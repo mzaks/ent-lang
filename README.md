@@ -93,6 +93,40 @@ function takes its own parameters followed by the whole world;
 `examples/host/integrate_main.c` shows the host side. Parallel stages assume
 the host passes columns that do not alias.
 
+## Fusion and entity parallelism
+
+Every access in a query goes through a ref to the current entity, and
+different archetypes share no columns. Two consequences the lowering uses:
+
+- `fuse-systems=1` inlines the systems of a schedule and emits one loop per
+  archetype holding every matching query body in program order. This is
+  legal for any sequence of systems without other effects, conflicting or
+  not: running all bodies for one entity before the next gives the same
+  result as running each query to completion.
+- `parallel-entities=1` emits every entity-local query loop as
+  `scf.parallel`; `--convert-scf-to-openmp` turns it into an OpenMP
+  work-sharing loop.
+
+## Benchmarks
+
+`bench/run.py` builds every variant of the example (per-system loops,
+parallel stages, parallel entity loops, fused, fused with parallel entity
+loops, and hand-written C with and without `restrict`), runs each
+measurement in its own process, round-robin over sizes and variants, and
+checks that all variants produce the same checksum.
+
+```sh
+python3 bench/run.py                    # OpenMP runtime defaults
+python3 bench/run.py --blocktime 200    # keep OpenMP workers spinning
+```
+
+Homebrew's `libomp` defaults to `KMP_BLOCKTIME=0` with a passive wait
+policy, so workers sleep after every parallel region; an empty region costs
+about 35 us with 12 threads on an M4 Max, and about 1.7 us with
+`KMP_BLOCKTIME=200`. Check that the machine is otherwise idle before
+trusting a run. Results, with the conditions they were taken under, are in
+`bench/RESULTS.md`.
+
 ## Milestones
 
 - [x] **M0**: the dialect parses, prints and verifies.
