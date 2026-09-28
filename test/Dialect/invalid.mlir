@@ -134,3 +134,29 @@ ecs.schedule @frame() {
   // expected-error @+1 {{references unknown system @missing}}
   ecs.run @missing()
 }
+
+// -----
+
+// expected-error @+1 {{must contain at least one component}}
+ecs.archetype @Empty ()
+
+// -----
+
+ecs.component @P (x: f32)
+// expected-error @+1 {{lists component @P more than once}}
+ecs.archetype @Twice (@P, @P)
+
+// -----
+
+// expected-error @+1 {{contains unknown component @Nope}}
+ecs.archetype @Bad (@Nope)
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.system @s() reads [@P] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{uses component reference #0; references may only be used by 'ecs.get' and 'ecs.set'}}
+    %x = builtin.unrealized_conversion_cast %p : !ecs.ref<@P> to f32
+  }
+}

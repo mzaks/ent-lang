@@ -1,10 +1,15 @@
 // The toy simulation that the milestones grow around: bodies move by their
 // velocity, gravity pulls every body with mass down, and a schedule runs both
-// systems once per frame.
+// systems once per frame. Particles move but have no mass, so gravity skips
+// them; scenery has a position only, so neither system touches it.
 
 ecs.component @Position (x: f32, y: f32)
 ecs.component @Velocity (dx: f32, dy: f32)
 ecs.component @Mass (kg: f32)
+
+ecs.archetype @Body (@Position, @Velocity, @Mass)
+ecs.archetype @Particle (@Position, @Velocity)
+ecs.archetype @Scenery (@Position)
 
 ecs.system @gravity(%dt: f32, %g: f32) reads [@Mass] writes [@Velocity] {
   // Mass is bound so the query only visits bodies that have one.

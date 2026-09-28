@@ -9,6 +9,28 @@
 using namespace mlir;
 using namespace mlir::ecs;
 
+// `(@A, @B)`, used by ecs.archetype.
+static ParseResult parseSymbolList(OpAsmParser &parser, ArrayAttr &list) {
+  SmallVector<Attribute> symbols;
+  auto parseOne = [&]() -> ParseResult {
+    FlatSymbolRefAttr symbol;
+    if (parser.parseAttribute(symbol))
+      return failure();
+    symbols.push_back(symbol);
+    return success();
+  };
+  if (parser.parseCommaSeparatedList(OpAsmParser::Delimiter::Paren, parseOne))
+    return failure();
+  list = parser.getBuilder().getArrayAttr(symbols);
+  return success();
+}
+
+static void printSymbolList(OpAsmPrinter &p, Operation *, ArrayAttr list) {
+  p << "(";
+  llvm::interleaveComma(list, p);
+  p << ")";
+}
+
 #define GET_OP_CLASSES
 #include "Ecs/EcsOps.cpp.inc"
 
@@ -163,6 +185,34 @@ Type ComponentOp::getFieldType(StringRef name) {
 }
 
 //===----------------------------------------------------------------------===//
+// ArchetypeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ArchetypeOp::verify() {
+  if (getComponents().empty())
+    return emitOpError("must contain at least one component");
+  llvm::SmallPtrSet<Attribute, 8> seen;
+  for (Attribute attr : getComponents())
+    if (!seen.insert(attr).second)
+      return emitOpError("lists component ") << attr << " more than once";
+  return success();
+}
+
+LogicalResult
+ArchetypeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  for (Attribute attr : getComponents()) {
+    auto ref = cast<FlatSymbolRefAttr>(attr);
+    if (!lookupComponent(symbolTable, *this, ref))
+      return emitOpError("contains unknown component ") << ref;
+  }
+  return success();
+}
+
+bool ArchetypeOp::contains(FlatSymbolRefAttr component) {
+  return llvm::is_contained(getComponents(), component);
+}
+
+//===----------------------------------------------------------------------===//
 // SystemOp
 //===----------------------------------------------------------------------===//
 
@@ -301,6 +351,13 @@ LogicalResult QueryOp::verify() {
     if (!seen.insert(refType.getComponent()).second)
       return emitOpError("binds component ")
              << refType.getComponent() << " more than once";
+    // Lowering replaces refs by an index into the matched archetype's
+    // columns, which only works if nothing else holds on to them.
+    for (Operation *user : arg.getUsers())
+      if (!isa<GetOp, SetOp>(user))
+        return user->emitOpError("uses component reference #")
+               << arg.getArgNumber()
+               << "; references may only be used by 'ecs.get' and 'ecs.set'";
   }
   return success();
 }

@@ -28,6 +28,28 @@ def Ecs_ComponentOp : Ecs_Op<"component", [Symbol]> {
   }];
 }
 
+def Ecs_ArchetypeOp : Ecs_Op<"archetype", [
+    Symbol, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Declare a set of components that entities are stored by";
+  let description = [{
+    ```mlir
+    ecs.archetype @Body (@Position, @Velocity, @Mass)
+    ```
+    Every entity belongs to exactly one archetype, and each archetype is
+    stored as its own table. The set of archetypes is closed and known at
+    compile time, so every query is matched to its archetypes statically.
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       FlatSymbolRefArrayAttr:$components);
+  let assemblyFormat = [{
+    $sym_name custom<SymbolList>($components) attr-dict
+  }];
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    bool contains(::mlir::FlatSymbolRefAttr component);
+  }];
+}
+
 def Ecs_SystemOp : Ecs_Op<"system", [
     Symbol, IsolatedFromAbove, SingleBlockImplicitTerminator<"YieldOp">,
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
@@ -82,8 +104,9 @@ def Ecs_QueryOp : Ecs_Op<"query", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Run the body once for every entity that has all components";
   let description = [{
-    Each entry block argument is an `!ecs.ref` to a distinct component.
-    Iteration order is unspecified, so the body must not depend on it.
+    Each entry block argument is an `!ecs.ref` to a distinct component, and
+    refs are only used by `ecs.get` and `ecs.set`. Iteration order is
+    unspecified, so the body must not depend on it.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
