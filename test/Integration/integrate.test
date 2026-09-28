@@ -1,0 +1,17 @@
+// Lower the toy simulation to LLVM, link it with its C host and run it.
+// RUN: ecs-opt %S/../../examples/integrate.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll \
+// RUN:     %S/../../examples/host/integrate_main.c -o %t.exe
+// RUN: %t.exe | FileCheck %s
+
+// Three frames of dt = 0.5 with g = 9.81: gravity lowers dy by 4.905 per
+// frame before integrate moves the body.
+// CHECK: body 0: pos (1.5000, 85.2850) vel (1.0000, -14.7150)
+// CHECK: body 1: pos (7.0000, 41.2850) vel (-2.0000, -10.7150)
+// Particles have no mass, so only integrate applies to them.
+// CHECK: particle 0: pos (3.0000, 1.5000) vel (2.0000, 1.0000)
+// CHECK: particle 1: pos (3.0000, 1.5000) vel (0.0000, -1.0000)
+// Scenery has no velocity, so nothing moves it.
+// CHECK: scenery 0: pos (7.0000, 7.0000)
