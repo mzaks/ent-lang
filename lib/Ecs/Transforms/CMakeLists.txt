@@ -12,6 +12,7 @@ add_mlir_library(MLIREcsTransforms
   MLIRArithDialect
   MLIRFuncDialect
   MLIRMemRefDialect
+  MLIROpenMPDialect
   MLIRSCFDialect
   MLIRPass
   MLIRSideEffectInterfaces

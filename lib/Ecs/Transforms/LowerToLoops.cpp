@@ -145,17 +145,43 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   rewriter.eraseOp(query);
 }
 
-/// Replace a stage by its calls, run one after another.
-static void lowerStage(IRRewriter &rewriter, StageOp stage) {
-  for (Operation &op : llvm::make_early_inc_range(
-           stage.getBody().front().without_terminator()))
-    op.moveBefore(stage);
+/// Replace a stage by its calls, run one after another, or by an OpenMP
+/// parallel region with one section per call.
+static void lowerStage(IRRewriter &rewriter, StageOp stage, bool parallel) {
+  SmallVector<Operation *> calls;
+  for (Operation &op : stage.getBody().front().without_terminator())
+    calls.push_back(&op);
+
+  if (!parallel || calls.size() < 2) {
+    for (Operation *call : calls)
+      call->moveBefore(stage);
+    rewriter.eraseOp(stage);
+    return;
+  }
+
+  Location loc = stage.getLoc();
+  rewriter.setInsertionPoint(stage);
+  auto parallelOp = omp::ParallelOp::create(rewriter, loc);
+  rewriter.createBlock(&parallelOp.getRegion());
+  auto sections = omp::SectionsOp::create(rewriter, loc, omp::SectionsOperands{});
+  omp::TerminatorOp::create(rewriter, loc);
+
+  rewriter.createBlock(&sections.getRegion());
+  for (Operation *call : calls) {
+    auto section = omp::SectionOp::create(rewriter, loc);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.createBlock(&section.getRegion());
+    call->moveBefore(omp::TerminatorOp::create(rewriter, loc));
+  }
+  omp::TerminatorOp::create(rewriter, loc);
   rewriter.eraseOp(stage);
 }
 
 namespace {
 struct EcsLowerToLoops
     : public mlir::ecs::impl::EcsLowerToLoopsBase<EcsLowerToLoops> {
+  using EcsLowerToLoopsBase::EcsLowerToLoopsBase;
+
   void runOnOperation() override {
     ModuleOp module = getOperation();
     IRRewriter rewriter(module.getContext());
@@ -189,7 +215,7 @@ struct EcsLowerToLoops
       }
       SmallVector<StageOp> stages(func.getOps<StageOp>());
       for (StageOp stage : stages)
-        lowerStage(rewriter, stage);
+        lowerStage(rewriter, stage, parallelStages);
     }
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))

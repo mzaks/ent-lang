@@ -21,14 +21,21 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
     - `ecs.schedule` becomes a public `func.func` with
       `llvm.emit_c_interface`, so a host program can call
       `_mlir_ciface_<name>`; each `ecs.run` becomes a `func.call`.
-    - `ecs.stage` is dissolved into its calls, in program order.
-    - `ecs.stage` is dissolved into its calls, in program order.
+    - `ecs.stage` is dissolved into its calls, or, with
+      `parallel-stages`, a stage of two or more runs becomes an
+      `omp.parallel` region with one `omp.section` per run. Parallel
+      stages assume that the host passes columns that do not alias.
     - Components and archetypes are erased.
   }];
+  let options = [
+    Option<"parallelStages", "parallel-stages", "bool", /*default=*/"false",
+           "Run the systems of a stage in parallel with OpenMP sections">,
+  ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
     "::mlir::func::FuncDialect",
     "::mlir::memref::MemRefDialect",
+    "::mlir::omp::OpenMPDialect",
     "::mlir::scf::SCFDialect",
   ];
 }
