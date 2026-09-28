@@ -44,4 +44,25 @@ def EcsPrintAccess : Pass<"ecs-print-access", "ModuleOp"> {
   }];
 }
 
+def EcsSchedule : Pass<"ecs-schedule", "ModuleOp"> {
+  let summary = "Group the runs of each schedule into parallel stages";
+  let description = [{
+    Two runs conflict if one writes a column the other reads or writes, or
+    if either system has effects outside component access. Each run is
+    placed in the earliest stage after every earlier run it conflicts with,
+    so runs within a stage commute and program order between conflicting
+    runs is kept.
+
+    An op in the schedule body with memory effects acts as a barrier:
+    runs before it are staged before it, runs after it after it. Ops
+    without effects stay where they are. Schedules that already contain
+    stages are left unchanged.
+  }];
+  let options = [
+    Option<"explain", "explain", "bool", /*default=*/"false",
+           "Emit a remark on each run that has to wait, naming the run it "
+           "waits for and the conflict">,
+  ];
+}
+
 #endif // ECS_PASSES
