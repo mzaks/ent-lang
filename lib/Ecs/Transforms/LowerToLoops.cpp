@@ -4,6 +4,7 @@
 
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 
 namespace mlir::ecs {
@@ -185,6 +186,96 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   rewriter.eraseOp(query);
 }
 
+/// Inline the systems of `runs` and fuse their queries: one loop per
+/// archetype, holding, in program order, the body of every query of every
+/// run that matches it. Emitted before `insertionPoint`; the runs are
+/// erased.
+///
+/// This is legal for any sequence of entity-local systems, conflicting or
+/// not: a query body only touches the components of its own entity, and
+/// different archetypes share no columns, so running all bodies for one
+/// entity before moving on gives the same result as running each query to
+/// completion in turn.
+static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
+                     Operation *insertionPoint, SymbolTable &symbols,
+                     const WorldLayout &world, ValueRange worldArgs,
+                     bool parallelEntities) {
+  if (runs.empty())
+    return;
+  Location loc = insertionPoint->getLoc();
+  rewriter.setInsertionPoint(insertionPoint);
+
+  // Per run: map the system's parameters to the run's arguments and clone
+  // the system's ops outside queries, which are free of effects.
+  SmallVector<SystemOp> systems;
+  SmallVector<IRMapping> mappings(runs.size());
+  for (auto [run, mapping] : llvm::zip(runs, mappings)) {
+    auto system = symbols.lookup<SystemOp>(run.getSystem());
+    systems.push_back(system);
+    mapping.map(system.getBody().getArguments(), run.getArgs());
+    for (Operation &op : system.getBody().front().without_terminator())
+      if (!isa<QueryOp>(op))
+        rewriter.clone(op, mapping);
+  }
+
+  for (const ArchetypeLayout &archetype : world.archetypes) {
+    SmallVector<std::pair<QueryOp, unsigned>> bodies;
+    for (auto [index, system] : llvm::enumerate(systems))
+      for (QueryOp query : system.getBody().getOps<QueryOp>())
+        if (matches(archetype, query))
+          bodies.push_back({query, index});
+    if (bodies.empty())
+      continue;
+
+    rewriter.setInsertionPoint(insertionPoint);
+    Value entity = createEntityLoop(rewriter, loc, archetype, worldArgs,
+                                    parallelEntities);
+    Block *loopBody = rewriter.getInsertionBlock();
+    for (auto [query, index] : bodies)
+      cloneQueryBody(rewriter, query, mappings[index]);
+    lowerAccesses(rewriter, loopBody, archetype, worldArgs, entity);
+  }
+
+  for (RunOp run : runs)
+    rewriter.eraseOp(run);
+}
+
+/// Fuse every maximal sequence of runs of entity-local systems in a
+/// schedule. Stages are dissolved first: fusion subsumes them. A run of an
+/// opaque system, or an op with effects in the schedule body, ends a
+/// sequence and stays where it is.
+static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
+                         SymbolTable &symbols, const WorldLayout &world,
+                         ValueRange worldArgs, bool parallelEntities) {
+  for (StageOp stage : llvm::make_early_inc_range(func.getOps<StageOp>())) {
+    for (Operation &op : llvm::make_early_inc_range(
+             stage.getBody().front().without_terminator()))
+      op.moveBefore(stage);
+    rewriter.eraseOp(stage);
+  }
+
+  SmallVector<ArchetypeOp> archetypes;
+  for (const ArchetypeLayout &archetype : world.archetypes)
+    archetypes.push_back(archetype.op);
+
+  SmallVector<RunOp> sequence;
+  for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
+    if (auto run = dyn_cast<RunOp>(op)) {
+      auto system = symbols.lookup<SystemOp>(run.getSystem());
+      if (!computeAccess(system, archetypes).isOpaque()) {
+        sequence.push_back(run);
+        continue;
+      }
+    } else if (!op.hasTrait<OpTrait::IsTerminator>() &&
+               isMemoryEffectFree(&op)) {
+      continue;
+    }
+    fuseRuns(rewriter, sequence, &op, symbols, world, worldArgs,
+             parallelEntities);
+    sequence.clear();
+  }
+}
+
 /// Replace a stage by its calls, run one after another, or by an OpenMP
 /// parallel region with one section per call.
 static void lowerStage(IRRewriter &rewriter, StageOp stage, bool parallel) {
@@ -226,24 +317,19 @@ struct EcsLowerToLoops
     ModuleOp module = getOperation();
     IRRewriter rewriter(module.getContext());
     WorldLayout world = buildWorldLayout(module);
+    SymbolTable symbols(module);
 
-    for (auto system : llvm::make_early_inc_range(module.getOps<SystemOp>())) {
-      SmallVector<Value> worldArgs;
-      auto func = convertToFunc(rewriter, system, system.getSymName(),
-                                system.getBody(), world, worldArgs);
-      func.setPrivate();
-      SmallVector<QueryOp> queries;
-      func.walk([&](QueryOp query) { queries.push_back(query); });
-      for (QueryOp query : queries)
-        lowerQuery(rewriter, query, world, worldArgs, parallelEntities);
-    }
-
+    // Schedules first: fusion reads the systems' bodies before they are
+    // lowered themselves.
     for (auto schedule :
          llvm::make_early_inc_range(module.getOps<ScheduleOp>())) {
       SmallVector<Value> worldArgs;
       auto func = convertToFunc(rewriter, schedule, schedule.getSymName(),
                                 schedule.getBody(), world, worldArgs);
       func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
+      if (fuseSystems)
+        fuseSchedule(rewriter, func, symbols, world, worldArgs,
+                     parallelEntities);
       SmallVector<RunOp> runs;
       func.walk([&](RunOp run) { runs.push_back(run); });
       for (RunOp run : runs) {
@@ -256,6 +342,17 @@ struct EcsLowerToLoops
       SmallVector<StageOp> stages(func.getOps<StageOp>());
       for (StageOp stage : stages)
         lowerStage(rewriter, stage, parallelStages);
+    }
+
+    for (auto system : llvm::make_early_inc_range(module.getOps<SystemOp>())) {
+      SmallVector<Value> worldArgs;
+      auto func = convertToFunc(rewriter, system, system.getSymName(),
+                                system.getBody(), world, worldArgs);
+      func.setPrivate();
+      SmallVector<QueryOp> queries;
+      func.walk([&](QueryOp query) { queries.push_back(query); });
+      for (QueryOp query : queries)
+        lowerQuery(rewriter, query, world, worldArgs, parallelEntities);
     }
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))

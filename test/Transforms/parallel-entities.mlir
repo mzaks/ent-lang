@@ -1,4 +1,6 @@
 // RUN: ecs-opt %s --ecs-lower-to-loops=parallel-entities=1 | FileCheck %s
+// RUN: ecs-opt %s "--ecs-lower-to-loops=parallel-entities=1 fuse-systems=1" \
+// RUN:   | FileCheck %s --check-prefix=FUSED
 
 ecs.component @P (x: f32)
 ecs.archetype @A (@P)
@@ -29,6 +31,10 @@ ecs.system @shiftAndLog() writes [@P] {
   }
 }
 
+// FUSED-LABEL: func.func @frame(
+// FUSED:       scf.parallel
+// FUSED-NOT:   scf.parallel
+// FUSED:       call @shiftAndLog(
 ecs.schedule @frame(%d: f32) {
   ecs.run @shift(%d) : f32
   ecs.run @shift(%d) : f32

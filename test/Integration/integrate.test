@@ -1,5 +1,6 @@
 // Lower the toy simulation to LLVM, link it with its C host and run it:
-// once as written, once staged with parallel stages. Both must agree.
+// as written, staged with parallel stages, fused, and fused with parallel
+// entity loops. All must agree.
 // RUN: ecs-opt %S/../../examples/integrate.mlir --ecs-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
@@ -15,6 +16,23 @@
 // RUN: clang -O2 -Wno-override-module %t.par.ll \
 // RUN:     %S/../../examples/host/integrate_main.c %openmp -o %t.par
 // RUN: %t.par | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/integrate.mlir \
+// RUN:     --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
+// RUN: clang -O2 -Wno-override-module %t.fused.ll \
+// RUN:     %S/../../examples/host/integrate_main.c -o %t.fused
+// RUN: %t.fused | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/integrate.mlir \
+// RUN:     "--ecs-lower-to-loops=fuse-systems=1 parallel-entities=1" \
+// RUN:     --symbol-dce --convert-scf-to-openmp --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.fusedpar.ll
+// RUN: clang -O2 -Wno-override-module %t.fusedpar.ll \
+// RUN:     %S/../../examples/host/integrate_main.c %openmp -o %t.fusedpar
+// RUN: %t.fusedpar | FileCheck %s
 
 // The first stage (gravity, wind, decay) forks a parallel region.
 // OMP: call void {{.*}}@__kmpc_fork_call

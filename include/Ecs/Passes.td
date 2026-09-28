@@ -24,6 +24,11 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
     - With `parallel-entities`, a query whose body only computes and
       touches its own entity becomes an `scf.parallel` instead, ready for
       `--convert-scf-to-openmp`.
+    - With `fuse-systems`, every maximal sequence of runs of systems
+      without other effects is inlined into the schedule as one loop per
+      archetype, holding every matching query body in program order.
+      Stages are dissolved first; unused system functions remain for
+      `--symbol-dce`.
     - `ecs.stage` is dissolved into its calls, or, with
       `parallel-stages`, a stage of two or more runs becomes an
       `omp.parallel` region with one `omp.section` per run. Parallel
@@ -36,6 +41,9 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
     Option<"parallelEntities", "parallel-entities", "bool",
            /*default=*/"false",
            "Emit entity loops as scf.parallel where the body is entity-local">,
+    Option<"fuseSystems", "fuse-systems", "bool", /*default=*/"false",
+           "Inline the systems of each schedule and fuse their queries into "
+           "one loop per archetype">,
   ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
