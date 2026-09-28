@@ -9,6 +9,7 @@ target_link_libraries(ecs-opt PRIVATE
   ${conversion_libs}
   ${extension_libs}
   MLIREcs
+  MLIREcsTransforms
   MLIROptLib
   MLIRRegisterAllDialects
   MLIRRegisterAllExtensions

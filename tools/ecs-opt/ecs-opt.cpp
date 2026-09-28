@@ -1,4 +1,5 @@
 #include "Ecs/EcsDialect.h"
+#include "Ecs/Passes.h"
 
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/InitAllDialects.h"
@@ -8,6 +9,7 @@
 
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
+  mlir::ecs::registerEcsPasses();
 
   mlir::DialectRegistry registry;
   registry.insert<mlir::ecs::EcsDialect>();
