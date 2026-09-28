@@ -1,3 +1,4 @@
+#include "Ecs/Access.h"
 #include "Ecs/EcsOps.h"
 #include "Ecs/Passes.h"
 
@@ -82,60 +83,99 @@ static func::FuncOp convertToFunc(IRRewriter &rewriter, Operation *op,
   return func;
 }
 
+static bool matches(const ArchetypeLayout &archetype, QueryOp query) {
+  ArchetypeOp archetypeOp = archetype.op;
+  return llvm::all_of(query.getBody().getArgumentTypes(), [&](Type type) {
+    return archetypeOp.contains(cast<RefType>(type).getComponent());
+  });
+}
+
+/// True if the query body only computes and accesses its own entity's
+/// components, so its iterations are independent of each other.
+static bool isEntityLocal(QueryOp query) {
+  WalkResult result = query.getBody().walk([](Operation *op) {
+    if (isa<GetOp, SetOp, YieldOp>(op) || !hasOwnEffects(op))
+      return WalkResult::advance();
+    return WalkResult::interrupt();
+  });
+  return !result.wasInterrupted();
+}
+
+/// Create a loop over the entities of `archetype` and set the insertion
+/// point into its body. Iterations of a query only touch their own entity,
+/// so the loop may be an `scf.parallel`.
+static Value createEntityLoop(IRRewriter &rewriter, Location loc,
+                              const ArchetypeLayout &archetype,
+                              ValueRange worldArgs, bool parallel) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value count = worldArgs[archetype.count];
+  if (parallel) {
+    auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                        ValueRange{count}, ValueRange{one});
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    return loop.getInductionVars().front();
+  }
+  auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+  return loop.getInductionVar();
+}
+
+/// Clone a query's body at the insertion point. Its get/set ops still name
+/// the query's refs; `lowerAccesses` resolves them afterwards.
+static void cloneQueryBody(IRRewriter &rewriter, QueryOp query,
+                           IRMapping mapping) {
+  for (Operation &op : query.getBody().front().without_terminator())
+    rewriter.clone(op, mapping);
+}
+
+/// Replace every get/set nested in `loopBody` by a load or store at
+/// `entity` in the column of the ref's component and field in `archetype`.
+static void lowerAccesses(IRRewriter &rewriter, Block *loopBody,
+                          const ArchetypeLayout &archetype,
+                          ValueRange worldArgs, Value entity) {
+  auto column = [&](Value ref, StringAttr field) {
+    FlatSymbolRefAttr component = cast<RefType>(ref.getType()).getComponent();
+    return worldArgs[archetype.columns.lookup({component, field})];
+  };
+  SmallVector<Operation *> accesses;
+  loopBody->walk([&](Operation *op) {
+    if (isa<GetOp, SetOp>(op))
+      accesses.push_back(op);
+  });
+  for (Operation *op : accesses) {
+    rewriter.setInsertionPoint(op);
+    if (auto get = dyn_cast<GetOp>(op)) {
+      rewriter.replaceOpWithNewOp<memref::LoadOp>(
+          get, column(get.getRef(), get.getFieldAttr()), ValueRange{entity});
+    } else {
+      auto set = cast<SetOp>(op);
+      rewriter.replaceOpWithNewOp<memref::StoreOp>(
+          set, set.getValue(), column(set.getRef(), set.getFieldAttr()),
+          ValueRange{entity});
+    }
+  }
+}
+
 /// Replace a query by one loop per matching archetype. The body is cloned
 /// into each loop, and every ref access becomes a load or store at the
 /// loop's index in the column of the ref's component and field.
 static void lowerQuery(IRRewriter &rewriter, QueryOp query,
-                       const WorldLayout &world, ValueRange worldArgs) {
-  Block &body = query.getBody().front();
-  SmallVector<FlatSymbolRefAttr> components;
-  for (Type type : body.getArgumentTypes())
-    components.push_back(cast<RefType>(type).getComponent());
-
+                       const WorldLayout &world, ValueRange worldArgs,
+                       bool parallelEntities) {
   Location loc = query.getLoc();
-  rewriter.setInsertionPoint(query);
-  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-
+  bool parallel = parallelEntities && isEntityLocal(query);
   bool matched = false;
   for (const ArchetypeLayout &archetype : world.archetypes) {
-    ArchetypeOp archetypeOp = archetype.op;
-    if (!llvm::all_of(components, [&](FlatSymbolRefAttr component) {
-          return archetypeOp.contains(component);
-        }))
+    if (!matches(archetype, query))
       continue;
     matched = true;
-
-    auto loop = scf::ForOp::create(rewriter, loc, zero,
-                                   worldArgs[archetype.count], one);
-    Value entity = loop.getInductionVar();
-    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-    IRMapping mapping;
-    for (Operation &op : body.without_terminator())
-      rewriter.clone(op, mapping);
-
-    auto column = [&](Value ref, StringAttr field) {
-      FlatSymbolRefAttr component = cast<RefType>(ref.getType()).getComponent();
-      return worldArgs[archetype.columns.lookup({component, field})];
-    };
-    SmallVector<Operation *> accesses;
-    loop.getBody()->walk([&](Operation *op) {
-      if (isa<GetOp, SetOp>(op))
-        accesses.push_back(op);
-    });
-    for (Operation *op : accesses) {
-      rewriter.setInsertionPoint(op);
-      if (auto get = dyn_cast<GetOp>(op)) {
-        rewriter.replaceOpWithNewOp<memref::LoadOp>(
-            get, column(get.getRef(), get.getFieldAttr()), ValueRange{entity});
-      } else {
-        auto set = cast<SetOp>(op);
-        rewriter.replaceOpWithNewOp<memref::StoreOp>(
-            set, set.getValue(), column(set.getRef(), set.getFieldAttr()),
-            ValueRange{entity});
-      }
-    }
     rewriter.setInsertionPoint(query);
+    Value entity =
+        createEntityLoop(rewriter, loc, archetype, worldArgs, parallel);
+    Block *loopBody = rewriter.getInsertionBlock();
+    cloneQueryBody(rewriter, query, IRMapping());
+    lowerAccesses(rewriter, loopBody, archetype, worldArgs, entity);
   }
 
   // The set of archetypes is closed, so a query that matches none of them
@@ -195,7 +235,7 @@ struct EcsLowerToLoops
       SmallVector<QueryOp> queries;
       func.walk([&](QueryOp query) { queries.push_back(query); });
       for (QueryOp query : queries)
-        lowerQuery(rewriter, query, world, worldArgs);
+        lowerQuery(rewriter, query, world, worldArgs, parallelEntities);
     }
 
     for (auto schedule :

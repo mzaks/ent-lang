@@ -21,6 +21,9 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
     - `ecs.schedule` becomes a public `func.func` with
       `llvm.emit_c_interface`, so a host program can call
       `_mlir_ciface_<name>`; each `ecs.run` becomes a `func.call`.
+    - With `parallel-entities`, a query whose body only computes and
+      touches its own entity becomes an `scf.parallel` instead, ready for
+      `--convert-scf-to-openmp`.
     - `ecs.stage` is dissolved into its calls, or, with
       `parallel-stages`, a stage of two or more runs becomes an
       `omp.parallel` region with one `omp.section` per run. Parallel
@@ -30,6 +33,9 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
   let options = [
     Option<"parallelStages", "parallel-stages", "bool", /*default=*/"false",
            "Run the systems of a stage in parallel with OpenMP sections">,
+    Option<"parallelEntities", "parallel-entities", "bool",
+           /*default=*/"false",
+           "Emit entity loops as scf.parallel where the body is entity-local">,
   ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
