@@ -63,6 +63,27 @@ static LogicalResult verifyNoRefParams(Operation *op, Region &body) {
   return success();
 }
 
+static ComponentOp lookupComponent(SymbolTableCollection &symbolTable,
+                                   Operation *from, FlatSymbolRefAttr ref) {
+  return symbolTable.lookupNearestSymbolFrom<ComponentOp>(from, ref);
+}
+
+/// Resolve the field that a get/set names and return its declared type.
+static FailureOr<Type> resolveField(SymbolTableCollection &symbolTable,
+                                    Operation *op, RefType refType,
+                                    StringRef field) {
+  ComponentOp component =
+      lookupComponent(symbolTable, op, refType.getComponent());
+  if (!component)
+    return op->emitOpError("references unknown component ")
+           << refType.getComponent();
+  Type fieldType = component.getFieldType(field);
+  if (!fieldType)
+    return op->emitOpError("component ")
+           << refType.getComponent() << " has no field '" << field << "'";
+  return fieldType;
+}
+
 //===----------------------------------------------------------------------===//
 // ComponentOp
 //===----------------------------------------------------------------------===//
@@ -134,6 +155,13 @@ LogicalResult ComponentOp::verify() {
   return success();
 }
 
+Type ComponentOp::getFieldType(StringRef name) {
+  for (auto [nameAttr, typeAttr] : llvm::zip(getFieldNames(), getFieldTypes()))
+    if (cast<StringAttr>(nameAttr).getValue() == name)
+      return cast<TypeAttr>(typeAttr).getValue();
+  return {};
+}
+
 //===----------------------------------------------------------------------===//
 // SystemOp
 //===----------------------------------------------------------------------===//
@@ -199,6 +227,24 @@ LogicalResult SystemOp::verify() {
   return success();
 }
 
+LogicalResult SystemOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  for (ArrayAttr list : {getReads(), getWrites()})
+    for (Attribute attr : list) {
+      auto ref = cast<FlatSymbolRefAttr>(attr);
+      if (!lookupComponent(symbolTable, *this, ref))
+        return emitOpError("declares access to unknown component ") << ref;
+    }
+  return success();
+}
+
+bool SystemOp::canWrite(FlatSymbolRefAttr component) {
+  return llvm::is_contained(getWrites(), component);
+}
+
+bool SystemOp::canRead(FlatSymbolRefAttr component) {
+  return canWrite(component) || llvm::is_contained(getReads(), component);
+}
+
 //===----------------------------------------------------------------------===//
 // ScheduleOp
 //===----------------------------------------------------------------------===//
@@ -259,13 +305,74 @@ LogicalResult QueryOp::verify() {
   return success();
 }
 
+LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto system = (*this)->getParentOfType<SystemOp>();
+  for (BlockArgument arg : getBody().getArguments()) {
+    auto refType = cast<RefType>(arg.getType());
+    FlatSymbolRefAttr component = refType.getComponent();
+    if (!lookupComponent(symbolTable, *this, component))
+      return emitOpError("binds unknown component ") << component;
+    if (refType.getIsMutable() && !system.canWrite(component))
+      return emitOpError("binds ")
+             << component << " mutably but system @" << system.getSymName()
+             << " does not declare it in 'writes'";
+    if (!system.canRead(component))
+      return emitOpError("binds ")
+             << component << " but system @" << system.getSymName()
+             << " does not declare it in 'reads' or 'writes'";
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GetOp / SetOp
 //===----------------------------------------------------------------------===//
+
+LogicalResult GetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  FailureOr<Type> fieldType =
+      resolveField(symbolTable, *this, getRef().getType(), getField());
+  if (failed(fieldType))
+    return failure();
+  if (*fieldType != getResult().getType())
+    return emitOpError("result type ")
+           << getResult().getType() << " does not match field '" << getField()
+           << "' of type " << *fieldType;
+  return success();
+}
 
 LogicalResult SetOp::verify() {
   if (!getRef().getType().getIsMutable())
     return emitOpError("requires a mutable reference, got ")
            << getRef().getType();
+  return success();
+}
+
+LogicalResult SetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  FailureOr<Type> fieldType =
+      resolveField(symbolTable, *this, getRef().getType(), getField());
+  if (failed(fieldType))
+    return failure();
+  if (*fieldType != getValue().getType())
+    return emitOpError("value type ")
+           << getValue().getType() << " does not match field '" << getField()
+           << "' of type " << *fieldType;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RunOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult RunOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto system =
+      symbolTable.lookupNearestSymbolFrom<SystemOp>(*this, getSystemAttr());
+  if (!system)
+    return emitOpError("references unknown system ") << getSystemAttr();
+
+  TypeRange params = system.getBody().getArgumentTypes();
+  if (params != getArgs().getTypes())
+    return emitOpError("argument types (")
+           << getArgs().getTypes() << ") do not match the parameters ("
+           << params << ") of system " << getSystemAttr();
   return success();
 }

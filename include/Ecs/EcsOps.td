@@ -22,10 +22,15 @@ def Ecs_ComponentOp : Ecs_Op<"component", [Symbol]> {
                        TypeArrayAttr:$field_types);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    /// The type of field `name`, or null if the component has no such field.
+    ::mlir::Type getFieldType(::llvm::StringRef name);
+  }];
 }
 
 def Ecs_SystemOp : Ecs_Op<"system", [
-    Symbol, IsolatedFromAbove, SingleBlockImplicitTerminator<"YieldOp">]> {
+    Symbol, IsolatedFromAbove, SingleBlockImplicitTerminator<"YieldOp">,
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "A system with declared component access";
   let description = [{
     ```mlir
@@ -44,6 +49,10 @@ def Ecs_SystemOp : Ecs_Op<"system", [
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    bool canRead(::mlir::FlatSymbolRefAttr component);
+    bool canWrite(::mlir::FlatSymbolRefAttr component);
+  }];
 }
 
 def Ecs_ScheduleOp : Ecs_Op<"schedule", [
@@ -69,7 +78,8 @@ def Ecs_ScheduleOp : Ecs_Op<"schedule", [
 //===----------------------------------------------------------------------===//
 
 def Ecs_QueryOp : Ecs_Op<"query", [
-    HasParent<"SystemOp">, SingleBlockImplicitTerminator<"YieldOp">]> {
+    HasParent<"SystemOp">, SingleBlockImplicitTerminator<"YieldOp">,
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Run the body once for every entity that has all components";
   let description = [{
     Each entry block argument is an `!ecs.ref` to a distinct component.
@@ -80,14 +90,16 @@ def Ecs_QueryOp : Ecs_Op<"query", [
   let hasVerifier = 1;
 }
 
-def Ecs_GetOp : Ecs_Op<"get"> {
+def Ecs_GetOp : Ecs_Op<"get", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Read one field through a component reference";
   let arguments = (ins Ecs_RefType:$ref, StrAttr:$field);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$ref $field attr-dict `:` type($ref) `->` type($result)";
 }
 
-def Ecs_SetOp : Ecs_Op<"set"> {
+def Ecs_SetOp : Ecs_Op<"set", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Write one field through a mutable component reference";
   let arguments = (ins Ecs_RefType:$ref, StrAttr:$field, AnyType:$value);
   let assemblyFormat =
@@ -95,7 +107,9 @@ def Ecs_SetOp : Ecs_Op<"set"> {
   let hasVerifier = 1;
 }
 
-def Ecs_RunOp : Ecs_Op<"run", [HasParent<"ScheduleOp">]> {
+def Ecs_RunOp : Ecs_Op<"run", [
+    HasParent<"ScheduleOp">,
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Run a system as one step of a schedule";
   let arguments = (ins FlatSymbolRefAttr:$system, Variadic<AnyType>:$args);
   let assemblyFormat = "$system `(` $args `)` attr-dict (`:` type($args)^)?";
