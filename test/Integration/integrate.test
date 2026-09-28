@@ -1,17 +1,31 @@
-// Lower the toy simulation to LLVM, link it with its C host and run it.
+// Lower the toy simulation to LLVM, link it with its C host and run it:
+// once as written, once staged with parallel stages. Both must agree.
 // RUN: ecs-opt %S/../../examples/integrate.mlir --ecs-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
-// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
-// RUN: clang -O2 -Wno-override-module %t.ll \
-// RUN:     %S/../../examples/host/integrate_main.c -o %t.exe
-// RUN: %t.exe | FileCheck %s
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
+// RUN: clang -O2 -Wno-override-module %t.seq.ll \
+// RUN:     %S/../../examples/host/integrate_main.c -o %t.seq
+// RUN: %t.seq | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/integrate.mlir --ecs-schedule \
+// RUN:     --ecs-lower-to-loops=parallel-stages=1 --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
+// RUN: FileCheck %s --check-prefix=OMP --input-file=%t.par.ll
+// RUN: clang -O2 -Wno-override-module %t.par.ll \
+// RUN:     %S/../../examples/host/integrate_main.c %openmp -o %t.par
+// RUN: %t.par | FileCheck %s
+
+// The first stage (gravity, wind, decay) forks a parallel region.
+// OMP: call void {{.*}}@__kmpc_fork_call
 
 // Three frames of dt = 0.5 with g = 9.81: gravity lowers dy by 4.905 per
 // frame before integrate moves the body.
 // CHECK: body 0: pos (1.5000, 85.2850) vel (1.0000, -14.7150)
 // CHECK: body 1: pos (7.0000, 41.2850) vel (-2.0000, -10.7150)
-// Particles have no mass, so only integrate applies to them.
-// CHECK: particle 0: pos (3.0000, 1.5000) vel (2.0000, 1.0000)
-// CHECK: particle 1: pos (3.0000, 1.5000) vel (0.0000, -1.0000)
+// Particles have no mass, so gravity skips them; wind raises dx by 1 per
+// frame before integrate, and decay takes 0.5 s of lifetime per frame.
+// CHECK: particle 0: pos (6.0000, 1.5000) vel (5.0000, 1.0000) life 8.5000
+// CHECK: particle 1: pos (6.0000, 1.5000) vel (3.0000, -1.0000) life 0.5000
 // Scenery has no velocity, so nothing moves it.
 // CHECK: scenery 0: pos (7.0000, 7.0000)

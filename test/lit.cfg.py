@@ -16,3 +16,7 @@ llvm_config.add_tool_substitutions(["ecs-opt"], [config.ecs_tools_dir])
 llvm_config.add_tool_substitutions(
     ["mlir-translate", "clang"], [config.llvm_tools_dir]
 )
+# Link flags for the OpenMP runtime that ships with the same LLVM.
+config.substitutions.append(
+    ("%openmp", f"-L{config.llvm_lib_dir} -lomp -Wl,-rpath,{config.llvm_lib_dir}")
+)
