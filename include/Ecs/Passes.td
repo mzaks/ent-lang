@@ -22,6 +22,7 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
       `llvm.emit_c_interface`, so a host program can call
       `_mlir_ciface_<name>`; each `ecs.run` becomes a `func.call`.
     - `ecs.stage` is dissolved into its calls, in program order.
+    - `ecs.stage` is dissolved into its calls, in program order.
     - Components and archetypes are erased.
   }];
   let dependentDialects = [
@@ -30,6 +31,17 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
     "::mlir::memref::MemRefDialect",
     "::mlir::scf::SCFDialect",
   ];
+}
+
+def EcsPrintAccess : Pass<"ecs-print-access", "ModuleOp"> {
+  let summary = "Report the columns each system reads and writes";
+  let description = [{
+    Emits one remark per system listing the columns
+    (`Archetype.Component.field`) it reads and writes, as derived from its
+    `ecs.get` and `ecs.set` ops, and points at the op that makes a system
+    opaque, if any. Meant for tests and for inspecting the analysis that
+    `--ecs-schedule` relies on.
+  }];
 }
 
 #endif // ECS_PASSES

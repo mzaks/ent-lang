@@ -1,5 +1,7 @@
 add_mlir_library(MLIREcsTransforms
+  Access.cpp
   LowerToLoops.cpp
+  PrintAccess.cpp
 
   DEPENDS
   MLIREcsPassIncGen
@@ -11,4 +13,5 @@ add_mlir_library(MLIREcsTransforms
   MLIRMemRefDialect
   MLIRSCFDialect
   MLIRPass
+  MLIRSideEffectInterfaces
 )
