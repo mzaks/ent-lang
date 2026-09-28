@@ -21,6 +21,7 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
     - `ecs.schedule` becomes a public `func.func` with
       `llvm.emit_c_interface`, so a host program can call
       `_mlir_ciface_<name>`; each `ecs.run` becomes a `func.call`.
+    - `ecs.stage` is dissolved into its calls, in program order.
     - Components and archetypes are erased.
   }];
   let dependentDialects = [

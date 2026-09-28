@@ -130,8 +130,29 @@ def Ecs_SetOp : Ecs_Op<"set", [
   let hasVerifier = 1;
 }
 
+def Ecs_StageOp : Ecs_Op<"stage", [
+    HasParent<"ScheduleOp">, NoRegionArguments,
+    SingleBlockImplicitTerminator<"YieldOp">]> {
+  let summary = "Runs that do not conflict and may execute in parallel";
+  let description = [{
+    ```mlir
+    ecs.stage {
+      ecs.run @gravity(%dt, %g) : f32, f32
+      ecs.run @wind(%dt, %w) : f32, f32
+    }
+    ```
+    No two runs in a stage access a common column where one of them
+    writes, so any order or interleaving gives the same result. Stages
+    execute in program order. `--ecs-schedule` forms stages; a stage
+    holds nothing but `ecs.run`.
+  }];
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = "attr-dict-with-keyword $body";
+  let hasVerifier = 1;
+}
+
 def Ecs_RunOp : Ecs_Op<"run", [
-    HasParent<"ScheduleOp">,
+    ParentOneOf<["ScheduleOp", "StageOp"]>,
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Run a system as one step of a schedule";
   let arguments = (ins FlatSymbolRefAttr:$system, Variadic<AnyType>:$args);
@@ -139,7 +160,8 @@ def Ecs_RunOp : Ecs_Op<"run", [
 }
 
 def Ecs_YieldOp : Ecs_Op<"yield", [
-    Pure, Terminator, ParentOneOf<["SystemOp", "ScheduleOp", "QueryOp"]>]> {
+    Pure, Terminator,
+    ParentOneOf<["SystemOp", "ScheduleOp", "QueryOp", "StageOp"]>]> {
   let summary = "Region terminator; implicit in the custom syntax";
   let assemblyFormat = "attr-dict";
 }

@@ -160,3 +160,20 @@ ecs.system @s() reads [@P] {
     %x = builtin.unrealized_conversion_cast %p : !ecs.ref<@P> to f32
   }
 }
+
+// -----
+
+ecs.schedule @frame() {
+  ecs.stage {
+    // expected-error @+1 {{is not allowed in 'ecs.stage'; a stage holds only 'ecs.run'}}
+    %c = arith.constant 1.0 : f32
+  }
+}
+
+// -----
+
+ecs.system @s() {
+  // expected-error @+1 {{'ecs.stage' op expects parent op 'ecs.schedule'}}
+  ecs.stage {
+  }
+}

@@ -145,6 +145,14 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   rewriter.eraseOp(query);
 }
 
+/// Replace a stage by its calls, run one after another.
+static void lowerStage(IRRewriter &rewriter, StageOp stage) {
+  for (Operation &op : llvm::make_early_inc_range(
+           stage.getBody().front().without_terminator()))
+    op.moveBefore(stage);
+  rewriter.eraseOp(stage);
+}
+
 namespace {
 struct EcsLowerToLoops
     : public mlir::ecs::impl::EcsLowerToLoopsBase<EcsLowerToLoops> {
@@ -179,6 +187,9 @@ struct EcsLowerToLoops
         rewriter.replaceOpWithNewOp<func::CallOp>(run, run.getSystem(),
                                                   TypeRange{}, args);
       }
+      SmallVector<StageOp> stages(func.getOps<StageOp>());
+      for (StageOp stage : stages)
+        lowerStage(rewriter, stage);
     }
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))

@@ -22,7 +22,20 @@
 // MISC: ecs.component @Tag ()
 // MISC: ecs.component @Named ("with space": i32, idx: index)
 // MISC: ecs.system @noop() {
+// MISC: ecs.schedule @staged() {
+// MISC-NEXT: ecs.stage {
+// MISC-NEXT:   ecs.run @noop()
+// MISC-NEXT: }
+// MISC-NEXT: ecs.stage {
+// MISC-NEXT: }
 ecs.component @Tag ()
 ecs.component @Named ("with space": i32, idx: index)
 ecs.system @noop() {
+}
+ecs.schedule @staged() {
+  ecs.stage {
+    ecs.run @noop()
+  }
+  ecs.stage {
+  }
 }

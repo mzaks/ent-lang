@@ -321,6 +321,18 @@ LogicalResult ScheduleOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// StageOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult StageOp::verify() {
+  for (Operation &op : getBody().front().without_terminator())
+    if (!isa<RunOp>(op))
+      return op.emitOpError("is not allowed in 'ecs.stage'; a stage holds "
+                            "only 'ecs.run'");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // QueryOp
 //===----------------------------------------------------------------------===//
 
