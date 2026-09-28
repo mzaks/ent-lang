@@ -18,14 +18,26 @@ cmake --build build --target check-ecs
 build/bin/ecs-opt examples/integrate.mlir
 ```
 
-Run the toy simulation: lower it, link it with its C host and execute it.
+Run the toy simulation: stage it, lower it with parallel stages, link it with
+its C host and the OpenMP runtime, and execute it. Drop `--ecs-schedule`,
+`parallel-stages` and the OpenMP flags for the sequential version.
 
 ```sh
-build/bin/ecs-opt examples/integrate.mlir --ecs-lower-to-loops \
-    --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
-  | /opt/homebrew/opt/llvm/bin/mlir-translate --mlir-to-llvmir -o /tmp/integrate.ll
-/opt/homebrew/opt/llvm/bin/clang -O2 -Wno-override-module /tmp/integrate.ll \
-    examples/host/integrate_main.c -o /tmp/integrate && /tmp/integrate
+LLVM=/opt/homebrew/opt/llvm
+build/bin/ecs-opt examples/integrate.mlir --ecs-schedule \
+    --ecs-lower-to-loops=parallel-stages=1 --convert-scf-to-cf \
+    --convert-to-llvm --reconcile-unrealized-casts \
+  | $LLVM/bin/mlir-translate --mlir-to-llvmir -o /tmp/integrate.ll
+$LLVM/bin/clang -O2 -Wno-override-module /tmp/integrate.ll \
+    examples/host/integrate_main.c -L$LLVM/lib -lomp -Wl,-rpath,$LLVM/lib \
+    -o /tmp/integrate && /tmp/integrate
+```
+
+Inspect the analysis behind the schedule:
+
+```sh
+build/bin/ecs-opt examples/integrate.mlir --ecs-print-access -o /dev/null
+build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
 ```
 
 ## The dialect today
@@ -41,24 +53,45 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-lower-to-loops \
 - `ecs.get` / `ecs.set`: field access through a ref; `set` needs `mut`.
 - `ecs.schedule @frame(%params) { ecs.run @s(...) }`: program order is the
   semantic order.
+- `ecs.stage { ecs.run ... }`: runs that commute and may execute in
+  parallel; stages execute in order.
 
 The verifier checks that every query stays inside its system's declared
 access, that no query binds a component twice, that refs are only used by
 `ecs.get` and `ecs.set`, and that field names and types match the component
 declarations.
 
+## Access analysis and scheduling
+
+A system's access is computed per column, `Archetype.Component.field`, from
+the `ecs.get` and `ecs.set` ops it contains, in every archetype its queries
+match. Declared `reads`/`writes` remain the contract the verifier enforces,
+but the analysis is finer: two systems that both declare `writes [@Velocity]`
+do not conflict if one only touches `Body.Velocity.dy` and the other only
+`Particle.Velocity.dx`, and binding a component to select archetypes is not
+a read. Any other op with memory effects (a call, say) makes a system
+opaque, and opaque systems conflict with everything.
+
+`--ecs-schedule` puts each run into the earliest stage after every earlier
+run it conflicts with. In the example, gravity, wind and decay share the
+first stage and integrate follows. Ops with effects in a schedule body act
+as barriers.
+
 ## Lowering
 
 `--ecs-lower-to-loops` turns systems into private functions and schedules into
 public ones with a C interface (`_mlir_ciface_<schedule>`). Each query becomes
 one `scf.for` per matching archetype, and field access becomes `memref.load`
-and `memref.store` on that archetype's columns.
+and `memref.store` on that archetype's columns. Stages dissolve into calls,
+or with `parallel-stages=1` a stage of several runs becomes an `omp.parallel`
+region with one `omp.section` per run.
 
 The world is passed explicitly. Per archetype, in declaration order, it is an
 entity count (`index`) and one `memref<?xT>` column per field, ordered by the
 archetype's components and then by each component's fields. Every lowered
 function takes its own parameters followed by the whole world;
-`examples/host/integrate_main.c` shows the host side.
+`examples/host/integrate_main.c` shows the host side. Parallel stages assume
+the host passes columns that do not alias.
 
 ## Milestones
 
@@ -66,7 +99,7 @@ function takes its own parameters followed by the whole world;
 - [x] **M1**: lower the toy simulation to loops and run it (from a C host
       rather than `mlir-runner`, which cannot call a schedule from an MLIR
       `main` before it is lowered).
-- [ ] **M2**: access analysis and a scheduling pass (compile-time parallelism).
+- [x] **M2**: access analysis and a scheduling pass (compile-time parallelism).
 - [ ] **M3**: layout choice (SoA/AoSoA), system fusion, benchmarks.
 - [ ] Later: structural changes (spawn/despawn), change detection, relations,
       surface syntax.
