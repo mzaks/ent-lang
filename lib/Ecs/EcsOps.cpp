@@ -3,6 +3,8 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringSet.h"
 
 using namespace mlir;
 using namespace mlir::ecs;
@@ -47,6 +49,18 @@ static void printBody(OpAsmPrinter &p, Region &body) {
   p << " ";
   p.printRegion(body, /*printEntryBlockArgs=*/false,
                 /*printBlockTerminators=*/false);
+}
+
+/// Refs may only be introduced by `ecs.query`; a system or schedule taking a
+/// ref parameter would smuggle component access past the declared sets.
+static LogicalResult verifyNoRefParams(Operation *op, Region &body) {
+  for (BlockArgument arg : body.getArguments())
+    if (isa<RefType>(arg.getType()))
+      return op->emitOpError("parameter #")
+             << arg.getArgNumber()
+             << " is a component reference; references can only be bound "
+                "by 'ecs.query'";
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -98,6 +112,28 @@ void ComponentOp::print(OpAsmPrinter &p) {
                            getFieldTypesAttrName()});
 }
 
+LogicalResult ComponentOp::verify() {
+  if (getFieldNames().size() != getFieldTypes().size())
+    return emitOpError("has ") << getFieldNames().size() << " field names but "
+                               << getFieldTypes().size() << " field types";
+
+  llvm::StringSet<> seen;
+  for (auto [nameAttr, typeAttr] :
+       llvm::zip(getFieldNames(), getFieldTypes())) {
+    StringRef name = cast<StringAttr>(nameAttr).getValue();
+    if (!seen.insert(name).second)
+      return emitOpError("has duplicate field '") << name << "'";
+    // Scalars only for now: layout passes split components into one column
+    // per field, which needs every field to be a plain value.
+    Type type = cast<TypeAttr>(typeAttr).getValue();
+    if (!isa<IntegerType, FloatType, IndexType>(type))
+      return emitOpError("field '")
+             << name << "' has type " << type
+             << "; only integer, float and index fields are supported";
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // SystemOp
 //===----------------------------------------------------------------------===//
@@ -142,6 +178,27 @@ void SystemOp::print(OpAsmPrinter &p) {
   printBody(p, getBody());
 }
 
+LogicalResult SystemOp::verify() {
+  if (failed(verifyNoRefParams(*this, getBody())))
+    return failure();
+
+  llvm::SmallPtrSet<Attribute, 8> seen;
+  for (auto [listName, list] :
+       {std::pair<StringRef, ArrayAttr>{"reads", getReads()},
+        std::pair<StringRef, ArrayAttr>{"writes", getWrites()}}) {
+    for (Attribute attr : list) {
+      if (!isa<FlatSymbolRefAttr>(attr))
+        return emitOpError("'") << listName << "' entry " << attr
+                                << " must be a flat symbol reference";
+      if (!seen.insert(attr).second)
+        return emitOpError("lists component ")
+               << attr
+               << " more than once; 'writes' already implies read access";
+    }
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // ScheduleOp
 //===----------------------------------------------------------------------===//
@@ -163,6 +220,10 @@ void ScheduleOp::print(OpAsmPrinter &p) {
   printBody(p, getBody());
 }
 
+LogicalResult ScheduleOp::verify() {
+  return verifyNoRefParams(*this, getBody());
+}
+
 //===----------------------------------------------------------------------===//
 // QueryOp
 //===----------------------------------------------------------------------===//
@@ -176,4 +237,35 @@ void QueryOp::print(OpAsmPrinter &p) {
   printArgs(p, getBody());
   p.printOptionalAttrDictWithKeyword((*this)->getAttrs());
   printBody(p, getBody());
+}
+
+LogicalResult QueryOp::verify() {
+  Block &body = getBody().front();
+  if (body.getNumArguments() == 0)
+    return emitOpError("must bind at least one component");
+
+  llvm::SmallPtrSet<Attribute, 8> seen;
+  for (BlockArgument arg : body.getArguments()) {
+    auto refType = dyn_cast<RefType>(arg.getType());
+    if (!refType)
+      return emitOpError("argument #")
+             << arg.getArgNumber() << " must be an !ecs.ref, got "
+             << arg.getType();
+    // Two refs to the same component of one entity would alias.
+    if (!seen.insert(refType.getComponent()).second)
+      return emitOpError("binds component ")
+             << refType.getComponent() << " more than once";
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// GetOp / SetOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult SetOp::verify() {
+  if (!getRef().getType().getIsMutable())
+    return emitOpError("requires a mutable reference, got ")
+           << getRef().getType();
+  return success();
 }

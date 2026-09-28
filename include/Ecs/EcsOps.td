@@ -21,6 +21,7 @@ def Ecs_ComponentOp : Ecs_Op<"component", [Symbol]> {
                        StrArrayAttr:$field_names,
                        TypeArrayAttr:$field_types);
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 def Ecs_SystemOp : Ecs_Op<"system", [
@@ -42,6 +43,7 @@ def Ecs_SystemOp : Ecs_Op<"system", [
                        SymbolRefArrayAttr:$writes);
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 def Ecs_ScheduleOp : Ecs_Op<"schedule", [
@@ -59,6 +61,7 @@ def Ecs_ScheduleOp : Ecs_Op<"schedule", [
   let arguments = (ins SymbolNameAttr:$sym_name);
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -74,6 +77,7 @@ def Ecs_QueryOp : Ecs_Op<"query", [
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 def Ecs_GetOp : Ecs_Op<"get"> {
@@ -88,6 +92,7 @@ def Ecs_SetOp : Ecs_Op<"set"> {
   let arguments = (ins Ecs_RefType:$ref, StrAttr:$field, AnyType:$value);
   let assemblyFormat =
       "$ref $field `,` $value attr-dict `:` type($ref) `,` type($value)";
+  let hasVerifier = 1;
 }
 
 def Ecs_RunOp : Ecs_Op<"run", [HasParent<"ScheduleOp">]> {
