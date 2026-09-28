@@ -11,6 +11,7 @@ target_link_libraries(ecs-opt PRIVATE
   MLIREcs
   MLIROptLib
   MLIRRegisterAllDialects
+  MLIRRegisterAllExtensions
   MLIRRegisterAllPasses
 )
 mlir_check_all_link_libraries(ecs-opt)
