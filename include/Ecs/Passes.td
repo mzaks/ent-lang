@@ -8,19 +8,18 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
   let description = [{
     Replaces the ECS program by plain functions over the world's storage.
 
-    World ABI: for every `ecs.archetype`, in declaration order, the world
-    holds an entity count (`index`) followed by one `memref<?xT>` column per
-    field, ordered by the archetype's component list and then by each
-    component's field list. Every lowered system and schedule takes its own
-    parameters followed by the whole world.
+    The world is one arena whose layout is fixed at compile time from the
+    archetypes' components and capacities (see `WorldLayout`): one i64
+    entity count per archetype, then one column per field at a static
+    offset. Every lowered system and schedule takes its own parameters
+    followed by the arena (`memref<Nxi8>`), and reads columns through
+    statically shaped `memref.view`s. `ecs-translate --ecs-to-c-header`
+    emits the matching C API for hosts.
 
     - `ecs.system` becomes a private `func.func`. Each `ecs.query` becomes
-      one `scf.for` over every archetype that contains all of the query's
+      one loop over every archetype that contains all of the query's
       components; `ecs.get` and `ecs.set` become `memref.load` and
       `memref.store` on the matched archetype's column.
-    - `ecs.schedule` becomes a public `func.func` with
-      `llvm.emit_c_interface`, so a host program can call
-      `_mlir_ciface_<name>`; each `ecs.run` becomes a `func.call`.
     - With `parallel-entities`, a query whose body only computes and
       touches its own entity becomes an `scf.parallel` instead, ready for
       `--convert-scf-to-openmp`.
@@ -29,10 +28,11 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
       archetype, holding every matching query body in program order.
       Stages are dissolved first; unused system functions remain for
       `--symbol-dce`.
+    - `ecs.schedule` becomes a public `func.func` with
+      `llvm.emit_c_interface`; each `ecs.run` becomes a `func.call`.
     - `ecs.stage` is dissolved into its calls, or, with
       `parallel-stages`, a stage of two or more runs becomes an
-      `omp.parallel` region with one `omp.section` per run. Parallel
-      stages assume that the host passes columns that do not alias.
+      `omp.parallel` region with one `omp.section` per run.
     - Components and archetypes are erased.
   }];
   let options = [

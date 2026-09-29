@@ -1,3 +1,7 @@
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/../../examples/integrate.mlir \
+// RUN:     -o %t.dir/integrate_world.h
+
 // Lower the toy simulation to LLVM, link it with its C host and run it:
 // as written, staged with parallel stages, fused, and fused with parallel
 // entity loops. All must agree.
@@ -5,7 +9,7 @@
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
 // RUN: clang -O2 -Wno-override-module %t.seq.ll \
-// RUN:     %S/../../examples/host/integrate_main.c -o %t.seq
+// RUN:     -I%t.dir %S/../../examples/host/integrate_main.c -o %t.seq
 // RUN: %t.seq | FileCheck %s
 
 // RUN: ecs-opt %S/../../examples/integrate.mlir --ecs-schedule \
@@ -14,7 +18,7 @@
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
 // RUN: FileCheck %s --check-prefix=OMP --input-file=%t.par.ll
 // RUN: clang -O2 -Wno-override-module %t.par.ll \
-// RUN:     %S/../../examples/host/integrate_main.c %openmp -o %t.par
+// RUN:     -I%t.dir %S/../../examples/host/integrate_main.c %openmp -o %t.par
 // RUN: %t.par | FileCheck %s
 
 // RUN: ecs-opt %S/../../examples/integrate.mlir \
@@ -22,7 +26,7 @@
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
 // RUN: clang -O2 -Wno-override-module %t.fused.ll \
-// RUN:     %S/../../examples/host/integrate_main.c -o %t.fused
+// RUN:     -I%t.dir %S/../../examples/host/integrate_main.c -o %t.fused
 // RUN: %t.fused | FileCheck %s
 
 // RUN: ecs-opt %S/../../examples/integrate.mlir \
@@ -31,7 +35,7 @@
 // RUN:     --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.fusedpar.ll
 // RUN: clang -O2 -Wno-override-module %t.fusedpar.ll \
-// RUN:     %S/../../examples/host/integrate_main.c %openmp -o %t.fusedpar
+// RUN:     -I%t.dir %S/../../examples/host/integrate_main.c %openmp -o %t.fusedpar
 // RUN: %t.fusedpar | FileCheck %s
 
 // The first stage (gravity, wind, decay) forks a parallel region.

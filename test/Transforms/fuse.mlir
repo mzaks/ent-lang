@@ -46,11 +46,18 @@ ecs.system @logs() {
 }
 
 // One loop per archetype; each holds, in program order, the bodies of the
-// queries that match it. Stages are dissolved first.
+// queries that match it. Stages are dissolved first. Columns: A.P.x at
+// 1152, A.V.dx at 6272, B.P.x at 11392.
 // CHECK-LABEL: func.func @frame(
-// CHECK-SAME: %[[K:[^:]*]]: f32, %[[D:[^:]*]]: f32,
-// CHECK-SAME: %[[NA:[^:]*]]: index, %[[AX:[^:]*]]: memref<?xf32>, %[[ADX:[^:]*]]: memref<?xf32>,
-// CHECK-SAME: %[[NB:[^:]*]]: index, %[[BX:[^:]*]]: memref<?xf32>)
+// CHECK-SAME: %[[K:[^:]*]]: f32, %[[D:[^:]*]]: f32, %[[W:[^:]*]]: memref<16384xi8>)
+// CHECK:      %[[NA:.*]] = arith.index_cast
+// CHECK:      arith.constant 6272
+// CHECK-NEXT: %[[ADX:.*]] = memref.view %[[W]]
+// CHECK:      arith.constant 1152
+// CHECK-NEXT: %[[AX:.*]] = memref.view %[[W]]
+// CHECK:      %[[NB:.*]] = arith.index_cast
+// CHECK:      arith.constant 11392
+// CHECK-NEXT: %[[BX:.*]] = memref.view %[[W]]
 // CHECK:      %[[TWICE:.*]] = arith.addf %[[K]], %[[K]]
 // CHECK:      scf.for %[[I:.*]] = %{{.*}} to %[[NA]]
 // CHECK-NEXT:   %[[DX:.*]] = memref.load %[[ADX]][%[[I]]]
@@ -83,11 +90,13 @@ ecs.schedule @frame(%k: f32, %d: f32) {
 // An opaque system and an op with effects both end a fused sequence. @shift
 // matches both archetypes, so each sequence is two loops (A, then B).
 // CHECK-LABEL: func.func @barriers(
-// CHECK-SAME: %{{[^:]*}}: f32, %[[NA:[^:]*]]: index, %{{[^:]*}}: memref<?xf32>, %{{[^:]*}}: memref<?xf32>, %[[NB:[^:]*]]: index
+// CHECK-SAME: %{{[^:]*}}: f32, %[[W:[^:]*]]: memref<16384xi8>)
+// CHECK:      %[[NA:.*]] = arith.index_cast
+// CHECK:      %[[NB:.*]] = arith.index_cast
 // CHECK:      scf.for {{.*}} to %[[NA]]
 // CHECK:      scf.for {{.*}} to %[[NB]]
 // CHECK:      }
-// CHECK-NEXT: call @logs(
+// CHECK-NEXT: call @logs(%[[W]])
 // CHECK:      scf.for {{.*}} to %[[NA]]
 // CHECK:      scf.for {{.*}} to %[[NB]]
 // CHECK:      }

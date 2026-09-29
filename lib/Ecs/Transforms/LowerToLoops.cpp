@@ -1,6 +1,7 @@
 #include "Ecs/Access.h"
 #include "Ecs/EcsOps.h"
 #include "Ecs/Passes.h"
+#include "Ecs/World.h"
 
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
@@ -15,76 +16,116 @@ namespace mlir::ecs {
 using namespace mlir;
 using namespace mlir::ecs;
 
+static MemRefType getArenaType(MLIRContext *context,
+                               const WorldLayout &layout) {
+  return MemRefType::get({static_cast<int64_t>(layout.totalBytes)},
+                         IntegerType::get(context, 8));
+}
+
 namespace {
 
-/// Where one archetype's storage sits among the world arguments.
-struct ArchetypeLayout {
-  ArchetypeOp op;
-  /// Position of the entity count.
-  unsigned count = 0;
-  /// (component symbol, field name) -> position of the field's column.
-  llvm::DenseMap<std::pair<Attribute, Attribute>, unsigned> columns;
+/// Access to the world inside one lowered function. Entity counts and
+/// column views are created at the function's entry the first time they
+/// are needed, so a function only carries what it uses.
+class WorldAccess {
+public:
+  WorldAccess(IRRewriter &rewriter, const WorldLayout &layout, Value arena)
+      : rewriter(rewriter), layout(layout), arena(arena) {}
+
+  Value getArena() const { return arena; }
+
+  /// The number of entities in `archetype`, as an index.
+  Value count(const WorldArchetype &archetype) {
+    Value &value = counts[archetype.index];
+    if (!value)
+      value = atEntry([&](Location loc) {
+        if (!countsView) {
+          auto countsType = MemRefType::get(
+              {static_cast<int64_t>(layout.archetypes.size())},
+              IntegerType::get(rewriter.getContext(), 64));
+          Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+          countsView = memref::ViewOp::create(rewriter, loc, countsType, arena,
+                                              zero, ValueRange{});
+        }
+        Value position =
+            arith::ConstantIndexOp::create(rewriter, loc, archetype.index);
+        Value count = memref::LoadOp::create(rewriter, loc, countsView,
+                                             ValueRange{position});
+        return arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getIndexType(), count);
+      });
+    return value;
+  }
+
+  /// A statically shaped view of one column of `archetype`.
+  Value column(const WorldArchetype &archetype, StringAttr component,
+               StringAttr field) {
+    const WorldColumn *column = archetype.find(component, field);
+    Value &value = columns[{archetype.index, column->offset}];
+    if (!value)
+      value = atEntry([&](Location loc) {
+        auto type = MemRefType::get({archetype.capacity}, column->type);
+        Value offset =
+            arith::ConstantIndexOp::create(rewriter, loc, column->offset);
+        return memref::ViewOp::create(rewriter, loc, type, arena, offset,
+                                      ValueRange{});
+      });
+    return value;
+  }
+
+private:
+  template <typename Build>
+  Value atEntry(Build build) {
+    OpBuilder::InsertionGuard guard(rewriter);
+    if (lastCreated)
+      rewriter.setInsertionPointAfter(lastCreated);
+    else
+      rewriter.setInsertionPointToStart(arena.getParentBlock());
+    Value value = build(arena.getLoc());
+    lastCreated = value.getDefiningOp();
+    return value;
+  }
+
+  IRRewriter &rewriter;
+  const WorldLayout &layout;
+  Value arena;
+  Operation *lastCreated = nullptr;
+  Value countsView;
+  llvm::DenseMap<unsigned, Value> counts;
+  llvm::DenseMap<std::pair<unsigned, uint64_t>, Value> columns;
 };
 
-/// The world ABI: the argument list every lowered function takes after its
-/// own parameters. See the pass description for the order.
-struct WorldLayout {
-  SmallVector<Type> types;
-  SmallVector<ArchetypeLayout> archetypes;
+/// How entity loops are emitted.
+struct LoopOptions {
+  bool parallelEntities;
 };
 
 } // namespace
 
-static WorldLayout buildWorldLayout(ModuleOp module) {
-  SymbolTable symbols(module);
-  WorldLayout world;
-  Type index = IndexType::get(module.getContext());
-  for (auto archetype : module.getOps<ArchetypeOp>()) {
-    ArchetypeLayout layout;
-    layout.op = archetype;
-    layout.count = world.types.size();
-    world.types.push_back(index);
-    for (Attribute attr : archetype.getComponents()) {
-      auto ref = cast<FlatSymbolRefAttr>(attr);
-      auto component = symbols.lookup<ComponentOp>(ref.getValue());
-      for (auto [name, type] :
-           llvm::zip(component.getFieldNames(), component.getFieldTypes())) {
-        layout.columns[{ref, name}] = world.types.size();
-        world.types.push_back(MemRefType::get(
-            {ShapedType::kDynamic}, cast<TypeAttr>(type).getValue()));
-      }
-    }
-    world.archetypes.push_back(std::move(layout));
-  }
-  return world;
-}
-
 /// Replace `op` (a system or schedule) by a function whose entry block is
-/// `op`'s body, extended by the world arguments. Returns the function and,
-/// through `worldArgs`, the values that hold the world inside it.
-static func::FuncOp convertToFunc(IRRewriter &rewriter, Operation *op,
-                                  StringRef name, Region &body,
-                                  const WorldLayout &world,
-                                  SmallVectorImpl<Value> &worldArgs) {
+/// `op`'s body, extended by the world arena. Returns the function and the
+/// arena argument.
+static std::pair<func::FuncOp, Value>
+convertToFunc(IRRewriter &rewriter, Operation *op, StringRef name,
+              Region &body, MemRefType arenaType) {
   Block &entry = body.front();
   SmallVector<Type> inputs(entry.getArgumentTypes());
-  llvm::append_range(inputs, world.types);
+  inputs.push_back(arenaType);
 
   rewriter.setInsertionPoint(op);
   auto func = func::FuncOp::create(rewriter, op->getLoc(), name,
                                    rewriter.getFunctionType(inputs, {}));
   rewriter.inlineRegionBefore(body, func.getBody(), func.getBody().end());
-  for (Type type : world.types)
-    worldArgs.push_back(entry.addArgument(type, op->getLoc()));
+  Value arena = entry.addArgument(arenaType, op->getLoc());
 
   Operation *terminator = entry.getTerminator();
   rewriter.setInsertionPoint(terminator);
   rewriter.replaceOpWithNewOp<func::ReturnOp>(terminator);
   rewriter.eraseOp(op);
-  return func;
+  return {func, arena};
 }
 
-static bool matches(const ArchetypeLayout &archetype, QueryOp query) {
+static bool matches(const WorldArchetype &archetype, QueryOp query) {
   ArchetypeOp archetypeOp = archetype.op;
   return llvm::all_of(query.getBody().getArgumentTypes(), [&](Type type) {
     return archetypeOp.contains(cast<RefType>(type).getComponent());
@@ -102,24 +143,28 @@ static bool isEntityLocal(QueryOp query) {
   return !result.wasInterrupted();
 }
 
-/// Create a loop over the entities of `archetype` and set the insertion
-/// point into its body. Iterations of a query only touch their own entity,
-/// so the loop may be an `scf.parallel`.
-static Value createEntityLoop(IRRewriter &rewriter, Location loc,
-                              const ArchetypeLayout &archetype,
-                              ValueRange worldArgs, bool parallel) {
+/// Emit the loop over the entities of `archetype` at the insertion point
+/// and call `emitBody` with the entity index, positioned inside the loop.
+/// Iterations of entity-local bodies are independent, so with
+/// `parallelEntities` the loop is an `scf.parallel`.
+static void
+emitEntityLoops(IRRewriter &rewriter, Location loc,
+                const WorldArchetype &archetype, WorldAccess &world,
+                const LoopOptions &options, bool entityLocal,
+                function_ref<void(Value entity, Block *loopBody)> emitBody) {
+  Value count = world.count(archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  Value count = worldArgs[archetype.count];
-  if (parallel) {
+  if (options.parallelEntities && entityLocal) {
     auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                         ValueRange{count}, ValueRange{one});
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-    return loop.getInductionVars().front();
+    emitBody(loop.getInductionVars().front(), loop.getBody());
+    return;
   }
   auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
   rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-  return loop.getInductionVar();
+  emitBody(loop.getInductionVar(), loop.getBody());
 }
 
 /// Clone a query's body at the insertion point. Its get/set ops still name
@@ -133,11 +178,11 @@ static void cloneQueryBody(IRRewriter &rewriter, QueryOp query,
 /// Replace every get/set nested in `loopBody` by a load or store at
 /// `entity` in the column of the ref's component and field in `archetype`.
 static void lowerAccesses(IRRewriter &rewriter, Block *loopBody,
-                          const ArchetypeLayout &archetype,
-                          ValueRange worldArgs, Value entity) {
+                          const WorldArchetype &archetype, WorldAccess &world,
+                          Value entity) {
   auto column = [&](Value ref, StringAttr field) {
     FlatSymbolRefAttr component = cast<RefType>(ref.getType()).getComponent();
-    return worldArgs[archetype.columns.lookup({component, field})];
+    return world.column(archetype, component.getAttr(), field);
   };
   SmallVector<Operation *> accesses;
   loopBody->walk([&](Operation *op) {
@@ -162,21 +207,22 @@ static void lowerAccesses(IRRewriter &rewriter, Block *loopBody,
 /// into each loop, and every ref access becomes a load or store at the
 /// loop's index in the column of the ref's component and field.
 static void lowerQuery(IRRewriter &rewriter, QueryOp query,
-                       const WorldLayout &world, ValueRange worldArgs,
-                       bool parallelEntities) {
+                       const WorldLayout &layout, WorldAccess &world,
+                       const LoopOptions &options) {
   Location loc = query.getLoc();
-  bool parallel = parallelEntities && isEntityLocal(query);
+  bool entityLocal = isEntityLocal(query);
   bool matched = false;
-  for (const ArchetypeLayout &archetype : world.archetypes) {
+  for (const WorldArchetype &archetype : layout.archetypes) {
     if (!matches(archetype, query))
       continue;
     matched = true;
     rewriter.setInsertionPoint(query);
-    Value entity =
-        createEntityLoop(rewriter, loc, archetype, worldArgs, parallel);
-    Block *loopBody = rewriter.getInsertionBlock();
-    cloneQueryBody(rewriter, query, IRMapping());
-    lowerAccesses(rewriter, loopBody, archetype, worldArgs, entity);
+    emitEntityLoops(rewriter, loc, archetype, world, options, entityLocal,
+                    [&](Value entity, Block *loopBody) {
+                      cloneQueryBody(rewriter, query, IRMapping());
+                      lowerAccesses(rewriter, loopBody, archetype, world,
+                                    entity);
+                    });
   }
 
   // The set of archetypes is closed, so a query that matches none of them
@@ -198,8 +244,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
 /// completion in turn.
 static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
                      Operation *insertionPoint, SymbolTable &symbols,
-                     const WorldLayout &world, ValueRange worldArgs,
-                     bool parallelEntities) {
+                     const WorldLayout &layout, WorldAccess &world,
+                     const LoopOptions &options) {
   if (runs.empty())
     return;
   Location loc = insertionPoint->getLoc();
@@ -218,7 +264,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
         rewriter.clone(op, mapping);
   }
 
-  for (const ArchetypeLayout &archetype : world.archetypes) {
+  for (const WorldArchetype &archetype : layout.archetypes) {
     SmallVector<std::pair<QueryOp, unsigned>> bodies;
     for (auto [index, system] : llvm::enumerate(systems))
       for (QueryOp query : system.getBody().getOps<QueryOp>())
@@ -228,12 +274,13 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
       continue;
 
     rewriter.setInsertionPoint(insertionPoint);
-    Value entity = createEntityLoop(rewriter, loc, archetype, worldArgs,
-                                    parallelEntities);
-    Block *loopBody = rewriter.getInsertionBlock();
-    for (auto [query, index] : bodies)
-      cloneQueryBody(rewriter, query, mappings[index]);
-    lowerAccesses(rewriter, loopBody, archetype, worldArgs, entity);
+    emitEntityLoops(rewriter, loc, archetype, world, options,
+                    /*entityLocal=*/true, [&](Value entity, Block *loopBody) {
+                      for (auto [query, index] : bodies)
+                        cloneQueryBody(rewriter, query, mappings[index]);
+                      lowerAccesses(rewriter, loopBody, archetype, world,
+                                    entity);
+                    });
   }
 
   for (RunOp run : runs)
@@ -245,8 +292,8 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
 /// opaque system, or an op with effects in the schedule body, ends a
 /// sequence and stays where it is.
 static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
-                         SymbolTable &symbols, const WorldLayout &world,
-                         ValueRange worldArgs, bool parallelEntities) {
+                         SymbolTable &symbols, const WorldLayout &layout,
+                         WorldAccess &world, const LoopOptions &options) {
   for (StageOp stage : llvm::make_early_inc_range(func.getOps<StageOp>())) {
     for (Operation &op : llvm::make_early_inc_range(
              stage.getBody().front().without_terminator()))
@@ -255,7 +302,7 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   }
 
   SmallVector<ArchetypeOp> archetypes;
-  for (const ArchetypeLayout &archetype : world.archetypes)
+  for (const WorldArchetype &archetype : layout.archetypes)
     archetypes.push_back(archetype.op);
 
   SmallVector<RunOp> sequence;
@@ -270,8 +317,7 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                isMemoryEffectFree(&op)) {
       continue;
     }
-    fuseRuns(rewriter, sequence, &op, symbols, world, worldArgs,
-             parallelEntities);
+    fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
     sequence.clear();
   }
 }
@@ -316,25 +362,29 @@ struct EcsLowerToLoops
   void runOnOperation() override {
     ModuleOp module = getOperation();
     IRRewriter rewriter(module.getContext());
-    WorldLayout world = buildWorldLayout(module);
+    FailureOr<WorldLayout> layout = WorldLayout::compute(module);
+    if (failed(layout))
+      return signalPassFailure();
+    MemRefType arenaType = getArenaType(module.getContext(), *layout);
+    LoopOptions options{parallelEntities};
     SymbolTable symbols(module);
 
     // Schedules first: fusion reads the systems' bodies before they are
     // lowered themselves.
     for (auto schedule :
          llvm::make_early_inc_range(module.getOps<ScheduleOp>())) {
-      SmallVector<Value> worldArgs;
-      auto func = convertToFunc(rewriter, schedule, schedule.getSymName(),
-                                schedule.getBody(), world, worldArgs);
+      auto [func, arena] = convertToFunc(rewriter, schedule,
+                                         schedule.getSymName(),
+                                         schedule.getBody(), arenaType);
       func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
+      WorldAccess world(rewriter, *layout, arena);
       if (fuseSystems)
-        fuseSchedule(rewriter, func, symbols, world, worldArgs,
-                     parallelEntities);
+        fuseSchedule(rewriter, func, symbols, *layout, world, options);
       SmallVector<RunOp> runs;
       func.walk([&](RunOp run) { runs.push_back(run); });
       for (RunOp run : runs) {
         SmallVector<Value> args(run.getArgs());
-        llvm::append_range(args, worldArgs);
+        args.push_back(arena);
         rewriter.setInsertionPoint(run);
         rewriter.replaceOpWithNewOp<func::CallOp>(run, run.getSystem(),
                                                   TypeRange{}, args);
@@ -345,14 +395,14 @@ struct EcsLowerToLoops
     }
 
     for (auto system : llvm::make_early_inc_range(module.getOps<SystemOp>())) {
-      SmallVector<Value> worldArgs;
-      auto func = convertToFunc(rewriter, system, system.getSymName(),
-                                system.getBody(), world, worldArgs);
+      auto [func, arena] = convertToFunc(
+          rewriter, system, system.getSymName(), system.getBody(), arenaType);
       func.setPrivate();
+      WorldAccess world(rewriter, *layout, arena);
       SmallVector<QueryOp> queries;
       func.walk([&](QueryOp query) { queries.push_back(query); });
       for (QueryOp query : queries)
-        lowerQuery(rewriter, query, world, worldArgs, parallelEntities);
+        lowerQuery(rewriter, query, *layout, world, options);
     }
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))

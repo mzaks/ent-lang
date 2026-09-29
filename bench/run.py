@@ -23,6 +23,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
 ECS_OPT = os.path.join(ROOT, "build", "bin", "ecs-opt")
+ECS_TRANSLATE = os.path.join(ROOT, "build", "bin", "ecs-translate")
 OUT = os.path.join(ROOT, "build", "bench")
 EXAMPLE = os.path.join(ROOT, "examples", "integrate.mlir")
 HOST = os.path.join(ROOT, "bench", "bench_main.c")
@@ -48,9 +49,15 @@ def run(cmd, **kwargs):
     return subprocess.run(cmd, check=True, **kwargs)
 
 
+def generate_header():
+    """The hosts include integrate_world.h, generated from the example."""
+    run([ECS_TRANSLATE, "--ecs-to-c-header", EXAMPLE, "-o",
+         os.path.join(OUT, "integrate_world.h")])
+
+
 def build(name, passes):
     exe = os.path.join(OUT, name)
-    cflags = ["-O2", "-Wno-override-module"]
+    cflags = ["-O2", "-Wno-override-module", f"-I{OUT}"]
     if passes is None:
         defines = ["-DRESTRICT=restrict"] if name.endswith("restrict") else []
         run([f"{LLVM}/bin/clang", *cflags, "-ffp-contract=off", *defines,
@@ -81,6 +88,7 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(OUT, exist_ok=True)
+    generate_header()
     names = args.variants.split(",")
     exes = {name: build(name, VARIANTS[name]) for name in names}
     sizes = [int(s) for s in args.sizes.split(",")]

@@ -1,22 +1,15 @@
 // Hand-written reference for examples/integrate.mlir: the fused frame as a
-// C programmer would write it, with the same signature as the lowered
-// schedule. Compile with -ffp-contract=off so the arithmetic matches the
-// generated code exactly (no fused multiply-add). Define RESTRICT=restrict
-// to tell the compiler that columns do not alias.
+// C programmer would write it, on the same world (generated header) and
+// with the same entry point as the lowered schedule. Compile with
+// -ffp-contract=off so the arithmetic matches the generated code exactly
+// (no fused multiply-add). Define RESTRICT=restrict to tell the compiler
+// that columns do not alias.
 
-#include <stdint.h>
+#include "integrate_world.h"
 
 #ifndef RESTRICT
 #define RESTRICT
 #endif
-
-typedef struct {
-  float *allocated;
-  float *aligned;
-  int64_t offset;
-  int64_t size;
-  int64_t stride;
-} Column;
 
 static void bodies(float dt, float g, int64_t n, float *RESTRICT x,
                    float *RESTRICT y, float *RESTRICT dx, float *RESTRICT dy) {
@@ -38,12 +31,12 @@ static void particles(float dt, float w, int64_t n, float *RESTRICT x,
   }
 }
 
-void _mlir_ciface_frame(float dt, int64_t nb, Column *bx, Column *by,
-                        Column *bdx, Column *bdy, Column *bkg, int64_t np,
-                        Column *px, Column *py, Column *pdx, Column *pdy,
-                        Column *plife, int64_t ns, Column *sx, Column *sy) {
-  (void)bkg, (void)ns, (void)sx, (void)sy;
-  bodies(dt, 9.81f, nb, bx->aligned, by->aligned, bdx->aligned, bdy->aligned);
-  particles(dt, 2.0f, np, px->aligned, py->aligned, pdx->aligned, pdy->aligned,
-            plife->aligned);
+void _mlir_ciface_frame(float dt, ecs_arena_descriptor *arena) {
+  ecs_world *w = (ecs_world *)arena->aligned;
+  bodies(dt, 9.81f, ecs_Body_count(w), ecs_Body_Position_x(w),
+         ecs_Body_Position_y(w), ecs_Body_Velocity_dx(w),
+         ecs_Body_Velocity_dy(w));
+  particles(dt, 2.0f, ecs_Particle_count(w), ecs_Particle_Position_x(w),
+            ecs_Particle_Position_y(w), ecs_Particle_Velocity_dx(w),
+            ecs_Particle_Velocity_dy(w), ecs_Particle_Lifetime_seconds(w));
 }

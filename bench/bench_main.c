@@ -11,6 +11,8 @@
 // Timing then continues on the same columns with a frame count calibrated
 // so that one repetition takes about <target ms>.
 
+#include "integrate_world.h"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,31 +23,11 @@
 // not in others, and the checksums of equivalent variants differ.
 #pragma clang fp contract(off)
 
-typedef struct {
-  float *allocated;
-  float *aligned;
-  int64_t offset;
-  int64_t size;
-  int64_t stride;
-} Column;
-
-void _mlir_ciface_frame(float dt, int64_t bodies, Column *bx, Column *by,
-                        Column *bdx, Column *bdy, Column *bkg,
-                        int64_t particles, Column *px, Column *py,
-                        Column *pdx, Column *pdy, Column *plife,
-                        int64_t scenery, Column *sx, Column *sy);
-
 enum { NUM_COLUMNS = 12 };
 
-static Column makeColumn(int64_t n, float base, float step) {
-  float *data;
-  if (posix_memalign((void **)&data, 64, (size_t)n * sizeof(float)) != 0) {
-    perror("posix_memalign");
-    exit(1);
-  }
+static void fill(float *column, int64_t n, float base, float step) {
   for (int64_t i = 0; i < n; ++i)
-    data[i] = base + step * (float)(i % 1024);
-  return (Column){data, data, 0, n, 1};
+    column[i] = base + step * (float)(i % 1024);
 }
 
 static uint64_t now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
@@ -62,27 +44,36 @@ int main(int argc, char **argv) {
   int reps = atoi(argv[2]);
   uint64_t target = (uint64_t)atoll(argv[3]) * 1000000;
 
-  // Body: Position, Velocity, Mass; Particle: Position, Velocity, Lifetime;
-  // Scenery: Position.
-  Column c[NUM_COLUMNS] = {
-      makeColumn(n, 0, 0.5f),   makeColumn(n, 100, 0.25f),
-      makeColumn(n, 1, 0.01f),  makeColumn(n, 0, 0.02f),
-      makeColumn(n, 1, 0.1f),   makeColumn(n, 0, 0.5f),
-      makeColumn(n, 0, 0.25f),  makeColumn(n, 2, -0.01f),
-      makeColumn(n, 1, 0.02f),  makeColumn(n, 10, 0.1f),
-      makeColumn(n, 7, 0.5f),   makeColumn(n, 7, 0.25f),
+  ecs_world *w = ecs_world_create();
+  if (!w || !ecs_Body_set_count(w, n) || !ecs_Particle_set_count(w, n) ||
+      !ecs_Scenery_set_count(w, n)) {
+    fprintf(stderr, "n=%lld does not fit the world\n", (long long)n);
+    return 1;
+  }
+  float *c[NUM_COLUMNS] = {
+      ecs_Body_Position_x(w),        ecs_Body_Position_y(w),
+      ecs_Body_Velocity_dx(w),       ecs_Body_Velocity_dy(w),
+      ecs_Body_Mass_kg(w),           ecs_Particle_Position_x(w),
+      ecs_Particle_Position_y(w),    ecs_Particle_Velocity_dx(w),
+      ecs_Particle_Velocity_dy(w),   ecs_Particle_Lifetime_seconds(w),
+      ecs_Scenery_Position_x(w),     ecs_Scenery_Position_y(w),
   };
+  static const float base[NUM_COLUMNS] = {0, 100, 1, 0, 1, 0,
+                                          0, 2,   1, 10, 7, 7};
+  static const float step[NUM_COLUMNS] = {0.5f,  0.25f, 0.01f, 0.02f,
+                                          0.1f,  0.5f,  0.25f, -0.01f,
+                                          0.02f, 0.1f,  0.5f,  0.25f};
+  for (int k = 0; k < NUM_COLUMNS; ++k)
+    fill(c[k], n, base[k], step[k]);
   const float dt = 1.0f / 60.0f;
-#define FRAME()                                                                \
-  _mlir_ciface_frame(dt, n, &c[0], &c[1], &c[2], &c[3], &c[4], n, &c[5],       \
-                     &c[6], &c[7], &c[8], &c[9], n, &c[10], &c[11])
+#define FRAME() ecs_frame(w, dt)
 
   for (int f = 0; f < VALIDATION_FRAMES; ++f)
     FRAME();
   double checksum = 0;
   for (int k = 0; k < NUM_COLUMNS; ++k)
     for (int64_t i = 0; i < n; ++i)
-      checksum += c[k].aligned[i];
+      checksum += c[k][i];
 
   // Calibrate (this also warms caches and the OpenMP thread pool): double
   // the frame count until a batch takes at least a tenth of the target.
