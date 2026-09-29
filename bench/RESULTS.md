@@ -153,3 +153,69 @@ M4's cache geometry (associativity) is not measured here.
 The host allocates the columns today, so the compiler cannot do this. It
 is the strongest argument so far for the language to own the world's
 storage.
+
+## 2026-09-29: compiler-owned world storage (arena, capacities)
+
+Same machine and toolchain, commit 9164ba9: the world is one arena laid
+out by the compiler with staggered columns; entity loops with
+`parallel-entities` run in parallel only from `parallel-min-entities`
+(default 1e6) entities on, and archetypes with smaller capacity never get
+a parallel loop. The example's capacity is 1e7 per archetype, so every
+size below is versioned on the count. All variants produced identical
+checksums at every size.
+
+The quietest run so far: load average 2.8 before, 4.3 between, 2.8 after;
+no heavy process (WindowServer, Slack and Docker at under half a core
+together).
+
+### OpenMP runtime defaults (`KMP_BLOCKTIME=0`, passive wait)
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 343 (8%) | 5,448 (5%) | 51,518 (1%) | 513,713 (1%) | 5,183,432 (1%) |
+| stages-omp | 63,223 (5%) | 67,436 (2%) | 104,203 (3%) | 484,569 (3%) | 4,423,657 (2%) |
+| entities-omp | 322 (16%) | 5,461 (3%) | 50,874 (4%) | 404,334 (1%) | 2,260,857 (1%) |
+| fused | 304 (12%) | 4,551 (2%) | 45,893 (3%) | 455,232 (0%) | 4,567,814 (0%) |
+| fused-entities-omp | 275 (16%) | 4,490 (2%) | 45,455 (2%) | 207,962 (1%) | 1,842,330 (0%) |
+| c-fused | 280 (11%) | 4,538 (2%) | 45,616 (1%) | 455,786 (1%) | 4,563,140 (0%) |
+| c-fused-restrict | 282 (11%) | 4,566 (1%) | 45,532 (2%) | 454,995 (1%) | 4,557,531 (0%) |
+
+### `KMP_BLOCKTIME=200`
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 348 (16%) | 5,472 (5%) | 51,394 (2%) | 515,515 (1%) | 5,219,797 (2%) |
+| stages-omp | 2,739 (25%) | 7,563 (15%) | 53,766 (21%) | 497,913 (20%) | 4,843,400 (6%) |
+| entities-omp | 333 (16%) | 5,510 (6%) | 51,543 (1%) | 90,649 (25%) | 2,442,367 (59%) |
+| fused | 288 (14%) | 4,525 (2%) | 45,528 (2%) | 455,951 (1%) | 4,564,246 (2%) |
+| fused-entities-omp | 298 (14%) | 4,549 (2%) | 45,207 (2%) | 85,588 (24%) | 2,212,380 (25%) |
+| c-fused | 287 (7%) | 4,582 (2%) | 45,485 (2%) | 457,990 (2%) | 4,580,959 (1%) |
+| c-fused-restrict | 287 (7%) | 4,567 (2%) | 46,041 (2%) | 457,976 (2%) | 4,572,941 (1%) |
+
+### Compared with 2026-09-28 (host-allocated columns), runtime defaults
+
+- Staggered columns deliver what the layout measurement predicted for the
+  fused frame: 8.0% faster at 1e7 (4.97 to 4.57 ms), 8.4% at 1e6, 6.9% at
+  1e5, 10% at 1e4. The C reference, now on the same arena, gains the same;
+  generated fused code still matches it within 0.5%.
+- The parallel threshold removes the fork cost below 1e6: fused parallel
+  goes from 128 us to 0.28 us per frame at 1e3, from 130 us to 4.5 us at
+  1e4 and from 142 us to 45 us at 1e5, where it now equals plain fused.
+  From 1e6 on it runs in parallel as before: 208 us at 1e6 (2.2x faster
+  than fused; 4% faster than before) and 1.84 ms at 1e7 (unchanged within
+  1%).
+- fused-entities-omp is now the fastest variant or tied for fastest at
+  every size, so one build serves all sizes.
+
+### Measured, not explained
+
+- The unfused per-system loops do not gain from staggering: -0.6% at 1e7,
+  -0.3% at 1e6, +1% at 1e5 (only 1e4 improves, by 9%), while the fused
+  loops gain 7-8%. That loops streaming fewer columns suffer less from set
+  conflicts would fit, but is not verified.
+- With `KMP_BLOCKTIME=200`, 1e7 parallel is again slower and noisier than
+  with runtime defaults (2.21 ms, spread 25%, vs 1.84 ms, 0%), as in both
+  earlier runs.
+- With `KMP_BLOCKTIME=200`, parallel loops would already pay at 1e5 (13.5
+  us vs 49 us on 2026-09-28); the default threshold of 1e6 is tuned for
+  the runtime's default settings and leaves that on the table.
