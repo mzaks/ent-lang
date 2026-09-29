@@ -11,5 +11,5 @@ find_program(ECS_LIT lit
 
 add_custom_target(check-ecs
   COMMAND ${ECS_LIT} -sv ${CMAKE_CURRENT_BINARY_DIR}
-  DEPENDS ecs-opt
+  DEPENDS ecs-opt ecs-translate
   USES_TERMINAL)
