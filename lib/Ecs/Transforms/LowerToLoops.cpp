@@ -98,6 +98,7 @@ private:
 /// How entity loops are emitted.
 struct LoopOptions {
   bool parallelEntities;
+  int64_t parallelMinEntities;
 };
 
 } // namespace
@@ -145,8 +146,12 @@ static bool isEntityLocal(QueryOp query) {
 
 /// Emit the loop over the entities of `archetype` at the insertion point
 /// and call `emitBody` with the entity index, positioned inside the loop.
-/// Iterations of entity-local bodies are independent, so with
-/// `parallelEntities` the loop is an `scf.parallel`.
+///
+/// Iterations of entity-local bodies are independent, so the loop may be an
+/// `scf.parallel`, but a parallel loop only pays for its fork beyond some
+/// number of entities. An archetype whose capacity is below that threshold
+/// never gets a parallel loop; otherwise the count is checked at run time
+/// and the body is emitted twice, once per loop kind.
 static void
 emitEntityLoops(IRRewriter &rewriter, Location loc,
                 const WorldArchetype &archetype, WorldAccess &world,
@@ -155,16 +160,35 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
   Value count = world.count(archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  if (options.parallelEntities && entityLocal) {
+
+  auto emitSequential = [&] {
+    auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    emitBody(loop.getInductionVar(), loop.getBody());
+  };
+  auto emitParallel = [&] {
     auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                         ValueRange{count}, ValueRange{one});
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     emitBody(loop.getInductionVars().front(), loop.getBody());
-    return;
-  }
-  auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
-  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-  emitBody(loop.getInductionVar(), loop.getBody());
+  };
+
+  if (!options.parallelEntities || !entityLocal ||
+      archetype.capacity < options.parallelMinEntities)
+    return emitSequential();
+  if (options.parallelMinEntities <= 1)
+    return emitParallel();
+
+  Value threshold = arith::ConstantIndexOp::create(
+      rewriter, loc, options.parallelMinEntities);
+  Value large = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
+                                      count, threshold);
+  auto branch = scf::IfOp::create(rewriter, loc, large,
+                                  /*withElseRegion=*/true);
+  rewriter.setInsertionPointToStart(branch.thenBlock());
+  emitParallel();
+  rewriter.setInsertionPointToStart(branch.elseBlock());
+  emitSequential();
 }
 
 /// Clone a query's body at the insertion point. Its get/set ops still name
@@ -366,7 +390,7 @@ struct EcsLowerToLoops
     if (failed(layout))
       return signalPassFailure();
     MemRefType arenaType = getArenaType(module.getContext(), *layout);
-    LoopOptions options{parallelEntities};
+    LoopOptions options{parallelEntities, parallelMinEntities};
     SymbolTable symbols(module);
 
     // Schedules first: fusion reads the systems' bodies before they are

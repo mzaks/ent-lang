@@ -21,8 +21,11 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
       components; `ecs.get` and `ecs.set` become `memref.load` and
       `memref.store` on the matched archetype's column.
     - With `parallel-entities`, a query whose body only computes and
-      touches its own entity becomes an `scf.parallel` instead, ready for
-      `--convert-scf-to-openmp`.
+      touches its own entity may become an `scf.parallel`, ready for
+      `--convert-scf-to-openmp`. An archetype whose capacity is below
+      `parallel-min-entities` always gets a sequential loop; otherwise the
+      count is checked at run time and the parallel loop runs only from
+      that many entities on.
     - With `fuse-systems`, every maximal sequence of runs of systems
       without other effects is inlined into the schedule as one loop per
       archetype, holding every matching query body in program order.
@@ -41,6 +44,11 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
     Option<"parallelEntities", "parallel-entities", "bool",
            /*default=*/"false",
            "Emit entity loops as scf.parallel where the body is entity-local">,
+    Option<"parallelMinEntities", "parallel-min-entities", "int64_t",
+           /*default=*/"1000000",
+           "Entity count from which a parallel entity loop runs; on an M4 "
+           "Max with default libomp the fused example pays off between 1e5 "
+           "and 1e6 entities">,
     Option<"fuseSystems", "fuse-systems", "bool", /*default=*/"false",
            "Inline the systems of each schedule and fuse their queries into "
            "one loop per archetype">,

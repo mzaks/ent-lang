@@ -82,6 +82,9 @@ def main():
                         help="duration of one timed repetition")
     parser.add_argument("--blocktime",
                         help="KMP_BLOCKTIME for the OpenMP runtime")
+    parser.add_argument("--parallel-min-entities", type=int,
+                        help="threshold for parallel entity loops (the "
+                             "compiler's default applies otherwise)")
     parser.add_argument("--sizes", default="1000,10000,100000,1000000,10000000")
     parser.add_argument("--variants", default=",".join(VARIANTS))
     parser.add_argument("--csv")
@@ -90,7 +93,15 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     generate_header()
     names = args.variants.split(",")
-    exes = {name: build(name, VARIANTS[name]) for name in names}
+    variants = dict(VARIANTS)
+    if args.parallel_min_entities is not None:
+        # Append the threshold to every lowering that uses entity loops.
+        for name, passes in variants.items():
+            if passes and "parallel-entities=1" in passes[-1]:
+                variants[name] = passes[:-1] + [
+                    passes[-1] + f" parallel-min-entities="
+                                 f"{args.parallel_min_entities}"]
+    exes = {name: build(name, variants[name]) for name in names}
     sizes = [int(s) for s in args.sizes.split(",")]
     env = dict(os.environ, OMP_NUM_THREADS=str(args.threads))
     if args.blocktime is not None:
