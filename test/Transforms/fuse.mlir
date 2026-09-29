@@ -50,15 +50,14 @@ ecs.system @logs() {
 // 1152, A.V.dx at 6272, B.P.x at 11392.
 // CHECK-LABEL: func.func @frame(
 // CHECK-SAME: %[[K:[^:]*]]: f32, %[[D:[^:]*]]: f32, %[[W:[^:]*]]: memref<16384xi8>)
-// CHECK:      %[[NA:.*]] = arith.index_cast
 // CHECK:      arith.constant 6272
 // CHECK-NEXT: %[[ADX:.*]] = memref.view %[[W]]
 // CHECK:      arith.constant 1152
 // CHECK-NEXT: %[[AX:.*]] = memref.view %[[W]]
-// CHECK:      %[[NB:.*]] = arith.index_cast
 // CHECK:      arith.constant 11392
 // CHECK-NEXT: %[[BX:.*]] = memref.view %[[W]]
 // CHECK:      %[[TWICE:.*]] = arith.addf %[[K]], %[[K]]
+// CHECK:      %[[NA:.*]] = arith.index_cast
 // CHECK:      scf.for %[[I:.*]] = %{{.*}} to %[[NA]]
 // CHECK-NEXT:   %[[DX:.*]] = memref.load %[[ADX]][%[[I]]]
 // CHECK-NEXT:   %[[DX2:.*]] = arith.addf %[[DX]], %[[TWICE]]
@@ -71,6 +70,7 @@ ecs.system @logs() {
 // CHECK-NEXT:   arith.addf %{{.*}}, %[[D]]
 // CHECK-NEXT:   memref.store %{{.*}}, %[[AX]][%[[I]]]
 // CHECK-NEXT: }
+// CHECK:      %[[NB:.*]] = arith.index_cast
 // CHECK:      scf.for %[[J:.*]] = %{{.*}} to %[[NB]]
 // CHECK-NEXT:   memref.load %[[BX]][%[[J]]]
 // CHECK-NEXT:   arith.addf %{{.*}}, %[[D]]
@@ -91,18 +91,16 @@ ecs.schedule @frame(%k: f32, %d: f32) {
 // matches both archetypes, so each sequence is two loops (A, then B).
 // CHECK-LABEL: func.func @barriers(
 // CHECK-SAME: %{{[^:]*}}: f32, %[[W:[^:]*]]: memref<16384xi8>)
-// CHECK:      %[[NA:.*]] = arith.index_cast
-// CHECK:      %[[NB:.*]] = arith.index_cast
-// CHECK:      scf.for {{.*}} to %[[NA]]
-// CHECK:      scf.for {{.*}} to %[[NB]]
+// CHECK:      scf.for
+// CHECK:      scf.for
 // CHECK:      }
 // CHECK-NEXT: call @logs(%[[W]])
-// CHECK:      scf.for {{.*}} to %[[NA]]
-// CHECK:      scf.for {{.*}} to %[[NB]]
+// CHECK:      scf.for
+// CHECK:      scf.for
 // CHECK:      }
 // CHECK-NEXT: call @log()
-// CHECK:      scf.for {{.*}} to %[[NA]]
-// CHECK:      scf.for {{.*}} to %[[NB]]
+// CHECK:      scf.for
+// CHECK:      scf.for
 // CHECK:      }
 // CHECK-NEXT: return
 ecs.schedule @barriers(%d: f32) {

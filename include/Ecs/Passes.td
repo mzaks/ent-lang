@@ -55,6 +55,7 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
   ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
+    "::mlir::cf::ControlFlowDialect",
     "::mlir::func::FuncDialect",
     "::mlir::memref::MemRefDialect",
     "::mlir::omp::OpenMPDialect",

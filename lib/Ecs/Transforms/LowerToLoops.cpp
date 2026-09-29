@@ -3,6 +3,7 @@
 #include "Ecs/Passes.h"
 #include "Ecs/World.h"
 
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -34,27 +35,35 @@ public:
 
   Value getArena() const { return arena; }
 
-  /// The number of entities in `archetype`, as an index.
-  Value count(const WorldArchetype &archetype) {
-    Value &value = counts[archetype.index];
-    if (!value)
-      value = atEntry([&](Location loc) {
-        if (!countsView) {
-          auto countsType = MemRefType::get(
-              {static_cast<int64_t>(layout.archetypes.size())},
-              IntegerType::get(rewriter.getContext(), 64));
-          Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-          countsView = memref::ViewOp::create(rewriter, loc, countsType, arena,
-                                              zero, ValueRange{});
-        }
-        Value position =
-            arith::ConstantIndexOp::create(rewriter, loc, archetype.index);
-        Value count = memref::LoadOp::create(rewriter, loc, countsView,
-                                             ValueRange{position});
-        return arith::IndexCastOp::create(rewriter, loc,
-                                          rewriter.getIndexType(), count);
-      });
-    return value;
+  /// The number of entities in `archetype`, as an index, loaded at the
+  /// insertion point: spawns and despawns change it, so it is not cached.
+  Value count(Location loc, const WorldArchetype &archetype) {
+    Value position =
+        arith::ConstantIndexOp::create(rewriter, loc, archetype.index);
+    Value count = memref::LoadOp::create(rewriter, loc, getCounts(),
+                                         ValueRange{position});
+    return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                      count);
+  }
+
+  /// Store `count` (an index) as the number of entities in `archetype`.
+  void setCount(Location loc, const WorldArchetype &archetype, Value count) {
+    Value position =
+        arith::ConstantIndexOp::create(rewriter, loc, archetype.index);
+    Value value = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getI64Type(), count);
+    memref::StoreOp::create(rewriter, loc, value, getCounts(),
+                            ValueRange{position});
+  }
+
+  /// The pending list of rows to despawn from `archetype`, and a
+  /// one-element view of their number.
+  Value pendingList(const WorldArchetype &archetype) {
+    return view(archetype.pendingOffset, archetype.capacity,
+                rewriter.getI32Type());
+  }
+  Value pendingCount(const WorldArchetype &archetype) {
+    return view(archetype.pendingCountOffset, 1, rewriter.getI64Type());
   }
 
   /// A statically shaped view of one column of `archetype`.
@@ -90,6 +99,32 @@ public:
   }
 
 private:
+  Value getCounts() {
+    if (!countsView)
+      countsView = atEntry([&](Location loc) {
+        auto countsType = MemRefType::get(
+            {static_cast<int64_t>(layout.archetypes.size())},
+            IntegerType::get(rewriter.getContext(), 64));
+        Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        return memref::ViewOp::create(rewriter, loc, countsType, arena, zero,
+                                      ValueRange{});
+      });
+    return countsView;
+  }
+
+  /// A view of `size` elements of `type` at `offset`, created once.
+  Value view(uint64_t offset, int64_t size, Type type) {
+    Value &value = columns[{~1u, offset}];
+    if (!value)
+      value = atEntry([&](Location loc) {
+        Value start = arith::ConstantIndexOp::create(rewriter, loc, offset);
+        return memref::ViewOp::create(rewriter, loc,
+                                      MemRefType::get({size}, type), arena,
+                                      start, ValueRange{});
+      });
+    return value;
+  }
+
   template <typename Build>
   Value atEntry(Build build) {
     OpBuilder::InsertionGuard guard(rewriter);
@@ -107,7 +142,6 @@ private:
   Value arena;
   Operation *lastCreated = nullptr;
   Value countsView;
-  llvm::DenseMap<unsigned, Value> counts;
   llvm::DenseMap<std::pair<unsigned, uint64_t>, Value> columns;
 };
 
@@ -178,7 +212,7 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
                 const WorldArchetype &archetype, WorldAccess &world,
                 const LoopOptions &options, bool entityLocal,
                 function_ref<void(Value entity, Block *loopBody)> emitBody) {
-  Value count = world.count(archetype);
+  Value count = world.count(loc, archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
 
   if (archetype.capacity == 1) {
@@ -313,7 +347,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
   SmallVector<Operation *> accesses;
   for (Operation *root : roots)
     root->walk([&](Operation *op) {
-      if (isa<GetOp, SetOp, AddOp, RemoveOp>(op))
+      if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp>(op))
         accesses.push_back(op);
     });
   for (Operation *op : accesses) {
@@ -340,10 +374,27 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         store(loc, value, column(component, cast<StringAttr>(field)));
       setPresence(loc, component, 1);
       rewriter.eraseOp(add);
-    } else {
-      auto remove = cast<RemoveOp>(op);
+    } else if (auto remove = dyn_cast<RemoveOp>(op)) {
       setPresence(loc, remove.getComponentAttr().getAttr(), 0);
       rewriter.eraseOp(remove);
+    } else {
+      // Despawn is deferred: list the row; the query's end removes it. A
+      // body with a despawn never runs masked (it is not speculatable).
+      assert(!mask && "despawn in a masked body");
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value counter = world.pendingCount(archetype);
+      Value pending =
+          memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero});
+      Value slot = arith::IndexCastOp::create(rewriter, loc,
+                                              rewriter.getIndexType(), pending);
+      Value row = arith::IndexCastOp::create(rewriter, loc,
+                                             rewriter.getI32Type(), entity);
+      memref::StoreOp::create(rewriter, loc, row, world.pendingList(archetype),
+                              ValueRange{slot});
+      Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
+      Value next = arith::AddIOp::create(rewriter, loc, pending, one);
+      memref::StoreOp::create(rewriter, loc, next, counter, ValueRange{zero});
+      rewriter.eraseOp(op);
     }
   }
 }
@@ -388,6 +439,96 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   lowerAccesses(rewriter, roots, archetype, world, entity, mask);
 }
 
+/// Remove the rows listed as pending for `archetype`, at the insertion
+/// point: last listed first, each by moving the archetype's last row into
+/// it (swap-remove). The list is in ascending row order, since the query
+/// visited rows in order, so no listed row is moved before it is removed.
+static void applyDespawns(IRRewriter &rewriter, Location loc,
+                          const WorldArchetype &archetype, WorldAccess &world) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value counter = world.pendingCount(archetype);
+  Value pending = arith::IndexCastOp::create(
+      rewriter, loc, rewriter.getIndexType(),
+      memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}));
+  auto loop = scf::ForOp::create(rewriter, loc, zero, pending, one);
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    Value reversed = arith::SubIOp::create(
+        rewriter, loc,
+        arith::SubIOp::create(rewriter, loc, pending, one),
+        loop.getInductionVar());
+    Value row = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(),
+        memref::LoadOp::create(rewriter, loc, world.pendingList(archetype),
+                               ValueRange{reversed}));
+    Value last = arith::SubIOp::create(rewriter, loc,
+                                       world.count(loc, archetype), one);
+    Value moves = arith::CmpIOp::create(rewriter, loc,
+                                        arith::CmpIPredicate::ne, row, last);
+    auto move = scf::IfOp::create(rewriter, loc, moves);
+    rewriter.setInsertionPointToStart(move.thenBlock());
+    for (const WorldColumn &column : archetype.columns) {
+      Value view = world.column(archetype, column.component, column.field);
+      Value value =
+          memref::LoadOp::create(rewriter, loc, view, ValueRange{last});
+      memref::StoreOp::create(rewriter, loc, value, view, ValueRange{row});
+    }
+    rewriter.setInsertionPointAfter(move);
+    world.setCount(loc, archetype, last);
+  }
+  rewriter.setInsertionPointAfter(loop);
+  Value none = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+  memref::StoreOp::create(rewriter, loc, none, counter, ValueRange{zero});
+}
+
+/// Lower every ecs.spawn in `func`: check the capacity, write the values
+/// into the next free row (optional components absent), bump the count.
+static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
+                        const WorldLayout &layout, WorldAccess &world) {
+  SmallVector<SpawnOp> spawns;
+  func.walk([&](SpawnOp spawn) { spawns.push_back(spawn); });
+  for (SpawnOp spawn : spawns) {
+    const WorldArchetype *archetype = nullptr;
+    for (const WorldArchetype &entry : layout.archetypes)
+      if (ArchetypeOp(entry.op).getSymNameAttr() ==
+          spawn.getArchetypeAttr().getAttr())
+        archetype = &entry;
+    Location loc = spawn.getLoc();
+    rewriter.setInsertionPoint(spawn);
+    Value row = world.count(loc, *archetype);
+    Value capacity =
+        arith::ConstantIndexOp::create(rewriter, loc, archetype->capacity);
+    Value fits = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                       row, capacity);
+    cf::AssertOp::create(
+        rewriter, loc, fits,
+        rewriter.getStringAttr("ecs.spawn exceeds the capacity of @" +
+                               spawn.getArchetypeAttr().getValue()));
+    ArchetypeOp archetypeOp = archetype->op;
+    auto value = spawn.getValues().begin();
+    for (const WorldColumn &column : archetype->columns) {
+      auto component = FlatSymbolRefAttr::get(column.component);
+      Value stored;
+      if (column.field.getValue().empty())
+        stored = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
+      else if (!archetypeOp.isOptional(component))
+        stored = *value++;
+      else
+        continue; // an absent optional component's fields stay as they are
+      memref::StoreOp::create(
+          rewriter, loc, stored,
+          world.column(*archetype, column.component, column.field),
+          ValueRange{row});
+    }
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    world.setCount(loc, *archetype,
+                   arith::AddIOp::create(rewriter, loc, row, one));
+    rewriter.eraseOp(spawn);
+  }
+}
+
 /// Replace a query by one loop per matching archetype. The body is cloned
 /// into each loop, and every ref access becomes a load or store at the
 /// loop's index in the column of the ref's component and field.
@@ -396,6 +537,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const LoopOptions &options) {
   Location loc = query.getLoc();
   bool entityLocal = isEntityLocal(query);
+  bool despawns =
+      query.walk([](DespawnOp) { return WalkResult::interrupt(); })
+          .wasInterrupted();
   bool matched = false;
   for (const WorldArchetype &archetype : layout.archetypes) {
     if (!matches(archetype, query))
@@ -409,6 +553,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                         entity);
         });
     hoistResourceReads(rewriter, loops, world);
+    if (despawns) {
+      rewriter.setInsertionPointAfter(loops);
+      applyDespawns(rewriter, loc, archetype, world);
+    }
   }
 
   // The set of archetypes is closed, so a query that matches none of them
@@ -498,8 +646,14 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     if (auto run = dyn_cast<RunOp>(op)) {
       auto system = symbols.lookup<SystemOp>(run.getSystem());
+      // Resource writes and structural changes both end a sequence.
       bool writesResource =
-          system.walk([](WriteOp) { return WalkResult::interrupt(); })
+          system
+              .walk([](Operation *op) {
+                return isa<WriteOp, SpawnOp, DespawnOp>(op)
+                           ? WalkResult::interrupt()
+                           : WalkResult::advance();
+              })
               .wasInterrupted();
       if (!writesResource && !computeAccess(system, archetypes).isOpaque()) {
         sequence.push_back(run);
@@ -596,6 +750,7 @@ struct EcsLowerToLoops
       func.walk([&](QueryOp query) { queries.push_back(query); });
       for (QueryOp query : queries)
         lowerQuery(rewriter, query, *layout, world, options);
+      lowerSpawns(rewriter, func, *layout, world);
       lowerResourceAccesses(rewriter, func, world);
     }
 

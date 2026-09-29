@@ -16,13 +16,11 @@ ecs.archetype @OnlyA (@A) capacity 1000
 
 // CHECK-LABEL: func.func private @scale(
 // CHECK-SAME: %[[K:[^:]*]]: f32, %[[W:[^:]*]]: memref<32768xi8>)
-// Counts and column views are created once, at the entry.
+// Views are created once, at the entry. Counts are loaded right before each
+// loop, since spawns and despawns change them.
 // CHECK:      %[[COUNTS:.*]] = memref.view %[[W]][%{{.*}}][] : memref<32768xi8> to memref<2xi64>
-// CHECK:      %[[N_AB_I64:.*]] = memref.load %[[COUNTS]][%{{.*}}] : memref<2xi64>
-// CHECK:      %[[N_AB:.*]] = arith.index_cast %[[N_AB_I64]] : i64 to index
 // CHECK:      %[[OFF_AB_A:.*]] = arith.constant 1152 : index
-// CHECK:      %[[AB_A:.*]] = memref.view %[[W]][%[[OFF_AB_A]]][] : memref<32768xi8> to memref<1000xf32>
-// CHECK:      %[[N_A:.*]] = arith.index_cast
+// CHECK-NEXT: %[[AB_A:.*]] = memref.view %[[W]][%[[OFF_AB_A]]][] : memref<32768xi8> to memref<1000xf32>
 // CHECK:      arith.constant 16512 : index
 // CHECK-NEXT: %[[A_A:.*]] = memref.view {{.*}} to memref<1000xf32>
 // CHECK:      arith.constant 6272 : index
@@ -31,11 +29,17 @@ ecs.archetype @OnlyA (@A) capacity 1000
 // CHECK-NEXT: %[[AB_B1:.*]] = memref.view {{.*}} to memref<1000xf32>
 ecs.system @scale(%k: f32) reads [@B] writes [@A] {
   // Matches both archetypes: one loop each, in declaration order.
-  // CHECK: scf.for %[[I:.*]] = %{{.*}} to %[[N_AB]]
+  // CHECK:      %[[P_AB:.*]] = arith.constant 0 : index
+  // CHECK-NEXT: %[[N_AB_I64:.*]] = memref.load %[[COUNTS]][%[[P_AB]]] : memref<2xi64>
+  // CHECK-NEXT: %[[N_AB:.*]] = arith.index_cast %[[N_AB_I64]] : i64 to index
+  // CHECK:      scf.for %[[I:.*]] = %{{.*}} to %[[N_AB]]
   // CHECK:   %[[X:.*]] = memref.load %[[AB_A]][%[[I]]]
   // CHECK:   %[[Y:.*]] = arith.mulf %[[X]], %[[K]]
   // CHECK:   memref.store %[[Y]], %[[AB_A]][%[[I]]]
-  // CHECK: scf.for %[[J:.*]] = %{{.*}} to %[[N_A]]
+  // CHECK:      %[[P_A:.*]] = arith.constant 1 : index
+  // CHECK-NEXT: %[[N_A_I64:.*]] = memref.load %[[COUNTS]][%[[P_A]]] : memref<2xi64>
+  // CHECK-NEXT: %[[N_A:.*]] = arith.index_cast %[[N_A_I64]] : i64 to index
+  // CHECK:      scf.for %[[J:.*]] = %{{.*}} to %[[N_A]]
   // CHECK:   memref.load %[[A_A]][%[[J]]]
   // CHECK:   memref.store %{{.*}}, %[[A_A]][%[[J]]]
   ecs.query (%a: !ecs.ref<@A, mut>) {
@@ -44,7 +48,9 @@ ecs.system @scale(%k: f32) reads [@B] writes [@A] {
     ecs.set %a "a", %y : !ecs.ref<@A, mut>, f32
   }
   // Matches only @AB; accesses nested in regions are lowered as well.
-  // CHECK: scf.for %[[I:.*]] = %{{.*}} to %[[N_AB]]
+  // CHECK:      memref.load %[[COUNTS]]
+  // CHECK-NEXT: %[[N_AB2:.*]] = arith.index_cast
+  // CHECK:      scf.for %[[I:.*]] = %{{.*}} to %[[N_AB2]]
   // CHECK:   memref.load %[[AB_B0]][%[[I]]]
   // CHECK:   scf.if
   // CHECK:     memref.load %[[AB_B1]][%[[I]]]

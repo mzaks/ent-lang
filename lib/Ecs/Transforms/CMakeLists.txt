@@ -10,6 +10,7 @@ add_mlir_library(MLIREcsTransforms
   LINK_LIBS PUBLIC
   MLIREcs
   MLIRArithDialect
+  MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIROpenMPDialect
