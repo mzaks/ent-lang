@@ -1,5 +1,6 @@
 #include "Ecs/World.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
@@ -83,6 +84,25 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     }
     layout.resources.push_back(std::move(entry));
   }
+  // Archetypes that some query despawns from need a pending list and a
+  // counter for the rows to remove when that query ends.
+  llvm::SmallPtrSet<Operation *, 4> despawned;
+  module.walk([&](DespawnOp despawn) {
+    auto query = despawn->getParentOfType<QueryOp>();
+    for (WorldArchetype &archetype : layout.archetypes) {
+      ArchetypeOp archetypeOp = archetype.op;
+      if (llvm::all_of(query.getBody().getArgumentTypes(), [&](Type type) {
+            return archetypeOp.contains(cast<RefType>(type).getComponent());
+          }))
+        despawned.insert(archetypeOp);
+    }
+  });
+  for (WorldArchetype &archetype : layout.archetypes)
+    if (despawned.contains(archetype.op)) {
+      end = llvm::alignTo(end, 8);
+      archetype.pendingCountOffset = end;
+      end += 8;
+    }
   layout.headerBytes = end;
 
   for (WorldArchetype &archetype : layout.archetypes) {
@@ -111,6 +131,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
              IntegerType::get(module.getContext(), 8), offset});
         end = offset + archetype.capacity;
       }
+    }
+    if (despawned.contains(archetype.op)) {
+      archetype.pendingOffset =
+          llvm::alignTo(end, kColumnAlignment) + kStagger;
+      end = archetype.pendingOffset + 4 * archetype.capacity;
     }
   }
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);

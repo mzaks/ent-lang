@@ -23,6 +23,13 @@ struct WorldArchetype {
   /// Position of the archetype's entity count in the counts array.
   unsigned index;
   SmallVector<WorldColumn> columns;
+  /// For an archetype some query despawns from: where the rows to remove at
+  /// the end of such a query are listed (one i32 per slot of capacity), and
+  /// where their number is kept. Zero if nothing despawns from it.
+  uint64_t pendingOffset = 0;
+  uint64_t pendingCountOffset = 0;
+
+  bool hasPending() const { return pendingOffset != 0; }
 
   /// The column of `component`.`field`, or null.
   const WorldColumn *find(StringAttr component, StringAttr field) const;
@@ -56,7 +63,9 @@ struct WorldResource {
 /// pushed 17 cache lines beyond the end of the previous column: columns
 /// laid out back to back from a page-aligned base would otherwise tend to
 /// start at the same cache set, which costs a single core 7-8% on the
-/// example (see bench/RESULTS.md).
+/// example (see bench/RESULTS.md). An archetype that entities are despawned
+/// from also gets a pending counter after the resources and a pending list
+/// after its columns.
 struct WorldLayout {
   static constexpr uint64_t kArenaAlignment = 16384;
   static constexpr uint64_t kColumnAlignment = 64;
