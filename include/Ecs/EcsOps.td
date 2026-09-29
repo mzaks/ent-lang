@@ -100,8 +100,9 @@ def Ecs_SystemOp : Ecs_Op<"system", [
       }
     }
     ```
-    `writes` implies read access. Entry block arguments are the system's
-    per-run parameters.
+    `writes` implies read access. `writes` may also name archetypes: the
+    system changes their set of entities (`ecs.spawn`, `ecs.despawn`).
+    Entry block arguments are the system's per-run parameters.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        SymbolRefArrayAttr:$reads,
@@ -238,6 +239,42 @@ def Ecs_RemoveOp : Ecs_Op<"remove", [
   }];
   let arguments = (ins FlatSymbolRefAttr:$component);
   let assemblyFormat = "$component attr-dict";
+  let hasVerifier = 1;
+}
+
+def Ecs_SpawnOp : Ecs_Op<"spawn", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Create an entity in an archetype";
+  let description = [{
+    ```mlir
+    ecs.spawn @Bullet(%x, %y, %dx, %dy, %seconds) : f32, f32, f32, f32, f32
+    ```
+    Appends an entity to the archetype. The values initialise every field
+    of the archetype's non-optional components, in the order of the
+    components and then of their fields; optional components start absent.
+    Spawning beyond the archetype's capacity is an error at run time. The
+    system must declare the archetype in `writes`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$archetype,
+                       Variadic<AnyType>:$values);
+  let assemblyFormat =
+      "$archetype `(` $values `)` attr-dict (`:` type($values)^)?";
+  let hasVerifier = 1;
+}
+
+def Ecs_DespawnOp : Ecs_Op<"despawn", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Remove the visited entity from the world";
+  let description = [{
+    ```mlir
+    ecs.despawn
+    ```
+    Removes the entity the enclosing query visits. The removal is deferred
+    to the end of the query: the query still visits every entity it would
+    have visited, and later systems no longer see the removed ones. The
+    system must declare every archetype the query matches in `writes`.
+  }];
+  let assemblyFormat = "attr-dict";
   let hasVerifier = 1;
 }
 

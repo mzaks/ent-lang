@@ -39,6 +39,9 @@
 // MISC-LABEL: ecs.system @stun(%{{.*}}: f32) reads [@Tag] writes [@Stunned] {
 // MISC:          ecs.add @Stunned(%{{.*}}) : f32
 // MISC:          ecs.remove @Stunned
+// MISC-LABEL: ecs.system @fire(%{{.*}}: f32) reads [@Tag] writes [@Character] {
+// MISC:          ecs.spawn @Character()
+// MISC:          ecs.despawn
 ecs.component @Tag ()
 ecs.component @Named ("with space": i32, idx: index)
 ecs.system @noop() {
@@ -68,5 +71,11 @@ ecs.system @stun(%s: f32) reads [@Tag] writes [@Stunned] {
   }
   ecs.query (%st: !ecs.ref<@Stunned, mut>) {
     ecs.remove @Stunned
+  }
+}
+ecs.system @fire(%s: f32) reads [@Tag] writes [@Character] {
+  ecs.spawn @Character()
+  ecs.query (%t: !ecs.ref<@Tag>) {
+    ecs.despawn
   }
 }

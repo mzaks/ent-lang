@@ -17,7 +17,7 @@ ecs.system @s() reads [@P] writes [@P] {
 
 // -----
 
-// expected-error @+1 {{declares access to unknown component or resource @Nope}}
+// expected-error @+1 {{declares access to unknown component, resource or archetype @Nope}}
 ecs.system @s() reads [@Nope] {
 }
 
@@ -333,4 +333,62 @@ ecs.system @s(%v: i32) reads [@P] writes [@S] {
     // expected-error @+1 {{value #0 has type 'i32', but field 't' has type 'f32'}}
     ecs.add @S(%v) : i32
   }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+// expected-error @+1 {{lists archetype @A in 'reads'; archetypes are declared in 'writes', by systems that spawn or despawn their entities}}
+ecs.system @s() reads [@A] {
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+ecs.system @s(%v: f32) {
+  // expected-error @+1 {{spawns into @A but system @s does not declare it in 'writes'}}
+  ecs.spawn @A(%v) : f32
+}
+
+// -----
+
+ecs.component @P (x: f32, y: i32)
+ecs.component @S (t: f32)
+ecs.archetype @A (@P, optional @S) capacity 10
+ecs.system @s(%v: f32) writes [@A] {
+  // Optional components start absent, so only P's fields are given.
+  // expected-error @+1 {{value #1 has type 'f32', but field P.y has type 'i32'}}
+  ecs.spawn @A(%v, %v) : f32, f32
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+ecs.system @s() writes [@A] {
+  // expected-error @+1 {{initialises 0 fields, but the non-optional components of @A have 1}}
+  ecs.spawn @A()
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+ecs.archetype @B (@P) capacity 10
+ecs.system @s() reads [@P] writes [@A] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{despawns entities of @B but system @s does not declare it in 'writes'}}
+    ecs.despawn
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+ecs.system @s() writes [@A] {
+  // expected-error @+1 {{must be inside an 'ecs.query'}}
+  ecs.despawn
 }

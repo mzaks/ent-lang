@@ -331,10 +331,15 @@ LogicalResult SystemOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     for (Attribute attr : list) {
       auto ref = cast<FlatSymbolRefAttr>(attr);
       Operation *target = symbolTable.lookupNearestSymbolFrom(*this, ref);
-      if (!isa_and_nonnull<ComponentOp, ResourceOp>(target))
-        return emitOpError("declares access to unknown component or "
-                           "resource ")
+      if (!isa_and_nonnull<ComponentOp, ResourceOp, ArchetypeOp>(target))
+        return emitOpError("declares access to unknown component, resource "
+                           "or archetype ")
                << ref;
+      if (isa<ArchetypeOp>(target) && list == getReads())
+        return emitOpError("lists archetype ")
+               << ref
+               << " in 'reads'; archetypes are declared in 'writes', by "
+                  "systems that spawn or despawn their entities";
     }
   return success();
 }
@@ -550,6 +555,74 @@ LogicalResult RemoveOp::verify() { return verifyInsideQuery(*this); }
 
 LogicalResult RemoveOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return verifyPresenceChange(symbolTable, *this, getComponentAttr());
+}
+
+//===----------------------------------------------------------------------===//
+// SpawnOp / DespawnOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult SpawnOp::verify() {
+  if (!(*this)->getParentOfType<SystemOp>())
+    return emitOpError("must be inside an 'ecs.system'");
+  return success();
+}
+
+LogicalResult SpawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto archetype =
+      symbolTable.lookupNearestSymbolFrom<ArchetypeOp>(*this, getArchetypeAttr());
+  if (!archetype)
+    return emitOpError("references unknown archetype ") << getArchetypeAttr();
+  auto system = (*this)->getParentOfType<SystemOp>();
+  if (!system.canWrite(getArchetypeAttr()))
+    return emitOpError("spawns into ")
+           << getArchetypeAttr() << " but system @" << system.getSymName()
+           << " does not declare it in 'writes'";
+
+  // Every field of every non-optional component, in order.
+  SmallVector<std::pair<std::string, Type>> fields;
+  for (Attribute attr : archetype.getComponents()) {
+    auto ref = cast<FlatSymbolRefAttr>(attr);
+    if (archetype.isOptional(ref))
+      continue;
+    ComponentOp component = lookupComponent(symbolTable, *this, ref);
+    for (auto [name, type] :
+         llvm::zip(component.getFieldNames(), component.getFieldTypes()))
+      fields.push_back({(ref.getValue() + "." +
+                         cast<StringAttr>(name).getValue())
+                            .str(),
+                        cast<TypeAttr>(type).getValue()});
+  }
+  if (fields.size() != getValues().size())
+    return emitOpError("initialises ")
+           << getValues().size() << " fields, but the non-optional "
+           << "components of " << getArchetypeAttr() << " have "
+           << fields.size();
+  for (auto [index, value, field] : llvm::enumerate(getValues(), fields))
+    if (value.getType() != field.second)
+      return emitOpError("value #")
+             << index << " has type " << value.getType() << ", but field "
+             << field.first << " has type " << field.second;
+  return success();
+}
+
+LogicalResult DespawnOp::verify() { return verifyInsideQuery(*this); }
+
+LogicalResult DespawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto system = (*this)->getParentOfType<SystemOp>();
+  auto query = (*this)->getParentOfType<QueryOp>();
+  auto module = (*this)->getParentOfType<ModuleOp>();
+  for (ArchetypeOp archetype : module.getOps<ArchetypeOp>()) {
+    bool matches = llvm::all_of(
+        query.getBody().getArgumentTypes(), [&](Type type) {
+          return archetype.contains(cast<RefType>(type).getComponent());
+        });
+    auto ref = FlatSymbolRefAttr::get(archetype.getSymNameAttr());
+    if (matches && !system.canWrite(ref))
+      return emitOpError("despawns entities of ")
+             << ref << " but system @" << system.getSymName()
+             << " does not declare it in 'writes'";
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
