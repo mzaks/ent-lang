@@ -102,6 +102,15 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
             {componentName, cast<StringAttr>(name), type, offset});
         end = offset + bytes * archetype.capacity;
       }
+      // An optional component also gets a presence byte per entity, as a
+      // column with an empty field name.
+      if (archetype.op.isOptional(cast<FlatSymbolRefAttr>(attr))) {
+        uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+        archetype.columns.push_back(
+            {componentName, StringAttr::get(module.getContext(), ""),
+             IntegerType::get(module.getContext(), 8), offset});
+        end = offset + archetype.capacity;
+      }
     }
   }
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);

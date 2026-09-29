@@ -10,6 +10,7 @@ namespace mlir::ecs {
 /// One field of one component in one archetype's table.
 struct WorldColumn {
   StringAttr component;
+  /// Empty for the presence byte of an optional component.
   StringAttr field;
   Type type;
   /// Byte offset of the column's first element in the world arena.
@@ -49,12 +50,13 @@ struct WorldResource {
 /// The arena starts with one i64 entity count per archetype, in declaration
 /// order. Resources follow, each starting on a cache line, with naturally
 /// aligned fields. Columns follow, one per field, ordered by archetype,
-/// then by the archetype's components, then by the component's fields.
-/// Each column
-/// starts at a 64-byte boundary, pushed 17 cache lines beyond the end of
-/// the previous column: columns laid out back to back from a page-aligned
-/// base would otherwise tend to start at the same cache set, which costs a
-/// single core 7-8% on the example (see bench/RESULTS.md).
+/// then by the archetype's components, then by the component's fields; an
+/// optional component's fields are followed by its presence column (one
+/// i8 per entity, 1 if present). Each column starts at a 64-byte boundary,
+/// pushed 17 cache lines beyond the end of the previous column: columns
+/// laid out back to back from a page-aligned base would otherwise tend to
+/// start at the same cache set, which costs a single core 7-8% on the
+/// example (see bench/RESULTS.md).
 struct WorldLayout {
   static constexpr uint64_t kArenaAlignment = 16384;
   static constexpr uint64_t kColumnAlignment = 64;

@@ -105,22 +105,38 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "static inline int64_t ecs_{0}_count(const ecs_world *world) {{\n"
         "  return ((const int64_t *)world)[{1}];\n}\n",
         name, archetype.index);
+    // Entities that come into range start without optional components.
+    std::string clearPresence;
+    for (const WorldColumn &column : archetype.columns)
+      if (column.field.getValue().empty())
+        clearPresence += llvm::formatv(
+            "    memset((char *)world + {0} + old, 0, (size_t)(n - old));\n",
+            column.offset);
+    os << "// Returns false and leaves the count unchanged if n is out of "
+          "range.\n";
+    if (!clearPresence.empty())
+      os << "// Entities that come into range have no optional components.\n";
     os << llvm::formatv(
-        "// Returns false and leaves the count unchanged if n is out of "
-        "range.\n"
         "static inline bool ecs_{0}_set_count(ecs_world *world, int64_t n) "
         "{{\n"
-        "  if (n < 0 || n > ECS_{0}_CAPACITY)\n    return false;\n"
-        "  ((int64_t *)world)[{1}] = n;\n  return true;\n}\n",
-        name, archetype.index);
+        "  if (n < 0 || n > ECS_{0}_CAPACITY)\n    return false;\n",
+        name);
+    if (!clearPresence.empty())
+      os << llvm::formatv("  int64_t old = ((int64_t *)world)[{0}];\n"
+                          "  if (n > old) {{\n{1}  }\n",
+                          archetype.index, clearPresence);
+    os << llvm::formatv("  ((int64_t *)world)[{0}] = n;\n  return true;\n}\n",
+                        archetype.index);
     for (const WorldColumn &column : archetype.columns) {
-      std::string accessor =
-          llvm::formatv("ecs_{0}_{1}_{2}", name,
-                        toIdentifier(column.component.getValue()),
-                        toIdentifier(column.field.getValue()));
+      // An optional component's presence column has an empty field name.
+      bool isPresence = column.field.getValue().empty();
+      std::string accessor = llvm::formatv(
+          "ecs_{0}_{1}_{2}", name, toIdentifier(column.component.getValue()),
+          isPresence ? std::string("present")
+                     : toIdentifier(column.field.getValue()));
       if (failed(claim(archetypeOp, accessor)))
         return failure();
-      StringRef cType = getCType(column.type);
+      StringRef cType = isPresence ? "uint8_t" : getCType(column.type);
       os << llvm::formatv(
           "static inline {0} *{1}(ecs_world *world) {{\n"
           "  return ({0} *)((char *)world + {2});\n}\n",
