@@ -153,8 +153,10 @@ static bool matches(const WorldArchetype &archetype, QueryOp query) {
 /// components, so its iterations are independent of each other.
 static bool isEntityLocal(QueryOp query) {
   WalkResult result = query.getBody().walk([](Operation *op) {
-    // Resource reads are fine: no query writes a resource.
-    if (isa<GetOp, SetOp, ReadOp, YieldOp>(op) || !hasOwnEffects(op))
+    // Resource reads are fine: no query writes a resource. Adding and
+    // removing optional components only writes the entity's own row.
+    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, YieldOp>(op) ||
+        !hasOwnEffects(op))
       return WalkResult::advance();
     return WalkResult::interrupt();
   });
@@ -267,40 +269,123 @@ static void lowerResourceAccesses(IRRewriter &rewriter, func::FuncOp func,
   }
 }
 
-/// Clone a query's body at the insertion point. Its get/set ops still name
-/// the query's refs; `lowerAccesses` resolves them afterwards.
-static void cloneQueryBody(IRRewriter &rewriter, QueryOp query,
-                           IRMapping mapping) {
-  for (Operation &op : query.getBody().front().without_terminator())
-    rewriter.clone(op, mapping);
+/// True if every op in the query's body may also run for an entity that
+/// lacks the query's optional components, whose fields hold stale or
+/// uninitialised values: component and resource accesses (their slots
+/// always exist), `scf.if` as structure, and pure, speculatable ops. Integer
+/// division, for example, is not: it may be undefined on such values.
+static bool canRunForAbsentEntities(QueryOp query) {
+  WalkResult result = query.getBody().walk([](Operation *op) {
+    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, YieldOp, scf::IfOp,
+            scf::YieldOp>(op))
+      return WalkResult::advance();
+    if (op->getNumRegions() == 0 && isPure(op))
+      return WalkResult::advance();
+    return WalkResult::interrupt();
+  });
+  return !result.wasInterrupted();
 }
 
-/// Replace every get/set nested in `loopBody` by a load or store at
-/// `entity` in the column of the ref's component and field in `archetype`.
-static void lowerAccesses(IRRewriter &rewriter, Block *loopBody,
+/// Replace the get/set/add/remove ops nested in `roots` by loads and stores
+/// at `entity` in the columns of `archetype`. With a `mask`, every store
+/// keeps the old value where the mask is false: the body ran for an entity
+/// it does not apply to.
+static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                           const WorldArchetype &archetype, WorldAccess &world,
-                          Value entity) {
-  auto column = [&](Value ref, StringAttr field) {
-    FlatSymbolRefAttr component = cast<RefType>(ref.getType()).getComponent();
-    return world.column(archetype, component.getAttr(), field);
+                          Value entity, Value mask) {
+  auto column = [&](StringAttr component, StringAttr field) {
+    return world.column(archetype, component, field);
   };
+  auto store = [&](Location loc, Value value, Value memref) {
+    if (mask) {
+      Value old = memref::LoadOp::create(rewriter, loc, memref,
+                                         ValueRange{entity});
+      value = arith::SelectOp::create(rewriter, loc, mask, value, old);
+    }
+    memref::StoreOp::create(rewriter, loc, value, memref, ValueRange{entity});
+  };
+  auto setPresence = [&](Location loc, StringAttr component, int present) {
+    Value presence = column(component, rewriter.getStringAttr(""));
+    Value value = arith::ConstantIntOp::create(rewriter, loc, present, 8);
+    store(loc, value, presence);
+  };
+
   SmallVector<Operation *> accesses;
-  loopBody->walk([&](Operation *op) {
-    if (isa<GetOp, SetOp>(op))
-      accesses.push_back(op);
-  });
+  for (Operation *root : roots)
+    root->walk([&](Operation *op) {
+      if (isa<GetOp, SetOp, AddOp, RemoveOp>(op))
+        accesses.push_back(op);
+    });
   for (Operation *op : accesses) {
     rewriter.setInsertionPoint(op);
+    Location loc = op->getLoc();
     if (auto get = dyn_cast<GetOp>(op)) {
+      FlatSymbolRefAttr component =
+          cast<RefType>(get.getRef().getType()).getComponent();
       rewriter.replaceOpWithNewOp<memref::LoadOp>(
-          get, column(get.getRef(), get.getFieldAttr()), ValueRange{entity});
-    } else {
-      auto set = cast<SetOp>(op);
-      rewriter.replaceOpWithNewOp<memref::StoreOp>(
-          set, set.getValue(), column(set.getRef(), set.getFieldAttr()),
+          get, column(component.getAttr(), get.getFieldAttr()),
           ValueRange{entity});
+    } else if (auto set = dyn_cast<SetOp>(op)) {
+      FlatSymbolRefAttr component =
+          cast<RefType>(set.getRef().getType()).getComponent();
+      store(loc, set.getValue(),
+            column(component.getAttr(), set.getFieldAttr()));
+      rewriter.eraseOp(set);
+    } else if (auto add = dyn_cast<AddOp>(op)) {
+      StringAttr component = add.getComponentAttr().getAttr();
+      auto componentOp = SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
+          add, add.getComponentAttr());
+      for (auto [value, field] :
+           llvm::zip(add.getValues(), componentOp.getFieldNames()))
+        store(loc, value, column(component, cast<StringAttr>(field)));
+      setPresence(loc, component, 1);
+      rewriter.eraseOp(add);
+    } else {
+      auto remove = cast<RemoveOp>(op);
+      setPresence(loc, remove.getComponentAttr().getAttr(), 0);
+      rewriter.eraseOp(remove);
     }
   }
+}
+
+/// Emit the body of `query` for `entity` of `archetype` at the insertion
+/// point, with the query's parameters and outer values mapped by
+/// `mapping`. If the query binds components that are optional in the
+/// archetype, the body applies only where all of them are present: either
+/// it runs for every entity and its stores are masked (branch-free, which
+/// keeps the loop vectorisable), or, if the body cannot safely run for
+/// absent entities, it is guarded by an `scf.if`.
+static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
+                          IRMapping mapping, const WorldArchetype &archetype,
+                          WorldAccess &world, Value entity) {
+  Location loc = query.getLoc();
+  ArchetypeOp archetypeOp = archetype.op;
+  Value mask;
+  for (Type type : query.getBody().getArgumentTypes()) {
+    FlatSymbolRefAttr component = cast<RefType>(type).getComponent();
+    if (!archetypeOp.isOptional(component))
+      continue;
+    Value presence =
+        world.column(archetype, component.getAttr(), rewriter.getStringAttr(""));
+    Value byte =
+        memref::LoadOp::create(rewriter, loc, presence, ValueRange{entity});
+    Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
+    Value present = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ne, byte, zero);
+    mask = mask ? arith::AndIOp::create(rewriter, loc, mask, present)
+                : present;
+  }
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  if (mask && !canRunForAbsentEntities(query)) {
+    auto branch = scf::IfOp::create(rewriter, loc, mask);
+    rewriter.setInsertionPointToStart(branch.thenBlock());
+    mask = Value();
+  }
+  SmallVector<Operation *> roots;
+  for (Operation &op : query.getBody().front().without_terminator())
+    roots.push_back(rewriter.clone(op, mapping));
+  lowerAccesses(rewriter, roots, archetype, world, entity, mask);
 }
 
 /// Replace a query by one loop per matching archetype. The body is cloned
@@ -319,9 +404,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     rewriter.setInsertionPoint(query);
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, entityLocal,
-        [&](Value entity, Block *loopBody) {
-          cloneQueryBody(rewriter, query, IRMapping());
-          lowerAccesses(rewriter, loopBody, archetype, world, entity);
+        [&](Value entity, Block *) {
+          emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                        entity);
         });
     hoistResourceReads(rewriter, loops, world);
   }
@@ -377,10 +462,10 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     rewriter.setInsertionPoint(insertionPoint);
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, /*entityLocal=*/true,
-        [&](Value entity, Block *loopBody) {
+        [&](Value entity, Block *) {
           for (auto [query, index] : bodies)
-            cloneQueryBody(rewriter, query, mappings[index]);
-          lowerAccesses(rewriter, loopBody, archetype, world, entity);
+            emitQueryBody(rewriter, query, mappings[index], archetype, world,
+                          entity);
         });
     hoistResourceReads(rewriter, loops, world);
   }
