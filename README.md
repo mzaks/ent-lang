@@ -50,7 +50,15 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
 - `ecs.archetype @Body (@Position, @Velocity, @Mass) capacity 100000`: a
   table that entities are stored in, with a hard upper bound on its size.
   The set of archetypes is closed, so every query is matched to its
-  archetypes at compile time.
+  archetypes at compile time. An archetype of capacity 1 holds at most one
+  entity (a player, a camera); its queries become a guard instead of a
+  loop.
+- `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
+  exactly once and is not an entity. Systems declare it in `reads`/`writes`
+  and access it with `ecs.read @Clock "dt" : f32` and
+  `ecs.write @Clock "frame", %v : i64`. Reads are allowed anywhere in a
+  system; writes are not allowed inside a query, where every entity would
+  write the same field and so depend on the others.
 - `ecs.system @s(%params) reads [...] writes [...] { ... }`: declared access;
   `writes` implies read.
 - `ecs.query (%p: !ecs.ref<@Position, mut>, ...) { ... }`: body runs once per
@@ -61,10 +69,10 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
 - `ecs.stage { ecs.run ... }`: runs that commute and may execute in
   parallel; stages execute in order.
 
-The verifier checks that every query stays inside its system's declared
-access, that no query binds a component twice, that refs are only used by
-`ecs.get` and `ecs.set`, and that field names and types match the component
-declarations.
+The verifier checks that every query and every resource access stays
+inside its system's declared access, that no query binds a component twice
+or writes a resource, that refs are only used by `ecs.get` and `ecs.set`,
+and that field names and types match the declarations.
 
 ## Access analysis and scheduling
 
@@ -74,8 +82,10 @@ match. Declared `reads`/`writes` remain the contract the verifier enforces,
 but the analysis is finer: two systems that both declare `writes [@Velocity]`
 do not conflict if one only touches `Body.Velocity.dy` and the other only
 `Particle.Velocity.dx`, and binding a component to select archetypes is not
-a read. Any other op with memory effects (a call, say) makes a system
-opaque, and opaque systems conflict with everything.
+a read. Resource fields are columns too (`Clock.frame`), so a system that
+writes a resource is ordered against the systems that read it. Any other op
+with memory effects (a call, say) makes a system opaque, and opaque systems
+conflict with everything.
 
 `--ecs-schedule` puts each run into the earliest stage after every earlier
 run it conflicts with. In the example, gravity, wind and decay share the
@@ -94,8 +104,9 @@ region with one `omp.section` per run.
 ## World storage
 
 The language owns the world's storage. From the archetypes' components and
-capacities, the compiler lays out the whole world as one arena: an i64
-entity count per archetype, then one column per field at a fixed offset.
+capacities and from the resources, the compiler lays out the whole world as
+one arena: an i64 entity count per archetype, then each resource on its own
+cache line, then one column per field at a fixed offset.
 Every column starts on a 64-byte boundary, 17 cache lines past the end of
 the previous one; columns packed from a page-aligned base would start at
 the same cache set, which cost a single core 7-8% (see
@@ -103,13 +114,14 @@ the same cache set, which cost a single core 7-8% (see
 parameters and read columns through statically shaped views.
 
 `ecs-translate --ecs-to-c-header` emits the C API for hosts:
-`ecs_world_create`/`ecs_world_destroy`, per archetype a capacity, a count
-and a checked `set_count`, typed column accessors such as
-`ecs_Body_Position_x(world)`, and one entry point per schedule, such as
-`ecs_frame(world, dt)`. `examples/host/integrate_main.c` shows the host
-side. Creating a world only touches the counts, so capacity costs address
-space, not memory, until columns are written. Parallel stages and loops
-assume nothing else writes the arena while a schedule runs.
+`ecs_world_create`/`ecs_world_destroy`, per archetype a capacity, a count and
+a checked `set_count`, typed column accessors such as
+`ecs_Body_Position_x(world)`, one accessor per resource field such as
+`ecs_Clock_frame(world)`, and one entry point per schedule, such as
+`ecs_frame(world, dt)`. `examples/host/integrate_main.c` shows the host side.
+Creating a world zeroes only the counts and resources, so capacity costs
+address space, not memory, until columns are written. Parallel stages and
+loops assume nothing else writes the arena while a schedule runs.
 
 ## Fusion and entity parallelism
 
@@ -120,7 +132,11 @@ different archetypes share no columns. Two consequences the lowering uses:
   archetype holding every matching query body in program order. This is
   legal for any sequence of systems without other effects, conflicting or
   not: running all bodies for one entity before the next gives the same
-  result as running each query to completion.
+  result as running each query to completion. A system that writes a
+  resource ends a fused sequence, because fusion moves system-level code
+  ahead of the queries.
+- Since no query writes a resource, a resource read inside a query is
+  loaded once before the loop.
 - `parallel-entities=1` emits entity-local query loops as `scf.parallel`;
   `--convert-scf-to-openmp` turns them into OpenMP work-sharing loops. A
   parallel loop only pays for its fork beyond some size, so an archetype
