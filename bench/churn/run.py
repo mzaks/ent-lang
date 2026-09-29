@@ -21,7 +21,12 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
 OUT = os.path.join(ROOT, "build", "bench", "churn")
 VARIANTS = {"archetypes": 0, "wide-select": 1, "wide-branch": 2,
-            "sparse-set": 3}
+            "sparse-set": 3, "compiled": 4, "compiled-fused": 4}
+ECS_OPT = os.path.join(ROOT, "build", "bin", "ecs-opt")
+ECS_TRANSLATE = os.path.join(ROOT, "build", "bin", "ecs-translate")
+PROGRAM = os.path.join(HERE, "status.mlir")
+LOWERINGS = {"compiled": "--ecs-lower-to-loops",
+             "compiled-fused": "--ecs-lower-to-loops=fuse-systems=1"}
 
 
 def main():
@@ -36,11 +41,25 @@ def main():
     args = parser.parse_args()
     os.makedirs(OUT, exist_ok=True)
 
+    subprocess.run([ECS_TRANSLATE, "--ecs-to-c-header", PROGRAM, "-o",
+                    os.path.join(OUT, "status_world.h")], check=True)
     exes = {}
     for name, number in VARIANTS.items():
         exes[name] = os.path.join(OUT, name)
+        extra = []
+        if name in LOWERINGS:
+            mlir = subprocess.run(
+                [ECS_OPT, PROGRAM, LOWERINGS[name], "--symbol-dce",
+                 "--convert-scf-to-cf", "--convert-to-llvm",
+                 "--reconcile-unrealized-casts"], check=True,
+                capture_output=True, text=True).stdout
+            ll = os.path.join(OUT, name + ".ll")
+            subprocess.run([f"{LLVM}/bin/mlir-translate", "--mlir-to-llvmir",
+                            "-o", ll], input=mlir, text=True, check=True)
+            extra = [ll, "-Wno-override-module"]
         subprocess.run([f"{LLVM}/bin/clang", "-O2", "-ffp-contract=off",
-                        f"-DVARIANT={number}", os.path.join(HERE, "churn.c"),
+                        f"-DVARIANT={number}", f"-I{OUT}",
+                        os.path.join(HERE, "churn.c"), *extra,
                         "-o", exes[name]], check=True)
 
     configs = []

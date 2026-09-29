@@ -18,10 +18,17 @@
 //   -DVARIANT=3  sparse set: Status packed densely with its owner's id and
 //                a sparse id -> slot index; status reads and writes the
 //                owners' Velocity through the id
+//   -DVARIANT=4  compiled: bench/churn/status.mlir, where Status is an
+//                optional component, lowered by ecs-opt and linked in; the
+//                host changes presence through the generated header
 //
 // Usage: churn <entities> <density> <churn per frame> <frames> <repetitions>
 // Prints the best repetition: total, churn and systems time per frame, the
 // bytes the variant allocates, and a checksum.
+
+#if VARIANT == 4
+#include "status_world.h"
+#endif
 
 #include <stdint.h>
 #include <stdio.h>
@@ -239,6 +246,42 @@ static void systems(void) {
 static void readEntity(uint32_t id, float out[5]) {
   out[0] = x[id], out[1] = y[id], out[2] = dx[id], out[3] = dy[id];
   out[4] = slotOf[id] >= 0 ? remaining[slotOf[id]] : 0;
+}
+
+#elif VARIANT == 4
+static ecs_world *world;
+static float *remaining;
+static uint8_t *present;
+static void storageInit(const uint8_t *holds) {
+  // A fresh world per repetition, like the other variants' fresh storage.
+  world = ecs_world_create();
+  if (!world || !ecs_Character_set_count(world, N)) {
+    fprintf(stderr, "n=%lld does not fit the world\n", (long long)N);
+    exit(1);
+  }
+  allocated += ECS_WORLD_BYTES;
+  float *x = ecs_Character_Position_x(world);
+  float *y = ecs_Character_Position_y(world);
+  float *dx = ecs_Character_Velocity_dx(world);
+  float *dy = ecs_Character_Velocity_dy(world);
+  remaining = ecs_Character_Status_remaining(world);
+  present = ecs_Character_Status_present(world);
+  for (uint32_t id = 0; id < N; ++id) {
+    x[id] = initialX(id), y[id] = initialY(id);
+    dx[id] = initialDx(id), dy[id] = initialDy(id);
+    remaining[id] = DURATION;
+    present[id] = holds[id];
+  }
+}
+static void gain(uint32_t id) { present[id] = 1, remaining[id] = DURATION; }
+static void lose(uint32_t id) { present[id] = 0; }
+static void systems(void) { ecs_frame(world, DT); }
+static void readEntity(uint32_t id, float out[5]) {
+  out[0] = ecs_Character_Position_x(world)[id];
+  out[1] = ecs_Character_Position_y(world)[id];
+  out[2] = ecs_Character_Velocity_dx(world)[id];
+  out[3] = ecs_Character_Velocity_dy(world)[id];
+  out[4] = present[id] ? remaining[id] : 0;
 }
 #endif
 
