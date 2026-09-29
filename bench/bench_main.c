@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
 
   ecs_world *w = ecs_world_create();
   if (!w || !ecs_Body_set_count(w, n) || !ecs_Particle_set_count(w, n) ||
-      !ecs_Scenery_set_count(w, n)) {
+      !ecs_Scenery_set_count(w, n) || !ecs_Player_set_count(w, 1)) {
     fprintf(stderr, "n=%lld does not fit the world\n", (long long)n);
     return 1;
   }
@@ -65,6 +65,11 @@ int main(int argc, char **argv) {
                                           0.02f, 0.1f,  0.5f,  0.25f};
   for (int k = 0; k < NUM_COLUMNS; ++k)
     fill(c[k], n, base[k], step[k]);
+  *ecs_Wind_strength(w) = 2.0f;
+  ecs_Player_Position_x(w)[0] = 0;
+  ecs_Player_Position_y(w)[0] = 0;
+  ecs_Player_Velocity_dx(w)[0] = 1;
+  ecs_Player_Velocity_dy(w)[0] = 1;
   const float dt = 1.0f / 60.0f;
 #define FRAME() ecs_frame(w, dt)
 
@@ -74,6 +79,9 @@ int main(int argc, char **argv) {
   for (int k = 0; k < NUM_COLUMNS; ++k)
     for (int64_t i = 0; i < n; ++i)
       checksum += c[k][i];
+  checksum += (double)ecs_Player_Position_x(w)[0] +
+              (double)ecs_Player_Position_y(w)[0] +
+              (double)*ecs_Clock_frame(w);
 
   // Calibrate (this also warms caches and the OpenMP thread pool): double
   // the frame count until a batch takes at least a tenth of the target.

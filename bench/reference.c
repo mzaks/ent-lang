@@ -36,7 +36,13 @@ void _mlir_ciface_frame(float dt, ecs_arena_descriptor *arena) {
   bodies(dt, 9.81f, ecs_Body_count(w), ecs_Body_Position_x(w),
          ecs_Body_Position_y(w), ecs_Body_Velocity_dx(w),
          ecs_Body_Velocity_dy(w));
-  particles(dt, 2.0f, ecs_Particle_count(w), ecs_Particle_Position_x(w),
-            ecs_Particle_Position_y(w), ecs_Particle_Velocity_dx(w),
-            ecs_Particle_Velocity_dy(w), ecs_Particle_Lifetime_seconds(w));
+  particles(dt, *ecs_Wind_strength(w), ecs_Particle_count(w),
+            ecs_Particle_Position_x(w), ecs_Particle_Position_y(w),
+            ecs_Particle_Velocity_dx(w), ecs_Particle_Velocity_dy(w),
+            ecs_Particle_Lifetime_seconds(w));
+  if (ecs_Player_count(w) > 0) {
+    ecs_Player_Position_x(w)[0] += ecs_Player_Velocity_dx(w)[0] * dt;
+    ecs_Player_Position_y(w)[0] += ecs_Player_Velocity_dy(w)[0] * dt;
+  }
+  *ecs_Clock_frame(w) += 1;
 }

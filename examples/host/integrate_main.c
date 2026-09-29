@@ -7,7 +7,7 @@
 
 #include <stdio.h>
 
-enum { BODIES = 2, PARTICLES = 2, SCENERY = 1, FRAMES = 3 };
+enum { BODIES = 2, PARTICLES = 2, SCENERY = 1, PLAYERS = 1, FRAMES = 3 };
 
 static void fill(float *column, const float *values, int n) {
   for (int i = 0; i < n; ++i)
@@ -18,7 +18,8 @@ int main(void) {
   ecs_world *w = ecs_world_create();
   if (!w || !ecs_Body_set_count(w, BODIES) ||
       !ecs_Particle_set_count(w, PARTICLES) ||
-      !ecs_Scenery_set_count(w, SCENERY)) {
+      !ecs_Scenery_set_count(w, SCENERY) ||
+      !ecs_Player_set_count(w, PLAYERS)) {
     fprintf(stderr, "could not set up the world\n");
     return 1;
   }
@@ -35,6 +36,11 @@ int main(void) {
   fill(ecs_Particle_Lifetime_seconds(w), (float[]){10, 2}, PARTICLES);
   fill(ecs_Scenery_Position_x(w), (float[]){7}, SCENERY);
   fill(ecs_Scenery_Position_y(w), (float[]){7}, SCENERY);
+  fill(ecs_Player_Position_x(w), (float[]){0}, PLAYERS);
+  fill(ecs_Player_Position_y(w), (float[]){0}, PLAYERS);
+  fill(ecs_Player_Velocity_dx(w), (float[]){1}, PLAYERS);
+  fill(ecs_Player_Velocity_dy(w), (float[]){1}, PLAYERS);
+  *ecs_Wind_strength(w) = 2.0f;
 
   for (int frame = 0; frame < FRAMES; ++frame)
     ecs_frame(w, 0.5f);
@@ -51,6 +57,9 @@ int main(void) {
   for (int i = 0; i < SCENERY; ++i)
     printf("scenery %d: pos (%.4f, %.4f)\n", i, ecs_Scenery_Position_x(w)[i],
            ecs_Scenery_Position_y(w)[i]);
+  printf("player: pos (%.4f, %.4f)\n", ecs_Player_Position_x(w)[0],
+         ecs_Player_Position_y(w)[0]);
+  printf("frame: %lld\n", (long long)*ecs_Clock_frame(w));
 
   ecs_world_destroy(w);
   return 0;

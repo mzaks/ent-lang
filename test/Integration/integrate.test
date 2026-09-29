@@ -51,3 +51,7 @@
 // CHECK: particle 1: pos (6.0000, 1.5000) vel (3.0000, -1.0000) life 0.5000
 // Scenery has no velocity, so nothing moves it.
 // CHECK: scenery 0: pos (7.0000, 7.0000)
+// The single player only moves: 3 frames of (1, 1) * 0.5.
+// CHECK: player: pos (1.5000, 1.5000)
+// tick ran once per frame.
+// CHECK: frame: 3
