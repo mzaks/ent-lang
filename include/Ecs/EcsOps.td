@@ -33,16 +33,22 @@ def Ecs_ArchetypeOp : Ecs_Op<"archetype", [
   let summary = "Declare a set of components that entities are stored by";
   let description = [{
     ```mlir
-    ecs.archetype @Body (@Position, @Velocity, @Mass)
+    ecs.archetype @Body (@Position, @Velocity, @Mass) capacity 100000
     ```
     Every entity belongs to exactly one archetype, and each archetype is
     stored as its own table. The set of archetypes is closed and known at
     compile time, so every query is matched to its archetypes statically.
+
+    `capacity` is a hard upper bound on the number of entities in the
+    archetype. It lets the compiler lay out the whole world statically and
+    decide from the size alone whether a loop over the archetype can ever
+    be worth running in parallel.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
-                       FlatSymbolRefArrayAttr:$components);
+                       FlatSymbolRefArrayAttr:$components,
+                       ConfinedAttr<I64Attr, [IntPositive]>:$capacity);
   let assemblyFormat = [{
-    $sym_name custom<SymbolList>($components) attr-dict
+    $sym_name custom<SymbolList>($components) `capacity` $capacity attr-dict
   }];
   let hasVerifier = 1;
   let extraClassDeclaration = [{

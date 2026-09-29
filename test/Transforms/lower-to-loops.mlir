@@ -5,8 +5,8 @@ ecs.component @B (b0: i32, b1: f32)
 ecs.component @Unused (u: f32)
 
 // World ABI: per archetype a count, then one column per field.
-ecs.archetype @AB (@A, @B)
-ecs.archetype @OnlyA (@A)
+ecs.archetype @AB (@A, @B) capacity 1000
+ecs.archetype @OnlyA (@A) capacity 1000
 
 // CHECK-LABEL: func.func private @scale(
 // CHECK-SAME: %[[K:[^:]*]]: f32,

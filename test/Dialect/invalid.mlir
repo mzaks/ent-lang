@@ -138,18 +138,24 @@ ecs.schedule @frame() {
 // -----
 
 // expected-error @+1 {{must contain at least one component}}
-ecs.archetype @Empty ()
+ecs.archetype @Empty () capacity 1000
 
 // -----
 
 ecs.component @P (x: f32)
 // expected-error @+1 {{lists component @P more than once}}
-ecs.archetype @Twice (@P, @P)
+ecs.archetype @Twice (@P, @P) capacity 1000
 
 // -----
 
 // expected-error @+1 {{contains unknown component @Nope}}
-ecs.archetype @Bad (@Nope)
+ecs.archetype @Bad (@Nope) capacity 1000
+
+// -----
+
+ecs.component @P (x: f32)
+// expected-error @+1 {{attribute 'capacity' failed to satisfy constraint: 64-bit signless integer attribute whose value is positive}}
+ecs.archetype @Zero (@P) capacity 0
 
 // -----
 

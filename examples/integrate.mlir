@@ -14,9 +14,9 @@ ecs.component @Velocity (dx: f32, dy: f32)
 ecs.component @Mass (kg: f32)
 ecs.component @Lifetime (seconds: f32)
 
-ecs.archetype @Body (@Position, @Velocity, @Mass)
-ecs.archetype @Particle (@Position, @Velocity, @Lifetime)
-ecs.archetype @Scenery (@Position)
+ecs.archetype @Body (@Position, @Velocity, @Mass) capacity 10000000
+ecs.archetype @Particle (@Position, @Velocity, @Lifetime) capacity 10000000
+ecs.archetype @Scenery (@Position) capacity 10000000
 
 ecs.system @gravity(%dt: f32, %g: f32) reads [@Mass] writes [@Velocity] {
   // Mass is bound so the query only visits bodies that have one.

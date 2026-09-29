@@ -2,7 +2,7 @@
 // RUN: ecs-opt %s --ecs-lower-to-loops=parallel-stages=1 | FileCheck %s --check-prefix=PAR
 
 ecs.component @P (x: f32, y: f32)
-ecs.archetype @A (@P)
+ecs.archetype @A (@P) capacity 1000
 
 ecs.system @writeX(%c: f32) writes [@P] {
   ecs.query (%p: !ecs.ref<@P, mut>) {

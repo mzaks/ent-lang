@@ -3,7 +3,7 @@
 // RUN:   | FileCheck %s --check-prefix=FUSED
 
 ecs.component @P (x: f32)
-ecs.archetype @A (@P)
+ecs.archetype @A (@P) capacity 1000
 
 func.func private @log()
 

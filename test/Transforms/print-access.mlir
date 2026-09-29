@@ -2,8 +2,8 @@
 
 ecs.component @P (x: f32, y: f32)
 ecs.component @V (dx: f32)
-ecs.archetype @A (@P, @V)
-ecs.archetype @B (@P)
+ecs.archetype @A (@P, @V) capacity 1000
+ecs.archetype @B (@P) capacity 1000
 
 func.func private @log()
 
