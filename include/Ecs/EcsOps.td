@@ -10,21 +10,38 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 // Declarations
 //===----------------------------------------------------------------------===//
 
-def Ecs_ComponentOp : Ecs_Op<"component", [Symbol]> {
-  let summary = "Declare a component: an ordered list of scalar fields";
-  let description = [{
-    ```mlir
-    ecs.component @Position (x: f32, y: f32)
-    ```
-  }];
+// A symbol that declares an ordered list of scalar fields.
+class Ecs_RecordOp<string mnemonic> : Ecs_Op<mnemonic, [Symbol]> {
   let arguments = (ins SymbolNameAttr:$sym_name,
                        StrArrayAttr:$field_names,
                        TypeArrayAttr:$field_types);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
   let extraClassDeclaration = [{
-    /// The type of field `name`, or null if the component has no such field.
+    /// The type of field `name`, or null if there is no such field.
     ::mlir::Type getFieldType(::llvm::StringRef name);
+  }];
+}
+
+def Ecs_ComponentOp : Ecs_RecordOp<"component"> {
+  let summary = "Declare a component: an ordered list of scalar fields";
+  let description = [{
+    ```mlir
+    ecs.component @Position (x: f32, y: f32)
+    ```
+  }];
+}
+
+def Ecs_ResourceOp : Ecs_RecordOp<"resource"> {
+  let summary = "Declare a resource: world state that exists exactly once";
+  let description = [{
+    ```mlir
+    ecs.resource @Clock (dt: f32, frame: i64)
+    ```
+    A resource is not an entity: no query visits it. Systems name it in
+    their `reads` and `writes` like a component and access its fields with
+    `ecs.read` and `ecs.write`. It lives in the world's storage next to the
+    entity counts.
   }];
 }
 
@@ -133,6 +150,41 @@ def Ecs_SetOp : Ecs_Op<"set", [
   let arguments = (ins Ecs_RefType:$ref, StrAttr:$field, AnyType:$value);
   let assemblyFormat =
       "$ref $field `,` $value attr-dict `:` type($ref) `,` type($value)";
+  let hasVerifier = 1;
+}
+
+def Ecs_ReadOp : Ecs_Op<"read", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Read one field of a resource";
+  let description = [{
+    ```mlir
+    %dt = ecs.read @Clock "dt" : f32
+    ```
+    Allowed anywhere in a system, including inside queries: no query may
+    write a resource, so every entity reads the same value. The system
+    must declare the resource in `reads` or `writes`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$resource, StrAttr:$field);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$resource $field attr-dict `:` type($result)";
+  let hasVerifier = 1;
+}
+
+def Ecs_WriteOp : Ecs_Op<"write", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Write one field of a resource, outside queries";
+  let description = [{
+    ```mlir
+    ecs.write @Clock "frame", %next : i64
+    ```
+    Allowed in a system but not inside a query: a write per entity would
+    make every entity depend on the others, which rules out parallel and
+    fused loops. The system must declare the resource in `writes`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$resource, StrAttr:$field,
+                       AnyType:$value);
+  let assemblyFormat =
+      "$resource $field `,` $value attr-dict `:` type($value)";
   let hasVerifier = 1;
 }
 

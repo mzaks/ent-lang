@@ -11,13 +11,13 @@ ecs.component @P (v: vector<4xf32>)
 // -----
 
 ecs.component @P (x: f32)
-// expected-error @+1 {{lists component @P more than once; 'writes' already implies read access}}
+// expected-error @+1 {{lists @P more than once; 'writes' already implies read access}}
 ecs.system @s() reads [@P] writes [@P] {
 }
 
 // -----
 
-// expected-error @+1 {{declares access to unknown component @Nope}}
+// expected-error @+1 {{declares access to unknown component or resource @Nope}}
 ecs.system @s() reads [@Nope] {
 }
 
@@ -183,3 +183,71 @@ ecs.system @s() {
   ecs.stage {
   }
 }
+
+// -----
+
+ecs.resource @Clock (dt: f32)
+ecs.component @P (x: f32)
+ecs.system @s(%v: f32) reads [@P] writes [@Clock] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{cannot write a resource inside 'ecs.query': every entity would write the same field, which makes the entities depend on each other; write it at system level}}
+    ecs.write @Clock "dt", %v : f32
+  }
+}
+
+// -----
+
+ecs.resource @Clock (dt: f32)
+ecs.system @s(%v: f32) reads [@Clock] {
+  // expected-error @+1 {{writes @Clock but system @s does not declare it in 'writes'}}
+  ecs.write @Clock "dt", %v : f32
+}
+
+// -----
+
+ecs.resource @Clock (dt: f32)
+ecs.system @s() {
+  // expected-error @+1 {{reads @Clock but system @s does not declare it in 'reads' or 'writes'}}
+  %dt = ecs.read @Clock "dt" : f32
+}
+
+// -----
+
+ecs.resource @Clock (dt: f32)
+ecs.system @s() reads [@Clock] {
+  // expected-error @+1 {{resource @Clock has no field 'frame'}}
+  %f = ecs.read @Clock "frame" : i64
+}
+
+// -----
+
+ecs.resource @Clock (dt: f32)
+ecs.system @s() reads [@Clock] {
+  // expected-error @+1 {{result type 'i32' does not match field 'dt' of type 'f32'}}
+  %dt = ecs.read @Clock "dt" : i32
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.system @s() reads [@P] {
+  // expected-error @+1 {{references unknown resource @P}}
+  %x = ecs.read @P "x" : f32
+}
+
+// -----
+
+ecs.resource @Clock (dt: f32)
+func.func @f() -> f32 {
+  // expected-error @+1 {{must be inside an 'ecs.system'}}
+  %dt = ecs.read @Clock "dt" : f32
+  return %dt : f32
+}
+
+// -----
+
+ecs.resource @Clock (dt: f32)
+// A resource is not an entity: no query can bind it, and no archetype can
+// hold it.
+// expected-error @+1 {{contains unknown component @Clock}}
+ecs.archetype @A (@Clock) capacity 10

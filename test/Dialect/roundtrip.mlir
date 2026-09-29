@@ -28,6 +28,12 @@
 // MISC-NEXT: }
 // MISC-NEXT: ecs.stage {
 // MISC-NEXT: }
+// MISC: ecs.resource @Clock (dt: f32, frame: i64)
+// MISC-LABEL: ecs.system @tick() reads [@Tag] writes [@Clock] {
+// MISC-NEXT:   %[[F:.*]] = ecs.read @Clock "frame" : i64
+// MISC:        ecs.write @Clock "frame", %{{.*}} : i64
+// MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag>) {
+// MISC-NEXT:     ecs.read @Clock "dt" : f32
 ecs.component @Tag ()
 ecs.component @Named ("with space": i32, idx: index)
 ecs.system @noop() {
@@ -37,5 +43,15 @@ ecs.schedule @staged() {
     ecs.run @noop()
   }
   ecs.stage {
+  }
+}
+ecs.resource @Clock (dt: f32, frame: i64)
+ecs.system @tick() reads [@Tag] writes [@Clock] {
+  %frame = ecs.read @Clock "frame" : i64
+  %one = arith.constant 1 : i64
+  %next = arith.addi %frame, %one : i64
+  ecs.write @Clock "frame", %next : i64
+  ecs.query (%t: !ecs.ref<@Tag>) {
+    %dt = ecs.read @Clock "dt" : f32
   }
 }

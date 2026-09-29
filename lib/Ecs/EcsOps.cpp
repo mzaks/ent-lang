@@ -107,11 +107,12 @@ static FailureOr<Type> resolveField(SymbolTableCollection &symbolTable,
 }
 
 //===----------------------------------------------------------------------===//
-// ComponentOp
+// ComponentOp and ResourceOp
 //===----------------------------------------------------------------------===//
 
-// ecs.component @Name (field: type, ...)
-ParseResult ComponentOp::parse(OpAsmParser &parser, OperationState &result) {
+// @Name (field: type, ...)
+template <typename OpTy>
+static ParseResult parseRecord(OpAsmParser &parser, OperationState &result) {
   StringAttr name;
   if (parser.parseSymbolName(name, SymbolTable::getSymbolAttrName(),
                              result.attributes))
@@ -133,55 +134,79 @@ ParseResult ComponentOp::parse(OpAsmParser &parser, OperationState &result) {
     return failure();
 
   Builder &b = parser.getBuilder();
-  result.addAttribute(getFieldNamesAttrName(result.name),
+  result.addAttribute(OpTy::getFieldNamesAttrName(result.name),
                       b.getArrayAttr(names));
-  result.addAttribute(getFieldTypesAttrName(result.name),
+  result.addAttribute(OpTy::getFieldTypesAttrName(result.name),
                       b.getArrayAttr(types));
   return parser.parseOptionalAttrDict(result.attributes);
 }
 
-void ComponentOp::print(OpAsmPrinter &p) {
+template <typename OpTy>
+static void printRecord(OpTy op, OpAsmPrinter &p) {
   p << " ";
-  p.printSymbolName(getSymName());
+  p.printSymbolName(op.getSymName());
   p << " (";
   llvm::interleaveComma(
-      llvm::zip(getFieldNames(), getFieldTypes()), p, [&](auto field) {
+      llvm::zip(op.getFieldNames(), op.getFieldTypes()), p, [&](auto field) {
         p.printKeywordOrString(cast<StringAttr>(std::get<0>(field)).getValue());
         p << ": " << cast<TypeAttr>(std::get<1>(field)).getValue();
       });
   p << ")";
-  p.printOptionalAttrDict((*this)->getAttrs(),
-                          {getSymNameAttrName(), getFieldNamesAttrName(),
-                           getFieldTypesAttrName()});
+  p.printOptionalAttrDict(op->getAttrs(),
+                          {op.getSymNameAttrName(), op.getFieldNamesAttrName(),
+                           op.getFieldTypesAttrName()});
 }
 
-LogicalResult ComponentOp::verify() {
-  if (getFieldNames().size() != getFieldTypes().size())
-    return emitOpError("has ") << getFieldNames().size() << " field names but "
-                               << getFieldTypes().size() << " field types";
+static LogicalResult verifyRecord(Operation *op, ArrayAttr names,
+                                  ArrayAttr types) {
+  if (names.size() != types.size())
+    return op->emitOpError("has ") << names.size() << " field names but "
+                                   << types.size() << " field types";
 
   llvm::StringSet<> seen;
-  for (auto [nameAttr, typeAttr] :
-       llvm::zip(getFieldNames(), getFieldTypes())) {
+  for (auto [nameAttr, typeAttr] : llvm::zip(names, types)) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
     if (!seen.insert(name).second)
-      return emitOpError("has duplicate field '") << name << "'";
+      return op->emitOpError("has duplicate field '") << name << "'";
     // Scalars only for now: layout passes split components into one column
     // per field, which needs every field to be a plain value.
     Type type = cast<TypeAttr>(typeAttr).getValue();
     if (!isa<IntegerType, FloatType, IndexType>(type))
-      return emitOpError("field '")
+      return op->emitOpError("field '")
              << name << "' has type " << type
              << "; only integer, float and index fields are supported";
   }
   return success();
 }
 
-Type ComponentOp::getFieldType(StringRef name) {
-  for (auto [nameAttr, typeAttr] : llvm::zip(getFieldNames(), getFieldTypes()))
+static Type lookupFieldType(ArrayAttr names, ArrayAttr types,
+                            StringRef name) {
+  for (auto [nameAttr, typeAttr] : llvm::zip(names, types))
     if (cast<StringAttr>(nameAttr).getValue() == name)
       return cast<TypeAttr>(typeAttr).getValue();
   return {};
+}
+
+ParseResult ComponentOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseRecord<ComponentOp>(parser, result);
+}
+void ComponentOp::print(OpAsmPrinter &p) { printRecord(*this, p); }
+LogicalResult ComponentOp::verify() {
+  return verifyRecord(*this, getFieldNames(), getFieldTypes());
+}
+Type ComponentOp::getFieldType(StringRef name) {
+  return lookupFieldType(getFieldNames(), getFieldTypes(), name);
+}
+
+ParseResult ResourceOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseRecord<ResourceOp>(parser, result);
+}
+void ResourceOp::print(OpAsmPrinter &p) { printRecord(*this, p); }
+LogicalResult ResourceOp::verify() {
+  return verifyRecord(*this, getFieldNames(), getFieldTypes());
+}
+Type ResourceOp::getFieldType(StringRef name) {
+  return lookupFieldType(getFieldNames(), getFieldTypes(), name);
 }
 
 //===----------------------------------------------------------------------===//
@@ -269,7 +294,7 @@ LogicalResult SystemOp::verify() {
         return emitOpError("'") << listName << "' entry " << attr
                                 << " must be a flat symbol reference";
       if (!seen.insert(attr).second)
-        return emitOpError("lists component ")
+        return emitOpError("lists ")
                << attr
                << " more than once; 'writes' already implies read access";
     }
@@ -281,8 +306,11 @@ LogicalResult SystemOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   for (ArrayAttr list : {getReads(), getWrites()})
     for (Attribute attr : list) {
       auto ref = cast<FlatSymbolRefAttr>(attr);
-      if (!lookupComponent(symbolTable, *this, ref))
-        return emitOpError("declares access to unknown component ") << ref;
+      Operation *target = symbolTable.lookupNearestSymbolFrom(*this, ref);
+      if (!isa_and_nonnull<ComponentOp, ResourceOp>(target))
+        return emitOpError("declares access to unknown component or "
+                           "resource ")
+               << ref;
     }
   return success();
 }
@@ -419,6 +447,79 @@ LogicalResult SetOp::verify() {
 LogicalResult SetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   FailureOr<Type> fieldType =
       resolveField(symbolTable, *this, getRef().getType(), getField());
+  if (failed(fieldType))
+    return failure();
+  if (*fieldType != getValue().getType())
+    return emitOpError("value type ")
+           << getValue().getType() << " does not match field '" << getField()
+           << "' of type " << *fieldType;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ReadOp / WriteOp
+//===----------------------------------------------------------------------===//
+
+/// Resolve the resource field that a read/write names, check that the
+/// enclosing system declares the access, and return the field's type.
+static FailureOr<Type> resolveResourceField(SymbolTableCollection &symbolTable,
+                                            Operation *op,
+                                            FlatSymbolRefAttr resource,
+                                            StringRef field, bool write) {
+  auto resourceOp =
+      symbolTable.lookupNearestSymbolFrom<ResourceOp>(op, resource);
+  if (!resourceOp)
+    return op->emitOpError("references unknown resource ") << resource;
+  Type fieldType = resourceOp.getFieldType(field);
+  if (!fieldType)
+    return op->emitOpError("resource ")
+           << resource << " has no field '" << field << "'";
+  auto system = op->getParentOfType<SystemOp>();
+  if (write && !system.canWrite(resource))
+    return op->emitOpError("writes ")
+           << resource << " but system @" << system.getSymName()
+           << " does not declare it in 'writes'";
+  if (!system.canRead(resource))
+    return op->emitOpError("reads ")
+           << resource << " but system @" << system.getSymName()
+           << " does not declare it in 'reads' or 'writes'";
+  return fieldType;
+}
+
+LogicalResult ReadOp::verify() {
+  if (!(*this)->getParentOfType<SystemOp>())
+    return emitOpError("must be inside an 'ecs.system'");
+  return success();
+}
+
+LogicalResult ReadOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  FailureOr<Type> fieldType =
+      resolveResourceField(symbolTable, *this, getResourceAttr(), getField(),
+                           /*write=*/false);
+  if (failed(fieldType))
+    return failure();
+  if (*fieldType != getResult().getType())
+    return emitOpError("result type ")
+           << getResult().getType() << " does not match field '" << getField()
+           << "' of type " << *fieldType;
+  return success();
+}
+
+LogicalResult WriteOp::verify() {
+  if (!(*this)->getParentOfType<SystemOp>())
+    return emitOpError("must be inside an 'ecs.system'");
+  if ((*this)->getParentOfType<QueryOp>())
+    return emitOpError("cannot write a resource inside 'ecs.query': every "
+                       "entity would write the same field, which makes the "
+                       "entities depend on each other; write it at system "
+                       "level");
+  return success();
+}
+
+LogicalResult WriteOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  FailureOr<Type> fieldType =
+      resolveResourceField(symbolTable, *this, getResourceAttr(), getField(),
+                           /*write=*/true);
   if (failed(fieldType))
     return failure();
   if (*fieldType != getValue().getType())
