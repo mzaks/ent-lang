@@ -66,13 +66,28 @@ ecs.system @stun(%t: f32) reads [@Q] writes [@S] {
 }
 
 // Spawning and despawning change which entities an archetype holds: they
-// write its count and every column.
+// write its count, its id column and every other column.
 ecs.component @R (r: f32)
 ecs.archetype @D (@R) capacity 10
-// expected-remark @+1 {{reads D.count; writes D.count, D.R.r}}
+// expected-remark @+1 {{reads D.count; writes D.count, D.id, D.R.r}}
 ecs.system @recycle(%v: f32) reads [@R] writes [@D] {
   ecs.spawn @D(%v) : f32
   ecs.query (%r: !ecs.ref<@R>) {
     ecs.despawn
+  }
+}
+
+// Adding a component that one matched archetype stores and the other does
+// not: overwrite in E2, move from E1 to E2 (both archetypes' structure).
+// ecs.entity reads the id column.
+ecs.component @M (m: f32)
+ecs.component @N (n: f32)
+ecs.archetype @E1 (@M) capacity 10
+ecs.archetype @E2 (@M, @N) capacity 10
+// expected-remark @+1 {{reads E1.id, E2.id, E1.count, E2.count; writes E1.count, E1.id, E1.M.m, E2.count, E2.id, E2.M.m, E2.N.n}}
+ecs.system @promote(%v: f32) reads [@M] writes [@N] {
+  ecs.query (%m: !ecs.ref<@M>) {
+    %id = ecs.entity : i64
+    ecs.add @N(%v) : f32
   }
 }

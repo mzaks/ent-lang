@@ -1,4 +1,5 @@
 #include "Ecs/Access.h"
+#include "Ecs/Structure.h"
 
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
@@ -11,7 +12,8 @@ std::string mlir::ecs::formatColumn(const Column &column) {
   if (!archetype)
     return (component.getValue() + "." + field.getValue()).str();
   if (component.getValue().empty())
-    return (archetype.getValue() + ".count").str();
+    return (archetype.getValue() + (field.getValue().empty() ? ".count" : ".id"))
+        .str();
   if (field.getValue().empty())
     return (archetype.getValue() + "." + component.getValue() + "?").str();
   return (archetype.getValue() + "." + component.getValue() + "." +
@@ -80,9 +82,11 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
 
   // A spawn or despawn changes which entities an archetype holds: it
   // writes the count and, since rows are appended or moved, every column.
+  StringAttr idField = StringAttr::get(system.getContext(), "id");
   auto writeStructure = [&](ArchetypeOp archetype) {
     StringAttr name = archetype.getSymNameAttr();
     access.writes.insert({name, empty, empty});
+    access.writes.insert({name, empty, idField});
     for (Attribute attr : archetype.getComponents()) {
       auto component = cast<FlatSymbolRefAttr>(attr);
       auto componentOp =
@@ -116,20 +120,34 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
                                          write.getResourceAttr().getAttr(),
                                          write.getFieldAttr()});
     if (isa<AddOp, RemoveOp>(op)) {
-      // Every matched archetype holds the component as optional (verified):
-      // the change writes its presence, and an add also its fields.
+      // What the change writes depends on how each matched archetype
+      // stores the component.
+      bool add = isa<AddOp>(op);
       auto component = cast<FlatSymbolRefAttr>(op->getAttr("component"));
       auto componentOp = SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
           system, component);
       for (ArchetypeOp archetype :
            matchedArchetypes(op->getParentOfType<QueryOp>())) {
         StringAttr name = archetype.getSymNameAttr();
-        access.writes.insert({name, component.getAttr(), presence});
-        if (isa<AddOp>(op))
+        ComponentChange change = classifyChange(archetype, component, add);
+        if (change.kind == ComponentChange::Move) {
+          writeStructure(archetype);
+          writeStructure(change.target);
+          continue;
+        }
+        if (change.kind == ComponentChange::Presence)
+          access.writes.insert({name, component.getAttr(), presence});
+        if (add && change.kind != ComponentChange::NoTarget)
           for (Attribute field : componentOp.getFieldNames())
             access.writes.insert(
                 {name, component.getAttr(), cast<StringAttr>(field)});
       }
+      return;
+    }
+    if (isa<EntityOp>(op)) {
+      for (ArchetypeOp archetype :
+           matchedArchetypes(op->getParentOfType<QueryOp>()))
+        access.reads.insert({archetype.getSymNameAttr(), empty, idField});
       return;
     }
     if (auto spawn = dyn_cast<SpawnOp>(op)) {
