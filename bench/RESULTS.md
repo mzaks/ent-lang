@@ -271,3 +271,111 @@ used a full core shortly before the run and was down to 8% at the start.
   1.85 ms (spread 7%) against 1.84 ms with defaults, and entities-omp was
   faster (2.06 vs 2.24 ms). The three earlier runs had more background
   load; whether that explains them is not verified.
+
+## 2026-09-29: storage for an optional component under churn
+
+Same machine and toolchain. `bench/churn/`: N entities with Position and
+Velocity; a fraction also holds Status (a timer). Each frame, churn * N / 2
+holders lose Status and as many others gain it (uniformly at random), then
+`move` runs on everyone and `status` (slow dx, count the timer down) on the
+holders. The changes are precomputed and identical for every variant; all
+variants agree on the checksum in every configuration. Single-threaded;
+median of 5 processes, each the best of 5 repetitions of 64 frames; load
+average 1.9 before and 2.4 after.
+
+Variants: **archetypes** (two tables; a change copies the entity to the
+other table and swap-removes it), **wide-select** (one table with a Status
+column and a presence byte; `status` computes for everyone and selects,
+branch-free, as the compiler would emit it), **wide-branch** (the same, with
+an `if`), **sparse-set** (Status packed densely with its owner's id; `status`
+reaches Velocity through the id).
+
+### n = 1e6: us per frame (spread), best in bold
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set |
+|---|---|---|---|---|---|
+| 1% | 0.0% | **171.7 (3%)** | 312.3 (2%) | 449.0 (6%) | 176.3 (4%) |
+| 1% | 0.1% | 184.1 (5%) | 313.2 (3%) | 456.0 (7%) | **179.4 (3%)** |
+| 1% | 1.0% | 282.9 (8%) | 322.6 (1%) | 473.2 (7%) | **190.1 (2%)** |
+| 10% | 0.0% | **181.7 (2%)** | 311.5 (2%) | 739.3 (8%) | 226.6 (3%) |
+| 10% | 0.1% | **197.2 (5%)** | 315.5 (2%) | 803.5 (8%) | 235.2 (4%) |
+| 10% | 1.0% | 301.6 (10%) | 325.3 (2%) | 850.8 (9%) | **285.0 (4%)** |
+| 10% | 10.0% | 1,332.9 (10%) | **426.1 (4%)** | 948.7 (5%) | 486.4 (2%) |
+| 50% | 0.0% | **225.8 (2%)** | 311.6 (1%) | 2,498.7 (6%) | 367.1 (2%) |
+| 50% | 0.1% | **241.0 (2%)** | 313.9 (1%) | 2,562.3 (4%) | 376.8 (2%) |
+| 50% | 1.0% | 355.1 (5%) | **322.4 (2%)** | 2,605.7 (4%) | 484.5 (1%) |
+| 50% | 10.0% | 1,452.3 (5%) | **429.0 (2%)** | 2,737.4 (2%) | 804.0 (2%) |
+| 90% | 0.0% | **269.9 (2%)** | 312.3 (3%) | 794.9 (6%) | 505.2 (3%) |
+| 90% | 0.1% | **289.1 (6%)** | 314.0 (1%) | 952.9 (2%) | 517.5 (3%) |
+| 90% | 1.0% | 390.6 (5%) | **322.8 (3%)** | 985.3 (3%) | 642.1 (2%) |
+| 90% | 10.0% | 1,499.3 (8%) | **429.6 (3%)** | 1,076.8 (2%) | 1,082.9 (3%) |
+
+Churn / systems split, us per frame:
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set |
+|---|---|---|---|---|---|
+| 1% | 1.0% | 113.5 / 170.4 | 9.5 / 313.1 | 9.4 / 463.8 | 13.8 / 176.2 |
+| 10% | 10.0% | 1,156.0 / 176.8 | 95.6 / 330.6 | 90.7 / 857.9 | 209.4 / 274.6 |
+| 50% | 1.0% | 130.7 / 222.2 | 9.6 / 312.9 | 9.6 / 2,596.3 | 21.6 / 463.4 |
+| 50% | 10.0% | 1,229.1 / 223.8 | 96.0 / 331.9 | 93.0 / 2,644.4 | 181.7 / 620.3 |
+| 90% | 10.0% | 1,217.7 / 280.8 | 95.7 / 331.9 | 94.4 / 982.9 | 177.1 / 905.2 |
+
+Reserved memory: archetypes 49 MB (both tables need full capacity),
+wide 21 MB, sparse-set 28 MB.
+
+### n = 1e5: us per frame (spread), best in bold
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set |
+|---|---|---|---|---|---|
+| 1% | 0.0% | **16.4 (58%)** | 30.5 (68%) | 44.3 (63%) | 17.0 (83%) |
+| 1% | 0.1% | 17.3 (45%) | 30.8 (27%) | 45.0 (11%) | **17.3 (8%)** |
+| 1% | 1.0% | 23.6 (9%) | 31.2 (5%) | 45.8 (7%) | **17.9 (9%)** |
+| 10% | 0.0% | **17.6 (10%)** | 30.2 (9%) | 47.7 (9%) | 21.7 (10%) |
+| 10% | 0.1% | **18.0 (6%)** | 30.1 (9%) | 51.1 (4%) | 21.9 (6%) |
+| 10% | 1.0% | 25.4 (12%) | 30.6 (10%) | 77.3 (9%) | **23.9 (11%)** |
+| 10% | 10.0% | 152.9 (10%) | 36.2 (10%) | 90.2 (9%) | **33.5 (8%)** |
+| 50% | 0.0% | **21.8 (12%)** | 30.5 (3%) | 94.4 (86%) | 35.5 (8%) |
+| 50% | 0.1% | **23.1 (6%)** | 30.0 (10%) | 145.1 (10%) | 35.7 (9%) |
+| 50% | 1.0% | **30.8 (8%)** | 31.1 (7%) | 234.4 (8%) | 42.5 (6%) |
+| 50% | 10.0% | 156.5 (11%) | **36.1 (7%)** | 259.9 (8%) | 78.5 (10%) |
+| 90% | 0.0% | **26.0 (16%)** | 30.4 (12%) | 49.5 (7%) | 49.1 (8%) |
+| 90% | 0.1% | **27.2 (9%)** | 30.4 (4%) | 61.5 (5%) | 50.3 (8%) |
+| 90% | 1.0% | 34.5 (10%) | **31.3 (10%)** | 95.8 (7%) | 57.7 (4%) |
+| 90% | 10.0% | 157.9 (18%) | **36.0 (9%)** | 99.3 (6%) | 109.4 (9%) |
+
+### What holds
+
+- No storage wins everywhere; churn rate and density decide.
+  - Churn up to 0.1% of entities per frame: archetype moves win except
+    at 1% density, where they tie with sparse-set.
+  - Churn of 1%: sparse-set wins at 1-10% density, wide-select at 50-90%.
+  - Churn of 10%: wide-select wins at every density, 3.1-3.5x faster than
+    archetype moves at 1e6.
+- The split gives the cost model behind it, at n=1e6:
+  - archetypes: a status pass over the holders only, plus 11-13 ns per
+    change (copy and swap-remove at random rows);
+  - wide-select: a full pass (about 312 us whatever the density), plus
+    about 1 ns per change;
+  - sparse-set: about 2 ns per change, but its status pass reaches
+    Velocity through the owner's id, and grows faster with density than a
+    contiguous pass (505 us at 90%).
+- Branch-free code matters: the wide archetype with an `if` is 2-8x slower
+  than the select form at 10-50% density (2.5 ms against 0.31 ms at 50%).
+  The compiler can emit the select form because query bodies are
+  entity-local and every slot is valid memory; a C programmer's natural
+  `if` is the slow one.
+- With capacities, archetype moves reserve full capacity in both tables:
+  49 MB against 21 MB (wide) and 28 MB (sparse-set) here.
+
+So the storage of an optional component should be a per-component
+decision, and the measured costs are enough for a first rule of thumb.
+
+### Limits and not explained
+
+- Single-threaded; one optional component; changes uniformly random (the
+  worst case for archetype moves, whose copies then miss the cache).
+  With k optional components, archetype moves would also split entities
+  over up to 2^k tables; not measured.
+- At n=1e5, the configurations without churn at 1% density are noisy
+  (58-83% spread) for every variant; why is not known. The rest of the
+  1e5 table follows the 1e6 pattern.
