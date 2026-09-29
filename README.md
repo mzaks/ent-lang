@@ -59,6 +59,13 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
   and `ecs.remove @Stunned`, inside a query, write the entity's own row
   instead of moving it to another archetype. Queries that bind it run only
   for the entities that have it.
+- `ecs.spawn @Bullet(%x, %dx, %t) : f32, f32, f32` creates an entity, with a
+  value for every field of the archetype's non-optional components;
+  optional components start absent. Spawning beyond the capacity stops the
+  program with a message. `ecs.despawn`, inside a query, removes the entity
+  it visits; the removal is deferred to the end of the query, so the query
+  still visits every entity it would have. A system that does either
+  declares the archetype in `writes`, e.g. `writes [@Bullet]`.
 - `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
   exactly once and is not an entity. Systems declare it in `reads`/`writes`
   and access it with `ecs.read @Clock "dt" : f32` and
@@ -91,7 +98,10 @@ do not conflict if one only touches `Body.Velocity.dy` and the other only
 a read. Resource fields are columns too (`Clock.frame`), so a system that
 writes a resource is ordered against the systems that read it, and so is
 the presence of an optional component (`Character.Stunned?`): adding or
-removing it is ordered against every query that binds it. Any other op
+removing it is ordered against every query that binds it. Every query reads
+its archetypes' entity counts (`Bullet.count`), and a spawn or despawn
+writes the count and every column of the archetype, so structural changes
+are ordered against every system that touches the archetype. Any other op
 with memory effects (a call, say) makes a system opaque, and opaque systems
 conflict with everything.
 
@@ -145,6 +155,12 @@ different archetypes share no columns. Two consequences the lowering uses:
   ahead of the queries.
 - Since no query writes a resource, a resource read inside a query is
   loaded once before the loop.
+- A spawn checks the capacity, writes row `count` and bumps the count. A
+  despawn appends the row to a pending list; after the query's loop, the
+  listed rows are removed last first, each by moving the archetype's last
+  row into it (swap-remove), which changes the rows of the moved entities.
+  Queries that spawn or despawn stay sequential (the lists are shared), and
+  a system that does either ends a fused sequence.
 - A query that binds an optional component runs for every entity of the
   archetype and masks its stores with the presence, branch-free: every
   slot exists and belongs to the entity, so computing on an absent
