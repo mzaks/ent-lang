@@ -69,9 +69,9 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "//\n"
         "// The world is one arena with a layout fixed at compile time. "
         "Create it,\n"
-        "// set each archetype's count (at most its capacity), fill the "
-        "columns of\n"
-        "// entities [0, count), and run schedules on it.\n\n"
+        "// spawn entities (ecs_<Archetype>_spawn), fill their columns, and "
+        "run\n"
+        "// schedules on it.\n\n"
         "#ifndef ECS_GENERATED_WORLD_H\n"
         "#define ECS_GENERATED_WORLD_H\n\n"
         "#include <stdbool.h>\n#include <stdint.h>\n#include <stdlib.h>\n"
@@ -93,6 +93,59 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "static inline void ecs_world_destroy(ecs_world *world) { "
         "free(world); }\n";
 
+  // Entity ids: a generation in the upper 32 bits, a slot of the entity
+  // table in the lower 32. Despawning bumps the slot's generation, so old
+  // ids stop being alive; freed slots are reused last freed first.
+  os << "\n// Entities\n"
+        "typedef uint64_t ecs_entity;\n"
+        "#define ECS_NO_ENTITY UINT64_MAX\n";
+  os << llvm::formatv("#define ECS_ENTITY_CAPACITY {0}\n",
+                      layout->entityCapacity);
+  os << llvm::formatv(
+      "#define ECS__NEXT_SLOT ((int64_t *)((char *)world + {0}))\n"
+      "#define ECS__FREE_COUNT ((int64_t *)((char *)world + {1}))\n"
+      "#define ECS__GENERATION ((uint32_t *)((char *)world + {2}))\n"
+      "#define ECS__ARCHETYPE ((int32_t *)((char *)world + {3}))\n"
+      "#define ECS__ROW ((int32_t *)((char *)world + {4}))\n"
+      "#define ECS__FREE_LIST ((int32_t *)((char *)world + {5}))\n",
+      layout->nextSlotOffset, layout->freeCountOffset,
+      layout->generationOffset, layout->locationArchetypeOffset,
+      layout->locationRowOffset, layout->freeListOffset);
+  os << "static inline ecs_entity ecs__allocate(ecs_world *world, "
+        "int32_t archetype,\n"
+        "                                       int64_t row) {\n"
+        "  int32_t slot;\n"
+        "  if (*ECS__FREE_COUNT > 0) {\n"
+        "    slot = ECS__FREE_LIST[--*ECS__FREE_COUNT];\n"
+        "  } else {\n"
+        "    slot = (int32_t)(*ECS__NEXT_SLOT)++;\n"
+        "    ECS__GENERATION[slot] = 0;\n"
+        "  }\n"
+        "  ECS__ARCHETYPE[slot] = archetype;\n"
+        "  ECS__ROW[slot] = (int32_t)row;\n"
+        "  return ((ecs_entity)ECS__GENERATION[slot] << 32) | (uint32_t)slot;\n"
+        "}\n"
+        "static inline bool ecs_entity_alive(const ecs_world *world_, "
+        "ecs_entity id) {\n"
+        "  ecs_world *world = (ecs_world *)world_;\n"
+        "  uint32_t slot = (uint32_t)id;\n"
+        "  return id != ECS_NO_ENTITY && (int64_t)slot < *ECS__NEXT_SLOT &&\n"
+        "         ECS__GENERATION[slot] == (uint32_t)(id >> 32);\n"
+        "}\n"
+        "// The archetype (ECS_ARCHETYPE_<name>) and row of a live entity, or "
+        "-1.\n"
+        "static inline int32_t ecs_entity_archetype(const ecs_world *world_,\n"
+        "                                           ecs_entity id) {\n"
+        "  ecs_world *world = (ecs_world *)world_;\n"
+        "  return ecs_entity_alive(world, id) ? ECS__ARCHETYPE[(uint32_t)id] "
+        ": -1;\n"
+        "}\n"
+        "static inline int64_t ecs_entity_row(const ecs_world *world_, "
+        "ecs_entity id) {\n"
+        "  ecs_world *world = (ecs_world *)world_;\n"
+        "  return ecs_entity_alive(world, id) ? ECS__ROW[(uint32_t)id] : -1;\n"
+        "}\n";
+
   for (const WorldArchetype &archetype : layout->archetypes) {
     ArchetypeOp archetypeOp = archetype.op;
     std::string name = toIdentifier(archetypeOp.getSymName());
@@ -105,28 +158,46 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "static inline int64_t ecs_{0}_count(const ecs_world *world) {{\n"
         "  return ((const int64_t *)world)[{1}];\n}\n",
         name, archetype.index);
-    // Entities that come into range start without optional components.
+    os << llvm::formatv("#define ECS_ARCHETYPE_{0} {1}\n", name,
+                        archetype.index);
+    // Spawn one entity: the next row, a new id, optional components absent.
+    // The same steps as ecs.spawn in the lowered program.
     std::string clearPresence;
     for (const WorldColumn &column : archetype.columns)
       if (column.field.getValue().empty())
-        clearPresence += llvm::formatv(
-            "    memset((char *)world + {0} + old, 0, (size_t)(n - old));\n",
-            column.offset);
-    os << "// Returns false and leaves the count unchanged if n is out of "
-          "range.\n";
-    if (!clearPresence.empty())
-      os << "// Entities that come into range have no optional components.\n";
+        clearPresence +=
+            llvm::formatv("  ((uint8_t *)((char *)world + {0}))[n] = 0;\n",
+                          column.offset);
+    os << "// Returns the new entity's id, or ECS_NO_ENTITY if the archetype "
+          "is full.\n// Its fields are uninitialised; fill them at "
+          "ecs_entity_row(world, id).\n";
     os << llvm::formatv(
-        "static inline bool ecs_{0}_set_count(ecs_world *world, int64_t n) "
-        "{{\n"
-        "  if (n < 0 || n > ECS_{0}_CAPACITY)\n    return false;\n",
+        "static inline ecs_entity ecs_{0}_spawn(ecs_world *world) {{\n"
+        "  int64_t n = ((int64_t *)world)[{1}];\n"
+        "  if (n >= ECS_{0}_CAPACITY)\n    return ECS_NO_ENTITY;\n"
+        "{2}"
+        "  ecs_entity id = ecs__allocate(world, {1}, n);\n"
+        "  ((ecs_entity *)((char *)world + {3}))[n] = id;\n"
+        "  ((int64_t *)world)[{1}] = n + 1;\n"
+        "  return id;\n}\n",
+        name, archetype.index, clearPresence, archetype.idOffset);
+    os << llvm::formatv(
+        "// Spawns n entities in consecutive rows; false (and none spawned) "
+        "if they\n// do not fit.\n"
+        "static inline bool ecs_{0}_spawn_n(ecs_world *world, int64_t n) {{\n"
+        "  if (n < 0 || ecs_{0}_count(world) + n > ECS_{0}_CAPACITY)\n"
+        "    return false;\n"
+        "  for (int64_t i = 0; i < n; ++i)\n"
+        "    ecs_{0}_spawn(world);\n"
+        "  return true;\n}\n",
         name);
-    if (!clearPresence.empty())
-      os << llvm::formatv("  int64_t old = ((int64_t *)world)[{0}];\n"
-                          "  if (n > old) {{\n{1}  }\n",
-                          archetype.index, clearPresence);
-    os << llvm::formatv("  ((int64_t *)world)[{0}] = n;\n  return true;\n}\n",
-                        archetype.index);
+    os << llvm::formatv(
+        "// The id of the entity in each row.\n"
+        "static inline ecs_entity *ecs_{0}_id(ecs_world *world) {{\n"
+        "  return (ecs_entity *)((char *)world + {1});\n}\n",
+        name, archetype.idOffset);
+    if (failed(claim(archetypeOp, "ecs_" + name + "_id")))
+      return failure();
     for (const WorldColumn &column : archetype.columns) {
       // An optional component's presence column has an empty field name.
       bool isPresence = column.field.getValue().empty();

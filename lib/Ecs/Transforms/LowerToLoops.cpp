@@ -1,6 +1,7 @@
 #include "Ecs/Access.h"
 #include "Ecs/EcsOps.h"
 #include "Ecs/Passes.h"
+#include "Ecs/Structure.h"
 #include "Ecs/World.h"
 
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -65,6 +66,115 @@ public:
   Value pendingCount(const WorldArchetype &archetype) {
     return view(archetype.pendingCountOffset, 1, rewriter.getI64Type());
   }
+  Value pendingActions(const WorldArchetype &archetype) {
+    return view(archetype.pendingActionOffset, archetype.capacity,
+                rewriter.getI32Type());
+  }
+  Value moveValues(const WorldArchetype &archetype,
+                   const WorldColumn &column) {
+    return view(column.offset, archetype.capacity, column.type);
+  }
+  /// The id of the entity in each row of `archetype`.
+  Value ids(const WorldArchetype &archetype) {
+    return view(archetype.idOffset, archetype.capacity, rewriter.getI64Type());
+  }
+
+  /// Allocate an id for a new entity at `row` (an index) of `archetype`,
+  /// the same way the generated C header does: reuse the last freed slot,
+  /// or take the next never-used one with generation 0.
+  Value allocateEntity(Location loc, const WorldArchetype &archetype,
+                       Value row) {
+    Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value freeCount = scalar(layout.freeCountOffset);
+    Value free = memref::LoadOp::create(rewriter, loc, freeCount,
+                                        ValueRange{zero});
+    Value zero64 = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+    Value one64 = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
+    Value reuse = arith::CmpIOp::create(rewriter, loc,
+                                        arith::CmpIPredicate::sgt, free, zero64);
+    auto choose = scf::IfOp::create(rewriter, loc, TypeRange{i32}, reuse,
+                                    /*withElseRegion=*/true);
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(choose.thenBlock());
+      Value top = arith::SubIOp::create(rewriter, loc, free, one64);
+      memref::StoreOp::create(rewriter, loc, top, freeCount, ValueRange{zero});
+      Value slot = memref::LoadOp::create(
+          rewriter, loc, table(layout.freeListOffset), ValueRange{toIndex(loc, top)});
+      scf::YieldOp::create(rewriter, loc, slot);
+      rewriter.setInsertionPointToStart(choose.elseBlock());
+      Value nextSlot = scalar(layout.nextSlotOffset);
+      Value next = memref::LoadOp::create(rewriter, loc, nextSlot,
+                                          ValueRange{zero});
+      memref::StoreOp::create(rewriter, loc,
+                              arith::AddIOp::create(rewriter, loc, next, one64),
+                              nextSlot, ValueRange{zero});
+      Value fresh = arith::TruncIOp::create(rewriter, loc, i32, next);
+      memref::StoreOp::create(rewriter, loc,
+                              arith::ConstantIntOp::create(rewriter, loc, 0, 32),
+                              table(layout.generationOffset),
+                              ValueRange{toIndex(loc, next)});
+      scf::YieldOp::create(rewriter, loc, fresh);
+    }
+    Value slot = choose.getResult(0);
+    setLocation(loc, slot, archetype, row);
+    Value generation = memref::LoadOp::create(
+        rewriter, loc, table(layout.generationOffset),
+        ValueRange{toIndex(loc, slot)});
+    Value high = arith::ShLIOp::create(
+        rewriter, loc, arith::ExtUIOp::create(rewriter, loc, i64, generation),
+        arith::ConstantIntOp::create(rewriter, loc, 32, 64));
+    Value low = arith::ExtUIOp::create(rewriter, loc, i64, slot);
+    return arith::OrIOp::create(rewriter, loc, high, low);
+  }
+
+  /// Free the id `entity` (i64): bump its slot's generation, so the id is
+  /// no longer alive, and push the slot on the free list.
+  void freeEntity(Location loc, Value entity) {
+    Value slot = arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(),
+                                         entity);
+    Value index = toIndex(loc, slot);
+    Value generations = table(layout.generationOffset);
+    Value generation =
+        memref::LoadOp::create(rewriter, loc, generations, ValueRange{index});
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::AddIOp::create(rewriter, loc, generation,
+                              arith::ConstantIntOp::create(rewriter, loc, 1, 32)),
+        generations, ValueRange{index});
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value freeCount = scalar(layout.freeCountOffset);
+    Value free = memref::LoadOp::create(rewriter, loc, freeCount,
+                                        ValueRange{zero});
+    memref::StoreOp::create(rewriter, loc, slot, table(layout.freeListOffset),
+                            ValueRange{toIndex(loc, free)});
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::AddIOp::create(rewriter, loc, free,
+                              arith::ConstantIntOp::create(rewriter, loc, 1, 64)),
+        freeCount, ValueRange{zero});
+  }
+
+  /// Record that the entity with id slot `slot` (i32) lives at `row` (an
+  /// index) of `archetype`.
+  void setLocation(Location loc, Value slot, const WorldArchetype &archetype,
+                   Value row) {
+    Value index = toIndex(loc, slot);
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::ConstantIntOp::create(rewriter, loc, archetype.index, 32),
+        table(layout.locationArchetypeOffset), ValueRange{index});
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(), row),
+        table(layout.locationRowOffset), ValueRange{index});
+  }
+
+  Value toIndex(Location loc, Value value) {
+    return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                      value);
+  }
 
   /// A statically shaped view of one column of `archetype`.
   Value column(const WorldArchetype &archetype, StringAttr component,
@@ -99,6 +209,15 @@ public:
   }
 
 private:
+  /// A one-element i64 view (a counter in the header).
+  Value scalar(uint64_t offset) {
+    return view(offset, 1, rewriter.getI64Type());
+  }
+  /// An i32 array of the entity table.
+  Value table(uint64_t offset) {
+    return view(offset, layout.entityCapacity, rewriter.getI32Type());
+  }
+
   Value getCounts() {
     if (!countsView)
       countsView = atEntry([&](Location loc) {
@@ -183,13 +302,37 @@ static bool matches(const WorldArchetype &archetype, QueryOp query) {
   });
 }
 
+/// True if the query changes which entities `archetype` holds: it spawns,
+/// despawns, or adds or removes a component in a way that moves entities
+/// of this archetype.
+static bool isStructuralFor(QueryOp query, ArchetypeOp archetype) {
+  WalkResult result = query.getBody().walk([&](Operation *op) {
+    if (isa<SpawnOp, DespawnOp>(op))
+      return WalkResult::interrupt();
+    if (auto add = dyn_cast<AddOp>(op))
+      if (classifyChange(archetype, add.getComponentAttr(), true)
+              .isStructural())
+        return WalkResult::interrupt();
+    if (auto remove = dyn_cast<RemoveOp>(op))
+      if (classifyChange(archetype, remove.getComponentAttr(), false)
+              .isStructural())
+        return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  return result.wasInterrupted();
+}
+
 /// True if the query body only computes and accesses its own entity's
 /// components, so its iterations are independent of each other.
 static bool isEntityLocal(QueryOp query) {
+  for (ArchetypeOp archetype : getMatchedArchetypes(query))
+    if (isStructuralFor(query, archetype))
+      return false;
   WalkResult result = query.getBody().walk([](Operation *op) {
     // Resource reads are fine: no query writes a resource. Adding and
-    // removing optional components only writes the entity's own row.
-    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, YieldOp>(op) ||
+    // removing components without moving (checked above) only writes the
+    // entity's own row; its id is its own.
+    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, YieldOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
     return WalkResult::interrupt();
@@ -310,8 +453,8 @@ static void lowerResourceAccesses(IRRewriter &rewriter, func::FuncOp func,
 /// division, for example, is not: it may be undefined on such values.
 static bool canRunForAbsentEntities(QueryOp query) {
   WalkResult result = query.getBody().walk([](Operation *op) {
-    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, YieldOp, scf::IfOp,
-            scf::YieldOp>(op))
+    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, YieldOp,
+            scf::IfOp, scf::YieldOp>(op))
       return WalkResult::advance();
     if (op->getNumRegions() == 0 && isPure(op))
       return WalkResult::advance();
@@ -320,10 +463,70 @@ static bool canRunForAbsentEntities(QueryOp query) {
   return !result.wasInterrupted();
 }
 
-/// Replace the get/set/add/remove ops nested in `roots` by loads and stores
-/// at `entity` in the columns of `archetype`. With a `mask`, every store
-/// keeps the old value where the mask is false: the body ran for an entity
-/// it does not apply to.
+/// List `entity` (a row of `archetype`) as pending with `action` (0 to
+/// despawn, otherwise a move's code) and the values of a move that adds a
+/// component. The rows come in ascending order; if the last listed row is
+/// this one, the new action replaces it: the last structural change to an
+/// entity in a query wins.
+static void recordPending(IRRewriter &rewriter, Location loc,
+                          const WorldArchetype &archetype, WorldAccess &world,
+                          Value entity, unsigned action,
+                          const WorldMove *move, ValueRange values) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value counter = world.pendingCount(archetype);
+  Value count = memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero});
+  Value one64 = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
+  Value row = arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(),
+                                         entity);
+  Value list = world.pendingList(archetype);
+  // Is the last listed row this entity? (Only look if there is one.)
+  Value any = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::sgt, count,
+      arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+  auto check = scf::IfOp::create(rewriter, loc, TypeRange{rewriter.getI1Type()},
+                                 any, /*withElseRegion=*/true);
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(check.thenBlock());
+    Value last = memref::LoadOp::create(
+        rewriter, loc, list,
+        ValueRange{world.toIndex(
+            loc, arith::SubIOp::create(rewriter, loc, count, one64))});
+    scf::YieldOp::create(rewriter, loc,
+                         ValueRange{arith::CmpIOp::create(
+                             rewriter, loc, arith::CmpIPredicate::eq, last,
+                             row)});
+    rewriter.setInsertionPointToStart(check.elseBlock());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 1)});
+  }
+  Value same = check.getResult(0);
+  Value slot64 = arith::SelectOp::create(
+      rewriter, loc, same, arith::SubIOp::create(rewriter, loc, count, one64),
+      count);
+  Value slot = world.toIndex(loc, slot64);
+  memref::StoreOp::create(rewriter, loc, row, list, ValueRange{slot});
+  if (archetype.pendingActionOffset)
+    memref::StoreOp::create(
+        rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, action, 32),
+        world.pendingActions(archetype), ValueRange{slot});
+  if (move)
+    for (auto [value, column] : llvm::zip(values, move->values))
+      memref::StoreOp::create(rewriter, loc, value,
+                              world.moveValues(archetype, column),
+                              ValueRange{slot});
+  memref::StoreOp::create(
+      rewriter, loc,
+      arith::SelectOp::create(rewriter, loc, same, count,
+                              arith::AddIOp::create(rewriter, loc, count, one64)),
+      counter, ValueRange{zero});
+}
+
+/// Replace the get/set/add/remove/despawn/entity ops nested in `roots` by
+/// loads and stores at `entity` in the columns of `archetype`. With a
+/// `mask`, every store keeps the old value where the mask is false: the
+/// body ran for an entity it does not apply to.
 static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                           const WorldArchetype &archetype, WorldAccess &world,
                           Value entity, Value mask) {
@@ -347,7 +550,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
   SmallVector<Operation *> accesses;
   for (Operation *root : roots)
     root->walk([&](Operation *op) {
-      if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp>(op))
+      if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp, EntityOp>(op))
         accesses.push_back(op);
     });
   for (Operation *op : accesses) {
@@ -365,35 +568,48 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       store(loc, set.getValue(),
             column(component.getAttr(), set.getFieldAttr()));
       rewriter.eraseOp(set);
-    } else if (auto add = dyn_cast<AddOp>(op)) {
-      StringAttr component = add.getComponentAttr().getAttr();
-      auto componentOp = SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
-          add, add.getComponentAttr());
-      for (auto [value, field] :
-           llvm::zip(add.getValues(), componentOp.getFieldNames()))
-        store(loc, value, column(component, cast<StringAttr>(field)));
-      setPresence(loc, component, 1);
-      rewriter.eraseOp(add);
-    } else if (auto remove = dyn_cast<RemoveOp>(op)) {
-      setPresence(loc, remove.getComponentAttr().getAttr(), 0);
-      rewriter.eraseOp(remove);
+    } else if (isa<AddOp, RemoveOp>(op)) {
+      bool isAdd = isa<AddOp>(op);
+      auto componentRef = cast<FlatSymbolRefAttr>(op->getAttr("component"));
+      StringAttr component = componentRef.getAttr();
+      ValueRange values = isAdd ? cast<AddOp>(op).getValues() : ValueRange();
+      auto componentOp =
+          SymbolTable::lookupNearestSymbolFrom<ComponentOp>(op, componentRef);
+      switch (classifyChange(archetype.op, componentRef, isAdd).kind) {
+      case ComponentChange::Presence:
+        if (isAdd)
+          for (auto [value, field] :
+               llvm::zip(values, componentOp.getFieldNames()))
+            store(loc, value, column(component, cast<StringAttr>(field)));
+        setPresence(loc, component, isAdd ? 1 : 0);
+        break;
+      case ComponentChange::Overwrite:
+        for (auto [value, field] :
+             llvm::zip(values, componentOp.getFieldNames()))
+          store(loc, value, column(component, cast<StringAttr>(field)));
+        break;
+      case ComponentChange::Move: {
+        // Deferred like a despawn; a moving body never runs masked.
+        assert(!mask && "move in a masked body");
+        const WorldMove *move = archetype.findMove(component, isAdd);
+        recordPending(rewriter, loc, archetype, world, entity, move->code,
+                      move, values);
+        break;
+      }
+      case ComponentChange::Nothing:
+      case ComponentChange::NoTarget:
+        break;
+      }
+      rewriter.eraseOp(op);
+    } else if (isa<EntityOp>(op)) {
+      rewriter.replaceOpWithNewOp<memref::LoadOp>(op, world.ids(archetype),
+                                                  ValueRange{entity});
     } else {
       // Despawn is deferred: list the row; the query's end removes it. A
       // body with a despawn never runs masked (it is not speculatable).
       assert(!mask && "despawn in a masked body");
-      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-      Value counter = world.pendingCount(archetype);
-      Value pending =
-          memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero});
-      Value slot = arith::IndexCastOp::create(rewriter, loc,
-                                              rewriter.getIndexType(), pending);
-      Value row = arith::IndexCastOp::create(rewriter, loc,
-                                             rewriter.getI32Type(), entity);
-      memref::StoreOp::create(rewriter, loc, row, world.pendingList(archetype),
-                              ValueRange{slot});
-      Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
-      Value next = arith::AddIOp::create(rewriter, loc, pending, one);
-      memref::StoreOp::create(rewriter, loc, next, counter, ValueRange{zero});
+      recordPending(rewriter, loc, archetype, world, entity, /*action=*/0,
+                    /*move=*/nullptr, {});
       rewriter.eraseOp(op);
     }
   }
@@ -428,7 +644,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   }
 
   OpBuilder::InsertionGuard guard(rewriter);
-  if (mask && !canRunForAbsentEntities(query)) {
+  if (mask && (!canRunForAbsentEntities(query) ||
+               isStructuralFor(query, archetypeOp))) {
     auto branch = scf::IfOp::create(rewriter, loc, mask);
     rewriter.setInsertionPointToStart(branch.thenBlock());
     mask = Value();
@@ -439,52 +656,162 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   lowerAccesses(rewriter, roots, archetype, world, entity, mask);
 }
 
-/// Remove the rows listed as pending for `archetype`, at the insertion
-/// point: last listed first, each by moving the archetype's last row into
-/// it (swap-remove). The list is in ascending row order, since the query
-/// visited rows in order, so no listed row is moved before it is removed.
-static void applyDespawns(IRRewriter &rewriter, Location loc,
-                          const WorldArchetype &archetype, WorldAccess &world) {
+/// Append the entity at `row` of `source` to `move.target`, as the move
+/// says: shared components are copied, an added component takes the values
+/// listed at pending slot `slot`, and optional components the entity did
+/// not have in `source` start absent. Updates the entity's location.
+static void applyMove(IRRewriter &rewriter, Location loc,
+                      const WorldLayout &layout, const WorldArchetype &source,
+                      const WorldMove &move, WorldAccess &world, Value row,
+                      Value slot, Value id) {
+  const WorldArchetype *target = nullptr;
+  for (const WorldArchetype &entry : layout.archetypes)
+    if (entry.op == move.target)
+      target = &entry;
+  ArchetypeOp sourceOp = source.op, targetOp = target->op;
+  Value to = world.count(loc, *target);
+  Value capacity =
+      arith::ConstantIndexOp::create(rewriter, loc, target->capacity);
+  cf::AssertOp::create(
+      rewriter, loc,
+      arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, to,
+                            capacity),
+      rewriter.getStringAttr("moving an entity exceeds the capacity of @" +
+                             targetOp.getSymName()));
+  for (const WorldColumn &column : target->columns) {
+    auto component = FlatSymbolRefAttr::get(column.component);
+    Value value;
+    if (column.field.getValue().empty()) {
+      // Presence in the target: carried over where the source has the
+      // component optionally, present where the source always has it or
+      // it is being added, absent otherwise.
+      if (sourceOp.isOptional(component))
+        value = memref::LoadOp::create(
+            rewriter, loc, world.column(source, column.component, column.field),
+            ValueRange{row});
+      else
+        value = arith::ConstantIntOp::create(
+            rewriter, loc,
+            sourceOp.contains(component) ||
+                (move.add && column.component == move.component),
+            8);
+    } else if (sourceOp.contains(component)) {
+      value = memref::LoadOp::create(
+          rewriter, loc, world.column(source, column.component, column.field),
+          ValueRange{row});
+    } else if (move.add && column.component == move.component) {
+      const WorldColumn *values = nullptr;
+      for (const WorldColumn &entry : move.values)
+        if (entry.field == column.field)
+          values = &entry;
+      value = memref::LoadOp::create(
+          rewriter, loc, world.moveValues(source, *values), ValueRange{slot});
+    } else {
+      continue; // an optional component the entity did not have
+    }
+    memref::StoreOp::create(
+        rewriter, loc, value,
+        world.column(*target, column.component, column.field), ValueRange{to});
+  }
+  memref::StoreOp::create(rewriter, loc, id, world.ids(*target),
+                          ValueRange{to});
+  world.setLocation(
+      loc, arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(), id),
+      *target, to);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  world.setCount(loc, *target, arith::AddIOp::create(rewriter, loc, to, one));
+}
+
+/// Apply the rows listed as pending for `archetype`, at the insertion
+/// point, last listed first: despawn (free the id) or move the entity to
+/// another archetype, then remove the row by moving the archetype's last
+/// row into it (swap-remove) and updating that entity's location. The list
+/// is in ascending row order, since the query visited rows in order, so no
+/// listed row is moved before it is removed; rows appended by moves into
+/// this archetype come after all of them.
+static void applyPending(IRRewriter &rewriter, Location loc,
+                         const WorldLayout &layout,
+                         const WorldArchetype &archetype, WorldAccess &world) {
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Value counter = world.pendingCount(archetype);
-  Value pending = arith::IndexCastOp::create(
-      rewriter, loc, rewriter.getIndexType(),
-      memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}));
+  Value pending = world.toIndex(
+      loc, memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}));
   auto loop = scf::ForOp::create(rewriter, loc, zero, pending, one);
   {
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-    Value reversed = arith::SubIOp::create(
-        rewriter, loc,
-        arith::SubIOp::create(rewriter, loc, pending, one),
+    Value slot = arith::SubIOp::create(
+        rewriter, loc, arith::SubIOp::create(rewriter, loc, pending, one),
         loop.getInductionVar());
-    Value row = arith::IndexCastOp::create(
-        rewriter, loc, rewriter.getIndexType(),
-        memref::LoadOp::create(rewriter, loc, world.pendingList(archetype),
-                               ValueRange{reversed}));
+    Value row = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc, world.pendingList(archetype),
+                                    ValueRange{slot}));
+    Value id = memref::LoadOp::create(rewriter, loc, world.ids(archetype),
+                                      ValueRange{row});
+    Value action = archetype.pendingActionOffset
+                       ? memref::LoadOp::create(rewriter, loc,
+                                                world.pendingActions(archetype),
+                                                ValueRange{slot})
+                             .getResult()
+                       : Value();
+    auto is = [&](unsigned code) -> Value {
+      if (!action)
+        return arith::ConstantIntOp::create(rewriter, loc, code == 0, 1);
+      return arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::eq, action,
+          arith::ConstantIntOp::create(rewriter, loc, code, 32));
+    };
+    if (!action) {
+      // Only despawns are ever listed for this archetype.
+      world.freeEntity(loc, id);
+    } else {
+      auto despawn = scf::IfOp::create(rewriter, loc, is(0));
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(despawn.thenBlock());
+      world.freeEntity(loc, id);
+    }
+    for (const WorldMove &move : archetype.moves) {
+      auto moves = scf::IfOp::create(rewriter, loc, is(move.code));
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(moves.thenBlock());
+      applyMove(rewriter, loc, layout, archetype, move, world, row, slot, id);
+    }
+    // Swap-remove the row.
     Value last = arith::SubIOp::create(rewriter, loc,
                                        world.count(loc, archetype), one);
-    Value moves = arith::CmpIOp::create(rewriter, loc,
-                                        arith::CmpIPredicate::ne, row, last);
-    auto move = scf::IfOp::create(rewriter, loc, moves);
-    rewriter.setInsertionPointToStart(move.thenBlock());
-    for (const WorldColumn &column : archetype.columns) {
-      Value view = world.column(archetype, column.component, column.field);
-      Value value =
-          memref::LoadOp::create(rewriter, loc, view, ValueRange{last});
-      memref::StoreOp::create(rewriter, loc, value, view, ValueRange{row});
+    Value shifts = arith::CmpIOp::create(rewriter, loc,
+                                         arith::CmpIPredicate::ne, row, last);
+    auto shift = scf::IfOp::create(rewriter, loc, shifts);
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(shift.thenBlock());
+      for (const WorldColumn &column : archetype.columns) {
+        Value view = world.column(archetype, column.component, column.field);
+        Value value =
+            memref::LoadOp::create(rewriter, loc, view, ValueRange{last});
+        memref::StoreOp::create(rewriter, loc, value, view, ValueRange{row});
+      }
+      Value moved = memref::LoadOp::create(rewriter, loc, world.ids(archetype),
+                                           ValueRange{last});
+      memref::StoreOp::create(rewriter, loc, moved, world.ids(archetype),
+                              ValueRange{row});
+      world.setLocation(
+          loc,
+          arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(), moved),
+          archetype, row);
     }
-    rewriter.setInsertionPointAfter(move);
     world.setCount(loc, archetype, last);
   }
   rewriter.setInsertionPointAfter(loop);
-  Value none = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
-  memref::StoreOp::create(rewriter, loc, none, counter, ValueRange{zero});
+  memref::StoreOp::create(rewriter, loc,
+                          arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                          counter, ValueRange{zero});
 }
 
 /// Lower every ecs.spawn in `func`: check the capacity, write the values
-/// into the next free row (optional components absent), bump the count.
+/// into the next free row (optional components absent), allocate the id,
+/// bump the count.
 static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
                         const WorldLayout &layout, WorldAccess &world) {
   SmallVector<SpawnOp> spawns;
@@ -522,10 +849,13 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
           world.column(*archetype, column.component, column.field),
           ValueRange{row});
     }
+    Value id = world.allocateEntity(loc, *archetype, row);
+    memref::StoreOp::create(rewriter, loc, id, world.ids(*archetype),
+                            ValueRange{row});
     Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
     world.setCount(loc, *archetype,
                    arith::AddIOp::create(rewriter, loc, row, one));
-    rewriter.eraseOp(spawn);
+    rewriter.replaceOp(spawn, id);
   }
 }
 
@@ -537,10 +867,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const LoopOptions &options) {
   Location loc = query.getLoc();
   bool entityLocal = isEntityLocal(query);
-  bool despawns =
-      query.walk([](DespawnOp) { return WalkResult::interrupt(); })
-          .wasInterrupted();
   bool matched = false;
+  SmallVector<const WorldArchetype *> changed;
   for (const WorldArchetype &archetype : layout.archetypes) {
     if (!matches(archetype, query))
       continue;
@@ -553,11 +881,16 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                         entity);
         });
     hoistResourceReads(rewriter, loops, world);
-    if (despawns) {
-      rewriter.setInsertionPointAfter(loops);
-      applyDespawns(rewriter, loc, archetype, world);
-    }
+    if (archetype.hasPending() && isStructuralFor(query, archetype.op))
+      changed.push_back(&archetype);
   }
+
+  // Despawns and moves take effect when the whole query has run, so an
+  // entity moved into another archetype the query matches is not visited
+  // twice.
+  rewriter.setInsertionPoint(query);
+  for (const WorldArchetype *archetype : changed)
+    applyPending(rewriter, loc, layout, *archetype, world);
 
   // The set of archetypes is closed, so a query that matches none of them
   // can never run; that is almost certainly a mistake in the program.
@@ -655,6 +988,9 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                            : WalkResult::advance();
               })
               .wasInterrupted();
+      for (QueryOp query : system.getBody().getOps<QueryOp>())
+        for (ArchetypeOp archetype : getMatchedArchetypes(query))
+          writesResource |= isStructuralFor(query, archetype);
       if (!writesResource && !computeAccess(system, archetypes).isOpaque()) {
         sequence.push_back(run);
         continue;

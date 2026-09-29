@@ -1,4 +1,5 @@
 #include "Ecs/World.h"
+#include "Ecs/Structure.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/MathExtras.h"
@@ -46,6 +47,14 @@ const WorldResourceField *WorldResource::find(StringAttr field) const {
   return nullptr;
 }
 
+const WorldMove *WorldArchetype::findMove(StringAttr component,
+                                          bool add) const {
+  for (const WorldMove &move : moves)
+    if (move.component == component && move.add == add)
+      return &move;
+  return nullptr;
+}
+
 const WorldResource &WorldLayout::getResource(StringAttr resource) const {
   for (const WorldResource &entry : resources)
     if (ResourceOp(entry.op).getSymNameAttr() == resource)
@@ -84,25 +93,49 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     }
     layout.resources.push_back(std::move(entry));
   }
-  // Archetypes that some query despawns from need a pending list and a
-  // counter for the rows to remove when that query ends.
+  // Archetypes that some query despawns from or moves entities out of need
+  // pending lists and a counter for the rows to remove when that query
+  // ends; moves also need to know their target and, for an add, the values.
   llvm::SmallPtrSet<Operation *, 4> despawned;
   module.walk([&](DespawnOp despawn) {
-    auto query = despawn->getParentOfType<QueryOp>();
-    for (WorldArchetype &archetype : layout.archetypes) {
-      ArchetypeOp archetypeOp = archetype.op;
-      if (llvm::all_of(query.getBody().getArgumentTypes(), [&](Type type) {
-            return archetypeOp.contains(cast<RefType>(type).getComponent());
-          }))
-        despawned.insert(archetypeOp);
-    }
+    for (ArchetypeOp archetype :
+         getMatchedArchetypes(despawn->getParentOfType<QueryOp>()))
+      despawned.insert(archetype);
   });
+  auto recordMoves = [&](Operation *op, FlatSymbolRefAttr component,
+                         bool add) {
+    for (ArchetypeOp source :
+         getMatchedArchetypes(op->getParentOfType<QueryOp>())) {
+      ComponentChange change = classifyChange(source, component, add);
+      if (change.kind != ComponentChange::Move)
+        continue;
+      for (WorldArchetype &archetype : layout.archetypes)
+        if (archetype.op == source &&
+            !archetype.findMove(component.getAttr(), add))
+          archetype.moves.push_back({change.target, component.getAttr(), add,
+                                     unsigned(archetype.moves.size() + 1),
+                                     {}});
+    }
+  };
+  module.walk([&](AddOp add) {
+    recordMoves(add, add.getComponentAttr(), /*add=*/true);
+  });
+  module.walk([&](RemoveOp remove) {
+    recordMoves(remove, remove.getComponentAttr(), /*add=*/false);
+  });
+  auto needsPending = [&](const WorldArchetype &archetype) {
+    return despawned.contains(archetype.op) || !archetype.moves.empty();
+  };
   for (WorldArchetype &archetype : layout.archetypes)
-    if (despawned.contains(archetype.op)) {
+    if (needsPending(archetype)) {
       end = llvm::alignTo(end, 8);
       archetype.pendingCountOffset = end;
       end += 8;
     }
+  end = llvm::alignTo(end, 8);
+  layout.nextSlotOffset = end;
+  layout.freeCountOffset = end + 8;
+  end += 16;
   layout.headerBytes = end;
 
   for (WorldArchetype &archetype : layout.archetypes) {
@@ -132,12 +165,42 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
         end = offset + archetype.capacity;
       }
     }
-    if (despawned.contains(archetype.op)) {
-      archetype.pendingOffset =
-          llvm::alignTo(end, kColumnAlignment) + kStagger;
-      end = archetype.pendingOffset + 4 * archetype.capacity;
+    auto place = [&](uint64_t bytes) {
+      uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+      end = offset + bytes * archetype.capacity;
+      return offset;
+    };
+    archetype.idOffset = place(8);
+    if (needsPending(archetype))
+      archetype.pendingOffset = place(4);
+    if (!archetype.moves.empty()) {
+      archetype.pendingActionOffset = place(4);
+      for (WorldMove &move : archetype.moves) {
+        if (!move.add)
+          continue;
+        auto component = SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
+            module, FlatSymbolRefAttr::get(move.component));
+        for (auto [name, typeAttr] : llvm::zip(component.getFieldNames(),
+                                               component.getFieldTypes())) {
+          Type type = cast<TypeAttr>(typeAttr).getValue();
+          move.values.push_back({move.component, cast<StringAttr>(name), type,
+                                 place(getStorageBytes(type))});
+        }
+      }
     }
+    layout.entityCapacity += archetype.capacity;
   }
+
+  // The entity table.
+  auto placeTable = [&](uint64_t bytes) {
+    uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+    end = offset + bytes * layout.entityCapacity;
+    return offset;
+  };
+  layout.generationOffset = placeTable(4);
+  layout.locationArchetypeOffset = placeTable(4);
+  layout.locationRowOffset = placeTable(4);
+  layout.freeListOffset = placeTable(4);
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;
 }

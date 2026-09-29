@@ -1,0 +1,22 @@
+// Entity ids stay valid across swap-remove and die with their entity; the
+// generated header and the lowered program agree on the bookkeeping.
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/Inputs/ids.mlir -o %t.dir/ids_world.h
+// RUN: ecs-opt %S/Inputs/ids.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/ids_main.c -o %t.exe
+// RUN: %t.exe | FileCheck %s
+
+// Slots 0, 1, 2 with generation 0.
+// CHECK: before: a 0 b 1 c 2
+// a (row 0) is despawned; c, the last row, moves into row 0.
+// CHECK-NEXT: count 2
+// CHECK-NEXT: a alive 0
+// CHECK-NEXT: b alive 1 row 1
+// CHECK-NEXT: c alive 1 row 0
+// The next spawn reuses a's slot 0 with generation 1, in row 2; a's old id
+// stays dead.
+// CHECK-NEXT: d 100000000 row 2
+// CHECK-NEXT: a alive 0

@@ -45,8 +45,8 @@ int main(int argc, char **argv) {
   uint64_t target = (uint64_t)atoll(argv[3]) * 1000000;
 
   ecs_world *w = ecs_world_create();
-  if (!w || !ecs_Body_set_count(w, n) || !ecs_Particle_set_count(w, n) ||
-      !ecs_Scenery_set_count(w, n) || !ecs_Player_set_count(w, 1)) {
+  if (!w || !ecs_Body_spawn_n(w, n) || !ecs_Particle_spawn_n(w, n) ||
+      !ecs_Scenery_spawn_n(w, n) || !ecs_Player_spawn_n(w, 1)) {
     fprintf(stderr, "n=%lld does not fit the world\n", (long long)n);
     return 1;
   }

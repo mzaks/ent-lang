@@ -9,15 +9,13 @@ ecs.component @S (t: f32, u: f32)
 ecs.archetype @C (@Q, optional @S) capacity 100
 
 // The optional component's fields are followed by its presence column.
-// Growing the count clears the presence of the new rows.
-// CHECK:      static inline bool ecs_C_set_count(ecs_world *world, int64_t n) {
-// CHECK-NEXT:   if (n < 0 || n > ECS_C_CAPACITY)
-// CHECK-NEXT:     return false;
-// CHECK-NEXT:   int64_t old = ((int64_t *)world)[0];
-// CHECK-NEXT:   if (n > old) {
-// CHECK-NEXT:     memset((char *)world + 5760 + old, 0, (size_t)(n - old));
-// CHECK-NEXT:   }
-// CHECK-NEXT:   ((int64_t *)world)[0] = n;
+// A spawned entity starts without the optional component.
+// CHECK:      static inline ecs_entity ecs_C_spawn(ecs_world *world) {
+// CHECK-NEXT:   int64_t n = ((int64_t *)world)[0];
+// CHECK-NEXT:   if (n >= ECS_C_CAPACITY)
+// CHECK-NEXT:     return ECS_NO_ENTITY;
+// CHECK-NEXT:   ((uint8_t *)((char *)world + 5760))[n] = 0;
+// CHECK-NEXT:   ecs_entity id = ecs__allocate(world, 0, n);
 // CHECK:      static inline float *ecs_C_S_t(ecs_world *world) {
 // CHECK-NEXT:   return (float *)((char *)world + 2688);
 // CHECK:      static inline float *ecs_C_S_u(ecs_world *world) {

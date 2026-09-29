@@ -9,7 +9,7 @@ enum { GUNS = 2, FRAMES = 8 };
 
 int main(void) {
   ecs_world *w = ecs_world_create();
-  if (!w || !ecs_Gun_set_count(w, GUNS)) {
+  if (!w || !ecs_Gun_spawn_n(w, GUNS)) {
     fprintf(stderr, "could not set up the world\n");
     return 1;
   }

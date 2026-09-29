@@ -16,10 +16,10 @@ static void fill(float *column, const float *values, int n) {
 
 int main(void) {
   ecs_world *w = ecs_world_create();
-  if (!w || !ecs_Body_set_count(w, BODIES) ||
-      !ecs_Particle_set_count(w, PARTICLES) ||
-      !ecs_Scenery_set_count(w, SCENERY) ||
-      !ecs_Player_set_count(w, PLAYERS)) {
+  if (!w || !ecs_Body_spawn_n(w, BODIES) ||
+      !ecs_Particle_spawn_n(w, PARTICLES) ||
+      !ecs_Scenery_spawn_n(w, SCENERY) ||
+      !ecs_Player_spawn_n(w, PLAYERS)) {
     fprintf(stderr, "could not set up the world\n");
     return 1;
   }

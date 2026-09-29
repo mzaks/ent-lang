@@ -9,36 +9,62 @@ ecs.component @L (t: f32)
 ecs.component @S (s: f32)
 ecs.archetype @Bullet (@P, @L, optional @S) capacity 100
 
-// Layout: the count at 0, the pending counter for @Bullet at 8, columns
-// P.x at 1152, L.t at 2688, S.s at 4224, S? at 5760, and the pending list
-// after them at 5888 + 1088 = 6976.
+// Layout: the count at 0, the pending counter for @Bullet at 8, the entity
+// table's next-slot and free counters at 16 and 24; columns P.x at 1152,
+// L.t at 2688, S.s at 4224, S? at 5760, the id column at 6976, the pending
+// list at 8896; then the entity table: generations at 10432, archetype at
+// 11968, row at 13504, free list at 15040.
 
-// A despawn lists the row; after the loop, the listed rows are removed
-// last first by moving the last row into them.
+// A despawn lists the row; if the last listed row is already this entity,
+// it replaces that entry (the last structural change wins). After the
+// loop, the listed rows are handled last first: the entity's id is freed
+// (its generation bumped, its slot pushed on the free list), and the
+// archetype's last row, id included, moves into the hole, with the moved
+// entity's location updated.
 // CHECK-LABEL: func.func private @age(
 // CHECK:      %[[COUNTS:.*]] = memref.view {{.*}} to memref<1xi64>
 // CHECK:      arith.constant 8 : index
 // CHECK-NEXT: %[[PENDING_N:.*]] = memref.view {{.*}} to memref<1xi64>
-// CHECK:      arith.constant 6976 : index
+// CHECK:      arith.constant 8896 : index
 // CHECK-NEXT: %[[PENDING:.*]] = memref.view {{.*}} to memref<100xi32>
+// CHECK:      arith.constant 6976 : index
+// CHECK-NEXT: %[[IDS:.*]] = memref.view {{.*}} to memref<100xi64>
+// CHECK:      arith.constant 10432 : index
+// CHECK-NEXT: %[[GENERATION:.*]] = memref.view {{.*}} to memref<100xi32>
+// CHECK:      arith.constant 15040 : index
+// CHECK-NEXT: %[[FREE_LIST:.*]] = memref.view {{.*}} to memref<100xi32>
+// CHECK:      arith.constant 11968 : index
+// CHECK-NEXT: %[[WHERE_ARCHETYPE:.*]] = memref.view {{.*}} to memref<100xi32>
+// CHECK:      arith.constant 13504 : index
+// CHECK-NEXT: %[[WHERE_ROW:.*]] = memref.view {{.*}} to memref<100xi32>
 // CHECK:      scf.for %[[I:.*]] =
 // CHECK:        scf.if
-// CHECK-NEXT:     %[[C0:.*]] = arith.constant 0 : index
-// CHECK-NEXT:     %[[K:.*]] = memref.load %[[PENDING_N]][%[[C0]]]
-// CHECK-NEXT:     %[[KI:.*]] = arith.index_cast %[[K]] : i64 to index
-// CHECK-NEXT:     %[[ROW:.*]] = arith.index_cast %[[I]] : index to i32
-// CHECK-NEXT:     memref.store %[[ROW]], %[[PENDING]][%[[KI]]]
-// CHECK:          memref.store %{{.*}}, %[[PENDING_N]][%[[C0]]]
-// CHECK:      %[[N:.*]] = memref.load %[[PENDING_N]]
-// CHECK-NEXT: %[[NI:.*]] = arith.index_cast %[[N]]
-// CHECK-NEXT: scf.for %[[J:.*]] = %{{.*}} to %[[NI]]
-// CHECK:        %[[REV:.*]] = arith.subi %{{.*}}, %[[J]] : index
-// CHECK-NEXT:   %[[R:.*]] = memref.load %[[PENDING]][%[[REV]]]
+// CHECK:          %[[K:.*]] = memref.load %[[PENDING_N]]
+// CHECK:          %[[ROW:.*]] = arith.index_cast %[[I]] : index to i32
+// CHECK:          %[[SAME:.*]] = scf.if %{{.*}} -> (i1) {
+// CHECK:            %[[PREV:.*]] = memref.load %[[PENDING]]
+// CHECK-NEXT:       arith.cmpi eq, %[[PREV]], %[[ROW]] : i32
+// CHECK:          %[[SLOT:.*]] = arith.select %[[SAME]], %{{.*}}, %[[K]] : i64
+// CHECK:          memref.store %[[ROW]], %[[PENDING]]
+// CHECK:          memref.store %{{.*}}, %[[PENDING_N]]
+// CHECK:      scf.for %[[J:.*]] =
+// CHECK:        %[[R:.*]] = memref.load %[[PENDING]]
+// CHECK:        %[[RI:.*]] = arith.index_cast %[[R]] : i32 to index
+// CHECK:        %[[ID:.*]] = memref.load %[[IDS]][%[[RI]]] : memref<100xi64>
+// CHECK-NEXT:   %[[IDSLOT:.*]] = arith.trunci %[[ID]] : i64 to i32
+// CHECK-NEXT:   %[[IDX:.*]] = arith.index_cast %[[IDSLOT]] : i32 to index
+// CHECK-NEXT:   %[[GEN:.*]] = memref.load %[[GENERATION]][%[[IDX]]]
+// CHECK:        %[[GEN1:.*]] = arith.addi %[[GEN]]
+// CHECK-NEXT:   memref.store %[[GEN1]], %[[GENERATION]][%[[IDX]]]
+// CHECK:        memref.store %[[IDSLOT]], %[[FREE_LIST]]
 // CHECK:        %[[LAST:.*]] = arith.subi
-// CHECK-NEXT:   %[[MOVES:.*]] = arith.cmpi ne, %{{.*}}, %[[LAST]] : index
+// CHECK-NEXT:   %[[MOVES:.*]] = arith.cmpi ne, %[[RI]], %[[LAST]] : index
 // CHECK-NEXT:   scf.if %[[MOVES]] {
-// Every column moves, the presence of the optional component included.
 // CHECK-COUNT-4: memref.load
+// CHECK:          %[[MOVED:.*]] = memref.load %[[IDS]][%[[LAST]]]
+// CHECK-NEXT:     memref.store %[[MOVED]], %[[IDS]][%[[RI]]]
+// CHECK:          memref.store %{{.*}}, %[[WHERE_ARCHETYPE]]
+// CHECK:          memref.store %{{.*}}, %[[WHERE_ROW]]
 // CHECK:        }
 // CHECK:        memref.store %{{.*}}, %[[COUNTS]]
 // CHECK:      }
@@ -58,7 +84,9 @@ ecs.system @age(%dt: f32) writes [@L, @Bullet] {
 }
 
 // A spawn checks the capacity, writes the non-optional fields and an
-// absent presence into row `count`, and bumps the count.
+// absent presence into row `count`, allocates an id (a freed slot if there
+// is one, otherwise the next unused slot with generation 0), records the
+// id's location and the row's id, and bumps the count.
 // CHECK-LABEL: func.func private @fire(
 // CHECK-SAME: %[[X:[^:]*]]: f32
 // CHECK:      %[[ROWI:.*]] = arith.index_cast %{{.*}} : i64 to index
@@ -69,6 +97,14 @@ ecs.system @age(%dt: f32) writes [@L, @Bullet] {
 // CHECK-NEXT: memref.store %{{.*}}, %{{.*}}[%[[ROWI]]] : memref<100xf32>
 // CHECK-NEXT: %[[ABSENT:.*]] = arith.constant 0 : i8
 // CHECK-NEXT: memref.store %[[ABSENT]], %{{.*}}[%[[ROWI]]] : memref<100xi8>
+// CHECK:      %[[SLOT:.*]] = scf.if %{{.*}} -> (i32) {
+// CHECK:      } else {
+// CHECK:        arith.trunci
+// CHECK:      }
+// CHECK:      %[[G:.*]] = memref.load
+// CHECK:      %[[HIGH:.*]] = arith.shli
+// CHECK:      %[[ID:.*]] = arith.ori %[[HIGH]], %{{.*}} : i64
+// CHECK-NEXT: memref.store %[[ID]], %{{.*}}[%[[ROWI]]] : memref<100xi64>
 // CHECK:      %[[NEXT:.*]] = arith.addi %[[ROWI]]
 // CHECK:      arith.index_cast %[[NEXT]] : index to i64
 // CHECK-NEXT: memref.store

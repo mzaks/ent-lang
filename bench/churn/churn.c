@@ -268,7 +268,7 @@ static uint8_t *present;
 static void storageInit(const uint8_t *holds) {
   // A fresh world per repetition, like the other variants' fresh storage.
   world = ecs_world_create();
-  if (!world || !ecs_Character_set_count(world, N)) {
+  if (!world || !ecs_Character_spawn_n(world, N)) {
     fprintf(stderr, "n=%lld does not fit the world\n", (long long)N);
     exit(1);
   }

@@ -9,8 +9,8 @@ enum { CHARACTERS = 3, FRAMES = 5 };
 
 int main(void) {
   ecs_world *w = ecs_world_create();
-  // Characters start without the optional Stunned component.
-  if (!w || !ecs_Character_set_count(w, CHARACTERS)) {
+  // Spawned characters start without the optional Stunned component.
+  if (!w || !ecs_Character_spawn_n(w, CHARACTERS)) {
     fprintf(stderr, "could not set up the world\n");
     return 1;
   }
