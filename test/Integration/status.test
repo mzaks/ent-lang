@@ -1,0 +1,39 @@
+// Optional components end to end: characters bounce off a wall, gain
+// Stunned, and lose it again. Run as written, fused, and fused with
+// parallel entity loops (forced on for these few entities); all agree.
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/../../examples/status.mlir \
+// RUN:     -o %t.dir/status_world.h
+
+// RUN: ecs-opt %S/../../examples/status.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
+// RUN: clang -O2 -Wno-override-module %t.seq.ll \
+// RUN:     -I%t.dir %S/../../examples/host/status_main.c -o %t.seq
+// RUN: %t.seq | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/status.mlir \
+// RUN:     --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
+// RUN: clang -O2 -Wno-override-module %t.fused.ll \
+// RUN:     -I%t.dir %S/../../examples/host/status_main.c -o %t.fused
+// RUN: %t.fused | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/status.mlir \
+// RUN:     "--ecs-lower-to-loops=fuse-systems=1 parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --symbol-dce --convert-scf-to-openmp --canonicalize --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
+// RUN: clang -O2 -Wno-override-module %t.par.ll \
+// RUN:     -I%t.dir %S/../../examples/host/status_main.c %openmp -o %t.par
+// RUN: %t.par | FileCheck %s
+
+// dt = 0.5, wall at 10. A (0, +4) reaches 10 in frame 5, bounces and is
+// stunned; recover takes 0.5 s the same frame.
+// CHECK: character 0: x 10.0000 dx -4.0000 stunned 0.5000 s
+// B (9, +4) hits the wall in frame 1 and recovers in frame 2, then walks
+// back: 11, 9, 7, 5, 3.
+// CHECK: character 1: x 3.0000 dx -4.0000 not stunned
+// C (5, -1) walks away and is never stunned.
+// CHECK: character 2: x 2.5000 dx -1.0000 not stunned
