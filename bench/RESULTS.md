@@ -379,3 +379,80 @@ decision, and the measured costs are enough for a first rule of thumb.
 - At n=1e5, the configurations without churn at 1% density are noisy
   (58-83% spread) for every variant; why is not known. The rest of the
   1e5 table follows the 1e6 pattern.
+
+## 2026-09-29: the compiled program in the churn benchmark
+
+Same machine and toolchain, commit c3ef71a. `bench/churn/run.py` now also
+runs `bench/churn/status.mlir`, where Status is an optional component,
+lowered per system ("compiled") and fused ("compiled-fused"); the host
+applies the same precomputed changes through the generated header. All
+six variants agree on the checksum in every configuration.
+
+Spotlight's indexer used 88-99% of one core throughout (load average 7.7
+before, 4.0 after). The benchmark is single-threaded, and the four
+hand-written variants reproduce the previous churn run within 1-2% at
+n=1e6, so the load made no measurable difference there.
+
+### n = 1e6: us per frame (spread), best in bold
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set | compiled | compiled-fused |
+|---|---|---|---|---|---|---|---|
+| 1% | 0.0% | **171.7 (3%)** | 312.5 (3%) | 452.2 (5%) | 177.0 (2%) | 284.3 (3%) | 256.5 (3%) |
+| 1% | 0.1% | 186.0 (1%) | 313.9 (2%) | 464.4 (4%) | **179.6 (4%)** | 286.6 (3%) | 258.4 (2%) |
+| 1% | 1.0% | 284.5 (3%) | 322.2 (1%) | 475.0 (5%) | **191.3 (3%)** | 294.6 (2%) | 267.1 (3%) |
+| 10% | 0.0% | **181.5 (1%)** | 312.5 (1%) | 743.9 (4%) | 226.2 (1%) | 284.4 (3%) | 257.0 (2%) |
+| 10% | 0.1% | **197.3 (3%)** | 313.9 (0%) | 797.2 (2%) | 235.7 (3%) | 285.5 (2%) | 258.5 (1%) |
+| 10% | 1.0% | 304.4 (2%) | 323.3 (1%) | 847.9 (5%) | 287.6 (2%) | 294.2 (2%) | **267.2 (1%)** |
+| 10% | 10.0% | 1,356.9 (6%) | 425.6 (2%) | 952.1 (6%) | 483.9 (4%) | 381.6 (2%) | **354.4 (3%)** |
+| 50% | 0.0% | **226.6 (1%)** | 312.7 (1%) | 2,500.9 (4%) | 367.4 (1%) | 284.7 (3%) | 256.7 (2%) |
+| 50% | 0.1% | **245.7 (1%)** | 314.8 (1%) | 2,570.2 (3%) | 377.6 (0%) | 285.2 (1%) | 258.1 (1%) |
+| 50% | 1.0% | 357.0 (2%) | 323.0 (0%) | 2,624.8 (4%) | 485.2 (1%) | 295.7 (1%) | **267.3 (2%)** |
+| 50% | 10.0% | 1,452.4 (3%) | 425.9 (2%) | 2,725.9 (3%) | 792.8 (2%) | 378.2 (3%) | **353.7 (3%)** |
+| 90% | 0.0% | 270.7 (1%) | 312.7 (1%) | 806.8 (3%) | 503.8 (1%) | 284.6 (2%) | **257.0 (1%)** |
+| 90% | 0.1% | 290.1 (1%) | 314.7 (1%) | 948.8 (2%) | 517.2 (1%) | 286.4 (2%) | **258.4 (3%)** |
+| 90% | 1.0% | 398.4 (3%) | 323.5 (2%) | 979.7 (1%) | 635.3 (2%) | 295.1 (1%) | **267.9 (1%)** |
+| 90% | 10.0% | 1,479.6 (2%) | 426.4 (2%) | 1,074.6 (1%) | 1,085.8 (2%) | 380.7 (1%) | **354.7 (1%)** |
+
+Systems time alone: compiled 283-286 us and compiled-fused 256-258 us at
+every configuration, against 312-330 us for the hand-written select form.
+
+### n = 1e5: us per frame (spread), best in bold
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set | compiled | compiled-fused |
+|---|---|---|---|---|---|---|---|
+| 1% | 0.0% | **16.3 (103%)** | 30.6 (25%) | 44.1 (35%) | 17.2 (18%) | 28.3 (46%) | 25.6 (79%) |
+| 1% | 0.1% | **17.4 (58%)** | 30.9 (28%) | 44.9 (19%) | 17.5 (9%) | 28.6 (3%) | 25.4 (7%) |
+| 1% | 1.0% | 23.5 (6%) | 31.4 (3%) | 45.9 (8%) | **17.9 (11%)** | 28.8 (4%) | 25.9 (3%) |
+| 10% | 0.0% | **17.2 (11%)** | 30.6 (2%) | 48.2 (6%) | 21.5 (9%) | 27.8 (4%) | 25.0 (10%) |
+| 10% | 0.1% | **18.4 (3%)** | 30.4 (6%) | 51.3 (3%) | 22.1 (10%) | 27.8 (7%) | 25.4 (7%) |
+| 10% | 1.0% | 25.6 (8%) | 31.4 (2%) | 76.1 (6%) | **23.9 (7%)** | 28.6 (2%) | 25.8 (5%) |
+| 10% | 10.0% | 150.4 (11%) | 36.2 (4%) | 87.8 (7%) | 33.2 (7%) | 33.8 (3%) | **30.7 (4%)** |
+| 50% | 0.0% | **22.0 (2%)** | 30.6 (5%) | 98.9 (66%) | 35.5 (3%) | 27.7 (11%) | 24.9 (3%) |
+| 50% | 0.1% | **23.2 (7%)** | 29.8 (5%) | 147.4 (4%) | 36.4 (8%) | 27.8 (10%) | 24.6 (7%) |
+| 50% | 1.0% | 30.9 (6%) | 31.2 (5%) | 242.3 (7%) | 41.7 (9%) | 28.3 (8%) | **26.4 (6%)** |
+| 50% | 10.0% | 160.6 (8%) | 35.9 (5%) | 261.9 (5%) | 80.5 (5%) | 33.6 (4%) | **31.4 (11%)** |
+| 90% | 0.0% | 26.5 (5%) | 30.3 (1%) | 50.0 (2%) | 48.9 (3%) | 27.9 (8%) | **25.3 (6%)** |
+| 90% | 0.1% | 27.4 (5%) | 30.3 (7%) | 62.3 (4%) | 50.4 (6%) | 27.8 (8%) | **24.6 (6%)** |
+| 90% | 1.0% | 34.7 (3%) | 30.8 (6%) | 97.2 (4%) | 56.6 (7%) | 28.6 (7%) | **26.0 (8%)** |
+| 90% | 10.0% | 159.7 (2%) | 35.9 (7%) | 100.2 (1%) | 109.4 (7%) | 33.6 (5%) | **31.5 (10%)** |
+
+### What holds
+
+- The compiler's masked, branch-free lowering of an optional component is
+  faster than the same form written by hand: 9% per system (284 against
+  312 us at 1e6) and 18% fused (257 us), at every density.
+- The compiled wide form now wins most configurations at 1e6: every
+  churn rate at 90% density, from 1% churn at 10-50% density, and 10%
+  churn everywhere, where it is about 4x faster than archetype moves (354
+  against 1,357-1,480 us). Archetype moves still win at churn up to 0.1%
+  with 10-50% density, and sparse-set at 1% density with churn. A
+  per-component choice remains necessary.
+
+### Measured, not explained
+
+- Why the unfused compiled form beats the hand-written select form by 9%.
+  The compiled world staggers its columns while churn.c's allocations are
+  page aligned, and staggering was worth 7-8% for the example's frame; a
+  wide-select build with staggered columns would confirm it, not run yet.
+- At n=1e5, the configurations without churn at 1% density are noisy
+  again (46-103% spread), for every variant, as in the first churn run.
