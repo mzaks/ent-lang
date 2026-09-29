@@ -68,3 +68,88 @@ scenery entities). Spread = (max - min) / median over the 5 processes.
 - From 1e5 to 1e7 the sequential cost per entity is flat (about 0.25 ns
   per entity update), although only 1e5 fits in cache. Which limit that
   is (single-core bandwidth is a candidate) is not measured.
+
+## 2026-09-28: where the time goes, and whether layout helps (M3 part 2)
+
+Same machine and toolchain. `bench/layout/`: the fused frame written by
+hand in C in four layouts (SoA, AoS, AoSoA with blocks of 8 and 16), and a
+read-modify-write kernel over K arrays (`streams.c`). All layouts agree on
+the checksum. `python3 bench/layout/run.py streams|frame`: median of 5
+processes; load average 3.4 at the start and 9 at the end.
+
+### The generated loops are vectorized
+
+The fused frame's loops run 4 entities per iteration (`fadd.4s`); in the
+body loop, `dy` is reused from a register after the store instead of being
+reloaded. Hand-written C compiles to the same loop.
+
+### A single core runs at its stream bandwidth, in L2 and in DRAM alike
+
+Read-modify-write bandwidth, one thread:
+
+| streams K | 1 | 2 | 3 | 4 | 5 | 8 | 16 |
+|---|---|---|---|---|---|---|---|
+| 1 MB total (L2) | 142 | 143 | 131 | 128 | 124 | 90 | 10 |
+| 160 MB total (DRAM) | 134 | 141 | 129 | 128 | 121 | 77 | 9 |
+| 160 MB, 12 threads | 405 | 387 | 380 | 373 | 371 | 358 | 28 |
+
+GB/s moved (read + write). The fused frame moves 64 bytes per entity pair
+per frame (bodies read 4 columns and write 3, particles read 5 and write
+4). At n=1e5 and at n=1e7 that is about 130 GB/s, which is the one-thread
+rate for 4 to 5 streams in the table, in L2 and in DRAM alike. This
+explains the flat cost per entity from 1e5 to 1e7 found in part 1: one core
+is limited by how fast it can stream, not by where the data lives. With 12
+threads, the fused parallel frame (1.8 ms at 1e7, about 355 GB/s) is close
+to the 12-thread stream rate.
+
+### AoS and AoSoA do not help
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| soa | 296 (8%) | 5,034 (19%) | 48,556 (1%) | 490,140 (1%) | 4,906,207 (2%) |
+| aos | 688 (15%) | 8,262 (17%) | 82,657 (1%) | 831,178 (1%) | 8,350,993 (2%) |
+| aosoa8 | 257 (21%) | 5,203 (11%) | 52,276 (2%) | 526,566 (3%) | 5,585,009 (3%) |
+| aosoa16 | 255 (22%) | 4,710 (17%) | 46,671 (1%) | 474,019 (1%) | 5,403,020 (5%) |
+| soa-omp | 64,106 (6%) | 65,268 (63%) | 77,930 (2%) | 149,101 (1%) | 1,796,304 (2%) |
+| aos-omp | 63,029 (185%) | 67,919 (76%) | 84,045 (3%) | 234,116 (3%) | 2,221,854 (6%) |
+| aosoa8-omp | 62,429 (252%) | 67,732 (81%) | 83,957 (1%) | 233,888 (177%) | 2,196,365 (4%) |
+| aosoa16-omp | 63,968 (70%) | 64,895 (9%) | 76,148 (2%) | 140,739 (3%) | 1,940,117 (10%) |
+
+ns per frame. AoS is 1.7x slower on one thread: it moves the unused
+kg/lifetime field of every body along with the rest. AoSoA would only pay
+if fewer streams meant more bandwidth, but up to 5 streams the rate barely
+drops (134 to 121 GB/s), so AoSoA8 is 7-14% slower than SoA and AoSoA16
+between 4% faster and 10% slower. With threads, SoA is best at 1e6 and
+1e7. Small sizes with threads are dominated by fork cost and noise.
+
+Conclusion: no AoSoA pass for now; SoA stays. The picture would change for
+archetypes whose queries stream many more columns, but see below: the drop
+at 8 and 16 streams is mostly an artefact of addresses.
+
+### What does matter: where columns start
+
+Large allocations come back page aligned (4 MB aligned at 40 MB), so every
+column starts at the same cache set. Offsetting each array by 17 more
+cache lines than the previous one (`-DSTAGGER`), three back-to-back
+process pairs each:
+
+| | plain | staggered |
+|---|---|---|
+| streams K=8, 160 MB, 1 thread | 56-70 GB/s | 101-109 GB/s |
+| streams K=16, 160 MB, 1 thread | 8-9 GB/s | 65-84 GB/s |
+| SoA frame n=1e5, 1 thread | 48.1-48.6 us | 44.6-44.8 us |
+| SoA frame n=1e6, 1 thread | 489-491 us | 449 us |
+| SoA frame n=1e7, 1 thread | 4.89-4.91 ms | 4.52-4.55 ms |
+| SoA frame n=1e6, 12 threads | 151-154 us | 147-150 us |
+| SoA frame n=1e7, 12 threads | 1.82-1.93 ms | 1.84-1.94 ms |
+
+Staggered columns make the single-thread frame 7-8% faster at every size,
+more than fusion did, and turn the collapse at 16 streams into a gradual
+decline. With 12 threads, where DRAM bandwidth is the limit, it makes no
+measurable difference. That columns starting at the same set conflict in
+the cache is consistent with the addresses and with the fix working; the
+M4's cache geometry (associativity) is not measured here.
+
+The host allocates the columns today, so the compiler cannot do this. It
+is the strongest argument so far for the language to own the world's
+storage.
