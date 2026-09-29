@@ -206,18 +206,22 @@ def Ecs_WriteOp : Ecs_Op<"write", [
 
 def Ecs_AddOp : Ecs_Op<"add", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
-  let summary = "Give the visited entity an optional component";
+  let summary = "Give the visited entity a component";
   let description = [{
     ```mlir
     ecs.add @Stunned(%seconds) : f32
     ```
-    Sets the presence of the optional component on the entity the
-    enclosing query visits and initialises its fields, in declaration
-    order. If the entity already has it, the fields are overwritten. Every
-    archetype the query matches must hold the component as optional: a
-    component an archetype does not hold would need a move to another
-    archetype, which is not supported. The system must declare the
-    component in `writes`.
+    Gives the entity the enclosing query visits the component, with its
+    fields initialised in declaration order. What that means depends on
+    how the entity's archetype stores the component, not on the program:
+    - optional in the archetype: set its presence (and fields);
+    - always held by the archetype: overwrite the fields;
+    - not held: move the entity to the archetype with exactly its
+      components plus this one, which must exist. Moves are deferred to
+      the end of the query, like despawns.
+    The system must declare the component in `writes`; a move needs no
+    archetypes declared, since whether a change moves entities is a storage
+    decision and the analysis derives its effect from the storage.
   }];
   let arguments = (ins FlatSymbolRefAttr:$component,
                        Variadic<AnyType>:$values);
@@ -228,14 +232,16 @@ def Ecs_AddOp : Ecs_Op<"add", [
 
 def Ecs_RemoveOp : Ecs_Op<"remove", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
-  let summary = "Take an optional component away from the visited entity";
+  let summary = "Take a component away from the visited entity";
   let description = [{
     ```mlir
     ecs.remove @Stunned
     ```
-    Clears the presence of the optional component on the entity the
-    enclosing query visits; does nothing if it is absent. The same rules as
-    for `ecs.add` apply.
+    Takes the component away from the entity the enclosing query visits:
+    clears its presence where it is optional, moves the entity to the
+    archetype with exactly its components minus this one where it is not
+    (deferred to the end of the query), and does nothing where the
+    archetype does not hold it. The same rules as for `ecs.add` apply.
   }];
   let arguments = (ins FlatSymbolRefAttr:$component);
   let assemblyFormat = "$component attr-dict";
@@ -244,7 +250,7 @@ def Ecs_RemoveOp : Ecs_Op<"remove", [
 
 def Ecs_SpawnOp : Ecs_Op<"spawn", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
-  let summary = "Create an entity in an archetype";
+  let summary = "Create an entity in an archetype and return its id";
   let description = [{
     ```mlir
     ecs.spawn @Bullet(%x, %y, %dx, %dy, %seconds) : f32, f32, f32, f32, f32
@@ -254,11 +260,30 @@ def Ecs_SpawnOp : Ecs_Op<"spawn", [
     components and then of their fields; optional components start absent.
     Spawning beyond the archetype's capacity is an error at run time. The
     system must declare the archetype in `writes`.
+
+    The result is the entity's id: a generational index (generation in the
+    upper 32 bits, slot in the lower) that stays valid while the entity
+    moves between rows and archetypes and becomes invalid when it is
+    despawned.
   }];
   let arguments = (ins FlatSymbolRefAttr:$archetype,
                        Variadic<AnyType>:$values);
+  let results = (outs I64:$entity);
   let assemblyFormat =
       "$archetype `(` $values `)` attr-dict (`:` type($values)^)?";
+  let hasVerifier = 1;
+}
+
+def Ecs_EntityOp : Ecs_Op<"entity"> {
+  let summary = "The id of the entity the enclosing query visits";
+  let description = [{
+    ```mlir
+    %id = ecs.entity : i64
+    ```
+    The same id `ecs.spawn` returned for the entity.
+  }];
+  let results = (outs I64:$entity);
+  let assemblyFormat = "attr-dict `:` type($entity)";
   let hasVerifier = 1;
 }
 

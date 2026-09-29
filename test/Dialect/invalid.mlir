@@ -289,14 +289,22 @@ ecs.system @s(%v: f32) reads [@P] {
 // -----
 
 ecs.component @P (x: f32)
+ecs.component @Q (q: f32)
 ecs.component @S (t: f32)
 ecs.archetype @A (@P, optional @S) capacity 10
-ecs.archetype @B (@P) capacity 10
+ecs.archetype @B (@P, @Q) capacity 10
 ecs.system @s(%v: f32) reads [@P] writes [@S] {
   ecs.query (%p: !ecs.ref<@P>) {
-    // expected-error @+1 {{changes @S on entities of archetype @B, which does not hold it as optional; moving entities between archetypes is not supported}}
+    // expected-error @+1 {{adds @S to entities of @B, but no archetype has exactly the resulting components; declare one, or make @S optional in @B}}
     ecs.add @S(%v) : f32
   }
+}
+
+// -----
+
+ecs.system @s() {
+  // expected-error @+1 {{must be inside an 'ecs.query'}}
+  %id = ecs.entity : i64
 }
 
 // -----
@@ -306,7 +314,7 @@ ecs.component @S (t: f32)
 ecs.archetype @A (@P, @S) capacity 10
 ecs.system @s() writes [@S] {
   ecs.query (%s: !ecs.ref<@S>) {
-    // expected-error @+1 {{changes @S on entities of archetype @A, which does not hold it as optional}}
+    // expected-error @+1 {{removes @S from entities of @A, but no archetype has exactly the resulting components; declare one, or make @S optional in @A}}
     ecs.remove @S
   }
 }

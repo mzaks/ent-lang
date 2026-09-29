@@ -1,4 +1,5 @@
 #include "Ecs/EcsOps.h"
+#include "Ecs/Structure.h"
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
@@ -490,11 +491,13 @@ LogicalResult SetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 //===----------------------------------------------------------------------===//
 
 /// Check the rules shared by ecs.add and ecs.remove and return the
-/// component: it exists, the system declares it in `writes`, and every
-/// archetype the enclosing query matches holds it as optional.
+/// component: it exists, the system declares it in `writes`, and in every
+/// archetype the enclosing query matches the change is possible. A move
+/// needs no archetypes in `writes`: whether a change moves entities is a
+/// storage decision, and the analysis derives its effect from the storage.
 static FailureOr<ComponentOp>
-verifyPresenceChange(SymbolTableCollection &symbolTable, Operation *op,
-                     FlatSymbolRefAttr componentRef) {
+verifyComponentChange(SymbolTableCollection &symbolTable, Operation *op,
+                      FlatSymbolRefAttr componentRef, bool add) {
   ComponentOp component = lookupComponent(symbolTable, op, componentRef);
   if (!component)
     return op->emitOpError("references unknown component ") << componentRef;
@@ -503,19 +506,19 @@ verifyPresenceChange(SymbolTableCollection &symbolTable, Operation *op,
     return op->emitOpError("changes ")
            << componentRef << " but system @" << system.getSymName()
            << " does not declare it in 'writes'";
-  auto query = op->getParentOfType<QueryOp>();
-  auto module = op->getParentOfType<ModuleOp>();
-  for (ArchetypeOp archetype : module.getOps<ArchetypeOp>()) {
-    bool matches = llvm::all_of(
-        query.getBody().getArgumentTypes(), [&](Type type) {
-          return archetype.contains(cast<RefType>(type).getComponent());
-        });
-    if (matches && !archetype.isOptional(componentRef))
-      return op->emitOpError("changes ")
-             << componentRef << " on entities of archetype @"
-             << archetype.getSymName() << ", which does not hold it as "
-             << "optional; moving entities between archetypes is not "
-                "supported";
+  for (ArchetypeOp archetype :
+       getMatchedArchetypes(op->getParentOfType<QueryOp>())) {
+    if (classifyChange(archetype, componentRef, add).kind !=
+        ComponentChange::NoTarget)
+      continue;
+    InFlightDiagnostic diag =
+        op->emitOpError(add ? "adds " : "removes ")
+        << componentRef << (add ? " to" : " from") << " entities of @"
+        << archetype.getSymName()
+        << ", but no archetype has exactly the resulting components; "
+           "declare one, or make ";
+    diag << componentRef << " optional in @" << archetype.getSymName();
+    return diag;
   }
   return component;
 }
@@ -531,7 +534,8 @@ LogicalResult AddOp::verify() { return verifyInsideQuery(*this); }
 
 LogicalResult AddOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   FailureOr<ComponentOp> component =
-      verifyPresenceChange(symbolTable, *this, getComponentAttr());
+      verifyComponentChange(symbolTable, *this, getComponentAttr(),
+                            /*add=*/true);
   if (failed(component))
     return failure();
   ArrayAttr fieldTypes = component->getFieldTypes();
@@ -554,7 +558,8 @@ LogicalResult AddOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 LogicalResult RemoveOp::verify() { return verifyInsideQuery(*this); }
 
 LogicalResult RemoveOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  return verifyPresenceChange(symbolTable, *this, getComponentAttr());
+  return verifyComponentChange(symbolTable, *this, getComponentAttr(),
+                               /*add=*/false);
 }
 
 //===----------------------------------------------------------------------===//
@@ -606,6 +611,8 @@ LogicalResult SpawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 }
 
 LogicalResult DespawnOp::verify() { return verifyInsideQuery(*this); }
+
+LogicalResult EntityOp::verify() { return verifyInsideQuery(*this); }
 
 LogicalResult DespawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto system = (*this)->getParentOfType<SystemOp>();
