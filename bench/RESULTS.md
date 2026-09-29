@@ -219,3 +219,55 @@ together).
 - With `KMP_BLOCKTIME=200`, parallel loops would already pay at 1e5 (13.5
   us vs 49 us on 2026-09-28); the default threshold of 1e6 is tuned for
   the runtime's default settings and leaves that on the table.
+
+## 2026-09-29: resources and a single-entity archetype in the example
+
+Same machine and toolchain, commit dc7efd5. The example's frame now also
+reads the wind strength from a resource (loaded once before the particle
+loop), moves one player through a capacity-1 guard, and advances a frame
+counter in a separate `tick` call after the fused loops. The C reference
+does the same. All variants produced identical checksums at every size.
+Load average 4.4 before, 3.4 between, 6.3 after; Spotlight's indexer had
+used a full core shortly before the run and was down to 8% at the start.
+
+### OpenMP runtime defaults (`KMP_BLOCKTIME=0`, passive wait)
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 331 (18%) | 5,412 (6%) | 50,514 (1%) | 507,784 (1%) | 5,138,269 (0%) |
+| stages-omp | 62,031 (10%) | 66,837 (11%) | 103,162 (5%) | 481,062 (6%) | 4,359,974 (4%) |
+| entities-omp | 334 (22%) | 5,389 (3%) | 50,521 (1%) | 399,761 (1%) | 2,241,739 (1%) |
+| fused | 278 (10%) | 4,475 (2%) | 45,467 (2%) | 451,343 (1%) | 4,520,546 (0%) |
+| fused-entities-omp | 285 (10%) | 4,522 (2%) | 45,182 (2%) | 203,531 (3%) | 1,839,318 (0%) |
+| c-fused | 313 (13%) | 4,451 (2%) | 45,151 (4%) | 452,738 (1%) | 4,519,588 (1%) |
+| c-fused-restrict | 279 (9%) | 4,507 (3%) | 45,154 (2%) | 453,638 (1%) | 4,527,093 (1%) |
+
+### `KMP_BLOCKTIME=200`
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 332 (11%) | 5,443 (4%) | 50,895 (1%) | 508,364 (1%) | 5,138,675 (0%) |
+| stages-omp | 2,274 (22%) | 7,214 (11%) | 46,495 (24%) | 476,429 (15%) | 4,662,516 (9%) |
+| entities-omp | 323 (20%) | 5,520 (7%) | 50,787 (1%) | 80,654 (23%) | 2,062,403 (2%) |
+| fused | 310 (17%) | 4,534 (3%) | 45,209 (3%) | 451,893 (1%) | 4,518,020 (1%) |
+| fused-entities-omp | 285 (15%) | 4,510 (2%) | 45,393 (3%) | 76,677 (21%) | 1,850,619 (7%) |
+| c-fused | 286 (16%) | 4,506 (3%) | 45,493 (4%) | 453,494 (0%) | 4,546,172 (2%) |
+| c-fused-restrict | 293 (14%) | 4,493 (3%) | 45,214 (1%) | 452,757 (1%) | 4,528,646 (2%) |
+
+### What holds
+
+- The resource read, the player guard and the extra `tick` call cost
+  nothing measurable: every fused variant is within 2% of the previous
+  run (fused 4.57 to 4.52 ms at 1e7, fused parallel 1.84 ms both times),
+  below what these runs can resolve. Generated code still matches the C
+  reference within 1%.
+- Whether loading the resource once before the loop matters is not
+  measured: there is no build without the hoist to compare against.
+
+### Measured, not explained
+
+- The earlier finding that `KMP_BLOCKTIME=200` makes 1e7 parallel slower
+  and noisier than runtime defaults did not reproduce: fused parallel took
+  1.85 ms (spread 7%) against 1.84 ms with defaults, and entities-omp was
+  faster (2.06 vs 2.24 ms). The three earlier runs had more background
+  load; whether that explains them is not verified.
