@@ -18,17 +18,21 @@ cmake --build build --target check-ecs
 build/bin/ecs-opt examples/integrate.mlir
 ```
 
-Run the toy simulation: stage it, lower it with parallel stages, link it with
-its C host and the OpenMP runtime, and execute it. Drop `--ecs-schedule`,
-`parallel-stages` and the OpenMP flags for the sequential version.
+Run the toy simulation: generate the world's C header, lower the program
+with fused, parallel entity loops, and link it with its C host and the
+OpenMP runtime. Drop `parallel-entities`, `--convert-scf-to-openmp` and the
+OpenMP flags for a sequential build.
 
 ```sh
 LLVM=/opt/homebrew/opt/llvm
-build/bin/ecs-opt examples/integrate.mlir --ecs-schedule \
-    --ecs-lower-to-loops=parallel-stages=1 --convert-scf-to-cf \
-    --convert-to-llvm --reconcile-unrealized-casts \
+build/bin/ecs-translate --ecs-to-c-header examples/integrate.mlir \
+    -o /tmp/integrate_world.h
+build/bin/ecs-opt examples/integrate.mlir \
+    "--ecs-lower-to-loops=fuse-systems=1 parallel-entities=1" --symbol-dce \
+    --convert-scf-to-openmp --convert-scf-to-cf --convert-to-llvm \
+    --reconcile-unrealized-casts \
   | $LLVM/bin/mlir-translate --mlir-to-llvmir -o /tmp/integrate.ll
-$LLVM/bin/clang -O2 -Wno-override-module /tmp/integrate.ll \
+$LLVM/bin/clang -O2 -Wno-override-module -I/tmp /tmp/integrate.ll \
     examples/host/integrate_main.c -L$LLVM/lib -lomp -Wl,-rpath,$LLVM/lib \
     -o /tmp/integrate && /tmp/integrate
 ```
@@ -43,9 +47,10 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
 ## The dialect today
 
 - `ecs.component @Position (x: f32, y: f32)`: scalar fields, abstract layout.
-- `ecs.archetype @Body (@Position, @Velocity, @Mass)`: a table that entities
-  are stored in. The set of archetypes is closed, so every query is matched
-  to its archetypes at compile time.
+- `ecs.archetype @Body (@Position, @Velocity, @Mass) capacity 100000`: a
+  table that entities are stored in, with a hard upper bound on its size.
+  The set of archetypes is closed, so every query is matched to its
+  archetypes at compile time.
 - `ecs.system @s(%params) reads [...] writes [...] { ... }`: declared access;
   `writes` implies read.
 - `ecs.query (%p: !ecs.ref<@Position, mut>, ...) { ... }`: body runs once per
@@ -86,12 +91,25 @@ and `memref.store` on that archetype's columns. Stages dissolve into calls,
 or with `parallel-stages=1` a stage of several runs becomes an `omp.parallel`
 region with one `omp.section` per run.
 
-The world is passed explicitly. Per archetype, in declaration order, it is an
-entity count (`index`) and one `memref<?xT>` column per field, ordered by the
-archetype's components and then by each component's fields. Every lowered
-function takes its own parameters followed by the whole world;
-`examples/host/integrate_main.c` shows the host side. Parallel stages assume
-the host passes columns that do not alias.
+## World storage
+
+The language owns the world's storage. From the archetypes' components and
+capacities, the compiler lays out the whole world as one arena: an i64
+entity count per archetype, then one column per field at a fixed offset.
+Every column starts on a 64-byte boundary, 17 cache lines past the end of
+the previous one; columns packed from a page-aligned base would start at
+the same cache set, which cost a single core 7-8% (see
+`bench/RESULTS.md`). Lowered functions take the arena after their own
+parameters and read columns through statically shaped views.
+
+`ecs-translate --ecs-to-c-header` emits the C API for hosts:
+`ecs_world_create`/`ecs_world_destroy`, per archetype a capacity, a count
+and a checked `set_count`, typed column accessors such as
+`ecs_Body_Position_x(world)`, and one entry point per schedule, such as
+`ecs_frame(world, dt)`. `examples/host/integrate_main.c` shows the host
+side. Creating a world only touches the counts, so capacity costs address
+space, not memory, until columns are written. Parallel stages and loops
+assume nothing else writes the arena while a schedule runs.
 
 ## Fusion and entity parallelism
 
@@ -103,9 +121,12 @@ different archetypes share no columns. Two consequences the lowering uses:
   legal for any sequence of systems without other effects, conflicting or
   not: running all bodies for one entity before the next gives the same
   result as running each query to completion.
-- `parallel-entities=1` emits every entity-local query loop as
-  `scf.parallel`; `--convert-scf-to-openmp` turns it into an OpenMP
-  work-sharing loop.
+- `parallel-entities=1` emits entity-local query loops as `scf.parallel`;
+  `--convert-scf-to-openmp` turns them into OpenMP work-sharing loops. A
+  parallel loop only pays for its fork beyond some size, so an archetype
+  whose capacity is below `parallel-min-entities` (default 1e6, the
+  measured crossover on an M4 Max) always gets a sequential loop, and
+  above it the count decides at run time.
 
 ## Benchmarks
 
