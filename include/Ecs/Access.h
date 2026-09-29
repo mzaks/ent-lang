@@ -10,18 +10,20 @@
 
 namespace mlir::ecs {
 
-/// One field of one component in one archetype's table: the unit of
-/// storage that systems read and write. Held as (archetype name, component
-/// name, field name).
+/// One field of one component in one archetype's table, or one field of a
+/// resource: the unit of storage that systems read and write. Held as
+/// (archetype name, component or resource name, field name); the archetype
+/// is null for a resource.
 using Column = std::tuple<StringAttr, StringAttr, StringAttr>;
 
-/// Prints a column as `Archetype.Component.field`.
+/// Prints a column as `Archetype.Component.field` or `Resource.field`.
 std::string formatColumn(const Column &column);
 
 /// The columns a system actually reads and writes, derived from the
-/// `ecs.get` and `ecs.set` ops in its queries rather than from its declared
-/// `reads` and `writes`. Binding a component without accessing it only
-/// filters archetypes and is not an access.
+/// `ecs.get`/`ecs.set` ops in its queries and its `ecs.read`/`ecs.write`
+/// ops rather than from its declared `reads` and `writes`. Binding a
+/// component without accessing it only filters archetypes and is not an
+/// access.
 struct SystemAccess {
   llvm::SetVector<Column> reads;
   llvm::SetVector<Column> writes;

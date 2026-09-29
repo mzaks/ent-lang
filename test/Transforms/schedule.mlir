@@ -166,3 +166,45 @@ ecs.schedule @staged(%c: f32) {
     ecs.run @writeY(%c) : f32
   }
 }
+
+// Resources: readers of a resource commute; a writer orders against them.
+ecs.resource @Clock (dt: f32, frame: i64)
+ecs.system @readDt() reads [@Clock] writes [@V] {
+  ecs.query (%v: !ecs.ref<@V, mut>) {
+    %dt = ecs.read @Clock "dt" : f32
+    ecs.set %v "dx", %dt : !ecs.ref<@V, mut>, f32
+  }
+}
+ecs.system @readDtAgain(%c: f32) reads [@Clock] writes [@P] {
+  %dt = ecs.read @Clock "dt" : f32
+  ecs.query (%p: !ecs.ref<@P, mut>) {
+    ecs.set %p "y", %dt : !ecs.ref<@P, mut>, f32
+  }
+}
+ecs.system @advance() writes [@Clock] {
+  %f = ecs.read @Clock "frame" : i64
+  %one = arith.constant 1 : i64
+  %n = arith.addi %f, %one : i64
+  ecs.write @Clock "frame", %n : i64
+}
+ecs.system @setDt(%dt: f32) writes [@Clock] {
+  ecs.write @Clock "dt", %dt : f32
+}
+
+// CHECK-LABEL: ecs.schedule @resources
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @readDt
+// CHECK-NEXT:   ecs.run @readDtAgain
+// CHECK-NEXT:   ecs.run @advance
+// CHECK-NEXT: }
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @setDt
+// CHECK-NEXT: }
+ecs.schedule @resources(%c: f32) {
+  ecs.run @readDt()
+  ecs.run @readDtAgain(%c) : f32
+  // Writes Clock.frame, which nobody else touches: same stage.
+  ecs.run @advance()
+  // expected-remark @+1 {{@setDt waits for @readDt: it writes Clock.dt, which @readDt reads}}
+  ecs.run @setDt(%c) : f32
+}

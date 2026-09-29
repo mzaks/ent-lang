@@ -29,3 +29,18 @@ ecs.system @opaque() {
   // expected-note @+1 {{has effects outside component access, so the system conflicts with every other system}}
   func.call @log() : () -> ()
 }
+
+// Resource fields are columns without an archetype. Reading one inside a
+// query counts once, however many archetypes the query matches.
+ecs.resource @Clock (dt: f32, frame: i64)
+// expected-remark @+1 {{reads Clock.frame, A.P.x, B.P.x, Clock.dt; writes Clock.frame, A.P.x, B.P.x}}
+ecs.system @tick() writes [@P, @Clock] {
+  %f = ecs.read @Clock "frame" : i64
+  ecs.write @Clock "frame", %f : i64
+  ecs.query (%p: !ecs.ref<@P, mut>) {
+    %x = ecs.get %p "x" : !ecs.ref<@P, mut> -> f32
+    %dt = ecs.read @Clock "dt" : f32
+    %n = arith.addf %x, %dt : f32
+    ecs.set %p "x", %n : !ecs.ref<@P, mut>, f32
+  }
+}

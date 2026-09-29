@@ -8,6 +8,8 @@ using namespace mlir::ecs;
 
 std::string mlir::ecs::formatColumn(const Column &column) {
   auto [archetype, component, field] = column;
+  if (!archetype)
+    return (component.getValue() + "." + field.getValue()).str();
   return (archetype.getValue() + "." + component.getValue() + "." +
           field.getValue())
       .str();
@@ -80,6 +82,13 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
       return record(op, get.getRef(), get.getFieldAttr(), access.reads);
     if (auto set = dyn_cast<SetOp>(op))
       return record(op, set.getRef(), set.getFieldAttr(), access.writes);
+    if (auto read = dyn_cast<ReadOp>(op))
+      return (void)access.reads.insert(
+          {StringAttr(), read.getResourceAttr().getAttr(), read.getFieldAttr()});
+    if (auto write = dyn_cast<WriteOp>(op))
+      return (void)access.writes.insert({StringAttr(),
+                                         write.getResourceAttr().getAttr(),
+                                         write.getFieldAttr()});
     if (isa<QueryOp, YieldOp>(op))
       return;
     if (!access.opaqueOp && hasOwnEffects(op))
