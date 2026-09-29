@@ -10,6 +10,8 @@ std::string mlir::ecs::formatColumn(const Column &column) {
   auto [archetype, component, field] = column;
   if (!archetype)
     return (component.getValue() + "." + field.getValue()).str();
+  if (field.getValue().empty())
+    return (archetype.getValue() + "." + component.getValue() + "?").str();
   return (archetype.getValue() + "." + component.getValue() + "." +
           field.getValue())
       .str();
@@ -52,9 +54,9 @@ SystemAccess::conflictWith(const SystemAccess &other,
 SystemAccess mlir::ecs::computeAccess(SystemOp system,
                                       ArrayRef<ArchetypeOp> archetypes) {
   SystemAccess access;
-  llvm::DenseMap<Operation *, SmallVector<StringAttr>> matched;
+  llvm::DenseMap<Operation *, SmallVector<ArchetypeOp>> matched;
 
-  auto matchedArchetypes = [&](QueryOp query) -> ArrayRef<StringAttr> {
+  auto matchedArchetypes = [&](QueryOp query) -> ArrayRef<ArchetypeOp> {
     auto [it, inserted] = matched.try_emplace(query);
     if (inserted) {
       for (ArchetypeOp archetype : archetypes) {
@@ -63,18 +65,22 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
               return archetype.contains(cast<RefType>(type).getComponent());
             });
         if (all)
-          it->second.push_back(archetype.getSymNameAttr());
+          it->second.push_back(archetype);
       }
     }
     return it->second;
   };
 
+  // The presence of an optional component is a column with an empty field
+  // name.
+  StringAttr presence = StringAttr::get(system.getContext(), "");
+
   auto record = [&](Operation *op, Value ref, StringAttr field,
                     llvm::SetVector<Column> &into) {
     auto query = op->getParentOfType<QueryOp>();
     StringAttr component = cast<RefType>(ref.getType()).getComponent().getAttr();
-    for (StringAttr archetype : matchedArchetypes(query))
-      into.insert({archetype, component, field});
+    for (ArchetypeOp archetype : matchedArchetypes(query))
+      into.insert({archetype.getSymNameAttr(), component, field});
   };
 
   system.getBody().walk([&](Operation *op) {
@@ -89,7 +95,36 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
       return (void)access.writes.insert({StringAttr(),
                                          write.getResourceAttr().getAttr(),
                                          write.getFieldAttr()});
-    if (isa<QueryOp, YieldOp>(op))
+    if (isa<AddOp, RemoveOp>(op)) {
+      // Every matched archetype holds the component as optional (verified):
+      // the change writes its presence, and an add also its fields.
+      auto component = cast<FlatSymbolRefAttr>(op->getAttr("component"));
+      auto componentOp = SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
+          system, component);
+      for (ArchetypeOp archetype :
+           matchedArchetypes(op->getParentOfType<QueryOp>())) {
+        StringAttr name = archetype.getSymNameAttr();
+        access.writes.insert({name, component.getAttr(), presence});
+        if (isa<AddOp>(op))
+          for (Attribute field : componentOp.getFieldNames())
+            access.writes.insert(
+                {name, component.getAttr(), cast<StringAttr>(field)});
+      }
+      return;
+    }
+    if (auto query = dyn_cast<QueryOp>(op)) {
+      // A query binding an optional component runs only where it is
+      // present, so it reads the presence.
+      for (Type type : query.getBody().getArgumentTypes()) {
+        FlatSymbolRefAttr component = cast<RefType>(type).getComponent();
+        for (ArchetypeOp archetype : matchedArchetypes(query))
+          if (archetype.isOptional(component))
+            access.reads.insert(
+                {archetype.getSymNameAttr(), component.getAttr(), presence});
+      }
+      return;
+    }
+    if (isa<YieldOp>(op))
       return;
     if (!access.opaqueOp && hasOwnEffects(op))
       access.opaqueOp = op;

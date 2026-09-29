@@ -44,3 +44,22 @@ ecs.system @tick() writes [@P, @Clock] {
     ecs.set %p "x", %n : !ecs.ref<@P, mut>, f32
   }
 }
+
+// Optional components: binding one reads its presence where it is
+// optional; ecs.remove writes the presence, ecs.add also the fields.
+ecs.component @Q (q: f32)
+ecs.component @S (t: f32, u: f32)
+ecs.archetype @C (@Q, optional @S) capacity 1000
+// expected-remark @+1 {{reads C.S.t, C.S?; writes C.S?}}
+ecs.system @expire() writes [@S] {
+  ecs.query (%s: !ecs.ref<@S, mut>) {
+    %t = ecs.get %s "t" : !ecs.ref<@S, mut> -> f32
+    ecs.remove @S
+  }
+}
+// expected-remark @+1 {{reads nothing; writes C.S?, C.S.t, C.S.u}}
+ecs.system @stun(%t: f32) reads [@Q] writes [@S] {
+  ecs.query (%q: !ecs.ref<@Q>) {
+    ecs.add @S(%t, %t) : f32, f32
+  }
+}

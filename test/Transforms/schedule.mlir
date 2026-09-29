@@ -208,3 +208,44 @@ ecs.schedule @resources(%c: f32) {
   // expected-remark @+1 {{@setDt waits for @readDt: it writes Clock.dt, which @readDt reads}}
   ecs.run @setDt(%c) : f32
 }
+
+// Optional components: gaining or losing one writes the presence, which
+// every query binding the component reads.
+ecs.component @Q (q: f32)
+ecs.component @S (t: f32)
+ecs.archetype @C (@Q, optional @S) capacity 100
+ecs.system @stun(%t: f32) reads [@Q] writes [@S] {
+  ecs.query (%q: !ecs.ref<@Q>) {
+    ecs.add @S(%t) : f32
+  }
+}
+ecs.system @countDown(%dt: f32) writes [@S] {
+  ecs.query (%s: !ecs.ref<@S, mut>) {
+    %t = ecs.get %s "t" : !ecs.ref<@S, mut> -> f32
+    %n = arith.subf %t, %dt : f32
+    ecs.set %s "t", %n : !ecs.ref<@S, mut>, f32
+  }
+}
+ecs.system @moveQ(%d: f32) writes [@Q] {
+  ecs.query (%q: !ecs.ref<@Q, mut>) {
+    ecs.set %q "q", %d : !ecs.ref<@Q, mut>, f32
+  }
+}
+
+// stun waits for countDown because of the presence; moveQ writes C.Q.q,
+// which neither reads (binding Q only selects entities), so it joins the
+// first stage.
+// CHECK-LABEL: ecs.schedule @optional
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @countDown
+// CHECK-NEXT:   ecs.run @moveQ
+// CHECK-NEXT: }
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @stun
+// CHECK-NEXT: }
+ecs.schedule @optional(%c: f32) {
+  ecs.run @countDown(%c) : f32
+  // expected-remark @+1 {{@stun waits for @countDown: it writes C.S?, which @countDown reads}}
+  ecs.run @stun(%c) : f32
+  ecs.run @moveQ(%c) : f32
+}
