@@ -27,12 +27,30 @@ struct WorldArchetype {
   const WorldColumn *find(StringAttr component, StringAttr field) const;
 };
 
+/// One field of a resource: stored once.
+struct WorldResourceField {
+  StringAttr field;
+  Type type;
+  /// Byte offset of the field in the world arena.
+  uint64_t offset;
+};
+
+struct WorldResource {
+  ResourceOp op;
+  SmallVector<WorldResourceField> fields;
+
+  /// The field named `field`, or null.
+  const WorldResourceField *find(StringAttr field) const;
+};
+
 /// Static layout of the whole world in one arena, computed from the
-/// archetypes' components and capacities.
+/// archetypes' components and capacities and from the resources.
 ///
 /// The arena starts with one i64 entity count per archetype, in declaration
-/// order. Columns follow, one per field, ordered by archetype, then by the
-/// archetype's components, then by the component's fields. Each column
+/// order. Resources follow, each starting on a cache line, with naturally
+/// aligned fields. Columns follow, one per field, ordered by archetype,
+/// then by the archetype's components, then by the component's fields.
+/// Each column
 /// starts at a 64-byte boundary, pushed 17 cache lines beyond the end of
 /// the previous column: columns laid out back to back from a page-aligned
 /// base would otherwise tend to start at the same cache set, which costs a
@@ -43,14 +61,20 @@ struct WorldLayout {
   static constexpr uint64_t kStagger = 17 * 64;
 
   SmallVector<WorldArchetype> archetypes;
+  SmallVector<WorldResource> resources;
   /// Bytes taken by the counts at the start of the arena.
   uint64_t countsBytes = 0;
+  /// Bytes taken by the counts and resources, which a new world zeroes.
+  uint64_t headerBytes = 0;
   /// Total size of the arena.
   uint64_t totalBytes = 0;
 
   /// Computes the layout, or emits an error on `module` and fails if a
   /// field has a type the world cannot store.
   static FailureOr<WorldLayout> compute(ModuleOp module);
+
+  /// The layout of `resource`; it must be declared in the module.
+  const WorldResource &getResource(StringAttr resource) const;
 };
 
 /// Bytes one element of `type` takes in world storage, or 0 if the type is

@@ -38,6 +38,20 @@ const WorldColumn *WorldArchetype::find(StringAttr component,
   return nullptr;
 }
 
+const WorldResourceField *WorldResource::find(StringAttr field) const {
+  for (const WorldResourceField &entry : fields)
+    if (entry.field == field)
+      return &entry;
+  return nullptr;
+}
+
+const WorldResource &WorldLayout::getResource(StringAttr resource) const {
+  for (const WorldResource &entry : resources)
+    if (ResourceOp(entry.op).getSymNameAttr() == resource)
+      return entry;
+  llvm_unreachable("resource is not part of the layout");
+}
+
 FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   SymbolTable symbols(module);
   WorldLayout layout;
@@ -51,6 +65,26 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   layout.countsBytes = 8 * layout.archetypes.size();
 
   uint64_t end = layout.countsBytes;
+  for (ResourceOp resource : module.getOps<ResourceOp>()) {
+    WorldResource entry;
+    entry.op = resource;
+    end = llvm::alignTo(end, kColumnAlignment);
+    for (auto [name, typeAttr] :
+         llvm::zip(resource.getFieldNames(), resource.getFieldTypes())) {
+      Type type = cast<TypeAttr>(typeAttr).getValue();
+      uint64_t bytes = getStorageBytes(type);
+      if (bytes == 0)
+        return resource.emitOpError("field ")
+               << name << " has type " << type
+               << ", which world storage does not support";
+      uint64_t offset = llvm::alignTo(end, bytes);
+      entry.fields.push_back({cast<StringAttr>(name), type, offset});
+      end = offset + bytes;
+    }
+    layout.resources.push_back(std::move(entry));
+  }
+  layout.headerBytes = end;
+
   for (WorldArchetype &archetype : layout.archetypes) {
     for (Attribute attr : archetype.op.getComponents()) {
       auto componentName = cast<FlatSymbolRefAttr>(attr).getAttr();

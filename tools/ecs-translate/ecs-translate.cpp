@@ -81,13 +81,14 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
   os << llvm::formatv("#define ECS_WORLD_ALIGNMENT {0}\n\n",
                       WorldLayout::kArenaAlignment);
 
-  os << "// Columns are left uninitialised: nothing reads beyond an "
-        "archetype's\n// count, and untouched pages cost no memory.\n"
+  os << "// Counts and resources start at zero. Columns are left "
+        "uninitialised:\n// nothing reads beyond an archetype's count, and "
+        "untouched pages cost\n// no memory.\n"
         "static inline ecs_world *ecs_world_create(void) {\n"
         "  void *arena = NULL;\n"
         "  if (posix_memalign(&arena, ECS_WORLD_ALIGNMENT, ECS_WORLD_BYTES))\n"
         "    return NULL;\n";
-  os << llvm::formatv("  memset(arena, 0, {0});\n", layout->countsBytes);
+  os << llvm::formatv("  memset(arena, 0, {0});\n", layout->headerBytes);
   os << "  return (ecs_world *)arena;\n}\n\n"
         "static inline void ecs_world_destroy(ecs_world *world) { "
         "free(world); }\n";
@@ -124,6 +125,22 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
           "static inline {0} *{1}(ecs_world *world) {{\n"
           "  return ({0} *)((char *)world + {2});\n}\n",
           cType, accessor, column.offset);
+    }
+  }
+
+  for (const WorldResource &resource : layout->resources) {
+    ResourceOp resourceOp = resource.op;
+    std::string name = toIdentifier(resourceOp.getSymName());
+    os << llvm::formatv("\n// Resource @{0}\n", resourceOp.getSymName());
+    for (const WorldResourceField &field : resource.fields) {
+      std::string accessor = llvm::formatv(
+          "ecs_{0}_{1}", name, toIdentifier(field.field.getValue()));
+      if (failed(claim(resourceOp, accessor)))
+        return failure();
+      os << llvm::formatv(
+          "static inline {0} *{1}(ecs_world *world) {{\n"
+          "  return ({0} *)((char *)world + {2});\n}\n",
+          getCType(field.type), accessor, field.offset);
     }
   }
 
