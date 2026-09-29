@@ -448,11 +448,29 @@ every configuration, against 312-330 us for the hand-written select form.
   with 10-50% density, and sparse-set at 1% density with churn. A
   per-component choice remains necessary.
 
+### Why the compiled form is 9% faster: vectorisation width
+
+Checked afterwards with three back-to-back process triples per density
+at n=1e6 without churn (load average 2-4), systems time:
+
+| density | hand-written select | with `-DSTAGGER` | with `-DWIDTH16` | compiled |
+|---|---|---|---|---|
+| 10% | 294-298 us | 293-307 us | – | 270-278 us |
+| 90% | 298-303 us | 296-316 us | – | 271-290 us |
+| 10% | 309-323 us | – | 289-302 us | 281-297 us |
+| 90% | 310-314 us | – | 289-290 us | 280-285 us |
+
+(The two halves are separate runs.) Staggered allocations do not change
+the hand-written form, so staggering is not the reason. The vectoriser is:
+LLVM runs the compiled status loop 16 entities wide but the hand-written
+one 4 wide with 2x interleave (`-Rpass=loop-vectorize`), and forcing the
+hand-written loop to width 16 recovers all but 2-3% of the gap, which is
+within the noise of these runs. The compiled body compares the presence
+byte as a byte (`cmpi ne` on i8), while the C source widens it to `int`
+first; the narrow type is the likely reason LLVM picks the wider factor,
+not verified beyond that.
+
 ### Measured, not explained
 
-- Why the unfused compiled form beats the hand-written select form by 9%.
-  The compiled world staggers its columns while churn.c's allocations are
-  page aligned, and staggering was worth 7-8% for the example's frame; a
-  wide-select build with staggered columns would confirm it, not run yet.
 - At n=1e5, the configurations without churn at 1% density are noisy
   again (46-103% spread), for every variant, as in the first churn run.

@@ -18,6 +18,10 @@
 //   -DVARIANT=3  sparse set: Status packed densely with its owner's id and
 //                a sparse id -> slot index; status reads and writes the
 //                owners' Velocity through the id
+//   -DSTAGGER    offset every allocation by 17 more cache lines than the
+//                previous one, as the compiled world lays out its columns
+//   -DWIDTH16    with VARIANT=1, vectorise the status loop 16 wide, as LLVM
+//                chooses for the compiled program (it picks 4 x 2 here)
 //   -DVARIANT=4  compiled: bench/churn/status.mlir, where Status is an
 //                optional component, lowered by ecs-opt and linked in; the
 //                host changes presence through the generated header
@@ -56,13 +60,19 @@ static uint32_t rng(uint32_t bound) {
 
 static size_t allocated = 0;
 static void *allocate(size_t bytes) {
-  void *p;
-  if (posix_memalign(&p, 64, bytes ? bytes : 64) != 0) {
+#ifdef STAGGER
+  static size_t count = 0;
+  size_t shift = 17 * 64 * count++;
+#else
+  size_t shift = 0;
+#endif
+  char *p;
+  if (posix_memalign((void **)&p, 64, (bytes ? bytes : 64) + shift) != 0) {
     perror("posix_memalign");
     exit(1);
   }
   allocated += bytes;
-  return p;
+  return p + shift;
 }
 
 static float initialX(uint32_t id) { return 0.5f * (float)(id % 1024); }
@@ -175,6 +185,9 @@ static void systems(void) {
     y[i] = y[i] + dy[i] * DT;
   }
 #if VARIANT == 1
+#ifdef WIDTH16
+#pragma clang loop vectorize_width(16)
+#endif
   for (int64_t i = 0; i < N; ++i) {
     int p = present[i];
     float slowed = dx[i] * SLOW, left = remaining[i] - DT;
