@@ -60,16 +60,31 @@ def Ecs_ArchetypeOp : Ecs_Op<"archetype", [
     archetype. It lets the compiler lay out the whole world statically and
     decide from the size alone whether a loop over the archetype can ever
     be worth running in parallel.
+
+    A component marked `optional` may be present or absent per entity:
+    ```mlir
+    ecs.archetype @Character (@Position, @Velocity, optional @Stunned)
+        capacity 100000
+    ```
+    It is stored as its field columns plus a presence byte per entity, so
+    gaining or losing it (`ecs.add`, `ecs.remove`) is a write to the
+    entity's own row rather than a move to another archetype. Queries that
+    bind it run only for the entities that currently have it.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        FlatSymbolRefArrayAttr:$components,
+                       OptionalAttr<FlatSymbolRefArrayAttr>:$optional,
                        ConfinedAttr<I64Attr, [IntPositive]>:$capacity);
   let assemblyFormat = [{
-    $sym_name custom<SymbolList>($components) `capacity` $capacity attr-dict
+    $sym_name custom<ComponentList>($components, $optional)
+    `capacity` $capacity attr-dict
   }];
   let hasVerifier = 1;
   let extraClassDeclaration = [{
+    /// True if the archetype stores `component`, always or optionally.
     bool contains(::mlir::FlatSymbolRefAttr component);
+    /// True if `component` is optional in this archetype.
+    bool isOptional(::mlir::FlatSymbolRefAttr component);
   }];
 }
 
@@ -185,6 +200,44 @@ def Ecs_WriteOp : Ecs_Op<"write", [
                        AnyType:$value);
   let assemblyFormat =
       "$resource $field `,` $value attr-dict `:` type($value)";
+  let hasVerifier = 1;
+}
+
+def Ecs_AddOp : Ecs_Op<"add", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Give the visited entity an optional component";
+  let description = [{
+    ```mlir
+    ecs.add @Stunned(%seconds) : f32
+    ```
+    Sets the presence of the optional component on the entity the
+    enclosing query visits and initialises its fields, in declaration
+    order. If the entity already has it, the fields are overwritten. Every
+    archetype the query matches must hold the component as optional: a
+    component an archetype does not hold would need a move to another
+    archetype, which is not supported. The system must declare the
+    component in `writes`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$component,
+                       Variadic<AnyType>:$values);
+  let assemblyFormat =
+      "$component `(` $values `)` attr-dict (`:` type($values)^)?";
+  let hasVerifier = 1;
+}
+
+def Ecs_RemoveOp : Ecs_Op<"remove", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Take an optional component away from the visited entity";
+  let description = [{
+    ```mlir
+    ecs.remove @Stunned
+    ```
+    Clears the presence of the optional component on the entity the
+    enclosing query visits; does nothing if it is absent. The same rules as
+    for `ecs.add` apply.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$component);
+  let assemblyFormat = "$component attr-dict";
   let hasVerifier = 1;
 }
 

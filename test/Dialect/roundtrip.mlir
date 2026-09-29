@@ -34,6 +34,11 @@
 // MISC:        ecs.write @Clock "frame", %{{.*}} : i64
 // MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag>) {
 // MISC-NEXT:     ecs.read @Clock "dt" : f32
+// MISC: ecs.component @Stunned (seconds: f32)
+// MISC: ecs.archetype @Character (@Tag, optional @Stunned) capacity 10
+// MISC-LABEL: ecs.system @stun(%{{.*}}: f32) reads [@Tag] writes [@Stunned] {
+// MISC:          ecs.add @Stunned(%{{.*}}) : f32
+// MISC:          ecs.remove @Stunned
 ecs.component @Tag ()
 ecs.component @Named ("with space": i32, idx: index)
 ecs.system @noop() {
@@ -53,5 +58,15 @@ ecs.system @tick() reads [@Tag] writes [@Clock] {
   ecs.write @Clock "frame", %next : i64
   ecs.query (%t: !ecs.ref<@Tag>) {
     %dt = ecs.read @Clock "dt" : f32
+  }
+}
+ecs.component @Stunned (seconds: f32)
+ecs.archetype @Character (@Tag, optional @Stunned) capacity 10
+ecs.system @stun(%s: f32) reads [@Tag] writes [@Stunned] {
+  ecs.query (%t: !ecs.ref<@Tag>) {
+    ecs.add @Stunned(%s) : f32
+  }
+  ecs.query (%st: !ecs.ref<@Stunned, mut>) {
+    ecs.remove @Stunned
   }
 }

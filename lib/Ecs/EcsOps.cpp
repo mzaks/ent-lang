@@ -9,25 +9,36 @@
 using namespace mlir;
 using namespace mlir::ecs;
 
-// `(@A, @B)`, used by ecs.archetype.
-static ParseResult parseSymbolList(OpAsmParser &parser, ArrayAttr &list) {
-  SmallVector<Attribute> symbols;
+// `(@A, optional @B)`, used by ecs.archetype.
+static ParseResult parseComponentList(OpAsmParser &parser, ArrayAttr &list,
+                                      ArrayAttr &optional) {
+  SmallVector<Attribute> components, optionals;
   auto parseOne = [&]() -> ParseResult {
+    bool isOptional = succeeded(parser.parseOptionalKeyword("optional"));
     FlatSymbolRefAttr symbol;
     if (parser.parseAttribute(symbol))
       return failure();
-    symbols.push_back(symbol);
+    components.push_back(symbol);
+    if (isOptional)
+      optionals.push_back(symbol);
     return success();
   };
   if (parser.parseCommaSeparatedList(OpAsmParser::Delimiter::Paren, parseOne))
     return failure();
-  list = parser.getBuilder().getArrayAttr(symbols);
+  list = parser.getBuilder().getArrayAttr(components);
+  if (!optionals.empty())
+    optional = parser.getBuilder().getArrayAttr(optionals);
   return success();
 }
 
-static void printSymbolList(OpAsmPrinter &p, Operation *, ArrayAttr list) {
+static void printComponentList(OpAsmPrinter &p, Operation *, ArrayAttr list,
+                               ArrayAttr optional) {
   p << "(";
-  llvm::interleaveComma(list, p);
+  llvm::interleaveComma(list, p, [&](Attribute component) {
+    if (optional && llvm::is_contained(optional, component))
+      p << "optional ";
+    p << component;
+  });
   p << ")";
 }
 
@@ -166,6 +177,9 @@ static LogicalResult verifyRecord(Operation *op, ArrayAttr names,
   llvm::StringSet<> seen;
   for (auto [nameAttr, typeAttr] : llvm::zip(names, types)) {
     StringRef name = cast<StringAttr>(nameAttr).getValue();
+    // The empty name stands for an optional component's presence column.
+    if (name.empty())
+      return op->emitOpError("has a field without a name");
     if (!seen.insert(name).second)
       return op->emitOpError("has duplicate field '") << name << "'";
     // Scalars only for now: layout passes split components into one column
@@ -220,6 +234,11 @@ LogicalResult ArchetypeOp::verify() {
   for (Attribute attr : getComponents())
     if (!seen.insert(attr).second)
       return emitOpError("lists component ") << attr << " more than once";
+  if (ArrayAttr optional = getOptionalAttr())
+    for (Attribute attr : optional)
+      if (!llvm::is_contained(getComponents(), attr))
+        return emitOpError("marks ")
+               << attr << " optional but does not list it as a component";
   return success();
 }
 
@@ -235,6 +254,11 @@ ArchetypeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 
 bool ArchetypeOp::contains(FlatSymbolRefAttr component) {
   return llvm::is_contained(getComponents(), component);
+}
+
+bool ArchetypeOp::isOptional(FlatSymbolRefAttr component) {
+  ArrayAttr optional = getOptionalAttr();
+  return optional && llvm::is_contained(optional, component);
 }
 
 //===----------------------------------------------------------------------===//
@@ -454,6 +478,78 @@ LogicalResult SetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
            << getValue().getType() << " does not match field '" << getField()
            << "' of type " << *fieldType;
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// AddOp / RemoveOp
+//===----------------------------------------------------------------------===//
+
+/// Check the rules shared by ecs.add and ecs.remove and return the
+/// component: it exists, the system declares it in `writes`, and every
+/// archetype the enclosing query matches holds it as optional.
+static FailureOr<ComponentOp>
+verifyPresenceChange(SymbolTableCollection &symbolTable, Operation *op,
+                     FlatSymbolRefAttr componentRef) {
+  ComponentOp component = lookupComponent(symbolTable, op, componentRef);
+  if (!component)
+    return op->emitOpError("references unknown component ") << componentRef;
+  auto system = op->getParentOfType<SystemOp>();
+  if (!system.canWrite(componentRef))
+    return op->emitOpError("changes ")
+           << componentRef << " but system @" << system.getSymName()
+           << " does not declare it in 'writes'";
+  auto query = op->getParentOfType<QueryOp>();
+  auto module = op->getParentOfType<ModuleOp>();
+  for (ArchetypeOp archetype : module.getOps<ArchetypeOp>()) {
+    bool matches = llvm::all_of(
+        query.getBody().getArgumentTypes(), [&](Type type) {
+          return archetype.contains(cast<RefType>(type).getComponent());
+        });
+    if (matches && !archetype.isOptional(componentRef))
+      return op->emitOpError("changes ")
+             << componentRef << " on entities of archetype @"
+             << archetype.getSymName() << ", which does not hold it as "
+             << "optional; moving entities between archetypes is not "
+                "supported";
+  }
+  return component;
+}
+
+static LogicalResult verifyInsideQuery(Operation *op) {
+  if (!op->getParentOfType<QueryOp>())
+    return op->emitOpError("must be inside an 'ecs.query': it changes the "
+                           "entity the query visits");
+  return success();
+}
+
+LogicalResult AddOp::verify() { return verifyInsideQuery(*this); }
+
+LogicalResult AddOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  FailureOr<ComponentOp> component =
+      verifyPresenceChange(symbolTable, *this, getComponentAttr());
+  if (failed(component))
+    return failure();
+  ArrayAttr fieldTypes = component->getFieldTypes();
+  if (fieldTypes.size() != getValues().size())
+    return emitOpError("initialises ")
+           << getValues().size() << " fields, but " << getComponentAttr()
+           << " has " << fieldTypes.size();
+  for (auto [index, value, typeAttr] :
+       llvm::enumerate(getValues(), fieldTypes)) {
+    Type fieldType = cast<TypeAttr>(typeAttr).getValue();
+    if (value.getType() != fieldType)
+      return emitOpError("value #")
+             << index << " has type " << value.getType() << ", but field '"
+             << cast<StringAttr>(component->getFieldNames()[index]).getValue()
+             << "' has type " << fieldType;
+  }
+  return success();
+}
+
+LogicalResult RemoveOp::verify() { return verifyInsideQuery(*this); }
+
+LogicalResult RemoveOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifyPresenceChange(symbolTable, *this, getComponentAttr());
 }
 
 //===----------------------------------------------------------------------===//

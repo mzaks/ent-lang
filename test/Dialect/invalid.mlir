@@ -251,3 +251,86 @@ ecs.resource @Clock (dt: f32)
 // hold it.
 // expected-error @+1 {{contains unknown component @Clock}}
 ecs.archetype @A (@Clock) capacity 10
+
+// -----
+
+// expected-error @+1 {{has a field without a name}}
+ecs.component @P ("": f32)
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.component @S (t: f32)
+// expected-error @+1 {{marks @S optional but does not list it as a component}}
+"ecs.archetype"() <{sym_name = "A", components = [@P], optional = [@S], capacity = 10 : i64}> : () -> ()
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.component @S (t: f32)
+ecs.archetype @A (@P, optional @S) capacity 10
+ecs.system @s(%v: f32) writes [@S] {
+  // expected-error @+1 {{must be inside an 'ecs.query': it changes the entity the query visits}}
+  ecs.add @S(%v) : f32
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.component @S (t: f32)
+ecs.archetype @A (@P, optional @S) capacity 10
+ecs.system @s(%v: f32) reads [@P] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{changes @S but system @s does not declare it in 'writes'}}
+    ecs.add @S(%v) : f32
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.component @S (t: f32)
+ecs.archetype @A (@P, optional @S) capacity 10
+ecs.archetype @B (@P) capacity 10
+ecs.system @s(%v: f32) reads [@P] writes [@S] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{changes @S on entities of archetype @B, which does not hold it as optional; moving entities between archetypes is not supported}}
+    ecs.add @S(%v) : f32
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.component @S (t: f32)
+ecs.archetype @A (@P, @S) capacity 10
+ecs.system @s() writes [@S] {
+  ecs.query (%s: !ecs.ref<@S>) {
+    // expected-error @+1 {{changes @S on entities of archetype @A, which does not hold it as optional}}
+    ecs.remove @S
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.component @S (t: f32, n: i32)
+ecs.archetype @A (@P, optional @S) capacity 10
+ecs.system @s(%v: f32) reads [@P] writes [@S] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{initialises 1 fields, but @S has 2}}
+    ecs.add @S(%v) : f32
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.component @S (t: f32)
+ecs.archetype @A (@P, optional @S) capacity 10
+ecs.system @s(%v: i32) reads [@P] writes [@S] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{value #0 has type 'i32', but field 't' has type 'f32'}}
+    ecs.add @S(%v) : i32
+  }
+}
