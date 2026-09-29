@@ -13,12 +13,13 @@ namespace mlir::ecs {
 /// One field of one component in one archetype's table, or one field of a
 /// resource: the unit of storage that systems read and write. Held as
 /// (archetype name, component or resource name, field name); the archetype
-/// is null for a resource, and the field is empty for the presence of an
-/// optional component.
+/// is null for a resource, the field is empty for the presence of an
+/// optional component, and component and field are empty for an
+/// archetype's entity count.
 using Column = std::tuple<StringAttr, StringAttr, StringAttr>;
 
-/// Prints a column as `Archetype.Component.field`, `Resource.field`, or
-/// `Archetype.Component?` for a presence.
+/// Prints a column as `Archetype.Component.field`, `Resource.field`,
+/// `Archetype.Component?` for a presence, or `Archetype.count`.
 std::string formatColumn(const Column &column);
 
 /// The columns a system actually reads and writes, derived from the

@@ -249,3 +249,24 @@ ecs.schedule @optional(%c: f32) {
   ecs.run @stun(%c) : f32
   ecs.run @moveQ(%c) : f32
 }
+
+// Structural changes: spawning into A writes A's count and columns, so a
+// query over A waits for it; a query over B only does not.
+ecs.system @spawnA(%c: f32) writes [@A] {
+  ecs.spawn @A(%c, %c, %c) : f32, f32, f32
+}
+
+// CHECK-LABEL: ecs.schedule @structural
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @spawnA
+// CHECK-NEXT:   ecs.run @xOnB
+// CHECK-NEXT: }
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @readX
+// CHECK-NEXT: }
+ecs.schedule @structural(%c: f32) {
+  ecs.run @spawnA(%c) : f32
+  ecs.run @xOnB(%c) : f32
+  // expected-remark @+1 {{@readX waits for @spawnA: it reads A.P.x, which @spawnA writes}}
+  ecs.run @readX()
+}

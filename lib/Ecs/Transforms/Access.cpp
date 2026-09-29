@@ -10,6 +10,8 @@ std::string mlir::ecs::formatColumn(const Column &column) {
   auto [archetype, component, field] = column;
   if (!archetype)
     return (component.getValue() + "." + field.getValue()).str();
+  if (component.getValue().empty())
+    return (archetype.getValue() + ".count").str();
   if (field.getValue().empty())
     return (archetype.getValue() + "." + component.getValue() + "?").str();
   return (archetype.getValue() + "." + component.getValue() + "." +
@@ -72,8 +74,26 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
   };
 
   // The presence of an optional component is a column with an empty field
-  // name.
-  StringAttr presence = StringAttr::get(system.getContext(), "");
+  // name; an archetype's entity count one with an empty component name.
+  StringAttr empty = StringAttr::get(system.getContext(), "");
+  StringAttr presence = empty;
+
+  // A spawn or despawn changes which entities an archetype holds: it
+  // writes the count and, since rows are appended or moved, every column.
+  auto writeStructure = [&](ArchetypeOp archetype) {
+    StringAttr name = archetype.getSymNameAttr();
+    access.writes.insert({name, empty, empty});
+    for (Attribute attr : archetype.getComponents()) {
+      auto component = cast<FlatSymbolRefAttr>(attr);
+      auto componentOp =
+          SymbolTable::lookupNearestSymbolFrom<ComponentOp>(system, component);
+      for (Attribute field : componentOp.getFieldNames())
+        access.writes.insert(
+            {name, component.getAttr(), cast<StringAttr>(field)});
+      if (archetype.isOptional(component))
+        access.writes.insert({name, component.getAttr(), presence});
+    }
+  };
 
   auto record = [&](Operation *op, Value ref, StringAttr field,
                     llvm::SetVector<Column> &into) {
@@ -112,7 +132,23 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
       }
       return;
     }
+    if (auto spawn = dyn_cast<SpawnOp>(op)) {
+      for (ArchetypeOp archetype : archetypes)
+        if (archetype.getSymNameAttr() == spawn.getArchetypeAttr().getAttr())
+          writeStructure(archetype);
+      return;
+    }
+    if (isa<DespawnOp>(op)) {
+      for (ArchetypeOp archetype :
+           matchedArchetypes(op->getParentOfType<QueryOp>()))
+        writeStructure(archetype);
+      return;
+    }
     if (auto query = dyn_cast<QueryOp>(op)) {
+      // A query iterates its archetypes' entities, so it reads their
+      // counts.
+      for (ArchetypeOp archetype : matchedArchetypes(query))
+        access.reads.insert({archetype.getSymNameAttr(), empty, empty});
       // A query binding an optional component runs only where it is
       // present, so it reads the presence.
       for (Type type : query.getBody().getArgumentTypes()) {
