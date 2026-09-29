@@ -29,8 +29,8 @@ build/bin/ecs-translate --ecs-to-c-header examples/integrate.mlir \
     -o /tmp/integrate_world.h
 build/bin/ecs-opt examples/integrate.mlir \
     "--ecs-lower-to-loops=fuse-systems=1 parallel-entities=1" --symbol-dce \
-    --convert-scf-to-openmp --convert-scf-to-cf --convert-to-llvm \
-    --reconcile-unrealized-casts \
+    --convert-scf-to-openmp --canonicalize --convert-scf-to-cf \
+    --convert-to-llvm --reconcile-unrealized-casts \
   | $LLVM/bin/mlir-translate --mlir-to-llvmir -o /tmp/integrate.ll
 $LLVM/bin/clang -O2 -Wno-override-module -I/tmp /tmp/integrate.ll \
     examples/host/integrate_main.c -L$LLVM/lib -lomp -Wl,-rpath,$LLVM/lib \

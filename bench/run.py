@@ -28,8 +28,12 @@ OUT = os.path.join(ROOT, "build", "bench")
 EXAMPLE = os.path.join(ROOT, "examples", "integrate.mlir")
 HOST = os.path.join(ROOT, "bench", "bench_main.c")
 REFERENCE = os.path.join(ROOT, "bench", "reference.c")
-TO_LLVM = ["--symbol-dce", "--convert-scf-to-openmp", "--convert-scf-to-cf",
-           "--convert-to-llvm", "--reconcile-unrealized-casts"]
+# --canonicalize inlines the memref.alloca_scope that --convert-scf-to-openmp
+# wraps loop bodies in; --convert-scf-to-cf would otherwise split it into
+# several blocks, which the op does not allow.
+TO_LLVM = ["--symbol-dce", "--convert-scf-to-openmp", "--canonicalize",
+           "--convert-scf-to-cf", "--convert-to-llvm",
+           "--reconcile-unrealized-casts"]
 OPENMP = [f"-L{LLVM}/lib", "-lomp", f"-Wl,-rpath,{LLVM}/lib"]
 
 # name -> ecs-opt passes before lowering to LLVM, or None for C references.
