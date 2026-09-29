@@ -1,0 +1,33 @@
+// The stun example with Stunned as a regular component: ecs.add and
+// ecs.remove move characters between @Character and @StunnedCharacter.
+// The systems are the same text as in status.mlir, and the result is the
+// same as with Stunned optional.
+// RUN: sed -n '/^ecs.system/,$p' %S/../../examples/status.mlir > %t.optional
+// RUN: sed -n '/^ecs.system/,$p' %S/../../examples/status_moves.mlir > %t.moves
+// RUN: diff %t.optional %t.moves
+
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/../../examples/status_moves.mlir \
+// RUN:     -o %t.dir/status_moves_world.h
+
+// RUN: ecs-opt %S/../../examples/status_moves.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
+// RUN: clang -O2 -Wno-override-module %t.seq.ll \
+// RUN:     -I%t.dir %S/../../examples/host/status_moves_main.c -o %t.seq
+// RUN: %t.seq | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/status_moves.mlir \
+// RUN:     "--ecs-lower-to-loops=fuse-systems=1 parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --symbol-dce --convert-scf-to-openmp --canonicalize --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
+// RUN: clang -O2 -Wno-override-module %t.par.ll \
+// RUN:     -I%t.dir %S/../../examples/host/status_moves_main.c %openmp -o %t.par
+// RUN: %t.par | FileCheck %s
+
+// The same end state as status.test.
+// CHECK: character 0: x 10.0000 dx -4.0000 stunned 0.5000 s
+// CHECK: character 1: x 3.0000 dx -4.0000 not stunned
+// CHECK: character 2: x 2.5000 dx -1.0000 not stunned
+// CHECK: characters: 2 not stunned, 1 stunned
