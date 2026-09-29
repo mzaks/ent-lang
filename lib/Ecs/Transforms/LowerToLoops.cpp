@@ -73,6 +73,22 @@ public:
     return value;
   }
 
+  /// A one-element view of a resource field.
+  Value resourceField(StringAttr resource, StringAttr field) {
+    const WorldResourceField *entry =
+        layout.getResource(resource).find(field);
+    Value &value = columns[{~0u, entry->offset}];
+    if (!value)
+      value = atEntry([&](Location loc) {
+        auto type = MemRefType::get({1}, entry->type);
+        Value offset =
+            arith::ConstantIndexOp::create(rewriter, loc, entry->offset);
+        return memref::ViewOp::create(rewriter, loc, type, arena, offset,
+                                      ValueRange{});
+      });
+    return value;
+  }
+
 private:
   template <typename Build>
   Value atEntry(Build build) {
@@ -137,7 +153,8 @@ static bool matches(const WorldArchetype &archetype, QueryOp query) {
 /// components, so its iterations are independent of each other.
 static bool isEntityLocal(QueryOp query) {
   WalkResult result = query.getBody().walk([](Operation *op) {
-    if (isa<GetOp, SetOp, YieldOp>(op) || !hasOwnEffects(op))
+    // Resource reads are fine: no query writes a resource.
+    if (isa<GetOp, SetOp, ReadOp, YieldOp>(op) || !hasOwnEffects(op))
       return WalkResult::advance();
     return WalkResult::interrupt();
   });
@@ -146,31 +163,44 @@ static bool isEntityLocal(QueryOp query) {
 
 /// Emit the loop over the entities of `archetype` at the insertion point
 /// and call `emitBody` with the entity index, positioned inside the loop.
+/// Returns the outermost op emitted.
 ///
-/// Iterations of entity-local bodies are independent, so the loop may be an
-/// `scf.parallel`, but a parallel loop only pays for its fork beyond some
-/// number of entities. An archetype whose capacity is below that threshold
-/// never gets a parallel loop; otherwise the count is checked at run time
-/// and the body is emitted twice, once per loop kind.
-static void
+/// An archetype of capacity 1 holds at most one entity, so it gets a guard
+/// instead of a loop. Iterations of entity-local bodies are independent,
+/// so the loop may be an `scf.parallel`, but a parallel loop only pays for
+/// its fork beyond some number of entities. An archetype whose capacity is
+/// below that threshold never gets a parallel loop; otherwise the count is
+/// checked at run time and the body is emitted twice, once per loop kind.
+static Operation *
 emitEntityLoops(IRRewriter &rewriter, Location loc,
                 const WorldArchetype &archetype, WorldAccess &world,
                 const LoopOptions &options, bool entityLocal,
                 function_ref<void(Value entity, Block *loopBody)> emitBody) {
   Value count = world.count(archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
 
-  auto emitSequential = [&] {
+  if (archetype.capacity == 1) {
+    Value present = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::sgt, count, zero);
+    auto guard = scf::IfOp::create(rewriter, loc, present);
+    rewriter.setInsertionPointToStart(guard.thenBlock());
+    emitBody(zero, guard.thenBlock());
+    return guard;
+  }
+
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto emitSequential = [&]() -> Operation * {
     auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     emitBody(loop.getInductionVar(), loop.getBody());
+    return loop;
   };
-  auto emitParallel = [&] {
+  auto emitParallel = [&]() -> Operation * {
     auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                         ValueRange{count}, ValueRange{one});
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     emitBody(loop.getInductionVars().front(), loop.getBody());
+    return loop;
   };
 
   if (!options.parallelEntities || !entityLocal ||
@@ -189,6 +219,52 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
   emitParallel();
   rewriter.setInsertionPointToStart(branch.elseBlock());
   emitSequential();
+  return branch;
+}
+
+/// Load every resource read inside `loops` once, right before them. Sound
+/// because no query writes a resource, and a fused sequence contains no
+/// system that writes one: the value cannot change while the loops run.
+static void hoistResourceReads(IRRewriter &rewriter, Operation *loops,
+                               WorldAccess &world) {
+  SmallVector<ReadOp> reads;
+  loops->walk([&](ReadOp read) { reads.push_back(read); });
+  for (ReadOp read : reads) {
+    Value field = world.resourceField(read.getResourceAttr().getAttr(),
+                                      read.getFieldAttr());
+    rewriter.setInsertionPoint(loops);
+    Value zero = arith::ConstantIndexOp::create(rewriter, read.getLoc(), 0);
+    Value value = memref::LoadOp::create(rewriter, read.getLoc(), field,
+                                         ValueRange{zero});
+    rewriter.replaceOp(read, value);
+  }
+}
+
+/// Lower the resource reads and writes left in `func` (those at system
+/// level) to loads and stores in place.
+static void lowerResourceAccesses(IRRewriter &rewriter, func::FuncOp func,
+                                  WorldAccess &world) {
+  SmallVector<Operation *> accesses;
+  func.walk([&](Operation *op) {
+    if (isa<ReadOp, WriteOp>(op))
+      accesses.push_back(op);
+  });
+  for (Operation *op : accesses) {
+    rewriter.setInsertionPoint(op);
+    Value zero = arith::ConstantIndexOp::create(rewriter, op->getLoc(), 0);
+    if (auto read = dyn_cast<ReadOp>(op)) {
+      Value field = world.resourceField(read.getResourceAttr().getAttr(),
+                                        read.getFieldAttr());
+      rewriter.replaceOpWithNewOp<memref::LoadOp>(read, field,
+                                                  ValueRange{zero});
+    } else {
+      auto write = cast<WriteOp>(op);
+      Value field = world.resourceField(write.getResourceAttr().getAttr(),
+                                        write.getFieldAttr());
+      rewriter.replaceOpWithNewOp<memref::StoreOp>(write, write.getValue(),
+                                                   field, ValueRange{zero});
+    }
+  }
 }
 
 /// Clone a query's body at the insertion point. Its get/set ops still name
@@ -241,12 +317,13 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       continue;
     matched = true;
     rewriter.setInsertionPoint(query);
-    emitEntityLoops(rewriter, loc, archetype, world, options, entityLocal,
-                    [&](Value entity, Block *loopBody) {
-                      cloneQueryBody(rewriter, query, IRMapping());
-                      lowerAccesses(rewriter, loopBody, archetype, world,
-                                    entity);
-                    });
+    Operation *loops = emitEntityLoops(
+        rewriter, loc, archetype, world, options, entityLocal,
+        [&](Value entity, Block *loopBody) {
+          cloneQueryBody(rewriter, query, IRMapping());
+          lowerAccesses(rewriter, loopBody, archetype, world, entity);
+        });
+    hoistResourceReads(rewriter, loops, world);
   }
 
   // The set of archetypes is closed, so a query that matches none of them
@@ -298,13 +375,14 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
       continue;
 
     rewriter.setInsertionPoint(insertionPoint);
-    emitEntityLoops(rewriter, loc, archetype, world, options,
-                    /*entityLocal=*/true, [&](Value entity, Block *loopBody) {
-                      for (auto [query, index] : bodies)
-                        cloneQueryBody(rewriter, query, mappings[index]);
-                      lowerAccesses(rewriter, loopBody, archetype, world,
-                                    entity);
-                    });
+    Operation *loops = emitEntityLoops(
+        rewriter, loc, archetype, world, options, /*entityLocal=*/true,
+        [&](Value entity, Block *loopBody) {
+          for (auto [query, index] : bodies)
+            cloneQueryBody(rewriter, query, mappings[index]);
+          lowerAccesses(rewriter, loopBody, archetype, world, entity);
+        });
+    hoistResourceReads(rewriter, loops, world);
   }
 
   for (RunOp run : runs)
@@ -314,7 +392,9 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
 /// Fuse every maximal sequence of runs of entity-local systems in a
 /// schedule. Stages are dissolved first: fusion subsumes them. A run of an
 /// opaque system, or an op with effects in the schedule body, ends a
-/// sequence and stays where it is.
+/// sequence and stays where it is. So does a run of a system that writes a
+/// resource: fusion moves system-level code ahead of every query of the
+/// sequence, which would let queries see a write that follows them.
 static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                          SymbolTable &symbols, const WorldLayout &layout,
                          WorldAccess &world, const LoopOptions &options) {
@@ -333,7 +413,10 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     if (auto run = dyn_cast<RunOp>(op)) {
       auto system = symbols.lookup<SystemOp>(run.getSystem());
-      if (!computeAccess(system, archetypes).isOpaque()) {
+      bool writesResource =
+          system.walk([](WriteOp) { return WalkResult::interrupt(); })
+              .wasInterrupted();
+      if (!writesResource && !computeAccess(system, archetypes).isOpaque()) {
         sequence.push_back(run);
         continue;
       }
@@ -416,6 +499,7 @@ struct EcsLowerToLoops
       SmallVector<StageOp> stages(func.getOps<StageOp>());
       for (StageOp stage : stages)
         lowerStage(rewriter, stage, parallelStages);
+      lowerResourceAccesses(rewriter, func, world);
     }
 
     for (auto system : llvm::make_early_inc_range(module.getOps<SystemOp>())) {
@@ -427,10 +511,11 @@ struct EcsLowerToLoops
       func.walk([&](QueryOp query) { queries.push_back(query); });
       for (QueryOp query : queries)
         lowerQuery(rewriter, query, *layout, world, options);
+      lowerResourceAccesses(rewriter, func, world);
     }
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
-      if (isa<ComponentOp, ArchetypeOp>(op))
+      if (isa<ComponentOp, ResourceOp, ArchetypeOp>(op))
         rewriter.eraseOp(&op);
   }
 };
