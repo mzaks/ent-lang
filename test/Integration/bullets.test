@@ -1,0 +1,44 @@
+// Spawning and despawning end to end: guns fire bullets on a cooldown,
+// bullets expire. Run as written, fused (structural systems stay calls),
+// and with parallel entity loops forced on (queries that spawn or despawn
+// stay sequential); all agree.
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/../../examples/bullets.mlir \
+// RUN:     -o %t.dir/bullets_world.h
+
+// RUN: ecs-opt %S/../../examples/bullets.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
+// RUN: clang -O2 -Wno-override-module %t.seq.ll \
+// RUN:     -I%t.dir %S/../../examples/host/bullets_main.c -o %t.seq
+// RUN: %t.seq | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/bullets.mlir \
+// RUN:     --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
+// RUN: clang -O2 -Wno-override-module %t.fused.ll \
+// RUN:     -I%t.dir %S/../../examples/host/bullets_main.c -o %t.fused
+// RUN: %t.fused | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/bullets.mlir \
+// RUN:     "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
+// RUN: clang -O2 -Wno-override-module %t.par.ll \
+// RUN:     -I%t.dir %S/../../examples/host/bullets_main.c %openmp -o %t.par
+// RUN: %t.par | FileCheck %s
+
+// dt = 0.25, 8 frames. Gun 0 (cooldown 0) fires in frames 1, 4 and 8; gun
+// 1 (cooldown 0.5) in frames 2 and 6. A bullet lives 1 s: it expires at
+// the end of its fourth frame, so the bullets of frames 1, 2 and 4 are
+// gone. Removal moves the last row into the hole: after frame 4 the table
+// is [c, b], after frame 7 [d], after frame 8 [d, e].
+// CHECK: gun 0: cooldown 1.0000
+// CHECK-NEXT: gun 1: cooldown 0.5000
+// CHECK-NEXT: bullets: 2
+// Fired by gun 1 (x = 100) in frame 6: three frames of 10 * 0.25.
+// CHECK-NEXT: bullet 0: x 107.5000 life 0.2500
+// Fired by gun 0 (x = 0) in frame 8.
+// CHECK-NEXT: bullet 1: x 2.5000 life 0.7500
