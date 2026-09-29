@@ -59,13 +59,25 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
   and `ecs.remove @Stunned`, inside a query, write the entity's own row
   instead of moving it to another archetype. Queries that bind it run only
   for the entities that have it.
-- `ecs.spawn @Bullet(%x, %dx, %t) : f32, f32, f32` creates an entity, with a
-  value for every field of the archetype's non-optional components;
-  optional components start absent. Spawning beyond the capacity stops the
-  program with a message. `ecs.despawn`, inside a query, removes the entity
-  it visits; the removal is deferred to the end of the query, so the query
-  still visits every entity it would have. A system that does either
-  declares the archetype in `writes`, e.g. `writes [@Bullet]`.
+- `%id = ecs.spawn @Bullet(%x, %dx, %t) : f32, f32, f32` creates an entity,
+  with a value for every field of the archetype's non-optional components
+  (optional components start absent), and returns its id. Spawning beyond the
+  capacity stops the program with a message. `ecs.despawn`, inside a query,
+  removes the entity it visits; the removal is deferred to the end of the
+  query, so the query still visits every entity it would have. A system that
+  does either declares the archetype in `writes`, e.g. `writes [@Bullet]`.
+- `ecs.add` and `ecs.remove` work on any component; the archetypes decide
+  what they do. Where the component is optional they set or clear its
+  presence; where it is not, the entity moves to the archetype with exactly
+  the resulting components (which must exist; the verifier says so
+  otherwise), deferred to the end of the query like a despawn. So choosing
+  between an optional component and separate archetypes is a storage
+  decision: `examples/status.mlir` and `examples/status_moves.mlir` run the
+  same systems both ways and print the same result.
+- `ecs.entity : i64`, inside a query, is the visited entity's id. Ids are
+  generational indices (generation in the upper 32 bits, a slot in the
+  lower): they stay valid while an entity moves between rows and
+  archetypes and stop being alive when it is despawned.
 - `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
   exactly once and is not an entity. Systems declare it in `reads`/`writes`
   and access it with `ecs.read @Clock "dt" : f32` and
@@ -124,7 +136,8 @@ region with one `omp.section` per run.
 The language owns the world's storage. From the archetypes' components and
 capacities and from the resources, the compiler lays out the whole world as
 one arena: an i64 entity count per archetype, then each resource on its own
-cache line, then one column per field at a fixed offset.
+cache line, then one column per field at a fixed offset, each archetype's
+id column, and the entity table that maps an id to its archetype and row.
 Every column starts on a 64-byte boundary, 17 cache lines past the end of
 the previous one; columns packed from a page-aligned base would start at
 the same cache set, which cost a single core 7-8% (see
@@ -132,14 +145,17 @@ the same cache set, which cost a single core 7-8% (see
 parameters and read columns through statically shaped views.
 
 `ecs-translate --ecs-to-c-header` emits the C API for hosts:
-`ecs_world_create`/`ecs_world_destroy`, per archetype a capacity, a count and
-a checked `set_count`, typed column accessors such as
-`ecs_Body_Position_x(world)`, one accessor per resource field such as
-`ecs_Clock_frame(world)`, and one entry point per schedule, such as
-`ecs_frame(world, dt)`. `examples/host/integrate_main.c` shows the host side.
-Creating a world zeroes only the counts and resources, so capacity costs
-address space, not memory, until columns are written. Parallel stages and
-loops assume nothing else writes the arena while a schedule runs.
+`ecs_world_create`/`ecs_world_destroy`; per archetype a capacity, a count,
+`ecs_Body_spawn(world)` (returns the new id, or `ECS_NO_ENTITY` if the
+archetype is full) and `ecs_Body_spawn_n(world, n)`, the id column, and typed
+column accessors such as `ecs_Body_Position_x(world)`; entity lookups
+`ecs_entity_alive`, `ecs_entity_archetype` and `ecs_entity_row`; one accessor
+per resource field such as `ecs_Clock_frame(world)`; and one entry point per
+schedule, such as `ecs_frame(world, dt)`. The header allocates ids exactly as
+the lowered program does. Creating a world zeroes only the counts, resources
+and entity counters, so capacity costs address space, not memory, until
+columns are written. Parallel stages and loops assume nothing else writes the
+arena while a schedule runs.
 
 ## Fusion and entity parallelism
 
@@ -155,12 +171,16 @@ different archetypes share no columns. Two consequences the lowering uses:
   ahead of the queries.
 - Since no query writes a resource, a resource read inside a query is
   loaded once before the loop.
-- A spawn checks the capacity, writes row `count` and bumps the count. A
-  despawn appends the row to a pending list; after the query's loop, the
-  listed rows are removed last first, each by moving the archetype's last
-  row into it (swap-remove), which changes the rows of the moved entities.
-  Queries that spawn or despawn stay sequential (the lists are shared), and
-  a system that does either ends a fused sequence.
+- A spawn checks the capacity, writes row `count`, allocates an id (the
+  last freed slot, or the next unused one) and bumps the count. A despawn
+  or move appends the row to a pending list; when the whole query has run,
+  the listed rows are applied last first: a despawn frees the id (bumping
+  its generation), a move appends the entity to the target archetype, and
+  either way the archetype's last row moves into the hole (swap-remove),
+  with the moved entity's location updated in the entity table. Within one
+  query, the last structural change to an entity wins. Queries with
+  structural changes stay sequential (the lists are shared), and a system
+  with any ends a fused sequence.
 - A query that binds an optional component runs for every entity of the
   archetype and masks its stores with the presence, branch-free: every
   slot exists and belongs to the entity, so computing on an absent
