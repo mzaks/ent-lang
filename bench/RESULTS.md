@@ -661,3 +661,110 @@ except compiled-rows-par at 1e4 ships: 122-138 us across the three runs).
 - Why generational ids cost most with 1e6 targets: the entity table's
   random reads (generation and location) are the obvious candidate, not
   verified.
+
+## 2026-09-30: closing the gap between ecs.apply and hand-written C
+
+Same machine and toolchain. Starting point: at 1e6 guns the compiled apply
+with a parallel filling loop took 16-40% longer than `c-buffered`, the
+same scheme written in C without ids. Measured step by step before
+changing anything.
+
+### Where the time went
+
+Removing the combine loop's work one step at a time from the lowered IR
+(E1-E4 cumulative, E5 alternative; us per frame at 1e6 guns, median of 5
+processes, run twice; the runs agree within 3.5%):
+
+| ships | c-index | c-buffered | E0 as generated | E1 counts loaded once | E2 -sentinel | E3 -archetype check | E4 -row check | E5 E1, one branch |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 477 | 547 | 640 | 594 | 635 | 665 | 568 | 633 |
+| 1e4 | 280 | 350 | 480 | 425 | 475 | 427 | 387 | 476 |
+| 1e6 | 798 | 892 | 1,004 | 896 | 897 | 900 | 900 | 893 |
+
+- Loading the count that Rows ids are checked against once, before the
+  combine loop, saves 8-11%. The loop reloaded it for every row: it lives
+  in the arena with the field being combined into, and the lowered code
+  gives LLVM no way to tell them apart. Legal, since combining cannot
+  change counts; with 1e6 targets it closes the gap entirely.
+- The checks themselves are not the cost. Dropping the sentinel check made
+  the loop 6-12% *slower* at 16 and 1e4 targets, and so did folding all
+  three checks into one branch (E5); even with every check gone (E4) the
+  loop is 4-10% slower than `c-buffered`. Not explained; it points at
+  code layout or branch structure rather than the work, but that was not
+  examined.
+- The filling loop alone, timed without the combine loop, took 93-98 us per
+  frame compiled against 52 us in C, whatever the number of ships: most of
+  the remaining gap at 16 and 1e4 targets. On one thread both take about
+  172 us; from 8 threads on the compiled one gets slower again (62 us at
+  8, 74 at 12, 90 at 16) while C levels off at 48 us. The difference is
+  about the same at 1e3 guns as at 1e6 (45 and 48 us), so it is a cost
+  per parallel region, not per entity. It is not vectorisation (both loops are 8 wide)
+  and hardly layout (C with its arrays at the arena's offsets: 55-78 us).
+- It is a barrier. `--convert-scf-to-openmp` emits a work-sharing loop that
+  ends with `__kmpc_barrier`, alone in a parallel region that ends with a
+  barrier of its own; clang's `parallel for` makes no such call. Marking
+  the loop `nowait` brings the compiled filling loop to 45 us at 1e3 guns
+  and 62-63 us at 1e6 (C: 39-45 and 60). This also resolves the 2026-09-28
+  entry that forks cost about 65 us against 35 us for an empty C region.
+
+### After: counts and slots in use loaded once, `--ecs-omp-nowait`
+
+The combine loop now loads the counts (Rows ids) or the slots in use
+(slot ids) before it runs; `--ecs-omp-nowait` drops the barrier of a
+work-sharing loop or sections construct that ends its parallel region,
+and `parallel-stages` emits its sections without one. us per frame, median
+of 5 processes (spread), ns per gun in brackets. The 1e6 rows are from a
+full run, the 1e5 rows from a run with 500 frames. Load average 10 before
+(left over from the previous run), 13-17 during, with no other process
+above half a core; a first attempt was
+discarded because XProtect used a full core and Discord was active.
+
+| guns | ships | c-index | c-atomic-par | c-buffered | compiled-rows | compiled-rows-par | compiled-gen |
+|---|---|---|---|---|---|---|---|
+| 1e5 | 16 | **50.6 (1%) [0.51]** | 6,625.8 (1%) [66.26] | 104.5 (2%) [1.05] | 88.7 (1%) [0.89] | 103.2 (2%) [1.03] | 96.6 (2%) [0.97] |
+| 1e5 | 1e4 | **28.9 (1%) [0.29]** | 512.9 (1%) [5.13] | 83.6 (2%) [0.84] | 68.9 (1%) [0.69] | 85.8 (4%) [0.86] | 89.8 (3%) [0.90] |
+| 1e5 | 1e6 | **87.6 (1%) [0.88]** | 433.4 (3%) [4.33] | 142.8 (5%) [1.43] | 119.2 (1%) [1.19] | 141.8 (2%) [1.42] | 215.7 (1%) [2.16] |
+| 1e6 | 16 | **503.8 (4%) [0.50]** | 79,105.2 (2%) [79.11] | 539.9 (4%) [0.54] | 884.9 (3%) [0.88] | 573.7 (4%) [0.57] | 970.9 (1%) [0.97] |
+| 1e6 | 1e4 | **290.1 (2%) [0.29]** | 4,797.6 (5%) [4.80] | 355.3 (5%) [0.36] | 692.0 (3%) [0.69] | 391.9 (4%) [0.39] | 913.4 (2%) [0.91] |
+| 1e6 | 1e6 | **863.0 (4%) [0.86]** | 3,412.9 (3%) [3.41] | 892.9 (3%) [0.89] | 1,196.0 (4%) [1.20] | 890.1 (5%) [0.89] | 2,181.8 (4%) [2.18] |
+
+- `c-index` and `c-buffered` are within 1.5% of the previous run, so the
+  comparison holds (`c-atomic-par` moved by up to 4%).
+- At 1e6 guns the gap to `c-buffered` shrinks from +21% to +6% (16 ships),
+  from +40% to +10% (1e4) and from +16% to none (1e6). Against sequential
+  hand-written C with row indices the parallel apply now takes 1.03-1.35x.
+- At 1e5 guns the parallel apply is 28-38% faster than before and within
+  3% of `c-buffered`; it still loses to the sequential compiled apply
+  there.
+- Sequential combining gains 5-8% (Rows ids) and generational ids 2-7%.
+- What remains at 16 and 1e4 targets (6-10%) is not explained; removing
+  the checks did not remove it (see above).
+
+### The barrier on the main benchmark
+
+The fix applies to every parallel entity loop. A/B on the main benchmark
+with parallel loops forced (`parallel-min-entities=1`), both builds in the
+same rounds; us per frame, median of 5 processes. `stages-omp` is built
+twice as a control (its sections are `nowait` either way now); the two
+agree within 0.5%. All checksums match.
+
+| variant | 1e3 | 1e4 | 1e5 | 1e6 | 1e7 |
+|---|---|---|---|---|---|
+| fused (sequential) | 0.29 | 4.5 | 45.9 | 454 | 4,546 |
+| fused-entities-omp, with barrier | 124 | 125 | 138 | 201 | 1,839 |
+| fused-entities-omp, nowait | 62 | 65 | 76 | 143 | 1,780 |
+| entities-omp, with barrier | 308 | 311 | 327 | 398 | 2,242 |
+| entities-omp, nowait | 156 | 160 | 175 | 246 | 2,101 |
+
+- The fixed cost of a parallel frame halves: about 31 us per parallel
+  region instead of 62 with 12 threads, which is what an empty C parallel
+  region costs. The fused parallel frame at 1e6 is 29% faster (201 to 143
+  us); at 1e7 3-6%.
+- `stages-omp` at 1e3 takes 32 us against 63 us on 2026-09-29, consistent
+  with its sections losing their barrier too; that compares runs on
+  different days and is not an A/B.
+- The crossover moves: forced parallel against sequential, the fused frame
+  pays off between 1.5e5 (68 against 78 us) and 2e5 (91 against 83 us),
+  the unfused one between 3e5 (153 against 192 us) and 5e5 (255 against
+  210 us). The default `parallel-min-entities` (1e6) was set from the
+  crossover with the barrier and is now conservative; not changed yet.
