@@ -88,6 +88,19 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
   depend on iteration order), and a system with lookups is not fused with
   others for the same reason; under those rules a query with lookups still
   runs in parallel.
+- `ecs.apply %id @Hull "hp" add %damage : f32` writes to another entity: it
+  combines a value into a field of the entity `%id`, with the rule `add`,
+  `min` or `max` (signed for integers). Applies are deferred to the end of
+  the query, where every target's field becomes `field ⊕ v1 ⊕ v2 ⊕ ...`
+  over the values sent to it; so the query itself sees the old values and
+  may read (`ecs.get`, `ecs.lookup`) or `ecs.set` the field, and the
+  applies land on top. Values are combined in a fixed order (by apply, then
+  archetype, then row), so the result does not depend on how the query ran,
+  in parallel or not, even for floating-point `add`. A value sent to a dead
+  id or to an entity without the component is dropped. An apply sits in a
+  query, not inside a loop there, and all applies of one query to a field
+  use the same rule; the system declares the component in `writes`.
+  `examples/damage.mlir` has torpedoes damaging their target ships.
 - `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
   exactly once and is not an entity. Systems declare it in `reads`/`writes`
   and access it with `ecs.read @Clock "dt" : f32` and
@@ -126,7 +139,9 @@ writes the count and every column of the archetype, so structural changes
 are ordered against every system that touches the archetype. A lookup reads
 the entity table (`entities`) and the field in every archetype holding the
 component; structural changes write the entity table, so a despawn waits
-for the lookups before it. Any other op
+for the lookups before it. An apply reads the entity table too and writes
+the field in every archetype holding the component, so the systems that
+read that field wait for it. Any other op
 with memory effects (a call, say) makes a system opaque, and opaque systems
 conflict with everything.
 
@@ -150,7 +165,9 @@ The language owns the world's storage. From the archetypes' components and
 capacities and from the resources, the compiler lays out the whole world as
 one arena: an i64 entity count per archetype, then each resource on its own
 cache line, then one column per field at a fixed offset, each archetype's
-id column, and the entity table that maps an id to its archetype and row.
+id column, one buffer per `ecs.apply` and archetype its query matches (a
+target id and a value per row), and the entity table that maps an id to its
+archetype and row.
 Every column starts on a 64-byte boundary, 17 cache lines past the end of
 the previous one; columns packed from a page-aligned base would start at
 the same cache set, which cost a single core 7-8% (see
@@ -220,6 +237,15 @@ different archetypes share no columns. Two consequences the lowering uses:
   query, the last structural change to an entity wins. Queries with
   structural changes stay sequential (the lists are shared), and a system
   with any ends a fused sequence.
+- An apply fills the entity's row of a buffer, a target id and a value
+  (or the all-ones id, "no target", where it did not run or the entity is
+  masked out), so the query loop stays entity-local and may run in
+  parallel. When the query has run, one sequential loop per apply and
+  archetype goes over the buffer in row order, finds each target like a
+  lookup, and combines the value into its field; this happens before the
+  query's despawns and moves, while every id still leads to its entity. A
+  system with applies ends a fused sequence: a later system reading the
+  field must see the combined values.
 - A query that binds an optional component runs for every entity of the
   archetype and masks its stores with the presence, branch-free: every
   slot exists and belongs to the entity, so computing on an absent
