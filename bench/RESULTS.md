@@ -768,3 +768,88 @@ agree within 0.5%. All checksums match.
   the unfused one between 3e5 (153 against 192 us) and 5e5 (255 against
   210 us). The default `parallel-min-entities` (1e6) was set from the
   crossover with the barrier and is now conservative; not changed yet.
+
+## 2026-09-30: change detection (reactive queries)
+
+Same machine and toolchain, commit 0fc583a. `bench/reactive/run.py`: 1e6
+units; each frame `hit` lowers the hp of the units a hash picks (the
+fraction below), and `redraw` recomputes the bar of the units whose hp
+changed. The bar depends on hp only, so every variant ends with the same
+widths (checksums agree in all 10 configurations); the redraws per frame
+show how many units a variant redrew. Light work is one multiply-add per
+redraw, heavy a 32-step loop. us per frame, median of 5 processes
+(spread), redraws per frame in brackets.
+
+Variants: `c-poll` (no tracking, redraw everything), `c-rowstamp` (a tick
+per changed row, redraw scans; the compiler's scheme by hand),
+`c-blockstamp` (plus the newest tick per 64 rows; redraw skips old
+blocks), `c-collector` (Entitas: a de-duplicated list of changed units),
+`c-bevy` (row ticks for every mutable write of every component, observed
+or not), `c-unity` (a version per 128-unit chunk, bumped for write access),
+`compiled` (the reactive query, sequential) and `compiled-par` (the same
+with parallel entity loops; the C variants are all sequential).
+
+A first run was discarded: a Bazel build (about 7 cores) started with it,
+and spreads reached 426%. The kept run: load average 2.4-3.2 (left from
+the build), falling; nothing above 0.3 cores before, between and after.
+
+### Light redraw
+
+| changed | c-poll | c-rowstamp | c-blockstamp | c-collector | c-bevy | c-unity | compiled | compiled-par |
+|---|---|---|---|---|---|---|---|---|
+| 0.01% | 443.9 (5%) [1,000,000] | 477.7 (3%) [107] | 263.8 (4%) [107] | 248.0 (6%) [107] | 482.5 (2%) [107] | 445.4 (6%) [1,000,000] | 447.2 (2%) [107] | **144.9 (4%) [107]** |
+| 0.10% | 445.8 (4%) [1,000,000] | 496.5 (4%) [1,008] | 308.2 (3%) [1,008] | 257.6 (4%) [1,008] | 495.9 (7%) [1,008] | 453.3 (4%) [1,000,000] | 451.1 (3%) [1,008] | **143.8 (3%) [1,008]** |
+| 1.00% | 482.3 (3%) [1,000,000] | 541.6 (4%) [9,995] | 562.4 (5%) [9,995] | 310.9 (3%) [9,995] | 539.5 (4%) [9,995] | 483.9 (2%) [1,000,000] | 483.2 (4%) [9,995] | **152.9 (5%) [9,995]** |
+| 10.00% | 509.3 (4%) [1,000,000] | 610.3 (4%) [100,006] | 800.0 (1%) [100,006] | 437.0 (4%) [100,006] | 605.2 (3%) [100,006] | 511.4 (4%) [1,000,000] | 523.6 (3%) [100,006] | **158.2 (3%) [100,006]** |
+| 100.00% | 441.2 (5%) [1,000,000] | 710.8 (1%) [1,000,000] | 909.5 (2%) [1,000,000] | 999.4 (2%) [1,000,000] | 849.5 (3%) [1,000,000] | 467.4 (2%) [1,000,000] | 573.2 (1%) [1,000,000] | **226.9 (4%) [1,000,000]** |
+
+### Heavy redraw
+
+| changed | c-poll | c-rowstamp | c-blockstamp | c-collector | c-bevy | c-unity | compiled | compiled-par |
+|---|---|---|---|---|---|---|---|---|
+| 0.01% | 1,875.1 (2%) [1,000,000] | 495.7 (3%) [107] | 266.6 (1%) [107] | 252.1 (1%) [107] | 498.4 (2%) [107] | 1,866.2 (1%) [1,000,000] | 505.0 (3%) [107] | **153.8 (2%) [107]** |
+| 0.10% | 1,876.7 (1%) [1,000,000] | 527.1 (3%) [1,008] | 334.7 (0%) [1,008] | 264.0 (4%) [1,008] | 535.2 (7%) [1,008] | 1,868.9 (3%) [1,000,000] | 528.6 (1%) [1,008] | **156.6 (0%) [1,008]** |
+| 1.00% | 1,888.6 (1%) [1,000,000] | 679.4 (1%) [9,995] | 830.4 (3%) [9,995] | 366.0 (1%) [9,995] | 718.8 (2%) [9,995] | 1,898.2 (1%) [1,000,000] | 689.9 (2%) [9,995] | **209.6 (2%) [9,995]** |
+| 10.00% | 1,918.2 (2%) [1,000,000] | 993.6 (2%) [100,006] | 1,203.7 (3%) [100,006] | 986.3 (2%) [100,006] | 1,026.6 (2%) [100,006] | 1,937.8 (1%) [1,000,000] | 1,021.8 (1%) [100,006] | **243.5 (3%) [100,006]** |
+| 100.00% | 1,891.8 (1%) [1,000,000] | 6,661.2 (1%) [1,000,000] | 6,785.2 (1%) [1,000,000] | 6,882.6 (1%) [1,000,000] | 6,660.9 (1%) [1,000,000] | 1,885.9 (1%) [1,000,000] | 6,661.1 (0%) [1,000,000] | **1,022.6 (1%) [1,000,000]** |
+
+### What holds
+
+- No sequential scheme wins everywhere. With few changes the collector
+  (Entitas) is fastest, 248-311 us light up to 1% changed, since its work
+  follows the changes; block stamps come close up to 0.1% (264-308 us) and
+  fall behind from 1% on, where about half the 64-unit blocks hold a
+  change. Row stamps scan every unit, so they never cost less than a scan
+  of the whole table (478-711 us light, polling 441-509). With every unit changed, polling wins: 441 us
+  light and 1.89 ms heavy, against 711-999 us and 6.66-6.88 ms for the
+  tracking schemes.
+- Why polling wins heavy work 3.5x at 100%: its loop is vectorised and the
+  check-first loops are not. Checked in the assembly: `c-poll` has 64
+  vector floating-point ops with heavy work (4 light), `c-rowstamp` none;
+  its per-unit `if` keeps the loop scalar.
+- The compiled reactive query beats the same scheme written in C on light
+  work, by 6% with few changes (447 against 478 us) and 19% with all
+  changed (573 against 711 us): its masked, branch-free form vectorises
+  (the assembly compares stamps four at a time, blends with `bsl`, and has
+  vector `fmul`/`fadd`), while C's `if` does not. With heavy work the
+  compiled body holds a loop, which the lowering does not run for rows the
+  mask excludes, so it branches like C and matches it exactly (6.66 ms).
+- Tracking by write access (Unity-style) degenerates to polling plus
+  version bookkeeping here, since the writer has write access to every
+  chunk: it redraws all 1e6 units at every rate, within -0.5% to +6% of
+  polling. Tracking every component (Bevy-style) costs up to 2% over row
+  stamps up to 0.1% changed, 3-6% at 1-10% with heavy work, and 20% with
+  light work and all changed (850 against 711 us), from stamping the bar
+  that no query observes.
+- The parallel compiled query is 2.5-3.3x (light) and 3.3-6.5x (heavy)
+  faster than the sequential one; no C variant runs in parallel, so this
+  is not a comparison of schemes.
+
+### Not measured
+
+- A masked form of the heavy body (vectorised, but doing the work for
+  every unit) would cost about what polling does: better from some change
+  rate on, worse below; the lowering decides by the body's ops, not by a
+  rate it cannot know.
+- Combining schemes (a collector that falls back to polling past a size,
+  or block stamps with per-block collectors) was not tried.
