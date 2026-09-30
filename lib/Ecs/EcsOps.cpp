@@ -184,12 +184,14 @@ static LogicalResult verifyRecord(Operation *op, ArrayAttr names,
     if (!seen.insert(name).second)
       return op->emitOpError("has duplicate field '") << name << "'";
     // Scalars only for now: layout passes split components into one column
-    // per field, which needs every field to be a plain value.
+    // per field, which needs every field to be a plain value. An entity id
+    // is one too (a relation).
     Type type = cast<TypeAttr>(typeAttr).getValue();
-    if (!isa<IntegerType, FloatType, IndexType>(type))
+    if (!isa<IntegerType, FloatType, IndexType, EntityType>(type))
       return op->emitOpError("field '")
              << name << "' has type " << type
-             << "; only integer, float and index fields are supported";
+             << "; only integer, float, index and entity fields are "
+                "supported";
   }
   return success();
 }

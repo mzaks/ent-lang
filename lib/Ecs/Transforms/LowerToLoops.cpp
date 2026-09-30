@@ -5,7 +5,10 @@
 #include "Ecs/World.h"
 
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
@@ -35,6 +38,29 @@ public:
       : rewriter(rewriter), layout(layout), arena(arena) {}
 
   Value getArena() const { return arena; }
+
+  /// The type a value of `type` is stored as: entity ids become integers
+  /// of the width the layout chose; everything else is stored as is.
+  Type storageType(Type type) {
+    if (isa<EntityType>(type))
+      return rewriter.getIntegerType(layout.entities.idBits);
+    return type;
+  }
+  /// Convert a value to and from its stored form. Entity ids cross with a
+  /// cast that the final type conversion removes.
+  Value toStorage(Location loc, Value value) {
+    Type type = storageType(value.getType());
+    if (type == value.getType())
+      return value;
+    return UnrealizedConversionCastOp::create(rewriter, loc, type, value)
+        .getResult(0);
+  }
+  Value fromStorage(Location loc, Value stored, Type type) {
+    if (stored.getType() == type)
+      return stored;
+    return UnrealizedConversionCastOp::create(rewriter, loc, type, stored)
+        .getResult(0);
+  }
 
   /// The number of entities in `archetype`, as an index, loaded at the
   /// insertion point: spawns and despawns change it, so it is not cached.
@@ -72,11 +98,13 @@ public:
   }
   Value moveValues(const WorldArchetype &archetype,
                    const WorldColumn &column) {
-    return view(column.offset, archetype.capacity, column.type);
+    return view(column.offset, archetype.capacity,
+                storageType(column.type));
   }
   /// The id of the entity in each row of `archetype`.
   Value ids(const WorldArchetype &archetype) {
-    return view(archetype.idOffset, archetype.capacity, rewriter.getI64Type());
+    return view(archetype.idOffset, archetype.capacity,
+                rewriter.getIntegerType(layout.entities.idBits));
   }
 
   /// Allocate an id for a new entity at `row` (an index) of `archetype`,
@@ -268,7 +296,8 @@ public:
     Value &value = columns[{archetype.index, column->offset}];
     if (!value)
       value = atEntry([&](Location loc) {
-        auto type = MemRefType::get({archetype.capacity}, column->type);
+        auto type = MemRefType::get({archetype.capacity},
+                                    storageType(column->type));
         Value offset =
             arith::ConstantIndexOp::create(rewriter, loc, column->offset);
         return memref::ViewOp::create(rewriter, loc, type, arena, offset,
@@ -284,7 +313,7 @@ public:
     Value &value = columns[{~0u, entry->offset}];
     if (!value)
       value = atEntry([&](Location loc) {
-        auto type = MemRefType::get({1}, entry->type);
+        auto type = MemRefType::get({1}, storageType(entry->type));
         Value offset =
             arith::ConstantIndexOp::create(rewriter, loc, entry->offset);
         return memref::ViewOp::create(rewriter, loc, type, arena, offset,
@@ -504,7 +533,8 @@ static void hoistResourceReads(IRRewriter &rewriter, Operation *loops,
     Value zero = arith::ConstantIndexOp::create(rewriter, read.getLoc(), 0);
     Value value = memref::LoadOp::create(rewriter, read.getLoc(), field,
                                          ValueRange{zero});
-    rewriter.replaceOp(read, value);
+    rewriter.replaceOp(read, world.fromStorage(read.getLoc(), value,
+                                               read.getType()));
   }
 }
 
@@ -523,14 +553,17 @@ static void lowerResourceAccesses(IRRewriter &rewriter, func::FuncOp func,
     if (auto read = dyn_cast<ReadOp>(op)) {
       Value field = world.resourceField(read.getResourceAttr().getAttr(),
                                         read.getFieldAttr());
-      rewriter.replaceOpWithNewOp<memref::LoadOp>(read, field,
-                                                  ValueRange{zero});
+      Value value =
+          memref::LoadOp::create(rewriter, op->getLoc(), field, ValueRange{zero});
+      rewriter.replaceOp(read, world.fromStorage(op->getLoc(), value,
+                                                 read.getType()));
     } else {
       auto write = cast<WriteOp>(op);
       Value field = world.resourceField(write.getResourceAttr().getAttr(),
                                         write.getFieldAttr());
-      rewriter.replaceOpWithNewOp<memref::StoreOp>(write, write.getValue(),
-                                                   field, ValueRange{zero});
+      rewriter.replaceOpWithNewOp<memref::StoreOp>(
+          write, world.toStorage(op->getLoc(), write.getValue()), field,
+          ValueRange{zero});
     }
   }
 }
@@ -602,7 +635,7 @@ static void recordPending(IRRewriter &rewriter, Location loc,
         world.pendingActions(archetype), ValueRange{slot});
   if (move)
     for (auto [value, column] : llvm::zip(values, move->values))
-      memref::StoreOp::create(rewriter, loc, value,
+      memref::StoreOp::create(rewriter, loc, world.toStorage(loc, value),
                               world.moveValues(archetype, column),
                               ValueRange{slot});
   memref::StoreOp::create(
@@ -623,6 +656,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
     return world.column(archetype, component, field);
   };
   auto store = [&](Location loc, Value value, Value memref) {
+    value = world.toStorage(loc, value);
     if (mask) {
       Value old = memref::LoadOp::create(rewriter, loc, memref,
                                          ValueRange{entity});
@@ -648,9 +682,10 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
     if (auto get = dyn_cast<GetOp>(op)) {
       FlatSymbolRefAttr component =
           cast<RefType>(get.getRef().getType()).getComponent();
-      rewriter.replaceOpWithNewOp<memref::LoadOp>(
-          get, column(component.getAttr(), get.getFieldAttr()),
+      Value value = memref::LoadOp::create(
+          rewriter, loc, column(component.getAttr(), get.getFieldAttr()),
           ValueRange{entity});
+      rewriter.replaceOp(get, world.fromStorage(loc, value, get.getType()));
     } else if (auto set = dyn_cast<SetOp>(op)) {
       FlatSymbolRefAttr component =
           cast<RefType>(set.getRef().getType()).getComponent();
@@ -690,9 +725,10 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         break;
       }
       rewriter.eraseOp(op);
-    } else if (isa<EntityOp>(op)) {
-      rewriter.replaceOpWithNewOp<memref::LoadOp>(op, world.ids(archetype),
-                                                  ValueRange{entity});
+    } else if (auto entityOp = dyn_cast<EntityOp>(op)) {
+      Value id = memref::LoadOp::create(rewriter, loc, world.ids(archetype),
+                                        ValueRange{entity});
+      rewriter.replaceOp(op, world.fromStorage(loc, id, entityOp.getType()));
     } else {
       // Despawn is deferred: list the row; the query's end removes it. A
       // body with a despawn never runs masked (it is not speculatable).
@@ -925,7 +961,7 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
       if (column.field.getValue().empty())
         stored = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
       else if (!archetypeOp.isOptional(component))
-        stored = *value++;
+        stored = world.toStorage(loc, *value++);
       else
         continue; // an absent optional component's fields stay as they are
       memref::StoreOp::create(
@@ -939,7 +975,7 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
     Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
     world.setCount(loc, *archetype,
                    arith::AddIOp::create(rewriter, loc, row, one));
-    rewriter.replaceOp(spawn, id);
+    rewriter.replaceOp(spawn, world.fromStorage(loc, id, spawn.getType()));
   }
 }
 
@@ -955,7 +991,7 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
   for (LookupOp lookup : lookups) {
     Location loc = lookup.getLoc();
     rewriter.setInsertionPoint(lookup);
-    Type type = lookup.getValue().getType();
+    Type type = world.storageType(lookup.getValue().getType());
     Type i1 = rewriter.getI1Type();
     SmallVector<Type, 2> resultTypes{type, i1};
     TypeRange results(resultTypes);
@@ -971,7 +1007,7 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
       scf::YieldOp::create(rewriter, loc, ValueRange{zero, no});
     };
 
-    Value id = lookup.getEntity();
+    Value id = world.toStorage(loc, lookup.getEntity());
     Value slot = world.idSlot(loc, id);
     Value generation = world.idGeneration(loc, id);
     Value zeroIndex = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -1035,7 +1071,11 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
       }
       missing();
     }
-    rewriter.replaceOp(lookup, checkRange.getResults());
+    rewriter.setInsertionPointAfter(checkRange);
+    rewriter.replaceOp(
+        lookup, {world.fromStorage(loc, checkRange.getResult(0),
+                                   lookup.getValue().getType()),
+                 checkRange.getResult(1)});
   }
 }
 
@@ -1219,6 +1259,94 @@ static void lowerStage(IRRewriter &rewriter, StageOp stage, bool parallel) {
 }
 
 namespace {
+/// Rewrites an op without regions whose operands or results have types the
+/// converter changes into the same op on the converted types. This covers
+/// ops that merely pass ids along, such as arith.select; ops with regions
+/// (functions, scf) have dedicated patterns.
+struct ConvertOpTypes : public ConversionPattern {
+  ConvertOpTypes(const TypeConverter &converter, MLIRContext *context)
+      : ConversionPattern(converter, MatchAnyOpTypeTag(), /*benefit=*/1,
+                          context) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op->getNumRegions() != 0 || isa<UnrealizedConversionCastOp>(op))
+      return failure();
+    SmallVector<Type> resultTypes;
+    if (failed(getTypeConverter()->convertTypes(op->getResultTypes(),
+                                                resultTypes)))
+      return failure();
+    OperationState state(op->getLoc(), op->getName().getStringRef(),
+                         operands, resultTypes, op->getAttrs(),
+                         op->getSuccessors());
+    Operation *converted = rewriter.create(state);
+    rewriter.replaceOp(op, converted->getResults());
+    return success();
+  }
+};
+} // namespace
+
+/// Replace every remaining !ecs.entity (function signatures, calls, scf
+/// results, ops passing ids along) by the integer the layout stores ids as,
+/// and fold away the casts the lowering placed at loads and stores.
+static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
+  MLIRContext *context = module.getContext();
+  auto isEntity = [](Type type) { return isa<EntityType>(type); };
+  bool used = module
+                  .walk([&](Operation *op) {
+                    for (Region &region : op->getRegions())
+                      for (Block &block : region)
+                        if (llvm::any_of(block.getArgumentTypes(), isEntity))
+                          return WalkResult::interrupt();
+                    if (llvm::any_of(op->getOperandTypes(), isEntity) ||
+                        llvm::any_of(op->getResultTypes(), isEntity))
+                      return WalkResult::interrupt();
+                    return WalkResult::advance();
+                  })
+                  .wasInterrupted();
+  if (!used)
+    return success();
+
+  TypeConverter converter;
+  converter.addConversion([](Type type) { return type; });
+  converter.addConversion([&](EntityType) -> Type {
+    return IntegerType::get(context, idBits);
+  });
+  auto materialize = [](OpBuilder &builder, Type type, ValueRange inputs,
+                        Location loc) -> Value {
+    return UnrealizedConversionCastOp::create(builder, loc, type, inputs)
+        .getResult(0);
+  };
+  converter.addSourceMaterialization(materialize);
+  converter.addTargetMaterialization(materialize);
+
+  ConversionTarget target(*context);
+  target.addLegalOp<UnrealizedConversionCastOp>();
+  target.markUnknownOpDynamicallyLegal([&](Operation *op) {
+    if (auto func = dyn_cast<func::FuncOp>(op))
+      return converter.isSignatureLegal(func.getFunctionType()) &&
+             converter.isLegal(&func.getBody());
+    return converter.isLegal(op);
+  });
+  RewritePatternSet patterns(context);
+  populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
+                                                                 converter);
+  populateCallOpTypeConversionPattern(patterns, converter);
+  populateReturnOpTypeConversionPattern(patterns, converter);
+  scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
+                                                       target);
+  patterns.add<ConvertOpTypes>(converter, context);
+  if (failed(applyPartialConversion(module, target, std::move(patterns))))
+    return failure();
+
+  SmallVector<UnrealizedConversionCastOp> casts;
+  module.walk([&](UnrealizedConversionCastOp cast) { casts.push_back(cast); });
+  reconcileUnrealizedCasts(casts);
+  return success();
+}
+
+namespace {
 struct EcsLowerToLoops
     : public mlir::ecs::impl::EcsLowerToLoopsBase<EcsLowerToLoops> {
   using EcsLowerToLoopsBase::EcsLowerToLoopsBase;
@@ -1276,6 +1404,9 @@ struct EcsLowerToLoops
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
       if (isa<ComponentOp, ResourceOp, ArchetypeOp>(op))
         rewriter.eraseOp(&op);
+
+    if (failed(convertEntityTypes(module, layout->entities.idBits)))
+      return signalPassFailure();
   }
 };
 } // namespace

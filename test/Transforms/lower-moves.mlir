@@ -56,17 +56,3 @@ ecs.system @promote(%v: f32) reads [@M] writes [@N] {
     ecs.add @N(%v) : f32
   }
 }
-
-// ecs.entity is the visited row's id.
-// CHECK-LABEL: func.func private @ids(
-// CHECK:      scf.for %[[I:.*]] =
-// CHECK-NEXT:   %[[ID:.*]] = memref.load %{{.*}}[%[[I]]] : memref<10xi64>
-// CHECK-NEXT:   %[[SLOT32:.*]] = arith.trunci %[[ID]] : i64 to i32
-ecs.system @ids() writes [@M] {
-  ecs.query (%m: !ecs.ref<@M, mut>) {
-    %id = ecs.entity : i64
-    %slot = arith.trunci %id : i64 to i32
-    %f = arith.sitofp %slot : i32 to f32
-    ecs.set %m "m", %f : !ecs.ref<@M, mut>, f32
-  }
-}

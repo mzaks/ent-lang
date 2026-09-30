@@ -5,7 +5,7 @@
 // RUN:   | FileCheck %s --check-prefix=FUSED
 
 ecs.component @P (x: f32)
-ecs.component @T (entity: i64)
+ecs.component @T (entity: !ecs.entity)
 ecs.component @S (s: f32)
 ecs.archetype @Plain (@P) capacity 10
 ecs.archetype @Tagged (@P, optional @S, @T) capacity 10
@@ -46,7 +46,7 @@ ecs.archetype @Tagged (@P, optional @S, @T) capacity 10
 // CHECK-NEXT: arith.select %{{.*}}, %[[R]]#0, %[[OLD]] : f32
 ecs.system @chase() reads [@P, @T] writes [@S] {
   ecs.query (%t: !ecs.ref<@T>, %s: !ecs.ref<@S, mut>) {
-    %target = ecs.get %t "entity" : !ecs.ref<@T> -> i64
+    %target = ecs.get %t "entity" : !ecs.ref<@T> -> !ecs.entity
     %x, %found = ecs.lookup %target @P "x" : f32
     ecs.set %s "s", %x : !ecs.ref<@S, mut>, f32
   }

@@ -83,7 +83,7 @@ ecs.system @fire(%s: f32) reads [@Tag] writes [@Character] {
 }
 ecs.system @follow() reads [@Tag, @Named] {
   ecs.query (%t: !ecs.ref<@Tag>) {
-    %id = ecs.entity : i64
+    %id = ecs.entity
     %idx, %found = ecs.lookup %id @Named "idx" : index
   }
 }

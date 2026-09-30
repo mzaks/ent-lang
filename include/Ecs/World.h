@@ -144,7 +144,8 @@ struct WorldLayout {
 };
 
 /// Bytes one element of `type` takes in world storage, or 0 if the type is
-/// not supported (i1, i8, i16, i32, i64, index, f32 and f64 are).
+/// not supported (i1, i8, i16, i32, i64, index, f32, f64 and entity ids
+/// are).
 uint64_t getStorageBytes(Type type);
 
 } // namespace mlir::ecs

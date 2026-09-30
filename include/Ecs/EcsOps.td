@@ -261,14 +261,12 @@ def Ecs_SpawnOp : Ecs_Op<"spawn", [
     Spawning beyond the archetype's capacity is an error at run time. The
     system must declare the archetype in `writes`.
 
-    The result is the entity's id: a generational index (generation in the
-    upper 32 bits, slot in the lower) that stays valid while the entity
-    moves between rows and archetypes and becomes invalid when it is
-    despawned.
+    The result is the entity's id, which stays valid while the entity moves
+    between rows and archetypes and becomes invalid when it is despawned.
   }];
   let arguments = (ins FlatSymbolRefAttr:$archetype,
                        Variadic<AnyType>:$values);
-  let results = (outs I64:$entity);
+  let results = (outs Ecs_EntityType:$entity);
   let assemblyFormat =
       "$archetype `(` $values `)` attr-dict (`:` type($values)^)?";
   let hasVerifier = 1;
@@ -278,12 +276,12 @@ def Ecs_EntityOp : Ecs_Op<"entity"> {
   let summary = "The id of the entity the enclosing query visits";
   let description = [{
     ```mlir
-    %id = ecs.entity : i64
+    %id = ecs.entity
     ```
     The same id `ecs.spawn` returned for the entity.
   }];
-  let results = (outs I64:$entity);
-  let assemblyFormat = "attr-dict `:` type($entity)";
+  let results = (outs Ecs_EntityType:$entity);
+  let assemblyFormat = "attr-dict";
   let hasVerifier = 1;
 }
 
@@ -298,8 +296,8 @@ def Ecs_LookupOp : Ecs_Op<"lookup", [
     whatever archetype it lives. `%found` is false, and the value 0, if
     the id is not alive or the entity does not have the component (its
     archetype does not hold it, or holds it optionally and it is absent).
-    A component field holding an id (an `i64`) is how entities refer to
-    each other.
+    A component field of type `!ecs.entity` is how entities refer to each
+    other.
 
     The system must declare the component in `reads` or `writes`. A query
     may not look up a field it writes itself: which entities would see the
@@ -307,7 +305,7 @@ def Ecs_LookupOp : Ecs_Op<"lookup", [
     only read; a system with lookups is not fused with others, for the same
     reason.
   }];
-  let arguments = (ins I64:$entity, FlatSymbolRefAttr:$component,
+  let arguments = (ins Ecs_EntityType:$entity, FlatSymbolRefAttr:$component,
                        StrAttr:$field);
   let results = (outs AnyType:$value, I1:$found);
   let assemblyFormat = [{

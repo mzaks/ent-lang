@@ -8,7 +8,7 @@ using namespace mlir;
 using namespace mlir::ecs;
 
 uint64_t mlir::ecs::getStorageBytes(Type type) {
-  if (isa<IndexType>(type))
+  if (isa<IndexType, EntityType>(type))
     return 8;
   if (auto integer = dyn_cast<IntegerType>(type)) {
     switch (integer.getWidth()) {

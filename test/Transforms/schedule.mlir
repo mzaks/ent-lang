@@ -273,11 +273,11 @@ ecs.schedule @structural(%c: f32) {
 
 // Lookups read the entity table and the looked-up field in every archetype
 // holding the component; a despawn writes the table, so it waits.
-ecs.component @Ref (entity: i64)
+ecs.component @Ref (entity: !ecs.entity)
 ecs.archetype @Seeker (@Ref) capacity 100
 ecs.system @seek() reads [@Ref, @P] {
   ecs.query (%r: !ecs.ref<@Ref>) {
-    %id = ecs.get %r "entity" : !ecs.ref<@Ref> -> i64
+    %id = ecs.get %r "entity" : !ecs.ref<@Ref> -> !ecs.entity
     %x, %found = ecs.lookup %id @P "x" : f32
   }
 }

@@ -88,19 +88,19 @@ ecs.archetype @E2 (@M, @N) capacity 10
 // expected-remark @+1 {{reads E1.id, E2.id, E1.count, E2.count; writes entities, E1.count, E1.id, E1.M.m, E2.count, E2.id, E2.M.m, E2.N.n}}
 ecs.system @promote(%v: f32) reads [@M] writes [@N] {
   ecs.query (%m: !ecs.ref<@M>) {
-    %id = ecs.entity : i64
+    %id = ecs.entity
     ecs.add @N(%v) : f32
   }
 }
 
 // A lookup reads the entity table and the field in every archetype that
 // holds the component: the entity may live in any of them.
-ecs.component @Ref (entity: i64)
+ecs.component @Ref (entity: !ecs.entity)
 ecs.archetype @G (@Ref) capacity 10
 // expected-remark @+1 {{reads G.Ref.entity, entities, D.R.r, G.count; writes nothing}}
 ecs.system @chase() reads [@Ref, @R] {
   ecs.query (%t: !ecs.ref<@Ref>) {
-    %id = ecs.get %t "entity" : !ecs.ref<@Ref> -> i64
+    %id = ecs.get %t "entity" : !ecs.ref<@Ref> -> !ecs.entity
     %r, %found = ecs.lookup %id @R "r" : f32
   }
 }

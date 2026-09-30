@@ -5,7 +5,7 @@ ecs.component @P (x: f32, x: f32)
 
 // -----
 
-// expected-error @+1 {{field 'v' has type 'vector<4xf32>'; only integer, float and index fields are supported}}
+// expected-error @+1 {{field 'v' has type 'vector<4xf32>'; only integer, float, index and entity fields are supported}}
 ecs.component @P (v: vector<4xf32>)
 
 // -----
@@ -304,7 +304,7 @@ ecs.system @s(%v: f32) reads [@P] writes [@S] {
 
 ecs.system @s() {
   // expected-error @+1 {{must be inside an 'ecs.query'}}
-  %id = ecs.entity : i64
+  %id = ecs.entity
 }
 
 // -----
@@ -404,7 +404,7 @@ ecs.system @s() writes [@A] {
 // -----
 
 ecs.component @P (x: f32)
-ecs.system @s(%id: i64) {
+ecs.system @s(%id: !ecs.entity) {
   // expected-error @+1 {{looks up @P but system @s does not declare it in 'reads' or 'writes'}}
   %x, %found = ecs.lookup %id @P "x" : f32
 }
@@ -412,7 +412,7 @@ ecs.system @s(%id: i64) {
 // -----
 
 ecs.component @P (x: f32)
-ecs.system @s(%id: i64) reads [@P] {
+ecs.system @s(%id: !ecs.entity) reads [@P] {
   // expected-error @+1 {{result type 'i32' does not match field 'x' of type 'f32'}}
   %x, %found = ecs.lookup %id @P "x" : i32
 }
@@ -420,11 +420,11 @@ ecs.system @s(%id: i64) reads [@P] {
 // -----
 
 ecs.component @P (x: f32)
-ecs.component @T (entity: i64)
+ecs.component @T (entity: !ecs.entity)
 ecs.archetype @A (@P, @T) capacity 10
 ecs.system @s() reads [@T] writes [@P] {
   ecs.query (%p: !ecs.ref<@P, mut>, %t: !ecs.ref<@T>) {
-    %target = ecs.get %t "entity" : !ecs.ref<@T> -> i64
+    %target = ecs.get %t "entity" : !ecs.ref<@T> -> !ecs.entity
     // expected-error @+1 {{looks up @P "x" of other entities in a query that changes it; which entities see the old value would depend on iteration order}}
     %x, %found = ecs.lookup %target @P "x" : f32
     // expected-note @+1 {{changed here}}
@@ -435,7 +435,7 @@ ecs.system @s() reads [@T] writes [@P] {
 // -----
 
 ecs.component @P (x: f32)
-func.func @f(%id: i64) {
+func.func @f(%id: !ecs.entity) {
   // expected-error @+1 {{must be inside an 'ecs.system'}}
   %x, %found = ecs.lookup %id @P "x" : f32
   return

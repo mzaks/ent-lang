@@ -1,5 +1,5 @@
 // Relations: a missile refers to its target ship by id (a Target component
-// holding an i64) and steers towards the ship's position, read with
+// holding an !ecs.entity) and steers towards the ship's position, read with
 // ecs.lookup. A ship that leaves the arena is despawned; a missile whose
 // target is gone keeps its course, because the lookup reports the target
 // as not found.
@@ -7,7 +7,7 @@
 ecs.component @Position (x: f32)
 ecs.component @Velocity (dx: f32)
 ecs.component @Hull (hp: f32)
-ecs.component @Target (entity: i64)
+ecs.component @Target (entity: !ecs.entity)
 
 ecs.archetype @Ship (@Position, @Velocity, @Hull) capacity 16
 ecs.archetype @Missile (@Position, @Velocity, @Target) capacity 64
@@ -17,7 +17,7 @@ ecs.archetype @Missile (@Position, @Velocity, @Target) capacity 64
 ecs.system @steer(%gain: f32) reads [@Position, @Target] writes [@Velocity] {
   ecs.query (%p: !ecs.ref<@Position>, %v: !ecs.ref<@Velocity, mut>,
              %t: !ecs.ref<@Target>) {
-    %target = ecs.get %t "entity" : !ecs.ref<@Target> -> i64
+    %target = ecs.get %t "entity" : !ecs.ref<@Target> -> !ecs.entity
     %tx, %found = ecs.lookup %target @Position "x" : f32
     scf.if %found {
       %x = ecs.get %p "x" : !ecs.ref<@Position> -> f32

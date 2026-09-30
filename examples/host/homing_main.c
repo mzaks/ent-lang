@@ -19,7 +19,7 @@ static ecs_entity spawnMissile(ecs_world *w, ecs_entity target) {
   int64_t row = ecs_entity_row(w, id);
   ecs_Missile_Position_x(w)[row] = 0;
   ecs_Missile_Velocity_dx(w)[row] = 0;
-  ecs_Missile_Target_entity(w)[row] = (int64_t)target;
+  ecs_Missile_Target_entity(w)[row] = target;
   return id;
 }
 
@@ -43,7 +43,7 @@ int main(void) {
   }
   for (int i = 0; i < 2; ++i) {
     int64_t row = ecs_entity_row(w, missiles[i]);
-    ecs_entity target = (ecs_entity)ecs_Missile_Target_entity(w)[row];
+    ecs_entity target = ecs_Missile_Target_entity(w)[row];
     printf("missile %d: x %.4f dx %.4f target %s\n", i,
            ecs_Missile_Position_x(w)[row], ecs_Missile_Velocity_dx(w)[row],
            ecs_entity_alive(w, target) ? "alive" : "gone");

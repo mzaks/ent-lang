@@ -16,6 +16,8 @@ using namespace mlir::ecs;
 
 /// The C type that holds one element of `type` in world storage.
 static StringRef getCType(Type type) {
+  if (isa<EntityType>(type))
+    return "ecs_entity";
   if (isa<IndexType>(type))
     return "int64_t";
   if (auto integer = dyn_cast<IntegerType>(type)) {
