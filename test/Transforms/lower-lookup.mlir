@@ -10,34 +10,27 @@ ecs.component @S (s: f32)
 ecs.archetype @Plain (@P) capacity 10
 ecs.archetype @Tagged (@P, optional @S, @T) capacity 10
 
-// The lookup checks that the id's slot is in use and its generation
-// current, finds the entity's archetype and row in the entity table, and
-// loads the field from whichever archetype holds P. Every load is guarded.
+// Nothing here is despawned or moved, so an id is `archetype << 4 | row`
+// (capacity 10 needs 4 row bits): the lookup decodes it, picks the
+// archetype holding P, and checks the row against that archetype's count.
+// Every load is guarded. (lower-lookup-generational.mlir covers ids that
+// go through the entity table.)
 // CHECK-LABEL: func.func private @chase(
-// CHECK:      %[[ID:.*]] = memref.load %{{.*}} : memref<10xi64>
-// CHECK:      %[[SLOTBITS:.*]] = arith.andi %[[ID]], %{{.*}} : i64
-// CHECK-NEXT: %[[SLOT:.*]] = arith.index_castui %[[SLOTBITS]] : i64 to index
-// CHECK:      %[[HIGH:.*]] = arith.shrui %[[ID]], %{{.*}} : i64
-// CHECK-NEXT: %[[GEN:.*]] = arith.trunci %[[HIGH]] : i64 to i32
-// CHECK:      %[[USED:.*]] = arith.index_cast
-// CHECK-NEXT: %[[IN:.*]] = arith.cmpi ult, %[[SLOT]], %[[USED]] : index
-// CHECK-NEXT: %[[R:.*]]:2 = scf.if %[[IN]] -> (f32, i1) {
-// CHECK:        %[[CUR:.*]] = memref.load %{{.*}}[%[[SLOT]]]
-// CHECK-NEXT:   %[[ALIVE:.*]] = arith.cmpi eq, %[[CUR]], %[[GEN]] : i32
-// CHECK-NEXT:   scf.if %[[ALIVE]] -> (f32, i1) {
-// The location packs archetype << 4 | row (capacity 10 needs 4 row bits).
-// CHECK:          %[[PACKED:.*]] = memref.load %{{.*}}[%[[SLOT]]] : memref<20xi32>
-// CHECK:          %[[WHERE:.*]] = arith.shrui %[[PACKED]], %{{.*}} : i32
-// CHECK:          arith.andi %[[PACKED]], %{{.*}} : i32
-// CHECK:          %[[PLAIN:.*]] = arith.constant 0 : i32
-// CHECK-NEXT:     arith.cmpi eq, %[[WHERE]], %[[PLAIN]] : i32
-// CHECK:            memref.load %{{.*}} : memref<10xf32>
-// CHECK:            %[[TAGGED:.*]] = arith.constant 1 : i32
-// CHECK-NEXT:       arith.cmpi eq, %[[WHERE]], %[[TAGGED]] : i32
-// CHECK:              memref.load %{{.*}} : memref<10xf32>
-// CHECK:              scf.yield %{{.*}}, %{{.*}} : f32, i1
-// An entity in neither archetype, a dead id or an unused slot finds
-// nothing: 0 and false.
+// CHECK:      %[[ID:.*]] = memref.load %{{.*}} : memref<10xi32>
+// CHECK:      %[[WHERE:.*]] = arith.shrui %[[ID]], %{{.*}} : i32
+// CHECK:      %[[ROWBITS:.*]] = arith.andi %[[ID]], %{{.*}} : i32
+// CHECK-NEXT: %[[ROW:.*]] = arith.index_castui %[[ROWBITS]] : i32 to index
+// CHECK:      %[[PLAIN:.*]] = arith.constant 0 : i32
+// CHECK-NEXT: %[[IS_PLAIN:.*]] = arith.cmpi eq, %[[WHERE]], %[[PLAIN]] : i32
+// CHECK-NEXT: %[[R:.*]]:2 = scf.if %[[IS_PLAIN]] -> (f32, i1) {
+// CHECK:        %[[COUNT:.*]] = arith.index_cast
+// CHECK-NEXT:   %[[LIVE:.*]] = arith.cmpi ult, %[[ROW]], %[[COUNT]] : index
+// CHECK-NEXT:   scf.if %[[LIVE]] -> (f32, i1) {
+// CHECK-NEXT:     memref.load %{{.*}}[%[[ROW]]] : memref<10xf32>
+// CHECK:      } else {
+// CHECK:        %[[TAGGED:.*]] = arith.constant 1 : i32
+// CHECK-NEXT:   arith.cmpi eq, %[[WHERE]], %[[TAGGED]] : i32
+// An id of neither archetype, or past its count, finds nothing.
 // CHECK:              %[[ZERO:.*]] = arith.constant 0.000000e+00 : f32
 // CHECK-NEXT:         %[[NO:.*]] = arith.constant false
 // CHECK-NEXT:         scf.yield %[[ZERO]], %[[NO]] : f32, i1

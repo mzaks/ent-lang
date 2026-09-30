@@ -73,22 +73,42 @@ struct WorldResource {
   const WorldResourceField *find(StringAttr field) const;
 };
 
-/// How entity ids and their bookkeeping are laid out.
+/// How entity ids and their bookkeeping are laid out, chosen from the
+/// capacities and from which structural changes the program makes:
 ///
-/// An id is `generation << slotBits | slot`: the slot indexes the entity
-/// table, the generation says which occupant of the slot the id means. A
-/// location packs `archetype << rowBits | row` into one integer.
+/// - Rows: nothing despawns or moves, so an entity keeps its row forever
+///   and its id is `archetype << rowBits | row`. No entity table, no id
+///   column.
+/// - Slots: entities move but never die, so slots are never reused; an id
+///   is a slot of the entity table, which holds only locations.
+/// - Generational: entities die and slots are reused; an id is
+///   `generation << slotBits | slot`, and the table holds a generation per
+///   slot besides the location. Freed slots are chained through their
+///   locations.
+///
+/// A location packs `archetype << rowBits | row`. Ids are 32 bits wide when
+/// that leaves enough generation bits (the module attribute
+/// `ecs.min_generation_bits`, 8 by default), 64 otherwise or when the
+/// module attribute `ecs.entity_id_bits = 64` asks for it.
 struct EntityScheme {
-  /// Width of an id: its storage in id columns and in the C API.
+  enum Kind { Rows, Slots, Generational };
+  Kind kind = Generational;
+  /// Width of an id: its storage in id columns, relation fields and the C
+  /// API.
   unsigned idBits = 64;
   unsigned slotBits = 32;
+  /// Bits of the generation that are used; it wraps around at this width.
   unsigned generationBits = 32;
   /// Width of a stored generation (8, 16 or 32).
   unsigned generationStorageBits = 32;
-  /// Bits of the row in a packed location; the archetype index is above.
+  /// Bits of the row in a packed location or a Rows id; the archetype index
+  /// is above.
   unsigned rowBits = 32;
   /// Width of a stored location (32 or 64).
   unsigned locationBits = 64;
+
+  bool hasIds() const { return kind != Rows; }
+  bool hasGenerations() const { return kind == Generational; }
 };
 
 /// Static layout of the whole world in one arena, computed from the

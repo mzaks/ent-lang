@@ -75,24 +75,6 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   layout.countsBytes = 8 * layout.archetypes.size();
 
   uint64_t end = layout.countsBytes;
-  for (ResourceOp resource : module.getOps<ResourceOp>()) {
-    WorldResource entry;
-    entry.op = resource;
-    end = llvm::alignTo(end, kColumnAlignment);
-    for (auto [name, typeAttr] :
-         llvm::zip(resource.getFieldNames(), resource.getFieldTypes())) {
-      Type type = cast<TypeAttr>(typeAttr).getValue();
-      uint64_t bytes = getStorageBytes(type);
-      if (bytes == 0)
-        return resource.emitOpError("field ")
-               << name << " has type " << type
-               << ", which world storage does not support";
-      uint64_t offset = llvm::alignTo(end, bytes);
-      entry.fields.push_back({cast<StringAttr>(name), type, offset});
-      end = offset + bytes;
-    }
-    layout.resources.push_back(std::move(entry));
-  }
   // Archetypes that some query despawns from or moves entities out of need
   // pending lists and a counter for the rows to remove when that query
   // ends; moves also need to know their target and, for an add, the values.
@@ -123,6 +105,76 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   module.walk([&](RemoveOp remove) {
     recordMoves(remove, remove.getComponentAttr(), /*add=*/false);
   });
+  // Choose how ids are represented, before the columns: relation fields
+  // are stored at the id's width.
+  EntityScheme &scheme = layout.entities;
+  int64_t maxCapacity = 1;
+  for (const WorldArchetype &archetype : layout.archetypes) {
+    maxCapacity = std::max(maxCapacity, archetype.capacity);
+    layout.entityCapacity += archetype.capacity;
+  }
+  scheme.rowBits = std::max(1u, llvm::Log2_64_Ceil(maxCapacity));
+  unsigned archetypeBits =
+      std::max(1u, llvm::Log2_64_Ceil(layout.archetypes.size()));
+  scheme.locationBits = scheme.rowBits + archetypeBits <= 32 ? 32 : 64;
+  bool moves = llvm::any_of(layout.archetypes, [](const WorldArchetype &a) {
+    return !a.moves.empty();
+  });
+  auto attr = [&](StringRef name, int64_t otherwise) {
+    if (auto value = module->getAttrOfType<IntegerAttr>(name))
+      return value.getInt();
+    return otherwise;
+  };
+  bool wide = attr("ecs.entity_id_bits", 0) == 64;
+  unsigned minGenerationBits = attr("ecs.min_generation_bits", 8);
+  scheme.slotBits = std::max(1u, llvm::Log2_64_Ceil(layout.entityCapacity));
+  if (despawned.empty() && !moves) {
+    scheme.kind = EntityScheme::Rows;
+    scheme.idBits = !wide && scheme.locationBits == 32 ? 32 : 64;
+    scheme.generationBits = scheme.generationStorageBits = 0;
+  } else if (despawned.empty()) {
+    scheme.kind = EntityScheme::Slots;
+    scheme.idBits = !wide && scheme.slotBits <= 32 ? 32 : 64;
+    scheme.generationBits = scheme.generationStorageBits = 0;
+  } else {
+    scheme.kind = EntityScheme::Generational;
+    if (!wide && scheme.slotBits + minGenerationBits <= 32) {
+      scheme.idBits = 32;
+      scheme.generationBits = 32 - scheme.slotBits;
+    } else {
+      scheme.idBits = 64;
+      scheme.generationBits = std::min(32u, 64 - scheme.slotBits);
+    }
+    scheme.generationStorageBits = scheme.generationBits <= 8    ? 8
+                                   : scheme.generationBits <= 16 ? 16
+                                                                 : 32;
+  }
+
+  // Bytes a field of `type` takes; ids take the scheme's width.
+  auto storageBytes = [&](Type type) -> uint64_t {
+    if (isa<EntityType>(type))
+      return scheme.idBits / 8;
+    return getStorageBytes(type);
+  };
+
+  for (ResourceOp resource : module.getOps<ResourceOp>()) {
+    WorldResource entry;
+    entry.op = resource;
+    end = llvm::alignTo(end, kColumnAlignment);
+    for (auto [name, typeAttr] :
+         llvm::zip(resource.getFieldNames(), resource.getFieldTypes())) {
+      Type type = cast<TypeAttr>(typeAttr).getValue();
+      uint64_t bytes = storageBytes(type);
+      if (bytes == 0)
+        return resource.emitOpError("field ")
+               << name << " has type " << type
+               << ", which world storage does not support";
+      uint64_t offset = llvm::alignTo(end, bytes);
+      entry.fields.push_back({cast<StringAttr>(name), type, offset});
+      end = offset + bytes;
+    }
+    layout.resources.push_back(std::move(entry));
+  }
   auto needsPending = [&](const WorldArchetype &archetype) {
     return despawned.contains(archetype.op) || !archetype.moves.empty();
   };
@@ -145,7 +197,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       for (auto [name, typeAttr] :
            llvm::zip(component.getFieldNames(), component.getFieldTypes())) {
         Type type = cast<TypeAttr>(typeAttr).getValue();
-        uint64_t bytes = getStorageBytes(type);
+        uint64_t bytes = storageBytes(type);
         if (bytes == 0)
           return component.emitOpError("field ")
                  << name << " has type " << type
@@ -170,7 +222,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       end = offset + bytes * archetype.capacity;
       return offset;
     };
-    archetype.idOffset = place(8);
+    if (scheme.hasIds())
+      archetype.idOffset = place(scheme.idBits / 8);
     if (needsPending(archetype))
       archetype.pendingOffset = place(4);
     if (!archetype.moves.empty()) {
@@ -184,11 +237,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
                                                component.getFieldTypes())) {
           Type type = cast<TypeAttr>(typeAttr).getValue();
           move.values.push_back({move.component, cast<StringAttr>(name), type,
-                                 place(getStorageBytes(type))});
+                                 place(storageBytes(type))});
         }
       }
     }
-    layout.entityCapacity += archetype.capacity;
   }
 
   // The entity table.
@@ -197,17 +249,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     end = offset + bytes * layout.entityCapacity;
     return offset;
   };
-  // Pack locations as tightly as the capacities allow.
-  EntityScheme &scheme = layout.entities;
-  int64_t maxCapacity = 1;
-  for (const WorldArchetype &archetype : layout.archetypes)
-    maxCapacity = std::max(maxCapacity, archetype.capacity);
-  scheme.rowBits = std::max(1u, llvm::Log2_64_Ceil(maxCapacity));
-  unsigned archetypeBits =
-      std::max(1u, llvm::Log2_64_Ceil(layout.archetypes.size()));
-  scheme.locationBits = scheme.rowBits + archetypeBits <= 32 ? 32 : 64;
-  layout.generationOffset = placeTable(scheme.generationStorageBits / 8);
-  layout.locationOffset = placeTable(scheme.locationBits / 8);
+  if (scheme.hasGenerations())
+    layout.generationOffset = placeTable(scheme.generationStorageBits / 8);
+  if (scheme.hasIds())
+    layout.locationOffset = placeTable(scheme.locationBits / 8);
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;
 }

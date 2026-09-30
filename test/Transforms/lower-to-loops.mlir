@@ -4,26 +4,25 @@ ecs.component @A (a: f32)
 ecs.component @B (b0: i32, b1: f32)
 ecs.component @Unused (u: f32)
 
-// World layout: 2 counts and the entity table's 2 counters (32 bytes),
-// then per column a 64-byte boundary plus 17 cache lines (1088 bytes):
+// World layout: 2 counts and the entity counters (32 bytes), then per
+// column a 64-byte boundary plus 17 cache lines (1088 bytes):
 //   AB.A.a    at 64 + 1088     = 1152  (1000 x f32)
 //   AB.B.b0   at 5184 + 1088   = 6272  (1000 x i32)
 //   AB.B.b1   at 10304 + 1088  = 11392 (1000 x f32)
-//   AB ids    at 15424 + 1088  = 16512 (1000 x i64)
-//   OnlyA.A.a at 24512 + 1088  = 25600 (1000 x f32)
-// then OnlyA's ids and the entity table (2000 slots); the arena rounds up
-// to 16 KiB: 65536 bytes.
+//   OnlyA.A.a at 15424 + 1088  = 16512 (1000 x f32)
+// Nothing is despawned or moved, so ids are just archetype and row: no id
+// columns and no entity table. The arena rounds up to 16 KiB: 32768 bytes.
 ecs.archetype @AB (@A, @B) capacity 1000
 ecs.archetype @OnlyA (@A) capacity 1000
 
 // CHECK-LABEL: func.func private @scale(
-// CHECK-SAME: %[[K:[^:]*]]: f32, %[[W:[^:]*]]: memref<65536xi8>)
+// CHECK-SAME: %[[K:[^:]*]]: f32, %[[W:[^:]*]]: memref<32768xi8>)
 // Views are created once, at the entry. Counts are loaded right before each
 // loop, since spawns and despawns change them.
-// CHECK:      %[[COUNTS:.*]] = memref.view %[[W]][%{{.*}}][] : memref<65536xi8> to memref<2xi64>
+// CHECK:      %[[COUNTS:.*]] = memref.view %[[W]][%{{.*}}][] : memref<32768xi8> to memref<2xi64>
 // CHECK:      %[[OFF_AB_A:.*]] = arith.constant 1152 : index
-// CHECK-NEXT: %[[AB_A:.*]] = memref.view %[[W]][%[[OFF_AB_A]]][] : memref<65536xi8> to memref<1000xf32>
-// CHECK:      arith.constant 25600 : index
+// CHECK-NEXT: %[[AB_A:.*]] = memref.view %[[W]][%[[OFF_AB_A]]][] : memref<32768xi8> to memref<1000xf32>
+// CHECK:      arith.constant 16512 : index
 // CHECK-NEXT: %[[A_A:.*]] = memref.view {{.*}} to memref<1000xf32>
 // CHECK:      arith.constant 6272 : index
 // CHECK-NEXT: %[[AB_B0:.*]] = memref.view {{.*}} to memref<1000xi32>
@@ -72,7 +71,7 @@ ecs.system @scale(%k: f32) reads [@B] writes [@A] {
 
 // A function that touches no archetype gets no views.
 // CHECK-LABEL: func.func private @dead(
-// CHECK-SAME: %{{[^:]*}}: memref<65536xi8>)
+// CHECK-SAME: %{{[^:]*}}: memref<32768xi8>)
 // CHECK-NEXT: return
 ecs.system @dead() reads [@Unused] {
   // expected-warning @+1 {{matches no archetype; the query is removed}}
@@ -82,7 +81,7 @@ ecs.system @dead() reads [@Unused] {
 }
 
 // CHECK-LABEL: func.func @tick(
-// CHECK-SAME: %[[K:[^:]*]]: f32, %[[W:[^:]*]]: memref<65536xi8>)
+// CHECK-SAME: %[[K:[^:]*]]: f32, %[[W:[^:]*]]: memref<32768xi8>)
 // CHECK-SAME: attributes {llvm.emit_c_interface}
 // CHECK-NEXT: call @scale(%[[K]], %[[W]])
 // CHECK-NEXT: call @dead(%[[W]])

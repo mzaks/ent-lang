@@ -10,7 +10,8 @@ ecs.system @point(%target: !ecs.entity) writes [@Link] {
   }
 }
 
-// CHECK: typedef uint64_t ecs_entity;
+// Nothing is despawned or moved: 32-bit ids.
+// CHECK: typedef uint32_t ecs_entity;
 // CHECK: static inline ecs_entity *ecs_Node_Link_to(ecs_world *world) {
 // CHECK: void _mlir_ciface_frame(ecs_entity arg0, ecs_arena_descriptor *world);
 ecs.schedule @frame(%t: !ecs.entity) {

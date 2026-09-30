@@ -12,8 +12,10 @@ ecs.archetype @Bullet (@P, @L, optional @S) capacity 100
 // Layout: the count at 0, the pending counter for @Bullet at 8, the entity
 // table's next-slot counter and free-list head at 16 and 24; columns P.x
 // at 1152, L.t at 2688, S.s at 4224, S? at 5760, the id column at 6976,
-// the pending list at 8896; then the entity table: generations at 10432
-// and packed locations (archetype << rowBits | row) at 11968.
+// the pending list at 8512; then the entity table: generations at 10048
+// and packed locations (archetype << rowBits | row) at 11584. Entities are
+// despawned, so ids are generational: 100 slots need 7 bits, which leaves
+// 25 generation bits in a 32-bit id.
 
 // A despawn lists the row; if the last listed row is already this entity,
 // it replaces that entry (the last structural change wins). After the
@@ -25,15 +27,15 @@ ecs.archetype @Bullet (@P, @L, optional @S) capacity 100
 // CHECK:      %[[COUNTS:.*]] = memref.view {{.*}} to memref<1xi64>
 // CHECK:      arith.constant 8 : index
 // CHECK-NEXT: %[[PENDING_N:.*]] = memref.view {{.*}} to memref<1xi64>
-// CHECK:      arith.constant 8896 : index
+// CHECK:      arith.constant 8512 : index
 // CHECK-NEXT: %[[PENDING:.*]] = memref.view {{.*}} to memref<100xi32>
 // CHECK:      arith.constant 6976 : index
-// CHECK-NEXT: %[[IDS:.*]] = memref.view {{.*}} to memref<100xi64>
-// CHECK:      arith.constant 10432 : index
+// CHECK-NEXT: %[[IDS:.*]] = memref.view {{.*}} to memref<100xi32>
+// CHECK:      arith.constant 10048 : index
 // CHECK-NEXT: %[[GENERATION:.*]] = memref.view {{.*}} to memref<100xi32>
 // CHECK:      arith.constant 24 : index
 // CHECK-NEXT: %[[FREE_HEAD:.*]] = memref.view {{.*}} to memref<1xi64>
-// CHECK:      arith.constant 11968 : index
+// CHECK:      arith.constant 11584 : index
 // CHECK-NEXT: %[[LOCATION:.*]] = memref.view {{.*}} to memref<100xi32>
 // CHECK:      scf.for %[[I:.*]] =
 // CHECK:        scf.if
@@ -48,12 +50,15 @@ ecs.archetype @Bullet (@P, @L, optional @S) capacity 100
 // CHECK:      scf.for %[[J:.*]] =
 // CHECK:        %[[R:.*]] = memref.load %[[PENDING]]
 // CHECK:        %[[RI:.*]] = arith.index_cast %[[R]] : i32 to index
-// CHECK:        %[[ID:.*]] = memref.load %[[IDS]][%[[RI]]] : memref<100xi64>
-// CHECK:        %[[IDSLOT:.*]] = arith.andi %[[ID]], %{{.*}} : i64
-// CHECK-NEXT:   %[[IDX:.*]] = arith.index_castui %[[IDSLOT]] : i64 to index
+// CHECK:        %[[ID:.*]] = memref.load %[[IDS]][%[[RI]]] : memref<100xi32>
+// CHECK:        %[[IDSLOT:.*]] = arith.andi %[[ID]], %{{.*}} : i32
+// CHECK-NEXT:   %[[IDX:.*]] = arith.index_castui %[[IDSLOT]] : i32 to index
 // CHECK-NEXT:   %[[GEN:.*]] = memref.load %[[GENERATION]][%[[IDX]]]
 // CHECK:        %[[GEN1:.*]] = arith.addi %[[GEN]]
-// CHECK-NEXT:   memref.store %[[GEN1]], %[[GENERATION]][%[[IDX]]]
+// The generation wraps at its 25 bits, not at its 32-bit storage.
+// CHECK-NEXT:   %[[MASK:.*]] = arith.constant 33554431 : i32
+// CHECK-NEXT:   %[[WRAPPED:.*]] = arith.andi %[[GEN1]], %[[MASK]] : i32
+// CHECK-NEXT:   memref.store %[[WRAPPED]], %[[GENERATION]][%[[IDX]]]
 // CHECK:        %[[HEAD:.*]] = memref.load %[[FREE_HEAD]]
 // CHECK-NEXT:   %[[NEXT:.*]] = arith.trunci %[[HEAD]] : i64 to i32
 // CHECK-NEXT:   memref.store %[[NEXT]], %[[LOCATION]][%[[IDX]]]
@@ -104,8 +109,8 @@ ecs.system @age(%dt: f32) writes [@L, @Bullet] {
 // CHECK:      }
 // CHECK:      memref.store %{{.*}}, %[[LOCATION]][%[[SLOT]]] : memref<100xi32>
 // CHECK:      %[[HIGH:.*]] = arith.shli
-// CHECK:      %[[ID:.*]] = arith.ori %[[HIGH]], %{{.*}} : i64
-// CHECK-NEXT: memref.store %[[ID]], %{{.*}}[%[[ROWI]]] : memref<100xi64>
+// CHECK:      %[[ID:.*]] = arith.ori %[[HIGH]], %{{.*}} : i32
+// CHECK-NEXT: memref.store %[[ID]], %{{.*}}[%[[ROWI]]] : memref<100xi32>
 // CHECK:      %[[NEXT:.*]] = arith.addi %[[ROWI]]
 // CHECK:      arith.index_cast %[[NEXT]] : index to i64
 // CHECK-NEXT: memref.store

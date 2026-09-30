@@ -17,6 +17,7 @@
 // CHECK-NEXT: b alive 1 row 1
 // CHECK-NEXT: c alive 1 row 0
 // The next spawn reuses a's slot 0 with generation 1, in row 2; a's old id
-// stays dead.
-// CHECK-NEXT: d 100000000 row 2
+// stays dead. Capacity 8 needs 3 slot bits, and the program despawns, so an
+// id is a 32-bit `generation << 3 | slot`: 1 << 3 = 8.
+// CHECK-NEXT: d 8 row 2
 // CHECK-NEXT: a alive 0
