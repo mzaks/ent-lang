@@ -106,7 +106,8 @@ public:
   /// id and a value per row.
   std::pair<Value, Value> applyBuffer(ApplyOp apply,
                                       const WorldArchetype &archetype) {
-    auto index = apply->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
+    auto index =
+        apply->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
     const WorldApply &entry = layout.applies[index.getInt()];
     const WorldApplyBuffer &buffer = entry.find(archetype.index);
     return {view(buffer.idOffset, archetype.capacity,
@@ -1091,6 +1092,28 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
   }
 }
 
+/// Bounds that ids are checked against, loaded ahead by a caller that
+/// knows they cannot change (see emitLocate).
+namespace {
+struct LocateBounds {
+  /// Entity counts by archetype index (Rows ids).
+  SmallVector<Value> counts;
+  /// Slots in use, as an index (slot ids).
+  Value slotsInUse;
+};
+} // namespace
+
+/// The number of entity slots ever used, as an index: a slot id at or above
+/// it was never handed out.
+static Value loadSlotsInUse(IRRewriter &rewriter, Location loc,
+                            const WorldLayout &layout, WorldAccess &world) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  return world.toIndex(
+      loc, memref::LoadOp::create(rewriter, loc,
+                                  world.scalar(layout.nextSlotOffset),
+                                  ValueRange{zero}));
+}
+
 /// Emit, at the insertion point, code that finds the entity `id` (in its
 /// stored form) among the archetypes that hold `component`, and return the
 /// values it yields. How the entity is found depends on the entity scheme:
@@ -1102,6 +1125,11 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
 /// archetype always has it); `missing` in every other branch. Both return
 /// values of `results` to yield. Every load is guarded, so this is safe for
 /// any id.
+///
+/// A Rows id's row is checked against its archetype's count, a slot id's
+/// slot against the number of slots in use. Both are loaded where they are
+/// needed, unless `bounds` provides them: a caller that knows they cannot
+/// change can load them once, outside a loop.
 static SmallVector<Value>
 emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
            WorldAccess &world, Value id, FlatSymbolRefAttr component,
@@ -1109,7 +1137,8 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
            function_ref<SmallVector<Value>(const WorldArchetype &archetype,
                                            Value row, Value present)>
                found,
-           function_ref<SmallVector<Value>()> missing) {
+           function_ref<SmallVector<Value>()> missing,
+           const LocateBounds &bounds = {}) {
   const EntityScheme &scheme = layout.entities;
   // Without results, scf.if blocks come with their terminator.
   auto yield = [&](ValueRange values) {
@@ -1135,11 +1164,9 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
     std::tie(where, row) = world.unpackRows(loc, id);
   } else {
     Value slot = world.idSlot(loc, id);
-    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    Value used = world.toIndex(
-        loc, memref::LoadOp::create(rewriter, loc,
-                                    world.scalar(layout.nextSlotOffset),
-                                    ValueRange{zero}));
+    Value used = bounds.slotsInUse ? bounds.slotsInUse
+                                   : loadSlotsInUse(rewriter, loc, layout,
+                                                    world);
     top = guard(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
                                       slot, used));
     if (scheme.hasGenerations()) {
@@ -1179,8 +1206,10 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
     rewriter.setInsertionPointToStart(branch.thenBlock());
     Value inRow = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
     if (scheme.kind == EntityScheme::Rows)
-      inRow = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
-                                    row, world.count(loc, archetype));
+      inRow = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ult, row,
+          bounds.counts.empty() ? world.count(loc, archetype)
+                                : bounds.counts[archetype.index]);
     auto inside = guard(inRow);
     Value present;
     if (archetypeOp.isOptional(component)) {
@@ -1281,6 +1310,21 @@ static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
   Location loc = apply.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   auto [ids, values] = world.applyBuffer(apply, archetype);
+  // The loop only combines into fields, so the counts and the slots in
+  // use that ids are checked against cannot change. Loaded inside, they
+  // would be reloaded for every row: LLVM cannot tell the stores to the
+  // field from them, since all live in the arena.
+  LocateBounds bounds;
+  if (layout.entities.kind == EntityScheme::Rows) {
+    for (const WorldArchetype &target : layout.archetypes) {
+      ArchetypeOp targetOp = target.op;
+      bounds.counts.push_back(targetOp.contains(apply.getComponentAttr())
+                                  ? world.count(loc, target)
+                                  : Value());
+    }
+  } else {
+    bounds.slotsInUse = loadSlotsInUse(rewriter, loc, layout, world);
+  }
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
@@ -1311,7 +1355,7 @@ static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
             field, ValueRange{targetRow});
         return {};
       },
-      []() -> SmallVector<Value> { return {}; });
+      []() -> SmallVector<Value> { return {}; }, bounds);
 }
 
 /// Replace a query by one loop per matching archetype. The body is cloned

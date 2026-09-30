@@ -20,11 +20,19 @@ ecs.archetype @Gun (@T, optional @On) capacity 8
 // CHECK:        %[[ID:.*]] = memref.load %[[GUN_T:.*]][%[[ROW]]] : memref<8xi32>
 // CHECK-NEXT:   memref.store %[[ID]], %[[IDS:.*]][%[[ROW]]] : memref<8xi32>
 // CHECK-NEXT:   memref.store %{{.*}}, %[[VALUES:.*]][%[[ROW]]] : memref<8xf32>
-// CHECK:      scf.for %[[ROW2:.*]] = %{{.*}} to %{{.*}} step
+// Ids here are generational (the system despawns); the slots in use that
+// they are checked against cannot change while combining, so they are
+// loaded once, before the loop (after the despawns are listed).
+// CHECK:      memref.store %{{.*}}, %{{.*}}[%c0] : memref<1xi64>
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[USED64:.*]] = memref.load %{{.*}}[%c0] : memref<1xi64>
+// CHECK-NEXT: %[[USED:.*]] = arith.index_cast %[[USED64]] : i64 to index
+// CHECK-NEXT: scf.for %[[ROW2:.*]] = %{{.*}} to %{{.*}} step
 // CHECK-NEXT:   %[[SENT_ID:.*]] = memref.load %[[IDS]][%[[ROW2]]]
 // CHECK-NEXT:   %[[SENT:.*]] = arith.cmpi ne, %[[SENT_ID]], %c-1_i32
 // CHECK-NEXT:   scf.if %[[SENT]] {
 // CHECK-NEXT:     %[[V:.*]] = memref.load %[[VALUES]][%[[ROW2]]]
+// CHECK:          arith.cmpi ult, %{{.*}}, %[[USED]] : index
 // CHECK:          %[[OLD:.*]] = memref.load %[[HP:.*]][%[[AT:.*]]] : memref<16xf32>
 // CHECK-NEXT:     %[[NEW:.*]] = arith.addf %[[OLD]], %[[V]] : f32
 // CHECK-NEXT:     memref.store %[[NEW]], %[[HP]][%[[AT]]] : memref<16xf32>
