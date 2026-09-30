@@ -1048,17 +1048,127 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
   }
 }
 
-/// Lower every ecs.lookup in `func` into guarded loads. How the entity is
-/// found depends on the entity scheme: a Rows id is its archetype and row
-/// (alive if the row is below the archetype's count); a slot id is looked
-/// up in the entity table (alive if the slot is in use and, for
-/// generational ids, its generation current). Then, in each archetype
-/// holding the component, the field is loaded (and, where the component
-/// is optional, its presence checked). Every load is guarded, so a lookup
-/// is safe to run for any id.
+/// Emit, at the insertion point, code that finds the entity `id` (in its
+/// stored form) among the archetypes that hold `component`, and return the
+/// values it yields. How the entity is found depends on the entity scheme:
+/// a Rows id is its archetype and row (alive if the row is below the
+/// archetype's count); a slot id is looked up in the entity table (alive if
+/// the slot is in use and, for generational ids, its generation current).
+/// `found` is called in the branch where the entity lives at `row` of
+/// `archetype`, with the presence of `component` there (null where the
+/// archetype always has it); `missing` in every other branch. Both return
+/// values of `results` to yield. Every load is guarded, so this is safe for
+/// any id.
+static SmallVector<Value>
+emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
+           WorldAccess &world, Value id, FlatSymbolRefAttr component,
+           TypeRange results,
+           function_ref<SmallVector<Value>(const WorldArchetype &archetype,
+                                           Value row, Value present)>
+               found,
+           function_ref<SmallVector<Value>()> missing) {
+  const EntityScheme &scheme = layout.entities;
+  // Without results, scf.if blocks come with their terminator.
+  auto yield = [&](ValueRange values) {
+    if (!results.empty())
+      scf::YieldOp::create(rewriter, loc, values);
+  };
+  // An `if` with `missing` in its else branch; leaves the insertion point
+  // in the then branch and returns the op.
+  auto guard = [&](Value condition) {
+    auto branch = scf::IfOp::create(rewriter, loc, results, condition,
+                                    /*withElseRegion=*/true);
+    rewriter.setInsertionPointToStart(branch.elseBlock());
+    yield(missing());
+    rewriter.setInsertionPointToStart(branch.thenBlock());
+    return branch;
+  };
+
+  Value where, row;
+  OpBuilder::InsertionGuard outer(rewriter);
+  OpBuilder::InsertPoint start = rewriter.saveInsertionPoint();
+  scf::IfOp top;
+  if (scheme.kind == EntityScheme::Rows) {
+    std::tie(where, row) = world.unpackRows(loc, id);
+  } else {
+    Value slot = world.idSlot(loc, id);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value used = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc,
+                                    world.scalar(layout.nextSlotOffset),
+                                    ValueRange{zero}));
+    top = guard(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                      slot, used));
+    if (scheme.hasGenerations()) {
+      Value current = memref::LoadOp::create(rewriter, loc, world.generations(),
+                                             ValueRange{slot});
+      Value alive =
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                current, world.idGeneration(loc, id));
+      auto checkAlive = guard(alive);
+      rewriter.setInsertionPointToEnd(top.thenBlock());
+      if (!results.empty())
+        yield(checkAlive.getResults());
+      rewriter.setInsertionPointToStart(checkAlive.thenBlock());
+    }
+    std::tie(where, row) = world.getLocation(loc, slot);
+  }
+
+  // One branch per archetype that holds the component; the innermost else
+  // finds nothing.
+  unsigned whereBits = cast<IntegerType>(where.getType()).getWidth();
+  bool any = false;
+  for (const WorldArchetype &archetype : layout.archetypes) {
+    ArchetypeOp archetypeOp = archetype.op;
+    if (!archetypeOp.contains(component))
+      continue;
+    Value here = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq, where,
+        arith::ConstantIntOp::create(rewriter, loc, archetype.index,
+                                     whereBits));
+    auto branch = scf::IfOp::create(rewriter, loc, results, here,
+                                    /*withElseRegion=*/true);
+    if (!any && !top)
+      top = branch;
+    else
+      yield(branch.getResults());
+    any = true;
+    rewriter.setInsertionPointToStart(branch.thenBlock());
+    Value inRow = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+    if (scheme.kind == EntityScheme::Rows)
+      inRow = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                    row, world.count(loc, archetype));
+    auto inside = guard(inRow);
+    Value present;
+    if (archetypeOp.isOptional(component)) {
+      Value byte = memref::LoadOp::create(
+          rewriter, loc,
+          world.column(archetype, component.getAttr(),
+                       rewriter.getStringAttr("")),
+          ValueRange{row});
+      present = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ne, byte,
+          arith::ConstantIntOp::create(rewriter, loc, 0, 8));
+    }
+    yield(found(archetype, row, present));
+    rewriter.setInsertionPointAfter(inside);
+    yield(inside.getResults());
+    rewriter.setInsertionPointToStart(branch.elseBlock());
+  }
+  if (top) {
+    yield(missing());
+  } else {
+    // Rows ids and no archetype holds the component: nothing is found.
+    rewriter.restoreInsertionPoint(start);
+    top = guard(arith::ConstantIntOp::create(rewriter, loc, 0, 1));
+  }
+  return SmallVector<Value>(top.getResults());
+}
+
+/// Lower every ecs.lookup in `func` into guarded loads (see emitLocate).
+/// Where the component is optional, `found` is its presence.
 static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
                          const WorldLayout &layout, WorldAccess &world) {
-  const EntityScheme &scheme = layout.entities;
   SmallVector<LookupOp> lookups;
   func.walk([&](LookupOp lookup) { lookups.push_back(lookup); });
   for (LookupOp lookup : lookups) {
@@ -1066,121 +1176,37 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
     rewriter.setInsertionPoint(lookup);
     Type type = world.storageType(lookup.getValue().getType());
     SmallVector<Type, 2> resultTypes{type, rewriter.getI1Type()};
-    TypeRange results(resultTypes);
-    auto missing = [&]() {
-      Value zero = isa<FloatType>(type)
-                       ? arith::ConstantOp::create(
-                             rewriter, loc, rewriter.getFloatAttr(type, 0.0))
-                             .getResult()
-                       : arith::ConstantOp::create(
-                             rewriter, loc, rewriter.getIntegerAttr(type, 0))
-                             .getResult();
-      Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
-      scf::YieldOp::create(rewriter, loc, ValueRange{zero, no});
-    };
-    // An `if` yielding (value, found), with "not found" in the else branch;
-    // leaves the insertion point in the then branch and returns the op.
-    auto guard = [&](Value condition) {
-      auto branch = scf::IfOp::create(rewriter, loc, results, condition,
-                                      /*withElseRegion=*/true);
-      rewriter.setInsertionPointToStart(branch.elseBlock());
-      missing();
-      rewriter.setInsertionPointToStart(branch.thenBlock());
-      return branch;
-    };
-    auto yield = [&](scf::IfOp inner) {
-      scf::YieldOp::create(rewriter, loc, inner.getResults());
-    };
-
-    Value id = world.toStorage(loc, lookup.getEntity());
-    Value where, row;
-    OpBuilder::InsertionGuard outer(rewriter);
-    scf::IfOp top;
-    if (scheme.kind == EntityScheme::Rows) {
-      std::tie(where, row) = world.unpackRows(loc, id);
-    } else {
-      Value slot = world.idSlot(loc, id);
-      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-      Value used = world.toIndex(
-          loc, memref::LoadOp::create(rewriter, loc,
-                                      world.scalar(layout.nextSlotOffset),
-                                      ValueRange{zero}));
-      top = guard(arith::CmpIOp::create(rewriter, loc,
-                                        arith::CmpIPredicate::ult, slot, used));
-      if (scheme.hasGenerations()) {
-        Value current = memref::LoadOp::create(
-            rewriter, loc, world.generations(), ValueRange{slot});
-        Value alive = arith::CmpIOp::create(rewriter, loc,
-                                            arith::CmpIPredicate::eq, current,
-                                            world.idGeneration(loc, id));
-        auto checkAlive = guard(alive);
-        rewriter.setInsertionPointToEnd(top.thenBlock());
-        yield(checkAlive);
-        rewriter.setInsertionPointToStart(checkAlive.thenBlock());
-      }
-      std::tie(where, row) = world.getLocation(loc, slot);
-    }
-
-    // One branch per archetype that holds the component; the innermost
-    // else finds nothing.
     FlatSymbolRefAttr component = lookup.getComponentAttr();
-    unsigned whereBits = cast<IntegerType>(where.getType()).getWidth();
-    SmallVector<scf::IfOp> chain;
-    for (const WorldArchetype &archetype : layout.archetypes) {
-      ArchetypeOp archetypeOp = archetype.op;
-      if (!archetypeOp.contains(component))
-        continue;
-      Value here = arith::CmpIOp::create(
-          rewriter, loc, arith::CmpIPredicate::eq, where,
-          arith::ConstantIntOp::create(rewriter, loc, archetype.index,
-                                       whereBits));
-      auto branch = scf::IfOp::create(rewriter, loc, results, here,
-                                      /*withElseRegion=*/true);
-      if (chain.empty() && !top)
-        top = branch;
-      else
-        scf::YieldOp::create(rewriter, loc, branch.getResults());
-      chain.push_back(branch);
-      rewriter.setInsertionPointToStart(branch.thenBlock());
-      Value inRow = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
-      if (scheme.kind == EntityScheme::Rows)
-        inRow = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
-                                      row, world.count(loc, archetype));
-      auto present = guard(inRow);
-      Value value = memref::LoadOp::create(
-          rewriter, loc,
-          world.column(archetype, component.getAttr(), lookup.getFieldAttr()),
-          ValueRange{row});
-      Value found = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
-      if (archetypeOp.isOptional(component)) {
-        Value byte = memref::LoadOp::create(
-            rewriter, loc,
-            world.column(archetype, component.getAttr(),
-                         rewriter.getStringAttr("")),
-            ValueRange{row});
-        found = arith::CmpIOp::create(
-            rewriter, loc, arith::CmpIPredicate::ne, byte,
-            arith::ConstantIntOp::create(rewriter, loc, 0, 8));
-      }
-      scf::YieldOp::create(rewriter, loc, ValueRange{value, found});
-      rewriter.setInsertionPointToEnd(branch.thenBlock());
-      yield(present);
-      rewriter.setInsertionPointToStart(branch.elseBlock());
-    }
-    if (top) {
-      missing();
-    } else {
-      // Rows ids and no archetype holds the component: nothing is found.
-      rewriter.setInsertionPoint(lookup);
-      top = guard(arith::ConstantIntOp::create(rewriter, loc, 0, 1));
-      missing();
-    }
-
-    rewriter.setInsertionPointAfter(top);
+    SmallVector<Value> results = emitLocate(
+        rewriter, loc, layout, world, world.toStorage(loc, lookup.getEntity()),
+        component, resultTypes,
+        [&](const WorldArchetype &archetype, Value row,
+            Value present) -> SmallVector<Value> {
+          Value value = memref::LoadOp::create(
+              rewriter, loc,
+              world.column(archetype, component.getAttr(),
+                           lookup.getFieldAttr()),
+              ValueRange{row});
+          if (!present)
+            present = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+          return {value, present};
+        },
+        [&]() -> SmallVector<Value> {
+          Value zero =
+              isa<FloatType>(type)
+                  ? arith::ConstantOp::create(rewriter, loc,
+                                              rewriter.getFloatAttr(type, 0.0))
+                        .getResult()
+                  : arith::ConstantOp::create(rewriter, loc,
+                                              rewriter.getIntegerAttr(type, 0))
+                        .getResult();
+          Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+          return {zero, no};
+        });
     rewriter.replaceOp(lookup,
-                       {world.fromStorage(loc, top.getResult(0),
+                       {world.fromStorage(loc, results[0],
                                           lookup.getValue().getType()),
-                        top.getResult(1)});
+                        results[1]});
   }
 }
 
