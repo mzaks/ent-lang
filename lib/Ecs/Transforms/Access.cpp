@@ -9,6 +9,8 @@ using namespace mlir::ecs;
 
 std::string mlir::ecs::formatColumn(const Column &column) {
   auto [archetype, component, field] = column;
+  if (!archetype && component.getValue().empty())
+    return "entities";
   if (!archetype)
     return (component.getValue() + "." + field.getValue()).str();
   if (component.getValue().empty())
@@ -83,7 +85,11 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
   // A spawn or despawn changes which entities an archetype holds: it
   // writes the count and, since rows are appended or moved, every column.
   StringAttr idField = StringAttr::get(system.getContext(), "id");
+  // The entity table, which maps ids to archetypes and rows: written by
+  // every structural change, read by every lookup.
+  Column entityTable{StringAttr(), empty, empty};
   auto writeStructure = [&](ArchetypeOp archetype) {
+    access.writes.insert(entityTable);
     StringAttr name = archetype.getSymNameAttr();
     access.writes.insert({name, empty, empty});
     access.writes.insert({name, empty, idField});
@@ -141,6 +147,20 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
           for (Attribute field : componentOp.getFieldNames())
             access.writes.insert(
                 {name, component.getAttr(), cast<StringAttr>(field)});
+      }
+      return;
+    }
+    if (auto lookup = dyn_cast<LookupOp>(op)) {
+      // The entity may live in any archetype holding the component.
+      access.reads.insert(entityTable);
+      FlatSymbolRefAttr component = lookup.getComponentAttr();
+      for (ArchetypeOp archetype : archetypes) {
+        if (!archetype.contains(component))
+          continue;
+        StringAttr name = archetype.getSymNameAttr();
+        access.reads.insert({name, component.getAttr(), lookup.getFieldAttr()});
+        if (archetype.isOptional(component))
+          access.reads.insert({name, component.getAttr(), presence});
       }
       return;
     }

@@ -66,10 +66,11 @@ ecs.system @stun(%t: f32) reads [@Q] writes [@S] {
 }
 
 // Spawning and despawning change which entities an archetype holds: they
-// write its count, its id column and every other column.
+// write its count, its id column, every other column, and the entity table
+// (`entities`), which maps ids to archetypes and rows.
 ecs.component @R (r: f32)
 ecs.archetype @D (@R) capacity 10
-// expected-remark @+1 {{reads D.count; writes D.count, D.id, D.R.r}}
+// expected-remark @+1 {{reads D.count; writes entities, D.count, D.id, D.R.r}}
 ecs.system @recycle(%v: f32) reads [@R] writes [@D] {
   ecs.spawn @D(%v) : f32
   ecs.query (%r: !ecs.ref<@R>) {
@@ -84,10 +85,22 @@ ecs.component @M (m: f32)
 ecs.component @N (n: f32)
 ecs.archetype @E1 (@M) capacity 10
 ecs.archetype @E2 (@M, @N) capacity 10
-// expected-remark @+1 {{reads E1.id, E2.id, E1.count, E2.count; writes E1.count, E1.id, E1.M.m, E2.count, E2.id, E2.M.m, E2.N.n}}
+// expected-remark @+1 {{reads E1.id, E2.id, E1.count, E2.count; writes entities, E1.count, E1.id, E1.M.m, E2.count, E2.id, E2.M.m, E2.N.n}}
 ecs.system @promote(%v: f32) reads [@M] writes [@N] {
   ecs.query (%m: !ecs.ref<@M>) {
     %id = ecs.entity : i64
     ecs.add @N(%v) : f32
+  }
+}
+
+// A lookup reads the entity table and the field in every archetype that
+// holds the component: the entity may live in any of them.
+ecs.component @Ref (entity: i64)
+ecs.archetype @G (@Ref) capacity 10
+// expected-remark @+1 {{reads G.Ref.entity, entities, D.R.r, G.count; writes nothing}}
+ecs.system @chase() reads [@Ref, @R] {
+  ecs.query (%t: !ecs.ref<@Ref>) {
+    %id = ecs.get %t "entity" : !ecs.ref<@Ref> -> i64
+    %r, %found = ecs.lookup %id @R "r" : f32
   }
 }

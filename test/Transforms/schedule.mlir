@@ -270,3 +270,34 @@ ecs.schedule @structural(%c: f32) {
   // expected-remark @+1 {{@readX waits for @spawnA: it reads A.P.x, which @spawnA writes}}
   ecs.run @readX()
 }
+
+// Lookups read the entity table and the looked-up field in every archetype
+// holding the component; a despawn writes the table, so it waits.
+ecs.component @Ref (entity: i64)
+ecs.archetype @Seeker (@Ref) capacity 100
+ecs.system @seek() reads [@Ref, @P] {
+  ecs.query (%r: !ecs.ref<@Ref>) {
+    %id = ecs.get %r "entity" : !ecs.ref<@Ref> -> i64
+    %x, %found = ecs.lookup %id @P "x" : f32
+  }
+}
+ecs.system @cull() reads [@P] writes [@A, @B] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    ecs.despawn
+  }
+}
+
+// CHECK-LABEL: ecs.schedule @relations
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @seek
+// CHECK-NEXT:   ecs.run @readX
+// CHECK-NEXT: }
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @cull
+// CHECK-NEXT: }
+ecs.schedule @relations() {
+  ecs.run @seek()
+  ecs.run @readX()
+  // expected-remark @+1 {{@cull waits for @seek: it writes entities, which @seek reads}}
+  ecs.run @cull()
+}
