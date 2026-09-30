@@ -474,3 +474,62 @@ not verified beyond that.
 
 - At n=1e5, the configurations without churn at 1% density are noisy
   again (46-103% spread), for every variant, as in the first churn run.
+
+## 2026-09-30: entity ids and moves (commit d449dcd)
+
+Same machine and toolchain. Every archetype now has an id column and the
+world an entity table; hosts spawn through the generated header. The
+frame loops themselves only changed offsets. All variants of both
+benchmarks agree on their checksums.
+
+Not a quiet run: during the main benchmark a Bazel clang++ used a full
+core and Spotlight 85% of one (load average 8.5 falling to 4.3); during
+the churn benchmark a Mojo kgen process used about 40% of one core (load
+average 4.3 to 4.5).
+
+### Main benchmark, OpenMP runtime defaults
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 317 (21%) | 5,529 (3%) | 51,028 (1%) | 514,878 (1%) | 5,200,132 (2%) |
+| stages-omp | 64,337 (9%) | 70,641 (8%) | 109,200 (5%) | 496,896 (11%) | 4,430,080 (6%) |
+| entities-omp | 335 (16%) | 5,428 (3%) | 51,449 (2%) | 428,056 (9%) | 2,271,724 (3%) |
+| fused | 274 (15%) | 4,541 (2%) | 45,667 (3%) | 455,456 (2%) | 4,563,546 (2%) |
+| fused-entities-omp | 265 (9%) | 4,615 (4%) | 45,843 (2%) | 210,581 (10%) | 1,851,090 (1%) |
+| c-fused | 303 (10%) | 4,495 (3%) | 45,377 (2%) | 454,464 (3%) | 4,566,698 (2%) |
+| c-fused-restrict | 265 (17%) | 4,495 (3%) | 45,896 (3%) | 462,962 (2%) | 4,659,126 (6%) |
+
+### Churn benchmark, n = 1e6: us per frame (spread), best in bold
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set | compiled | compiled-fused |
+|---|---|---|---|---|---|---|---|
+| 1% | 0.0% | **172.3 (2%)** | 316.4 (3%) | 469.5 (3%) | 178.4 (2%) | 289.4 (2%) | 261.0 (3%) |
+| 1% | 0.1% | 191.4 (6%) | 317.9 (2%) | 474.9 (4%) | **182.5 (4%)** | 289.5 (3%) | 261.6 (3%) |
+| 1% | 1.0% | 301.4 (11%) | 327.6 (1%) | 496.8 (4%) | **194.7 (4%)** | 299.1 (2%) | 270.8 (2%) |
+| 10% | 0.0% | **183.8 (3%)** | 316.8 (2%) | 763.4 (5%) | 229.4 (1%) | 288.4 (2%) | 261.0 (1%) |
+| 10% | 0.1% | **203.6 (4%)** | 318.4 (3%) | 839.8 (5%) | 239.6 (2%) | 291.3 (2%) | 262.3 (1%) |
+| 10% | 1.0% | 318.5 (10%) | 328.1 (2%) | 899.0 (3%) | 291.1 (3%) | 302.1 (2%) | **272.8 (3%)** |
+| 10% | 10.0% | 1,475.8 (14%) | 429.4 (2%) | 992.9 (1%) | 493.7 (6%) | 389.0 (2%) | **359.3 (1%)** |
+| 50% | 0.0% | **229.6 (2%)** | 316.4 (2%) | 2,619.4 (2%) | 372.6 (3%) | 288.8 (2%) | 260.6 (2%) |
+| 50% | 0.1% | **250.3 (5%)** | 317.0 (2%) | 2,676.1 (2%) | 382.8 (4%) | 287.9 (2%) | 260.6 (2%) |
+| 50% | 1.0% | 378.1 (9%) | 328.2 (2%) | 2,740.4 (2%) | 496.9 (3%) | 299.0 (2%) | **271.2 (2%)** |
+| 50% | 10.0% | 1,550.8 (4%) | 433.8 (2%) | 2,863.6 (2%) | 813.0 (2%) | 386.4 (1%) | **358.8 (4%)** |
+| 90% | 0.0% | 274.2 (2%) | 318.1 (2%) | 815.6 (12%) | 512.9 (1%) | 291.2 (13%) | **262.8 (5%)** |
+| 90% | 0.1% | 299.2 (8%) | 320.8 (5%) | 970.4 (4%) | 529.5 (5%) | 291.8 (4%) | **264.4 (8%)** |
+| 90% | 1.0% | 420.5 (22%) | 330.2 (4%) | 1,005.7 (5%) | 660.8 (12%) | 300.4 (9%) | **275.5 (9%)** |
+| 90% | 10.0% | 1,707.4 (21%) | 426.5 (3%) | 1,088.2 (2%) | 1,124.2 (4%) | 387.8 (2%) | **360.6 (2%)** |
+
+### What holds
+
+- Ids cost the frame nothing measurable. Main benchmark against the
+  2026-09-29 resources run: fused +0.4% to +1.5% at every size (4.52 to
+  4.56 ms at 1e7), fused parallel +0.7% at 1e7 (+3.5% at 1e6, with a 10%
+  spread). Churn against the previous churn run: the compiled variants
+  are 1.6-1.8% slower, but so are the hand-written ones, which contain
+  no id code (wide-select +1.3%, sparse-set +1%); the background load is
+  the likelier cause. The winners per configuration are unchanged.
+- Ids do cost memory: the compiled churn world reserves 45 MB at 1e6
+  entities instead of 21 MB, 8 bytes of id column and 16 bytes of entity
+  table per entity. Creating a world touches none of it, but spawning
+  writes each entity's id and table entry, so for live entities it is
+  resident.
