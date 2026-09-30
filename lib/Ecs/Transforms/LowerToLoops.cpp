@@ -102,6 +102,24 @@ public:
     return view(column.offset, archetype.capacity,
                 storageType(column.type));
   }
+  /// The buffer `apply` fills from the entities of `archetype`: a target
+  /// id and a value per row.
+  std::pair<Value, Value> applyBuffer(ApplyOp apply,
+                                      const WorldArchetype &archetype) {
+    auto index = apply->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
+    const WorldApply &entry = layout.applies[index.getInt()];
+    const WorldApplyBuffer &buffer = entry.find(archetype.index);
+    return {view(buffer.idOffset, archetype.capacity,
+                 rewriter.getIntegerType(layout.entities.idBits)),
+            view(buffer.valueOffset, archetype.capacity,
+                 storageType(entry.type))};
+  }
+  /// The all-ones id, which is never alive: "no target" in apply buffers.
+  Value noEntity(Location loc) {
+    return arith::ConstantIntOp::create(rewriter, loc, -1,
+                                        layout.entities.idBits);
+  }
+
   /// The id of the entity in each row of `archetype`.
   Value ids(const WorldArchetype &archetype) {
     return view(archetype.idOffset, archetype.capacity,
@@ -510,8 +528,9 @@ static bool isEntityLocal(QueryOp query) {
     // entity's own row; its id is its own.
     // Lookups read other entities, but the verifier ensures the query does
     // not change what they read.
+    // Applies write the entity's own slot of their buffer.
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, LookupOp,
-            YieldOp>(op) ||
+            ApplyOp, YieldOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
     return WalkResult::interrupt();
@@ -637,7 +656,7 @@ static void lowerResourceAccesses(IRRewriter &rewriter, func::FuncOp func,
 static bool canRunForAbsentEntities(QueryOp query) {
   WalkResult result = query.getBody().walk([](Operation *op) {
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, LookupOp,
-            YieldOp, scf::IfOp, scf::YieldOp>(op))
+            ApplyOp, YieldOp, scf::IfOp, scf::YieldOp>(op))
       return WalkResult::advance();
     if (op->getNumRegions() == 0 && isPure(op))
       return WalkResult::advance();
@@ -734,7 +753,8 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
   SmallVector<Operation *> accesses;
   for (Operation *root : roots)
     root->walk([&](Operation *op) {
-      if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp, EntityOp>(op))
+      if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp, EntityOp, ApplyOp>(
+              op))
         accesses.push_back(op);
     });
   for (Operation *op : accesses) {
@@ -786,6 +806,19 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         break;
       }
       rewriter.eraseOp(op);
+    } else if (auto apply = dyn_cast<ApplyOp>(op)) {
+      // Fill this entity's slot of the buffer; the query's end combines.
+      // An entity the masked body does not apply to sends nothing.
+      auto [ids, values] = world.applyBuffer(apply, archetype);
+      Value id = world.toStorage(loc, apply.getEntity());
+      if (mask)
+        id = arith::SelectOp::create(rewriter, loc, mask, id,
+                                     world.noEntity(loc));
+      memref::StoreOp::create(rewriter, loc, id, ids, ValueRange{entity});
+      memref::StoreOp::create(rewriter, loc,
+                              world.toStorage(loc, apply.getValue()), values,
+                              ValueRange{entity});
+      rewriter.eraseOp(op);
     } else if (auto entityOp = dyn_cast<EntityOp>(op)) {
       Value id = world.hasIds()
                      ? memref::LoadOp::create(rewriter, loc,
@@ -834,8 +867,18 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   }
 
   OpBuilder::InsertionGuard guard(rewriter);
-  if (mask && (!canRunForAbsentEntities(query) ||
-               isStructuralFor(query, archetypeOp))) {
+  bool guarded = mask && (!canRunForAbsentEntities(query) ||
+                          isStructuralFor(query, archetypeOp));
+  // An apply that may not run for this entity (it is under an `if`, or the
+  // body is guarded) must still leave its slot saying "no target".
+  query.getBody().walk([&](ApplyOp apply) {
+    if (!guarded && apply->getBlock() == &query.getBody().front())
+      return;
+    Value ids = world.applyBuffer(apply, archetype).first;
+    memref::StoreOp::create(rewriter, loc, world.noEntity(loc), ids,
+                            ValueRange{entity});
+  });
+  if (guarded) {
     auto branch = scf::IfOp::create(rewriter, loc, mask);
     rewriter.setInsertionPointToStart(branch.thenBlock());
     mask = Value();
@@ -1210,6 +1253,67 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
   }
 }
 
+/// `a ⊕ b` under an apply's rule; min and max are signed for integers and
+/// IEEE-754 minimum/maximum (NaN-propagating) for floats.
+static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
+                     Value a, Value b) {
+  bool isFloat = isa<FloatType>(a.getType());
+  if (rule == "add")
+    return isFloat ? arith::AddFOp::create(rewriter, loc, a, b).getResult()
+                   : arith::AddIOp::create(rewriter, loc, a, b).getResult();
+  if (rule == "min")
+    return isFloat ? arith::MinimumFOp::create(rewriter, loc, a, b).getResult()
+                   : arith::MinSIOp::create(rewriter, loc, a, b).getResult();
+  assert(rule == "max" && "the verifier admits add, min and max");
+  return isFloat ? arith::MaximumFOp::create(rewriter, loc, a, b).getResult()
+                 : arith::MaxSIOp::create(rewriter, loc, a, b).getResult();
+}
+
+/// Combine the values `apply` sent from the first `count` rows of
+/// `archetype` into their targets, at the insertion point, one row after
+/// another: the order is fixed, so the result does not depend on how the
+/// query's loop ran. Rows that sent nothing, dead ids and targets without
+/// the component are skipped.
+static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
+                           const WorldLayout &layout,
+                           const WorldArchetype &archetype, WorldAccess &world,
+                           Value count) {
+  Location loc = apply.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  auto [ids, values] = world.applyBuffer(apply, archetype);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+  Value row = loop.getInductionVar();
+  Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{row});
+  Value sent = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                     id, world.noEntity(loc));
+  auto ifSent = scf::IfOp::create(rewriter, loc, sent);
+  rewriter.setInsertionPointToStart(ifSent.thenBlock());
+  Value value = memref::LoadOp::create(rewriter, loc, values, ValueRange{row});
+  FlatSymbolRefAttr component = apply.getComponentAttr();
+  emitLocate(
+      rewriter, loc, layout, world, id, component, TypeRange{},
+      [&](const WorldArchetype &target, Value targetRow,
+          Value present) -> SmallVector<Value> {
+        OpBuilder::InsertionGuard inner(rewriter);
+        if (present) {
+          auto ifPresent = scf::IfOp::create(rewriter, loc, present);
+          rewriter.setInsertionPointToStart(ifPresent.thenBlock());
+        }
+        Value field =
+            world.column(target, component.getAttr(), apply.getFieldAttr());
+        Value old =
+            memref::LoadOp::create(rewriter, loc, field, ValueRange{targetRow});
+        memref::StoreOp::create(
+            rewriter, loc, combine(rewriter, loc, apply.getRule(), old, value),
+            field, ValueRange{targetRow});
+        return {};
+      },
+      []() -> SmallVector<Value> { return {}; });
+}
+
 /// Replace a query by one loop per matching archetype. The body is cloned
 /// into each loop, and every ref access becomes a load or store at the
 /// loop's index in the column of the ref's component and field.
@@ -1220,11 +1324,18 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   bool entityLocal = isEntityLocal(query);
   bool matched = false;
   SmallVector<const WorldArchetype *> changed;
+  SmallVector<ApplyOp> applies;
+  query.getBody().walk([&](ApplyOp apply) { applies.push_back(apply); });
+  // The rows each archetype's loop visits, for combining their applies:
+  // the count before the loop, which spawns in the query may raise.
+  SmallVector<std::pair<const WorldArchetype *, Value>> visited;
   for (const WorldArchetype &archetype : layout.archetypes) {
     if (!matches(archetype, query))
       continue;
     matched = true;
     rewriter.setInsertionPoint(query);
+    if (!applies.empty())
+      visited.push_back({&archetype, world.count(loc, archetype)});
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, entityLocal,
         [&](Value entity, Block *) {
@@ -1235,6 +1346,14 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     if (archetype.hasPending() && isStructuralFor(query, archetype.op))
       changed.push_back(&archetype);
   }
+
+  // Applies are combined when the whole query has run, in a fixed order:
+  // by apply, then archetype, then row. They land before despawns and
+  // moves, while every id still leads to where its entity was.
+  rewriter.setInsertionPoint(query);
+  for (ApplyOp apply : applies)
+    for (auto [archetype, count] : visited)
+      combineApplied(rewriter, apply, layout, *archetype, world, count);
 
   // Despawns and moves take effect when the whole query has run, so an
   // entity moved into another archetype the query matches is not visited
@@ -1330,13 +1449,14 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     if (auto run = dyn_cast<RunOp>(op)) {
       auto system = symbols.lookup<SystemOp>(run.getSystem());
-      // Resource writes, structural changes and lookups end a sequence:
-      // fusion interleaves systems per entity, and a lookup would then see
-      // some entities' updates from other systems and not others'.
+      // Resource writes, structural changes, lookups and applies end a
+      // sequence: fusion interleaves systems per entity, and a lookup would
+      // then see some entities' updates from other systems and not others',
+      // as would a later system reading what an apply combines.
       bool writesResource =
           system
               .walk([](Operation *op) {
-                return isa<WriteOp, SpawnOp, DespawnOp, LookupOp>(op)
+                return isa<WriteOp, SpawnOp, DespawnOp, LookupOp, ApplyOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -1488,6 +1608,13 @@ struct EcsLowerToLoops
     FailureOr<WorldLayout> layout = WorldLayout::compute(module);
     if (failed(layout))
       return signalPassFailure();
+    // Tag every apply with its buffers' index in the layout, which lists
+    // them in the same walk order; clones keep the tag.
+    unsigned applyIndex = 0;
+    module.walk([&](ApplyOp apply) {
+      apply->setAttr(WorldLayout::kApplyIndexAttr,
+                     rewriter.getI64IntegerAttr(applyIndex++));
+    });
     MemRefType arenaType = getArenaType(module.getContext(), *layout);
     LoopOptions options{parallelEntities, parallelMinEntities};
     SymbolTable symbols(module);

@@ -55,6 +55,13 @@ const WorldMove *WorldArchetype::findMove(StringAttr component,
   return nullptr;
 }
 
+const WorldApplyBuffer &WorldApply::find(unsigned archetype) const {
+  for (const WorldApplyBuffer &buffer : buffers)
+    if (buffer.archetype == archetype)
+      return buffer;
+  llvm_unreachable("the apply's query does not match the archetype");
+}
+
 const WorldResource &WorldLayout::getResource(StringAttr resource) const {
   for (const WorldResource &entry : resources)
     if (ResourceOp(entry.op).getSymNameAttr() == resource)
@@ -242,6 +249,29 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       }
     }
   }
+
+  // A target id and a value per row, for each apply and each archetype its
+  // query matches.
+  module.walk([&](ApplyOp apply) {
+    WorldApply entry;
+    entry.type = apply.getValue().getType();
+    for (ArchetypeOp source :
+         getMatchedArchetypes(apply->getParentOfType<QueryOp>())) {
+      for (WorldArchetype &archetype : layout.archetypes) {
+        if (archetype.op != source)
+          continue;
+        auto place = [&](uint64_t bytes) {
+          uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+          end = offset + bytes * archetype.capacity;
+          return offset;
+        };
+        uint64_t ids = place(scheme.idBits / 8);
+        entry.buffers.push_back(
+            {archetype.index, ids, place(storageBytes(entry.type))});
+      }
+    }
+    layout.applies.push_back(std::move(entry));
+  });
 
   // The entity table.
   auto placeTable = [&](uint64_t bytes) {

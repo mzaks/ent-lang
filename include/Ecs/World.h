@@ -73,6 +73,25 @@ struct WorldResource {
   const WorldResourceField *find(StringAttr field) const;
 };
 
+/// The values one `ecs.apply` sends from the entities of one archetype: a
+/// target id and a value per row. A row whose entity sent nothing holds the
+/// all-ones id (`ECS_NO_ENTITY`).
+struct WorldApplyBuffer {
+  /// Index of the source archetype.
+  unsigned archetype;
+  uint64_t idOffset;
+  uint64_t valueOffset;
+};
+
+/// The buffers of one `ecs.apply`, one per archetype its query matches.
+struct WorldApply {
+  Type type;
+  SmallVector<WorldApplyBuffer> buffers;
+
+  /// The buffer for source archetype `archetype` (its index).
+  const WorldApplyBuffer &find(unsigned archetype) const;
+};
+
 /// How entity ids and their bookkeeping are laid out, chosen from the
 /// capacities and from which structural changes the program makes:
 ///
@@ -126,7 +145,8 @@ struct EntityScheme {
 /// example (see bench/RESULTS.md). Each archetype's columns are followed by
 /// its id column; an archetype that entities are despawned from or moved
 /// out of also gets a pending counter in the header and pending lists after
-/// its id column. The entity table comes last.
+/// its id column. The buffers of `ecs.apply` follow the archetypes, and
+/// the entity table comes last.
 struct WorldLayout {
   static constexpr uint64_t kArenaAlignment = 16384;
   static constexpr uint64_t kColumnAlignment = 64;
@@ -134,6 +154,10 @@ struct WorldLayout {
 
   SmallVector<WorldArchetype> archetypes;
   SmallVector<WorldResource> resources;
+  /// One entry per `ecs.apply` in the module, in walk order; the lowering
+  /// tags each op with its index (see kApplyIndexAttr).
+  SmallVector<WorldApply> applies;
+  static constexpr llvm::StringLiteral kApplyIndexAttr = "ecs.apply_index";
 
   /// How entity ids are represented; see EntityScheme.
   EntityScheme entities;
