@@ -13,5 +13,6 @@ add_mlir_dialect_library(MLIREcs
 
   LINK_LIBS PUBLIC
   MLIRIR
+  MLIRLoopLikeInterface
   MLIRSideEffectInterfaces
 )

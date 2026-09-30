@@ -440,3 +440,102 @@ func.func @f(%id: !ecs.entity) {
   %x, %found = ecs.lookup %id @P "x" : f32
   return
 }
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.system @s(%id: !ecs.entity, %d: f32) writes [@H] {
+  // expected-error @+1 {{must be inside an 'ecs.query': its values are combined when the query ends}}
+  ecs.apply %id @H "hp" add %d : f32
+}
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s(%d: f32) reads [@H] {
+  ecs.query (%h: !ecs.ref<@H>) {
+    %id = ecs.entity
+    // expected-error @+1 {{applies to @H but system @s does not declare it in 'writes'}}
+    ecs.apply %id @H "hp" add %d : f32
+  }
+}
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s(%d: f32) writes [@H] {
+  ecs.query (%h: !ecs.ref<@H>) {
+    %id = ecs.entity
+    // expected-error @+1 {{has unknown rule 'mul'; expected 'add', 'min' or 'max'}}
+    ecs.apply %id @H "hp" mul %d : f32
+  }
+}
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s(%d: i32) writes [@H] {
+  ecs.query (%h: !ecs.ref<@H>) {
+    %id = ecs.entity
+    // expected-error @+1 {{value type 'i32' does not match field 'hp' of type 'f32'}}
+    ecs.apply %id @H "hp" add %d : i32
+  }
+}
+
+// -----
+
+ecs.component @H (alive: i1, next: !ecs.entity)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s(%b: i1) writes [@H] {
+  ecs.query (%h: !ecs.ref<@H>) {
+    %id = ecs.entity
+    // expected-error @+1 {{cannot combine field 'alive' of type i1; only integers and floats can}}
+    ecs.apply %id @H "alive" max %b : i1
+  }
+}
+
+// -----
+
+ecs.component @H (next: !ecs.entity)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s() writes [@H] {
+  ecs.query (%h: !ecs.ref<@H>) {
+    %id = ecs.entity
+    // expected-error @+1 {{cannot combine field 'next' of type '!ecs.entity'; only integers and floats can}}
+    ecs.apply %id @H "next" max %id : !ecs.entity
+  }
+}
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s(%d: f32) writes [@H] {
+  ecs.query (%h: !ecs.ref<@H>) {
+    %id = ecs.entity
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c3 = arith.constant 3 : index
+    scf.for %i = %c0 to %c3 step %c1 {
+      // expected-error @+1 {{must not be inside a loop ('scf.for'): it may run at most once per entity}}
+      ecs.apply %id @H "hp" add %d : f32
+    }
+  }
+}
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s(%d: f32) writes [@H] {
+  ecs.query (%h: !ecs.ref<@H>) {
+    %id = ecs.entity
+    // expected-error @+1 {{combines @H "hp" with 'add', but the query also combines it with 'min'; the result would depend on the order}}
+    ecs.apply %id @H "hp" add %d : f32
+    // expected-note @+1 {{other rule here}}
+    ecs.apply %id @H "hp" min %d : f32
+  }
+}

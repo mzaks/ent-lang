@@ -3,6 +3,7 @@
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
@@ -41,6 +42,19 @@ static void printComponentList(OpAsmPrinter &p, Operation *, ArrayAttr list,
     p << component;
   });
   p << ")";
+}
+
+// A bare keyword naming how ecs.apply combines values: `add`, `min`, `max`.
+static ParseResult parseRule(OpAsmParser &parser, StringAttr &rule) {
+  StringRef keyword;
+  if (parser.parseKeyword(&keyword))
+    return failure();
+  rule = parser.getBuilder().getStringAttr(keyword);
+  return success();
+}
+
+static void printRule(OpAsmPrinter &p, Operation *, StringAttr rule) {
+  p << rule.getValue();
 }
 
 #define GET_OP_CLASSES
@@ -661,6 +675,69 @@ LogicalResult LookupOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
                                  "changes it; which entities see the old "
                                  "value would depend on iteration order";
     diag.attachNote(writer->getLoc()) << "changed here";
+    return diag;
+  }
+  return success();
+}
+
+LogicalResult ApplyOp::verify() {
+  auto query = (*this)->getParentOfType<QueryOp>();
+  if (!query)
+    return emitOpError("must be inside an 'ecs.query': its values are "
+                       "combined when the query ends");
+  // At most one value per entity and apply: the buffer has one slot per row.
+  for (Operation *parent = (*this)->getParentOp(); parent != query;
+       parent = parent->getParentOp())
+    if (isa<LoopLikeOpInterface>(parent))
+      return emitOpError("must not be inside a loop ('")
+             << parent->getName() << "'): it may run at most once per entity";
+  StringRef rule = getRule();
+  if (rule != "add" && rule != "min" && rule != "max")
+    return emitOpError("has unknown rule '")
+           << rule << "'; expected 'add', 'min' or 'max'";
+  return success();
+}
+
+LogicalResult ApplyOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  ComponentOp component =
+      lookupComponent(symbolTable, *this, getComponentAttr());
+  if (!component)
+    return emitOpError("references unknown component ") << getComponentAttr();
+  Type fieldType = component.getFieldType(getField());
+  if (!fieldType)
+    return emitOpError("component ")
+           << getComponentAttr() << " has no field '" << getField() << "'";
+  if (fieldType != getValue().getType())
+    return emitOpError("value type ")
+           << getValue().getType() << " does not match field '" << getField()
+           << "' of type " << fieldType;
+  if (!isa<FloatType>(fieldType) && !fieldType.isIntOrIndex())
+    return emitOpError("cannot combine field '")
+           << getField() << "' of type " << fieldType
+           << "; only integers and floats can";
+  if (fieldType.isInteger(1))
+    return emitOpError("cannot combine field '")
+           << getField() << "' of type i1; only integers and floats can";
+  auto system = (*this)->getParentOfType<SystemOp>();
+  if (!system.canWrite(getComponentAttr()))
+    return emitOpError("applies to ")
+           << getComponentAttr() << " but system @" << system.getSymName()
+           << " does not declare it in 'writes'";
+
+  // One rule per field and query: mixed rules would not commute.
+  ApplyOp other;
+  (*this)->getParentOfType<QueryOp>().walk([&](ApplyOp apply) {
+    if (!other && apply.getComponentAttr() == getComponentAttr() &&
+        apply.getField() == getField() && apply.getRule() != getRule())
+      other = apply;
+  });
+  if (other) {
+    InFlightDiagnostic diag =
+        emitOpError("combines ")
+        << getComponentAttr() << " \"" << getField() << "\" with '"
+        << getRule() << "', but the query also combines it with '"
+        << other.getRule() << "'; the result would depend on the order";
+    diag.attachNote(other.getLoc()) << "other rule here";
     return diag;
   }
   return success();

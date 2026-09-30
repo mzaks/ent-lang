@@ -314,6 +314,42 @@ def Ecs_LookupOp : Ecs_Op<"lookup", [
   let hasVerifier = 1;
 }
 
+def Ecs_ApplyOp : Ecs_Op<"apply", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Combine a value into a field of another entity, by id";
+  let description = [{
+    ```mlir
+    ecs.apply %target @Hull "hp" add %damage : f32
+    ```
+    Combines `%damage` into field `hp` of `@Hull` of the entity with id
+    `%target`, with the rule `add`, `min` or `max` (signed for integers).
+    Applies are deferred to the end of the enclosing query: then every
+    target's field becomes `field ⊕ v1 ⊕ v2 ⊕ ...` over the values sent to
+    it, before the query's despawns and moves take effect. So the query
+    itself sees every target's old value and may read the field (with
+    `ecs.get` or `ecs.lookup`) or set it; applies land on top.
+
+    The values are combined in a fixed order (by apply, then archetype,
+    then row), so the result does not depend on how the query's loop was
+    run, in parallel or not, even for floating-point `add`. A value sent to
+    an id that is not alive, or to an entity without the component, is
+    dropped.
+
+    The system must declare the component in `writes`. An apply must be
+    inside a query and not inside a loop there, so it runs at most once per
+    entity; all applies of one query to the same field use the same rule
+    (`add` then `min` would depend on the order). The field must be an
+    integer (not `i1`) or a float.
+  }];
+  let arguments = (ins Ecs_EntityType:$entity, FlatSymbolRefAttr:$component,
+                       StrAttr:$field, StrAttr:$rule, AnyType:$value);
+  let assemblyFormat = [{
+    $entity $component $field custom<Rule>($rule) $value attr-dict
+    `:` type($value)
+  }];
+  let hasVerifier = 1;
+}
+
 def Ecs_DespawnOp : Ecs_Op<"despawn", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Remove the visited entity from the world";
