@@ -78,6 +78,16 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
   generational indices (generation in the upper 32 bits, a slot in the
   lower): they stay valid while an entity moves between rows and
   archetypes and stop being alive when it is despawned.
+- `%x, %found = ecs.lookup %id @Position "x" : f32` reads a field of
+  another entity, whichever archetype it lives in; `%found` is false (and
+  the value 0) if the id is dead or the entity lacks the component. A
+  component field holding an id (`@Target (entity: i64)`) is how entities
+  refer to each other; `examples/homing.mlir` has missiles steering towards
+  their target ship. Lookups only read. A query may not look up a field it
+  changes itself (the verifier rejects it: which entities saw the old
+  value would depend on iteration order), and a system with lookups is not
+  fused with others for the same reason; under those rules a query with
+  lookups still runs in parallel.
 - `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
   exactly once and is not an entity. Systems declare it in `reads`/`writes`
   and access it with `ecs.read @Clock "dt" : f32` and
@@ -113,7 +123,10 @@ the presence of an optional component (`Character.Stunned?`): adding or
 removing it is ordered against every query that binds it. Every query reads
 its archetypes' entity counts (`Bullet.count`), and a spawn or despawn
 writes the count and every column of the archetype, so structural changes
-are ordered against every system that touches the archetype. Any other op
+are ordered against every system that touches the archetype. A lookup reads
+the entity table (`entities`) and the field in every archetype holding the
+component; structural changes write the entity table, so a despawn waits
+for the lookups before it. Any other op
 with memory effects (a call, say) makes a system opaque, and opaque systems
 conflict with everything.
 
