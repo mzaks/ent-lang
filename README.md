@@ -242,7 +242,9 @@ different archetypes share no columns. Two consequences the lowering uses:
   masked out), so the query loop stays entity-local and may run in
   parallel. When the query has run, one sequential loop per apply and
   archetype goes over the buffer in row order, finds each target like a
-  lookup, and combines the value into its field; this happens before the
+  lookup, and combines the value into its field (the counts and slots that
+  ids are checked against are loaded once, before the loop, since
+  combining cannot change them); this happens before the
   query's despawns and moves, while every id still leads to its entity. A
   system with applies ends a fused sequence: a later system reading the
   field must see the combined values.
@@ -254,11 +256,20 @@ different archetypes share no columns. Two consequences the lowering uses:
   behind an `if` instead. `bench/churn/` measures why: the `if` form is 2-8x
   slower at medium densities.
 - `parallel-entities=1` emits entity-local query loops as `scf.parallel`;
-  `--convert-scf-to-openmp` turns them into OpenMP work-sharing loops. A
+  `--convert-scf-to-openmp` turns them into OpenMP work-sharing loops, each
+  alone in a parallel region. Such a loop ends with a barrier, and so does
+  the region, where clang emits one for `parallel for`;
+  `--ecs-omp-nowait`, run after the conversion, drops the loop's (and
+  `parallel-stages` emits its sections without one). With the OpenMP
+  runtime's defaults the second barrier cost as much as the fork itself:
+  it doubled the fixed cost of a parallel frame. A
   parallel loop only pays for its fork beyond some size, so an archetype
-  whose capacity is below `parallel-min-entities` (default 1e6, the
-  measured crossover on an M4 Max) always gets a sequential loop, and
-  above it the count decides at run time.
+  whose capacity is below `parallel-min-entities` (default 1e6) always
+  gets a sequential loop, and above it the count decides at run time. The
+  default was the crossover on an M4 Max with the extra barrier; without
+  it, parallel loops pay off from about 2e5 entities in the fused example
+  and 4e5 unfused (`bench/RESULTS.md`), and the default is not lowered
+  yet.
 
 ## Benchmarks
 
