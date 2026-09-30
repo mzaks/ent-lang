@@ -587,3 +587,77 @@ of one core.
   benchmark program despawns or moves entities. For a program that does,
   32-bit generational ids cost 10 bytes per entity at 1e6 (measured from
   the layout: id 4, generation 2, location 4) instead of 24.
+
+## 2026-09-30: cross-entity writes with ecs.apply (commit 05158c8)
+
+Same machine (M4 Max, 16 cores) and toolchain (Homebrew clang/LLVM
+22.1.8, OpenMP runtime defaults). `bench/apply/run.py`: N guns each deal
+damage (1-4, so f32 sums are exact in any order) to one of M ships, chosen
+at random with a fixed seed; a frame applies every gun once. Every variant
+agrees on the checksum in every configuration. Load average 2.2 before the
+runs; during them it rose to 11-16, with nothing but the benchmark visible
+in `ps` (its OpenMP variants run 16 threads, and the atomic one runs for
+seconds per process), so it is likely self-inflicted but not proven.
+
+- `c-index`: hand-written C, `hp[t[i]] -= d[i]`, targets are rows,
+  sequential;
+- `c-atomic-par`: the same in an OpenMP loop with an atomic float add
+  (compare-and-swap): parallel, order not fixed;
+- `c-buffered`: what the compiled program does, without ids: an OpenMP
+  loop fills (row, value) per gun, one sequential loop combines;
+- `compiled-rows`: `bench/apply/fire.mlir`, Rows ids, sequential;
+- `compiled-rows-par`: the same with the filling loop parallel (forced
+  with `parallel-min-entities=1`);
+- `compiled-gen`: `fire_generational.mlir`, the same program with a
+  despawn that never runs, so ids are generational; sequential.
+
+us per frame, median of 5 processes (spread), ns per gun in brackets
+(1e6 rows from the second full run; the first agreed within 3.5%).
+
+| guns | ships | c-index | c-atomic-par | c-buffered | compiled-rows | compiled-rows-par | compiled-gen |
+|---|---|---|---|---|---|---|---|
+| 1e5 | 16 | **49.3 (4%) [0.49]** | 6,694.3 (2%) [66.94] | 104.1 (5%) [1.04] | 91.8 (2%) [0.92] | 152.1 (3%) [1.52] | 103.2 (1%) [1.03] |
+| 1e5 | 1e4 | **28.5 (2%) [0.28]** | 503.9 (2%) [5.04] | 83.6 (2%) [0.84] | 74.6 (1%) [0.75] | 137.8 (0%) [1.38] | 95.4 (2%) [0.95] |
+| 1e5 | 1e6 | **85.6 (1%) [0.86]** | 437.5 (4%) [4.37] | 143.0 (2%) [1.43] | 128.2 (2%) [1.28] | 196.5 (2%) [1.97] | 220.6 (1%) [2.21] |
+| 1e6 | 16 | **502.1 (1%) [0.50]** | 82,186.1 (3%) [82.19] | 546.7 (3%) [0.55] | 929.6 (1%) [0.93] | 659.0 (2%) [0.66] | 1,046.5 (0%) [1.05] |
+| 1e6 | 1e4 | **288.2 (0%) [0.29]** | 4,695.7 (2%) [4.70] | 354.6 (3%) [0.35] | 754.5 (0%) [0.75] | 496.7 (1%) [0.50] | 978.1 (3%) [0.98] |
+| 1e6 | 1e6 | **862.7 (1%) [0.86]** | 3,428.9 (8%) [3.43] | 898.1 (1%) [0.90] | 1,303.0 (1%) [1.30] | 1,040.2 (1%) [1.04] | 2,230.4 (9%) [2.23] |
+
+The 1e5 rows are from a separate run with 500 frames instead of 50 (the
+50-frame runs had spreads up to 65% there; their medians agree within 7%,
+except compiled-rows-par at 1e4 ships: 122-138 us across the three runs).
+
+### What holds
+
+- Determinism is not what costs: atomics are far slower than the buffered,
+  fixed-order form. At 1e6 guns `c-atomic-par` takes 3.3x the time of
+  `compiled-rows-par` with targets spread over 1e6 ships, 9.4x over 1e4
+  ships and 125x on 16 hot ships; it also loses to sequential `c-index`
+  everywhere (4-164x). A parallel apply with atomics is not worth building.
+- At 1e6 guns, parallel filling plus the sequential combine
+  (`compiled-rows-par`) costs 1.21x (1e6 ships), 1.32x (16) and 1.72x (1e4)
+  the time of sequential hand-written C with row indices. Against
+  `c-buffered`, which does the same without ids, the compiled form takes
+  16-40% longer; the difference is what the compiled combine does in
+  addition (sentinel check, id decode, a branch on the archetype, the row
+  checked against the count), not measured step by step.
+- Sequential compiled applies cost 1.5-2.6x `c-index` at 1e6 guns (0.75 to
+  1.30 ns per gun).
+- Generational ids cost 1.7x Rows ids with targets spread over 1e6 ships
+  (2.23 against 1.30 ns per gun), 1.3x over 1e4 ships and 1.1x on 16.
+- At 1e5 guns a parallel filling loop loses to the sequential one (1.97
+  against 1.28 ns per gun at 1e6 ships, 60-68 us more per frame), as for
+  other parallel entity loops at this size; the default
+  `parallel-min-entities` (1e6, checked against the count at run time)
+  keeps such loops sequential.
+
+### Measured, not explained
+
+- Why the atomic loop is so slow with targets spread over 1e6 ships (3.4
+  ns per gun, where contention should be rare): not investigated.
+- `c-index` is slower on 16 ships than on 1e4 (0.50 against 0.29 ns per
+  gun), and so are the compiled variants; a dependence through repeatedly
+  updated `hp` values would fit, but it was not tested.
+- Why generational ids cost most with 1e6 targets: the entity table's
+  random reads (generation and location) are the obvious candidate, not
+  verified.
