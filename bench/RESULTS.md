@@ -533,3 +533,57 @@ average 4.3 to 4.5).
   table per entity. Creating a world touches none of it, but spawning
   writes each entity's id and table entry, so for live entities it is
   resident.
+
+## 2026-09-30: compact entity ids (commit c2e9a66)
+
+Same machine and toolchain. The world now picks the id scheme from the
+program's structural changes: both benchmark programs neither despawn nor
+move entities, so their ids are archetype and row, with no id column and no
+entity table. All variants of both benchmarks agree on their checksums. A
+quiet run: load average 3.9 falling to 2.5; a virtual machine used 12-20%
+of one core.
+
+### Main benchmark, OpenMP runtime defaults
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 321 (8%) | 5,441 (2%) | 51,078 (2%) | 510,376 (1%) | 5,179,833 (2%) |
+| stages-omp | 63,804 (1%) | 68,017 (1%) | 104,267 (4%) | 491,118 (5%) | 4,413,809 (1%) |
+| entities-omp | 327 (16%) | 5,523 (7%) | 50,735 (2%) | 408,897 (2%) | 2,264,414 (0%) |
+| fused | 304 (11%) | 4,479 (1%) | 45,424 (2%) | 455,117 (1%) | 4,536,710 (0%) |
+| fused-entities-omp | 280 (12%) | 4,528 (3%) | 45,177 (1%) | 210,555 (2%) | 1,842,731 (1%) |
+| c-fused | 280 (6%) | 4,554 (3%) | 45,090 (1%) | 454,434 (1%) | 4,545,506 (0%) |
+| c-fused-restrict | 274 (13%) | 4,508 (2%) | 45,304 (3%) | 453,802 (0%) | 4,552,044 (1%) |
+
+### Churn benchmark, n = 1e6: us per frame (spread), best in bold
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set | compiled | compiled-fused |
+|---|---|---|---|---|---|---|---|
+| 1% | 0.0% | **171.6 (1%)** | 313.1 (0%) | 462.9 (0%) | 177.9 (0%) | 285.2 (1%) | 258.1 (1%) |
+| 1% | 0.1% | 186.0 (2%) | 313.9 (1%) | 468.2 (1%) | **180.4 (1%)** | 285.7 (0%) | 258.7 (1%) |
+| 1% | 1.0% | 284.5 (1%) | 323.0 (1%) | 486.3 (1%) | **191.2 (2%)** | 295.3 (4%) | 268.2 (2%) |
+| 10% | 0.0% | **182.4 (1%)** | 313.0 (1%) | 771.4 (8%) | 226.3 (2%) | 285.1 (2%) | 257.8 (2%) |
+| 10% | 0.1% | **198.4 (3%)** | 314.1 (2%) | 825.4 (1%) | 236.1 (0%) | 286.2 (1%) | 258.7 (2%) |
+| 10% | 1.0% | 305.1 (3%) | 323.2 (1%) | 880.4 (1%) | 288.9 (1%) | 295.3 (0%) | **268.3 (2%)** |
+| 10% | 10.0% | 1,372.7 (1%) | 429.0 (1%) | 978.2 (1%) | 491.6 (1%) | 382.0 (0%) | **354.9 (1%)** |
+| 50% | 0.0% | **226.9 (1%)** | 312.9 (1%) | 2,574.8 (1%) | 366.6 (0%) | 284.9 (0%) | 257.0 (0%) |
+| 50% | 0.1% | **245.4 (1%)** | 314.5 (0%) | 2,644.5 (1%) | 377.9 (1%) | 286.4 (0%) | 258.6 (0%) |
+| 50% | 1.0% | 361.3 (1%) | 323.0 (0%) | 2,705.3 (0%) | 486.6 (1%) | 295.3 (0%) | **268.2 (0%)** |
+| 50% | 10.0% | 1,485.2 (1%) | 428.8 (1%) | 2,817.0 (0%) | 800.3 (1%) | 382.5 (0%) | **354.8 (0%)** |
+| 90% | 0.0% | 271.4 (1%) | 312.6 (0%) | 791.3 (3%) | 506.1 (0%) | 284.9 (0%) | **257.1 (1%)** |
+| 90% | 0.1% | 290.2 (1%) | 314.2 (1%) | 950.9 (1%) | 516.7 (0%) | 286.5 (0%) | **259.1 (1%)** |
+| 90% | 1.0% | 395.5 (0%) | 322.6 (0%) | 981.4 (0%) | 638.4 (1%) | 294.9 (0%) | **267.1 (1%)** |
+| 90% | 10.0% | 1,498.1 (1%) | 427.9 (0%) | 1,079.9 (0%) | 1,089.7 (1%) | 381.9 (0%) | **354.8 (0%)** |
+
+### What holds
+
+- Compact ids cost no frame time. Main benchmark: fused 4.54 ms at 1e7
+  (4.52 before entity ids, 4.56 with uncompacted ids), fused parallel
+  1.84 ms, all within 0.6%. Churn at 1e6: compiled 285 us and compiled-fused
+  257-258 us per frame, the same as before entity ids existed; the winners
+  per configuration are unchanged.
+- They give the memory back: the compiled churn world reserves 21 MB at
+  1e6 entities again, down from 45 MB with uncompacted ids, since neither
+  benchmark program despawns or moves entities. For a program that does,
+  32-bit generational ids cost 10 bytes per entity at 1e6 (measured from
+  the layout: id 4, generation 2, location 4) instead of 24.
