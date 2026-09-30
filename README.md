@@ -101,6 +101,22 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
   query, not inside a loop there, and all applies of one query to a field
   use the same rule; the system declares the component in `writes`.
   `examples/damage.mlir` has torpedoes damaging their target ships.
+- `ecs.query (%b: !ecs.ref<@Bar, mut>) on [changed @Hull "hp", added @Hull,
+  removed @Shield] { ... }` is a reactive query, after Entitas's reactive
+  systems: it runs only for the entities that had one of these events since
+  it last started, and that match the query now. `added @C` fires when an
+  entity gains `C` (`ecs.add`, or spawned with it), `removed @C` when it
+  loses `C` and stays alive, `changed @C "f"` on every write to the field
+  (`ecs.set`, `ecs.apply`, `ecs.add`, spawning), even of the same value, and
+  `changed @C` on a write to any of its fields. On its first run every
+  existing entity counts as added and changed. Events a query causes itself
+  count on its next run; the compiler warns where it can prove that, since
+  such a system usually wants to run every frame, be split, or react to a
+  marker component. It also warns about triggers nothing in the program
+  can fire. A query cannot react to `removed @C` and bind `C`. Writes the
+  host makes through the header's column accessors are not tracked;
+  spawning through the header is. `examples/reactive.mlir` redraws health
+  bars only for ships that were hit.
 - `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
   exactly once and is not an entity. Systems declare it in `reads`/`writes`
   and access it with `ecs.read @Clock "dt" : f32` and
@@ -141,7 +157,11 @@ the entity table (`entities`) and the field in every archetype holding the
 component; structural changes write the entity table, so a despawn waits
 for the lookups before it. An apply reads the entity table too and writes
 the field in every archetype holding the component, so the systems that
-read that field wait for it. Any other op
+read that field wait for it. Reactive queries read the stamps of their
+triggers (`A.C.f@`, `A.C@`, `A.C+`, `A.C-`), which the ops causing those
+events write, and advance a tick counter (`ticks`) that those ops read:
+a reactive system never shares a stage with a system causing observed
+events. Any other op
 with memory effects (a call, say) makes a system opaque, and opaque systems
 conflict with everything.
 
@@ -167,7 +187,9 @@ one arena: an i64 entity count per archetype, then each resource on its own
 cache line, then one column per field at a fixed offset, each archetype's
 id column, one buffer per `ecs.apply` and archetype its query matches (a
 target id and a value per row), and the entity table that maps an id to its
-archetype and row.
+archetype and row. Programs with reactive queries also keep a tick counter
+and each reactive query's last tick in the header, and stamp columns after
+the component columns of the archetypes that need them.
 Every column starts on a 64-byte boundary, 17 cache lines past the end of
 the previous one; columns packed from a page-aligned base would start at
 the same cache set, which cost a single core 7-8% (see
@@ -248,6 +270,16 @@ different archetypes share no columns. Two consequences the lowering uses:
   query's despawns and moves, while every id still leads to its entity. A
   system with applies ends a fused sequence: a later system reading the
   field must see the combined values.
+- Reactive queries find their entities by version stamps: an i64 tick per
+  row for each event some reactive query observes, stored only in the
+  archetypes whose entities such a query can see (directly, or after
+  moves). An op causing an observed event stores the current tick next to
+  it; spawns stamp their row; moves carry stamps along, or stamp the move
+  itself where it is the event. A reactive query starts by taking the tick
+  it last started at and advancing the counter, then runs for every row and
+  keeps its effects only where a stamp is newer, branch-free like a body
+  masked by an optional component. Reactive systems end a fused sequence,
+  since they advance the counter before their loop.
 - A query that binds an optional component runs for every entity of the
   archetype and masks its stores with the presence, branch-free: every
   slot exists and belongs to the entity, so computing on an absent
