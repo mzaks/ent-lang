@@ -208,7 +208,6 @@ public:
     return value;
   }
 
-private:
   /// A one-element i64 view (a counter in the header).
   Value scalar(uint64_t offset) {
     return view(offset, 1, rewriter.getI64Type());
@@ -217,6 +216,8 @@ private:
   Value table(uint64_t offset) {
     return view(offset, layout.entityCapacity, rewriter.getI32Type());
   }
+
+private:
 
   Value getCounts() {
     if (!countsView)
@@ -332,7 +333,10 @@ static bool isEntityLocal(QueryOp query) {
     // Resource reads are fine: no query writes a resource. Adding and
     // removing components without moving (checked above) only writes the
     // entity's own row; its id is its own.
-    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, YieldOp>(op) ||
+    // Lookups read other entities, but the verifier ensures the query does
+    // not change what they read.
+    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, LookupOp,
+            YieldOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
     return WalkResult::interrupt();
@@ -453,8 +457,8 @@ static void lowerResourceAccesses(IRRewriter &rewriter, func::FuncOp func,
 /// division, for example, is not: it may be undefined on such values.
 static bool canRunForAbsentEntities(QueryOp query) {
   WalkResult result = query.getBody().walk([](Operation *op) {
-    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, YieldOp,
-            scf::IfOp, scf::YieldOp>(op))
+    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, LookupOp,
+            YieldOp, scf::IfOp, scf::YieldOp>(op))
       return WalkResult::advance();
     if (op->getNumRegions() == 0 && isPure(op))
       return WalkResult::advance();
@@ -859,6 +863,113 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
   }
 }
 
+/// Lower every ecs.lookup in `func` into guarded loads: is the id's slot
+/// in use and its generation current; in which archetype and row does the
+/// entity live; and, in each archetype holding the component, the field
+/// (and, where the component is optional, its presence). Every load is
+/// guarded, so a lookup is safe to run for any id.
+static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
+                         const WorldLayout &layout, WorldAccess &world) {
+  SmallVector<LookupOp> lookups;
+  func.walk([&](LookupOp lookup) { lookups.push_back(lookup); });
+  for (LookupOp lookup : lookups) {
+    Location loc = lookup.getLoc();
+    rewriter.setInsertionPoint(lookup);
+    Type type = lookup.getValue().getType();
+    Type i1 = rewriter.getI1Type(), i32 = rewriter.getI32Type(),
+         i64 = rewriter.getI64Type();
+    SmallVector<Type, 2> resultTypes{type, i1};
+    TypeRange results(resultTypes);
+    auto missing = [&]() {
+      Value zero = isa<FloatType>(type)
+                       ? arith::ConstantOp::create(
+                             rewriter, loc, rewriter.getFloatAttr(type, 0.0))
+                             .getResult()
+                       : arith::ConstantOp::create(
+                             rewriter, loc, rewriter.getIntegerAttr(type, 0))
+                             .getResult();
+      Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+      scf::YieldOp::create(rewriter, loc, ValueRange{zero, no});
+    };
+
+    Value id = lookup.getEntity();
+    Value slot = arith::TruncIOp::create(rewriter, loc, i32, id);
+    Value generation = arith::TruncIOp::create(
+        rewriter, loc, i32,
+        arith::ShRUIOp::create(
+            rewriter, loc, id,
+            arith::ConstantIntOp::create(rewriter, loc, 32, 64)));
+    Value zeroIndex = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value used = memref::LoadOp::create(
+        rewriter, loc, world.scalar(layout.nextSlotOffset),
+        ValueRange{zeroIndex});
+    Value inRange = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ult,
+        arith::ExtUIOp::create(rewriter, loc, i64, slot), used);
+    auto checkRange = scf::IfOp::create(rewriter, loc, results, inRange,
+                                        /*withElseRegion=*/true);
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(checkRange.elseBlock());
+      missing();
+      rewriter.setInsertionPointToStart(checkRange.thenBlock());
+      Value index = world.toIndex(loc, slot);
+      Value current = memref::LoadOp::create(
+          rewriter, loc, world.table(layout.generationOffset),
+          ValueRange{index});
+      Value alive = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::eq, current, generation);
+      auto checkAlive = scf::IfOp::create(rewriter, loc, results, alive,
+                                          /*withElseRegion=*/true);
+      scf::YieldOp::create(rewriter, loc, checkAlive.getResults());
+      rewriter.setInsertionPointToStart(checkAlive.elseBlock());
+      missing();
+      rewriter.setInsertionPointToStart(checkAlive.thenBlock());
+      Value where = memref::LoadOp::create(
+          rewriter, loc, world.table(layout.locationArchetypeOffset),
+          ValueRange{index});
+      Value row = world.toIndex(
+          loc, memref::LoadOp::create(rewriter, loc,
+                                      world.table(layout.locationRowOffset),
+                                      ValueRange{index}));
+      // One branch per archetype that holds the component.
+      FlatSymbolRefAttr component = lookup.getComponentAttr();
+      for (const WorldArchetype &archetype : layout.archetypes) {
+        ArchetypeOp archetypeOp = archetype.op;
+        if (!archetypeOp.contains(component))
+          continue;
+        Value here = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq, where,
+            arith::ConstantIntOp::create(rewriter, loc, archetype.index, 32));
+        auto branch = scf::IfOp::create(rewriter, loc, results, here,
+                                        /*withElseRegion=*/true);
+        scf::YieldOp::create(rewriter, loc, branch.getResults());
+        rewriter.setInsertionPointToStart(branch.thenBlock());
+        Value value = memref::LoadOp::create(
+            rewriter, loc,
+            world.column(archetype, component.getAttr(),
+                         lookup.getFieldAttr()),
+            ValueRange{row});
+        Value found = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+        if (archetypeOp.isOptional(component)) {
+          Value byte = memref::LoadOp::create(
+              rewriter, loc,
+              world.column(archetype, component.getAttr(),
+                           rewriter.getStringAttr("")),
+              ValueRange{row});
+          found = arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::ne, byte,
+              arith::ConstantIntOp::create(rewriter, loc, 0, 8));
+        }
+        scf::YieldOp::create(rewriter, loc, ValueRange{value, found});
+        rewriter.setInsertionPointToStart(branch.elseBlock());
+      }
+      missing();
+    }
+    rewriter.replaceOp(lookup, checkRange.getResults());
+  }
+}
+
 /// Replace a query by one loop per matching archetype. The body is cloned
 /// into each loop, and every ref access becomes a load or store at the
 /// loop's index in the column of the ref's component and field.
@@ -979,11 +1090,13 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     if (auto run = dyn_cast<RunOp>(op)) {
       auto system = symbols.lookup<SystemOp>(run.getSystem());
-      // Resource writes and structural changes both end a sequence.
+      // Resource writes, structural changes and lookups end a sequence:
+      // fusion interleaves systems per entity, and a lookup would then see
+      // some entities' updates from other systems and not others'.
       bool writesResource =
           system
               .walk([](Operation *op) {
-                return isa<WriteOp, SpawnOp, DespawnOp>(op)
+                return isa<WriteOp, SpawnOp, DespawnOp, LookupOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -1087,6 +1200,7 @@ struct EcsLowerToLoops
       for (QueryOp query : queries)
         lowerQuery(rewriter, query, *layout, world, options);
       lowerSpawns(rewriter, func, *layout, world);
+      lowerLookups(rewriter, func, *layout, world);
       lowerResourceAccesses(rewriter, func, world);
     }
 
