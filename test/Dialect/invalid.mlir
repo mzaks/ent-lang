@@ -400,3 +400,43 @@ ecs.system @s() writes [@A] {
   // expected-error @+1 {{must be inside an 'ecs.query'}}
   ecs.despawn
 }
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.system @s(%id: i64) {
+  // expected-error @+1 {{looks up @P but system @s does not declare it in 'reads' or 'writes'}}
+  %x, %found = ecs.lookup %id @P "x" : f32
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.system @s(%id: i64) reads [@P] {
+  // expected-error @+1 {{result type 'i32' does not match field 'x' of type 'f32'}}
+  %x, %found = ecs.lookup %id @P "x" : i32
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.component @T (entity: i64)
+ecs.archetype @A (@P, @T) capacity 10
+ecs.system @s() reads [@T] writes [@P] {
+  ecs.query (%p: !ecs.ref<@P, mut>, %t: !ecs.ref<@T>) {
+    %target = ecs.get %t "entity" : !ecs.ref<@T> -> i64
+    // expected-error @+1 {{looks up @P "x" of other entities in a query that changes it; which entities see the old value would depend on iteration order}}
+    %x, %found = ecs.lookup %target @P "x" : f32
+    // expected-note @+1 {{changed here}}
+    ecs.set %p "x", %x : !ecs.ref<@P, mut>, f32
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+func.func @f(%id: i64) {
+  // expected-error @+1 {{must be inside an 'ecs.system'}}
+  %x, %found = ecs.lookup %id @P "x" : f32
+  return
+}

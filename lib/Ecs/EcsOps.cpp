@@ -610,6 +610,60 @@ LogicalResult SpawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+LogicalResult LookupOp::verify() {
+  if (!(*this)->getParentOfType<SystemOp>())
+    return emitOpError("must be inside an 'ecs.system'");
+  return success();
+}
+
+LogicalResult LookupOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  ComponentOp component =
+      lookupComponent(symbolTable, *this, getComponentAttr());
+  if (!component)
+    return emitOpError("references unknown component ") << getComponentAttr();
+  Type fieldType = component.getFieldType(getField());
+  if (!fieldType)
+    return emitOpError("component ")
+           << getComponentAttr() << " has no field '" << getField() << "'";
+  if (fieldType != getValue().getType())
+    return emitOpError("result type ")
+           << getValue().getType() << " does not match field '" << getField()
+           << "' of type " << fieldType;
+  auto system = (*this)->getParentOfType<SystemOp>();
+  if (!system.canRead(getComponentAttr()))
+    return emitOpError("looks up ")
+           << getComponentAttr() << " but system @" << system.getSymName()
+           << " does not declare it in 'reads' or 'writes'";
+
+  // Within a query, the looked-up field must not change: other entities'
+  // values would be old or new depending on iteration order.
+  auto query = (*this)->getParentOfType<QueryOp>();
+  if (!query)
+    return success();
+  Operation *writer = nullptr;
+  query.walk([&](Operation *op) {
+    if (auto set = dyn_cast<SetOp>(op)) {
+      if (cast<RefType>(set.getRef().getType()).getComponent() ==
+              getComponentAttr() &&
+          set.getField() == getField())
+        writer = op;
+    } else if (isa<AddOp, RemoveOp>(op) &&
+               op->getAttr("component") == getComponentAttr()) {
+      writer = op;
+    }
+  });
+  if (writer) {
+    InFlightDiagnostic diag = emitOpError("looks up ")
+                              << getComponentAttr() << " \"" << getField()
+                              << "\" of other entities in a query that "
+                                 "changes it; which entities see the old "
+                                 "value would depend on iteration order";
+    diag.attachNote(writer->getLoc()) << "changed here";
+    return diag;
+  }
+  return success();
+}
+
 LogicalResult DespawnOp::verify() { return verifyInsideQuery(*this); }
 
 LogicalResult EntityOp::verify() { return verifyInsideQuery(*this); }

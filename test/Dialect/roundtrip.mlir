@@ -42,6 +42,8 @@
 // MISC-LABEL: ecs.system @fire(%{{.*}}: f32) reads [@Tag] writes [@Character] {
 // MISC:          ecs.spawn @Character()
 // MISC:          ecs.despawn
+// MISC-LABEL: ecs.system @follow() reads [@Tag, @Named] {
+// MISC:          %{{.*}}, %{{.*}} = ecs.lookup %{{.*}} @Named "idx" : index
 ecs.component @Tag ()
 ecs.component @Named ("with space": i32, idx: index)
 ecs.system @noop() {
@@ -77,5 +79,11 @@ ecs.system @fire(%s: f32) reads [@Tag] writes [@Character] {
   ecs.spawn @Character()
   ecs.query (%t: !ecs.ref<@Tag>) {
     ecs.despawn
+  }
+}
+ecs.system @follow() reads [@Tag, @Named] {
+  ecs.query (%t: !ecs.ref<@Tag>) {
+    %id = ecs.entity : i64
+    %idx, %found = ecs.lookup %id @Named "idx" : index
   }
 }

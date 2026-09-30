@@ -287,6 +287,35 @@ def Ecs_EntityOp : Ecs_Op<"entity"> {
   let hasVerifier = 1;
 }
 
+def Ecs_LookupOp : Ecs_Op<"lookup", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Read a field of another entity, by id";
+  let description = [{
+    ```mlir
+    %x, %found = ecs.lookup %target @Position "x" : f32
+    ```
+    Reads field `x` of `@Position` of the entity with id `%target`, in
+    whatever archetype it lives. `%found` is false, and the value 0, if
+    the id is not alive or the entity does not have the component (its
+    archetype does not hold it, or holds it optionally and it is absent).
+    A component field holding an id (an `i64`) is how entities refer to
+    each other.
+
+    The system must declare the component in `reads` or `writes`. A query
+    may not look up a field it writes itself: which entities would see the
+    old value and which the new would depend on iteration order. Lookups
+    only read; a system with lookups is not fused with others, for the same
+    reason.
+  }];
+  let arguments = (ins I64:$entity, FlatSymbolRefAttr:$component,
+                       StrAttr:$field);
+  let results = (outs AnyType:$value, I1:$found);
+  let assemblyFormat = [{
+    $entity $component $field attr-dict `:` type($value)
+  }];
+  let hasVerifier = 1;
+}
+
 def Ecs_DespawnOp : Ecs_Op<"despawn", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Remove the visited entity from the world";
