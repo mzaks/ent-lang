@@ -301,3 +301,34 @@ ecs.schedule @relations() {
   // expected-remark @+1 {{@cull waits for @seek: it writes entities, which @seek reads}}
   ecs.run @cull()
 }
+
+// An apply writes the field in every archetype holding the component, so
+// a system reading that field waits; one reading another field does not.
+ecs.system @push(%d: f32) reads [@Ref] writes [@P] {
+  ecs.query (%r: !ecs.ref<@Ref>) {
+    %id = ecs.get %r "entity" : !ecs.ref<@Ref> -> !ecs.entity
+    ecs.apply %id @P "y" add %d : f32
+  }
+}
+ecs.system @readY() reads [@P] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    %y = ecs.get %p "y" : !ecs.ref<@P> -> f32
+  }
+}
+
+// CHECK-LABEL: ecs.schedule @applies
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @seek
+// CHECK-NEXT:   ecs.run @push
+// CHECK-NEXT:   ecs.run @readX
+// CHECK-NEXT: }
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @readY
+// CHECK-NEXT: }
+ecs.schedule @applies(%d: f32) {
+  ecs.run @seek()
+  ecs.run @push(%d) : f32
+  ecs.run @readX()
+  // expected-remark @+1 {{@readY waits for @push: it reads A.P.y, which @push writes}}
+  ecs.run @readY()
+}

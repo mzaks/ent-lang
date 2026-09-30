@@ -164,6 +164,21 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
       }
       return;
     }
+    if (auto apply = dyn_cast<ApplyOp>(op)) {
+      // Like a lookup, but the field is combined into: written (which
+      // conflicts like a read too) in every archetype holding it.
+      access.reads.insert(entityTable);
+      FlatSymbolRefAttr component = apply.getComponentAttr();
+      for (ArchetypeOp archetype : archetypes) {
+        if (!archetype.contains(component))
+          continue;
+        StringAttr name = archetype.getSymNameAttr();
+        access.writes.insert({name, component.getAttr(), apply.getFieldAttr()});
+        if (archetype.isOptional(component))
+          access.reads.insert({name, component.getAttr(), presence});
+      }
+      return;
+    }
     if (isa<EntityOp>(op)) {
       for (ArchetypeOp archetype :
            matchedArchetypes(op->getParentOfType<QueryOp>()))

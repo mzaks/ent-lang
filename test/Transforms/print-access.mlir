@@ -104,3 +104,13 @@ ecs.system @chase() reads [@Ref, @R] {
     %r, %found = ecs.lookup %id @R "r" : f32
   }
 }
+
+// An apply reads the entity table and writes the field in every archetype
+// that holds the component (reading the presence where it is optional).
+// expected-remark @+1 {{reads G.Ref.entity, entities, C.S?, G.count; writes C.S.t}}
+ecs.system @hit(%d: f32) reads [@Ref] writes [@S] {
+  ecs.query (%t: !ecs.ref<@Ref>) {
+    %id = ecs.get %t "entity" : !ecs.ref<@Ref> -> !ecs.entity
+    ecs.apply %id @S "t" add %d : f32
+  }
+}
