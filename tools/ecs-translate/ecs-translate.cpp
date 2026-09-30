@@ -229,12 +229,28 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
                         archetype.index);
     // Spawn one entity: the next row, a new id, optional components absent.
     // The same steps as ecs.spawn in the lowered program.
+    // A new entity starts without its optional components; for reactive
+    // queries it has added and changed every other component (stamped with
+    // the current tick, one past the counter) and lost none.
     std::string clearPresence;
-    for (const WorldColumn &column : archetype.columns)
-      if (column.field.getValue().empty())
+    for (const WorldColumn &column : archetype.columns) {
+      if (column.isPresence()) {
         clearPresence +=
             llvm::formatv("  ((uint8_t *)((char *)world + {0}))[n] = 0;\n",
                           column.offset);
+      } else if (column.isStamp()) {
+        bool happened =
+            column.stamp->kind != Trigger::Removed &&
+            !archetypeOp.isOptional(
+                FlatSymbolRefAttr::get(column.stamp->component));
+        clearPresence += llvm::formatv(
+            "  ((int64_t *)((char *)world + {0}))[n] = {1};\n", column.offset,
+            happened ? llvm::formatv("*(int64_t *)((char *)world + {0}) + 1",
+                                     layout->tickOffset)
+                           .str()
+                     : std::string("0"));
+      }
+    }
     os << "// Returns the new entity's id, or ECS_NO_ENTITY if the archetype "
           "is full.\n// Its fields are uninitialised; fill them at "
           "ecs_entity_row(world, id).\n";
@@ -275,8 +291,10 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         return failure();
     }
     for (const WorldColumn &column : archetype.columns) {
-      // An optional component's presence column has an empty field name.
-      bool isPresence = column.field.getValue().empty();
+      // Stamps are the compiler's bookkeeping for reactive queries.
+      if (column.isStamp())
+        continue;
+      bool isPresence = column.isPresence();
       std::string accessor = llvm::formatv(
           "ecs_{0}_{1}_{2}", name, toIdentifier(column.component.getValue()),
           isPresence ? std::string("present")

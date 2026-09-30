@@ -35,7 +35,15 @@ uint64_t mlir::ecs::getStorageBytes(Type type) {
 const WorldColumn *WorldArchetype::find(StringAttr component,
                                         StringAttr field) const {
   for (const WorldColumn &column : columns)
-    if (column.component == component && column.field == field)
+    if (!column.isStamp() && column.component == component &&
+        column.field == field)
+      return &column;
+  return nullptr;
+}
+
+const WorldColumn *WorldArchetype::findStamp(const Stamp &stamp) const {
+  for (const WorldColumn &column : columns)
+    if (column.stamp && *column.stamp == stamp)
       return &column;
   return nullptr;
 }
@@ -195,6 +203,18 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   layout.nextSlotOffset = end;
   layout.freeHeadOffset = end + 8;
   end += 16;
+  // Reactive queries: the tick counter and each query's last tick.
+  layout.stamps = StampPlan::compute(module);
+  module.walk([&](QueryOp query) {
+    if (getTriggers(query).empty())
+      return;
+    if (!layout.tickOffset) {
+      layout.tickOffset = end;
+      end += 8;
+    }
+    layout.reactiveOffsets.push_back(end);
+    end += 8;
+  });
   layout.headerBytes = end;
 
   for (WorldArchetype &archetype : layout.archetypes) {
@@ -229,6 +249,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       end = offset + bytes * archetype.capacity;
       return offset;
     };
+    for (const Stamp &stamp : layout.stamps.getStamps())
+      if (layout.stamps.stores(archetype.op, stamp))
+        archetype.columns.push_back(
+            {stamp.component, StringAttr::get(module.getContext(), ""),
+             IntegerType::get(module.getContext(), 64), place(8), stamp});
     if (scheme.hasIds())
       archetype.idOffset = place(scheme.idBits / 8);
     if (needsPending(archetype))

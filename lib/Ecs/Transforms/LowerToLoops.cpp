@@ -115,6 +115,32 @@ public:
             view(buffer.valueOffset, archetype.capacity,
                  storageType(entry.type))};
   }
+  /// Whether the program has reactive queries, so that some events are
+  /// stamped.
+  bool hasStamps() const { return layout.tickOffset != 0; }
+  /// The tick that events happening now are stamped with: one past the
+  /// counter, which reactive queries advance when they start.
+  Value currentTick(Location loc) {
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value counter = memref::LoadOp::create(
+        rewriter, loc, scalar(layout.tickOffset), ValueRange{zero});
+    return arith::AddIOp::create(
+        rewriter, loc, counter,
+        arith::ConstantIntOp::create(rewriter, loc, 1, 64));
+  }
+  /// The tick counter, and the tick at which `query` (reactive) last
+  /// started, as one-element i64 views.
+  Value tickCounter() { return scalar(layout.tickOffset); }
+  Value lastTick(QueryOp query) {
+    auto index =
+        query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
+    return scalar(layout.reactiveOffsets[index.getInt()]);
+  }
+  /// A stamp column of `archetype`.
+  Value stamps(const WorldArchetype &archetype, const WorldColumn &column) {
+    return view(column.offset, archetype.capacity, rewriter.getI64Type());
+  }
+
   /// The all-ones id, which is never alive: "no target" in apply buffers.
   Value noEntity(Location loc) {
     return arith::ConstantIntOp::create(rewriter, loc, -1,
@@ -726,13 +752,32 @@ static void recordPending(IRRewriter &rewriter, Location loc,
       counter, ValueRange{zero});
 }
 
+/// The stamp columns of `archetype` that an event updates: `kind` of
+/// `component`, and for Changed, a write to `field` (every field if null).
+static SmallVector<const WorldColumn *>
+stampsFor(const WorldArchetype &archetype, Trigger::Kind kind,
+          StringAttr component, StringAttr field = StringAttr()) {
+  SmallVector<const WorldColumn *> columns;
+  for (const WorldColumn &column : archetype.columns) {
+    if (!column.isStamp() || column.stamp->kind != kind ||
+        column.stamp->component != component)
+      continue;
+    if (kind == Trigger::Changed && field &&
+        !column.stamp->field.getValue().empty() &&
+        column.stamp->field != field)
+      continue;
+    columns.push_back(&column);
+  }
+  return columns;
+}
+
 /// Replace the get/set/add/remove/despawn/entity ops nested in `roots` by
 /// loads and stores at `entity` in the columns of `archetype`. With a
 /// `mask`, every store keeps the old value where the mask is false: the
 /// body ran for an entity it does not apply to.
 static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                           const WorldArchetype &archetype, WorldAccess &world,
-                          Value entity, Value mask) {
+                          Value entity, Value mask, Value tick) {
   auto column = [&](StringAttr component, StringAttr field) {
     return world.column(archetype, component, field);
   };
@@ -749,6 +794,16 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
     Value presence = column(component, rewriter.getStringAttr(""));
     Value value = arith::ConstantIntOp::create(rewriter, loc, present, 8);
     store(loc, value, presence);
+  };
+  // Record an event for reactive queries: store the current tick in the
+  // stamps it updates (none unless some query observes it).
+  auto stamp = [&](Location loc, Trigger::Kind kind, StringAttr component,
+                   StringAttr field = StringAttr()) {
+    for (const WorldColumn *column :
+         stampsFor(archetype, kind, component, field)) {
+      assert(tick && "an event is stamped without a tick");
+      store(loc, tick, world.stamps(archetype, *column));
+    }
   };
 
   SmallVector<Operation *> accesses;
@@ -773,6 +828,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
           cast<RefType>(set.getRef().getType()).getComponent();
       store(loc, set.getValue(),
             column(component.getAttr(), set.getFieldAttr()));
+      stamp(loc, Trigger::Changed, component.getAttr(), set.getFieldAttr());
       rewriter.eraseOp(set);
     } else if (isa<AddOp, RemoveOp>(op)) {
       bool isAdd = isa<AddOp>(op);
@@ -788,11 +844,15 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                llvm::zip(values, componentOp.getFieldNames()))
             store(loc, value, column(component, cast<StringAttr>(field)));
         setPresence(loc, component, isAdd ? 1 : 0);
+        stamp(loc, isAdd ? Trigger::Added : Trigger::Removed, component);
+        if (isAdd)
+          stamp(loc, Trigger::Changed, component);
         break;
       case ComponentChange::Overwrite:
         for (auto [value, field] :
              llvm::zip(values, componentOp.getFieldNames()))
           store(loc, value, column(component, cast<StringAttr>(field)));
+        stamp(loc, Trigger::Changed, component);
         break;
       case ComponentChange::Move: {
         // Deferred like a despawn; a moving body never runs masked.
@@ -848,10 +908,27 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
 /// absent entities, it is guarded by an `scf.if`.
 static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                           IRMapping mapping, const WorldArchetype &archetype,
-                          WorldAccess &world, Value entity) {
+                          WorldAccess &world, Value entity, Value tick,
+                          Value seen) {
   Location loc = query.getLoc();
   ArchetypeOp archetypeOp = archetype.op;
   Value mask;
+  // A reactive query applies only to the entities with an event since it
+  // last started (`seen`): a stamp newer than that, for any trigger.
+  if (seen) {
+    for (const Trigger &trigger : getTriggers(query)) {
+      const WorldColumn *column = archetype.findStamp(getStamp(trigger));
+      if (!column)
+        continue;
+      Value stamped = memref::LoadOp::create(
+          rewriter, loc, world.stamps(archetype, *column), ValueRange{entity});
+      Value newer = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::sgt, stamped, seen);
+      mask = mask ? arith::OrIOp::create(rewriter, loc, mask, newer) : newer;
+    }
+    assert(mask && "a reactive query is lowered for an archetype where no "
+                   "trigger can fire");
+  }
   for (Type type : query.getBody().getArgumentTypes()) {
     FlatSymbolRefAttr component = cast<RefType>(type).getComponent();
     if (!archetypeOp.isOptional(component))
@@ -887,7 +964,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   SmallVector<Operation *> roots;
   for (Operation &op : query.getBody().front().without_terminator())
     roots.push_back(rewriter.clone(op, mapping));
-  lowerAccesses(rewriter, roots, archetype, world, entity, mask);
+  lowerAccesses(rewriter, roots, archetype, world, entity, mask, tick);
 }
 
 /// Append the entity at `row` of `source` to `move.target`, as the move
@@ -897,7 +974,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
 static void applyMove(IRRewriter &rewriter, Location loc,
                       const WorldLayout &layout, const WorldArchetype &source,
                       const WorldMove &move, WorldAccess &world, Value row,
-                      Value slot, Value id) {
+                      Value slot, Value id, Value tick) {
   const WorldArchetype *target = nullptr;
   for (const WorldArchetype &entry : layout.archetypes)
     if (entry.op == move.target)
@@ -915,7 +992,20 @@ static void applyMove(IRRewriter &rewriter, Location loc,
   for (const WorldColumn &column : target->columns) {
     auto component = FlatSymbolRefAttr::get(column.component);
     Value value;
-    if (column.field.getValue().empty()) {
+    if (column.isStamp()) {
+      // Stamps move with the entity. Where the source does not store one,
+      // the entity gains or loses the component by this move: that is the
+      // event (see StampPlan).
+      if (const WorldColumn *carried = source.findStamp(*column.stamp))
+        value = memref::LoadOp::create(
+            rewriter, loc, world.stamps(source, *carried), ValueRange{row});
+      else
+        value = tick;
+      memref::StoreOp::create(rewriter, loc, value,
+                              world.stamps(*target, column), ValueRange{to});
+      continue;
+    }
+    if (column.isPresence()) {
       // Presence in the target: carried over where the source has the
       // component optionally, present where the source always has it or
       // it is being added, absent otherwise.
@@ -963,7 +1053,8 @@ static void applyMove(IRRewriter &rewriter, Location loc,
 /// this archetype come after all of them.
 static void applyPending(IRRewriter &rewriter, Location loc,
                          const WorldLayout &layout,
-                         const WorldArchetype &archetype, WorldAccess &world) {
+                         const WorldArchetype &archetype, WorldAccess &world,
+                         Value tick) {
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Value counter = world.pendingCount(archetype);
@@ -1010,7 +1101,8 @@ static void applyPending(IRRewriter &rewriter, Location loc,
       auto moves = scf::IfOp::create(rewriter, loc, is(move.code));
       OpBuilder::InsertionGuard inner(rewriter);
       rewriter.setInsertionPointToStart(moves.thenBlock());
-      applyMove(rewriter, loc, layout, archetype, move, world, row, slot, id);
+      applyMove(rewriter, loc, layout, archetype, move, world, row, slot, id,
+                tick);
     }
     // Swap-remove the row.
     Value last = arith::SubIOp::create(rewriter, loc,
@@ -1022,7 +1114,10 @@ static void applyPending(IRRewriter &rewriter, Location loc,
       OpBuilder::InsertionGuard inner(rewriter);
       rewriter.setInsertionPointToStart(shift.thenBlock());
       for (const WorldColumn &column : archetype.columns) {
-        Value view = world.column(archetype, column.component, column.field);
+        Value view = column.isStamp()
+                         ? world.stamps(archetype, column)
+                         : world.column(archetype, column.component,
+                                        column.field);
         Value value =
             memref::LoadOp::create(rewriter, loc, view, ValueRange{last});
         memref::StoreOp::create(rewriter, loc, value, view, ValueRange{row});
@@ -1069,8 +1164,20 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
     auto value = spawn.getValues().begin();
     for (const WorldColumn &column : archetype->columns) {
       auto component = FlatSymbolRefAttr::get(column.component);
+      if (column.isStamp()) {
+        // A new entity has added and changed every component it has, and
+        // lost none; optional components start absent.
+        bool happened = column.stamp->kind != Trigger::Removed &&
+                        !archetypeOp.isOptional(component);
+        memref::StoreOp::create(
+            rewriter, loc,
+            happened ? world.currentTick(loc)
+                     : arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+            world.stamps(*archetype, column), ValueRange{row});
+        continue;
+      }
       Value stored;
-      if (column.field.getValue().empty())
+      if (column.isPresence())
         stored = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
       else if (!archetypeOp.isOptional(component))
         stored = world.toStorage(loc, *value++);
@@ -1306,7 +1413,7 @@ static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
 static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
                            const WorldLayout &layout,
                            const WorldArchetype &archetype, WorldAccess &world,
-                           Value count) {
+                           Value count, Value tick) {
   Location loc = apply.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   auto [ids, values] = world.applyBuffer(apply, archetype);
@@ -1353,6 +1460,12 @@ static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
         memref::StoreOp::create(
             rewriter, loc, combine(rewriter, loc, apply.getRule(), old, value),
             field, ValueRange{targetRow});
+        for (const WorldColumn *column :
+             stampsFor(target, Trigger::Changed, component.getAttr(),
+                       apply.getFieldAttr()))
+          memref::StoreOp::create(rewriter, loc, tick,
+                                  world.stamps(target, *column),
+                                  ValueRange{targetRow});
         return {};
       },
       []() -> SmallVector<Value> { return {}; }, bounds);
@@ -1368,6 +1481,23 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   bool entityLocal = isEntityLocal(query);
   bool matched = false;
   SmallVector<const WorldArchetype *> changed;
+  // A reactive query starts by taking the tick it last started at (0 at
+  // first, so every stamp counts) and advancing the counter: events from
+  // here on, its own included, are stamped later than its new last tick.
+  SmallVector<Trigger> triggers = getTriggers(query);
+  Value seen;
+  rewriter.setInsertionPoint(query);
+  if (!triggers.empty()) {
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value last = world.lastTick(query);
+    seen = memref::LoadOp::create(rewriter, loc, last, ValueRange{zero});
+    Value next = world.currentTick(loc);
+    memref::StoreOp::create(rewriter, loc, next, last, ValueRange{zero});
+    memref::StoreOp::create(rewriter, loc, next, world.tickCounter(),
+                            ValueRange{zero});
+  }
+  // The tick this query's events are stamped with; constant while it runs.
+  Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
   SmallVector<ApplyOp> applies;
   query.getBody().walk([&](ApplyOp apply) { applies.push_back(apply); });
   // The rows each archetype's loop visits, for combining their applies:
@@ -1377,6 +1507,12 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     if (!matches(archetype, query))
       continue;
     matched = true;
+    // No trigger can fire for the entities of this archetype.
+    if (!triggers.empty() &&
+        llvm::none_of(triggers, [&](const Trigger &trigger) {
+          return archetype.findStamp(getStamp(trigger));
+        }))
+      continue;
     rewriter.setInsertionPoint(query);
     if (!applies.empty())
       visited.push_back({&archetype, world.count(loc, archetype)});
@@ -1384,7 +1520,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
         rewriter, loc, archetype, world, options, entityLocal,
         [&](Value entity, Block *) {
           emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                        entity);
+                        entity, tick, seen);
         });
     hoistResourceReads(rewriter, loops, world);
     if (archetype.hasPending() && isStructuralFor(query, archetype.op))
@@ -1397,14 +1533,14 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   rewriter.setInsertionPoint(query);
   for (ApplyOp apply : applies)
     for (auto [archetype, count] : visited)
-      combineApplied(rewriter, apply, layout, *archetype, world, count);
+      combineApplied(rewriter, apply, layout, *archetype, world, count, tick);
 
   // Despawns and moves take effect when the whole query has run, so an
   // entity moved into another archetype the query matches is not visited
   // twice.
   rewriter.setInsertionPoint(query);
   for (const WorldArchetype *archetype : changed)
-    applyPending(rewriter, loc, layout, *archetype, world);
+    applyPending(rewriter, loc, layout, *archetype, world, tick);
 
   // The set of archetypes is closed, so a query that matches none of them
   // can never run; that is almost certainly a mistake in the program.
@@ -1445,6 +1581,10 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
         rewriter.clone(op, mapping);
   }
 
+  // No reactive query is fused, so the counter cannot change while the
+  // fused loops run.
+  rewriter.setInsertionPoint(insertionPoint);
+  Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
   for (const WorldArchetype &archetype : layout.archetypes) {
     SmallVector<std::pair<QueryOp, unsigned>> bodies;
     for (auto [index, system] : llvm::enumerate(systems))
@@ -1460,7 +1600,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
         [&](Value entity, Block *) {
           for (auto [query, index] : bodies)
             emitQueryBody(rewriter, query, mappings[index], archetype, world,
-                          entity);
+                          entity, tick, Value());
         });
     hoistResourceReads(rewriter, loops, world);
   }
@@ -1505,9 +1645,13 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                            : WalkResult::advance();
               })
               .wasInterrupted();
-      for (QueryOp query : system.getBody().getOps<QueryOp>())
+      for (QueryOp query : system.getBody().getOps<QueryOp>()) {
         for (ArchetypeOp archetype : getMatchedArchetypes(query))
           writesResource |= isStructuralFor(query, archetype);
+        // A reactive query advances the tick counter when it starts, which
+        // fusion would move ahead of the systems before it.
+        writesResource |= !getTriggers(query).empty();
+      }
       if (!writesResource && !computeAccess(system, archetypes).isOpaque()) {
         sequence.push_back(run);
         continue;
@@ -1586,6 +1730,90 @@ struct ConvertOpTypes : public ConversionPattern {
 };
 } // namespace
 
+/// Whether `op` causes the event `trigger` reacts to, for some entity:
+/// writes the field (changed), adds the component (added, and changed,
+/// since adding sets its fields) or removes it (removed).
+static bool causes(Operation *op, const Trigger &trigger) {
+  auto sameField = [&](StringRef field) {
+    return trigger.field.getValue().empty() ||
+           trigger.field.getValue() == field;
+  };
+  switch (trigger.kind) {
+  case Trigger::Changed:
+    if (auto set = dyn_cast<SetOp>(op))
+      return cast<RefType>(set.getRef().getType()).getComponent() ==
+                 trigger.component &&
+             sameField(set.getField());
+    if (auto apply = dyn_cast<ApplyOp>(op))
+      return apply.getComponentAttr() == trigger.component &&
+             sameField(apply.getField());
+    [[fallthrough]];
+  case Trigger::Added:
+    if (auto add = dyn_cast<AddOp>(op))
+      return add.getComponentAttr() == trigger.component;
+    return false;
+  case Trigger::Removed:
+    if (auto remove = dyn_cast<RemoveOp>(op))
+      return remove.getComponentAttr() == trigger.component;
+    return false;
+  }
+  llvm_unreachable("unknown trigger kind");
+}
+
+static std::string describe(const Trigger &trigger) {
+  std::string text = trigger.kind == Trigger::Added     ? "added @"
+                     : trigger.kind == Trigger::Removed ? "removed @"
+                                                        : "changed @";
+  text += trigger.component.getValue();
+  if (trigger.field && !trigger.field.getValue().empty())
+    text += " \"" + trigger.field.getValue().str() + "\"";
+  return text;
+}
+
+/// Warn about reactive queries that can never fire for a trigger, or only
+/// when entities are spawned, and about queries reacting to events they
+/// cause themselves: each run collects the entities it changed for the
+/// next one, which is most likely a system that should run every frame,
+/// be split, or react to a marker component instead.
+static void warnAboutReactiveQueries(ModuleOp module) {
+  SmallVector<Operation *> causers;
+  module.walk([&](Operation *op) {
+    if (isa<SetOp, ApplyOp, AddOp, RemoveOp>(op))
+      causers.push_back(op);
+  });
+  module.walk([&](QueryOp query) {
+    for (const Trigger &trigger : getTriggers(query)) {
+      if (trigger.kind != Trigger::Added &&
+          llvm::none_of(causers,
+                        [&](Operation *op) { return causes(op, trigger); })) {
+        if (trigger.kind == Trigger::Removed)
+          query.emitWarning("reacts to ")
+              << describe(trigger)
+              << ", but no system removes it; this trigger never fires";
+        else
+          query.emitWarning("reacts to ")
+              << describe(trigger)
+              << ", but no system writes it; this trigger fires only for "
+                 "entities spawned with it or gaining it";
+      }
+      Operation *own = nullptr;
+      query.getBody().walk([&](Operation *op) {
+        if (!own && causes(op, trigger))
+          own = op;
+      });
+      if (own) {
+        InFlightDiagnostic diag =
+            query.emitWarning("reacts to ")
+            << describe(trigger)
+            << ", which it causes itself: every run collects the entities "
+               "it changed for the next run. Consider a system that runs "
+               "every frame, splitting this one, or a marker component";
+        diag.attachNote(own->getLoc()) << "causes " << describe(trigger);
+      }
+    }
+  });
+}
+
 /// Replace every remaining !ecs.entity (function signatures, calls, scf
 /// results, ops passing ids along) by the integer the layout stores ids as,
 /// and fold away the casts the lowering placed at loads and stores.
@@ -1662,6 +1890,14 @@ struct EcsLowerToLoops
     module.walk([&](ApplyOp apply) {
       apply->setAttr(WorldLayout::kApplyIndexAttr,
                      rewriter.getI64IntegerAttr(applyIndex++));
+    });
+    warnAboutReactiveQueries(module);
+    // The same for reactive queries and their last ticks.
+    unsigned reactiveIndex = 0;
+    module.walk([&](QueryOp query) {
+      if (!getTriggers(query).empty())
+        query->setAttr(WorldLayout::kReactiveIndexAttr,
+                       rewriter.getI64IntegerAttr(reactiveIndex++));
     });
     MemRefType arenaType = getArenaType(module.getContext(), *layout);
     LoopOptions options{parallelEntities, parallelMinEntities};

@@ -2,12 +2,16 @@
 #define ECS_WORLD_H
 
 #include "Ecs/EcsOps.h"
+#include "Ecs/Structure.h"
+
+#include <optional>
 
 #include "llvm/ADT/DenseMap.h"
 
 namespace mlir::ecs {
 
-/// One field of one component in one archetype's table.
+/// One field of one component in one archetype's table, the presence of
+/// an optional component, or a stamp.
 struct WorldColumn {
   StringAttr component;
   /// Empty for the presence byte of an optional component.
@@ -15,6 +19,12 @@ struct WorldColumn {
   Type type;
   /// Byte offset of the column's first element in the world arena.
   uint64_t offset;
+  /// For a stamp column (i64 ticks): which stamp; `component` is the
+  /// stamp's and `field` is empty.
+  std::optional<Stamp> stamp = std::nullopt;
+
+  bool isStamp() const { return stamp.has_value(); }
+  bool isPresence() const { return !stamp && field.getValue().empty(); }
 };
 
 /// A move of entities out of an archetype, into `target`, caused by adding
@@ -53,8 +63,12 @@ struct WorldArchetype {
   /// The move for adding or removing `component`, or null.
   const WorldMove *findMove(StringAttr component, bool add) const;
 
-  /// The column of `component`.`field`, or null.
+  /// The column of `component`.`field` (or its presence, for an empty
+  /// field), or null.
   const WorldColumn *find(StringAttr component, StringAttr field) const;
+  /// The column holding `stamp`, or null if the archetype does not store
+  /// it.
+  const WorldColumn *findStamp(const Stamp &stamp) const;
 };
 
 /// One field of a resource: stored once.
@@ -145,8 +159,11 @@ struct EntityScheme {
 /// example (see bench/RESULTS.md). Each archetype's columns are followed by
 /// its id column; an archetype that entities are despawned from or moved
 /// out of also gets a pending counter in the header and pending lists after
-/// its id column. The buffers of `ecs.apply` follow the archetypes, and
-/// the entity table comes last.
+/// its id column. An archetype's stamp columns (see StampPlan) come after
+/// its component columns. The buffers of `ecs.apply` follow the
+/// archetypes, and the entity table comes last. Programs with reactive
+/// queries keep a tick counter and each reactive query's last tick in the
+/// header.
 struct WorldLayout {
   static constexpr uint64_t kArenaAlignment = 16384;
   static constexpr uint64_t kColumnAlignment = 64;
@@ -158,6 +175,16 @@ struct WorldLayout {
   /// tags each op with its index (see kApplyIndexAttr).
   SmallVector<WorldApply> applies;
   static constexpr llvm::StringLiteral kApplyIndexAttr = "ecs.apply_index";
+
+  /// Reactive queries: the stamps and where they are stored, the tick
+  /// counter (an i64, 0 if there are no reactive queries), and per reactive
+  /// query, in walk order, the tick at which it last started (an i64). The
+  /// lowering tags each reactive query with its index (kReactiveIndexAttr).
+  StampPlan stamps;
+  uint64_t tickOffset = 0;
+  SmallVector<uint64_t> reactiveOffsets;
+  static constexpr llvm::StringLiteral kReactiveIndexAttr =
+      "ecs.reactive_index";
 
   /// How entity ids are represented; see EntityScheme.
   EntityScheme entities;
