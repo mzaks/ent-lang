@@ -332,3 +332,44 @@ ecs.schedule @applies(%d: f32) {
   // expected-remark @+1 {{@readY waits for @push: it reads A.P.y, which @push writes}}
   ecs.run @readY()
 }
+
+// A reactive query waits for the systems writing the stamps it observes;
+// every system causing an observed event reads the tick counter that
+// reactive queries advance, so they never share a stage either.
+ecs.component @Hp (hp: f32)
+ecs.component @Mood (m: f32)
+ecs.archetype @Unit (@Hp, @Mood) capacity 10
+ecs.system @hurt() writes [@Hp] {
+  ecs.query (%h: !ecs.ref<@Hp, mut>) {
+    %x = ecs.get %h "hp" : !ecs.ref<@Hp, mut> -> f32
+    ecs.set %h "hp", %x : !ecs.ref<@Hp, mut>, f32
+  }
+}
+ecs.system @onHurt() reads [@Hp] writes [@Mood] {
+  ecs.query (%m: !ecs.ref<@Mood, mut>) on [changed @Hp "hp"] {
+    %c = arith.constant 1.0 : f32
+    ecs.set %m "m", %c : !ecs.ref<@Mood, mut>, f32
+  }
+}
+ecs.system @onMood() reads [@Hp, @Mood] {
+  ecs.query (%h: !ecs.ref<@Hp>) on [changed @Mood] {
+  }
+}
+
+// CHECK-LABEL: ecs.schedule @reactive
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @hurt
+// CHECK-NEXT: }
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @onHurt
+// CHECK-NEXT: }
+// CHECK-NEXT: ecs.stage {
+// CHECK-NEXT:   ecs.run @onMood
+// CHECK-NEXT: }
+ecs.schedule @reactive() {
+  ecs.run @hurt()
+  // expected-remark @+1 {{@onHurt waits for @hurt: it writes ticks, which @hurt reads}}
+  ecs.run @onHurt()
+  // expected-remark @+1 {{@onMood waits for @onHurt: it writes ticks, which @onHurt also writes}}
+  ecs.run @onMood()
+}

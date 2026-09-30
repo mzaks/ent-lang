@@ -114,3 +114,33 @@ ecs.system @hit(%d: f32) reads [@Ref] writes [@S] {
     ecs.apply %id @S "t" add %d : f32
   }
 }
+
+// Reactive queries read the stamps of their triggers and advance the tick
+// counter; ops that cause observed events write the stamps (in every
+// archetype that carries them) and read the counter. Writing an unobserved
+// field (u) stamps nothing.
+ecs.component @Hp (hp: f32, u: f32)
+ecs.component @Guard ()
+ecs.archetype @Unit (@Hp, optional @Guard) capacity 10
+// expected-remark @+1 {{reads Unit.count, Unit.Hp.hp@, Unit.Guard+, Unit.Guard-; writes ticks}}
+ecs.system @watch() reads [@Hp, @Guard] {
+  ecs.query (%h: !ecs.ref<@Hp>)
+      on [changed @Hp "hp", added @Guard, removed @Guard] {
+  }
+}
+// expected-remark @+1 {{reads Unit.Hp.hp, ticks, Unit.Hp.u, Unit.count; writes Unit.Hp.hp@, Unit.Hp.hp, Unit.Hp.u}}
+ecs.system @hurt() writes [@Hp] {
+  ecs.query (%h: !ecs.ref<@Hp, mut>) {
+    %x = ecs.get %h "hp" : !ecs.ref<@Hp, mut> -> f32
+    ecs.set %h "hp", %x : !ecs.ref<@Hp, mut>, f32
+    %y = ecs.get %h "u" : !ecs.ref<@Hp, mut> -> f32
+    ecs.set %h "u", %y : !ecs.ref<@Hp, mut>, f32
+  }
+}
+// expected-remark @+1 {{reads ticks, Unit.count; writes Unit.Guard?, Unit.Guard+, Unit.Guard-}}
+ecs.system @toggle() reads [@Hp] writes [@Guard] {
+  ecs.query (%h: !ecs.ref<@Hp>) {
+    ecs.add @Guard()
+    ecs.remove @Guard
+  }
+}

@@ -2,6 +2,7 @@
 #define ECS_ACCESS_H
 
 #include "Ecs/EcsOps.h"
+#include "Ecs/Structure.h"
 
 #include "llvm/ADT/SetVector.h"
 #include <optional>
@@ -16,13 +17,21 @@ namespace mlir::ecs {
 /// is null for a resource, the field is empty for the presence of an
 /// optional component, the component is empty for an archetype's entity
 /// count (empty field) and id column (field "id"), and all three are empty
-/// for the entity table.
+/// for the entity table. The tick counter of reactive queries has only the
+/// field "ticks". A stamp column (see Stamp) has the field of
+/// getStampColumnField.
 using Column = std::tuple<StringAttr, StringAttr, StringAttr>;
 
 /// Prints a column as `Archetype.Component.field`, `Resource.field`,
 /// `Archetype.Component?` for a presence, `Archetype.count`,
-/// `Archetype.id`, or `entities` for the entity table.
+/// `Archetype.id`, `entities` for the entity table, `ticks` for the tick
+/// counter, and for stamps `Archetype.Component.field@` (changed field),
+/// `Archetype.Component@` (changed, any field), `Archetype.Component+`
+/// (added) and `Archetype.Component-` (removed).
 std::string formatColumn(const Column &column);
+
+/// The field name that stands for `stamp` in a Column.
+StringAttr getStampColumnField(MLIRContext *context, const Stamp &stamp);
 
 /// The columns a system actually reads and writes, derived from the
 /// `ecs.get`/`ecs.set` ops in its queries and its `ecs.read`/`ecs.write`

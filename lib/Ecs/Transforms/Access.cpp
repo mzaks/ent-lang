@@ -10,7 +10,11 @@ using namespace mlir::ecs;
 std::string mlir::ecs::formatColumn(const Column &column) {
   auto [archetype, component, field] = column;
   if (!archetype && component.getValue().empty())
-    return "entities";
+    return field.getValue().empty() ? "entities" : field.getValue().str();
+  StringRef name = field.getValue();
+  if (archetype && !component.getValue().empty() &&
+      (name == "+" || name == "-" || name == "@"))
+    return (archetype.getValue() + "." + component.getValue() + name).str();
   if (!archetype)
     return (component.getValue() + "." + field.getValue()).str();
   if (component.getValue().empty())
@@ -21,6 +25,19 @@ std::string mlir::ecs::formatColumn(const Column &column) {
   return (archetype.getValue() + "." + component.getValue() + "." +
           field.getValue())
       .str();
+}
+
+StringAttr mlir::ecs::getStampColumnField(MLIRContext *context,
+                                          const Stamp &stamp) {
+  switch (stamp.kind) {
+  case Trigger::Added:
+    return StringAttr::get(context, "+");
+  case Trigger::Removed:
+    return StringAttr::get(context, "-");
+  case Trigger::Changed:
+    return StringAttr::get(context, stamp.field.getValue() + "@");
+  }
+  llvm_unreachable("unknown stamp kind");
 }
 
 bool mlir::ecs::hasOwnEffects(Operation *op) {
@@ -88,7 +105,37 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
   // The entity table, which maps ids to archetypes and rows: written by
   // every structural change, read by every lookup.
   Column entityTable{StringAttr(), empty, empty};
+  // Stamps some reactive query observes; ops that cause those events write
+  // them and read the tick counter, reactive queries read them.
+  MLIRContext *context = system.getContext();
+  StampPlan stamps = StampPlan::compute(system->getParentOfType<ModuleOp>());
+  Column ticks{StringAttr(), empty, StringAttr::get(context, "ticks")};
+  auto writeStamp = [&](ArchetypeOp archetype, const Stamp &stamp) {
+    if (!stamps.stores(archetype, stamp))
+      return;
+    access.writes.insert({archetype.getSymNameAttr(), stamp.component,
+                          getStampColumnField(context, stamp)});
+    access.reads.insert(ticks);
+  };
+  // A write to `field` of `component` (every field if `field` is null).
+  auto writeChanged = [&](ArchetypeOp archetype, StringAttr component,
+                          StringAttr field) {
+    writeStamp(archetype, {Trigger::Changed, component, empty});
+    if (field) {
+      writeStamp(archetype, {Trigger::Changed, component, field});
+      return;
+    }
+    auto componentOp = SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
+        system, FlatSymbolRefAttr::get(component));
+    for (Attribute name : componentOp.getFieldNames())
+      writeStamp(archetype,
+                 {Trigger::Changed, component, cast<StringAttr>(name)});
+  };
+
   auto writeStructure = [&](ArchetypeOp archetype) {
+    // Rows move with their stamps; a spawn or move stamps its row.
+    for (const Stamp &stamp : stamps.getStamps())
+      writeStamp(archetype, stamp);
     access.writes.insert(entityTable);
     StringAttr name = archetype.getSymNameAttr();
     access.writes.insert({name, empty, empty});
@@ -116,8 +163,14 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
   system.getBody().walk([&](Operation *op) {
     if (auto get = dyn_cast<GetOp>(op))
       return record(op, get.getRef(), get.getFieldAttr(), access.reads);
-    if (auto set = dyn_cast<SetOp>(op))
+    if (auto set = dyn_cast<SetOp>(op)) {
+      StringAttr component =
+          cast<RefType>(set.getRef().getType()).getComponent().getAttr();
+      for (ArchetypeOp archetype :
+           matchedArchetypes(op->getParentOfType<QueryOp>()))
+        writeChanged(archetype, component, set.getFieldAttr());
       return record(op, set.getRef(), set.getFieldAttr(), access.writes);
+    }
     if (auto read = dyn_cast<ReadOp>(op))
       return (void)access.reads.insert(
           {StringAttr(), read.getResourceAttr().getAttr(), read.getFieldAttr()});
@@ -141,8 +194,13 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
           writeStructure(change.target);
           continue;
         }
-        if (change.kind == ComponentChange::Presence)
+        if (change.kind == ComponentChange::Presence) {
           access.writes.insert({name, component.getAttr(), presence});
+          writeStamp(archetype, {add ? Trigger::Added : Trigger::Removed,
+                                 component.getAttr(), empty});
+        }
+        if (add && change.kind != ComponentChange::NoTarget)
+          writeChanged(archetype, component.getAttr(), StringAttr());
         if (add && change.kind != ComponentChange::NoTarget)
           for (Attribute field : componentOp.getFieldNames())
             access.writes.insert(
@@ -174,6 +232,7 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
           continue;
         StringAttr name = archetype.getSymNameAttr();
         access.writes.insert({name, component.getAttr(), apply.getFieldAttr()});
+        writeChanged(archetype, component.getAttr(), apply.getFieldAttr());
         if (archetype.isOptional(component))
           access.reads.insert({name, component.getAttr(), presence});
       }
@@ -202,6 +261,18 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
       // counts.
       for (ArchetypeOp archetype : matchedArchetypes(query))
         access.reads.insert({archetype.getSymNameAttr(), empty, empty});
+      // A reactive query reads the stamps of its triggers and advances the
+      // tick counter.
+      SmallVector<Trigger> triggers = getTriggers(query);
+      if (!triggers.empty())
+        access.writes.insert(ticks);
+      for (const Trigger &trigger : triggers)
+        for (ArchetypeOp archetype : matchedArchetypes(query))
+          if (stamps.stores(archetype, getStamp(trigger)))
+            access.reads.insert({archetype.getSymNameAttr(),
+                                 trigger.component.getAttr(),
+                                 getStampColumnField(context,
+                                                     getStamp(trigger))});
       // A query binding an optional component runs only where it is
       // present, so it reads the presence.
       for (Type type : query.getBody().getArgumentTypes()) {
