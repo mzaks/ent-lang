@@ -37,6 +37,18 @@ struct ComponentChange {
 ComponentChange classifyChange(ArchetypeOp archetype,
                                FlatSymbolRefAttr component, bool add);
 
+/// An event a reactive query (`ecs.query ... on [...]`) reacts to.
+struct Trigger {
+  enum Kind { Added, Removed, Changed };
+  Kind kind;
+  FlatSymbolRefAttr component;
+  /// For Changed: the field, or empty for any field of the component.
+  StringAttr field;
+};
+
+/// The triggers of `query`, in order; empty if it is not reactive.
+SmallVector<Trigger> getTriggers(QueryOp query);
+
 } // namespace mlir::ecs
 
 #endif // ECS_STRUCTURE_H

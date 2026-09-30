@@ -539,3 +539,44 @@ ecs.system @s(%d: f32) writes [@H] {
     ecs.apply %id @H "hp" min %d : f32
   }
 }
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s() reads [@H] {
+  // expected-error @+1 {{unknown trigger 'touched'; expected 'added', 'removed' or 'changed'}}
+  ecs.query (%h: !ecs.ref<@H>) on [touched @H] {
+  }
+}
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s() reads [@H] {
+  // expected-error @+1 {{component @H has no field 'shield'}}
+  ecs.query (%h: !ecs.ref<@H>) on [changed @H "shield"] {
+  }
+}
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.component @T ()
+ecs.archetype @A (@H, @T) capacity 10
+ecs.system @s() reads [@T] {
+  // expected-error @+1 {{reacts to @H but system @s does not declare it in 'reads' or 'writes'}}
+  ecs.query (%t: !ecs.ref<@T>) on [changed @H] {
+  }
+}
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.archetype @A (optional @H) capacity 10
+ecs.system @s() reads [@H] {
+  // expected-error @+1 {{reacts to removed @H but binds it; an entity that lost it never matches}}
+  ecs.query (%h: !ecs.ref<@H>) on [removed @H] {
+  }
+}

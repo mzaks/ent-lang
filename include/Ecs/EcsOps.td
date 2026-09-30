@@ -146,10 +146,32 @@ def Ecs_QueryOp : Ecs_Op<"query", [
     Each entry block argument is an `!ecs.ref` to a distinct component, and
     refs are only used by `ecs.get` and `ecs.set`. Iteration order is
     unspecified, so the body must not depend on it.
+
+    A reactive query lists triggers after its arguments:
+    ```mlir
+    ecs.query (%h: !ecs.ref<@Hull>, %b: !ecs.ref<@Bar, mut>)
+        on [changed @Hull "hp", added @Hull] { ... }
+    ```
+    It runs only for the entities that had at least one of these events
+    since the query last started, and that match the query now (an entity
+    may have changed again, or moved, since): `added @C` when the entity
+    gained `C` (by `ecs.add` or by being spawned with it), `removed @C`
+    when it lost `C` while staying alive, `changed @C "f"` on every write
+    to field `f` (`ecs.set`, `ecs.apply`, `ecs.add`, spawning), and
+    `changed @C` on a write to any field of `C`. On its first run every
+    existing entity counts as added and changed. Events the query causes
+    itself count on its next run. The system must declare every trigger's
+    component in `reads` or `writes`.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    /// The attribute holding a reactive query's triggers: an array of
+    /// [kind, component, field] entries, the field empty unless the kind
+    /// is "changed" with a field.
+    static constexpr ::llvm::StringLiteral kTriggersAttr = "triggers";
+  }];
 }
 
 def Ecs_GetOp : Ecs_Op<"get", [

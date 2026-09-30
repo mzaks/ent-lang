@@ -47,6 +47,8 @@
 // MISC-LABEL: ecs.system @hit(%{{.*}}: i32) reads [@Tag] writes [@Named] {
 // MISC:          ecs.apply %{{.*}} @Named "with space" add %{{.*}} : i32
 // MISC-NEXT:     ecs.apply %{{.*}} @Named "idx" max %{{.*}} : index
+// MISC-LABEL: ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
+// MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag, mut>) on [changed @Named "idx", changed @Named, added @Stunned, removed @Stunned] {
 ecs.component @Tag ()
 ecs.component @Named ("with space": i32, idx: index)
 ecs.system @noop() {
@@ -96,5 +98,11 @@ ecs.system @hit(%v: i32) reads [@Tag] writes [@Named] {
     %i = arith.constant 3 : index
     ecs.apply %id @Named "with space" add %v : i32
     ecs.apply %id @Named "idx" max %i : index
+  }
+}
+ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
+  ecs.query (%t: !ecs.ref<@Tag, mut>)
+      on [changed @Named "idx", changed @Named, added @Stunned,
+          removed @Stunned] {
   }
 }

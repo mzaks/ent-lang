@@ -410,14 +410,53 @@ LogicalResult StageOp::verify() {
 // QueryOp
 //===----------------------------------------------------------------------===//
 
+// `on [changed @C "f", added @C, removed @C, changed @C]`
 ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseArgsAndBody<QueryOp>(parser, result);
+  auto parseTriggers = [&]() -> ParseResult {
+    if (failed(parser.parseOptionalKeyword("on")))
+      return success();
+    Builder &builder = parser.getBuilder();
+    SmallVector<Attribute> triggers;
+    auto parseOne = [&]() -> ParseResult {
+      StringRef kind;
+      FlatSymbolRefAttr component;
+      llvm::SMLoc loc = parser.getCurrentLocation();
+      if (parser.parseKeyword(&kind) || parser.parseAttribute(component))
+        return failure();
+      if (kind != "added" && kind != "removed" && kind != "changed")
+        return parser.emitError(loc, "unknown trigger '")
+               << kind << "'; expected 'added', 'removed' or 'changed'";
+      std::string field;
+      if (kind == "changed")
+        (void)parser.parseOptionalString(&field);
+      triggers.push_back(builder.getArrayAttr(
+          {builder.getStringAttr(kind), component,
+           builder.getStringAttr(field)}));
+      return success();
+    };
+    if (parser.parseCommaSeparatedList(OpAsmParser::Delimiter::Square,
+                                       parseOne))
+      return failure();
+    result.addAttribute(kTriggersAttr, builder.getArrayAttr(triggers));
+    return success();
+  };
+  return parseArgsAndBody<QueryOp>(parser, result, parseTriggers);
 }
 
 void QueryOp::print(OpAsmPrinter &p) {
   p << " ";
   printArgs(p, getBody());
-  p.printOptionalAttrDictWithKeyword((*this)->getAttrs());
+  if (auto triggers = (*this)->getAttrOfType<ArrayAttr>(kTriggersAttr)) {
+    p << " on [";
+    llvm::interleaveComma(triggers, p, [&](Attribute attr) {
+      auto entry = cast<ArrayAttr>(attr);
+      p << cast<StringAttr>(entry[0]).getValue() << " " << entry[1];
+      if (!cast<StringAttr>(entry[2]).getValue().empty())
+        p << " " << entry[2];
+    });
+    p << "]";
+  }
+  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), {kTriggersAttr});
   printBody(p, getBody());
 }
 
@@ -450,6 +489,29 @@ LogicalResult QueryOp::verify() {
 
 LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto system = (*this)->getParentOfType<SystemOp>();
+  for (const Trigger &trigger : getTriggers(*this)) {
+    ComponentOp component =
+        lookupComponent(symbolTable, *this, trigger.component);
+    if (!component)
+      return emitOpError("reacts to unknown component ") << trigger.component;
+    if (trigger.field && !trigger.field.getValue().empty() &&
+        !component.getFieldType(trigger.field))
+      return emitOpError("component ")
+             << trigger.component << " has no field '"
+             << trigger.field.getValue() << "'";
+    if (!system.canRead(trigger.component))
+      return emitOpError("reacts to ")
+             << trigger.component << " but system @" << system.getSymName()
+             << " does not declare it in 'reads' or 'writes'";
+    // An entity that lost the component cannot match a query binding it.
+    if (trigger.kind == Trigger::Removed &&
+        llvm::any_of(getBody().getArgumentTypes(), [&](Type type) {
+          return cast<RefType>(type).getComponent() == trigger.component;
+        }))
+      return emitOpError("reacts to removed ")
+             << trigger.component
+             << " but binds it; an entity that lost it never matches";
+  }
   for (BlockArgument arg : getBody().getArguments()) {
     auto refType = cast<RefType>(arg.getType());
     FlatSymbolRefAttr component = refType.getComponent();

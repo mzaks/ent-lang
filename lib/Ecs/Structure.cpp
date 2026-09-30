@@ -53,3 +53,20 @@ ComponentChange mlir::ecs::classifyChange(ArchetypeOp archetype,
     return {ComponentChange::NoTarget, {}};
   return {ComponentChange::Move, target};
 }
+
+SmallVector<Trigger> mlir::ecs::getTriggers(QueryOp query) {
+  SmallVector<Trigger> triggers;
+  auto list = query->getAttrOfType<ArrayAttr>(QueryOp::kTriggersAttr);
+  if (!list)
+    return triggers;
+  for (Attribute attr : list) {
+    auto entry = cast<ArrayAttr>(attr);
+    StringRef kind = cast<StringAttr>(entry[0]).getValue();
+    triggers.push_back({kind == "added"     ? Trigger::Added
+                        : kind == "removed" ? Trigger::Removed
+                                            : Trigger::Changed,
+                        cast<FlatSymbolRefAttr>(entry[1]),
+                        cast<StringAttr>(entry[2])});
+  }
+  return triggers;
+}
