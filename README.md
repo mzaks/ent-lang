@@ -74,20 +74,20 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
   between an optional component and separate archetypes is a storage
   decision: `examples/status.mlir` and `examples/status_moves.mlir` run the
   same systems both ways and print the same result.
-- `ecs.entity : i64`, inside a query, is the visited entity's id. Ids are
-  generational indices (generation in the upper 32 bits, a slot in the
-  lower): they stay valid while an entity moves between rows and
-  archetypes and stop being alive when it is despawned.
-- `%x, %found = ecs.lookup %id @Position "x" : f32` reads a field of
-  another entity, whichever archetype it lives in; `%found` is false (and
-  the value 0) if the id is dead or the entity lacks the component. A
-  component field holding an id (`@Target (entity: i64)`) is how entities
-  refer to each other; `examples/homing.mlir` has missiles steering towards
-  their target ship. Lookups only read. A query may not look up a field it
-  changes itself (the verifier rejects it: which entities saw the old
-  value would depend on iteration order), and a system with lookups is not
-  fused with others for the same reason; under those rules a query with
-  lookups still runs in parallel.
+- `%id = ecs.entity`, inside a query, is the visited entity's id, of type
+  `!ecs.entity`. Ids stay valid while an entity moves between rows and
+  archetypes and stop being alive when it is despawned. How many bits an id
+  takes is up to the compiler (see Entity ids below), not the program.
+- `%x, %found = ecs.lookup %id @Position "x" : f32` reads a field of another
+  entity, whichever archetype it lives in; `%found` is false (and the value 0)
+  if the id is dead or the entity lacks the component. A component field of
+  type `!ecs.entity` (`@Target (entity: !ecs.entity)`) is how entities refer
+  to each other; `examples/homing.mlir` has missiles steering towards their
+  target ship. Lookups only read. A query may not look up a field it changes
+  itself (the verifier rejects it: which entities saw the old value would
+  depend on iteration order), and a system with lookups is not fused with
+  others for the same reason; under those rules a query with lookups still
+  runs in parallel.
 - `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
   exactly once and is not an entity. Systems declare it in `reads`/`writes`
   and access it with `ecs.read @Clock "dt" : f32` and
@@ -169,6 +169,32 @@ the lowered program does. Creating a world zeroes only the counts, resources
 and entity counters, so capacity costs address space, not memory, until
 columns are written. Parallel stages and loops assume nothing else writes the
 arena while a schedule runs.
+
+## Entity ids
+
+The compiler picks how ids are represented from the capacities and from
+which structural changes the program makes:
+
+- **Rows**: nothing is despawned or moved, so an entity keeps its row and
+  its id is `archetype << rowBits | row`. No id column, no entity table.
+- **Slots**: entities move but are never despawned, so slots are never
+  reused; an id is a slot of an entity table that holds only locations.
+- **Generational**: entities are despawned and slots reused; an id is
+  `generation << slotBits | slot`, and the table holds a generation per
+  slot besides the location. Freed slots are chained through their
+  locations, so the free list costs nothing extra.
+
+Locations pack `archetype << rowBits | row` into 32 bits where they fit. An
+id is 32 bits wide whenever that leaves at least 8 generation bits (so at up
+to 2^24 entities); otherwise it is 64 bits. A generation wraps around at its
+bit width: an id kept across that many reuses of its slot could come alive
+again. The module attributes `ecs.entity_id_bits = 64` and
+`ecs.min_generation_bits = N` trade memory for more margin. At 10^6
+entities, generational ids cost 10 bytes per entity (id 4, generation 2,
+location 4) instead of 24; rows ids cost nothing.
+
+`!ecs.entity` lowers to the chosen integer; the generated header's
+`ecs_entity` type matches it.
 
 ## Fusion and entity parallelism
 
