@@ -1,0 +1,68 @@
+// Reactive queries end to end: health bars redrawn only for ships whose hp
+// changed, alarms for shields going down, counts of shields coming back.
+// Run as written, fused (reactive systems stay calls; the others fuse),
+// with parallel stages, and with parallel entity loops forced on; then with
+// Shield stored in separate archetypes, where the same events are moves.
+// All print the same.
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/../../examples/reactive.mlir \
+// RUN:     -o %t.dir/reactive_world.h
+
+// RUN: ecs-opt %S/../../examples/reactive.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
+// RUN: clang -O2 -Wno-override-module %t.seq.ll \
+// RUN:     -I%t.dir %S/../../examples/host/reactive_main.c -o %t.seq
+// RUN: %t.seq | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/reactive.mlir \
+// RUN:     --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
+// RUN: clang -O2 -Wno-override-module %t.fused.ll \
+// RUN:     -I%t.dir %S/../../examples/host/reactive_main.c -o %t.fused
+// RUN: %t.fused | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/reactive.mlir --ecs-schedule \
+// RUN:     --ecs-lower-to-loops=parallel-stages=1 --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.stages.ll
+// RUN: clang -O2 -Wno-override-module %t.stages.ll \
+// RUN:     -I%t.dir %S/../../examples/host/reactive_main.c %openmp -o %t.stages
+// RUN: %t.stages | FileCheck %s
+
+// RUN: ecs-opt %S/../../examples/reactive.mlir \
+// RUN:     "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ecs-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
+// RUN: clang -O2 -Wno-override-module %t.par.ll \
+// RUN:     -I%t.dir %S/../../examples/host/reactive_main.c %openmp -o %t.par
+// RUN: %t.par | FileCheck %s
+
+// RUN: ecs-translate --ecs-to-c-header %S/Inputs/reactive_moves.mlir \
+// RUN:     -o %t.dir/reactive_moves_world.h
+// RUN: ecs-opt %S/Inputs/reactive_moves.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.moves.ll
+// RUN: clang -O2 -Wno-override-module %t.moves.ll \
+// RUN:     -I%t.dir %S/Inputs/reactive_moves_main.c -o %t.moves
+// RUN: %t.moves | FileCheck %s
+
+// Frame 0 is every query's first run: every bar is redrawn; the repairs
+// add shields, which @restored (after them in the frame) counts.
+// CHECK:      frame 0 ship 0: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
+// CHECK-NEXT: frame 0 ship 1: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
+// CHECK-NEXT: frame 0 ship 2: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
+// Frame 1: only ship 1 changed (hp 40) and lost its shield.
+// CHECK-NEXT: frame 1 ship 0: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
+// CHECK-NEXT: frame 1 ship 1: hp 40 width 40 redraws 2 alarms 1 restores 1 shield 0
+// CHECK-NEXT: frame 1 ship 2: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
+// Frame 2: ship 1 is repaired and regains its shield.
+// CHECK-NEXT: frame 2 ship 0: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
+// CHECK-NEXT: frame 2 ship 1: hp 100 width 100 redraws 3 alarms 1 restores 2 shield 1
+// CHECK-NEXT: frame 2 ship 2: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
+// Frame 3: nothing happened, nothing is collected.
+// CHECK-NEXT: frame 3 ship 0: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
+// CHECK-NEXT: frame 3 ship 1: hp 100 width 100 redraws 3 alarms 1 restores 2 shield 1
+// CHECK-NEXT: frame 3 ship 2: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
