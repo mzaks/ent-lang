@@ -27,7 +27,7 @@ OPENMP = [f"-I{LLVM}/include", f"-L{LLVM}/lib",
 LOWER = ["--convert-scf-to-cf", "--convert-to-llvm",
          "--reconcile-unrealized-casts"]
 PARALLEL = ["--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1",
-            "--convert-scf-to-openmp", "--canonicalize"]
+            "--convert-scf-to-openmp", "--canonicalize", "--ecs-omp-nowait"]
 # name: (VARIANT, program, ecs-opt passes before LOWER, OpenMP)
 VARIANTS = {
     "c-index": (0, None, None, False),

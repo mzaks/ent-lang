@@ -26,7 +26,7 @@ ecs.system @writeY(%c: f32) writes [@P] {
 // stage with a single run stays a plain call.
 // PAR-LABEL: func.func @frame(
 // PAR-NEXT:    omp.parallel {
-// PAR-NEXT:      omp.sections {
+// PAR-NEXT:      omp.sections nowait {
 // PAR-NEXT:        omp.section {
 // PAR-NEXT:          func.call @writeX
 // PAR-NEXT:          omp.terminator

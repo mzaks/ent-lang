@@ -32,6 +32,7 @@ REFERENCE = os.path.join(ROOT, "bench", "reference.c")
 # wraps loop bodies in; --convert-scf-to-cf would otherwise split it into
 # several blocks, which the op does not allow.
 TO_LLVM = ["--symbol-dce", "--convert-scf-to-openmp", "--canonicalize",
+           "--ecs-omp-nowait",
            "--convert-scf-to-cf", "--convert-to-llvm",
            "--reconcile-unrealized-casts"]
 OPENMP = [f"-L{LLVM}/lib", "-lomp", f"-Wl,-rpath,{LLVM}/lib"]

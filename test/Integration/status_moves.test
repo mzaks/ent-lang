@@ -19,8 +19,9 @@
 
 // RUN: ecs-opt %S/../../examples/status_moves.mlir \
 // RUN:     "--ecs-lower-to-loops=fuse-systems=1 parallel-entities=1 parallel-min-entities=1" \
-// RUN:     --symbol-dce --convert-scf-to-openmp --canonicalize --convert-scf-to-cf \
-// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:     --symbol-dce --convert-scf-to-openmp --canonicalize \
+// RUN:     --ecs-omp-nowait --convert-scf-to-cf --convert-to-llvm \
+// RUN:     --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
 // RUN: clang -O2 -Wno-override-module %t.par.ll \
 // RUN:     -I%t.dir %S/../../examples/host/status_moves_main.c %openmp -o %t.par

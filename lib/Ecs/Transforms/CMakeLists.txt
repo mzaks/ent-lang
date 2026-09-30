@@ -1,6 +1,7 @@
 add_mlir_library(MLIREcsTransforms
   Access.cpp
   LowerToLoops.cpp
+  OmpNowait.cpp
   PrintAccess.cpp
   Schedule.cpp
 

@@ -63,6 +63,25 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
   ];
 }
 
+def EcsOmpNowait : Pass<"ecs-omp-nowait"> {
+  let summary = "Drop the barrier after a parallel region's last loop";
+  let description = [{
+    A work-sharing loop (`omp.wsloop`) or `omp.sections` ends with a
+    barrier unless it is `nowait`; so does every `omp.parallel` region.
+    `--convert-scf-to-openmp` turns an `scf.parallel` into a parallel
+    region holding nothing but a work-sharing loop, which then waits at two
+    barriers back to back, where clang emits one for `parallel for`. With
+    the OpenMP runtime's defaults, where waiting threads sleep, the second
+    barrier costs about as much as the fork itself (see bench/RESULTS.md).
+
+    This pass marks a work-sharing loop or sections construct `nowait`
+    when it is the last op of its parallel region, since the region's own
+    barrier follows. Constructs with reductions or private values are left
+    alone. Run it after `--convert-scf-to-openmp`.
+  }];
+  let dependentDialects = ["::mlir::omp::OpenMPDialect"];
+}
+
 def EcsPrintAccess : Pass<"ecs-print-access", "ModuleOp"> {
   let summary = "Report the columns each system reads and writes";
   let description = [{

@@ -1539,7 +1539,11 @@ static void lowerStage(IRRewriter &rewriter, StageOp stage, bool parallel) {
   rewriter.setInsertionPoint(stage);
   auto parallelOp = omp::ParallelOp::create(rewriter, loc);
   rewriter.createBlock(&parallelOp.getRegion());
-  auto sections = omp::SectionsOp::create(rewriter, loc, omp::SectionsOperands{});
+  // The region's end is a barrier already; the sections need none of their
+  // own (see --ecs-omp-nowait).
+  omp::SectionsOperands operands;
+  operands.nowait = rewriter.getUnitAttr();
+  auto sections = omp::SectionsOp::create(rewriter, loc, operands);
   omp::TerminatorOp::create(rewriter, loc);
 
   rewriter.createBlock(&sections.getRegion());
