@@ -15,15 +15,20 @@ ecs.archetype @Tagged (@P, optional @S, @T) capacity 10
 // loads the field from whichever archetype holds P. Every load is guarded.
 // CHECK-LABEL: func.func private @chase(
 // CHECK:      %[[ID:.*]] = memref.load %{{.*}} : memref<10xi64>
-// CHECK:      %[[SLOT:.*]] = arith.trunci %[[ID]] : i64 to i32
-// CHECK:      %[[GEN:.*]] = arith.trunci %{{.*}} : i64 to i32
-// CHECK:      %[[USED:.*]] = memref.load
-// CHECK:      %[[IN:.*]] = arith.cmpi ult, %{{.*}}, %[[USED]] : i64
+// CHECK:      %[[SLOTBITS:.*]] = arith.andi %[[ID]], %{{.*}} : i64
+// CHECK-NEXT: %[[SLOT:.*]] = arith.index_castui %[[SLOTBITS]] : i64 to index
+// CHECK:      %[[HIGH:.*]] = arith.shrui %[[ID]], %{{.*}} : i64
+// CHECK-NEXT: %[[GEN:.*]] = arith.trunci %[[HIGH]] : i64 to i32
+// CHECK:      %[[USED:.*]] = arith.index_cast
+// CHECK-NEXT: %[[IN:.*]] = arith.cmpi ult, %[[SLOT]], %[[USED]] : index
 // CHECK-NEXT: %[[R:.*]]:2 = scf.if %[[IN]] -> (f32, i1) {
-// CHECK:        %[[CUR:.*]] = memref.load
+// CHECK:        %[[CUR:.*]] = memref.load %{{.*}}[%[[SLOT]]]
 // CHECK-NEXT:   %[[ALIVE:.*]] = arith.cmpi eq, %[[CUR]], %[[GEN]] : i32
 // CHECK-NEXT:   scf.if %[[ALIVE]] -> (f32, i1) {
-// CHECK:          %[[WHERE:.*]] = memref.load
+// The location packs archetype << 4 | row (capacity 10 needs 4 row bits).
+// CHECK:          %[[PACKED:.*]] = memref.load %{{.*}}[%[[SLOT]]] : memref<20xi32>
+// CHECK:          %[[WHERE:.*]] = arith.shrui %[[PACKED]], %{{.*}} : i32
+// CHECK:          arith.andi %[[PACKED]], %{{.*}} : i32
 // CHECK:          %[[PLAIN:.*]] = arith.constant 0 : i32
 // CHECK-NEXT:     arith.cmpi eq, %[[WHERE]], %[[PLAIN]] : i32
 // CHECK:            memref.load %{{.*}} : memref<10xf32>

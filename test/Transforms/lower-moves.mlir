@@ -46,8 +46,11 @@ ecs.archetype @E2 (@M, @N) capacity 10
 // CHECK:          %[[N:.*]] = memref.load %[[VALUES]]
 // CHECK-NEXT:     memref.store %[[N]], %[[E2_N]]
 // CHECK-NEXT:     memref.store %{{.*}}, %[[E2_IDS]]
-// CHECK:          %[[E2_INDEX:.*]] = arith.constant 1 : i32
-// CHECK-NEXT:     memref.store %[[E2_INDEX]]
+// The new location packs E2's index above the row: 1 << 4 (capacity 10
+// needs 4 row bits).
+// CHECK:          %[[E2_BITS:.*]] = arith.constant 16 : i32
+// CHECK:          %[[PACKED:.*]] = arith.ori %[[E2_BITS]], %{{.*}} : i32
+// CHECK-NEXT:     memref.store %[[PACKED]]
 ecs.system @promote(%v: f32) reads [@M] writes [@N] {
   ecs.query (%m: !ecs.ref<@M>) {
     ecs.add @N(%v) : f32

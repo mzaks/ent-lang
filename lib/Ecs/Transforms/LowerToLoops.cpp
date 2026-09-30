@@ -80,95 +80,180 @@ public:
   }
 
   /// Allocate an id for a new entity at `row` (an index) of `archetype`,
-  /// the same way the generated C header does: reuse the last freed slot,
-  /// or take the next never-used one with generation 0.
+  /// the same way the generated C header does: pop the free list (the last
+  /// freed slot), or take the next never-used slot with generation 0.
   Value allocateEntity(Location loc, const WorldArchetype &archetype,
                        Value row) {
-    Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
+    const EntityScheme &scheme = layout.entities;
+    Type index = rewriter.getIndexType();
     Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    Value freeCount = scalar(layout.freeCountOffset);
-    Value free = memref::LoadOp::create(rewriter, loc, freeCount,
-                                        ValueRange{zero});
-    Value zero64 = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
     Value one64 = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
-    Value reuse = arith::CmpIOp::create(rewriter, loc,
-                                        arith::CmpIPredicate::sgt, free, zero64);
-    auto choose = scf::IfOp::create(rewriter, loc, TypeRange{i32}, reuse,
+    Value freeHead = scalar(layout.freeHeadOffset);
+    Value head = memref::LoadOp::create(rewriter, loc, freeHead,
+                                        ValueRange{zero});
+    Value reuse = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ne, head,
+        arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+    auto choose = scf::IfOp::create(rewriter, loc, TypeRange{index}, reuse,
                                     /*withElseRegion=*/true);
     {
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(choose.thenBlock());
-      Value top = arith::SubIOp::create(rewriter, loc, free, one64);
-      memref::StoreOp::create(rewriter, loc, top, freeCount, ValueRange{zero});
-      Value slot = memref::LoadOp::create(
-          rewriter, loc, table(layout.freeListOffset), ValueRange{toIndex(loc, top)});
+      // The head is the slot plus one; the slot's location holds the next.
+      Value slot = toIndex(loc, arith::SubIOp::create(rewriter, loc, head,
+                                                      one64));
+      Value next = memref::LoadOp::create(rewriter, loc, locations(),
+                                          ValueRange{slot});
+      memref::StoreOp::create(rewriter, loc, widen(loc, next), freeHead,
+                              ValueRange{zero});
       scf::YieldOp::create(rewriter, loc, slot);
       rewriter.setInsertionPointToStart(choose.elseBlock());
       Value nextSlot = scalar(layout.nextSlotOffset);
-      Value next = memref::LoadOp::create(rewriter, loc, nextSlot,
-                                          ValueRange{zero});
-      memref::StoreOp::create(rewriter, loc,
-                              arith::AddIOp::create(rewriter, loc, next, one64),
-                              nextSlot, ValueRange{zero});
-      Value fresh = arith::TruncIOp::create(rewriter, loc, i32, next);
-      memref::StoreOp::create(rewriter, loc,
-                              arith::ConstantIntOp::create(rewriter, loc, 0, 32),
-                              table(layout.generationOffset),
-                              ValueRange{toIndex(loc, next)});
-      scf::YieldOp::create(rewriter, loc, fresh);
+      Value fresh = memref::LoadOp::create(rewriter, loc, nextSlot,
+                                           ValueRange{zero});
+      memref::StoreOp::create(
+          rewriter, loc, arith::AddIOp::create(rewriter, loc, fresh, one64),
+          nextSlot, ValueRange{zero});
+      Value freshIndex = toIndex(loc, fresh);
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::ConstantIntOp::create(rewriter, loc, 0,
+                                       scheme.generationStorageBits),
+          generations(), ValueRange{freshIndex});
+      scf::YieldOp::create(rewriter, loc, freshIndex);
     }
     Value slot = choose.getResult(0);
     setLocation(loc, slot, archetype, row);
-    Value generation = memref::LoadOp::create(
-        rewriter, loc, table(layout.generationOffset),
-        ValueRange{toIndex(loc, slot)});
-    Value high = arith::ShLIOp::create(
-        rewriter, loc, arith::ExtUIOp::create(rewriter, loc, i64, generation),
-        arith::ConstantIntOp::create(rewriter, loc, 32, 64));
-    Value low = arith::ExtUIOp::create(rewriter, loc, i64, slot);
-    return arith::OrIOp::create(rewriter, loc, high, low);
-  }
-
-  /// Free the id `entity` (i64): bump its slot's generation, so the id is
-  /// no longer alive, and push the slot on the free list.
-  void freeEntity(Location loc, Value entity) {
-    Value slot = arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(),
-                                         entity);
-    Value index = toIndex(loc, slot);
-    Value generations = table(layout.generationOffset);
     Value generation =
-        memref::LoadOp::create(rewriter, loc, generations, ValueRange{index});
-    memref::StoreOp::create(
-        rewriter, loc,
-        arith::AddIOp::create(rewriter, loc, generation,
-                              arith::ConstantIntOp::create(rewriter, loc, 1, 32)),
-        generations, ValueRange{index});
-    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    Value freeCount = scalar(layout.freeCountOffset);
-    Value free = memref::LoadOp::create(rewriter, loc, freeCount,
-                                        ValueRange{zero});
-    memref::StoreOp::create(rewriter, loc, slot, table(layout.freeListOffset),
-                            ValueRange{toIndex(loc, free)});
-    memref::StoreOp::create(
-        rewriter, loc,
-        arith::AddIOp::create(rewriter, loc, free,
-                              arith::ConstantIntOp::create(rewriter, loc, 1, 64)),
-        freeCount, ValueRange{zero});
+        memref::LoadOp::create(rewriter, loc, generations(), ValueRange{slot});
+    return makeId(loc, generation, slot);
   }
 
-  /// Record that the entity with id slot `slot` (i32) lives at `row` (an
+  /// Free the id `entity`: bump its slot's generation, so the id is no
+  /// longer alive, and push the slot on the free list through its location.
+  void freeEntity(Location loc, Value entity) {
+    const EntityScheme &scheme = layout.entities;
+    Value slot = idSlot(loc, entity);
+    Value generation =
+        memref::LoadOp::create(rewriter, loc, generations(), ValueRange{slot});
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::AddIOp::create(
+            rewriter, loc, generation,
+            arith::ConstantIntOp::create(rewriter, loc, 1,
+                                         scheme.generationStorageBits)),
+        generations(), ValueRange{slot});
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value freeHead = scalar(layout.freeHeadOffset);
+    Value head = memref::LoadOp::create(rewriter, loc, freeHead,
+                                        ValueRange{zero});
+    memref::StoreOp::create(rewriter, loc, narrow(loc, head), locations(),
+                            ValueRange{slot});
+    Value slot64 =
+        arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(), slot);
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::AddIOp::create(
+            rewriter, loc, slot64,
+            arith::ConstantIntOp::create(rewriter, loc, 1, 64)),
+        freeHead, ValueRange{zero});
+  }
+
+  /// Record that the entity in slot `slot` (an index) lives at `row` (an
   /// index) of `archetype`.
   void setLocation(Location loc, Value slot, const WorldArchetype &archetype,
                    Value row) {
-    Value index = toIndex(loc, slot);
-    memref::StoreOp::create(
+    const EntityScheme &scheme = layout.entities;
+    Type type = rewriter.getIntegerType(scheme.locationBits);
+    Value packed = arith::OrIOp::create(
         rewriter, loc,
-        arith::ConstantIntOp::create(rewriter, loc, archetype.index, 32),
-        table(layout.locationArchetypeOffset), ValueRange{index});
-    memref::StoreOp::create(
+        arith::ConstantIntOp::create(
+            rewriter, loc, int64_t(archetype.index) << scheme.rowBits,
+            scheme.locationBits),
+        arith::IndexCastOp::create(rewriter, loc, type, row));
+    memref::StoreOp::create(rewriter, loc, packed, locations(),
+                            ValueRange{slot});
+  }
+
+  /// The archetype index (as a location-width integer) and row (an index)
+  /// of the packed location of `slot`.
+  std::pair<Value, Value> getLocation(Location loc, Value slot) {
+    const EntityScheme &scheme = layout.entities;
+    Value packed =
+        memref::LoadOp::create(rewriter, loc, locations(), ValueRange{slot});
+    Value archetype = arith::ShRUIOp::create(
+        rewriter, loc, packed,
+        arith::ConstantIntOp::create(rewriter, loc, scheme.rowBits,
+                                     scheme.locationBits));
+    Value row = arith::AndIOp::create(
+        rewriter, loc, packed,
+        arith::ConstantIntOp::create(
+            rewriter, loc, (int64_t(1) << scheme.rowBits) - 1,
+            scheme.locationBits));
+    return {archetype, toIndex(loc, row)};
+  }
+
+  /// An id from a generation (stored width) and a slot (an index).
+  Value makeId(Location loc, Value generation, Value slot) {
+    const EntityScheme &scheme = layout.entities;
+    Type id = rewriter.getIntegerType(scheme.idBits);
+    Value high = arith::ShLIOp::create(
         rewriter, loc,
-        arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(), row),
-        table(layout.locationRowOffset), ValueRange{index});
+        scheme.generationStorageBits < scheme.idBits
+            ? arith::ExtUIOp::create(rewriter, loc, id, generation).getResult()
+            : generation,
+        arith::ConstantIntOp::create(rewriter, loc, scheme.slotBits,
+                                     scheme.idBits));
+    Value low = arith::IndexCastUIOp::create(rewriter, loc, id, slot);
+    return arith::OrIOp::create(rewriter, loc, high, low);
+  }
+
+  /// The slot (an index) of an id.
+  Value idSlot(Location loc, Value id) {
+    const EntityScheme &scheme = layout.entities;
+    Value slot = arith::AndIOp::create(
+        rewriter, loc, id,
+        arith::ConstantIntOp::create(rewriter, loc,
+                                     (int64_t(1) << scheme.slotBits) - 1,
+                                     scheme.idBits));
+    return arith::IndexCastUIOp::create(rewriter, loc,
+                                        rewriter.getIndexType(), slot);
+  }
+
+  /// The generation of an id, at its stored width.
+  Value idGeneration(Location loc, Value id) {
+    const EntityScheme &scheme = layout.entities;
+    Value generation = arith::ShRUIOp::create(
+        rewriter, loc, id,
+        arith::ConstantIntOp::create(rewriter, loc, scheme.slotBits,
+                                     scheme.idBits));
+    Type type = rewriter.getIntegerType(scheme.generationStorageBits);
+    if (scheme.generationStorageBits < scheme.idBits)
+      generation = arith::TruncIOp::create(rewriter, loc, type, generation);
+    return generation;
+  }
+
+  Value generations() {
+    return view(layout.generationOffset, layout.entityCapacity,
+                rewriter.getIntegerType(layout.entities.generationStorageBits));
+  }
+  Value locations() {
+    return view(layout.locationOffset, layout.entityCapacity,
+                rewriter.getIntegerType(layout.entities.locationBits));
+  }
+
+  /// A location-width value as an i64 counter, and back.
+  Value widen(Location loc, Value value) {
+    if (layout.entities.locationBits == 64)
+      return value;
+    return arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(), value);
+  }
+  Value narrow(Location loc, Value value) {
+    if (layout.entities.locationBits == 64)
+      return value;
+    return arith::TruncIOp::create(
+        rewriter, loc, rewriter.getIntegerType(layout.entities.locationBits),
+        value);
   }
 
   Value toIndex(Location loc, Value value) {
@@ -719,9 +804,7 @@ static void applyMove(IRRewriter &rewriter, Location loc,
   }
   memref::StoreOp::create(rewriter, loc, id, world.ids(*target),
                           ValueRange{to});
-  world.setLocation(
-      loc, arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(), id),
-      *target, to);
+  world.setLocation(loc, world.idSlot(loc, id), *target, to);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   world.setCount(loc, *target, arith::AddIOp::create(rewriter, loc, to, one));
 }
@@ -800,10 +883,7 @@ static void applyPending(IRRewriter &rewriter, Location loc,
                                            ValueRange{last});
       memref::StoreOp::create(rewriter, loc, moved, world.ids(archetype),
                               ValueRange{row});
-      world.setLocation(
-          loc,
-          arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(), moved),
-          archetype, row);
+      world.setLocation(loc, world.idSlot(loc, moved), archetype, row);
     }
     world.setCount(loc, archetype, last);
   }
@@ -876,8 +956,7 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
     Location loc = lookup.getLoc();
     rewriter.setInsertionPoint(lookup);
     Type type = lookup.getValue().getType();
-    Type i1 = rewriter.getI1Type(), i32 = rewriter.getI32Type(),
-         i64 = rewriter.getI64Type();
+    Type i1 = rewriter.getI1Type();
     SmallVector<Type, 2> resultTypes{type, i1};
     TypeRange results(resultTypes);
     auto missing = [&]() {
@@ -893,19 +972,15 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
     };
 
     Value id = lookup.getEntity();
-    Value slot = arith::TruncIOp::create(rewriter, loc, i32, id);
-    Value generation = arith::TruncIOp::create(
-        rewriter, loc, i32,
-        arith::ShRUIOp::create(
-            rewriter, loc, id,
-            arith::ConstantIntOp::create(rewriter, loc, 32, 64)));
+    Value slot = world.idSlot(loc, id);
+    Value generation = world.idGeneration(loc, id);
     Value zeroIndex = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    Value used = memref::LoadOp::create(
-        rewriter, loc, world.scalar(layout.nextSlotOffset),
-        ValueRange{zeroIndex});
+    Value used = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc,
+                                    world.scalar(layout.nextSlotOffset),
+                                    ValueRange{zeroIndex}));
     Value inRange = arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::ult,
-        arith::ExtUIOp::create(rewriter, loc, i64, slot), used);
+        rewriter, loc, arith::CmpIPredicate::ult, slot, used);
     auto checkRange = scf::IfOp::create(rewriter, loc, results, inRange,
                                         /*withElseRegion=*/true);
     {
@@ -913,10 +988,9 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
       rewriter.setInsertionPointToStart(checkRange.elseBlock());
       missing();
       rewriter.setInsertionPointToStart(checkRange.thenBlock());
-      Value index = world.toIndex(loc, slot);
-      Value current = memref::LoadOp::create(
-          rewriter, loc, world.table(layout.generationOffset),
-          ValueRange{index});
+      Value current = memref::LoadOp::create(rewriter, loc,
+                                             world.generations(),
+                                             ValueRange{slot});
       Value alive = arith::CmpIOp::create(
           rewriter, loc, arith::CmpIPredicate::eq, current, generation);
       auto checkAlive = scf::IfOp::create(rewriter, loc, results, alive,
@@ -925,13 +999,7 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
       rewriter.setInsertionPointToStart(checkAlive.elseBlock());
       missing();
       rewriter.setInsertionPointToStart(checkAlive.thenBlock());
-      Value where = memref::LoadOp::create(
-          rewriter, loc, world.table(layout.locationArchetypeOffset),
-          ValueRange{index});
-      Value row = world.toIndex(
-          loc, memref::LoadOp::create(rewriter, loc,
-                                      world.table(layout.locationRowOffset),
-                                      ValueRange{index}));
+      auto [where, row] = world.getLocation(loc, slot);
       // One branch per archetype that holds the component.
       FlatSymbolRefAttr component = lookup.getComponentAttr();
       for (const WorldArchetype &archetype : layout.archetypes) {
@@ -940,7 +1008,8 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
           continue;
         Value here = arith::CmpIOp::create(
             rewriter, loc, arith::CmpIPredicate::eq, where,
-            arith::ConstantIntOp::create(rewriter, loc, archetype.index, 32));
+            arith::ConstantIntOp::create(rewriter, loc, archetype.index,
+                                         layout.entities.locationBits));
         auto branch = scf::IfOp::create(rewriter, loc, results, here,
                                         /*withElseRegion=*/true);
         scf::YieldOp::create(rewriter, loc, branch.getResults());

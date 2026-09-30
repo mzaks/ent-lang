@@ -73,6 +73,24 @@ struct WorldResource {
   const WorldResourceField *find(StringAttr field) const;
 };
 
+/// How entity ids and their bookkeeping are laid out.
+///
+/// An id is `generation << slotBits | slot`: the slot indexes the entity
+/// table, the generation says which occupant of the slot the id means. A
+/// location packs `archetype << rowBits | row` into one integer.
+struct EntityScheme {
+  /// Width of an id: its storage in id columns and in the C API.
+  unsigned idBits = 64;
+  unsigned slotBits = 32;
+  unsigned generationBits = 32;
+  /// Width of a stored generation (8, 16 or 32).
+  unsigned generationStorageBits = 32;
+  /// Bits of the row in a packed location; the archetype index is above.
+  unsigned rowBits = 32;
+  /// Width of a stored location (32 or 64).
+  unsigned locationBits = 64;
+};
+
 /// Static layout of the whole world in one arena, computed from the
 /// archetypes' components and capacities and from the resources.
 ///
@@ -97,18 +115,19 @@ struct WorldLayout {
   SmallVector<WorldArchetype> archetypes;
   SmallVector<WorldResource> resources;
 
-  /// The entity table, indexed by an id's slot (its lower 32 bits): the
-  /// slot's generation (i32), the archetype index and row it lives at (i32
-  /// each), and a stack of free slots (i32). One entry per slot of total
-  /// capacity. The next never-used slot and the number of free slots are
-  /// i64 counters in the header.
+  /// How entity ids are represented; see EntityScheme.
+  EntityScheme entities;
+  /// The entity table, indexed by an id's slot: the slot's generation and
+  /// the packed location (archetype and row) of the entity living in it. A
+  /// free slot's location holds the next free slot plus one (0 ends the
+  /// list), so the free list needs no storage of its own. One entry per
+  /// slot of total capacity. The next never-used slot and the head of the
+  /// free list (plus one) are i64 counters in the header.
   int64_t entityCapacity = 0;
   uint64_t nextSlotOffset = 0;
-  uint64_t freeCountOffset = 0;
+  uint64_t freeHeadOffset = 0;
   uint64_t generationOffset = 0;
-  uint64_t locationArchetypeOffset = 0;
-  uint64_t locationRowOffset = 0;
-  uint64_t freeListOffset = 0;
+  uint64_t locationOffset = 0;
   /// Bytes taken by the counts at the start of the arena.
   uint64_t countsBytes = 0;
   /// Bytes taken by the counts and resources, which a new world zeroes.

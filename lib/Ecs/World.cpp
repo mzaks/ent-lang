@@ -134,7 +134,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     }
   end = llvm::alignTo(end, 8);
   layout.nextSlotOffset = end;
-  layout.freeCountOffset = end + 8;
+  layout.freeHeadOffset = end + 8;
   end += 16;
   layout.headerBytes = end;
 
@@ -197,10 +197,17 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     end = offset + bytes * layout.entityCapacity;
     return offset;
   };
-  layout.generationOffset = placeTable(4);
-  layout.locationArchetypeOffset = placeTable(4);
-  layout.locationRowOffset = placeTable(4);
-  layout.freeListOffset = placeTable(4);
+  // Pack locations as tightly as the capacities allow.
+  EntityScheme &scheme = layout.entities;
+  int64_t maxCapacity = 1;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    maxCapacity = std::max(maxCapacity, archetype.capacity);
+  scheme.rowBits = std::max(1u, llvm::Log2_64_Ceil(maxCapacity));
+  unsigned archetypeBits =
+      std::max(1u, llvm::Log2_64_Ceil(layout.archetypes.size()));
+  scheme.locationBits = scheme.rowBits + archetypeBits <= 32 ? 32 : 64;
+  layout.generationOffset = placeTable(scheme.generationStorageBits / 8);
+  layout.locationOffset = placeTable(scheme.locationBits / 8);
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;
 }

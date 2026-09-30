@@ -15,7 +15,7 @@ ecs.archetype @Player (@P) capacity 1
 // that writes the resource before the query is seen by it, since the loop
 // comes after the write.
 // CHECK-LABEL: func.func private @advance(
-// CHECK-SAME: %[[W:[^:]*]]: memref<49152xi8>)
+// CHECK-SAME: %[[W:[^:]*]]: memref<32768xi8>)
 // CHECK:      arith.constant 72 : index
 // CHECK-NEXT: %[[FRAME:.*]] = memref.view %[[W]]{{.*}} to memref<1xi64>
 // CHECK:      %[[F:.*]] = memref.load %[[FRAME]][%{{.*}}] : memref<1xi64>

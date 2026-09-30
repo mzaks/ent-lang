@@ -93,57 +93,74 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "static inline void ecs_world_destroy(ecs_world *world) { "
         "free(world); }\n";
 
-  // Entity ids: a generation in the upper 32 bits, a slot of the entity
-  // table in the lower 32. Despawning bumps the slot's generation, so old
-  // ids stop being alive; freed slots are reused last freed first.
-  os << "\n// Entities\n"
-        "typedef uint64_t ecs_entity;\n"
-        "#define ECS_NO_ENTITY UINT64_MAX\n";
+  // Entity ids: `generation << slotBits | slot`, as EntityScheme says.
+  // Despawning bumps the slot's generation, so old ids stop being alive;
+  // freed slots are reused last freed first, through a free list threaded
+  // through their locations. A location packs `archetype << rowBits | row`.
+  const EntityScheme &scheme = layout->entities;
+  auto uintType = [](unsigned bits) {
+    return llvm::formatv("uint{0}_t", bits).str();
+  };
+  std::string idType = uintType(scheme.idBits);
+  std::string generationType = uintType(scheme.generationStorageBits);
+  std::string locationType = uintType(scheme.locationBits);
+  os << "\n// Entities\n";
+  os << llvm::formatv("typedef {0} ecs_entity;\n", idType);
+  os << llvm::formatv("#define ECS_NO_ENTITY UINT{0}_MAX\n", scheme.idBits);
   os << llvm::formatv("#define ECS_ENTITY_CAPACITY {0}\n",
                       layout->entityCapacity);
+  os << llvm::formatv("#define ECS__SLOT_BITS {0}\n#define ECS__ROW_BITS {1}\n",
+                      scheme.slotBits, scheme.rowBits);
   os << llvm::formatv(
       "#define ECS__NEXT_SLOT ((int64_t *)((char *)world + {0}))\n"
-      "#define ECS__FREE_COUNT ((int64_t *)((char *)world + {1}))\n"
-      "#define ECS__GENERATION ((uint32_t *)((char *)world + {2}))\n"
-      "#define ECS__ARCHETYPE ((int32_t *)((char *)world + {3}))\n"
-      "#define ECS__ROW ((int32_t *)((char *)world + {4}))\n"
-      "#define ECS__FREE_LIST ((int32_t *)((char *)world + {5}))\n",
-      layout->nextSlotOffset, layout->freeCountOffset,
-      layout->generationOffset, layout->locationArchetypeOffset,
-      layout->locationRowOffset, layout->freeListOffset);
-  os << "static inline ecs_entity ecs__allocate(ecs_world *world, "
-        "int32_t archetype,\n"
-        "                                       int64_t row) {\n"
-        "  int32_t slot;\n"
-        "  if (*ECS__FREE_COUNT > 0) {\n"
-        "    slot = ECS__FREE_LIST[--*ECS__FREE_COUNT];\n"
-        "  } else {\n"
-        "    slot = (int32_t)(*ECS__NEXT_SLOT)++;\n"
-        "    ECS__GENERATION[slot] = 0;\n"
-        "  }\n"
-        "  ECS__ARCHETYPE[slot] = archetype;\n"
-        "  ECS__ROW[slot] = (int32_t)row;\n"
-        "  return ((ecs_entity)ECS__GENERATION[slot] << 32) | (uint32_t)slot;\n"
+      "#define ECS__FREE_HEAD ((int64_t *)((char *)world + {1}))\n"
+      "#define ECS__GENERATION (({2} *)((char *)world + {3}))\n"
+      "#define ECS__LOCATION (({4} *)((char *)world + {5}))\n",
+      layout->nextSlotOffset, layout->freeHeadOffset, generationType,
+      layout->generationOffset, locationType, layout->locationOffset);
+  os << llvm::formatv(
+      "static inline ecs_entity ecs__allocate(ecs_world *world, "
+      "int32_t archetype,\n"
+      "                                       int64_t row) {{\n"
+      "  int64_t slot;\n"
+      "  if (*ECS__FREE_HEAD != 0) {{\n"
+      "    slot = *ECS__FREE_HEAD - 1;\n"
+      "    *ECS__FREE_HEAD = (int64_t)ECS__LOCATION[slot];\n"
+      "  } else {{\n"
+      "    slot = (*ECS__NEXT_SLOT)++;\n"
+      "    ECS__GENERATION[slot] = 0;\n"
+      "  }\n"
+      "  ECS__LOCATION[slot] = ({0})(((uint64_t)archetype << ECS__ROW_BITS) "
+      "| (uint64_t)row);\n"
+      "  return ((ecs_entity)ECS__GENERATION[slot] << ECS__SLOT_BITS) | "
+      "(ecs_entity)slot;\n"
+      "}\n",
+      locationType);
+  os << "static inline uint64_t ecs__slot(ecs_entity id) {\n"
+        "  return (uint64_t)id & ((UINT64_C(1) << ECS__SLOT_BITS) - 1);\n"
         "}\n"
         "static inline bool ecs_entity_alive(const ecs_world *world_, "
         "ecs_entity id) {\n"
         "  ecs_world *world = (ecs_world *)world_;\n"
-        "  uint32_t slot = (uint32_t)id;\n"
+        "  uint64_t slot = ecs__slot(id);\n"
         "  return id != ECS_NO_ENTITY && (int64_t)slot < *ECS__NEXT_SLOT &&\n"
-        "         ECS__GENERATION[slot] == (uint32_t)(id >> 32);\n"
+        "         ECS__GENERATION[slot] ==\n"
+        "             (uint64_t)id >> ECS__SLOT_BITS;\n"
         "}\n"
         "// The archetype (ECS_ARCHETYPE_<name>) and row of a live entity, or "
         "-1.\n"
         "static inline int32_t ecs_entity_archetype(const ecs_world *world_,\n"
         "                                           ecs_entity id) {\n"
         "  ecs_world *world = (ecs_world *)world_;\n"
-        "  return ecs_entity_alive(world, id) ? ECS__ARCHETYPE[(uint32_t)id] "
-        ": -1;\n"
+        "  if (!ecs_entity_alive(world, id))\n    return -1;\n"
+        "  return (int32_t)(ECS__LOCATION[ecs__slot(id)] >> ECS__ROW_BITS);\n"
         "}\n"
         "static inline int64_t ecs_entity_row(const ecs_world *world_, "
         "ecs_entity id) {\n"
         "  ecs_world *world = (ecs_world *)world_;\n"
-        "  return ecs_entity_alive(world, id) ? ECS__ROW[(uint32_t)id] : -1;\n"
+        "  if (!ecs_entity_alive(world, id))\n    return -1;\n"
+        "  return (int64_t)(ECS__LOCATION[ecs__slot(id)] &\n"
+        "                   ((UINT64_C(1) << ECS__ROW_BITS) - 1));\n"
         "}\n";
 
   for (const WorldArchetype &archetype : layout->archetypes) {

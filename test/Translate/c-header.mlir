@@ -10,18 +10,25 @@ ecs.component @"Odd Name" ("with space": f32)
 ecs.archetype @Things (@Kinds, @"Odd Name") capacity 100
 
 // The header holds the count (8 bytes) and the entity table's next-slot
-// and free counters (8 each); a new world zeroes those 24 bytes. Columns
-// start at the next 64-byte boundary plus 17 cache lines (1088 bytes) and
-// each is pushed as far past the end of the previous one; the archetype's
-// id column follows its component columns, and the entity table (one slot
-// per entity of capacity) comes last.
-// CHECK: #define ECS_WORLD_BYTES 32768ull
+// counter and free-list head (8 each); a new world zeroes those 24 bytes.
+// Columns start at the next 64-byte boundary plus 17 cache lines (1088
+// bytes) and each is pushed as far past the end of the previous one; the
+// archetype's id column follows its component columns, and the entity
+// table (a generation and a packed location per slot) comes last.
+// CHECK: #define ECS_WORLD_BYTES 16384ull
 // CHECK: memset(arena, 0, 24);
 // CHECK: typedef uint64_t ecs_entity;
 // CHECK: #define ECS_ENTITY_CAPACITY 100
+// A location packs the archetype above 7 row bits (capacity 100).
+// CHECK: #define ECS__SLOT_BITS 32
+// CHECK: #define ECS__ROW_BITS 7
 // CHECK: #define ECS__NEXT_SLOT ((int64_t *)((char *)world + 8))
-// CHECK: #define ECS__FREE_COUNT ((int64_t *)((char *)world + 16))
+// CHECK: #define ECS__FREE_HEAD ((int64_t *)((char *)world + 16))
+// CHECK: #define ECS__GENERATION ((uint32_t *)((char *)world + 12416))
+// CHECK: #define ECS__LOCATION ((uint32_t *)((char *)world + 13952))
+// Freed slots form a list through their locations.
 // CHECK: static inline ecs_entity ecs__allocate(
+// CHECK:     *ECS__FREE_HEAD = (int64_t)ECS__LOCATION[slot];
 // CHECK: static inline bool ecs_entity_alive(
 // CHECK: #define ECS_Things_CAPACITY 100
 // CHECK: static inline int64_t ecs_Things_count(const ecs_world *world) {

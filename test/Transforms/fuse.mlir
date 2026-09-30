@@ -49,7 +49,7 @@ ecs.system @logs() {
 // queries that match it. Stages are dissolved first. Columns: A.P.x at
 // 1152, A.V.dx at 6272, A's ids at 11392, B.P.x at 20480.
 // CHECK-LABEL: func.func @frame(
-// CHECK-SAME: %[[K:[^:]*]]: f32, %[[D:[^:]*]]: f32, %[[W:[^:]*]]: memref<81920xi8>)
+// CHECK-SAME: %[[K:[^:]*]]: f32, %[[D:[^:]*]]: f32, %[[W:[^:]*]]: memref<65536xi8>)
 // CHECK:      arith.constant 6272
 // CHECK-NEXT: %[[ADX:.*]] = memref.view %[[W]]
 // CHECK:      arith.constant 1152
@@ -90,7 +90,7 @@ ecs.schedule @frame(%k: f32, %d: f32) {
 // An opaque system and an op with effects both end a fused sequence. @shift
 // matches both archetypes, so each sequence is two loops (A, then B).
 // CHECK-LABEL: func.func @barriers(
-// CHECK-SAME: %{{[^:]*}}: f32, %[[W:[^:]*]]: memref<81920xi8>)
+// CHECK-SAME: %{{[^:]*}}: f32, %[[W:[^:]*]]: memref<65536xi8>)
 // CHECK:      scf.for
 // CHECK:      scf.for
 // CHECK:      }
