@@ -3,6 +3,7 @@
 // shields coming back. Each reactive query records how often it visited a
 // ship, so the host can check exactly which ships each frame collected.
 // The host deals damage (or repairs, with negative damage) through Hit.
+// The systems declare no access: the compiler infers it from their bodies.
 
 ecs.component @Hull (hp: f32)
 ecs.component @Hit (damage: f32)
@@ -12,7 +13,7 @@ ecs.component @Shield ()
 ecs.archetype @Ship (@Hull, @Hit, @Bar, optional @Shield) capacity 16
 
 // Takes the damage waiting in Hit; repairs restore the shield.
-ecs.system @absorb() writes [@Hull, @Hit, @Shield] {
+ecs.system @absorb() {
   ecs.query (%h: !ecs.ref<@Hull, mut>, %hit: !ecs.ref<@Hit, mut>) {
     %d = ecs.get %hit "damage" : !ecs.ref<@Hit, mut> -> f32
     %zero = arith.constant 0.0 : f32
@@ -31,7 +32,7 @@ ecs.system @absorb() writes [@Hull, @Hit, @Shield] {
 }
 
 // A shield fails below 50 hp.
-ecs.system @fail() reads [@Hull] writes [@Shield] {
+ecs.system @fail() {
   ecs.query (%h: !ecs.ref<@Hull>, %s: !ecs.ref<@Shield>) {
     %hp = ecs.get %h "hp" : !ecs.ref<@Hull> -> f32
     %limit = arith.constant 50.0 : f32
@@ -42,7 +43,7 @@ ecs.system @fail() reads [@Hull] writes [@Shield] {
   }
 }
 
-ecs.system @redraw() reads [@Hull] writes [@Bar] {
+ecs.system @redraw() {
   ecs.query (%h: !ecs.ref<@Hull>, %b: !ecs.ref<@Bar, mut>)
       on [changed @Hull "hp"] {
     %hp = ecs.get %h "hp" : !ecs.ref<@Hull> -> f32
@@ -54,7 +55,7 @@ ecs.system @redraw() reads [@Hull] writes [@Bar] {
   }
 }
 
-ecs.system @alarm() reads [@Shield] writes [@Bar] {
+ecs.system @alarm() {
   ecs.query (%b: !ecs.ref<@Bar, mut>) on [removed @Shield] {
     %n = ecs.get %b "alarms" : !ecs.ref<@Bar, mut> -> i32
     %one = arith.constant 1 : i32
@@ -63,7 +64,7 @@ ecs.system @alarm() reads [@Shield] writes [@Bar] {
   }
 }
 
-ecs.system @restored() reads [@Shield] writes [@Bar] {
+ecs.system @restored() {
   ecs.query (%b: !ecs.ref<@Bar, mut>, %s: !ecs.ref<@Shield>)
       on [added @Shield] {
     %n = ecs.get %b "restores" : !ecs.ref<@Bar, mut> -> i32
