@@ -17,7 +17,7 @@ ent.system @s() reads [@P] writes [@P] {
 
 // -----
 
-// expected-error @+1 {{declares access to unknown component, resource or archetype @Nope}}
+// expected-error @+1 {{declares access to unknown component, resource, relation or archetype @Nope}}
 ent.system @s() reads [@Nope] {
 }
 

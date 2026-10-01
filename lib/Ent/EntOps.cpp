@@ -121,6 +121,16 @@ static ComponentOp lookupComponent(SymbolTableCollection &symbolTable,
 static FailureOr<Type> resolveField(SymbolTableCollection &symbolTable,
                                     Operation *op, RefType refType,
                                     StringRef field) {
+  // A ref names a component (bound by a query) or a relation (bound by
+  // ent.edges).
+  if (auto relation = symbolTable.lookupNearestSymbolFrom<RelationOp>(
+          op, refType.getComponent())) {
+    Type fieldType = relation.getFieldType(field);
+    if (!fieldType)
+      return op->emitOpError("relation ")
+             << refType.getComponent() << " has no field '" << field << "'";
+    return fieldType;
+  }
   ComponentOp component =
       lookupComponent(symbolTable, op, refType.getComponent());
   if (!component)
@@ -165,6 +175,14 @@ static ParseResult parseRecord(OpAsmParser &parser, OperationState &result) {
                       b.getArrayAttr(names));
   result.addAttribute(OpTy::getFieldTypesAttrName(result.name),
                       b.getArrayAttr(types));
+  // `capacity N`, mandatory for relations.
+  if constexpr (std::is_same_v<OpTy, RelationOp>) {
+    int64_t capacity;
+    if (parser.parseKeyword("capacity") || parser.parseInteger(capacity))
+      return failure();
+    result.addAttribute(OpTy::getCapacityAttrName(result.name),
+                        b.getI64IntegerAttr(capacity));
+  }
   // `capacity N`, for components.
   if constexpr (std::is_same_v<OpTy, ComponentOp>) {
     if (succeeded(parser.parseOptionalKeyword("capacity"))) {
@@ -195,6 +213,10 @@ static void printRecord(OpTy op, OpAsmPrinter &p) {
   if constexpr (std::is_same_v<OpTy, ComponentOp>) {
     if (std::optional<int64_t> capacity = op.getCapacity())
       p << " capacity " << *capacity;
+    elided.push_back(op.getCapacityAttrName());
+  }
+  if constexpr (std::is_same_v<OpTy, RelationOp>) {
+    p << " capacity " << op.getCapacity();
     elided.push_back(op.getCapacityAttrName());
   }
   p.printOptionalAttrDict(op->getAttrs(), elided);
@@ -254,6 +276,17 @@ LogicalResult ResourceOp::verify() {
   return verifyRecord(*this, getFieldNames(), getFieldTypes());
 }
 Type ResourceOp::getFieldType(StringRef name) {
+  return lookupFieldType(getFieldNames(), getFieldTypes(), name);
+}
+
+ParseResult RelationOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseRecord<RelationOp>(parser, result);
+}
+void RelationOp::print(OpAsmPrinter &p) { printRecord(*this, p); }
+LogicalResult RelationOp::verify() {
+  return verifyRecord(*this, getFieldNames(), getFieldTypes());
+}
+Type RelationOp::getFieldType(StringRef name) {
   return lookupFieldType(getFieldNames(), getFieldTypes(), name);
 }
 
@@ -392,8 +425,10 @@ LogicalResult SystemOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     for (Attribute attr : list) {
       auto ref = cast<FlatSymbolRefAttr>(attr);
       Operation *target = symbolTable.lookupNearestSymbolFrom(*this, ref);
-      if (!isa_and_nonnull<ComponentOp, ResourceOp, ArchetypeOp>(target))
-        return emitOpError("declares access to unknown component, resource "
+      if (!isa_and_nonnull<ComponentOp, ResourceOp, ArchetypeOp, RelationOp>(
+              target))
+        return emitOpError("declares access to unknown component, resource, "
+                           "relation "
                            "or archetype ")
                << ref;
       if (isa<ArchetypeOp>(target) && list == getReadsAttr())
@@ -1086,6 +1121,10 @@ static LogicalResult verifyCombining(Operation *op, StringRef rule) {
     if (isa<LoopLikeOpInterface>(parent))
       return op->emitOpError("must not be inside a loop ('")
              << parent->getName() << "'): it may run at most once per entity";
+  // An apply in ent.edges runs once per edge, into a slot per edge; an
+  // accumulate there has no such buffer yet.
+  if (isa<AccumulateOp>(op) && op->getParentOfType<EdgesOp>())
+    return op->emitOpError("inside 'ent.edges' is not supported yet");
   if (rule != "add" && rule != "min" && rule != "max")
     return op->emitOpError("has unknown rule '")
            << rule << "'; expected 'add', 'min' or 'max'";
@@ -1141,6 +1180,155 @@ LogicalResult ApplyOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     diag.attachNote(other.getLoc()) << "other rule here";
     return diag;
   }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// EdgesOp / ConnectOp / DisconnectOp
+//===----------------------------------------------------------------------===//
+
+// ent.edges @R out|in (%e: !ent.ref<@R[, mut]>, %other: !ent.entity) { }
+ParseResult EdgesOp::parse(OpAsmParser &parser, OperationState &result) {
+  FlatSymbolRefAttr relation;
+  StringRef direction;
+  if (parser.parseAttribute(relation) || parser.parseKeyword(&direction))
+    return failure();
+  Builder &b = parser.getBuilder();
+  result.addAttribute(getRelationAttrName(result.name), relation);
+  result.addAttribute(getDirectionAttrName(result.name),
+                      b.getStringAttr(direction));
+  return parseArgsAndBody<EdgesOp>(parser, result);
+}
+
+void EdgesOp::print(OpAsmPrinter &p) {
+  p << " " << getRelationAttr() << " " << getDirection() << " ";
+  printArgs(p, getBody());
+  p.printOptionalAttrDictWithKeyword(
+      (*this)->getAttrs(), {getRelationAttrName(), getDirectionAttrName()});
+  printBody(p, getBody());
+}
+
+LogicalResult EdgesOp::verify() {
+  if (getDirection() != "out" && getDirection() != "in")
+    return emitOpError("direction must be 'out' or 'in', got '")
+           << getDirection() << "'";
+  if (!(*this)->getParentOfType<QueryOp>())
+    return emitOpError("must be inside an 'ent.query': it visits the edges "
+                       "of the entity the query visits");
+  if ((*this)->getParentOfType<EdgesOp>())
+    return emitOpError("cannot be nested in another 'ent.edges'");
+  for (Operation *parent = (*this)->getParentOp(); !isa<QueryOp>(parent);
+       parent = parent->getParentOp())
+    if (isa<LoopLikeOpInterface>(parent))
+      return emitOpError("must not be inside a loop ('")
+             << parent->getName() << "')";
+  Block &body = getBody().front();
+  auto ref = body.getNumArguments() == 2
+                 ? dyn_cast<RefType>(body.getArgument(0).getType())
+                 : RefType();
+  if (!ref || !isa<EntityType>(body.getArgument(1).getType()))
+    return emitOpError("must take an !ent.ref to the relation and the "
+                       "!ent.entity at the other end");
+  if (ref.getComponent() != getRelationAttr())
+    return emitOpError("ref names ")
+           << ref.getComponent() << ", but the loop visits "
+           << getRelationAttr();
+  for (Operation *user : body.getArgument(0).getUsers())
+    if (!isa<GetOp, SetOp>(user))
+      return user->emitOpError("uses the edge reference; it may only be "
+                               "used by 'ent.get' and 'ent.set'");
+  return success();
+}
+
+LogicalResult EdgesOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  if (!symbolTable.lookupNearestSymbolFrom<RelationOp>(*this,
+                                                       getRelationAttr()))
+    return emitOpError("visits unknown relation ") << getRelationAttr();
+  auto system = (*this)->getParentOfType<SystemOp>();
+  bool mut = cast<RefType>(getBody().getArgument(0).getType()).getIsMutable();
+  if (mut && !system.canWrite(getRelationAttr()))
+    return emitOpError("writes the edges of ")
+           << getRelationAttr() << " but system @" << system.getSymName()
+           << " does not declare it in 'writes'";
+  if (!system.canRead(getRelationAttr()))
+    return emitOpError("visits the edges of ")
+           << getRelationAttr() << " but system @" << system.getSymName()
+           << " does not declare it in 'reads' or 'writes'";
+  // Both ways in one query: an edge would be visited by its source and its
+  // target, from different entities' iterations.
+  EdgesOp other;
+  (*this)->getParentOfType<QueryOp>().walk([&](EdgesOp edges) {
+    if (!other && edges.getRelationAttr() == getRelationAttr() &&
+        edges.getDirection() != getDirection())
+      other = edges;
+  });
+  if (other) {
+    bool otherMut =
+        cast<RefType>(other.getBody().getArgument(0).getType()).getIsMutable();
+    if (mut || otherMut) {
+      InFlightDiagnostic diag =
+          emitOpError("visits ")
+          << getRelationAttr()
+          << " both ways in one query and one loop writes the edges; an "
+             "edge would be visited from both its ends";
+      diag.attachNote(other.getLoc()) << "other loop here";
+      return diag;
+    }
+  }
+  return success();
+}
+
+LogicalResult ConnectOp::verify() {
+  if (auto query = (*this)->getParentOfType<QueryOp>()) {
+    if ((*this)->getParentOfType<EdgesOp>())
+      return emitOpError("inside 'ent.edges' is not supported yet");
+    for (Operation *parent = (*this)->getParentOp(); parent != query;
+         parent = parent->getParentOp())
+      if (isa<LoopLikeOpInterface>(parent))
+        return emitOpError("must not be inside a loop ('")
+               << parent->getName()
+               << "') in a query: it may run at most once per entity";
+  } else if (!(*this)->getParentOfType<SystemOp>()) {
+    return emitOpError("must be inside an 'ent.system'");
+  }
+  return success();
+}
+
+LogicalResult ConnectOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto relation =
+      symbolTable.lookupNearestSymbolFrom<RelationOp>(*this, getRelationAttr());
+  if (!relation)
+    return emitOpError("connects unknown relation ") << getRelationAttr();
+  ArrayAttr fieldTypes = relation.getFieldTypes();
+  if (fieldTypes.size() != getValues().size())
+    return emitOpError("initialises ")
+           << getValues().size() << " fields, but " << getRelationAttr()
+           << " has " << fieldTypes.size();
+  for (auto [index, value, typeAttr] :
+       llvm::enumerate(getValues(), fieldTypes))
+    if (value.getType() != cast<TypeAttr>(typeAttr).getValue())
+      return emitOpError("value #")
+             << index << " has type " << value.getType() << ", but field '"
+             << cast<StringAttr>(relation.getFieldNames()[index]).getValue()
+             << "' has type " << cast<TypeAttr>(typeAttr).getValue();
+  auto system = (*this)->getParentOfType<SystemOp>();
+  if (!system.canWrite(getRelationAttr()))
+    return emitOpError("connects ")
+           << getRelationAttr() << " but system @" << system.getSymName()
+           << " does not declare it in 'writes'";
+  return success();
+}
+
+LogicalResult DisconnectOp::verify() {
+  auto edges = (*this)->getParentOfType<EdgesOp>();
+  if (!edges)
+    return emitOpError("must be inside an 'ent.edges': it removes the edge "
+                       "the loop visits");
+  auto system = (*this)->getParentOfType<SystemOp>();
+  if (!system.canWrite(edges.getRelationAttr()))
+    return emitOpError("disconnects ")
+           << edges.getRelationAttr() << " but system @"
+           << system.getSymName() << " does not declare it in 'writes'";
   return success();
 }
 

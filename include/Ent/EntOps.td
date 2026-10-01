@@ -53,6 +53,26 @@ def Ent_ResourceOp : Ent_RecordOp<"resource"> {
   }];
 }
 
+def Ent_RelationOp : Ent_RecordOp<"relation"> {
+  let summary = "Declare a relation: directed edges between entities, with data";
+  let description = [{
+    ```mlir
+    ent.relation @Synapse (weight: f32) capacity 1000000
+    ```
+    An edge goes from a source entity to a target entity and carries the
+    relation's fields. Edges are not entities: they live in a table of
+    their own, holding at most `capacity` edges, kept sorted by source
+    (compressed sparse rows), with an index by target where the program
+    iterates incoming edges. An entity may have any number of edges, also
+    several to the same target. Queries iterate an entity's edges with
+    `ent.edges`; `ent.connect` and `ent.disconnect` change them.
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       StrArrayAttr:$field_names,
+                       TypeArrayAttr:$field_types,
+                       ConfinedAttr<I64Attr, [IntPositive]>:$capacity);
+}
+
 def Ent_ArchetypeOp : Ent_Op<"archetype", [
     Symbol, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Declare a set of components that entities are stored by";
@@ -403,6 +423,81 @@ def Ent_HasOp : Ent_Op<"has", [
   let hasVerifier = 1;
 }
 
+def Ent_EdgesOp : Ent_Op<"edges", [
+    SingleBlockImplicitTerminator<"YieldOp">,
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Run the body once for every edge of the visited entity";
+  let description = [{
+    ```mlir
+    ent.edges @Synapse out (%s: !ent.ref<@Synapse>, %post: !ent.entity) {
+      %w = ent.get %s "weight" : !ent.ref<@Synapse> -> f32
+      ent.apply %post @Neuron "input" add %w : f32
+    }
+    ```
+    `out` visits the edges whose source is the entity the enclosing query
+    visits, `in` those whose target it is; the second argument is the
+    entity at the other end. The first is a ref to the edge's fields, used
+    only by `ent.get` and `ent.set`; with `mut` the body may write them:
+    every edge is visited once per query, by its source (`out`) or its
+    target (`in`), so the write is the visiting entity's own, like a
+    component's. Edges are visited in a fixed order (by source, then in the
+    order they were connected).
+
+    An `ent.apply` in the body may run once per edge: its values are
+    combined when the query ends, by apply, archetype, row and edge, so the
+    result does not depend on how the query ran. A query may not iterate a
+    relation both ways if either loop writes the edges, and loops do not
+    nest. A system that declares its access must list the relation in
+    `reads` or `writes` (`writes` for `mut`).
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$relation, StrAttr:$direction);
+  let regions = (region SizedRegion<1>:$body);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    bool isOut() { return getDirection() == "out"; }
+  }];
+}
+
+def Ent_ConnectOp : Ent_Op<"connect", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Add an edge from one entity to another";
+  let description = [{
+    ```mlir
+    ent.connect @Synapse %pre, %post (%weight) : f32
+    ```
+    Adds an edge from `%pre` to `%post` with its fields initialised in
+    declaration order. Outside a query it takes effect at once. Inside one
+    it is deferred to the end of the query, like `ent.apply`, and may run at
+    most once per entity (not inside a loop or `ent.edges`); the edges are
+    added in a fixed order (by connect, archetype, row). Connecting beyond
+    the relation's capacity is an error at run time. Edges whose source or
+    target has been despawned are dropped when the edges are next sorted.
+    A system that declares its access must list the relation in `writes`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$relation, Ent_EntityType:$source,
+                       Ent_EntityType:$target, Variadic<AnyType>:$values);
+  let assemblyFormat = [{
+    $relation $source `,` $target ` ` `(` $values `)` attr-dict
+    (`:` type($values)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Ent_DisconnectOp : Ent_Op<"disconnect"> {
+  let summary = "Remove the edge the enclosing ent.edges visits";
+  let description = [{
+    ```mlir
+    ent.disconnect
+    ```
+    The removal is deferred to the end of the query: the query still
+    visits the edge in every loop. A system that declares its access must
+    list the relation in `writes`.
+  }];
+  let assemblyFormat = "attr-dict";
+  let hasVerifier = 1;
+}
+
 def Ent_LookupOp : Ent_Op<"lookup", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Read a field of another entity, by id";
@@ -455,9 +550,10 @@ def Ent_ApplyOp : Ent_Op<"apply", [
 
     A system that declares its access must list the component in `writes`. An
     apply must be inside a query and not inside a loop there, so it runs at most
-    once per entity; all applies of one query to the same field use the same
-    rule (`add` then `min` would depend on the order). The field must be an
-    integer (not `i1`) or a float.
+    once per entity, or once per edge inside `ent.edges` (combined by apply,
+    archetype, row, then edge); all applies of one query to the same field use
+    the same rule (`add` then `min` would depend on the order). The field must
+    be an integer (not `i1`) or a float.
   }];
   let arguments = (ins Ent_EntityType:$entity, FlatSymbolRefAttr:$component,
                        StrAttr:$field, StrAttr:$rule, AnyType:$value);
@@ -563,7 +659,8 @@ def Ent_RunOp : Ent_Op<"run", [
 
 def Ent_YieldOp : Ent_Op<"yield", [
     Pure, Terminator,
-    ParentOneOf<["SystemOp", "ScheduleOp", "QueryOp", "StageOp", "RunOp"]>]> {
+    ParentOneOf<["SystemOp", "ScheduleOp", "QueryOp", "StageOp", "RunOp",
+                 "EdgesOp"]>]> {
   let summary = "Region terminator; implicit in the custom syntax";
   let description = [{
     Ends a body without operands, and a condition with its value.
