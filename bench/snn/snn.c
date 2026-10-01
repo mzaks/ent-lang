@@ -1,0 +1,182 @@
+// A spiking network of leaky integrate-and-fire neurons (see
+// examples/snn.ent): N neurons with K random synapses each, run for some
+// steps. Built once per variant and network size (N and K are compile-time
+// constants, since the ent-lang world's capacities are):
+//
+//   VARIANT 0  c-push      compressed rows by source; firing neurons add
+//                          their weights into their targets' input
+//   VARIANT 1  c-pull      compressed rows by target; every neuron sums the
+//                          weights from sources that fired
+//   VARIANT 2  c-pull-par  the same, neurons in parallel (OpenMP)
+//   VARIANT 3  ent         the ent-lang program compiled into the binary
+//                          (push or pull, sequential or parallel)
+//
+// All variants add the weights into a neuron's input in the order of the
+// source neurons, so they agree to the bit; the checksum is a hash of every
+// potential's bits. Compile with -ffp-contract=off.
+//
+// Usage: snn STEPS WARMUP BIAS_HIGH
+// Prints: ns_per_step=... spikes_per_step=... checksum=...
+
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#if VARIANT == 3
+#include "snn_world.h"
+#endif
+
+#ifndef N
+#error "define N and K"
+#endif
+
+static uint32_t state = 12345;
+static uint32_t next(void) {
+  state = state * 1664525u + 1013904223u;
+  return state >> 8;
+}
+static float uniform(float low, float high) {
+  return low + (high - low) * (float)next() / (float)(1u << 24);
+}
+
+static double now(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec * 1e9 + t.tv_nsec;
+}
+
+static const float decay = 0.9f, threshold = 1.0f;
+static float *bias;
+static int32_t *targets;
+static float *weights;
+
+#if VARIANT != 3
+static float *v, *input, *fired;
+static int32_t *in_offsets, *in_sources;
+static float *in_weights;
+static long long spikes;
+
+static void integrate(void) {
+  for (int i = 0; i < N; ++i) {
+    float x = v[i] * decay + input[i] + bias[i];
+    input[i] = 0.0f;
+    if (x >= threshold) {
+      v[i] = 0.0f;
+      fired[i] = 1.0f;
+      ++spikes;
+    } else {
+      v[i] = x;
+      fired[i] = 0.0f;
+    }
+  }
+}
+
+static void step(void) {
+  integrate();
+#if VARIANT == 0
+  for (int i = 0; i < N; ++i)
+    if (fired[i] != 0.0f)
+      for (int e = i * K; e < (i + 1) * K; ++e)
+        input[targets[e]] += weights[e];
+#else
+#if VARIANT == 2
+#pragma omp parallel for schedule(static)
+#endif
+  for (int i = 0; i < N; ++i)
+    for (int e = in_offsets[i]; e < in_offsets[i + 1]; ++e)
+      input[i] += in_weights[e] * fired[in_sources[e]];
+#endif
+}
+#endif
+
+int main(int argc, char **argv) {
+  if (argc != 4) {
+    fprintf(stderr, "usage: %s STEPS WARMUP BIAS_HIGH\n", argv[0]);
+    return 2;
+  }
+  int steps = atoi(argv[1]), warmup = atoi(argv[2]);
+  float biasHigh = (float)atof(argv[3]);
+  bias = malloc(sizeof(float) * N);
+  targets = malloc(sizeof(int32_t) * N * K);
+  weights = malloc(sizeof(float) * N * K);
+  // Weights scale with 1/K, so the input a neuron gets has about the same
+  // spread for every K.
+  float scale = 32.0f / K;
+  for (int i = 0; i < N; ++i)
+    bias[i] = uniform(0.02f, biasHigh);
+  for (int e = 0; e < N * K; ++e) {
+    targets[e] = (int32_t)(next() % N);
+    weights[e] = uniform(-0.15f, 0.12f) * scale;
+  }
+
+#if VARIANT == 3
+  ent_world *w = ent_world_create();
+  if (!w) {
+    fprintf(stderr, "cannot allocate the world\n");
+    return 1;
+  }
+  ent_entity *ids = malloc(sizeof(ent_entity) * N);
+  for (int i = 0; i < N; ++i) {
+    ent_entity id = ids[i] = ent_Cell_spawn(w);
+    int64_t row = ent_entity_row(w, id);
+    ent_Cell_Neuron_v(w)[row] = 0.0f;
+    ent_Cell_Neuron_input(w)[row] = 0.0f;
+    ent_Cell_Neuron_bias(w)[row] = bias[i];
+    ent_Cell_Neuron_fired(w)[row] = 0.0f;
+    ent_Cell_Spiked_present(w)[row] = 0;
+  }
+  for (int i = 0; i < N; ++i)
+    for (int e = i * K; e < (i + 1) * K; ++e)
+      if (!ent_Synapse_connect(w, ids[i], ids[targets[e]], weights[e]))
+        return 1;
+#define STEP() ent_step(w, decay, threshold)
+#define SPIKES() (*ent_Stats_spikes(w))
+#define POTENTIAL(i) (ent_Cell_Neuron_v(w)[ent_entity_row(w, ids[i])])
+#else
+  v = calloc(N, sizeof(float));
+  input = calloc(N, sizeof(float));
+  fired = calloc(N, sizeof(float));
+  in_offsets = calloc(N + 1, sizeof(int32_t));
+  in_sources = malloc(sizeof(int32_t) * N * K);
+  in_weights = malloc(sizeof(float) * N * K);
+  for (int e = 0; e < N * K; ++e)
+    ++in_offsets[targets[e] + 1];
+  for (int i = 0; i < N; ++i)
+    in_offsets[i + 1] += in_offsets[i];
+  int32_t *cursor = malloc(sizeof(int32_t) * N);
+  memcpy(cursor, in_offsets, sizeof(int32_t) * N);
+  for (int e = 0; e < N * K; ++e) {
+    int32_t at = cursor[targets[e]]++;
+    in_sources[at] = e / K;
+    in_weights[at] = weights[e];
+  }
+  free(cursor);
+#define STEP() step()
+#define SPIKES() spikes
+#define POTENTIAL(i) (v[i])
+#endif
+
+  // Warm up (the first ent step also sorts the edges).
+  for (int s = 0; s < warmup; ++s)
+    STEP();
+  long long before = SPIKES();
+  double start = now();
+  for (int s = 0; s < steps; ++s)
+    STEP();
+  double elapsed = now() - start;
+  long long during = SPIKES() - before;
+
+  uint64_t hash = 1469598103934665603ull;
+  for (int i = 0; i < N; ++i) {
+    float p = POTENTIAL(i);
+    uint32_t bits;
+    memcpy(&bits, &p, sizeof bits);
+    hash = (hash ^ bits) * 1099511628211ull;
+  }
+  printf("ns_per_step=%.0f spikes_per_step=%.1f checksum=%016llx\n",
+         elapsed / steps, (double)during / steps, (unsigned long long)hash);
+  return 0;
+}
