@@ -15,7 +15,7 @@ ecs.system @hurt(%d: f32) writes [@H, @G] {
 }
 
 ecs.system @pass(%d: f32) reads [@T, @G] writes [@H] {
-  // expected-remark @+1 {{scans every entity on each run: it applies values to other entities, which are combined in row order}}
+  // expected-remark @+1 {{scans every entity on each run: it applies or accumulates values, which are combined in row order}}
   ecs.query (%t: !ecs.ref<@T>) on [changed @G] {
     %id = ecs.get %t "entity" : !ecs.ref<@T> -> !ecs.entity
     ecs.apply %id @H "hp" add %d : f32

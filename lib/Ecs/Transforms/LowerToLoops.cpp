@@ -104,7 +104,7 @@ public:
   }
   /// The buffer `apply` fills from the entities of `archetype`: a target
   /// id and a value per row.
-  std::pair<Value, Value> applyBuffer(ApplyOp apply,
+  std::pair<Value, Value> applyBuffer(Operation *apply,
                                       const WorldArchetype &archetype) {
     auto index =
         apply->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
@@ -592,7 +592,7 @@ static bool isEntityLocal(QueryOp query) {
     // not change what they read.
     // Applies write the entity's own slot of their buffer.
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, LookupOp,
-            ApplyOp, YieldOp>(op) ||
+            ApplyOp, AccumulateOp, YieldOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
     return WalkResult::interrupt();
@@ -724,7 +724,7 @@ static void lowerResourceAccesses(IRRewriter &rewriter, func::FuncOp func,
 static bool canRunForAbsentEntities(QueryOp query) {
   WalkResult result = query.getBody().walk([](Operation *op) {
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, LookupOp,
-            ApplyOp, YieldOp, scf::IfOp, scf::YieldOp>(op))
+            ApplyOp, AccumulateOp, YieldOp, scf::IfOp, scf::YieldOp>(op))
       return WalkResult::advance();
     if (op->getNumRegions() == 0 && isPure(op))
       return WalkResult::advance();
@@ -963,8 +963,8 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
   SmallVector<Operation *> accesses;
   for (Operation *root : roots)
     root->walk([&](Operation *op) {
-      if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp, EntityOp, ApplyOp>(
-              op))
+      if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp, EntityOp, ApplyOp,
+              AccumulateOp>(op))
         accesses.push_back(op);
     });
   for (Operation *op : accesses) {
@@ -1034,6 +1034,19 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                               world.toStorage(loc, apply.getValue()), values,
                               ValueRange{entity});
       rewriter.eraseOp(op);
+    } else if (auto accumulate = dyn_cast<AccumulateOp>(op)) {
+      // The same, with "sent" (0) for a target id.
+      auto [ids, values] = world.applyBuffer(accumulate, archetype);
+      Value sent = arith::ConstantIntOp::create(
+          rewriter, loc,
+          cast<MemRefType>(ids.getType()).getElementType(), 0);
+      if (mask)
+        sent = arith::SelectOp::create(rewriter, loc, mask, sent,
+                                       world.noEntity(loc));
+      memref::StoreOp::create(rewriter, loc, sent, ids, ValueRange{entity});
+      memref::StoreOp::create(rewriter, loc, accumulate.getValue(), values,
+                              ValueRange{entity});
+      rewriter.eraseOp(op);
     } else if (auto entityOp = dyn_cast<EntityOp>(op)) {
       Value id = world.entityId(loc, archetype, entity);
       rewriter.replaceOp(op, world.fromStorage(loc, id, entityOp.getType()));
@@ -1099,7 +1112,9 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                           isStructuralFor(query, archetypeOp));
   // An apply that may not run for this entity (it is under an `if`, or the
   // body is guarded) must still leave its slot saying "no target".
-  query.getBody().walk([&](ApplyOp apply) {
+  query.getBody().walk([&](Operation *apply) {
+    if (!isa<ApplyOp, AccumulateOp>(apply))
+      return;
     if (!guarded && apply->getBlock() == &query.getBody().front())
       return;
     Value ids = world.applyBuffer(apply, archetype).first;
@@ -1668,11 +1683,11 @@ static std::optional<std::string> whyScans(QueryOp query,
       return "the event log of a trigger has capacity 0";
   bool applies = false, spawns = false;
   query.getBody().walk([&](Operation *op) {
-    applies |= isa<ApplyOp>(op);
+    applies |= isa<ApplyOp, AccumulateOp>(op);
     spawns |= isa<SpawnOp>(op);
   });
   if (applies)
-    return std::string("it applies values to other entities, which are "
+    return std::string("it applies or accumulates values, which are "
                        "combined in row order");
   if (spawns || llvm::any_of(getMatchedArchetypes(query),
                              [&](ArchetypeOp archetype) {
@@ -1785,6 +1800,40 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
   }
 }
 
+/// Fold the values `accumulate` sent from the first `count` rows of
+/// `archetype` into its resource field, at the insertion point, one row
+/// after another (rows that sent nothing are skipped), so the result does
+/// not depend on how the query's loop ran.
+static void combineAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
+                               const WorldArchetype &archetype,
+                               WorldAccess &world, Value count) {
+  Location loc = accumulate.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  auto [ids, values] = world.applyBuffer(accumulate, archetype);
+  Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
+                                    accumulate.getFieldAttr());
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
+  auto loop = scf::ForOp::create(rewriter, loc, zero, count, one,
+                                 ValueRange{start});
+  rewriter.setInsertionPointToStart(loop.getBody());
+  Value row = loop.getInductionVar();
+  Value sum = loop.getRegionIterArg(0);
+  Value sent = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::ne,
+      memref::LoadOp::create(rewriter, loc, ids, ValueRange{row}),
+      world.noEntity(loc));
+  Value value = memref::LoadOp::create(rewriter, loc, values, ValueRange{row});
+  Value next = arith::SelectOp::create(
+      rewriter, loc, sent,
+      combine(rewriter, loc, accumulate.getRule(), sum, value), sum);
+  scf::YieldOp::create(rewriter, loc, ValueRange{next});
+  rewriter.setInsertionPointAfter(loop);
+  memref::StoreOp::create(rewriter, loc, loop.getResult(0), field,
+                          ValueRange{zero});
+}
+
 /// Replace a query by one loop per matching archetype. The body is cloned
 /// into each loop, and every ref access becomes a load or store at the
 /// loop's index in the column of the ref's component and field.
@@ -1888,6 +1937,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
 
   SmallVector<ApplyOp> applies;
   query.getBody().walk([&](ApplyOp apply) { applies.push_back(apply); });
+  SmallVector<AccumulateOp> accumulates;
+  query.getBody().walk(
+      [&](AccumulateOp accumulate) { accumulates.push_back(accumulate); });
   // A query visits the entities that exist when it starts: count every
   // matched archetype now, before any of its loops, since a body may spawn
   // into an archetype whose loop comes later. The same counts bound the
@@ -1914,7 +1966,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       continue;
     rewriter.setInsertionPoint(anchor);
     Value rows = startCounts.lookup(&archetype);
-    if (!applies.empty())
+    if (!applies.empty() || !accumulates.empty())
       visited.push_back({&archetype, rows});
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, entityLocal,
@@ -1993,6 +2045,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   for (ApplyOp apply : applies)
     for (auto [archetype, count] : visited)
       combineApplied(rewriter, apply, layout, *archetype, world, count, tick);
+  for (AccumulateOp accumulate : accumulates)
+    for (auto [archetype, count] : visited)
+      combineAccumulated(rewriter, accumulate, *archetype, world, count);
 
   // Despawns and moves take effect when the whole query has run, so an
   // entity moved into another archetype the query matches is not visited
@@ -2099,7 +2154,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       bool writesResource =
           system
               .walk([](Operation *op) {
-                return isa<WriteOp, SpawnOp, DespawnOp, LookupOp, ApplyOp>(op)
+                return isa<WriteOp, SpawnOp, DespawnOp, LookupOp, ApplyOp,
+                           AccumulateOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -2346,9 +2402,10 @@ struct EcsLowerToLoops
     // Tag every apply with its buffers' index in the layout, which lists
     // them in the same walk order; clones keep the tag.
     unsigned applyIndex = 0;
-    module.walk([&](ApplyOp apply) {
-      apply->setAttr(WorldLayout::kApplyIndexAttr,
-                     rewriter.getI64IntegerAttr(applyIndex++));
+    module.walk([&](Operation *apply) {
+      if (isa<ApplyOp, AccumulateOp>(apply))
+        apply->setAttr(WorldLayout::kApplyIndexAttr,
+                       rewriter.getI64IntegerAttr(applyIndex++));
     });
     warnAboutReactiveQueries(module);
     // The same for reactive queries and their last ticks.

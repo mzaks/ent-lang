@@ -89,7 +89,8 @@ struct WorldResource {
 
 /// The values one `ecs.apply` sends from the entities of one archetype: a
 /// target id and a value per row. A row whose entity sent nothing holds the
-/// all-ones id (`ECS_NO_ENTITY`).
+/// all-ones id (`ECS_NO_ENTITY`). An `ecs.accumulate` uses the same buffers;
+/// its ids only say whether the row sent a value (0) or not.
 struct WorldApplyBuffer {
   /// Index of the source archetype.
   unsigned archetype;
@@ -217,8 +218,8 @@ struct WorldLayout {
 
   SmallVector<WorldArchetype> archetypes;
   SmallVector<WorldResource> resources;
-  /// One entry per `ecs.apply` in the module, in walk order; the lowering
-  /// tags each op with its index (see kApplyIndexAttr).
+  /// One entry per `ecs.apply` and `ecs.accumulate` in the module, in walk
+  /// order; the lowering tags each op with its index (see kApplyIndexAttr).
   SmallVector<WorldApply> applies;
   static constexpr llvm::StringLiteral kApplyIndexAttr = "ecs.apply_index";
 

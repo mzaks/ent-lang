@@ -174,6 +174,10 @@ SystemAccess mlir::ecs::computeAccess(SystemOp system,
     if (auto read = dyn_cast<ReadOp>(op))
       return (void)access.reads.insert(
           {StringAttr(), read.getResourceAttr().getAttr(), read.getFieldAttr()});
+    if (auto accumulate = dyn_cast<AccumulateOp>(op))
+      return (void)access.writes.insert({StringAttr(),
+                                         accumulate.getResourceAttr().getAttr(),
+                                         accumulate.getFieldAttr()});
     if (auto write = dyn_cast<WriteOp>(op))
       return (void)access.writes.insert({StringAttr(),
                                          write.getResourceAttr().getAttr(),

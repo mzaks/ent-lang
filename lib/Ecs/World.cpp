@@ -338,9 +338,13 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
 
   // A target id and a value per row, for each apply and each archetype its
   // query matches.
-  module.walk([&](ApplyOp apply) {
+  // Accumulates into resources use the same buffers, the id saying only
+  // whether the row sent a value.
+  module.walk([&](Operation *apply) {
+    if (!isa<ApplyOp, AccumulateOp>(apply))
+      return;
     WorldApply entry;
-    entry.type = apply.getValue().getType();
+    entry.type = apply->getOperand(apply->getNumOperands() - 1).getType();
     for (ArchetypeOp source :
          getMatchedArchetypes(apply->getParentOfType<QueryOp>())) {
       for (WorldArchetype &archetype : layout.archetypes) {

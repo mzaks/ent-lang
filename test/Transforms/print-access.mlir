@@ -144,3 +144,13 @@ ecs.system @toggle() reads [@Hp] writes [@Guard] {
     ecs.remove @Guard
   }
 }
+
+// An accumulate writes the resource field (and reads it: a write conflicts
+// like a read too).
+ecs.resource @Score (points: i64)
+// expected-remark @+1 {{reads A.count, B.count; writes Score.points}}
+ecs.system @scoreAll(%v: i64) reads [@P] writes [@Score] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    ecs.accumulate @Score "points" add %v : i64
+  }
+}

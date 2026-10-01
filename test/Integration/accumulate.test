@@ -1,0 +1,30 @@
+// ecs.accumulate from a query whose loop runs sequentially and, forced, in
+// parallel: both give the same, row-ordered result.
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/Inputs/accumulate.mlir \
+// RUN:     -o %t.dir/accumulate_world.h
+
+// RUN: ecs-opt %S/Inputs/accumulate.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
+// RUN: clang -O2 -Wno-override-module %t.seq.ll -I%t.dir \
+// RUN:     %S/Inputs/accumulate_main.c -o %t.seq
+// RUN: %t.seq | FileCheck %s
+
+// RUN: ecs-opt %S/Inputs/accumulate.mlir \
+// RUN:     "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ecs-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
+// RUN: clang -O2 -Wno-override-module %t.par.ll -I%t.dir \
+// RUN:     %S/Inputs/accumulate_main.c %openmp -o %t.par
+// RUN: %t.par | FileCheck %s
+
+// In row order, (0 + 1e8) + 1 rounds back to 1e8 in f32, and adding -1e8
+// gives 0 (another order could give 1). lo = min(100, 5, -3, 7); two of the
+// armed sources have a positive n. The unarmed source sends nothing (its
+// 1000 and -50 would show).
+// CHECK: total: sum 0.0 lo -3 count 2
+// Armed sources read the sum the query started with; the unarmed one kept
+// -1.
+// CHECK-NEXT: seen: 0.0 0.0 0.0 -1.0
