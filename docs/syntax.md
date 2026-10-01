@@ -14,6 +14,7 @@ build/bin/ent-opt bullets.mlir --ent-lower-to-loops ...   # as in the README
 
 `examples/*.ent` are the examples of `examples/*.mlir` written in ent-lang;
 the integration tests run both and expect the same output.
+`examples/filters.ent` (filters, `has`, `run_if`) exists only in ent-lang.
 
 ## Declarations
 
@@ -54,14 +55,26 @@ bound components:
 for e, p: Position, h: mut Hull with Enemy where h.hp < 10 on changed Hull.hp {
   ...
 }
+for e, h: mut Hull with Enemy, any(Fire, Ice) without Shield { ... }
+for e with Enemy { ... }          // binds no component
+for with Enemy { Count += 1 }     // nor the entity
 ```
 
 - `e,` (optional, first) names the visited entity: `e` is its id, and
   `e.destroy()`, `e.add(Shield)`, `e.add(Stunned { seconds: 2.0 })`,
   `e.remove(Shield)` change it (deferred as the sync-point rules say).
+  `e.has(Shield)` is a bool: whether the entity had `Shield` when the `for`
+  started, so `if e.has(S) { e.remove(S) } else { e.add(S) }` toggles it
+  however `S` is stored.
 - `name: Component` binds a component read-only, `name: mut Component`
   writably.
-- `with A, B` only filters: the entities must have them.
+- `with A, B` only filters: the entities must have them. `any(A, B)` in
+  the `with` list: they must have at least one of them.
+- `without A, B`: the entities must have none of them.
+- Filters read only whether an entity has a component, never its fields, so
+  a system filtering by `C` does not wait for one writing `C`'s fields. Where
+  an archetype always or never holds the component, the compiler decides for
+  the whole archetype; where it holds it optionally, per entity.
 - `where cond` runs the body only where `cond` holds.
 - `on changed C.f, changed C, added C, removed C` makes the query reactive;
   `log N` after a trigger sets its event log's capacity (`log 0`: none).
@@ -105,8 +118,20 @@ Runs systems in order; arguments may be literals, which take the system
 parameter's type. Systems must be declared before the schedules that run
 them.
 
+```
+schedule frame(dt: f32) run_if !Paused {
+  setup() run_if Clock.frame == 0
+  move(dt)
+}
+```
+
+`run_if cond` makes a run, or the whole schedule, conditional. The condition
+is a bool over uniques and the schedule's parameters, evaluated when the run
+(or the schedule) would start; its reads count as the run's when the
+scheduler forms stages, and a conditional run is never fused with others.
+
 ## Not yet supported
 
-`without`, `any`/or-terms, `run_if`, `fn`/`proc`, relations, `world`,
-devices, prefabs, mutable locals (`var`), loops: each is reported as "not
-supported yet" where it would start.
+`fn`/`proc`, relations, `world`, devices, prefabs, optional bindings
+(`T?`), mutable locals (`var`), loops: each is reported as "not supported
+yet" where it would start.

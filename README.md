@@ -54,7 +54,8 @@ Programs are written in `.ent` files and imported into the dialect below
 with `ent-translate --import-ent`; the syntax is described in
 [`docs/syntax.md`](docs/syntax.md), and `examples/*.ent` are the examples
 written that way (the integration tests run both forms and expect the same
-output):
+output; `examples/filters.ent`, for filters, `has` and `run_if`, exists only
+in ent-lang):
 
 ```
 component Position { x: f32 }
@@ -195,10 +196,24 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   within both, and the verifier says where it does not. `writes` implies
   read.
 - `ent.query (%p: !ent.ref<@Position, mut>, ...) { ... }`: body runs once per
-  matching entity; refs exist only as query arguments.
+  matching entity; refs exist only as query arguments. Filters follow the
+  arguments: `with [@Enemy] without [@Shield] any [@Fire, @Ice]` (the
+  entity has every `with` component, no `without` one, and one of each `any`
+  group). A query binds or filters by at least one component. Where an
+  archetype always or never holds a filtered component the match is decided
+  for the archetype; where it holds it optionally, by the presence per
+  entity, which joins the mask of optional bindings.
+- `%b = ent.has @Shield`: whether the visited entity had the component when
+  the query started (the query's own adds and removes land at its end, as
+  far as `has` can tell, however the component is stored); a constant where
+  the archetype always or never holds it.
 - `ent.get` / `ent.set`: field access through a ref; `set` needs `mut`.
 - `ent.schedule @frame(%params) { ent.run @s(...) }`: program order is the
-  semantic order.
+  semantic order. `ent.run @s() if { ...; ent.yield %c : i1 }` runs the
+  system only if the condition holds when the run would start;
+  `ent.schedule @frame(%p: T) if { ^bb0(%p: T): ... } { ... }` runs the
+  whole frame under a condition. Conditions read resources and compute
+  with ops free of side effects.
 - `ent.stage { ent.run ... }`: runs that commute and may execute in
   parallel; stages execute in order.
 
@@ -216,7 +231,9 @@ match; it does not need declarations, and where a system declares its
 access the analysis is still finer: two systems that both write `Velocity`
 do not conflict if one only touches `Body.Velocity.dy` and the other only
 `Particle.Velocity.dx`, and binding a component to select archetypes is not
-a read. Resource fields are columns too (`Clock.frame`), so a system that
+a read; nor is a filter, which reads at most the presence where the
+component is optional. A run's condition adds its resource reads to the
+run's access. Resource fields are columns too (`Clock.frame`), so a system that
 writes a resource is ordered against the systems that read it, and so is
 the presence of an optional component (`Character.Stunned?`): adding or
 removing it is ordered against every query that binds it. Every query reads
@@ -316,7 +333,8 @@ different archetypes share no columns. Two consequences the lowering uses:
   not: running all bodies for one entity before the next gives the same
   result as running each query to completion. A system that writes a
   resource ends a fused sequence, because fusion moves system-level code
-  ahead of the queries.
+  ahead of the queries. So does a run under a condition, which runs as a
+  whole or not at all.
 - Since no query writes a resource, a resource read inside a query is
   loaded once before the loop.
 - A spawn checks the capacity, writes row `count`, allocates an id (the

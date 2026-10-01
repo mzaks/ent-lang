@@ -36,7 +36,8 @@ last started (see R1).
 entity read and write its row at once; a later op of the same body sees the
 new value. Adding or removing a component the archetype holds optionally sets
 or clears its presence at once, for the same reason: the row belongs to the
-entity.
+entity. No op of the body observes that, though: `ent.has` answers as of the
+query's start (Q7).
 
 **Q3. Other entities, as of the query's start.** `ent.lookup` reads another
 entity's field. A query may not look up a field it changes itself (the
@@ -60,6 +61,14 @@ query runs:
 **Q6. Immediate, but not visited.** `ent.spawn` appends the new entity at
 once: its id is valid and it is visible to lookups and to every later query,
 but not visited by the query that spawned it (Q1).
+
+**Q7. Whether it has a component, as of the query's start.** `ent.has @C`
+tells whether the visited entity had `C` when the query started; the query's
+own `ent.add` and `ent.remove` do not change the answer. Where `C` is
+optional the change is immediate (Q2) and where the entity moves it is
+deferred (Q5), so answering with the current state would make the result
+depend on how the archetypes store `C`. Filters (`with`, `without`, `any`)
+are decided the same way: they choose the entities the query visits (Q1).
 
 ## The commit point: the end of a query
 
@@ -90,6 +99,12 @@ take effect at once.
 **S3.** A schedule runs its systems in program order. One call of a schedule
 is a frame: what the host sees after the call is the state after the last
 run's last commit point.
+
+**S4.** A run's condition (`run_if`) is evaluated when the run would start,
+after every earlier run's commit points; a schedule's condition when the
+schedule starts. A condition only reads resources (and the schedule's
+parameters), so evaluating it has no effect; a run whose condition fails
+does nothing.
 
 ## Reactive queries
 

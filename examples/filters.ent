@@ -1,0 +1,97 @@
+// Filters, `has` and `run_if`: a skirmish where exposed enemies (those
+// without a shield) take damage, units with fire or ice are counted, and
+// enemies raise and drop their shields in turns. The world is populated by
+// a system that runs only in frame 0, units regenerate every other frame,
+// and the whole frame is skipped while the game is paused.
+//
+// Shield comes and goes, so the compiler makes it optional in the inferred
+// archetypes: the filters test its presence per entity. Fire and Ice never
+// change, so for them the filters decide per archetype. Uncommenting the
+// two `MOVES:` archetypes stores Shield by moving entities between them
+// instead; the program prints the same.
+
+component Hull { hp: i32 } capacity 8
+tag Enemy
+tag Shield
+tag Fire
+tag Ice
+
+// MOVES: archetype Grunt { Hull, Enemy } capacity 8
+// MOVES: archetype ShieldedGrunt { Hull, Enemy, Shield } capacity 8
+
+unique Clock { frame: i64 }
+unique Paused: bool
+unique Stats { enemies: i32, exposed: i32, elemental: i32, shielded: i32, hp: i32 }
+
+system setup() {
+  spawn { Hull { hp: 10 }, Enemy }
+  spawn { Hull { hp: 10 }, Enemy, Shield }
+  spawn { Hull { hp: 10 }, Enemy, Ice }
+  spawn { Hull { hp: 10 }, Fire }
+  spawn { Hull { hp: 10 } }
+}
+
+system reset() {
+  Stats.enemies = 0
+  Stats.exposed = 0
+  Stats.elemental = 0
+  Stats.shielded = 0
+  Stats.hp = 0
+}
+
+// Binds nothing: counts enemies.
+system census() {
+  for with Enemy {
+    Stats.enemies += 1
+  }
+}
+
+system strike() {
+  for h: mut Hull with Enemy without Shield {
+    h.hp -= 3
+    Stats.exposed += 1
+  }
+}
+
+system elements() {
+  for h: Hull with any(Fire, Ice) {
+    Stats.elemental += 1
+  }
+}
+
+// `has` answers as of the start of the query, so the second test still
+// sees the shield state before the toggle, however Shield is stored.
+system toggle() {
+  for e with Enemy {
+    if e.has(Shield) { e.remove(Shield) } else { e.add(Shield) }
+    if e.has(Shield) { Stats.shielded += 1 }
+  }
+}
+
+system regen() {
+  for h: mut Hull without Fire {
+    h.hp += 1
+  }
+}
+
+system report() {
+  for h: Hull {
+    Stats.hp += h.hp
+  }
+}
+
+system tick() {
+  Clock.frame += 1
+}
+
+schedule frame() run_if !Paused {
+  setup() run_if Clock.frame == 0
+  reset()
+  census()
+  strike()
+  elements()
+  toggle()
+  regen() run_if Clock.frame % 2 == 0
+  report()
+  tick()
+}

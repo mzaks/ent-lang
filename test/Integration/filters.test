@@ -1,0 +1,72 @@
+// Filters, `has` and `run_if` end to end (examples/filters.ent): run as
+// written, fused (conditional runs stay calls), with parallel stages and
+// with parallel entity loops forced on; then with Shield stored by moving
+// entities between two declared archetypes instead of as optional. All
+// print the same.
+// RUN: mkdir -p %t.dir %t.moves
+// RUN: ent-translate --import-ent %S/../../examples/filters.ent -o %t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/filters_world.h
+
+// RUN: ent-opt %t.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
+// RUN: clang -O2 -Wno-override-module %t.seq.ll \
+// RUN:     -I%t.dir %S/../../examples/host/filters_main.c -o %t.seq
+// RUN: %t.seq | FileCheck %s
+
+// RUN: ent-opt %t.mlir --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
+// RUN: clang -O2 -Wno-override-module %t.fused.ll \
+// RUN:     -I%t.dir %S/../../examples/host/filters_main.c -o %t.fused
+// RUN: %t.fused | FileCheck %s
+
+// RUN: ent-opt %t.mlir --ent-schedule \
+// RUN:     --ent-lower-to-loops=parallel-stages=1 --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.stages.ll
+// RUN: clang -O2 -Wno-override-module %t.stages.ll \
+// RUN:     -I%t.dir %S/../../examples/host/filters_main.c %openmp -o %t.stages
+// RUN: %t.stages | FileCheck %s
+
+// RUN: ent-opt %t.mlir \
+// RUN:     "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
+// RUN: clang -O2 -Wno-override-module %t.par.ll \
+// RUN:     -I%t.dir %S/../../examples/host/filters_main.c %openmp -o %t.par
+// RUN: %t.par | FileCheck %s
+
+// RUN: sed -e 's|^// MOVES: ||' %S/../../examples/filters.ent > %t.moves.ent
+// RUN: ent-translate --import-ent %t.moves.ent -o %t.moves.mlir
+// RUN: ent-translate --ent-to-c-header %t.moves.mlir \
+// RUN:     -o %t.moves/filters_world.h
+// RUN: FileCheck %s --check-prefix=MOVES < %t.moves/filters_world.h
+// RUN: ent-opt %t.moves.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.mseq.ll
+// RUN: clang -O2 -Wno-override-module %t.mseq.ll \
+// RUN:     -I%t.moves %S/../../examples/host/filters_main.c -o %t.mseq
+// RUN: %t.mseq | FileCheck %s
+// RUN: ent-opt %t.moves.mlir --ent-lower-to-loops=fuse-systems=1 \
+// RUN:     --symbol-dce --convert-scf-to-cf --convert-to-llvm \
+// RUN:     --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.mfused.ll
+// RUN: clang -O2 -Wno-override-module %t.mfused.ll \
+// RUN:     -I%t.moves %S/../../examples/host/filters_main.c -o %t.mfused
+// RUN: %t.mfused | FileCheck %s
+
+// The moves variant really stores Shield by archetype.
+// MOVES: #define ENT_ARCHETYPE_Grunt 0
+// MOVES: #define ENT_ARCHETYPE_ShieldedGrunt 1
+
+// Frame 0: setup spawns three enemies (one shielded) and two others.
+// Exposed: the two without a shield; elemental: the ice enemy and the fire
+// unit; shielded counts the state before the toggle (one), and regen runs.
+// CHECK:      frame 0: clock 1 enemies 3 exposed 2 elemental 2 shielded 1 hp 48
+// Frame 1: shields swapped; no regen in odd frames.
+// CHECK-NEXT: frame 1: clock 2 enemies 3 exposed 1 elemental 2 shielded 2 hp 45
+// Frame 2 is paused: nothing runs, the clock stays.
+// CHECK-NEXT: frame 2: clock 2 enemies 3 exposed 1 elemental 2 shielded 2 hp 45
+// CHECK-NEXT: frame 3: clock 3 enemies 3 exposed 2 elemental 2 shielded 1 hp 43
