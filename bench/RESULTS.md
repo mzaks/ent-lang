@@ -926,3 +926,47 @@ cores before, between or after (load average 2.4-2.5).
   builds.
 - Bounding the writers' cost in dense frames further, e.g. by skipping the
   segment check after a writer loop saw its segment full.
+
+## 2026-10-01: walking event-log segments in parallel
+
+Same machine and toolchain. With parallel entity loops, a reactive query
+now walks its logs' segments in parallel once at least
+`parallel-min-events` entries are pending (default 16,384); `compiled-par`
+uses the default, `compiled-par-walk1` walks in parallel however few
+entries are pending. 1e6 units, us per frame, median of 5 processes
+(spread). Checksums agree in all configurations. A `launchd` spike (84% of
+a core) before the light runs and Spotlight indexing (80%) after the heavy
+ones; spreads are mostly at most 6% (up to 19% in a few heavy cells), and
+the variants this change does not touch agree with the previous run
+within 1-3%.
+
+| changed | work | compiled (sequential walk) | compiled-par | compiled-par-walk1 | compiled-par-scan |
+|---|---|---|---|---|---|
+| 0.01% | light | 272.0 (3%) | **81.9 (10%)** | 113.3 (14%) | 141.0 (5%) |
+| 0.10% | light | 294.2 (1%) | **91.4 (1%)** | 121.7 (9%) | 139.1 (4%) |
+| 1.00% | light | 371.8 (2%) | **145.3 (7%)** | 154.1 (6%) | 151.6 (6%) |
+| 10.00% | light | 560.9 (3%) | 162.8 (2%) | 159.8 (4%) | **155.8 (2%)** |
+| 100.00% | light | 1,059.3 (2%) | 214.2 (2%) | **213.4 (4%)** | 226.0 (4%) |
+| 0.01% | heavy | 279.5 (3%) | **84.4 (13%)** | 125.9 (11%) | 150.0 (10%) |
+| 0.10% | heavy | 300.4 (19%) | **102.8 (6%)** | 125.7 (7%) | 152.1 (5%) |
+| 1.00% | heavy | 442.8 (16%) | 216.4 (5%) | **164.5 (5%)** | 212.0 (5%) |
+| 10.00% | heavy | 1,074.1 (2%) | **225.2 (3%)** | 225.3 (3%) | 242.6 (3%) |
+| 100.00% | heavy | 7,237.7 (1%) | 1,033.2 (2%) | 1,031.3 (2%) | **1,020.6 (3%)** |
+
+The full tables (all variants) are in the run's output; the C variants
+match the previous section's.
+
+### What holds
+
+- The parallel walk closes the gap at 10% changed: 163 us against 277
+  before (light) and 225 against 792 (heavy), 4.5% slower than the
+  parallel scan light and 7% faster heavy. With logs, parallel builds are
+  now within 5% of scanning or faster at every rate measured, and 1.5-1.8x
+  faster up to 0.1% changed.
+- Walking in parallel with few entries pending costs its fork: 113-126 us
+  against 82-103 us for a sequential walk up to 0.1% changed. At 1%
+  (about 10,000 entries, below the default threshold) the sequential walk
+  wins with light work (145 against 154 us) and the parallel one with
+  heavy work (216 against 165 us): the break-even lies near 10,000 entries
+  and depends on the work per entity, which a fixed threshold cannot see.
+  The default stays at 16,384; a profile of a recorded run could set it.
