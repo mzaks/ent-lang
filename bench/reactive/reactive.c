@@ -25,7 +25,9 @@
 //                bumped for every chunk a system has write access to,
 //                written or not; redraw handles the chunks whose hp version
 //                is newer (here: all, since hit has write access to all)
-//   -DVARIANT=6  compiled: bench/reactive/react.mlir, lowered by ecs-opt
+//   -DVARIANT=6  compiled: bench/reactive/react.mlir, lowered by ecs-opt;
+//                run.py builds it with the trigger's event log (walk the
+//                changed units, scan when it overflows) and without
 //   -DHEAVY      f is a 32-step loop instead of one multiply-add
 //
 // Usage: reactive <units> <threshold> <frames> <repetitions>

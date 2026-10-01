@@ -30,16 +30,20 @@ LOWER = ["--convert-scf-to-cf", "--convert-to-llvm",
          "--reconcile-unrealized-casts"]
 PARALLEL = ["--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1",
             "--convert-scf-to-openmp", "--canonicalize", "--ecs-omp-nowait"]
-# name: (VARIANT, ecs-opt passes before LOWER or None, OpenMP)
+# name: (VARIANT, ecs-opt passes before LOWER or None, OpenMP, event log)
+# The compiled variants walk the trigger's event log (default capacity, an
+# eighth of the units) unless "-scan" says `log 0`: scan every unit.
 VARIANTS = {
-    "c-poll": (0, None, False),
-    "c-rowstamp": (1, None, False),
-    "c-blockstamp": (2, None, False),
-    "c-collector": (3, None, False),
-    "c-bevy": (4, None, False),
-    "c-unity": (5, None, False),
-    "compiled": (6, ["--ecs-lower-to-loops"], False),
-    "compiled-par": (6, PARALLEL, True),
+    "c-poll": (0, None, False, True),
+    "c-rowstamp": (1, None, False, True),
+    "c-blockstamp": (2, None, False, True),
+    "c-collector": (3, None, False, True),
+    "c-bevy": (4, None, False, True),
+    "c-unity": (5, None, False, True),
+    "compiled": (6, ["--ecs-lower-to-loops"], False, True),
+    "compiled-scan": (6, ["--ecs-lower-to-loops"], False, False),
+    "compiled-par": (6, PARALLEL, True, True),
+    "compiled-par-scan": (6, PARALLEL, True, False),
 }
 # The heavy redraw: 32 steps of w = w * 0.999 + 0.001 from w = hp, as
 # bar() in reactive.c computes with -DHEAVY.
@@ -57,9 +61,14 @@ HEAVY_WORK = """\
 """
 
 
-def program(work):
-    """react.mlir, with the heavy work swapped in if asked for."""
+def program(work, log):
+    """react.mlir, with the heavy work swapped in if asked for, and without
+    an event log unless `log`."""
     text = open(PROGRAM).read()
+    if not log:
+        trigger = 'on [changed @Hull "hp"]'
+        assert trigger in text
+        text = text.replace(trigger, 'on [changed @Hull "hp" log 0]')
     if work == "light":
         return text
     begin = text.index("    // BEGIN WORK")
@@ -67,15 +76,17 @@ def program(work):
     return text[:begin] + HEAVY_WORK + text[end:]
 
 
-def build(name, work, number, passes, openmp):
+def build(name, work, number, passes, openmp, log):
     directory = os.path.join(OUT, work)
     os.makedirs(directory, exist_ok=True)
     exe = os.path.join(directory, name)
     extra = ["-DHEAVY"] if work == "heavy" else []
     if passes:
+        directory = os.path.join(directory, name + ".d")
+        os.makedirs(directory, exist_ok=True)
         source = os.path.join(directory, "react.mlir")
         with open(source, "w") as f:
-            f.write(program(work))
+            f.write(program(work, log))
         subprocess.run([ECS_TRANSLATE, "--ecs-to-c-header", source, "-o",
                         os.path.join(directory, "react_world.h")], check=True)
         mlir = subprocess.run([ECS_OPT, source, *passes, *LOWER], check=True,
