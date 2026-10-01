@@ -30,6 +30,11 @@ LOWER = ["--convert-scf-to-cf", "--convert-to-llvm",
          "--reconcile-unrealized-casts"]
 PARALLEL = ["--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1",
             "--convert-scf-to-openmp", "--canonicalize", "--ecs-omp-nowait"]
+# The same, walking event logs in parallel however few entries are pending
+# (by default only from parallel-min-events of them).
+PARALLEL_WALK = ["--ecs-lower-to-loops=parallel-entities=1 "
+                 "parallel-min-entities=1 parallel-min-events=1",
+                 *PARALLEL[1:]]
 # name: (VARIANT, ecs-opt passes before LOWER or None, OpenMP, event log)
 # The compiled variants walk the trigger's event log (default capacity, an
 # eighth of the units) unless "-scan" says `log 0`: scan every unit.
@@ -43,6 +48,7 @@ VARIANTS = {
     "compiled": (6, ["--ecs-lower-to-loops"], False, True),
     "compiled-scan": (6, ["--ecs-lower-to-loops"], False, False),
     "compiled-par": (6, PARALLEL, True, True),
+    "compiled-par-walk1": (6, PARALLEL_WALK, True, True),
     "compiled-par-scan": (6, PARALLEL, True, False),
 }
 # The heavy redraw: 32 steps of w = w * 0.999 + 0.001 from w = hp, as
