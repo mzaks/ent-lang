@@ -1,2 +1,2 @@
-add_subdirectory(Ecs)
-add_subdirectory(Ecs/Transforms)
+add_subdirectory(Ent)
+add_subdirectory(Ent/Transforms)

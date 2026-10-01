@@ -1,9 +1,9 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops | FileCheck %s
+// RUN: ent-opt %s --ent-lower-to-loops | FileCheck %s
 
-ecs.component @P (x: f32)
-ecs.component @T (entity: !ecs.entity)
-ecs.archetype @Plain (@P) capacity 10
-ecs.archetype @Tagged (@P, @T) capacity 10
+ent.component @P (x: f32)
+ent.component @T (entity: !ent.entity)
+ent.archetype @Plain (@P) capacity 10
+ent.archetype @Tagged (@P, @T) capacity 10
 
 // Plain entities are despawned, so ids are generational: 20 slots need 5
 // bits, which leaves 27 generation bits in a 32-bit id. A lookup checks
@@ -26,15 +26,15 @@ ecs.archetype @Tagged (@P, @T) capacity 10
 // CHECK:          %[[WHERE:.*]] = arith.shrui %[[PACKED]], %{{.*}} : i32
 // CHECK:          arith.andi %[[PACKED]], %{{.*}} : i32
 // CHECK:          arith.cmpi eq, %[[WHERE]], %{{.*}} : i32
-ecs.system @chase() reads [@P, @T] {
-  ecs.query (%t: !ecs.ref<@T>) {
-    %target = ecs.get %t "entity" : !ecs.ref<@T> -> !ecs.entity
-    %x, %found = ecs.lookup %target @P "x" : f32
+ent.system @chase() reads [@P, @T] {
+  ent.query (%t: !ent.ref<@T>) {
+    %target = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
+    %x, %found = ent.lookup %target @P "x" : f32
   }
 }
 
-ecs.system @cull() reads [@P] writes [@Plain, @Tagged] {
-  ecs.query (%p: !ecs.ref<@P>) {
-    ecs.despawn
+ent.system @cull() reads [@P] writes [@Plain, @Tagged] {
+  ent.query (%p: !ent.ref<@P>) {
+    ent.despawn
   }
 }

@@ -1,9 +1,9 @@
 // Spawns during a query are not visited by it, whichever archetype loop of
 // the query comes later.
 // RUN: mkdir -p %t.dir
-// RUN: ecs-translate --ecs-to-c-header %S/Inputs/spawn_unvisited.mlir \
+// RUN: ent-translate --ent-to-c-header %S/Inputs/spawn_unvisited.mlir \
 // RUN:     -o %t.dir/spawn_unvisited_world.h
-// RUN: ecs-opt %S/Inputs/spawn_unvisited.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %S/Inputs/spawn_unvisited.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
 // RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \

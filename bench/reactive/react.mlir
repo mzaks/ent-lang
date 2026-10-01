@@ -5,15 +5,15 @@
 // its visit count. The work between the WORK markers is the light one; the
 // runner replaces it with a 32-step loop for the heavy one.
 
-ecs.component @Hull (hp: f32)
-ecs.component @Seed (s: i32)
-ecs.component @Bar (width: f32, visits: i32)
+ent.component @Hull (hp: f32)
+ent.component @Seed (s: i32)
+ent.component @Bar (width: f32, visits: i32)
 
-ecs.archetype @Unit (@Hull, @Seed, @Bar) capacity 1000000
+ent.archetype @Unit (@Hull, @Seed, @Bar) capacity 1000000
 
-ecs.system @hit(%frame: i32, %threshold: i32) reads [@Seed] writes [@Hull] {
-  ecs.query (%h: !ecs.ref<@Hull, mut>, %s: !ecs.ref<@Seed>) {
-    %seed = ecs.get %s "s" : !ecs.ref<@Seed> -> i32
+ent.system @hit(%frame: i32, %threshold: i32) reads [@Seed] writes [@Hull] {
+  ent.query (%h: !ent.ref<@Hull, mut>, %s: !ent.ref<@Seed>) {
+    %seed = ent.get %s "s" : !ent.ref<@Seed> -> i32
     %a = arith.constant -1640531535 : i32
     %b = arith.constant 40503 : i32
     %x0 = arith.muli %seed, %a : i32
@@ -25,33 +25,33 @@ ecs.system @hit(%frame: i32, %threshold: i32) reads [@Seed] writes [@Hull] {
     %m = arith.andi %shifted, %mask : i32
     %chosen = arith.cmpi ult, %m, %threshold : i32
     scf.if %chosen {
-      %hp = ecs.get %h "hp" : !ecs.ref<@Hull, mut> -> f32
+      %hp = ent.get %h "hp" : !ent.ref<@Hull, mut> -> f32
       %one = arith.constant 1.0 : f32
       %less = arith.subf %hp, %one : f32
-      ecs.set %h "hp", %less : !ecs.ref<@Hull, mut>, f32
+      ent.set %h "hp", %less : !ent.ref<@Hull, mut>, f32
     }
   }
 }
 
-ecs.system @redraw() reads [@Hull] writes [@Bar] {
-  ecs.query (%h: !ecs.ref<@Hull>, %b: !ecs.ref<@Bar, mut>)
+ent.system @redraw() reads [@Hull] writes [@Bar] {
+  ent.query (%h: !ent.ref<@Hull>, %b: !ent.ref<@Bar, mut>)
       on [changed @Hull "hp"] {
-    %hp = ecs.get %h "hp" : !ecs.ref<@Hull> -> f32
+    %hp = ent.get %h "hp" : !ent.ref<@Hull> -> f32
     // BEGIN WORK (run.py swaps this block for the heavy work)
     %half = arith.constant 0.5 : f32
     %base = arith.constant 1.0 : f32
     %scaled = arith.mulf %hp, %half : f32
     %w = arith.addf %scaled, %base : f32
     // END WORK
-    ecs.set %b "width", %w : !ecs.ref<@Bar, mut>, f32
-    %v = ecs.get %b "visits" : !ecs.ref<@Bar, mut> -> i32
+    ent.set %b "width", %w : !ent.ref<@Bar, mut>, f32
+    %v = ent.get %b "visits" : !ent.ref<@Bar, mut> -> i32
     %one = arith.constant 1 : i32
     %next = arith.addi %v, %one : i32
-    ecs.set %b "visits", %next : !ecs.ref<@Bar, mut>, i32
+    ent.set %b "visits", %next : !ent.ref<@Bar, mut>, i32
   }
 }
 
-ecs.schedule @frame(%frame: i32, %threshold: i32) {
-  ecs.run @hit(%frame, %threshold) : i32, i32
-  ecs.run @redraw()
+ent.schedule @frame(%frame: i32, %threshold: i32) {
+  ent.run @hit(%frame, %threshold) : i32, i32
+  ent.run @redraw()
 }

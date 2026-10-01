@@ -4,10 +4,10 @@
 #include <stdio.h>
 
 int main(void) {
-  ecs_world *w = ecs_world_create();
+  ent_world *w = ent_world_create();
   for (int i = 0; i < 3; ++i) {
-    ecs_frame(w, (float)i);
-    printf("count %lld\n", (long long)ecs_A_count(w));
+    ent_frame(w, (float)i);
+    printf("count %lld\n", (long long)ent_A_count(w));
     fflush(stdout);
   }
   return 0;

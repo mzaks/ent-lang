@@ -4,30 +4,30 @@
 
 #include <stdio.h>
 
-static void source(ecs_world *w, float v, int n, int armed) {
-  int64_t row = ecs_entity_row(w, ecs_Source_spawn(w));
-  ecs_Source_Amount_v(w)[row] = v;
-  ecs_Source_Amount_n(w)[row] = n;
-  ecs_Source_Amount_seen(w)[row] = -1;
-  ecs_Source_Armed_present(w)[row] = armed;
+static void source(ent_world *w, float v, int n, int armed) {
+  int64_t row = ent_entity_row(w, ent_Source_spawn(w));
+  ent_Source_Amount_v(w)[row] = v;
+  ent_Source_Amount_n(w)[row] = n;
+  ent_Source_Amount_seen(w)[row] = -1;
+  ent_Source_Armed_present(w)[row] = armed;
 }
 
 int main(void) {
-  ecs_world *w = ecs_world_create();
-  *ecs_Total_sum(w) = 0;
-  *ecs_Total_lo(w) = 100;
-  *ecs_Total_count(w) = 0;
+  ent_world *w = ent_world_create();
+  *ent_Total_sum(w) = 0;
+  *ent_Total_lo(w) = 100;
+  *ent_Total_count(w) = 0;
   source(w, 1e8f, 5, 1);
   source(w, 1, -3, 1);
   source(w, -1e8f, 7, 1);
   source(w, 1000, -50, 0); // not armed: sends nothing
-  ecs_frame(w);
-  printf("total: sum %.1f lo %d count %lld\n", *ecs_Total_sum(w),
-         *ecs_Total_lo(w), (long long)*ecs_Total_count(w));
+  ent_frame(w);
+  printf("total: sum %.1f lo %d count %lld\n", *ent_Total_sum(w),
+         *ent_Total_lo(w), (long long)*ent_Total_count(w));
   printf("seen:");
   for (int i = 0; i < 4; ++i)
-    printf(" %.1f", ecs_Source_Amount_seen(w)[i]);
+    printf(" %.1f", ent_Source_Amount_seen(w)[i]);
   printf("\n");
-  ecs_world_destroy(w);
+  ent_world_destroy(w);
   return 0;
 }

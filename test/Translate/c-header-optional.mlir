@@ -1,24 +1,24 @@
-// RUN: ecs-translate --ecs-to-c-header %s | FileCheck %s
+// RUN: ent-translate --ent-to-c-header %s | FileCheck %s
 // RUN: mkdir -p %t.dir
-// RUN: ecs-translate --ecs-to-c-header %s -o %t.dir/world.h
+// RUN: ent-translate --ent-to-c-header %s -o %t.dir/world.h
 // RUN: echo '#include "world.h"' > %t.dir/use.c
 // RUN: clang -fsyntax-only -Wall -Wextra -Werror -I%t.dir %t.dir/use.c
 
-ecs.component @Q (q: f32)
-ecs.component @S (t: f32, u: f32)
-ecs.archetype @C (@Q, optional @S) capacity 100
+ent.component @Q (q: f32)
+ent.component @S (t: f32, u: f32)
+ent.archetype @C (@Q, optional @S) capacity 100
 
 // The optional component's fields are followed by its presence column.
 // A spawned entity starts without the optional component.
-// CHECK:      static inline ecs_entity ecs_C_spawn(ecs_world *world) {
+// CHECK:      static inline ent_entity ent_C_spawn(ent_world *world) {
 // CHECK-NEXT:   int64_t n = ((int64_t *)world)[0];
-// CHECK-NEXT:   if (n >= ECS_C_CAPACITY)
-// CHECK-NEXT:     return ECS_NO_ENTITY;
+// CHECK-NEXT:   if (n >= ENT_C_CAPACITY)
+// CHECK-NEXT:     return ENT_NO_ENTITY;
 // CHECK-NEXT:   ((uint8_t *)((char *)world + 5760))[n] = 0;
-// CHECK-NEXT:   ecs_entity id = ecs__allocate(world, 0, n);
-// CHECK:      static inline float *ecs_C_S_t(ecs_world *world) {
+// CHECK-NEXT:   ent_entity id = ent__allocate(world, 0, n);
+// CHECK:      static inline float *ent_C_S_t(ent_world *world) {
 // CHECK-NEXT:   return (float *)((char *)world + 2688);
-// CHECK:      static inline float *ecs_C_S_u(ecs_world *world) {
+// CHECK:      static inline float *ent_C_S_u(ent_world *world) {
 // CHECK-NEXT:   return (float *)((char *)world + 4224);
-// CHECK:      static inline uint8_t *ecs_C_S_present(ecs_world *world) {
+// CHECK:      static inline uint8_t *ent_C_S_present(ent_world *world) {
 // CHECK-NEXT:   return (uint8_t *)((char *)world + 5760);

@@ -22,20 +22,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
 OUT = os.path.join(ROOT, "build", "bench", "reactive")
-ECS_OPT = os.path.join(ROOT, "build", "bin", "ecs-opt")
-ECS_TRANSLATE = os.path.join(ROOT, "build", "bin", "ecs-translate")
+ENT_OPT = os.path.join(ROOT, "build", "bin", "ent-opt")
+ENT_TRANSLATE = os.path.join(ROOT, "build", "bin", "ent-translate")
 PROGRAM = os.path.join(HERE, "react.mlir")
 OPENMP = [f"-I{LLVM}/include", f"-L{LLVM}/lib", f"-Wl,-rpath,{LLVM}/lib"]
 LOWER = ["--convert-scf-to-cf", "--convert-to-llvm",
          "--reconcile-unrealized-casts"]
-PARALLEL = ["--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1",
-            "--convert-scf-to-openmp", "--canonicalize", "--ecs-omp-nowait"]
+PARALLEL = ["--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1",
+            "--convert-scf-to-openmp", "--canonicalize", "--ent-omp-nowait"]
 # The same, walking event logs in parallel however few entries are pending
 # (by default only from parallel-min-events of them).
-PARALLEL_WALK = ["--ecs-lower-to-loops=parallel-entities=1 "
+PARALLEL_WALK = ["--ent-lower-to-loops=parallel-entities=1 "
                  "parallel-min-entities=1 parallel-min-events=1",
                  *PARALLEL[1:]]
-# name: (VARIANT, ecs-opt passes before LOWER or None, OpenMP, event log)
+# name: (VARIANT, ent-opt passes before LOWER or None, OpenMP, event log)
 # The compiled variants walk the trigger's event log (default capacity, an
 # eighth of the units) unless "-scan" says `log 0`: scan every unit.
 VARIANTS = {
@@ -45,8 +45,8 @@ VARIANTS = {
     "c-collector": (3, None, False, True),
     "c-bevy": (4, None, False, True),
     "c-unity": (5, None, False, True),
-    "compiled": (6, ["--ecs-lower-to-loops"], False, True),
-    "compiled-scan": (6, ["--ecs-lower-to-loops"], False, False),
+    "compiled": (6, ["--ent-lower-to-loops"], False, True),
+    "compiled-scan": (6, ["--ent-lower-to-loops"], False, False),
     "compiled-par": (6, PARALLEL, True, True),
     "compiled-par-walk1": (6, PARALLEL_WALK, True, True),
     "compiled-par-scan": (6, PARALLEL, True, False),
@@ -93,9 +93,9 @@ def build(name, work, number, passes, openmp, log):
         source = os.path.join(directory, "react.mlir")
         with open(source, "w") as f:
             f.write(program(work, log))
-        subprocess.run([ECS_TRANSLATE, "--ecs-to-c-header", source, "-o",
+        subprocess.run([ENT_TRANSLATE, "--ent-to-c-header", source, "-o",
                         os.path.join(directory, "react_world.h")], check=True)
-        mlir = subprocess.run([ECS_OPT, source, *passes, *LOWER], check=True,
+        mlir = subprocess.run([ENT_OPT, source, *passes, *LOWER], check=True,
                               capture_output=True, text=True).stdout
         ll = os.path.join(directory, name + ".ll")
         subprocess.run([f"{LLVM}/bin/mlir-translate", "--mlir-to-llvmir",

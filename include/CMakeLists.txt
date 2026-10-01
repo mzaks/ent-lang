@@ -1,1 +1,1 @@
-add_subdirectory(Ecs)
+add_subdirectory(Ent)

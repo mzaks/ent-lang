@@ -2,28 +2,28 @@
 // Stunned, and lose it again. Run as written, fused, and fused with
 // parallel entity loops (forced on for these few entities); all agree.
 // RUN: mkdir -p %t.dir
-// RUN: ecs-translate --ecs-to-c-header %S/../../examples/status.mlir \
+// RUN: ent-translate --ent-to-c-header %S/../../examples/status.mlir \
 // RUN:     -o %t.dir/status_world.h
 
-// RUN: ecs-opt %S/../../examples/status.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %S/../../examples/status.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
 // RUN: clang -O2 -Wno-override-module %t.seq.ll \
 // RUN:     -I%t.dir %S/../../examples/host/status_main.c -o %t.seq
 // RUN: %t.seq | FileCheck %s
 
-// RUN: ecs-opt %S/../../examples/status.mlir \
-// RUN:     --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN: ent-opt %S/../../examples/status.mlir \
+// RUN:     --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
 // RUN: clang -O2 -Wno-override-module %t.fused.ll \
 // RUN:     -I%t.dir %S/../../examples/host/status_main.c -o %t.fused
 // RUN: %t.fused | FileCheck %s
 
-// RUN: ecs-opt %S/../../examples/status.mlir \
-// RUN:     "--ecs-lower-to-loops=fuse-systems=1 parallel-entities=1 parallel-min-entities=1" \
+// RUN: ent-opt %S/../../examples/status.mlir \
+// RUN:     "--ent-lower-to-loops=fuse-systems=1 parallel-entities=1 parallel-min-entities=1" \
 // RUN:     --symbol-dce --convert-scf-to-openmp --canonicalize \
-// RUN:     --ecs-omp-nowait --convert-scf-to-cf --convert-to-llvm \
+// RUN:     --ent-omp-nowait --convert-scf-to-cf --convert-to-llvm \
 // RUN:     --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
 // RUN: clang -O2 -Wno-override-module %t.par.ll \

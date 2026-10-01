@@ -2,8 +2,8 @@
 
 config.llvm_tools_dir = lit_config.substitute("@LLVM_TOOLS_DIR@")
 config.llvm_lib_dir = lit_config.substitute("@LLVM_LIBRARY_DIR@")
-config.ecs_obj_root = "@CMAKE_BINARY_DIR@"
-config.ecs_tools_dir = "@CMAKE_BINARY_DIR@/bin"
+config.ent_obj_root = "@CMAKE_BINARY_DIR@"
+config.ent_tools_dir = "@CMAKE_BINARY_DIR@/bin"
 
 import lit.llvm
 lit.llvm.initialize(lit_config, config)

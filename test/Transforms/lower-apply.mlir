@@ -1,14 +1,14 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops --canonicalize | FileCheck %s
-// RUN: ecs-opt %s "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN: ent-opt %s --ent-lower-to-loops --canonicalize | FileCheck %s
+// RUN: ent-opt %s "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
 // RUN:   | FileCheck %s --check-prefix=PAR
-// RUN: ecs-opt %s "--ecs-lower-to-loops=fuse-systems=1" --symbol-dce \
+// RUN: ent-opt %s "--ent-lower-to-loops=fuse-systems=1" --symbol-dce \
 // RUN:   | FileCheck %s --check-prefix=FUSED
 
-ecs.component @H (hp: f32, lvl: i32)
-ecs.component @T (entity: !ecs.entity)
-ecs.component @On ()
-ecs.archetype @Ship (@H) capacity 16
-ecs.archetype @Gun (@T, optional @On) capacity 8
+ent.component @H (hp: f32, lvl: i32)
+ent.component @T (entity: !ent.entity)
+ent.component @On ()
+ent.archetype @Ship (@H) capacity 16
+ent.archetype @Gun (@T, optional @On) capacity 8
 
 // Each gun fills its row of the apply's buffer (target id, value). When
 // the query has run, one sequential loop goes over the buffer in row
@@ -40,11 +40,11 @@ ecs.archetype @Gun (@T, optional @On) capacity 8
 // CHECK:      scf.for
 // CHECK:        arith.subi
 // CHECK:      return
-ecs.system @fire(%d: f32) reads [@T] writes [@H, @Gun] {
-  ecs.query (%t: !ecs.ref<@T>) {
-    %id = ecs.get %t "entity" : !ecs.ref<@T> -> !ecs.entity
-    ecs.apply %id @H "hp" add %d : f32
-    ecs.despawn
+ent.system @fire(%d: f32) reads [@T] writes [@H, @Gun] {
+  ent.query (%t: !ent.ref<@T>) {
+    %id = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
+    ent.apply %id @H "hp" add %d : f32
+    ent.despawn
   }
 }
 
@@ -69,12 +69,12 @@ ecs.system @fire(%d: f32) reads [@T] writes [@H, @Gun] {
 // CHECK:      scf.for
 // CHECK-NEXT:   memref.load %[[IDS1]]
 // CHECK:          arith.maxsi
-ecs.system @aim(%n: i32, %c: i1) reads [@T, @On] writes [@H] {
-  ecs.query (%t: !ecs.ref<@T>, %on: !ecs.ref<@On>) {
-    %id = ecs.get %t "entity" : !ecs.ref<@T> -> !ecs.entity
-    ecs.apply %id @H "lvl" max %n : i32
+ent.system @aim(%n: i32, %c: i1) reads [@T, @On] writes [@H] {
+  ent.query (%t: !ent.ref<@T>, %on: !ent.ref<@On>) {
+    %id = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
+    ent.apply %id @H "lvl" max %n : i32
     scf.if %c {
-      ecs.apply %id @H "lvl" max %n : i32
+      ent.apply %id @H "lvl" max %n : i32
     }
   }
 }
@@ -88,9 +88,9 @@ ecs.system @aim(%n: i32, %c: i1) reads [@T, @On] writes [@H] {
 
 // A system with applies is not fused with its neighbours: the reader of
 // "lvl" must see the combined values.
-ecs.system @read() reads [@H] {
-  ecs.query (%h: !ecs.ref<@H>) {
-    %l = ecs.get %h "lvl" : !ecs.ref<@H> -> i32
+ent.system @read() reads [@H] {
+  ent.query (%h: !ent.ref<@H>) {
+    %l = ent.get %h "lvl" : !ent.ref<@H> -> i32
   }
 }
 // FUSED-LABEL: func.func @frame(
@@ -98,7 +98,7 @@ ecs.system @read() reads [@H] {
 // FUSED-NOT:   call @read(
 // FUSED:       scf.for
 // FUSED:       return
-ecs.schedule @frame(%n: i32, %c: i1) {
-  ecs.run @aim(%n, %c) : i32, i1
-  ecs.run @read()
+ent.schedule @frame(%n: i32, %c: i1) {
+  ent.run @aim(%n, %c) : i32, i1
+  ent.run @read()
 }

@@ -23,7 +23,7 @@
 //   -DWIDTH16    with VARIANT=1, vectorise the status loop 16 wide, as LLVM
 //                chooses for the compiled program (it picks 4 x 2 here)
 //   -DVARIANT=4  compiled: bench/churn/status.mlir, where Status is an
-//                optional component, lowered by ecs-opt and linked in; the
+//                optional component, lowered by ent-opt and linked in; the
 //                host changes presence through the generated header
 //
 // Usage: churn <entities> <density> <churn per frame> <frames> <repetitions>
@@ -262,23 +262,23 @@ static void readEntity(uint32_t id, float out[5]) {
 }
 
 #elif VARIANT == 4
-static ecs_world *world;
+static ent_world *world;
 static float *remaining;
 static uint8_t *present;
 static void storageInit(const uint8_t *holds) {
   // A fresh world per repetition, like the other variants' fresh storage.
-  world = ecs_world_create();
-  if (!world || !ecs_Character_spawn_n(world, N)) {
+  world = ent_world_create();
+  if (!world || !ent_Character_spawn_n(world, N)) {
     fprintf(stderr, "n=%lld does not fit the world\n", (long long)N);
     exit(1);
   }
-  allocated += ECS_WORLD_BYTES;
-  float *x = ecs_Character_Position_x(world);
-  float *y = ecs_Character_Position_y(world);
-  float *dx = ecs_Character_Velocity_dx(world);
-  float *dy = ecs_Character_Velocity_dy(world);
-  remaining = ecs_Character_Status_remaining(world);
-  present = ecs_Character_Status_present(world);
+  allocated += ENT_WORLD_BYTES;
+  float *x = ent_Character_Position_x(world);
+  float *y = ent_Character_Position_y(world);
+  float *dx = ent_Character_Velocity_dx(world);
+  float *dy = ent_Character_Velocity_dy(world);
+  remaining = ent_Character_Status_remaining(world);
+  present = ent_Character_Status_present(world);
   for (uint32_t id = 0; id < N; ++id) {
     x[id] = initialX(id), y[id] = initialY(id);
     dx[id] = initialDx(id), dy[id] = initialDy(id);
@@ -288,12 +288,12 @@ static void storageInit(const uint8_t *holds) {
 }
 static void gain(uint32_t id) { present[id] = 1, remaining[id] = DURATION; }
 static void lose(uint32_t id) { present[id] = 0; }
-static void systems(void) { ecs_frame(world, DT); }
+static void systems(void) { ent_frame(world, DT); }
 static void readEntity(uint32_t id, float out[5]) {
-  out[0] = ecs_Character_Position_x(world)[id];
-  out[1] = ecs_Character_Position_y(world)[id];
-  out[2] = ecs_Character_Velocity_dx(world)[id];
-  out[3] = ecs_Character_Velocity_dy(world)[id];
+  out[0] = ent_Character_Position_x(world)[id];
+  out[1] = ent_Character_Position_y(world)[id];
+  out[2] = ent_Character_Velocity_dx(world)[id];
+  out[3] = ent_Character_Velocity_dy(world)[id];
   out[4] = present[id] ? remaining[id] : 0;
 }
 #endif

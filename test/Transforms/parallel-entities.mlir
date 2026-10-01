@@ -1,14 +1,14 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops=parallel-entities=1 \
+// RUN: ent-opt %s --ent-lower-to-loops=parallel-entities=1 \
 // RUN:   | FileCheck %s --check-prefix=DEFAULT
-// RUN: ecs-opt %s "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN: ent-opt %s "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
 // RUN:   | FileCheck %s --check-prefix=ALWAYS
-// RUN: ecs-opt %s "--ecs-lower-to-loops=parallel-entities=1 fuse-systems=1" \
+// RUN: ent-opt %s "--ent-lower-to-loops=parallel-entities=1 fuse-systems=1" \
 // RUN:   | FileCheck %s --check-prefix=FUSED
 
-ecs.component @S (x: f32)
-ecs.component @L (x: f32)
-ecs.archetype @Small (@S) capacity 1000
-ecs.archetype @Large (@L) capacity 2000000
+ent.component @S (x: f32)
+ent.component @L (x: f32)
+ent.archetype @Small (@S) capacity 1000
+ent.archetype @Large (@L) capacity 2000000
 
 func.func private @log()
 
@@ -21,11 +21,11 @@ func.func private @log()
 // ALWAYS-LABEL:  func.func private @shiftSmall(
 // ALWAYS-NOT:    scf.if
 // ALWAYS:        scf.parallel
-ecs.system @shiftSmall(%d: f32) writes [@S] {
-  ecs.query (%s: !ecs.ref<@S, mut>) {
-    %x = ecs.get %s "x" : !ecs.ref<@S, mut> -> f32
+ent.system @shiftSmall(%d: f32) writes [@S] {
+  ent.query (%s: !ent.ref<@S, mut>) {
+    %x = ent.get %s "x" : !ent.ref<@S, mut> -> f32
     %n = arith.addf %x, %d : f32
-    ecs.set %s "x", %n : !ecs.ref<@S, mut>, f32
+    ent.set %s "x", %n : !ent.ref<@S, mut>, f32
   }
 }
 
@@ -45,11 +45,11 @@ ecs.system @shiftSmall(%d: f32) writes [@S] {
 // ALWAYS-LABEL:  func.func private @shiftLarge(
 // ALWAYS-NOT:    scf.if
 // ALWAYS:        scf.parallel
-ecs.system @shiftLarge(%d: f32) writes [@L] {
-  ecs.query (%l: !ecs.ref<@L, mut>) {
-    %x = ecs.get %l "x" : !ecs.ref<@L, mut> -> f32
+ent.system @shiftLarge(%d: f32) writes [@L] {
+  ent.query (%l: !ent.ref<@L, mut>) {
+    %x = ent.get %l "x" : !ent.ref<@L, mut> -> f32
     %n = arith.addf %x, %d : f32
-    ecs.set %l "x", %n : !ecs.ref<@L, mut>, f32
+    ent.set %l "x", %n : !ent.ref<@L, mut>, f32
   }
 }
 
@@ -59,8 +59,8 @@ ecs.system @shiftLarge(%d: f32) writes [@L] {
 // ALWAYS-NOT:   scf.parallel
 // ALWAYS:       scf.for
 // ALWAYS:         call @log()
-ecs.system @shiftAndLog() writes [@L] {
-  ecs.query (%l: !ecs.ref<@L, mut>) {
+ent.system @shiftAndLog() writes [@L] {
+  ent.query (%l: !ent.ref<@L, mut>) {
     func.call @log() : () -> ()
   }
 }
@@ -74,8 +74,8 @@ ecs.system @shiftAndLog() writes [@L] {
 // FUSED:       } else {
 // FUSED:         scf.for
 // FUSED:       call @shiftAndLog(
-ecs.schedule @frame(%d: f32) {
-  ecs.run @shiftSmall(%d) : f32
-  ecs.run @shiftLarge(%d) : f32
-  ecs.run @shiftAndLog()
+ent.schedule @frame(%d: f32) {
+  ent.run @shiftSmall(%d) : f32
+  ent.run @shiftLarge(%d) : f32
+  ent.run @shiftAndLog()
 }

@@ -1,8 +1,8 @@
 // Entity ids stay valid across swap-remove and die with their entity; the
 // generated header and the lowered program agree on the bookkeeping.
 // RUN: mkdir -p %t.dir
-// RUN: ecs-translate --ecs-to-c-header %S/Inputs/ids.mlir -o %t.dir/ids_world.h
-// RUN: ecs-opt %S/Inputs/ids.mlir --ecs-lower-to-loops \
+// RUN: ent-translate --ent-to-c-header %S/Inputs/ids.mlir -o %t.dir/ids_world.h
+// RUN: ent-opt %S/Inputs/ids.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
 // RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \

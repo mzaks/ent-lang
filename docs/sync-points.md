@@ -3,7 +3,7 @@
 This is the frame model of the language: which effects of a program are
 visible to which other parts of it, and when. Everything else that needs a
 notion of "now" — reactive queries, and later devices, shared-memory IPC and
-indexes — is defined against it. Names follow the current dialect (`ecs.`);
+indexes — is defined against it. Names follow the current dialect (`ent.`);
 the language is to be called ent-lang.
 
 The model in one sentence: **a query is the unit of consistency** — it sees
@@ -15,7 +15,7 @@ everything it does to other entities or to the set of entities when it ends.
 | Level | What it is | Sync point at its end? |
 |---|---|---|
 | Entity step | One run of a query body for one entity | No |
-| Query | One `ecs.query`: its body for every entity it visits | **Yes: the commit point** |
+| Query | One `ent.query`: its body for every entity it visits | **Yes: the commit point** |
 | System | Its queries and system-level ops, in program order | Only through its queries' ends |
 | Schedule | One call of a schedule: its runs, in program order | Yes: the frame boundary |
 | Host | The program around the schedule calls | — |
@@ -32,32 +32,32 @@ while it runs are not visited by it; entities it despawns or moves are still
 visited. A reactive query visits the subset of these with an event since it
 last started (see R1).
 
-**Q2. Its own entity, immediately.** `ecs.get` and `ecs.set` on the visited
+**Q2. Its own entity, immediately.** `ent.get` and `ent.set` on the visited
 entity read and write its row at once; a later op of the same body sees the
 new value. Adding or removing a component the archetype holds optionally sets
 or clears its presence at once, for the same reason: the row belongs to the
 entity.
 
-**Q3. Other entities, as of the query's start.** `ecs.lookup` reads another
+**Q3. Other entities, as of the query's start.** `ent.lookup` reads another
 entity's field. A query may not look up a field it changes itself (the
 verifier rejects it), so every lookup sees the value the field had when the
 query started, whichever entities have run before.
 
 **Q4. Resources, as of the query's start.** No query writes a resource; it
-may only accumulate into one (`ecs.accumulate`), which takes effect at the
+may only accumulate into one (`ent.accumulate`), which takes effect at the
 commit point. So a resource read inside a query sees the value it had when
 the query started.
 
 **Q5. Deferred to the commit point.** These do not take effect while the
 query runs:
 
-- `ecs.apply`: values sent to other entities;
-- `ecs.accumulate`: values combined into a resource;
-- `ecs.despawn`;
-- `ecs.add` / `ecs.remove` where the storage moves the entity to another
+- `ent.apply`: values sent to other entities;
+- `ent.accumulate`: values combined into a resource;
+- `ent.despawn`;
+- `ent.add` / `ent.remove` where the storage moves the entity to another
   archetype.
 
-**Q6. Immediate, but not visited.** `ecs.spawn` appends the new entity at
+**Q6. Immediate, but not visited.** `ent.spawn` appends the new entity at
 once: its id is valid and it is visible to lookups and to every later query,
 but not visited by the query that spawned it (Q1).
 
@@ -84,7 +84,7 @@ code, the next run — sees all of the query's effects.
 **S1.** A system runs its queries and system-level ops in program order;
 each query's commit point precedes the next op.
 
-**S2.** System-level code may write resources (`ecs.write`) and spawn; both
+**S2.** System-level code may write resources (`ent.write`) and spawn; both
 take effect at once.
 
 **S3.** A schedule runs its systems in program order. One call of a schedule
@@ -111,7 +111,7 @@ The compiler may execute a schedule differently from its program order only
 where the result is the same:
 
 - **Stages**: runs whose column accesses do not conflict may run
-  concurrently (`--ecs-schedule`, `parallel-stages`).
+  concurrently (`--ent-schedule`, `parallel-stages`).
 - **Parallel entity loops**: a query whose body only touches its own entity
   (plus lookups and applies, which Q3 and Q5 make order-independent) may visit
   its entities in parallel.

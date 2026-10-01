@@ -1,4 +1,4 @@
-// RUN: ecs-opt %s --ecs-omp-nowait | FileCheck %s
+// RUN: ent-opt %s --ent-omp-nowait | FileCheck %s
 
 // The loop is the last thing the region does: the region's closing barrier
 // follows, so the loop's own is dropped.

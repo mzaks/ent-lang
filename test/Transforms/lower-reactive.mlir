@@ -1,8 +1,8 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops --canonicalize | FileCheck %s
+// RUN: ent-opt %s --ent-lower-to-loops --canonicalize | FileCheck %s
 
-ecs.component @H (hp: f32)
-ecs.component @B (w: f32)
-ecs.archetype @A (@H, @B) capacity 8
+ent.component @H (hp: f32)
+ent.component @B (w: f32)
+ent.archetype @A (@H, @B) capacity 8
 
 // A write to an observed field stores the current tick (one past the
 // counter, loaded once before the loop) in the field's stamp column, and
@@ -40,9 +40,9 @@ ecs.archetype @A (@H, @B) capacity 8
 // CHECK-NEXT:   scf.if %[[LOST]] {
 // CHECK-NEXT:     %[[PAST:.*]] = arith.addi %[[SLOWEST]], %c65_i64
 // CHECK-NEXT:     memref.store %[[PAST]], %[[COUNTS]][%c0]
-ecs.system @hurt(%d: f32) writes [@H] {
-  ecs.query (%h: !ecs.ref<@H, mut>) {
-    ecs.set %h "hp", %d : !ecs.ref<@H, mut>, f32
+ent.system @hurt(%d: f32) writes [@H] {
+  ent.query (%h: !ent.ref<@H, mut>) {
+    ent.set %h "hp", %d : !ent.ref<@H, mut>, f32
   }
 }
 
@@ -93,10 +93,10 @@ ecs.system @hurt(%d: f32) writes [@H] {
 // CHECK-NEXT: memref.store %[[NOTED]], %[[POSITION]][%c0]
 // CHECK-NEXT: %[[SLOWEST:.*]] = memref.load %[[POSITION]][%c0]
 // CHECK-NEXT: memref.store %[[SLOWEST]], %[[COUNTS]][%c1]
-ecs.system @redraw() reads [@H] writes [@B] {
-  ecs.query (%h: !ecs.ref<@H>, %b: !ecs.ref<@B, mut>) on [changed @H "hp"] {
-    %x = ecs.get %h "hp" : !ecs.ref<@H> -> f32
-    ecs.set %b "w", %x : !ecs.ref<@B, mut>, f32
+ent.system @redraw() reads [@H] writes [@B] {
+  ent.query (%h: !ent.ref<@H>, %b: !ent.ref<@B, mut>) on [changed @H "hp"] {
+    %x = ent.get %h "hp" : !ent.ref<@H> -> f32
+    ent.set %b "w", %x : !ent.ref<@B, mut>, f32
   }
 }
 
@@ -107,6 +107,6 @@ ecs.system @redraw() reads [@H] writes [@B] {
 // CHECK:      %[[C:.*]] = memref.load %[[COUNTER]][%c0]
 // CHECK-NEXT: %[[TICK:.*]] = arith.addi %[[C]], %c1_i64
 // CHECK-NEXT: memref.store %[[TICK]], %[[STAMP]][%{{.*}}] : memref<8xi64>
-ecs.system @make(%x: f32) writes [@A] {
-  ecs.spawn @A(%x, %x) : f32, f32
+ent.system @make(%x: f32) writes [@A] {
+  ent.spawn @A(%x, %x) : f32, f32
 }

@@ -1,8 +1,8 @@
 // Spawning beyond an archetype's capacity stops the program with a message.
 // RUN: mkdir -p %t.dir
-// RUN: ecs-translate --ecs-to-c-header %S/Inputs/capacity.mlir \
+// RUN: ent-translate --ent-to-c-header %S/Inputs/capacity.mlir \
 // RUN:     -o %t.dir/capacity_world.h
-// RUN: ecs-opt %S/Inputs/capacity.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %S/Inputs/capacity.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
 // RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
@@ -12,5 +12,5 @@
 
 // CHECK: count 1
 // CHECK-NEXT: count 2
-// CHECK-NEXT: ecs.spawn exceeds the capacity of @A
+// CHECK-NEXT: ent.spawn exceeds the capacity of @A
 // CHECK-NOT: count 3

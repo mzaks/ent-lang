@@ -25,7 +25,7 @@
 //                bumped for every chunk a system has write access to,
 //                written or not; redraw handles the chunks whose hp version
 //                is newer (here: all, since hit has write access to all)
-//   -DVARIANT=6  compiled: bench/reactive/react.mlir, lowered by ecs-opt;
+//   -DVARIANT=6  compiled: bench/reactive/react.mlir, lowered by ent-opt;
 //                run.py builds it with the trigger's event log (walk the
 //                changed units, scan when it overflows) and without
 //   -DHEAVY      f is a 32-step loop instead of one multiply-add
@@ -91,16 +91,16 @@ int main(int argc, char **argv) {
   int frames = atoi(argv[3]), reps = atoi(argv[4]);
 
 #if VARIANT == 6
-  ecs_world *world = ecs_world_create();
-  if (n > ECS_Unit_CAPACITY) {
+  ent_world *world = ent_world_create();
+  if (n > ENT_Unit_CAPACITY) {
     fprintf(stderr, "more units than the program's capacity\n");
     return 2;
   }
-  ecs_Unit_spawn_n(world, n);
-  float *hp = ecs_Unit_Hull_hp(world);
-  int32_t *seed = ecs_Unit_Seed_s(world);
-  float *width = ecs_Unit_Bar_width(world);
-  int32_t *visits = ecs_Unit_Bar_visits(world);
+  ent_Unit_spawn_n(world, n);
+  float *hp = ent_Unit_Hull_hp(world);
+  int32_t *seed = ent_Unit_Seed_s(world);
+  float *width = ent_Unit_Bar_width(world);
+  int32_t *visits = ent_Unit_Bar_visits(world);
 #else
   float *hp = allocate(sizeof(float) * n);
   int32_t *seed = allocate(sizeof(int32_t) * n);
@@ -154,7 +154,7 @@ int main(int argc, char **argv) {
     uint64_t start = now();
     for (int f = 0; f < frames; ++f, ++frame) {
 #if VARIANT == 6
-      ecs_frame(world, frame, threshold);
+      ent_frame(world, frame, threshold);
 #else
       // hit
       int64_t tick = counter + 1;

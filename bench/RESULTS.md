@@ -1,5 +1,10 @@
 # Benchmark results
 
+Entries before 2026-10-01's rename keep the names of the time: the language
+was ecs-lang, its tools `ecs-opt` and `ecs-translate`, its passes and
+attributes `--ecs-...` and `ecs.`, its generated C `ecs_...`; they are now
+ent-lang, `ent-opt`, `ent-translate`, `--ent-...`, `ent.` and `ent_...`.
+
 ## 2026-09-28: fusion and entity parallelism (M3 part 1)
 
 Apple M4 Max (12 performance + 4 efficiency cores, 64 GB), Homebrew LLVM

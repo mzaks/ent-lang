@@ -8,60 +8,60 @@
 // by the host, which the compiler cannot see, so their archetype is
 // declared.
 
-ecs.component @Position (x: f32)
-ecs.component @Velocity (dx: f32) capacity 64
-ecs.component @Cooldown (seconds: f32, period: f32)
-ecs.component @Lifetime (seconds: f32) capacity 64
+ent.component @Position (x: f32)
+ent.component @Velocity (dx: f32) capacity 64
+ent.component @Cooldown (seconds: f32, period: f32)
+ent.component @Lifetime (seconds: f32) capacity 64
 
-ecs.archetype @Gun (@Position, @Cooldown) capacity 4
+ent.archetype @Gun (@Position, @Cooldown) capacity 4
 
-ecs.system @shoot(%dt: f32) {
-  ecs.query (%p: !ecs.ref<@Position>, %c: !ecs.ref<@Cooldown, mut>) {
-    %s = ecs.get %c "seconds" : !ecs.ref<@Cooldown, mut> -> f32
+ent.system @shoot(%dt: f32) {
+  ent.query (%p: !ent.ref<@Position>, %c: !ent.ref<@Cooldown, mut>) {
+    %s = ent.get %c "seconds" : !ent.ref<@Cooldown, mut> -> f32
     %left = arith.subf %s, %dt : f32
     %zero = arith.constant 0.0 : f32
     %ready = arith.cmpf ole, %left, %zero : f32
     %next = scf.if %ready -> f32 {
-      %x = ecs.get %p "x" : !ecs.ref<@Position> -> f32
+      %x = ent.get %p "x" : !ent.ref<@Position> -> f32
       %speed = arith.constant 10.0 : f32
       %life = arith.constant 1.0 : f32
-      ecs.spawn (@Position, @Velocity, @Lifetime)(%x, %speed, %life)
+      ent.spawn (@Position, @Velocity, @Lifetime)(%x, %speed, %life)
           : f32, f32, f32
-      %period = ecs.get %c "period" : !ecs.ref<@Cooldown, mut> -> f32
+      %period = ent.get %c "period" : !ent.ref<@Cooldown, mut> -> f32
       %reload = arith.addf %left, %period : f32
       scf.yield %reload : f32
     } else {
       scf.yield %left : f32
     }
-    ecs.set %c "seconds", %next : !ecs.ref<@Cooldown, mut>, f32
+    ent.set %c "seconds", %next : !ent.ref<@Cooldown, mut>, f32
   }
 }
 
-ecs.system @fly(%dt: f32) {
-  ecs.query (%p: !ecs.ref<@Position, mut>, %v: !ecs.ref<@Velocity>) {
-    %x = ecs.get %p "x" : !ecs.ref<@Position, mut> -> f32
-    %dx = ecs.get %v "dx" : !ecs.ref<@Velocity> -> f32
+ent.system @fly(%dt: f32) {
+  ent.query (%p: !ent.ref<@Position, mut>, %v: !ent.ref<@Velocity>) {
+    %x = ent.get %p "x" : !ent.ref<@Position, mut> -> f32
+    %dx = ent.get %v "dx" : !ent.ref<@Velocity> -> f32
     %step = arith.mulf %dx, %dt : f32
     %nx = arith.addf %x, %step : f32
-    ecs.set %p "x", %nx : !ecs.ref<@Position, mut>, f32
+    ent.set %p "x", %nx : !ent.ref<@Position, mut>, f32
   }
 }
 
-ecs.system @expire(%dt: f32) {
-  ecs.query (%l: !ecs.ref<@Lifetime, mut>) {
-    %t = ecs.get %l "seconds" : !ecs.ref<@Lifetime, mut> -> f32
+ent.system @expire(%dt: f32) {
+  ent.query (%l: !ent.ref<@Lifetime, mut>) {
+    %t = ent.get %l "seconds" : !ent.ref<@Lifetime, mut> -> f32
     %left = arith.subf %t, %dt : f32
-    ecs.set %l "seconds", %left : !ecs.ref<@Lifetime, mut>, f32
+    ent.set %l "seconds", %left : !ent.ref<@Lifetime, mut>, f32
     %zero = arith.constant 0.0 : f32
     %over = arith.cmpf ole, %left, %zero : f32
     scf.if %over {
-      ecs.despawn
+      ent.despawn
     }
   }
 }
 
-ecs.schedule @frame(%dt: f32) {
-  ecs.run @shoot(%dt) : f32
-  ecs.run @fly(%dt) : f32
-  ecs.run @expire(%dt) : f32
+ent.schedule @frame(%dt: f32) {
+  ent.run @shoot(%dt) : f32
+  ent.run @fly(%dt) : f32
+  ent.run @expire(%dt) : f32
 }

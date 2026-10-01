@@ -31,18 +31,18 @@ static void particles(float dt, float w, int64_t n, float *RESTRICT x,
   }
 }
 
-void _mlir_ciface_frame(float dt, ecs_arena_descriptor *arena) {
-  ecs_world *w = (ecs_world *)arena->aligned;
-  bodies(dt, 9.81f, ecs_Body_count(w), ecs_Body_Position_x(w),
-         ecs_Body_Position_y(w), ecs_Body_Velocity_dx(w),
-         ecs_Body_Velocity_dy(w));
-  particles(dt, *ecs_Wind_strength(w), ecs_Particle_count(w),
-            ecs_Particle_Position_x(w), ecs_Particle_Position_y(w),
-            ecs_Particle_Velocity_dx(w), ecs_Particle_Velocity_dy(w),
-            ecs_Particle_Lifetime_seconds(w));
-  if (ecs_Player_count(w) > 0) {
-    ecs_Player_Position_x(w)[0] += ecs_Player_Velocity_dx(w)[0] * dt;
-    ecs_Player_Position_y(w)[0] += ecs_Player_Velocity_dy(w)[0] * dt;
+void _mlir_ciface_frame(float dt, ent_arena_descriptor *arena) {
+  ent_world *w = (ent_world *)arena->aligned;
+  bodies(dt, 9.81f, ent_Body_count(w), ent_Body_Position_x(w),
+         ent_Body_Position_y(w), ent_Body_Velocity_dx(w),
+         ent_Body_Velocity_dy(w));
+  particles(dt, *ent_Wind_strength(w), ent_Particle_count(w),
+            ent_Particle_Position_x(w), ent_Particle_Position_y(w),
+            ent_Particle_Velocity_dx(w), ent_Particle_Velocity_dy(w),
+            ent_Particle_Lifetime_seconds(w));
+  if (ent_Player_count(w) > 0) {
+    ent_Player_Position_x(w)[0] += ent_Player_Velocity_dx(w)[0] * dt;
+    ent_Player_Position_y(w)[0] += ent_Player_Velocity_dy(w)[0] * dt;
   }
-  *ecs_Clock_frame(w) += 1;
+  *ent_Clock_frame(w) += 1;
 }

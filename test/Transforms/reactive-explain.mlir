@@ -1,30 +1,30 @@
-// RUN: ecs-opt %s "--ecs-lower-to-loops=explain=1" -verify-diagnostics -o /dev/null
+// RUN: ent-opt %s "--ent-lower-to-loops=explain=1" -verify-diagnostics -o /dev/null
 
 // Reactive queries walk their triggers' event logs, except where the log
 // order (the order events happened) would change the result.
-ecs.component @H (hp: f32)
-ecs.component @T (entity: !ecs.entity)
-ecs.component @G (g: f32)
-ecs.archetype @A (@H, @T, @G) capacity 8
+ent.component @H (hp: f32)
+ent.component @T (entity: !ent.entity)
+ent.component @G (g: f32)
+ent.archetype @A (@H, @T, @G) capacity 8
 
-ecs.system @hurt(%d: f32) writes [@H, @G] {
-  ecs.query (%h: !ecs.ref<@H, mut>, %g: !ecs.ref<@G, mut>) {
-    ecs.set %h "hp", %d : !ecs.ref<@H, mut>, f32
-    ecs.set %g "g", %d : !ecs.ref<@G, mut>, f32
+ent.system @hurt(%d: f32) writes [@H, @G] {
+  ent.query (%h: !ent.ref<@H, mut>, %g: !ent.ref<@G, mut>) {
+    ent.set %h "hp", %d : !ent.ref<@H, mut>, f32
+    ent.set %g "g", %d : !ent.ref<@G, mut>, f32
   }
 }
 
-ecs.system @pass(%d: f32) reads [@T, @G] writes [@H] {
+ent.system @pass(%d: f32) reads [@T, @G] writes [@H] {
   // expected-remark @+1 {{scans every entity on each run: it applies or accumulates values, which are combined in row order}}
-  ecs.query (%t: !ecs.ref<@T>) on [changed @G] {
-    %id = ecs.get %t "entity" : !ecs.ref<@T> -> !ecs.entity
-    ecs.apply %id @H "hp" add %d : f32
+  ent.query (%t: !ent.ref<@T>) on [changed @G] {
+    %id = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
+    ent.apply %id @H "hp" add %d : f32
   }
 }
 
-ecs.system @cull() reads [@H] writes [@A] {
+ent.system @cull() reads [@H] writes [@A] {
   // expected-remark @+1 {{scans every entity on each run: it changes which entities archetypes hold, which is applied in row order}}
-  ecs.query (%h: !ecs.ref<@H>) on [changed @H "hp"] {
-    ecs.despawn
+  ent.query (%h: !ent.ref<@H>) on [changed @H "hp"] {
+    ent.despawn
   }
 }

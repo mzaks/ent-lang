@@ -1,11 +1,11 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops | FileCheck %s
-// RUN: ecs-opt %s --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN: ent-opt %s --ent-lower-to-loops | FileCheck %s
+// RUN: ent-opt %s --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
 // RUN:   | FileCheck %s --check-prefix=FUSED
 
-ecs.component @V (dx: f32)
-ecs.component @S (t: f32)
-ecs.component @N (n: i32)
-ecs.archetype @C (@V, optional @S, optional @N) capacity 100
+ent.component @V (dx: f32)
+ent.component @S (t: f32)
+ent.component @N (n: i32)
+ent.archetype @C (@V, optional @S, optional @N) capacity 100
 
 // Columns: V.dx at 1152, S.t at 2688, S? at 4224, N.n at 5440, N? at 6976.
 
@@ -27,19 +27,19 @@ ecs.archetype @C (@V, optional @S, optional @N) capacity 100
 // CHECK-NEXT:     %[[OLDP:.*]] = memref.load %[[PRESENT]][%[[I]]]
 // CHECK-NEXT:     %[[SELP:.*]] = arith.select %[[MASK]], %[[C0]], %[[OLDP]] : i8
 // CHECK-NEXT:     memref.store %[[SELP]], %[[PRESENT]][%[[I]]]
-ecs.system @status(%dt: f32) writes [@V, @S] {
-  ecs.query (%v: !ecs.ref<@V, mut>, %s: !ecs.ref<@S, mut>) {
-    %dx = ecs.get %v "dx" : !ecs.ref<@V, mut> -> f32
+ent.system @status(%dt: f32) writes [@V, @S] {
+  ent.query (%v: !ent.ref<@V, mut>, %s: !ent.ref<@S, mut>) {
+    %dx = ent.get %v "dx" : !ent.ref<@V, mut> -> f32
     %slow = arith.constant 0.99 : f32
     %n = arith.mulf %dx, %slow : f32
-    ecs.set %v "dx", %n : !ecs.ref<@V, mut>, f32
-    %t = ecs.get %s "t" : !ecs.ref<@S, mut> -> f32
+    ent.set %v "dx", %n : !ent.ref<@V, mut>, f32
+    %t = ent.get %s "t" : !ent.ref<@S, mut> -> f32
     %left = arith.subf %t, %dt : f32
-    ecs.set %s "t", %left : !ecs.ref<@S, mut>, f32
+    ent.set %s "t", %left : !ent.ref<@S, mut>, f32
     %zero = arith.constant 0.0 : f32
     %done = arith.cmpf ole, %left, %zero : f32
     scf.if %done {
-      ecs.remove @S
+      ent.remove @S
     }
   }
 }
@@ -52,9 +52,9 @@ ecs.system @status(%dt: f32) writes [@V, @S] {
 // CHECK-NEXT:   %[[ONE:.*]] = arith.constant 1 : i8
 // CHECK-NEXT:   memref.store %[[ONE]], %{{.*}}[%[[I]]] : memref<100xi8>
 // CHECK-NEXT: }
-ecs.system @stun(%t: f32) reads [@V] writes [@S] {
-  ecs.query (%v: !ecs.ref<@V>) {
-    ecs.add @S(%t) : f32
+ent.system @stun(%t: f32) reads [@V] writes [@S] {
+  ent.query (%v: !ent.ref<@V>) {
+    ent.add @S(%t) : f32
   }
 }
 
@@ -71,12 +71,12 @@ ecs.system @stun(%t: f32) reads [@V] writes [@S] {
 // CHECK-NOT:      arith.select
 // CHECK:          memref.store
 // CHECK-NEXT:   }
-ecs.system @divide() reads [@S] writes [@N] {
-  ecs.query (%n: !ecs.ref<@N, mut>, %s: !ecs.ref<@S>) {
-    %x = ecs.get %n "n" : !ecs.ref<@N, mut> -> i32
+ent.system @divide() reads [@S] writes [@N] {
+  ent.query (%n: !ent.ref<@N, mut>, %s: !ent.ref<@S>) {
+    %x = ent.get %n "n" : !ent.ref<@N, mut> -> i32
     %hundred = arith.constant 100 : i32
     %h = arith.divsi %hundred, %x : i32
-    ecs.set %n "n", %h : !ecs.ref<@N, mut>, i32
+    ent.set %n "n", %h : !ent.ref<@N, mut>, i32
   }
 }
 
@@ -91,7 +91,7 @@ ecs.system @divide() reads [@S] writes [@N] {
 // FUSED:         arith.select
 // FUSED-NOT:   scf.for
 // FUSED:       return
-ecs.schedule @frame(%t: f32, %dt: f32) {
-  ecs.run @stun(%t) : f32
-  ecs.run @status(%dt) : f32
+ent.schedule @frame(%t: f32, %dt: f32) {
+  ent.run @stun(%t) : f32
+  ent.run @status(%dt) : f32
 }

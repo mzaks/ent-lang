@@ -1,39 +1,39 @@
 // Cross-entity writes end to end: torpedoes deal damage to their target
-// ship with ecs.apply; hits on one ship in a frame add up, and a hit on a
+// ship with ent.apply; hits on one ship in a frame add up, and a hit on a
 // sunk ship is dropped even though a new ship took its slot. Run as
 // written, fused (systems with applies stay calls), staged with parallel
 // stages, and with parallel entity loops forced on (the query filling the
 // apply buffers runs in parallel); all agree.
 // RUN: mkdir -p %t.dir
-// RUN: ecs-translate --ecs-to-c-header %S/../../examples/damage.mlir \
+// RUN: ent-translate --ent-to-c-header %S/../../examples/damage.mlir \
 // RUN:     -o %t.dir/damage_world.h
 
-// RUN: ecs-opt %S/../../examples/damage.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %S/../../examples/damage.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
 // RUN: clang -O2 -Wno-override-module %t.seq.ll \
 // RUN:     -I%t.dir %S/../../examples/host/damage_main.c -o %t.seq
 // RUN: %t.seq | FileCheck %s
 
-// RUN: ecs-opt %S/../../examples/damage.mlir \
-// RUN:     --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN: ent-opt %S/../../examples/damage.mlir \
+// RUN:     --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
 // RUN: clang -O2 -Wno-override-module %t.fused.ll \
 // RUN:     -I%t.dir %S/../../examples/host/damage_main.c -o %t.fused
 // RUN: %t.fused | FileCheck %s
 
-// RUN: ecs-opt %S/../../examples/damage.mlir --ecs-schedule \
-// RUN:     --ecs-lower-to-loops=parallel-stages=1 --convert-scf-to-cf \
+// RUN: ent-opt %S/../../examples/damage.mlir --ent-schedule \
+// RUN:     --ent-lower-to-loops=parallel-stages=1 --convert-scf-to-cf \
 // RUN:     --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.stages.ll
 // RUN: clang -O2 -Wno-override-module %t.stages.ll \
 // RUN:     -I%t.dir %S/../../examples/host/damage_main.c %openmp -o %t.stages
 // RUN: %t.stages | FileCheck %s
 
-// RUN: ecs-opt %S/../../examples/damage.mlir \
-// RUN:     "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
-// RUN:     --convert-scf-to-openmp --canonicalize --ecs-omp-nowait \
+// RUN: ent-opt %S/../../examples/damage.mlir \
+// RUN:     "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
 // RUN: clang -O2 -Wno-override-module %t.par.ll \

@@ -44,19 +44,19 @@ int main(int argc, char **argv) {
   int reps = atoi(argv[2]);
   uint64_t target = (uint64_t)atoll(argv[3]) * 1000000;
 
-  ecs_world *w = ecs_world_create();
-  if (!w || !ecs_Body_spawn_n(w, n) || !ecs_Particle_spawn_n(w, n) ||
-      !ecs_Scenery_spawn_n(w, n) || !ecs_Player_spawn_n(w, 1)) {
+  ent_world *w = ent_world_create();
+  if (!w || !ent_Body_spawn_n(w, n) || !ent_Particle_spawn_n(w, n) ||
+      !ent_Scenery_spawn_n(w, n) || !ent_Player_spawn_n(w, 1)) {
     fprintf(stderr, "n=%lld does not fit the world\n", (long long)n);
     return 1;
   }
   float *c[NUM_COLUMNS] = {
-      ecs_Body_Position_x(w),        ecs_Body_Position_y(w),
-      ecs_Body_Velocity_dx(w),       ecs_Body_Velocity_dy(w),
-      ecs_Body_Mass_kg(w),           ecs_Particle_Position_x(w),
-      ecs_Particle_Position_y(w),    ecs_Particle_Velocity_dx(w),
-      ecs_Particle_Velocity_dy(w),   ecs_Particle_Lifetime_seconds(w),
-      ecs_Scenery_Position_x(w),     ecs_Scenery_Position_y(w),
+      ent_Body_Position_x(w),        ent_Body_Position_y(w),
+      ent_Body_Velocity_dx(w),       ent_Body_Velocity_dy(w),
+      ent_Body_Mass_kg(w),           ent_Particle_Position_x(w),
+      ent_Particle_Position_y(w),    ent_Particle_Velocity_dx(w),
+      ent_Particle_Velocity_dy(w),   ent_Particle_Lifetime_seconds(w),
+      ent_Scenery_Position_x(w),     ent_Scenery_Position_y(w),
   };
   static const float base[NUM_COLUMNS] = {0, 100, 1, 0, 1, 0,
                                           0, 2,   1, 10, 7, 7};
@@ -65,13 +65,13 @@ int main(int argc, char **argv) {
                                           0.02f, 0.1f,  0.5f,  0.25f};
   for (int k = 0; k < NUM_COLUMNS; ++k)
     fill(c[k], n, base[k], step[k]);
-  *ecs_Wind_strength(w) = 2.0f;
-  ecs_Player_Position_x(w)[0] = 0;
-  ecs_Player_Position_y(w)[0] = 0;
-  ecs_Player_Velocity_dx(w)[0] = 1;
-  ecs_Player_Velocity_dy(w)[0] = 1;
+  *ent_Wind_strength(w) = 2.0f;
+  ent_Player_Position_x(w)[0] = 0;
+  ent_Player_Position_y(w)[0] = 0;
+  ent_Player_Velocity_dx(w)[0] = 1;
+  ent_Player_Velocity_dy(w)[0] = 1;
   const float dt = 1.0f / 60.0f;
-#define FRAME() ecs_frame(w, dt)
+#define FRAME() ent_frame(w, dt)
 
   for (int f = 0; f < VALIDATION_FRAMES; ++f)
     FRAME();
@@ -79,9 +79,9 @@ int main(int argc, char **argv) {
   for (int k = 0; k < NUM_COLUMNS; ++k)
     for (int64_t i = 0; i < n; ++i)
       checksum += c[k][i];
-  checksum += (double)ecs_Player_Position_x(w)[0] +
-              (double)ecs_Player_Position_y(w)[0] +
-              (double)*ecs_Clock_frame(w);
+  checksum += (double)ent_Player_Position_x(w)[0] +
+              (double)ent_Player_Position_y(w)[0] +
+              (double)*ent_Clock_frame(w);
 
   // Calibrate (this also warms caches and the OpenMP thread pool): double
   // the frame count until a batch takes at least a tenth of the target.

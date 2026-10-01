@@ -1,9 +1,9 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops=fuse-systems=1 --symbol-dce | FileCheck %s
+// RUN: ent-opt %s --ent-lower-to-loops=fuse-systems=1 --symbol-dce | FileCheck %s
 
-ecs.component @P (x: f32)
-ecs.component @V (dx: f32)
-ecs.archetype @A (@P, @V) capacity 1000
-ecs.archetype @B (@P) capacity 1000
+ent.component @P (x: f32)
+ent.component @V (dx: f32)
+ent.archetype @A (@P, @V) capacity 1000
+ent.archetype @B (@P) capacity 1000
 
 func.func private @log()
 
@@ -15,33 +15,33 @@ func.func private @log()
 // CHECK-NOT: func.func private @shift
 // CHECK: func.func private @logs
 
-ecs.system @accelerate(%k: f32) writes [@V] {
+ent.system @accelerate(%k: f32) writes [@V] {
   // Ops outside queries are cloned once per run, with parameters mapped to
   // the run's arguments.
   %twice = arith.addf %k, %k : f32
-  ecs.query (%v: !ecs.ref<@V, mut>) {
-    %dx = ecs.get %v "dx" : !ecs.ref<@V, mut> -> f32
+  ent.query (%v: !ent.ref<@V, mut>) {
+    %dx = ent.get %v "dx" : !ent.ref<@V, mut> -> f32
     %n = arith.addf %dx, %twice : f32
-    ecs.set %v "dx", %n : !ecs.ref<@V, mut>, f32
+    ent.set %v "dx", %n : !ent.ref<@V, mut>, f32
   }
 }
 // Reads what accelerate writes: they conflict, and still fuse.
-ecs.system @move() reads [@V] writes [@P] {
-  ecs.query (%p: !ecs.ref<@P, mut>, %v: !ecs.ref<@V>) {
-    %x = ecs.get %p "x" : !ecs.ref<@P, mut> -> f32
-    %dx = ecs.get %v "dx" : !ecs.ref<@V> -> f32
+ent.system @move() reads [@V] writes [@P] {
+  ent.query (%p: !ent.ref<@P, mut>, %v: !ent.ref<@V>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
+    %dx = ent.get %v "dx" : !ent.ref<@V> -> f32
     %n = arith.addf %x, %dx : f32
-    ecs.set %p "x", %n : !ecs.ref<@P, mut>, f32
+    ent.set %p "x", %n : !ent.ref<@P, mut>, f32
   }
 }
-ecs.system @shift(%d: f32) writes [@P] {
-  ecs.query (%p: !ecs.ref<@P, mut>) {
-    %x = ecs.get %p "x" : !ecs.ref<@P, mut> -> f32
+ent.system @shift(%d: f32) writes [@P] {
+  ent.query (%p: !ent.ref<@P, mut>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
     %n = arith.addf %x, %d : f32
-    ecs.set %p "x", %n : !ecs.ref<@P, mut>, f32
+    ent.set %p "x", %n : !ent.ref<@P, mut>, f32
   }
 }
-ecs.system @logs() {
+ent.system @logs() {
   func.call @log() : () -> ()
 }
 
@@ -78,13 +78,13 @@ ecs.system @logs() {
 // CHECK-NEXT:   memref.store %{{.*}}, %[[BX]][%[[J]]]
 // CHECK-NEXT: }
 // CHECK-NEXT: return
-ecs.schedule @frame(%k: f32, %d: f32) {
-  ecs.stage {
-    ecs.run @accelerate(%k) : f32
+ent.schedule @frame(%k: f32, %d: f32) {
+  ent.stage {
+    ent.run @accelerate(%k) : f32
   }
-  ecs.stage {
-    ecs.run @move()
-    ecs.run @shift(%d) : f32
+  ent.stage {
+    ent.run @move()
+    ent.run @shift(%d) : f32
   }
 }
 
@@ -104,10 +104,10 @@ ecs.schedule @frame(%k: f32, %d: f32) {
 // CHECK:      scf.for
 // CHECK:      }
 // CHECK-NEXT: return
-ecs.schedule @barriers(%d: f32) {
-  ecs.run @shift(%d) : f32
-  ecs.run @logs()
-  ecs.run @shift(%d) : f32
+ent.schedule @barriers(%d: f32) {
+  ent.run @shift(%d) : f32
+  ent.run @logs()
+  ent.run @shift(%d) : f32
   func.call @log() : () -> ()
-  ecs.run @shift(%d) : f32
+  ent.run @shift(%d) : f32
 }

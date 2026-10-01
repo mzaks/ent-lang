@@ -1,13 +1,13 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops | FileCheck %s
-// RUN: ecs-opt %s "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN: ent-opt %s --ent-lower-to-loops | FileCheck %s
+// RUN: ent-opt %s "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
 // RUN:   | FileCheck %s --check-prefix=PAR
-// RUN: ecs-opt %s --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN: ent-opt %s --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
 // RUN:   | FileCheck %s --check-prefix=FUSED
 
-ecs.component @P (x: f32)
-ecs.component @L (t: f32)
-ecs.component @S (s: f32)
-ecs.archetype @Bullet (@P, @L, optional @S) capacity 100
+ent.component @P (x: f32)
+ent.component @L (t: f32)
+ent.component @S (s: f32)
+ent.archetype @Bullet (@P, @L, optional @S) capacity 100
 
 // Layout: the count at 0, the pending counter for @Bullet at 8, the entity
 // table's next-slot counter and free-list head at 16 and 24; columns P.x
@@ -75,15 +75,15 @@ ecs.archetype @Bullet (@P, @L, optional @S) capacity 100
 // CHECK:      }
 // CHECK:      memref.store %{{.*}}, %[[PENDING_N]]
 // CHECK-NEXT: return
-ecs.system @age(%dt: f32) writes [@L, @Bullet] {
-  ecs.query (%l: !ecs.ref<@L, mut>) {
-    %t = ecs.get %l "t" : !ecs.ref<@L, mut> -> f32
+ent.system @age(%dt: f32) writes [@L, @Bullet] {
+  ent.query (%l: !ent.ref<@L, mut>) {
+    %t = ent.get %l "t" : !ent.ref<@L, mut> -> f32
     %n = arith.subf %t, %dt : f32
-    ecs.set %l "t", %n : !ecs.ref<@L, mut>, f32
+    ent.set %l "t", %n : !ent.ref<@L, mut>, f32
     %zero = arith.constant 0.0 : f32
     %dead = arith.cmpf ole, %n, %zero : f32
     scf.if %dead {
-      ecs.despawn
+      ent.despawn
     }
   }
 }
@@ -97,7 +97,7 @@ ecs.system @age(%dt: f32) writes [@L, @Bullet] {
 // CHECK:      %[[ROWI:.*]] = arith.index_cast %{{.*}} : i64 to index
 // CHECK-NEXT: %[[CAP:.*]] = arith.constant 100 : index
 // CHECK-NEXT: %[[FITS:.*]] = arith.cmpi ult, %[[ROWI]], %[[CAP]] : index
-// CHECK-NEXT: cf.assert %[[FITS]], "ecs.spawn exceeds the capacity of @Bullet"
+// CHECK-NEXT: cf.assert %[[FITS]], "ent.spawn exceeds the capacity of @Bullet"
 // CHECK-NEXT: memref.store %[[X]], %{{.*}}[%[[ROWI]]] : memref<100xf32>
 // CHECK-NEXT: memref.store %{{.*}}, %{{.*}}[%[[ROWI]]] : memref<100xf32>
 // CHECK-NEXT: %[[ABSENT:.*]] = arith.constant 0 : i8
@@ -114,16 +114,16 @@ ecs.system @age(%dt: f32) writes [@L, @Bullet] {
 // CHECK:      %[[NEXT:.*]] = arith.addi %[[ROWI]]
 // CHECK:      arith.index_cast %[[NEXT]] : index to i64
 // CHECK-NEXT: memref.store
-ecs.system @fire(%x: f32) writes [@Bullet] {
+ent.system @fire(%x: f32) writes [@Bullet] {
   %t = arith.constant 1.0 : f32
-  ecs.spawn @Bullet(%x, %t) : f32, f32
+  ent.spawn @Bullet(%x, %t) : f32, f32
 }
 
-ecs.system @drift(%d: f32) writes [@P] {
-  ecs.query (%p: !ecs.ref<@P, mut>) {
-    %x = ecs.get %p "x" : !ecs.ref<@P, mut> -> f32
+ent.system @drift(%d: f32) writes [@P] {
+  ent.query (%p: !ent.ref<@P, mut>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
     %n = arith.addf %x, %d : f32
-    ecs.set %p "x", %n : !ecs.ref<@P, mut>, f32
+    ent.set %p "x", %n : !ent.ref<@P, mut>, f32
   }
 }
 
@@ -142,9 +142,9 @@ ecs.system @drift(%d: f32) writes [@P] {
 // FUSED:       call @fire(
 // FUSED:       scf.for
 // FUSED:       return
-ecs.schedule @frame(%dt: f32, %x: f32) {
-  ecs.run @drift(%dt) : f32
-  ecs.run @age(%dt) : f32
-  ecs.run @fire(%x) : f32
-  ecs.run @drift(%dt) : f32
+ent.schedule @frame(%dt: f32, %x: f32) {
+  ent.run @drift(%dt) : f32
+  ent.run @age(%dt) : f32
+  ent.run @fire(%x) : f32
+  ent.run @drift(%dt) : f32
 }

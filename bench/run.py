@@ -22,8 +22,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
-ECS_OPT = os.path.join(ROOT, "build", "bin", "ecs-opt")
-ECS_TRANSLATE = os.path.join(ROOT, "build", "bin", "ecs-translate")
+ENT_OPT = os.path.join(ROOT, "build", "bin", "ent-opt")
+ENT_TRANSLATE = os.path.join(ROOT, "build", "bin", "ent-translate")
 OUT = os.path.join(ROOT, "build", "bench")
 EXAMPLE = os.path.join(ROOT, "examples", "integrate.mlir")
 HOST = os.path.join(ROOT, "bench", "bench_main.c")
@@ -32,19 +32,19 @@ REFERENCE = os.path.join(ROOT, "bench", "reference.c")
 # wraps loop bodies in; --convert-scf-to-cf would otherwise split it into
 # several blocks, which the op does not allow.
 TO_LLVM = ["--symbol-dce", "--convert-scf-to-openmp", "--canonicalize",
-           "--ecs-omp-nowait",
+           "--ent-omp-nowait",
            "--convert-scf-to-cf", "--convert-to-llvm",
            "--reconcile-unrealized-casts"]
 OPENMP = [f"-L{LLVM}/lib", "-lomp", f"-Wl,-rpath,{LLVM}/lib"]
 
-# name -> ecs-opt passes before lowering to LLVM, or None for C references.
+# name -> ent-opt passes before lowering to LLVM, or None for C references.
 VARIANTS = {
-    "loops": ["--ecs-lower-to-loops"],
-    "stages-omp": ["--ecs-schedule", "--ecs-lower-to-loops=parallel-stages=1"],
-    "entities-omp": ["--ecs-lower-to-loops=parallel-entities=1"],
-    "fused": ["--ecs-lower-to-loops=fuse-systems=1"],
+    "loops": ["--ent-lower-to-loops"],
+    "stages-omp": ["--ent-schedule", "--ent-lower-to-loops=parallel-stages=1"],
+    "entities-omp": ["--ent-lower-to-loops=parallel-entities=1"],
+    "fused": ["--ent-lower-to-loops=fuse-systems=1"],
     "fused-entities-omp": [
-        "--ecs-lower-to-loops=fuse-systems=1 parallel-entities=1"],
+        "--ent-lower-to-loops=fuse-systems=1 parallel-entities=1"],
     "c-fused": None,
     "c-fused-restrict": None,
 }
@@ -56,7 +56,7 @@ def run(cmd, **kwargs):
 
 def generate_header():
     """The hosts include integrate_world.h, generated from the example."""
-    run([ECS_TRANSLATE, "--ecs-to-c-header", EXAMPLE, "-o",
+    run([ENT_TRANSLATE, "--ent-to-c-header", EXAMPLE, "-o",
          os.path.join(OUT, "integrate_world.h")])
 
 
@@ -68,7 +68,7 @@ def build(name, passes):
         run([f"{LLVM}/bin/clang", *cflags, "-ffp-contract=off", *defines,
              REFERENCE, HOST, "-o", exe])
         return exe
-    mlir = run([ECS_OPT, EXAMPLE, *passes, *TO_LLVM], capture_output=True,
+    mlir = run([ENT_OPT, EXAMPLE, *passes, *TO_LLVM], capture_output=True,
                text=True).stdout
     ll = os.path.join(OUT, name + ".ll")
     run([f"{LLVM}/bin/mlir-translate", "--mlir-to-llvmir", "-o", ll],

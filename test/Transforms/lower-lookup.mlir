@@ -1,14 +1,14 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops | FileCheck %s
-// RUN: ecs-opt %s "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN: ent-opt %s --ent-lower-to-loops | FileCheck %s
+// RUN: ent-opt %s "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
 // RUN:   | FileCheck %s --check-prefix=PAR
-// RUN: ecs-opt %s --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN: ent-opt %s --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
 // RUN:   | FileCheck %s --check-prefix=FUSED
 
-ecs.component @P (x: f32)
-ecs.component @T (entity: !ecs.entity)
-ecs.component @S (s: f32)
-ecs.archetype @Plain (@P) capacity 10
-ecs.archetype @Tagged (@P, optional @S, @T) capacity 10
+ent.component @P (x: f32)
+ent.component @T (entity: !ent.entity)
+ent.component @S (s: f32)
+ent.archetype @Plain (@P) capacity 10
+ent.archetype @Tagged (@P, optional @S, @T) capacity 10
 
 // Nothing here is despawned or moved, so an id is `archetype << 4 | row`
 // (capacity 10 needs 4 row bits): the lookup decodes it, picks the
@@ -37,11 +37,11 @@ ecs.archetype @Tagged (@P, optional @S, @T) capacity 10
 // The query binds the optional S, so its store is masked.
 // CHECK:      %[[OLD:.*]] = memref.load
 // CHECK-NEXT: arith.select %{{.*}}, %[[R]]#0, %[[OLD]] : f32
-ecs.system @chase() reads [@P, @T] writes [@S] {
-  ecs.query (%t: !ecs.ref<@T>, %s: !ecs.ref<@S, mut>) {
-    %target = ecs.get %t "entity" : !ecs.ref<@T> -> !ecs.entity
-    %x, %found = ecs.lookup %target @P "x" : f32
-    ecs.set %s "s", %x : !ecs.ref<@S, mut>, f32
+ent.system @chase() reads [@P, @T] writes [@S] {
+  ent.query (%t: !ent.ref<@T>, %s: !ent.ref<@S, mut>) {
+    %target = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
+    %x, %found = ent.lookup %target @P "x" : f32
+    ent.set %s "s", %x : !ent.ref<@S, mut>, f32
   }
 }
 
@@ -52,11 +52,11 @@ ecs.system @chase() reads [@P, @T] writes [@S] {
 // PAR:       scf.parallel
 // PAR:         arith.select
 
-ecs.system @shift(%d: f32) writes [@P] {
-  ecs.query (%p: !ecs.ref<@P, mut>) {
-    %x = ecs.get %p "x" : !ecs.ref<@P, mut> -> f32
+ent.system @shift(%d: f32) writes [@P] {
+  ent.query (%p: !ent.ref<@P, mut>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
     %n = arith.addf %x, %d : f32
-    ecs.set %p "x", %n : !ecs.ref<@P, mut>, f32
+    ent.set %p "x", %n : !ent.ref<@P, mut>, f32
   }
 }
 
@@ -69,8 +69,8 @@ ecs.system @shift(%d: f32) writes [@P] {
 // FUSED-NEXT:  arith.constant
 // FUSED:       scf.for
 // FUSED:       return
-ecs.schedule @frame(%d: f32) {
-  ecs.run @shift(%d) : f32
-  ecs.run @chase()
-  ecs.run @shift(%d) : f32
+ent.schedule @frame(%d: f32) {
+  ent.run @shift(%d) : f32
+  ent.run @chase()
+  ent.run @shift(%d) : f32
 }

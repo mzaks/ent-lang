@@ -1,11 +1,11 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops | FileCheck %s
-// RUN: ecs-opt %s --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN: ent-opt %s --ent-lower-to-loops | FileCheck %s
+// RUN: ent-opt %s --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
 // RUN:   | FileCheck %s --check-prefix=FUSED
 
-ecs.component @P (x: f32)
-ecs.resource @Clock (dt: f32, frame: i64)
-ecs.archetype @Many (@P) capacity 1000
-ecs.archetype @Player (@P) capacity 1
+ent.component @P (x: f32)
+ent.resource @Clock (dt: f32, frame: i64)
+ent.archetype @Many (@P) capacity 1000
+ent.archetype @Player (@P) capacity 1
 
 // World layout: 2 counts, then Clock on its own cache line (dt at 64,
 // frame at 72), then columns: Many.P.x at 128 + 1088 = 1216, Player.P.x at
@@ -34,25 +34,25 @@ ecs.archetype @Player (@P) capacity 1
 // CHECK-NEXT:   %[[X1:.*]] = arith.addf %[[X]], %[[DT2]]
 // CHECK-NEXT:   memref.store %[[X1]], %{{.*}}[%[[ZERO]]] : memref<1xf32>
 // CHECK-NEXT: }
-ecs.system @advance() writes [@P, @Clock] {
-  %f = ecs.read @Clock "frame" : i64
+ent.system @advance() writes [@P, @Clock] {
+  %f = ent.read @Clock "frame" : i64
   %one = arith.constant 1 : i64
   %next = arith.addi %f, %one : i64
-  ecs.write @Clock "frame", %next : i64
-  ecs.query (%p: !ecs.ref<@P, mut>) {
-    %x = ecs.get %p "x" : !ecs.ref<@P, mut> -> f32
-    %dt = ecs.read @Clock "dt" : f32
+  ent.write @Clock "frame", %next : i64
+  ent.query (%p: !ent.ref<@P, mut>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
+    %dt = ent.read @Clock "dt" : f32
     %n = arith.addf %x, %dt : f32
-    ecs.set %p "x", %n : !ecs.ref<@P, mut>, f32
+    ent.set %p "x", %n : !ent.ref<@P, mut>, f32
   }
 }
 
-ecs.system @drift() reads [@Clock] writes [@P] {
-  ecs.query (%p: !ecs.ref<@P, mut>) {
-    %x = ecs.get %p "x" : !ecs.ref<@P, mut> -> f32
-    %dt = ecs.read @Clock "dt" : f32
+ent.system @drift() reads [@Clock] writes [@P] {
+  ent.query (%p: !ent.ref<@P, mut>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
+    %dt = ent.read @Clock "dt" : f32
     %n = arith.subf %x, %dt : f32
-    ecs.set %p "x", %n : !ecs.ref<@P, mut>, f32
+    ent.set %p "x", %n : !ent.ref<@P, mut>, f32
   }
 }
 
@@ -69,8 +69,8 @@ ecs.system @drift() reads [@Clock] writes [@P] {
 // FUSED-NEXT:  scf.for
 // FUSED:       scf.if
 // FUSED:       return
-ecs.schedule @frame() {
-  ecs.run @drift()
-  ecs.run @advance()
-  ecs.run @drift()
+ent.schedule @frame() {
+  ent.run @drift()
+  ent.run @advance()
+  ent.run @drift()
 }

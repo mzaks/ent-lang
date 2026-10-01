@@ -1,17 +1,17 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops | FileCheck %s --check-prefix=SEQ
-// RUN: ecs-opt %s --ecs-lower-to-loops=parallel-stages=1 | FileCheck %s --check-prefix=PAR
+// RUN: ent-opt %s --ent-lower-to-loops | FileCheck %s --check-prefix=SEQ
+// RUN: ent-opt %s --ent-lower-to-loops=parallel-stages=1 | FileCheck %s --check-prefix=PAR
 
-ecs.component @P (x: f32, y: f32)
-ecs.archetype @A (@P) capacity 1000
+ent.component @P (x: f32, y: f32)
+ent.archetype @A (@P) capacity 1000
 
-ecs.system @writeX(%c: f32) writes [@P] {
-  ecs.query (%p: !ecs.ref<@P, mut>) {
-    ecs.set %p "x", %c : !ecs.ref<@P, mut>, f32
+ent.system @writeX(%c: f32) writes [@P] {
+  ent.query (%p: !ent.ref<@P, mut>) {
+    ent.set %p "x", %c : !ent.ref<@P, mut>, f32
   }
 }
-ecs.system @writeY(%c: f32) writes [@P] {
-  ecs.query (%p: !ecs.ref<@P, mut>) {
-    ecs.set %p "y", %c : !ecs.ref<@P, mut>, f32
+ent.system @writeY(%c: f32) writes [@P] {
+  ent.query (%p: !ent.ref<@P, mut>) {
+    ent.set %p "y", %c : !ent.ref<@P, mut>, f32
   }
 }
 
@@ -41,12 +41,12 @@ ecs.system @writeY(%c: f32) writes [@P] {
 // PAR-NEXT:    }
 // PAR-NEXT:    call @writeX
 // PAR-NEXT:    return
-ecs.schedule @frame(%c: f32) {
-  ecs.stage {
-    ecs.run @writeX(%c) : f32
-    ecs.run @writeY(%c) : f32
+ent.schedule @frame(%c: f32) {
+  ent.stage {
+    ent.run @writeX(%c) : f32
+    ent.run @writeY(%c) : f32
   }
-  ecs.stage {
-    ecs.run @writeX(%c) : f32
+  ent.stage {
+    ent.run @writeX(%c) : f32
   }
 }

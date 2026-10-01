@@ -1,14 +1,14 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops --canonicalize | FileCheck %s
-// RUN: ecs-opt %s "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=100" \
+// RUN: ent-opt %s --ent-lower-to-loops --canonicalize | FileCheck %s
+// RUN: ent-opt %s "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=100" \
 // RUN:     --canonicalize | FileCheck %s --check-prefix=PAR
 
 // 32768 units give the hp log 4096 entries, in 64 segments of 64. A write
 // at row r of n units appends to segment r * 64 / n, so the contiguous row
 // ranges of a parallel loop's threads mostly use segments of their own;
 // segment s's count is the i64 at s * 8 of the counts.
-ecs.component @H (hp: f32)
-ecs.component @B (w: f32)
-ecs.archetype @A (@H, @B) capacity 32768
+ent.component @H (hp: f32)
+ent.component @B (w: f32)
+ent.archetype @A (@H, @B) capacity 32768
 
 // CHECK-LABEL: func.func private @hurt(
 // CHECK-DAG:  %[[COUNTS:.*]] = memref.view %{{.*}} : memref<{{.*}}xi8> to memref<512xi64>
@@ -20,9 +20,9 @@ ecs.archetype @A (@H, @B) capacity 32768
 // CHECK:        %[[BASE:.*]] = arith.muli %[[SEGMENT]], %c8_i64
 // CHECK-NEXT:   %[[AT:.*]] = arith.index_cast %[[BASE]] : i64 to index
 // CHECK:        memref.load %[[COUNTS]][%[[AT]]]
-ecs.system @hurt(%d: f32) writes [@H] {
-  ecs.query (%h: !ecs.ref<@H, mut>) {
-    ecs.set %h "hp", %d : !ecs.ref<@H, mut>, f32
+ent.system @hurt(%d: f32) writes [@H] {
+  ent.query (%h: !ent.ref<@H, mut>) {
+    ent.set %h "hp", %d : !ent.ref<@H, mut>, f32
   }
 }
 
@@ -48,9 +48,9 @@ ecs.system @hurt(%d: f32) writes [@H] {
 // PAR-NEXT:      scf.parallel (%{{.*}}) = (%c0) to (%c64) step (%c1) {
 // PAR:         } else {
 // PAR-NEXT:      scf.for %{{.*}} = %c0 to %c64 step %c1 {
-ecs.system @watch() reads [@H] writes [@B] {
-  ecs.query (%h: !ecs.ref<@H>, %b: !ecs.ref<@B, mut>) on [changed @H "hp"] {
-    %x = ecs.get %h "hp" : !ecs.ref<@H> -> f32
-    ecs.set %b "w", %x : !ecs.ref<@B, mut>, f32
+ent.system @watch() reads [@H] writes [@B] {
+  ent.query (%h: !ent.ref<@H>, %b: !ent.ref<@B, mut>) on [changed @H "hp"] {
+    %x = ent.get %h "hp" : !ent.ref<@H> -> f32
+    ent.set %b "w", %x : !ent.ref<@B, mut>, f32
   }
 }

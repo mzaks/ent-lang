@@ -6,35 +6,35 @@
 // After the first run the queries walk their event logs, except where a
 // log is too small or absent. All print the same.
 // RUN: mkdir -p %t.dir %t.dir/tiny %t.dir/nolog
-// RUN: ecs-translate --ecs-to-c-header %S/../../examples/reactive.mlir \
+// RUN: ent-translate --ent-to-c-header %S/../../examples/reactive.mlir \
 // RUN:     -o %t.dir/reactive_world.h
 
-// RUN: ecs-opt %S/../../examples/reactive.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %S/../../examples/reactive.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
 // RUN: clang -O2 -Wno-override-module %t.seq.ll \
 // RUN:     -I%t.dir %S/../../examples/host/reactive_main.c -o %t.seq
 // RUN: %t.seq | FileCheck %s
 
-// RUN: ecs-opt %S/../../examples/reactive.mlir \
-// RUN:     --ecs-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN: ent-opt %S/../../examples/reactive.mlir \
+// RUN:     --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
 // RUN: clang -O2 -Wno-override-module %t.fused.ll \
 // RUN:     -I%t.dir %S/../../examples/host/reactive_main.c -o %t.fused
 // RUN: %t.fused | FileCheck %s
 
-// RUN: ecs-opt %S/../../examples/reactive.mlir --ecs-schedule \
-// RUN:     --ecs-lower-to-loops=parallel-stages=1 --convert-scf-to-cf \
+// RUN: ent-opt %S/../../examples/reactive.mlir --ent-schedule \
+// RUN:     --ent-lower-to-loops=parallel-stages=1 --convert-scf-to-cf \
 // RUN:     --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.stages.ll
 // RUN: clang -O2 -Wno-override-module %t.stages.ll \
 // RUN:     -I%t.dir %S/../../examples/host/reactive_main.c %openmp -o %t.stages
 // RUN: %t.stages | FileCheck %s
 
-// RUN: ecs-opt %S/../../examples/reactive.mlir \
-// RUN:     "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=1" \
-// RUN:     --convert-scf-to-openmp --canonicalize --ecs-omp-nowait \
+// RUN: ent-opt %S/../../examples/reactive.mlir \
+// RUN:     "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
 // RUN: clang -O2 -Wno-override-module %t.par.ll \
@@ -47,9 +47,9 @@
 // RUN:     -e 's/added @Shield\]/added @Shield log 1]/' \
 // RUN:     -e 's/removed @Shield\]/removed @Shield log 1]/' \
 // RUN:     %S/../../examples/reactive.mlir > %t.dir/tiny.mlir
-// RUN: ecs-translate --ecs-to-c-header %t.dir/tiny.mlir \
+// RUN: ent-translate --ent-to-c-header %t.dir/tiny.mlir \
 // RUN:     -o %t.dir/tiny/reactive_world.h
-// RUN: ecs-opt %t.dir/tiny.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %t.dir/tiny.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.tiny.ll
 // RUN: clang -O2 -Wno-override-module %t.tiny.ll \
@@ -59,18 +59,18 @@
 // RUN:     -e 's/added @Shield\]/added @Shield log 0]/' \
 // RUN:     -e 's/removed @Shield\]/removed @Shield log 0]/' \
 // RUN:     %S/../../examples/reactive.mlir > %t.dir/nolog.mlir
-// RUN: ecs-translate --ecs-to-c-header %t.dir/nolog.mlir \
+// RUN: ent-translate --ent-to-c-header %t.dir/nolog.mlir \
 // RUN:     -o %t.dir/nolog/reactive_world.h
-// RUN: ecs-opt %t.dir/nolog.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %t.dir/nolog.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.nolog.ll
 // RUN: clang -O2 -Wno-override-module %t.nolog.ll \
 // RUN:     -I%t.dir/nolog %S/../../examples/host/reactive_main.c -o %t.nolog
 // RUN: %t.nolog | FileCheck %s
 
-// RUN: ecs-translate --ecs-to-c-header %S/Inputs/reactive_moves.mlir \
+// RUN: ent-translate --ent-to-c-header %S/Inputs/reactive_moves.mlir \
 // RUN:     -o %t.dir/reactive_moves_world.h
-// RUN: ecs-opt %S/Inputs/reactive_moves.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %S/Inputs/reactive_moves.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.moves.ll
 // RUN: clang -O2 -Wno-override-module %t.moves.ll \

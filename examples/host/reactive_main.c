@@ -9,44 +9,44 @@
 
 #include <stdio.h>
 
-static ecs_entity spawnShip(ecs_world *w) {
-  ecs_entity id = ecs_Ship_spawn(w);
-  int64_t row = ecs_entity_row(w, id);
-  ecs_Ship_Hull_hp(w)[row] = 99;
-  ecs_Ship_Hit_damage(w)[row] = 0;
-  ecs_Ship_Bar_width(w)[row] = 0;
-  ecs_Ship_Bar_redraws(w)[row] = 0;
-  ecs_Ship_Bar_alarms(w)[row] = 0;
-  ecs_Ship_Bar_restores(w)[row] = 0;
+static ent_entity spawnShip(ent_world *w) {
+  ent_entity id = ent_Ship_spawn(w);
+  int64_t row = ent_entity_row(w, id);
+  ent_Ship_Hull_hp(w)[row] = 99;
+  ent_Ship_Hit_damage(w)[row] = 0;
+  ent_Ship_Bar_width(w)[row] = 0;
+  ent_Ship_Bar_redraws(w)[row] = 0;
+  ent_Ship_Bar_alarms(w)[row] = 0;
+  ent_Ship_Bar_restores(w)[row] = 0;
   return id;
 }
 
-static void report(ecs_world *w, int frame, ecs_entity *ships) {
+static void report(ent_world *w, int frame, ent_entity *ships) {
   for (int i = 0; i < 3; ++i) {
-    int64_t row = ecs_entity_row(w, ships[i]);
+    int64_t row = ent_entity_row(w, ships[i]);
     printf("frame %d ship %d: hp %.0f width %.0f redraws %d alarms %d "
            "restores %d shield %d\n",
-           frame, i, ecs_Ship_Hull_hp(w)[row], ecs_Ship_Bar_width(w)[row],
-           ecs_Ship_Bar_redraws(w)[row], ecs_Ship_Bar_alarms(w)[row],
-           ecs_Ship_Bar_restores(w)[row], ecs_Ship_Shield_present(w)[row]);
+           frame, i, ent_Ship_Hull_hp(w)[row], ent_Ship_Bar_width(w)[row],
+           ent_Ship_Bar_redraws(w)[row], ent_Ship_Bar_alarms(w)[row],
+           ent_Ship_Bar_restores(w)[row], ent_Ship_Shield_present(w)[row]);
   }
 }
 
 int main(void) {
-  ecs_world *w = ecs_world_create();
-  ecs_entity ships[3] = {spawnShip(w), spawnShip(w), spawnShip(w)};
+  ent_world *w = ent_world_create();
+  ent_entity ships[3] = {spawnShip(w), spawnShip(w), spawnShip(w)};
   for (int frame = 0; frame < 4; ++frame) {
-    int64_t row = ecs_entity_row(w, ships[1]);
+    int64_t row = ent_entity_row(w, ships[1]);
     if (frame == 0)
       for (int i = 0; i < 3; ++i)
-        ecs_Ship_Hit_damage(w)[ecs_entity_row(w, ships[i])] = -1;
+        ent_Ship_Hit_damage(w)[ent_entity_row(w, ships[i])] = -1;
     if (frame == 1)
-      ecs_Ship_Hit_damage(w)[row] = 60;
+      ent_Ship_Hit_damage(w)[row] = 60;
     if (frame == 2)
-      ecs_Ship_Hit_damage(w)[row] = -60;
-    ecs_frame(w);
+      ent_Ship_Hit_damage(w)[row] = -60;
+    ent_frame(w);
     report(w, frame, ships);
   }
-  ecs_world_destroy(w);
+  ent_world_destroy(w);
   return 0;
 }

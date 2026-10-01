@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-entity writes (see apply.c): ecs.apply against hand-written C,
+"""Cross-entity writes (see apply.c): ent.apply against hand-written C,
 swept over the number of guns and of target ships.
 
 Every variant is its own binary and every measurement its own process,
@@ -20,22 +20,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
 OUT = os.path.join(ROOT, "build", "bench", "apply")
-ECS_OPT = os.path.join(ROOT, "build", "bin", "ecs-opt")
-ECS_TRANSLATE = os.path.join(ROOT, "build", "bin", "ecs-translate")
+ENT_OPT = os.path.join(ROOT, "build", "bin", "ent-opt")
+ENT_TRANSLATE = os.path.join(ROOT, "build", "bin", "ent-translate")
 OPENMP = [f"-I{LLVM}/include", f"-L{LLVM}/lib",
           f"-Wl,-rpath,{LLVM}/lib"]
 LOWER = ["--convert-scf-to-cf", "--convert-to-llvm",
          "--reconcile-unrealized-casts"]
-PARALLEL = ["--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1",
-            "--convert-scf-to-openmp", "--canonicalize", "--ecs-omp-nowait"]
-# name: (VARIANT, program, ecs-opt passes before LOWER, OpenMP)
+PARALLEL = ["--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1",
+            "--convert-scf-to-openmp", "--canonicalize", "--ent-omp-nowait"]
+# name: (VARIANT, program, ent-opt passes before LOWER, OpenMP)
 VARIANTS = {
     "c-index": (0, None, None, False),
     "c-atomic-par": (1, None, None, True),
     "c-buffered": (2, None, None, True),
-    "compiled-rows": (3, "fire.mlir", ["--ecs-lower-to-loops"], False),
+    "compiled-rows": (3, "fire.mlir", ["--ent-lower-to-loops"], False),
     "compiled-rows-par": (3, "fire.mlir", PARALLEL, True),
-    "compiled-gen": (3, "fire_generational.mlir", ["--ecs-lower-to-loops"],
+    "compiled-gen": (3, "fire_generational.mlir", ["--ent-lower-to-loops"],
                      False),
 }
 
@@ -47,9 +47,9 @@ def build(name, number, program, passes, openmp):
         directory = os.path.join(OUT, name + ".d")
         os.makedirs(directory, exist_ok=True)
         source = os.path.join(HERE, program)
-        subprocess.run([ECS_TRANSLATE, "--ecs-to-c-header", source, "-o",
+        subprocess.run([ENT_TRANSLATE, "--ent-to-c-header", source, "-o",
                         os.path.join(directory, "fire_world.h")], check=True)
-        mlir = subprocess.run([ECS_OPT, source, *passes, *LOWER], check=True,
+        mlir = subprocess.run([ENT_OPT, source, *passes, *LOWER], check=True,
                               capture_output=True, text=True).stdout
         ll = os.path.join(directory, "fire.ll")
         subprocess.run([f"{LLVM}/bin/mlir-translate", "--mlir-to-llvmir",

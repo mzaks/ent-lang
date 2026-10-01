@@ -1,19 +1,19 @@
-// ecs.apply from a query whose loop runs sequentially and, forced, in
+// ent.apply from a query whose loop runs sequentially and, forced, in
 // parallel: both give the same, row-ordered result.
 // RUN: mkdir -p %t.dir
-// RUN: ecs-translate --ecs-to-c-header %S/Inputs/apply.mlir \
+// RUN: ent-translate --ent-to-c-header %S/Inputs/apply.mlir \
 // RUN:     -o %t.dir/apply_world.h
 
-// RUN: ecs-opt %S/Inputs/apply.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %S/Inputs/apply.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
 // RUN: clang -O2 -Wno-override-module %t.seq.ll -I%t.dir \
 // RUN:     %S/Inputs/apply_main.c -o %t.seq
 // RUN: %t.seq | FileCheck %s
 
-// RUN: ecs-opt %S/Inputs/apply.mlir \
-// RUN:     "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
-// RUN:     --convert-scf-to-openmp --canonicalize --ecs-omp-nowait \
+// RUN: ent-opt %S/Inputs/apply.mlir \
+// RUN:     "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
 // RUN: clang -O2 -Wno-override-module %t.par.ll -I%t.dir \

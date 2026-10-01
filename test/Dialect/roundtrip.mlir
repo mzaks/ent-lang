@@ -1,142 +1,142 @@
-// RUN: ecs-opt %S/../../examples/integrate.mlir | FileCheck %s
+// RUN: ent-opt %S/../../examples/integrate.mlir | FileCheck %s
 // Printing and re-parsing must give the same module.
-// RUN: ecs-opt %S/../../examples/integrate.mlir | ecs-opt | FileCheck %s
+// RUN: ent-opt %S/../../examples/integrate.mlir | ent-opt | FileCheck %s
 
-// CHECK: ecs.component @Position (x: f32, y: f32)
-// CHECK: ecs.component @Mass (kg: f32)
-// CHECK: ecs.archetype @Body (@Position, @Velocity, @Mass) capacity 10000000
-// CHECK: ecs.archetype @Scenery (@Position) capacity 10000000
-// CHECK-LABEL: ecs.system @gravity(%{{.*}}: f32, %{{.*}}: f32) reads [@Mass] writes [@Velocity] {
-// CHECK:   ecs.query (%[[V:.*]]: !ecs.ref<@Velocity, mut>, %{{.*}}: !ecs.ref<@Mass>) {
-// CHECK:     ecs.get %[[V]] "dy" : <@Velocity, mut> -> f32
-// CHECK:     ecs.set %[[V]] "dy", %{{.*}} : <@Velocity, mut>, f32
+// CHECK: ent.component @Position (x: f32, y: f32)
+// CHECK: ent.component @Mass (kg: f32)
+// CHECK: ent.archetype @Body (@Position, @Velocity, @Mass) capacity 10000000
+// CHECK: ent.archetype @Scenery (@Position) capacity 10000000
+// CHECK-LABEL: ent.system @gravity(%{{.*}}: f32, %{{.*}}: f32) reads [@Mass] writes [@Velocity] {
+// CHECK:   ent.query (%[[V:.*]]: !ent.ref<@Velocity, mut>, %{{.*}}: !ent.ref<@Mass>) {
+// CHECK:     ent.get %[[V]] "dy" : <@Velocity, mut> -> f32
+// CHECK:     ent.set %[[V]] "dy", %{{.*}} : <@Velocity, mut>, f32
 // CHECK-NEXT: }
 // CHECK-NEXT: }
-// CHECK: ecs.schedule @frame(%[[DT:.*]]: f32) {
-// CHECK:   ecs.run @gravity(%[[DT]], %{{.*}}) : f32, f32
-// CHECK:   ecs.run @integrate(%[[DT]]) : f32
-// CHECK-NOT: ecs.yield
+// CHECK: ent.schedule @frame(%[[DT:.*]]: f32) {
+// CHECK:   ent.run @gravity(%[[DT]], %{{.*}}) : f32, f32
+// CHECK:   ent.run @integrate(%[[DT]]) : f32
+// CHECK-NOT: ent.yield
 
 // A system without access lists and a component with quoted field names.
-// RUN: ecs-opt %s | FileCheck %s --check-prefix=MISC
-// MISC: ecs.component @Tag ()
-// MISC: ecs.component @Named ("with space": i32, idx: index)
-// MISC: ecs.system @noop() {
-// MISC: ecs.schedule @staged() {
-// MISC-NEXT: ecs.stage {
-// MISC-NEXT:   ecs.run @noop()
+// RUN: ent-opt %s | FileCheck %s --check-prefix=MISC
+// MISC: ent.component @Tag ()
+// MISC: ent.component @Named ("with space": i32, idx: index)
+// MISC: ent.system @noop() {
+// MISC: ent.schedule @staged() {
+// MISC-NEXT: ent.stage {
+// MISC-NEXT:   ent.run @noop()
 // MISC-NEXT: }
-// MISC-NEXT: ecs.stage {
+// MISC-NEXT: ent.stage {
 // MISC-NEXT: }
-// MISC: ecs.resource @Clock (dt: f32, frame: i64)
-// MISC-LABEL: ecs.system @tick() reads [@Tag] writes [@Clock] {
-// MISC-NEXT:   %[[F:.*]] = ecs.read @Clock "frame" : i64
-// MISC:        ecs.write @Clock "frame", %{{.*}} : i64
-// MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag>) {
-// MISC-NEXT:     ecs.read @Clock "dt" : f32
-// MISC: ecs.component @Stunned (seconds: f32)
-// MISC: ecs.archetype @Character (@Tag, optional @Stunned) capacity 10
-// MISC-LABEL: ecs.system @stun(%{{.*}}: f32) reads [@Tag] writes [@Stunned] {
-// MISC:          ecs.add @Stunned(%{{.*}}) : f32
-// MISC:          ecs.remove @Stunned
-// MISC-LABEL: ecs.system @fire(%{{.*}}: f32) reads [@Tag] writes [@Character] {
-// MISC:          ecs.spawn @Character()
-// MISC:          ecs.despawn
-// MISC-LABEL: ecs.system @follow() reads [@Tag, @Named] {
-// MISC:          %{{.*}}, %{{.*}} = ecs.lookup %{{.*}} @Named "idx" : index
-// MISC-LABEL: ecs.system @hit(%{{.*}}: i32) reads [@Tag] writes [@Named] {
-// MISC:          ecs.apply %{{.*}} @Named "with space" add %{{.*}} : i32
-// MISC-NEXT:     ecs.apply %{{.*}} @Named "idx" max %{{.*}} : index
-// MISC-LABEL: ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
-// MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag, mut>) on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0, removed @Stunned] {
+// MISC: ent.resource @Clock (dt: f32, frame: i64)
+// MISC-LABEL: ent.system @tick() reads [@Tag] writes [@Clock] {
+// MISC-NEXT:   %[[F:.*]] = ent.read @Clock "frame" : i64
+// MISC:        ent.write @Clock "frame", %{{.*}} : i64
+// MISC-NEXT:   ent.query (%{{.*}}: !ent.ref<@Tag>) {
+// MISC-NEXT:     ent.read @Clock "dt" : f32
+// MISC: ent.component @Stunned (seconds: f32)
+// MISC: ent.archetype @Character (@Tag, optional @Stunned) capacity 10
+// MISC-LABEL: ent.system @stun(%{{.*}}: f32) reads [@Tag] writes [@Stunned] {
+// MISC:          ent.add @Stunned(%{{.*}}) : f32
+// MISC:          ent.remove @Stunned
+// MISC-LABEL: ent.system @fire(%{{.*}}: f32) reads [@Tag] writes [@Character] {
+// MISC:          ent.spawn @Character()
+// MISC:          ent.despawn
+// MISC-LABEL: ent.system @follow() reads [@Tag, @Named] {
+// MISC:          %{{.*}}, %{{.*}} = ent.lookup %{{.*}} @Named "idx" : index
+// MISC-LABEL: ent.system @hit(%{{.*}}: i32) reads [@Tag] writes [@Named] {
+// MISC:          ent.apply %{{.*}} @Named "with space" add %{{.*}} : i32
+// MISC-NEXT:     ent.apply %{{.*}} @Named "idx" max %{{.*}} : index
+// MISC-LABEL: ent.system @react() reads [@Named, @Stunned] writes [@Tag] {
+// MISC-NEXT:   ent.query (%{{.*}}: !ent.ref<@Tag, mut>) on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0, removed @Stunned] {
 // Components may carry a capacity; spawns may list components, and after
 // inference also name the archetype.
-// MISC:       ecs.component @Sized (s: i32) capacity 32
-// MISC-LABEL: ecs.system @spawnBoth(%{{.*}}: i32) {
-// MISC-NEXT:    ecs.spawn (@Sized)(%{{.*}}) : i32
-// MISC-NEXT:    ecs.spawn (@Sized) into @SizedOnly (%{{.*}}) : i32
+// MISC:       ent.component @Sized (s: i32) capacity 32
+// MISC-LABEL: ent.system @spawnBoth(%{{.*}}: i32) {
+// MISC-NEXT:    ent.spawn (@Sized)(%{{.*}}) : i32
+// MISC-NEXT:    ent.spawn (@Sized) into @SizedOnly (%{{.*}}) : i32
 // Without declarations a system's access is inferred and none is printed;
 // an empty declaration is a contract and stays.
-// MISC-LABEL: ecs.system @inferred() {
-// MISC:       ecs.system @nothing() reads [] {
-// MISC-LABEL: ecs.system @score() reads [@Tag] writes [@Clock] {
-// MISC:          ecs.accumulate @Clock "frame" add %{{.*}} : i64
-// MISC-NEXT:     ecs.accumulate @Clock "dt" max %{{.*}} : f32
-ecs.component @Tag ()
-ecs.component @Named ("with space": i32, idx: index)
-ecs.system @noop() {
+// MISC-LABEL: ent.system @inferred() {
+// MISC:       ent.system @nothing() reads [] {
+// MISC-LABEL: ent.system @score() reads [@Tag] writes [@Clock] {
+// MISC:          ent.accumulate @Clock "frame" add %{{.*}} : i64
+// MISC-NEXT:     ent.accumulate @Clock "dt" max %{{.*}} : f32
+ent.component @Tag ()
+ent.component @Named ("with space": i32, idx: index)
+ent.system @noop() {
 }
-ecs.schedule @staged() {
-  ecs.stage {
-    ecs.run @noop()
+ent.schedule @staged() {
+  ent.stage {
+    ent.run @noop()
   }
-  ecs.stage {
+  ent.stage {
   }
 }
-ecs.resource @Clock (dt: f32, frame: i64)
-ecs.system @tick() reads [@Tag] writes [@Clock] {
-  %frame = ecs.read @Clock "frame" : i64
+ent.resource @Clock (dt: f32, frame: i64)
+ent.system @tick() reads [@Tag] writes [@Clock] {
+  %frame = ent.read @Clock "frame" : i64
   %one = arith.constant 1 : i64
   %next = arith.addi %frame, %one : i64
-  ecs.write @Clock "frame", %next : i64
-  ecs.query (%t: !ecs.ref<@Tag>) {
-    %dt = ecs.read @Clock "dt" : f32
+  ent.write @Clock "frame", %next : i64
+  ent.query (%t: !ent.ref<@Tag>) {
+    %dt = ent.read @Clock "dt" : f32
   }
 }
-ecs.component @Stunned (seconds: f32)
-ecs.archetype @Character (@Tag, optional @Stunned) capacity 10
-ecs.system @stun(%s: f32) reads [@Tag] writes [@Stunned] {
-  ecs.query (%t: !ecs.ref<@Tag>) {
-    ecs.add @Stunned(%s) : f32
+ent.component @Stunned (seconds: f32)
+ent.archetype @Character (@Tag, optional @Stunned) capacity 10
+ent.system @stun(%s: f32) reads [@Tag] writes [@Stunned] {
+  ent.query (%t: !ent.ref<@Tag>) {
+    ent.add @Stunned(%s) : f32
   }
-  ecs.query (%st: !ecs.ref<@Stunned, mut>) {
-    ecs.remove @Stunned
-  }
-}
-ecs.system @fire(%s: f32) reads [@Tag] writes [@Character] {
-  ecs.spawn @Character()
-  ecs.query (%t: !ecs.ref<@Tag>) {
-    ecs.despawn
+  ent.query (%st: !ent.ref<@Stunned, mut>) {
+    ent.remove @Stunned
   }
 }
-ecs.system @follow() reads [@Tag, @Named] {
-  ecs.query (%t: !ecs.ref<@Tag>) {
-    %id = ecs.entity
-    %idx, %found = ecs.lookup %id @Named "idx" : index
+ent.system @fire(%s: f32) reads [@Tag] writes [@Character] {
+  ent.spawn @Character()
+  ent.query (%t: !ent.ref<@Tag>) {
+    ent.despawn
   }
 }
-ecs.system @hit(%v: i32) reads [@Tag] writes [@Named] {
-  ecs.query (%t: !ecs.ref<@Tag>) {
-    %id = ecs.entity
+ent.system @follow() reads [@Tag, @Named] {
+  ent.query (%t: !ent.ref<@Tag>) {
+    %id = ent.entity
+    %idx, %found = ent.lookup %id @Named "idx" : index
+  }
+}
+ent.system @hit(%v: i32) reads [@Tag] writes [@Named] {
+  ent.query (%t: !ent.ref<@Tag>) {
+    %id = ent.entity
     %i = arith.constant 3 : index
-    ecs.apply %id @Named "with space" add %v : i32
-    ecs.apply %id @Named "idx" max %i : index
+    ent.apply %id @Named "with space" add %v : i32
+    ent.apply %id @Named "idx" max %i : index
   }
 }
-ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
-  ecs.query (%t: !ecs.ref<@Tag, mut>)
+ent.system @react() reads [@Named, @Stunned] writes [@Tag] {
+  ent.query (%t: !ent.ref<@Tag, mut>)
       on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0,
           removed @Stunned] {
   }
 }
-ecs.component @Sized (s: i32) capacity 32
-ecs.archetype @SizedOnly (@Sized) capacity 32
-ecs.system @spawnBoth(%v: i32) {
-  %a = ecs.spawn (@Sized)(%v) : i32
-  %b = ecs.spawn (@Sized) into @SizedOnly (%v) : i32
+ent.component @Sized (s: i32) capacity 32
+ent.archetype @SizedOnly (@Sized) capacity 32
+ent.system @spawnBoth(%v: i32) {
+  %a = ent.spawn (@Sized)(%v) : i32
+  %b = ent.spawn (@Sized) into @SizedOnly (%v) : i32
 }
-ecs.system @inferred() {
-  ecs.query (%t: !ecs.ref<@Tag>) {
-    %dt = ecs.read @Clock "dt" : f32
+ent.system @inferred() {
+  ent.query (%t: !ent.ref<@Tag>) {
+    %dt = ent.read @Clock "dt" : f32
   }
 }
-ecs.system @nothing() reads [] {
+ent.system @nothing() reads [] {
 }
-ecs.system @score() reads [@Tag] writes [@Clock] {
-  ecs.query (%t: !ecs.ref<@Tag>) {
+ent.system @score() reads [@Tag] writes [@Clock] {
+  ent.query (%t: !ent.ref<@Tag>) {
     %one = arith.constant 1 : i64
     %dt = arith.constant 0.5 : f32
-    ecs.accumulate @Clock "frame" add %one : i64
-    ecs.accumulate @Clock "dt" max %dt : f32
+    ent.accumulate @Clock "frame" add %one : i64
+    ent.accumulate @Clock "dt" max %dt : f32
   }
 }

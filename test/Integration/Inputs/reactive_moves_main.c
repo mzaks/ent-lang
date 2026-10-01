@@ -6,39 +6,39 @@
 
 #include <stdio.h>
 
-static ecs_entity spawnShip(ecs_world *w) {
-  ecs_entity id = ecs_Ship_spawn(w);
-  int64_t row = ecs_entity_row(w, id);
-  ecs_Ship_Hull_hp(w)[row] = 99;
-  ecs_Ship_Hit_damage(w)[row] = 0;
-  ecs_Ship_Bar_width(w)[row] = 0;
-  ecs_Ship_Bar_redraws(w)[row] = 0;
-  ecs_Ship_Bar_alarms(w)[row] = 0;
-  ecs_Ship_Bar_restores(w)[row] = 0;
+static ent_entity spawnShip(ent_world *w) {
+  ent_entity id = ent_Ship_spawn(w);
+  int64_t row = ent_entity_row(w, id);
+  ent_Ship_Hull_hp(w)[row] = 99;
+  ent_Ship_Hit_damage(w)[row] = 0;
+  ent_Ship_Bar_width(w)[row] = 0;
+  ent_Ship_Bar_redraws(w)[row] = 0;
+  ent_Ship_Bar_alarms(w)[row] = 0;
+  ent_Ship_Bar_restores(w)[row] = 0;
   return id;
 }
 
 // Accessors for whichever archetype the ship is in.
 #define FIELD(w, id, component, field)                                        \
-  (ecs_entity_archetype(w, id) == ECS_ARCHETYPE_Shielded                      \
-       ? ecs_Shielded_##component##_##field(w)                               \
-       : ecs_Ship_##component##_##field(w))[ecs_entity_row(w, id)]
+  (ent_entity_archetype(w, id) == ENT_ARCHETYPE_Shielded                      \
+       ? ent_Shielded_##component##_##field(w)                               \
+       : ent_Ship_##component##_##field(w))[ent_entity_row(w, id)]
 
-static void report(ecs_world *w, int frame, ecs_entity *ships) {
+static void report(ent_world *w, int frame, ent_entity *ships) {
   for (int i = 0; i < 3; ++i) {
-    ecs_entity id = ships[i];
+    ent_entity id = ships[i];
     printf("frame %d ship %d: hp %.0f width %.0f redraws %d alarms %d "
            "restores %d shield %d\n",
            frame, i, FIELD(w, id, Hull, hp), FIELD(w, id, Bar, width),
            FIELD(w, id, Bar, redraws), FIELD(w, id, Bar, alarms),
            FIELD(w, id, Bar, restores),
-           ecs_entity_archetype(w, id) == ECS_ARCHETYPE_Shielded);
+           ent_entity_archetype(w, id) == ENT_ARCHETYPE_Shielded);
   }
 }
 
 int main(void) {
-  ecs_world *w = ecs_world_create();
-  ecs_entity ships[3] = {spawnShip(w), spawnShip(w), spawnShip(w)};
+  ent_world *w = ent_world_create();
+  ent_entity ships[3] = {spawnShip(w), spawnShip(w), spawnShip(w)};
   for (int frame = 0; frame < 4; ++frame) {
     if (frame == 0)
       for (int i = 0; i < 3; ++i)
@@ -47,9 +47,9 @@ int main(void) {
       FIELD(w, ships[1], Hit, damage) = 60;
     if (frame == 2)
       FIELD(w, ships[1], Hit, damage) = -60;
-    ecs_frame(w);
+    ent_frame(w);
     report(w, frame, ships);
   }
-  ecs_world_destroy(w);
+  ent_world_destroy(w);
   return 0;
 }

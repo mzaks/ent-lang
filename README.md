@@ -1,8 +1,12 @@
-# ecs-lang
+# ent-lang
 
-A research language built on the Entity Component System pattern. The
-semantics are developed first as an MLIR dialect (`ecs`), written by hand and
-transformed by passes; a surface syntax comes later.
+A research language built on the Entity Component System pattern; the name
+reads as *Ent*-ity plus *lang*, and as German "entlang" ("along"): systems
+run along the entities their queries match. The semantics are developed
+first as an MLIR dialect (`ent`), written by hand and transformed by passes;
+a surface syntax comes later. (Until 2026-10-01 it was called ecs-lang, with
+an `ecs` dialect and `ecs_` names in generated C; `bench/RESULTS.md` keeps
+the old names for results taken before.)
 
 ## Build
 
@@ -14,8 +18,8 @@ python3 -m venv .venv && .venv/bin/pip install lit
 cmake -S . -B build -DMLIR_DIR=/opt/homebrew/opt/llvm/lib/cmake/mlir \
       -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
-cmake --build build --target check-ecs
-build/bin/ecs-opt examples/integrate.mlir
+cmake --build build --target check-ent
+build/bin/ent-opt examples/integrate.mlir
 ```
 
 Run the toy simulation: generate the world's C header, lower the program
@@ -25,11 +29,11 @@ OpenMP flags for a sequential build.
 
 ```sh
 LLVM=/opt/homebrew/opt/llvm
-build/bin/ecs-translate --ecs-to-c-header examples/integrate.mlir \
+build/bin/ent-translate --ent-to-c-header examples/integrate.mlir \
     -o /tmp/integrate_world.h
-build/bin/ecs-opt examples/integrate.mlir \
-    "--ecs-lower-to-loops=fuse-systems=1 parallel-entities=1" --symbol-dce \
-    --convert-scf-to-openmp --canonicalize --ecs-omp-nowait \
+build/bin/ent-opt examples/integrate.mlir \
+    "--ent-lower-to-loops=fuse-systems=1 parallel-entities=1" --symbol-dce \
+    --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
   | $LLVM/bin/mlir-translate --mlir-to-llvmir -o /tmp/integrate.ll
 $LLVM/bin/clang -O2 -Wno-override-module -I/tmp /tmp/integrate.ll \
@@ -40,8 +44,8 @@ $LLVM/bin/clang -O2 -Wno-override-module -I/tmp /tmp/integrate.ll \
 Inspect the analysis behind the schedule:
 
 ```sh
-build/bin/ecs-opt examples/integrate.mlir --ecs-print-access -o /dev/null
-build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
+build/bin/ent-opt examples/integrate.mlir --ent-print-access -o /dev/null
+build/bin/ent-opt examples/integrate.mlir --ent-schedule=explain=1
 ```
 
 ## The dialect today
@@ -50,24 +54,24 @@ When each effect becomes visible to the rest of the program (the frame
 model: queries as the unit of consistency, their end as the commit point)
 is specified in [`docs/sync-points.md`](docs/sync-points.md).
 
-- `ecs.component @Position (x: f32, y: f32) capacity 100000`: scalar fields,
+- `ent.component @Position (x: f32, y: f32) capacity 100000`: scalar fields,
   abstract layout; the optional capacity bounds how many entities can have
   the component.
-- `%id = ecs.spawn (@Position, @Velocity)(%x, %y, %dx, %dy) : f32, f32, f32,
+- `%id = ent.spawn (@Position, @Velocity)(%x, %y, %dx, %dy) : f32, f32, f32,
   f32` creates an entity with these components, a value for every field in
   order, and returns its id. Archetypes need not be declared: the compiler
-  (`--ecs-infer-archetypes`, which every other pass and `ecs-translate` run
+  (`--ent-infer-archetypes`, which every other pass and `ent-translate` run
   first) gives every set of spawned components an archetype, named after
   them (`@Position_Velocity`, with `_archetype` appended if the name is
-  taken). A component some `ecs.add` can give these entities, or some
-  `ecs.remove` can take away, is stored in it as optional (below), so
+  taken). A component some `ent.add` can give these entities, or some
+  `ent.remove` can take away, is stored in it as optional (below), so
   entities never move between inferred archetypes; a spawn still starts
   with every component it lists. Its capacity is the smallest among the
-  components that stay required, or the module's `ecs.default_capacity`;
+  components that stay required, or the module's `ent.default_capacity`;
   without either it is an error. Shapes only the host spawns (through the
   generated header) are invisible to the compiler and need a declared
   archetype. `examples/bullets.mlir` spawns bullets this way.
-- `ecs.archetype @Body (@Position, @Velocity, @Mass) capacity 100000`: a
+- `ent.archetype @Body (@Position, @Velocity, @Mass) capacity 100000`: a
   table that entities are stored in, with a hard upper bound on its size.
   Declaring one takes full control: its name, capacity and storage (moves
   between archetypes, below). A spawn whose components are exactly a
@@ -76,24 +80,24 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   archetypes at compile time. An archetype of capacity 1 holds at most one
   entity (a player, a camera); its queries become a guard instead of a
   loop.
-- `ecs.archetype @Character (@Position, optional @Stunned) capacity N`: an
+- `ent.archetype @Character (@Position, optional @Stunned) capacity N`: an
   optional component may be present or absent per entity. It is stored as
-  its field columns plus a presence byte, so `ecs.add @Stunned(%t) : f32`
-  and `ecs.remove @Stunned`, inside a query, write the entity's own row
+  its field columns plus a presence byte, so `ent.add @Stunned(%t) : f32`
+  and `ent.remove @Stunned`, inside a query, write the entity's own row
   instead of moving it to another archetype. Queries that bind it run only
   for the entities that have it.
-- `%id = ecs.spawn @Body(%x, %dx, %m) : f32, f32, f32` spawns into a declared
+- `%id = ent.spawn @Body(%x, %dx, %m) : f32, f32, f32` spawns into a declared
   archetype, with a value for every field of its non-optional components
   (optional components start absent). Either way the new entity exists at
   once (its id is valid, lookups find it), but the query that spawned it
   does not visit it. Spawning beyond the
-  capacity stops the program with a message. `ecs.despawn`, inside a query,
+  capacity stops the program with a message. `ent.despawn`, inside a query,
   removes the entity it visits; the removal is deferred to the end of the
   query, so the query still visits every entity it would have. A system that
-  does either and declares its access (see `ecs.system`) lists in `writes`
+  does either and declares its access (see `ent.system`) lists in `writes`
   the components it spawns, or the declared archetype (`writes [@Body]`); to
   despawn, the components its query binds, or the declared archetype.
-- `ecs.add` and `ecs.remove` work on any component; the archetypes decide
+- `ent.add` and `ent.remove` work on any component; the archetypes decide
   what they do. Where the component is optional they set or clear its
   presence; where it is not, the entity moves to the archetype with exactly
   the resulting components (which must exist; the verifier says so
@@ -101,26 +105,26 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   between an optional component and separate archetypes is a storage
   decision: `examples/status.mlir` and `examples/status_moves.mlir` run the
   same systems both ways and print the same result.
-- `%id = ecs.entity`, inside a query, is the visited entity's id, of type
-  `!ecs.entity`. Ids stay valid while an entity moves between rows and
+- `%id = ent.entity`, inside a query, is the visited entity's id, of type
+  `!ent.entity`. Ids stay valid while an entity moves between rows and
   archetypes and stop being alive when it is despawned. How many bits an id
   takes is up to the compiler (see Entity ids below), not the program.
-- `%x, %found = ecs.lookup %id @Position "x" : f32` reads a field of another
+- `%x, %found = ent.lookup %id @Position "x" : f32` reads a field of another
   entity, whichever archetype it lives in; `%found` is false (and the value 0)
   if the id is dead or the entity lacks the component. A component field of
-  type `!ecs.entity` (`@Target (entity: !ecs.entity)`) is how entities refer
+  type `!ent.entity` (`@Target (entity: !ent.entity)`) is how entities refer
   to each other; `examples/homing.mlir` has missiles steering towards their
   target ship. Lookups only read. A query may not look up a field it changes
   itself (the verifier rejects it: which entities saw the old value would
   depend on iteration order), and a system with lookups is not fused with
   others for the same reason; under those rules a query with lookups still
   runs in parallel.
-- `ecs.apply %id @Hull "hp" add %damage : f32` writes to another entity: it
+- `ent.apply %id @Hull "hp" add %damage : f32` writes to another entity: it
   combines a value into a field of the entity `%id`, with the rule `add`,
   `min` or `max` (signed for integers). Applies are deferred to the end of
   the query, where every target's field becomes `field ⊕ v1 ⊕ v2 ⊕ ...`
   over the values sent to it; so the query itself sees the old values and
-  may read (`ecs.get`, `ecs.lookup`) or `ecs.set` the field, and the
+  may read (`ent.get`, `ent.lookup`) or `ent.set` the field, and the
   applies land on top. Values are combined in a fixed order (by apply, then
   archetype, then row), so the result does not depend on how the query ran,
   in parallel or not, even for floating-point `add`. A value sent to a dead
@@ -129,13 +133,13 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   use the same rule; a system that declares its access lists the component
   in `writes`.
   `examples/damage.mlir` has torpedoes damaging their target ships.
-- `ecs.query (%b: !ecs.ref<@Bar, mut>) on [changed @Hull "hp", added @Hull,
+- `ent.query (%b: !ent.ref<@Bar, mut>) on [changed @Hull "hp", added @Hull,
   removed @Shield] { ... }` is a reactive query, after Entitas's reactive
   systems: it runs only for the entities that had one of these events since
   it last started, and that match the query now. `added @C` fires when an
-  entity gains `C` (`ecs.add`, or spawned with it), `removed @C` when it
+  entity gains `C` (`ent.add`, or spawned with it), `removed @C` when it
   loses `C` and stays alive, `changed @C "f"` on every write to the field
-  (`ecs.set`, `ecs.apply`, `ecs.add`, spawning), even of the same value, and
+  (`ent.set`, `ent.apply`, `ent.add`, spawning), even of the same value, and
   `changed @C` on a write to any of its fields. On its first run every
   existing entity counts as added and changed. Events a query causes itself
   count on its next run; the compiler warns where it can prove that, since
@@ -146,40 +150,40 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   spawning through the header is. `examples/reactive.mlir` redraws health
   bars only for ships that were hit. A trigger may set the capacity of its
   event log (below): `changed @Hull "hp" log 4096`, or `log 0` for none.
-- `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
+- `ent.resource @Clock (dt: f32, frame: i64)`: world state that exists
   exactly once and is not an entity. Systems access it with
-  `ecs.read @Clock "dt" : f32` and
-  `ecs.write @Clock "frame", %v : i64`. Reads are allowed anywhere in a
+  `ent.read @Clock "dt" : f32` and
+  `ent.write @Clock "frame", %v : i64`. Reads are allowed anywhere in a
   system; writes are not allowed inside a query, where every entity would
   write the same field and so depend on the others. Inside a query,
-  `ecs.accumulate @Score "points" add %bonus : i64` combines values into a
+  `ent.accumulate @Score "points" add %bonus : i64` combines values into a
   resource field instead (`add`, `min` or `max`), with the same rules and
-  guarantees as `ecs.apply`: combined when the query ends, in a fixed
+  guarantees as `ent.apply`: combined when the query ends, in a fixed
   order, so the result is the same however the query ran.
-- `ecs.system @s(%params) { ... }`: what a system reads and writes is
-  inferred from its body (`--ecs-print-access` shows it). It may also declare
-  it, `ecs.system @s(%params) reads [...] writes [...] { ... }`, as a
+- `ent.system @s(%params) { ... }`: what a system reads and writes is
+  inferred from its body (`--ent-print-access` shows it). It may also declare
+  it, `ent.system @s(%params) reads [...] writes [...] { ... }`, as a
   contract: a system that declares either list (even `reads []`) must stay
   within both, and the verifier says where it does not. `writes` implies
   read.
-- `ecs.query (%p: !ecs.ref<@Position, mut>, ...) { ... }`: body runs once per
+- `ent.query (%p: !ent.ref<@Position, mut>, ...) { ... }`: body runs once per
   matching entity; refs exist only as query arguments.
-- `ecs.get` / `ecs.set`: field access through a ref; `set` needs `mut`.
-- `ecs.schedule @frame(%params) { ecs.run @s(...) }`: program order is the
+- `ent.get` / `ent.set`: field access through a ref; `set` needs `mut`.
+- `ent.schedule @frame(%params) { ent.run @s(...) }`: program order is the
   semantic order.
-- `ecs.stage { ecs.run ... }`: runs that commute and may execute in
+- `ent.stage { ent.run ... }`: runs that commute and may execute in
   parallel; stages execute in order.
 
 The verifier checks that every query and every resource access stays
 inside its system's declared access, where it declares one, that no query
 binds a component twice or writes a resource, that refs are only used by
-`ecs.get` and `ecs.set`, and that field names and types match the
+`ent.get` and `ent.set`, and that field names and types match the
 declarations.
 
 ## Access analysis and scheduling
 
 A system's access is computed per column, `Archetype.Component.field`, from
-the `ecs.get` and `ecs.set` ops it contains, in every archetype its queries
+the `ent.get` and `ent.set` ops it contains, in every archetype its queries
 match; it does not need declarations, and where a system declares its
 access the analysis is still finer: two systems that both write `Velocity`
 do not conflict if one only touches `Body.Velocity.dy` and the other only
@@ -203,14 +207,14 @@ events. Any other op
 with memory effects (a call, say) makes a system opaque, and opaque systems
 conflict with everything.
 
-`--ecs-schedule` puts each run into the earliest stage after every earlier
+`--ent-schedule` puts each run into the earliest stage after every earlier
 run it conflicts with. In the example, gravity, wind and decay share the
 first stage and integrate follows. Ops with effects in a schedule body act
 as barriers.
 
 ## Lowering
 
-`--ecs-lower-to-loops` turns systems into private functions and schedules into
+`--ent-lower-to-loops` turns systems into private functions and schedules into
 public ones with a C interface (`_mlir_ciface_<schedule>`). Each query becomes
 one `scf.for` per matching archetype, and field access becomes `memref.load`
 and `memref.store` on that archetype's columns. Stages dissolve into calls,
@@ -223,7 +227,7 @@ The language owns the world's storage. From the archetypes' components and
 capacities and from the resources, the compiler lays out the whole world as
 one arena: an i64 entity count per archetype, then each resource on its own
 cache line, then one column per field at a fixed offset, each archetype's
-id column, one buffer per `ecs.apply` and archetype its query matches (a
+id column, one buffer per `ent.apply` and archetype its query matches (a
 target id and a value per row), and the entity table that maps an id to its
 archetype and row. Programs with reactive queries also keep a tick counter
 and each reactive query's last tick in the header, and stamp columns after
@@ -234,14 +238,14 @@ the same cache set, which cost a single core 7-8% (see
 `bench/RESULTS.md`). Lowered functions take the arena after their own
 parameters and read columns through statically shaped views.
 
-`ecs-translate --ecs-to-c-header` emits the C API for hosts:
-`ecs_world_create`/`ecs_world_destroy`; per archetype a capacity, a count,
-`ecs_Body_spawn(world)` (returns the new id, or `ECS_NO_ENTITY` if the
-archetype is full) and `ecs_Body_spawn_n(world, n)`, the id column, and typed
-column accessors such as `ecs_Body_Position_x(world)`; entity lookups
-`ecs_entity_alive`, `ecs_entity_archetype` and `ecs_entity_row`; one accessor
-per resource field such as `ecs_Clock_frame(world)`; and one entry point per
-schedule, such as `ecs_frame(world, dt)`. The header allocates ids exactly as
+`ent-translate --ent-to-c-header` emits the C API for hosts:
+`ent_world_create`/`ent_world_destroy`; per archetype a capacity, a count,
+`ent_Body_spawn(world)` (returns the new id, or `ENT_NO_ENTITY` if the
+archetype is full) and `ent_Body_spawn_n(world, n)`, the id column, and typed
+column accessors such as `ent_Body_Position_x(world)`; entity lookups
+`ent_entity_alive`, `ent_entity_archetype` and `ent_entity_row`; one accessor
+per resource field such as `ent_Clock_frame(world)`; and one entry point per
+schedule, such as `ent_frame(world, dt)`. The header allocates ids exactly as
 the lowered program does. Creating a world zeroes only the counts, resources
 and entity counters, so capacity costs address space, not memory, until
 columns are written. Parallel stages and loops assume nothing else writes the
@@ -265,13 +269,13 @@ Locations pack `archetype << rowBits | row` into 32 bits where they fit. An
 id is 32 bits wide whenever that leaves at least 8 generation bits (so at up
 to 2^24 entities); otherwise it is 64 bits. A generation wraps around at its
 bit width: an id kept across that many reuses of its slot could come alive
-again. The module attributes `ecs.entity_id_bits = 64` and
-`ecs.min_generation_bits = N` trade memory for more margin. At 10^6
+again. The module attributes `ent.entity_id_bits = 64` and
+`ent.min_generation_bits = N` trade memory for more margin. At 10^6
 entities, generational ids cost 10 bytes per entity (id 4, generation 2,
 location 4) instead of 24; rows ids cost nothing.
 
-`!ecs.entity` lowers to the chosen integer; the generated header's
-`ecs_entity` type matches it.
+`!ent.entity` lowers to the chosen integer; the generated header's
+`ent_entity` type matches it.
 
 ## Fusion and entity parallelism
 
@@ -354,7 +358,7 @@ different archetypes share no columns. Two consequences the lowering uses:
   `--convert-scf-to-openmp` turns them into OpenMP work-sharing loops, each
   alone in a parallel region. Such a loop ends with a barrier, and so does
   the region, where clang emits one for `parallel for`;
-  `--ecs-omp-nowait`, run after the conversion, drops the loop's (and
+  `--ent-omp-nowait`, run after the conversion, drops the loop's (and
   `parallel-stages` emits its sections without one). With the OpenMP
   runtime's defaults the second barrier cost as much as the fork itself:
   it doubled the fixed cost of a parallel frame. A

@@ -1,4 +1,4 @@
-// Cross-entity writes: what ecs.apply costs against hand-written C.
+// Cross-entity writes: what ent.apply costs against hand-written C.
 //
 // N guns each deal damage (1 to 4, exact in f32 in any order) to one of M
 // ships, chosen at random with a fixed seed; a frame applies every gun
@@ -12,7 +12,7 @@
 //   -DVARIANT=2  c-buffered: what the compiled program does, without ids:
 //                an OpenMP loop fills (target row, value) per gun, then one
 //                sequential loop combines them
-//   -DVARIANT=3  compiled: bench/apply/fire*.mlir lowered by ecs-opt and
+//   -DVARIANT=3  compiled: bench/apply/fire*.mlir lowered by ent-opt and
 //                linked in; targets are entity ids (Rows or generational,
 //                depending on the program)
 //
@@ -66,20 +66,20 @@ int main(int argc, char **argv) {
   }
 
 #if VARIANT == 3
-  ecs_world *w = ecs_world_create();
-  if (m > ECS_Ship_CAPACITY || n > ECS_Turret_CAPACITY) {
+  ent_world *w = ent_world_create();
+  if (m > ENT_Ship_CAPACITY || n > ENT_Turret_CAPACITY) {
     fprintf(stderr, "sizes exceed the program's capacities\n");
     return 2;
   }
-  ecs_entity *shipIds = allocate(sizeof(ecs_entity) * m);
+  ent_entity *shipIds = allocate(sizeof(ent_entity) * m);
   for (int64_t s = 0; s < m; ++s)
-    shipIds[s] = ecs_Ship_spawn(w);
+    shipIds[s] = ent_Ship_spawn(w);
   for (int64_t i = 0; i < n; ++i) {
-    int64_t row = ecs_entity_row(w, ecs_Turret_spawn(w));
-    ecs_Turret_Gun_damage(w)[row] = damage[i];
-    ecs_Turret_Gun_target(w)[row] = shipIds[targetRow[i]];
+    int64_t row = ent_entity_row(w, ent_Turret_spawn(w));
+    ent_Turret_Gun_damage(w)[row] = damage[i];
+    ent_Turret_Gun_target(w)[row] = shipIds[targetRow[i]];
   }
-  float *hp = ecs_Ship_Hull_hp(w);
+  float *hp = ent_Ship_Hull_hp(w);
 #else
   float *hp = allocate(sizeof(float) * m);
 #endif
@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
       for (int64_t i = 0; i < n; ++i)
         hp[bufferRow[i]] += bufferValue[i];
 #else
-      ecs_frame(w);
+      ent_frame(w);
 #endif
     }
     uint64_t elapsed = now() - start;

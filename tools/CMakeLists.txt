@@ -1,2 +1,2 @@
-add_subdirectory(ecs-opt)
-add_subdirectory(ecs-translate)
+add_subdirectory(ent-opt)
+add_subdirectory(ent-translate)

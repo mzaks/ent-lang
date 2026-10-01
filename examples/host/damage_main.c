@@ -7,33 +7,33 @@
 
 #include <stdio.h>
 
-static ecs_entity spawnShip(ecs_world *w, float hp) {
-  ecs_entity id = ecs_Ship_spawn(w);
-  ecs_Ship_Hull_hp(w)[ecs_entity_row(w, id)] = hp;
+static ent_entity spawnShip(ent_world *w, float hp) {
+  ent_entity id = ent_Ship_spawn(w);
+  ent_Ship_Hull_hp(w)[ent_entity_row(w, id)] = hp;
   return id;
 }
 
-static void spawnTorpedo(ecs_world *w, ecs_entity target, float damage,
+static void spawnTorpedo(ent_world *w, ent_entity target, float damage,
                          float seconds) {
-  ecs_entity id = ecs_Torpedo_spawn(w);
-  int64_t row = ecs_entity_row(w, id);
-  ecs_Torpedo_Fuse_seconds(w)[row] = seconds;
-  ecs_Torpedo_Warhead_damage(w)[row] = damage;
-  ecs_Torpedo_Target_entity(w)[row] = target;
+  ent_entity id = ent_Torpedo_spawn(w);
+  int64_t row = ent_entity_row(w, id);
+  ent_Torpedo_Fuse_seconds(w)[row] = seconds;
+  ent_Torpedo_Warhead_damage(w)[row] = damage;
+  ent_Torpedo_Target_entity(w)[row] = target;
 }
 
-static void report(ecs_world *w, const char *name, ecs_entity ship) {
-  if (!ecs_entity_alive(w, ship)) {
+static void report(ent_world *w, const char *name, ent_entity ship) {
+  if (!ent_entity_alive(w, ship)) {
     printf("%s: gone\n", name);
     return;
   }
   printf("%s: hp %.4f\n", name,
-         ecs_Ship_Hull_hp(w)[ecs_entity_row(w, ship)]);
+         ent_Ship_Hull_hp(w)[ent_entity_row(w, ship)]);
 }
 
 int main(void) {
-  ecs_world *w = ecs_world_create();
-  ecs_entity ships[3] = {spawnShip(w, 100), spawnShip(w, 30), 0};
+  ent_world *w = ent_world_create();
+  ent_entity ships[3] = {spawnShip(w, 100), spawnShip(w, 30), 0};
   spawnTorpedo(w, ships[0], 40, 0.5f);
   spawnTorpedo(w, ships[0], 40, 0.5f);
   spawnTorpedo(w, ships[1], 50, 0.5f);
@@ -41,19 +41,19 @@ int main(void) {
   spawnTorpedo(w, ships[0], 10, 0.5f);
 
   for (int frame = 0; frame < 2; ++frame) {
-    ecs_frame(w, 0.5f);
+    ent_frame(w, 0.5f);
     printf("frame %d: ships %lld torpedoes %lld\n", frame,
-           (long long)ecs_Ship_count(w), (long long)ecs_Torpedo_count(w));
+           (long long)ent_Ship_count(w), (long long)ent_Torpedo_count(w));
     if (frame == 0) {
       ships[2] = spawnShip(w, 100);
       printf("new ship reuses a slot: %s\n",
-             ecs__slot(ships[2]) == ecs__slot(ships[1]) ? "yes" : "no");
+             ent__slot(ships[2]) == ent__slot(ships[1]) ? "yes" : "no");
     }
   }
 
   report(w, "ship 0", ships[0]);
   report(w, "ship 1", ships[1]);
   report(w, "ship 2", ships[2]);
-  ecs_world_destroy(w);
+  ent_world_destroy(w);
   return 0;
 }

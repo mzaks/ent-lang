@@ -1,8 +1,8 @@
 // Spawns between runs of a reactive query reach it through its event log.
 // RUN: mkdir -p %t.dir
-// RUN: ecs-translate --ecs-to-c-header %S/Inputs/reactive_spawn.mlir \
+// RUN: ent-translate --ent-to-c-header %S/Inputs/reactive_spawn.mlir \
 // RUN:     -o %t.dir/reactive_spawn_world.h
-// RUN: ecs-opt %S/Inputs/reactive_spawn.mlir --ecs-lower-to-loops \
+// RUN: ent-opt %S/Inputs/reactive_spawn.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
 // RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \

@@ -1,11 +1,11 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops | FileCheck %s
+// RUN: ent-opt %s --ent-lower-to-loops | FileCheck %s
 
 // Adding N moves entities of E1 to E2 and overwrites N in E2: the storage
 // decides, the system is the same for both archetypes.
-ecs.component @M (m: f32)
-ecs.component @N (n: f32)
-ecs.archetype @E1 (@M) capacity 10
-ecs.archetype @E2 (@M, @N) capacity 10
+ent.component @M (m: f32)
+ent.component @N (n: f32)
+ent.archetype @E1 (@M) capacity 10
+ent.archetype @E2 (@M, @N) capacity 10
 
 // Entities move but are never despawned, so an id is a slot of the entity
 // table (20 slots: 5 bits, in a 32-bit id), and the table holds only
@@ -54,8 +54,8 @@ ecs.archetype @E2 (@M, @N) capacity 10
 // CHECK:          %[[E2_BITS:.*]] = arith.constant 16 : i32
 // CHECK:          %[[PACKED:.*]] = arith.ori %[[E2_BITS]], %{{.*}} : i32
 // CHECK-NEXT:     memref.store %[[PACKED]]
-ecs.system @promote(%v: f32) reads [@M] writes [@N] {
-  ecs.query (%m: !ecs.ref<@M>) {
-    ecs.add @N(%v) : f32
+ent.system @promote(%v: f32) reads [@M] writes [@N] {
+  ent.query (%m: !ent.ref<@M>) {
+    ent.add @N(%v) : f32
   }
 }

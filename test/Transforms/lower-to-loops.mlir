@@ -1,8 +1,8 @@
-// RUN: ecs-opt %s --ecs-lower-to-loops -verify-diagnostics | FileCheck %s
+// RUN: ent-opt %s --ent-lower-to-loops -verify-diagnostics | FileCheck %s
 
-ecs.component @A (a: f32)
-ecs.component @B (b0: i32, b1: f32)
-ecs.component @Unused (u: f32)
+ent.component @A (a: f32)
+ent.component @B (b0: i32, b1: f32)
+ent.component @Unused (u: f32)
 
 // World layout: 2 counts and the entity counters (32 bytes), then per
 // column a 64-byte boundary plus 17 cache lines (1088 bytes):
@@ -12,8 +12,8 @@ ecs.component @Unused (u: f32)
 //   OnlyA.A.a at 15424 + 1088  = 16512 (1000 x f32)
 // Nothing is despawned or moved, so ids are just archetype and row: no id
 // columns and no entity table. The arena rounds up to 16 KiB: 32768 bytes.
-ecs.archetype @AB (@A, @B) capacity 1000
-ecs.archetype @OnlyA (@A) capacity 1000
+ent.archetype @AB (@A, @B) capacity 1000
+ent.archetype @OnlyA (@A) capacity 1000
 
 // CHECK-LABEL: func.func private @scale(
 // CHECK-SAME: %[[K:[^:]*]]: f32, %[[W:[^:]*]]: memref<32768xi8>)
@@ -29,7 +29,7 @@ ecs.archetype @OnlyA (@A) capacity 1000
 // CHECK-NEXT: %[[AB_B0:.*]] = memref.view {{.*}} to memref<1000xi32>
 // CHECK:      arith.constant 11392 : index
 // CHECK-NEXT: %[[AB_B1:.*]] = memref.view {{.*}} to memref<1000xf32>
-ecs.system @scale(%k: f32) reads [@B] writes [@A] {
+ent.system @scale(%k: f32) reads [@B] writes [@A] {
   // Matches both archetypes: one loop each, in declaration order, both
   // bounded by the counts taken when the query starts.
   // CHECK:      %[[P_AB:.*]] = arith.constant 0 : index
@@ -45,10 +45,10 @@ ecs.system @scale(%k: f32) reads [@B] writes [@A] {
   // CHECK:      scf.for %[[J:.*]] = %{{.*}} to %[[N_A]]
   // CHECK:   memref.load %[[A_A]][%[[J]]]
   // CHECK:   memref.store %{{.*}}, %[[A_A]][%[[J]]]
-  ecs.query (%a: !ecs.ref<@A, mut>) {
-    %x = ecs.get %a "a" : !ecs.ref<@A, mut> -> f32
+  ent.query (%a: !ent.ref<@A, mut>) {
+    %x = ent.get %a "a" : !ent.ref<@A, mut> -> f32
     %y = arith.mulf %x, %k : f32
-    ecs.set %a "a", %y : !ecs.ref<@A, mut>, f32
+    ent.set %a "a", %y : !ent.ref<@A, mut>, f32
   }
   // Matches only @AB; accesses nested in regions are lowered as well.
   // CHECK:      memref.load %[[COUNTS]]
@@ -60,13 +60,13 @@ ecs.system @scale(%k: f32) reads [@B] writes [@A] {
   // CHECK:     memref.store %{{.*}}, %[[AB_A]][%[[I]]]
   // CHECK-NOT: scf.for
   // CHECK: return
-  ecs.query (%a: !ecs.ref<@A, mut>, %b: !ecs.ref<@B>) {
-    %flag = ecs.get %b "b0" : !ecs.ref<@B> -> i32
+  ent.query (%a: !ent.ref<@A, mut>, %b: !ent.ref<@B>) {
+    %flag = ent.get %b "b0" : !ent.ref<@B> -> i32
     %zero = arith.constant 0 : i32
     %set = arith.cmpi ne, %flag, %zero : i32
     scf.if %set {
-      %v = ecs.get %b "b1" : !ecs.ref<@B> -> f32
-      ecs.set %a "a", %v : !ecs.ref<@A, mut>, f32
+      %v = ent.get %b "b1" : !ent.ref<@B> -> f32
+      ent.set %a "a", %v : !ent.ref<@A, mut>, f32
     }
   }
 }
@@ -75,10 +75,10 @@ ecs.system @scale(%k: f32) reads [@B] writes [@A] {
 // CHECK-LABEL: func.func private @dead(
 // CHECK-SAME: %{{[^:]*}}: memref<32768xi8>)
 // CHECK-NEXT: return
-ecs.system @dead() reads [@Unused] {
+ent.system @dead() reads [@Unused] {
   // expected-warning @+1 {{matches no archetype; the query is removed}}
-  ecs.query (%u: !ecs.ref<@Unused>) {
-    %v = ecs.get %u "u" : !ecs.ref<@Unused> -> f32
+  ent.query (%u: !ent.ref<@Unused>) {
+    %v = ent.get %u "u" : !ent.ref<@Unused> -> f32
   }
 }
 
@@ -87,9 +87,9 @@ ecs.system @dead() reads [@Unused] {
 // CHECK-SAME: attributes {llvm.emit_c_interface}
 // CHECK-NEXT: call @scale(%[[K]], %[[W]])
 // CHECK-NEXT: call @dead(%[[W]])
-ecs.schedule @tick(%k: f32) {
-  ecs.run @scale(%k) : f32
-  ecs.run @dead()
+ent.schedule @tick(%k: f32) {
+  ent.run @scale(%k) : f32
+  ent.run @dead()
 }
 
-// CHECK-NOT: ecs.
+// CHECK-NOT: ent.
