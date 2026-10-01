@@ -5,6 +5,8 @@
 
 #include "llvm/ADT/SmallPtrSet.h"
 
+#include <optional>
+
 namespace mlir::ecs {
 
 /// The archetypes `query` matches (those holding all of its components,
@@ -46,6 +48,9 @@ struct Trigger {
   FlatSymbolRefAttr component;
   /// For Changed: the field, or empty for any field of the component.
   StringAttr field;
+  /// The capacity the program asks for the trigger's event log (`log N`;
+  /// 0 for none), if it asks.
+  std::optional<int64_t> logCapacity;
 };
 
 /// The triggers of `query`, in order; empty if it is not reactive.

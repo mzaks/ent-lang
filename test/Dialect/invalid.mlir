@@ -580,3 +580,13 @@ ecs.system @s() reads [@H] {
   ecs.query (%h: !ecs.ref<@H>) on [removed @H] {
   }
 }
+
+// -----
+
+ecs.component @H (hp: f32)
+ecs.archetype @A (@H) capacity 10
+ecs.system @s() reads [@H] {
+  // expected-error @+1 {{gives the event log of @H a negative capacity}}
+  ecs.query (%h: !ecs.ref<@H>) on [changed @H log -1] {
+  }
+}

@@ -410,7 +410,7 @@ LogicalResult StageOp::verify() {
 // QueryOp
 //===----------------------------------------------------------------------===//
 
-// `on [changed @C "f", added @C, removed @C, changed @C]`
+// `on [changed @C "f", added @C log 4096, removed @C, changed @C]`
 ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
   auto parseTriggers = [&]() -> ParseResult {
     if (failed(parser.parseOptionalKeyword("on")))
@@ -429,9 +429,15 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
       std::string field;
       if (kind == "changed")
         (void)parser.parseOptionalString(&field);
-      triggers.push_back(builder.getArrayAttr(
-          {builder.getStringAttr(kind), component,
-           builder.getStringAttr(field)}));
+      SmallVector<Attribute, 4> entry{builder.getStringAttr(kind), component,
+                                      builder.getStringAttr(field)};
+      if (succeeded(parser.parseOptionalKeyword("log"))) {
+        int64_t capacity;
+        if (parser.parseInteger(capacity))
+          return failure();
+        entry.push_back(builder.getI64IntegerAttr(capacity));
+      }
+      triggers.push_back(builder.getArrayAttr(entry));
       return success();
     };
     if (parser.parseCommaSeparatedList(OpAsmParser::Delimiter::Square,
@@ -453,6 +459,8 @@ void QueryOp::print(OpAsmPrinter &p) {
       p << cast<StringAttr>(entry[0]).getValue() << " " << entry[1];
       if (!cast<StringAttr>(entry[2]).getValue().empty())
         p << " " << entry[2];
+      if (entry.size() > 3)
+        p << " log " << cast<IntegerAttr>(entry[3]).getInt();
     });
     p << "]";
   }
@@ -499,6 +507,9 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       return emitOpError("component ")
              << trigger.component << " has no field '"
              << trigger.field.getValue() << "'";
+    if (trigger.logCapacity && *trigger.logCapacity < 0)
+      return emitOpError("gives the event log of ")
+             << trigger.component << " a negative capacity";
     if (!system.canRead(trigger.component))
       return emitOpError("reacts to ")
              << trigger.component << " but system @" << system.getSymName()

@@ -63,11 +63,14 @@ SmallVector<Trigger> mlir::ecs::getTriggers(QueryOp query) {
   for (Attribute attr : list) {
     auto entry = cast<ArrayAttr>(attr);
     StringRef kind = cast<StringAttr>(entry[0]).getValue();
+    std::optional<int64_t> logCapacity;
+    if (entry.size() > 3)
+      logCapacity = cast<IntegerAttr>(entry[3]).getInt();
     triggers.push_back({kind == "added"     ? Trigger::Added
                         : kind == "removed" ? Trigger::Removed
                                             : Trigger::Changed,
                         cast<FlatSymbolRefAttr>(entry[1]),
-                        cast<StringAttr>(entry[2])});
+                        cast<StringAttr>(entry[2]), logCapacity});
   }
   return triggers;
 }

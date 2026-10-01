@@ -48,7 +48,7 @@
 // MISC:          ecs.apply %{{.*}} @Named "with space" add %{{.*}} : i32
 // MISC-NEXT:     ecs.apply %{{.*}} @Named "idx" max %{{.*}} : index
 // MISC-LABEL: ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
-// MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag, mut>) on [changed @Named "idx", changed @Named, added @Stunned, removed @Stunned] {
+// MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag, mut>) on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0, removed @Stunned] {
 ecs.component @Tag ()
 ecs.component @Named ("with space": i32, idx: index)
 ecs.system @noop() {
@@ -102,7 +102,7 @@ ecs.system @hit(%v: i32) reads [@Tag] writes [@Named] {
 }
 ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
   ecs.query (%t: !ecs.ref<@Tag, mut>)
-      on [changed @Named "idx", changed @Named, added @Stunned,
+      on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0,
           removed @Stunned] {
   }
 }
