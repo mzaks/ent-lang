@@ -164,6 +164,16 @@ static ParseResult parseRecord(OpAsmParser &parser, OperationState &result) {
                       b.getArrayAttr(names));
   result.addAttribute(OpTy::getFieldTypesAttrName(result.name),
                       b.getArrayAttr(types));
+  // `capacity N`, for components.
+  if constexpr (std::is_same_v<OpTy, ComponentOp>) {
+    if (succeeded(parser.parseOptionalKeyword("capacity"))) {
+      int64_t capacity;
+      if (parser.parseInteger(capacity))
+        return failure();
+      result.addAttribute(OpTy::getCapacityAttrName(result.name),
+                          b.getI64IntegerAttr(capacity));
+    }
+  }
   return parser.parseOptionalAttrDict(result.attributes);
 }
 
@@ -178,9 +188,15 @@ static void printRecord(OpTy op, OpAsmPrinter &p) {
         p << ": " << cast<TypeAttr>(std::get<1>(field)).getValue();
       });
   p << ")";
-  p.printOptionalAttrDict(op->getAttrs(),
-                          {op.getSymNameAttrName(), op.getFieldNamesAttrName(),
-                           op.getFieldTypesAttrName()});
+  SmallVector<StringRef, 4> elided{op.getSymNameAttrName(),
+                                   op.getFieldNamesAttrName(),
+                                   op.getFieldTypesAttrName()};
+  if constexpr (std::is_same_v<OpTy, ComponentOp>) {
+    if (std::optional<int64_t> capacity = op.getCapacity())
+      p << " capacity " << *capacity;
+    elided.push_back(op.getCapacityAttrName());
+  }
+  p.printOptionalAttrDict(op->getAttrs(), elided);
 }
 
 static LogicalResult verifyRecord(Operation *op, ArrayAttr names,
@@ -670,29 +686,142 @@ LogicalResult RemoveOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 // SpawnOp / DespawnOp
 //===----------------------------------------------------------------------===//
 
+// `@Archetype(values)`, `(@A, @B)(values)` or `(@A, @B) into @A_B (values)`,
+// then `: types` when there are values.
+ParseResult SpawnOp::parse(OpAsmParser &parser, OperationState &result) {
+  Builder &b = parser.getBuilder();
+  FlatSymbolRefAttr archetype;
+  if (succeeded(parser.parseOptionalLParen())) {
+    SmallVector<Attribute> components;
+    if (parser.parseCommaSeparatedList([&]() -> ParseResult {
+          FlatSymbolRefAttr component;
+          if (parser.parseAttribute(component))
+            return failure();
+          components.push_back(component);
+          return success();
+        }) ||
+        parser.parseRParen())
+      return failure();
+    result.addAttribute(getComponentsAttrName(result.name),
+                        b.getArrayAttr(components));
+    if (succeeded(parser.parseOptionalKeyword("into")) &&
+        parser.parseAttribute(archetype))
+      return failure();
+  } else if (parser.parseAttribute(archetype)) {
+    return failure();
+  }
+  if (archetype)
+    result.addAttribute(getArchetypeAttrName(result.name), archetype);
+  SmallVector<OpAsmParser::UnresolvedOperand> values;
+  SmallVector<Type> types;
+  if (parser.parseOperandList(values, OpAsmParser::Delimiter::Paren) ||
+      parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+  if (succeeded(parser.parseOptionalColon()) && parser.parseTypeList(types))
+    return failure();
+  if (parser.resolveOperands(values, types, parser.getCurrentLocation(),
+                             result.operands))
+    return failure();
+  result.addTypes(EntityType::get(parser.getContext()));
+  return success();
+}
+
+void SpawnOp::print(OpAsmPrinter &p) {
+  p << " ";
+  if (ArrayAttr components = getComponentsAttr()) {
+    p << "(";
+    llvm::interleaveComma(components, p);
+    p << ")";
+    if (FlatSymbolRefAttr archetype = getArchetypeAttr())
+      p << " into " << archetype << " ";
+  } else {
+    p << getArchetypeAttr();
+  }
+  p << "(" << getValues() << ")";
+  p.printOptionalAttrDict((*this)->getAttrs(),
+                          {getArchetypeAttrName(), getComponentsAttrName()});
+  if (!getValues().empty())
+    p << " : " << getValues().getTypes();
+}
+
+bool SpawnOp::startsWith(FlatSymbolRefAttr component) {
+  if (ArrayAttr components = getComponentsAttr())
+    return llvm::is_contained(components, component);
+  auto archetype = SymbolTable::lookupNearestSymbolFrom<ArchetypeOp>(
+      *this, getArchetypeAttr());
+  return archetype && archetype.contains(component) &&
+         !archetype.isOptional(component);
+}
+
 LogicalResult SpawnOp::verify() {
   if (!(*this)->getParentOfType<SystemOp>())
     return emitOpError("must be inside an 'ecs.system'");
+  if (!getArchetypeAttr() && !getComponentsAttr())
+    return emitOpError("names neither an archetype nor components");
+  if (ArrayAttr components = getComponentsAttr()) {
+    if (components.empty())
+      return emitOpError("spawns an entity without components");
+    llvm::SmallPtrSet<Attribute, 8> seen;
+    for (Attribute component : components)
+      if (!seen.insert(component).second)
+        return emitOpError("lists component ")
+               << component << " more than once";
+  }
   return success();
 }
 
 LogicalResult SpawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  auto archetype =
-      symbolTable.lookupNearestSymbolFrom<ArchetypeOp>(*this, getArchetypeAttr());
-  if (!archetype)
-    return emitOpError("references unknown archetype ") << getArchetypeAttr();
   auto system = (*this)->getParentOfType<SystemOp>();
-  if (!system.canWrite(getArchetypeAttr()))
-    return emitOpError("spawns into ")
-           << getArchetypeAttr() << " but system @" << system.getSymName()
-           << " does not declare it in 'writes'";
+  ArchetypeOp archetype;
+  if (FlatSymbolRefAttr name = getArchetypeAttr()) {
+    archetype = symbolTable.lookupNearestSymbolFrom<ArchetypeOp>(*this, name);
+    if (!archetype)
+      return emitOpError("references unknown archetype ") << name;
+  }
 
-  // Every field of every non-optional component, in order.
+  // The components whose fields the values initialise, in order.
+  SmallVector<FlatSymbolRefAttr> initialised;
+  if (ArrayAttr components = getComponentsAttr()) {
+    for (Attribute attr : components) {
+      auto component = cast<FlatSymbolRefAttr>(attr);
+      if (!lookupComponent(symbolTable, *this, component))
+        return emitOpError("spawns unknown component ") << component;
+      if (!system.canWrite(component))
+        return emitOpError("spawns ")
+               << component << " but system @" << system.getSymName()
+               << " does not declare it in 'writes'";
+      initialised.push_back(component);
+    }
+    // An archetype recorded by inference holds every listed component and
+    // requires no other.
+    if (archetype) {
+      for (FlatSymbolRefAttr component : initialised)
+        if (!archetype.contains(component))
+          return emitOpError("spawns into ")
+                 << getArchetypeAttr() << ", which does not hold "
+                 << component;
+      for (Attribute attr : archetype.getComponents()) {
+        auto component = cast<FlatSymbolRefAttr>(attr);
+        if (!archetype.isOptional(component) &&
+            !llvm::is_contained(initialised, component))
+          return emitOpError("spawns into ")
+                 << getArchetypeAttr() << " without its required component "
+                 << component;
+      }
+    }
+  } else {
+    if (!system.canWrite(getArchetypeAttr()))
+      return emitOpError("spawns into ")
+             << getArchetypeAttr() << " but system @" << system.getSymName()
+             << " does not declare it in 'writes'";
+    for (Attribute attr : archetype.getComponents())
+      if (!archetype.isOptional(cast<FlatSymbolRefAttr>(attr)))
+        initialised.push_back(cast<FlatSymbolRefAttr>(attr));
+  }
+
+  // Every field of every initialised component, in order.
   SmallVector<std::pair<std::string, Type>> fields;
-  for (Attribute attr : archetype.getComponents()) {
-    auto ref = cast<FlatSymbolRefAttr>(attr);
-    if (archetype.isOptional(ref))
-      continue;
+  for (FlatSymbolRefAttr ref : initialised) {
     ComponentOp component = lookupComponent(symbolTable, *this, ref);
     for (auto [name, type] :
          llvm::zip(component.getFieldNames(), component.getFieldTypes()))
@@ -701,11 +830,16 @@ LogicalResult SpawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
                             .str(),
                         cast<TypeAttr>(type).getValue()});
   }
-  if (fields.size() != getValues().size())
-    return emitOpError("initialises ")
-           << getValues().size() << " fields, but the non-optional "
-           << "components of " << getArchetypeAttr() << " have "
-           << fields.size();
+  if (fields.size() != getValues().size()) {
+    InFlightDiagnostic diag = emitOpError("initialises ")
+                              << getValues().size() << " fields, but ";
+    if (getComponentsAttr())
+      diag << "its components have " << fields.size();
+    else
+      diag << "the non-optional components of " << getArchetypeAttr()
+           << " have " << fields.size();
+    return diag;
+  }
   for (auto [index, value, field] : llvm::enumerate(getValues(), fields))
     if (value.getType() != field.second)
       return emitOpError("value #")
@@ -852,8 +986,22 @@ LogicalResult DespawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
         query.getBody().getArgumentTypes(), [&](Type type) {
           return archetype.contains(cast<RefType>(type).getComponent());
         });
+    if (!matches)
+      continue;
+    // An inferred archetype has no name a contract could list: the query's
+    // components stand for it.
+    if (archetype.getInferred()) {
+      for (Type type : query.getBody().getArgumentTypes()) {
+        FlatSymbolRefAttr component = cast<RefType>(type).getComponent();
+        if (!system.canWrite(component))
+          return emitOpError("despawns entities with ")
+                 << component << " but system @" << system.getSymName()
+                 << " does not declare it in 'writes'";
+      }
+      continue;
+    }
     auto ref = FlatSymbolRefAttr::get(archetype.getSymNameAttr());
-    if (matches && !system.canWrite(ref))
+    if (!system.canWrite(ref))
       return emitOpError("despawns entities of ")
              << ref << " but system @" << system.getSymName()
              << " does not declare it in 'writes'";

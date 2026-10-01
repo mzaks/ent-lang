@@ -27,9 +27,17 @@ def Ecs_ComponentOp : Ecs_RecordOp<"component"> {
   let summary = "Declare a component: an ordered list of scalar fields";
   let description = [{
     ```mlir
-    ecs.component @Position (x: f32, y: f32)
+    ecs.component @Position (x: f32, y: f32) capacity 100000
     ```
+    `capacity` bounds how many entities can have the component at once. An
+    archetype the compiler infers from spawns holds as many entities as the
+    smallest capacity among its required components allows.
   }];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       StrArrayAttr:$field_names,
+                       TypeArrayAttr:$field_types,
+                       OptionalAttr<ConfinedAttr<I64Attr, [IntPositive]>>:
+                           $capacity);
 }
 
 def Ecs_ResourceOp : Ecs_RecordOp<"resource"> {
@@ -70,14 +78,20 @@ def Ecs_ArchetypeOp : Ecs_Op<"archetype", [
     gaining or losing it (`ecs.add`, `ecs.remove`) is a write to the
     entity's own row rather than a move to another archetype. Queries that
     bind it run only for the entities that currently have it.
+
+    Archetypes need not be declared: `--ecs-infer-archetypes` derives them
+    from spawns (`ecs.spawn (@A, @B)(...)`) and adds them, marked
+    `inferred`. A declared archetype with exactly a spawn's components is
+    used instead, which names it and sets its capacity.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        FlatSymbolRefArrayAttr:$components,
                        OptionalAttr<FlatSymbolRefArrayAttr>:$optional,
-                       ConfinedAttr<I64Attr, [IntPositive]>:$capacity);
+                       ConfinedAttr<I64Attr, [IntPositive]>:$capacity,
+                       UnitAttr:$inferred);
   let assemblyFormat = [{
     $sym_name custom<ComponentList>($components, $optional)
-    `capacity` $capacity attr-dict
+    `capacity` $capacity (`inferred` $inferred^)? attr-dict
   }];
   let hasVerifier = 1;
   let extraClassDeclaration = [{
@@ -283,26 +297,39 @@ def Ecs_RemoveOp : Ecs_Op<"remove", [
 
 def Ecs_SpawnOp : Ecs_Op<"spawn", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
-  let summary = "Create an entity in an archetype and return its id";
+  let summary = "Create an entity and return its id";
   let description = [{
     ```mlir
-    ecs.spawn @Bullet(%x, %y, %dx, %dy, %seconds) : f32, f32, f32, f32, f32
+    ecs.spawn (@Position, @Velocity)(%x, %dx) : f32, f32
+    ecs.spawn @Bullet(%x, %dx, %seconds) : f32, f32, f32
     ```
-    Appends an entity to the archetype. The values initialise every field
-    of the archetype's non-optional components, in the order of the
-    components and then of their fields; optional components start absent.
-    Spawning beyond the archetype's capacity is an error at run time. A
-    system that declares its access must list the archetype in `writes`.
+    The first form lists the components the new entity has; the values
+    initialise their fields, in that order. The archetype it lives in is
+    inferred (`--ecs-infer-archetypes`, which records it: `ecs.spawn
+    (@Position, @Velocity) into @Position_Velocity (...)`). The second form
+    names a declared archetype; the values initialise every field of its
+    non-optional components, in the order of the components and then of
+    their fields, and optional components start absent.
+
+    Appends the entity to the archetype. Spawning beyond the archetype's
+    capacity is an error at run time. A system that declares its access
+    must list the spawned components in `writes`, or the archetype for the
+    second form.
 
     The result is the entity's id, which stays valid while the entity moves
     between rows and archetypes and becomes invalid when it is despawned.
   }];
-  let arguments = (ins FlatSymbolRefAttr:$archetype,
+  let arguments = (ins OptionalAttr<FlatSymbolRefAttr>:$archetype,
+                       OptionalAttr<FlatSymbolRefArrayAttr>:$components,
                        Variadic<AnyType>:$values);
   let results = (outs Ecs_EntityType:$entity);
-  let assemblyFormat =
-      "$archetype `(` $values `)` attr-dict (`:` type($values)^)?";
+  let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    /// Whether the new entity has `component` from the start: listed (first
+    /// form), or held by the archetype non-optionally (second form).
+    bool startsWith(::mlir::FlatSymbolRefAttr component);
+  }];
 }
 
 def Ecs_EntityOp : Ecs_Op<"entity"> {

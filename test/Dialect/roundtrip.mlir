@@ -49,6 +49,12 @@
 // MISC-NEXT:     ecs.apply %{{.*}} @Named "idx" max %{{.*}} : index
 // MISC-LABEL: ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
 // MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag, mut>) on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0, removed @Stunned] {
+// Components may carry a capacity; spawns may list components, and after
+// inference also name the archetype.
+// MISC:       ecs.component @Sized (s: i32) capacity 32
+// MISC-LABEL: ecs.system @spawnBoth(%{{.*}}: i32) {
+// MISC-NEXT:    ecs.spawn (@Sized)(%{{.*}}) : i32
+// MISC-NEXT:    ecs.spawn (@Sized) into @SizedOnly (%{{.*}}) : i32
 // Without declarations a system's access is inferred and none is printed;
 // an empty declaration is a contract and stays.
 // MISC-LABEL: ecs.system @inferred() {
@@ -112,6 +118,12 @@ ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
       on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0,
           removed @Stunned] {
   }
+}
+ecs.component @Sized (s: i32) capacity 32
+ecs.archetype @SizedOnly (@Sized) capacity 32
+ecs.system @spawnBoth(%v: i32) {
+  %a = ecs.spawn (@Sized)(%v) : i32
+  %b = ecs.spawn (@Sized) into @SizedOnly (%v) : i32
 }
 ecs.system @inferred() {
   ecs.query (%t: !ecs.ref<@Tag>) {

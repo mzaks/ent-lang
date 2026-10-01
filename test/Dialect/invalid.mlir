@@ -665,3 +665,51 @@ ecs.system @s(%v: i64) reads [@P] writes [@Score] {
     ecs.accumulate @Score "points" max %v : i64
   }
 }
+
+// -----
+
+ecs.component @P (x: f32) capacity 8
+ecs.system @s(%x: f32) {
+  // expected-error @+1 {{lists component @P more than once}}
+  ecs.spawn (@P, @P)(%x, %x) : f32, f32
+}
+
+// -----
+
+ecs.component @P (x: f32) capacity 8
+ecs.system @s(%x: f32) {
+  // expected-error @+1 {{spawns unknown component @Q}}
+  ecs.spawn (@P, @Q)(%x) : f32
+}
+
+// -----
+
+ecs.component @P (x: f32) capacity 8
+ecs.component @V (dx: f32) capacity 8
+ecs.system @s(%x: f32) {
+  // expected-error @+1 {{initialises 1 fields, but its components have 2}}
+  ecs.spawn (@P, @V)(%x) : f32
+}
+
+// -----
+
+ecs.component @P (x: f32) capacity 8
+ecs.system @s(%x: f32) reads [@P] {
+  // expected-error @+1 {{spawns @P but system @s does not declare it in 'writes'}}
+  ecs.spawn (@P)(%x) : f32
+}
+
+// -----
+
+ecs.component @P (x: f32) capacity 8
+ecs.component @V (dx: f32) capacity 8
+ecs.archetype @PV (@P, @V) capacity 8
+ecs.system @s(%x: f32) {
+  // expected-error @+1 {{spawns into @PV without its required component @V}}
+  ecs.spawn (@P) into @PV (%x) : f32
+}
+
+// -----
+
+// expected-error @+1 {{'ecs.component' op attribute 'capacity' failed to satisfy constraint}}
+ecs.component @P (x: f32) capacity 0
