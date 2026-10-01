@@ -1,0 +1,146 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+system s() {
+  // expected-error @+1 {{unknown component 'Position'}}
+  for p: Position {
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+system s() {
+  for p: Position {
+    // expected-error @+1 {{'p' is not 'mut': bind it as 'p: mut Position' to write it}}
+    p.x = 1.0
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+system s() {
+  for p: mut Position {
+    let a = 1.0
+    // expected-error @+1 {{'a' is a value and cannot be assigned; locals are immutable}}
+    a = 2.0
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+unique Clock { frame: i64 }
+system s() {
+  for p: Position {
+    // expected-error @+1 {{inside a 'for', a unique can only be accumulated into ('+=', '-=', 'min=', 'max='): every entity would write the same field}}
+    Clock.frame = 1
+  }
+}
+
+// -----
+
+component Hull { hp: f32 }
+component Target { who: entity }
+system s() {
+  for t: Target {
+    // expected-error @+1 {{another entity's field can only be combined into ('+=', '-=', 'min=', 'max='): which write lands last would depend on the order}}
+    Hull(t.who).hp = 0.0
+  }
+}
+
+// -----
+
+component Hull { hp: f32 }
+component Target { who: entity }
+system s() {
+  for t: Target {
+    // expected-error @+1 {{reading another entity's field may find nothing: use 'if let value = Hull(entity).field { ... }'}}
+    let hp = Hull(t.who).hp
+  }
+}
+
+// -----
+
+component Position { x: f32, y: f32 }
+system s() {
+  // expected-error @+1 {{'Position' needs a value for 'y'}}
+  spawn { Position { x: 1.0 } }
+}
+
+// -----
+
+component Position { x: f32 }
+system s() {
+  for p: Position {
+    // expected-error @+1 {{component 'Position' has no field 'z'}}
+    let z = p.z
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+system s(n: i32) {
+  for p: mut Position {
+    // expected-error @+1 {{operands have different types}}
+    p.x = p.x + n
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+tag Enemy
+system s() {
+  // expected-error @+1 {{'without' is not supported yet}}
+  for p: Position without Enemy {
+  }
+}
+
+// -----
+
+// expected-error @+1 {{'proc' is not supported yet}}
+proc nearest() {
+}
+
+// -----
+
+component Position { x: f32 }
+system s() {
+  for e, p: Position {
+    // expected-error @+1 {{a 'for' cannot be nested in another 'for'}}
+    for q: Position {
+    }
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+system s() {
+  for p: mut Position {
+    // expected-error @+1 {{expected an assignment ('=', '+=', '-=', '*=', '/=', 'min=', 'max='), found '1.0'}}
+    p.x 1.0
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+schedule frame() {
+  // expected-error @+1 {{unknown system 'move'; declare systems before the schedules that run them}}
+  move()
+}
+
+// -----
+
+component Position { x: f32 }
+// The ent dialect's verifier speaks for what the parser lets through,
+// pointing into the source.
+system s() reads Position {
+  // expected-error @+1 {{'ent.query' op binds @Position mutably but system @s does not declare it in 'writes'}}
+  for p: mut Position {
+    p.x = 1.0
+  }
+}

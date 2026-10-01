@@ -5,7 +5,7 @@ from lit.llvm import llvm_config
 
 config.name = "ent"
 config.test_format = lit.formats.ShTest(execute_external=False)
-config.suffixes = [".mlir", ".test"]
+config.suffixes = [".mlir", ".test", ".ent"]
 config.excludes = ["CMakeLists.txt", "lit.cfg.py", "Inputs"]
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.ent_obj_root, "test")

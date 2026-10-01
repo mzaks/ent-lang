@@ -1,0 +1,125 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+// The importer's output is valid ent IR that prints and parses again.
+// RUN: ent-translate --import-ent %s | ent-opt | FileCheck %s
+
+default_capacity 128
+
+// CHECK: module attributes {ent.default_capacity = 128 : i64}
+// CHECK: ent.component @Position (x: f32, y: f32) capacity 1000
+component Position { x: f32, y: f32 } capacity 1000
+// CHECK: ent.component @Health (hp: i32, alive: i1)
+component Health { hp: i32, alive: bool }
+// CHECK: ent.component @Target (who: !ent.entity)
+component Target { who: entity }
+// CHECK: ent.component @Enemy ()
+tag Enemy
+// CHECK: ent.resource @Clock (dt: f32, frame: i64)
+unique Clock { dt: f32, frame: i64 }
+// A unique with one value: its field is "value".
+// CHECK: ent.resource @Score (value: i64)
+unique Score: i64
+// CHECK: ent.archetype @Unit (@Position, @Health, optional @Enemy) capacity 8
+archetype Unit { Position, Health, optional Enemy } capacity 8
+
+// Declared access is optional; with it, a contract.
+// CHECK-LABEL: ent.system @step(%{{.*}}: f32) reads [@Health] writes [@Position, @Clock] {
+system step(dt: f32) reads Health writes Position, Clock {
+  // Literals take the type of the other operand; `+=` reads and writes.
+  // CHECK:      ent.query (%[[P:.*]]: !ent.ref<@Position, mut>, %{{.*}}: !ent.ref<@Health>) {
+  // CHECK:        %[[X:.*]] = ent.get %[[P]] "x"
+  // CHECK-NEXT:   %[[TWO:.*]] = arith.constant 2.000000e+00 : f32
+  // CHECK-NEXT:   %[[D:.*]] = arith.mulf %[[X]], %[[TWO]] : f32
+  // CHECK-NEXT:   %[[OLD:.*]] = ent.get %[[P]] "y"
+  // CHECK-NEXT:   %[[NEW:.*]] = arith.addf %[[OLD]], %[[D]] : f32
+  // CHECK-NEXT:   ent.set %[[P]] "y", %[[NEW]]
+  for p: mut Position, h: Health {
+    p.y += p.x * 2
+  }
+  // Outside a for, a unique is read and written.
+  // CHECK:      %[[ONE:.*]] = arith.constant 1 : i64
+  // CHECK-NEXT: %[[F:.*]] = ent.read @Clock "frame" : i64
+  // CHECK-NEXT: %[[N:.*]] = arith.addi %[[F]], %[[ONE]] : i64
+  // CHECK-NEXT: ent.write @Clock "frame", %[[N]] : i64
+  Clock.frame += 1
+}
+
+// `with` binds only to filter; `where` guards the body; an if-expression
+// yields a value; `as` converts.
+// CHECK-LABEL: ent.system @score() {
+// CHECK:      ent.query (%[[H:.*]]: !ent.ref<@Health>, %{{.*}}: !ent.ref<@Enemy>) {
+// CHECK:        %[[HP:.*]] = ent.get %[[H]] "hp"
+// CHECK:        %[[LOW:.*]] = arith.cmpi slt, %[[HP]], %{{.*}} : i32
+// CHECK-NEXT:   scf.if %[[LOW]] {
+// CHECK:          %[[V:.*]] = scf.if %{{.*}} -> (i32) {
+// CHECK:          %[[W:.*]] = arith.extsi %[[V]] : i32 to i64
+// Inside a for, a unique is accumulated into.
+// CHECK-NEXT:     ent.accumulate @Score "value" add %[[W]] : i64
+system score() {
+  for h: Health with Enemy where h.hp < 10 {
+    let bonus = if h.alive { 10 } else { 1 }
+    Score += bonus as i64
+  }
+}
+
+// Another entity: read with `if let`, combined into with `-=`, `min=`.
+// CHECK-LABEL: ent.system @hit(%{{.*}}: i32) {
+// CHECK:        %[[WHO:.*]] = ent.get %{{.*}} "who"
+// CHECK:        %[[HPV:.*]], %[[FOUND:.*]] = ent.lookup %[[WHO]] @Health "hp" : i32
+// CHECK-NEXT:   scf.if %[[FOUND]] {
+// CHECK:          %[[NEG:.*]] = arith.subi %{{.*}}, %{{.*}} : i32
+// CHECK-NEXT:     ent.apply %{{.*}} @Health "hp" add %[[NEG]] : i32
+system hit(d: i32) {
+  for t: Target {
+    if let hp = Health(t.who).hp {
+      Health(t.who).hp -= min(hp, d)
+    }
+  }
+}
+// CHECK-LABEL: ent.system @cap() {
+// CHECK:        ent.apply %{{.*}} @Health "hp" min %{{.*}} : i32
+system cap() {
+  for t: Target {
+    Health(t.who).hp min= 100
+  }
+}
+
+// Spawning lists components; the visited entity can be changed.
+// CHECK-LABEL: ent.system @life() {
+// CHECK:        %{{.*}} = ent.spawn (@Position, @Health)(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : f32, f32, i32, i1
+// CHECK:        ent.add @Enemy()
+// CHECK:        ent.remove @Enemy
+// CHECK:        ent.despawn
+system life() {
+  for e, h: Health {
+    if h.hp > 100 {
+      spawn { Position { y: 1.0, x: 0.0 }, Health { hp: 1, alive: true } }
+      e.add(Enemy)
+    } else if h.hp < 0 {
+      e.remove(Enemy)
+      e.destroy()
+    }
+  }
+}
+
+// Reactive triggers, with an event log's capacity.
+// CHECK-LABEL: ent.system @watch() {
+// CHECK: ent.query (%{{.*}}: !ent.ref<@Position, mut>) on [changed @Health "hp" log 64, added @Enemy] {
+system watch() {
+  for p: mut Position on changed Health.hp log 64, added Enemy {
+    p.x = 0.0
+  }
+}
+
+// Schedules run systems; literals take the parameter's type.
+// CHECK-LABEL: ent.schedule @frame(%{{.*}}: f32) {
+// CHECK:      ent.run @step(%{{.*}}) : f32
+// CHECK:      %[[C:.*]] = arith.constant 5 : i32
+// CHECK-NEXT: ent.run @hit(%[[C]]) : i32
+schedule frame(dt: f32) {
+  step(dt)
+  score()
+  hit(5)
+  cap()
+  life()
+  watch()
+}

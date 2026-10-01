@@ -1,5 +1,6 @@
 #include "Ent/EntDialect.h"
 #include "Ent/EntOps.h"
+#include "Ent/Import.h"
 #include "Ent/Structure.h"
 #include "Ent/World.h"
 
@@ -394,6 +395,15 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
 }
 
 int main(int argc, char **argv) {
+  TranslateToMLIRRegistration import(
+      "import-ent", "Parse ent-lang source (a .ent file) into the ent dialect",
+      [](llvm::SourceMgr &sourceMgr,
+         MLIRContext *context) -> OwningOpRef<Operation *> {
+        return importEnt(sourceMgr, context);
+      },
+      [](DialectRegistry &registry) {
+        registry.insert<EntDialect, arith::ArithDialect, scf::SCFDialect>();
+      });
   TranslateFromMLIRRegistration header(
       "ent-to-c-header", "Emit the C API of an ent-lang program's world",
       [](Operation *op, raw_ostream &os) -> LogicalResult {
