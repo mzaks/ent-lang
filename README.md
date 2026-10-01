@@ -50,9 +50,28 @@ When each effect becomes visible to the rest of the program (the frame
 model: queries as the unit of consistency, their end as the commit point)
 is specified in [`docs/sync-points.md`](docs/sync-points.md).
 
-- `ecs.component @Position (x: f32, y: f32)`: scalar fields, abstract layout.
+- `ecs.component @Position (x: f32, y: f32) capacity 100000`: scalar fields,
+  abstract layout; the optional capacity bounds how many entities can have
+  the component.
+- `%id = ecs.spawn (@Position, @Velocity)(%x, %y, %dx, %dy) : f32, f32, f32,
+  f32` creates an entity with these components, a value for every field in
+  order, and returns its id. Archetypes need not be declared: the compiler
+  (`--ecs-infer-archetypes`, which every other pass and `ecs-translate` run
+  first) gives every set of spawned components an archetype, named after
+  them (`@Position_Velocity`, with `_archetype` appended if the name is
+  taken). A component some `ecs.add` can give these entities, or some
+  `ecs.remove` can take away, is stored in it as optional (below), so
+  entities never move between inferred archetypes; a spawn still starts
+  with every component it lists. Its capacity is the smallest among the
+  components that stay required, or the module's `ecs.default_capacity`;
+  without either it is an error. Shapes only the host spawns (through the
+  generated header) are invisible to the compiler and need a declared
+  archetype. `examples/bullets.mlir` spawns bullets this way.
 - `ecs.archetype @Body (@Position, @Velocity, @Mass) capacity 100000`: a
   table that entities are stored in, with a hard upper bound on its size.
+  Declaring one takes full control: its name, capacity and storage (moves
+  between archetypes, below). A spawn whose components are exactly a
+  declared archetype's required ones lives there.
   The set of archetypes is closed, so every query is matched to its
   archetypes at compile time. An archetype of capacity 1 holds at most one
   entity (a player, a camera); its queries become a guard instead of a
@@ -63,16 +82,17 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   and `ecs.remove @Stunned`, inside a query, write the entity's own row
   instead of moving it to another archetype. Queries that bind it run only
   for the entities that have it.
-- `%id = ecs.spawn @Bullet(%x, %dx, %t) : f32, f32, f32` creates an entity,
-  with a value for every field of the archetype's non-optional components
-  (optional components start absent), and returns its id. The new entity
-  exists at once (its id is valid, lookups find it), but the query that
-  spawned it does not visit it. Spawning beyond the
+- `%id = ecs.spawn @Body(%x, %dx, %m) : f32, f32, f32` spawns into a declared
+  archetype, with a value for every field of its non-optional components
+  (optional components start absent). Either way the new entity exists at
+  once (its id is valid, lookups find it), but the query that spawned it
+  does not visit it. Spawning beyond the
   capacity stops the program with a message. `ecs.despawn`, inside a query,
   removes the entity it visits; the removal is deferred to the end of the
   query, so the query still visits every entity it would have. A system that
-  does either and declares its access (see `ecs.system`) lists the archetype
-  in `writes`, e.g. `writes [@Bullet]`.
+  does either and declares its access (see `ecs.system`) lists in `writes`
+  the components it spawns, or the declared archetype (`writes [@Body]`); to
+  despawn, the components its query binds, or the declared archetype.
 - `ecs.add` and `ecs.remove` work on any component; the archetypes decide
   what they do. Where the component is optional they set or clear its
   presence; where it is not, the entity moves to the archetype with exactly
