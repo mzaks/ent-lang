@@ -70,6 +70,27 @@ const WorldApplyBuffer &WorldApply::find(unsigned archetype) const {
   llvm_unreachable("the apply's query does not match the archetype");
 }
 
+const WorldColumn *WorldRelation::find(StringAttr field) const {
+  for (const WorldColumn &column : fields)
+    if (column.field == field)
+      return &column;
+  return nullptr;
+}
+
+const WorldConnect::Buffer &WorldConnect::find(unsigned archetype) const {
+  for (const Buffer &buffer : buffers)
+    if (buffer.archetype == archetype)
+      return buffer;
+  llvm_unreachable("the connect's query does not match the archetype");
+}
+
+const WorldRelation &WorldLayout::getRelation(StringAttr relation) const {
+  for (const WorldRelation &entry : relations)
+    if (RelationOp(entry.op).getSymNameAttr() == relation)
+      return entry;
+  llvm_unreachable("relation is not part of the layout");
+}
+
 const WorldLog *WorldLayout::findLog(const Stamp &stamp) const {
   ArrayRef<Stamp> all = stamps.getStamps();
   auto *it = llvm::find(all, stamp);
@@ -173,6 +194,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
                                                                  : 32;
   }
 
+  layout.entityKeys =
+      scheme.kind == EntityScheme::Rows
+          ? int64_t(layout.archetypes.size()) << scheme.rowBits
+          : layout.entityCapacity;
+
   // Bytes a field of `type` takes; ids take the scheme's width.
   auto storageBytes = [&](Type type) -> uint64_t {
     if (isa<EntityType>(type))
@@ -207,6 +233,17 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       archetype.pendingCountOffset = end;
       end += 8;
     }
+  // Relations: their edge counts and clean flags.
+  for (RelationOp relation : module.getOps<RelationOp>()) {
+    WorldRelation entry;
+    entry.op = relation;
+    entry.capacity = relation.getCapacity();
+    end = llvm::alignTo(end, 8);
+    entry.countOffset = end;
+    entry.cleanOffset = end + 8;
+    end += 16;
+    layout.relations.push_back(std::move(entry));
+  }
   end = llvm::alignTo(end, 8);
   layout.nextSlotOffset = end;
   layout.freeHeadOffset = end + 8;
@@ -360,7 +397,100 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
             {archetype.index, ids, place(storageBytes(entry.type))});
       }
     }
+    if (auto edges = apply->getParentOfType<EdgesOp>()) {
+      entry.edgeCapacity =
+          symbols.lookup<RelationOp>(edges.getRelationAttr().getAttr())
+              .getCapacity();
+      auto place = [&](uint64_t bytes) {
+        uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+        end = offset + bytes * entry.edgeCapacity;
+        return offset;
+      };
+      entry.edgeIdOffset = place(scheme.idBits / 8);
+      entry.edgeValueOffset = place(storageBytes(entry.type));
+    }
     layout.applies.push_back(std::move(entry));
+  });
+
+  // Relations: the edge table, the offsets, and the scratch for sorting.
+  for (WorldRelation &relation : layout.relations) {
+    RelationOp op = relation.op;
+    StringAttr name = op.getSymNameAttr();
+    bool hasIn = false, hasDead = false;
+    module.walk([&](EdgesOp edges) {
+      hasIn |= edges.getRelationAttr().getAttr() == name && !edges.isOut();
+    });
+    module.walk([&](DisconnectOp disconnect) {
+      hasDead |= disconnect->getParentOfType<EdgesOp>()
+                     .getRelationAttr()
+                     .getAttr() == name;
+    });
+    relation.offsetBits = relation.capacity < (int64_t(1) << 31) ? 32 : 64;
+    auto place = [&](uint64_t bytes, int64_t elements) {
+      uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+      end = offset + bytes * elements;
+      return offset;
+    };
+    int64_t edges = relation.capacity;
+    int64_t keys = layout.entityKeys;
+    uint64_t idBytes = scheme.idBits / 8, offsetBytes = relation.offsetBits / 8;
+    relation.sourceOffset = place(idBytes, edges);
+    relation.targetOffset = place(idBytes, edges);
+    for (auto [fieldName, typeAttr] :
+         llvm::zip(op.getFieldNames(), op.getFieldTypes())) {
+      Type type = cast<TypeAttr>(typeAttr).getValue();
+      uint64_t bytes = storageBytes(type);
+      if (bytes == 0)
+        return op.emitOpError("field ")
+               << fieldName << " has type " << type
+               << ", which world storage does not support";
+      relation.fields.push_back(
+          {name, cast<StringAttr>(fieldName), type, place(bytes, edges)});
+    }
+    if (hasDead)
+      relation.deadOffset = place(1, edges);
+    relation.outOffset = place(offsetBytes, keys + 1);
+    if (hasIn) {
+      relation.inOffset = place(offsetBytes, keys + 1);
+      relation.inEdgesOffset = place(offsetBytes, edges);
+    }
+    relation.cursorOffset = place(offsetBytes, keys);
+    relation.sourceScratchOffset = place(idBytes, edges);
+    relation.targetScratchOffset = place(idBytes, edges);
+    for (const WorldColumn &field : relation.fields)
+      relation.fieldScratchOffsets.push_back(
+          place(storageBytes(field.type), edges));
+  }
+
+  // Edges connected inside queries: per row a source, a target and the
+  // values, for each archetype the query matches.
+  module.walk([&](ConnectOp connect) {
+    auto query = connect->getParentOfType<QueryOp>();
+    if (!query)
+      return;
+    auto relation = symbols.lookup<RelationOp>(
+        connect.getRelationAttr().getAttr());
+    WorldConnect entry;
+    for (ArchetypeOp source : getMatchedArchetypes(query)) {
+      for (WorldArchetype &archetype : layout.archetypes) {
+        if (archetype.op != source)
+          continue;
+        auto place = [&](uint64_t bytes) {
+          uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+          end = offset + bytes * archetype.capacity;
+          return offset;
+        };
+        WorldConnect::Buffer buffer;
+        buffer.archetype = archetype.index;
+        buffer.sourceOffset = place(scheme.idBits / 8);
+        buffer.targetOffset = place(scheme.idBits / 8);
+        for (Attribute typeAttr : relation.getFieldTypes())
+          buffer.valueOffsets.push_back(
+              place(storageBytes(cast<TypeAttr>(typeAttr).getValue())));
+        entry.buffers.push_back(std::move(buffer));
+      }
+    }
+    layout.connects.push_back(std::move(entry));
   });
 
   // The rings of the event logs.

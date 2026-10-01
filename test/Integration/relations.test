@@ -1,0 +1,57 @@
+// Relations end to end: edges connected by the host, by a system and by a
+// query; push (an apply per edge), pull (a lookup per edge), writes to
+// edge data, disconnects, and edges left behind by a despawned entity
+// whose slot a new entity reuses. Sequential and with parallel entity
+// loops forced on; both print the same.
+// RUN: mkdir -p %t.dir
+// RUN: ent-translate --ent-to-c-header %S/Inputs/relations.mlir \
+// RUN:     -o %t.dir/relations_world.h
+// RUN: ent-opt %S/Inputs/relations.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.rows.ll
+// RUN: clang -O2 -Wno-override-module %t.rows.ll -I%t.dir \
+// RUN:     %S/Inputs/relations_main.c -o %t.rows
+// RUN: %t.rows | FileCheck %s --check-prefix=ROWS
+// RUN: ent-opt %S/Inputs/relations.mlir \
+// RUN:     "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.rowspar.ll
+// RUN: clang -O2 -Wno-override-module %t.rowspar.ll -I%t.dir \
+// RUN:     %S/Inputs/relations_main.c %openmp -o %t.rowspar
+// RUN: %t.rowspar | FileCheck %s --check-prefix=ROWS
+
+// a -> b (0.5), a -> c (0.25), b -> c (4), c -> a (0.5); v = 1, 2, 3.
+// Frame 1: every weight has grown by 1.
+// ROWS:      frame 0 n0: input 1.50 gathered 1.50
+// ROWS-NEXT: frame 0 n1: input 0.50 gathered 0.50
+// ROWS-NEXT: frame 0 n2: input 8.25 gathered 8.25
+// ROWS-NEXT: frame 1 n0: input 6.00 gathered 6.00
+// ROWS-NEXT: frame 1 n1: input 2.00 gathered 2.00
+// ROWS-NEXT: frame 1 n2: input 19.50 gathered 19.50
+
+// RUN: ent-translate --ent-to-c-header %S/Inputs/relations_ids.mlir \
+// RUN:     -o %t.dir/relations_ids_world.h
+// RUN: ent-opt %S/Inputs/relations_ids.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ids.ll
+// RUN: clang -O2 -Wno-override-module %t.ids.ll -I%t.dir \
+// RUN:     %S/Inputs/relations_ids_main.c -o %t.ids
+// RUN: %t.ids | FileCheck %s --check-prefix=IDS
+// RUN: ent-opt %S/Inputs/relations_ids.mlir \
+// RUN:     "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.idspar.ll
+// RUN: clang -O2 -Wno-override-module %t.idspar.ll -I%t.dir \
+// RUN:     %S/Inputs/relations_ids_main.c %openmp -o %t.idspar
+// RUN: %t.idspar | FileCheck %s --check-prefix=IDS
+
+// The host connects c0 -> c2 (10) and c3 -> c1 (0.5); in frame 0 every
+// cell connects to its next with its v (1..4), and c3 -> c1 is pruned.
+// IDS:      frame 0: edges 5 c0 16 c1 1 c2 14 c3 9
+// c2 dies in frame 1, after pushing: its edges stay until the next sort.
+// IDS-NEXT: frame 1: edges 5 c0 32 c1 2 c3 18
+// c4 takes c2's slot; c2's old edge to c3 is not c4's, so c3 stays at 18.
+// IDS-NEXT: frame 2: edges 5 c0 48 c1 3 c3 18 c4 0
+// IDS-NEXT: slot reused: 1

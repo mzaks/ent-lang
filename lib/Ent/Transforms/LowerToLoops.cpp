@@ -467,6 +467,129 @@ public:
     return view(offset, layout.entityCapacity, rewriter.getI32Type());
   }
 
+  /// The integer type ids are stored as.
+  Type idType() { return rewriter.getIntegerType(layout.entities.idBits); }
+
+  /// The key relations index the entity `id` (stored form) by, an index:
+  /// its slot, or for row ids the id itself.
+  Value entityKey(Location loc, Value id) {
+    if (layout.entities.kind == EntityScheme::Rows)
+      return arith::IndexCastUIOp::create(rewriter, loc,
+                                          rewriter.getIndexType(), id);
+    return idSlot(loc, id);
+  }
+
+  /// Whether `id` (stored form) can be a live entity: for row ids, a key in
+  /// range (entities with row ids never die); for slot ids, a slot handed
+  /// out and, with generations, the slot's current generation.
+  Value isAlive(Location loc, Value id) {
+    const EntityScheme &scheme = layout.entities;
+    Value key = entityKey(loc, id);
+    if (scheme.kind == EntityScheme::Rows)
+      return arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ult, key,
+          arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys));
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value inUse = toIndex(loc, memref::LoadOp::create(
+                                   rewriter, loc, scalar(layout.nextSlotOffset),
+                                   ValueRange{zero}));
+    Value handedOut = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ult, key, inUse);
+    if (scheme.kind == EntityScheme::Slots)
+      return handedOut;
+    auto current = scf::IfOp::create(rewriter, loc,
+                                     TypeRange{rewriter.getI1Type()}, handedOut,
+                                     /*withElseRegion=*/true);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(current.thenBlock());
+    Value generation =
+        memref::LoadOp::create(rewriter, loc, generations(), ValueRange{key});
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{arith::CmpIOp::create(rewriter, loc,
+                                         arith::CmpIPredicate::eq, generation,
+                                         idGeneration(loc, id))});
+    rewriter.setInsertionPointToStart(current.elseBlock());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 1)});
+    return current.getResult(0);
+  }
+
+  /// A relation's storage: source or target ids, a field, the dead flags,
+  /// the offsets by source or target, the positions of edges by target, and
+  /// the sorting cursors; its edge count and clean flag (i64 scalars).
+  Value edgeIds(const WorldRelation &relation, bool source) {
+    return view(source ? relation.sourceOffset : relation.targetOffset,
+                relation.capacity, idType());
+  }
+  Value edgeField(const WorldRelation &relation, const WorldColumn &field) {
+    return view(field.offset, relation.capacity, storageType(field.type));
+  }
+  Value edgeDead(const WorldRelation &relation) {
+    return view(relation.deadOffset, relation.capacity, rewriter.getI8Type());
+  }
+  Value edgeOffsets(const WorldRelation &relation, bool in) {
+    return view(in ? relation.inOffset : relation.outOffset,
+                layout.entityKeys + 1, offsetType(relation));
+  }
+  Value inEdges(const WorldRelation &relation) {
+    return view(relation.inEdgesOffset, relation.capacity,
+                offsetType(relation));
+  }
+  Value edgeCursors(const WorldRelation &relation) {
+    return view(relation.cursorOffset, layout.entityKeys,
+                offsetType(relation));
+  }
+  Value edgeCount(const WorldRelation &relation) {
+    return scalar(relation.countOffset);
+  }
+  Value edgesClean(const WorldRelation &relation) {
+    return scalar(relation.cleanOffset);
+  }
+  Type offsetType(const WorldRelation &relation) {
+    return rewriter.getIntegerType(relation.offsetBits);
+  }
+  /// A view of `elements` values of `type` at `offset`.
+  Value array(uint64_t offset, int64_t elements, Type type) {
+    return view(offset, elements, type);
+  }
+
+  /// The per-edge buffers of an apply inside `ent.edges`: target ids and
+  /// values, by position in the loop's order.
+  std::pair<Value, Value> edgeApplyBuffer(Operation *apply) {
+    auto index =
+        apply->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
+    const WorldApply &entry = layout.applies[index.getInt()];
+    return {view(entry.edgeIdOffset, entry.edgeCapacity, idType()),
+            view(entry.edgeValueOffset, entry.edgeCapacity,
+                 storageType(entry.type))};
+  }
+
+  /// The buffers of a connect inside a query, for the rows of `archetype`:
+  /// source ids, target ids, and a column per field.
+  struct ConnectBuffers {
+    Value sources, targets;
+    SmallVector<Value> values;
+  };
+  ConnectBuffers connectBuffer(ConnectOp connect,
+                               const WorldArchetype &archetype) {
+    auto index =
+        connect->getAttrOfType<IntegerAttr>(WorldLayout::kConnectIndexAttr);
+    const WorldConnect::Buffer &buffer =
+        layout.connects[index.getInt()].find(archetype.index);
+    const WorldRelation &relation =
+        layout.getRelation(connect.getRelationAttr().getAttr());
+    ConnectBuffers result;
+    result.sources = view(buffer.sourceOffset, archetype.capacity, idType());
+    result.targets = view(buffer.targetOffset, archetype.capacity, idType());
+    for (auto [offset, field] :
+         llvm::zip(buffer.valueOffsets, relation.fields))
+      result.values.push_back(
+          view(offset, archetype.capacity, storageType(field.type)));
+    return result;
+  }
+
 private:
 
   Value getCounts() {
@@ -588,8 +711,11 @@ static bool isEntityLocal(QueryOp query) {
     // Lookups read other entities, but the verifier ensures the query does
     // not change what they read.
     // Applies write the entity's own slot of their buffer.
+    // Edge loops visit the entity's own edges (each edge belongs to one
+    // entity's range); connects fill the entity's own slot of a buffer.
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
-            ApplyOp, AccumulateOp, YieldOp>(op) ||
+            ApplyOp, AccumulateOp, YieldOp, EdgesOp, ConnectOp, DisconnectOp>(
+            op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
     return WalkResult::interrupt();
@@ -961,7 +1087,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
   for (Operation *root : roots)
     root->walk([&](Operation *op) {
       if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp, EntityOp, ApplyOp,
-              AccumulateOp>(op))
+              AccumulateOp, ConnectOp>(op))
         accesses.push_back(op);
     });
   for (Operation *op : accesses) {
@@ -1044,6 +1170,24 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       memref::StoreOp::create(rewriter, loc, accumulate.getValue(), values,
                               ValueRange{entity});
       rewriter.eraseOp(op);
+    } else if (auto connect = dyn_cast<ConnectOp>(op)) {
+      // Fill this entity's slot; the query's end appends the edge.
+      WorldAccess::ConnectBuffers buffers =
+          world.connectBuffer(connect, archetype);
+      Value source = world.toStorage(loc, connect.getSource());
+      if (mask)
+        source = arith::SelectOp::create(rewriter, loc, mask, source,
+                                         world.noEntity(loc));
+      memref::StoreOp::create(rewriter, loc, source, buffers.sources,
+                              ValueRange{entity});
+      memref::StoreOp::create(rewriter, loc,
+                              world.toStorage(loc, connect.getTarget()),
+                              buffers.targets, ValueRange{entity});
+      for (auto [value, column] :
+           llvm::zip(connect.getValues(), buffers.values))
+        memref::StoreOp::create(rewriter, loc, world.toStorage(loc, value),
+                                column, ValueRange{entity});
+      rewriter.eraseOp(op);
     } else if (auto entityOp = dyn_cast<EntityOp>(op)) {
       Value id = world.entityId(loc, archetype, entity);
       rewriter.replaceOp(op, world.fromStorage(loc, id, entityOp.getType()));
@@ -1057,6 +1201,11 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
     }
   }
 }
+
+static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
+                             const WorldArchetype &archetype,
+                             WorldAccess &world, const WorldLayout &layout,
+                             Value row);
 
 /// Emit the body of `query` for `entity` of `archetype` at the insertion
 /// point, with the query's parameters and outer values mapped by
@@ -1133,14 +1282,21 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   OpBuilder::InsertionGuard guard(rewriter);
   bool guarded = mask && (!canRunForAbsentEntities(query) ||
                           isStructuralFor(query, archetypeOp));
-  // An apply that may not run for this entity (it is under an `if`, or the
-  // body is guarded) must still leave its slot saying "no target".
+  // An apply or connect that may not run for this entity (it is under an
+  // `if`, or the body is guarded) must still leave its slot saying "no
+  // target". So must an apply in an edge loop, whose row slot says whether
+  // the loop ran.
   query.getBody().walk([&](Operation *apply) {
-    if (!isa<ApplyOp, AccumulateOp>(apply))
+    if (!isa<ApplyOp, AccumulateOp, ConnectOp>(apply))
       return;
-    if (!guarded && apply->getBlock() == &query.getBody().front())
+    bool inEdges = apply->getParentOfType<EdgesOp>() != nullptr;
+    if (!inEdges && !guarded &&
+        apply->getBlock() == &query.getBody().front())
       return;
-    Value ids = world.applyBuffer(apply, archetype).first;
+    Value ids = isa<ConnectOp>(apply)
+                    ? world.connectBuffer(cast<ConnectOp>(apply), archetype)
+                          .sources
+                    : world.applyBuffer(apply, archetype).first;
     memref::StoreOp::create(rewriter, loc, world.noEntity(loc), ids,
                             ValueRange{entity});
   });
@@ -1168,6 +1324,15 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   llvm::erase_if(roots, [&](Operation *root) {
     return llvm::is_contained(tests, root);
   });
+  SmallVector<EdgesOp> edgeLoops;
+  for (Operation *root : roots)
+    root->walk([&](EdgesOp edges) { edgeLoops.push_back(edges); });
+  for (EdgesOp edges : edgeLoops) {
+    Operation *op = edges;
+    Operation *loop = lowerEdges(rewriter, edges, archetype, world, layout,
+                                 entity);
+    llvm::replace(roots, op, loop);
+  }
   lowerAccesses(rewriter, roots, archetype, world, layout, entity, rows, mask,
                 tick, parallel);
 }
@@ -1655,22 +1820,13 @@ static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
                  : arith::MaxSIOp::create(rewriter, loc, a, b).getResult();
 }
 
-/// Combine the values `apply` sent from the first `count` rows of
-/// `archetype` into their targets, at the insertion point, one row after
-/// another: the order is fixed, so the result does not depend on how the
-/// query's loop ran. Rows that sent nothing, dead ids and targets without
-/// the component are skipped.
-static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
-                           const WorldLayout &layout,
-                           const WorldArchetype &archetype, WorldAccess &world,
-                           Value count, Value tick) {
-  Location loc = apply.getLoc();
-  OpBuilder::InsertionGuard guard(rewriter);
-  auto [ids, values] = world.applyBuffer(apply, archetype);
-  // The loop only combines into fields, so the counts and the slots in
-  // use that ids are checked against cannot change. Loaded inside, they
-  // would be reloaded for every row: LLVM cannot tell the stores to the
-  // field from them, since all live in the arena.
+/// The bounds the ids an apply sends to are checked against, loaded once:
+/// combining only writes fields, so they cannot change meanwhile. Loaded
+/// inside the loop, they would be reloaded for every value: LLVM cannot
+/// tell the stores to the field from them, since all live in the arena.
+static LocateBounds loadApplyBounds(IRRewriter &rewriter, Location loc,
+                                    ApplyOp apply, const WorldLayout &layout,
+                                    WorldAccess &world) {
   LocateBounds bounds;
   if (layout.entities.kind == EntityScheme::Rows) {
     for (const WorldArchetype &target : layout.archetypes) {
@@ -1682,17 +1838,17 @@ static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
   } else {
     bounds.slotsInUse = loadSlotsInUse(rewriter, loc, layout, world);
   }
-  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
-  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-  Value row = loop.getInductionVar();
-  Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{row});
-  Value sent = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
-                                     id, world.noEntity(loc));
-  auto ifSent = scf::IfOp::create(rewriter, loc, sent);
-  rewriter.setInsertionPointToStart(ifSent.thenBlock());
-  Value value = memref::LoadOp::create(rewriter, loc, values, ValueRange{row});
+  return bounds;
+}
+
+/// Combine `value` (stored form) into `apply`'s field of the entity `id`,
+/// at the insertion point; nothing if the id is not alive or the entity
+/// lacks the component.
+static void combineInto(IRRewriter &rewriter, ApplyOp apply,
+                        const WorldLayout &layout, WorldAccess &world,
+                        Value id, Value value, Value tick,
+                        const LocateBounds &bounds) {
+  Location loc = apply.getLoc();
   FlatSymbolRefAttr component = apply.getComponentAttr();
   auto holds = [&](const WorldArchetype &archetype) {
     return ArchetypeOp(archetype.op).contains(component);
@@ -1735,6 +1891,506 @@ static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
       []() -> SmallVector<Value> { return {}; }, bounds);
 }
 
+/// Combine the values `apply` sent from the first `count` rows of
+/// `archetype` into their targets, at the insertion point, one row after
+/// another: the order is fixed, so the result does not depend on how the
+/// query's loop ran. Rows that sent nothing, dead ids and targets without
+/// the component are skipped.
+static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
+                           const WorldLayout &layout,
+                           const WorldArchetype &archetype, WorldAccess &world,
+                           Value count, Value tick) {
+  Location loc = apply.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  auto [ids, values] = world.applyBuffer(apply, archetype);
+  LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+  Value row = loop.getInductionVar();
+  Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{row});
+  Value sent = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                     id, world.noEntity(loc));
+  auto ifSent = scf::IfOp::create(rewriter, loc, sent);
+  rewriter.setInsertionPointToStart(ifSent.thenBlock());
+  Value value = memref::LoadOp::create(rewriter, loc, values, ValueRange{row});
+  combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
+}
+
+/// The positions of the edges of the entity with key `key` (an index) in
+/// the order `in` or `out` visits them: [begin, end), as indices.
+static std::pair<Value, Value> emitEdgeRange(IRRewriter &rewriter,
+                                             Location loc, WorldAccess &world,
+                                             const WorldRelation &relation,
+                                             bool in, Value key) {
+  Value offsets = world.edgeOffsets(relation, in);
+  Value next = arith::AddIOp::create(
+      rewriter, loc, key, arith::ConstantIndexOp::create(rewriter, loc, 1));
+  Value begin = memref::LoadOp::create(rewriter, loc, offsets, ValueRange{key});
+  Value end = memref::LoadOp::create(rewriter, loc, offsets, ValueRange{next});
+  return {world.toIndex(loc, begin), world.toIndex(loc, end)};
+}
+
+/// Combine the values an apply inside `ent.edges` sent from the first
+/// `count` rows of `archetype`, at the insertion point, row after row and
+/// edge after edge: rows that ran the loop (their flag is 0) visited
+/// exactly the edges of their entity's range, each of which holds a target
+/// id ("no target" where the apply did not run) and a value.
+static void combineEdgeApplied(IRRewriter &rewriter, ApplyOp apply,
+                               const WorldLayout &layout,
+                               const WorldArchetype &archetype,
+                               WorldAccess &world, Value count, Value tick) {
+  Location loc = apply.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  auto edges = apply->getParentOfType<EdgesOp>();
+  const WorldRelation &relation =
+      layout.getRelation(edges.getRelationAttr().getAttr());
+  Value flags = world.applyBuffer(apply, archetype).first;
+  auto [ids, values] = world.edgeApplyBuffer(apply);
+  LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto rows = scf::ForOp::create(rewriter, loc, zero, count, one);
+  rewriter.setInsertionPoint(rows.getBody()->getTerminator());
+  Value row = rows.getInductionVar();
+  Value flag = memref::LoadOp::create(rewriter, loc, flags, ValueRange{row});
+  Value ran = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                    flag, world.noEntity(loc));
+  auto ifRan = scf::IfOp::create(rewriter, loc, ran);
+  rewriter.setInsertionPointToStart(ifRan.thenBlock());
+  Value key = world.entityKey(loc, world.entityId(loc, archetype, row));
+  auto [begin, end] =
+      emitEdgeRange(rewriter, loc, world, relation, !edges.isOut(), key);
+  auto positions = scf::ForOp::create(rewriter, loc, begin, end, one);
+  rewriter.setInsertionPoint(positions.getBody()->getTerminator());
+  Value position = positions.getInductionVar();
+  Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{position});
+  Value sent = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                     id, world.noEntity(loc));
+  auto ifSent = scf::IfOp::create(rewriter, loc, sent);
+  rewriter.setInsertionPointToStart(ifSent.thenBlock());
+  Value value =
+      memref::LoadOp::create(rewriter, loc, values, ValueRange{position});
+  combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
+}
+
+/// Replace `edges` (cloned into the body of a query for `row` of
+/// `archetype`) by a loop over the edges of the entity at that row, and
+/// return the loop. Get and set through the edge ref become loads and
+/// stores at the edge's position in the table, applies write the edge's
+/// slot of their buffers, and disconnects mark the edge dead and the
+/// relation unclean. With generational ids a slot may have been reused
+/// since the edges were last sorted: only edges whose own end is this
+/// entity's id count.
+static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
+                             const WorldArchetype &archetype,
+                             WorldAccess &world, const WorldLayout &layout,
+                             Value row) {
+  Location loc = edges.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(edges);
+  const WorldRelation &relation =
+      layout.getRelation(edges.getRelationAttr().getAttr());
+  bool out = edges.isOut();
+  Value id = world.entityId(loc, archetype, row);
+  Value key = world.entityKey(loc, id);
+  SmallVector<ApplyOp> applies;
+  edges.walk([&](ApplyOp apply) { applies.push_back(apply); });
+  // The row ran this loop: its edges' slots are to be combined.
+  for (ApplyOp apply : applies)
+    memref::StoreOp::create(
+        rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0,
+                                                    layout.entities.idBits),
+        world.applyBuffer(apply, archetype).first, ValueRange{row});
+  auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation, !out, key);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto loop = scf::ForOp::create(rewriter, loc, begin, end, one);
+  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+  Value position = loop.getInductionVar();
+  Value edge = out ? position
+                   : world.toIndex(loc, memref::LoadOp::create(
+                                            rewriter, loc,
+                                            world.inEdges(relation),
+                                            ValueRange{position}));
+  for (ApplyOp apply : applies)
+    memref::StoreOp::create(rewriter, loc, world.noEntity(loc),
+                            world.edgeApplyBuffer(apply).first,
+                            ValueRange{position});
+  Operation *insertBefore = loop.getBody()->getTerminator();
+  if (layout.entities.hasGenerations()) {
+    Value own = memref::LoadOp::create(
+        rewriter, loc, world.edgeIds(relation, /*source=*/out),
+        ValueRange{edge});
+    Value mine = arith::CmpIOp::create(rewriter, loc,
+                                       arith::CmpIPredicate::eq, own, id);
+    auto ifMine = scf::IfOp::create(rewriter, loc, mine);
+    insertBefore = ifMine.thenBlock()->getTerminator();
+  }
+  rewriter.setInsertionPoint(insertBefore);
+  Value other = world.fromStorage(
+      loc,
+      memref::LoadOp::create(rewriter, loc,
+                             world.edgeIds(relation, /*source=*/!out),
+                             ValueRange{edge}),
+      EntityType::get(rewriter.getContext()));
+
+  Block &body = edges.getBody().front();
+  for (Operation *user :
+       llvm::make_early_inc_range(body.getArgument(0).getUsers())) {
+    rewriter.setInsertionPoint(user);
+    if (auto get = dyn_cast<GetOp>(user)) {
+      const WorldColumn *field = relation.find(get.getFieldAttr());
+      Value value = memref::LoadOp::create(
+          rewriter, get.getLoc(), world.edgeField(relation, *field),
+          ValueRange{edge});
+      rewriter.replaceOp(get,
+                         world.fromStorage(get.getLoc(), value, get.getType()));
+    } else {
+      auto set = cast<SetOp>(user);
+      const WorldColumn *field = relation.find(set.getFieldAttr());
+      memref::StoreOp::create(rewriter, set.getLoc(),
+                              world.toStorage(set.getLoc(), set.getValue()),
+                              world.edgeField(relation, *field),
+                              ValueRange{edge});
+      rewriter.eraseOp(set);
+    }
+  }
+  for (ApplyOp apply : applies) {
+    rewriter.setInsertionPoint(apply);
+    auto [ids, values] = world.edgeApplyBuffer(apply);
+    memref::StoreOp::create(rewriter, apply.getLoc(),
+                            world.toStorage(apply.getLoc(), apply.getEntity()),
+                            ids, ValueRange{position});
+    memref::StoreOp::create(rewriter, apply.getLoc(),
+                            world.toStorage(apply.getLoc(), apply.getValue()),
+                            values, ValueRange{position});
+    rewriter.eraseOp(apply);
+  }
+  SmallVector<DisconnectOp> disconnects;
+  body.walk([&](DisconnectOp op) { disconnects.push_back(op); });
+  for (DisconnectOp disconnect : disconnects) {
+    Location at = disconnect.getLoc();
+    rewriter.setInsertionPoint(disconnect);
+    memref::StoreOp::create(rewriter, at,
+                            arith::ConstantIntOp::create(rewriter, at, 1, 8),
+                            world.edgeDead(relation), ValueRange{edge});
+    Value zero = arith::ConstantIndexOp::create(rewriter, at, 0);
+    memref::StoreOp::create(rewriter, at,
+                            arith::ConstantIntOp::create(rewriter, at, 0, 64),
+                            world.edgesClean(relation), ValueRange{zero});
+    rewriter.eraseOp(disconnect);
+  }
+  rewriter.eraseOp(body.getTerminator());
+  body.eraseArgument(0);
+  rewriter.inlineBlockBefore(&body, insertBefore, ValueRange{other});
+  rewriter.eraseOp(edges);
+  return loop;
+}
+
+/// Append the edge (`source`, `target`, `values`, all stored forms) to
+/// `relation` at the insertion point, after checking its capacity, and
+/// mark it unclean.
+static void appendEdge(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                       const WorldRelation &relation, Value source,
+                       Value target, ValueRange values) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value counter = world.edgeCount(relation);
+  Value count = memref::LoadOp::create(rewriter, loc, counter,
+                                       ValueRange{zero});
+  Value at = world.toIndex(loc, count);
+  Value fits = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::ult, at,
+      arith::ConstantIndexOp::create(rewriter, loc, relation.capacity));
+  cf::AssertOp::create(
+      rewriter, loc, fits,
+      rewriter.getStringAttr("ent.connect exceeds the capacity of @" +
+                             RelationOp(relation.op).getSymName()));
+  memref::StoreOp::create(rewriter, loc, source,
+                          world.edgeIds(relation, /*source=*/true),
+                          ValueRange{at});
+  memref::StoreOp::create(rewriter, loc, target,
+                          world.edgeIds(relation, /*source=*/false),
+                          ValueRange{at});
+  for (auto [value, field] : llvm::zip(values, relation.fields))
+    memref::StoreOp::create(rewriter, loc, value,
+                            world.edgeField(relation, field), ValueRange{at});
+  if (relation.deadOffset)
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+                            world.edgeDead(relation), ValueRange{at});
+  memref::StoreOp::create(
+      rewriter, loc,
+      arith::AddIOp::create(rewriter, loc, count,
+                            arith::ConstantIntOp::create(rewriter, loc, 1, 64)),
+      counter, ValueRange{zero});
+  memref::StoreOp::create(rewriter, loc,
+                          arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                          world.edgesClean(relation), ValueRange{zero});
+}
+
+/// Append the edges `connect` (inside a query) buffered for the first
+/// `count` rows of `archetype`, row after row, at the insertion point.
+static void appendConnected(IRRewriter &rewriter, ConnectOp connect,
+                            const WorldLayout &layout,
+                            const WorldArchetype &archetype,
+                            WorldAccess &world, Value count) {
+  Location loc = connect.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  const WorldRelation &relation =
+      layout.getRelation(connect.getRelationAttr().getAttr());
+  WorldAccess::ConnectBuffers buffers =
+      world.connectBuffer(connect, archetype);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+  Value row = loop.getInductionVar();
+  Value source =
+      memref::LoadOp::create(rewriter, loc, buffers.sources, ValueRange{row});
+  Value added = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                      source, world.noEntity(loc));
+  auto ifAdded = scf::IfOp::create(rewriter, loc, added);
+  rewriter.setInsertionPointToStart(ifAdded.thenBlock());
+  Value target =
+      memref::LoadOp::create(rewriter, loc, buffers.targets, ValueRange{row});
+  SmallVector<Value> values;
+  for (Value column : buffers.values)
+    values.push_back(
+        memref::LoadOp::create(rewriter, loc, column, ValueRange{row}));
+  appendEdge(rewriter, loc, world, relation, source, target, values);
+}
+
+/// The name of the function that sorts `relation`'s edges if it is
+/// unclean.
+static std::string sortFunctionName(const WorldRelation &relation) {
+  return ("ent_sort_" + RelationOp(relation.op).getSymName()).str();
+}
+
+static void callSort(IRRewriter &rewriter, Location loc,
+                     const WorldRelation &relation, Value arena) {
+  func::CallOp::create(rewriter, loc, sortFunctionName(relation), TypeRange{},
+                       ValueRange{arena});
+}
+
+/// Emit the function that, if `relation` is unclean, sorts its edges by
+/// source with a stable counting sort through the scratch columns,
+/// dropping dead edges and edges with an end that is no longer alive,
+/// computes the offsets by source (and by target, with the positions of
+/// those edges, where the program visits incoming edges) and marks it
+/// clean. Edges keep the order they were connected in among those of the
+/// same source, and the index by target lists each target's edges in table
+/// order.
+static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
+                             const WorldLayout &layout,
+                             const WorldRelation &relation,
+                             MemRefType arenaType) {
+  Location loc = RelationOp(relation.op).getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(module.getBody());
+  auto func = func::FuncOp::create(rewriter, loc, sortFunctionName(relation),
+                                   rewriter.getFunctionType({arenaType}, {}));
+  func.setPrivate();
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  func::ReturnOp::create(rewriter, loc);
+  rewriter.setInsertionPointToStart(entry);
+  WorldAccess world(rewriter, layout, entry->getArgument(0));
+
+  Type offsetType = world.offsetType(relation);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value keys = arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys);
+  Value keysPlusOne =
+      arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys + 1);
+  Value clean = memref::LoadOp::create(rewriter, loc, world.edgesClean(relation),
+                                       ValueRange{zero});
+  auto ifUnclean = scf::IfOp::create(
+      rewriter, loc,
+      arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, clean,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
+  rewriter.setInsertionPointToStart(ifUnclean.thenBlock());
+
+  auto forEach = [&](Value from, Value to,
+                     function_ref<void(Value)> body) {
+    auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    body(loop.getInductionVar());
+  };
+  auto offsetConstant = [&](int64_t value) {
+    return arith::ConstantIntOp::create(rewriter, loc, value,
+                                        relation.offsetBits);
+  };
+  // offsets[i] = 0; offsets[key + 1] += 1 per counted edge; prefix sums;
+  // cursors = offsets.
+  auto countInto = [&](Value offsets, Value edgeCount,
+                       function_ref<Value(Value)> keyOf,
+                       function_ref<Value(Value)> counts) {
+    forEach(zero, keysPlusOne, [&](Value i) {
+      memref::StoreOp::create(rewriter, loc, offsetConstant(0), offsets,
+                              ValueRange{i});
+    });
+    forEach(zero, edgeCount, [&](Value k) {
+      Value counted = counts(k);
+      auto ifCounted = scf::IfOp::create(rewriter, loc, counted);
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(ifCounted.thenBlock());
+      Value slot = arith::AddIOp::create(rewriter, loc, keyOf(k), one);
+      Value old =
+          memref::LoadOp::create(rewriter, loc, offsets, ValueRange{slot});
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::AddIOp::create(rewriter, loc, old, offsetConstant(1)),
+          offsets, ValueRange{slot});
+    });
+    forEach(one, keysPlusOne, [&](Value i) {
+      Value previous = memref::LoadOp::create(
+          rewriter, loc, offsets,
+          ValueRange{arith::SubIOp::create(rewriter, loc, i, one)});
+      Value own = memref::LoadOp::create(rewriter, loc, offsets, ValueRange{i});
+      memref::StoreOp::create(
+          rewriter, loc, arith::AddIOp::create(rewriter, loc, previous, own),
+          offsets, ValueRange{i});
+    });
+    Value cursors = world.edgeCursors(relation);
+    forEach(zero, keys, [&](Value i) {
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, offsets, ValueRange{i}),
+          cursors, ValueRange{i});
+    });
+  };
+  // Take the cursor of `key` and advance it.
+  auto take = [&](Value key) {
+    Value cursors = world.edgeCursors(relation);
+    Value position =
+        memref::LoadOp::create(rewriter, loc, cursors, ValueRange{key});
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::AddIOp::create(rewriter, loc, position, offsetConstant(1)),
+        cursors, ValueRange{key});
+    return position;
+  };
+
+  Value sources = world.edgeIds(relation, /*source=*/true);
+  Value targets = world.edgeIds(relation, /*source=*/false);
+  Value count = world.toIndex(
+      loc, memref::LoadOp::create(rewriter, loc, world.edgeCount(relation),
+                                  ValueRange{zero}));
+  auto keep = [&](Value k) {
+    Value source =
+        memref::LoadOp::create(rewriter, loc, sources, ValueRange{k});
+    Value target =
+        memref::LoadOp::create(rewriter, loc, targets, ValueRange{k});
+    Value kept = arith::AndIOp::create(rewriter, loc,
+                                       world.isAlive(loc, source),
+                                       world.isAlive(loc, target));
+    if (relation.deadOffset) {
+      Value dead = memref::LoadOp::create(rewriter, loc,
+                                          world.edgeDead(relation),
+                                          ValueRange{k});
+      kept = arith::AndIOp::create(
+          rewriter, loc, kept,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, dead,
+                                arith::ConstantIntOp::create(rewriter, loc, 0,
+                                                             8)));
+    }
+    return kept;
+  };
+  auto keyOfSource = [&](Value k) {
+    return world.entityKey(
+        loc, memref::LoadOp::create(rewriter, loc, sources, ValueRange{k}));
+  };
+  Value out = world.edgeOffsets(relation, /*in=*/false);
+  countInto(out, count, keyOfSource, keep);
+
+  // Scatter the kept edges into the scratch columns, in order.
+  SmallVector<std::pair<Value, Value>> columns{
+      {sources, world.array(relation.sourceScratchOffset, relation.capacity,
+                            world.idType())},
+      {targets, world.array(relation.targetScratchOffset, relation.capacity,
+                            world.idType())}};
+  for (auto [field, scratch] :
+       llvm::zip(relation.fields, relation.fieldScratchOffsets))
+    columns.push_back(
+        {world.edgeField(relation, field),
+         world.array(scratch, relation.capacity,
+                     world.storageType(field.type))});
+  forEach(zero, count, [&](Value k) {
+    auto ifKept = scf::IfOp::create(rewriter, loc, keep(k));
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(ifKept.thenBlock());
+    Value position = world.toIndex(loc, take(keyOfSource(k)));
+    for (auto [column, scratch] : columns)
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, column, ValueRange{k}),
+          scratch, ValueRange{position});
+  });
+  Value kept = world.toIndex(
+      loc, memref::LoadOp::create(rewriter, loc, out, ValueRange{keys}));
+  forEach(zero, kept, [&](Value p) {
+    for (auto [column, scratch] : columns)
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, scratch, ValueRange{p}),
+          column, ValueRange{p});
+    if (relation.deadOffset)
+      memref::StoreOp::create(rewriter, loc,
+                              arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+                              world.edgeDead(relation), ValueRange{p});
+  });
+  memref::StoreOp::create(
+      rewriter, loc,
+      arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(), kept),
+      world.edgeCount(relation), ValueRange{zero});
+
+  if (relation.hasIn()) {
+    auto keyOfTarget = [&](Value k) {
+      return world.entityKey(
+          loc, memref::LoadOp::create(rewriter, loc, targets, ValueRange{k}));
+    };
+    auto all = [&](Value) {
+      return arith::ConstantIntOp::create(rewriter, loc, 1, 1).getResult();
+    };
+    Value in = world.edgeOffsets(relation, /*in=*/true);
+    countInto(in, kept, keyOfTarget, all);
+    forEach(zero, kept, [&](Value k) {
+      Value position = world.toIndex(loc, take(keyOfTarget(k)));
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::IndexCastOp::create(rewriter, loc, offsetType, k),
+          world.inEdges(relation), ValueRange{position});
+    });
+  }
+  memref::StoreOp::create(rewriter, loc,
+                          arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+                          world.edgesClean(relation), ValueRange{zero});
+}
+
+/// Lower the connects left in `func`, those outside queries: append the
+/// edge and sort at once, so the edge is visible to what follows.
+static void lowerConnects(IRRewriter &rewriter, func::FuncOp func,
+                          const WorldLayout &layout, WorldAccess &world) {
+  SmallVector<ConnectOp> connects;
+  func.walk([&](ConnectOp connect) { connects.push_back(connect); });
+  for (ConnectOp connect : connects) {
+    Location loc = connect.getLoc();
+    rewriter.setInsertionPoint(connect);
+    const WorldRelation &relation =
+        layout.getRelation(connect.getRelationAttr().getAttr());
+    SmallVector<Value> values;
+    for (Value value : connect.getValues())
+      values.push_back(world.toStorage(loc, value));
+    appendEdge(rewriter, loc, world, relation,
+               world.toStorage(loc, connect.getSource()),
+               world.toStorage(loc, connect.getTarget()), values);
+    callSort(rewriter, loc, relation, world.getArena());
+    rewriter.eraseOp(connect);
+  }
+}
+
 /// Why the reactive `query` scans every entity on each run instead of
 /// walking its triggers' event logs, or nothing if it can walk them. The
 /// log is in the order events happened, not in row order: queries that
@@ -1746,12 +2402,12 @@ static std::optional<std::string> whyScans(QueryOp query,
       return "the event log of a trigger has capacity 0";
   bool applies = false, spawns = false;
   query.getBody().walk([&](Operation *op) {
-    applies |= isa<ApplyOp, AccumulateOp>(op);
+    applies |= isa<ApplyOp, AccumulateOp, ConnectOp>(op);
     spawns |= isa<SpawnOp>(op);
   });
   if (applies)
-    return std::string("it applies or accumulates values, which are "
-                       "combined in row order");
+    return std::string("it applies or accumulates values or connects "
+                       "edges, which are combined in row order");
   if (spawns || llvm::any_of(getMatchedArchetypes(query),
                              [&](ArchetypeOp archetype) {
                                return isStructuralFor(query, archetype);
@@ -2003,6 +2659,16 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   SmallVector<AccumulateOp> accumulates;
   query.getBody().walk(
       [&](AccumulateOp accumulate) { accumulates.push_back(accumulate); });
+  SmallVector<ConnectOp> connects;
+  query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
+  // Relations whose edges the query changes: sorted when it ends.
+  llvm::SetVector<Attribute> changedRelations;
+  for (ConnectOp connect : connects)
+    changedRelations.insert(connect.getRelationAttr().getAttr());
+  query.getBody().walk([&](DisconnectOp disconnect) {
+    changedRelations.insert(
+        disconnect->getParentOfType<EdgesOp>().getRelationAttr().getAttr());
+  });
   // A query visits the entities that exist when it starts: count every
   // matched archetype now, before any of its loops, since a body may spawn
   // into an archetype whose loop comes later. The same counts bound the
@@ -2029,7 +2695,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       continue;
     rewriter.setInsertionPoint(anchor);
     Value rows = startCounts.lookup(&archetype);
-    if (!applies.empty() || !accumulates.empty())
+    if (!applies.empty() || !accumulates.empty() || !connects.empty())
       visited.push_back({&archetype, rows});
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, entityLocal,
@@ -2106,11 +2772,22 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // moves, while every id still leads to where its entity was.
   rewriter.setInsertionPoint(query);
   for (ApplyOp apply : applies)
-    for (auto [archetype, count] : visited)
-      combineApplied(rewriter, apply, layout, *archetype, world, count, tick);
+    for (auto [archetype, count] : visited) {
+      if (apply->getParentOfType<EdgesOp>())
+        combineEdgeApplied(rewriter, apply, layout, *archetype, world, count,
+                           tick);
+      else
+        combineApplied(rewriter, apply, layout, *archetype, world, count,
+                       tick);
+    }
   for (AccumulateOp accumulate : accumulates)
     for (auto [archetype, count] : visited)
       combineAccumulated(rewriter, accumulate, *archetype, world, count);
+  // Connected edges are appended while the buffers' rows still are the
+  // rows that filled them, before despawns and moves.
+  for (ConnectOp connect : connects)
+    for (auto [archetype, count] : visited)
+      appendConnected(rewriter, connect, layout, *archetype, world, count);
 
   // Despawns and moves take effect when the whole query has run, so an
   // entity moved into another archetype the query matches is not visited
@@ -2118,6 +2795,11 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   rewriter.setInsertionPoint(query);
   for (const WorldArchetype *archetype : changed)
     applyPending(rewriter, loc, layout, *archetype, world, tick);
+  // Then the changed relations are sorted, which also drops edges to the
+  // entities just despawned.
+  for (Attribute relation : changedRelations)
+    callSort(rewriter, loc, layout.getRelation(cast<StringAttr>(relation)),
+             world.getArena());
 
   // The set of archetypes is closed, so a query that matches none of them
   // can never run; that is almost certainly a mistake in the program.
@@ -2213,15 +2895,16 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       // A run under a condition runs as a whole or not at all; it is not
       // interleaved with others.
       bool conditional = !run.getCondition().empty();
-      // Resource writes, structural changes, lookups and applies end a
-      // sequence: fusion interleaves systems per entity, and a lookup would
-      // then see some entities' updates from other systems and not others',
-      // as would a later system reading what an apply combines.
+      // Resource writes, structural changes, lookups, applies and edges
+      // end a sequence: fusion interleaves systems per entity, and a lookup
+      // would then see some entities' updates from other systems and not
+      // others', as would a later system reading what an apply combines;
+      // edge loops reach other entities too, and connects sort the edges.
       bool writesResource =
           system
               .walk([](Operation *op) {
                 return isa<WriteOp, SpawnOp, DespawnOp, LookupOp, ApplyOp,
-                           AccumulateOp>(op)
+                           AccumulateOp, EdgesOp, ConnectOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -2548,7 +3231,16 @@ struct EntLowerToLoops
         query->setAttr(WorldLayout::kReactiveIndexAttr,
                        rewriter.getI64IntegerAttr(reactiveIndex++));
     });
+    // And for connects inside queries and their buffers.
+    unsigned connectIndex = 0;
+    module.walk([&](ConnectOp connect) {
+      if (connect->getParentOfType<QueryOp>())
+        connect->setAttr(WorldLayout::kConnectIndexAttr,
+                         rewriter.getI64IntegerAttr(connectIndex++));
+    });
     MemRefType arenaType = getArenaType(module.getContext(), *layout);
+    for (const WorldRelation &relation : layout->relations)
+      emitSortFunction(rewriter, module, *layout, relation, arenaType);
     LoopOptions options{parallelEntities, parallelMinEntities,
                         parallelMinEvents, explain};
     SymbolTable symbols(module);
@@ -2574,6 +3266,10 @@ struct EntLowerToLoops
       SmallVector<StageOp> stages(func.getOps<StageOp>());
       for (StageOp stage : stages)
         lowerStage(rewriter, stage, parallelStages);
+      // Edges the host connected since the last frame are sorted first.
+      rewriter.setInsertionPointToStart(&func.getBody().front());
+      for (const WorldRelation &relation : layout->relations)
+        callSort(rewriter, func.getLoc(), relation, arena);
       guardSchedule(rewriter, func, condition);
       lowerResourceAccesses(rewriter, func, world);
     }
@@ -2588,12 +3284,13 @@ struct EntLowerToLoops
       for (QueryOp query : queries)
         lowerQuery(rewriter, query, *layout, world, options);
       lowerSpawns(rewriter, func, *layout, world);
+      lowerConnects(rewriter, func, *layout, world);
       lowerLookups(rewriter, func, *layout, world);
       lowerResourceAccesses(rewriter, func, world);
     }
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
-      if (isa<ComponentOp, ResourceOp, ArchetypeOp>(op))
+      if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp>(op))
         rewriter.eraseOp(&op);
 
     if (failed(convertEntityTypes(module, layout->entities.idBits)))

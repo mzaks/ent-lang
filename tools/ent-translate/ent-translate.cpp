@@ -354,6 +354,71 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     }
   }
 
+  for (const WorldRelation &relation : layout->relations) {
+    RelationOp relationOp = relation.op;
+    std::string name = toIdentifier(relationOp.getSymName());
+    os << llvm::formatv(
+        "\n// Relation @{0}: edges from a source to a target entity. "
+        "ent_{1}_connect\n// appends one; the next schedule run sorts them "
+        "by source (stable: the\n// edges of one source keep their order), "
+        "dropping edges to entities no\n// longer alive. The columns below "
+        "hold the first ent_{1}_count(world)\n// edges, in that order once "
+        "sorted.\n",
+        relationOp.getSymName(), name);
+    os << llvm::formatv("#define ENT_{0}_CAPACITY {1}\n", name,
+                        relation.capacity);
+    os << llvm::formatv(
+        "static inline int64_t *ent__{0}_count(ent_world *world) {{\n"
+        "  return (int64_t *)((char *)world + {1});\n}\n"
+        "static inline int64_t ent_{0}_count(ent_world *world) {{\n"
+        "  return *ent__{0}_count(world);\n}\n",
+        name, relation.countOffset);
+    os << llvm::formatv(
+        "static inline ent_entity *ent_{0}_source(ent_world *world) {{\n"
+        "  return (ent_entity *)((char *)world + {1});\n}\n"
+        "static inline ent_entity *ent_{0}_target(ent_world *world) {{\n"
+        "  return (ent_entity *)((char *)world + {2});\n}\n",
+        name, relation.sourceOffset, relation.targetOffset);
+    std::string params, stores;
+    for (const WorldColumn &field : relation.fields) {
+      std::string fieldName = toIdentifier(field.field.getValue());
+      std::string accessor = llvm::formatv("ent_{0}_{1}", name, fieldName);
+      if (failed(claim(relationOp, accessor)))
+        return failure();
+      os << llvm::formatv(
+          "static inline {0} *{1}(ent_world *world) {{\n"
+          "  return ({0} *)((char *)world + {2});\n}\n",
+          getCType(field.type), accessor, field.offset);
+      params += llvm::formatv(", {0} value_{1}", getCType(field.type),
+                              fieldName)
+                    .str();
+      stores += llvm::formatv("  {0}(world)[*count] = value_{1};\n", accessor,
+                              fieldName)
+                    .str();
+    }
+    if (relation.deadOffset)
+      stores += llvm::formatv("  ((uint8_t *)((char *)world + {0}))[*count] "
+                              "= 0;\n",
+                              relation.deadOffset)
+                    .str();
+    std::string connect = llvm::formatv("ent_{0}_connect", name);
+    if (failed(claim(relationOp, connect)))
+      return failure();
+    os << llvm::formatv(
+        "// Returns false, connecting nothing, if the relation is full.\n"
+        "static inline bool {0}(ent_world *world, ent_entity source,\n"
+        "                       ent_entity target{1}) {{\n"
+        "  int64_t *count = ent__{2}_count(world);\n"
+        "  if (*count >= ENT_{2}_CAPACITY)\n    return false;\n"
+        "  ent_{2}_source(world)[*count] = source;\n"
+        "  ent_{2}_target(world)[*count] = target;\n"
+        "{3}"
+        "  ++*count;\n"
+        "  *(int64_t *)((char *)world + {4}) = 0; // unclean\n"
+        "  return true;\n}\n",
+        connect, params, name, stores, relation.cleanOffset);
+  }
+
   os << "\n// Schedules. The lowered function receives the arena as a "
         "memref descriptor.\n"
         "typedef struct {\n  char *allocated;\n  char *aligned;\n"

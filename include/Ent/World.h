@@ -99,12 +99,80 @@ struct WorldApplyBuffer {
 };
 
 /// The buffers of one `ent.apply`, one per archetype its query matches.
+/// An apply inside `ent.edges` sends a value per edge: its per-row ids
+/// only say whether the row ran the edge loop (0) or not, and the target
+/// ids and values are kept per edge, at the edge's position in the loop's
+/// order (the sorted table for `out`, the index by target for `in`).
 struct WorldApply {
   Type type;
   SmallVector<WorldApplyBuffer> buffers;
+  /// For an apply inside `ent.edges`: per edge, a target id and a value.
+  uint64_t edgeIdOffset = 0;
+  uint64_t edgeValueOffset = 0;
+  int64_t edgeCapacity = 0;
 
   /// The buffer for source archetype `archetype` (its index).
   const WorldApplyBuffer &find(unsigned archetype) const;
+};
+
+/// The edges of one relation: a table of at most `capacity` edges (source
+/// id, target id, a column per field), the first `count` of which are
+/// sorted by source, so the edges of the entity with key k are those from
+/// `out[k]` to `out[k + 1]` (compressed sparse rows). Keys are entity
+/// slots, or for row ids the id itself (see WorldLayout::entityKeys).
+/// Where the program visits incoming edges, `in` holds the same offsets by
+/// target and `inEdges` the positions of those edges in the table.
+///
+/// `ent.connect` appends after `count` and marks the relation unclean
+/// (`clean` 0, which is also how a new world starts); disconnects mark
+/// edges dead. Sorting again (a stable counting sort, through the scratch
+/// columns) drops dead edges and those whose source or target is no
+/// longer alive, and makes the relation clean.
+struct WorldRelation {
+  RelationOp op;
+  int64_t capacity;
+  /// In the header (i64): the number of edges, and whether the sorted
+  /// table and offsets are current.
+  uint64_t countOffset = 0;
+  uint64_t cleanOffset = 0;
+  uint64_t sourceOffset = 0;
+  uint64_t targetOffset = 0;
+  /// One column per field; `component` is the relation's name.
+  SmallVector<WorldColumn> fields;
+  /// One i8 per edge, 1 once disconnected; 0 if nothing disconnects.
+  uint64_t deadOffset = 0;
+  /// Width of an offset or edge position: 32 or 64 bits.
+  unsigned offsetBits = 32;
+  /// Offsets by source, entityKeys + 1 of them.
+  uint64_t outOffset = 0;
+  /// By target, if the program visits incoming edges: offsets and the
+  /// table positions of the edges.
+  uint64_t inOffset = 0;
+  uint64_t inEdgesOffset = 0;
+  /// For sorting: a cursor per key and a copy of every column.
+  uint64_t cursorOffset = 0;
+  uint64_t sourceScratchOffset = 0;
+  uint64_t targetScratchOffset = 0;
+  SmallVector<uint64_t> fieldScratchOffsets;
+
+  bool hasIn() const { return inOffset != 0; }
+  /// The column of `field`, or null.
+  const WorldColumn *find(StringAttr field) const;
+};
+
+/// The edges one `ent.connect` inside a query adds, from the entities of
+/// each archetype the query matches: per row a source id (all ones if the
+/// row added none), a target id and the field values.
+struct WorldConnect {
+  struct Buffer {
+    unsigned archetype;
+    uint64_t sourceOffset;
+    uint64_t targetOffset;
+    SmallVector<uint64_t> valueOffsets;
+  };
+  SmallVector<Buffer> buffers;
+
+  const Buffer &find(unsigned archetype) const;
 };
 
 /// The event log of one observed stamp: (entity id, tick) entries, one per
@@ -222,6 +290,18 @@ struct WorldLayout {
   /// order; the lowering tags each op with its index (see kApplyIndexAttr).
   SmallVector<WorldApply> applies;
   static constexpr llvm::StringLiteral kApplyIndexAttr = "ent.apply_index";
+  /// Relations in declaration order, and one entry per `ent.connect`
+  /// inside a query, in walk order (tagged with kConnectIndexAttr).
+  SmallVector<WorldRelation> relations;
+  SmallVector<WorldConnect> connects;
+  static constexpr llvm::StringLiteral kConnectIndexAttr =
+      "ent.connect_index";
+  /// The number of entity keys relations index their edges by: the
+  /// entity table's size, or for row ids `archetypes << rowBits`.
+  int64_t entityKeys = 0;
+
+  /// The layout of `relation`; it must be declared in the module.
+  const WorldRelation &getRelation(StringAttr relation) const;
 
   /// Reactive queries: the stamps and where they are stored, the tick
   /// counter (an i64, 0 if there are no reactive queries), and per reactive

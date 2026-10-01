@@ -15,6 +15,8 @@ std::string mlir::ent::formatColumn(const Column &column) {
   if (archetype && !component.getValue().empty() &&
       (name == "+" || name == "-" || name == "@"))
     return (archetype.getValue() + "." + component.getValue() + name).str();
+  if (!archetype && field.getValue().empty())
+    return (component.getValue() + ".edges").str();
   if (!archetype)
     return (component.getValue() + "." + field.getValue()).str();
   if (component.getValue().empty())
@@ -154,8 +156,26 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
     }
   };
 
+  // A relation's fields are columns like a resource's, its sorted edges
+  // and offsets one more (empty field, printed `R.edges`).
+  auto relationOf = [&](Value ref) -> RelationOp {
+    return SymbolTable::lookupNearestSymbolFrom<RelationOp>(
+        system, cast<RefType>(ref.getType()).getComponent());
+  };
+  auto relationColumns = [&](StringAttr relation) {
+    auto op = SymbolTable::lookupNearestSymbolFrom<RelationOp>(
+        system, FlatSymbolRefAttr::get(relation));
+    SmallVector<Column> columns{{StringAttr(), relation, empty}};
+    for (Attribute field : op.getFieldNames())
+      columns.push_back({StringAttr(), relation, cast<StringAttr>(field)});
+    return columns;
+  };
   auto record = [&](Operation *op, Value ref, StringAttr field,
                     llvm::SetVector<Column> &into) {
+    if (RelationOp relation = relationOf(ref)) {
+      into.insert({StringAttr(), relation.getSymNameAttr(), field});
+      return;
+    }
     auto query = op->getParentOfType<QueryOp>();
     StringAttr component = cast<RefType>(ref.getType()).getComponent().getAttr();
     for (ArchetypeOp archetype : matchedArchetypes(query))
@@ -165,6 +185,8 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
   system.getBody().walk([&](Operation *op) {
     if (auto get = dyn_cast<GetOp>(op))
       return record(op, get.getRef(), get.getFieldAttr(), access.reads);
+    if (auto set = dyn_cast<SetOp>(op); set && relationOf(set.getRef()))
+      return record(op, set.getRef(), set.getFieldAttr(), access.writes);
     if (auto set = dyn_cast<SetOp>(op)) {
       StringAttr component =
           cast<RefType>(set.getRef().getType()).getComponent().getAttr();
@@ -286,6 +308,31 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
              getPresenceTest(query, archetype).components())
           access.reads.insert(
               {archetype.getSymNameAttr(), component.getAttr(), presence});
+      return;
+    }
+    if (auto edges = dyn_cast<EdgesOp>(op)) {
+      // Visits the sorted edges of each entity, found by its id.
+      access.reads.insert(
+          {StringAttr(), edges.getRelationAttr().getAttr(), empty});
+      for (ArchetypeOp archetype :
+           matchedArchetypes(op->getParentOfType<QueryOp>()))
+        access.reads.insert({archetype.getSymNameAttr(), empty, idField});
+      return;
+    }
+    if (isa<ConnectOp, DisconnectOp>(op)) {
+      // Adds or drops edges, and sorts them again: every column of the
+      // relation moves. Sorting drops edges to entities no longer alive.
+      StringAttr relation =
+          isa<ConnectOp>(op)
+              ? cast<ConnectOp>(op).getRelationAttr().getAttr()
+              : op->getParentOfType<EdgesOp>().getRelationAttr().getAttr();
+      for (const Column &column : relationColumns(relation))
+        access.writes.insert(column);
+      access.reads.insert(entityTable);
+      if (isa<ConnectOp>(op) && op->getParentOfType<QueryOp>())
+        for (ArchetypeOp archetype :
+             matchedArchetypes(op->getParentOfType<QueryOp>()))
+          access.reads.insert({archetype.getSymNameAttr(), empty, empty});
       return;
     }
     if (auto has = dyn_cast<HasOp>(op)) {
