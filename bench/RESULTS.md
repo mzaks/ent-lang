@@ -975,3 +975,65 @@ match the previous section's.
   heavy work (216 against 165 us): the break-even lies near 10,000 entries
   and depends on the work per entity, which a fixed threshold cannot see.
   The default stays at 16,384; a profile of a recorded run could set it.
+
+## 2026-10-01: relations, a spiking network
+
+`bench/snn/run.py` (defaults: 5 rounds, 100 steps after 50 warm-up steps,
+which also sort the edges): leaky integrate-and-fire neurons with K random
+synapses each, a relation in ent-lang (`examples/snn.ent` pushes spikes
+along outgoing synapses with an apply per edge, `examples/snn_pull.ent`
+gathers along incoming ones with a lookup per edge) against hand-written C
+over compressed rows: `c-push` (rows by source, firing neurons add into
+their targets), `c-pull` (rows by target, weights stored in target order,
+every neuron sums), `c-pull-par` (the same with `omp parallel for`). `-par`
+ent variants: parallel entity loops, `parallel-min-entities=1`. The bias
+sets the firing rate (the `firing` column: neurons firing per step);
+weights scale with 1/K. us per step, median of 5 processes (spread).
+Checksums (a hash of every potential's bits) agree in all configurations:
+all variants add a neuron's inputs in the order of the source neurons.
+M4 Max, 16 cores; load average 2.0 at the start and 5.0 at the end (the
+parallel variants run 16 threads), WindowServer and Discord in the
+background (about 23% and 9% of a core).
+
+| neurons x synapses | bias | firing | c-push | c-pull | c-pull-par | ent-push | ent-push-par | ent-pull | ent-pull-par |
+|---|---|---|---|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | **20.3 (109%)** | 462.4 (8%) | 100.9 (30%) | 32.9 (79%) | 117.4 (30%) | 2,934.2 (14%) | 450.8 (6%) |
+| 1e+04 x 100 | 0.3 | 7.4% | **53.0 (19%)** | 461.5 (11%) | 106.2 (15%) | 83.2 (12%) | 166.1 (13%) | 2,957.6 (12%) | 440.6 (6%) |
+| 1e+05 x 100 | 0.15 | 2.0% | **343.3 (49%)** | 5,623.2 (8%) | 738.0 (13%) | 593.4 (16%) | 447.9 (9%) | 52,078.3 (17%) | 9,755.4 (2%) |
+| 1e+05 x 100 | 0.3 | 7.3% | 1,066.1 (9%) | 5,601.3 (5%) | **777.1 (7%)** | 1,756.7 (8%) | 1,178.8 (11%) | 52,621.7 (11%) | 9,676.9 (2%) |
+| 1e+06 x 20 | 0.15 | 2.4% | 2,579.0 (8%) | 15,853.2 (3%) | 2,612.8 (2%) | 3,995.4 (7%) | **2,268.8 (6%)** | 127,210.0 (4%) | 20,210.7 (4%) |
+| 1e+06 x 20 | 0.3 | 7.9% | 5,674.4 (4%) | 16,602.6 (4%) | **3,050.1 (5%)** | 9,399.9 (8%) | 6,378.0 (11%) | 127,603.2 (4%) | 20,028.5 (5%) |
+
+### What holds
+
+- Push: `ent-push` takes 1.55-1.73x the time of `c-push` at every size and
+  rate (1e4: 33 against 20 us, a noisy cell with 79-109% spread; 1e6 at
+  2.4% firing: 4.0 against 2.6 ms). The generated code makes two passes
+  where C makes one: the edge loop fills a target and a value per edge, and
+  the combine at the end of the query walks the rows that fired and their
+  edges again to add them in.
+- Parallel push pays from 1e5 neurons: `ent-push-par` takes 0.67-0.76x of
+  sequential `ent-push` at 1e5 and 0.57-0.68x at 1e6, and at 1e6 with 2.4%
+  firing it is the fastest variant measured (2.27 ms against 2.58 for
+  `c-push` and 2.61 for `c-pull-par`). At 1e4 the fork costs more than the
+  step (117 against 33 us). The combine is sequential by construction; how
+  much of the parallel step it takes was not measured.
+- Push scales with the firing rate (2.2-3.1x from 2% to 7.5%), pull
+  does not: it visits every edge every step. At these rates sequential push
+  beats sequential pull in C by 2.9-23x.
+- Pull is slow in ent-lang: `ent-pull` takes 6.3-9.4x the time of `c-pull`
+  (1e5 x 100: 52 against 5.6 ms) and `ent-pull-par` 4.1-13x that of
+  `c-pull-par`.
+
+### Not measured
+
+Candidate causes of the pull gap, none checked yet: (1) the generated
+loop reaches an incoming edge's weight and source through the index by
+target (an indirect, scattered load), where `c-pull` stores the weights
+and sources in target order; (2) the lookup of the source's `fired`
+locates the id per edge (unpack, archetype and bound checks), and the
+bound may be reloaded per edge as the archetype count was in the apply
+combine before it was hoisted; (3) `n.input += ...` loads and stores the
+neuron's input once per edge rather than keeping the sum in a register.
+A C pull variant through the same index, and the generated IR's inner
+loop, would separate them.
