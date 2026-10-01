@@ -116,7 +116,8 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
   can fire. A query cannot react to `removed @C` and bind `C`. Writes the
   host makes through the header's column accessors are not tracked;
   spawning through the header is. `examples/reactive.mlir` redraws health
-  bars only for ships that were hit.
+  bars only for ships that were hit. A trigger may set the capacity of its
+  event log (below): `changed @Hull "hp" log 4096`, or `log 0` for none.
 - `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
   exactly once and is not an entity. Systems declare it in `reads`/`writes`
   and access it with `ecs.read @Clock "dt" : f32` and
@@ -280,6 +281,27 @@ different archetypes share no columns. Two consequences the lowering uses:
   keeps its effects only where a stamp is newer, branch-free like a body
   masked by an optional component. Reactive systems end a fused sequence,
   since they advance the counter before their loop.
+- Besides the stamps, every observed event has an event log: the entities
+  whose stamp moved on to a new tick, so that a reactive query can visit
+  just those instead of scanning every row (`bench/reactive/`: no single
+  scheme wins at every change rate). Its capacity is an eighth of the
+  entities that can carry the stamp unless a trigger asks for another
+  (`log N`), and it is split into up to 64 segments, each a ring with its
+  own count on a cache line of its own. An event at row r of n entities
+  goes to segment r * segments / n, so the contiguous row ranges of a
+  parallel loop's threads mostly append to segments of their own (an
+  atomic add keeps the shared ones correct); a single shared count was
+  5-40x slower than scanning with 16 threads. A reactive query notes where
+  each segment ends, and on its first run, or if any segment received more
+  entries since it last read it than it holds, scans as above; otherwise
+  it walks the entries, running its body for each entity whose stamp still
+  holds the entry's tick (its latest), that matches the query, and for
+  which no earlier trigger of the query fired (so it runs once). Writers
+  stop appending to a segment once it is full for every reader, marking it
+  as overflowed instead, which bounds what a frame that changes everything
+  costs. Walking a log visits entities in the order events happened, so
+  queries that combine applies or change which entities archetypes hold
+  (both rely on row order) always scan; `explain=1` says so.
 - A query that binds an optional component runs for every entity of the
   archetype and masks its stores with the presence, branch-free: every
   slot exists and belongs to the entity, so computing on an absent
