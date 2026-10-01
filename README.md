@@ -46,6 +46,10 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
 
 ## The dialect today
 
+When each effect becomes visible to the rest of the program (the frame
+model: queries as the unit of consistency, their end as the commit point)
+is specified in [`docs/sync-points.md`](docs/sync-points.md).
+
 - `ecs.component @Position (x: f32, y: f32)`: scalar fields, abstract layout.
 - `ecs.archetype @Body (@Position, @Velocity, @Mass) capacity 100000`: a
   table that entities are stored in, with a hard upper bound on its size.
@@ -61,7 +65,9 @@ build/bin/ecs-opt examples/integrate.mlir --ecs-schedule=explain=1
   for the entities that have it.
 - `%id = ecs.spawn @Bullet(%x, %dx, %t) : f32, f32, f32` creates an entity,
   with a value for every field of the archetype's non-optional components
-  (optional components start absent), and returns its id. Spawning beyond the
+  (optional components start absent), and returns its id. The new entity
+  exists at once (its id is valid, lookups find it), but the query that
+  spawned it does not visit it. Spawning beyond the
   capacity stops the program with a message. `ecs.despawn`, inside a query,
   removes the entity it visits; the removal is deferred to the end of the
   query, so the query still visits every entity it would have. A system that
