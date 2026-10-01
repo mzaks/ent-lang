@@ -232,7 +232,7 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     // A new entity starts without its optional components; for reactive
     // queries it has added and changed every other component (stamped with
     // the current tick, one past the counter) and lost none.
-    std::string clearPresence;
+    std::string clearPresence, appendToLogs;
     for (const WorldColumn &column : archetype.columns) {
       if (column.isPresence()) {
         clearPresence +=
@@ -249,6 +249,30 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
                                      layout->tickOffset)
                            .str()
                      : std::string("0"));
+        // A new entity is an event: append it to the stamp's log (the
+        // segment of its row's low bits), while the segment has room for
+        // its slowest reader; the first to find it full marks it overflowed.
+        const WorldLog *log = happened ? layout->findLog(*column.stamp)
+                                       : nullptr;
+        if (log)
+          appendToLogs += llvm::formatv(
+              "  {{\n"
+              "    int64_t segment = n & {0};\n"
+              "    int64_t *counts = (int64_t *)((char *)world + {1}) + "
+              "segment * {2};\n"
+              "    int64_t pending = counts[0] - counts[1];\n"
+              "    if (pending < {3}) {{\n"
+              "      int64_t slot = segment * {3} + (counts[0]++ & {4});\n"
+              "      ((ecs_entity *)((char *)world + {5}))[slot] = id;\n"
+              "      ((int64_t *)((char *)world + {6}))[slot] =\n"
+              "          *(int64_t *)((char *)world + {7}) + 1;\n"
+              "    } else if (pending == {3}) {{\n"
+              "      counts[0] = counts[1] + {3} + 1; // overflowed\n"
+              "    }\n  }\n",
+              log->segments - 1, log->countsOffset,
+              WorldLog::kSegmentStride / 8, log->segmentCapacity,
+              log->segmentCapacity - 1, log->idsOffset, log->ticksOffset,
+              layout->tickOffset);
       }
     }
     os << "// Returns the new entity's id, or ECS_NO_ENTITY if the archetype "
@@ -267,10 +291,10 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "  if (n >= ECS_{0}_CAPACITY)\n    return ECS_NO_ENTITY;\n"
         "{2}"
         "  ecs_entity id = ecs__allocate(world, {1}, n);\n"
-        "{3}"
+        "{3}{4}"
         "  ((int64_t *)world)[{1}] = n + 1;\n"
         "  return id;\n}\n",
-        name, archetype.index, clearPresence, storeId);
+        name, archetype.index, clearPresence, storeId, appendToLogs);
     os << llvm::formatv(
         "// Spawns n entities in consecutive rows; false (and none spawned) "
         "if they\n// do not fit.\n"

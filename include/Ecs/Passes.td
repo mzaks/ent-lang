@@ -52,6 +52,9 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
     Option<"fuseSystems", "fuse-systems", "bool", /*default=*/"false",
            "Inline the systems of each schedule and fuse their queries into "
            "one loop per archetype">,
+    Option<"explain", "explain", "bool", /*default=*/"false",
+           "Emit remarks on lowering decisions, such as reactive queries "
+           "that scan every entity instead of walking event logs">,
   ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",

@@ -1,0 +1,25 @@
+// A reactive query whose event log overflowed scans instead, sequentially
+// and with parallel loops (where appends are atomic).
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/Inputs/reactive_overflow.mlir \
+// RUN:     -o %t.dir/reactive_overflow_world.h
+// RUN: ecs-opt %S/Inputs/reactive_overflow.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/reactive_overflow_main.c -o %t.exe
+// RUN: %t.exe | FileCheck %s
+// RUN: ecs-opt %S/Inputs/reactive_overflow.mlir \
+// RUN:     "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ecs-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
+// RUN: clang -O2 -Wno-override-module %t.par.ll -I%t.dir \
+// RUN:     %S/Inputs/reactive_overflow_main.c %openmp -o %t.par
+// RUN: %t.par | FileCheck %s
+
+// Frame 0 is the first run; frame 1 changes all four units, twice as many
+// as the log holds; frame 2 changes none.
+// CHECK:      frame 0: 1 1 1 1
+// CHECK-NEXT: frame 1: 2 2 2 2
+// CHECK-NEXT: frame 2: 2 2 2 2

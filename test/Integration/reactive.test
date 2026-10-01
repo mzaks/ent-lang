@@ -3,8 +3,9 @@
 // Run as written, fused (reactive systems stay calls; the others fuse),
 // with parallel stages, and with parallel entity loops forced on; then with
 // Shield stored in separate archetypes, where the same events are moves.
-// All print the same.
-// RUN: mkdir -p %t.dir
+// After the first run the queries walk their event logs, except where a
+// log is too small or absent. All print the same.
+// RUN: mkdir -p %t.dir %t.dir/tiny %t.dir/nolog
 // RUN: ecs-translate --ecs-to-c-header %S/../../examples/reactive.mlir \
 // RUN:     -o %t.dir/reactive_world.h
 
@@ -39,6 +40,33 @@
 // RUN: clang -O2 -Wno-override-module %t.par.ll \
 // RUN:     -I%t.dir %S/../../examples/host/reactive_main.c %openmp -o %t.par
 // RUN: %t.par | FileCheck %s
+
+// The same with logs of one entry, so every run but those without events
+// finds its log overwritten and scans, and with no logs at all.
+// RUN: sed -e 's/"hp"\]/"hp" log 1]/' \
+// RUN:     -e 's/added @Shield\]/added @Shield log 1]/' \
+// RUN:     -e 's/removed @Shield\]/removed @Shield log 1]/' \
+// RUN:     %S/../../examples/reactive.mlir > %t.dir/tiny.mlir
+// RUN: ecs-translate --ecs-to-c-header %t.dir/tiny.mlir \
+// RUN:     -o %t.dir/tiny/reactive_world.h
+// RUN: ecs-opt %t.dir/tiny.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.tiny.ll
+// RUN: clang -O2 -Wno-override-module %t.tiny.ll \
+// RUN:     -I%t.dir/tiny %S/../../examples/host/reactive_main.c -o %t.tiny
+// RUN: %t.tiny | FileCheck %s
+// RUN: sed -e 's/"hp"\]/"hp" log 0]/' \
+// RUN:     -e 's/added @Shield\]/added @Shield log 0]/' \
+// RUN:     -e 's/removed @Shield\]/removed @Shield log 0]/' \
+// RUN:     %S/../../examples/reactive.mlir > %t.dir/nolog.mlir
+// RUN: ecs-translate --ecs-to-c-header %t.dir/nolog.mlir \
+// RUN:     -o %t.dir/nolog/reactive_world.h
+// RUN: ecs-opt %t.dir/nolog.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.nolog.ll
+// RUN: clang -O2 -Wno-override-module %t.nolog.ll \
+// RUN:     -I%t.dir/nolog %S/../../examples/host/reactive_main.c -o %t.nolog
+// RUN: %t.nolog | FileCheck %s
 
 // RUN: ecs-translate --ecs-to-c-header %S/Inputs/reactive_moves.mlir \
 // RUN:     -o %t.dir/reactive_moves_world.h

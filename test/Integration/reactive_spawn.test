@@ -1,0 +1,16 @@
+// Spawns between runs of a reactive query reach it through its event log.
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/Inputs/reactive_spawn.mlir \
+// RUN:     -o %t.dir/reactive_spawn_world.h
+// RUN: ecs-opt %S/Inputs/reactive_spawn.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/reactive_spawn_main.c -o %t.exe
+// RUN: %t.exe | FileCheck %s
+
+// Every unit is greeted once: the first two on the first run, the host's
+// and the program's on the next (rows 2 and 3), none after.
+// CHECK:      frame 0: 1 1
+// CHECK-NEXT: frame 1: 1 1 1 1
+// CHECK-NEXT: frame 2: 1 1 1 1

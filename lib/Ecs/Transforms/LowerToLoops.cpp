@@ -140,6 +140,36 @@ public:
   Value stamps(const WorldArchetype &archetype, const WorldColumn &column) {
     return view(column.offset, archetype.capacity, rewriter.getI64Type());
   }
+  /// An event log's per-segment counts: segment s's count of entries ever
+  /// appended at index s * stride, its slowest reader's position after it.
+  Value logCounts(const WorldLog &log) {
+    return view(log.countsOffset,
+                log.segments * WorldLog::kSegmentStride / 8,
+                rewriter.getI64Type());
+  }
+  /// Where each segment of an event log ended when its reader started.
+  Value logEnds(const WorldLog &log) {
+    return view(log.endsOffset, log.segments, rewriter.getI64Type());
+  }
+  /// A reader's positions in an event log, one per segment.
+  Value logPositions(const WorldLog &log, uint64_t offset) {
+    return view(offset, log.segments, rewriter.getI64Type());
+  }
+  /// The ring of an event log: entity ids and ticks.
+  Value logIds(const WorldLog &log) {
+    return view(log.idsOffset, log.capacity,
+                rewriter.getIntegerType(layout.entities.idBits));
+  }
+  Value logTicks(const WorldLog &log) {
+    return view(log.ticksOffset, log.capacity, rewriter.getI64Type());
+  }
+  /// The id of the entity at `row` of `archetype`, in its stored form.
+  Value entityId(Location loc, const WorldArchetype &archetype, Value row) {
+    if (hasIds())
+      return memref::LoadOp::create(rewriter, loc, ids(archetype),
+                                    ValueRange{row});
+    return packRows(loc, archetype, row);
+  }
 
   /// The all-ones id, which is never alive: "no target" in apply buffers.
   Value noEntity(Location loc) {
@@ -489,6 +519,8 @@ private:
 struct LoopOptions {
   bool parallelEntities;
   int64_t parallelMinEntities;
+  /// Emit remarks explaining lowering decisions.
+  bool explain;
 };
 
 } // namespace
@@ -566,7 +598,9 @@ static bool isEntityLocal(QueryOp query) {
 }
 
 /// Emit the loop over the entities of `archetype` at the insertion point
-/// and call `emitBody` with the entity index, positioned inside the loop.
+/// and call `emitBody` with the entity index, positioned inside the loop,
+/// the number of entities the loop runs over, and whether it runs its
+/// iterations in parallel.
 /// Returns the outermost op emitted.
 ///
 /// An archetype of capacity 1 holds at most one entity, so it gets a guard
@@ -579,7 +613,8 @@ static Operation *
 emitEntityLoops(IRRewriter &rewriter, Location loc,
                 const WorldArchetype &archetype, WorldAccess &world,
                 const LoopOptions &options, bool entityLocal,
-                function_ref<void(Value entity, Block *loopBody)> emitBody) {
+                function_ref<void(Value entity, Value rows, bool parallel)>
+                    emitBody) {
   Value count = world.count(loc, archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
 
@@ -588,7 +623,7 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
         rewriter, loc, arith::CmpIPredicate::sgt, count, zero);
     auto guard = scf::IfOp::create(rewriter, loc, present);
     rewriter.setInsertionPointToStart(guard.thenBlock());
-    emitBody(zero, guard.thenBlock());
+    emitBody(zero, count, /*parallel=*/false);
     return guard;
   }
 
@@ -596,14 +631,14 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
   auto emitSequential = [&]() -> Operation * {
     auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-    emitBody(loop.getInductionVar(), loop.getBody());
+    emitBody(loop.getInductionVar(), count, /*parallel=*/false);
     return loop;
   };
   auto emitParallel = [&]() -> Operation * {
     auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                         ValueRange{count}, ValueRange{one});
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-    emitBody(loop.getInductionVars().front(), loop.getBody());
+    emitBody(loop.getInductionVars().front(), count, /*parallel=*/true);
     return loop;
   };
 
@@ -752,6 +787,105 @@ static void recordPending(IRRewriter &rewriter, Location loc,
       counter, ValueRange{zero});
 }
 
+/// The segment of `log` that an event at `row` (an index) of an archetype
+/// holding `rows` entities (an index) goes to, as an i64: row * segments /
+/// rows, so that the contiguous row ranges of a parallel loop's threads map
+/// to different segments. Without `rows`, the row's low bits.
+static Value segmentOf(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                       const WorldLog &log, Value row, Value rows) {
+  Type i64 = rewriter.getI64Type();
+  Value at = arith::IndexCastOp::create(rewriter, loc, i64, row);
+  if (log.segments == 1)
+    return arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+  if (!rows)
+    return arith::AndIOp::create(
+        rewriter, loc, at,
+        arith::ConstantIntOp::create(rewriter, loc, log.segments - 1, 64));
+  Value scaled = arith::MulIOp::create(
+      rewriter, loc, at,
+      arith::ConstantIntOp::create(rewriter, loc, log.segments, 64));
+  return arith::DivUIOp::create(
+      rewriter, loc, scaled,
+      arith::IndexCastOp::create(rewriter, loc, i64, rows));
+}
+
+/// Append the entity `id` (stored form) to `segment` (an i64) of `log` as
+/// having had an event at `tick`, if `old` (its stamp before this event;
+/// null for a new entity or a move, which are events by themselves) is not
+/// `tick` already and `when` holds (null for always). Once the segment is
+/// full for every reader, appending is wasted work: the first event that
+/// finds it full instead moves its count one past (every reader scans),
+/// and later events find nothing to do. With `atomic`, iterations of a
+/// parallel loop may append concurrently: the count is advanced atomically
+/// (rarely contended, since threads mostly own their segments) and never
+/// moved back.
+static void appendToLog(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                        const WorldLog &log, Value segment, Value id,
+                        Value tick, Value old, Value when, bool atomic) {
+  auto i64 = [&](int64_t value) {
+    return arith::ConstantIntOp::create(rewriter, loc, value, 64);
+  };
+  Value event = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+  if (old)
+    event = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, old,
+                                  tick);
+  if (when)
+    event = arith::AndIOp::create(rewriter, loc, event, when);
+  Value counts = world.logCounts(log);
+  Value base = arith::MulIOp::create(rewriter, loc, segment,
+                                     i64(WorldLog::kSegmentStride / 8));
+  Value countAt = world.toIndex(loc, base);
+  Value slowestAt =
+      world.toIndex(loc, arith::AddIOp::create(rewriter, loc, base, i64(1)));
+  Value count =
+      memref::LoadOp::create(rewriter, loc, counts, ValueRange{countAt});
+  Value slowest =
+      memref::LoadOp::create(rewriter, loc, counts, ValueRange{slowestAt});
+  Value pending = arith::SubIOp::create(rewriter, loc, count, slowest);
+  Value room = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
+                                     pending, i64(log.segmentCapacity));
+  Value full = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                     pending, i64(log.segmentCapacity));
+  OpBuilder::InsertionGuard guard(rewriter);
+  auto append = scf::IfOp::create(
+      rewriter, loc, arith::AndIOp::create(rewriter, loc, event, room));
+  rewriter.setInsertionPointToStart(append.thenBlock());
+  Value position;
+  if (atomic) {
+    position = memref::AtomicRMWOp::create(rewriter, loc,
+                                           arith::AtomicRMWKind::addi, i64(1),
+                                           counts, ValueRange{countAt});
+  } else {
+    position = count;
+    memref::StoreOp::create(rewriter, loc,
+                            arith::AddIOp::create(rewriter, loc, count, i64(1)),
+                            counts, ValueRange{countAt});
+  }
+  Value slot = world.toIndex(
+      loc, arith::AddIOp::create(
+               rewriter, loc,
+               arith::MulIOp::create(rewriter, loc, segment,
+                                     i64(log.segmentCapacity)),
+               arith::AndIOp::create(rewriter, loc, position,
+                                     i64(log.segmentCapacity - 1))));
+  memref::StoreOp::create(rewriter, loc, id, world.logIds(log),
+                          ValueRange{slot});
+  memref::StoreOp::create(rewriter, loc, tick, world.logTicks(log),
+                          ValueRange{slot});
+
+  rewriter.setInsertionPointAfter(append);
+  auto overflow = scf::IfOp::create(
+      rewriter, loc, arith::AndIOp::create(rewriter, loc, event, full));
+  rewriter.setInsertionPointToStart(overflow.thenBlock());
+  Value past = arith::AddIOp::create(rewriter, loc, slowest,
+                                     i64(log.segmentCapacity + 1));
+  if (atomic)
+    memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::maxs,
+                                past, counts, ValueRange{countAt});
+  else
+    memref::StoreOp::create(rewriter, loc, past, counts, ValueRange{countAt});
+}
+
 /// The stamp columns of `archetype` that an event updates: `kind` of
 /// `component`, and for Changed, a write to `field` (every field if null).
 static SmallVector<const WorldColumn *>
@@ -777,7 +911,8 @@ stampsFor(const WorldArchetype &archetype, Trigger::Kind kind,
 /// body ran for an entity it does not apply to.
 static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                           const WorldArchetype &archetype, WorldAccess &world,
-                          Value entity, Value mask, Value tick) {
+                          const WorldLayout &layout, Value entity,
+                          Value rows, Value mask, Value tick, bool parallel) {
   auto column = [&](StringAttr component, StringAttr field) {
     return world.column(archetype, component, field);
   };
@@ -797,12 +932,25 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
   };
   // Record an event for reactive queries: store the current tick in the
   // stamps it updates (none unless some query observes it).
+  // An entity whose stamp moves on to this tick is appended to the
+  // stamp's event log, if it has one.
   auto stamp = [&](Location loc, Trigger::Kind kind, StringAttr component,
                    StringAttr field = StringAttr()) {
     for (const WorldColumn *column :
          stampsFor(archetype, kind, component, field)) {
       assert(tick && "an event is stamped without a tick");
-      store(loc, tick, world.stamps(archetype, *column));
+      Value stamps = world.stamps(archetype, *column);
+      const WorldLog *log = layout.findLog(*column->stamp);
+      Value old = log ? memref::LoadOp::create(rewriter, loc, stamps,
+                                               ValueRange{entity})
+                            .getResult()
+                      : Value();
+      store(loc, tick, stamps);
+      if (log)
+        appendToLog(rewriter, loc, world, *log,
+                    segmentOf(rewriter, loc, world, *log, entity, rows),
+                    world.entityId(loc, archetype, entity), tick, old, mask,
+                    parallel);
     }
   };
 
@@ -881,12 +1029,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                               ValueRange{entity});
       rewriter.eraseOp(op);
     } else if (auto entityOp = dyn_cast<EntityOp>(op)) {
-      Value id = world.hasIds()
-                     ? memref::LoadOp::create(rewriter, loc,
-                                              world.ids(archetype),
-                                              ValueRange{entity})
-                           .getResult()
-                     : world.packRows(loc, archetype, entity);
+      Value id = world.entityId(loc, archetype, entity);
       rewriter.replaceOp(op, world.fromStorage(loc, id, entityOp.getType()));
     } else {
       // Despawn is deferred: list the row; the query's end removes it. A
@@ -908,8 +1051,9 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
 /// absent entities, it is guarded by an `scf.if`.
 static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                           IRMapping mapping, const WorldArchetype &archetype,
-                          WorldAccess &world, Value entity, Value tick,
-                          Value seen) {
+                          WorldAccess &world, const WorldLayout &layout,
+                          Value entity, Value rows, Value tick, Value seen,
+                          bool parallel) {
   Location loc = query.getLoc();
   ArchetypeOp archetypeOp = archetype.op;
   Value mask;
@@ -964,7 +1108,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   SmallVector<Operation *> roots;
   for (Operation &op : query.getBody().front().without_terminator())
     roots.push_back(rewriter.clone(op, mapping));
-  lowerAccesses(rewriter, roots, archetype, world, entity, mask, tick);
+  lowerAccesses(rewriter, roots, archetype, world, layout, entity, rows, mask,
+                tick, parallel);
 }
 
 /// Append the entity at `row` of `source` to `move.target`, as the move
@@ -996,11 +1141,16 @@ static void applyMove(IRRewriter &rewriter, Location loc,
       // Stamps move with the entity. Where the source does not store one,
       // the entity gains or loses the component by this move: that is the
       // event (see StampPlan).
-      if (const WorldColumn *carried = source.findStamp(*column.stamp))
+      if (const WorldColumn *carried = source.findStamp(*column.stamp)) {
         value = memref::LoadOp::create(
             rewriter, loc, world.stamps(source, *carried), ValueRange{row});
-      else
+      } else {
         value = tick;
+        if (const WorldLog *log = layout.findLog(*column.stamp))
+          appendToLog(rewriter, loc, world, *log,
+                      segmentOf(rewriter, loc, world, *log, to, Value()), id,
+                      tick, Value(), Value(), /*atomic=*/false);
+      }
       memref::StoreOp::create(rewriter, loc, value,
                               world.stamps(*target, column), ValueRange{to});
       continue;
@@ -1162,6 +1312,8 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
                                spawn.getArchetypeAttr().getValue()));
     ArchetypeOp archetypeOp = archetype->op;
     auto value = spawn.getValues().begin();
+    // Logs to append the new entity to, once it has an id.
+    SmallVector<std::pair<const WorldLog *, Value>> spawned;
     for (const WorldColumn &column : archetype->columns) {
       auto component = FlatSymbolRefAttr::get(column.component);
       if (column.isStamp()) {
@@ -1169,11 +1321,16 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
         // lost none; optional components start absent.
         bool happened = column.stamp->kind != Trigger::Removed &&
                         !archetypeOp.isOptional(component);
-        memref::StoreOp::create(
-            rewriter, loc,
+        Value stamped =
             happened ? world.currentTick(loc)
-                     : arith::ConstantIntOp::create(rewriter, loc, 0, 64),
-            world.stamps(*archetype, column), ValueRange{row});
+                     : arith::ConstantIntOp::create(rewriter, loc, 0, 64)
+                           .getResult();
+        memref::StoreOp::create(rewriter, loc, stamped,
+                                world.stamps(*archetype, column),
+                                ValueRange{row});
+        if (happened)
+          if (const WorldLog *log = layout.findLog(*column.stamp))
+            spawned.push_back({log, stamped});
         continue;
       }
       Value stored;
@@ -1192,6 +1349,10 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
     if (world.hasIds())
       memref::StoreOp::create(rewriter, loc, id, world.ids(*archetype),
                               ValueRange{row});
+    for (auto [log, stamped] : spawned)
+      appendToLog(rewriter, loc, world, *log,
+                  segmentOf(rewriter, loc, world, *log, row, Value()), id,
+                  stamped, Value(), Value(), /*atomic=*/false);
     Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
     world.setCount(loc, *archetype,
                    arith::AddIOp::create(rewriter, loc, row, one));
@@ -1222,14 +1383,15 @@ static Value loadSlotsInUse(IRRewriter &rewriter, Location loc,
 }
 
 /// Emit, at the insertion point, code that finds the entity `id` (in its
-/// stored form) among the archetypes that hold `component`, and return the
-/// values it yields. How the entity is found depends on the entity scheme:
+/// stored form) among the `candidate` archetypes, and return the values it
+/// yields. How the entity is found depends on the entity scheme:
 /// a Rows id is its archetype and row (alive if the row is below the
 /// archetype's count); a slot id is looked up in the entity table (alive if
 /// the slot is in use and, for generational ids, its generation current).
 /// `found` is called in the branch where the entity lives at `row` of
-/// `archetype`, with the presence of `component` there (null where the
-/// archetype always has it); `missing` in every other branch. Both return
+/// `archetype`, with the presence of `presenceOf` there (null where the
+/// archetype always has it, or `presenceOf` is null); `missing` in every
+/// other branch. Both return
 /// values of `results` to yield. Every load is guarded, so this is safe for
 /// any id.
 ///
@@ -1239,8 +1401,9 @@ static Value loadSlotsInUse(IRRewriter &rewriter, Location loc,
 /// change can load them once, outside a loop.
 static SmallVector<Value>
 emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
-           WorldAccess &world, Value id, FlatSymbolRefAttr component,
-           TypeRange results,
+           WorldAccess &world, Value id,
+           function_ref<bool(const WorldArchetype &)> candidate,
+           FlatSymbolRefAttr presenceOf, TypeRange results,
            function_ref<SmallVector<Value>(const WorldArchetype &archetype,
                                            Value row, Value present)>
                found,
@@ -1297,7 +1460,7 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
   bool any = false;
   for (const WorldArchetype &archetype : layout.archetypes) {
     ArchetypeOp archetypeOp = archetype.op;
-    if (!archetypeOp.contains(component))
+    if (!candidate(archetype))
       continue;
     Value here = arith::CmpIOp::create(
         rewriter, loc, arith::CmpIPredicate::eq, where,
@@ -1319,10 +1482,10 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
                                 : bounds.counts[archetype.index]);
     auto inside = guard(inRow);
     Value present;
-    if (archetypeOp.isOptional(component)) {
+    if (presenceOf && archetypeOp.isOptional(presenceOf)) {
       Value byte = memref::LoadOp::create(
           rewriter, loc,
-          world.column(archetype, component.getAttr(),
+          world.column(archetype, presenceOf.getAttr(),
                        rewriter.getStringAttr("")),
           ValueRange{row});
       present = arith::CmpIOp::create(
@@ -1356,9 +1519,12 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
     Type type = world.storageType(lookup.getValue().getType());
     SmallVector<Type, 2> resultTypes{type, rewriter.getI1Type()};
     FlatSymbolRefAttr component = lookup.getComponentAttr();
+    auto holds = [&](const WorldArchetype &archetype) {
+      return ArchetypeOp(archetype.op).contains(component);
+    };
     SmallVector<Value> results = emitLocate(
         rewriter, loc, layout, world, world.toStorage(loc, lookup.getEntity()),
-        component, resultTypes,
+        holds, component, resultTypes,
         [&](const WorldArchetype &archetype, Value row,
             Value present) -> SmallVector<Value> {
           Value value = memref::LoadOp::create(
@@ -1444,8 +1610,11 @@ static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
   rewriter.setInsertionPointToStart(ifSent.thenBlock());
   Value value = memref::LoadOp::create(rewriter, loc, values, ValueRange{row});
   FlatSymbolRefAttr component = apply.getComponentAttr();
+  auto holds = [&](const WorldArchetype &archetype) {
+    return ArchetypeOp(archetype.op).contains(component);
+  };
   emitLocate(
-      rewriter, loc, layout, world, id, component, TypeRange{},
+      rewriter, loc, layout, world, id, holds, component, TypeRange{},
       [&](const WorldArchetype &target, Value targetRow,
           Value present) -> SmallVector<Value> {
         OpBuilder::InsertionGuard inner(rewriter);
@@ -1462,18 +1631,150 @@ static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
             field, ValueRange{targetRow});
         for (const WorldColumn *column :
              stampsFor(target, Trigger::Changed, component.getAttr(),
-                       apply.getFieldAttr()))
-          memref::StoreOp::create(rewriter, loc, tick,
-                                  world.stamps(target, *column),
+                       apply.getFieldAttr())) {
+          Value stamps = world.stamps(target, *column);
+          const WorldLog *log = layout.findLog(*column->stamp);
+          Value before = log ? memref::LoadOp::create(rewriter, loc, stamps,
+                                                      ValueRange{targetRow})
+                                   .getResult()
+                             : Value();
+          memref::StoreOp::create(rewriter, loc, tick, stamps,
                                   ValueRange{targetRow});
+          if (log)
+            appendToLog(rewriter, loc, world, *log,
+                        segmentOf(rewriter, loc, world, *log, targetRow,
+                                  Value()),
+                        id, tick, before, Value(), /*atomic=*/false);
+        }
         return {};
       },
       []() -> SmallVector<Value> { return {}; }, bounds);
 }
 
+/// Why the reactive `query` scans every entity on each run instead of
+/// walking its triggers' event logs, or nothing if it can walk them. The
+/// log is in the order events happened, not in row order: queries that
+/// combine applies or apply pending structural changes rely on row order.
+static std::optional<std::string> whyScans(QueryOp query,
+                                           const WorldLayout &layout) {
+  for (const Trigger &trigger : getTriggers(query))
+    if (!layout.findLog(getStamp(trigger)))
+      return "the event log of a trigger has capacity 0";
+  bool applies = false, spawns = false;
+  query.getBody().walk([&](Operation *op) {
+    applies |= isa<ApplyOp>(op);
+    spawns |= isa<SpawnOp>(op);
+  });
+  if (applies)
+    return std::string("it applies values to other entities, which are "
+                       "combined in row order");
+  if (spawns || llvm::any_of(getMatchedArchetypes(query),
+                             [&](ArchetypeOp archetype) {
+                               return isStructuralFor(query, archetype);
+                             }))
+    return std::string("it changes which entities archetypes hold, which "
+                       "is applied in row order");
+  return std::nullopt;
+}
+
+/// Walk the event logs of a reactive query's triggers, segment by segment,
+/// from where it last read each (its positions) to where it ended when the
+/// query started (the log's ends), at the insertion point, and run the
+/// query's body for each entity with an event: an entry counts if it is
+/// the entity's latest in this log (its stamp still holds the entry's
+/// tick), the entity matches the query, and no earlier trigger of the query
+/// fired for it too, so each entity runs once.
+static void walkLogs(IRRewriter &rewriter, QueryOp query,
+                     const WorldLayout &layout, WorldAccess &world, Value tick,
+                     Value seen) {
+  Location loc = query.getLoc();
+  SmallVector<Trigger> triggers = getTriggers(query);
+  auto index =
+      query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  for (unsigned k = 0; k < triggers.size(); ++k) {
+    Stamp stamp = getStamp(triggers[k]);
+    const WorldLog &log = *layout.findLog(stamp);
+    Value positions =
+        world.logPositions(log, layout.readPositions[index.getInt()][k]);
+    auto segments = scf::ForOp::create(
+        rewriter, loc, zero,
+        arith::ConstantIndexOp::create(rewriter, loc, log.segments), one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(segments.getBody()->getTerminator());
+    Value segment = segments.getInductionVar();
+    Value from = memref::LoadOp::create(rewriter, loc, positions,
+                                        ValueRange{segment});
+    Value to = memref::LoadOp::create(rewriter, loc, world.logEnds(log),
+                                      ValueRange{segment});
+    Value first = arith::MulIOp::create(
+        rewriter, loc, segment,
+        arith::ConstantIndexOp::create(rewriter, loc, log.segmentCapacity));
+    auto entries = scf::ForOp::create(rewriter, loc, world.toIndex(loc, from),
+                                      world.toIndex(loc, to), one);
+    rewriter.setInsertionPoint(entries.getBody()->getTerminator());
+    Value slot = arith::AddIOp::create(
+        rewriter, loc, first,
+        arith::AndIOp::create(
+            rewriter, loc, entries.getInductionVar(),
+            arith::ConstantIndexOp::create(rewriter, loc,
+                                           log.segmentCapacity - 1)));
+    Value id = memref::LoadOp::create(rewriter, loc, world.logIds(log),
+                                      ValueRange{slot});
+    Value when = memref::LoadOp::create(rewriter, loc, world.logTicks(log),
+                                        ValueRange{slot});
+    auto candidate = [&](const WorldArchetype &archetype) {
+      return matches(archetype, query) && archetype.findStamp(stamp);
+    };
+    emitLocate(
+        rewriter, loc, layout, world, id, candidate, FlatSymbolRefAttr(),
+        TypeRange{},
+        [&](const WorldArchetype &archetype, Value row,
+            Value) -> SmallVector<Value> {
+          OpBuilder::InsertionGuard inner(rewriter);
+          Value current = memref::LoadOp::create(
+              rewriter, loc,
+              world.stamps(archetype, *archetype.findStamp(stamp)),
+              ValueRange{row});
+          Value runs = arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::eq, current, when);
+          for (const Trigger &earlier : ArrayRef(triggers).take_front(k)) {
+            const WorldColumn *column =
+                archetype.findStamp(getStamp(earlier));
+            if (!column)
+              continue;
+            Value stamped = memref::LoadOp::create(
+                rewriter, loc, world.stamps(archetype, *column),
+                ValueRange{row});
+            Value fired = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::sgt, stamped, seen);
+            Value notFired = arith::XOrIOp::create(
+                rewriter, loc, fired,
+                arith::ConstantIntOp::create(rewriter, loc, 1, 1));
+            runs = arith::AndIOp::create(rewriter, loc, runs, notFired);
+          }
+          auto branch = scf::IfOp::create(rewriter, loc, runs);
+          rewriter.setInsertionPointToStart(branch.thenBlock());
+          emitQueryBody(rewriter, query, IRMapping(), archetype, world, layout,
+                        row, world.count(loc, archetype), tick, Value(),
+                        /*parallel=*/false);
+          return {};
+        },
+        []() -> SmallVector<Value> { return {}; });
+    rewriter.setInsertionPointAfter(segments);
+    hoistResourceReads(rewriter, segments, world);
+  }
+}
+
 /// Replace a query by one loop per matching archetype. The body is cloned
 /// into each loop, and every ref access becomes a load or store at the
 /// loop's index in the column of the ref's component and field.
+///
+/// A reactive query whose triggers all have event logs walks them instead,
+/// unless this is its first run or more events happened since it last read
+/// a log than the log holds; then it scans every entity, keeping the
+/// effects where a trigger's stamp is newer.
 static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const WorldLayout &layout, WorldAccess &world,
                        const LoopOptions &options) {
@@ -1498,6 +1799,67 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   }
   // The tick this query's events are stamped with; constant while it runs.
   Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
+
+  // Event logs: read where each ends and where this query last read it;
+  // scan on the first run or if a log was overwritten since.
+  bool useLogs = false;
+  if (!triggers.empty()) {
+    std::optional<std::string> reason = whyScans(query, layout);
+    useLogs = !reason;
+    if (reason && options.explain)
+      query.emitRemark("scans every entity on each run: ") << *reason;
+  }
+  auto index = query->getAttrOfType<IntegerAttr>(
+      WorldLayout::kReactiveIndexAttr);
+  scf::IfOp scanOrWalk;
+  Operation *anchor = query;
+  Value zero, one;
+  if (useLogs) {
+    zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    // Note where every segment ends now; scan if this is the first run or
+    // a segment holds more entries since this query read it than it keeps.
+    Value scan = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq, seen,
+        arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+    for (auto [k, trigger] : llvm::enumerate(triggers)) {
+      const WorldLog &log = *layout.findLog(getStamp(trigger));
+      Value positions =
+          world.logPositions(log, layout.readPositions[index.getInt()][k]);
+      auto segments = scf::ForOp::create(
+          rewriter, loc, zero,
+          arith::ConstantIndexOp::create(rewriter, loc, log.segments), one,
+          ValueRange{scan});
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(segments.getBody());
+      Value segment = segments.getInductionVar();
+      Value countAt = arith::MulIOp::create(
+          rewriter, loc, segment,
+          arith::ConstantIndexOp::create(rewriter, loc,
+                                         WorldLog::kSegmentStride / 8));
+      Value end = memref::LoadOp::create(rewriter, loc, world.logCounts(log),
+                                         ValueRange{countAt});
+      memref::StoreOp::create(rewriter, loc, end, world.logEnds(log),
+                              ValueRange{segment});
+      Value from = memref::LoadOp::create(rewriter, loc, positions,
+                                          ValueRange{segment});
+      Value lost = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::sgt,
+          arith::SubIOp::create(rewriter, loc, end, from),
+          arith::ConstantIntOp::create(rewriter, loc, log.segmentCapacity,
+                                       64));
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{arith::OrIOp::create(rewriter, loc,
+                                          segments.getRegionIterArg(0), lost)});
+      rewriter.setInsertionPointAfter(segments);
+      scan = segments.getResult(0);
+    }
+    scanOrWalk = scf::IfOp::create(rewriter, loc, scan,
+                                   /*withElseRegion=*/true);
+    anchor = scanOrWalk.thenBlock()->getTerminator();
+  }
+
   SmallVector<ApplyOp> applies;
   query.getBody().walk([&](ApplyOp apply) { applies.push_back(apply); });
   // The rows each archetype's loop visits, for combining their applies:
@@ -1513,18 +1875,60 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
           return archetype.findStamp(getStamp(trigger));
         }))
       continue;
-    rewriter.setInsertionPoint(query);
+    rewriter.setInsertionPoint(anchor);
     if (!applies.empty())
       visited.push_back({&archetype, world.count(loc, archetype)});
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, entityLocal,
-        [&](Value entity, Block *) {
+        [&](Value entity, Value rows, bool parallel) {
           emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                        entity, tick, seen);
+                        layout, entity, rows, tick, seen, parallel);
         });
     hoistResourceReads(rewriter, loops, world);
     if (archetype.hasPending() && isStructuralFor(query, archetype.op))
       changed.push_back(&archetype);
+  }
+
+  if (useLogs) {
+    rewriter.setInsertionPoint(scanOrWalk.elseBlock()->getTerminator());
+    walkLogs(rewriter, query, layout, world, tick, seen);
+    // The query has read every segment to where it ended when it started;
+    // the slowest reader of each segment bounds how far writers append.
+    rewriter.setInsertionPoint(query);
+    for (auto [k, trigger] : llvm::enumerate(triggers)) {
+      const WorldLog &log = *layout.findLog(getStamp(trigger));
+      Value positions =
+          world.logPositions(log, layout.readPositions[index.getInt()][k]);
+      auto segments = scf::ForOp::create(
+          rewriter, loc, zero,
+          arith::ConstantIndexOp::create(rewriter, loc, log.segments), one);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(segments.getBody()->getTerminator());
+      Value segment = segments.getInductionVar();
+      Value end = memref::LoadOp::create(rewriter, loc, world.logEnds(log),
+                                         ValueRange{segment});
+      memref::StoreOp::create(rewriter, loc, end, positions,
+                              ValueRange{segment});
+      Value slowest;
+      for (uint64_t reader : log.readerOffsets) {
+        Value position = memref::LoadOp::create(
+            rewriter, loc, world.logPositions(log, reader),
+            ValueRange{segment});
+        slowest = slowest ? arith::MinSIOp::create(rewriter, loc, slowest,
+                                                   position)
+                                .getResult()
+                          : position;
+      }
+      Value slowestAt = arith::AddIOp::create(
+          rewriter, loc,
+          arith::MulIOp::create(
+              rewriter, loc, segment,
+              arith::ConstantIndexOp::create(rewriter, loc,
+                                             WorldLog::kSegmentStride / 8)),
+          one);
+      memref::StoreOp::create(rewriter, loc, slowest, world.logCounts(log),
+                              ValueRange{slowestAt});
+    }
   }
 
   // Applies are combined when the whole query has run, in a fixed order:
@@ -1597,10 +2001,10 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     rewriter.setInsertionPoint(insertionPoint);
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, /*entityLocal=*/true,
-        [&](Value entity, Block *) {
+        [&](Value entity, Value rows, bool parallel) {
           for (auto [query, index] : bodies)
             emitQueryBody(rewriter, query, mappings[index], archetype, world,
-                          entity, tick, Value());
+                          layout, entity, rows, tick, Value(), parallel);
         });
     hoistResourceReads(rewriter, loops, world);
   }
@@ -1900,7 +2304,7 @@ struct EcsLowerToLoops
                        rewriter.getI64IntegerAttr(reactiveIndex++));
     });
     MemRefType arenaType = getArenaType(module.getContext(), *layout);
-    LoopOptions options{parallelEntities, parallelMinEntities};
+    LoopOptions options{parallelEntities, parallelMinEntities, explain};
     SymbolTable symbols(module);
 
     // Schedules first: fusion reads the systems' bodies before they are

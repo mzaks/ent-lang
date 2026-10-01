@@ -70,6 +70,14 @@ const WorldApplyBuffer &WorldApply::find(unsigned archetype) const {
   llvm_unreachable("the apply's query does not match the archetype");
 }
 
+const WorldLog *WorldLayout::findLog(const Stamp &stamp) const {
+  ArrayRef<Stamp> all = stamps.getStamps();
+  auto *it = llvm::find(all, stamp);
+  if (it == all.end() || !logs[it - all.begin()].exists())
+    return nullptr;
+  return &logs[it - all.begin()];
+}
+
 const WorldResource &WorldLayout::getResource(StringAttr resource) const {
   for (const WorldResource &entry : resources)
     if (ResourceOp(entry.op).getSymNameAttr() == resource)
@@ -215,6 +223,59 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     layout.reactiveOffsets.push_back(end);
     end += 8;
   });
+  // Event logs: a capacity per stamp, the largest any trigger asks for
+  // (`log N`), or by default an eighth of the entities that can carry the
+  // stamp; rounded up to a power of two so positions wrap with a mask.
+  ArrayRef<Stamp> stamps = layout.stamps.getStamps();
+  SmallVector<std::optional<int64_t>> asked(stamps.size());
+  module.walk([&](QueryOp query) {
+    for (const Trigger &trigger : getTriggers(query)) {
+      if (!trigger.logCapacity)
+        continue;
+      auto &entry = asked[llvm::find(stamps, getStamp(trigger)) -
+                          stamps.begin()];
+      entry = std::max(entry.value_or(0), *trigger.logCapacity);
+    }
+  });
+  for (auto [stamp, request] : llvm::zip(stamps, asked)) {
+    WorldLog log;
+    int64_t entities = 0;
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (layout.stamps.stores(archetype.op, stamp))
+        entities += archetype.capacity;
+    int64_t capacity = request ? *request : std::max<int64_t>(64, entities / 8);
+    if (capacity > 0) {
+      log.capacity = int64_t(llvm::PowerOf2Ceil(uint64_t(capacity)));
+      log.segments = std::clamp<int64_t>(
+          log.capacity / WorldLog::kMinSegmentCapacity, 1,
+          WorldLog::kMaxSegments);
+      log.segmentCapacity = log.capacity / log.segments;
+      end = llvm::alignTo(end, WorldLog::kSegmentStride);
+      log.countsOffset = end;
+      end += log.segments * WorldLog::kSegmentStride;
+      log.endsOffset = end;
+      end += 8 * log.segments;
+    }
+    layout.logs.push_back(std::move(log));
+  }
+  module.walk([&](QueryOp query) {
+    SmallVector<Trigger> triggers = getTriggers(query);
+    if (triggers.empty())
+      return;
+    SmallVector<uint64_t> positions;
+    for (const Trigger &trigger : triggers) {
+      WorldLog &log =
+          layout.logs[llvm::find(stamps, getStamp(trigger)) - stamps.begin()];
+      if (!log.exists()) {
+        positions.push_back(0);
+        continue;
+      }
+      log.readerOffsets.push_back(end);
+      positions.push_back(end);
+      end += 8 * log.segments;
+    }
+    layout.readPositions.push_back(std::move(positions));
+  });
   layout.headerBytes = end;
 
   for (WorldArchetype &archetype : layout.archetypes) {
@@ -297,6 +358,19 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     }
     layout.applies.push_back(std::move(entry));
   });
+
+  // The rings of the event logs.
+  for (WorldLog &log : layout.logs) {
+    if (!log.exists())
+      continue;
+    auto place = [&](uint64_t bytes) {
+      uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+      end = offset + bytes * log.capacity;
+      return offset;
+    };
+    log.idsOffset = place(scheme.idBits / 8);
+    log.ticksOffset = place(8);
+  }
 
   // The entity table.
   auto placeTable = [&](uint64_t bytes) {

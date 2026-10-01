@@ -106,6 +106,52 @@ struct WorldApply {
   const WorldApplyBuffer &find(unsigned archetype) const;
 };
 
+/// The event log of one observed stamp: (entity id, tick) entries, one per
+/// entity whose stamp an event set to a new tick, so that a reactive query
+/// can visit the entities with events instead of scanning every row.
+///
+/// The log is split into segments, each a ring of its own with its own
+/// count of entries ever appended (on a cache line of its own). An event at
+/// row r of an archetype holding n entities goes to segment r * segments /
+/// n: the threads of a parallel loop, each running a contiguous range of
+/// rows, mostly append to segments of their own, and an atomic add keeps
+/// the few shared at range boundaries correct. A query that finds more
+/// entries in some segment than it holds since it last read it (it was
+/// overwritten) scans instead.
+struct WorldLog {
+  /// Entries in all (a power of two); 0 if the stamp has no log.
+  int64_t capacity = 0;
+  /// Segments (a power of two) and entries per segment.
+  int64_t segments = 0;
+  int64_t segmentCapacity = 0;
+  /// The rings, segment after segment: ids at the id width, ticks as i64.
+  uint64_t idsOffset = 0;
+  uint64_t ticksOffset = 0;
+  /// In the header, per segment on a cache line: the number of entries ever
+  /// appended (i64) and, right after, the smallest position of the log's
+  /// readers. Writers stop appending to a segment once it is full for
+  /// every reader.
+  uint64_t countsOffset = 0;
+  /// In the header: where each segment ended when its current reader
+  /// started (one i64 per segment). Readers never run concurrently.
+  uint64_t endsOffset = 0;
+  /// Per reactive query reading the log: where its positions (one i64 per
+  /// segment) are in the header.
+  SmallVector<uint64_t> readerOffsets;
+  static constexpr int64_t kMaxSegments = 64;
+  static constexpr int64_t kMinSegmentCapacity = 64;
+  static constexpr int64_t kSegmentStride = 64;
+
+  bool exists() const { return capacity != 0; }
+  /// Header offsets of a segment's count and slowest reader's position.
+  uint64_t countOffset(int64_t segment) const {
+    return countsOffset + segment * kSegmentStride;
+  }
+  uint64_t slowestOffset(int64_t segment) const {
+    return countOffset(segment) + 8;
+  }
+};
+
 /// How entity ids and their bookkeeping are laid out, chosen from the
 /// capacities and from which structural changes the program makes:
 ///
@@ -183,6 +229,15 @@ struct WorldLayout {
   StampPlan stamps;
   uint64_t tickOffset = 0;
   SmallVector<uint64_t> reactiveOffsets;
+  /// One log per stamp, in the order of `stamps.getStamps()`.
+  SmallVector<WorldLog> logs;
+  /// Per reactive query (by index) and trigger (in order): the header
+  /// offset of the query's positions in the trigger's log (one i64 per
+  /// segment), 0 if none.
+  SmallVector<SmallVector<uint64_t>> readPositions;
+
+  /// The log of `stamp`, or null if it has none.
+  const WorldLog *findLog(const Stamp &stamp) const;
   static constexpr llvm::StringLiteral kReactiveIndexAttr =
       "ecs.reactive_index";
 
