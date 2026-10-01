@@ -2188,8 +2188,8 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
 
 /// Fuse every maximal sequence of runs of entity-local systems in a
 /// schedule. Stages are dissolved first: fusion subsumes them. A run of an
-/// opaque system, or an op with effects in the schedule body, ends a
-/// sequence and stays where it is. So does a run of a system that writes a
+/// opaque system, a run under a condition, or an op with effects in the
+/// schedule body, ends a sequence and stays where it is. So does a run of a system that writes a
 /// resource: fusion moves system-level code ahead of every query of the
 /// sequence, which would let queries see a write that follows them.
 static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
@@ -2210,6 +2210,9 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     if (auto run = dyn_cast<RunOp>(op)) {
       auto system = symbols.lookup<SystemOp>(run.getSystem());
+      // A run under a condition runs as a whole or not at all; it is not
+      // interleaved with others.
+      bool conditional = !run.getCondition().empty();
       // Resource writes, structural changes, lookups and applies end a
       // sequence: fusion interleaves systems per entity, and a lookup would
       // then see some entities' updates from other systems and not others',
@@ -2230,7 +2233,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
         // fusion would move ahead of the systems before it.
         writesResource |= !getTriggers(query).empty();
       }
-      if (!writesResource && !computeAccess(system, archetypes).isOpaque()) {
+      if (!conditional && !writesResource &&
+          !computeAccess(system, archetypes).isOpaque()) {
         sequence.push_back(run);
         continue;
       }
@@ -2241,6 +2245,70 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
     fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
     sequence.clear();
   }
+}
+
+/// Replace `run` by a call of its system, guarded by its condition if it
+/// has one: `scf.execute_region { condition; scf.if %c { call } }`, one op,
+/// so that a stage section still holds one op per run.
+static void lowerRun(IRRewriter &rewriter, RunOp run, Value arena) {
+  SmallVector<Value> args(run.getArgs());
+  args.push_back(arena);
+  Location loc = run.getLoc();
+  rewriter.setInsertionPoint(run);
+  if (run.getCondition().empty()) {
+    rewriter.replaceOpWithNewOp<func::CallOp>(run, run.getSystem(),
+                                              TypeRange{}, args);
+    return;
+  }
+  auto region = scf::ExecuteRegionOp::create(rewriter, loc, TypeRange{});
+  Block *block = rewriter.createBlock(&region.getRegion());
+  IRMapping mapping;
+  for (Operation &op : run.getCondition().front().without_terminator())
+    rewriter.clone(op, mapping);
+  auto yield = cast<YieldOp>(run.getCondition().front().getTerminator());
+  Value condition = mapping.lookupOrDefault(yield.getResults()[0]);
+  auto branch = scf::IfOp::create(rewriter, loc, condition);
+  rewriter.setInsertionPointToStart(branch.thenBlock());
+  func::CallOp::create(rewriter, loc, run.getSystem(), TypeRange{}, args);
+  rewriter.setInsertionPointToEnd(block);
+  scf::YieldOp::create(rewriter, loc);
+  rewriter.eraseOp(run);
+}
+
+/// Run the body of a schedule's function `func` only if the schedule's
+/// `condition` holds: everything but the return moves into an `scf.if`,
+/// except the views of the world's columns at the start of the function,
+/// which the condition may share.
+static void guardSchedule(IRRewriter &rewriter, func::FuncOp func,
+                          Region &condition) {
+  if (condition.empty())
+    return;
+  Block &entry = func.getBody().front();
+  Operation *terminator = entry.getTerminator();
+  SmallVector<Operation *> body;
+  Operation *firstMoved = nullptr;
+  for (Operation &op : entry.without_terminator()) {
+    if (!firstMoved && op.getNumRegions() == 0 && isPure(&op))
+      continue;
+    firstMoved = firstMoved ? firstMoved : &op;
+    body.push_back(&op);
+  }
+  if (firstMoved)
+    rewriter.setInsertionPoint(firstMoved);
+  else
+    rewriter.setInsertionPoint(terminator);
+  IRMapping mapping;
+  for (auto [from, to] : llvm::zip(condition.front().getArguments(),
+                                   entry.getArguments()))
+    mapping.map(from, to);
+  for (Operation &op : condition.front().without_terminator())
+    rewriter.clone(op, mapping);
+  auto yield = cast<YieldOp>(condition.front().getTerminator());
+  auto branch = scf::IfOp::create(rewriter, terminator->getLoc(),
+                                  mapping.lookupOrDefault(
+                                      yield.getResults()[0]));
+  for (Operation *op : body)
+    op->moveBefore(branch.thenBlock()->getTerminator());
 }
 
 /// Replace a stage by its calls, run one after another, or by an OpenMP
@@ -2489,6 +2557,9 @@ struct EntLowerToLoops
     // lowered themselves.
     for (auto schedule :
          llvm::make_early_inc_range(module.getOps<ScheduleOp>())) {
+      // The function replaces the schedule; keep its condition apart.
+      Region condition;
+      condition.takeBody(schedule.getCondition());
       auto [func, arena] = convertToFunc(rewriter, schedule,
                                          schedule.getSymName(),
                                          schedule.getBody(), arenaType);
@@ -2498,16 +2569,12 @@ struct EntLowerToLoops
         fuseSchedule(rewriter, func, symbols, *layout, world, options);
       SmallVector<RunOp> runs;
       func.walk([&](RunOp run) { runs.push_back(run); });
-      for (RunOp run : runs) {
-        SmallVector<Value> args(run.getArgs());
-        args.push_back(arena);
-        rewriter.setInsertionPoint(run);
-        rewriter.replaceOpWithNewOp<func::CallOp>(run, run.getSystem(),
-                                                  TypeRange{}, args);
-      }
+      for (RunOp run : runs)
+        lowerRun(rewriter, run, arena);
       SmallVector<StageOp> stages(func.getOps<StageOp>());
       for (StageOp stage : stages)
         lowerStage(rewriter, stage, parallelStages);
+      guardSchedule(rewriter, func, condition);
       lowerResourceAccesses(rewriter, func, world);
     }
 

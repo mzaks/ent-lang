@@ -9,6 +9,7 @@ ent.component @P (x: f32)
 ent.component @S ()
 ent.component @F ()
 ent.component @I ()
+ent.resource @Paused (value: i1)
 ent.archetype @A (@P, optional @S) capacity 100
 ent.archetype @B (@P, @F) capacity 100
 ent.archetype @C (@P, optional @F, optional @I, optional @S) capacity 100
@@ -100,12 +101,42 @@ ent.system @toggle() {
   }
 }
 
-// All three are fused.
+// The schedule's condition guards its whole body; a run's guards its call.
+// CHECK-LABEL: func.func @frame(
+// CHECK:        %[[PAUSED:.*]] = memref.load
+// CHECK:        %[[GO:.*]] = arith.xori %[[PAUSED]]
+// CHECK-NEXT:   scf.if %[[GO]] {
+// CHECK-NEXT:     func.call @strike(
+// CHECK-NEXT:     scf.execute_region {
+// CHECK:            %[[C:.*]] = memref.load
+// CHECK-NEXT:       scf.if %[[C]] {
+// CHECK-NEXT:         func.call @elements(
+// CHECK-NEXT:       }
+// CHECK-NEXT:       scf.yield
+// CHECK-NEXT:     }
+// CHECK-NEXT:     func.call @toggle(
+// CHECK-NEXT:   }
+// CHECK-NEXT:   return
+
+// A run under a condition is not fused with its neighbours.
 // FUSED-LABEL: func.func @frame(
-// FUSED-NOT:     func.call
-// FUSED:         return
-ent.schedule @frame() {
+// FUSED:         scf.if
+// FUSED:           scf.for
+// FUSED:           scf.execute_region {
+// FUSED:             func.call @elements(
+// FUSED:           scf.for
+// FUSED-NOT:     func.call @strike
+// FUSED-NOT:     func.call @toggle
+ent.schedule @frame() if {
+  %paused = ent.read @Paused "value" : i1
+  %true = arith.constant true
+  %run = arith.xori %paused, %true : i1
+  ent.yield %run : i1
+} {
   ent.run @strike()
-  ent.run @elements()
+  ent.run @elements() if {
+    %paused = ent.read @Paused "value" : i1
+    ent.yield %paused : i1
+  }
   ent.run @toggle()
 }

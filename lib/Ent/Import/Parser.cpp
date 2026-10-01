@@ -558,6 +558,7 @@ LogicalResult Parser::parseSchedule() {
   body->push_back(block);
   for (auto &[param, type] : params)
     block->addArgument(type, loc(at));
+  state.addRegion(); // the condition: none in the source yet
   Operation *schedule = builder.create(state);
 
   OpBuilder::InsertionGuard guard(builder);

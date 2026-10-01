@@ -22,12 +22,15 @@ public:
   AccessCache(ModuleOp module)
       : symbols(module), archetypes(module.getOps<ArchetypeOp>()) {}
 
-  const SystemAccess &get(RunOp run) {
+  /// The system's access plus what the run's condition reads.
+  SystemAccess get(RunOp run) {
     auto system = symbols.lookup<SystemOp>(run.getSystem());
     auto [it, inserted] = cache.try_emplace(system);
     if (inserted)
       it->second = computeAccess(system, archetypes);
-    return it->second;
+    SystemAccess access = it->second;
+    addConditionReads(run.getCondition(), access);
+    return access;
   }
 
 private:
@@ -50,7 +53,7 @@ static void stageSegment(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   SmallVector<unsigned> level(runs.size(), 0);
   unsigned numStages = 0;
   for (auto [j, later] : llvm::enumerate(runs)) {
-    const SystemAccess &laterAccess = accesses.get(later);
+    SystemAccess laterAccess = accesses.get(later);
     std::optional<std::string> reason;
     RunOp waitsFor;
     for (unsigned i = 0; i < j; ++i) {

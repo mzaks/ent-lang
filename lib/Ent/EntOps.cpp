@@ -4,6 +4,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
@@ -294,6 +295,27 @@ bool ArchetypeOp::isOptional(FlatSymbolRefAttr component) {
   return optional && llvm::is_contained(optional, component);
 }
 
+/// A run or schedule condition: empty, or one block of resource reads and
+/// ops free of side effects, ending in `ent.yield` of an i1.
+static LogicalResult verifyCondition(Operation *op, Region &condition) {
+  if (condition.empty())
+    return success();
+  auto yield = dyn_cast<YieldOp>(condition.front().getTerminator());
+  if (!yield || yield.getResults().size() != 1 ||
+      !yield.getResults()[0].getType().isInteger(1))
+    return op->emitOpError("condition must end in 'ent.yield' of an i1");
+  for (Operation &nested : condition.front().without_terminator()) {
+    if (isa<ReadOp>(nested))
+      continue;
+    if (nested.getNumRegions() == 0 && isMemoryEffectFree(&nested))
+      continue;
+    return nested.emitOpError("is not allowed in a condition; a condition "
+                              "reads resources and computes with ops free "
+                              "of side effects");
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // SystemOp
 //===----------------------------------------------------------------------===//
@@ -404,25 +426,49 @@ bool SystemOp::canRead(FlatSymbolRefAttr component) {
 // ScheduleOp
 //===----------------------------------------------------------------------===//
 
+// ent.schedule @name(%arg: T, ...) (if { ^bb0(%arg: T, ...): ... })?
+//     (attributes {...})? { body }
 ParseResult ScheduleOp::parse(OpAsmParser &parser, OperationState &result) {
   StringAttr name;
   if (parser.parseSymbolName(name, SymbolTable::getSymbolAttrName(),
                              result.attributes))
     return failure();
-  return parseArgsAndBody<ScheduleOp>(parser, result);
+  // The condition is the second region; parse it into a holder until the
+  // body is added.
+  auto condition = std::make_unique<Region>();
+  auto parseCondition = [&]() -> ParseResult {
+    if (failed(parser.parseOptionalKeyword("if")))
+      return success();
+    return parser.parseRegion(*condition);
+  };
+  if (parseArgsAndBody<ScheduleOp>(parser, result, parseCondition))
+    return failure();
+  result.addRegion(std::move(condition));
+  return success();
 }
 
 void ScheduleOp::print(OpAsmPrinter &p) {
   p << " ";
   p.printSymbolName(getSymName());
   printArgs(p, getBody());
+  if (!getCondition().empty()) {
+    p << " if ";
+    p.printRegion(getCondition(), /*printEntryBlockArgs=*/true,
+                  /*printBlockTerminators=*/true);
+  }
   p.printOptionalAttrDictWithKeyword((*this)->getAttrs(),
                                      {getSymNameAttrName()});
   printBody(p, getBody());
 }
 
 LogicalResult ScheduleOp::verify() {
-  return verifyNoRefParams(*this, getBody());
+  if (failed(verifyNoRefParams(*this, getBody())))
+    return failure();
+  Region &condition = getCondition();
+  if (!condition.empty() &&
+      condition.front().getArgumentTypes() != getBody().getArgumentTypes())
+    return emitOpError("condition must take the schedule's parameters");
+  return verifyCondition(*this, condition);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1158,6 +1204,8 @@ static FailureOr<Type> resolveResourceField(SymbolTableCollection &symbolTable,
     return op->emitOpError("resource ")
            << resource << " has no field '" << field << "'";
   auto system = op->getParentOfType<SystemOp>();
+  if (!system) // a condition, which has no contract
+    return fieldType;
   if (write && !system.canWrite(resource))
     return op->emitOpError("writes ")
            << resource << " but system @" << system.getSymName()
@@ -1170,8 +1218,12 @@ static FailureOr<Type> resolveResourceField(SymbolTableCollection &symbolTable,
 }
 
 LogicalResult ReadOp::verify() {
-  if (!(*this)->getParentOfType<SystemOp>())
-    return emitOpError("must be inside an 'ent.system'");
+  Region *region = (*this)->getParentRegion();
+  auto schedule = dyn_cast<ScheduleOp>(region->getParentOp());
+  if (!(*this)->getParentOfType<SystemOp>() &&
+      !(*this)->getParentOfType<RunOp>() &&
+      !(schedule && region == &schedule.getCondition()))
+    return emitOpError("must be inside an 'ent.system' or a condition");
   return success();
 }
 
@@ -1253,6 +1305,14 @@ AccumulateOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     return diag;
   }
   return success();
+}
+
+LogicalResult RunOp::verify() {
+  Region &condition = getCondition();
+  if (!condition.empty() && condition.front().getNumArguments() != 0)
+    return emitOpError("condition takes no arguments; it uses the "
+                       "schedule's parameters directly");
+  return verifyCondition(*this, condition);
 }
 
 LogicalResult RunOp::verifySymbolUses(SymbolTableCollection &symbolTable) {

@@ -57,6 +57,10 @@ struct SystemAccess {
 /// Computes the access of `system` against the module's archetypes.
 SystemAccess computeAccess(SystemOp system, ArrayRef<ArchetypeOp> archetypes);
 
+/// Adds what a run's or schedule's condition reads (resource fields) to
+/// `access`: a run reads them right before its system starts.
+void addConditionReads(Region &condition, SystemAccess &access);
+
 /// True if `op` has memory effects of its own or unknown effects. Nested
 /// ops of region-holding ops with recursive effects are not considered.
 bool hasOwnEffects(Operation *op);

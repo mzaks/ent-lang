@@ -74,6 +74,13 @@ SystemAccess::conflictWith(const SystemAccess &other,
   return std::nullopt;
 }
 
+void mlir::ent::addConditionReads(Region &condition, SystemAccess &access) {
+  condition.walk([&](ReadOp read) {
+    access.reads.insert(
+        {StringAttr(), read.getResourceAttr().getAttr(), read.getFieldAttr()});
+  });
+}
+
 SystemAccess mlir::ent::computeAccess(SystemOp system,
                                       ArrayRef<ArchetypeOp> archetypes) {
   SystemAccess access;

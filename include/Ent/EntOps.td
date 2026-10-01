@@ -151,9 +151,23 @@ def Ent_ScheduleOp : Ent_Op<"schedule", [
     ```
     Program order is the semantic order; a scheduler may reorder or
     parallelise runs whose access sets do not conflict.
+
+    A schedule may run only under a condition, evaluated when it starts:
+    ```mlir
+    ent.schedule @frame(%dt: f32) if {
+    ^bb0(%dt: f32):
+      %paused = ent.read @Paused "value" : i1
+      %run = arith.xori %paused, %true : i1
+      ent.yield %run : i1
+    } {
+      ...
+    }
+    ```
+    The condition's block takes the schedule's parameters; it may read
+    resources and compute with ops free of side effects.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name);
-  let regions = (region SizedRegion<1>:$body);
+  let regions = (region SizedRegion<1>:$body, AnyRegion:$condition);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 }
@@ -525,15 +539,38 @@ def Ent_RunOp : Ent_Op<"run", [
     ParentOneOf<["ScheduleOp", "StageOp"]>,
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Run a system as one step of a schedule";
+  let description = [{
+    ```mlir
+    ent.run @move(%dt) : f32
+    ent.run @move(%dt) : f32 if {
+      %paused = ent.read @Paused "value" : i1
+      %run = arith.xori %paused, %true : i1
+      ent.yield %run : i1
+    }
+    ```
+    With a condition, the system runs only if it holds when the run would
+    start (after the runs before it). The condition may read resources and
+    compute with ops free of side effects; its reads count as the run's.
+  }];
   let arguments = (ins FlatSymbolRefAttr:$system, Variadic<AnyType>:$args);
-  let assemblyFormat = "$system `(` $args `)` attr-dict (`:` type($args)^)?";
+  let regions = (region AnyRegion:$condition);
+  let assemblyFormat = [{
+    $system `(` $args `)` attr-dict (`:` type($args)^)?
+    (`if` $condition^)?
+  }];
+  let hasVerifier = 1;
 }
 
 def Ent_YieldOp : Ent_Op<"yield", [
     Pure, Terminator,
-    ParentOneOf<["SystemOp", "ScheduleOp", "QueryOp", "StageOp"]>]> {
+    ParentOneOf<["SystemOp", "ScheduleOp", "QueryOp", "StageOp", "RunOp"]>]> {
   let summary = "Region terminator; implicit in the custom syntax";
-  let assemblyFormat = "attr-dict";
+  let description = [{
+    Ends a body without operands, and a condition with its value.
+  }];
+  let arguments = (ins Variadic<AnyType>:$results);
+  let builders = [OpBuilder<(ins), [{ /* nothing to do */ }]>];
+  let assemblyFormat = "attr-dict ($results^ `:` type($results))?";
 }
 
 #endif // ENT_OPS
