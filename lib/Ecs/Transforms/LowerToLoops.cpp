@@ -617,8 +617,11 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
                 const WorldArchetype &archetype, WorldAccess &world,
                 const LoopOptions &options, bool entityLocal,
                 function_ref<void(Value entity, Value rows, bool parallel)>
-                    emitBody) {
-  Value count = world.count(loc, archetype);
+                    emitBody,
+                Value rows = Value()) {
+  // The entities to visit: `rows` if given (counted when the query
+  // started), or as many as the archetype holds now.
+  Value count = rows ? rows : world.count(loc, archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
 
   if (archetype.capacity == 1) {
@@ -1885,9 +1888,20 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
 
   SmallVector<ApplyOp> applies;
   query.getBody().walk([&](ApplyOp apply) { applies.push_back(apply); });
-  // The rows each archetype's loop visits, for combining their applies:
-  // the count before the loop, which spawns in the query may raise.
+  // A query visits the entities that exist when it starts: count every
+  // matched archetype now, before any of its loops, since a body may spawn
+  // into an archetype whose loop comes later. The same counts bound the
+  // rows whose applies are combined.
   SmallVector<std::pair<const WorldArchetype *, Value>> visited;
+  llvm::DenseMap<const WorldArchetype *, Value> startCounts;
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(scanOrWalk ? scanOrWalk.getOperation()
+                                          : query.getOperation());
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (matches(archetype, query))
+        startCounts[&archetype] = world.count(loc, archetype);
+  }
   for (const WorldArchetype &archetype : layout.archetypes) {
     if (!matches(archetype, query))
       continue;
@@ -1899,14 +1913,16 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
         }))
       continue;
     rewriter.setInsertionPoint(anchor);
+    Value rows = startCounts.lookup(&archetype);
     if (!applies.empty())
-      visited.push_back({&archetype, world.count(loc, archetype)});
+      visited.push_back({&archetype, rows});
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, entityLocal,
         [&](Value entity, Value rows, bool parallel) {
           emitQueryBody(rewriter, query, IRMapping(), archetype, world,
                         layout, entity, rows, tick, seen, parallel);
-        });
+        },
+        rows);
     hoistResourceReads(rewriter, loops, world);
     if (archetype.hasPending() && isStructuralFor(query, archetype.op))
       changed.push_back(&archetype);

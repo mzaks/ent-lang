@@ -75,7 +75,7 @@ ecs.system @hurt(%d: f32) writes [@H] {
 // CHECK-NEXT: %[[PENDING:.*]] = arith.subi %[[END]], %[[FROM]]
 // CHECK-NEXT: %[[LOST:.*]] = arith.cmpi sgt, %[[PENDING]], %c64_i64
 // CHECK-NEXT: %[[SCAN:.*]] = arith.ori %[[FIRST]], %[[LOST]]
-// CHECK-NEXT: scf.if %[[SCAN]] {
+// CHECK:      scf.if %[[SCAN]] {
 // CHECK:        scf.for %[[ROW:.*]] =
 // CHECK-NEXT:     %[[S:.*]] = memref.load %[[STAMP]][%[[ROW]]]
 // CHECK-NEXT:     %[[NEW:.*]] = arith.cmpi sgt, %[[S]], %[[SEEN]] : i64
