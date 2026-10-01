@@ -93,8 +93,8 @@ system s(n: i32) {
 component Position { x: f32 }
 tag Enemy
 system s() {
-  // expected-error @+1 {{'without' is not supported yet}}
-  for p: Position without Enemy {
+  // expected-error @+1 {{names component @Enemy in more than one binding or filter}}
+  for p: Position with Enemy without Enemy {
   }
 }
 
@@ -143,4 +143,37 @@ system s() reads Position {
   for p: mut Position {
     p.x = 1.0
   }
+}
+
+// -----
+
+component Position { x: f32 }
+tag Enemy
+system s() {
+  for p: Position {
+    // expected-error @+1 {{'has' tests the entity a 'for' visits; 'p' is not that entity}}
+    let h = p.has(Enemy)
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+system s() {
+  // expected-error @+1 {{unknown component 'Enemy'}}
+  for p: Position with any(Position, Enemy) {
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+system s() {
+  for p: Position {
+  }
+}
+unique Count: i64
+schedule f() {
+  // expected-error @+1 {{a 'run_if' condition must be a bool}}
+  s() run_if Count
 }

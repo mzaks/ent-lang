@@ -59,6 +59,7 @@ struct Expr {
     Cast,   // e as T
     If,     // if c { a } else { b }
     Spawn,  // spawn { A { .. }, B { .. } }
+    Has,    // e.has(C): name is the entity, field the component
   };
   Kind kind;
   llvm::SMLoc loc;
@@ -219,6 +220,7 @@ private:
   FailureOr<ExprPtr> parseBinary(int precedence);
   FailureOr<ExprPtr> parseUnary();
   FailureOr<ExprPtr> parsePrimary();
+  LogicalResult emitCondition(const Expr &expr);
   FailureOr<std::unique_ptr<Branch>> parseBranch();
   FailureOr<ComponentInit> parseComponentInit();
 
@@ -529,7 +531,19 @@ LogicalResult Parser::parseSystem() {
   return success();
 }
 
-// schedule name(params) { system(args) ... }
+// schedule name(params) [run_if cond] { system(args) [run_if cond] ... }
+
+/// Emit a run or schedule condition, ending its block with `ent.yield`.
+LogicalResult Parser::emitCondition(const Expr &expr) {
+  FailureOr<mlir::Value> value = emit(expr, builder.getI1Type());
+  if (failed(value))
+    return failure();
+  if (!value->getType().isInteger(1))
+    return error(expr.loc, "a 'run_if' condition must be a bool");
+  YieldOp::create(builder, loc(expr.loc), ValueRange{*value});
+  return success();
+}
+
 LogicalResult Parser::parseSchedule() {
   llvm::SMLoc at = token.loc;
   FailureOr<std::string> name = identifier("a schedule name");
@@ -550,6 +564,14 @@ LogicalResult Parser::parseSchedule() {
   if (failed(expect(Token::RParen, "')'")))
     return failure();
 
+  ExprPtr runIf;
+  if (consumeKeyword("run_if")) {
+    FailureOr<ExprPtr> condition = parseExpr();
+    if (failed(condition))
+      return failure();
+    runIf = std::move(*condition);
+  }
+
   OperationState state(loc(at), ScheduleOp::getOperationName());
   state.addAttribute(SymbolTable::getSymbolAttrName(),
                      builder.getStringAttr(*name));
@@ -558,10 +580,23 @@ LogicalResult Parser::parseSchedule() {
   body->push_back(block);
   for (auto &[param, type] : params)
     block->addArgument(type, loc(at));
-  state.addRegion(); // the condition: none in the source yet
+  state.addRegion(); // the condition, filled below if there is one
   Operation *schedule = builder.create(state);
 
   OpBuilder::InsertionGuard guard(builder);
+  // The schedule's condition: a block of its own taking the parameters.
+  if (runIf) {
+    auto *conditionBlock = new Block();
+    schedule->getRegion(1).push_back(conditionBlock);
+    for (auto &[param, type] : params)
+      conditionBlock->addArgument(type, loc(at));
+    builder.setInsertionPointToEnd(conditionBlock);
+    ScopeGuard scope(*this);
+    for (auto [param, arg] : llvm::zip(params, conditionBlock->getArguments()))
+      bind(param.first, Variable::ofValue(arg));
+    if (failed(emitCondition(*runIf)))
+      return failure();
+  }
   builder.setInsertionPointToEnd(block);
   ScopeGuard scope(*this);
   for (auto [param, arg] : llvm::zip(params, block->getArguments()))
@@ -595,8 +630,18 @@ LogicalResult Parser::parseSchedule() {
     }
     if (failed(expect(Token::RParen, "')'")))
       return failure();
+    auto run = RunOp::create(builder, loc(callAt), symbol(*system), args);
+    if (consumeKeyword("run_if")) {
+      FailureOr<ExprPtr> condition = parseExpr();
+      if (failed(condition))
+        return failure();
+      OpBuilder::InsertionGuard inner(builder);
+      builder.setInsertionPointToEnd(
+          builder.createBlock(&run.getCondition()));
+      if (failed(emitCondition(**condition)))
+        return failure();
+    }
     consumeIf(Token::Semicolon);
-    RunOp::create(builder, loc(callAt), symbol(*system), args);
   }
   if (failed(expect(Token::RBrace, "'}'")))
     return failure();
@@ -657,7 +702,8 @@ LogicalResult Parser::parseStatement() {
   return error(at, "expected a statement, found '" + token.spelling + "'");
 }
 
-// for [e,] p: [mut] P, ... [with A, B] [where cond] [on trigger, ...] { }
+// for [e,] [p: [mut] P, ...] [with A, any(B, C)] [without D]
+//     [where cond] [on trigger, ...] { }
 LogicalResult Parser::parseFor() {
   llvm::SMLoc at = token.loc;
   if (inQuery)
@@ -671,19 +717,30 @@ LogicalResult Parser::parseFor() {
   };
   SmallVector<Binding> bindings;
   std::string entity;
-  // The first name is the entity if no ':' follows it.
-  FailureOr<std::string> first = identifier("a binding");
-  if (failed(first))
-    return failure();
-  std::string pending = *first;
-  if (consumeIf(Token::Comma)) {
-    entity = pending;
-    FailureOr<std::string> next = identifier("a binding");
-    if (failed(next))
+  auto startsFilter = [&] {
+    return token.isKeyword("with") || token.isKeyword("without");
+  };
+  // The first name is the entity if no ':' follows it; a query may filter
+  // without binding anything (`for e with Enemy`, `for with Enemy`).
+  std::string pending;
+  bool hasBindings = !startsFilter();
+  if (hasBindings) {
+    FailureOr<std::string> first = identifier("a binding");
+    if (failed(first))
       return failure();
-    pending = *next;
+    pending = *first;
+    if (startsFilter()) {
+      entity = pending;
+      hasBindings = false;
+    } else if (consumeIf(Token::Comma)) {
+      entity = pending;
+      FailureOr<std::string> next = identifier("a binding");
+      if (failed(next))
+        return failure();
+      pending = *next;
+    }
   }
-  while (true) {
+  while (hasBindings) {
     if (failed(expect(Token::Colon, "':' and a component")))
       return failure();
     bool mut = consumeKeyword("mut");
@@ -701,20 +758,49 @@ LogicalResult Parser::parseFor() {
       return failure();
     pending = *next;
   }
-  SmallVector<std::string> filters;
+  auto parseComponent = [&]() -> FailureOr<Attribute> {
+    llvm::SMLoc componentAt = token.loc;
+    FailureOr<std::string> component = identifier("a component");
+    if (failed(component))
+      return failure();
+    if (!components.count(*component))
+      return error(componentAt, "unknown component '" + *component + "'");
+    return Attribute(symbol(*component));
+  };
+  // with A, any(B, C)   without D, E
+  SmallVector<Attribute> with, without, anyGroups;
   if (consumeKeyword("with")) {
     do {
-      llvm::SMLoc componentAt = token.loc;
-      FailureOr<std::string> component = identifier("a component");
+      if (token.isKeyword("any")) {
+        advance();
+        if (failed(expect(Token::LParen, "'('")))
+          return failure();
+        SmallVector<Attribute> group;
+        do {
+          FailureOr<Attribute> component = parseComponent();
+          if (failed(component))
+            return failure();
+          group.push_back(*component);
+        } while (consumeIf(Token::Comma));
+        if (failed(expect(Token::RParen, "')'")))
+          return failure();
+        anyGroups.push_back(builder.getArrayAttr(group));
+        continue;
+      }
+      FailureOr<Attribute> component = parseComponent();
       if (failed(component))
         return failure();
-      if (!components.count(*component))
-        return error(componentAt, "unknown component '" + *component + "'");
-      filters.push_back(*component);
+      with.push_back(*component);
     } while (consumeIf(Token::Comma));
   }
-  if (token.isKeyword("without"))
-    return error("'without' is not supported yet");
+  if (consumeKeyword("without")) {
+    do {
+      FailureOr<Attribute> component = parseComponent();
+      if (failed(component))
+        return failure();
+      without.push_back(*component);
+    } while (consumeIf(Token::Comma));
+  }
   ExprPtr where;
   if (consumeKeyword("where")) {
     FailureOr<ExprPtr> condition = parseExpr();
@@ -761,6 +847,12 @@ LogicalResult Parser::parseFor() {
   OperationState state(loc(at), QueryOp::getOperationName());
   if (!triggers.empty())
     state.addAttribute(QueryOp::kTriggersAttr, builder.getArrayAttr(triggers));
+  if (!with.empty())
+    state.addAttribute(QueryOp::kWithAttr, builder.getArrayAttr(with));
+  if (!without.empty())
+    state.addAttribute(QueryOp::kWithoutAttr, builder.getArrayAttr(without));
+  if (!anyGroups.empty())
+    state.addAttribute(QueryOp::kAnyAttr, builder.getArrayAttr(anyGroups));
   Region *body = state.addRegion();
   auto *block = new Block();
   body->push_back(block);
@@ -768,8 +860,6 @@ LogicalResult Parser::parseFor() {
     block->addArgument(
         RefType::get(context, symbol(binding.component), binding.mut),
         loc(at));
-  for (const std::string &filter : filters)
-    block->addArgument(RefType::get(context, symbol(filter), false), loc(at));
   Operation *query = builder.create(state);
 
   OpBuilder::InsertionGuard guard(builder);
@@ -1403,6 +1493,18 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
     node->kind = Expr::Field;
     node->name = name;
     node->field = *field;
+    if (*field == "has" && consumeIf(Token::LParen)) {
+      node->kind = Expr::Has;
+      llvm::SMLoc componentAt = token.loc;
+      FailureOr<std::string> component = identifier("a component");
+      if (failed(component))
+        return failure();
+      if (!components.count(*component))
+        return error(componentAt, "unknown component '" + *component + "'");
+      node->field = *component;
+      if (failed(expect(Token::RParen, "')'")))
+        return failure();
+    }
     return node;
   }
   node->kind = Expr::Name;
@@ -1473,6 +1575,8 @@ Type Parser::typeOf(const Expr &expr) {
     return typeOf(*expr.elseBranch->value);
   case Expr::Spawn:
     return EntityType::get(context);
+  case Expr::Has:
+    return builder.getI1Type();
   }
   return {};
 }
@@ -1642,6 +1746,14 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
     return emitIf(expr, expected);
   case Expr::Spawn:
     return emitSpawn(expr);
+  case Expr::Has: {
+    const Variable *variable = lookup(expr.name);
+    if (!variable || variable->kind != Variable::Entity)
+      return error(expr.loc, "'has' tests the entity a 'for' visits; '" +
+                                 expr.name + "' is not that entity");
+    return HasOp::create(builder, at, builder.getI1Type(), symbol(expr.field))
+        .getResult();
+  }
   }
   return error(expr.loc, "unsupported expression");
 }

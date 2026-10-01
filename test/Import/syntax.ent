@@ -46,7 +46,7 @@ system step(dt: f32) reads Health writes Position, Clock {
 // `with` binds only to filter; `where` guards the body; an if-expression
 // yields a value; `as` converts.
 // CHECK-LABEL: ent.system @score() {
-// CHECK:      ent.query (%[[H:.*]]: !ent.ref<@Health>, %{{.*}}: !ent.ref<@Enemy>) {
+// CHECK:      ent.query (%[[H:.*]]: !ent.ref<@Health>) with [@Enemy] {
 // CHECK:        %[[HP:.*]] = ent.get %[[H]] "hp"
 // CHECK:        %[[LOW:.*]] = arith.cmpi slt, %[[HP]], %{{.*}} : i32
 // CHECK-NEXT:   scf.if %[[LOW]] {
@@ -110,6 +110,27 @@ system watch() {
   }
 }
 
+// Filters: `with` (also `any(...)`), `without`; a for may bind nothing,
+// with or without naming the entity. `e.has(C)` tests the visited entity.
+// CHECK-LABEL: ent.system @filters() {
+// CHECK:      ent.query (%{{.*}}: !ent.ref<@Position>) with [@Enemy] without [@Target] any [@Health, @Target2] {
+// CHECK:      ent.query () with [@Enemy] {
+// CHECK-NEXT:   %[[HAS:.*]] = ent.has @Target
+// CHECK-NEXT:   scf.if %[[HAS]] {
+// CHECK:      ent.query () without [@Enemy] {
+component Target2 { who: entity }
+system filters() {
+  for p: Position with Enemy, any(Health, Target2) without Target {
+    Score += 1
+  }
+  for e with Enemy {
+    if e.has(Target) { e.destroy() }
+  }
+  for without Enemy {
+    Score += 1
+  }
+}
+
 // Schedules run systems; literals take the parameter's type.
 // CHECK-LABEL: ent.schedule @frame(%{{.*}}: f32) {
 // CHECK:      ent.run @step(%{{.*}}) : f32
@@ -122,4 +143,23 @@ schedule frame(dt: f32) {
   cap()
   life()
   watch()
+}
+
+// run_if: on a schedule, a condition over uniques and the schedule's
+// parameters in a block of its own; on a run, inside the schedule.
+// CHECK-LABEL: ent.schedule @gated(%{{.*}}: f32) if {
+// CHECK-NEXT: ^bb0(%[[DT:.*]]: f32):
+// CHECK-NEXT:   %[[Z:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK-NEXT:   %[[POS:.*]] = arith.cmpf ogt, %[[DT]], %[[Z]] : f32
+// CHECK-NEXT:   ent.yield %[[POS]] : i1
+// CHECK-NEXT: } {
+// CHECK-NEXT:   ent.run @step(%{{.*}}) : f32 if {
+// CHECK-NEXT:     %[[F:.*]] = ent.read @Clock "frame" : i64
+// CHECK:          %[[C:.*]] = arith.cmpi slt, %[[F]], %{{.*}} : i64
+// CHECK-NEXT:     ent.yield %[[C]] : i1
+// CHECK-NEXT:   }
+// CHECK-NEXT:   ent.run @filters()
+schedule gated(dt: f32) run_if dt > 0.0 {
+  step(dt) run_if Clock.frame < 100
+  filters()
 }
