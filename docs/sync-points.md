@@ -56,11 +56,22 @@ query runs:
 - `ent.accumulate`: values combined into a resource;
 - `ent.despawn`;
 - `ent.add` / `ent.remove` where the storage moves the entity to another
-  archetype.
+  archetype;
+- `ent.connect` (inside a query) and `ent.disconnect`: the query visits the
+  edges as they were when it started, in every edge loop.
 
 **Q6. Immediate, but not visited.** `ent.spawn` appends the new entity at
 once: its id is valid and it is visible to lookups and to every later query,
 but not visited by the query that spawned it (Q1).
+
+**Q8. Edges.** An edge loop (`ent.edges`) visits the edges the visited
+entity had when the query started, in a fixed order (by source, then in the
+order they were connected). Writing an edge's fields (`mut`) is immediate,
+like writing the entity's own components: every edge is visited once per
+query, by its source (`out`) or its target (`in`), and a query may not visit
+a relation both ways when either loop writes the edges. An apply inside an
+edge loop runs once per edge and is combined at the commit point like any
+apply.
 
 **Q7. Whether it has a component, as of the query's start.** `ent.has @C`
 tells whether the visited entity had `C` when the query started; the query's
@@ -75,8 +86,10 @@ are decided the same way: they choose the entities the query visits (Q1).
 When a query has run for every entity it visits, in this order:
 
 1. **Applies** are combined into their targets, by apply op (in program
-   order), then source archetype, then source row; then **accumulates** into
-   their resources, in the same order. The order is fixed, so the result
+   order), then source archetype, then source row (and for an apply in an
+   edge loop, then the edge's position in the loop's order); then
+   **accumulates** into their resources, in the same order; then edges
+   **connected** in the query are added, by connect op, archetype and row. The order is fixed, so the result
    does not depend on how the query's loop ran, in parallel or not, even for
    floating-point `add`. Applies land before structural changes, while every
    id still leads to where its entity was.
@@ -84,6 +97,9 @@ When a query has run for every entity it visits, in this order:
    moves append their entities to the target archetype, and the rows they
    leave are filled by swap-remove. Within one query the last structural
    change to an entity wins.
+3. **Relations** the query connected or disconnected are sorted again,
+   which drops disconnected edges and edges whose source or target is no
+   longer alive (despawned in step 2 or before).
 
 After that, every later op — the next query of the same system, system-level
 code, the next run — sees all of the query's effects.
@@ -93,8 +109,9 @@ code, the next run — sees all of the query's effects.
 **S1.** A system runs its queries and system-level ops in program order;
 each query's commit point precedes the next op.
 
-**S2.** System-level code may write resources (`ent.write`) and spawn; both
-take effect at once.
+**S2.** System-level code may write resources (`ent.write`), spawn and
+connect edges; all take effect at once (a connect sorts its relation right
+away).
 
 **S3.** A schedule runs its systems in program order. One call of a schedule
 is a frame: what the host sees after the call is the state after the last
@@ -151,6 +168,12 @@ loops assume nothing else writes the arena.
 
 **H2.** Spawns through the header are events (reactive queries see them);
 writes through the header's column accessors are not tracked.
+
+**H3.** Edges connected through the header (`ent_<R>_connect`) are sorted
+when the next schedule call starts. A despawn leaves the edges of the
+despawned entity in place until the relation is next sorted; until then
+loops skip them (their end is no longer the visited entity) and applies
+along them are dropped (their target is dead).
 
 ## Defined against this model later
 

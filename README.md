@@ -54,8 +54,8 @@ Programs are written in `.ent` files and imported into the dialect below
 with `ent-translate --import-ent`; the syntax is described in
 [`docs/syntax.md`](docs/syntax.md), and `examples/*.ent` are the examples
 written that way (the integration tests run both forms and expect the same
-output; `examples/filters.ent`, for filters, `has` and `run_if`, exists only
-in ent-lang):
+output; `examples/filters.ent`, for filters, `has` and `run_if`, and
+`examples/snn*.ent`, for relations, exist only in ent-lang):
 
 ```
 component Position { x: f32 }
@@ -162,6 +162,21 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   use the same rule; a system that declares its access lists the component
   in `writes`.
   `examples/damage.mlir` has torpedoes damaging their target ships.
+- `ent.relation @Synapse (weight: f32) capacity 1000000` declares edges
+  between entities, with data: each goes from a source to a target and
+  carries the fields. Edges are not entities; an entity may have any number
+  of them. Inside a query, `ent.edges @Synapse out (%s: !ent.ref<@Synapse>,
+  %post: !ent.entity) { ... }` visits the edges of the visited entity (`in`:
+  those to it), `%post` being the other end; `ent.get`/`ent.set` read and,
+  with `mut`, write the edge's fields (every edge is visited once per query,
+  so the write is local). An `ent.apply` inside runs once per edge, combined
+  at the query's end by apply, archetype, row and edge, so pushing values
+  along edges is deterministic in parallel too. `ent.connect @Synapse %a,
+  %b (%w)` adds an edge (outside queries at once, inside at the query's
+  end), `ent.disconnect` inside an edge loop removes the visited one at the
+  query's end. `examples/snn.ent` and `examples/snn_pull.ent` are a spiking
+  neural network pushing spikes along outgoing synapses and gathering them
+  along incoming ones; both agree with a plain C simulation to the bit.
 - `ent.query (%b: !ent.ref<@Bar, mut>) on [changed @Hull "hp", added @Hull,
   removed @Shield] { ... }` is a reactive query, after Entitas's reactive
   systems: it runs only for the entities that had one of these events since
@@ -273,8 +288,8 @@ capacities and from the resources, the compiler lays out the whole world as
 one arena: an i64 entity count per archetype, then each resource on its own
 cache line, then one column per field at a fixed offset, each archetype's
 id column, one buffer per `ent.apply` and archetype its query matches (a
-target id and a value per row), and the entity table that maps an id to its
-archetype and row. Programs with reactive queries also keep a tick counter
+target id and a value per row), each relation's edges, and the entity table
+that maps an id to its archetype and row. Programs with reactive queries also keep a tick counter
 and each reactive query's last tick in the header, and stamp columns after
 the component columns of the archetypes that need them.
 Every column starts on a 64-byte boundary, 17 cache lines past the end of
@@ -282,6 +297,22 @@ the previous one; columns packed from a page-aligned base would start at
 the same cache set, which cost a single core 7-8% (see
 `bench/RESULTS.md`). Lowered functions take the arena after their own
 parameters and read columns through statically shaped views.
+
+A relation is a table of source ids, target ids and a column per field,
+kept sorted by source (compressed sparse rows): an offset per entity key
+(its slot, or for row ids the id itself) says where its edges start, so an
+`out` loop reads one contiguous range. Where the program visits incoming
+edges, offsets by target and the table positions of those edges follow.
+Connects append and mark the relation unclean; a sort (a stable counting
+sort through scratch columns, O(edges + keys)) runs where edges changed:
+at a schedule's start for edges the host connected, after a system-level
+connect, and at the end of a query that connected or disconnected. It
+drops dead edges and edges to entities no longer alive. With generational
+ids a slot may be reused before the next sort, so a loop only counts edges
+whose own end is the visited entity. An apply inside an edge loop has, per
+row, a flag saying whether the row ran the loop, and per edge a target and
+a value; the end of the query walks the rows that ran and their edges in
+order.
 
 `ent-translate --ent-to-c-header` emits the C API for hosts:
 `ent_world_create`/`ent_world_destroy`; per archetype a capacity, a count,
@@ -334,7 +365,7 @@ different archetypes share no columns. Two consequences the lowering uses:
   result as running each query to completion. A system that writes a
   resource ends a fused sequence, because fusion moves system-level code
   ahead of the queries. So does a run under a condition, which runs as a
-  whole or not at all.
+  whole or not at all, and a system with edge loops or connects.
 - Since no query writes a resource, a resource read inside a query is
   loaded once before the loop.
 - A spawn checks the capacity, writes row `count`, allocates an id (the
@@ -428,6 +459,11 @@ checks that all variants produce the same checksum.
 python3 bench/run.py                    # OpenMP runtime defaults
 python3 bench/run.py --blocktime 200    # keep OpenMP workers spinning
 ```
+
+`bench/snn/run.py` runs the spiking network (`examples/snn.ent` pushing,
+`examples/snn_pull.ent` gathering, sequential and parallel) against
+hand-written C over compressed rows (push, pull, pull with OpenMP), per
+network size and firing rate.
 
 Homebrew's `libomp` defaults to `KMP_BLOCKTIME=0` with a passive wait
 policy, so workers sleep after every parallel region; an empty region costs

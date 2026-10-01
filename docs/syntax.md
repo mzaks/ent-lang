@@ -14,7 +14,8 @@ build/bin/ent-opt bullets.mlir --ent-lower-to-loops ...   # as in the README
 
 `examples/*.ent` are the examples of `examples/*.mlir` written in ent-lang;
 the integration tests run both and expect the same output.
-`examples/filters.ent` (filters, `has`, `run_if`) exists only in ent-lang.
+`examples/filters.ent` (filters, `has`, `run_if`) and `examples/snn.ent` /
+`examples/snn_pull.ent` (relations) exist only in ent-lang.
 
 ## Declarations
 
@@ -24,6 +25,8 @@ tag Enemy                                   // a component without fields
 unique Clock { dt: f32, frame: i64 }        // exists once (a resource)
 unique Score: i64                           // shorthand: one field, `value`
 archetype Gun { Position, optional Stunned } capacity 4
+relation Synapse { weight: f32 } capacity 100000  // edges with data
+relation Follows capacity 1000                     // edges without
 default_capacity 1024
 ```
 
@@ -33,6 +36,9 @@ default_capacity 1024
   among its required components, or `default_capacity`.
 - Archetypes need only be declared for shapes the host spawns (which the
   compiler cannot see), or to name and size one explicitly.
+- A relation's edges go from a source entity to a target entity and carry
+  its fields. They are not entities; `capacity` bounds how many there are.
+  An entity may have any number of edges, also several to the same target.
 
 ## Systems and queries
 
@@ -79,6 +85,29 @@ for with Enemy { Count += 1 }     // nor the entity
 - `on changed C.f, changed C, added C, removed C` makes the query reactive;
   `log N` after a trigger sets its event log's capacity (`log 0`: none).
 
+Inside a `for` that names its entity, another `for` visits the entity's
+edges:
+
+```
+for e with Spiked {
+  for s, post in e.out(Synapse) {         // edges from e; post: the target
+    Neuron(post).input += s.weight
+  }
+}
+for e, n: mut Neuron {
+  for mut s, pre in e.in(Synapse) {       // edges to e; pre: the source
+    s.weight *= 0.99                      // `mut`: the edge's fields
+    if s.weight < 0.001 { s.disconnect() }
+  }
+}
+```
+
+Edges are visited in a fixed order: by source, then in the order they were
+connected. `s.disconnect()` removes the edge when the outer `for` ends.
+Edge loops do not nest, and a `for` may not visit a relation both ways if
+either loop writes the edges. A `+=` into another entity's field inside an
+edge loop runs once per edge.
+
 ## Statements
 
 - `let name = expr`: an immutable local.
@@ -90,6 +119,10 @@ for with Enemy { Count += 1 }     // nor the entity
 - Another entity: `Hull(target).hp -= damage` (also `+=`, `min=`, `max=`)
   combines into its field when the query ends; reading one may find nothing,
   so it is `if let hp = Hull(target).hp { ... } else { ... }`.
+- `connect(a, b, Synapse { weight: 0.5 })` adds an edge from `a` to `b`
+  (`connect(a, b, Follows)` without fields). Outside a `for` at once,
+  inside one when the `for` ends (at most once per entity; not inside an
+  edge loop).
 - `spawn { Position { x: 1.0, y: 0.0 }, Velocity { dx: 2.0, dy: 0.0 } }`
   creates an entity; as an expression it returns its id
   (`let id = spawn { ... }`).
@@ -132,6 +165,8 @@ scheduler forms stages, and a conditional run is never fused with others.
 
 ## Not yet supported
 
-`fn`/`proc`, relations, `world`, devices, prefabs, optional bindings
-(`T?`), mutable locals (`var`), loops: each is reported as "not supported
-yet" where it would start.
+`fn`/`proc`, `world`, devices, prefabs, optional bindings (`T?`), mutable
+locals (`var`), loops: each is reported as "not supported yet" where it
+would start. Of relations, not yet: traversal (`up`, `cascade`), joins
+over relation variables, accumulating into a unique and connecting inside
+an edge loop, and disconnecting by pair.
