@@ -296,7 +296,11 @@ different archetypes share no columns. Two consequences the lowering uses:
   entries since it last read it than it holds, scans as above; otherwise
   it walks the entries, running its body for each entity whose stamp still
   holds the entry's tick (its latest), that matches the query, and for
-  which no earlier trigger of the query fired (so it runs once). Writers
+  which no earlier trigger of the query fired (so it runs once). With
+  `parallel-entities`, it walks the segments in parallel once at least
+  `parallel-min-events` entries are pending (default 16,384; an entity's
+  latest entry is in one segment only, so no two iterations run its body).
+  Writers
   stop appending to a segment once it is full for every reader, marking it
   as overflowed instead, which bounds what a frame that changes everything
   costs. Walking a log visits entities in the order events happened, so
