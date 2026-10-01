@@ -8,13 +8,68 @@
 using namespace mlir;
 using namespace mlir::ent;
 
+bool mlir::ent::canMatch(QueryOp query, function_ref<bool(Attribute)> holds,
+                         function_ref<bool(Attribute)> always) {
+  return llvm::all_of(query.getRequired(),
+                      [&](FlatSymbolRefAttr c) { return holds(c); }) &&
+         llvm::none_of(query.getWithout(),
+                       [&](FlatSymbolRefAttr c) { return always(c); }) &&
+         llvm::all_of(query.getAnyGroups(), [&](const auto &group) {
+           return llvm::any_of(group,
+                               [&](FlatSymbolRefAttr c) { return holds(c); });
+         });
+}
+
+bool mlir::ent::matches(QueryOp query, ArchetypeOp archetype) {
+  return canMatch(
+      query,
+      [&](Attribute c) {
+        return archetype.contains(cast<FlatSymbolRefAttr>(c));
+      },
+      [&](Attribute c) {
+        auto component = cast<FlatSymbolRefAttr>(c);
+        return archetype.contains(component) &&
+               !archetype.isOptional(component);
+      });
+}
+
+SmallVector<FlatSymbolRefAttr> PresenceTest::components() const {
+  SmallVector<FlatSymbolRefAttr> all(present);
+  all.append(absent.begin(), absent.end());
+  for (const auto &group : anyPresent)
+    all.append(group.begin(), group.end());
+  return all;
+}
+
+PresenceTest mlir::ent::getPresenceTest(QueryOp query,
+                                        ArchetypeOp archetype) {
+  PresenceTest test;
+  for (FlatSymbolRefAttr component : query.getRequired())
+    if (archetype.isOptional(component))
+      test.present.push_back(component);
+  for (FlatSymbolRefAttr component : query.getWithout())
+    if (archetype.isOptional(component))
+      test.absent.push_back(component);
+  for (const auto &group : query.getAnyGroups()) {
+    SmallVector<FlatSymbolRefAttr> optional;
+    bool always = false;
+    for (FlatSymbolRefAttr component : group) {
+      if (archetype.isOptional(component))
+        optional.push_back(component);
+      else if (archetype.contains(component))
+        always = true;
+    }
+    if (!always)
+      test.anyPresent.push_back(std::move(optional));
+  }
+  return test;
+}
+
 SmallVector<ArchetypeOp> mlir::ent::getMatchedArchetypes(QueryOp query) {
   SmallVector<ArchetypeOp> matched;
   auto module = query->getParentOfType<ModuleOp>();
   for (ArchetypeOp archetype : module.getOps<ArchetypeOp>())
-    if (llvm::all_of(query.getBody().getArgumentTypes(), [&](Type type) {
-          return archetype.contains(cast<RefType>(type).getComponent());
-        }))
+    if (matches(query, archetype))
       matched.push_back(archetype);
   return matched;
 }
@@ -186,9 +241,9 @@ LogicalResult mlir::ent::inferArchetypes(ModuleOp module) {
   if (shapes.empty())
     return success();
 
-  // What queries add and remove, and the components they bind.
+  // What queries add and remove, and the queries doing it.
   struct Change {
-    llvm::SmallPtrSet<Attribute, 4> bound;
+    QueryOp query;
     Attribute component;
     bool add;
   };
@@ -197,9 +252,7 @@ LogicalResult mlir::ent::inferArchetypes(ModuleOp module) {
     if (!isa<AddOp, RemoveOp>(op))
       return;
     Change change;
-    for (Type type :
-         op->getParentOfType<QueryOp>().getBody().getArgumentTypes())
-      change.bound.insert(cast<RefType>(type).getComponent());
+    change.query = op->getParentOfType<QueryOp>();
     change.component = op->getAttr("component");
     change.add = isa<AddOp>(op);
     changes.push_back(std::move(change));
@@ -241,9 +294,16 @@ LogicalResult mlir::ent::inferArchetypes(ModuleOp module) {
       for (bool grew = true; grew;) {
         grew = false;
         for (const Change &change : changes) {
-          bool matches = llvm::all_of(change.bound, [&](Attribute component) {
-            return base.contains(component) || optional.contains(component);
-          });
+          bool matches = canMatch(
+              change.query,
+              [&](Attribute component) {
+                return base.contains(component) ||
+                       optional.contains(component);
+              },
+              [&](Attribute component) {
+                return base.contains(component) &&
+                       !optional.contains(component);
+              });
           if (!matches || optional.contains(change.component))
             continue;
           if (change.add ? !base.contains(change.component)

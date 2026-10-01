@@ -67,7 +67,7 @@ ent.system @s() {
 // -----
 
 ent.system @s() {
-  // expected-error @+1 {{must bind at least one component}}
+  // expected-error @+1 {{must bind or filter by at least one component}}
   ent.query () {
   }
 }
@@ -577,7 +577,7 @@ ent.system @s() reads [@T] {
 ent.component @H (hp: f32)
 ent.archetype @A (optional @H) capacity 10
 ent.system @s() reads [@H] {
-  // expected-error @+1 {{reacts to removed @H but binds it; an entity that lost it never matches}}
+  // expected-error @+1 {{reacts to removed @H but requires it; an entity that lost it never matches}}
   ent.query (%h: !ent.ref<@H>) on [removed @H] {
   }
 }

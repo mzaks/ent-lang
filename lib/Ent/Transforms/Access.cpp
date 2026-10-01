@@ -82,14 +82,9 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
   auto matchedArchetypes = [&](QueryOp query) -> ArrayRef<ArchetypeOp> {
     auto [it, inserted] = matched.try_emplace(query);
     if (inserted) {
-      for (ArchetypeOp archetype : archetypes) {
-        bool all = llvm::all_of(
-            query.getBody().getArgumentTypes(), [&](Type type) {
-              return archetype.contains(cast<RefType>(type).getComponent());
-            });
-        if (all)
+      for (ArchetypeOp archetype : archetypes)
+        if (matches(query, archetype))
           it->second.push_back(archetype);
-      }
     }
     return it->second;
   };
@@ -277,15 +272,13 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
                                  trigger.component.getAttr(),
                                  getStampColumnField(context,
                                                      getStamp(trigger))});
-      // A query binding an optional component runs only where it is
-      // present, so it reads the presence.
-      for (Type type : query.getBody().getArgumentTypes()) {
-        FlatSymbolRefAttr component = cast<RefType>(type).getComponent();
-        for (ArchetypeOp archetype : matchedArchetypes(query))
-          if (archetype.isOptional(component))
-            access.reads.insert(
-                {archetype.getSymNameAttr(), component.getAttr(), presence});
-      }
+      // Where the query's bindings and filters are optional, it tests
+      // their presence per entity, so it reads the presence.
+      for (ArchetypeOp archetype : matchedArchetypes(query))
+        for (FlatSymbolRefAttr component :
+             getPresenceTest(query, archetype).components())
+          access.reads.insert(
+              {archetype.getSymNameAttr(), component.getAttr(), presence});
       return;
     }
     if (isa<YieldOp>(op))

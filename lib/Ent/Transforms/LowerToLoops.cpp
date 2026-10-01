@@ -552,10 +552,7 @@ convertToFunc(IRRewriter &rewriter, Operation *op, StringRef name,
 }
 
 static bool matches(const WorldArchetype &archetype, QueryOp query) {
-  ArchetypeOp archetypeOp = archetype.op;
-  return llvm::all_of(query.getBody().getArgumentTypes(), [&](Type type) {
-    return archetypeOp.contains(cast<RefType>(type).getComponent());
-  });
+  return matches(query, archetype.op);
 }
 
 /// True if the query changes which entities `archetype` holds: it spawns,
@@ -1092,19 +1089,40 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     assert(mask && "a reactive query is lowered for an archetype where no "
                    "trigger can fire");
   }
-  for (Type type : query.getBody().getArgumentTypes()) {
-    FlatSymbolRefAttr component = cast<RefType>(type).getComponent();
-    if (!archetypeOp.isOptional(component))
-      continue;
-    Value presence =
-        world.column(archetype, component.getAttr(), rewriter.getStringAttr(""));
-    Value byte =
-        memref::LoadOp::create(rewriter, loc, presence, ValueRange{entity});
-    Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
-    Value present = arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::ne, byte, zero);
-    mask = mask ? arith::AndIOp::create(rewriter, loc, mask, present)
-                : present;
+  // Whether the entity has a component it holds optionally, read once.
+  llvm::DenseMap<Attribute, Value> presence;
+  auto isPresent = [&](FlatSymbolRefAttr component) {
+    Value &present = presence[component];
+    if (!present) {
+      Value column = world.column(archetype, component.getAttr(),
+                                  rewriter.getStringAttr(""));
+      Value byte =
+          memref::LoadOp::create(rewriter, loc, column, ValueRange{entity});
+      Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
+      present = arith::CmpIOp::create(rewriter, loc,
+                                      arith::CmpIPredicate::ne, byte, zero);
+    }
+    return present;
+  };
+  auto require = [&](Value term) {
+    mask = mask ? arith::AndIOp::create(rewriter, loc, mask, term).getResult()
+                : term;
+  };
+  PresenceTest test = getPresenceTest(query, archetypeOp);
+  for (FlatSymbolRefAttr component : test.present)
+    require(isPresent(component));
+  for (FlatSymbolRefAttr component : test.absent)
+    require(arith::XOrIOp::create(
+        rewriter, loc, isPresent(component),
+        arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
+  for (const auto &group : test.anyPresent) {
+    Value any;
+    for (FlatSymbolRefAttr component : group)
+      any = any ? arith::OrIOp::create(rewriter, loc, any,
+                                       isPresent(component))
+                      .getResult()
+                : isPresent(component);
+    require(any);
   }
 
   OpBuilder::InsertionGuard guard(rewriter);

@@ -9,8 +9,39 @@
 
 namespace mlir::ent {
 
-/// The archetypes `query` matches (those holding all of its components,
-/// always or optionally), in declaration order.
+/// Whether entities stored with some components can match `query`: `holds`
+/// says whether they may have a component, `always` whether they all do.
+/// They hold every required component, one of each `any` group, and not
+/// always a `without` component.
+bool canMatch(QueryOp query, function_ref<bool(Attribute)> holds,
+              function_ref<bool(Attribute)> always);
+
+/// How `query` tests the entities of one archetype it matches: by the
+/// presence of components the archetype stores optionally. The others are
+/// decided for the whole archetype.
+struct PresenceTest {
+  /// Must be present (required components that are optional here).
+  SmallVector<FlatSymbolRefAttr> present;
+  /// Must be absent (`without` components that are optional here).
+  SmallVector<FlatSymbolRefAttr> absent;
+  /// One of each must be present (`any` groups no member of which the
+  /// archetype always holds; the members it holds optionally).
+  SmallVector<SmallVector<FlatSymbolRefAttr>> anyPresent;
+
+  bool empty() const {
+    return present.empty() && absent.empty() && anyPresent.empty();
+  }
+  /// Every component whose presence the test reads.
+  SmallVector<FlatSymbolRefAttr> components() const;
+};
+
+/// Whether `query` matches `archetype` (some of its entities may match).
+bool matches(QueryOp query, ArchetypeOp archetype);
+
+/// The presence test of `query` in an archetype it matches.
+PresenceTest getPresenceTest(QueryOp query, ArchetypeOp archetype);
+
+/// The archetypes `query` matches, in declaration order.
 SmallVector<ArchetypeOp> getMatchedArchetypes(QueryOp query);
 
 /// What `ent.add` or `ent.remove` of a component does to an entity of a

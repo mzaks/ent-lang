@@ -441,9 +441,31 @@ LogicalResult StageOp::verify() {
 // QueryOp
 //===----------------------------------------------------------------------===//
 
+// `with [@A] without [@B] any [@C, @D] any [@E, @F]`, then
 // `on [changed @C "f", added @C log 4096, removed @C, changed @C]`
 ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
   auto parseTriggers = [&]() -> ParseResult {
+    Builder &b = parser.getBuilder();
+    ArrayAttr with, without;
+    SmallVector<Attribute> groups;
+    if (succeeded(parser.parseOptionalKeyword("with")) &&
+        parser.parseAttribute(with))
+      return failure();
+    if (succeeded(parser.parseOptionalKeyword("without")) &&
+        parser.parseAttribute(without))
+      return failure();
+    while (succeeded(parser.parseOptionalKeyword("any"))) {
+      ArrayAttr group;
+      if (parser.parseAttribute(group))
+        return failure();
+      groups.push_back(group);
+    }
+    if (with)
+      result.addAttribute(kWithAttr, with);
+    if (without)
+      result.addAttribute(kWithoutAttr, without);
+    if (!groups.empty())
+      result.addAttribute(kAnyAttr, b.getArrayAttr(groups));
     if (failed(parser.parseOptionalKeyword("on")))
       return success();
     Builder &builder = parser.getBuilder();
@@ -483,6 +505,13 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
 void QueryOp::print(OpAsmPrinter &p) {
   p << " ";
   printArgs(p, getBody());
+  if (auto with = (*this)->getAttrOfType<ArrayAttr>(kWithAttr))
+    p << " with " << with;
+  if (auto without = (*this)->getAttrOfType<ArrayAttr>(kWithoutAttr))
+    p << " without " << without;
+  if (auto groups = (*this)->getAttrOfType<ArrayAttr>(kAnyAttr))
+    for (Attribute group : groups)
+      p << " any " << group;
   if (auto triggers = (*this)->getAttrOfType<ArrayAttr>(kTriggersAttr)) {
     p << " on [";
     llvm::interleaveComma(triggers, p, [&](Attribute attr) {
@@ -495,14 +524,95 @@ void QueryOp::print(OpAsmPrinter &p) {
     });
     p << "]";
   }
-  p.printOptionalAttrDictWithKeyword((*this)->getAttrs(), {kTriggersAttr});
+  p.printOptionalAttrDictWithKeyword(
+      (*this)->getAttrs(), {kTriggersAttr, kWithAttr, kWithoutAttr, kAnyAttr});
   printBody(p, getBody());
+}
+
+/// `attr` as a list of components, or failure if it is not one.
+static FailureOr<SmallVector<FlatSymbolRefAttr>>
+componentList(Attribute attr) {
+  auto list = dyn_cast<ArrayAttr>(attr);
+  if (!list)
+    return failure();
+  SmallVector<FlatSymbolRefAttr> components;
+  for (Attribute entry : list) {
+    auto ref = dyn_cast<FlatSymbolRefAttr>(entry);
+    if (!ref)
+      return failure();
+    components.push_back(ref);
+  }
+  return components;
+}
+
+SmallVector<FlatSymbolRefAttr> QueryOp::getRequired() {
+  SmallVector<FlatSymbolRefAttr> required;
+  for (Type type : getBody().getArgumentTypes())
+    required.push_back(cast<RefType>(type).getComponent());
+  if (Attribute with = (*this)->getAttr(kWithAttr))
+    if (auto list = componentList(with); succeeded(list))
+      required.append(list->begin(), list->end());
+  return required;
+}
+
+SmallVector<FlatSymbolRefAttr> QueryOp::getWithout() {
+  if (Attribute without = (*this)->getAttr(kWithoutAttr))
+    if (auto list = componentList(without); succeeded(list))
+      return *list;
+  return {};
+}
+
+SmallVector<SmallVector<FlatSymbolRefAttr>> QueryOp::getAnyGroups() {
+  SmallVector<SmallVector<FlatSymbolRefAttr>> groups;
+  if (auto list = (*this)->getAttrOfType<ArrayAttr>(kAnyAttr))
+    for (Attribute group : list)
+      if (auto components = componentList(group); succeeded(components))
+        groups.push_back(*components);
+  return groups;
 }
 
 LogicalResult QueryOp::verify() {
   Block &body = getBody().front();
-  if (body.getNumArguments() == 0)
-    return emitOpError("must bind at least one component");
+  for (StringRef name : {kWithAttr, kWithoutAttr})
+    if (Attribute attr = (*this)->getAttr(name))
+      if (failed(componentList(attr)))
+        return emitOpError("'") << name << "' must be a list of components";
+  if (Attribute attr = (*this)->getAttr(kAnyAttr)) {
+    auto groups = dyn_cast<ArrayAttr>(attr);
+    if (!groups)
+      return emitOpError("'any' must be a list of component lists");
+    for (Attribute group : groups) {
+      FailureOr<SmallVector<FlatSymbolRefAttr>> list = componentList(group);
+      if (failed(list))
+        return emitOpError("'any' must be a list of component lists");
+      if (list->size() < 2)
+        return emitOpError("an 'any' group needs at least two components; "
+                           "use 'with' for one");
+    }
+  }
+  if (getRequired().empty() && getWithout().empty() && getAnyGroups().empty())
+    return emitOpError("must bind or filter by at least one component");
+
+  // Every component appears in at most one term: two would be redundant
+  // (with, any) or contradict each other (without).
+  llvm::SmallPtrSet<Attribute, 8> terms;
+  auto addTerm = [&](FlatSymbolRefAttr component) -> LogicalResult {
+    if (!terms.insert(component).second)
+      return emitOpError("names component ")
+             << component << " in more than one binding or filter";
+    return success();
+  };
+  for (FlatSymbolRefAttr component : getWithout())
+    if (failed(addTerm(component)))
+      return failure();
+  for (auto &group : getAnyGroups())
+    for (FlatSymbolRefAttr component : group)
+      if (failed(addTerm(component)))
+        return failure();
+  if (auto with = (*this)->getAttr(kWithAttr))
+    for (FlatSymbolRefAttr component : *componentList(with))
+      if (failed(addTerm(component)))
+        return failure();
 
   llvm::SmallPtrSet<Attribute, 8> seen;
   for (BlockArgument arg : body.getArguments()) {
@@ -515,6 +625,10 @@ LogicalResult QueryOp::verify() {
     if (!seen.insert(refType.getComponent()).second)
       return emitOpError("binds component ")
              << refType.getComponent() << " more than once";
+    if (terms.contains(refType.getComponent()))
+      return emitOpError("names component ")
+             << refType.getComponent()
+             << " in more than one binding or filter";
     // Lowering replaces refs by an index into the matched archetype's
     // columns, which only works if nothing else holds on to them.
     for (Operation *user : arg.getUsers())
@@ -547,12 +661,23 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
              << " does not declare it in 'reads' or 'writes'";
     // An entity that lost the component cannot match a query binding it.
     if (trigger.kind == Trigger::Removed &&
-        llvm::any_of(getBody().getArgumentTypes(), [&](Type type) {
-          return cast<RefType>(type).getComponent() == trigger.component;
-        }))
+        llvm::is_contained(getRequired(), trigger.component))
       return emitOpError("reacts to removed ")
              << trigger.component
-             << " but binds it; an entity that lost it never matches";
+             << " but requires it; an entity that lost it never matches";
+  }
+  SmallVector<FlatSymbolRefAttr> filters = getWithout();
+  if (auto with = (*this)->getAttr(kWithAttr))
+    llvm::append_range(filters, *componentList(with));
+  for (auto &group : getAnyGroups())
+    llvm::append_range(filters, group);
+  for (FlatSymbolRefAttr component : filters) {
+    if (!lookupComponent(symbolTable, *this, component))
+      return emitOpError("filters by unknown component ") << component;
+    if (!system.canRead(component))
+      return emitOpError("filters by ")
+             << component << " but system @" << system.getSymName()
+             << " does not declare it in 'reads' or 'writes'";
   }
   for (BlockArgument arg : getBody().getArguments()) {
     auto refType = cast<RefType>(arg.getType());
@@ -980,19 +1105,11 @@ LogicalResult EntityOp::verify() { return verifyInsideQuery(*this); }
 LogicalResult DespawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto system = (*this)->getParentOfType<SystemOp>();
   auto query = (*this)->getParentOfType<QueryOp>();
-  auto module = (*this)->getParentOfType<ModuleOp>();
-  for (ArchetypeOp archetype : module.getOps<ArchetypeOp>()) {
-    bool matches = llvm::all_of(
-        query.getBody().getArgumentTypes(), [&](Type type) {
-          return archetype.contains(cast<RefType>(type).getComponent());
-        });
-    if (!matches)
-      continue;
+  for (ArchetypeOp archetype : getMatchedArchetypes(query)) {
     // An inferred archetype has no name a contract could list: the query's
-    // components stand for it.
+    // required components stand for it.
     if (archetype.getInferred()) {
-      for (Type type : query.getBody().getArgumentTypes()) {
-        FlatSymbolRefAttr component = cast<RefType>(type).getComponent();
+      for (FlatSymbolRefAttr component : query.getRequired()) {
         if (!system.canWrite(component))
           return emitOpError("despawns entities with ")
                  << component << " but system @" << system.getSymName()

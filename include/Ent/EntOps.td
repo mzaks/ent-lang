@@ -186,6 +186,17 @@ def Ent_QueryOp : Ent_Op<"query", [
     existing entity counts as added and changed. Events the query causes
     itself count on its next run. A system that declares its access must
     list every trigger's component in `reads` or `writes`.
+
+    Filters narrow the entities a query visits without binding components:
+    ```mlir
+    ent.query (%p: !ent.ref<@Position, mut>) with [@Enemy]
+        without [@Shield] any [@Fire, @Ice] { ... }
+    ```
+    The entity must have every `with` component, none of the `without`
+    components, and at least one component of each `any` group. A filter
+    reads only whether the entity has the component, never its fields, so
+    it does not conflict with systems that write them. A query binds or
+    filters by at least one component.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
@@ -195,6 +206,18 @@ def Ent_QueryOp : Ent_Op<"query", [
     /// [kind, component, field] entries, the field empty unless the kind
     /// is "changed" with a field.
     static constexpr ::llvm::StringLiteral kTriggersAttr = "triggers";
+    /// Filters: arrays of components (`any`: an array of such arrays).
+    static constexpr ::llvm::StringLiteral kWithAttr = "with";
+    static constexpr ::llvm::StringLiteral kWithoutAttr = "without";
+    static constexpr ::llvm::StringLiteral kAnyAttr = "any";
+
+    /// The components the entity must have: those bound, then `with`.
+    ::llvm::SmallVector<::mlir::FlatSymbolRefAttr> getRequired();
+    /// The components the entity must not have.
+    ::llvm::SmallVector<::mlir::FlatSymbolRefAttr> getWithout();
+    /// Groups of components of which the entity must have one each.
+    ::llvm::SmallVector<::llvm::SmallVector<::mlir::FlatSymbolRefAttr>>
+    getAnyGroups();
   }];
 }
 
