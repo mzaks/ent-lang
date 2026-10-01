@@ -368,6 +368,27 @@ def Ent_EntityOp : Ent_Op<"entity"> {
   let hasVerifier = 1;
 }
 
+def Ent_HasOp : Ent_Op<"has", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Whether the visited entity has a component";
+  let description = [{
+    ```mlir
+    %shielded = ent.has @Shield
+    ```
+    True if the entity the enclosing query visits had the component when
+    the query started: the query's own `ent.add` and `ent.remove` take
+    effect for it at its end, whether they move the entity or not. So the
+    answer does not depend on how archetypes store the component. It is a
+    constant where the archetype always or never holds the component, and
+    reads the presence where it is optional. A system that declares its
+    access must list the component in `reads` or `writes`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$component);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$component attr-dict";
+  let hasVerifier = 1;
+}
+
 def Ent_LookupOp : Ent_Op<"lookup", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Read a field of another entity, by id";

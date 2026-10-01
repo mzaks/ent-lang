@@ -68,11 +68,44 @@ ent.system @elements() {
   }
 }
 
-// Both are fused.
+// has answers as of the query's start: the presence is read before the add
+// stores it. In A, F is never held: false.
+// CHECK-LABEL: func.func private @toggle(
+// CHECK:      scf.for %[[I:.*]] =
+// CHECK-NEXT:   %[[P:.*]] = memref.load %[[S:.*]][%[[I]]] : memref<100xi8>
+// CHECK-NEXT:   %{{.*}} = arith.constant 0 : i8
+// CHECK-NEXT:   %[[HAS:.*]] = arith.cmpi ne, %[[P]], %{{.*}} : i8
+// CHECK-NEXT:   %[[ONE:.*]] = arith.constant 1 : i8
+// CHECK-NEXT:   memref.store %[[ONE]], %[[S]][%[[I]]] : memref<100xi8>
+// CHECK-NEXT:   %[[NO:.*]] = arith.constant false
+// CHECK-NEXT:   %[[X:.*]] = memref.load
+// CHECK-NEXT:   %[[Y:.*]] = arith.select %[[HAS]], %[[X]], %[[X]] : f32
+// CHECK-NEXT:   arith.select %[[NO]], %[[Y]], %[[Y]] : f32
+// The test of F in C reuses the mask's load.
+// CHECK:      scf.for %[[J:.*]] =
+// CHECK-NEXT:   memref.load %{{.*}}[%[[J]]] : memref<100xi8>
+// CHECK-NEXT:   arith.constant 0 : i8
+// CHECK-NEXT:   %[[FC:.*]] = arith.cmpi ne
+// CHECK:        arith.select %[[FC]]
+// ACCESS: remark: reads A.S?, C.S?, C.F?, A.P.x, C.P.x, A.count, C.count; writes A.S?, C.S?, A.P.x, C.P.x
+ent.system @toggle() {
+  ent.query (%p: !ent.ref<@P, mut>) without [@F] {
+    ent.add @S()
+    %s = ent.has @S
+    %f = ent.has @F
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
+    %y = arith.select %s, %x, %x : f32
+    %z = arith.select %f, %y, %y : f32
+    ent.set %p "x", %z : !ent.ref<@P, mut>, f32
+  }
+}
+
+// All three are fused.
 // FUSED-LABEL: func.func @frame(
 // FUSED-NOT:     func.call
 // FUSED:         return
 ent.schedule @frame() {
   ent.run @strike()
   ent.run @elements()
+  ent.run @toggle()
 }

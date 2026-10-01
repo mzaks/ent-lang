@@ -61,3 +61,22 @@ ent.system @s() {
   ent.query () with [@A] on [removed @A] {
   }
 }
+
+// -----
+
+ent.component @A ()
+ent.system @s() {
+  // expected-error @+1 {{'ent.has' op must be inside an 'ent.query'}}
+  %a = ent.has @A
+}
+
+// -----
+
+ent.component @A ()
+ent.component @B ()
+ent.system @s() reads [@A] {
+  ent.query () with [@A] {
+    // expected-error @+1 {{tests for @B but system @s does not declare it in 'reads' or 'writes'}}
+    %b = ent.has @B
+  }
+}

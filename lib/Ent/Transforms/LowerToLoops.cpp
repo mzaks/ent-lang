@@ -588,7 +588,7 @@ static bool isEntityLocal(QueryOp query) {
     // Lookups read other entities, but the verifier ensures the query does
     // not change what they read.
     // Applies write the entity's own slot of their buffer.
-    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, LookupOp,
+    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
             ApplyOp, AccumulateOp, YieldOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
@@ -720,7 +720,7 @@ static void lowerResourceAccesses(IRRewriter &rewriter, func::FuncOp func,
 /// division, for example, is not: it may be undefined on such values.
 static bool canRunForAbsentEntities(QueryOp query) {
   WalkResult result = query.getBody().walk([](Operation *op) {
-    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, LookupOp,
+    if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
             ApplyOp, AccumulateOp, YieldOp, scf::IfOp, scf::YieldOp>(op))
       return WalkResult::advance();
     if (op->getNumRegions() == 0 && isPure(op))
@@ -1124,6 +1124,11 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                 : isPresent(component);
     require(any);
   }
+  // `ent.has` answers as of the query's start: read before the body runs.
+  query.getBody().walk([&](HasOp has) {
+    if (archetypeOp.isOptional(has.getComponentAttr()))
+      isPresent(has.getComponentAttr());
+  });
 
   OpBuilder::InsertionGuard guard(rewriter);
   bool guarded = mask && (!canRunForAbsentEntities(query) ||
@@ -1147,6 +1152,22 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   SmallVector<Operation *> roots;
   for (Operation &op : query.getBody().front().without_terminator())
     roots.push_back(rewriter.clone(op, mapping));
+  SmallVector<HasOp> tests;
+  for (Operation *root : roots)
+    root->walk([&](HasOp has) { tests.push_back(has); });
+  for (HasOp has : tests) {
+    FlatSymbolRefAttr component = has.getComponentAttr();
+    Value answer = presence.lookup(component);
+    if (!answer) {
+      rewriter.setInsertionPoint(has);
+      answer = arith::ConstantIntOp::create(
+          rewriter, has.getLoc(), archetypeOp.contains(component), 1);
+    }
+    rewriter.replaceOp(has, answer);
+  }
+  llvm::erase_if(roots, [&](Operation *root) {
+    return llvm::is_contained(tests, root);
+  });
   lowerAccesses(rewriter, roots, archetype, world, layout, entity, rows, mask,
                 tick, parallel);
 }

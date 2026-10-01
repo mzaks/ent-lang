@@ -1102,6 +1102,19 @@ LogicalResult DespawnOp::verify() { return verifyInsideQuery(*this); }
 
 LogicalResult EntityOp::verify() { return verifyInsideQuery(*this); }
 
+LogicalResult HasOp::verify() { return verifyInsideQuery(*this); }
+
+LogicalResult HasOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  if (!lookupComponent(symbolTable, *this, getComponentAttr()))
+    return emitOpError("references unknown component ") << getComponentAttr();
+  auto system = (*this)->getParentOfType<SystemOp>();
+  if (!system.canRead(getComponentAttr()))
+    return emitOpError("tests for ")
+           << getComponentAttr() << " but system @" << system.getSymName()
+           << " does not declare it in 'reads' or 'writes'";
+  return success();
+}
+
 LogicalResult DespawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto system = (*this)->getParentOfType<SystemOp>();
   auto query = (*this)->getParentOfType<QueryOp>();

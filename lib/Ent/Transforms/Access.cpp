@@ -281,6 +281,15 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
               {archetype.getSymNameAttr(), component.getAttr(), presence});
       return;
     }
+    if (auto has = dyn_cast<HasOp>(op)) {
+      FlatSymbolRefAttr component = has.getComponentAttr();
+      for (ArchetypeOp archetype :
+           matchedArchetypes(op->getParentOfType<QueryOp>()))
+        if (archetype.isOptional(component))
+          access.reads.insert(
+              {archetype.getSymNameAttr(), component.getAttr(), presence});
+      return;
+    }
     if (isa<YieldOp>(op))
       return;
     if (!access.opaqueOp && hasOwnEffects(op))

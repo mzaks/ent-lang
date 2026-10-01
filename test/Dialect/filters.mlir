@@ -12,12 +12,14 @@ ent.archetype @A (@P, @Enemy, optional @Shield, optional @Fire) capacity 8
 // Filters print after the bindings, in the order with, without, any.
 // CHECK-LABEL: ent.system @filtered() {
 // CHECK:   ent.query (%{{.*}}: !ent.ref<@P>) with [@Enemy] without [@Shield] any [@Fire, @Ice] {
+// CHECK:     %{{.*}} = ent.has @Shield
 // CHECK:   ent.query () with [@Enemy] {
 // CHECK:   ent.query () without [@Shield] {
 // CHECK:   ent.query () any [@Fire, @Ice] any [@Shield, @Enemy] {
 ent.system @filtered() {
   ent.query (%p: !ent.ref<@P>) with [@Enemy] without [@Shield]
       any [@Fire, @Ice] {
+    %shielded = ent.has @Shield
   }
   ent.query () with [@Enemy] {
   }
