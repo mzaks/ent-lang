@@ -1,5 +1,6 @@
 // Host program for examples/bullets.mlir: two guns, eight frames of
-// dt = 0.25, then every gun's cooldown and every live bullet.
+// dt = 0.25, then every gun's cooldown and every live bullet. Bullets live
+// in the archetype the compiler inferred, named after their components.
 
 #include "bullets_world.h"
 
@@ -25,10 +26,12 @@ int main(void) {
 
   for (int i = 0; i < GUNS; ++i)
     printf("gun %d: cooldown %.4f\n", i, ecs_Gun_Cooldown_seconds(w)[i]);
-  printf("bullets: %lld\n", (long long)ecs_Bullet_count(w));
-  for (int64_t i = 0; i < ecs_Bullet_count(w); ++i)
+  int64_t bullets = ecs_Position_Velocity_Lifetime_count(w);
+  printf("bullets: %lld\n", (long long)bullets);
+  for (int64_t i = 0; i < bullets; ++i)
     printf("bullet %lld: x %.4f life %.4f\n", (long long)i,
-           ecs_Bullet_Position_x(w)[i], ecs_Bullet_Lifetime_seconds(w)[i]);
+           ecs_Position_Velocity_Lifetime_Position_x(w)[i],
+           ecs_Position_Velocity_Lifetime_Lifetime_seconds(w)[i]);
   ecs_world_destroy(w);
   return 0;
 }
