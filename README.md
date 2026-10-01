@@ -48,6 +48,34 @@ build/bin/ent-opt examples/integrate.mlir --ent-print-access -o /dev/null
 build/bin/ent-opt examples/integrate.mlir --ent-schedule=explain=1
 ```
 
+## Writing ent-lang
+
+Programs are written in `.ent` files and imported into the dialect below
+with `ent-translate --import-ent`; the syntax is described in
+[`docs/syntax.md`](docs/syntax.md), and `examples/*.ent` are the examples
+written that way (the integration tests run both forms and expect the same
+output):
+
+```
+component Position { x: f32 }
+component Velocity { dx: f32 } capacity 64
+
+system fly(dt: f32) {
+  for p: mut Position, v: Velocity {
+    p.x += v.dx * dt
+  }
+}
+
+schedule frame(dt: f32) { fly(dt) }
+```
+
+```sh
+build/bin/ent-translate --import-ent examples/bullets.ent -o /tmp/bullets.mlir
+build/bin/ent-translate --ent-to-c-header /tmp/bullets.mlir \
+    -o /tmp/bullets_world.h
+build/bin/ent-opt /tmp/bullets.mlir --ent-lower-to-loops ...  # as below
+```
+
 ## The dialect today
 
 When each effect becomes visible to the rest of the program (the frame

@@ -1,0 +1,112 @@
+# ent-lang syntax (v1)
+
+ent-lang source lives in `.ent` files. `ent-translate --import-ent` parses
+one into the `ent` dialect, with locations pointing into the source, so
+errors from later passes still name the `.ent` line. Everything here maps
+directly onto the dialect described in the README; the semantics of when
+effects become visible are in [`sync-points.md`](sync-points.md).
+
+```sh
+build/bin/ent-translate --import-ent examples/bullets.ent -o bullets.mlir
+build/bin/ent-translate --ent-to-c-header bullets.mlir -o bullets_world.h
+build/bin/ent-opt bullets.mlir --ent-lower-to-loops ...   # as in the README
+```
+
+`examples/*.ent` are the examples of `examples/*.mlir` written in ent-lang;
+the integration tests run both and expect the same output.
+
+## Declarations
+
+```
+component Position { x: f32, y: f32 } capacity 1000
+tag Enemy                                   // a component without fields
+unique Clock { dt: f32, frame: i64 }        // exists once (a resource)
+unique Score: i64                           // shorthand: one field, `value`
+archetype Gun { Position, optional Stunned } capacity 4
+default_capacity 1024
+```
+
+- Types: `f32`, `f64`, `bool`, `i8`, `i16`, `i32`, `i64`, `index`, `entity`.
+- `capacity` on a component bounds how many entities can have it; an
+  archetype the compiler infers from spawns takes the smallest capacity
+  among its required components, or `default_capacity`.
+- Archetypes need only be declared for shapes the host spawns (which the
+  compiler cannot see), or to name and size one explicitly.
+
+## Systems and queries
+
+```
+system move(dt: f32) {
+  for p: mut Position, v: Velocity {
+    p.x += v.dx * dt
+  }
+}
+```
+
+A system takes parameters and runs statements; its access is inferred. It
+may declare a contract the compiler checks: `system move(dt: f32) reads
+Velocity writes Position { ... }`.
+
+`for` (only at the top level of a system) visits every entity with the
+bound components:
+
+```
+for e, p: Position, h: mut Hull with Enemy where h.hp < 10 on changed Hull.hp {
+  ...
+}
+```
+
+- `e,` (optional, first) names the visited entity: `e` is its id, and
+  `e.destroy()`, `e.add(Shield)`, `e.add(Stunned { seconds: 2.0 })`,
+  `e.remove(Shield)` change it (deferred as the sync-point rules say).
+- `name: Component` binds a component read-only, `name: mut Component`
+  writably.
+- `with A, B` only filters: the entities must have them.
+- `where cond` runs the body only where `cond` holds.
+- `on changed C.f, changed C, added C, removed C` makes the query reactive;
+  `log N` after a trigger sets its event log's capacity (`log 0`: none).
+
+## Statements
+
+- `let name = expr`: an immutable local.
+- `binding.field = expr`, and `+=`, `-=`, `*=`, `/=`, `min=`, `max=`.
+- Uniques: `Clock.frame += 1`, `Score += 10` (the shorthand's value).
+  Outside a `for` this reads and writes; inside one only `+=`, `-=`,
+  `min=` and `max=` are allowed, and they accumulate (combined when the
+  query ends, in a fixed order).
+- Another entity: `Hull(target).hp -= damage` (also `+=`, `min=`, `max=`)
+  combines into its field when the query ends; reading one may find nothing,
+  so it is `if let hp = Hull(target).hp { ... } else { ... }`.
+- `spawn { Position { x: 1.0, y: 0.0 }, Velocity { dx: 2.0, dy: 0.0 } }`
+  creates an entity; as an expression it returns its id
+  (`let id = spawn { ... }`).
+- `if cond { ... } else if cond { ... } else { ... }`.
+
+## Expressions
+
+Literals (`1`, `2.5`, `1e8`, `true`), locals and parameters, `binding.field`,
+`Unique.field`, `Unique` (shorthand), `- !`, `* / %`, `+ -`, comparisons,
+`&&`, `||` (in that order of precedence, all left-associative),
+`min(a, b)`, `max(a, b)`, `expr as T`, and
+`if cond { let ...; value } else { value }`. A literal takes the type of the
+operand it meets (`x * 2` is an f32 if `x` is); on its own an integer is an
+i32 and a float an f32. There are no implicit conversions.
+
+## Schedules
+
+```
+schedule frame(dt: f32) {
+  shoot(dt)
+  fly(dt)
+}
+```
+
+Runs systems in order; arguments may be literals, which take the system
+parameter's type. Systems must be declared before the schedules that run
+them.
+
+## Not yet supported
+
+`without`, `any`/or-terms, `run_if`, `fn`/`proc`, relations, `world`,
+devices, prefabs, mutable locals (`var`), loops: each is reported as "not
+supported yet" where it would start.
