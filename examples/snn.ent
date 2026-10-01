@@ -1,0 +1,48 @@
+// A spiking neural network of leaky integrate-and-fire neurons: each step
+// a neuron's potential decays, takes the input that arrived and its bias,
+// and if it reaches the threshold the neuron fires and resets. Synapses
+// are a relation with a weight; a neuron that fired pushes its weights
+// into the input of the neurons it connects to. The host spawns the
+// neurons and connects the synapses (examples/host/snn_main.c), and checks
+// the result against a plain C simulation of the same network.
+//
+// Spiked comes and goes every step, so it is optional (a presence byte):
+// propagate visits every neuron and only the firing ones walk their edges.
+// examples/snn_pull.ent gathers instead of pushing.
+
+component Neuron { v: f32, input: f32, bias: f32, fired: f32 } capacity 1024
+tag Spiked
+archetype Cell { Neuron, optional Spiked } capacity 1024
+relation Synapse { weight: f32 } capacity 65536
+unique Stats { spikes: i64 }
+
+system integrate(decay: f32, threshold: f32) {
+  for e, n: mut Neuron {
+    let v = n.v * decay + n.input + n.bias
+    n.input = 0.0
+    if v >= threshold {
+      n.v = 0.0
+      n.fired = 1.0
+      e.add(Spiked)
+      Stats.spikes += 1
+    } else {
+      n.v = v
+      n.fired = 0.0
+      e.remove(Spiked)
+    }
+  }
+}
+
+// Push: combined into the targets when the query ends, in a fixed order.
+system propagate() {
+  for e with Spiked {
+    for s, post in e.out(Synapse) {
+      Neuron(post).input += s.weight
+    }
+  }
+}
+
+schedule step(decay: f32, threshold: f32) {
+  integrate(decay, threshold)
+  propagate()
+}

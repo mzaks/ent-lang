@@ -1,0 +1,69 @@
+// The spiking network examples end to end (examples/snn.ent pushes spikes
+// along outgoing synapses, examples/snn_pull.ent gathers them along
+// incoming ones): each run checks every neuron's potential and input
+// against a plain C simulation of the same network, to the bit. As
+// written, fused, with parallel stages and with parallel entity loops.
+// The host is compiled with -ffp-contract=off, so that C rounds like the
+// generated code.
+
+// RUN: mkdir -p %t.snn
+// RUN: ent-translate --import-ent %S/../../examples/snn.ent -o %t.snn.mlir
+// RUN: ent-translate --ent-to-c-header %t.snn.mlir -o %t.snn/snn_world.h
+// RUN: ent-opt %t.snn.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn.seq.ll
+// RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn.seq.ll \
+// RUN:     -I%t.snn %S/../../examples/host/snn_main.c -o %t.snn.seq
+// RUN: %t.snn.seq | FileCheck %s
+// RUN: ent-opt %t.snn.mlir --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn.fused.ll
+// RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn.fused.ll \
+// RUN:     -I%t.snn %S/../../examples/host/snn_main.c -o %t.snn.fused
+// RUN: %t.snn.fused | FileCheck %s
+// RUN: ent-opt %t.snn.mlir --ent-schedule --ent-lower-to-loops=parallel-stages=1 \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn.stages.ll
+// RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn.stages.ll \
+// RUN:     -I%t.snn %S/../../examples/host/snn_main.c %openmp -o %t.snn.stages
+// RUN: %t.snn.stages | FileCheck %s
+// RUN: ent-opt %t.snn.mlir "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn.par.ll
+// RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn.par.ll \
+// RUN:     -I%t.snn %S/../../examples/host/snn_main.c %openmp -o %t.snn.par
+// RUN: %t.snn.par | FileCheck %s
+
+// RUN: mkdir -p %t.snn_pull
+// RUN: ent-translate --import-ent %S/../../examples/snn_pull.ent -o %t.snn_pull.mlir
+// RUN: ent-translate --ent-to-c-header %t.snn_pull.mlir -o %t.snn_pull/snn_world.h
+// RUN: ent-opt %t.snn_pull.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn_pull.seq.ll
+// RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn_pull.seq.ll \
+// RUN:     -I%t.snn_pull %S/../../examples/host/snn_main.c -o %t.snn_pull.seq
+// RUN: %t.snn_pull.seq | FileCheck %s
+// RUN: ent-opt %t.snn_pull.mlir --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn_pull.fused.ll
+// RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn_pull.fused.ll \
+// RUN:     -I%t.snn_pull %S/../../examples/host/snn_main.c -o %t.snn_pull.fused
+// RUN: %t.snn_pull.fused | FileCheck %s
+// RUN: ent-opt %t.snn_pull.mlir --ent-schedule --ent-lower-to-loops=parallel-stages=1 \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn_pull.stages.ll
+// RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn_pull.stages.ll \
+// RUN:     -I%t.snn_pull %S/../../examples/host/snn_main.c %openmp -o %t.snn_pull.stages
+// RUN: %t.snn_pull.stages | FileCheck %s
+// RUN: ent-opt %t.snn_pull.mlir "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn_pull.par.ll
+// RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn_pull.par.ll \
+// RUN:     -I%t.snn_pull %S/../../examples/host/snn_main.c %openmp -o %t.snn_pull.par
+// RUN: %t.snn_pull.par | FileCheck %s
+
+// CHECK:      neurons 1024 synapses 32768 steps 100
+// CHECK-NEXT: spikes 2121 (C 2121) sum of v 542.592544
+// CHECK-NEXT: matches C: yes

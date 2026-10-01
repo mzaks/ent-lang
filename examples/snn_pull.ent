@@ -1,0 +1,48 @@
+// examples/snn.ent with propagation as a gather: every neuron walks its
+// incoming synapses and sums the weights of those from neurons that fired
+// (a lookup of the source's `fired`), instead of the firing neurons
+// pushing along their outgoing ones. Same network, same host, same result
+// to the bit: both add the weights into a neuron's input in the order of
+// the source neurons.
+
+component Neuron { v: f32, input: f32, bias: f32, fired: f32 } capacity 1024
+tag Spiked
+archetype Cell { Neuron, optional Spiked } capacity 1024
+relation Synapse { weight: f32 } capacity 65536
+unique Stats { spikes: i64 }
+
+system integrate(decay: f32, threshold: f32) {
+  for e, n: mut Neuron {
+    let v = n.v * decay + n.input + n.bias
+    n.input = 0.0
+    if v >= threshold {
+      n.v = 0.0
+      n.fired = 1.0
+      e.add(Spiked)
+      Stats.spikes += 1
+    } else {
+      n.v = v
+      n.fired = 0.0
+      e.remove(Spiked)
+    }
+  }
+}
+
+
+// Pull: every neuron sums the weights of its incoming synapses from
+// neurons that fired. No values cross entities, so nothing is combined at
+// the end, but every neuron walks all its incoming edges.
+system propagate() {
+  for e, n: mut Neuron {
+    for s, pre in e.in(Synapse) {
+      if let fired = Neuron(pre).fired {
+        n.input += s.weight * fired
+      }
+    }
+  }
+}
+
+schedule step(decay: f32, threshold: f32) {
+  integrate(decay, threshold)
+  propagate()
+}
