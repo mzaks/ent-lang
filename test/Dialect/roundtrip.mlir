@@ -49,6 +49,9 @@
 // MISC-NEXT:     ecs.apply %{{.*}} @Named "idx" max %{{.*}} : index
 // MISC-LABEL: ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
 // MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag, mut>) on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0, removed @Stunned] {
+// MISC-LABEL: ecs.system @score() reads [@Tag] writes [@Clock] {
+// MISC:          ecs.accumulate @Clock "frame" add %{{.*}} : i64
+// MISC-NEXT:     ecs.accumulate @Clock "dt" max %{{.*}} : f32
 ecs.component @Tag ()
 ecs.component @Named ("with space": i32, idx: index)
 ecs.system @noop() {
@@ -104,5 +107,13 @@ ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
   ecs.query (%t: !ecs.ref<@Tag, mut>)
       on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0,
           removed @Stunned] {
+  }
+}
+ecs.system @score() reads [@Tag] writes [@Clock] {
+  ecs.query (%t: !ecs.ref<@Tag>) {
+    %one = arith.constant 1 : i64
+    %dt = arith.constant 0.5 : f32
+    ecs.accumulate @Clock "frame" add %one : i64
+    ecs.accumulate @Clock "dt" max %dt : f32
   }
 }

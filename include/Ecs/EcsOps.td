@@ -372,6 +372,35 @@ def Ecs_ApplyOp : Ecs_Op<"apply", [
   let hasVerifier = 1;
 }
 
+def Ecs_AccumulateOp : Ecs_Op<"accumulate", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Combine a value into a resource field, from inside a query";
+  let description = [{
+    ```mlir
+    ecs.accumulate @Score "points" add %bonus : i64
+    ```
+    Combines `%bonus` into field `points` of `@Score` with the rule `add`,
+    `min` or `max` (signed for integers). A resource cannot be written
+    inside a query, where every entity would write the same field; an
+    accumulate is the commutative alternative. Like `ecs.apply`, its values
+    are combined when the query ends, in a fixed order (by accumulate, then
+    archetype, then row), so the result does not depend on how the query
+    ran, in parallel or not, even for floating-point `add`; reads of the
+    resource in the same query see the value it had when the query started.
+
+    The system must declare the resource in `writes`. An accumulate must be
+    inside a query and not inside a loop there, all accumulates of one query
+    to the same field use the same rule, and the field must be an integer
+    (not `i1`) or a float.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$resource, StrAttr:$field,
+                       StrAttr:$rule, AnyType:$value);
+  let assemblyFormat = [{
+    $resource $field custom<Rule>($rule) $value attr-dict `:` type($value)
+  }];
+  let hasVerifier = 1;
+}
+
 def Ecs_DespawnOp : Ecs_Op<"despawn", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Remove the visited entity from the world";

@@ -190,7 +190,7 @@ ecs.resource @Clock (dt: f32)
 ecs.component @P (x: f32)
 ecs.system @s(%v: f32) reads [@P] writes [@Clock] {
   ecs.query (%p: !ecs.ref<@P>) {
-    // expected-error @+1 {{cannot write a resource inside 'ecs.query': every entity would write the same field, which makes the entities depend on each other; write it at system level}}
+    // expected-error @+1 {{cannot write a resource inside 'ecs.query': every entity would write the same field, which makes the entities depend on each other; write it at system level, or combine values with 'ecs.accumulate'}}
     ecs.write @Clock "dt", %v : f32
   }
 }
@@ -588,5 +588,79 @@ ecs.archetype @A (@H) capacity 10
 ecs.system @s() reads [@H] {
   // expected-error @+1 {{gives the event log of @H a negative capacity}}
   ecs.query (%h: !ecs.ref<@H>) on [changed @H log -1] {
+  }
+}
+
+// -----
+
+ecs.resource @Score (points: i64, alive: i1)
+ecs.system @s(%v: i64) writes [@Score] {
+  // expected-error @+1 {{must be inside an 'ecs.query': its values are combined when the query ends}}
+  ecs.accumulate @Score "points" add %v : i64
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+ecs.resource @Score (points: i64)
+ecs.system @s(%v: i64) reads [@P, @Score] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{writes @Score but system @s does not declare it in 'writes'}}
+    ecs.accumulate @Score "points" add %v : i64
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+ecs.resource @Score (points: i64, alive: i1)
+ecs.system @s(%b: i1) reads [@P] writes [@Score] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{cannot combine field 'alive' of type 'i1'; only integers (not i1) and floats can}}
+    ecs.accumulate @Score "alive" max %b : i1
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+ecs.resource @Score (points: i64)
+ecs.system @s(%v: i32) reads [@P] writes [@Score] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{value type 'i32' does not match field 'points' of type 'i64'}}
+    ecs.accumulate @Score "points" add %v : i32
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+ecs.resource @Score (points: i64)
+ecs.system @s(%v: i64) reads [@P] writes [@Score] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    scf.for %i = %c0 to %c1 step %c1 {
+      // expected-error @+1 {{must not be inside a loop ('scf.for'): it may run at most once per entity}}
+      ecs.accumulate @Score "points" add %v : i64
+    }
+  }
+}
+
+// -----
+
+ecs.component @P (x: f32)
+ecs.archetype @A (@P) capacity 10
+ecs.resource @Score (points: i64)
+ecs.system @s(%v: i64) reads [@P] writes [@Score] {
+  ecs.query (%p: !ecs.ref<@P>) {
+    // expected-error @+1 {{combines @Score "points" with 'add', but the query also combines it with 'max'; the result would depend on the order}}
+    ecs.accumulate @Score "points" add %v : i64
+    // expected-note @+1 {{other rule here}}
+    ecs.accumulate @Score "points" max %v : i64
   }
 }

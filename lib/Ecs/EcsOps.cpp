@@ -753,23 +753,31 @@ LogicalResult LookupOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
-LogicalResult ApplyOp::verify() {
-  auto query = (*this)->getParentOfType<QueryOp>();
+/// Checks shared by ecs.apply and ecs.accumulate: inside a query, at most
+/// once per entity (not inside a loop there: the buffer has one slot per
+/// row), and a known rule.
+static LogicalResult verifyCombining(Operation *op, StringRef rule) {
+  auto query = op->getParentOfType<QueryOp>();
   if (!query)
-    return emitOpError("must be inside an 'ecs.query': its values are "
-                       "combined when the query ends");
-  // At most one value per entity and apply: the buffer has one slot per row.
-  for (Operation *parent = (*this)->getParentOp(); parent != query;
+    return op->emitOpError("must be inside an 'ecs.query': its values are "
+                           "combined when the query ends");
+  for (Operation *parent = op->getParentOp(); parent != query;
        parent = parent->getParentOp())
     if (isa<LoopLikeOpInterface>(parent))
-      return emitOpError("must not be inside a loop ('")
+      return op->emitOpError("must not be inside a loop ('")
              << parent->getName() << "'): it may run at most once per entity";
-  StringRef rule = getRule();
   if (rule != "add" && rule != "min" && rule != "max")
-    return emitOpError("has unknown rule '")
+    return op->emitOpError("has unknown rule '")
            << rule << "'; expected 'add', 'min' or 'max'";
   return success();
 }
+
+/// Whether `type` can be combined: an integer other than i1, or a float.
+static bool isCombinable(Type type) {
+  return (isa<FloatType>(type) || type.isIntOrIndex()) && !type.isInteger(1);
+}
+
+LogicalResult ApplyOp::verify() { return verifyCombining(*this, getRule()); }
 
 LogicalResult ApplyOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   ComponentOp component =
@@ -894,7 +902,7 @@ LogicalResult WriteOp::verify() {
     return emitOpError("cannot write a resource inside 'ecs.query': every "
                        "entity would write the same field, which makes the "
                        "entities depend on each other; write it at system "
-                       "level");
+                       "level, or combine values with 'ecs.accumulate'");
   return success();
 }
 
@@ -914,6 +922,45 @@ LogicalResult WriteOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 //===----------------------------------------------------------------------===//
 // RunOp
 //===----------------------------------------------------------------------===//
+
+LogicalResult AccumulateOp::verify() {
+  return verifyCombining(*this, getRule());
+}
+
+LogicalResult
+AccumulateOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  FailureOr<Type> fieldType =
+      resolveResourceField(symbolTable, *this, getResourceAttr(), getField(),
+                           /*write=*/true);
+  if (failed(fieldType))
+    return failure();
+  if (*fieldType != getValue().getType())
+    return emitOpError("value type ")
+           << getValue().getType() << " does not match field '" << getField()
+           << "' of type " << *fieldType;
+  if (!isCombinable(*fieldType))
+    return emitOpError("cannot combine field '")
+           << getField() << "' of type " << *fieldType
+           << "; only integers (not i1) and floats can";
+  // One rule per field and query: mixed rules would not commute.
+  AccumulateOp other;
+  (*this)->getParentOfType<QueryOp>().walk([&](AccumulateOp accumulate) {
+    if (!other && accumulate.getResourceAttr() == getResourceAttr() &&
+        accumulate.getField() == getField() &&
+        accumulate.getRule() != getRule())
+      other = accumulate;
+  });
+  if (other) {
+    InFlightDiagnostic diag =
+        emitOpError("combines ")
+        << getResourceAttr() << " \"" << getField() << "\" with '"
+        << getRule() << "', but the query also combines it with '"
+        << other.getRule() << "'; the result would depend on the order";
+    diag.attachNote(other.getLoc()) << "other rule here";
+    return diag;
+  }
+  return success();
+}
 
 LogicalResult RunOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto system =
