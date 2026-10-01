@@ -1,5 +1,6 @@
 add_mlir_library(MLIREcsTransforms
   Access.cpp
+  InferArchetypes.cpp
   LowerToLoops.cpp
   OmpNowait.cpp
   PrintAccess.cpp

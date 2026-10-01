@@ -1,5 +1,6 @@
 #include "Ecs/EcsDialect.h"
 #include "Ecs/EcsOps.h"
+#include "Ecs/Structure.h"
 #include "Ecs/World.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -55,6 +56,9 @@ static std::string toIdentifier(StringRef name) {
 /// counts, typed column accessors and one entry point per schedule. The
 /// header is the only place a host needs to know the layout.
 static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
+  // The same archetypes the lowering infers, under the same names.
+  if (failed(inferArchetypes(module)))
+    return failure();
   FailureOr<WorldLayout> layout = WorldLayout::compute(module);
   if (failed(layout))
     return failure();

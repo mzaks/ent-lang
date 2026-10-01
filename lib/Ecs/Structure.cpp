@@ -1,6 +1,8 @@
 #include "Ecs/Structure.h"
 
+#include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
 using namespace mlir;
@@ -157,4 +159,149 @@ bool StampPlan::stores(ArchetypeOp archetype, const Stamp &stamp) const {
   if (it == stamps.end())
     return false;
   return storing[it - stamps.begin()].contains(archetype);
+}
+
+LogicalResult mlir::ecs::inferArchetypes(ModuleOp module) {
+  // Spawn shapes still without an archetype, as component sets in
+  // declaration order.
+  SmallVector<ComponentOp> declared(module.getOps<ComponentOp>());
+  auto inOrder = [&](const llvm::SmallPtrSetImpl<Attribute> &set) {
+    SmallVector<Attribute> ordered;
+    for (ComponentOp component : declared) {
+      auto ref = FlatSymbolRefAttr::get(component.getSymNameAttr());
+      if (set.contains(ref))
+        ordered.push_back(ref);
+    }
+    return ordered;
+  };
+  llvm::MapVector<ArrayAttr, SmallVector<SpawnOp>> shapes;
+  Builder builder(module.getContext());
+  module.walk([&](SpawnOp spawn) {
+    if (spawn.getArchetypeAttr() || !spawn.getComponentsAttr())
+      return;
+    llvm::SmallPtrSet<Attribute, 8> set(spawn.getComponentsAttr().begin(),
+                                        spawn.getComponentsAttr().end());
+    shapes[builder.getArrayAttr(inOrder(set))].push_back(spawn);
+  });
+  if (shapes.empty())
+    return success();
+
+  // What queries add and remove, and the components they bind.
+  struct Change {
+    llvm::SmallPtrSet<Attribute, 4> bound;
+    Attribute component;
+    bool add;
+  };
+  SmallVector<Change> changes;
+  module.walk([&](Operation *op) {
+    if (!isa<AddOp, RemoveOp>(op))
+      return;
+    Change change;
+    for (Type type :
+         op->getParentOfType<QueryOp>().getBody().getArgumentTypes())
+      change.bound.insert(cast<RefType>(type).getComponent());
+    change.component = op->getAttr("component");
+    change.add = isa<AddOp>(op);
+    changes.push_back(std::move(change));
+  });
+
+  SymbolTable symbols(module);
+  auto defaultCapacity =
+      module->getAttrOfType<IntegerAttr>("ecs.default_capacity");
+  // New archetypes go after the last declaration they may refer to.
+  Operation *after = nullptr;
+  for (Operation &op : module.getOps())
+    if (isa<ComponentOp, ArchetypeOp>(op))
+      after = &op;
+  OpBuilder insert(module.getContext());
+  insert.setInsertionPointAfter(after);
+
+  for (auto &[listed, spawns] : shapes) {
+    llvm::SmallPtrSet<Attribute, 8> base(listed.begin(), listed.end());
+    // A declared archetype with exactly these required components.
+    ArchetypeOp chosen;
+    for (ArchetypeOp archetype : module.getOps<ArchetypeOp>()) {
+      llvm::SmallPtrSet<Attribute, 8> required;
+      for (Attribute attr : archetype.getComponents())
+        if (!archetype.isOptional(cast<FlatSymbolRefAttr>(attr)))
+          required.insert(attr);
+      if (required.size() == base.size() &&
+          llvm::all_of(required, [&](Attribute component) {
+            return base.contains(component);
+          })) {
+        chosen = archetype;
+        break;
+      }
+    }
+
+    if (!chosen) {
+      // Optional members: what adds and removes reach, until nothing
+      // changes.
+      llvm::SmallPtrSet<Attribute, 8> optional;
+      for (bool grew = true; grew;) {
+        grew = false;
+        for (const Change &change : changes) {
+          bool matches = llvm::all_of(change.bound, [&](Attribute component) {
+            return base.contains(component) || optional.contains(component);
+          });
+          if (!matches || optional.contains(change.component))
+            continue;
+          if (change.add ? !base.contains(change.component)
+                         : base.contains(change.component)) {
+            optional.insert(change.component);
+            grew = true;
+          }
+        }
+      }
+      llvm::SmallPtrSet<Attribute, 8> all(base.begin(), base.end());
+      all.insert(optional.begin(), optional.end());
+
+      // Capacity: the smallest among the required components.
+      std::optional<int64_t> capacity;
+      for (Attribute component : listed) {
+        if (optional.contains(component))
+          continue;
+        auto componentOp = symbols.lookup<ComponentOp>(
+            cast<FlatSymbolRefAttr>(component).getAttr());
+        if (std::optional<int64_t> limit = componentOp.getCapacity())
+          capacity = std::min(capacity.value_or(*limit), *limit);
+      }
+      if (!capacity && defaultCapacity)
+        capacity = defaultCapacity.getInt();
+
+      std::string name;
+      for (Attribute component : listed) {
+        if (!name.empty())
+          name += "_";
+        name += cast<FlatSymbolRefAttr>(component).getValue();
+      }
+      if (symbols.lookup(name))
+        name += "_archetype";
+      if (symbols.lookup(name))
+        return spawns.front().emitOpError("needs an archetype named @")
+               << name << ", but that name is taken";
+      if (!capacity) {
+        InFlightDiagnostic diag =
+            spawns.front().emitOpError("spawns into an archetype (@")
+            << name << ") with no capacity: give one of its required "
+            << "components a capacity, or set ecs.default_capacity on the "
+               "module";
+        return diag;
+      }
+
+      SmallVector<Attribute> optionalList = inOrder(optional);
+      chosen = ArchetypeOp::create(
+          insert, spawns.front().getLoc(), insert.getStringAttr(name),
+          insert.getArrayAttr(inOrder(all)),
+          optionalList.empty() ? ArrayAttr()
+                               : insert.getArrayAttr(optionalList),
+          insert.getI64IntegerAttr(*capacity), insert.getUnitAttr());
+      symbols.insert(chosen);
+      insert.setInsertionPointAfter(chosen);
+    }
+    for (SpawnOp spawn : spawns)
+      spawn.setArchetypeAttr(
+          FlatSymbolRefAttr::get(chosen.getSymNameAttr()));
+  }
+  return success();
 }

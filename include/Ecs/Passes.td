@@ -70,6 +70,18 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
   ];
 }
 
+def EcsInferArchetypes : Pass<"ecs-infer-archetypes", "ModuleOp"> {
+  let summary = "Derive the archetypes that spawns by components need";
+  let description = [{
+    Gives every `ecs.spawn (@A, @B)(...)` an archetype and adds the
+    archetypes this needs, marked `inferred` (see `inferArchetypes`): one per
+    distinct set of spawned components, holding as optional the components
+    adds and removes reach, sized by the smallest capacity among its
+    required components. The other passes and `ecs-translate` run it
+    themselves; on its own it shows what they infer.
+  }];
+}
+
 def EcsOmpNowait : Pass<"ecs-omp-nowait"> {
   let summary = "Drop the barrier after a parallel region's last loop";
   let description = [{

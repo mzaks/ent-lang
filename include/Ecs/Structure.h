@@ -41,6 +41,22 @@ struct ComponentChange {
 ComponentChange classifyChange(ArchetypeOp archetype,
                                FlatSymbolRefAttr component, bool add);
 
+/// Give every spawn that lists components (`ecs.spawn (@A, @B)(...)`) an
+/// archetype, and add the archetypes this needs to `module`, marked
+/// `inferred`. A spawn's components are the base of its archetype; a
+/// component some `ecs.add` can give to the archetype's entities joins it
+/// as optional, and so does a listed one some `ecs.remove` can take away
+/// (spawns still start with it), until nothing changes: entities never
+/// move between inferred archetypes. Capacity is the smallest among the
+/// components that stay required, or the module's `ecs.default_capacity`
+/// if none has one. A declared archetype whose required components are
+/// exactly a spawn's is used instead. Names join the spawn's component
+/// names in declaration order (`Position_Velocity`), with `_archetype`
+/// appended if that name is taken. Does nothing for spawns that already
+/// have an archetype; fails, with an error, if an archetype gets no
+/// capacity.
+LogicalResult inferArchetypes(ModuleOp module);
+
 /// An event a reactive query (`ecs.query ... on [...]`) reacts to.
 struct Trigger {
   enum Kind { Added, Removed, Changed };

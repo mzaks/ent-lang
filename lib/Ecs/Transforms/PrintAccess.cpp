@@ -1,5 +1,6 @@
 #include "Ecs/Access.h"
 #include "Ecs/Passes.h"
+#include "Ecs/Structure.h"
 
 namespace mlir::ecs {
 #define GEN_PASS_DEF_ECSPRINTACCESS
@@ -24,6 +25,8 @@ struct EcsPrintAccess
     : public mlir::ecs::impl::EcsPrintAccessBase<EcsPrintAccess> {
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    if (failed(inferArchetypes(module)))
+      return signalPassFailure();
     SmallVector<ArchetypeOp> archetypes(module.getOps<ArchetypeOp>());
     for (SystemOp system : module.getOps<SystemOp>()) {
       SystemAccess access = computeAccess(system, archetypes);

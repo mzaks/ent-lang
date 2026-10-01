@@ -1,5 +1,6 @@
 #include "Ecs/Access.h"
 #include "Ecs/Passes.h"
+#include "Ecs/Structure.h"
 
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -88,6 +89,8 @@ struct EcsSchedule : public mlir::ecs::impl::EcsScheduleBase<EcsSchedule> {
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    if (failed(inferArchetypes(module)))
+      return signalPassFailure();
     AccessCache accesses(module);
     IRRewriter rewriter(module.getContext());
 

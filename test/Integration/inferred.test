@@ -1,0 +1,18 @@
+// An archetype inferred from a spawn: its capacity comes from its
+// components, a component a system removes becomes optional, and spawns
+// still start with it.
+// RUN: mkdir -p %t.dir
+// RUN: ecs-translate --ecs-to-c-header %S/Inputs/inferred.mlir \
+// RUN:     -o %t.dir/inferred_world.h
+// RUN: ecs-opt %S/Inputs/inferred.mlir --ecs-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/inferred_main.c -o %t.exe
+// RUN: %t.exe | FileCheck %s
+
+// Hull's capacity; Shield, now optional, does not bound it.
+// CHECK:      capacity 4
+// The unit is spawned with its shield, charges once and loses it.
+// CHECK-NEXT: frame 0: units 1 hp 11.0 shield 0
+// CHECK-NEXT: frame 1: units 1 hp 11.0 shield 0

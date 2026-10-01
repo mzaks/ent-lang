@@ -1332,16 +1332,33 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
         rewriter.getStringAttr("ecs.spawn exceeds the capacity of @" +
                                spawn.getArchetypeAttr().getValue()));
     ArchetypeOp archetypeOp = archetype->op;
-    auto value = spawn.getValues().begin();
+    // Where each component the entity starts with finds its values: in the
+    // order the spawn lists them, or the archetype holds them.
+    SmallVector<Attribute> started;
+    if (ArrayAttr listed = spawn.getComponentsAttr())
+      started.assign(listed.begin(), listed.end());
+    else
+      for (Attribute attr : archetypeOp.getComponents())
+        if (!archetypeOp.isOptional(cast<FlatSymbolRefAttr>(attr)))
+          started.push_back(attr);
+    llvm::DenseMap<Attribute, unsigned> firstValue;
+    unsigned nextValue = 0;
+    for (Attribute attr : started) {
+      firstValue[attr] = nextValue;
+      nextValue += SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
+                       spawn, cast<FlatSymbolRefAttr>(attr))
+                       .getFieldNames()
+                       .size();
+    }
     // Logs to append the new entity to, once it has an id.
     SmallVector<std::pair<const WorldLog *, Value>> spawned;
     for (const WorldColumn &column : archetype->columns) {
       auto component = FlatSymbolRefAttr::get(column.component);
+      bool starts = firstValue.count(component);
       if (column.isStamp()) {
-        // A new entity has added and changed every component it has, and
-        // lost none; optional components start absent.
-        bool happened = column.stamp->kind != Trigger::Removed &&
-                        !archetypeOp.isOptional(component);
+        // A new entity has added and changed every component it starts
+        // with, and lost none.
+        bool happened = column.stamp->kind != Trigger::Removed && starts;
         Value stamped =
             happened ? world.currentTick(loc)
                      : arith::ConstantIntOp::create(rewriter, loc, 0, 64)
@@ -1355,12 +1372,19 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
         continue;
       }
       Value stored;
-      if (column.isPresence())
-        stored = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
-      else if (!archetypeOp.isOptional(component))
-        stored = world.toStorage(loc, *value++);
-      else
+      if (column.isPresence()) {
+        stored = arith::ConstantIntOp::create(rewriter, loc, starts, 8);
+      } else if (starts) {
+        auto componentOp =
+            SymbolTable::lookupNearestSymbolFrom<ComponentOp>(spawn, component);
+        unsigned field = llvm::find(componentOp.getFieldNames(),
+                                    column.field) -
+                         componentOp.getFieldNames().begin();
+        stored = world.toStorage(
+            loc, spawn.getValues()[firstValue[component] + field]);
+      } else {
         continue; // an absent optional component's fields stay as they are
+      }
       memref::StoreOp::create(
           rewriter, loc, stored,
           world.column(*archetype, column.component, column.field),
@@ -2396,6 +2420,8 @@ struct EcsLowerToLoops
   void runOnOperation() override {
     ModuleOp module = getOperation();
     IRRewriter rewriter(module.getContext());
+    if (failed(inferArchetypes(module)))
+      return signalPassFailure();
     FailureOr<WorldLayout> layout = WorldLayout::compute(module);
     if (failed(layout))
       return signalPassFailure();
