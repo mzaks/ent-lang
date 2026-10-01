@@ -290,8 +290,8 @@ ParseResult SystemOp::parse(OpAsmParser &parser, OperationState &result) {
                              result.attributes))
     return failure();
 
-  ArrayAttr reads = parser.getBuilder().getArrayAttr({});
-  ArrayAttr writes = reads;
+  // Declared access is optional; either list makes it a contract.
+  ArrayAttr reads, writes;
   auto parseAccess = [&]() -> ParseResult {
     if (succeeded(parser.parseOptionalKeyword("reads")) &&
         parser.parseAttribute(reads))
@@ -303,8 +303,10 @@ ParseResult SystemOp::parse(OpAsmParser &parser, OperationState &result) {
   };
   if (parseArgsAndBody<SystemOp>(parser, result, parseAccess))
     return failure();
-  result.addAttribute(getReadsAttrName(result.name), reads);
-  result.addAttribute(getWritesAttrName(result.name), writes);
+  if (reads)
+    result.addAttribute(getReadsAttrName(result.name), reads);
+  if (writes)
+    result.addAttribute(getWritesAttrName(result.name), writes);
   return success();
 }
 
@@ -312,10 +314,10 @@ void SystemOp::print(OpAsmPrinter &p) {
   p << " ";
   p.printSymbolName(getSymName());
   printArgs(p, getBody());
-  if (!getReads().empty())
-    p << " reads " << getReads();
-  if (!getWrites().empty())
-    p << " writes " << getWrites();
+  if (ArrayAttr reads = getReadsAttr())
+    p << " reads " << reads;
+  if (ArrayAttr writes = getWritesAttr())
+    p << " writes " << writes;
   p.printOptionalAttrDictWithKeyword(
       (*this)->getAttrs(),
       {getSymNameAttrName(), getReadsAttrName(), getWritesAttrName()});
@@ -328,8 +330,10 @@ LogicalResult SystemOp::verify() {
 
   llvm::SmallPtrSet<Attribute, 8> seen;
   for (auto [listName, list] :
-       {std::pair<StringRef, ArrayAttr>{"reads", getReads()},
-        std::pair<StringRef, ArrayAttr>{"writes", getWrites()}}) {
+       {std::pair<StringRef, ArrayAttr>{"reads", getReadsAttr()},
+        std::pair<StringRef, ArrayAttr>{"writes", getWritesAttr()}}) {
+    if (!list)
+      continue;
     for (Attribute attr : list) {
       if (!isa<FlatSymbolRefAttr>(attr))
         return emitOpError("'") << listName << "' entry " << attr
@@ -344,7 +348,9 @@ LogicalResult SystemOp::verify() {
 }
 
 LogicalResult SystemOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  for (ArrayAttr list : {getReads(), getWrites()})
+  for (ArrayAttr list : {getReadsAttr(), getWritesAttr()}) {
+    if (!list)
+      continue;
     for (Attribute attr : list) {
       auto ref = cast<FlatSymbolRefAttr>(attr);
       Operation *target = symbolTable.lookupNearestSymbolFrom(*this, ref);
@@ -352,21 +358,30 @@ LogicalResult SystemOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
         return emitOpError("declares access to unknown component, resource "
                            "or archetype ")
                << ref;
-      if (isa<ArchetypeOp>(target) && list == getReads())
+      if (isa<ArchetypeOp>(target) && list == getReadsAttr())
         return emitOpError("lists archetype ")
                << ref
                << " in 'reads'; archetypes are declared in 'writes', by "
                   "systems that spawn or despawn their entities";
     }
+  }
   return success();
 }
 
+bool SystemOp::hasContract() { return getReadsAttr() || getWritesAttr(); }
+
 bool SystemOp::canWrite(FlatSymbolRefAttr component) {
-  return llvm::is_contained(getWrites(), component);
+  if (!hasContract())
+    return true;
+  ArrayAttr writes = getWritesAttr();
+  return writes && llvm::is_contained(writes, component);
 }
 
 bool SystemOp::canRead(FlatSymbolRefAttr component) {
-  return canWrite(component) || llvm::is_contained(getReads(), component);
+  if (canWrite(component))
+    return true;
+  ArrayAttr reads = getReadsAttr();
+  return reads && llvm::is_contained(reads, component);
 }
 
 //===----------------------------------------------------------------------===//

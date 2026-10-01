@@ -206,7 +206,8 @@ ecs.system @s(%v: f32) reads [@Clock] {
 // -----
 
 ecs.resource @Clock (dt: f32)
-ecs.system @s() {
+// A declared contract, even an empty one, is checked.
+ecs.system @s() reads [] {
   // expected-error @+1 {{reads @Clock but system @s does not declare it in 'reads' or 'writes'}}
   %dt = ecs.read @Clock "dt" : f32
 }
@@ -355,7 +356,7 @@ ecs.system @s() reads [@A] {
 
 ecs.component @P (x: f32)
 ecs.archetype @A (@P) capacity 10
-ecs.system @s(%v: f32) {
+ecs.system @s(%v: f32) reads [] {
   // expected-error @+1 {{spawns into @A but system @s does not declare it in 'writes'}}
   ecs.spawn @A(%v) : f32
 }
@@ -404,7 +405,7 @@ ecs.system @s() writes [@A] {
 // -----
 
 ecs.component @P (x: f32)
-ecs.system @s(%id: !ecs.entity) {
+ecs.system @s(%id: !ecs.entity) reads [] {
   // expected-error @+1 {{looks up @P but system @s does not declare it in 'reads' or 'writes'}}
   %x, %found = ecs.lookup %id @P "x" : f32
 }

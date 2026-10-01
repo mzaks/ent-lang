@@ -91,26 +91,36 @@ def Ecs_ArchetypeOp : Ecs_Op<"archetype", [
 def Ecs_SystemOp : Ecs_Op<"system", [
     Symbol, IsolatedFromAbove, SingleBlockImplicitTerminator<"YieldOp">,
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
-  let summary = "A system with declared component access";
+  let summary = "A system: queries and code that run as one step";
   let description = [{
     ```mlir
-    ecs.system @integrate(%dt: f32) reads [@Velocity] writes [@Position] {
+    ecs.system @integrate(%dt: f32) {
       ecs.query (%p: !ecs.ref<@Position, mut>, %v: !ecs.ref<@Velocity>) {
         ...
       }
     }
     ```
-    `writes` implies read access. `writes` may also name archetypes: the
-    system changes their set of entities (`ecs.spawn`, `ecs.despawn`).
+    What a system reads and writes is inferred from its body. It may also
+    declare it, as a contract the compiler checks:
+    ```mlir
+    ecs.system @integrate(%dt: f32) reads [@Velocity] writes [@Position] {
+    ```
+    A system that declares either list (even empty, `reads []`) must stay
+    within both. `writes` implies read access, and may also name archetypes:
+    the system changes their set of entities (`ecs.spawn`, `ecs.despawn`).
     Entry block arguments are the system's per-run parameters.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
-                       SymbolRefArrayAttr:$reads,
-                       SymbolRefArrayAttr:$writes);
+                       OptionalAttr<SymbolRefArrayAttr>:$reads,
+                       OptionalAttr<SymbolRefArrayAttr>:$writes);
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
   let extraClassDeclaration = [{
+    /// Whether the system declares its access (`reads` or `writes`, even
+    /// empty): then its body must stay within the declaration. Without one,
+    /// its access is whatever the body does.
+    bool hasContract();
     bool canRead(::mlir::FlatSymbolRefAttr component);
     bool canWrite(::mlir::FlatSymbolRefAttr component);
   }];
@@ -160,8 +170,8 @@ def Ecs_QueryOp : Ecs_Op<"query", [
     to field `f` (`ecs.set`, `ecs.apply`, `ecs.add`, spawning), and
     `changed @C` on a write to any field of `C`. On its first run every
     existing entity counts as added and changed. Events the query causes
-    itself count on its next run. The system must declare every trigger's
-    component in `reads` or `writes`.
+    itself count on its next run. A system that declares its access must
+    list every trigger's component in `reads` or `writes`.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
@@ -199,8 +209,8 @@ def Ecs_ReadOp : Ecs_Op<"read", [
     %dt = ecs.read @Clock "dt" : f32
     ```
     Allowed anywhere in a system, including inside queries: no query may
-    write a resource, so every entity reads the same value. The system
-    must declare the resource in `reads` or `writes`.
+    write a resource, so every entity reads the same value. A system that
+    declares its access must list the resource in `reads` or `writes`.
   }];
   let arguments = (ins FlatSymbolRefAttr:$resource, StrAttr:$field);
   let results = (outs AnyType:$result);
@@ -217,7 +227,8 @@ def Ecs_WriteOp : Ecs_Op<"write", [
     ```
     Allowed in a system but not inside a query: a write per entity would
     make every entity depend on the others, which rules out parallel and
-    fused loops. The system must declare the resource in `writes`.
+    fused loops. A system that declares its access must list the resource in
+    `writes`.
   }];
   let arguments = (ins FlatSymbolRefAttr:$resource, StrAttr:$field,
                        AnyType:$value);
@@ -241,9 +252,9 @@ def Ecs_AddOp : Ecs_Op<"add", [
     - not held: move the entity to the archetype with exactly its
       components plus this one, which must exist. Moves are deferred to
       the end of the query, like despawns.
-    The system must declare the component in `writes`; a move needs no
-    archetypes declared, since whether a change moves entities is a storage
-    decision and the analysis derives its effect from the storage.
+    A system that declares its access must list the component in `writes`; a
+    move needs no archetypes declared, since whether a change moves entities is
+    a storage decision and the analysis derives its effect from the storage.
   }];
   let arguments = (ins FlatSymbolRefAttr:$component,
                        Variadic<AnyType>:$values);
@@ -280,8 +291,8 @@ def Ecs_SpawnOp : Ecs_Op<"spawn", [
     Appends an entity to the archetype. The values initialise every field
     of the archetype's non-optional components, in the order of the
     components and then of their fields; optional components start absent.
-    Spawning beyond the archetype's capacity is an error at run time. The
-    system must declare the archetype in `writes`.
+    Spawning beyond the archetype's capacity is an error at run time. A
+    system that declares its access must list the archetype in `writes`.
 
     The result is the entity's id, which stays valid while the entity moves
     between rows and archetypes and becomes invalid when it is despawned.
@@ -321,11 +332,11 @@ def Ecs_LookupOp : Ecs_Op<"lookup", [
     A component field of type `!ecs.entity` is how entities refer to each
     other.
 
-    The system must declare the component in `reads` or `writes`. A query
-    may not look up a field it writes itself: which entities would see the
-    old value and which the new would depend on iteration order. Lookups
-    only read; a system with lookups is not fused with others, for the same
-    reason.
+    A system that declares its access must list the component in `reads` or
+    `writes`. A query may not look up a field it writes itself: which entities
+    would see the old value and which the new would depend on iteration order.
+    Lookups only read; a system with lookups is not fused with others, for the
+    same reason.
   }];
   let arguments = (ins Ecs_EntityType:$entity, FlatSymbolRefAttr:$component,
                        StrAttr:$field);
@@ -357,10 +368,10 @@ def Ecs_ApplyOp : Ecs_Op<"apply", [
     an id that is not alive, or to an entity without the component, is
     dropped.
 
-    The system must declare the component in `writes`. An apply must be
-    inside a query and not inside a loop there, so it runs at most once per
-    entity; all applies of one query to the same field use the same rule
-    (`add` then `min` would depend on the order). The field must be an
+    A system that declares its access must list the component in `writes`. An
+    apply must be inside a query and not inside a loop there, so it runs at most
+    once per entity; all applies of one query to the same field use the same
+    rule (`add` then `min` would depend on the order). The field must be an
     integer (not `i1`) or a float.
   }];
   let arguments = (ins Ecs_EntityType:$entity, FlatSymbolRefAttr:$component,
@@ -388,10 +399,10 @@ def Ecs_AccumulateOp : Ecs_Op<"accumulate", [
     ran, in parallel or not, even for floating-point `add`; reads of the
     resource in the same query see the value it had when the query started.
 
-    The system must declare the resource in `writes`. An accumulate must be
-    inside a query and not inside a loop there, all accumulates of one query
-    to the same field use the same rule, and the field must be an integer
-    (not `i1`) or a float.
+    A system that declares its access must list the resource in `writes`. An
+    accumulate must be inside a query and not inside a loop there, all
+    accumulates of one query to the same field use the same rule, and the field
+    must be an integer (not `i1`) or a float.
   }];
   let arguments = (ins FlatSymbolRefAttr:$resource, StrAttr:$field,
                        StrAttr:$rule, AnyType:$value);
@@ -410,8 +421,9 @@ def Ecs_DespawnOp : Ecs_Op<"despawn", [
     ```
     Removes the entity the enclosing query visits. The removal is deferred
     to the end of the query: the query still visits every entity it would
-    have visited, and later systems no longer see the removed ones. The
-    system must declare every archetype the query matches in `writes`.
+    have visited, and later systems no longer see the removed ones. A
+    system that declares its access must list every archetype the query
+    matches in `writes`.
   }];
   let assemblyFormat = "attr-dict";
   let hasVerifier = 1;

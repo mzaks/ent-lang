@@ -49,6 +49,10 @@
 // MISC-NEXT:     ecs.apply %{{.*}} @Named "idx" max %{{.*}} : index
 // MISC-LABEL: ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
 // MISC-NEXT:   ecs.query (%{{.*}}: !ecs.ref<@Tag, mut>) on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0, removed @Stunned] {
+// Without declarations a system's access is inferred and none is printed;
+// an empty declaration is a contract and stays.
+// MISC-LABEL: ecs.system @inferred() {
+// MISC:       ecs.system @nothing() reads [] {
 // MISC-LABEL: ecs.system @score() reads [@Tag] writes [@Clock] {
 // MISC:          ecs.accumulate @Clock "frame" add %{{.*}} : i64
 // MISC-NEXT:     ecs.accumulate @Clock "dt" max %{{.*}} : f32
@@ -108,6 +112,13 @@ ecs.system @react() reads [@Named, @Stunned] writes [@Tag] {
       on [changed @Named "idx" log 4096, changed @Named, added @Stunned log 0,
           removed @Stunned] {
   }
+}
+ecs.system @inferred() {
+  ecs.query (%t: !ecs.ref<@Tag>) {
+    %dt = ecs.read @Clock "dt" : f32
+  }
+}
+ecs.system @nothing() reads [] {
 }
 ecs.system @score() reads [@Tag] writes [@Clock] {
   ecs.query (%t: !ecs.ref<@Tag>) {

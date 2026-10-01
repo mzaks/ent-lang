@@ -154,3 +154,14 @@ ecs.system @scoreAll(%v: i64) reads [@P] writes [@Score] {
     ecs.accumulate @Score "points" add %v : i64
   }
 }
+
+// Without declarations the analysis is the whole story: a system's access
+// is what its body does.
+// expected-remark @+1 {{reads A.P.x, B.P.x, Score.points, A.count, B.count; writes A.P.y, B.P.y}}
+ecs.system @undeclared() {
+  ecs.query (%p: !ecs.ref<@P, mut>) {
+    %x = ecs.get %p "x" : !ecs.ref<@P, mut> -> f32
+    ecs.set %p "y", %x : !ecs.ref<@P, mut>, f32
+    %s = ecs.read @Score "points" : i64
+  }
+}
