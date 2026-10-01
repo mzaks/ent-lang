@@ -1,4 +1,6 @@
 // RUN: ecs-opt %s --ecs-lower-to-loops --canonicalize | FileCheck %s
+// RUN: ecs-opt %s "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=100" \
+// RUN:     --canonicalize | FileCheck %s --check-prefix=PAR
 
 // 32768 units give the hp log 4096 entries, in 64 segments of 64. A write
 // at row r of n units appends to segment r * 64 / n, so the contiguous row
@@ -24,16 +26,28 @@ ecs.system @hurt(%d: f32) writes [@H] {
   }
 }
 
-// The reader notes where every segment ends and whether any overflowed,
-// and walks the segments one after another.
+// The reader notes where every segment ends, whether any overflowed, and
+// how many entries are pending, and walks the segments one after another.
 // CHECK-LABEL: func.func private @watch(
-// CHECK:      %[[SCAN:.*]] = scf.for %[[SEG:.*]] = %c0 to %c64 step %c1 iter_args(%[[ANY:.*]] = %{{.*}}) -> (i1) {
+// CHECK:      %[[STATE:.*]]:2 = scf.for %[[SEG:.*]] = %c0 to %c64 step %c1 iter_args(%[[ANY:.*]] = %{{.*}}, %[[SUM:.*]] = %{{.*}}) -> (i1, i64) {
 // CHECK:        %[[LOST:.*]] = arith.cmpi sgt, %{{.*}}, %c64_i64 : i64
-// CHECK-NEXT:   %[[OR:.*]] = arith.ori %[[ANY]], %[[LOST]] : i1
-// CHECK-NEXT:   scf.yield %[[OR]] : i1
-// CHECK:      scf.if %[[SCAN]] {
+// CHECK:        %[[OR:.*]] = arith.ori %[[ANY]], %[[LOST]] : i1
+// CHECK-NEXT:   scf.yield %[[OR]], %{{.*}} : i1, i64
+// CHECK:      scf.if %[[STATE]]#0 {
 // CHECK:      } else {
 // CHECK-NEXT:   scf.for %[[S:.*]] = %c0 to %c64 step %c1 {
+
+// With parallel entity loops, a walk of at least parallel-min-events
+// pending entries (100 here) runs the segments in parallel.
+// PAR-LABEL: func.func private @watch(
+// PAR:       %[[STATE:.*]]:2 = scf.for
+// PAR:       scf.if %[[STATE]]#0 {
+// PAR:       } else {
+// PAR-NEXT:    %[[MANY:.*]] = arith.cmpi sge, %[[STATE]]#1, %c100_i64 : i64
+// PAR-NEXT:    scf.if %[[MANY]] {
+// PAR-NEXT:      scf.parallel (%{{.*}}) = (%c0) to (%c64) step (%c1) {
+// PAR:         } else {
+// PAR-NEXT:      scf.for %{{.*}} = %c0 to %c64 step %c1 {
 ecs.system @watch() reads [@H] writes [@B] {
   ecs.query (%h: !ecs.ref<@H>, %b: !ecs.ref<@B, mut>) on [changed @H "hp"] {
     %x = ecs.get %h "hp" : !ecs.ref<@H> -> f32

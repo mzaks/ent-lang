@@ -519,6 +519,9 @@ private:
 struct LoopOptions {
   bool parallelEntities;
   int64_t parallelMinEntities;
+  /// Pending log entries from which a reactive query walks its event logs'
+  /// segments in parallel.
+  int64_t parallelMinEvents;
   /// Emit remarks explaining lowering decisions.
   bool explain;
 };
@@ -1683,10 +1686,12 @@ static std::optional<std::string> whyScans(QueryOp query,
 /// query's body for each entity with an event: an entry counts if it is
 /// the entity's latest in this log (its stamp still holds the entry's
 /// tick), the entity matches the query, and no earlier trigger of the query
-/// fired for it too, so each entity runs once.
+/// fired for it too, so each entity runs once. With `parallel`, the
+/// segments are walked in parallel: an entity's latest entry is in one
+/// segment only, so no two iterations run the body for the same entity.
 static void walkLogs(IRRewriter &rewriter, QueryOp query,
                      const WorldLayout &layout, WorldAccess &world, Value tick,
-                     Value seen) {
+                     Value seen, bool parallel) {
   Location loc = query.getLoc();
   SmallVector<Trigger> triggers = getTriggers(query);
   auto index =
@@ -1698,12 +1703,22 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
     const WorldLog &log = *layout.findLog(stamp);
     Value positions =
         world.logPositions(log, layout.readPositions[index.getInt()][k]);
-    auto segments = scf::ForOp::create(
-        rewriter, loc, zero,
-        arith::ConstantIndexOp::create(rewriter, loc, log.segments), one);
+    Value count = arith::ConstantIndexOp::create(rewriter, loc, log.segments);
+    Operation *segments;
+    Value segment;
     OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPoint(segments.getBody()->getTerminator());
-    Value segment = segments.getInductionVar();
+    if (parallel) {
+      auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                          ValueRange{count}, ValueRange{one});
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      segments = loop;
+      segment = loop.getInductionVars().front();
+    } else {
+      auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      segments = loop;
+      segment = loop.getInductionVar();
+    }
     Value from = memref::LoadOp::create(rewriter, loc, positions,
                                         ValueRange{segment});
     Value to = memref::LoadOp::create(rewriter, loc, world.logEnds(log),
@@ -1758,7 +1773,7 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
           rewriter.setInsertionPointToStart(branch.thenBlock());
           emitQueryBody(rewriter, query, IRMapping(), archetype, world, layout,
                         row, world.count(loc, archetype), tick, Value(),
-                        /*parallel=*/false);
+                        parallel);
           return {};
         },
         []() -> SmallVector<Value> { return {}; });
@@ -1814,6 +1829,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   scf::IfOp scanOrWalk;
   Operation *anchor = query;
   Value zero, one;
+  // Entries pending in all the query's logs, for choosing a parallel walk.
+  Value pending;
   if (useLogs) {
     zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
     one = arith::ConstantIndexOp::create(rewriter, loc, 1);
@@ -1822,6 +1839,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     Value scan = arith::CmpIOp::create(
         rewriter, loc, arith::CmpIPredicate::eq, seen,
         arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+    pending = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
     for (auto [k, trigger] : llvm::enumerate(triggers)) {
       const WorldLog &log = *layout.findLog(getStamp(trigger));
       Value positions =
@@ -1829,7 +1847,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       auto segments = scf::ForOp::create(
           rewriter, loc, zero,
           arith::ConstantIndexOp::create(rewriter, loc, log.segments), one,
-          ValueRange{scan});
+          ValueRange{scan, pending});
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(segments.getBody());
       Value segment = segments.getInductionVar();
@@ -1848,12 +1866,17 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
           arith::SubIOp::create(rewriter, loc, end, from),
           arith::ConstantIntOp::create(rewriter, loc, log.segmentCapacity,
                                        64));
+      Value more = arith::AddIOp::create(
+          rewriter, loc, segments.getRegionIterArg(1),
+          arith::SubIOp::create(rewriter, loc, end, from));
       scf::YieldOp::create(
           rewriter, loc,
           ValueRange{arith::OrIOp::create(rewriter, loc,
-                                          segments.getRegionIterArg(0), lost)});
+                                          segments.getRegionIterArg(0), lost),
+                     more});
       rewriter.setInsertionPointAfter(segments);
       scan = segments.getResult(0);
+      pending = segments.getResult(1);
     }
     scanOrWalk = scf::IfOp::create(rewriter, loc, scan,
                                    /*withElseRegion=*/true);
@@ -1891,7 +1914,23 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
 
   if (useLogs) {
     rewriter.setInsertionPoint(scanOrWalk.elseBlock()->getTerminator());
-    walkLogs(rewriter, query, layout, world, tick, seen);
+    // A walk only pays for a parallel region beyond some number of entries;
+    // the count of pending entries decides at run time.
+    if (options.parallelEntities && entityLocal) {
+      Value many = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::sge, pending,
+          arith::ConstantIntOp::create(rewriter, loc,
+                                       options.parallelMinEvents, 64));
+      auto walk = scf::IfOp::create(rewriter, loc, many,
+                                    /*withElseRegion=*/true);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(walk.thenBlock()->getTerminator());
+      walkLogs(rewriter, query, layout, world, tick, seen, /*parallel=*/true);
+      rewriter.setInsertionPoint(walk.elseBlock()->getTerminator());
+      walkLogs(rewriter, query, layout, world, tick, seen, /*parallel=*/false);
+    } else {
+      walkLogs(rewriter, query, layout, world, tick, seen, /*parallel=*/false);
+    }
     // The query has read every segment to where it ended when it started;
     // the slowest reader of each segment bounds how far writers append.
     rewriter.setInsertionPoint(query);
@@ -2304,7 +2343,8 @@ struct EcsLowerToLoops
                        rewriter.getI64IntegerAttr(reactiveIndex++));
     });
     MemRefType arenaType = getArenaType(module.getContext(), *layout);
-    LoopOptions options{parallelEntities, parallelMinEntities, explain};
+    LoopOptions options{parallelEntities, parallelMinEntities,
+                        parallelMinEvents, explain};
     SymbolTable symbols(module);
 
     // Schedules first: fusion reads the systems' bodies before they are

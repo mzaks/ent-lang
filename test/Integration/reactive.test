@@ -33,7 +33,7 @@
 // RUN: %t.stages | FileCheck %s
 
 // RUN: ecs-opt %S/../../examples/reactive.mlir \
-// RUN:     "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:     "--ecs-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=1" \
 // RUN:     --convert-scf-to-openmp --canonicalize --ecs-omp-nowait \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll

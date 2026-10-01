@@ -49,6 +49,10 @@ def EcsLowerToLoops : Pass<"ecs-lower-to-loops", "ModuleOp"> {
            "Entity count from which a parallel entity loop runs; on an M4 "
            "Max with default libomp the fused example pays off between 1e5 "
            "and 1e6 entities">,
+    Option<"parallelMinEvents", "parallel-min-events", "int64_t",
+           /*default=*/"16384",
+           "Pending event-log entries from which a reactive query walks its "
+           "logs' segments in parallel (with parallel-entities)">,
     Option<"fuseSystems", "fuse-systems", "bool", /*default=*/"false",
            "Inline the systems of each schedule and fuse their queries into "
            "one loop per archetype">,
