@@ -71,7 +71,8 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   capacity stops the program with a message. `ecs.despawn`, inside a query,
   removes the entity it visits; the removal is deferred to the end of the
   query, so the query still visits every entity it would have. A system that
-  does either declares the archetype in `writes`, e.g. `writes [@Bullet]`.
+  does either and declares its access (see `ecs.system`) lists the archetype
+  in `writes`, e.g. `writes [@Bullet]`.
 - `ecs.add` and `ecs.remove` work on any component; the archetypes decide
   what they do. Where the component is optional they set or clear its
   presence; where it is not, the entity moves to the archetype with exactly
@@ -105,7 +106,8 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   in parallel or not, even for floating-point `add`. A value sent to a dead
   id or to an entity without the component is dropped. An apply sits in a
   query, not inside a loop there, and all applies of one query to a field
-  use the same rule; the system declares the component in `writes`.
+  use the same rule; a system that declares its access lists the component
+  in `writes`.
   `examples/damage.mlir` has torpedoes damaging their target ships.
 - `ecs.query (%b: !ecs.ref<@Bar, mut>) on [changed @Hull "hp", added @Hull,
   removed @Shield] { ... }` is a reactive query, after Entitas's reactive
@@ -125,8 +127,8 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   bars only for ships that were hit. A trigger may set the capacity of its
   event log (below): `changed @Hull "hp" log 4096`, or `log 0` for none.
 - `ecs.resource @Clock (dt: f32, frame: i64)`: world state that exists
-  exactly once and is not an entity. Systems declare it in `reads`/`writes`
-  and access it with `ecs.read @Clock "dt" : f32` and
+  exactly once and is not an entity. Systems access it with
+  `ecs.read @Clock "dt" : f32` and
   `ecs.write @Clock "frame", %v : i64`. Reads are allowed anywhere in a
   system; writes are not allowed inside a query, where every entity would
   write the same field and so depend on the others. Inside a query,
@@ -134,8 +136,12 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   resource field instead (`add`, `min` or `max`), with the same rules and
   guarantees as `ecs.apply`: combined when the query ends, in a fixed
   order, so the result is the same however the query ran.
-- `ecs.system @s(%params) reads [...] writes [...] { ... }`: declared access;
-  `writes` implies read.
+- `ecs.system @s(%params) { ... }`: what a system reads and writes is
+  inferred from its body (`--ecs-print-access` shows it). It may also declare
+  it, `ecs.system @s(%params) reads [...] writes [...] { ... }`, as a
+  contract: a system that declares either list (even `reads []`) must stay
+  within both, and the verifier says where it does not. `writes` implies
+  read.
 - `ecs.query (%p: !ecs.ref<@Position, mut>, ...) { ... }`: body runs once per
   matching entity; refs exist only as query arguments.
 - `ecs.get` / `ecs.set`: field access through a ref; `set` needs `mut`.
@@ -145,16 +151,17 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   parallel; stages execute in order.
 
 The verifier checks that every query and every resource access stays
-inside its system's declared access, that no query binds a component twice
-or writes a resource, that refs are only used by `ecs.get` and `ecs.set`,
-and that field names and types match the declarations.
+inside its system's declared access, where it declares one, that no query
+binds a component twice or writes a resource, that refs are only used by
+`ecs.get` and `ecs.set`, and that field names and types match the
+declarations.
 
 ## Access analysis and scheduling
 
 A system's access is computed per column, `Archetype.Component.field`, from
 the `ecs.get` and `ecs.set` ops it contains, in every archetype its queries
-match. Declared `reads`/`writes` remain the contract the verifier enforces,
-but the analysis is finer: two systems that both declare `writes [@Velocity]`
+match; it does not need declarations, and where a system declares its
+access the analysis is still finer: two systems that both write `Velocity`
 do not conflict if one only touches `Body.Velocity.dy` and the other only
 `Particle.Velocity.dx`, and binding a component to select archetypes is not
 a read. Resource fields are columns too (`Clock.frame`), so a system that
