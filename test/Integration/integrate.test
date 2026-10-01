@@ -42,6 +42,18 @@
 // The first stage (gravity, wind, decay) forks a parallel region.
 // OMP: call void {{.*}}@__kmpc_fork_call
 
+// The same program written in ent-lang (examples/integrate.ent), imported,
+// with its own header, prints the same.
+// RUN: mkdir -p %t.ent
+// RUN: ent-translate --import-ent %S/../../examples/integrate.ent -o %t.ent.mlir
+// RUN: ent-translate --ent-to-c-header %t.ent.mlir -o %t.ent/integrate_world.h
+// RUN: ent-opt %t.ent.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ent.ll
+// RUN: clang -O2 -Wno-override-module %t.ent.ll \
+// RUN:     -I%t.ent %S/../../examples/host/integrate_main.c -o %t.entexe
+// RUN: %t.entexe | FileCheck %s
+
 // Three frames of dt = 0.5 with g = 9.81: gravity lowers dy by 4.905 per
 // frame before integrate moves the body.
 // CHECK: body 0: pos (1.5000, 85.2850) vel (1.0000, -14.7150)

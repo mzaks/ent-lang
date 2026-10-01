@@ -40,6 +40,18 @@
 // RUN:     -I%t.dir %S/../../examples/host/damage_main.c %openmp -o %t.par
 // RUN: %t.par | FileCheck %s
 
+// The same program written in ent-lang (examples/damage.ent), imported,
+// with its own header, prints the same.
+// RUN: mkdir -p %t.ent
+// RUN: ent-translate --import-ent %S/../../examples/damage.ent -o %t.ent.mlir
+// RUN: ent-translate --ent-to-c-header %t.ent.mlir -o %t.ent/damage_world.h
+// RUN: ent-opt %t.ent.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ent.ll
+// RUN: clang -O2 -Wno-override-module %t.ent.ll \
+// RUN:     -I%t.ent %S/../../examples/host/damage_main.c -o %t.entexe
+// RUN: %t.entexe | FileCheck %s
+
 // Frame 0: three torpedoes hit ship 0 (100 - 40 - 40 - 10 = 10), one sinks
 // ship 1 (30 - 50). The new ship takes ship 1's slot; in frame 1 the last
 // torpedo, aimed at ship 1, hits nothing.

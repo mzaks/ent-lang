@@ -1,0 +1,54 @@
+// examples/reactive.mlir in ent-lang: a ship's health bar is redrawn only
+// when its hp changed, an alarm counts shields going down, and a counter
+// counts shields coming back. The host deals damage (or repairs, with
+// negative damage) through Hit.
+
+component Hull { hp: f32 }
+component Hit { damage: f32 }
+component Bar { width: f32, redraws: i32, alarms: i32, restores: i32 }
+tag Shield
+
+archetype Ship { Hull, Hit, Bar, optional Shield } capacity 16
+
+// Takes the damage waiting in Hit; repairs restore the shield.
+system absorb() {
+  for e, h: mut Hull, hit: mut Hit where hit.damage != 0.0 {
+    h.hp -= hit.damage
+    if hit.damage < 0.0 { e.add(Shield) }
+    hit.damage = 0.0
+  }
+}
+
+// A shield fails below 50 hp.
+system fail() {
+  for e, h: Hull, s: Shield where h.hp < 50.0 {
+    e.remove(Shield)
+  }
+}
+
+system redraw() {
+  for h: Hull, b: mut Bar on changed Hull.hp {
+    b.width = h.hp
+    b.redraws += 1
+  }
+}
+
+system alarm() {
+  for b: mut Bar on removed Shield {
+    b.alarms += 1
+  }
+}
+
+system restored() {
+  for b: mut Bar, s: Shield on added Shield {
+    b.restores += 1
+  }
+}
+
+schedule frame() {
+  absorb()
+  fail()
+  redraw()
+  alarm()
+  restored()
+}

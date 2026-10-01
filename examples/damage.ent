@@ -1,0 +1,32 @@
+// examples/damage.mlir in ent-lang: a torpedo whose fuse runs out deals its
+// damage to its target ship's hull (`Hull(target).hp -= damage` combines
+// with every other hit in the frame) and is destroyed.
+
+component Hull { hp: f32 }
+component Fuse { seconds: f32 }
+component Warhead { damage: f32 }
+component Target { entity: entity }
+
+archetype Ship { Hull } capacity 16
+archetype Torpedo { Fuse, Warhead, Target } capacity 64
+
+system detonate(dt: f32) {
+  for e, f: mut Fuse, w: Warhead, t: Target {
+    f.seconds -= dt
+    if f.seconds <= 0.0 {
+      Hull(t.entity).hp -= w.damage
+      e.destroy()
+    }
+  }
+}
+
+system sink() {
+  for e, h: Hull where h.hp <= 0.0 {
+    e.destroy()
+  }
+}
+
+schedule frame(dt: f32) {
+  detonate(dt)
+  sink()
+}

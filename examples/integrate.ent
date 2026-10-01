@@ -1,0 +1,55 @@
+// examples/integrate.mlir in ent-lang: bodies move by their velocity,
+// gravity pulls every body with mass down, wind pushes particles sideways
+// and their lifetime runs out, and a frame counter advances. Access is
+// inferred; archetypes are declared, since only the host spawns entities.
+
+component Position { x: f32, y: f32 }
+component Velocity { dx: f32, dy: f32 }
+component Mass { kg: f32 }
+component Lifetime { seconds: f32 }
+
+unique Wind { strength: f32 }
+unique Clock { frame: i64 }
+
+archetype Body { Position, Velocity, Mass } capacity 10000000
+archetype Particle { Position, Velocity, Lifetime } capacity 10000000
+archetype Scenery { Position } capacity 10000000
+archetype Player { Position, Velocity } capacity 1
+
+system gravity(dt: f32, g: f32) {
+  // Mass is bound only to select bodies.
+  for v: mut Velocity with Mass {
+    v.dy -= g * dt
+  }
+}
+
+system wind(dt: f32) {
+  for v: mut Velocity with Lifetime {
+    v.dx += Wind.strength * dt
+  }
+}
+
+system decay(dt: f32) {
+  for l: mut Lifetime {
+    l.seconds -= dt
+  }
+}
+
+system integrate(dt: f32) {
+  for p: mut Position, v: Velocity {
+    p.x += v.dx * dt
+    p.y += v.dy * dt
+  }
+}
+
+system tick() {
+  Clock.frame += 1
+}
+
+schedule frame(dt: f32) {
+  gravity(dt, 9.81)
+  wind(dt)
+  integrate(dt)
+  decay(dt)
+  tick()
+}

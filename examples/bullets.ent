@@ -1,0 +1,42 @@
+// examples/bullets.mlir in ent-lang: guns fire bullets on a cooldown,
+// bullets fly, and a bullet whose lifetime runs out is destroyed. Bullets
+// are spawned by listing their components; the compiler infers their
+// archetype, @Position_Velocity_Lifetime. Guns are spawned by the host only,
+// so their archetype is declared.
+component Position { x: f32 }
+component Velocity { dx: f32 } capacity 64
+component Cooldown { seconds: f32, period: f32 }
+component Lifetime { seconds: f32 } capacity 64
+
+archetype Gun { Position, Cooldown } capacity 4
+
+system shoot(dt: f32) {
+  for p: Position, c: mut Cooldown {
+    let left = c.seconds - dt
+    if left <= 0.0 {
+      spawn { Position { x: p.x }, Velocity { dx: 10.0 }, Lifetime { seconds: 1.0 } }
+      c.seconds = left + c.period
+    } else {
+      c.seconds = left
+    }
+  }
+}
+
+system fly(dt: f32) {
+  for p: mut Position, v: Velocity {
+    p.x += v.dx * dt
+  }
+}
+
+system expire(dt: f32) {
+  for e, l: mut Lifetime {
+    l.seconds -= dt
+    if l.seconds <= 0.0 { e.destroy() }
+  }
+}
+
+schedule frame(dt: f32) {
+  shoot(dt)
+  fly(dt)
+  expire(dt)
+}

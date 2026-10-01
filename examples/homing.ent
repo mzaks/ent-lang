@@ -1,0 +1,37 @@
+// examples/homing.mlir in ent-lang: missiles steer towards their target
+// ship, read with `if let`, which runs only if the target is still there.
+
+component Position { x: f32 }
+component Velocity { dx: f32 }
+component Hull { hp: f32 }
+component Target { entity: entity }
+
+archetype Ship { Position, Velocity, Hull } capacity 16
+archetype Missile { Position, Velocity, Target } capacity 64
+
+system steer(gain: f32) {
+  for p: Position, v: mut Velocity, t: Target {
+    if let tx = Position(t.entity).x {
+      v.dx = (tx - p.x) * gain
+    }
+  }
+}
+
+system move(dt: f32) {
+  for p: mut Position, v: Velocity {
+    p.x += v.dx * dt
+  }
+}
+
+// Ships (they have a Hull) past the edge leave the arena.
+system leave(edge: f32) {
+  for e, p: Position with Hull where p.x > edge {
+    e.destroy()
+  }
+}
+
+schedule frame(dt: f32) {
+  steer(1.0)
+  move(dt)
+  leave(20.0)
+}

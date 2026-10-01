@@ -39,6 +39,18 @@
 // RUN:     -I%t.dir %S/../../examples/host/homing_main.c %openmp -o %t.par
 // RUN: %t.par | FileCheck %s
 
+// The same program written in ent-lang (examples/homing.ent), imported,
+// with its own header, prints the same.
+// RUN: mkdir -p %t.ent
+// RUN: ent-translate --import-ent %S/../../examples/homing.ent -o %t.ent.mlir
+// RUN: ent-translate --ent-to-c-header %t.ent.mlir -o %t.ent/homing_world.h
+// RUN: ent-opt %t.ent.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ent.ll
+// RUN: clang -O2 -Wno-override-module %t.ent.ll \
+// RUN:     -I%t.ent %S/../../examples/host/homing_main.c -o %t.entexe
+// RUN: %t.entexe | FileCheck %s
+
 // dt = 0.5, gain 1. Ship 1 (15, +4) passes the edge at 20 in frame 3 and is
 // despawned; in frame 4 missile 1's lookup fails and it keeps dx = 6.75.
 // Missile 0 closes in on ship 0: dx 10, 5.5, 3.25, 2.125.

@@ -77,6 +77,18 @@
 // RUN:     -I%t.dir %S/Inputs/reactive_moves_main.c -o %t.moves
 // RUN: %t.moves | FileCheck %s
 
+// The same program written in ent-lang (examples/reactive.ent), imported,
+// with its own header, prints the same.
+// RUN: mkdir -p %t.ent
+// RUN: ent-translate --import-ent %S/../../examples/reactive.ent -o %t.ent.mlir
+// RUN: ent-translate --ent-to-c-header %t.ent.mlir -o %t.ent/reactive_world.h
+// RUN: ent-opt %t.ent.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ent.ll
+// RUN: clang -O2 -Wno-override-module %t.ent.ll \
+// RUN:     -I%t.ent %S/../../examples/host/reactive_main.c -o %t.entexe
+// RUN: %t.entexe | FileCheck %s
+
 // Frame 0 is every query's first run: every bar is redrawn; the repairs
 // add shields, which @restored (after them in the frame) counts.
 // CHECK:      frame 0 ship 0: hp 100 width 100 redraws 1 alarms 0 restores 1 shield 1
