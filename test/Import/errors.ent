@@ -177,3 +177,50 @@ schedule f() {
   // expected-error @+1 {{a 'run_if' condition must be a bool}}
   s() run_if Count
 }
+
+// -----
+
+component Position { x: f32 }
+relation Synapse { weight: f32 } capacity 4
+system s() {
+  for p: Position {
+    // expected-error @+1 {{edges are visited from the entity a 'for' visits; name it: 'for e, ...'}}
+    for w, t in e.out(Synapse) {
+    }
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+relation Synapse { weight: f32 } capacity 4
+system s() {
+  for e, p: Position {
+    for w, t in e.out(Synapse) {
+      // expected-error @+1 {{'w' is not 'mut': bind it as 'for mut w, ...' to write it}}
+      w.weight = 1.0
+    }
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+relation Synapse { weight: f32 } capacity 4
+system s() {
+  for e, p: Position {
+    // expected-error @+1 {{'Synapse' needs a value for 'weight'}}
+    connect(e, e, Synapse)
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+system s() {
+  for e, p: Position {
+    // expected-error @+1 {{unknown relation 'Synapse'}}
+    for w, t in e.out(Synapse) {
+    }
+  }
+}

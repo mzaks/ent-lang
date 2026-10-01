@@ -131,6 +131,49 @@ system filters() {
   }
 }
 
+// Relations: edges with data. Inside a `for`, `for [mut] s, other in
+// e.out(R)` / `e.in(R)` visits the entity's edges; `s.disconnect()` drops
+// one; `connect(a, b, R { ... })` adds one.
+// CHECK: ent.relation @Synapse (weight: f32) capacity 64
+// CHECK: ent.relation @Follows () capacity 16
+relation Synapse { weight: f32 } capacity 64
+relation Follows capacity 16
+// CHECK-LABEL: ent.system @wire() {
+// CHECK:      ent.query (%{{.*}}: !ent.ref<@Health>) {
+// CHECK:        ent.edges @Synapse out (%[[S:.*]]: !ent.ref<@Synapse>, %[[T:.*]]: !ent.entity) {
+// CHECK:          %[[W:.*]] = ent.get %[[S]] "weight" : <@Synapse> -> f32
+// CHECK:          ent.apply %[[T]] @Position "x" add %[[W]] : f32
+// CHECK:        ent.edges @Follows in (%{{.*}}: !ent.ref<@Follows>, %[[P:.*]]: !ent.entity) {
+// CHECK:          ent.apply %[[P]] @Position "x" add
+// CHECK:        %[[A:.*]] = ent.entity
+// CHECK-NEXT:   %[[B:.*]] = ent.entity
+// CHECK:        ent.connect @Synapse %[[A]], %[[B]] (%{{.*}}) : f32
+system wire() {
+  for e, h: Health {
+    for s, t in e.out(Synapse) {
+      Position(t).x += s.weight
+    }
+  }
+  for e, h: Health {
+    for f, p in e.in(Follows) {
+      Position(p).x += 1.0
+    }
+    connect(e, e, Synapse { weight: 0.5 })
+  }
+}
+// CHECK-LABEL: ent.system @prune() {
+// CHECK:        ent.edges @Synapse out (%[[S:.*]]: !ent.ref<@Synapse, mut>, %{{.*}}: !ent.entity) {
+// CHECK:          ent.set %[[S]] "weight", %{{.*}} : <@Synapse, mut>, f32
+// CHECK:          ent.disconnect
+system prune() {
+  for e, h: Health {
+    for mut s, t in e.out(Synapse) {
+      s.weight *= 0.5
+      if s.weight < 0.01 { s.disconnect() }
+    }
+  }
+}
+
 // Schedules run systems; literals take the parameter's type.
 // CHECK-LABEL: ent.schedule @frame(%{{.*}}: f32) {
 // CHECK:      ent.run @step(%{{.*}}) : f32

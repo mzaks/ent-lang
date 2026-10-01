@@ -220,6 +220,9 @@ private:
   FailureOr<ExprPtr> parseBinary(int precedence);
   FailureOr<ExprPtr> parseUnary();
   FailureOr<ExprPtr> parsePrimary();
+  LogicalResult parseRelation();
+  LogicalResult parseEdges(llvm::SMLoc at);
+  LogicalResult parseConnect(llvm::SMLoc at);
   LogicalResult emitCondition(const Expr &expr);
   FailureOr<std::unique_ptr<Branch>> parseBranch();
   FailureOr<ComponentInit> parseComponentInit();
@@ -272,10 +275,21 @@ private:
 
   llvm::StringMap<Record> components;
   llvm::StringMap<Record> uniques;
+  llvm::StringMap<Record> relations;
+
+  /// The fields a ref's variable has: a component's, or for an edge a
+  /// relation's.
+  const Record &recordOf(const Variable &variable) {
+    auto relation = relations.find(variable.component);
+    if (relation != relations.end())
+      return relation->second;
+    return components[variable.component];
+  }
   llvm::StringMap<SmallVector<Type>> systems;
   SmallVector<llvm::StringMap<Variable>> scopes;
   /// Inside a `for`: the name of the visited entity, if bound.
   bool inQuery = false;
+  bool inEdges = false;
   std::string queryEntity;
 };
 
@@ -297,6 +311,8 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
       result = parseComponent(/*tag=*/true);
     else if (consumeKeyword("unique"))
       result = parseUnique();
+    else if (consumeKeyword("relation"))
+      result = parseRelation();
     else if (consumeKeyword("archetype"))
       result = parseArchetype();
     else if (consumeKeyword("system"))
@@ -310,12 +326,12 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
       module->setAttr("ent.default_capacity",
                       builder.getI64IntegerAttr(*capacity));
     } else if (token.isKeyword("world") || token.isKeyword("proc") ||
-               token.isKeyword("fn") || token.isKeyword("relation") ||
-               token.isKeyword("device") || token.isKeyword("prefab")) {
+               token.isKeyword("fn") || token.isKeyword("device") ||
+               token.isKeyword("prefab")) {
       result = error("'" + token.spelling + "' is not supported yet");
     } else {
       result = error("expected a declaration (component, tag, unique, "
-                     "archetype, system, schedule), found '" +
+                     "relation, archetype, system, schedule), found '" +
                      token.spelling + "'");
     }
     if (failed(result))
@@ -393,6 +409,34 @@ LogicalResult Parser::parseComponent(bool tag) {
                       builder.getArrayAttr(names), builder.getArrayAttr(types),
                       capacity);
   components[*name] = std::move(record);
+  return success();
+}
+
+// relation Name [{ fields }] capacity N
+LogicalResult Parser::parseRelation() {
+  llvm::SMLoc at = token.loc;
+  FailureOr<std::string> name = identifier("a relation name");
+  if (failed(name))
+    return failure();
+  if (components.count(*name) || uniques.count(*name))
+    return error(at, "'" + *name + "' is already declared");
+  Record record;
+  if (token.is(Token::LBrace) && failed(parseFields(record)))
+    return failure();
+  if (failed(expectKeyword("capacity")))
+    return failure();
+  FailureOr<int64_t> capacity = integer("a capacity");
+  if (failed(capacity))
+    return failure();
+  SmallVector<Attribute> names, types;
+  for (auto &[field, type] : record.fields) {
+    names.push_back(builder.getStringAttr(field));
+    types.push_back(TypeAttr::get(type));
+  }
+  RelationOp::create(builder, loc(at), builder.getStringAttr(*name),
+                     builder.getArrayAttr(names), builder.getArrayAttr(types),
+                     builder.getI64IntegerAttr(*capacity));
+  relations[*name] = std::move(record);
   return success();
 }
 
@@ -686,6 +730,8 @@ LogicalResult Parser::parseStatement() {
   }
   if (consumeKeyword("for"))
     return parseFor();
+  if (consumeKeyword("connect"))
+    return parseConnect(at);
   if (consumeKeyword("if"))
     return parseIf();
   if (token.isKeyword("spawn")) {
@@ -702,12 +748,155 @@ LogicalResult Parser::parseStatement() {
   return error(at, "expected a statement, found '" + token.spelling + "'");
 }
 
+// for [mut] s, other in e.out(R) { } / e.in(R), inside a `for`
+LogicalResult Parser::parseEdges(llvm::SMLoc at) {
+  if (inEdges)
+    return error(at, "edge loops cannot be nested");
+  bool mut = consumeKeyword("mut");
+  FailureOr<std::string> edge = identifier("a name for the edge");
+  if (failed(edge))
+    return failure();
+  if (token.is(Token::Colon))
+    return error(at, "a 'for' cannot be nested in another 'for'; inside "
+                     "one, 'for s, other in e.out(R)' visits the entity's "
+                     "edges");
+  if (failed(expect(Token::Comma, "','")))
+    return failure();
+  FailureOr<std::string> other =
+      identifier("a name for the entity at the other end");
+  if (failed(other) || failed(expectKeyword("in")))
+    return failure();
+  llvm::SMLoc entityAt = token.loc;
+  FailureOr<std::string> entity = identifier("the visited entity");
+  if (failed(entity))
+    return failure();
+  if (*entity != queryEntity)
+    return error(entityAt,
+                 queryEntity.empty()
+                     ? "edges are visited from the entity a 'for' visits; "
+                       "name it: 'for e, ...'"
+                     : "edges are visited from the entity the 'for' visits, '" +
+                           queryEntity + "', not '" + *entity + "'");
+  if (failed(expect(Token::Dot, "'.'")))
+    return failure();
+  llvm::SMLoc directionAt = token.loc;
+  FailureOr<std::string> direction = identifier("'out' or 'in'");
+  if (failed(direction))
+    return failure();
+  if (*direction != "out" && *direction != "in")
+    return error(directionAt, "expected 'out' or 'in', found '" + *direction +
+                                  "'");
+  if (failed(expect(Token::LParen, "'('")))
+    return failure();
+  llvm::SMLoc relationAt = token.loc;
+  FailureOr<std::string> relation = identifier("a relation");
+  if (failed(relation) || failed(expect(Token::RParen, "')'")))
+    return failure();
+  if (!relations.count(*relation))
+    return error(relationAt, "unknown relation '" + *relation + "'");
+
+  OperationState state(loc(at), EdgesOp::getOperationName());
+  state.addAttribute("relation", symbol(*relation));
+  state.addAttribute("direction", builder.getStringAttr(*direction));
+  Region *body = state.addRegion();
+  auto *block = new Block();
+  body->push_back(block);
+  block->addArgument(RefType::get(context, symbol(*relation), mut), loc(at));
+  block->addArgument(EntityType::get(context), loc(at));
+  Operation *edges = builder.create(state);
+
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(block);
+  ScopeGuard scope(*this);
+  bind(*edge, {Variable::Ref, block->getArgument(0), *relation, mut});
+  bind(*other, Variable::ofValue(block->getArgument(1)));
+  inEdges = true;
+  llvm::scope_exit leave([&] { inEdges = false; });
+  if (failed(parseBlock()))
+    return failure();
+  EdgesOp::ensureTerminator(edges->getRegion(0), builder, loc(at));
+  return success();
+}
+
+// connect(source, target, Relation { field: value, ... })
+LogicalResult Parser::parseConnect(llvm::SMLoc at) {
+  if (failed(expect(Token::LParen, "'('")))
+    return failure();
+  FailureOr<ExprPtr> source = parseExpr();
+  if (failed(source) || failed(expect(Token::Comma, "','")))
+    return failure();
+  FailureOr<ExprPtr> target = parseExpr();
+  if (failed(target) || failed(expect(Token::Comma, "','")))
+    return failure();
+  llvm::SMLoc relationAt = token.loc;
+  FailureOr<std::string> relation = identifier("a relation");
+  if (failed(relation))
+    return failure();
+  auto record = relations.find(*relation);
+  if (record == relations.end())
+    return error(relationAt, "unknown relation '" + *relation + "'");
+  // The field values, by name, as in a component's initialiser.
+  SmallVector<std::pair<std::string, ExprPtr>> fields;
+  if (consumeIf(Token::LBrace)) {
+    while (!token.is(Token::RBrace)) {
+      FailureOr<std::string> field = identifier("a field");
+      if (failed(field) || failed(expect(Token::Colon, "':'")))
+        return failure();
+      FailureOr<ExprPtr> value = parseExpr();
+      if (failed(value))
+        return failure();
+      fields.push_back({*field, std::move(*value)});
+      if (!consumeIf(Token::Comma))
+        break;
+    }
+    if (failed(expect(Token::RBrace, "'}'")))
+      return failure();
+  }
+  if (failed(expect(Token::RParen, "')'")))
+    return failure();
+  if (inEdges)
+    return error(at, "'connect' inside an edge loop is not supported yet");
+  FailureOr<mlir::Value> sourceValue =
+      emit(**source, EntityType::get(context));
+  FailureOr<mlir::Value> targetValue =
+      emit(**target, EntityType::get(context));
+  if (failed(sourceValue) || failed(targetValue))
+    return failure();
+  if (!isa<EntityType>(sourceValue->getType()) ||
+      !isa<EntityType>(targetValue->getType()))
+    return error(at, "'connect' takes two entities");
+  SmallVector<mlir::Value> values;
+  for (auto &[field, type] : record->second.fields) {
+    const Expr *value = nullptr;
+    for (auto &[name, expr] : fields)
+      if (name == field)
+        value = expr.get();
+    if (!value)
+      return error(relationAt, "'" + *relation + "' needs a value for '" +
+                                   field + "'");
+    FailureOr<mlir::Value> emitted = emit(*value, type);
+    if (failed(emitted))
+      return failure();
+    if (emitted->getType() != type)
+      return error(value->loc, "value for '" + field +
+                                   "' has a different type than the field");
+    values.push_back(*emitted);
+  }
+  for (auto &[name, expr] : fields)
+    if (!record->second.fieldType(name))
+      return error(expr->loc, "relation '" + *relation + "' has no field '" +
+                                  name + "'");
+  ConnectOp::create(builder, loc(at), symbol(*relation), *sourceValue,
+                    *targetValue, values);
+  return success();
+}
+
 // for [e,] [p: [mut] P, ...] [with A, any(B, C)] [without D]
 //     [where cond] [on trigger, ...] { }
 LogicalResult Parser::parseFor() {
   llvm::SMLoc at = token.loc;
   if (inQuery)
-    return error(at, "a 'for' cannot be nested in another 'for'");
+    return parseEdges(at);
   if (!isa<SystemOp>(builder.getInsertionBlock()->getParentOp()))
     return error(at, "a 'for' must be at the top level of a system");
 
@@ -1185,13 +1374,25 @@ LogicalResult Parser::parseNameStatement() {
     FailureOr<std::string> field = identifier("a field");
     if (failed(field))
       return failure();
-    Type type = components[variable->component].fieldType(*field);
+    bool edge = relations.count(variable->component);
+    // s.disconnect(): remove the edge the loop visits.
+    if (edge && *field == "disconnect" && consumeIf(Token::LParen)) {
+      if (failed(expect(Token::RParen, "')'")))
+        return failure();
+      DisconnectOp::create(builder, loc(at));
+      return success();
+    }
+    Type type = recordOf(*variable).fieldType(*field);
     if (!type)
-      return error(fieldAt, "component '" + variable->component +
-                                "' has no field '" + *field + "'");
+      return error(fieldAt, std::string(edge ? "relation '" : "component '") +
+                                variable->component + "' has no field '" +
+                                *field + "'");
     if (!variable->mut)
-      return error(at, "'" + name + "' is not 'mut': bind it as '" + name +
-                           ": mut " + variable->component + "' to write it");
+      return error(at, edge ? "'" + name + "' is not 'mut': bind it as 'for "
+                                  "mut " + name + ", ...' to write it"
+                            : "'" + name + "' is not 'mut': bind it as '" +
+                                  name + ": mut " + variable->component +
+                                  "' to write it");
     auto op = parseAssignOp();
     if (failed(op))
       return failure();
@@ -1537,7 +1738,7 @@ Type Parser::typeOf(const Expr &expr) {
   case Expr::Field: {
     if (const Variable *variable = lookup(expr.name))
       if (variable->kind == Variable::Ref)
-        return components[variable->component].fieldType(expr.field);
+        return recordOf(*variable).fieldType(expr.field);
     auto unique = uniques.find(expr.name);
     if (unique != uniques.end())
       return unique->second.fieldType(expr.field);
@@ -1648,10 +1849,13 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
     if (const Variable *variable = lookup(expr.name)) {
       if (variable->kind != Variable::Ref)
         return error(expr.loc, "'" + expr.name + "' has no fields");
-      Type type = components[variable->component].fieldType(expr.field);
+      Type type = recordOf(*variable).fieldType(expr.field);
       if (!type)
-        return error(expr.loc, "component '" + variable->component +
-                                   "' has no field '" + expr.field + "'");
+        return error(expr.loc, std::string(relations.count(variable->component)
+                                               ? "relation '"
+                                               : "component '") +
+                                   variable->component + "' has no field '" +
+                                   expr.field + "'");
       return GetOp::create(builder, at, type, variable->value,
                            builder.getStringAttr(expr.field))
           .getResult();
