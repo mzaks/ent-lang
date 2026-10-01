@@ -43,14 +43,16 @@ entity's field. A query may not look up a field it changes itself (the
 verifier rejects it), so every lookup sees the value the field had when the
 query started, whichever entities have run before.
 
-**Q4. Resources, as of the query's start.** No query writes a resource (`acc`
-onto resources, decided, will combine at the commit point like applies), so a
-resource read inside a query sees the value it had when the query started.
+**Q4. Resources, as of the query's start.** No query writes a resource; it
+may only accumulate into one (`ecs.accumulate`), which takes effect at the
+commit point. So a resource read inside a query sees the value it had when
+the query started.
 
 **Q5. Deferred to the commit point.** These do not take effect while the
 query runs:
 
 - `ecs.apply`: values sent to other entities;
+- `ecs.accumulate`: values combined into a resource;
 - `ecs.despawn`;
 - `ecs.add` / `ecs.remove` where the storage moves the entity to another
   archetype.
@@ -64,10 +66,11 @@ but not visited by the query that spawned it (Q1).
 When a query has run for every entity it visits, in this order:
 
 1. **Applies** are combined into their targets, by apply op (in program
-   order), then source archetype, then source row. The order is fixed, so the
-   result does not depend on how the query's loop ran, in parallel or not,
-   even for floating-point `add`. Applies land before structural changes,
-   while every id still leads to where its entity was.
+   order), then source archetype, then source row; then **accumulates** into
+   their resources, in the same order. The order is fixed, so the result
+   does not depend on how the query's loop ran, in parallel or not, even for
+   floating-point `add`. Applies land before structural changes, while every
+   id still leads to where its entity was.
 2. **Structural changes** are applied per archetype: despawns free their ids,
    moves append their entities to the target archetype, and the rows they
    leave are filled by swap-remove. Within one query the last structural

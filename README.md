@@ -129,7 +129,11 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   and access it with `ecs.read @Clock "dt" : f32` and
   `ecs.write @Clock "frame", %v : i64`. Reads are allowed anywhere in a
   system; writes are not allowed inside a query, where every entity would
-  write the same field and so depend on the others.
+  write the same field and so depend on the others. Inside a query,
+  `ecs.accumulate @Score "points" add %bonus : i64` combines values into a
+  resource field instead (`add`, `min` or `max`), with the same rules and
+  guarantees as `ecs.apply`: combined when the query ends, in a fixed
+  order, so the result is the same however the query ran.
 - `ecs.system @s(%params) reads [...] writes [...] { ... }`: declared access;
   `writes` implies read.
 - `ecs.query (%p: !ecs.ref<@Position, mut>, ...) { ... }`: body runs once per
