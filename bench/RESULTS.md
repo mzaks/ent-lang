@@ -853,3 +853,76 @@ the build), falling; nothing above 0.3 cores before, between and after.
   rate it cannot know.
 - Combining schemes (a collector that falls back to polling past a size,
   or block stamps with per-block collectors) was not tried.
+
+## 2026-10-01: event logs for reactive queries
+
+Same machine and toolchain. Reactive queries now walk an event log of the
+entities with events (default: an eighth of the entities, 131,072 entries
+in 64 segments here) and scan only on their first run or when a segment
+overflowed; `compiled` and `compiled-par` use it, `-scan` variants are the
+same programs with `log 0` (the previous behaviour). Same benchmark,
+1e6 units, us per frame, median of 5 processes (spread), redraws per frame
+in brackets. Checksums agree in all configurations; nothing above 0.4
+cores before, between or after (load average 2.4-2.5).
+
+### Light redraw
+
+| changed | c-poll | c-rowstamp | c-blockstamp | c-collector | c-bevy | c-unity | compiled | compiled-scan | compiled-par | compiled-par-scan |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.01% | 446.7 (4%) [1,000,000] | 470.3 (4%) [107] | 262.7 (6%) [107] | 247.0 (7%) [107] | 467.8 (4%) [107] | 438.0 (3%) [1,000,000] | 273.8 (5%) [107] | 435.6 (2%) [107] | **80.5 (22%) [107]** | 143.1 (12%) [107] |
+| 0.10% | 450.2 (5%) [1,000,000] | 485.7 (2%) [1,008] | 309.3 (3%) [1,008] | 257.1 (5%) [1,008] | 481.5 (2%) [1,008] | 441.9 (3%) [1,000,000] | 297.8 (4%) [1,008] | 447.6 (2%) [1,008] | **91.9 (2%) [1,008]** | 143.3 (3%) [1,008] |
+| 1.00% | 472.3 (4%) [1,000,000] | 527.6 (2%) [9,995] | 553.6 (4%) [9,995] | 309.4 (4%) [9,995] | 537.0 (2%) [9,995] | 471.8 (2%) [1,000,000] | 373.4 (1%) [9,995] | 476.5 (2%) [9,995] | **147.2 (2%) [9,995]** | 151.9 (2%) [9,995] |
+| 10.00% | 501.7 (3%) [1,000,000] | 597.7 (5%) [100,006] | 784.6 (4%) [100,006] | 434.3 (2%) [100,006] | 596.7 (3%) [100,006] | 499.0 (4%) [1,000,000] | 554.0 (2%) [100,006] | 517.3 (1%) [100,006] | 276.6 (1%) [100,006] | **157.5 (4%) [100,006]** |
+| 100.00% | 441.0 (1%) [1,000,000] | 711.2 (1%) [1,000,000] | 908.9 (1%) [1,000,000] | 996.3 (0%) [1,000,000] | 842.1 (1%) [1,000,000] | 458.0 (3%) [1,000,000] | 1,068.6 (2%) [1,000,000] | 573.5 (2%) [1,000,000] | **215.9 (4%) [1,000,000]** | 222.9 (2%) [1,000,000] |
+
+### Heavy redraw
+
+| changed | c-poll | c-rowstamp | c-blockstamp | c-collector | c-bevy | c-unity | compiled | compiled-scan | compiled-par | compiled-par-scan |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.01% | 1,853.4 (3%) [1,000,000] | 495.0 (2%) [107] | 266.7 (6%) [107] | 252.3 (4%) [107] | 493.9 (3%) [107] | 1,850.7 (2%) [1,000,000] | 272.7 (2%) [107] | 495.9 (3%) [107] | **82.6 (21%) [107]** | 150.3 (12%) [107] |
+| 0.10% | 1,856.5 (2%) [1,000,000] | 525.0 (3%) [1,008] | 335.8 (3%) [1,008] | 264.4 (1%) [1,008] | 536.1 (3%) [1,008] | 1,874.3 (3%) [1,000,000] | 301.5 (2%) [1,008] | 534.9 (2%) [1,008] | **105.0 (12%) [1,008]** | 155.9 (3%) [1,008] |
+| 1.00% | 1,898.0 (2%) [1,000,000] | 664.8 (1%) [9,995] | 837.7 (1%) [9,995] | 365.9 (2%) [9,995] | 713.2 (1%) [9,995] | 1,879.4 (3%) [1,000,000] | 444.9 (2%) [9,995] | 688.9 (2%) [9,995] | 214.1 (3%) [9,995] | **212.5 (1%) [9,995]** |
+| 10.00% | 1,933.5 (2%) [1,000,000] | 997.3 (2%) [100,006] | 1,201.6 (2%) [100,006] | 981.8 (2%) [100,006] | 1,031.2 (3%) [100,006] | 1,921.2 (2%) [1,000,000] | 1,076.0 (3%) [100,006] | 1,016.9 (2%) [100,006] | 791.8 (0%) [100,006] | **241.9 (2%) [100,006]** |
+| 100.00% | 1,892.7 (2%) [1,000,000] | 6,659.3 (1%) [1,000,000] | 6,782.9 (2%) [1,000,000] | 6,872.7 (1%) [1,000,000] | 6,656.7 (1%) [1,000,000] | 1,890.0 (2%) [1,000,000] | 7,157.2 (1%) [1,000,000] | 6,650.3 (1%) [1,000,000] | 1,033.5 (2%) [1,000,000] | **1,020.0 (2%) [1,000,000]** |
+
+### How it got here
+
+- A first version gave all threads of a parallel loop one shared count
+  per log. Against thread count (10% changed, light): 585 us on 1
+  thread, 2,956 on 2, 6,260 on 16, while the parallel scan went from 689
+  to 152 us; so the shared count's contention it was. A per-thread log
+  keyed by `omp_get_thread_num` was abandoned: a call in the parallel body
+  keeps `--canonicalize` from inlining the `memref.alloca_scope` that
+  `--convert-scf-to-openmp` wraps the body in, and `--convert-scf-to-cf`
+  then rejects it. Segments by row range replaced both.
+- The same run found a bug: writers that stop appending once a log is
+  full left its count exactly one log ahead of the slowest reader, which
+  readers took for "no overflow", so a frame changing every unit redrew
+  only 131,072 of them (and the checksum differed). A full log now records
+  the overflow; `test/Integration/reactive_overflow.test` fails without
+  the fix.
+
+### What holds
+
+- Sequentially, walking the log pays where changes are sparse: 37% faster
+  than scanning with light work at 0.01% changed (274 against 436 us), 22%
+  at 1%, and 45% / 35% with heavy work at 0.01% / 1%. It comes within
+  11-21% of the hand-written collector (247-309 us light) up to 1%.
+- It costs where changes are dense: +7% at 10% light and +86% at 100%
+  light (1,069 against 574 us); +6% and +8% with heavy work. A frame that
+  changes everything pays for checking each write's segment and appending
+  until the overflow marks it, and scans anyway; not measured step by
+  step.
+- With parallel loops, the log helps up to 0.1% changed (81 against 143
+  us light, 83 against 150 heavy), ties at 1% and 100%, and loses at 10%
+  (277 against 158 us light, 792 against 242 heavy). There 100,006 entries
+  still fit (about 1,560 per segment of 2,048), so the query walks them,
+  and the walk is sequential while the scan runs on all threads.
+
+### Not done
+
+- Walking the segments in parallel (an entity's latest entry is in one
+  segment only, so it would be safe), or scanning earlier in parallel
+  builds.
+- Bounding the writers' cost in dense frames further, e.g. by skipping the
+  segment check after a writer loop saw its segment full.
