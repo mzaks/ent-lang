@@ -1077,3 +1077,34 @@ the start and 2.5 at the end, WindowServer at about 21% of a core.
 - Storing the input on every edge costs 2.5x on top at 1e4 x 100, where the
   rest stays in cache, and 1.2-1.4x at the larger sizes.
 - The id checks cost nothing measurable (-1% to +2%, within the spread).
+
+## 2026-10-02: pull after sorting by target and carrying the sum
+
+Two changes from the diagnosis above. (1) A relation the program visits
+only by incoming edges is stored sorted by target (sorting first by source,
+then stably by target, so an entity's incoming edges keep the order by
+source): an `in` loop then reads sources and weights in order, without the
+index. (2) A field of the visited entity that an edge loop sets is loaded
+once before the loop, carried through it (and the `scf.if`s in it) as a
+value, and stored once after it if it was set; the language guarantees
+nothing else in the loop reaches it, which LLVM cannot see through the
+arena's views. The id checks stay. `bench/snn/run.py --bias 0.15
+--variants c-pull,c-pull-par,ent-pull,ent-pull-par`; us per step, median of
+5 processes (spread), checksums agree. Load average 4.1 at the start
+(falling after XProtect had scanned the new binaries) and 2.5 at the end.
+
+| neurons x synapses | bias | firing | c-pull | c-pull-par | ent-pull | ent-pull-par |
+|---|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | 449.6 (7%) | **103.8 (52%)** | 569.9 (6%) | 154.5 (42%) |
+| 1e+05 x 100 | 0.15 | 2.0% | 5,353.0 (9%) | **749.8 (8%)** | 5,837.4 (4%) | 833.9 (10%) |
+| 1e+06 x 20 | 0.15 | 2.4% | 15,309.1 (5%) | 2,592.6 (5%) | 16,926.0 (4%) | **2,373.6 (7%)** |
+
+### What holds
+
+- `ent-pull` takes 1.09-1.27x the time of `c-pull` (5.8 against 5.4 ms at
+  1e5 x 100), down from 6.3-9.4x; `ent-pull-par` 1.11x `c-pull-par` at
+  1e5 x 100 and 0.92x at 1e6 x 20 (2.37 against 2.59 ms), the fastest pull
+  measured there. At 1e4 x 100 the parallel cells spread 42-52%.
+- The C variants match the previous runs within 2-4%.
+- Not measured: what the remaining 9-27% sequential gap is; the id checks
+  (a branch per edge) and the loop not being vectorised are candidates.

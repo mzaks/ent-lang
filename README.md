@@ -301,8 +301,15 @@ parameters and read columns through statically shaped views.
 A relation is a table of source ids, target ids and a column per field,
 kept sorted by source (compressed sparse rows): an offset per entity key
 (its slot, or for row ids the id itself) says where its edges start, so an
-`out` loop reads one contiguous range. Where the program visits incoming
-edges, offsets by target and the table positions of those edges follow.
+`out` loop reads one contiguous range. A relation the program visits only
+by incoming edges is sorted by target instead (first by source, then
+stably by target, so the visiting order stays the same), and an `in` loop
+reads its range in order; where the program visits edges both ways,
+offsets by target and the table positions of those edges follow. Fields
+of the visited entity that an edge loop sets are carried through the loop
+as values and stored once after it: nothing else in the loop can reach
+them, which LLVM cannot tell from the arena's views (pull 6.3-9.4x slower
+than hand-written C before, 1.09-1.27x after; see `bench/RESULTS.md`).
 Connects append and mark the relation unclean; a sort (a stable counting
 sort through scratch columns, O(edges + keys)) runs where edges changed:
 at a schedule's start for edges the host connected, after a system-level
