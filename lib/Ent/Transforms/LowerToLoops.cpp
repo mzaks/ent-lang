@@ -2425,6 +2425,184 @@ static SmallVector<Operation *> carryOwnFields(IRRewriter &rewriter,
   return ops;
 }
 
+/// Whether `value` is the constant index 0.
+static bool isZeroIndex(Value value) {
+  auto constant = value.getDefiningOp<arith::ConstantIndexOp>();
+  return constant && constant.value() == 0;
+}
+
+/// Replace the loads and stores of the one-element `cells` in `block` by the
+/// values `state` carries, threading them through the `scf.if`s that
+/// contain any (as carryThrough does for fields).
+static void carryCellsThrough(IRRewriter &rewriter, Block &block,
+                              ArrayRef<Value> cells, CarriedState &state) {
+  auto cellOf = [&](Operation *op) -> int {
+    Value memref;
+    if (auto load = dyn_cast<memref::LoadOp>(op))
+      memref = load.getMemref();
+    else if (auto store = dyn_cast<memref::StoreOp>(op))
+      memref = store.getMemref();
+    else
+      return -1;
+    auto *it = llvm::find(cells, memref);
+    return it == cells.end() ? -1 : int(it - cells.begin());
+  };
+  auto touches = [&](Operation *op) {
+    return op
+        ->walk([&](Operation *nested) {
+          return cellOf(nested) >= 0 ? WalkResult::interrupt()
+                                     : WalkResult::advance();
+        })
+        .wasInterrupted();
+  };
+  for (Operation &op : llvm::make_early_inc_range(block)) {
+    int index = cellOf(&op);
+    if (auto load = dyn_cast<memref::LoadOp>(op); load && index >= 0) {
+      rewriter.replaceOp(load, state.values[index]);
+      continue;
+    }
+    if (auto store = dyn_cast<memref::StoreOp>(op); store && index >= 0) {
+      rewriter.setInsertionPoint(store);
+      state.values[index] = store.getValueToStore();
+      state.written[index] =
+          arith::ConstantIntOp::create(rewriter, store.getLoc(), 1, 1);
+      rewriter.eraseOp(store);
+      continue;
+    }
+    auto branch = dyn_cast<scf::IfOp>(op);
+    if (!branch || !touches(branch))
+      continue;
+    CarriedState thenState = state, elseState = state;
+    carryCellsThrough(rewriter, *branch.thenBlock(), cells, thenState);
+    if (branch.elseBlock())
+      carryCellsThrough(rewriter, *branch.elseBlock(), cells, elseState);
+    SmallVector<unsigned> changed;
+    for (unsigned i = 0; i < cells.size(); ++i)
+      if (thenState.values[i] != state.values[i] ||
+          elseState.values[i] != state.values[i] ||
+          thenState.written[i] != state.written[i] ||
+          elseState.written[i] != state.written[i])
+        changed.push_back(i);
+    if (changed.empty())
+      continue;
+    Location loc = branch.getLoc();
+    SmallVector<Type> types(branch.getResultTypes());
+    for (unsigned i : changed) {
+      types.push_back(state.values[i].getType());
+      types.push_back(rewriter.getI1Type());
+    }
+    rewriter.setInsertionPoint(branch);
+    auto replacement = scf::IfOp::create(rewriter, loc, types,
+                                         branch.getCondition(),
+                                         /*withElseRegion=*/true);
+    for (Block *block : {replacement.thenBlock(), replacement.elseBlock()})
+      while (!block->empty())
+        rewriter.eraseOp(&block->back());
+    rewriter.eraseBlock(replacement.thenBlock());
+    replacement.getThenRegion().takeBody(branch.getThenRegion());
+    if (branch.elseBlock()) {
+      rewriter.eraseBlock(replacement.elseBlock());
+      replacement.getElseRegion().takeBody(branch.getElseRegion());
+    } else {
+      rewriter.setInsertionPointToEnd(replacement.elseBlock());
+      scf::YieldOp::create(rewriter, loc);
+    }
+    for (auto [block, branchState] :
+         {std::make_pair(replacement.thenBlock(), &thenState),
+          std::make_pair(replacement.elseBlock(), &elseState)}) {
+      auto yield = cast<scf::YieldOp>(block->getTerminator());
+      SmallVector<Value> operands(yield.getOperands());
+      for (unsigned i : changed) {
+        operands.push_back(branchState->values[i]);
+        operands.push_back(branchState->written[i]);
+      }
+      rewriter.setInsertionPoint(yield);
+      rewriter.replaceOpWithNewOp<scf::YieldOp>(yield, operands);
+    }
+    unsigned results = branch.getNumResults();
+    rewriter.replaceOp(branch, replacement.getResults().take_front(results));
+    for (auto [k, i] : llvm::enumerate(changed)) {
+      state.values[i] = replacement.getResult(results + 2 * k);
+      state.written[i] = replacement.getResult(results + 2 * k + 1);
+    }
+  }
+}
+
+/// Keep the resource cells that directly combined accumulates write in
+/// registers across the entity loop `loop`: load each once before it, carry
+/// it through the loop as a value and store it once after (unchanged if no
+/// entity combined into it; resources carry no change stamps). No flag says
+/// whether one did: LLVM would specialise the loop on it, giving it early
+/// exits, and not vectorise it. Only the accumulate reaches the cell inside the loop
+/// (nothing else in its query reads the field, see kUnobservedAttr), but
+/// LLVM cannot tell its store from the columns', all views of the arena,
+/// so it kept the loop scalar and branching. A cell accessed inside other
+/// regions than `scf.if`, or at another index than 0, stays in memory.
+static scf::ForOp carryCells(IRRewriter &rewriter, scf::ForOp loop,
+                             SmallVector<Value> cells) {
+  llvm::erase_if(cells, [&](Value cell) {
+    WalkResult result = loop.getBody()->walk([&](Operation *op) {
+      Value memref;
+      ValueRange indices;
+      if (auto load = dyn_cast<memref::LoadOp>(op))
+        memref = load.getMemref(), indices = load.getIndices();
+      else if (auto store = dyn_cast<memref::StoreOp>(op))
+        memref = store.getMemref(), indices = store.getIndices();
+      if (memref != cell)
+        return WalkResult::advance();
+      for (Operation *parent = op->getParentOp(); parent != loop;
+           parent = parent->getParentOp())
+        if (!isa<scf::IfOp>(parent))
+          return WalkResult::interrupt();
+      if (indices.size() != 1 || !isZeroIndex(indices[0]))
+        return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+    bool used = false;
+    loop.getBody()->walk([&](Operation *op) {
+      used |= llvm::is_contained(op->getOperands(), cell);
+    });
+    return result.wasInterrupted() || !used;
+  });
+  if (cells.empty())
+    return loop;
+
+  Location loc = loop.getLoc();
+  rewriter.setInsertionPoint(loop);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  SmallVector<Value> inits;
+  for (Value cell : cells)
+    inits.push_back(
+        memref::LoadOp::create(rewriter, loc, cell, ValueRange{zero}));
+  auto carrying = scf::ForOp::create(rewriter, loc, loop.getLowerBound(),
+                                     loop.getUpperBound(), loop.getStep(),
+                                     inits);
+  Block *body = carrying.getBody();
+  while (!body->empty())
+    rewriter.eraseOp(&body->back());
+  body->getOperations().splice(body->end(), loop.getBody()->getOperations());
+  rewriter.replaceAllUsesWith(loop.getInductionVar(),
+                              carrying.getInductionVar());
+  // carryCellsThrough tracks a written flag too; here it is not used.
+  CarriedState state;
+  Value unused = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+  rewriter.moveOpBefore(unused.getDefiningOp(), carrying);
+  for (unsigned i = 0; i < cells.size(); ++i) {
+    state.values.push_back(carrying.getRegionIterArg(i));
+    state.written.push_back(unused);
+  }
+  carryCellsThrough(rewriter, *body, cells, state);
+  auto yield = cast<scf::YieldOp>(body->getTerminator());
+  rewriter.setInsertionPoint(yield);
+  rewriter.replaceOpWithNewOp<scf::YieldOp>(yield, state.values);
+  rewriter.replaceOp(loop, ValueRange{});
+  rewriter.setInsertionPointAfter(carrying);
+  for (auto [i, cell] : llvm::enumerate(cells))
+    memref::StoreOp::create(rewriter, loc, carrying.getResult(i), cell,
+                            ValueRange{zero});
+  return carrying;
+}
+
 /// Append the edge (`source`, `target`, `values`, all stored forms) to
 /// `relation` at the insertion point, after checking its capacity, and
 /// mark it unclean.
@@ -3100,6 +3278,17 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                         sequentialOnly);
         },
         rows);
+    // Directly combined accumulates: their resource cells in registers.
+    if (auto loop = dyn_cast<scf::ForOp>(loops); loop && sequentialOnly) {
+      SmallVector<Value> cells;
+      for (AccumulateOp accumulate : accumulates)
+        if (appliesDirectly(accumulate, true))
+          cells.push_back(
+              world.resourceField(accumulate.getResourceAttr().getAttr(),
+                                  accumulate.getFieldAttr()));
+      if (!cells.empty())
+        loops = carryCells(rewriter, loop, cells);
+    }
     hoistResourceReads(rewriter, loops, world);
     if (archetype.hasPending() && isStructuralFor(query, archetype.op))
       changed.push_back(&archetype);

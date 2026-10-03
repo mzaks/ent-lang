@@ -120,20 +120,20 @@ ent.schedule @frame(%n: i32, %c: i1) {
 }
 
 // An accumulate nothing else in its query reads: buffered per row and
-// summed after the loop, or (direct) added into the resource as the loop
-// visits the guns.
+// summed after the loop, or (direct) added up as the loop visits the guns,
+// the sum carried through the loop and stored once after it.
 ent.resource @Score (points: i64)
 // CHECK-LABEL: func.func private @tally(
 // CHECK:      scf.for %[[ROW:.*]] =
 // CHECK:        memref.store %{{.*}}, %{{.*}}[%[[ROW]]] : memref<8xi64>
 // CHECK:      scf.for
 // DIRECT-LABEL: func.func private @tally(
-// DIRECT:      scf.for %{{.*}} =
-// DIRECT:        %[[OLD:.*]] = memref.load %[[SCORE:.*]][%c0] : memref<1xi64>
-// DIRECT-NEXT:   %[[NEW:.*]] = arith.addi %[[OLD]], %{{.*}} : i64
-// DIRECT-NEXT:   memref.store %[[NEW]], %[[SCORE]][%c0] : memref<1xi64>
+// DIRECT:      %[[OLD:.*]] = memref.load %[[SCORE:.*]][%c0] : memref<1xi64>
+// DIRECT-NEXT: %[[R:.*]] = scf.for %{{.*}} = {{.*}} iter_args(%[[SUM:.*]] = %[[OLD]]) -> (i64) {
+// DIRECT-NEXT:   %[[NEW:.*]] = arith.addi %[[SUM]], %{{.*}} : i64
+// DIRECT-NEXT:   scf.yield %[[NEW]] : i64
 // DIRECT-NEXT: }
-// DIRECT-NEXT: return
+// DIRECT-NEXT: memref.store %[[R]], %[[SCORE]][%c0] : memref<1xi64>
 ent.system @tally() reads [@T] writes [@Score] {
   ent.query (%t: !ent.ref<@T>) {
     %one = arith.constant 1 : i64
