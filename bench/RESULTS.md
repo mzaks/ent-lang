@@ -1531,3 +1531,250 @@ another 21 spread 33-43%, for every variant.
 - The reactive run started at load average 16.5; its sequential C cells
   spread at most 13%, its parallel ones up to 66%, and it was not repeated.
 - The generated frame at 1e3 taking 15% longer than C.
+
+## 2026-10-03: Linux again, pinned and with `-march=native`
+
+Two questions the entry above left: whether the 33-60% spreads come from
+this CPU's two kinds of cores, and whether baseline SSE2 is why the masked
+forms lost their lead over C. Same machine, toolchain and commit; the
+scripts now pass `BENCH_CFLAGS` to every compile. CPUs 0-3 are Zen 5 cores
+(5.16 GHz, 16 MB L3 shared by the four), CPUs 4-11 Zen 5c (3.29 GHz, 8 MB
+L3 shared by the eight), each with a second hardware thread. Sequential
+runs under `taskset -c 2` (Zen 5) or `-c 8` (Zen 5c); parallel runs with
+`OMP_NUM_THREADS=12 OMP_PLACES=cores OMP_PROC_BIND=close`, one thread per
+core. "native" adds `BENCH_CFLAGS=-march=native` (clang takes it as
+`znver5`; the binaries use 512-bit vectors and mask registers). Baseline
+and native are separate runs, one after the other, not the same rounds.
+Checksums agree in every configuration, between baseline and native too
+where a script compares them. Load average 0.3-1.3 at the start of each
+sequential run, 1.1-8.2 for the parallel ones (left by the one before).
+
+### The spread was the two kinds of cores
+
+Churn at n = 1e5 on one Zen 5 core, us per frame (spread), the table the
+entry above could not give:
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set | compiled | compiled-fused |
+|---|---|---|---|---|---|---|---|
+| 1% | 0.0% | **13.4 (4%)** | 33.9 (3%) | 33.5 (3%) | 13.6 (2%) | 30.6 (1%) | 27.9 (2%) |
+| 1% | 0.1% | 14.6 (7%) | 33.7 (1%) | 36.0 (1%) | **13.8 (3%)** | 30.7 (3%) | 27.9 (2%) |
+| 1% | 1.0% | 20.3 (7%) | 34.4 (2%) | 37.3 (2%) | **14.8 (2%)** | 31.4 (3%) | 28.6 (2%) |
+| 10% | 0.0% | **14.0 (2%)** | 33.8 (2%) | 27.2 (4%) | 16.9 (2%) | 30.7 (2%) | 28.0 (2%) |
+| 10% | 0.1% | **15.0 (5%)** | 33.8 (2%) | 48.7 (2%) | 17.1 (2%) | 30.8 (3%) | 28.2 (3%) |
+| 10% | 1.0% | 21.1 (3%) | 34.3 (2%) | 84.7 (2%) | **18.1 (1%)** | 31.0 (2%) | 28.6 (2%) |
+| 10% | 10.0% | 72.7 (4%) | 37.8 (2%) | 92.9 (2%) | **26.0 (3%)** | 34.9 (4%) | 32.0 (3%) |
+| 50% | 0.0% | **16.8 (1%)** | 33.8 (2%) | 247.9 (1%) | 29.7 (1%) | 30.5 (2%) | 28.1 (2%) |
+| 50% | 0.1% | **17.9 (5%)** | 33.8 (2%) | 259.3 (2%) | 29.9 (2%) | 30.7 (2%) | 28.0 (2%) |
+| 50% | 1.0% | **24.9 (8%)** | 34.4 (2%) | 285.6 (1%) | 31.7 (1%) | 31.5 (1%) | 28.6 (2%) |
+| 50% | 10.0% | 78.3 (3%) | 37.7 (1%) | 304.5 (1%) | 43.1 (4%) | 35.6 (3%) | **32.0 (1%)** |
+| 90% | 0.0% | **19.7 (2%)** | 33.8 (2%) | 42.6 (2%) | 43.2 (2%) | 30.8 (3%) | 28.0 (2%) |
+| 90% | 0.1% | **20.8 (7%)** | 33.7 (1%) | 72.9 (4%) | 43.3 (2%) | 30.7 (1%) | 28.1 (1%) |
+| 90% | 1.0% | **26.9 (8%)** | 34.4 (2%) | 103.1 (1%) | 45.3 (2%) | 31.5 (3%) | 28.6 (3%) |
+| 90% | 10.0% | 78.4 (6%) | 37.8 (2%) | 108.6 (2%) | 57.7 (3%) | 34.8 (3%) | **32.0 (4%)** |
+
+Spreads are 1-8% where the unpinned run had 33-60% in 60 of 90 cells. On a
+Zen 5c core the same run takes 1.5x as long in every cell that fits the
+caches (51.0 against 33.8 us for wide-select, 46.5 against 30.7 compiled),
+the ratio of the clocks (1.57), and 1.4-1.8x at 1e6; its spreads are 0-6%
+at 1e5 and at most 11% at 1e6.
+The unpinned medians were mixtures of the two.
+
+The other pinned baselines reproduce the unpinned runs: the main
+benchmark's sequential variants within 3% at every size, the reactive
+benchmark's sequential variants within 6% (that run had started at load
+average 16.5), churn at 1e6 within 3% for the forms without a branch.
+
+### Main benchmark, one Zen 5 core, ns per frame
+
+Baseline:
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 366 (1%) | 3,694 (4%) | 39,349 (5%) | 970,805 (2%) | 12,839,767 (1%) |
+| fused | 299 (1%) | 2,922 (2%) | 32,844 (5%) | 921,698 (2%) | 11,983,479 (0%) |
+| c-fused | 256 (2%) | 2,798 (3%) | 32,116 (15%) | 936,066 (2%) | 12,401,045 (1%) |
+| c-fused-restrict | 254 (3%) | 2,835 (10%) | 32,486 (10%) | 929,980 (2%) | 12,450,925 (1%) |
+
+Native:
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 152 (5%) | 2,029 (3%) | 33,304 (3%) | 853,093 (1%) | 12,410,493 (1%) |
+| fused | 119 (7%) | 1,663 (2%) | 29,440 (6%) | 858,827 (1%) | 12,175,067 (0%) |
+| c-fused | 120 (13%) | 1,692 (7%) | 29,193 (3%) | 861,147 (4%) | 12,364,062 (2%) |
+| c-fused-restrict | 125 (7%) | 1,682 (7%) | 29,727 (2%) | 855,925 (3%) | 12,206,697 (1%) |
+
+Twelve threads, one per core, baseline:
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| stages-omp | 1,508 (5%) | 4,304 (1%) | 34,528 (13%) | 817,753 (2%) | 11,734,384 (1%) |
+| entities-omp | 379 (1%) | 3,792 (4%) | 39,741 (4%) | 326,074 (6%) | 10,801,466 (0%) |
+| fused-entities-omp | 303 (1%) | 3,000 (2%) | 32,555 (14%) | 358,530 (11%) | 10,403,168 (0%) |
+
+Native:
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| stages-omp | 1,325 (8%) | 3,458 (3%) | 31,566 (5%) | 712,261 (3%) | 11,479,436 (1%) |
+| entities-omp | 150 (5%) | 2,031 (5%) | 32,950 (2%) | 342,090 (2%) | 11,180,478 (1%) |
+| fused-entities-omp | 122 (5%) | 1,702 (3%) | 28,452 (6%) | 376,893 (3%) | 10,545,950 (1%) |
+
+### Churn, one Zen 5 core, native: us per frame (spread)
+
+n = 1e5:
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set | compiled | compiled-fused |
+|---|---|---|---|---|---|---|---|
+| 1% | 0.0% | **11.3 (5%)** | 17.9 (2%) | 17.4 (1%) | 11.5 (4%) | 17.5 (3%) | 15.4 (7%) |
+| 1% | 0.1% | 12.3 (11%) | 17.7 (3%) | 17.2 (3%) | **11.6 (3%)** | 17.5 (2%) | 15.4 (1%) |
+| 1% | 1.0% | 18.0 (5%) | 18.3 (2%) | 17.8 (2%) | **12.6 (2%)** | 17.9 (3%) | 15.5 (3%) |
+| 10% | 0.0% | **11.6 (3%)** | 17.8 (3%) | 17.1 (2%) | 14.7 (2%) | 17.4 (0%) | 15.2 (4%) |
+| 10% | 0.1% | **13.0 (7%)** | 17.9 (3%) | 17.3 (2%) | 14.9 (1%) | 17.5 (2%) | 15.4 (3%) |
+| 10% | 1.0% | 19.2 (13%) | 18.4 (3%) | 17.7 (3%) | 16.3 (4%) | 18.1 (4%) | **15.6 (3%)** |
+| 10% | 10.0% | 69.5 (4%) | 21.7 (3%) | 21.5 (1%) | 24.7 (3%) | 21.9 (5%) | **19.3 (2%)** |
+| 50% | 0.0% | **13.9 (2%)** | 17.8 (2%) | 17.1 (2%) | 27.0 (1%) | 17.4 (3%) | 15.2 (3%) |
+| 50% | 0.1% | **15.0 (11%)** | 17.7 (2%) | 17.2 (4%) | 27.3 (1%) | 17.4 (2%) | 15.2 (2%) |
+| 50% | 1.0% | 22.0 (6%) | 18.1 (1%) | 17.8 (1%) | 29.5 (1%) | 18.1 (4%) | **15.8 (3%)** |
+| 50% | 10.0% | 74.8 (3%) | 21.4 (6%) | 21.5 (2%) | 41.8 (2%) | 22.0 (5%) | **19.3 (7%)** |
+| 90% | 0.0% | 16.5 (3%) | 18.0 (4%) | 17.1 (2%) | 39.5 (1%) | 17.5 (3%) | **15.3 (2%)** |
+| 90% | 0.1% | 17.5 (4%) | 17.9 (2%) | 17.4 (2%) | 39.9 (2%) | 17.5 (4%) | **15.3 (3%)** |
+| 90% | 1.0% | 24.2 (3%) | 18.4 (2%) | 17.9 (4%) | 42.2 (2%) | 18.0 (2%) | **15.6 (3%)** |
+| 90% | 10.0% | 75.1 (4%) | 21.8 (7%) | 21.3 (4%) | 54.5 (5%) | 21.9 (5%) | **19.0 (4%)** |
+
+n = 1e6:
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set | compiled | compiled-fused |
+|---|---|---|---|---|---|---|---|
+| 1% | 0.0% | **169.7 (7%)** | 369.7 (5%) | 455.3 (7%) | 188.3 (11%) | 382.8 (7%) | 405.1 (7%) |
+| 1% | 0.1% | 215.0 (2%) | 377.1 (2%) | 467.0 (3%) | **192.9 (7%)** | 390.5 (2%) | 403.8 (2%) |
+| 1% | 1.0% | 567.7 (3%) | 395.4 (6%) | 485.9 (5%) | **260.5 (8%)** | 410.6 (3%) | 417.5 (3%) |
+| 10% | 0.0% | **181.8 (25%)** | 373.7 (10%) | 452.9 (15%) | 229.3 (10%) | 390.5 (9%) | 404.7 (14%) |
+| 10% | 0.1% | **234.9 (13%)** | 374.6 (4%) | 463.4 (15%) | 236.8 (15%) | 393.4 (15%) | 410.0 (16%) |
+| 10% | 1.0% | 634.6 (1%) | 395.3 (2%) | 483.6 (7%) | **332.2 (3%)** | 409.0 (1%) | 421.4 (5%) |
+| 10% | 10.0% | 3,391.2 (2%) | 460.9 (2%) | 530.9 (14%) | 700.7 (15%) | **456.5 (10%)** | 503.6 (8%) |
+| 50% | 0.0% | **259.5 (6%)** | 368.8 (4%) | 457.5 (10%) | 381.8 (6%) | 386.5 (3%) | 401.7 (2%) |
+| 50% | 0.1% | **313.3 (3%)** | 377.2 (1%) | 463.7 (1%) | 405.0 (2%) | 392.0 (5%) | 406.7 (9%) |
+| 50% | 1.0% | 758.1 (1%) | **395.3 (0%)** | 486.6 (2%) | 530.2 (1%) | 405.9 (3%) | 422.8 (5%) |
+| 50% | 10.0% | 4,444.5 (1%) | 458.2 (3%) | 531.3 (2%) | 1,042.7 (3%) | **453.2 (1%)** | 507.3 (5%) |
+| 90% | 0.0% | **315.3 (3%)** | 372.9 (2%) | 452.2 (1%) | 525.5 (2%) | 385.0 (1%) | 399.1 (6%) |
+| 90% | 0.1% | **372.8 (2%)** | 376.6 (2%) | 460.8 (2%) | 555.1 (2%) | 390.3 (1%) | 403.7 (3%) |
+| 90% | 1.0% | 805.8 (1%) | **392.9 (1%)** | 491.2 (5%) | 699.5 (2%) | 408.4 (4%) | 417.7 (4%) |
+| 90% | 10.0% | 3,938.4 (1%) | 463.3 (3%) | 534.3 (9%) | 1,507.2 (2%) | **451.9 (4%)** | 502.2 (6%) |
+
+### Reactive queries, one Zen 5 core, native: us per frame (spread)
+
+Light redraw:
+
+| changed | c-poll | c-rowstamp | c-blockstamp | c-collector | c-bevy | c-unity | compiled | compiled-scan |
+|---|---|---|---|---|---|---|---|---|
+| 0.01% | **178.3 (2%)** | 625.4 (3%) | 270.6 (1%) | 251.4 (1%) | 1,072.6 (1%) | 186.6 (2%) | 279.4 (4%) | 525.6 (19%) |
+| 0.10% | **178.0 (32%)** | 634.5 (7%) | 399.2 (2%) | 267.5 (4%) | 1,079.0 (6%) | 186.7 (4%) | 330.4 (5%) | 539.3 (18%) |
+| 1.00% | **177.8 (2%)** | 627.7 (6%) | 849.9 (2%) | 355.8 (1%) | 1,082.7 (2%) | 185.9 (1%) | 398.1 (5%) | 539.6 (17%) |
+| 10.00% | **178.8 (4%)** | 627.7 (6%) | 801.0 (2%) | 453.6 (3%) | 1,077.1 (3%) | 187.9 (3%) | 793.8 (8%) | 532.6 (21%) |
+| 100.00% | **179.2 (9%)** | 620.3 (8%) | 904.3 (3%) | 914.5 (9%) | 1,087.1 (3%) | 186.6 (4%) | 1,599.9 (2%) | 538.3 (11%) |
+
+Heavy redraw:
+
+| changed | c-poll | c-rowstamp | c-blockstamp | c-collector | c-bevy | c-unity | compiled | compiled-scan |
+|---|---|---|---|---|---|---|---|---|
+| 0.01% | 920.6 (1%) | 2,043.3 (4%) | 271.9 (1%) | **253.0 (1%)** | 2,143.2 (1%) | 924.9 (1%) | 277.3 (1%) | 1,979.3 (3%) |
+| 0.10% | 921.0 (1%) | 2,038.8 (1%) | 614.6 (2%) | **274.8 (0%)** | 2,141.0 (0%) | 924.1 (1%) | 331.4 (2%) | 1,977.5 (1%) |
+| 1.00% | 920.6 (0%) | 2,046.1 (1%) | 2,006.3 (2%) | **432.5 (10%)** | 2,147.4 (1%) | 923.1 (0%) | 592.4 (4%) | 1,969.1 (3%) |
+| 10.00% | **920.1 (1%)** | 2,040.9 (1%) | 2,090.8 (1%) | 1,574.1 (1%) | 2,142.4 (2%) | 925.5 (0%) | 1,726.4 (1%) | 1,975.3 (4%) |
+| 100.00% | **917.7 (1%)** | 2,043.3 (0%) | 2,192.6 (3%) | 13,226.1 (0%) | 2,150.0 (1%) | 924.3 (1%) | 2,995.6 (0%) | 1,977.8 (1%) |
+
+Parallel variants, light redraw:
+
+| changed | compiled-par, baseline | compiled-par-walk1, baseline | compiled-par-scan, baseline | compiled-par, native | compiled-par-walk1, native | compiled-par-scan, native |
+|---|---|---|---|---|---|---|
+| 0.01% | **59.7 (1%)** | 60.3 (1%) | 119.5 (2%) | **46.2 (3%)** | 46.7 (2%) | 63.7 (3%) |
+| 0.10% | 73.0 (1%) | **66.3 (1%)** | 122.2 (3%) | 64.3 (3%) | **56.0 (1%)** | 64.5 (5%) |
+| 1.00% | 165.4 (4%) | **97.3 (0%)** | 127.6 (8%) | 171.0 (5%) | 94.9 (10%) | **64.3 (4%)** |
+| 10.00% | 260.6 (4%) | 258.3 (3%) | **122.1 (4%)** | 234.6 (6%) | 234.5 (9%) | **64.4 (2%)** |
+| 100.00% | 305.4 (3%) | 305.1 (2%) | **122.6 (3%)** | 272.9 (2%) | 271.8 (1%) | **64.7 (5%)** |
+
+Heavy redraw:
+
+| changed | compiled-par, baseline | compiled-par-walk1, baseline | compiled-par-scan, baseline | compiled-par, native | compiled-par-walk1, native | compiled-par-scan, native |
+|---|---|---|---|---|---|---|
+| 0.01% | 62.0 (2%) | **60.9 (1%)** | 84.1 (1%) | 48.1 (1%) | **46.8 (1%)** | 255.3 (4%) |
+| 0.10% | 85.7 (1%) | **66.7 (1%)** | 92.4 (2%) | 79.2 (4%) | **57.6 (2%)** | 256.5 (3%) |
+| 1.00% | 276.4 (3%) | **105.4 (1%)** | 133.9 (4%) | 289.2 (4%) | **101.8 (8%)** | 256.6 (4%) |
+| 10.00% | 370.0 (4%) | 367.1 (4%) | **221.9 (2%)** | 335.0 (6%) | 340.0 (3%) | **254.3 (1%)** |
+| 100.00% | 1,861.9 (0%) | 1,861.2 (0%) | **1,692.7 (0%)** | 449.1 (2%) | 450.7 (1%) | **255.5 (3%)** |
+
+### What holds
+
+- The instruction set is worth 2.5x in the caches and nothing out of
+  them: the fused frame takes 119 against 299 ns at 1e3, 1.76x less at
+  1e4, 1.12x at 1e5, 1.07x at 1e6 and the same at 1e7. Native, it takes
+  0.37-0.39x the Mac's time at 1e3-1e4 and still 1.9-2.7x at 1e6-1e7.
+- The generated frame taking 15% longer than C at 1e3 was baseline SSE2:
+  pinned it is 17% (299 against 256 ns), native it is gone, and generated
+  fused code matches C within 2% at every size.
+- SSE2 was why the reactive scan lost to C. Native, `compiled-scan` with
+  light work takes 0.84-0.87x the time of `c-rowstamp` at every rate
+  (526-540 against 620-635 us; the Mac: 6-19% faster), where baseline it
+  took 1.56x.
+- SSE2 was not why churn's compiled form lost its lead: the lead follows
+  the caches, not the instruction set. In the
+  caches (1e5, no churn) it leads the hand-written select in both builds:
+  9% per system and 17% fused baseline (30.7 and 28.0 against 33.8 us),
+  2% and 14% native (17.5 and 15.3 against 17.8 us). At 1e6, where the
+  21 MB world exceeds the 16 MB L3, it does not: baseline 2-3% slower per
+  system and 4% faster fused, native 4% and 8% slower (386 and 402 against
+  370 us), the fused form slower than the unfused one.
+- With masked stores the `if` is no longer the slow form. Native,
+  `wide-branch` takes 17.1-17.4 us at 1e5 at every density, 3-4% less than
+  `wide-select`, where baseline it took up to 7.3x (248 against 34 us at
+  50% density); at 1e6 it takes 1.23x. "A C programmer's natural `if` is
+  the slow one" holds for NEON and SSE2, not for AVX-512.
+- The same turns the reactive results around. Native, clang vectorises
+  the check-first loops by doing the work for every unit: `c-rowstamp`
+  with heavy work takes 2.04 ms at every rate, 6.4x less than baseline
+  with all changed (13.2 ms) and 3.3x more with 0.01% changed (619 us);
+  `compiled-scan` likewise (1.98 ms at every rate). That is the masked
+  heavy form the 2026-09-30 entry listed as not measured, chosen by LLVM
+  rather than by the lowering, and it costs the scan its advantage at low
+  rates.
+- So polling wins far more often: native `c-poll` takes 178 us light at
+  every rate, less than every sequential tracking scheme (251 us at best),
+  and 0.92 ms heavy, less than every scheme from 10% changed on. The
+  collector, whose loop cannot vectorise, wins heavy work up to 1% (253-433
+  us) and stays at 13.2 ms with all changed.
+- The compiled event log beating the collector with few changes was SSE2
+  too: native the collector leads by 11-24% up to 1% light (251 against
+  279 us at 0.01%), as on the Mac.
+- In parallel, native, scanning beats the log from 1% changed with light
+  work (64 us at every rate against 171-273) and from 10% with heavy work
+  (255 against 335-449 us); the log wins below (46-48 us at 0.01%).
+  Walking the log in parallel however few entries are pending
+  (`compiled-par-walk1`) is within 1.5% of the default threshold or
+  faster at every rate in both builds (97 against 165 us at 1% light, baseline):
+  on this machine, where forks are cheap, `parallel-min-events` should be
+  far lower than 16,384.
+- Binding 12 threads to 12 cores changes nothing for the frame out of the
+  caches: fused parallel takes 359 us at 1e6 and 10.4 ms at 1e7 (unbound:
+  393 us with 16% spread, 10.6 ms), 2.6x and 1.15x less than sequential.
+  Native does not help there either (377 us, 10.5 ms).
+- Bound, the reactive parallel variants spread 0-8% (unbound: up to 66%)
+  and take half the time with few changes (60 against 127 us at 0.01%
+  light). The unbound run used the runtime's default thread count and
+  started at load average 16.5, so this does not separate binding from
+  thread count from load. With all changed and heavy work the bound scan
+  is slower (1.69 against 1.36 ms).
+
+### Measured, not explained
+
+- Why the compiled churn form trails the hand-written select once the
+  world leaves the L3, and why fusing then costs (402 against 386 us
+  native at 1e6) where it gains 9-13% in the caches.
+- `c-bevy` with light work is 1.7x slower native at 0.01% changed (1,073
+  against 617 us) and about as slow at every rate, and `compiled-scan` with light work spreads 11-21%
+  native against 1-4% baseline.
+- Archetype moves still win without churn at 1e6 at every density in both
+  builds; at 1e5, native, the compiled fused form wins at 90% (15.3
+  against 16.5 us) and loses at 50% (15.2 against 13.9).
+- The buffered apply costing twice `c-index`, and parallel push losing to
+  sequential push, were not rerun.

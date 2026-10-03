@@ -520,6 +520,11 @@ python3 bench/run.py --blocktime 200    # keep OpenMP workers spinning
 The scripts take the toolchain from `LLVM_PREFIX` (default: Homebrew's),
 so on Linux: `LLVM_PREFIX=$PWD/build/toolchain/.pixi/envs/default python3
 bench/run.py`.
+`BENCH_CFLAGS` adds flags to every compile (`BENCH_CFLAGS=-march=native`;
+without it x86 builds are baseline SSE2). On a CPU with two kinds of cores,
+pin the run (`taskset -c 2 python3 bench/run.py`, or `OMP_PLACES=cores
+OMP_PROC_BIND=close` for the parallel variants): unpinned, spreads reached
+60% on a Ryzen AI 9 HX 370.
 
 `bench/snn/run.py` runs the spiking network (`examples/snn.ent` pushing,
 `examples/snn_pull.ent` gathering, sequential and parallel) against
