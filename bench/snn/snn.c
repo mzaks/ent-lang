@@ -3,11 +3,14 @@
 // steps. Built once per variant and network size (N and K are compile-time
 // constants, since the ent-lang world's capacities are):
 //
-//   VARIANT 0  c-push      compressed rows by source; firing neurons add
-//                          their weights into their targets' input
+//   VARIANT 0  c-push      compressed rows by source (offsets per neuron,
+//                          read from memory like any such table); firing
+//                          neurons add their weights into their targets'
+//                          input
 //   VARIANT 1  c-pull      compressed rows by target; every neuron sums the
 //                          weights from sources that fired
-//   VARIANT 2  c-pull-par  the same, neurons in parallel (OpenMP)
+//   VARIANT 2  c-pull-par  the same, neurons in parallel (OpenMP), in both
+//                          the integration and the propagation
 //   VARIANT 3  ent         the ent-lang program compiled into the binary
 //                          (push or pull, sequential or parallel)
 //
@@ -27,6 +30,12 @@
 //                                         targets and values into buffers;
 //                                         then every row's flag is read and
 //                                         the buffered values are added in
+//   VARIANT 10 c-push-fixed               c-push with every neuron's edges at
+//                                         i * K (the degree a compile-time
+//                                         constant, so the edge loop unrolls;
+//                                         c-push before 2026-10-03)
+//   VARIANT 9  c-integrate                only the integration, no propagation
+//                                         (compare with ent-integrate)
 //   VARIANT 7  c-pull-locate              c-pull with only the lookup's
 //                                         checks (the generated pull since
 //                                         the edges are sorted by target and
@@ -81,7 +90,7 @@ static int64_t count;
 
 #if VARIANT != 3
 static float *v, *input, *fired;
-static int32_t *in_offsets, *in_sources, *in_edges;
+static int32_t *out_offsets, *in_offsets, *in_sources, *in_edges;
 static float *in_weights;
 // For VARIANT 8: per row, -1 if it sent nothing; per edge, a target and a
 // value.
@@ -90,23 +99,36 @@ static float *sent;
 static long long spikes;
 
 static void integrate(void) {
+  // Parallel where the propagation is, as ent-lang's -par variants run
+  // every entity loop in parallel. The spike count is an exact sum.
+  long long count = 0;
+#if VARIANT == 2
+#pragma omp parallel for schedule(static) reduction(+ : count)
+#endif
   for (int i = 0; i < N; ++i) {
     float x = v[i] * decay + input[i] + bias[i];
     input[i] = 0.0f;
     if (x >= threshold) {
       v[i] = 0.0f;
       fired[i] = 1.0f;
-      ++spikes;
+      ++count;
     } else {
       v[i] = x;
       fired[i] = 0.0f;
     }
   }
+  spikes += count;
 }
 
 static void step(void) {
   integrate();
-#if VARIANT == 0
+#if VARIANT == 9
+#elif VARIANT == 0
+  for (int i = 0; i < N; ++i)
+    if (fired[i] != 0.0f)
+      for (int e = out_offsets[i]; e < out_offsets[i + 1]; ++e)
+        input[targets[e]] += weights[e];
+#elif VARIANT == 10
   for (int i = 0; i < N; ++i)
     if (fired[i] != 0.0f)
       for (int e = i * K; e < (i + 1) * K; ++e)
@@ -116,7 +138,7 @@ static void step(void) {
     ran[i] = -1;
     if (fired[i] != 0.0f) {
       ran[i] = 0;
-      for (int e = i * K; e < (i + 1) * K; ++e) {
+      for (int e = out_offsets[i]; e < out_offsets[i + 1]; ++e) {
         sent_to[e] = targets[e];
         sent[e] = weights[e];
       }
@@ -124,7 +146,7 @@ static void step(void) {
   }
   for (int i = 0; i < N; ++i)
     if (ran[i] != -1)
-      for (int e = i * K; e < (i + 1) * K; ++e)
+      for (int e = out_offsets[i]; e < out_offsets[i + 1]; ++e)
         if (sent_to[e] != -1)
           input[sent_to[e]] += sent[e];
 #elif VARIANT == 7
@@ -219,6 +241,9 @@ int main(int argc, char **argv) {
   v = calloc(N, sizeof(float));
   input = calloc(N, sizeof(float));
   fired = calloc(N, sizeof(float));
+  out_offsets = malloc(sizeof(int32_t) * (N + 1));
+  for (int i = 0; i <= N; ++i)
+    out_offsets[i] = i * K;
   in_offsets = calloc(N + 1, sizeof(int32_t));
   in_sources = malloc(sizeof(int32_t) * N * K);
   in_weights = malloc(sizeof(float) * N * K);

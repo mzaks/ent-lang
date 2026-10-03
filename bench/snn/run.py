@@ -47,6 +47,11 @@ VARIANTS = {
     "c-pull-index-store-locate": (6, None, None, False),
     "c-pull-locate": (7, None, None, False),
     "c-push-buffer": (8, None, None, False),
+    "c-push-fixed": (10, None, None, False),
+    # Only the integration: the example's schedule without propagate.
+    "c-integrate": (9, None, None, False),
+    "ent-integrate": (3, "snn.ent", ["--ent-lower-to-loops"], False,
+                      lambda text: text.replace("  propagate()\n", "")),
     # ent-push with applies always buffered until the query ends.
     "ent-push-buffered": (3, "snn.ent",
                           ["--ent-lower-to-loops=direct-applies=0"], False),
@@ -55,7 +60,7 @@ DEFAULT = ["c-push", "c-pull", "c-pull-par", "ent-push", "ent-push-par",
            "ent-pull", "ent-pull-par"]
 
 
-def build(name, number, program, passes, openmp, n, k):
+def build(name, number, program, passes, openmp, n, k, transform=None):
     exe = os.path.join(OUT, f"{name}-{n}x{k}")
     extra = []
     if program:
@@ -65,6 +70,8 @@ def build(name, number, program, passes, openmp, n, k):
             text = f.read()
         text = re.sub(r"capacity 1024\b", f"capacity {n}", text)
         text = re.sub(r"capacity 65536\b", f"capacity {n * k}", text)
+        if transform:
+            text = transform(text)
         source = os.path.join(directory, program)
         with open(source, "w") as f:
             f.write(text)
@@ -105,7 +112,8 @@ def main():
 
     sizes = [tuple(int(x) for x in s.split("x")) for s in args.sizes.split(",")]
     biases = args.bias.split(",")
-    exes = {(size, name): build(name, *VARIANTS[name], *size)
+    exes = {(size, name): build(name, *VARIANTS[name][:4], *size,
+                                *VARIANTS[name][4:])
             for size in sizes for name in names}
     configs = list(itertools.product(sizes, biases))
 
