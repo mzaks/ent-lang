@@ -117,11 +117,15 @@ struct WorldApply {
 
 /// The edges of one relation: a table of at most `capacity` edges (source
 /// id, target id, a column per field), the first `count` of which are
-/// sorted by source, so the edges of the entity with key k are those from
-/// `out[k]` to `out[k + 1]` (compressed sparse rows). Keys are entity
-/// slots, or for row ids the id itself (see WorldLayout::entityKeys).
-/// Where the program visits incoming edges, `in` holds the same offsets by
-/// target and `inEdges` the positions of those edges in the table.
+/// sorted by one end, so the edges of the entity with key k at that end
+/// are those from `sorted[k]` to `sorted[k + 1]` (compressed sparse rows).
+/// Keys are entity slots, or for row ids the id itself (see
+/// WorldLayout::entityKeys). The table is sorted by source, or by target
+/// where the program visits only incoming edges, so that every edge loop
+/// reads its edges' columns in order. Where the program visits edges both
+/// ways, `index` holds the offsets by target and `indexEdges` the positions
+/// of those edges in the table. Either way an entity's edges are in the
+/// same order: by source, then in the order they were connected.
 ///
 /// `ent.connect` appends after `count` and marks the relation unclean
 /// (`clean` 0, which is also how a new world starts); disconnects mark
@@ -143,19 +147,24 @@ struct WorldRelation {
   uint64_t deadOffset = 0;
   /// Width of an offset or edge position: 32 or 64 bits.
   unsigned offsetBits = 32;
-  /// Offsets by source, entityKeys + 1 of them.
-  uint64_t outOffset = 0;
-  /// By target, if the program visits incoming edges: offsets and the
+  /// Whether the table is sorted by target rather than by source.
+  bool byTarget = false;
+  /// Offsets by the end the table is sorted by, entityKeys + 1 of them.
+  uint64_t sortedOffset = 0;
+  /// By target, if the program visits edges both ways: offsets and the
   /// table positions of the edges.
-  uint64_t inOffset = 0;
-  uint64_t inEdgesOffset = 0;
+  uint64_t indexOffset = 0;
+  uint64_t indexEdgesOffset = 0;
   /// For sorting: a cursor per key and a copy of every column.
   uint64_t cursorOffset = 0;
   uint64_t sourceScratchOffset = 0;
   uint64_t targetScratchOffset = 0;
   SmallVector<uint64_t> fieldScratchOffsets;
 
-  bool hasIn() const { return inOffset != 0; }
+  bool hasIndex() const { return indexOffset != 0; }
+  /// Whether a loop visiting incoming (`in`) or outgoing edges reads the
+  /// table in order, rather than through the index.
+  bool isSorted(bool in) const { return in == byTarget; }
   /// The column of `field`, or null.
   const WorldColumn *find(StringAttr field) const;
 };

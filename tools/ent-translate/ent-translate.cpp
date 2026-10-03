@@ -360,11 +360,13 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     os << llvm::formatv(
         "\n// Relation @{0}: edges from a source to a target entity. "
         "ent_{1}_connect\n// appends one; the next schedule run sorts them "
-        "by source (stable: the\n// edges of one source keep their order), "
+        "by {2} (stable: the\n// edges of one {3} keep their order), "
         "dropping edges to entities no\n// longer alive. The columns below "
         "hold the first ent_{1}_count(world)\n// edges, in that order once "
         "sorted.\n",
-        relationOp.getSymName(), name);
+        relationOp.getSymName(), name,
+        relation.byTarget ? "target, then source" : "source",
+        relation.byTarget ? "target and source" : "source");
     os << llvm::formatv("#define ENT_{0}_CAPACITY {1}\n", name,
                         relation.capacity);
     os << llvm::formatv(

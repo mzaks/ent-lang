@@ -55,3 +55,19 @@
 // c4 takes c2's slot; c2's old edge to c3 is not c4's, so c3 stays at 18.
 // IDS-NEXT: frame 2: edges 5 c0 48 c1 3 c3 18 c4 0
 // IDS-NEXT: slot reused: 1
+
+// The order edges are visited in, for a relation stored by target (only
+// incoming edges visited) and one stored by source with an index.
+// RUN: ent-translate --ent-to-c-header %S/Inputs/relations_order.mlir \
+// RUN:     -o %t.dir/relations_order_world.h
+// RUN: ent-opt %S/Inputs/relations_order.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.order.ll
+// RUN: clang -O2 -Wno-override-module %t.order.ll -I%t.dir \
+// RUN:     %S/Inputs/relations_order_main.c -o %t.order
+// RUN: %t.order | FileCheck %s --check-prefix=ORDER
+
+// Into a: from a (1, then 4, as connected), b (2), c (3).
+// ORDER:      n0: in only 1423 in both 1423 out 14
+// ORDER-NEXT: n1: in only 0 in both 0 out 25
+// ORDER-NEXT: n2: in only 5 in both 5 out 3

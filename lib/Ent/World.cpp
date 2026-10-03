@@ -416,10 +416,14 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   for (WorldRelation &relation : layout.relations) {
     RelationOp op = relation.op;
     StringAttr name = op.getSymNameAttr();
-    bool hasIn = false, hasDead = false;
+    bool hasIn = false, hasOut = false, hasDead = false;
     module.walk([&](EdgesOp edges) {
-      hasIn |= edges.getRelationAttr().getAttr() == name && !edges.isOut();
+      if (edges.getRelationAttr().getAttr() != name)
+        return;
+      hasIn |= !edges.isOut();
+      hasOut |= edges.isOut();
     });
+    relation.byTarget = hasIn && !hasOut;
     module.walk([&](DisconnectOp disconnect) {
       hasDead |= disconnect->getParentOfType<EdgesOp>()
                      .getRelationAttr()
@@ -449,10 +453,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     }
     if (hasDead)
       relation.deadOffset = place(1, edges);
-    relation.outOffset = place(offsetBytes, keys + 1);
-    if (hasIn) {
-      relation.inOffset = place(offsetBytes, keys + 1);
-      relation.inEdgesOffset = place(offsetBytes, edges);
+    relation.sortedOffset = place(offsetBytes, keys + 1);
+    if (hasIn && hasOut) {
+      relation.indexOffset = place(offsetBytes, keys + 1);
+      relation.indexEdgesOffset = place(offsetBytes, edges);
     }
     relation.cursorOffset = place(offsetBytes, keys);
     relation.sourceScratchOffset = place(idBytes, edges);

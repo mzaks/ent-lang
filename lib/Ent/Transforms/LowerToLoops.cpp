@@ -530,11 +530,12 @@ public:
     return view(relation.deadOffset, relation.capacity, rewriter.getI8Type());
   }
   Value edgeOffsets(const WorldRelation &relation, bool in) {
-    return view(in ? relation.inOffset : relation.outOffset,
+    return view(relation.isSorted(in) ? relation.sortedOffset
+                                      : relation.indexOffset,
                 layout.entityKeys + 1, offsetType(relation));
   }
-  Value inEdges(const WorldRelation &relation) {
-    return view(relation.inEdgesOffset, relation.capacity,
+  Value indexEdges(const WorldRelation &relation) {
+    return view(relation.indexEdgesOffset, relation.capacity,
                 offsetType(relation));
   }
   Value edgeCursors(const WorldRelation &relation) {
@@ -2008,10 +2009,11 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   auto loop = scf::ForOp::create(rewriter, loc, begin, end, one);
   rewriter.setInsertionPoint(loop.getBody()->getTerminator());
   Value position = loop.getInductionVar();
-  Value edge = out ? position
+  Value edge = relation.isSorted(!out)
+                   ? position
                    : world.toIndex(loc, memref::LoadOp::create(
                                             rewriter, loc,
-                                            world.inEdges(relation),
+                                            world.indexEdges(relation),
                                             ValueRange{position}));
   for (ApplyOp apply : applies)
     memref::StoreOp::create(rewriter, loc, world.noEntity(loc),
@@ -2298,70 +2300,90 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
     }
     return kept;
   };
-  auto keyOfSource = [&](Value k) {
-    return world.entityKey(
-        loc, memref::LoadOp::create(rewriter, loc, sources, ValueRange{k}));
+  // The table's columns and their scratch copies.
+  SmallVector<Value> table{sources, targets}, scratch{
+      world.array(relation.sourceScratchOffset, relation.capacity,
+                  world.idType()),
+      world.array(relation.targetScratchOffset, relation.capacity,
+                  world.idType())};
+  for (auto [field, offset] :
+       llvm::zip(relation.fields, relation.fieldScratchOffsets)) {
+    table.push_back(world.edgeField(relation, field));
+    scratch.push_back(world.array(offset, relation.capacity,
+                                  world.storageType(field.type)));
+  }
+  auto keyIn = [&](ArrayRef<Value> columns, bool target) {
+    return [&, columns, target](Value k) {
+      return world.entityKey(
+          loc, memref::LoadOp::create(rewriter, loc, columns[target ? 1 : 0],
+                                      ValueRange{k}));
+    };
   };
-  Value out = world.edgeOffsets(relation, /*in=*/false);
-  countInto(out, count, keyOfSource, keep);
+  auto all = [&](Value) {
+    return arith::ConstantIntOp::create(rewriter, loc, 1, 1).getResult();
+  };
+  // Move the first `n` edges of `from` that `counted` keeps into `to`,
+  // stably ordered by `keyOf`, through `offsets`.
+  auto sortInto = [&](Value offsets, Value n, ArrayRef<Value> from,
+                      ArrayRef<Value> to, function_ref<Value(Value)> keyOf,
+                      function_ref<Value(Value)> counted) {
+    countInto(offsets, n, keyOf, counted);
+    forEach(zero, n, [&](Value k) {
+      auto ifCounted = scf::IfOp::create(rewriter, loc, counted(k));
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(ifCounted.thenBlock());
+      Value position = world.toIndex(loc, take(keyOf(k)));
+      for (auto [source, target] : llvm::zip(from, to))
+        memref::StoreOp::create(
+            rewriter, loc,
+            memref::LoadOp::create(rewriter, loc, source, ValueRange{k}),
+            target, ValueRange{position});
+    });
+    return world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc, offsets, ValueRange{keys}));
+  };
 
-  // Scatter the kept edges into the scratch columns, in order.
-  SmallVector<std::pair<Value, Value>> columns{
-      {sources, world.array(relation.sourceScratchOffset, relation.capacity,
-                            world.idType())},
-      {targets, world.array(relation.targetScratchOffset, relation.capacity,
-                            world.idType())}};
-  for (auto [field, scratch] :
-       llvm::zip(relation.fields, relation.fieldScratchOffsets))
-    columns.push_back(
-        {world.edgeField(relation, field),
-         world.array(scratch, relation.capacity,
-                     world.storageType(field.type))});
-  forEach(zero, count, [&](Value k) {
-    auto ifKept = scf::IfOp::create(rewriter, loc, keep(k));
-    OpBuilder::InsertionGuard inner(rewriter);
-    rewriter.setInsertionPointToStart(ifKept.thenBlock());
-    Value position = world.toIndex(loc, take(keyOfSource(k)));
-    for (auto [column, scratch] : columns)
-      memref::StoreOp::create(
-          rewriter, loc,
-          memref::LoadOp::create(rewriter, loc, column, ValueRange{k}),
-          scratch, ValueRange{position});
-  });
-  Value kept = world.toIndex(
-      loc, memref::LoadOp::create(rewriter, loc, out, ValueRange{keys}));
-  forEach(zero, kept, [&](Value p) {
-    for (auto [column, scratch] : columns)
-      memref::StoreOp::create(
-          rewriter, loc,
-          memref::LoadOp::create(rewriter, loc, scratch, ValueRange{p}),
-          column, ValueRange{p});
-    if (relation.deadOffset)
+  // By source into the scratch, dropping what is not kept; then back, by
+  // source as it is or (stably, so still by source within a target) by
+  // target.
+  Value sorted = world.edgeOffsets(relation, /*in=*/relation.byTarget);
+  Value kept = sortInto(sorted, count, table, scratch,
+                        keyIn(table, /*target=*/false), keep);
+  if (relation.byTarget) {
+    sortInto(sorted, kept, scratch, table, keyIn(scratch, /*target=*/true),
+             all);
+  } else {
+    forEach(zero, kept, [&](Value p) {
+      for (auto [column, copy] : llvm::zip(table, scratch))
+        memref::StoreOp::create(
+            rewriter, loc,
+            memref::LoadOp::create(rewriter, loc, copy, ValueRange{p}),
+            column, ValueRange{p});
+    });
+  }
+  if (relation.deadOffset)
+    forEach(zero, kept, [&](Value p) {
       memref::StoreOp::create(rewriter, loc,
                               arith::ConstantIntOp::create(rewriter, loc, 0, 8),
                               world.edgeDead(relation), ValueRange{p});
-  });
+    });
   memref::StoreOp::create(
       rewriter, loc,
       arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(), kept),
       world.edgeCount(relation), ValueRange{zero});
 
-  if (relation.hasIn()) {
-    auto keyOfTarget = [&](Value k) {
-      return world.entityKey(
-          loc, memref::LoadOp::create(rewriter, loc, targets, ValueRange{k}));
-    };
-    auto all = [&](Value) {
-      return arith::ConstantIntOp::create(rewriter, loc, 1, 1).getResult();
-    };
-    Value in = world.edgeOffsets(relation, /*in=*/true);
-    countInto(in, kept, keyOfTarget, all);
+  // Both ways: the index by target, listing each target's edges in table
+  // order.
+  if (relation.hasIndex()) {
+    Value index = world.edgeOffsets(relation, /*in=*/true);
+    auto keyOfTarget = keyIn(table, /*target=*/true);
+    countInto(index, kept, keyOfTarget, all);
     forEach(zero, kept, [&](Value k) {
       Value position = world.toIndex(loc, take(keyOfTarget(k)));
       memref::StoreOp::create(
           rewriter, loc,
           arith::IndexCastOp::create(rewriter, loc, offsetType, k),
-          world.inEdges(relation), ValueRange{position});
+          world.indexEdges(relation), ValueRange{position});
     });
   }
   memref::StoreOp::create(rewriter, loc,
