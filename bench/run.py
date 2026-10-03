@@ -22,6 +22,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
+# Extra compiler flags for every binary, e.g. BENCH_CFLAGS=-march=native.
+EXTRA_CFLAGS = os.environ.get("BENCH_CFLAGS", "").split()
 ENT_OPT = os.path.join(ROOT, "build", "bin", "ent-opt")
 ENT_TRANSLATE = os.path.join(ROOT, "build", "bin", "ent-translate")
 OUT = os.path.join(ROOT, "build", "bench")
@@ -62,7 +64,7 @@ def generate_header():
 
 def build(name, passes):
     exe = os.path.join(OUT, name)
-    cflags = ["-O2", "-Wno-override-module", f"-I{OUT}"]
+    cflags = ["-O2", *EXTRA_CFLAGS, "-Wno-override-module", f"-I{OUT}"]
     if passes is None:
         defines = ["-DRESTRICT=restrict"] if name.endswith("restrict") else []
         run([f"{LLVM}/bin/clang", *cflags, "-ffp-contract=off", *defines,

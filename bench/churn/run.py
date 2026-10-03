@@ -19,6 +19,8 @@ import subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
+# Extra compiler flags for every binary, e.g. BENCH_CFLAGS=-march=native.
+EXTRA_CFLAGS = os.environ.get("BENCH_CFLAGS", "").split()
 OUT = os.path.join(ROOT, "build", "bench", "churn")
 VARIANTS = {"archetypes": 0, "wide-select": 1, "wide-branch": 2,
             "sparse-set": 3, "compiled": 4, "compiled-fused": 4}
@@ -57,7 +59,8 @@ def main():
             subprocess.run([f"{LLVM}/bin/mlir-translate", "--mlir-to-llvmir",
                             "-o", ll], input=mlir, text=True, check=True)
             extra = [ll, "-Wno-override-module"]
-        subprocess.run([f"{LLVM}/bin/clang", "-O2", "-ffp-contract=off",
+        subprocess.run([f"{LLVM}/bin/clang", "-O2", *EXTRA_CFLAGS,
+                        "-ffp-contract=off",
                         f"-DVARIANT={number}", f"-I{OUT}",
                         os.path.join(HERE, "churn.c"), *extra,
                         "-o", exes[name]], check=True)

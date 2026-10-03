@@ -17,13 +17,16 @@ import subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
+# Extra compiler flags for every binary, e.g. BENCH_CFLAGS=-march=native.
+EXTRA_CFLAGS = os.environ.get("BENCH_CFLAGS", "").split()
 OUT = os.path.join(ROOT, "build", "bench", "layout")
 OPENMP = ["-fopenmp", f"-L{LLVM}/lib", f"-Wl,-rpath,{LLVM}/lib"]
 
 
 def build(source, name, flags):
     exe = os.path.join(OUT, name)
-    subprocess.run([f"{LLVM}/bin/clang", "-O2", "-ffp-contract=off", *flags,
+    subprocess.run([f"{LLVM}/bin/clang", "-O2", *EXTRA_CFLAGS,
+                    "-ffp-contract=off", *flags,
                     os.path.join(HERE, source), "-o", exe], check=True)
     return exe
 

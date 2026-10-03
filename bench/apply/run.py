@@ -19,6 +19,8 @@ import subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
+# Extra compiler flags for every binary, e.g. BENCH_CFLAGS=-march=native.
+EXTRA_CFLAGS = os.environ.get("BENCH_CFLAGS", "").split()
 OUT = os.path.join(ROOT, "build", "bench", "apply")
 ENT_OPT = os.path.join(ROOT, "build", "bin", "ent-opt")
 ENT_TRANSLATE = os.path.join(ROOT, "build", "bin", "ent-translate")
@@ -57,7 +59,8 @@ def build(name, number, program, passes, openmp):
         extra = [ll, "-Wno-override-module", f"-I{directory}"]
     if openmp:
         extra += ["-fopenmp", *OPENMP]
-    subprocess.run([f"{LLVM}/bin/clang", "-O2", "-ffp-contract=off",
+    subprocess.run([f"{LLVM}/bin/clang", "-O2", *EXTRA_CFLAGS,
+                    "-ffp-contract=off",
                     f"-DVARIANT={number}", os.path.join(HERE, "apply.c"),
                     *extra, "-o", exe], check=True)
     return exe
