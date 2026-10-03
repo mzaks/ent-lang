@@ -6,24 +6,21 @@
 // the source neurons.
 
 component Neuron { v: f32, input: f32, bias: f32, fired: f32 } capacity 1024
-tag Spiked
-archetype Cell { Neuron, optional Spiked } capacity 1024
+archetype Cell { Neuron } capacity 1024
 relation Synapse { weight: f32 } from Neuron to Neuron capacity 65536
 unique Stats { spikes: i64 }
 
 system integrate(decay: f32, threshold: f32) {
-  for e, n: mut Neuron {
+  for n: mut Neuron {
     let v = n.v * decay + n.input + n.bias
     n.input = 0.0
     if v >= threshold {
       n.v = 0.0
       n.fired = 1.0
-      e.add(Spiked)
       Stats.spikes += 1
     } else {
       n.v = v
       n.fired = 0.0
-      e.remove(Spiked)
     }
   }
 }

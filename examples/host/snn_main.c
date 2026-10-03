@@ -39,7 +39,6 @@ int main(void) {
     ent_Cell_Neuron_input(w)[row] = 0.0f;
     ent_Cell_Neuron_bias(w)[row] = bias[i];
     ent_Cell_Neuron_fired(w)[row] = 0.0f;
-    ent_Cell_Spiked_present(w)[row] = 0;
   }
   for (int i = 0; i < N; ++i) {
     offsets[i] = i * K;
