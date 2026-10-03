@@ -313,8 +313,9 @@ reads its range in order; where the program visits edges both ways,
 offsets by target and the table positions of those edges follow. Fields
 of the visited entity that an edge loop sets are carried through the loop
 as values and stored once after it: nothing else in the loop can reach
-them, which LLVM cannot tell from the arena's views (pull 6.3-9.4x slower
-than hand-written C before, 1.09-1.27x after; see `bench/RESULTS.md`).
+them, which LLVM cannot tell from the arena's views. With both, and the
+relation's ends typed, the pull example takes 1.01-1.05x the time of
+hand-written C (6.3-9.4x before; see `bench/RESULTS.md`).
 Connects append and mark the relation unclean; a sort (a stable counting
 sort through scratch columns, O(edges + keys)) runs where edges changed:
 at a schedule's start for edges the host connected, after a system-level

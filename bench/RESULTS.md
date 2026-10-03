@@ -1140,3 +1140,36 @@ end.
   `c-pull-locate` (545 against 494 us; c-pull's cell spreads 15%): the
   checks explain about 60% of the gap there. The rest is not measured; the
   per-edge flag and the generated branch layout are candidates.
+
+## 2026-10-03: typed relation ends
+
+`relation Synapse { weight: f32 } from Neuron to Neuron` in both examples:
+the relation names the component its ends have, connecting checks it, and
+since no system despawns neurons or removes `Neuron`, lookups and applies
+of `Neuron` through an edge's other end skip the id checks (the archetype
+holding `Neuron` is the only candidate, so the row is read from the id
+directly). Full `bench/snn/run.py`; us per step, median of 5 processes
+(spread), checksums agree. Load average 5.1 at the start (from the test
+suite run just before; the script builds every binary before measuring)
+and 1.9 at the end.
+
+| neurons x synapses | bias | firing | c-push | c-pull | c-pull-par | ent-push | ent-push-par | ent-pull | ent-pull-par |
+|---|---|---|---|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | **19.4 (97%)** | 454.1 (9%) | 104.7 (31%) | 31.6 (64%) | 111.9 (24%) | 463.8 (7%) | 144.0 (14%) |
+| 1e+04 x 100 | 0.3 | 7.4% | **51.2 (13%)** | 456.1 (11%) | 108.3 (4%) | 76.8 (11%) | 160.6 (5%) | 466.0 (6%) | 141.7 (1%) |
+| 1e+05 x 100 | 0.15 | 2.0% | **315.0 (18%)** | 5,454.8 (4%) | 766.4 (10%) | 539.0 (5%) | 408.5 (2%) | 5,670.2 (4%) | 759.2 (6%) |
+| 1e+05 x 100 | 0.3 | 7.3% | 1,005.1 (6%) | 5,481.8 (3%) | 782.2 (7%) | 1,679.6 (2%) | 1,081.3 (14%) | 5,731.1 (4%) | **760.0 (2%)** |
+| 1e+06 x 20 | 0.15 | 2.4% | 2,482.9 (3%) | 15,605.7 (2%) | 2,634.7 (3%) | 3,702.5 (4%) | **2,142.0 (4%)** | 15,723.2 (2%) | 2,191.0 (4%) |
+| 1e+06 x 20 | 0.3 | 7.9% | 5,352.3 (9%) | 16,012.8 (3%) | 3,050.1 (1%) | 8,767.7 (2%) | 5,338.7 (3%) | 16,173.3 (3%) | **2,217.9 (5%)** |
+
+### What holds
+
+- `ent-pull` takes 1.01-1.05x the time of `c-pull` (1.02x at 1e4 x 100,
+  1.04-1.05x at 1e5 x 100, 1.01x at 1e6 x 20), down from 1.09-1.27x.
+- `ent-push` is unchanged within the spread: 1.49-1.71x `c-push` (before:
+  1.55-1.73x). Its cost is the second pass (the combine), not the checks.
+- `ent-pull-par` takes 0.97-0.99x `c-pull-par` at 1e5 x 100 and 0.73-0.83x
+  at 1e6 x 20, where it is the fastest variant; at 1e4 x 100 1.31-1.38x
+  (spreads up to 31%). The comparison is not like for like: ent's `-par`
+  variants also run the integrate loop in parallel, the C ones only the
+  propagation. Not measured how much that accounts for.

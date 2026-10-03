@@ -8,7 +8,7 @@
 component Neuron { v: f32, input: f32, bias: f32, fired: f32 } capacity 1024
 tag Spiked
 archetype Cell { Neuron, optional Spiked } capacity 1024
-relation Synapse { weight: f32 } capacity 65536
+relation Synapse { weight: f32 } from Neuron to Neuron capacity 65536
 unique Stats { spikes: i64 }
 
 system integrate(decay: f32, threshold: f32) {
