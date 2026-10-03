@@ -21,6 +21,10 @@
 //   VARIANT 6  c-pull-index-store-locate  ... and every source id is checked
 //                                         like an ent-lang lookup (archetype
 //                                         and row bound) before the load
+//   VARIANT 7  c-pull-locate              c-pull with only the lookup's
+//                                         checks (the generated pull since
+//                                         the edges are sorted by target and
+//                                         the sum is kept in a register)
 //
 // All variants add the weights into a neuron's input in the order of the
 // source neurons, so they agree to the bit; the checksum is a hash of every
@@ -97,6 +101,20 @@ static void step(void) {
     if (fired[i] != 0.0f)
       for (int e = i * K; e < (i + 1) * K; ++e)
         input[targets[e]] += weights[e];
+#elif VARIANT == 7
+  // The sum in a local, as the generated code carries it (with the checks,
+  // clang would otherwise store it on every edge).
+  for (int i = 0; i < N; ++i) {
+    float sum = input[i];
+    for (int e = in_offsets[i]; e < in_offsets[i + 1]; ++e) {
+      int32_t source = in_sources[e];
+      // Row ids: archetype 0 in the high bits, the row below a count.
+      if ((uint32_t)source >> ROW_BITS != 0 || source >= count)
+        continue;
+      sum += in_weights[e] * fired[source];
+    }
+    input[i] = sum;
+  }
 #elif VARIANT <= 2
 #if VARIANT == 2
 #pragma omp parallel for schedule(static)

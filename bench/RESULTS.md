@@ -1108,3 +1108,35 @@ arena's views. The id checks stay. `bench/snn/run.py --bias 0.15
 - The C variants match the previous runs within 2-4%.
 - Not measured: what the remaining 9-27% sequential gap is; the id checks
   (a branch per edge) and the loop not being vectorised are candidates.
+
+## 2026-10-03: the rest of the pull gap is the lookup's checks
+
+After the previous section, ent-pull still took 1.09-1.27x the time of
+c-pull. Its inner loop (read in its assembly) is c-pull's plus, per edge,
+the lookup's checks of the source id (archetype bits and row bound: `and`,
+`lsr`, `cmp`, `ccmp`), a branch around the rest, and the flag saying the
+input was set: 14 instructions against 7. The earlier diagnosis found the
+checks free, but then the loop waited on scattered loads and a store per
+edge. `c-pull-locate` is c-pull with only those checks, the sum kept in a
+local as the generated code carries it (with the checks, clang otherwise
+stores it on every edge). `bench/snn/run.py --bias 0.15 --variants
+c-pull,c-pull-locate,ent-pull`; us per step, median of 5 processes
+(spread), checksums agree. Load average 1.9 at the start and 1.6 at the
+end.
+
+| neurons x synapses | bias | firing | c-pull | c-pull-locate | ent-pull |
+|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | **421.4 (15%)** | 494.2 (6%) | 544.5 (5%) |
+| 1e+05 x 100 | 0.15 | 2.0% | **5,187.8 (6%)** | 5,861.6 (5%) | 5,704.6 (5%) |
+| 1e+06 x 20 | 0.15 | 2.4% | **14,776.9 (5%)** | 16,428.2 (8%) | 16,643.5 (3%) |
+
+### What holds
+
+- The checks cost c-pull 11-17% (1.17x at 1e4 x 100, 1.13x at 1e5 x 100,
+  1.11x at 1e6 x 20).
+- At 1e5 and 1e6, ent-pull matches c-pull with the checks (0.97x and
+  1.01x): they are the whole remaining gap there.
+- At 1e4 x 100, where everything stays in the caches, ent-pull takes 1.10x
+  `c-pull-locate` (545 against 494 us; c-pull's cell spreads 15%): the
+  checks explain about 60% of the gap there. The rest is not measured; the
+  per-edge flag and the generated branch layout are candidates.
