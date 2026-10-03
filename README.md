@@ -22,6 +22,34 @@ cmake --build build --target check-ent
 build/bin/ent-opt examples/integrate.mlir
 ```
 
+On Linux any LLVM 22 that ships MLIR and its CMake files will do. Where the
+distribution packages none (Arch packages LLVM without MLIR), conda-forge
+has it; with [pixi](https://pixi.sh), into the ignored `build/`:
+
+```sh
+mkdir -p build/toolchain && cd build/toolchain
+pixi init . -c conda-forge
+pixi add mlir=22.1.8 llvmdev=22.1.8 clang=22.1.8 clangxx=22.1.8 \
+         llvm-openmp=22.1.8 lld=22.1.8 lit ninja
+cd ../..
+LLVM=$PWD/build/toolchain/.pixi/envs/default
+# conda-forge's LLVM leaves out the test tools; the distribution's llvm
+# package (same major version) has them.
+for t in FileCheck not count split-file; do ln -s /usr/bin/$t $LLVM/bin/; done
+cmake -S . -B build -G Ninja -DCMAKE_MAKE_PROGRAM=$LLVM/bin/ninja \
+      -DMLIR_DIR=$LLVM/lib/cmake/mlir -DLLVM_DIR=$LLVM/lib/cmake/llvm \
+      -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+      -DENT_LIT=$LLVM/bin/lit -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build
+cmake --build build --target check-ent
+```
+
+`ent-opt` and `ent-translate` are compiled with the system's clang against
+the environment's libraries; the tests and benchmarks compile with the
+environment's clang. Tested on Arch Linux, x86-64. Removing `build/`
+removes the toolchain with it. Below, set `LLVM` to that prefix instead of
+Homebrew's.
+
 Run the toy simulation: generate the world's C header, lower the program
 with fused, parallel entity loops, and link it with its C host and the
 OpenMP runtime. Drop `parallel-entities`, `--convert-scf-to-openmp` and the
@@ -489,6 +517,10 @@ python3 bench/run.py                    # OpenMP runtime defaults
 python3 bench/run.py --blocktime 200    # keep OpenMP workers spinning
 ```
 
+The scripts take the toolchain from `LLVM_PREFIX` (default: Homebrew's),
+so on Linux: `LLVM_PREFIX=$PWD/build/toolchain/.pixi/envs/default python3
+bench/run.py`.
+
 `bench/snn/run.py` runs the spiking network (`examples/snn.ent` pushing,
 `examples/snn_pull.ent` gathering, sequential and parallel) against
 hand-written C over compressed rows (push, pull, pull with OpenMP), per
@@ -498,7 +530,9 @@ Homebrew's `libomp` defaults to `KMP_BLOCKTIME=0` with a passive wait
 policy, so workers sleep after every parallel region; an empty region costs
 about 35 us with 12 threads on an M4 Max, and about 1.7 us with
 `KMP_BLOCKTIME=200`. Check that the machine is otherwise idle before
-trusting a run. Results, with the conditions they were taken under, are in
+trusting a run. With conda-forge's `libomp` on
+Linux `--blocktime 200` made no measurable difference, and forks were as
+cheap by default as on the Mac with it. Results, with the conditions they were taken under, are in
 `bench/RESULTS.md`.
 
 ## Milestones
