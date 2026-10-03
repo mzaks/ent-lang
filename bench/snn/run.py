@@ -41,7 +41,13 @@ VARIANTS = {
     "ent-push-par": (3, "snn.ent", PARALLEL, True),
     "ent-pull": (3, "snn_pull.ent", ["--ent-lower-to-loops"], False),
     "ent-pull-par": (3, "snn_pull.ent", PARALLEL, True),
+    # Diagnostic: c-pull plus one more thing the generated pull does each.
+    "c-pull-index": (4, None, None, False),
+    "c-pull-index-store": (5, None, None, False),
+    "c-pull-index-store-locate": (6, None, None, False),
 }
+DEFAULT = ["c-push", "c-pull", "c-pull-par", "ent-push", "ent-push-par",
+           "ent-pull", "ent-pull-par"]
 
 
 def build(name, number, program, passes, openmp, n, k):
@@ -84,20 +90,24 @@ def main():
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--sizes", default="10000x100,100000x100,1000000x20")
     parser.add_argument("--bias", default="0.15,0.3")
+    parser.add_argument("--variants", default=",".join(DEFAULT),
+                        help="comma-separated; also: " + ", ".join(
+                            v for v in VARIANTS if v not in DEFAULT))
     parser.add_argument("--csv")
     args = parser.parse_args()
     os.makedirs(OUT, exist_ok=True)
+    names = args.variants.split(",")
 
     sizes = [tuple(int(x) for x in s.split("x")) for s in args.sizes.split(",")]
     biases = args.bias.split(",")
-    exes = {(size, name): build(name, *spec, *size)
-            for size in sizes for name, spec in VARIANTS.items()}
+    exes = {(size, name): build(name, *VARIANTS[name], *size)
+            for size in sizes for name in names}
     configs = list(itertools.product(sizes, biases))
 
     results, rates, checksums = {}, {}, {}
     for _ in range(args.rounds):
         for size, bias in configs:
-            for name in VARIANTS:
+            for name in names:
                 out = subprocess.run(
                     [exes[(size, name)], str(args.steps), str(args.warmup),
                      bias], check=True, capture_output=True, text=True).stdout
@@ -112,7 +122,6 @@ def main():
         if len(values) != 1:
             print(f"CHECKSUM MISMATCH at {config}: {values}")
 
-    names = list(VARIANTS)
     print(f"\nus per step, median of {args.rounds} processes (spread); "
           "best in bold\n")
     print("| neurons x synapses | bias | firing | " + " | ".join(names) + " |")

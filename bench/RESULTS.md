@@ -1037,3 +1037,43 @@ combine before it was hoisted; (3) `n.input += ...` loads and stores the
 neuron's input once per edge rather than keeping the sum in a register.
 A C pull variant through the same index, and the generated IR's inner
 loop, would separate them.
+
+## 2026-10-02: where the generated pull loses its time
+
+The previous section left `ent-pull` at 6.3-9.4x `c-pull` with three
+unchecked candidate causes. The generated inner loop (read in its
+assembly) does, per incoming edge: a sequential load of the edge's
+position from the index by target; a scattered load of the source id and
+of the weight at that position in the table sorted by source; the
+lookup's id checks (the archetype count is hoisted by LLVM, so that
+candidate was wrong: the checks are a few integer instructions and a
+branch); and a load, add and store of the neuron's input. `c-pull`'s loop
+keeps the sum in a register and reads sources and weights sequentially
+(7 instructions against 13). Three diagnostic variants add the generated
+code's behaviour to `c-pull` one by one: `c-pull-index` reads sources and
+weights through the index by target, `c-pull-index-store` also stores the
+input on every edge (a compiler barrier per edge keeps it from staying in
+a register), `c-pull-index-store-locate` also checks every source id like
+the lookup does. `bench/snn/run.py --bias 0.15 --variants c-pull,
+c-pull-index,c-pull-index-store,c-pull-index-store-locate,ent-pull`; us per
+step, median of 5 processes (spread), checksums agree. Load average 3.5 at
+the start and 2.5 at the end, WindowServer at about 21% of a core.
+
+| neurons x synapses | bias | firing | c-pull | c-pull-index | c-pull-index-store | c-pull-index-store-locate | ent-pull |
+|---|---|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | **460.2 (9%)** | 1,197.0 (7%) | 2,953.8 (10%) | 2,955.3 (9%) | 2,887.8 (9%) |
+| 1e+05 x 100 | 0.15 | 2.0% | **5,512.3 (6%)** | 39,499.7 (7%) | 53,890.0 (24%) | 53,417.1 (8%) | 51,907.7 (6%) |
+| 1e+06 x 20 | 0.15 | 2.4% | **15,739.1 (3%)** | 108,499.7 (4%) | 127,561.7 (4%) | 130,283.4 (8%) | 124,169.4 (6%) |
+
+### What holds
+
+- With all three, C lands within 2-5% of `ent-pull` at every size
+  (2,955 against 2,888 us at 1e4 x 100; 53.4 against 51.9 ms at 1e5 x 100;
+  130 against 124 ms at 1e6 x 20): the three explain the gap.
+- Reading through the index by target is the largest cost where the table
+  does not fit in the caches: 7.2x at 1e5 x 100 and 6.9x at 1e6 x 20
+  (1e7 and 2e7 edges, 80-160 MB of ids and weights read at scattered
+  positions); 2.6x at 1e4 x 100.
+- Storing the input on every edge costs 2.5x on top at 1e4 x 100, where the
+  rest stays in cache, and 1.2-1.4x at the larger sizes.
+- The id checks cost nothing measurable (-1% to +2%, within the spread).

@@ -11,6 +11,17 @@
 //   VARIANT 3  ent         the ent-lang program compiled into the binary
 //                          (push or pull, sequential or parallel)
 //
+// Diagnostic variants, each adding one thing the generated pull does to
+// c-pull, to tell where its time goes:
+//   VARIANT 4  c-pull-index               sources and weights stay in source
+//                                         order and are read through the
+//                                         positions of the edges by target
+//   VARIANT 5  c-pull-index-store         ... and the input is loaded and
+//                                         stored on every edge
+//   VARIANT 6  c-pull-index-store-locate  ... and every source id is checked
+//                                         like an ent-lang lookup (archetype
+//                                         and row bound) before the load
+//
 // All variants add the weights into a neuron's input in the order of the
 // source neurons, so they agree to the bit; the checksum is a hash of every
 // potential's bits. Compile with -ffp-contract=off.
@@ -50,12 +61,17 @@ static double now(void) {
 
 static const float decay = 0.9f, threshold = 1.0f;
 static float *bias;
-static int32_t *targets;
+static int32_t *targets, *sources;
 static float *weights;
+// For VARIANT 6: the bits of a row, and an entity count to check against
+// (read from memory, as the generated code does).
+#define ROW_BITS 31
+static volatile int64_t count_storage = N;
+static int64_t count;
 
 #if VARIANT != 3
 static float *v, *input, *fired;
-static int32_t *in_offsets, *in_sources;
+static int32_t *in_offsets, *in_sources, *in_edges;
 static float *in_weights;
 static long long spikes;
 
@@ -81,13 +97,33 @@ static void step(void) {
     if (fired[i] != 0.0f)
       for (int e = i * K; e < (i + 1) * K; ++e)
         input[targets[e]] += weights[e];
-#else
+#elif VARIANT <= 2
 #if VARIANT == 2
 #pragma omp parallel for schedule(static)
 #endif
   for (int i = 0; i < N; ++i)
     for (int e = in_offsets[i]; e < in_offsets[i + 1]; ++e)
       input[i] += in_weights[e] * fired[in_sources[e]];
+#else
+  // Sources are e / K in the table by source; stored like the generated
+  // code, as ids, here equal to rows.
+  for (int i = 0; i < N; ++i) {
+    for (int e = in_offsets[i]; e < in_offsets[i + 1]; ++e) {
+      int32_t k = in_edges[e];
+      int32_t source = sources[k];
+#if VARIANT == 6
+      // Row ids: archetype 0 in the high bits, the row below a count.
+      if ((uint32_t)source >> ROW_BITS != 0 || source >= count)
+        continue;
+#endif
+      input[i] += weights[k] * fired[source];
+#if VARIANT >= 5
+      // Forbid keeping the sum in a register, like the generated code
+      // (whose arena views LLVM cannot tell apart).
+      __asm__ volatile("" ::: "memory");
+#endif
+    }
+  }
 #endif
 }
 #endif
@@ -142,6 +178,11 @@ int main(int argc, char **argv) {
   in_offsets = calloc(N + 1, sizeof(int32_t));
   in_sources = malloc(sizeof(int32_t) * N * K);
   in_weights = malloc(sizeof(float) * N * K);
+  in_edges = malloc(sizeof(int32_t) * N * K);
+  sources = malloc(sizeof(int32_t) * N * K);
+  for (int e = 0; e < N * K; ++e)
+    sources[e] = e / K;
+  count = count_storage;
   for (int e = 0; e < N * K; ++e)
     ++in_offsets[targets[e] + 1];
   for (int i = 0; i < N; ++i)
@@ -152,6 +193,7 @@ int main(int argc, char **argv) {
     int32_t at = cursor[targets[e]]++;
     in_sources[at] = e / K;
     in_weights[at] = weights[e];
+    in_edges[at] = e;
   }
   free(cursor);
 #define STEP() step()
