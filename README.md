@@ -324,7 +324,8 @@ add or remove of its component), and an accumulate whose resource field
 nothing else in the query reads or accumulates into, are combined as the
 loop visits, without buffers and the second pass (same result). Loops
 that may run in parallel keep the buffers; `direct-applies=0` keeps them
-everywhere.
+everywhere. The push example went from 1.49-1.71x the time of
+hand-written C to 1.04-1.06x up to 1e5 neurons, 1.18-1.31x at 1e6.
 Connects append and mark the relation unclean; a sort (a stable counting
 sort through scratch columns, O(edges + keys)) runs where edges changed:
 at a schedule's start for edges the host connected, after a system-level

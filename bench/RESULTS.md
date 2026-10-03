@@ -1194,4 +1194,40 @@ processes (spread), checksums agree; load average 2.8 at the start and
 | 1e+06 x 20 | 0.3 | 7.9% | **5,296.1 (5%)** | 8,452.5 (5%) | 8,664.1 (7%) |
 
 `ent-push` lands within 0.98-1.09x of `c-push-buffer` everywhere: the two
-passes are the gap.
+passes are the gap. A loop that never runs in parallel visits the entities
+(and their edges) in the order the query's end combines applies in, so an
+apply whose field nothing else in the query touches (no get, set or lookup
+of it, no second apply to it, no add or remove of its component) is now
+combined as the loop visits, without buffers; likewise an accumulate whose
+resource field nothing else in the query reads or accumulates into (the
+`Stats.spikes += 1` in `integrate` was buffered per neuron and summed in a
+second pass over all of them). Loops that may run in parallel keep the
+buffers. `--ent-lower-to-loops=direct-applies=0` keeps the old form
+(`ent-push-buffered`). `bench/snn/run.py --variants c-push,
+ent-push-buffered,ent-push,ent-push-par,c-pull,ent-pull`; checksums agree;
+load average 2.4 at the start and 2.0 at the end:
+
+| neurons x synapses | bias | firing | c-push | ent-push-buffered | ent-push | ent-push-par | c-pull | ent-pull |
+|---|---|---|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | **20.6 (95%)** | 31.8 (62%) | 21.5 (82%) | 123.3 (13%) | 436.5 (15%) | 451.9 (10%) |
+| 1e+04 x 100 | 0.3 | 7.4% | **49.9 (25%)** | 75.0 (8%) | 51.8 (19%) | 152.4 (13%) | 438.9 (5%) | 449.7 (4%) |
+| 1e+05 x 100 | 0.15 | 2.0% | **309.0 (5%)** | 527.5 (10%) | 327.2 (7%) | 412.1 (7%) | 5,363.8 (2%) | 5,600.7 (50621%) |
+| 1e+05 x 100 | 0.3 | 7.3% | **996.4 (47%)** | 1,643.3 (23%) | 1,040.0 (63%) | 1,080.2 (26%) | 5,389.5 (5%) | 5,605.0 (4%) |
+| 1e+06 x 20 | 0.15 | 2.4% | 2,424.3 (5%) | 3,635.7 (36%) | 3,175.3 (15%) | **2,152.2 (17%)** | 15,272.1 (2%) | 15,136.7 (1%) |
+| 1e+06 x 20 | 0.3 | 7.9% | **5,274.4 (12%)** | 8,656.6 (11%) | 6,207.5 (8%) | 5,360.0 (24%) | 15,777.2 (3%) | 15,693.6 (7%) |
+
+### What holds
+
+- `ent-push` takes 1.04-1.06x the time of `c-push` at 1e4 and 1e5 (327
+  against 309 us at 1e5 x 100, 2% firing), down from 1.49-1.71x;
+  `ent-push-buffered` matches the earlier `ent-push` within 1-3%.
+- At 1e6 x 20 it takes 1.18-1.31x (3.18 against 2.42 ms at 2.4% firing).
+  The direct accumulate took 9% off there (3.47 ms with only direct
+  applies, in a run before). Not measured what the rest is; at 1e6
+  neurons and few spikes the per-neuron work dominates. Candidates: the
+  `Spiked` presence byte `integrate` writes for every neuron, and c-push
+  computing each neuron's edges as `i * K` instead of loading offsets.
+- `ent-pull` now takes 0.99-1.04x `c-pull` (its `integrate` has the same
+  accumulate).
+- One `ent-pull` process at 1e5 x 100, 2% firing, was an outlier (the
+  spread column shows 50621%); the median agrees with the other runs.
