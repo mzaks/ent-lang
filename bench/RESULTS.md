@@ -1173,3 +1173,25 @@ and 1.9 at the end.
   (spreads up to 31%). The comparison is not like for like: ent's `-par`
   variants also run the integrate loop in parallel, the C ones only the
   propagation. Not measured how much that accounts for.
+
+## 2026-10-03: push without the second pass
+
+`ent-push` took 1.49-1.71x the time of `c-push`. `c-push-buffer` is c-push
+in the generated code's two passes (every row writes a flag; firing rows
+copy their edges' targets and values into buffers; then every row's flag
+is read and the buffered values are added in). `bench/snn/run.py
+--variants c-push,c-push-buffer,ent-push`; us per step, median of 5
+processes (spread), checksums agree; load average 2.8 at the start and
+2.4 at the end:
+
+| neurons x synapses | bias | firing | c-push | c-push-buffer | ent-push |
+|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | **18.1 (95%)** | 27.2 (112%) | 29.6 (28%) |
+| 1e+04 x 100 | 0.3 | 7.4% | **49.0 (35%)** | 70.1 (14%) | 74.2 (8%) |
+| 1e+05 x 100 | 0.15 | 2.0% | **320.8 (36%)** | 505.6 (11%) | 518.5 (7%) |
+| 1e+05 x 100 | 0.3 | 7.3% | **993.0 (35%)** | 1,652.6 (12%) | 1,621.7 (13%) |
+| 1e+06 x 20 | 0.15 | 2.4% | **2,469.7 (4%)** | 3,546.0 (3%) | 3,688.9 (4%) |
+| 1e+06 x 20 | 0.3 | 7.9% | **5,296.1 (5%)** | 8,452.5 (5%) | 8,664.1 (7%) |
+
+`ent-push` lands within 0.98-1.09x of `c-push-buffer` everywhere: the two
+passes are the gap.

@@ -21,6 +21,12 @@
 //   VARIANT 6  c-pull-index-store-locate  ... and every source id is checked
 //                                         like an ent-lang lookup (archetype
 //                                         and row bound) before the load
+//   VARIANT 8  c-push-buffer              c-push in the generated code's two
+//                                         passes: every row writes a flag,
+//                                         firing rows copy their edges'
+//                                         targets and values into buffers;
+//                                         then every row's flag is read and
+//                                         the buffered values are added in
 //   VARIANT 7  c-pull-locate              c-pull with only the lookup's
 //                                         checks (the generated pull since
 //                                         the edges are sorted by target and
@@ -77,6 +83,10 @@ static int64_t count;
 static float *v, *input, *fired;
 static int32_t *in_offsets, *in_sources, *in_edges;
 static float *in_weights;
+// For VARIANT 8: per row, -1 if it sent nothing; per edge, a target and a
+// value.
+static int32_t *ran, *sent_to;
+static float *sent;
 static long long spikes;
 
 static void integrate(void) {
@@ -101,6 +111,22 @@ static void step(void) {
     if (fired[i] != 0.0f)
       for (int e = i * K; e < (i + 1) * K; ++e)
         input[targets[e]] += weights[e];
+#elif VARIANT == 8
+  for (int i = 0; i < N; ++i) {
+    ran[i] = -1;
+    if (fired[i] != 0.0f) {
+      ran[i] = 0;
+      for (int e = i * K; e < (i + 1) * K; ++e) {
+        sent_to[e] = targets[e];
+        sent[e] = weights[e];
+      }
+    }
+  }
+  for (int i = 0; i < N; ++i)
+    if (ran[i] != -1)
+      for (int e = i * K; e < (i + 1) * K; ++e)
+        if (sent_to[e] != -1)
+          input[sent_to[e]] += sent[e];
 #elif VARIANT == 7
   // The sum in a local, as the generated code carries it (with the checks,
   // clang would otherwise store it on every edge).
@@ -197,6 +223,9 @@ int main(int argc, char **argv) {
   in_sources = malloc(sizeof(int32_t) * N * K);
   in_weights = malloc(sizeof(float) * N * K);
   in_edges = malloc(sizeof(int32_t) * N * K);
+  ran = malloc(sizeof(int32_t) * N);
+  sent_to = malloc(sizeof(int32_t) * N * K);
+  sent = malloc(sizeof(float) * N * K);
   sources = malloc(sizeof(int32_t) * N * K);
   for (int e = 0; e < N * K; ++e)
     sources[e] = e / K;

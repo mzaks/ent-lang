@@ -46,6 +46,7 @@ VARIANTS = {
     "c-pull-index-store": (5, None, None, False),
     "c-pull-index-store-locate": (6, None, None, False),
     "c-pull-locate": (7, None, None, False),
+    "c-push-buffer": (8, None, None, False),
 }
 DEFAULT = ["c-push", "c-pull", "c-pull-par", "ent-push", "ent-push-par",
            "ent-pull", "ent-pull-par"]
