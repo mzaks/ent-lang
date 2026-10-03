@@ -1207,6 +1207,8 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                              const WorldArchetype &archetype,
                              WorldAccess &world, const WorldLayout &layout,
                              Value row);
+static SmallVector<Operation *> carryOwnFields(IRRewriter &rewriter,
+                                               scf::ForOp loop);
 
 /// Emit the body of `query` for `entity` of `archetype` at the insertion
 /// point, with the query's parameters and outer values mapped by
@@ -1332,7 +1334,13 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     Operation *op = edges;
     Operation *loop = lowerEdges(rewriter, edges, archetype, world, layout,
                                  entity);
-    llvm::replace(roots, op, loop);
+    SmallVector<Operation *> lowered =
+        carryOwnFields(rewriter, cast<scf::ForOp>(loop));
+    auto *at = llvm::find(roots, op);
+    if (at != roots.end()) {
+      at = roots.erase(at);
+      roots.insert(at, lowered.begin(), lowered.end());
+    }
   }
   lowerAccesses(rewriter, roots, archetype, world, layout, entity, rows, mask,
                 tick, parallel);
@@ -2088,6 +2096,229 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   rewriter.inlineBlockBefore(&body, insertBefore, ValueRange{other});
   rewriter.eraseOp(edges);
   return loop;
+}
+
+/// A field of the visited entity that an edge loop sets: carried through
+/// the loop as a value.
+namespace {
+struct CarriedField {
+  Value ref;
+  StringAttr field;
+  Type type;
+};
+/// The carried fields' values and whether they were set, at a point of the
+/// loop body.
+struct CarriedState {
+  SmallVector<Value> values;
+  SmallVector<Value> written;
+};
+} // namespace
+
+static int findCarried(ArrayRef<CarriedField> fields, Value ref,
+                       StringAttr field) {
+  for (auto [index, carried] : llvm::enumerate(fields))
+    if (carried.ref == ref && carried.field == field)
+      return index;
+  return -1;
+}
+
+/// Replace the gets and sets of `fields` in `block` by the values `state`
+/// carries, threading them through the `scf.if`s that contain any.
+static void carryThrough(IRRewriter &rewriter, Block &block,
+                         ArrayRef<CarriedField> fields, CarriedState &state) {
+  auto touches = [&](Operation *op) {
+    return op
+        ->walk([&](Operation *nested) {
+          if (auto get = dyn_cast<GetOp>(nested);
+              get && findCarried(fields, get.getRef(), get.getFieldAttr()) >= 0)
+            return WalkResult::interrupt();
+          if (auto set = dyn_cast<SetOp>(nested);
+              set && findCarried(fields, set.getRef(), set.getFieldAttr()) >= 0)
+            return WalkResult::interrupt();
+          return WalkResult::advance();
+        })
+        .wasInterrupted();
+  };
+  for (Operation &op : llvm::make_early_inc_range(block)) {
+    if (auto get = dyn_cast<GetOp>(op)) {
+      int index = findCarried(fields, get.getRef(), get.getFieldAttr());
+      if (index >= 0) {
+        rewriter.replaceOp(get, state.values[index]);
+        continue;
+      }
+    }
+    if (auto set = dyn_cast<SetOp>(op)) {
+      int index = findCarried(fields, set.getRef(), set.getFieldAttr());
+      if (index >= 0) {
+        rewriter.setInsertionPoint(set);
+        state.values[index] = set.getValue();
+        state.written[index] =
+            arith::ConstantIntOp::create(rewriter, set.getLoc(), 1, 1);
+        rewriter.eraseOp(set);
+        continue;
+      }
+    }
+    auto branch = dyn_cast<scf::IfOp>(op);
+    if (!branch || !touches(branch))
+      continue;
+    CarriedState thenState = state, elseState = state;
+    carryThrough(rewriter, *branch.thenBlock(), fields, thenState);
+    if (branch.elseBlock())
+      carryThrough(rewriter, *branch.elseBlock(), fields, elseState);
+    // The fields either branch changes become results of the `if`.
+    SmallVector<unsigned> changed;
+    for (unsigned i = 0; i < fields.size(); ++i)
+      if (thenState.values[i] != state.values[i] ||
+          elseState.values[i] != state.values[i] ||
+          thenState.written[i] != state.written[i] ||
+          elseState.written[i] != state.written[i])
+        changed.push_back(i);
+    if (changed.empty())
+      continue;
+    Location loc = branch.getLoc();
+    SmallVector<Type> types(branch.getResultTypes());
+    for (unsigned i : changed) {
+      types.push_back(fields[i].type);
+      types.push_back(rewriter.getI1Type());
+    }
+    rewriter.setInsertionPoint(branch);
+    auto replacement = scf::IfOp::create(rewriter, loc, types,
+                                         branch.getCondition(),
+                                         /*withElseRegion=*/true);
+    // Blocks of a new `if` with results come without terminators.
+    for (Block *block : {replacement.thenBlock(), replacement.elseBlock()})
+      while (!block->empty())
+        rewriter.eraseOp(&block->back());
+    rewriter.eraseBlock(replacement.thenBlock());
+    replacement.getThenRegion().takeBody(branch.getThenRegion());
+    if (branch.elseBlock()) {
+      rewriter.eraseBlock(replacement.elseBlock());
+      replacement.getElseRegion().takeBody(branch.getElseRegion());
+    } else {
+      rewriter.setInsertionPointToEnd(replacement.elseBlock());
+      scf::YieldOp::create(rewriter, loc);
+    }
+    for (auto [block, branchState] :
+         {std::make_pair(replacement.thenBlock(), &thenState),
+          std::make_pair(replacement.elseBlock(), &elseState)}) {
+      auto yield = cast<scf::YieldOp>(block->getTerminator());
+      SmallVector<Value> operands(yield.getOperands());
+      for (unsigned i : changed) {
+        operands.push_back(branchState->values[i]);
+        operands.push_back(branchState->written[i]);
+      }
+      rewriter.setInsertionPoint(yield);
+      rewriter.replaceOpWithNewOp<scf::YieldOp>(yield, operands);
+    }
+    unsigned results = branch.getNumResults();
+    rewriter.replaceOp(branch,
+                       replacement.getResults().take_front(results));
+    for (auto [k, i] : llvm::enumerate(changed)) {
+      state.values[i] = replacement.getResult(results + 2 * k);
+      state.written[i] = replacement.getResult(results + 2 * k + 1);
+    }
+  }
+}
+
+/// Keep the fields of the visited entity that the edge loop `loop` sets in
+/// registers: load each once before the loop, carry it through the loop
+/// (and the `scf.if`s in it) as a value, and set it once after the loop if
+/// any iteration set it. LLVM cannot do this itself: every column is a view
+/// of the same arena, so a store to the entity's field might change any
+/// other load in the loop. The language rules it out: in an edge loop only
+/// the entity's own get and set reach its fields (a query may not look up a
+/// field it writes, applies land when the query ends). Fields set inside
+/// other regions than `scf.if`, or of a component the loop adds, stay in
+/// memory. Returns the ops that replace `loop`, in order.
+static SmallVector<Operation *> carryOwnFields(IRRewriter &rewriter,
+                                               scf::ForOp loop) {
+  SmallVector<CarriedField> fields;
+  loop.walk([&](SetOp set) {
+    auto arg = dyn_cast<BlockArgument>(set.getRef());
+    if (!arg || !isa<QueryOp>(arg.getOwner()->getParentOp()) ||
+        findCarried(fields, set.getRef(), set.getFieldAttr()) >= 0)
+      return;
+    fields.push_back(
+        {set.getRef(), set.getFieldAttr(), set.getValue().getType()});
+  });
+  // Every get and set of a carried field must sit in `scf.if`s only.
+  auto onlyIfs = [&](Operation *op) {
+    for (Operation *parent = op->getParentOp(); parent != loop;
+         parent = parent->getParentOp())
+      if (!isa<scf::IfOp>(parent))
+        return false;
+    return true;
+  };
+  llvm::SmallPtrSet<Attribute, 4> added;
+  loop.walk([&](AddOp add) { added.insert(add.getComponentAttr()); });
+  loop.walk([&](Operation *op) {
+    Value ref;
+    StringAttr field;
+    if (auto get = dyn_cast<GetOp>(op))
+      ref = get.getRef(), field = get.getFieldAttr();
+    else if (auto set = dyn_cast<SetOp>(op))
+      ref = set.getRef(), field = set.getFieldAttr();
+    else
+      return;
+    int index = findCarried(fields, ref, field);
+    if (index >= 0 && !onlyIfs(op))
+      fields.erase(fields.begin() + index);
+  });
+  llvm::erase_if(fields, [&](const CarriedField &carried) {
+    return added.contains(
+        cast<RefType>(carried.ref.getType()).getComponent());
+  });
+  if (fields.empty())
+    return {loop};
+
+  Location loc = loop.getLoc();
+  SmallVector<Operation *> ops;
+  rewriter.setInsertionPoint(loop);
+  SmallVector<Value> inits;
+  for (const CarriedField &carried : fields) {
+    auto get = GetOp::create(rewriter, loc, carried.type, carried.ref,
+                             carried.field);
+    ops.push_back(get);
+    inits.push_back(get);
+  }
+  Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+  for (unsigned i = 0; i < fields.size(); ++i)
+    inits.push_back(no);
+  auto carrying = scf::ForOp::create(rewriter, loc, loop.getLowerBound(),
+                                     loop.getUpperBound(), loop.getStep(),
+                                     inits);
+  ops.push_back(carrying);
+  Block *body = carrying.getBody();
+  while (!body->empty())
+    rewriter.eraseOp(&body->back());
+  body->getOperations().splice(body->end(),
+                               loop.getBody()->getOperations());
+  rewriter.replaceAllUsesWith(loop.getInductionVar(),
+                              carrying.getInductionVar());
+  CarriedState state;
+  for (unsigned i = 0; i < fields.size(); ++i) {
+    state.values.push_back(carrying.getRegionIterArg(i));
+    state.written.push_back(carrying.getRegionIterArg(fields.size() + i));
+  }
+  carryThrough(rewriter, *body, fields, state);
+  auto yield = cast<scf::YieldOp>(body->getTerminator());
+  SmallVector<Value> operands(state.values);
+  operands.append(state.written.begin(), state.written.end());
+  rewriter.setInsertionPoint(yield);
+  rewriter.replaceOpWithNewOp<scf::YieldOp>(yield, operands);
+  rewriter.eraseOp(loop);
+
+  rewriter.setInsertionPointAfter(carrying);
+  for (auto [i, carried] : llvm::enumerate(fields)) {
+    auto ifWritten = scf::IfOp::create(
+        rewriter, loc, carrying.getResult(fields.size() + i));
+    ops.push_back(ifWritten);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(ifWritten.thenBlock());
+    SetOp::create(rewriter, loc, carried.ref, carried.field,
+                  carrying.getResult(i));
+  }
+  return ops;
 }
 
 /// Append the edge (`source`, `target`, `values`, all stored forms) to

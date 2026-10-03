@@ -84,14 +84,27 @@ ent.component @N (v: f32) capacity 100
 ent.archetype @A (@N) capacity 100
 ent.relation @Syn (w: f32) capacity 1000
 
+// Visited both ways here, so `in` reads through the index by target. The
+// entity's own field the loop sets is carried as a value (through the
+// ownership check's `if`) and stored once after the loop, if it was set.
 // CHECK-LABEL: func.func private @pull(
 // CHECK:        %[[ID:.*]] = memref.load %{{.*}}[%{{.*}}] : memref<100xi32>
-// CHECK:        scf.for %[[P:.*]] =
+// CHECK:        %[[V0:.*]] = memref.load %[[V:.*]][%[[ROW:.*]]] : memref<100xf32>
+// CHECK-NEXT:   %[[NO:.*]] = arith.constant false
+// CHECK-NEXT:   %[[R:.*]]:2 = scf.for %[[P:.*]] = {{.*}} iter_args(%[[CUR:.*]] = %[[V0]], %[[SET:.*]] = %[[NO]]) -> (f32, i1) {
 // CHECK-NEXT:     %[[POS:.*]] = memref.load %{{.*}}[%[[P]]] : memref<1000xi32>
 // CHECK-NEXT:     %[[EDGE:.*]] = arith.index_cast %[[POS]]
 // CHECK-NEXT:     %[[OWN:.*]] = memref.load %{{.*}}[%[[EDGE]]] : memref<1000xi32>
 // CHECK-NEXT:     %[[MINE:.*]] = arith.cmpi eq, %[[OWN]], %[[ID]] : i32
-// CHECK-NEXT:     scf.if %[[MINE]] {
+// CHECK-NEXT:     %[[B:.*]]:2 = scf.if %[[MINE]] -> (f32, i1) {
+// CHECK:            scf.yield %{{.*}}, %{{.*}} : f32, i1
+// CHECK-NEXT:     } else {
+// CHECK-NEXT:       scf.yield %[[CUR]], %[[SET]] : f32, i1
+// CHECK-NEXT:     }
+// CHECK-NEXT:     scf.yield %[[B]]#0, %[[B]]#1 : f32, i1
+// CHECK-NEXT:   }
+// CHECK-NEXT:   scf.if %[[R]]#1 {
+// CHECK-NEXT:     memref.store %[[R]]#0, %[[V]][%[[ROW]]] : memref<100xf32>
 ent.system @pull() {
   ent.query (%n: !ent.ref<@N, mut>) {
     ent.edges @Syn in (%s: !ent.ref<@Syn>, %p: !ent.entity) {
@@ -115,4 +128,36 @@ ent.system @prune() {
     }
     ent.despawn
   }
+}
+
+// -----
+
+// Visited only by incoming edges: the table is sorted by target, so the
+// loop reads sources and weights in order, without the index.
+ent.component @N (v: f32, input: f32) capacity 100
+ent.archetype @A (@N) capacity 100
+ent.relation @Syn (w: f32) capacity 1000
+
+// CHECK-LABEL: func.func private @gather(
+// CHECK:        %[[B:.*]] = memref.load %[[OFF:.*]][%{{.*}}] : memref<129xi32>
+// CHECK:        scf.for %[[P:.*]] = {{.*}} iter_args(
+// CHECK-NEXT:     %[[SRC:.*]] = memref.load %{{.*}}[%[[P]]] : memref<1000xi32>
+// CHECK-NEXT:     %[[W:.*]] = memref.load %{{.*}}[%[[P]]] : memref<1000xf32>
+// CHECK-NOT:      memref.store
+// CHECK:          scf.yield
+// The sort: by source into the scratch, then by target back.
+// CHECK-LABEL: func.func private @ent_sort_Syn(
+ent.system @gather() {
+  ent.query (%n: !ent.ref<@N, mut>) {
+    ent.edges @Syn in (%s: !ent.ref<@Syn>, %p: !ent.entity) {
+      %w = ent.get %s "w" : !ent.ref<@Syn> -> f32
+      %i = ent.get %n "input" : !ent.ref<@N, mut> -> f32
+      %j = arith.addf %i, %w : f32
+      ent.set %n "input", %j : !ent.ref<@N, mut>, f32
+    }
+  }
+}
+
+ent.schedule @frame() {
+  ent.run @gather()
 }
