@@ -2425,6 +2425,93 @@ static SmallVector<Operation *> carryOwnFields(IRRewriter &rewriter,
   return ops;
 }
 
+/// Where both branches of `branch` store to the same column at the same
+/// index, yield the two values and store once after the `if`: the stores no
+/// longer depend on the branch, so it can become a select and the loop
+/// around it be vectorised (LLVM does not merge them itself: each store
+/// computes its address in its own block). Only for an `if` whose branches
+/// do nothing but compute and store, and where no other store in either
+/// branch writes a column a merged store writes (columns are disjoint
+/// views, so stores to different ones never alias).
+static void mergeBranchStores(IRRewriter &rewriter, scf::IfOp branch) {
+  if (!branch.elseBlock())
+    return;
+  auto storesOnly = [](Block *block) {
+    for (Operation &op : block->without_terminator())
+      if (!isa<memref::StoreOp>(op) &&
+          !(op.getNumRegions() == 0 && isMemoryEffectFree(&op)))
+        return false;
+    return true;
+  };
+  if (!storesOnly(branch.thenBlock()) || !storesOnly(branch.elseBlock()))
+    return;
+  SmallVector<std::pair<memref::StoreOp, memref::StoreOp>> pairs;
+  for (auto store : branch.thenBlock()->getOps<memref::StoreOp>())
+    for (auto other : branch.elseBlock()->getOps<memref::StoreOp>())
+      if (store.getMemref() == other.getMemref() &&
+          store.getIndices() == other.getIndices() &&
+          llvm::none_of(pairs, [&](auto &pair) {
+            return pair.first.getMemref() == store.getMemref();
+          }))
+        pairs.push_back({store, other});
+  // Every other store must leave the merged columns alone, and a merged
+  // column is stored once per branch.
+  for (Block *block : {branch.thenBlock(), branch.elseBlock()})
+    for (auto store : block->getOps<memref::StoreOp>()) {
+      auto *pair = llvm::find_if(pairs, [&](auto &pair) {
+        return pair.first.getMemref() == store.getMemref();
+      });
+      if (pair != pairs.end() && pair->first != store &&
+          pair->second != store)
+        return;
+    }
+  // The index of a merged store must be defined outside the `if`.
+  llvm::erase_if(pairs, [&](auto &pair) {
+    return llvm::any_of(pair.first.getIndices(), [&](Value index) {
+      return branch->isProperAncestor(index.getParentBlock()->getParentOp()) ||
+             index.getParentBlock()->getParentOp() == branch;
+    });
+  });
+  if (pairs.empty())
+    return;
+
+  Location loc = branch.getLoc();
+  SmallVector<Type> types(branch.getResultTypes());
+  for (auto &pair : pairs)
+    types.push_back(pair.first.getValueToStore().getType());
+  rewriter.setInsertionPoint(branch);
+  auto replacement = scf::IfOp::create(rewriter, loc, types,
+                                       branch.getCondition(),
+                                       /*withElseRegion=*/true);
+  for (Block *block : {replacement.thenBlock(), replacement.elseBlock()})
+    while (!block->empty())
+      rewriter.eraseOp(&block->back());
+  rewriter.eraseBlock(replacement.thenBlock());
+  replacement.getThenRegion().takeBody(branch.getThenRegion());
+  rewriter.eraseBlock(replacement.elseBlock());
+  replacement.getElseRegion().takeBody(branch.getElseRegion());
+  for (bool then : {true, false}) {
+    Block *block = then ? replacement.thenBlock() : replacement.elseBlock();
+    auto yield = cast<scf::YieldOp>(block->getTerminator());
+    SmallVector<Value> operands(yield.getOperands());
+    for (auto &pair : pairs) {
+      memref::StoreOp store = then ? pair.first : pair.second;
+      operands.push_back(store.getValueToStore());
+    }
+    rewriter.setInsertionPoint(yield);
+    rewriter.replaceOpWithNewOp<scf::YieldOp>(yield, operands);
+  }
+  unsigned results = branch.getNumResults();
+  rewriter.setInsertionPointAfter(replacement);
+  for (auto [k, pair] : llvm::enumerate(pairs)) {
+    memref::StoreOp::create(rewriter, loc, replacement.getResult(results + k),
+                            pair.first.getMemref(), pair.first.getIndices());
+    rewriter.eraseOp(pair.first);
+    rewriter.eraseOp(pair.second);
+  }
+  rewriter.replaceOp(branch, replacement.getResults().take_front(results));
+}
+
 /// Whether `value` is the constant index 0.
 static bool isZeroIndex(Value value) {
   auto constant = value.getDefiningOp<arith::ConstantIndexOp>();
@@ -3933,6 +4020,12 @@ struct EntLowerToLoops
         lowerQuery(rewriter, query, *layout, world, options);
       lowerSpawns(rewriter, func, *layout, world);
       lowerConnects(rewriter, func, *layout, world);
+      // Innermost first, so an outer `if` sees merged inner ones.
+      SmallVector<scf::IfOp> branches;
+      func.walk<WalkOrder::PostOrder>(
+          [&](scf::IfOp branch) { branches.push_back(branch); });
+      for (scf::IfOp branch : branches)
+        mergeBranchStores(rewriter, branch);
       lowerLookups(rewriter, func, *layout, world);
       lowerResourceAccesses(rewriter, func, world);
     }
