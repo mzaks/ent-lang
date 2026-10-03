@@ -1315,3 +1315,219 @@ below 3 (2.7 at the start, 2.6 at the end):
   ent's processes spread 24%, C's 4%). Not explained: the loops have the
   same shape and vector width. Push and pull at 1e6, which include the
   integration, match C within the spread.
+
+## 2026-10-03: every benchmark on Linux (Ryzen AI 9 HX 370)
+
+The first run off the Mac, at commit d023ec1 plus a portable timer in the
+benchmark hosts (`clock_gettime(CLOCK_MONOTONIC)` where
+`clock_gettime_nsec_np` does not exist). AMD Ryzen AI 9 HX 370 (12 cores,
+24 threads, 22 GB visible), Arch Linux, kernel 7.1.9, on mains with the
+`performance` governor. LLVM, MLIR, clang and `libomp` 22.1.8 from
+conda-forge (Arch packages no MLIR), `clang -O2` without `-march`, so the
+x86 code is baseline SSE2 where the Mac's had all of NEON. Every script
+with its defaults, one after the other; `bench/run.py` and
+`bench/layout/run.py` with 12 threads as on the Mac, the parallel variants
+of apply, reactive and snn with the runtime's default thread count (not
+recorded; 16 on the Mac). Checksums agree in every configuration of every
+benchmark. Load average at the start of each run, mostly left by the one
+before: main 0.8, main with `--blocktime 200` 4.3, streams 6.0, frame 4.1,
+churn 5.4, apply 1.9, reactive 16.5 (apply's parallel variants had just
+finished), snn 3.2; 1.1 after the last. No other process was checked.
+
+"Mac" below is the most recent entry above for the same benchmark.
+
+### Main benchmark, OpenMP runtime defaults
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 369 (4%) | 3,682 (6%) | 38,933 (3%) | 996,548 (3%) | 13,004,324 (2%) |
+| stages-omp | 2,292 (34%) | 8,690 (35%) | 69,626 (35%) | 1,027,016 (12%) | 12,629,999 (3%) |
+| entities-omp | 381 (4%) | 3,716 (3%) | 39,286 (3%) | 349,472 (11%) | 11,069,759 (2%) |
+| fused | 302 (2%) | 2,962 (3%) | 32,725 (8%) | 953,716 (2%) | 12,054,948 (1%) |
+| fused-entities-omp | 303 (3%) | 2,973 (2%) | 33,257 (6%) | 393,201 (16%) | 10,635,437 (2%) |
+| c-fused | 262 (4%) | 2,861 (10%) | 32,791 (7%) | 964,663 (5%) | 12,390,410 (4%) |
+| c-fused-restrict | 268 (4%) | 2,866 (10%) | 31,430 (11%) | 961,032 (4%) | 12,384,010 (2%) |
+
+With `--blocktime 200`:
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| loops | 371 (2%) | 3,664 (4%) | 38,124 (8%) | 968,189 (2%) | 12,824,603 (4%) |
+| stages-omp | 2,248 (36%) | 8,873 (33%) | 69,791 (43%) | 1,011,294 (6%) | 12,666,198 (6%) |
+| entities-omp | 378 (1%) | 3,840 (5%) | 38,705 (3%) | 331,439 (5%) | 10,820,392 (3%) |
+| fused | 301 (1%) | 2,971 (5%) | 32,267 (5%) | 942,930 (3%) | 11,953,735 (8%) |
+| fused-entities-omp | 302 (1%) | 2,955 (3%) | 32,419 (6%) | 369,629 (13%) | 10,421,764 (0%) |
+| c-fused | 259 (10%) | 2,810 (5%) | 31,289 (4%) | 929,174 (5%) | 12,311,514 (4%) |
+| c-fused-restrict | 259 (3%) | 2,850 (5%) | 31,535 (5%) | 948,160 (3%) | 12,341,060 (6%) |
+
+### Layout: streams and the frame by hand
+
+GB/s moved (read + write), median of 5 processes:
+
+| streams K | 1 | 2 | 3 | 4 | 5 | 8 | 16 |
+|---|---|---|---|---|---|---|---|
+| 1 MB total, 1 thread | 155 | 235 | 217 | 196 | 208 | 167 | 150 |
+| 1 MB total, 12 threads | 736 | 622 | 558 | 608 | 542 | 488 | 206 |
+| 160 MB total, 1 thread | 62 | 64 | 53 | 54 | 57 | 51 | 18 |
+| 160 MB total, 1 thread, staggered | 62 | 64 | 62 | 53 | 58 | 51 | 52 |
+| 160 MB total, 12 threads | 78 | 66 | 65 | 64 | 63 | 62 | 29 |
+
+ns per frame:
+
+| variant | n=1e3 | n=1e4 | n=1e5 | n=1e6 | n=1e7 |
+|---|---|---|---|---|---|
+| soa | 333 (25%) | 3,256 (1%) | 38,797 (5%) | 930,588 (3%) | 11,909,984 (2%) |
+| soa-omp | 3,724 (14%) | 4,358 (4%) | 11,152 (15%) | 378,550 (8%) | 10,501,304 (1%) |
+| soa-stagger | 304 (3%) | 3,277 (1%) | 36,125 (6%) | 935,910 (3%) | 11,929,663 (1%) |
+| soa-stagger-omp | 3,684 (10%) | 4,549 (5%) | 9,532 (16%) | 364,714 (3%) | 10,491,614 (0%) |
+| aos | 835 (0%) | 8,312 (2%) | 84,164 (3%) | 1,262,117 (8%) | 13,094,405 (2%) |
+| aos-omp | 3,025 (5%) | 4,283 (2%) | 17,638 (3%) | 440,582 (7%) | 11,525,962 (1%) |
+| aosoa8 | 272 (1%) | 2,999 (1%) | 34,471 (3%) | 1,078,899 (3%) | 12,119,768 (1%) |
+| aosoa8-omp | 2,665 (12%) | 5,297 (7%) | 22,690 (7%) | 483,757 (2%) | 12,559,641 (4%) |
+| aosoa16 | 269 (1%) | 2,799 (1%) | 35,025 (3%) | 980,884 (2%) | 11,279,695 (1%) |
+| aosoa16-omp | 3,475 (9%) | 3,830 (4%) | 7,029 (9%) | 350,266 (1%) | 10,046,926 (2%) |
+
+### Churn, n = 1e6: us per frame (spread), best in bold
+
+| density | churn/frame | archetypes | wide-select | wide-branch | sparse-set | compiled | compiled-fused |
+|---|---|---|---|---|---|---|---|
+| 1% | 0.0% | **200.8 (6%)** | 484.4 (2%) | 568.8 (22%) | 202.3 (10%) | 500.0 (5%) | 465.8 (6%) |
+| 1% | 0.1% | 248.1 (7%) | 498.2 (3%) | 604.7 (10%) | **218.7 (4%)** | 497.4 (6%) | 469.0 (3%) |
+| 1% | 1.0% | 599.9 (3%) | 519.6 (3%) | 801.4 (8%) | **295.5 (10%)** | 525.4 (3%) | 485.9 (6%) |
+| 10% | 0.0% | **220.2 (9%)** | 486.6 (5%) | 993.0 (3%) | 257.4 (12%) | 501.0 (6%) | 466.4 (7%) |
+| 10% | 0.1% | 278.8 (7%) | 499.1 (1%) | 998.3 (1%) | **277.7 (10%)** | 509.8 (5%) | 472.1 (4%) |
+| 10% | 1.0% | 673.1 (2%) | 520.7 (4%) | 1,040.0 (4%) | **371.3 (8%)** | 527.2 (4%) | 479.3 (8%) |
+| 10% | 10.0% | 3,406.0 (4%) | 610.1 (8%) | 1,144.7 (5%) | 717.3 (11%) | 592.0 (4%) | **542.4 (15%)** |
+| 50% | 0.0% | **299.7 (10%)** | 486.0 (5%) | 3,148.7 (2%) | 428.9 (6%) | 505.4 (6%) | 464.9 (5%) |
+| 50% | 0.1% | **356.1 (9%)** | 495.6 (7%) | 3,154.4 (1%) | 455.6 (3%) | 508.7 (5%) | 466.4 (4%) |
+| 50% | 1.0% | 806.1 (4%) | 523.4 (3%) | 3,206.2 (1%) | 585.2 (3%) | 524.7 (11%) | **493.1 (8%)** |
+| 50% | 10.0% | 4,448.9 (4%) | 597.3 (9%) | 3,294.2 (1%) | 1,049.2 (7%) | 589.0 (1%) | **550.7 (7%)** |
+| 90% | 0.0% | **362.8 (6%)** | 488.1 (7%) | 1,177.8 (4%) | 586.5 (7%) | 509.1 (5%) | 470.2 (7%) |
+| 90% | 0.1% | **428.4 (6%)** | 497.7 (2%) | 1,183.6 (1%) | 607.9 (1%) | 507.7 (4%) | 466.4 (13%) |
+| 90% | 1.0% | 848.6 (4%) | 522.0 (3%) | 1,228.6 (3%) | 747.5 (2%) | 524.9 (2%) | **484.3 (7%)** |
+| 90% | 10.0% | 3,936.6 (6%) | 600.8 (5%) | 1,306.8 (6%) | 1,537.8 (6%) | 586.7 (5%) | **538.3 (9%)** |
+
+The n = 1e5 table is not given: 39 of its 90 cells spread 49-60% and
+another 21 spread 33-43%, for every variant.
+
+### Apply: us per frame (spread), ns per gun in brackets
+
+50 frames at both sizes (the Mac's 1e5 rows were taken with 500).
+
+| guns | ships | c-index | c-atomic-par | c-buffered | compiled-rows | compiled-rows-par | compiled-gen |
+|---|---|---|---|---|---|---|---|
+| 1e5 | 16 | **52.2 (13%) [0.52]** | 2,904.3 (1%) [29.04] | 97.6 (18%) [0.98] | 61.5 (33%) [0.61] | 126.4 (13%) [1.26] | 52.8 (49%) [0.53] |
+| 1e5 | 1e4 | **28.4 (50%) [0.28]** | 240.0 (7%) [2.40] | 90.3 (17%) [0.90] | 40.9 (49%) [0.41] | 116.1 (29%) [1.16] | 59.1 (49%) [0.59] |
+| 1e5 | 1e6 | **53.5 (67%) [0.53]** | 190.5 (22%) [1.91] | 107.7 (33%) [1.08] | 73.4 (48%) [0.73] | 167.9 (38%) [1.68] | 125.7 (10%) [1.26] |
+| 1e6 | 16 | **350.3 (3%) [0.35]** | 29,065.4 (0%) [29.07] | 664.2 (10%) [0.66] | 417.8 (2%) [0.42] | 923.4 (6%) [0.92] | 524.2 (2%) [0.52] |
+| 1e6 | 1e4 | **285.3 (3%) [0.29]** | 1,707.3 (6%) [1.71] | 611.6 (3%) [0.61] | 417.1 (2%) [0.42] | 865.2 (7%) [0.87] | 605.1 (1%) [0.61] |
+| 1e6 | 1e6 | **544.8 (4%) [0.54]** | 1,335.0 (4%) [1.34] | 1,325.3 (8%) [1.33] | 610.2 (2%) [0.61] | 1,656.2 (11%) [1.66] | 1,515.3 (15%) [1.52] |
+
+### Reactive queries, 1e6 units, light redraw
+
+| changed | c-poll | c-rowstamp | c-blockstamp | c-collector | c-bevy | c-unity | compiled | compiled-scan | compiled-par | compiled-par-walk1 | compiled-par-scan |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.01% | 457.4 (3%) [1,000,000] | 619.3 (2%) [107] | 425.5 (9%) [107] | 414.1 (2%) [107] | 617.4 (2%) [107] | 456.8 (1%) [1,000,000] | 394.9 (2%) [107] | 964.5 (7%) [107] | **126.5 (42%) [107]** | 152.0 (21%) [107] | 265.3 (21%) [107] |
+| 0.10% | 466.8 (2%) [1,000,000] | 658.9 (3%) [1,008] | 529.4 (4%) [1,008] | 434.9 (1%) [1,008] | 667.2 (2%) [1,008] | 469.4 (3%) [1,000,000] | 418.1 (4%) [1,008] | 994.3 (2%) [1,008] | **130.1 (10%) [1,008]** | 165.9 (19%) [1,008] | 259.6 (21%) [1,008] |
+| 1.00% | 510.6 (3%) [1,000,000] | 897.8 (4%) [9,995] | 1,151.6 (4%) [9,995] | 543.5 (2%) [9,995] | 940.4 (10%) [9,995] | 514.3 (8%) [1,000,000] | 598.1 (6%) [9,995] | 1,053.7 (4%) [9,995] | 253.1 (5%) [9,995] | **199.5 (16%) [9,995]** | 268.8 (15%) [9,995] |
+| 10.00% | 485.5 (4%) [1,000,000] | 775.2 (2%) [100,006] | 818.0 (13%) [100,006] | 594.1 (3%) [100,006] | 1,013.3 (5%) [100,006] | 467.1 (7%) [1,000,000] | 872.8 (6%) [100,006] | 867.9 (2%) [100,006] | 422.3 (28%) [100,006] | 449.5 (10%) [100,006] | **270.3 (20%) [100,006]** |
+| 100.00% | 472.1 (5%) [1,000,000] | 894.3 (1%) [1,000,000] | 926.1 (2%) [1,000,000] | 1,005.8 (2%) [1,000,000] | 1,171.1 (2%) [1,000,000] | 483.2 (9%) [1,000,000] | 1,753.3 (1%) [1,000,000] | 907.7 (7%) [1,000,000] | 492.1 (6%) [1,000,000] | 490.9 (9%) [1,000,000] | **254.9 (12%) [1,000,000]** |
+
+### Reactive queries, 1e6 units, heavy redraw
+
+| changed | c-poll | c-rowstamp | c-blockstamp | c-collector | c-bevy | c-unity | compiled | compiled-scan | compiled-par | compiled-par-walk1 | compiled-par-scan |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.01% | 3,562.3 (1%) [1,000,000] | 622.8 (2%) [107] | 428.2 (8%) [107] | 412.6 (6%) [107] | 618.6 (1%) [107] | 3,549.9 (3%) [1,000,000] | 393.4 (1%) [107] | 618.8 (6%) [107] | **127.8 (25%) [107]** | 158.7 (33%) [107] | 171.1 (66%) [107] |
+| 0.10% | 3,558.9 (0%) [1,000,000] | 698.7 (3%) [1,008] | 558.8 (2%) [1,008] | 438.8 (12%) [1,008] | 693.5 (3%) [1,008] | 3,552.9 (1%) [1,000,000] | 423.0 (4%) [1,008] | 697.4 (1%) [1,008] | **154.7 (41%) [1,008]** | 161.4 (23%) [1,008] | 181.1 (14%) [1,008] |
+| 1.00% | 3,608.2 (3%) [1,000,000] | 1,077.0 (6%) [9,995] | 1,374.7 (3%) [9,995] | 605.6 (9%) [9,995] | 1,110.8 (2%) [9,995] | 3,606.1 (3%) [1,000,000] | 658.7 (5%) [9,995] | 1,064.8 (2%) [9,995] | 415.8 (15%) [9,995] | **217.3 (33%) [9,995]** | 235.2 (16%) [9,995] |
+| 10.00% | 3,576.9 (2%) [1,000,000] | 1,680.8 (1%) [100,006] | 1,699.5 (1%) [100,006] | 1,726.9 (2%) [100,006] | 1,720.9 (1%) [100,006] | 3,567.2 (1%) [1,000,000] | 1,796.1 (1%) [100,006] | 1,710.4 (1%) [100,006] | 554.7 (53%) [100,006] | 503.2 (28%) [100,006] | **356.1 (10%) [100,006]** |
+| 100.00% | 3,575.3 (1%) [1,000,000] | 13,186.4 (1%) [1,000,000] | 13,251.4 (0%) [1,000,000] | 13,289.8 (1%) [1,000,000] | 13,200.0 (0%) [1,000,000] | 3,566.4 (1%) [1,000,000] | 13,979.5 (0%) [1,000,000] | 13,166.3 (2%) [1,000,000] | 1,493.3 (1%) [1,000,000] | 1,495.6 (0%) [1,000,000] | **1,361.1 (3%) [1,000,000]** |
+
+### Spiking network: us per step (spread)
+
+| neurons x synapses | bias | firing | c-push | c-pull | c-pull-par | ent-push | ent-push-par | ent-pull | ent-pull-par |
+|---|---|---|---|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | **27.7 (38%)** | 389.4 (3%) | 167.6 (35%) | 28.2 (39%) | 103.6 (23%) | 423.1 (13%) | 156.1 (25%) |
+| 1e+04 x 100 | 0.3 | 7.4% | **40.0 (105%)** | 388.2 (5%) | 168.3 (23%) | 41.9 (83%) | 168.3 (15%) | 422.6 (5%) | 150.3 (66%) |
+| 1e+05 x 100 | 0.15 | 2.0% | 473.6 (4%) | 4,665.3 (8%) | 1,188.2 (12%) | **470.8 (19%)** | 684.5 (43%) | 4,887.7 (4%) | 1,266.3 (16%) |
+| 1e+05 x 100 | 0.3 | 7.3% | 1,452.6 (2%) | 4,701.2 (8%) | **1,169.9 (10%)** | 1,408.1 (2%) | 2,256.3 (54%) | 4,928.6 (4%) | 1,237.0 (18%) |
+| 1e+06 x 20 | 0.15 | 2.4% | 5,950.3 (10%) | 17,945.7 (3%) | **3,409.0 (8%)** | 5,875.8 (1%) | 7,772.0 (17%) | 18,832.1 (4%) | 3,681.3 (9%) |
+| 1e+06 x 20 | 0.3 | 7.9% | 11,632.9 (3%) | 17,751.6 (5%) | **3,417.2 (5%)** | 11,681.9 (4%) | 17,008.3 (50%) | 18,869.6 (6%) | 3,776.0 (4%) |
+
+### What holds here as on the Mac
+
+- Generated fused code matches hand-written C from 1e4 entities on (within
+  3.5%; `restrict` changes nothing). At 1e3 it takes 15% longer (302
+  against 262 ns), where the Mac showed no difference.
+- Fusion pays more: 20% at 1e4, 16% at 1e5, 4% at 1e6, 7% at 1e7.
+- `ent-push` takes 0.97-1.05x the time of `c-push` at every size and rate.
+  `ent-pull` takes 1.05-1.09x `c-pull` (Mac: 0.97-1.04x), and
+  `ent-pull-par` 0.89-0.93x `c-pull-par` at 1e4 and 1.06-1.11x from 1e5.
+- AoS is the slowest layout on one thread (2.2-2.6x SoA up to 1e5, 1.1-1.4x
+  beyond). Staggering turns the collapse at 16 streams in DRAM into a
+  gradual decline (18 to 52 GB/s).
+- No optional-component storage wins everywhere; branch-free beats the
+  `if` (up to 6.5x at 50% density); atomics lose to the sequential
+  compiled apply and to `c-index` everywhere; among the sequential
+  reactive schemes polling wins when every unit changed, and none wins at
+  every rate.
+
+### What differs
+
+- This machine is faster in the caches and slower out of them. The fused
+  frame takes 0.66x the Mac's time at 1e4 and 0.72x at 1e5, but 2.1x at
+  1e6 and 2.7x at 1e7 (12.1 against 4.54 ms). The streams say why: one
+  thread moves 155-235 GB/s within 1 MB in up to 5 streams (Mac: 124-143)
+  but 53-64 GB/s over 160 MB (Mac: 121-141), and 12 threads move 62-78
+  GB/s there in up to 8 streams (Mac: 358-405). One core nearly saturates this machine's memory.
+- So entity parallelism stops paying where the Mac's paid most: the fused
+  parallel frame is 2.4x faster than fused at 1e6 (393 against 954 us) and
+  1.13x at 1e7 (10.6 against 12.1 ms; Mac: 2.2x and 2.5x). Parallel pull,
+  which reads more than it writes, still gains 5.0-5.3x at 1e6 neurons.
+- Forks are cheap. `stages-omp` takes 2.3 us at 1e3 (Mac: 64 us with
+  runtime defaults, 2.3-3.0 with `KMP_BLOCKTIME=200`), and `--blocktime
+  200` changes nothing here (every cell within the spread): this `libomp`
+  evidently keeps its workers spinning by default.
+- Staggered columns no longer speed the frame up from 1e6 on (-0.6% and
+  -0.2%; 7% at 1e5, where the Mac gained 7-8% at every size), consistent
+  with DRAM being the limit on one thread already.
+- Churn at 1e6: the compiled masked form no longer beats the hand-written
+  select per system (500-509 against 484-488 us without churn; Mac 285 against
+  313), and fused it leads by 4% (466 us), not 18%. A change costs
+  archetype moves 30-45 ns (Mac: 11-13), yet their status pass is cheap
+  enough that they win without churn at every density, 90% included,
+  where the compiled fused form won on the Mac.
+- Apply at 1e6 guns: the sequential compiled apply is closer to `c-index`
+  (1.12-1.46x; Mac 1.39-2.39x), and the parallel filling loop loses to it
+  everywhere (923 against 418 us on 16 ships; on the Mac it won by
+  1.3-1.8x). `c-buffered` loses to `c-index` by 1.9-2.4x (Mac:
+  1.03-1.22x), so it is the scheme, not the generated code;
+  `compiled-rows-par` takes 1.25-1.41x `c-buffered` (Mac: 1.0-1.10x).
+  `c-atomic-par` is 2.6-2.8x faster than on the Mac and still takes
+  2.5-83x the time of `c-index`.
+- Parallel push never pays: `ent-push-par` takes 1.3-4.0x the time of
+  `ent-push` at every size (7.8 against 5.9 ms at 1e6, 2.4% firing, where
+  it was the Mac's fastest variant earlier).
+- Reactive, few changes: the compiled event log beats the hand-written
+  collector up to 0.1% changed (395 against 414 us, 418 against 435;
+  on the Mac the collector led by 11-21%).
+- Reactive, scanning: `compiled-scan` with light work takes 1.56x the
+  time of `c-rowstamp` at 0.01% changed and 1.17x at 1% (965 against 619
+  us), where on the Mac it was 6-19% faster. With heavy work the two
+  match, as before.
+- Heavy redraw costs about twice the Mac's: `c-poll` 3.56 against 1.89
+  ms, the check-first loops 13.2 against 6.66 ms with all changed.
+
+### Measured, not explained
+
+- Whether baseline SSE2 is why the masked forms lost their lead (churn's
+  compiled select, the reactive scan): they depend on blends and wide
+  compares, which NEON has and SSE2 lacks; no `-march=native` build was
+  measured.
+- Why the buffered apply costs twice `c-index` here.
+- The spreads of 33-60% in churn at 1e5 and in many parallel cells. They
+  look bimodal; this CPU has two kinds of cores (4 Zen 5, 8 Zen 5c) and
+  no process was pinned, which would fit but was not checked.
+- The reactive run started at load average 16.5; its sequential C cells
+  spread at most 13%, its parallel ones up to 66%, and it was not repeated.
+- The generated frame at 1e3 taking 15% longer than C.
