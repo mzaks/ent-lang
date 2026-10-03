@@ -648,6 +648,9 @@ struct LoopOptions {
   int64_t parallelMinEvents;
   /// Emit remarks explaining lowering decisions.
   bool explain;
+  /// Combine unobserved applies directly in loops that never run in
+  /// parallel.
+  bool directApplies;
 };
 
 } // namespace
@@ -1035,6 +1038,27 @@ stampsFor(const WorldArchetype &archetype, Trigger::Kind kind,
   return columns;
 }
 
+static void combineDirectly(IRRewriter &rewriter, ApplyOp apply,
+                            const WorldLayout &layout, WorldAccess &world,
+                            Value id, Value value, Value tick);
+static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
+                     Value a, Value b);
+
+/// Marks an `ent.apply` whose field nothing else in its query touches (no
+/// get, set or lookup of the field, no other apply to it, no add or remove
+/// of the component), or an `ent.accumulate` whose resource field nothing
+/// else in its query reads or accumulates into. Combining its values as the
+/// query visits the entities, one after another, then gives the result
+/// combining them at the query's end would (same order, nothing sees the
+/// field in between), so a sequential loop does that instead of filling a
+/// buffer.
+static constexpr llvm::StringLiteral kUnobservedAttr = "ent.unobserved";
+
+static bool appliesDirectly(Operation *apply, bool directApplies) {
+  return directApplies && isa<ApplyOp, AccumulateOp>(apply) &&
+         apply->hasAttr(kUnobservedAttr);
+}
+
 /// Replace the get/set/add/remove/despawn/entity ops nested in `roots` by
 /// loads and stores at `entity` in the columns of `archetype`. With a
 /// `mask`, every store keeps the old value where the mask is false: the
@@ -1042,7 +1066,8 @@ stampsFor(const WorldArchetype &archetype, Trigger::Kind kind,
 static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                           const WorldArchetype &archetype, WorldAccess &world,
                           const WorldLayout &layout, Value entity,
-                          Value rows, Value mask, Value tick, bool parallel) {
+                          Value rows, Value mask, Value tick, bool parallel,
+                          bool directApplies) {
   auto column = [&](StringAttr component, StringAttr field) {
     return world.column(archetype, component, field);
   };
@@ -1145,6 +1170,18 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         break;
       }
       rewriter.eraseOp(op);
+    } else if (auto apply = dyn_cast<ApplyOp>(op);
+               apply && appliesDirectly(apply, directApplies)) {
+      // Combine now: the loop visits entities in the order the query's end
+      // would combine them, and nothing in the query sees the field.
+      Value id = world.toStorage(loc, apply.getEntity());
+      Value value = world.toStorage(loc, apply.getValue());
+      if (mask) {
+        auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
+        rewriter.setInsertionPointToStart(ifApplies.thenBlock());
+      }
+      combineDirectly(rewriter, apply, layout, world, id, value, tick);
+      rewriter.eraseOp(op);
     } else if (auto apply = dyn_cast<ApplyOp>(op)) {
       // Fill this entity's slot of the buffer; the query's end combines.
       // An entity the masked body does not apply to sends nothing.
@@ -1157,6 +1194,24 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       memref::StoreOp::create(rewriter, loc,
                               world.toStorage(loc, apply.getValue()), values,
                               ValueRange{entity});
+      rewriter.eraseOp(op);
+    } else if (auto accumulate = dyn_cast<AccumulateOp>(op);
+               accumulate && appliesDirectly(accumulate, directApplies)) {
+      // Combine into the resource now, in the order the query's end would.
+      if (mask) {
+        auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
+        rewriter.setInsertionPointToStart(ifApplies.thenBlock());
+      }
+      Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
+                                        accumulate.getFieldAttr());
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value old = memref::LoadOp::create(rewriter, loc, field,
+                                         ValueRange{zero});
+      memref::StoreOp::create(
+          rewriter, loc,
+          combine(rewriter, loc, accumulate.getRule(), old,
+                  world.toStorage(loc, accumulate.getValue())),
+          field, ValueRange{zero});
       rewriter.eraseOp(op);
     } else if (auto accumulate = dyn_cast<AccumulateOp>(op)) {
       // The same, with "sent" (0) for a target id.
@@ -1206,7 +1261,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
 static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                              const WorldArchetype &archetype,
                              WorldAccess &world, const WorldLayout &layout,
-                             Value row);
+                             Value row, Value tick, bool directApplies);
 static SmallVector<Operation *> carryOwnFields(IRRewriter &rewriter,
                                                scf::ForOp loop);
 
@@ -1221,7 +1276,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                           IRMapping mapping, const WorldArchetype &archetype,
                           WorldAccess &world, const WorldLayout &layout,
                           Value entity, Value rows, Value tick, Value seen,
-                          bool parallel) {
+                          bool parallel, bool directApplies = false) {
   Location loc = query.getLoc();
   ArchetypeOp archetypeOp = archetype.op;
   Value mask;
@@ -1290,7 +1345,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   // target". So must an apply in an edge loop, whose row slot says whether
   // the loop ran.
   query.getBody().walk([&](Operation *apply) {
-    if (!isa<ApplyOp, AccumulateOp, ConnectOp>(apply))
+    if (!isa<ApplyOp, AccumulateOp, ConnectOp>(apply) ||
+        appliesDirectly(apply, directApplies))
       return;
     bool inEdges = apply->getParentOfType<EdgesOp>() != nullptr;
     if (!inEdges && !guarded &&
@@ -1333,7 +1389,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   for (EdgesOp edges : edgeLoops) {
     Operation *op = edges;
     Operation *loop = lowerEdges(rewriter, edges, archetype, world, layout,
-                                 entity);
+                                 entity, tick, directApplies);
     SmallVector<Operation *> lowered =
         carryOwnFields(rewriter, cast<scf::ForOp>(loop));
     auto *at = llvm::find(roots, op);
@@ -1343,7 +1399,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     }
   }
   lowerAccesses(rewriter, roots, archetype, world, layout, entity, rows, mask,
-                tick, parallel);
+                tick, parallel, directApplies);
 }
 
 /// Append the entity at `row` of `source` to `move.target`, as the move
@@ -1954,6 +2010,13 @@ static void combineApplied(IRRewriter &rewriter, ApplyOp apply,
   combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
 }
 
+static void combineDirectly(IRRewriter &rewriter, ApplyOp apply,
+                            const WorldLayout &layout, WorldAccess &world,
+                            Value id, Value value, Value tick) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  combineInto(rewriter, apply, layout, world, id, value, tick, LocateBounds());
+}
+
 /// The positions of the edges of the entity with key `key` (an index) in
 /// the order `in` or `out` visits them: [begin, end), as indices.
 static std::pair<Value, Value> emitEdgeRange(IRRewriter &rewriter,
@@ -2022,7 +2085,7 @@ static void combineEdgeApplied(IRRewriter &rewriter, ApplyOp apply,
 static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                              const WorldArchetype &archetype,
                              WorldAccess &world, const WorldLayout &layout,
-                             Value row) {
+                             Value row, Value tick, bool directApplies) {
   Location loc = edges.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(edges);
@@ -2031,8 +2094,11 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   bool out = edges.isOut();
   Value id = world.entityId(loc, archetype, row);
   Value key = world.entityKey(loc, id);
-  SmallVector<ApplyOp> applies;
-  edges.walk([&](ApplyOp apply) { applies.push_back(apply); });
+  SmallVector<ApplyOp> applies, direct;
+  edges.walk([&](ApplyOp apply) {
+    (appliesDirectly(apply, directApplies) ? direct : applies)
+        .push_back(apply);
+  });
   // The row ran this loop: its edges' slots are to be combined.
   for (ApplyOp apply : applies)
     memref::StoreOp::create(
@@ -2096,6 +2162,13 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                               ValueRange{edge});
       rewriter.eraseOp(set);
     }
+  }
+  for (ApplyOp apply : direct) {
+    rewriter.setInsertionPoint(apply);
+    combineDirectly(rewriter, apply, layout, world,
+                    world.toStorage(apply.getLoc(), apply.getEntity()),
+                    world.toStorage(apply.getLoc(), apply.getValue()), tick);
+    rewriter.eraseOp(apply);
   }
   for (ApplyOp apply : applies) {
     rewriter.setInsertionPoint(apply);
@@ -2987,6 +3060,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // into an archetype whose loop comes later. The same counts bound the
   // rows whose applies are combined.
   SmallVector<std::pair<const WorldArchetype *, Value>> visited;
+  // Archetypes whose loop combined its unobserved applies directly.
+  llvm::SmallPtrSet<const WorldArchetype *, 4> direct;
   llvm::DenseMap<const WorldArchetype *, Value> startCounts;
   {
     OpBuilder::InsertionGuard guard(rewriter);
@@ -3010,11 +3085,19 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     Value rows = startCounts.lookup(&archetype);
     if (!applies.empty() || !accumulates.empty() || !connects.empty())
       visited.push_back({&archetype, rows});
+    // A loop that never runs in parallel visits the entities in the order
+    // applies are combined in, so it may combine unobserved ones directly.
+    bool sequentialOnly = options.directApplies &&
+                          (!options.parallelEntities || !entityLocal ||
+                           archetype.capacity < options.parallelMinEntities);
+    if (sequentialOnly)
+      direct.insert(&archetype);
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, entityLocal,
         [&](Value entity, Value rows, bool parallel) {
           emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                        layout, entity, rows, tick, seen, parallel);
+                        layout, entity, rows, tick, seen, parallel,
+                        sequentialOnly);
         },
         rows);
     hoistResourceReads(rewriter, loops, world);
@@ -3086,6 +3169,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   rewriter.setInsertionPoint(query);
   for (ApplyOp apply : applies)
     for (auto [archetype, count] : visited) {
+      if (appliesDirectly(apply, direct.contains(archetype)))
+        continue;
       if (apply->getParentOfType<EdgesOp>())
         combineEdgeApplied(rewriter, apply, layout, *archetype, world, count,
                            tick);
@@ -3095,7 +3180,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     }
   for (AccumulateOp accumulate : accumulates)
     for (auto [archetype, count] : visited)
-      combineAccumulated(rewriter, accumulate, *archetype, world, count);
+      if (!appliesDirectly(accumulate, direct.contains(archetype)))
+        combineAccumulated(rewriter, accumulate, *archetype, world, count);
   // Connected edges are appended while the buffers' rows still are the
   // rows that filled them, before despawns and moves.
   for (ConnectOp connect : connects)
@@ -3544,6 +3630,50 @@ struct EntLowerToLoops
         query->setAttr(WorldLayout::kReactiveIndexAttr,
                        rewriter.getI64IntegerAttr(reactiveIndex++));
     });
+    // Applies whose field nothing else in their query touches.
+    module.walk([&](ApplyOp apply) {
+      auto query = apply->getParentOfType<QueryOp>();
+      FlatSymbolRefAttr component = apply.getComponentAttr();
+      StringAttr field = apply.getFieldAttr();
+      auto refTo = [&](Value ref) {
+        return cast<RefType>(ref.getType()).getComponent() == component;
+      };
+      WalkResult seen = query.walk([&](Operation *op) {
+        bool touches = false;
+        if (auto other = dyn_cast<ApplyOp>(op))
+          touches = other != apply && other.getComponentAttr() == component &&
+                    other.getFieldAttr() == field;
+        else if (auto get = dyn_cast<GetOp>(op))
+          touches = refTo(get.getRef()) && get.getFieldAttr() == field;
+        else if (auto set = dyn_cast<SetOp>(op))
+          touches = refTo(set.getRef()) && set.getFieldAttr() == field;
+        else if (auto lookup = dyn_cast<LookupOp>(op))
+          touches = lookup.getComponentAttr() == component &&
+                    lookup.getFieldAttr() == field;
+        else if (isa<AddOp, RemoveOp>(op))
+          touches = op->getAttr("component") == component;
+        return touches ? WalkResult::interrupt() : WalkResult::advance();
+      });
+      if (!seen.wasInterrupted())
+        apply->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
+    });
+    module.walk([&](AccumulateOp accumulate) {
+      auto query = accumulate->getParentOfType<QueryOp>();
+      auto resource = accumulate.getResourceAttr();
+      StringAttr field = accumulate.getFieldAttr();
+      WalkResult seen = query.walk([&](Operation *op) {
+        if (auto read = dyn_cast<ReadOp>(op))
+          if (read.getResourceAttr() == resource && read.getFieldAttr() == field)
+            return WalkResult::interrupt();
+        if (auto other = dyn_cast<AccumulateOp>(op))
+          if (other != accumulate && other.getResourceAttr() == resource &&
+              other.getFieldAttr() == field)
+            return WalkResult::interrupt();
+        return WalkResult::advance();
+      });
+      if (!seen.wasInterrupted())
+        accumulate->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
+    });
     // Lookups and applies through a trusted end of an edge.
     module.walk([&](Operation *op) {
       if (!isa<LookupOp, ApplyOp>(op))
@@ -3571,7 +3701,7 @@ struct EntLowerToLoops
     for (const WorldRelation &relation : layout->relations)
       emitSortFunction(rewriter, module, *layout, relation, arenaType);
     LoopOptions options{parallelEntities, parallelMinEntities,
-                        parallelMinEvents, explain};
+                        parallelMinEvents, explain, directApplies};
     SymbolTable symbols(module);
 
     // Schedules first: fusion reads the systems' bodies before they are

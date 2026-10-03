@@ -1,4 +1,7 @@
-// RUN: ent-opt %s --split-input-file --ent-lower-to-loops | FileCheck %s
+// RUN: ent-opt %s --split-input-file --ent-lower-to-loops=direct-applies=0 \
+// RUN:   | FileCheck %s
+// RUN: ent-opt %s --split-input-file --ent-lower-to-loops \
+// RUN:   | FileCheck %s --check-prefix=DIRECT
 // RUN: ent-opt %s --split-input-file --ent-print-access 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=ACCESS
 
@@ -34,6 +37,19 @@ ent.relation @Syn (w: f32) capacity 1000
 // CHECK-NEXT:       memref.load %[[IDS]][%[[Q]]]
 // CHECK:              arith.addf
 // ACCESS: remark: reads A.N.v, Syn.w, entities, Syn.edges, A.id, A.count; writes A.N.input
+// In a loop that never runs in parallel the apply is combined as the edges
+// are visited (rows, then edges: the combine's order), without buffers.
+// DIRECT-LABEL: func.func private @push(
+// DIRECT:      scf.for %[[ROW:.*]] =
+// DIRECT-NOT:    memref<100xi32>
+// DIRECT:        scf.for %[[P:.*]] =
+// DIRECT:          %[[T:.*]] = memref.load %{{.*}}[%[[P]]] : memref<1000xi32>
+// DIRECT-NEXT:     %[[W:.*]] = memref.load %{{.*}}[%[[P]]] : memref<1000xf32>
+// DIRECT-NEXT:     %[[X:.*]] = arith.mulf %{{.*}}, %[[W]] : f32
+// DIRECT:            %[[OLD:.*]] = memref.load %[[IN:.*]][%[[AT:.*]]] : memref<100xf32>
+// DIRECT-NEXT:       %[[NEW:.*]] = arith.addf %[[OLD]], %[[X]] : f32
+// DIRECT-NEXT:       memref.store %[[NEW]], %[[IN]][%[[AT]]] : memref<100xf32>
+// DIRECT-LABEL: func.func private @learn(
 ent.system @push() {
   ent.query (%n: !ent.ref<@N>) {
     %v = ent.get %n "v" : !ent.ref<@N> -> f32

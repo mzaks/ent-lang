@@ -316,6 +316,15 @@ as values and stored once after it: nothing else in the loop can reach
 them, which LLVM cannot tell from the arena's views. With both, and the
 relation's ends typed, the pull example takes 1.01-1.05x the time of
 hand-written C (6.3-9.4x before; see `bench/RESULTS.md`).
+
+A loop that never runs in parallel visits entities in the order the
+query's end combines applies in. So an apply whose field nothing else in
+the query touches (no get, set or lookup of it, no second apply to it, no
+add or remove of its component), and an accumulate whose resource field
+nothing else in the query reads or accumulates into, are combined as the
+loop visits, without buffers and the second pass (same result). Loops
+that may run in parallel keep the buffers; `direct-applies=0` keeps them
+everywhere.
 Connects append and mark the relation unclean; a sort (a stable counting
 sort through scratch columns, O(edges + keys)) runs where edges changed:
 at a schedule's start for edges the host connected, after a system-level

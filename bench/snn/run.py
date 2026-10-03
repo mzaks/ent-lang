@@ -47,6 +47,9 @@ VARIANTS = {
     "c-pull-index-store-locate": (6, None, None, False),
     "c-pull-locate": (7, None, None, False),
     "c-push-buffer": (8, None, None, False),
+    # ent-push with applies always buffered until the query ends.
+    "ent-push-buffered": (3, "snn.ent",
+                          ["--ent-lower-to-loops=direct-applies=0"], False),
 }
 DEFAULT = ["c-push", "c-pull", "c-pull-par", "ent-push", "ent-push-par",
            "ent-pull", "ent-pull-par"]

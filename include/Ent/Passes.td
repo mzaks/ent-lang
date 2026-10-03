@@ -56,6 +56,11 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
     Option<"fuseSystems", "fuse-systems", "bool", /*default=*/"false",
            "Inline the systems of each schedule and fuse their queries into "
            "one loop per archetype">,
+    Option<"directApplies", "direct-applies", "bool", /*default=*/"true",
+           "Combine an apply whose field nothing else in its query touches "
+           "as the loop visits the entities, where the loop never runs in "
+           "parallel, instead of buffering it until the query ends (same "
+           "result)">,
     Option<"explain", "explain", "bool", /*default=*/"false",
            "Emit remarks on lowering decisions, such as reactive queries "
            "that scan every entity instead of walking event logs">,

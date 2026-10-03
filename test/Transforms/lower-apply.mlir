@@ -1,4 +1,7 @@
-// RUN: ent-opt %s --ent-lower-to-loops --canonicalize | FileCheck %s
+// RUN: ent-opt %s --ent-lower-to-loops=direct-applies=0 --canonicalize \
+// RUN:   | FileCheck %s
+// RUN: ent-opt %s --ent-lower-to-loops --canonicalize \
+// RUN:   | FileCheck %s --check-prefix=DIRECT
 // RUN: ent-opt %s "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
 // RUN:   | FileCheck %s --check-prefix=PAR
 // RUN: ent-opt %s "--ent-lower-to-loops=fuse-systems=1" --symbol-dce \
@@ -40,6 +43,19 @@ ent.archetype @Gun (@T, optional @On) capacity 8
 // CHECK:      scf.for
 // CHECK:        arith.subi
 // CHECK:      return
+// In a loop that never runs in parallel, an apply whose field nothing else
+// in the query touches is combined as the loop visits the guns: same order,
+// no buffer, no second loop.
+// DIRECT-LABEL: func.func private @fire(
+// DIRECT:      scf.for %[[ROW:.*]] = %{{.*}} to %{{.*}} step
+// DIRECT:        %[[ID:.*]] = memref.load %{{.*}}[%[[ROW]]] : memref<8xi32>
+// DIRECT-NOT:    memref.store %[[ID]]
+// DIRECT:        %[[OLD:.*]] = memref.load %[[HP:.*]][%[[AT:.*]]] : memref<16xf32>
+// DIRECT-NEXT:   %[[NEW:.*]] = arith.addf %[[OLD]], %{{.*}} : f32
+// DIRECT-NEXT:   memref.store %[[NEW]], %[[HP]][%[[AT]]] : memref<16xf32>
+// Two applies to one field are combined by apply first: buffered.
+// DIRECT-LABEL: func.func private @aim(
+// DIRECT:      memref.store %c-1_i32
 ent.system @fire(%d: f32) reads [@T] writes [@H, @Gun] {
   ent.query (%t: !ent.ref<@T>) {
     %id = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
@@ -101,4 +117,26 @@ ent.system @read() reads [@H] {
 ent.schedule @frame(%n: i32, %c: i1) {
   ent.run @aim(%n, %c) : i32, i1
   ent.run @read()
+}
+
+// An accumulate nothing else in its query reads: buffered per row and
+// summed after the loop, or (direct) added into the resource as the loop
+// visits the guns.
+ent.resource @Score (points: i64)
+// CHECK-LABEL: func.func private @tally(
+// CHECK:      scf.for %[[ROW:.*]] =
+// CHECK:        memref.store %{{.*}}, %{{.*}}[%[[ROW]]] : memref<8xi64>
+// CHECK:      scf.for
+// DIRECT-LABEL: func.func private @tally(
+// DIRECT:      scf.for %{{.*}} =
+// DIRECT:        %[[OLD:.*]] = memref.load %[[SCORE:.*]][%c0] : memref<1xi64>
+// DIRECT-NEXT:   %[[NEW:.*]] = arith.addi %[[OLD]], %{{.*}} : i64
+// DIRECT-NEXT:   memref.store %[[NEW]], %[[SCORE]][%c0] : memref<1xi64>
+// DIRECT-NEXT: }
+// DIRECT-NEXT: return
+ent.system @tally() reads [@T] writes [@Score] {
+  ent.query (%t: !ent.ref<@T>) {
+    %one = arith.constant 1 : i64
+    ent.accumulate @Score "points" add %one : i64
+  }
 }
