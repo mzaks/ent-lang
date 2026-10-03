@@ -48,7 +48,15 @@
 
 static const float DT = 1.0f / 60.0f, SLOW = 0.99f, DURATION = 5.0f;
 
-static uint64_t now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static uint64_t now(void) {
+#ifdef __APPLE__
+  return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#else
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+#endif
+}
 
 static uint64_t rngState = 0x9E3779B97F4A7C15ull;
 static uint32_t rng(uint32_t bound) {
