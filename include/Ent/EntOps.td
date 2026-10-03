@@ -184,6 +184,51 @@ def Ent_SystemOp : Ent_Op<"system", [
   }];
 }
 
+def Ent_ExternOp : Ent_Op<"extern", [
+    Symbol, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "A system implemented outside the program";
+  let description = [{
+    ```mlir
+    ent.extern @report(f32) reads [@Position] writes [@Console]
+    ```
+    A system without a body: a schedule runs it like any other
+    (`ent.run @report(%dt) : f32`), and the lowered program calls the C
+    function `ent_report(world, dt)`, which works on the world through the
+    generated header (`ent-translate --ent-to-c-header` declares it there).
+
+    The compiler cannot see what it does, so its declared access is its
+    access: every field of the components, resources and relations it
+    lists, in every archetype holding them, and for an archetype in
+    `writes` the set of its entities (it spawns them). Without `reads` or
+    `writes` it conflicts with every other system. Effects outside the
+    world (output, say) are not in the contract; systems that must keep
+    their order because of them write a common resource, or declare
+    nothing.
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       TypeArrayAttr:$params,
+                       OptionalAttr<SymbolRefArrayAttr>:$reads,
+                       OptionalAttr<SymbolRefArrayAttr>:$writes);
+  let assemblyFormat = [{
+    $sym_name `(` custom<ParamTypes>($params) `)` (`reads` $reads^)?
+    (`writes` $writes^)? attr-dict
+  }];
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    /// Whether it declares its access; without, it is opaque.
+    bool hasContract() { return getReadsAttr() || getWritesAttr(); }
+    /// The name of the C function a run calls: `ent_` and the system's
+    /// name, where a character C cannot have in a name (the `.` after a
+    /// module's name) is `_`.
+    std::string getCName() {
+      std::string name = "ent_";
+      for (char c : getSymName())
+        name += ::llvm::isAlnum(c) ? c : '_';
+      return name;
+    }
+  }];
+}
+
 def Ent_ScheduleOp : Ent_Op<"schedule", [
     Symbol, IsolatedFromAbove, SingleBlockImplicitTerminator<"YieldOp">]> {
   let summary = "An ordered list of systems that make up one frame";
@@ -304,7 +349,8 @@ def Ent_ReadOp : Ent_Op<"read", [
     %dt = ent.read @Clock "dt" : f32
     ```
     Allowed anywhere in a system, including inside queries: no query may
-    write a resource, so every entity reads the same value. A system that
+    write a resource, so every entity reads the same value; also in
+    conditions and in `ent.main`. A system that
     declares its access must list the resource in `reads` or `writes`.
   }];
   let arguments = (ins FlatSymbolRefAttr:$resource, StrAttr:$field);
@@ -681,10 +727,73 @@ def Ent_RunOp : Ent_Op<"run", [
   let hasVerifier = 1;
 }
 
+def Ent_MainOp : Ent_Op<"main", [
+    IsolatedFromAbove, NoRegionArguments,
+    SingleBlockImplicitTerminator<"YieldOp">]> {
+  let summary = "The program's entry point: which schedules run, and when";
+  let description = [{
+    ```mlir
+    ent.main {
+      ent.call @setup()
+      ent.loop {
+        ent.call @frame(%dt) : f32
+        %frame = ent.read @Clock "frame" : i32
+        %done = arith.cmpi eq, %frame, %last : i32
+        ent.yield %done : i1
+      }
+      ent.call @report()
+    }
+    ```
+    A module with `ent.main` is a program of its own: lowering emits a C
+    `main` that creates the world, runs the body and returns 0. The body
+    calls schedules (`ent.call`), repeats (`ent.loop`), reads resources and
+    computes with ops free of side effects. A module has at most one.
+  }];
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = "attr-dict-with-keyword $body";
+  let hasVerifier = 1;
+}
+
+def Ent_CallOp : Ent_Op<"call", [
+    ParentOneOf<["MainOp", "LoopOp"]>,
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Run a schedule once, from the entry point";
+  let description = [{
+    ```mlir
+    ent.call @frame(%dt) : f32
+    ```
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$schedule, Variadic<AnyType>:$args);
+  let assemblyFormat = [{
+    $schedule `(` $args `)` attr-dict (`:` type($args)^)?
+  }];
+}
+
+def Ent_LoopOp : Ent_Op<"loop", [
+    ParentOneOf<["MainOp", "LoopOp"]>, NoRegionArguments,
+    SingleBlockImplicitTerminator<"YieldOp">]> {
+  let summary = "Repeat a part of the entry point until a condition holds";
+  let description = [{
+    ```mlir
+    ent.loop {
+      ent.call @frame()
+      %done = ent.read @Exit "value" : i1
+      ent.yield %done : i1
+    }
+    ```
+    Runs the body, then stops if it yielded true; so the body runs at
+    least once, and the condition sees what it did. A body that yields
+    nothing repeats forever.
+  }];
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = "attr-dict-with-keyword $body";
+  let hasVerifier = 1;
+}
+
 def Ent_YieldOp : Ent_Op<"yield", [
     Pure, Terminator,
     ParentOneOf<["SystemOp", "ScheduleOp", "QueryOp", "StageOp", "RunOp",
-                 "EdgesOp"]>]> {
+                 "EdgesOp", "MainOp", "LoopOp"]>]> {
   let summary = "Region terminator; implicit in the custom syntax";
   let description = [{
     Ends a body without operands, and a condition with its value.

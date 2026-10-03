@@ -1,0 +1,58 @@
+// RUN: not ent-translate --import-ent %s -I %S/Inputs -split-input-file 2>&1 \
+// RUN:   | FileCheck %s
+// RUN: not ent-translate --import-ent %S/Inputs/cycle_a.ent 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=CYCLE
+
+// CYCLE: cycle_b.ent:1:1: error: module 'cycle_a' is imported while it is being imported itself; imports cannot form a cycle
+
+// CHECK: error: cannot find module 'nowhere': no 'nowhere.ent' next to the importing file or in an -I directory
+import nowhere
+
+// -----
+
+import clock
+import physics
+system s() {
+  // CHECK: error: 'Time' is declared by the modules 'clock' and 'physics'; write 'clock::Time' or 'physics::Time'
+  Time.dt = 1.0
+}
+
+// -----
+
+import physics
+system s() {
+  // A module's imports are its own: shapes is not in scope here.
+  // CHECK: error: unknown component 'Ball'
+  for b: Ball {
+  }
+}
+
+// -----
+
+import physics
+system s() {
+  // CHECK: error: unknown module 'shapes'; import it first
+  for b: shapes::Ball {
+  }
+}
+
+// -----
+
+// CHECK: with_main.ent:1:1: error: 'main' belongs to the program's own file, not to a module it imports
+import with_main
+
+// -----
+
+// CHECK: error: a declaration's name cannot be qualified; it belongs to the module that declares it
+component clock::Timer { left: f32 }
+
+// -----
+
+import clock
+// An own declaration comes before an imported one of the same name.
+unique Time { mine: i32 }
+system s() {
+  Time.mine = 1
+  // CHECK: error: unique 'Time' has no field 'dt'
+  Time.dt = 1.0
+}

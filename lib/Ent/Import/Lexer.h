@@ -15,15 +15,20 @@ struct Token {
     Identifier,
     Integer,
     Float,
+    String, // "..." with its quotes
+    Char,   // 'a' with its quotes
     // Punctuation and operators.
     LBrace,
     RBrace,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     Comma,
     Colon,
     Semicolon,
     Dot,
+    DotDot, // ..
     Assign,     // =
     PlusAssign, // +=
     MinusAssign,

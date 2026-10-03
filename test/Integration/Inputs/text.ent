@@ -1,0 +1,64 @@
+// Text end to end: literals, fields, locals, copies between capacities,
+// comparison, joining, numbers put into text, bytes. The lines are
+// entities; an extern system prints them through the header.
+component Label { name: text[14] }
+component Hull { hp: f32, hits: i32 }
+component Line { text: text[62] } capacity 32
+unique Title: text[30]
+unique Seen { bytes: i32, first: i8 }
+
+archetype Ship { Label, Hull } capacity 4
+
+extern system print() reads Line
+
+world {
+  Title = "fleet"
+  spawn { Label { name: "gun" }, Hull { hp: 107.5, hits: 3 } }
+  spawn { Label { name: "torpedo boat" }, Hull { hp: -0.25, hits: -12 } }
+  spawn { Label { name: "" }, Hull { hp: 2.0, hits: 0 } }
+}
+
+system describe() {
+  // A unique's text, widened into a longer one, and joined.
+  spawn { Line { text: Title + ":" } }
+  for l: Label, h: Hull {
+    // Compared with a literal and with another text.
+    let unnamed = l.name == ""
+    let shown = if unnamed { "(none)" as text[14] } else { l.name }
+    if l.name != "gun" {
+      spawn { Line { text: "{shown} hp {h.hp} hits {h.hits} unnamed {unnamed}" } }
+    } else {
+      spawn { Line { text: "{shown}: {len(l.name)} bytes, first {l.name[0] as i32}" } }
+    }
+  }
+}
+
+system measure() {
+  for l: Label where l.name[0] == 't' {
+    Seen.bytes += len(l.name)
+    Seen.first max= l.name[7]
+  }
+}
+
+system finish() {
+  // Cut to what the target holds; `+=` joins.
+  Title = "a title that is clearly longer than thirty bytes"
+      as text[30]
+  spawn { Line { text: Title } }
+  Title = "short"
+  Title += "er" + "!"
+  spawn { Line { text: Title } }
+  spawn { Line { text: "seen {Seen.bytes} {Seen.first as i32} {1.0 / 3.0} {1e15} {0.0} \{ok\}" } }
+  spawn { Line { text: "{1e30} {0.0 - 1e30} {1.0 / 0.0} {0.0 / 0.0} {123456789012 as i64} {0.9999996}" } }
+}
+
+schedule frame() {
+  describe()
+  measure()
+  finish()
+  print()
+}
+
+main {
+  frame()
+}

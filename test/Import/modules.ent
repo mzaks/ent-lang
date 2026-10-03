@@ -1,0 +1,86 @@
+// RUN: ent-translate --import-ent %s -I %S/Inputs | FileCheck %s
+// RUN: ent-translate --import-ent %s -I %S/Inputs | ent-opt \
+// RUN:   | FileCheck %s
+// RUN: ent-translate --import-ent %s -I %S/Inputs \
+// RUN:   | ent-translate --ent-to-c-header | FileCheck %s --check-prefix=HEADER
+// RUN: ent-translate --import-ent %s -I %S/Inputs \
+// RUN:   | ent-opt --ent-lower-to-loops | FileCheck %s --check-prefix=LOWER
+
+// A module is a file: `import clock` is clock.ent next to this file or, as
+// here, in an -I directory (physics finds its own import next to itself).
+// Its declarations come where the import stands, named `module.Name`.
+// CHECK: ent.resource @clock.Time (now: f64, dt: f32)
+// CHECK: ent.component @clock.Timer (left: f32) capacity 16
+// CHECK: ent.system @clock.tick() {
+// Inside the module its names are its own.
+// CHECK:   ent.read @clock.Time "dt" : f32
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@clock.Timer, mut>) {
+// CHECK: ent.extern @clock.sleep(f32) reads [@clock.Time]
+// CHECK: ent.schedule @clock.advance() {
+// CHECK:   ent.run @clock.tick()
+// CHECK: ent.system @clock.world_setup() {
+import clock
+// A module's own imports are loaded with it, once for the whole program.
+// CHECK: ent.component @shapes.Ball (radius: f32)
+// CHECK: ent.component @physics.Position (x: f32) capacity 16
+// CHECK: ent.resource @physics.Time (step: i32)
+import physics
+import clock
+
+// This file's own names stay as they are.
+// CHECK: ent.component @Health (hp: f32)
+component Health { hp: f32 }
+
+// CHECK-LABEL: ent.system @hurt() {
+system hurt() {
+  // An imported name is in scope as it is.
+  // CHECK: ent.query (%{{.*}}: !ent.ref<@Health, mut>, %{{.*}}: !ent.ref<@physics.Position>, %{{.*}}: !ent.ref<@clock.Timer>) {
+  for h: mut Health, p: Position, t: Timer {
+    // A name two imported modules declare is qualified.
+    // CHECK: ent.read @clock.Time "dt" : f32
+    h.hp -= clock::Time.dt * t.left
+  }
+  // CHECK: ent.write @physics.Time "step", %{{.*}} : i32
+  physics::Time.step = 1
+  // CHECK: ent.spawn (@Health, @physics.Position, @clock.Timer)
+  spawn { Health { hp: 1.0 }, Position { x: 0.0 }, clock::Timer { left: 2.0 } }
+}
+
+// A schedule runs the systems of modules like its own.
+// CHECK-LABEL: ent.schedule @frame() {
+// CHECK-NEXT:   ent.run @hurt()
+// CHECK-NEXT:   ent.run @physics.fall()
+// CHECK-NEXT:   ent.run @clock.tick()
+schedule frame() {
+  hurt()
+  fall()
+  clock::tick()
+}
+
+// Every module's world is set up first, then this file's; `main` calls
+// the schedules of modules too.
+// CHECK-LABEL: ent.main {
+// CHECK-NEXT:   ent.call @clock.world_init()
+// CHECK-NEXT:   ent.call @world_init()
+// CHECK-NEXT:   ent.call @clock.advance()
+// CHECK-NEXT:   ent.call @frame()
+main {
+  advance()
+  frame()
+}
+
+world {
+  physics::Time.step = 0
+}
+
+// In C a module's names are spelled with `_`.
+// HEADER: static inline double *ent_clock_Time_now(ent_world *world) {
+// HEADER: void _mlir_ciface_clock_advance(ent_arena_descriptor *world) ENT__SYMBOL("_mlir_ciface_clock.advance");
+// HEADER: static inline void ent_clock_advance(ent_world *world) {
+// HEADER:   _mlir_ciface_clock_advance(&arena);
+// HEADER: void _mlir_ciface_frame(ent_arena_descriptor *world);
+// HEADER: void ent_clock_sleep(ent_world *world, float arg0);
+
+// LOWER: func.func private @ent_clock_sleep(!llvm.ptr, f32)
+// LOWER: func.func @clock.advance(
+// LOWER: call @ent_clock_sleep(

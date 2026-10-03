@@ -122,6 +122,6 @@ ent.schedule @f(%x: f32) if {
 
 ent.resource @R (v: i1)
 ent.schedule @f() {
-  // expected-error @+1 {{'ent.read' op must be inside an 'ent.system' or a condition}}
+  // expected-error @+1 {{'ent.read' op must be inside an 'ent.system', a condition or 'ent.main'}}
   %v = ent.read @R "v" : i1
 }

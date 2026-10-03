@@ -6,6 +6,7 @@
 
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -45,6 +46,8 @@ public:
   Type storageType(Type type) {
     if (isa<EntityType>(type))
       return rewriter.getIntegerType(layout.entities.idBits);
+    if (auto text = dyn_cast<TextType>(type))
+      return text.getStorageType();
     return type;
   }
   /// Convert a value to and from its stored form. Entity ids cross with a
@@ -3566,7 +3569,13 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   SmallVector<RunOp> sequence;
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     if (auto run = dyn_cast<RunOp>(op)) {
+      // An extern system has no body to fuse; it ends a sequence too.
       auto system = symbols.lookup<SystemOp>(run.getSystem());
+      if (!system) {
+        fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
+        sequence.clear();
+        continue;
+      }
       // A run under a condition runs as a whole or not at all; it is not
       // interleaved with others.
       bool conditional = !run.getCondition().empty();
@@ -3605,32 +3614,189 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   }
 }
 
+/// The world as the pointer C code takes it (`ent_world *`).
+static Value worldPointer(IRRewriter &rewriter, Location loc, Value arena) {
+  Value address =
+      memref::ExtractAlignedPointerAsIndexOp::create(rewriter, loc, arena);
+  Value bits = arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getI64Type(), address);
+  return LLVM::IntToPtrOp::create(
+      rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()), bits);
+}
+
+/// A bool crosses to C as a byte.
+static Type externParamType(Type type) {
+  return type.isInteger(1) ? IntegerType::get(type.getContext(), 8) : type;
+}
+
+/// Declare the C function of an extern system, `void ent_<name>(ent_world
+/// *world, params...)`.
+static LogicalResult declareExtern(IRRewriter &rewriter, ExternOp external,
+                                   SymbolTable &symbols) {
+  std::string name = external.getCName();
+  if (Operation *other = symbols.lookup(name)) {
+    InFlightDiagnostic diag = external.emitError("is called as the C function '")
+                              << name << "', a name this program also declares";
+    diag.attachNote(other->getLoc()) << "declared here";
+    return diag;
+  }
+  SmallVector<Type> inputs{LLVM::LLVMPointerType::get(rewriter.getContext())};
+  for (Type type : external.getParams().getAsValueRange<TypeAttr>())
+    inputs.push_back(externParamType(type));
+  rewriter.setInsertionPoint(external);
+  auto func = func::FuncOp::create(rewriter, external.getLoc(), name,
+                                   rewriter.getFunctionType(inputs, {}));
+  func.setPrivate();
+  return success();
+}
+
 /// Replace `run` by a call of its system, guarded by its condition if it
 /// has one: `scf.execute_region { condition; scf.if %c { call } }`, one op,
-/// so that a stage section still holds one op per run.
-static void lowerRun(IRRewriter &rewriter, RunOp run, Value arena) {
-  SmallVector<Value> args(run.getArgs());
-  args.push_back(arena);
+/// so that a stage section still holds one op per run. An extern system is
+/// called as its C function, with the world first, in such a region too.
+static void lowerRun(IRRewriter &rewriter, RunOp run, Value arena,
+                     SymbolTable &symbols, const WorldLayout &layout) {
   Location loc = run.getLoc();
+  auto external = symbols.lookup<ExternOp>(run.getSystem());
+  auto emitCall = [&]() {
+    if (!external) {
+      SmallVector<Value> args(run.getArgs());
+      args.push_back(arena);
+      func::CallOp::create(rewriter, loc, run.getSystem(), TypeRange{}, args);
+      return;
+    }
+    SmallVector<Value> args{worldPointer(rewriter, loc, arena)};
+    for (Value arg : run.getArgs())
+      args.push_back(arg.getType().isInteger(1)
+                         ? arith::ExtUIOp::create(rewriter, loc,
+                                                  rewriter.getI8Type(), arg)
+                               .getResult()
+                         : arg);
+    func::CallOp::create(rewriter, loc, external.getCName(), TypeRange{},
+                         args);
+    // Edges it connected (through the header) are sorted before the next
+    // system visits them, as after a connect of the program's own.
+    ArrayAttr writes = external.getWritesAttr();
+    for (const WorldRelation &relation : layout.relations) {
+      RelationOp relationOp = relation.op;
+      if (!external.hasContract() ||
+          (writes && llvm::is_contained(
+                         writes, FlatSymbolRefAttr::get(
+                                     relationOp.getSymNameAttr()))))
+        callSort(rewriter, loc, relation, arena);
+    }
+  };
   rewriter.setInsertionPoint(run);
-  if (run.getCondition().empty()) {
-    rewriter.replaceOpWithNewOp<func::CallOp>(run, run.getSystem(),
-                                              TypeRange{}, args);
+  if (run.getCondition().empty() && !external) {
+    emitCall();
+    rewriter.eraseOp(run);
     return;
   }
   auto region = scf::ExecuteRegionOp::create(rewriter, loc, TypeRange{});
   Block *block = rewriter.createBlock(&region.getRegion());
-  IRMapping mapping;
-  for (Operation &op : run.getCondition().front().without_terminator())
-    rewriter.clone(op, mapping);
-  auto yield = cast<YieldOp>(run.getCondition().front().getTerminator());
-  Value condition = mapping.lookupOrDefault(yield.getResults()[0]);
-  auto branch = scf::IfOp::create(rewriter, loc, condition);
-  rewriter.setInsertionPointToStart(branch.thenBlock());
-  func::CallOp::create(rewriter, loc, run.getSystem(), TypeRange{}, args);
+  if (run.getCondition().empty()) {
+    emitCall();
+  } else {
+    IRMapping mapping;
+    for (Operation &op : run.getCondition().front().without_terminator())
+      rewriter.clone(op, mapping);
+    auto yield = cast<YieldOp>(run.getCondition().front().getTerminator());
+    Value condition = mapping.lookupOrDefault(yield.getResults()[0]);
+    auto branch = scf::IfOp::create(rewriter, loc, condition);
+    rewriter.setInsertionPointToStart(branch.thenBlock());
+    emitCall();
+  }
   rewriter.setInsertionPointToEnd(block);
   scf::YieldOp::create(rewriter, loc);
   rewriter.eraseOp(run);
+}
+
+/// Turn the entry point into the program's `main`: a private function
+/// holding the body, where loops become `scf.while` and schedule calls
+/// calls of the lowered schedules, and a C `main` that creates the world
+/// as the generated header does (the arena, with its header zeroed), runs
+/// that function and returns 0.
+static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
+                               ModuleOp module, const WorldLayout &layout,
+                               MemRefType arenaType) {
+  if (Operation *other = SymbolTable::lookupSymbolIn(module, "main")) {
+    InFlightDiagnostic diag =
+        main.emitError("lowers to the function 'main', a name this program "
+                       "also declares");
+    diag.attachNote(other->getLoc()) << "declared here";
+    return diag;
+  }
+  Location loc = main.getLoc();
+  auto [body, arena] =
+      convertToFunc(rewriter, main, "ent.main", main.getBody(), arenaType);
+  body.setPrivate();
+
+  // Innermost first: an outer loop moves the lowered inner ones.
+  SmallVector<LoopOp> loops;
+  body.walk<WalkOrder::PostOrder>([&](LoopOp loop) { loops.push_back(loop); });
+  for (LoopOp loop : loops) {
+    rewriter.setInsertionPoint(loop);
+    // The body runs in the `before` region, which then decides whether to
+    // go on: a loop that tests after each run.
+    auto whileOp = scf::WhileOp::create(
+        rewriter, loop.getLoc(), TypeRange{}, ValueRange{},
+        [](OpBuilder &, Location, ValueRange) {},
+        [](OpBuilder &builder, Location loc, ValueRange) {
+          scf::YieldOp::create(builder, loc);
+        });
+    Block *before = whileOp.getBeforeBody();
+    auto yield = cast<YieldOp>(loop.getBody().front().getTerminator());
+    for (Operation &op :
+         llvm::make_early_inc_range(loop.getBody().front().without_terminator()))
+      op.moveBefore(before, before->end());
+    rewriter.setInsertionPointToEnd(before);
+    Value proceed = arith::ConstantIntOp::create(rewriter, loop.getLoc(), 1, 1);
+    if (yield.getNumOperands() == 1)
+      proceed = arith::XOrIOp::create(rewriter, loop.getLoc(),
+                                      yield.getResults()[0], proceed);
+    scf::ConditionOp::create(rewriter, loop.getLoc(), proceed, ValueRange{});
+    rewriter.eraseOp(loop);
+  }
+
+  SmallVector<CallOp> calls;
+  body.walk([&](CallOp call) { calls.push_back(call); });
+  for (CallOp call : calls) {
+    SmallVector<Value> args(call.getArgs());
+    args.push_back(arena);
+    rewriter.setInsertionPoint(call);
+    rewriter.replaceOpWithNewOp<func::CallOp>(call, call.getSchedule(),
+                                              TypeRange{}, args);
+  }
+  WorldAccess world(rewriter, layout, arena);
+  lowerResourceAccesses(rewriter, body, world);
+
+  rewriter.setInsertionPoint(body);
+  auto func = func::FuncOp::create(
+      rewriter, loc, "main",
+      rewriter.getFunctionType({}, {rewriter.getI32Type()}));
+  rewriter.setInsertionPointToStart(func.addEntryBlock());
+  Value created = memref::AllocOp::create(
+      rewriter, loc, arenaType,
+      rewriter.getI64IntegerAttr(WorldLayout::kArenaAlignment));
+  // Counts, resources and entity counters start at zero; columns stay
+  // untouched, so capacity costs address space, not memory.
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value end = arith::ConstantIndexOp::create(rewriter, loc, layout.headerBytes);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value zeroByte = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
+  scf::ForOp::create(rewriter, loc, zero, end, one, ValueRange{},
+                     [&](OpBuilder &builder, Location loc, Value index,
+                         ValueRange) {
+                       memref::StoreOp::create(builder, loc, zeroByte, created,
+                                               ValueRange{index});
+                       scf::YieldOp::create(builder, loc);
+                     });
+  func::CallOp::create(rewriter, loc, body.getSymName(), TypeRange{},
+                       ValueRange{created});
+  memref::DeallocOp::create(rewriter, loc, created);
+  Value status = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
+  func::ReturnOp::create(rewriter, loc, ValueRange{status});
+  return success();
 }
 
 /// Run the body of a schedule's function `func` only if the schedule's
@@ -3820,10 +3986,11 @@ static void warnAboutReactiveQueries(ModuleOp module) {
 
 /// Replace every remaining !ent.entity (function signatures, calls, scf
 /// results, ops passing ids along) by the integer the layout stores ids as,
-/// and fold away the casts the lowering placed at loads and stores.
+/// and every !ent.text by the integer it is stored as, and fold away the
+/// casts the lowering placed at loads and stores.
 static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
   MLIRContext *context = module.getContext();
-  auto isEntity = [](Type type) { return isa<EntityType>(type); };
+  auto isEntity = [](Type type) { return isa<EntityType, TextType>(type); };
   bool used = module
                   .walk([&](Operation *op) {
                     for (Region &region : op->getRegions())
@@ -3844,6 +4011,8 @@ static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
   converter.addConversion([&](EntityType) -> Type {
     return IntegerType::get(context, idBits);
   });
+  converter.addConversion(
+      [](TextType text) -> Type { return text.getStorageType(); });
   auto materialize = [](OpBuilder &builder, Type type, ValueRange inputs,
                         Location loc) -> Value {
     return UnrealizedConversionCastOp::create(builder, loc, type, inputs)
@@ -3980,6 +4149,10 @@ struct EntLowerToLoops
                         parallelMinEvents, explain, directApplies};
     SymbolTable symbols(module);
 
+    for (ExternOp external : module.getOps<ExternOp>())
+      if (failed(declareExtern(rewriter, external, symbols)))
+        return signalPassFailure();
+
     // Schedules first: fusion reads the systems' bodies before they are
     // lowered themselves.
     for (auto schedule :
@@ -3997,7 +4170,7 @@ struct EntLowerToLoops
       SmallVector<RunOp> runs;
       func.walk([&](RunOp run) { runs.push_back(run); });
       for (RunOp run : runs)
-        lowerRun(rewriter, run, arena);
+        lowerRun(rewriter, run, arena, symbols, *layout);
       SmallVector<StageOp> stages(func.getOps<StageOp>());
       for (StageOp stage : stages)
         lowerStage(rewriter, stage, parallelStages);
@@ -4030,8 +4203,12 @@ struct EntLowerToLoops
       lowerResourceAccesses(rewriter, func, world);
     }
 
+    for (auto main : llvm::make_early_inc_range(module.getOps<MainOp>()))
+      if (failed(lowerMain(rewriter, main, module, *layout, arenaType)))
+        return signalPassFailure();
+
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
-      if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp>(op))
+      if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp, ExternOp>(op))
         rewriter.eraseOp(&op);
 
     if (failed(convertEntityTypes(module, layout->entities.idBits)))

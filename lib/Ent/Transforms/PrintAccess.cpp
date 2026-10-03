@@ -28,8 +28,16 @@ struct EntPrintAccess
     if (failed(inferArchetypes(module)))
       return signalPassFailure();
     SmallVector<ArchetypeOp> archetypes(module.getOps<ArchetypeOp>());
-    for (SystemOp system : module.getOps<SystemOp>()) {
-      SystemAccess access = computeAccess(system, archetypes);
+    for (Operation &system : module.getOps()) {
+      if (!isa<SystemOp, ExternOp>(system))
+        continue;
+      SystemAccess access = computeAccess(&system, archetypes);
+      // An extern system without a contract is opaque as a whole.
+      if (access.opaqueOp == &system) {
+        system.emitRemark() << "declares no access, so the system conflicts "
+                               "with every other system";
+        continue;
+      }
       InFlightDiagnostic remark = system.emitRemark()
                                   << "reads " << formatColumns(access.reads)
                                   << "; writes "

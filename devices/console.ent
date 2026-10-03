@@ -1,0 +1,19 @@
+// The console: a program prints a line by spawning a `Print`; `write`
+// puts the lines out in the order they were spawned and `clear` takes
+// them away. Run both where the frame's output should appear:
+//
+//   import console
+//   system greet() { spawn { Print { line: "hello" } } }
+//   schedule frame() { greet()  write()  clear() }
+//
+// Implemented in devices/console.c.
+component Print { line: text[126] }
+
+// At most this many lines between two `write`s.
+archetype Lines { Print } capacity 1024
+
+extern system write() reads Print
+
+system clear() {
+  for e with Print { e.destroy() }
+}

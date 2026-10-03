@@ -230,3 +230,180 @@ system s() {
 component Position { x: f32 }
 // expected-error @+1 {{unknown component 'Neuron'}}
 relation Synapse { weight: f32 } from Position to Neuron capacity 4
+
+// -----
+
+// expected-error @+1 {{an extern system has no body; it is implemented outside the program}}
+extern system draw() {
+}
+
+// -----
+
+// expected-error @+1 {{expected 'system', found 'schedule'}}
+extern schedule frame() {
+}
+
+// -----
+
+system s() {
+}
+main {
+  // expected-error @+1 {{unknown schedule 's'; 'main' runs schedules, declared before it}}
+  s()
+}
+
+// -----
+
+unique Clock { frame: i64 }
+schedule frame() {
+}
+main {
+  // expected-error @+1 {{an 'until' condition must be a bool}}
+  loop { frame() } until Clock.frame
+}
+
+// -----
+
+schedule frame() {
+}
+main {
+  frame()
+}
+// expected-error @+1 {{a program has one 'main'}}
+main {
+}
+
+// -----
+
+world {
+}
+// expected-error @+1 {{a module has one 'world'}}
+world {
+}
+
+// -----
+
+component Position { x: f32 }
+system s() {
+  for p: Position {
+    // expected-error @+1 {{a counted 'for' inside a 'for' over entities is not supported yet}}
+    for i in 0..2 {
+    }
+  }
+}
+
+// -----
+
+system s(n: f32) {
+  // expected-error @+1 {{a 'for' counts over integers}}
+  for i in 0..n {
+  }
+}
+
+// -----
+
+system s(a: i32, b: i64) {
+  // expected-error @+1 {{the bounds of a 'for' must have the same integer type}}
+  for i in a..b {
+  }
+}
+
+// -----
+
+// expected-note @+1 {{see existing symbol definition here}}
+world {
+}
+// expected-error @+1 {{redefinition of symbol named 'world_init'}}
+schedule world_init() {
+}
+
+// -----
+
+// expected-error @+1 {{expected '[' and the text's capacity, found '}'}}
+component Label { name: text }
+
+// -----
+
+// expected-error @+1 {{a text holds 1 to 4094 bytes}}
+component Label { name: text[5000] }
+
+// -----
+
+unique Title: text[4]
+system s() {
+  // expected-error @+1 {{this text has 5 bytes, but it is put into a text[4]}}
+  Title = "fleet"
+}
+
+// -----
+
+unique Title: text[8]
+system s(n: i32) {
+  // expected-error @+1 {{a text is joined with and compared to texts; a number is put into one with "{value}"}}
+  Title = Title + n
+}
+
+// -----
+
+unique Title: text[8]
+unique Ordered: bool
+system s() {
+  // expected-error @+1 {{texts can be joined ('+') and compared with '==' and '!='}}
+  Ordered = Title < "b"
+}
+
+// -----
+
+unique Title: text[8]
+system s() {
+  // expected-error @+1 {{a text can be assigned ('=') or added to ('+=')}}
+  Title -= "b"
+}
+
+// -----
+
+unique Title: text[8]
+system s() {
+  // expected-error @+1 {{unknown escape '\q'; there are \n \t \r \0 \\ \" \' \{ \} and \xHH}}
+  Title = "a\q"
+}
+
+// -----
+
+unique Title: text[8]
+system s() {
+  // expected-error @+1 {{'{' starts a value that '}' ends; write '\{' for the character}}
+  Title = "a{"
+}
+
+// -----
+
+unique Title: text[8]
+system s() {
+  // expected-error @+1 {{this literal is not closed on its line}}
+  Title = "abc
+}
+
+// -----
+
+unique Count: i32
+system s(n: i32) {
+  // expected-error @+1 {{only a text can be indexed}}
+  Count = n[0]
+}
+
+// -----
+
+unique Byte: i8
+system s() {
+  // expected-error @+1 {{a character literal holds one byte; text is written in double quotes}}
+  Byte = 'ab'
+}
+
+// -----
+
+unique Title: text[8]
+system s(e: entity) {
+  // expected-error @+1 {{this value has no text form; numbers, bools and texts do}}
+  Title = "{e}"
+}

@@ -105,6 +105,92 @@ build/bin/ent-translate --ent-to-c-header /tmp/bullets.mlir \
 build/bin/ent-opt /tmp/bullets.mlir --ent-lower-to-loops ...  # as below
 ```
 
+## A program of its own
+
+```
+import console
+import clock
+
+system greet() {
+  spawn { Print { line: "hello from frame {Time.frame}" } }
+}
+
+schedule frame() { tick()  greet()  write()  clear() }
+
+main {
+  loop { frame() } until Time.frame == 5
+}
+```
+
+```sh
+tools/ent run examples/hello.ent       # or: tools/ent build ... -o hello
+```
+
+`tools/ent` runs the steps below for a program and the modules it imports
+(`--parallel` stages and fuses the systems and runs them on all cores,
+`--keep dir` keeps the IR and the header). It finds the compiler in
+`build/bin` and LLVM under `$LLVM_PREFIX`, `build/toolchain` or Homebrew.
+
+A program with a `main` needs no C host: the compiler emits C's `main`,
+which creates the world and runs the schedules as `main` says, after the
+statements of `world`, the state the program starts with. What the
+language cannot do itself yet (input, output) is an `extern system`: a
+system declared in ent-lang, with its access, and implemented in C against
+the generated header, which declares it. `examples/bullets_main.ent` is the
+bullets example that way; its one extern system prints the result
+(`examples/extern/bullets_report.c`).
+
+```
+world {
+  for i in 0..2 {
+    spawn {
+      Position { x: i as f32 * 100.0 },
+      Cooldown { seconds: i as f32 * 0.5, period: 1.0 }
+    }
+  }
+}
+
+extern system report() reads Position, Cooldown, Lifetime
+
+schedule finish() { report() }
+
+main {
+  loop { frame(0.25) } until Clock.frame == 8
+  finish()
+}
+```
+
+```sh
+build/bin/ent-translate --import-ent examples/bullets_main.ent -o /tmp/bm.mlir
+build/bin/ent-translate --ent-to-c-header /tmp/bm.mlir \
+    -o /tmp/bullets_main_world.h
+build/bin/ent-opt /tmp/bm.mlir --ent-lower-to-loops --convert-scf-to-cf \
+    --convert-to-llvm --reconcile-unrealized-casts \
+  | $LLVM/bin/mlir-translate --mlir-to-llvmir -o /tmp/bm.ll
+$LLVM/bin/clang -O2 -Wno-override-module -I/tmp /tmp/bm.ll \
+    examples/extern/bullets_report.c -o /tmp/bm && /tmp/bm
+```
+
+A program may be several files: `import clock` loads `clock.ent`, found
+next to the importing file or in an `-I` directory, and puts what it
+declares in scope (`clock::Time` where two modules declare a `Time`). The
+whole program is still compiled as one closed world; see
+[`docs/syntax.md`](docs/syntax.md).
+
+A device is a module whose extern systems touch the outside: its
+declarations in `name.ent`, their C in `name.c` next to it, which
+`tools/ent` compiles against the program's header (as `ent_world.h`).
+Two come with the compiler, in `devices/`:
+
+- `console`: a program prints a line by spawning `Print { line: "..." }`;
+  `write()` puts the pending lines out in order, `clear()` takes them
+  away.
+- `clock`: `tick()`, once a frame, sets `Time.now` (seconds since the
+  first tick), `Time.dt` and `Time.frame`, and waits for the next frame if
+  `FrameRate` is set.
+
+Both keep all their state in the world.
+
 ## The dialect today
 
 When each effect becomes visible to the rest of the program (the frame
@@ -113,7 +199,11 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
 
 - `ent.component @Position (x: f32, y: f32) capacity 100000`: scalar fields,
   abstract layout; the optional capacity bounds how many entities can have
-  the component.
+  the component. A field may be a text, `name: !ent.text<30>`: up to 30
+  bytes and their number, stored inline as one integer (the length in its
+  low 16 bits, the bytes above, zero past the length), which is what the
+  lowering turns the type into; `text[30]` in ent-lang, whose literals,
+  joins and comparisons are integer ops on it (`docs/syntax.md`).
 - `%id = ent.spawn (@Position, @Velocity)(%x, %y, %dx, %dy) : f32, f32, f32,
   f32` creates an entity with these components, a value for every field in
   order, and returns its id. Archetypes need not be declared: the compiler
@@ -264,6 +354,28 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   with ops free of side effects.
 - `ent.stage { ent.run ... }`: runs that commute and may execute in
   parallel; stages execute in order.
+- `ent.extern @report(f32) reads [@Position] writes [@Console]`: a system
+  without a body, implemented in C. A schedule runs it like any other, and
+  the lowered program calls `ent_report(world, dt)` (a bool crosses as C's
+  `bool`, an entity as `ent_entity`), which works on the world through the
+  generated header. Its declared access is its access: every field of the
+  components, resources and relations it lists, in every archetype holding
+  them, and for an archetype in `writes` its set of entities (it spawns
+  them, so the archetype is declared, like any shape only C spawns).
+  Without `reads` or `writes` it conflicts with every other system. What
+  it does outside the world (output, say) is not in the contract: extern
+  systems that must keep their order because of it write a common
+  resource, or declare nothing. Field writes it makes are not tracked for
+  reactive queries, as for a host; edges it connects are sorted when it
+  returns.
+- `ent.main { ent.call @setup()  ent.loop { ent.call @frame(%dt) : f32 ...
+  ent.yield %done : i1 } }`: the entry point, at most one. It calls
+  schedules, repeats (`ent.loop` runs its body, then stops if it yielded
+  true; without a value it repeats forever), reads resources and computes
+  with ops free of side effects. Lowering emits C's `main`: it allocates
+  the arena, zeroes its header as `ent_world_create` does, runs the body
+  and returns 0. A module without `ent.main` is a library for a C host, as
+  before.
 
 The verifier checks that every query and every resource access stays
 inside its system's declared access, where it declares one, that no query
@@ -298,7 +410,9 @@ events write, and advance a tick counter (`ticks`) that those ops read:
 a reactive system never shares a stage with a system causing observed
 events. Any other op
 with memory effects (a call, say) makes a system opaque, and opaque systems
-conflict with everything.
+conflict with everything. An extern system's access is what it declares
+(`--ent-print-access` shows the columns); without a declaration it is
+opaque.
 
 `--ent-schedule` puts each run into the earliest stage after every earlier
 run it conflicts with. In the example, gravity, wind and decay share the
@@ -312,7 +426,9 @@ public ones with a C interface (`_mlir_ciface_<schedule>`). Each query becomes
 one `scf.for` per matching archetype, and field access becomes `memref.load`
 and `memref.store` on that archetype's columns. Stages dissolve into calls,
 or with `parallel-stages=1` a stage of several runs becomes an `omp.parallel`
-region with one `omp.section` per run.
+region with one `omp.section` per run. A run of an extern system becomes a
+call of its C function, with the arena's pointer first; `ent.main` becomes
+`main` (so no system or schedule may be called that).
 
 ## World storage
 
@@ -377,8 +493,10 @@ order.
 archetype is full) and `ent_Body_spawn_n(world, n)`, the id column, and typed
 column accessors such as `ent_Body_Position_x(world)`; entity lookups
 `ent_entity_alive`, `ent_entity_archetype` and `ent_entity_row`; one accessor
-per resource field such as `ent_Clock_frame(world)`; and one entry point per
-schedule, such as `ent_frame(world, dt)`. The header allocates ids exactly as
+per resource field such as `ent_Clock_frame(world)`; one entry point per
+schedule, such as `ent_frame(world, dt)`; and a declaration of every extern
+system's C function, such as `void ent_report(ent_world *world, float
+arg0)`, for the file that defines it. The header allocates ids exactly as
 the lowered program does. Creating a world zeroes only the counts, resources
 and entity counters, so capacity costs address space, not memory, until
 columns are written. Parallel stages and loops assume nothing else writes the

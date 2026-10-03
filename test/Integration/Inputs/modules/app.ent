@@ -1,0 +1,19 @@
+// A program made of two files: it runs the module's systems in its own
+// schedule and starts from both worlds, the module's first.
+import ticker
+
+unique Limit: i32
+
+world {
+  // The module's world has run: its step is set.
+  Limit = Ticks.step * 3
+}
+
+schedule frame() {
+  tick()
+  show()
+}
+
+main {
+  loop { frame() } until Ticks.count >= Limit
+}

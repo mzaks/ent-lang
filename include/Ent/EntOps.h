@@ -5,6 +5,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/StringExtras.h"
 
 #include "Ent/EntDialect.h"
 #include "Ent/EntTypes.h"

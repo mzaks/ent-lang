@@ -1,0 +1,26 @@
+// Text end to end (Inputs/text.ent): the program builds lines, an extern
+// system prints them from the columns.
+// RUN: mkdir -p %t.dir
+// RUN: ent-translate --import-ent %S/Inputs/text.ent -o %t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/text_world.h
+// RUN: ent-opt %t.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/text_print.c -o %t.exe
+// RUN: %t.exe | FileCheck %s
+// Unoptimised, where nothing is folded.
+// RUN: clang -O0 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/text_print.c -o %t.O0
+// RUN: %t.O0 | FileCheck %s
+
+// CHECK:      [fleet:]
+// CHECK-NEXT: [gun: 3 bytes, first 103]
+// CHECK-NEXT: [torpedo boat hp -0.25 hits -12 unnamed false]
+// CHECK-NEXT: [(none) hp 2.0 hits 0 unnamed true]
+// Cut to thirty bytes.
+// CHECK-NEXT: [a title that is clearly longer]
+// CHECK-NEXT: [shorter!]
+// f32 literals: a third to six decimals, 1e15 as the f32 nearest to it.
+// CHECK-NEXT: [seen 12 32 0.333333 999999986991104 0.0 {ok}]
+// CHECK-NEXT: [big -big inf nan 123456789012 1.0]

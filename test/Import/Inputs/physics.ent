@@ -1,0 +1,9 @@
+import shapes
+
+component Position { x: f32 } capacity 16
+// Also declared by clock.
+unique Time { step: i32 }
+
+system fall() {
+  for p: mut Position, b: Ball { p.x -= b.radius }
+}

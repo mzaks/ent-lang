@@ -69,6 +69,7 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
     "::mlir::arith::ArithDialect",
     "::mlir::cf::ControlFlowDialect",
     "::mlir::func::FuncDialect",
+    "::mlir::LLVM::LLVMDialect",
     "::mlir::memref::MemRefDialect",
     "::mlir::omp::OpenMPDialect",
     "::mlir::scf::SCFDialect",

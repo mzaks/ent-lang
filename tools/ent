@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Build and run ent-lang programs.
+
+  ent build program.ent [-o program] [-I dir] [more.c ...]
+  ent run   program.ent [-I dir] [more.c ...] [-- arguments]
+
+A program is a .ent file with `main` and the modules it imports. Modules
+are found next to the importing file, in the -I directories and in the
+devices that come with the compiler. A module `m.ent` with an `m.c` next to
+it has its extern systems there; that file is compiled with the program,
+against the program's generated header (ent_world.h). C files on the
+command line are compiled the same way.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def find_tool(name, directories):
+    for directory in directories:
+        path = os.path.join(directory, name)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    path = shutil.which(name)
+    if path:
+        return path
+    sys.exit(f"ent: cannot find '{name}' (looked in {', '.join(directories)} "
+             "and PATH)")
+
+
+def llvm_directories():
+    prefixes = [os.environ.get("LLVM_PREFIX"),
+                os.path.join(ROOT, "build/toolchain/.pixi/envs/default"),
+                "/opt/homebrew/opt/llvm"]
+    return [os.path.join(prefix, "bin") for prefix in prefixes if prefix]
+
+
+def modules_of(path, include_directories, seen):
+    """The files of the modules `path` imports, itself included, found as
+    the compiler finds them."""
+    path = os.path.realpath(path)
+    if path in seen:
+        return
+    seen.append(path)
+    with open(path) as source:
+        text = re.sub(r"//[^\n]*", "", source.read())
+    for name in re.findall(r"^\s*import\s+(\w+)", text, re.MULTILINE):
+        for directory in [os.path.dirname(path)] + include_directories:
+            candidate = os.path.join(directory, name + ".ent")
+            if os.path.isfile(candidate):
+                modules_of(candidate, include_directories, seen)
+                break
+
+
+def run(command, **options):
+    result = subprocess.run(command, **options)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+    return result
+
+
+def build(arguments, output, directory):
+    own = [os.environ.get("ENT_BIN"), os.path.join(ROOT, "build/bin")]
+    own = [path for path in own if path]
+    translate = find_tool("ent-translate", own)
+    optimise = find_tool("ent-opt", own)
+    mlir_translate = find_tool("mlir-translate", llvm_directories())
+    clang = find_tool("clang", llvm_directories())
+
+    include_directories = arguments.I + [os.path.join(ROOT, "devices")]
+    includes = [flag for path in include_directories for flag in ("-I", path)]
+    program = arguments.program
+    stem = os.path.splitext(os.path.basename(program))[0]
+
+    module = os.path.join(directory, stem + ".mlir")
+    run([translate, "--import-ent", program, "-o", module] + includes)
+    header = os.path.join(directory, "ent_world.h")
+    run([translate, "--ent-to-c-header", module, "-o", header])
+    # Also under the program's name, for C written for this program only.
+    shutil.copyfile(header, os.path.join(directory, stem + "_world.h"))
+
+    lowering = "--ent-lower-to-loops"
+    passes = [lowering]
+    link = []
+    if arguments.parallel:
+        passes = ["--ent-schedule",
+                  lowering + "=fuse-systems=1 parallel-entities=1 "
+                  "parallel-stages=1",
+                  "--symbol-dce", "--convert-scf-to-openmp", "--canonicalize",
+                  "--ent-omp-nowait"]
+        library = os.path.join(os.path.dirname(os.path.dirname(clang)), "lib")
+        link = ["-L" + library, "-lomp", "-Wl,-rpath," + library]
+    lowered = run([optimise, module] + passes +
+                  ["--convert-scf-to-cf", "--convert-to-llvm",
+                   "--reconcile-unrealized-casts"],
+                  stdout=subprocess.PIPE).stdout
+    llvm = os.path.join(directory, stem + ".ll")
+    run([mlir_translate, "--mlir-to-llvmir", "-o", llvm], input=lowered)
+
+    files = []
+    modules_of(program, include_directories, files)
+    sources = [path[:-4] + ".c" for path in files
+               if os.path.isfile(path[:-4] + ".c")]
+    run([clang, "-O2", "-Wno-override-module", "-I", directory, llvm] +
+        sources + arguments.sources + link + ["-o", output])
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="ent", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("command", choices=["build", "run"])
+    parser.add_argument("program", help="the .ent file with `main`")
+    parser.add_argument("sources", nargs="*", metavar="more.c",
+                        help="C files with the program's own extern systems")
+    parser.add_argument("-o", dest="output", help="the executable to write "
+                        "(build; default: the program's name)")
+    parser.add_argument("-I", action="append", default=[], metavar="dir",
+                        help="a directory to find imported modules in")
+    parser.add_argument("--parallel", action="store_true",
+                        help="stage and fuse systems and run them on all "
+                        "cores (OpenMP)")
+    parser.add_argument("--keep", metavar="dir", help="keep the generated "
+                        "files (IR, header) in this directory")
+    own, rest = sys.argv[1:], []
+    if "--" in own:
+        rest = own[own.index("--") + 1:]
+        own = own[:own.index("--")]
+    arguments = parser.parse_args(own)
+
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = temporary
+        if arguments.keep:
+            directory = arguments.keep
+            os.makedirs(directory, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(arguments.program))[0]
+        if arguments.command == "build":
+            build(arguments, arguments.output or stem, directory)
+            return 0
+        executable = os.path.join(temporary, stem)
+        build(arguments, executable, directory)
+        return subprocess.run([executable] + rest).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

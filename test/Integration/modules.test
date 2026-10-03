@@ -1,0 +1,19 @@
+// A program of two files end to end: the module's declarations, world,
+// system and extern system, used from the importing file.
+// RUN: mkdir -p %t.dir
+// RUN: ent-translate --import-ent %S/Inputs/modules/app.ent -o %t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/app_world.h
+// RUN: ent-opt %t.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/modules/ticker.c -o %t.exe
+// RUN: %t.exe | FileCheck %s
+
+// A C host reaches a module's schedules under C names.
+// RUN: clang -fsyntax-only -I%t.dir %S/Inputs/modules/host.c
+
+// CHECK:      ticks 2 of 6
+// CHECK-NEXT: ticks 4 of 6
+// CHECK-NEXT: ticks 6 of 6
+// CHECK-NOT:  ticks

@@ -1,0 +1,12 @@
+// A module with state, a world of its own, a system and an extern system.
+unique Ticks { count: i32, step: i32 }
+
+world {
+  Ticks.step = 2
+}
+
+system tick() {
+  Ticks.count += Ticks.step
+}
+
+extern system show() reads Ticks

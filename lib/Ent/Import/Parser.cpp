@@ -19,8 +19,16 @@
 #include "mlir/IR/Verifier.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
+
+#include <functional>
+#include <limits>
 
 #include <memory>
 #include <optional>
@@ -28,7 +36,51 @@
 using namespace mlir;
 using namespace mlir::ent;
 
+static llvm::cl::list<std::string> importDirs(
+    "I", llvm::cl::desc("Directory to search for imported ent-lang modules, "
+                        "after the importing file's own"),
+    llvm::cl::value_desc("dir"), llvm::cl::Prefix);
+
 namespace {
+
+/// One `.ent` file of a program. The file the compiler is given is the
+/// root; its declarations keep their names. Those of an imported module
+/// `m` are named `m.Name` in the IR.
+struct SourceModule {
+  std::string name;
+  std::string prefix;
+  /// Everything it declares, by the name written in its source.
+  llvm::StringSet<> names;
+  /// The modules it imports itself; their names are in scope in it.
+  SmallVector<SourceModule *> imports;
+  /// Still being parsed: importing it again is a cycle.
+  bool loading = true;
+  /// The schedule that runs its `world` block, if it has one.
+  std::string worldSchedule;
+  llvm::StringSet<> reported;
+};
+
+/// What the declarations of one kind (components, uniques, ...) are known
+/// by. Keys are IR symbol names; a name as written in the source is
+/// resolved against the module being parsed first.
+template <typename T>
+class Declared {
+public:
+  using iterator = typename llvm::StringMap<T>::iterator;
+  explicit Declared(std::function<std::string(StringRef)> resolve)
+      : resolve(std::move(resolve)) {}
+  iterator end() { return map.end(); }
+  iterator find(StringRef name) { return map.find(resolve(name)); }
+  size_t count(StringRef name) { return map.count(resolve(name)); }
+  T &operator[](StringRef name) { return map[resolve(name)]; }
+  bool try_emplace(StringRef name) {
+    return map.try_emplace(resolve(name)).second;
+  }
+
+private:
+  std::function<std::string(StringRef)> resolve;
+  llvm::StringMap<T> map;
+};
 
 struct Expr;
 using ExprPtr = std::unique_ptr<Expr>;
@@ -60,12 +112,17 @@ struct Expr {
     If,     // if c { a } else { b }
     Spawn,  // spawn { A { .. }, B { .. } }
     Has,    // e.has(C): name is the entity, field the component
+    String, // "text": name holds its bytes
+    Index,  // text[i]
+    Format, // {value} inside a string: the value as text
   };
   Kind kind;
   llvm::SMLoc loc;
   int64_t intValue = 0;
   double floatValue = 0;
   bool boolValue = false;
+  /// For an Int: written as a character ('a'), so it is a byte (i8).
+  bool isByte = false;
   std::string name, field;
   Token::Kind op = Token::Eof;
   SmallVector<ExprPtr> operands;
@@ -111,7 +168,12 @@ public:
       : sourceMgr(sourceMgr), context(context),
         lexer(sourceMgr.getMemoryBuffer(sourceMgr.getMainFileID())
                   ->getBuffer()),
-        builder(context) {
+        builder(context),
+        components([this](StringRef name) { return resolve(name); }),
+        uniques([this](StringRef name) { return resolve(name); }),
+        relations([this](StringRef name) { return resolve(name); }),
+        systems([this](StringRef name) { return resolve(name); }),
+        schedules([this](StringRef name) { return resolve(name); }) {
     advance();
   }
 
@@ -123,17 +185,22 @@ private:
   //===--------------------------------------------------------------===//
 
   void advance() { token = lexer.next(); }
+  /// The token after the current one.
+  Token peek() {
+    Lexer ahead = lexer;
+    return ahead.next();
+  }
 
   Location loc(llvm::SMLoc at) {
-    auto [line, column] = sourceMgr.getLineAndColumn(at);
-    StringRef file =
-        sourceMgr.getMemoryBuffer(sourceMgr.getMainFileID())
-            ->getBufferIdentifier();
+    unsigned buffer = sourceMgr.FindBufferContainingLoc(at);
+    auto [line, column] = sourceMgr.getLineAndColumn(at, buffer);
+    StringRef file = sourceMgr.getMemoryBuffer(buffer)->getBufferIdentifier();
     return FileLineColLoc::get(context, file, line, column);
   }
 
   LogicalResult error(llvm::SMLoc at, const Twine &message) {
     emitError(loc(at)) << message;
+    hadError = true;
     return failure();
   }
   LogicalResult error(const Twine &message) {
@@ -188,8 +255,13 @@ private:
   LogicalResult parseComponent(bool tag);
   LogicalResult parseUnique();
   LogicalResult parseArchetype();
-  LogicalResult parseSystem();
+  LogicalResult parseSystem(bool isExtern);
   LogicalResult parseSchedule();
+  LogicalResult parseMain();
+  LogicalResult parseWorld();
+  LogicalResult parseDeclarations();
+  LogicalResult parseImport();
+  LogicalResult parseMainBlock();
   FailureOr<ArrayAttr> parseNameList(StringRef what);
 
   //===--------------------------------------------------------------===//
@@ -199,6 +271,7 @@ private:
   LogicalResult parseBlock();
   LogicalResult parseStatement();
   LogicalResult parseFor();
+  LogicalResult parseCountedFor(llvm::SMLoc at);
   LogicalResult parseIf();
   LogicalResult parseIfLet(llvm::SMLoc at);
   LogicalResult parseNameStatement();
@@ -230,6 +303,24 @@ private:
   Type typeOf(const Expr &expr);
   Type defaultType(const Expr &expr);
   FailureOr<mlir::Value> emit(const Expr &expr, Type expected);
+  FailureOr<mlir::Value> emitRaw(const Expr &expr, Type expected);
+  FailureOr<ExprPtr> parseString();
+  FailureOr<char> parseEscape(StringRef &rest, llvm::SMLoc at);
+
+  // Text: a value of !ent.text<N> is one integer (see TextType), which
+  // these compute with.
+  Type textTypeOf(const Expr &expr);
+  TextType textType(llvm::SMLoc at, unsigned capacity);
+  mlir::Value integer(Location at, Type type, uint64_t value);
+  mlir::Value textBits(Location at, mlir::Value text);
+  mlir::Value textFromBits(Location at, mlir::Value bits, TextType type);
+  mlir::Value textConstant(Location at, StringRef bytes, TextType type);
+  mlir::Value textResize(Location at, mlir::Value text, TextType to);
+  mlir::Value textConcat(llvm::SMLoc at, mlir::Value a, mlir::Value b);
+  mlir::Value textLength(Location at, mlir::Value text);
+  mlir::Value textIndex(Location at, mlir::Value text, mlir::Value index);
+  mlir::Value formatUnsigned(Location at, mlir::Value magnitude);
+  FailureOr<mlir::Value> formatValue(llvm::SMLoc at, mlir::Value value);
   FailureOr<mlir::Value> emitBinary(const Expr &expr, Type expected);
   FailureOr<mlir::Value> emitIf(const Expr &expr, Type expected);
   FailureOr<mlir::Value> emitSpawn(const Expr &expr);
@@ -263,7 +354,57 @@ private:
   };
 
   FlatSymbolRefAttr symbol(StringRef name) {
-    return FlatSymbolRefAttr::get(context, name);
+    return FlatSymbolRefAttr::get(context, resolve(name));
+  }
+
+  //===--------------------------------------------------------------===//
+  // Modules
+  //===--------------------------------------------------------------===//
+
+  /// The IR symbol a name written in the module being parsed stands for:
+  /// its own declaration, else that of the one module it imports that
+  /// declares the name; `m::Name` names module `m`'s. A name nothing
+  /// declares resolves to an own name, which the caller will not find.
+  std::string resolve(StringRef written) {
+    auto report = [&](const Twine &message) {
+      if (current->reported.insert(written).second)
+        (void)error(message);
+    };
+    auto [qualifier, base] = written.split("::");
+    if (base.empty() && !written.contains("::")) {
+      if (current->names.contains(written))
+        return current->prefix + written.str();
+      SourceModule *found = nullptr;
+      for (SourceModule *imported : current->imports) {
+        if (!imported->names.contains(written))
+          continue;
+        if (found) {
+          report("'" + written + "' is declared by the modules '" +
+                 found->name + "' and '" + imported->name + "'; write '" +
+                 found->name + "::" + written + "' or '" + imported->name +
+                 "::" + written + "'");
+          break;
+        }
+        found = imported;
+      }
+      return (found ? found->prefix : current->prefix) + written.str();
+    }
+    if (qualifier == current->name)
+      return current->prefix + base.str();
+    for (SourceModule *imported : current->imports)
+      if (imported->name == qualifier)
+        return imported->prefix + base.str();
+    report("unknown module '" + qualifier + "'; import it first");
+    return current->prefix + written.str();
+  }
+
+  /// Declare `name` in the module being parsed and return its IR symbol.
+  StringAttr declareSymbol(llvm::SMLoc at, StringRef name) {
+    if (name.contains("::"))
+      (void)error(at, "a declaration's name cannot be qualified; it belongs to "
+                      "the module that declares it");
+    current->names.insert(name);
+    return builder.getStringAttr(current->prefix + name);
   }
 
   llvm::SourceMgr &sourceMgr;
@@ -273,9 +414,9 @@ private:
   OpBuilder builder;
   ModuleOp module;
 
-  llvm::StringMap<Record> components;
-  llvm::StringMap<Record> uniques;
-  llvm::StringMap<Record> relations;
+  Declared<Record> components;
+  Declared<Record> uniques;
+  Declared<Record> relations;
 
   /// The fields a ref's variable has: a component's, or for an edge a
   /// relation's.
@@ -285,7 +426,23 @@ private:
       return relation->second;
     return components[variable.component];
   }
-  llvm::StringMap<SmallVector<Type>> systems;
+  Declared<SmallVector<Type>> systems;
+  Declared<SmallVector<Type>> schedules;
+  bool hasMain = false;
+  bool hadError = false;
+  /// Every module of the program, in the order their parsing finished: a
+  /// module after the ones it imports, the root last.
+  std::vector<std::unique_ptr<SourceModule>> modules;
+  SmallVector<SourceModule *> finished;
+  /// Modules by the path of their file.
+  llvm::StringMap<SourceModule *> modulesByPath;
+  SourceModule *root = nullptr;
+  SourceModule *current = nullptr;
+  /// The names a `world` block is declared under: a system holding its
+  /// statements and a schedule running it, which `main` calls first and a
+  /// C host calls as `ent_world_init`.
+  static constexpr StringLiteral kWorldSystem = "world_setup";
+  static constexpr StringLiteral kWorldSchedule = "world_init";
   SmallVector<llvm::StringMap<Variable>> scopes;
   /// Inside a `for`: the name of the visited entity, if bound.
   bool inQuery = false;
@@ -303,6 +460,37 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
   OwningOpRef<ModuleOp> owned = ModuleOp::create(loc(token.loc));
   module = *owned;
   builder.setInsertionPointToEnd(module.getBody());
+  StringRef file = sourceMgr.getMemoryBuffer(sourceMgr.getMainFileID())
+                       ->getBufferIdentifier();
+  modules.push_back(std::make_unique<SourceModule>());
+  root = current = modules.back().get();
+  root->name = llvm::sys::path::stem(file).str();
+  SmallString<256> path;
+  if (!llvm::sys::fs::real_path(file, path))
+    modulesByPath[path] = root;
+  if (failed(parseDeclarations()) || hadError)
+    return nullptr;
+  root->loading = false;
+  finished.push_back(root);
+
+  // Every module's world is set up before `main` does anything else, a
+  // module's after those it imports, wherever they were declared.
+  for (MainOp main : module.getOps<MainOp>()) {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToStart(&main.getBody().front());
+    for (SourceModule *source : finished)
+      if (!source->worldSchedule.empty())
+        CallOp::create(builder, main.getLoc(),
+                       FlatSymbolRefAttr::get(context, source->worldSchedule),
+                       ValueRange{});
+  }
+  if (failed(verify(module)))
+    return nullptr;
+  return owned;
+}
+
+// The declarations of one file, up to its end.
+LogicalResult Parser::parseDeclarations() {
   while (!token.is(Token::Eof)) {
     LogicalResult result = success();
     if (consumeKeyword("component"))
@@ -316,30 +504,127 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
     else if (consumeKeyword("archetype"))
       result = parseArchetype();
     else if (consumeKeyword("system"))
-      result = parseSystem();
+      result = parseSystem(/*isExtern=*/false);
+    else if (consumeKeyword("extern"))
+      result = failed(expectKeyword("system"))
+                   ? LogicalResult::failure()
+                   : parseSystem(/*isExtern=*/true);
     else if (consumeKeyword("schedule"))
       result = parseSchedule();
-    else if (consumeKeyword("default_capacity")) {
+    else if (token.isKeyword("import"))
+      result = parseImport();
+    else if (token.isKeyword("main"))
+      result = current == root
+                   ? parseMain()
+                   : error("'main' belongs to the program's own file, not to "
+                           "a module it imports");
+    else if (token.isKeyword("world"))
+      result = parseWorld();
+    else if (token.isKeyword("default_capacity")) {
+      if (current != root)
+        return error("'default_capacity' belongs to the program's own file, "
+                     "not to a module it imports");
+      advance();
       FailureOr<int64_t> capacity = integer("a capacity");
       if (failed(capacity))
-        return nullptr;
+        return failure();
       module->setAttr("ent.default_capacity",
                       builder.getI64IntegerAttr(*capacity));
-    } else if (token.isKeyword("world") || token.isKeyword("proc") ||
+    } else if (token.isKeyword("proc") ||
                token.isKeyword("fn") || token.isKeyword("device") ||
                token.isKeyword("prefab")) {
       result = error("'" + token.spelling + "' is not supported yet");
     } else {
-      result = error("expected a declaration (component, tag, unique, "
-                     "relation, archetype, system, schedule), found '" +
+      result = error("expected a declaration (import, component, tag, "
+                     "unique, relation, archetype, system, schedule, world, "
+                     "main), found '" +
                      token.spelling + "'");
     }
     if (failed(result))
-      return nullptr;
+      return failure();
   }
-  if (failed(verify(module)))
-    return nullptr;
-  return owned;
+  return success();
+}
+
+// import name: the declarations of name.ent, found next to the importing
+// file or in an -I directory.
+LogicalResult Parser::parseImport() {
+  llvm::SMLoc at = token.loc;
+  advance();
+  FailureOr<std::string> name = identifier("a module name");
+  if (failed(name))
+    return failure();
+  consumeIf(Token::Semicolon);
+  if (StringRef(*name).contains("::"))
+    return error(at, "expected a module name");
+
+  SmallVector<std::string> dirs;
+  StringRef importer =
+      sourceMgr.getMemoryBuffer(sourceMgr.FindBufferContainingLoc(at))
+          ->getBufferIdentifier();
+  dirs.push_back(llvm::sys::path::parent_path(importer).str());
+  llvm::append_range(dirs, importDirs);
+  SmallString<256> path;
+  bool found = false;
+  for (const std::string &dir : dirs) {
+    SmallString<256> candidate(dir);
+    llvm::sys::path::append(candidate, *name + ".ent");
+    if (!llvm::sys::fs::real_path(candidate, path) &&
+        llvm::sys::fs::is_regular_file(path)) {
+      found = true;
+      break;
+    }
+  }
+  if (!found)
+    return error(at, "cannot find module '" + *name + "': no '" + *name +
+                         ".ent' next to the importing file or in an -I "
+                         "directory");
+
+  auto known = modulesByPath.find(path);
+  if (known != modulesByPath.end()) {
+    if (known->second->loading)
+      return error(at, "module '" + *name + "' is imported while it is "
+                           "being imported itself; imports cannot form a "
+                           "cycle");
+    if (!llvm::is_contained(current->imports, known->second))
+      current->imports.push_back(known->second);
+    return success();
+  }
+  // Names are told apart by their module's name, so that is unique.
+  for (const std::unique_ptr<SourceModule> &other : modules)
+    if (other->name == *name)
+      return error(at, "another module named '" + *name +
+                           "' is part of the program already");
+
+  auto buffer = llvm::MemoryBuffer::getFile(path);
+  if (!buffer)
+    return error(at, "cannot read '" + path + "'");
+  StringRef text = (*buffer)->getBuffer();
+  sourceMgr.AddNewSourceBuffer(std::move(*buffer), at);
+
+  modules.push_back(std::make_unique<SourceModule>());
+  SourceModule *imported = modules.back().get();
+  imported->name = *name;
+  imported->prefix = *name + ".";
+  modulesByPath[path] = imported;
+
+  // Parse the file where the import stands, then go on with this one.
+  Lexer savedLexer = lexer;
+  Token savedToken = token;
+  SourceModule *importing = current;
+  lexer = Lexer(text);
+  current = imported;
+  advance();
+  LogicalResult result = parseDeclarations();
+  lexer = savedLexer;
+  token = savedToken;
+  current = importing;
+  if (failed(result))
+    return failure();
+  imported->loading = false;
+  finished.push_back(imported);
+  current->imports.push_back(imported);
+  return success();
 }
 
 FailureOr<Type> Parser::parseType() {
@@ -359,10 +644,22 @@ FailureOr<Type> Parser::parseType() {
                   .Case("index", builder.getIndexType())
                   .Case("entity", EntityType::get(context))
                   .Default(Type());
+  if (*name == "text") {
+    // text[N]: up to N bytes, stored inline.
+    if (failed(expect(Token::LBracket, "'[' and the text's capacity")))
+      return failure();
+    FailureOr<int64_t> capacity = integer("a capacity in bytes");
+    if (failed(capacity) || failed(expect(Token::RBracket, "']'")))
+      return failure();
+    if (*capacity < 1 || *capacity > TextType::kMaxCapacity)
+      return error(at, "a text holds 1 to " +
+                           Twine(unsigned(TextType::kMaxCapacity)) + " bytes");
+    return Type(TextType::get(context, *capacity));
+  }
   if (!type)
     return error(at, "unknown type '" + *name +
                          "'; expected f32, f64, bool, i8, i16, i32, i64, "
-                         "index or entity");
+                         "index, entity or text[N]");
   return type;
 }
 
@@ -405,7 +702,7 @@ LogicalResult Parser::parseComponent(bool tag) {
     names.push_back(builder.getStringAttr(field));
     types.push_back(TypeAttr::get(type));
   }
-  ComponentOp::create(builder, loc(at), builder.getStringAttr(*name),
+  ComponentOp::create(builder, loc(at), declareSymbol(at, *name),
                       builder.getArrayAttr(names), builder.getArrayAttr(types),
                       capacity);
   components[*name] = std::move(record);
@@ -418,7 +715,7 @@ LogicalResult Parser::parseRelation() {
   FailureOr<std::string> name = identifier("a relation name");
   if (failed(name))
     return failure();
-  if (components.count(*name) || uniques.count(*name))
+  if (current->names.contains(*name))
     return error(at, "'" + *name + "' is already declared");
   Record record;
   if (token.is(Token::LBrace) && failed(parseFields(record)))
@@ -447,7 +744,7 @@ LogicalResult Parser::parseRelation() {
     names.push_back(builder.getStringAttr(field));
     types.push_back(TypeAttr::get(type));
   }
-  RelationOp::create(builder, loc(at), builder.getStringAttr(*name),
+  RelationOp::create(builder, loc(at), declareSymbol(at, *name),
                      builder.getArrayAttr(names), builder.getArrayAttr(types),
                      ends[0], ends[1], builder.getI64IntegerAttr(*capacity));
   relations[*name] = std::move(record);
@@ -475,7 +772,7 @@ LogicalResult Parser::parseUnique() {
     names.push_back(builder.getStringAttr(field));
     types.push_back(TypeAttr::get(type));
   }
-  ResourceOp::create(builder, loc(at), builder.getStringAttr(*name),
+  ResourceOp::create(builder, loc(at), declareSymbol(at, *name),
                      builder.getArrayAttr(names), builder.getArrayAttr(types));
   uniques[*name] = std::move(record);
   return success();
@@ -508,7 +805,7 @@ LogicalResult Parser::parseArchetype() {
   FailureOr<int64_t> capacity = integer("a capacity");
   if (failed(capacity))
     return failure();
-  ArchetypeOp::create(builder, loc(at), builder.getStringAttr(*name),
+  ArchetypeOp::create(builder, loc(at), declareSymbol(at, *name),
                       builder.getArrayAttr(all),
                       optional.empty() ? ArrayAttr()
                                        : builder.getArrayAttr(optional),
@@ -519,7 +816,8 @@ LogicalResult Parser::parseArchetype() {
 // A, B, ... (up to the next keyword or '{')
 FailureOr<ArrayAttr> Parser::parseNameList(StringRef what) {
   SmallVector<Attribute> names;
-  if (token.is(Token::LBrace) || token.isKeyword("writes"))
+  if (token.is(Token::LBrace) || token.isKeyword("writes") ||
+      token.is(Token::Semicolon))
     return builder.getArrayAttr(names);
   do {
     FailureOr<std::string> name = identifier(what);
@@ -531,7 +829,8 @@ FailureOr<ArrayAttr> Parser::parseNameList(StringRef what) {
 }
 
 // system name(params) [reads A, B] [writes C] { statements }
-LogicalResult Parser::parseSystem() {
+// extern system name(params) [reads A, B] [writes C]
+LogicalResult Parser::parseSystem(bool isExtern) {
   llvm::SMLoc at = token.loc;
   FailureOr<std::string> name = identifier("a system name");
   if (failed(name) || failed(expect(Token::LParen, "'('")))
@@ -551,9 +850,10 @@ LogicalResult Parser::parseSystem() {
   if (failed(expect(Token::RParen, "')'")))
     return failure();
 
-  OperationState state(loc(at), SystemOp::getOperationName());
+  OperationState state(loc(at), isExtern ? ExternOp::getOperationName()
+                                         : SystemOp::getOperationName());
   state.addAttribute(SymbolTable::getSymbolAttrName(),
-                     builder.getStringAttr(*name));
+                     declareSymbol(at, *name));
   if (consumeKeyword("reads")) {
     FailureOr<ArrayAttr> reads = parseNameList("a component or unique");
     if (failed(reads))
@@ -566,6 +866,20 @@ LogicalResult Parser::parseSystem() {
     if (failed(writes))
       return failure();
     state.addAttribute("writes", *writes);
+  }
+  if (isExtern) {
+    // Implemented in C: no body. A ';' may end the declaration.
+    if (token.is(Token::LBrace))
+      return error("an extern system has no body; it is implemented "
+                   "outside the program");
+    consumeIf(Token::Semicolon);
+    SmallVector<Type> types;
+    for (auto &[param, type] : params)
+      types.push_back(type);
+    state.addAttribute("params", builder.getTypeArrayAttr(types));
+    systems[*name] = types;
+    builder.create(state);
+    return success();
   }
   Region *body = state.addRegion();
   auto *block = new Block();
@@ -632,7 +946,7 @@ LogicalResult Parser::parseSchedule() {
 
   OperationState state(loc(at), ScheduleOp::getOperationName());
   state.addAttribute(SymbolTable::getSymbolAttrName(),
-                     builder.getStringAttr(*name));
+                     declareSymbol(at, *name));
   Region *body = state.addRegion();
   auto *block = new Block();
   body->push_back(block);
@@ -640,6 +954,9 @@ LogicalResult Parser::parseSchedule() {
     block->addArgument(type, loc(at));
   state.addRegion(); // the condition, filled below if there is one
   Operation *schedule = builder.create(state);
+  schedules.try_emplace(*name);
+  for (auto &[param, type] : params)
+    schedules[*name].push_back(type);
 
   OpBuilder::InsertionGuard guard(builder);
   // The schedule's condition: a block of its own taking the parameters.
@@ -705,6 +1022,125 @@ LogicalResult Parser::parseSchedule() {
     return failure();
   ScheduleOp::ensureTerminator(schedule->getRegion(0), builder, loc(at));
   return success();
+}
+
+// world { statements }: the state the program starts with.
+LogicalResult Parser::parseWorld() {
+  llvm::SMLoc at = token.loc;
+  advance();
+  if (!current->worldSchedule.empty())
+    return error(at, "a module has one 'world'");
+  current->worldSchedule = current->prefix + kWorldSchedule.str();
+
+  OperationState state(loc(at), SystemOp::getOperationName());
+  state.addAttribute(SymbolTable::getSymbolAttrName(),
+                     declareSymbol(at, kWorldSystem));
+  state.addRegion()->push_back(new Block());
+  Operation *system = builder.create(state);
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToEnd(&system->getRegion(0).front());
+    ScopeGuard scope(*this);
+    if (failed(parseBlock()))
+      return failure();
+    SystemOp::ensureTerminator(system->getRegion(0), builder, loc(at));
+  }
+
+  OperationState scheduleState(loc(at), ScheduleOp::getOperationName());
+  scheduleState.addAttribute(SymbolTable::getSymbolAttrName(),
+                             declareSymbol(at, kWorldSchedule));
+  scheduleState.addRegion()->push_back(new Block());
+  scheduleState.addRegion();
+  Operation *schedule = builder.create(scheduleState);
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(&schedule->getRegion(0).front());
+  RunOp::create(builder, loc(at), symbol(kWorldSystem), ValueRange{});
+  ScheduleOp::ensureTerminator(schedule->getRegion(0), builder, loc(at));
+  return success();
+}
+
+// main { schedule(args) | loop { ... } [until cond] ... }
+LogicalResult Parser::parseMain() {
+  llvm::SMLoc at = token.loc;
+  advance();
+  if (hasMain)
+    return error(at, "a program has one 'main'");
+  hasMain = true;
+  OperationState state(loc(at), MainOp::getOperationName());
+  Region *body = state.addRegion();
+  body->push_back(new Block());
+  Operation *main = builder.create(state);
+
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(&main->getRegion(0).front());
+  ScopeGuard scope(*this);
+  if (failed(parseMainBlock()))
+    return failure();
+  MainOp::ensureTerminator(main->getRegion(0), builder, loc(at));
+  return success();
+}
+
+// { step* } of main or of a loop in it, at the builder's insertion point.
+LogicalResult Parser::parseMainBlock() {
+  if (failed(expect(Token::LBrace, "'{'")))
+    return failure();
+  while (!token.is(Token::RBrace)) {
+    llvm::SMLoc at = token.loc;
+    if (consumeKeyword("loop")) {
+      OperationState state(loc(at), LoopOp::getOperationName());
+      Region *body = state.addRegion();
+      body->push_back(new Block());
+      Operation *loop = builder.create(state);
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToEnd(&loop->getRegion(0).front());
+      if (failed(parseMainBlock()))
+        return failure();
+      // The condition is evaluated after the body, in the loop.
+      if (consumeKeyword("until")) {
+        FailureOr<ExprPtr> condition = parseExpr();
+        if (failed(condition))
+          return failure();
+        FailureOr<mlir::Value> value = emit(**condition, builder.getI1Type());
+        if (failed(value))
+          return failure();
+        if (!value->getType().isInteger(1))
+          return error((*condition)->loc, "an 'until' condition must be a "
+                                          "bool");
+        YieldOp::create(builder, loc((*condition)->loc), ValueRange{*value});
+      } else {
+        LoopOp::ensureTerminator(loop->getRegion(0), builder, loc(at));
+      }
+      consumeIf(Token::Semicolon);
+      continue;
+    }
+    FailureOr<std::string> schedule = identifier("a schedule to run or 'loop'");
+    if (failed(schedule) || failed(expect(Token::LParen, "'('")))
+      return failure();
+    auto known = schedules.find(*schedule);
+    if (known == schedules.end())
+      return error(at, "unknown schedule '" + *schedule +
+                           "'; 'main' runs schedules, declared before it");
+    SmallVector<mlir::Value> args;
+    while (!token.is(Token::RParen)) {
+      FailureOr<ExprPtr> arg = parseExpr();
+      if (failed(arg))
+        return failure();
+      Type expected = args.size() < known->second.size()
+                          ? known->second[args.size()]
+                          : Type();
+      FailureOr<mlir::Value> value = emit(**arg, expected);
+      if (failed(value))
+        return failure();
+      args.push_back(*value);
+      if (!consumeIf(Token::Comma))
+        break;
+    }
+    if (failed(expect(Token::RParen, "')'")))
+      return failure();
+    CallOp::create(builder, loc(at), symbol(*schedule), args);
+    consumeIf(Token::Semicolon);
+  }
+  return expect(Token::RBrace, "'}'");
 }
 
 //===----------------------------------------------------------------------===//
@@ -905,10 +1341,57 @@ LogicalResult Parser::parseConnect(llvm::SMLoc at) {
   return success();
 }
 
+// for i in a..b { statements }: i takes a, a + 1, ... b - 1, outside a
+// `for` over entities.
+LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
+  FailureOr<std::string> name = identifier("a name");
+  if (failed(name) || failed(expectKeyword("in")))
+    return failure();
+  FailureOr<ExprPtr> first = parseExpr();
+  if (failed(first) || failed(expect(Token::DotDot, "'..'")))
+    return failure();
+  FailureOr<ExprPtr> end = parseExpr();
+  if (failed(end))
+    return failure();
+  // Literal bounds take the other bound's type; two literals count in i32.
+  Type type = typeOf(**end);
+  if (!type)
+    type = typeOf(**first);
+  if (!type)
+    type = builder.getI32Type();
+  if (!type.isSignlessInteger() || type.isInteger(1))
+    return error((*first)->loc, "a 'for' counts over integers");
+  FailureOr<mlir::Value> low = emit(**first, type);
+  FailureOr<mlir::Value> high = emit(**end, type);
+  if (failed(low) || failed(high))
+    return failure();
+  if (low->getType() != type || high->getType() != type)
+    return error((*first)->loc, "the bounds of a 'for' must have the same "
+                                "integer type");
+  Location where = loc(at);
+  Type index = builder.getIndexType();
+  auto loop = scf::ForOp::create(
+      builder, where, arith::IndexCastOp::create(builder, where, index, *low),
+      arith::IndexCastOp::create(builder, where, index, *high),
+      arith::ConstantIndexOp::create(builder, where, 1));
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPoint(loop.getBody()->getTerminator());
+  ScopeGuard scope(*this);
+  bind(*name, Variable::ofValue(arith::IndexCastOp::create(
+                  builder, where, type, loop.getInductionVar())));
+  return parseBlock();
+}
+
 // for [e,] [p: [mut] P, ...] [with A, any(B, C)] [without D]
 //     [where cond] [on trigger, ...] { }
 LogicalResult Parser::parseFor() {
   llvm::SMLoc at = token.loc;
+  if (token.is(Token::Identifier) && peek().isKeyword("in")) {
+    if (inQuery)
+      return error(at, "a counted 'for' inside a 'for' over entities is not "
+                       "supported yet");
+    return parseCountedFor(at);
+  }
   if (inQuery)
     return parseEdges(at);
   if (!isa<SystemOp>(builder.getInsertionBlock()->getParentOp()))
@@ -1227,6 +1710,12 @@ LogicalResult Parser::emitAssignment(
     return error(value.loc, "value has a different type than the target");
   if (op == Token::Assign && !rule)
     return store(*rhs);
+  if (auto text = dyn_cast<TextType>(type)) {
+    // Joined, then cut to what the target holds.
+    if (op != Token::PlusAssign || rule)
+      return error(at, "a text can be assigned ('=') or added to ('+=')");
+    return store(textResize(loc(at), textConcat(at, load(), *rhs), text));
+  }
   mlir::Value old = load();
   if (rule)
     return store(combine(loc(at), *rule, old, *rhs));
@@ -1545,6 +2034,20 @@ FailureOr<ExprPtr> Parser::parseUnary() {
   FailureOr<ExprPtr> primary = parsePrimary();
   if (failed(primary))
     return failure();
+  // text[i]: one byte of a text.
+  while (token.is(Token::LBracket)) {
+    llvm::SMLoc at = token.loc;
+    advance();
+    FailureOr<ExprPtr> index = parseExpr();
+    if (failed(index) || failed(expect(Token::RBracket, "']'")))
+      return failure();
+    auto node = std::make_unique<Expr>();
+    node->kind = Expr::Index;
+    node->loc = at;
+    node->operands.push_back(std::move(*primary));
+    node->operands.push_back(std::move(*index));
+    primary = std::move(node);
+  }
   while (token.isKeyword("as")) {
     llvm::SMLoc at = token.loc;
     advance();
@@ -1636,8 +2139,40 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
       return failure();
     return inner;
   }
+  case Token::String:
+    return parseString();
+  case Token::Char: {
+    // 'a' or an escape: one byte.
+    StringRef rest = token.spelling.drop_front().drop_back();
+    char byte = 0;
+    if (rest.consume_front("\\")) {
+      FailureOr<char> escaped = parseEscape(rest, token.loc);
+      if (failed(escaped))
+        return failure();
+      byte = *escaped;
+    } else if (!rest.empty()) {
+      byte = rest.front();
+      rest = rest.drop_front();
+    } else {
+      return error("a character literal holds one byte");
+    }
+    if (!rest.empty())
+      return error("a character literal holds one byte; text is written "
+                   "in double quotes");
+    node->kind = Expr::Int;
+    node->isByte = true;
+    node->intValue = static_cast<unsigned char>(byte);
+    advance();
+    return node;
+  }
+  case Token::Error:
+    if (token.spelling.starts_with("\"") || token.spelling.starts_with("'"))
+      return error("this literal is not closed on its line");
+    [[fallthrough]];
   case Token::Identifier:
-    break;
+    if (token.is(Token::Identifier))
+      break;
+    [[fallthrough]];
   default:
     return error("expected an expression, found '" + token.spelling + "'");
   }
@@ -1732,8 +2267,22 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
 Type Parser::typeOf(const Expr &expr) {
   switch (expr.kind) {
   case Expr::Int:
+    return expr.isByte ? Type(builder.getIntegerType(8)) : Type();
   case Expr::Float:
+  case Expr::String:
     return {};
+  case Expr::Index:
+    return builder.getIntegerType(8);
+  case Expr::Format: {
+    Type type = typeOf(*expr.operands[0]);
+    if (!type)
+      type = defaultType(*expr.operands[0]);
+    if (isa<TextType>(type))
+      return type;
+    if (type.isInteger(1))
+      return TextType::get(context, 5);
+    return TextType::get(context, isa<FloatType>(type) ? 28 : 21);
+  }
   case Expr::Bool:
     return builder.getI1Type();
   case Expr::Name: {
@@ -1772,12 +2321,22 @@ Type Parser::typeOf(const Expr &expr) {
     case Token::AndAnd:
     case Token::OrOr:
       return builder.getI1Type();
-    default:
+    default: {
+      // Joining texts gives a text that holds both.
+      Type a = textTypeOf(*expr.operands[0]), b = textTypeOf(*expr.operands[1]);
+      if (expr.op == Token::Plus && a && b)
+        return TextType::get(
+            context, std::min<unsigned>(cast<TextType>(a).getCapacity() +
+                                            cast<TextType>(b).getCapacity(),
+                                        TextType::kMaxCapacity));
       if (Type type = typeOf(*expr.operands[0]))
         return type;
       return typeOf(*expr.operands[1]);
     }
+    }
   case Expr::Call:
+    if (expr.name == "len")
+      return builder.getI32Type();
     for (const ExprPtr &operand : expr.operands)
       if (Type type = typeOf(*operand))
         return type;
@@ -1808,9 +2367,65 @@ Type Parser::defaultType(const Expr &expr) {
 }
 
 FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
+  FailureOr<mlir::Value> value = emitRaw(expr, expected);
+  if (failed(value))
+    return failure();
+  // A text goes where a text of another capacity is expected: widened, or
+  // cut to what fits.
+  auto from = dyn_cast<TextType>(value->getType());
+  auto to = dyn_cast_or_null<TextType>(expected);
+  if (from && to && from != to)
+    return textResize(loc(expr.loc), *value, to);
+  return value;
+}
+
+FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   Location at = loc(expr.loc);
   switch (expr.kind) {
+  case Expr::String: {
+    // A literal takes the capacity it is put into, where it fits.
+    unsigned size = expr.name.size();
+    if (auto text = dyn_cast_or_null<TextType>(expected)) {
+      if (size > text.getCapacity())
+        return error(expr.loc, "this text has " + Twine(size) +
+                                   " bytes, but it is put into a text[" +
+                                   Twine(text.getCapacity()) + "]");
+      return textConstant(at, expr.name, text);
+    }
+    if (size > TextType::kMaxCapacity)
+      return error(expr.loc, "a text holds at most " +
+                                 Twine(unsigned(TextType::kMaxCapacity)) +
+                                 " bytes");
+    return textConstant(at, expr.name,
+                        TextType::get(context, std::max(size, 1u)));
+  }
+  case Expr::Index: {
+    Type textTy = textTypeOf(*expr.operands[0]);
+    if (!textTy)
+      return error(expr.loc, "only a text can be indexed");
+    FailureOr<mlir::Value> text = emit(*expr.operands[0], textTy);
+    Type indexTy = typeOf(*expr.operands[1]);
+    if (!indexTy)
+      indexTy = builder.getI32Type();
+    FailureOr<mlir::Value> index = emit(*expr.operands[1], indexTy);
+    if (failed(text) || failed(index))
+      return failure();
+    if (!index->getType().isSignlessInteger() || index->getType().isInteger(1))
+      return error(expr.operands[1]->loc, "an index is an integer");
+    return textIndex(at, *text, *index);
+  }
+  case Expr::Format: {
+    Type type = typeOf(*expr.operands[0]);
+    if (!type)
+      type = defaultType(*expr.operands[0]);
+    FailureOr<mlir::Value> value = emit(*expr.operands[0], type);
+    if (failed(value))
+      return failure();
+    return formatValue(expr.loc, *value);
+  }
   case Expr::Int: {
+    if (expr.isByte)
+      return integer(at, builder.getIntegerType(8), expr.intValue);
     Type type = expected ? expected : builder.getI32Type();
     if (isa<FloatType>(type))
       return arith::ConstantOp::create(
@@ -1916,10 +2531,21 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
   case Expr::Binary:
     return emitBinary(expr, expected);
   case Expr::Call: {
+    if (expr.name == "len") {
+      Type textTy = expr.operands.size() == 1
+                        ? textTypeOf(*expr.operands[0])
+                        : Type();
+      if (!textTy)
+        return error(expr.loc, "'len' takes one text");
+      FailureOr<mlir::Value> text = emit(*expr.operands[0], textTy);
+      if (failed(text))
+        return failure();
+      return textLength(at, *text);
+    }
     if (expr.name != "min" && expr.name != "max")
       return error(expr.loc, "unknown function '" + expr.name +
                                  "'; functions are not supported yet "
-                                 "(min and max are built in)");
+                                 "(min, max and len are built in)");
     if (expr.operands.size() != 2)
       return error(expr.loc, "'" + expr.name + "' takes two arguments");
     Type type = typeOf(expr);
@@ -1932,7 +2558,24 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
     return combine(at, expr.name, *a, *b);
   }
   case Expr::Cast: {
+    if (auto text = dyn_cast<TextType>(expr.castType)) {
+      // `as text[N]`: the same text, cut to N bytes if it is longer.
+      Type operand = textTypeOf(*expr.operands[0]);
+      if (!operand)
+        return error(expr.loc, "only a text can be cast to a text; a "
+                               "number is put into one with \"{value}\"");
+      FailureOr<mlir::Value> value = emit(*expr.operands[0], operand);
+      if (failed(value))
+        return failure();
+      return textResize(at, *value, text);
+    }
     Type from = typeOf(*expr.operands[0]);
+    // A literal is written in the type it is cast to (`5000000000 as i64`).
+    if (!from && (isa<FloatType>(expr.castType) ||
+                  (expr.castType.isSignlessInteger() &&
+                   !expr.castType.isInteger(1) &&
+                   !defaultType(*expr.operands[0]).isF32())))
+      from = expr.castType;
     if (!from)
       from = defaultType(*expr.operands[0]);
     FailureOr<mlir::Value> value = emit(*expr.operands[0], from);
@@ -2028,6 +2671,37 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
                : arith::OrIOp::create(builder, at, *a, *b).getResult();
   }
   bool comparison = precedenceOf(expr.op) == 3 || precedenceOf(expr.op) == 4;
+  Type leftText = textTypeOf(lhs), rightText = textTypeOf(rhs);
+  if (leftText || rightText) {
+    if (!leftText || !rightText)
+      return error(expr.loc, "a text is joined with and compared to texts; "
+                             "a number is put into one with \"{value}\"");
+    FailureOr<mlir::Value> a = emit(lhs, leftText);
+    FailureOr<mlir::Value> b = emit(rhs, rightText);
+    if (failed(a) || failed(b))
+      return failure();
+    if (expr.op == Token::Plus)
+      return textConcat(expr.loc, *a, *b);
+    if (expr.op != Token::Equal && expr.op != Token::NotEqual)
+      return error(expr.loc, "texts can be joined ('+') and compared with "
+                             "'==' and '!='");
+    // Bytes past the length are zero, so equal texts are equal integers,
+    // whatever their capacities.
+    mlir::Value x = textBits(at, *a), y = textBits(at, *b);
+    unsigned width = std::max(x.getType().getIntOrFloatBitWidth(),
+                              y.getType().getIntOrFloatBitWidth());
+    Type wide = builder.getIntegerType(width);
+    if (x.getType() != wide)
+      x = arith::ExtUIOp::create(builder, at, wide, x);
+    if (y.getType() != wide)
+      y = arith::ExtUIOp::create(builder, at, wide, y);
+    return arith::CmpIOp::create(builder, at,
+                                 expr.op == Token::Equal
+                                     ? arith::CmpIPredicate::eq
+                                     : arith::CmpIPredicate::ne,
+                                 x, y)
+        .getResult();
+  }
   Type type = typeOf(lhs);
   if (!type)
     type = typeOf(rhs);
@@ -2089,6 +2763,465 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
   if (isa<EntityType>(type))
     return error(expr.loc, "entities cannot be compared yet");
   return arith::CmpIOp::create(builder, at, predicate, *a, *b).getResult();
+}
+
+//===----------------------------------------------------------------------===//
+// Text
+//===----------------------------------------------------------------------===//
+
+// One escape after its backslash: n t r 0 \ " ' { } or xHH.
+FailureOr<char> Parser::parseEscape(StringRef &rest, llvm::SMLoc at) {
+  if (rest.empty())
+    return error(at, "a backslash needs a character after it");
+  char c = rest.front();
+  rest = rest.drop_front();
+  switch (c) {
+  case 'n':
+    return '\n';
+  case 't':
+    return '\t';
+  case 'r':
+    return '\r';
+  case '0':
+    return '\0';
+  case '\\':
+  case '"':
+  case '\'':
+  case '{':
+  case '}':
+    return c;
+  case 'x': {
+    unsigned value;
+    if (rest.size() < 2 || rest.take_front(2).getAsInteger(16, value))
+      return error(at, "'\\x' needs two hex digits");
+    rest = rest.drop_front(2);
+    return static_cast<char>(value);
+  }
+  default:
+    return error(at, "unknown escape '\\" + Twine(c) +
+                         "'; there are \\n \\t \\r \\0 \\\\ \\\" \\' \\{ \\} "
+                         "and \\xHH");
+  }
+}
+
+// "text {value} more": the pieces joined; a value in braces is put in as
+// text ("{x}" for a number, a bool or a text).
+FailureOr<ExprPtr> Parser::parseString() {
+  llvm::SMLoc at = token.loc;
+  StringRef rest = token.spelling.drop_front().drop_back();
+  SmallVector<ExprPtr> parts;
+  std::string bytes;
+  auto flush = [&](bool always) {
+    if (bytes.empty() && !always)
+      return;
+    auto node = std::make_unique<Expr>();
+    node->kind = Expr::String;
+    node->loc = at;
+    node->name = std::move(bytes);
+    bytes.clear();
+    parts.push_back(std::move(node));
+  };
+  while (!rest.empty()) {
+    char c = rest.front();
+    llvm::SMLoc here = llvm::SMLoc::getFromPointer(rest.data());
+    rest = rest.drop_front();
+    if (c == '\\') {
+      FailureOr<char> escaped = parseEscape(rest, here);
+      if (failed(escaped))
+        return failure();
+      bytes += *escaped;
+    } else if (c == '}') {
+      return error(here, "'}' without a '{' before it; write '\\}' for the "
+                         "character");
+    } else if (c == '{') {
+      size_t close = rest.find('}');
+      if (close == StringRef::npos)
+        return error(here, "'{' starts a value that '}' ends; write '\\{' "
+                           "for the character");
+      // The expression between the braces, parsed where it stands.
+      Lexer savedLexer = lexer;
+      Token savedToken = token;
+      lexer = Lexer(rest.take_front(close));
+      advance();
+      FailureOr<ExprPtr> value = parseExpr();
+      bool whole = token.is(Token::Eof);
+      lexer = savedLexer;
+      token = savedToken;
+      if (failed(value))
+        return failure();
+      if (!whole)
+        return error(here, "expected one expression between '{' and '}'");
+      rest = rest.drop_front(close + 1);
+      flush(/*always=*/false);
+      auto node = std::make_unique<Expr>();
+      node->kind = Expr::Format;
+      node->loc = here;
+      node->operands.push_back(std::move(*value));
+      parts.push_back(std::move(node));
+    } else {
+      bytes += c;
+    }
+  }
+  flush(/*always=*/parts.empty());
+  advance();
+  ExprPtr joined = std::move(parts.front());
+  for (ExprPtr &part : llvm::drop_begin(parts)) {
+    auto node = std::make_unique<Expr>();
+    node->kind = Expr::Binary;
+    node->loc = at;
+    node->op = Token::Plus;
+    node->operands.push_back(std::move(joined));
+    node->operands.push_back(std::move(part));
+    joined = std::move(node);
+  }
+  return joined;
+}
+
+/// The text type of `expr` if it is a text: for a literal the one that
+/// just holds it.
+Type Parser::textTypeOf(const Expr &expr) {
+  if (expr.kind == Expr::String)
+    return TextType::get(
+        context, std::clamp<unsigned>(expr.name.size(), 1,
+                                      TextType::kMaxCapacity));
+  Type type = typeOf(expr);
+  return type && isa<TextType>(type) ? type : Type();
+}
+
+mlir::Value Parser::integer(Location at, Type type, uint64_t value) {
+  return arith::ConstantOp::create(
+      builder, at,
+      IntegerAttr::get(type, APInt(type.getIntOrFloatBitWidth(), value)));
+}
+
+mlir::Value Parser::textBits(Location at, mlir::Value text) {
+  return UnrealizedConversionCastOp::create(
+             builder, at, cast<TextType>(text.getType()).getStorageType(),
+             text)
+      .getResult(0);
+}
+
+mlir::Value Parser::textFromBits(Location at, mlir::Value bits,
+                                 TextType type) {
+  return UnrealizedConversionCastOp::create(builder, at, type, bits)
+      .getResult(0);
+}
+
+mlir::Value Parser::textConstant(Location at, StringRef bytes, TextType type) {
+  IntegerType storage = type.getStorageType();
+  APInt value(storage.getWidth(), bytes.size());
+  for (auto [index, byte] : llvm::enumerate(bytes))
+    value.insertBits(static_cast<unsigned char>(byte), 16 + 8 * index, 8);
+  return textFromBits(
+      at, arith::ConstantOp::create(builder, at, IntegerAttr::get(storage, value)),
+      type);
+}
+
+/// `text` as a text of capacity `to`: the same bytes, or the first that
+/// fit.
+mlir::Value Parser::textResize(Location at, mlir::Value text, TextType to) {
+  auto from = cast<TextType>(text.getType());
+  if (from == to)
+    return text;
+  mlir::Value bits = textBits(at, text);
+  IntegerType wide = from.getStorageType(), target = to.getStorageType();
+  if (to.getCapacity() < from.getCapacity()) {
+    // Keep the bytes that fit and the smaller of the two lengths.
+    APInt keep = APInt::getLowBitsSet(wide.getWidth(),
+                                      16 + 8 * to.getCapacity());
+    keep.clearLowBits(16);
+    mlir::Value content = arith::AndIOp::create(
+        builder, at, bits,
+        arith::ConstantOp::create(builder, at, IntegerAttr::get(wide, keep)));
+    mlir::Value length = arith::AndIOp::create(builder, at, bits,
+                                               integer(at, wide, 0xFFFF));
+    length = arith::MinUIOp::create(builder, at, length,
+                                    integer(at, wide, to.getCapacity()));
+    bits = arith::OrIOp::create(builder, at, content, length);
+  }
+  if (target.getWidth() > wide.getWidth())
+    bits = arith::ExtUIOp::create(builder, at, target, bits);
+  else if (target.getWidth() < wide.getWidth())
+    bits = arith::TruncIOp::create(builder, at, target, bits);
+  return textFromBits(at, bits, to);
+}
+
+TextType Parser::textType(llvm::SMLoc at, unsigned capacity) {
+  if (capacity > TextType::kMaxCapacity) {
+    (void)error(at, "this text could have " + Twine(capacity) +
+                        " bytes; a text holds at most " +
+                        Twine(unsigned(TextType::kMaxCapacity)) +
+                        " (cut a part with 'as text[N]')");
+    capacity = TextType::kMaxCapacity;
+  }
+  return TextType::get(context, capacity);
+}
+
+/// `a` followed by `b`, in a text that holds both.
+mlir::Value Parser::textConcat(llvm::SMLoc where, mlir::Value a,
+                               mlir::Value b) {
+  Location at = loc(where);
+  TextType type =
+      textType(where, cast<TextType>(a.getType()).getCapacity() +
+                          cast<TextType>(b.getType()).getCapacity());
+  IntegerType wide = type.getStorageType();
+  auto widen = [&](mlir::Value text) {
+    mlir::Value bits = textBits(at, text);
+    if (bits.getType() != wide)
+      bits = arith::ExtUIOp::create(builder, at, wide, bits);
+    return bits;
+  };
+  mlir::Value x = widen(a), y = widen(b);
+  mlir::Value mask = integer(at, wide, 0xFFFF);
+  mlir::Value sixteen = integer(at, wide, 16);
+  mlir::Value lengthA = arith::AndIOp::create(builder, at, x, mask);
+  mlir::Value lengthB = arith::AndIOp::create(builder, at, y, mask);
+  // b's bytes move behind a's; the lengths add up.
+  mlir::Value bytesA = arith::SubIOp::create(builder, at, x, lengthA);
+  mlir::Value bytesB = arith::ShRUIOp::create(builder, at, y, sixteen);
+  mlir::Value shift = arith::AddIOp::create(
+      builder, at, sixteen,
+      arith::MulIOp::create(builder, at, lengthA, integer(at, wide, 8)));
+  bytesB = arith::ShLIOp::create(builder, at, bytesB, shift);
+  mlir::Value bits = arith::OrIOp::create(
+      builder, at, arith::OrIOp::create(builder, at, bytesA, bytesB),
+      arith::AddIOp::create(builder, at, lengthA, lengthB));
+  return textFromBits(at, bits, type);
+}
+
+mlir::Value Parser::textLength(Location at, mlir::Value text) {
+  mlir::Value length = arith::TruncIOp::create(
+      builder, at, builder.getIntegerType(16), textBits(at, text));
+  return arith::ExtUIOp::create(builder, at, builder.getI32Type(), length);
+}
+
+/// Byte `index` of `text`; 0 past its end.
+mlir::Value Parser::textIndex(Location at, mlir::Value text,
+                              mlir::Value index) {
+  auto type = cast<TextType>(text.getType());
+  IntegerType wide = type.getStorageType();
+  mlir::Value bits = textBits(at, text);
+  mlir::Value position =
+      arith::ExtSIOp::create(builder, at, builder.getI64Type(), index);
+  if (index.getType() == builder.getI64Type())
+    position = index;
+  // Bytes past the length are zero already; past the capacity (or below
+  // zero) there is nothing to shift to.
+  mlir::Value inside = arith::CmpIOp::create(
+      builder, at, arith::CmpIPredicate::ult, position,
+      integer(at, builder.getI64Type(), type.getCapacity()));
+  position = arith::SelectOp::create(builder, at, inside, position,
+                                     integer(at, builder.getI64Type(), 0));
+  mlir::Value shift = arith::AddIOp::create(
+      builder, at, integer(at, wide, 16),
+      arith::MulIOp::create(
+          builder, at, arith::ExtUIOp::create(builder, at, wide, position),
+          integer(at, wide, 8)));
+  mlir::Value byte = arith::TruncIOp::create(
+      builder, at, builder.getIntegerType(8),
+      arith::ShRUIOp::create(builder, at, bits, shift));
+  return arith::SelectOp::create(builder, at, inside, byte,
+                                 integer(at, builder.getIntegerType(8), 0));
+}
+
+/// The decimal digits of an unsigned 64-bit `magnitude`, as a text[20].
+mlir::Value Parser::formatUnsigned(Location at, mlir::Value magnitude) {
+  TextType type = TextType::get(context, 20);
+  IntegerType wide = type.getStorageType();
+  Type i64 = builder.getI64Type();
+  // How many digits: one, and one more for every power of ten reached.
+  mlir::Value count = integer(at, i64, 1);
+  uint64_t power = 1;
+  for (int k = 1; k < 20; ++k) {
+    power *= 10;
+    mlir::Value reached = arith::CmpIOp::create(
+        builder, at, arith::CmpIPredicate::uge, magnitude,
+        integer(at, i64, power));
+    count = arith::AddIOp::create(
+        builder, at, count, arith::ExtUIOp::create(builder, at, i64, reached));
+  }
+  // Digit k (from the right) goes to byte count - 1 - k.
+  mlir::Value bits = arith::ExtUIOp::create(builder, at, wide, count);
+  power = 1;
+  for (int k = 0; k < 20; ++k) {
+    mlir::Value digit = arith::RemUIOp::create(
+        builder, at,
+        arith::DivUIOp::create(builder, at, magnitude, integer(at, i64, power)),
+        integer(at, i64, 10));
+    mlir::Value character =
+        arith::AddIOp::create(builder, at, digit, integer(at, i64, '0'));
+    mlir::Value used = arith::CmpIOp::create(
+        builder, at, arith::CmpIPredicate::ult, integer(at, i64, k), count);
+    mlir::Value position = arith::SubIOp::create(
+        builder, at, count, integer(at, i64, k + 1));
+    position = arith::SelectOp::create(builder, at, used, position,
+                                       integer(at, i64, 0));
+    mlir::Value shift = arith::AddIOp::create(
+        builder, at, integer(at, wide, 16),
+        arith::MulIOp::create(
+            builder, at, arith::ExtUIOp::create(builder, at, wide, position),
+            integer(at, wide, 8)));
+    mlir::Value placed = arith::ShLIOp::create(
+        builder, at, arith::ExtUIOp::create(builder, at, wide, character),
+        shift);
+    placed = arith::SelectOp::create(builder, at, used, placed,
+                                     integer(at, wide, 0));
+    bits = arith::OrIOp::create(builder, at, bits, placed);
+    power *= 10;
+  }
+  return textFromBits(at, bits, type);
+}
+
+/// `value` as text: a text as it is, a bool as true or false, an integer
+/// in decimal, a float with up to six decimals.
+FailureOr<mlir::Value> Parser::formatValue(llvm::SMLoc where,
+                                           mlir::Value value) {
+  Location at = loc(where);
+  Type type = value.getType();
+  Type i64 = builder.getI64Type();
+  if (isa<TextType>(type))
+    return value;
+  auto choose = [&](mlir::Value condition, mlir::Value a, mlir::Value b) {
+    auto text = cast<TextType>(a.getType());
+    return textFromBits(at,
+                        arith::SelectOp::create(builder, at, condition,
+                                                textBits(at, a),
+                                                textBits(at, b)),
+                        text);
+  };
+  // "-" or nothing.
+  auto sign = [&](mlir::Value negative) {
+    TextType one = TextType::get(context, 1);
+    return choose(negative, textConstant(at, "-", one),
+                  textConstant(at, "", one));
+  };
+  if (type.isInteger(1)) {
+    TextType five = TextType::get(context, 5);
+    return choose(value, textConstant(at, "true", five),
+                  textConstant(at, "false", five));
+  }
+  if (type.isIntOrIndex()) {
+    mlir::Value wide = value;
+    if (type.isIndex())
+      wide = arith::IndexCastOp::create(builder, at, i64, value);
+    else if (type != i64)
+      wide = arith::ExtSIOp::create(builder, at, i64, value);
+    mlir::Value zero = integer(at, i64, 0);
+    mlir::Value negative = arith::CmpIOp::create(
+        builder, at, arith::CmpIPredicate::slt, wide, zero);
+    mlir::Value magnitude = arith::SelectOp::create(
+        builder, at, negative, arith::SubIOp::create(builder, at, zero, wide),
+        wide);
+    return textConcat(where, sign(negative), formatUnsigned(at, magnitude));
+  }
+  if (!isa<FloatType>(type))
+    return error(where, "this value has no text form; numbers, bools and "
+                        "texts do");
+
+  // A float: its sign, the digits before the point and up to six after
+  // it, rounded; without a fraction from 9e12 on; from 9e18 on "big", or
+  // "inf" for infinity; and "nan".
+  Type f64 = builder.getF64Type();
+  mlir::Value x = value;
+  if (type != f64)
+    x = arith::ExtFOp::create(builder, at, f64, value);
+  auto real = [&](double v) {
+    return arith::ConstantOp::create(builder, at, builder.getF64FloatAttr(v))
+        .getResult();
+  };
+  auto compare = [&](arith::CmpFPredicate predicate, mlir::Value a,
+                     mlir::Value b) {
+    return arith::CmpFOp::create(builder, at, predicate, a, b).getResult();
+  };
+  mlir::Value nan = compare(arith::CmpFPredicate::UNO, x, x);
+  mlir::Value negative = compare(arith::CmpFPredicate::OLT, x, real(0));
+  mlir::Value magnitude = arith::SelectOp::create(
+      builder, at, negative, arith::NegFOp::create(builder, at, x), x);
+  mlir::Value large = compare(arith::CmpFPredicate::OGE, magnitude, real(9e12));
+  mlir::Value beyond =
+      compare(arith::CmpFPredicate::OGE, magnitude, real(9e18));
+  mlir::Value infinite = compare(
+      arith::CmpFPredicate::OEQ, magnitude,
+      real(std::numeric_limits<double>::infinity()));
+  mlir::Value finite = compare(arith::CmpFPredicate::OLT, magnitude, real(9e18));
+  // Values the conversions below cannot take are replaced by zero; their
+  // result is not used.
+  mlir::Value small = compare(arith::CmpFPredicate::OLT, magnitude, real(9e12));
+  mlir::Value scaled = arith::FPToUIOp::create(
+      builder, at, i64,
+      arith::AddFOp::create(
+          builder, at,
+          arith::MulFOp::create(
+              builder, at,
+              arith::SelectOp::create(builder, at, small, magnitude, real(0)),
+              real(1e6)),
+          real(0.5)));
+  mlir::Value million = integer(at, i64, 1000000);
+  mlir::Value whole = arith::DivUIOp::create(builder, at, scaled, million);
+  mlir::Value fraction = arith::RemUIOp::create(builder, at, scaled, million);
+
+  // The fraction's six digits, of which the trailing zeros are dropped,
+  // but not the first.
+  TextType six = TextType::get(context, 6);
+  IntegerType sixBits = six.getStorageType();
+  mlir::Value kept = integer(at, i64, 1);
+  uint64_t power = 100000;
+  for (int digits = 2; digits <= 6; ++digits) {
+    mlir::Value nonzero = arith::CmpIOp::create(
+        builder, at, arith::CmpIPredicate::ne,
+        arith::RemUIOp::create(builder, at, fraction, integer(at, i64, power)),
+        integer(at, i64, 0));
+    kept = arith::SelectOp::create(builder, at, nonzero,
+                                   integer(at, i64, digits), kept);
+    power /= 10;
+  }
+  mlir::Value fractionBits = arith::ExtUIOp::create(builder, at, sixBits, kept);
+  power = 100000;
+  for (int j = 0; j < 6; ++j) {
+    mlir::Value digit = arith::RemUIOp::create(
+        builder, at,
+        arith::DivUIOp::create(builder, at, fraction, integer(at, i64, power)),
+        integer(at, i64, 10));
+    mlir::Value character = arith::ExtUIOp::create(
+        builder, at, sixBits,
+        arith::AddIOp::create(builder, at, digit, integer(at, i64, '0')));
+    mlir::Value placed = arith::ShLIOp::create(
+        builder, at, character, integer(at, sixBits, 16 + 8 * j));
+    mlir::Value used = arith::CmpIOp::create(
+        builder, at, arith::CmpIPredicate::ult, integer(at, i64, j), kept);
+    fractionBits = arith::OrIOp::create(
+        builder, at, fractionBits,
+        arith::SelectOp::create(builder, at, used, placed,
+                                integer(at, sixBits, 0)));
+    power /= 10;
+  }
+  mlir::Value minus = sign(negative);
+  mlir::Value fixed = textConcat(
+      where,
+      textConcat(where,
+                 textConcat(where, minus, formatUnsigned(at, whole)),
+                 textConstant(at, ".", TextType::get(context, 1))),
+      textFromBits(at, fractionBits, six));
+  auto result = cast<TextType>(fixed.getType());
+  // From 9e12 on a double has no six decimals left: digits only.
+  mlir::Value integral = arith::FPToUIOp::create(
+      builder, at, i64,
+      arith::SelectOp::create(
+          builder, at,
+          arith::AndIOp::create(builder, at, large, finite), magnitude,
+          real(0)));
+  mlir::Value digits = textResize(
+      at, textConcat(where, minus, formatUnsigned(at, integral)), result);
+  TextType three = TextType::get(context, 3);
+  mlir::Value beyondText = textResize(
+      at,
+      textConcat(where, minus,
+                 choose(infinite, textConstant(at, "inf", three),
+                        textConstant(at, "big", three))),
+      result);
+  mlir::Value text = choose(large, digits, fixed);
+  text = choose(beyond, beyondText, text);
+  return choose(nan, textConstant(at, "nan", result), text);
 }
 
 FailureOr<mlir::Value> Parser::emitIf(const Expr &expr, Type expected) {

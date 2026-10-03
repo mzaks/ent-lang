@@ -83,6 +83,109 @@ void mlir::ent::addConditionReads(Region &condition, SystemAccess &access) {
   });
 }
 
+/// The entity table, which maps ids to archetypes and rows: written by
+/// every structural change, read by every lookup.
+static Column entityTableColumn(MLIRContext *context) {
+  StringAttr empty = StringAttr::get(context, "");
+  return {StringAttr(), empty, empty};
+}
+
+/// Record that `stamp` is written for entities of `archetype`, if some
+/// reactive query observes it there.
+static void writeStamp(SystemAccess &access, const StampPlan &stamps,
+                       ArchetypeOp archetype, const Stamp &stamp) {
+  if (!stamps.stores(archetype, stamp))
+    return;
+  MLIRContext *context = archetype.getContext();
+  access.writes.insert({archetype.getSymNameAttr(), stamp.component,
+                        getStampColumnField(context, stamp)});
+  access.reads.insert({StringAttr(), StringAttr::get(context, ""),
+                       StringAttr::get(context, "ticks")});
+}
+
+/// A spawn or despawn changes which entities an archetype holds: it
+/// writes the count and, since rows are appended or moved, every column.
+static void writeStructure(SystemAccess &access, const StampPlan &stamps,
+                           ArchetypeOp archetype) {
+  MLIRContext *context = archetype.getContext();
+  StringAttr empty = StringAttr::get(context, "");
+  // Rows move with their stamps; a spawn or move stamps its row.
+  for (const Stamp &stamp : stamps.getStamps())
+    writeStamp(access, stamps, archetype, stamp);
+  access.writes.insert(entityTableColumn(context));
+  StringAttr name = archetype.getSymNameAttr();
+  access.writes.insert({name, empty, empty});
+  access.writes.insert({name, empty, StringAttr::get(context, "id")});
+  for (Attribute attr : archetype.getComponents()) {
+    auto component = cast<FlatSymbolRefAttr>(attr);
+    auto componentOp =
+        SymbolTable::lookupNearestSymbolFrom<ComponentOp>(archetype, component);
+    for (Attribute field : componentOp.getFieldNames())
+      access.writes.insert({name, component.getAttr(), cast<StringAttr>(field)});
+    if (archetype.isOptional(component))
+      access.writes.insert({name, component.getAttr(), empty});
+  }
+}
+
+SystemAccess mlir::ent::computeAccess(ExternOp external,
+                                      ArrayRef<ArchetypeOp> archetypes) {
+  SystemAccess access;
+  if (!external.hasContract()) {
+    access.opaqueOp = external;
+    return access;
+  }
+  MLIRContext *context = external.getContext();
+  StringAttr empty = StringAttr::get(context, "");
+  StampPlan stamps = StampPlan::compute(external->getParentOfType<ModuleOp>());
+
+  // Everything the header gives access to for a name: every field, in
+  // every archetype holding the component, with the rows' ids and count.
+  auto add = [&](FlatSymbolRefAttr ref, bool write) {
+    llvm::SetVector<Column> &into = write ? access.writes : access.reads;
+    Operation *target = SymbolTable::lookupNearestSymbolFrom(external, ref);
+    if (auto archetype = dyn_cast<ArchetypeOp>(target))
+      return writeStructure(access, stamps, archetype);
+    if (auto resource = dyn_cast<ResourceOp>(target)) {
+      for (Attribute field : resource.getFieldNames())
+        into.insert({StringAttr(), ref.getAttr(), cast<StringAttr>(field)});
+      return;
+    }
+    access.reads.insert(entityTableColumn(context));
+    if (auto relation = dyn_cast<RelationOp>(target)) {
+      into.insert({StringAttr(), ref.getAttr(), empty});
+      for (Attribute field : relation.getFieldNames())
+        into.insert({StringAttr(), ref.getAttr(), cast<StringAttr>(field)});
+      return;
+    }
+    auto component = cast<ComponentOp>(target);
+    for (ArchetypeOp archetype : archetypes) {
+      if (!archetype.contains(ref))
+        continue;
+      StringAttr name = archetype.getSymNameAttr();
+      access.reads.insert({name, empty, empty});
+      access.reads.insert({name, empty, StringAttr::get(context, "id")});
+      for (Attribute field : component.getFieldNames())
+        into.insert({name, ref.getAttr(), cast<StringAttr>(field)});
+      if (archetype.isOptional(ref))
+        into.insert({name, ref.getAttr(), empty});
+    }
+  };
+  if (ArrayAttr reads = external.getReadsAttr())
+    for (Attribute attr : reads)
+      add(cast<FlatSymbolRefAttr>(attr), /*write=*/false);
+  if (ArrayAttr writes = external.getWritesAttr())
+    for (Attribute attr : writes)
+      add(cast<FlatSymbolRefAttr>(attr), /*write=*/true);
+  return access;
+}
+
+SystemAccess mlir::ent::computeAccess(Operation *system,
+                                      ArrayRef<ArchetypeOp> archetypes) {
+  if (auto external = dyn_cast<ExternOp>(system))
+    return computeAccess(external, archetypes);
+  return computeAccess(cast<SystemOp>(system), archetypes);
+}
+
 SystemAccess mlir::ent::computeAccess(SystemOp system,
                                       ArrayRef<ArchetypeOp> archetypes) {
   SystemAccess access;
@@ -103,23 +206,15 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
   StringAttr empty = StringAttr::get(system.getContext(), "");
   StringAttr presence = empty;
 
-  // A spawn or despawn changes which entities an archetype holds: it
-  // writes the count and, since rows are appended or moved, every column.
   StringAttr idField = StringAttr::get(system.getContext(), "id");
-  // The entity table, which maps ids to archetypes and rows: written by
-  // every structural change, read by every lookup.
-  Column entityTable{StringAttr(), empty, empty};
+  Column entityTable = entityTableColumn(system.getContext());
   // Stamps some reactive query observes; ops that cause those events write
   // them and read the tick counter, reactive queries read them.
   MLIRContext *context = system.getContext();
   StampPlan stamps = StampPlan::compute(system->getParentOfType<ModuleOp>());
   Column ticks{StringAttr(), empty, StringAttr::get(context, "ticks")};
   auto writeStamp = [&](ArchetypeOp archetype, const Stamp &stamp) {
-    if (!stamps.stores(archetype, stamp))
-      return;
-    access.writes.insert({archetype.getSymNameAttr(), stamp.component,
-                          getStampColumnField(context, stamp)});
-    access.reads.insert(ticks);
+    ::writeStamp(access, stamps, archetype, stamp);
   };
   // A write to `field` of `component` (every field if `field` is null).
   auto writeChanged = [&](ArchetypeOp archetype, StringAttr component,
@@ -137,23 +232,7 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
   };
 
   auto writeStructure = [&](ArchetypeOp archetype) {
-    // Rows move with their stamps; a spawn or move stamps its row.
-    for (const Stamp &stamp : stamps.getStamps())
-      writeStamp(archetype, stamp);
-    access.writes.insert(entityTable);
-    StringAttr name = archetype.getSymNameAttr();
-    access.writes.insert({name, empty, empty});
-    access.writes.insert({name, empty, idField});
-    for (Attribute attr : archetype.getComponents()) {
-      auto component = cast<FlatSymbolRefAttr>(attr);
-      auto componentOp =
-          SymbolTable::lookupNearestSymbolFrom<ComponentOp>(system, component);
-      for (Attribute field : componentOp.getFieldNames())
-        access.writes.insert(
-            {name, component.getAttr(), cast<StringAttr>(field)});
-      if (archetype.isOptional(component))
-        access.writes.insert({name, component.getAttr(), presence});
-    }
+    ::writeStructure(access, stamps, archetype);
   };
 
   // A relation's fields are columns like a resource's, its sorted edges

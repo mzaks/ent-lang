@@ -18,7 +18,7 @@ everything it does to other entities or to the set of entities when it ends.
 | Query | One `ent.query`: its body for every entity it visits | **Yes: the commit point** |
 | System | Its queries and system-level ops, in program order | Only through its queries' ends |
 | Schedule | One call of a schedule: its runs, in program order | Yes: the frame boundary |
-| Host | The program around the schedule calls | — |
+| Host | The program around the schedule calls: `main`, or a C host | — |
 
 Stages, fusion and parallel loops are not levels: they are ways the compiler
 may execute a schedule, allowed only where they give the same result as the
@@ -179,6 +179,13 @@ along them are dropped (their target is dead).
 on them: the header's connect refuses an end without its component, and
 the host must not clear the presence of an end's component through the
 header while the entity has edges.
+
+## Extern systems and `main`
+
+An extern system is a run like any other: it sees what the runs before it
+committed, and what it does to the world through the header is there when
+it returns. `main` only calls schedules, so everything it reads (a loop's
+condition, a call's arguments) is read at a frame boundary.
 
 ## Defined against this model later
 

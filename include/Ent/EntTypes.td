@@ -31,4 +31,29 @@ def Ent_EntityType : Ent_Type<"Entity", "entity"> {
   }];
 }
 
+def Ent_TextType : Ent_Type<"Text", "text"> {
+  let summary = "Text or bytes of a fixed capacity, stored inline";
+  let description = [{
+    `!ent.text<30>` holds up to 30 bytes and how many it holds. It is a
+    plain value: stored in the column itself, copied whole, with no
+    lifetime. Its storage is one integer of `getStorageBytes()` bytes
+    (capacity plus a 16-bit length, rounded up to 16 bytes): the low 16
+    bits are the length, byte `i` sits at bits `16 + 8 * i`, and every
+    byte past the length is zero, so two texts are equal exactly when
+    their integers are. In memory (little-endian) that is the length
+    followed by the bytes.
+  }];
+  let parameters = (ins "unsigned":$capacity);
+  let assemblyFormat = "`<` $capacity `>`";
+  let extraClassDeclaration = [{
+    static constexpr unsigned kMaxCapacity = 4094;
+    unsigned getStorageBytes() const {
+      return (getCapacity() + 2 + 15) / 16 * 16;
+    }
+    ::mlir::IntegerType getStorageType() const {
+      return ::mlir::IntegerType::get(getContext(), getStorageBytes() * 8);
+    }
+  }];
+}
+
 #endif // ENT_TYPES

@@ -1,0 +1,50 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+// RUN: ent-translate --import-ent %s | ent-opt | FileCheck %s
+
+// CHECK: ent.component @Label (name: !ent.text<14>)
+component Label { name: text[14] }
+// CHECK: ent.resource @Title (value: !ent.text<30>)
+unique Title: text[30]
+unique Count: i32
+
+// CHECK-LABEL: ent.system @texts() {
+system texts() {
+  // A literal takes the capacity it is put into: one integer holding the
+  // length (2) and the bytes 'h' (0x68), 'i' (0x69) above it.
+  // CHECK:      %[[HI:.*]] = arith.constant 1768423426 : i256
+  // CHECK-NEXT: %[[TEXT:.*]] = builtin.unrealized_conversion_cast %[[HI]] : i256 to !ent.text<30>
+  // CHECK-NEXT: ent.write @Title "value", %[[TEXT]] : !ent.text<30>
+  Title = "hi"
+  // On its own it has its own length; an escape is one byte.
+  // CHECK:      arith.constant 173015042 : i128
+  // CHECK-NEXT: builtin.unrealized_conversion_cast %{{.*}} : i128 to !ent.text<2>
+  let local = "P\n"
+  // Compared as integers, widened to the wider of the two.
+  // CHECK:      %[[A:.*]] = builtin.unrealized_conversion_cast %{{.*}} : !ent.text<30> to i256
+  // CHECK:      %[[B:.*]] = builtin.unrealized_conversion_cast %{{.*}} : !ent.text<2> to i128
+  // CHECK-NEXT: %[[WIDE:.*]] = arith.extui %[[B]] : i128 to i256
+  // CHECK-NEXT: arith.cmpi eq, %[[A]], %[[WIDE]] : i256
+  let same = Title == local
+  // The length is the low 16 bits.
+  // CHECK:      %[[LENGTH:.*]] = arith.trunci %{{.*}} : i256 to i16
+  // CHECK-NEXT: arith.extui %[[LENGTH]] : i16 to i32
+  Count = len(Title)
+  // A character is a byte.
+  // CHECK:      arith.constant 97 : i8
+  let a = 'a'
+  // CHECK:      arith.constant 10 : i8
+  let newline = '\n'
+}
+
+// CHECK-LABEL: ent.system @fields() {
+system fields() {
+  for l: mut Label {
+    // A text goes into one of another capacity: here cut to 14 bytes.
+    // CHECK:      %[[TITLE:.*]] = ent.read @Title "value" : !ent.text<30>
+    // CHECK:      arith.minui
+    // CHECK:      %[[CUT:.*]] = arith.trunci %{{.*}} : i256 to i128
+    // CHECK-NEXT: %[[SHORT:.*]] = builtin.unrealized_conversion_cast %[[CUT]] : i128 to !ent.text<14>
+    // CHECK-NEXT: ent.set %{{.*}} "name", %[[SHORT]]
+    l.name = Title
+  }
+}

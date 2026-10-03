@@ -13,6 +13,8 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/FormatVariadic.h"
 
+#include <set>
+
 using namespace mlir;
 using namespace mlir::ent;
 
@@ -20,6 +22,11 @@ using namespace mlir::ent;
 static StringRef getCType(Type type) {
   if (isa<EntityType>(type))
     return "ent_entity";
+  if (auto text = dyn_cast<TextType>(type)) {
+    static llvm::StringSet<> names;
+    return names.insert(llvm::formatv("ent_text{0}", text.getCapacity()).str())
+        .first->getKey();
+  }
   if (isa<IndexType>(type))
     return "int64_t";
   if (auto integer = dyn_cast<IntegerType>(type)) {
@@ -99,6 +106,33 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
   os << "  return (ent_world *)arena;\n}\n\n"
         "static inline void ent_world_destroy(ent_world *world) { "
         "free(world); }\n";
+
+  // Texts: one struct per capacity some field has, laid out as the program
+  // stores them.
+  std::set<unsigned> textCapacities;
+  for (Operation &op : module.getOps())
+    if (isa<ComponentOp, ResourceOp, RelationOp>(op))
+      for (Type type : cast<ArrayAttr>(op.getAttr("field_types"))
+                           .getAsValueRange<TypeAttr>())
+        if (auto text = dyn_cast<TextType>(type))
+          textCapacities.insert(text.getCapacity());
+  if (!textCapacities.empty())
+    os << "\n// Texts: `length` bytes of `bytes` count, the rest are zero "
+          "(keep them\n// so when writing: equal texts are equal byte for "
+          "byte). Not terminated.\n";
+  for (unsigned capacity : textCapacities) {
+    unsigned bytes = TextType::get(module.getContext(), capacity)
+                         .getStorageBytes();
+    std::string padding;
+    if (bytes > capacity + 2)
+      padding = llvm::formatv("  char ent__padding[{0}];\n",
+                              bytes - capacity - 2);
+    os << llvm::formatv(
+        "typedef struct {{\n  uint16_t length;\n  char bytes[{0}];\n{1}"
+        "} ent_text{0};\n"
+        "_Static_assert(sizeof(ent_text{0}) == {2}, \"text layout\");\n",
+        capacity, padding, bytes);
+  }
 
   // Entity ids, as EntityScheme chose them. The functions below do exactly
   // what the lowered program does.
@@ -460,7 +494,9 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "memref descriptor.\n"
         "typedef struct {\n  char *allocated;\n  char *aligned;\n"
         "  int64_t offset;\n  int64_t size;\n  int64_t stride;\n"
-        "} ent_arena_descriptor;\n";
+        "} ent_arena_descriptor;\n"
+        "#ifdef __APPLE__\n#define ENT__SYMBOL(name) __asm__(\"_\" name)\n"
+        "#else\n#define ENT__SYMBOL(name) __asm__(name)\n#endif\n";
   for (ScheduleOp schedule : module.getOps<ScheduleOp>()) {
     std::string name = toIdentifier(schedule.getSymName());
     if (failed(claim(schedule, name)))
@@ -468,6 +504,11 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     SmallVector<std::string> params, args;
     for (BlockArgument arg : schedule.getBody().getArguments()) {
       StringRef cType = getCType(arg.getType());
+      if (isa<TextType>(arg.getType()))
+        return schedule.emitError("parameter #")
+               << arg.getArgNumber()
+               << " is a text, which a C host cannot pass yet; put it in a "
+                  "resource the schedule's systems read";
       if (cType.empty())
         return schedule.emitError("parameter #")
                << arg.getArgNumber() << " has type " << arg.getType()
@@ -480,16 +521,48 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
       declParams += param + ", ";
       callArgs += arg + ", ";
     }
+    // The lowered function is named after the schedule; where that is no
+    // C name (a module's schedule, `m.frame`), it is declared under one
+    // and bound to the symbol.
+    std::string label;
+    if (name != schedule.getSymName())
+      label = llvm::formatv(" ENT__SYMBOL(\"_mlir_ciface_{0}\")",
+                            schedule.getSymName());
     os << llvm::formatv("\nvoid _mlir_ciface_{0}({1}ent_arena_descriptor "
-                        "*world);\n",
-                        schedule.getSymName(), declParams);
+                        "*world){2};\n",
+                        name, declParams, label);
     os << llvm::formatv(
         "static inline void ent_{0}(ent_world *world{1}{2}) {{\n"
         "  ent_arena_descriptor arena = {{(char *)world, (char *)world, 0,\n"
         "                                 ENT_WORLD_BYTES, 1};\n"
-        "  _mlir_ciface_{3}({4}&arena);\n}\n",
+        "  _mlir_ciface_{0}({3}&arena);\n}\n",
         name, params.empty() ? "" : ", ", llvm::join(params, ", "),
-        schedule.getSymName(), callArgs);
+        callArgs);
+  }
+
+  // Extern systems: C functions the lowered schedules call. Their names
+  // share the header's `ent_` prefix with the accessors above.
+  bool anyExtern = false;
+  for (ExternOp external : module.getOps<ExternOp>()) {
+    if (failed(claim(external, external.getCName())))
+      return failure();
+    if (!anyExtern)
+      os << "\n// Extern systems. The program calls these when a schedule "
+            "runs them;\n// define each one, working on the world through "
+            "this header.\n";
+    anyExtern = true;
+    std::string params;
+    for (auto [index, type] :
+         llvm::enumerate(external.getParams().getAsValueRange<TypeAttr>())) {
+      StringRef cType = getCType(type);
+      if (cType.empty())
+        return external.emitError("parameter #")
+               << index << " has type " << type
+               << ", which has no C equivalent here";
+      params += llvm::formatv(", {0} arg{1}", cType, index).str();
+    }
+    os << llvm::formatv("void {0}(ent_world *world{1});\n",
+                        external.getCName(), params);
   }
 
   os << "\n#endif // ENT_GENERATED_WORLD_H\n";

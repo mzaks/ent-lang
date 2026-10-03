@@ -1,0 +1,36 @@
+// Extern systems end to end, in a program with its own entry point: they
+// take parameters (a bool among them), spawn and read and write the world
+// through the generated header, run under a condition, and one of them
+// decides when the loop ends.
+unique Clock { frame: i32 }
+unique Console { lines: i32 }
+unique Done: bool
+component Position { x: f32 }
+archetype Rock { Position } capacity 8
+
+extern system load(n: i32, first: f32) writes Rock
+extern system show(verbose: bool, scale: f32) reads Position, Clock writes Console
+extern system decide(limit: i32) reads Clock writes Done
+
+system drift() {
+  for p: mut Position { p.x += 1.0 }
+}
+
+system tick() {
+  Clock.frame += 1
+}
+
+schedule setup() { load(3, 10.0) }
+
+schedule frame(verbose: bool) {
+  drift()
+  tick()
+  show(verbose, 2.0) run_if Clock.frame != 2
+  decide(3)
+}
+
+main {
+  setup()
+  loop { frame(true) } until Done
+  frame(false)
+}

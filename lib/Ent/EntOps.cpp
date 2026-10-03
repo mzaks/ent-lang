@@ -58,6 +58,29 @@ static void printRule(OpAsmPrinter &p, Operation *, StringAttr rule) {
   p << rule.getValue();
 }
 
+// `f32, i64`: the parameter types of ent.extern, possibly none.
+static ParseResult parseParamTypes(OpAsmParser &parser, ArrayAttr &params) {
+  SmallVector<Type> types;
+  Type type;
+  OptionalParseResult first = parser.parseOptionalType(type);
+  if (first.has_value()) {
+    if (failed(*first))
+      return failure();
+    types.push_back(type);
+    while (succeeded(parser.parseOptionalComma())) {
+      if (parser.parseType(type))
+        return failure();
+      types.push_back(type);
+    }
+  }
+  params = parser.getBuilder().getTypeArrayAttr(types);
+  return success();
+}
+
+static void printParamTypes(OpAsmPrinter &p, Operation *, ArrayAttr params) {
+  llvm::interleaveComma(params.getAsValueRange<TypeAttr>(), p);
+}
+
 #define GET_OP_CLASSES
 #include "Ent/EntOps.cpp.inc"
 
@@ -253,11 +276,17 @@ static LogicalResult verifyRecord(Operation *op, ArrayAttr names,
     // per field, which needs every field to be a plain value. An entity id
     // is one too (a relation).
     Type type = cast<TypeAttr>(typeAttr).getValue();
-    if (!isa<IntegerType, FloatType, IndexType, EntityType>(type))
+    if (!isa<IntegerType, FloatType, IndexType, EntityType, TextType>(type))
       return op->emitOpError("field '")
              << name << "' has type " << type
-             << "; only integer, float, index and entity fields are "
+             << "; only integer, float, index, entity and text fields are "
                 "supported";
+    if (auto text = dyn_cast<TextType>(type))
+      if (text.getCapacity() == 0 || text.getCapacity() > TextType::kMaxCapacity)
+        return op->emitOpError("field '")
+               << name << "' is a text of capacity " << text.getCapacity()
+               << "; a text holds 1 to " << TextType::kMaxCapacity
+               << " bytes";
   }
   return success();
 }
@@ -416,22 +445,21 @@ void SystemOp::print(OpAsmPrinter &p) {
   printBody(p, getBody());
 }
 
-LogicalResult SystemOp::verify() {
-  if (failed(verifyNoRefParams(*this, getBody())))
-    return failure();
-
+/// The `reads` and `writes` lists of a system or an extern system: flat
+/// symbol references, none twice.
+static LogicalResult verifyAccessLists(Operation *op, ArrayAttr reads,
+                                       ArrayAttr writes) {
   llvm::SmallPtrSet<Attribute, 8> seen;
-  for (auto [listName, list] :
-       {std::pair<StringRef, ArrayAttr>{"reads", getReadsAttr()},
-        std::pair<StringRef, ArrayAttr>{"writes", getWritesAttr()}}) {
+  for (auto [listName, list] : {std::pair<StringRef, ArrayAttr>{"reads", reads},
+                                std::pair<StringRef, ArrayAttr>{"writes", writes}}) {
     if (!list)
       continue;
     for (Attribute attr : list) {
       if (!isa<FlatSymbolRefAttr>(attr))
-        return emitOpError("'") << listName << "' entry " << attr
-                                << " must be a flat symbol reference";
+        return op->emitOpError("'") << listName << "' entry " << attr
+                                    << " must be a flat symbol reference";
       if (!seen.insert(attr).second)
-        return emitOpError("lists ")
+        return op->emitOpError("lists ")
                << attr
                << " more than once; 'writes' already implies read access";
     }
@@ -439,27 +467,41 @@ LogicalResult SystemOp::verify() {
   return success();
 }
 
-LogicalResult SystemOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  for (ArrayAttr list : {getReadsAttr(), getWritesAttr()}) {
+/// What those lists may name.
+static LogicalResult verifyAccessSymbols(SymbolTableCollection &symbolTable,
+                                         Operation *op, ArrayAttr reads,
+                                         ArrayAttr writes) {
+  for (ArrayAttr list : {reads, writes}) {
     if (!list)
       continue;
     for (Attribute attr : list) {
       auto ref = cast<FlatSymbolRefAttr>(attr);
-      Operation *target = symbolTable.lookupNearestSymbolFrom(*this, ref);
+      Operation *target = symbolTable.lookupNearestSymbolFrom(op, ref);
       if (!isa_and_nonnull<ComponentOp, ResourceOp, ArchetypeOp, RelationOp>(
               target))
-        return emitOpError("declares access to unknown component, resource, "
-                           "relation "
-                           "or archetype ")
+        return op->emitOpError("declares access to unknown component, "
+                               "resource, relation "
+                               "or archetype ")
                << ref;
-      if (isa<ArchetypeOp>(target) && list == getReadsAttr())
-        return emitOpError("lists archetype ")
+      if (isa<ArchetypeOp>(target) && list == reads)
+        return op->emitOpError("lists archetype ")
                << ref
                << " in 'reads'; archetypes are declared in 'writes', by "
                   "systems that spawn or despawn their entities";
     }
   }
   return success();
+}
+
+LogicalResult SystemOp::verify() {
+  if (failed(verifyNoRefParams(*this, getBody())))
+    return failure();
+  return verifyAccessLists(*this, getReadsAttr(), getWritesAttr());
+}
+
+LogicalResult SystemOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifyAccessSymbols(symbolTable, *this, getReadsAttr(),
+                             getWritesAttr());
 }
 
 bool SystemOp::hasContract() { return getReadsAttr() || getWritesAttr(); }
@@ -525,6 +567,88 @@ LogicalResult ScheduleOp::verify() {
       condition.front().getArgumentTypes() != getBody().getArgumentTypes())
     return emitOpError("condition must take the schedule's parameters");
   return verifyCondition(*this, condition);
+}
+
+//===----------------------------------------------------------------------===//
+// ExternOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ExternOp::verify() {
+  for (auto [index, type] :
+       llvm::enumerate(getParams().getAsValueRange<TypeAttr>())) {
+    if (isa<RefType>(type))
+      return emitOpError("parameter #")
+             << index
+             << " is a component reference; references can only be bound "
+                "by 'ent.query'";
+    if (isa<TextType>(type))
+      return emitOpError("parameter #")
+             << index
+             << " is a text, which cannot be passed to C yet; put it in a "
+                "component or resource the system reads";
+  }
+  return verifyAccessLists(*this, getReadsAttr(), getWritesAttr());
+}
+
+LogicalResult ExternOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifyAccessSymbols(symbolTable, *this, getReadsAttr(),
+                             getWritesAttr());
+}
+
+//===----------------------------------------------------------------------===//
+// MainOp, CallOp, LoopOp
+//===----------------------------------------------------------------------===//
+
+/// The body of the entry point or of a loop in it: schedule calls, loops,
+/// resource reads and ops free of side effects.
+static LogicalResult verifyEntryBody(Block &body) {
+  for (Operation &op : body.without_terminator()) {
+    if (isa<CallOp, LoopOp, ReadOp>(op))
+      continue;
+    if (op.getNumRegions() == 0 && isMemoryEffectFree(&op))
+      continue;
+    return op.emitOpError("is not allowed in 'ent.main'; the entry point "
+                          "calls schedules, loops, reads resources and "
+                          "computes with ops free of side effects");
+  }
+  return success();
+}
+
+LogicalResult MainOp::verify() {
+  for (Operation *op = getOperation()->getPrevNode(); op;
+       op = op->getPrevNode())
+    if (isa<MainOp>(op)) {
+      InFlightDiagnostic diag =
+          emitOpError("is the second entry point; a program has one");
+      diag.attachNote(op->getLoc()) << "the other is here";
+      return diag;
+    }
+  if (cast<YieldOp>(getBody().front().getTerminator()).getNumOperands() != 0)
+    return emitOpError("body must not yield a value");
+  return verifyEntryBody(getBody().front());
+}
+
+LogicalResult LoopOp::verify() {
+  auto yield = cast<YieldOp>(getBody().front().getTerminator());
+  if (yield.getNumOperands() > 1 ||
+      (yield.getNumOperands() == 1 &&
+       !yield.getResults()[0].getType().isInteger(1)))
+    return emitOpError("body must end in 'ent.yield' of nothing (repeat "
+                       "forever) or of an i1 (stop if true)");
+  return verifyEntryBody(getBody().front());
+}
+
+LogicalResult CallOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto schedule =
+      symbolTable.lookupNearestSymbolFrom<ScheduleOp>(*this, getScheduleAttr());
+  if (!schedule)
+    return emitOpError("references unknown schedule ") << getScheduleAttr();
+  TypeRange params = schedule.getBody().getArgumentTypes();
+  if (params != getArgs().getTypes())
+    return emitOpError("argument types (")
+           << getArgs().getTypes() << ") do not match the parameters ("
+           << params << ") of schedule " << getScheduleAttr();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1431,8 +1555,10 @@ LogicalResult ReadOp::verify() {
   auto schedule = dyn_cast<ScheduleOp>(region->getParentOp());
   if (!(*this)->getParentOfType<SystemOp>() &&
       !(*this)->getParentOfType<RunOp>() &&
+      !(*this)->getParentOfType<MainOp>() &&
       !(schedule && region == &schedule.getCondition()))
-    return emitOpError("must be inside an 'ent.system' or a condition");
+    return emitOpError("must be inside an 'ent.system', a condition or "
+                       "'ent.main'");
   return success();
 }
 
@@ -1525,13 +1651,17 @@ LogicalResult RunOp::verify() {
 }
 
 LogicalResult RunOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  auto system =
-      symbolTable.lookupNearestSymbolFrom<SystemOp>(*this, getSystemAttr());
-  if (!system)
+  Operation *callee =
+      symbolTable.lookupNearestSymbolFrom(*this, getSystemAttr());
+  SmallVector<Type> params;
+  if (auto system = dyn_cast_or_null<SystemOp>(callee))
+    llvm::append_range(params, system.getBody().getArgumentTypes());
+  else if (auto external = dyn_cast_or_null<ExternOp>(callee))
+    llvm::append_range(params, external.getParams().getAsValueRange<TypeAttr>());
+  else
     return emitOpError("references unknown system ") << getSystemAttr();
 
-  TypeRange params = system.getBody().getArgumentTypes();
-  if (params != getArgs().getTypes())
+  if (TypeRange(params) != getArgs().getTypes())
     return emitOpError("argument types (")
            << getArgs().getTypes() << ") do not match the parameters ("
            << params << ") of system " << getSystemAttr();

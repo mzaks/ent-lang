@@ -15,6 +15,7 @@ add_mlir_library(MLIREntTransforms
   MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRFuncTransforms
+  MLIRLLVMDialect
   MLIRMemRefDialect
   MLIROpenMPDialect
   MLIRSCFDialect

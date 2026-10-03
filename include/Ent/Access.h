@@ -57,6 +57,17 @@ struct SystemAccess {
 /// Computes the access of `system` against the module's archetypes.
 SystemAccess computeAccess(SystemOp system, ArrayRef<ArchetypeOp> archetypes);
 
+/// The access of an extern system is what it declares: every field of the
+/// components, resources and relations it lists, in every archetype
+/// holding them, and the set of entities of the archetypes in `writes`.
+/// Without a declaration it is opaque.
+SystemAccess computeAccess(ExternOp external,
+                           ArrayRef<ArchetypeOp> archetypes);
+
+/// Either, for the op a run names.
+SystemAccess computeAccess(Operation *system,
+                           ArrayRef<ArchetypeOp> archetypes);
+
 /// Adds what a run's or schedule's condition reads (resource fields) to
 /// `access`: a run reads them right before its system starts.
 void addConditionReads(Region &condition, SystemAccess &access);

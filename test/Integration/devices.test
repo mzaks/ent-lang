@@ -1,0 +1,28 @@
+// The devices that come with the compiler (devices/), through the build
+// driver (tools/ent): a program of .ent files only. The driver finds the
+// modules, compiles their C against the program's header, and runs it.
+// RUN: %ent run %S/Inputs/devices.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/devices.ent | FileCheck %s
+// RUN: %ent build %S/Inputs/devices.ent -o %t.exe --keep %t.dir
+// RUN: %t.exe | FileCheck %s
+// RUN: ls %t.dir | FileCheck %s --check-prefix=KEPT
+
+// Lines come out in the order they were spawned, once each.
+// CHECK:      start 0.0 step 0.0
+// CHECK-NEXT: frame 1
+// CHECK-NEXT:   with a second line
+// CHECK-NEXT: frame 2
+// CHECK-NEXT:   with a second line
+// CHECK-NEXT: frame 3
+// CHECK-NEXT:   with a second line
+// CHECK-NEXT: early 0 backwards 0
+// CHECK-NOT:  {{.}}
+
+// KEPT-DAG: ent_world.h
+// KEPT-DAG: devices.mlir
+
+// The hello example.
+// RUN: %ent run %S/../../examples/hello.ent | FileCheck %s --check-prefix=HELLO
+// HELLO:      hello from frame 1
+// HELLO:      hello from frame 5
+// HELLO-NOT:  late

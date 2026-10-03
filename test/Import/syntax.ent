@@ -211,3 +211,48 @@ schedule gated(dt: f32) run_if dt > 0.0 {
   step(dt) run_if Clock.frame < 100
   filters()
 }
+
+// An extern system has no body; its contract is its access. `;` may end it.
+// CHECK: ent.extern @draw(f32, i1) reads [@Position] writes [@Score]
+extern system draw(dt: f32, on: bool) reads Position writes Score
+// CHECK: ent.extern @beep()
+extern system beep();
+// CHECK: ent.extern @load() writes [@Unit]
+extern system load() writes Unit
+
+// CHECK-LABEL: ent.schedule @present(%{{.*}}: f32) {
+// CHECK-NEXT:   %[[ON:.*]] = arith.constant true
+// CHECK-NEXT:   ent.run @draw(%{{.*}}, %[[ON]]) : f32, i1
+// CHECK-NEXT:   ent.run @beep()
+schedule present(dt: f32) {
+  draw(dt, true)
+  beep()
+}
+schedule boot() { load() }
+
+// The entry point: schedules in order, `loop` repeating until a condition
+// that is evaluated after each round; arguments are expressions over
+// uniques.
+// CHECK-LABEL: ent.main {
+// CHECK-NEXT:   ent.call @boot()
+// CHECK-NEXT:   ent.loop {
+// CHECK-NEXT:     %[[DT:.*]] = ent.read @Clock "dt" : f32
+// CHECK-NEXT:     ent.call @present(%[[DT]]) : f32
+// CHECK-NEXT:     ent.loop {
+// CHECK-NEXT:       ent.call @boot()
+// CHECK-NEXT:     }
+// CHECK-NEXT:     %[[FRAME:.*]] = ent.read @Clock "frame" : i64
+// CHECK-NEXT:     %[[LAST:.*]] = arith.constant 8 : i64
+// CHECK-NEXT:     %[[DONE:.*]] = arith.cmpi sge, %[[FRAME]], %[[LAST]] : i64
+// CHECK-NEXT:     ent.yield %[[DONE]] : i1
+// CHECK-NEXT:   }
+// CHECK-NEXT:   ent.call @boot()
+// CHECK-NEXT: }
+main {
+  boot()
+  loop {
+    present(Clock.dt)
+    loop { boot() }
+  } until Clock.frame >= 8
+  boot()
+}

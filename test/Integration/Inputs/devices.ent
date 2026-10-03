@@ -1,0 +1,44 @@
+// The console and the clock, used by a program without C of its own.
+import console
+import clock
+
+unique Checked { late: i32, backwards: i32 }
+
+world {
+  FrameRate = 200.0
+}
+
+system report() {
+  // The first tick is time 0 and has no step; later ones are a period
+  // apart or more (the clock waits, it never runs ahead).
+  if Time.frame == 1 {
+    spawn { Print { line: "start {Time.now} step {Time.dt}" } }
+  } else {
+    if Time.now < ((Time.frame - 1) as f64) * 0.005 { Checked.late += 1 }
+    if Time.dt <= 0.0 { Checked.backwards += 1 }
+  }
+  spawn { Print { line: "frame {Time.frame}" } }
+  spawn { Print { line: "  with a second line" } }
+}
+
+system sum() {
+  spawn { Print { line: "early {Checked.late} backwards {Checked.backwards}" } }
+}
+
+schedule frame() {
+  tick()
+  report()
+  write()
+  clear()
+}
+
+schedule end() {
+  sum()
+  write()
+  clear()
+}
+
+main {
+  loop { frame() } until Time.frame == 3
+  end()
+}

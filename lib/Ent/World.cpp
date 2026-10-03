@@ -10,6 +10,8 @@ using namespace mlir::ent;
 uint64_t mlir::ent::getStorageBytes(Type type) {
   if (isa<IndexType, EntityType>(type))
     return 8;
+  if (auto text = dyn_cast<TextType>(type))
+    return text.getStorageBytes();
   if (auto integer = dyn_cast<IntegerType>(type)) {
     switch (integer.getWidth()) {
     case 1:

@@ -1,0 +1,57 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+// RUN: ent-translate --import-ent %s | ent-opt | FileCheck %s
+// A C host sets the world up through the header.
+// RUN: ent-translate --import-ent %s | ent-translate --ent-to-c-header \
+// RUN:   | FileCheck %s --check-prefix=HEADER
+
+component Position { x: f32 } capacity 64
+unique Clock { dt: f32, count: i64 }
+
+// A system counts too, outside its queries.
+// CHECK-LABEL: ent.system @burst(%{{.*}}: i32) {
+// CHECK:        scf.for
+// CHECK:          ent.spawn
+system burst(n: i32) {
+  for i in 0..n { spawn { Position { x: 0.0 } } }
+}
+
+schedule frame() {
+  burst(2)
+}
+
+// `main` may come before `world`: the world is still set up before its
+// first step.
+// CHECK-LABEL: ent.main {
+// CHECK-NEXT:   ent.call @world_init()
+// CHECK-NEXT:   ent.call @frame()
+main {
+  frame()
+}
+
+// The world's statements are a system, run by a schedule of its own.
+// CHECK-LABEL: ent.system @world_setup() {
+// CHECK:        ent.write @Clock "dt", %{{.*}} : f32
+world {
+  Clock.dt = 0.25
+  // A counted loop: the bounds are cast to index, the counter back to the
+  // bounds' type, here the unique's.
+  // CHECK:        %[[LOW:.*]] = arith.index_cast %{{.*}} : i64 to index
+  // CHECK-NEXT:   %[[HIGH:.*]] = arith.index_cast %{{.*}} : i64 to index
+  // CHECK:        scf.for %[[I:.*]] = %[[LOW]] to %[[HIGH]] step
+  // CHECK-NEXT:     %[[N:.*]] = arith.index_cast %[[I]] : index to i64
+  // CHECK-NEXT:     %[[X:.*]] = arith.sitofp %[[N]] : i64 to f32
+  // CHECK-NEXT:     ent.spawn (@Position)(%[[X]]) : f32
+  for i in 1..Clock.count {
+    spawn { Position { x: i as f32 } }
+    // Loops nest; two literal bounds count in i32.
+    // CHECK:        scf.for %[[J:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK-NEXT:     %{{.*}} = arith.index_cast %[[J]] : index to i32
+    for j in 0..2 {
+      if j == 1 { Clock.count += 1 }
+    }
+  }
+}
+// CHECK-LABEL: ent.schedule @world_init() {
+// CHECK-NEXT:   ent.run @world_setup()
+
+// HEADER: static inline void ent_world_init(ent_world *world) {

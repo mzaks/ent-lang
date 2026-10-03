@@ -1,0 +1,68 @@
+// examples/bullets.ent as a program of its own: no C host. `world` is the
+// state it starts with, `main` says which schedules run and when, and the
+// one thing the language cannot do yet, printing, is an extern system,
+// implemented in C (examples/extern/bullets_report.c) against the
+// generated header.
+component Position { x: f32 }
+component Velocity { dx: f32 } capacity 64
+component Cooldown { seconds: f32, period: f32 }
+component Lifetime { seconds: f32 } capacity 64
+unique Clock { frame: i32 }
+
+archetype Gun { Position, Cooldown } capacity 4
+
+// Two guns, 100 apart; the second starts half a period late.
+world {
+  for i in 0..2 {
+    spawn {
+      Position { x: i as f32 * 100.0 },
+      Cooldown { seconds: i as f32 * 0.5, period: 1.0 }
+    }
+  }
+}
+
+system shoot(dt: f32) {
+  for p: Position, c: mut Cooldown {
+    let left = c.seconds - dt
+    if left <= 0.0 {
+      spawn { Position { x: p.x }, Velocity { dx: 10.0 }, Lifetime { seconds: 1.0 } }
+      c.seconds = left + c.period
+    } else {
+      c.seconds = left
+    }
+  }
+}
+
+system fly(dt: f32) {
+  for p: mut Position, v: Velocity {
+    p.x += v.dx * dt
+  }
+}
+
+system expire(dt: f32) {
+  for e, l: mut Lifetime {
+    l.seconds -= dt
+    if l.seconds <= 0.0 { e.destroy() }
+  }
+}
+
+system tick() {
+  Clock.frame += 1
+}
+
+// Prints every gun's cooldown and every live bullet.
+extern system report() reads Position, Cooldown, Lifetime
+
+schedule frame(dt: f32) {
+  shoot(dt)
+  fly(dt)
+  expire(dt)
+  tick()
+}
+
+schedule finish() { report() }
+
+main {
+  loop { frame(0.25) } until Clock.frame == 8
+  finish()
+}

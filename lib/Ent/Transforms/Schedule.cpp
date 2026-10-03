@@ -24,7 +24,7 @@ public:
 
   /// The system's access plus what the run's condition reads.
   SystemAccess get(RunOp run) {
-    auto system = symbols.lookup<SystemOp>(run.getSystem());
+    Operation *system = symbols.lookup(run.getSystem());
     auto [it, inserted] = cache.try_emplace(system);
     if (inserted)
       it->second = computeAccess(system, archetypes);

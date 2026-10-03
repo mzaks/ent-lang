@@ -1,0 +1,22 @@
+// A module: every declaration is visible to the files that import it.
+unique Time { now: f64, dt: f32 }
+component Timer { left: f32 } capacity 16
+
+system tick() {
+  Time.now += Time.dt as f64
+  for e, t: mut Timer {
+    t.left -= Time.dt
+    if t.left <= 0.0 { e.destroy() }
+  }
+}
+
+extern system sleep(scale: f32) reads Time
+
+schedule advance() {
+  tick()
+  sleep(1.0)
+}
+
+world {
+  Time.dt = 0.5
+}

@@ -23,9 +23,18 @@ Token Lexer::next() {
 
   char c = *current++;
   if (llvm::isAlpha(c) || c == '_') {
-    while (current != buffer.end() &&
-           (llvm::isAlnum(*current) || *current == '_'))
-      ++current;
+    auto word = [&] {
+      while (current != buffer.end() &&
+             (llvm::isAlnum(*current) || *current == '_'))
+        ++current;
+    };
+    word();
+    // `module::Name` is one identifier: a name qualified by its module.
+    if (buffer.end() - current > 2 && current[0] == ':' && current[1] == ':' &&
+        (llvm::isAlpha(current[2]) || current[2] == '_')) {
+      current += 2;
+      word();
+    }
     return make(Token::Identifier, start);
   }
   if (llvm::isDigit(c)) {
@@ -60,7 +69,24 @@ Token Lexer::next() {
     }
     return false;
   };
+  // A string or a character: up to the closing quote on the same line, a
+  // backslash taking the next character with it.
+  if (c == '"' || c == '\'') {
+    while (current != buffer.end() && *current != c && *current != '\n') {
+      if (*current == '\\' && current + 1 != buffer.end())
+        ++current;
+      ++current;
+    }
+    if (current == buffer.end() || *current != c)
+      return make(Token::Error, start);
+    ++current;
+    return make(c == '"' ? Token::String : Token::Char, start);
+  }
   switch (c) {
+  case '[':
+    return make(Token::LBracket, start);
+  case ']':
+    return make(Token::RBracket, start);
   case '{':
     return make(Token::LBrace, start);
   case '}':
@@ -76,7 +102,7 @@ Token Lexer::next() {
   case ';':
     return make(Token::Semicolon, start);
   case '.':
-    return make(Token::Dot, start);
+    return make(followedBy('.') ? Token::DotDot : Token::Dot, start);
   case '=':
     return make(followedBy('=') ? Token::Equal : Token::Assign, start);
   case '+':

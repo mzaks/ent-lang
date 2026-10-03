@@ -1,0 +1,21 @@
+// The clock: `tick`, run once a frame, says what time it is.
+//
+//   import clock
+//   world { FrameRate = 60.0 }
+//   schedule frame() { tick()  ... }
+//   main { loop { frame() } until Time.now > 10.0 }
+//
+// Implemented in devices/clock.c.
+
+// Seconds since the first tick, seconds since the previous one (0 in the
+// first frame), and the number of ticks so far.
+unique Time { now: f64, dt: f32, frame: i64 }
+
+// Frames per second to hold: `tick` waits until the next frame is due.
+// 0 (the start) does not wait.
+unique FrameRate: f32
+
+// The machine's time at the first tick; the clock's own.
+unique Epoch: f64
+
+extern system tick() reads FrameRate writes Time, Epoch

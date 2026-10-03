@@ -1,0 +1,37 @@
+// Extern systems and the entry point end to end: no C host, only the C
+// functions the program declares. Run as written, fused, and staged with
+// the stages in parallel; all agree.
+// RUN: mkdir -p %t.dir
+// RUN: ent-translate --import-ent %S/Inputs/extern.ent -o %t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/extern_world.h
+
+// RUN: ent-opt %t.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.seq.ll
+// RUN: clang -O2 -Wno-override-module %t.seq.ll -I%t.dir \
+// RUN:     %S/Inputs/extern_systems.c -o %t.seq
+// RUN: %t.seq | FileCheck %s
+
+// RUN: ent-opt %t.mlir --ent-lower-to-loops=fuse-systems=1 --symbol-dce \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.fused.ll
+// RUN: clang -O2 -Wno-override-module %t.fused.ll -I%t.dir \
+// RUN:     %S/Inputs/extern_systems.c -o %t.fused
+// RUN: %t.fused | FileCheck %s
+
+// RUN: ent-opt %t.mlir --ent-schedule \
+// RUN:     "--ent-lower-to-loops=parallel-stages=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.par.ll
+// RUN: clang -O2 -Wno-override-module %t.par.ll -I%t.dir \
+// RUN:     %S/Inputs/extern_systems.c %openmp -o %t.par
+// RUN: %t.par | FileCheck %s
+
+// Three rocks at 10, 11, 12 drift by one a frame and are shown doubled.
+// Frame 2 is not shown (run_if). `decide` ends the loop after frame 3; one
+// more frame runs after it, not verbose: three lines were shown by then.
+// CHECK:      frame 1: 22.0 24.0 26.0
+// CHECK-NEXT: frame 3: 26.0 28.0 30.0
+// CHECK-NEXT: frame 4: lines 3
+// CHECK-NOT:  frame

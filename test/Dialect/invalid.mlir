@@ -5,7 +5,7 @@ ent.component @P (x: f32, x: f32)
 
 // -----
 
-// expected-error @+1 {{field 'v' has type 'vector<4xf32>'; only integer, float, index and entity fields are supported}}
+// expected-error @+1 {{field 'v' has type 'vector<4xf32>'; only integer, float, index, entity and text fields are supported}}
 ent.component @P (v: vector<4xf32>)
 
 // -----

@@ -19,6 +19,20 @@ llvm_config.add_tool_substitutions(
 llvm_config.add_tool_substitutions(
     ["mlir-translate", "clang"], [config.llvm_tools_dir]
 )
+# The build driver, using the tools under test and the same LLVM.
+import sys
+
+config.substitutions.append(
+    (
+        "%ent",
+        "env ENT_BIN={} LLVM_PREFIX={} {} {}".format(
+            config.ent_tools_dir,
+            os.path.dirname(config.llvm_tools_dir),
+            sys.executable,
+            os.path.join(os.path.dirname(config.test_source_root), "tools", "ent"),
+        ),
+    )
+)
 # Link flags for the OpenMP runtime that ships with the same LLVM.
 config.substitutions.append(
     ("%openmp", f"-L{config.llvm_lib_dir} -lomp -Wl,-rpath,{config.llvm_lib_dir}")

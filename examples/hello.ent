@@ -1,0 +1,29 @@
+// A program with no C of its own: the console and the clock are modules
+// (devices/), and what they do outside the world is theirs.
+//
+// Five frames at 50 frames a second, a line for each.
+import console
+import clock
+
+world {
+  FrameRate = 50.0
+}
+
+system greet() {
+  let late = Time.now > (Time.frame as f64) * 0.02 + 0.5
+  spawn { Print { line: "hello from frame {Time.frame}" } }
+  if late {
+    spawn { Print { line: "(the clock is late)" } }
+  }
+}
+
+schedule frame() {
+  tick()
+  greet()
+  write()
+  clear()
+}
+
+main {
+  loop { frame() } until Time.frame == 5
+}
