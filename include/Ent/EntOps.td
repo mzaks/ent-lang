@@ -11,7 +11,8 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 //===----------------------------------------------------------------------===//
 
 // A symbol that declares an ordered list of scalar fields.
-class Ent_RecordOp<string mnemonic> : Ent_Op<mnemonic, [Symbol]> {
+class Ent_RecordOp<string mnemonic, list<Trait> traits = []>
+    : Ent_Op<mnemonic, !listconcat([Symbol], traits)> {
   let arguments = (ins SymbolNameAttr:$sym_name,
                        StrArrayAttr:$field_names,
                        TypeArrayAttr:$field_types);
@@ -53,7 +54,8 @@ def Ent_ResourceOp : Ent_RecordOp<"resource"> {
   }];
 }
 
-def Ent_RelationOp : Ent_RecordOp<"relation"> {
+def Ent_RelationOp : Ent_RecordOp<"relation", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Declare a relation: directed edges between entities, with data";
   let description = [{
     ```mlir
@@ -66,11 +68,33 @@ def Ent_RelationOp : Ent_RecordOp<"relation"> {
     iterates incoming edges. An entity may have any number of edges, also
     several to the same target. Queries iterate an entity's edges with
     `ent.edges`; `ent.connect` and `ent.disconnect` change them.
+
+    A relation may name the component its sources and its targets have:
+    ```mlir
+    ent.relation @Synapse (weight: f32) from @Neuron to @Neuron capacity 1000
+    ```
+    Connecting checks it, at run time, for both ends. Where no system can
+    take that component away from an entity (despawn it, or remove the
+    component), every edge's end then has it for as long as the edge
+    exists, so reading that component of the other end inside an edge loop
+    (`ent.lookup`, `ent.apply`) needs no check that the entity is alive and
+    has it.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        StrArrayAttr:$field_names,
                        TypeArrayAttr:$field_types,
+                       OptionalAttr<FlatSymbolRefAttr>:$from,
+                       OptionalAttr<FlatSymbolRefAttr>:$to,
                        ConfinedAttr<I64Attr, [IntPositive]>:$capacity);
+  let extraClassDeclaration = [{
+    /// The type of field `name`, or null if there is no such field.
+    ::mlir::Type getFieldType(::llvm::StringRef name);
+    /// The component the edges' sources (`target` false) or targets have,
+    /// if the relation names it.
+    ::mlir::FlatSymbolRefAttr getEndpoint(bool target) {
+      return target ? getToAttr() : getFromAttr();
+    }
+  }];
 }
 
 def Ent_ArchetypeOp : Ent_Op<"archetype", [

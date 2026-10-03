@@ -175,6 +175,11 @@ despawned entity in place until the relation is next sorted; until then
 loops skip them (their end is no longer the visited entity) and applies
 along them are dropped (their target is dead).
 
+**H4.** A relation that names its ends' components (`from C to D`) relies
+on them: the header's connect refuses an end without its component, and
+the host must not clear the presence of an end's component through the
+header while the entity has edges.
+
 ## Defined against this model later
 
 These are proposals from the ent-lang design notes, not built:

@@ -1618,6 +1618,11 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
   }
 }
 
+/// Marks an `ent.lookup` or `ent.apply` whose entity is the other end of
+/// an edge loop's edge, of the component that end is trusted to have (see
+/// getTrustedEndpoint): it is located without checks.
+static constexpr llvm::StringLiteral kTrustedAttr = "ent.trusted";
+
 /// Bounds that ids are checked against, loaded ahead by a caller that
 /// knows they cannot change (see emitLocate).
 namespace {
@@ -1657,6 +1662,11 @@ static Value loadSlotsInUse(IRRewriter &rewriter, Location loc,
 /// slot against the number of slots in use. Both are loaded where they are
 /// needed, unless `bounds` provides them: a caller that knows they cannot
 /// change can load them once, outside a loop.
+///
+/// With `trusted`, the caller knows the entity is alive, lives in a
+/// candidate archetype and has `presenceOf` (an edge's end, see
+/// getTrustedEndpoint): if only one archetype is a candidate, `found` is
+/// called for it directly, without any check, and nothing is missing.
 static SmallVector<Value>
 emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
            WorldAccess &world, Value id,
@@ -1666,8 +1676,23 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
                                            Value row, Value present)>
                found,
            function_ref<SmallVector<Value>()> missing,
-           const LocateBounds &bounds = {}) {
+           const LocateBounds &bounds = {}, bool trusted = false) {
   const EntityScheme &scheme = layout.entities;
+  if (trusted) {
+    const WorldArchetype *only = nullptr;
+    unsigned candidates = 0;
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (candidate(archetype)) {
+        only = &archetype;
+        ++candidates;
+      }
+    if (candidates == 1) {
+      Value row = scheme.kind == EntityScheme::Rows
+                      ? world.unpackRows(loc, id).second
+                      : world.getLocation(loc, world.idSlot(loc, id)).second;
+      return found(*only, row, Value());
+    }
+  }
   // Without results, scf.if blocks come with their terminator.
   auto yield = [&](ValueRange values) {
     if (!results.empty())
@@ -1805,7 +1830,8 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
                         .getResult();
           Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
           return {zero, no};
-        });
+        },
+        LocateBounds(), lookup->hasAttr(kTrustedAttr));
     rewriter.replaceOp(lookup,
                        {world.fromStorage(loc, results[0],
                                           lookup.getValue().getType()),
@@ -1897,7 +1923,8 @@ static void combineInto(IRRewriter &rewriter, ApplyOp apply,
         }
         return {};
       },
-      []() -> SmallVector<Value> { return {}; }, bounds);
+      []() -> SmallVector<Value> { return {}; }, bounds,
+      apply->hasAttr(kTrustedAttr));
 }
 
 /// Combine the values `apply` sent from the first `count` rows of
@@ -2028,7 +2055,11 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                             world.edgeApplyBuffer(apply).first,
                             ValueRange{position});
   Operation *insertBefore = loop.getBody()->getTerminator();
-  if (layout.entities.hasGenerations()) {
+  // A visited entity whose end is trusted never dies, so its slot is never
+  // reused and its range holds only its own edges.
+  bool ownEndTrusted =
+      getTrustedEndpoint(relation.op, /*target=*/!out) != FlatSymbolRefAttr();
+  if (layout.entities.hasGenerations() && !ownEndTrusted) {
     Value own = memref::LoadOp::create(
         rewriter, loc, world.edgeIds(relation, /*source=*/out),
         ValueRange{edge});
@@ -2324,9 +2355,38 @@ static SmallVector<Operation *> carryOwnFields(IRRewriter &rewriter,
 /// Append the edge (`source`, `target`, `values`, all stored forms) to
 /// `relation` at the insertion point, after checking its capacity, and
 /// mark it unclean.
-static void appendEdge(IRRewriter &rewriter, Location loc, WorldAccess &world,
+static void appendEdge(IRRewriter &rewriter, Location loc,
+                       const WorldLayout &layout, WorldAccess &world,
                        const WorldRelation &relation, Value source,
                        Value target, ValueRange values) {
+  // The ends must have the components the relation names.
+  RelationOp relationOp = relation.op;
+  for (auto [end, id] : {std::make_pair(false, source),
+                         std::make_pair(true, target)}) {
+    FlatSymbolRefAttr component = relationOp.getEndpoint(end);
+    if (!component)
+      continue;
+    auto holds = [&](const WorldArchetype &archetype) {
+      return ArchetypeOp(archetype.op).contains(component);
+    };
+    Value has = emitLocate(
+        rewriter, loc, layout, world, id, holds, component,
+        TypeRange{rewriter.getI1Type()},
+        [&](const WorldArchetype &, Value, Value present) -> SmallVector<Value> {
+          if (!present)
+            present = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+          return {present};
+        },
+        [&]() -> SmallVector<Value> {
+          return {arith::ConstantIntOp::create(rewriter, loc, 0, 1)};
+        })[0];
+    cf::AssertOp::create(
+        rewriter, loc, has,
+        rewriter.getStringAttr(
+            "ent.connect: the " + std::string(end ? "target" : "source") +
+            " of an edge of @" + relationOp.getSymName().str() +
+            " does not have @" + component.getValue().str()));
+  }
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value counter = world.edgeCount(relation);
   Value count = memref::LoadOp::create(rewriter, loc, counter,
@@ -2391,7 +2451,7 @@ static void appendConnected(IRRewriter &rewriter, ConnectOp connect,
   for (Value column : buffers.values)
     values.push_back(
         memref::LoadOp::create(rewriter, loc, column, ValueRange{row}));
-  appendEdge(rewriter, loc, world, relation, source, target, values);
+  appendEdge(rewriter, loc, layout, world, relation, source, target, values);
 }
 
 /// The name of the function that sorts `relation`'s edges if it is
@@ -2636,7 +2696,7 @@ static void lowerConnects(IRRewriter &rewriter, func::FuncOp func,
     SmallVector<Value> values;
     for (Value value : connect.getValues())
       values.push_back(world.toStorage(loc, value));
-    appendEdge(rewriter, loc, world, relation,
+    appendEdge(rewriter, loc, layout, world, relation,
                world.toStorage(loc, connect.getSource()),
                world.toStorage(loc, connect.getTarget()), values);
     callSort(rewriter, loc, relation, world.getArena());
@@ -3483,6 +3543,22 @@ struct EntLowerToLoops
       if (!getTriggers(query).empty())
         query->setAttr(WorldLayout::kReactiveIndexAttr,
                        rewriter.getI64IntegerAttr(reactiveIndex++));
+    });
+    // Lookups and applies through a trusted end of an edge.
+    module.walk([&](Operation *op) {
+      if (!isa<LookupOp, ApplyOp>(op))
+        return;
+      auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
+      auto edges =
+          arg ? dyn_cast<EdgesOp>(arg.getOwner()->getParentOp()) : EdgesOp();
+      if (!edges || arg.getArgNumber() != 1)
+        return;
+      auto relation = SymbolTable::lookupNearestSymbolFrom<RelationOp>(
+          edges, edges.getRelationAttr());
+      FlatSymbolRefAttr trusted =
+          getTrustedEndpoint(relation, /*target=*/edges.isOut());
+      if (trusted && trusted == op->getAttr("component"))
+        op->setAttr(kTrustedAttr, rewriter.getUnitAttr());
     });
     // And for connects inside queries and their buffers.
     unsigned connectIndex = 0;

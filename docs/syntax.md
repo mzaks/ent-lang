@@ -27,6 +27,7 @@ unique Score: i64                           // shorthand: one field, `value`
 archetype Gun { Position, optional Stunned } capacity 4
 relation Synapse { weight: f32 } capacity 100000  // edges with data
 relation Follows capacity 1000                     // edges without
+relation Aims { w: f32 } from Ship to Target capacity 64  // typed ends
 default_capacity 1024
 ```
 
@@ -39,6 +40,11 @@ default_capacity 1024
 - A relation's edges go from a source entity to a target entity and carry
   its fields. They are not entities; `capacity` bounds how many there are.
   An entity may have any number of edges, also several to the same target.
+  `from C` and `to D` name the components the sources and targets have;
+  connecting checks them. Where no system despawns entities with `C` or
+  removes it (and likewise for `D`), reading `C` of an edge's other end
+  (`if let x = C(other).f`) is compiled without checking the id, though it
+  is still written with `if let`.
 
 ## Systems and queries
 

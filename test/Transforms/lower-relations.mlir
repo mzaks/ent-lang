@@ -161,3 +161,70 @@ ent.system @gather() {
 ent.schedule @frame() {
   ent.run @gather()
 }
+
+// -----
+
+// Typed ends that nothing takes away: a lookup through the edge's other end
+// reads the field directly, without checking the id.
+ent.component @N (v: f32, input: f32) capacity 100
+ent.archetype @A (@N) capacity 100
+ent.relation @Syn (w: f32) from @N to @N capacity 1000
+
+// CHECK-LABEL: func.func private @trusted(
+// CHECK:        scf.for %[[P:.*]] = {{.*}} iter_args(
+// CHECK-NEXT:     %[[SRC:.*]] = memref.load %{{.*}}[%[[P]]] : memref<1000xi32>
+// CHECK:          %[[ROW:.*]] = arith.index_castui %{{.*}} : i32 to index
+// CHECK-NEXT:     %[[V:.*]] = memref.load %{{.*}}[%[[ROW]]] : memref<100xf32>
+// CHECK-NEXT:     %{{.*}} = arith.constant true
+ent.system @trusted() {
+  ent.query (%n: !ent.ref<@N, mut>) {
+    ent.edges @Syn in (%s: !ent.ref<@Syn>, %p: !ent.entity) {
+      %v, %found = ent.lookup %p @N "v" : f32
+      %i = ent.get %n "input" : !ent.ref<@N, mut> -> f32
+      %j = arith.addf %i, %v : f32
+      ent.set %n "input", %j : !ent.ref<@N, mut>, f32
+    }
+  }
+}
+
+// Connecting checks both ends.
+// CHECK-LABEL: func.func private @wire(
+// CHECK:        cf.assert %{{.*}}, "ent.connect: the source of an edge of @Syn does not have @N"
+// CHECK:        cf.assert %{{.*}}, "ent.connect: the target of an edge of @Syn does not have @N"
+ent.system @wire(%a: !ent.entity, %b: !ent.entity) {
+  %w = arith.constant 1.0 : f32
+  ent.connect @Syn %a, %b (%w) : f32
+}
+
+ent.schedule @frame() {
+  ent.run @trusted()
+}
+
+// -----
+
+// The same where a system despawns entities with @N: their edges may
+// outlive them until the next sort, so the lookup checks the id.
+ent.component @N (v: f32, input: f32) capacity 100
+ent.archetype @A (@N) capacity 100
+ent.relation @Syn (w: f32) from @N to @N capacity 1000
+
+// CHECK-LABEL: func.func private @checked(
+// CHECK:        scf.for %{{.*}} = {{.*}} iter_args(
+// CHECK:          memref.load %{{.*}} : memref<1xi64>
+// CHECK:          arith.cmpi ult
+ent.system @checked() {
+  ent.query (%n: !ent.ref<@N, mut>) {
+    ent.edges @Syn in (%s: !ent.ref<@Syn>, %p: !ent.entity) {
+      %v, %found = ent.lookup %p @N "v" : f32
+      %i = ent.get %n "input" : !ent.ref<@N, mut> -> f32
+      %j = arith.addf %i, %v : f32
+      ent.set %n "input", %j : !ent.ref<@N, mut>, f32
+    }
+  }
+}
+
+ent.system @cull() {
+  ent.query (%n: !ent.ref<@N>) {
+    ent.despawn
+  }
+}

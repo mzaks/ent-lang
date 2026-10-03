@@ -5,9 +5,13 @@
 // CHECK: ent.component @N (v: f32, input: f32) capacity 8
 // CHECK: ent.relation @Syn (w: f32) capacity 64
 // CHECK: ent.relation @Link () capacity 16
+// CHECK: ent.relation @Typed (w: f32) from @N to @N capacity 32
+// CHECK: ent.relation @ToN () to @N capacity 4
 ent.component @N (v: f32, input: f32) capacity 8
 ent.relation @Syn (w: f32) capacity 64
 ent.relation @Link () capacity 16
+ent.relation @Typed (w: f32) from @N to @N capacity 32
+ent.relation @ToN () to @N capacity 4
 
 // CHECK-LABEL: ent.system @push() {
 // CHECK:   ent.edges @Syn out (%[[S:.*]]: !ent.ref<@Syn>, %[[T:.*]]: !ent.entity) {

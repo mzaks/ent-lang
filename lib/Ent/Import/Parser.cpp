@@ -412,7 +412,7 @@ LogicalResult Parser::parseComponent(bool tag) {
   return success();
 }
 
-// relation Name [{ fields }] capacity N
+// relation Name [{ fields }] [from C] [to D] capacity N
 LogicalResult Parser::parseRelation() {
   llvm::SMLoc at = token.loc;
   FailureOr<std::string> name = identifier("a relation name");
@@ -423,6 +423,20 @@ LogicalResult Parser::parseRelation() {
   Record record;
   if (token.is(Token::LBrace) && failed(parseFields(record)))
     return failure();
+  // [from Component] [to Component]: what the ends have.
+  FlatSymbolRefAttr ends[2];
+  const StringRef endNames[] = {"from", "to"};
+  for (auto [index, end] : llvm::enumerate(endNames)) {
+    if (!consumeKeyword(end))
+      continue;
+    llvm::SMLoc componentAt = token.loc;
+    FailureOr<std::string> component = identifier("a component");
+    if (failed(component))
+      return failure();
+    if (!components.count(*component))
+      return error(componentAt, "unknown component '" + *component + "'");
+    ends[index] = symbol(*component);
+  }
   if (failed(expectKeyword("capacity")))
     return failure();
   FailureOr<int64_t> capacity = integer("a capacity");
@@ -435,7 +449,7 @@ LogicalResult Parser::parseRelation() {
   }
   RelationOp::create(builder, loc(at), builder.getStringAttr(*name),
                      builder.getArrayAttr(names), builder.getArrayAttr(types),
-                     builder.getI64IntegerAttr(*capacity));
+                     ends[0], ends[1], builder.getI64IntegerAttr(*capacity));
   relations[*name] = std::move(record);
   return success();
 }

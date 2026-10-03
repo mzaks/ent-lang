@@ -157,3 +157,9 @@ ent.system @s() {
     ent.disconnect
   }
 }
+
+// -----
+
+ent.component @N (v: f32)
+// expected-error @+1 {{names unknown component @M for its targets}}
+ent.relation @R (w: f32) from @N to @M capacity 4

@@ -403,13 +403,48 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
                               "= 0;\n",
                               relation.deadOffset)
                     .str();
+    // The components the ends must have, checked like the generated code
+    // checks an in-language connect.
+    std::string checks;
+    for (bool target : {false, true}) {
+      FlatSymbolRefAttr component = relationOp.getEndpoint(target);
+      if (!component)
+        continue;
+      std::string function = llvm::formatv(
+          "ent__{0}_{1}_has", name, target ? "target" : "source");
+      os << llvm::formatv(
+          "static inline bool {0}(ent_world *world, ent_entity id) {{\n"
+          "  int64_t row = ent_entity_row(world, id);\n"
+          "  switch (ent_entity_archetype(world, id)) {{\n",
+          function);
+      for (const WorldArchetype &archetype : layout->archetypes) {
+        ArchetypeOp archetypeOp = archetype.op;
+        if (!archetypeOp.contains(component))
+          continue;
+        std::string archetypeName = toIdentifier(archetypeOp.getSymName());
+        os << llvm::formatv("  case ENT_ARCHETYPE_{0}:\n", archetypeName);
+        if (archetypeOp.isOptional(component))
+          os << llvm::formatv("    return ent_{0}_{1}_present(world)[row] != "
+                              "0;\n",
+                              archetypeName,
+                              toIdentifier(component.getValue()));
+        else
+          os << "    return true;\n";
+      }
+      os << "  default:\n    (void)row;\n    return false;\n  }\n}\n";
+      checks += llvm::formatv("  if (!{0}(world, {1}))\n    return false;\n",
+                              function, target ? "target" : "source")
+                    .str();
+    }
     std::string connect = llvm::formatv("ent_{0}_connect", name);
     if (failed(claim(relationOp, connect)))
       return failure();
     os << llvm::formatv(
-        "// Returns false, connecting nothing, if the relation is full.\n"
+        "// Returns false, connecting nothing, if the relation is full or an "
+        "end\n// lacks the component the relation names for it.\n"
         "static inline bool {0}(ent_world *world, ent_entity source,\n"
         "                       ent_entity target{1}) {{\n"
+        "{5}"
         "  int64_t *count = ent__{2}_count(world);\n"
         "  if (*count >= ENT_{2}_CAPACITY)\n    return false;\n"
         "  ent_{2}_source(world)[*count] = source;\n"
@@ -418,7 +453,7 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "  ++*count;\n"
         "  *(int64_t *)((char *)world + {4}) = 0; // unclean\n"
         "  return true;\n}\n",
-        connect, params, name, stores, relation.cleanOffset);
+        connect, params, name, stores, relation.cleanOffset, checks);
   }
 
   os << "\n// Schedules. The lowered function receives the arena as a "

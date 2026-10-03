@@ -224,3 +224,9 @@ system s() {
     }
   }
 }
+
+// -----
+
+component Position { x: f32 }
+// expected-error @+1 {{unknown component 'Neuron'}}
+relation Synapse { weight: f32 } from Position to Neuron capacity 4

@@ -174,7 +174,12 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   along edges is deterministic in parallel too. `ent.connect @Synapse %a,
   %b (%w)` adds an edge (outside queries at once, inside at the query's
   end), `ent.disconnect` inside an edge loop removes the visited one at the
-  query's end. `examples/snn.ent` and `examples/snn_pull.ent` are a spiking
+  query's end. A relation may name the components its ends have
+  (`ent.relation @Synapse (weight: f32) from @Neuron to @Neuron`):
+  connecting checks them, and where no system despawns entities with such a
+  component or removes it, lookups and applies through an edge's other end
+  of that component skip the checks that the id is alive and has it.
+  `examples/snn.ent` and `examples/snn_pull.ent` are a spiking
   neural network pushing spikes along outgoing synapses and gathering them
   along incoming ones; both agree with a plain C simulation to the bit.
 - `ent.query (%b: !ent.ref<@Bar, mut>) on [changed @Hull "hp", added @Hull,

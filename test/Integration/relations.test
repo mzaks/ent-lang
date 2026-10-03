@@ -71,3 +71,19 @@
 // ORDER:      n0: in only 1423 in both 1423 out 14
 // ORDER-NEXT: n1: in only 0 in both 0 out 25
 // ORDER-NEXT: n2: in only 5 in both 5 out 3
+
+// A relation naming its ends' components: the host's connect refuses an
+// end without it; lookups through the edges read without checks.
+// RUN: ent-translate --ent-to-c-header %S/Inputs/relations_typed.mlir \
+// RUN:     -o %t.dir/relations_typed_world.h
+// RUN: ent-opt %S/Inputs/relations_typed.mlir --ent-lower-to-loops \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.typed.ll
+// RUN: clang -O2 -Wno-override-module %t.typed.ll -I%t.dir \
+// RUN:     %S/Inputs/relations_typed_main.c -o %t.typed
+// RUN: %t.typed | FileCheck %s --check-prefix=TYPED
+
+// TYPED:      0 -> 2: 1
+// TYPED-NEXT: 0 -> 1: 0
+// TYPED-NEXT: 1 -> 2: 1
+// TYPED-NEXT: edges 2 v 5.0 10.0 0.0

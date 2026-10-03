@@ -74,6 +74,26 @@ SmallVector<ArchetypeOp> mlir::ent::getMatchedArchetypes(QueryOp query) {
   return matched;
 }
 
+FlatSymbolRefAttr mlir::ent::getTrustedEndpoint(RelationOp relation,
+                                                bool target) {
+  FlatSymbolRefAttr component = relation.getEndpoint(target);
+  if (!component)
+    return {};
+  auto module = relation->getParentOfType<ModuleOp>();
+  WalkResult result = module.walk([&](Operation *op) {
+    if (auto remove = dyn_cast<RemoveOp>(op))
+      if (remove.getComponentAttr() == component)
+        return WalkResult::interrupt();
+    if (isa<DespawnOp>(op))
+      for (ArchetypeOp archetype :
+           getMatchedArchetypes(op->getParentOfType<QueryOp>()))
+        if (archetype.contains(component))
+          return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  return result.wasInterrupted() ? FlatSymbolRefAttr() : component;
+}
+
 /// The archetype whose components are exactly `components`, or null.
 static ArchetypeOp findArchetype(ModuleOp module,
                                  const llvm::SmallPtrSet<Attribute, 8> &wanted) {

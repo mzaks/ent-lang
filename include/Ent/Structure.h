@@ -44,6 +44,14 @@ PresenceTest getPresenceTest(QueryOp query, ArchetypeOp archetype);
 /// The archetypes `query` matches, in declaration order.
 SmallVector<ArchetypeOp> getMatchedArchetypes(QueryOp query);
 
+/// The component `relation`'s sources (`target` false) or targets have, if
+/// the relation names one and no system can take it away from an entity:
+/// no query despawns entities of an archetype that holds it, and none
+/// removes it. Connecting checks that both ends have their components, so
+/// then every edge's end has it for as long as the edge exists, and
+/// reading it through the edge needs no checks. Null otherwise.
+FlatSymbolRefAttr getTrustedEndpoint(RelationOp relation, bool target);
+
 /// What `ent.add` or `ent.remove` of a component does to an entity of a
 /// given archetype. The storage decides, not the program: the same op sets
 /// a presence byte where the component is optional and moves the entity

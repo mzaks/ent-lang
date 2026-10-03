@@ -175,8 +175,16 @@ static ParseResult parseRecord(OpAsmParser &parser, OperationState &result) {
                       b.getArrayAttr(names));
   result.addAttribute(OpTy::getFieldTypesAttrName(result.name),
                       b.getArrayAttr(types));
-  // `capacity N`, mandatory for relations.
+  // `[from @C] [to @D] capacity N`, for relations.
   if constexpr (std::is_same_v<OpTy, RelationOp>) {
+    for (StringRef end : {"from", "to"}) {
+      if (failed(parser.parseOptionalKeyword(end)))
+        continue;
+      FlatSymbolRefAttr component;
+      if (parser.parseAttribute(component))
+        return failure();
+      result.addAttribute(end, component);
+    }
     int64_t capacity;
     if (parser.parseKeyword("capacity") || parser.parseInteger(capacity))
       return failure();
@@ -216,8 +224,13 @@ static void printRecord(OpTy op, OpAsmPrinter &p) {
     elided.push_back(op.getCapacityAttrName());
   }
   if constexpr (std::is_same_v<OpTy, RelationOp>) {
+    if (FlatSymbolRefAttr from = op.getFromAttr())
+      p << " from " << from;
+    if (FlatSymbolRefAttr to = op.getToAttr())
+      p << " to " << to;
     p << " capacity " << op.getCapacity();
-    elided.push_back(op.getCapacityAttrName());
+    elided.append({op.getCapacityAttrName(), op.getFromAttrName(),
+                   op.getToAttrName()});
   }
   p.printOptionalAttrDict(op->getAttrs(), elided);
 }
@@ -288,6 +301,14 @@ LogicalResult RelationOp::verify() {
 }
 Type RelationOp::getFieldType(StringRef name) {
   return lookupFieldType(getFieldNames(), getFieldTypes(), name);
+}
+LogicalResult RelationOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  for (bool target : {false, true})
+    if (FlatSymbolRefAttr component = getEndpoint(target))
+      if (!lookupComponent(symbolTable, *this, component))
+        return emitOpError("names unknown component ")
+               << component << " for its " << (target ? "targets" : "sources");
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

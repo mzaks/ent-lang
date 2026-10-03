@@ -138,6 +138,11 @@ system filters() {
 // CHECK: ent.relation @Follows () capacity 16
 relation Synapse { weight: f32 } capacity 64
 relation Follows capacity 16
+// The components the ends have, if the relation names them.
+// CHECK: ent.relation @Aims (w: f32) from @Health to @Position capacity 8
+// CHECK: ent.relation @Owns () to @Health capacity 8
+relation Aims { w: f32 } from Health to Position capacity 8
+relation Owns to Health capacity 8
 // CHECK-LABEL: ent.system @wire() {
 // CHECK:      ent.query (%{{.*}}: !ent.ref<@Health>) {
 // CHECK:        ent.edges @Synapse out (%[[S:.*]]: !ent.ref<@Synapse>, %[[T:.*]]: !ent.entity) {
