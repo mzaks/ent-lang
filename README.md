@@ -324,8 +324,14 @@ add or remove of its component), and an accumulate whose resource field
 nothing else in the query reads or accumulates into, are combined as the
 loop visits, without buffers and the second pass (same result). Loops
 that may run in parallel keep the buffers; `direct-applies=0` keeps them
-everywhere. The push example went from 1.49-1.71x the time of
-hand-written C to 1.04-1.06x up to 1e5 neurons, 1.18-1.31x at 1e6.
+everywhere. Within an entity loop that never runs in parallel, a resource
+cell such an accumulate combines into is carried as a loop value and
+stored once after the loop; and where both branches of an `if` store to
+the same column at the same index, the value is chosen in the `if` and
+stored once after it. Both keep loops vectorisable that LLVM otherwise
+would not vectorise, since it cannot tell the arena's views apart. With
+these, the spiking network matches hand-written C over compressed rows,
+push and pull, from 1e4 to 1e6 neurons (see `bench/RESULTS.md`).
 Connects append and mark the relation unclean; a sort (a stable counting
 sort through scratch columns, O(edges + keys)) runs where edges changed:
 at a schedule's start for edges the host connected, after a system-level

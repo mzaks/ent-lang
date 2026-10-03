@@ -1231,3 +1231,87 @@ load average 2.4 at the start and 2.0 at the end:
   accumulate).
 - One `ent-pull` process at 1e5 x 100, 2% firing, was an outlier (the
   spread column shows 50621%); the median agrees with the other runs.
+
+## 2026-10-03: closing the gaps: like-for-like C, and the integration loop
+
+Two things were left: push at 1e6 (1.18-1.31x) and the parallel
+comparison (the C `-par` variant ran only the propagation in parallel).
+
+The C side first. `c-pull-par` now runs the integration in parallel too
+(the spike count as an OpenMP reduction), as ent-lang's `-par` variants do.
+`c-push` now reads each neuron's edge range from an offsets array, as any
+compressed-rows code must; until now it computed it as `i * K` with K a
+compile-time constant, which no program over a real relation can, and
+clang unrolled the edge loop (`c-push-fixed` keeps that form). And
+`c-integrate` / `ent-integrate` time the integration alone (the example's
+schedule without `propagate`; same dynamics as each other, not as the
+others).
+
+The ent side. The integration loop was 3.9x C's at 1e6 (790 against 202
+us): C's vectorises (4 wide, interleaved 4), the generated one did not.
+Three things, found one at a time with LLVM's vectoriser remarks:
+- The directly combined spike count loaded and stored a cell of the arena
+  on every spike, which LLVM cannot tell from the columns. The entity loop
+  now carries such a resource cell as a loop value and stores it once
+  after (unconditionally: a flag saying whether it changed made LLVM
+  specialise the loop on it, with early exits).
+- Both branches of `if v >= threshold` store `v`, `fired` and the presence
+  of `Spiked`, each in its own block. When both branches of an `scf.if`
+  store to the same column at the same index (and do nothing else with
+  memory), the lowering now yields the values and stores once after the
+  `if`, which becomes a select.
+- That vectorised it at width 2, not 4: storing a presence byte per neuron.
+  Clang does not vectorise the C loop at all with such a store (checked
+  with the same loop plus a `uint8_t` store per neuron). The example kept
+  the same fact twice, `fired` and the tag `Spiked`; C keeps one. Both
+  examples now keep it as a value, as the design notes had it, and push
+  filters `where n.fired != 0.0`. Then the loop vectorises 4 wide,
+  interleaved 4, like C's. Finding: an optional component set or cleared
+  for every entity in a hot loop costs vector width.
+
+`bench/snn/run.py --rounds 7 --bias 0.15 --variants
+c-integrate,ent-integrate`, then `--rounds 7` with the main variants; us per
+step, median of 7 processes (spread), checksums agree. Load average 2.0 at
+the start and 6.8 at the end (the parallel variants run 16 threads; Slack
+at 12% of a core afterwards):
+
+| neurons x synapses | bias | firing | c-integrate | ent-integrate |
+|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.3% | **1.9 (136%)** | 1.9 (146%) |
+| 1e+05 x 100 | 0.15 | 2.4% | 19.6 (2%) | **19.3 (19%)** |
+| 1e+06 x 20 | 0.15 | 2.4% | **205.1 (1%)** | 336.4 (18%) |
+
+| neurons x synapses | bias | firing | c-push-fixed | c-push | c-pull | c-pull-par | ent-push | ent-push-par | ent-pull | ent-pull-par |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | **15.1 (111%)** | 16.7 (97%) | 455.1 (7%) | 185.9 (30%) | 17.0 (83%) | 117.2 (24%) | 466.4 (3%) | 141.8 (17%) |
+| 1e+04 x 100 | 0.3 | 7.4% | 44.8 (14%) | 46.9 (11%) | 454.5 (6%) | 187.6 (2%) | **43.1 (12%)** | 164.8 (10%) | 465.5 (7%) | 141.6 (5%) |
+| 1e+05 x 100 | 0.15 | 2.0% | **328.6 (57%)** | 337.6 (30%) | 5,602.4 (6%) | 801.7 (13%) | 342.9 (39%) | 419.0 (11%) | 5,770.0 (5%) | 789.7 (9%) |
+| 1e+05 x 100 | 0.3 | 7.3% | 1,141.3 (45%) | 1,164.5 (45%) | 5,564.0 (4%) | **795.6 (7%)** | 1,120.6 (16%) | 1,146.1 (8%) | 5,785.4 (6%) | 804.4 (8%) |
+| 1e+06 x 20 | 0.15 | 2.4% | 2,141.6 (44%) | 3,009.9 (19%) | 15,626.6 (5%) | **2,059.9 (13%)** | 2,987.8 (26%) | 2,372.2 (17%) | 15,172.6 (3%) | 2,175.9 (7%) |
+| 1e+06 x 20 | 0.3 | 7.9% | 4,837.4 (16%) | 5,943.8 (25%) | 15,521.5 (3%) | **2,062.1 (4%)** | 5,902.6 (14%) | 6,322.3 (21%) | 15,310.9 (2%) | 2,246.6 (8%) |
+
+Integration alone at 1e6 again, 9 processes, after the load average fell
+below 3 (2.7 at the start, 2.6 at the end):
+
+| neurons x synapses | bias | firing | c-integrate | ent-integrate |
+|---|---|---|---|---|
+| 1e+06 x 20 | 0.15 | 2.4% | **204.1 (4%)** | 333.6 (24%) |
+
+### What holds
+
+- Push and pull match hand-written C at every size measured: `ent-push`
+  takes 0.92-1.02x the time of `c-push`, `ent-pull` 0.97-1.04x `c-pull`.
+  Push cells at 1e4 and 1e5 spread widely for C and ent alike (up to 111%
+  and 57%); the 1e6 cells spread 14-44% in this run.
+- `c-push-fixed` (the old c-push) takes 0.71-0.81x of `c-push` at 1e6 and
+  about the same elsewhere: the fixed, compile-time degree was most of the
+  push gap at 1e6 reported before.
+- With the integration parallel in C too, `ent-pull-par` takes 0.75-0.76x
+  `c-pull-par` at 1e4 (C forks twice per step, ent's -par variants as
+  well, but C's step is slower there; not measured why), 0.99-1.01x at
+  1e5 and 1.06-1.09x at 1e6.
+- The integration alone matches C at 1e4 and 1e5 (1.0x, 0.98x), from 3.9x
+  before. At 1e6 it takes 1.63x (334 against 204 us in the 9-process run;
+  ent's processes spread 24%, C's 4%). Not explained: the loops have the
+  same shape and vector width. Push and pull at 1e6, which include the
+  integration, match C within the spread.
