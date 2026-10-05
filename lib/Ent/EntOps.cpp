@@ -596,6 +596,71 @@ LogicalResult ExternOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 }
 
 //===----------------------------------------------------------------------===//
+// FunctionOp, InvokeOp
+//===----------------------------------------------------------------------===//
+
+/// The types a value can cross to C with.
+static bool crossesToC(Type type) {
+  return isa<FloatType, TextType>(type) || type.isSignlessInteger();
+}
+
+LogicalResult FunctionOp::verify() {
+  for (auto [index, type] :
+       llvm::enumerate(getParams().getAsValueRange<TypeAttr>()))
+    if (!crossesToC(type))
+      return emitOpError("parameter #")
+             << index << " has type " << type
+             << ", which cannot be passed to C";
+  if (std::optional<Type> result = getResult()) {
+    if (isa<TextType>(*result))
+      return emitOpError("gives a text, which C cannot give back yet");
+    if (!crossesToC(*result))
+      return emitOpError("gives a ")
+             << *result << ", which C cannot give back";
+  }
+  return success();
+}
+
+LogicalResult InvokeOp::verify() {
+  if (!(*this)->getParentOfType<SystemOp>())
+    return emitOpError("must be inside 'ent.system'; conditions and the "
+                       "entry point only read uniques and compute");
+  return success();
+}
+
+LogicalResult InvokeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto function =
+      symbolTable.lookupNearestSymbolFrom<FunctionOp>(*this, getCalleeAttr());
+  if (!function)
+    return emitOpError("references unknown function ") << getCalleeAttr();
+  SmallVector<Type> params(function.getParams().getAsValueRange<TypeAttr>());
+  if (TypeRange(params) != getArgs().getTypes())
+    return emitOpError("argument types (")
+           << getArgs().getTypes() << ") do not match the parameters ("
+           << params << ") of function " << getCalleeAttr();
+  std::optional<Type> declared = function.getResult();
+  Type given = getResult() ? getResult().getType() : Type();
+  if ((declared ? *declared : Type()) != given)
+    return emitOpError("result does not match what function ")
+           << getCalleeAttr() << " gives";
+  if (function.getProc() != getProc())
+    return emitOpError(getProc() ? "is marked 'proc', but " : "calls ")
+           << getCalleeAttr()
+           << (getProc() ? " is not one" : ", a proc, without 'proc'");
+  return success();
+}
+
+void InvokeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // A proc acts on the outside, which no resource here stands for.
+  if (!getProc())
+    return;
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
+//===----------------------------------------------------------------------===//
 // MainOp, CallOp, LoopOp
 //===----------------------------------------------------------------------===//
 

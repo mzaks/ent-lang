@@ -229,6 +229,48 @@ def Ent_ExternOp : Ent_Op<"extern", [
   }];
 }
 
+def Ent_FunctionOp : Ent_Op<"function", [Symbol]> {
+  let summary = "A function implemented outside the program";
+  let description = [{
+    ```mlir
+    ent.function @hash(i64) -> i64
+    ent.function proc @put(!ent.text<126>)
+    ent.function proc @seconds() -> f64
+    ```
+    A C function a system calls with `ent.invoke`. It takes values and
+    gives at most one back; it never sees the world, so what a system
+    reads and writes stays what its own body does.
+
+    A plain function gives the same result for the same arguments and
+    does nothing else: calls may be dropped, repeated, reordered or run on
+    several threads. A `proc` acts on the outside (output, the time); the
+    program calls it exactly where and as often as its systems say.
+
+    A bool crosses as a C `bool`, a text as a pointer to its struct
+    (`const ent_text126 *`); a text cannot be the result.
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       TypeArrayAttr:$params,
+                       OptionalAttr<TypeAttr>:$result,
+                       UnitAttr:$proc);
+  let assemblyFormat = [{
+    (`proc` $proc^)? $sym_name `(` custom<ParamTypes>($params) `)`
+    (`->` $result^)? attr-dict
+  }];
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    /// The name of the C function: `ent_` and the function's name, where
+    /// a character C cannot have in a name (the `.` after a module's
+    /// name) is `_`.
+    std::string getCName() {
+      std::string name = "ent_";
+      for (char c : getSymName())
+        name += ::llvm::isAlnum(c) ? c : '_';
+      return name;
+    }
+  }];
+}
+
 def Ent_ScheduleOp : Ent_Op<"schedule", [
     Symbol, IsolatedFromAbove, SingleBlockImplicitTerminator<"YieldOp">]> {
   let summary = "An ordered list of systems that make up one frame";
@@ -677,6 +719,30 @@ def Ent_DespawnOp : Ent_Op<"despawn", [
     matches in `writes`.
   }];
   let assemblyFormat = "attr-dict";
+  let hasVerifier = 1;
+}
+
+def Ent_InvokeOp : Ent_Op<"invoke", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Call a function implemented outside the program";
+  let description = [{
+    ```mlir
+    %h = ent.invoke @hash(%id) : (i64) -> i64
+    ent.invoke proc @put(%line) : (!ent.text<126>) -> ()
+    ```
+    Calls an `ent.function` from inside a system. `proc` repeats what the
+    function declares: the call then has effects outside the world, so its
+    system keeps its place among all others and a query holding it visits
+    its entities in order, one at a time.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<AnyType>:$args,
+                       UnitAttr:$proc);
+  let results = (outs Optional<AnyType>:$result);
+  let assemblyFormat = [{
+    (`proc` $proc^)? $callee `(` $args `)` attr-dict
+    `:` functional-type($args, results)
+  }];
   let hasVerifier = 1;
 }
 

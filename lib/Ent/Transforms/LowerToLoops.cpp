@@ -3614,7 +3614,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   }
 }
 
-/// The world as the pointer C code takes it (`ent_world *`).
+/// The address of a memref as the pointer C code takes it (the world's
+/// arena as `ent_world *`).
 static Value worldPointer(IRRewriter &rewriter, Location loc, Value arena) {
   Value address =
       memref::ExtractAlignedPointerAsIndexOp::create(rewriter, loc, arena);
@@ -3648,6 +3649,94 @@ static LogicalResult declareExtern(IRRewriter &rewriter, ExternOp external,
                                    rewriter.getFunctionType(inputs, {}));
   func.setPrivate();
   return success();
+}
+
+/// How a value of `type` crosses to a C function: a bool as a byte, a text
+/// as a pointer to it.
+static Type functionParamType(Type type) {
+  if (isa<TextType>(type))
+    return LLVM::LLVMPointerType::get(type.getContext());
+  return externParamType(type);
+}
+
+/// Declare the C function of an extern fn or proc, `ent_<name>(params...)`.
+static LogicalResult declareFunction(IRRewriter &rewriter, FunctionOp function,
+                                     SymbolTable &symbols) {
+  std::string name = function.getCName();
+  if (Operation *other = symbols.lookup(name)) {
+    InFlightDiagnostic diag = function.emitError("is called as the C function '")
+                              << name << "', a name this program also declares";
+    diag.attachNote(other->getLoc()) << "declared here";
+    return diag;
+  }
+  SmallVector<Type> inputs, results;
+  for (Type type : function.getParams().getAsValueRange<TypeAttr>())
+    inputs.push_back(functionParamType(type));
+  if (std::optional<Type> result = function.getResult())
+    results.push_back(externParamType(*result));
+  rewriter.setInsertionPoint(function);
+  auto func = func::FuncOp::create(rewriter, function.getLoc(), name,
+                                   rewriter.getFunctionType(inputs, results));
+  func.setPrivate();
+  return success();
+}
+
+/// Replace `invoke` by a call of the C function. A text argument is put
+/// on the stack for the call, which gets its address; the stack is given
+/// back right after, since the call may sit in a loop.
+static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
+                        FunctionOp function) {
+  Location loc = invoke.getLoc();
+  bool hasText = llvm::any_of(invoke.getArgs(), [](Value arg) {
+    return isa<TextType>(arg.getType());
+  });
+  SmallVector<Type> resultTypes;
+  if (invoke.getResult())
+    resultTypes.push_back(invoke.getResult().getType());
+
+  rewriter.setInsertionPoint(invoke);
+  memref::AllocaScopeOp scope;
+  if (hasText) {
+    scope = memref::AllocaScopeOp::create(rewriter, loc, resultTypes);
+    rewriter.createBlock(&scope.getBodyRegion());
+  }
+  SmallVector<Value> args;
+  for (Value arg : invoke.getArgs()) {
+    if (auto text = dyn_cast<TextType>(arg.getType())) {
+      IntegerType storage = text.getStorageType();
+      Value slot = memref::AllocaOp::create(
+          rewriter, loc, MemRefType::get({}, storage), ValueRange{},
+          rewriter.getI64IntegerAttr(16));
+      Value bits =
+          UnrealizedConversionCastOp::create(rewriter, loc, storage, arg)
+              .getResult(0);
+      memref::StoreOp::create(rewriter, loc, bits, slot, ValueRange{});
+      args.push_back(worldPointer(rewriter, loc, slot));
+    } else if (arg.getType().isInteger(1)) {
+      args.push_back(
+          arith::ExtUIOp::create(rewriter, loc, rewriter.getI8Type(), arg));
+    } else {
+      args.push_back(arg);
+    }
+  }
+  SmallVector<Type> callResults;
+  for (Type type : resultTypes)
+    callResults.push_back(externParamType(type));
+  auto call = func::CallOp::create(rewriter, loc, function.getCName(),
+                                   callResults, args);
+  SmallVector<Value> results;
+  if (!resultTypes.empty()) {
+    Value result = call.getResult(0);
+    if (resultTypes.front().isInteger(1))
+      result = arith::TruncIOp::create(rewriter, loc, rewriter.getI1Type(),
+                                       result);
+    results.push_back(result);
+  }
+  if (scope) {
+    memref::AllocaScopeReturnOp::create(rewriter, loc, results);
+    results.assign(scope.getResults().begin(), scope.getResults().end());
+  }
+  rewriter.replaceOp(invoke, results);
 }
 
 /// Replace `run` by a call of its system, guarded by its condition if it
@@ -4153,6 +4242,10 @@ struct EntLowerToLoops
       if (failed(declareExtern(rewriter, external, symbols)))
         return signalPassFailure();
 
+    for (FunctionOp function : module.getOps<FunctionOp>())
+      if (failed(declareFunction(rewriter, function, symbols)))
+        return signalPassFailure();
+
     // Schedules first: fusion reads the systems' bodies before they are
     // lowered themselves.
     for (auto schedule :
@@ -4203,12 +4296,19 @@ struct EntLowerToLoops
       lowerResourceAccesses(rewriter, func, world);
     }
 
+    SmallVector<InvokeOp> invokes;
+    module.walk([&](InvokeOp invoke) { invokes.push_back(invoke); });
+    for (InvokeOp invoke : invokes)
+      lowerInvoke(rewriter, invoke,
+                  symbols.lookup<FunctionOp>(invoke.getCallee()));
+
     for (auto main : llvm::make_early_inc_range(module.getOps<MainOp>()))
       if (failed(lowerMain(rewriter, main, module, *layout, arenaType)))
         return signalPassFailure();
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
-      if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp, ExternOp>(op))
+      if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp, ExternOp,
+              FunctionOp>(op))
         rewriter.eraseOp(&op);
 
     if (failed(convertEntityTypes(module, layout->entities.idBits)))

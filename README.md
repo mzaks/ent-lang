@@ -134,10 +134,26 @@ tools/ent run examples/hello.ent       # or: tools/ent build ... -o hello
 A program with a `main` needs no C host: the compiler emits C's `main`,
 which creates the world and runs the schedules as `main` says, after the
 statements of `world`, the state the program starts with. What the
-language cannot do itself yet (input, output) is an `extern system`: a
-system declared in ent-lang, with its access, and implemented in C against
-the generated header, which declares it. `examples/bullets_main.ent` is the
-bullets example that way; its one extern system prints the result
+language cannot do itself (input, output, the time) is an `extern proc`,
+and a computation better written in C an `extern fn`: functions
+implemented in C that systems call with values. They never get the world,
+so everything that reads or writes it is ent-lang, and checked:
+
+```
+extern proc put(line: text[126])
+extern proc wait_until(due: f64) -> f64
+extern fn noise(x: f32, y: f32) -> f32
+
+system write() {
+  for p: Print { put(p.line) }
+}
+```
+
+An `extern system` is the older, wider door: a system declared in
+ent-lang, with its access, and implemented in C against the generated
+header, working on the world itself. The compiler takes its declared
+access on trust. `examples/bullets_main.ent` is the bullets example that
+way; its one extern system prints the result
 (`examples/extern/bullets_report.c`).
 
 ```
@@ -177,10 +193,15 @@ declares in scope (`clock::Time` where two modules declare a `Time`). The
 whole program is still compiled as one closed world; see
 [`docs/syntax.md`](docs/syntax.md).
 
-A device is a module whose extern systems touch the outside: its
-declarations in `name.ent`, their C in `name.c` next to it, which
-`tools/ent` compiles against the program's header (as `ent_world.h`).
-Two come with the compiler, in `devices/`:
+A device is a module that touches the outside: its systems in
+`name.ent`, and in `name.c` next to it the extern procs and fns they
+call, which `tools/ent` compiles against the declarations generated for
+them (`ent_extern.h`, which has no world in it). Instead of `name.c` it
+may be `name.cpp`, an object or archive (`name.o`, `name.a`), or a command
+that builds one (`name.build`), so a device can be written in any language
+that defines C functions; see [`docs/syntax.md`](docs/syntax.md). Two come
+with the compiler, in `devices/`, and a third that needs
+[raylib](https://www.raylib.com) installed:
 
 - `console`: a program prints a line by spawning `Print { line: "..." }`;
   `write()` puts the pending lines out in order, `clear()` takes them
@@ -189,7 +210,17 @@ Two come with the compiler, in `devices/`:
   first tick), `Time.dt` and `Time.frame`, and waits for the next frame if
   `FrameRate` is set.
 
-Both keep all their state in the world.
+- `window`: a window to draw in, with the keys and the mouse.
+  `begin()` opens it, fills `Window`, `Mouse` and `Keys` and clears the
+  picture; systems then draw with `rect`, `circle`, `line` and `label`
+  (colours are `0xRRGGBB`); `present()` shows the frame and holds
+  `Window.fps`. `examples/bounce.ent` is a program with it:
+  `tools/ent run examples/bounce.ent`. A module's `name.link` names the
+  libraries it needs (`-lraylib`).
+
+All keep their state in the world, and their logic in ent-lang: their C is
+`put` and `flush` for the console, `wait_until` for the clock, and for the
+window one small function for each call into raylib.
 
 ## The dialect today
 
@@ -368,6 +399,16 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   resource, or declare nothing. Field writes it makes are not tracked for
   reactive queries, as for a host; edges it connects are sorted when it
   returns.
+- `ent.function proc @put(!ent.text<126>)`, `ent.function @noise(f32, f32)
+  -> f32`: a function implemented in C, and `ent.invoke proc @put(%line) :
+  (!ent.text<126>) -> ()` its call from a system. The lowered program
+  calls `ent_put(&line)`: values only (a bool as C's `bool`, a text as a
+  pointer to a copy of it), at most one back, never the world. A plain
+  function gives the same result for the same arguments and does nothing
+  else, so its calls are computing like any arithmetic: they may run on
+  several threads, or be dropped. A `proc` acts on the outside: a system
+  that calls one keeps its place among all other systems, is not fused,
+  and a query that calls one visits its entities in order.
 - `ent.main { ent.call @setup()  ent.loop { ent.call @frame(%dt) : f32 ...
   ent.yield %done : i1 } }`: the entry point, at most one. It calls
   schedules, repeats (`ent.loop` runs its body, then stops if it yielded
@@ -496,7 +537,10 @@ column accessors such as `ent_Body_Position_x(world)`; entity lookups
 per resource field such as `ent_Clock_frame(world)`; one entry point per
 schedule, such as `ent_frame(world, dt)`; and a declaration of every extern
 system's C function, such as `void ent_report(ent_world *world, float
-arg0)`, for the file that defines it. The header allocates ids exactly as
+arg0)`, and of every extern fn and proc, for the file that defines it.
+`ent-translate --ent-to-c-extern-header` emits the declarations of the
+extern fns and procs alone, with the texts they take: what the C of a
+device includes. The header allocates ids exactly as
 the lowered program does. Creating a world zeroes only the counts, resources
 and entity counters, so capacity costs address space, not memory, until
 columns are written. Parallel stages and loops assume nothing else writes the

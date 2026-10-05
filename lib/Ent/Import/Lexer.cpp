@@ -37,6 +37,15 @@ Token Lexer::next() {
     }
     return make(Token::Identifier, start);
   }
+  // 0xff: an integer written as its bits.
+  if (c == '0' && current != buffer.end() &&
+      (*current == 'x' || *current == 'X') && current + 1 != buffer.end() &&
+      llvm::isHexDigit(current[1])) {
+    ++current;
+    while (current != buffer.end() && llvm::isHexDigit(*current))
+      ++current;
+    return make(Token::Integer, start);
+  }
   if (llvm::isDigit(c)) {
     while (current != buffer.end() && llvm::isDigit(*current))
       ++current;

@@ -1,0 +1,21 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+
+// A hex literal is the bits of the integer it becomes: all of an i8's are
+// 0xff, though no i8 is 255.
+unique Bits { color: i32, byte: i8, all: i64, top: i32 }
+
+// CHECK-LABEL: ent.system @set() {
+system set() {
+  // CHECK: arith.constant 16746496 : i32
+  Bits.color = 0xff8800
+  // CHECK: arith.constant -1 : i8
+  Bits.byte = 0xFF
+  // CHECK: arith.constant -1 : i64
+  Bits.all = 0xffffffffffffffff
+  // CHECK: arith.constant -2147483648 : i32
+  Bits.top = 0X80000000
+  // Alone it is an i32, like any integer.
+  // CHECK: arith.constant 16 : i32
+  let sixteen = 0x10
+  Bits.color += sixteen
+}

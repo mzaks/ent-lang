@@ -1,0 +1,7 @@
+// A module with functions implemented in C.
+extern proc beep(pitch: f32)
+extern fn loudness(level: i32) -> f32
+
+system alarm() {
+  beep(loudness(3))
+}

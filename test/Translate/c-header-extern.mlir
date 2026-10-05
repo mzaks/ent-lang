@@ -9,6 +9,9 @@ ent.archetype @Rock (@Position) capacity 8
 // CHECK:      void ent_draw(ent_world *world, float arg0, bool arg1, ent_entity arg2);
 // CHECK-NEXT: void ent_beep(ent_world *world);
 // CHECK-EMPTY:
+// CHECK-NEXT: #undef ENT__STATIC_ASSERT
+// CHECK-NEXT: #ifdef __cplusplus
+// CHECK-NEXT: } // extern "C"
 // CHECK-NEXT: #endif
 ent.extern @draw(f32, i1, !ent.entity) reads [@Position]
 ent.extern @beep()

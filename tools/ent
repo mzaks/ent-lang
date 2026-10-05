@@ -6,21 +6,46 @@
 
 A program is a .ent file with `main` and the modules it imports. Modules
 are found next to the importing file, in the -I directories and in the
-devices that come with the compiler. A module `m.ent` with an `m.c` next to
-it has its extern systems there; that file is compiled with the program,
-against the program's generated header (ent_world.h). C files on the
-command line are compiled the same way.
+devices that come with the compiler.
+
+What a module `m.ent` declares `extern` is implemented next to it, in any
+of these, which are built and linked with the program:
+
+  m.c      C, compiled against the program's generated headers:
+           ent_extern.h (the extern fns and procs, without the world) and
+           ent_world.h (everything)
+  m.cpp    C++, the same way (the headers are `extern "C"`)
+  m.o m.a  an object or archive built elsewhere, in any language that can
+           define C functions; linked as it is
+  m.build  one shell command that builds such an object or archive. It
+           runs in the module's directory with ENT_OUTPUT (the file to
+           write), ENT_INCLUDE (the directory of the generated headers),
+           ENT_CC and ENT_CXX (the C and C++ compilers used here) set.
+
+The program itself is compiled by the LLVM its IR was made with. The C and
+C++ next to modules, and the link, go to the machine's own compiler, which
+knows where the machine's libraries are: `cc` and `c++`, or what ENT_CC and
+ENT_CXX name.
+
+Files on the command line (.c, .cpp, .o, .a) are taken the same way.
+
+A module that needs libraries says so in `m.link`: the linker's arguments
+for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
 """
 
 import argparse
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# What implements a module's extern declarations, next to its .ent file.
+IMPLEMENTATIONS = (".c", ".cpp", ".o", ".a", ".build")
 
 
 def find_tool(name, directories):
@@ -40,6 +65,19 @@ def llvm_directories():
                 os.path.join(ROOT, "build/toolchain/.pixi/envs/default"),
                 "/opt/homebrew/opt/llvm"]
     return [os.path.join(prefix, "bin") for prefix in prefixes if prefix]
+
+
+def host_compiler(variable, names, fallback):
+    """The machine's own compiler, which knows where its libraries are:
+    $ENT_CC / $ENT_CXX, else `cc` / `c++`, else LLVM's."""
+    chosen = os.environ.get(variable)
+    if chosen:
+        return chosen
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            return path
+    return find_tool(fallback, llvm_directories())
 
 
 def modules_of(path, include_directories, seen):
@@ -83,6 +121,10 @@ def build(arguments, output, directory):
     run([translate, "--import-ent", program, "-o", module] + includes)
     header = os.path.join(directory, "ent_world.h")
     run([translate, "--ent-to-c-header", module, "-o", header])
+    # What the C of extern fns and procs gets: their declarations, without
+    # the world.
+    run([translate, "--ent-to-c-extern-header", module, "-o",
+         os.path.join(directory, "ent_extern.h")])
     # Also under the program's name, for C written for this program only.
     shutil.copyfile(header, os.path.join(directory, stem + "_world.h"))
 
@@ -95,8 +137,11 @@ def build(arguments, output, directory):
                   "parallel-stages=1",
                   "--symbol-dce", "--convert-scf-to-openmp", "--canonicalize",
                   "--ent-omp-nowait"]
+        # The OpenMP runtime of the LLVM that compiled the program, by its
+        # file: its directory is not one to look for other libraries in.
         library = os.path.join(os.path.dirname(os.path.dirname(clang)), "lib")
-        link = ["-L" + library, "-lomp", "-Wl,-rpath," + library]
+        runtime = "libomp.dylib" if sys.platform == "darwin" else "libomp.so"
+        link = [os.path.join(library, runtime), "-Wl,-rpath," + library]
     lowered = run([optimise, module] + passes +
                   ["--convert-scf-to-cf", "--convert-to-llvm",
                    "--reconcile-unrealized-casts"],
@@ -106,10 +151,65 @@ def build(arguments, output, directory):
 
     files = []
     modules_of(program, include_directories, files)
-    sources = [path[:-4] + ".c" for path in files
-               if os.path.isfile(path[:-4] + ".c")]
-    run([clang, "-O2", "-Wno-override-module", "-I", directory, llvm] +
-        sources + arguments.sources + link + ["-o", output])
+    given = [os.path.splitext(path)[0] + extension for path in files
+             for extension in IMPLEMENTATIONS
+             if os.path.isfile(os.path.splitext(path)[0] + extension)]
+    for path in arguments.sources:
+        if os.path.splitext(path)[1] not in (".c", ".cpp", ".o", ".a"):
+            sys.exit(f"ent: do not know how to build '{path}' (expected "
+                     ".c, .cpp, .o or .a)")
+    given += arguments.sources
+    # The libraries the modules ask for, after everything that uses them.
+    for path in files:
+        flags = os.path.splitext(path)[0] + ".link"
+        if os.path.isfile(flags):
+            with open(flags) as source:
+                link = shlex.split(source.read(), comments=True) + link
+
+    # The program by the LLVM that made its IR; the rest, and the link, by
+    # the machine's compiler. Each to an object, then one link.
+    cc = host_compiler("ENT_CC", ["cc"], "clang")
+    cxx = host_compiler("ENT_CXX", ["c++"], "clang++")
+    # It runs as on its own: an LLVM on the PATH would lend it its linker,
+    # and with that its idea of where libraries are.
+    toolchain = [os.path.realpath(path) for path in llvm_directories()]
+    host = dict(os.environ)
+    if os.path.realpath(os.path.dirname(cc)) not in toolchain:
+        host["PATH"] = os.pathsep.join(
+            path for path in os.environ.get("PATH", "").split(os.pathsep)
+            if os.path.realpath(path) not in toolchain)
+    objects = [os.path.join(directory, stem + ".o")]
+    run([clang, "-O2", "-Wno-override-module", "-c", llvm, "-o", objects[0]])
+    for index, path in enumerate(given):
+        name, extension = os.path.splitext(os.path.basename(path))
+        built = os.path.join(directory, f"{name}.{index}.o")
+        if extension in (".o", ".a"):
+            objects.append(path)
+            continue
+        if extension == ".c":
+            run([cc, "-O2", "-I", directory, "-c", path, "-o", built],
+                env=host)
+        elif extension == ".cpp":
+            run([cxx, "-O2", "-I", directory, "-c", path, "-o", built],
+                env=host)
+        else:
+            with open(path) as source:
+                command = source.read().strip()
+            environment = dict(host, ENT_OUTPUT=built,
+                               ENT_INCLUDE=os.path.abspath(directory),
+                               ENT_CC=cc, ENT_CXX=cxx)
+            if os.path.exists(built):
+                os.remove(built)
+            run(command, shell=True, env=environment,
+                cwd=os.path.dirname(os.path.abspath(path)))
+            if not os.path.isfile(built):
+                sys.exit(f"ent: '{path}' did not write $ENT_OUTPUT")
+        objects.append(built)
+    # C++ brings its library; other languages' objects say what they need
+    # in their module's .link.
+    uses_cxx = any(path.endswith(".cpp") for path in given)
+    run([cxx if uses_cxx else cc] + objects + link + ["-o", output],
+        env=host)
 
 
 def main():
@@ -119,7 +219,8 @@ def main():
     parser.add_argument("command", choices=["build", "run"])
     parser.add_argument("program", help="the .ent file with `main`")
     parser.add_argument("sources", nargs="*", metavar="more.c",
-                        help="C files with the program's own extern systems")
+                        help="files (.c, .cpp, .o, .a) with the program's "
+                        "own extern fns, procs and systems")
     parser.add_argument("-o", dest="output", help="the executable to write "
                         "(build; default: the program's name)")
     parser.add_argument("-I", action="append", default=[], metavar="dir",

@@ -1,0 +1,2 @@
+# What built_source.c needs.
+-lm

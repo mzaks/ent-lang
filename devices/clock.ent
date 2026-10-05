@@ -5,7 +5,7 @@
 //   schedule frame() { tick()  ... }
 //   main { loop { frame() } until Time.now > 10.0 }
 //
-// Implemented in devices/clock.c.
+// `wait_until` is implemented in devices/clock.c.
 
 // Seconds since the first tick, seconds since the previous one (0 in the
 // first frame), and the number of ticks so far.
@@ -18,4 +18,20 @@ unique FrameRate: f32
 // The machine's time at the first tick; the clock's own.
 unique Epoch: f64
 
-extern system tick() reads FrameRate writes Time, Epoch
+// Waits until the machine's clock (seconds, from some moment in the past,
+// never going back) shows `due`, not at all if it already does, and gives
+// what it shows then.
+extern proc wait_until(due: f64) -> f64
+
+system tick() {
+  let first = Time.frame == 0
+  // Frame n is due n periods after the first; no drift adds up.
+  let due = if first || FrameRate <= 0.0 { 0.0 }
+            else { Epoch + (Time.frame as f64) / (FrameRate as f64) }
+  let seconds = wait_until(due)
+  if first { Epoch = seconds }
+  let elapsed = seconds - Epoch
+  Time.dt = if first { 0.0 } else { (elapsed - Time.now) as f32 }
+  Time.now = elapsed
+  Time.frame += 1
+}

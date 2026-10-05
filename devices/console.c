@@ -1,17 +1,14 @@
-// The console device (devices/console.ent): writes every pending line to
-// standard output. Compiled with the program, against its generated
-// header, which the build names ent_world.h.
+// The console device (devices/console.ent): what it does to standard
+// output. Compiled with the program, against the declarations generated
+// for it (ent_extern.h); it never sees the world.
 
-#include "ent_world.h"
+#include "ent_extern.h"
 
 #include <stdio.h>
 
-void ent_console_write(ent_world *world) {
-  int64_t lines = ent_console_Lines_count(world);
-  const ent_text126 *line = ent_console_Lines_console_Print_line(world);
-  for (int64_t i = 0; i < lines; ++i) {
-    fwrite(line[i].bytes, 1, line[i].length, stdout);
-    fputc('\n', stdout);
-  }
-  fflush(stdout);
+void ent_console_put(const ent_text126 *line) {
+  fwrite(line->bytes, 1, line->length, stdout);
+  fputc('\n', stdout);
 }
+
+void ent_console_flush(void) { fflush(stdout); }

@@ -1,0 +1,88 @@
+// The window: a place to draw, with the keys and the mouse. `begin` opens
+// it (the first time), takes in what happened since the last frame and
+// clears the picture; `present` shows what was drawn since. Systems run
+// between the two draw by calling `rect`, `circle`, `line` and `label`:
+//
+//   import window
+//   world { Window.width = 800  Window.height = 450  Window.fps = 60 }
+//   system draw() { for p: Position { circle(p.x, p.y, 8.0, 0xff8800) } }
+//   schedule frame() { begin()  draw()  present() }
+//   main { loop { frame() } until Window.closed }
+//
+// What is drawn later lies on top. Coordinates are pixels from the top
+// left corner; a colour is 0xRRGGBB.
+//
+// Implemented with raylib (devices/window.c, devices/window.link).
+
+// `width`, `height` (800 by 450 if left 0) and `title` are read when the
+// window opens; `background` and `fps` every frame. `fps` is the frames
+// per second to hold, which `present` waits for; 0 does not wait.
+// `closed` says that the user closed the window or pressed Escape. `dt`
+// is the seconds the previous frame took, `frame` the number of `begin`s.
+unique Window {
+  width: i32, height: i32, title: text[62], background: i32, fps: i32,
+  open: bool, closed: bool, dt: f32, frame: i64
+}
+
+// Where the mouse is, and which of its buttons are down.
+unique Mouse { x: f32, y: f32, left: bool, right: bool }
+
+// The keys most programs ask for: down or not.
+unique Keys {
+  left: bool, right: bool, up: bool, down: bool,
+  space: bool, enter: bool
+}
+
+// Any other key: a letter or digit by its character ('A' as i32), the
+// rest by raylib's key numbers.
+extern proc key_down(key: i32) -> bool
+
+// A filled rectangle, by its top left corner and its size.
+extern proc rect(x: f32, y: f32, width: f32, height: f32, color: i32)
+// A filled circle, by its centre.
+extern proc circle(x: f32, y: f32, radius: f32, color: i32)
+extern proc line(x0: f32, y0: f32, x1: f32, y1: f32, color: i32)
+// A line of text `size` pixels high, by its top left corner.
+extern proc label(text: text[126], x: f32, y: f32, size: f32, color: i32)
+// Saves the picture as it is now (a .png) in the directory the program
+// runs in.
+extern proc screenshot(file: text[126])
+
+// The device's own: what `begin` and `present` are made of.
+extern proc open_window(width: i32, height: i32, title: text[62])
+extern proc should_close() -> bool
+extern proc frame_seconds() -> f32
+extern proc begin_frame(background: i32, fps: i32)
+extern proc end_frame()
+extern proc mouse_x() -> f32
+extern proc mouse_y() -> f32
+extern proc mouse_down(button: i32) -> bool
+
+system begin() {
+  if !Window.open {
+    let width = if Window.width > 0 { Window.width } else { 800 }
+    let height = if Window.height > 0 { Window.height } else { 450 }
+    Window.width = width
+    Window.height = height
+    open_window(width, height, Window.title)
+    Window.open = true
+  }
+  Window.closed = should_close()
+  Window.dt = frame_seconds()
+  Window.frame += 1
+  Mouse.x = mouse_x()
+  Mouse.y = mouse_y()
+  Mouse.left = mouse_down(0)
+  Mouse.right = mouse_down(1)
+  Keys.right = key_down(262)
+  Keys.left = key_down(263)
+  Keys.down = key_down(264)
+  Keys.up = key_down(265)
+  Keys.space = key_down(32)
+  Keys.enter = key_down(257)
+  begin_frame(Window.background, Window.fps)
+}
+
+system present() {
+  end_frame()
+}

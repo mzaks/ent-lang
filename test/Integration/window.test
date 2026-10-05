@@ -1,0 +1,26 @@
+// The window device (devices/window.ent) and its example compile: every
+// call goes to a C function of the device, with values only. Running it
+// needs a display and raylib, which a test cannot ask for.
+// RUN: ent-translate --import-ent %S/../../examples/bounce.ent \
+// RUN:     -I %S/../../devices -o %t.mlir
+// RUN: ent-translate --ent-to-c-extern-header %t.mlir | FileCheck %s
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s --check-prefix=LLVM
+// The systems that draw keep their order; moving the balls is the
+// program's own business.
+// RUN: ent-opt %t.mlir --ent-print-access -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=ACCESS
+
+// CHECK-NOT: ent_world
+// CHECK: void ent_window_circle(float arg0, float arg1, float arg2, int32_t arg3);
+// CHECK: void ent_window_label(const ent_text126 *arg0, float arg1, float arg2, float arg3, int32_t arg4);
+// CHECK: void ent_window_open_window(int32_t arg0, int32_t arg1, const ent_text62 *arg2);
+
+// LLVM-DAG: declare void @ent_window_circle(float, float, float, i32)
+// LLVM-DAG: declare i8 @ent_window_should_close()
+
+// ACCESS:     remark: reads window.Keys.space{{.*}}; writes {{.*}}Position_Velocity_Ball.Position.x
+// ACCESS-NOT: has effects outside
+// ACCESS:     remark: reads Position_Velocity_Ball.Position.x
+// ACCESS:     note: has effects outside component access

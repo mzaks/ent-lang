@@ -49,10 +49,33 @@ there (`Position`, `tick()`); there is no access control yet.
 - A module may have a `world`. `main` and `default_capacity` belong to
   the program's own file.
 
-A module with an `m.c` next to its `m.ent` is a device: the C defines
-its extern systems, and `tools/ent` compiles it with the program. The
-compiler's own are in `devices/` (`console`, `clock`), found without `-I`
-by `tools/ent`.
+A module with an implementation next to its `m.ent` is a device: that
+defines its extern procs and fns (and extern systems), and `tools/ent`
+builds and links it with the program. The compiler's own are in `devices/`
+(`console`, `clock`, `window`), found without `-I` by `tools/ent`. The
+implementation is any of:
+
+- `m.c`: C, compiled against the generated headers.
+- `m.cpp`: C++, the same way; the headers are `extern "C"`.
+- `m.o`, `m.a`: an object or archive built elsewhere, linked as it is.
+- `m.build`: one shell command that builds such an object or archive. It
+  runs in the module's directory, with `ENT_OUTPUT` (the file to write),
+  `ENT_INCLUDE` (the directory of the generated headers) and `ENT_CC`,
+  `ENT_CXX` (the compilers `tools/ent` uses) set.
+
+Next to any of them, `m.link` names the libraries the module needs, as
+arguments for the linker (`-lraylib -lm`).
+
+`tools/ent` compiles the program itself with the LLVM its IR was made
+with, and hands the modules' C and C++ and the link to the machine's own
+compiler (`cc`, `c++`, or what `ENT_CC` and `ENT_CXX` name), which knows
+where the machine's libraries are.
+
+So a device may be written in any language that can define a C function:
+the contract is the C calling convention, with what the headers declare.
+Such a function must not let an exception or a panic leave it, must not
+need a runtime the program never started, and, for an `extern fn`, must
+be callable from threads its language did not create.
 
 ## Declarations
 
@@ -187,6 +210,10 @@ Literals (`1`, `2.5`, `1e8`, `true`), locals and parameters, `binding.field`,
 operand it meets (`x * 2` is an f32 if `x` is); on its own an integer is an
 i32 and a float an f32. There are no implicit conversions.
 
+An integer may be written in hex (`0xff8800`): the bits of the type it
+takes, so `0xff` is an i8 (all its bits, the number -1) and a ninth bit
+does not fit one. It is never a float.
+
 ## Text
 
 ```
@@ -224,7 +251,8 @@ well as for text: any byte may be in it, nothing ends it.
 - In the C header a text column is an array of `ent_textN`, a struct of
   `uint16_t length` and `char bytes[N]`, not terminated; C that writes one
   keeps the bytes past `length` zero. A text cannot be a parameter of a
-  schedule a C host calls or of an extern system yet.
+  schedule a C host calls or of an extern system yet; an extern fn or proc
+  takes one.
 
 Text has no order (`<`), search or slices yet, and its bytes cannot be
 changed one by one.
@@ -261,7 +289,10 @@ extern system report(scale: f32) reads Position, Clock writes Console
 ```
 
 A system without a body, implemented in C as `void ent_report(ent_world
-*world, float scale)` against the generated header, which declares it.
+*world, float scale)` against the generated header, which declares it. It
+gets the whole world, and the compiler cannot check that it keeps to what
+it declares: where values are enough, an extern fn or proc is the safer
+way out.
 Schedules run it like any system. Since the compiler cannot see what it
 does, what it declares is its access: every field of the components,
 uniques and relations it names; an archetype in `writes` means it spawns
@@ -269,6 +300,49 @@ entities there. Without `reads` or `writes` it is ordered against every
 other system. Output and other effects outside the world are not part of
 the contract: extern systems that must stay in order because of them write
 a common unique (`writes Console`), or declare nothing.
+
+## Extern fns and procs
+
+```
+extern fn noise(x: f32, y: f32) -> f32
+extern proc put(line: text[126])
+extern proc wait_until(due: f64) -> f64
+
+system write() {
+  for p: Print { put(p.line) }
+}
+system wobble() {
+  for p: mut Position { p.y += noise(p.x, p.y) }
+}
+```
+
+Functions implemented in C, which systems call. They take values and give
+at most one back; they never get the world. So what a system reads and
+writes is what its own body does, inferred and checked as always, and the C
+has nothing to get wrong about it. Prefer them to extern systems.
+
+- An `extern fn` computes: the same result for the same arguments, and
+  nothing else. The compiler takes that on trust and treats a call like
+  arithmetic: it may run on several threads at once, be moved, or be
+  dropped if its value is not used. It always gives a value.
+- An `extern proc` acts on the outside (output, input, the time) and may
+  give a value back. It is called exactly where and as often as the
+  systems say: a system that calls one keeps its place in the schedule
+  among all other systems, and a `for` that calls one visits its entities
+  in order, one at a time. A proc is called as a statement, or as an
+  expression where it gives a value.
+- They are called in systems and in `world`, not in `main` or a `run_if`
+  condition: those read uniques, which a system has written.
+- Parameters and results are numbers and bools; a parameter may also be a
+  text, which C gets as `const ent_textN *`. A text argument of another
+  capacity is widened or cut like anywhere else.
+- In C, `extern proc put` is `void ent_put(const ent_text126 *line)`, and
+  a module `console`'s is `ent_console_put`. `tools/ent` generates their
+  declarations as `ent_extern.h` (`ent-translate
+  --ent-to-c-extern-header`): the texts and the functions, without the
+  world. They are also in the world's header.
+
+`fn` and `proc` with a body in ent-lang are not supported yet.
 
 ## The world
 
@@ -313,7 +387,7 @@ header, as before.
 
 ## Not yet supported
 
-`fn`/`proc`, devices, prefabs, optional bindings (`T?`), mutable locals
+`fn`/`proc` with a body, `device` declarations, prefabs, optional bindings (`T?`), mutable locals
 (`var`), `while` loops and counted loops inside a `for` over entities: each
 is reported as "not supported yet" where it would start. Of relations, not yet: traversal (`up`, `cascade`), joins
 over relation variables, accumulating into a unique and connecting inside

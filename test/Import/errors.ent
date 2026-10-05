@@ -100,8 +100,77 @@ system s() {
 
 // -----
 
-// expected-error @+1 {{'proc' is not supported yet}}
+// expected-error @+1 {{'proc' with a body is not supported yet; 'extern proc' declares one implemented in C}}
 proc nearest() {
+}
+
+// -----
+
+// expected-error @+1 {{an extern fn gives a value back ('-> type'); one that only acts is an 'extern proc'}}
+extern fn beep()
+
+// -----
+
+// expected-error @+1 {{C cannot give a text back yet}}
+extern proc name() -> text[8]
+
+// -----
+
+// expected-error @+1 {{an extern proc has no body; it is implemented in C}}
+extern proc beep() {
+}
+
+// -----
+
+extern proc put(value: i32)
+system s() {
+  // expected-error @+1 {{'put' takes 1 argument(s), not 2}}
+  put(1, 2)
+}
+
+// -----
+
+extern proc put(value: i32)
+system s() {
+  // expected-error @+1 {{'put' gives no value}}
+  let x = put(1)
+}
+
+// -----
+
+extern fn twice(value: i32) -> i32
+system s() {
+  // expected-error @+1 {{'twice' is a fn: it only gives a value, so calling it for nothing does nothing}}
+  twice(1)
+}
+
+// -----
+
+extern fn twice(value: i32) -> i32
+system s() {
+  // expected-error @+1 {{argument has a different type than the parameter}}
+  let x = twice(1.5 as f32)
+}
+
+// -----
+
+unique Exit: bool
+extern proc done() -> bool
+system s() {
+}
+schedule frame() {
+  s()
+}
+main {
+  // expected-error @+1 {{'done' can only be called in a system; conditions and 'main' read uniques a system has written}}
+  loop { frame() } until done()
+}
+
+// -----
+
+system s() {
+  // expected-error @+1 {{unknown function 'nearest'; declare one implemented in C with 'extern fn' or 'extern proc' (min, max and len are built in)}}
+  let x = nearest(1)
 }
 
 // -----
@@ -239,7 +308,7 @@ extern system draw() {
 
 // -----
 
-// expected-error @+1 {{expected 'system', found 'schedule'}}
+// expected-error @+1 {{expected 'fn', 'proc' or 'system' after 'extern', found 'schedule'}}
 extern schedule frame() {
 }
 
@@ -406,4 +475,28 @@ unique Title: text[8]
 system s(e: entity) {
   // expected-error @+1 {{this value has no text form; numbers, bools and texts do}}
   Title = "{e}"
+}
+
+// -----
+
+unique Bits { byte: i8, ratio: f32, all: i64 }
+system s() {
+  // expected-error @+1 {{this hex literal has more than the 8 bits of its type}}
+  Bits.byte = 0x100
+}
+
+// -----
+
+unique Bits { ratio: f32 }
+system s() {
+  // expected-error @+1 {{a hex literal is the bits of an integer; it cannot be a float}}
+  Bits.ratio = 0x10
+}
+
+// -----
+
+unique Bits { all: i64 }
+system s() {
+  // expected-error @+1 {{a hex literal has at most 16 digits (64 bits)}}
+  Bits.all = 0x10000000000000000
 }

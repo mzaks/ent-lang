@@ -1,0 +1,68 @@
+// Balls in a window: the `window` device (devices/window.ent) opens it,
+// reads the keys and the mouse and shows what the systems here draw.
+//
+//   tools/ent run examples/bounce.ent
+//
+// Space holds the balls still, the left mouse button pulls them to the
+// mouse; Escape or closing the window ends the program.
+import window
+
+component Position { x: f32, y: f32 }
+component Velocity { dx: f32, dy: f32 }
+component Ball { radius: f32, color: i32 }
+default_capacity 256
+
+world {
+  Window.width = 800
+  Window.height = 450
+  Window.title = "ent-lang: bounce"
+  Window.background = 0x202830
+  Window.fps = 60
+  for i in 0..120 {
+    spawn {
+      Position { x: 40.0 + (i * 53 % 720) as f32, y: 40.0 + (i * 31 % 370) as f32 },
+      Velocity { dx: ((i * 17 % 240) - 120) as f32, dy: ((i * 29 % 200) - 100) as f32 },
+      Ball { radius: 4.0 + (i % 5) as f32 * 2.0,
+             color: 0x3060c0 + (i % 6) * 0x281400 }
+    }
+  }
+}
+
+// Nothing here acts on the outside: it may run on all cores.
+system move() {
+  let dt = if Keys.space { 0.0 } else { Window.dt }
+  let width = Window.width as f32
+  let height = Window.height as f32
+  for p: mut Position, v: mut Velocity, b: Ball {
+    if Mouse.left {
+      v.dx += (Mouse.x - p.x) * dt
+      v.dy += (Mouse.y - p.y) * dt
+    }
+    p.x += v.dx * dt
+    p.y += v.dy * dt
+    // Off a wall: away from it, whatever the speed was.
+    if p.x < b.radius { v.dx = max(v.dx, -v.dx) }
+    if p.x > width - b.radius { v.dx = min(v.dx, -v.dx) }
+    if p.y < b.radius { v.dy = max(v.dy, -v.dy) }
+    if p.y > height - b.radius { v.dy = min(v.dy, -v.dy) }
+  }
+}
+
+system draw() {
+  for p: Position, b: Ball {
+    circle(p.x, p.y, b.radius, b.color)
+  }
+  rect(0.0, 0.0, 250.0, 26.0, 0x101418)
+  label("frame {Window.frame}  space: hold", 8.0, 6.0, 16.0, 0xe0e0e0)
+}
+
+schedule frame() {
+  begin()
+  move()
+  draw()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}

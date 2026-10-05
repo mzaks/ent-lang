@@ -1,0 +1,3 @@
+// Built by its own command (built.build); any language that can define a
+// C function and write an object would do.
+extern fn double_it(n: i32) -> i32

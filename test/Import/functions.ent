@@ -1,0 +1,54 @@
+// RUN: ent-translate --import-ent %s -I %S/Inputs | FileCheck %s
+// RUN: ent-translate --import-ent %s -I %S/Inputs | ent-opt | FileCheck %s
+// RUN: ent-translate --import-ent %s -I %S/Inputs \
+// RUN:   | ent-translate --ent-to-c-extern-header \
+// RUN:   | FileCheck %s --check-prefix=HEADER
+
+// A module's functions are named like its other declarations, in C too.
+// CHECK: ent.function proc @sound.beep(f32)
+// CHECK: ent.function @sound.loudness(i32) -> f32
+// CHECK: ent.system @sound.alarm() {
+// CHECK:   %[[L:.*]] = ent.invoke @sound.loudness(%{{.*}}) : (i32) -> f32
+// CHECK:   ent.invoke proc @sound.beep(%[[L]]) : (f32) -> ()
+// HEADER: void ent_sound_beep(float arg0);
+// HEADER: float ent_sound_loudness(int32_t arg0);
+import sound
+
+component Name { text: text[30], id: i64 }
+unique Clock { now: f64 }
+
+// `fn`: only computes. `proc`: acts, and may give something back.
+// CHECK: ent.function @hash(i64) -> i64
+// HEADER: int64_t ent_hash(int64_t arg0);
+extern fn hash(id: i64) -> i64
+// CHECK: ent.function proc @put(!ent.text<30>, i1)
+// HEADER: void ent_put(const ent_text30 *arg0, bool arg1);
+extern proc put(line: text[30], loud: bool)
+// CHECK: ent.function proc @seconds() -> f64
+// HEADER: double ent_seconds(void);
+extern proc seconds() -> f64;
+
+// CHECK-LABEL: ent.system @run() {
+system run() {
+  // A call is an expression where it gives a value...
+  // CHECK: %[[T:.*]] = ent.invoke proc @seconds() : () -> f64
+  // CHECK: ent.write @Clock "now", %[[T]] : f64
+  Clock.now = seconds()
+  for n: mut Name {
+    // CHECK: %[[H:.*]] = ent.invoke @hash(%{{.*}}) : (i64) -> i64
+    // CHECK: arith.addi %[[H]]
+    n.id = hash(n.id) + 1
+    // ... and a statement where it acts. A literal takes the parameter's
+    // type, a text its capacity.
+    // CHECK: ent.invoke proc @put(%{{.*}}, %{{.*}}) : (!ent.text<30>, i1) -> ()
+    put(n.text, true)
+    // CHECK: ent.invoke proc @put(%{{.*}}, %{{.*}}) : (!ent.text<30>, i1) -> ()
+    put("id {n.id}", n.id > 3)
+  }
+  // An imported module's are called like one's own.
+  // CHECK: ent.invoke proc @sound.beep(%{{.*}}) : (f32) -> ()
+  beep(440.0)
+  // A proc's value may be left unused.
+  // CHECK: ent.invoke proc @seconds() : () -> f64
+  seconds()
+}

@@ -1,6 +1,7 @@
 // The devices that come with the compiler (devices/), through the build
 // driver (tools/ent): a program of .ent files only. The driver finds the
-// modules, compiles their C against the program's header, and runs it.
+// modules, compiles their C against the declarations of what they
+// implement, and runs it.
 // RUN: %ent run %S/Inputs/devices.ent | FileCheck %s
 // RUN: %ent run --parallel %S/Inputs/devices.ent | FileCheck %s
 // RUN: %ent build %S/Inputs/devices.ent -o %t.exe --keep %t.dir
@@ -16,9 +17,11 @@
 // CHECK-NEXT: frame 3
 // CHECK-NEXT:   with a second line
 // CHECK-NEXT: early 0 backwards 0
+// CHECK-NEXT: the end
 // CHECK-NOT:  {{.}}
 
 // KEPT-DAG: ent_world.h
+// KEPT-DAG: ent_extern.h
 // KEPT-DAG: devices.mlir
 
 // The hello example.

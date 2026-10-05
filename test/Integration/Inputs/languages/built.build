@@ -1,0 +1,1 @@
+"$ENT_CC" -O2 -I "$ENT_INCLUDE" -c built_source.c -o "$ENT_OUTPUT"

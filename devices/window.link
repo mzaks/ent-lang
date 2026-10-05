@@ -1,0 +1,2 @@
+# The window device draws with raylib (https://www.raylib.com).
+-lraylib -lm

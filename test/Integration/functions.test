@@ -1,0 +1,28 @@
+// Extern fns and procs through the build driver: values go to C and come
+// back, the world stays with the program. Procs are called in the order
+// the systems say, also when the schedule is staged.
+// RUN: %ent run %S/Inputs/functions.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/functions.ent | FileCheck %s
+// The C is compiled against a header without the world.
+// RUN: %ent build %S/Inputs/functions.ent -o %t.exe --keep %t.dir
+// RUN: FileCheck %s --check-prefix=HEADER --input-file %t.dir/ent_extern.h
+
+// HEADER-NOT: ent_world
+// HEADER:     bool ent_longer(const ent_text14 *arg0, int32_t arg1);
+
+// CHECK:      start
+// CHECK-NEXT: item 0: 1 odd
+// CHECK-NEXT: item 1: 4
+// CHECK-NEXT: item 2: 7 odd
+// CHECK-NEXT: item 3: 10
+// CHECK-NEXT: a longer item: 13 odd
+// CHECK-NEXT:   is long
+// CHECK-NEXT: shown 5
+// CHECK-NEXT: item 0: 4
+// CHECK-NEXT: item 1: 13 odd
+// CHECK-NEXT: item 2: 22
+// CHECK-NEXT: item 3: 31 odd
+// CHECK-NEXT: a longer item: 40
+// CHECK-NEXT:   is long
+// CHECK-NEXT: shown 10
+// CHECK-NOT:  {{.}}

@@ -1,0 +1,3 @@
+// Implemented in C++ (cxx.cpp).
+extern fn square(n: i32) -> i32
+extern proc shout(line: text[30])

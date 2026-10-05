@@ -1,18 +1,29 @@
 // The console: a program prints a line by spawning a `Print`; `write`
-// puts the lines out in the order they were spawned and `clear` takes
-// them away. Run both where the frame's output should appear:
+// puts the lines out and `clear` takes them away. Run both where the
+// frame's output should appear:
 //
 //   import console
 //   system greet() { spawn { Print { line: "hello" } } }
 //   schedule frame() { greet()  write()  clear() }
 //
-// Implemented in devices/console.c.
-component Print { line: text[126] }
+// Lines spawned alike come out in the order they were spawned. An entity
+// may carry more than its `Print`; such lines follow the plain ones, each
+// shape's together.
+//
+// `put` and `flush` are implemented in devices/console.c.
 
-// At most this many lines between two `write`s.
-archetype Lines { Print } capacity 1024
+// At most this many lines of one shape between two `write`s.
+component Print { line: text[126] } capacity 1024
 
-extern system write() reads Print
+// Writes one line to standard output.
+extern proc put(line: text[126])
+// Hands what was written on to whoever reads it.
+extern proc flush()
+
+system write() {
+  for p: Print { put(p.line) }
+  flush()
+}
 
 system clear() {
   for e with Print { e.destroy() }

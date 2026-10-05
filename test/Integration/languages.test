@@ -1,0 +1,14 @@
+// Extern functions need not be C next to the module: C++ (m.cpp), a
+// command that builds an object (m.build) with the library it needs
+// (m.link), and objects built elsewhere, here handed to the driver.
+// RUN: clang -O2 -c %S/Inputs/languages/say.c -o %t.say.o
+// RUN: %ent run %S/Inputs/languages/app.ent %t.say.o | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/languages/app.ent %t.say.o \
+// RUN:   | FileCheck %s
+// RUN: not %ent build %S/Inputs/languages/app.ent %S/Inputs/languages/app.ent \
+// RUN:     -o %t.exe 2>&1 | FileCheck %s --check-prefix=UNKNOWN
+
+// CHECK:      squared 49
+// CHECK-NEXT: doubled 42
+// CHECK-NEXT: DONE
+// UNKNOWN: ent: do not know how to build '{{.*}}app.ent' (expected .c, .cpp, .o or .a)

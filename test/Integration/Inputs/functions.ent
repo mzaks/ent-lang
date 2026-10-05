@@ -1,0 +1,49 @@
+// Extern fns and procs end to end: the C next to this file
+// (functions.c) gets values and gives values, and never sees the world.
+component Item { id: i64, name: text[14] } capacity 2000
+tag Marked
+
+// The same result for the same arguments, and nothing else.
+extern fn mix(id: i64) -> i64
+extern fn is_odd(id: i64) -> bool
+extern fn longer(name: text[14], than: i32) -> bool
+// Acting on the outside.
+extern proc say(line: text[30])
+extern proc show(name: text[14], id: i64, odd: bool)
+extern proc shown() -> i32
+
+world {
+  say("start")
+  for i in 0..4 {
+    spawn { Item { id: i as i64, name: "item {i}" } }
+  }
+  // Another shape: `report` visits it too.
+  spawn { Item { id: 4, name: "a longer item" }, Marked }
+}
+
+system scramble() {
+  for it: mut Item { it.id = mix(it.id) }
+}
+
+system report() {
+  for it: Item {
+    show(it.name, it.id, is_odd(it.id))
+    if longer(it.name, 6) { say("  is long") }
+  }
+}
+
+system total() {
+  let n = shown()
+  say("shown {n}")
+}
+
+schedule frame() {
+  scramble()
+  report()
+  total()
+}
+
+main {
+  frame()
+  frame()
+}

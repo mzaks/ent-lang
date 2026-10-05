@@ -21,7 +21,12 @@ system report() {
   spawn { Print { line: "  with a second line" } }
 }
 
+// A line may carry more than its `Print`; `write` finds it all the same,
+// after the plain ones.
+tag Last
+
 system sum() {
+  spawn { Print { line: "the end" }, Last }
   spawn { Print { line: "early {Checked.late} backwards {Checked.backwards}" } }
 }
 

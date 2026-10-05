@@ -25,6 +25,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/SourceMgr.h"
 
 #include <functional>
@@ -123,6 +124,8 @@ struct Expr {
   bool boolValue = false;
   /// For an Int: written as a character ('a'), so it is a byte (i8).
   bool isByte = false;
+  /// For an Int: written in hex (0xff), so it is the bits of its type.
+  bool isHex = false;
   std::string name, field;
   Token::Kind op = Token::Eof;
   SmallVector<ExprPtr> operands;
@@ -144,6 +147,14 @@ struct Record {
         return type;
     return {};
   }
+};
+
+/// A function implemented in C (`extern fn`, `extern proc`).
+struct Function {
+  SmallVector<Type> params;
+  /// Null if it gives nothing back.
+  Type result;
+  bool proc = false;
 };
 
 /// What a name stands for in a body.
@@ -173,7 +184,8 @@ public:
         uniques([this](StringRef name) { return resolve(name); }),
         relations([this](StringRef name) { return resolve(name); }),
         systems([this](StringRef name) { return resolve(name); }),
-        schedules([this](StringRef name) { return resolve(name); }) {
+        schedules([this](StringRef name) { return resolve(name); }),
+        functions([this](StringRef name) { return resolve(name); }) {
     advance();
   }
 
@@ -256,6 +268,7 @@ private:
   LogicalResult parseUnique();
   LogicalResult parseArchetype();
   LogicalResult parseSystem(bool isExtern);
+  LogicalResult parseFunction(bool proc);
   LogicalResult parseSchedule();
   LogicalResult parseMain();
   LogicalResult parseWorld();
@@ -324,6 +337,7 @@ private:
   FailureOr<mlir::Value> emitBinary(const Expr &expr, Type expected);
   FailureOr<mlir::Value> emitIf(const Expr &expr, Type expected);
   FailureOr<mlir::Value> emitSpawn(const Expr &expr);
+  FailureOr<mlir::Value> emitInvoke(const Expr &expr);
   FailureOr<SmallVector<mlir::Value>> emitInitValues(const ComponentInit &init);
   mlir::Value combine(Location at, StringRef rule, mlir::Value a,
                       mlir::Value b);
@@ -428,6 +442,10 @@ private:
   }
   Declared<SmallVector<Type>> systems;
   Declared<SmallVector<Type>> schedules;
+  Declared<Function> functions;
+  /// Parsing the body of a system (or `world`): where functions are
+  /// called.
+  bool inSystem = false;
   bool hasMain = false;
   bool hadError = false;
   /// Every module of the program, in the order their parsing finished: a
@@ -505,10 +523,17 @@ LogicalResult Parser::parseDeclarations() {
       result = parseArchetype();
     else if (consumeKeyword("system"))
       result = parseSystem(/*isExtern=*/false);
-    else if (consumeKeyword("extern"))
-      result = failed(expectKeyword("system"))
-                   ? LogicalResult::failure()
-                   : parseSystem(/*isExtern=*/true);
+    else if (consumeKeyword("extern")) {
+      if (consumeKeyword("fn"))
+        result = parseFunction(/*proc=*/false);
+      else if (consumeKeyword("proc"))
+        result = parseFunction(/*proc=*/true);
+      else if (consumeKeyword("system"))
+        result = parseSystem(/*isExtern=*/true);
+      else
+        result = error("expected 'fn', 'proc' or 'system' after 'extern', "
+                       "found '" + token.spelling + "'");
+    }
     else if (consumeKeyword("schedule"))
       result = parseSchedule();
     else if (token.isKeyword("import"))
@@ -533,7 +558,12 @@ LogicalResult Parser::parseDeclarations() {
     } else if (token.isKeyword("proc") ||
                token.isKeyword("fn") || token.isKeyword("device") ||
                token.isKeyword("prefab")) {
-      result = error("'" + token.spelling + "' is not supported yet");
+      result = error(
+          token.isKeyword("proc") || token.isKeyword("fn")
+              ? "'" + token.spelling + "' with a body is not supported yet; "
+                "'extern " + token.spelling + "' declares one implemented "
+                "in C"
+              : "'" + token.spelling + "' is not supported yet");
     } else {
       result = error("expected a declaration (import, component, tag, "
                      "unique, relation, archetype, system, schedule, world, "
@@ -897,9 +927,64 @@ LogicalResult Parser::parseSystem(bool isExtern) {
   ScopeGuard scope(*this);
   for (auto [param, arg] : llvm::zip(params, block->getArguments()))
     bind(param.first, Variable::ofValue(arg));
+  llvm::SaveAndRestore<bool> calls(inSystem, true);
   if (failed(parseBlock()))
     return failure();
   SystemOp::ensureTerminator(system->getRegion(0), builder, loc(at));
+  return success();
+}
+
+// extern fn name(params) [-> type]
+// extern proc name(params) [-> type]
+LogicalResult Parser::parseFunction(bool proc) {
+  llvm::SMLoc at = token.loc;
+  StringRef kind = proc ? "proc" : "fn";
+  FailureOr<std::string> name = identifier("a function name");
+  if (failed(name) || failed(expect(Token::LParen, "'('")))
+    return failure();
+  Function function;
+  function.proc = proc;
+  while (!token.is(Token::RParen)) {
+    FailureOr<std::string> param = identifier("a parameter name");
+    if (failed(param) || failed(expect(Token::Colon, "':'")))
+      return failure();
+    FailureOr<Type> type = parseType();
+    if (failed(type))
+      return failure();
+    function.params.push_back(*type);
+    if (!consumeIf(Token::Comma))
+      break;
+  }
+  if (failed(expect(Token::RParen, "')'")))
+    return failure();
+  // `-> type`: what it gives back.
+  if (token.is(Token::Minus) && peek().is(Token::Greater)) {
+    advance();
+    advance();
+    llvm::SMLoc resultAt = token.loc;
+    FailureOr<Type> type = parseType();
+    if (failed(type))
+      return failure();
+    if (isa<TextType>(*type))
+      return error(resultAt, "C cannot give a text back yet");
+    function.result = *type;
+  } else if (!proc) {
+    return error(at, "an extern fn gives a value back ('-> type'); one that "
+                 "only acts is an 'extern proc'");
+  }
+  if (token.is(Token::LBrace))
+    return error(at,
+                 "an extern " + kind + " has no body; it is implemented in C");
+  consumeIf(Token::Semicolon);
+  if (name->size() == 3 && (*name == "min" || *name == "max" || *name == "len"))
+    return error(at, "'" + *name + "' is built in");
+  StringAttr symbolName = declareSymbol(at, *name);
+  FunctionOp::create(builder, loc(at), symbolName,
+                     builder.getTypeArrayAttr(function.params),
+                     function.result ? TypeAttr::get(function.result)
+                                     : TypeAttr(),
+                     proc);
+  functions[*name] = std::move(function);
   return success();
 }
 
@@ -1041,6 +1126,7 @@ LogicalResult Parser::parseWorld() {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPointToEnd(&system->getRegion(0).front());
     ScopeGuard scope(*this);
+    llvm::SaveAndRestore<bool> body(inSystem, true);
     if (failed(parseBlock()))
       return failure();
     SystemOp::ensureTerminator(system->getRegion(0), builder, loc(at));
@@ -1193,6 +1279,18 @@ LogicalResult Parser::parseStatement() {
   if (token.isKeyword("return") || token.isKeyword("while") ||
       token.isKeyword("loop") || token.isKeyword("var"))
     return error("'" + token.spelling + "' is not supported yet");
+  // name(args): a call for what it does.
+  if (token.is(Token::Identifier) && peek().is(Token::LParen) &&
+      functions.count(token.spelling)) {
+    FailureOr<ExprPtr> call = parsePrimary();
+    if (failed(call))
+      return failure();
+    Function &function = functions[(*call)->name];
+    if (!function.proc)
+      return error(at, "'" + (*call)->name + "' is a fn: it only gives a "
+                       "value, so calling it for nothing does nothing");
+    return emitInvoke(**call);
+  }
   if (token.is(Token::Identifier))
     return parseNameStatement();
   return error(at, "expected a statement, found '" + token.spelling + "'");
@@ -2120,7 +2218,13 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
   switch (token.kind) {
   case Token::Integer: {
     node->kind = Expr::Int;
-    if (token.spelling.getAsInteger(10, node->intValue))
+    if (token.spelling.starts_with_insensitive("0x")) {
+      uint64_t bits;
+      if (token.spelling.drop_front(2).getAsInteger(16, bits))
+        return error("a hex literal has at most 16 digits (64 bits)");
+      node->intValue = int64_t(bits);
+      node->isHex = true;
+    } else if (token.spelling.getAsInteger(10, node->intValue))
       return error("integer literal out of range");
     advance();
     return node;
@@ -2337,6 +2441,8 @@ Type Parser::typeOf(const Expr &expr) {
   case Expr::Call:
     if (expr.name == "len")
       return builder.getI32Type();
+    if (functions.count(expr.name))
+      return functions[expr.name].result;
     for (const ExprPtr &operand : expr.operands)
       if (Type type = typeOf(*operand))
         return type;
@@ -2364,6 +2470,36 @@ Type Parser::defaultType(const Expr &expr) {
     if (defaultType(*operand).isF32())
       return builder.getF32Type();
   return builder.getI32Type();
+}
+
+/// Emit a call of an extern fn or proc; the value is null if it gives
+/// none.
+FailureOr<mlir::Value> Parser::emitInvoke(const Expr &expr) {
+  Function &function = functions[expr.name];
+  if (!inSystem)
+    return error(expr.loc, "'" + expr.name + "' can only be called in a "
+                           "system; conditions and 'main' read uniques a "
+                           "system has written");
+  if (expr.operands.size() != function.params.size())
+    return error(expr.loc, "'" + expr.name + "' takes " +
+                               Twine(function.params.size()) +
+                               " argument(s), not " +
+                               Twine(expr.operands.size()));
+  SmallVector<mlir::Value> args;
+  for (auto [operand, type] : llvm::zip(expr.operands, function.params)) {
+    FailureOr<mlir::Value> arg = emit(*operand, type);
+    if (failed(arg))
+      return failure();
+    if (arg->getType() != type)
+      return error(operand->loc, "argument has a different type than the "
+                                 "parameter");
+    args.push_back(*arg);
+  }
+  auto invoke = InvokeOp::create(
+      builder, loc(expr.loc),
+      function.result, symbol(expr.name), args,
+      function.proc ? builder.getUnitAttr() : UnitAttr());
+  return invoke.getResult() ? mlir::Value(invoke.getResult()) : mlir::Value();
 }
 
 FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
@@ -2427,6 +2563,9 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     if (expr.isByte)
       return integer(at, builder.getIntegerType(8), expr.intValue);
     Type type = expected ? expected : builder.getI32Type();
+    if (expr.isHex && isa<FloatType>(type))
+      return error(expr.loc, "a hex literal is the bits of an integer; "
+                             "it cannot be a float");
     if (isa<FloatType>(type))
       return arith::ConstantOp::create(
                  builder, at,
@@ -2434,6 +2573,17 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
           .getResult();
     if (!type.isIntOrIndex() || type.isInteger(1))
       return error(expr.loc, "an integer cannot be used here");
+    if (expr.isHex) {
+      // The bits of the value, whatever number they make: 0xff is an i8.
+      unsigned width = type.isIndex() ? 64 : type.getIntOrFloatBitWidth();
+      uint64_t bits = uint64_t(expr.intValue);
+      if (width < 64 && bits >> width != 0)
+        return error(expr.loc, "this hex literal has more than the " +
+                                   Twine(width) + " bits of its type");
+      return arith::ConstantOp::create(
+                 builder, at, IntegerAttr::get(type, APInt(width, bits)))
+          .getResult();
+    }
     return arith::ConstantOp::create(
                builder, at, builder.getIntegerAttr(type, expr.intValue))
         .getResult();
@@ -2542,10 +2692,16 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return failure();
       return textLength(at, *text);
     }
+    if (functions.count(expr.name)) {
+      if (!functions[expr.name].result)
+        return error(expr.loc, "'" + expr.name + "' gives no value");
+      return emitInvoke(expr);
+    }
     if (expr.name != "min" && expr.name != "max")
       return error(expr.loc, "unknown function '" + expr.name +
-                                 "'; functions are not supported yet "
-                                 "(min, max and len are built in)");
+                                 "'; declare one implemented in C with "
+                                 "'extern fn' or 'extern proc' (min, max "
+                                 "and len are built in)");
     if (expr.operands.size() != 2)
       return error(expr.loc, "'" + expr.name + "' takes two arguments");
     Type type = typeOf(expr);

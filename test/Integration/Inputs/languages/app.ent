@@ -1,0 +1,17 @@
+// A program whose extern functions are implemented three ways: a module
+// in C++, a module built by its own command, and an object handed to the
+// driver.
+import cxx
+import built
+
+extern proc say(line: text[30])
+
+system run() {
+  say("squared {square(7)}")
+  say("doubled {double_it(21)}")
+  shout("done")
+}
+
+schedule frame() { run() }
+
+main { frame() }
