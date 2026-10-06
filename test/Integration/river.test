@@ -1,0 +1,22 @@
+// A tree from its leaves (Inputs/river.ent): every node passes what it
+// has gathered on to the node it flows into, with `+=` and `max=` through
+// a `mut` binding up the tree, in a `for` that cascades `leaves first`.
+// RUN: %ent run %S/Inputs/river.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/river.ent 2>/dev/null | FileCheck %s
+
+// The nodes are spawned downstream first: in that order the sea would get
+// the river's own 10 and no more.
+// CHECK:      sea 11111 from 900
+// CHECK-NEXT: river 11110 from 900
+// CHECK-NEXT: brook 11000 from 900
+// CHECK-NEXT: spring 10000 from 900
+// CHECK-NEXT: creek 100 from 500
+// CHECK-NEXT: lake 5 from 50
+// The deepest first, those without a parent last.
+// CHECK-NEXT: visit spring
+// CHECK-NEXT: visit creek
+// CHECK-NEXT: visit brook
+// CHECK-NEXT: visit river
+// CHECK-NEXT: visit sea
+// CHECK-NEXT: visit lake
+// CHECK-NOT:  {{.}}

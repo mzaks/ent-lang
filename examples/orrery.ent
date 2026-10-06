@@ -1,0 +1,111 @@
+// An orrery: a sun, planets around it, moons around the planets and a
+// station around a moon. Every body knows only its orbit around the body
+// it circles; where it is in the window follows from where that one is.
+//
+//   tools/ent run examples/orrery.ent
+//
+// Space holds the bodies still; Escape or closing the window ends the
+// program.
+import window
+import math
+
+// Where a body is in the window, and how big.
+component Body { x: f32, y: f32, radius: f32 }
+// Its way around the body it circles: how far out, where on the circle
+// (radians) and how fast (radians a second).
+component Orbit { distance: f32, angle: f32, speed: f32 }
+// A colour of its own; a body without one has that of what it circles.
+component Tint { color: i32 }
+default_capacity 64
+
+// From a body to the one it circles. A tree: a body circles one other,
+// and none circles itself, however far around.
+relation Orbits from Orbit to Body tree capacity 64
+
+world {
+  Window.width = 800
+  Window.height = 600
+  Window.title = "ent-lang: orrery"
+  Window.background = 0x080810
+  Window.fps = 60
+
+  let sun = spawn {
+    Body { x: 400.0, y: 300.0, radius: 26.0 }, Tint { color: 0xffcc33 }
+  }
+  let inner = spawn {
+    Body { x: 0.0, y: 0.0, radius: 6.0 },
+    Orbit { distance: 70.0, angle: 0.0, speed: 1.6 }, Tint { color: 0xc0a080 }
+  }
+  let earth = spawn {
+    Body { x: 0.0, y: 0.0, radius: 10.0 },
+    Orbit { distance: 140.0, angle: 1.0, speed: 0.8 }, Tint { color: 0x3080ff }
+  }
+  let giant = spawn {
+    Body { x: 0.0, y: 0.0, radius: 16.0 },
+    Orbit { distance: 240.0, angle: 3.0, speed: 0.3 }, Tint { color: 0xd08040 }
+  }
+  connect(inner, sun, Orbits)
+  connect(earth, sun, Orbits)
+  connect(giant, sun, Orbits)
+
+  // Moons have no colour of their own.
+  let moon = spawn {
+    Body { x: 0.0, y: 0.0, radius: 4.0 },
+    Orbit { distance: 24.0, angle: 0.0, speed: 4.0 }
+  }
+  connect(moon, earth, Orbits)
+  for i in 0..4 {
+    let around = spawn {
+      Body { x: 0.0, y: 0.0, radius: 3.0 },
+      Orbit { distance: 26.0 + i as f32 * 9.0, angle: i as f32 * 1.7,
+              speed: 3.0 - i as f32 * 0.5 }
+    }
+    connect(around, giant, Orbits)
+  }
+  // A station around the moon, in a colour of its own.
+  let station = spawn {
+    Body { x: 0.0, y: 0.0, radius: 2.0 },
+    Orbit { distance: 9.0, angle: 0.0, speed: 9.0 }, Tint { color: 0xff4060 }
+  }
+  connect(station, moon, Orbits)
+}
+
+system turn() {
+  let dt = if Keys.space { 0.0 } else { Window.dt }
+  for o: mut Orbit {
+    o.angle += o.speed * dt
+  }
+}
+
+// A body is where the one it circles is, plus its place on the orbit.
+// `center` is that other body; `cascade` visits it first, so its place is
+// this frame's: the station follows the moon, which follows the planet.
+system place() {
+  for b: mut Body, o: Orbit, center: Body up Orbits cascade Orbits {
+    b.x = center.x + cos(o.angle) * o.distance
+    b.y = center.y + sin(o.angle) * o.distance
+  }
+}
+
+system draw() {
+  for b: Body, t: Tint {
+    circle(b.x, b.y, b.radius, t.color)
+  }
+  // Without a colour: that of the nearest body up the tree that has one.
+  for b: Body, t: Tint up Orbits without Tint {
+    circle(b.x, b.y, b.radius, t.color)
+  }
+  label("space: hold", 8.0, 6.0, 16.0, 0x808890)
+}
+
+schedule frame() {
+  begin()
+  turn()
+  place()
+  draw()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}

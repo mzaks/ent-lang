@@ -1,0 +1,47 @@
+// Water running down a tree: every node passes what it has gathered on to
+// the node it flows into. Children before their parents, so a node has all
+// that is above it when it passes its own on.
+import console
+
+component Node { name: text[8], rain: i32, flow: i32, height: i32, top: i32 }
+default_capacity 16
+relation Flows from Node to Node tree capacity 16
+unique Frame: i32
+
+world {
+  // Downstream first: a pass in the order of rows would hand on flows
+  // before they are gathered.
+  let sea = spawn { Node { name: "sea", rain: 1, flow: 0, height: 0, top: 0 } }
+  let river = spawn { Node { name: "river", rain: 10, flow: 0, height: 20, top: 0 } }
+  let brook = spawn { Node { name: "brook", rain: 1000, flow: 0, height: 300, top: 0 } }
+  let spring = spawn { Node { name: "spring", rain: 10000, flow: 0, height: 900, top: 0 } }
+  let creek = spawn { Node { name: "creek", rain: 100, flow: 0, height: 500, top: 0 } }
+  spawn { Node { name: "lake", rain: 5, flow: 0, height: 50, top: 0 } }
+  connect(river, sea, Flows)
+  connect(brook, river, Flows)
+  connect(spring, brook, Flows)
+  connect(creek, river, Flows)
+}
+
+system gather() {
+  Frame += 1
+  for n: mut Node {
+    n.flow = n.rain
+    n.top = n.height
+  }
+  // What has gathered here goes on down; the highest place it came from
+  // goes with it.
+  for n: Node, down: mut Node up Flows cascade Flows leaves first {
+    down.flow += n.flow
+    down.top max= n.top
+  }
+}
+
+system show() {
+  for n: Node { put("{n.name} {n.flow} from {n.top}") }
+  for n: Node cascade Flows leaves first { put("visit {n.name}") }
+  flush()
+}
+
+schedule frame() { gather()  show() }
+main { loop { frame() } until Frame == 1 }

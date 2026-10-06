@@ -453,6 +453,13 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
                             archetype.idOffset)
                   .str()
             : std::string();
+    // A new entity is out of a sorted archetype's order: its tree is
+    // sorted again when a schedule next starts.
+    if (archetype.isSorted())
+      storeId += llvm::formatv(
+                     "  *(int64_t *)((char *)world + {0}) = 0; // unsorted\n",
+                     layout->getRelation(archetype.sortedBy).cleanOffset)
+                     .str();
     os << llvm::formatv(
         "static inline ent_entity ent_{0}_spawn(ent_world *world) {{\n"
         "  int64_t n = ((int64_t *)world)[{1}];\n"

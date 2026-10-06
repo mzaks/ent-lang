@@ -1,0 +1,19 @@
+// examples/orrery.ent compiles: bodies circle the body they are connected
+// to in a tree, and a `for` that cascades along it places each from where
+// that one is this frame. Running it needs a display and raylib, which a
+// test cannot ask for.
+// RUN: ent-translate --import-ent %S/../../examples/orrery.ent \
+// RUN:     -I %S/../../devices -o %t.mlir
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s --check-prefix=LLVM
+// RUN: ent-opt %t.mlir --ent-print-access -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=ACCESS
+
+// LLVM-DAG: define {{.*}}void @ent_sort_Orbits(
+// LLVM-DAG: declare void @ent_window_circle(float, float, float, i32)
+
+// Placing reads the tree, the bodies' ids and the place of bodies in every
+// shape, the sun's too, and writes that of the bodies with an orbit.
+// ACCESS: remark: reads Body_Tint.Body.x, Body_Orbit_Tint.Body.x, Body_Orbit.Body.x, {{.*}}Orbits.edges, entities, Body_Orbit_Tint.id, Body_Orbit.id; writes Body_Orbit_Tint.Body.x, Body_Orbit.Body.x, Body_Orbit_Tint.Body.y, Body_Orbit.Body.y
+// ACCESS-NEXT: ent.system @place()

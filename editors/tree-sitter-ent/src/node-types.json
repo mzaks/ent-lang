@@ -581,6 +581,20 @@
             "named": true
           }
         ]
+      },
+      "via": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
       }
     }
   },
@@ -795,6 +809,26 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "cascade",
+    "named": true,
+    "fields": {
+      "along": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -2442,6 +2476,10 @@
           "named": true
         },
         {
+          "type": "cascade",
+          "named": true
+        },
+        {
           "type": "on",
           "named": true
         },
@@ -3522,6 +3560,10 @@
     "named": false
   },
   {
+    "type": "cascade",
+    "named": false
+  },
+  {
     "type": "changed",
     "named": false
   },
@@ -3572,6 +3614,10 @@
   },
   {
     "type": "false",
+    "named": false
+  },
+  {
+    "type": "first",
     "named": false
   },
   {
@@ -3633,6 +3679,10 @@
   {
     "type": "integer",
     "named": true
+  },
+  {
+    "type": "leaves",
+    "named": false
   },
   {
     "type": "let",
@@ -3699,6 +3749,10 @@
     "named": false
   },
   {
+    "type": "sorted",
+    "named": false
+  },
+  {
     "type": "spawn",
     "named": false
   },
@@ -3723,6 +3777,10 @@
     "named": false
   },
   {
+    "type": "tree",
+    "named": false
+  },
+  {
     "type": "true",
     "named": false
   },
@@ -3732,6 +3790,10 @@
   },
   {
     "type": "until",
+    "named": false
+  },
+  {
+    "type": "up",
     "named": false
   },
   {

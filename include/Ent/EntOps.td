@@ -106,12 +106,42 @@ def Ent_RelationOp : Ent_RecordOp<"relation", [
     exists, so reading that component of the other end inside an edge loop
     (`ent.lookup`, `ent.apply`) needs no check that the entity is alive and
     has it.
+
+    A relation may be a tree:
+    ```mlir
+    ent.relation @ChildOf () from @Node to @Node tree capacity 1000
+    ```
+    Then an entity has at most one outgoing edge, to its parent, and no
+    entity is its own ancestor. Connecting an entity that has a parent
+    gives it the new one instead (the last connect wins); edges that close
+    a cycle stop the program. Queries may bind a component of an ancestor
+    along a tree (`!ent.ref<@C, up @ChildOf>`) and visit parents before
+    their children (`cascade @ChildOf`).
+
+    A tree may ask for its entities to be stored in its order:
+    ```mlir
+    ent.relation @Flows () from @Node to @Node tree sorted capacity 100000
+    ```
+    Then the rows of the archetype that holds its entities are kept with
+    every parent before its children (the entities without a parent first,
+    then the others breadth first), so a query that cascades along the
+    tree reads the rows one after another and finds each entity's parent
+    by its row. The order is restored whenever the tree's edges change or
+    the archetype gains or loses an entity, which moves every row: what a
+    program combines in the order of rows (`ent.apply`, `ent.accumulate`)
+    then depends on the tree, a host cannot keep rows, and ids are never
+    rows in such a program. So far the tree must live in one archetype: it
+    names what its sources and targets have (`from`, `to`), one archetype
+    holds either, and it holds both, always. No archetype is in two sorted
+    trees: its rows have one order.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        StrArrayAttr:$field_names,
                        TypeArrayAttr:$field_types,
                        OptionalAttr<FlatSymbolRefAttr>:$from,
                        OptionalAttr<FlatSymbolRefAttr>:$to,
+                       UnitAttr:$tree,
+                       UnitAttr:$sorted,
                        ConfinedAttr<I64Attr, [IntPositive]>:$capacity);
   let extraClassDeclaration = [{
     /// The type of field `name`, or null if there is no such field.
@@ -398,6 +428,31 @@ def Ent_QueryOp : Ent_Op<"query", [
     reads only whether the entity has the component, never its fields, so
     it does not conflict with systems that write them. A query binds or
     filters by at least one component.
+
+    A ref may be to a component of an ancestor along a tree relation:
+    ```mlir
+    ent.query (%b: !ent.ref<@Body, mut>, %p: !ent.ref<@Body, up @Orbits>)
+        cascade @Orbits { ... }
+    ```
+    `%p` is `@Body` of the nearest ancestor of the visited entity that has
+    it: of its parent along `@Orbits`, else of the parent's parent, and so
+    on. The query visits only the entities with such an ancestor; the
+    entity itself need not have the component. Like a lookup it must not
+    read a field the query writes, unless the query cascades along the same
+    relation.
+
+    `cascade @Orbits` orders the query by depth in the tree: it runs as if
+    it were one query per depth, first for the entities without a parent,
+    then for their children, and so on, each seeing what those before it
+    wrote. So a ref `up @Orbits` reads what this query already wrote to the
+    ancestor. `cascade @Orbits leaves first` runs the depths the other way,
+    the deepest first and the entities without a parent last: children
+    before their parents. Either way a `mut` ref up the tree lets the query
+    combine values into the ancestor (`ent.combine`), which take effect
+    when the depth that sent them is through. Otherwise a cascading query
+    only reads and writes fields so far: it does not spawn, despawn, add or
+    remove components, apply, accumulate, connect or disconnect, and it is
+    not reactive.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
@@ -411,8 +466,19 @@ def Ent_QueryOp : Ent_Op<"query", [
     static constexpr ::llvm::StringLiteral kWithAttr = "with";
     static constexpr ::llvm::StringLiteral kWithoutAttr = "without";
     static constexpr ::llvm::StringLiteral kAnyAttr = "any";
+    /// The tree relation the query is ordered by, parents first.
+    static constexpr ::llvm::StringLiteral kCascadeAttr = "cascade";
+    ::mlir::FlatSymbolRefAttr getCascade() {
+      return (*this)->getAttrOfType<::mlir::FlatSymbolRefAttr>(kCascadeAttr);
+    }
+    /// With `cascade`: children before their parents.
+    static constexpr ::llvm::StringLiteral kLeavesFirstAttr = "leaves_first";
+    bool isLeavesFirst() { return (*this)->hasAttr(kLeavesFirstAttr); }
+    /// Whether an argument is a ref to an ancestor's component.
+    bool hasUpRefs();
 
-    /// The components the entity must have: those bound, then `with`.
+    /// The components the entity must have: those bound (its own), then
+    /// `with`.
     ::llvm::SmallVector<::mlir::FlatSymbolRefAttr> getRequired();
     /// The components the entity must not have.
     ::llvm::SmallVector<::mlir::FlatSymbolRefAttr> getWithout();
@@ -728,6 +794,37 @@ def Ent_ApplyOp : Ent_Op<"apply", [
   let assemblyFormat = [{
     $entity $component $field custom<Rule>($rule) $value attr-dict
     `:` type($value)
+  }];
+  let hasVerifier = 1;
+}
+
+def Ent_CombineOp : Ent_Op<"combine", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Combine a value into a field of an ancestor, through a ref";
+  let description = [{
+    ```mlir
+    ent.combine %down "flow" add %own : !ent.ref<@Node, mut, up @Flows>, f32
+    ```
+    Combines `%own` into field `flow` of the component the ref leads to, of
+    the visited entity's ancestor, with the rule `add`, `min` or `max`
+    (signed for integers). The enclosing query cascades along the ref's
+    tree, and the values take effect when the depth that sent them is
+    through: `field ⊕ v1 ⊕ v2 ⊕ ...` over the values the entities of that
+    depth sent to the ancestor, in the order the query visits them, which
+    is fixed. So with `leaves first` an entity that reads the field of its
+    own has there what all below it sent.
+
+    The query may not read the field through a ref up the tree or look it
+    up: entities of one depth would see what others of it sent. All its
+    combines into one field use the same rule, and the field is an integer
+    (not `i1`) or a float. A system that declares its access must list the
+    component in `writes`.
+  }];
+  let arguments = (ins Ent_RefType:$ref, StrAttr:$field, StrAttr:$rule,
+                       AnyType:$value);
+  let assemblyFormat = [{
+    $ref $field custom<Rule>($rule) $value attr-dict
+    `:` type($ref) `,` type($value)
   }];
   let hasVerifier = 1;
 }

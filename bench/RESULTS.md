@@ -1778,3 +1778,145 @@ Heavy redraw:
   against 16.5 us) and loses at 50% (15.2 against 13.9).
 - The buffered apply costing twice `c-index`, and parallel push losing to
   sequential push, were not rerun.
+
+## 2026-10-06: trees, a river network
+
+`examples/river.ent`: nodes in a tree (`relation Flows ... tree`), rain on
+each, and every node's flow the rain on everything upstream of it: a `for`
+that cascades `leaves first` and adds its flow into its parent's
+(`down.flow += n.flow`, `down: mut Node up Flows`). `bench/river/run.py`
+runs it against hand-written C. Ryzen AI 9 HX 370, Linux, the pixi
+toolchain (LLVM 22.1.8), `taskset -c 2` (a Zen 5 core), `-march=native`
+(from this entry on what the scripts build with unless `BENCH_CFLAGS` says
+otherwise), 200 steps after 50, medians of 7 processes.
+Checksums (every flow's bits) agree in every configuration. Load average
+1.3-1.5 at the start.
+
+Shapes: `bushy`, node i flows into a node picked from all before it;
+`deep`, into one of the 8 before it; `shuffled`, bushy with the nodes in a
+random order. C variants: `c-order` walks a list of the nodes with a
+parent, parents before children, from its end, and finds each node's
+parent by the node's number; `c-pairs` has the parent next to the node in
+the list, which is what the generated code does; `c-sorted` stores the
+nodes themselves in that order.
+
+us per step (spread), best in bold; `ent-sorted` is the same program with
+its tree `sorted` (see the next entry):
+
+| nodes | shape | depth | c-order | c-pairs | c-sorted | ent | ent-sorted |
+|---|---|---|---|---|---|---|---|
+| 1e4 | bushy | 21 | 6.1 (3%) | 4.3 (3%) | **3.5 (3%)** | 5.4 (2%) | 3.6 (5%) |
+| 1e4 | deep | 2,192 | 9.0 (2%) | 8.4 (2%) | 8.2 (1%) | **8.1 (2%)** | 8.5 (2%) |
+| 1e4 | shuffled | 21 | 6.0 (1%) | 4.2 (2%) | **3.5 (2%)** | 5.4 (1%) | 3.6 (2%) |
+| 1e5 | bushy | 25 | 76.2 (11%) | 48.0 (2%) | **36.1 (2%)** | 56.3 (3%) | 36.4 (3%) |
+| 1e5 | deep | 21,920 | 108.6 (4%) | 81.2 (1%) | 82.6 (3%) | **81.1 (1%)** | 85.6 (2%) |
+| 1e5 | shuffled | 25 | 74.5 (10%) | 48.5 (2%) | **35.8 (2%)** | 56.0 (4%) | 36.4 (4%) |
+| 1e6 | bushy | 31 | 1,365.3 (14%) | 827.1 (19%) | **378.6 (1%)** | 842.3 (14%) | 387.7 (1%) |
+| 1e6 | deep | 219,241 | 1,124.2 (1%) | 841.2 (1%) | **839.2 (1%)** | 853.4 (10%) | 872.3 (2%) |
+| 1e6 | shuffled | 31 | 1,306.6 (9%) | 958.6 (23%) | **379.5 (0%)** | 980.3 (15%) | 389.2 (2%) |
+
+### How it got here
+
+us per step at 1e6 bushy, 1e5 bushy and 1e4 bushy, a run of 7 rounds
+each:
+
+| generated code | 1e6 | 1e5 | 1e4 |
+|---|---|---|---|
+| each node's parent found through its edge (two offsets, then the target) | not measured native | | |
+| the parent next to the node in the list | 1,093 | 71.5 | 6.8 |
+| ... and the node found without checking its id | 842 | 56.3 | 5.4 |
+
+The first form was only measured in a baseline (SSE2) build, 5 rounds of
+100 steps after 10: 3,292, 155.5 and 11.0, where the second took 1,023,
+69.3 and 6.6.
+
+The first form made three scattered loads per node before it reached a
+flow; the list is read in order. The id needs no check where the
+relation's sources cannot die and can live in one archetype only.
+
+### What holds
+
+- Against the same storage and the same lists (`c-pairs`), the generated
+  code takes 0.96-1.02x the time at 1e6 and in deep trees at every size,
+  and 1.15-1.26x in bushy trees that fit the caches (1e4, 1e5).
+- A deep tree is a chain of dependent adds: every form but `c-order`
+  takes 0.81-0.87 ns per node at 1e5 and 1e6, whatever its storage.
+- Where the nodes are stored matters more than anything the generated
+  code does: `c-sorted` takes 0.40-0.46x the time of `c-pairs` at 1e6
+  bushy and shuffled, and 0.74-0.81x at 1e4 and 1e5. ent-lang stores
+  entities in the order they were spawned.
+- The order the nodes were spawned in makes no difference to the forms
+  that walk a list (bushy against shuffled): the list is in neither.
+
+### Measured, not explained
+
+- The 1.15-1.26x over `c-pairs` in the caches. The generated loop computes
+  each list position from the end (`count - 1 - i`) and masks the row out
+  of each id, where the C counts down and uses the numbers as they are;
+  whether that is the difference was not checked.
+- The spreads of 9-23% at 1e6 bushy and shuffled in every form that does
+  not store the nodes in order.
+
+### Not measured
+
+- Trees whose nodes are in several archetypes, or whose sources can die
+  (ids checked, the parent searched for where the relation does not say
+  what its targets have).
+- Parents first (`cascade` without `leaves first`), and anything in
+  parallel: a cascading `for` runs on one core.
+
+## 2026-10-06: a sorted tree
+
+`relation Flows from Node to Node tree sorted capacity N` (measured while
+it was still written on the archetype, `sorted by Flows`; the generated
+code is the same) keeps the rows of the archetype holding the tree's
+entities in the tree's order: the entities without a parent, then the others
+breadth first, each with its parent's row in a column. A query cascading
+along the tree is then a loop over rows, and reads its parent at that row.
+The rows are put in order by the relation's sort, which now also runs when
+the archetype gains or loses an entity. Same machine, pinning and flags as
+the entry above, whose table has the steady state (`ent-sorted`, the same
+run as the other columns).
+
+### What holds
+
+- The generated code takes 1.01-1.04x the time of `c-sorted`, the same
+  storage by hand, in every cell.
+- Against the unsorted program: 0.40-0.46x at 1e6 bushy and shuffled,
+  0.65-0.67x at 1e4 and 1e5, and 1.02-1.06x (slower) in deep trees, where
+  the sum is one chain of dependent adds and the order of rows gains
+  nothing.
+
+### What a change to the tree costs
+
+`--resort`: one node is connected to the node it already flows into
+before every step, so every step sorts the edges, and a sorted archetype
+its rows, first. ms per step (spread), 5 rounds of 50 steps after 10, and
+in brackets what one sort costs: the step less the step without it.
+
+| nodes | shape | ent | ent-sorted |
+|---|---|---|---|
+| 1e4 | bushy | 0.053 (3%) [0.048] | 0.063 (1%) [0.059] |
+| 1e5 | bushy | 1.05 (2%) [0.99] | 1.22 (1%) [1.18] |
+| 1e5 | deep | 0.55 (1%) [0.47] | 0.71 (1%) [0.62] |
+| 1e6 | bushy | 18.8 (3%) [17.9] | 24.2 (3%) [23.8] |
+| 1e6 | deep | 6.3 (1%) [5.4] | 8.9 (2%) [8.1] |
+| 1e6 | shuffled | 17.2 (5%) [16.2] | 21.9 (2%) [21.5] |
+
+- Sorting the edges is most of it, sorted archetype or not: 16-18 ms at
+  1e6 bushy and shuffled, 17-21 steps' worth for the unsorted program.
+- Putting the rows in order adds 2.7-5.9 ms at 1e6 (two fields and the
+  ids), 19-50% on top of the edges' sort at every size.
+- At 1e6 bushy a step is 0.45 ms shorter sorted and a change 5.9 ms
+  dearer: sorted storage pays where the tree changes less often than every
+  13 steps or so. In deep trees it never pays.
+
+### Not measured
+
+- Spawning or destroying nodes, which sorts a sorted archetype the same
+  way (and does not sort the edges of an unsorted program at all).
+- Archetypes with more or wider columns, which all move.
+- What ids that are slots rather than rows cost the rest of a program:
+  every lookup then goes through the entity table. The river looks nothing
+  up.
+- Why the sorted form is 2-6% slower in deep trees.

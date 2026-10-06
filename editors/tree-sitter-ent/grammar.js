@@ -73,7 +73,7 @@ module.exports = grammar({
     relation: ($) =>
       seq('relation', field('name', $.identifier), optional($.fields),
           optional(seq('from', $._name)), optional(seq('to', $._name)),
-          optional($.capacity)),
+          optional(seq('tree', optional('sorted'))), optional($.capacity)),
 
     archetype: ($) =>
       seq('archetype', field('name', $.identifier), '{',
@@ -167,15 +167,20 @@ module.exports = grammar({
       seq('for',
           optional(list(choice($.binding, field('entity', $.identifier)))),
           repeat(choice($.with, $.without)),
+          optional($.cascade),
           optional($.where),
           optional($.on),
           field('body', $.block)),
     binding: ($) =>
       seq(field('name', $.identifier), ':', optional('mut'),
-          field('component', $._name)),
+          field('component', $._name),
+          optional(seq('up', field('via', $._name)))),
     with: ($) => seq('with', list(choice($._name, $.any))),
     any: ($) => seq('any', '(', list($._name), ')'),
     without: ($) => seq('without', list($._name)),
+    cascade: ($) =>
+      seq('cascade', field('along', $._name),
+          optional(seq('leaves', 'first'))),
     where: ($) => seq('where', $._expression),
     on: ($) => seq('on', list($.trigger)),
     trigger: ($) =>

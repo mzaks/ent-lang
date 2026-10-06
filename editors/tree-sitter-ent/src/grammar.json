@@ -469,6 +469,35 @@
           "type": "CHOICE",
           "members": [
             {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "tree"
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "STRING",
+                      "value": "sorted"
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
               "type": "SYMBOL",
               "name": "capacity"
             },
@@ -1702,6 +1731,18 @@
           "members": [
             {
               "type": "SYMBOL",
+              "name": "cascade"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
               "name": "where"
             },
             {
@@ -1765,6 +1806,31 @@
             "type": "SYMBOL",
             "name": "_name"
           }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "up"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "via",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_name"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         }
       ]
     },
@@ -1927,6 +1993,44 @@
                   "type": "BLANK"
                 }
               ]
+            }
+          ]
+        }
+      ]
+    },
+    "cascade": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "cascade"
+        },
+        {
+          "type": "FIELD",
+          "name": "along",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_name"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "leaves"
+                },
+                {
+                  "type": "STRING",
+                  "value": "first"
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
             }
           ]
         }

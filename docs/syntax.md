@@ -90,6 +90,8 @@ archetype Gun { Position, optional Stunned } capacity 4
 relation Synapse { weight: f32 } capacity 100000  // edges with data
 relation Follows capacity 1000                     // edges without
 relation Aims { w: f32 } from Ship to Target capacity 64  // typed ends
+relation Orbits from Orbit to Body tree capacity 64       // one parent each
+relation Flows from Node to Node tree sorted capacity 64  // stored in its order
 default_capacity 1024
 ```
 
@@ -110,6 +112,11 @@ default_capacity 1024
   removes it (and likewise for `D`), reading `C` of an edge's other end
   (`if let x = C(other).f`) is compiled without checking the id, though it
   is still written with `if let`.
+- A relation declared a `tree` gives every entity at most one edge out, to
+  its parent, and lets none be its own ancestor. Connecting an entity that
+  has a parent gives it the new one instead (the last `connect` wins); an
+  edge that closes a cycle stops the program. A `for` can read up a tree
+  and follow it in order (`up`, `cascade`, below).
 
 ## Systems and queries
 
@@ -152,6 +159,19 @@ for with Enemy { Count += 1 }     // nor the entity
   a system filtering by `C` does not wait for one writing `C`'s fields. Where
   an archetype always or never holds the component, the compiler decides for
   the whole archetype; where it holds it optionally, per entity.
+- `name: Component up Relation` binds a component of another entity: of
+  the nearest ancestor along the tree `Relation` that has it, which is the
+  entity's parent, or else the parent's parent, and so on. The `for` visits
+  only the entities with such an ancestor; the entity itself need not have
+  the component, and may be filtered not to (`t: Tint up Orbits without
+  Tint`). With `mut` (`down: mut Node up Flows`) its fields can be
+  combined into (`+=`, `-=`, `min=`, `max=`), in a `for` that cascades
+  along the tree.
+- `cascade Relation`, after the filters, visits parents before their
+  children along the tree: first the entities without a parent, then their
+  children, and so on, each seeing what the `for` wrote before it.
+  `cascade Relation leaves first` visits children before their parents.
+  See Trees below.
 - `where cond` runs the body only where `cond` holds.
 - `on changed C.f, changed C, added C, removed C` makes the query reactive;
   `log N` after a trigger sets its event log's capacity (`log 0`: none).
@@ -178,6 +198,118 @@ connected. `s.disconnect()` removes the edge when the outer `for` ends.
 Edge loops do not nest, and a `for` may not visit a relation both ways if
 either loop writes the edges. A `+=` into another entity's field inside an
 edge loop runs once per edge.
+
+### Trees
+
+```
+relation Orbits from Orbit to Body tree capacity 64
+
+system place() {
+  for b: mut Body, o: Orbit, center: Body up Orbits cascade Orbits {
+    b.x = center.x + cos(o.angle) * o.distance
+    b.y = center.y + sin(o.angle) * o.distance
+  }
+}
+
+system draw() {
+  for b: Body, t: Tint { circle(b.x, b.y, b.radius, t.color) }
+  for b: Body, t: Tint up Orbits without Tint {
+    circle(b.x, b.y, b.radius, t.color)
+  }
+}
+```
+
+`examples/orrery.ent` is this program: moons around planets around a sun.
+
+A `for` sees other entities as they were when it started, which is why it
+may not read a field of another entity that it writes itself: some would
+have been visited before and some not. `place` does just that, and
+`cascade` is what makes it mean something: the `for` runs as if it were
+one `for` per depth of the tree, each seeing what those before it wrote.
+So `center.x` is where the body's parent is this frame, however deep the
+tree, and in whichever order the bodies were spawned. Without `cascade
+Orbits` the compiler rejects `place`. `draw` reads `Tint`, which it does
+not write, and needs no order.
+
+- With a binding `up` the tree it cascades along, a `for` visits no entity
+  without a parent, since that has no ancestor. Without one it visits
+  those first.
+- An entity whose parent was destroyed keeps its edge until the relation
+  is next sorted (when an edge is connected or disconnected): until then
+  it has no ancestor, and a `for` that only cascades visits it where the
+  edge puts it.
+- Where the relation says what its targets have (`to Body`) and nothing
+  destroys bodies or takes `Body` away, `Body up Orbits` is the parent's,
+  read without a search or a check.
+
+The other way, from the leaves:
+
+```
+relation Flows from Node to Node tree capacity 100000
+
+system run() {
+  for n: mut Node { n.flow = n.rain }
+  for n: Node, down: mut Node up Flows cascade Flows leaves first {
+    down.flow += n.flow
+  }
+}
+```
+
+`examples/river.ent` is this: every node's flow becomes the rain on all
+that is upstream of it. `leaves first` runs the depths from the deepest to
+the entities without a parent, so a node has what all above it sent when
+it passes its own on. What goes into an ancestor through a `mut` binding
+lands when the depth that sent it is through, combined in the order the
+`for` visits the entities, which is fixed; so the `for` may read the field
+of its own entity, but not through a binding `up` the tree or with `if
+let`, where it would see what others of its depth sent. An ancestor's
+field is only combined into, never assigned.
+
+**Sorted trees.** A tree may ask for its entities to be stored in its
+order:
+
+```
+relation Flows from Node to Node tree sorted capacity 100000
+```
+
+The archetype that holds them, declared or not, then has every entity
+after its parent in its rows (those without a parent first), and a `for`
+that cascades along the tree reads them one after another and finds each
+parent where it is, instead of walking a list of ids: the river's sum takes 0.4x the time at a million nodes in a bushy
+tree (`bench/RESULTS.md`). Nothing else about the program changes; it is a
+choice of storage, and it has its price:
+
+- Every change puts the rows in order again, all of them with all their
+  fields: a `connect` or disconnect of the tree, and a `spawn` or
+  `destroy` in the archetype (outside a `for`, before the next `for` or
+  when the system ends; in a `for`, when it ends). At a million nodes in
+  a bushy tree that is some 24 ms, 18 of them for the edges, which are
+  sorted with or without it: dozens of passes over the tree. In deep,
+  narrow trees the order gains nothing.
+- Rows are not the order of spawning any more, and move. What is combined
+  in the order of rows (`+=` into another entity or a unique in a plain
+  `for`) is combined in an order that depends on the tree, which shows in
+  the last bits of floats; a C host cannot keep a row across a call.
+- No entity's id is its row in such a program: reading another entity
+  (`if let`, `+=`) goes through a table, everywhere.
+- So far the tree must live in one archetype: the relation says what its
+  ends have (`from`, `to`), one archetype has either, it always has both,
+  and nothing removes them. The orrery's bodies, which come in three
+  shapes, cannot be sorted yet; the compiler says which archetypes a tree
+  would be in.
+- An archetype's rows have one order: two sorted trees with their
+  entities in the same archetype are an error. Any number of other
+  relations, and of trees that are not sorted, are no trouble, since edges
+  hold ids and not rows.
+- Destroying an entity sorts, so the edges of its children are dropped at
+  once and they are without a parent right away, where otherwise they
+  keep a dangling edge until the tree next changes.
+
+Not yet: besides that, a cascading `for` only reads and writes fields. It
+does not `spawn`, `destroy`, `add` or `remove`, combine into an entity
+found by its id or into a unique, `connect` or disconnect, and it has no
+`on`; it visits one entity after another, on one core. Combining into an
+ancestor needs the `for` to cascade along that tree.
 
 ## Statements
 
@@ -615,6 +747,7 @@ header, as before.
 
 `proc` with a body, `device` declarations, prefabs, optional bindings (`T?`),
 `while` loops and counted loops inside a `for` over entities: each
-is reported as "not supported yet" where it would start. Of relations, not yet: traversal (`up`, `cascade`), joins
-over relation variables, accumulating into a unique and connecting inside
-an edge loop, and disconnecting by pair.
+is reported as "not supported yet" where it would start. Of relations, not
+yet: joins over relation variables, accumulating into a unique and
+connecting inside an edge loop, disconnecting by pair, and of trees what
+Trees above lists.

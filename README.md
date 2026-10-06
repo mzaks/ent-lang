@@ -82,8 +82,9 @@ Programs are written in `.ent` files and imported into the dialect below
 with `ent-translate --import-ent`; the syntax is described in
 [`docs/syntax.md`](docs/syntax.md), and `examples/*.ent` are the examples
 written that way (the integration tests run both forms and expect the same
-output; `examples/filters.ent`, for filters, `has` and `run_if`, and
-`examples/snn*.ent`, for relations, exist only in ent-lang):
+output; `examples/filters.ent`, for filters, `has` and `run_if`,
+`examples/snn*.ent`, for relations, and `examples/orrery.ent` and
+`examples/river.ent`, for trees, exist only in ent-lang):
 
 ```
 component Position { x: f32 }
@@ -222,8 +223,9 @@ come with the compiler, in `devices/`, and two more that need
   picture; systems then draw with `rect`, `circle`, `sector`, `line` and
   `label` (colours are `0xRRGGBB`); `present()` shows the frame and holds
   `Window.fps`. `examples/bounce.ent` is a program with it:
-  `tools/ent run examples/bounce.ent`, and `examples/pacman.ent` a whole
-  game: the maze is a text that fns read, the pellets and ghosts are
+  `tools/ent run examples/bounce.ent`; `examples/orrery.ent` has moons
+  around planets around a sun, each placed from where the body it circles
+  is; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are
   entities, ways, modes and the game's state are enums, and the only C is
   that of the devices and the math module. A module's `name.link` names the
   libraries it needs (`-lraylib`).
@@ -287,6 +289,7 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   archetypes at compile time. An archetype of capacity 1 holds at most one
   entity (a player, a camera); its queries become a guard instead of a
   loop.
+
 - `ent.archetype @Character (@Position, optional @Stunned) capacity N`: an
   optional component may be present or absent per entity. It is stored as
   its field columns plus a presence byte, so `ent.add @Stunned(%t) : f32`
@@ -360,6 +363,38 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   `examples/snn.ent` and `examples/snn_pull.ent` are a spiking
   neural network pushing spikes along outgoing synapses and gathering them
   along incoming ones; both agree with a plain C simulation to the bit.
+- `ent.relation @Orbits () from @Orbit to @Body tree capacity 64` is a
+  tree: an entity has at most one edge out, to its parent, and none is its
+  own ancestor. Connecting an entity that has a parent gives it the new one
+  (the last connect wins); an edge that closes a cycle stops the program.
+  A query argument `%c: !ent.ref<@Body, up @Orbits>` is a read-only ref to
+  `@Body` of the nearest ancestor that has it (the parent, else the
+  parent's parent, ...), and the query visits only the entities with such
+  an ancestor. `ent.query (...) cascade @Orbits { ... }` visits parents
+  before their children: it runs as if it were one query per depth of the
+  tree, each seeing what those before wrote, so it may read through a ref
+  up the tree a field it writes itself, which is otherwise rejected like a
+  lookup of one. `cascade @Orbits leaves first` visits children before
+  their parents. `ent.combine %down "flow" add %v : !ent.ref<@Node, mut, up
+  @Flows>, f32` combines a value into a field of the ancestor a `mut` ref
+  leads to, in a query cascading along that tree; the values land when the
+  depth that sent them is through. Otherwise a cascading query only reads
+  and writes fields so far (not reactive, nothing else deferred) and runs
+  on one core.
+  A tree may be `sorted` (`... from @Node to @Node tree sorted capacity
+  N`): the archetype that holds its entities, declared or inferred, keeps
+  its rows in the tree's order, every entity after its parent, and a query
+  cascading along the tree is a loop over those rows, with each entity's
+  parent at a row it reads from a column, and no ids. It is a choice of
+  storage with a price: the rows are put in order again whenever the
+  tree's edges change or the archetype gains or loses an entity, ids are
+  never rows in such a program, the tree must so far live in one archetype
+  (it names what its ends have, and one archetype holds either), and no
+  archetype is in two sorted trees. `docs/syntax.md` lists what follows.
+  `examples/orrery.ent` places moons from their planets and planets from
+  their sun that way, and draws a body without a colour in that of the
+  nearest body up the tree that has one; `examples/river.ent` sums the
+  rain on everything upstream of each node, from the leaves.
 - `ent.query (%b: !ent.ref<@Bar, mut>) on [changed @Hull "hp", added @Hull,
   removed @Shield] { ... }` is a reactive query, after Entitas's reactive
   systems: it runs only for the entities that had one of these events since
@@ -546,6 +581,36 @@ them, which LLVM cannot tell from the arena's views. With both, and the
 relation's ends typed, the pull example takes 1.01-1.05x the time of
 hand-written C (6.3-9.4x before; see `bench/RESULTS.md`).
 
+A tree is sorted by source and always has the index by target, so an
+entity's parent is the target of the one edge in its range and its
+children are the sources of the edges to it. Its sort keeps, of the edges
+from one source, the last connected, and then lists the ids of the
+entities that have a parent breadth first, each with its parent's id next
+to it: the children of the entities without one in table order, then the
+children of each entity listed. An entity on a cycle is never reached; if
+the list comes out shorter than the edges, the program stops. A cascading
+query first runs a loop per archetype for the entities without a parent,
+then walks that list (`leaves first`: the list from its end, then that
+loop), finding each entity by its id, without a check where the
+relation's sources cannot die and can live in one archetype only. A ref
+up the tree is read like a lookup of the ancestor, found by following
+parents until one has the component, or, where the relation's targets are
+trusted to have it, of the parent directly, which the list has at hand.
+On the river (`bench/river/`) that takes 0.96-1.02x the time of C written
+the same way at 1e6 nodes and 1.15-1.26x in the caches.
+
+C that stores the nodes themselves in the tree's order takes 0.40-0.46x
+the time at 1e6, and so does the program with its tree `sorted`. The
+relation's sort then also moves the archetype's rows: the entities without
+a parent to the front, as they are, the others behind them as listed,
+through a copy of every column; the entity table follows, and a column
+takes each row's parent's row. A cascading query over it is one loop over
+the rows behind the roots, up or down, which reads the parent's fields at
+that row: 1.01-1.04x the time of the C. A sort costs 8-24 ms at 1e6 nodes,
+most of it for the edges, which are sorted either way; in a bushy tree the
+order pays where the tree changes less often than every dozen steps, in a
+deep one never (see `bench/RESULTS.md`).
+
 A loop that never runs in parallel visits entities in the order the
 query's end combines applies in. So an apply whose field nothing else in
 the query touches (no get, set or lookup of it, no second apply to it, no
@@ -595,8 +660,9 @@ arena while a schedule runs.
 The compiler picks how ids are represented from the capacities and from
 which structural changes the program makes:
 
-- **Rows**: nothing is despawned or moved, so an entity keeps its row and
-  its id is `archetype << rowBits | row`. No id column, no entity table.
+- **Rows**: nothing is despawned or moved and no tree is `sorted`, so an
+  entity keeps its row and its id is `archetype << rowBits |
+  row`. No id column, no entity table.
 - **Slots**: entities move but are never despawned, so slots are never
   reused; an id is a slot of an entity table that holds only locations.
 - **Generational**: entities are despawned and slots reused; an id is
@@ -726,11 +792,18 @@ python3 bench/run.py --blocktime 200    # keep OpenMP workers spinning
 The scripts take the toolchain from `LLVM_PREFIX` (default: Homebrew's),
 so on Linux: `LLVM_PREFIX=$PWD/build/toolchain/.pixi/envs/default python3
 bench/run.py`.
-`BENCH_CFLAGS` adds flags to every compile (`BENCH_CFLAGS=-march=native`;
-without it x86 builds are baseline SSE2). On a CPU with two kinds of cores,
+Every binary is built for the machine's own instruction set
+(`-march=native`, on Arm `-mcpu=native`); `BENCH_CFLAGS` gives other flags
+instead (`BENCH_CFLAGS=` for a baseline build, on x86 SSE2; results before
+2026-10-06 are baseline unless they say native). On a CPU with two kinds
+of cores,
 pin the run (`taskset -c 2 python3 bench/run.py`, or `OMP_PLACES=cores
 OMP_PROC_BIND=close` for the parallel variants): unpinned, spreads reached
 60% on a Ryzen AI 9 HX 370.
+
+`bench/river/run.py` runs the river network (`examples/river.ent`, a sum
+down a tree from its leaves) against hand-written C, per size and shape of
+the tree.
 
 `bench/snn/run.py` runs the spiking network (`examples/snn.ent` pushing,
 `examples/snn_pull.ent` gathering, sequential and parallel) against

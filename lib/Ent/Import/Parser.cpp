@@ -147,6 +147,8 @@ struct Expr {
 
 /// A record declared in the source: a component or a unique.
 struct Record {
+  /// For a relation: declared a `tree`.
+  bool tree = false;
   SmallVector<std::pair<std::string, Type>> fields;
   /// For a unique declared as `unique Score: i64`: its one field is
   /// `value` and the bare name stands for it.
@@ -834,7 +836,7 @@ LogicalResult Parser::parseComponent(bool tag) {
   return success();
 }
 
-// relation Name [{ fields }] [from C] [to D] capacity N
+// relation Name [{ fields }] [from C] [to D] [tree [sorted]] capacity N
 LogicalResult Parser::parseRelation() {
   llvm::SMLoc at = token.loc;
   FailureOr<std::string> name = identifier("a relation name");
@@ -859,6 +861,18 @@ LogicalResult Parser::parseRelation() {
       return error(componentAt, "unknown component '" + *component + "'");
     ends[index] = symbol(*component);
   }
+  record.tree = consumeKeyword("tree");
+  // sorted: the entities stored in the tree's order.
+  llvm::SMLoc sortedAt = token.loc;
+  bool sorted = consumeKeyword("sorted");
+  if (sorted && !record.tree)
+    return error(sortedAt, "only a tree gives its entities an order: "
+                           "'relation " + *name + " ... tree sorted "
+                           "capacity N'");
+  if (sorted && !(ends[0] && ends[1]))
+    return error(sortedAt, "a sorted tree says what its ends have, so that "
+                           "the archetypes it sorts are known: 'relation " +
+                               *name + " from C to D tree sorted capacity N'");
   if (failed(expectKeyword("capacity")))
     return failure();
   FailureOr<int64_t> capacity = integer("a capacity");
@@ -871,7 +885,10 @@ LogicalResult Parser::parseRelation() {
   }
   RelationOp::create(builder, loc(at), declareSymbol(at, *name),
                      builder.getArrayAttr(names), builder.getArrayAttr(types),
-                     ends[0], ends[1], builder.getI64IntegerAttr(*capacity));
+                     ends[0], ends[1],
+                     record.tree ? builder.getUnitAttr() : UnitAttr(),
+                     sorted ? builder.getUnitAttr() : UnitAttr(),
+                     builder.getI64IntegerAttr(*capacity));
   relations[*name] = std::move(record);
   return success();
 }
@@ -1863,8 +1880,8 @@ scf::IfOp Parser::giveFromBranches(scf::IfOp branch,
   return merged;
 }
 
-// for [e,] [p: [mut] P, ...] [with A, any(B, C)] [without D]
-//     [where cond] [on trigger, ...] { }
+// for [e,] [p: [mut] P [up R], ...] [with A, any(B, C)] [without D]
+//     [cascade R [leaves first]] [where cond] [on trigger, ...] { }
 LogicalResult Parser::parseFor() {
   llvm::SMLoc at = token.loc;
   if (token.is(Token::Identifier) && peek().isKeyword("in")) {
@@ -1884,6 +1901,24 @@ LogicalResult Parser::parseFor() {
   struct Binding {
     std::string name, component;
     bool mut;
+    /// `up R`: the component is an ancestor's along this tree.
+    FlatSymbolRefAttr via;
+  };
+  // A relation `up` or `cascade` follows: a tree.
+  auto parseTree = [&](StringRef word) -> FailureOr<FlatSymbolRefAttr> {
+    llvm::SMLoc relationAt = token.loc;
+    FailureOr<std::string> relation = identifier("a relation");
+    if (failed(relation))
+      return failure();
+    auto record = relations.find(*relation);
+    if (record == relations.end())
+      return error(relationAt, "unknown relation '" + *relation + "'");
+    if (!record->second.tree)
+      return error(relationAt, "'" + word.str() + "' follows a tree, and '" +
+                                   *relation + "' is not declared one "
+                                   "('relation " + *relation +
+                                   " ... tree capacity N')");
+    return symbol(*relation);
   };
   SmallVector<Binding> bindings;
   std::string entity;
@@ -1920,7 +1955,14 @@ LogicalResult Parser::parseFor() {
       return failure();
     if (!components.count(*component))
       return error(componentAt, "unknown component '" + *component + "'");
-    bindings.push_back({pending, *component, mut});
+    FlatSymbolRefAttr via;
+    if (consumeKeyword("up")) {
+      FailureOr<FlatSymbolRefAttr> relation = parseTree("up");
+      if (failed(relation))
+        return failure();
+      via = *relation;
+    }
+    bindings.push_back({pending, *component, mut, via});
     if (!consumeIf(Token::Comma))
       break;
     FailureOr<std::string> next = identifier("a binding");
@@ -1970,6 +2012,19 @@ LogicalResult Parser::parseFor() {
         return failure();
       without.push_back(*component);
     } while (consumeIf(Token::Comma));
+  }
+  FlatSymbolRefAttr cascade;
+  bool leavesFirst = false;
+  if (consumeKeyword("cascade")) {
+    FailureOr<FlatSymbolRefAttr> relation = parseTree("cascade");
+    if (failed(relation))
+      return failure();
+    cascade = *relation;
+    if (consumeKeyword("leaves")) {
+      if (failed(expectKeyword("first")))
+        return failure();
+      leavesFirst = true;
+    }
   }
   ExprPtr where;
   if (consumeKeyword("where")) {
@@ -2023,12 +2078,17 @@ LogicalResult Parser::parseFor() {
     state.addAttribute(QueryOp::kWithoutAttr, builder.getArrayAttr(without));
   if (!anyGroups.empty())
     state.addAttribute(QueryOp::kAnyAttr, builder.getArrayAttr(anyGroups));
+  if (cascade)
+    state.addAttribute(QueryOp::kCascadeAttr, cascade);
+  if (leavesFirst)
+    state.addAttribute(QueryOp::kLeavesFirstAttr, builder.getUnitAttr());
   Region *body = state.addRegion();
   auto *block = new Block();
   body->push_back(block);
   for (const Binding &binding : bindings)
     block->addArgument(
-        RefType::get(context, symbol(binding.component), binding.mut),
+        RefType::get(context, symbol(binding.component), binding.mut,
+                     binding.via),
         loc(at));
   Operation *query = builder.create(state);
 
@@ -2393,6 +2453,54 @@ LogicalResult Parser::parseNameStatement() {
       return error(fieldAt, std::string(edge ? "relation '" : "component '") +
                                 variable->component + "' has no field '" +
                                 *field + "'");
+    bool ancestor = false;
+    if (variable->value)
+      if (auto ref = dyn_cast<RefType>(variable->value.getType()))
+        ancestor = ref.isUp();
+    if (ancestor && !variable->mut)
+      return error(at, "'" + name + "' is an ancestor's '" +
+                           variable->component + "' and not 'mut': bind it "
+                           "as '" + name + ": mut " + variable->component +
+                           " up ...' to combine into it");
+    if (ancestor) {
+      // Another entity's field: combined into, like `C(id).f += v`.
+      auto op = parseAssignOp();
+      if (failed(op))
+        return failure();
+      FailureOr<ExprPtr> value = parseExpr();
+      if (failed(value))
+        return failure();
+      StringRef rule;
+      bool negate = false;
+      if (op->second)
+        rule = *op->second;
+      else if (op->first == Token::PlusAssign)
+        rule = "add";
+      else if (op->first == Token::MinusAssign)
+        rule = "add", negate = true;
+      else
+        return error(at, "an ancestor's field can only be combined into "
+                         "('+=', '-=', 'min=', 'max='): which write lands "
+                         "last would depend on the order");
+      FailureOr<mlir::Value> rhs = emit(**value, type);
+      if (failed(rhs))
+        return failure();
+      mlir::Value v = *rhs;
+      if (negate) {
+        FailureOr<mlir::Value> negated = arithmetic(
+            loc(at), Token::Minus,
+            arith::ConstantOp::create(builder, loc(at),
+                                      builder.getZeroAttr(type)),
+            v);
+        if (failed(negated))
+          return failure();
+        v = *negated;
+      }
+      CombineOp::create(builder, loc(at), variable->value,
+                        builder.getStringAttr(*field),
+                        builder.getStringAttr(rule), v);
+      return success();
+    }
     if (!variable->mut)
       return error(at, edge ? "'" + name + "' is not 'mut': bind it as 'for "
                                   "mut " + name + ", ...' to write it"

@@ -1,0 +1,32 @@
+// A sorted archetype that a `for` spawns into, with an edge for the new
+// node: in order again when the `for` ends.
+import console
+component Node { name: text[8], rain: i32, flow: i32 }
+relation Flows from Node to Node tree sorted capacity 16
+default_capacity 16
+unique Frame: i32
+world {
+  let spring = spawn { Node { name: "spring", rain: 100, flow: 0 } }
+  let sea = spawn { Node { name: "sea", rain: 1, flow: 0 } }
+  connect(spring, sea, Flows)
+}
+system bud() {
+  Frame += 1
+  let grows = Frame == 2
+  // In a `for`: a new node above the spring, and one on its own.
+  for e, n: Node where grows && n.rain == 100 {
+    let twig = spawn { Node { name: "twig", rain: 10, flow: 0 } }
+    connect(twig, e, Flows)
+    spawn { Node { name: "pool", rain: 5, flow: 0 } }
+  }
+}
+system gather() {
+  for n: mut Node { n.flow = n.rain }
+  for n: Node, down: mut Node up Flows cascade Flows leaves first { down.flow += n.flow }
+}
+system show() {
+  for n: Node { put("{Frame}: {n.name} {n.flow}") }
+  flush()
+}
+schedule frame() { bud()  gather()  show() }
+main { loop { frame() } until Frame == 2 }

@@ -160,6 +160,11 @@
         {
           "name": "keyword.other.ent",
           "match": "\\b(let|var|mut|spawn|as|with|without|any|where|on|changed|added|removed|log|from|to|out|run_if)\\b"
+        },
+        {
+          "comment": "Words only before a relation's name, or its capacity: a field may be called `up`.",
+          "name": "keyword.other.ent",
+          "match": "(?<![.])\\b(?:(?:up|cascade)(?=\\s+[A-Za-z_])|tree(?=\\s+(?:sorted\\s+)?capacity\\b)|sorted(?=\\s+capacity\\b)|leaves\\s+first\\b)"
         }
       ]
     },

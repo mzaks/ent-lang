@@ -31,25 +31,33 @@ void EntDialect::registerTypes() {
       >();
 }
 
-// !ent.ref<@Component> or !ent.ref<@Component, mut>
+// !ent.ref<@Component>, !ent.ref<@Component, mut> or
+// !ent.ref<@Component, up @Relation>
 Type RefType::parse(AsmParser &parser) {
-  FlatSymbolRefAttr component;
+  FlatSymbolRefAttr component, via;
   if (parser.parseLess() || parser.parseAttribute(component))
     return {};
   bool isMutable = false;
-  if (succeeded(parser.parseOptionalComma())) {
-    if (parser.parseKeyword("mut"))
+  while (succeeded(parser.parseOptionalComma())) {
+    if (succeeded(parser.parseOptionalKeyword("up"))) {
+      if (parser.parseAttribute(via))
+        return {};
+    } else if (parser.parseKeyword("mut")) {
       return {};
-    isMutable = true;
+    } else {
+      isMutable = true;
+    }
   }
   if (parser.parseGreater())
     return {};
-  return RefType::get(parser.getContext(), component, isMutable);
+  return RefType::get(parser.getContext(), component, isMutable, via);
 }
 
 void RefType::print(AsmPrinter &printer) const {
   printer << "<" << getComponent();
   if (getIsMutable())
     printer << ", mut";
+  if (getVia())
+    printer << ", up " << getVia();
   printer << ">";
 }

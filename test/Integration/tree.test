@@ -1,0 +1,73 @@
+// A tree relation end to end (Inputs/tree.ent): a sum down the tree in a
+// cascading `for` that reads its parent's sum, a component taken from the
+// nearest ancestor that has it, and the order parents and children are
+// visited in; through a node that changes its parent, one whose parent
+// dies, and a new node in the dead one's slot.
+// RUN: %ent run %S/Inputs/tree.ent 2>/dev/null | FileCheck %s
+// Staged, fused and on all cores: the same.
+// RUN: %ent run --parallel %S/Inputs/tree.ent 2>/dev/null | FileCheck %s
+
+// The nodes are spawned leaf, mid, top, side: a pass in that order would
+// give the leaf 11. The mid was connected to the side, then to the top.
+// CHECK:      1: leaf 111
+// CHECK-NEXT: 1: mid 110
+// CHECK-NEXT: 1: lone 5
+// CHECK-NEXT: 1: top 100
+// CHECK-NEXT: 1: side 1100
+// The leaf's parent has no Mark; the top, two up, has.
+// CHECK-NEXT: 1: leaf marked 7
+// CHECK-NEXT: 1: mid marked 7
+// Nodes without a parent first, then depth by depth.
+// CHECK-NEXT: 1: visit lone
+// CHECK-NEXT: 1: visit top
+// CHECK-NEXT: 1: visit mid
+// CHECK-NEXT: 1: visit side
+// CHECK-NEXT: 1: visit leaf
+
+// The leaf is connected to the side: it has left the mid.
+// CHECK-NEXT: 2: leaf 1101
+// CHECK-NEXT: 2: mid 110
+// CHECK-NEXT: 2: lone 5
+// CHECK-NEXT: 2: top 100
+// CHECK-NEXT: 2: side 1100
+// CHECK-NEXT: 2: leaf marked 9
+// CHECK-NEXT: 2: mid marked 7
+// CHECK-NEXT: 2: visit lone
+// CHECK-NEXT: 2: visit top
+// CHECK-NEXT: 2: visit mid
+// CHECK-NEXT: 2: visit side
+// CHECK-NEXT: 2: visit leaf
+
+// The side is gone: the leaf has no ancestor, so no `for` with `up`
+// visits it; one that only cascades still does, where its edge puts it.
+// CHECK-NEXT: 3: leaf 1
+// CHECK-NEXT: 3: mid 110
+// CHECK-NEXT: 3: lone 5
+// CHECK-NEXT: 3: top 100
+// CHECK-NEXT: 3: mid marked 7
+// CHECK-NEXT: 3: visit lone
+// CHECK-NEXT: 3: visit top
+// CHECK-NEXT: 3: visit mid
+// CHECK-NEXT: 3: visit leaf
+
+// A new node takes the side's slot and not its child; connecting it
+// sorted the edges, which dropped the leaf's.
+// CHECK-NEXT: 4: leaf 1
+// CHECK-NEXT: 4: mid 110
+// CHECK-NEXT: 4: lone 5
+// CHECK-NEXT: 4: top 100
+// CHECK-NEXT: 4: fresh 2100
+// CHECK-NEXT: 4: mid marked 7
+// CHECK-NEXT: 4: visit leaf
+// CHECK-NEXT: 4: visit lone
+// CHECK-NEXT: 4: visit top
+// CHECK-NEXT: 4: visit mid
+// CHECK-NEXT: 4: visit fresh
+// CHECK-NOT:  {{.}}
+
+// An entity that would be its own ancestor stops the program.
+// RUN: %ent build %S/Inputs/tree_cycle.ent -o %t.cycle 2>/dev/null
+// RUN: not --crash %t.cycle > %t.out 2>&1
+// RUN: FileCheck %s --check-prefix=CYCLE --input-file=%t.out
+// CYCLE:     a tree
+// CYCLE-NOT: not reached

@@ -81,6 +81,41 @@ deferred (Q5), so answering with the current state would make the result
 depend on how the archetypes store `C`. Filters (`with`, `without`, `any`)
 are decided the same way: they choose the entities the query visits (Q1).
 
+**Q9. Ancestors, as of the query's start, or in order.** A ref up a tree
+(`!ent.ref<@C, up @R>`) reads a component of another entity, the nearest
+ancestor that has it; which entity that is, is decided by the edges and
+components as they were when the query started. Like a lookup (Q3) it must
+not read a field the query writes. A query that cascades along the same
+tree (`cascade @R`) may: it is defined as one query per depth of the tree,
+run in order, first for the entities without a parent, then for their
+children, and so on, each with its own commit point. So a ref up the tree
+reads what this query wrote to the ancestor, which is at a smaller depth,
+and never what it will write to an entity of the same depth or deeper.
+`cascade @R leaves first` runs the depths the other way, the deepest first
+and the entities without a parent last.
+
+`ent.combine` through a `mut` ref up the tree is deferred to the commit
+point of the depth that sent the value, where the values are combined in
+the order the query visits the entities (fixed: by the edges, not by
+rows). The ancestor is at another depth, so with `leaves first` it finds
+them in its own field when its turn comes. The query may not read such a
+field through a ref up the tree or look it up, so no entity sees what
+others of its depth sent, and combining each value as its entity is
+visited gives the same result. Nothing else in a cascading query is
+deferred (Q5) so far, so one pass in an order that puts every parent
+before its children, or after them, is that sequence of queries.
+
+**Q10. Sorted trees.** The archetype holding the entities of a tree
+declared `sorted` has its rows
+put in the tree's order whenever the tree's edges are sorted, and that
+also happens when the archetype gained or lost an entity: at the commit
+point of a query that spawned into it or despawned from it (step 3), and
+for a spawn outside a query before the system's next query and when the
+system ends. No query sees rows move: it happens between queries. What the
+order of rows decides (the order applies and accumulates are combined in,
+the order a query with a `proc` visits entities in) therefore follows the
+tree; ids, and everything read through them, do not change.
+
 ## The commit point: the end of a query
 
 When a query has run for every entity it visits, in this order:
@@ -150,8 +185,12 @@ where the result is the same:
 - **Fusion**: consecutive systems may be run per entity rather than per
   query, which is equivalent while every body only touches its own entity. It
   stops at systems that write resources, change which entities archetypes
-  hold, look up or apply to other entities, or react to events: those depend
-  on other queries having reached their commit points.
+  hold, look up or apply to other entities, read up a tree or cascade along
+  one, or react to events: those depend on other queries having reached
+  their commit points.
+- **Cascading queries**: the entities of one depth are independent of each
+  other (Q9) and could be visited in parallel; the compiler visits them one
+  after another so far.
 
 **Determinism.** Given the same world and arguments, a frame's result does
 not depend on these choices or on the number of threads: bodies cannot

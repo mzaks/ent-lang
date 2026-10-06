@@ -16,9 +16,25 @@ def Ent_RefType : Ent_Type<"Ref", "ref"> {
     `!ent.ref<@Position>` grants read access, `!ent.ref<@Position, mut>`
     grants read and write access. A ref only exists as a block argument of
     an `ent.query`, so it can never outlive the iteration step.
+
+    `!ent.ref<@Position, up @ChildOf>` is a ref to the component of
+    another entity: the nearest ancestor of the visited one along the tree
+    relation `@ChildOf` (its parent, the parent's parent, ...) that has the
+    component. `ent.get` reads through it; with `mut` (`!ent.ref<@Position,
+    mut, up @ChildOf>`) `ent.combine` combines values into its fields.
   }];
-  let parameters = (ins "FlatSymbolRefAttr":$component, "bool":$isMutable);
+  let parameters = (ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
+                        "FlatSymbolRefAttr":$via);
   let hasCustomAssemblyFormat = 1;
+  let builders = [
+    TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable), [{
+      return $_get($_ctxt, component, isMutable, ::mlir::FlatSymbolRefAttr());
+    }]>
+  ];
+  let extraClassDeclaration = [{
+    /// Whether the ref is to a component of an ancestor (`up @Relation`).
+    bool isUp() const { return static_cast<bool>(getVia()); }
+  }];
 }
 
 def Ent_EntityType : Ent_Type<"Entity", "entity"> {

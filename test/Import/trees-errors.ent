@@ -1,0 +1,113 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+component Body { x: f32 }
+relation Near from Body to Body capacity 8
+system s() {
+  // expected-error @+1 {{'up' follows a tree, and 'Near' is not declared one ('relation Near ... tree capacity N')}}
+  for b: Body, p: Body up Near {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation Near from Body to Body capacity 8
+system s() {
+  // expected-error @+1 {{'cascade' follows a tree, and 'Near' is not declared one}}
+  for b: Body cascade Near {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+system s() {
+  // expected-error @+1 {{unknown relation 'Orbits'}}
+  for b: Body, p: Body up Orbits {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+default_capacity 8
+system s() {
+  for b: Body, p: mut Body up Orbits cascade Orbits {
+    // expected-error @+1 {{an ancestor's field can only be combined into ('+=', '-=', 'min=', 'max='): which write lands last would depend on the order}}
+    p.x = b.x
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+default_capacity 8
+system s() {
+  for b: Body, p: mut Body up Orbits {
+    // expected-error @+1 {{combines into an ancestor up @Orbits in a query that does not cascade along it, which is not supported yet}}
+    p.x += b.x
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+system s() {
+  // expected-error @+1 {{expected 'first'}}
+  for b: Body cascade Orbits leaves {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+default_capacity 8
+system s() {
+  for b: mut Body, p: Body up Orbits cascade Orbits {
+    // expected-error @+1 {{'p' is an ancestor's 'Body' and not 'mut': bind it as 'p: mut Body up ...' to combine into it}}
+    p.x = 1.0
+  }
+}
+
+// -----
+
+// Without the order, a body would read its parent's place before or after
+// the parent moved.
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{reads @Body "x" of an ancestor up @Orbits and changes it; which entities see the old value would depend on iteration order ('cascade @Orbits' visits ancestors first)}}
+  for b: mut Body, p: Body up Orbits {
+    // expected-note @+1 {{changed here}}
+    b.x = p.x + 1.0
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+default_capacity 8
+system s() {
+  for e, b: Body cascade Orbits {
+    // expected-error @+1 {{in a cascading query is not supported yet: such a query only reads and writes fields}}
+    e.destroy()
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+// expected-error @+1 {{only a tree gives its entities an order: 'relation Near ... tree sorted capacity N'}}
+relation Near from Body to Body sorted capacity 8
+
+// -----
+
+component Body { x: f32 }
+// expected-error @+1 {{a sorted tree says what its ends have, so that the archetypes it sorts are known: 'relation Orbits from C to D tree sorted capacity N'}}
+relation Orbits to Body tree sorted capacity 8

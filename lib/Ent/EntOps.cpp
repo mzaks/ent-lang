@@ -198,7 +198,7 @@ static ParseResult parseRecord(OpAsmParser &parser, OperationState &result) {
                       b.getArrayAttr(names));
   result.addAttribute(OpTy::getFieldTypesAttrName(result.name),
                       b.getArrayAttr(types));
-  // `[from @C] [to @D] capacity N`, for relations.
+  // `[from @C] [to @D] [tree] capacity N`, for relations.
   if constexpr (std::is_same_v<OpTy, RelationOp>) {
     for (StringRef end : {"from", "to"}) {
       if (failed(parser.parseOptionalKeyword(end)))
@@ -208,6 +208,12 @@ static ParseResult parseRecord(OpAsmParser &parser, OperationState &result) {
         return failure();
       result.addAttribute(end, component);
     }
+    if (succeeded(parser.parseOptionalKeyword("tree")))
+      result.addAttribute(OpTy::getTreeAttrName(result.name),
+                          b.getUnitAttr());
+    if (succeeded(parser.parseOptionalKeyword("sorted")))
+      result.addAttribute(OpTy::getSortedAttrName(result.name),
+                          b.getUnitAttr());
     int64_t capacity;
     if (parser.parseKeyword("capacity") || parser.parseInteger(capacity))
       return failure();
@@ -251,9 +257,14 @@ static void printRecord(OpTy op, OpAsmPrinter &p) {
       p << " from " << from;
     if (FlatSymbolRefAttr to = op.getToAttr())
       p << " to " << to;
+    if (op.getTree())
+      p << " tree";
+    if (op.getSorted())
+      p << " sorted";
     p << " capacity " << op.getCapacity();
     elided.append({op.getCapacityAttrName(), op.getFromAttrName(),
-                   op.getToAttrName()});
+                   op.getToAttrName(), op.getTreeAttrName(),
+                   op.getSortedAttrName()});
   }
   p.printOptionalAttrDict(op->getAttrs(), elided);
 }
@@ -327,6 +338,19 @@ ParseResult RelationOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 void RelationOp::print(OpAsmPrinter &p) { printRecord(*this, p); }
 LogicalResult RelationOp::verify() {
+  // Entities are stored in a tree's order, and the tree must be known to
+  // live in the archetypes that are.
+  if (getSorted()) {
+    if (!getTree())
+      return emitOpError("is 'sorted' but not a 'tree'; only a tree gives "
+                         "its entities an order");
+    for (bool target : {false, true})
+      if (!getEndpoint(target))
+        return emitOpError("is 'sorted' but does not say what its ")
+               << (target ? "targets" : "sources") << " have ('"
+               << (target ? "to" : "from")
+               << "'): which archetypes it sorts must be known";
+  }
   return verifyRecord(*this, getFieldNames(), getFieldTypes());
 }
 Type RelationOp::getFieldType(StringRef name) {
@@ -893,6 +917,7 @@ LogicalResult StageOp::verify() {
 //===----------------------------------------------------------------------===//
 
 // `with [@A] without [@B] any [@C, @D] any [@E, @F]`, then
+// `cascade @R`, then
 // `on [changed @C "f", added @C log 4096, removed @C, changed @C]`
 ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
   auto parseTriggers = [&]() -> ParseResult {
@@ -917,6 +942,17 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
       result.addAttribute(kWithoutAttr, without);
     if (!groups.empty())
       result.addAttribute(kAnyAttr, b.getArrayAttr(groups));
+    if (succeeded(parser.parseOptionalKeyword("cascade"))) {
+      FlatSymbolRefAttr relation;
+      if (parser.parseAttribute(relation))
+        return failure();
+      result.addAttribute(kCascadeAttr, relation);
+      if (succeeded(parser.parseOptionalKeyword("leaves"))) {
+        if (parser.parseKeyword("first"))
+          return failure();
+        result.addAttribute(kLeavesFirstAttr, b.getUnitAttr());
+      }
+    }
     if (failed(parser.parseOptionalKeyword("on")))
       return success();
     Builder &builder = parser.getBuilder();
@@ -963,6 +999,8 @@ void QueryOp::print(OpAsmPrinter &p) {
   if (auto groups = (*this)->getAttrOfType<ArrayAttr>(kAnyAttr))
     for (Attribute group : groups)
       p << " any " << group;
+  if (FlatSymbolRefAttr cascade = getCascade())
+    p << " cascade " << cascade << (isLeavesFirst() ? " leaves first" : "");
   if (auto triggers = (*this)->getAttrOfType<ArrayAttr>(kTriggersAttr)) {
     p << " on [";
     llvm::interleaveComma(triggers, p, [&](Attribute attr) {
@@ -976,7 +1014,9 @@ void QueryOp::print(OpAsmPrinter &p) {
     p << "]";
   }
   p.printOptionalAttrDictWithKeyword(
-      (*this)->getAttrs(), {kTriggersAttr, kWithAttr, kWithoutAttr, kAnyAttr});
+      (*this)->getAttrs(),
+      {kTriggersAttr, kWithAttr, kWithoutAttr, kAnyAttr, kCascadeAttr,
+       kLeavesFirstAttr});
   printBody(p, getBody());
 }
 
@@ -999,11 +1039,19 @@ componentList(Attribute attr) {
 SmallVector<FlatSymbolRefAttr> QueryOp::getRequired() {
   SmallVector<FlatSymbolRefAttr> required;
   for (Type type : getBody().getArgumentTypes())
-    required.push_back(cast<RefType>(type).getComponent());
+    if (auto ref = dyn_cast<RefType>(type); ref && !ref.isUp())
+      required.push_back(ref.getComponent());
   if (Attribute with = (*this)->getAttr(kWithAttr))
     if (auto list = componentList(with); succeeded(list))
       required.append(list->begin(), list->end());
   return required;
+}
+
+bool QueryOp::hasUpRefs() {
+  return llvm::any_of(getBody().getArgumentTypes(), [](Type type) {
+    auto ref = dyn_cast<RefType>(type);
+    return ref && ref.isUp();
+  });
 }
 
 SmallVector<FlatSymbolRefAttr> QueryOp::getWithout() {
@@ -1041,6 +1089,11 @@ LogicalResult QueryOp::verify() {
                            "use 'with' for one");
     }
   }
+  for (BlockArgument arg : body.getArguments())
+    if (!isa<RefType>(arg.getType()))
+      return emitOpError("argument #")
+             << arg.getArgNumber() << " must be an !ent.ref, got "
+             << arg.getType();
   if (getRequired().empty() && getWithout().empty() && getAnyGroups().empty())
     return emitOpError("must bind or filter by at least one component");
 
@@ -1065,13 +1118,30 @@ LogicalResult QueryOp::verify() {
       if (failed(addTerm(component)))
         return failure();
 
+  if (Attribute attr = (*this)->getAttr(kCascadeAttr))
+    if (!isa<FlatSymbolRefAttr>(attr))
+      return emitOpError("'cascade' must name a relation");
+  if (isLeavesFirst() && !getCascade())
+    return emitOpError("is 'leaves first' without a 'cascade'");
   llvm::SmallPtrSet<Attribute, 8> seen;
+  llvm::SmallDenseSet<std::pair<Attribute, Attribute>, 4> seenUp;
   for (BlockArgument arg : body.getArguments()) {
-    auto refType = dyn_cast<RefType>(arg.getType());
-    if (!refType)
-      return emitOpError("argument #")
-             << arg.getArgNumber() << " must be an !ent.ref, got "
-             << arg.getType();
+    auto refType = cast<RefType>(arg.getType());
+    if (refType.isUp()) {
+      // An ancestor's component: another entity's, so it may also be bound
+      // or filtered by for the entity itself.
+      if (!seenUp.insert({refType.getComponent(), refType.getVia()}).second)
+        return emitOpError("binds component ")
+               << refType.getComponent() << " up " << refType.getVia()
+               << " more than once";
+      for (Operation *user : arg.getUsers())
+        if (!isa<GetOp, CombineOp>(user))
+          return user->emitOpError("uses component reference #")
+                 << arg.getArgNumber()
+                 << "; a reference 'up' a relation may only be used by "
+                    "'ent.get' and 'ent.combine'";
+      continue;
+    }
     // Two refs to the same component of one entity would alias.
     if (!seen.insert(refType.getComponent()).second)
       return emitOpError("binds component ")
@@ -1087,6 +1157,70 @@ LogicalResult QueryOp::verify() {
         return user->emitOpError("uses component reference #")
                << arg.getArgNumber()
                << "; references may only be used by 'ent.get' and 'ent.set'";
+  }
+
+  // A cascading query runs as one query per depth; what is deferred to a
+  // query's end, or relies on the order of rows, has no place in it yet.
+  if (getCascade()) {
+    if ((*this)->hasAttr(kTriggersAttr))
+      return emitOpError("cascades and is reactive, which is not supported "
+                         "yet");
+    Operation *unsupported = nullptr;
+    getBody().walk([&](Operation *op) {
+      if (!unsupported &&
+          isa<SpawnOp, DespawnOp, AddOp, RemoveOp, ApplyOp, AccumulateOp,
+              ConnectOp, DisconnectOp>(op))
+        unsupported = op;
+    });
+    if (unsupported)
+      return unsupported->emitOpError(
+          "in a cascading query is not supported yet: such a query only "
+          "reads and writes fields");
+  }
+
+  // Like a lookup, a ref to an ancestor reads another entity: the query
+  // must not change what it reads, unless it visits ancestors first.
+  for (BlockArgument arg : body.getArguments()) {
+    auto refType = cast<RefType>(arg.getType());
+    if (!refType.isUp())
+      continue;
+    bool ordered = getCascade() == refType.getVia();
+    Operation *writer = nullptr;
+    StringRef what;
+    getBody().walk([&](Operation *op) {
+      if (writer)
+        return;
+      if (isa<AddOp, RemoveOp>(op) &&
+          op->getAttr("component") == refType.getComponent()) {
+        writer = op;
+        return;
+      }
+      auto set = dyn_cast<SetOp>(op);
+      if (ordered || !set)
+        return;
+      auto target = dyn_cast<RefType>(set.getRef().getType());
+      if (!target || target.getComponent() != refType.getComponent())
+        return;
+      for (Operation *user : arg.getUsers())
+        if (auto get = dyn_cast<GetOp>(user))
+          if (get.getField() == set.getField()) {
+            writer = op;
+            what = get.getField();
+          }
+    });
+    if (writer) {
+      InFlightDiagnostic diag = emitOpError("reads ") << refType.getComponent();
+      if (!what.empty())
+        diag << " \"" << what << "\"";
+      diag << " of an ancestor up " << refType.getVia()
+           << " and changes it; which entities see the old value would "
+              "depend on iteration order";
+      if (!what.empty())
+        diag << " ('cascade " << refType.getVia()
+             << "' visits ancestors first)";
+      diag.attachNote(writer->getLoc()) << "changed here";
+      return diag;
+    }
   }
   return success();
 }
@@ -1130,9 +1264,30 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
              << component << " but system @" << system.getSymName()
              << " does not declare it in 'reads' or 'writes'";
   }
+  // `up @R` and `cascade @R` follow a tree.
+  auto verifyTree = [&](FlatSymbolRefAttr name,
+                        StringRef what) -> LogicalResult {
+    auto relation =
+        symbolTable.lookupNearestSymbolFrom<RelationOp>(*this, name);
+    if (!relation)
+      return emitOpError(what) << " unknown relation " << name;
+    if (!relation.getTree())
+      return emitOpError(what)
+             << " " << name << ", which is not declared a 'tree'";
+    if (!system.canRead(name))
+      return emitOpError(what)
+             << " " << name << " but system @" << system.getSymName()
+             << " does not declare it in 'reads' or 'writes'";
+    return success();
+  };
+  if (FlatSymbolRefAttr cascade = getCascade())
+    if (failed(verifyTree(cascade, "cascades along")))
+      return failure();
   for (BlockArgument arg : getBody().getArguments()) {
     auto refType = cast<RefType>(arg.getType());
     FlatSymbolRefAttr component = refType.getComponent();
+    if (refType.isUp() && failed(verifyTree(refType.getVia(), "binds up")))
+      return failure();
     if (!lookupComponent(symbolTable, *this, component))
       return emitOpError("binds unknown component ") << component;
     if (refType.getIsMutable() && !system.canWrite(component))
@@ -1475,6 +1630,92 @@ LogicalResult LookupOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     diag.attachNote(writer->getLoc()) << "changed here";
     return diag;
   }
+  return success();
+}
+
+LogicalResult CombineOp::verify() {
+  RefType ref = getRef().getType();
+  auto arg = dyn_cast<BlockArgument>(getRef());
+  auto query = arg ? dyn_cast<QueryOp>(arg.getOwner()->getParentOp())
+                   : QueryOp();
+  if (!ref.isUp() || !query)
+    return emitOpError("combines through ")
+           << ref << "; only a ref up a relation, bound by the query, leads "
+           << "to another entity";
+  if (!ref.getIsMutable())
+    return emitOpError("requires a mutable reference, got ") << ref;
+  if (getRule() != "add" && getRule() != "min" && getRule() != "max")
+    return emitOpError("has unknown rule '")
+           << getRule() << "'; expected 'add', 'min' or 'max'";
+  // Without an order, the values would have to wait for the query's end.
+  if (query.getCascade() != ref.getVia())
+    return emitOpError("combines into an ancestor up ")
+           << ref.getVia() << " in a query that does not cascade along it, "
+           << "which is not supported yet";
+  if ((*this)->getParentOfType<EdgesOp>())
+    return emitOpError("inside 'ent.edges' is not supported yet");
+
+  // What this depth sends must not be seen by this depth.
+  Operation *reader = nullptr;
+  CombineOp other;
+  query.walk([&](Operation *op) {
+    if (auto get = dyn_cast<GetOp>(op)) {
+      RefType read = get.getRef().getType();
+      if (read.isUp() && read.getComponent() == ref.getComponent() &&
+          get.getField() == getField())
+        reader = op;
+    } else if (auto lookup = dyn_cast<LookupOp>(op)) {
+      if (lookup.getComponentAttr() == ref.getComponent() &&
+          lookup.getField() == getField())
+        reader = op;
+    } else if (auto combine = dyn_cast<CombineOp>(op)) {
+      if (!other && combine.getRef().getType().getComponent() ==
+                        ref.getComponent() &&
+          combine.getField() == getField() && combine.getRule() != getRule())
+        other = combine;
+    }
+  });
+  if (reader) {
+    InFlightDiagnostic diag =
+        emitOpError("combines into ")
+        << ref.getComponent() << " \"" << getField()
+        << "\" of an ancestor in a query that reads it of other entities; "
+           "which values those see would depend on the order";
+    diag.attachNote(reader->getLoc()) << "read here";
+    return diag;
+  }
+  if (other) {
+    InFlightDiagnostic diag =
+        emitOpError("combines ")
+        << ref.getComponent() << " \"" << getField() << "\" with '"
+        << getRule() << "', but the query also combines it with '"
+        << other.getRule() << "'; the result would depend on the order";
+    diag.attachNote(other.getLoc()) << "other rule here";
+    return diag;
+  }
+  return success();
+}
+
+LogicalResult CombineOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  FailureOr<Type> fieldType =
+      resolveField(symbolTable, *this, getRef().getType(), getField());
+  if (failed(fieldType))
+    return failure();
+  if (*fieldType != getValue().getType())
+    return emitOpError("value type ")
+           << getValue().getType() << " does not match field '" << getField()
+           << "' of type " << *fieldType;
+  if ((!isa<FloatType>(*fieldType) && !fieldType->isIntOrIndex()) ||
+      fieldType->isInteger(1))
+    return emitOpError("cannot combine field '")
+           << getField() << "' of type " << *fieldType
+           << "; only integers and floats can";
+  auto system = (*this)->getParentOfType<SystemOp>();
+  FlatSymbolRefAttr component = getRef().getType().getComponent();
+  if (!system.canWrite(component))
+    return emitOpError("combines into ")
+           << component << " but system @" << system.getSymName()
+           << " does not declare it in 'writes'";
   return success();
 }
 

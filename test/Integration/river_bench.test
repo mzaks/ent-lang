@@ -1,0 +1,45 @@
+// examples/river.ent, the program bench/river measures, agrees with C
+// that sums down the same tree, to the bit, in each shape of tree.
+// RUN: mkdir -p %t.dir
+// RUN: ent-translate --import-ent %S/../../examples/river.ent -o %t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/river_world.h
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module -ffp-contract=off -DVARIANT=2 -DN=1024 \
+// RUN:     %t.ll -I%t.dir %S/../../bench/river/river.c -o %t.ent
+// With its tree sorted.
+// RUN: sed 's/ tree capacity 1024$/ tree sorted capacity 1024/' \
+// RUN:     %S/../../examples/river.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted capacity" %t.sorted.ent
+// RUN: mkdir -p %t.sdir
+// RUN: ent-translate --import-ent %t.sorted.ent -o %t.s.mlir
+// RUN: ent-translate --ent-to-c-header %t.s.mlir -o %t.sdir/river_world.h
+// RUN: ent-opt %t.s.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.s.ll
+// RUN: clang -O2 -Wno-override-module -ffp-contract=off -DVARIANT=2 -DN=1024 \
+// RUN:     %t.s.ll -I%t.sdir %S/../../bench/river/river.c -o %t.entsorted
+// RUN: %t.entsorted 3 1 bushy | sed 's/.*depth/depth/' > %t.es.out
+// RUN: %t.entsorted 3 1 deep | sed 's/.*depth/depth/' >> %t.es.out
+// RUN: %t.entsorted 3 1 shuffled | sed 's/.*depth/depth/' >> %t.es.out
+// RUN: clang -O2 -ffp-contract=off -DVARIANT=0 -DN=1024 \
+// RUN:     %S/../../bench/river/river.c -o %t.c
+// RUN: clang -O2 -ffp-contract=off -DVARIANT=1 -DN=1024 \
+// RUN:     %S/../../bench/river/river.c -o %t.sorted
+// RUN: %t.ent 3 1 bushy | sed 's/.*depth/depth/' > %t.ent.out
+// RUN: %t.ent 3 1 deep | sed 's/.*depth/depth/' >> %t.ent.out
+// RUN: %t.ent 3 1 shuffled | sed 's/.*depth/depth/' >> %t.ent.out
+// RUN: %t.c 3 1 bushy | sed 's/.*depth/depth/' > %t.c.out
+// RUN: %t.c 3 1 deep | sed 's/.*depth/depth/' >> %t.c.out
+// RUN: %t.c 3 1 shuffled | sed 's/.*depth/depth/' >> %t.c.out
+// RUN: %t.sorted 3 1 bushy | sed 's/.*depth/depth/' > %t.sorted.out
+// RUN: %t.sorted 3 1 deep | sed 's/.*depth/depth/' >> %t.sorted.out
+// RUN: %t.sorted 3 1 shuffled | sed 's/.*depth/depth/' >> %t.sorted.out
+// RUN: cmp %t.ent.out %t.c.out
+// RUN: cmp %t.ent.out %t.sorted.out
+// RUN: cmp %t.ent.out %t.es.out
+// RUN: FileCheck %s --input-file=%t.ent.out
+// CHECK:      depth={{[0-9]+}} checksum={{[0-9a-f]+}}
+// CHECK-NEXT: depth={{[0-9]+}} checksum={{[0-9a-f]+}}
+// CHECK-NEXT: depth={{[0-9]+}} checksum={{[0-9a-f]+}}

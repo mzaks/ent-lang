@@ -1,0 +1,21 @@
+// The third edge closes a cycle, which a tree cannot have.
+import console
+component Node { n: i32 }
+default_capacity 8
+relation Under from Node to Node tree capacity 8
+unique Frame: i32
+world {
+  let a = spawn { Node { n: 1 } }
+  let b = spawn { Node { n: 2 } }
+  let c = spawn { Node { n: 3 } }
+  connect(a, b, Under)
+  connect(b, c, Under)
+  put("a tree")
+  flush()
+  connect(c, a, Under)
+  put("not reached")
+  flush()
+}
+system count() { Frame += 1 }
+schedule frame() { count() }
+main { loop { frame() } until Frame == 1 }

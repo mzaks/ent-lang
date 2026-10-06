@@ -1,0 +1,64 @@
+// RUN: ent-opt %s | FileCheck %s
+// Printing and re-parsing must give the same module.
+// RUN: ent-opt %s | ent-opt | FileCheck %s
+
+// CHECK: ent.relation @Under () from @Node to @Node tree capacity 16
+// CHECK: ent.relation @Owns (share: f32) tree capacity 4
+ent.component @Node (local: i32, total: i32) capacity 8
+ent.component @Mark (color: i32)
+ent.relation @Under () from @Node to @Node tree capacity 16
+ent.relation @Owns (share: f32) tree capacity 4
+ent.archetype @Plain (@Node) capacity 8
+ent.archetype @Marked (@Node, @Mark) capacity 8
+
+// A ref up a tree and the order that lets the query write what it reads
+// there.
+// CHECK-LABEL: ent.system @sum() {
+// CHECK:   ent.query (%[[N:.*]]: !ent.ref<@Node, mut>, %[[P:.*]]: !ent.ref<@Node, up @Under>) cascade @Under {
+// CHECK:     ent.get %[[P]] "total" : <@Node, up @Under> -> i32
+ent.system @sum() {
+  ent.query (%n: !ent.ref<@Node, mut>, %p: !ent.ref<@Node, up @Under>)
+      cascade @Under {
+    %above = ent.get %p "total" : !ent.ref<@Node, up @Under> -> i32
+    %own = ent.get %n "local" : !ent.ref<@Node, mut> -> i32
+    %total = arith.addi %above, %own : i32
+    ent.set %n "total", %total : !ent.ref<@Node, mut>, i32
+  }
+}
+
+// An ancestor's component may be one the entity itself must not have, and
+// a system that declares its access names the tree.
+// CHECK-LABEL: ent.system @inherit() reads [@Node, @Mark, @Under] {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Node>, %{{.*}}: !ent.ref<@Mark, up @Under>) without [@Mark] {
+ent.system @inherit() reads [@Node, @Mark, @Under] {
+  ent.query (%n: !ent.ref<@Node>, %m: !ent.ref<@Mark, up @Under>)
+      without [@Mark] {
+    %color = ent.get %m "color" : !ent.ref<@Mark, up @Under> -> i32
+  }
+}
+
+// Ordered only, after the filters.
+// CHECK-LABEL: ent.system @visit() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Node>) with [@Mark] cascade @Under {
+ent.system @visit() {
+  ent.query (%n: !ent.ref<@Node>) with [@Mark] cascade @Under {
+  }
+}
+
+// Children before their parents, each combining into its parent.
+// CHECK-LABEL: ent.system @gather() {
+// CHECK:   ent.query (%[[N:.*]]: !ent.ref<@Node>, %[[D:.*]]: !ent.ref<@Node, mut, up @Under>) cascade @Under leaves first {
+// CHECK:     ent.combine %[[D]] "total" add %{{.*}} : <@Node, mut, up @Under>, i32
+ent.system @gather() {
+  ent.query (%n: !ent.ref<@Node>, %d: !ent.ref<@Node, mut, up @Under>)
+      cascade @Under leaves first {
+    %own = ent.get %n "total" : !ent.ref<@Node> -> i32
+    ent.combine %d "total" add %own : !ent.ref<@Node, mut, up @Under>, i32
+  }
+}
+
+// A tree whose entities are stored in its order.
+// CHECK: ent.relation @In (w: f32) from @Cell to @Cell tree sorted capacity 8
+ent.component @Cell (v: f32)
+ent.relation @In (w: f32) from @Cell to @Cell tree sorted capacity 8
+ent.archetype @Cells (@Cell) capacity 8

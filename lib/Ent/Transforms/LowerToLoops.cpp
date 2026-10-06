@@ -556,6 +556,25 @@ public:
   Type offsetType(const WorldRelation &relation) {
     return rewriter.getIntegerType(relation.offsetBits);
   }
+  /// A tree's entities with a parent, parents first, and how many.
+  Value treeOrder(const WorldRelation &relation) {
+    return view(relation.orderOffset, relation.capacity, idType());
+  }
+  Value treeOrderParents(const WorldRelation &relation) {
+    return view(relation.orderParentOffset, relation.capacity, idType());
+  }
+  /// A sorted archetype: how many of its entities have no parent, and per
+  /// row the parent's row.
+  Value rootCount(const WorldArchetype &archetype) {
+    return scalar(archetype.rootCountOffset);
+  }
+  Value parentRows(const WorldArchetype &archetype) {
+    return view(archetype.parentRowOffset, archetype.capacity,
+                rewriter.getI32Type());
+  }
+  Value treeOrderCount(const WorldRelation &relation) {
+    return scalar(relation.orderCountOffset);
+  }
   /// A view of `elements` values of `type` at `offset`.
   Value array(uint64_t offset, int64_t elements, Type type) {
     return view(offset, elements, type);
@@ -1059,6 +1078,12 @@ static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
 /// buffer.
 static constexpr llvm::StringLiteral kUnobservedAttr = "ent.unobserved";
 
+/// Marks an `ent.lookup` or `ent.apply` whose entity is the other end of
+/// an edge loop's edge, of the component that end is trusted to have (see
+/// getTrustedEndpoint), or the ancestor a ref up a tree was found to lead
+/// to: it is located without checks.
+static constexpr llvm::StringLiteral kTrustedAttr = "ent.trusted";
+
 static bool appliesDirectly(Operation *apply, bool directApplies) {
   return directApplies && isa<ApplyOp, AccumulateOp>(apply) &&
          apply->hasAttr(kUnobservedAttr);
@@ -1269,6 +1294,40 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                              Value row, Value tick, bool directApplies);
 static SmallVector<Operation *> carryOwnFields(IRRewriter &rewriter,
                                                scf::ForOp loop);
+namespace {
+/// Where a ref `up` a relation leads for one entity: whether it has such
+/// an ancestor, and the ancestor's id (in its stored form).
+struct Ancestor {
+  Value found, id;
+  /// The ancestor is known to be alive and to have the component.
+  bool trusted;
+  /// Where it is, if that is known rather than its id.
+  const WorldArchetype *archetype = nullptr;
+  Value row;
+};
+} // namespace
+static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
+                             const WorldLayout &layout, WorldAccess &world,
+                             const WorldRelation &relation,
+                             FlatSymbolRefAttr component, Value id,
+                             Value parent = Value());
+namespace {
+/// The visited entity's parent in a tree, where the caller has it at hand:
+/// its id (in its stored form), or where it is.
+struct KnownParent {
+  const WorldRelation *relation = nullptr;
+  Value id;
+  const WorldArchetype *archetype = nullptr;
+  Value row;
+};
+} // namespace
+/// Combine `value` (in its stored form) into a field of the entity at
+/// `row` of `target` and record the change for reactive queries.
+static void combineAtRow(IRRewriter &rewriter, Location loc,
+                         const WorldLayout &layout, WorldAccess &world,
+                         const WorldArchetype &target, Value row,
+                         StringAttr component, StringAttr field,
+                         StringRef rule, Value value, Value id, Value tick);
 
 /// Emit the body of `query` for `entity` of `archetype` at the insertion
 /// point, with the query's parameters and outer values mapped by
@@ -1281,7 +1340,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                           IRMapping mapping, const WorldArchetype &archetype,
                           WorldAccess &world, const WorldLayout &layout,
                           Value entity, Value rows, Value tick, Value seen,
-                          bool parallel, bool directApplies = false) {
+                          bool parallel, bool directApplies = false,
+                          KnownParent parent = {}) {
   Location loc = query.getLoc();
   ArchetypeOp archetypeOp = archetype.op;
   Value mask;
@@ -1341,10 +1401,50 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     if (archetypeOp.isOptional(has.getComponentAttr()))
       isPresent(has.getComponentAttr());
   });
+  // A ref up a relation: find the ancestor it leads to. The body applies
+  // only to the entities that have one.
+  SmallVector<std::pair<BlockArgument, Ancestor>> ancestors;
+  for (BlockArgument arg : query.getBody().getArguments()) {
+    auto refType = cast<RefType>(arg.getType());
+    if (!refType.isUp())
+      continue;
+    const WorldRelation &relation =
+        layout.getRelation(refType.getVia().getAttr());
+    KnownParent known = parent.relation == &relation ? parent : KnownParent();
+    Ancestor ancestor;
+    if (known.row &&
+        ArchetypeOp(known.archetype->op).contains(refType.getComponent()) &&
+        !ArchetypeOp(known.archetype->op)
+             .isOptional(refType.getComponent())) {
+      // The parent's row, in an archetype that always has the component.
+      ancestor = {Value(), Value(), /*trusted=*/true, known.archetype,
+                  known.row};
+    } else {
+      if (known.row)
+        known.id = memref::LoadOp::create(rewriter, loc,
+                                          world.ids(*known.archetype),
+                                          ValueRange{known.row});
+      ancestor = emitAncestor(rewriter, loc, layout, world, relation,
+                              refType.getComponent(),
+                              world.entityId(loc, archetype, entity),
+                              known.id);
+    }
+    // Null: every entity the caller visits has one.
+    if (ancestor.found)
+      require(ancestor.found);
+    ancestors.push_back({arg, ancestor});
+  }
 
   OpBuilder::InsertionGuard guard(rewriter);
+  // Without an ancestor there is nothing to read: such a body never runs
+  // masked.
   bool guarded = mask && (!canRunForAbsentEntities(query) ||
-                          isStructuralFor(query, archetypeOp));
+                          isStructuralFor(query, archetypeOp) ||
+                          !ancestors.empty());
+  assert((mask || ancestors.empty() ||
+          llvm::all_of(ancestors, [](auto &entry) {
+            return !entry.second.found;
+          })) && "a body reading an ancestor runs unguarded");
   // An apply or connect that may not run for this entity (it is under an
   // `if`, or the body is guarded) must still leave its slot saying "no
   // target". So must an apply in an edge loop, whose row slot says whether
@@ -1372,6 +1472,84 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   SmallVector<Operation *> roots;
   for (Operation &op : query.getBody().front().without_terminator())
     roots.push_back(rewriter.clone(op, mapping));
+  // Reading through a ref to an ancestor is a lookup of the ancestor,
+  // which is known to be found.
+  for (auto &[arg, ancestor] : ancestors) {
+    SmallVector<GetOp> gets;
+    for (Operation *root : roots)
+      root->walk([&, arg = arg](GetOp get) {
+        if (get.getRef() == arg)
+          gets.push_back(get);
+      });
+    for (GetOp get : gets) {
+      rewriter.setInsertionPoint(get);
+      Operation *op = get;
+      if (ancestor.row) {
+        auto load = memref::LoadOp::create(
+            rewriter, get.getLoc(),
+            world.column(*ancestor.archetype,
+                         cast<RefType>(arg.getType()).getComponent().getAttr(),
+                         get.getFieldAttr()),
+            ValueRange{ancestor.row});
+        auto *at = llvm::find(roots, op);
+        if (at != roots.end())
+          *at = load;
+        rewriter.replaceOp(
+            get, world.fromStorage(get.getLoc(), load, get.getType()));
+        continue;
+      }
+      auto lookup = LookupOp::create(
+          rewriter, get.getLoc(), get.getType(), rewriter.getI1Type(),
+          world.fromStorage(get.getLoc(), ancestor.id,
+                            EntityType::get(rewriter.getContext())),
+          cast<RefType>(arg.getType()).getComponent(), get.getFieldAttr());
+      if (ancestor.trusted)
+        lookup->setAttr(kTrustedAttr, rewriter.getUnitAttr());
+      auto *at = llvm::find(roots, op);
+      if (at != roots.end())
+        *at = lookup;
+      rewriter.replaceOp(get, lookup.getValue());
+    }
+    // Combining through it is an apply to the ancestor. A cascading query
+    // visits the entities in the order its values are combined in, and
+    // nothing in it sees the field of another entity, so it combines as it
+    // goes.
+    SmallVector<CombineOp> combines;
+    for (Operation *root : roots)
+      root->walk([&, arg = arg](CombineOp combine) {
+        if (combine.getRef() == arg)
+          combines.push_back(combine);
+      });
+    for (CombineOp combine : combines) {
+      assert(directApplies && "an ancestor is combined into in order");
+      rewriter.setInsertionPoint(combine);
+      Operation *op = combine;
+      if (ancestor.row) {
+        combineAtRow(rewriter, combine.getLoc(), layout, world,
+                     *ancestor.archetype, ancestor.row,
+                     cast<RefType>(arg.getType()).getComponent().getAttr(),
+                     combine.getFieldAttr(), combine.getRule(),
+                     world.toStorage(combine.getLoc(), combine.getValue()),
+                     Value(), tick);
+        llvm::erase(roots, op);
+        rewriter.eraseOp(combine);
+        continue;
+      }
+      auto apply = ApplyOp::create(
+          rewriter, combine.getLoc(),
+          world.fromStorage(combine.getLoc(), ancestor.id,
+                            EntityType::get(rewriter.getContext())),
+          cast<RefType>(arg.getType()).getComponent(), combine.getFieldAttr(),
+          combine.getRuleAttr(), combine.getValue());
+      apply->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
+      if (ancestor.trusted)
+        apply->setAttr(kTrustedAttr, rewriter.getUnitAttr());
+      auto *at = llvm::find(roots, op);
+      if (at != roots.end())
+        *at = apply;
+      rewriter.eraseOp(combine);
+    }
+  }
   SmallVector<HasOp> tests;
   for (Operation *root : roots)
     root->walk([&](HasOp has) { tests.push_back(has); });
@@ -1596,6 +1774,13 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
         archetype = &entry;
     Location loc = spawn.getLoc();
     rewriter.setInsertionPoint(spawn);
+    // A new entity is out of a sorted archetype's order until the next
+    // sort.
+    if (archetype->isSorted())
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+          world.edgesClean(layout.getRelation(archetype->sortedBy)),
+          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
     Value row = world.count(loc, *archetype);
     Value capacity =
         arith::ConstantIndexOp::create(rewriter, loc, archetype->capacity);
@@ -1678,11 +1863,6 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
     rewriter.replaceOp(spawn, world.fromStorage(loc, id, spawn.getType()));
   }
 }
-
-/// Marks an `ent.lookup` or `ent.apply` whose entity is the other end of
-/// an edge loop's edge, of the component that end is trusted to have (see
-/// getTrustedEndpoint): it is located without checks.
-static constexpr llvm::StringLiteral kTrustedAttr = "ent.trusted";
 
 /// Bounds that ids are checked against, loaded ahead by a caller that
 /// knows they cannot change (see emitLocate).
@@ -1958,34 +2138,40 @@ static void combineInto(IRRewriter &rewriter, ApplyOp apply,
           auto ifPresent = scf::IfOp::create(rewriter, loc, present);
           rewriter.setInsertionPointToStart(ifPresent.thenBlock());
         }
-        Value field =
-            world.column(target, component.getAttr(), apply.getFieldAttr());
-        Value old =
-            memref::LoadOp::create(rewriter, loc, field, ValueRange{targetRow});
-        memref::StoreOp::create(
-            rewriter, loc, combine(rewriter, loc, apply.getRule(), old, value),
-            field, ValueRange{targetRow});
-        for (const WorldColumn *column :
-             stampsFor(target, Trigger::Changed, component.getAttr(),
-                       apply.getFieldAttr())) {
-          Value stamps = world.stamps(target, *column);
-          const WorldLog *log = layout.findLog(*column->stamp);
-          Value before = log ? memref::LoadOp::create(rewriter, loc, stamps,
-                                                      ValueRange{targetRow})
-                                   .getResult()
-                             : Value();
-          memref::StoreOp::create(rewriter, loc, tick, stamps,
-                                  ValueRange{targetRow});
-          if (log)
-            appendToLog(rewriter, loc, world, *log,
-                        segmentOf(rewriter, loc, world, *log, targetRow,
-                                  Value()),
-                        id, tick, before, Value(), /*atomic=*/false);
-        }
+        combineAtRow(rewriter, loc, layout, world, target, targetRow,
+                     component.getAttr(), apply.getFieldAttr(),
+                     apply.getRule(), value, id, tick);
         return {};
       },
       []() -> SmallVector<Value> { return {}; }, bounds,
       apply->hasAttr(kTrustedAttr));
+}
+
+static void combineAtRow(IRRewriter &rewriter, Location loc,
+                         const WorldLayout &layout, WorldAccess &world,
+                         const WorldArchetype &target, Value row,
+                         StringAttr component, StringAttr fieldName,
+                         StringRef rule, Value value, Value id, Value tick) {
+  Value field = world.column(target, component, fieldName);
+  Value old = memref::LoadOp::create(rewriter, loc, field, ValueRange{row});
+  memref::StoreOp::create(rewriter, loc,
+                          combine(rewriter, loc, rule, old, value), field,
+                          ValueRange{row});
+  for (const WorldColumn *column :
+       stampsFor(target, Trigger::Changed, component, fieldName)) {
+    Value stamps = world.stamps(target, *column);
+    const WorldLog *log = layout.findLog(*column->stamp);
+    Value before = log ? memref::LoadOp::create(rewriter, loc, stamps,
+                                                ValueRange{row})
+                             .getResult()
+                       : Value();
+    memref::StoreOp::create(rewriter, loc, tick, stamps, ValueRange{row});
+    if (log)
+      appendToLog(rewriter, loc, world, *log,
+                  segmentOf(rewriter, loc, world, *log, row, Value()),
+                  id ? id : world.entityId(loc, target, row), tick, before,
+                  Value(), /*atomic=*/false);
+  }
 }
 
 /// Combine the values `apply` sent from the first `count` rows of
@@ -2034,6 +2220,115 @@ static std::pair<Value, Value> emitEdgeRange(IRRewriter &rewriter,
   Value begin = memref::LoadOp::create(rewriter, loc, offsets, ValueRange{key});
   Value end = memref::LoadOp::create(rewriter, loc, offsets, ValueRange{next});
   return {world.toIndex(loc, begin), world.toIndex(loc, end)};
+}
+
+/// The parent of the entity `id` (in its stored form) in the tree
+/// `relation`, at the insertion point: whether it has one, and the
+/// parent's id (no entity otherwise). The parent is the target of the
+/// entity's one edge; with generational ids a slot may have been reused
+/// since the edges were sorted, so the edge must be the entity's own.
+static std::pair<Value, Value> emitParent(IRRewriter &rewriter, Location loc,
+                                          const WorldLayout &layout,
+                                          WorldAccess &world,
+                                          const WorldRelation &relation,
+                                          Value id) {
+  auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation,
+                                    /*in=*/false, world.entityKey(loc, id));
+  Value any = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                    begin, end);
+  bool sourceTrusted =
+      relation.getTrusted(/*target=*/false) != FlatSymbolRefAttr();
+  auto branch = scf::IfOp::create(
+      rewriter, loc, TypeRange{rewriter.getI1Type(), world.idType()}, any,
+      /*withElseRegion=*/true);
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(branch.thenBlock());
+  Value mine = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+  if (layout.entities.hasGenerations() && !sourceTrusted)
+    mine = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq,
+        memref::LoadOp::create(rewriter, loc,
+                               world.edgeIds(relation, /*source=*/true),
+                               ValueRange{begin}),
+        id);
+  Value parent = memref::LoadOp::create(
+      rewriter, loc, world.edgeIds(relation, /*source=*/false),
+      ValueRange{begin});
+  scf::YieldOp::create(rewriter, loc, ValueRange{mine, parent});
+  rewriter.setInsertionPointToStart(branch.elseBlock());
+  scf::YieldOp::create(
+      rewriter, loc,
+      ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 1),
+                 world.noEntity(loc)});
+  return {branch.getResult(0), branch.getResult(1)};
+}
+
+/// The nearest ancestor of the entity `id` (in its stored form) along the
+/// tree `relation` that has `component`, at the insertion point: its
+/// parent if that has the component, else the parent's parent, and so on,
+/// as long as the entities on the way are alive. Where the relation's
+/// targets are trusted to have the component, that is the parent. A caller
+/// that has the entity's parent at hand gives it as `parent`; `found` is
+/// then null where the parent is the ancestor without a doubt.
+static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
+                             const WorldLayout &layout, WorldAccess &world,
+                             const WorldRelation &relation,
+                             FlatSymbolRefAttr component, Value id,
+                             Value parent) {
+  Type i1 = rewriter.getI1Type();
+  Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+  Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+  bool trusted = relation.getTrusted(/*target=*/true) == component;
+  if (trusted && parent)
+    return {Value(), parent, /*trusted=*/true};
+  Value has = yes;
+  if (!parent)
+    std::tie(has, parent) =
+        emitParent(rewriter, loc, layout, world, relation, id);
+  if (trusted)
+    return {has, parent, /*trusted=*/true};
+  // (the entity to look at, whether it is the ancestor, whether to look)
+  auto climb = scf::WhileOp::create(
+      rewriter, loc, TypeRange{world.idType(), i1, i1},
+      ValueRange{parent, no, has},
+      [&](OpBuilder &builder, Location, ValueRange state) {
+        scf::ConditionOp::create(builder, loc, state[2], state);
+      },
+      [&](OpBuilder &, Location, ValueRange state) {
+        // Whether it is alive, and whether it has the component.
+        SmallVector<Value> located = emitLocate(
+            rewriter, loc, layout, world, state[0],
+            [](const WorldArchetype &) { return true; }, component,
+            TypeRange{i1, i1},
+            [&](const WorldArchetype &archetype, Value,
+                Value present) -> SmallVector<Value> {
+              if (!ArchetypeOp(archetype.op).contains(component))
+                return {yes, no};
+              return {yes, present ? present : yes};
+            },
+            [&]() -> SmallVector<Value> { return {no, no}; });
+        Value alive = located[0], found = located[1];
+        // Not it, but alive: on to its parent, if it has one.
+        Value further = arith::AndIOp::create(
+            rewriter, loc, alive,
+            arith::XOrIOp::create(rewriter, loc, found, yes));
+        auto branch = scf::IfOp::create(
+            rewriter, loc, TypeRange{world.idType(), i1}, further,
+            /*withElseRegion=*/true);
+        {
+          OpBuilder::InsertionGuard guard(rewriter);
+          rewriter.setInsertionPointToStart(branch.thenBlock());
+          auto [hasNext, next] =
+              emitParent(rewriter, loc, layout, world, relation, state[0]);
+          scf::YieldOp::create(rewriter, loc, ValueRange{next, hasNext});
+          rewriter.setInsertionPointToStart(branch.elseBlock());
+          scf::YieldOp::create(rewriter, loc, ValueRange{state[0], no});
+        }
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{branch.getResult(0), found, branch.getResult(1)});
+      });
+  return {climb.getResult(1), climb.getResult(0), /*trusted=*/false};
 }
 
 /// Combine the values an apply inside `ent.edges` sent from the first
@@ -2129,7 +2424,7 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   // A visited entity whose end is trusted never dies, so its slot is never
   // reused and its range holds only its own edges.
   bool ownEndTrusted =
-      getTrustedEndpoint(relation.op, /*target=*/!out) != FlatSymbolRefAttr();
+      relation.getTrusted(/*target=*/!out) != FlatSymbolRefAttr();
   if (layout.entities.hasGenerations() && !ownEndTrusted) {
     Value own = memref::LoadOp::create(
         rewriter, loc, world.edgeIds(relation, /*source=*/out),
@@ -2983,7 +3278,46 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   Value sorted = world.edgeOffsets(relation, /*in=*/relation.byTarget);
   Value kept = sortInto(sorted, count, table, scratch,
                         keyIn(table, /*target=*/false), keep);
-  if (relation.byTarget) {
+  if (relation.tree) {
+    // An entity has one parent: of the edges from one source, which are
+    // next to each other in the order they were connected, the last stays.
+    // Then back by source, which counts the offsets again.
+    auto compact = scf::ForOp::create(rewriter, loc, zero, kept, one,
+                                      ValueRange{zero});
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(compact.getBody());
+      Value p = compact.getInductionVar();
+      Value at = compact.getRegionIterArg(0);
+      Value next = arith::AddIOp::create(rewriter, loc, p, one);
+      Value isEnd = arith::CmpIOp::create(rewriter, loc,
+                                          arith::CmpIPredicate::eq, next, kept);
+      Value source =
+          memref::LoadOp::create(rewriter, loc, scratch[0], ValueRange{p});
+      Value following = memref::LoadOp::create(
+          rewriter, loc, scratch[0],
+          ValueRange{arith::SelectOp::create(rewriter, loc, isEnd, p, next)});
+      Value last = arith::OrIOp::create(
+          rewriter, loc, isEnd,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                source, following));
+      auto ifLast = scf::IfOp::create(rewriter, loc, last);
+      rewriter.setInsertionPointToStart(ifLast.thenBlock());
+      for (Value column : scratch)
+        memref::StoreOp::create(
+            rewriter, loc,
+            memref::LoadOp::create(rewriter, loc, column, ValueRange{p}),
+            column, ValueRange{at});
+      rewriter.setInsertionPointAfter(ifLast);
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{arith::SelectOp::create(
+              rewriter, loc, last,
+              arith::AddIOp::create(rewriter, loc, at, one), at)});
+    }
+    kept = sortInto(sorted, compact.getResult(0), scratch, table,
+                    keyIn(scratch, /*target=*/false), all);
+  } else if (relation.byTarget) {
     sortInto(sorted, kept, scratch, table, keyIn(scratch, /*target=*/true),
              all);
   } else {
@@ -3019,6 +3353,192 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
           arith::IndexCastOp::create(rewriter, loc, offsetType, k),
           world.indexEdges(relation), ValueRange{position});
     });
+  }
+
+  // A tree: list the entities with a parent, parents before children.
+  // First the children of the entities without a parent, in table order,
+  // then the children of each entity listed, as the index by target has
+  // them. An entity on a cycle is never reached.
+  if (relation.tree) {
+    Value order = world.treeOrder(relation);
+    Value length = world.treeOrderCount(relation);
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                            length, ValueRange{zero});
+    Value orderParents = world.treeOrderParents(relation);
+    auto list = [&](Value id, Value parent) {
+      Value n = memref::LoadOp::create(rewriter, loc, length, ValueRange{zero});
+      memref::StoreOp::create(rewriter, loc, id, order,
+                              ValueRange{world.toIndex(loc, n)});
+      memref::StoreOp::create(rewriter, loc, parent, orderParents,
+                              ValueRange{world.toIndex(loc, n)});
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::AddIOp::create(
+              rewriter, loc, n,
+              arith::ConstantIntOp::create(rewriter, loc, 1, 64)),
+          length, ValueRange{zero});
+    };
+    forEach(zero, kept, [&](Value k) {
+      Value parent =
+          memref::LoadOp::create(rewriter, loc, targets, ValueRange{k});
+      auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation,
+                                        /*in=*/false,
+                                        world.entityKey(loc, parent));
+      auto ifRoot = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, begin,
+                                end));
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(ifRoot.thenBlock());
+      list(memref::LoadOp::create(rewriter, loc, sources, ValueRange{k}),
+           parent);
+    });
+    scf::WhileOp::create(
+        rewriter, loc, TypeRange{rewriter.getIndexType()}, ValueRange{zero},
+        [&](OpBuilder &, Location, ValueRange state) {
+          Value n = world.toIndex(
+              loc, memref::LoadOp::create(rewriter, loc, length,
+                                          ValueRange{zero}));
+          scf::ConditionOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                    state[0], n),
+              state);
+        },
+        [&](OpBuilder &, Location, ValueRange state) {
+          Value id = memref::LoadOp::create(rewriter, loc, order,
+                                            ValueRange{state[0]});
+          auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation,
+                                            /*in=*/true,
+                                            world.entityKey(loc, id));
+          forEach(begin, end, [&](Value position) {
+            Value edge = world.toIndex(
+                loc, memref::LoadOp::create(rewriter, loc,
+                                            world.indexEdges(relation),
+                                            ValueRange{position}));
+            list(memref::LoadOp::create(rewriter, loc, sources,
+                                        ValueRange{edge}),
+                 id);
+          });
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::AddIOp::create(rewriter, loc, state[0], one)});
+        });
+    Value listed =
+        memref::LoadOp::create(rewriter, loc, length, ValueRange{zero});
+    cf::AssertOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq, listed,
+            arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                       kept)),
+        rewriter.getStringAttr("@" + RelationOp(relation.op).getSymName() +
+                               " is a tree, but an entity is its own "
+                               "ancestor"));
+
+    // The archetype sorted by the tree: its rows into the tree's order.
+    // The entities without a parent first, as they are, then the others
+    // as listed; every column and the ids move, the entity table follows,
+    // and each row notes its parent's.
+    if (relation.sortedArchetype >= 0) {
+      const WorldArchetype &archetype =
+          layout.archetypes[relation.sortedArchetype];
+      Type i32 = rewriter.getI32Type();
+      auto asRow = [&](Value index) -> Value {
+        return arith::IndexCastOp::create(rewriter, loc, i32, index);
+      };
+      Value rows = world.count(loc, archetype);
+      Value ids = world.ids(archetype);
+      Value newRows =
+          world.array(archetype.newRowOffset, archetype.capacity, i32);
+      auto unparented = scf::ForOp::create(rewriter, loc, zero, rows, one,
+                                           ValueRange{zero});
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(unparented.getBody());
+        Value row = unparented.getInductionVar();
+        Value at = unparented.getRegionIterArg(0);
+        Value hasParent =
+            emitParent(rewriter, loc, layout, world, relation,
+                       memref::LoadOp::create(rewriter, loc, ids,
+                                              ValueRange{row}))
+                .first;
+        auto ifRoot = scf::IfOp::create(
+            rewriter, loc,
+            arith::XOrIOp::create(
+                rewriter, loc, hasParent,
+                arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
+        rewriter.setInsertionPointToStart(ifRoot.thenBlock());
+        memref::StoreOp::create(rewriter, loc, asRow(at), newRows,
+                                ValueRange{row});
+        rewriter.setInsertionPointAfter(ifRoot);
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::SelectOp::create(
+                rewriter, loc, hasParent, at,
+                arith::AddIOp::create(rewriter, loc, at, one))});
+      }
+      Value roots = unparented.getResult(0);
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                     roots),
+          world.rootCount(archetype), ValueRange{zero});
+      Value entries = world.toIndex(loc, listed);
+      auto rowOf = [&](Value id) {
+        return world.getLocation(loc, world.idSlot(loc, id)).second;
+      };
+      forEach(zero, entries, [&](Value k) {
+        Value id = memref::LoadOp::create(rewriter, loc, order, ValueRange{k});
+        memref::StoreOp::create(
+            rewriter, loc,
+            asRow(arith::AddIOp::create(rewriter, loc, roots, k)), newRows,
+            ValueRange{rowOf(id)});
+      });
+      SmallVector<std::pair<Value, Value>> columns;
+      for (auto [column, offset] :
+           llvm::zip(archetype.columns, archetype.columnScratchOffsets))
+        columns.push_back({world.moveValues(archetype, column),
+                           world.array(offset, archetype.capacity,
+                                       world.storageType(column.type))});
+      columns.push_back({ids, world.array(archetype.idScratchOffset,
+                                          archetype.capacity, world.idType())});
+      for (auto [column, copy] : columns) {
+        forEach(zero, rows, [&, column = column, copy = copy](Value row) {
+          memref::StoreOp::create(
+              rewriter, loc,
+              memref::LoadOp::create(rewriter, loc, column, ValueRange{row}),
+              copy, ValueRange{row});
+        });
+        forEach(zero, rows, [&, column = column, copy = copy](Value row) {
+          Value to = world.toIndex(
+              loc, memref::LoadOp::create(rewriter, loc, newRows,
+                                          ValueRange{row}));
+          memref::StoreOp::create(
+              rewriter, loc,
+              memref::LoadOp::create(rewriter, loc, copy, ValueRange{row}),
+              column, ValueRange{to});
+        });
+      }
+      forEach(zero, rows, [&](Value row) {
+        Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{row});
+        world.setLocation(loc, world.idSlot(loc, id), archetype, row);
+      });
+      Value parentRows = world.parentRows(archetype);
+      forEach(zero, roots, [&](Value row) {
+        memref::StoreOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, -1, 32),
+            parentRows, ValueRange{row});
+      });
+      forEach(zero, entries, [&](Value k) {
+        Value parent = memref::LoadOp::create(rewriter, loc, orderParents,
+                                              ValueRange{k});
+        memref::StoreOp::create(
+            rewriter, loc, asRow(rowOf(parent)), parentRows,
+            ValueRange{arith::AddIOp::create(rewriter, loc, roots, k)});
+      });
+    }
   }
   memref::StoreOp::create(rewriter, loc,
                           arith::ConstantIntOp::create(rewriter, loc, 1, 64),
@@ -3209,6 +3729,186 @@ static void combineAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
                           ValueRange{zero});
 }
 
+/// Replace a cascading query by loops that visit parents before their
+/// children: first the entities without a parent in the tree, archetype
+/// after archetype, then those with one in the order the relation's sort
+/// left (breadth first), each found by its id. Entities of one depth read
+/// only what shallower ones wrote (through refs up the tree), so one pass
+/// in this order is the query run once per depth. A query with a ref up
+/// the tree it cascades along visits no entity without a parent. With
+/// `leaves first` the order is the other way: the list from its end, then
+/// the entities without a parent. What the query combines into ancestors
+/// it combines as it visits, which is the order of the depths' ends.
+static void lowerCascade(IRRewriter &rewriter, QueryOp query,
+                         const WorldLayout &layout, WorldAccess &world,
+                         const LoopOptions &options) {
+  Location loc = query.getLoc();
+  FlatSymbolRefAttr cascade = query.getCascade();
+  const WorldRelation &relation = layout.getRelation(cascade.getAttr());
+  rewriter.setInsertionPoint(query);
+  Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
+  bool matched = false;
+  bool visitsRoots =
+      llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
+        return cast<RefType>(type).getVia() == cascade;
+      });
+  LoopOptions sequential = options;
+  sequential.parallelEntities = false;
+  bool leavesFirst = query.isLeavesFirst();
+  // The archetype stored in the tree's order, if there is one: its rows
+  // are the entities without a parent, then the others, parents first.
+  const WorldArchetype *sorted =
+      relation.sortedArchetype >= 0
+          ? &layout.archetypes[relation.sortedArchetype]
+          : nullptr;
+  auto rootCount = [&] {
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    return world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc, world.rootCount(*sorted),
+                                    ValueRange{zero}));
+  };
+  auto emitRoots = [&] {
+  for (const WorldArchetype &archetype : layout.archetypes) {
+    if (!matches(archetype, query))
+      continue;
+    matched = true;
+    if (!visitsRoots)
+      continue;
+    rewriter.setInsertionPoint(query);
+    if (&archetype == sorted) {
+      Operation *loops = emitEntityLoops(
+          rewriter, loc, archetype, world, sequential, /*entityLocal=*/false,
+          [&](Value entity, Value rows, bool) {
+            emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                          layout, entity, rows, tick, Value(),
+                          /*parallel=*/false, /*directApplies=*/true);
+          },
+          rootCount());
+      hoistResourceReads(rewriter, loops, world);
+      continue;
+    }
+    Operation *loops = emitEntityLoops(
+        rewriter, loc, archetype, world, sequential, /*entityLocal=*/false,
+        [&](Value entity, Value rows, bool) {
+          Value hasParent =
+              emitParent(rewriter, loc, layout, world, relation,
+                         world.entityId(loc, archetype, entity))
+                  .first;
+          auto ifRoot = scf::IfOp::create(
+              rewriter, loc,
+              arith::XOrIOp::create(
+                  rewriter, loc, hasParent,
+                  arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
+          rewriter.setInsertionPointToStart(ifRoot.thenBlock());
+          emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                        layout, entity, rows, tick, Value(),
+                        /*parallel=*/false, /*directApplies=*/true);
+        });
+    hoistResourceReads(rewriter, loops, world);
+  }
+  };
+  if (!leavesFirst)
+    emitRoots();
+  else
+    matched = llvm::any_of(layout.archetypes,
+                           [&](const WorldArchetype &archetype) {
+                             return matches(archetype, query);
+                           });
+  if (matched && sorted) {
+    // Every entity with a parent is in the sorted archetype: its rows
+    // after those without one, up or down, each with its parent's row.
+    if (matches(*sorted, query)) {
+      rewriter.setInsertionPoint(query);
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+      Value rows = world.count(loc, *sorted);
+      Value roots = rootCount();
+      auto loop = scf::ForOp::create(
+          rewriter, loc, zero,
+          arith::SubIOp::create(rewriter, loc, rows, roots), one);
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      Value row = leavesFirst
+                      ? arith::SubIOp::create(
+                            rewriter, loc,
+                            arith::SubIOp::create(rewriter, loc, rows, one),
+                            loop.getInductionVar())
+                            .getResult()
+                      : arith::AddIOp::create(rewriter, loc, roots,
+                                              loop.getInductionVar())
+                            .getResult();
+      KnownParent parent{
+          &relation, Value(), sorted,
+          world.toIndex(loc, memref::LoadOp::create(rewriter, loc,
+                                                    world.parentRows(*sorted),
+                                                    ValueRange{row}))};
+      emitQueryBody(rewriter, query, IRMapping(), *sorted, world, layout, row,
+                    rows, tick, Value(), /*parallel=*/false,
+                    /*directApplies=*/true, parent);
+      hoistResourceReads(rewriter, loop, world);
+    }
+    if (leavesFirst)
+      emitRoots();
+  } else if (matched) {
+    rewriter.setInsertionPoint(query);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value count = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc,
+                                    world.treeOrderCount(relation),
+                                    ValueRange{zero}));
+    auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    Value at = loop.getInductionVar();
+    if (leavesFirst)
+      at = arith::SubIOp::create(
+          rewriter, loc, arith::SubIOp::create(rewriter, loc, count, one), at);
+    Value id = memref::LoadOp::create(rewriter, loc, world.treeOrder(relation),
+                                      ValueRange{at});
+    // The list has each entity's parent next to it.
+    KnownParent parent{&relation,
+                       memref::LoadOp::create(rewriter, loc,
+                                              world.treeOrderParents(relation),
+                                              ValueRange{at})};
+    // The listed entities are sources of edges. Where those cannot die
+    // (the relation's sources are trusted, or nothing dies at all) and can
+    // only live in one archetype, each is found there without a check.
+    RelationOp relationOp = relation.op;
+    FlatSymbolRefAttr from = relationOp.getEndpoint(/*target=*/false);
+    bool fromTrusted =
+        from && relation.getTrusted(/*target=*/false) == from;
+    const WorldArchetype *only = nullptr;
+    unsigned homes = 0;
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (!from || ArchetypeOp(archetype.op).contains(from)) {
+        only = &archetype;
+        ++homes;
+      }
+    bool certain = homes == 1 && matches(*only, query) &&
+                   (from ? fromTrusted : !layout.entities.hasGenerations());
+    emitLocate(
+        rewriter, loc, layout, world, id,
+        [&](const WorldArchetype &archetype) {
+          return certain ? &archetype == only : matches(archetype, query);
+        },
+        FlatSymbolRefAttr(), TypeRange{},
+        [&](const WorldArchetype &archetype, Value row,
+            Value) -> SmallVector<Value> {
+          OpBuilder::InsertionGuard inner(rewriter);
+          emitQueryBody(rewriter, query, IRMapping(), archetype, world, layout,
+                        row, world.count(loc, archetype), tick, Value(),
+                        /*parallel=*/false, /*directApplies=*/true, parent);
+          return {};
+        },
+        []() -> SmallVector<Value> { return {}; }, LocateBounds(), certain);
+    hoistResourceReads(rewriter, loop, world);
+    if (leavesFirst)
+      emitRoots();
+  } else {
+    query.emitWarning("matches no archetype; the query is removed");
+  }
+  rewriter.eraseOp(query);
+}
+
 /// Replace a query by one loop per matching archetype. The body is cloned
 /// into each loop, and every ref access becomes a load or store at the
 /// loop's index in the column of the ref's component and field.
@@ -3220,6 +3920,8 @@ static void combineAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
 static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const WorldLayout &layout, WorldAccess &world,
                        const LoopOptions &options) {
+  if (query.getCascade())
+    return lowerCascade(rewriter, query, layout, world, options);
   Location loc = query.getLoc();
   bool entityLocal = isEntityLocal(query);
   bool matched = false;
@@ -3324,6 +4026,14 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   query.getBody().walk([&](DisconnectOp disconnect) {
     changedRelations.insert(
         disconnect->getParentOfType<EdgesOp>().getRelationAttr().getAttr());
+  });
+  // And a sorted archetype it spawns into, which the spawn marks.
+  query.getBody().walk([&](SpawnOp spawn) {
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (archetype.isSorted() &&
+          ArchetypeOp(archetype.op).getSymNameAttr() ==
+              spawn.getArchetypeAttr().getAttr())
+        changedRelations.insert(archetype.sortedBy);
   });
   // A query visits the entities that exist when it starts: count every
   // matched archetype now, before any of its loops, since a body may spawn
@@ -3473,8 +4183,27 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // entity moved into another archetype the query matches is not visited
   // twice.
   rewriter.setInsertionPoint(query);
-  for (const WorldArchetype *archetype : changed)
+  for (const WorldArchetype *archetype : changed) {
+    // A sorted archetype that loses entities is sorted again.
+    if (archetype->isSorted()) {
+      const WorldRelation &tree = layout.getRelation(archetype->sortedBy);
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value pending = memref::LoadOp::create(
+          rewriter, loc, world.pendingCount(*archetype), ValueRange{zero});
+      auto ifAny = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::ne, pending,
+              arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(ifAny.thenBlock());
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+          world.edgesClean(tree), ValueRange{zero});
+      changedRelations.insert(archetype->sortedBy);
+    }
     applyPending(rewriter, loc, layout, *archetype, world, tick);
+  }
   // Then the changed relations are sorted, which also drops edges to the
   // entities just despawned.
   for (Attribute relation : changedRelations)
@@ -3601,6 +4330,9 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
         // A reactive query advances the tick counter when it starts, which
         // fusion would move ahead of the systems before it.
         writesResource |= !getTriggers(query).empty();
+        // A ref to an ancestor reads another entity, like a lookup, and a
+        // cascading query has an order of its own.
+        writesResource |= query.hasUpRefs() || query.getCascade();
       }
       if (!conditional && !writesResource &&
           !computeAccess(system, archetypes).isOpaque()) {
@@ -4042,6 +4774,9 @@ static bool causes(Operation *op, const Trigger &trigger) {
     if (auto apply = dyn_cast<ApplyOp>(op))
       return apply.getComponentAttr() == trigger.component &&
              sameField(apply.getField());
+    if (auto combine = dyn_cast<CombineOp>(op))
+      return combine.getRef().getType().getComponent() == trigger.component &&
+             sameField(combine.getField());
     [[fallthrough]];
   case Trigger::Added:
     if (auto add = dyn_cast<AddOp>(op))
@@ -4327,6 +5062,29 @@ struct EntLowerToLoops
       WorldAccess world(rewriter, *layout, arena);
       SmallVector<QueryOp> queries;
       func.walk([&](QueryOp query) { queries.push_back(query); });
+      // An archetype sorted by a tree that the system spawns into outside
+      // its queries is sorted before the next query and when the system
+      // ends, rather than after every spawn.
+      llvm::SetVector<Attribute> unsorted;
+      func.walk([&](SpawnOp spawn) {
+        if (spawn->getParentOfType<QueryOp>())
+          return;
+        for (const WorldArchetype &archetype : layout->archetypes)
+          if (archetype.isSorted() &&
+              ArchetypeOp(archetype.op).getSymNameAttr() ==
+                  spawn.getArchetypeAttr().getAttr())
+            unsorted.insert(archetype.sortedBy);
+      });
+      if (!unsorted.empty()) {
+        SmallVector<Operation *> before(queries.begin(), queries.end());
+        func.walk([&](func::ReturnOp op) { before.push_back(op); });
+        for (Operation *op : before) {
+          rewriter.setInsertionPoint(op);
+          for (Attribute relation : unsorted)
+            callSort(rewriter, op->getLoc(),
+                     layout->getRelation(cast<StringAttr>(relation)), arena);
+        }
+      }
       for (QueryOp query : queries)
         lowerQuery(rewriter, query, *layout, world, options);
       lowerSpawns(rewriter, func, *layout, world);

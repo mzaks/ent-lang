@@ -60,6 +60,21 @@ struct WorldArchetype {
 
   bool hasPending() const { return pendingOffset != 0; }
 
+  /// For the archetype of a tree declared `sorted` (its rows are kept with the
+  /// entities without a parent first, then the others, every parent before
+  /// its children): the relation; in the header (i64) how many entities
+  /// have no parent; per row the row of its parent (i32, -1 for none); and
+  /// for sorting, the row each row goes to (i32) and a copy of every column
+  /// (in the order of `columns`) and of the ids.
+  StringAttr sortedBy;
+  uint64_t rootCountOffset = 0;
+  uint64_t parentRowOffset = 0;
+  uint64_t newRowOffset = 0;
+  SmallVector<uint64_t> columnScratchOffsets;
+  uint64_t idScratchOffset = 0;
+
+  bool isSorted() const { return static_cast<bool>(sortedBy); }
+
   /// The move for adding or removing `component`, or null.
   const WorldMove *findMove(StringAttr component, bool add) const;
 
@@ -132,6 +147,13 @@ struct WorldApply {
 /// edges dead. Sorting again (a stable counting sort, through the scratch
 /// columns) drops dead edges and those whose source or target is no
 /// longer alive, and makes the relation clean.
+///
+/// A tree is sorted by source and has the index by target: an entity's
+/// parent is the target of its one edge, its children are the sources of
+/// the edges to it. Sorting keeps the last edge connected from each source
+/// and lists the entities that have a parent in `order`, parents before
+/// their children (breadth first from the entities without a parent); an
+/// entity on a cycle would never be listed, which stops the program.
 struct WorldRelation {
   RelationOp op;
   int64_t capacity;
@@ -160,6 +182,21 @@ struct WorldRelation {
   uint64_t sourceScratchOffset = 0;
   uint64_t targetScratchOffset = 0;
   SmallVector<uint64_t> fieldScratchOffsets;
+  /// For a tree: the ids of the entities with a parent, parents before
+  /// children (one per edge), next to each its parent's id, and in the
+  /// header (i64) how many.
+  bool tree = false;
+  uint64_t orderOffset = 0;
+  uint64_t orderParentOffset = 0;
+  /// The index of the archetype sorted by this tree, or -1.
+  int sortedArchetype = -1;
+  /// The component the sources (0) and the targets (1) are trusted to
+  /// have for as long as an edge exists (see getTrustedEndpoint), decided
+  /// for the program as it was written: lowering takes the ops that
+  /// decide it away, system by system.
+  FlatSymbolRefAttr trusted[2];
+  FlatSymbolRefAttr getTrusted(bool target) const { return trusted[target]; }
+  uint64_t orderCountOffset = 0;
 
   bool hasIndex() const { return indexOffset != 0; }
   /// Whether a loop visiting incoming (`in`) or outgoing edges reads the
@@ -233,9 +270,9 @@ struct WorldLog {
 /// How entity ids and their bookkeeping are laid out, chosen from the
 /// capacities and from which structural changes the program makes:
 ///
-/// - Rows: nothing despawns or moves, so an entity keeps its row forever
-///   and its id is `archetype << rowBits | row`. No entity table, no id
-///   column.
+/// - Rows: nothing despawns or moves and no archetype is sorted by a tree,
+///   so an entity keeps its row forever and its id is `archetype << rowBits
+///   | row`. No entity table, no id column.
 /// - Slots: entities move but never die, so slots are never reused; an id
 ///   is a slot of the entity table, which holds only locations.
 /// - Generational: entities die and slots are reused; an id is
@@ -293,7 +330,7 @@ struct WorldLayout {
   static constexpr uint64_t kColumnAlignment = 64;
   static constexpr uint64_t kStagger = 17 * 64;
 
-  SmallVector<WorldArchetype> archetypes;
+  SmallVector<WorldArchetype, 1> archetypes;
   SmallVector<WorldResource> resources;
   /// One entry per `ent.apply` and `ent.accumulate` in the module, in walk
   /// order; the lowering tags each op with its index (see kApplyIndexAttr).
@@ -301,7 +338,7 @@ struct WorldLayout {
   static constexpr llvm::StringLiteral kApplyIndexAttr = "ent.apply_index";
   /// Relations in declaration order, and one entry per `ent.connect`
   /// inside a query, in walk order (tagged with kConnectIndexAttr).
-  SmallVector<WorldRelation> relations;
+  SmallVector<WorldRelation, 1> relations;
   SmallVector<WorldConnect> connects;
   static constexpr llvm::StringLiteral kConnectIndexAttr =
       "ent.connect_index";

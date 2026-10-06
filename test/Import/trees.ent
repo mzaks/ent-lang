@@ -1,0 +1,72 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+// The importer's output is valid ent IR that prints and parses again.
+// RUN: ent-translate --import-ent %s | ent-opt | FileCheck %s
+
+component Body { x: f32 }
+component Orbit { distance: f32 }
+component Tint { color: i32 }
+default_capacity 8
+
+// CHECK: ent.relation @Orbits () from @Orbit to @Body tree capacity 8
+// CHECK: ent.relation @Owns (share: f32) tree capacity 4
+relation Orbits from Orbit to Body tree capacity 8
+relation Owns { share: f32 } tree capacity 4
+
+// `up` after a binding's component: the nearest ancestor's that has it.
+// `cascade`, after the filters: parents before their children.
+// CHECK-LABEL: ent.system @place() {
+// CHECK:   ent.query (%[[B:.*]]: !ent.ref<@Body, mut>, %[[O:.*]]: !ent.ref<@Orbit>, %[[C:.*]]: !ent.ref<@Body, up @Orbits>) cascade @Orbits {
+// CHECK:     %[[X:.*]] = ent.get %[[C]] "x" : <@Body, up @Orbits> -> f32
+// CHECK:     ent.set %[[B]] "x", %{{.*}} : <@Body, mut>, f32
+system place() {
+  for b: mut Body, o: Orbit, center: Body up Orbits cascade Orbits {
+    b.x = center.x + o.distance
+  }
+}
+
+// An ancestor's component may be one the entity is filtered not to have.
+// CHECK-LABEL: ent.system @inherit() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Body>, %{{.*}}: !ent.ref<@Tint, up @Orbits>) without [@Tint] {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Body>) with [@Orbit] cascade @Owns {
+// CHECK:     scf.if
+system inherit() {
+  for b: Body, t: Tint up Orbits without Tint {
+    let color = t.color
+  }
+  for b: Body with Orbit cascade Owns where b.x > 0.0 {
+    let x = b.x
+  }
+}
+
+// `up` is a word only there: a field or a name may be called so.
+// CHECK: ent.resource @Keys (up: i1)
+unique Keys { up: bool }
+system keys() {
+  let up = Keys.up
+}
+
+// Children before their parents; `+=` through a `mut` binding up the tree
+// combines into the ancestor.
+// CHECK-LABEL: ent.system @gather() {
+// CHECK:   ent.query (%[[N:.*]]: !ent.ref<@Body>, %[[D:.*]]: !ent.ref<@Body, mut, up @Orbits>) cascade @Orbits leaves first {
+// CHECK:     ent.combine %[[D]] "x" add %{{.*}} : <@Body, mut, up @Orbits>, f32
+// CHECK:     %[[NEG:.*]] = arith.subf %{{.*}}, %{{.*}} : f32
+// CHECK:     ent.combine %[[D]] "x" add %[[NEG]] : <@Body, mut, up @Orbits>, f32
+system gather() {
+  for b: Body, down: mut Body up Orbits cascade Orbits leaves first {
+    down.x += b.x
+    down.x -= 1.0
+  }
+}
+// CHECK-LABEL: ent.system @highest() {
+// CHECK:     ent.combine %{{.*}} "x" max %{{.*}} : <@Body, mut, up @Orbits>, f32
+system highest() {
+  for b: Body, down: mut Body up Orbits cascade Orbits {
+    down.x max= b.x
+  }
+}
+
+// A tree whose entities are stored in its order.
+// CHECK: ent.relation @Under () from @Leaf to @Leaf tree sorted capacity 8
+component Leaf { v: f32 }
+relation Under from Leaf to Leaf tree sorted capacity 8

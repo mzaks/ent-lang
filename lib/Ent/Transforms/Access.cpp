@@ -249,6 +249,14 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       columns.push_back({StringAttr(), relation, cast<StringAttr>(field)});
     return columns;
   };
+  // Following a tree from the visited entities: their ids, the sorted
+  // edges, and the entities the edges lead to.
+  auto followTree = [&](QueryOp query, FlatSymbolRefAttr relation) {
+    access.reads.insert({StringAttr(), relation.getAttr(), empty});
+    access.reads.insert(entityTable);
+    for (ArchetypeOp archetype : matchedArchetypes(query))
+      access.reads.insert({archetype.getSymNameAttr(), empty, idField});
+  };
   auto record = [&](Operation *op, Value ref, StringAttr field,
                     llvm::SetVector<Column> &into) {
     if (RelationOp relation = relationOf(ref)) {
@@ -256,6 +264,16 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       return;
     }
     auto query = op->getParentOfType<QueryOp>();
+    auto refType = cast<RefType>(ref.getType());
+    if (refType.isUp()) {
+      // An ancestor's: like a lookup, in any archetype holding the
+      // component.
+      for (ArchetypeOp archetype : archetypes)
+        if (archetype.contains(refType.getComponent()))
+          into.insert({archetype.getSymNameAttr(),
+                       refType.getComponent().getAttr(), field});
+      return;
+    }
     StringAttr component = cast<RefType>(ref.getType()).getComponent().getAttr();
     for (ArchetypeOp archetype : matchedArchetypes(query))
       into.insert({archetype.getSymNameAttr(), component, field});
@@ -329,6 +347,20 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       }
       return;
     }
+    if (auto combine = dyn_cast<CombineOp>(op)) {
+      // Into an ancestor's field: like an apply, in every archetype
+      // holding the component. The query itself records what finding the
+      // ancestor reads.
+      FlatSymbolRefAttr component = combine.getRef().getType().getComponent();
+      for (ArchetypeOp archetype : archetypes) {
+        if (!archetype.contains(component))
+          continue;
+        access.writes.insert({archetype.getSymNameAttr(), component.getAttr(),
+                              combine.getFieldAttr()});
+        writeChanged(archetype, component.getAttr(), combine.getFieldAttr());
+      }
+      return;
+    }
     if (auto apply = dyn_cast<ApplyOp>(op)) {
       // Like a lookup, but the field is combined into: written (which
       // conflicts like a read too) in every archetype holding it.
@@ -351,16 +383,27 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
         access.reads.insert({archetype.getSymNameAttr(), empty, idField});
       return;
     }
+    // An archetype sorted by a tree is sorted again when it gains or
+    // loses an entity, with the tree's edges.
+    auto sortsTree = [&](ArchetypeOp archetype) {
+      if (RelationOp tree = getSortingTree(archetype))
+        for (const Column &column : relationColumns(tree.getSymNameAttr()))
+          access.writes.insert(column);
+    };
     if (auto spawn = dyn_cast<SpawnOp>(op)) {
       for (ArchetypeOp archetype : archetypes)
-        if (archetype.getSymNameAttr() == spawn.getArchetypeAttr().getAttr())
+        if (archetype.getSymNameAttr() == spawn.getArchetypeAttr().getAttr()) {
           writeStructure(archetype);
+          sortsTree(archetype);
+        }
       return;
     }
     if (isa<DespawnOp>(op)) {
       for (ArchetypeOp archetype :
-           matchedArchetypes(op->getParentOfType<QueryOp>()))
+           matchedArchetypes(op->getParentOfType<QueryOp>())) {
         writeStructure(archetype);
+        sortsTree(archetype);
+      }
       return;
     }
     if (auto query = dyn_cast<QueryOp>(op)) {
@@ -387,6 +430,20 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
              getPresenceTest(query, archetype).components())
           access.reads.insert(
               {archetype.getSymNameAttr(), component.getAttr(), presence});
+      // A cascading query follows its tree, and so does a ref to an
+      // ancestor, which is the nearest one that has the component.
+      if (FlatSymbolRefAttr cascade = query.getCascade())
+        followTree(query, cascade);
+      for (Type type : query.getBody().getArgumentTypes()) {
+        auto refType = cast<RefType>(type);
+        if (!refType.isUp())
+          continue;
+        followTree(query, refType.getVia());
+        for (ArchetypeOp archetype : archetypes)
+          if (archetype.isOptional(refType.getComponent()))
+            access.reads.insert({archetype.getSymNameAttr(),
+                                 refType.getComponent().getAttr(), presence});
+      }
       return;
     }
     if (auto edges = dyn_cast<EdgesOp>(op)) {
@@ -407,6 +464,11 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
               : op->getParentOfType<EdgesOp>().getRelationAttr().getAttr();
       for (const Column &column : relationColumns(relation))
         access.writes.insert(column);
+      // The archetype sorted by the tree moves its rows with it.
+      for (ArchetypeOp archetype : archetypes)
+        if (RelationOp tree = getSortingTree(archetype);
+            tree && tree.getSymNameAttr() == relation)
+          writeStructure(archetype);
       access.reads.insert(entityTable);
       if (isa<ConnectOp>(op) && op->getParentOfType<QueryOp>())
         for (ArchetypeOp archetype :

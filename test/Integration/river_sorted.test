@@ -1,0 +1,165 @@
+// A tree declared `sorted` (Inputs/river_sorted.ent): the
+// rows follow the tree through a node made by a system, one that is
+// destroyed and one that changes its parent, and the sums down the tree
+// are what they are without the sorting.
+// RUN: %ent run %S/Inputs/river_sorted.ent 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=SORTED
+// RUN: %ent run --parallel %S/Inputs/river_sorted.ent 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=SORTED
+// The same program with its rows left as they are.
+// RUN: sed 's/ tree sorted / tree /' %S/Inputs/river_sorted.ent > %t.ent
+// RUN: not grep -q sorted.capacity %t.ent
+// RUN: %ent run %t.ent 2>/dev/null | FileCheck %s --check-prefix=PLAIN
+
+// Rows are in the tree's order, though the nodes were spawned upstream
+// first: the two without a parent, then the others, each after the node it
+// flows into.
+// SORTED:      1: lake 5 from 50 at 50
+// SORTED-NEXT: 1: sea 11111 from 900 at 0
+// SORTED-NEXT: 1: river 11110 from 900 at 20
+// SORTED-NEXT: 1: creek 100 from 500 at 500
+// SORTED-NEXT: 1: brook 11000 from 900 at 300
+// SORTED-NEXT: 1: spring 10000 from 900 at 900
+// Children first: the rows from the last down, then those without a
+// parent.
+// SORTED-NEXT: 1: visit spring
+// SORTED-NEXT: 1: visit brook
+// SORTED-NEXT: 1: visit creek
+// SORTED-NEXT: 1: visit river
+// SORTED-NEXT: 1: visit lake
+// SORTED-NEXT: 1: visit sea
+// A node made by a system and connected: sorted in before the next 'for'.
+// SORTED-NEXT: 2: lake 5 from 50 at 50
+// SORTED-NEXT: 2: sea 11118 from 900 at 0
+// SORTED-NEXT: 2: river 11117 from 900 at 20
+// SORTED-NEXT: 2: creek 100 from 500 at 500
+// SORTED-NEXT: 2: brook 11000 from 900 at 300
+// SORTED-NEXT: 2: pond 7 from 60 at 60
+// SORTED-NEXT: 2: spring 10000 from 900 at 900
+// SORTED-NEXT: 2: visit spring
+// SORTED-NEXT: 2: visit pond
+// SORTED-NEXT: 2: visit brook
+// SORTED-NEXT: 2: visit creek
+// SORTED-NEXT: 2: visit river
+// SORTED-NEXT: 2: visit lake
+// SORTED-NEXT: 2: visit sea
+// The brook is gone, and the archetype was sorted for it: the spring above
+// it has lost its edge and is a node without a parent.
+// SORTED-NEXT: 3: lake 5 from 50 at 50
+// SORTED-NEXT: 3: sea 118 from 500 at 0
+// SORTED-NEXT: 3: spring 10000 from 900 at 900
+// SORTED-NEXT: 3: river 117 from 500 at 20
+// SORTED-NEXT: 3: creek 100 from 500 at 500
+// SORTED-NEXT: 3: pond 7 from 60 at 60
+// SORTED-NEXT: 3: visit pond
+// SORTED-NEXT: 3: visit creek
+// SORTED-NEXT: 3: visit river
+// SORTED-NEXT: 3: visit lake
+// SORTED-NEXT: 3: visit sea
+// SORTED-NEXT: 3: visit spring
+// The creek flows into the lake.
+// SORTED-NEXT: 4: lake 105 from 500 at 50
+// SORTED-NEXT: 4: sea 18 from 60 at 0
+// SORTED-NEXT: 4: spring 10000 from 900 at 900
+// SORTED-NEXT: 4: creek 100 from 500 at 500
+// SORTED-NEXT: 4: river 17 from 60 at 20
+// SORTED-NEXT: 4: pond 7 from 60 at 60
+// SORTED-NEXT: 4: visit pond
+// SORTED-NEXT: 4: visit river
+// SORTED-NEXT: 4: visit creek
+// SORTED-NEXT: 4: visit lake
+// SORTED-NEXT: 4: visit sea
+// SORTED-NEXT: 4: visit spring
+// Parents first: every node one higher than the one it flows into.
+// SORTED-NEXT: 5: lake 105 from 500 at 50
+// SORTED-NEXT: 5: sea 18 from 60 at 0
+// SORTED-NEXT: 5: spring 10000 from 900 at 900
+// SORTED-NEXT: 5: creek 100 from 500 at 51
+// SORTED-NEXT: 5: river 17 from 60 at 1
+// SORTED-NEXT: 5: pond 7 from 60 at 2
+// SORTED-NEXT: 5: visit pond
+// SORTED-NEXT: 5: visit river
+// SORTED-NEXT: 5: visit creek
+// SORTED-NEXT: 5: visit lake
+// SORTED-NEXT: 5: visit sea
+// SORTED-NEXT: 5: visit spring
+// SORTED-NOT:  {{.}}
+
+// Rows as spawned; the sums are the same.
+// PLAIN:      1: spring 10000 from 900 at 900
+// PLAIN-NEXT: 1: creek 100 from 500 at 500
+// PLAIN-NEXT: 1: brook 11000 from 900 at 300
+// PLAIN-NEXT: 1: lake 5 from 50 at 50
+// PLAIN-NEXT: 1: river 11110 from 900 at 20
+// PLAIN-NEXT: 1: sea 11111 from 900 at 0
+// PLAIN-NEXT: 1: visit spring
+// PLAIN-NEXT: 1: visit brook
+// PLAIN-NEXT: 1: visit creek
+// PLAIN-NEXT: 1: visit river
+// PLAIN-NEXT: 1: visit lake
+// PLAIN-NEXT: 1: visit sea
+// PLAIN-NEXT: 2: spring 10000 from 900 at 900
+// PLAIN-NEXT: 2: creek 100 from 500 at 500
+// PLAIN-NEXT: 2: brook 11000 from 900 at 300
+// PLAIN-NEXT: 2: lake 5 from 50 at 50
+// PLAIN-NEXT: 2: river 11117 from 900 at 20
+// PLAIN-NEXT: 2: sea 11118 from 900 at 0
+// PLAIN-NEXT: 2: pond 7 from 60 at 60
+// PLAIN-NEXT: 2: visit spring
+// PLAIN-NEXT: 2: visit pond
+// PLAIN-NEXT: 2: visit brook
+// PLAIN-NEXT: 2: visit creek
+// PLAIN-NEXT: 2: visit river
+// PLAIN-NEXT: 2: visit lake
+// PLAIN-NEXT: 2: visit sea
+// Nothing sorted the edges when the brook went: the spring keeps its
+// edge to it, has no ancestor, and is visited where the edge puts it.
+// PLAIN-NEXT: 3: spring 10000 from 900 at 900
+// PLAIN-NEXT: 3: creek 100 from 500 at 500
+// PLAIN-NEXT: 3: pond 7 from 60 at 60
+// PLAIN-NEXT: 3: lake 5 from 50 at 50
+// PLAIN-NEXT: 3: river 117 from 500 at 20
+// PLAIN-NEXT: 3: sea 118 from 500 at 0
+// PLAIN-NEXT: 3: visit spring
+// PLAIN-NEXT: 3: visit pond
+// PLAIN-NEXT: 3: visit creek
+// PLAIN-NEXT: 3: visit river
+// PLAIN-NEXT: 3: visit lake
+// PLAIN-NEXT: 3: visit sea
+// PLAIN-NEXT: 4: spring 10000 from 900 at 900
+// PLAIN-NEXT: 4: creek 100 from 500 at 500
+// PLAIN-NEXT: 4: pond 7 from 60 at 60
+// PLAIN-NEXT: 4: lake 105 from 500 at 50
+// PLAIN-NEXT: 4: river 17 from 60 at 20
+// PLAIN-NEXT: 4: sea 18 from 60 at 0
+// PLAIN-NEXT: 4: visit pond
+// PLAIN-NEXT: 4: visit river
+// PLAIN-NEXT: 4: visit creek
+// PLAIN-NEXT: 4: visit spring
+// PLAIN-NEXT: 4: visit lake
+// PLAIN-NEXT: 4: visit sea
+// PLAIN-NEXT: 5: spring 10000 from 900 at 900
+// PLAIN-NEXT: 5: creek 100 from 500 at 51
+// PLAIN-NEXT: 5: pond 7 from 60 at 2
+// PLAIN-NEXT: 5: lake 105 from 500 at 50
+// PLAIN-NEXT: 5: river 17 from 60 at 1
+// PLAIN-NEXT: 5: sea 18 from 60 at 0
+// PLAIN-NEXT: 5: visit pond
+// PLAIN-NEXT: 5: visit river
+// PLAIN-NEXT: 5: visit creek
+// PLAIN-NEXT: 5: visit spring
+// PLAIN-NEXT: 5: visit lake
+// PLAIN-NEXT: 5: visit sea
+// PLAIN-NOT:  {{.}}
+
+// Spawned in a `for`, one with an edge and one without (Inputs/
+// river_bud.ent): both are in their places when the `for` has ended.
+// RUN: %ent run %S/Inputs/river_bud.ent 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=BUD
+// BUD:      1: sea 101
+// BUD-NEXT: 1: spring 100
+// BUD-NEXT: 2: sea 111
+// BUD-NEXT: 2: pool 5
+// BUD-NEXT: 2: spring 110
+// BUD-NEXT: 2: twig 10
+// BUD-NOT:  {{.}}

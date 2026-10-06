@@ -165,8 +165,19 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   unsigned archetypeBits =
       std::max(1u, llvm::Log2_64_Ceil(layout.archetypes.size()));
   scheme.locationBits = scheme.rowBits + archetypeBits <= 32 ? 32 : 64;
+  // An archetype sorted by a tree moves its rows too.
+  for (RelationOp relation : module.getOps<RelationOp>()) {
+    if (!relation.getSorted())
+      continue;
+    FailureOr<ArchetypeOp> sorted = getSortedArchetype(relation);
+    if (failed(sorted))
+      return failure();
+    for (WorldArchetype &archetype : layout.archetypes)
+      if (archetype.op == *sorted)
+        archetype.sortedBy = relation.getSymNameAttr();
+  }
   bool moves = llvm::any_of(layout.archetypes, [](const WorldArchetype &a) {
-    return !a.moves.empty();
+    return !a.moves.empty() || a.isSorted();
   });
   auto attr = [&](StringRef name, int64_t otherwise) {
     if (auto value = module->getAttrOfType<IntegerAttr>(name))
@@ -237,6 +248,12 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       archetype.pendingCountOffset = end;
       end += 8;
     }
+  for (WorldArchetype &archetype : layout.archetypes)
+    if (archetype.isSorted()) {
+      end = llvm::alignTo(end, 8);
+      archetype.rootCountOffset = end;
+      end += 8;
+    }
   // Relations: their edge counts and clean flags.
   for (RelationOp relation : module.getOps<RelationOp>()) {
     WorldRelation entry;
@@ -246,6 +263,16 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     entry.countOffset = end;
     entry.cleanOffset = end + 8;
     end += 16;
+    entry.tree = relation.getTree();
+    for (bool target : {false, true})
+      entry.trusted[target] = getTrustedEndpoint(relation, target);
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (archetype.sortedBy == relation.getSymNameAttr())
+        entry.sortedArchetype = archetype.index;
+    if (entry.tree) {
+      entry.orderCountOffset = end;
+      end += 8;
+    }
     layout.relations.push_back(std::move(entry));
   }
   end = llvm::alignTo(end, 8);
@@ -360,6 +387,14 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       archetype.idOffset = place(scheme.idBits / 8);
     if (needsPending(archetype))
       archetype.pendingOffset = place(4);
+    if (archetype.isSorted()) {
+      archetype.parentRowOffset = place(4);
+      archetype.newRowOffset = place(4);
+      for (const WorldColumn &column : archetype.columns)
+        archetype.columnScratchOffsets.push_back(
+            place(storageBytes(column.type)));
+      archetype.idScratchOffset = place(scheme.idBits / 8);
+    }
     if (!archetype.moves.empty()) {
       archetype.pendingActionOffset = place(4);
       for (WorldMove &move : archetype.moves) {
@@ -427,6 +462,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       hasIn |= !edges.isOut();
       hasOut |= edges.isOut();
     });
+    // A tree is read from child to parent (`up`) and, to order it, from
+    // parent to children.
+    if (relation.tree)
+      hasIn = hasOut = true;
     relation.byTarget = hasIn && !hasOut;
     module.walk([&](DisconnectOp disconnect) {
       hasDead |= disconnect->getParentOfType<EdgesOp>()
@@ -468,6 +507,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     for (const WorldColumn &field : relation.fields)
       relation.fieldScratchOffsets.push_back(
           place(storageBytes(field.type), edges));
+    if (relation.tree) {
+      relation.orderOffset = place(idBytes, edges);
+      relation.orderParentOffset = place(idBytes, edges);
+    }
   }
 
   // Edges connected inside queries: per row a source, a target and the

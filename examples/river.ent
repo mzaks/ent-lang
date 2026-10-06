@@ -1,0 +1,35 @@
+// A river network: rain falls on every node, and every node passes what
+// has gathered in it on to the node it flows into, so a node's flow is the
+// rain on everything upstream of it. A library for a C host, which makes
+// the nodes, connects them and runs `step` (bench/river/river.c):
+//
+//   python3 bench/river/run.py
+
+component Node { rain: f32, flow: f32 } capacity 1024
+// The host spawns the nodes, so their archetype is declared.
+archetype Cell { Node } capacity 1024
+// From a node to the one it flows into: a tree, with the sea for its root.
+// `tree sorted` would store the nodes in the tree's order, every node after
+// the one it flows into: the sum then reads them one after another
+// (bench/river measures both), and every change to the tree or to which
+// nodes there are moves them all.
+relation Flows from Node to Node tree capacity 1024
+
+system fall(wet: f32) {
+  for n: mut Node {
+    n.flow = n.rain * wet
+  }
+}
+
+// Children before their parents: when a node passes its flow on, all that
+// is above it has arrived. `down` is the node it flows into.
+system run() {
+  for n: Node, down: mut Node up Flows cascade Flows leaves first {
+    down.flow += n.flow
+  }
+}
+
+schedule step(wet: f32) {
+  fall(wet)
+  run()
+}
