@@ -403,6 +403,21 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
            matchedArchetypes(op->getParentOfType<QueryOp>())) {
         writeStructure(archetype);
         sortsTree(archetype);
+        // A tree that is not sorted drops the entity's edges with it.
+        for (RelationOp relation :
+             system->getParentOfType<ModuleOp>().getOps<RelationOp>()) {
+          if (!relation.getTree() || relation.getSorted())
+            continue;
+          bool holds = false;
+          for (bool target : {false, true}) {
+            FlatSymbolRefAttr component = relation.getEndpoint(target);
+            holds |= !component || archetype.contains(component);
+          }
+          if (holds)
+            for (const Column &column :
+                 relationColumns(relation.getSymNameAttr()))
+              access.writes.insert(column);
+        }
       }
       return;
     }

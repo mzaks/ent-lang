@@ -39,29 +39,30 @@
 // CHECK-NEXT: 2: visit side
 // CHECK-NEXT: 2: visit mid
 // CHECK-NEXT: 2: visit leaf
-// The side is gone: the leaf has no ancestor, so no `for` with `up`
-// visits it; one that only cascades still does, where its edge puts it.
+// The side is gone, and its edges with it: the leaf has no parent, so no
+// `for` with `up` visits it, and one that only cascades visits it with
+// the nodes that have none.
 // CHECK-NEXT: 3: leaf 1
 // CHECK-NEXT: 3: mid 110
 // CHECK-NEXT: 3: lone 5
 // CHECK-NEXT: 3: top 100
 // CHECK-NEXT: 3: mid marked 7
+// CHECK-NEXT: 3: visit leaf
 // CHECK-NEXT: 3: visit lone
 // CHECK-NEXT: 3: visit top
 // CHECK-NEXT: 3: visit mid
-// CHECK-NEXT: 3: visit leaf
 // A new node takes the side's slot and not its child, and goes to the
-// end. The leaf keeps the edge to the node that is gone.
+// end.
 // CHECK-NEXT: 4: leaf 1
 // CHECK-NEXT: 4: mid 110
 // CHECK-NEXT: 4: lone 5
 // CHECK-NEXT: 4: top 100
 // CHECK-NEXT: 4: fresh 2100
 // CHECK-NEXT: 4: mid marked 7
+// CHECK-NEXT: 4: visit leaf
 // CHECK-NEXT: 4: visit lone
 // CHECK-NEXT: 4: visit top
 // CHECK-NEXT: 4: visit mid
-// CHECK-NEXT: 4: visit leaf
 // CHECK-NEXT: 4: visit fresh
 // CHECK-NOT:  {{.}}
 

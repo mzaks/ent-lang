@@ -246,9 +246,10 @@ not write, and needs no order.
   the entities' ids with every entity's ancestors before it; so do edges
   a host connected, and an order that has run out of room for nodes that
   moved.) A `sorted` tree's order is its shape's alone.
-- An entity whose parent was destroyed keeps its edge until the tree is
-  next built again or it gets a new one: until then it has no ancestor,
-  and a `for` that only cascades visits it where the edge puts it.
+- Destroying an entity takes its edge and the edges to it out of the
+  tree when the `for` that destroyed it ends: its children have no parent
+  from then on, with all that is below them as it was. (Other relations
+  keep the edges of a destroyed entity until they are next sorted.)
 - Where the relation says what its targets have (`to Body`) and nothing
   destroys bodies or takes `Body` away, `Body up Orbits` is the parent's,
   read without a search or a check.
@@ -319,9 +320,6 @@ choice of storage, and it has its price:
   entities in the same archetype are an error. Any number of other
   relations, and of trees that are not sorted, are no trouble, since edges
   hold ids and not rows.
-- Destroying an entity sorts, so the edges of its children are dropped at
-  once and they are without a parent right away, where otherwise they
-  keep a dangling edge until the tree next changes.
 
 Not yet: besides that, a cascading `for` only reads and writes fields. It
 does not `spawn`, `destroy`, `add` or `remove`, combine into an entity

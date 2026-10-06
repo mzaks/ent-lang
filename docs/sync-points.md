@@ -142,7 +142,9 @@ When a query has run for every entity it visits, in this order:
    change to an entity wins.
 3. **Relations** the query connected or disconnected are sorted again,
    which drops disconnected edges and edges whose source or target is no
-   longer alive (despawned in step 2 or before).
+   longer alive (despawned in step 2 or before). A tree does not wait for
+   that: the edge of a despawned entity and the edges to it go in step 2,
+   with the entity.
 
 After that, every later op — the next query of the same system, system-level
 code, the next run — sees all of the query's effects.

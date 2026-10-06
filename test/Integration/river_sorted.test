@@ -113,8 +113,7 @@
 // PLAIN-NEXT: 2: visit river
 // PLAIN-NEXT: 2: visit lake
 // PLAIN-NEXT: 2: visit sea
-// Nothing takes the spring's edge away when the brook goes: it keeps it,
-// has no ancestor, and is visited where the edge puts it.
+// The brook's edges go with it: the spring is a node without a parent.
 // PLAIN-NEXT: 3: spring 10000 from 900 at 900
 // PLAIN-NEXT: 3: creek 100 from 500 at 500
 // PLAIN-NEXT: 3: pond 7 from 60 at 60
@@ -123,8 +122,8 @@
 // PLAIN-NEXT: 3: sea 118 from 500 at 0
 // PLAIN-NEXT: 3: visit pond
 // PLAIN-NEXT: 3: visit creek
-// PLAIN-NEXT: 3: visit spring
 // PLAIN-NEXT: 3: visit river
+// PLAIN-NEXT: 3: visit spring
 // PLAIN-NEXT: 3: visit lake
 // PLAIN-NEXT: 3: visit sea
 // The creek flows into the lake, which has no edge of its own: its place
@@ -137,8 +136,8 @@
 // PLAIN-NEXT: 4: sea 18 from 60 at 0
 // PLAIN-NEXT: 4: visit pond
 // PLAIN-NEXT: 4: visit creek
-// PLAIN-NEXT: 4: visit spring
 // PLAIN-NEXT: 4: visit river
+// PLAIN-NEXT: 4: visit spring
 // PLAIN-NEXT: 4: visit lake
 // PLAIN-NEXT: 4: visit sea
 // PLAIN-NEXT: 5: spring 10000 from 900 at 900
@@ -149,8 +148,8 @@
 // PLAIN-NEXT: 5: sea 18 from 60 at 0
 // PLAIN-NEXT: 5: visit pond
 // PLAIN-NEXT: 5: visit creek
-// PLAIN-NEXT: 5: visit spring
 // PLAIN-NEXT: 5: visit river
+// PLAIN-NEXT: 5: visit spring
 // PLAIN-NEXT: 5: visit lake
 // PLAIN-NEXT: 5: visit sea
 // PLAIN-NOT:  {{.}}

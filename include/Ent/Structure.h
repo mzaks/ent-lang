@@ -46,8 +46,9 @@ SmallVector<ArchetypeOp> getMatchedArchetypes(QueryOp query);
 
 /// The component `relation`'s sources (`target` false) or targets have, if
 /// the relation names one and no system can take it away from an entity:
-/// no query despawns entities of an archetype that holds it, and none
-/// removes it. Connecting checks that both ends have their components, so
+/// no query despawns entities of an archetype that holds it (which is no
+/// matter for a tree that is not sorted: it drops a despawned entity's
+/// edges with the entity), and none removes it. Connecting checks that both ends have their components, so
 /// then every edge's end has it for as long as the edge exists, and
 /// reading it through the edge needs no checks. Null otherwise.
 FlatSymbolRefAttr getTrustedEndpoint(RelationOp relation, bool target);

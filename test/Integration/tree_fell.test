@@ -1,0 +1,26 @@
+// A node of a tree is destroyed (Inputs/tree_fell.ent): its edge and the
+// edges to it go with it when the `for` that destroyed it ends, and a new
+// node in its slot has none of them.
+// RUN: %ent run %S/Inputs/tree_fell.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/tree_fell.ent 2>/dev/null | FileCheck %s
+
+// CHECK:      1: top kids 2 heard 30 under 0
+// CHECK-NEXT: 1: a kids 1 heard 40 under 1
+// CHECK-NEXT: 1: b kids 0 heard 0 under 1
+// CHECK-NEXT: 1: d kids 0 heard 0 under 10
+// CHECK-NEXT: 1: a below top
+// CHECK-NEXT: 1: b below top
+// CHECK-NEXT: 1: d below a
+// a is gone: top has one child, d no parent.
+// CHECK-NEXT: 2: top kids 1 heard 20 under 0
+// CHECK-NEXT: 2: d kids 0 heard 0 under 0
+// CHECK-NEXT: 2: b kids 0 heard 0 under 1
+// CHECK-NEXT: 2: b below top
+// A new node in a's slot, under top: d is nothing to it.
+// CHECK-NEXT: 3: top kids 2 heard 100 under 0
+// CHECK-NEXT: 3: d kids 0 heard 0 under 0
+// CHECK-NEXT: 3: b kids 0 heard 0 under 1
+// CHECK-NEXT: 3: fresh kids 0 heard 0 under 1
+// CHECK-NEXT: 3: b below top
+// CHECK-NEXT: 3: fresh below top
+// CHECK-NOT:  {{.}}

@@ -2297,3 +2297,49 @@ us per step (spread), best in bold:
 
 - Edge loops that write the edges' fields, or disconnect.
 - Entities that can die, where every edge in is checked for its target.
+
+## 2026-10-06: a tree whose nodes can be destroyed
+
+A program that destroys entities has ids with generations, found through
+the entity table, and nothing about an edge's ends was taken on trust: a
+cascading query checked the generation of every listed entity and of its
+parent, and looked the parent up twice, once to find the ancestor and once
+to combine into it. `ent-mortal` is the river with a system that destroys
+nodes (which the host never runs), `ent-two-mortal` the same in two
+archetypes. Now a despawned entity's edge and the edges to it are taken
+out of an unsorted tree with the entity, so its edges' ends are always
+alive, and trusted as those of a tree whose nodes cannot go are. Same
+machine, pinning and flags; 200 steps after 50, medians of 5 processes;
+checksums agree.
+
+us per step (spread):
+
+| nodes | shape | ent | ent-mortal before | ent-mortal | ent-mortal-sorted | ent-two | ent-two-mortal before | ent-two-mortal | ent-two-mortal-sorted |
+|---|---|---|---|---|---|---|---|---|---|
+| 1e5 | bushy | 46.7 (1%) | 111.2 | 84.1 (11%) | 37.1 (2%) | 62.9 (2%) | 468.2 | 85.8 (8%) | 45.4 (1%) |
+| 1e5 | deep | 81.0 (1%) | 100.4 | 90.4 (2%) | 86.0 (1%) | 93.2 (2%) | 342.9 | 93.9 (0%) | 185.1 (1%) |
+| 1e5 | shuffled | 55.1 (2%) | 144.6 | 92.6 (15%) | 37.4 (4%) | 66.2 (5%) | 632.2 | 108.2 (15%) | 45.6 (1%) |
+| 1e6 | bushy | 687.6 (4%) | 3,878.4 | 1,991.2 (7%) | 391.7 (1%) | 870.2 (3%) | 7,765.4 | 2,156.5 (9%) | 475.4 (0%) |
+| 1e6 | deep | 845.0 (6%) | 1,067.3 | 967.1 (4%) | 877.1 (0%) | 990.8 (3%) | 3,689.8 | 1,004.2 (2%) | 1,630.2 (3%) |
+| 1e6 | shuffled | 823.9 (4%) | 3,946.8 | 2,129.0 (10%) | 390.6 (1%) | 996.7 (13%) | 9,258.4 | 2,335.4 (8%) | 476.5 (1%) |
+
+### What holds
+
+- In one archetype the tree whose nodes can go takes 0.51-0.54x the time
+  it took at 1e6 bushy and shuffled, and 0.64-0.76x at 1e5; in two
+  archetypes 0.25-0.28x at 1e6 and 0.17-0.18x at 1e5.
+- It still takes 2.3-2.9x the time of the tree whose nodes cannot go at
+  1e6 bushy and shuffled (1.4-1.8x at 1e5, 1.0-1.1x deep): its ids are
+  slots, and the row of every node and of its parent comes from the
+  entity table.
+- Sorted, it takes what the sorted tree of nodes that cannot go takes:
+  rows, and each parent's row, with no id on the way. For a tree whose
+  nodes can go, that is 0.20x (one archetype) and 0.22x (two) of the
+  unsorted at 1e6 bushy.
+
+### Not measured
+
+- Destroying nodes: each takes its own edge and its children's out of the
+  tree, in time by the number of its children.
+- A tree whose relation does not name what its ends have, or whose
+  program removes that component: there the checks stay.

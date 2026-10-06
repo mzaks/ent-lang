@@ -1795,6 +1795,27 @@ static void applyMove(IRRewriter &rewriter, Location loc,
   world.setCount(loc, *target, arith::AddIOp::create(rewriter, loc, to, one));
 }
 
+/// The name of the function that takes the edges of and to a despawned
+/// entity out of `relation`, a linked tree: (the entity's id, the arena).
+static std::string dropFunctionName(const WorldRelation &relation) {
+  return ("ent_drop_" + RelationOp(relation.op).getSymName()).str();
+}
+
+/// Whether entities of `archetype` can be an end of `relation`'s edges:
+/// it holds what the relation says its sources or its targets have, or
+/// the relation does not say.
+static bool canHoldEnd(const WorldArchetype &archetype,
+                       const WorldRelation &relation) {
+  RelationOp relationOp = relation.op;
+  ArchetypeOp archetypeOp = archetype.op;
+  for (bool target : {false, true}) {
+    FlatSymbolRefAttr component = relationOp.getEndpoint(target);
+    if (!component || archetypeOp.contains(component))
+      return true;
+  }
+  return false;
+}
+
 /// Apply the rows listed as pending for `archetype`, at the insertion
 /// point, last listed first: despawn (free the id) or move the entity to
 /// another archetype, then remove the row by moving the archetype's last
@@ -1839,14 +1860,26 @@ static void applyPending(IRRewriter &rewriter, Location loc,
     if (!layout.entities.hasGenerations()) {
       // Nothing is ever despawned (the entity scheme has no generations);
       // every listed row is a move.
-    } else if (!action) {
-      // Only despawns are ever listed for this archetype.
-      world.freeEntity(loc, id);
     } else {
-      auto despawn = scf::IfOp::create(rewriter, loc, is(0));
-      OpBuilder::InsertionGuard inner(rewriter);
-      rewriter.setInsertionPointToStart(despawn.thenBlock());
-      world.freeEntity(loc, id);
+      // A despawned entity's edges in the trees that keep a slot for it
+      // go with it, so that an edge of such a tree never has a dead end.
+      auto despawnEntity = [&] {
+        for (const WorldRelation &relation : layout.relations)
+          if (relation.linked && canHoldEnd(archetype, relation))
+            func::CallOp::create(rewriter, loc, dropFunctionName(relation),
+                                 TypeRange{},
+                                 ValueRange{id, world.getArena()});
+        world.freeEntity(loc, id);
+      };
+      if (!action) {
+        // Only despawns are ever listed for this archetype.
+        despawnEntity();
+      } else {
+        auto despawn = scf::IfOp::create(rewriter, loc, is(0));
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(despawn.thenBlock());
+        despawnEntity();
+      }
     }
     for (const WorldMove &move : archetype.moves) {
       auto moves = scf::IfOp::create(rewriter, loc, is(move.code));
@@ -3537,6 +3570,21 @@ struct LinkedTree {
   }
   void markUnclean() { store(i64(0), world.edgesClean(relation), zero); }
 
+  /// The edge in `slot` is no more: out of the list, and one edge less.
+  /// (Its place among its target's children is the caller's business.)
+  void clearSlot(Value slot) {
+    Value at = load(position(), slot);
+    branch(negate(isNone(at)), [&] {
+      store(world.noEntity(loc), world.treeOrder(relation),
+            arith::SubIOp::create(rewriter, loc, world.toIndex(loc, at), one));
+      store(noLink(), position(), slot);
+    });
+    store(noOwner(), sources(), slot);
+    Value counter = world.edgeCount(relation);
+    store(arith::SubIOp::create(rewriter, loc, load(counter, zero), i64(1)),
+          counter, zero);
+  }
+
   /// The entity of `slot` goes to the list's end: its entry, if it has
   /// one, becomes all ones, which a walk of the list skips. Without room
   /// at the end the relation is unclean, and the list made again.
@@ -3751,6 +3799,61 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
       });
 }
 
+/// Emit the function that takes a despawned entity out of a linked tree:
+/// (its id, the arena). Its own edge leaves its parent's children, and
+/// the edges to it go too, each child's from the child's slot: its
+/// children are without a parent from here on, with all that is below
+/// them as it was. So every edge of the tree has both its ends alive,
+/// and neither is checked where the edges are followed.
+static void emitDropFunction(IRRewriter &rewriter, ModuleOp module,
+                             const WorldLayout &layout,
+                             const WorldRelation &relation,
+                             MemRefType arenaType) {
+  RelationOp relationOp = relation.op;
+  Location loc = relationOp.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(module.getBody());
+  Type idType = rewriter.getIntegerType(layout.entities.idBits);
+  auto func = func::FuncOp::create(
+      rewriter, loc, dropFunctionName(relation),
+      rewriter.getFunctionType({idType, arenaType}, {}));
+  func.setPrivate();
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  func::ReturnOp::create(rewriter, loc);
+  rewriter.setInsertionPointToStart(entry);
+  WorldAccess world(rewriter, layout, entry->getArgument(1));
+  LinkedTree tree(rewriter, loc, world, relation);
+  Value id = entry->getArgument(0);
+  Value slot = world.entityKey(loc, id);
+  tree.branch(
+      tree.same(tree.load(tree.sources(), slot), world.slotOwner(loc, id)),
+      [&] {
+        tree.unlink(slot);
+        tree.clearSlot(slot);
+      });
+  Value number = world.toIndex(loc, tree.load(tree.childCount(), slot));
+  Value first = world.toIndex(loc, tree.load(tree.firstChild(), slot));
+  auto children = scf::ForOp::create(rewriter, loc, tree.zero, number,
+                                     tree.one, ValueRange{first});
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(children.getBody());
+    Value child = arith::SubIOp::create(
+        rewriter, loc, children.getRegionIterArg(0), tree.one);
+    Value next = world.toIndex(loc, tree.load(tree.nextSibling(), child));
+    tree.branch(
+        tree.both(tree.negate(tree.same(tree.load(tree.sources(), child),
+                                        tree.noOwner())),
+                  tree.same(tree.load(tree.targets(), child), id)),
+        [&] { tree.clearSlot(child); });
+    scf::YieldOp::create(rewriter, loc, ValueRange{next});
+  }
+  for (Value column :
+       {tree.firstChild(), tree.lastChild(), tree.childCount()})
+    tree.store(tree.noLink(), column, slot);
+}
+
 /// Emit the function that, if a linked tree is unclean, builds it again
 /// from its slots: the edges of dead entities, to dead entities and
 /// disconnected ones go; every entity's children are linked in the order
@@ -3895,6 +3998,8 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   if (relation.linked) {
     emitLinkedSortFunction(rewriter, module, layout, relation, arenaType);
     emitConnectFunction(rewriter, module, layout, relation, arenaType);
+    if (layout.entities.hasGenerations())
+      emitDropFunction(rewriter, module, layout, relation, arenaType);
     return;
   }
   Location loc = RelationOp(relation.op).getLoc();
@@ -4894,7 +4999,11 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     auto isHome = [&](const WorldArchetype &archetype) {
       return !from || ArchetypeOp(archetype.op).contains(from);
     };
-    bool certain = from ? fromTrusted : !layout.entities.hasGenerations();
+    // (A linked tree's edges go with a despawned entity: what is listed
+    // is alive.)
+    bool certain = from ? fromTrusted
+                        : relation.linked ||
+                              !layout.entities.hasGenerations();
     for (const WorldArchetype &archetype : layout.archetypes)
       certain &= !isHome(archetype) || matches(archetype, query);
     emitLocate(

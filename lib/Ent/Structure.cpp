@@ -80,11 +80,14 @@ FlatSymbolRefAttr mlir::ent::getTrustedEndpoint(RelationOp relation,
   if (!component)
     return {};
   auto module = relation->getParentOfType<ModuleOp>();
+  // A tree that is not sorted loses the edges of and to an entity when
+  // the entity is despawned, so its edges' ends are always alive.
+  bool endsAlive = relation.getTree() && !relation.getSorted();
   WalkResult result = module.walk([&](Operation *op) {
     if (auto remove = dyn_cast<RemoveOp>(op))
       if (remove.getComponentAttr() == component)
         return WalkResult::interrupt();
-    if (isa<DespawnOp>(op))
+    if (isa<DespawnOp>(op) && !endsAlive)
       for (ArchetypeOp archetype :
            getMatchedArchetypes(op->getParentOfType<QueryOp>()))
         if (archetype.contains(component))

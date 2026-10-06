@@ -54,14 +54,36 @@ VARIANTS = {
                        lambda text: text.replace(
                            " tree capacity 1024",
                            " tree sorted capacity 1024") + TWO, ["-DTWO"]),
+    # Nodes that can be destroyed (a system that does it, which the host
+    # never runs): ids have generations, and nothing about an edge's ends
+    # is taken on trust.
+    "ent-mortal": (2, "river.ent", ["--ent-lower-to-loops"],
+                   lambda text: text + MORTAL),
+    "ent-mortal-sorted": (2, "river.ent", ["--ent-lower-to-loops"],
+                          lambda text: text.replace(
+                              " tree capacity 1024",
+                              " tree sorted capacity 1024") + MORTAL),
+    "ent-two-mortal": (2, "river.ent", ["--ent-lower-to-loops"],
+                       lambda text: text + TWO + MORTAL, ["-DTWO"]),
+    "ent-two-mortal-sorted": (2, "river.ent", ["--ent-lower-to-loops"],
+                              lambda text: text.replace(
+                                  " tree capacity 1024",
+                                  " tree sorted capacity 1024") + TWO
+                              + MORTAL, ["-DTWO"]),
 }
+MORTAL = """
+system dry() {
+  for e, n: Node where n.rain < 0.0 { e.destroy() }
+}
+schedule drought() { dry() }
+"""
 TWO = """
 component Still { level: f32 } capacity 1024
 archetype Pool { Node, Still } capacity 1024
 """
 # A tree sorted across archetypes adds a node's inflows in another order:
 # its sums differ in their last bits, and are compared by their total.
-REORDERED = {"ent-two-sorted"}
+REORDERED = {"ent-two-sorted", "ent-two-mortal-sorted"}
 DEFAULT = ["c-order", "c-pairs", "c-sorted", "ent", "ent-sorted"]
 
 
