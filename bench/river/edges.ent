@@ -1,0 +1,30 @@
+// Edge loops over a tree, for bench/river/edges.py: every node gathers
+// from the nodes that flow into it (the edges in), or sends to the node
+// it flows into (its edge out). One step of the river, without the order
+// of a cascade. The script also runs it with `tree` taken out, which
+// keeps the edges in the table other relations have.
+
+component Node { rain: f32, sum: f32 } capacity 1024
+archetype Cell { Node } capacity 1024
+relation Flows from Node to Node tree capacity 1024
+
+// Along the edges in: the rain on the nodes right above.
+system gather(wet: f32) {
+  for e, n: mut Node {
+    n.sum = 0.0
+    for s, above in e.in(Flows) {
+      if let rain = Node(above).rain { n.sum += rain * wet }
+    }
+  }
+}
+
+// Along the edge out: the same sums, sent down.
+system send(wet: f32) {
+  for n: mut Node { n.sum = 0.0 }
+  for e, n: Node {
+    for s, below in e.out(Flows) { Node(below).sum += n.rain * wet }
+  }
+}
+
+schedule pull(wet: f32) { gather(wet) }
+schedule push(wet: f32) { send(wet) }

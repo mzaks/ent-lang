@@ -839,7 +839,8 @@ OMP_PROC_BIND=close` for the parallel variants): unpinned, spreads reached
 
 `bench/river/run.py` runs the river network (`examples/river.ent`, a sum
 down a tree from its leaves) against hand-written C, per size and shape of
-the tree.
+the tree; `bench/river/edges.py` runs edge loops over the same tree, kept
+as a tree and as a table of edges.
 
 `bench/snn/run.py` runs the spiking network (`examples/snn.ent` pushing,
 `examples/snn_pull.ent` gathering, sequential and parallel) against

@@ -2237,3 +2237,63 @@ at the order's end, so a node with about 1,000 below it moves each step:
 - A move of so much of a tree that building it again would be cheaper.
   Going by the 0.24 ms, that is somewhere near a twentieth of a bushy
   tree's nodes; nothing looks at the size before moving.
+
+## 2026-10-06: edge loops over a tree
+
+A tree that is not `sorted` keeps a slot per entity and links from child
+to child, where other relations have a table of edges. `bench/river/
+edges.py` runs edge loops over the river's tree both ways: `edges.ent` as
+it is (`ent-tree`), and with `tree` taken out (`ent-table`), against C by
+hand. `pull`: every node sums the rain on the nodes that flow straight
+into it, along the edges in. `push`: every node sends its rain to the node
+it flows into, along its edge out. Same machine, pinning and flags; 200
+steps after 50, medians of 7 processes. Checksums agree in every
+configuration.
+
+us per step (spread), best in bold:
+
+| nodes | shape | way | c | ent-tree | ent-table |
+|---|---|---|---|---|---|
+| 1e4 | bushy | pull | **5.8 (25%)** | 9.2 (2%) | 7.1 (4%) |
+| 1e4 | bushy | push | **2.8 (4%)** | 3.5 (3%) | 6.8 (12%) |
+| 1e4 | deep | pull | **5.9 (11%)** | 6.4 (10%) | 6.7 (3%) |
+| 1e4 | deep | push | **3.4 (1%)** | 4.0 (2%) | 7.0 (9%) |
+| 1e4 | shuffled | pull | **5.6 (15%)** | 10.3 (1%) | 7.5 (4%) |
+| 1e4 | shuffled | push | **2.9 (2%)** | 3.6 (4%) | 6.9 (3%) |
+| 1e5 | bushy | pull | **374.9 (1%)** | 383.1 (2%) | 386.3 (1%) |
+| 1e5 | bushy | push | **33.7 (1%)** | 41.8 (2%) | 73.8 (2%) |
+| 1e5 | deep | pull | 70.1 (9%) | **65.9 (9%)** | 67.7 (2%) |
+| 1e5 | deep | push | **33.9 (1%)** | 40.9 (2%) | 69.5 (19%) |
+| 1e5 | shuffled | pull | **513.2 (1%)** | 532.3 (4%) | 541.4 (3%) |
+| 1e5 | shuffled | push | **35.2 (2%)** | 43.5 (1%) | 75.3 (1%) |
+| 1e6 | bushy | pull | **4,013.7 (3%)** | 4,478.8 (9%) | 4,344.0 (3%) |
+| 1e6 | bushy | push | **509.1 (2%)** | 645.4 (4%) | 1,001.5 (2%) |
+| 1e6 | deep | pull | **634.3 (10%)** | 666.5 (7%) | 750.5 (5%) |
+| 1e6 | deep | push | **366.1 (15%)** | 434.0 (11%) | 744.2 (11%) |
+| 1e6 | shuffled | pull | **5,618.8 (1%)** | 6,541.3 (1%) | 6,168.8 (4%) |
+| 1e6 | shuffled | push | **568.9 (20%)** | 708.4 (8%) | 1,071.6 (3%) |
+
+### What holds
+
+- Along the edge out, the tree's slot takes 0.51-0.66x the time of the
+  table (one load of the slot's owner and one of the target, where the
+  table has two offsets and then the target), and 1.18-1.27x of the C,
+  whose loop the generated one is but for the owner it compares.
+- Along the edges in, from child to child, the tree takes 0.89-1.06x the
+  time of the table at 1e5 and 1e6, and 1.3-1.4x in a bushy or shuffled
+  tree of 1e4, where everything is in the caches and the next child is
+  one more load to wait for; in a deep tree it is 0.96x there.
+- Pull costs 4-6 ns a node in a bushy tree in every form, the C too: how
+  many nodes flow into one is not to be foreseen, and the rain is
+  wherever the node above is.
+
+### Tried, and left out
+
+- Carrying the visited entity's own field through the walk from child to
+  child as a value, as a table's loop does: 5,035 against 4,455 us at 1e6
+  bushy, 392 against 382 at 1e5. No gain.
+
+### Not measured
+
+- Edge loops that write the edges' fields, or disconnect.
+- Entities that can die, where every edge in is checked for its target.
