@@ -18,13 +18,13 @@
 // CHECK-NEXT: 1: leaf marked 7
 // CHECK-NEXT: 1: mid marked 7
 // Nodes without a parent first, then the others, every parent before its
-// children. The mid had a child when it got its parent, so the tree was
-// built again: by the nodes' keys, each after its ancestors.
+// children. The mid had a child when it got its parent: it went to the end
+// of the order, and the leaf after it.
 // CHECK-NEXT: 1: visit lone
 // CHECK-NEXT: 1: visit top
+// CHECK-NEXT: 1: visit side
 // CHECK-NEXT: 1: visit mid
 // CHECK-NEXT: 1: visit leaf
-// CHECK-NEXT: 1: visit side
 // The leaf is connected to the side, which is before it: it has left the
 // mid, and its place is the same.
 // CHECK-NEXT: 2: leaf 1101
@@ -37,8 +37,8 @@
 // CHECK-NEXT: 2: visit lone
 // CHECK-NEXT: 2: visit top
 // CHECK-NEXT: 2: visit side
-// CHECK-NEXT: 2: visit leaf
 // CHECK-NEXT: 2: visit mid
+// CHECK-NEXT: 2: visit leaf
 // The side is gone: the leaf has no ancestor, so no `for` with `up`
 // visits it; one that only cascades still does, where its edge puts it.
 // CHECK-NEXT: 3: leaf 1
@@ -48,8 +48,8 @@
 // CHECK-NEXT: 3: mid marked 7
 // CHECK-NEXT: 3: visit lone
 // CHECK-NEXT: 3: visit top
-// CHECK-NEXT: 3: visit leaf
 // CHECK-NEXT: 3: visit mid
+// CHECK-NEXT: 3: visit leaf
 // A new node takes the side's slot and not its child, and goes to the
 // end. The leaf keeps the edge to the node that is gone.
 // CHECK-NEXT: 4: leaf 1
@@ -58,10 +58,10 @@
 // CHECK-NEXT: 4: top 100
 // CHECK-NEXT: 4: fresh 2100
 // CHECK-NEXT: 4: mid marked 7
-// CHECK-NEXT: 4: visit leaf
 // CHECK-NEXT: 4: visit lone
 // CHECK-NEXT: 4: visit top
 // CHECK-NEXT: 4: visit mid
+// CHECK-NEXT: 4: visit leaf
 // CHECK-NEXT: 4: visit fresh
 // CHECK-NOT:  {{.}}
 

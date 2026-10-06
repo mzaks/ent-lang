@@ -2190,3 +2190,50 @@ without):
 
 - A tree connected leaves first, where every entity waits for all its
   ancestors.
+
+## 2026-10-06: a node put under a later one
+
+An unsorted tree was built again when a node was put under one that comes
+after it in the tree's order, or when a node that has children got a
+parent. Now such a node goes to the end of the order with everything below
+it (itself, then the children of each node moved, so the order's end is
+the queue), and its old entries stay behind as gaps a walk skips. The
+order has room for twice the relation's edges, and is made again when
+that runs out. Same machine, pinning and flags; 1e6 nodes, 5 rounds.
+
+us per step, 200 steps after 50, checksums agreeing with the C; since the
+entry above, a tree a host has built is listed by key:
+
+| shape | c-pairs | ent | ent-two |
+|---|---|---|---|
+| bushy | 906.4 (19%) | 675.8 (2%) | 863.3 (2%) |
+| deep | 845.0 (2%) | 845.3 (2%) | 988.6 (3%) |
+| shuffled | 906.3 (18%) | 818.7 (9%) | 984.6 (12%) |
+
+us per step with `--move`, 50 steps after 10: before every step the
+program puts node 1000 + s under node 999 + s, which the step before put
+at the order's end, so a node with about 1,000 below it moves each step:
+
+| shape | ent | ent-sorted | ent-two |
+|---|---|---|---|
+| bushy | 914.4 (3%) | 23,294.9 (1%) | 1,105.1 (3%) |
+| shuffled | 827.4 (10%) | 20,934.2 (2%) | 981.8 (16%) |
+
+### What holds
+
+- A step that moves a node with about 1,000 below it takes 0.24 ms longer
+  than a step alone in the bushy tree (914 against 676) and no longer in
+  the shuffled one, where building the tree again cost 11.4 and 19.7 ms.
+  How much of the 0.24 ms is the move and how much the walk over an order
+  that is less in order was not taken apart.
+- The list by key is also the better one to walk: the unsorted bushy tree
+  takes 0.75x the time of `c-pairs`, which walks the nodes breadth first,
+  where it took as long before (902 to 991 against 836 to 951).
+
+### Not measured
+
+- Moves in a deep tree: what is below a node there is most of the tree,
+  and the scheme above ties it into a cycle.
+- A move of so much of a tree that building it again would be cheaper.
+  Going by the 0.24 ms, that is somewhere near a twentieth of a bushy
+  tree's nodes; nothing looks at the size before moving.

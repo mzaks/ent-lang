@@ -178,9 +178,12 @@ struct WorldApply {
 /// next and previous sibling per slot. The entities with a parent are in
 /// `order` as for any tree, parents before their children, with their
 /// parents' ids next to them; `position` has where each key's is (and
-/// one). Connecting keeps all of it as it goes where the list stays in
-/// order by putting a new leaf at its end or by changing a parent's id in
-/// place, and marks the relation unclean otherwise; unclean, it is built
+/// one). Connecting keeps all of it as it goes: a new leaf goes to the
+/// list's end, an entity put under one that is before it has its parent's
+/// id changed in place, and one put under a later entity goes to the end
+/// with everything below it, leaving entries of all ones behind. Where
+/// the list has no room for that, and for a disconnect or a host's
+/// connect, the relation is marked unclean; unclean, it is built
 /// again from the slots: dead edges dropped, children by key, and the
 /// list by key with every entity's ancestors put before it.
 struct WorldRelation {
@@ -228,6 +231,10 @@ struct WorldRelation {
   bool tree = false;
   uint64_t orderOffset = 0;
   uint64_t orderParentOffset = 0;
+  /// Elements of the list: an edge each, or for a linked tree twice that,
+  /// which leaves room for the entries of entities that moved to its end
+  /// (their old ones are all ones, and skipped) before it is made again.
+  int64_t orderCapacity = 0;
   /// The indices of the archetypes a `sorted` tree keeps in its order, and
   /// in the header (i64) the depth of the tree: of its deepest entity,
   /// where an entity without a parent has 0.

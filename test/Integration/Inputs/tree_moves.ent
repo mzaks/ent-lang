@@ -1,6 +1,7 @@
-// Changes to a tree that its list cannot take in on the spot: a node put
-// under one that comes after it, and a node that has children given a
-// parent. The tree is built again for them, and the sums are right.
+// Changes to a tree that its order cannot take in with one store: a node
+// put under one that comes after it, and a node that has children given a
+// parent. The node goes to the end of the order with all that is below
+// it, and the sums are right.
 import console
 
 component Node { name: text[8], local: i32, total: i32 }

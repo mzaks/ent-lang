@@ -240,10 +240,12 @@ not write, and needs no order.
   they happen, a new leaf at the end of its order, a node that gets
   another parent where it is. So two programs that build the same tree in
   another order may add a parent's inflows in another order, and their
-  sums of floats differ in the last bits. (A node put under one that
-  comes after it, a node with children given a parent, and a disconnect
-  have the order made again, by the entities' ids with every
-  entity's ancestors before it; so do edges a host connected.) A `sorted` tree's order is its shape's alone.
+  sums of floats differ in the last bits. A node put under one that
+  comes after it, or given a parent when it has children, goes to the end
+  with everything below it. (A disconnect has the order made again, by
+  the entities' ids with every entity's ancestors before it; so do edges
+  a host connected, and an order that has run out of room for nodes that
+  moved.) A `sorted` tree's order is its shape's alone.
 - An entity whose parent was destroyed keeps its edge until the tree is
   next built again or it gets a new one: until then it has no ancestor,
   and a `for` that only cascades visits it where the edge puts it.

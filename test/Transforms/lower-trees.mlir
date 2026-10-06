@@ -29,7 +29,7 @@ ent.archetype @Marked (@Node, @Mark) capacity 8
 // CHECK:       %[[N:.*]] = memref.load %[[COUNT:.*]][%{{.*}}] : memref<1xi64>
 // CHECK:       %[[END:.*]] = arith.index_cast %[[N]] : i64 to index
 // CHECK:       scf.for %[[I:.*]] = %{{.*}} to %[[END]] step %{{.*}} {
-// CHECK-NEXT:    %[[ID:.*]] = memref.load %[[ORDER:.*]][%[[I]]] : memref<16xi32>
+// CHECK-NEXT:    %[[ID:.*]] = memref.load %[[ORDER:.*]][%[[I]]] : memref<32xi32>
 // CHECK:         scf.if
 // CHECK-NOT:   scf.while
 // CHECK:       return
@@ -72,7 +72,7 @@ ent.system @inherit() {
 // CHECK:       scf.for
 // CHECK:       scf.for
 // CHECK:       scf.for %[[I:.*]] = %{{.*}} to
-// CHECK-NEXT:    memref.load %{{.*}}[%[[I]]] : memref<16xi32>
+// CHECK-NEXT:    memref.load %{{.*}}[%[[I]]] : memref<32xi32>
 // CHECK:       return
 ent.system @visit() {
   ent.query (%n: !ent.ref<@Node, mut>) cascade @Under {
@@ -94,7 +94,7 @@ ent.schedule @frame() {
 // CHECK:       scf.for %[[I:.*]] = %{{.*}} to %[[END:.*]] step %[[ONE:.*]] {
 // CHECK-NEXT:    %[[LAST:.*]] = arith.subi %[[END]], %[[ONE]]
 // CHECK-NEXT:    %[[AT:.*]] = arith.subi %[[LAST]], %[[I]]
-// CHECK-NEXT:    memref.load %{{.*}}[%[[AT]]] : memref<16xi32>
+// CHECK-NEXT:    memref.load %{{.*}}[%[[AT]]] : memref<32xi32>
 // CHECK-NOT:   ent.
 // CHECK:       return
 ent.system @gather() {

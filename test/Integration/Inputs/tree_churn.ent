@@ -1,0 +1,55 @@
+// A tree whose nodes keep changing their parents for ones that come later
+// in its order: each goes to the end of the order with what is below it,
+// leaving a gap, until the order has no room left and is made again. The
+// relation has room for 4 edges, its order for 8 entries.
+import console
+
+component Node { name: text[8], local: i32, total: i32 }
+default_capacity 8
+relation Under from Node to Node tree capacity 4
+unique Frame: i32
+unique Keep { root: entity, a: entity, b: entity, c: entity, d: entity }
+
+world {
+  let root = spawn { Node { name: "root", local: 1, total: 0 } }
+  let a = spawn { Node { name: "a", local: 10, total: 0 } }
+  let b = spawn { Node { name: "b", local: 100, total: 0 } }
+  let c = spawn { Node { name: "c", local: 1000, total: 0 } }
+  let d = spawn { Node { name: "d", local: 10000, total: 0 } }
+  connect(a, root, Under)
+  connect(b, root, Under)
+  connect(c, root, Under)
+  connect(d, root, Under)
+  Keep.root = root
+  Keep.a = a
+  Keep.b = b
+  Keep.c = c
+  Keep.d = d
+}
+
+system change() {
+  Frame += 1
+  if Frame == 1 { connect(Keep.a, Keep.d, Under) }     // a to the end
+  if Frame == 2 { connect(Keep.b, Keep.a, Under) }     // b after it
+  if Frame == 3 { connect(Keep.c, Keep.b, Under) }     // and c
+  if Frame == 4 { connect(Keep.a, Keep.root, Under) }  // in place
+  if Frame == 5 { connect(Keep.d, Keep.c, Under) }     // d: the order is full
+  if Frame == 6 { connect(Keep.c, Keep.root, Under) }  // in place
+  if Frame == 7 { connect(Keep.b, Keep.d, Under) }     // no room: made again
+  if Frame == 8 { connect(Keep.a, Keep.b, Under) }     // a, alone now
+}
+
+system sum() {
+  for n: mut Node { n.total = n.local }
+  for n: mut Node, parent: Node up Under cascade Under {
+    n.total = parent.total + n.local
+  }
+}
+
+system show() {
+  for n: Node { put("{Frame}: {n.name} {n.total}") }
+  flush()
+}
+
+schedule frame() { change()  sum()  show() }
+main { loop { frame() } until Frame == 8 }

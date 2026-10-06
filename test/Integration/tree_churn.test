@@ -1,0 +1,38 @@
+// Nodes that keep taking parents that come later in the tree's order
+// (Inputs/tree_churn.ent): each goes to the order's end with what is
+// below it, the order fills with the gaps they leave, and is made again
+// when it has no room. The sums are those of the same tree sorted, which
+// is put in order from scratch for every change (it needs room in its
+// table for the edges that are replaced, so it gets 8).
+// RUN: %ent run %S/Inputs/tree_churn.ent 2>/dev/null > %t.out
+// RUN: sed 's/ tree capacity 4/ tree sorted capacity 8/' \
+// RUN:     %S/Inputs/tree_churn.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted" %t.sorted.ent
+// RUN: %ent run %t.sorted.ent 2>/dev/null | sort > %t.sorted.out
+// RUN: sort %t.out | cmp - %t.sorted.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// a under d, which is after it.
+// CHECK:      1: root 1
+// CHECK-NEXT: 1: a 10011
+// CHECK-NEXT: 1: b 101
+// CHECK-NEXT: 1: c 1001
+// CHECK-NEXT: 1: d 10001
+// d under c, under b, under a, under the root: the order is full.
+// CHECK:      5: root 1
+// CHECK-NEXT: 5: a 11
+// CHECK-NEXT: 5: b 111
+// CHECK-NEXT: 5: c 1111
+// CHECK-NEXT: 5: d 11111
+// b under d: no room for it at the end, so the order is made again.
+// CHECK:      7: root 1
+// CHECK-NEXT: 7: a 11
+// CHECK-NEXT: 7: b 11101
+// CHECK-NEXT: 7: c 1001
+// CHECK-NEXT: 7: d 11001
+// CHECK-NEXT: 8: root 1
+// CHECK-NEXT: 8: a 11111
+// CHECK-NEXT: 8: b 11101
+// CHECK-NEXT: 8: c 1001
+// CHECK-NEXT: 8: d 11001
+// CHECK-NOT:  {{.}}

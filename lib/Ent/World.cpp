@@ -533,9 +533,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       relation.nextSiblingOffset = perKey(link);
       relation.previousSiblingOffset = perKey(link);
       relation.positionOffset = perKey(link);
+      relation.orderCapacity = 2 * relation.capacity;
       auto perEdge = [&](uint64_t bytes) {
         uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
-        end = offset + bytes * relation.capacity;
+        end = offset + bytes * relation.orderCapacity;
         return offset;
       };
       relation.orderOffset = perEdge(idBytes);
@@ -577,6 +578,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       relation.fieldScratchOffsets.push_back(
           place(storageBytes(field.type), edges));
     if (relation.tree) {
+      relation.orderCapacity = edges;
       relation.orderOffset = place(idBytes, edges);
       relation.orderParentOffset = place(idBytes, edges);
     }

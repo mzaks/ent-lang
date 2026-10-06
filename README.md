@@ -590,10 +590,13 @@ parents before children, each with its parent's id next to it and its
 place in a column. A connect keeps all of that as it goes: the slot is
 set, the entity joins its new parent's children, and the list takes a new
 leaf at its end or a new parent's id in place where the parent is before
-the entity. Where it cannot (the parent comes later, the entity has
-children and was not in the list, a disconnect, a host's connect) the
-relation is marked unclean and built again from its slots before anything
-reads it: edges of and to dead entities dropped, children by key, and the
+the entity. Where the parent comes later, or the entity has children and
+was not in the list, the entity goes to the list's end with everything
+below it, found from child to child with the end of the list for a queue;
+the entries left behind are all ones, which a walk skips, and the list
+has room for twice the edges. Where that room runs out, and for a
+disconnect or a host's connect, the relation is marked unclean and built
+again from its slots before anything reads it: edges of and to dead entities dropped, children by key, and the
 list by key, each entity after those of its ancestors that were not in
 yet (most are: a look at the parent's slot, and no walk through the
 tree). An entity on a cycle would wait for itself, which stops the

@@ -116,6 +116,10 @@ def main():
     parser.add_argument("--divert", action="store_true",
                         help="the program connects an edge before every "
                         "step, which an unsorted tree takes in on the spot")
+    parser.add_argument("--move", action="store_true",
+                        help="the program puts a node under one that is "
+                        "later in the tree's order before every step; the "
+                        "tree changes, so give ent variants only")
     parser.add_argument("--csv")
     args = parser.parse_args()
     os.makedirs(OUT, exist_ok=True)
@@ -135,7 +139,7 @@ def main():
                 out = subprocess.run(
                     [exes[(n, name)], str(args.steps), str(args.warmup),
                      shape] + ["resort"] * args.resort
-                    + ["divert"] * args.divert,
+                    + ["divert"] * args.divert + ["move"] * args.move,
                     check=True, capture_output=True, text=True).stdout
                 fields = dict(kv.split("=") for kv in out.split())
                 results.setdefault(((n, shape), name), []).append(

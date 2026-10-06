@@ -577,10 +577,10 @@ public:
   }
   /// A tree's entities with a parent, parents first, and how many.
   Value treeOrder(const WorldRelation &relation) {
-    return view(relation.orderOffset, relation.capacity, idType());
+    return view(relation.orderOffset, relation.orderCapacity, idType());
   }
   Value treeOrderParents(const WorldRelation &relation) {
-    return view(relation.orderParentOffset, relation.capacity, idType());
+    return view(relation.orderParentOffset, relation.orderCapacity, idType());
   }
   /// A sorted archetype: how many of its entities have no parent, and per
   /// row the parent's row.
@@ -3536,6 +3536,72 @@ struct LinkedTree {
           world.treeOrderCount(relation), zero);
   }
   void markUnclean() { store(i64(0), world.edgesClean(relation), zero); }
+
+  /// The entity of `slot` goes to the list's end: its entry, if it has
+  /// one, becomes all ones, which a walk of the list skips. Without room
+  /// at the end the relation is unclean, and the list made again.
+  void relist(Value slot) {
+    Value at = load(position(), slot);
+    branch(negate(isNone(at)), [&] {
+      store(world.noEntity(loc), world.treeOrder(relation),
+            arith::SubIOp::create(rewriter, loc, world.toIndex(loc, at), one));
+    });
+    Value room = arith::CmpIOp::create(rewriter, loc,
+                                       arith::CmpIPredicate::slt, listed(),
+                                       i64(relation.orderCapacity));
+    branch(
+        room,
+        [&] { list(sourceOf(slot), load(targets(), slot), slot); },
+        [&] { markUnclean(); });
+  }
+  /// The entity of `slot`, which has a new parent that is in the list (or
+  /// has no edge of its own), goes to the list's end with everything
+  /// below it: itself, then the children of each entity moved, so every
+  /// one is again after its parent. The end of the list is the queue.
+  /// Coming to the entity itself again means its new parent was below it.
+  void moveToEnd(Value slot) {
+    Value from = world.toIndex(loc, listed());
+    relist(slot);
+    scf::WhileOp::create(
+        rewriter, loc, TypeRange{rewriter.getIndexType()}, ValueRange{from},
+        [&](OpBuilder &, Location, ValueRange state) {
+          scf::ConditionOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                    state[0], world.toIndex(loc, listed())),
+              state);
+        },
+        [&](OpBuilder &, Location, ValueRange state) {
+          Value id = load(world.treeOrder(relation), state[0]);
+          Value key = world.entityKey(loc, id);
+          Value number = world.toIndex(loc, load(childCount(), key));
+          Value first = world.toIndex(loc, load(firstChild(), key));
+          auto children = scf::ForOp::create(rewriter, loc, zero, number, one,
+                                             ValueRange{first});
+          {
+            OpBuilder::InsertionGuard guard(rewriter);
+            rewriter.setInsertionPointToStart(children.getBody());
+            Value child = arith::SubIOp::create(
+                rewriter, loc, children.getRegionIterArg(0), one);
+            // (A slot a dead entity left in the list of a key that has a
+            // new owner is not this entity's child.)
+            branch(same(load(targets(), child), id), [&] {
+              cf::AssertOp::create(
+                  rewriter, loc, negate(same(child, slot)),
+                  rewriter.getStringAttr(
+                      "@" + RelationOp(relation.op).getSymName() +
+                      " is a tree, but an entity is its own ancestor"));
+              relist(child);
+            });
+            scf::YieldOp::create(
+                rewriter, loc,
+                ValueRange{world.toIndex(loc, load(nextSibling(), child))});
+          }
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::AddIOp::create(rewriter, loc, state[0], one)});
+        });
+  }
 };
 } // namespace
 
@@ -3641,6 +3707,19 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
                               world.slotOwner(loc, target));
   Value parentAt = tree.load(tree.position(), parentKey);
   Value ownAt = tree.load(tree.position(), slot);
+  Value parentListed = arith::OrIOp::create(
+      rewriter, loc, tree.negate(parentHas),
+      tree.negate(tree.isNone(parentAt)));
+  // Where the list cannot take the edge with one store: the entity goes
+  // to its end with all that is below it, if the list is in order and has
+  // the parent; else it is to be made again anyway.
+  auto moveOrMark = [&] {
+    Value clean = tree.negate(
+        tree.same(tree.load(world.edgesClean(relation), zero), tree.i64(0)));
+    tree.branch(
+        tree.both(clean, parentListed), [&] { tree.moveToEnd(slot); },
+        [&] { tree.markUnclean(); });
+  };
   tree.branch(
       isOwn,
       [&] {
@@ -3659,20 +3738,16 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
                                                world.toIndex(loc, ownAt),
                                                one));
             },
-            [&] { tree.markUnclean(); });
+            moveOrMark);
       },
       [&] {
         Value childless = tree.isNone(tree.load(tree.childCount(), slot));
-        Value parentListed = arith::OrIOp::create(
-            rewriter, loc, tree.negate(parentHas),
-            tree.negate(tree.isNone(parentAt)));
         Value room = arith::CmpIOp::create(
             rewriter, loc, arith::CmpIPredicate::slt, tree.listed(),
-            tree.i64(relation.capacity));
+            tree.i64(relation.orderCapacity));
         tree.branch(
             tree.both(childless, tree.both(parentListed, room)),
-            [&] { tree.list(source, target, slot); },
-            [&] { tree.markUnclean(); });
+            [&] { tree.list(source, target, slot); }, moveOrMark);
       });
 }
 
@@ -3755,7 +3830,7 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
   // place, and no walk through the tree.
   Value order = world.treeOrder(relation);
   Value capacity =
-      arith::ConstantIndexOp::create(rewriter, loc, relation.capacity);
+      arith::ConstantIndexOp::create(rewriter, loc, relation.orderCapacity);
   Value edges =
       world.toIndex(loc, tree.load(world.edgeCount(relation), zero));
   tree.store(tree.i64(0), world.treeOrderCount(relation), zero);
@@ -4793,6 +4868,15 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           rewriter, loc, arith::SubIOp::create(rewriter, loc, count, one), at);
     Value id = memref::LoadOp::create(rewriter, loc, world.treeOrder(relation),
                                       ValueRange{at});
+    // (A linked tree's list has entries of all ones where an entity has
+    // moved to its end.)
+    if (relation.linked) {
+      auto ifThere = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, id,
+                                world.noEntity(loc)));
+      rewriter.setInsertionPointToStart(ifThere.thenBlock());
+    }
     // The list has each entity's parent next to it.
     KnownParent parent{&relation,
                        memref::LoadOp::create(rewriter, loc,

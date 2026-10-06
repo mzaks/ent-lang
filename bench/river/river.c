@@ -36,11 +36,19 @@
 // `divert` has the program connect it (its schedule `divert`), which an
 // unsorted tree takes in on the spot. The C variants take no notice.
 //
+// `move` changes the tree: before the first step the program puts node
+// 1000 under the last node that is not below it, which is later in the
+// tree's order, and before step s node 1000 + s under node 999 + s, which
+// the step before put at the order's end. So every step one node goes to
+// the end with all that is below it (about N / 1000 nodes in a bushy
+// tree). The sums are another tree's then, and only say that the
+// variants given it agree.
+//
 // A sorted tree across archetypes adds the flows into a node in another
 // order (by archetype, then row), so its checksum is its own; `total`, the
 // sum of all flows, says that it is the same river.
 //
-// Usage: river STEPS WARMUP SHAPE [resort|divert]
+// Usage: river STEPS WARMUP SHAPE [resort|divert|move]
 // Prints: ns_per_step=... depth=... checksum=... total=...
 
 #include <stdint.h>
@@ -142,10 +150,16 @@ int main(int argc, char **argv) {
   int steps = argc > 1 ? atoi(argv[1]) : 100;
   int warmup = argc > 2 ? atoi(argv[2]) : 10;
   const char *shape = argc > 3 ? argv[3] : "bushy";
-  int resort = argc > 4 && strcmp(argv[4], "divert") != 0;
+  int resort = argc > 4 && strcmp(argv[4], "resort") == 0;
   int divert = argc > 4 && strcmp(argv[4], "divert") == 0;
+  int move = argc > 4 && strcmp(argv[4], "move") == 0;
+  int moved = 0;
+  int later = N - 1;
+  (void)later;
   (void)resort;
   (void)divert;
+  (void)move;
+  (void)moved;
 
   parent = malloc(sizeof(int32_t) * N);
   rain = malloc(sizeof(float) * N);
@@ -171,6 +185,14 @@ int main(int argc, char **argv) {
     free(parent);
     free(to);
     parent = moved;
+  }
+  // For `move`: the last node that is not below node 1000.
+  for (; N > 1001 && later > 1000; --later) {
+    int below = 0;
+    for (int at = later; at >= 0; at = parent[at])
+      below |= at == 1000;
+    if (!below)
+      break;
   }
   int depth = 0;
   {
@@ -229,6 +251,10 @@ int main(int argc, char **argv) {
 #define STEP(wet)                                                            \
   ((void)(resort && ent_Flows_connect(w, ids[N - 1], ids[parent[N - 1]])),   \
    (void)(divert && (ent_divert(w, ids[N - 1], ids[parent[N - 1]]), 1)),     \
+   (void)(move && 1001 + moved < N &&                                        \
+          (ent_divert(w, ids[1000 + moved],                                  \
+                      ids[moved ? 999 + moved : later]),                     \
+           ++moved)),                                                        \
    ent_step(w, wet))
 #ifdef TWO
 #define FLOW(i)                                                              \

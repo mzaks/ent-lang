@@ -1,6 +1,6 @@
-// Changes a tree's list cannot take in where they happen (Inputs/
-// tree_moves.ent): the tree is built again for them when the system that
-// made them ends, which is also where a cycle is found.
+// Changes a tree's order cannot take in with one store (Inputs/
+// tree_moves.ent): the node goes to the order's end with all that is
+// below it. Coming to the node itself on the way is a cycle.
 // RUN: %ent build %S/Inputs/tree_moves.ent -o %t.exe 2>/dev/null
 // RUN: not --crash %t.exe > %t.out 2>&1
 // RUN: FileCheck %s --input-file=%t.out
