@@ -60,15 +60,27 @@ struct WorldArchetype {
 
   bool hasPending() const { return pendingOffset != 0; }
 
-  /// For the archetype of a tree declared `sorted` (its rows are kept with the
-  /// entities without a parent first, then the others, every parent before
-  /// its children): the relation; in the header (i64) how many entities
-  /// have no parent; per row the row of its parent (i32, -1 for none); and
-  /// for sorting, the row each row goes to (i32) and a copy of every column
-  /// (in the order of `columns`) and of the ids.
+  /// For an archetype holding entities of a tree declared `sorted` (its
+  /// rows are kept with the entities without a parent first, then the
+  /// others by their depth in the tree, so every parent's depth is before
+  /// its children's): the relation; in the header (i64) how many entities
+  /// have no parent; and for sorting, the row each row goes to (i32) and a
+  /// copy of every column (in the order of `columns`) and of the ids.
+  ///
+  /// Where the tree lives in this archetype alone, the others are in the
+  /// order the tree lists them, every parent before its children, and each
+  /// row has the row of its parent (i32, -1 for none).
+  ///
+  /// Where it lives in several, each row has its parent's packed location
+  /// (archetype and row, at the width of a location), and `levelStart`
+  /// has, per depth d from 1 (i32), the first row of that depth; the entry
+  /// after the last depth is the number of rows.
   StringAttr sortedBy;
   uint64_t rootCountOffset = 0;
   uint64_t parentRowOffset = 0;
+  uint64_t parentLocationOffset = 0;
+  uint64_t levelStartOffset = 0;
+  int64_t levelCapacity = 0;
   uint64_t newRowOffset = 0;
   SmallVector<uint64_t> columnScratchOffsets;
   uint64_t idScratchOffset = 0;
@@ -188,8 +200,15 @@ struct WorldRelation {
   bool tree = false;
   uint64_t orderOffset = 0;
   uint64_t orderParentOffset = 0;
-  /// The index of the archetype sorted by this tree, or -1.
-  int sortedArchetype = -1;
+  /// The indices of the archetypes a `sorted` tree keeps in its order, and
+  /// in the header (i64) the depth of the tree: of its deepest entity,
+  /// where an entity without a parent has 0.
+  SmallVector<unsigned, 2> sortedArchetypes;
+  uint64_t depthOffset = 0;
+  /// The one archetype the tree lives in, or -1.
+  int sortedArchetype() const {
+    return sortedArchetypes.size() == 1 ? int(sortedArchetypes.front()) : -1;
+  }
   /// The component the sources (0) and the targets (1) are trusted to
   /// have for as long as an edge exists (see getTrustedEndpoint), decided
   /// for the program as it was written: lowering takes the ops that

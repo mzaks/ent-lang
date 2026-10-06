@@ -37,9 +37,40 @@
 // RUN: %t.sorted 3 1 deep | sed 's/.*depth/depth/' >> %t.sorted.out
 // RUN: %t.sorted 3 1 shuffled | sed 's/.*depth/depth/' >> %t.sorted.out
 // RUN: cmp %t.ent.out %t.c.out
+// Nodes of two shapes, in two archetypes: unsorted to the bit, and sorted,
+// where a node's inflows are added in another order, to five digits of
+// the sum of all flows.
+// RUN: printf 'component Still { level: f32 } capacity 1024\narchetype Pool { Node, Still } capacity 1024\n' \
+// RUN:     > %t.two
+// RUN: cat %S/../../examples/river.ent %t.two > %t.two.ent
+// RUN: cat %t.sorted.ent %t.two > %t.twos.ent
+// RUN: mkdir -p %t.2dir %t.2sdir
+// RUN: ent-translate --import-ent %t.two.ent -o %t.2.mlir
+// RUN: ent-translate --ent-to-c-header %t.2.mlir -o %t.2dir/river_world.h
+// RUN: ent-opt %t.2.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.2.ll
+// RUN: clang -O2 -Wno-override-module -ffp-contract=off -DVARIANT=2 -DN=1024 \
+// RUN:     -DTWO %t.2.ll -I%t.2dir %S/../../bench/river/river.c -o %t.two.exe
+// RUN: ent-translate --import-ent %t.twos.ent -o %t.2s.mlir
+// RUN: ent-translate --ent-to-c-header %t.2s.mlir -o %t.2sdir/river_world.h
+// RUN: ent-opt %t.2s.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.2s.ll
+// RUN: clang -O2 -Wno-override-module -ffp-contract=off -DVARIANT=2 -DN=1024 \
+// RUN:     -DTWO %t.2s.ll -I%t.2sdir %S/../../bench/river/river.c -o %t.twos.exe
+// RUN: %t.two.exe 3 1 bushy | sed 's/.*depth/depth/' > %t.two.out
+// RUN: %t.two.exe 3 1 deep | sed 's/.*depth/depth/' >> %t.two.out
+// RUN: %t.two.exe 3 1 shuffled | sed 's/.*depth/depth/' >> %t.two.out
+// RUN: cmp %t.ent.out %t.two.out
+// RUN: %t.twos.exe 3 1 bushy | sed 's/.*total=\(......\).*/\1/' > %t.twos.out
+// RUN: %t.twos.exe 3 1 deep | sed 's/.*total=\(......\).*/\1/' >> %t.twos.out
+// RUN: %t.twos.exe 3 1 shuffled | sed 's/.*total=\(......\).*/\1/' >> %t.twos.out
+// RUN: sed 's/.*total=\(......\).*/\1/' %t.ent.out > %t.totals.out
+// RUN: cmp %t.totals.out %t.twos.out
 // RUN: cmp %t.ent.out %t.sorted.out
 // RUN: cmp %t.ent.out %t.es.out
 // RUN: FileCheck %s --input-file=%t.ent.out
-// CHECK:      depth={{[0-9]+}} checksum={{[0-9a-f]+}}
-// CHECK-NEXT: depth={{[0-9]+}} checksum={{[0-9a-f]+}}
-// CHECK-NEXT: depth={{[0-9]+}} checksum={{[0-9a-f]+}}
+// CHECK:      depth={{[0-9]+}} checksum={{[0-9a-f]+}} total={{[0-9.e+]+}}
+// CHECK-NEXT: depth={{[0-9]+}} checksum={{[0-9a-f]+}} total={{[0-9.e+]+}}
+// CHECK-NEXT: depth={{[0-9]+}} checksum={{[0-9a-f]+}} total={{[0-9.e+]+}}

@@ -272,10 +272,11 @@ order:
 relation Flows from Node to Node tree sorted capacity 100000
 ```
 
-The archetype that holds them, declared or not, then has every entity
-after its parent in its rows (those without a parent first), and a `for`
-that cascades along the tree reads them one after another and finds each
-parent where it is, instead of walking a list of ids: the river's sum takes 0.4x the time at a million nodes in a bushy
+The archetypes that hold them, declared or not, then have their rows in
+the tree's order (the entities without a parent first, then the others by
+their depth), and a `for` that cascades along the tree reads them one
+after another and finds each parent where it is, instead of walking a
+list of ids: the river's sum takes 0.4x the time at a million nodes in a bushy
 tree (`bench/RESULTS.md`). Nothing else about the program changes; it is a
 choice of storage, and it has its price:
 
@@ -292,11 +293,16 @@ choice of storage, and it has its price:
   the last bits of floats; a C host cannot keep a row across a call.
 - No entity's id is its row in such a program: reading another entity
   (`if let`, `+=`) goes through a table, everywhere.
-- So far the tree must live in one archetype: the relation says what its
-  ends have (`from`, `to`), one archetype has either, it always has both,
-  and nothing removes them. The orrery's bodies, which come in three
-  shapes, cannot be sorted yet; the compiler says which archetypes a tree
-  would be in.
+- Which archetypes are sorted follows from what the relation says its
+  ends have (`from`, `to`, which it must, and which nothing may remove):
+  every archetype with either. A tree in one archetype is one pass over
+  its rows. A tree in several (the orrery's bodies come in three shapes)
+  is read depth by depth, in each the rows every archetype has of it: in a
+  bushy tree that costs a fifth more, in a deep, narrow one twice as
+  much, and still far less than unsorted. Across archetypes, what
+  children send to a parent is combined by archetype and then by row, not
+  in the order unsorted has, so sums of floats differ in their last bits
+  between the two.
 - An archetype's rows have one order: two sorted trees with their
   entities in the same archetype are an error. Any number of other
   relations, and of trees that are not sorted, are no trouble, since edges

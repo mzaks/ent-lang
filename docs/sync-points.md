@@ -114,7 +114,10 @@ for a spawn outside a query before the system's next query and when the
 system ends. No query sees rows move: it happens between queries. What the
 order of rows decides (the order applies and accumulates are combined in,
 the order a query with a `proc` visits entities in) therefore follows the
-tree; ids, and everything read through them, do not change.
+tree; ids, and everything read through them, do not change. A cascading
+query over a sorted tree in several archetypes visits the entities of one
+depth by archetype, then by row; the order within a depth is fixed, and
+another than the unsorted tree's.
 
 ## The commit point: the end of a query
 

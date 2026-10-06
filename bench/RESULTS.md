@@ -1920,3 +1920,70 @@ in brackets what one sort costs: the step less the step without it.
   every lookup then goes through the entity table. The river looks nothing
   up.
 - Why the sorted form is 2-6% slower in deep trees.
+
+## 2026-10-06: a sorted tree across archetypes
+
+A sorted tree may now have its entities in several archetypes. Each keeps
+its rows by depth in the tree and notes where each depth starts; a row has
+its parent's location, archetype and row. A cascading query goes depth by
+depth and, in each, through the rows every archetype has of it; a tree in
+one archetype keeps its one loop over rows. `ent-two` and `ent-two-sorted`
+are the river with half its nodes (picked by a hash of their number) in a
+second archetype with one more component. Same machine, pinning and flags;
+200 steps after 50, medians of 7 processes, one run for all columns.
+`ent-two` agrees with the C on the checksum; `ent-two-sorted` adds a
+node's inflows in another order (by archetype, then row) and agrees on the
+sum of all flows to 1e-4.
+
+us per step (spread):
+
+| nodes | shape | depth | c-sorted | ent | ent-sorted | ent-two | ent-two-sorted |
+|---|---|---|---|---|---|---|---|
+| 1e4 | bushy | 21 | 3.5 (5%) | 5.4 (2%) | 3.6 (2%) | 8.0 (4%) | 4.4 (4%) |
+| 1e4 | deep | 2,192 | 8.2 (2%) | 8.1 (2%) | 8.6 (2%) | 8.7 (8%) | 9.7 (5%) |
+| 1e4 | shuffled | 21 | 3.5 (4%) | 5.5 (1%) | 3.6 (3%) | 8.0 (4%) | 4.4 (2%) |
+| 1e5 | bushy | 25 | 36.4 (2%) | 56.5 (2%) | 36.8 (2%) | 438.5 (4%) | 44.9 (4%) |
+| 1e5 | deep | 21,920 | 82.6 (2%) | 81.6 (2%) | 85.3 (2%) | 374.7 (4%) | 185.3 (3%) |
+| 1e5 | shuffled | 25 | 36.0 (2%) | 56.5 (5%) | 36.8 (4%) | 437.0 (3%) | 44.9 (3%) |
+| 1e6 | bushy | 31 | 378.1 (2%) | 931.2 (15%) | 389.5 (2%) | 4,841.1 (3%) | 474.6 (2%) |
+| 1e6 | deep | 219,241 | 841.6 (2%) | 855.2 (6%) | 874.0 (2%) | 3,683.0 (5%) | 1,635.3 (3%) |
+| 1e6 | shuffled | 31 | 378.4 (3%) | 968.1 (30%) | 390.9 (3%) | 4,871.8 (3%) | 477.0 (4%) |
+
+With `--resort` (5 rounds of 50 steps after 10), ms per step at 1e6 and in
+brackets what one sort costs:
+
+| shape | ent-two | ent-two-sorted |
+|---|---|---|
+| bushy | 24.0 (3%) [19.2] | 37.4 (3%) [36.9] |
+| deep | 13.5 (1%) [9.8] | 19.0 (1%) [17.4] |
+| shuffled | 23.4 (5%) [18.6] | 34.4 (1%) [33.9] |
+
+### What holds
+
+- Sorted across two archetypes, a bushy tree takes 1.22x the time of the
+  same tree sorted in one, at every size: the branch on the parent's
+  archetype, and two loops a depth.
+- A deep tree takes 1.9-2.2x at 1e5 and 1e6: with 219,241 depths for 1e6
+  nodes, most loops run for two or three rows.
+- Unsorted, the tree across two archetypes is the slow one: 4.3-7.8x the
+  time of the unsorted tree in one archetype at 1e5 and 1e6 (1.1-1.5x at
+  1e4). So sorting gains more here than in one archetype: 0.10x the time
+  in a bushy tree at 1e5 and 1e6, 0.44-0.49x in a deep one.
+- A sort costs 34-37 ms at 1e6 bushy and shuffled, against 19 unsorted:
+  both archetypes' rows move, 15-18 ms on top of the edges. With 4.4 ms
+  saved a step, the order pays where the tree changes less often than
+  every 4 steps.
+
+### Measured, not explained
+
+- Why the unsorted tree in two archetypes costs 4-5 ns a node at 1e5 and
+  1e6 and under 1 ns at 1e4. Each node's archetype and its parent's are
+  told by branches there, which follow no pattern across the list; a
+  predictor that learns a sequence of 1e4 and not one of 1e5 would fit.
+  Not checked.
+
+### Not measured
+
+- More than two archetypes, and archetypes of very different sizes.
+- A component of the ancestor that not every archetype has (searched for
+  from the entity, as unsorted).

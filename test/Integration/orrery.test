@@ -10,6 +10,12 @@
 // RUN: ent-opt %t.mlir --ent-print-access -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=ACCESS
 
+// With its tree sorted, across the three archetypes its bodies are in.
+// RUN: sed 's/ tree capacity 64/ tree sorted capacity 64/' %t.mlir \
+// RUN:   | ent-opt --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s --check-prefix=LLVM
+
 // LLVM-DAG: define {{.*}}void @ent_sort_Orbits(
 // LLVM-DAG: declare void @ent_window_circle(float, float, float, i32)
 

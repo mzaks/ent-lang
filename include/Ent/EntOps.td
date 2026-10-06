@@ -122,18 +122,16 @@ def Ent_RelationOp : Ent_RecordOp<"relation", [
     ```mlir
     ent.relation @Flows () from @Node to @Node tree sorted capacity 100000
     ```
-    Then the rows of the archetype that holds its entities are kept with
-    every parent before its children (the entities without a parent first,
-    then the others breadth first), so a query that cascades along the
-    tree reads the rows one after another and finds each entity's parent
-    by its row. The order is restored whenever the tree's edges change or
+    Then the rows of the archetypes that hold its entities are kept in the
+    tree's order (the entities without a parent first, then the others by
+    their depth), so a query that cascades along the tree reads the rows
+    one after another and finds each entity's parent where it is. The order is restored whenever the tree's edges change or
     the archetype gains or loses an entity, which moves every row: what a
     program combines in the order of rows (`ent.apply`, `ent.accumulate`)
     then depends on the tree, a host cannot keep rows, and ids are never
-    rows in such a program. So far the tree must live in one archetype: it
-    names what its sources and targets have (`from`, `to`), one archetype
-    holds either, and it holds both, always. No archetype is in two sorted
-    trees: its rows have one order.
+    rows in such a program. The tree names what its sources and targets
+    have (`from`, `to`): the archetypes holding either are the sorted ones.
+    No archetype is in two sorted trees: its rows have one order.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        StrArrayAttr:$field_names,

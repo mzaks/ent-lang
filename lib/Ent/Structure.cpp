@@ -109,33 +109,15 @@ RelationOp mlir::ent::getSortingTree(ArchetypeOp archetype) {
   return {};
 }
 
-FailureOr<ArchetypeOp> mlir::ent::getSortedArchetype(RelationOp relation) {
+FailureOr<SmallVector<ArchetypeOp>>
+mlir::ent::getSortedArchetypes(RelationOp relation) {
   auto module = relation->getParentOfType<ModuleOp>();
   SmallVector<ArchetypeOp> holders;
   for (ArchetypeOp archetype : module.getOps<ArchetypeOp>())
     if (holdsEnd(archetype, relation))
       holders.push_back(archetype);
-  if (holders.empty())
-    return ArchetypeOp();
-  if (holders.size() > 1) {
-    InFlightDiagnostic diag =
-        relation.emitOpError("is 'sorted', but its entities can be in ")
-        << holders.size() << " archetypes (";
-    llvm::interleaveComma(holders, diag, [&](ArchetypeOp archetype) {
-      diag << "@" << archetype.getSymName();
-    });
-    diag << "); a tree across archetypes cannot be sorted yet";
-    return diag;
-  }
-  ArchetypeOp archetype = holders.front();
   for (bool target : {false, true}) {
     FlatSymbolRefAttr component = relation.getEndpoint(target);
-    StringRef end = target ? "targets" : "sources";
-    if (!archetype.contains(component) || archetype.isOptional(component))
-      return relation.emitOpError("is 'sorted', but @")
-             << archetype.getSymName() << ", which holds its entities, does "
-             << "not always hold " << component << ", which its " << end
-             << " have";
     RemoveOp removed;
     module.walk([&](RemoveOp remove) {
       if (remove.getComponentAttr() == component)
@@ -144,22 +126,26 @@ FailureOr<ArchetypeOp> mlir::ent::getSortedArchetype(RelationOp relation) {
     if (removed) {
       InFlightDiagnostic diag =
           relation.emitOpError("is 'sorted', but a system removes ")
-          << component << ", which its " << end << " have";
+          << component << ", which its " << (target ? "targets" : "sources")
+          << " have";
       diag.attachNote(removed.getLoc()) << "removed here";
       return diag;
     }
   }
-  for (RelationOp other : module.getOps<RelationOp>())
-    if (other != relation && other.getSorted() &&
-        holdsEnd(archetype, other)) {
-      InFlightDiagnostic diag =
-          relation.emitOpError("is 'sorted', and so is @")
-          << other.getSymName() << "; both have their entities in @"
-          << archetype.getSymName() << ", whose rows have one order";
-      diag.attachNote(other.getLoc()) << "the other tree";
-      return diag;
-    }
-  return archetype;
+  for (RelationOp other : module.getOps<RelationOp>()) {
+    if (other == relation || !other.getSorted())
+      continue;
+    for (ArchetypeOp archetype : holders)
+      if (holdsEnd(archetype, other)) {
+        InFlightDiagnostic diag =
+            relation.emitOpError("is 'sorted', and so is @")
+            << other.getSymName() << "; both have their entities in @"
+            << archetype.getSymName() << ", whose rows have one order";
+        diag.attachNote(other.getLoc()) << "the other tree";
+        return diag;
+      }
+  }
+  return holders;
 }
 
 /// The archetype whose components are exactly `components`, or null.

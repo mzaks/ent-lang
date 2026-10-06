@@ -169,11 +169,12 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   for (RelationOp relation : module.getOps<RelationOp>()) {
     if (!relation.getSorted())
       continue;
-    FailureOr<ArchetypeOp> sorted = getSortedArchetype(relation);
+    FailureOr<SmallVector<ArchetypeOp>> sorted =
+        getSortedArchetypes(relation);
     if (failed(sorted))
       return failure();
     for (WorldArchetype &archetype : layout.archetypes)
-      if (archetype.op == *sorted)
+      if (llvm::is_contained(*sorted, ArchetypeOp(archetype.op)))
         archetype.sortedBy = relation.getSymNameAttr();
   }
   bool moves = llvm::any_of(layout.archetypes, [](const WorldArchetype &a) {
@@ -268,7 +269,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       entry.trusted[target] = getTrustedEndpoint(relation, target);
     for (const WorldArchetype &archetype : layout.archetypes)
       if (archetype.sortedBy == relation.getSymNameAttr())
-        entry.sortedArchetype = archetype.index;
+        entry.sortedArchetypes.push_back(archetype.index);
+    if (entry.sortedArchetypes.size() > 1) {
+      entry.depthOffset = end;
+      end += 8;
+    }
     if (entry.tree) {
       entry.orderCountOffset = end;
       end += 8;
@@ -388,7 +393,23 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     if (needsPending(archetype))
       archetype.pendingOffset = place(4);
     if (archetype.isSorted()) {
-      archetype.parentRowOffset = place(4);
+      // Alone in its tree, or one of several archetypes.
+      int64_t others = 0, sources = 0;
+      for (const WorldArchetype &other : layout.archetypes)
+        if (other.sortedBy == archetype.sortedBy) {
+          ++others;
+          sources += other.capacity;
+        }
+      if (others == 1) {
+        archetype.parentRowOffset = place(4);
+      } else {
+        archetype.parentLocationOffset = place(scheme.locationBits / 8);
+        // A depth for every entity that can have a parent, and two more.
+        archetype.levelCapacity = sources + 2;
+        uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+        archetype.levelStartOffset = offset;
+        end = offset + 4 * archetype.levelCapacity;
+      }
       archetype.newRowOffset = place(4);
       for (const WorldColumn &column : archetype.columns)
         archetype.columnScratchOffsets.push_back(

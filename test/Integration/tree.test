@@ -65,6 +65,66 @@
 // CHECK-NEXT: 4: visit fresh
 // CHECK-NOT:  {{.}}
 
+// RUN: sed 's/ tree capacity 16/ tree sorted capacity 16/' %S/Inputs/tree.ent \
+// RUN:     > %t.sorted.ent
+// RUN: grep -q "tree sorted" %t.sorted.ent
+// RUN: %ent run %t.sorted.ent 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=SORTED
+// RUN: %ent run --parallel %t.sorted.ent 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=SORTED
+// The same tree with `tree sorted`: it is in two archetypes (nodes with a
+// Mark and without), and each has its rows by depth: lone without a parent,
+// then mid, then leaf; top, then side. Sums, marks and the order of visits
+// are what they are unsorted.
+// SORTED:      1: lone 5
+// SORTED-NEXT: 1: mid 110
+// SORTED-NEXT: 1: leaf 111
+// SORTED-NEXT: 1: top 100
+// SORTED-NEXT: 1: side 1100
+// SORTED-NEXT: 1: mid marked 7
+// SORTED-NEXT: 1: leaf marked 7
+// SORTED-NEXT: 1: visit lone
+// SORTED-NEXT: 1: visit top
+// SORTED-NEXT: 1: visit mid
+// SORTED-NEXT: 1: visit side
+// SORTED-NEXT: 1: visit leaf
+// SORTED-NEXT: 2: lone 5
+// SORTED-NEXT: 2: mid 110
+// SORTED-NEXT: 2: leaf 1101
+// SORTED-NEXT: 2: top 100
+// SORTED-NEXT: 2: side 1100
+// SORTED-NEXT: 2: mid marked 7
+// SORTED-NEXT: 2: leaf marked 9
+// SORTED-NEXT: 2: visit lone
+// SORTED-NEXT: 2: visit top
+// SORTED-NEXT: 2: visit mid
+// SORTED-NEXT: 2: visit side
+// SORTED-NEXT: 2: visit leaf
+// Destroying the side sorted its archetype and with it the edges: the leaf
+// lost its edge at once and is a node without a parent, before the mid in
+// its rows and in the visits.
+// SORTED-NEXT: 3: lone 5
+// SORTED-NEXT: 3: leaf 1
+// SORTED-NEXT: 3: mid 110
+// SORTED-NEXT: 3: top 100
+// SORTED-NEXT: 3: mid marked 7
+// SORTED-NEXT: 3: visit lone
+// SORTED-NEXT: 3: visit leaf
+// SORTED-NEXT: 3: visit top
+// SORTED-NEXT: 3: visit mid
+// SORTED-NEXT: 4: lone 5
+// SORTED-NEXT: 4: leaf 1
+// SORTED-NEXT: 4: mid 110
+// SORTED-NEXT: 4: top 100
+// SORTED-NEXT: 4: fresh 2100
+// SORTED-NEXT: 4: mid marked 7
+// SORTED-NEXT: 4: visit lone
+// SORTED-NEXT: 4: visit leaf
+// SORTED-NEXT: 4: visit top
+// SORTED-NEXT: 4: visit mid
+// SORTED-NEXT: 4: visit fresh
+// SORTED-NOT:  {{.}}
+
 // An entity that would be its own ancestor stops the program.
 // RUN: %ent build %S/Inputs/tree_cycle.ent -o %t.cycle 2>/dev/null
 // RUN: not --crash %t.cycle > %t.out 2>&1

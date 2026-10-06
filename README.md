@@ -388,9 +388,9 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   parent at a row it reads from a column, and no ids. It is a choice of
   storage with a price: the rows are put in order again whenever the
   tree's edges change or the archetype gains or loses an entity, ids are
-  never rows in such a program, the tree must so far live in one archetype
-  (it names what its ends have, and one archetype holds either), and no
-  archetype is in two sorted trees. `docs/syntax.md` lists what follows.
+  never rows in such a program, and no archetype is in two sorted trees.
+  The tree names what its ends have; where several archetypes hold them,
+  each has its rows by depth and the query goes depth by depth. `docs/syntax.md` lists what follows.
   `examples/orrery.ent` places moons from their planets and planets from
   their sun that way, and draws a body without a colour in that of the
   nearest body up the tree that has one; `examples/river.ent` sums the
@@ -609,7 +609,17 @@ the rows behind the roots, up or down, which reads the parent's fields at
 that row: 1.01-1.04x the time of the C. A sort costs 8-24 ms at 1e6 nodes,
 most of it for the edges, which are sorted either way; in a bushy tree the
 order pays where the tree changes less often than every dozen steps, in a
-deep one never (see `bench/RESULTS.md`).
+deep one never.
+
+A sorted tree in several archetypes cannot have every parent before its
+children in one archetype's rows, since the parent may be in another. Each
+archetype then has its rows by depth, an array saying where each depth
+starts, and per row its parent's packed location; a cascading query is a
+loop over the depths holding a loop per archetype, and reads the parent
+through a branch on its archetype. With the river's nodes in two
+archetypes that takes 1.2x the time of the one-archetype sorted tree when
+the tree is bushy and about 2x when it is deep, and a tenth of the time
+the same tree takes unsorted (see `bench/RESULTS.md`).
 
 A loop that never runs in parallel visits entities in the order the
 query's end combines applies in. So an apply whose field nothing else in

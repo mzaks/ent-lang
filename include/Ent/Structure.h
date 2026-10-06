@@ -52,14 +52,13 @@ SmallVector<ArchetypeOp> getMatchedArchetypes(QueryOp query);
 /// reading it through the edge needs no checks. Null otherwise.
 FlatSymbolRefAttr getTrustedEndpoint(RelationOp relation, bool target);
 
-/// The archetype whose rows `relation`, a tree declared `sorted`, keeps in
-/// its order: the one that holds its entities. Null if no archetype holds
-/// any. Fails, with an error on the relation, where it cannot be sorted:
-/// its sources and targets can be in more than one archetype, that
-/// archetype does not always hold what both have, a system removes either
-/// component, or another sorted tree has the archetype. Archetypes must
-/// have been inferred.
-FailureOr<ArchetypeOp> getSortedArchetype(RelationOp relation);
+/// The archetypes whose rows `relation`, a tree declared `sorted`, keeps
+/// in its order: those that can hold its entities (they hold what its
+/// sources or its targets have), in declaration order. Fails, with an
+/// error on the relation, where it cannot be sorted: a system removes what
+/// its sources or targets have, or another sorted tree has one of the
+/// archetypes. Archetypes must have been inferred.
+FailureOr<SmallVector<ArchetypeOp>> getSortedArchetypes(RelationOp relation);
 
 /// The sorted tree that has `archetype`'s entities, or null.
 RelationOp getSortingTree(ArchetypeOp archetype);

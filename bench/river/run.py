@@ -46,10 +46,26 @@ VARIANTS = {
     "ent-sorted": (2, "river.ent", ["--ent-lower-to-loops"],
                    lambda text: text.replace(" tree capacity 1024",
                                              " tree sorted capacity 1024")),
+    # Nodes of two shapes, half of them in a second archetype: a tree
+    # across archetypes, as it is and sorted.
+    "ent-two": (2, "river.ent", ["--ent-lower-to-loops"],
+                lambda text: text + TWO, ["-DTWO"]),
+    "ent-two-sorted": (2, "river.ent", ["--ent-lower-to-loops"],
+                       lambda text: text.replace(
+                           " tree capacity 1024",
+                           " tree sorted capacity 1024") + TWO, ["-DTWO"]),
 }
+TWO = """
+component Still { level: f32 } capacity 1024
+archetype Pool { Node, Still } capacity 1024
+"""
+# A tree sorted across archetypes adds a node's inflows in another order:
+# its sums differ in their last bits, and are compared by their total.
+REORDERED = {"ent-two-sorted"}
+DEFAULT = ["c-order", "c-pairs", "c-sorted", "ent", "ent-sorted"]
 
 
-def build(name, number, program, passes, n, transform=None):
+def build(name, number, program, passes, n, transform=None, defines=()):
     exe = os.path.join(OUT, f"{name}-{n}")
     extra = []
     if program:
@@ -78,6 +94,7 @@ def build(name, number, program, passes, n, transform=None):
         extra = [ll, "-Wno-override-module", f"-I{directory}"]
     subprocess.run([f"{LLVM}/bin/clang", "-O2", *EXTRA_CFLAGS,
                     "-ffp-contract=off", f"-DVARIANT={number}", f"-DN={n}",
+                    *defines,
                     os.path.join(HERE, "river.c"), *extra, "-o", exe],
                    check=True)
     return exe
@@ -90,7 +107,9 @@ def main():
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--sizes", default="10000,100000,1000000")
     parser.add_argument("--shapes", default="bushy,deep,shuffled")
-    parser.add_argument("--variants", default=",".join(VARIANTS))
+    parser.add_argument("--variants", default=",".join(DEFAULT),
+                        help="comma-separated; also: " + ", ".join(
+                            v for v in VARIANTS if v not in DEFAULT))
     parser.add_argument("--resort", action="store_true",
                         help="the ent variants sort their edges (and a "
                         "sorted archetype its rows) before every step")
@@ -106,7 +125,7 @@ def main():
             for n in sizes for name in names}
     configs = list(itertools.product(sizes, shapes))
 
-    results, depths, checksums = {}, {}, {}
+    results, depths, checksums, totals = {}, {}, {}, {}
     for _ in range(args.rounds):
         for n, shape in configs:
             for name in names:
@@ -118,12 +137,18 @@ def main():
                 results.setdefault(((n, shape), name), []).append(
                     float(fields["ns_per_step"]))
                 depths[(n, shape)] = int(fields["depth"])
-                checksums.setdefault((n, shape), {}).setdefault(
-                    fields["checksum"], set()).add(name)
+                totals.setdefault((n, shape), {})[name] = float(fields["total"])
+                if name not in REORDERED:
+                    checksums.setdefault((n, shape), {}).setdefault(
+                        fields["checksum"], set()).add(name)
 
     for config, values in checksums.items():
         if len(values) != 1:
             print(f"CHECKSUM MISMATCH at {config}: {values}")
+    for config, values in totals.items():
+        low, high = min(values.values()), max(values.values())
+        if high - low > 1e-4 * abs(high):
+            print(f"TOTAL MISMATCH at {config}: {values}")
 
     print(f"\nus per step, median of {args.rounds} processes (spread); "
           "best in bold\n")

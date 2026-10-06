@@ -13,7 +13,10 @@
 //                        walk reads its own flows one after another
 //   VARIANT 2  ent       the ent-lang program compiled into the binary
 //                        (as it is, or with its tree `sorted`, which is
-//                        c-sorted's storage)
+//                        c-sorted's storage). With -DTWO the nodes are of
+//                        two shapes, half of them in a second archetype
+//                        `Pool` that the program is given, picked by the
+//                        node's number: a tree across archetypes.
 //
 // The shape of the tree is an argument:
 //   bushy     node i flows into a node picked from all before it (depth
@@ -31,8 +34,12 @@
 // but has the edges sorted again, and with them a sorted archetype's rows:
 // what a change to the tree costs. The C variants take no notice.
 //
+// A sorted tree across archetypes adds the flows into a node in another
+// order (by archetype, then row), so its checksum is its own; `total`, the
+// sum of all flows, says that it is the same river.
+//
 // Usage: river STEPS WARMUP SHAPE [RESORT]
-// Prints: ns_per_step=... depth=... checksum=...
+// Prints: ns_per_step=... depth=... checksum=... total=...
 
 #include <stdint.h>
 #include <stdio.h>
@@ -188,19 +195,43 @@ int main(int argc, char **argv) {
     return 1;
   }
   ent_entity *ids = malloc(sizeof(ent_entity) * N);
+#ifdef TWO
+  // Which nodes are pools: by a hash of the number, not by the generator
+  // the tree is made with.
+  #define POOL(i) (((uint32_t)(i) * 2654435761u >> 16) & 1)
+  for (int i = 0; i < N; ++i) {
+    ent_entity id = ids[i] = POOL(i) ? ent_Pool_spawn(w) : ent_Cell_spawn(w);
+    int64_t row = ent_entity_row(w, id);
+    if (POOL(i)) {
+      ent_Pool_Node_rain(w)[row] = rain[i];
+      ent_Pool_Node_flow(w)[row] = 0.0f;
+      ent_Pool_Still_level(w)[row] = 0.0f;
+    } else {
+      ent_Cell_Node_rain(w)[row] = rain[i];
+      ent_Cell_Node_flow(w)[row] = 0.0f;
+    }
+  }
+#else
   for (int i = 0; i < N; ++i) {
     ent_entity id = ids[i] = ent_Cell_spawn(w);
     int64_t row = ent_entity_row(w, id);
     ent_Cell_Node_rain(w)[row] = rain[i];
     ent_Cell_Node_flow(w)[row] = 0.0f;
   }
+#endif
   for (int i = 0; i < N; ++i)
     if (parent[i] >= 0 && !ent_Flows_connect(w, ids[i], ids[parent[i]]))
       return 1;
 #define STEP(wet)                                                            \
   ((void)(resort && ent_Flows_connect(w, ids[N - 1], ids[parent[N - 1]])),   \
    ent_step(w, wet))
+#ifdef TWO
+#define FLOW(i)                                                              \
+  ((POOL(i) ? ent_Pool_Node_flow(w)                                          \
+            : ent_Cell_Node_flow(w))[ent_entity_row(w, ids[i])])
+#else
 #define FLOW(i) (ent_Cell_Node_flow(w)[ent_entity_row(w, ids[i])])
+#endif
 #else
   list_nodes();
   flow = calloc(N, sizeof(float));
@@ -233,13 +264,15 @@ int main(int argc, char **argv) {
   double elapsed = now() - start;
 
   uint64_t hash = 1469598103934665603ull;
+  double total = 0.0;
   for (int i = 0; i < N; ++i) {
     float f = FLOW(i);
     uint32_t bits;
     memcpy(&bits, &f, sizeof bits);
     hash = (hash ^ bits) * 1099511628211ull;
+    total += f;
   }
-  printf("ns_per_step=%.0f depth=%d checksum=%016llx\n", elapsed / steps,
-         depth, (unsigned long long)hash);
+  printf("ns_per_step=%.0f depth=%d checksum=%016llx total=%.9g\n",
+         elapsed / steps, depth, (unsigned long long)hash, total);
   return 0;
 }
