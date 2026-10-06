@@ -3417,51 +3417,65 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   // source as it is or (stably, so still by source within a target) by
   // target.
   Value sorted = world.edgeOffsets(relation, /*in=*/relation.byTarget);
-  Value kept = sortInto(sorted, count, table, scratch,
-                        keyIn(table, /*target=*/false), keep);
+  Value kept;
   if (relation.tree) {
-    // An entity has one parent: of the edges from one source, which are
-    // next to each other in the order they were connected, the last stays.
-    // Then back by source, which counts the offsets again.
-    auto compact = scf::ForOp::create(rewriter, loc, zero, kept, one,
-                                      ValueRange{zero});
+    // An entity has one parent, the target of the last edge connected
+    // from it: note each source's last kept edge (its position and one, in
+    // the cursors; 0 for none), then go through the keys in order, which
+    // gives the offsets and the edges by source in one pass each. No
+    // counting, and no second sort to drop the edges that lost.
+    Value last = world.edgeCursors(relation);
+    forEach(zero, keys, [&](Value key) {
+      memref::StoreOp::create(rewriter, loc, offsetConstant(0), last,
+                              ValueRange{key});
+    });
+    auto keyOfSource = keyIn(table, /*target=*/false);
+    forEach(zero, count, [&](Value k) {
+      auto ifKept = scf::IfOp::create(rewriter, loc, keep(k));
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(ifKept.thenBlock());
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::IndexCastOp::create(
+              rewriter, loc, offsetType,
+              arith::AddIOp::create(rewriter, loc, k, one)),
+          last, ValueRange{keyOfSource(k)});
+    });
+    auto place = scf::ForOp::create(rewriter, loc, zero, keys, one,
+                                    ValueRange{zero});
     {
       OpBuilder::InsertionGuard inner(rewriter);
-      rewriter.setInsertionPointToStart(compact.getBody());
-      Value p = compact.getInductionVar();
-      Value at = compact.getRegionIterArg(0);
-      Value next = arith::AddIOp::create(rewriter, loc, p, one);
-      Value isEnd = arith::CmpIOp::create(rewriter, loc,
-                                          arith::CmpIPredicate::eq, next, kept);
-      Value source =
-          memref::LoadOp::create(rewriter, loc, scratch[0], ValueRange{p});
-      Value following = memref::LoadOp::create(
-          rewriter, loc, scratch[0],
-          ValueRange{arith::SelectOp::create(rewriter, loc, isEnd, p, next)});
-      Value last = arith::OrIOp::create(
-          rewriter, loc, isEnd,
-          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
-                                source, following));
-      auto ifLast = scf::IfOp::create(rewriter, loc, last);
-      rewriter.setInsertionPointToStart(ifLast.thenBlock());
-      for (Value column : scratch)
+      rewriter.setInsertionPointToStart(place.getBody());
+      Value key = place.getInductionVar();
+      Value at = place.getRegionIterArg(0);
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::IndexCastOp::create(rewriter, loc, offsetType, at), sorted,
+          ValueRange{key});
+      Value edge = world.toIndex(
+          loc, memref::LoadOp::create(rewriter, loc, last, ValueRange{key}));
+      Value has = arith::CmpIOp::create(rewriter, loc,
+                                        arith::CmpIPredicate::ne, edge, zero);
+      auto ifHas = scf::IfOp::create(rewriter, loc, has);
+      rewriter.setInsertionPointToStart(ifHas.thenBlock());
+      Value from = arith::SubIOp::create(rewriter, loc, edge, one);
+      for (auto [column, copy] : llvm::zip(table, scratch))
         memref::StoreOp::create(
             rewriter, loc,
-            memref::LoadOp::create(rewriter, loc, column, ValueRange{p}),
-            column, ValueRange{at});
-      rewriter.setInsertionPointAfter(ifLast);
+            memref::LoadOp::create(rewriter, loc, column, ValueRange{from}),
+            copy, ValueRange{at});
+      rewriter.setInsertionPointAfter(ifHas);
       scf::YieldOp::create(
           rewriter, loc,
           ValueRange{arith::SelectOp::create(
-              rewriter, loc, last,
-              arith::AddIOp::create(rewriter, loc, at, one), at)});
+              rewriter, loc, has, arith::AddIOp::create(rewriter, loc, at, one),
+              at)});
     }
-    kept = sortInto(sorted, compact.getResult(0), scratch, table,
-                    keyIn(scratch, /*target=*/false), all);
-  } else if (relation.byTarget) {
-    sortInto(sorted, kept, scratch, table, keyIn(scratch, /*target=*/true),
-             all);
-  } else {
+    kept = place.getResult(0);
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::IndexCastOp::create(rewriter, loc, offsetType, kept), sorted,
+        ValueRange{keys});
     forEach(zero, kept, [&](Value p) {
       for (auto [column, copy] : llvm::zip(table, scratch))
         memref::StoreOp::create(
@@ -3469,6 +3483,21 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
             memref::LoadOp::create(rewriter, loc, copy, ValueRange{p}),
             column, ValueRange{p});
     });
+  } else {
+    kept = sortInto(sorted, count, table, scratch,
+                    keyIn(table, /*target=*/false), keep);
+    if (relation.byTarget) {
+      sortInto(sorted, kept, scratch, table, keyIn(scratch, /*target=*/true),
+               all);
+    } else {
+      forEach(zero, kept, [&](Value p) {
+        for (auto [column, copy] : llvm::zip(table, scratch))
+          memref::StoreOp::create(
+              rewriter, loc,
+              memref::LoadOp::create(rewriter, loc, copy, ValueRange{p}),
+              column, ValueRange{p});
+      });
+    }
   }
   if (relation.deadOffset)
     forEach(zero, kept, [&](Value p) {
@@ -3813,7 +3842,9 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
 }
 
 /// Lower the connects left in `func`, those outside queries: append the
-/// edge and sort at once, so the edge is visible to what follows.
+/// edge. The caller has the relation sorted before the system's next
+/// query and when the system ends, so the edge is there for whatever can
+/// see it, and a loop of connects sorts once.
 static void lowerConnects(IRRewriter &rewriter, func::FuncOp func,
                           const WorldLayout &layout, WorldAccess &world) {
   SmallVector<ConnectOp> connects;
@@ -3829,7 +3860,6 @@ static void lowerConnects(IRRewriter &rewriter, func::FuncOp func,
     appendEdge(rewriter, loc, layout, world, relation,
                world.toStorage(loc, connect.getSource()),
                world.toStorage(loc, connect.getTarget()), values);
-    callSort(rewriter, loc, relation, world.getArena());
     rewriter.eraseOp(connect);
   }
 }
@@ -5395,10 +5425,15 @@ struct EntLowerToLoops
       WorldAccess world(rewriter, *layout, arena);
       SmallVector<QueryOp> queries;
       func.walk([&](QueryOp query) { queries.push_back(query); });
-      // An archetype sorted by a tree that the system spawns into outside
-      // its queries is sorted before the next query and when the system
-      // ends, rather than after every spawn.
+      // A relation the system connects outside its queries, and an
+      // archetype sorted by a tree that it spawns into there, are sorted
+      // before its next query and when it ends, rather than after every
+      // connect or spawn: nothing in between can see the edges.
       llvm::SetVector<Attribute> unsorted;
+      func.walk([&](ConnectOp connect) {
+        if (!connect->getParentOfType<QueryOp>())
+          unsorted.insert(connect.getRelationAttr().getAttr());
+      });
       func.walk([&](SpawnOp spawn) {
         if (spawn->getParentOfType<QueryOp>())
           return;

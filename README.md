@@ -353,7 +353,7 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   so the write is local). An `ent.apply` inside runs once per edge, combined
   at the query's end by apply, archetype, row and edge, so pushing values
   along edges is deterministic in parallel too. `ent.connect @Synapse %a,
-  %b (%w)` adds an edge (outside queries at once, inside at the query's
+  %b (%w)` adds an edge (outside queries for every query that follows, inside at the query's
   end), `ent.disconnect` inside an edge loop removes the visited one at the
   query's end. A relation may name the components its ends have
   (`ent.relation @Synapse (weight: f32) from @Neuron to @Neuron`):
@@ -646,8 +646,12 @@ these, the spiking network matches hand-written C over compressed rows,
 push and pull, from 1e4 to 1e6 neurons (see `bench/RESULTS.md`).
 Connects append and mark the relation unclean; a sort (a stable counting
 sort through scratch columns, O(edges + keys)) runs where edges changed:
-at a schedule's start for edges the host connected, after a system-level
-connect, and at the end of a query that connected or disconnected. It
+at a schedule's start for edges the host connected, before a system's
+next query and at its end where it connected outside queries (once,
+however many connects: sorting after each made building a tree of n
+entities cost n sorts), and at the end of a query that connected or
+disconnected. A tree's sort does not count and sort twice: it notes each
+source's last edge and goes through the keys in order. It
 drops dead edges and edges to entities no longer alive. With generational
 ids a slot may be reused before the next sort, so a loop only counts edges
 whose own end is the visited entity. An apply inside an edge loop has, per

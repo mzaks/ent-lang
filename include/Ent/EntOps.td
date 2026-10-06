@@ -699,7 +699,9 @@ def Ent_ConnectOp : Ent_Op<"connect", [
     ent.connect @Synapse %pre, %post (%weight) : f32
     ```
     Adds an edge from `%pre` to `%post` with its fields initialised in
-    declaration order. Outside a query it takes effect at once. Inside one
+    declaration order. Outside a query it is there for every query that
+    follows (the edges are sorted before the system's next query and when
+    the system ends). Inside one
     it is deferred to the end of the query, like `ent.apply`, and may run at
     most once per entity (not inside a loop or `ent.edges`); the edges are
     added in a fixed order (by connect, archetype, row). Connecting beyond

@@ -125,7 +125,8 @@
 // SORTED-NEXT: 4: visit fresh
 // SORTED-NOT:  {{.}}
 
-// An entity that would be its own ancestor stops the program.
+// An entity that would be its own ancestor stops the program, when the
+// system that connected it ends.
 // RUN: %ent build %S/Inputs/tree_cycle.ent -o %t.cycle 2>/dev/null
 // RUN: not --crash %t.cycle > %t.out 2>&1
 // RUN: FileCheck %s --check-prefix=CYCLE --input-file=%t.out

@@ -2033,3 +2033,61 @@ us per step (spread); `ent-two` before is the entry above:
 
 - A tree whose entities can die, or whose relation does not name what its
   ends have: there the checks stay, and with them, presumably, the cost.
+
+## 2026-10-06: what a sort costs, and when it runs
+
+Two changes to the relations' sort, and one that was tried and left out.
+Same machine, pinning and flags.
+
+**A system's connects are sorted once.** A connect outside a query sorted
+its relation at once, each of them a pass over every key and edge: a
+system that builds a tree of n entities paid n sorts. Now the relation is
+sorted before the system's next query and when the system ends. A chain
+of nodes spawned and connected in a `world` block, with capacities of
+32,768, the whole program's time:
+
+| nodes | before | after |
+|---|---|---|
+| 4,000 | 0.22 s | 0.001 s |
+| 8,000 | 0.54 s | |
+| 16,000 | 0.89 s | 0.002 s |
+
+**A tree's edges are put in order in one pass.** It sorted them by source
+with a counting sort, dropped all but the last edge of each source, and
+sorted again for the offsets. Now it notes each source's last edge and
+goes through the keys in order. With `--resort` at 1e6 nodes, 7 rounds of
+50 steps after 10, ms a sort costs (the step with it less the step
+without; before is the two entries above):
+
+| shape | ent before | ent | sorted before | sorted | two before | two | two sorted before | two sorted |
+|---|---|---|---|---|---|---|---|---|
+| bushy | 17.9 | 17.4 | 23.8 | 23.1 | 19.2 | 18.3 | 36.9 | 34.8 |
+| deep | 5.4 | 4.0 | 8.1 | 6.8 | 9.8 | 6.0 | 17.4 | 15.4 |
+| shuffled | 16.2 | 15.2 | 21.5 | 20.8 | 18.6 | 16.9 | 33.9 | 32.0 |
+
+### What holds
+
+- When a sort runs mattered far more than what it costs: building a tree
+  in ent-lang took time by the product of its size and the capacities.
+- The one pass saves 1.4-3.8 ms in a deep tree (16-39%) and 0.5-2.1 ms
+  in a bushy one (3-6%), which is within the spreads there (3-5%).
+- In a bushy tree the edges' order was never the cost. Sampling the
+  program counter of the generated sort (a timer in the process; no
+  `perf` here) puts about a third of it in the loop that lists the tree
+  breadth first, at the loads of each listed entity's range of children
+  and of the children, which are wherever the parent's key puts them.
+
+### Tried, and left out
+
+- Copying four children whatever their number, where an entity has at
+  most four, instead of a loop over them that is mispredicted for most
+  entities, with the children's ids kept next to each other: by hand it
+  halved the listing (15.6 to 7.0 ms of a sort written out in C). In the
+  generated sort it gave 17.0 against 18.2 ms in a bushy tree and 5.8
+  against 4.8 in a deep one. Not worth its code.
+
+### Not done
+
+- A sort that does only what a change needs. Every connect, and every
+  spawn or destroy in a sorted archetype, still sorts everything: 4-35 ms
+  at 1e6 nodes.

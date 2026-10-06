@@ -1,4 +1,6 @@
-// The third edge closes a cycle, which a tree cannot have.
+// The third edge closes a cycle, which a tree cannot have. The edges a
+// system connects outside a `for` are sorted, and with that checked, when
+// it ends: the world is never done.
 import console
 component Node { n: i32 }
 default_capacity 8
@@ -13,9 +15,11 @@ world {
   put("a tree")
   flush()
   connect(c, a, Under)
+}
+system count() {
+  Frame += 1
   put("not reached")
   flush()
 }
-system count() { Frame += 1 }
 schedule frame() { count() }
 main { loop { frame() } until Frame == 1 }

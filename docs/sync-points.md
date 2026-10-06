@@ -148,8 +148,11 @@ code, the next run — sees all of the query's effects.
 each query's commit point precedes the next op.
 
 **S2.** System-level code may write resources (`ent.write`), spawn and
-connect edges; all take effect at once (a connect sorts its relation right
-away).
+connect edges; all take effect at once as far as anything can tell: an
+edge connected there is in every edge loop and cascade that follows. The
+relation is sorted for it before the system's next query and when the
+system ends, not after each connect, so that is also when a tree's cycle
+stops the program.
 
 **S3.** A schedule runs its systems in program order. One call of a schedule
 is a frame: what the host sees after the call is the state after the last

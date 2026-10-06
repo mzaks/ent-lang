@@ -58,8 +58,14 @@ ent.system @down() {
 // its rows: it writes every column, and the tree's edges with them.
 // ACCESS: remark: reads entities; writes Flows.edges, entities, Cell.count, Cell.id, Cell.Node.rain, Cell.Node.flow
 // ACCESS-NEXT: ent.system @link(
+// Connected outside a query: sorted once, when the system ends.
+// CHECK-LABEL: func.func private @link(
+// CHECK-NOT:   call @ent_sort_Flows
+// CHECK:       call @ent_sort_Flows(%{{.*}})
+// CHECK-NEXT:  return
 ent.system @link(%a: !ent.entity, %b: !ent.entity) {
   ent.connect @Flows %a, %b ()
+  ent.connect @Flows %b, %a ()
 }
 // ACCESS: remark: reads nothing; writes entities, Cell.count, Cell.id, Cell.Node.rain, Cell.Node.flow, Flows.edges
 // ACCESS-NEXT: ent.system @grow(
