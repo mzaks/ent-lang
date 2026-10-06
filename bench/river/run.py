@@ -111,8 +111,11 @@ def main():
                         help="comma-separated; also: " + ", ".join(
                             v for v in VARIANTS if v not in DEFAULT))
     parser.add_argument("--resort", action="store_true",
-                        help="the ent variants sort their edges (and a "
-                        "sorted archetype its rows) before every step")
+                        help="the host connects an edge before every step: "
+                        "the ent variants go through every edge for it")
+    parser.add_argument("--divert", action="store_true",
+                        help="the program connects an edge before every "
+                        "step, which an unsorted tree takes in on the spot")
     parser.add_argument("--csv")
     args = parser.parse_args()
     os.makedirs(OUT, exist_ok=True)
@@ -131,7 +134,8 @@ def main():
             for name in names:
                 out = subprocess.run(
                     [exes[(n, name)], str(args.steps), str(args.warmup),
-                     shape] + ["resort"] * args.resort,
+                     shape] + ["resort"] * args.resort
+                    + ["divert"] * args.divert,
                     check=True, capture_output=True, text=True).stdout
                 fields = dict(kv.split("=") for kv in out.split())
                 results.setdefault(((n, shape), name), []).append(

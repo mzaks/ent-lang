@@ -85,16 +85,17 @@
 // SORTED-NEXT: 5: visit spring
 // SORTED-NOT:  {{.}}
 
-// Rows as spawned; the sums are the same.
+// Rows as spawned; the sums are the same. Unsorted, the tree is visited
+// in the order its nodes were connected in, from the last.
 // PLAIN:      1: spring 10000 from 900 at 900
 // PLAIN-NEXT: 1: creek 100 from 500 at 500
 // PLAIN-NEXT: 1: brook 11000 from 900 at 300
 // PLAIN-NEXT: 1: lake 5 from 50 at 50
 // PLAIN-NEXT: 1: river 11110 from 900 at 20
 // PLAIN-NEXT: 1: sea 11111 from 900 at 0
+// PLAIN-NEXT: 1: visit creek
 // PLAIN-NEXT: 1: visit spring
 // PLAIN-NEXT: 1: visit brook
-// PLAIN-NEXT: 1: visit creek
 // PLAIN-NEXT: 1: visit river
 // PLAIN-NEXT: 1: visit lake
 // PLAIN-NEXT: 1: visit sea
@@ -105,27 +106,29 @@
 // PLAIN-NEXT: 2: river 11117 from 900 at 20
 // PLAIN-NEXT: 2: sea 11118 from 900 at 0
 // PLAIN-NEXT: 2: pond 7 from 60 at 60
-// PLAIN-NEXT: 2: visit spring
 // PLAIN-NEXT: 2: visit pond
-// PLAIN-NEXT: 2: visit brook
 // PLAIN-NEXT: 2: visit creek
+// PLAIN-NEXT: 2: visit spring
+// PLAIN-NEXT: 2: visit brook
 // PLAIN-NEXT: 2: visit river
 // PLAIN-NEXT: 2: visit lake
 // PLAIN-NEXT: 2: visit sea
-// Nothing sorted the edges when the brook went: the spring keeps its
-// edge to it, has no ancestor, and is visited where the edge puts it.
+// Nothing takes the spring's edge away when the brook goes: it keeps it,
+// has no ancestor, and is visited where the edge puts it.
 // PLAIN-NEXT: 3: spring 10000 from 900 at 900
 // PLAIN-NEXT: 3: creek 100 from 500 at 500
 // PLAIN-NEXT: 3: pond 7 from 60 at 60
 // PLAIN-NEXT: 3: lake 5 from 50 at 50
 // PLAIN-NEXT: 3: river 117 from 500 at 20
 // PLAIN-NEXT: 3: sea 118 from 500 at 0
-// PLAIN-NEXT: 3: visit spring
 // PLAIN-NEXT: 3: visit pond
 // PLAIN-NEXT: 3: visit creek
+// PLAIN-NEXT: 3: visit spring
 // PLAIN-NEXT: 3: visit river
 // PLAIN-NEXT: 3: visit lake
 // PLAIN-NEXT: 3: visit sea
+// The creek flows into the lake, which has no edge of its own: its place
+// in the order stays.
 // PLAIN-NEXT: 4: spring 10000 from 900 at 900
 // PLAIN-NEXT: 4: creek 100 from 500 at 500
 // PLAIN-NEXT: 4: pond 7 from 60 at 60
@@ -133,9 +136,9 @@
 // PLAIN-NEXT: 4: river 17 from 60 at 20
 // PLAIN-NEXT: 4: sea 18 from 60 at 0
 // PLAIN-NEXT: 4: visit pond
-// PLAIN-NEXT: 4: visit river
 // PLAIN-NEXT: 4: visit creek
 // PLAIN-NEXT: 4: visit spring
+// PLAIN-NEXT: 4: visit river
 // PLAIN-NEXT: 4: visit lake
 // PLAIN-NEXT: 4: visit sea
 // PLAIN-NEXT: 5: spring 10000 from 900 at 900
@@ -145,9 +148,9 @@
 // PLAIN-NEXT: 5: river 17 from 60 at 1
 // PLAIN-NEXT: 5: sea 18 from 60 at 0
 // PLAIN-NEXT: 5: visit pond
-// PLAIN-NEXT: 5: visit river
 // PLAIN-NEXT: 5: visit creek
 // PLAIN-NEXT: 5: visit spring
+// PLAIN-NEXT: 5: visit river
 // PLAIN-NEXT: 5: visit lake
 // PLAIN-NEXT: 5: visit sea
 // PLAIN-NOT:  {{.}}

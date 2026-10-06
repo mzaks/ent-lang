@@ -33,3 +33,12 @@ schedule step(wet: f32) {
   fall(wet)
   run()
 }
+
+// A node changes where it flows into.
+system reroute(node: entity, into: entity) {
+  connect(node, into, Flows)
+}
+
+schedule divert(node: entity, into: entity) {
+  reroute(node, into)
+}

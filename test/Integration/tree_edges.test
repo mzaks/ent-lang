@@ -1,0 +1,31 @@
+// Edge loops over a tree (Inputs/tree_edges.ent): along an entity's one
+// edge out and along the edges into it, reading and writing the edges'
+// fields, sending values along them, and taking an edge away. A tree that
+// is not sorted keeps its edges in a slot per entity with links from child
+// to child, not in the table other relations have; the same program
+// without `tree` gives the same lines.
+// RUN: %ent run %S/Inputs/tree_edges.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/tree_edges.ent 2>/dev/null | FileCheck %s
+// RUN: sed 's/ tree capacity 16/ capacity 16/' %S/Inputs/tree_edges.ent > %t.ent
+// RUN: not grep -q " tree " %t.ent
+// RUN: %ent run %t.ent 2>/dev/null | FileCheck %s
+
+// top has a (weight 1), b (2) and c (3) under it, a has d (4).
+// CHECK:      1: top got 140 kids 3 heard 140
+// CHECK-NEXT: 1: a got 160 kids 1 heard 160
+// CHECK-NEXT: 1: b got 0 kids 0 heard 0
+// CHECK-NEXT: 1: c got 0 kids 0 heard 0
+// CHECK-NEXT: 1: d got 0 kids 0 heard 0
+// Every weight has grown by 10.
+// CHECK-NEXT: 2: top got 880 kids 3 heard 740
+// CHECK-NEXT: 2: a got 720 kids 1 heard 560
+// CHECK-NEXT: 2: b got 0 kids 0 heard 0
+// CHECK-NEXT: 2: c got 0 kids 0 heard 0
+// CHECK-NEXT: 2: d got 0 kids 0 heard 0
+// c's edge is gone.
+// CHECK-NEXT: 3: top got 1530 kids 2 heard 650
+// CHECK-NEXT: 3: a got 1680 kids 1 heard 960
+// CHECK-NEXT: 3: b got 0 kids 0 heard 0
+// CHECK-NEXT: 3: c got 0 kids 0 heard 0
+// CHECK-NEXT: 3: d got 0 kids 0 heard 0
+// CHECK-NOT:  {{.}}

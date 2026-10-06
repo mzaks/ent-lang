@@ -1,0 +1,69 @@
+// Edge loops over a tree: its one edge out of an entity, the edges into
+// it, their fields, values sent along them, and an edge taken away. A tree
+// keeps its edges in another way than other relations do, and gives the
+// same: the test runs this with `tree` and without.
+import console
+
+component Node { name: text[8], value: i32, got: i32, kids: i32, heard: i32 }
+default_capacity 16
+relation Under { weight: i32 } from Node to Node tree capacity 16
+unique Frame: i32
+
+world {
+  let top = spawn { Node { name: "top", value: 1, got: 0, kids: 0, heard: 0 } }
+  let a = spawn { Node { name: "a", value: 10, got: 0, kids: 0, heard: 0 } }
+  let b = spawn { Node { name: "b", value: 20, got: 0, kids: 0, heard: 0 } }
+  let c = spawn { Node { name: "c", value: 30, got: 0, kids: 0, heard: 0 } }
+  let d = spawn { Node { name: "d", value: 40, got: 0, kids: 0, heard: 0 } }
+  connect(a, top, Under { weight: 1 })
+  connect(b, top, Under { weight: 2 })
+  connect(c, top, Under { weight: 3 })
+  connect(d, a, Under { weight: 4 })
+}
+
+// Along the edge out: every node sends its value, times the edge's
+// weight, to the node it is under.
+system push() {
+  Frame += 1
+  for e, n: Node {
+    for s, parent in e.out(Under) {
+      Node(parent).got += n.value * s.weight
+    }
+  }
+}
+
+// Along the edges in: every node counts its children and hears their
+// values, in a field of its own.
+system gather() {
+  for e, n: mut Node {
+    n.kids = 0
+    n.heard = 0
+    for s, child in e.in(Under) {
+      n.kids += 1
+      if let value = Node(child).value { n.heard += value * s.weight }
+    }
+  }
+}
+
+// The edges' own fields, written from the end they lead to.
+system grow() {
+  for e with Node {
+    for mut s, child in e.in(Under) { s.weight += 10 }
+  }
+}
+
+// In the second frame c's edge goes.
+system cut() {
+  let goes = if Frame == 2 { 30 } else { -1 }
+  for e, n: Node where n.value == goes {
+    for s, parent in e.out(Under) { s.disconnect() }
+  }
+}
+
+system show() {
+  for n: Node { put("{Frame}: {n.name} got {n.got} kids {n.kids} heard {n.heard}") }
+  flush()
+}
+
+schedule frame() { push()  gather()  grow()  cut()  show() }
+main { loop { frame() } until Frame == 3 }

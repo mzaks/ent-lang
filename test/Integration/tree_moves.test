@@ -1,0 +1,24 @@
+// Changes a tree's list cannot take in where they happen (Inputs/
+// tree_moves.ent): the tree is built again for them when the system that
+// made them ends, which is also where a cycle is found.
+// RUN: %ent build %S/Inputs/tree_moves.ent -o %t.exe 2>/dev/null
+// RUN: not --crash %t.exe > %t.out 2>&1
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK:      1: root 1
+// CHECK-NEXT: 1: x 11
+// CHECK-NEXT: 1: y 101
+// CHECK-NEXT: 1: z 1011
+// x, and z with it, under y, which came after x.
+// CHECK-NEXT: 2: root 1
+// CHECK-NEXT: 2: x 111
+// CHECK-NEXT: 2: y 101
+// CHECK-NEXT: 2: z 1111
+// The root under a new node.
+// CHECK-NEXT: 3: root 6
+// CHECK-NEXT: 3: x 116
+// CHECK-NEXT: 3: y 106
+// CHECK-NEXT: 3: z 1116
+// CHECK-NEXT: 3: above 5
+// y under z, which is under x, which is under y: no fourth frame.
+// CHECK-NOT:  4:

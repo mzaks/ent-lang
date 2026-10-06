@@ -166,9 +166,36 @@ struct WorldApply {
 /// and lists the entities that have a parent in `order`, parents before
 /// their children (breadth first from the entities without a parent); an
 /// entity on a cycle would never be listed, which stops the program.
+///
+/// A tree that is not `sorted` is linked instead: it has no table of
+/// edges. Every entity key has a slot for the one edge from its entity:
+/// the source's id (all ones for none; an edge is its entity's if it
+/// holds the entity's id), the target's, and the fields. `sourceOffset`,
+/// `targetOffset`, `fields` and `deadOffset` are those columns, of
+/// `slots` elements. The edges to an entity are a list through the slots
+/// of their sources, in the order they were connected (links are a key
+/// and one, 0 for none): first and last child and their number per key,
+/// next and previous sibling per slot. The entities with a parent are in
+/// `order` as for any tree, parents before their children, with their
+/// parents' ids next to them; `position` has where each key's is (and
+/// one). Connecting keeps all of it as it goes where the list stays in
+/// order by putting a new leaf at its end or by changing a parent's id in
+/// place, and marks the relation unclean otherwise; unclean, it is built
+/// again from the slots: dead edges dropped, children by key, the list
+/// breadth first.
 struct WorldRelation {
   RelationOp op;
   int64_t capacity;
+  /// Elements of the edge columns: `capacity`, or for a linked tree the
+  /// number of entity keys.
+  int64_t slots = 0;
+  bool linked = false;
+  uint64_t firstChildOffset = 0;
+  uint64_t lastChildOffset = 0;
+  uint64_t childCountOffset = 0;
+  uint64_t nextSiblingOffset = 0;
+  uint64_t previousSiblingOffset = 0;
+  uint64_t positionOffset = 0;
   /// In the header (i64): the number of edges, and whether the sorted
   /// table and offsets are current.
   uint64_t countOffset = 0;

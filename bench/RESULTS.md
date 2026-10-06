@@ -2091,3 +2091,57 @@ without; before is the two entries above):
 - A sort that does only what a change needs. Every connect, and every
   spawn or destroy in a sorted archetype, still sorts everything: 4-35 ms
   at 1e6 nodes.
+
+## 2026-10-06: a tree that takes a change in where it happens
+
+A tree that is not `sorted` no longer keeps a table of edges that is
+sorted for every change. Every entity key has a slot for its entity's one
+edge, the edges to an entity are a list through their sources' slots, and
+the list a cascading query walks is kept as the program connects: a new
+leaf goes to its end, a node put under one that is before it (or under one
+without a parent) has its parent changed in place. What that cannot do (a
+node put under one that comes after it, a node with children given a
+parent, a disconnect, edges a host connected) has the tree built again
+from its slots, breadth first. So the order a tree is visited in is the
+order it was connected in, where it was the tree's shape alone. Same
+machine, pinning and flags; 1e6 nodes, 5 rounds.
+
+us per step (spread), 200 steps after 50; checksums agree with the C:
+
+| shape | c-pairs | ent | ent-sorted | ent-two | ent-two-sorted |
+|---|---|---|---|---|---|
+| bushy | 835.6 (10%) | 991.5 (22%) | 406.5 (6%) | 1,127.1 (14%) | 499.2 (14%) |
+| deep | 847.1 (11%) | 873.0 (4%) | 873.9 (2%) | 879.8 (2%) | 1,692.0 (6%) |
+| shuffled | 992.2 (22%) | 1,006.1 (13%) | 410.1 (6%) | 1,143.1 (14%) | 501.4 (6%) |
+
+ms per step with one node connected before every step to the node it
+already flows into, 50 steps after 10: by the program (`--divert`, the
+river's schedule `divert`), and by the host (`--resort`):
+
+| shape | ent, program | ent, host | ent-sorted, program | ent-sorted, host | ent-two, program | ent-two, host |
+|---|---|---|---|---|---|---|
+| bushy | 0.98 (92%) | 27.0 (10%) | 23.2 (16%) | 23.6 (1%) | 1.05 (27%) | 28.8 (1%) |
+| deep | 0.88 (3%) | 4.1 (7%) | 7.7 (4%) | 7.9 (10%) | 0.88 (4%) | 8.2 (6%) |
+| shuffled | 0.94 (24%) | 27.4 (14%) | 21.0 (4%) | 21.6 (3%) | 1.13 (20%) | 29.8 (14%) |
+
+### What holds
+
+- A change the program makes to an unsorted tree that its list can take
+  in costs nothing that shows in a step of 1e6 nodes: 0.88-1.13 ms with
+  it, the step's own time, where the entry above has 4.9-18.3.
+- Steps without a change take what they took.
+- A sorted tree is built again for every change, as before: 21-23 ms in a
+  bushy tree.
+- Building an unsorted tree again costs more than sorting its edges did
+  when the tree is bushy: 26 ms against 17.4 (a host's connect, less the
+  step), and less when it is deep, 3.3 against 4.0. Each child is now
+  found through its sibling's slot, one load after another.
+
+### Not measured
+
+- A change that has the tree built again from the program (a node put
+  under a later one): it should cost what the host's connect does.
+- Edge loops over a tree, which now go from child to child through the
+  slots, against the ranges of a table.
+- What the slots and links cost in memory: 32 bytes an entity key and
+  the fields, whatever the tree's size.

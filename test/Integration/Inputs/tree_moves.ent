@@ -1,0 +1,52 @@
+// Changes to a tree that its list cannot take in on the spot: a node put
+// under one that comes after it, and a node that has children given a
+// parent. The tree is built again for them, and the sums are right.
+import console
+
+component Node { name: text[8], local: i32, total: i32 }
+default_capacity 16
+relation Under from Node to Node tree capacity 16
+unique Frame: i32
+unique Keep { root: entity, x: entity, y: entity, z: entity }
+
+world {
+  let root = spawn { Node { name: "root", local: 1, total: 0 } }
+  let x = spawn { Node { name: "x", local: 10, total: 0 } }
+  let y = spawn { Node { name: "y", local: 100, total: 0 } }
+  let z = spawn { Node { name: "z", local: 1000, total: 0 } }
+  connect(x, root, Under)
+  connect(y, root, Under)
+  connect(z, x, Under)
+  Keep.root = root
+  Keep.x = x
+  Keep.y = y
+  Keep.z = z
+}
+
+system change() {
+  Frame += 1
+  // x, with z under it, goes under y, which was connected after it.
+  if Frame == 2 { connect(Keep.x, Keep.y, Under) }
+  // The root, which has children, gets a parent of its own.
+  if Frame == 3 {
+    let above = spawn { Node { name: "above", local: 5, total: 0 } }
+    connect(Keep.root, above, Under)
+  }
+  // And back: y under z would have y above itself.
+  if Frame == 4 { connect(Keep.y, Keep.z, Under) }
+}
+
+system sum() {
+  for n: mut Node { n.total = n.local }
+  for n: mut Node, parent: Node up Under cascade Under {
+    n.total = parent.total + n.local
+  }
+}
+
+system show() {
+  for n: Node { put("{Frame}: {n.name} {n.total}") }
+  flush()
+}
+
+schedule frame() { change()  sum()  show() }
+main { loop { frame() } until Frame == 4 }

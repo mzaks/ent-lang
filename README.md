@@ -581,14 +581,23 @@ them, which LLVM cannot tell from the arena's views. With both, and the
 relation's ends typed, the pull example takes 1.01-1.05x the time of
 hand-written C (6.3-9.4x before; see `bench/RESULTS.md`).
 
-A tree is sorted by source and always has the index by target, so an
-entity's parent is the target of the one edge in its range and its
-children are the sources of the edges to it. Its sort keeps, of the edges
-from one source, the last connected, and then lists the ids of the
-entities that have a parent breadth first, each with its parent's id next
-to it: the children of the entities without one in table order, then the
-children of each entity listed. An entity on a cycle is never reached; if
-the list comes out shorter than the edges, the program stops. A cascading
+A tree has no such table unless it is `sorted`. Every entity key has a
+slot for its entity's one edge (its source's id and one, so that a new
+world's zeroes are no edges; the target's id; the fields), the edges to an
+entity are a list through their sources' slots, in the order they were
+connected, and the ids of the entities with a parent are in a list,
+parents before children, each with its parent's id next to it and its
+place in a column. A connect keeps all of that as it goes: the slot is
+set, the entity joins its new parent's children, and the list takes a new
+leaf at its end or a new parent's id in place where the parent is before
+the entity. Where it cannot (the parent comes later, the entity has
+children and was not in the list, a disconnect, a host's connect) the
+relation is marked unclean and built again from its slots before anything
+reads it: edges of and to dead entities dropped, children by key, the list
+breadth first. An entity on a cycle is never reached then; if the list
+comes out shorter than the edges, the program stops. A `sorted` tree keeps
+the table, sorted by source with the index by target, and is sorted again
+for every change. A cascading
 query first runs a loop per archetype for the entities without a parent,
 then walks that list (`leaves first`: the list from its end, then that
 loop), finding each entity by its id, without a check where the
@@ -650,8 +659,8 @@ at a schedule's start for edges the host connected, before a system's
 next query and at its end where it connected outside queries (once,
 however many connects: sorting after each made building a tree of n
 entities cost n sorts), and at the end of a query that connected or
-disconnected. A tree's sort does not count and sort twice: it notes each
-source's last edge and goes through the keys in order. It
+disconnected. A sorted tree's sort does not count and sort twice: it
+notes each source's last edge and goes through the keys in order. It
 drops dead edges and edges to entities no longer alive. With generational
 ids a slot may be reused before the next sort, so a loop only counts edges
 whose own end is the visited entity. An apply inside an edge loop has, per

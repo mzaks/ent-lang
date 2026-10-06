@@ -91,6 +91,11 @@ run in order, first for the entities without a parent, then for their
 children, and so on, each with its own commit point. So a ref up the tree
 reads what this query wrote to the ancestor, which is at a smaller depth,
 and never what it will write to an entity of the same depth or deeper.
+The pass that does this visits every parent before its children; among
+entities that are not above one another, a tree that is not `sorted`
+keeps the order they were connected in, so the order values are combined
+in follows how the tree was built, as the order of rows follows how
+entities were spawned and destroyed.
 `cascade @R leaves first` runs the depths the other way, the deepest first
 and the entities without a parent last.
 

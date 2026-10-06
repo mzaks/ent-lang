@@ -29,16 +29,18 @@
 // to the bit; the checksum is a hash of every flow's bits. Compile with
 // -ffp-contract=off.
 //
-// With RESORT (any fourth argument) the ent variants connect one node to
-// the node it already flows into before every step, which changes nothing
-// but has the edges sorted again, and with them a sorted archetype's rows:
-// what a change to the tree costs. The C variants take no notice.
+// With a fourth argument the ent variants connect one node to the node it
+// already flows into before every step, which changes nothing in the sums
+// but is a change to the tree: what one costs. `resort` has the host
+// connect it, which the next step takes in by going through every edge;
+// `divert` has the program connect it (its schedule `divert`), which an
+// unsorted tree takes in on the spot. The C variants take no notice.
 //
 // A sorted tree across archetypes adds the flows into a node in another
 // order (by archetype, then row), so its checksum is its own; `total`, the
 // sum of all flows, says that it is the same river.
 //
-// Usage: river STEPS WARMUP SHAPE [RESORT]
+// Usage: river STEPS WARMUP SHAPE [resort|divert]
 // Prints: ns_per_step=... depth=... checksum=... total=...
 
 #include <stdint.h>
@@ -140,8 +142,10 @@ int main(int argc, char **argv) {
   int steps = argc > 1 ? atoi(argv[1]) : 100;
   int warmup = argc > 2 ? atoi(argv[2]) : 10;
   const char *shape = argc > 3 ? argv[3] : "bushy";
-  int resort = argc > 4;
+  int resort = argc > 4 && strcmp(argv[4], "divert") != 0;
+  int divert = argc > 4 && strcmp(argv[4], "divert") == 0;
   (void)resort;
+  (void)divert;
 
   parent = malloc(sizeof(int32_t) * N);
   rain = malloc(sizeof(float) * N);
@@ -224,6 +228,7 @@ int main(int argc, char **argv) {
       return 1;
 #define STEP(wet)                                                            \
   ((void)(resort && ent_Flows_connect(w, ids[N - 1], ids[parent[N - 1]])),   \
+   (void)(divert && (ent_divert(w, ids[N - 1], ids[parent[N - 1]]), 1)),     \
    ent_step(w, wet))
 #ifdef TWO
 #define FLOW(i)                                                              \

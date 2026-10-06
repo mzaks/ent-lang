@@ -527,7 +527,17 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
   for (const WorldRelation &relation : layout->relations) {
     RelationOp relationOp = relation.op;
     std::string name = toIdentifier(relationOp.getSymName());
-    os << llvm::formatv(
+    if (relation.linked)
+      os << llvm::formatv(
+          "\n// Relation @{0}, a tree: every entity has at most one edge, "
+          "to its\n// parent, which ent_{1}_parent gives. The fields' "
+          "columns have a slot per\n// entity, at ent_{1}_slot(id). "
+          "ent_{1}_connect sets an entity's edge; the\n// next schedule run "
+          "takes the edges in, dropping those of and to\n// entities no "
+          "longer alive.\n",
+          relationOp.getSymName(), name);
+    else
+      os << llvm::formatv(
         "\n// Relation @{0}: edges from a source to a target entity. "
         "ent_{1}_connect\n// appends one; the next schedule run sorts them "
         "by {2} (stable: the\n// edges of one {3} keep their order), "
@@ -545,6 +555,27 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "static inline int64_t ent_{0}_count(ent_world *world) {{\n"
         "  return *ent__{0}_count(world);\n}\n",
         name, relation.countOffset);
+    if (relation.linked)
+      // A slot's owner is its edge's source and one: 0 is no edge.
+      os << llvm::formatv(
+          "static inline ent_entity *ent__{0}_owner(ent_world *world) {{\n"
+          "  return (ent_entity *)((char *)world + {1});\n}\n"
+          "static inline ent_entity *ent__{0}_target(ent_world *world) {{\n"
+          "  return (ent_entity *)((char *)world + {2});\n}\n"
+          "static inline uint64_t ent_{0}_slot(ent_entity id) {{\n"
+          "  return {3};\n}\n"
+          "// The entity `id` has its edge to, or ENT_NO_ENTITY.\n"
+          "static inline ent_entity ent_{0}_parent(ent_world *world, "
+          "ent_entity id) {{\n"
+          "  uint64_t at = ent_{0}_slot(id);\n"
+          "  return ent__{0}_owner(world)[at] == (ent_entity)(id + 1)\n"
+          "             ? ent__{0}_target(world)[at]\n"
+          "             : ENT_NO_ENTITY;\n}\n",
+          name, relation.sourceOffset, relation.targetOffset,
+          scheme.hasIds()
+              ? "(uint64_t)id & ((UINT64_C(1) << ENT__SLOT_BITS) - 1)"
+              : "(uint64_t)id");
+    else
     os << llvm::formatv(
         "static inline ent_entity *ent_{0}_source(ent_world *world) {{\n"
         "  return (ent_entity *)((char *)world + {1});\n}\n"
@@ -564,14 +595,15 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
       params += llvm::formatv(", {0} value_{1}", getCType(field.type),
                               fieldName)
                     .str();
-      stores += llvm::formatv("  {0}(world)[*count] = value_{1};\n", accessor,
-                              fieldName)
+      stores += llvm::formatv("  {0}(world)[{2}] = value_{1};\n", accessor,
+                              fieldName, relation.linked ? "at" : "*count")
                     .str();
     }
     if (relation.deadOffset)
-      stores += llvm::formatv("  ((uint8_t *)((char *)world + {0}))[*count] "
+      stores += llvm::formatv("  ((uint8_t *)((char *)world + {0}))[{1}] "
                               "= 0;\n",
-                              relation.deadOffset)
+                              relation.deadOffset,
+                              relation.linked ? "at" : "*count")
                     .str();
     // The components the ends must have, checked like the generated code
     // checks an in-language connect.
@@ -609,6 +641,27 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     std::string connect = llvm::formatv("ent_{0}_connect", name);
     if (failed(claim(relationOp, connect)))
       return failure();
+    if (relation.linked)
+      // The slot of the source's key; an edge it already has is replaced.
+      os << llvm::formatv(
+          "// Returns false, connecting nothing, if the relation is full or "
+          "an end\n// lacks the component the relation names for it. An "
+          "entity that has an\n// edge gets the new one instead.\n"
+          "static inline bool {0}(ent_world *world, ent_entity source,\n"
+          "                       ent_entity target{1}) {{\n"
+          "{5}"
+          "  int64_t *count = ent__{2}_count(world);\n"
+          "  uint64_t at = ent_{2}_slot(source);\n"
+          "  if (ent__{2}_owner(world)[at] != (ent_entity)(source + 1)) {{\n"
+          "    if (*count >= ENT_{2}_CAPACITY)\n      return false;\n"
+          "    ++*count;\n  }\n"
+          "  ent__{2}_owner(world)[at] = (ent_entity)(source + 1);\n"
+          "  ent__{2}_target(world)[at] = target;\n"
+          "{3}"
+          "  *(int64_t *)((char *)world + {4}) = 0; // unclean\n"
+          "  return true;\n}\n",
+          connect, params, name, stores, relation.cleanOffset, checks);
+    else
     os << llvm::formatv(
         "// Returns false, connecting nothing, if the relation is full or an "
         "end\n// lacks the component the relation names for it.\n"

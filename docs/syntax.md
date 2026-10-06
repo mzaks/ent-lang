@@ -194,7 +194,8 @@ for e, n: mut Neuron {
 ```
 
 Edges are visited in a fixed order: by source, then in the order they were
-connected. `s.disconnect()` removes the edge when the outer `for` ends.
+connected (a tree's edges into an entity: in the order they were
+connected). `s.disconnect()` removes the edge when the outer `for` ends.
 Edge loops do not nest, and a `for` may not visit a relation both ways if
 either loop writes the edges. A `+=` into another entity's field inside an
 edge loop runs once per edge.
@@ -234,10 +235,18 @@ not write, and needs no order.
 - With a binding `up` the tree it cascades along, a `for` visits no entity
   without a parent, since that has no ancestor. Without one it visits
   those first.
-- An entity whose parent was destroyed keeps its edge until the relation
-  is next sorted (when an edge is connected or disconnected): until then
-  it has no ancestor, and a `for` that only cascades visits it where the
-  edge puts it.
+- Which of two entities that are not above one another comes first is
+  the order they were connected in: a tree takes most changes in where
+  they happen, a new leaf at the end of its order, a node that gets
+  another parent where it is. So two programs that build the same tree in
+  another order may add a parent's inflows in another order, and their
+  sums of floats differ in the last bits. (A node put under one that
+  comes after it, a node with children given a parent, and a disconnect
+  have the order made again, breadth first; so do edges a host
+  connected.) A `sorted` tree's order is its shape's alone.
+- An entity whose parent was destroyed keeps its edge until the tree is
+  next built again or it gets a new one: until then it has no ancestor,
+  and a `for` that only cascades visits it where the edge puts it.
 - Where the relation says what its targets have (`to Body`) and nothing
   destroys bodies or takes `Body` away, `Body up Orbits` is the parent's,
   read without a search or a check.

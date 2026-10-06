@@ -265,6 +265,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     entry.cleanOffset = end + 8;
     end += 16;
     entry.tree = relation.getTree();
+    entry.linked = relation.getTree() && !relation.getSorted();
     for (bool target : {false, true})
       entry.trusted[target] = getTrustedEndpoint(relation, target);
     for (const WorldArchetype &archetype : layout.archetypes)
@@ -458,9 +459,12 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       }
     }
     if (auto edges = apply->getParentOfType<EdgesOp>()) {
-      entry.edgeCapacity =
-          symbols.lookup<RelationOp>(edges.getRelationAttr().getAttr())
-              .getCapacity();
+      // A slot per edge: of the table, or of a linked tree's keys.
+      auto relation =
+          symbols.lookup<RelationOp>(edges.getRelationAttr().getAttr());
+      entry.edgeCapacity = relation.getTree() && !relation.getSorted()
+                               ? layout.entityKeys
+                               : relation.getCapacity();
       auto place = [&](uint64_t bytes) {
         uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
         end = offset + bytes * entry.edgeCapacity;
@@ -493,7 +497,51 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
                      .getRelationAttr()
                      .getAttr() == name;
     });
-    relation.offsetBits = relation.capacity < (int64_t(1) << 31) ? 32 : 64;
+    relation.offsetBits = relation.capacity < (int64_t(1) << 31) &&
+                                  layout.entityKeys < (int64_t(1) << 31)
+                              ? 32
+                              : 64;
+    relation.slots = relation.capacity;
+    // A tree that is not sorted: a slot per entity key, linked.
+    if (relation.linked) {
+      int64_t keys = layout.entityKeys;
+      relation.slots = keys;
+      auto perKey = [&](uint64_t bytes) {
+        uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+        end = offset + bytes * keys;
+        return offset;
+      };
+      uint64_t idBytes = scheme.idBits / 8, link = relation.offsetBits / 8;
+      relation.sourceOffset = perKey(idBytes);
+      relation.targetOffset = perKey(idBytes);
+      for (auto [fieldName, typeAttr] :
+           llvm::zip(op.getFieldNames(), op.getFieldTypes())) {
+        Type type = cast<TypeAttr>(typeAttr).getValue();
+        uint64_t bytes = storageBytes(type);
+        if (bytes == 0)
+          return op.emitOpError("field ")
+                 << fieldName << " has type " << type
+                 << ", which world storage does not support";
+        relation.fields.push_back(
+            {name, cast<StringAttr>(fieldName), type, perKey(bytes)});
+      }
+      if (hasDead)
+        relation.deadOffset = perKey(1);
+      relation.firstChildOffset = perKey(link);
+      relation.lastChildOffset = perKey(link);
+      relation.childCountOffset = perKey(link);
+      relation.nextSiblingOffset = perKey(link);
+      relation.previousSiblingOffset = perKey(link);
+      relation.positionOffset = perKey(link);
+      auto perEdge = [&](uint64_t bytes) {
+        uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+        end = offset + bytes * relation.capacity;
+        return offset;
+      };
+      relation.orderOffset = perEdge(idBytes);
+      relation.orderParentOffset = perEdge(idBytes);
+      continue;
+    }
     auto place = [&](uint64_t bytes, int64_t elements) {
       uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
       end = offset + bytes * elements;

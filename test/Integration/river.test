@@ -12,9 +12,11 @@
 // CHECK-NEXT: spring 10000 from 900
 // CHECK-NEXT: creek 100 from 500
 // CHECK-NEXT: lake 5 from 50
-// The deepest first, those without a parent last.
-// CHECK-NEXT: visit spring
+// Children before their parents: the nodes from the one connected last
+// to the first, which every node's parent was there before; then those
+// without a parent.
 // CHECK-NEXT: visit creek
+// CHECK-NEXT: visit spring
 // CHECK-NEXT: visit brook
 // CHECK-NEXT: visit river
 // CHECK-NEXT: visit sea

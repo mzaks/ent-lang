@@ -526,13 +526,32 @@ public:
   /// the sorting cursors; its edge count and clean flag (i64 scalars).
   Value edgeIds(const WorldRelation &relation, bool source) {
     return view(source ? relation.sourceOffset : relation.targetOffset,
-                relation.capacity, idType());
+                relation.slots, idType());
   }
   Value edgeField(const WorldRelation &relation, const WorldColumn &field) {
-    return view(field.offset, relation.capacity, storageType(field.type));
+    return view(field.offset, relation.slots, storageType(field.type));
   }
   Value edgeDead(const WorldRelation &relation) {
-    return view(relation.deadOffset, relation.capacity, rewriter.getI8Type());
+    return view(relation.deadOffset, relation.slots, rewriter.getI8Type());
+  }
+  /// What a linked tree's slot holds for its edge's source: the id and
+  /// one, so that 0, which a new world's memory is, says there is none.
+  Value slotOwner(Location loc, Value id) {
+    return arith::AddIOp::create(
+        rewriter, loc, id,
+        arith::ConstantIntOp::create(rewriter, loc, 1,
+                                     layout.entities.idBits));
+  }
+  Value ownerId(Location loc, Value owner) {
+    return arith::SubIOp::create(
+        rewriter, loc, owner,
+        arith::ConstantIntOp::create(rewriter, loc, 1,
+                                     layout.entities.idBits));
+  }
+  /// A linked tree's links, per entity key (a key and one, 0 for none),
+  /// and where each key's entity is in the tree's list (and one).
+  Value treeLinks(const WorldRelation &relation, uint64_t offset) {
+    return view(offset, layout.entityKeys, offsetType(relation));
   }
   Value edgeOffsets(const WorldRelation &relation, bool in) {
     return view(relation.isSorted(in) ? relation.sortedOffset
@@ -1677,8 +1696,13 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     Operation *op = edges;
     Operation *loop = lowerEdges(rewriter, edges, archetype, world, layout,
                                  entity, tick, directApplies);
+    // (A loop that already carries a value, a linked tree's walk from
+    // child to child, is left as it is.)
+    auto forLoop = cast<scf::ForOp>(loop);
     SmallVector<Operation *> lowered =
-        carryOwnFields(rewriter, cast<scf::ForOp>(loop));
+        forLoop.getNumRegionIterArgs() == 0
+            ? carryOwnFields(rewriter, forLoop)
+            : SmallVector<Operation *>{loop};
     auto *at = llvm::find(roots, op);
     if (at != roots.end()) {
       at = roots.erase(at);
@@ -2373,6 +2397,20 @@ static std::pair<Value, Value> emitParent(IRRewriter &rewriter, Location loc,
                                           WorldAccess &world,
                                           const WorldRelation &relation,
                                           Value id) {
+  // A linked tree: the slot of the entity's key, if it holds its id.
+  if (relation.linked) {
+    Value key = world.entityKey(loc, id);
+    Value mine = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq,
+        memref::LoadOp::create(rewriter, loc,
+                               world.edgeIds(relation, /*source=*/true),
+                               ValueRange{key}),
+        world.slotOwner(loc, id));
+    Value parent = memref::LoadOp::create(
+        rewriter, loc, world.edgeIds(relation, /*source=*/false),
+        ValueRange{key});
+    return {mine, parent};
+  }
   auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation,
                                     /*in=*/false, world.entityKey(loc, id));
   Value any = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
@@ -2472,6 +2510,54 @@ static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
   return {climb.getResult(1), climb.getResult(0), /*trusted=*/false};
 }
 
+/// A loop over the edges of the entity `id` (in its stored form, with
+/// key `key`) in a linked tree, at the insertion point: its one edge out,
+/// if its slot holds one, or the edges to it, which are a list through
+/// their sources' slots. Returns the loop and the edge's slot (an index),
+/// and leaves the insertion point in the loop's body, after the slot.
+static std::pair<scf::ForOp, Value>
+emitLinkedEdges(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                const WorldRelation &relation, bool in, Value key, Value id) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  if (!in) {
+    Value mine = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq,
+        memref::LoadOp::create(rewriter, loc,
+                               world.edgeIds(relation, /*source=*/true),
+                               ValueRange{key}),
+        world.slotOwner(loc, id));
+    auto loop = scf::ForOp::create(
+        rewriter, loc, zero,
+        arith::SelectOp::create(rewriter, loc, mine, one, zero), one);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    return {loop, key};
+  }
+  Value number = world.toIndex(
+      loc, memref::LoadOp::create(
+               rewriter, loc,
+               world.treeLinks(relation, relation.childCountOffset),
+               ValueRange{key}));
+  Value first = world.toIndex(
+      loc, memref::LoadOp::create(
+               rewriter, loc,
+               world.treeLinks(relation, relation.firstChildOffset),
+               ValueRange{key}));
+  auto loop = scf::ForOp::create(rewriter, loc, zero, number, one,
+                                 ValueRange{first});
+  rewriter.setInsertionPointToStart(loop.getBody());
+  Value slot =
+      arith::SubIOp::create(rewriter, loc, loop.getRegionIterArg(0), one);
+  Value next = world.toIndex(
+      loc, memref::LoadOp::create(
+               rewriter, loc,
+               world.treeLinks(relation, relation.nextSiblingOffset),
+               ValueRange{slot}));
+  auto yield = scf::YieldOp::create(rewriter, loc, ValueRange{next});
+  rewriter.setInsertionPoint(yield);
+  return {loop, slot};
+}
+
 /// Combine the values an apply inside `ent.edges` sent from the first
 /// `count` rows of `archetype`, at the insertion point, row after row and
 /// edge after edge: rows that ran the loop (their flag is 0) visited
@@ -2499,12 +2585,20 @@ static void combineEdgeApplied(IRRewriter &rewriter, ApplyOp apply,
                                     flag, world.noEntity(loc));
   auto ifRan = scf::IfOp::create(rewriter, loc, ran);
   rewriter.setInsertionPointToStart(ifRan.thenBlock());
-  Value key = world.entityKey(loc, world.entityId(loc, archetype, row));
-  auto [begin, end] =
-      emitEdgeRange(rewriter, loc, world, relation, !edges.isOut(), key);
-  auto positions = scf::ForOp::create(rewriter, loc, begin, end, one);
-  rewriter.setInsertionPoint(positions.getBody()->getTerminator());
-  Value position = positions.getInductionVar();
+  Value own = world.entityId(loc, archetype, row);
+  Value key = world.entityKey(loc, own);
+  Value position;
+  if (relation.linked) {
+    position = emitLinkedEdges(rewriter, loc, world, relation,
+                               !edges.isOut(), key, own)
+                   .second;
+  } else {
+    auto [begin, end] =
+        emitEdgeRange(rewriter, loc, world, relation, !edges.isOut(), key);
+    auto positions = scf::ForOp::create(rewriter, loc, begin, end, one);
+    rewriter.setInsertionPoint(positions.getBody()->getTerminator());
+    position = positions.getInductionVar();
+  }
   Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{position});
   Value sent = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
                                      id, world.noEntity(loc));
@@ -2546,17 +2640,28 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
         rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0,
                                                     layout.entities.idBits),
         world.applyBuffer(apply, archetype).first, ValueRange{row});
-  auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation, !out, key);
-  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  auto loop = scf::ForOp::create(rewriter, loc, begin, end, one);
-  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-  Value position = loop.getInductionVar();
-  Value edge = relation.isSorted(!out)
-                   ? position
-                   : world.toIndex(loc, memref::LoadOp::create(
-                                            rewriter, loc,
-                                            world.indexEdges(relation),
-                                            ValueRange{position}));
+  scf::ForOp loop;
+  Value position, edge;
+  if (relation.linked) {
+    // Its slot, or the slots of the edges to it; a slot is also the
+    // edge's place in an apply's buffers.
+    std::tie(loop, edge) =
+        emitLinkedEdges(rewriter, loc, world, relation, !out, key, id);
+    position = edge;
+  } else {
+    auto [begin, end] =
+        emitEdgeRange(rewriter, loc, world, relation, !out, key);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    loop = scf::ForOp::create(rewriter, loc, begin, end, one);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    position = loop.getInductionVar();
+    edge = relation.isSorted(!out)
+               ? position
+               : world.toIndex(loc, memref::LoadOp::create(
+                                        rewriter, loc,
+                                        world.indexEdges(relation),
+                                        ValueRange{position}));
+  }
   for (ApplyOp apply : applies)
     memref::StoreOp::create(rewriter, loc, world.noEntity(loc),
                             world.edgeApplyBuffer(apply).first,
@@ -2566,7 +2671,9 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   // reused and its range holds only its own edges.
   bool ownEndTrusted =
       relation.getTrusted(/*target=*/!out) != FlatSymbolRefAttr();
-  if (layout.entities.hasGenerations() && !ownEndTrusted) {
+  // (A linked tree's edge out is its entity's or not there.)
+  if (layout.entities.hasGenerations() && !ownEndTrusted &&
+      !(relation.linked && out)) {
     Value own = memref::LoadOp::create(
         rewriter, loc, world.edgeIds(relation, /*source=*/out),
         ValueRange{edge});
@@ -2576,12 +2683,14 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
     insertBefore = ifMine.thenBlock()->getTerminator();
   }
   rewriter.setInsertionPoint(insertBefore);
-  Value other = world.fromStorage(
-      loc,
-      memref::LoadOp::create(rewriter, loc,
-                             world.edgeIds(relation, /*source=*/!out),
-                             ValueRange{edge}),
-      EntityType::get(rewriter.getContext()));
+  Value otherId = memref::LoadOp::create(
+      rewriter, loc, world.edgeIds(relation, /*source=*/!out),
+      ValueRange{edge});
+  // A linked tree's slot has its source as its owner, the id and one.
+  if (relation.linked && !out)
+    otherId = world.ownerId(loc, otherId);
+  Value other = world.fromStorage(loc, otherId,
+                                  EntityType::get(rewriter.getContext()));
 
   Block &body = edges.getBody().front();
   for (Operation *user :
@@ -3134,11 +3243,22 @@ static scf::ForOp carryCells(IRRewriter &rewriter, scf::ForOp loop,
 /// Append the edge (`source`, `target`, `values`, all stored forms) to
 /// `relation` at the insertion point, after checking its capacity, and
 /// mark it unclean.
+/// The name of the function that connects an edge of `relation`, a
+/// linked tree: (source, target, the fields' values, the arena).
+static std::string connectFunctionName(const WorldRelation &relation) {
+  return ("ent_connect_" + RelationOp(relation.op).getSymName()).str();
+}
+
 static void appendEdge(IRRewriter &rewriter, Location loc,
                        const WorldLayout &layout, WorldAccess &world,
                        const WorldRelation &relation, Value source,
-                       Value target, ValueRange values) {
-  // The ends must have the components the relation names.
+                       Value target, ValueRange values);
+
+/// The ends of an edge must have the components the relation names.
+static void assertEnds(IRRewriter &rewriter, Location loc,
+                       const WorldLayout &layout, WorldAccess &world,
+                       const WorldRelation &relation, Value source,
+                       Value target) {
   RelationOp relationOp = relation.op;
   for (auto [end, id] : {std::make_pair(false, source),
                          std::make_pair(true, target)}) {
@@ -3165,6 +3285,22 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
             "ent.connect: the " + std::string(end ? "target" : "source") +
             " of an edge of @" + relationOp.getSymName().str() +
             " does not have @" + component.getValue().str()));
+  }
+}
+
+static void appendEdge(IRRewriter &rewriter, Location loc,
+                       const WorldLayout &layout, WorldAccess &world,
+                       const WorldRelation &relation, Value source,
+                       Value target, ValueRange values) {
+  assertEnds(rewriter, loc, layout, world, relation, source, target);
+  // A linked tree takes the edge in at once.
+  if (relation.linked) {
+    SmallVector<Value> arguments{source, target};
+    arguments.append(values.begin(), values.end());
+    arguments.push_back(world.getArena());
+    func::CallOp::create(rewriter, loc, connectFunctionName(relation),
+                         TypeRange{}, arguments);
+    return;
   }
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value counter = world.edgeCount(relation);
@@ -3245,6 +3381,416 @@ static void callSort(IRRewriter &rewriter, Location loc,
                        ValueRange{arena});
 }
 
+namespace {
+/// What the functions of a linked tree are written with: loads and stores
+/// in its per-key columns, and links, which are a key and one.
+struct LinkedTree {
+  IRRewriter &rewriter;
+  Location loc;
+  WorldAccess &world;
+  const WorldRelation &relation;
+  Value zero, one;
+
+  LinkedTree(IRRewriter &rewriter, Location loc, WorldAccess &world,
+             const WorldRelation &relation)
+      : rewriter(rewriter), loc(loc), world(world), relation(relation) {
+    zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  }
+
+  Value load(Value column, Value at) {
+    return memref::LoadOp::create(rewriter, loc, column, ValueRange{at});
+  }
+  void store(Value value, Value column, Value at) {
+    memref::StoreOp::create(rewriter, loc, value, column, ValueRange{at});
+  }
+  Value links(uint64_t offset) { return world.treeLinks(relation, offset); }
+  Value firstChild() { return links(relation.firstChildOffset); }
+  Value lastChild() { return links(relation.lastChildOffset); }
+  Value childCount() { return links(relation.childCountOffset); }
+  Value nextSibling() { return links(relation.nextSiblingOffset); }
+  Value previousSibling() { return links(relation.previousSiblingOffset); }
+  Value position() { return links(relation.positionOffset); }
+  Value sources() { return world.edgeIds(relation, /*source=*/true); }
+  Value targets() { return world.edgeIds(relation, /*source=*/false); }
+  /// A link, or a count, at the links' width, from an index and back.
+  Value link(Value index) {
+    return arith::IndexCastOp::create(rewriter, loc,
+                                      world.offsetType(relation), index);
+  }
+  Value noLink() {
+    return arith::ConstantIntOp::create(rewriter, loc, 0,
+                                        relation.offsetBits);
+  }
+  Value isNone(Value linkValue) {
+    return arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                 linkValue, noLink());
+  }
+  Value noOwner() {
+    return arith::ConstantIntOp::create(rewriter, loc, 0,
+                                        cast<IntegerType>(world.idType())
+                                            .getWidth());
+  }
+  /// The id of the source of the edge in `slot`, which holds one.
+  Value sourceOf(Value slot) {
+    return world.ownerId(loc, load(sources(), slot));
+  }
+  Value i64(int64_t value) {
+    return arith::ConstantIntOp::create(rewriter, loc, value, 64);
+  }
+  Value i1(bool value) {
+    return arith::ConstantIntOp::create(rewriter, loc, value, 1);
+  }
+  Value negate(Value condition) {
+    return arith::XOrIOp::create(rewriter, loc, condition, i1(true));
+  }
+  Value both(Value a, Value b) {
+    return arith::AndIOp::create(rewriter, loc, a, b);
+  }
+  Value same(Value a, Value b) {
+    return arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, a,
+                                 b);
+  }
+
+  /// `then` where `condition` holds, else `otherwise` if given.
+  void branch(Value condition, function_ref<void()> then,
+              function_ref<void()> otherwise = nullptr) {
+    auto ifOp = scf::IfOp::create(rewriter, loc, condition,
+                                  /*withElseRegion=*/bool(otherwise));
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(ifOp.thenBlock());
+    then();
+    if (otherwise) {
+      rewriter.setInsertionPointToStart(ifOp.elseBlock());
+      otherwise();
+    }
+  }
+  void forEach(Value from, Value to, function_ref<void(Value)> body) {
+    auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    body(loop.getInductionVar());
+  }
+
+  /// The slot `slot` joins the end of the children of the key `parent`.
+  void linkUnder(Value slot, Value parent) {
+    Value last = load(lastChild(), parent);
+    Value self = link(arith::AddIOp::create(rewriter, loc, slot, one));
+    store(last, previousSibling(), slot);
+    store(noLink(), nextSibling(), slot);
+    branch(
+        isNone(last), [&] { store(self, firstChild(), parent); },
+        [&] {
+          store(self, nextSibling(),
+                arith::SubIOp::create(rewriter, loc, world.toIndex(loc, last),
+                                      one));
+        });
+    store(self, lastChild(), parent);
+    store(arith::AddIOp::create(
+              rewriter, loc, load(childCount(), parent),
+              arith::ConstantIntOp::create(rewriter, loc, 1,
+                                           relation.offsetBits)),
+          childCount(), parent);
+  }
+  /// The slot `slot` leaves the children of the key its target has.
+  void unlink(Value slot) {
+    Value parent = world.entityKey(loc, load(targets(), slot));
+    Value previous = load(previousSibling(), slot);
+    Value next = load(nextSibling(), slot);
+    auto before = [&](Value linkValue) {
+      return arith::SubIOp::create(rewriter, loc,
+                                   world.toIndex(loc, linkValue), one)
+          .getResult();
+    };
+    branch(
+        isNone(previous), [&] { store(next, firstChild(), parent); },
+        [&] { store(next, nextSibling(), before(previous)); });
+    branch(
+        isNone(next), [&] { store(previous, lastChild(), parent); },
+        [&] { store(previous, previousSibling(), before(next)); });
+    store(arith::SubIOp::create(
+              rewriter, loc, load(childCount(), parent),
+              arith::ConstantIntOp::create(rewriter, loc, 1,
+                                           relation.offsetBits)),
+          childCount(), parent);
+  }
+  /// The list's length, and putting `id` with its `parent` at its end,
+  /// for the entity whose key is `key`.
+  Value listed() { return load(world.treeOrderCount(relation), zero); }
+  void list(Value id, Value parent, Value key) {
+    Value length = listed();
+    Value at = world.toIndex(loc, length);
+    store(id, world.treeOrder(relation), at);
+    store(parent, world.treeOrderParents(relation), at);
+    store(link(arith::AddIOp::create(rewriter, loc, at, one)), position(),
+          key);
+    store(arith::AddIOp::create(rewriter, loc, length, i64(1)),
+          world.treeOrderCount(relation), zero);
+  }
+  void markUnclean() { store(i64(0), world.edgesClean(relation), zero); }
+};
+} // namespace
+
+static void assertEnds(IRRewriter &rewriter, Location loc,
+                       const WorldLayout &layout, WorldAccess &world,
+                       const WorldRelation &relation, Value source,
+                       Value target);
+
+/// Emit the function that connects an edge of a linked tree: (source,
+/// target, the fields' values, the arena). The edge takes the slot of the
+/// source's key, replacing the edge the source had (the last connect
+/// wins) or one a dead entity left there, and joins the end of the
+/// target's children. The tree's list stays in order, parents before
+/// their children, where the entity is new to it and has no children (it
+/// goes to the end) or is in it after its new parent (the parent's id is
+/// changed in place); otherwise the relation is marked unclean, and built
+/// again before anything reads it, which is also where a cycle is found.
+static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
+                                const WorldLayout &layout,
+                                const WorldRelation &relation,
+                                MemRefType arenaType) {
+  RelationOp relationOp = relation.op;
+  Location loc = relationOp.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(module.getBody());
+  Type idType = rewriter.getIntegerType(layout.entities.idBits);
+  SmallVector<Type> inputs{idType, idType};
+  for (const WorldColumn &field : relation.fields) {
+    Type type = field.type;
+    if (isa<EntityType>(type))
+      type = idType;
+    else if (auto text = dyn_cast<TextType>(type))
+      type = text.getStorageType();
+    else if (auto named = dyn_cast<EnumType>(type))
+      type = named.getStorageType();
+    inputs.push_back(type);
+  }
+  inputs.push_back(arenaType);
+  auto func = func::FuncOp::create(rewriter, loc,
+                                   connectFunctionName(relation),
+                                   rewriter.getFunctionType(inputs, {}));
+  func.setPrivate();
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  func::ReturnOp::create(rewriter, loc);
+  rewriter.setInsertionPointToStart(entry);
+  WorldAccess world(rewriter, layout, entry->getArguments().back());
+  LinkedTree tree(rewriter, loc, world, relation);
+  Value source = entry->getArgument(0), target = entry->getArgument(1);
+  Value zero = tree.zero, one = tree.one;
+
+  cf::AssertOp::create(
+      rewriter, loc,
+      arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, source,
+                            target),
+      rewriter.getStringAttr("@" + relationOp.getSymName() +
+                             " is a tree, but an entity is its own "
+                             "ancestor"));
+  Value slot = world.entityKey(loc, source);
+  Value parentKey = world.entityKey(loc, target);
+  Value old = tree.load(tree.sources(), slot);
+  Value isOwn = tree.same(old, world.slotOwner(loc, source));
+  Value isNew = tree.same(old, tree.noOwner());
+  Value isStale = tree.both(tree.negate(isOwn), tree.negate(isNew));
+  // The edge a dead entity left in the slot goes, from its target's
+  // children and from the list.
+  tree.branch(isStale, [&] {
+    tree.unlink(slot);
+    Value at = tree.load(tree.position(), slot);
+    tree.branch(tree.negate(tree.isNone(at)), [&] {
+      tree.store(world.noEntity(loc), world.treeOrder(relation),
+                 arith::SubIOp::create(rewriter, loc, world.toIndex(loc, at),
+                                       one));
+      tree.store(tree.noLink(), tree.position(), slot);
+    });
+  });
+  tree.branch(isOwn, [&] { tree.unlink(slot); });
+  tree.branch(isNew, [&] {
+    Value counter = world.edgeCount(relation);
+    Value count = tree.load(counter, zero);
+    cf::AssertOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt, count,
+                              tree.i64(relation.capacity)),
+        rewriter.getStringAttr("ent.connect exceeds the capacity of @" +
+                               relationOp.getSymName()));
+    tree.store(arith::AddIOp::create(rewriter, loc, count, tree.i64(1)),
+               counter, zero);
+  });
+  tree.store(world.slotOwner(loc, source), tree.sources(), slot);
+  tree.store(target, tree.targets(), slot);
+  for (auto [index, field] : llvm::enumerate(relation.fields))
+    tree.store(entry->getArgument(2 + index),
+               world.edgeField(relation, field), slot);
+  if (relation.deadOffset)
+    tree.store(arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+               world.edgeDead(relation), slot);
+  tree.linkUnder(slot, parentKey);
+
+  // The list. A parent that has no edge of its own is before everything;
+  // one that has is where its position says.
+  Value parentHas = tree.same(tree.load(tree.sources(), parentKey),
+                              world.slotOwner(loc, target));
+  Value parentAt = tree.load(tree.position(), parentKey);
+  Value ownAt = tree.load(tree.position(), slot);
+  tree.branch(
+      isOwn,
+      [&] {
+        Value earlier = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ult, parentAt, ownAt);
+        Value inOrder = tree.both(
+            tree.negate(tree.isNone(ownAt)),
+            arith::OrIOp::create(
+                rewriter, loc, tree.negate(parentHas),
+                tree.both(tree.negate(tree.isNone(parentAt)), earlier)));
+        tree.branch(
+            inOrder,
+            [&] {
+              tree.store(target, world.treeOrderParents(relation),
+                         arith::SubIOp::create(rewriter, loc,
+                                               world.toIndex(loc, ownAt),
+                                               one));
+            },
+            [&] { tree.markUnclean(); });
+      },
+      [&] {
+        Value childless = tree.isNone(tree.load(tree.childCount(), slot));
+        Value parentListed = arith::OrIOp::create(
+            rewriter, loc, tree.negate(parentHas),
+            tree.negate(tree.isNone(parentAt)));
+        Value room = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::slt, tree.listed(),
+            tree.i64(relation.capacity));
+        tree.branch(
+            tree.both(childless, tree.both(parentListed, room)),
+            [&] { tree.list(source, target, slot); },
+            [&] { tree.markUnclean(); });
+      });
+}
+
+/// Emit the function that, if a linked tree is unclean, builds it again
+/// from its slots: the edges of dead entities, to dead entities and
+/// disconnected ones go; every entity's children are linked in the order
+/// of their keys; and the entities with a parent are listed breadth first,
+/// the children of those without one by their keys, then the children of
+/// each entity listed. An entity on a cycle is never reached, which stops
+/// the program.
+static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
+                                   const WorldLayout &layout,
+                                   const WorldRelation &relation,
+                                   MemRefType arenaType) {
+  RelationOp relationOp = relation.op;
+  Location loc = relationOp.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(module.getBody());
+  auto func = func::FuncOp::create(rewriter, loc, sortFunctionName(relation),
+                                   rewriter.getFunctionType({arenaType}, {}));
+  func.setPrivate();
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  func::ReturnOp::create(rewriter, loc);
+  rewriter.setInsertionPointToStart(entry);
+  WorldAccess world(rewriter, layout, entry->getArgument(0));
+  LinkedTree tree(rewriter, loc, world, relation);
+  Value zero = tree.zero, one = tree.one;
+  Value keys = arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys);
+  Value clean = tree.load(world.edgesClean(relation), zero);
+  auto ifUnclean = scf::IfOp::create(rewriter, loc,
+                                     tree.same(clean, tree.i64(0)));
+  rewriter.setInsertionPointToStart(ifUnclean.thenBlock());
+
+  auto hasEdge = [&](Value key) {
+    return tree.negate(
+        tree.same(tree.load(tree.sources(), key), tree.noOwner()));
+  };
+  // The edges that stay, counted, and every link cleared.
+  tree.store(tree.i64(0), world.edgeCount(relation), zero);
+  tree.forEach(zero, keys, [&](Value key) {
+    tree.branch(hasEdge(key), [&] {
+      Value kept = tree.both(
+          world.isAlive(loc, tree.sourceOf(key)),
+          world.isAlive(loc, tree.load(tree.targets(), key)));
+      if (relation.deadOffset)
+        kept = tree.both(
+            kept, tree.same(tree.load(world.edgeDead(relation), key),
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 8)));
+      tree.branch(
+          kept,
+          [&] {
+            Value counter = world.edgeCount(relation);
+            tree.store(arith::AddIOp::create(rewriter, loc,
+                                             tree.load(counter, zero),
+                                             tree.i64(1)),
+                       counter, zero);
+          },
+          [&] { tree.store(tree.noOwner(), tree.sources(), key); });
+    });
+    if (relation.deadOffset)
+      tree.store(arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+                 world.edgeDead(relation), key);
+    for (Value column : {tree.firstChild(), tree.lastChild(),
+                         tree.childCount(), tree.position()})
+      tree.store(tree.noLink(), column, key);
+  });
+  // Children, by their keys.
+  tree.forEach(zero, keys, [&](Value key) {
+    tree.branch(hasEdge(key), [&] {
+      tree.linkUnder(key,
+                     world.entityKey(loc, tree.load(tree.targets(), key)));
+    });
+  });
+  // The list: the children of the entities without a parent, then the
+  // children of each entity listed.
+  tree.store(tree.i64(0), world.treeOrderCount(relation), zero);
+  tree.forEach(zero, keys, [&](Value key) {
+    tree.branch(hasEdge(key), [&] {
+      Value parent = tree.load(tree.targets(), key);
+      tree.branch(tree.negate(hasEdge(world.entityKey(loc, parent))), [&] {
+        tree.list(tree.sourceOf(key), parent, key);
+      });
+    });
+  });
+  scf::WhileOp::create(
+      rewriter, loc, TypeRange{rewriter.getIndexType()}, ValueRange{zero},
+      [&](OpBuilder &, Location, ValueRange state) {
+        scf::ConditionOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                  state[0],
+                                  world.toIndex(loc, tree.listed())),
+            state);
+      },
+      [&](OpBuilder &, Location, ValueRange state) {
+        Value id = tree.load(world.treeOrder(relation), state[0]);
+        Value key = world.entityKey(loc, id);
+        Value number = world.toIndex(loc, tree.load(tree.childCount(), key));
+        Value first = world.toIndex(loc, tree.load(tree.firstChild(), key));
+        auto children = scf::ForOp::create(rewriter, loc, zero, number, one,
+                                           ValueRange{first});
+        {
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPointToStart(children.getBody());
+          Value child = arith::SubIOp::create(
+              rewriter, loc, children.getRegionIterArg(0), one);
+          tree.list(tree.sourceOf(child), id, child);
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{world.toIndex(
+                  loc, tree.load(tree.nextSibling(), child))});
+        }
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::AddIOp::create(rewriter, loc, state[0], one)});
+      });
+  cf::AssertOp::create(
+      rewriter, loc,
+      tree.same(tree.listed(), tree.load(world.edgeCount(relation), zero)),
+      rewriter.getStringAttr("@" + relationOp.getSymName() +
+                             " is a tree, but an entity is its own "
+                             "ancestor"));
+  tree.store(tree.i64(1), world.edgesClean(relation), zero);
+}
+
 /// Emit the function that, if `relation` is unclean, sorts its edges by
 /// source with a stable counting sort through the scratch columns,
 /// dropping dead edges and edges with an end that is no longer alive,
@@ -3257,6 +3803,11 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                              const WorldLayout &layout,
                              const WorldRelation &relation,
                              MemRefType arenaType) {
+  if (relation.linked) {
+    emitLinkedSortFunction(rewriter, module, layout, relation, arenaType);
+    emitConnectFunction(rewriter, module, layout, relation, arenaType);
+    return;
+  }
   Location loc = RelationOp(relation.op).getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToEnd(module.getBody());
