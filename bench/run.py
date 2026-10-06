@@ -16,14 +16,18 @@ on an M4 Max); 200 is the value the OpenMP documentation gives as default.
 
 import argparse
 import os
+import platform
 import statistics
 import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LLVM = os.environ.get("LLVM_PREFIX", "/opt/homebrew/opt/llvm")
-# Extra compiler flags for every binary, e.g. BENCH_CFLAGS=-march=native.
-EXTRA_CFLAGS = os.environ.get("BENCH_CFLAGS", "").split()
+# Flags for every binary: the machine's own instruction set, unless
+# BENCH_CFLAGS says otherwise (BENCH_CFLAGS= for the baseline one).
+NATIVE = ("-mcpu=native" if platform.machine() in ("arm64", "aarch64")
+          else "-march=native")
+EXTRA_CFLAGS = os.environ.get("BENCH_CFLAGS", NATIVE).split()
 ENT_OPT = os.path.join(ROOT, "build", "bin", "ent-opt")
 ENT_TRANSLATE = os.path.join(ROOT, "build", "bin", "ent-translate")
 OUT = os.path.join(ROOT, "build", "bench")
