@@ -1,0 +1,6 @@
+// The queries Zed uses are those of the grammar, kept as copies because
+// Zed takes an extension's files as they are.
+// RUN: cmp %S/../../editors/tree-sitter-ent/queries/highlights.scm %S/../../editors/zed/languages/ent/highlights.scm
+// RUN: cmp %S/../../editors/tree-sitter-ent/queries/outline.scm %S/../../editors/zed/languages/ent/outline.scm
+// RUN: cmp %S/../../editors/tree-sitter-ent/queries/brackets.scm %S/../../editors/zed/languages/ent/brackets.scm
+// RUN: cmp %S/../../editors/tree-sitter-ent/queries/indents.scm %S/../../editors/zed/languages/ent/indents.scm

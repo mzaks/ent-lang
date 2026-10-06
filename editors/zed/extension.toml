@@ -1,0 +1,20 @@
+id = "ent-lang"
+name = "ent-lang"
+version = "0.1.0"
+schema_version = 1
+authors = ["Maxim Zaks"]
+description = "ent-lang: colours and outline, and what the compiler knows of a file from its language server"
+repository = "https://github.com/mzaks/ent-lang"
+
+# The grammar is editors/tree-sitter-ent of the commit `rev` names; Zed
+# builds it from there, so `rev` is moved on when the grammar changes. To
+# try a grammar that is not pushed, name the clone instead:
+# repository = "file:///path/to/ent-lang", with a commit of it.
+[grammars.ent]
+repository = "https://github.com/mzaks/ent-lang"
+rev = "0000000000000000000000000000000000000000"
+path = "editors/tree-sitter-ent"
+
+[language_servers.ent-lsp]
+name = "ent-lsp"
+languages = ["Ent"]

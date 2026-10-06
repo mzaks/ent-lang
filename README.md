@@ -241,6 +241,16 @@ All keep their state in the world, and their logic in ent-lang: their C is
 window one small function for each call into raylib, and for sound `tone`
 and `sample`.
 
+## In an editor
+
+`build/bin/ent-lsp` is a language server for `.ent` files: it runs the
+compiler's front end as a file changes and gives an editor its errors and
+warnings, the outline, where a name is declared, and on hovering over a
+name its declaration and comment, and for a system what it reads and
+writes and what it waits for in a schedule. `editors/` has what VS Code
+and Zed need to use it and to colour the source (a TextMate grammar and a
+tree-sitter grammar); see [`editors/README.md`](editors/README.md).
+
 ## The dialect today
 
 When each effect becomes visible to the rest of the program (the frame

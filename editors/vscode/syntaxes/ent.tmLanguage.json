@@ -1,0 +1,269 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ent-lang",
+  "scopeName": "source.ent",
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#character"
+    },
+    {
+      "include": "#declaration"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#keyword"
+    },
+    {
+      "include": "#type"
+    },
+    {
+      "include": "#call"
+    },
+    {
+      "include": "#name"
+    },
+    {
+      "include": "#operator"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.double-slash.ent",
+      "match": "//.*$"
+    },
+    "string": {
+      "name": "string.quoted.double.ent",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [
+        {
+          "name": "constant.character.escape.ent",
+          "match": "\\\\(x[0-9a-fA-F]{2}|.)"
+        },
+        {
+          "name": "meta.interpolation.ent",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.begin.ent"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.end.ent"
+            }
+          },
+          "contentName": "source.ent.embedded",
+          "patterns": [
+            {
+              "include": "#number"
+            },
+            {
+              "include": "#keyword"
+            },
+            {
+              "include": "#type"
+            },
+            {
+              "include": "#call"
+            },
+            {
+              "include": "#name"
+            },
+            {
+              "include": "#operator"
+            }
+          ]
+        }
+      ]
+    },
+    "character": {
+      "name": "string.quoted.single.ent",
+      "match": "'(\\\\x[0-9a-fA-F]{2}|\\\\.|[^'\\\\])'"
+    },
+    "number": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.ent",
+          "match": "\\b0[xX][0-9a-fA-F]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.ent",
+          "match": "\\b[0-9]+(\\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)\\b"
+        },
+        {
+          "name": "constant.numeric.integer.ent",
+          "match": "\\b[0-9]+\\b"
+        },
+        {
+          "name": "constant.language.boolean.ent",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "\\b(system|fn|proc|schedule)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.declaration.ent"
+            },
+            "2": {
+              "name": "entity.name.function.ent"
+            }
+          }
+        },
+        {
+          "match": "\\b(component|tag|unique|enum|relation|archetype)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.declaration.ent"
+            },
+            "2": {
+              "name": "entity.name.type.ent"
+            }
+          }
+        },
+        {
+          "match": "\\b(import)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.import.ent"
+            },
+            "2": {
+              "name": "entity.name.namespace.ent"
+            }
+          }
+        }
+      ]
+    },
+    "keyword": {
+      "patterns": [
+        {
+          "name": "keyword.control.ent",
+          "match": "\\b(if|else|for|in|loop|until)\\b"
+        },
+        {
+          "name": "keyword.other.declaration.ent",
+          "match": "\\b(import|component|tag|unique|enum|relation|archetype|system|extern|fn|proc|schedule|world|main|default_capacity|capacity|optional|reads|writes)\\b"
+        },
+        {
+          "name": "keyword.other.ent",
+          "match": "\\b(let|var|mut|spawn|as|with|without|any|where|on|changed|added|removed|log|from|to|out|run_if)\\b"
+        }
+      ]
+    },
+    "type": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.ent",
+          "match": "\\b(f32|f64|bool|i1|i8|i16|i32|i64|index|entity|text)\\b"
+        },
+        {
+          "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(\\.)\\s*([A-Z][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "entity.name.type.ent"
+            },
+            "2": {
+              "name": "punctuation.accessor.ent"
+            },
+            "3": {
+              "name": "constant.other.enum.ent"
+            }
+          }
+        },
+        {
+          "match": "\\b([a-z_][A-Za-z0-9_]*)(::)",
+          "captures": {
+            "1": {
+              "name": "entity.name.namespace.ent"
+            },
+            "2": {
+              "name": "punctuation.separator.namespace.ent"
+            }
+          }
+        },
+        {
+          "name": "entity.name.type.ent",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "call": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.ent",
+          "match": "\\b(min|max|len|connect)\\b(?=\\s*\\()"
+        },
+        {
+          "match": "(\\.)([a-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.ent"
+            },
+            "2": {
+              "name": "entity.name.function.member.ent"
+            }
+          }
+        },
+        {
+          "name": "entity.name.function.ent",
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "name": {
+      "patterns": [
+        {
+          "match": "(\\.)([a-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.ent"
+            },
+            "2": {
+              "name": "variable.other.property.ent"
+            }
+          }
+        },
+        {
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(:)(?!:)",
+          "captures": {
+            "1": {
+              "name": "variable.parameter.ent"
+            },
+            "2": {
+              "name": "punctuation.separator.ent"
+            }
+          }
+        },
+        {
+          "name": "variable.other.ent",
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "operator": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.ent",
+          "match": "(\\+=|-=|\\*=|/=|\\b(min|max)\\s*=(?!=)|=(?!=))"
+        },
+        {
+          "name": "keyword.operator.ent",
+          "match": "(->|\\.\\.|==|!=|<=|>=|&&|\\|\\||[-+*/%<>!])"
+        }
+      ]
+    }
+  }
+}

@@ -203,8 +203,10 @@ struct VarState {
 
 class Parser {
 public:
-  Parser(llvm::SourceMgr &sourceMgr, MLIRContext *context)
+  Parser(llvm::SourceMgr &sourceMgr, MLIRContext *context,
+         ArrayRef<std::string> directories)
       : sourceMgr(sourceMgr), context(context),
+        directories(directories),
         lexer(sourceMgr.getMemoryBuffer(sourceMgr.getMainFileID())
                   ->getBuffer()),
         builder(context),
@@ -466,6 +468,9 @@ private:
 
   llvm::SourceMgr &sourceMgr;
   MLIRContext *context;
+  /// Where imported modules are looked for, after the importer's own
+  /// directory and before those of `-I`.
+  SmallVector<std::string> directories;
   Lexer lexer;
   Token token;
   OpBuilder builder;
@@ -645,6 +650,7 @@ LogicalResult Parser::parseImport() {
       sourceMgr.getMemoryBuffer(sourceMgr.FindBufferContainingLoc(at))
           ->getBufferIdentifier();
   dirs.push_back(llvm::sys::path::parent_path(importer).str());
+  llvm::append_range(dirs, directories);
   llvm::append_range(dirs, importDirs);
   SmallString<256> path;
   bool found = false;
@@ -4173,9 +4179,10 @@ FailureOr<mlir::Value> Parser::emitSpawn(const Expr &expr) {
   return builder.create(state)->getResult(0);
 }
 
-OwningOpRef<ModuleOp> mlir::ent::importEnt(llvm::SourceMgr &sourceMgr,
-                                           MLIRContext *context) {
+OwningOpRef<ModuleOp>
+mlir::ent::importEnt(llvm::SourceMgr &sourceMgr, MLIRContext *context,
+                     ArrayRef<std::string> directories) {
   context->loadDialect<EntDialect, arith::ArithDialect, scf::SCFDialect>();
-  Parser parser(sourceMgr, context);
+  Parser parser(sourceMgr, context, directories);
   return parser.parseModule();
 }

@@ -11,5 +11,5 @@ find_program(ENT_LIT lit
 
 add_custom_target(check-ent
   COMMAND ${ENT_LIT} -sv ${CMAKE_CURRENT_BINARY_DIR}
-  DEPENDS ent-opt ent-translate
+  DEPENDS ent-opt ent-translate ent-lsp
   USES_TERMINAL)

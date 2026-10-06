@@ -13,9 +13,12 @@ namespace mlir::ent {
 /// Parse ent-lang source (a `.ent` file, the main buffer of `sourceMgr`)
 /// into a module of the `ent` dialect, with locations pointing into the
 /// source. Reports errors through the context's diagnostics and returns
-/// null if there are any.
+/// null if there are any. Imported modules are looked for next to the
+/// importing file, then in `directories`, then in those the `-I` option
+/// names.
 OwningOpRef<ModuleOp> importEnt(llvm::SourceMgr &sourceMgr,
-                                MLIRContext *context);
+                                MLIRContext *context,
+                                ArrayRef<std::string> directories = {});
 
 } // namespace mlir::ent
 

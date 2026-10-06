@@ -1,0 +1,47 @@
+{
+  "name": "ent-lang",
+  "displayName": "ent-lang",
+  "description": "ent-lang: colours, and what the compiler knows of a file (errors, outline, go to definition, what a system reads and writes) from its language server",
+  "version": "0.1.0",
+  "publisher": "ent-lang",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/mzaks/ent-lang" },
+  "engines": { "vscode": "^1.82.0" },
+  "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "ent",
+        "aliases": ["ent-lang", "ent"],
+        "extensions": [".ent"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      { "language": "ent", "scopeName": "source.ent", "path": "./syntaxes/ent.tmLanguage.json" }
+    ],
+    "configuration": {
+      "title": "ent-lang",
+      "properties": {
+        "ent.server.path": {
+          "type": "string",
+          "default": "",
+          "description": "The language server, ent-lsp. Left empty, it is build/bin/ent-lsp of a folder that is open, or else ent-lsp on the PATH."
+        },
+        "ent.server.arguments": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Arguments for the language server, such as -I and a directory to look for modules in."
+        }
+      }
+    },
+    "commands": [
+      { "command": "ent.restartServer", "title": "ent-lang: Restart the language server" }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

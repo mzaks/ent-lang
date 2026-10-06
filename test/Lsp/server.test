@@ -1,0 +1,131 @@
+// The language server: what an editor shows of a file comes from the
+// compiler's own front end, run on every change.
+// RUN: ent-lsp -lit-test < %s | FileCheck %s
+{"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"processId": 1, "capabilities": {}}}
+// CHECK:      "definitionProvider": true
+// CHECK-NEXT: "documentSymbolProvider": true
+// CHECK-NEXT: "hoverProvider": true
+// -----
+{"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "test:///game.ent", "languageId": "ent", "version": 1, "text": "import console\n\n// Where something is.\ncomponent Position { x: f32, y: f32 } capacity 8\nunique Score: i32\nenum Way { Left, Right }\n\n// Twice as much.\nfn twice(x: f32) -> f32 { x * 2.0 }\n\n// Moves everything to the right.\nsystem move() {\n  for p: mut Position { p.x = twice(p.x) }\n}\n\nsystem report() {\n  for p: Position { Score += 1 }\n  spawn { Print { line: \"moved\" } }\n}\n\nschedule frame() {\n  move()\n  report()\n  write()\n}\n\nworld { spawn { Position { x: 1.0, y: 2.0 } } }\n\nmain { frame() }\n"}}}
+// A file that is in order has nothing to report.
+// CHECK:      "method": "textDocument/publishDiagnostics"
+// CHECK-NEXT: "params": {
+// CHECK-NEXT:   "diagnostics": [],
+// CHECK-NEXT:   "uri": "test:///game.ent",
+// CHECK-NEXT:   "version": 1
+// -----
+{"jsonrpc": "2.0", "id": 1, "method": "textDocument/documentSymbol", "params": {"textDocument": {"uri": "test:///game.ent"}}}
+// The outline: the file's own declarations, in its order, each up to the
+// next; not those of the module it imports.
+// CHECK:      "id": 1
+// CHECK-NOT:  "name": "Print"
+// CHECK:      "detail": "component",
+// CHECK-NEXT: "kind": 23,
+// CHECK-NEXT: "name": "Position",
+// CHECK-NEXT: "range": {
+// CHECK-NEXT:   "end": {
+// CHECK-NEXT:     "character": 48,
+// CHECK-NEXT:     "line": 3
+// CHECK:      "name": "Score",
+// CHECK:      "detail": "enum",
+// CHECK:      "name": "Way",
+// CHECK:      "detail": "fn",
+// CHECK:      "name": "twice",
+// CHECK:      "detail": "system",
+// CHECK:      "name": "move",
+// CHECK-NEXT: "range": {
+// CHECK-NEXT:   "end": {
+// CHECK-NEXT:     "character": 0,
+// CHECK-NEXT:     "line": 14
+// CHECK:      "name": "report",
+// CHECK:      "detail": "schedule",
+// CHECK:      "name": "frame",
+// CHECK:      "name": "main",
+// -----
+{"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 21, "character": 3}}}
+// A system: how it is declared, the comment above it, what it reads and
+// writes.
+// CHECK:      "id": 2
+// CHECK:      "value": "```ent\nsystem move()\n```\nMoves everything to the right.\n\n---\n**reads** `Position.x`\n\n**writes** `Position.x`\n"
+// CHECK:      "range": {
+// CHECK-NEXT:   "end": {
+// CHECK-NEXT:     "character": 6,
+// CHECK-NEXT:     "line": 21
+// CHECK:        "start": {
+// CHECK-NEXT:     "character": 2,
+// -----
+{"jsonrpc": "2.0", "id": 3, "method": "textDocument/hover", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 22, "character": 3}}}
+// What it adds up and spawns.
+// CHECK:      "id": 3
+// CHECK:      "value": "```ent\nsystem report()\n```\n---\n**reads** nothing\n\n**writes** `Score`, `console.Print.line`; the entities of `console.Print_archetype`\n"
+// -----
+{"jsonrpc": "2.0", "id": 11, "method": "textDocument/hover", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 23, "character": 3}}}
+// A module's system: that it acts on the outside, and what it waits for
+// in a schedule and why.
+// CHECK:      "id": 11
+// CHECK:      "value": "```ent\nsystem write()\n```\nFrom the module `console`.\n\n---\n**reads** `console.Print.line`\n\n**writes** nothing\n\nActs on the outside (console.ent:{{[0-9]+}}), so it keeps its place among all other systems.\n\nIn a schedule, @console.write waits for @move: it has effects outside component access ('ent.invoke').\n"
+// -----
+{"jsonrpc": "2.0", "id": 4, "method": "textDocument/hover", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 12, "character": 31}}}
+// A fn where it is called.
+// CHECK:      "id": 4
+// CHECK:      "value": "```ent\nfn twice(x: f32) -> f32\n```\nTwice as much.\n\n"
+// -----
+{"jsonrpc": "2.0", "id": 5, "method": "textDocument/hover", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 17, "character": 11}}}
+// A module's declaration: read from the module's file.
+// CHECK:      "id": 5
+// CHECK:      "value": "```ent\ncomponent Print { line: text[126] } capacity 1024\n```\nFrom the module `console`.\n\nAt most this many lines of one shape between two `write`s.\n\n"
+// -----
+{"jsonrpc": "2.0", "id": 6, "method": "textDocument/definition", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 23, "character": 3}}}
+// Where a name is declared, also in another file.
+// CHECK:      "id": 6
+// CHECK:      "range": {
+// CHECK-NEXT:   "end": {
+// CHECK-NEXT:     "character": 12,
+// CHECK:        "start": {
+// CHECK-NEXT:     "character": 7,
+// CHECK:      "uri": "file://{{.*}}/devices/console.ent"
+// -----
+{"jsonrpc": "2.0", "id": 7, "method": "textDocument/definition", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 12, "character": 14}}}
+// CHECK:      "id": 7
+// CHECK:        "start": {
+// CHECK-NEXT:     "character": 10,
+// CHECK-NEXT:     "line": 3
+// CHECK:      "uri": "file:///game.ent"
+// -----
+{"jsonrpc": "2.0", "id": 8, "method": "textDocument/hover", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 12, "character": 7}}}
+// A local is not something the server knows yet.
+// CHECK:      "id": 8
+// CHECK-NEXT: "jsonrpc": "2.0",
+// CHECK-NEXT: "result": null
+// -----
+{"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": {"uri": "test:///game.ent", "version": 2}, "contentChanges": [{"text": "import console\n\n// Where something is.\ncomponent Position { x: f32, y: f32 } capacity 8\nunique Score: i32\nenum Way { Left, Right }\n\n// Twice as much.\nfn twice(x: f32) -> f32 { x * 2.0 }\n\n// Moves everything to the right.\nsystem move() {\n  for p: mut Position { p.x = twice(p.x) }\n}\n\nsystem report() {\n  for p: Position { Score += 1.5 }\n  spawn { Print { line: \"moved\" } }\n}\n\nschedule frame() {\n  move()\n  report()\n  write()\n}\n\nworld { spawn { Position { x: 1.0, y: 2.0 } } }\n\nmain { frame() }\n"}]}}
+// An error is reported where it is, to the end of its line.
+// CHECK:      "method": "textDocument/publishDiagnostics"
+// CHECK:          "message": "a float cannot be used here",
+// CHECK-NEXT:     "range": {
+// CHECK-NEXT:       "end": {
+// CHECK-NEXT:         "character": 34,
+// CHECK-NEXT:         "line": 16
+// CHECK:            "start": {
+// CHECK-NEXT:         "character": 29,
+// CHECK-NEXT:         "line": 16
+// CHECK:          "severity": 1,
+// CHECK-NEXT:     "source": "ent"
+// CHECK:        "version": 2
+// -----
+{"jsonrpc": "2.0", "id": 9, "method": "textDocument/hover", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 21, "character": 3}}}
+// While the file does not parse, one finds one's way by what it was.
+// CHECK:      "id": 9
+// CHECK:      "value": "```ent\nsystem move()
+// -----
+{"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": {"uri": "test:///game.ent", "version": 3}, "contentChanges": [{"text": "import console\n\n// Where something is.\ncomponent Position { x: f32, y: f32 } capacity 8\nunique Score: i32\nenum Way { Left, Right }\n\n// Twice as much.\nfn twice(x: f32) -> f32 { x * 2.0 }\n\n// Moves everything to the right.\nsystem move() {\n  for p: mut Position { p.x = twice(p.x) }\n}\n\nsystem report() {\n  for p: Position { Score += 1 }\n  \n}\n\nschedule frame() {\n  move()\n  report()\n  write()\n  clear()\n}\n\nworld { spawn { Position { x: 1.0, y: 2.0 } } }\n\nmain { frame() }\n"}]}}
+// What lowering finds is reported too: in a module's file, at the top of
+// this one, with the place.
+// CHECK:      "method": "textDocument/publishDiagnostics"
+// CHECK:          "message": "console.ent:{{[0-9]+}}: matches no archetype; the query is removed",
+// CHECK:          "severity": 2,
+// CHECK:        "version": 3
+// -----
+{"jsonrpc": "2.0", "id": 10, "method": "shutdown"}
+// -----
+{"jsonrpc": "2.0", "method": "exit"}

@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "ent",
+      "camelcase": "Ent",
+      "scope": "source.ent",
+      "path": ".",
+      "file-types": ["ent"],
+      "highlights": ["queries/highlights.scm"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "ent-lang grammar for tree-sitter",
+    "links": { "repository": "https://github.com/mzaks/ent-lang" }
+  }
+}
