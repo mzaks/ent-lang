@@ -1987,3 +1987,49 @@ brackets what one sort costs:
 - More than two archetypes, and archetypes of very different sizes.
 - A component of the ancestor that not every archetype has (searched for
   from the entity, as unsorted).
+
+## 2026-10-06: the unsorted tree across archetypes, without its checks
+
+The entry above left the unsorted river in two archetypes at 4.3-7.8x the
+time of the one in one archetype. Its loop told each node's archetype, and
+its parent's, by a branch, and then checked the row against the
+archetype's count, which it loaded: the shortcut for an entity known to be
+alive and to have the component (a trusted end of an edge, an id from the
+tree's list) was only taken where it could live in one archetype. Now
+such an entity is found in any number of archetypes by a branch on its
+archetype alone, the last without a test. Same machine, pinning and flags;
+200 steps after 50, medians of 7 processes, one run. Checksums agree with
+the C.
+
+us per step (spread); `ent-two` before is the entry above:
+
+| nodes | shape | c-pairs | ent | ent-two before | ent-two | ent-two-sorted |
+|---|---|---|---|---|---|---|
+| 1e4 | bushy | 4.3 (6%) | 5.4 (6%) | 8.0 | 6.6 (1%) | 4.4 (3%) |
+| 1e4 | deep | 8.5 (3%) | 8.2 (1%) | 8.7 | 8.2 (2%) | 9.7 (5%) |
+| 1e4 | shuffled | 4.3 (2%) | 5.4 (2%) | 8.0 | 6.7 (5%) | 4.4 (2%) |
+| 1e5 | bushy | 48.7 (2%) | 56.3 (3%) | 438.5 | 67.8 (3%) | 44.9 (3%) |
+| 1e5 | deep | 82.4 (1%) | 81.6 (2%) | 374.7 | 82.0 (2%) | 185.2 (2%) |
+| 1e5 | shuffled | 48.5 (2%) | 56.4 (2%) | 437.0 | 67.7 (2%) | 45.2 (5%) |
+| 1e6 | bushy | 941.0 (20%) | 934.1 (26%) | 4,841.1 | 1,094.4 (13%) | 473.7 (2%) |
+| 1e6 | deep | 844.8 (2%) | 862.0 (4%) | 3,683.0 | 877.8 (3%) | 1,631.5 (2%) |
+| 1e6 | shuffled | 951.5 (20%) | 973.7 (16%) | 4,871.8 | 1,128.2 (13%) | 476.5 (1%) |
+
+### What holds
+
+- The unsorted tree in two archetypes takes 1.16-1.23x the time of the one
+  in one archetype when bushy and 1.00-1.02x when deep: 0.15-0.23x of what
+  it took at 1e5 and 1e6.
+- That the branches and checks were the cost is what taking them out
+  shows; what they cost each was not taken apart. The generated loop now
+  has no load but the ids, the parent's and the flows.
+- Sorting across archetypes is left with less to gain: 0.42-0.43x the time
+  at 1e6 bushy and shuffled, 0.66x at 1e4 and 1e5, and in a deep tree it
+  loses, 1.2x at 1e4 and 1.9-2.3x at 1e5 and 1e6. At 1e6 bushy it saves
+  0.62 ms a step and a sort costs 17.7 ms more (the entry above), so it
+  pays where the tree changes less often than every 28 steps or so.
+
+### Not measured
+
+- A tree whose entities can die, or whose relation does not name what its
+  ends have: there the checks stay, and with them, presumably, the cost.

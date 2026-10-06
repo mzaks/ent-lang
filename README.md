@@ -618,8 +618,16 @@ starts, and per row its parent's packed location; a cascading query is a
 loop over the depths holding a loop per archetype, and reads the parent
 through a branch on its archetype. With the river's nodes in two
 archetypes that takes 1.2x the time of the one-archetype sorted tree when
-the tree is bushy and about 2x when it is deep, and a tenth of the time
-the same tree takes unsorted (see `bench/RESULTS.md`).
+the tree is bushy, which is 0.42x of the same tree unsorted at 1e6; a deep
+tree across archetypes is better left unsorted, sorted taking 1.9x the
+time (see `bench/RESULTS.md`).
+
+An entity that is known to be alive and to have a component (the trusted
+end of an edge, an id from a tree's list where nothing dies) is found
+without a check: in its one archetype directly, or by a branch on its
+archetype where it can be in several. Checking the row against a loaded
+count behind such branches made the unsorted river in two archetypes
+4-8x slower than in one; without, it takes 1.0-1.2x.
 
 A loop that never runs in parallel visits entities in the order the
 query's end combines applies in. So an apply whose field nothing else in

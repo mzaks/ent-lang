@@ -2010,8 +2010,9 @@ static Value loadSlotsInUse(IRRewriter &rewriter, Location loc,
 ///
 /// With `trusted`, the caller knows the entity is alive, lives in a
 /// candidate archetype and has `presenceOf` (an edge's end, see
-/// getTrustedEndpoint): if only one archetype is a candidate, `found` is
-/// called for it directly, without any check, and nothing is missing.
+/// getTrustedEndpoint): `found` is called without any check, for the one
+/// candidate directly or in a branch per candidate, the last of which
+/// needs no test, and nothing is missing.
 static SmallVector<Value>
 emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
            WorldAccess &world, Value id,
@@ -2036,6 +2037,42 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
                       ? world.unpackRows(loc, id).second
                       : world.getLocation(loc, world.idSlot(loc, id)).second;
       return found(*only, row, Value());
+    }
+    if (candidates > 1) {
+      auto [where, row] =
+          scheme.kind == EntityScheme::Rows
+              ? world.unpackRows(loc, id)
+              : world.getLocation(loc, world.idSlot(loc, id));
+      unsigned bits = cast<IntegerType>(where.getType()).getWidth();
+      OpBuilder::InsertionGuard guard(rewriter);
+      scf::IfOp top;
+      unsigned left = candidates;
+      for (const WorldArchetype &archetype : layout.archetypes) {
+        if (!candidate(archetype))
+          continue;
+        if (--left == 0) {
+          SmallVector<Value> values = found(archetype, row, Value());
+          if (!results.empty())
+            scf::YieldOp::create(rewriter, loc, values);
+          break;
+        }
+        Value here = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq, where,
+            arith::ConstantIntOp::create(rewriter, loc, archetype.index,
+                                         bits));
+        auto branch = scf::IfOp::create(rewriter, loc, results, here,
+                                        /*withElseRegion=*/true);
+        if (top && !results.empty())
+          scf::YieldOp::create(rewriter, loc, branch.getResults());
+        if (!top)
+          top = branch;
+        rewriter.setInsertionPointToStart(branch.thenBlock());
+        SmallVector<Value> values = found(archetype, row, Value());
+        if (!results.empty())
+          scf::YieldOp::create(rewriter, loc, values);
+        rewriter.setInsertionPointToStart(branch.elseBlock());
+      }
+      return SmallVector<Value>(top.getResults());
     }
   }
   // Without results, scf.if blocks come with their terminator.
@@ -4173,19 +4210,18 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     FlatSymbolRefAttr from = relationOp.getEndpoint(/*target=*/false);
     bool fromTrusted =
         from && relation.getTrusted(/*target=*/false) == from;
-    const WorldArchetype *only = nullptr;
-    unsigned homes = 0;
+    // Or in several, all of which the query matches: then a branch on
+    // its archetype tells where, and nothing else is checked.
+    auto isHome = [&](const WorldArchetype &archetype) {
+      return !from || ArchetypeOp(archetype.op).contains(from);
+    };
+    bool certain = from ? fromTrusted : !layout.entities.hasGenerations();
     for (const WorldArchetype &archetype : layout.archetypes)
-      if (!from || ArchetypeOp(archetype.op).contains(from)) {
-        only = &archetype;
-        ++homes;
-      }
-    bool certain = homes == 1 && matches(*only, query) &&
-                   (from ? fromTrusted : !layout.entities.hasGenerations());
+      certain &= !isHome(archetype) || matches(archetype, query);
     emitLocate(
         rewriter, loc, layout, world, id,
         [&](const WorldArchetype &archetype) {
-          return certain ? &archetype == only : matches(archetype, query);
+          return certain ? isHome(archetype) : matches(archetype, query);
         },
         FlatSymbolRefAttr(), TypeRange{},
         [&](const WorldArchetype &archetype, Value row,

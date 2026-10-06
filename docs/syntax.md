@@ -298,8 +298,9 @@ choice of storage, and it has its price:
   every archetype with either. A tree in one archetype is one pass over
   its rows. A tree in several (the orrery's bodies come in three shapes)
   is read depth by depth, in each the rows every archetype has of it: in a
-  bushy tree that costs a fifth more, in a deep, narrow one twice as
-  much, and still far less than unsorted. Across archetypes, what
+  bushy tree that costs a fifth more than in one archetype and is still
+  less than half of unsorted; in a deep, narrow one it is twice as slow
+  as unsorted, a loop for every few rows. Across archetypes, what
   children send to a parent is combined by archetype and then by row, not
   in the order unsorted has, so sums of floats differ in their last bits
   between the two.
