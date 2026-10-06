@@ -48,6 +48,8 @@ public:
       return rewriter.getIntegerType(layout.entities.idBits);
     if (auto text = dyn_cast<TextType>(type))
       return text.getStorageType();
+    if (auto named = dyn_cast<EnumType>(type))
+      return named.getStorageType();
     return type;
   }
   /// Convert a value to and from its stored form. Entity ids cross with a
@@ -3627,6 +3629,8 @@ static Value worldPointer(IRRewriter &rewriter, Location loc, Value arena) {
 
 /// A bool crosses to C as a byte.
 static Type externParamType(Type type) {
+  if (auto named = dyn_cast<EnumType>(type))
+    return named.getStorageType();
   return type.isInteger(1) ? IntegerType::get(type.getContext(), 8) : type;
 }
 
@@ -3659,34 +3663,57 @@ static Type functionParamType(Type type) {
   return externParamType(type);
 }
 
-/// Declare the C function of an extern fn or proc, `ent_<name>(params...)`.
+/// Declare the C function of an extern fn or proc, `ent_<name>(params...)`,
+/// or make the function of a fn with a body, under the same name: its
+/// body with its values as they are.
 static LogicalResult declareFunction(IRRewriter &rewriter, FunctionOp function,
                                      SymbolTable &symbols) {
   std::string name = function.getCName();
   if (Operation *other = symbols.lookup(name)) {
-    InFlightDiagnostic diag = function.emitError("is called as the C function '")
-                              << name << "', a name this program also declares";
+    InFlightDiagnostic diag =
+        function.emitError(function.isDefined()
+                               ? "is lowered to the function '"
+                               : "is called as the C function '")
+        << name << "', a name this program also declares";
     diag.attachNote(other->getLoc()) << "declared here";
     return diag;
   }
+  bool defined = function.isDefined();
   SmallVector<Type> inputs, results;
   for (Type type : function.getParams().getAsValueRange<TypeAttr>())
-    inputs.push_back(functionParamType(type));
-  if (std::optional<Type> result = function.getResult())
-    results.push_back(externParamType(*result));
+    inputs.push_back(defined ? type : functionParamType(type));
+  for (Type result : function.getResultTypes())
+    results.push_back(defined ? result : externParamType(result));
   rewriter.setInsertionPoint(function);
   auto func = func::FuncOp::create(rewriter, function.getLoc(), name,
                                    rewriter.getFunctionType(inputs, results));
   func.setPrivate();
+  if (!defined)
+    return success();
+  rewriter.inlineRegionBefore(function.getBody(), func.getBody(),
+                              func.getBody().end());
+  Operation *terminator = func.getBody().front().getTerminator();
+  SmallVector<Value> values(terminator->getOperands());
+  rewriter.setInsertionPoint(terminator);
+  rewriter.replaceOpWithNewOp<func::ReturnOp>(terminator, values);
   return success();
 }
 
-/// Replace `invoke` by a call of the C function. A text argument is put
+/// Replace `invoke` by a call of the function. One with a body (`defined`)
+/// takes the values as they are. For a C function a text argument is put
 /// on the stack for the call, which gets its address; the stack is given
 /// back right after, since the call may sit in a loop.
 static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
-                        FunctionOp function) {
+                        FunctionOp function, bool defined) {
   Location loc = invoke.getLoc();
+  if (defined) {
+    rewriter.setInsertionPoint(invoke);
+    auto call = func::CallOp::create(rewriter, loc, function.getCName(),
+                                     invoke->getResultTypes(),
+                                     invoke.getArgs());
+    rewriter.replaceOp(invoke, call.getResults());
+    return;
+  }
   bool hasText = llvm::any_of(invoke.getArgs(), [](Value arg) {
     return isa<TextType>(arg.getType());
   });
@@ -3715,6 +3742,11 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     } else if (arg.getType().isInteger(1)) {
       args.push_back(
           arith::ExtUIOp::create(rewriter, loc, rewriter.getI8Type(), arg));
+    } else if (auto named = dyn_cast<EnumType>(arg.getType())) {
+      // An enum crosses as the byte that numbers its case.
+      args.push_back(UnrealizedConversionCastOp::create(
+                         rewriter, loc, named.getStorageType(), arg)
+                         .getResult(0));
     } else {
       args.push_back(arg);
     }
@@ -3730,6 +3762,10 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     if (resultTypes.front().isInteger(1))
       result = arith::TruncIOp::create(rewriter, loc, rewriter.getI1Type(),
                                        result);
+    else if (isa<EnumType>(resultTypes.front()))
+      result = UnrealizedConversionCastOp::create(rewriter, loc,
+                                                  resultTypes.front(), result)
+                   .getResult(0);
     results.push_back(result);
   }
   if (scope) {
@@ -4079,7 +4115,9 @@ static void warnAboutReactiveQueries(ModuleOp module) {
 /// casts the lowering placed at loads and stores.
 static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
   MLIRContext *context = module.getContext();
-  auto isEntity = [](Type type) { return isa<EntityType, TextType>(type); };
+  auto isEntity = [](Type type) {
+    return isa<EntityType, TextType, EnumType>(type);
+  };
   bool used = module
                   .walk([&](Operation *op) {
                     for (Region &region : op->getRegions())
@@ -4102,6 +4140,8 @@ static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
   });
   converter.addConversion(
       [](TextType text) -> Type { return text.getStorageType(); });
+  converter.addConversion(
+      [](EnumType named) -> Type { return named.getStorageType(); });
   auto materialize = [](OpBuilder &builder, Type type, ValueRange inputs,
                         Location loc) -> Value {
     return UnrealizedConversionCastOp::create(builder, loc, type, inputs)
@@ -4242,9 +4282,14 @@ struct EntLowerToLoops
       if (failed(declareExtern(rewriter, external, symbols)))
         return signalPassFailure();
 
-    for (FunctionOp function : module.getOps<FunctionOp>())
+    // The functions with a body, which lowering takes out of them.
+    SmallPtrSet<Operation *, 8> defined;
+    for (FunctionOp function : module.getOps<FunctionOp>()) {
+      if (function.isDefined())
+        defined.insert(function);
       if (failed(declareFunction(rewriter, function, symbols)))
         return signalPassFailure();
+    }
 
     // Schedules first: fusion reads the systems' bodies before they are
     // lowered themselves.
@@ -4298,9 +4343,10 @@ struct EntLowerToLoops
 
     SmallVector<InvokeOp> invokes;
     module.walk([&](InvokeOp invoke) { invokes.push_back(invoke); });
-    for (InvokeOp invoke : invokes)
-      lowerInvoke(rewriter, invoke,
-                  symbols.lookup<FunctionOp>(invoke.getCallee()));
+    for (InvokeOp invoke : invokes) {
+      auto function = symbols.lookup<FunctionOp>(invoke.getCallee());
+      lowerInvoke(rewriter, invoke, function, defined.contains(function));
+    }
 
     for (auto main : llvm::make_early_inc_range(module.getOps<MainOp>()))
       if (failed(lowerMain(rewriter, main, module, *layout, arenaType)))
@@ -4308,7 +4354,7 @@ struct EntLowerToLoops
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
       if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp, ExternOp,
-              FunctionOp>(op))
+              FunctionOp, EnumOp>(op))
         rewriter.eraseOp(&op);
 
     if (failed(convertEntityTypes(module, layout->entities.idBits)))

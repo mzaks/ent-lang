@@ -276,11 +276,12 @@ static LogicalResult verifyRecord(Operation *op, ArrayAttr names,
     // per field, which needs every field to be a plain value. An entity id
     // is one too (a relation).
     Type type = cast<TypeAttr>(typeAttr).getValue();
-    if (!isa<IntegerType, FloatType, IndexType, EntityType, TextType>(type))
+    if (!isa<IntegerType, FloatType, IndexType, EntityType, TextType,
+             EnumType>(type))
       return op->emitOpError("field '")
              << name << "' has type " << type
-             << "; only integer, float, index, entity and text fields are "
-                "supported";
+             << "; only integer, float, index, entity, text and enum fields "
+                "are supported";
     if (auto text = dyn_cast<TextType>(type))
       if (text.getCapacity() == 0 || text.getCapacity() > TextType::kMaxCapacity)
         return op->emitOpError("field '")
@@ -601,16 +602,143 @@ LogicalResult ExternOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 
 /// The types a value can cross to C with.
 static bool crossesToC(Type type) {
-  return isa<FloatType, TextType>(type) || type.isSignlessInteger();
+  return isa<FloatType, TextType, EnumType>(type) || type.isSignlessInteger();
+}
+
+//===----------------------------------------------------------------------===//
+// EnumOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult EnumOp::verify() {
+  if (getCases().empty())
+    return emitOpError("has no cases");
+  if (getCases().size() > EnumType::kMaxCases)
+    return emitOpError("has ")
+           << getCases().size() << " cases; an enum has at most "
+           << unsigned(EnumType::kMaxCases);
+  llvm::StringSet<> seen;
+  for (StringRef name : getCases().getAsValueRange<StringAttr>())
+    if (!seen.insert(name).second)
+      return emitOpError("has duplicate case '") << name << "'";
+  return success();
+}
+
+// [proc] @name(T, U) [-> R]
+// @name(%a: T, %b: U) -> R { body }
+ParseResult FunctionOp::parse(OpAsmParser &parser, OperationState &result) {
+  Builder &builder = parser.getBuilder();
+  if (succeeded(parser.parseOptionalKeyword("proc")))
+    result.addAttribute(getProcAttrName(result.name), builder.getUnitAttr());
+  StringAttr name;
+  if (parser.parseSymbolName(name, SymbolTable::getSymbolAttrName(),
+                             result.attributes) ||
+      parser.parseLParen())
+    return failure();
+  // Named parameters belong to a body, bare types to a declaration.
+  SmallVector<OpAsmParser::Argument> args;
+  SmallVector<Type> types;
+  if (failed(parser.parseOptionalRParen())) {
+    do {
+      OpAsmParser::Argument arg;
+      OptionalParseResult named =
+          parser.parseOptionalArgument(arg, /*allowType=*/true);
+      if (named.has_value()) {
+        if (failed(*named))
+          return failure();
+        args.push_back(arg);
+        types.push_back(arg.type);
+      } else {
+        Type type;
+        if (parser.parseType(type))
+          return failure();
+        types.push_back(type);
+      }
+    } while (succeeded(parser.parseOptionalComma()));
+    if (parser.parseRParen())
+      return failure();
+  }
+  if (!args.empty() && args.size() != types.size())
+    return parser.emitError(parser.getNameLoc(),
+                            "names all of its parameters or none");
+  result.addAttribute(getParamsAttrName(result.name),
+                      builder.getTypeArrayAttr(types));
+  // `-> T`, or `-> (T, U)` for several values.
+  SmallVector<Type> results;
+  if (succeeded(parser.parseOptionalArrow())) {
+    if (succeeded(parser.parseOptionalLParen())) {
+      if (parser.parseTypeList(results) || parser.parseRParen())
+        return failure();
+    } else {
+      Type type;
+      if (parser.parseType(type))
+        return failure();
+      results.push_back(type);
+    }
+  }
+  result.addAttribute(getResultsAttrName(result.name),
+                      builder.getTypeArrayAttr(results));
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+  Region *body = result.addRegion();
+  OptionalParseResult parsed = parser.parseOptionalRegion(*body, args);
+  if (parsed.has_value() && failed(*parsed))
+    return failure();
+  if (!parsed.has_value() && !args.empty())
+    return parser.emitError(parser.getNameLoc(),
+                            "names its parameters, so it needs a body");
+  return success();
+}
+
+void FunctionOp::print(OpAsmPrinter &p) {
+  if (getProc())
+    p << " proc";
+  p << " ";
+  p.printSymbolName(getSymName());
+  if (isDefined()) {
+    printArgs(p, getBody());
+  } else {
+    p << "(";
+    printParamTypes(p, *this, getParams());
+    p << ")";
+  }
+  SmallVector<Type> results = getResultTypes();
+  if (results.size() == 1)
+    p << " -> " << results.front();
+  else if (!results.empty())
+    p << " -> (" << results << ")";
+  p.printOptionalAttrDictWithKeyword(
+      (*this)->getAttrs(), {getSymNameAttrName(), getParamsAttrName(),
+                            getResultsAttrName(), getProcAttrName()});
+  if (isDefined()) {
+    p << " ";
+    p.printRegion(getBody(), /*printEntryBlockArgs=*/false,
+                  /*printBlockTerminators=*/true);
+  }
 }
 
 LogicalResult FunctionOp::verify() {
+  if (isDefined()) {
+    // The program's own: any value may go in and come out.
+    if (getProc())
+      return emitOpError("is a proc with a body, which is not supported yet");
+    if (getResults().empty())
+      return emitOpError("has a body, so it gives a value ('-> type')");
+    if (!getBody().hasOneBlock())
+      return emitOpError("body must be one block");
+    SmallVector<Type> params(getParams().getAsValueRange<TypeAttr>());
+    if (TypeRange(params) != TypeRange(getBody().front().getArgumentTypes()))
+      return emitOpError("body's arguments do not match the parameters (")
+             << params << ")";
+    return verifyNoRefParams(*this, getBody());
+  }
   for (auto [index, type] :
        llvm::enumerate(getParams().getAsValueRange<TypeAttr>()))
     if (!crossesToC(type))
       return emitOpError("parameter #")
              << index << " has type " << type
              << ", which cannot be passed to C";
+  if (getResults().size() > 1)
+    return emitOpError("gives several values, which C cannot give back");
   if (std::optional<Type> result = getResult()) {
     if (isa<TextType>(*result))
       return emitOpError("gives a text, which C cannot give back yet");
@@ -621,10 +749,43 @@ LogicalResult FunctionOp::verify() {
   return success();
 }
 
+LogicalResult FunctionOp::verifyRegions() {
+  if (!isDefined())
+    return success();
+  auto yield = dyn_cast<YieldOp>(&getBody().front().back());
+  SmallVector<Type> results = getResultTypes();
+  if (!yield || TypeRange(results) != yield.getResults().getTypes()) {
+    InFlightDiagnostic diag =
+        emitOpError("body must end with 'ent.yield' of ");
+    if (results.size() == 1)
+      return diag << "one " << results.front() << ", the function's value";
+    return diag << "(" << results << "), the function's values";
+  }
+  // Only computing: nothing of the world, nothing that acts.
+  LogicalResult result = success();
+  getBody().walk([&](Operation *op) {
+    if (op == yield.getOperation() ||
+        op->getName().getDialectNamespace() != "ent")
+      return;
+    auto invoke = dyn_cast<InvokeOp>(op);
+    if (invoke && !invoke.getProc())
+      return;
+    if (succeeded(result))
+      result = op->emitOpError(invoke ? "calls a proc in a function's body; "
+                                        "a function only computes"
+                                      : "cannot be in a function's body; a "
+                                        "function only computes from its "
+                                        "parameters");
+  });
+  return result;
+}
+
 LogicalResult InvokeOp::verify() {
-  if (!(*this)->getParentOfType<SystemOp>())
-    return emitOpError("must be inside 'ent.system'; conditions and the "
-                       "entry point only read uniques and compute");
+  if (!(*this)->getParentOfType<SystemOp>() &&
+      !(*this)->getParentOfType<FunctionOp>())
+    return emitOpError("must be inside 'ent.system' or a function's body; "
+                       "conditions and the entry point only read uniques "
+                       "and compute");
   return success();
 }
 
@@ -638,9 +799,8 @@ LogicalResult InvokeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     return emitOpError("argument types (")
            << getArgs().getTypes() << ") do not match the parameters ("
            << params << ") of function " << getCalleeAttr();
-  std::optional<Type> declared = function.getResult();
-  Type given = getResult() ? getResult().getType() : Type();
-  if ((declared ? *declared : Type()) != given)
+  SmallVector<Type> declared = function.getResultTypes();
+  if (TypeRange(declared) != getResults().getTypes())
     return emitOpError("result does not match what function ")
            << getCalleeAttr() << " gives";
   if (function.getProc() != getProc())

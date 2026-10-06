@@ -1,0 +1,56 @@
+// Fns that give several values, end to end.
+import console
+component Ghost { kind: i32, col: i32, row: i32 }
+default_capacity 8
+unique N: i32
+unique Pac { col: i32, row: i32 }
+
+fn step(col: i32, row: i32, way: i32) -> (i32, i32) {
+  let dx = if way == 0 { 1 } else if way == 2 { -1 } else { 0 }
+  let dy = if way == 1 { 1 } else if way == 3 { -1 } else { 0 }
+  (col + dx, row + dy)
+}
+// An `if` whose branches give them, a call that gives them on.
+fn target(kind: i32, scatter: bool, pcol: i32, prow: i32) -> (i32, i32) {
+  if scatter {
+    let corner = if kind < 2 { 0 } else { 30 }
+    (if kind % 2 == 0 { 26 } else { 1 }, corner)
+  } else if kind == 1 {
+    step(pcol, prow, 3)
+  } else {
+    (pcol, prow)
+  }
+}
+fn divide(a: i64, b: i64) -> (i64, i64, bool) {
+  var q: i64 = 0
+  var r = a
+  for i in 0..100 { if r >= b { r -= b  q += 1 } }
+  (q, r, r == 0)
+}
+fn name_and_size(kind: i32) -> (text[8], f32) {
+  if kind == 0 { ("red", 1.5) } else { ("other", 2.0) }
+}
+
+world {
+  Pac.col = 13
+  Pac.row = 23
+  for kind in 0..3 { spawn { Ghost { kind: kind, col: kind, row: 5 } } }
+}
+system show() {
+  N += 1
+  let (q, r, even) = divide(17, 5)
+  var (a, b) = step(1, 1, 0)
+  if q == 3 { a += 100 }
+  let (x, y) = if a > 50 { (1.5, 2) } else { (2.5, 3) }
+  spawn { Print { line: "{q} {r} {even} {a} {b} {x} {y}" } }
+  for g: mut Ghost {
+    let (tc, tr) = target(g.kind, N > 1, Pac.col, Pac.row)
+    let (c, r2) = step(g.col, g.row, g.kind)
+    let (name, size) = name_and_size(g.kind)
+    g.col = c
+    g.row = r2
+    spawn { Print { line: "{name} {size} at {g.col},{g.row} to {tc},{tr}" } }
+  }
+}
+schedule frame() { show() write() clear() }
+main { loop { frame() } until N == 2 }

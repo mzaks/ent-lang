@@ -1,0 +1,15 @@
+// Fns that give several values, through the build driver: given as
+// '(a, b)', by a call, or by the branches of an 'if', and taken apart with
+// 'let (a, b) = ...'.
+// RUN: %ent run %S/Inputs/tuples.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/tuples.ent | FileCheck %s
+
+// CHECK:      3 2 false 102 1 1.5 2
+// CHECK-NEXT: red 1.5 at 1,5 to 13,23
+// CHECK-NEXT: other 2.0 at 1,6 to 13,22
+// CHECK-NEXT: other 2.0 at 1,5 to 13,23
+// CHECK-NEXT: 3 2 false 102 1 1.5 2
+// CHECK-NEXT: red 1.5 at 2,5 to 26,0
+// CHECK-NEXT: other 2.0 at 1,7 to 1,0
+// CHECK-NEXT: other 2.0 at 0,5 to 26,30
+// CHECK-NOT:  {{.}}

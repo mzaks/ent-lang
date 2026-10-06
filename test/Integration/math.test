@@ -1,0 +1,16 @@
+// The math module (devices/math.ent) through the build driver: `import
+// math` brings fns for f32 (`sin`), f64 (`sin64`) and i32 (`iabs`); those
+// of the machine's math library are C (devices/math.c), the rest ent-lang.
+// RUN: %ent run %S/Inputs/math_use.ent | FileCheck %s
+// They are fns: a `for` that calls them may run on all cores.
+// RUN: %ent run --parallel %S/Inputs/math_use.ent | FileCheck %s
+
+// CHECK:      100.0 0.0 at 0.0
+// CHECK-NEXT: 71.0 71.0 at 45.0
+// CHECK-NEXT: 0.0 100.0 at 90.0
+// CHECK-NEXT: sqrt 1.414214 pow 1024.0 exp 2.718282 log 2.0 log2 3.0
+// CHECK-NEXT: floor -2.0 ceil -1.0 round 3.0 trunc -1.0 fmod 1.5 fract 0.75
+// CHECK-NEXT: abs 2.5 7 sign -1.0 1 clamp 1.0 0 lerp 12.5
+// CHECK-NEXT: length 5.0 distance 5.0 ipow 81 pi 3.141593 tau 6.283185
+// CHECK-NEXT: 64: 1.414214 1.0 3.141593 1.25 2.0 1.414214
+// CHECK-NOT:  {{.}}

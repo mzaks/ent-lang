@@ -1,0 +1,27 @@
+// The sound device (devices/sound.ent) and a program that uses it compile:
+// a sound is an entity the program spawns, and what plays it is the
+// device's system, which calls its C with values only. Running it needs
+// raylib, which a test cannot ask for.
+// RUN: ent-translate --import-ent %S/Inputs/sound_use.ent \
+// RUN:     -I %S/../../devices -o %t.mlir
+// RUN: ent-translate --ent-to-c-extern-header %t.mlir | FileCheck %s
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s --check-prefix=LLVM
+// A program that imports it and makes no sound is no trouble either.
+// RUN: echo "import sound  schedule frame() { play() }  main { frame() }" > %t.ent
+// RUN: ent-translate --import-ent %t.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-lower-to-loops 2>&1 | FileCheck %s --check-prefix=QUIET
+
+// The kind of wave is an enum, which C gets as a byte with named cases.
+// CHECK-NOT: ent_world
+// CHECK:     typedef uint8_t ent_sound_Wave;
+// CHECK:       ent_sound_Wave_Square = 0,
+// CHECK:       ent_sound_Wave_Noise = 3
+// CHECK:     void ent_sound_tone(float arg0, float arg1, float arg2, float arg3, float arg4, ent_sound_Wave arg5);
+// CHECK:     void ent_sound_sample(const ent_text126 *arg0, float arg1);
+
+// LLVM-DAG: declare void @ent_sound_tone(float, float, float, float, float, i8)
+// LLVM-DAG: declare void @ent_sound_sample(ptr, float)
+
+// QUIET-NOT: warning

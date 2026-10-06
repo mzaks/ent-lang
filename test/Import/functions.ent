@@ -28,6 +28,117 @@ extern proc put(line: text[30], loud: bool)
 // HEADER: double ent_seconds(void);
 extern proc seconds() -> f64;
 
+// A fn with a body is the program's own: its parameters, `let`s, and the
+// value it gives. C never hears of it.
+// CHECK:      ent.function @square(%[[X:.*]]: i64) -> i64 {
+// CHECK-NEXT:   %[[S:.*]] = arith.muli %[[X]], %[[X]] : i64
+// CHECK-NEXT:   ent.yield %[[S]] : i64
+// CHECK-NEXT: }
+// HEADER-NOT: square
+fn square(x: i64) -> i64 { x * x }
+
+// It calls other fns, its own kind and C's. A literal takes the type the
+// fn gives back, a text its capacity.
+// CHECK:      ent.function @spread(%[[ID:.*]]: i64, %[[WIDE:.*]]: i1) -> i64 {
+// CHECK:        %[[H:.*]] = ent.invoke @hash(%[[ID]]) : (i64) -> i64
+// CHECK:        %[[Q:.*]] = ent.invoke @square(%[[H]]) : (i64) -> i64
+// CHECK:        %[[R:.*]] = scf.if %[[WIDE]] -> (i64) {
+// CHECK:          scf.yield %[[Q]] : i64
+// CHECK:        } else {
+// CHECK:          %[[SEVEN:.*]] = arith.constant 7 : i64
+// CHECK:          scf.yield %[[SEVEN]] : i64
+// CHECK:        ent.yield %[[R]] : i64
+// HEADER-NOT: spread
+fn spread(id: i64, wide: bool) -> i64 {
+  let h = hash(id)
+  let q = square(h)
+  if wide { q } else { 7 }
+}
+// CHECK: ent.function @title(%{{.*}}: !ent.text<30>, %{{.*}}: i64) -> !ent.text<30> {
+// CHECK:   ent.yield %{{.*}} : !ent.text<30>
+fn title(name: text[30], id: i64) -> text[30] { "{name} #{id}" }
+// `else if` in a value: the `else` branch is that `if`. A cast after the
+// last brace is of the whole, whose literals are written in its type.
+// CHECK:      ent.function @sign(%[[X:.*]]: i64) -> f32 {
+// CHECK:        %[[R:.*]] = scf.if %{{.*}} -> (f32) {
+// CHECK:          scf.yield %{{.*}} : f32
+// CHECK-NEXT:   } else {
+// CHECK:          %[[INNER:.*]] = scf.if %{{.*}} -> (f32) {
+// CHECK:          } else {
+// CHECK:          scf.yield %[[INNER]] : f32
+// CHECK:        ent.yield %[[R]] : f32
+fn sign(x: i64) -> f32 {
+  if x > 0 { 1 } else if x < 0 { -1 } else { 0 } as f32
+}
+// Statements come before the value: `let`, `var`, assignments, `if`s and
+// counted loops. They are the values they compute, as in a system.
+// CHECK:      ent.function @count(%[[TEXT:.*]]: !ent.text<30>, %[[BYTE:.*]]: i8) -> i32 {
+// CHECK:        %[[ZERO:.*]] = arith.constant 0 : i32
+// CHECK:        %[[N:.*]] = scf.for %{{.*}} iter_args(%[[SOFAR:.*]] = %[[ZERO]]) -> (i32) {
+// CHECK:          %[[NEXT:.*]] = scf.if %{{.*}} -> (i32) {
+// CHECK:            %[[MORE:.*]] = arith.addi %[[SOFAR]], %{{.*}} : i32
+// CHECK-NEXT:       scf.yield %[[MORE]] : i32
+// CHECK-NEXT:     } else {
+// CHECK-NEXT:       scf.yield %[[SOFAR]] : i32
+// CHECK-NEXT:     }
+// CHECK-NEXT:     scf.yield %[[NEXT]] : i32
+// CHECK-NEXT:   }
+// CHECK-NEXT:   ent.yield %[[N]] : i32
+fn count(text: text[30], byte: i8) -> i32 {
+  var n = 0
+  for i in 0..len(text) {
+    if text[i] == byte { n += 1 }
+  }
+  n
+}
+// An `if` with more of the body after it is a statement; the one that is
+// the last thing in the body is the value.
+// CHECK:      ent.function @clamp(%[[X:.*]]: i32, %[[LOW:.*]]: i32, %[[HIGH:.*]]: i32) -> i32 {
+// CHECK:        %[[Y:.*]] = scf.if %{{.*}} -> (i32) {
+// CHECK-NEXT:     scf.yield %[[LOW]] : i32
+// CHECK:        %[[TWICE:.*]] = arith.muli %[[Y]], %{{.*}} : i32
+// CHECK:        %[[R:.*]] = scf.if %{{.*}} -> (i32) {
+// CHECK:        } else {
+// CHECK-NEXT:     scf.yield %[[TWICE]] : i32
+// CHECK-NEXT:   }
+// CHECK-NEXT:   ent.yield %[[R]] : i32
+fn clamp(x: i32, low: i32, high: i32) -> i32 {
+  var y = x
+  if y < low { y = low } else if y > high { y = high }
+  let twice = y * 2;
+  if twice > 100 { 100 } else { twice }
+}
+// A value that starts with a name is not an assignment.
+// CHECK: ent.function @same(%[[A:.*]]: i32, %[[B:.*]]: i32) -> i1 {
+// CHECK-NEXT: %[[EQ:.*]] = arith.cmpi eq, %[[A]], %[[B]] : i32
+// CHECK-NEXT: ent.yield %[[EQ]] : i1
+fn same(a: i32, b: i32) -> bool { a == b }
+// After an `if` statement, a `-` starts the value; an `if` that the value
+// starts with may go on.
+// CHECK:      ent.function @either(%[[C:.*]]: i1, %[[X:.*]]: i32) -> i32 {
+// CHECK:        %[[Y:.*]] = scf.if %[[C]] -> (i32) {
+// CHECK:        %[[NEG:.*]] = arith.subi %{{.*}}, %[[Y]] : i32
+// CHECK-NEXT:   ent.yield %[[NEG]] : i32
+fn either(c: bool, x: i32) -> i32 {
+  var y = x
+  if c { y = 1 }
+  -y
+}
+// CHECK:      ent.function @more(%[[C:.*]]: i1, %[[X:.*]]: i32) -> i32 {
+// CHECK:        %[[P:.*]] = scf.if %[[C]] -> (i32) {
+// CHECK:        %[[SUM:.*]] = arith.addi %[[P]], %[[X]] : i32
+// CHECK-NEXT:   ent.yield %[[SUM]] : i32
+fn more(c: bool, x: i32) -> i32 {
+  if c { 1 } else { 2 } + x
+}
+
+// And itself.
+// CHECK: ent.function @gcd(%[[A:.*]]: i64, %[[B:.*]]: i64) -> i64 {
+// CHECK:     %{{.*}} = ent.invoke @gcd(%[[B]], %{{.*}}) : (i64, i64) -> i64
+fn gcd(a: i64, b: i64) -> i64 {
+  if b == 0 { a } else { gcd(b, a % b) }
+}
+
 // CHECK-LABEL: ent.system @run() {
 system run() {
   // A call is an expression where it gives a value...
@@ -38,6 +149,12 @@ system run() {
     // CHECK: %[[H:.*]] = ent.invoke @hash(%{{.*}}) : (i64) -> i64
     // CHECK: arith.addi %[[H]]
     n.id = hash(n.id) + 1
+    // A fn of the program's is called like one of C's.
+    // CHECK: %[[G:.*]] = ent.invoke @gcd(%{{.*}}, %{{.*}}) : (i64, i64) -> i64
+    // CHECK: %[[W:.*]] = ent.invoke @spread(%[[G]], %{{.*}}) : (i64, i1) -> i64
+    n.id = spread(gcd(n.id, 12), true)
+    // CHECK: ent.invoke @title(%{{.*}}, %{{.*}}) : (!ent.text<30>, i64) -> !ent.text<30>
+    n.text = title("item", n.id)
     // ... and a statement where it acts. A literal takes the parameter's
     // type, a text its capacity.
     // CHECK: ent.invoke proc @put(%{{.*}}, %{{.*}}) : (!ent.text<30>, i1) -> ()

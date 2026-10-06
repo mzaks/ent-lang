@@ -1,0 +1,99 @@
+// Fns with a body end to end: a program of .ent files only, whose systems
+// compute with functions of its own.
+import console
+
+component Cell { col: i32, row: i32 }
+default_capacity 64
+
+// Five rows of eight tiles.
+unique Maze: text[40]
+unique Frame: i32
+
+fn square(x: i32) -> i32 { x * x }
+// Right, down, left, up.
+fn dx(dir: i32) -> i32 {
+  if dir == 0 { 1 } else if dir == 2 { -1 } else { 0 }
+}
+// A text is a value like any other: it goes in whole.
+fn wall(maze: text[40], col: i32, row: i32) -> bool {
+  maze[row * 8 + col] == '#'
+}
+fn distance(ax: i32, ay: i32, bx: i32, by: i32) -> i32 {
+  let x = ax - bx
+  let y = ay - by
+  square(x) + square(y)
+}
+// A fn may call itself.
+fn gcd(a: i64, b: i64) -> i64 { if b == 0 { a } else { gcd(b, a % b) } }
+fn fib(n: i32) -> i32 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
+fn half(x: f32) -> f32 { x / 2 }
+// And give a text back.
+fn kind(free: bool) -> text[12] { if free { "free" } else { "wall" } }
+fn stars(n: i32, sofar: text[30]) -> text[30] {
+  if n == 0 { sofar } else { stars(n - 1, sofar + "*") }
+}
+
+// Statements before the value: vars, loops, `if`s.
+fn count(text: text[40], byte: i8) -> i32 {
+  var n = 0
+  for i in 0..len(text) {
+    if text[i] == byte { n += 1 }
+  }
+  n
+}
+fn power(base: i64, exponent: i32) -> i64 {
+  var result: i64 = 1
+  for i in 0..exponent { result *= base }
+  result
+}
+// An `if` that is a statement, then the `if` that is the value.
+fn clamp(x: i32, low: i32, high: i32) -> i32 {
+  var y = x
+  if y < low { y = low } else if y > high { y = high }
+  let twice = y * 2
+  if twice > 100 { 100 } else { twice }
+}
+fn collatz(start: i64) -> i32 {
+  var n = start
+  var steps = 0
+  for i in 0..1000 {
+    if n != 1 {
+      steps += 1
+      if n % 2 == 0 { n /= 2 } else { n = 3 * n + 1 }
+    }
+  }
+  steps
+}
+fn bar(n: i32) -> text[30] {
+  var line: text[30] = ""
+  for i in 0..n { line += "=" }
+  line
+}
+
+world {
+  Maze = "########" + "#o..#..#" + "#.##.#.#" + "#......#" + "########"
+  for i in 0..4 { spawn { Cell { col: i + 1, row: 1 } } }
+}
+
+system show() {
+  Frame += 1
+  let line = stars(5, "")
+  spawn { Print { line: "gcd {gcd(1071, 462)} fib {fib(20)} half {half(5.0)} {line}" } }
+  let walls = count(Maze, '#')
+  spawn { Print { line: "walls {walls} power {power(3, 13)} clamp {clamp(-5, 0, 9)} {clamp(70, 0, 60)} {clamp(4, 0, 9)}" } }
+  spawn { Print { line: "collatz {collatz(27)} {bar(6)}" } }
+  for c: Cell {
+    let free = !wall(Maze, c.col, c.row)
+    spawn { Print { line: "{c.col},{c.row} {kind(free)}: {distance(c.col, c.row, 6, 3)} away, dx {dx(c.col % 3)}" } }
+  }
+}
+
+schedule frame() {
+  show()
+  write()
+  clear()
+}
+
+main {
+  loop { frame() } until Frame == 1
+}

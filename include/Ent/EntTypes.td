@@ -56,4 +56,24 @@ def Ent_TextType : Ent_Type<"Text", "text"> {
   }];
 }
 
+def Ent_EnumType : Ent_Type<"Enum", "enum"> {
+  let summary = "One of the cases an `ent.enum` names";
+  let description = [{
+    `!ent.enum<@Way>` is a value of the enum `@Way`: one of its cases, and
+    a type of its own, so a `@Way` does not go where a `@Mode` belongs. It
+    is stored as one byte, the number of the case (the first is 0), and
+    computed with as that byte: `builtin.unrealized_conversion_cast` takes
+    a value to and from `i8`, as for a text and its integer.
+  }];
+  let parameters = (ins "FlatSymbolRefAttr":$name);
+  let hasCustomAssemblyFormat = 1;
+  let extraClassDeclaration = [{
+    /// At most this many cases: what a byte tells apart.
+    static constexpr unsigned kMaxCases = 256;
+    ::mlir::IntegerType getStorageType() const {
+      return ::mlir::IntegerType::get(getContext(), 8);
+    }
+  }];
+}
+
 #endif // ENT_TYPES

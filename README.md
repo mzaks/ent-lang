@@ -137,12 +137,14 @@ statements of `world`, the state the program starts with. What the
 language cannot do itself (input, output, the time) is an `extern proc`,
 and a computation better written in C an `extern fn`: functions
 implemented in C that systems call with values. They never get the world,
-so everything that reads or writes it is ent-lang, and checked:
+so everything that reads or writes it is ent-lang, and checked. A `fn`
+with a body is the same kind of function written in ent-lang:
 
 ```
 extern proc put(line: text[126])
 extern proc wait_until(due: f64) -> f64
 extern fn noise(x: f32, y: f32) -> f32
+fn square(x: f32) -> f32 { x * x }
 
 system write() {
   for p: Print { put(p.line) }
@@ -199,9 +201,14 @@ call, which `tools/ent` compiles against the declarations generated for
 them (`ent_extern.h`, which has no world in it). Instead of `name.c` it
 may be `name.cpp`, an object or archive (`name.o`, `name.a`), or a command
 that builds one (`name.build`), so a device can be written in any language
-that defines C functions; see [`docs/syntax.md`](docs/syntax.md). Two come
-with the compiler, in `devices/`, and a third that needs
+that defines C functions; see [`docs/syntax.md`](docs/syntax.md). Three
+come with the compiler, in `devices/`, and two more that need
 [raylib](https://www.raylib.com) installed:
+
+- `math`: `sqrt`, `sin`, `cos`, `atan2`, `floor`, `pow` and the like from
+  the machine's math library, and `abs`, `clamp`, `lerp`, `length`, `pi()`
+  and more written in ent-lang on top. All are fns, for `f32` by their
+  plain name and for `f64` with `64` at its end.
 
 - `console`: a program prints a line by spawning `Print { line: "..." }`;
   `write()` puts the pending lines out in order, `clear()` takes them
@@ -212,15 +219,27 @@ with the compiler, in `devices/`, and a third that needs
 
 - `window`: a window to draw in, with the keys and the mouse.
   `begin()` opens it, fills `Window`, `Mouse` and `Keys` and clears the
-  picture; systems then draw with `rect`, `circle`, `line` and `label`
-  (colours are `0xRRGGBB`); `present()` shows the frame and holds
+  picture; systems then draw with `rect`, `circle`, `sector`, `line` and
+  `label` (colours are `0xRRGGBB`); `present()` shows the frame and holds
   `Window.fps`. `examples/bounce.ent` is a program with it:
-  `tools/ent run examples/bounce.ent`. A module's `name.link` names the
+  `tools/ent run examples/bounce.ent`, and `examples/pacman.ent` a whole
+  game: the maze is a text that fns read, the pellets and ghosts are
+  entities, ways, modes and the game's state are enums, and the only C is
+  that of the devices and the math module. A module's `name.link` names the
   libraries it needs (`-lraylib`).
 
+- `sound`: a program makes a sound by spawning a `Tone { pitch, to,
+  seconds, after, volume, wave }`, made up on the spot (a square,
+  triangle or sine wave or a hiss, sliding from one pitch to another), or
+  a `Sample { file, volume }`, a sound file; `play()`, once a frame,
+  starts what is pending. `Sound.volume` and `Sound.off` are for
+  everything. `examples/pacman.ent` has its tune and noises from it,
+  without a file.
+
 All keep their state in the world, and their logic in ent-lang: their C is
-`put` and `flush` for the console, `wait_until` for the clock, and for the
-window one small function for each call into raylib.
+`put` and `flush` for the console, `wait_until` for the clock, for the
+window one small function for each call into raylib, and for sound `tone`
+and `sample`.
 
 ## The dialect today
 
@@ -409,6 +428,21 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   several threads, or be dropped. A `proc` acts on the outside: a system
   that calls one keeps its place among all other systems, is not fused,
   and a query that calls one visits its entities in order.
+  `ent.function @square(%x: f32) -> f32 { ... ent.yield %y : f32 }` is a
+  plain function with a body, the program's own: its parameters are the
+  body's arguments and `ent.yield` gives its value. The body only
+  computes, calling other plain functions or itself, and is lowered to a
+  private function `ent_square`, which gets its values as they are (a
+  text as the integer that holds it) and which LLVM inlines where that
+  pays. It may give several values (`-> (f32, i32)`), which are then the
+  results of the function and of its calls. Its calls are `ent.invoke` like any other, so access analysis,
+  staging and parallel loops treat both kinds alike.
+- `ent.enum @Way ["Right", "Down", "Left", "Up"]` declares an enum, and
+  `!ent.enum<@Way>` is the type of its values: a type of its own for
+  fields, parameters and results, stored as the byte that numbers the
+  case. As with a text and its integer, a value is computed with as that
+  byte through `builtin.unrealized_conversion_cast`, which lowering
+  removes. A generated C header has `ent_Way` and its cases.
 - `ent.main { ent.call @setup()  ent.loop { ent.call @frame(%dt) : f32 ...
   ent.yield %done : i1 } }`: the entry point, at most one. It calls
   schedules, repeats (`ent.loop` runs its body, then stops if it yielded

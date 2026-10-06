@@ -1,0 +1,702 @@
+// A maze, a mouth and four ghosts, in ent-lang only: the `window` and
+// `sound` devices and the `math` module (devices/) are the things here
+// that are not.
+//
+//   tools/ent run examples/pacman.ent
+//
+// The arrow keys steer; Enter starts again after the game is over; Escape
+// or closing the window ends the program.
+//
+// The maze is a text, a byte for each tile, which fns read: they are given
+// it like any value. The pellets and the ghosts are entities; the player,
+// of whom there is one, is a unique, so every `for` can read where he is.
+import window
+import sound
+import math
+
+// A tile is 20 pixels; the maze starts 60 pixels down, under the score.
+// 28 tiles across, 31 down: '#' a wall, '.' a pellet, 'o' a power pellet,
+// '-' the door of the ghosts' house.
+unique Maze: text[868]
+
+// What the game is doing. The first three follow each other at once: take
+// the pellets away, lay them out, put everyone in place.
+enum State { Unload, Fill, Place, Ready, Playing, Caught, Cleared, Over }
+// `timer` is the seconds the state still lasts.
+unique Game { state: State, timer: f32, level: i32, lives: i32 }
+unique Score: i32
+unique Best: i32
+// The frame's seconds (never more than a twentieth) and their sum.
+unique Tick { dt: f32, time: f32 }
+
+// The first four in the order a turn to the right goes through them.
+enum Way { Right, Down, Left, Up, Nowhere }
+// `progress` is how far he is from his tile towards the next, 0 to 1;
+// `want` the way last asked for, `face` the way he last went.
+unique Pac { col: i32, row: i32, dir: Way, want: Way, face: Way, progress: f32 }
+
+// What the entities add up in a frame.
+unique Left: i32    // pellets not eaten
+unique Munched: i32 // pellets eaten
+unique Power: i32   // power pellets eaten
+unique Catches: i32 // ghosts that caught him
+unique Eaten: i32   // ghosts he ate
+// Where the red ghost is: the cyan one aims by it.
+unique Blinky { col: i32, row: i32 }
+
+// Eating goes up and down in turns.
+unique Waka: bool
+
+// The ghosts take turns: to their corners (`scatter`), then after him.
+unique Phase { scatter: bool, timer: f32 }
+// A power pellet frightens them for `left` seconds; `chain` counts the
+// ghosts eaten on one pellet.
+unique Fright { left: f32, chain: i32 }
+
+component Pellet { col: i32, row: i32, power: bool } capacity 256
+
+enum Kind { Red, Pink, Cyan, Orange }
+// Waiting in the house, leaving it, out in the maze, eaten (eyes on their
+// way home), entering the house.
+enum Mode { Waiting, Leaving, Roaming, Eyes, Entering }
+component Ghost {
+  kind: Kind, col: i32, row: i32, dir: Way, progress: f32,
+  mode: Mode, wait: f32, scared: bool, seed: i32
+} capacity 4
+
+//===------------------------------------------------------------------===//
+// The maze
+//===------------------------------------------------------------------===//
+
+fn dx(way: Way) -> i32 {
+  if way == Way.Right { 1 } else if way == Way.Left { -1 } else { 0 }
+}
+fn dy(way: Way) -> i32 {
+  if way == Way.Down { 1 } else if way == Way.Up { -1 } else { 0 }
+}
+fn back(way: Way) -> Way { ((way as i32 + 2) % 4) as Way }
+// The tunnel: off one side is on at the other.
+fn wrap(col: i32) -> i32 { (col + 28) % 28 }
+
+// The tile one step on.
+fn step(col: i32, row: i32, way: Way) -> (i32, i32) {
+  (wrap(col + dx(way)), row + dy(way))
+}
+
+// Whether one can be on a tile; through the door only if `door`.
+fn open(maze: text[868], col: i32, row: i32, door: bool) -> bool {
+  let tile = maze[row * 28 + col]
+  tile != '#' && (door || tile != '-')
+}
+
+// Whether the tile one step on is open.
+fn free(maze: text[868], col: i32, row: i32, way: Way) -> bool {
+  let (c, r) = step(col, row, way)
+  open(maze, c, r, false)
+}
+
+// Whether a tile is a wall, as is everything around the maze.
+fn solid(maze: text[868], col: i32, row: i32) -> bool {
+  col < 0 || col > 27 || row < 0 || row > 30 || maze[row * 28 + col] == '#'
+}
+
+fn far(ax: i32, ay: i32, bx: i32, by: i32) -> i32 {
+  (ax - bx) * (ax - bx) + (ay - by) * (ay - by)
+}
+
+// Where on the screen someone is who is `progress` of the way from a tile
+// to the next.
+fn spot(col: i32, row: i32, way: Way, progress: f32) -> (f32, f32) {
+  ((col as f32 + dx(way) as f32 * progress) * 20.0 + 10.0,
+   (row as f32 + dy(way) as f32 * progress) * 20.0 + 70.0)
+}
+
+// The pitch so many half steps above a low A.
+fn note(steps: i32) -> f32 { 220.0 * pow(2.0, steps as f32 / 12.0) }
+
+//===------------------------------------------------------------------===//
+// Which way
+//===------------------------------------------------------------------===//
+
+// The player, at a tile's middle: the way he wants if it is open, else on
+// as he went, else nowhere.
+fn steer(maze: text[868], col: i32, row: i32, dir: Way, want: Way) -> Way {
+  if want != Way.Nowhere && free(maze, col, row, want) {
+    want
+  } else if dir != Way.Nowhere && free(maze, col, row, dir) {
+    dir
+  } else {
+    Way.Nowhere
+  }
+}
+
+// A ghost, at a tile's middle: the open way, not back, that ends nearest
+// to its target; of equals up before left before down before right.
+fn choose(maze: text[868], col: i32, row: i32, dir: Way,
+          tcol: i32, trow: i32) -> Way {
+  var best = 1000000
+  var pick = back(dir)
+  for k in 0..4 {
+    let way = (3 - k) as Way
+    let (c, r) = step(col, row, way)
+    if way != back(dir) && open(maze, c, r, false) {
+      let d = far(c, r, tcol, trow)
+      if d < best {
+        best = d
+        pick = way
+      }
+    }
+  }
+  pick
+}
+
+// A frightened ghost: the first open way, not back, counting from one the
+// dice give.
+fn wander(maze: text[868], col: i32, row: i32, dir: Way, dice: i32) -> Way {
+  var pick = Way.Nowhere
+  for k in 0..4 {
+    let way = ((dice + k) % 4) as Way
+    if pick == Way.Nowhere && way != back(dir) && free(maze, col, row, way) {
+      pick = way
+    }
+  }
+  if pick == Way.Nowhere { back(dir) } else { pick }
+}
+
+// Out of the house: to the middle, then up through the door.
+fn way_out(col: i32) -> Way {
+  if col < 13 { Way.Right } else if col > 14 { Way.Left } else { Way.Up }
+}
+
+// The tile a ghost in the maze is heading for. Scattering, each to its
+// corner. Otherwise red to the player, pink four tiles ahead of him, cyan
+// to the far side of the tile two ahead of him as seen from red, and orange
+// to him while far away, to its corner when near.
+fn target(kind: Kind, scatter: bool, col: i32, row: i32,
+          pcol: i32, prow: i32, pway: Way, bcol: i32, brow: i32) -> (i32, i32) {
+  let corner_col = if kind == Kind.Red || kind == Kind.Cyan { 26 } else { 1 }
+  let corner_row = if kind == Kind.Red || kind == Kind.Pink { 0 } else { 30 }
+  if scatter {
+    (corner_col, corner_row)
+  } else if kind == Kind.Red {
+    (pcol, prow)
+  } else if kind == Kind.Pink {
+    (pcol + 4 * dx(pway), prow + 4 * dy(pway))
+  } else if kind == Kind.Cyan {
+    (2 * (pcol + 2 * dx(pway)) - bcol, 2 * (prow + 2 * dy(pway)) - brow)
+  } else if far(col, row, pcol, prow) > 64 {
+    (pcol, prow)
+  } else {
+    (corner_col, corner_row)
+  }
+}
+
+// Tiles a second: eyes hurry, the tunnel and fear slow down, and every
+// level is a little faster (the player does 8).
+fn pace(mode: Mode, scared: bool, tunnel: bool, level: i32) -> f32 {
+  if mode == Mode.Eyes || mode == Mode.Entering {
+    16.0
+  } else if mode == Mode.Leaving || tunnel {
+    4.0
+  } else if scared {
+    4.5
+  } else {
+    7.0 + 0.15 * min(level, 6) as f32
+  }
+}
+
+fn ghost_color(kind: Kind) -> i32 {
+  if kind == Kind.Red { 0xff2020 } else if kind == Kind.Pink { 0xffb8ff }
+  else if kind == Kind.Cyan { 0x20ffff } else { 0xffb850 }
+}
+
+//===------------------------------------------------------------------===//
+// The game
+//===------------------------------------------------------------------===//
+
+world {
+  Window.width = 560
+  Window.height = 720
+  Window.title = "ent-lang: pacman"
+  Window.background = 0x000000
+  Window.fps = 60
+  Maze = "############################" +
+         "#............##............#" +
+         "#.####.#####.##.#####.####.#" +
+         "#o####.#####.##.#####.####o#" +
+         "#.####.#####.##.#####.####.#" +
+         "#..........................#" +
+         "#.####.##.########.##.####.#" +
+         "#.####.##.########.##.####.#" +
+         "#......##....##....##......#" +
+         "######.##### ## #####.######" +
+         "     #.##### ## #####.#     " +
+         "     #.##          ##.#     " +
+         "     #.## ###--### ##.#     " +
+         "######.## #      # ##.######" +
+         "      .   #      #   .      " +
+         "######.## #      # ##.######" +
+         "     #.## ######## ##.#     " +
+         "     #.##          ##.#     " +
+         "     #.## ######## ##.#     " +
+         "######.## ######## ##.######" +
+         "#............##............#" +
+         "#.####.#####.##.#####.####.#" +
+         "#.####.#####.##.#####.####.#" +
+         "#o..##.......  .......##..o#" +
+         "###.##.##.########.##.##.###" +
+         "###.##.##.########.##.##.###" +
+         "#......##....##....##......#" +
+         "#.##########.##.##########.#" +
+         "#.##########.##.##########.#" +
+         "#..........................#" +
+         "############################"
+  Game.lives = 3
+  Game.level = 1
+  for kind in 0..4 {
+    spawn { Ghost { kind: kind as Kind, col: 13, row: 14, dir: Way.Up,
+                    progress: 0.0, mode: Mode.Waiting, wait: 0.0,
+                    scared: false, seed: 7 + kind * 13 } }
+  }
+}
+
+// The frame's time, the keys, and the states that only wait.
+system flow() {
+  let dt = min(Window.dt, 0.05)
+  Tick.dt = dt
+  Tick.time += dt
+  if Score > Best { Best = Score }
+  if Keys.right { Pac.want = Way.Right }
+  if Keys.down { Pac.want = Way.Down }
+  if Keys.left { Pac.want = Way.Left }
+  if Keys.up { Pac.want = Way.Up }
+
+  let state = Game.state
+  let over = Game.timer - dt <= 0.0
+  if state == State.Ready || state == State.Caught || state == State.Cleared {
+    Game.timer -= dt
+  }
+  if state == State.Ready && over {
+    Game.state = State.Playing
+  } else if state == State.Caught && over {
+    Game.lives -= 1
+    Game.state = if Game.lives == 0 { State.Over } else { State.Place }
+  } else if state == State.Cleared && over {
+    Game.level += 1
+    Game.state = State.Unload
+  } else if state == State.Over && Keys.enter {
+    Score = 0
+    Game.lives = 3
+    Game.level = 1
+    Game.state = State.Unload
+  }
+}
+
+system unload() {
+  for e with Pellet { e.destroy() }
+  Game.state = State.Fill
+}
+
+system fill() {
+  for i in 0..868 {
+    let tile = Maze[i]
+    if tile == '.' || tile == 'o' {
+      spawn { Pellet { col: i % 28, row: i / 28, power: tile == 'o' } }
+    }
+  }
+  Game.state = State.Place
+}
+
+// Everyone to where a life starts.
+system place() {
+  Pac.col = 13
+  Pac.row = 23
+  Pac.dir = Way.Nowhere
+  Pac.want = Way.Left
+  Pac.face = Way.Left
+  Pac.progress = 0.0
+  Fright.left = 0.0
+  Phase.scatter = true
+  Phase.timer = 7.0
+  for g: mut Ghost {
+    let red = g.kind == Kind.Red
+    g.col = if g.kind == Kind.Cyan { 11 } else if g.kind == Kind.Orange { 15 }
+            else { 13 }
+    g.row = if red { 11 } else { 14 }
+    g.dir = if red { Way.Left } else { Way.Up }
+    g.progress = 0.0
+    g.mode = if red { Mode.Roaming } else { Mode.Waiting }
+    // Pink after a second, then one every four.
+    g.wait = g.kind as i32 as f32 * 4.0 - 3.0
+    g.scared = false
+  }
+  Game.state = State.Ready
+  Game.timer = 2.0
+  // A tune to get ready by: a letter is a note, so many half steps up.
+  let tune = "hlohlosqtqol"
+  for i in 0..len(tune) {
+    spawn { Tone { pitch: note((tune[i] - 'a') as i32), to: 0.0,
+                   seconds: 0.13, after: i as f32 * 0.15, volume: 0.25,
+                   wave: Wave.Square } }
+  }
+}
+
+system player() {
+  var col = Pac.col
+  var row = Pac.row
+  var dir = Pac.dir
+  var progress = Pac.progress
+  let want = Pac.want
+  // Back the way he came: at once, wherever he is.
+  if dir != Way.Nowhere && want == back(dir) && progress > 0.0 {
+    let (c, r) = step(col, row, dir)
+    col = c
+    row = r
+    dir = want
+    progress = 1.0 - progress
+  }
+  if progress == 0.0 { dir = steer(Maze, col, row, dir, want) }
+  if dir != Way.Nowhere {
+    progress += 8.0 * Tick.dt
+    if progress >= 1.0 {
+      let (c, r) = step(col, row, dir)
+      col = c
+      row = r
+      let next = steer(Maze, col, row, dir, want)
+      // Round a corner from the tile's middle.
+      progress = if next == dir { progress - 1.0 } else { 0.0 }
+      dir = next
+    }
+  }
+  if dir != Way.Nowhere { Pac.face = dir }
+  Pac.col = col
+  Pac.row = row
+  Pac.dir = dir
+  Pac.progress = progress
+}
+
+system eat() {
+  Left = 0
+  Munched = 0
+  Power = 0
+  for e, p: Pellet {
+    if p.col == Pac.col && p.row == Pac.row {
+      e.destroy()
+      if p.power {
+        Score += 50
+        Power += 1
+      } else {
+        Score += 10
+        Munched += 1
+      }
+    } else {
+      Left += 1
+    }
+  }
+  if Munched > 0 {
+    Waka = !Waka
+    spawn { Tone { pitch: if Waka { 260.0 } else { 520.0 },
+                   to: if Waka { 520.0 } else { 260.0 },
+                   seconds: 0.08, after: 0.0, volume: 0.25,
+                   wave: Wave.Triangle } }
+  }
+  if Power > 0 {
+    Fright.left = max(7.0 - Game.level as f32, 2.0)
+    Fright.chain = 0
+    spawn { Tone { pitch: 160.0, to: 640.0, seconds: 0.3, after: 0.0,
+                   volume: 0.25, wave: Wave.Square } }
+  }
+  if Left == 0 {
+    Game.state = State.Cleared
+    Game.timer = 2.5
+    for i in 0..8 {
+      spawn { Tone { pitch: note(12 + i * 2), to: 0.0, seconds: 0.1,
+                     after: 0.2 + i as f32 * 0.1, volume: 0.25,
+                     wave: Wave.Square } }
+    }
+  }
+}
+
+system track() {
+  Blinky.col = 0
+  Blinky.row = 0
+  for g: Ghost where g.kind == Kind.Red {
+    Blinky.col += g.col
+    Blinky.row += g.row
+  }
+}
+
+system ghosts() {
+  let dt = Tick.dt
+  let frighten = Power > 0
+  Fright.left = max(Fright.left - dt, 0.0)
+  let calm = Fright.left <= 0.0
+  Phase.timer -= dt
+  if Phase.timer <= 0.0 {
+    Phase.scatter = !Phase.scatter
+    Phase.timer = if Phase.scatter { 7.0 } else { 20.0 }
+  }
+  Catches = 0
+  Eaten = 0
+  let (pacx, pacy) = spot(Pac.col, Pac.row, Pac.dir, Pac.progress)
+
+  for g: mut Ghost {
+    var col = g.col
+    var row = g.row
+    var dir = g.dir
+    var progress = g.progress
+    var mode = g.mode
+    var scared = g.scared && !calm
+    if frighten && mode != Mode.Eyes && mode != Mode.Entering {
+      scared = true
+      // Those in the maze turn round.
+      if mode == Mode.Roaming {
+        let (c, r) = step(col, row, dir)
+        col = c
+        row = r
+        dir = back(dir)
+        progress = 1.0 - progress
+      }
+    }
+
+    if mode == Mode.Waiting {
+      g.wait -= dt
+      if g.wait <= 0.0 {
+        mode = Mode.Leaving
+        dir = way_out(col)
+      }
+    } else {
+      let tunnel = row == 14 && (col < 6 || col > 21)
+      progress += pace(mode, scared, tunnel, Game.level) * dt
+      if progress >= 1.0 {
+        // At the next tile's middle: which way from here.
+        progress -= 1.0
+        let (c, r) = step(col, row, dir)
+        col = c
+        row = r
+        if mode == Mode.Leaving {
+          if row == 11 {
+            mode = Mode.Roaming
+            dir = Way.Left
+          } else {
+            dir = way_out(col)
+          }
+        } else if mode == Mode.Entering {
+          if row == 14 {
+            mode = Mode.Leaving
+            dir = Way.Up
+          } else {
+            dir = Way.Down
+          }
+        } else if mode == Mode.Eyes && col == 13 && row == 11 {
+          mode = Mode.Entering
+          dir = Way.Down
+        } else if mode == Mode.Eyes {
+          dir = choose(Maze, col, row, dir, 13, 11)
+        } else if scared {
+          g.seed = (g.seed * 75 + 74) % 65537
+          dir = wander(Maze, col, row, dir, g.seed)
+        } else {
+          let (tcol, trow) = target(g.kind, Phase.scatter, col, row,
+                                    Pac.col, Pac.row, Pac.face,
+                                    Blinky.col, Blinky.row)
+          dir = choose(Maze, col, row, dir, tcol, trow)
+        }
+      }
+    }
+
+    // Do they meet?
+    let (x, y) = spot(col, row, dir, progress)
+    if mode == Mode.Roaming && abs(x - pacx) + abs(y - pacy) < 16.0 {
+      if scared {
+        mode = Mode.Eyes
+        scared = false
+        Eaten += 1
+      } else {
+        Catches += 1
+      }
+    }
+    g.col = col
+    g.row = row
+    g.dir = dir
+    g.progress = progress
+    g.mode = mode
+    g.scared = scared
+  }
+
+  // 200, 400, 800, 1600 for the ghosts of one power pellet.
+  Power = 0
+  var chain = Fright.chain
+  var points = 0
+  for i in 0..Eaten {
+    chain += 1
+    points += 100 * ipow(2, chain)
+    // Higher with every one.
+    spawn { Tone { pitch: note(12 + chain * 3), to: note(36 + chain * 3),
+                   seconds: 0.3, after: 0.0, volume: 0.25,
+                   wave: Wave.Square } }
+  }
+  Fright.chain = chain
+  Score += points
+  if Catches > 0 {
+    Game.state = State.Caught
+    Game.timer = 1.5
+    // Down and out.
+    for i in 0..10 {
+      let pitch = note(30 - i * 3)
+      spawn { Tone { pitch: pitch, to: pitch * 0.7, seconds: 0.11,
+                     after: 0.15 + i as f32 * 0.11, volume: 0.25,
+                     wave: Wave.Triangle } }
+    }
+  }
+}
+
+//===------------------------------------------------------------------===//
+// The picture
+//===------------------------------------------------------------------===//
+
+// A wall is drawn as a line through the middle of its tiles, where they
+// border on what is not a wall.
+system draw_maze() {
+  let flash = Game.state == State.Cleared && (Game.timer * 5.0) as i32 % 2 == 0
+  let color = if flash { 0xffffff } else { 0x2121de }
+  for i in 0..868 {
+    let col = i % 28
+    let row = i / 28
+    let x = (col * 20) as f32
+    let y = (row * 20 + 60) as f32
+    if Maze[i] == '-' { rect(x, y + 8.0, 20.0, 4.0, 0xffb8ff) }
+    if Maze[i] == '#' {
+      let u = solid(Maze, col, row - 1)
+      let d = solid(Maze, col, row + 1)
+      let l = solid(Maze, col - 1, row)
+      let r = solid(Maze, col + 1, row)
+      // Along an edge, as far as the wall goes on.
+      if !u || !d {
+        let from = if l { 0.0 } else { 9.0 }
+        let to = if r { 20.0 } else { 11.0 }
+        rect(x + from, y + 9.0, to - from, 2.0, color)
+      }
+      if !l || !r {
+        let from = if u { 0.0 } else { 9.0 }
+        let to = if d { 20.0 } else { 11.0 }
+        rect(x + 9.0, y + from, 2.0, to - from, color)
+      }
+      // Round an inner corner.
+      if u && l && !solid(Maze, col - 1, row - 1) {
+        rect(x + 9.0, y, 2.0, 11.0, color)
+        rect(x, y + 9.0, 11.0, 2.0, color)
+      }
+      if u && r && !solid(Maze, col + 1, row - 1) {
+        rect(x + 9.0, y, 2.0, 11.0, color)
+        rect(x + 9.0, y + 9.0, 11.0, 2.0, color)
+      }
+      if d && l && !solid(Maze, col - 1, row + 1) {
+        rect(x + 9.0, y + 9.0, 2.0, 11.0, color)
+        rect(x, y + 9.0, 11.0, 2.0, color)
+      }
+      if d && r && !solid(Maze, col + 1, row + 1) {
+        rect(x + 9.0, y + 9.0, 2.0, 11.0, color)
+        rect(x + 9.0, y + 9.0, 11.0, 2.0, color)
+      }
+    }
+  }
+}
+
+system draw_pellets() {
+  let lit = (Tick.time * 5.0) as i32 % 2 == 0
+  for p: Pellet {
+    let (x, y) = spot(p.col, p.row, Way.Nowhere, 0.0)
+    if !p.power {
+      rect(x - 2.0, y - 2.0, 4.0, 4.0, 0xffb8ae)
+    } else if lit {
+      circle(x, y, 7.0, 0xffb8ae)
+    }
+  }
+}
+
+system draw_ghosts() {
+  let ending = Fright.left < 2.0 && (Tick.time * 6.0) as i32 % 2 == 0
+  for g: Ghost {
+    let (x, y) = spot(g.col, g.row, g.dir, g.progress)
+    if g.mode != Mode.Eyes && g.mode != Mode.Entering {
+      let color = if !g.scared { ghost_color(g.kind) }
+                  else if ending { 0xffffff } else { 0x2121de }
+      circle(x, y - 2.0, 13.0, color)
+      rect(x - 13.0, y - 2.0, 26.0, 11.0, color)
+      circle(x - 8.7, y + 9.0, 4.3, color)
+      circle(x, y + 9.0, 4.3, color)
+      circle(x + 8.7, y + 9.0, 4.3, color)
+    }
+    if g.scared {
+      let face = if ending { 0xff2020 } else { 0xffb8ae }
+      rect(x - 6.0, y - 6.0, 4.0, 4.0, face)
+      rect(x + 2.0, y - 6.0, 4.0, 4.0, face)
+      rect(x - 8.0, y + 3.0, 16.0, 2.0, face)
+    } else {
+      // They look where they go.
+      let lx = dx(g.dir) as f32 * 2.0
+      let ly = dy(g.dir) as f32 * 2.0
+      circle(x - 5.5 + lx, y - 4.0 + ly, 4.5, 0xffffff)
+      circle(x + 5.5 + lx, y - 4.0 + ly, 4.5, 0xffffff)
+      circle(x - 5.5 + lx * 2.0, y - 4.0 + ly * 2.0, 2.2, 0x2121de)
+      circle(x + 5.5 + lx * 2.0, y - 4.0 + ly * 2.0, 2.2, 0x2121de)
+    }
+  }
+}
+
+system draw_pac() {
+  let (x, y) = spot(Pac.col, Pac.row, Pac.dir, Pac.progress)
+  if Game.state == State.Caught {
+    // Caught: he opens up until nothing is left.
+    let gone = (1.0 - Game.timer / 1.5) * 180.0
+    if gone < 179.0 { sector(x, y, 14.0, 270.0 + gone, 630.0 - gone, 0xffff00) }
+  } else {
+    // The mouth opens and shuts while he moves.
+    let still = Pac.dir == Way.Nowhere || Game.state != State.Playing
+    let mouth = if still { 25.0 }
+                else { 3.0 + abs(fract(Tick.time * 7.0) * 2.0 - 1.0) * 42.0 }
+    // A quarter turn for each way after `Right`.
+    let toward = Pac.face as i32 as f32 * 90.0
+    sector(x, y, 14.0, toward + mouth, toward + 360.0 - mouth, 0xffff00)
+  }
+}
+
+system draw_text() {
+  label("SCORE", 20.0, 8.0, 20.0, 0xffffff)
+  label("{Score}", 20.0, 32.0, 20.0, 0xffffff)
+  label("HIGH SCORE", 220.0, 8.0, 20.0, 0xffffff)
+  label("{Best}", 220.0, 32.0, 20.0, 0xffffff)
+  label("LEVEL {Game.level}", 440.0, 690.0, 20.0, 0xffffff)
+  for i in 0..Game.lives - 1 {
+    sector(30.0 + i as f32 * 34.0, 700.0, 12.0, 205.0, 515.0, 0xffff00)
+  }
+  if Game.state == State.Ready { label("READY!", 238.0, 392.0, 22.0, 0xffff00) }
+  if Game.state == State.Over {
+    label("GAME  OVER", 212.0, 392.0, 22.0, 0xff2020)
+    label("press Enter", 224.0, 340.0, 20.0, 0xffffff)
+  }
+}
+
+schedule frame() {
+  begin()
+  flow()
+  unload() run_if Game.state == State.Unload
+  fill() run_if Game.state == State.Fill
+  place() run_if Game.state == State.Place
+  player() run_if Game.state == State.Playing
+  eat() run_if Game.state == State.Playing
+  track() run_if Game.state == State.Playing
+  ghosts() run_if Game.state == State.Playing
+  draw_maze()
+  draw_pellets()
+  draw_ghosts() run_if Game.state == State.Ready || Game.state == State.Playing
+  draw_pac() run_if Game.state != State.Over
+  draw_text()
+  play()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}

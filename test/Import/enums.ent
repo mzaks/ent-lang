@@ -1,0 +1,88 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+// RUN: ent-translate --import-ent %s | ent-opt | FileCheck %s
+// RUN: ent-translate --import-ent %s | ent-translate --ent-to-c-header \
+// RUN:   | FileCheck %s --check-prefix=HEADER
+
+// An enum is a type of named cases, stored as the byte that numbers them.
+// CHECK: ent.enum @Way ["Right", "Down", "Left", "Up"]
+// HEADER:      typedef uint8_t ent_Way;
+// HEADER-NEXT: enum {
+// HEADER-NEXT:   ent_Way_Right = 0,
+// HEADER-NEXT:   ent_Way_Down = 1,
+// HEADER-NEXT:   ent_Way_Left = 2,
+// HEADER-NEXT:   ent_Way_Up = 3
+// HEADER-NEXT: };
+enum Way { Right, Down, Left, Up }
+// CHECK: ent.enum @State ["Ready", "Playing"]
+enum State { Ready, Playing, }
+
+// A field, a unique, a parameter, a result.
+// CHECK: ent.component @Ghost (way: !ent.enum<@Way>, col: i32)
+// HEADER: ent_Way *
+component Ghost { way: Way, col: i32 }
+// CHECK: ent.resource @Game (state: !ent.enum<@State>)
+unique Game { state: State }
+// CHECK: ent.resource @Facing (value: !ent.enum<@Way>)
+unique Facing: Way
+default_capacity 8
+
+// A cast gives the number of a case, and the case of a number.
+// CHECK:      ent.function @back(%[[W:.*]]: !ent.enum<@Way>) -> !ent.enum<@Way> {
+// CHECK-NEXT:   %[[B:.*]] = builtin.unrealized_conversion_cast %[[W]] : !ent.enum<@Way> to i8
+// CHECK-NEXT:   %[[N:.*]] = arith.extui %[[B]] : i8 to i32
+// CHECK:        %[[M:.*]] = arith.remsi
+// CHECK-NEXT:   %[[T:.*]] = arith.trunci %[[M]] : i32 to i8
+// CHECK-NEXT:   %[[R:.*]] = builtin.unrealized_conversion_cast %[[T]] : i8 to !ent.enum<@Way>
+// CHECK-NEXT:   ent.yield %[[R]] : !ent.enum<@Way>
+fn back(way: Way) -> Way { ((way as i32 + 2) % 4) as Way }
+
+// `Way.Left` is a value; values are compared with `==` and `!=`.
+// CHECK:      ent.function @dx(%[[W:.*]]: !ent.enum<@Way>) -> i32 {
+// CHECK-NEXT:   %[[ZERO:.*]] = arith.constant 0 : i8
+// CHECK-NEXT:   %[[RIGHT:.*]] = builtin.unrealized_conversion_cast %[[ZERO]] : i8 to !ent.enum<@Way>
+// CHECK-NEXT:   %[[A:.*]] = builtin.unrealized_conversion_cast %[[W]] : !ent.enum<@Way> to i8
+// CHECK-NEXT:   %[[B:.*]] = builtin.unrealized_conversion_cast %[[RIGHT]] : !ent.enum<@Way> to i8
+// CHECK-NEXT:   arith.cmpi eq, %[[A]], %[[B]] : i8
+fn dx(way: Way) -> i32 {
+  if way == Way.Right { 1 } else if way == Way.Left { -1 } else { 0 }
+}
+
+// CHECK-LABEL: ent.system @play() {
+system play() {
+  // CHECK: %[[TWO:.*]] = arith.constant 2 : i8
+  // CHECK: %[[LEFT:.*]] = builtin.unrealized_conversion_cast %[[TWO]] : i8 to !ent.enum<@Way>
+  // CHECK: ent.write @Facing "value", %[[LEFT]] : !ent.enum<@Way>
+  Facing = Way.Left
+  for g: mut Ghost {
+    // CHECK: %[[OLD:.*]] = ent.get %{{.*}} "way" : <@Ghost, mut> -> !ent.enum<@Way>
+    // CHECK: %[[NEW:.*]] = ent.invoke @back(%[[OLD]]) : (!ent.enum<@Way>) -> !ent.enum<@Way>
+    // CHECK: ent.set %{{.*}} "way", %[[NEW]] : <@Ghost, mut>, !ent.enum<@Way>
+    g.way = back(g.way)
+    // An `if` gives one like any value.
+    // CHECK: scf.if %{{.*}} -> (!ent.enum<@Way>) {
+    let turn = if g.col > 3 { Way.Up } else { g.way }
+    g.col += dx(turn)
+  }
+}
+
+// In a text an enum is the name of its case: as long as the longest.
+unique Title: text[30]
+// CHECK-LABEL: ent.system @describe() {
+// CHECK: builtin.unrealized_conversion_cast %{{.*}} : i128 to !ent.text<7>
+system describe() {
+  Title = "{Game.state}"
+}
+
+// A condition compares them too.
+// CHECK:      ent.schedule @frame() {
+// CHECK-NEXT:   ent.run @play() if {
+// CHECK-NEXT:     %[[S:.*]] = ent.read @Game "state" : !ent.enum<@State>
+// CHECK:          arith.cmpi eq
+schedule frame() {
+  play() run_if Game.state == State.Playing
+  describe()
+}
+
+main {
+  loop { frame() } until Game.state != State.Playing
+}

@@ -1,0 +1,45 @@
+// Enums end to end: as fields, uniques, parameters and results, compared,
+// cast, printed by name, deciding which systems run, and through C.
+import console
+import shapes
+enum Way { Right, Down, Left, Up, Nowhere }
+enum State { Ready, Playing, Over }
+component Ghost { way: Way, col: i32, shape: Shape }
+default_capacity 8
+unique Game { state: State, frames: i32 }
+unique Facing: Way
+
+fn back(way: Way) -> Way { ((way as i32 + 2) % 4) as Way }
+fn dx(way: Way) -> i32 { if way == Way.Right { 1 } else if way == Way.Left { -1 } else { 0 } }
+fn turn(way: Way, state: State) -> (Way, bool) {
+  if state != State.Playing { (way, false) } else { (back(way), true) }
+}
+
+world {
+  spawn { Ghost { way: Way.Left, col: 5, shape: Shape.Square } }
+  spawn { Ghost { way: Way.Up, col: 9, shape: Shape.Round } }
+  Facing = Way.Down
+}
+system start() { Game.state = State.Playing }
+system play() {
+  Game.frames += 1
+  if Game.frames == 3 { Game.state = State.Over }
+  let was = Facing
+  Facing = back(Facing)
+  for g: mut Ghost {
+    let (way, turned) = turn(g.way, Game.state)
+    var next = way
+    if g.col > 8 && turned { next = Way.Nowhere }
+    g.col += dx(next)
+    g.way = next
+    g.shape = other(g.shape)
+    spawn { Print { line: "{g.way} at {g.col} ({g.way as i32}) {g.shape} {corners(g.shape)} corners, facing {was} then {Facing}, {Game.state}" } }
+  }
+}
+schedule frame() {
+  start() run_if Game.state == State.Ready
+  play() run_if Game.state == State.Playing
+  write()
+  clear()
+}
+main { loop { frame() } until Game.state == State.Over }

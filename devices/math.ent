@@ -1,0 +1,105 @@
+// Typical math: `import math`.
+//
+//   import math
+//   system orbit() {
+//     for p: mut Position, o: Orbit {
+//       p.x = o.cx + cos(o.angle) * o.radius
+//       p.y = o.cy + sin(o.angle) * o.radius
+//     }
+//   }
+//
+// Everything is a fn: it computes, and may be called anywhere a fn may,
+// also in a `for` that runs on all cores. A name without a suffix is for
+// f32, the language's everyday float; with `64` for f64 (`sin64`), with an
+// `i` in front for i32 (`iabs`). Angles are radians.
+//
+// What the machine's math library does is implemented in devices/math.c;
+// the rest is written here.
+
+// Square root, powers and logarithms. `pow(x, y)` is x to the power of y,
+// `exp(x)` e to the power of x, `log` the natural logarithm.
+extern fn sqrt(x: f32) -> f32
+extern fn pow(x: f32, y: f32) -> f32
+extern fn exp(x: f32) -> f32
+extern fn log(x: f32) -> f32
+extern fn log2(x: f32) -> f32
+
+// Angles. `atan2(y, x)` is the angle of the point (x, y), from -pi to pi.
+extern fn sin(x: f32) -> f32
+extern fn cos(x: f32) -> f32
+extern fn tan(x: f32) -> f32
+extern fn asin(x: f32) -> f32
+extern fn acos(x: f32) -> f32
+extern fn atan(x: f32) -> f32
+extern fn atan2(y: f32, x: f32) -> f32
+
+// To a whole number, still a float: down, up, to the nearest (halves away
+// from 0), and towards 0. `x as i32` then makes it an integer.
+extern fn floor(x: f32) -> f32
+extern fn ceil(x: f32) -> f32
+extern fn round(x: f32) -> f32
+extern fn trunc(x: f32) -> f32
+// What is left of x after taking y away as often as it fits, with x's
+// sign (`%` does the same).
+extern fn fmod(x: f32, y: f32) -> f32
+
+extern fn sqrt64(x: f64) -> f64
+extern fn pow64(x: f64, y: f64) -> f64
+extern fn exp64(x: f64) -> f64
+extern fn log64(x: f64) -> f64
+extern fn log264(x: f64) -> f64
+extern fn sin64(x: f64) -> f64
+extern fn cos64(x: f64) -> f64
+extern fn tan64(x: f64) -> f64
+extern fn asin64(x: f64) -> f64
+extern fn acos64(x: f64) -> f64
+extern fn atan64(x: f64) -> f64
+extern fn atan264(y: f64, x: f64) -> f64
+extern fn floor64(x: f64) -> f64
+extern fn ceil64(x: f64) -> f64
+extern fn round64(x: f64) -> f64
+extern fn trunc64(x: f64) -> f64
+extern fn fmod64(x: f64, y: f64) -> f64
+
+fn pi() -> f32 { 3.14159265358979 }
+fn pi64() -> f64 { 3.14159265358979 }
+// A whole turn.
+fn tau() -> f32 { 6.28318530717959 }
+fn tau64() -> f64 { 6.28318530717959 }
+fn radians(degrees: f32) -> f32 { degrees * 0.0174532925199433 }
+fn degrees(radians: f32) -> f32 { radians * 57.2957795130823 }
+
+// Without its sign.
+fn abs(x: f32) -> f32 { max(x, -x) }
+fn abs64(x: f64) -> f64 { max(x, -x) }
+fn iabs(x: i32) -> i32 { max(x, -x) }
+
+// -1, 0 or 1, as x is below, at or above 0.
+fn sign(x: f32) -> f32 { if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 } }
+fn sign64(x: f64) -> f64 { if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 } }
+fn isign(x: i32) -> i32 { if x > 0 { 1 } else if x < 0 { -1 } else { 0 } }
+
+// x, but not below `low` and not above `high`.
+fn clamp(x: f32, low: f32, high: f32) -> f32 { min(max(x, low), high) }
+fn clamp64(x: f64, low: f64, high: f64) -> f64 { min(max(x, low), high) }
+fn iclamp(x: i32, low: i32, high: i32) -> i32 { min(max(x, low), high) }
+
+// From a (at t = 0) to b (at t = 1), and beyond.
+fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }
+fn lerp64(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
+
+// What follows the point: x less its floor, from 0 up to 1.
+fn fract(x: f32) -> f32 { x - floor(x) }
+
+// How long the arrow (x, y) is, and how far two points are apart.
+fn length(x: f32, y: f32) -> f32 { sqrt(x * x + y * y) }
+fn distance(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+  length(bx - ax, by - ay)
+}
+
+// x times itself `n` times; 1 if n is 0 or less.
+fn ipow(x: i32, n: i32) -> i32 {
+  var result = 1
+  for i in 0..n { result *= x }
+  result
+}

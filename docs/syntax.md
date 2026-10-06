@@ -52,7 +52,8 @@ there (`Position`, `tick()`); there is no access control yet.
 A module with an implementation next to its `m.ent` is a device: that
 defines its extern procs and fns (and extern systems), and `tools/ent`
 builds and links it with the program. The compiler's own are in `devices/`
-(`console`, `clock`, `window`), found without `-I` by `tools/ent`. The
+(`console`, `clock`, `window`, `sound`, and `math`, see Math below), found
+without `-I` by `tools/ent`; each says in its `.ent` file how it is used. The
 implementation is any of:
 
 - `m.c`: C, compiled against the generated headers.
@@ -84,6 +85,7 @@ component Position { x: f32, y: f32 } capacity 1000
 tag Enemy                                   // a component without fields
 unique Clock { dt: f32, frame: i64 }        // exists once (a resource)
 unique Score: i64                           // shorthand: one field, `value`
+enum Way { Right, Down, Left, Up }          // a type of named cases
 archetype Gun { Position, optional Stunned } capacity 4
 relation Synapse { weight: f32 } capacity 100000  // edges with data
 relation Follows capacity 1000                     // edges without
@@ -92,7 +94,8 @@ default_capacity 1024
 ```
 
 - Types: `f32`, `f64`, `bool`, `i8`, `i16`, `i32`, `i64`, `index`, `entity`,
-  `text[N]` (see Text below).
+  `text[N]` (see Text below), and the enums the program declares (see
+  Enums below).
 - `capacity` on a component bounds how many entities can have it; an
   archetype the compiler infers from spawns takes the smallest capacity
   among its required components, or `default_capacity`.
@@ -179,6 +182,10 @@ edge loop runs once per edge.
 ## Statements
 
 - `let name = expr`: an immutable local.
+- `var name = expr`, `var name: type = expr`: a local that can be assigned,
+  with `=`, `+=`, `-=`, `*=`, `/=`, `min=`, `max=` (a text with `=` and
+  `+=`). It has the type of the value it starts with, or the one written:
+  `var best: i64 = 0`, `var line: text[30] = ""`. See Vars below.
 - `binding.field = expr`, and `+=`, `-=`, `*=`, `/=`, `min=`, `max=`.
 - Uniques: `Clock.frame += 1`, `Score += 10` (the shorthand's value).
   Outside a `for` this reads and writes; inside one only `+=`, `-=`,
@@ -200,13 +207,57 @@ edge loop runs once per edge.
   which `i` has too; literal bounds take the other bound's type, two
   literals count in `i32`. Outside a `for` over entities only; loops nest.
 
+### Vars
+
+```
+system steer() {
+  for g: mut Ghost {
+    var best = 1000000
+    var dir = g.dir
+    if !wall(Maze, g.col + 1, g.row) {
+      let d = distance(g.col + 1, g.row, Player.col, Player.row)
+      if d < best { best = d  dir = 0 }
+    }
+    // ... and the other three ways
+    g.dir = dir
+  }
+}
+
+world {
+  var pellets = 0
+  for i in 0..868 {
+    if Maze[i] == '.' { pellets += 1 }
+  }
+  Left = pellets
+}
+```
+
+A `var` lives to the end of the block it is declared in, like a `let`.
+It may be assigned in that block and in the `if`s (also `if let`) and
+counted `for`s inside it; after an `if` it holds what the branch that ran
+left in it, after a loop what the last round did.
+
+- A `var` declared in the body of a `for` over entities is that entity's
+  own: every entity starts with a fresh one.
+- A `var` from outside a `for` over entities can be read in it but not
+  assigned: every entity would assign it, in an order that is not the
+  program's to choose. What entities add up goes into a unique (`+=`,
+  `-=`, `min=`, `max=`).
+- A `let` keeps the value a var had where the `let` was made.
+- A var is not storage: the compiler follows its values, and reading and
+  assigning one cost what the values cost.
+
+Not yet: assigning, inside an edge loop, a var from outside it; and vars
+in a branch of an `if` that gives a value, which is made of `let`s.
+
 ## Expressions
 
 Literals (`1`, `2.5`, `1e8`, `true`), locals and parameters, `binding.field`,
 `Unique.field`, `Unique` (shorthand), `- !`, `* / %`, `+ -`, comparisons,
 `&&`, `||` (in that order of precedence, all left-associative),
 `min(a, b)`, `max(a, b)`, `expr as T`, and
-`if cond { let ...; value } else { value }`. A literal takes the type of the
+`if cond { let ...; value } else { value }` (also with `else if cond
+{ value }` between). A literal takes the type of the
 operand it meets (`x * 2` is an f32 if `x` is); on its own an integer is an
 i32 and a float an f32. There are no implicit conversions.
 
@@ -301,6 +352,183 @@ other system. Output and other effects outside the world are not part of
 the contract: extern systems that must stay in order because of them write
 a common unique (`writes Console`), or declare nothing.
 
+## Fns
+
+```
+fn square(x: f32) -> f32 { x * x }
+
+fn distance(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+  let dx = ax - bx
+  let dy = ay - by
+  square(dx) + square(dy)
+}
+
+fn wall(maze: text[868], col: i32, row: i32) -> bool {
+  maze[row * 28 + col] == '#'
+}
+
+system chase() {
+  for g: mut Ghost where !wall(Maze, g.col + 1, g.row) {
+    g.far = distance(g.x, g.y, Player.x, Player.y)
+  }
+}
+```
+
+A `fn` computes a value from its parameters. Its body is statements and
+then the value it gives, which has the type after `->`:
+
+```
+fn pellets(maze: text[868]) -> i32 {
+  var n = 0
+  for i in 0..len(maze) {
+    if maze[i] == '.' { n += 1 }
+  }
+  n
+}
+
+fn clamp(x: i32, low: i32, high: i32) -> i32 {
+  var y = x
+  if y < low { y = low } else if y > high { y = high }
+  y
+}
+```
+
+- The statements are those that compute: `let`, `var` and assignments to
+  vars, `if` with `else if` and `else`, and counted `for`s, nested as in a
+  system.
+- The last thing in the body is the value. An `if` that starts it is a
+  value (and so has an `else`): after its last branch comes the body's
+  `}`, or what continues a value (`if a { 1 } else { 2 } + x`, `... as
+  f32`). Any other `if` is a statement. A `-` after an `if` starts the
+  next thing; to subtract from an `if`, write it in parentheses.
+
+- It never sees the world: no uniques, no components, no `for` over
+  entities, no `spawn`, no procs. What it needs of them a system passes in, so what a system reads
+  and writes is still what its own body says. A text is passed like any
+  value, whole.
+- A call is computing like arithmetic: the same result for the same
+  arguments and nothing else. It may run on several threads at once, be
+  moved, or be dropped if its value is not used, and it does not keep a
+  `for` from running on all cores.
+- Parameters and the result are of any type; a literal argument takes the
+  parameter's type, a text its capacity (widened or cut).
+- A fn may give several values: `-> (i32, i32)`, with `(col, row)` as what
+  it gives, see Several values below.
+- A fn is declared before it is called. It may call other fns, also
+  `extern` ones, and itself: `fn gcd(a: i64, b: i64) -> i64 { if b == 0
+  { a } else { gcd(b, a % b) } }`. Nothing bounds how deep.
+- Fns are called in systems, `world` and other fns, not in `main` or a
+  `run_if` condition.
+- A module's fns are visible to the files that import it, like its other
+  declarations. C does not hear of them: they are in no header.
+
+`proc` with a body in ent-lang is not supported yet.
+
+### Several values
+
+```
+fn step(col: i32, row: i32, way: Way) -> (i32, i32) {
+  (col + dx(way), row + dy(way))
+}
+
+fn target(kind: Kind, scatter: bool, pcol: i32, prow: i32) -> (i32, i32) {
+  if scatter { (26, 0) }
+  else if kind == Kind.Pink { step(pcol, prow, Way.Up) }
+  else { (pcol, prow) }
+}
+
+system chase() {
+  for g: mut Ghost {
+    let (tcol, trow) = target(g.kind, Phase.scatter, Pac.col, Pac.row)
+    var (col, row) = step(g.col, g.row, g.dir)
+    ...
+  }
+}
+```
+
+A fn gives several values by naming their types in parentheses after
+`->`. What it gives is then `(a, b)`, a call of a fn that gives the same,
+or an `if` whose branches each give them. `let (a, b) = ...` takes them
+apart into locals, `var (a, b) = ...` into vars; the right side is again a
+call, `(a, b)` or such an `if`.
+
+There are no tuples besides: several values are not a value. They cannot
+be a field, a parameter or a local, and a call that gives several cannot
+stand where one value is expected. An `extern fn` gives one value, as C
+does.
+
+## Enums
+
+```
+enum State { Ready, Playing, Over }
+enum Way { Right, Down, Left, Up }
+
+component Ghost { way: Way, col: i32 }
+unique Game { state: State }
+
+fn back(way: Way) -> Way { ((way as i32 + 2) % 4) as Way }
+
+system turn() {
+  for g: mut Ghost where g.way != Way.Up {
+    g.way = back(g.way)
+  }
+}
+
+schedule frame() {
+  turn() run_if Game.state == State.Playing
+}
+```
+
+An enum is a type whose values are its cases, written `Way.Left`. It is a
+type of its own: a `Way` goes where a `Way` is expected and nowhere else,
+neither a number nor another enum's case.
+
+- It is the type of fields, uniques, parameters, results, locals and
+  vars. A field starts as the first case, as a number starts as 0.
+- Values are compared with `==` and `!=`, in systems, fns and in the
+  conditions of `run_if` and `main`. There is no order and no arithmetic.
+- `way as i32` (or another integer type) is the number of the case, the
+  first being 0, and `n as Way` the case with that number; a number no
+  case has gives a value equal to none of them.
+- In a text, `"{g.way}"` is the name of the case.
+- An enum has 1 to 256 cases and is stored as one byte. An `extern fn` or
+  `proc` takes and gives one; in the generated C header `Way` is
+  `ent_Way` (a `uint8_t`) with `ent_Way_Right`, `ent_Way_Down`, ... for
+  the cases, and a module `m`'s is `ent_m_Way`.
+- An enum is declared before it is used. A module's enums are visible to
+  the files that import it, like its other declarations.
+
+## Math
+
+```
+import math
+
+system orbit() {
+  for p: mut Position, o: Orbit {
+    p.x = o.cx + cos(o.angle) * o.radius
+    p.y = o.cy + sin(o.angle) * o.radius
+  }
+}
+```
+
+The module `math` (devices/math.ent) has the usual functions, all fns:
+they compute, and may be called wherever a fn may. A name as it is works
+on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
+`i32`. Angles are radians.
+
+- From the machine's math library (devices/math.c), each also with `64`:
+  `sqrt`, `pow(x, y)`, `exp`, `log`, `log2`, `sin`, `cos`, `tan`, `asin`,
+  `acos`, `atan`, `atan2(y, x)`, `floor`, `ceil`, `round`, `trunc`,
+  `fmod(x, y)`.
+- Written in ent-lang: `pi()`, `tau()` (and `pi64()`, `tau64()`),
+  `radians(degrees)`, `degrees(radians)`, `abs`, `sign`, `clamp(x, low,
+  high)`, `lerp(a, b, t)` (each also with `64`, and `iabs`, `isign`,
+  `iclamp`), `fract`, `length(x, y)`, `distance(ax, ay, bx, by)`,
+  `ipow(x, n)`.
+- `min` and `max` are built in and need no import.
+- A program's own fn of the same name comes before the module's; the
+  module's is then `math::abs`.
+
 ## Extern fns and procs
 
 ```
@@ -321,10 +549,10 @@ at most one back; they never get the world. So what a system reads and
 writes is what its own body does, inferred and checked as always, and the C
 has nothing to get wrong about it. Prefer them to extern systems.
 
-- An `extern fn` computes: the same result for the same arguments, and
-  nothing else. The compiler takes that on trust and treats a call like
-  arithmetic: it may run on several threads at once, be moved, or be
-  dropped if its value is not used. It always gives a value.
+- An `extern fn` computes like a `fn`: the same result for the same
+  arguments, and nothing else. The compiler takes that on trust and treats
+  a call like arithmetic: it may run on several threads at once, be moved,
+  or be dropped if its value is not used. It always gives a value.
 - An `extern proc` acts on the outside (output, input, the time) and may
   give a value back. It is called exactly where and as often as the
   systems say: a system that calls one keeps its place in the schedule
@@ -341,8 +569,6 @@ has nothing to get wrong about it. Prefer them to extern systems.
   declarations as `ent_extern.h` (`ent-translate
   --ent-to-c-extern-header`): the texts and the functions, without the
   world. They are also in the world's header.
-
-`fn` and `proc` with a body in ent-lang are not supported yet.
 
 ## The world
 
@@ -387,8 +613,8 @@ header, as before.
 
 ## Not yet supported
 
-`fn`/`proc` with a body, `device` declarations, prefabs, optional bindings (`T?`), mutable locals
-(`var`), `while` loops and counted loops inside a `for` over entities: each
+`proc` with a body, `device` declarations, prefabs, optional bindings (`T?`),
+`while` loops and counted loops inside a `for` over entities: each
 is reported as "not supported yet" where it would start. Of relations, not yet: traversal (`up`, `cascade`), joins
 over relation variables, accumulating into a unique and connecting inside
 an edge loop, and disconnecting by pair.

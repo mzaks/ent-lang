@@ -1,0 +1,32 @@
+// examples/pacman.ent, a game in ent-lang only, compiles down to LLVM IR:
+// fns with loops and vars that are given the maze, a text of 868 bytes,
+// and give a tile as two values; enums for ways, modes and the game's
+// state, which says what the schedule runs; vars of each ghost's own in a
+// `for`.
+// Running it needs a display and raylib, which a test cannot ask for.
+// RUN: ent-translate --import-ent %S/../../examples/pacman.ent \
+// RUN:     -I %S/../../devices -o %t.mlir
+// RUN: ent-translate --ent-to-c-extern-header %t.mlir | FileCheck %s
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s --check-prefix=LLVM
+// Its fns only compute, so moving the ghosts is a system like any other;
+// those that draw keep their order.
+// RUN: ent-opt %t.mlir --ent-print-access -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=ACCESS
+
+// The game's own fns are no business of the device's C.
+// CHECK-NOT: ent_world
+// CHECK-NOT: choose
+// CHECK:     void ent_window_sector(float arg0, float arg1, float arg2, float arg3, float arg4, int32_t arg5);
+
+// A way is a byte, a tile two results.
+// LLVM-DAG: define {{.*}}i8 @ent_choose(i7040 %{{.*}}, i32 %{{.*}}, i32 %{{.*}}, i8 %{{.*}}, i32 %{{.*}}, i32 %{{.*}})
+// LLVM-DAG: define {{.*}}{ i32, i32 } @ent_step(i32 %{{.*}}, i32 %{{.*}}, i8 %{{.*}})
+// LLVM-DAG: declare float @ent_math_floor(float)
+// LLVM-DAG: declare void @ent_window_sector(float, float, float, float, float, i32)
+
+// ACCESS:     remark: reads Tick.dt, Power.value
+// ACCESS-NOT: has effects outside
+// ACCESS:     remark: reads Game.state, Game.timer, Maze.value; writes nothing
+// ACCESS:     note: has effects outside component access

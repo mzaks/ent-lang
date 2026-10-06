@@ -1,0 +1,123 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+// RUN: ent-translate --import-ent %s | ent-opt | FileCheck %s
+
+// A `var` is a local that can be assigned. In the IR there is no variable:
+// a var is the value it holds at each place, which an `if` that assigns it
+// gives as a result and a counted loop carries from round to round.
+component Hull { hp: i32, owner: entity }
+relation Link { w: i32 } capacity 16
+default_capacity 16
+unique Score: i32
+unique Title: text[30]
+
+// CHECK: ent.system @count(%[[N:.*]]: i32) {
+system count(n: i32) {
+  // CHECK: %[[ZERO:.*]] = arith.constant 0 : i32
+  var total = 0
+  // With a type: the literal is written in it.
+  // CHECK: %[[FIVE:.*]] = arith.constant 5 : i64
+  var best: i64 = 5
+  // A var nothing assigns stays the value it started with.
+  // CHECK: %[[ONE:.*]] = arith.constant 1 : i32
+  var same = 1
+  // Assigned in one branch: the other gives what it held before. An
+  // `else if` is an `if` in the `else` branch.
+  // CHECK:      %[[T1:.*]] = scf.if %{{.*}} -> (i32) {
+  // CHECK-NEXT:   scf.yield %[[N]] : i32
+  // CHECK-NEXT: } else {
+  // CHECK:        %[[INNER:.*]] = scf.if %{{.*}} -> (i32) {
+  // CHECK:          %[[PLUS:.*]] = arith.addi %[[ZERO]], %{{.*}} : i32
+  // CHECK-NEXT:     scf.yield %[[PLUS]] : i32
+  // CHECK-NEXT:   } else {
+  // CHECK-NEXT:     scf.yield %[[ZERO]] : i32
+  // CHECK-NEXT:   }
+  // CHECK-NEXT:   scf.yield %[[INNER]] : i32
+  // CHECK-NEXT: }
+  if n > 2 { total = n } else if n > 1 { total += 2 }
+  // Only the vars the body assigns are carried.
+  // CHECK:      %[[LOOP:.*]]:2 = scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[B:.*]] = %[[FIVE]], %[[T:.*]] = %[[T1]]) -> (i64, i32) {
+  // CHECK:        %[[T2:.*]] = arith.addi %[[T]], %{{.*}} : i32
+  // CHECK:        %[[B2:.*]] = arith.maxsi %[[B]], %{{.*}} : i64
+  // CHECK-NEXT:   scf.yield %[[B2]], %[[T2]] : i64, i32
+  // CHECK-NEXT: }
+  for i in 0..n {
+    total += i
+    best max= i as i64
+  }
+  // CHECK: ent.query (%[[H:.*]]: !ent.ref<@Hull, mut>) {
+  for h: mut Hull {
+    // A var of the `for`'s own body: one for each entity.
+    // CHECK:      %[[HP:.*]] = ent.get %[[H]] "hp"
+    // CHECK:      %[[LEFT:.*]] = scf.if %{{.*}} -> (i32) {
+    // CHECK:        scf.yield %{{.*}} : i32
+    // CHECK-NEXT: } else {
+    // CHECK-NEXT:   scf.yield %[[HP]] : i32
+    var left = h.hp
+    if left > 10 { left = 10 }
+    // A var from outside is read like any value.
+    // CHECK: %[[SUM:.*]] = arith.addi %[[LEFT]], %[[LOOP]]#1 : i32
+    // CHECK: arith.addi %[[SUM]], %[[ONE]] : i32
+    h.hp = left + total + same
+  }
+  // CHECK: %[[NARROW:.*]] = arith.trunci %[[LOOP]]#0 : i64 to i32
+  // CHECK: arith.addi %[[LOOP]]#1, %[[NARROW]] : i32
+  Score = total + best as i32
+}
+
+// CHECK-LABEL: ent.system @nest(
+system nest(n: i32) {
+  // A loop in a loop: the inner one's result is what the outer one's round
+  // ends with. A `let` keeps the value the var had where it was made.
+  // CHECK:      %[[OUTER:.*]] = scf.for %{{.*}} iter_args(%[[A:.*]] = %{{.*}}) -> (i32) {
+  // CHECK:        %[[INNER:.*]] = scf.for %{{.*}} iter_args(%[[C:.*]] = %[[A]]) -> (i32) {
+  // CHECK:        %[[SAME:.*]] = arith.cmpi eq, %[[INNER]], %[[A]] : i32
+  // CHECK:        %[[END:.*]] = scf.if %[[SAME]] -> (i32) {
+  // CHECK:        } else {
+  // CHECK-NEXT:     scf.yield %[[INNER]] : i32
+  // CHECK:        scf.yield %[[END]] : i32
+  var sum = 0
+  for r in 0..n {
+    let start = sum
+    for c in 0..4 { sum += r * c }
+    if sum == start { sum += 100 }
+  }
+  // A text var: joined to, cut to what it holds.
+  // CHECK: scf.for %{{.*}} iter_args(%{{.*}} = %{{.*}}) -> (!ent.text<30>) {
+  var line: text[30] = ""
+  for i in 0..n { line += "+" }
+  Title = line
+  // One var assigned from another: no loop carries the one only read.
+  // CHECK: %[[X:.*]] = arith.constant 3 : i32
+  // CHECK: scf.for %{{.*}} iter_args(%{{.*}} = %{{.*}}) -> (i32) {
+  // CHECK:      scf.yield %[[X]] : i32
+  var x = 3
+  var y = 0
+  for i in 0..n { y = x }
+  // CHECK: ent.write @Score "value", %[[OUTER]] : i32
+  Score = sum
+  Score += y
+}
+
+// CHECK-LABEL: ent.system @look() {
+system look() {
+  for h: Hull {
+    // `if let`: both branches may assign.
+    // CHECK:      %[[HP:.*]], %[[FOUND:.*]] = ent.lookup
+    // CHECK:      %[[SEEN:.*]] = scf.if %[[FOUND]] -> (i32) {
+    // CHECK-NEXT:   scf.yield %[[HP]] : i32
+    // CHECK-NEXT: } else {
+    // CHECK:        scf.yield %{{.*}} : i32
+    // CHECK:      ent.accumulate @Score "value" add %[[SEEN]] : i32
+    var seen = 0
+    if let hp = Hull(h.owner).hp { seen = hp } else { seen = -1 }
+    Score += seen
+  }
+  for e, h: Hull {
+    for s, other in e.out(Link) {
+      // A var of an edge loop's own body.
+      var w = s.w
+      if w < 0 { w = 0 }
+      Hull(other).hp += w
+    }
+  }
+}

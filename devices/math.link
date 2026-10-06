@@ -1,0 +1,2 @@
+# The math module calls the machine's math library.
+-lm

@@ -1,0 +1,22 @@
+// Enums through the build driver: a type of named cases, stored as a byte.
+// RUN: %ent run %S/Inputs/enums/enums.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/enums/enums.ent | FileCheck %s
+// C gets the byte and names for the cases.
+// RUN: %ent build %S/Inputs/enums/enums.ent -o %t.exe --keep %t.dir
+// RUN: FileCheck %s --check-prefix=HEADER --input-file %t.dir/ent_extern.h
+
+// HEADER:      typedef uint8_t ent_shapes_Shape;
+// HEADER-NEXT: enum {
+// HEADER-NEXT:   ent_shapes_Shape_Round = 0,
+// HEADER-NEXT:   ent_shapes_Shape_Square = 1
+// HEADER-NEXT: };
+// HEADER:      int32_t ent_shapes_corners(ent_shapes_Shape arg0);
+// HEADER:      ent_shapes_Shape ent_shapes_other(ent_shapes_Shape arg0);
+
+// CHECK:      Right at 6 (0) Round 0 corners, facing Down then Up, Playing
+// CHECK-NEXT: Nowhere at 9 (4) Square 4 corners, facing Down then Up, Playing
+// CHECK-NEXT: Left at 5 (2) Square 4 corners, facing Up then Down, Playing
+// CHECK-NEXT: Nowhere at 9 (4) Round 0 corners, facing Up then Down, Playing
+// CHECK-NEXT: Left at 4 (2) Round 0 corners, facing Down then Up, Over
+// CHECK-NEXT: Nowhere at 9 (4) Square 4 corners, facing Down then Up, Over
+// CHECK-NOT:  {{.}}

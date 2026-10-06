@@ -77,6 +77,8 @@ public:
   bool try_emplace(StringRef name) {
     return map.try_emplace(resolve(name)).second;
   }
+  /// The declaration with this IR symbol name, as it is.
+  T &ofSymbol(StringRef symbol) { return map[symbol]; }
 
 private:
   std::function<std::string(StringRef)> resolve;
@@ -93,9 +95,17 @@ struct ComponentInit {
   SmallVector<std::pair<std::string, ExprPtr>> fields;
 };
 
+/// `let a = value`, or `let (a, b) = values` for what a fn gives.
+struct Let {
+  SmallVector<std::string> names;
+  ExprPtr value;
+  /// Written with parentheses: takes several values apart.
+  bool several = false;
+};
+
 /// A branch of an if-expression: `{ let a = ...; value }`.
 struct Branch {
-  SmallVector<std::pair<std::string, ExprPtr>> lets;
+  SmallVector<Let> lets;
   ExprPtr value;
 };
 
@@ -116,6 +126,7 @@ struct Expr {
     String, // "text": name holds its bytes
     Index,  // text[i]
     Format, // {value} inside a string: the value as text
+    Tuple,  // (a, b): the values a fn gives
   };
   Kind kind;
   llvm::SMLoc loc;
@@ -149,10 +160,13 @@ struct Record {
   }
 };
 
-/// A function implemented in C (`extern fn`, `extern proc`).
+/// A function over values: the program's own (`fn`) or one implemented in
+/// C (`extern fn`, `extern proc`).
 struct Function {
   SmallVector<Type> params;
-  /// Null if it gives nothing back.
+  /// What it gives back: nothing, a value, or several.
+  SmallVector<Type> results;
+  /// The value it gives back, if that is one; else null.
   Type result;
   bool proc = false;
 };
@@ -164,13 +178,27 @@ struct Variable {
   mlir::Value value;
   std::string component; // for Ref
   bool mut = false;      // for Ref
+  /// For a Value: declared with `var`, so it can be assigned; `value` is
+  /// what it holds where the parser is.
+  bool isVar = false;
 
   static Variable ofValue(mlir::Value value) {
     return {Value, value, std::string(), false};
   }
+  static Variable ofVar(mlir::Value value) {
+    return {Value, value, std::string(), false, true};
+  }
   static Variable ofEntity(mlir::Value value) {
     return {Entity, value, std::string(), false};
   }
+};
+
+/// What a `var` holds at some point: the variable, by its scope and name,
+/// and its value there.
+struct VarState {
+  unsigned scope;
+  std::string name;
+  mlir::Value value;
 };
 
 class Parser {
@@ -185,7 +213,8 @@ public:
         relations([this](StringRef name) { return resolve(name); }),
         systems([this](StringRef name) { return resolve(name); }),
         schedules([this](StringRef name) { return resolve(name); }),
-        functions([this](StringRef name) { return resolve(name); }) {
+        functions([this](StringRef name) { return resolve(name); }),
+        enums([this](StringRef name) { return resolve(name); }) {
     advance();
   }
 
@@ -268,7 +297,8 @@ private:
   LogicalResult parseUnique();
   LogicalResult parseArchetype();
   LogicalResult parseSystem(bool isExtern);
-  LogicalResult parseFunction(bool proc);
+  LogicalResult parseFunction(bool proc, bool isExtern);
+  LogicalResult parseEnum();
   LogicalResult parseSchedule();
   LogicalResult parseMain();
   LogicalResult parseWorld();
@@ -288,6 +318,12 @@ private:
   LogicalResult parseIf();
   LogicalResult parseIfLet(llvm::SMLoc at);
   LogicalResult parseNameStatement();
+  LogicalResult parseVar();
+  bool ifIsStatement();
+  SmallVector<VarState> captureVars();
+  void restoreVars(ArrayRef<VarState> states);
+  void mergeBranches(scf::IfOp branch, ArrayRef<VarState> before,
+                     ArrayRef<VarState> thenVars, ArrayRef<VarState> elseVars);
   LogicalResult parseMethod(const std::string &entity, llvm::SMLoc at);
   LogicalResult emitAssignment(llvm::SMLoc at, Token::Kind op,
                                std::optional<StringRef> rule,
@@ -338,6 +374,13 @@ private:
   FailureOr<mlir::Value> emitIf(const Expr &expr, Type expected);
   FailureOr<mlir::Value> emitSpawn(const Expr &expr);
   FailureOr<mlir::Value> emitInvoke(const Expr &expr);
+  FailureOr<SmallVector<mlir::Value>> emitCall(const Expr &expr);
+  FailureOr<SmallVector<mlir::Value>>
+  emitSeveral(const Expr &expr, ArrayRef<Type> expected);
+  FailureOr<Let> parseLet();
+  LogicalResult emitLet(const Let &let, bool isVar);
+  scf::IfOp giveFromBranches(scf::IfOp branch, ArrayRef<mlir::Value> thenValues,
+                             ArrayRef<mlir::Value> elseValues);
   FailureOr<SmallVector<mlir::Value>> emitInitValues(const ComponentInit &init);
   mlir::Value combine(Location at, StringRef rule, mlir::Value a,
                       mlir::Value b);
@@ -443,9 +486,13 @@ private:
   Declared<SmallVector<Type>> systems;
   Declared<SmallVector<Type>> schedules;
   Declared<Function> functions;
-  /// Parsing the body of a system (or `world`): where functions are
-  /// called.
+  /// The cases of every enum, in the order they number them.
+  Declared<SmallVector<std::string>> enums;
+  /// Parsing the body of a system (or `world`) or of a fn: where functions
+  /// are called.
   bool inSystem = false;
+  /// Parsing the body of a fn, which only computes from its parameters.
+  bool inFunction = false;
   bool hasMain = false;
   bool hadError = false;
   /// Every module of the program, in the order their parsing finished: a
@@ -465,6 +512,9 @@ private:
   /// Inside a `for`: the name of the visited entity, if bound.
   bool inQuery = false;
   bool inEdges = false;
+  /// The number of scopes outside the `for` over entities (and the edge
+  /// loop) being parsed: a `var` of one of them is not the loop's own.
+  unsigned queryScopes = 0, edgesScopes = 0;
   std::string queryEntity;
 };
 
@@ -525,15 +575,19 @@ LogicalResult Parser::parseDeclarations() {
       result = parseSystem(/*isExtern=*/false);
     else if (consumeKeyword("extern")) {
       if (consumeKeyword("fn"))
-        result = parseFunction(/*proc=*/false);
+        result = parseFunction(/*proc=*/false, /*isExtern=*/true);
       else if (consumeKeyword("proc"))
-        result = parseFunction(/*proc=*/true);
+        result = parseFunction(/*proc=*/true, /*isExtern=*/true);
       else if (consumeKeyword("system"))
         result = parseSystem(/*isExtern=*/true);
       else
         result = error("expected 'fn', 'proc' or 'system' after 'extern', "
                        "found '" + token.spelling + "'");
     }
+    else if (consumeKeyword("fn"))
+      result = parseFunction(/*proc=*/false, /*isExtern=*/false);
+    else if (consumeKeyword("enum"))
+      result = parseEnum();
     else if (consumeKeyword("schedule"))
       result = parseSchedule();
     else if (token.isKeyword("import"))
@@ -555,19 +609,17 @@ LogicalResult Parser::parseDeclarations() {
         return failure();
       module->setAttr("ent.default_capacity",
                       builder.getI64IntegerAttr(*capacity));
-    } else if (token.isKeyword("proc") ||
-               token.isKeyword("fn") || token.isKeyword("device") ||
+    } else if (token.isKeyword("proc") || token.isKeyword("device") ||
                token.isKeyword("prefab")) {
       result = error(
-          token.isKeyword("proc") || token.isKeyword("fn")
-              ? "'" + token.spelling + "' with a body is not supported yet; "
-                "'extern " + token.spelling + "' declares one implemented "
-                "in C"
+          token.isKeyword("proc")
+              ? "'proc' with a body is not supported yet; 'extern proc' "
+                "declares one implemented in C"
               : "'" + token.spelling + "' is not supported yet");
     } else {
       result = error("expected a declaration (import, component, tag, "
-                     "unique, relation, archetype, system, schedule, world, "
-                     "main), found '" +
+                     "unique, enum, relation, archetype, system, fn, "
+                     "schedule, world, main), found '" +
                      token.spelling + "'");
     }
     if (failed(result))
@@ -686,11 +738,48 @@ FailureOr<Type> Parser::parseType() {
                            Twine(unsigned(TextType::kMaxCapacity)) + " bytes");
     return Type(TextType::get(context, *capacity));
   }
+  if (!type && enums.count(*name))
+    return Type(EnumType::get(context, symbol(*name)));
   if (!type)
     return error(at, "unknown type '" + *name +
                          "'; expected f32, f64, bool, i8, i16, i32, i64, "
-                         "index, entity or text[N]");
+                         "index, entity, text[N] or an enum");
   return type;
+}
+
+// enum Name { First, Second, ... }
+LogicalResult Parser::parseEnum() {
+  llvm::SMLoc at = token.loc;
+  FailureOr<std::string> name = identifier("an enum's name");
+  if (failed(name) || failed(expect(Token::LBrace, "'{'")))
+    return failure();
+  SmallVector<std::string> cases;
+  SmallVector<StringRef> labels;
+  while (!token.is(Token::RBrace)) {
+    llvm::SMLoc caseAt = token.loc;
+    FailureOr<std::string> label = identifier("a case");
+    if (failed(label))
+      return failure();
+    if (llvm::is_contained(cases, *label))
+      return error(caseAt, "enum '" + *name + "' has the case '" + *label +
+                               "' twice");
+    cases.push_back(*label);
+    if (!consumeIf(Token::Comma))
+      break;
+  }
+  if (failed(expect(Token::RBrace, "'}'")))
+    return failure();
+  if (cases.empty())
+    return error(at, "an enum has at least one case");
+  if (cases.size() > EnumType::kMaxCases)
+    return error(at, "an enum has at most " +
+                         Twine(unsigned(EnumType::kMaxCases)) + " cases");
+  for (const std::string &label : cases)
+    labels.push_back(label);
+  EnumOp::create(builder, loc(at), declareSymbol(at, *name),
+                 builder.getStrArrayAttr(labels));
+  enums[*name] = std::move(cases);
+  return success();
 }
 
 // `{ name: type, ... }`
@@ -934,9 +1023,10 @@ LogicalResult Parser::parseSystem(bool isExtern) {
   return success();
 }
 
-// extern fn name(params) [-> type]
+// fn name(params) -> type { [let x = e]* value }
+// extern fn name(params) -> type
 // extern proc name(params) [-> type]
-LogicalResult Parser::parseFunction(bool proc) {
+LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   llvm::SMLoc at = token.loc;
   StringRef kind = proc ? "proc" : "fn";
   FailureOr<std::string> name = identifier("a function name");
@@ -944,6 +1034,7 @@ LogicalResult Parser::parseFunction(bool proc) {
     return failure();
   Function function;
   function.proc = proc;
+  SmallVector<std::string> names;
   while (!token.is(Token::RParen)) {
     FailureOr<std::string> param = identifier("a parameter name");
     if (failed(param) || failed(expect(Token::Colon, "':'")))
@@ -951,6 +1042,7 @@ LogicalResult Parser::parseFunction(bool proc) {
     FailureOr<Type> type = parseType();
     if (failed(type))
       return failure();
+    names.push_back(*param);
     function.params.push_back(*type);
     if (!consumeIf(Token::Comma))
       break;
@@ -962,30 +1054,160 @@ LogicalResult Parser::parseFunction(bool proc) {
     advance();
     advance();
     llvm::SMLoc resultAt = token.loc;
-    FailureOr<Type> type = parseType();
-    if (failed(type))
+    // `-> (T, U)`: several values.
+    bool several = consumeIf(Token::LParen);
+    do {
+      FailureOr<Type> type = parseType();
+      if (failed(type))
+        return failure();
+      function.results.push_back(*type);
+    } while (several && consumeIf(Token::Comma));
+    if (several && failed(expect(Token::RParen, "')'")))
       return failure();
-    if (isa<TextType>(*type))
+    if (several && function.results.size() < 2)
+      return error(resultAt, "one value is written without parentheses");
+    if (isExtern && several)
+      return error(resultAt, "C gives one value back; a fn with a body may "
+                             "give several");
+    if (isExtern && isa<TextType>(function.results.front()))
       return error(resultAt, "C cannot give a text back yet");
-    function.result = *type;
+    if (!several)
+      function.result = function.results.front();
   } else if (!proc) {
-    return error(at, "an extern fn gives a value back ('-> type'); one that "
-                 "only acts is an 'extern proc'");
+    return error(at, isExtern
+                         ? "an extern fn gives a value back ('-> type'); one "
+                           "that only acts is an 'extern proc'"
+                         : "a fn gives a value back ('-> type')");
   }
-  if (token.is(Token::LBrace))
+  if (isExtern && token.is(Token::LBrace))
     return error(at,
                  "an extern " + kind + " has no body; it is implemented in C");
-  consumeIf(Token::Semicolon);
+  if (!isExtern && !token.is(Token::LBrace))
+    return error(at, "a fn has a body ('{ value }'); 'extern fn' declares "
+                     "one implemented in C");
+  if (isExtern)
+    consumeIf(Token::Semicolon);
   if (name->size() == 3 && (*name == "min" || *name == "max" || *name == "len"))
     return error(at, "'" + *name + "' is built in");
   StringAttr symbolName = declareSymbol(at, *name);
-  FunctionOp::create(builder, loc(at), symbolName,
-                     builder.getTypeArrayAttr(function.params),
-                     function.result ? TypeAttr::get(function.result)
-                                     : TypeAttr(),
-                     proc);
+  auto op = FunctionOp::create(builder, loc(at), symbolName,
+                               builder.getTypeArrayAttr(function.params),
+                               builder.getTypeArrayAttr(function.results),
+                               proc);
+  // Known before its body is parsed: a fn may call itself.
+  Type result = function.result;
+  SmallVector<Type> results = function.results;
+  SmallVector<Type> params = function.params;
   functions[*name] = std::move(function);
+  if (isExtern)
+    return success();
+
+  auto *block = new Block();
+  op.getBody().push_back(block);
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(block);
+  ScopeGuard scope(*this);
+  for (auto [param, type] : llvm::zip(names, params))
+    bind(param, Variable::ofValue(block->addArgument(type, loc(at))));
+  llvm::SaveAndRestore<bool> calls(inSystem, true);
+  llvm::SaveAndRestore<bool> computes(inFunction, true);
+  // Statements, then the value the fn gives.
+  advance();
+  while (true) {
+    bool statement = token.isKeyword("let") || token.isKeyword("var") ||
+                     token.isKeyword("for");
+    if (token.isKeyword("if"))
+      statement = ifIsStatement();
+    // name op value: an assignment (`==` would be part of the value).
+    if (token.is(Token::Identifier) && lookup(token.spelling)) {
+      Token next = peek();
+      statement = next.is(Token::Assign) || next.is(Token::PlusAssign) ||
+                  next.is(Token::MinusAssign) || next.is(Token::StarAssign) ||
+                  next.is(Token::SlashAssign) || next.isKeyword("min") ||
+                  next.isKeyword("max");
+    }
+    if (!statement)
+      break;
+    if (failed(parseStatement()))
+      return failure();
+    consumeIf(Token::Semicolon);
+  }
+  if (token.is(Token::RBrace))
+    return error("a fn's body ends with the value it gives");
+  FailureOr<ExprPtr> body = parseExpr();
+  if (failed(body))
+    return failure();
+  SmallVector<mlir::Value> values;
+  if (results.size() > 1) {
+    FailureOr<SmallVector<mlir::Value>> several = emitSeveral(**body, results);
+    if (failed(several))
+      return failure();
+    values = std::move(*several);
+  } else {
+    FailureOr<mlir::Value> value = emit(**body, result);
+    if (failed(value))
+      return failure();
+    if (value->getType() != result)
+      return error((*body)->loc,
+                   "the fn's value has a different type than it gives back");
+    values.push_back(*value);
+  }
+  consumeIf(Token::Semicolon);
+  if (!token.is(Token::RBrace))
+    return error("expected '}' after the fn's value, found '" +
+                 token.spelling + "'");
+  advance();
+  YieldOp::create(builder, loc(at), values);
   return success();
+}
+
+/// At an `if` in a fn's body: whether it is a statement. The `if` that
+/// starts the last thing in the body is (the start of) the value the fn
+/// gives: after its last branch comes the body's '}', or what continues a
+/// value ('+', '==', 'as', ...). A '-' there starts the next thing.
+bool Parser::ifIsStatement() {
+  Lexer ahead = lexer;
+  Token next = ahead.next();
+  // Skips to the '}' that closes the block starting at the next '{'
+  // outside parentheses, and reads the token after it.
+  auto skipBlock = [&] {
+    for (int parens = 0; !next.is(Token::Eof); next = ahead.next()) {
+      if (next.is(Token::LParen))
+        ++parens;
+      else if (next.is(Token::RParen))
+        --parens;
+      else if (next.is(Token::LBrace) && parens <= 0)
+        break;
+    }
+    for (int braces = 0; !next.is(Token::Eof); next = ahead.next()) {
+      if (next.is(Token::LBrace))
+        ++braces;
+      else if (next.is(Token::RBrace) && --braces == 0)
+        break;
+    }
+    next = ahead.next();
+  };
+  skipBlock();
+  while (next.isKeyword("else"))
+    skipBlock();
+  switch (next.kind) {
+  case Token::RBrace:
+  case Token::Plus:
+  case Token::Star:
+  case Token::Slash:
+  case Token::Percent:
+  case Token::Equal:
+  case Token::NotEqual:
+  case Token::Less:
+  case Token::LessEqual:
+  case Token::Greater:
+  case Token::GreaterEqual:
+  case Token::AndAnd:
+  case Token::OrOr:
+    return false;
+  default:
+    return !next.isKeyword("as");
+  }
 }
 
 // schedule name(params) [run_if cond] { system(args) [run_if cond] ... }
@@ -1252,17 +1474,20 @@ LogicalResult Parser::parseBlock() {
 LogicalResult Parser::parseStatement() {
   llvm::SMLoc at = token.loc;
   if (consumeKeyword("let")) {
-    FailureOr<std::string> name = identifier("a name");
-    if (failed(name) || failed(expect(Token::Assign, "'='")))
+    FailureOr<Let> let = parseLet();
+    if (failed(let))
       return failure();
-    FailureOr<ExprPtr> value = parseExpr();
-    if (failed(value))
-      return failure();
-    FailureOr<mlir::Value> emitted = emit(**value, Type());
-    if (failed(emitted))
-      return failure();
-    bind(*name, Variable::ofValue(*emitted));
-    return success();
+    return emitLet(*let, /*isVar=*/false);
+  }
+  if (consumeKeyword("var")) {
+    // var (a, b) = values: each a var of its own.
+    if (token.is(Token::LParen)) {
+      FailureOr<Let> let = parseLet();
+      if (failed(let))
+        return failure();
+      return emitLet(*let, /*isVar=*/true);
+    }
+    return parseVar();
   }
   if (consumeKeyword("for"))
     return parseFor();
@@ -1277,7 +1502,7 @@ LogicalResult Parser::parseStatement() {
     return success();
   }
   if (token.isKeyword("return") || token.isKeyword("while") ||
-      token.isKeyword("loop") || token.isKeyword("var"))
+      token.isKeyword("loop"))
     return error("'" + token.spelling + "' is not supported yet");
   // name(args): a call for what it does.
   if (token.is(Token::Identifier) && peek().is(Token::LParen) &&
@@ -1355,6 +1580,7 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
 
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToEnd(block);
+  edgesScopes = scopes.size();
   ScopeGuard scope(*this);
   bind(*edge, {Variable::Ref, block->getArgument(0), *relation, mut});
   bind(*other, Variable::ofValue(block->getArgument(1)));
@@ -1368,6 +1594,8 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
 
 // connect(source, target, Relation { field: value, ... })
 LogicalResult Parser::parseConnect(llvm::SMLoc at) {
+  if (inFunction)
+    return error(at, "a fn only computes; a system connects");
   if (failed(expect(Token::LParen, "'('")))
     return failure();
   FailureOr<ExprPtr> source = parseExpr();
@@ -1468,16 +1696,165 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
                                 "integer type");
   Location where = loc(at);
   Type index = builder.getIndexType();
-  auto loop = scf::ForOp::create(
-      builder, where, arith::IndexCastOp::create(builder, where, index, *low),
-      arith::IndexCastOp::create(builder, where, index, *high),
-      arith::ConstantIndexOp::create(builder, where, 1));
-  OpBuilder::InsertionGuard guard(builder);
-  builder.setInsertionPoint(loop.getBody()->getTerminator());
-  ScopeGuard scope(*this);
-  bind(*name, Variable::ofValue(arith::IndexCastOp::create(
-                  builder, where, type, loop.getInductionVar())));
-  return parseBlock();
+  mlir::Value lower = arith::IndexCastOp::create(builder, where, index, *low);
+  mlir::Value upper = arith::IndexCastOp::create(builder, where, index, *high);
+  mlir::Value step = arith::ConstantIndexOp::create(builder, where, 1);
+  auto loop = scf::ForOp::create(builder, where, lower, upper, step);
+  // Which vars the body assigns is known after it: inside, each var is a
+  // placeholder for what it holds when a round starts.
+  SmallVector<VarState> before = captureVars(), after;
+  SmallVector<Operation *> placeholders;
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(loop.getBody()->getTerminator());
+    ScopeGuard scope(*this);
+    bind(*name, Variable::ofValue(arith::IndexCastOp::create(
+                    builder, where, type, loop.getInductionVar())));
+    SmallVector<VarState> inside = before;
+    for (VarState &state : inside) {
+      auto placeholder = UnrealizedConversionCastOp::create(
+          builder, where, state.value.getType(), state.value);
+      placeholders.push_back(placeholder);
+      state.value = placeholder.getResult(0);
+    }
+    restoreVars(inside);
+    if (failed(parseBlock()))
+      return failure();
+    after = captureVars();
+  }
+  restoreVars(before);
+  // The vars the body assigned are carried from round to round: what a
+  // round ends with the next one starts with, and the loop gives the last.
+  SmallVector<unsigned> carried;
+  for (auto [i, state] : llvm::enumerate(after))
+    if (state.value != placeholders[i]->getResult(0))
+      carried.push_back(i);
+  if (!carried.empty()) {
+    SmallVector<mlir::Value> inits, ends;
+    for (unsigned i : carried) {
+      inits.push_back(before[i].value);
+      ends.push_back(after[i].value);
+    }
+    auto carrying =
+        scf::ForOp::create(builder, where, lower, upper, step, inits);
+    Block *from = loop.getBody(), *to = carrying.getBody();
+    from->getTerminator()->erase();
+    loop.getInductionVar().replaceAllUsesWith(carrying.getInductionVar());
+    to->getOperations().splice(to->end(), from->getOperations());
+    {
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToEnd(to);
+      scf::YieldOp::create(builder, where, ends);
+    }
+    loop.erase();
+    for (auto [k, i] : llvm::enumerate(carried)) {
+      placeholders[i]->getResult(0).replaceAllUsesWith(
+          carrying.getRegionIterArg(k));
+      before[i].value = carrying.getResult(k);
+    }
+    restoreVars(before);
+  }
+  for (Operation *placeholder : placeholders) {
+    placeholder->getResult(0).replaceAllUsesWith(placeholder->getOperand(0));
+    placeholder->erase();
+  }
+  return success();
+}
+
+// var name [: type] = value
+LogicalResult Parser::parseVar() {
+  FailureOr<std::string> name = identifier("a name");
+  if (failed(name))
+    return failure();
+  Type type;
+  if (consumeIf(Token::Colon)) {
+    FailureOr<Type> declared = parseType();
+    if (failed(declared))
+      return failure();
+    type = *declared;
+  }
+  if (failed(expect(Token::Assign, "'=': a var starts with a value")))
+    return failure();
+  FailureOr<ExprPtr> value = parseExpr();
+  if (failed(value))
+    return failure();
+  FailureOr<mlir::Value> emitted = emit(**value, type);
+  if (failed(emitted))
+    return failure();
+  if (type && emitted->getType() != type)
+    return error((*value)->loc, "value has a different type than the var");
+  bind(*name, Variable::ofVar(*emitted));
+  return success();
+}
+
+/// Every `var` in scope with what it holds here, outermost first.
+SmallVector<VarState> Parser::captureVars() {
+  SmallVector<VarState> states;
+  for (auto [index, scope] : llvm::enumerate(scopes)) {
+    SmallVector<StringRef> names;
+    for (auto &entry : scope)
+      if (entry.second.isVar)
+        names.push_back(entry.first());
+    llvm::sort(names);
+    for (StringRef name : names)
+      states.push_back({unsigned(index), name.str(), scope[name].value});
+  }
+  return states;
+}
+
+void Parser::restoreVars(ArrayRef<VarState> states) {
+  for (const VarState &state : states)
+    scopes[state.scope][state.name].value = state.value;
+}
+
+/// After an `if` whose branches left the vars as `thenVars` and `elseVars`
+/// (from `before`): a var a branch assigned holds, from here on, what the
+/// branch that ran left in it, which the `if` gives as a result.
+void Parser::mergeBranches(scf::IfOp branch, ArrayRef<VarState> before,
+                           ArrayRef<VarState> thenVars,
+                           ArrayRef<VarState> elseVars) {
+  SmallVector<unsigned> assigned;
+  SmallVector<mlir::Value> thenValues, elseValues;
+  for (unsigned i = 0, e = before.size(); i < e; ++i) {
+    if (thenVars[i].value == before[i].value &&
+        elseVars[i].value == before[i].value)
+      continue;
+    assigned.push_back(i);
+    thenValues.push_back(thenVars[i].value);
+    elseValues.push_back(elseVars[i].value);
+  }
+  if (assigned.empty())
+    return;
+  scf::IfOp merged = giveFromBranches(branch, thenValues, elseValues);
+  for (auto [k, i] : llvm::enumerate(assigned))
+    scopes[before[i].scope][before[i].name].value = merged.getResult(k);
+}
+
+/// Replace `branch`, an `if` without results that was just made, by one
+/// with the same branches that gives `thenValues` or `elseValues`.
+scf::IfOp Parser::giveFromBranches(scf::IfOp branch,
+                                   ArrayRef<mlir::Value> thenValues,
+                                   ArrayRef<mlir::Value> elseValues) {
+  Location at = branch.getLoc();
+  SmallVector<Type> types;
+  for (mlir::Value value : thenValues)
+    types.push_back(value.getType());
+  auto merged = scf::IfOp::create(builder, at, types, branch.getCondition(),
+                                  /*withElseRegion=*/true);
+  auto fill = [&](Block *from, Block *to, ArrayRef<mlir::Value> values) {
+    if (from) {
+      from->getTerminator()->erase();
+      to->getOperations().splice(to->end(), from->getOperations());
+    }
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToEnd(to);
+    scf::YieldOp::create(builder, at, values);
+  };
+  fill(branch.thenBlock(), merged.thenBlock(), thenValues);
+  fill(branch.getElseRegion().empty() ? nullptr : branch.elseBlock(),
+       merged.elseBlock(), elseValues);
+  branch.erase();
+  return merged;
 }
 
 // for [e,] [p: [mut] P, ...] [with A, any(B, C)] [without D]
@@ -1492,6 +1869,9 @@ LogicalResult Parser::parseFor() {
   }
   if (inQuery)
     return parseEdges(at);
+  if (inFunction)
+    return error(at, "a fn only computes: it counts ('for i in a..b'), and "
+                     "a system visits entities");
   if (!isa<SystemOp>(builder.getInsertionBlock()->getParentOp()))
     return error(at, "a 'for' must be at the top level of a system");
 
@@ -1648,6 +2028,7 @@ LogicalResult Parser::parseFor() {
 
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToEnd(block);
+  queryScopes = scopes.size();
   ScopeGuard scope(*this);
   for (auto [binding, arg] : llvm::zip(bindings, block->getArguments()))
     bind(binding.name, {Variable::Ref, arg, binding.component, binding.mut});
@@ -1691,12 +2072,15 @@ LogicalResult Parser::parseIf() {
   bool hasElse = false;
   auto branch = scf::IfOp::create(builder, loc(at), *value,
                                   /*withElseRegion=*/true);
+  SmallVector<VarState> before = captureVars();
   {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(branch.thenBlock()->getTerminator());
     if (failed(parseBlock()))
       return failure();
   }
+  SmallVector<VarState> thenVars = captureVars();
+  restoreVars(before);
   if (consumeKeyword("else")) {
     hasElse = true;
     OpBuilder::InsertionGuard guard(builder);
@@ -1711,11 +2095,17 @@ LogicalResult Parser::parseIf() {
   }
   if (!hasElse)
     branch.getElseRegion().getBlocks().clear();
+  SmallVector<VarState> elseVars = captureVars();
+  restoreVars(before);
+  mergeBranches(branch, before, thenVars, elseVars);
   return success();
 }
 
 // if let x = Component(id).field { found } [else { not found }]
 LogicalResult Parser::parseIfLet(llvm::SMLoc at) {
+  if (inFunction)
+    return error(at, "a fn only computes; 'if let' reads another entity's "
+                     "field, which a system does");
   FailureOr<std::string> name = identifier("a name");
   if (failed(name) || failed(expect(Token::Assign, "'='")))
     return failure();
@@ -1749,6 +2139,7 @@ LogicalResult Parser::parseIfLet(llvm::SMLoc at) {
                        symbol(*component), builder.getStringAttr(*field));
   auto branch = scf::IfOp::create(builder, loc(at), lookupOp.getFound(),
                                   /*withElseRegion=*/true);
+  SmallVector<VarState> before = captureVars();
   {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(branch.thenBlock()->getTerminator());
@@ -1757,6 +2148,8 @@ LogicalResult Parser::parseIfLet(llvm::SMLoc at) {
     if (failed(parseBlock()))
       return failure();
   }
+  SmallVector<VarState> thenVars = captureVars();
+  restoreVars(before);
   if (consumeKeyword("else")) {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(branch.elseBlock()->getTerminator());
@@ -1765,6 +2158,9 @@ LogicalResult Parser::parseIfLet(llvm::SMLoc at) {
   } else {
     branch.getElseRegion().getBlocks().clear();
   }
+  SmallVector<VarState> elseVars = captureVars();
+  restoreVars(before);
+  mergeBranches(branch, before, thenVars, elseVars);
   return success();
 }
 
@@ -1898,6 +2294,9 @@ LogicalResult Parser::parseNameStatement() {
 
   // A unique: Unique.field op value, or Unique op value (shorthand).
   auto unique = uniques.find(name);
+  if (!variable && unique != uniques.end() && inFunction)
+    return error(at, "a fn only computes; it cannot write unique '" + name +
+                         "'. Give the value back and let a system write it");
   if (!variable && unique != uniques.end()) {
     std::string field = "value";
     if (consumeIf(Token::Dot)) {
@@ -2015,9 +2414,38 @@ LogicalResult Parser::parseNameStatement() {
         **value);
   }
 
+  // A var: name op value.
+  if (variable && variable->isVar) {
+    unsigned scope = scopes.size();
+    while (!scopes[--scope].count(name))
+      ;
+    if (inQuery && scope < queryScopes)
+      return error(at, "'" + name + "' is a var from outside the 'for': "
+                       "every entity would assign it. Accumulate into a "
+                       "unique ('+=', '-=', 'min=', 'max=') instead");
+    if (inEdges && scope < edgesScopes)
+      return error(at, "assigning a var from outside an edge loop is not "
+                       "supported yet");
+    auto op = parseAssignOp();
+    if (failed(op))
+      return failure();
+    FailureOr<ExprPtr> value = parseExpr();
+    if (failed(value))
+      return failure();
+    Variable &target = scopes[scope][name];
+    return emitAssignment(
+        at, op->first, op->second, [&] { return target.value.getType(); },
+        [&]() -> mlir::Value { return target.value; },
+        [&](mlir::Value v) -> LogicalResult {
+          target.value = v;
+          return success();
+        },
+        **value);
+  }
+
   if (variable)
-    return error(at, "'" + name + "' is a value and cannot be assigned; "
-                                  "locals are immutable");
+    return error(at, "'" + name + "' is a value and cannot be assigned: "
+                                  "declare it with 'var' instead of 'let'");
   return error(at, "unknown name '" + name + "'");
 }
 
@@ -2162,21 +2590,68 @@ FailureOr<ExprPtr> Parser::parseUnary() {
   return primary;
 }
 
+// After `let` (or `var`): name = value, or (a, b) = values.
+FailureOr<Let> Parser::parseLet() {
+  Let let;
+  if (consumeIf(Token::LParen)) {
+    let.several = true;
+    do {
+      FailureOr<std::string> name = identifier("a name");
+      if (failed(name))
+        return failure();
+      let.names.push_back(*name);
+    } while (consumeIf(Token::Comma));
+    if (failed(expect(Token::RParen, "')'")))
+      return failure();
+  } else {
+    FailureOr<std::string> name = identifier("a name");
+    if (failed(name))
+      return failure();
+    let.names.push_back(*name);
+  }
+  if (failed(expect(Token::Assign, "'='")))
+    return failure();
+  FailureOr<ExprPtr> value = parseExpr();
+  if (failed(value))
+    return failure();
+  let.value = std::move(*value);
+  return let;
+}
+
+LogicalResult Parser::emitLet(const Let &let, bool isVar) {
+  SmallVector<mlir::Value> values;
+  if (let.several) {
+    SmallVector<Type> any(let.names.size());
+    FailureOr<SmallVector<mlir::Value>> several = emitSeveral(*let.value, any);
+    if (failed(several))
+      return failure();
+    values = std::move(*several);
+  } else {
+    FailureOr<mlir::Value> value = emit(*let.value, Type());
+    if (failed(value))
+      return failure();
+    values.push_back(*value);
+  }
+  for (auto [name, value] : llvm::zip(let.names, values))
+    bind(name, isVar ? Variable::ofVar(value) : Variable::ofValue(value));
+  return success();
+}
+
 // { [let x = e;]* value }
 FailureOr<std::unique_ptr<Branch>> Parser::parseBranch() {
   if (failed(expect(Token::LBrace, "'{'")))
     return failure();
   auto branch = std::make_unique<Branch>();
   while (consumeKeyword("let")) {
-    FailureOr<std::string> name = identifier("a name");
-    if (failed(name) || failed(expect(Token::Assign, "'='")))
-      return failure();
-    FailureOr<ExprPtr> value = parseExpr();
-    if (failed(value))
+    FailureOr<Let> let = parseLet();
+    if (failed(let))
       return failure();
     consumeIf(Token::Semicolon);
-    branch->lets.push_back({*name, std::move(*value)});
+    branch->lets.push_back(std::move(*let));
   }
+  if (token.isKeyword("var"))
+    return error("'var' is not supported here yet: a branch of an 'if' "
+                 "that gives a value is made of 'let's");
   FailureOr<ExprPtr> value = parseExpr();
   if (failed(value) || failed(expect(Token::RBrace, "'}'")))
     return failure();
@@ -2239,7 +2714,23 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
   case Token::LParen: {
     advance();
     FailureOr<ExprPtr> inner = parseExpr();
-    if (failed(inner) || failed(expect(Token::RParen, "')'")))
+    if (failed(inner))
+      return failure();
+    // (a, b): several values.
+    if (token.is(Token::Comma)) {
+      node->kind = Expr::Tuple;
+      node->operands.push_back(std::move(*inner));
+      while (consumeIf(Token::Comma)) {
+        FailureOr<ExprPtr> next = parseExpr();
+        if (failed(next))
+          return failure();
+        node->operands.push_back(std::move(*next));
+      }
+      if (failed(expect(Token::RParen, "')'")))
+        return failure();
+      return node;
+    }
+    if (failed(expect(Token::RParen, "')'")))
       return failure();
     return inner;
   }
@@ -2295,10 +2786,19 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
     auto thenBranch = parseBranch();
     if (failed(thenBranch) || failed(expectKeyword("else")))
       return failure();
+    node->thenBranch = std::move(*thenBranch);
+    // `else if ...`: the branch is that `if`, as if written in braces.
+    if (token.isKeyword("if")) {
+      FailureOr<ExprPtr> rest = parsePrimary();
+      if (failed(rest))
+        return failure();
+      node->elseBranch = std::make_unique<Branch>();
+      node->elseBranch->value = std::move(*rest);
+      return node;
+    }
     auto elseBranch = parseBranch();
     if (failed(elseBranch))
       return failure();
-    node->thenBranch = std::move(*thenBranch);
     node->elseBranch = std::move(*elseBranch);
     return node;
   }
@@ -2385,6 +2885,14 @@ Type Parser::typeOf(const Expr &expr) {
       return type;
     if (type.isInteger(1))
       return TextType::get(context, 5);
+    // An enum as the name of its case.
+    if (auto named = dyn_cast<EnumType>(type)) {
+      unsigned longest = 1;
+      for (const std::string &label :
+           enums.ofSymbol(named.getName().getValue()))
+        longest = std::max<unsigned>(longest, label.size());
+      return TextType::get(context, longest);
+    }
     return TextType::get(context, isa<FloatType>(type) ? 28 : 21);
   }
   case Expr::Bool:
@@ -2409,6 +2917,9 @@ Type Parser::typeOf(const Expr &expr) {
     auto unique = uniques.find(expr.name);
     if (unique != uniques.end())
       return unique->second.fieldType(expr.field);
+    // Enum.Case
+    if (!lookup(expr.name) && enums.count(expr.name))
+      return EnumType::get(context, symbol(expr.name));
     return {};
   }
   case Expr::Unary:
@@ -2457,6 +2968,8 @@ Type Parser::typeOf(const Expr &expr) {
     return EntityType::get(context);
   case Expr::Has:
     return builder.getI1Type();
+  case Expr::Tuple:
+    return {};
   }
   return {};
 }
@@ -2472,14 +2985,34 @@ Type Parser::defaultType(const Expr &expr) {
   return builder.getI32Type();
 }
 
-/// Emit a call of an extern fn or proc; the value is null if it gives
-/// none.
+/// Emit a call of a fn or proc that gives at most one value; the value is
+/// null if it gives none.
 FailureOr<mlir::Value> Parser::emitInvoke(const Expr &expr) {
+  size_t count = functions[expr.name].results.size();
+  if (count > 1) {
+    std::string names = "a";
+    for (size_t i = 1; i < count; ++i)
+      names += std::string(", ") + char('a' + std::min<size_t>(i, 25));
+    return error(expr.loc, "'" + expr.name + "' gives " + Twine(count) +
+                               " values; take them with 'let (" + names +
+                               ") = " + expr.name + "(...)'");
+  }
+  FailureOr<SmallVector<mlir::Value>> values = emitCall(expr);
+  if (failed(values))
+    return failure();
+  return values->empty() ? mlir::Value() : values->front();
+}
+
+/// Emit a call of a fn or proc, and give what it gives.
+FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
   Function &function = functions[expr.name];
   if (!inSystem)
     return error(expr.loc, "'" + expr.name + "' can only be called in a "
                            "system; conditions and 'main' read uniques a "
                            "system has written");
+  if (inFunction && function.proc)
+    return error(expr.loc, "'" + expr.name + "' is a proc: it acts, and a "
+                           "fn only computes");
   if (expr.operands.size() != function.params.size())
     return error(expr.loc, "'" + expr.name + "' takes " +
                                Twine(function.params.size()) +
@@ -2496,10 +3029,96 @@ FailureOr<mlir::Value> Parser::emitInvoke(const Expr &expr) {
     args.push_back(*arg);
   }
   auto invoke = InvokeOp::create(
-      builder, loc(expr.loc),
-      function.result, symbol(expr.name), args,
+      builder, loc(expr.loc), function.results, symbol(expr.name), args,
       function.proc ? builder.getUnitAttr() : UnitAttr());
-  return invoke.getResult() ? mlir::Value(invoke.getResult()) : mlir::Value();
+  return SmallVector<mlir::Value>(invoke.getResults());
+}
+
+/// Emit an expression that is several values, as many as `expected` has
+/// types (a null one leaves the type to the value): `(a, b)`, a call of a
+/// fn that gives them, or an `if` whose branches do.
+FailureOr<SmallVector<mlir::Value>>
+Parser::emitSeveral(const Expr &expr, ArrayRef<Type> expected) {
+  Location at = loc(expr.loc);
+  auto check = [&](ArrayRef<mlir::Value> values,
+                   ArrayRef<const Expr *> from) -> LogicalResult {
+    if (values.size() != expected.size())
+      return error(expr.loc, "expected " + Twine(expected.size()) +
+                                 " values, found " + Twine(values.size()));
+    for (auto [index, value] : llvm::enumerate(values))
+      if (expected[index] && value.getType() != expected[index])
+        return error(from.empty() ? expr.loc : from[index]->loc,
+                     "value #" + Twine(index + 1) +
+                         " has a different type than expected");
+    return success();
+  };
+  switch (expr.kind) {
+  case Expr::Tuple: {
+    if (expr.operands.size() != expected.size())
+      return error(expr.loc, "expected " + Twine(expected.size()) +
+                                 " values, found " +
+                                 Twine(expr.operands.size()));
+    SmallVector<mlir::Value> values;
+    SmallVector<const Expr *> from;
+    for (auto [operand, type] : llvm::zip(expr.operands, expected)) {
+      FailureOr<mlir::Value> value = emit(*operand, type);
+      if (failed(value))
+        return failure();
+      values.push_back(*value);
+      from.push_back(operand.get());
+    }
+    if (failed(check(values, from)))
+      return failure();
+    return values;
+  }
+  case Expr::Call: {
+    if (!functions.count(expr.name) ||
+        functions[expr.name].results.size() < 2)
+      break;
+    FailureOr<SmallVector<mlir::Value>> values = emitCall(expr);
+    if (failed(values) || failed(check(*values, {})))
+      return failure();
+    return values;
+  }
+  case Expr::If: {
+    FailureOr<mlir::Value> condition =
+        emit(*expr.operands[0], builder.getI1Type());
+    if (failed(condition))
+      return failure();
+    if (!condition->getType().isInteger(1))
+      return error(expr.loc, "an 'if' condition must be a bool");
+    auto branch = scf::IfOp::create(builder, at, *condition,
+                                    /*withElseRegion=*/true);
+    // The first branch says what the types are where nothing else does.
+    SmallVector<Type> types(expected);
+    SmallVector<mlir::Value> thenValues, elseValues;
+    for (auto [block, part, values] :
+         {std::make_tuple(branch.thenBlock(), expr.thenBranch.get(),
+                          &thenValues),
+          std::make_tuple(branch.elseBlock(), expr.elseBranch.get(),
+                          &elseValues)}) {
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPoint(block->getTerminator());
+      ScopeGuard scope(*this);
+      for (const Let &let : part->lets)
+        if (failed(emitLet(let, /*isVar=*/false)))
+          return failure();
+      FailureOr<SmallVector<mlir::Value>> given =
+          emitSeveral(*part->value, types);
+      if (failed(given))
+        return failure();
+      *values = std::move(*given);
+      for (auto [type, value] : llvm::zip(types, *values))
+        type = value.getType();
+    }
+    scf::IfOp merged = giveFromBranches(branch, thenValues, elseValues);
+    return SmallVector<mlir::Value>(merged.getResults());
+  }
+  default:
+    break;
+  }
+  return error(expr.loc, "expected " + Twine(expected.size()) +
+                             " values: '(a, b)', or a fn that gives them");
 }
 
 FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
@@ -2613,6 +3232,10 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return variable->value;
     }
     auto unique = uniques.find(expr.name);
+    if (unique != uniques.end() && inFunction)
+      return error(expr.loc, "a fn computes from its parameters only; pass "
+                             "it what it needs of unique '" +
+                                 expr.name + "'");
     if (unique != uniques.end()) {
       if (!unique->second.shorthand)
         return error(expr.loc, "unique '" + expr.name +
@@ -2640,6 +3263,10 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
           .getResult();
     }
     auto unique = uniques.find(expr.name);
+    if (unique != uniques.end() && inFunction)
+      return error(expr.loc, "a fn computes from its parameters only; pass "
+                             "it what it needs of unique '" +
+                                 expr.name + "'");
     if (unique != uniques.end()) {
       Type type = unique->second.fieldType(expr.field);
       if (!type)
@@ -2648,6 +3275,19 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return ReadOp::create(builder, at, type, symbol(expr.name),
                             builder.getStringAttr(expr.field))
           .getResult();
+    }
+    // Enum.Case: the byte that numbers the case, as the enum's type.
+    auto named = enums.find(expr.name);
+    if (named != enums.end()) {
+      auto label = llvm::find(named->second, expr.field);
+      if (label == named->second.end())
+        return error(expr.loc, "enum '" + expr.name + "' has no case '" +
+                                   expr.field + "'");
+      auto type = EnumType::get(context, symbol(expr.name));
+      mlir::Value number = integer(at, type.getStorageType(),
+                                   label - named->second.begin());
+      return UnrealizedConversionCastOp::create(builder, at, type, number)
+          .getResult(0);
     }
     return error(expr.loc, "unknown name '" + expr.name + "'");
   }
@@ -2693,15 +3333,16 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return textLength(at, *text);
     }
     if (functions.count(expr.name)) {
-      if (!functions[expr.name].result)
+      if (functions[expr.name].results.empty())
         return error(expr.loc, "'" + expr.name + "' gives no value");
       return emitInvoke(expr);
     }
     if (expr.name != "min" && expr.name != "max")
       return error(expr.loc, "unknown function '" + expr.name +
-                                 "'; declare one implemented in C with "
-                                 "'extern fn' or 'extern proc' (min, max "
-                                 "and len are built in)");
+                                 "'; declare it before with 'fn', or one "
+                                 "implemented in C with 'extern fn' or "
+                                 "'extern proc' (min, max and len are "
+                                 "built in)");
     if (expr.operands.size() != 2)
       return error(expr.loc, "'" + expr.name + "' takes two arguments");
     Type type = typeOf(expr);
@@ -2726,6 +3367,39 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return textResize(at, *value, text);
     }
     Type from = typeOf(*expr.operands[0]);
+    // An enum is the number of its case: `way as i32`, `2 as Way`.
+    auto toEnum = dyn_cast<EnumType>(expr.castType);
+    auto fromEnum = dyn_cast_or_null<EnumType>(from);
+    if (toEnum || fromEnum) {
+      if (!from)
+        from = defaultType(*expr.operands[0]);
+      FailureOr<mlir::Value> value = emit(*expr.operands[0], from);
+      if (failed(value))
+        return failure();
+      if (from == expr.castType)
+        return *value;
+      Type other = toEnum ? from : expr.castType;
+      if (!other.isSignlessInteger() || other.isInteger(1))
+        return error(expr.loc, "an enum is cast to and from an integer, the "
+                               "number of its case");
+      Type byte = builder.getIntegerType(8);
+      unsigned width = other.getIntOrFloatBitWidth();
+      if (fromEnum) {
+        mlir::Value number =
+            UnrealizedConversionCastOp::create(builder, at, byte, *value)
+                .getResult(0);
+        return width == 8 ? number
+                          : arith::ExtUIOp::create(builder, at, other, number)
+                                .getResult();
+      }
+      mlir::Value number =
+          width == 8
+              ? *value
+              : arith::TruncIOp::create(builder, at, byte, *value).getResult();
+      return UnrealizedConversionCastOp::create(builder, at, expr.castType,
+                                                number)
+          .getResult(0);
+    }
     // A literal is written in the type it is cast to (`5000000000 as i64`).
     if (!from && (isa<FloatType>(expr.castType) ||
                   (expr.castType.isSignlessInteger() &&
@@ -2762,7 +3436,13 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   case Expr::If:
     return emitIf(expr, expected);
   case Expr::Spawn:
+    if (inFunction)
+      return error(expr.loc, "a fn only computes; a system spawns");
     return emitSpawn(expr);
+  case Expr::Tuple:
+    return error(expr.loc, "'(a, b)' is several values, which a fn gives "
+                           "back and 'let (a, b) = ...' takes apart; one "
+                           "value is expected here");
   case Expr::Has: {
     const Variable *variable = lookup(expr.name);
     if (!variable || variable->kind != Variable::Entity)
@@ -2869,6 +3549,21 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
     return failure();
   if (a->getType() != b->getType())
     return error(expr.loc, "operands have different types");
+  if (auto named = dyn_cast<EnumType>(a->getType())) {
+    if (expr.op != Token::Equal && expr.op != Token::NotEqual)
+      return error(expr.loc, "enum values are compared with '==' and '!='; "
+                             "'as i32' gives the number of a case");
+    Type byte = named.getStorageType();
+    return arith::CmpIOp::create(
+               builder, at,
+               expr.op == Token::Equal ? arith::CmpIPredicate::eq
+                                       : arith::CmpIPredicate::ne,
+               UnrealizedConversionCastOp::create(builder, at, byte, *a)
+                   .getResult(0),
+               UnrealizedConversionCastOp::create(builder, at, byte, *b)
+                   .getResult(0))
+        .getResult();
+  }
   if (!comparison)
     return arithmetic(at, expr.op, *a, *b);
   if (isa<FloatType>(type)) {
@@ -3245,6 +3940,26 @@ FailureOr<mlir::Value> Parser::formatValue(llvm::SMLoc where,
                                                 textBits(at, b)),
                         text);
   };
+  // An enum: the name of its case.
+  if (auto named = dyn_cast<EnumType>(type)) {
+    const SmallVector<std::string> &labels =
+        enums.ofSymbol(named.getName().getValue());
+    unsigned longest = 1;
+    for (const std::string &label : labels)
+      longest = std::max<unsigned>(longest, label.size());
+    TextType text = TextType::get(context, longest);
+    Type byte = named.getStorageType();
+    mlir::Value number =
+        UnrealizedConversionCastOp::create(builder, at, byte, value)
+            .getResult(0);
+    mlir::Value name = textConstant(at, labels.back(), text);
+    for (unsigned i = labels.size() - 1; i-- > 0;)
+      name = choose(arith::CmpIOp::create(builder, at,
+                                          arith::CmpIPredicate::eq, number,
+                                          integer(at, byte, i)),
+                    textConstant(at, labels[i], text), name);
+    return name;
+  }
   // "-" or nothing.
   auto sign = [&](mlir::Value negative) {
     TextType one = TextType::get(context, 1);
@@ -3399,12 +4114,9 @@ FailureOr<mlir::Value> Parser::emitIf(const Expr &expr, Type expected) {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPointToStart(block);
     ScopeGuard scope(*this);
-    for (auto &[name, value] : part->lets) {
-      FailureOr<mlir::Value> emitted = emit(*value, Type());
-      if (failed(emitted))
+    for (const Let &let : part->lets)
+      if (failed(emitLet(let, /*isVar=*/false)))
         return failure();
-      bind(name, Variable::ofValue(*emitted));
-    }
     FailureOr<mlir::Value> value = emit(*part->value, type);
     if (failed(value))
       return failure();

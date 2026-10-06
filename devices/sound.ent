@@ -1,0 +1,64 @@
+// Sound: a program makes one by spawning a `Tone` (or a `Sample`, a file),
+// and `play`, run once a frame, starts what is pending and takes it away:
+//
+//   import sound
+//   system hit() {
+//     for b: Ball where b.bounced {
+//       spawn { Tone { pitch: 440.0, to: 880.0, seconds: 0.1, after: 0.0,
+//                      volume: 0.5, wave: Wave.Square } }
+//     }
+//   }
+//   schedule frame() { hit()  play() }
+//
+// A tone is made up on the spot, so a program needs no files to be heard.
+// Tones sound together; a tune is tones with different `after`.
+//
+// Implemented with raylib (devices/sound.c, devices/sound.link). Where the
+// machine has nothing to play on, nothing is heard and nothing fails.
+
+// What a tone sounds like: hollow and buzzing (the sound of old games),
+// soft, pure, or a hiss.
+enum Wave { Square, Triangle, Sine, Noise }
+
+// `pitch` in hertz (440 is the A above middle C), sliding evenly to `to`
+// while it sounds (the same, or 0, for none); for `seconds`, starting
+// `after` seconds from now; `volume` from 0 to 1. At most this many between
+// two `play`s.
+component Tone {
+  pitch: f32, to: f32, seconds: f32, after: f32, volume: f32, wave: Wave
+} capacity 64
+
+// A sound file (.wav, .ogg, .mp3), by its path from where the program
+// runs. It is read the first time it is played.
+component Sample { file: text[126], volume: f32 } capacity 16
+
+// The shapes `play` looks for, whether or not the program makes any.
+archetype Tones { Tone } capacity 64
+archetype Samples { Sample } capacity 16
+
+// `volume` scales everything played from now on (1 at the start); `off`
+// plays nothing.
+unique Sound { volume: f32, off: bool }
+
+world {
+  Sound.volume = 1.0
+}
+
+// The device's own: what `play` is made of.
+extern proc tone(pitch: f32, to: f32, seconds: f32, after: f32, volume: f32,
+                 wave: Wave)
+extern proc sample(file: text[126], volume: f32)
+
+system play() {
+  let volume = if Sound.off { 0.0 } else { Sound.volume }
+  for e, t: Tone {
+    if volume > 0.0 {
+      tone(t.pitch, t.to, t.seconds, t.after, t.volume * volume, t.wave)
+    }
+    e.destroy()
+  }
+  for e, s: Sample {
+    if volume > 0.0 { sample(s.file, s.volume * volume) }
+    e.destroy()
+  }
+}

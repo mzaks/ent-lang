@@ -54,6 +54,33 @@ def Ent_ResourceOp : Ent_RecordOp<"resource"> {
   }];
 }
 
+def Ent_EnumOp : Ent_Op<"enum", [Symbol]> {
+  let summary = "Declare an enum: a type whose values are named cases";
+  let description = [{
+    ```mlir
+    ent.enum @Way ["Right", "Down", "Left", "Up"]
+    ```
+    A value of the type `!ent.enum<@Way>` is one of the cases, stored as
+    the byte that numbers it: `Right` is 0, `Down` 1, and so on. Fields,
+    parameters and results may have the type. A generated C header names
+    the cases (`ent_Way_Right`).
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name, StrArrayAttr:$cases);
+  let assemblyFormat = "$sym_name $cases attr-dict";
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    /// The name of the C type: `ent_` and the enum's name, where a
+    /// character C cannot have in a name (the `.` after a module's name)
+    /// is `_`.
+    std::string getCName() {
+      std::string name = "ent_";
+      for (char c : getSymName())
+        name += ::llvm::isAlnum(c) ? c : '_';
+      return name;
+    }
+  }];
+}
+
 def Ent_RelationOp : Ent_RecordOp<"relation", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Declare a relation: directed edges between entities, with data";
@@ -229,15 +256,22 @@ def Ent_ExternOp : Ent_Op<"extern", [
   }];
 }
 
-def Ent_FunctionOp : Ent_Op<"function", [Symbol]> {
-  let summary = "A function implemented outside the program";
+def Ent_FunctionOp : Ent_Op<"function", [Symbol, IsolatedFromAbove]> {
+  let summary = "A function over values: the program's own, or one in C";
   let description = [{
     ```mlir
     ent.function @hash(i64) -> i64
     ent.function proc @put(!ent.text<126>)
     ent.function proc @seconds() -> f64
+    ent.function @square(%x: i32) -> i32 {
+      %0 = arith.muli %x, %x : i32
+      ent.yield %0 : i32
+    }
+    ent.function @swap(%a: i32, %b: f32) -> (f32, i32) {
+      ent.yield %b, %a : f32, i32
+    }
     ```
-    A C function a system calls with `ent.invoke`. It takes values and
+    A function a system calls with `ent.invoke`. It takes values and
     gives at most one back; it never sees the world, so what a system
     reads and writes stays what its own body does.
 
@@ -246,22 +280,44 @@ def Ent_FunctionOp : Ent_Op<"function", [Symbol]> {
     several threads. A `proc` acts on the outside (output, the time); the
     program calls it exactly where and as often as its systems say.
 
-    A bool crosses as a C `bool`, a text as a pointer to its struct
-    (`const ent_text126 *`); a text cannot be the result.
+    Without a body it is implemented in C. A bool then crosses as a C
+    `bool`, a text as a pointer to its struct (`const ent_text126 *`); a
+    text cannot be the result.
+
+    With a body it is the program's own: the entry block's arguments are
+    its parameters, and `ent.yield` ends it with its value. The body only
+    computes: of this dialect it may hold calls of other plain functions
+    (also of itself) and nothing else. A value of any type may go in and
+    come out, and it may give several values (`-> (f32, i32)`), which
+    `ent.yield` and its calls then have in that order. Only a plain
+    function has a body so far.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        TypeArrayAttr:$params,
-                       OptionalAttr<TypeAttr>:$result,
+                       TypeArrayAttr:$results,
                        UnitAttr:$proc);
-  let assemblyFormat = [{
-    (`proc` $proc^)? $sym_name `(` custom<ParamTypes>($params) `)`
-    (`->` $result^)? attr-dict
-  }];
+  let regions = (region AnyRegion:$body);
+  let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
+  let hasRegionVerifier = 1;
   let extraClassDeclaration = [{
-    /// The name of the C function: `ent_` and the function's name, where
-    /// a character C cannot have in a name (the `.` after a module's
-    /// name) is `_`.
+    /// Whether the function has a body; without one it is implemented in C.
+    bool isDefined() { return !getBody().empty(); }
+
+    /// What it gives back, if that is one value.
+    std::optional<::mlir::Type> getResult() {
+      if (getResults().size() != 1)
+        return std::nullopt;
+      return ::llvm::cast<::mlir::TypeAttr>(getResults()[0]).getValue();
+    }
+    ::llvm::SmallVector<::mlir::Type> getResultTypes() {
+      return ::llvm::SmallVector<::mlir::Type>(
+          getResults().getAsValueRange<::mlir::TypeAttr>());
+    }
+
+    /// The name of the lowered function, for one without a body the C
+    /// function's: `ent_` and the function's name, where a character C
+    /// cannot have in a name (the `.` after a module's name) is `_`.
     std::string getCName() {
       std::string name = "ent_";
       for (char c : getSymName())
@@ -725,25 +781,33 @@ def Ent_DespawnOp : Ent_Op<"despawn", [
 def Ent_InvokeOp : Ent_Op<"invoke", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>,
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = "Call a function implemented outside the program";
+  let summary = "Call a function over values";
   let description = [{
     ```mlir
     %h = ent.invoke @hash(%id) : (i64) -> i64
     ent.invoke proc @put(%line) : (!ent.text<126>) -> ()
+    %b, %a = ent.invoke @swap(%x, %y) : (i32, f32) -> (f32, i32)
     ```
-    Calls an `ent.function` from inside a system. `proc` repeats what the
+    Calls an `ent.function` from inside a system, or from the body of
+    another function (which calls no proc). `proc` repeats what the
     function declares: the call then has effects outside the world, so its
     system keeps its place among all others and a query holding it visits
     its entities in order, one at a time.
   }];
   let arguments = (ins FlatSymbolRefAttr:$callee, Variadic<AnyType>:$args,
                        UnitAttr:$proc);
-  let results = (outs Optional<AnyType>:$result);
+  let results = (outs Variadic<AnyType>:$results);
   let assemblyFormat = [{
     (`proc` $proc^)? $callee `(` $args `)` attr-dict
-    `:` functional-type($args, results)
+    `:` functional-type($args, $results)
   }];
   let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    /// The value the call gives, if any: the first of several.
+    ::mlir::Value getResult() {
+      return getNumResults() ? getOperation()->getResult(0) : ::mlir::Value();
+    }
+  }];
 }
 
 def Ent_StageOp : Ent_Op<"stage", [
@@ -859,10 +923,11 @@ def Ent_LoopOp : Ent_Op<"loop", [
 def Ent_YieldOp : Ent_Op<"yield", [
     Pure, Terminator,
     ParentOneOf<["SystemOp", "ScheduleOp", "QueryOp", "StageOp", "RunOp",
-                 "EdgesOp", "MainOp", "LoopOp"]>]> {
+                 "EdgesOp", "MainOp", "LoopOp", "FunctionOp"]>]> {
   let summary = "Region terminator; implicit in the custom syntax";
   let description = [{
-    Ends a body without operands, and a condition with its value.
+    Ends a body without operands, and a condition or a function with its
+    value.
   }];
   let arguments = (ins Variadic<AnyType>:$results);
   let builders = [OpBuilder<(ins), [{ /* nothing to do */ }]>];

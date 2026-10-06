@@ -1,0 +1,5 @@
+// A module with an enum that crosses to C: there it is a byte, with a name
+// for each case (shapes.c).
+enum Shape { Round, Square }
+extern fn corners(shape: Shape) -> i32
+extern fn other(shape: Shape) -> Shape

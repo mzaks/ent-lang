@@ -56,6 +56,12 @@ void ent_window_circle(float x, float y, float radius, int32_t color) {
   DrawCircleV((Vector2){x, y}, radius, ent_window_color(color));
 }
 
+void ent_window_sector(float x, float y, float radius, float from, float to,
+                       int32_t color) {
+  DrawCircleSector((Vector2){x, y}, radius, from, to, 48,
+                   ent_window_color(color));
+}
+
 void ent_window_line(float x0, float y0, float x1, float y1, int32_t color) {
   DrawLineV((Vector2){x0, y0}, (Vector2){x1, y1}, ent_window_color(color));
 }

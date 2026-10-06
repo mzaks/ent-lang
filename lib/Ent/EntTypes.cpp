@@ -11,6 +11,19 @@ using namespace mlir::ent;
 #define GET_TYPEDEF_CLASSES
 #include "Ent/EntOpsTypes.cpp.inc"
 
+// !ent.enum<@Name>
+Type EnumType::parse(AsmParser &parser) {
+  FlatSymbolRefAttr name;
+  if (parser.parseLess() || parser.parseAttribute(name) ||
+      parser.parseGreater())
+    return {};
+  return EnumType::get(parser.getContext(), name);
+}
+
+void EnumType::print(AsmPrinter &printer) const {
+  printer << "<" << getName() << ">";
+}
+
 void EntDialect::registerTypes() {
   addTypes<
 #define GET_TYPEDEF_LIST

@@ -22,6 +22,14 @@ using namespace mlir::ent;
 static StringRef getCType(Type type) {
   if (isa<EntityType>(type))
     return "ent_entity";
+  if (auto named = dyn_cast<EnumType>(type)) {
+    // As EnumOp::getCName names it.
+    static llvm::StringSet<> names;
+    std::string name = "ent_";
+    for (char c : named.getName().getValue())
+      name += llvm::isAlnum(c) ? c : '_';
+    return names.insert(name).first->getKey();
+  }
   if (auto text = dyn_cast<TextType>(type)) {
     static llvm::StringSet<> names;
     return names.insert(llvm::formatv("ent_text{0}", text.getCapacity()).str())
@@ -101,19 +109,44 @@ static void emitTexts(ModuleOp module, raw_ostream &os,
 
 /// The text capacities the extern fns and procs of `module` take.
 static void addFunctionTexts(ModuleOp module, std::set<unsigned> &capacities) {
-  for (FunctionOp function : module.getOps<FunctionOp>())
+  for (FunctionOp function : module.getOps<FunctionOp>()) {
+    if (function.isDefined())
+      continue;
     for (Type type : function.getParams().getAsValueRange<TypeAttr>())
       if (auto text = dyn_cast<TextType>(type))
         capacities.insert(text.getCapacity());
+  }
 }
 
-/// Declare the C function of every extern fn and proc of `module`.
+/// Declare the enums of `module`: a byte, and a name for each case.
+static void emitEnums(ModuleOp module, raw_ostream &os) {
+  bool any = false;
+  for (EnumOp named : module.getOps<EnumOp>()) {
+    if (!any)
+      os << "\n// Enums: a value is the number of its case, in one byte.\n";
+    any = true;
+    std::string name = named.getCName();
+    os << llvm::formatv("#ifndef ENT_ENUM_{0}\n#define ENT_ENUM_{0}\n"
+                        "typedef uint8_t {0};\nenum {{",
+                        name);
+    for (auto [index, label] :
+         llvm::enumerate(named.getCases().getAsValueRange<StringAttr>()))
+      os << llvm::formatv("{0}\n  {1}_{2} = {3}", index ? "," : "", name,
+                          label, index);
+    os << "\n};\n#endif\n";
+  }
+}
+
+/// Declare the C function of every extern fn and proc of `module`; a fn
+/// with a body is the program's own, and no business of C.
 static LogicalResult
 emitFunctions(ModuleOp module, raw_ostream &os,
               function_ref<LogicalResult(Operation *, const std::string &)>
                   claim) {
   bool any = false;
   for (FunctionOp function : module.getOps<FunctionOp>()) {
+    if (function.isDefined())
+      continue;
     if (failed(claim(function, function.getCName())))
       return failure();
     if (!any)
@@ -161,6 +194,7 @@ static LogicalResult emitExternHeader(ModuleOp module, raw_ostream &os) {
   std::set<unsigned> textCapacities;
   addFunctionTexts(module, textCapacities);
   emitTexts(module, os, textCapacities);
+  emitEnums(module, os);
   if (failed(emitFunctions(module, os, claim)))
     return failure();
   emitLanguageClose(os);
@@ -227,6 +261,7 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
           textCapacities.insert(text.getCapacity());
   addFunctionTexts(module, textCapacities);
   emitTexts(module, os, textCapacities);
+  emitEnums(module, os);
 
   // Entity ids, as EntityScheme chose them. The functions below do exactly
   // what the lowered program does.

@@ -1,0 +1,21 @@
+// Fns with a body through the build driver: the program's own functions,
+// called from its systems, from each other and from themselves, with
+// numbers and texts going in and coming out.
+// RUN: %ent run %S/Inputs/fns.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/fns.ent | FileCheck %s
+// They are no business of C: its header has the console's procs only.
+// RUN: %ent build %S/Inputs/fns.ent -o %t.exe --keep %t.dir
+// RUN: FileCheck %s --check-prefix=HEADER --input-file %t.dir/ent_extern.h
+
+// HEADER:     ent_console_put
+// HEADER-NOT: gcd
+// HEADER-NOT: wall
+
+// CHECK:      gcd 21 fib 6765 half 2.5 *****
+// CHECK-NEXT: walls 26 power 1594323 clamp 0 100 8
+// CHECK-NEXT: collatz 111 ======
+// CHECK-NEXT: 1,1 free: 29 away, dx 0
+// CHECK-NEXT: 2,1 free: 20 away, dx -1
+// CHECK-NEXT: 3,1 free: 13 away, dx 1
+// CHECK-NEXT: 4,1 wall: 8 away, dx 0
+// CHECK-NOT:  {{.}}

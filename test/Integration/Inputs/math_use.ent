@@ -1,0 +1,25 @@
+// The math module (devices/math.ent): what the machine's math library
+// does, and what is written in ent-lang on top.
+import console
+import math
+component Spot { angle: f32, x: f32, y: f32 }
+default_capacity 8
+unique N: i32
+world { for i in 0..3 { spawn { Spot { angle: radians(i as f32 * 45.0), x: 0.0, y: 0.0 } } } }
+system turn() {
+  N += 1
+  for s: mut Spot {
+    s.x = round(cos(s.angle) * 100.0)
+    s.y = round(sin(s.angle) * 100.0)
+  }
+}
+system show() {
+  for s: Spot { spawn { Print { line: "{s.x} {s.y} at {round(degrees(atan2(s.y, s.x)))}" } } }
+  spawn { Print { line: "sqrt {sqrt(2.0)} pow {pow(2.0, 10.0)} exp {exp(1.0)} log {log(exp(2.0))} log2 {log2(8.0)}" } }
+  spawn { Print { line: "floor {floor(-1.5)} ceil {ceil(-1.5)} round {round(2.5)} trunc {trunc(-1.7)} fmod {fmod(7.5, 2.0)} fract {fract(2.75)}" } }
+  spawn { Print { line: "abs {abs(-2.5)} {iabs(-7)} sign {sign(-3.0)} {isign(9)} clamp {clamp(5.0, 0.0, 1.0)} {iclamp(-4, 0, 9)} lerp {lerp(10.0, 20.0, 0.25)}" } }
+  spawn { Print { line: "length {length(3.0, 4.0)} distance {distance(1.0, 1.0, 4.0, 5.0)} ipow {ipow(3, 4)} pi {pi()} tau {tau()}" } }
+  spawn { Print { line: "64: {sqrt64(2.0)} {sin64(pi64() / 2.0)} {atan264(1.0, 1.0) * 4.0} {abs64(-1.25)} {floor64(2.5)} {pow64(2.0, 0.5)}" } }
+}
+schedule frame() { turn() show() write() clear() }
+main { loop { frame() } until N == 1 }

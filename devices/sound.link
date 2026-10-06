@@ -1,0 +1,2 @@
+# The sound device plays with raylib (https://www.raylib.com).
+-lraylib -lm
