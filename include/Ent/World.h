@@ -181,8 +181,8 @@ struct WorldApply {
 /// one). Connecting keeps all of it as it goes where the list stays in
 /// order by putting a new leaf at its end or by changing a parent's id in
 /// place, and marks the relation unclean otherwise; unclean, it is built
-/// again from the slots: dead edges dropped, children by key, the list
-/// breadth first.
+/// again from the slots: dead edges dropped, children by key, and the
+/// list by key with every entity's ancestors put before it.
 struct WorldRelation {
   RelationOp op;
   int64_t capacity;
@@ -196,6 +196,7 @@ struct WorldRelation {
   uint64_t nextSiblingOffset = 0;
   uint64_t previousSiblingOffset = 0;
   uint64_t positionOffset = 0;
+
   /// In the header (i64): the number of edges, and whether the sorted
   /// table and offsets are current.
   uint64_t countOffset = 0;

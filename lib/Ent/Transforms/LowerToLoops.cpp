@@ -3473,18 +3473,26 @@ struct LinkedTree {
   }
 
   /// The slot `slot` joins the end of the children of the key `parent`.
+  /// Whether it is the first is not to be foreseen where a tree is built
+  /// again, and is known only once the parent's links have come from
+  /// memory: so no branch on it. The first child is stored whichever it
+  /// is, and the last child's next link or, if there is none, the slot's
+  /// own once more.
   void linkUnder(Value slot, Value parent) {
     Value last = load(lastChild(), parent);
     Value self = link(arith::AddIOp::create(rewriter, loc, slot, one));
+    Value none = isNone(last);
     store(last, previousSibling(), slot);
     store(noLink(), nextSibling(), slot);
-    branch(
-        isNone(last), [&] { store(self, firstChild(), parent); },
-        [&] {
-          store(self, nextSibling(),
-                arith::SubIOp::create(rewriter, loc, world.toIndex(loc, last),
-                                      one));
-        });
+    store(arith::SelectOp::create(rewriter, loc, none, self,
+                                  load(firstChild(), parent)),
+          firstChild(), parent);
+    store(arith::SelectOp::create(rewriter, loc, none, noLink(), self),
+          nextSibling(),
+          arith::SelectOp::create(
+              rewriter, loc, none, slot,
+              arith::SubIOp::create(rewriter, loc, world.toIndex(loc, last),
+                                    one)));
     store(self, lastChild(), parent);
     store(arith::AddIOp::create(
               rewriter, loc, load(childCount(), parent),
@@ -3671,10 +3679,9 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
 /// Emit the function that, if a linked tree is unclean, builds it again
 /// from its slots: the edges of dead entities, to dead entities and
 /// disconnected ones go; every entity's children are linked in the order
-/// of their keys; and the entities with a parent are listed breadth first,
-/// the children of those without one by their keys, then the children of
-/// each entity listed. An entity on a cycle is never reached, which stops
-/// the program.
+/// of their keys; and the entities with a parent are listed by their
+/// keys, each after those of its ancestors that were not in yet. An
+/// entity on a cycle would wait for itself, which stops the program.
 static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
                                    const WorldLayout &layout,
                                    const WorldRelation &relation,
@@ -3739,55 +3746,62 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
                      world.entityKey(loc, tree.load(tree.targets(), key)));
     });
   });
-  // The list: the children of the entities without a parent, then the
-  // children of each entity listed.
+  // The list, by key: an entity goes in once its parent is in (or has no
+  // edge of its own). One whose parent is not is kept back with those of
+  // its ancestors that are not either, the keys at the end of the list's
+  // array, which has room for every entity that is yet to go in; then
+  // they go in from the top. More kept back than are left to go in is a
+  // cycle. Most parents are already in: a look at the parent's slot and
+  // place, and no walk through the tree.
+  Value order = world.treeOrder(relation);
+  Value capacity =
+      arith::ConstantIndexOp::create(rewriter, loc, relation.capacity);
+  Value edges =
+      world.toIndex(loc, tree.load(world.edgeCount(relation), zero));
   tree.store(tree.i64(0), world.treeOrderCount(relation), zero);
+  auto isIn = [&](Value key) {
+    return tree.negate(tree.isNone(tree.load(tree.position(), key)));
+  };
+  Type index = rewriter.getIndexType();
+  Type idType = world.idType();
   tree.forEach(zero, keys, [&](Value key) {
-    tree.branch(hasEdge(key), [&] {
-      Value parent = tree.load(tree.targets(), key);
-      tree.branch(tree.negate(hasEdge(world.entityKey(loc, parent))), [&] {
-        tree.list(tree.sourceOf(key), parent, key);
+    tree.branch(tree.both(hasEdge(key), tree.negate(isIn(key))), [&] {
+      // (the key to keep back, where the kept start, whether to go on)
+      auto climb = scf::WhileOp::create(
+          rewriter, loc, TypeRange{index, index, rewriter.getI1Type()},
+          ValueRange{key, capacity, tree.i1(true)},
+          [&](OpBuilder &, Location, ValueRange state) {
+            scf::ConditionOp::create(rewriter, loc, state[2], state);
+          },
+          [&](OpBuilder &, Location, ValueRange state) {
+            Value top = arith::SubIOp::create(rewriter, loc, state[1], one);
+            Value held = arith::SubIOp::create(rewriter, loc, capacity, top);
+            Value left = arith::SubIOp::create(
+                rewriter, loc, edges, world.toIndex(loc, tree.listed()));
+            cf::AssertOp::create(
+                rewriter, loc,
+                arith::CmpIOp::create(rewriter, loc,
+                                      arith::CmpIPredicate::sle, held, left),
+                rewriter.getStringAttr("@" + relationOp.getSymName() +
+                                       " is a tree, but an entity is its "
+                                       "own ancestor"));
+            tree.store(arith::IndexCastOp::create(rewriter, loc, idType,
+                                                  state[0]),
+                       order, top);
+            Value parent = world.entityKey(
+                loc, tree.load(tree.targets(), state[0]));
+            Value waits =
+                tree.both(hasEdge(parent), tree.negate(isIn(parent)));
+            scf::YieldOp::create(rewriter, loc,
+                                 ValueRange{parent, top, waits});
+          });
+      tree.forEach(climb.getResult(1), capacity, [&](Value at) {
+        Value kept = arith::IndexCastUIOp::create(rewriter, loc, index,
+                                                  tree.load(order, at));
+        tree.list(tree.sourceOf(kept), tree.load(tree.targets(), kept), kept);
       });
     });
   });
-  scf::WhileOp::create(
-      rewriter, loc, TypeRange{rewriter.getIndexType()}, ValueRange{zero},
-      [&](OpBuilder &, Location, ValueRange state) {
-        scf::ConditionOp::create(
-            rewriter, loc,
-            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
-                                  state[0],
-                                  world.toIndex(loc, tree.listed())),
-            state);
-      },
-      [&](OpBuilder &, Location, ValueRange state) {
-        Value id = tree.load(world.treeOrder(relation), state[0]);
-        Value key = world.entityKey(loc, id);
-        Value number = world.toIndex(loc, tree.load(tree.childCount(), key));
-        Value first = world.toIndex(loc, tree.load(tree.firstChild(), key));
-        auto children = scf::ForOp::create(rewriter, loc, zero, number, one,
-                                           ValueRange{first});
-        {
-          OpBuilder::InsertionGuard inner(rewriter);
-          rewriter.setInsertionPointToStart(children.getBody());
-          Value child = arith::SubIOp::create(
-              rewriter, loc, children.getRegionIterArg(0), one);
-          tree.list(tree.sourceOf(child), id, child);
-          scf::YieldOp::create(
-              rewriter, loc,
-              ValueRange{world.toIndex(
-                  loc, tree.load(tree.nextSibling(), child))});
-        }
-        scf::YieldOp::create(
-            rewriter, loc,
-            ValueRange{arith::AddIOp::create(rewriter, loc, state[0], one)});
-      });
-  cf::AssertOp::create(
-      rewriter, loc,
-      tree.same(tree.listed(), tree.load(world.edgeCount(relation), zero)),
-      rewriter.getStringAttr("@" + relationOp.getSymName() +
-                             " is a tree, but an entity is its own "
-                             "ancestor"));
   tree.store(tree.i64(1), world.edgesClean(relation), zero);
 }
 
@@ -4580,7 +4594,7 @@ static void combineAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
 /// Replace a cascading query by loops that visit parents before their
 /// children: first the entities without a parent in the tree, archetype
 /// after archetype, then those with one in the order the relation's sort
-/// left (breadth first), each found by its id. Entities of one depth read
+/// left, each found by its id. Entities of one depth read
 /// only what shallower ones wrote (through refs up the tree), so one pass
 /// in this order is the query run once per depth. A query with a ref up
 /// the tree it cascades along visits no entity without a parent. With

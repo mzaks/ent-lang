@@ -593,9 +593,11 @@ leaf at its end or a new parent's id in place where the parent is before
 the entity. Where it cannot (the parent comes later, the entity has
 children and was not in the list, a disconnect, a host's connect) the
 relation is marked unclean and built again from its slots before anything
-reads it: edges of and to dead entities dropped, children by key, the list
-breadth first. An entity on a cycle is never reached then; if the list
-comes out shorter than the edges, the program stops. A `sorted` tree keeps
+reads it: edges of and to dead entities dropped, children by key, and the
+list by key, each entity after those of its ancestors that were not in
+yet (most are: a look at the parent's slot, and no walk through the
+tree). An entity on a cycle would wait for itself, which stops the
+program. A `sorted` tree keeps
 the table, sorted by source with the index by target, and is sorted again
 for every change. A cascading
 query first runs a loop per archetype for the entities without a parent,

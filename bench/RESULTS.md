@@ -2145,3 +2145,48 @@ river's schedule `divert`), and by the host (`--resort`):
   slots, against the ranges of a table.
 - What the slots and links cost in memory: 32 bytes an entity key and
   the fields, whatever the tree's size.
+
+## 2026-10-06: building an unsorted tree again
+
+The entry above left building an unsorted bushy tree again at 26 ms for
+1e6 nodes, against 17.4 for the sort it replaced. Sampling the program
+counter put nearly half of it in the loop that listed the tree breadth
+first: for every listed entity a branch on whether it has children, which
+is not to be foreseen, taken only once the entity's links have come from
+memory. An unsorted tree's list need not be breadth first any more, only
+parents before children. Now the entities are listed by key, each after
+those of its ancestors that are not in yet (kept, while they wait, at the
+end of the list's own array), and a child joins its parent's children
+without a branch on whether it is the first. Same machine, pinning and
+flags; 1e6 nodes, a host's connect before every step, 5 rounds of 50
+steps after 10; ms a build costs (the step with it less the step
+without):
+
+| shape | the sort (two entries above) | breadth first (the entry above) | by key |
+|---|---|---|---|
+| bushy | 17.4 | 26.1 | 11.4 |
+| deep | 4.0 | 3.3 | 3.5 |
+| shuffled | 15.2 | 26.4 | 19.7 |
+| bushy, two archetypes | 18.3 | 27.7 | 18.6 |
+| deep, two archetypes | 6.0 | 7.3 | 7.8 |
+
+### What holds
+
+- A bushy tree whose nodes were made parents first is built again in 0.66x
+  the time the sort took, and 0.44x of breadth first.
+- Where the nodes' keys say nothing about the tree (shuffled), most
+  parents are not in yet when their child's turn comes, and the branch
+  that tells is as hard to foresee as the one that went: 1.3x the sort.
+- In two archetypes there are twice the keys to go through, and it takes
+  what the sort took (bushy) or 1.3x (deep).
+
+### Tried, and left out
+
+- Every entity's children put next to each other by counting, and the
+  links made from that: 28.9 ms in a bushy tree, no better than chasing
+  the siblings' links, since the listing stalled on the same branch.
+
+### Not measured
+
+- A tree connected leaves first, where every entity waits for all its
+  ancestors.
