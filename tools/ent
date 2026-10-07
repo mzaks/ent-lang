@@ -25,7 +25,8 @@ of these, which are built and linked with the program:
 The program itself is compiled by the LLVM its IR was made with. The C and
 C++ next to modules, and the link, go to the machine's own compiler, which
 knows where the machine's libraries are: `cc` and `c++`, or what ENT_CC and
-ENT_CXX name.
+ENT_CXX name. ENT_CFLAGS has more flags for compiling the program itself
+(-march=native, say).
 
 Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 
@@ -179,7 +180,8 @@ def build(arguments, output, directory):
             path for path in os.environ.get("PATH", "").split(os.pathsep)
             if os.path.realpath(path) not in toolchain)
     objects = [os.path.join(directory, stem + ".o")]
-    run([clang, "-O2", "-Wno-override-module", "-c", llvm, "-o", objects[0]])
+    run([clang, "-O2", *shlex.split(os.environ.get("ENT_CFLAGS", "")),
+         "-Wno-override-module", "-c", llvm, "-o", objects[0]])
     for index, path in enumerate(given):
         name, extension = os.path.splitext(os.path.basename(path))
         built = os.path.join(directory, f"{name}.{index}.o")

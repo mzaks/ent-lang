@@ -90,42 +90,93 @@ const WorldConnect::Buffer &WorldConnect::find(unsigned archetype) const {
 
 bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
   SmallVector<Trigger> triggers = getTriggers(query);
-  if (!query.getCascade() || query.isLeavesFirst() || triggers.empty())
+  if (!query.getCascade() || triggers.empty())
     return false;
   FlatSymbolRefAttr cascade = query.getCascade();
   const WorldRelation &tree = getRelation(cascade.getAttr());
-  // (An order that is asked for exactly is not the order events are
-  // followed in.)
-  if (!query.getTraversal().empty())
+  bool leavesFirst = query.isLeavesFirst();
+  // (An order that is asked for exactly is the order events are followed
+  // in only where it is the one the tree is stored in.)
+  StringRef traversal = query.getTraversal();
+  if (!traversal.empty() && (!tree.linked || tree.walksInOrder(traversal)))
     return false;
   // (A tree in several archetypes whose children are in an order is gone
   // through by its list, not depth by depth.)
   if (tree.sortedArchetypes.size() > 1 && tree.isOrdered())
     return false;
-  if (!(tree.linked || !tree.sortedArchetypes.empty()) ||
-      llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
-        auto ref = dyn_cast<RefType>(type);
-        return ref && ref.getVia() == cascade && !ref.getIsBefore() &&
+  if (!(tree.linked || !tree.sortedArchetypes.empty()))
+    return false;
+  // (Only a tree with links is followed from the leaves, to the parents.)
+  if (leavesFirst && !tree.linked)
+    return false;
+  auto refs = [&](function_ref<bool(RefType)> test) {
+    return llvm::any_of(query.getBody().getArgumentTypes(), [&](Type type) {
+      auto ref = dyn_cast<RefType>(type);
+      return ref && test(ref);
+    });
+  };
+  if (!leavesFirst && !refs([&](RefType ref) {
+        return ref.getVia() == cascade && !ref.getIsBefore() &&
                !ref.getIsAfter() && !ref.getIsOptional();
-      }) ||
-      // (More than one step up is asked of each entity as it is come
-      // to, not passed down.)
-      llvm::any_of(query.getBody().getArgumentTypes(), [&](Type type) {
-        auto ref = dyn_cast<RefType>(type);
-        return ref && (ref.getHops() != 1 || ref.hasPath());
       }))
     return false;
-  for (const Trigger &trigger : triggers) {
-    // (Events of children and of siblings are not followed yet.)
-    if (trigger.where == Trigger::Down || trigger.where == Trigger::Before ||
-        trigger.where == Trigger::After)
-      return false;
-    if (!findLog(getStamp(trigger)))
-      return false;
-    if (trigger.via && tree.getTrusted(/*target=*/true) != trigger.component)
+  // (More than one step up is asked of each entity as it is come to, not
+  // passed down: which a linked tree's list does for every ref.)
+  if (!tree.linked &&
+      refs([](RefType ref) { return ref.getHops() != 1 || ref.hasPath(); }))
+    return false;
+  // (What an entity adds into its parent, the parent, which comes after
+  // it, would have to hear of.)
+  if (leavesFirst) {
+    bool sends = false;
+    query.getBody().walk([&](CombineOp) { sends = true; });
+    if (sends)
       return false;
   }
+  for (const Trigger &trigger : triggers) {
+    if (!findLog(getStamp(trigger)))
+      return false;
+    switch (trigger.where) {
+    case Trigger::Own:
+      break;
+    case Trigger::Up:
+      // The parent itself must be the ancestor the trigger means: the
+      // relation's targets all have the component, or the refs to it are
+      // to the parent and no further.
+      if (leavesFirst)
+        return false;
+      if (tree.getTrusted(/*target=*/true) != trigger.component &&
+          !(tree.linked && !refs([&](RefType ref) {
+            return ref.getVia() == trigger.via && !ref.getIsBefore() &&
+                   !ref.getIsAfter() &&
+                   ref.getComponent() == trigger.component &&
+                   !(ref.getIsDirect() && ref.getHops() == 1 &&
+                     !ref.hasPath());
+          })))
+        return false;
+      break;
+    case Trigger::Down:
+      if (!leavesFirst || !tree.linked)
+        return false;
+      break;
+    case Trigger::Before:
+    case Trigger::After:
+      if (leavesFirst || !tree.linked)
+        return false;
+      break;
+    }
+  }
   return true;
+}
+
+bool WorldLayout::cascadeFollowsToRoots(QueryOp query) const {
+  if (!cascadeFollowsEvents(query) || !query.isLeavesFirst())
+    return false;
+  FlatSymbolRefAttr cascade = query.getCascade();
+  return llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
+    auto ref = dyn_cast<RefType>(type);
+    return ref && ref.getVia() == cascade && !ref.getIsOptional();
+  });
 }
 
 const WorldRelation &WorldLayout::getRelation(StringAttr relation) const {
@@ -630,17 +681,19 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
                     trigger.where == Trigger::After;
       }
     });
+    // (And one more of each: the tick of the latest of any entity.)
     if (asked) {
       relation.childTicksOffset = llvm::alignTo(end, kColumnAlignment);
-      end = relation.childTicksOffset + 8 * layout.entityKeys;
+      end = relation.childTicksOffset + 8 * (layout.entityKeys + 1);
       layout.zeroed.push_back(
-          {relation.childTicksOffset, uint64_t(8 * layout.entityKeys)});
+          {relation.childTicksOffset, uint64_t(8 * (layout.entityKeys + 1))});
     }
     if (siblings) {
       relation.siblingTicksOffset = llvm::alignTo(end, kColumnAlignment);
-      end = relation.siblingTicksOffset + 8 * layout.entityKeys;
+      end = relation.siblingTicksOffset + 8 * (layout.entityKeys + 1);
       layout.zeroed.push_back(
-          {relation.siblingTicksOffset, uint64_t(8 * layout.entityKeys)});
+          {relation.siblingTicksOffset,
+           uint64_t(8 * (layout.entityKeys + 1))});
       relation.siblingsBeforeOffset = llvm::alignTo(end, kColumnAlignment);
       end = relation.siblingsBeforeOffset +
             relation.offsetBits / 8 * layout.entityKeys;
@@ -648,6 +701,23 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       end = relation.siblingsAfterOffset +
             relation.offsetBits / 8 * layout.entityKeys;
     }
+  }
+  // A mark per row, where a reactive query follows events up a tree to
+  // the entities without a parent, which are in no list.
+  for (WorldArchetype &archetype : layout.archetypes) {
+    if (archetype.marksOffset)
+      continue;
+    bool followed = false;
+    module.walk([&](QueryOp query) {
+      followed |= layout.cascadeFollowsToRoots(query) &&
+                  matches(query, archetype.op);
+    });
+    if (!followed)
+      continue;
+    archetype.marksOffset = llvm::alignTo(end, kColumnAlignment);
+    end = archetype.marksOffset + 8 * archetype.markWords();
+    layout.zeroed.push_back(
+        {archetype.marksOffset, uint64_t(8 * archetype.markWords())});
   }
   // The marks of a tree that some reactive query follows events down.
   auto placeMarks = [&](WorldRelation &relation, int64_t bits) {

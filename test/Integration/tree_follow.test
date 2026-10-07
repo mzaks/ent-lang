@@ -1,0 +1,31 @@
+// Reactive `for`s along a tree follow their events where the tree has
+// links: from a node with an event up to its parent (a trigger on a
+// child's, from the leaves), down to its children, and on to the sibling
+// after it (a trigger on the sibling before's), each passing on what its
+// body changed; the nodes without a parent are come to by their rows.
+// Inputs/tree_follow.ent works a wide tree out that way and, without
+// triggers, by going through all of it, in every frame of forty in which
+// sizes change, the order of siblings, a leaf goes and a node moves with
+// all under it: the two never disagree. (Leaving out any one of the
+// marks that following sets makes them disagree.)
+// RUN: %ent run %S/Inputs/tree_follow.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tree_follow.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/tree_follow.ent \
+// RUN:     -I %S/../../devices -o %t.mlir
+// RUN: ent-opt %t.mlir "--ent-lower-to-loops=explain=1" -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=EXPLAIN
+
+// Both the `for` from the leaves and the one from the roots.
+// EXPLAIN:     remark: follows its events along the tree
+// EXPLAIN:     leaves first
+// EXPLAIN:     remark: follows its events along the tree
+// EXPLAIN-NOT: goes through its whole tree
+
+// CHECK-NOT:  wrong {{[1-9]}}
+// CHECK:      1: wrong 0 runs 979
+// CHECK-NEXT: 2: wrong 0 runs 450
+// CHECK-NEXT: 3: wrong 0 runs 66
+// Nothing changed: nothing ran.
+// CHECK-NEXT: 4: wrong 0 runs 0
+// CHECK:      40: wrong 0 runs 228

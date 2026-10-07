@@ -1,0 +1,136 @@
+// A tree worked out twice, every frame: by `for`s that react (and follow
+// their events along the tree: from a changed node up to its parents,
+// down to its children and on to the sibling after), and by the same
+// `for`s without triggers, which go through everything. They are to agree
+// whatever changes (tree_follow.test).
+import console
+// (`tip`: what a node adds to the one it is under, and not to itself.)
+component Node { index: i32, base: f32, tip: f32 }
+component Slot { at: i32 }
+// What reacts works out, and what does not.
+component Lazy { sum: f32, w: f32, x: f32, runs: i32 }
+component Full { sum: f32, w: f32, x: f32 }
+default_capacity 512
+relation (Node)-[In]->(Node) tree ordered by Slot.at capacity 512
+unique Frame: i32
+unique Wrong: i32
+unique Runs: i32
+unique Home: entity
+
+world {
+  // A spine of eight nodes, each with the next and sixty leaves under it,
+  // thirty before the next and thirty after (489 nodes, by index), and
+  // two nodes more that are in no tree: wide,
+  // so that a change is a few events among many nodes, which are followed
+  // (with many events, everything is gone through instead).
+  let root = spawn {
+    Node { index: 0, base: 1.0, tip: 0.0 }, Slot { at: 0 },
+    Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
+    Full { sum: 0.0, w: 0.0, x: 0.0 }
+  }
+  Home = root
+  var spine = root
+  var index = 1
+  for i in 0..8 {
+    let next = spawn {
+      Node { index: index, base: 1.0 + index as f32, tip: 0.0 }, Slot { at: 1 },
+      Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
+      Full { sum: 0.0, w: 0.0, x: 0.0 }
+    }
+    connect (next)-[In]->(spine)
+    for j in 0..60 {
+      let leaf = spawn {
+        Node { index: index + 1 + j, base: 2.0 + (j % 5) as f32, tip: 0.0 },
+        Slot { at: if j < 30 { 0 } else { 2 } },
+        Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
+        Full { sum: 0.0, w: 0.0, x: 0.0 }
+      }
+      connect (leaf)-[In]->(spine)
+    }
+    spine = next
+    index += 61
+  }
+  for i in 0..2 {
+    spawn {
+      Node { index: 489 + i, base: 5.0, tip: 0.0 }, Slot { at: 0 },
+      Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
+      Full { sum: 0.0, w: 0.0, x: 0.0 }
+    }
+  }
+}
+
+// A node is another size in three frames of four, one that moves on
+// through the nodes (those in no tree too), and in every third another
+// node has another tip; every fifth frame a node
+// takes a later slot among its siblings; in frame 23 a leaf goes, and in
+// frame 31 a node of the spine is put under the first, with all under it.
+system change() {
+  Frame += 1
+  for n: mut Node where Frame % 4 != 0 && n.index == (Frame * 37) % 491 {
+    n.base += 1.0
+  }
+  for n: mut Node where Frame % 3 == 0 && n.index == (Frame * 53) % 491 {
+    n.tip += 2.0
+  }
+  for s: mut Slot, n: Node where Frame % 5 == 0 && n.index == (Frame * 31) % 489 {
+    s.at = Frame
+  }
+  for e, n: Node where Frame == 23 && n.index == 488 { e.destroy() }
+  for e, n: Node where Frame == 31 && n.index == 123 { connect (e)-[In]->(Home) }
+}
+
+// As wide as itself and all under it: from the leaves.
+system lazy() {
+  for (e, n: Node, l: mut Lazy) bottom up In
+      on changed n.base, changed (: Lazy.w)-[In]->(e),
+         changed (: Node.tip)-[In]->(e) {
+    l.sum = 0.0
+    for (c: Lazy, cn: Node)-[In]->(e) { l.sum += c.w + cn.tip }
+    l.w = n.base + l.sum
+    l.runs += 1
+  }
+  // Where the one before it ends, or one in from where its parent starts.
+  for (l: mut Lazy)-[In]->(p: Lazy), optional (prev: Lazy)~[In]~>(l)
+      top down In
+      on changed l.w, changed p.x, changed prev.x, changed prev.w {
+    var x = p.x + 1.0
+    if let px = prev.x, let pw = prev.w { x = px + pw }
+    l.x = x
+    l.runs += 1
+  }
+}
+
+system full() {
+  for (e, n: Node, f: mut Full) bottom up In {
+    f.sum = 0.0
+    for (c: Full, cn: Node)-[In]->(e) { f.sum += c.w + cn.tip }
+    f.w = n.base + f.sum
+  }
+  for (f: mut Full)-[In]->(p: Full), optional (prev: Full)~[In]~>(f)
+      top down In {
+    var x = p.x + 1.0
+    if let px = prev.x, let pw = prev.w { x = px + pw }
+    f.x = x
+  }
+}
+
+// How many nodes the two disagree about, and how often a body that
+// reacts ran.
+system compare() {
+  Wrong = 0
+  Runs = 0
+  for l: Lazy, f: Full where l.w != f.w || l.x != f.x { Wrong += 1 }
+  for l: mut Lazy where l.runs > 0 {
+    Runs += l.runs
+    l.runs = 0
+  }
+}
+
+system show() {
+  for n: Node where n.index == 0 {
+    put("{Frame}: wrong {Wrong} runs {Runs}")
+  }
+}
+
+schedule frame() { change()  lazy()  full()  compare()  show() }
+main { loop { frame() } until Frame == 40 }

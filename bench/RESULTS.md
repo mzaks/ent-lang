@@ -2817,3 +2817,35 @@ before -> after:
 - A step that changes the tree pays what the first table says, once.
 - One order is kept per tree. Not measured: two queries asking the same
   tree for different orders, which each work theirs out every step.
+
+## 2026-10-07: a layout that follows its events
+
+`bench/boxes/boxes.ent`: 90,301 boxes laid out by `examples/layout.ent`
+(300 columns of 300 in a row, each column as high as its boxes), one box
+in the middle of a column another height every frame. The column and the
+row are fitted again and the 150 boxes below are placed again; nothing
+else has anything to do. The Linux machine, one Zen 5 core,
+`ENT_CFLAGS=-march=native tools/ent run -I examples
+bench/boxes/boxes.ent`: us a frame over 200 frames, three runs each.
+
+| | us a frame |
+|---|---|
+| every pass goes through the tree, running its body where a trigger fired | 1,664 - 1,678 |
+| the passes follow their events | 196 - 197 |
+| and only new boxes are asked whether they have what `layout` keeps | 17.8 - 18.2 |
+
+- The passes react to a child's size (from the leaves), to the box
+  before and to the box they are in. None of them was followed before:
+  a trigger on a child or a sibling was not, nor one on a parent's
+  component that not every parent has (`Stack`, `Content`), which now
+  is where the arrow is to the parent itself.
+- What was left then was the library's first `for`, which gives a box
+  what `layout` keeps if it has not got it: over every box, every
+  frame. With `on added Box` it is over the new ones.
+- 83 times less than going through everything, for a change that
+  reaches some 450 of 90,000 boxes. What 18 us are made of is not
+  measured: eight passes each look through a mark per box (1,400 words).
+- The first line was measured with following switched off in the
+  compiler for the run, which is not kept. A frame in which a box comes
+  or goes is such a frame: that children or siblings changed is in no
+  log, and all are asked.

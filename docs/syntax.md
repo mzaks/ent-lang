@@ -566,15 +566,16 @@ thereby passed down: the next time it runs that is no event.
   (Compared where the field is written, and only for fields some `for`
   reacts to. A text is not compared: writing one counts.)
 - Triggers on children and on siblings are for unsorted trees so far;
-  one on what several arrows lead to is not there yet; and
-  a `for` with one goes through its whole tree, running its body where a
-  trigger fired.
+  one on what several arrows lead to is not there yet.
 - What a node sees through the binding also changes when the node is
   given another parent: `connect (node)-[Under]->(other)` is such an event
   for `node`, whether a system or the host connects it, and the `for`
   places it and everything below it again the next time it runs.
 - Such a `for` goes only where the events lead: to the nodes that had
-  one, and from each node it changes down to its children. Its time
+  one, and from each node it changes down to its children; over an
+  unsorted tree also on to the sibling after (a trigger on the sibling
+  before's) and, `bottom up`, to the parent (a trigger on a child's),
+  with the nodes that have no parent last. Its time
   follows the number of nodes it comes to, not the tree's size: at a
   million nodes, moving one takes 5 us where placing all of them takes
   630, and 4 against 235 where the tree is `sorted` (`bench/RESULTS.md`,
@@ -582,12 +583,21 @@ thereby passed down: the next time it runs that is no event.
   them does, though, since it jumps where that reads on: once more than
   a node in a hundred or so is placed again, the `for` without `on` is
   the faster one, up to four times where most of the tree moves.
+  In `examples/layout.ent` every pass is such a `for`: with 90,000
+  boxes of which one is another height each frame, a frame takes 18 us,
+  against 1,500 going through all of them (`bench/boxes`).
 - It goes through the whole tree instead, running its body where a
-  trigger fired, `bottom up`, with `bfs` or `dfs`, without an arrow up
-  the tree,
-  where a trigger's event log has capacity 0 or has lost events, on its
-  first run, where the tree's targets do not all have the component of a
-  trigger up it (`->(World)` in its declaration says they do), and over a
+  trigger fired: with `dfs` (and with `bfs` where that is not the order
+  the tree is kept in, as it is for an unsorted tree `ordered by`);
+  `top down` without an arrow up the tree; `bottom up` over a `sorted`
+  tree, or where the body adds into a parent; where a trigger's event
+  log has capacity 0 or has lost events, on its first run, and with
+  events for more than a sixteenth of the tree; in a run before which a
+  node has got or lost a child (with a trigger on children) or another
+  sibling next to it (with one on siblings), which no log has; over a
+  `sorted` tree where its targets do not all have the component of a
+  trigger up it (`->(World)` in its declaration says they do) or the
+  head has arrows that go on (`(b)-[R]->()-[R]->(far: C)`); and over a
   `sorted` tree in
   several archetypes that is deep (fewer than 64 nodes a depth). That
   saves the body, not the walk.

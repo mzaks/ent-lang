@@ -1,0 +1,58 @@
+// Many boxes laid out by examples/layout.ent, and one of them another
+// height every frame: what a frame costs when little changes.
+//
+//   LLVM_PREFIX=... ENT_CFLAGS=-march=native \
+//     tools/ent run -I examples bench/boxes/boxes.ent
+//
+// 300 columns of 300 boxes in a row (90,301 boxes). A column is as high as
+// its boxes; the change is in the middle of one, so the column and the
+// row are fitted again and the 150 boxes below are placed again. Prints
+// the microseconds a frame took, over 200 frames after 20.
+import clock
+import console
+import layout
+
+component Picked { who: entity }
+unique Started: f64
+default_capacity 131072
+capacity Inside 131072
+
+world {
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 4000.0, h: 4000.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 2.0, gap: 1.0 }
+  }
+  for i in 0..300 {
+    let column = spawn {
+      Box { x: 0.0, y: 0.0, w: 12.0, h: 0.0 },
+      Size { w: Sizing.Fixed, h: Sizing.Fit },
+      Stack { row: false, pad: 1.0, gap: 1.0 }
+    }
+    connect (column)-[Inside]->(root)
+    for j in 0..300 {
+      let box = spawn {
+        Box { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
+        Size { w: Sizing.Fixed, h: Sizing.Fixed },
+        Stack { row: true, pad: 0.0, gap: 0.0 }
+      }
+      connect (box)-[Inside]->(column)
+      if i == 150 && j == 150 { spawn { Picked { who: box } } }
+    }
+  }
+}
+
+system change() {
+  for p: Picked { Box(p.who).h += 1.0 }
+}
+
+system report() {
+  if Time.frame == 20 { Started = Time.now }
+  for p: Picked where Time.frame == 220 {
+    let us = (Time.now - Started) * 1000000.0 / 200.0
+    put("{us} us a frame")
+  }
+}
+
+schedule frame() { tick()  change()  layout()  report() }
+main { loop { frame() } until Time.frame == 220 }

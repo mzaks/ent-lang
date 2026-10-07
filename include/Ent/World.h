@@ -317,13 +317,15 @@ struct WorldRelation {
   uint64_t rowOrderParentOffset = 0;
   /// Where a reactive query has a trigger before or after this tree: per
   /// entity key the tick at which the entity last got another sibling
-  /// before it or after it (i64), and, while the tree's order is made,
-  /// the siblings each had before and after (links).
+  /// before it or after it (i64; and after those the latest of any), and,
+  /// while the tree's order is made, the siblings each had before and
+  /// after (links).
   uint64_t siblingTicksOffset = 0;
   uint64_t siblingsBeforeOffset = 0;
   uint64_t siblingsAfterOffset = 0;
   /// Where a reactive query has a trigger down this tree: per entity key
-  /// the tick at which the entity last gained or lost a child (i64).
+  /// the tick at which the entity last gained or lost a child (i64), and
+  /// after those the latest of any.
   uint64_t childTicksOffset = 0;
   /// For a tree that a reactive query follows events down (see
   /// cascadeFollowsEvents): a bit per element of a linked tree's list, or
@@ -517,7 +519,17 @@ struct WorldLayout {
   /// parent are not visited), and for a trigger up the tree the parent
   /// itself to be the
   /// ancestor it means (the relation's targets all have the component).
+  ///
+  /// A linked tree is also followed from the leaves (children first),
+  /// from an entity with an event to its parent, where a trigger is down
+  /// the tree; and, parents first, to the sibling after or before, where
+  /// a trigger is before or after it. That children or siblings have come
+  /// or gone is in no log: then the whole tree is gone through.
   bool cascadeFollowsEvents(QueryOp query) const;
+  /// Whether a query that follows events from the leaves also visits the
+  /// entities without a parent, which a mark per row of their archetypes
+  /// is kept for.
+  bool cascadeFollowsToRoots(QueryOp query) const;
 
   /// Reactive queries: the stamps and where they are stored, the tick
   /// counter (an i64, 0 if there are no reactive queries), and per reactive

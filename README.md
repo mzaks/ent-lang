@@ -221,8 +221,8 @@ come with the compiler, in `devices/`, and two more that need
 
 - `window`: a window to draw in, with the keys and the mouse.
   `begin()` opens it, fills `Window`, `Mouse` and `Keys` and clears the
-  picture; systems then draw with `rect`, `circle`, `sector`, `line` and
-  `label`, `paragraph` (colours are `0xRRGGBB`); `present()` shows the frame and holds
+  picture; systems then draw with `rect`, `circle`, `sector`, `line`,
+  `label` and `paragraph` (colours are `0xRRGGBB`); `present()` shows the frame and holds
   `Window.fps`. `examples/bounce.ent` is a program with it:
   `tools/ent run examples/bounce.ent`; `examples/orrery.ent` has moons
   around planets around a sun, each placed from where the body it circles
@@ -409,8 +409,12 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   range of child rows) and visits the marked ones in that order, so its
   time follows the entities it comes to; a tree sorted in several
   archetypes has a bitmap per archetype and for every row its children's
-  rows in each, and is gone through depth by depth. Otherwise (`leaves
-  first`, no log, a log that lost events, a deep tree in several
+  rows in each, and is gone through depth by depth. Over an unsorted
+  tree it also goes on to the sibling after (a trigger `before`) and,
+  `leaves first`, from the marked ones with the highest place in the
+  list up to their parents (a trigger `down`), then to those without a
+  parent, which have a mark per row. Otherwise (no log, a log that lost
+  events, a child or sibling come or gone, a deep tree in several
   archetypes)
   it goes through the whole tree and runs its body where a trigger
   fired.

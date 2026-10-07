@@ -605,7 +605,7 @@ public:
   /// sibling before it, and the sibling it had before the tree's order
   /// was last made.
   Value siblingTicks(const WorldRelation &relation) {
-    return view(relation.siblingTicksOffset, layout.entityKeys,
+    return view(relation.siblingTicksOffset, layout.entityKeys + 1,
                 rewriter.getI64Type());
   }
   Value siblingsBefore(const WorldRelation &relation) {
@@ -617,9 +617,10 @@ public:
                 offsetType(relation));
   }
   /// Per entity key, the tick at which the entity last gained or lost a
-  /// child in the tree.
+  /// child in the tree. (After these, as after the siblings' ticks, the
+  /// latest of any: at `latestConnect`.)
   Value childTicks(const WorldRelation &relation) {
-    return view(relation.childTicksOffset, layout.entityKeys,
+    return view(relation.childTicksOffset, layout.entityKeys + 1,
                 rewriter.getI64Type());
   }
   /// Per entity key, what an ordered tree's children are ordered by, as
@@ -3648,10 +3649,14 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                             arith::ConstantIntOp::create(rewriter, at, 1, 8),
                             world.edgeDead(relation), ValueRange{edge});
     // (The edge's target loses a child.)
-    if (relation.childTicksOffset)
+    if (relation.childTicksOffset) {
       memref::StoreOp::create(
           rewriter, at, world.currentTick(at), world.childTicks(relation),
           ValueRange{out ? world.entityKey(at, otherId) : key});
+      memref::StoreOp::create(
+          rewriter, at, world.currentTick(at), world.childTicks(relation),
+          ValueRange{world.latestConnect(at)});
+    }
     Value zero = arith::ConstantIndexOp::create(rewriter, at, 0);
     memref::StoreOp::create(rewriter, at,
                             arith::ConstantIntOp::create(rewriter, at, 0, 64),
@@ -4623,8 +4628,11 @@ struct LinkedTree {
   /// The entity with the key `parent` gains or loses a child, which is an
   /// event where a reactive query has a trigger down the tree.
   void childrenChanged(Value parent) {
-    if (relation.childTicksOffset)
+    if (relation.childTicksOffset) {
       store(world.currentTick(loc), world.childTicks(relation), parent);
+      store(world.currentTick(loc), world.childTicks(relation),
+            world.latestConnect(loc));
+    }
   }
   /// The slot `slot` leaves the children of the key its target has.
   void unlink(Value slot) {
@@ -4639,6 +4647,8 @@ struct LinkedTree {
           store(world.currentTick(loc), world.siblingTicks(relation),
                 arith::SubIOp::create(rewriter, loc,
                                       world.toIndex(loc, neighbour), one));
+          store(world.currentTick(loc), world.siblingTicks(relation),
+                world.latestConnect(loc));
         });
     auto before = [&](Value linkValue) {
       return arith::SubIOp::create(rewriter, loc,
@@ -5211,6 +5221,8 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
           [&] {
             tree.store(world.currentTick(loc), world.siblingTicks(relation),
                        key);
+            tree.store(world.currentTick(loc), world.siblingTicks(relation),
+                       world.latestConnect(loc));
           });
     });
   if (!relation.hasLocations())
@@ -6380,6 +6392,66 @@ static scf::ForOp sweepMarks(IRRewriter &rewriter, Location loc, Value marks,
   return sweep;
 }
 
+/// As sweepMarks, from the highest mark of the first `count` positions
+/// to the lowest: `visit` may set marks of earlier positions.
+static scf::ForOp sweepMarksDown(IRRewriter &rewriter, Location loc,
+                                 Value marks, Value count,
+                                 function_ref<void(Value)> visit) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value sixtyFour = arith::ConstantIndexOp::create(rewriter, loc, 64);
+  Value words = arith::DivUIOp::create(
+      rewriter, loc,
+      arith::AddIOp::create(rewriter, loc, count,
+                            arith::ConstantIndexOp::create(rewriter, loc, 63)),
+      sixtyFour);
+  auto sweep = scf::ForOp::create(rewriter, loc, zero, words, one);
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(sweep.getBody()->getTerminator());
+  Value word = arith::SubIOp::create(
+      rewriter, loc, arith::SubIOp::create(rewriter, loc, words, one),
+      sweep.getInductionVar());
+  Type i64 = rewriter.getI64Type();
+  scf::WhileOp::create(
+      rewriter, loc, TypeRange{}, ValueRange{},
+      [&](OpBuilder &, Location, ValueRange) {
+        scf::ConditionOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ne,
+                memref::LoadOp::create(rewriter, loc, marks, ValueRange{word}),
+                arith::ConstantIntOp::create(rewriter, loc, 0, 64)),
+            ValueRange{});
+      },
+      [&](OpBuilder &, Location, ValueRange) {
+        Value bits =
+            memref::LoadOp::create(rewriter, loc, marks, ValueRange{word});
+        Value highest = arith::SubIOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 63, 64),
+            LLVM::CountLeadingZerosOp::create(rewriter, loc, i64, bits,
+                                              /*is_zero_poison=*/true));
+        memref::StoreOp::create(
+            rewriter, loc,
+            arith::XOrIOp::create(
+                rewriter, loc, bits,
+                arith::ShLIOp::create(
+                    rewriter, loc,
+                    arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+                    highest)),
+            marks, ValueRange{word});
+        {
+          OpBuilder::InsertionGuard inner(rewriter);
+          visit(arith::AddIOp::create(
+              rewriter, loc,
+              arith::MulIOp::create(rewriter, loc, word, sixtyFour),
+              arith::IndexCastOp::create(rewriter, loc,
+                                         rewriter.getIndexType(), highest)));
+        }
+        scf::YieldOp::create(rewriter, loc, ValueRange{});
+      });
+  return sweep;
+}
+
 /// As sweepMarks, for the marks of the positions from `from` to `to`
 /// only; the others stay as they are.
 static scf::ForOp sweepMarkRange(IRRewriter &rewriter, Location loc,
@@ -6810,6 +6882,10 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   // applies where a trigger fired: no event log is walked, since the
   // order is the tree's.
   SmallVector<Trigger> triggers = getTriggers(query);
+  if (!triggers.empty() && options.explain)
+    query.emitRemark(layout.cascadeFollowsEvents(query)
+                         ? "follows its events along the tree"
+                         : "goes through its whole tree on each run");
   Value seen;
   if (!triggers.empty()) {
     Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -6923,6 +6999,9 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         loc, memref::LoadOp::create(rewriter, loc, world.rootCount(archetype),
                                     ValueRange{zero}));
   };
+  // (Before `rootsAt`: the query, or where a query that follows events
+  // goes through everything instead.)
+  Operation *rootsAt = query;
   auto emitRoots = [&] {
   for (const WorldArchetype &archetype : layout.archetypes) {
     if (!matches(archetype, query))
@@ -6930,7 +7009,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     matched = true;
     if (!visitsRoots)
       continue;
-    rewriter.setInsertionPoint(query);
+    rewriter.setInsertionPoint(rootsAt);
     if (&archetype == sorted || llvm::is_contained(levelled, &archetype)) {
       Operation *loops = emitEntityLoops(
           rewriter, loc, archetype, world, sequential, /*entityLocal=*/false,
@@ -7921,6 +8000,63 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                                      one));
       });
     };
+    // The sibling after the entity with the key `key`, or the one before.
+    auto markSibling = [&](Value key, bool after) {
+      Value link = tree.load(
+          after ? tree.nextSibling() : tree.previousSibling(), key);
+      tree.branch(tree.negate(tree.isNone(link)), [&] {
+        markKey(arith::SubIOp::create(rewriter, loc,
+                                      world.toIndex(loc, link), one));
+      });
+    };
+    // The entity `id`, which is alive: in the list, or, having no parent,
+    // by its row.
+    bool follows = layout.cascadeFollowsEvents(query);
+    bool toRoots = layout.cascadeFollowsToRoots(query);
+    auto markEntity = [&](Value id) {
+      Value link = tree.load(tree.position(), world.entityKey(loc, id));
+      tree.branch(
+          tree.negate(tree.isNone(link)),
+          [&] {
+            markAt(arith::SubIOp::create(rewriter, loc,
+                                         world.toIndex(loc, link), one));
+          },
+          [&] {
+            if (!toRoots)
+              return;
+            emitLocate(
+                rewriter, loc, layout, world, id,
+                [&](const WorldArchetype &archetype) {
+                  return matches(archetype, query);
+                },
+                FlatSymbolRefAttr(), TypeRange{},
+                [&](const WorldArchetype &archetype, Value row,
+                    Value) -> SmallVector<Value> {
+                  markBit(rewriter, loc, world.rowMarks(archetype), row);
+                  return {};
+                },
+                []() -> SmallVector<Value> { return {}; });
+          });
+    };
+    // The parent of the entity `id`, which may be no more: if the list
+    // has it, with its parent next to it.
+    auto markParentOf = [&](Value id) {
+      Value link = tree.load(tree.position(), world.entityKey(loc, id));
+      Value at = arith::SubIOp::create(rewriter, loc,
+                                       world.toIndex(loc, link), one);
+      tree.branch(
+          tree.both(tree.negate(tree.isNone(link)),
+                    arith::CmpIOp::create(rewriter, loc,
+                                          arith::CmpIPredicate::ult, at,
+                                          count)),
+          [&] {
+            tree.branch(
+                tree.same(tree.load(world.treeOrder(relation), at), id), [&] {
+                  markEntity(
+                      tree.load(world.treeOrderParents(relation), at));
+                });
+          });
+    };
     auto markChildren = [&](Value id) {
       Value first = tree.load(tree.firstChild(), world.entityKey(loc, id));
       scf::WhileOp::create(
@@ -8017,28 +8153,41 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                             /*parallel=*/false, /*directApplies=*/true, parent,
                             marks);
             }
-            Value changedHere;
-            for (const Trigger &trigger : triggers) {
-              const WorldColumn *column =
-                  trigger.via ? archetype.findStamp(getStamp(trigger)) : nullptr;
-              if (!column)
+            // (And for the sibling after, where a trigger is before the
+            // tree, and for the parent, which comes later from the leaves,
+            // where one is down it. The sibling before has been visited.)
+            for (Trigger::Where where :
+                 {Trigger::Up, Trigger::Before, Trigger::Down}) {
+              Value changedHere;
+              for (const Trigger &trigger : triggers) {
+                const WorldColumn *column =
+                    trigger.via && trigger.where == where
+                        ? archetype.findStamp(getStamp(trigger))
+                        : nullptr;
+                if (!column)
+                  continue;
+                Value now = arith::CmpIOp::create(
+                    rewriter, loc, arith::CmpIPredicate::eq,
+                    memref::LoadOp::create(rewriter, loc,
+                                           world.stamps(archetype, *column),
+                                           ValueRange{row}),
+                    tick);
+                changedHere = changedHere
+                                  ? arith::OrIOp::create(rewriter, loc,
+                                                         changedHere, now)
+                                        .getResult()
+                                  : now;
+              }
+              if (!changedHere)
                 continue;
-              Value now = arith::CmpIOp::create(
-                  rewriter, loc, arith::CmpIPredicate::eq,
-                  memref::LoadOp::create(rewriter, loc,
-                                         world.stamps(archetype, *column),
-                                         ValueRange{row}),
-                  tick);
-              changedHere = changedHere
-                                ? arith::OrIOp::create(rewriter, loc,
-                                                       changedHere, now)
-                                      .getResult()
-                                : now;
-            }
-            if (changedHere) {
-              auto ifChanged = scf::IfOp::create(rewriter, loc, changedHere);
-              rewriter.setInsertionPointToStart(ifChanged.thenBlock());
-              markChildren(id);
+              tree.branch(changedHere, [&] {
+                if (where == Trigger::Up)
+                  markChildren(id);
+                else if (where == Trigger::Before)
+                  markSibling(world.entityKey(loc, id), /*after=*/true);
+                else
+                  markEntity(parent.id);
+              });
             }
             return {};
           },
@@ -8059,18 +8208,43 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       }
       hoistResourceReads(rewriter, loop, world);
     };
-    if (!layout.cascadeFollowsEvents(query)) {
+    if (!follows) {
       visitAll();
+      if (leavesFirst)
+        emitRoots();
     } else {
       // On its first run, and when a log has lost events, every entity as
       // ever. Else from the events: an entity with an event of its own
       // gets a mark, and so do the children of an entity with an event
-      // that a trigger up the tree means. Then the marked ones in the
-      // list's order, each passing marks on to its children if the body
-      // changed it. (An event marks more entities than the body runs
-      // for, which the body's own test of the ticks sorts out.)
+      // that a trigger up the tree means, the sibling after one with an
+      // event that a trigger before the tree means (or the one before,
+      // for a trigger after it), and the parent, for a trigger down the
+      // tree. Then the marked ones in the list's order, each passing
+      // marks on to those if the body changed it. (An event marks more
+      // entities than the body runs for, which the body's own test of
+      // the ticks sorts out.)
       Value scan =
           openLogsToFollow(rewriter, query, layout, world, seen, count);
+      // That an entity has other children or siblings than it had is in
+      // no log: where any has since the query last ran, all are asked.
+      bool down = false, beside = false;
+      for (const Trigger &trigger : triggers) {
+        down |= trigger.where == Trigger::Down;
+        beside |= trigger.where == Trigger::Before ||
+                  trigger.where == Trigger::After;
+      }
+      for (Value ticks :
+           {down && relation.childTicksOffset ? world.childTicks(relation)
+                                              : Value(),
+            beside && relation.siblingTicksOffset
+                ? world.siblingTicks(relation)
+                : Value()})
+        if (ticks)
+          scan = arith::OrIOp::create(
+              rewriter, loc, scan,
+              arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::sgt,
+                  tree.load(ticks, world.latestConnect(loc)), seen));
       auto scanOrFollow = scf::IfOp::create(rewriter, loc, scan,
                                             /*withElseRegion=*/true);
       rewriter.setInsertionPointToStart(scanOrFollow.thenBlock());
@@ -8078,20 +8252,80 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       rewriter.setInsertionPointToStart(scanOrFollow.elseBlock());
       forEachEvent(rewriter, query, layout, world,
                    [&](const Trigger &trigger, Value id) {
-                     if (trigger.via)
+                     Value key = world.entityKey(loc, id);
+                     switch (trigger.where) {
+                     case Trigger::Own:
+                       if (toRoots) {
+                         // (An entity in no list may be no more.)
+                         Value link = tree.load(tree.position(), key);
+                         tree.branch(
+                             tree.negate(tree.isNone(link)),
+                             [&] { markKey(key); },
+                             [&] {
+                               emitLocate(
+                                   rewriter, loc, layout, world, id,
+                                   [&](const WorldArchetype &archetype) {
+                                     return matches(archetype, query);
+                                   },
+                                   FlatSymbolRefAttr(), TypeRange{},
+                                   [&](const WorldArchetype &archetype,
+                                       Value row,
+                                       Value) -> SmallVector<Value> {
+                                     markBit(rewriter, loc,
+                                             world.rowMarks(archetype), row);
+                                     return {};
+                                   },
+                                   []() -> SmallVector<Value> { return {}; });
+                             });
+                       } else {
+                         markKey(key);
+                       }
+                       break;
+                     case Trigger::Up:
                        markChildren(id);
-                     else
-                       markKey(world.entityKey(loc, id));
+                       break;
+                     case Trigger::Down:
+                       markParentOf(id);
+                       break;
+                     case Trigger::Before:
+                       markSibling(key, /*after=*/true);
+                       break;
+                     case Trigger::After:
+                       markSibling(key, /*after=*/false);
+                       break;
+                     }
                    });
       scf::ForOp sweep =
-          sweepMarks(rewriter, loc, world.treeMarks(relation), count,
-                     [&](Value at) { visitAt(at, /*following=*/true); });
+          (leavesFirst ? sweepMarksDown : sweepMarks)(
+              rewriter, loc, world.treeMarks(relation), count,
+              [&](Value at) { visitAt(at, /*following=*/true); });
       hoistResourceReads(rewriter, sweep, world);
+      // Then the marked ones without a parent, by their rows.
+      if (toRoots)
+        for (const WorldArchetype &archetype : layout.archetypes) {
+          if (!matches(archetype, query))
+            continue;
+          scf::ForOp roots = sweepMarks(
+              rewriter, loc, world.rowMarks(archetype),
+              startCounts.lookup(&archetype), [&](Value row) {
+                emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                              layout, row, world.count(loc, archetype), tick,
+                              seen, /*parallel=*/false, /*directApplies=*/true,
+                              KnownParent(), marks);
+              });
+          hoistResourceReads(rewriter, roots, world);
+        }
       rewriter.setInsertionPoint(query);
       closeLogs(rewriter, query, layout, world);
+      if (leavesFirst) {
+        // (Everything: so too the ones without a parent.)
+        auto ifScan = scf::IfOp::create(rewriter, loc, scan);
+        rootsAt = ifScan.thenBlock()->getTerminator();
+        emitRoots();
+        rootsAt = query;
+        rewriter.setInsertionPoint(query);
+      }
     }
-    if (leavesFirst)
-      emitRoots();
   } else {
     query.emitWarning("matches no archetype; the query is removed");
   }

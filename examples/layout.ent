@@ -77,7 +77,10 @@ relation (Float)-[Over]->(Box) tree capacity 256
 // before it or in one inside it. Giving a box the size it has is no
 // change, and nothing follows from it.
 system layout() {
-  for e, b: Box without Content {
+  // (Only the boxes that are new: asking every box whether it has got
+  // what `layout` keeps would be the one thing here done for all of
+  // them every frame.)
+  for e, b: Box without Content on added Box {
     e.add(Content {
       count: 0, sum_w: 0.0, max_w: 0.0, sum_h: 0.0, max_h: 0.0,
       grow_w: 0, grow_h: 0
