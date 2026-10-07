@@ -1,8 +1,12 @@
 // A reactive `for` that cascades (Inputs/tree_reactive.ent): a node is
 // placed where its own Local changed or the World above it did, which the
 // same `for` may just have done, so a change goes down the tree in the
-// pass that sees it and nothing else is visited. Sorted, the tree gives
-// the same lines in another order of rows.
+// pass that sees it and nothing else is visited. As the tree is, the
+// `for` goes from the events down the children's links (the lowered
+// program counts the zeros below a mark); sorted, it goes through every
+// row, and gives the same lines in another order of rows.
+// RUN: ent-translate --import-ent -I %S/../../devices %S/Inputs/tree_reactive.ent 2>/dev/null \
+// RUN:   | ent-opt --ent-lower-to-loops 2>/dev/null | grep -q "llvm.intr.cttz"
 // RUN: %ent run %S/Inputs/tree_reactive.ent 2>/dev/null > %t.out
 // RUN: %ent run --parallel %S/Inputs/tree_reactive.ent 2>/dev/null | cmp - %t.out
 // RUN: sed 's/ tree capacity 16/ tree sorted capacity 16/' \
@@ -47,4 +51,13 @@
 // CHECK-NEXT: 5: a11 1113 placed 3
 // CHECK-NEXT: 5: 6 placed
 // CHECK:      6: 0 placed
+// A node made and connected under a: itself alone.
+// CHECK:      7: a3 413 placed 1
+// CHECK-NEXT: 7: 1 placed
+// a moves again, with the new node below it.
+// CHECK:      8: a 14 placed 4
+// CHECK:      8: b1 323 placed 3
+// CHECK-NEXT: 8: a11 1114 placed 4
+// CHECK-NEXT: 8: a3 414 placed 2
+// CHECK-NEXT: 8: 5 placed
 // CHECK-NOT:  {{.}}

@@ -252,6 +252,12 @@ struct WorldRelation {
   uint64_t orderParentLocationOffset = 0;
   uint64_t staleOffset = 0;
   bool hasLocations() const { return orderLocationOffset != 0; }
+  /// For a linked tree that a reactive query follows events down (see
+  /// cascadeFollowsEvents): a bit per element of the list, in i64 words,
+  /// set for the entities such a query has yet to look at. All are 0
+  /// between queries.
+  uint64_t marksOffset = 0;
+  int64_t markWords() const { return (orderCapacity + 63) / 64; }
   /// Elements of the list: an edge each, or for a linked tree twice that,
   /// which leaves room for the entries of entities that moved to its end
   /// (their old ones are all ones, and skipped) before it is made again.
@@ -318,9 +324,10 @@ struct WorldLog {
   uint64_t idsOffset = 0;
   uint64_t ticksOffset = 0;
   /// In the header, per segment on a cache line: the number of entries ever
-  /// appended (i64) and, right after, the smallest position of the log's
-  /// readers. Writers stop appending to a segment once it is full for
-  /// every reader.
+  /// appended (i64), right after it the smallest position of the log's
+  /// readers, and then the count as the last event left it that found the
+  /// segment full for that reader and was not appended. A reader whose
+  /// position is before that has lost an event.
   uint64_t countsOffset = 0;
   /// In the header: where each segment ended when its current reader
   /// started (one i64 per segment). Readers never run concurrently.
@@ -423,6 +430,15 @@ struct WorldLayout {
 
   /// The layout of `relation`; it must be declared in the module.
   const WorldRelation &getRelation(StringAttr relation) const;
+  /// Whether the reactive, cascading `query` goes only where its events
+  /// lead, instead of through its whole tree: from the entities in its
+  /// triggers' event logs, and from each one it changes, down to the
+  /// children. That needs the tree's links (not a sorted tree), parents
+  /// first, a log for every trigger, a ref up the tree (so that the
+  /// entities without a parent, which are not in the tree's list, are not
+  /// visited), and for a trigger up the tree the parent itself to be the
+  /// ancestor it means (the relation's targets all have the component).
+  bool cascadeFollowsEvents(QueryOp query) const;
 
   /// Reactive queries: the stamps and where they are stored, the tick
   /// counter (an i64, 0 if there are no reactive queries), and per reactive

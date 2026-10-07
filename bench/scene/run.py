@@ -11,7 +11,8 @@ spread and how many nodes a step's moves reach, and checks that all
 variants agree on the checksum.
 
 Usage: bench/scene/run.py [--rounds 5] [--steps 100] [--warmup 10]
-       [--sizes 100000,1000000] [--shapes bushy,deep] [--moves 0,1,100]
+       [--sizes 100000,1000000] [--shapes bushy,deep]
+       [--moves 0,1,10,100,1000]
 """
 
 import argparse
@@ -85,7 +86,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--sizes", default="100000,1000000")
     parser.add_argument("--shapes", default="bushy,deep")
-    parser.add_argument("--moves", default="0,1,100")
+    parser.add_argument("--moves", default="0,1,10,100,1000")
     parser.add_argument("--variants", default=",".join(VARIANTS))
     args = parser.parse_args()
     os.makedirs(OUT, exist_ok=True)

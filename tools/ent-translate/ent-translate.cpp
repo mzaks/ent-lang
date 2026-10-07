@@ -424,7 +424,9 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
                      : std::string("0"));
         // A new entity is an event: append it to the stamp's log (the
         // segment of its row's low bits), while the segment has room for
-        // its slowest reader; the first to find it full marks it overflowed.
+        // its slowest reader; one that finds it full is lost to every
+        // reader, which the segment's third number tells them (see
+        // appendToLog in LowerToLoops.cpp).
         const WorldLog *log = happened ? layout->findLog(*column.stamp)
                                        : nullptr;
         if (log)
@@ -439,8 +441,10 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
               "      ((ent_entity *)((char *)world + {5}))[slot] = id;\n"
               "      ((int64_t *)((char *)world + {6}))[slot] =\n"
               "          *(int64_t *)((char *)world + {7}) + 1;\n"
-              "    } else if (pending == {3}) {{\n"
-              "      counts[0] = counts[1] + {3} + 1; // overflowed\n"
+              "    } else {{ // overflowed: every reader scans\n"
+              "      counts[0] = (pending > {3} ? counts[0] : counts[1] + {3}) "
+              "+ 1;\n"
+              "      counts[2] = counts[0];\n"
               "    }\n  }\n",
               log->segments - 1, log->countsOffset,
               WorldLog::kSegmentStride / 8, log->segmentCapacity,

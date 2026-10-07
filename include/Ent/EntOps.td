@@ -462,8 +462,9 @@ def Ent_QueryOp : Ent_Op<"query", [
     leads to, read from the ancestor's stamp, so that what the query wrote
     to an ancestor is an event for the entities below it in the same run.
     Those events it has then passed down; they are none the next time it
-    runs. The query goes through its whole tree and runs its body where a
-    trigger fired.
+    runs. Over a tree that is not sorted the query goes only where its
+    events lead (see WorldLayout::cascadeFollowsEvents); otherwise through
+    its whole tree, running its body where a trigger fired.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;

@@ -375,11 +375,21 @@ thereby passed down: the next time it runs that is no event.
   `up` that tree and cascade along it.
 - Giving a node another parent is no event: such a `for` does not run
   for it until its own component or its new ancestor's changes.
-- The `for` still goes through the whole tree to find where to run, and
-  compares a tick or two per node. It saves the body, not the walk: with
-  a body as small as the one above it takes longer than placing every
-  node every time (`bench/RESULTS.md`, the scene graph). It is for bodies
-  that cost more or that act (a `proc`, a `spawn`, a `destroy`).
+- Over a tree that is not `sorted`, such a `for` goes only where the
+  events lead: to the nodes that had one, and from each node it changes
+  down to its children. Its time follows the number of nodes it comes
+  to, not the tree's size: at a million nodes, moving one takes 5 us
+  where placing all of them takes 630 (`bench/RESULTS.md`, the scene
+  graph). Per node it comes to it costs far more than a pass over all of
+  them does, though, since it jumps where that reads on: once more than
+  a node in a hundred or so is placed again, the `for` without `on` is
+  the faster one, up to four times where most of the tree moves.
+- It goes through the whole tree instead, running its body where a
+  trigger fired, over a `sorted` tree, with `leaves first`, without a
+  binding `up` the tree, where a trigger's event log has capacity 0 or
+  has lost events, on its first run, and where the tree's targets do not
+  all have the component of a trigger `up` it (`to World` says they do).
+  That saves the body, not the walk.
 - It runs on one core.
 
 Not yet: combining into an ancestor needs the `for` to cascade along

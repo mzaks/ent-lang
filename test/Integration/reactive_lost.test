@@ -1,0 +1,13 @@
+// An event that an event log has no room for is lost to every reactive
+// `for` that reads the log, not only to the one that has read least of
+// it (Inputs/reactive_lost.ent): the 100 new entities are more than the
+// log's 64 entries, q1 runs and has read past them, and w1's five events
+// then find the log full for q2, which has not run. q1 has to see those
+// five in the next frame, with the 40 of w2: 45 a frame for both.
+// RUN: %ent run %S/Inputs/reactive_lost.ent 2>/dev/null | FileCheck %s
+
+// CHECK:      1: 100 100
+// CHECK-NEXT: 2: 145 145
+// CHECK-NEXT: 3: 190 190
+// CHECK-NEXT: 4: 235 235
+// CHECK:      8: 415 415

@@ -30,7 +30,7 @@ ent.archetype @A (@H, @B) capacity 8
 // CHECK-NEXT:   %[[SLOWEST:.*]] = memref.load %[[COUNTS]][%c1]
 // CHECK-NEXT:   %[[PENDING:.*]] = arith.subi %[[COUNT]], %[[SLOWEST]]
 // CHECK-NEXT:   %[[ROOM:.*]] = arith.cmpi slt, %[[PENDING]], %c64_i64 : i64
-// CHECK-NEXT:   %[[FULL:.*]] = arith.cmpi eq, %[[PENDING]], %c64_i64 : i64
+// CHECK-NEXT:   %[[FULL:.*]] = arith.cmpi sge, %[[PENDING]], %c64_i64 : i64
 // CHECK-NEXT:   %[[APPEND:.*]] = arith.andi %[[NEW]], %[[ROOM]] : i1
 // CHECK-NEXT:   scf.if %[[APPEND]] {
 // CHECK:          memref.store %{{.*}}, %[[IDS]][%{{.*}}]
@@ -38,8 +38,11 @@ ent.archetype @A (@H, @B) capacity 8
 // CHECK-NEXT:   }
 // CHECK-NEXT:   %[[LOST:.*]] = arith.andi %[[NEW]], %[[FULL]] : i1
 // CHECK-NEXT:   scf.if %[[LOST]] {
-// CHECK-NEXT:     %[[PAST:.*]] = arith.addi %[[SLOWEST]], %c65_i64
+// CHECK-NEXT:     %[[HELD:.*]] = arith.addi %[[SLOWEST]], %c64_i64
+// CHECK-NEXT:     %[[MOST:.*]] = arith.maxsi %[[COUNT]], %[[HELD]]
+// CHECK-NEXT:     %[[PAST:.*]] = arith.addi %[[MOST]], %c1_i64
 // CHECK-NEXT:     memref.store %[[PAST]], %[[COUNTS]][%c0]
+// CHECK-NEXT:     memref.store %[[PAST]], %[[COUNTS]][%c2]
 ent.system @hurt(%d: f32) writes [@H] {
   ent.query (%h: !ent.ref<@H, mut>) {
     ent.set %h "hp", %d : !ent.ref<@H, mut>, f32
@@ -49,7 +52,9 @@ ent.system @hurt(%d: f32) writes [@H] {
 // A reactive query takes the tick it last started at, and makes the next
 // one both its new last tick and the counter. It notes where the log ends
 // now. On its first run (it had seen tick 0), or if more entries were
-// appended since it last read the log than the log holds, it scans every
+// appended since it last read the log than the log holds, or an event was
+// not appended since then (its position is before the count that event
+// left, the log's third number), it scans every
 // row and keeps its stores only where the stamp is newer (branch-free,
 // like a body masked by an optional component). Otherwise it walks the log
 // from where it last read it to the noted end, skipping entries whose
@@ -73,7 +78,10 @@ ent.system @hurt(%d: f32) writes [@H] {
 // CHECK-NEXT: memref.store %[[END]], %[[ENDS]][%c0]
 // CHECK-NEXT: %[[FROM:.*]] = memref.load %[[POSITION]][%c0]
 // CHECK-NEXT: %[[PENDING:.*]] = arith.subi %[[END]], %[[FROM]]
-// CHECK-NEXT: %[[LOST:.*]] = arith.cmpi sgt, %[[PENDING]], %c64_i64
+// CHECK-NEXT: %[[OVER:.*]] = arith.cmpi sgt, %[[PENDING]], %c64_i64
+// CHECK-NEXT: %[[LOSTAT:.*]] = memref.load %[[COUNTS]][%c2]
+// CHECK-NEXT: %[[BEHIND:.*]] = arith.cmpi slt, %[[FROM]], %[[LOSTAT]]
+// CHECK-NEXT: %[[LOST:.*]] = arith.ori %[[OVER]], %[[BEHIND]]
 // CHECK-NEXT: %[[SCAN:.*]] = arith.ori %[[FIRST]], %[[LOST]]
 // CHECK:      scf.if %[[SCAN]] {
 // CHECK:        scf.for %[[ROW:.*]] =

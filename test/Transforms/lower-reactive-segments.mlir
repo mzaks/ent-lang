@@ -30,7 +30,9 @@ ent.system @hurt(%d: f32) writes [@H] {
 // how many entries are pending, and walks the segments one after another.
 // CHECK-LABEL: func.func private @watch(
 // CHECK:      %[[STATE:.*]]:2 = scf.for %[[SEG:.*]] = %c0 to %c64 step %c1 iter_args(%[[ANY:.*]] = %{{.*}}, %[[SUM:.*]] = %{{.*}}) -> (i1, i64) {
-// CHECK:        %[[LOST:.*]] = arith.cmpi sgt, %{{.*}}, %c64_i64 : i64
+// CHECK:        %[[OVER:.*]] = arith.cmpi sgt, %{{.*}}, %c64_i64 : i64
+// CHECK:        %[[BEHIND:.*]] = arith.cmpi slt, %{{.*}}, %{{.*}} : i64
+// CHECK-NEXT:   %[[LOST:.*]] = arith.ori %[[OVER]], %[[BEHIND]] : i1
 // CHECK:        %[[OR:.*]] = arith.ori %[[ANY]], %[[LOST]] : i1
 // CHECK-NEXT:   scf.yield %[[OR]], %{{.*}} : i1, i64
 // CHECK:      scf.if %[[STATE]]#0 {

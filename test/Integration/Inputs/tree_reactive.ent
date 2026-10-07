@@ -9,6 +9,7 @@ default_capacity 16
 relation Under from Local to World tree capacity 16
 unique Frame: i32
 unique Placed: i32
+unique Arm: entity
 
 world {
   let root = spawn { World { name: "root", x: 1, placed: 0 } }
@@ -24,16 +25,23 @@ world {
   connect(a1, a, Under)
   connect(a2, a, Under)
   connect(b1, b, Under)
+  Arm = a
 }
 
 // Frame 1: everything is new. 2: nothing happens. 3: a moves. 4: the leaf
 // b1. 5: the root, which has no Local and is not placed. 6: nothing.
+// 7: a new node under a. 8: a moves again, with the new node below it.
 system move() {
   Frame += 1
   Placed = 0
   for l: mut Local where Frame == 3 && l.x == 10 { l.x += 1 }
   for l: mut Local where Frame == 4 && l.x == 300 { l.x += 1 }
   for w: mut World without Local where Frame == 5 { w.x += 1 }
+  if Frame == 7 {
+    let a3 = spawn { World { name: "a3", x: 0, placed: 0 }, Local { x: 400 } }
+    connect(a3, Arm, Under)
+  }
+  for l: mut Local where Frame == 8 && l.x == 11 { l.x += 1 }
 }
 
 system place() {
@@ -53,4 +61,4 @@ system show() {
 }
 
 schedule frame() { move()  place()  show() }
-main { loop { frame() } until Frame == 6 }
+main { loop { frame() } until Frame == 8 }

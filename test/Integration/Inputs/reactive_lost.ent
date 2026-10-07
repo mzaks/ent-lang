@@ -1,0 +1,127 @@
+// Two reactive `for`s read one event log of 64 entries, and more happens
+// than it holds (reactive_lost.test).
+import console
+
+component A { i: i32, v: i32 }
+component S1 { n: i32 }
+component S2 { n: i32 }
+default_capacity 128
+unique Frame: i32
+unique One: i32
+unique Two: i32
+
+world {
+  spawn { A { i: 0, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 1, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 2, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 3, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 4, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 5, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 6, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 7, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 8, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 9, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 10, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 11, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 12, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 13, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 14, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 15, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 16, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 17, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 18, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 19, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 20, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 21, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 22, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 23, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 24, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 25, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 26, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 27, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 28, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 29, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 30, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 31, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 32, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 33, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 34, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 35, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 36, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 37, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 38, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 39, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 40, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 41, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 42, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 43, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 44, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 45, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 46, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 47, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 48, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 49, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 50, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 51, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 52, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 53, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 54, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 55, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 56, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 57, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 58, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 59, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 60, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 61, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 62, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 63, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 64, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 65, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 66, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 67, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 68, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 69, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 70, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 71, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 72, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 73, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 74, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 75, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 76, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 77, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 78, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 79, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 80, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 81, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 82, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 83, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 84, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 85, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 86, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 87, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 88, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 89, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 90, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 91, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 92, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 93, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 94, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 95, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 96, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 97, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 98, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+  spawn { A { i: 99, v: 0 }, S1 { n: 0 }, S2 { n: 0 } }
+}
+
+system tick() { Frame += 1  One = 0  Two = 0 }
+system q1() { for a: A, s: mut S1 on changed A.v log 64 { s.n += 1 } }
+system w1() { for a: mut A where a.i < 5 { a.v += 1 } }
+system q2() { for a: A, s: mut S2 on changed A.v log 64 { s.n += 1 } }
+system w2() { for a: mut A where a.i >= 50 && a.i < 90 { a.v += 1 } }
+system show() {
+  for s: S1 { One += s.n }
+  for s: S2 { Two += s.n }
+  put("{Frame}: {One} {Two}")  flush() }
+
+schedule frame() { tick()  q1()  w1()  q2()  w2()  show() }
+main { loop { frame() } until Frame == 8 }

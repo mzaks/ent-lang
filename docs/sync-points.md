@@ -204,7 +204,14 @@ visit afterwards. In return the query's own changes are not events of this
 kind on its next run: every entity below a changed one has been visited. (To
 tell them from what happens afterwards, such a query advances the tick
 counter when it ends as well as when it starts.) Its other triggers follow
-R1. Connecting an entity to another parent is no event.
+R1. Connecting an entity to another parent is no event. Whether such a
+query goes through its whole tree or only where events lead does not show:
+the entities it runs its body for, and their order, are the same.
+
+**R4.** An event log never loses an event unnoticed. Entries a reader has
+not read are not written over; an event that finds its log full is lost to
+every reader of the log, each of which visits every entity on its next run
+instead.
 
 ## Execution freedom
 

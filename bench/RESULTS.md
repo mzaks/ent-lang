@@ -2460,42 +2460,79 @@ steps each; `reached` is the nodes below the moved ones, themselves
 included, summed over the moves of a step (a node below two of them
 counts twice). All variants agree on a checksum of every node's place.
 
+Over the unsorted tree the reactive `for` goes from the events down the
+children's links (a bitmap over the tree's list, marked from the event
+logs and by each node the body changes, and gone through in the list's
+order). Over the sorted one it goes through every row and runs its body
+where a trigger fired, which is what it did over both when first built.
+
 us per step, median (spread):
 
 | nodes | shape | moves | reached | full | reactive | full-sorted | reactive-sorted |
 |---|---|---|---|---|---|---|---|
-| 1e5 | bushy | 0 | 0 | 38.0 (20%) | 38.3 (38%) | 23.0 (15%) | 24.0 (24%) |
-| 1e5 | bushy | 1 | 6 | 37.7 (31%) | 38.8 (19%) | 23.1 (3%) | 26.3 (56%) |
-| 1e5 | bushy | 100 | 1,096 | 37.9 (8%) | 51.7 (16%) | 22.7 (13%) | 32.0 (9%) |
-| 1e5 | deep | 0 | 0 | 43.0 (29%) | 31.3 (7%) | 37.0 (1%) | 23.9 (28%) |
-| 1e5 | deep | 1 | 11,146 | 43.3 (2%) | 42.6 (5%) | 37.1 (2%) | 37.2 (2%) |
-| 1e5 | deep | 100 | 1,089,217 | 43.1 (2%) | 124.4 (2%) | 37.3 (2%) | 121.9 (2%) |
-| 1e6 | bushy | 0 | 0 | 628.5 (12%) | 1,337.7 (33%) | 235.6 (5%) | 394.1 (25%) |
-| 1e6 | bushy | 1 | 5 | 638.2 (5%) | 1,374.4 (23%) | 231.0 (20%) | 418.4 (7%) |
-| 1e6 | bushy | 100 | 894 | 633.7 (16%) | 1,474.9 (12%) | 236.9 (6%) | 453.6 (13%) |
-| 1e6 | deep | 0 | 0 | 453.7 (7%) | 541.1 (7%) | 373.1 (2%) | 376.1 (27%) |
-| 1e6 | deep | 1 | 96,024 | 444.3 (5%) | 615.2 (4%) | 372.0 (1%) | 474.3 (4%) |
-| 1e6 | deep | 100 | 10,575,314 | 446.7 (5%) | 1,290.7 (4%) | 374.6 (2%) | 1,264.8 (2%) |
+| 1e5 | bushy | 0 | 0 | 37.4 (2%) | **0.5 (1%)** | 22.9 (1%) | 30.9 (5%) |
+| 1e5 | bushy | 1 | 6 | 38.4 (4%) | **0.9 (5%)** | 22.9 (3%) | 31.6 (2%) |
+| 1e5 | bushy | 10 | 63 | 38.4 (3%) | **3.7 (12%)** | 23.1 (6%) | 31.9 (5%) |
+| 1e5 | bushy | 100 | 1,096 | 37.6 (4%) | 37.0 (4%) | **23.0 (1%)** | 37.5 (7%) |
+| 1e5 | bushy | 1000 | 10,965 | 38.6 (4%) | 148.3 (1%) | **24.2 (3%)** | 76.6 (2%) |
+| 1e5 | deep | 0 | 0 | 43.5 (3%) | **0.5 (10%)** | 37.4 (1%) | 30.9 (2%) |
+| 1e5 | deep | 1 | 11,146 | 44.1 (2%) | 69.9 (2%) | **37.4 (1%)** | 47.5 (10%) |
+| 1e5 | deep | 10 | 110,699 | 43.7 (2%) | 145.6 (2%) | **37.6 (1%)** | 121.8 (0%) |
+| 1e5 | deep | 100 | 1,089,217 | 43.8 (2%) | 199.2 (2%) | **37.6 (1%)** | 168.4 (1%) |
+| 1e5 | deep | 1000 | 11,016,950 | 45.0 (7%) | 212.1 (2%) | **38.5 (1%)** | 181.1 (1%) |
+| 1e6 | bushy | 0 | 0 | 645.0 (4%) | **3.3 (0%)** | 241.8 (5%) | 384.3 (3%) |
+| 1e6 | bushy | 1 | 5 | 626.4 (14%) | **5.0 (1%)** | 243.8 (12%) | 389.4 (2%) |
+| 1e6 | bushy | 10 | 57 | 667.2 (10%) | **18.5 (10%)** | 233.8 (5%) | 390.3 (3%) |
+| 1e6 | bushy | 100 | 894 | 653.4 (10%) | **140.1 (3%)** | 238.1 (3%) | 427.4 (1%) |
+| 1e6 | bushy | 1000 | 20,431 | 656.3 (4%) | 1,652.5 (4%) | **240.3 (1%)** | 693.9 (4%) |
+| 1e6 | deep | 0 | 0 | 459.3 (15%) | **3.3 (1%)** | 376.8 (1%) | 362.5 (5%) |
+| 1e6 | deep | 1 | 96,024 | 463.3 (15%) | 599.8 (5%) | **377.2 (6%)** | 513.5 (3%) |
+| 1e6 | deep | 10 | 1,221,576 | 455.4 (15%) | 1,615.9 (1%) | **379.2 (3%)** | 1,285.4 (1%) |
+| 1e6 | deep | 100 | 10,575,314 | 451.6 (12%) | 2,006.6 (1%) | **379.9 (3%)** | 1,692.6 (1%) |
+| 1e6 | deep | 1000 | 109,895,143 | 453.3 (6%) | 2,066.4 (2%) | **383.1 (1%)** | 1,784.7 (1%) |
 
 ### What holds
 
-- For a body this small the reactive `for` is no gain, and at 1e6 nodes
-  a loss: 1.6-2.1x the time of placing everything in a bushy tree when
-  nothing or next to nothing moved, 1.0-1.2x in a deep one. It goes
-  through the whole tree as the full one does, and reads the node's and
-  its parent's ticks where the full one reads two ints and writes one.
-- Where most of the tree is placed anyway (deep, 100 moves) it takes
-  2.9-3.4x: the body's work and the ticks' on top.
-- What it does give is that the body runs for 6 nodes instead of a
-  million, which this benchmark's time does not show: a body that costs
-  more than a memory read, or one that draws, sends or spawns.
+- Following the events, the time is the moves': at 1e6 nodes in a bushy
+  tree 3.3 us with nothing moved (the bitmap's 31,250 words), 5.0 with
+  one node, 140 with a hundred, against 630-670 for placing everything:
+  0.005x, 0.008x, 0.2x.
+- A moved node costs some 1.4 us at 1e6 (0.35 at 1e5), with the nine
+  nodes or so it reaches: every one of them is somewhere else in every
+  column, and the pass over all of them reads on at 0.6 ns a node. So
+  the reactive `for` wins up to about 400 moves a step at 1e6 bushy (a
+  node in a hundred placed again) and loses beyond: 2.5x at 1000 moves.
+- In the deep tree one move reaches a tenth of the nodes, and the
+  reactive `for` takes 1.3x the full one; with most of the tree placed
+  again, 3.5-4.5x. There the events are more than their logs hold and
+  it goes through the whole tree, paying for the ticks and for the
+  events it writes on top of the body.
+- Over the sorted tree, which it goes through row by row, it takes
+  1.6x the full `for` with nothing moved (0.96x in the deep tree) and
+  never less than about that.
+
+### How it got here
+
+- First built going through the whole list everywhere: 1,337-1,475 us
+  at 1e6 bushy for 0-100 moves, twice the full `for`.
+- Following then showed 2,720 us in the deep tree with 100 moves where
+  going through the list had taken 1,290, and looking for why found
+  that an event log could lose events unnoticed: an event that found
+  its log full was told only to the reader that had read least of it.
+  Fixed (`test/Integration/reactive_lost.test`; any reactive `for`
+  sharing a log with another could miss events after an overflow).
+  With that, the deep tree goes through the list when its events
+  overflow, at 2,007 us: the 700 more than before are the events of
+  `World`, which nothing read then and which are written now.
+- A rule that goes through the list when more than a sixteenth of it
+  has events waiting is in, and decides nothing in these runs: the logs
+  (an eighth of the nodes) overflow before it.
 
 ### Not measured
 
-- A body with real work, where the reactive form should win.
-- Going only where something happened (from the changed nodes down
-  their children's links) instead of through the whole tree: not built.
-  It is what would make the time follow `reached`.
-- Why the unsorted bushy tree takes twice as long reactive (1.3 ms
-  against 0.63) when the sorted one takes 1.7x: presumably the parent's
-  tick, read at a random place; not looked into.
+- A body with real work, where the reactive form wins further up.
+- The sorted tree following events (its rows' child ranges would
+  serve): not built.
+- A second level over the bitmap, which would take the 3.3 us of an
+  idle step at 1e6 to nothing: not built.
+- Larger event logs (`log N`) for the deep tree.

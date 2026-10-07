@@ -88,6 +88,27 @@ const WorldConnect::Buffer &WorldConnect::find(unsigned archetype) const {
   llvm_unreachable("the connect's query does not match the archetype");
 }
 
+bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
+  SmallVector<Trigger> triggers = getTriggers(query);
+  if (!query.getCascade() || query.isLeavesFirst() || triggers.empty())
+    return false;
+  FlatSymbolRefAttr cascade = query.getCascade();
+  const WorldRelation &tree = getRelation(cascade.getAttr());
+  if (!tree.linked ||
+      llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
+        auto ref = dyn_cast<RefType>(type);
+        return ref && ref.getVia() == cascade;
+      }))
+    return false;
+  for (const Trigger &trigger : triggers) {
+    if (!findLog(getStamp(trigger)))
+      return false;
+    if (trigger.via && tree.getTrusted(/*target=*/true) != trigger.component)
+      return false;
+  }
+  return true;
+}
+
 const WorldRelation &WorldLayout::getRelation(StringAttr relation) const {
   for (const WorldRelation &entry : relations)
     if (RelationOp(entry.op).getSymNameAttr() == relation)
@@ -348,12 +369,9 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     for (const Trigger &trigger : triggers) {
       WorldLog &log =
           layout.logs[llvm::find(stamps, getStamp(trigger)) - stamps.begin()];
-      // (A cascading query goes through its tree and reads no log, nor
-      // does one that reacts to an ancestor's events.)
-      bool scans = query.getCascade() ||
-                   llvm::any_of(triggers, [](const Trigger &other) {
-                     return static_cast<bool>(other.via);
-                   });
+      // (A cascading query that goes through its whole tree reads no
+      // log.)
+      bool scans = query.getCascade() && !layout.cascadeFollowsEvents(query);
       if (!log.exists() || scans) {
         positions.push_back(0);
         continue;
@@ -554,6 +572,19 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       // before anything follows them: a new world's trees are unclean.)
       layout.zeroed.push_back({relation.sourceOffset, idBytes * keys});
       relation.orderCapacity = 2 * relation.capacity;
+      bool followed = false;
+      module.walk([&](QueryOp query) {
+        followed |= query.getCascade() &&
+                    query.getCascade().getAttr() ==
+                        RelationOp(relation.op).getSymNameAttr() &&
+                    layout.cascadeFollowsEvents(query);
+      });
+      if (followed) {
+        relation.marksOffset = llvm::alignTo(end, kColumnAlignment);
+        end = relation.marksOffset + 8 * relation.markWords();
+        layout.zeroed.push_back(
+            {relation.marksOffset, uint64_t(8 * relation.markWords())});
+      }
       auto perEdge = [&](uint64_t bytes) {
         uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
         end = offset + bytes * relation.orderCapacity;

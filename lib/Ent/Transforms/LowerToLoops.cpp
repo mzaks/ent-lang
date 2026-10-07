@@ -579,6 +579,11 @@ public:
   Value treeOrder(const WorldRelation &relation) {
     return view(relation.orderOffset, relation.orderCapacity, idType());
   }
+  /// A linked tree's marks: a bit per element of its list.
+  Value treeMarks(const WorldRelation &relation) {
+    return view(relation.marksOffset, relation.markWords(),
+                rewriter.getI64Type());
+  }
   Value treeOrderParents(const WorldRelation &relation) {
     return view(relation.orderParentOffset, relation.orderCapacity, idType());
   }
@@ -1045,10 +1050,14 @@ static Value segmentOf(IRRewriter &rewriter, Location loc, WorldAccess &world,
 /// Append the entity `id` (stored form) to `segment` (an i64) of `log` as
 /// having had an event at `tick`, if `old` (its stamp before this event;
 /// null for a new entity or a move, which are events by themselves) is not
-/// `tick` already and `when` holds (null for always). Once the segment is
-/// full for every reader, appending is wasted work: the first event that
-/// finds it full instead moves its count one past (every reader scans),
-/// and later events find nothing to do. With `atomic`, iterations of a
+/// `tick` already and `when` holds (null for always). Entries a reader has
+/// not read are never written over: once the segment is full for its
+/// slowest reader, an event is not appended but lost, to every reader
+/// (one that has read further would otherwise not notice). So the event
+/// moves the segment's count on, past what the slowest reader can hold,
+/// and notes the new count as the segment's third number: a reader whose
+/// position is before that has lost an event and scans (see openLogs),
+/// after which its position is there or beyond. With `atomic`, iterations of a
 /// parallel loop may append concurrently: the count is advanced atomically
 /// (rarely contended, since threads mostly own their segments) and never
 /// moved back.
@@ -1077,8 +1086,8 @@ static void appendToLog(IRRewriter &rewriter, Location loc, WorldAccess &world,
   Value pending = arith::SubIOp::create(rewriter, loc, count, slowest);
   Value room = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
                                      pending, i64(log.segmentCapacity));
-  Value full = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
-                                     pending, i64(log.segmentCapacity));
+  Value full = arith::XOrIOp::create(
+      rewriter, loc, room, arith::ConstantIntOp::create(rewriter, loc, 1, 1));
   OpBuilder::InsertionGuard guard(rewriter);
   auto append = scf::IfOp::create(
       rewriter, loc, arith::AndIOp::create(rewriter, loc, event, room));
@@ -1110,13 +1119,27 @@ static void appendToLog(IRRewriter &rewriter, Location loc, WorldAccess &world,
   auto overflow = scf::IfOp::create(
       rewriter, loc, arith::AndIOp::create(rewriter, loc, event, full));
   rewriter.setInsertionPointToStart(overflow.thenBlock());
-  Value past = arith::AddIOp::create(rewriter, loc, slowest,
-                                     i64(log.segmentCapacity + 1));
-  if (atomic)
+  Value lostAt =
+      world.toIndex(loc, arith::AddIOp::create(rewriter, loc, base, i64(2)));
+  Value atLeast = arith::AddIOp::create(rewriter, loc, slowest,
+                                        i64(log.segmentCapacity));
+  if (atomic) {
     memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::maxs,
-                                past, counts, ValueRange{countAt});
-  else
+                                atLeast, counts, ValueRange{countAt});
+    Value before = memref::AtomicRMWOp::create(
+        rewriter, loc, arith::AtomicRMWKind::addi, i64(1), counts,
+        ValueRange{countAt});
+    memref::AtomicRMWOp::create(
+        rewriter, loc, arith::AtomicRMWKind::maxs,
+        arith::AddIOp::create(rewriter, loc, before, i64(1)), counts,
+        ValueRange{lostAt});
+  } else {
+    Value past = arith::AddIOp::create(
+        rewriter, loc, arith::MaxSIOp::create(rewriter, loc, count, atLeast),
+        i64(1));
     memref::StoreOp::create(rewriter, loc, past, counts, ValueRange{countAt});
+    memref::StoreOp::create(rewriter, loc, past, counts, ValueRange{lostAt});
+  }
 }
 
 /// The stamp columns of `archetype` that an event updates: `kind` of
@@ -4952,6 +4975,126 @@ static std::optional<std::string> whyScans(QueryOp query,
   return std::nullopt;
 }
 
+/// Open the event logs of a reactive query's triggers, at the insertion
+/// point: note where every segment ends now, which is as far as the query
+/// reads this time. Returns whether it has to visit every entity instead
+/// (i1: its first run, or a log was overwritten since it last read it) and
+/// how many entries wait for it in all (i64).
+static std::pair<Value, Value> openLogs(IRRewriter &rewriter, QueryOp query,
+                                        const WorldLayout &layout,
+                                        WorldAccess &world, Value seen) {
+  Location loc = query.getLoc();
+  SmallVector<Trigger> triggers = getTriggers(query);
+  auto index =
+      query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value pending;
+  // Note where every segment ends now; scan if this is the first run or
+  // a segment holds more entries since this query read it than it keeps.
+  Value scan = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::eq, seen,
+      arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+  pending = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+  for (auto [k, trigger] : llvm::enumerate(triggers)) {
+    const WorldLog &log = *layout.findLog(getStamp(trigger));
+    Value positions =
+        world.logPositions(log, layout.readPositions[index.getInt()][k]);
+    auto segments = scf::ForOp::create(
+        rewriter, loc, zero,
+        arith::ConstantIndexOp::create(rewriter, loc, log.segments), one,
+        ValueRange{scan, pending});
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(segments.getBody());
+    Value segment = segments.getInductionVar();
+    Value countAt = arith::MulIOp::create(
+        rewriter, loc, segment,
+        arith::ConstantIndexOp::create(rewriter, loc,
+                                       WorldLog::kSegmentStride / 8));
+    Value end = memref::LoadOp::create(rewriter, loc, world.logCounts(log),
+                                       ValueRange{countAt});
+    memref::StoreOp::create(rewriter, loc, end, world.logEnds(log),
+                            ValueRange{segment});
+    Value from = memref::LoadOp::create(rewriter, loc, positions,
+                                        ValueRange{segment});
+    // Lost: more entries than the segment holds, or an event that was
+    // not appended since this query last read it (see appendToLog).
+    Value lost = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::sgt,
+        arith::SubIOp::create(rewriter, loc, end, from),
+        arith::ConstantIntOp::create(rewriter, loc, log.segmentCapacity,
+                                     64));
+    lost = arith::OrIOp::create(
+        rewriter, loc, lost,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::slt, from,
+            memref::LoadOp::create(
+                rewriter, loc, world.logCounts(log),
+                ValueRange{arith::AddIOp::create(
+                    rewriter, loc, countAt,
+                    arith::ConstantIndexOp::create(rewriter, loc, 2))})));
+    Value more = arith::AddIOp::create(
+        rewriter, loc, segments.getRegionIterArg(1),
+        arith::SubIOp::create(rewriter, loc, end, from));
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{arith::OrIOp::create(rewriter, loc,
+                                        segments.getRegionIterArg(0), lost),
+                   more});
+    rewriter.setInsertionPointAfter(segments);
+    scan = segments.getResult(0);
+    pending = segments.getResult(1);
+  }
+  return {scan, pending};
+}
+
+/// The query has read every segment of its triggers' logs to where it
+/// ended when the query started; the slowest reader of each segment bounds
+/// how far writers append.
+static void closeLogs(IRRewriter &rewriter, QueryOp query,
+                      const WorldLayout &layout, WorldAccess &world) {
+  Location loc = query.getLoc();
+  SmallVector<Trigger> triggers = getTriggers(query);
+  auto index =
+      query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  for (auto [k, trigger] : llvm::enumerate(triggers)) {
+    const WorldLog &log = *layout.findLog(getStamp(trigger));
+    Value positions =
+        world.logPositions(log, layout.readPositions[index.getInt()][k]);
+    auto segments = scf::ForOp::create(
+        rewriter, loc, zero,
+        arith::ConstantIndexOp::create(rewriter, loc, log.segments), one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(segments.getBody()->getTerminator());
+    Value segment = segments.getInductionVar();
+    Value end = memref::LoadOp::create(rewriter, loc, world.logEnds(log),
+                                       ValueRange{segment});
+    memref::StoreOp::create(rewriter, loc, end, positions,
+                            ValueRange{segment});
+    Value slowest;
+    for (uint64_t reader : log.readerOffsets) {
+      Value position = memref::LoadOp::create(
+          rewriter, loc, world.logPositions(log, reader),
+          ValueRange{segment});
+      slowest = slowest ? arith::MinSIOp::create(rewriter, loc, slowest,
+                                                 position)
+                              .getResult()
+                        : position;
+    }
+    Value slowestAt = arith::AddIOp::create(
+        rewriter, loc,
+        arith::MulIOp::create(
+            rewriter, loc, segment,
+            arith::ConstantIndexOp::create(rewriter, loc,
+                                           WorldLog::kSegmentStride / 8)),
+        one);
+    memref::StoreOp::create(rewriter, loc, slowest, world.logCounts(log),
+                            ValueRange{slowestAt});
+  }
+}
+
 /// Walk the event logs of a reactive query's triggers, segment by segment,
 /// from where it last read each (its positions) to where it ended when the
 /// query started (the log's ends), at the insertion point, and run the
@@ -5565,74 +5708,279 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         loc, memref::LoadOp::create(rewriter, loc,
                                     world.treeOrderCount(relation),
                                     ValueRange{zero}));
-    auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
-    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-    Value at = loop.getInductionVar();
-    if (leavesFirst)
-      at = arith::SubIOp::create(
-          rewriter, loc, arith::SubIOp::create(rewriter, loc, count, one), at);
-    Value id = memref::LoadOp::create(rewriter, loc, world.treeOrder(relation),
-                                      ValueRange{at});
-    // (A linked tree's list has entries of all ones where an entity has
-    // moved to its end.)
-    if (relation.linked) {
-      auto ifThere = scf::IfOp::create(
-          rewriter, loc,
-          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, id,
-                                world.noEntity(loc)));
-      rewriter.setInsertionPointToStart(ifThere.thenBlock());
-    }
-    // The list has each entity's parent next to it, and where ids are
-    // not rows, the locations of both.
-    KnownParent parent{&relation,
-                       memref::LoadOp::create(rewriter, loc,
-                                              world.treeOrderParents(relation),
-                                              ValueRange{at})};
-    Value location;
-    if (relation.hasLocations()) {
-      location = memref::LoadOp::create(
-          rewriter, loc, world.treeOrderLocations(relation, /*parent=*/false),
-          ValueRange{at});
-      parent.location = memref::LoadOp::create(
-          rewriter, loc, world.treeOrderLocations(relation, /*parent=*/true),
-          ValueRange{at});
-    }
-    // The listed entities are sources of edges. Where those cannot die
-    // (the relation's sources are trusted, or nothing dies at all) and can
-    // only live in one archetype, each is found there without a check.
-    RelationOp relationOp = relation.op;
-    FlatSymbolRefAttr from = relationOp.getEndpoint(/*target=*/false);
-    bool fromTrusted =
-        from && relation.getTrusted(/*target=*/false) == from;
-    // Or in several, all of which the query matches: then a branch on
-    // its archetype tells where, and nothing else is checked.
-    auto isHome = [&](const WorldArchetype &archetype) {
-      return !from || ArchetypeOp(archetype.op).contains(from);
+    // The entities with a mark are the ones a query that follows events
+    // has yet to look at (see WorldLayout::cascadeFollowsEvents): a bit
+    // per element of the list.
+    LinkedTree tree(rewriter, loc, world, relation);
+    Value sixtyFour = arith::ConstantIndexOp::create(rewriter, loc, 64);
+    auto markAt = [&](Value position) {
+      Value word = arith::DivUIOp::create(rewriter, loc, position, sixtyFour);
+      Value bit = arith::ShLIOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+          arith::IndexCastOp::create(
+              rewriter, loc, rewriter.getI64Type(),
+              arith::RemUIOp::create(rewriter, loc, position, sixtyFour)));
+      Value marksOf = world.treeMarks(relation);
+      tree.store(arith::OrIOp::create(rewriter, loc,
+                                      tree.load(marksOf, word), bit),
+                 marksOf, word);
     };
-    // (A linked tree's edges go with a despawned entity: what is listed
-    // is alive.)
-    bool certain = from ? fromTrusted
-                        : relation.linked ||
-                              !layout.entities.hasGenerations();
-    for (const WorldArchetype &archetype : layout.archetypes)
-      certain &= !isHome(archetype) || matches(archetype, query);
-    emitLocate(
-        rewriter, loc, layout, world, id,
-        [&](const WorldArchetype &archetype) {
-          return certain ? isHome(archetype) : matches(archetype, query);
-        },
-        FlatSymbolRefAttr(), TypeRange{},
-        [&](const WorldArchetype &archetype, Value row,
-            Value) -> SmallVector<Value> {
-          OpBuilder::InsertionGuard inner(rewriter);
-          emitQueryBody(rewriter, query, IRMapping(), archetype, world, layout,
-                        row, world.count(loc, archetype), tick, seen,
-                        /*parallel=*/false, /*directApplies=*/true, parent, marks);
-          return {};
-        },
-        []() -> SmallVector<Value> { return {}; }, LocateBounds(), certain,
-        certain ? location : Value());
-    hoistResourceReads(rewriter, loop, world);
+    // The entity with the key `key`, if it is in the list.
+    auto markKey = [&](Value key) {
+      Value link = tree.load(tree.position(), key);
+      tree.branch(tree.negate(tree.isNone(link)), [&] {
+        markAt(arith::SubIOp::create(rewriter, loc, world.toIndex(loc, link),
+                                     one));
+      });
+    };
+    auto markChildren = [&](Value id) {
+      Value first = tree.load(tree.firstChild(), world.entityKey(loc, id));
+      scf::WhileOp::create(
+          rewriter, loc, TypeRange{first.getType()}, ValueRange{first},
+          [&](OpBuilder &, Location, ValueRange state) {
+            scf::ConditionOp::create(rewriter, loc,
+                                     tree.negate(tree.isNone(state[0])),
+                                     state);
+          },
+          [&](OpBuilder &, Location, ValueRange state) {
+            Value child = arith::SubIOp::create(
+                rewriter, loc, world.toIndex(loc, state[0]), one);
+            markKey(child);
+            scf::YieldOp::create(
+                rewriter, loc,
+                ValueRange{tree.load(tree.nextSibling(), child)});
+          });
+    };
+    // The body for the entity at `at` of the list, at the insertion point.
+    auto visitAt = [&](Value at, bool following) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      Value id = memref::LoadOp::create(rewriter, loc, world.treeOrder(relation),
+                                        ValueRange{at});
+      // (A linked tree's list has entries of all ones where an entity has
+      // moved to its end.)
+      if (relation.linked) {
+        auto ifThere = scf::IfOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, id,
+                                  world.noEntity(loc)));
+        rewriter.setInsertionPointToStart(ifThere.thenBlock());
+      }
+      // The list has each entity's parent next to it, and where ids are
+      // not rows, the locations of both.
+      KnownParent parent{&relation,
+                         memref::LoadOp::create(rewriter, loc,
+                                                world.treeOrderParents(relation),
+                                                ValueRange{at})};
+      Value location;
+      if (relation.hasLocations()) {
+        location = memref::LoadOp::create(
+            rewriter, loc, world.treeOrderLocations(relation, /*parent=*/false),
+            ValueRange{at});
+        parent.location = memref::LoadOp::create(
+            rewriter, loc, world.treeOrderLocations(relation, /*parent=*/true),
+            ValueRange{at});
+      }
+      // The listed entities are sources of edges. Where those cannot die
+      // (the relation's sources are trusted, or nothing dies at all) and can
+      // only live in one archetype, each is found there without a check.
+      RelationOp relationOp = relation.op;
+      FlatSymbolRefAttr from = relationOp.getEndpoint(/*target=*/false);
+      bool fromTrusted =
+          from && relation.getTrusted(/*target=*/false) == from;
+      // Or in several, all of which the query matches: then a branch on
+      // its archetype tells where, and nothing else is checked.
+      auto isHome = [&](const WorldArchetype &archetype) {
+        return !from || ArchetypeOp(archetype.op).contains(from);
+      };
+      // (A linked tree's edges go with a despawned entity: what is listed
+      // is alive.)
+      bool certain = from ? fromTrusted
+                          : relation.linked ||
+                                !layout.entities.hasGenerations();
+      for (const WorldArchetype &archetype : layout.archetypes)
+        certain &= !isHome(archetype) || matches(archetype, query);
+      emitLocate(
+          rewriter, loc, layout, world, id,
+          [&](const WorldArchetype &archetype) {
+            return certain ? isHome(archetype) : matches(archetype, query);
+          },
+          FlatSymbolRefAttr(), TypeRange{},
+          [&](const WorldArchetype &archetype, Value row,
+              Value) -> SmallVector<Value> {
+            OpBuilder::InsertionGuard inner(rewriter);
+            if (!following) {
+              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                            layout, row, world.count(loc, archetype), tick, seen,
+                            /*parallel=*/false, /*directApplies=*/true, parent,
+                            marks);
+              return {};
+            }
+            // Following events: what the body changed here that a trigger
+            // up the tree means (its stamp has this query's tick, which no
+            // other event has) is an event for the children, which come
+            // later in the list.
+            auto ran = scf::IfOp::create(
+                rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 1));
+            {
+              OpBuilder::InsertionGuard body(rewriter);
+              rewriter.setInsertionPointToStart(ran.thenBlock());
+              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                            layout, row, world.count(loc, archetype), tick, seen,
+                            /*parallel=*/false, /*directApplies=*/true, parent,
+                            marks);
+            }
+            Value changedHere;
+            for (const Trigger &trigger : triggers) {
+              const WorldColumn *column =
+                  trigger.via ? archetype.findStamp(getStamp(trigger)) : nullptr;
+              if (!column)
+                continue;
+              Value now = arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::eq,
+                  memref::LoadOp::create(rewriter, loc,
+                                         world.stamps(archetype, *column),
+                                         ValueRange{row}),
+                  tick);
+              changedHere = changedHere
+                                ? arith::OrIOp::create(rewriter, loc,
+                                                       changedHere, now)
+                                      .getResult()
+                                : now;
+            }
+            if (changedHere) {
+              auto ifChanged = scf::IfOp::create(rewriter, loc, changedHere);
+              rewriter.setInsertionPointToStart(ifChanged.thenBlock());
+              markChildren(id);
+            }
+            return {};
+          },
+          []() -> SmallVector<Value> { return {}; }, LocateBounds(), certain,
+          certain ? location : Value());
+    };
+    auto visitAll = [&] {
+      auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+        Value at = loop.getInductionVar();
+        if (leavesFirst)
+          at = arith::SubIOp::create(
+              rewriter, loc, arith::SubIOp::create(rewriter, loc, count, one),
+              at);
+        visitAt(at, /*following=*/false);
+      }
+      hoistResourceReads(rewriter, loop, world);
+    };
+    if (!layout.cascadeFollowsEvents(query)) {
+      visitAll();
+    } else {
+      // On its first run, and when a log has lost events, every entity as
+      // ever. Else from the events: an entity with an event of its own
+      // gets a mark, and so do the children of an entity with an event
+      // that a trigger up the tree means. Then the marked ones in the
+      // list's order, each passing marks on to its children if the body
+      // changed it. (An event marks more entities than the body runs
+      // for, which the body's own test of the ticks sorts out.)
+      auto [lost, pending] = openLogs(rewriter, query, layout, world, seen);
+      // Following costs several times a visit per entity it comes to, so
+      // where the events are many (more than a sixteenth of the list;
+      // those of the query's own last run are among them) it goes through
+      // the list as well.
+      Value scan = arith::OrIOp::create(
+          rewriter, loc, lost,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::sgt,
+              arith::MulIOp::create(
+                  rewriter, loc, pending,
+                  arith::ConstantIntOp::create(rewriter, loc, 16, 64)),
+              arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                         count)));
+      auto scanOrFollow = scf::IfOp::create(rewriter, loc, scan,
+                                            /*withElseRegion=*/true);
+      rewriter.setInsertionPointToStart(scanOrFollow.thenBlock());
+      visitAll();
+      rewriter.setInsertionPointToStart(scanOrFollow.elseBlock());
+      auto index =
+          query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
+      for (auto [k, trigger] : llvm::enumerate(triggers)) {
+        const WorldLog &log = *layout.findLog(getStamp(trigger));
+        Value positions =
+            world.logPositions(log, layout.readPositions[index.getInt()][k]);
+        tree.forEach(
+            zero, arith::ConstantIndexOp::create(rewriter, loc, log.segments),
+            [&](Value segment) {
+              Value from = tree.load(positions, segment);
+              Value to = tree.load(world.logEnds(log), segment);
+              Value first = arith::MulIOp::create(
+                  rewriter, loc, segment,
+                  arith::ConstantIndexOp::create(rewriter, loc,
+                                                 log.segmentCapacity));
+              tree.forEach(world.toIndex(loc, from), world.toIndex(loc, to),
+                           [&](Value entry) {
+                Value slot = arith::AddIOp::create(
+                    rewriter, loc, first,
+                    arith::AndIOp::create(
+                        rewriter, loc, entry,
+                        arith::ConstantIndexOp::create(
+                            rewriter, loc, log.segmentCapacity - 1)));
+                Value id = tree.load(world.logIds(log), slot);
+                if (trigger.via)
+                  markChildren(id);
+                else
+                  markKey(world.entityKey(loc, id));
+              });
+            });
+      }
+      Value words = arith::DivUIOp::create(
+          rewriter, loc,
+          arith::AddIOp::create(
+              rewriter, loc, count,
+              arith::ConstantIndexOp::create(rewriter, loc, 63)),
+          sixtyFour);
+      auto sweep = scf::ForOp::create(rewriter, loc, zero, words, one);
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPoint(sweep.getBody()->getTerminator());
+        Value word = sweep.getInductionVar();
+        Type i64 = rewriter.getI64Type();
+        // The word is read again for every mark: an entity's children
+        // may be in it too.
+        scf::WhileOp::create(
+            rewriter, loc, TypeRange{}, ValueRange{},
+            [&](OpBuilder &, Location, ValueRange) {
+              scf::ConditionOp::create(
+                  rewriter, loc,
+                  arith::CmpIOp::create(
+                      rewriter, loc, arith::CmpIPredicate::ne,
+                      tree.load(world.treeMarks(relation), word),
+                      arith::ConstantIntOp::create(rewriter, loc, 0, 64)),
+                  ValueRange{});
+            },
+            [&](OpBuilder &, Location, ValueRange) {
+              Value marksOf = world.treeMarks(relation);
+              Value bits = tree.load(marksOf, word);
+              tree.store(
+                  arith::AndIOp::create(
+                      rewriter, loc, bits,
+                      arith::SubIOp::create(
+                          rewriter, loc, bits,
+                          arith::ConstantIntOp::create(rewriter, loc, 1, 64))),
+                  marksOf, word);
+              Value lowest = LLVM::CountTrailingZerosOp::create(
+                  rewriter, loc, i64, bits, /*is_zero_poison=*/true);
+              Value at = arith::AddIOp::create(
+                  rewriter, loc,
+                  arith::MulIOp::create(rewriter, loc, word, sixtyFour),
+                  arith::IndexCastOp::create(rewriter, loc,
+                                             rewriter.getIndexType(), lowest));
+              visitAt(at, /*following=*/true);
+              scf::YieldOp::create(rewriter, loc, ValueRange{});
+            });
+      }
+      hoistResourceReads(rewriter, sweep, world);
+      rewriter.setInsertionPoint(query);
+      closeLogs(rewriter, query, layout, world);
+    }
     if (leavesFirst)
       emitRoots();
   } else {
@@ -5767,50 +6115,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   if (useLogs) {
     zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
     one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-    // Note where every segment ends now; scan if this is the first run or
-    // a segment holds more entries since this query read it than it keeps.
-    Value scan = arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::eq, seen,
-        arith::ConstantIntOp::create(rewriter, loc, 0, 64));
-    pending = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
-    for (auto [k, trigger] : llvm::enumerate(triggers)) {
-      const WorldLog &log = *layout.findLog(getStamp(trigger));
-      Value positions =
-          world.logPositions(log, layout.readPositions[index.getInt()][k]);
-      auto segments = scf::ForOp::create(
-          rewriter, loc, zero,
-          arith::ConstantIndexOp::create(rewriter, loc, log.segments), one,
-          ValueRange{scan, pending});
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(segments.getBody());
-      Value segment = segments.getInductionVar();
-      Value countAt = arith::MulIOp::create(
-          rewriter, loc, segment,
-          arith::ConstantIndexOp::create(rewriter, loc,
-                                         WorldLog::kSegmentStride / 8));
-      Value end = memref::LoadOp::create(rewriter, loc, world.logCounts(log),
-                                         ValueRange{countAt});
-      memref::StoreOp::create(rewriter, loc, end, world.logEnds(log),
-                              ValueRange{segment});
-      Value from = memref::LoadOp::create(rewriter, loc, positions,
-                                          ValueRange{segment});
-      Value lost = arith::CmpIOp::create(
-          rewriter, loc, arith::CmpIPredicate::sgt,
-          arith::SubIOp::create(rewriter, loc, end, from),
-          arith::ConstantIntOp::create(rewriter, loc, log.segmentCapacity,
-                                       64));
-      Value more = arith::AddIOp::create(
-          rewriter, loc, segments.getRegionIterArg(1),
-          arith::SubIOp::create(rewriter, loc, end, from));
-      scf::YieldOp::create(
-          rewriter, loc,
-          ValueRange{arith::OrIOp::create(rewriter, loc,
-                                          segments.getRegionIterArg(0), lost),
-                     more});
-      rewriter.setInsertionPointAfter(segments);
-      scan = segments.getResult(0);
-      pending = segments.getResult(1);
-    }
+    Value scan;
+    std::tie(scan, pending) = openLogs(rewriter, query, layout, world, seen);
     scanOrWalk = scf::IfOp::create(rewriter, loc, scan,
                                    /*withElseRegion=*/true);
     anchor = scanOrWalk.thenBlock()->getTerminator();
@@ -5919,43 +6225,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     } else {
       walkLogs(rewriter, query, layout, world, tick, seen, /*parallel=*/false);
     }
-    // The query has read every segment to where it ended when it started;
-    // the slowest reader of each segment bounds how far writers append.
     rewriter.setInsertionPoint(query);
-    for (auto [k, trigger] : llvm::enumerate(triggers)) {
-      const WorldLog &log = *layout.findLog(getStamp(trigger));
-      Value positions =
-          world.logPositions(log, layout.readPositions[index.getInt()][k]);
-      auto segments = scf::ForOp::create(
-          rewriter, loc, zero,
-          arith::ConstantIndexOp::create(rewriter, loc, log.segments), one);
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPoint(segments.getBody()->getTerminator());
-      Value segment = segments.getInductionVar();
-      Value end = memref::LoadOp::create(rewriter, loc, world.logEnds(log),
-                                         ValueRange{segment});
-      memref::StoreOp::create(rewriter, loc, end, positions,
-                              ValueRange{segment});
-      Value slowest;
-      for (uint64_t reader : log.readerOffsets) {
-        Value position = memref::LoadOp::create(
-            rewriter, loc, world.logPositions(log, reader),
-            ValueRange{segment});
-        slowest = slowest ? arith::MinSIOp::create(rewriter, loc, slowest,
-                                                   position)
-                                .getResult()
-                          : position;
-      }
-      Value slowestAt = arith::AddIOp::create(
-          rewriter, loc,
-          arith::MulIOp::create(
-              rewriter, loc, segment,
-              arith::ConstantIndexOp::create(rewriter, loc,
-                                             WorldLog::kSegmentStride / 8)),
-          one);
-      memref::StoreOp::create(rewriter, loc, slowest, world.logCounts(log),
-                              ValueRange{slowestAt});
-    }
+    closeLogs(rewriter, query, layout, world);
   }
 
   // Applies are combined when the whole query has run, in a fixed order:
