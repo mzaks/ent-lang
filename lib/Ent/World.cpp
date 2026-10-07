@@ -681,6 +681,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       if (relation.sortedArchetype() >= 0)
         placeMarks(relation,
                    layout.archetypes[relation.sortedArchetype()].capacity);
+      if (relation.sortedArchetypes.size() > 1) {
+        relation.rowOrderOffset = place(scheme.locationBits / 8, edges);
+        relation.rowOrderParentOffset = place(scheme.locationBits / 8, edges);
+      }
     }
   }
 

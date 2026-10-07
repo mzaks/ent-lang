@@ -1,0 +1,31 @@
+// A tree sorted across two archetypes is gone through depth by depth
+// where it is bushy and by its list where it is deep (fewer than 64 nodes
+// a depth), and places every node as the unsorted tree in one archetype
+// does: the scene graph of bench/scene with 2000 nodes, in both shapes,
+// by the checksum of every node's place.
+// RUN: mkdir -p %t.dir %t.sdir
+// RUN: sed 's/capacity 1024$/capacity 2000/' %S/../../bench/scene/scene.ent > %t.ent
+// RUN: ent-translate --import-ent %t.ent -o %t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/scene_world.h
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module -DN=2000 %t.ll -I%t.dir \
+// RUN:     %S/../../bench/scene/scene.c -o %t.exe
+// RUN: sed 's/ tree capacity 2000$/ tree sorted capacity 2000/' %t.ent > %t.two.ent
+// RUN: echo "component Mass { m: i32 } capacity 2000" >> %t.two.ent
+// RUN: echo "archetype Heavy { Local, World, Mass } capacity 2000" >> %t.two.ent
+// RUN: grep -q "tree sorted" %t.two.ent
+// RUN: grep -q "archetype Heavy" %t.two.ent
+// RUN: ent-translate --import-ent %t.two.ent -o %t.s.mlir
+// RUN: ent-translate --ent-to-c-header %t.s.mlir -o %t.sdir/scene_world.h
+// RUN: ent-opt %t.s.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.s.ll
+// RUN: clang -O2 -Wno-override-module -DN=2000 -DTWO %t.s.ll -I%t.sdir \
+// RUN:     %S/../../bench/scene/scene.c -o %t.s.exe
+// RUN: %t.exe 20 2 bushy 5 | sed 's/.*checksum=//' > %t.bushy
+// RUN: %t.s.exe 20 2 bushy 5 | sed 's/.*checksum=//' | cmp - %t.bushy
+// RUN: %t.exe 20 2 deep 5 | sed 's/.*checksum=//' > %t.deep
+// RUN: %t.s.exe 20 2 deep 5 | sed 's/.*checksum=//' | cmp - %t.deep
+// RUN: not cmp -s %t.bushy %t.deep

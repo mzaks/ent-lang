@@ -672,6 +672,14 @@ public:
                 relation.orderCapacity,
                 rewriter.getIntegerType(layout.entities.locationBits));
   }
+  /// A tree sorted in several archetypes: per element of the list where
+  /// the entity's row is, or its parent's.
+  Value rowOrder(const WorldRelation &relation, bool parent) {
+    return view(parent ? relation.rowOrderParentOffset
+                       : relation.rowOrderOffset,
+                relation.orderCapacity,
+                rewriter.getIntegerType(layout.entities.locationBits));
+  }
   Value treeStale(const WorldRelation &relation) {
     return scalar(relation.staleOffset);
   }
@@ -5031,6 +5039,16 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
               ValueRange{world.idSlot(loc, parent)});
           auto [where, row] = locationOf(id);
           auto [parentWhere, parentRow] = locationOf(parent);
+          // (Both also next to the entity in the list, for going through
+          // a deep tree by it.)
+          memref::StoreOp::create(
+              rewriter, loc,
+              memref::LoadOp::create(rewriter, loc, world.locations(),
+                                     ValueRange{world.idSlot(loc, id)}),
+              world.rowOrder(relation, /*parent=*/false), ValueRange{k});
+          memref::StoreOp::create(rewriter, loc, packed,
+                                  world.rowOrder(relation, /*parent=*/true),
+                                  ValueRange{k});
           for (auto [index, archetype] : llvm::enumerate(holders)) {
             auto ifHere =
                 scf::IfOp::create(rewriter, loc, isIn(where, *archetype));
@@ -6161,7 +6179,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         options.parallelEntities && isDepthLocal(query) && !marks &&
         triggers.empty() && connects.empty() && !sends &&
         held >= options.parallelMinEntities;
-    auto walkLevels = [&] {
+    auto walkDepths = [&] {
       auto levels = scf::ForOp::create(rewriter, loc, zero, depths, one);
       {
         OpBuilder::InsertionGuard guard(rewriter);
@@ -6241,6 +6259,84 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         }
       }
       hoistResourceReads(rewriter, levels, world);
+    };
+    // A deep tree has few rows a depth, and going depth by depth costs
+    // more than the rows do. It is gone through by the tree's list
+    // instead, which has every entity after its parent, with where its
+    // row is and where its parent's: one loop, and a branch per entity on
+    // its archetype. (Within a depth that is the list's order, not the
+    // archetypes' one after another.)
+    Value rowsInAll = zero;
+    for (const WorldArchetype *archetype : levelled)
+      rowsInAll = arith::AddIOp::create(rewriter, loc, rowsInAll,
+                                        world.count(loc, *archetype));
+    auto walkList = [&] {
+      Value count = world.toIndex(
+          loc, memref::LoadOp::create(rewriter, loc,
+                                      world.treeOrderCount(relation),
+                                      ValueRange{zero}));
+      auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+        Value at = loop.getInductionVar();
+        if (leavesFirst)
+          at = arith::SubIOp::create(
+              rewriter, loc, arith::SubIOp::create(rewriter, loc, count, one),
+              at);
+        Value id = memref::LoadOp::create(
+            rewriter, loc, world.treeOrder(relation), ValueRange{at});
+        KnownParent parent{&relation};
+        parent.location = memref::LoadOp::create(
+            rewriter, loc, world.rowOrder(relation, /*parent=*/true),
+            ValueRange{at});
+        Value location = memref::LoadOp::create(
+            rewriter, loc, world.rowOrder(relation, /*parent=*/false),
+            ValueRange{at});
+        emitLocate(
+            rewriter, loc, layout, world, id,
+            [&](const WorldArchetype &archetype) {
+              return llvm::is_contained(levelled, &archetype);
+            },
+            FlatSymbolRefAttr(), TypeRange{},
+            [&](const WorldArchetype &archetype, Value row,
+                Value) -> SmallVector<Value> {
+              if (!matches(archetype, query))
+                return {};
+              OpBuilder::InsertionGuard inner(rewriter);
+              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                            layout, row, world.count(loc, archetype), tick,
+                            seen, /*parallel=*/false, /*directApplies=*/true,
+                            parent, marks);
+              return {};
+            },
+            []() -> SmallVector<Value> { return {}; }, LocateBounds(),
+            /*trusted=*/true, location);
+      }
+      hoistResourceReads(rewriter, loop, world);
+    };
+    auto walkLevels = [&] {
+      // (A reactive query stays with the depths: by the list it took
+      // twice as long in a deep tree, 2.9 ms against 1.4 at a million
+      // nodes, where the query without triggers takes half. Why is not
+      // known.)
+      if (!triggers.empty()) {
+        walkDepths();
+        return;
+      }
+      Value deep = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ugt,
+          arith::MulIOp::create(
+              rewriter, loc, depths,
+              arith::ConstantIndexOp::create(rewriter, loc, 64)),
+          rowsInAll);
+      auto byListOrDepth = scf::IfOp::create(rewriter, loc, deep,
+                                             /*withElseRegion=*/true);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(byListOrDepth.thenBlock());
+      walkList();
+      rewriter.setInsertionPointToStart(byListOrDepth.elseBlock());
+      walkDepths();
     };
     if (!layout.cascadeFollowsEvents(query)) {
       walkLevels();

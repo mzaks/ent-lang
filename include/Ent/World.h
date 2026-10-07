@@ -270,6 +270,11 @@ struct WorldRelation {
   /// and after those the tick of the latest connect of any entity, by
   /// which a query knows whether to look at them at all.
   uint64_t connectedOffset = 0;
+  /// For a tree sorted in several archetypes: next to each entity of the
+  /// list where its row is and where its parent's is (packed locations),
+  /// as the sort left them, for going through a deep tree by its list.
+  uint64_t rowOrderOffset = 0;
+  uint64_t rowOrderParentOffset = 0;
   /// For a tree that a reactive query follows events down (see
   /// cascadeFollowsEvents): a bit per element of a linked tree's list, or
   /// per row of the one archetype a sorted tree is stored in, in i64
