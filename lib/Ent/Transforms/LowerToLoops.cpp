@@ -8885,7 +8885,11 @@ static void warnAboutReactiveQueries(ModuleOp module) {
       // (Not a trigger the program wrote.)
       if (trigger.kind == Trigger::Connected)
         continue;
-      if (trigger.kind != Trigger::Added &&
+      // (A module's query reacts to what the program that imports it may
+      // do, which is not the module's to know: `module.name` is one.)
+      auto system = query->getParentOfType<SystemOp>();
+      bool ofModule = system && system.getSymName().contains('.');
+      if (trigger.kind != Trigger::Added && !ofModule &&
           llvm::none_of(causers,
                         [&](Operation *op) { return causes(op, trigger); })) {
         if (trigger.kind == Trigger::Removed)

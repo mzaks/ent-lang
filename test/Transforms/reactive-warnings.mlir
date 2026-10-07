@@ -22,3 +22,10 @@ ent.system @watch() reads [@H, @S] {
   ent.query (%h: !ent.ref<@H>) on [changed @H "max", removed @S] {
   }
 }
+
+// A module's query (its system is `module.name`) reacts to what the
+// program that imports it may do or not: it is not told.
+ent.system @lib.watch() reads [@H, @S] {
+  ent.query (%h: !ent.ref<@H>) on [changed @H "max", removed @S] {
+  }
+}

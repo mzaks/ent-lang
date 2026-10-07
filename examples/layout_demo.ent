@@ -156,8 +156,9 @@ system interact() {
     o.dx = Mouse.x + 14.0
     o.dy = Mouse.y + 10.0
   }
-  // A box that fits its label is as wide as the window draws that.
-  for b: mut Box, t: Label, f: Fitted on changed t, changed f {
+  // A box that fits its label is as wide as the window draws that: once,
+  // when it is made, since nothing here gives a label another text.
+  for b: mut Box, t: Label, f: Fitted on added Fitted {
     let w = text_width(t.text, t.size) + 2.0 * f.around
     if b.w != w { b.w = w }
   }
