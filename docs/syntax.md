@@ -566,7 +566,6 @@ thereby passed down: the next time it runs that is no event.
   each running only as long as something still gets another value.
   (Compared where the field is written, and only for fields some `for`
   reacts to. A text is not compared: writing one counts.)
-- Triggers on children and on siblings are for unsorted trees so far.
 - A binding several arrows up has its events too
   (`(b)-[R]->()-[R]->(far: C) ... on changed far.x`): the `for` runs for
   an entity when what it finds there changed, and when an entity on the

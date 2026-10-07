@@ -695,6 +695,25 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       layout.zeroed.push_back(
           {relation.childTicksOffset, uint64_t(8 * layout.entityKeys)});
     }
+    if (!relation.linked) {
+      uint64_t idBytes = scheme.idBits / 8;
+      if (asked) {
+        relation.childCountsOffset = llvm::alignTo(end, kColumnAlignment);
+        end = relation.childCountsOffset + 8 * layout.entityKeys;
+        layout.zeroed.push_back(
+            {relation.childCountsOffset, uint64_t(8 * layout.entityKeys)});
+      }
+      if (siblings) {
+        relation.siblingIdsBeforeOffset =
+            llvm::alignTo(end, kColumnAlignment);
+        end = relation.siblingIdsBeforeOffset + idBytes * layout.entityKeys;
+        relation.siblingIdsAfterOffset = llvm::alignTo(end, kColumnAlignment);
+        end = relation.siblingIdsAfterOffset + idBytes * layout.entityKeys;
+        layout.zeroed.push_back(
+            {relation.siblingIdsBeforeOffset,
+             end - relation.siblingIdsBeforeOffset});
+      }
+    }
     // (And the ring of the entities these last happened to.)
     if (asked || siblings) {
       relation.touchedOffset = llvm::alignTo(end, kColumnAlignment);

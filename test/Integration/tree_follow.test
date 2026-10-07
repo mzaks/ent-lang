@@ -23,6 +23,15 @@
 // RUN: ent-translate --import-ent %t.dfs.ent -I %S/../../devices -o %t.dfs.mlir
 // RUN: ent-opt %t.dfs.mlir "--ent-lower-to-loops=explain=1" -o /dev/null 2>&1 \
 // RUN:   | grep -c "remark: follows its events" | grep -q 4
+// The same over a tree whose rows are kept in its order, in one archetype
+// and (the leaves given a component more) in two.
+// RUN: sed 's/ tree ordered by / tree sorted ordered by /' \
+// RUN:     %S/Inputs/tree_follow.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted ordered" %t.sorted.ent
+// RUN: %ent run %t.sorted.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/else { 2 } },$/else { 2 } }, Leaf { n: 0 },/' %t.sorted.ent > %t.two.ent
+// RUN: grep -q "Leaf { n: 0 }," %t.two.ent
+// RUN: %ent run %t.two.ent 2>/dev/null | cmp - %t.out
 // RUN: ent-translate --import-ent %S/Inputs/tree_follow.ent \
 // RUN:     -I %S/../../devices -o %t.mlir
 // RUN: ent-opt %t.mlir "--ent-lower-to-loops=explain=1" -o /dev/null 2>&1 \

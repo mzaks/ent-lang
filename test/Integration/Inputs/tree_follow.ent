@@ -7,6 +7,8 @@ import console
 // (`tip`: what a node adds to the one it is under, and not to itself.)
 component Node { index: i32, base: f32, tip: f32 }
 component Slot { at: i32 }
+// (For the test to give the leaves, so that the nodes are of two kinds.)
+component Leaf { n: i32 }
 // What reacts works out, and what does not.
 component Lazy { sum: f32, w: f32, x: f32, runs: i32 }
 component Full { sum: f32, w: f32, x: f32 }

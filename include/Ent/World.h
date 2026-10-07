@@ -333,6 +333,13 @@ struct WorldRelation {
   /// there have been ever and the tick of the newest the ring has lost
   /// (i64 each). A query that follows events goes to those since its
   /// last run, or through everything if one of them is lost.
+  /// In a sorted tree, where the order of the rows is all there is, both
+  /// are found out when the rows are put in order: per entity key how
+  /// many children it had then (i64), and which siblings before and
+  /// after (ids).
+  uint64_t childCountsOffset = 0;
+  uint64_t siblingIdsBeforeOffset = 0;
+  uint64_t siblingIdsAfterOffset = 0;
   static constexpr int64_t kTouched = 256;
   uint64_t touchedOffset = 0;
   uint64_t touchedTicksOffset = 0;

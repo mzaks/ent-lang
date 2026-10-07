@@ -1462,12 +1462,6 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
                << " without 'cascade " << trigger.via
                << "': the other entity is seen to change where it is "
                << "visited first";
-      auto relation =
-          symbolTable.lookupNearestSymbolFrom<RelationOp>(*this, trigger.via);
-      if (trigger.where != Trigger::Up && relation && relation.getSorted())
-        return emitOpError("reacts to changed ")
-               << trigger.component << " " << direction << " " << trigger.via
-               << ", a sorted tree, which is not supported yet";
       if (down) {
         if (!isLeavesFirst())
           return emitOpError("reacts to changed ")

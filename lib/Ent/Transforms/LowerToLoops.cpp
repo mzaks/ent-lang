@@ -626,6 +626,17 @@ public:
     return view(relation.childTicksOffset, layout.entityKeys,
                 rewriter.getI64Type());
   }
+  /// A sorted tree's: per entity key how many children the entity had
+  /// when the rows were last put in order, and its siblings then.
+  Value childCounts(const WorldRelation &relation) {
+    return view(relation.childCountsOffset, layout.entityKeys,
+                rewriter.getI64Type());
+  }
+  Value siblingIds(const WorldRelation &relation, bool after) {
+    return view(after ? relation.siblingIdsAfterOffset
+                      : relation.siblingIdsBeforeOffset,
+                layout.entityKeys, idType());
+  }
   /// The entities that last got other children or siblings in the tree,
   /// for the queries that follow events: their ids and the ticks, in a
   /// ring, and how many there have been ever and the tick of the newest
@@ -1682,6 +1693,10 @@ static std::pair<Value, Value> emitParent(IRRewriter &rewriter, Location loc,
                                           WorldAccess &world,
                                           const WorldRelation &relation,
                                           Value id);
+static std::pair<Value, Value> emitEdgeRange(IRRewriter &rewriter,
+                                             Location loc, WorldAccess &world,
+                                             const WorldRelation &relation,
+                                             bool in, Value key);
 namespace {
 /// Bounds that ids are checked against, loaded ahead by a caller that
 /// knows they cannot change (see emitLocate).
@@ -2190,7 +2205,6 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         continue;
       const WorldRelation &relation =
           layout.getRelation(trigger.via.getAttr());
-      assert(relation.linked && "a trigger down a tree without links");
       Type i64 = rewriter.getI64Type();
       Type i1 = rewriter.getI1Type();
       Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
@@ -2215,6 +2229,61 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
           arith::AddIOp::create(rewriter, loc, seen, constant(1, 64)));
       Stamp stamp = getStamp(trigger);
       FlatSymbolRefAttr component = trigger.component;
+      // The stamp of the child `childId`, 0 if it has none.
+      auto stampOf = [&](Value childId) -> Value {
+        if (llvm::none_of(layout.archetypes, [&](const WorldArchetype &home) {
+              return home.findStamp(stamp) != nullptr;
+            }))
+          return constant(0, 64);
+        return emitLocate(
+            rewriter, loc, layout, world, childId,
+            [&](const WorldArchetype &home) {
+              return home.findStamp(stamp) != nullptr;
+            },
+            component, TypeRange{i64},
+            [&](const WorldArchetype &home, Value row,
+                Value) -> SmallVector<Value> {
+              return {load(world.stamps(home, *home.findStamp(stamp)), row)};
+            },
+            [&]() -> SmallVector<Value> { return {constant(0, 64)}; })[0];
+      };
+      if (!relation.linked) {
+        // A tree without links: the children are the sources of the edges
+        // to the entity, which the relation has together.
+        Value id = world.entityId(loc, archetype, entity);
+        auto [begin, end] =
+            emitEdgeRange(rewriter, loc, world, relation, /*in=*/true, key);
+        auto edges = scf::ForOp::create(rewriter, loc, begin, end, one,
+                                        ValueRange{constant(0, 1)});
+        {
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPointToStart(edges.getBody());
+          Value position = edges.getInductionVar();
+          Value edge = relation.isSorted(/*in=*/true)
+                           ? position
+                           : world.toIndex(
+                                 loc, load(world.indexEdges(relation),
+                                           position));
+          // (A slot may have been reused since the edges were sorted.)
+          Value mine = arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::eq,
+              load(world.edgeIds(relation, /*source=*/false), edge), id);
+          Value newer = arith::AndIOp::create(
+              rewriter, loc, mine,
+              arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::sgt,
+                  stampOf(load(world.edgeIds(relation, /*source=*/true),
+                               edge)),
+                  passed));
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::OrIOp::create(rewriter, loc,
+                                              edges.getRegionIterArg(0),
+                                              newer)});
+        }
+        fires(edges.getResult(0));
+        continue;
+      }
       Value nextSibling =
           world.treeLinks(relation, relation.nextSiblingOffset);
       auto children = scf::WhileOp::create(
@@ -6228,6 +6297,118 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                         loc, world.entityId(loc, *archetype, row))}),
                 world.connectedRows(*archetype), ValueRange{row});
           });
+    }
+  }
+  // Who has other children than when the rows were last put in order, and
+  // who other siblings: events, where a reactive query has a trigger down
+  // the tree or before or after it.
+  auto each = [&](Value from, Value to, function_ref<void(Value)> body) {
+    auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    body(loop.getInductionVar());
+  };
+  auto when = [&](Value condition, function_ref<void()> then) {
+    auto ifOp = scf::IfOp::create(rewriter, loc, condition);
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(ifOp.thenBlock());
+    then();
+  };
+  auto at = [&](Value column, Value index) -> Value {
+    return memref::LoadOp::create(rewriter, loc, column, ValueRange{index});
+  };
+  auto differs = [&](Value a, Value b) -> Value {
+    return arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, a,
+                                 b);
+  };
+  if (relation.childCountsOffset) {
+    FlatSymbolRefAttr has = RelationOp(relation.op).getEndpoint(/*target=*/true);
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (has && !ArchetypeOp(archetype.op).contains(has))
+        continue;
+      each(zero, world.count(loc, archetype), [&](Value row) {
+        Value id = world.entityId(loc, archetype, row);
+        Value key = world.entityKey(loc, id);
+        auto [begin, end] =
+            emitEdgeRange(rewriter, loc, world, relation, /*in=*/true, key);
+        Value number = arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getI64Type(),
+            arith::SubIOp::create(rewriter, loc, end, begin));
+        when(differs(number, at(world.childCounts(relation), key)), [&] {
+          memref::StoreOp::create(rewriter, loc, number,
+                                  world.childCounts(relation),
+                                  ValueRange{key});
+          memref::StoreOp::create(rewriter, loc, world.currentTick(loc),
+                                  world.childTicks(relation), ValueRange{key});
+          world.touch(loc, relation, id);
+        });
+      });
+    }
+  }
+  if (relation.siblingIdsBeforeOffset) {
+    bool single = relation.sortedArchetype() >= 0;
+    for (unsigned index : relation.sortedArchetypes) {
+      const WorldArchetype &archetype = layout.archetypes[index];
+      Value rows = world.count(loc, archetype);
+      Value roots = world.toIndex(loc, at(world.rootCount(archetype), zero));
+      each(zero, rows, [&](Value row) {
+        Value id = world.entityId(loc, archetype, row);
+        Value key = world.entityKey(loc, id);
+        Value changed;
+        for (bool after : {false, true}) {
+          Value sibling;
+          if (single) {
+            // The row before or after, if it has the same parent.
+            Value next = arith::AddIOp::create(rewriter, loc, row, one);
+            Value there =
+                after ? arith::AndIOp::create(
+                            rewriter, loc,
+                            arith::CmpIOp::create(rewriter, loc,
+                                                  arith::CmpIPredicate::uge,
+                                                  row, roots),
+                            arith::CmpIOp::create(rewriter, loc,
+                                                  arith::CmpIPredicate::ult,
+                                                  next, rows))
+                            .getResult()
+                      : arith::CmpIOp::create(rewriter, loc,
+                                              arith::CmpIPredicate::ugt, row,
+                                              roots)
+                            .getResult();
+            Value other = arith::SelectOp::create(
+                rewriter, loc, there,
+                after ? next
+                      : arith::SubIOp::create(rewriter, loc, row, one)
+                            .getResult(),
+                row);
+            Value parents = world.parentRows(archetype);
+            Value same = arith::AndIOp::create(
+                rewriter, loc, there,
+                arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                      at(parents, other), at(parents, row)));
+            sibling = arith::SelectOp::create(
+                rewriter, loc, same, world.entityId(loc, archetype, other),
+                world.noEntity(loc));
+          } else {
+            sibling = at(after ? world.afterIds(archetype)
+                               : world.beforeIds(archetype),
+                         row);
+          }
+          Value had = world.siblingIds(relation, after);
+          Value other = differs(sibling, at(had, key));
+          memref::StoreOp::create(rewriter, loc, sibling, had,
+                                  ValueRange{key});
+          changed = changed ? arith::OrIOp::create(rewriter, loc, changed,
+                                                   other)
+                                  .getResult()
+                            : other;
+        }
+        when(changed, [&] {
+          memref::StoreOp::create(rewriter, loc, world.currentTick(loc),
+                                  world.siblingTicks(relation),
+                                  ValueRange{key});
+          world.touch(loc, relation, id);
+        });
+      });
     }
   }
   memref::StoreOp::create(rewriter, loc,
