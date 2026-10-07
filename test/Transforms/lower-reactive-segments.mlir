@@ -15,11 +15,16 @@ ent.archetype @A (@H, @B) capacity 32768
 // CHECK:      %[[N:.*]] = arith.index_cast %[[ROWS:.*]] : i64 to index
 // CHECK:      scf.for %[[ROW:.*]] = %c0 to %[[N]] step
 // CHECK:        %[[R:.*]] = arith.index_cast %[[ROW]] : index to i64
-// CHECK-NEXT:   %[[SCALED:.*]] = arith.muli %[[R]], %c64_i64
-// CHECK-NEXT:   %[[SEGMENT:.*]] = arith.divui %[[SCALED]], %[[ROWS]]
+// CHECK-NEXT:   %[[SEGMENT:.*]] = arith.andi %[[R]], %c63_i64
 // CHECK:        %[[BASE:.*]] = arith.muli %[[SEGMENT]], %c8_i64
 // CHECK-NEXT:   %[[AT:.*]] = arith.index_cast %[[BASE]] : i64 to index
 // CHECK:        memref.load %[[COUNTS]][%[[AT]]]
+// (Where threads share the log, a row's segment is that of its range of
+// rows: row * 64 / rows. One loop takes the row's low bits, as above,
+// which costs no division.)
+// PAR-LABEL: func.func private @hurt(
+// PAR:        %[[SCALED:.*]] = arith.muli %{{.*}}, %c64_i64
+// PAR-NEXT:   arith.divui %[[SCALED]], %{{.*}}
 ent.system @hurt(%d: f32) writes [@H] {
   ent.query (%h: !ent.ref<@H, mut>) {
     ent.set %h "hp", %d : !ent.ref<@H, mut>, f32

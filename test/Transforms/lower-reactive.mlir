@@ -36,8 +36,12 @@ ent.archetype @A (@H, @B) capacity 8
 // CHECK:          memref.store %{{.*}}, %[[IDS]][%{{.*}}]
 // CHECK-NEXT:     memref.store %[[TICK]], %[[TICKS]][%{{.*}}]
 // CHECK-NEXT:   }
-// CHECK-NEXT:   %[[LOST:.*]] = arith.andi %[[NEW]], %[[FULL]] : i1
+// CHECK-NEXT:   %[[TOLD:.*]] = memref.load %[[COUNTS]][%c3]
+// CHECK-NEXT:   %[[UNTOLD:.*]] = arith.cmpi eq, %[[TOLD]], %c0_i64
+// CHECK-NEXT:   %[[OVER:.*]] = arith.andi %[[NEW]], %[[FULL]] : i1
+// CHECK-NEXT:   %[[LOST:.*]] = arith.andi %[[OVER]], %[[UNTOLD]] : i1
 // CHECK-NEXT:   scf.if %[[LOST]] {
+// CHECK-NEXT:     memref.store %c1_i64, %[[COUNTS]][%c3]
 // CHECK-NEXT:     %[[HELD:.*]] = arith.addi %[[SLOWEST]], %c64_i64
 // CHECK-NEXT:     %[[MOST:.*]] = arith.maxsi %[[COUNT]], %[[HELD]]
 // CHECK-NEXT:     %[[PAST:.*]] = arith.addi %[[MOST]], %c1_i64
@@ -101,6 +105,7 @@ ent.system @hurt(%d: f32) writes [@H] {
 // CHECK-NEXT: memref.store %[[NOTED]], %[[POSITION]][%c0]
 // CHECK-NEXT: %[[SLOWEST:.*]] = memref.load %[[POSITION]][%c0]
 // CHECK-NEXT: memref.store %[[SLOWEST]], %[[COUNTS]][%c1]
+// CHECK-NEXT: memref.store %c0_i64, %[[COUNTS]][%c3]
 ent.system @redraw() reads [@H] writes [@B] {
   ent.query (%h: !ent.ref<@H>, %b: !ent.ref<@B, mut>) on [changed @H "hp"] {
     %x = ent.get %h "hp" : !ent.ref<@H> -> f32

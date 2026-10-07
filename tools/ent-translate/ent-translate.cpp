@@ -441,10 +441,12 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
               "      ((ent_entity *)((char *)world + {5}))[slot] = id;\n"
               "      ((int64_t *)((char *)world + {6}))[slot] =\n"
               "          *(int64_t *)((char *)world + {7}) + 1;\n"
-              "    } else {{ // overflowed: every reader scans\n"
+              "    } else if (!counts[3]) {{ // overflowed: every reader "
+              "scans\n"
               "      counts[0] = (pending > {3} ? counts[0] : counts[1] + {3}) "
               "+ 1;\n"
               "      counts[2] = counts[0];\n"
+              "      counts[3] = 1;\n"
               "    }\n  }\n",
               log->segments - 1, log->countsOffset,
               WorldLog::kSegmentStride / 8, log->segmentCapacity,
@@ -678,10 +680,12 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
             "        int64_t slot = segment * {3} + (counts[0]++ & {4});\n"
             "        ((ent_entity *)((char *)world + {5}))[slot] = source;\n"
             "        ((int64_t *)((char *)world + {6}))[slot] = now;\n"
-            "      } else {{ // overflowed: every reader scans\n"
+            "      } else if (!counts[3]) {{ // overflowed: every reader "
+            "scans\n"
             "        counts[0] = (pending > {3} ? counts[0] : counts[1] + {3}) "
             "+ 1;\n"
             "        counts[2] = counts[0];\n"
+            "        counts[3] = 1;\n"
             "      }\n",
             log->segments - 1, log->countsOffset,
             WorldLog::kSegmentStride / 8, log->segmentCapacity,

@@ -1067,7 +1067,9 @@ static Value segmentOf(IRRewriter &rewriter, Location loc, WorldAccess &world,
 /// moves the segment's count on, past what the slowest reader can hold,
 /// and notes the new count as the segment's third number: a reader whose
 /// position is before that has lost an event and scans (see openLogs),
-/// after which its position is there or beyond. With `atomic`, iterations of a
+/// after which its position is there or beyond. That is done for the
+/// first event lost since a reader last finished with the log, not for
+/// each: all who have not read on know already. With `atomic`, iterations of a
 /// parallel loop may append concurrently: the count is advanced atomically
 /// (rarely contended, since threads mostly own their segments) and never
 /// moved back.
@@ -1126,9 +1128,23 @@ static void appendToLog(IRRewriter &rewriter, Location loc, WorldAccess &world,
                           ValueRange{slot});
 
   rewriter.setInsertionPointAfter(append);
+  // (Told once is enough until a reader has read on: the segment's
+  // fourth number says that it has been, and a reader that is through
+  // with the log takes it back, see closeLogs. The events of a query that
+  // changes more than its logs hold then cost a look each.)
+  Value toldAt =
+      world.toIndex(loc, arith::AddIOp::create(rewriter, loc, base, i64(3)));
+  Value untold = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::eq,
+      memref::LoadOp::create(rewriter, loc, counts, ValueRange{toldAt}),
+      i64(0));
   auto overflow = scf::IfOp::create(
-      rewriter, loc, arith::AndIOp::create(rewriter, loc, event, full));
+      rewriter, loc,
+      arith::AndIOp::create(rewriter, loc,
+                            arith::AndIOp::create(rewriter, loc, event, full),
+                            untold));
   rewriter.setInsertionPointToStart(overflow.thenBlock());
+  memref::StoreOp::create(rewriter, loc, i64(1), counts, ValueRange{toldAt});
   Value lostAt =
       world.toIndex(loc, arith::AddIOp::create(rewriter, loc, base, i64(2)));
   Value atLeast = arith::AddIOp::create(rewriter, loc, slowest,
@@ -1266,7 +1282,10 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       store(loc, tick, stamps);
       if (log)
         appendToLog(rewriter, loc, world, *log,
-                    segmentOf(rewriter, loc, world, *log, entity, rows),
+                    // (By row range only where threads share the
+                    // log: it costs a division an event.)
+                    segmentOf(rewriter, loc, world, *log, entity,
+                              parallel ? rows : Value()),
                     world.entityId(loc, archetype, entity), tick, old, mask,
                     parallel);
     }
@@ -5157,6 +5176,14 @@ static void closeLogs(IRRewriter &rewriter, QueryOp query,
         one);
     memref::StoreOp::create(rewriter, loc, slowest, world.logCounts(log),
                             ValueRange{slowestAt});
+    // An event lost from here on is news to this reader again.
+    memref::StoreOp::create(
+        rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+        world.logCounts(log),
+        ValueRange{arith::AddIOp::create(
+                       rewriter, loc, slowestAt,
+                       arith::ConstantIndexOp::create(rewriter, loc, 2))
+                       .getResult()});
   }
 }
 

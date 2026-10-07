@@ -337,7 +337,9 @@ struct WorldLog {
   /// appended (i64), right after it the smallest position of the log's
   /// readers, and then the count as the last event left it that found the
   /// segment full for that reader and was not appended. A reader whose
-  /// position is before that has lost an event.
+  /// position is before that has lost an event. The fourth number is 1
+  /// from such an event until a reader has finished with the log: lost
+  /// events in between need not be told again.
   uint64_t countsOffset = 0;
   /// In the header: where each segment ended when its current reader
   /// started (one i64 per segment). Readers never run concurrently.
