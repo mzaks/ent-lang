@@ -2059,6 +2059,17 @@ LogicalResult Parser::parseFor() {
       SmallVector<Attribute, 4> entry{builder.getStringAttr(*kind),
                                       symbol(*component),
                                       builder.getStringAttr(field)};
+      // `changed C up R`: the event of the ancestor a binding `up R`
+      // leads to.
+      llvm::SMLoc upAt = token.loc;
+      if (consumeKeyword("up")) {
+        if (*kind != "changed")
+          return error(upAt, "only 'changed' can be 'up' a tree");
+        FailureOr<FlatSymbolRefAttr> relation = parseTree("up");
+        if (failed(relation))
+          return failure();
+        entry.push_back(*relation);
+      }
       if (consumeKeyword("log")) {
         FailureOr<int64_t> capacity = integer("a log capacity");
         if (failed(capacity))

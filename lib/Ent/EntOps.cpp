@@ -971,6 +971,12 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
         (void)parser.parseOptionalString(&field);
       SmallVector<Attribute, 4> entry{builder.getStringAttr(kind), component,
                                       builder.getStringAttr(field)};
+      if (succeeded(parser.parseOptionalKeyword("up"))) {
+        FlatSymbolRefAttr via;
+        if (parser.parseAttribute(via))
+          return failure();
+        entry.push_back(via);
+      }
       if (succeeded(parser.parseOptionalKeyword("log"))) {
         int64_t capacity;
         if (parser.parseInteger(capacity))
@@ -1008,8 +1014,12 @@ void QueryOp::print(OpAsmPrinter &p) {
       p << cast<StringAttr>(entry[0]).getValue() << " " << entry[1];
       if (!cast<StringAttr>(entry[2]).getValue().empty())
         p << " " << entry[2];
-      if (entry.size() > 3)
-        p << " log " << cast<IntegerAttr>(entry[3]).getInt();
+      for (Attribute extra : entry.getValue().drop_front(3)) {
+        if (auto capacity = dyn_cast<IntegerAttr>(extra))
+          p << " log " << capacity.getInt();
+        else
+          p << " up " << extra;
+      }
     });
     p << "]";
   }
@@ -1164,9 +1174,6 @@ LogicalResult QueryOp::verify() {
   // when all of it has run, like any query. What else changes which
   // entities there are, or the tree, has no place in it yet.
   if (getCascade()) {
-    if ((*this)->hasAttr(kTriggersAttr))
-      return emitOpError("cascades and is reactive, which is not supported "
-                         "yet");
     // Nothing of the query may see what a depth sends part way: an entity
     // of the same depth would see what those visited before it sent.
     Operation *sender = nullptr, *seer = nullptr;
@@ -1280,6 +1287,29 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       return emitOpError("component ")
              << trigger.component << " has no field '"
              << trigger.field.getValue() << "'";
+    if (trigger.via) {
+      // An ancestor's event: of the component a ref up that tree binds.
+      if (trigger.kind != Trigger::Changed)
+        return emitOpError("reacts to an ancestor gaining or losing ")
+               << trigger.component << "; only 'changed' can be 'up' a tree";
+      bool bound = llvm::any_of(getBody().getArgumentTypes(), [&](Type type) {
+        auto ref = cast<RefType>(type);
+        return ref.getVia() == trigger.via &&
+               ref.getComponent() == trigger.component;
+      });
+      if (getCascade() != trigger.via)
+        return emitOpError("reacts to changed ")
+               << trigger.component << " up " << trigger.via
+               << " without 'cascade " << trigger.via
+               << "': an ancestor is seen to change where it is visited "
+               << "first";
+      if (!bound)
+        return emitOpError("reacts to changed ")
+               << trigger.component << " up " << trigger.via
+               << ", but binds no '!ent.ref<" << trigger.component << ", up "
+               << trigger.via << ">': the ancestor is the one such a ref "
+               << "leads to";
+    }
     if (trigger.logCapacity && *trigger.logCapacity < 0)
       return emitOpError("gives the event log of ")
              << trigger.component << " a negative capacity";
@@ -1288,7 +1318,7 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
              << trigger.component << " but system @" << system.getSymName()
              << " does not declare it in 'reads' or 'writes'";
     // An entity that lost the component cannot match a query binding it.
-    if (trigger.kind == Trigger::Removed &&
+    if (trigger.kind == Trigger::Removed && !trigger.via &&
         llvm::is_contained(getRequired(), trigger.component))
       return emitOpError("reacts to removed ")
              << trigger.component

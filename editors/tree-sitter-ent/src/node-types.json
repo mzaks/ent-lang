@@ -2940,7 +2940,22 @@
   {
     "type": "trigger",
     "named": true,
-    "fields": {},
+    "fields": {
+      "via": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      }
+    },
     "children": {
       "multiple": true,
       "required": true,

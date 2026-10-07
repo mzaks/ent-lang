@@ -1,0 +1,56 @@
+// A scene graph kept up to date by a reactive `for` that cascades: a node
+// is placed again where its own Local changed or the World above it did,
+// which the same `for` may just have done.
+import console
+
+component World { name: text[8], x: i32, placed: i32 }
+component Local { x: i32 }
+default_capacity 16
+relation Under from Local to World tree capacity 16
+unique Frame: i32
+unique Placed: i32
+
+world {
+  let root = spawn { World { name: "root", x: 1, placed: 0 } }
+  let a = spawn { World { name: "a", x: 0, placed: 0 }, Local { x: 10 } }
+  let b = spawn { World { name: "b", x: 0, placed: 0 }, Local { x: 20 } }
+  let a1 = spawn { World { name: "a1", x: 0, placed: 0 }, Local { x: 100 } }
+  let a2 = spawn { World { name: "a2", x: 0, placed: 0 }, Local { x: 200 } }
+  let b1 = spawn { World { name: "b1", x: 0, placed: 0 }, Local { x: 300 } }
+  let a11 = spawn { World { name: "a11", x: 0, placed: 0 }, Local { x: 1000 } }
+  connect(a11, a1, Under)
+  connect(a, root, Under)
+  connect(b, root, Under)
+  connect(a1, a, Under)
+  connect(a2, a, Under)
+  connect(b1, b, Under)
+}
+
+// Frame 1: everything is new. 2: nothing happens. 3: a moves. 4: the leaf
+// b1. 5: the root, which has no Local and is not placed. 6: nothing.
+system move() {
+  Frame += 1
+  Placed = 0
+  for l: mut Local where Frame == 3 && l.x == 10 { l.x += 1 }
+  for l: mut Local where Frame == 4 && l.x == 300 { l.x += 1 }
+  for w: mut World without Local where Frame == 5 { w.x += 1 }
+}
+
+system place() {
+  for w: mut World, l: Local, p: World up Under
+      cascade Under
+      on changed Local, changed World.x up Under {
+    w.x = p.x + l.x
+    w.placed += 1
+    Placed += 1
+  }
+}
+
+system show() {
+  for w: World { put("{Frame}: {w.name} {w.x} placed {w.placed}") }
+  put("{Frame}: {Placed} placed")
+  flush()
+}
+
+schedule frame() { move()  place()  show() }
+main { loop { frame() } until Frame == 6 }

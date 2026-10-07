@@ -197,14 +197,21 @@ SmallVector<Trigger> mlir::ent::getTriggers(QueryOp query) {
   for (Attribute attr : list) {
     auto entry = cast<ArrayAttr>(attr);
     StringRef kind = cast<StringAttr>(entry[0]).getValue();
+    // After the field: a tree (`up @R`) and a log capacity, either or
+    // both.
     std::optional<int64_t> logCapacity;
-    if (entry.size() > 3)
-      logCapacity = cast<IntegerAttr>(entry[3]).getInt();
+    FlatSymbolRefAttr via;
+    for (Attribute extra : entry.getValue().drop_front(3)) {
+      if (auto capacity = dyn_cast<IntegerAttr>(extra))
+        logCapacity = capacity.getInt();
+      else
+        via = cast<FlatSymbolRefAttr>(extra);
+    }
     triggers.push_back({kind == "added"     ? Trigger::Added
                         : kind == "removed" ? Trigger::Removed
                                             : Trigger::Changed,
                         cast<FlatSymbolRefAttr>(entry[1]),
-                        cast<StringAttr>(entry[2]), logCapacity});
+                        cast<StringAttr>(entry[2]), logCapacity, via});
   }
   return triggers;
 }
@@ -233,6 +240,13 @@ StampPlan StampPlan::compute(ModuleOp module) {
       if (it == plan.stamps.end()) {
         plan.stamps.push_back(stamp);
         observers.emplace_back();
+      }
+      // An ancestor's event is looked for wherever the component is.
+      if (trigger.via) {
+        for (ArchetypeOp archetype : module.getOps<ArchetypeOp>())
+          if (archetype.contains(trigger.component))
+            observers[index].push_back(archetype);
+        continue;
       }
       for (ArchetypeOp archetype : getMatchedArchetypes(query))
         observers[index].push_back(archetype);

@@ -2447,3 +2447,55 @@ rounds, 1e6 bushy: 144.8 (3%) against 396.0 (29%).
   have more to gain: the river's step is two streams through memory.
 - A query that only reads its parent (parents first, nothing combined),
   whose depths run over their rows directly.
+
+## 2026-10-07: a reactive `for` that cascades (scene graph)
+
+`bench/scene/run.py`: every node's place is its parent's plus its own
+offset (`w.x = above.x + l.x`, i32). `full` places every node every step
+with a cascading `for`; `reactive` is the same `for` with `on changed
+Local, changed World up Under`, which runs its body for the nodes the
+host moved in the step and for what is below them. `-sorted`: the tree
+`sorted`. Native build, one core (`taskset -c 2`), 5 processes of 100
+steps each; `reached` is the nodes below the moved ones, themselves
+included, summed over the moves of a step (a node below two of them
+counts twice). All variants agree on a checksum of every node's place.
+
+us per step, median (spread):
+
+| nodes | shape | moves | reached | full | reactive | full-sorted | reactive-sorted |
+|---|---|---|---|---|---|---|---|
+| 1e5 | bushy | 0 | 0 | 38.0 (20%) | 38.3 (38%) | 23.0 (15%) | 24.0 (24%) |
+| 1e5 | bushy | 1 | 6 | 37.7 (31%) | 38.8 (19%) | 23.1 (3%) | 26.3 (56%) |
+| 1e5 | bushy | 100 | 1,096 | 37.9 (8%) | 51.7 (16%) | 22.7 (13%) | 32.0 (9%) |
+| 1e5 | deep | 0 | 0 | 43.0 (29%) | 31.3 (7%) | 37.0 (1%) | 23.9 (28%) |
+| 1e5 | deep | 1 | 11,146 | 43.3 (2%) | 42.6 (5%) | 37.1 (2%) | 37.2 (2%) |
+| 1e5 | deep | 100 | 1,089,217 | 43.1 (2%) | 124.4 (2%) | 37.3 (2%) | 121.9 (2%) |
+| 1e6 | bushy | 0 | 0 | 628.5 (12%) | 1,337.7 (33%) | 235.6 (5%) | 394.1 (25%) |
+| 1e6 | bushy | 1 | 5 | 638.2 (5%) | 1,374.4 (23%) | 231.0 (20%) | 418.4 (7%) |
+| 1e6 | bushy | 100 | 894 | 633.7 (16%) | 1,474.9 (12%) | 236.9 (6%) | 453.6 (13%) |
+| 1e6 | deep | 0 | 0 | 453.7 (7%) | 541.1 (7%) | 373.1 (2%) | 376.1 (27%) |
+| 1e6 | deep | 1 | 96,024 | 444.3 (5%) | 615.2 (4%) | 372.0 (1%) | 474.3 (4%) |
+| 1e6 | deep | 100 | 10,575,314 | 446.7 (5%) | 1,290.7 (4%) | 374.6 (2%) | 1,264.8 (2%) |
+
+### What holds
+
+- For a body this small the reactive `for` is no gain, and at 1e6 nodes
+  a loss: 1.6-2.1x the time of placing everything in a bushy tree when
+  nothing or next to nothing moved, 1.0-1.2x in a deep one. It goes
+  through the whole tree as the full one does, and reads the node's and
+  its parent's ticks where the full one reads two ints and writes one.
+- Where most of the tree is placed anyway (deep, 100 moves) it takes
+  2.9-3.4x: the body's work and the ticks' on top.
+- What it does give is that the body runs for 6 nodes instead of a
+  million, which this benchmark's time does not show: a body that costs
+  more than a memory read, or one that draws, sends or spawns.
+
+### Not measured
+
+- A body with real work, where the reactive form should win.
+- Going only where something happened (from the changed nodes down
+  their children's links) instead of through the whole tree: not built.
+  It is what would make the time follow `reached`.
+- Why the unsorted bushy tree takes twice as long reactive (1.3 ms
+  against 0.63) when the sorted one takes 1.7x: presumably the parent's
+  tick, read at a random place; not looked into.

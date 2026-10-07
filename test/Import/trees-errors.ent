@@ -94,8 +94,41 @@ component Body { x: f32 }
 relation Orbits from Body to Body tree capacity 8
 default_capacity 8
 system s() {
-  // expected-error @+1 {{cascades and is reactive, which is not supported yet}}
-  for e, b: Body cascade Orbits on changed Body.x {
+  // expected-error @+1 {{reacts to changed @Body up @Orbits, but binds no '!ent.ref<@Body, up @Orbits>'}}
+  for e, b: Body cascade Orbits on changed Body up Orbits {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{reacts to changed @Body up @Orbits without 'cascade @Orbits'}}
+  for b: Body, p: Body up Orbits on changed Body up Orbits {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{only 'changed' can be 'up' a tree}}
+  for b: Body, p: Body up Orbits cascade Orbits on added Body up Orbits {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation Near from Body to Body capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{}}
+  for b: Body on changed Body up Near {
   }
 }
 

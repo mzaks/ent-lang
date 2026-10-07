@@ -1422,6 +1422,27 @@ static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
                              FlatSymbolRefAttr component, Value id,
                              Value parent = Value());
 namespace {
+/// Bounds that ids are checked against, loaded ahead by a caller that
+/// knows they cannot change (see emitLocate).
+struct LocateBounds {
+  /// Entity counts by archetype index (Rows ids).
+  SmallVector<Value> counts;
+  /// Slots in use, as an index (slot ids).
+  Value slotsInUse;
+};
+} // namespace
+static SmallVector<Value>
+emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
+           WorldAccess &world, Value id,
+           function_ref<bool(const WorldArchetype &)> candidate,
+           FlatSymbolRefAttr presenceOf, TypeRange results,
+           function_ref<SmallVector<Value>(const WorldArchetype &archetype,
+                                           Value row, Value present)>
+               found,
+           function_ref<SmallVector<Value>()> missing,
+           const LocateBounds &bounds = {}, bool trusted = false,
+           Value location = Value());
+namespace {
 /// The visited entity's parent in a tree, where the caller has it at hand:
 /// its id (in its stored form), its row in an archetype, or its packed
 /// location.
@@ -1493,20 +1514,25 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   ArchetypeOp archetypeOp = archetype.op;
   Value mask;
   // A reactive query applies only to the entities with an event since it
-  // last started (`seen`): a stamp newer than that, for any trigger.
+  // last started (`seen`): a stamp newer than that, for any trigger. (A
+  // trigger on an ancestor's event joins below, once the ancestor is
+  // found.)
+  Value fired;
+  auto fires = [&](Value newer) {
+    fired = fired ? arith::OrIOp::create(rewriter, loc, fired, newer)
+                        .getResult()
+                  : newer;
+  };
   if (seen) {
     for (const Trigger &trigger : getTriggers(query)) {
       const WorldColumn *column = archetype.findStamp(getStamp(trigger));
-      if (!column)
+      if (!column || trigger.via)
         continue;
       Value stamped = memref::LoadOp::create(
           rewriter, loc, world.stamps(archetype, *column), ValueRange{entity});
-      Value newer = arith::CmpIOp::create(
-          rewriter, loc, arith::CmpIPredicate::sgt, stamped, seen);
-      mask = mask ? arith::OrIOp::create(rewriter, loc, mask, newer) : newer;
+      fires(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
+                                  stamped, seen));
     }
-    assert(mask && "a reactive query is lowered for an archetype where no "
-                   "trigger can fire");
   }
   // Whether the entity has a component it holds optionally, read once.
   llvm::DenseMap<Attribute, Value> presence;
@@ -1605,7 +1631,84 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     if (ancestor.found)
       require(ancestor.found);
     ancestors.push_back({arg, ancestor});
+    // The ancestor's events, for a trigger `up` this tree: its stamp, read
+    // where it is (0 where the entity has no such ancestor). An ancestor
+    // this query has already visited has what it did there in its stamp.
+    if (seen)
+      for (const Trigger &trigger : getTriggers(query)) {
+        if (trigger.via != refType.getVia() ||
+            trigger.component != refType.getComponent())
+          continue;
+        Stamp stamp = getStamp(trigger);
+        Type i64 = rewriter.getI64Type();
+        auto stampAt = [&](const WorldArchetype &home, Value row) -> Value {
+          const WorldColumn *column = home.findStamp(stamp);
+          assert(column && "an archetype holding the component of a trigger "
+                           "up a tree stores its stamp");
+          return memref::LoadOp::create(rewriter, loc,
+                                        world.stamps(home, *column),
+                                        ValueRange{row});
+        };
+        auto read = [&]() -> Value {
+          if (ancestor.row)
+            return emitAtHome(rewriter, loc, layout, ancestor, TypeRange{i64},
+                              [&](const WorldArchetype &home)
+                                  -> SmallVector<Value> {
+                                return {stampAt(home, ancestor.row)};
+                              })[0];
+          FlatSymbolRefAttr component = refType.getComponent();
+          return emitLocate(
+              rewriter, loc, layout, world, ancestor.id,
+              [&](const WorldArchetype &home) {
+                return ArchetypeOp(home.op).contains(component);
+              },
+              component, TypeRange{i64},
+              [&](const WorldArchetype &home, Value row,
+                  Value) -> SmallVector<Value> {
+                return {stampAt(home, row)};
+              },
+              [&]() -> SmallVector<Value> {
+                return {arith::ConstantIntOp::create(rewriter, loc, 0, 64)};
+              },
+              LocateBounds(), ancestor.trusted)[0];
+        };
+        Value stamped;
+        if (ancestor.found) {
+          auto ifFound = scf::IfOp::create(rewriter, loc, TypeRange{i64},
+                                           ancestor.found,
+                                           /*withElseRegion=*/true);
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPointToStart(ifFound.thenBlock());
+          scf::YieldOp::create(rewriter, loc, ValueRange{read()});
+          rewriter.setInsertionPointToStart(ifFound.elseBlock());
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)});
+          stamped = ifFound.getResult(0);
+        } else {
+          stamped = read();
+        }
+        // What this query did to an ancestor the last time it ran, it
+        // has passed down then: those events carry the tick after the one
+        // it started at and no others do (see lowerCascade), so an
+        // ancestor's event counts from the tick after that. (A query that
+        // has not run has passed nothing down.)
+        Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+        Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
+        Value passed = arith::SelectOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                  seen, zero),
+            zero, arith::AddIOp::create(rewriter, loc, seen, one));
+        fires(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
+                                    stamped, passed));
+      }
   }
+  // Reactive: only where a trigger fired (nowhere, if none can here).
+  if (seen)
+    require(fired ? fired
+                  : arith::ConstantIntOp::create(rewriter, loc, 0, 1)
+                        .getResult());
 
   OpBuilder::InsertionGuard guard(rewriter);
   // Without an ancestor there is nothing to read: such a body never runs
@@ -2087,17 +2190,6 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
   }
 }
 
-/// Bounds that ids are checked against, loaded ahead by a caller that
-/// knows they cannot change (see emitLocate).
-namespace {
-struct LocateBounds {
-  /// Entity counts by archetype index (Rows ids).
-  SmallVector<Value> counts;
-  /// Slots in use, as an index (slot ids).
-  Value slotsInUse;
-};
-} // namespace
-
 /// The number of entity slots ever used, as an index: a slot id at or above
 /// it was never handed out.
 static Value loadSlotsInUse(IRRewriter &rewriter, Location loc,
@@ -2141,8 +2233,7 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
                                            Value row, Value present)>
                found,
            function_ref<SmallVector<Value>()> missing,
-           const LocateBounds &bounds = {}, bool trusted = false,
-           Value location = Value()) {
+           const LocateBounds &bounds, bool trusted, Value location) {
   const EntityScheme &scheme = layout.entities;
   // (`location`: the trusted entity's packed location, where the caller
   // has it and the entity table need not be asked.)
@@ -4837,9 +4928,13 @@ static void lowerConnects(IRRewriter &rewriter, func::FuncOp func,
 /// combine applies or apply pending structural changes rely on row order.
 static std::optional<std::string> whyScans(QueryOp query,
                                            const WorldLayout &layout) {
-  for (const Trigger &trigger : getTriggers(query))
+  for (const Trigger &trigger : getTriggers(query)) {
+    if (trigger.via)
+      return std::string("it reacts to events of an ancestor, which is "
+                         "found from each entity");
     if (!layout.findLog(getStamp(trigger)))
       return "the event log of a trigger has capacity 0";
+  }
   bool applies = false, spawns = false;
   query.getBody().walk([&](Operation *op) {
     applies |= isa<ApplyOp, AccumulateOp, ConnectOp>(op);
@@ -5083,6 +5178,21 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   FlatSymbolRefAttr cascade = query.getCascade();
   const WorldRelation &relation = layout.getRelation(cascade.getAttr());
   rewriter.setInsertionPoint(query);
+  // A reactive query takes the tick it last started at and advances the
+  // counter, as any does. It goes through its tree as ever, and its body
+  // applies where a trigger fired: no event log is walked, since the
+  // order is the tree's.
+  SmallVector<Trigger> triggers = getTriggers(query);
+  Value seen;
+  if (!triggers.empty()) {
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value last = world.lastTick(query);
+    seen = memref::LoadOp::create(rewriter, loc, last, ValueRange{zero});
+    Value next = world.currentTick(loc);
+    memref::StoreOp::create(rewriter, loc, next, last, ValueRange{zero});
+    memref::StoreOp::create(rewriter, loc, next, world.tickCounter(),
+                            ValueRange{zero});
+  }
   Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
   bool matched = false;
   // Despawns take effect when the whole query has run. Its rows are not
@@ -5190,7 +5300,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           rewriter, loc, archetype, world, sequential, /*entityLocal=*/false,
           [&](Value entity, Value rows, bool) {
             emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                          layout, entity, rows, tick, Value(),
+                          layout, entity, rows, tick, seen,
                           /*parallel=*/false, /*directApplies=*/true, KnownParent(),
                         marks);
           },
@@ -5212,7 +5322,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                   arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
           rewriter.setInsertionPointToStart(ifRoot.thenBlock());
           emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                        layout, entity, rows, tick, Value(),
+                        layout, entity, rows, tick, seen,
                         /*parallel=*/false, /*directApplies=*/true, KnownParent(),
                         marks);
         },
@@ -5245,7 +5355,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       auto body = [&](Value row, Value parentRow, bool parallel) {
         KnownParent parent{&relation, Value(), sorted, parentRow};
         emitQueryBody(rewriter, query, IRMapping(), *sorted, world, layout,
-                      row, rows, tick, Value(), parallel,
+                      row, rows, tick, seen, parallel,
                       /*directApplies=*/true, parent, marks);
       };
       // The rows from `from` to `to`, up, or down for children first.
@@ -5280,6 +5390,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       query.getBody().walk([&](CombineOp) { combines = true; });
       bool mayRunInParallel =
           options.parallelEntities && isDepthLocal(query) && !marks &&
+          triggers.empty() &&
           connects.empty() && !(combines && world.hasStamps()) &&
           sorted->capacity >= options.parallelMinEntities;
       if (!mayRunInParallel) {
@@ -5439,7 +5550,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         parent.location = memref::LoadOp::create(
             rewriter, loc, world.parentLocations(*archetype), ValueRange{row});
         emitQueryBody(rewriter, query, IRMapping(), *archetype, world, layout,
-                      row, world.count(loc, *archetype), tick, Value(),
+                      row, world.count(loc, *archetype), tick, seen,
                       /*parallel=*/false, /*directApplies=*/true, parent, marks);
       }
     }
@@ -5515,7 +5626,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
             Value) -> SmallVector<Value> {
           OpBuilder::InsertionGuard inner(rewriter);
           emitQueryBody(rewriter, query, IRMapping(), archetype, world, layout,
-                        row, world.count(loc, archetype), tick, Value(),
+                        row, world.count(loc, archetype), tick, seen,
                         /*parallel=*/false, /*directApplies=*/true, parent, marks);
           return {};
         },
@@ -5586,6 +5697,17 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     for (const WorldArchetype &archetype : layout.archetypes)
       if (Value rows = startCounts.lookup(&archetype))
         appendConnected(rewriter, connect, layout, archetype, world, rows);
+  // A query that reacts to its ancestors' events has passed down the ones
+  // it caused itself. The counter moves on, so that these are the only
+  // events of their tick and the next time can tell them from what came
+  // after.
+  if (llvm::any_of(triggers, [](const Trigger &trigger) {
+        return static_cast<bool>(trigger.via);
+      })) {
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    memref::StoreOp::create(rewriter, loc, world.currentTick(loc),
+                            world.tickCounter(), ValueRange{zero});
+  }
   commitStructure(rewriter, loc, layout, world, changed, changedRelations,
                   tick);
   rewriter.eraseOp(query);
@@ -5740,7 +5862,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     // No trigger can fire for the entities of this archetype.
     if (!triggers.empty() &&
         llvm::none_of(triggers, [&](const Trigger &trigger) {
-          return archetype.findStamp(getStamp(trigger));
+          return trigger.via || archetype.findStamp(getStamp(trigger));
         }))
       continue;
     rewriter.setInsertionPoint(anchor);
@@ -6496,11 +6618,14 @@ static void warnAboutReactiveQueries(ModuleOp module) {
               << ", but no system writes it; this trigger fires only for "
                  "entities spawned with it or gaining it";
       }
+      // (An ancestor's event that the query causes where it visits the
+      // ancestor is what a trigger up a tree is for.)
       Operation *own = nullptr;
-      query.getBody().walk([&](Operation *op) {
-        if (!own && causes(op, trigger))
-          own = op;
-      });
+      if (!trigger.via)
+        query.getBody().walk([&](Operation *op) {
+          if (!own && causes(op, trigger))
+            own = op;
+        });
       if (own) {
         InFlightDiagnostic diag =
             query.emitWarning("reacts to ")

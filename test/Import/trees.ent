@@ -66,6 +66,17 @@ system highest() {
   }
 }
 
+// Reactive: where the entity's own events fired, or the ancestor's.
+// CHECK-LABEL: ent.system @settle() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Body, mut>, %{{.*}}: !ent.ref<@Orbit>, %{{.*}}: !ent.ref<@Body, up @Orbits>) cascade @Orbits on [changed @Orbit, changed @Body "x" up @Orbits] {
+system settle() {
+  for b: mut Body, o: Orbit, center: Body up Orbits
+      cascade Orbits
+      on changed Orbit, changed Body.x up Orbits {
+    b.x = center.x + o.distance
+  }
+}
+
 // A tree whose entities are stored in its order.
 // CHECK: ent.relation @Under () from @Leaf to @Leaf tree sorted capacity 8
 component Leaf { v: f32 }

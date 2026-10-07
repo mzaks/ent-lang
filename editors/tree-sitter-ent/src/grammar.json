@@ -2148,6 +2148,31 @@
               "members": [
                 {
                   "type": "STRING",
+                  "value": "up"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "via",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_name"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
                   "value": "log"
                 },
                 {

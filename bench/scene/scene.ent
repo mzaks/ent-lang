@@ -1,0 +1,31 @@
+// A scene graph for bench/scene/run.py: every node's place is its
+// parent's plus its own offset. A library for a C host (scene.c), which
+// makes the nodes, connects them, says which to move and runs `step`.
+
+component Local { x: i32 } capacity 1024
+component World { x: i32 } capacity 1024
+archetype Node { Local, World } capacity 1024
+// From a node to the one it hangs under; the first node hangs under none.
+relation Under from Local to World tree capacity 1024
+
+// The nodes to move in a step, which the host names.
+component Pick { node: entity, by: i32 }
+archetype Picks { Pick } capacity 1024
+
+system move() {
+  for p: Pick {
+    Local(p.node).x += p.by
+  }
+}
+
+// Every node, every step.
+system place() {
+  for w: mut World, l: Local, above: World up Under cascade Under {
+    w.x = above.x + l.x
+  }
+}
+
+schedule step() {
+  move()
+  place()
+}

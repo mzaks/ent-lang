@@ -173,7 +173,8 @@ for with Enemy { Count += 1 }     // nor the entity
   `cascade Relation leaves first` visits children before their parents.
   See Trees below.
 - `where cond` runs the body only where `cond` holds.
-- `on changed C.f, changed C, added C, removed C` makes the query reactive;
+- `on changed C.f, changed C, added C, removed C` makes the query reactive
+  (`changed C up Relation`, in a `for` that cascades: see Trees below);
   `log N` after a trigger sets its event log's capacity (`log 0`: none).
 
 Inside a `for` that names its entity, another `for` visits the entity's
@@ -349,8 +350,40 @@ for e, n: Node, parent: Node up Under cascade Under where parent.total > 100 {
   visit it. A tree can be grown, pruned and rearranged from a `for` that
   walks it, and is walked as it was.
 
-Not yet: a cascading `for` has no `on`. Combining into an ancestor needs
-the `for` to cascade along that tree.
+A cascading `for` may be reactive, and then react to what happened to
+the ancestor it binds as well:
+
+```
+system place() {
+  for w: mut World, l: Local, above: World up Under
+      cascade Under
+      on changed Local, changed World.x up Under {
+    w.x = above.x + l.x
+  }
+}
+```
+
+`changed World.x up Under` is the event of the entity `above` is taken
+from: the body runs for a node whose own `Local` changed since the `for`
+last ran, or whose ancestor's `World.x` did, which includes what this
+`for` wrote when it visited the ancestor a moment before. So moving one
+node places it and everything below it again in the same pass, and no
+other node's body runs. What the `for` wrote into ancestors it has
+thereby passed down: the next time it runs that is no event.
+
+- Only `changed` can be `up` a tree; the `for` must bind that component
+  `up` that tree and cascade along it.
+- Giving a node another parent is no event: such a `for` does not run
+  for it until its own component or its new ancestor's changes.
+- The `for` still goes through the whole tree to find where to run, and
+  compares a tick or two per node. It saves the body, not the walk: with
+  a body as small as the one above it takes longer than placing every
+  node every time (`bench/RESULTS.md`, the scene graph). It is for bodies
+  that cost more or that act (a `proc`, a `spawn`, a `destroy`).
+- It runs on one core.
+
+Not yet: combining into an ancestor needs the `for` to cascade along
+that tree.
 
 A cascading `for` visits one entity after another, with one exception:
 over a `sorted` tree in one archetype, built with parallel loops

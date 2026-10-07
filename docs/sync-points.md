@@ -196,6 +196,16 @@ has reached its commit point; since reactive queries never run concurrently
 with the systems causing their events (the scheduler orders them through the
 tick counter), this is the same as "before the reactive query starts".
 
+**R3.** A trigger `up` a tree (`changed @C up @R`, in a query that cascades
+along `@R`) is the event of the ancestor that a ref `up @R` leads to, and
+its window is another: it is open while the query runs, so what the query
+changes in an entity is an event for the entities below it, which Q9 has it
+visit afterwards. In return the query's own changes are not events of this
+kind on its next run: every entity below a changed one has been visited. (To
+tell them from what happens afterwards, such a query advances the tick
+counter when it ends as well as when it starts.) Its other triggers follow
+R1. Connecting an entity to another parent is no event.
+
 ## Execution freedom
 
 The compiler may execute a schedule differently from its program order only

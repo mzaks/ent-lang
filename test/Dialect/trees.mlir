@@ -57,6 +57,18 @@ ent.system @gather() {
   }
 }
 
+// Reactive: where the entity's own events fired, or the ancestor's.
+// CHECK-LABEL: ent.system @place() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Node, mut>, %{{.*}}: !ent.ref<@Node, up @Under>, %{{.*}}: !ent.ref<@Mark, up @Under>) cascade @Under on [changed @Node "local", changed @Node "total" up @Under, changed @Mark up @Under log 4] {
+ent.system @place() {
+  ent.query (%n: !ent.ref<@Node, mut>, %p: !ent.ref<@Node, up @Under>,
+             %m: !ent.ref<@Mark, up @Under>)
+      cascade @Under
+      on [changed @Node "local", changed @Node "total" up @Under,
+          changed @Mark up @Under log 4] {
+  }
+}
+
 // A tree whose entities are stored in its order.
 // CHECK: ent.relation @In (w: f32) from @Cell to @Cell tree sorted capacity 8
 ent.component @Cell (v: f32)

@@ -1,0 +1,50 @@
+// A reactive `for` that cascades (Inputs/tree_reactive.ent): a node is
+// placed where its own Local changed or the World above it did, which the
+// same `for` may just have done, so a change goes down the tree in the
+// pass that sees it and nothing else is visited. Sorted, the tree gives
+// the same lines in another order of rows.
+// RUN: %ent run %S/Inputs/tree_reactive.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tree_reactive.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/ tree capacity 16/ tree sorted capacity 16/' \
+// RUN:     %S/Inputs/tree_reactive.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted" %t.sorted.ent
+// RUN: %ent run %t.sorted.ent 2>/dev/null | sort > %t.sorted.out
+// RUN: sort %t.out | cmp - %t.sorted.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// root <- a <- a1 <- a11, a <- a2, root <- b <- b1.
+// CHECK:      1: root 1 placed 0
+// CHECK-NEXT: 1: a 11 placed 1
+// CHECK-NEXT: 1: b 21 placed 1
+// CHECK-NEXT: 1: a1 111 placed 1
+// CHECK-NEXT: 1: a2 211 placed 1
+// CHECK-NEXT: 1: b1 321 placed 1
+// CHECK-NEXT: 1: a11 1111 placed 1
+// CHECK-NEXT: 1: 6 placed
+// What the pass wrote the frame before is no news to it.
+// CHECK:      2: a11 1111 placed 1
+// CHECK-NEXT: 2: 0 placed
+// a moves: a, and a1, a2 and a11 below it.
+// CHECK-NEXT: 3: root 1 placed 0
+// CHECK-NEXT: 3: a 12 placed 2
+// CHECK-NEXT: 3: b 21 placed 1
+// CHECK-NEXT: 3: a1 112 placed 2
+// CHECK-NEXT: 3: a2 212 placed 2
+// CHECK-NEXT: 3: b1 321 placed 1
+// CHECK-NEXT: 3: a11 1112 placed 2
+// CHECK-NEXT: 3: 4 placed
+// A leaf: itself alone.
+// CHECK:      4: b1 322 placed 2
+// CHECK-NEXT: 4: a11 1112 placed 2
+// CHECK-NEXT: 4: 1 placed
+// The root, changed by another system: everything below it.
+// CHECK-NEXT: 5: root 2 placed 0
+// CHECK-NEXT: 5: a 13 placed 3
+// CHECK-NEXT: 5: b 22 placed 2
+// CHECK-NEXT: 5: a1 113 placed 3
+// CHECK-NEXT: 5: a2 213 placed 3
+// CHECK-NEXT: 5: b1 323 placed 3
+// CHECK-NEXT: 5: a11 1113 placed 3
+// CHECK-NEXT: 5: 6 placed
+// CHECK:      6: 0 placed
+// CHECK-NOT:  {{.}}

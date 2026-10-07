@@ -162,8 +162,30 @@ ent.component @N (v: f32)
 ent.relation @R () tree capacity 4
 ent.archetype @A (@N) capacity 4
 ent.system @s() {
-  // expected-error @+1 {{cascades and is reactive, which is not supported yet}}
-  ent.query (%n: !ent.ref<@N>) cascade @R on [changed @N "v"] {
+  // expected-error @+1 {{reacts to changed @N up @R, but binds no '!ent.ref<@N, up @R>'}}
+  ent.query (%n: !ent.ref<@N>) cascade @R on [changed @N "v" up @R] {
+  }
+}
+
+// -----
+
+ent.component @N (v: f32)
+ent.relation @R () tree capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  // expected-error @+1 {{reacts to changed @N up @R without 'cascade @R'}}
+  ent.query (%n: !ent.ref<@N>, %p: !ent.ref<@N, up @R>) on [changed @N up @R] {
+  }
+}
+
+// -----
+
+ent.component @N (v: f32)
+ent.relation @R () tree capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  // expected-error @+1 {{reacts to an ancestor gaining or losing @N; only 'changed' can be 'up' a tree}}
+  ent.query (%n: !ent.ref<@N>, %p: !ent.ref<@N, up @R>) cascade @R on [added @N up @R] {
   }
 }
 

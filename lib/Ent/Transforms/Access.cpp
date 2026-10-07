@@ -441,13 +441,17 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       SmallVector<Trigger> triggers = getTriggers(query);
       if (!triggers.empty())
         access.writes.insert(ticks);
-      for (const Trigger &trigger : triggers)
-        for (ArchetypeOp archetype : matchedArchetypes(query))
+      for (const Trigger &trigger : triggers) {
+        // (An ancestor's stamp is wherever its component is.)
+        ArrayRef<ArchetypeOp> observed =
+            trigger.via ? archetypes : matchedArchetypes(query);
+        for (ArchetypeOp archetype : observed)
           if (stamps.stores(archetype, getStamp(trigger)))
             access.reads.insert({archetype.getSymNameAttr(),
                                  trigger.component.getAttr(),
                                  getStampColumnField(context,
                                                      getStamp(trigger))});
+      }
       // Where the query's bindings and filters are optional, it tests
       // their presence per entity, so it reads the presence.
       for (ArchetypeOp archetype : matchedArchetypes(query))

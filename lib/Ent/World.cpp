@@ -348,7 +348,13 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     for (const Trigger &trigger : triggers) {
       WorldLog &log =
           layout.logs[llvm::find(stamps, getStamp(trigger)) - stamps.begin()];
-      if (!log.exists()) {
+      // (A cascading query goes through its tree and reads no log, nor
+      // does one that reacts to an ancestor's events.)
+      bool scans = query.getCascade() ||
+                   llvm::any_of(triggers, [](const Trigger &other) {
+                     return static_cast<bool>(other.via);
+                   });
+      if (!log.exists() || scans) {
         positions.push_back(0);
         continue;
       }

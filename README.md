@@ -384,7 +384,13 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   `ent.connect` and `ent.disconnect` take effect when the whole query has
   run, as in any query (the rows of entities that go or move are marked as
   they are visited and listed in order at the end), and `ent.spawn` at
-  once, its entity not visited. A cascading query is not reactive so far.
+  once, its entity not visited. A cascading query may be reactive, and
+  then also react to the events of the ancestor a ref leads to
+  (`on [changed @Local, changed @World "x" up @Under]`): an ancestor's
+  stamp is read where the ancestor is, so what the query wrote there a
+  depth before counts, and a change goes down the tree in one pass. Such
+  a query goes through its whole tree and runs its body where a trigger
+  fired; it reads no event log.
   It runs on one core unless its tree is sorted in one archetype (see
   Fusion and entity parallelism).
   A tree may be `sorted` (`... from @Node to @Node tree sorted capacity
@@ -884,7 +890,9 @@ OMP_PROC_BIND=close` for the parallel variants): unpinned, spreads reached
 `bench/river/run.py` runs the river network (`examples/river.ent`, a sum
 down a tree from its leaves) against hand-written C, per size and shape of
 the tree; `bench/river/edges.py` runs edge loops over the same tree, kept
-as a tree and as a table of edges.
+as a tree and as a table of edges. `bench/scene/run.py` runs a scene
+graph placed by a cascading `for` every step against the same `for` made
+reactive.
 
 `bench/snn/run.py` runs the spiking network (`examples/snn.ent` pushing,
 `examples/snn_pull.ent` gathering, sequential and parallel) against

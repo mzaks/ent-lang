@@ -118,6 +118,10 @@ struct Trigger {
   /// The capacity the program asks for the trigger's event log (`log N`;
   /// 0 for none), if it asks.
   std::optional<int64_t> logCapacity;
+  /// For `changed @C up @R`: the event is not the visited entity's but
+  /// that of its ancestor along this tree, the one the query's ref
+  /// `!ent.ref<@C, up @R>` leads to.
+  FlatSymbolRefAttr via = {};
 };
 
 /// The triggers of `query`, in order; empty if it is not reactive.

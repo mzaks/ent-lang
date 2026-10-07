@@ -185,7 +185,9 @@ module.exports = grammar({
     on: ($) => seq('on', list($.trigger)),
     trigger: ($) =>
       seq(choice('changed', 'added', 'removed'), $._name,
-          optional(seq('.', $.identifier)), optional(seq('log', $.integer))),
+          optional(seq('.', $.identifier)),
+          optional(seq('up', field('via', $._name))),
+          optional(seq('log', $.integer))),
 
     edges_for: ($) =>
       seq('for', optional('mut'), field('edge', $.identifier), ',',

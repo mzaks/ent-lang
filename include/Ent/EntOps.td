@@ -454,7 +454,16 @@ def Ent_QueryOp : Ent_Op<"query", [
     they hold or the tree (`ent.despawn`, a moving `ent.add` or
     `ent.remove`, `ent.connect`, `ent.disconnect`) takes effect when the
     whole query has run, as in any query: every entity is visited as the
-    tree was when it started. A cascading query is not reactive so far.
+    tree was when it started.
+
+    A cascading query may be reactive, and a `changed` trigger of it may be
+    `up` the tree (`on [changed @Local, changed @World "x" up @Under]`):
+    the event of the ancestor that a `!ent.ref<@World, up @Under>` argument
+    leads to, read from the ancestor's stamp, so that what the query wrote
+    to an ancestor is an event for the entities below it in the same run.
+    Those events it has then passed down; they are none the next time it
+    runs. The query goes through its whole tree and runs its body where a
+    trigger fired.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
