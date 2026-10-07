@@ -1,0 +1,76 @@
+// A tree changed from inside `for`s that cascade along it: nodes spawned
+// and connected, a component added and removed (which moves the nodes
+// between the two archetypes), and edges disconnected. All of it takes
+// effect when the `for` that did it has run.
+import console
+
+component Node { name: text[8], depth: i32, total: i32, local: i32 }
+component Flag { since: i32 }
+archetype Plain { Node } capacity 16
+archetype Flagged { Node, Flag } capacity 16
+relation Under from Node to Node tree capacity 32
+unique Frame: i32
+
+world {
+  let root = spawn { Node { name: "root", depth: 0, total: 0, local: 1 } }
+  let a = spawn { Node { name: "a", depth: 0, total: 0, local: 10 } }
+  let b = spawn { Node { name: "b", depth: 0, total: 0, local: 100 } }
+  let c = spawn { Node { name: "c", depth: 0, total: 0, local: 1000 } }
+  connect(a, root, Under)
+  connect(b, root, Under)
+  connect(c, a, Under)
+}
+
+system sum() {
+  Frame += 1
+  for n: mut Node {
+    n.depth = 0
+    n.total = n.local
+  }
+  for n: mut Node, parent: Node up Under cascade Under {
+    n.depth = parent.depth + 1
+    n.total = parent.total + n.local
+  }
+}
+
+// Frame 2: every node of depth 2 gets a new node under it. The new nodes
+// are there at once and not visited; their edges come when the `for` ends.
+system grow() {
+  let now = Frame == 2
+  for e, n: Node, parent: Node up Under cascade Under where now && n.depth == 2 {
+    let bud = spawn { Node { name: "bud", depth: 0, total: 0, local: 5 } }
+    connect(bud, e, Under)
+  }
+}
+
+// Frame 3: the nodes of depth 2 and more are flagged, which moves them to
+// the other archetype. Frame 4: they are not any more, leaves first.
+system flag() {
+  let now = Frame == 3
+  for e, n: Node, parent: Node up Under cascade Under where now && n.depth >= 2 {
+    e.add(Flag { since: Frame })
+  }
+  let back = Frame == 4
+  for e, n: Node with Flag cascade Under leaves first where back {
+    e.remove(Flag)
+  }
+}
+
+// Frame 5: the nodes right under the root let go of it.
+system cut() {
+  let now = Frame == 5
+  for e, n: Node cascade Under {
+    for s, parent in e.out(Under) {
+      if now && n.depth == 1 { s.disconnect() }
+    }
+  }
+}
+
+system show() {
+  for n: Node without Flag { put("{Frame}: {n.name} depth {n.depth} total {n.total}") }
+  for n: Node, f: Flag { put("{Frame}: {n.name} depth {n.depth} total {n.total} flagged in {f.since}") }
+  flush()
+}
+
+schedule frame() { sum()  grow()  flag()  cut()  show() }
+main { loop { frame() } until Frame == 6 }

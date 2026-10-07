@@ -19,6 +19,8 @@ ent.archetype @Cell (@Node) capacity 16
 // Children first is the rows after the roots from the last down, each
 // with its parent's row at hand: no list of ids, no id looked up.
 // CHECK-LABEL: func.func private @run(
+// (The archetype is counted when the query starts.)
+// CHECK:       arith.index_cast %{{.*}} : i64 to index
 // CHECK:       %[[ROWS:.*]] = arith.index_cast %{{.*}} : i64 to index
 // CHECK:       %[[ROOTS:.*]] = arith.index_cast %{{.*}} : i64 to index
 // CHECK:       %[[N:.*]] = arith.subi %[[ROWS]], %[[ROOTS]]

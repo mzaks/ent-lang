@@ -113,10 +113,13 @@ field it applies to and no resource field it accumulates into. So one
 pass in an order that puts every parent before its children, or after
 them, is that sequence of queries.
 
-`ent.despawn` is not deferred to a depth's commit point but to the last:
-which entities there are, and the tree, are those of the query's start
-for all of it (Q1), and a despawned entity's children are visited with
-their parent still there.
+What changes which entities there are, what they hold, or the tree
+(`ent.despawn`, `ent.add` and `ent.remove` that move an entity,
+`ent.connect`, `ent.disconnect`) is not deferred to a depth's commit point
+but to the last: the entities and the tree are those of the query's start
+for all of it (Q1, Q5), and a despawned entity's children are visited
+with their parent still there. `ent.spawn` is immediate and its entity
+not visited (Q6).
 
 **Q10. Sorted trees.** The archetype holding the entities of a tree
 declared `sorted` has its rows

@@ -1,0 +1,49 @@
+// A tree changed from inside `for`s that cascade along it (Inputs/
+// tree_grow.ent): nodes spawned and connected, a component added and
+// removed, which moves the nodes between two archetypes, and edges
+// disconnected. Each takes effect when its `for` has run. Sorted, across
+// the two archetypes, the tree gives the same lines.
+// RUN: %ent run %S/Inputs/tree_grow.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tree_grow.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/ tree capacity 32/ tree sorted capacity 32/' \
+// RUN:     %S/Inputs/tree_grow.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted" %t.sorted.ent
+// RUN: %ent run %t.sorted.ent 2>/dev/null | sort > %t.sorted.out
+// RUN: sort %t.out | cmp - %t.sorted.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK:      1: root depth 0 total 1
+// CHECK-NEXT: 1: a depth 1 total 11
+// CHECK-NEXT: 1: b depth 1 total 101
+// CHECK-NEXT: 1: c depth 2 total 1011
+// A new node under c, the one node of depth 2: there, but not in the tree
+// while the `for` that made it ran.
+// CHECK-NEXT: 2: root depth 0 total 1
+// CHECK-NEXT: 2: a depth 1 total 11
+// CHECK-NEXT: 2: b depth 1 total 101
+// CHECK-NEXT: 2: c depth 2 total 1011
+// CHECK-NEXT: 2: bud depth 0 total 0
+// It is under c now; c and it are flagged, and in the other archetype.
+// CHECK-NEXT: 3: root depth 0 total 1
+// CHECK-NEXT: 3: a depth 1 total 11
+// CHECK-NEXT: 3: b depth 1 total 101
+// CHECK-NEXT: 3: bud depth 3 total 1016 flagged in 3
+// CHECK-NEXT: 3: c depth 2 total 1011 flagged in 3
+// And back.
+// CHECK-NEXT: 4: root depth 0 total 1
+// CHECK-NEXT: 4: a depth 1 total 11
+// CHECK-NEXT: 4: b depth 1 total 101
+// CHECK-NEXT: 4: c depth 2 total 1011
+// CHECK-NEXT: 4: bud depth 3 total 1016
+// CHECK-NEXT: 5: root depth 0 total 1
+// CHECK-NEXT: 5: a depth 1 total 11
+// CHECK-NEXT: 5: b depth 1 total 101
+// CHECK-NEXT: 5: c depth 2 total 1011
+// CHECK-NEXT: 5: bud depth 3 total 1016
+// a and b have let go of the root.
+// CHECK-NEXT: 6: root depth 0 total 1
+// CHECK-NEXT: 6: a depth 0 total 10
+// CHECK-NEXT: 6: b depth 0 total 100
+// CHECK-NEXT: 6: c depth 1 total 1010
+// CHECK-NEXT: 6: bud depth 2 total 1015
+// CHECK-NOT:  {{.}}

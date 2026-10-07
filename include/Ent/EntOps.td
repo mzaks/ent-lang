@@ -450,10 +450,11 @@ def Ent_QueryOp : Ent_Op<"query", [
     when the depth that sent them is through. So do the values it sends
     with `ent.apply` and `ent.accumulate`; the query may not read or set a
     field it sends to that way, where an entity of the same depth would
-    see what others of it sent. `ent.despawn` takes effect when the whole
-    query has run, as in any query: every entity is visited as the tree
-    was when it started. A cascading query does not spawn, add or remove
-    components, connect or disconnect so far, and it is not reactive.
+    see what others of it sent. What changes which entities there are, what
+    they hold or the tree (`ent.despawn`, a moving `ent.add` or
+    `ent.remove`, `ent.connect`, `ent.disconnect`) takes effect when the
+    whole query has run, as in any query: every entity is visited as the
+    tree was when it started. A cascading query is not reactive so far.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;

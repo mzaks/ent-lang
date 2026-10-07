@@ -1167,15 +1167,6 @@ LogicalResult QueryOp::verify() {
     if ((*this)->hasAttr(kTriggersAttr))
       return emitOpError("cascades and is reactive, which is not supported "
                          "yet");
-    Operation *unsupported = nullptr;
-    getBody().walk([&](Operation *op) {
-      if (!unsupported &&
-          isa<SpawnOp, AddOp, RemoveOp, ConnectOp, DisconnectOp>(op))
-        unsupported = op;
-    });
-    if (unsupported)
-      return unsupported->emitOpError(
-          "in a cascading query is not supported yet");
     // Nothing of the query may see what a depth sends part way: an entity
     // of the same depth would see what those visited before it sent.
     Operation *sender = nullptr, *seer = nullptr;
@@ -1203,6 +1194,11 @@ LogicalResult QueryOp::verify() {
           } else if (auto lookup = dyn_cast<LookupOp>(other)) {
             component = lookup.getComponentAttr();
             field = lookup.getField();
+          } else if (isa<AddOp>(other)) {
+            // (which sets every field of its component)
+            if (other->getAttr("component") == apply.getComponentAttr())
+              seer = other;
+            return;
           } else {
             return;
           }

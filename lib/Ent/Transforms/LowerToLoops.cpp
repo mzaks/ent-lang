@@ -1157,6 +1157,30 @@ static bool appliesDirectly(Operation *apply, bool directApplies) {
          apply->hasAttr(kUnobservedAttr);
 }
 
+/// What recordPending does, for a query that does not visit rows in their
+/// order (a cascading one), which applying the pending rows goes by: the
+/// row is marked in its own place of the pending list, with its action
+/// and a move's values in the same place of theirs, and the query's end
+/// makes the list of the marked rows, in order. The last change to an
+/// entity is the one that stays.
+static void markPending(IRRewriter &rewriter, Location loc,
+                        const WorldArchetype &archetype, WorldAccess &world,
+                        Value row, unsigned action, const WorldMove *move,
+                        ValueRange values) {
+  memref::StoreOp::create(rewriter, loc,
+                          arith::ConstantIntOp::create(rewriter, loc, 1, 32),
+                          world.pendingList(archetype), ValueRange{row});
+  if (archetype.pendingActionOffset)
+    memref::StoreOp::create(
+        rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, action, 32),
+        world.pendingActions(archetype), ValueRange{row});
+  if (move)
+    for (auto [value, column] : llvm::zip(values, move->values))
+      memref::StoreOp::create(rewriter, loc, world.toStorage(loc, value),
+                              world.moveValues(archetype, column),
+                              ValueRange{row});
+}
+
 /// Replace the get/set/add/remove/despawn/entity ops nested in `roots` by
 /// loads and stores at `entity` in the columns of `archetype`. With a
 /// `mask`, every store keeps the old value where the mask is false: the
@@ -1259,8 +1283,12 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         // Deferred like a despawn; a moving body never runs masked.
         assert(!mask && "move in a masked body");
         const WorldMove *move = archetype.findMove(component, isAdd);
-        recordPending(rewriter, loc, archetype, world, entity, move->code,
+        if (marksPending)
+          markPending(rewriter, loc, archetype, world, entity, move->code,
                       move, values);
+        else
+          recordPending(rewriter, loc, archetype, world, entity, move->code,
+                        move, values);
         break;
       }
       case ComponentChange::Nothing:
@@ -1350,12 +1378,8 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       // body with a despawn never runs masked (it is not speculatable).
       assert(!mask && "despawn in a masked body");
       if (marksPending)
-        // Rows are not visited in their order (a cascading query): the
-        // row is marked in its own place of the pending list, which the
-        // query's end makes the list of.
-        memref::StoreOp::create(
-            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 32),
-            world.pendingList(archetype), ValueRange{entity});
+        markPending(rewriter, loc, archetype, world, entity, /*action=*/0,
+                    /*move=*/nullptr, {});
       else
         recordPending(rewriter, loc, archetype, world, entity, /*action=*/0,
                       /*move=*/nullptr, {});
@@ -4989,15 +5013,58 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   // marks its row in the row's own place of the archetype's pending list
   // (cleared here), and the marked rows are made the list, in order, when
   // the query has run.
-  bool marks = false;
-  query.getBody().walk([&](DespawnOp) { marks = true; });
+  // The same for an entity that an add or a remove moves to another
+  // archetype. A query visits the entities there are when it starts: the
+  // archetypes are counted now, since a body may spawn into one whose
+  // loop comes later.
+  llvm::DenseMap<const WorldArchetype *, Value> startCounts;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    if (matches(archetype, query))
+      startCounts[&archetype] = world.count(loc, archetype);
   SmallVector<std::pair<const WorldArchetype *, Value>> despawning;
-  if (marks)
+  for (const WorldArchetype &archetype : layout.archetypes)
+    if (matches(archetype, query) && archetype.hasPending() &&
+        isStructuralFor(query, archetype.op))
+      despawning.push_back({&archetype, startCounts.lookup(&archetype)});
+  bool marks = !despawning.empty();
+  // Edges the query connects are added when it has run, from a place per
+  // row that says "none" unless the row's entity connected; and the
+  // relations whose edges it changes, or whose sorted archetype it spawns
+  // into, are looked over then.
+  SmallVector<ConnectOp> connects;
+  query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
+  llvm::SetVector<Attribute> changedRelations;
+  for (ConnectOp connect : connects)
+    changedRelations.insert(connect.getRelationAttr().getAttr());
+  query.getBody().walk([&](DisconnectOp disconnect) {
+    changedRelations.insert(
+        disconnect->getParentOfType<EdgesOp>().getRelationAttr().getAttr());
+  });
+  query.getBody().walk([&](SpawnOp spawn) {
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (archetype.isSorted() &&
+          ArchetypeOp(archetype.op).getSymNameAttr() ==
+              spawn.getArchetypeAttr().getAttr())
+        changedRelations.insert(archetype.sortedBy);
+  });
+  for (ConnectOp connect : connects)
     for (const WorldArchetype &archetype : layout.archetypes) {
-      if (!matches(archetype, query) || !archetype.hasPending())
+      Value rows = startCounts.lookup(&archetype);
+      if (!rows)
         continue;
-      Value rows = world.count(loc, archetype);
-      despawning.push_back({&archetype, rows});
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+      auto clear = scf::ForOp::create(rewriter, loc, zero, rows, one);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(clear.getBody()->getTerminator());
+      memref::StoreOp::create(
+          rewriter, loc, world.noEntity(loc),
+          world.connectBuffer(connect, archetype).sources,
+          ValueRange{clear.getInductionVar()});
+    }
+  {
+    for (auto &[archetypePointer, rows] : despawning) {
+      const WorldArchetype &archetype = *archetypePointer;
       Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
       Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
       auto clear = scf::ForOp::create(rewriter, loc, zero, rows, one);
@@ -5008,6 +5075,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           world.pendingList(archetype),
           ValueRange{clear.getInductionVar()});
     }
+  }
   bool visitsRoots =
       llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
         return cast<RefType>(type).getVia() == cascade;
@@ -5070,7 +5138,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                         layout, entity, rows, tick, Value(),
                         /*parallel=*/false, /*directApplies=*/true, KnownParent(),
                         marks);
-        });
+        },
+        startCounts.lookup(&archetype));
     hoistResourceReads(rewriter, loops, world);
   }
   };
@@ -5285,10 +5354,19 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(),
                                      row),
           list, ValueRange{at});
+      // Its action and a move's values come along, from the row's place
+      // to the list's.
+      SmallVector<Value> carried;
       if (archetype->pendingActionOffset)
+        carried.push_back(world.pendingActions(*archetype));
+      for (const WorldMove &move : archetype->moves)
+        for (const WorldColumn &column : move.values)
+          carried.push_back(world.moveValues(*archetype, column));
+      for (Value column : carried)
         memref::StoreOp::create(
-            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 32),
-            world.pendingActions(*archetype), ValueRange{at});
+            rewriter, loc,
+            memref::LoadOp::create(rewriter, loc, column, ValueRange{row}),
+            column, ValueRange{at});
       rewriter.setInsertionPointAfter(ifMarked);
       scf::YieldOp::create(
           rewriter, loc,
@@ -5302,7 +5380,12 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                                    gather.getResult(0)),
         world.pendingCount(*archetype), ValueRange{zero});
   }
-  llvm::SetVector<Attribute> changedRelations;
+  // Connected edges are added while the rows that connected them are
+  // where they were, before despawns and moves.
+  for (ConnectOp connect : connects)
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (Value rows = startCounts.lookup(&archetype))
+        appendConnected(rewriter, connect, layout, archetype, world, rows);
   commitStructure(rewriter, loc, layout, world, changed, changedRelations,
                   tick);
   rewriter.eraseOp(query);

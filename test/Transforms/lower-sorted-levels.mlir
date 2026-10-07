@@ -14,6 +14,9 @@ ent.archetype @Pool (@Node, @Still) capacity 8
 // one of the two, which a branch on its location's archetype tells; the
 // last needs no test.
 // CHECK-LABEL: func.func private @run(
+// (Both archetypes are counted when the query starts.)
+// CHECK:       arith.index_cast %{{.*}} : i64 to index
+// CHECK:       arith.index_cast %{{.*}} : i64 to index
 // CHECK:       %[[DEPTHS:.*]] = arith.index_cast %{{.*}} : i64 to index
 // CHECK:       scf.for %[[I:.*]] = %{{.*}} to %[[DEPTHS]] step %[[ONE:.*]] {
 // CHECK-NEXT:    %[[D:.*]] = arith.subi %[[DEPTHS]], %[[I]]

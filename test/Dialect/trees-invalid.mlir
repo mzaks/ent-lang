@@ -116,10 +116,9 @@ ent.system @s() {
 ent.component @N (v: f32)
 ent.relation @R () tree capacity 4
 ent.archetype @A (@N) capacity 4
-ent.system @s() {
+ent.system @fine() {
   ent.query (%n: !ent.ref<@N>) cascade @R {
     %v = arith.constant 1.0 : f32
-    // expected-error @+1 {{in a cascading query is not supported yet}}
     %e = ent.spawn @A(%v) : f32
   }
 }

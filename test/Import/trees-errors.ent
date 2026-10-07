@@ -94,9 +94,8 @@ component Body { x: f32 }
 relation Orbits from Body to Body tree capacity 8
 default_capacity 8
 system s() {
-  for e, b: Body cascade Orbits {
-    // expected-error @+1 {{in a cascading query is not supported yet}}
-    spawn { Body { x: b.x } }
+  // expected-error @+1 {{cascades and is reactive, which is not supported yet}}
+  for e, b: Body cascade Orbits on changed Body.x {
   }
 }
 

@@ -341,11 +341,17 @@ for e, n: Node, parent: Node up Under cascade Under where parent.total > 100 {
 - `e.destroy()` takes effect when the whole `for` has run, as in any
   `for`: every entity is visited as the tree was when it started, a
   destroyed node's children too, with their parent still there to read.
+- So does everything else that changes which entities there are, what
+  they have, or the tree: `e.add(C)` and `e.remove(C)` where they move
+  the entity to another archetype, `connect` (also of a node the `for`
+  has just spawned, to the node it visits) and `s.disconnect()` in an
+  edge loop. `spawn` makes its entity at once, and the `for` does not
+  visit it. A tree can be grown, pruned and rearranged from a `for` that
+  walks it, and is walked as it was.
 
-Not yet: a cascading `for` does not `spawn`, `add` or `remove`, `connect`
-or disconnect, and it has no `on`; it visits one entity after another, on
-one core. Combining into an ancestor needs the `for` to cascade along
-that tree.
+Not yet: a cascading `for` has no `on`, and it visits one entity after
+another, on one core. Combining into an ancestor needs the `for` to
+cascade along that tree.
 
 ## Statements
 

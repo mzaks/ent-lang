@@ -380,10 +380,12 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   leads to, in a query cascading along that tree; the values land when the
   depth that sent them is through. So do `ent.apply` and `ent.accumulate`
   in a cascading query, which may then not read what it sends to that way;
-  `ent.despawn` takes effect when the whole query has run, its rows marked
-  as they are visited and listed in order at the end. A cascading query
-  does not spawn, add or remove components, connect or disconnect so far,
-  is not reactive, and runs on one core.
+  `ent.despawn`, an `ent.add` or `ent.remove` that moves the entity,
+  `ent.connect` and `ent.disconnect` take effect when the whole query has
+  run, as in any query (the rows of entities that go or move are marked as
+  they are visited and listed in order at the end), and `ent.spawn` at
+  once, its entity not visited. A cascading query is not reactive so far,
+  and runs on one core.
   A tree may be `sorted` (`... from @Node to @Node tree sorted capacity
   N`): the archetype that holds its entities, declared or inferred, keeps
   its rows in the tree's order, every entity after its parent, and a query
