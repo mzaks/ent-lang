@@ -592,6 +592,10 @@ public:
                         : relation.walkOrderOffset,
                 relation.walkCapacity(), idType());
   }
+  /// Which order is worked out (at 0) and how many it has (at 1).
+  Value walkState(const WorldRelation &relation) {
+    return view(relation.walkStateOffset, 2, rewriter.getI64Type());
+  }
   Value walkNumbers(const WorldRelation &relation, bool cursors) {
     return view(cursors ? relation.walkCursorsOffset
                         : relation.walkSizesOffset,
@@ -4385,6 +4389,11 @@ struct LinkedTree {
           world.treeOrderCount(relation), zero);
   }
   void markUnclean() { store(i64(0), world.edgesClean(relation), zero); }
+  /// The tree changes: an order worked out for a query is no more.
+  void forgetWalk() {
+    if (relation.walkStateOffset)
+      store(i64(0), world.walkState(relation), zero);
+  }
 
   /// The edge in `slot` is no more: out of the list, and one edge less.
   /// (Its place among its target's children is the caller's business.)
@@ -4526,6 +4535,7 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
                              "ancestor"));
   Value slot = world.entityKey(loc, source);
   Value parentKey = world.entityKey(loc, target);
+  tree.forgetWalk();
   // Among children with the same order, the one connected later is later.
   if (relation.isOrdered()) {
     Value numbers = world.connectNumbers(relation);
@@ -4664,6 +4674,7 @@ static void emitDropFunction(IRRewriter &rewriter, ModuleOp module,
   LinkedTree tree(rewriter, loc, world, relation);
   Value id = entry->getArgument(0);
   Value slot = world.entityKey(loc, id);
+  tree.forgetWalk();
   tree.branch(
       tree.same(tree.load(tree.sources(), slot), world.slotOwner(loc, id)),
       [&] {
@@ -4723,6 +4734,7 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
   auto ifUnclean = scf::IfOp::create(rewriter, loc,
                                      tree.same(clean, tree.i64(0)));
   rewriter.setInsertionPointToStart(ifUnclean.thenBlock());
+  tree.forgetWalk();
 
   auto hasEdge = [&](Value key) {
     return tree.negate(
@@ -4977,6 +4989,11 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
       arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, clean,
                             arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
   rewriter.setInsertionPointToStart(ifUnclean.thenBlock());
+  // (An order worked out for a query is no more.)
+  if (relation.walkStateOffset)
+    memref::StoreOp::create(
+        rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+        world.walkState(relation), ValueRange{zero});
 
   auto forEach = [&](Value from, Value to,
                      function_ref<void(Value)> body) {
@@ -6673,6 +6690,19 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                     [&] { each(id, tree.load(listParents, at)); });
       });
     };
+    // The order is kept until the tree changes (which takes the note of
+    // it away, see forgetWalk): worked out only if it is not the one
+    // that is there.
+    Value state = world.walkState(relation);
+    Value kind = tree.i64(!depthFirst ? 3 : leavesFirst ? 2 : 1);
+    Value from = !depthFirst
+                     ? arith::ConstantIndexOp::create(rewriter, loc,
+                                                      2 * relation.capacity)
+                           .getResult()
+                     : zero;
+    auto ifNotThere = scf::IfOp::create(
+        rewriter, loc, tree.negate(tree.same(tree.load(state, zero), kind)));
+    rewriter.setInsertionPointToStart(ifNotThere.thenBlock());
     Value count;
     // (Breadth first is made from the order with parents first.)
     bool after = leavesFirst && depthFirst;
@@ -6738,11 +6768,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     // of each says where each depth starts, and the entities go there in
     // the order they have, so that the children of one are next to each
     // other and in their order.
-    Value from = zero;
     if (!depthFirst) {
       Value all = count;
-      from = arith::ConstantIndexOp::create(rewriter, loc,
-                                            2 * relation.capacity);
       tree.forEach(zero, keys, [&](Value key) {
         tree.store(tree.i64(0), sizes, key);
         tree.store(tree.i64(0), cursors, key);
@@ -6779,6 +6806,12 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       });
       count = asIndex(starts.getResult(0));
     }
+    tree.store(arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getI64Type(), count),
+               state, one);
+    tree.store(kind, state, zero);
+    rewriter.setInsertionPointAfter(ifNotThere);
+    count = asIndex(tree.load(state, one));
     // Depth first, an entity without a parent is in the order if it has
     // children, with them; one without is visited here, before the
     // others or (children first) after them.

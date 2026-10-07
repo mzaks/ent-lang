@@ -2796,3 +2796,24 @@ us per step, median (spread):
 - Most of it is working the order out, which is the same every step
   here: the tree does not change. Keeping the order until it does is
   not built.
+
+## 2026-10-07: an exact order, kept until the tree changes
+
+The order worked out for `bfs` or `dfs` is kept with the tree and worked
+out again only after a connect, a destroyed node or a rebuilt order.
+The same runs as above (the tree does not change in them), us per step,
+before -> after:
+
+| nodes | full | full-bfs | full-dfs | full-sorted | full-sorted-dfs |
+|---|---|---|---|---|---|
+| 1e4 | 3.3 | 41.3 -> 4.6 | 21.4 -> 7.1 | 2.3 | 24.0 -> 6.8 |
+| 1e6 | 653.7 | 17,201.9 -> 1,266.4 | 10,294.2 -> 1,236.5 | 239.4 | 16,352.1 -> 2,834.5 |
+
+- With the order at hand, an exact order takes 1.9x the any-order walk
+  at a million nodes (1.4-2.2x at ten thousand): the entities are found
+  by their ids, one lookup each.
+- Depth first over a sorted tree is 12x the sorted walk: the rows are
+  by depth, and depth first jumps among them.
+- A step that changes the tree pays what the first table says, once.
+- One order is kept per tree. Not measured: two queries asking the same
+  tree for different orders, which each work theirs out every step.

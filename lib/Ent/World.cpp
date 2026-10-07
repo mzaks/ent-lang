@@ -604,6 +604,9 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     end = relation.walkSizesOffset + 8 * (layout.entityKeys + 1);
     relation.walkCursorsOffset = llvm::alignTo(end, kColumnAlignment);
     end = relation.walkCursorsOffset + 8 * (layout.entityKeys + 1);
+    relation.walkStateOffset = llvm::alignTo(end, kColumnAlignment);
+    end = relation.walkStateOffset + 16;
+    layout.zeroed.push_back({relation.walkStateOffset, 16});
   }
   // When each entity's children last changed, for a tree some trigger is
   // down.

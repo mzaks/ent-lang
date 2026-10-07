@@ -1,0 +1,57 @@
+// An order worked out for a `for` (here depth first) is kept until the
+// tree changes, and then worked out again
+// (Inputs/tree_walk_change.ent): after a node is put under another, one
+// is made, one is given an earlier slot and one is destroyed. The same
+// lines where the tree is also `sorted`.
+// RUN: %ent run %S/Inputs/tree_walk_change.ent 2>/dev/null > %t.out
+// RUN: sed 's/ tree ordered by / tree sorted ordered by /' \
+// RUN:     %S/Inputs/tree_walk_change.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted ordered" %t.sorted.ent
+// RUN: %ent run %t.sorted.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK:      1: root
+// CHECK-NEXT: 1: a
+// CHECK-NEXT: 1: a1
+// CHECK-NEXT: 1: a11
+// CHECK-NEXT: 1: a2
+// CHECK-NEXT: 1: b
+// CHECK-NEXT: 1: b1
+// Nothing changes: the same.
+// CHECK-NEXT: 2: root
+// CHECK-NEXT: 2: a
+// CHECK-NEXT: 2: a1
+// CHECK-NEXT: 2: a11
+// CHECK-NEXT: 2: a2
+// CHECK-NEXT: 2: b
+// CHECK-NEXT: 2: b1
+// b1 goes under a, after a2.
+// CHECK-NEXT: 3: root
+// CHECK-NEXT: 3: a
+// CHECK-NEXT: 3: a1
+// CHECK-NEXT: 3: a11
+// CHECK-NEXT: 3: a2
+// CHECK-NEXT: 3: b1
+// CHECK-NEXT: 3: b
+// A new node under b.
+// CHECK-NEXT: 4: root
+// CHECK:      4: b{{$}}
+// CHECK-NEXT: 4: c
+// a2 has a slot before a1's.
+// CHECK-NEXT: 5: root
+// CHECK-NEXT: 5: a
+// CHECK-NEXT: 5: a2
+// CHECK-NEXT: 5: a1
+// CHECK-NEXT: 5: a11
+// CHECK-NEXT: 5: b1
+// CHECK-NEXT: 5: b
+// CHECK-NEXT: 5: c
+// a1 is destroyed: a11 has no parent, and is alone.
+// CHECK-NEXT: 6: a11
+// CHECK-NEXT: 6: root
+// CHECK-NEXT: 6: a
+// CHECK-NEXT: 6: a2
+// CHECK-NEXT: 6: b1
+// CHECK-NEXT: 6: b
+// CHECK-NEXT: 6: c
+// CHECK-NOT:  {{.}}

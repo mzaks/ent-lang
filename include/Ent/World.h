@@ -296,6 +296,11 @@ struct WorldRelation {
   uint64_t walkParentsOffset = 0;
   uint64_t walkSizesOffset = 0;
   uint64_t walkCursorsOffset = 0;
+  /// And which order that is (i64: 0 for none, as when the tree has
+  /// changed since; 1 depth first with parents first, 2 with children
+  /// first, 3 breadth first) and how many entities it has (i64): an
+  /// order is kept until the tree changes.
+  uint64_t walkStateOffset = 0;
   int64_t walkCapacity() const { return 4 * capacity; }
   /// Whether a query in the order `traversal` works the order out, rather
   /// than going through the tree as it is stored.

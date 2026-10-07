@@ -403,10 +403,13 @@ for b: Box, t: Tint top down dfs Inside {
   `bottom up` the children.
 - A tree that is `sorted` or `ordered` is stored breadth first, so `bfs`
   costs it nothing. Every other exact order is worked out from the tree
-  each time the `for` runs, and the entities are then found one by one:
-  at a million nodes 10 ms depth first and 17 ms breadth first, where
-  the `for` without either takes 0.6 (`bench/RESULTS.md`). Such a `for`
-  runs on one core and, if reactive, goes through the whole tree.
+  and kept until the tree changes (a connect, a destroyed node, another
+  order of siblings); the entities are then found one by one. At a
+  million nodes a `for` in such an order takes 1.2 ms where the one
+  without takes 0.6, and 10-17 ms in a step that changed the tree
+  (`bench/RESULTS.md`). One order is kept per tree: two `for`s that ask
+  for different ones work theirs out in turn. Such a `for` runs on one
+  core and, if reactive, goes through the whole tree.
 
 **Sorted trees.** A tree may ask for its entities to be stored in its
 order:

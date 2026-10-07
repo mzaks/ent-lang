@@ -1,0 +1,58 @@
+// A depth-first order is kept until the tree changes
+// (tree_walk_change.test):
+// every frame the nodes are named depth first, and between frames a node
+// is put under another, one is made, one is given an earlier slot and
+// one is destroyed.
+//
+//   root -- a -- a1 -- a11
+//       |     `- a2
+//       `- b -- b1
+import console
+
+component Node { name: text[8], at: i32 }
+default_capacity 16
+relation (Node)-[Under]->(Node) tree ordered by Node.at capacity 16
+unique Frame: i32
+unique A: entity
+unique B: entity
+
+world {
+  let root = spawn { Node { name: "root", at: 0 } }
+  let a = spawn { Node { name: "a", at: 0 } }
+  let b = spawn { Node { name: "b", at: 1 } }
+  let a1 = spawn { Node { name: "a1", at: 0 } }
+  let a2 = spawn { Node { name: "a2", at: 1 } }
+  let b1 = spawn { Node { name: "b1", at: 0 } }
+  let a11 = spawn { Node { name: "a11", at: 0 } }
+  connect (a)-[Under]->(root)<-[Under]-(b)
+  connect (a1)-[Under]->(a)<-[Under]-(a2)
+  connect (b1)-[Under]->(b)
+  connect (a11)-[Under]->(a1)
+  A = a
+  B = b
+}
+
+// 2: nothing. 3: b1 goes under a, last there. 4: a new node under b.
+// 5: a2 gets a slot before a1's. 6: a1 is destroyed, and a11 has no
+// parent any more.
+system change() {
+  Frame += 1
+  for e, n: mut Node where Frame == 3 && n.name == "b1" {
+    n.at = 2
+    connect (e)-[Under]->(A)
+  }
+  if Frame == 4 {
+    let c = spawn { Node { name: "c", at: 0 } }
+    connect (c)-[Under]->(B)
+  }
+  for n: mut Node where Frame == 5 && n.name == "a2" { n.at = -1 }
+  for e, n: Node where Frame == 6 && n.name == "a1" { e.destroy() }
+}
+
+system walk() {
+  for n: Node top down dfs Under { put("{Frame}: {n.name}") }
+  flush()
+}
+
+schedule frame() { change()  walk() }
+main { loop { frame() } until Frame == 6 }
