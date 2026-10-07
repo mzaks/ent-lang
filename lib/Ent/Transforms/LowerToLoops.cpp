@@ -579,10 +579,15 @@ public:
   Value treeOrder(const WorldRelation &relation) {
     return view(relation.orderOffset, relation.orderCapacity, idType());
   }
-  /// Per entity key, the tick at which the entity was last connected.
+  /// Per entity key, the tick at which the entity was last connected, and
+  /// after those the tick of the latest connect of any (at
+  /// `latestConnect`).
   Value connectedTicks(const WorldRelation &relation) {
-    return view(relation.connectedOffset, layout.entityKeys,
+    return view(relation.connectedOffset, layout.entityKeys + 1,
                 rewriter.getI64Type());
+  }
+  Value latestConnect(Location loc) {
+    return arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys);
   }
   /// A linked tree's marks: a bit per element of its list.
   Value treeMarks(const WorldRelation &relation) {
@@ -1104,6 +1109,22 @@ static void appendToLog(IRRewriter &rewriter, Location loc, WorldAccess &world,
   Value countAt = world.toIndex(loc, base);
   Value slowestAt =
       world.toIndex(loc, arith::AddIOp::create(rewriter, loc, base, i64(1)));
+  // A segment whose readers have been told of a lost event, and none of
+  // which has finished with the log since (its fourth number, which a
+  // reader takes back, see closeLogs), is as full as it was: the event is
+  // lost as well, and that is all there is to do. So that is looked at
+  // first, and the events of a query that changes more than its logs
+  // hold cost a look each.
+  Value toldAt =
+      world.toIndex(loc, arith::AddIOp::create(rewriter, loc, base, i64(3)));
+  Value untold = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::eq,
+      memref::LoadOp::create(rewriter, loc, counts, ValueRange{toldAt}),
+      i64(0));
+  OpBuilder::InsertionGuard guard(rewriter);
+  auto live = scf::IfOp::create(
+      rewriter, loc, arith::AndIOp::create(rewriter, loc, event, untold));
+  rewriter.setInsertionPointToStart(live.thenBlock());
   Value count =
       memref::LoadOp::create(rewriter, loc, counts, ValueRange{countAt});
   Value slowest =
@@ -1111,11 +1132,8 @@ static void appendToLog(IRRewriter &rewriter, Location loc, WorldAccess &world,
   Value pending = arith::SubIOp::create(rewriter, loc, count, slowest);
   Value room = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
                                      pending, i64(log.segmentCapacity));
-  Value full = arith::XOrIOp::create(
-      rewriter, loc, room, arith::ConstantIntOp::create(rewriter, loc, 1, 1));
-  OpBuilder::InsertionGuard guard(rewriter);
-  auto append = scf::IfOp::create(
-      rewriter, loc, arith::AndIOp::create(rewriter, loc, event, room));
+  auto append = scf::IfOp::create(rewriter, loc, room,
+                                  /*withElseRegion=*/true);
   rewriter.setInsertionPointToStart(append.thenBlock());
   Value position;
   if (atomic) {
@@ -1140,23 +1158,8 @@ static void appendToLog(IRRewriter &rewriter, Location loc, WorldAccess &world,
   memref::StoreOp::create(rewriter, loc, tick, world.logTicks(log),
                           ValueRange{slot});
 
-  rewriter.setInsertionPointAfter(append);
-  // (Told once is enough until a reader has read on: the segment's
-  // fourth number says that it has been, and a reader that is through
-  // with the log takes it back, see closeLogs. The events of a query that
-  // changes more than its logs hold then cost a look each.)
-  Value toldAt =
-      world.toIndex(loc, arith::AddIOp::create(rewriter, loc, base, i64(3)));
-  Value untold = arith::CmpIOp::create(
-      rewriter, loc, arith::CmpIPredicate::eq,
-      memref::LoadOp::create(rewriter, loc, counts, ValueRange{toldAt}),
-      i64(0));
-  auto overflow = scf::IfOp::create(
-      rewriter, loc,
-      arith::AndIOp::create(rewriter, loc,
-                            arith::AndIOp::create(rewriter, loc, event, full),
-                            untold));
-  rewriter.setInsertionPointToStart(overflow.thenBlock());
+  // Lost: told once.
+  rewriter.setInsertionPointToStart(append.elseBlock());
   memref::StoreOp::create(rewriter, loc, i64(1), counts, ValueRange{toldAt});
   Value lostAt =
       world.toIndex(loc, arith::AddIOp::create(rewriter, loc, base, i64(2)));
@@ -1596,18 +1599,39 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         // query reads of the row.)
         const WorldRelation &tree =
             layout.getRelation(trigger.component.getAttr());
-        Value connected =
-            archetype.connectedRowOffset &&
-                    archetype.sortedBy == trigger.component.getAttr()
-                ? memref::LoadOp::create(rewriter, loc,
-                                         world.connectedRows(archetype),
-                                         ValueRange{entity})
-                : memref::LoadOp::create(
-                      rewriter, loc, world.connectedTicks(tree),
-                      ValueRange{world.entityKey(
-                          loc, world.entityId(loc, archetype, entity))});
-        fires(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
-                                    connected, seen));
+        // Where nothing has been connected since the query last ran,
+        // which the relation knows, no entity's tick is looked at.
+        Value any = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sgt,
+            memref::LoadOp::create(rewriter, loc, world.connectedTicks(tree),
+                                   ValueRange{world.latestConnect(loc)}),
+            seen);
+        auto ifAny = scf::IfOp::create(rewriter, loc,
+                                       TypeRange{rewriter.getI1Type()}, any,
+                                       /*withElseRegion=*/true);
+        {
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPointToStart(ifAny.thenBlock());
+          Value connected =
+              archetype.connectedRowOffset &&
+                      archetype.sortedBy == trigger.component.getAttr()
+                  ? memref::LoadOp::create(rewriter, loc,
+                                           world.connectedRows(archetype),
+                                           ValueRange{entity})
+                  : memref::LoadOp::create(
+                        rewriter, loc, world.connectedTicks(tree),
+                        ValueRange{world.entityKey(
+                            loc, world.entityId(loc, archetype, entity))});
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::sgt, connected, seen)});
+          rewriter.setInsertionPointToStart(ifAny.elseBlock());
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 1)});
+        }
+        fires(ifAny.getResult(0));
         continue;
       }
       const WorldColumn *column = archetype.findStamp(getStamp(trigger));
@@ -3576,6 +3600,8 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
     Value now = world.currentTick(loc);
     Value old = memref::LoadOp::create(rewriter, loc, ticks, ValueRange{key});
     memref::StoreOp::create(rewriter, loc, now, ticks, ValueRange{key});
+    memref::StoreOp::create(rewriter, loc, now, ticks,
+                            ValueRange{world.latestConnect(loc)});
     Stamp stamp{Trigger::Connected, RelationOp(relation.op).getSymNameAttr(),
                 rewriter.getStringAttr("")};
     if (const WorldLog *log = layout.findLog(stamp))

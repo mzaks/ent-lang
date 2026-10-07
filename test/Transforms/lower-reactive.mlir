@@ -26,27 +26,24 @@ ent.archetype @A (@H, @B) capacity 8
 // CHECK-NEXT:   %[[OLD:.*]] = memref.load %[[STAMP]][%[[ROW]]]
 // CHECK-NEXT:   memref.store %[[TICK]], %[[STAMP]][%[[ROW]]]
 // CHECK:        %[[NEW:.*]] = arith.cmpi ne, %[[OLD]], %[[TICK]] : i64
-// CHECK-NEXT:   %[[COUNT:.*]] = memref.load %[[COUNTS]][%c0]
-// CHECK-NEXT:   %[[SLOWEST:.*]] = memref.load %[[COUNTS]][%c1]
-// CHECK-NEXT:   %[[PENDING:.*]] = arith.subi %[[COUNT]], %[[SLOWEST]]
-// CHECK-NEXT:   %[[ROOM:.*]] = arith.cmpi slt, %[[PENDING]], %c64_i64 : i64
-// CHECK-NEXT:   %[[FULL:.*]] = arith.cmpi sge, %[[PENDING]], %c64_i64 : i64
-// CHECK-NEXT:   %[[APPEND:.*]] = arith.andi %[[NEW]], %[[ROOM]] : i1
-// CHECK-NEXT:   scf.if %[[APPEND]] {
-// CHECK:          memref.store %{{.*}}, %[[IDS]][%{{.*}}]
-// CHECK-NEXT:     memref.store %[[TICK]], %[[TICKS]][%{{.*}}]
-// CHECK-NEXT:   }
 // CHECK-NEXT:   %[[TOLD:.*]] = memref.load %[[COUNTS]][%c3]
 // CHECK-NEXT:   %[[UNTOLD:.*]] = arith.cmpi eq, %[[TOLD]], %c0_i64
-// CHECK-NEXT:   %[[OVER:.*]] = arith.andi %[[NEW]], %[[FULL]] : i1
-// CHECK-NEXT:   %[[LOST:.*]] = arith.andi %[[OVER]], %[[UNTOLD]] : i1
-// CHECK-NEXT:   scf.if %[[LOST]] {
-// CHECK-NEXT:     memref.store %c1_i64, %[[COUNTS]][%c3]
-// CHECK-NEXT:     %[[HELD:.*]] = arith.addi %[[SLOWEST]], %c64_i64
-// CHECK-NEXT:     %[[MOST:.*]] = arith.maxsi %[[COUNT]], %[[HELD]]
-// CHECK-NEXT:     %[[PAST:.*]] = arith.addi %[[MOST]], %c1_i64
-// CHECK-NEXT:     memref.store %[[PAST]], %[[COUNTS]][%c0]
-// CHECK-NEXT:     memref.store %[[PAST]], %[[COUNTS]][%c2]
+// CHECK-NEXT:   %[[LIVE:.*]] = arith.andi %[[NEW]], %[[UNTOLD]] : i1
+// CHECK-NEXT:   scf.if %[[LIVE]] {
+// CHECK-NEXT:     %[[COUNT:.*]] = memref.load %[[COUNTS]][%c0]
+// CHECK-NEXT:     %[[SLOWEST:.*]] = memref.load %[[COUNTS]][%c1]
+// CHECK-NEXT:     %[[PENDING:.*]] = arith.subi %[[COUNT]], %[[SLOWEST]]
+// CHECK-NEXT:     %[[ROOM:.*]] = arith.cmpi slt, %[[PENDING]], %c64_i64 : i64
+// CHECK-NEXT:     scf.if %[[ROOM]] {
+// CHECK:            memref.store %{{.*}}, %[[IDS]][%{{.*}}]
+// CHECK-NEXT:       memref.store %[[TICK]], %[[TICKS]][%{{.*}}]
+// CHECK-NEXT:     } else {
+// CHECK-NEXT:       memref.store %c1_i64, %[[COUNTS]][%c3]
+// CHECK-NEXT:       %[[HELD:.*]] = arith.addi %[[SLOWEST]], %c64_i64
+// CHECK-NEXT:       %[[MOST:.*]] = arith.maxsi %[[COUNT]], %[[HELD]]
+// CHECK-NEXT:       %[[PAST:.*]] = arith.addi %[[MOST]], %c1_i64
+// CHECK-NEXT:       memref.store %[[PAST]], %[[COUNTS]][%c0]
+// CHECK-NEXT:       memref.store %[[PAST]], %[[COUNTS]][%c2]
 ent.system @hurt(%d: f32) writes [@H] {
   ent.query (%h: !ent.ref<@H, mut>) {
     ent.set %h "hp", %d : !ent.ref<@H, mut>, f32

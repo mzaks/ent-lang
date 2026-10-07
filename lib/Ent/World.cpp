@@ -542,9 +542,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
             Stamp{Trigger::Connected, RelationOp(relation.op).getSymNameAttr(),
                   StringAttr::get(module.getContext(), "")})) {
       relation.connectedOffset = llvm::alignTo(end, kColumnAlignment);
-      end = relation.connectedOffset + 8 * layout.entityKeys;
+      // (And one more: the tick of the latest connect of any entity.)
+      end = relation.connectedOffset + 8 * (layout.entityKeys + 1);
       layout.zeroed.push_back(
-          {relation.connectedOffset, uint64_t(8 * layout.entityKeys)});
+          {relation.connectedOffset, uint64_t(8 * (layout.entityKeys + 1))});
     }
   // The marks of a tree that some reactive query follows events down.
   auto placeMarks = [&](WorldRelation &relation, int64_t bits) {

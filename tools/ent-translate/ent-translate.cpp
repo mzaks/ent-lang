@@ -662,12 +662,13 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
           "    uint64_t key = {0};\n"
           "    int64_t *ticks = (int64_t *)((char *)world + {1});\n"
           "    int64_t now = *(int64_t *)((char *)world + {2}) + 1;\n"
+          "    ticks[{3}] = now; // the latest connect of any entity\n"
           "    if (ticks[key] != now) {{\n"
           "      ticks[key] = now;\n",
           scheme.hasIds()
               ? "(uint64_t)source & ((UINT64_C(1) << ENT__SLOT_BITS) - 1)"
               : "(uint64_t)source",
-          relation.connectedOffset, layout->tickOffset);
+          relation.connectedOffset, layout->tickOffset, layout->entityKeys);
       Stamp stamp{Trigger::Connected, relationOp.getSymNameAttr(),
                   StringAttr::get(module.getContext(), "")};
       if (const WorldLog *log = layout->findLog(stamp))
