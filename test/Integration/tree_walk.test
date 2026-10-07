@@ -19,6 +19,12 @@
 // RUN: grep -q "tree sorted ordered" %t.both.ent
 // RUN: %ent run %t.both.ent 2>/dev/null | cmp - %t.out
 // RUN: FileCheck %s --input-file=%t.out
+// Without the node that is alone, the rest are visited as they are with
+// it.
+// RUN: sed '/"lone"/d' %S/Inputs/tree_walk.ent > %t.all.ent
+// RUN: not grep -q '"lone"' %t.all.ent
+// RUN: %ent run %t.all.ent 2>/dev/null > %t.all.out
+// RUN: grep -v "^  lone$" %t.out | cmp - %t.all.out
 
 //   root -- a -- a1 -- a11        lone
 //       |     `- a2

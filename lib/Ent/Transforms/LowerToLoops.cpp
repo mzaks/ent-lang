@@ -6788,6 +6788,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       for (const WorldArchetype &archetype : layout.archetypes) {
         if (!matches(archetype, query))
           continue;
+        rewriter.setInsertionPoint(query);
         Operation *loops = emitEntityLoops(
             rewriter, loc, archetype, world, sequential,
             /*entityLocal=*/false,
@@ -6808,6 +6809,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
             },
             startCounts.lookup(&archetype));
         hoistResourceReads(rewriter, loops, world);
+        rewriter.setInsertionPoint(query);
       }
     };
     if (!leavesFirst)
