@@ -5095,6 +5095,148 @@ static void closeLogs(IRRewriter &rewriter, QueryOp query,
   }
 }
 
+/// Marks: a bit per position in i64 words (`marks`), for the entities a
+/// query that follows events has yet to look at. Set the bit of
+/// `position` (an index), at the insertion point.
+static void markBit(IRRewriter &rewriter, Location loc, Value marks,
+                    Value position) {
+  Value sixtyFour = arith::ConstantIndexOp::create(rewriter, loc, 64);
+  Value word = arith::DivUIOp::create(rewriter, loc, position, sixtyFour);
+  Value bit = arith::ShLIOp::create(
+      rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+      arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getI64Type(),
+          arith::RemUIOp::create(rewriter, loc, position, sixtyFour)));
+  Value old = memref::LoadOp::create(rewriter, loc, marks, ValueRange{word});
+  memref::StoreOp::create(rewriter, loc,
+                          arith::OrIOp::create(rewriter, loc, old, bit), marks,
+                          ValueRange{word});
+}
+
+/// Go through the marks of the first `count` positions from the lowest,
+/// at the insertion point: each is taken away and `visit` emits what
+/// happens at its position, which may set marks of later positions. The
+/// word is read again for every mark, since those may be in it too.
+/// Returns the loop.
+static scf::ForOp sweepMarks(IRRewriter &rewriter, Location loc, Value marks,
+                             Value count, function_ref<void(Value)> visit) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value sixtyFour = arith::ConstantIndexOp::create(rewriter, loc, 64);
+  Value words = arith::DivUIOp::create(
+      rewriter, loc,
+      arith::AddIOp::create(rewriter, loc, count,
+                            arith::ConstantIndexOp::create(rewriter, loc, 63)),
+      sixtyFour);
+  auto sweep = scf::ForOp::create(rewriter, loc, zero, words, one);
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(sweep.getBody()->getTerminator());
+  Value word = sweep.getInductionVar();
+  Type i64 = rewriter.getI64Type();
+  scf::WhileOp::create(
+      rewriter, loc, TypeRange{}, ValueRange{},
+      [&](OpBuilder &, Location, ValueRange) {
+        scf::ConditionOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ne,
+                memref::LoadOp::create(rewriter, loc, marks, ValueRange{word}),
+                arith::ConstantIntOp::create(rewriter, loc, 0, 64)),
+            ValueRange{});
+      },
+      [&](OpBuilder &, Location, ValueRange) {
+        Value bits =
+            memref::LoadOp::create(rewriter, loc, marks, ValueRange{word});
+        memref::StoreOp::create(
+            rewriter, loc,
+            arith::AndIOp::create(
+                rewriter, loc, bits,
+                arith::SubIOp::create(
+                    rewriter, loc, bits,
+                    arith::ConstantIntOp::create(rewriter, loc, 1, 64))),
+            marks, ValueRange{word});
+        Value lowest = LLVM::CountTrailingZerosOp::create(
+            rewriter, loc, i64, bits, /*is_zero_poison=*/true);
+        {
+          OpBuilder::InsertionGuard inner(rewriter);
+          visit(arith::AddIOp::create(
+              rewriter, loc,
+              arith::MulIOp::create(rewriter, loc, word, sixtyFour),
+              arith::IndexCastOp::create(rewriter, loc,
+                                         rewriter.getIndexType(), lowest)));
+        }
+        scf::YieldOp::create(rewriter, loc, ValueRange{});
+      });
+  return sweep;
+}
+
+/// For every entry of the event logs of a reactive query's triggers that
+/// the query has not read (see openLogs), at the insertion point: `event`
+/// emits what happens for the trigger and the entity's id, which may be
+/// of an entity that is no more.
+static void
+forEachEvent(IRRewriter &rewriter, QueryOp query, const WorldLayout &layout,
+             WorldAccess &world,
+             function_ref<void(const Trigger &, Value)> event) {
+  Location loc = query.getLoc();
+  SmallVector<Trigger> triggers = getTriggers(query);
+  auto index =
+      query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  for (auto [k, trigger] : llvm::enumerate(triggers)) {
+    const WorldLog &log = *layout.findLog(getStamp(trigger));
+    Value positions =
+        world.logPositions(log, layout.readPositions[index.getInt()][k]);
+    auto segments = scf::ForOp::create(
+        rewriter, loc, zero,
+        arith::ConstantIndexOp::create(rewriter, loc, log.segments), one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(segments.getBody()->getTerminator());
+    Value segment = segments.getInductionVar();
+    Value from = memref::LoadOp::create(rewriter, loc, positions,
+                                        ValueRange{segment});
+    Value to = memref::LoadOp::create(rewriter, loc, world.logEnds(log),
+                                      ValueRange{segment});
+    Value first = arith::MulIOp::create(
+        rewriter, loc, segment,
+        arith::ConstantIndexOp::create(rewriter, loc, log.segmentCapacity));
+    auto entries = scf::ForOp::create(rewriter, loc, world.toIndex(loc, from),
+                                      world.toIndex(loc, to), one);
+    rewriter.setInsertionPoint(entries.getBody()->getTerminator());
+    Value slot = arith::AddIOp::create(
+        rewriter, loc, first,
+        arith::AndIOp::create(
+            rewriter, loc, entries.getInductionVar(),
+            arith::ConstantIndexOp::create(rewriter, loc,
+                                           log.segmentCapacity - 1)));
+    event(trigger, memref::LoadOp::create(rewriter, loc, world.logIds(log),
+                                          ValueRange{slot}));
+  }
+}
+
+/// Open the logs of a reactive query that follows events down its tree
+/// (see openLogs), and return whether it goes through all `count`
+/// positions of the tree's order instead: where events were lost, and
+/// where they are many. Following costs several times a visit per entity
+/// it comes to, so with events for more than a sixteenth of the positions
+/// (those of the query's own last run are among them) it does not pay.
+static Value openLogsToFollow(IRRewriter &rewriter, QueryOp query,
+                              const WorldLayout &layout, WorldAccess &world,
+                              Value seen, Value count) {
+  Location loc = query.getLoc();
+  auto [lost, pending] = openLogs(rewriter, query, layout, world, seen);
+  return arith::OrIOp::create(
+      rewriter, loc, lost,
+      arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::sgt,
+          arith::MulIOp::create(
+              rewriter, loc, pending,
+              arith::ConstantIntOp::create(rewriter, loc, 16, 64)),
+          arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                     count)));
+}
+
 /// Walk the event logs of a reactive query's triggers, segment by segment,
 /// from where it last read each (its positions) to where it ended when the
 /// query started (the log's ends), at the insertion point, and run the
@@ -5536,7 +5678,107 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           triggers.empty() &&
           connects.empty() && !(combines && world.hasStamps()) &&
           sorted->capacity >= options.parallelMinEntities;
-      if (!mayRunInParallel) {
+      if (!mayRunInParallel && layout.cascadeFollowsEvents(query)) {
+        // Reactive, going where the events lead (see
+        // WorldLayout::cascadeFollowsEvents): the rows are in the tree's
+        // order, a row's children next to each other after it, and a mark
+        // per row says which the query has yet to look at. An entity with
+        // an event of its own gets one, and so do the children of an
+        // entity with an event that a trigger up the tree means; then the
+        // marked rows from the first, each passing marks on to its
+        // children if the body changed it. (An event marks more rows
+        // than the body runs for, which the body's own test of the ticks
+        // sorts out.) On the first run, and where events were lost or are
+        // many, every row as ever.
+        Value marked = world.treeMarks(relation);
+        auto forRows = [&](Value from, Value to, function_ref<void(Value)> at) {
+          auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
+          OpBuilder::InsertionGuard guard(rewriter);
+          rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+          at(loop.getInductionVar());
+        };
+        auto markChildren = [&](Value row) {
+          auto edge = [&](bool begin) {
+            return world.toIndex(
+                loc, memref::LoadOp::create(rewriter, loc,
+                                            world.childRows(*sorted, begin),
+                                            ValueRange{row}));
+          };
+          forRows(edge(true), edge(false),
+                  [&](Value child) { markBit(rewriter, loc, marked, child); });
+        };
+        Value scan =
+            openLogsToFollow(rewriter, query, layout, world, seen, rows);
+        auto scanOrFollow = scf::IfOp::create(rewriter, loc, scan,
+                                              /*withElseRegion=*/true);
+        rewriter.setInsertionPointToStart(scanOrFollow.thenBlock());
+        hoistResourceReads(rewriter, inOrder(roots, rows), world);
+        rewriter.setInsertionPointToStart(scanOrFollow.elseBlock());
+        forEachEvent(
+            rewriter, query, layout, world,
+            [&](const Trigger &trigger, Value id) {
+              emitLocate(
+                  rewriter, loc, layout, world, id,
+                  [&](const WorldArchetype &archetype) {
+                    return &archetype == sorted;
+                  },
+                  FlatSymbolRefAttr(), TypeRange{},
+                  [&](const WorldArchetype &, Value row,
+                      Value) -> SmallVector<Value> {
+                    OpBuilder::InsertionGuard inner(rewriter);
+                    if (trigger.via)
+                      markChildren(row);
+                    else
+                      markBit(rewriter, loc, marked, row);
+                    return {};
+                  },
+                  []() -> SmallVector<Value> { return {}; });
+            });
+        scf::ForOp sweep = sweepMarks(rewriter, loc, marked, rows, [&](Value row) {
+          // (An entity without a parent can have had an event; it is not
+          // visited.)
+          auto ifBelow = scf::IfOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::uge,
+                                    row, roots));
+          rewriter.setInsertionPointToStart(ifBelow.thenBlock());
+          auto ran = scf::IfOp::create(
+              rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 1));
+          {
+            OpBuilder::InsertionGuard inner(rewriter);
+            rewriter.setInsertionPointToStart(ran.thenBlock());
+            body(row, parentOf(row), /*parallel=*/false);
+          }
+          // What the body changed here that a trigger up the tree means
+          // has this query's tick, which no other event has.
+          Value changedHere;
+          for (const Trigger &trigger : triggers) {
+            const WorldColumn *column =
+                trigger.via ? sorted->findStamp(getStamp(trigger)) : nullptr;
+            if (!column)
+              continue;
+            Value now = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::eq,
+                memref::LoadOp::create(rewriter, loc,
+                                       world.stamps(*sorted, *column),
+                                       ValueRange{row}),
+                tick);
+            changedHere = changedHere
+                              ? arith::OrIOp::create(rewriter, loc,
+                                                     changedHere, now)
+                                    .getResult()
+                              : now;
+          }
+          if (changedHere) {
+            auto ifChanged = scf::IfOp::create(rewriter, loc, changedHere);
+            rewriter.setInsertionPointToStart(ifChanged.thenBlock());
+            markChildren(row);
+          }
+        });
+        hoistResourceReads(rewriter, sweep, world);
+        rewriter.setInsertionPoint(query);
+        closeLogs(rewriter, query, layout, world);
+      } else if (!mayRunInParallel) {
         hoistResourceReads(rewriter, inOrder(roots, rows), world);
       } else {
         Value depths = world.toIndex(
@@ -5712,18 +5954,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     // has yet to look at (see WorldLayout::cascadeFollowsEvents): a bit
     // per element of the list.
     LinkedTree tree(rewriter, loc, world, relation);
-    Value sixtyFour = arith::ConstantIndexOp::create(rewriter, loc, 64);
     auto markAt = [&](Value position) {
-      Value word = arith::DivUIOp::create(rewriter, loc, position, sixtyFour);
-      Value bit = arith::ShLIOp::create(
-          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
-          arith::IndexCastOp::create(
-              rewriter, loc, rewriter.getI64Type(),
-              arith::RemUIOp::create(rewriter, loc, position, sixtyFour)));
-      Value marksOf = world.treeMarks(relation);
-      tree.store(arith::OrIOp::create(rewriter, loc,
-                                      tree.load(marksOf, word), bit),
-                 marksOf, word);
+      markBit(rewriter, loc, world.treeMarks(relation), position);
     };
     // The entity with the key `key`, if it is in the list.
     auto markKey = [&](Value key) {
@@ -5881,102 +6113,23 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       // list's order, each passing marks on to its children if the body
       // changed it. (An event marks more entities than the body runs
       // for, which the body's own test of the ticks sorts out.)
-      auto [lost, pending] = openLogs(rewriter, query, layout, world, seen);
-      // Following costs several times a visit per entity it comes to, so
-      // where the events are many (more than a sixteenth of the list;
-      // those of the query's own last run are among them) it goes through
-      // the list as well.
-      Value scan = arith::OrIOp::create(
-          rewriter, loc, lost,
-          arith::CmpIOp::create(
-              rewriter, loc, arith::CmpIPredicate::sgt,
-              arith::MulIOp::create(
-                  rewriter, loc, pending,
-                  arith::ConstantIntOp::create(rewriter, loc, 16, 64)),
-              arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
-                                         count)));
+      Value scan =
+          openLogsToFollow(rewriter, query, layout, world, seen, count);
       auto scanOrFollow = scf::IfOp::create(rewriter, loc, scan,
                                             /*withElseRegion=*/true);
       rewriter.setInsertionPointToStart(scanOrFollow.thenBlock());
       visitAll();
       rewriter.setInsertionPointToStart(scanOrFollow.elseBlock());
-      auto index =
-          query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
-      for (auto [k, trigger] : llvm::enumerate(triggers)) {
-        const WorldLog &log = *layout.findLog(getStamp(trigger));
-        Value positions =
-            world.logPositions(log, layout.readPositions[index.getInt()][k]);
-        tree.forEach(
-            zero, arith::ConstantIndexOp::create(rewriter, loc, log.segments),
-            [&](Value segment) {
-              Value from = tree.load(positions, segment);
-              Value to = tree.load(world.logEnds(log), segment);
-              Value first = arith::MulIOp::create(
-                  rewriter, loc, segment,
-                  arith::ConstantIndexOp::create(rewriter, loc,
-                                                 log.segmentCapacity));
-              tree.forEach(world.toIndex(loc, from), world.toIndex(loc, to),
-                           [&](Value entry) {
-                Value slot = arith::AddIOp::create(
-                    rewriter, loc, first,
-                    arith::AndIOp::create(
-                        rewriter, loc, entry,
-                        arith::ConstantIndexOp::create(
-                            rewriter, loc, log.segmentCapacity - 1)));
-                Value id = tree.load(world.logIds(log), slot);
-                if (trigger.via)
-                  markChildren(id);
-                else
-                  markKey(world.entityKey(loc, id));
-              });
-            });
-      }
-      Value words = arith::DivUIOp::create(
-          rewriter, loc,
-          arith::AddIOp::create(
-              rewriter, loc, count,
-              arith::ConstantIndexOp::create(rewriter, loc, 63)),
-          sixtyFour);
-      auto sweep = scf::ForOp::create(rewriter, loc, zero, words, one);
-      {
-        OpBuilder::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPoint(sweep.getBody()->getTerminator());
-        Value word = sweep.getInductionVar();
-        Type i64 = rewriter.getI64Type();
-        // The word is read again for every mark: an entity's children
-        // may be in it too.
-        scf::WhileOp::create(
-            rewriter, loc, TypeRange{}, ValueRange{},
-            [&](OpBuilder &, Location, ValueRange) {
-              scf::ConditionOp::create(
-                  rewriter, loc,
-                  arith::CmpIOp::create(
-                      rewriter, loc, arith::CmpIPredicate::ne,
-                      tree.load(world.treeMarks(relation), word),
-                      arith::ConstantIntOp::create(rewriter, loc, 0, 64)),
-                  ValueRange{});
-            },
-            [&](OpBuilder &, Location, ValueRange) {
-              Value marksOf = world.treeMarks(relation);
-              Value bits = tree.load(marksOf, word);
-              tree.store(
-                  arith::AndIOp::create(
-                      rewriter, loc, bits,
-                      arith::SubIOp::create(
-                          rewriter, loc, bits,
-                          arith::ConstantIntOp::create(rewriter, loc, 1, 64))),
-                  marksOf, word);
-              Value lowest = LLVM::CountTrailingZerosOp::create(
-                  rewriter, loc, i64, bits, /*is_zero_poison=*/true);
-              Value at = arith::AddIOp::create(
-                  rewriter, loc,
-                  arith::MulIOp::create(rewriter, loc, word, sixtyFour),
-                  arith::IndexCastOp::create(rewriter, loc,
-                                             rewriter.getIndexType(), lowest));
-              visitAt(at, /*following=*/true);
-              scf::YieldOp::create(rewriter, loc, ValueRange{});
-            });
-      }
+      forEachEvent(rewriter, query, layout, world,
+                   [&](const Trigger &trigger, Value id) {
+                     if (trigger.via)
+                       markChildren(id);
+                     else
+                       markKey(world.entityKey(loc, id));
+                   });
+      scf::ForOp sweep =
+          sweepMarks(rewriter, loc, world.treeMarks(relation), count,
+                     [&](Value at) { visitAt(at, /*following=*/true); });
       hoistResourceReads(rewriter, sweep, world);
       rewriter.setInsertionPoint(query);
       closeLogs(rewriter, query, layout, world);

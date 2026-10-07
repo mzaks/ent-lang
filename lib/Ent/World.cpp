@@ -94,7 +94,7 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
     return false;
   FlatSymbolRefAttr cascade = query.getCascade();
   const WorldRelation &tree = getRelation(cascade.getAttr());
-  if (!tree.linked ||
+  if (!(tree.linked || tree.sortedArchetype() >= 0) ||
       llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
         auto ref = dyn_cast<RefType>(type);
         return ref && ref.getVia() == cascade;
@@ -511,6 +511,23 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   });
 
   // Relations: the edge table, the offsets, and the scratch for sorting.
+  // The marks of a tree that some reactive query follows events down.
+  auto placeMarks = [&](WorldRelation &relation, int64_t bits) {
+    bool followed = false;
+    module.walk([&](QueryOp query) {
+      followed |= query.getCascade() &&
+                  query.getCascade().getAttr() ==
+                      RelationOp(relation.op).getSymNameAttr() &&
+                  layout.cascadeFollowsEvents(query);
+    });
+    if (!followed)
+      return;
+    relation.markBits = bits;
+    relation.marksOffset = llvm::alignTo(end, kColumnAlignment);
+    end = relation.marksOffset + 8 * relation.markWords();
+    layout.zeroed.push_back(
+        {relation.marksOffset, uint64_t(8 * relation.markWords())});
+  };
   for (WorldRelation &relation : layout.relations) {
     RelationOp op = relation.op;
     StringAttr name = op.getSymNameAttr();
@@ -572,19 +589,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       // before anything follows them: a new world's trees are unclean.)
       layout.zeroed.push_back({relation.sourceOffset, idBytes * keys});
       relation.orderCapacity = 2 * relation.capacity;
-      bool followed = false;
-      module.walk([&](QueryOp query) {
-        followed |= query.getCascade() &&
-                    query.getCascade().getAttr() ==
-                        RelationOp(relation.op).getSymNameAttr() &&
-                    layout.cascadeFollowsEvents(query);
-      });
-      if (followed) {
-        relation.marksOffset = llvm::alignTo(end, kColumnAlignment);
-        end = relation.marksOffset + 8 * relation.markWords();
-        layout.zeroed.push_back(
-            {relation.marksOffset, uint64_t(8 * relation.markWords())});
-      }
+      placeMarks(relation, relation.orderCapacity);
       auto perEdge = [&](uint64_t bytes) {
         uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
         end = offset + bytes * relation.orderCapacity;
@@ -637,6 +642,9 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       relation.orderCapacity = edges;
       relation.orderOffset = place(idBytes, edges);
       relation.orderParentOffset = place(idBytes, edges);
+      if (relation.sortedArchetype() >= 0)
+        placeMarks(relation,
+                   layout.archetypes[relation.sortedArchetype()].capacity);
     }
   }
 

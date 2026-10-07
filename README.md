@@ -389,13 +389,15 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   (`on [changed @Local, changed @World "x" up @Under]`): an ancestor's
   stamp is read where the ancestor is, so what the query wrote there a
   depth before counts, and a change goes down the tree in one pass. Such
-  a query over an unsorted tree goes from the entities in its triggers'
-  event logs, and from each one it changes, down the children's links:
-  it marks them in a bitmap over the tree's list and visits the marked
-  ones in the list's order, so its time follows the entities it comes
-  to. Otherwise (a sorted tree, `leaves first`, no log, a log that lost
-  events) it goes through the whole tree and runs its body where a
-  trigger fired.
+  a query goes from the entities in its triggers' event logs, and from
+  each one it changes, down to the children: it marks them in a bitmap
+  over the tree's order (an unsorted tree's list, with the children's
+  links; the rows of a tree sorted in one archetype, with each row's
+  range of child rows) and visits the marked ones in that order, so its
+  time follows the entities it comes to. Otherwise (a sorted tree in
+  several archetypes, `leaves first`, no log, a log that lost events)
+  it goes through the whole tree and runs its body where a trigger
+  fired.
   It runs on one core unless its tree is sorted in one archetype (see
   Fusion and entity parallelism).
   A tree may be `sorted` (`... from @Node to @Node tree sorted capacity

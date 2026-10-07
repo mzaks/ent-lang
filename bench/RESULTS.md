@@ -2494,7 +2494,7 @@ us per step, median (spread):
 ### What holds
 
 - Following the events, the time is the moves': at 1e6 nodes in a bushy
-  tree 3.3 us with nothing moved (the bitmap's 31,250 words), 5.0 with
+  tree 3.3 us with nothing moved, 5.0 with
   one node, 140 with a hundred, against 630-670 for placing everything:
   0.005x, 0.008x, 0.2x.
 - A moved node costs some 1.4 us at 1e6 (0.35 at 1e5), with the nine
@@ -2536,3 +2536,45 @@ us per step, median (spread):
 - A second level over the bitmap, which would take the 3.3 us of an
   idle step at 1e6 to nothing: not built.
 - Larger event logs (`log N`) for the deep tree.
+
+## 2026-10-07: a sorted tree follows events too
+
+The same benchmark, after a reactive `for` over a tree sorted in one
+archetype was made to go where the events lead as well: the marks are a
+bit per row, and a row's children are the rows from its child range's
+begin to its end. Native, one core (`taskset -c 2`), 3 processes of 100
+steps each, 1e6 nodes; all variants agree on the checksum (also at 1e4
+and 1e5).
+
+us per step, median (spread):
+
+| shape | moves | reached | full | reactive | full-sorted | reactive-sorted |
+|---|---|---|---|---|---|---|
+| bushy | 0 | 0 | 622.3 (3%) | 3.3 (1%) | 233.6 (2%) | 3.3 (1%) |
+| bushy | 1 | 5 | 635.2 (6%) | 5.1 (2%) | 234.3 (8%) | **4.3 (2%)** |
+| bushy | 10 | 57 | 650.4 (7%) | 18.4 (1%) | 242.5 (0%) | **9.7 (0%)** |
+| bushy | 100 | 894 | 632.9 (6%) | 140.1 (2%) | 235.3 (3%) | **63.2 (0%)** |
+| bushy | 1000 | 20,431 | 653.8 (5%) | 1,653.9 (4%) | **239.3 (0%)** | 638.8 (3%) |
+| deep | 0 | 0 | 461.2 (10%) | 3.3 (0%) | 379.8 (2%) | 3.3 (1%) |
+| deep | 1 | 96,024 | 450.3 (3%) | 588.6 (0%) | **376.5 (2%)** | 453.2 (1%) |
+| deep | 10 | 1,221,576 | 447.9 (2%) | 1,606.2 (0%) | **378.1 (1%)** | 1,350.7 (0%) |
+| deep | 100 | 10,575,314 | 450.7 (2%) | 2,018.3 (0%) | **381.4 (1%)** | 1,746.3 (1%) |
+| deep | 1000 | 109,895,143 | 451.2 (3%) | 2,082.6 (1%) | **385.9 (2%)** | 1,835.2 (1%) |
+
+### What holds
+
+- The sorted tree's reactive `for` was 384-427 us for 0-100 moves in the
+  bushy tree and is 3.3-63: with one node moved, 0.018x of placing every
+  row, and with a hundred 0.27x.
+- A moved node costs about 0.6 us, under half the unsorted tree's 1.4:
+  its children are rows next to each other, not links to follow.
+- It wins up to about 350 moves a step (the full `for` over a sorted
+  tree is the fastest thing there is to beat), and loses beyond: 2.7x at
+  1000 moves, 1.2x-4.8x in the deep tree, as before.
+- An idle step takes 3.3 us over either tree, with a bitmap of half the
+  words for the sorted one: so that is not the bitmap. Not looked into.
+
+### Not measured
+
+- A sorted tree across several archetypes, which still goes through
+  every row.

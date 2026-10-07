@@ -252,12 +252,14 @@ struct WorldRelation {
   uint64_t orderParentLocationOffset = 0;
   uint64_t staleOffset = 0;
   bool hasLocations() const { return orderLocationOffset != 0; }
-  /// For a linked tree that a reactive query follows events down (see
-  /// cascadeFollowsEvents): a bit per element of the list, in i64 words,
-  /// set for the entities such a query has yet to look at. All are 0
-  /// between queries.
+  /// For a tree that a reactive query follows events down (see
+  /// cascadeFollowsEvents): a bit per element of a linked tree's list, or
+  /// per row of the one archetype a sorted tree is stored in, in i64
+  /// words, set for the entities such a query has yet to look at. All are
+  /// 0 between queries.
   uint64_t marksOffset = 0;
-  int64_t markWords() const { return (orderCapacity + 63) / 64; }
+  int64_t markBits = 0;
+  int64_t markWords() const { return (markBits + 63) / 64; }
   /// Elements of the list: an edge each, or for a linked tree twice that,
   /// which leaves room for the entries of entities that moved to its end
   /// (their old ones are all ones, and skipped) before it is made again.
@@ -433,10 +435,12 @@ struct WorldLayout {
   /// Whether the reactive, cascading `query` goes only where its events
   /// lead, instead of through its whole tree: from the entities in its
   /// triggers' event logs, and from each one it changes, down to the
-  /// children. That needs the tree's links (not a sorted tree), parents
-  /// first, a log for every trigger, a ref up the tree (so that the
-  /// entities without a parent, which are not in the tree's list, are not
-  /// visited), and for a trigger up the tree the parent itself to be the
+  /// children. That needs an order in which an entity's children come
+  /// after it and can be found from it (a linked tree's list and links,
+  /// or the rows of a tree sorted in one archetype), parents first, a log
+  /// for every trigger, a ref up the tree (so that the entities without a
+  /// parent are not visited), and for a trigger up the tree the parent
+  /// itself to be the
   /// ancestor it means (the relation's targets all have the component).
   bool cascadeFollowsEvents(QueryOp query) const;
 
