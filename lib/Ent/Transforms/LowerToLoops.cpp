@@ -605,7 +605,7 @@ public:
   /// sibling before it, and the sibling it had before the tree's order
   /// was last made.
   Value siblingTicks(const WorldRelation &relation) {
-    return view(relation.siblingTicksOffset, layout.entityKeys + 1,
+    return view(relation.siblingTicksOffset, layout.entityKeys,
                 rewriter.getI64Type());
   }
   Value siblingsBefore(const WorldRelation &relation) {
@@ -617,11 +617,53 @@ public:
                 offsetType(relation));
   }
   /// Per entity key, the tick at which the entity last gained or lost a
-  /// child in the tree. (After these, as after the siblings' ticks, the
-  /// latest of any: at `latestConnect`.)
+  /// child in the tree.
   Value childTicks(const WorldRelation &relation) {
-    return view(relation.childTicksOffset, layout.entityKeys + 1,
+    return view(relation.childTicksOffset, layout.entityKeys,
                 rewriter.getI64Type());
+  }
+  /// The entities that last got other children or siblings in the tree,
+  /// for the queries that follow events: their ids and the ticks, in a
+  /// ring, and how many there have been ever and the tick of the newest
+  /// that the ring has lost (i64 each).
+  Value touchedIds(const WorldRelation &relation) {
+    return view(relation.touchedOffset, WorldRelation::kTouched, idType());
+  }
+  Value touchedTicks(const WorldRelation &relation) {
+    return view(relation.touchedTicksOffset, WorldRelation::kTouched,
+                rewriter.getI64Type());
+  }
+  Value touchedState(const WorldRelation &relation) {
+    return view(relation.touchedStateOffset, 2, rewriter.getI64Type());
+  }
+  /// The entity `id` has other children or siblings from here on.
+  void touch(Location loc, const WorldRelation &relation, Value id) {
+    if (!relation.touchedOffset)
+      return;
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value state = touchedState(relation);
+    Value count = memref::LoadOp::create(rewriter, loc, state, ValueRange{zero});
+    Value slot = arith::AndIOp::create(
+        rewriter, loc, toIndex(loc, count),
+        arith::ConstantIndexOp::create(rewriter, loc,
+                                       WorldRelation::kTouched - 1));
+    Value ticks = touchedTicks(relation);
+    // (The entry this one takes the place of is lost; the first ones take
+    // the place of none, whose tick is 0.)
+    memref::StoreOp::create(
+        rewriter, loc,
+        memref::LoadOp::create(rewriter, loc, ticks, ValueRange{slot}), state,
+        ValueRange{one});
+    memref::StoreOp::create(rewriter, loc, id, touchedIds(relation),
+                            ValueRange{slot});
+    memref::StoreOp::create(rewriter, loc, currentTick(loc), ticks,
+                            ValueRange{slot});
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::AddIOp::create(rewriter, loc, count,
+                              arith::ConstantIntOp::create(rewriter, loc, 1, 64)),
+        state, ValueRange{zero});
   }
   /// Per entity key, what an ordered tree's children are ordered by, as
   /// read when the order was last made.
@@ -3653,9 +3695,12 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
       memref::StoreOp::create(
           rewriter, at, world.currentTick(at), world.childTicks(relation),
           ValueRange{out ? world.entityKey(at, otherId) : key});
-      memref::StoreOp::create(
-          rewriter, at, world.currentTick(at), world.childTicks(relation),
-          ValueRange{world.latestConnect(at)});
+      // (Bodies may run on several threads, which the ring of those
+      // that changed is not made for: it says it has lost this one.)
+      if (relation.touchedOffset)
+        memref::StoreOp::create(
+            rewriter, at, world.currentTick(at), world.touchedState(relation),
+            ValueRange{arith::ConstantIndexOp::create(rewriter, at, 1)});
     }
     Value zero = arith::ConstantIndexOp::create(rewriter, at, 0);
     memref::StoreOp::create(rewriter, at,
@@ -4625,13 +4670,13 @@ struct LinkedTree {
                                            relation.offsetBits)),
           childCount(), parent);
   }
-  /// The entity with the key `parent` gains or loses a child, which is an
-  /// event where a reactive query has a trigger down the tree.
+  /// The entity `parent` gains or loses a child, which is an event where
+  /// a reactive query has a trigger down the tree.
   void childrenChanged(Value parent) {
     if (relation.childTicksOffset) {
-      store(world.currentTick(loc), world.childTicks(relation), parent);
       store(world.currentTick(loc), world.childTicks(relation),
-            world.latestConnect(loc));
+            world.entityKey(loc, parent));
+      world.touch(loc, relation, parent);
     }
   }
   /// The slot `slot` leaves the children of the key its target has.
@@ -4644,11 +4689,10 @@ struct LinkedTree {
     if (relation.siblingTicksOffset)
       for (Value neighbour : {next, previous})
         branch(negate(isNone(neighbour)), [&] {
-          store(world.currentTick(loc), world.siblingTicks(relation),
-                arith::SubIOp::create(rewriter, loc,
-                                      world.toIndex(loc, neighbour), one));
-          store(world.currentTick(loc), world.siblingTicks(relation),
-                world.latestConnect(loc));
+          Value beside = arith::SubIOp::create(
+              rewriter, loc, world.toIndex(loc, neighbour), one);
+          store(world.currentTick(loc), world.siblingTicks(relation), beside);
+          world.touch(loc, relation, sourceOf(beside));
         });
     auto before = [&](Value linkValue) {
       return arith::SubIOp::create(rewriter, loc,
@@ -4862,10 +4906,10 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
     });
   });
   tree.branch(isOwn, [&] {
-    tree.childrenChanged(world.entityKey(loc, tree.load(tree.targets(), slot)));
+    tree.childrenChanged(tree.load(tree.targets(), slot));
     tree.unlink(slot);
   });
-  tree.childrenChanged(parentKey);
+  tree.childrenChanged(target);
   tree.branch(isNew, [&] {
     Value counter = world.edgeCount(relation);
     Value count = tree.load(counter, zero);
@@ -4976,8 +5020,7 @@ static void emitDropFunction(IRRewriter &rewriter, ModuleOp module,
   tree.branch(
       tree.same(tree.load(tree.sources(), slot), world.slotOwner(loc, id)),
       [&] {
-        tree.childrenChanged(
-            world.entityKey(loc, tree.load(tree.targets(), slot)));
+        tree.childrenChanged(tree.load(tree.targets(), slot));
         tree.unlink(slot);
         tree.clearSlot(slot);
       });
@@ -5221,8 +5264,7 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
           [&] {
             tree.store(world.currentTick(loc), world.siblingTicks(relation),
                        key);
-            tree.store(world.currentTick(loc), world.siblingTicks(relation),
-                       world.latestConnect(loc));
+            world.touch(loc, relation, tree.sourceOf(key));
           });
     });
   if (!relation.hasLocations())
@@ -8226,30 +8268,49 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       Value scan =
           openLogsToFollow(rewriter, query, layout, world, seen, count);
       // That an entity has other children or siblings than it had is in
-      // no log: where any has since the query last ran, all are asked.
-      bool down = false, beside = false;
-      for (const Trigger &trigger : triggers) {
-        down |= trigger.where == Trigger::Down;
-        beside |= trigger.where == Trigger::Before ||
-                  trigger.where == Trigger::After;
-      }
-      for (Value ticks :
-           {down && relation.childTicksOffset ? world.childTicks(relation)
-                                              : Value(),
-            beside && relation.siblingTicksOffset
-                ? world.siblingTicks(relation)
-                : Value()})
-        if (ticks)
-          scan = arith::OrIOp::create(
-              rewriter, loc, scan,
-              arith::CmpIOp::create(
-                  rewriter, loc, arith::CmpIPredicate::sgt,
-                  tree.load(ticks, world.latestConnect(loc)), seen));
+      // a ring the tree keeps of those: all are asked where it has lost
+      // one since the query last ran.
+      bool touches = relation.touchedOffset &&
+                     llvm::any_of(triggers, [](const Trigger &trigger) {
+                       return trigger.where == Trigger::Down ||
+                              trigger.where == Trigger::Before ||
+                              trigger.where == Trigger::After;
+                     });
+      if (touches)
+        scan = arith::OrIOp::create(
+            rewriter, loc, scan,
+            arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::sgt,
+                tree.load(world.touchedState(relation), one), seen));
       auto scanOrFollow = scf::IfOp::create(rewriter, loc, scan,
                                             /*withElseRegion=*/true);
       rewriter.setInsertionPointToStart(scanOrFollow.thenBlock());
       visitAll();
       rewriter.setInsertionPointToStart(scanOrFollow.elseBlock());
+      // The ones with other children or siblings since: themselves.
+      if (touches) {
+        Value last = arith::ConstantIndexOp::create(
+            rewriter, loc, WorldRelation::kTouched - 1);
+        Value ever = world.toIndex(
+            loc, tree.load(world.touchedState(relation), zero));
+        Value kept = arith::MinUIOp::create(
+            rewriter, loc, ever,
+            arith::ConstantIndexOp::create(rewriter, loc,
+                                           WorldRelation::kTouched));
+        tree.forEach(zero, kept, [&](Value back) {
+          Value slot = arith::AndIOp::create(
+              rewriter, loc,
+              arith::SubIOp::create(
+                  rewriter, loc, arith::SubIOp::create(rewriter, loc, ever, one),
+                  back),
+              last);
+          tree.branch(
+              arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::sgt,
+                  tree.load(world.touchedTicks(relation), slot), seen),
+              [&] { markEntity(tree.load(world.touchedIds(relation), slot)); });
+        });
+      }
       forEachEvent(rewriter, query, layout, world,
                    [&](const Trigger &trigger, Value id) {
                      Value key = world.entityKey(loc, id);

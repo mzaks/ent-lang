@@ -62,8 +62,10 @@ world {
 // A node is another size in three frames of four, one that moves on
 // through the nodes (those in no tree too), and in every third another
 // node has another tip; every fifth frame a node
-// takes a later slot among its siblings; in frame 23 a leaf goes, and in
-// frame 31 a node of the spine is put under the first, with all under it.
+// takes a later slot among its siblings; in frame 23 a leaf goes, in
+// frame 31 a node of the spine is put under the first, with all under it,
+// and in every seventh frame there is a new node under the first, or
+// (every fourteenth) one that is in no tree.
 system change() {
   Frame += 1
   for n: mut Node where Frame % 4 != 0 && n.index == (Frame * 37) % 491 {
@@ -77,6 +79,14 @@ system change() {
   }
   for e, n: Node where Frame == 23 && n.index == 488 { e.destroy() }
   for e, n: Node where Frame == 31 && n.index == 123 { connect (e)-[In]->(Home) }
+  for e, n: Node where Frame % 7 == 0 && n.index == 0 {
+    let made = spawn {
+      Node { index: 1000 + Frame, base: 3.0, tip: 1.0 }, Slot { at: 1 },
+      Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
+      Full { sum: 0.0, w: 0.0, x: 0.0 }
+    }
+    if Frame % 14 != 0 { connect (made)-[In]->(e) }
+  }
 }
 
 // As wide as itself and all under it: from the leaves.

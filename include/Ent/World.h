@@ -317,16 +317,23 @@ struct WorldRelation {
   uint64_t rowOrderParentOffset = 0;
   /// Where a reactive query has a trigger before or after this tree: per
   /// entity key the tick at which the entity last got another sibling
-  /// before it or after it (i64; and after those the latest of any), and,
-  /// while the tree's order is made, the siblings each had before and
-  /// after (links).
+  /// before it or after it (i64), and, while the tree's order is made,
+  /// the siblings each had before and after (links).
   uint64_t siblingTicksOffset = 0;
   uint64_t siblingsBeforeOffset = 0;
   uint64_t siblingsAfterOffset = 0;
   /// Where a reactive query has a trigger down this tree: per entity key
-  /// the tick at which the entity last gained or lost a child (i64), and
-  /// after those the latest of any.
+  /// the tick at which the entity last gained or lost a child (i64).
   uint64_t childTicksOffset = 0;
+  /// With either: a ring of the last `kTouched` entities that got other
+  /// children or siblings (ids), the tick of each (i64), and how many
+  /// there have been ever and the tick of the newest the ring has lost
+  /// (i64 each). A query that follows events goes to those since its
+  /// last run, or through everything if one of them is lost.
+  static constexpr int64_t kTouched = 256;
+  uint64_t touchedOffset = 0;
+  uint64_t touchedTicksOffset = 0;
+  uint64_t touchedStateOffset = 0;
   /// For a tree that a reactive query follows events down (see
   /// cascadeFollowsEvents): a bit per element of a linked tree's list, or
   /// per row of the one archetype a sorted tree is stored in, in i64

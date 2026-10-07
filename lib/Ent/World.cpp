@@ -681,19 +681,29 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
                     trigger.where == Trigger::After;
       }
     });
-    // (And one more of each: the tick of the latest of any entity.)
     if (asked) {
       relation.childTicksOffset = llvm::alignTo(end, kColumnAlignment);
-      end = relation.childTicksOffset + 8 * (layout.entityKeys + 1);
+      end = relation.childTicksOffset + 8 * layout.entityKeys;
       layout.zeroed.push_back(
-          {relation.childTicksOffset, uint64_t(8 * (layout.entityKeys + 1))});
+          {relation.childTicksOffset, uint64_t(8 * layout.entityKeys)});
+    }
+    // (And the ring of the entities these last happened to.)
+    if (asked || siblings) {
+      relation.touchedOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.touchedOffset +
+            scheme.idBits / 8 * WorldRelation::kTouched;
+      relation.touchedTicksOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.touchedTicksOffset + 8 * WorldRelation::kTouched;
+      relation.touchedStateOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.touchedStateOffset + 16;
+      layout.zeroed.push_back({relation.touchedOffset,
+                               end - relation.touchedOffset});
     }
     if (siblings) {
       relation.siblingTicksOffset = llvm::alignTo(end, kColumnAlignment);
-      end = relation.siblingTicksOffset + 8 * (layout.entityKeys + 1);
+      end = relation.siblingTicksOffset + 8 * layout.entityKeys;
       layout.zeroed.push_back(
-          {relation.siblingTicksOffset,
-           uint64_t(8 * (layout.entityKeys + 1))});
+          {relation.siblingTicksOffset, uint64_t(8 * layout.entityKeys)});
       relation.siblingsBeforeOffset = llvm::alignTo(end, kColumnAlignment);
       end = relation.siblingsBeforeOffset +
             relation.offsetBits / 8 * layout.entityKeys;
