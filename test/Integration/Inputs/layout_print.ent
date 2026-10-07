@@ -27,7 +27,6 @@ world {
   }
   connect(side, root, Inside)
   connect(rest, root, Inside)
-  connect(rest, side, After)
 
   let header = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
@@ -41,21 +40,21 @@ world {
   }
   connect(header, rest, Inside)
   connect(body, rest, Inside)
-  connect(body, header, After)
 
   let ok = spawn {
     Box { x: 0.0, y: 0.0, w: 60.0, h: 20.0 },
     Size { w: Sizing.Fixed, h: Sizing.Fixed },
-    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "ok" }
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "ok" },
+    Slot { at: 0 }
   }
   let cancel = spawn {
     Box { x: 0.0, y: 0.0, w: 90.0, h: 30.0 },
     Size { w: Sizing.Fixed, h: Sizing.Fixed },
-    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "cancel" }
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "cancel" },
+    Slot { at: 1 }
   }
   connect(ok, header, Inside)
   connect(cancel, header, Inside)
-  connect(cancel, ok, After)
 
   let left = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
@@ -69,15 +68,16 @@ world {
   }
   connect(left, body, Inside)
   connect(right, body, Inside)
-  connect(right, left, After)
 }
 
 // In the second frame the side bar is narrower, in the third the body's
-// columns are below one another.
+// columns are below one another, and in the fourth the first button is
+// given a later slot than the second.
 system change() {
   Frame += 1
   for b: mut Box, n: Name where Frame == 2 && b.w == 200.0 { b.w = 100.0 }
   for k: mut Stack where Frame == 3 && k.gap == 20.0 { k.row = false }
+  for s: mut Slot where Frame == 4 && s.at == 0 { s.at = 2 }
 }
 
 system show() {
@@ -86,4 +86,4 @@ system show() {
 }
 
 schedule frame() { change()  layout()  show() }
-main { loop { frame() } until Frame == 3 }
+main { loop { frame() } until Frame == 4 }

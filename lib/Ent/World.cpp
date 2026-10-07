@@ -97,7 +97,8 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
   if (!(tree.linked || !tree.sortedArchetypes.empty()) ||
       llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
         auto ref = dyn_cast<RefType>(type);
-        return ref && ref.getVia() == cascade;
+        return ref && ref.getVia() == cascade && !ref.getIsBefore() &&
+               !ref.getIsOptional();
       }))
     return false;
   for (const Trigger &trigger : triggers) {
@@ -286,6 +287,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     entry.cleanOffset = end + 8;
     end += 16;
     entry.tree = relation.getTree();
+    if (relation.isOrdered()) {
+      entry.orderComponent = relation.getOrderComponentAttr().getAttr();
+      entry.orderField = relation.getOrderFieldAttr();
+    }
     entry.linked = relation.getTree() && !relation.getSorted();
     for (bool target : {false, true})
       entry.trusted[target] = getTrustedEndpoint(relation, target);
@@ -544,6 +549,14 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   });
 
   // Relations: the edge table, the offsets, and the scratch for sorting.
+  // The number of each entity's connect, for a tree with an order.
+  for (WorldRelation &relation : layout.relations)
+    if (relation.isOrdered()) {
+      relation.sequenceOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.sequenceOffset + 8 * (layout.entityKeys + 1);
+      layout.zeroed.push_back(
+          {relation.sequenceOffset, uint64_t(8 * (layout.entityKeys + 1))});
+    }
   // When each entity was connected, for a tree some trigger is up.
   for (WorldRelation &relation : layout.relations)
     if (llvm::is_contained(

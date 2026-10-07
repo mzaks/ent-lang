@@ -1,8 +1,8 @@
 // Layout: boxes inside boxes, each as wide and high as it is told, as its
 // content needs or as there is room, placed in a row or a column inside
 // the box it is in. A library: a program imports it, makes boxes, says
-// which is inside which and which comes after which, and runs `layout`
-// (examples/layout_demo.ent draws the result in a window).
+// which is inside which, and runs `layout` (examples/layout_demo.ent
+// draws the result in a window).
 //
 // The sizes are those of Clay (github.com/nicbarker/clay): a box is
 // `fixed` (as wide as `w` says), `fit` (as wide as what is in it) or
@@ -23,29 +23,29 @@ component Size { w: Sizing, h: Sizing }
 // them.
 component Stack { row: bool, pad: f32, gap: f32 }
 
+// Where a box comes among those in the same box: smaller first. Boxes
+// without one, or with the same, are in the order they were made.
+component Slot { at: i32 }
+
 // What `layout` keeps for itself, and gives to every box that has not
 // got it: what the boxes inside a box come to (how many, their widths and
-// heights added and the largest, and how many of them grow), and how far
-// along its box's row or column a box starts.
+// heights added and the largest, and how many of them grow).
 component Content {
   count: i32, sum_w: f32, max_w: f32, sum_h: f32, max_h: f32,
   grow_w: i32, grow_h: i32
 }
-component Offset { along: f32 }
 
-// From a box to the one it is in.
-relation Inside from Box to Box tree capacity 256
-// From a box to the one before it in the same box. The first has none.
-relation After from Box to Box tree capacity 256
+// From a box to the one it is in; the boxes in one box are in the order
+// of their slots.
+relation Inside from Box to Box tree ordered by Slot.at capacity 256
 
-// Four passes over the boxes, each a `for` along a tree.
+// Three passes over the boxes, each a `for` along the tree.
 system layout() {
   for e, b: Box without Content {
     e.add(Content {
       count: 0, sum_w: 0.0, max_w: 0.0, sum_h: 0.0, max_h: 0.0,
       grow_w: 0, grow_h: 0
     })
-    e.add(Offset { along: 0.0 })
   }
 
   // As wide and as high as what is in it, from the innermost boxes out:
@@ -96,16 +96,16 @@ system layout() {
     }
   }
 
-  // A box starts where the one before it ends, and a gap further.
-  for o: mut Offset, before: Offset up After, b: Box up After,
-      k: Stack up Inside cascade After {
-    o.along = before.along + (if k.row { b.w } else { b.h }) + k.gap
-  }
-
-  // And is that far along its box's row or column, inside the padding.
-  for b: mut Box, o: Offset, outer: Box up Inside, k: Stack up Inside
-      cascade Inside {
-    b.x = outer.x + k.pad + (if k.row { o.along } else { 0.0 })
-    b.y = outer.y + k.pad + (if k.row { 0.0 } else { o.along })
+  // A box starts where the one before it in the same box ends, and a
+  // gap further; the first inside the padding of the box they are in.
+  // Across the row or column, all start at the padding. The box before
+  // has been placed when a box is: boxes in one box are visited in order.
+  for b: mut Box, outer: Box up Inside, k: Stack up Inside,
+      optional prev: Box before Inside cascade Inside {
+    b.x = outer.x + k.pad
+    b.y = outer.y + k.pad
+    if let x = prev.x, let y = prev.y, let w = prev.w, let h = prev.h {
+      if k.row { b.x = x + w + k.gap } else { b.y = y + h + k.gap }
+    }
   }
 }

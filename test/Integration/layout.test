@@ -1,6 +1,7 @@
 // examples/layout.ent, a library that lays boxes out inside boxes with
-// four `for`s along two trees (which box a box is in, and which comes
-// before it there): Inputs/layout_print.ent prints where a small window's
+// three `for`s along a tree whose children are in an order (which box a
+// box is in, and where among those in it): Inputs/layout_print.ent prints
+// where a small window's
 // boxes end up, and examples/layout_demo.ent, which draws one, compiles.
 // RUN: %ent run -I %S/../../examples %S/Inputs/layout_print.ent 2>/dev/null \
 // RUN:   | FileCheck %s
@@ -22,20 +23,24 @@
 // body has the height that is left under it and the gap.
 // CHECK-NEXT: 1: header 220.0 10.0 570.0 40.0
 // CHECK-NEXT: 1: body 220.0 56.0 570.0 534.0
-// The second button starts where the first ends, and a gap further.
-// CHECK-NEXT: 1: ok 225.0 15.0 60.0 20.0
-// CHECK-NEXT: 1: cancel 288.0 15.0 90.0 30.0
 // The columns share the body's width less the gap between them.
 // CHECK-NEXT: 1: left 220.0 56.0 275.0 534.0
 // CHECK-NEXT: 1: right 515.0 56.0 275.0 534.0
+// The second button starts where the first ends, and a gap further.
+// CHECK-NEXT: 1: ok 225.0 15.0 60.0 20.0
+// CHECK-NEXT: 1: cancel 288.0 15.0 90.0 30.0
 // A narrower side bar: everything next to it moves and widens.
 // CHECK:      2: side 10.0 10.0 100.0 580.0
 // CHECK-NEXT: 2: rest 120.0 10.0 670.0 580.0
-// CHECK:      2: cancel 188.0 15.0 90.0 30.0
-// CHECK-NEXT: 2: left 120.0 56.0 325.0 534.0
+// CHECK:      2: left 120.0 56.0 325.0 534.0
 // CHECK-NEXT: 2: right 465.0 56.0 325.0 534.0
+// CHECK:      2: cancel 188.0 15.0 90.0 30.0
 // The body's two below one another: each as wide as it, sharing its
 // height.
 // CHECK:      3: left 120.0 56.0 670.0 257.0
 // CHECK-NEXT: 3: right 120.0 333.0 670.0 257.0
+// The first button given a later slot than the second: they change
+// places.
+// CHECK:      4: ok 218.0 15.0 60.0 20.0
+// CHECK-NEXT: 4: cancel 125.0 15.0 90.0 30.0
 // CHECK-NOT:  {{.}}

@@ -1,0 +1,63 @@
+// A tree whose children are in an order (tree_order.test): by their
+// slots, and by when they were connected where those are the same or
+// missing.
+// Every node starts where the sibling before it ends, the first where
+// its parent starts, and the root at 100.
+import console
+
+component Node { name: text[8], size: i32, start: i32 }
+component Slot { at: i32 }
+default_capacity 16
+relation Under from Node to Node tree ordered by Slot.at capacity 16
+unique Frame: i32
+unique Root: entity
+
+world {
+  let root = spawn { Node { name: "root", size: 0, start: 0 } }
+  // Connected a, b, c; their slots say b, a, c.
+  let a = spawn { Node { name: "a", size: 10, start: 0 }, Slot { at: 2 } }
+  let b = spawn { Node { name: "b", size: 20, start: 0 }, Slot { at: 1 } }
+  let c = spawn { Node { name: "c", size: 30, start: 0 }, Slot { at: 3 } }
+  connect(a, root, Under)
+  connect(b, root, Under)
+  connect(c, root, Under)
+  // Under b: one with a slot of 0 and one without, which counts as 0 and
+  // comes before it, being connected first.
+  let b1 = spawn { Node { name: "b1", size: 1, start: 0 }, Slot { at: 0 } }
+  let b2 = spawn { Node { name: "b2", size: 2, start: 0 } }
+  connect(b2, b, Under)
+  connect(b1, b, Under)
+  Root = root
+}
+
+// Frame 2: c is given the first slot. Frame 3: a new node with a's slot,
+// which comes after a.
+system change() {
+  Frame += 1
+  for s: mut Slot where Frame == 2 && s.at == 3 { s.at = 0 }
+  if Frame == 3 {
+    let d = spawn { Node { name: "d", size: 40, start: 0 }, Slot { at: 2 } }
+    connect(d, Root, Under)
+  }
+}
+
+system starts() {
+  for n: mut Node, optional before: Node before Under,
+      optional above: Node up Under cascade Under {
+    n.start = 100
+    if let start = above.start { n.start = start }
+    if let start = before.start, let size = before.size {
+      n.start = start + size
+    }
+  }
+}
+
+// In the order they are visited: a node after its parent, the children
+// of one in their order.
+system show() {
+  for n: Node cascade Under { put("{Frame}: {n.name} {n.start}") }
+  flush()
+}
+
+schedule frame() { change()  starts()  show() }
+main { loop { frame() } until Frame == 3 }

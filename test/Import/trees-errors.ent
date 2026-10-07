@@ -159,3 +159,44 @@ relation Near from Body to Body sorted capacity 8
 component Body { x: f32 }
 // expected-error @+1 {{a sorted tree says what its ends have, so that the archetypes it sorts are known: 'relation Orbits from C to D tree sorted capacity N'}}
 relation Orbits to Body tree sorted capacity 8
+
+// -----
+
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{the entities of 'Orbits' are in no order}}
+  for b: Body, p: Body before Orbits {
+  }
+}
+
+// -----
+
+component Body { x: f32, at: i32 }
+relation Orbits from Body to Body tree ordered by Body.at capacity 8
+default_capacity 8
+system s() {
+  for b: mut Body, optional p: Body before Orbits cascade Orbits {
+    // expected-error @+1 {{'p' is optional and may lead nowhere: read it with 'if let x = p.x { ... } else { ... }'}}
+    b.x = p.x
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+default_capacity 8
+system s() {
+  // expected-error @+1 {{only a binding 'up' or 'before' a tree can be optional}}
+  for optional b: Body {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+default_capacity 8
+// expected-error @+1 {{the children are ordered by an integer, and 'Body.x' is not one}}
+relation Orbits from Body to Body tree ordered by Body.x capacity 8
+

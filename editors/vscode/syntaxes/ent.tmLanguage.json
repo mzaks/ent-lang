@@ -164,7 +164,7 @@
         {
           "comment": "Words only before a relation's name, or its capacity: a field may be called `up`.",
           "name": "keyword.other.ent",
-          "match": "(?<![.])\\b(?:(?:up|cascade)(?=\\s+[A-Za-z_])|tree(?=\\s+(?:sorted\\s+)?capacity\\b)|sorted(?=\\s+capacity\\b)|leaves\\s+first\\b)"
+          "match": "(?<![.])\\b(?:(?:up|before|cascade)(?=\\s+[A-Za-z_])|optional(?=\\s+[A-Za-z_]+\\s*:)|tree(?=\\s+(?:(?:sorted|ordered)\\b|capacity\\b))|sorted(?=\\s+capacity\\b)|ordered\\s+by\\b|leaves\\s+first\\b)"
         }
       ]
     },

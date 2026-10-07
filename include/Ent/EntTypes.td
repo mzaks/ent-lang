@@ -22,17 +22,35 @@ def Ent_RefType : Ent_Type<"Ref", "ref"> {
     relation `@ChildOf` (its parent, the parent's parent, ...) that has the
     component. `ent.get` reads through it; with `mut` (`!ent.ref<@Position,
     mut, up @ChildOf>`) `ent.combine` combines values into its fields.
+
+    `!ent.ref<@Position, before @ChildOf>` is a ref to the component of the
+    visited entity's sibling before it: the child of the same parent that
+    comes right before it in the tree's order (`tree ordered by`). It is
+    read only.
+
+    With `optional` (`!ent.ref<@Position, up @ChildOf, optional>`) the
+    query also visits the entities that have no such ancestor or sibling:
+    `ent.bound` says whether the ref leads anywhere, and `ent.get` reads
+    zero where it does not.
   }];
   let parameters = (ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
-                        "FlatSymbolRefAttr":$via);
+                        "FlatSymbolRefAttr":$via, "bool":$isBefore,
+                        "bool":$isOptional);
   let hasCustomAssemblyFormat = 1;
   let builders = [
     TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable), [{
-      return $_get($_ctxt, component, isMutable, ::mlir::FlatSymbolRefAttr());
+      return $_get($_ctxt, component, isMutable, ::mlir::FlatSymbolRefAttr(),
+                   false, false);
+    }]>,
+    TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
+                     "FlatSymbolRefAttr":$via), [{
+      return $_get($_ctxt, component, isMutable, via, false, false);
     }]>
   ];
   let extraClassDeclaration = [{
-    /// Whether the ref is to a component of an ancestor (`up @Relation`).
+    /// Whether the ref is to a component of another entity, found along a
+    /// tree: an ancestor (`up @Relation`) or, with `isBefore`, the
+    /// sibling before (`before @Relation`).
     bool isUp() const { return static_cast<bool>(getVia()); }
   }];
 }

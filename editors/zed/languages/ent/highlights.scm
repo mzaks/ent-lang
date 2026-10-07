@@ -81,10 +81,10 @@
   "import" "component" "tag" "unique" "enum" "relation" "archetype"
   "system" "extern" "fn" "proc" "schedule" "world" "main"
   "default_capacity" "capacity" "optional" "from" "to" "tree"
-  "sorted"
+  "sorted" "ordered" "by"
   "reads" "writes" "let" "var" "mut" "spawn" "as"
   "with" "without" "any" "where" "on" "changed" "added" "removed" "log"
-  "up" "cascade" "leaves" "first"
+  "up" "before" "cascade" "leaves" "first"
   "out" "run_if"
 ] @keyword
 

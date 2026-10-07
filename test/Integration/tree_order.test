@@ -1,0 +1,34 @@
+// A tree whose children are in an order (Inputs/tree_order.ent): a `for`
+// that cascades visits the children of a node by their slots, and in the
+// order they were connected where those are the same; a binding `before`
+// the tree is the sibling before, and with `optional` the `for` also
+// visits the first of them, and the root, which has no parent either.
+// RUN: %ent run %S/Inputs/tree_order.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tree_order.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// Connected a, b, c with slots 2, 1, 3: b (20 wide) first, then a (10),
+// then c.
+// CHECK:      1: root 100
+// CHECK-NEXT: 1: b 100
+// CHECK-NEXT: 1: a 120
+// CHECK-NEXT: 1: c 130
+// Under b, both with slot 0 (one has none): the one connected first.
+// CHECK-NEXT: 1: b2 100
+// CHECK-NEXT: 1: b1 102
+// c is given slot 0: it is first, and all after it start 30 later.
+// CHECK-NEXT: 2: root 100
+// CHECK-NEXT: 2: c 100
+// CHECK-NEXT: 2: b 130
+// CHECK-NEXT: 2: a 150
+// CHECK-NEXT: 2: b2 130
+// CHECK-NEXT: 2: b1 132
+// A new node with a's slot comes after a, and before nothing.
+// CHECK-NEXT: 3: root 100
+// CHECK-NEXT: 3: c 100
+// CHECK-NEXT: 3: b 130
+// CHECK-NEXT: 3: a 150
+// CHECK-NEXT: 3: d 160
+// CHECK-NEXT: 3: b2 130
+// CHECK-NEXT: 3: b1 132
+// CHECK-NOT:  {{.}}

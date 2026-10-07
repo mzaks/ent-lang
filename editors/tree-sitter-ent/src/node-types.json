@@ -1722,7 +1722,7 @@
     "named": true,
     "fields": {
       "name": {
-        "multiple": false,
+        "multiple": true,
         "required": true,
         "types": [
           {
@@ -1732,7 +1732,7 @@
         ]
       },
       "value": {
-        "multiple": false,
+        "multiple": true,
         "required": true,
         "types": [
           {
@@ -3567,7 +3567,15 @@
     "named": false
   },
   {
+    "type": "before",
+    "named": false
+  },
+  {
     "type": "bool",
+    "named": false
+  },
+  {
+    "type": "by",
     "named": false
   },
   {
@@ -3733,6 +3741,10 @@
   },
   {
     "type": "optional",
+    "named": false
+  },
+  {
+    "type": "ordered",
     "named": false
   },
   {

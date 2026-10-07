@@ -136,7 +136,13 @@ depth by archetype, then by row; the order within a depth is fixed, and
 another than the unsorted tree's. (A deep tree, with fewer than 64 entities
 a depth, is visited in the order of the tree's list instead, unless the
 query is reactive: also fixed for a given tree, and another within a
-depth.)
+depth.) A tree `ordered by` a field has the children of an entity in the
+order of that field, then of their connects, wherever they are visited one
+after another: by a query cascading parents first, and by an edge loop
+over the edges into an entity. A write to the field and a connect are
+changes to the relation like any other: the order is as they left it from
+the commit point on (Q10), or for one outside a query before the system's
+next query.
 
 ## The commit point: the end of a query
 

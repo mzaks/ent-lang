@@ -37,11 +37,17 @@ Type RefType::parse(AsmParser &parser) {
   FlatSymbolRefAttr component, via;
   if (parser.parseLess() || parser.parseAttribute(component))
     return {};
-  bool isMutable = false;
+  bool isMutable = false, isBefore = false, isOptional = false;
   while (succeeded(parser.parseOptionalComma())) {
     if (succeeded(parser.parseOptionalKeyword("up"))) {
       if (parser.parseAttribute(via))
         return {};
+    } else if (succeeded(parser.parseOptionalKeyword("before"))) {
+      if (parser.parseAttribute(via))
+        return {};
+      isBefore = true;
+    } else if (succeeded(parser.parseOptionalKeyword("optional"))) {
+      isOptional = true;
     } else if (parser.parseKeyword("mut")) {
       return {};
     } else {
@@ -50,7 +56,8 @@ Type RefType::parse(AsmParser &parser) {
   }
   if (parser.parseGreater())
     return {};
-  return RefType::get(parser.getContext(), component, isMutable, via);
+  return RefType::get(parser.getContext(), component, isMutable, via,
+                      isBefore, isOptional);
 }
 
 void RefType::print(AsmPrinter &printer) const {
@@ -58,6 +65,8 @@ void RefType::print(AsmPrinter &printer) const {
   if (getIsMutable())
     printer << ", mut";
   if (getVia())
-    printer << ", up " << getVia();
+    printer << (getIsBefore() ? ", before " : ", up ") << getVia();
+  if (getIsOptional())
+    printer << ", optional";
   printer << ">";
 }

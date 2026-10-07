@@ -249,6 +249,14 @@ struct WorldRelation {
   /// children (one per edge), next to each its parent's id, and in the
   /// header (i64) how many.
   bool tree = false;
+  /// For a tree `ordered by`: the component and the field (an integer)
+  /// that the children of an entity are ordered by; null otherwise.
+  StringAttr orderComponent, orderField;
+  bool isOrdered() const { return static_cast<bool>(orderComponent); }
+  /// And per entity key the number of its connect (i64; the count of all
+  /// connects so far after them): children with the same order are in
+  /// the order they were connected.
+  uint64_t sequenceOffset = 0;
   uint64_t orderOffset = 0;
   uint64_t orderParentOffset = 0;
   /// For a sorted tree, in the header (i64): how many edges the table had

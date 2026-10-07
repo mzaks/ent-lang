@@ -228,7 +228,9 @@ come with the compiler, in `devices/`, and two more that need
   around planets around a sun, each placed from where the body it circles
   is; `examples/layout_demo.ent` is a window of boxes inside boxes, laid
   out by the library `examples/layout.ent` (fixed, fit and grow sizes in
-  rows and columns, after Clay) in four `for`s along two trees:
+  rows and columns, after Clay) in three `for`s along a tree whose
+  children are in an order (`tree ordered by Slot.at`; a binding `before`
+  the tree is the sibling before, and an `optional` one may find none):
   `tools/ent run -I examples examples/layout_demo.ent`; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are
   entities, ways, modes and the game's state are enums, and the only C is
   that of the devices and the math module. A module's `name.link` names the

@@ -77,6 +77,29 @@ system settle() {
   }
 }
 
+// A tree whose children are in an order; the sibling before; a binding
+// that may lead nowhere, read with `if let`.
+// CHECK: ent.relation @Row () from @Leaf2 to @Leaf2 tree ordered by @Leaf2 "at" capacity 8
+// CHECK-LABEL: ent.system @line() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Leaf2, mut>, %[[P:.*]]: !ent.ref<@Leaf2, before @Row, optional>, %[[U:.*]]: !ent.ref<@Leaf2, up @Row>) cascade @Row {
+// CHECK:     %[[THERE:.*]] = ent.bound %[[P]] : <@Leaf2, before @Row, optional>
+// CHECK:     %[[V:.*]] = ent.get %[[P]] "v" : <@Leaf2, before @Row, optional> -> f32
+// CHECK:     %[[THERE2:.*]] = ent.bound %[[P]]
+// CHECK:     %[[BOTH:.*]] = arith.andi %[[THERE]], %[[THERE2]]
+// CHECK:     scf.if %[[BOTH]] {
+component Leaf2 { v: f32, at: i32 }
+relation Row from Leaf2 to Leaf2 tree ordered by Leaf2.at capacity 8
+system line() {
+  for l: mut Leaf2, optional prev: Leaf2 before Row, above: Leaf2 up Row
+      cascade Row {
+    if let v = prev.v, let at = prev.at {
+      l.v = v + 1.0
+    } else {
+      l.v = above.v
+    }
+  }
+}
+
 // A tree whose entities are stored in its order.
 // CHECK: ent.relation @Under () from @Leaf to @Leaf tree sorted capacity 8
 component Leaf { v: f32 }

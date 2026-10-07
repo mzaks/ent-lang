@@ -92,6 +92,7 @@ relation Follows capacity 1000                     // edges without
 relation Aims { w: f32 } from Ship to Target capacity 64  // typed ends
 relation Orbits from Orbit to Body tree capacity 64       // one parent each
 relation Flows from Node to Node tree sorted capacity 64  // stored in its order
+relation Inside from Box to Box tree ordered by Slot.at capacity 64  // children in order
 default_capacity 1024
 ```
 
@@ -167,6 +168,15 @@ for with Enemy { Count += 1 }     // nor the entity
   Tint`). With `mut` (`down: mut Node up Flows`) its fields can be
   combined into (`+=`, `-=`, `min=`, `max=`), in a `for` that cascades
   along the tree.
+- `name: Component before Relation` binds a component of the sibling
+  before: the child of the same parent that comes right before the entity
+  in a tree whose children are in an order (`tree ordered by`), if it has
+  the component. The `for` visits only the entities with such a sibling.
+  It is read, never written.
+- `optional name: Component up Relation` (or `before Relation`): the
+  `for` also visits the entities without that ancestor or sibling, and the
+  binding is read with `if let v = name.field { ... } else { ... }`. See
+  Trees below.
 - `cascade Relation`, after the filters, visits parents before their
   children along the tree: first the entities without a parent, then their
   children, and so on, each seeing what the `for` wrote before it.
@@ -277,6 +287,48 @@ lands when the depth that sent it is through, combined in the order the
 of its own entity, but not through a binding `up` the tree or with `if
 let`, where it would see what others of its depth sent. An ancestor's
 field is only combined into, never assigned.
+
+**Children in an order.** A tree may give the children of an entity an
+order, by an integer field of theirs:
+
+```
+component Slot { at: i32 }
+relation Inside from Box to Box tree ordered by Slot.at capacity 256
+
+for b: mut Box, outer: Box up Inside, optional prev: Box before Inside
+    cascade Inside {
+  b.x = outer.x
+  if let x = prev.x, let w = prev.w { b.x = x + w }
+}
+```
+
+`examples/layout.ent` places boxes this way: each where the one before
+it in the same box ends, the first where the box they are in starts.
+
+- The children of an entity are ordered by the field, smallest first. A
+  child without the component counts as 0, and children with the same
+  value are in the order they were connected: a tree nobody gives slots
+  is in connect order.
+- A `for` that cascades along the tree visits the children of an entity
+  in that order (parents first; not with `leaves first`), and so does an
+  edge loop over the edges into an entity. So such a `for` may read
+  through `before` what it writes, as it may through `up`: the sibling
+  before has been visited.
+- `before` is the sibling right before, and only that: if it does not
+  have the component, the binding is not there (the `for` does not visit
+  the entity, or with `optional` finds nothing), and no earlier sibling
+  is taken instead.
+- With every binding `up` or `before` the tree `optional`, a cascading
+  `for` visits the entities without a parent too, first, as one without
+  such bindings does.
+- Reordering is a write to the field, in any `for`. The tree puts its
+  children in order again before the next `for` after a write to the
+  field and after a `connect`: all of the tree, some milliseconds for a
+  million nodes, so this is for trees that are reordered now and then.
+  A host that writes the field through the header is not noticed until
+  something is connected.
+- Not yet: together with `sorted`; a trigger on the sibling before for
+  a reactive `for`; an order by a float.
 
 **Sorted trees.** A tree may ask for its entities to be stored in its
 order:
@@ -425,7 +477,11 @@ of a depth.
   query ends, in a fixed order).
 - Another entity: `Hull(target).hp -= damage` (also `+=`, `min=`, `max=`)
   combines into its field when the query ends; reading one may find nothing,
-  so it is `if let hp = Hull(target).hp { ... } else { ... }`.
+  so it is `if let hp = Hull(target).hp { ... } else { ... }`. So is a
+  read through an `optional` binding (`if let x = prev.x`). Several go
+  into one `if let` with `, let` between them
+  (`if let x = prev.x, let w = prev.w { ... }`): the first block runs
+  where all are there.
 - `connect(a, b, Synapse { weight: 0.5 })` adds an edge from `a` to `b`
   (`connect(a, b, Follows)` without fields). Outside a `for` it is there
   for the next `for` and everything after; inside one, when the `for` ends

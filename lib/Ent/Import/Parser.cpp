@@ -149,6 +149,8 @@ struct Expr {
 struct Record {
   /// For a relation: declared a `tree`.
   bool tree = false;
+  /// `ordered by`: its entities have siblings before them.
+  bool ordered = false;
   SmallVector<std::pair<std::string, Type>> fields;
   /// For a unique declared as `unique Score: i64`: its one field is
   /// `value` and the bare name stands for it.
@@ -873,6 +875,45 @@ LogicalResult Parser::parseRelation() {
     return error(sortedAt, "a sorted tree says what its ends have, so that "
                            "the archetypes it sorts are known: 'relation " +
                                *name + " from C to D tree sorted capacity N'");
+  // ordered by Component.field: the children of an entity, by that field
+  // of theirs.
+  FlatSymbolRefAttr orderComponent;
+  StringAttr orderField;
+  llvm::SMLoc orderedAt = token.loc;
+  if (consumeKeyword("ordered")) {
+    if (!record.tree)
+      return error(orderedAt, "only a tree's entities have siblings to be "
+                              "in an order: 'relation " + *name +
+                                  " ... tree ordered by C.f capacity N'");
+    if (sorted)
+      return error(orderedAt, "a tree that is 'sorted' and 'ordered' is not "
+                              "supported yet");
+    if (failed(expectKeyword("by")))
+      return failure();
+    llvm::SMLoc componentAt = token.loc;
+    FailureOr<std::string> component = identifier("a component");
+    if (failed(component))
+      return failure();
+    auto key = components.find(*component);
+    if (key == components.end())
+      return error(componentAt, "unknown component '" + *component + "'");
+    if (failed(expect(Token::Dot, "'.' and a field")))
+      return failure();
+    llvm::SMLoc fieldAt = token.loc;
+    FailureOr<std::string> field = identifier("a field");
+    if (failed(field))
+      return failure();
+    Type type = key->second.fieldType(*field);
+    if (!type)
+      return error(fieldAt, "component '" + *component + "' has no field '" +
+                                *field + "'");
+    if (!isa<IntegerType>(type) || type.isInteger(1))
+      return error(fieldAt, "the children are ordered by an integer, and '" +
+                                *component + "." + *field + "' is not one");
+    orderComponent = symbol(*component);
+    orderField = builder.getStringAttr(*field);
+    record.ordered = true;
+  }
   if (failed(expectKeyword("capacity")))
     return failure();
   FailureOr<int64_t> capacity = integer("a capacity");
@@ -888,7 +929,8 @@ LogicalResult Parser::parseRelation() {
                      ends[0], ends[1],
                      record.tree ? builder.getUnitAttr() : UnitAttr(),
                      sorted ? builder.getUnitAttr() : UnitAttr(),
-                     builder.getI64IntegerAttr(*capacity));
+                     builder.getI64IntegerAttr(*capacity), orderComponent,
+                     orderField);
   relations[*name] = std::move(record);
   return success();
 }
@@ -1901,10 +1943,17 @@ LogicalResult Parser::parseFor() {
   struct Binding {
     std::string name, component;
     bool mut;
-    /// `up R`: the component is an ancestor's along this tree.
+    /// `up R`: the component is an ancestor's along this tree; `before
+    /// R`: that of the sibling before in it.
     FlatSymbolRefAttr via;
+    bool before = false;
+    /// `optional`: entities without that ancestor or sibling are visited
+    /// too, and the binding is read with `if let`.
+    bool optional = false;
   };
-  // A relation `up` or `cascade` follows: a tree.
+  // A relation `up` or `cascade` follows: a tree. (`treeIsOrdered`:
+  // whether the one last parsed has its entities in an order.)
+  bool treeIsOrdered = false;
   auto parseTree = [&](StringRef word) -> FailureOr<FlatSymbolRefAttr> {
     llvm::SMLoc relationAt = token.loc;
     FailureOr<std::string> relation = identifier("a relation");
@@ -1913,6 +1962,7 @@ LogicalResult Parser::parseFor() {
     auto record = relations.find(*relation);
     if (record == relations.end())
       return error(relationAt, "unknown relation '" + *relation + "'");
+    treeIsOrdered = record->second.ordered;
     if (!record->second.tree)
       return error(relationAt, "'" + word.str() + "' follows a tree, and '" +
                                    *relation + "' is not declared one "
@@ -1945,9 +1995,17 @@ LogicalResult Parser::parseFor() {
       pending = *next;
     }
   }
+  // `optional name: ...`, for the first binding too.
+  bool pendingOptional = false;
+  if (hasBindings && pending == "optional" && token.is(Token::Identifier)) {
+    pendingOptional = true;
+    pending = token.spelling;
+    advance();
+  }
   while (hasBindings) {
     if (failed(expect(Token::Colon, "':' and a component")))
       return failure();
+    llvm::SMLoc bindingAt = token.loc;
     bool mut = consumeKeyword("mut");
     llvm::SMLoc componentAt = token.loc;
     FailureOr<std::string> component = identifier("a component");
@@ -1956,15 +2014,41 @@ LogicalResult Parser::parseFor() {
     if (!components.count(*component))
       return error(componentAt, "unknown component '" + *component + "'");
     FlatSymbolRefAttr via;
+    bool before = false;
     if (consumeKeyword("up")) {
       FailureOr<FlatSymbolRefAttr> relation = parseTree("up");
       if (failed(relation))
         return failure();
       via = *relation;
+    } else if (token.isKeyword("before")) {
+      llvm::SMLoc beforeAt = token.loc;
+      advance();
+      llvm::SMLoc relationAt = token.loc;
+      FailureOr<FlatSymbolRefAttr> relation = parseTree("before");
+      if (failed(relation))
+        return failure();
+      if (!treeIsOrdered)
+        return error(relationAt, "the entities of '" +
+                                     relation->getValue().str() +
+                                     "' are in no order: 'relation " +
+                                     relation->getValue().str() +
+                                     " ... tree ordered by C.f capacity N'");
+      if (mut)
+        return error(beforeAt, "the sibling before is only read: '" + pending +
+                                   ": " + *component + " before " +
+                                   relation->getValue().str() + "'");
+      via = *relation;
+      before = true;
     }
-    bindings.push_back({pending, *component, mut, via});
+    if (pendingOptional && !via)
+      return error(bindingAt, "only a binding 'up' or 'before' a tree can be "
+                              "optional: every entity the 'for' visits has "
+                              "its own '" + *component + "'");
+    bindings.push_back({pending, *component, mut, via, before,
+                        pendingOptional});
     if (!consumeIf(Token::Comma))
       break;
+    pendingOptional = consumeKeyword("optional");
     FailureOr<std::string> next = identifier("a binding");
     if (failed(next))
       return failure();
@@ -2099,7 +2183,7 @@ LogicalResult Parser::parseFor() {
   for (const Binding &binding : bindings)
     block->addArgument(
         RefType::get(context, symbol(binding.component), binding.mut,
-                     binding.via),
+                     binding.via, binding.before, binding.optional),
         loc(at));
   Operation *query = builder.create(state);
 
@@ -2183,45 +2267,87 @@ LogicalResult Parser::parseIfLet(llvm::SMLoc at) {
   if (inFunction)
     return error(at, "a fn only computes; 'if let' reads another entity's "
                      "field, which a system does");
-  FailureOr<std::string> name = identifier("a name");
-  if (failed(name) || failed(expect(Token::Assign, "'='")))
-    return failure();
-  llvm::SMLoc componentAt = token.loc;
-  FailureOr<std::string> component = identifier("a component");
-  if (failed(component))
-    return failure();
-  auto record = components.find(*component);
-  if (record == components.end())
-    return error(componentAt, "'if let' reads another entity's field: "
-                              "expected 'Component(entity).field'");
-  if (failed(expect(Token::LParen, "'('")))
-    return failure();
-  FailureOr<ExprPtr> id = parseExpr();
-  if (failed(id) || failed(expect(Token::RParen, "')'")) ||
-      failed(expect(Token::Dot, "'.'")))
-    return failure();
-  llvm::SMLoc fieldAt = token.loc;
-  FailureOr<std::string> field = identifier("a field");
-  if (failed(field))
-    return failure();
-  Type type = record->second.fieldType(*field);
-  if (!type)
-    return error(fieldAt, "component '" + *component + "' has no field '" +
-                              *field + "'");
-  FailureOr<mlir::Value> entity = emit(**id, EntityType::get(context));
-  if (failed(entity))
-    return failure();
-  auto lookupOp =
-      LookupOp::create(builder, loc(at), type, builder.getI1Type(), *entity,
-                       symbol(*component), builder.getStringAttr(*field));
-  auto branch = scf::IfOp::create(builder, loc(at), lookupOp.getFound(),
+  // One or more of `name = Component(entity).field` (another entity's
+  // field, which may find nothing) and `name = binding.field` (through an
+  // optional binding, which may lead nowhere), with `, let` between them:
+  // the first block runs where all are there.
+  SmallVector<std::pair<std::string, mlir::Value>> found;
+  mlir::Value all;
+  do {
+    FailureOr<std::string> name = identifier("a name");
+    if (failed(name) || failed(expect(Token::Assign, "'='")))
+      return failure();
+    llvm::SMLoc sourceAt = token.loc;
+    FailureOr<std::string> source = identifier("a component or a binding");
+    if (failed(source))
+      return failure();
+    mlir::Value value, there;
+    const Variable *variable = lookup(*source);
+    auto optional = variable && variable->kind == Variable::Ref &&
+                            variable->value
+                        ? dyn_cast<RefType>(variable->value.getType())
+                        : RefType();
+    if (optional && optional.getIsOptional()) {
+      if (failed(expect(Token::Dot, "'.' and a field")))
+        return failure();
+      llvm::SMLoc fieldAt = token.loc;
+      FailureOr<std::string> field = identifier("a field");
+      if (failed(field))
+        return failure();
+      Type type = recordOf(*variable).fieldType(*field);
+      if (!type)
+        return error(fieldAt, "component '" + variable->component +
+                                  "' has no field '" + *field + "'");
+      there = BoundOp::create(builder, loc(sourceAt), builder.getI1Type(),
+                              variable->value)
+                  .getResult();
+      value = GetOp::create(builder, loc(sourceAt), type, variable->value,
+                            builder.getStringAttr(*field))
+                  .getResult();
+    } else {
+      auto record = components.find(*source);
+      if (record == components.end())
+        return error(sourceAt,
+                     "'if let' reads what may not be there: expected "
+                     "'Component(entity).field' or a field of an optional "
+                     "binding");
+      if (failed(expect(Token::LParen, "'('")))
+        return failure();
+      FailureOr<ExprPtr> id = parseExpr();
+      if (failed(id) || failed(expect(Token::RParen, "')'")) ||
+          failed(expect(Token::Dot, "'.'")))
+        return failure();
+      llvm::SMLoc fieldAt = token.loc;
+      FailureOr<std::string> field = identifier("a field");
+      if (failed(field))
+        return failure();
+      Type type = record->second.fieldType(*field);
+      if (!type)
+        return error(fieldAt, "component '" + *source + "' has no field '" +
+                                  *field + "'");
+      FailureOr<mlir::Value> entity = emit(**id, EntityType::get(context));
+      if (failed(entity))
+        return failure();
+      auto lookupOp =
+          LookupOp::create(builder, loc(at), type, builder.getI1Type(),
+                           *entity, symbol(*source),
+                           builder.getStringAttr(*field));
+      value = lookupOp.getValue();
+      there = lookupOp.getFound();
+    }
+    found.push_back({*name, value});
+    all = all ? arith::AndIOp::create(builder, loc(at), all, there).getResult()
+              : there;
+  } while (consumeIf(Token::Comma) && succeeded(expectKeyword("let")));
+  auto branch = scf::IfOp::create(builder, loc(at), all,
                                   /*withElseRegion=*/true);
   SmallVector<VarState> before = captureVars();
   {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(branch.thenBlock()->getTerminator());
     ScopeGuard scope(*this);
-    bind(*name, Variable::ofValue(lookupOp.getValue()));
+    for (auto &[name, value] : found)
+      bind(name, Variable::ofValue(value));
     if (failed(parseBlock()))
       return failure();
   }
@@ -3383,6 +3509,13 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                                                : "component '") +
                                    variable->component + "' has no field '" +
                                    expr.field + "'");
+      if (variable->value)
+        if (auto ref = dyn_cast<RefType>(variable->value.getType());
+            ref && ref.getIsOptional())
+          return error(expr.loc, "'" + expr.name + "' is optional and may "
+                                 "lead nowhere: read it with 'if let x = " +
+                                     expr.name + "." + expr.field +
+                                     " { ... } else { ... }'");
       return GetOp::create(builder, at, type, variable->value,
                            builder.getStringAttr(expr.field))
           .getResult();

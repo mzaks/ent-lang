@@ -132,6 +132,15 @@ def Ent_RelationOp : Ent_RecordOp<"relation", [
     rows in such a program. The tree names what its sources and targets
     have (`from`, `to`): the archetypes holding either are the sorted ones.
     No archetype is in two sorted trees: its rows have one order.
+
+    `tree ordered by @Slot "at"` gives the children of an entity an order:
+    by the integer field `at` of their component `@Slot` (0 for a child
+    without it), smallest first, and by their ids where that is the same.
+    A cascading query then visits the children of an entity in that order,
+    an edge loop over the edges into an entity too, and a ref `before` the
+    tree (`!ent.ref<@C, before @R>`) leads to the child before. The order
+    is restored before the next query after a connect or a write to the
+    field. Not together with `sorted` yet.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        StrArrayAttr:$field_names,
@@ -140,10 +149,14 @@ def Ent_RelationOp : Ent_RecordOp<"relation", [
                        OptionalAttr<FlatSymbolRefAttr>:$to,
                        UnitAttr:$tree,
                        UnitAttr:$sorted,
-                       ConfinedAttr<I64Attr, [IntPositive]>:$capacity);
+                       ConfinedAttr<I64Attr, [IntPositive]>:$capacity,
+                       OptionalAttr<FlatSymbolRefAttr>:$order_component,
+                       OptionalAttr<StrAttr>:$order_field);
   let extraClassDeclaration = [{
     /// The type of field `name`, or null if there is no such field.
     ::mlir::Type getFieldType(::llvm::StringRef name);
+    /// Whether the children of an entity have an order (`ordered by`).
+    bool isOrdered() { return static_cast<bool>(getOrderComponentAttr()); }
     /// The component the edges' sources (`target` false) or targets have,
     /// if the relation names it.
     ::mlir::FlatSymbolRefAttr getEndpoint(bool target) {
@@ -668,6 +681,21 @@ def Ent_HasOp : Ent_Op<"has", [
   let arguments = (ins FlatSymbolRefAttr:$component);
   let results = (outs I1:$result);
   let assemblyFormat = "$component attr-dict";
+  let hasVerifier = 1;
+}
+
+def Ent_BoundOp : Ent_Op<"bound"> {
+  let summary = "Whether an optional ref leads to an entity";
+  let description = [{
+    ```mlir
+    %there = ent.bound %prev : !ent.ref<@Offset, before @Inside, optional>
+    ```
+    True if the visited entity has the ancestor or the sibling before it
+    that the ref, an `optional` one up or before a tree, stands for.
+  }];
+  let arguments = (ins Ent_RefType:$ref);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$ref attr-dict `:` type($ref)";
   let hasVerifier = 1;
 }
 

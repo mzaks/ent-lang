@@ -306,3 +306,65 @@ ent.relation @R () from @N to @N sorted capacity 4
 ent.component @N (v: f32)
 // expected-error @+1 {{is 'sorted' but does not say what its targets have ('to'): which archetypes it sorts must be known}}
 ent.relation @R () from @N tree sorted capacity 4
+
+// -----
+
+ent.component @N (v: f32)
+// expected-error @+1 {{is ordered by a field of type 'f32'; the children are ordered by an integer}}
+ent.relation @R () tree ordered by @N "v" capacity 4
+
+// -----
+
+ent.component @N (v: i32)
+// expected-error @+1 {{is 'sorted' and 'ordered', which is not supported yet}}
+ent.relation @R () from @N to @N tree sorted ordered by @N "v" capacity 4
+
+// -----
+
+ent.component @N (v: i32)
+ent.relation @R () tree capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  // expected-error @+1 {{binds before @R, whose entities are in no order ('tree ordered by')}}
+  ent.query (%n: !ent.ref<@N>, %b: !ent.ref<@N, before @R>) {
+  }
+}
+
+// -----
+
+ent.component @N (v: i32)
+ent.relation @R () tree ordered by @N "v" capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  // expected-error @+1 {{the sibling before is only read}}
+  ent.query (%n: !ent.ref<@N>, %b: !ent.ref<@N, mut, before @R>) {
+  }
+}
+
+// -----
+
+ent.component @N (v: i32)
+ent.relation @R () tree ordered by @N "v" capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  ent.query (%n: !ent.ref<@N>, %b: !ent.ref<@N, before @R>) {
+    // expected-error @+1 {{asks whether a ref leads anywhere that always does}}
+    %x = ent.bound %b : !ent.ref<@N, before @R>
+  }
+}
+
+// -----
+
+// The sibling before is visited first only where parents are.
+ent.component @N (v: i32)
+ent.relation @R () tree ordered by @N "v" capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  // expected-error @+1 {{reads @N "v" of the sibling before in @R and changes it}}
+  ent.query (%n: !ent.ref<@N, mut>, %b: !ent.ref<@N, before @R>) cascade @R leaves first {
+    %v = ent.get %b "v" : !ent.ref<@N, before @R> -> i32
+    // expected-note @+1 {{changed here}}
+    ent.set %n "v", %v : !ent.ref<@N, mut>, i32
+  }
+}
+

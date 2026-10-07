@@ -69,6 +69,24 @@ ent.system @place() {
   }
 }
 
+// A tree whose children are in an order, the sibling before, and refs
+// that may lead nowhere.
+// CHECK: ent.relation @Row () from @Node to @Node tree ordered by @Mark "color" capacity 8
+// CHECK-LABEL: ent.system @line() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Node, mut>, %[[B:.*]]: !ent.ref<@Node, before @Row, optional>, %{{.*}}: !ent.ref<@Node, up @Row, optional>, %{{.*}}: !ent.ref<@Mark, before @Row>) cascade @Row {
+// CHECK:     ent.bound %[[B]] : <@Node, before @Row, optional>
+ent.relation @Row () from @Node to @Node tree ordered by @Mark "color" capacity 8
+ent.system @line() {
+  ent.query (%n: !ent.ref<@Node, mut>,
+             %b: !ent.ref<@Node, before @Row, optional>,
+             %p: !ent.ref<@Node, up @Row, optional>,
+             %m: !ent.ref<@Mark, before @Row>) cascade @Row {
+    %there = ent.bound %b : !ent.ref<@Node, before @Row, optional>
+    %total = ent.get %b "total" : !ent.ref<@Node, before @Row, optional> -> i32
+    ent.set %n "total", %total : !ent.ref<@Node, mut>, i32
+  }
+}
+
 // A tree whose entities are stored in its order.
 // CHECK: ent.relation @In (w: f32) from @Cell to @Cell tree sorted capacity 8
 ent.component @Cell (v: f32)

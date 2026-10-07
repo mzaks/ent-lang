@@ -73,7 +73,10 @@ module.exports = grammar({
     relation: ($) =>
       seq('relation', field('name', $.identifier), optional($.fields),
           optional(seq('from', $._name)), optional(seq('to', $._name)),
-          optional(seq('tree', optional('sorted'))), optional($.capacity)),
+          optional(seq('tree', optional('sorted'),
+                       optional(seq('ordered', 'by', $._name, '.',
+                                    $.identifier)))),
+          optional($.capacity)),
 
     archetype: ($) =>
       seq('archetype', field('name', $.identifier), '{',
@@ -172,9 +175,9 @@ module.exports = grammar({
           optional($.on),
           field('body', $.block)),
     binding: ($) =>
-      seq(field('name', $.identifier), ':', optional('mut'),
-          field('component', $._name),
-          optional(seq('up', field('via', $._name)))),
+      seq(optional('optional'), field('name', $.identifier), ':',
+          optional('mut'), field('component', $._name),
+          optional(seq(choice('up', 'before'), field('via', $._name)))),
     with: ($) => seq('with', list(choice($._name, $.any))),
     any: ($) => seq('any', '(', list($._name), ')'),
     without: ($) => seq('without', list($._name)),
@@ -197,7 +200,9 @@ module.exports = grammar({
 
     if_let: ($) =>
       seq('let', field('name', $.identifier), '=',
-          field('value', $._expression)),
+          field('value', $._expression),
+          repeat(seq(',', 'let', field('name', $.identifier), '=',
+                     field('value', $._expression)))),
 
     assignment: ($) =>
       prec.right(seq(field('target', $._expression),

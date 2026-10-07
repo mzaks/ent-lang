@@ -709,11 +709,20 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
           "    ++*count;\n  }\n"
           "  ent__{2}_owner(world)[at] = (ent_entity)(source + 1);\n"
           "  ent__{2}_target(world)[at] = target;\n"
-          "{3}{6}"
+          "{3}{6}{7}"
           "  *(int64_t *)((char *)world + {4}) = 0; // unclean\n"
           "  return true;\n}\n",
           connect, params, name, stores, relation.cleanOffset, checks,
-          connected);
+          connected,
+          // The number of the connect, for a tree with an order.
+          relation.isOrdered()
+              ? llvm::formatv("  {{\n"
+                              "    int64_t *numbers = (int64_t *)((char *)"
+                              "world + {0});\n"
+                              "    numbers[at] = ++numbers[{1}];\n  }\n",
+                              relation.sequenceOffset, layout->entityKeys)
+                    .str()
+              : std::string());
     else
     os << llvm::formatv(
         "// Returns false, connecting nothing, if the relation is full or an "

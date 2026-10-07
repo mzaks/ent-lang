@@ -579,6 +579,12 @@ public:
   Value treeOrder(const WorldRelation &relation) {
     return view(relation.orderOffset, relation.orderCapacity, idType());
   }
+  /// Per entity key, the number of the entity's connect in an ordered
+  /// tree, and after those how many connects there were.
+  Value connectNumbers(const WorldRelation &relation) {
+    return view(relation.sequenceOffset, layout.entityKeys + 1,
+                rewriter.getI64Type());
+  }
   /// Per entity key, the tick at which the entity was last connected, and
   /// after those the tick of the latest connect of any (at
   /// `latestConnect`).
@@ -1338,6 +1344,22 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       store(loc, set.getValue(),
             column(component.getAttr(), set.getFieldAttr()));
       stamp(loc, Trigger::Changed, component.getAttr(), set.getFieldAttr());
+      // What a tree's children are ordered by: the tree is looked over
+      // when the query ends (see noteOrderWrites).
+      for (const WorldRelation &relation : layout.relations) {
+        if (relation.orderComponent != component.getAttr() ||
+            relation.orderField != set.getFieldAttr())
+          continue;
+        Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        Value clean = world.edgesClean(relation);
+        Value unclean = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+        if (mask)
+          unclean = arith::SelectOp::create(
+              rewriter, loc, mask, unclean,
+              memref::LoadOp::create(rewriter, loc, clean, ValueRange{zero}));
+        memref::StoreOp::create(rewriter, loc, unclean, clean,
+                                ValueRange{zero});
+      }
       rewriter.eraseOp(set);
     } else if (isa<AddOp, RemoveOp>(op)) {
       bool isAdd = isa<AddOp>(op);
@@ -1497,6 +1519,10 @@ static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
                              const WorldRelation &relation,
                              FlatSymbolRefAttr component, Value id,
                              Value parent = Value());
+static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
+                            const WorldLayout &layout, WorldAccess &world,
+                            const WorldRelation &relation,
+                            FlatSymbolRefAttr component, Value id);
 namespace {
 /// Bounds that ids are checked against, loaded ahead by a caller that
 /// knows they cannot change (see emitLocate).
@@ -1702,7 +1728,12 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         layout.getRelation(refType.getVia().getAttr());
     KnownParent known = parent.relation == &relation ? parent : KnownParent();
     Ancestor ancestor;
-    if (known.row &&
+    if (refType.getIsBefore()) {
+      // The sibling before, by the tree's links.
+      ancestor = emitSibling(rewriter, loc, layout, world, relation,
+                             refType.getComponent(),
+                             world.entityId(loc, archetype, entity));
+    } else if (known.row &&
         ArchetypeOp(known.archetype->op).contains(refType.getComponent()) &&
         !ArchetypeOp(known.archetype->op)
              .isOptional(refType.getComponent())) {
@@ -1744,8 +1775,9 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                               world.entityId(loc, archetype, entity),
                               known.id);
     }
-    // Null: every entity the caller visits has one.
-    if (ancestor.found)
+    // Null: every entity the caller visits has one. (Through an optional
+    // ref the body sees whether there is one, and runs either way.)
+    if (ancestor.found && !refType.getIsOptional())
       require(ancestor.found);
     ancestors.push_back({arg, ancestor});
     // The ancestor's events, for a trigger `up` this tree: its stamp, read
@@ -1835,7 +1867,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                           !ancestors.empty());
   assert((mask || ancestors.empty() ||
           llvm::all_of(ancestors, [](auto &entry) {
-            return !entry.second.found;
+            return !entry.second.found ||
+                   cast<RefType>(entry.first.getType()).getIsOptional();
           })) && "a body reading an ancestor runs unguarded");
   // An apply or connect that may not run for this entity (it is under an
   // `if`, or the body is guarded) must still leave its slot saying "no
@@ -1867,6 +1900,25 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   // Reading through a ref to an ancestor is a lookup of the ancestor,
   // which is known to be found.
   for (auto &[arg, ancestor] : ancestors) {
+    // Whether an optional ref leads anywhere.
+    bool mayBeNone = cast<RefType>(arg.getType()).getIsOptional() &&
+                     static_cast<bool>(ancestor.found);
+    SmallVector<BoundOp> asked;
+    for (Operation *root : roots)
+      root->walk([&, arg = arg](BoundOp bound) {
+        if (bound.getRef() == arg)
+          asked.push_back(bound);
+      });
+    for (BoundOp bound : asked) {
+      Value answer = ancestor.found;
+      if (!answer) {
+        rewriter.setInsertionPoint(bound);
+        answer = arith::ConstantIntOp::create(rewriter, bound.getLoc(), 1, 1);
+      }
+      Operation *op = bound;
+      llvm::erase(roots, op);
+      rewriter.replaceOp(bound, answer);
+    }
     SmallVector<GetOp> gets;
     for (Operation *root : roots)
       root->walk([&, arg = arg](GetOp get) {
@@ -1901,7 +1953,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
           world.fromStorage(get.getLoc(), ancestor.id,
                             EntityType::get(rewriter.getContext())),
           cast<RefType>(arg.getType()).getComponent(), get.getFieldAttr());
-      if (ancestor.trusted)
+      // (Where there may be none, the lookup is of no entity, and checks.)
+      if (ancestor.trusted && !mayBeNone)
         lookup->setAttr(kTrustedAttr, rewriter.getUnitAttr());
       auto *at = llvm::find(roots, op);
       if (at != roots.end())
@@ -2814,6 +2867,66 @@ static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
             ValueRange{branch.getResult(0), found, branch.getResult(1)});
       });
   return {climb.getResult(1), climb.getResult(0), /*trusted=*/false};
+}
+
+/// The sibling before the entity `id` (in its stored form) in the tree
+/// `relation`, whose children are in an order, at the insertion point:
+/// the child of the same parent that comes right before it, if there is
+/// one and it has `component`.
+static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
+                            const WorldLayout &layout, WorldAccess &world,
+                            const WorldRelation &relation,
+                            FlatSymbolRefAttr component, Value id) {
+  assert(relation.linked && "the sibling before, in a tree without links");
+  Type i1 = rewriter.getI1Type();
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value key = world.entityKey(loc, id);
+  Value mine = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::eq,
+      memref::LoadOp::create(rewriter, loc,
+                             world.edgeIds(relation, /*source=*/true),
+                             ValueRange{key}),
+      world.slotOwner(loc, id));
+  Value link = memref::LoadOp::create(
+      rewriter, loc,
+      world.treeLinks(relation, relation.previousSiblingOffset),
+      ValueRange{key});
+  Value has = arith::AndIOp::create(
+      rewriter, loc, mine,
+      arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ne, link,
+          arith::ConstantIntOp::create(rewriter, loc, 0,
+                                       relation.offsetBits)));
+  Value slot = arith::SelectOp::create(
+      rewriter, loc, has,
+      arith::SubIOp::create(rewriter, loc, world.toIndex(loc, link), one),
+      zero);
+  Value sibling = arith::SelectOp::create(
+      rewriter, loc, has,
+      world.ownerId(loc, memref::LoadOp::create(
+                             rewriter, loc,
+                             world.edgeIds(relation, /*source=*/true),
+                             ValueRange{slot})),
+      world.noEntity(loc));
+  // A sibling is a source of the tree's edges: where those all have the
+  // component, it does.
+  if (relation.getTrusted(/*target=*/false) == component)
+    return {has, sibling, /*trusted=*/true};
+  Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+  Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+  Value holds = emitLocate(
+      rewriter, loc, layout, world, sibling,
+      [](const WorldArchetype &) { return true; }, component, TypeRange{i1},
+      [&](const WorldArchetype &archetype, Value,
+          Value present) -> SmallVector<Value> {
+        if (!ArchetypeOp(archetype.op).contains(component))
+          return {no};
+        return {present ? present : yes};
+      },
+      [&]() -> SmallVector<Value> { return {no}; })[0];
+  return {arith::AndIOp::create(rewriter, loc, has, holds), sibling,
+          /*trusted=*/false};
 }
 
 /// A loop over the edges of the entity `id` (in its stored form, with
@@ -3885,6 +3998,119 @@ struct LinkedTree {
                                            relation.offsetBits)),
           childCount(), parent);
   }
+  /// What the children of an entity are ordered by, for the entity `id`
+  /// (in its stored form): the tree's order field of it as an i64, 0
+  /// where it has no such component.
+  Value orderKey(const WorldLayout &layout, Value id) {
+    Type wide = rewriter.getI64Type();
+    FlatSymbolRefAttr component = FlatSymbolRefAttr::get(relation.orderComponent);
+    // (No entity has one: all are 0.)
+    if (llvm::none_of(layout.archetypes, [&](const WorldArchetype &archetype) {
+          return ArchetypeOp(archetype.op).contains(component);
+        }))
+      return i64(0);
+    return emitLocate(
+        rewriter, loc, layout, world, id,
+        [&](const WorldArchetype &archetype) {
+          return ArchetypeOp(archetype.op).contains(component);
+        },
+        component, TypeRange{wide},
+        [&](const WorldArchetype &archetype, Value row,
+            Value present) -> SmallVector<Value> {
+          Value value = memref::LoadOp::create(
+              rewriter, loc,
+              world.column(archetype, relation.orderComponent,
+                           relation.orderField),
+              ValueRange{row});
+          if (value.getType() != wide)
+            value = arith::ExtSIOp::create(rewriter, loc, wide, value);
+          if (present)
+            value = arith::SelectOp::create(rewriter, loc, present, value,
+                                            i64(0));
+          return {value};
+        },
+        [&]() -> SmallVector<Value> { return {i64(0)}; })[0];
+  }
+  /// As linkUnder, for a tree whose children are in an order: the slot
+  /// goes after the last of them whose order is not greater than its own,
+  /// found from the end (where it belongs if they come in order).
+  void linkInOrder(const WorldLayout &layout, Value slot, Value parent) {
+    Value own = orderKey(layout, sourceOf(slot));
+    Type linkType = world.offsetType(relation);
+    auto walk = scf::WhileOp::create(
+        rewriter, loc, TypeRange{linkType},
+        ValueRange{load(lastChild(), parent)},
+        [&](OpBuilder &, Location, ValueRange state) {
+          // On while there is a child here and it comes after the slot.
+          auto ifAny = scf::IfOp::create(rewriter, loc,
+                                         TypeRange{rewriter.getI1Type()},
+                                         negate(isNone(state[0])),
+                                         /*withElseRegion=*/true);
+          {
+            OpBuilder::InsertionGuard guard(rewriter);
+            rewriter.setInsertionPointToStart(ifAny.thenBlock());
+            Value sibling = arith::SubIOp::create(
+                rewriter, loc, world.toIndex(loc, state[0]), one);
+            // (After it: a greater order, or the same and connected
+            // later.)
+            Value other = orderKey(layout, sourceOf(sibling));
+            Value numbers = world.connectNumbers(relation);
+            scf::YieldOp::create(
+                rewriter, loc,
+                ValueRange{arith::OrIOp::create(
+                    rewriter, loc,
+                    arith::CmpIOp::create(rewriter, loc,
+                                          arith::CmpIPredicate::sgt, other,
+                                          own),
+                    both(same(other, own),
+                         arith::CmpIOp::create(
+                             rewriter, loc, arith::CmpIPredicate::sgt,
+                             load(numbers, sibling),
+                             load(numbers, slot))))});
+            rewriter.setInsertionPointToStart(ifAny.elseBlock());
+            scf::YieldOp::create(rewriter, loc, ValueRange{i1(false)});
+          }
+          scf::ConditionOp::create(rewriter, loc, ifAny.getResult(0), state);
+        },
+        [&](OpBuilder &, Location, ValueRange state) {
+          Value sibling = arith::SubIOp::create(
+              rewriter, loc, world.toIndex(loc, state[0]), one);
+          scf::YieldOp::create(rewriter, loc,
+                               ValueRange{load(previousSibling(), sibling)});
+        });
+    Value after = walk.getResult(0);
+    Value self = link(arith::AddIOp::create(rewriter, loc, slot, one));
+    Value atFront = isNone(after);
+    // (Where there is none before it, the links of the slot itself are
+    // read and written in place of that one's: they are set below.)
+    Value afterSlot = arith::SelectOp::create(
+        rewriter, loc, atFront, slot,
+        arith::SubIOp::create(rewriter, loc, world.toIndex(loc, after), one));
+    Value next = arith::SelectOp::create(rewriter, loc, atFront,
+                                         load(firstChild(), parent),
+                                         load(nextSibling(), afterSlot));
+    store(self, nextSibling(), afterSlot);
+    store(arith::SelectOp::create(rewriter, loc, atFront, self,
+                                  load(firstChild(), parent)),
+          firstChild(), parent);
+    store(after, previousSibling(), slot);
+    store(next, nextSibling(), slot);
+    Value atEnd = isNone(next);
+    Value nextSlot = arith::SelectOp::create(
+        rewriter, loc, atEnd, slot,
+        arith::SubIOp::create(rewriter, loc, world.toIndex(loc, next), one));
+    Value kept = load(previousSibling(), nextSlot);
+    store(arith::SelectOp::create(rewriter, loc, atEnd, kept, self),
+          previousSibling(), nextSlot);
+    store(arith::SelectOp::create(rewriter, loc, atEnd, self,
+                                  load(lastChild(), parent)),
+          lastChild(), parent);
+    store(arith::AddIOp::create(
+              rewriter, loc, load(childCount(), parent),
+              arith::ConstantIntOp::create(rewriter, loc, 1,
+                                           relation.offsetBits)),
+          childCount(), parent);
+  }
   /// The slot `slot` leaves the children of the key its target has.
   void unlink(Value slot) {
     Value parent = world.entityKey(loc, load(targets(), slot));
@@ -4068,6 +4294,17 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
                              "ancestor"));
   Value slot = world.entityKey(loc, source);
   Value parentKey = world.entityKey(loc, target);
+  // Among children with the same order, the one connected later is later.
+  if (relation.isOrdered()) {
+    Value numbers = world.connectNumbers(relation);
+    Value count = arith::ConstantIndexOp::create(rewriter, loc,
+                                                 layout.entityKeys);
+    Value number = arith::AddIOp::create(rewriter, loc,
+                                         tree.load(numbers, count),
+                                         tree.i64(1));
+    tree.store(number, numbers, count);
+    tree.store(number, numbers, slot);
+  }
   Value old = tree.load(tree.sources(), slot);
   Value isOwn = tree.same(old, world.slotOwner(loc, source));
   Value isNew = tree.same(old, tree.noOwner());
@@ -4158,6 +4395,10 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
             tree.both(childless, tree.both(parentListed, room)),
             [&] { tree.list(source, target, slot); }, moveOrMark);
       });
+  // Where the children are in an order, the new one is put in its place
+  // when the tree is next looked over.
+  if (relation.isOrdered())
+    tree.markUnclean();
 }
 
 /// Emit the function that takes a despawned entity out of a linked tree:
@@ -4278,13 +4519,69 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
                          tree.childCount(), tree.position()})
       tree.store(tree.noLink(), column, key);
   });
-  // Children, by their keys.
+  // Children, by their keys, or in their order where the tree has one.
   tree.forEach(zero, keys, [&](Value key) {
     tree.branch(hasEdge(key), [&] {
-      tree.linkUnder(key,
-                     world.entityKey(loc, tree.load(tree.targets(), key)));
+      Value parent = world.entityKey(loc, tree.load(tree.targets(), key));
+      if (relation.isOrdered())
+        tree.linkInOrder(layout, key, parent);
+      else
+        tree.linkUnder(key, parent);
     });
   });
+  // The list of a tree whose children are in an order has them in it:
+  // the children of the entities without a parent, then those of every
+  // entity listed, each entity's as they are linked. An entity that is
+  // its own ancestor is never come to.
+  if (relation.isOrdered()) {
+    tree.store(tree.i64(0), world.treeOrderCount(relation), zero);
+    auto listChildren = [&](Value parent) {
+      scf::WhileOp::create(
+          rewriter, loc, TypeRange{world.offsetType(relation)},
+          ValueRange{tree.load(tree.firstChild(), parent)},
+          [&](OpBuilder &, Location, ValueRange state) {
+            scf::ConditionOp::create(rewriter, loc,
+                                     tree.negate(tree.isNone(state[0])),
+                                     state);
+          },
+          [&](OpBuilder &, Location, ValueRange state) {
+            Value child = arith::SubIOp::create(
+                rewriter, loc, world.toIndex(loc, state[0]), one);
+            tree.list(tree.sourceOf(child), tree.load(tree.targets(), child),
+                      child);
+            scf::YieldOp::create(
+                rewriter, loc,
+                ValueRange{tree.load(tree.nextSibling(), child)});
+          });
+    };
+    tree.forEach(zero, keys, [&](Value key) {
+      tree.branch(tree.negate(hasEdge(key)), [&] { listChildren(key); });
+    });
+    scf::WhileOp::create(
+        rewriter, loc, TypeRange{rewriter.getIndexType()}, ValueRange{zero},
+        [&](OpBuilder &, Location, ValueRange state) {
+          scf::ConditionOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                    state[0],
+                                    world.toIndex(loc, tree.listed())),
+              state);
+        },
+        [&](OpBuilder &, Location, ValueRange state) {
+          listChildren(world.entityKey(
+              loc, tree.load(world.treeOrder(relation), state[0])));
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::AddIOp::create(rewriter, loc, state[0], one)
+                             .getResult()});
+        });
+    cf::AssertOp::create(
+        rewriter, loc,
+        tree.same(tree.listed(), tree.load(world.edgeCount(relation), zero)),
+        rewriter.getStringAttr("@" + relationOp.getSymName() +
+                               " is a tree, but an entity is its own "
+                               "ancestor"));
+  }
   // The list, by key: an entity goes in once its parent is in (or has no
   // edge of its own). One whose parent is not is kept back with those of
   // its ancestors that are not either, the keys at the end of the list's
@@ -4297,13 +4594,16 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
       arith::ConstantIndexOp::create(rewriter, loc, relation.orderCapacity);
   Value edges =
       world.toIndex(loc, tree.load(world.edgeCount(relation), zero));
-  tree.store(tree.i64(0), world.treeOrderCount(relation), zero);
+  if (!relation.isOrdered())
+    tree.store(tree.i64(0), world.treeOrderCount(relation), zero);
   auto isIn = [&](Value key) {
     return tree.negate(tree.isNone(tree.load(tree.position(), key)));
   };
   Type index = rewriter.getIndexType();
   Type idType = world.idType();
-  tree.forEach(zero, keys, [&](Value key) {
+  // (A tree whose children are in an order has its list: every entity is
+  // in, and nothing is left for this.)
+  tree.forEach(zero, relation.isOrdered() ? zero : keys, [&](Value key) {
     tree.branch(tree.both(hasEdge(key), tree.negate(isIn(key))), [&] {
       // (the key to keep back, where the kept start, whether to go on)
       auto climb = scf::WhileOp::create(
@@ -5711,6 +6011,51 @@ static void commitStructure(IRRewriter &rewriter, Location loc,
              world.getArena());
 }
 
+/// The trees whose children are ordered by a field that `query` may write
+/// join `changedRelations`: they are looked over when the query ends. A
+/// set marks its tree unclean where it runs (see lowerAccesses); what
+/// else can write the field (an add of the component, a value applied or
+/// combined into it) does here, at the insertion point, whether it runs
+/// for any entity or not.
+static void noteOrderWrites(IRRewriter &rewriter, QueryOp query,
+                            const WorldLayout &layout, WorldAccess &world,
+                            llvm::SetVector<Attribute> &changedRelations) {
+  Location loc = query.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(query);
+  for (const WorldRelation &relation : layout.relations) {
+    if (!relation.isOrdered())
+      continue;
+    bool sets = false, others = false;
+    query.getBody().walk([&](Operation *op) {
+      if (auto set = dyn_cast<SetOp>(op))
+        sets |= cast<RefType>(set.getRef().getType())
+                        .getComponent()
+                        .getAttr() == relation.orderComponent &&
+                set.getFieldAttr() == relation.orderField;
+      else if (auto add = dyn_cast<AddOp>(op))
+        others |= add.getComponentAttr().getAttr() == relation.orderComponent;
+      else if (auto apply = dyn_cast<ApplyOp>(op))
+        others |=
+            apply.getComponentAttr().getAttr() == relation.orderComponent &&
+            apply.getFieldAttr() == relation.orderField;
+      else if (auto combine = dyn_cast<CombineOp>(op))
+        others |= combine.getRef().getType().getComponent().getAttr() ==
+                      relation.orderComponent &&
+                  combine.getFieldAttr() == relation.orderField;
+    });
+    if (!sets && !others)
+      continue;
+    changedRelations.insert(RelationOp(relation.op).getSymNameAttr());
+    if (others)
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+          world.edgesClean(relation),
+          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)
+                         .getResult()});
+  }
+}
+
 /// Replace a cascading query by loops that visit parents before their
 /// children: first the entities without a parent in the tree, archetype
 /// after archetype, then those with one in the order the relation's sort
@@ -5785,6 +6130,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   SmallVector<ConnectOp> connects;
   query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
   llvm::SetVector<Attribute> changedRelations;
+  noteOrderWrites(rewriter, query, layout, world, changedRelations);
   for (ConnectOp connect : connects)
     changedRelations.insert(connect.getRelationAttr().getAttr());
   query.getBody().walk([&](DisconnectOp disconnect) {
@@ -5827,9 +6173,12 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           ValueRange{clear.getInductionVar()});
     }
   }
+  // (An entity without a parent has no ancestor and no sibling: a ref
+  // up or before the tree leaves it out, unless it is optional.)
   bool visitsRoots =
       llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
-        return cast<RefType>(type).getVia() == cascade;
+        auto ref = cast<RefType>(type);
+        return ref.getVia() == cascade && !ref.getIsOptional();
       });
   LoopOptions sequential = options;
   sequential.parallelEntities = false;
@@ -6910,6 +7259,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
   // Relations whose edges the query changes: sorted when it ends.
   llvm::SetVector<Attribute> changedRelations;
+  noteOrderWrites(rewriter, query, layout, world, changedRelations);
   for (ConnectOp connect : connects)
     changedRelations.insert(connect.getRelationAttr().getAttr());
   query.getBody().walk([&](DisconnectOp disconnect) {
