@@ -1,0 +1,23 @@
+// RUN: ent-translate --import-ent %s -I %S/Inputs | FileCheck %s
+// RUN: ent-translate --import-ent %s -I %S/Inputs | ent-opt | FileCheck %s
+
+// `capacity Name N` gives a component, a relation or an archetype that
+// was declared before another capacity: one of an imported module, which
+// cannot know how much the program needs, or one of the file's own. The
+// last one said holds.
+import shapes
+
+// CHECK: ent.component @shapes.Ball (radius: f32) capacity 5000
+capacity Ball 100
+capacity Ball 5000
+
+// CHECK: ent.component @Mark (n: i32) capacity 7
+// CHECK: ent.relation @Near () capacity 300
+// CHECK: ent.archetype @Marked (@Mark) capacity 9
+component Mark { n: i32 } capacity 3
+relation Near capacity 10
+archetype Marked { Mark } capacity 4
+capacity Mark 7
+capacity Near 300
+capacity Marked 9
+default_capacity 16

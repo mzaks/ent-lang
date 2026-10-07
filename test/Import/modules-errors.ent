@@ -56,3 +56,15 @@ system s() {
   // CHECK: error: unique 'Time' has no field 'dt'
   Time.dt = 1.0
 }
+
+// -----
+
+unique Score: i32
+// CHECK: error: 'Score' is no component, relation or archetype declared before this: 'capacity' gives one of those another capacity
+capacity Score 4
+
+// -----
+
+// CHECK: error: 'Later' is no component, relation or archetype declared before this
+capacity Later 4
+component Later { x: f32 }

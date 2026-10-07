@@ -88,6 +88,10 @@
         {
           "type": "SYMBOL",
           "name": "default_capacity"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "capacity_of"
         }
       ]
     },
@@ -114,6 +118,27 @@
         {
           "type": "STRING",
           "value": "default_capacity"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "integer"
+        }
+      ]
+    },
+    "capacity_of": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "capacity"
+        },
+        {
+          "type": "FIELD",
+          "name": "of",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_name"
+          }
         },
         {
           "type": "SYMBOL",
@@ -3697,7 +3722,20 @@
       "name": "comment"
     }
   ],
-  "conflicts": [],
+  "conflicts": [
+    [
+      "tag"
+    ],
+    [
+      "component"
+    ],
+    [
+      "relation"
+    ],
+    [
+      "archetype"
+    ]
+  ],
   "precedences": [],
   "externals": [],
   "inline": [],

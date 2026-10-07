@@ -812,6 +812,36 @@
     }
   },
   {
+    "type": "capacity_of",
+    "named": true,
+    "fields": {
+      "of": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "integer",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "cascade",
     "named": true,
     "fields": {
@@ -2742,6 +2772,10 @@
       "types": [
         {
           "type": "archetype",
+          "named": true
+        },
+        {
+          "type": "capacity_of",
           "named": true
         },
         {

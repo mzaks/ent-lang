@@ -94,6 +94,7 @@ relation Orbits from Orbit to Body tree capacity 64       // one parent each
 relation Flows from Node to Node tree sorted capacity 64  // stored in its order
 relation Inside from Box to Box tree ordered by Slot.at capacity 64  // children in order
 default_capacity 1024
+capacity Inside 4096                        // another capacity for one declared before
 ```
 
 - Types: `f32`, `f64`, `bool`, `i8`, `i16`, `i32`, `i64`, `index`, `entity`,
@@ -102,6 +103,11 @@ default_capacity 1024
 - `capacity` on a component bounds how many entities can have it; an
   archetype the compiler infers from spawns takes the smallest capacity
   among its required components, or `default_capacity`.
+- `capacity Name N` gives a component, a relation or an archetype that
+  was declared before, in the file or in a module it imports, another
+  capacity: a module cannot know how much the program that imports it
+  needs. The last one said holds, so a program's over a module's, and a
+  module's over that of one it imports.
 - Archetypes need only be declared for shapes the host or an extern system
   spawns (which the compiler cannot see), or to name and size one
   explicitly.

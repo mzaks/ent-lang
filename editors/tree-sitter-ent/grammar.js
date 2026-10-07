@@ -21,6 +21,9 @@ module.exports = grammar({
 
   extras: ($) => [/\s/, $.comment],
   word: ($) => $.identifier,
+  // `capacity` after a declaration is its own (`... capacity 64`) or
+  // starts the next one (`capacity Name 64`): what follows it tells.
+  conflicts: ($) => [[$.tag], [$.component], [$.relation], [$.archetype]],
 
   rules: {
     source_file: ($) => repeat($._declaration),
@@ -44,11 +47,13 @@ module.exports = grammar({
         $.world,
         $.main,
         $.default_capacity,
+        $.capacity_of,
       ),
 
     import: ($) => seq('import', field('module', $.identifier)),
 
     default_capacity: ($) => seq('default_capacity', $.integer),
+    capacity_of: ($) => seq('capacity', field('of', $._name), $.integer),
 
     capacity: ($) => seq('capacity', $.integer),
 

@@ -618,6 +618,29 @@ LogicalResult Parser::parseDeclarations() {
         return failure();
       module->setAttr("ent.default_capacity",
                       builder.getI64IntegerAttr(*capacity));
+    } else if (token.isKeyword("capacity")) {
+      // capacity Name N: another capacity for a component, a relation or
+      // an archetype declared before, here or in an imported module. The
+      // last one said holds, so the importing file's over the module's.
+      advance();
+      llvm::SMLoc nameAt = token.loc;
+      FailureOr<std::string> name = identifier("a component, a relation or "
+                                               "an archetype");
+      if (failed(name))
+        return failure();
+      FailureOr<int64_t> capacity = integer("a capacity");
+      if (failed(capacity))
+        return failure();
+      if (*capacity <= 0)
+        return error(nameAt, "a capacity is at least 1");
+      Operation *declared =
+          SymbolTable::lookupSymbolIn(module,
+                                      symbol(*name).getAttr());
+      if (!declared || !isa<ComponentOp, RelationOp, ArchetypeOp>(declared))
+        return error(nameAt, "'" + *name + "' is no component, relation or "
+                             "archetype declared before this: 'capacity' "
+                             "gives one of those another capacity");
+      declared->setAttr("capacity", builder.getI64IntegerAttr(*capacity));
     } else if (token.isKeyword("proc") || token.isKeyword("device") ||
                token.isKeyword("prefab")) {
       result = error(
