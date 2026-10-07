@@ -556,6 +556,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       end = relation.sequenceOffset + 8 * (layout.entityKeys + 1);
       layout.zeroed.push_back(
           {relation.sequenceOffset, uint64_t(8 * (layout.entityKeys + 1))});
+      relation.orderKeysOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.orderKeysOffset + 8 * layout.entityKeys;
     }
   // When each entity was connected, for a tree some trigger is up.
   for (WorldRelation &relation : layout.relations)

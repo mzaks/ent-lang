@@ -257,6 +257,9 @@ struct WorldRelation {
   /// connects so far after them): children with the same order are in
   /// the order they were connected.
   uint64_t sequenceOffset = 0;
+  /// And, while the tree's order is made, per entity key what it is
+  /// ordered by (i64): read once from the entity, compared many times.
+  uint64_t orderKeysOffset = 0;
   uint64_t orderOffset = 0;
   uint64_t orderParentOffset = 0;
   /// For a sorted tree, in the header (i64): how many edges the table had

@@ -585,6 +585,12 @@ public:
     return view(relation.sequenceOffset, layout.entityKeys + 1,
                 rewriter.getI64Type());
   }
+  /// Per entity key, what an ordered tree's children are ordered by, as
+  /// read when the order was last made.
+  Value orderKeys(const WorldRelation &relation) {
+    return view(relation.orderKeysOffset, layout.entityKeys,
+                rewriter.getI64Type());
+  }
   /// Per entity key, the tick at which the entity was last connected, and
   /// after those the tick of the latest connect of any (at
   /// `latestConnect`).
@@ -2681,6 +2687,16 @@ static void combineAtRow(IRRewriter &rewriter, Location loc,
   memref::StoreOp::create(rewriter, loc,
                           combine(rewriter, loc, rule, old, value), field,
                           ValueRange{row});
+  // What a tree's children are ordered by: the tree is looked over when
+  // the query ends (see noteOrderWrites).
+  for (const WorldRelation &relation : layout.relations)
+    if (relation.orderComponent == component &&
+        relation.orderField == fieldName)
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+          world.edgesClean(relation),
+          ValueRange{
+              arith::ConstantIndexOp::create(rewriter, loc, 0).getResult()});
   for (const WorldColumn *column :
        stampsFor(target, Trigger::Changed, component, fieldName)) {
     Value stamps = world.stamps(target, *column);
@@ -4033,9 +4049,11 @@ struct LinkedTree {
   }
   /// As linkUnder, for a tree whose children are in an order: the slot
   /// goes after the last of them whose order is not greater than its own,
-  /// found from the end (where it belongs if they come in order).
+  /// found from the end (where it belongs if they come in order). What
+  /// each is ordered by is in the relation's `orderKeys`.
   void linkInOrder(const WorldLayout &layout, Value slot, Value parent) {
-    Value own = orderKey(layout, sourceOf(slot));
+    Value keys = world.orderKeys(relation);
+    Value own = load(keys, slot);
     Type linkType = world.offsetType(relation);
     auto walk = scf::WhileOp::create(
         rewriter, loc, TypeRange{linkType},
@@ -4053,7 +4071,7 @@ struct LinkedTree {
                 rewriter, loc, world.toIndex(loc, state[0]), one);
             // (After it: a greater order, or the same and connected
             // later.)
-            Value other = orderKey(layout, sourceOf(sibling));
+            Value other = load(keys, sibling);
             Value numbers = world.connectNumbers(relation);
             scf::YieldOp::create(
                 rewriter, loc,
@@ -4519,7 +4537,15 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
                          tree.childCount(), tree.position()})
       tree.store(tree.noLink(), column, key);
   });
-  // Children, by their keys, or in their order where the tree has one.
+  // Children, by their keys, or in their order where the tree has one
+  // (what each is ordered by is read from it first, once).
+  if (relation.isOrdered())
+    tree.forEach(zero, keys, [&](Value key) {
+      tree.branch(hasEdge(key), [&] {
+        tree.store(tree.orderKey(layout, tree.sourceOf(key)),
+                   world.orderKeys(relation), key);
+      });
+    });
   tree.forEach(zero, keys, [&](Value key) {
     tree.branch(hasEdge(key), [&] {
       Value parent = world.entityKey(loc, tree.load(tree.targets(), key));
@@ -6013,10 +6039,10 @@ static void commitStructure(IRRewriter &rewriter, Location loc,
 
 /// The trees whose children are ordered by a field that `query` may write
 /// join `changedRelations`: they are looked over when the query ends. A
-/// set marks its tree unclean where it runs (see lowerAccesses); what
-/// else can write the field (an add of the component, a value applied or
-/// combined into it) does here, at the insertion point, whether it runs
-/// for any entity or not.
+/// set marks its tree unclean where it runs (see lowerAccesses), and a
+/// value applied or combined into the field where it lands
+/// (combineAtRow); an add of the component does here, at the insertion
+/// point, whether it runs for any entity or not.
 static void noteOrderWrites(IRRewriter &rewriter, QueryOp query,
                             const WorldLayout &layout, WorldAccess &world,
                             llvm::SetVector<Attribute> &changedRelations) {
@@ -6036,13 +6062,13 @@ static void noteOrderWrites(IRRewriter &rewriter, QueryOp query,
       else if (auto add = dyn_cast<AddOp>(op))
         others |= add.getComponentAttr().getAttr() == relation.orderComponent;
       else if (auto apply = dyn_cast<ApplyOp>(op))
-        others |=
+        sets |=
             apply.getComponentAttr().getAttr() == relation.orderComponent &&
             apply.getFieldAttr() == relation.orderField;
       else if (auto combine = dyn_cast<CombineOp>(op))
-        others |= combine.getRef().getType().getComponent().getAttr() ==
-                      relation.orderComponent &&
-                  combine.getFieldAttr() == relation.orderField;
+        sets |= combine.getRef().getType().getComponent().getAttr() ==
+                    relation.orderComponent &&
+                combine.getFieldAttr() == relation.orderField;
     });
     if (!sets && !others)
       continue;

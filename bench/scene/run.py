@@ -58,6 +58,10 @@ VARIANTS = {
     "full-two-sorted-par": [SORTED, TWO],
     "full-sorted-par": [SORTED],
     "reactive-two-sorted": [(PLAIN, REACTIVE), SORTED, TWO],
+    # The tree's children in the order of their offsets, which every move
+    # writes: the tree's order is made again every step that moves one.
+    "full-ordered": [(" tree capacity 1024",
+                      " tree ordered by Local.x capacity 1024")],
 }
 DEFAULT = ["full", "reactive", "full-sorted", "reactive-sorted"]
 
