@@ -73,4 +73,14 @@
 // CHECK-NEXT: 8: a11 1114 placed 4
 // CHECK-NEXT: 8: a3 414 placed 2
 // CHECK-NEXT: 8: 5 placed
+// a1 is put under b: it and a11 below it are placed from there, though
+// nothing of theirs or of b's has changed.
+// CHECK:      9: b 22 placed 2
+// CHECK-NEXT: 9: a1 122 placed 5
+// CHECK-NEXT: 9: a2 214 placed 4
+// CHECK-NEXT: 9: b1 323 placed 3
+// CHECK-NEXT: 9: a11 1122 placed 5
+// CHECK-NEXT: 9: a3 414 placed 2
+// CHECK-NEXT: 9: 2 placed
+// CHECK:      10: 0 placed
 // CHECK-NOT:  {{.}}

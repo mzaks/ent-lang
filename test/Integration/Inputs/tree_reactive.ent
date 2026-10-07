@@ -10,6 +10,8 @@ relation Under from Local to World tree capacity 16
 unique Frame: i32
 unique Placed: i32
 unique Arm: entity
+unique Twig: entity
+unique Other: entity
 
 world {
   let root = spawn { World { name: "root", x: 1, placed: 0 } }
@@ -26,11 +28,14 @@ world {
   connect(a2, a, Under)
   connect(b1, b, Under)
   Arm = a
+  Twig = a1
+  Other = b
 }
 
 // Frame 1: everything is new. 2: nothing happens. 3: a moves. 4: the leaf
 // b1. 5: the root, which has no Local and is not placed. 6: nothing.
 // 7: a new node under a. 8: a moves again, with the new node below it.
+// 9: a1 goes under b, with a11 below it. 10: nothing.
 system move() {
   Frame += 1
   Placed = 0
@@ -42,6 +47,7 @@ system move() {
     connect(a3, Arm, Under)
   }
   for l: mut Local where Frame == 8 && l.x == 11 { l.x += 1 }
+  if Frame == 9 { connect(Twig, Other, Under) }
 }
 
 system place() {
@@ -61,4 +67,4 @@ system show() {
 }
 
 schedule frame() { move()  place()  show() }
-main { loop { frame() } until Frame == 8 }
+main { loop { frame() } until Frame == 10 }

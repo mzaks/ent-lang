@@ -373,8 +373,10 @@ thereby passed down: the next time it runs that is no event.
 
 - Only `changed` can be `up` a tree; the `for` must bind that component
   `up` that tree and cascade along it.
-- Giving a node another parent is no event: such a `for` does not run
-  for it until its own component or its new ancestor's changes.
+- What a node sees through the binding also changes when the node is
+  given another parent: `connect(node, other, Under)` is such an event
+  for `node`, whether a system or the host connects it, and the `for`
+  places it and everything below it again the next time it runs.
 - Such a `for` goes only where the events lead: to the nodes that had
   one, and from each node it changes down to its children. Its time
   follows the number of nodes it comes to, not the tree's size: at a

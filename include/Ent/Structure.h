@@ -110,7 +110,11 @@ LogicalResult inferArchetypes(ModuleOp module);
 
 /// An event a reactive query (`ent.query ... on [...]`) reacts to.
 struct Trigger {
-  enum Kind { Added, Removed, Changed };
+  /// Connected is no trigger a program writes: a trigger `up` a tree
+  /// brings it along (see getTriggers). Its `component` is the tree, and
+  /// its event that the entity was given an edge of it, which is to say
+  /// another ancestor.
+  enum Kind { Added, Removed, Changed, Connected };
   Kind kind;
   FlatSymbolRefAttr component;
   /// For Changed: the field, or empty for any field of the component.
@@ -124,7 +128,10 @@ struct Trigger {
   FlatSymbolRefAttr via = {};
 };
 
-/// The triggers of `query`, in order; empty if it is not reactive.
+/// The triggers of `query`, in order; empty if it is not reactive. After
+/// those it names comes a Connected one for every tree some trigger of it
+/// is `up`: what the entity sees through a ref up the tree has changed
+/// also when the entity has been connected to another parent.
 SmallVector<Trigger> getTriggers(QueryOp query);
 
 /// What the world records per row so that reactive queries can find the

@@ -462,7 +462,8 @@ def Ent_QueryOp : Ent_Op<"query", [
     leads to, read from the ancestor's stamp, so that what the query wrote
     to an ancestor is an event for the entities below it in the same run.
     Those events it has then passed down; they are none the next time it
-    runs. Over an unsorted tree, or one sorted in one archetype, the query
+    runs. An entity that is connected along the tree has such an event as
+    well: the ancestor it sees is another. Over an unsorted tree, or one sorted in one archetype, the query
     goes only where its events lead (see
     WorldLayout::cascadeFollowsEvents); otherwise through
     its whole tree, running its body where a trigger fired.

@@ -346,6 +346,9 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     for (const WorldArchetype &archetype : layout.archetypes)
       if (layout.stamps.stores(archetype.op, stamp))
         entities += archetype.capacity;
+    // (Connects: of as many entities as the relation has edges.)
+    if (stamp.kind == Trigger::Connected)
+      entities = layout.getRelation(stamp.component).capacity;
     int64_t capacity = request ? *request : std::max<int64_t>(64, entities / 8);
     if (capacity > 0) {
       log.capacity = int64_t(llvm::PowerOf2Ceil(uint64_t(capacity)));
@@ -511,6 +514,17 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   });
 
   // Relations: the edge table, the offsets, and the scratch for sorting.
+  // When each entity was connected, for a tree some trigger is up.
+  for (WorldRelation &relation : layout.relations)
+    if (llvm::is_contained(
+            layout.stamps.getStamps(),
+            Stamp{Trigger::Connected, RelationOp(relation.op).getSymNameAttr(),
+                  StringAttr::get(module.getContext(), "")})) {
+      relation.connectedOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.connectedOffset + 8 * layout.entityKeys;
+      layout.zeroed.push_back(
+          {relation.connectedOffset, uint64_t(8 * layout.entityKeys)});
+    }
   // The marks of a tree that some reactive query follows events down.
   auto placeMarks = [&](WorldRelation &relation, int64_t bits) {
     bool followed = false;

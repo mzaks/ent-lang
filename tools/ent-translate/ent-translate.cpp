@@ -650,6 +650,44 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     std::string connect = llvm::formatv("ent_{0}_connect", name);
     if (failed(claim(relationOp, connect)))
       return failure();
+    // Being connected is an event of the source, where a reactive query
+    // has a trigger up the tree (see appendEdge in LowerToLoops.cpp): the
+    // tick per entity key, and an entry in the event's log.
+    std::string connected;
+    if (relation.connectedOffset) {
+      connected = llvm::formatv(
+          "  {{\n"
+          "    uint64_t key = {0};\n"
+          "    int64_t *ticks = (int64_t *)((char *)world + {1});\n"
+          "    int64_t now = *(int64_t *)((char *)world + {2}) + 1;\n"
+          "    if (ticks[key] != now) {{\n"
+          "      ticks[key] = now;\n",
+          scheme.hasIds()
+              ? "(uint64_t)source & ((UINT64_C(1) << ENT__SLOT_BITS) - 1)"
+              : "(uint64_t)source",
+          relation.connectedOffset, layout->tickOffset);
+      Stamp stamp{Trigger::Connected, relationOp.getSymNameAttr(),
+                  StringAttr::get(module.getContext(), "")};
+      if (const WorldLog *log = layout->findLog(stamp))
+        connected += llvm::formatv(
+            "      int64_t segment = key & {0};\n"
+            "      int64_t *counts = (int64_t *)((char *)world + {1}) + "
+            "segment * {2};\n"
+            "      int64_t pending = counts[0] - counts[1];\n"
+            "      if (pending < {3}) {{\n"
+            "        int64_t slot = segment * {3} + (counts[0]++ & {4});\n"
+            "        ((ent_entity *)((char *)world + {5}))[slot] = source;\n"
+            "        ((int64_t *)((char *)world + {6}))[slot] = now;\n"
+            "      } else {{ // overflowed: every reader scans\n"
+            "        counts[0] = (pending > {3} ? counts[0] : counts[1] + {3}) "
+            "+ 1;\n"
+            "        counts[2] = counts[0];\n"
+            "      }\n",
+            log->segments - 1, log->countsOffset,
+            WorldLog::kSegmentStride / 8, log->segmentCapacity,
+            log->segmentCapacity - 1, log->idsOffset, log->ticksOffset);
+      connected += "    }\n  }\n";
+    }
     if (relation.linked)
       // The slot of the source's key; an edge it already has is replaced.
       os << llvm::formatv(
@@ -666,10 +704,11 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
           "    ++*count;\n  }\n"
           "  ent__{2}_owner(world)[at] = (ent_entity)(source + 1);\n"
           "  ent__{2}_target(world)[at] = target;\n"
-          "{3}"
+          "{3}{6}"
           "  *(int64_t *)((char *)world + {4}) = 0; // unclean\n"
           "  return true;\n}\n",
-          connect, params, name, stores, relation.cleanOffset, checks);
+          connect, params, name, stores, relation.cleanOffset, checks,
+          connected);
     else
     os << llvm::formatv(
         "// Returns false, connecting nothing, if the relation is full or an "
@@ -681,11 +720,12 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "  if (*count >= ENT_{2}_CAPACITY)\n    return false;\n"
         "  ent_{2}_source(world)[*count] = source;\n"
         "  ent_{2}_target(world)[*count] = target;\n"
-        "{3}"
+        "{3}{6}"
         "  ++*count;\n"
         "  *(int64_t *)((char *)world + {4}) = 0; // unclean\n"
         "  return true;\n}\n",
-        connect, params, name, stores, relation.cleanOffset, checks);
+        connect, params, name, stores, relation.cleanOffset, checks,
+        connected);
   }
 
   os << "\n// Schedules. The lowered function receives the arena as a "

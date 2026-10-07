@@ -252,6 +252,9 @@ struct WorldRelation {
   uint64_t orderParentLocationOffset = 0;
   uint64_t staleOffset = 0;
   bool hasLocations() const { return orderLocationOffset != 0; }
+  /// Where a reactive query has a trigger up this tree: per entity key the
+  /// tick at which the entity was last given an edge (i64, 0 for never).
+  uint64_t connectedOffset = 0;
   /// For a tree that a reactive query follows events down (see
   /// cascadeFollowsEvents): a bit per element of a linked tree's list, or
   /// per row of the one archetype a sorted tree is stored in, in i64

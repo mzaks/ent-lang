@@ -204,7 +204,10 @@ visit afterwards. In return the query's own changes are not events of this
 kind on its next run: every entity below a changed one has been visited. (To
 tell them from what happens afterwards, such a query advances the tick
 counter when it ends as well as when it starts.) Its other triggers follow
-R1. Connecting an entity to another parent is no event. Whether such a
+R1. Being connected along `@R` is an event of this kind too, of the entity
+that was connected: its ancestor is another from then on. (A connect in a
+query takes effect at the query's commit point, Q10, and is an event from
+there.) Whether such a
 query goes through its whole tree or only where events lead does not show:
 the entities it runs its body for, and their order, are the same.
 

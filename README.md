@@ -388,7 +388,9 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   then also react to the events of the ancestor a ref leads to
   (`on [changed @Local, changed @World "x" up @Under]`): an ancestor's
   stamp is read where the ancestor is, so what the query wrote there a
-  depth before counts, and a change goes down the tree in one pass. Such
+  depth before counts, and a change goes down the tree in one pass. An
+  entity given another parent counts as well (the relation keeps the tick
+  of each entity's last connect, and an event log of them). Such
   a query goes from the entities in its triggers' event logs, and from
   each one it changes, down to the children: it marks them in a bitmap
   over the tree's order (an unsorted tree's list, with the children's

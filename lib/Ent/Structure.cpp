@@ -213,6 +213,15 @@ SmallVector<Trigger> mlir::ent::getTriggers(QueryOp query) {
                         cast<FlatSymbolRefAttr>(entry[1]),
                         cast<StringAttr>(entry[2]), logCapacity, via});
   }
+  for (size_t named = triggers.size(), k = 0; k < named; ++k) {
+    FlatSymbolRefAttr via = triggers[k].via;
+    if (via && llvm::none_of(triggers, [&](const Trigger &other) {
+          return other.kind == Trigger::Connected && other.component == via;
+        }))
+      triggers.push_back({Trigger::Connected, via,
+                          StringAttr::get(query->getContext(), ""),
+                          std::nullopt});
+  }
   return triggers;
 }
 
@@ -222,6 +231,9 @@ Stamp mlir::ent::getStamp(const Trigger &trigger) {
 
 /// Whether `stamp` means something in `archetype`.
 static bool isMeaningful(ArchetypeOp archetype, const Stamp &stamp) {
+  // (When an entity was connected is kept by the relation, per entity.)
+  if (stamp.kind == Trigger::Connected)
+    return false;
   auto component = FlatSymbolRefAttr::get(stamp.component);
   if (stamp.kind == Trigger::Removed)
     return !archetype.contains(component) || archetype.isOptional(component);

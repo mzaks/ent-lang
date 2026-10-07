@@ -579,6 +579,11 @@ public:
   Value treeOrder(const WorldRelation &relation) {
     return view(relation.orderOffset, relation.orderCapacity, idType());
   }
+  /// Per entity key, the tick at which the entity was last connected.
+  Value connectedTicks(const WorldRelation &relation) {
+    return view(relation.connectedOffset, layout.entityKeys,
+                rewriter.getI64Type());
+  }
   /// A linked tree's marks: a bit per element of its list.
   Value treeMarks(const WorldRelation &relation) {
     return view(relation.marksOffset, relation.markWords(),
@@ -1548,6 +1553,18 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   };
   if (seen) {
     for (const Trigger &trigger : getTriggers(query)) {
+      // Connected to another parent, perhaps: the relation has the tick.
+      if (trigger.kind == Trigger::Connected) {
+        const WorldRelation &tree =
+            layout.getRelation(trigger.component.getAttr());
+        Value connected = memref::LoadOp::create(
+            rewriter, loc, world.connectedTicks(tree),
+            ValueRange{world.entityKey(
+                loc, world.entityId(loc, archetype, entity))});
+        fires(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
+                                    connected, seen));
+        continue;
+      }
       const WorldColumn *column = archetype.findStamp(getStamp(trigger));
       if (!column || trigger.via)
         continue;
@@ -3505,6 +3522,28 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
                        const WorldRelation &relation, Value source,
                        Value target, ValueRange values) {
   assertEnds(rewriter, loc, layout, world, relation, source, target);
+  // Being connected is an event of the source, where a reactive query has
+  // a trigger up this tree: what it sees through a ref up it is another
+  // entity's from now on.
+  if (relation.connectedOffset) {
+    Value key = world.entityKey(loc, source);
+    Value ticks = world.connectedTicks(relation);
+    Value now = world.currentTick(loc);
+    Value old = memref::LoadOp::create(rewriter, loc, ticks, ValueRange{key});
+    memref::StoreOp::create(rewriter, loc, now, ticks, ValueRange{key});
+    Stamp stamp{Trigger::Connected, RelationOp(relation.op).getSymNameAttr(),
+                rewriter.getStringAttr("")};
+    if (const WorldLog *log = layout.findLog(stamp))
+      appendToLog(
+          rewriter, loc, world, *log,
+          arith::AndIOp::create(
+              rewriter, loc,
+              arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                         key),
+              arith::ConstantIntOp::create(rewriter, loc, log->segments - 1,
+                                           64)),
+          source, now, old, Value(), /*atomic=*/false);
+  }
   // A linked tree takes the edge in at once.
   if (relation.linked) {
     SmallVector<Value> arguments{source, target};
@@ -7002,6 +7041,10 @@ static bool causes(Operation *op, const Trigger &trigger) {
     if (auto remove = dyn_cast<RemoveOp>(op))
       return remove.getComponentAttr() == trigger.component;
     return false;
+  case Trigger::Connected:
+    if (auto connect = dyn_cast<ConnectOp>(op))
+      return connect.getRelationAttr() == trigger.component;
+    return false;
   }
   llvm_unreachable("unknown trigger kind");
 }
@@ -7029,6 +7072,9 @@ static void warnAboutReactiveQueries(ModuleOp module) {
   });
   module.walk([&](QueryOp query) {
     for (const Trigger &trigger : getTriggers(query)) {
+      // (Not a trigger the program wrote.)
+      if (trigger.kind == Trigger::Connected)
+        continue;
       if (trigger.kind != Trigger::Added &&
           llvm::none_of(causers,
                         [&](Operation *op) { return causes(op, trigger); })) {

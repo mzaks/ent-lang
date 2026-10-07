@@ -38,6 +38,8 @@ StringAttr mlir::ent::getStampColumnField(MLIRContext *context,
     return StringAttr::get(context, "-");
   case Trigger::Changed:
     return StringAttr::get(context, stamp.field.getValue() + "@");
+  case Trigger::Connected:
+    return StringAttr::get(context, "~");
   }
   llvm_unreachable("unknown stamp kind");
 }

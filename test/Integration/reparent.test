@@ -1,0 +1,37 @@
+// A connect made by a host through the generated header is an event for
+// a reactive `for` with a trigger up the tree, as one made by the program
+// is (Inputs/reparent_main.c, over bench/scene/scene.ent made reactive):
+// unsorted and sorted.
+// RUN: mkdir -p %t.dir %t.sdir
+// RUN: sed 's/cascade Under {/cascade Under on changed Local, changed World up Under {/' \
+// RUN:     %S/../../bench/scene/scene.ent > %t.ent
+// RUN: grep -q "changed World up Under" %t.ent
+// RUN: ent-translate --import-ent %t.ent -o %t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/scene_world.h
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/reparent_main.c -o %t.exe
+// RUN: %t.exe | FileCheck %s
+// RUN: sed 's/ tree capacity 1024$/ tree sorted capacity 1024/' %t.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted" %t.sorted.ent
+// RUN: ent-translate --import-ent %t.sorted.ent -o %t.s.mlir
+// RUN: ent-translate --ent-to-c-header %t.s.mlir -o %t.sdir/scene_world.h
+// RUN: ent-opt %t.s.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.s.ll
+// RUN: clang -O2 -Wno-override-module %t.s.ll -I%t.sdir \
+// RUN:     %S/Inputs/reparent_main.c -o %t.s.exe
+// RUN: %t.s.exe | FileCheck %s
+
+// CHECK:      0: 0
+// CHECK-NEXT: 1: 10
+// CHECK-NEXT: 2: 20
+// CHECK-NEXT: 3: 110
+// CHECK-NEXT: 4: 1110
+// CHECK-NEXT: 0: 0
+// CHECK-NEXT: 1: 10
+// CHECK-NEXT: 2: 20
+// CHECK-NEXT: 3: 120
+// CHECK-NEXT: 4: 1120

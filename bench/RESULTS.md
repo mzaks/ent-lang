@@ -2578,3 +2578,30 @@ us per step, median (spread):
 
 - A sorted tree across several archetypes, which still goes through
   every row.
+
+## 2026-10-07: what reacting to a new parent costs
+
+A trigger up a tree now also fires for an entity that was connected to
+another parent, for which the body's test reads one more tick per
+entity, kept by the relation per entity key. The scene graph again
+(`bench/scene/run.py`, native, `taskset -c 2`, 3 processes of 100 steps,
+1e6 nodes; nothing is connected in it, so this is the price alone).
+Reactive variants, us per step, before -> after:
+
+| shape | moves | reactive | reactive-sorted |
+|---|---|---|---|
+| bushy | 0 | 3.3 -> 3.3 | 3.3 -> 3.3 |
+| bushy | 1 | 5.1 -> 5.3 | 4.3 -> 4.4 |
+| bushy | 100 | 140.1 -> 151.5 | 63.2 -> 71.6 |
+| bushy | 1000 | 1,653.9 -> 1,776.7 | 638.8 -> 1,091.9 |
+| deep | 1 | 588.6 -> 634.0 | 453.2 -> 550.2 |
+| deep | 100 | 2,018.3 -> 2,212.5 | 1,746.3 -> 2,000.0 |
+
+- 4-13% where the `for` follows events, since an entity it comes to is
+  a jump anyway.
+- More where it goes through every row of a sorted tree (1000 moves in
+  the bushy tree, 1.7x; the deep tree, 1.15-1.2x): the tick is kept by
+  entity key, and a sorted tree's rows are in another order than the
+  keys, so that one read jumps where the others read on. A tick per row
+  would not; not built.
+- Not measured: a step that does connect nodes.
