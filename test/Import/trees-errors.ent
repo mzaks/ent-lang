@@ -272,17 +272,6 @@ system s() {
 // -----
 
 component Body { x: f32 }
-relation (Body)-[Orbits]->(Body) tree capacity 8
-default_capacity 8
-system s() {
-  // expected-error @+1 {{the event of an entity more than one arrow away is not asked yet}}
-  for (b: Body)-[Orbits]->()-[Orbits]->(g: Body) top down Orbits on changed g {
-  }
-}
-
-// -----
-
-component Body { x: f32 }
 relation ()-[Orbits]->() tree capacity 8
 default_capacity 8
 system s() {

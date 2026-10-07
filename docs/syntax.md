@@ -566,8 +566,12 @@ thereby passed down: the next time it runs that is no event.
   each running only as long as something still gets another value.
   (Compared where the field is written, and only for fields some `for`
   reacts to. A text is not compared: writing one counts.)
-- Triggers on children and on siblings are for unsorted trees so far;
-  one on what several arrows lead to is not there yet.
+- Triggers on children and on siblings are for unsorted trees so far.
+- A binding several arrows up has its events too
+  (`(b)-[R]->()-[R]->(far: C) ... on changed far.x`): the `for` runs for
+  an entity when what it finds there changed, and when an entity on the
+  way was put under another parent, since it then finds another. (Not
+  when one on the way of a `*` loses what the `*` asks for.)
 - What a node sees through the binding also changes when the node is
   given another parent: `connect (node)-[Under]->(other)` is such an event
   for `node`, whether a system or the host connects it, and the `for`
@@ -598,7 +602,9 @@ thereby passed down: the next time it runs that is no event.
   sibling next to it (with one on siblings), which no log has; over a
   `sorted` tree where its targets do not all have the component of a
   trigger up it (`->(World)` in its declaration says they do) or the
-  head has arrows that go on (`(b)-[R]->()-[R]->(far: C)`); and over a
+  head has arrows that go on (`(b)-[R]->()-[R]->(far: C)`); with a
+  trigger on a binding that a `*` or another tree is on the way to; and
+  over a
   `sorted` tree in
   several archetypes that is deep (fewer than 64 nodes a depth). That
   saves the body, not the walk.

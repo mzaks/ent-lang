@@ -133,3 +133,19 @@ ent.system @far() {
 ent.component @Cell (v: f32)
 ent.relation @In (w: f32) from @Cell to @Cell tree sorted capacity 8
 ent.archetype @Cells (@Cell) capacity 8
+
+// An event of what several steps lead to: so many up, or by a path.
+// CHECK-LABEL: ent.system @further() {
+// CHECK:   on [changed @Node "total" up @Row hops 2] {
+// CHECK:   on [changed @Mark up @Row path {{\[\[}}"parent", @Row], ["up", @Under, @Mark, @Node]]] {
+ent.system @further() {
+  ent.query (%n: !ent.ref<@Node, mut>,
+             %g: !ent.ref<@Node, parent @Row, hops 2>) cascade @Row
+      on [changed @Node "total" up @Row hops 2] {
+  }
+  ent.query (%n: !ent.ref<@Node, mut>,
+             %m: !ent.ref<@Mark, path [["parent", @Row], ["up", @Under, @Mark, @Node]]>)
+      cascade @Row
+      on [changed @Mark up @Row path [["parent", @Row], ["up", @Under, @Mark, @Node]]] {
+  }
+}

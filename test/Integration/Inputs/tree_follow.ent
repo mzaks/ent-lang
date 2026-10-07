@@ -14,6 +14,13 @@ component Full { sum: f32, w: f32, x: f32 }
 // the one it is under: again by reacting and without.
 component LazyTop { top: f32 }
 component FullTop { top: f32 }
+// A node's size and that of the node two above it.
+component LazyFar { v: f32 }
+component FullFar { v: f32 }
+// The same, found another way: the nearest above the parent that has a
+// size and a slot, which is the one above it (this `for` goes through
+// all of them and runs its body where a trigger fired).
+component LazyPath { v: f32 }
 default_capacity 512
 relation (Node)-[In]->(Node) tree ordered by Slot.at capacity 512
 unique Frame: i32
@@ -31,7 +38,8 @@ world {
     Node { index: 0, base: 1.0, tip: 0.0 }, Slot { at: 0 },
     Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
     Full { sum: 0.0, w: 0.0, x: 0.0 },
-      LazyTop { top: 0.0 }, FullTop { top: 0.0 }
+      LazyTop { top: 0.0 }, FullTop { top: 0.0 },
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
   }
   Home = root
   var spine = root
@@ -41,7 +49,8 @@ world {
       Node { index: index, base: 1.0 + index as f32, tip: 0.0 }, Slot { at: 1 },
       Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
       Full { sum: 0.0, w: 0.0, x: 0.0 },
-      LazyTop { top: 0.0 }, FullTop { top: 0.0 }
+      LazyTop { top: 0.0 }, FullTop { top: 0.0 },
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
     }
     connect (next)-[In]->(spine)
     for j in 0..60 {
@@ -50,7 +59,8 @@ world {
         Slot { at: if j < 30 { 0 } else { 2 } },
         Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
         Full { sum: 0.0, w: 0.0, x: 0.0 },
-      LazyTop { top: 0.0 }, FullTop { top: 0.0 }
+      LazyTop { top: 0.0 }, FullTop { top: 0.0 },
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
       }
       connect (leaf)-[In]->(spine)
     }
@@ -62,7 +72,8 @@ world {
       Node { index: 489 + i, base: 5.0, tip: 0.0 }, Slot { at: 0 },
       Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
       Full { sum: 0.0, w: 0.0, x: 0.0 },
-      LazyTop { top: 0.0 }, FullTop { top: 0.0 }
+      LazyTop { top: 0.0 }, FullTop { top: 0.0 },
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
     }
   }
 }
@@ -81,6 +92,11 @@ system change() {
     // above it.)
     n.base += 1.0 + (Frame * 50) as f32
   }
+  // (And every sixth frame a node of the spine, which has nodes two
+  // below it.)
+  for n: mut Node where Frame % 6 == 1 && n.index == 1 + 61 * (Frame % 7) {
+    n.base += 3.0
+  }
   for n: mut Node where Frame % 3 == 0 && n.index == (Frame * 53) % 491 {
     n.tip += 2.0
   }
@@ -94,7 +110,8 @@ system change() {
       Node { index: 1000 + Frame, base: 3.0, tip: 1.0 }, Slot { at: 1 },
       Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
       Full { sum: 0.0, w: 0.0, x: 0.0 },
-      LazyTop { top: 0.0 }, FullTop { top: 0.0 }
+      LazyTop { top: 0.0 }, FullTop { top: 0.0 },
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
     }
     if Frame % 14 != 0 { connect (made)-[In]->(e) }
   }
@@ -123,6 +140,14 @@ system lazy() {
       on changed n.base, changed t.top {
     p.top max= max(n.base, t.top)
   }
+  for (n: Node, f: mut LazyFar)-[In]->()-[In]->(far: Node) top down In
+      on changed n.base, changed far.base {
+    f.v = n.base + far.base
+  }
+  for (n: Node, f: mut LazyPath)-[In]->()-[In*]->(far: Node, s: Slot)
+      top down In on changed n.base, changed far.base {
+    f.v = n.base + far.base
+  }
 }
 
 system full() {
@@ -140,6 +165,9 @@ system full() {
   for (n: Node, t: FullTop)-[In]->(p: mut FullTop) bottom up In {
     p.top max= max(n.base, t.top)
   }
+  for (n: Node, f: mut FullFar)-[In]->()-[In]->(far: Node) top down In {
+    f.v = n.base + far.base
+  }
 }
 
 // How many nodes the two disagree about, and how often a body that
@@ -149,6 +177,8 @@ system compare() {
   Runs = 0
   for l: Lazy, f: Full where l.w != f.w || l.x != f.x { Wrong += 1 }
   for l: LazyTop, f: FullTop where l.top != f.top { Wrong += 1 }
+  for l: LazyFar, f: FullFar where l.v != f.v { Wrong += 1 }
+  for l: LazyPath, f: FullFar where l.v != f.v { Wrong += 1 }
   for l: mut Lazy where l.runs > 0 {
     Runs += l.runs
     l.runs = 0

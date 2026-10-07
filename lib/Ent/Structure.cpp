@@ -202,8 +202,16 @@ SmallVector<Trigger> mlir::ent::getTriggers(QueryOp query) {
     std::optional<int64_t> logCapacity;
     FlatSymbolRefAttr via;
     Trigger::Where where = Trigger::Own;
+    unsigned hops = 1;
+    ArrayAttr path;
     for (Attribute extra : entry.getValue().drop_front(3)) {
-      if (auto capacity = dyn_cast<IntegerAttr>(extra)) {
+      if (auto steps = dyn_cast<ArrayAttr>(extra)) {
+        // `[N]`: so many steps; else the steps themselves.
+        if (steps.size() == 1 && isa<IntegerAttr>(steps[0]))
+          hops = cast<IntegerAttr>(steps[0]).getInt();
+        else
+          path = steps;
+      } else if (auto capacity = dyn_cast<IntegerAttr>(extra)) {
         logCapacity = capacity.getInt();
       } else if (auto direction = dyn_cast<StringAttr>(extra)) {
         where = direction.getValue() == "down"    ? Trigger::Down
@@ -219,16 +227,23 @@ SmallVector<Trigger> mlir::ent::getTriggers(QueryOp query) {
                         : kind == "removed" ? Trigger::Removed
                                             : Trigger::Changed,
                         cast<FlatSymbolRefAttr>(entry[1]),
-                        cast<StringAttr>(entry[2]), logCapacity, via, where});
+                        cast<StringAttr>(entry[2]), logCapacity, via, where,
+                        hops, path});
   }
   for (size_t named = triggers.size(), k = 0; k < named; ++k) {
-    FlatSymbolRefAttr via = triggers[k].via;
-    if (via && llvm::none_of(triggers, [&](const Trigger &other) {
-          return other.kind == Trigger::Connected && other.component == via;
-        }))
-      triggers.push_back({Trigger::Connected, via,
-                          StringAttr::get(query->getContext(), ""),
-                          std::nullopt});
+    SmallVector<FlatSymbolRefAttr, 2> trees;
+    if (triggers[k].via)
+      trees.push_back(triggers[k].via);
+    if (triggers[k].path)
+      for (Attribute step : triggers[k].path)
+        trees.push_back(cast<FlatSymbolRefAttr>(cast<ArrayAttr>(step)[1]));
+    for (FlatSymbolRefAttr via : trees)
+      if (llvm::none_of(triggers, [&](const Trigger &other) {
+            return other.kind == Trigger::Connected && other.component == via;
+          }))
+        triggers.push_back({Trigger::Connected, via,
+                            StringAttr::get(query->getContext(), ""),
+                            std::nullopt});
   }
   return triggers;
 }

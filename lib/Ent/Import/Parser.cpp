@@ -2757,14 +2757,17 @@ LogicalResult Parser::parseFor() {
           if (*kind != "changed")
             return error(componentAt, "only 'changed' can be asked of "
                                       "another entity");
-          if (bound->path || bound->hops != 1)
-            return error(componentAt, "the event of an entity more than "
-                                      "one arrow away is not asked yet");
           if (bound->after)
             entry.push_back(builder.getStringAttr("after"));
           if (bound->before)
             entry.push_back(builder.getStringAttr("before"));
           entry.push_back(bound->via);
+          // (Further than one arrow: which of the bindings up the tree.)
+          if (bound->path)
+            entry.push_back(bound->path);
+          else if (bound->hops != 1)
+            entry.push_back(builder.getArrayAttr(
+                {builder.getI64IntegerAttr(bound->hops)}));
         }
         if (token.isKeyword("up") || token.isKeyword("down") ||
             token.isKeyword("before"))

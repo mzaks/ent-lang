@@ -130,12 +130,25 @@ struct Trigger {
   FlatSymbolRefAttr via = {};
   enum Where { Own, Up, Down, Before, After };
   Where where = Own;
+  /// For a trigger up a tree: how many steps up the ancestor is, or the
+  /// steps to it, as the ref has them that leads to it (`hops N`, `path
+  /// [...]`).
+  unsigned hops = 1;
+  ArrayAttr path = {};
+  /// Whether `ref` is the ref whose entity the trigger means.
+  bool means(RefType ref) const {
+    return via && ref.getVia() == via && ref.getComponent() == component &&
+           ref.getIsBefore() == (where == Before) &&
+           ref.getIsAfter() == (where == After) && where != Down &&
+           ref.getHops() == hops && ref.getPath() == path;
+  }
 };
 
 /// The triggers of `query`, in order; empty if it is not reactive. After
 /// those it names comes a Connected one for every tree some trigger of it
-/// is `up`: what the entity sees through a ref up the tree has changed
-/// also when the entity has been connected to another parent.
+/// is `up` (and every tree on the way, for one that is several steps up):
+/// what the entity sees through a ref up the tree has changed also when
+/// the entity has been connected to another parent.
 SmallVector<Trigger> getTriggers(QueryOp query);
 
 /// What the world records per row so that reactive queries can find the

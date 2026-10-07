@@ -4,7 +4,9 @@
 // after it (a trigger on the sibling before's), each passing on what its
 // body changed (or added into its parent); the nodes without a parent
 // are come to by their rows, and a node that has other children or
-// siblings than before is come to itself.
+// siblings than before is come to itself. A trigger on the node two
+// arrows up is followed two levels down, also from a node that is put
+// under another.
 // Inputs/tree_follow.ent works a wide tree out that way and, without
 // triggers, by going through all of it, in every frame of forty in which
 // sizes change, the order of siblings, a leaf goes and a node moves with
@@ -18,11 +20,19 @@
 // RUN: ent-opt %t.mlir "--ent-lower-to-loops=explain=1" -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=EXPLAIN
 
-// Both the `for` from the leaves and the one from the roots.
-// EXPLAIN:     remark: follows its events along the tree
-// EXPLAIN:     leaves first
-// EXPLAIN:     remark: follows its events along the tree
-// EXPLAIN-NOT: goes through its whole tree
+// The `for` from the leaves, the one from the roots, the one that adds
+// into its parent and the one that reacts to the node two above it; not
+// the one whose way up is the nearest node that has two components.
+// EXPLAIN:      remark: follows its events along the tree
+// EXPLAIN-NEXT: leaves first on [changed @Node "base", changed @Lazy "w" down @In
+// EXPLAIN:      remark: follows its events along the tree
+// EXPLAIN-NEXT: changed @Lazy "x" before @In
+// EXPLAIN:      remark: follows its events along the tree
+// EXPLAIN-NEXT: !ent.ref<@LazyTop, mut, parent @In>) cascade @In leaves first
+// EXPLAIN:      remark: follows its events along the tree
+// EXPLAIN-NEXT: changed @Node "base" up @In hops 2]
+// EXPLAIN:      remark: goes through its whole tree on each run
+// EXPLAIN-NEXT: changed @Node "base" up @In path {{\[\[}}"parent", @In], ["up", @In, @Node, @Slot]]]
 
 // CHECK-NOT:  wrong {{[1-9]}}
 // CHECK:      1: wrong 0 runs 979

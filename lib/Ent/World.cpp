@@ -151,13 +151,13 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
       // to the parent and no further.
       if (leavesFirst)
         return false;
+      // (Several steps up: so many levels down from the event, in a tree
+      // with links; not where the steps are of other kinds.)
+      if (trigger.path || (trigger.hops != 1 && !tree.linked))
+        return false;
       if (tree.getTrusted(/*target=*/true) != trigger.component &&
           !(tree.linked && !refs([&](RefType ref) {
-            return ref.getVia() == trigger.via && !ref.getIsBefore() &&
-                   !ref.getIsAfter() &&
-                   ref.getComponent() == trigger.component &&
-                   !(ref.getIsDirect() && ref.getHops() == 1 &&
-                     !ref.hasPath());
+            return trigger.means(ref) && !ref.getIsDirect();
           })))
         return false;
       break;

@@ -1904,6 +1904,31 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         layout.getRelation(refType.getVia().getAttr());
     KnownParent known = parent.relation == &relation ? parent : KnownParent();
     Ancestor ancestor;
+    // For a trigger on what several steps lead to: whether an entity on
+    // the way has been connected to another parent since the query last
+    // ran, which makes what the steps lead to another too. (`moved`, of
+    // the edges gone along: `walked` is told each one's source.)
+    bool tracks = seen && llvm::any_of(getTriggers(query),
+                                       [&](const Trigger &trigger) {
+                                         return trigger.means(refType);
+                                       });
+    Value moved;
+    auto newlyConnected = [&](const WorldRelation &tree, Value id) -> Value {
+      return arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::sgt,
+          memref::LoadOp::create(rewriter, loc, world.connectedTicks(tree),
+                                 ValueRange{world.entityKey(loc, id)}),
+          seen);
+    };
+    auto walked = [&](const WorldRelation &tree, Value id, Value valid) {
+      if (!tracks || !tree.connectedOffset)
+        return;
+      Value newer =
+          arith::AndIOp::create(rewriter, loc, valid, newlyConnected(tree, id));
+      moved = moved ? arith::OrIOp::create(rewriter, loc, moved, newer)
+                          .getResult()
+                    : newer;
+    };
     if (refType.hasPath()) {
       // Step by step from the entity: to a parent, or to the nearest
       // ancestor that has what the step names, each along its own tree.
@@ -1933,6 +1958,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         // (Where a step before led nowhere, the entity is asked in its
         // place, to no effect.)
         Value from = arith::SelectOp::create(rewriter, loc, has, at, own);
+        walked(tree, from, has);
+        bool climbs = tracks && tree.connectedOffset;
         if (cast<StringAttr>(step[0]).getValue() == "parent") {
           auto [more, next] =
               emitParent(rewriter, loc, layout, world, tree, from);
@@ -1944,9 +1971,9 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         auto [first, parentOf] =
             emitParent(rewriter, loc, layout, world, tree, from);
         auto climb = scf::WhileOp::create(
-            rewriter, loc, TypeRange{world.idType(), i1, i1},
+            rewriter, loc, TypeRange{world.idType(), i1, i1, i1},
             ValueRange{parentOf, no,
-                       arith::AndIOp::create(rewriter, loc, has, first)},
+                       arith::AndIOp::create(rewriter, loc, has, first), no},
             [&](OpBuilder &builder, Location, ValueRange state) {
               scf::ConditionOp::create(builder, loc, state[2], state);
             },
@@ -1957,22 +1984,36 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                     rewriter, loc, all,
                     holds(state[0], cast<FlatSymbolRefAttr>(part)));
               auto further = scf::IfOp::create(
-                  rewriter, loc, TypeRange{world.idType(), i1}, all,
+                  rewriter, loc, TypeRange{world.idType(), i1, i1}, all,
                   /*withElseRegion=*/true);
               {
                 OpBuilder::InsertionGuard guard(rewriter);
                 rewriter.setInsertionPointToStart(further.thenBlock());
-                scf::YieldOp::create(rewriter, loc, ValueRange{state[0], no});
+                scf::YieldOp::create(rewriter, loc,
+                                     ValueRange{state[0], no, state[3]});
                 rewriter.setInsertionPointToStart(further.elseBlock());
                 auto [more, next] =
                     emitParent(rewriter, loc, layout, world, tree, state[0]);
-                scf::YieldOp::create(rewriter, loc, ValueRange{next, more});
+                // (On past this one: along its edge.)
+                Value newer = state[3];
+                if (climbs)
+                  newer = arith::OrIOp::create(
+                      rewriter, loc, newer,
+                      arith::AndIOp::create(rewriter, loc, more,
+                                            newlyConnected(tree, state[0])));
+                scf::YieldOp::create(rewriter, loc,
+                                     ValueRange{next, more, newer});
               }
               scf::YieldOp::create(
                   rewriter, loc,
-                  ValueRange{further.getResult(0), all,
-                             further.getResult(1)});
+                  ValueRange{further.getResult(0), all, further.getResult(1),
+                             further.getResult(2)});
             });
+        if (climbs)
+          moved = moved ? arith::OrIOp::create(rewriter, loc, moved,
+                                               climb.getResult(3))
+                              .getResult()
+                        : climb.getResult(3);
         has = arith::AndIOp::create(rewriter, loc, has, climb.getResult(1));
         at = climb.getResult(0);
       }
@@ -1992,6 +2033,19 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                               refType.getComponent(),
                               world.entityId(loc, archetype, entity), Value(),
                               /*direct=*/true, refType.getHops());
+      // (The parents on the way, each along its own edge.)
+      if (tracks && relation.connectedOffset) {
+        Value own = world.entityId(loc, archetype, entity);
+        Value at = own;
+        Value valid = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+        for (unsigned step = 1; step < refType.getHops(); ++step) {
+          auto [more, next] =
+              emitParent(rewriter, loc, layout, world, relation, at);
+          valid = arith::AndIOp::create(rewriter, loc, valid, more);
+          at = arith::SelectOp::create(rewriter, loc, valid, next, own);
+          walked(relation, at, valid);
+        }
+      }
     } else if (known.row &&
         ArchetypeOp(known.archetype->op).contains(refType.getComponent()) &&
         !ArchetypeOp(known.archetype->op)
@@ -2044,13 +2098,12 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     // this query has already visited has what it did there in its stamp.
     if (seen)
       for (const Trigger &trigger : getTriggers(query)) {
-        if (trigger.via != refType.getVia() ||
-            trigger.component != refType.getComponent() ||
-            trigger.where != (refType.getIsBefore()  ? Trigger::Before
-                              : refType.getIsAfter() ? Trigger::After
-                                                     : Trigger::Up) ||
-            refType.hasPath())
+        if (!trigger.means(refType))
           continue;
+        if (moved) {
+          fires(moved);
+          moved = Value();
+        }
         Stamp stamp = getStamp(trigger);
         Type i64 = rewriter.getI64Type();
         auto stampAt = [&](const WorldArchetype &home, Value row) -> Value {
@@ -8101,8 +8154,11 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                 });
           });
     };
-    auto markChildren = [&](Value id) {
-      Value first = tree.load(tree.firstChild(), world.entityKey(loc, id));
+    // The entities so many levels below the one with the key `key`: its
+    // children, or theirs, and so on.
+    std::function<void(Value, unsigned)> markBelow = [&](Value key,
+                                                         unsigned levels) {
+      Value first = tree.load(tree.firstChild(), key);
       scf::WhileOp::create(
           rewriter, loc, TypeRange{first.getType()}, ValueRange{first},
           [&](OpBuilder &, Location, ValueRange state) {
@@ -8113,12 +8169,20 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           [&](OpBuilder &, Location, ValueRange state) {
             Value child = arith::SubIOp::create(
                 rewriter, loc, world.toIndex(loc, state[0]), one);
-            markKey(child);
+            if (levels == 1)
+              markKey(child);
+            else
+              markBelow(child, levels - 1);
             scf::YieldOp::create(
                 rewriter, loc,
                 ValueRange{tree.load(tree.nextSibling(), child)});
           });
     };
+    // How many steps up the triggers of the query go.
+    llvm::SmallSetVector<unsigned, 2> stepsUp;
+    for (const Trigger &trigger : triggers)
+      if (trigger.where == Trigger::Up)
+        stepsUp.insert(trigger.hops);
     // The body for the entity at `at` of the list, at the insertion point.
     auto visitAt = [&](Value at, bool following) {
       OpBuilder::InsertionGuard guard(rewriter);
@@ -8229,12 +8293,17 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
             // (And for the sibling after, where a trigger is before the
             // tree, and for the parent, which comes later from the leaves,
             // where one is down it. The sibling before has been visited.)
-            for (Trigger::Where where :
-                 {Trigger::Up, Trigger::Before, Trigger::Down}) {
+            SmallVector<std::pair<Trigger::Where, unsigned>, 4> ways;
+            for (unsigned steps : stepsUp)
+              ways.push_back({Trigger::Up, steps});
+            ways.push_back({Trigger::Before, 1});
+            ways.push_back({Trigger::Down, 1});
+            for (auto [where, steps] : ways) {
               Value changedHere;
               for (const Trigger &trigger : triggers) {
                 const WorldColumn *column =
-                    trigger.via && trigger.where == where
+                    trigger.via && trigger.where == where &&
+                            trigger.hops == steps
                         ? archetype.findStamp(getStamp(trigger))
                         : nullptr;
                 if (!column)
@@ -8255,7 +8324,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                 continue;
               tree.branch(changedHere, [&] {
                 if (where == Trigger::Up)
-                  markChildren(id);
+                  markBelow(world.entityKey(loc, id), steps);
                 else if (where == Trigger::Before)
                   markSibling(world.entityKey(loc, id), /*after=*/true);
                 else
@@ -8372,9 +8441,15 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                        } else {
                          markKey(key);
                        }
+                       // (Connected to another parent: those below it
+                       // that look further up than it see another too.)
+                       if (trigger.kind == Trigger::Connected)
+                         for (unsigned steps : stepsUp)
+                           for (unsigned below = 1; below < steps; ++below)
+                             markBelow(key, below);
                        break;
                      case Trigger::Up:
-                       markChildren(id);
+                       markBelow(key, trigger.hops);
                        break;
                      case Trigger::Down:
                        markParentOf(id);

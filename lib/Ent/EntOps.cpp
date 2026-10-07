@@ -1035,6 +1035,19 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
         if (direction != "up")
           entry.push_back(builder.getStringAttr(direction));
         entry.push_back(via);
+        // `hops N`, `path [...]`: which ref up the tree, as the ref says.
+        if (succeeded(parser.parseOptionalKeyword("hops"))) {
+          int64_t hops;
+          if (parser.parseInteger(hops))
+            return failure();
+          entry.push_back(
+              builder.getArrayAttr({builder.getI64IntegerAttr(hops)}));
+        } else if (succeeded(parser.parseOptionalKeyword("path"))) {
+          ArrayAttr path;
+          if (parser.parseAttribute(path))
+            return failure();
+          entry.push_back(path);
+        }
         break;
       }
       if (succeeded(parser.parseOptionalKeyword("log"))) {
@@ -1079,7 +1092,12 @@ void QueryOp::print(OpAsmPrinter &p) {
       for (Attribute extra : entry.getValue().drop_front(3)) {
         if (auto capacity = dyn_cast<IntegerAttr>(extra))
           p << " log " << capacity.getInt();
-        else if (auto where = dyn_cast<StringAttr>(extra))
+        else if (auto steps = dyn_cast<ArrayAttr>(extra)) {
+          if (steps.size() == 1 && isa<IntegerAttr>(steps[0]))
+            p << " hops " << cast<IntegerAttr>(steps[0]).getInt();
+          else
+            p << " path " << steps;
+        } else if (auto where = dyn_cast<StringAttr>(extra))
           direction = where.getValue();
         else
           p << " " << direction << " " << extra;
@@ -1464,11 +1482,7 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
                  << "first only where parents are";
         bool bound =
             llvm::any_of(getBody().getArgumentTypes(), [&](Type type) {
-              auto ref = cast<RefType>(type);
-              return ref.getVia() == trigger.via && !ref.hasPath() &&
-                     ref.getIsAfter() == after &&
-                     ref.getIsBefore() == before &&
-                     ref.getComponent() == trigger.component;
+              return trigger.means(cast<RefType>(type));
             });
         if (!bound)
           return emitOpError("reacts to changed ")
