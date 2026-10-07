@@ -1,0 +1,111 @@
+// Layout: boxes inside boxes, each as wide and high as it is told, as its
+// content needs or as there is room, placed in a row or a column inside
+// the box it is in. A library: a program imports it, makes boxes, says
+// which is inside which and which comes after which, and runs `layout`
+// (examples/layout_demo.ent draws the result in a window).
+//
+// The sizes are those of Clay (github.com/nicbarker/clay): a box is
+// `fixed` (as wide as `w` says), `fit` (as wide as what is in it) or
+// `grow` (as wide as its share of the room that is left).
+
+// Where a box is and how big: what `layout` works out. A box that is
+// inside no other keeps what the program gave it.
+component Box { x: f32, y: f32, w: f32, h: f32 }
+
+// How wide and how high a box is to be: `Fixed`, as `Box.w` and `Box.h`
+// say when `layout` starts; `Fit`, as what is inside it needs; `Grow`, as
+// there is room in the box it is in (starting from what `Box` says).
+enum Sizing { Fixed, Fit, Grow }
+component Size { w: Sizing, h: Sizing }
+
+// What a box does with the boxes inside it: one after another in a row,
+// or below one another; `pad` between its edge and them, `gap` between
+// them.
+component Stack { row: bool, pad: f32, gap: f32 }
+
+// What `layout` keeps for itself, and gives to every box that has not
+// got it: what the boxes inside a box come to (how many, their widths and
+// heights added and the largest, and how many of them grow), and how far
+// along its box's row or column a box starts.
+component Content {
+  count: i32, sum_w: f32, max_w: f32, sum_h: f32, max_h: f32,
+  grow_w: i32, grow_h: i32
+}
+component Offset { along: f32 }
+
+// From a box to the one it is in.
+relation Inside from Box to Box tree capacity 256
+// From a box to the one before it in the same box. The first has none.
+relation After from Box to Box tree capacity 256
+
+// Four passes over the boxes, each a `for` along a tree.
+system layout() {
+  for e, b: Box without Content {
+    e.add(Content {
+      count: 0, sum_w: 0.0, max_w: 0.0, sum_h: 0.0, max_h: 0.0,
+      grow_w: 0, grow_h: 0
+    })
+    e.add(Offset { along: 0.0 })
+  }
+
+  // As wide and as high as what is in it, from the innermost boxes out:
+  // when a box is visited, all that is inside it has told it its size.
+  for c: mut Content {
+    c.count = 0
+    c.sum_w = 0.0
+    c.max_w = 0.0
+    c.sum_h = 0.0
+    c.max_h = 0.0
+    c.grow_w = 0
+    c.grow_h = 0
+  }
+  for b: mut Box, s: Size, k: Stack, c: Content, outer: mut Content up Inside
+      cascade Inside leaves first {
+    let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
+    if s.w == Sizing.Fit {
+      b.w = (if k.row { c.sum_w + gaps } else { c.max_w }) + 2.0 * k.pad
+    }
+    if s.h == Sizing.Fit {
+      b.h = (if k.row { c.max_h } else { c.sum_h + gaps }) + 2.0 * k.pad
+    }
+    outer.count += 1
+    outer.sum_w += b.w
+    outer.max_w max= b.w
+    outer.sum_h += b.h
+    outer.max_h max= b.h
+    if s.w == Sizing.Grow { outer.grow_w += 1 }
+    if s.h == Sizing.Grow { outer.grow_h += 1 }
+  }
+
+  // The room that is left in a box goes to those inside it that grow:
+  // along the row or column in equal shares, across it all of it. From
+  // the outermost boxes in, since a box that grew has more room to give.
+  for b: mut Box, s: Size,
+      outer: Box up Inside, k: Stack up Inside, c: Content up Inside
+      cascade Inside {
+    let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
+    let room_w = outer.w - 2.0 * k.pad
+    let room_h = outer.h - 2.0 * k.pad
+    if s.w == Sizing.Grow {
+      b.w = if k.row { b.w + (room_w - c.sum_w - gaps) / c.grow_w as f32 }
+            else { room_w }
+    }
+    if s.h == Sizing.Grow {
+      b.h = if k.row { room_h }
+            else { b.h + (room_h - c.sum_h - gaps) / c.grow_h as f32 }
+    }
+  }
+
+  // A box starts where the one before it ends, and a gap further.
+  for o: mut Offset, before: Offset up After, b: Box up After,
+      k: Stack up Inside cascade After {
+    o.along = before.along + (if k.row { b.w } else { b.h }) + k.gap
+  }
+
+  // And is that far along its box's row or column, inside the padding.
+  for b: mut Box, o: Offset, outer: Box up Inside, k: Stack up Inside
+      cascade Inside {
+    b.x = outer.x + k.pad + (if k.row { o.along } else { 0.0 })
+    b.y = outer.y + k.pad + (if k.row { 0.0 } else { o.along })
+  }
+}

@@ -1,0 +1,89 @@
+// A small window laid out by examples/layout.ent and printed
+// (layout.test): a side bar of a fixed width, and next to it a header as
+// high as its two buttons need, a body with the room that is left, and
+// in the body two columns that share its width.
+import console
+import layout
+
+component Name { name: text[14] }
+unique Frame: i32
+default_capacity 64
+
+world {
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 800.0, h: 600.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 10.0, gap: 10.0 }, Name { name: "root" }
+  }
+  let side = spawn {
+    Box { x: 0.0, y: 0.0, w: 200.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Grow },
+    Stack { row: false, pad: 8.0, gap: 4.0 }, Name { name: "side" }
+  }
+  let rest = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 6.0 }, Name { name: "rest" }
+  }
+  connect(side, root, Inside)
+  connect(rest, root, Inside)
+  connect(rest, side, After)
+
+  let header = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 5.0, gap: 3.0 }, Name { name: "header" }
+  }
+  let body = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: true, pad: 0.0, gap: 20.0 }, Name { name: "body" }
+  }
+  connect(header, rest, Inside)
+  connect(body, rest, Inside)
+  connect(body, header, After)
+
+  let ok = spawn {
+    Box { x: 0.0, y: 0.0, w: 60.0, h: 20.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "ok" }
+  }
+  let cancel = spawn {
+    Box { x: 0.0, y: 0.0, w: 90.0, h: 30.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "cancel" }
+  }
+  connect(ok, header, Inside)
+  connect(cancel, header, Inside)
+  connect(cancel, ok, After)
+
+  let left = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 0.0 }, Name { name: "left" }
+  }
+  let right = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 0.0 }, Name { name: "right" }
+  }
+  connect(left, body, Inside)
+  connect(right, body, Inside)
+  connect(right, left, After)
+}
+
+// In the second frame the side bar is narrower, in the third the body's
+// columns are below one another.
+system change() {
+  Frame += 1
+  for b: mut Box, n: Name where Frame == 2 && b.w == 200.0 { b.w = 100.0 }
+  for k: mut Stack where Frame == 3 && k.gap == 20.0 { k.row = false }
+}
+
+system show() {
+  for b: Box, n: Name { put("{Frame}: {n.name} {b.x} {b.y} {b.w} {b.h}") }
+  flush()
+}
+
+schedule frame() { change()  layout()  show() }
+main { loop { frame() } until Frame == 3 }

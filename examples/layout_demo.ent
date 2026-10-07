@@ -1,0 +1,161 @@
+// A window laid out by examples/layout.ent: a bar at the side, and next
+// to it a header, three cards and a footer. Every box says how big it is
+// to be (so many pixels, what is inside it, or the room there is) and
+// which box it is in; where it ends up is worked out every frame.
+//
+//   tools/ent run -I examples examples/layout_demo.ent
+//
+// Hold the left mouse button to drag the side bar's edge; hold Space to
+// put the cards below one another. Escape or closing the window ends the
+// program.
+import window
+import layout
+
+component Tint { color: i32 }
+tag SideBar
+tag Cards
+tag Footer
+default_capacity 256
+
+world {
+  Window.width = 900
+  Window.height = 600
+  Window.title = "ent-lang: layout"
+  Window.background = 0x101418
+  Window.fps = 60
+
+  // The window: the side bar and the rest, next to each other.
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 900.0, h: 600.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 12.0, gap: 12.0 }, Tint { color: 0x101418 }
+  }
+  let side = spawn {
+    Box { x: 0.0, y: 0.0, w: 180.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Grow },
+    Stack { row: false, pad: 10.0, gap: 8.0 }, Tint { color: 0x1c242c },
+    SideBar
+  }
+  let rest = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 12.0 }, Tint { color: 0x101418 }
+  }
+  connect(side, root, Inside)
+  connect(rest, root, Inside)
+  connect(rest, side, After)
+
+  // The side bar's entries: as wide as the bar, 34 pixels high.
+  var before = side
+  for i in 0..6 {
+    let entry = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 34.0 },
+      Size { w: Sizing.Grow, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Tint { color: if i == 1 { 0x3a7bd5 } else { 0x2a3640 } }
+    }
+    connect(entry, side, Inside)
+    if i > 0 { connect(entry, before, After) }
+    before = entry
+  }
+
+  // A header as high as its buttons need, the cards with the room that
+  // is left, a footer.
+  let header = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 8.0, gap: 8.0 }, Tint { color: 0x1c242c }
+  }
+  let cards = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: true, pad: 0.0, gap: 12.0 }, Tint { color: 0x101418 },
+    Cards
+  }
+  let footer = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 28.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fixed },
+    Stack { row: true, pad: 6.0, gap: 6.0 }, Tint { color: 0x1c242c },
+    Footer
+  }
+  connect(header, rest, Inside)
+  connect(cards, rest, Inside)
+  connect(footer, rest, Inside)
+  connect(cards, header, After)
+  connect(footer, cards, After)
+
+  for i in 0..4 {
+    let button = spawn {
+      Box { x: 0.0, y: 0.0, w: 70.0 + i as f32 * 12.0, h: 30.0 },
+      Size { w: Sizing.Fixed, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x3a7bd5 }
+    }
+    connect(button, header, Inside)
+    if i > 0 { connect(button, before, After) }
+    before = button
+  }
+
+  // Three cards share the width; in each, a picture with the height that
+  // is left above three lines.
+  var card_before = cards
+  for i in 0..3 {
+    let card = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Grow },
+      Stack { row: false, pad: 10.0, gap: 6.0 }, Tint { color: 0x242e38 }
+    }
+    connect(card, cards, Inside)
+    if i > 0 { connect(card, card_before, After) }
+    card_before = card
+    let picture = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Grow },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Tint { color: 0x805030 + i * 0x203040 }
+    }
+    connect(picture, card, Inside)
+    before = picture
+    for j in 0..3 {
+      let text = spawn {
+        Box { x: 0.0, y: 0.0, w: 120.0 - j as f32 * 30.0, h: 10.0 },
+        Size { w: Sizing.Fixed, h: Sizing.Fixed },
+        Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x5a6a78 }
+      }
+      connect(text, card, Inside)
+      connect(text, before, After)
+      before = text
+    }
+  }
+}
+
+system interact() {
+  for b: mut Box with SideBar where Mouse.left {
+    b.w = max(80.0, min(Mouse.x - 12.0, 500.0))
+  }
+  for k: mut Stack with Cards {
+    k.row = !Keys.space
+  }
+}
+
+// A box is drawn after the one it is in, and so on top of it.
+system draw() {
+  for b: Box, t: Tint cascade Inside {
+    rect(b.x, b.y, b.w, b.h, t.color)
+  }
+  for b: Box with Footer {
+    label("drag: side bar   space: stack the cards", b.x + 8.0, b.y + 7.0,
+          14.0, 0x808890)
+  }
+}
+
+schedule frame() {
+  begin()
+  interact()
+  layout()
+  draw()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}

@@ -83,8 +83,9 @@ with `ent-translate --import-ent`; the syntax is described in
 [`docs/syntax.md`](docs/syntax.md), and `examples/*.ent` are the examples
 written that way (the integration tests run both forms and expect the same
 output; `examples/filters.ent`, for filters, `has` and `run_if`,
-`examples/snn*.ent`, for relations, and `examples/orrery.ent` and
-`examples/river.ent`, for trees, exist only in ent-lang):
+`examples/snn*.ent`, for relations, and `examples/orrery.ent`,
+`examples/river.ent` and `examples/layout.ent`, for trees, exist only in
+ent-lang):
 
 ```
 component Position { x: f32 }
@@ -225,7 +226,10 @@ come with the compiler, in `devices/`, and two more that need
   `Window.fps`. `examples/bounce.ent` is a program with it:
   `tools/ent run examples/bounce.ent`; `examples/orrery.ent` has moons
   around planets around a sun, each placed from where the body it circles
-  is; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are
+  is; `examples/layout_demo.ent` is a window of boxes inside boxes, laid
+  out by the library `examples/layout.ent` (fixed, fit and grow sizes in
+  rows and columns, after Clay) in four `for`s along two trees:
+  `tools/ent run -I examples examples/layout_demo.ent`; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are
   entities, ways, modes and the game's state are enums, and the only C is
   that of the devices and the math module. A module's `name.link` names the
   libraries it needs (`-lraylib`).
