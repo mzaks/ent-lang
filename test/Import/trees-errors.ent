@@ -95,8 +95,24 @@ relation Orbits from Body to Body tree capacity 8
 default_capacity 8
 system s() {
   for e, b: Body cascade Orbits {
-    // expected-error @+1 {{in a cascading query is not supported yet: such a query only reads and writes fields}}
-    e.destroy()
+    // expected-error @+1 {{in a cascading query is not supported yet}}
+    spawn { Body { x: b.x } }
+  }
+}
+
+// -----
+
+// What a depth adds up must not be seen by the same depth.
+component Body { x: f32 }
+relation Orbits from Body to Body tree capacity 8
+default_capacity 8
+unique Total: f32
+system s() {
+  for b: mut Body cascade Orbits {
+    // expected-note @+1 {{read or set here}}
+    b.x = Total
+    // expected-error @+1 {{in a cascading query combines into a field the query also reads or sets; what an entity sees of it would depend on the order within its depth}}
+    Total += 1.0
   }
 }
 

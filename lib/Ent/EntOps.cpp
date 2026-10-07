@@ -1159,8 +1159,10 @@ LogicalResult QueryOp::verify() {
                << "; references may only be used by 'ent.get' and 'ent.set'";
   }
 
-  // A cascading query runs as one query per depth; what is deferred to a
-  // query's end, or relies on the order of rows, has no place in it yet.
+  // A cascading query runs as one query per depth. What it sends (applies,
+  // accumulates) lands when the depth that sent it is through; it despawns
+  // when all of it has run, like any query. What else changes which
+  // entities there are, or the tree, has no place in it yet.
   if (getCascade()) {
     if ((*this)->hasAttr(kTriggersAttr))
       return emitOpError("cascades and is reactive, which is not supported "
@@ -1168,14 +1170,59 @@ LogicalResult QueryOp::verify() {
     Operation *unsupported = nullptr;
     getBody().walk([&](Operation *op) {
       if (!unsupported &&
-          isa<SpawnOp, DespawnOp, AddOp, RemoveOp, ApplyOp, AccumulateOp,
-              ConnectOp, DisconnectOp>(op))
+          isa<SpawnOp, AddOp, RemoveOp, ConnectOp, DisconnectOp>(op))
         unsupported = op;
     });
     if (unsupported)
       return unsupported->emitOpError(
-          "in a cascading query is not supported yet: such a query only "
-          "reads and writes fields");
+          "in a cascading query is not supported yet");
+    // Nothing of the query may see what a depth sends part way: an entity
+    // of the same depth would see what those visited before it sent.
+    Operation *sender = nullptr, *seer = nullptr;
+    getBody().walk([&](Operation *op) {
+      if (sender)
+        return;
+      if (auto accumulate = dyn_cast<AccumulateOp>(op)) {
+        getBody().walk([&](ReadOp read) {
+          if (!seer && read.getResourceAttr() == accumulate.getResourceAttr() &&
+              read.getField() == accumulate.getField())
+            seer = read;
+        });
+      } else if (auto apply = dyn_cast<ApplyOp>(op)) {
+        getBody().walk([&](Operation *other) {
+          if (seer)
+            return;
+          FlatSymbolRefAttr component;
+          StringRef field;
+          if (auto get = dyn_cast<GetOp>(other)) {
+            component = get.getRef().getType().getComponent();
+            field = get.getField();
+          } else if (auto set = dyn_cast<SetOp>(other)) {
+            component = set.getRef().getType().getComponent();
+            field = set.getField();
+          } else if (auto lookup = dyn_cast<LookupOp>(other)) {
+            component = lookup.getComponentAttr();
+            field = lookup.getField();
+          } else {
+            return;
+          }
+          if (component == apply.getComponentAttr() &&
+              field == apply.getField())
+            seer = other;
+        });
+      }
+      if (seer)
+        sender = op;
+    });
+    if (sender) {
+      InFlightDiagnostic diag =
+          sender->emitOpError("in a cascading query combines into a field "
+                              "the query also reads or sets; what an entity "
+                              "sees of it would depend on the order within "
+                              "its depth");
+      diag.attachNote(seer->getLoc()) << "read or set here";
+      return diag;
+    }
   }
 
   // Like a lookup, a ref to an ancestor reads another entity: the query

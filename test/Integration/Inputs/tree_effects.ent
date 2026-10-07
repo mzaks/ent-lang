@@ -1,0 +1,66 @@
+// What a `for` that cascades may do besides reading and writing fields:
+// add into a unique, combine into an entity it has the id of, and destroy
+// the entity it visits.
+import console
+
+component Node { name: text[8], local: i32, total: i32, hit: i32 }
+default_capacity 16
+relation Under from Node to Node tree capacity 16
+unique Frame: i32
+unique Count: i32
+unique Deepest: i32
+unique Sink: entity
+
+world {
+  let root = spawn { Node { name: "root", local: 1, total: 0, hit: 0 } }
+  let a = spawn { Node { name: "a", local: 10, total: 0, hit: 0 } }
+  let b = spawn { Node { name: "b", local: 100, total: 0, hit: 0 } }
+  let c = spawn { Node { name: "c", local: 1000, total: 0, hit: 0 } }
+  let d = spawn { Node { name: "d", local: 5, total: 0, hit: 0 } }
+  connect(a, root, Under)
+  connect(b, a, Under)
+  connect(c, b, Under)
+  connect(d, root, Under)
+  Sink = root
+}
+
+// Sums down the tree; how many nodes have a parent, and the largest sum.
+system sum() {
+  Frame += 1
+  Count = 0
+  Deepest = 0
+  for n: mut Node {
+    n.total = n.local
+    n.hit = 0
+  }
+  for n: mut Node, parent: Node up Under cascade Under {
+    n.total = parent.total + n.local
+    Count += 1
+    Deepest max= n.total
+  }
+}
+
+// Every node sends its own to the sink, by its id, from the leaves.
+system strike() {
+  for n: Node cascade Under leaves first {
+    Node(Sink).hit += n.local
+  }
+}
+
+// In the second frame every node whose parent's sum is 11 or more goes:
+// b, and c with it, which is visited as the tree was though b goes too.
+system prune() {
+  let from = if Frame == 2 { 11 } else { 1000000 }
+  for e, n: Node, parent: Node up Under cascade Under where parent.total >= from {
+    e.destroy()
+  }
+}
+
+system show() {
+  for n: Node { put("{Frame}: {n.name} {n.total} hit {n.hit}") }
+  put("{Frame}: count {Count} deepest {Deepest}")
+  flush()
+}
+
+schedule frame() { sum()  strike()  prune()  show() }
+main { loop { frame() } until Frame == 3 }

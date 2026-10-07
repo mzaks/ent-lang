@@ -378,9 +378,12 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   their parents. `ent.combine %down "flow" add %v : !ent.ref<@Node, mut, up
   @Flows>, f32` combines a value into a field of the ancestor a `mut` ref
   leads to, in a query cascading along that tree; the values land when the
-  depth that sent them is through. Otherwise a cascading query only reads
-  and writes fields so far (not reactive, nothing else deferred) and runs
-  on one core.
+  depth that sent them is through. So do `ent.apply` and `ent.accumulate`
+  in a cascading query, which may then not read what it sends to that way;
+  `ent.despawn` takes effect when the whole query has run, its rows marked
+  as they are visited and listed in order at the end. A cascading query
+  does not spawn, add or remove components, connect or disconnect so far,
+  is not reactive, and runs on one core.
   A tree may be `sorted` (`... from @Node to @Node tree sorted capacity
   N`): the archetype that holds its entities, declared or inferred, keeps
   its rows in the tree's order, every entity after its parent, and a query

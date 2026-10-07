@@ -321,11 +321,31 @@ choice of storage, and it has its price:
   relations, and of trees that are not sorted, are no trouble, since edges
   hold ids and not rows.
 
-Not yet: besides that, a cascading `for` only reads and writes fields. It
-does not `spawn`, `destroy`, `add` or `remove`, combine into an entity
-found by its id or into a unique, `connect` or disconnect, and it has no
-`on`; it visits one entity after another, on one core. Combining into an
-ancestor needs the `for` to cascade along that tree.
+A cascading `for` may also do what any `for` does to the world beyond its
+own entity:
+
+```
+for e, n: Node, parent: Node up Under cascade Under where parent.total > 100 {
+  Pruned += 1                // into a unique
+  Stats(Keeper).lost += n.local   // into an entity it has the id of
+  e.destroy()
+}
+```
+
+- `+=`, `-=`, `min=`, `max=` into a unique, and into a field of another
+  entity (`Component(id).field += v`), land when the depth that sent them
+  is through, in the order the `for` visits the entities. So the `for` may
+  not read a unique it adds into, nor read or set a field it sends to
+  that way, of any entity: an entity of the same depth would see what
+  those before it sent.
+- `e.destroy()` takes effect when the whole `for` has run, as in any
+  `for`: every entity is visited as the tree was when it started, a
+  destroyed node's children too, with their parent still there to read.
+
+Not yet: a cascading `for` does not `spawn`, `add` or `remove`, `connect`
+or disconnect, and it has no `on`; it visits one entity after another, on
+one core. Combining into an ancestor needs the `for` to cascade along
+that tree.
 
 ## Statements
 

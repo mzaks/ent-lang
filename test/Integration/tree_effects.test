@@ -1,0 +1,33 @@
+// What a `for` that cascades may do besides reading and writing fields
+// (Inputs/tree_effects.ent): add into uniques, combine into an entity by
+// its id, and destroy the entity it visits, which goes when the whole
+// `for` has run. Sorted, the tree gives the same lines in another order
+// of rows.
+// RUN: %ent run %S/Inputs/tree_effects.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tree_effects.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/ tree capacity 16/ tree sorted capacity 16/' \
+// RUN:     %S/Inputs/tree_effects.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted" %t.sorted.ent
+// RUN: %ent run %t.sorted.ent 2>/dev/null | sort > %t.sorted.out
+// RUN: sort %t.out | cmp - %t.sorted.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// root <- a <- b <- c, and root <- d. Every node sends its own to the
+// root: 1 + 10 + 100 + 1000 + 5.
+// CHECK:      1: root 1 hit 1116
+// CHECK-NEXT: 1: a 11 hit 0
+// CHECK-NEXT: 1: b 111 hit 0
+// CHECK-NEXT: 1: c 1111 hit 0
+// CHECK-NEXT: 1: d 6 hit 0
+// CHECK-NEXT: 1: count 4 deepest 1111
+// b goes, its parent's sum being 11, and c, whose parent b was there to
+// be read: after everything else of the frame.
+// CHECK-NEXT: 2: root 1 hit 1116
+// CHECK-NEXT: 2: a 11 hit 0
+// CHECK-NEXT: 2: d 6 hit 0
+// CHECK-NEXT: 2: count 4 deepest 1111
+// CHECK-NEXT: 3: root 1 hit 16
+// CHECK-NEXT: 3: a 11 hit 0
+// CHECK-NEXT: 3: d 6 hit 0
+// CHECK-NEXT: 3: count 2 deepest 11
+// CHECK-NOT:  {{.}}

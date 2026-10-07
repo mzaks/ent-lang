@@ -118,7 +118,41 @@ ent.relation @R () tree capacity 4
 ent.archetype @A (@N) capacity 4
 ent.system @s() {
   ent.query (%n: !ent.ref<@N>) cascade @R {
-    // expected-error @+1 {{in a cascading query is not supported yet: such a query only reads and writes fields}}
+    %v = arith.constant 1.0 : f32
+    // expected-error @+1 {{in a cascading query is not supported yet}}
+    %e = ent.spawn @A(%v) : f32
+  }
+}
+
+// -----
+
+// A value sent to an entity by its id lands when the sender's depth is
+// through: the query may not read that field, of any entity.
+ent.component @N (v: f32, w: f32)
+ent.relation @R () tree capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s(%to: !ent.entity) {
+  ent.query (%n: !ent.ref<@N>) cascade @R {
+    // expected-note @+1 {{read or set here}}
+    %v = ent.get %n "v" : !ent.ref<@N> -> f32
+    // expected-error @+1 {{in a cascading query combines into a field the query also reads or sets}}
+    ent.apply %to @N "v" add %v : f32
+  }
+}
+
+// -----
+
+// Another field is fine, and so are despawning and adding into a
+// resource the query does not read.
+ent.component @N (v: f32, w: f32)
+ent.resource @Total (value: f32)
+ent.relation @R () tree capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @fine(%to: !ent.entity) {
+  ent.query (%n: !ent.ref<@N>) cascade @R leaves first {
+    %v = ent.get %n "v" : !ent.ref<@N> -> f32
+    ent.apply %to @N "w" add %v : f32
+    ent.accumulate @Total "value" add %v : f32
     ent.despawn
   }
 }

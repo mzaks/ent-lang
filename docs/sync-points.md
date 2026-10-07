@@ -106,9 +106,17 @@ rows). The ancestor is at another depth, so with `leaves first` it finds
 them in its own field when its turn comes. The query may not read such a
 field through a ref up the tree or look it up, so no entity sees what
 others of its depth sent, and combining each value as its entity is
-visited gives the same result. Nothing else in a cascading query is
-deferred (Q5) so far, so one pass in an order that puts every parent
-before its children, or after them, is that sequence of queries.
+visited gives the same result. `ent.apply` and `ent.accumulate` in a
+cascading query are deferred the same way, to the commit point of the
+depth that sent them, and under the same condition: the query reads no
+field it applies to and no resource field it accumulates into. So one
+pass in an order that puts every parent before its children, or after
+them, is that sequence of queries.
+
+`ent.despawn` is not deferred to a depth's commit point but to the last:
+which entities there are, and the tree, are those of the query's start
+for all of it (Q1), and a despawned entity's children are visited with
+their parent still there.
 
 **Q10. Sorted trees.** The archetype holding the entities of a tree
 declared `sorted` has its rows

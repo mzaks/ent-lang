@@ -447,10 +447,13 @@ def Ent_QueryOp : Ent_Op<"query", [
     the deepest first and the entities without a parent last: children
     before their parents. Either way a `mut` ref up the tree lets the query
     combine values into the ancestor (`ent.combine`), which take effect
-    when the depth that sent them is through. Otherwise a cascading query
-    only reads and writes fields so far: it does not spawn, despawn, add or
-    remove components, apply, accumulate, connect or disconnect, and it is
-    not reactive.
+    when the depth that sent them is through. So do the values it sends
+    with `ent.apply` and `ent.accumulate`; the query may not read or set a
+    field it sends to that way, where an entity of the same depth would
+    see what others of it sent. `ent.despawn` takes effect when the whole
+    query has run, as in any query: every entity is visited as the tree
+    was when it started. A cascading query does not spawn, add or remove
+    components, connect or disconnect so far, and it is not reactive.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;

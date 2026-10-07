@@ -1165,7 +1165,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                           const WorldArchetype &archetype, WorldAccess &world,
                           const WorldLayout &layout, Value entity,
                           Value rows, Value mask, Value tick, bool parallel,
-                          bool directApplies) {
+                          bool directApplies, bool marksPending = false) {
   auto column = [&](StringAttr component, StringAttr field) {
     return world.column(archetype, component, field);
   };
@@ -1349,8 +1349,16 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       // Despawn is deferred: list the row; the query's end removes it. A
       // body with a despawn never runs masked (it is not speculatable).
       assert(!mask && "despawn in a masked body");
-      recordPending(rewriter, loc, archetype, world, entity, /*action=*/0,
-                    /*move=*/nullptr, {});
+      if (marksPending)
+        // Rows are not visited in their order (a cascading query): the
+        // row is marked in its own place of the pending list, which the
+        // query's end makes the list of.
+        memref::StoreOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 32),
+            world.pendingList(archetype), ValueRange{entity});
+      else
+        recordPending(rewriter, loc, archetype, world, entity, /*action=*/0,
+                      /*move=*/nullptr, {});
       rewriter.eraseOp(op);
     }
   }
@@ -1447,7 +1455,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                           WorldAccess &world, const WorldLayout &layout,
                           Value entity, Value rows, Value tick, Value seen,
                           bool parallel, bool directApplies = false,
-                          KnownParent parent = {}) {
+                          KnownParent parent = {},
+                          bool marksPending = false) {
   Location loc = query.getLoc();
   ArchetypeOp archetypeOp = archetype.op;
   Value mask;
@@ -1731,7 +1740,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     }
   }
   lowerAccesses(rewriter, roots, archetype, world, layout, entity, rows, mask,
-                tick, parallel, directApplies);
+                tick, parallel, directApplies, marksPending);
 }
 
 /// Append the entity at `row` of `source` to `move.target`, as the move
@@ -4897,6 +4906,65 @@ static void combineAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
                           ValueRange{zero});
 }
 
+/// What a query's end does to the archetypes it changed the entities of,
+/// at the insertion point: their pending despawns and moves are applied,
+/// what depends on their rows is told (a sorted tree, and the locations a
+/// tree keeps), and the relations in `changedRelations`, with those that
+/// follow from that, are looked over.
+static void commitStructure(IRRewriter &rewriter, Location loc,
+                            const WorldLayout &layout, WorldAccess &world,
+                            ArrayRef<const WorldArchetype *> changed,
+                            llvm::SetVector<Attribute> &changedRelations,
+                            Value tick) {
+  for (const WorldArchetype *archetype : changed) {
+    // A sorted archetype that loses entities is sorted again.
+    if (archetype->isSorted()) {
+      const WorldRelation &tree = layout.getRelation(archetype->sortedBy);
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value pending = memref::LoadOp::create(
+          rewriter, loc, world.pendingCount(*archetype), ValueRange{zero});
+      auto ifAny = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::ne, pending,
+              arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(ifAny.thenBlock());
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+          world.edgesClean(tree), ValueRange{zero});
+      changedRelations.insert(archetype->sortedBy);
+    }
+    // Rows of this archetype move: the locations that the trees keeping a
+    // slot for its entities have noted are stale, and read again where
+    // the relations are looked over below.
+    for (const WorldRelation &tree : layout.relations) {
+      if (!tree.hasLocations() || !canHoldEnd(*archetype, tree))
+        continue;
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value pending = memref::LoadOp::create(
+          rewriter, loc, world.pendingCount(*archetype), ValueRange{zero});
+      auto ifAny = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::ne, pending,
+              arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(ifAny.thenBlock());
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+          world.treeStale(tree), ValueRange{zero});
+      changedRelations.insert(RelationOp(tree.op).getSymNameAttr());
+    }
+    applyPending(rewriter, loc, layout, *archetype, world, tick);
+  }
+  // Then the changed relations are sorted, which also drops edges to the
+  // entities just despawned.
+  for (Attribute relation : changedRelations)
+    callSort(rewriter, loc, layout.getRelation(cast<StringAttr>(relation)),
+             world.getArena());
+}
+
 /// Replace a cascading query by loops that visit parents before their
 /// children: first the entities without a parent in the tree, archetype
 /// after archetype, then those with one in the order the relation's sort
@@ -4916,6 +4984,30 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   rewriter.setInsertionPoint(query);
   Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
   bool matched = false;
+  // Despawns take effect when the whole query has run. Its rows are not
+  // visited in their order, which applying them goes by: so a despawn
+  // marks its row in the row's own place of the archetype's pending list
+  // (cleared here), and the marked rows are made the list, in order, when
+  // the query has run.
+  bool marks = false;
+  query.getBody().walk([&](DespawnOp) { marks = true; });
+  SmallVector<std::pair<const WorldArchetype *, Value>> despawning;
+  if (marks)
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (!matches(archetype, query) || !archetype.hasPending())
+        continue;
+      Value rows = world.count(loc, archetype);
+      despawning.push_back({&archetype, rows});
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+      auto clear = scf::ForOp::create(rewriter, loc, zero, rows, one);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(clear.getBody()->getTerminator());
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 32),
+          world.pendingList(archetype),
+          ValueRange{clear.getInductionVar()});
+    }
   bool visitsRoots =
       llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
         return cast<RefType>(type).getVia() == cascade;
@@ -4954,7 +5046,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           [&](Value entity, Value rows, bool) {
             emitQueryBody(rewriter, query, IRMapping(), archetype, world,
                           layout, entity, rows, tick, Value(),
-                          /*parallel=*/false, /*directApplies=*/true);
+                          /*parallel=*/false, /*directApplies=*/true, KnownParent(),
+                        marks);
           },
           rootCount(archetype));
       hoistResourceReads(rewriter, loops, world);
@@ -4975,7 +5068,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           rewriter.setInsertionPointToStart(ifRoot.thenBlock());
           emitQueryBody(rewriter, query, IRMapping(), archetype, world,
                         layout, entity, rows, tick, Value(),
-                        /*parallel=*/false, /*directApplies=*/true);
+                        /*parallel=*/false, /*directApplies=*/true, KnownParent(),
+                        marks);
         });
     hoistResourceReads(rewriter, loops, world);
   }
@@ -5016,7 +5110,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                                                     ValueRange{row}))};
       emitQueryBody(rewriter, query, IRMapping(), *sorted, world, layout, row,
                     rows, tick, Value(), /*parallel=*/false,
-                    /*directApplies=*/true, parent);
+                    /*directApplies=*/true, parent, marks);
       hoistResourceReads(rewriter, loop, world);
     }
     if (leavesFirst)
@@ -5077,7 +5171,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
             rewriter, loc, world.parentLocations(*archetype), ValueRange{row});
         emitQueryBody(rewriter, query, IRMapping(), *archetype, world, layout,
                       row, world.count(loc, *archetype), tick, Value(),
-                      /*parallel=*/false, /*directApplies=*/true, parent);
+                      /*parallel=*/false, /*directApplies=*/true, parent, marks);
       }
     }
     hoistResourceReads(rewriter, levels, world);
@@ -5153,7 +5247,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           OpBuilder::InsertionGuard inner(rewriter);
           emitQueryBody(rewriter, query, IRMapping(), archetype, world, layout,
                         row, world.count(loc, archetype), tick, Value(),
-                        /*parallel=*/false, /*directApplies=*/true, parent);
+                        /*parallel=*/false, /*directApplies=*/true, parent, marks);
           return {};
         },
         []() -> SmallVector<Value> { return {}; }, LocateBounds(), certain,
@@ -5164,6 +5258,53 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   } else {
     query.emitWarning("matches no archetype; the query is removed");
   }
+  // The marked rows, in order, are the pending list; then the query's end
+  // as any query's.
+  rewriter.setInsertionPoint(query);
+  SmallVector<const WorldArchetype *> changed;
+  for (auto [archetype, rows] : despawning) {
+    changed.push_back(archetype);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value list = world.pendingList(*archetype);
+    auto gather = scf::ForOp::create(rewriter, loc, zero, rows, one,
+                                     ValueRange{zero});
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(gather.getBody());
+      Value row = gather.getInductionVar();
+      Value at = gather.getRegionIterArg(0);
+      Value marked = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ne,
+          memref::LoadOp::create(rewriter, loc, list, ValueRange{row}),
+          arith::ConstantIntOp::create(rewriter, loc, 0, 32));
+      auto ifMarked = scf::IfOp::create(rewriter, loc, marked);
+      rewriter.setInsertionPointToStart(ifMarked.thenBlock());
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(),
+                                     row),
+          list, ValueRange{at});
+      if (archetype->pendingActionOffset)
+        memref::StoreOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 32),
+            world.pendingActions(*archetype), ValueRange{at});
+      rewriter.setInsertionPointAfter(ifMarked);
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{arith::SelectOp::create(
+              rewriter, loc, marked,
+              arith::AddIOp::create(rewriter, loc, at, one), at)});
+    }
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                   gather.getResult(0)),
+        world.pendingCount(*archetype), ValueRange{zero});
+  }
+  llvm::SetVector<Attribute> changedRelations;
+  commitStructure(rewriter, loc, layout, world, changed, changedRelations,
+                  tick);
   rewriter.eraseOp(query);
 }
 
@@ -5441,53 +5582,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // entity moved into another archetype the query matches is not visited
   // twice.
   rewriter.setInsertionPoint(query);
-  for (const WorldArchetype *archetype : changed) {
-    // A sorted archetype that loses entities is sorted again.
-    if (archetype->isSorted()) {
-      const WorldRelation &tree = layout.getRelation(archetype->sortedBy);
-      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-      Value pending = memref::LoadOp::create(
-          rewriter, loc, world.pendingCount(*archetype), ValueRange{zero});
-      auto ifAny = scf::IfOp::create(
-          rewriter, loc,
-          arith::CmpIOp::create(
-              rewriter, loc, arith::CmpIPredicate::ne, pending,
-              arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(ifAny.thenBlock());
-      memref::StoreOp::create(
-          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
-          world.edgesClean(tree), ValueRange{zero});
-      changedRelations.insert(archetype->sortedBy);
-    }
-    // Rows of this archetype move: the locations that the trees keeping a
-    // slot for its entities have noted are stale, and read again where
-    // the relations are looked over below.
-    for (const WorldRelation &tree : layout.relations) {
-      if (!tree.hasLocations() || !canHoldEnd(*archetype, tree))
-        continue;
-      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-      Value pending = memref::LoadOp::create(
-          rewriter, loc, world.pendingCount(*archetype), ValueRange{zero});
-      auto ifAny = scf::IfOp::create(
-          rewriter, loc,
-          arith::CmpIOp::create(
-              rewriter, loc, arith::CmpIPredicate::ne, pending,
-              arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(ifAny.thenBlock());
-      memref::StoreOp::create(
-          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
-          world.treeStale(tree), ValueRange{zero});
-      changedRelations.insert(RelationOp(tree.op).getSymNameAttr());
-    }
-    applyPending(rewriter, loc, layout, *archetype, world, tick);
-  }
-  // Then the changed relations are sorted, which also drops edges to the
-  // entities just despawned.
-  for (Attribute relation : changedRelations)
-    callSort(rewriter, loc, layout.getRelation(cast<StringAttr>(relation)),
-             world.getArena());
+  commitStructure(rewriter, loc, layout, world, changed, changedRelations,
+                  tick);
 
   // The set of archetypes is closed, so a query that matches none of them
   // can never run; that is almost certainly a mistake in the program.
@@ -6273,6 +6369,14 @@ struct EntLowerToLoops
       });
       if (!seen.wasInterrupted())
         accumulate->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
+    });
+    // A cascading query combines what it sends as it visits: its order is
+    // the order of its depths' ends, and it reads none of those fields.
+    module.walk([&](Operation *op) {
+      if (!isa<ApplyOp, AccumulateOp>(op))
+        return;
+      if (op->getParentOfType<QueryOp>().getCascade())
+        op->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
     });
     // Lookups and applies through a trusted end of an edge.
     module.walk([&](Operation *op) {
