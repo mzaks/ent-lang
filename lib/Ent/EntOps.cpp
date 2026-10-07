@@ -402,6 +402,13 @@ LogicalResult RelationOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+LogicalResult OtherOp::verify() {
+  if (!getRef().getType().isUp())
+    return emitOpError("asks for the entity of a ref to the visited "
+                       "entity's own component; 'ent.entity' is that");
+  return success();
+}
+
 LogicalResult BoundOp::verify() {
   if (!getRef().getType().getIsOptional())
     return emitOpError("asks whether a ref leads anywhere that always does: "
@@ -1198,28 +1205,44 @@ LogicalResult QueryOp::verify() {
              << getTraversal() << "'; expected 'bfs' or 'dfs'";
   }
   llvm::SmallPtrSet<Attribute, 8> seen;
-  llvm::SmallDenseSet<std::pair<Attribute, Attribute>, 4> seenUp, seenBefore;
+  llvm::SmallDenseSet<std::tuple<Attribute, Attribute, Attribute>, 4>
+      seenWays;
   for (BlockArgument arg : body.getArguments()) {
     auto refType = cast<RefType>(arg.getType());
-    if (!refType.isUp() && (refType.getIsBefore() || refType.getIsOptional()))
+    bool sibling = refType.getIsBefore() || refType.getIsAfter();
+    if (refType.getHops() == 0 ||
+        (refType.getHops() != 1 && !refType.getIsDirect()))
+      return emitOpError("argument #")
+             << arg.getArgNumber() << " is " << refType
+             << "; steps are counted from 1, up to a parent";
+    if (!refType.isUp() && (sibling || refType.getIsOptional()))
       return emitOpError("argument #")
              << arg.getArgNumber() << " is " << refType
              << "; only a ref up or before a tree can be that";
-    if (refType.getIsBefore() && refType.getIsMutable())
+    if (sibling && refType.getIsMutable())
       return emitOpError("binds ")
-             << refType << "; the sibling before is only read";
+             << refType << "; a sibling is only read";
     if (refType.isUp()) {
       // An ancestor's component (or a sibling's): another entity's, so it
       // may also be bound or filtered by for the entity itself.
-      if (!(refType.getIsBefore() ? seenBefore : seenUp)
-               .insert({refType.getComponent(), refType.getVia()})
+      // (Each way to another entity apart: up by its steps, before,
+      // after.)
+      Attribute way = Builder(getContext())
+                          .getI64IntegerAttr(refType.getIsBefore()  ? -1
+                                             : refType.getIsAfter() ? -2
+                                             : refType.getIsDirect()
+                                                   ? refType.getHops()
+                                                   : 0);
+      if (!seenWays.insert({refType.getComponent(), refType.getVia(), way})
                .second)
         return emitOpError("binds component ")
                << refType.getComponent()
-               << (refType.getIsBefore() ? " before " : " up ")
+               << (refType.getIsBefore()  ? " before "
+                   : refType.getIsAfter() ? " after "
+                                          : " up ")
                << refType.getVia() << " more than once";
       for (Operation *user : arg.getUsers())
-        if (!isa<GetOp, CombineOp, BoundOp>(user))
+        if (!isa<GetOp, CombineOp, BoundOp, OtherOp>(user))
           return user->emitOpError("uses component reference #")
                  << arg.getArgNumber()
                  << "; a reference 'up' a relation may only be used by "
@@ -1309,8 +1332,10 @@ LogicalResult QueryOp::verify() {
     if (!refType.isUp())
       continue;
     // (The sibling before is visited first where parents are.)
+    // The sibling after never has been.
     bool ordered = getCascade() == refType.getVia() &&
-                   !(refType.getIsBefore() && isLeavesFirst());
+                   !(refType.getIsBefore() && isLeavesFirst()) &&
+                   !refType.getIsAfter();
     Operation *writer = nullptr;
     StringRef what;
     getBody().walk([&](Operation *op) {
@@ -1338,12 +1363,13 @@ LogicalResult QueryOp::verify() {
       InFlightDiagnostic diag = emitOpError("reads ") << refType.getComponent();
       if (!what.empty())
         diag << " \"" << what << "\"";
-      diag << (refType.getIsBefore() ? " of the sibling before in "
-                                     : " of an ancestor up ")
+      diag << (refType.getIsBefore()  ? " of the sibling before in "
+               : refType.getIsAfter() ? " of the sibling after in "
+                                      : " of an ancestor up ")
            << refType.getVia()
            << " and changes it; which entities see the old value would "
               "depend on iteration order";
-      if (!what.empty())
+      if (!what.empty() && !refType.getIsAfter())
         diag << " ('cascade " << refType.getVia()
              << (refType.getIsBefore()
                      ? "' visits siblings in order, parents first)"
@@ -1419,7 +1445,7 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
         bool bound =
             llvm::any_of(getBody().getArgumentTypes(), [&](Type type) {
               auto ref = cast<RefType>(type);
-              return ref.getVia() == trigger.via &&
+              return ref.getVia() == trigger.via && !ref.getIsAfter() &&
                      ref.getIsBefore() == before &&
                      ref.getComponent() == trigger.component;
             });
@@ -1484,13 +1510,16 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     FlatSymbolRefAttr component = refType.getComponent();
     if (refType.isUp() &&
         failed(verifyTree(refType.getVia(),
-                          refType.getIsBefore() ? "binds before" : "binds up")))
+                          refType.getIsBefore()  ? "binds before"
+                          : refType.getIsAfter() ? "binds after"
+                                                 : "binds up")))
       return failure();
-    if (refType.getIsBefore() &&
+    if ((refType.getIsBefore() || refType.getIsAfter()) &&
         !symbolTable
              .lookupNearestSymbolFrom<RelationOp>(*this, refType.getVia())
              .isOrdered())
-      return emitOpError("binds before ")
+      return emitOpError(refType.getIsAfter() ? "binds after "
+                                              : "binds before ")
              << refType.getVia()
              << ", whose entities are in no order ('tree ordered by')";
     if (!lookupComponent(symbolTable, *this, component))
@@ -1854,7 +1883,7 @@ LogicalResult CombineOp::verify() {
   auto arg = dyn_cast<BlockArgument>(getRef());
   auto query = arg ? dyn_cast<QueryOp>(arg.getOwner()->getParentOp())
                    : QueryOp();
-  if (!ref.isUp() || ref.getIsBefore() || !query)
+  if (!ref.isUp() || ref.getIsBefore() || ref.getIsAfter() || !query)
     return emitOpError("combines through ")
            << ref << "; only a ref up a relation, bound by the query, leads "
            << "to another entity";

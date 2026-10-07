@@ -38,7 +38,8 @@ Type RefType::parse(AsmParser &parser) {
   if (parser.parseLess() || parser.parseAttribute(component))
     return {};
   bool isMutable = false, isBefore = false, isOptional = false;
-  bool isDirect = false;
+  bool isDirect = false, isAfter = false;
+  unsigned hops = 1;
   while (succeeded(parser.parseOptionalComma())) {
     if (succeeded(parser.parseOptionalKeyword("up"))) {
       if (parser.parseAttribute(via))
@@ -51,6 +52,13 @@ Type RefType::parse(AsmParser &parser) {
       if (parser.parseAttribute(via))
         return {};
       isBefore = true;
+    } else if (succeeded(parser.parseOptionalKeyword("after"))) {
+      if (parser.parseAttribute(via))
+        return {};
+      isAfter = true;
+    } else if (succeeded(parser.parseOptionalKeyword("hops"))) {
+      if (parser.parseInteger(hops))
+        return {};
     } else if (succeeded(parser.parseOptionalKeyword("optional"))) {
       isOptional = true;
     } else if (parser.parseKeyword("mut")) {
@@ -62,7 +70,7 @@ Type RefType::parse(AsmParser &parser) {
   if (parser.parseGreater())
     return {};
   return RefType::get(parser.getContext(), component, isMutable, via,
-                      isBefore, isOptional, isDirect);
+                      isBefore, isOptional, isDirect, isAfter, hops);
 }
 
 void RefType::print(AsmPrinter &printer) const {
@@ -71,9 +79,12 @@ void RefType::print(AsmPrinter &printer) const {
     printer << ", mut";
   if (getVia())
     printer << (getIsBefore()   ? ", before "
+                : getIsAfter()  ? ", after "
                 : getIsDirect() ? ", parent "
                                 : ", up ")
             << getVia();
+  if (getHops() != 1)
+    printer << ", hops " << getHops();
   if (getIsOptional())
     printer << ", optional";
   printer << ">";

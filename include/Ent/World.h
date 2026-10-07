@@ -97,6 +97,8 @@ struct WorldArchetype {
   /// Where the tree is in several archetypes and its children are in an
   /// order: per row the id of the sibling before (no entity for none).
   uint64_t beforeIdOffset = 0;
+  /// And of the sibling after.
+  uint64_t afterIdOffset = 0;
   /// Where a reactive query has a trigger up the tree: per row the tick
   /// at which its entity was last connected (i64), a copy of what the
   /// relation keeps per entity key, made where the rows are put in order,

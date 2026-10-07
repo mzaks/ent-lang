@@ -330,7 +330,7 @@ ent.component @N (v: i32)
 ent.relation @R () tree ordered by @N "v" capacity 4
 ent.archetype @A (@N) capacity 4
 ent.system @s() {
-  // expected-error @+1 {{the sibling before is only read}}
+  // expected-error @+1 {{a sibling is only read}}
   ent.query (%n: !ent.ref<@N>, %b: !ent.ref<@N, mut, before @R>) {
   }
 }

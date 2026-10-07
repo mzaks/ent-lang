@@ -1,0 +1,50 @@
+// What arrows reach from the entity a `for` visits
+// (Inputs/tree_arrows.ent): its parent by a name, its parent's parent by
+// two arrows (and what is three up, whatever is between), the sibling
+// after it as well as the one before, and from a loop over its edges a
+// value sent to what is bound of the other end. The same lines where the
+// tree is `sorted`, in one archetype and across two.
+// RUN: %ent run %S/Inputs/tree_arrows.ent 2>/dev/null > %t.out
+// RUN: sed 's/ tree ordered by / tree sorted ordered by /' \
+// RUN:     %S/Inputs/tree_arrows.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted ordered" %t.sorted.ent
+// RUN: %ent run %t.sorted.ent 2>/dev/null | cmp - %t.out
+// RUN: sed -e 's/name: "a2", at: 1, got: 0 } }/name: "a2", at: 1, got: 0 }, Odd }/' \
+// RUN:     -e 's/name: "b", at: 1, got: 0 } }/name: "b", at: 1, got: 0 }, Odd }/' \
+// RUN:     -e 's/^default_capacity 16$/tag Odd default_capacity 16/' \
+// RUN:     %S/Inputs/tree_arrows.ent > %t.two.ent
+// RUN: grep -q "tag Odd" %t.two.ent
+// RUN: grep -c "Odd }" %t.two.ent | grep -q 2
+// RUN: %ent run %t.two.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/ tree ordered by / tree sorted ordered by /' %t.two.ent > %t.two.sorted.ent
+// RUN: %ent run %t.two.sorted.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+//   root -- a -- a1 -- a11
+//       |     `- a2
+//       `- b
+// Every node with a parent sends its parent one.
+// CHECK:      root got 2
+// CHECK-NEXT: a got 2
+// CHECK-NEXT: b got 0
+// CHECK-NEXT: a1 got 1
+// CHECK-NEXT: a2 got 0
+// CHECK-NEXT: a11 got 0
+// CHECK-NEXT: a1 under a under root
+// CHECK-NEXT: a2 under a under root
+// CHECK-NEXT: a11 under a1 under a
+// CHECK-NEXT: a11 three below root
+// CHECK-NEXT: root:
+// CHECK-NEXT: a: before b
+// CHECK-NEXT: b: after a
+// CHECK-NEXT: a1: before a2
+// CHECK-NEXT: a2: after a1
+// CHECK-NEXT: a11:
+// Every node sends each of its children ten.
+// CHECK-NEXT: root got 2
+// CHECK-NEXT: a got 12
+// CHECK-NEXT: b got 10
+// CHECK-NEXT: a1 got 11
+// CHECK-NEXT: a2 got 10
+// CHECK-NEXT: a11 got 10
+// CHECK-NOT:  {{.}}

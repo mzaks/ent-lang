@@ -105,6 +105,18 @@ ent.system @row() {
   }
 }
 
+// Two steps up, the sibling after, and the entity a ref leads to.
+// CHECK-LABEL: ent.system @reach() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Node>, %[[G:.*]]: !ent.ref<@Node, parent @Row, hops 2>, %{{.*}}: !ent.ref<@Node, after @Row, optional>) {
+// CHECK:     ent.other %[[G]] : <@Node, parent @Row, hops 2>
+ent.system @reach() {
+  ent.query (%n: !ent.ref<@Node>,
+             %g: !ent.ref<@Node, parent @Row, hops 2>,
+             %a: !ent.ref<@Node, after @Row, optional>) {
+    %far = ent.other %g : !ent.ref<@Node, parent @Row, hops 2>
+  }
+}
+
 // A tree whose entities are stored in its order.
 // CHECK: ent.relation @In (w: f32) from @Cell to @Cell tree sorted capacity 8
 ent.component @Cell (v: f32)

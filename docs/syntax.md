@@ -190,6 +190,17 @@ for with Enemy { Count += 1 }     // nor the entity
   same parent that comes right before the entity in a tree whose children
   are in an order (`tree ordered by`), if it has the component. It is
   read, never written.
+- Arrows go on up the tree, parent by parent:
+  `(b: Box)-[Inside]->(outer: Box)-[Inside]->(far: Box)` binds the
+  parent's and the parent's parent's, and a node on the way may be left
+  empty, `()`, where nothing of it is read.
+- The other way along the siblings, `(b)~[Inside]~>(next: Box)` binds the
+  sibling after. It is yet to be visited: a `for` does not read from it a
+  field it writes.
+- A node at the other end can name its entity, alone or before what it
+  binds: `(b: Box)-[Inside]->(parent)`, `(parent, outer: Box)`. The name
+  is the entity's id, to send a value to (`Box(parent).w += 1.0`) or to
+  connect; by itself it takes the relation to say what that end has.
 - `optional` before a pattern: the `for` also visits the entities without
   that parent, ancestor or sibling, and what the pattern binds is read
   with `if let v = name.field { ... } else { ... }`. See Trees below.
@@ -247,7 +258,9 @@ fields are read (`s: Synapse`), and `mut` where they are written. The
 other end is `(name)` for its id, `()` for nothing, or binds components of
 it (`(inner: Box)`, `(pre, n: Neuron)`): the body then runs for the edges
 whose other end has them, and a field is read like any other
-(`inner.w`).
+(`inner.w`). With `mut` (`(inner: mut Box)`) a value can be sent to a
+field, `inner.w += 1.0`, which lands when the outer `for` ends, like
+`Box(id).w += 1.0`.
 
 Edges are visited in a fixed order: by source, then in the order they were
 connected (a tree's edges into an entity: in the order they were

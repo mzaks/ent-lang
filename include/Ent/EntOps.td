@@ -719,6 +719,22 @@ def Ent_BoundOp : Ent_Op<"bound"> {
   let hasVerifier = 1;
 }
 
+def Ent_OtherOp : Ent_Op<"other"> {
+  let summary = "The entity a ref to another entity's component leads to";
+  let description = [{
+    ```mlir
+    %parent = ent.other %outer : !ent.ref<@Box, parent @Inside>
+    ```
+    The id of the ancestor or the sibling that the ref, one up, before or
+    after a tree, stands for; where an `optional` ref leads nowhere, the
+    id of no entity.
+  }];
+  let arguments = (ins Ent_RefType:$ref);
+  let results = (outs Ent_EntityType:$result);
+  let assemblyFormat = "$ref attr-dict `:` type($ref)";
+  let hasVerifier = 1;
+}
+
 def Ent_EdgesOp : Ent_Op<"edges", [
     SingleBlockImplicitTerminator<"YieldOp">,
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {

@@ -27,6 +27,14 @@ def Ent_RefType : Ent_Type<"Ref", "ref"> {
     the visited entity's parent itself, and to nothing if the parent does
     not have the component: no further ancestor is looked at.
 
+    With `hops N` (`!ent.ref<@Position, parent @ChildOf, hops 2>`) it is
+    that many steps up: the parent's parent, and so on, whatever those on
+    the way have.
+
+    `!ent.ref<@Position, after @ChildOf>` is the sibling after, as
+    `before` is the one before. A query never reads through it a field it
+    writes: that sibling is yet to be visited.
+
     `!ent.ref<@Position, before @ChildOf>` is a ref to the component of the
     visited entity's sibling before it: the child of the same parent that
     comes right before it in the tree's order (`tree ordered by`). It is
@@ -39,22 +47,24 @@ def Ent_RefType : Ent_Type<"Ref", "ref"> {
   }];
   let parameters = (ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
                         "FlatSymbolRefAttr":$via, "bool":$isBefore,
-                        "bool":$isOptional, "bool":$isDirect);
+                        "bool":$isOptional, "bool":$isDirect,
+                        "bool":$isAfter, "unsigned":$hops);
   let hasCustomAssemblyFormat = 1;
   let builders = [
     TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable), [{
       return $_get($_ctxt, component, isMutable, ::mlir::FlatSymbolRefAttr(),
-                   false, false, false);
+                   false, false, false, false, 1u);
     }]>,
     TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
                      "FlatSymbolRefAttr":$via), [{
-      return $_get($_ctxt, component, isMutable, via, false, false, false);
+      return $_get($_ctxt, component, isMutable, via, false, false, false,
+                   false, 1u);
     }]>,
     TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
                      "FlatSymbolRefAttr":$via, "bool":$isBefore,
                      "bool":$isOptional), [{
       return $_get($_ctxt, component, isMutable, via, isBefore, isOptional,
-                   false);
+                   false, false, 1u);
     }]>
   ];
   let extraClassDeclaration = [{

@@ -1,0 +1,57 @@
+// What arrows reach from an entity a `for` visits (tree_arrows.test): its
+// parent by name, its parent's parent, the sibling after it, and from a
+// loop over its edges a value sent to the other end.
+//
+//   root -- a -- a1 -- a11
+//       |     `- a2
+//       `- b
+import console
+
+component Node { name: text[8], at: i32, got: i32 }
+default_capacity 16
+relation (Node)-[Under]->(Node) tree ordered by Node.at capacity 16
+
+world {
+  let root = spawn { Node { name: "root", at: 0, got: 0 } }
+  let a = spawn { Node { name: "a", at: 0, got: 0 } }
+  let b = spawn { Node { name: "b", at: 1, got: 0 } }
+  let a1 = spawn { Node { name: "a1", at: 0, got: 0 } }
+  let a2 = spawn { Node { name: "a2", at: 1, got: 0 } }
+  let a11 = spawn { Node { name: "a11", at: 0, got: 0 } }
+  connect (a)-[Under]->(root)<-[Under]-(b)
+  connect (a1)-[Under]->(a)<-[Under]-(a2)
+  connect (a11)-[Under]->(a1)
+}
+
+system show() {
+  // The parent, by a name: its id, to send it a value by.
+  for (n: Node)-[Under]->(parent) top down Under {
+    Node(parent).got += 1
+  }
+  for n: Node top down bfs Under { put("{n.name} got {n.got}") }
+  // The parent, and its parent: two arrows.
+  for (n: Node)-[Under]->(p: Node)-[Under]->(g: Node) top down bfs Under {
+    put("{n.name} under {p.name} under {g.name}")
+  }
+  // Only the far one, whatever is between.
+  for (n: Node)-[Under]->()-[Under]->()-[Under]->(far: Node) {
+    put("{n.name} three below {far.name}")
+  }
+  // The sibling after, and the one before, where there is one.
+  for (n: Node), optional (n)~[Under]~>(next: Node),
+      optional (prev: Node)~[Under]~>(n) top down bfs Under {
+    var line: text[40] = "{n.name}:"
+    if let before = prev.name { line += " after {before}" }
+    if let after = next.name { line += " before {after}" }
+    put(line)
+  }
+  // A value sent to the other end of an edge, by what is bound of it.
+  for n: Node {
+    for (child: mut Node)-[Under]->(n) { child.got += 10 }
+  }
+  for n: Node top down bfs Under { put("{n.name} got {n.got}") }
+  flush()
+}
+
+schedule once() { show() }
+main { once() }

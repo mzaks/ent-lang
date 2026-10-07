@@ -669,6 +669,9 @@ public:
   Value beforeIds(const WorldArchetype &archetype) {
     return view(archetype.beforeIdOffset, archetype.capacity, idType());
   }
+  Value afterIds(const WorldArchetype &archetype) {
+    return view(archetype.afterIdOffset, archetype.capacity, idType());
+  }
   /// Per row of a sorted archetype, the tick of its entity's last connect.
   Value connectedRows(const WorldArchetype &archetype) {
     return view(archetype.connectedRowOffset, archetype.capacity,
@@ -1562,12 +1565,14 @@ static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
                              const WorldLayout &layout, WorldAccess &world,
                              const WorldRelation &relation,
                              FlatSymbolRefAttr component, Value id,
-                             Value parent = Value(), bool direct = false);
+                             Value parent = Value(), bool direct = false,
+                             unsigned hops = 1);
 static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
                             const WorldLayout &layout, WorldAccess &world,
                             const WorldRelation &relation,
                             FlatSymbolRefAttr component,
-                            const WorldArchetype &archetype, Value row);
+                            const WorldArchetype &archetype, Value row,
+                            bool after);
 namespace {
 /// Bounds that ids are checked against, loaded ahead by a caller that
 /// knows they cannot change (see emitLocate).
@@ -1787,10 +1792,17 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         layout.getRelation(refType.getVia().getAttr());
     KnownParent known = parent.relation == &relation ? parent : KnownParent();
     Ancestor ancestor;
-    if (refType.getIsBefore()) {
-      // The sibling before, by the tree's links.
+    if (refType.getIsBefore() || refType.getIsAfter()) {
+      // The sibling before or after, by the tree's links.
       ancestor = emitSibling(rewriter, loc, layout, world, relation,
-                             refType.getComponent(), archetype, entity);
+                             refType.getComponent(), archetype, entity,
+                             refType.getIsAfter());
+    } else if (refType.getHops() != 1) {
+      // More than one step up: from the entity, parent by parent.
+      ancestor = emitAncestor(rewriter, loc, layout, world, relation,
+                              refType.getComponent(),
+                              world.entityId(loc, archetype, entity), Value(),
+                              /*direct=*/true, refType.getHops());
     } else if (known.row &&
         ArchetypeOp(known.archetype->op).contains(refType.getComponent()) &&
         !ArchetypeOp(known.archetype->op)
@@ -1846,7 +1858,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         if (trigger.via != refType.getVia() ||
             trigger.component != refType.getComponent() ||
             trigger.where !=
-                (refType.getIsBefore() ? Trigger::Before : Trigger::Up))
+                (refType.getIsBefore() ? Trigger::Before : Trigger::Up) ||
+            refType.getIsAfter())
           continue;
         Stamp stamp = getStamp(trigger);
         Type i64 = rewriter.getI64Type();
@@ -2056,6 +2069,33 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
       Operation *op = bound;
       llvm::erase(roots, op);
       rewriter.replaceOp(bound, answer);
+    }
+    // The entity the ref leads to: its id, or the one at its row.
+    SmallVector<OtherOp> others;
+    for (Operation *root : roots)
+      root->walk([&, arg = arg](OtherOp other) {
+        if (other.getRef() == arg)
+          others.push_back(other);
+      });
+    for (OtherOp other : others) {
+      rewriter.setInsertionPoint(other);
+      Value id = ancestor.id;
+      if (!id)
+        id = emitAtHome(rewriter, other.getLoc(), layout, ancestor,
+                        TypeRange{world.idType()},
+                        [&](const WorldArchetype &home) -> SmallVector<Value> {
+                          return {world.entityId(other.getLoc(), home,
+                                                 ancestor.row)};
+                        })[0];
+      if (ancestor.found)
+        id = arith::SelectOp::create(rewriter, other.getLoc(), ancestor.found,
+                                     id, world.noEntity(other.getLoc()));
+      Operation *op = other;
+      llvm::erase(roots, op);
+      rewriter.replaceOp(other,
+                         world.fromStorage(other.getLoc(), id,
+                                           EntityType::get(
+                                               rewriter.getContext())));
     }
     SmallVector<GetOp> gets;
     for (Operation *root : roots)
@@ -2961,7 +3001,7 @@ static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
                              const WorldLayout &layout, WorldAccess &world,
                              const WorldRelation &relation,
                              FlatSymbolRefAttr component, Value id,
-                             Value parent, bool direct) {
+                             Value parent, bool direct, unsigned hops) {
   Type i1 = rewriter.getI1Type();
   Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
   Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
@@ -2972,6 +3012,16 @@ static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
   if (!parent)
     std::tie(has, parent) =
         emitParent(rewriter, loc, layout, world, relation, id);
+  // More steps: the parent's parent, and on. (Where there is none, the
+  // entity is asked in its place, to no effect.)
+  for (unsigned step = 1; step < hops; ++step) {
+    auto [more, next] = emitParent(
+        rewriter, loc, layout, world, relation,
+        arith::SelectOp::create(rewriter, loc, has, parent, id));
+    has = arith::AndIOp::create(rewriter, loc, has, more);
+    parent = arith::SelectOp::create(rewriter, loc, has, next,
+                                     world.noEntity(loc));
+  }
   if (trusted)
     return {has, parent, /*trusted=*/true};
   if (direct) {
@@ -3041,7 +3091,8 @@ static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
                             const WorldLayout &layout, WorldAccess &world,
                             const WorldRelation &relation,
                             FlatSymbolRefAttr component,
-                            const WorldArchetype &archetype, Value row) {
+                            const WorldArchetype &archetype, Value row,
+                            bool after) {
   Type i1 = rewriter.getI1Type();
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -3057,7 +3108,8 @@ static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
         world.slotOwner(loc, id));
     Value link = memref::LoadOp::create(
         rewriter, loc,
-        world.treeLinks(relation, relation.previousSiblingOffset),
+        world.treeLinks(relation, after ? relation.nextSiblingOffset
+                                        : relation.previousSiblingOffset),
         ValueRange{key});
     has = arith::AndIOp::create(
         rewriter, loc, mine,
@@ -3086,10 +3138,25 @@ static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
     Value roots = world.toIndex(
         loc, memref::LoadOp::create(rewriter, loc, world.rootCount(archetype),
                                     ValueRange{zero}));
-    Value past = arith::CmpIOp::create(rewriter, loc,
-                                       arith::CmpIPredicate::ugt, row, roots);
+    // (Or the row after, of an entity that has a parent itself.)
+    Value next = arith::AddIOp::create(rewriter, loc, row, one);
+    Value past =
+        after ? arith::AndIOp::create(
+                    rewriter, loc,
+                    arith::CmpIOp::create(rewriter, loc,
+                                          arith::CmpIPredicate::uge, row,
+                                          roots),
+                    arith::CmpIOp::create(rewriter, loc,
+                                          arith::CmpIPredicate::ult, next,
+                                          world.count(loc, archetype)))
+                    .getResult()
+              : arith::CmpIOp::create(rewriter, loc,
+                                      arith::CmpIPredicate::ugt, row, roots)
+                    .getResult();
     Value before = arith::SelectOp::create(
-        rewriter, loc, past, arith::SubIOp::create(rewriter, loc, row, one),
+        rewriter, loc, past,
+        after ? next
+              : arith::SubIOp::create(rewriter, loc, row, one).getResult(),
         row);
     Value parents = world.parentRows(archetype);
     has = arith::AndIOp::create(
@@ -3107,8 +3174,10 @@ static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
                                ValueRange{before}),
         world.noEntity(loc));
   } else {
-    sibling = memref::LoadOp::create(rewriter, loc, world.beforeIds(archetype),
-                                     ValueRange{row});
+    sibling = memref::LoadOp::create(
+        rewriter, loc,
+        after ? world.afterIds(archetype) : world.beforeIds(archetype),
+        ValueRange{row});
     has = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
                                 sibling, world.noEntity(loc));
   }
@@ -5686,6 +5755,16 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
         // the rows of its children in each archetype: they are next to
         // each other there, the list having an entity's children one
         // after another.)
+        // (An entity without a parent has no sibling before it or after
+        // it; those with one are given theirs below.)
+        for (const WorldArchetype *archetype : holders)
+          if (archetype->beforeIdOffset)
+            forEach(zero, world.count(loc, *archetype), [&](Value row) {
+              for (Value ids : {world.beforeIds(*archetype),
+                                world.afterIds(*archetype)})
+                memref::StoreOp::create(rewriter, loc, world.noEntity(loc),
+                                        ids, ValueRange{row});
+            });
         bool ranges = !holders[0]->childRangeOffsets.empty();
         if (ranges)
           for (const WorldArchetype *archetype : holders)
@@ -5728,6 +5807,28 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                                     ValueRange{row});
             // (The sibling before: the one before in the list, if that
             // has the same parent.)
+            // (And the one after: the next in the list, likewise.)
+            if (archetype->afterIdOffset) {
+              Value next = arith::AddIOp::create(rewriter, loc, k, one);
+              Value any = arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::ult, next, entries);
+              Value at = arith::SelectOp::create(rewriter, loc, any, next, k);
+              Value same = arith::AndIOp::create(
+                  rewriter, loc, any,
+                  arith::CmpIOp::create(
+                      rewriter, loc, arith::CmpIPredicate::eq,
+                      memref::LoadOp::create(rewriter, loc, orderParents,
+                                             ValueRange{at}),
+                      parent));
+              memref::StoreOp::create(
+                  rewriter, loc,
+                  arith::SelectOp::create(
+                      rewriter, loc, same,
+                      memref::LoadOp::create(rewriter, loc, order,
+                                             ValueRange{at}),
+                      world.noEntity(loc)),
+                  world.afterIds(*archetype), ValueRange{row});
+            }
             if (archetype->beforeIdOffset) {
               Value any = arith::CmpIOp::create(
                   rewriter, loc, arith::CmpIPredicate::ugt, k, zero);
@@ -6578,7 +6679,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   bool leavesFirst = query.isLeavesFirst();
   bool readsSiblings =
       llvm::any_of(query.getBody().getArgumentTypes(), [](Type type) {
-        return cast<RefType>(type).getIsBefore();
+        auto ref = cast<RefType>(type);
+        return ref.getIsBefore() || ref.getIsAfter();
       });
   // The archetype stored in the tree's order, if there is one: its rows
   // are the entities without a parent, then the others, parents first.

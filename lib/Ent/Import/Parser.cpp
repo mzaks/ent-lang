@@ -151,6 +151,9 @@ struct Record {
   bool tree = false;
   /// `ordered by`: its entities have siblings before them.
   bool ordered = false;
+  /// For a relation: the components its sources and its targets have, as
+  /// it names them (empty where it does not).
+  std::string ends[2];
   SmallVector<std::pair<std::string, Type>> fields;
   /// For a unique declared as `unique Score: i64`: its one field is
   /// `value` and the bare name stands for it.
@@ -914,6 +917,7 @@ LogicalResult Parser::parseRelation() {
   // (Source)-[Name { fields }]->(Target): what the ends have, either or
   // both of which may be left open, `()`. Without ends, the name alone.
   FlatSymbolRefAttr ends[2];
+  std::string endNames[2];
   bool hasEnds = token.is(Token::LParen);
   auto parseEnd = [&](unsigned index) -> LogicalResult {
     if (failed(expect(Token::LParen, "'('")))
@@ -926,6 +930,7 @@ LogicalResult Parser::parseRelation() {
       if (!components.count(*component))
         return error(componentAt, "unknown component '" + *component + "'");
       ends[index] = symbol(*component);
+      endNames[index] = *component;
     }
     return expect(Token::RParen, "')'");
   };
@@ -1021,6 +1026,8 @@ LogicalResult Parser::parseRelation() {
                      sorted ? builder.getUnitAttr() : UnitAttr(),
                      builder.getI64IntegerAttr(*capacity), orderComponent,
                      orderField);
+  record.ends[0] = endNames[0];
+  record.ends[1] = endNames[1];
   relations[*name] = std::move(record);
   return success();
 }
@@ -1695,7 +1702,11 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
   struct End {
     llvm::SMLoc loc;
     std::string name;
-    SmallVector<std::pair<std::string, std::string>> bindings;
+    struct Bound {
+      std::string name, component;
+      bool mut;
+    };
+    SmallVector<Bound> bindings;
   };
   auto parseEnd = [&]() -> FailureOr<End> {
     End end;
@@ -1722,10 +1733,8 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
     while (binds) {
       if (failed(expect(Token::Colon, "':' and a component")))
         return failure();
-      if (token.isKeyword("mut"))
-        return error("a component of the entity at the other end of an edge "
-                     "is read; a value is sent to it with 'Component(name)."
-                     "field += value'");
+      // (`mut`: a value can be sent to its fields, with `+=` and such.)
+      bool mut = consumeKeyword("mut");
       llvm::SMLoc componentAt = token.loc;
       FailureOr<std::string> component = identifier("a component");
       if (failed(component))
@@ -1736,7 +1745,7 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
       if (record->second.fields.empty())
         return error(componentAt, "'" + *component + "' has no fields to "
                                   "read of the entity at the other end");
-      end.bindings.push_back({pending, *component});
+      end.bindings.push_back({pending, *component, mut});
       if (!consumeIf(Token::Comma))
         break;
       FailureOr<std::string> next = identifier("a binding");
@@ -1820,7 +1829,7 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
   // What is bound of the other entity: the body runs where it has all of
   // it, and a field is looked up where it is read.
   mlir::Value has;
-  for (auto &[name, component] : other.bindings) {
+  for (auto &[name, component, mutOther] : other.bindings) {
     Record &record = components[component];
     auto lookup = LookupOp::create(
         builder, loc(other.loc), record.fields.front().second,
@@ -1830,7 +1839,7 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
                                       lookup.getFound())
                     .getResult()
               : lookup.getFound();
-    bind(name, {Variable::Other, block->getArgument(1), component, false});
+    bind(name, {Variable::Other, block->getArgument(1), component, mutOther});
   }
   if (has) {
     auto branch = scf::IfOp::create(builder, loc(other.loc), has);
@@ -2164,10 +2173,15 @@ LogicalResult Parser::parseFor() {
     /// The parent's itself (`-[R]->`), not the nearest ancestor's that
     /// has the component (`-[R*]->`).
     bool direct = false;
+    /// The sibling after's (`(name)~[R]~>(next: C)`).
+    bool after = false;
+    /// How many arrows up: `(name)-[R]->()-[R]->(far: C)` is two.
+    unsigned hops = 1;
   };
   // A relation `up` or `cascade` follows: a tree. (`treeIsOrdered`:
   // whether the one last parsed has its entities in an order.)
   bool treeIsOrdered = false;
+  std::string treeEnds[2];
   auto parseTree = [&](StringRef word) -> FailureOr<FlatSymbolRefAttr> {
     llvm::SMLoc relationAt = token.loc;
     FailureOr<std::string> relation = identifier("a relation");
@@ -2177,6 +2191,8 @@ LogicalResult Parser::parseFor() {
     if (record == relations.end())
       return error(relationAt, "unknown relation '" + *relation + "'");
     treeIsOrdered = record->second.ordered;
+    treeEnds[0] = record->second.ends[0];
+    treeEnds[1] = record->second.ends[1];
     if (!record->second.tree)
       return error(relationAt, word.str() + " follows a tree, and '" +
                                    *relation + "' is not declared one "
@@ -2288,6 +2304,9 @@ LogicalResult Parser::parseFor() {
   // sibling before (`~[R]~>`). Later patterns name the visited entity by
   // one of its names.
   llvm::StringSet<> ownNames;
+  // The entities at other ends that are named, and a binding of each to
+  // reach it by.
+  SmallVector<std::pair<std::string, unsigned>> otherNames;
   bool first = true;
   while (patterns) {
     llvm::SMLoc patternAt = token.loc;
@@ -2329,8 +2348,6 @@ LogicalResult Parser::parseFor() {
       FailureOr<Node> right = parseNode();
       if (failed(right))
         return failure();
-      if (atArrow())
-        return error("a pattern of more than one arrow is not supported yet");
       // Which end is the visited entity.
       bool leftIsOwn = first;
       if (!first) {
@@ -2343,46 +2360,91 @@ LogicalResult Parser::parseFor() {
                        "of another: '(name)-[Relation]->(outer: C)'");
         leftIsOwn = leftOwn;
       }
-      Node &other = leftIsOwn ? *right : *left;
-      if (!other.name.empty())
-        return error(other.loc, "naming the entity at the other end of an "
-                                "arrow is not supported yet; bind its "
-                                "components: '(outer: C)'");
-      if (other.bindings.empty())
-        return error(other.loc, "the other end of an arrow binds what is "
-                                "read of it: '(outer: C)'");
       // Does the arrow point from the visited entity?
       bool fromOwn = leftIsOwn != arrow->reversed;
+      std::string relationName = relation->getValue().str();
       if (arrow->sibling) {
-        if (fromOwn)
-          return error(arrow->loc, "the sibling after is not bound yet; the "
-                                   "one before is: '(prev: C)~[" +
-                                       relation->getValue().str() +
-                                       "]~>(name)'");
         if (!ordered)
           return error(arrow->loc,
-                       "the entities of '" + relation->getValue().str() +
+                       "the entities of '" + relationName +
                            "' are in no order: 'relation ... tree ordered by "
                            "C.f capacity N'");
         if (nearest)
-          return error(arrow->loc, "'*' is for ancestors: the sibling before "
-                                   "is one");
+          return error(arrow->loc, "'*' is for ancestors: a sibling is the "
+                                   "one before or the one after");
       } else if (!fromOwn) {
         return error(arrow->loc,
                      "an arrow to the entity a 'for' visits comes from its "
                      "children, of which there are many: they are visited in "
-                     "a loop in the body, 'for (child: C)-[" +
-                         relation->getValue().str() + "]->(name) { ... }'");
+                     "a loop in the body, 'for (child: C)-[" + relationName +
+                         "]->(name) { ... }'");
       }
-      for (Binding &binding : other.bindings) {
-        if (arrow->sibling && binding.mut)
-          return error(other.loc, "the sibling before is only read");
-        binding.via = *relation;
-        binding.before = arrow->sibling;
-        binding.optional = optional;
-        binding.direct = !arrow->sibling && !nearest;
-        bindings.push_back(binding);
+      // What a node at the other end of an arrow binds: components of
+      // that entity, and its id if the node names it (which takes a
+      // component to reach it by: what the relation says its ends have,
+      // if the node binds none).
+      std::string endComponent = treeEnds[arrow->sibling ? 0 : 1];
+      auto bindOther = [&](Node &other, unsigned hops) -> LogicalResult {
+        // (`(name)` alone is parsed as bare.)
+        std::string named = other.name;
+        if (!named.empty() && other.bindings.empty()) {
+          if (endComponent.empty())
+            return error(other.loc,
+                         "'" + relationName + "' does not say what the "
+                         "entity at this end has; bind a component of it "
+                         "to reach it by: '(" + named + ", c: C)'");
+          other.bindings.push_back({"$" + named, endComponent, false, {}});
+        }
+        for (Binding &binding : other.bindings) {
+          if (arrow->sibling && binding.mut)
+            return error(other.loc, "a sibling is only read");
+          binding.via = *relation;
+          binding.before = arrow->sibling && !fromOwn;
+          binding.after = arrow->sibling && fromOwn;
+          binding.optional = optional;
+          binding.direct = !arrow->sibling && !nearest;
+          binding.hops = hops;
+          bindings.push_back(binding);
+        }
+        if (!named.empty())
+          otherNames.push_back({named, unsigned(bindings.size() - 1)});
+        return success();
+      };
+      Node *last = leftIsOwn ? &*right : &*left;
+      if (failed(bindOther(*last, 1)))
+        return failure();
+      // On up the tree: `(name)-[R]->(mid: C)-[R]->(far: C)`, each arrow
+      // a step from the node before it.
+      unsigned hops = 1;
+      FailureOr<Node> further = failure();
+      while (atArrow()) {
+        FailureOr<ArrowStart> next = parseArrowStart();
+        if (failed(next))
+          return failure();
+        llvm::SMLoc nextAt = token.loc;
+        FailureOr<FlatSymbolRefAttr> nextRelation =
+            parseTree("an arrow in the head of a 'for'");
+        if (failed(nextRelation))
+          return failure();
+        if (!leftIsOwn || arrow->sibling || arrow->reversed || nearest ||
+            next->sibling || next->reversed || token.is(Token::Star) ||
+            *nextRelation != *relation)
+          return error(nextAt, "arrows go on only up a tree, parent by "
+                               "parent: '(name)-[R]->(mid: C)-[R]->(far: "
+                               "C)'");
+        if (failed(parseArrowEnd(*next)))
+          return failure();
+        further = parseNode();
+        if (failed(further))
+          return failure();
+        last = &*further;
+        if (failed(bindOther(*last, ++hops)))
+          return failure();
       }
+      if (last->name.empty() && last->bindings.empty())
+        return error(last->loc, "the other end of an arrow binds what is "
+                                "read of it, or names it: '(outer: C)', "
+                                "'(parent)'");
     }
     first = false;
     if (!consumeIf(Token::Comma))
@@ -2552,6 +2614,9 @@ LogicalResult Parser::parseFor() {
           if (*kind != "changed")
             return error(componentAt, "only 'changed' can be asked of "
                                       "another entity");
+          if (bound->after)
+            return error(componentAt, "the event of the sibling after is "
+                                      "not asked yet");
           if (bound->before)
             entry.push_back(builder.getStringAttr("before"));
           entry.push_back(bound->via);
@@ -2595,7 +2660,7 @@ LogicalResult Parser::parseFor() {
     block->addArgument(
         RefType::get(context, symbol(binding.component), binding.mut,
                      binding.via, binding.before, binding.optional,
-                     binding.direct),
+                     binding.direct, binding.after, binding.hops),
         loc(at));
   Operation *query = builder.create(state);
 
@@ -2605,6 +2670,11 @@ LogicalResult Parser::parseFor() {
   ScopeGuard scope(*this);
   for (auto [binding, arg] : llvm::zip(bindings, block->getArguments()))
     bind(binding.name, {Variable::Ref, arg, binding.component, binding.mut});
+  for (auto &[name, index] : otherNames)
+    bind(name, Variable::ofValue(
+                   OtherOp::create(builder, loc(at), EntityType::get(context),
+                                   block->getArgument(index))
+                       .getResult()));
   inQuery = true;
   queryEntity = entity;
   queryNames.clear();
@@ -2906,6 +2976,61 @@ LogicalResult Parser::parseNameStatement() {
   }
 
   const Variable *variable = lookup(name);
+  // binding.field op value, for a component of the entity at the other
+  // end of an edge a loop visits: combined into, like `C(id).f += v`.
+  if (variable && variable->kind == Variable::Other) {
+    if (failed(expect(Token::Dot, "'.' and a field")))
+      return failure();
+    llvm::SMLoc fieldAt = token.loc;
+    FailureOr<std::string> field = identifier("a field");
+    if (failed(field))
+      return failure();
+    Type type = recordOf(*variable).fieldType(*field);
+    if (!type)
+      return error(fieldAt, "component '" + variable->component +
+                                "' has no field '" + *field + "'");
+    if (!variable->mut)
+      return error(at, "'" + name + "' is not 'mut': bind it as '(" + name +
+                           ": mut " + variable->component +
+                           ")' to send a value to it");
+    auto op = parseAssignOp();
+    if (failed(op))
+      return failure();
+    FailureOr<ExprPtr> value = parseExpr();
+    if (failed(value))
+      return failure();
+    StringRef rule;
+    bool negate = false;
+    if (op->second)
+      rule = *op->second;
+    else if (op->first == Token::PlusAssign)
+      rule = "add";
+    else if (op->first == Token::MinusAssign)
+      rule = "add", negate = true;
+    else
+      return error(at, "another entity's field can only be combined into "
+                       "('+=', '-=', 'min=', 'max='): which write lands "
+                       "last would depend on the order");
+    FailureOr<mlir::Value> rhs = emit(**value, type);
+    if (failed(rhs))
+      return failure();
+    mlir::Value v = *rhs;
+    if (negate) {
+      FailureOr<mlir::Value> negated = arithmetic(
+          loc(at), Token::Minus,
+          arith::ConstantOp::create(builder, loc(at),
+                                    builder.getZeroAttr(type)),
+          v);
+      if (failed(negated))
+        return failure();
+      v = *negated;
+    }
+    ApplyOp::create(builder, loc(at), variable->value,
+                    symbol(variable->component),
+                    builder.getStringAttr(*field), builder.getStringAttr(rule),
+                    v);
+    return success();
+  }
   // e.destroy(), e.add(C { .. }), e.remove(C)
   if (variable && variable->kind == Variable::Entity) {
     if (failed(expect(Token::Dot, "'.' and a method")))

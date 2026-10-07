@@ -106,7 +106,13 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
       llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
         auto ref = dyn_cast<RefType>(type);
         return ref && ref.getVia() == cascade && !ref.getIsBefore() &&
-               !ref.getIsOptional();
+               !ref.getIsAfter() && !ref.getIsOptional();
+      }) ||
+      // (More than one step up is asked of each entity as it is come
+      // to, not passed down.)
+      llvm::any_of(query.getBody().getArgumentTypes(), [&](Type type) {
+        auto ref = dyn_cast<RefType>(type);
+        return ref && ref.getHops() != 1;
       }))
     return false;
   for (const Trigger &trigger : triggers) {
@@ -464,7 +470,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       } else {
         archetype.parentLocationOffset = place(scheme.locationBits / 8);
         if (layout.getRelation(archetype.sortedBy).isOrdered())
-          archetype.beforeIdOffset = place(scheme.idBits / 8);
+          archetype.beforeIdOffset = place(scheme.idBits / 8),
+          archetype.afterIdOffset = place(scheme.idBits / 8);
         bool followed = false;
         module.walk([&](QueryOp query) {
           followed |= query.getCascade() &&

@@ -234,12 +234,52 @@ system s() {
 
 // -----
 
+// What is read of a sibling that is yet to be visited is as the `for`
+// found it: not what the `for` writes.
 component Body { x: f32, at: i32 }
 relation (Body)-[Orbits]->(Body) tree ordered by Body.at capacity 8
 default_capacity 8
 system s() {
-  // expected-error @+1 {{the sibling after is not bound yet; the one before is: '(prev: C)~[Orbits]~>(name)'}}
-  for (b: Body)~[Orbits]~>(next: Body) {
+  // expected-error @+1 {{reads @Body "x" of the sibling after in @Orbits and changes it; which entities see the old value would depend on iteration order}}
+  for (b: mut Body)~[Orbits]~>(next: Body) top down Orbits {
+    // expected-note @+1 {{changed here}}
+    b.x = next.x
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation (Body)-[Orbits]->(Body) tree capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{arrows go on only up a tree, parent by parent: '(name)-[R]->(mid: C)-[R]->(far: C)'}}
+  for (b: Body)-[Orbits*]->(p: Body)-[Orbits]->(g: Body) {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation ()-[Orbits]->() tree capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{'Orbits' does not say what the entity at this end has; bind a component of it to reach it by: '(p, c: C)'}}
+  for (b: Body)-[Orbits]->(p) {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation (Body)-[Orbits]->(Body) tree capacity 8
+default_capacity 8
+system s() {
+  for b: Body {
+    for (child: Body)-[Orbits]->(b) {
+      // expected-error @+1 {{'child' is not 'mut': bind it as '(child: mut Body)' to send a value to it}}
+      child.x += 1.0
+    }
   }
 }
 
