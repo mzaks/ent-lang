@@ -20,7 +20,7 @@ system move() {
 
 // Every node, every step.
 system place() {
-  for (w: mut World, l: Local)-[Under]->(above: World) cascade Under {
+  for (w: mut World, l: Local)-[Under]->(above: World) top down Under {
     w.x = above.x + l.x
   }
 }

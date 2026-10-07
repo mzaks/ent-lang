@@ -81,7 +81,7 @@ system turn() {
 // `center` is that other body; `cascade` visits it first, so its place is
 // this frame's: the station follows the moon, which follows the planet.
 system place() {
-  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) cascade Orbits {
+  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) top down Orbits {
     b.x = center.x + cos(o.angle) * o.distance
     b.y = center.y + sin(o.angle) * o.distance
   }

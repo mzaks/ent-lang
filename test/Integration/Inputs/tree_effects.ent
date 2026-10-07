@@ -33,7 +33,7 @@ system sum() {
     n.total = n.local
     n.hit = 0
   }
-  for (n: mut Node)-[Under]->(parent: Node) cascade Under {
+  for (n: mut Node)-[Under]->(parent: Node) top down Under {
     n.total = parent.total + n.local
     Count += 1
     Deepest max= n.total
@@ -42,7 +42,7 @@ system sum() {
 
 // Every node sends its own to the sink, by its id, from the leaves.
 system strike() {
-  for n: Node cascade Under leaves first {
+  for n: Node bottom up Under {
     Node(Sink).hit += n.local
   }
 }
@@ -52,7 +52,7 @@ system strike() {
 system prune() {
   let from = if Frame == 2 { 11 } else { 1000000 }
   for (e, n: Node)-[Under]->(parent: Node)
-      cascade Under where parent.total >= from {
+      top down Under where parent.total >= from {
     e.destroy()
   }
 }

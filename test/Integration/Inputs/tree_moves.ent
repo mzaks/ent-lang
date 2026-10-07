@@ -39,7 +39,7 @@ system change() {
 
 system sum() {
   for n: mut Node { n.total = n.local }
-  for (n: mut Node)-[Under]->(parent: Node) cascade Under {
+  for (n: mut Node)-[Under]->(parent: Node) top down Under {
     n.total = parent.total + n.local
   }
 }

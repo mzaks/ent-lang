@@ -13,8 +13,8 @@ system s() {
 component Body { x: f32 }
 relation (Body)-[Near]->(Body) capacity 8
 system s() {
-  // expected-error @+1 {{'cascade' follows a tree, and 'Near' is not declared one}}
-  for b: Body cascade Near {
+  // expected-error @+1 {{'top down' follows a tree, and 'Near' is not declared one}}
+  for b: Body top down Near {
   }
 }
 
@@ -60,7 +60,7 @@ component Body { x: f32 }
 relation (Body)-[Orbits]->(Body) tree capacity 8
 default_capacity 8
 system s() {
-  for (b: Body)-[Orbits]->(p: mut Body) cascade Orbits {
+  for (b: Body)-[Orbits]->(p: mut Body) top down Orbits {
     // expected-error @+1 {{an ancestor's field can only be combined into ('+=', '-=', 'min=', 'max='): which write lands last would depend on the order}}
     p.x = b.x
   }
@@ -83,8 +83,8 @@ system s() {
 component Body { x: f32 }
 relation (Body)-[Orbits]->(Body) tree capacity 8
 system s() {
-  // expected-error @+1 {{expected 'first'}}
-  for b: Body cascade Orbits leaves {
+  // expected-error @+1 {{the order along a tree is 'top down Relation' (parents first) or 'bottom up Relation' (children first), with 'bfs' or 'dfs' before the relation where the order is to be exactly that}}
+  for b: Body cascade Orbits {
   }
 }
 
@@ -94,7 +94,7 @@ component Body { x: f32 }
 relation (Body)-[Orbits]->(Body) tree capacity 8
 default_capacity 8
 system s() {
-  for (b: mut Body)-[Orbits]->(p: Body) cascade Orbits {
+  for (b: mut Body)-[Orbits]->(p: Body) top down Orbits {
     // expected-error @+1 {{'p' is an ancestor's 'Body' and not 'mut': bind it as '(p: mut Body)' to combine into it}}
     p.x = 1.0
   }
@@ -145,7 +145,7 @@ relation (Body)-[Orbits]->(Body) tree capacity 8
 default_capacity 8
 system s() {
   // expected-error @+1 {{only 'changed' can be asked of another entity}}
-  for (b: Body)-[Orbits]->(p: Body) cascade Orbits on added p {
+  for (b: Body)-[Orbits]->(p: Body) top down Orbits on added p {
   }
 }
 
@@ -156,7 +156,7 @@ relation (Body)-[Orbits]->(Body) tree capacity 8
 default_capacity 8
 system s() {
   // expected-error @+1 {{another entity's event is asked by its binding ('changed outer.x'), a child's by a pattern ('changed (: C.f)-[R]->(name)')}}
-  for (b: Body)-[Orbits]->(p: Body) cascade Orbits on changed Body up Orbits {
+  for (b: Body)-[Orbits]->(p: Body) top down Orbits on changed Body up Orbits {
   }
 }
 
@@ -167,7 +167,7 @@ relation (Body)-[Orbits]->(Body) tree capacity 8
 default_capacity 8
 system s() {
   // expected-error @+1 {{reacts to changed @Body down @Orbits without 'leaves first': children are visited first only then}}
-  for e, b: Body cascade Orbits on changed (: Body.x)-[Orbits]->(e) {
+  for e, b: Body top down Orbits on changed (: Body.x)-[Orbits]->(e) {
   }
 }
 
@@ -179,7 +179,7 @@ relation (Body)-[Orbits]->(Body) tree capacity 8
 default_capacity 8
 unique Total: f32
 system s() {
-  for b: mut Body cascade Orbits {
+  for b: mut Body top down Orbits {
     // expected-note @+1 {{read or set here}}
     b.x = Total
     // expected-error @+1 {{in a cascading query combines into a field the query also reads or sets; what an entity sees of it would depend on the order within its depth}}
@@ -216,7 +216,7 @@ component Body { x: f32, at: i32 }
 relation (Body)-[Orbits]->(Body) tree ordered by Body.at capacity 8
 default_capacity 8
 system s() {
-  for (b: mut Body), optional (p: Body)~[Orbits]~>(b) cascade Orbits {
+  for (b: mut Body), optional (p: Body)~[Orbits]~>(b) top down Orbits {
     // expected-error @+1 {{'p' is optional and may lead nowhere: read it with 'if let x = p.x { ... } else { ... }'}}
     b.x = p.x
   }

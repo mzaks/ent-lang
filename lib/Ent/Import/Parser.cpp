@@ -2431,18 +2431,31 @@ LogicalResult Parser::parseFor() {
       without.push_back(*component);
     } while (consumeIf(Token::Comma));
   }
+  // top down Relation / bottom up Relation: along a tree, parents before
+  // their children or after them; with `bfs` or `dfs` before the relation,
+  // in exactly that order.
   FlatSymbolRefAttr cascade;
   bool leavesFirst = false;
-  if (consumeKeyword("cascade")) {
-    FailureOr<FlatSymbolRefAttr> relation = parseTree("'cascade'");
+  StringRef traversal;
+  if (token.isKeyword("cascade"))
+    return error("the order along a tree is 'top down Relation' (parents "
+                 "first) or 'bottom up Relation' (children first), with "
+                 "'bfs' or 'dfs' before the relation where the order is to "
+                 "be exactly that");
+  bool topDown = token.isKeyword("top") && peek().isKeyword("down");
+  bool bottomUp = token.isKeyword("bottom") && peek().isKeyword("up");
+  if (topDown || bottomUp) {
+    advance();
+    advance();
+    leavesFirst = bottomUp;
+    for (StringRef kind : {"bfs", "dfs"})
+      if (consumeKeyword(kind))
+        traversal = kind;
+    FailureOr<FlatSymbolRefAttr> relation =
+        parseTree(bottomUp ? "'bottom up'" : "'top down'");
     if (failed(relation))
       return failure();
     cascade = *relation;
-    if (consumeKeyword("leaves")) {
-      if (failed(expectKeyword("first")))
-        return failure();
-      leavesFirst = true;
-    }
   }
   ExprPtr where;
   if (consumeKeyword("where")) {
@@ -2572,6 +2585,9 @@ LogicalResult Parser::parseFor() {
     state.addAttribute(QueryOp::kCascadeAttr, cascade);
   if (leavesFirst)
     state.addAttribute(QueryOp::kLeavesFirstAttr, builder.getUnitAttr());
+  if (!traversal.empty())
+    state.addAttribute(QueryOp::kTraversalAttr,
+                       builder.getStringAttr(traversal));
   Region *body = state.addRegion();
   auto *block = new Block();
   body->push_back(block);

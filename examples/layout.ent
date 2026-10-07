@@ -58,7 +58,7 @@ system layout() {
   // where it is asked for another size, stands them another way, or one
   // of them has another size, or has come or gone.
   for (b: mut Box, s: Size, k: Stack, c: mut Content)
-      cascade Inside leaves first
+      bottom up Inside
       on changed s, changed k, changed (: Box.w)-[Inside]->(b),
          changed (: Box.h)-[Inside]->(b), changed (: Size)-[Inside]->(b) {
     c.count = 0
@@ -93,7 +93,7 @@ system layout() {
   // the outermost boxes in, since a box that grew has more room to give;
   // only where the box it is in has another size or other boxes in it.
   for (b: mut Box, s: Size)-[Inside]->(outer: Box, k: Stack, c: Content)
-      cascade Inside
+      top down Inside
       on changed s, changed outer.w, changed outer.h, changed k, changed c {
     let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
     let room_w = outer.w - 2.0 * k.pad
@@ -116,7 +116,7 @@ system layout() {
   // moved, has another size or is another.
   for (b: mut Box)-[Inside]->(outer: Box, k: Stack),
       optional (prev: Box)~[Inside]~>(b)
-      cascade Inside
+      top down Inside
       on changed outer.x, changed outer.y, changed k, changed prev {
     var x = outer.x + k.pad
     var y = outer.y + k.pad

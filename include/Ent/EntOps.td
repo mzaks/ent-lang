@@ -506,6 +506,15 @@ def Ent_QueryOp : Ent_Op<"query", [
     /// With `cascade`: children before their parents.
     static constexpr ::llvm::StringLiteral kLeavesFirstAttr = "leaves_first";
     bool isLeavesFirst() { return (*this)->hasAttr(kLeavesFirstAttr); }
+    /// With `cascade`: the order exactly, "bfs" (depth by depth) or "dfs"
+    /// (an entity and all below it before the next; children first, all
+    /// below an entity before it). Empty: any order in which parents
+    /// come before their children, or after with `leaves first`.
+    static constexpr ::llvm::StringLiteral kTraversalAttr = "traversal";
+    ::llvm::StringRef getTraversal() {
+      auto attr = (*this)->getAttrOfType<::mlir::StringAttr>(kTraversalAttr);
+      return attr ? attr.getValue() : ::llvm::StringRef();
+    }
     /// Whether an argument is a ref to an ancestor's component.
     bool hasUpRefs();
 

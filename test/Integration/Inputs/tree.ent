@@ -42,7 +42,7 @@ system change() {
 
 system sum() {
   for n: mut Node { n.total = n.local }
-  for (n: mut Node)-[Under]->(parent: Node) cascade Under {
+  for (n: mut Node)-[Under]->(parent: Node) top down Under {
     n.total = parent.total + n.local
   }
 }
@@ -53,7 +53,7 @@ system show() {
   for (n: Node)-[Under*]->(m: Mark) without Mark {
     put("{Frame}: {n.name} marked {m.color}")
   }
-  for n: Node cascade Under { put("{Frame}: visit {n.name}") }
+  for n: Node top down Under { put("{Frame}: visit {n.name}") }
   flush()
 }
 

@@ -31,7 +31,7 @@ system change() {
 }
 
 system add() {
-  for (e, n: mut Node) cascade Under leaves first
+  for (e, n: mut Node) bottom up Under
       on changed Node.own, changed (: Node.total)-[Under]->(e) {
     n.total = n.own
     for (child)-[edge: Under]->(e) {

@@ -51,7 +51,7 @@ system move() {
 }
 
 system place() {
-  for (w: mut World, l: Local)-[Under]->(p: World) cascade Under
+  for (w: mut World, l: Local)-[Under]->(p: World) top down Under
       on changed Local, changed p.x {
     w.x = p.x + l.x
     w.placed += 1

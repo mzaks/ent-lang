@@ -3,7 +3,7 @@
 // is (Inputs/reparent_main.c, over bench/scene/scene.ent made reactive):
 // unsorted and sorted.
 // RUN: mkdir -p %t.dir %t.sdir
-// RUN: sed 's/cascade Under {/cascade Under on changed l, changed above {/' \
+// RUN: sed 's/top down Under {/top down Under on changed l, changed above {/' \
 // RUN:     %S/../../bench/scene/scene.ent > %t.ent
 // RUN: grep -q "changed l, changed above" %t.ent
 // RUN: ent-translate --import-ent %t.ent -o %t.mlir

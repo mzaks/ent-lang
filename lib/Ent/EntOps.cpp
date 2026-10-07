@@ -996,6 +996,9 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
           return failure();
         result.addAttribute(kLeavesFirstAttr, b.getUnitAttr());
       }
+      for (StringRef traversal : {"bfs", "dfs"})
+        if (succeeded(parser.parseOptionalKeyword(traversal)))
+          result.addAttribute(kTraversalAttr, b.getStringAttr(traversal));
     }
     if (failed(parser.parseOptionalKeyword("on")))
       return success();
@@ -1056,7 +1059,8 @@ void QueryOp::print(OpAsmPrinter &p) {
     for (Attribute group : groups)
       p << " any " << group;
   if (FlatSymbolRefAttr cascade = getCascade())
-    p << " cascade " << cascade << (isLeavesFirst() ? " leaves first" : "");
+    p << " cascade " << cascade << (isLeavesFirst() ? " leaves first" : "")
+      << (getTraversal().empty() ? "" : " ") << getTraversal();
   if (auto triggers = (*this)->getAttrOfType<ArrayAttr>(kTriggersAttr)) {
     p << " on [";
     llvm::interleaveComma(triggers, p, [&](Attribute attr) {
@@ -1079,7 +1083,7 @@ void QueryOp::print(OpAsmPrinter &p) {
   p.printOptionalAttrDictWithKeyword(
       (*this)->getAttrs(),
       {kTriggersAttr, kWithAttr, kWithoutAttr, kAnyAttr, kCascadeAttr,
-       kLeavesFirstAttr});
+       kLeavesFirstAttr, kTraversalAttr});
   printBody(p, getBody());
 }
 
@@ -1186,6 +1190,13 @@ LogicalResult QueryOp::verify() {
       return emitOpError("'cascade' must name a relation");
   if (isLeavesFirst() && !getCascade())
     return emitOpError("is 'leaves first' without a 'cascade'");
+  if ((*this)->hasAttr(kTraversalAttr)) {
+    if (!getCascade())
+      return emitOpError("has a traversal without a 'cascade'");
+    if (getTraversal() != "bfs" && getTraversal() != "dfs")
+      return emitOpError("has unknown traversal '")
+             << getTraversal() << "'; expected 'bfs' or 'dfs'";
+  }
   llvm::SmallPtrSet<Attribute, 8> seen;
   llvm::SmallDenseSet<std::pair<Attribute, Attribute>, 4> seenUp, seenBefore;
   for (BlockArgument arg : body.getArguments()) {

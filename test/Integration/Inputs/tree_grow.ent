@@ -1,4 +1,4 @@
-// A tree changed from inside `for`s that cascade along it: nodes spawned
+// A tree changed from inside `for`s that go along it: nodes spawned
 // and connected, a component added and removed (which moves the nodes
 // between the two archetypes), and edges disconnected. All of it takes
 // effect when the `for` that did it has run.
@@ -27,7 +27,7 @@ system sum() {
     n.depth = 0
     n.total = n.local
   }
-  for (n: mut Node)-[Under]->(parent: Node) cascade Under {
+  for (n: mut Node)-[Under]->(parent: Node) top down Under {
     n.depth = parent.depth + 1
     n.total = parent.total + n.local
   }
@@ -38,7 +38,7 @@ system sum() {
 system grow() {
   let now = Frame == 2
   for (e, n: Node)-[Under]->(parent: Node)
-      cascade Under where now && n.depth == 2 {
+      top down Under where now && n.depth == 2 {
     let bud = spawn { Node { name: "bud", depth: 0, total: 0, local: 5 } }
     connect (bud)-[Under]->(e)
   }
@@ -49,11 +49,11 @@ system grow() {
 system flag() {
   let now = Frame == 3
   for (e, n: Node)-[Under]->(parent: Node)
-      cascade Under where now && n.depth >= 2 {
+      top down Under where now && n.depth >= 2 {
     e.add(Flag { since: Frame })
   }
   let back = Frame == 4
-  for e, n: Node with Flag cascade Under leaves first where back {
+  for e, n: Node with Flag bottom up Under where back {
     e.remove(Flag)
   }
 }
@@ -61,7 +61,7 @@ system flag() {
 // Frame 5: the nodes right under the root let go of it.
 system cut() {
   let now = Frame == 5
-  for e, n: Node cascade Under {
+  for e, n: Node top down Under {
     for (e)-[s: Under]->(parent) {
       if now && n.depth == 1 { s.disconnect() }
     }

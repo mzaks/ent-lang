@@ -19,7 +19,7 @@ relation Owns { share: f32 } tree capacity 4
 // CHECK:     %[[X:.*]] = ent.get %[[C]] "x" : <@Body, parent @Orbits> -> f32
 // CHECK:     ent.set %[[B]] "x", %{{.*}} : <@Body, mut>, f32
 system place() {
-  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) cascade Orbits {
+  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) top down Orbits {
     b.x = center.x + o.distance
   }
 }
@@ -33,7 +33,7 @@ system inherit() {
   for (b: Body)-[Orbits*]->(t: Tint) without Tint {
     let color = t.color
   }
-  for b: Body with Orbit cascade Owns where b.x > 0.0 {
+  for b: Body with Orbit top down Owns where b.x > 0.0 {
     let x = b.x
   }
 }
@@ -53,7 +53,7 @@ system keys() {
 // CHECK:     %[[NEG:.*]] = arith.subf %{{.*}}, %{{.*}} : f32
 // CHECK:     ent.combine %[[D]] "x" add %[[NEG]] : <@Body, mut, parent @Orbits>, f32
 system gather() {
-  for (b: Body)-[Orbits]->(down: mut Body) cascade Orbits leaves first {
+  for (b: Body)-[Orbits]->(down: mut Body) bottom up Orbits {
     down.x += b.x
     down.x -= 1.0
   }
@@ -61,7 +61,7 @@ system gather() {
 // CHECK-LABEL: ent.system @highest() {
 // CHECK:     ent.combine %{{.*}} "x" max %{{.*}} : <@Body, mut, parent @Orbits>, f32
 system highest() {
-  for (b: Body)-[Orbits]->(down: mut Body) cascade Orbits {
+  for (b: Body)-[Orbits]->(down: mut Body) top down Orbits {
     down.x max= b.x
   }
 }
@@ -70,7 +70,7 @@ system highest() {
 // CHECK-LABEL: ent.system @settle() {
 // CHECK:   ent.query (%{{.*}}: !ent.ref<@Body, mut>, %{{.*}}: !ent.ref<@Orbit>, %{{.*}}: !ent.ref<@Body, parent @Orbits>) cascade @Orbits on [changed @Orbit, changed @Body "x" up @Orbits] {
 system settle() {
-  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) cascade Orbits
+  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) top down Orbits
       on changed Orbit, changed center.x {
     b.x = center.x + o.distance
   }
@@ -91,7 +91,7 @@ relation (Leaf2)-[Row]->(Leaf2) tree ordered by Leaf2.at capacity 8
 system line() {
   for (l: mut Leaf2)-[Row]->(above: Leaf2),
       optional (prev: Leaf2)~[Row]~>(l)
-      cascade Row {
+      top down Row {
     if let v = prev.v, let at = prev.at {
       l.v = v + 1.0
     } else {

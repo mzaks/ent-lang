@@ -45,7 +45,7 @@ system starts() {
   for (n: mut Node),
       optional (before: Node)~[Under]~>(n),
       optional (n)-[Under]->(above: Node)
-      cascade Under {
+      top down Under {
     n.start = 100
     if let start = above.start { n.start = start }
     if let start = before.start, let size = before.size {
@@ -57,7 +57,7 @@ system starts() {
 // In the order they are visited: a node after its parent, the children
 // of one in their order.
 system show() {
-  for n: Node cascade Under { put("{Frame}: {n.name} {n.start}") }
+  for n: Node top down Under { put("{Frame}: {n.name} {n.start}") }
   flush()
 }
 

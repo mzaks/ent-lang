@@ -22,7 +22,7 @@ system bud() {
 }
 system gather() {
   for n: mut Node { n.flow = n.rain }
-  for (n: Node)-[Flows]->(down: mut Node) cascade Flows leaves first { down.flow += n.flow }
+  for (n: Node)-[Flows]->(down: mut Node) bottom up Flows { down.flow += n.flow }
 }
 system show() {
   for n: Node { put("{Frame}: {n.name} {n.flow}") }

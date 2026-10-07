@@ -24,7 +24,7 @@ system fall(wet: f32) {
 // Children before their parents: when a node passes its flow on, all that
 // is above it has arrived. `down` is the node it flows into.
 system run() {
-  for (n: Node)-[Flows]->(down: mut Node) cascade Flows leaves first {
+  for (n: Node)-[Flows]->(down: mut Node) bottom up Flows {
     down.flow += n.flow
   }
 }

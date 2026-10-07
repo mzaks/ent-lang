@@ -46,7 +46,7 @@ system gather() {
     n.flow = n.rain
     n.top = n.height
   }
-  for (n: Node)-[Flows]->(down: mut Node) cascade Flows leaves first {
+  for (n: Node)-[Flows]->(down: mut Node) bottom up Flows {
     down.flow += n.flow
     down.top max= n.top
   }
@@ -54,7 +54,7 @@ system gather() {
 
 // Where the water came down: every node after the one it flows into.
 system trace() {
-  for (n: mut Node)-[Flows]->(down: Node) cascade Flows {
+  for (n: mut Node)-[Flows]->(down: Node) top down Flows {
     n.height = down.height + 1
   }
 }
@@ -62,7 +62,7 @@ system trace() {
 system show() {
   // In the order of rows: no node before the one it flows into.
   for n: Node { put("{Frame}: {n.name} {n.flow} from {n.top} at {n.height}") }
-  for n: Node cascade Flows leaves first { put("{Frame}: visit {n.name}") }
+  for n: Node bottom up Flows { put("{Frame}: visit {n.name}") }
   flush()
 }
 

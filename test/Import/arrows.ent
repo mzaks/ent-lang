@@ -41,7 +41,7 @@ world {
 }
 system a() {
   for (b: mut Box, s: Size)-[Inside]->(outer: Box, k: Stack),
-      optional (b)<~[Inside]~(prev: Box) cascade Inside {
+      optional (b)<~[Inside]~(prev: Box) top down Inside {
     b.x = outer.x + k.pad
     if let x = prev.x { b.x = x }
   }

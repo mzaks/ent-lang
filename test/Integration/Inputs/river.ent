@@ -31,7 +31,7 @@ system gather() {
   }
   // What has gathered here goes on down; the highest place it came from
   // goes with it.
-  for (n: Node)-[Flows]->(down: mut Node) cascade Flows leaves first {
+  for (n: Node)-[Flows]->(down: mut Node) bottom up Flows {
     down.flow += n.flow
     down.top max= n.top
   }
@@ -39,7 +39,7 @@ system gather() {
 
 system show() {
   for n: Node { put("{n.name} {n.flow} from {n.top}") }
-  for n: Node cascade Flows leaves first { put("visit {n.name}") }
+  for n: Node bottom up Flows { put("visit {n.name}") }
   flush()
 }
 
