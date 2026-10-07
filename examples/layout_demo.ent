@@ -6,9 +6,10 @@
 //   tools/ent run -I examples examples/layout_demo.ent
 //
 // Hold the left mouse button to drag the side bar's edge; hold Space to
-// put the cards below one another. A note floats at the mouse, over
-// everything else. Escape or closing the window ends the
-// program.
+// put the cards below one another. The text in a card goes on in the next
+// line where the card ends. A note floats at the mouse, over everything
+// else, with a mark that floats over its text. Escape or closing the
+// window ends the program.
 import window
 import layout
 
@@ -115,9 +116,19 @@ world {
   }
   connect (note)-[Over]->(root)
   connect (line)-[Inside]->(note)
+  // And a mark at the corner of that line: over a box that is inside one
+  // that floats.
+  let mark = spawn {
+    Box { x: 0.0, y: 0.0, w: 8.0, h: 8.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0xd04030 },
+    Float { dx: -6.0, dy: -6.0 }
+  }
+  connect (mark)-[Over]->(line)
 
   // Three cards share the width; in each, a picture with the height that
-  // is left above three lines.
+  // is left above a text, which is as high as its lines come to in the
+  // width of the card.
   for i in 0..3 {
     let card = spawn {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
@@ -132,14 +143,17 @@ world {
       Tint { color: 0x805030 + i * 0x203040 }
     }
     connect (picture)-[Inside]->(card)
-    for j in 0..3 {
-      let text = spawn {
-        Box { x: 0.0, y: 0.0, w: 120.0 - j as f32 * 30.0, h: 10.0 },
-        Size { w: Sizing.Fixed, h: Sizing.Fixed },
-        Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x5a6a78 }
-      }
-      connect (text)-[Inside]->(card)
+    let text = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x242e38 },
+      Label { text: if i == 0 { "A card is as wide as its share of the room, and its text breaks where the card ends." }
+                    else if i == 1 { "Drag the side bar: the lines break elsewhere, and the picture has what is left." }
+                    else { "Short." },
+              size: 16.0, colour: 0xa0b0c0 },
+      Wrap
     }
+    connect (text)-[Inside]->(card)
   }
 }
 
@@ -164,30 +178,42 @@ system interact() {
   }
 }
 
+// A text that goes on in the next line is as high as its lines come to
+// in the width `layout` gave its box: only where that is another.
+system wrap() {
+  for b: mut Box, t: Label with Wrap on changed b.w {
+    let h = text_height(t.text, t.size, b.w)
+    b.h = h
+  }
+}
+
 // A box is drawn after the one it is in, and so on top of it, and all that
 // is in a box before the next box: depth first. What floats is a layer
-// above, drawn after all of the layer below, with its labels.
+// above, drawn after all of the layer below, with its texts.
 system draw() {
-  for b: Box, t: Tint, l: Layer top down dfs Inside where l.z == 0 {
-    rect(b.x, b.y, b.w, b.h, t.color)
-  }
-  for b: Box, t: Label, f: Fitted, l: Layer where l.z == 0 {
-    label(t.text, b.x + f.around, b.y + (b.h - t.size) * 0.5, t.size, t.colour)
-  }
-  for b: Box, t: Label, l: Layer without Fitted where l.z == 0 {
-    label(t.text, b.x + 10.0, b.y + (b.h - t.size) * 0.5, t.size, t.colour)
-  }
-  for b: Box, t: Tint, l: Layer top down dfs Inside where l.z > 0 {
-    rect(b.x, b.y, b.w, b.h, t.color)
-  }
-  for b: Box, t: Label, f: Fitted, l: Layer where l.z > 0 {
-    label(t.text, b.x + f.around, b.y + (b.h - t.size) * 0.5, t.size, t.colour)
+  for z in 0..3 {
+    for b: Box, t: Tint, l: Layer top down dfs Inside where l.z == z {
+      rect(b.x, b.y, b.w, b.h, t.color)
+    }
+    for e, b: Box, t: Label, l: Layer, optional f: Fitted where l.z == z {
+      var around = 10.0
+      if let a = f.around { around = a }
+      if e.has(Wrap) { paragraph(t.text, b.x, b.y, b.w, t.size, t.colour) }
+      else {
+        label(t.text, b.x + around, b.y + (b.h - t.size) * 0.5, t.size,
+              t.colour)
+      }
+    }
   }
 }
 
 schedule frame() {
   begin()
   interact()
+  // The widths, then the heights of the texts that those give, then
+  // what follows from these.
+  layout()
+  wrap()
   layout()
   draw()
   present()

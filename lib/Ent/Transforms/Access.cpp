@@ -277,8 +277,10 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       return;
     }
     StringAttr component = cast<RefType>(ref.getType()).getComponent().getAttr();
+    // (An optional ref's, only where the archetype has the component.)
     for (ArchetypeOp archetype : matchedArchetypes(query))
-      into.insert({archetype.getSymNameAttr(), component, field});
+      if (archetype.contains(refType.getComponent()))
+        into.insert({archetype.getSymNameAttr(), component, field});
   };
 
   // The trees that keep a slot for the entities of `archetype` (those

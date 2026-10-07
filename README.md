@@ -222,15 +222,16 @@ come with the compiler, in `devices/`, and two more that need
 - `window`: a window to draw in, with the keys and the mouse.
   `begin()` opens it, fills `Window`, `Mouse` and `Keys` and clears the
   picture; systems then draw with `rect`, `circle`, `sector`, `line` and
-  `label` (colours are `0xRRGGBB`); `present()` shows the frame and holds
+  `label`, `paragraph` (colours are `0xRRGGBB`); `present()` shows the frame and holds
   `Window.fps`. `examples/bounce.ent` is a program with it:
   `tools/ent run examples/bounce.ent`; `examples/orrery.ent` has moons
   around planets around a sun, each placed from where the body it circles
   is; `examples/layout_demo.ent` is a window of boxes inside boxes, with
-  labels the window measures and a note that floats at the mouse, drawn
-  depth first (`top down dfs Inside`) and laid
+  labels the window measures, texts that go on in the next line where
+  their card ends and a note that floats at the mouse, drawn layer by
+  layer and depth first (`top down dfs Inside`) and laid
   out by the library `examples/layout.ent` (fixed, fit and grow sizes in
-  rows and columns, after Clay) in three reactive `for`s along a tree
+  rows and columns, after Clay) in reactive `for`s along a tree
   whose children are in an order (`tree ordered by Slot.at`), each
   running only where something it reads changed, in the box, in the one
   it is in (`(b: Box)-[Inside]->(outer: Box)`), in the one before it

@@ -865,3 +865,26 @@ enum Nothing { }
 // expected-error @+1 {{unknown type 'Way'; expected f32, f64, bool, i8, i16, i32, i64, index, entity, text[N] or an enum}}
 component Ghost { way: Way }
 enum Way { Left, Right }
+
+// -----
+
+component Body { x: f32 }
+component Name { n: i32 }
+default_capacity 8
+system s() {
+  // expected-error @+1 {{a component the entity may be without is only read: to change it, visit the entities that have it in a 'for' of their own}}
+  for b: Body, optional n: mut Name {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+component Name { n: i32 }
+default_capacity 8
+system s() {
+  for b: mut Body, optional n: Name {
+    // expected-error @+1 {{'n' is optional and may lead nowhere: read it with 'if let x = n.n { ... } else { ... }'}}
+    b.x = n.n as f32
+  }
+}

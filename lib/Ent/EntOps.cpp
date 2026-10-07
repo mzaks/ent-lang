@@ -412,7 +412,7 @@ LogicalResult OtherOp::verify() {
 LogicalResult BoundOp::verify() {
   if (!getRef().getType().getIsOptional())
     return emitOpError("asks whether a ref leads anywhere that always does: "
-                       "only a ref 'optional' up or before a tree may not");
+                       "only an 'optional' ref may not");
   return success();
 }
 
@@ -1113,7 +1113,8 @@ componentList(Attribute attr) {
 SmallVector<FlatSymbolRefAttr> QueryOp::getRequired() {
   SmallVector<FlatSymbolRefAttr> required;
   for (Type type : getBody().getArgumentTypes())
-    if (auto ref = dyn_cast<RefType>(type); ref && !ref.isUp())
+    if (auto ref = dyn_cast<RefType>(type);
+        ref && !ref.isUp() && !ref.getIsOptional())
       required.push_back(ref.getComponent());
   if (Attribute with = (*this)->getAttr(kWithAttr))
     if (auto list = componentList(with); succeeded(list))
@@ -1170,6 +1171,13 @@ LogicalResult QueryOp::verify() {
              << arg.getType();
   if (getRequired().empty() && getWithout().empty() && getAnyGroups().empty())
     return emitOpError("must bind or filter by at least one component");
+  // In a system, or in a counted loop of one.
+  Operation *parent = (*this)->getParentOp();
+  while (parent && parent->getName().getStringRef() == "scf.for")
+    parent = parent->getParentOp();
+  if (!parent || !isa<SystemOp>(parent))
+    return emitOpError("expects to be an op of a system, or of an 'scf.for' "
+                       "in one");
 
   // Every component appears in at most one term: two would be redundant
   // (with, any) or contradict each other (without).
@@ -1215,10 +1223,14 @@ LogicalResult QueryOp::verify() {
       return emitOpError("argument #")
              << arg.getArgNumber() << " is " << refType
              << "; steps are counted from 1, up to a parent";
-    if (!refType.isUp() && (sibling || refType.getIsOptional()))
+    if (!refType.isUp() && sibling)
       return emitOpError("argument #")
              << arg.getArgNumber() << " is " << refType
              << "; only a ref up or before a tree can be that";
+    if (!refType.isUp() && refType.getIsOptional() && refType.getIsMutable())
+      return emitOpError("binds ")
+             << refType
+             << "; a component the entity may not have is only read";
     if (sibling && refType.getIsMutable())
       return emitOpError("binds ")
              << refType << "; a sibling is only read";
@@ -1265,7 +1277,8 @@ LogicalResult QueryOp::verify() {
     // Lowering replaces refs by an index into the matched archetype's
     // columns, which only works if nothing else holds on to them.
     for (Operation *user : arg.getUsers())
-      if (!isa<GetOp, SetOp>(user))
+      if (!isa<GetOp, SetOp>(user) &&
+          !(isa<BoundOp>(user) && refType.getIsOptional()))
         return user->emitOpError("uses component reference #")
                << arg.getArgNumber()
                << "; references may only be used by 'ent.get' and 'ent.set'";

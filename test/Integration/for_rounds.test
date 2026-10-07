@@ -1,0 +1,14 @@
+// A counted `for` in a system runs the `for`s over entities in it so many
+// times: once for each layer, with the count in the filter, or in rounds,
+// where a reactive `for` reacts to what the round before changed.
+// RUN: %ent run %S/Inputs/for_rounds.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/for_rounds.ent 2>/dev/null | FileCheck %s
+
+// CHECK:      layer 0: 2
+// CHECK-NEXT: layer 1: 3
+// CHECK-NEXT: layer 2: 1
+// The cell that was 1 changed in two rounds, the others in one (being
+// new counts as one).
+// CHECK-NEXT: 3 3 heard 2
+// CHECK-NEXT: 3 3 heard 1
+// CHECK-NEXT: 3 3 heard 1

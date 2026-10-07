@@ -6,6 +6,7 @@
 
 #include <raylib.h>
 #include <rlgl.h>
+#include <stdio.h>
 #include <string.h>
 
 // 0xRRGGBB, opaque.
@@ -75,6 +76,59 @@ void ent_window_label(const ent_text126 *text, float x, float y, float size,
 float ent_window_text_width(const ent_text126 *text, float size) {
   ENT_WINDOW_TEXT(line, text);
   return (float)MeasureText(line, (int)size);
+}
+
+// Breaks a text into lines no wider than `width`, at its spaces (a word
+// wider than that has a line to itself), draws them if asked, and says
+// how many there are.
+static int ent_window_wrap(const char *text, float size, float width,
+                           int draw, float x, float y, Color color) {
+  char line[128], trial[128];
+  int length = 0, lines = 0;
+  float step = size + size / 4;
+  const char *at = text;
+  for (;;) {
+    while (*at == ' ')
+      at++;
+    const char *end = at;
+    while (*end && *end != ' ')
+      end++;
+    int word = (int)(end - at);
+    if (!word)
+      break;
+    int both = length ? snprintf(trial, sizeof trial, "%.*s %.*s", length,
+                                 line, word, at)
+                      : snprintf(trial, sizeof trial, "%.*s", word, at);
+    if (length && MeasureText(trial, (int)size) > width) {
+      if (draw)
+        DrawText(line, (int)x, (int)(y + lines * step), (int)size, color);
+      lines++;
+      length = snprintf(line, sizeof line, "%.*s", word, at);
+    } else {
+      memcpy(line, trial, both + 1);
+      length = both;
+    }
+    at = end;
+  }
+  if (length) {
+    if (draw)
+      DrawText(line, (int)x, (int)(y + lines * step), (int)size, color);
+    lines++;
+  }
+  return lines;
+}
+
+void ent_window_paragraph(const ent_text126 *text, float x, float y,
+                          float width, float size, int32_t color) {
+  ENT_WINDOW_TEXT(all, text);
+  ent_window_wrap(all, size, width, 1, x, y, ent_window_color(color));
+}
+
+float ent_window_text_height(const ent_text126 *text, float size,
+                             float width) {
+  ENT_WINDOW_TEXT(all, text);
+  int lines = ent_window_wrap(all, size, width, 0, 0, 0, BLACK);
+  return lines ? lines * size + (lines - 1) * (size / 4) : 0;
 }
 
 void ent_window_screenshot(const ent_text126 *file) {

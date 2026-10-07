@@ -2157,8 +2157,14 @@ LogicalResult Parser::parseFor() {
   if (inFunction)
     return error(at, "a fn only computes: it counts ('for i in a..b'), and "
                      "a system visits entities");
-  if (!isa<SystemOp>(builder.getInsertionBlock()->getParentOp()))
-    return error(at, "a 'for' must be at the top level of a system");
+  // In a system, or in a counted `for` of one, which runs it so many
+  // times.
+  Operation *around = builder.getInsertionBlock()->getParentOp();
+  while (around && isa<scf::ForOp>(around))
+    around = around->getParentOp();
+  if (!around || !isa<SystemOp>(around))
+    return error(at, "a 'for' over entities is at the top level of a system, "
+                     "or in a counted 'for' there");
 
   struct Binding {
     std::string name, component;
@@ -2209,12 +2215,20 @@ LogicalResult Parser::parseFor() {
   };
   // name: [mut] Component, one or more, into `into`; the first name was
   // read (`pending`).
+  // `optional` before a name: the entity may be without the component,
+  // and the binding is read with `if let`.
   auto parseBindings = [&](std::string pending,
-                           SmallVectorImpl<Binding> &into) -> LogicalResult {
+                           SmallVectorImpl<Binding> &into,
+                           bool optional = false) -> LogicalResult {
     while (true) {
       if (failed(expect(Token::Colon, "':' and a component")))
         return failure();
+      llvm::SMLoc mutAt = token.loc;
       bool mut = consumeKeyword("mut");
+      if (mut && optional)
+        return error(mutAt, "a component the entity may be without is only "
+                            "read: to change it, visit the entities that "
+                            "have it in a 'for' of their own");
       llvm::SMLoc componentAt = token.loc;
       FailureOr<std::string> component = identifier("a component");
       if (failed(component))
@@ -2228,8 +2242,10 @@ LogicalResult Parser::parseFor() {
                      "that has it, '(prev: Box)~[Relation]~>(b)' for the "
                      "sibling before's");
       into.push_back({pending, *component, mut, {}});
+      into.back().optional = optional;
       if (!consumeIf(Token::Comma))
         return success();
+      optional = consumeKeyword("optional");
       FailureOr<std::string> next = identifier("a binding");
       if (failed(next))
         return failure();
@@ -2259,14 +2275,16 @@ LogicalResult Parser::parseFor() {
       node.bare = true;
     } else {
       std::string pending = *first;
+      bool optional = false;
       if (consumeIf(Token::Comma)) {
         node.name = pending;
+        optional = consumeKeyword("optional");
         FailureOr<std::string> next = identifier("a binding");
         if (failed(next))
           return failure();
         pending = *next;
       }
-      if (failed(parseBindings(pending, node.bindings)))
+      if (failed(parseBindings(pending, node.bindings, optional)))
         return failure();
     }
     if (failed(expect(Token::RParen, "')'")))
@@ -2283,22 +2301,24 @@ LogicalResult Parser::parseFor() {
     if (failed(first))
       return failure();
     std::string pending = *first;
-    bool hasBindings = true;
+    bool hasBindings = true, firstOptional = false;
     if (startsFilter()) {
       entity = pending;
       hasBindings = false;
     } else if (consumeIf(Token::Comma)) {
       entity = pending;
-      if (token.is(Token::LParen) || token.isKeyword("optional"))
+      if (token.is(Token::LParen) ||
+          (token.isKeyword("optional") && peek().is(Token::LParen)))
         return error("the entity a 'for' visits is the first node of its "
                      "pattern: 'for (" + entity + ", b: Box)-[Relation]->"
                      "(outer: Box)'");
+      firstOptional = consumeKeyword("optional");
       FailureOr<std::string> next = identifier("a binding");
       if (failed(next))
         return failure();
       pending = *next;
     }
-    if (hasBindings && failed(parseBindings(pending, bindings)))
+    if (hasBindings && failed(parseBindings(pending, bindings, firstOptional)))
       return failure();
   }
   // Patterns: the first node of the first is the entity the `for`
@@ -2461,6 +2481,10 @@ LogicalResult Parser::parseFor() {
         for (Binding &binding : node.bindings) {
           if (arrow->sibling && binding.mut)
             return error(node.loc, "a sibling is only read");
+          if (binding.optional)
+            return error(node.loc, "what another entity may be without is "
+                                   "said before the pattern: 'optional "
+                                   "(name)-[Relation]->(outer: C)'");
           binding.via = *relation;
           binding.optional = optional;
           if (plain) {

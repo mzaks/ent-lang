@@ -140,8 +140,8 @@ A system takes parameters and runs statements; its access is inferred. It
 may declare a contract the compiler checks: `system move(dt: f32) reads
 Velocity writes Position { ... }`.
 
-`for` (only at the top level of a system) visits every entity with the
-bound components:
+`for` (at the top level of a system, or in a counted `for` there) visits
+every entity with the bound components:
 
 ```
 for e, p: Position, h: mut Hull with Enemy where h.hp < 10 on changed Hull.hp {
@@ -160,6 +160,11 @@ for with Enemy { Count += 1 }     // nor the entity
   however `S` is stored.
 - `name: Component` binds a component read-only, `name: mut Component`
   writably.
+- `optional name: Component` (after the first binding, or in the first
+  node: `(e, b: Box, optional t: Label)`) binds a component the entities
+  may be without: the `for` visits those without it too, and its fields
+  are read with `if let v = name.field { ... } else { ... }`. Only read;
+  to change it, visit the entities that have it in a `for` of their own.
 - `with A, B` only filters: the entities must have them. `any(A, B)` in
   the `with` list: they must have at least one of them.
 - `without A, B`: the entities must have none of them.
@@ -640,6 +645,12 @@ of a depth.
   `b - 1` (not at all if `a >= b`). The bounds are integers of one type,
   which `i` has too; literal bounds take the other bound's type, two
   literals count in `i32`. Outside a `for` over entities only; loops nest.
+- A counted `for` in a system can have `for`s over entities in it, and
+  runs them so many times: once for each layer, with the count in the
+  filter (`for z in 0..3 { for b: Box, l: Layer where l.z == z { ... } }`),
+  or in rounds, where a reactive `for` reacts each time to what has
+  changed since the time before, and does nothing in a round that has
+  nothing new for it. A system with such a loop is not fused with others.
 
 ### Vars
 

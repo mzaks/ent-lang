@@ -1,0 +1,28 @@
+// A `for` over entities in a counted `for`, which runs it so many times
+// (test/Integration/for_rounds.test).
+import console
+component Cell { v: i32, layer: i32 }
+component Echo { v: i32, heard: i32 }
+default_capacity 64
+world {
+  spawn { Cell { v: 1, layer: 2 }, Echo { v: 0, heard: 0 } }
+  spawn { Cell { v: 2, layer: 0 }, Echo { v: 0, heard: 0 } }
+  spawn { Cell { v: 3, layer: 1 }, Echo { v: 0, heard: 0 } }
+}
+system work() {
+  // By layer: one loop over the entities for each.
+  for z in 0..3 {
+    for c: Cell where c.layer == z { put("layer {z}: {c.v}") }
+  }
+  // In rounds: what a round changes the next reacts to.
+  for round in 0..4 {
+    for c: mut Cell where c.v < 3 { c.v += 1 }
+    for c: Cell, e: mut Echo on changed c.v {
+      e.v = c.v
+      e.heard += 1
+    }
+  }
+  for c: Cell, e: Echo { put("{c.v} {e.v} heard {e.heard}") }
+}
+schedule frame() { work() }
+main { frame() }

@@ -191,9 +191,10 @@ module.exports = grammar({
           optional($.where),
           optional($.on),
           field('body', $.block)),
+    // (`optional`: a component the entity may be without.)
     binding: ($) =>
-      seq(field('name', $.identifier), ':', optional('mut'),
-          field('component', $._name)),
+      seq(optional('optional'), field('name', $.identifier), ':',
+          optional('mut'), field('component', $._name)),
     // (name), (e, a: A), (: C.f), (expr): an entity and what is bound of
     // it; in `connect`, an entity by any expression.
     node: ($) =>

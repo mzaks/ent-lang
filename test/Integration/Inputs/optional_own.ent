@@ -1,0 +1,29 @@
+// A `for` binds a component its entities may be without (`optional`),
+// and reads it with `if let` (test/Integration/optional_own.test).
+import console
+component Box { x: f32 }
+component Label { size: f32, name: text[14] }
+component Extra { n: i32 }
+component Pin { at: i32 }
+archetype Pinned { Box, Pin, optional Extra } capacity 4
+default_capacity 16
+world {
+  spawn { Box { x: 1.0 } }
+  spawn { Box { x: 2.0 }, Label { size: 5.0, name: "two" } }
+  spawn { Box { x: 3.0 }, Pin { at: 1 }, Extra { n: 7 } }
+  spawn { Box { x: 4.0 }, Pin { at: 2 } }
+}
+system show() {
+  for b: Box, optional t: Label, optional x: Extra {
+    if let s = t.size, let n = t.name { put("{b.x}: label {s} {n}") }
+    else {
+      if let k = x.n { put("{b.x}: extra {k}") }
+      else { put("{b.x}: bare") }
+    }
+  }
+  for (e, b: Box, optional p: Pin) {
+    if let at = p.at { put("{b.x} pinned at {at}") }
+  }
+}
+schedule frame() { show() }
+main { frame() }

@@ -2,9 +2,10 @@
 // reactive `for`s along a tree whose children are in an order (which box
 // a box is in, and where among those in it), each running only where
 // something it reads has changed; boxes may stand in the middle across
-// their row or column, and float over another box, a layer above. Inputs/layout_print.ent prints
-// where a small window's
-// boxes end up, and examples/layout_demo.ent, which draws one, compiles.
+// their row or column, and float over another box, a layer above, also
+// over one inside a box that floats. Inputs/layout_print.ent prints where
+// a small window's boxes end up, and examples/layout_demo.ent, which
+// draws one, compiles.
 // RUN: %ent run -I %S/../../examples %S/Inputs/layout_print.ent 2>/dev/null \
 // RUN:   | FileCheck %s
 // RUN: ent-translate --import-ent %S/../../examples/layout_demo.ent \
@@ -36,8 +37,12 @@
 // CHECK-NEXT: 1: ok 225.0 15.0 60.0 20.0 layer 0
 // CHECK-NEXT: 1: cancel 288.0 15.0 90.0 30.0 layer 0
 // CHECK-NEXT: 1: badge 224.0 12.0 16.0 14.0 layer 1
+// And the mark over the dot, which is inside the badge that floats: 1
+// in and down from it, another layer above.
+// CHECK-NEXT: 1: mark 228.0 16.0 4.0 4.0 layer 2
 // A narrower side bar: everything next to it moves and widens, and the
-// badge goes with the header.
+// badge goes with the header, the dot with the badge and the mark with
+// the dot, in the same frame.
 // CHECK-NEXT: 2: root 0.0 0.0 800.0 600.0 layer 0
 // CHECK-NEXT: 2: rest 120.0 10.0 670.0 580.0 layer 0
 // CHECK-NEXT: 2: header 120.0 10.0 670.0 40.0 layer 0
@@ -50,6 +55,7 @@
 // CHECK-NEXT: 2: ok 125.0 15.0 60.0 20.0 layer 0
 // CHECK-NEXT: 2: cancel 188.0 15.0 90.0 30.0 layer 0
 // CHECK-NEXT: 2: badge 124.0 12.0 16.0 14.0 layer 1
+// CHECK-NEXT: 2: mark 128.0 16.0 4.0 4.0 layer 2
 // The body's two below one another: each as wide as it, sharing its
 // height.
 // CHECK-NEXT: 3: root 0.0 0.0 800.0 600.0 layer 0
@@ -64,6 +70,7 @@
 // CHECK-NEXT: 3: ok 125.0 15.0 60.0 20.0 layer 0
 // CHECK-NEXT: 3: cancel 188.0 15.0 90.0 30.0 layer 0
 // CHECK-NEXT: 3: badge 124.0 12.0 16.0 14.0 layer 1
+// CHECK-NEXT: 3: mark 128.0 16.0 4.0 4.0 layer 2
 // The first button given a later slot than the second: they change
 // places.
 // CHECK-NEXT: 4: root 0.0 0.0 800.0 600.0 layer 0
@@ -78,4 +85,5 @@
 // CHECK-NEXT: 4: ok 218.0 15.0 60.0 20.0 layer 0
 // CHECK-NEXT: 4: cancel 125.0 15.0 90.0 30.0 layer 0
 // CHECK-NEXT: 4: badge 124.0 12.0 16.0 14.0 layer 1
+// CHECK-NEXT: 4: mark 128.0 16.0 4.0 4.0 layer 2
 // CHECK-NOT:  {{.}}

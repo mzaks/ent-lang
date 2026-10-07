@@ -1844,6 +1844,12 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     if (archetypeOp.isOptional(has.getComponentAttr()))
       isPresent(has.getComponentAttr());
   });
+  // So does an optional ref to a component of the entity's own.
+  for (Type type : query.getBody().getArgumentTypes())
+    if (auto refType = cast<RefType>(type);
+        !refType.isUp() && refType.getIsOptional() &&
+        archetypeOp.isOptional(refType.getComponent()))
+      isPresent(refType.getComponent());
   // A ref up a relation: find the ancestor it leads to. The body applies
   // only to the entities that have one.
   SmallVector<std::pair<BlockArgument, Ancestor>> ancestors;
@@ -2206,6 +2212,45 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   SmallVector<Operation *> roots;
   for (Operation &op : query.getBody().front().without_terminator())
     roots.push_back(rewriter.clone(op, mapping));
+  // An optional ref to a component of the entity's own leads somewhere
+  // where the entity has the component: what its archetype says, or for
+  // a component held optionally the entity itself. Where the archetype
+  // has no such column, what is read is nothing.
+  for (BlockArgument arg : query.getBody().getArguments()) {
+    auto refType = cast<RefType>(arg.getType());
+    if (refType.isUp() || !refType.getIsOptional())
+      continue;
+    FlatSymbolRefAttr component = refType.getComponent();
+    bool held = archetypeOp.contains(component);
+    SmallVector<Operation *> uses;
+    for (Operation *root : roots)
+      root->walk([&](Operation *op) {
+        if (auto bound = dyn_cast<BoundOp>(op);
+            bound && bound.getRef() == arg)
+          uses.push_back(op);
+        else if (auto get = dyn_cast<GetOp>(op);
+                 get && get.getRef() == arg && !held)
+          uses.push_back(op);
+      });
+    for (Operation *op : uses) {
+      rewriter.setInsertionPoint(op);
+      Value answer;
+      if (isa<BoundOp>(op)) {
+        answer = presence.lookup(component);
+        if (!answer)
+          answer = arith::ConstantIntOp::create(rewriter, op->getLoc(), held, 1);
+      } else {
+        Type stored = world.storageType(op->getResult(0).getType());
+        answer = world.fromStorage(
+            op->getLoc(),
+            arith::ConstantOp::create(rewriter, op->getLoc(),
+                                      cast<TypedAttr>(rewriter.getZeroAttr(stored))),
+            op->getResult(0).getType());
+      }
+      llvm::erase(roots, op);
+      rewriter.replaceOp(op, answer);
+    }
+  }
   // Reading through a ref to an ancestor is a lookup of the ancestor,
   // which is known to be found.
   for (auto &[arg, ancestor] : ancestors) {
@@ -8440,6 +8485,10 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                            : WalkResult::advance();
               })
               .wasInterrupted();
+      // A query in a counted loop runs so many times, in its place.
+      system.walk([&](QueryOp query) {
+        writesResource |= query->getParentOp() != system.getOperation();
+      });
       for (QueryOp query : system.getBody().getOps<QueryOp>()) {
         for (ArchetypeOp archetype : getMatchedArchetypes(query))
           writesResource |= isStructuralFor(query, archetype);

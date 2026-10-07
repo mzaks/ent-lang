@@ -10,7 +10,8 @@
 // `grow` (as wide as its share of the room that is left). Across its row
 // or column a box's contents can stand in the middle or at the end
 // (`Align`); a box can float over another (`Float`, `Over`), a layer
-// above it; and a box can carry a line of text (`Label`).
+// above it; and a box can carry a line of text (`Label`), or one that
+// goes on in the next line (`Wrap`).
 
 // Where a box is and how big: what `layout` works out. A box that is
 // inside no other keeps what the program gave it.
@@ -35,7 +36,13 @@ component Align { across: Across }
 // A line of text in a box. The box is as big as the program makes it:
 // how wide a text is, only what draws it knows (examples/layout_demo.ent
 // asks the window).
-component Label { text: text[62], size: f32, colour: i32 }
+component Label { text: text[126], size: f32, colour: i32 }
+
+// A label whose text goes on in the next line where its box ends. How
+// high that makes it, again only what draws it knows: the program gives
+// the box that height when `layout` has given it its width, and runs
+// `layout` once more, which reacts to that alone.
+tag Wrap
 
 // A box that floats over another: so far from that one's corner, in
 // nobody's row, and with all that is inside it a layer above.
@@ -64,9 +71,9 @@ relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 256
 // From a box that floats to the one it floats over.
 relation (Float)-[Over]->(Box) tree capacity 256
 
-// Four passes over the boxes, each a `for` along a tree, and each
-// reactive: it runs for a box only where something it reads has changed
-// since it last ran, in the box itself, in the box it is in, in the one
+// Passes over the boxes, each a `for` along a tree, and each reactive:
+// it runs for a box only where something it reads has changed since it
+// last ran, in the box itself, in the box it is in, in the one
 // before it or in one inside it. Giving a box the size it has is no
 // change, and nothing follows from it.
 system layout() {
@@ -135,70 +142,52 @@ system layout() {
     }
   }
 
-  // A box starts where the one before it in the same box ends, and a
-  // gap further; the first inside the padding of the box they are in.
-  // Across the row or column it stands at the padding, or where the box
-  // it is in says: in the middle of the room there, or at its end. Only
-  // where the box it is in or the one before it has moved, has another
-  // size or is another, or it has another size itself. It is in the
-  // layer of the box it is in.
-  for (b: mut Box, l: mut Layer)-[Inside]->(outer: Box, k: Stack, ol: Layer),
-      optional (prev: Box)~[Inside]~>(b),
-      optional (b)-[Inside]->(how: Align)
-      top down Inside
-      on changed b.w, changed b.h, changed outer, changed k, changed ol,
-         changed prev, changed how {
-    var x = outer.x + k.pad
-    var y = outer.y + k.pad
-    var part = 0.0
-    if let across = how.across {
-      if across == Across.Middle { part = 0.5 }
-      if across == Across.End { part = 1.0 }
+  // Placing and floating take turns: a box that floats is put where the
+  // box under it is, which must have been placed; and what is inside it
+  // is placed from where it has been put. Three rounds reach a box that
+  // floats over one inside another that floats (one nested deeper still
+  // is a frame late); a round with nothing new to react to does nothing.
+  for round in 0..3 {
+    // A box starts where the one before it in the same box ends, and a
+    // gap further; the first inside the padding of the box they are in.
+    // Across the row or column it stands at the padding, or where the box
+    // it is in says: in the middle of the room there, or at its end. Only
+    // where the box it is in or the one before it has moved, has another
+    // size or is another, or it has another size itself. It is in the
+    // layer of the box it is in.
+    for (b: mut Box, l: mut Layer)-[Inside]->(outer: Box, k: Stack, ol: Layer),
+        optional (prev: Box)~[Inside]~>(b),
+        optional (b)-[Inside]->(how: Align)
+        top down Inside
+        on changed b.w, changed b.h, changed outer, changed k, changed ol,
+           changed prev, changed how {
+      var x = outer.x + k.pad
+      var y = outer.y + k.pad
+      var part = 0.0
+      if let across = how.across {
+        if across == Across.Middle { part = 0.5 }
+        if across == Across.End { part = 1.0 }
+      }
+      if k.row { y += (outer.h - 2.0 * k.pad - b.h) * part }
+      else { x += (outer.w - 2.0 * k.pad - b.w) * part }
+      if let px = prev.x, let py = prev.y, let w = prev.w, let h = prev.h {
+        if k.row { x = px + w + k.gap } else { y = py + h + k.gap }
+      }
+      b.x = x
+      b.y = y
+      l.z = ol.z
     }
-    if k.row { y += (outer.h - 2.0 * k.pad - b.h) * part }
-    else { x += (outer.w - 2.0 * k.pad - b.w) * part }
-    if let px = prev.x, let py = prev.y, let w = prev.w, let h = prev.h {
-      if k.row { x = px + w + k.gap } else { y = py + h + k.gap }
-    }
-    b.x = x
-    b.y = y
-    l.z = ol.z
-  }
 
-  // A box that floats is so far from the corner of the one it floats
-  // over, which has just been placed, and a layer above it.
-  for (f: mut Box, o: Float, l: mut Layer)-[Over]->(under: Box, ul: Layer)
-      top down Over
-      on changed o, changed under.x, changed under.y, changed ul {
-    let x = under.x + o.dx
-    let y = under.y + o.dy
-    f.x = x
-    f.y = y
-    l.z = ul.z + 1
-  }
-
-  // And what is inside a box that floats is placed from where that is
-  // now: the same once more, which runs for those boxes alone.
-  for (b: mut Box, l: mut Layer)-[Inside]->(outer: Box, k: Stack, ol: Layer),
-      optional (prev: Box)~[Inside]~>(b),
-      optional (b)-[Inside]->(how: Align)
-      top down Inside
-      on changed b.w, changed b.h, changed outer, changed k, changed ol,
-         changed prev, changed how {
-    var x = outer.x + k.pad
-    var y = outer.y + k.pad
-    var part = 0.0
-    if let across = how.across {
-      if across == Across.Middle { part = 0.5 }
-      if across == Across.End { part = 1.0 }
+    // A box that floats is so far from the corner of the one it floats
+    // over, which has just been placed, and a layer above it.
+    for (f: mut Box, o: Float, l: mut Layer)-[Over]->(under: Box, ul: Layer)
+        top down Over
+        on changed o, changed under.x, changed under.y, changed ul {
+      let x = under.x + o.dx
+      let y = under.y + o.dy
+      f.x = x
+      f.y = y
+      l.z = ul.z + 1
     }
-    if k.row { y += (outer.h - 2.0 * k.pad - b.h) * part }
-    else { x += (outer.w - 2.0 * k.pad - b.w) * part }
-    if let px = prev.x, let py = prev.y, let w = prev.w, let h = prev.h {
-      if k.row { x = px + w + k.gap } else { y = py + h + k.gap }
-    }
-    b.x = x
-    b.y = y
-    l.z = ol.z
   }
 }

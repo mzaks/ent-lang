@@ -406,13 +406,17 @@ def Ent_ScheduleOp : Ent_Op<"schedule", [
 //===----------------------------------------------------------------------===//
 
 def Ent_QueryOp : Ent_Op<"query", [
-    HasParent<"SystemOp">, SingleBlockImplicitTerminator<"YieldOp">,
+    SingleBlockImplicitTerminator<"YieldOp">,
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Run the body once for every entity that has all components";
   let description = [{
     Each entry block argument is an `!ent.ref` to a distinct component, and
     refs are only used by `ent.get` and `ent.set`. Iteration order is
     unspecified, so the body must not depend on it.
+
+    A query is an op of a system's body, or of a counted loop (`scf.for`)
+    there, which runs it so many times: a reactive query then reacts each
+    time to what has changed since the time before.
 
     A reactive query lists triggers after its arguments:
     ```mlir

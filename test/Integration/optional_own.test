@@ -1,0 +1,12 @@
+// A `for` binds a component its entities may be without, `optional t:
+// Label`, and visits those without it too: `if let` says which. The
+// component may be missing from the archetype, or held optionally in it.
+// RUN: %ent run %S/Inputs/optional_own.ent 2>/dev/null | sort | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/optional_own.ent 2>/dev/null | sort | FileCheck %s
+
+// CHECK:      1.0: bare
+// CHECK-NEXT: 2.0: label 5.0 two
+// CHECK-NEXT: 3.0 pinned at 1
+// CHECK-NEXT: 3.0: extra 7
+// CHECK-NEXT: 4.0 pinned at 2
+// CHECK-NEXT: 4.0: bare

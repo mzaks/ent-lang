@@ -91,10 +91,18 @@ world {
   }
   connect (badge)-[Over]->(header)
   connect (dot)-[Inside]->(badge)
+  let mark = spawn {
+    Box { x: 0.0, y: 0.0, w: 4.0, h: 4.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "mark" },
+    Float { dx: 1.0, dy: 1.0 }
+  }
+  connect (mark)-[Over]->(dot)
 }
 
 // A badge floats over the header, 4 in and 2 down from its corner, with
-// a dot inside it; and the side bar puts what is in it in the middle.
+// a dot inside it, and over the dot floats a mark; and the side bar puts
+// what is in it in the middle.
 //
 // In the second frame the side bar is narrower, in the third the body's
 // columns are below one another, and in the fourth the first button is
