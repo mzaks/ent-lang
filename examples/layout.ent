@@ -65,6 +65,10 @@ component Content {
 // the box it floats over.
 component Layer { z: i32 }
 
+// How many boxes the round of placing that is running has placed:
+// `layout`'s own.
+unique Placed: i32
+
 // From a box to the one it is in; the boxes in one box are in the order
 // of their slots.
 relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 256
@@ -147,10 +151,11 @@ system layout() {
 
   // Placing and floating take turns: a box that floats is put where the
   // box under it is, which must have been placed; and what is inside it
-  // is placed from where it has been put. Three rounds reach a box that
-  // floats over one inside another that floats (one nested deeper still
-  // is a frame late); a round with nothing new to react to does nothing.
-  for round in 0..3 {
+  // is placed from where it has been put, with what floats over that in
+  // turn. Round after round until one has nothing new to react to, and
+  // places nothing.
+  loop {
+    Placed = 0
     // A box starts where the one before it in the same box ends, and a
     // gap further; the first inside the padding of the box they are in.
     // Across the row or column it stands at the padding, or where the box
@@ -179,6 +184,7 @@ system layout() {
       b.x = x
       b.y = y
       l.z = ol.z
+      Placed += 1
     }
 
     // A box that floats is so far from the corner of the one it floats
@@ -191,6 +197,7 @@ system layout() {
       f.x = x
       f.y = y
       l.z = ul.z + 1
+      Placed += 1
     }
-  }
+  } until Placed == 0
 }

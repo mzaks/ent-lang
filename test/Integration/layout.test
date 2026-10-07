@@ -33,6 +33,9 @@
 // The badge floats 4 in and 2 down from the header's corner, a layer
 // above it, as big as the dot in it and its padding.
 // CHECK-NEXT: 1: dot 227.0 15.0 10.0 8.0 layer 1
+// (A pin inside the mark, and a speck that floats over the pin: a box
+// that floats three deep is placed in the same frame too.)
+// CHECK-NEXT: 1: pin 228.0 16.0 2.0 2.0 layer 2
 // CHECK-NEXT: 1: side 10.0 10.0 200.0 580.0 layer 0
 // CHECK-NEXT: 1: ok 225.0 15.0 60.0 20.0 layer 0
 // CHECK-NEXT: 1: cancel 288.0 15.0 90.0 30.0 layer 0
@@ -40,6 +43,7 @@
 // And the mark over the dot, which is inside the badge that floats: 1
 // in and down from it, another layer above.
 // CHECK-NEXT: 1: mark 228.0 16.0 4.0 4.0 layer 2
+// CHECK-NEXT: 1: speck 229.0 17.0 1.0 1.0 layer 3
 // A narrower side bar: everything next to it moves and widens, and the
 // badge goes with the header, the dot with the badge and the mark with
 // the dot, in the same frame.
@@ -51,11 +55,13 @@
 // CHECK-NEXT: 2: right 465.0 56.0 325.0 534.0 layer 0
 // CHECK-NEXT: 2: item 40.0 18.0 40.0 20.0 layer 0
 // CHECK-NEXT: 2: dot 127.0 15.0 10.0 8.0 layer 1
+// CHECK-NEXT: 2: pin 128.0 16.0 2.0 2.0 layer 2
 // CHECK-NEXT: 2: side 10.0 10.0 100.0 580.0 layer 0
 // CHECK-NEXT: 2: ok 125.0 15.0 60.0 20.0 layer 0
 // CHECK-NEXT: 2: cancel 188.0 15.0 90.0 30.0 layer 0
 // CHECK-NEXT: 2: badge 124.0 12.0 16.0 14.0 layer 1
 // CHECK-NEXT: 2: mark 128.0 16.0 4.0 4.0 layer 2
+// CHECK-NEXT: 2: speck 129.0 17.0 1.0 1.0 layer 3
 // The body's two below one another: each as wide as it, sharing its
 // height.
 // CHECK-NEXT: 3: root 0.0 0.0 800.0 600.0 layer 0
@@ -66,11 +72,13 @@
 // CHECK-NEXT: 3: right 120.0 333.0 670.0 257.0 layer 0
 // CHECK-NEXT: 3: item 40.0 18.0 40.0 20.0 layer 0
 // CHECK-NEXT: 3: dot 127.0 15.0 10.0 8.0 layer 1
+// CHECK-NEXT: 3: pin 128.0 16.0 2.0 2.0 layer 2
 // CHECK-NEXT: 3: side 10.0 10.0 100.0 580.0 layer 0
 // CHECK-NEXT: 3: ok 125.0 15.0 60.0 20.0 layer 0
 // CHECK-NEXT: 3: cancel 188.0 15.0 90.0 30.0 layer 0
 // CHECK-NEXT: 3: badge 124.0 12.0 16.0 14.0 layer 1
 // CHECK-NEXT: 3: mark 128.0 16.0 4.0 4.0 layer 2
+// CHECK-NEXT: 3: speck 129.0 17.0 1.0 1.0 layer 3
 // The first button given a later slot than the second: they change
 // places.
 // CHECK-NEXT: 4: root 0.0 0.0 800.0 600.0 layer 0
@@ -81,9 +89,11 @@
 // CHECK-NEXT: 4: right 120.0 333.0 670.0 257.0 layer 0
 // CHECK-NEXT: 4: item 40.0 18.0 40.0 20.0 layer 0
 // CHECK-NEXT: 4: dot 127.0 15.0 10.0 8.0 layer 1
+// CHECK-NEXT: 4: pin 128.0 16.0 2.0 2.0 layer 2
 // CHECK-NEXT: 4: side 10.0 10.0 100.0 580.0 layer 0
 // CHECK-NEXT: 4: ok 218.0 15.0 60.0 20.0 layer 0
 // CHECK-NEXT: 4: cancel 125.0 15.0 90.0 30.0 layer 0
 // CHECK-NEXT: 4: badge 124.0 12.0 16.0 14.0 layer 1
 // CHECK-NEXT: 4: mark 128.0 16.0 4.0 4.0 layer 2
+// CHECK-NEXT: 4: speck 129.0 17.0 1.0 1.0 layer 3
 // CHECK-NOT:  {{.}}

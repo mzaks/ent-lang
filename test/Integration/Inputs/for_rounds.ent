@@ -4,6 +4,19 @@ import console
 component Cell { v: i32, layer: i32 }
 component Echo { v: i32, heard: i32 }
 default_capacity 64
+unique Raised: i32
+
+// A `loop` in a fn: how many steps from `n` to 1, halving what is even
+// and taking three times and one more of what is odd.
+fn steps(n: i32) -> i32 {
+  var k = n
+  var count = 0
+  loop {
+    k = if k % 2 == 0 { k / 2 } else { 3 * k + 1 }
+    count += 1
+  } until k == 1
+  count
+}
 world {
   spawn { Cell { v: 1, layer: 2 }, Echo { v: 0, heard: 0 } }
   spawn { Cell { v: 2, layer: 0 }, Echo { v: 0, heard: 0 } }
@@ -23,6 +36,18 @@ system work() {
     }
   }
   for c: Cell, e: Echo { put("{c.v} {e.v} heard {e.heard}") }
+  // Until a round changes nothing: as many rounds as the cell that is
+  // furthest from 6 needs, and one that finds nothing to do.
+  var rounds = 0
+  loop {
+    Raised = 0
+    for c: mut Cell where c.v < 6 {
+      c.v += 1
+      Raised += 1
+    }
+    rounds += 1
+  } until Raised == 0
+  for c: Cell where c.layer == 0 { put("{rounds} rounds, {steps(27)} steps") }
 }
 schedule frame() { work() }
 main { frame() }

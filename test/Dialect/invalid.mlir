@@ -115,7 +115,7 @@ ent.system @s(%v: i32) writes [@P] {
 // -----
 
 ent.component @P (x: f32)
-// expected-error @+1 {{'ent.query' op expects to be an op of a system, or of an 'scf.for' in one}}
+// expected-error @+1 {{'ent.query' op expects to be an op of a system, or of an 'scf.for' or 'scf.while' in one}}
 ent.query (%p: !ent.ref<@P>) {
 }
 

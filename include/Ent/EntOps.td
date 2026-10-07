@@ -414,9 +414,9 @@ def Ent_QueryOp : Ent_Op<"query", [
     refs are only used by `ent.get` and `ent.set`. Iteration order is
     unspecified, so the body must not depend on it.
 
-    A query is an op of a system's body, or of a counted loop (`scf.for`)
-    there, which runs it so many times: a reactive query then reacts each
-    time to what has changed since the time before.
+    A query is an op of a system's body, or of a loop (`scf.for`,
+    `scf.while`) there, which runs it so many times: a reactive query then
+    reacts each time to what has changed since the time before.
 
     A reactive query lists triggers after its arguments:
     ```mlir

@@ -1504,6 +1504,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "until_loop"
+        },
+        {
+          "type": "SYMBOL",
           "name": "connect"
         },
         {
@@ -1733,6 +1737,31 @@
             "type": "SYMBOL",
             "name": "block"
           }
+        }
+      ]
+    },
+    "until_loop": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "loop"
+        },
+        {
+          "type": "FIELD",
+          "name": "body",
+          "content": {
+            "type": "SYMBOL",
+            "name": "block"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "until"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_expression"
         }
       ]
     },

@@ -98,6 +98,20 @@ world {
     Float { dx: 1.0, dy: 1.0 }
   }
   connect (mark)-[Over]->(dot)
+  // And once more: a pin inside the mark, and a speck over the pin.
+  let pin = spawn {
+    Box { x: 0.0, y: 0.0, w: 2.0, h: 2.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "pin" }
+  }
+  let speck = spawn {
+    Box { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "speck" },
+    Float { dx: 1.0, dy: 1.0 }
+  }
+  connect (pin)-[Inside]->(mark)
+  connect (speck)-[Over]->(pin)
 }
 
 // A badge floats over the header, 4 in and 2 down from its corner, with

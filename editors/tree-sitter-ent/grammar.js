@@ -155,6 +155,7 @@ module.exports = grammar({
         $.var,
         $.counted_for,
         $.query_for,
+        $.until_loop,
         $.connect,
         $.assignment,
         $._expression,
@@ -177,6 +178,10 @@ module.exports = grammar({
           field('from', $._expression), '..', field('to', $._expression),
           field('body', $.block)),
 
+    // loop { ... } until done: the statements, until the condition holds
+    // after them.
+    until_loop: ($) =>
+      seq('loop', field('body', $.block), 'until', $._expression),
     // for e, a: A, b: mut B ... { }: the entity's own. With arrows, the
     // head is patterns: for (a: A)-[R]->(outer: B), optional
     // (prev: A)~[R]~>(a) ... { }. Inside a `for`, a pattern is a loop

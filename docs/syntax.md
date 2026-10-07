@@ -140,7 +140,8 @@ A system takes parameters and runs statements; its access is inferred. It
 may declare a contract the compiler checks: `system move(dt: f32) reads
 Velocity writes Position { ... }`.
 
-`for` (at the top level of a system, or in a counted `for` there) visits
+`for` (at the top level of a system, or in a counted `for` or a `loop`
+there) visits
 every entity with the bound components:
 
 ```
@@ -661,6 +662,14 @@ of a depth.
   or in rounds, where a reactive `for` reacts each time to what has
   changed since the time before, and does nothing in a round that has
   nothing new for it. A system with such a loop is not fused with others.
+- `loop { ... } until cond` runs its statements, and again until the
+  condition holds after them (at least once); a var they assign goes
+  round with it. In a system it may hold `for`s over entities, as a
+  counted `for` may: rounds until one changes nothing, where each `for`
+  counts what it does in a unique,
+  `loop { Placed = 0  for ... { ...  Placed += 1 }  } until Placed == 0`
+  (so `examples/layout.ent` places what floats, however deep). Not in a
+  `for` over entities.
 
 ### Vars
 
@@ -1069,7 +1078,7 @@ header, as before.
 ## Not yet supported
 
 `proc` with a body, `device` declarations, prefabs, optional bindings (`T?`),
-`while` loops and counted loops inside a `for` over entities: each
+`while` loops, and counted loops and `loop` inside a `for` over entities: each
 is reported as "not supported yet" where it would start. Of relations, not
 yet: joins over relation variables, accumulating into a unique and
 connecting inside an edge loop, disconnecting by pair, and of trees what

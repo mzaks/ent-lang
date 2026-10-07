@@ -368,6 +368,7 @@ private:
   LogicalResult parseStatement();
   LogicalResult parseFor();
   LogicalResult parseCountedFor(llvm::SMLoc at);
+  LogicalResult parseLoop(llvm::SMLoc at);
   LogicalResult parseIf();
   LogicalResult parseIfLet(llvm::SMLoc at);
   LogicalResult parseNameStatement();
@@ -549,6 +550,9 @@ private:
   bool inSystem = false;
   /// Parsing the body of a fn, which only computes from its parameters.
   bool inFunction = false;
+  /// In a `loop` of a system, whose body is built before the loop is in
+  /// the system.
+  bool inSystemLoop = false;
   bool hasMain = false;
   bool hadError = false;
   /// Every module of the program, in the order their parsing finished: a
@@ -1277,7 +1281,8 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   advance();
   while (true) {
     bool statement = token.isKeyword("let") || token.isKeyword("var") ||
-                     token.isKeyword("for");
+                     token.isKeyword("for") ||
+                     (token.isKeyword("loop") && peek().is(Token::LBrace));
     if (token.isKeyword("if"))
       statement = ifIsStatement();
     // name op value: an assignment (`==` would be part of the value).
@@ -1663,8 +1668,9 @@ LogicalResult Parser::parseStatement() {
       return failure();
     return success();
   }
-  if (token.isKeyword("return") || token.isKeyword("while") ||
-      token.isKeyword("loop"))
+  if (consumeKeyword("loop"))
+    return parseLoop(at);
+  if (token.isKeyword("return") || token.isKeyword("while"))
     return error("'" + token.spelling + "' is not supported yet");
   // name(args): a call for what it does.
   if (token.is(Token::Identifier) && peek().is(Token::LParen) &&
@@ -2046,6 +2052,83 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
   return success();
 }
 
+// loop { statements } until condition: the statements, again and again
+// until, after them, the condition holds. In a system the statements may
+// be `for`s over entities, which then run in rounds.
+LogicalResult Parser::parseLoop(llvm::SMLoc at) {
+  if (inQuery)
+    return error(at, "a 'loop' inside a 'for' over entities is not "
+                     "supported yet");
+  Location where = loc(at);
+  // Every var goes round with the loop: what a round leaves in it the
+  // next one starts with, and the loop gives what the last one left.
+  SmallVector<VarState> vars = captureVars();
+  SmallVector<mlir::Value> starts;
+  SmallVector<Type> types;
+  for (const VarState &state : vars) {
+    starts.push_back(state.value);
+    types.push_back(state.value.getType());
+  }
+  Operation *around = builder.getInsertionBlock()->getParentOp();
+  while (around && isa<scf::ForOp, scf::WhileOp>(around))
+    around = around->getParentOp();
+  llvm::SaveAndRestore inLoop(
+      inSystemLoop, around ? isa<SystemOp>(around) : inSystemLoop);
+  LogicalResult parsed = success();
+  auto loop = scf::WhileOp::create(
+      builder, where, types, starts,
+      [&](OpBuilder &, Location, ValueRange arguments) {
+        ScopeGuard scope(*this);
+        SmallVector<VarState> inside = vars;
+        for (auto [state, argument] : llvm::zip(inside, arguments))
+          state.value = argument;
+        restoreVars(inside);
+        mlir::Value done;
+        if (failed(parseBlock())) {
+          parsed = failure();
+        } else if (!consumeKeyword("until")) {
+          parsed = error("a 'loop' ends with 'until' and what is to hold "
+                         "then: 'loop { ... } until done'");
+        } else {
+          FailureOr<ExprPtr> condition = parseExpr();
+          FailureOr<mlir::Value> value =
+              failed(condition) ? FailureOr<mlir::Value>(failure())
+                                : emit(**condition, builder.getI1Type());
+          if (failed(value))
+            parsed = failure();
+          else if (!value->getType().isInteger(1))
+            parsed = error((*condition)->loc,
+                           "an 'until' condition must be a bool");
+          else
+            done = *value;
+        }
+        SmallVector<mlir::Value> ends;
+        if (succeeded(parsed)) {
+          for (const VarState &state : captureVars())
+            if (ends.size() < vars.size())
+              ends.push_back(state.value);
+        } else {
+          ends.assign(arguments.begin(), arguments.end());
+          done = arith::ConstantIntOp::create(builder, where, 1, 1);
+        }
+        scf::ConditionOp::create(
+            builder, where,
+            arith::XOrIOp::create(
+                builder, where, done,
+                arith::ConstantIntOp::create(builder, where, 1, 1)),
+            ends);
+      },
+      [&](OpBuilder &, Location, ValueRange arguments) {
+        scf::YieldOp::create(builder, where, arguments);
+      });
+  if (failed(parsed))
+    return failure();
+  for (auto [state, result] : llvm::zip(vars, loop.getResults()))
+    state.value = result;
+  restoreVars(vars);
+  return success();
+}
+
 // var name [: type] = value
 LogicalResult Parser::parseVar() {
   FailureOr<std::string> name = identifier("a name");
@@ -2157,14 +2240,14 @@ LogicalResult Parser::parseFor() {
   if (inFunction)
     return error(at, "a fn only computes: it counts ('for i in a..b'), and "
                      "a system visits entities");
-  // In a system, or in a counted `for` of one, which runs it so many
-  // times.
+  // In a system, or in a counted `for` or a `loop` of one, which runs it
+  // so many times.
   Operation *around = builder.getInsertionBlock()->getParentOp();
-  while (around && isa<scf::ForOp>(around))
+  while (around && isa<scf::ForOp, scf::WhileOp>(around))
     around = around->getParentOp();
-  if (!around || !isa<SystemOp>(around))
+  if (around ? !isa<SystemOp>(around) : !inSystemLoop)
     return error(at, "a 'for' over entities is at the top level of a system, "
-                     "or in a counted 'for' there");
+                     "or in a counted 'for' or a 'loop' there");
 
   struct Binding {
     std::string name, component;

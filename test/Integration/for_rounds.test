@@ -1,6 +1,7 @@
 // A counted `for` in a system runs the `for`s over entities in it so many
 // times: once for each layer, with the count in the filter, or in rounds,
-// where a reactive `for` reacts to what the round before changed.
+// where a reactive `for` reacts to what the round before changed. A
+// `loop ... until` runs them until a condition holds.
 // RUN: %ent run %S/Inputs/for_rounds.ent 2>/dev/null | FileCheck %s
 // RUN: %ent run --parallel %S/Inputs/for_rounds.ent 2>/dev/null | FileCheck %s
 
@@ -12,3 +13,6 @@
 // CHECK-NEXT: 3 3 heard 2
 // CHECK-NEXT: 3 3 heard 1
 // CHECK-NEXT: 3 3 heard 1
+// Raised until none is below 6: three rounds, and one that raises none.
+// From 27 to 1 in 111 steps, counted by a `loop` in a fn.
+// CHECK-NEXT: 4 rounds, 111 steps

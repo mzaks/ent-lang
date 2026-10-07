@@ -888,3 +888,36 @@ system s() {
     b.x = n.n as f32
   }
 }
+
+// -----
+
+component Body { x: f32 }
+default_capacity 8
+system s() {
+  // expected-error @+4 {{a 'loop' ends with 'until' and what is to hold then: 'loop { ... } until done'}}
+  loop {
+    for b: mut Body { b.x += 1.0 }
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+default_capacity 8
+system s() {
+  for b: mut Body {
+    // expected-error @+1 {{a 'loop' inside a 'for' over entities is not supported yet}}
+    loop { b.x += 1.0 } until b.x > 3.0
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+default_capacity 8
+system s(on: bool) {
+  if on {
+    // expected-error @+1 {{a 'for' over entities is at the top level of a system, or in a counted 'for' or a 'loop' there}}
+    for b: mut Body { b.x += 1.0 }
+  }
+}
