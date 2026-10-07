@@ -590,21 +590,19 @@ thereby passed down: the next time it runs that is no event.
   In `examples/layout.ent` every pass is such a `for`: with 90,000
   boxes of which one is another height each frame, a frame takes 18 us,
   against 1,500 going through all of them (`bench/boxes`).
+- Over a `sorted` tree the events are followed by its rows where the
+  `for` goes `top down` with one arrow to the parent and triggers on
+  itself and on that; with a trigger on a child or a sibling, `bottom
+  up`, with arrows that go on, or `bfs` or `dfs`, they are followed in a
+  depth-first order that is worked out and kept until the tree changes
+  (and everything is still gone through by the rows).
 - It goes through the whole tree instead, running its body where a
-  trigger fired: with `bfs` or `dfs` over a `sorted` tree; `top down`
-  without an arrow up the tree; `bottom up` over a `sorted` tree, or
-  where the body adds into an entity further up than its parent; where a
-  trigger's event log has capacity 0 or has lost events, on its first
-  run, and with events for more than a sixteenth of the tree; where more
-  than 256 nodes got or lost a child or a sibling since it last ran;
-  over a
-  `sorted` tree where its targets do not all have the component of a
-  trigger up it (`->(World)` in its declaration says they do) or the
-  head has arrows that go on (`(b)-[R]->()-[R]->(far: C)`); with a
-  trigger on a binding that a `*` or another tree is on the way to; and
-  over a
-  `sorted` tree in
-  several archetypes that is deep (fewer than 64 nodes a depth). That
+  trigger fired: `top down` without an arrow up the tree; where the body
+  adds into an entity further up than its parent; with a trigger on a
+  binding that a `*` or another tree is on the way to; where a trigger's
+  event log has capacity 0 or has lost events, on its first run, and
+  with events for more than a sixteenth of the tree; and where more than
+  256 nodes got or lost a child or a sibling since it last ran. That
   saves the body, not the walk.
 - It runs on one core.
 

@@ -2849,3 +2849,7 @@ bench/boxes/boxes.ent`: us a frame over 200 frames, three runs each.
   compiler for the run, which is not kept. A frame in which a box comes
   or goes is such a frame: that children or siblings changed is in no
   log, and all are asked.
+- Later the same day: a frame in which a box comes or goes is followed
+  too (the tree keeps a ring of the last 256 entities that got other
+  children or siblings), and placing and floating run until a round
+  places nothing instead of three rounds: 17.6 - 17.8 us a frame here.

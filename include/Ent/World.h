@@ -543,6 +543,15 @@ struct WorldLayout {
   /// a trigger is before or after it. That children or siblings have come
   /// or gone is in no log: then the whole tree is gone through.
   bool cascadeFollowsEvents(QueryOp query) const;
+  /// Whether it does so over a tree without links, in a depth-first order
+  /// worked out for it and kept with the tree: where the tree's rows do
+  /// not serve (from the leaves, with a trigger on children or siblings,
+  /// in an order asked for exactly), but its edges and what the sort
+  /// noted of the siblings do.
+  bool cascadeFollowsByWalk(QueryOp query) const;
+  /// (The rules, for a tree gone through by its rows, or as one with
+  /// links is.)
+  bool cascadeFollows(QueryOp query, bool links) const;
   /// Whether a query that follows events also visits the entities
   /// without a parent (so one from the leaves, the others naming a
   /// parent), which a mark per row of their archetypes is kept for.

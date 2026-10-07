@@ -88,7 +88,7 @@ const WorldConnect::Buffer &WorldConnect::find(unsigned archetype) const {
   llvm_unreachable("the connect's query does not match the archetype");
 }
 
-bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
+bool WorldLayout::cascadeFollows(QueryOp query, bool links) const {
   SmallVector<Trigger> triggers = getTriggers(query);
   if (!query.getCascade() || triggers.empty())
     return false;
@@ -98,16 +98,16 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
   // (An order that is asked for exactly is followed in where the tree
   // has links to find the children by: the order says where each is.)
   StringRef traversal = query.getTraversal();
-  if (!traversal.empty() && !tree.linked)
+  if (!traversal.empty() && !links)
     return false;
   // (A tree in several archetypes whose children are in an order is gone
   // through by its list, not depth by depth.)
-  if (tree.sortedArchetypes.size() > 1 && tree.isOrdered())
+  if (!links && tree.sortedArchetypes.size() > 1 && tree.isOrdered())
     return false;
   if (!(tree.linked || !tree.sortedArchetypes.empty()))
     return false;
   // (Only a tree with links is followed from the leaves, to the parents.)
-  if (leavesFirst && !tree.linked)
+  if (leavesFirst && !links)
     return false;
   auto refs = [&](function_ref<bool(RefType)> test) {
     return llvm::any_of(query.getBody().getArgumentTypes(), [&](Type type) {
@@ -122,7 +122,7 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
     return false;
   // (More than one step up is asked of each entity as it is come to, not
   // passed down: which a linked tree's list does for every ref.)
-  if (!tree.linked &&
+  if (!links &&
       refs([](RefType ref) { return ref.getHops() != 1 || ref.hasPath(); }))
     return false;
   // (What an entity adds into its parent is an event for the parent,
@@ -153,26 +153,42 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
         return false;
       // (Several steps up: so many levels down from the event, in a tree
       // with links; not where the steps are of other kinds.)
-      if (trigger.path || (trigger.hops != 1 && !tree.linked))
+      if (trigger.path || (trigger.hops != 1 && !links))
         return false;
       if (tree.getTrusted(/*target=*/true) != trigger.component &&
-          !(tree.linked && !refs([&](RefType ref) {
+          !(links && !refs([&](RefType ref) {
             return trigger.means(ref) && !ref.getIsDirect();
           })))
         return false;
       break;
     case Trigger::Down:
-      if (!leavesFirst || !tree.linked)
+      if (!leavesFirst || !links)
         return false;
       break;
     case Trigger::Before:
     case Trigger::After:
-      if (leavesFirst || !tree.linked)
+      if (leavesFirst || !links)
         return false;
       break;
     }
   }
   return true;
+}
+
+bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
+  if (!query.getCascade())
+    return false;
+  if (getRelation(query.getCascade().getAttr()).linked)
+    return cascadeFollows(query, /*links=*/true);
+  return cascadeFollows(query, /*links=*/false) ||
+         cascadeFollows(query, /*links=*/true);
+}
+
+bool WorldLayout::cascadeFollowsByWalk(QueryOp query) const {
+  return query.getCascade() &&
+         !getRelation(query.getCascade().getAttr()).linked &&
+         !cascadeFollows(query, /*links=*/false) &&
+         cascadeFollows(query, /*links=*/true);
 }
 
 bool WorldLayout::cascadeFollowsToRoots(QueryOp query) const {
@@ -656,7 +672,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       asked |= query.getCascade() &&
                query.getCascade().getAttr() ==
                    RelationOp(relation.op).getSymNameAttr() &&
-               relation.walksInOrder(query.getTraversal());
+               (relation.walksInOrder(query.getTraversal()) ||
+                layout.cascadeFollowsByWalk(query));
     });
     if (!asked)
       continue;
@@ -890,9 +907,22 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       relation.orderCapacity = edges;
       relation.orderOffset = place(idBytes, edges);
       relation.orderParentOffset = place(idBytes, edges);
-      if (relation.sortedArchetype() >= 0)
-        placeMarks(relation,
-                   layout.archetypes[relation.sortedArchetype()].capacity);
+      // (A mark per row of the one archetype, or per place of an order
+      // worked out for a query that follows its events in that.)
+      int64_t rows = relation.sortedArchetype() >= 0
+                         ? layout.archetypes[relation.sortedArchetype()].capacity
+                         : 0;
+      bool byWalk = false;
+      module.walk([&](QueryOp query) {
+        byWalk |= query.getCascade() &&
+                  query.getCascade().getAttr() ==
+                      RelationOp(relation.op).getSymNameAttr() &&
+                  layout.cascadeFollowsByWalk(query);
+      });
+      if (byWalk)
+        placeMarks(relation, std::max(rows, relation.walkCapacity()));
+      else if (rows)
+        placeMarks(relation, rows);
       if (relation.sortedArchetypes.size() > 1) {
         relation.rowOrderOffset = place(scheme.locationBits / 8, edges);
         relation.rowOrderParentOffset = place(scheme.locationBits / 8, edges);
