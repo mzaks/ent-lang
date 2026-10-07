@@ -85,6 +85,11 @@ struct WorldArchetype {
   uint64_t parentLocationOffset = 0;
   uint64_t childBeginOffset = 0;
   uint64_t childEndOffset = 0;
+  /// Where a reactive query has a trigger up the tree: per row the tick
+  /// at which its entity was last connected (i64), a copy of what the
+  /// relation keeps per entity key, made where the rows are put in order,
+  /// which every connect has done before a query runs.
+  uint64_t connectedRowOffset = 0;
   uint64_t levelStartOffset = 0;
   int64_t levelCapacity = 0;
   uint64_t newRowOffset = 0;

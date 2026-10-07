@@ -436,6 +436,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
           ++others;
           sources += other.capacity;
         }
+      if (llvm::is_contained(
+              layout.stamps.getStamps(),
+              Stamp{Trigger::Connected, archetype.sortedBy,
+                    StringAttr::get(module.getContext(), "")}))
+        archetype.connectedRowOffset = place(8);
       if (others == 1) {
         archetype.parentRowOffset = place(4);
         archetype.childBeginOffset = place(4);

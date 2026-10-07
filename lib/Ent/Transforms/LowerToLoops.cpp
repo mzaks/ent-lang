@@ -601,6 +601,11 @@ public:
     return view(archetype.parentRowOffset, archetype.capacity,
                 rewriter.getI32Type());
   }
+  /// Per row of a sorted archetype, the tick of its entity's last connect.
+  Value connectedRows(const WorldArchetype &archetype) {
+    return view(archetype.connectedRowOffset, archetype.capacity,
+                rewriter.getI64Type());
+  }
   /// And the rows of its children, from `begin` to the other.
   Value childRows(const WorldArchetype &archetype, bool begin) {
     return view(begin ? archetype.childBeginOffset : archetype.childEndOffset,
@@ -1555,12 +1560,20 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     for (const Trigger &trigger : getTriggers(query)) {
       // Connected to another parent, perhaps: the relation has the tick.
       if (trigger.kind == Trigger::Connected) {
+        // (A sorted archetype has a copy per row, next to what else the
+        // query reads of the row.)
         const WorldRelation &tree =
             layout.getRelation(trigger.component.getAttr());
-        Value connected = memref::LoadOp::create(
-            rewriter, loc, world.connectedTicks(tree),
-            ValueRange{world.entityKey(
-                loc, world.entityId(loc, archetype, entity))});
+        Value connected =
+            archetype.connectedRowOffset &&
+                    archetype.sortedBy == trigger.component.getAttr()
+                ? memref::LoadOp::create(rewriter, loc,
+                                         world.connectedRows(archetype),
+                                         ValueRange{entity})
+                : memref::LoadOp::create(
+                      rewriter, loc, world.connectedTicks(tree),
+                      ValueRange{world.entityKey(
+                          loc, world.entityId(loc, archetype, entity))});
         fires(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
                                     connected, seen));
         continue;
@@ -4954,6 +4967,19 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
           }
         });
       }
+      // And each row when its entity was last connected, where a reactive
+      // query asks (the relation has it by the entity's key).
+      for (const WorldArchetype *archetype : holders)
+        if (archetype->connectedRowOffset)
+          forEach(zero, world.count(loc, *archetype), [&](Value row) {
+            memref::StoreOp::create(
+                rewriter, loc,
+                memref::LoadOp::create(
+                    rewriter, loc, world.connectedTicks(relation),
+                    ValueRange{world.entityKey(
+                        loc, world.entityId(loc, *archetype, row))}),
+                world.connectedRows(*archetype), ValueRange{row});
+          });
     }
   }
   memref::StoreOp::create(rewriter, loc,
