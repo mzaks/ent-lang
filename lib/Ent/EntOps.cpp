@@ -1015,11 +1015,17 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
         (void)parser.parseOptionalString(&field);
       SmallVector<Attribute, 4> entry{builder.getStringAttr(kind), component,
                                       builder.getStringAttr(field)};
-      if (succeeded(parser.parseOptionalKeyword("up"))) {
+      // `up @R`, `down @R`, `before @R`: whose event along the tree.
+      for (StringRef direction : {"up", "down", "before"}) {
+        if (failed(parser.parseOptionalKeyword(direction)))
+          continue;
         FlatSymbolRefAttr via;
         if (parser.parseAttribute(via))
           return failure();
+        if (direction != "up")
+          entry.push_back(builder.getStringAttr(direction));
         entry.push_back(via);
+        break;
       }
       if (succeeded(parser.parseOptionalKeyword("log"))) {
         int64_t capacity;
@@ -1058,11 +1064,14 @@ void QueryOp::print(OpAsmPrinter &p) {
       p << cast<StringAttr>(entry[0]).getValue() << " " << entry[1];
       if (!cast<StringAttr>(entry[2]).getValue().empty())
         p << " " << entry[2];
+      StringRef direction = "up";
       for (Attribute extra : entry.getValue().drop_front(3)) {
         if (auto capacity = dyn_cast<IntegerAttr>(extra))
           p << " log " << capacity.getInt();
+        else if (auto where = dyn_cast<StringAttr>(extra))
+          direction = where.getValue();
         else
-          p << " up " << extra;
+          p << " " << direction << " " << extra;
       }
     });
     p << "]";
@@ -1351,27 +1360,67 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
              << trigger.component << " has no field '"
              << trigger.field.getValue() << "'";
     if (trigger.via) {
-      // An ancestor's event: of the component a ref up that tree binds.
+      // Another entity's event along a tree: of the ancestor a ref up it
+      // binds, of the sibling a ref before it binds, or of a child.
+      StringRef direction = trigger.where == Trigger::Down     ? "down"
+                            : trigger.where == Trigger::Before ? "before"
+                                                               : "up";
       if (trigger.kind != Trigger::Changed)
-        return emitOpError("reacts to an ancestor gaining or losing ")
-               << trigger.component << "; only 'changed' can be 'up' a tree";
-      bool bound = llvm::any_of(getBody().getArgumentTypes(), [&](Type type) {
-        auto ref = cast<RefType>(type);
-        return ref.getVia() == trigger.via && !ref.getIsBefore() &&
-               ref.getComponent() == trigger.component;
-      });
+        return emitOpError("reacts to ")
+               << (trigger.where == Trigger::Down     ? "a child"
+                   : trigger.where == Trigger::Before ? "the sibling before"
+                                                      : "an ancestor")
+               << " gaining or losing " << trigger.component
+               << "; only 'changed' can be '"
+               << direction << "' a tree";
       if (getCascade() != trigger.via)
         return emitOpError("reacts to changed ")
-               << trigger.component << " up " << trigger.via
+               << trigger.component << " " << direction << " " << trigger.via
                << " without 'cascade " << trigger.via
-               << "': an ancestor is seen to change where it is visited "
-               << "first";
-      if (!bound)
-        return emitOpError("reacts to changed ")
-               << trigger.component << " up " << trigger.via
-               << ", but binds no '!ent.ref<" << trigger.component << ", up "
-               << trigger.via << ">': the ancestor is the one such a ref "
-               << "leads to";
+               << "': the other entity is seen to change where it is "
+               << "visited first";
+      if (trigger.where == Trigger::Down) {
+        if (!isLeavesFirst())
+          return emitOpError("reacts to changed ")
+                 << trigger.component << " down " << trigger.via
+                 << " without 'leaves first': children are visited first "
+                 << "only then";
+        auto relation = symbolTable.lookupNearestSymbolFrom<RelationOp>(
+            *this, trigger.via);
+        if (relation && relation.getSorted())
+          return emitOpError("reacts to changed ")
+                 << trigger.component << " down " << trigger.via
+                 << ", a sorted tree, which is not supported yet";
+      } else {
+        bool before = trigger.where == Trigger::Before;
+        if (before)
+          if (auto relation = symbolTable.lookupNearestSymbolFrom<RelationOp>(
+                  *this, trigger.via);
+              relation && relation.getSorted())
+            return emitOpError("reacts to changed ")
+                   << trigger.component << " before " << trigger.via
+                   << ", a sorted tree, which is not supported yet";
+        if (before && isLeavesFirst())
+          return emitOpError("reacts to changed ")
+                 << trigger.component << " before " << trigger.via
+                 << " with 'leaves first': the sibling before is visited "
+                 << "first only where parents are";
+        bool bound =
+            llvm::any_of(getBody().getArgumentTypes(), [&](Type type) {
+              auto ref = cast<RefType>(type);
+              return ref.getVia() == trigger.via &&
+                     ref.getIsBefore() == before &&
+                     ref.getComponent() == trigger.component;
+            });
+        if (!bound)
+          return emitOpError("reacts to changed ")
+                 << trigger.component << " " << direction << " "
+                 << trigger.via << ", but binds no '!ent.ref<"
+                 << trigger.component << ", " << direction << " "
+                 << trigger.via << ">': the "
+                 << (before ? "sibling" : "ancestor")
+                 << " is the one such a ref leads to";
+      }
     }
     if (trigger.logCapacity && *trigger.logCapacity < 0)
       return emitOpError("gives the event log of ")
@@ -1754,10 +1803,21 @@ LogicalResult LookupOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto query = (*this)->getParentOfType<QueryOp>();
   if (!query)
     return success();
+  // Unless the query has been there: it cascades along a tree, and the
+  // entity is the other end of one of the tree's edges that it visits,
+  // the children of the visited entity where they come first, or its
+  // parent where that does.
+  bool visitedBefore = false;
+  if (auto other = dyn_cast<BlockArgument>(getEntity()))
+    if (auto edges = dyn_cast<EdgesOp>(other.getOwner()->getParentOp()))
+      visitedBefore = other.getArgNumber() == 1 &&
+                      query.getCascade() == edges.getRelationAttr() &&
+                      edges.isOut() != query.isLeavesFirst();
   Operation *writer = nullptr;
   query.walk([&](Operation *op) {
     if (auto set = dyn_cast<SetOp>(op)) {
-      if (cast<RefType>(set.getRef().getType()).getComponent() ==
+      if (!visitedBefore &&
+          cast<RefType>(set.getRef().getType()).getComponent() ==
               getComponentAttr() &&
           set.getField() == getField())
         writer = op;

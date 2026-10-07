@@ -124,8 +124,12 @@ struct Trigger {
   std::optional<int64_t> logCapacity;
   /// For `changed @C up @R`: the event is not the visited entity's but
   /// that of its ancestor along this tree, the one the query's ref
-  /// `!ent.ref<@C, up @R>` leads to.
+  /// `!ent.ref<@C, up @R>` leads to. `where` says whose it is otherwise:
+  /// `before @R`, the sibling before's (the one a ref `before @R` leads
+  /// to), or `down @R`, that of any of its children.
   FlatSymbolRefAttr via = {};
+  enum Where { Own, Up, Down, Before };
+  Where where = Own;
 };
 
 /// The triggers of `query`, in order; empty if it is not reactive. After

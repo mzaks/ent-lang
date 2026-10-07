@@ -87,6 +87,24 @@ ent.system @line() {
   }
 }
 
+// Reactive to a child's events, from the leaves; and to the sibling
+// before's.
+// CHECK-LABEL: ent.system @sum_down() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Node, mut>) cascade @Under leaves first on [changed @Node "total" down @Under] {
+// CHECK-LABEL: ent.system @row() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Node, mut>, %{{.*}}: !ent.ref<@Node, before @Row, optional>) cascade @Row on [changed @Node "total" before @Row] {
+ent.system @sum_down() {
+  ent.query (%n: !ent.ref<@Node, mut>) cascade @Under leaves first
+      on [changed @Node "total" down @Under] {
+  }
+}
+ent.system @row() {
+  ent.query (%n: !ent.ref<@Node, mut>,
+             %b: !ent.ref<@Node, before @Row, optional>) cascade @Row
+      on [changed @Node "total" before @Row] {
+  }
+}
+
 // A tree whose entities are stored in its order.
 // CHECK: ent.relation @In (w: f32) from @Cell to @Cell tree sorted capacity 8
 ent.component @Cell (v: f32)

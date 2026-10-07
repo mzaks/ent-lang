@@ -362,3 +362,25 @@ ent.system @s() {
   }
 }
 
+// -----
+
+ent.component @N (v: i32)
+ent.relation @R () tree capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  // expected-error @+1 {{reacts to changed @N down @R without 'leaves first': children are visited first only then}}
+  ent.query (%n: !ent.ref<@N>) cascade @R on [changed @N down @R] {
+  }
+}
+
+// -----
+
+ent.component @N (v: i32)
+ent.relation @R () tree ordered by @N "v" capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  // expected-error @+1 {{reacts to changed @N before @R, but binds no '!ent.ref<@N, before @R>': the sibling is the one such a ref leads to}}
+  ent.query (%n: !ent.ref<@N>) cascade @R on [changed @N before @R] {
+  }
+}
+

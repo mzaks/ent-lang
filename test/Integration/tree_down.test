@@ -1,0 +1,35 @@
+// A reactive `for` that cascades from the leaves and reacts to its
+// children (Inputs/tree_down.ent): `changed Node.total down Under` is the
+// event of any child, also one this `for` has just caused, and a child
+// that comes or goes is one too. A node reads its children in an edge
+// loop, which it may though the `for` writes what it reads there: they
+// have been visited.
+// RUN: %ent run %S/Inputs/tree_down.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tree_down.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// root(1) <- a(10) <- a1(100), a2(200); root <- b(20).
+// CHECK:      1: root 331 runs 1
+// CHECK-NEXT: 1: a 310 runs 1
+// CHECK-NEXT: 1: b 20 runs 1
+// CHECK-NEXT: 1: a1 100 runs 1
+// CHECK-NEXT: 1: a2 200 runs 1
+// Nothing happens: nothing runs.
+// CHECK-NEXT: 2: root 331 runs 1
+// CHECK:      2: a2 200 runs 1
+// a1 grows: it, a above it and the root; not b, not a2.
+// CHECK-NEXT: 3: root 332 runs 2
+// CHECK-NEXT: 3: a 311 runs 2
+// CHECK-NEXT: 3: b 20 runs 1
+// CHECK-NEXT: 3: a1 101 runs 2
+// CHECK-NEXT: 3: a2 200 runs 1
+// a2 goes from a to b: a has lost a child and b gained one, and the
+// root's children have other totals (the same in all).
+// CHECK-NEXT: 4: root 332 runs 3
+// CHECK-NEXT: 4: a 111 runs 3
+// CHECK-NEXT: 4: b 220 runs 2
+// CHECK-NEXT: 4: a1 101 runs 2
+// CHECK-NEXT: 4: a2 200 runs 2
+// CHECK-NEXT: 5: root 332 runs 3
+// CHECK:      5: a2 200 runs 2
+// CHECK-NOT:  {{.}}

@@ -2226,8 +2226,21 @@
               "type": "SEQ",
               "members": [
                 {
-                  "type": "STRING",
-                  "value": "up"
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "STRING",
+                      "value": "up"
+                    },
+                    {
+                      "type": "STRING",
+                      "value": "down"
+                    },
+                    {
+                      "type": "STRING",
+                      "value": "before"
+                    }
+                  ]
                 },
                 {
                   "type": "FIELD",

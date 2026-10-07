@@ -475,6 +475,10 @@ def Ent_QueryOp : Ent_Op<"query", [
     the event of the ancestor that a `!ent.ref<@World, up @Under>` argument
     leads to, read from the ancestor's stamp, so that what the query wrote
     to an ancestor is an event for the entities below it in the same run.
+    `changed @C before @R` is the same for the sibling a ref `before @R`
+    leads to (and fires where the entity has another sibling before it
+    than it had), and `changed @C down @R`, in a query cascading `leaves
+    first`, for any child of the entity (and where it gained or lost one).
     Those events it has then passed down; they are none the next time it
     runs. An entity that is connected along the tree has such an event as
     well: the ancestor it sees is another. Over an unsorted tree, or one sorted in one archetype, the query

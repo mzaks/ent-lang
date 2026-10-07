@@ -201,17 +201,24 @@ SmallVector<Trigger> mlir::ent::getTriggers(QueryOp query) {
     // both.
     std::optional<int64_t> logCapacity;
     FlatSymbolRefAttr via;
+    Trigger::Where where = Trigger::Own;
     for (Attribute extra : entry.getValue().drop_front(3)) {
-      if (auto capacity = dyn_cast<IntegerAttr>(extra))
+      if (auto capacity = dyn_cast<IntegerAttr>(extra)) {
         logCapacity = capacity.getInt();
-      else
+      } else if (auto direction = dyn_cast<StringAttr>(extra)) {
+        where = direction.getValue() == "down" ? Trigger::Down
+                                                : Trigger::Before;
+      } else {
         via = cast<FlatSymbolRefAttr>(extra);
+        if (where == Trigger::Own)
+          where = Trigger::Up;
+      }
     }
     triggers.push_back({kind == "added"     ? Trigger::Added
                         : kind == "removed" ? Trigger::Removed
                                             : Trigger::Changed,
                         cast<FlatSymbolRefAttr>(entry[1]),
-                        cast<StringAttr>(entry[2]), logCapacity, via});
+                        cast<StringAttr>(entry[2]), logCapacity, via, where});
   }
   for (size_t named = triggers.size(), k = 0; k < named; ++k) {
     FlatSymbolRefAttr via = triggers[k].via;

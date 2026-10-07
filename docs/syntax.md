@@ -337,8 +337,7 @@ it in the same box ends, the first where the box they are in starts.
   are in the tree's order with the children of an entity in theirs: the
   sibling before is the row before. Across several archetypes such a
   tree is read by its list.
-- Not yet: a trigger on the sibling before for a reactive `for`; an
-  order by a float.
+- Not yet: an order by a float.
 
 **Sorted trees.** A tree may ask for its entities to be stored in its
 order:
@@ -437,6 +436,35 @@ thereby passed down: the next time it runs that is no event.
 
 - Only `changed` can be `up` a tree; the `for` must bind that component
   `up` that tree and cascade along it.
+- `changed C before Relation` is the same for the sibling before, which
+  a binding `before` the tree leads to: the `for` runs for a node whose
+  sibling before had the event, also in the same pass, or which has
+  another sibling before it than it had (one came, went or was moved).
+- `changed C down Relation`, in a `for` that cascades `leaves first`, is
+  the event of any of the node's children, also one the `for` has just
+  caused in a child; a child that comes or goes is one too. No binding
+  goes with it: a node reads its children in an edge loop,
+
+  ```
+  for e, n: mut Node cascade Under leaves first
+      on changed Node.own, changed Node.total down Under {
+    n.total = n.own
+    for edge, child in e.in(Under) {
+      if let t = Node(child).total { n.total += t }
+    }
+  }
+  ```
+
+  which it may though the `for` writes `total`: where a `for` cascades
+  along a tree, the other end of the tree's edges it visits has been
+  visited (the children with `leaves first`, the parent without).
+- A trigger fires on a write, whether the value is another or not. Passes
+  that feed each other (as in `examples/layout.ent`, where sizes go up
+  the tree and room comes down) write only what differs
+  (`if b.w != w { b.w = w }`), or each would set the other off for good.
+- Triggers `down` and `before` a tree are for unsorted trees so far, and
+  a `for` with one goes through its whole tree, running its body where a
+  trigger fired.
 - What a node sees through the binding also changes when the node is
   given another parent: `connect(node, other, Under)` is such an event
   for `node`, whether a system or the host connects it, and the `for`

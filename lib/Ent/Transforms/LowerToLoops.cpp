@@ -585,6 +585,23 @@ public:
     return view(relation.sequenceOffset, layout.entityKeys + 1,
                 rewriter.getI64Type());
   }
+  /// Per entity key, the tick at which the entity last got another
+  /// sibling before it, and the sibling it had before the tree's order
+  /// was last made.
+  Value siblingTicks(const WorldRelation &relation) {
+    return view(relation.siblingTicksOffset, layout.entityKeys,
+                rewriter.getI64Type());
+  }
+  Value siblingsBefore(const WorldRelation &relation) {
+    return view(relation.siblingsBeforeOffset, layout.entityKeys,
+                offsetType(relation));
+  }
+  /// Per entity key, the tick at which the entity last gained or lost a
+  /// child in the tree.
+  Value childTicks(const WorldRelation &relation) {
+    return view(relation.childTicksOffset, layout.entityKeys,
+                rewriter.getI64Type());
+  }
   /// Per entity key, what an ordered tree's children are ordered by, as
   /// read when the order was last made.
   Value orderKeys(const WorldRelation &relation) {
@@ -1680,6 +1697,20 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         fires(ifAny.getResult(0));
         continue;
       }
+      // Another sibling before it than it had, for a trigger before a
+      // tree (that sibling's own events join below, with the ancestors').
+      if (trigger.where == Trigger::Before) {
+        const WorldRelation &tree =
+            layout.getRelation(trigger.via.getAttr());
+        if (tree.siblingTicksOffset)
+          fires(arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::sgt,
+              memref::LoadOp::create(
+                  rewriter, loc, world.siblingTicks(tree),
+                  ValueRange{world.entityKey(
+                      loc, world.entityId(loc, archetype, entity))}),
+              seen));
+      }
       const WorldColumn *column = archetype.findStamp(getStamp(trigger));
       if (!column || trigger.via)
         continue;
@@ -1797,7 +1828,9 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     if (seen)
       for (const Trigger &trigger : getTriggers(query)) {
         if (trigger.via != refType.getVia() ||
-            trigger.component != refType.getComponent())
+            trigger.component != refType.getComponent() ||
+            trigger.where !=
+                (refType.getIsBefore() ? Trigger::Before : Trigger::Up))
           continue;
         Stamp stamp = getStamp(trigger);
         Type i64 = rewriter.getI64Type();
@@ -1864,6 +1897,84 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                                     stamped, passed));
       }
   }
+  // A trigger down a tree: an event of one of the entity's children,
+  // each asked in turn until one has had one, or a child gained or lost.
+  if (seen)
+    for (const Trigger &trigger : getTriggers(query)) {
+      if (trigger.where != Trigger::Down)
+        continue;
+      const WorldRelation &relation =
+          layout.getRelation(trigger.via.getAttr());
+      assert(relation.linked && "a trigger down a tree without links");
+      Type i64 = rewriter.getI64Type();
+      Type i1 = rewriter.getI1Type();
+      Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+      auto load = [&](Value column, Value at) -> Value {
+        return memref::LoadOp::create(rewriter, loc, column, ValueRange{at});
+      };
+      auto constant = [&](int64_t value, unsigned bits) -> Value {
+        return arith::ConstantIntOp::create(rewriter, loc, value, bits);
+      };
+      Value key = world.entityKey(loc, world.entityId(loc, archetype, entity));
+      if (relation.childTicksOffset)
+        fires(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
+                                    load(world.childTicks(relation), key),
+                                    seen));
+      // (What this query did to a child the last time, it has taken in
+      // then: see the trigger up a tree above.)
+      Value passed = arith::SelectOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, seen,
+                                constant(0, 64)),
+          constant(0, 64),
+          arith::AddIOp::create(rewriter, loc, seen, constant(1, 64)));
+      Stamp stamp = getStamp(trigger);
+      FlatSymbolRefAttr component = trigger.component;
+      Value nextSibling =
+          world.treeLinks(relation, relation.nextSiblingOffset);
+      auto children = scf::WhileOp::create(
+          rewriter, loc, TypeRange{world.offsetType(relation), i1},
+          ValueRange{load(world.treeLinks(relation, relation.firstChildOffset),
+                          key),
+                     constant(0, 1)},
+          [&](OpBuilder &, Location, ValueRange state) {
+            Value more = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ne, state[0],
+                constant(0, relation.offsetBits));
+            scf::ConditionOp::create(
+                rewriter, loc,
+                arith::AndIOp::create(
+                    rewriter, loc, more,
+                    arith::XOrIOp::create(rewriter, loc, state[1],
+                                          constant(1, 1))),
+                state);
+          },
+          [&](OpBuilder &, Location, ValueRange state) {
+            Value child = arith::SubIOp::create(
+                rewriter, loc, world.toIndex(loc, state[0]), one);
+            Value childId = world.ownerId(
+                loc, load(world.edgeIds(relation, /*source=*/true), child));
+            Value stamped = emitLocate(
+                rewriter, loc, layout, world, childId,
+                [&](const WorldArchetype &home) {
+                  return home.findStamp(stamp) != nullptr;
+                },
+                component, TypeRange{i64},
+                [&](const WorldArchetype &home, Value row,
+                    Value) -> SmallVector<Value> {
+                  return {load(world.stamps(home, *home.findStamp(stamp)),
+                               row)};
+                },
+                [&]() -> SmallVector<Value> { return {constant(0, 64)}; })[0];
+            scf::YieldOp::create(
+                rewriter, loc,
+                ValueRange{load(nextSibling, child),
+                           arith::CmpIOp::create(rewriter, loc,
+                                                 arith::CmpIPredicate::sgt,
+                                                 stamped, passed)});
+          });
+      fires(children.getResult(1));
+    }
   // Reactive: only where a trigger fired (nowhere, if none can here).
   if (seen)
     require(fired ? fired
@@ -3219,6 +3330,11 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
     memref::StoreOp::create(rewriter, at,
                             arith::ConstantIntOp::create(rewriter, at, 1, 8),
                             world.edgeDead(relation), ValueRange{edge});
+    // (The edge's target loses a child.)
+    if (relation.childTicksOffset)
+      memref::StoreOp::create(
+          rewriter, at, world.currentTick(at), world.childTicks(relation),
+          ValueRange{out ? world.entityKey(at, otherId) : key});
     Value zero = arith::ConstantIndexOp::create(rewriter, at, 0);
     memref::StoreOp::create(rewriter, at,
                             arith::ConstantIntOp::create(rewriter, at, 0, 64),
@@ -4187,11 +4303,24 @@ struct LinkedTree {
                                            relation.offsetBits)),
           childCount(), parent);
   }
+  /// The entity with the key `parent` gains or loses a child, which is an
+  /// event where a reactive query has a trigger down the tree.
+  void childrenChanged(Value parent) {
+    if (relation.childTicksOffset)
+      store(world.currentTick(loc), world.childTicks(relation), parent);
+  }
   /// The slot `slot` leaves the children of the key its target has.
   void unlink(Value slot) {
     Value parent = world.entityKey(loc, load(targets(), slot));
     Value previous = load(previousSibling(), slot);
     Value next = load(nextSibling(), slot);
+    // (The one after it has another sibling before it from here on.)
+    if (relation.siblingTicksOffset)
+      branch(negate(isNone(next)), [&] {
+        store(world.currentTick(loc), world.siblingTicks(relation),
+              arith::SubIOp::create(rewriter, loc, world.toIndex(loc, next),
+                                    one));
+      });
     auto before = [&](Value linkValue) {
       return arith::SubIOp::create(rewriter, loc,
                                    world.toIndex(loc, linkValue), one)
@@ -4397,7 +4526,11 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
       tree.store(tree.noLink(), tree.position(), slot);
     });
   });
-  tree.branch(isOwn, [&] { tree.unlink(slot); });
+  tree.branch(isOwn, [&] {
+    tree.childrenChanged(world.entityKey(loc, tree.load(tree.targets(), slot)));
+    tree.unlink(slot);
+  });
+  tree.childrenChanged(parentKey);
   tree.branch(isNew, [&] {
     Value counter = world.edgeCount(relation);
     Value count = tree.load(counter, zero);
@@ -4507,6 +4640,8 @@ static void emitDropFunction(IRRewriter &rewriter, ModuleOp module,
   tree.branch(
       tree.same(tree.load(tree.sources(), slot), world.slotOwner(loc, id)),
       [&] {
+        tree.childrenChanged(
+            world.entityKey(loc, tree.load(tree.targets(), slot)));
         tree.unlink(slot);
         tree.clearSlot(slot);
       });
@@ -4566,6 +4701,12 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
     return tree.negate(
         tree.same(tree.load(tree.sources(), key), tree.noOwner()));
   };
+  // Which sibling each had before it, to tell afterwards who has another.
+  if (relation.siblingTicksOffset)
+    tree.forEach(zero, keys, [&](Value key) {
+      tree.store(tree.load(tree.previousSibling(), key),
+                 world.siblingsBefore(relation), key);
+    });
   // The edges that stay, counted, and every link cleared.
   tree.store(tree.i64(0), world.edgeCount(relation), zero);
   tree.forEach(zero, keys, [&](Value key) {
@@ -4726,6 +4867,20 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
     });
   });
   tree.store(tree.i64(1), world.edgesClean(relation), zero);
+  // An entity with another sibling before it than it had: an event, where
+  // a reactive query has a trigger before the tree.
+  if (relation.siblingTicksOffset)
+    tree.forEach(zero, keys, [&](Value key) {
+      tree.branch(
+          tree.both(hasEdge(key),
+                    tree.negate(tree.same(
+                        tree.load(tree.previousSibling(), key),
+                        tree.load(world.siblingsBefore(relation), key)))),
+          [&] {
+            tree.store(world.currentTick(loc), world.siblingTicks(relation),
+                       key);
+          });
+    });
   if (!relation.hasLocations())
     return;
   // The list has the entities' and their parents' locations fresh from

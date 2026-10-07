@@ -220,6 +220,12 @@ there.) Whether such a
 query goes through its whole tree or only where events lead does not show:
 the entities it runs its body for, and their order, are the same.
 
+A trigger `before @R` is of this kind for the sibling before (parents
+first), with one more event: another sibling before the entity than it
+had. A trigger `down @R` (children first) is the event of any child of the
+entity, in the same open window, and of the entity gaining or losing a
+child.
+
 **R4.** An event log never loses an event unnoticed. Entries a reader has
 not read are not written over; an event that finds its log full is lost to
 every reader of the log, each of which visits every entity on its next run

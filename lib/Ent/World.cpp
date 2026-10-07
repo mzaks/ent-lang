@@ -106,6 +106,9 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
       }))
     return false;
   for (const Trigger &trigger : triggers) {
+    // (Events of children and of siblings are not followed yet.)
+    if (trigger.where == Trigger::Down || trigger.where == Trigger::Before)
+      return false;
     if (!findLog(getStamp(trigger)))
       return false;
     if (trigger.via && tree.getTrusted(/*target=*/true) != trigger.component)
@@ -577,6 +580,35 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       layout.zeroed.push_back(
           {relation.connectedOffset, uint64_t(8 * (layout.entityKeys + 1))});
     }
+  // When each entity's children last changed, for a tree some trigger is
+  // down.
+  for (WorldRelation &relation : layout.relations) {
+    bool asked = false, siblings = false;
+    module.walk([&](QueryOp query) {
+      for (const Trigger &trigger : getTriggers(query)) {
+        if (!trigger.via ||
+            trigger.via.getAttr() != RelationOp(relation.op).getSymNameAttr())
+          continue;
+        asked |= trigger.where == Trigger::Down;
+        siblings |= trigger.where == Trigger::Before;
+      }
+    });
+    if (asked) {
+      relation.childTicksOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.childTicksOffset + 8 * layout.entityKeys;
+      layout.zeroed.push_back(
+          {relation.childTicksOffset, uint64_t(8 * layout.entityKeys)});
+    }
+    if (siblings) {
+      relation.siblingTicksOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.siblingTicksOffset + 8 * layout.entityKeys;
+      layout.zeroed.push_back(
+          {relation.siblingTicksOffset, uint64_t(8 * layout.entityKeys)});
+      relation.siblingsBeforeOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.siblingsBeforeOffset +
+            relation.offsetBits / 8 * layout.entityKeys;
+    }
+  }
   // The marks of a tree that some reactive query follows events down.
   auto placeMarks = [&](WorldRelation &relation, int64_t bits) {
     bool followed = false;

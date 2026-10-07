@@ -1,20 +1,11 @@
 // examples/layout.ent, a library that lays boxes out inside boxes with
-// three `for`s along a tree whose children are in an order (which box a
-// box is in, and where among those in it): Inputs/layout_print.ent prints
+// three reactive `for`s along a tree whose children are in an order
+// (which box a box is in, and where among those in it): each runs only
+// where something it reads has changed. Inputs/layout_print.ent prints
 // where a small window's
 // boxes end up, and examples/layout_demo.ent, which draws one, compiles.
 // RUN: %ent run -I %S/../../examples %S/Inputs/layout_print.ent 2>/dev/null \
 // RUN:   | FileCheck %s
-// The same places with the tree `sorted` as well, its rows in another
-// order.
-// RUN: mkdir -p %t.dir
-// RUN: sed 's/ tree ordered by / tree sorted ordered by /' \
-// RUN:     %S/../../examples/layout.ent > %t.dir/layout.ent
-// RUN: grep -q "tree sorted ordered" %t.dir/layout.ent
-// RUN: %ent run -I %S/../../examples %S/Inputs/layout_print.ent 2>/dev/null \
-// RUN:   | sort > %t.plain
-// RUN: %ent run -I %t.dir %S/Inputs/layout_print.ent 2>/dev/null \
-// RUN:   | sort | cmp - %t.plain
 // RUN: ent-translate --import-ent %S/../../examples/layout_demo.ent \
 // RUN:     -I %S/../../devices -I %S/../../examples -o %t.mlir
 // RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \

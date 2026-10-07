@@ -1,8 +1,9 @@
 // Layout: boxes inside boxes, each as wide and high as it is told, as its
 // content needs or as there is room, placed in a row or a column inside
 // the box it is in. A library: a program imports it, makes boxes, says
-// which is inside which, and runs `layout` (examples/layout_demo.ent
-// draws the result in a window).
+// which is inside which, and runs `layout` every frame, which works out
+// what has changed since it last ran (examples/layout_demo.ent draws the
+// result in a window).
 //
 // The sizes are those of Clay (github.com/nicbarker/clay): a box is
 // `fixed` (as wide as `w` says), `fit` (as wide as what is in it) or
@@ -39,7 +40,11 @@ component Content {
 // of their slots.
 relation Inside from Box to Box tree ordered by Slot.at capacity 256
 
-// Three passes over the boxes, each a `for` along the tree.
+// Three passes over the boxes, each a `for` along the tree, and each
+// reactive: it runs for a box only where something it reads has changed
+// since it last ran, in the box itself, in the box it is in, in the one
+// before it or in one inside it. A box that is given the size it has is
+// not written, so that nothing follows from it.
 system layout() {
   for e, b: Box without Content {
     e.add(Content {
@@ -49,8 +54,13 @@ system layout() {
   }
 
   // As wide and as high as what is in it, from the innermost boxes out:
-  // when a box is visited, all that is inside it has told it its size.
-  for c: mut Content {
+  // a box adds up the boxes inside it, which have been visited. Only
+  // where it is asked for another size, stands them another way, or one
+  // of them has another size, or has come or gone.
+  for e, b: mut Box, s: Size, k: Stack, c: mut Content
+      cascade Inside leaves first
+      on changed Size, changed Stack, changed Box.w down Inside,
+         changed Box.h down Inside, changed Size down Inside {
     c.count = 0
     c.sum_w = 0.0
     c.max_w = 0.0
@@ -58,54 +68,67 @@ system layout() {
     c.max_h = 0.0
     c.grow_w = 0
     c.grow_h = 0
-  }
-  for b: mut Box, s: Size, k: Stack, c: Content, outer: mut Content up Inside
-      cascade Inside leaves first {
+    for inside, child in e.in(Inside) {
+      if let w = Box(child).w, let h = Box(child).h,
+         let sw = Size(child).w, let sh = Size(child).h {
+        c.count += 1
+        c.sum_w += w
+        c.max_w max= w
+        c.sum_h += h
+        c.max_h max= h
+        if sw == Sizing.Grow { c.grow_w += 1 }
+        if sh == Sizing.Grow { c.grow_h += 1 }
+      }
+    }
     let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
     if s.w == Sizing.Fit {
-      b.w = (if k.row { c.sum_w + gaps } else { c.max_w }) + 2.0 * k.pad
+      let w = (if k.row { c.sum_w + gaps } else { c.max_w }) + 2.0 * k.pad
+      if b.w != w { b.w = w }
     }
     if s.h == Sizing.Fit {
-      b.h = (if k.row { c.max_h } else { c.sum_h + gaps }) + 2.0 * k.pad
+      let h = (if k.row { c.max_h } else { c.sum_h + gaps }) + 2.0 * k.pad
+      if b.h != h { b.h = h }
     }
-    outer.count += 1
-    outer.sum_w += b.w
-    outer.max_w max= b.w
-    outer.sum_h += b.h
-    outer.max_h max= b.h
-    if s.w == Sizing.Grow { outer.grow_w += 1 }
-    if s.h == Sizing.Grow { outer.grow_h += 1 }
   }
 
   // The room that is left in a box goes to those inside it that grow:
   // along the row or column in equal shares, across it all of it. From
-  // the outermost boxes in, since a box that grew has more room to give.
+  // the outermost boxes in, since a box that grew has more room to give;
+  // only where the box it is in has another size or other boxes in it.
   for b: mut Box, s: Size,
       outer: Box up Inside, k: Stack up Inside, c: Content up Inside
-      cascade Inside {
+      cascade Inside
+      on changed Size, changed Box.w up Inside, changed Box.h up Inside,
+         changed Stack up Inside, changed Content up Inside {
     let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
     let room_w = outer.w - 2.0 * k.pad
     let room_h = outer.h - 2.0 * k.pad
     if s.w == Sizing.Grow {
-      b.w = if k.row { b.w + (room_w - c.sum_w - gaps) / c.grow_w as f32 }
-            else { room_w }
+      let w = if k.row { b.w + (room_w - c.sum_w - gaps) / c.grow_w as f32 }
+              else { room_w }
+      if b.w != w { b.w = w }
     }
     if s.h == Sizing.Grow {
-      b.h = if k.row { room_h }
-            else { b.h + (room_h - c.sum_h - gaps) / c.grow_h as f32 }
+      let h = if k.row { room_h }
+              else { b.h + (room_h - c.sum_h - gaps) / c.grow_h as f32 }
+      if b.h != h { b.h = h }
     }
   }
 
   // A box starts where the one before it in the same box ends, and a
   // gap further; the first inside the padding of the box they are in.
-  // Across the row or column, all start at the padding. The box before
-  // has been placed when a box is: boxes in one box are visited in order.
+  // Only where the box it is in has moved, or the one before it has
+  // moved, has another size or is another.
   for b: mut Box, outer: Box up Inside, k: Stack up Inside,
-      optional prev: Box before Inside cascade Inside {
-    b.x = outer.x + k.pad
-    b.y = outer.y + k.pad
-    if let x = prev.x, let y = prev.y, let w = prev.w, let h = prev.h {
-      if k.row { b.x = x + w + k.gap } else { b.y = y + h + k.gap }
+      optional prev: Box before Inside cascade Inside
+      on changed Box.x up Inside, changed Box.y up Inside,
+         changed Stack up Inside, changed Box before Inside {
+    var x = outer.x + k.pad
+    var y = outer.y + k.pad
+    if let px = prev.x, let py = prev.y, let w = prev.w, let h = prev.h {
+      if k.row { x = px + w + k.gap } else { y = py + h + k.gap }
     }
+    if b.x != x { b.x = x }
+    if b.y != y { b.y = y }
   }
 }

@@ -1,0 +1,49 @@
+// Totals added up from the leaves, only where something below changed
+// (tree_down.test): a node's total is its own and its children's, which
+// it reads in an edge loop, having visited them.
+import console
+component Node { name: text[8], own: i32, total: i32, runs: i32 }
+default_capacity 16
+relation Under from Node to Node tree capacity 16
+unique Frame: i32
+unique Mid: entity
+unique Top: entity
+
+world {
+  let root = spawn { Node { name: "root", own: 1, total: 0, runs: 0 } }
+  let a = spawn { Node { name: "a", own: 10, total: 0, runs: 0 } }
+  let b = spawn { Node { name: "b", own: 20, total: 0, runs: 0 } }
+  let a1 = spawn { Node { name: "a1", own: 100, total: 0, runs: 0 } }
+  let a2 = spawn { Node { name: "a2", own: 200, total: 0, runs: 0 } }
+  connect(a, root, Under)
+  connect(b, root, Under)
+  connect(a1, a, Under)
+  connect(a2, a, Under)
+  Mid = b
+  Top = root
+}
+
+// 2: nothing. 3: a1 grows. 4: a2 is put under b. 5: nothing.
+system change() {
+  Frame += 1
+  for n: mut Node where Frame == 3 && n.own == 100 { n.own = 101 }
+  for e, n: Node where Frame == 4 && n.own == 200 { connect(e, Mid, Under) }
+}
+
+system add() {
+  for e, n: mut Node cascade Under leaves first
+      on changed Node.own, changed Node.total down Under {
+    n.total = n.own
+    for edge, child in e.in(Under) {
+      if let t = Node(child).total { n.total += t }
+    }
+    n.runs += 1
+  }
+}
+
+system show() {
+  for n: Node { put("{Frame}: {n.name} {n.total} runs {n.runs}") }
+  flush()
+}
+schedule frame() { change()  add()  show() }
+main { loop { frame() } until Frame == 5 }

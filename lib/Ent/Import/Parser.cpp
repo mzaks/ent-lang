@@ -2164,15 +2164,22 @@ LogicalResult Parser::parseFor() {
                                       symbol(*component),
                                       builder.getStringAttr(field)};
       // `changed C up R`: the event of the ancestor a binding `up R`
-      // leads to.
+      // leads to; `before R`, of the sibling a binding `before R` leads
+      // to; `down R`, of any child.
       llvm::SMLoc upAt = token.loc;
-      if (consumeKeyword("up")) {
+      for (StringRef direction : {"up", "down", "before"}) {
+        if (!consumeKeyword(direction))
+          continue;
         if (*kind != "changed")
-          return error(upAt, "only 'changed' can be 'up' a tree");
-        FailureOr<FlatSymbolRefAttr> relation = parseTree("up");
+          return error(upAt, "only 'changed' can be '" + direction.str() +
+                                 "' a tree");
+        FailureOr<FlatSymbolRefAttr> relation = parseTree(direction);
         if (failed(relation))
           return failure();
+        if (direction != "up")
+          entry.push_back(builder.getStringAttr(direction));
         entry.push_back(*relation);
+        break;
       }
       if (consumeKeyword("log")) {
         FailureOr<int64_t> capacity = integer("a log capacity");
