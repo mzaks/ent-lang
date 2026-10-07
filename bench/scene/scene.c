@@ -59,12 +59,34 @@ int main(int argc, char **argv) {
     return 1;
   }
   ent_entity *ids = malloc(sizeof(ent_entity) * N);
+#ifdef TWO
+  // Half of the nodes in a second archetype, by a hash of the number.
+  #define HEAVY(i) (((uint32_t)(i) * 2654435761u >> 16) & 1)
+  for (int i = 0; i < N; ++i) {
+    ent_entity id = ids[i] = HEAVY(i) ? ent_Heavy_spawn(w) : ent_Node_spawn(w);
+    int64_t row = ent_entity_row(w, id);
+    int32_t x = (int32_t)(next() % 1000);
+    if (HEAVY(i)) {
+      ent_Heavy_Local_x(w)[row] = x;
+      ent_Heavy_World_x(w)[row] = 0;
+      ent_Heavy_Mass_m(w)[row] = 0;
+    } else {
+      ent_Node_Local_x(w)[row] = x;
+      ent_Node_World_x(w)[row] = 0;
+    }
+  }
+  #define WORLD(i)                                                            \
+    ((HEAVY(i) ? ent_Heavy_World_x(w)                                         \
+               : ent_Node_World_x(w))[ent_entity_row(w, ids[i])])
+#else
   for (int i = 0; i < N; ++i) {
     ent_entity id = ids[i] = ent_Node_spawn(w);
     int64_t row = ent_entity_row(w, id);
     ent_Node_Local_x(w)[row] = (int32_t)(next() % 1000);
     ent_Node_World_x(w)[row] = 0;
   }
+  #define WORLD(i) (ent_Node_World_x(w)[ent_entity_row(w, ids[i])])
+#endif
   for (int i = 1; i < N; ++i)
     if (!ent_Under_connect(w, ids[i], ids[parent[i]]))
       return 1;
@@ -92,7 +114,7 @@ int main(int argc, char **argv) {
 
   uint64_t hash = 1469598103934665603ull;
   for (int i = 0; i < N; ++i) {
-    uint32_t bits = (uint32_t)ent_Node_World_x(w)[ent_entity_row(w, ids[i])];
+    uint32_t bits = (uint32_t)WORLD(i);
     hash = (hash ^ bits) * 1099511628211ull;
   }
   printf("ns_per_step=%.0f reached=%.1f checksum=%016llx\n", elapsed / steps,

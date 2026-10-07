@@ -5983,6 +5983,15 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     Value depths = world.toIndex(
         loc, memref::LoadOp::create(rewriter, loc, world.treeDepth(relation),
                                     ValueRange{zero}));
+    bool sends = false;
+    query.getBody().walk([&](CombineOp) { sends = true; });
+    int64_t held = 0;
+    for (const WorldArchetype *archetype : levelled)
+      held += archetype->capacity;
+    bool levelsInParallel =
+        options.parallelEntities && isDepthLocal(query) && !marks &&
+        triggers.empty() && connects.empty() && !sends &&
+        held >= options.parallelMinEntities;
     auto levels = scf::ForOp::create(rewriter, loc, zero, depths, one);
     {
       OpBuilder::InsertionGuard guard(rewriter);
@@ -6010,25 +6019,55 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         Value to = world.toIndex(
             loc,
             memref::LoadOp::create(rewriter, loc, starts, ValueRange{next}));
-        auto rows = scf::ForOp::create(
-            rewriter, loc, zero, arith::SubIOp::create(rewriter, loc, to, from),
-            one);
-        rewriter.setInsertionPoint(rows.getBody()->getTerminator());
-        Value row = leavesFirst
-                        ? arith::SubIOp::create(
-                              rewriter, loc,
-                              arith::SubIOp::create(rewriter, loc, to, one),
-                              rows.getInductionVar())
-                              .getResult()
-                        : arith::AddIOp::create(rewriter, loc, from,
-                                                rows.getInductionVar())
-                              .getResult();
-        KnownParent parent{&relation};
-        parent.location = memref::LoadOp::create(
-            rewriter, loc, world.parentLocations(*archetype), ValueRange{row});
-        emitQueryBody(rewriter, query, IRMapping(), *archetype, world, layout,
-                      row, world.count(loc, *archetype), tick, seen,
-                      /*parallel=*/false, /*directApplies=*/true, parent, marks);
+        auto visit = [&](Value row, bool parallel) {
+          KnownParent parent{&relation};
+          parent.location = memref::LoadOp::create(
+              rewriter, loc, world.parentLocations(*archetype),
+              ValueRange{row});
+          emitQueryBody(rewriter, query, IRMapping(), *archetype, world,
+                        layout, row, world.count(loc, *archetype), tick, seen,
+                        parallel, /*directApplies=*/true, parent, marks);
+        };
+        auto oneAfterAnother = [&] {
+          auto rows = scf::ForOp::create(
+              rewriter, loc, zero,
+              arith::SubIOp::create(rewriter, loc, to, from), one);
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPoint(rows.getBody()->getTerminator());
+          visit(leavesFirst
+                    ? arith::SubIOp::create(
+                          rewriter, loc,
+                          arith::SubIOp::create(rewriter, loc, to, one),
+                          rows.getInductionVar())
+                          .getResult()
+                    : arith::AddIOp::create(rewriter, loc, from,
+                                            rows.getInductionVar())
+                          .getResult(),
+                /*parallel=*/false);
+        };
+        // The rows an archetype has of one depth do not depend on each
+        // other, nor on those the other archetypes have of it: in
+        // parallel where there are parallel-min-level of them, the body
+        // only reads and writes its entity and reads its ancestors, and
+        // the archetype can be large enough.
+        if (!levelsInParallel || archetype->capacity < options.parallelMinLevel) {
+          oneAfterAnother();
+          continue;
+        }
+        Value many = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sge,
+            arith::SubIOp::create(rewriter, loc, to, from),
+            arith::ConstantIndexOp::create(rewriter, loc,
+                                           options.parallelMinLevel));
+        auto perDepth = scf::IfOp::create(rewriter, loc, many,
+                                          /*withElseRegion=*/true);
+        rewriter.setInsertionPointToStart(perDepth.elseBlock());
+        oneAfterAnother();
+        rewriter.setInsertionPointToStart(perDepth.thenBlock());
+        auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{from},
+                                            ValueRange{to}, ValueRange{one});
+        rewriter.setInsertionPoint(each.getBody()->getTerminator());
+        visit(each.getInductionVars().front(), /*parallel=*/true);
       }
     }
     hoistResourceReads(rewriter, levels, world);

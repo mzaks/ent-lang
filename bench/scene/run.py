@@ -36,6 +36,14 @@ ENT_OPT = os.path.join(ROOT, "build", "bin", "ent-opt")
 ENT_TRANSLATE = os.path.join(ROOT, "build", "bin", "ent-translate")
 LOWER = ["--convert-scf-to-cf", "--convert-to-llvm",
          "--reconcile-unrealized-casts"]
+OPENMP = ["-fopenmp", f"-I{LLVM}/include", f"-L{LLVM}/lib",
+          f"-Wl,-rpath,{LLVM}/lib"]
+PARALLEL = ["--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1",
+            "--convert-scf-to-openmp", "--canonicalize", "--ent-omp-nowait"]
+# Half of the nodes in a second archetype (scene.c, -DTWO).
+TWO = ("archetype Picks {", "component Mass { m: i32 } capacity 1024\n"
+       "archetype Heavy { Local, World, Mass } capacity 1024\n"
+       "archetype Picks {")
 PLAIN = "cascade Under {"
 REACTIVE = "cascade Under\n      on changed Local, changed World up Under {"
 SORTED = (" tree capacity 1024", " tree sorted capacity 1024")
@@ -45,7 +53,13 @@ VARIANTS = {
     "reactive": [(PLAIN, REACTIVE)],
     "full-sorted": [SORTED],
     "reactive-sorted": [(PLAIN, REACTIVE), SORTED],
+    # The sorted tree across two archetypes; `-par` with parallel loops.
+    "full-two-sorted": [SORTED, TWO],
+    "full-two-sorted-par": [SORTED, TWO],
+    "full-sorted-par": [SORTED],
+    "reactive-two-sorted": [(PLAIN, REACTIVE), SORTED, TWO],
 }
+DEFAULT = ["full", "reactive", "full-sorted", "reactive-sorted"]
 
 
 def build(name, n):
@@ -67,13 +81,17 @@ def build(name, n):
                    check=True)
     subprocess.run([ENT_TRANSLATE, "--ent-to-c-header", mlir, "-o",
                     os.path.join(directory, "scene_world.h")], check=True)
-    lowered = subprocess.run([ENT_OPT, mlir, "--ent-lower-to-loops", *LOWER],
+    parallel = name.endswith("-par")
+    passes = PARALLEL if parallel else ["--ent-lower-to-loops"]
+    lowered = subprocess.run([ENT_OPT, mlir, *passes, *LOWER],
                              check=True, capture_output=True, text=True).stdout
     ll = os.path.join(directory, "scene.ll")
     subprocess.run([f"{LLVM}/bin/mlir-translate", "--mlir-to-llvmir",
                     "-o", ll], input=lowered, text=True, check=True)
     subprocess.run([f"{LLVM}/bin/clang", "-O2", *EXTRA_CFLAGS, f"-DN={n}",
+                    *(["-DTWO"] if "-two-" in name else []),
                     os.path.join(HERE, "scene.c"), ll,
+                    *(OPENMP if parallel else []),
                     "-Wno-override-module", f"-I{directory}", "-o", exe],
                    check=True)
     return exe
@@ -87,7 +105,9 @@ def main():
     parser.add_argument("--sizes", default="100000,1000000")
     parser.add_argument("--shapes", default="bushy,deep")
     parser.add_argument("--moves", default="0,1,10,100,1000")
-    parser.add_argument("--variants", default=",".join(VARIANTS))
+    parser.add_argument("--variants", default=",".join(DEFAULT),
+                        help="comma-separated; also: " + ", ".join(
+                            v for v in VARIANTS if v not in DEFAULT))
     args = parser.parse_args()
     os.makedirs(OUT, exist_ok=True)
     names = args.variants.split(",")
