@@ -48,6 +48,9 @@ extern proc sector(x: f32, y: f32, radius: f32, from: f32, to: f32, color: i32)
 extern proc line(x0: f32, y0: f32, x1: f32, y1: f32, color: i32)
 // A line of text `size` pixels high, by its top left corner.
 extern proc label(text: text[126], x: f32, y: f32, size: f32, color: i32)
+// How wide `label` draws a text of that size, in pixels. The window must
+// be open (after the first `begin`).
+extern fn text_width(text: text[126], size: f32) -> f32
 // Saves the picture as it is now (a .png) in the directory the program
 // runs in.
 extern proc screenshot(file: text[126])

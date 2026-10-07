@@ -1967,6 +1967,12 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                                 return {stampAt(home, ancestor.row)};
                               })[0];
           FlatSymbolRefAttr component = refType.getComponent();
+          // (No entity has the component: none has had an event of it.)
+          if (llvm::none_of(layout.archetypes,
+                            [&](const WorldArchetype &home) {
+                              return ArchetypeOp(home.op).contains(component);
+                            }))
+            return arith::ConstantIntOp::create(rewriter, loc, 0, 64);
           return emitLocate(
               rewriter, loc, layout, world, ancestor.id,
               [&](const WorldArchetype &home) {
@@ -2074,7 +2080,15 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                 rewriter, loc, world.toIndex(loc, state[0]), one);
             Value childId = world.ownerId(
                 loc, load(world.edgeIds(relation, /*source=*/true), child));
-            Value stamped = emitLocate(
+            Value stamped = llvm::none_of(
+                                layout.archetypes,
+                                [&](const WorldArchetype &home) {
+                                  return home.findStamp(stamp) != nullptr;
+                                })
+                                ? arith::ConstantIntOp::create(rewriter, loc,
+                                                               0, 64)
+                                      .getResult()
+                                : emitLocate(
                 rewriter, loc, layout, world, childId,
                 [&](const WorldArchetype &home) {
                   return home.findStamp(stamp) != nullptr;
@@ -2674,6 +2688,10 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
            function_ref<SmallVector<Value>()> missing,
            const LocateBounds &bounds, bool trusted, Value location) {
   const EntityScheme &scheme = layout.entities;
+  // No archetype is a candidate (a component no entity of the program
+  // has, say): the entity is nowhere to be found.
+  if (llvm::none_of(layout.archetypes, candidate))
+    return missing();
   // (`location`: the trusted entity's packed location, where the caller
   // has it and the entity table need not be asked.)
   auto whereAndRow = [&]() -> std::pair<Value, Value> {

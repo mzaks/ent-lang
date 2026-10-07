@@ -226,7 +226,8 @@ come with the compiler, in `devices/`, and two more that need
   `Window.fps`. `examples/bounce.ent` is a program with it:
   `tools/ent run examples/bounce.ent`; `examples/orrery.ent` has moons
   around planets around a sun, each placed from where the body it circles
-  is; `examples/layout_demo.ent` is a window of boxes inside boxes, drawn
+  is; `examples/layout_demo.ent` is a window of boxes inside boxes, with
+  labels the window measures and a note that floats at the mouse, drawn
   depth first (`top down dfs Inside`) and laid
   out by the library `examples/layout.ent` (fixed, fit and grow sizes in
   rows and columns, after Clay) in three reactive `for`s along a tree

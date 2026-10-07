@@ -6,7 +6,8 @@
 //   tools/ent run -I examples examples/layout_demo.ent
 //
 // Hold the left mouse button to drag the side bar's edge; hold Space to
-// put the cards below one another. Escape or closing the window ends the
+// put the cards below one another. A note floats at the mouse, over
+// everything else. Escape or closing the window ends the
 // program.
 import window
 import layout
@@ -14,7 +15,9 @@ import layout
 component Tint { color: i32 }
 tag SideBar
 tag Cards
-tag Footer
+// A box as wide as its label and so much more, which the window measures.
+component Fitted { around: f32 }
+tag Note
 default_capacity 256
 
 world {
@@ -50,17 +53,19 @@ world {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 34.0 },
       Size { w: Sizing.Grow, h: Sizing.Fixed },
       Stack { row: true, pad: 0.0, gap: 0.0 },
-      Tint { color: if i == 1 { 0x3a7bd5 } else { 0x2a3640 } }
+      Tint { color: if i == 1 { 0x3a7bd5 } else { 0x2a3640 } },
+      Label { text: "entry {i + 1}", size: 16.0, colour: 0xd0d8e0 }
     }
     connect (entry)-[Inside]->(side)
   }
 
-  // A header as high as its buttons need, the cards with the room that
-  // is left, a footer.
+  // A header with its buttons in the middle of its height, the cards
+  // with the room that is left, a footer.
   let header = spawn {
-    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
-    Size { w: Sizing.Grow, h: Sizing.Fit },
-    Stack { row: true, pad: 8.0, gap: 8.0 }, Tint { color: 0x1c242c }
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 56.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fixed },
+    Stack { row: true, pad: 8.0, gap: 8.0 }, Tint { color: 0x1c242c },
+    Align { across: Across.Middle }
   }
   let cards = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
@@ -72,20 +77,44 @@ world {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 28.0 },
     Size { w: Sizing.Grow, h: Sizing.Fixed },
     Stack { row: true, pad: 6.0, gap: 6.0 }, Tint { color: 0x1c242c },
-    Footer
+    Label { text: "drag: side bar   space: stack the cards", size: 14.0,
+            colour: 0x808890 }
   }
   connect (header)-[Inside]->(rest)
   connect (cards)-[Inside]->(rest)
   connect (footer)-[Inside]->(rest)
 
+  // Buttons as wide as what they say, and 12 more on either side.
   for i in 0..4 {
     let button = spawn {
-      Box { x: 0.0, y: 0.0, w: 70.0 + i as f32 * 12.0, h: 30.0 },
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 30.0 },
       Size { w: Sizing.Fixed, h: Sizing.Fixed },
-      Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x3a7bd5 }
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x3a7bd5 },
+      Label { text: if i == 0 { "open" } else if i == 1 { "save as" }
+                    else if i == 2 { "undo" } else { "preferences" },
+              size: 16.0, colour: 0xffffff },
+      Fitted { around: 12.0 }
     }
     connect (button)-[Inside]->(header)
   }
+
+  // A note that floats over the window, where the mouse is: as big as
+  // the line in it.
+  let note = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: true, pad: 4.0, gap: 0.0 }, Tint { color: 0xf0e0a0 },
+    Float { dx: 0.0, dy: 0.0 }, Note
+  }
+  let line = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 18.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0xf0e0a0 },
+    Label { text: "a note that floats", size: 14.0, colour: 0x202020 },
+    Fitted { around: 4.0 }
+  }
+  connect (note)-[Over]->(root)
+  connect (line)-[Inside]->(note)
 
   // Three cards share the width; in each, a picture with the height that
   // is left above three lines.
@@ -118,20 +147,40 @@ system interact() {
   for b: mut Box with SideBar where Mouse.left {
     b.w = max(80.0, min(Mouse.x - 12.0, 500.0))
   }
-  for k: mut Stack with Cards {
+  for k: mut Stack with Cards where k.row == Keys.space {
     k.row = !Keys.space
+  }
+  // The note, a little off the mouse.
+  for o: mut Float with Note
+      where o.dx != Mouse.x + 14.0 || o.dy != Mouse.y + 10.0 {
+    o.dx = Mouse.x + 14.0
+    o.dy = Mouse.y + 10.0
+  }
+  // A box that fits its label is as wide as the window draws that.
+  for b: mut Box, t: Label, f: Fitted on changed t, changed f {
+    let w = text_width(t.text, t.size) + 2.0 * f.around
+    if b.w != w { b.w = w }
   }
 }
 
 // A box is drawn after the one it is in, and so on top of it, and all that
-// is in a box before the next box: depth first.
+// is in a box before the next box: depth first. What floats is a layer
+// above, drawn after all of the layer below, with its labels.
 system draw() {
-  for b: Box, t: Tint top down dfs Inside {
+  for b: Box, t: Tint, l: Layer top down dfs Inside where l.z == 0 {
     rect(b.x, b.y, b.w, b.h, t.color)
   }
-  for b: Box with Footer {
-    label("drag: side bar   space: stack the cards", b.x + 8.0, b.y + 7.0,
-          14.0, 0x808890)
+  for b: Box, t: Label, f: Fitted, l: Layer where l.z == 0 {
+    label(t.text, b.x + f.around, b.y + (b.h - t.size) * 0.5, t.size, t.colour)
+  }
+  for b: Box, t: Label, l: Layer without Fitted where l.z == 0 {
+    label(t.text, b.x + 10.0, b.y + (b.h - t.size) * 0.5, t.size, t.colour)
+  }
+  for b: Box, t: Tint, l: Layer top down dfs Inside where l.z > 0 {
+    rect(b.x, b.y, b.w, b.h, t.color)
+  }
+  for b: Box, t: Label, f: Fitted, l: Layer where l.z > 0 {
+    label(t.text, b.x + f.around, b.y + (b.h - t.size) * 0.5, t.size, t.colour)
   }
 }
 

@@ -18,7 +18,8 @@ world {
   let side = spawn {
     Box { x: 0.0, y: 0.0, w: 200.0, h: 0.0 },
     Size { w: Sizing.Fixed, h: Sizing.Grow },
-    Stack { row: false, pad: 8.0, gap: 4.0 }, Name { name: "side" }
+    Stack { row: false, pad: 8.0, gap: 4.0 }, Name { name: "side" },
+    Align { across: Across.Middle }
   }
   let rest = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
@@ -68,8 +69,33 @@ world {
   }
   connect (left)-[Inside]->(body)
   connect (right)-[Inside]->(body)
+
+  // In the side bar, in the middle across it.
+  let item = spawn {
+    Box { x: 0.0, y: 0.0, w: 40.0, h: 20.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "item" }
+  }
+  connect (item)-[Inside]->(side)
+
+  let badge = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: true, pad: 3.0, gap: 0.0 }, Name { name: "badge" },
+    Float { dx: 4.0, dy: 2.0 }
+  }
+  let dot = spawn {
+    Box { x: 0.0, y: 0.0, w: 10.0, h: 8.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "dot" }
+  }
+  connect (badge)-[Over]->(header)
+  connect (dot)-[Inside]->(badge)
 }
 
+// A badge floats over the header, 4 in and 2 down from its corner, with
+// a dot inside it; and the side bar puts what is in it in the middle.
+//
 // In the second frame the side bar is narrower, in the third the body's
 // columns are below one another, and in the fourth the first button is
 // given a later slot than the second.
@@ -81,7 +107,9 @@ system change() {
 }
 
 system show() {
-  for b: Box, n: Name { put("{Frame}: {n.name} {b.x} {b.y} {b.w} {b.h}") }
+  for b: Box, n: Name, l: Layer {
+    put("{Frame}: {n.name} {b.x} {b.y} {b.w} {b.h} layer {l.z}")
+  }
   flush()
 }
 

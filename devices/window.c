@@ -72,6 +72,11 @@ void ent_window_label(const ent_text126 *text, float x, float y, float size,
   DrawText(line, (int)x, (int)y, (int)size, ent_window_color(color));
 }
 
+float ent_window_text_width(const ent_text126 *text, float size) {
+  ENT_WINDOW_TEXT(line, text);
+  return (float)MeasureText(line, (int)size);
+}
+
 void ent_window_screenshot(const ent_text126 *file) {
   ENT_WINDOW_TEXT(name, file);
   // What was drawn so far is still waiting to go to the picture.
