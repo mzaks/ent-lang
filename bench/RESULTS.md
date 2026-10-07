@@ -2770,3 +2770,29 @@ OMP_PROC_BIND=close`, not pinned), 5 processes:
   archetype has half of a depth, and fewer depths are worth a fork.
 - The deep tree goes by its list on one core (972 against 887: the
   other loop of the step being parallel).
+
+## 2026-10-07: an order asked for exactly
+
+`top down bfs R` and `top down dfs R` (and `bottom up`) give a `for` an
+exact order along a tree. A sorted or ordered tree is stored breadth
+first; any other exact order is worked out from the tree's list every
+time the `for` runs (how many are below each node, then a place for
+each), and the nodes are then found by their ids. The scene graph,
+placing every node (`bench/scene/run.py`, bushy, native, `taskset -c 2`,
+3 processes of 100 steps); all agree on the checksum.
+
+us per step, median (spread):
+
+| nodes | full | full-bfs | full-dfs | full-sorted | full-sorted-dfs |
+|---|---|---|---|---|---|
+| 1e4 | 3.3 (2%) | 41.3 (1%) | 21.4 (1%) | 2.3 (1%) | 24.0 (1%) |
+| 1e6 | 634.4 (5%) | 17,201.9 (4%) | 10,294.2 (4%) | 239.5 (2%) | 16,352.1 (2%) |
+
+- Depth first costs 6x the any-order walk at ten thousand nodes and 16x
+  at a million; breadth first over a tree that is not stored that way
+  12x and 27x (it is made from the depth-first order). Over a sorted
+  tree depth first is 68x at a million: its rows are by depth, and the
+  order jumps among them.
+- Most of it is working the order out, which is the same every step
+  here: the tree does not change. Keeping the order until it does is
+  not built.

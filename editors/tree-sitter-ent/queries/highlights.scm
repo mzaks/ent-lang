@@ -84,7 +84,7 @@
   "sorted" "ordered" "by"
   "reads" "writes" "let" "var" "mut" "spawn" "as"
   "with" "without" "any" "where" "on" "changed" "added" "removed" "log"
-  "cascade" "leaves" "first" "connect"
+  "top" "down" "bottom" "up" "bfs" "dfs" "connect"
   "run_if"
 ] @keyword
 

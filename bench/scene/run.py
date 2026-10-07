@@ -62,6 +62,10 @@ VARIANTS = {
     # writes: the tree's order is made again every step that moves one.
     "full-ordered": [(" tree capacity 1024",
                       " tree ordered by Local.x capacity 1024")],
+    # In an order that is asked for exactly, and worked out every step.
+    "full-bfs": [(PLAIN, "top down bfs Under {")],
+    "full-dfs": [(PLAIN, "top down dfs Under {")],
+    "full-sorted-dfs": [(PLAIN, "top down dfs Under {"), SORTED],
 }
 DEFAULT = ["full", "reactive", "full-sorted", "reactive-sorted"]
 

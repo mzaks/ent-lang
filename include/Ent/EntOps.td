@@ -475,6 +475,12 @@ def Ent_QueryOp : Ent_Op<"query", [
     the event of the ancestor that a `!ent.ref<@World, up @Under>` argument
     leads to, read from the ancestor's stamp, so that what the query wrote
     to an ancestor is an event for the entities below it in the same run.
+    `cascade @R bfs` and `cascade @R dfs` (also after `leaves first`) ask
+    for the order exactly: depth by depth, or an entity and then all that
+    is below it (`leaves first`: all that is below it, then the entity).
+    Where that is not how the tree is stored it is worked out from the
+    tree when the query runs.
+
     `changed @C before @R` is the same for the sibling a ref `before @R`
     leads to (and fires where the entity has another sibling before it
     than it had), and `changed @C down @R`, in a query cascading `leaves

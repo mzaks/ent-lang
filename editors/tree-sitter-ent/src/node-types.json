@@ -3715,7 +3715,15 @@
     "named": false
   },
   {
+    "type": "bfs",
+    "named": false
+  },
+  {
     "type": "bool",
+    "named": false
+  },
+  {
+    "type": "bottom",
     "named": false
   },
   {
@@ -3724,10 +3732,6 @@
   },
   {
     "type": "capacity",
-    "named": false
-  },
-  {
-    "type": "cascade",
     "named": false
   },
   {
@@ -3753,6 +3757,14 @@
   },
   {
     "type": "default_capacity",
+    "named": false
+  },
+  {
+    "type": "dfs",
+    "named": false
+  },
+  {
+    "type": "down",
     "named": false
   },
   {
@@ -3785,10 +3797,6 @@
   },
   {
     "type": "false",
-    "named": false
-  },
-  {
-    "type": "first",
     "named": false
   },
   {
@@ -3846,10 +3854,6 @@
   {
     "type": "integer",
     "named": true
-  },
-  {
-    "type": "leaves",
-    "named": false
   },
   {
     "type": "let",
@@ -3940,6 +3944,10 @@
     "named": false
   },
   {
+    "type": "top",
+    "named": false
+  },
+  {
     "type": "tree",
     "named": false
   },
@@ -3953,6 +3961,10 @@
   },
   {
     "type": "until",
+    "named": false
+  },
+  {
+    "type": "up",
     "named": false
   },
   {

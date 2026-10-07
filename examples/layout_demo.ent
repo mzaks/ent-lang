@@ -123,9 +123,10 @@ system interact() {
   }
 }
 
-// A box is drawn after the one it is in, and so on top of it.
+// A box is drawn after the one it is in, and so on top of it, and all that
+// is in a box before the next box: depth first.
 system draw() {
-  for b: Box, t: Tint top down Inside {
+  for b: Box, t: Tint top down dfs Inside {
     rect(b.x, b.y, b.w, b.h, t.color)
   }
   for b: Box with Footer {

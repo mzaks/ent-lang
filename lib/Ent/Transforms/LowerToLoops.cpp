@@ -585,6 +585,18 @@ public:
     return view(relation.sequenceOffset, layout.entityKeys + 1,
                 rewriter.getI64Type());
   }
+  /// An order worked out for a query: the entities' ids, or their
+  /// parents', and the two numbers per entity key it is worked out with.
+  Value walkOrder(const WorldRelation &relation, bool parents) {
+    return view(parents ? relation.walkParentsOffset
+                        : relation.walkOrderOffset,
+                relation.walkCapacity(), idType());
+  }
+  Value walkNumbers(const WorldRelation &relation, bool cursors) {
+    return view(cursors ? relation.walkCursorsOffset
+                        : relation.walkSizesOffset,
+                layout.entityKeys + 1, rewriter.getI64Type());
+  }
   /// Per entity key, the tick at which the entity last got another
   /// sibling before it, and the sibling it had before the tree's order
   /// was last made.
@@ -6611,14 +6623,245 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     hoistResourceReads(rewriter, loops, world);
   }
   };
-  if (!leavesFirst)
+  // An order asked for exactly, where it is not the one the tree is
+  // stored in: worked out from the tree's list, which has every entity
+  // with a parent after that parent, into a list of its own.
+  StringRef traversal = query.getTraversal();
+  bool inOrder = relation.walksInOrder(traversal);
+  bool depthFirst = traversal == "dfs";
+  if (!leavesFirst && !(inOrder && depthFirst))
     emitRoots();
   else
     matched = llvm::any_of(layout.archetypes,
                            [&](const WorldArchetype &archetype) {
                              return matches(archetype, query);
                            });
-  if (matched && sorted) {
+  if (matched && inOrder) {
+    rewriter.setInsertionPoint(query);
+    LinkedTree tree(rewriter, loc, world, relation);
+    Value zero = tree.zero, one = tree.one;
+    Type index = rewriter.getIndexType();
+    Value keys =
+        arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys + 1);
+    Value list = world.treeOrder(relation);
+    Value listParents = world.treeOrderParents(relation);
+    Value listed = world.toIndex(loc, tree.listed());
+    Value out = world.walkOrder(relation, /*parents=*/false);
+    Value outParents = world.walkOrder(relation, /*parents=*/true);
+    Value sizes = world.walkNumbers(relation, /*cursors=*/false);
+    Value cursors = world.walkNumbers(relation, /*cursors=*/true);
+    Value none = world.noEntity(loc);
+    auto add = [&](Value a, Value b) -> Value {
+      return arith::AddIOp::create(rewriter, loc, a, b);
+    };
+    auto asIndex = [&](Value number) -> Value {
+      return arith::IndexCastOp::create(rewriter, loc, index, number);
+    };
+    // (An element of a linked tree's list may be empty.)
+    auto forListed = [&](bool backwards,
+                         function_ref<void(Value id, Value parent)> each) {
+      tree.forEach(zero, listed, [&](Value k) {
+        Value at = backwards
+                       ? arith::SubIOp::create(
+                             rewriter, loc,
+                             arith::SubIOp::create(rewriter, loc, listed, one),
+                             k)
+                             .getResult()
+                       : k;
+        Value id = tree.load(list, at);
+        tree.branch(tree.negate(tree.same(id, none)),
+                    [&] { each(id, tree.load(listParents, at)); });
+      });
+    };
+    Value count;
+    // (Breadth first is made from the order with parents first.)
+    bool after = leavesFirst && depthFirst;
+    {
+      // How many are below each entity, itself counted (one without a
+      // parent is not in the list and not counted): from the list's end,
+      // where an entity's children have been before it is come to.
+      tree.forEach(zero, keys, [&](Value key) {
+        tree.store(tree.i64(0), sizes, key);
+        tree.store(tree.i64(-1), cursors, key);
+      });
+      forListed(/*backwards=*/true, [&](Value id, Value parent) {
+        Value key = world.entityKey(loc, id);
+        Value size = add(tree.load(sizes, key), tree.i64(1));
+        tree.store(size, sizes, key);
+        Value parentKey = world.entityKey(loc, parent);
+        tree.store(add(tree.load(sizes, parentKey), size), sizes, parentKey);
+      });
+      // Then every entity gets its place: all below one are next to each
+      // other, after it (parents first) or before it, and an entity's
+      // cursor is where the next of its children goes. One without a
+      // parent is given room, and its place, when its first child comes.
+      Value total = world.walkNumbers(relation, /*cursors=*/true);
+      Value totalAt =
+          arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys);
+      tree.store(tree.i64(0), total, totalAt);
+      auto place = [&](Value id, Value parent, Value at) {
+        tree.store(id, out, asIndex(at));
+        tree.store(parent, outParents, asIndex(at));
+      };
+      forListed(/*backwards=*/false, [&](Value id, Value parent) {
+        Value key = world.entityKey(loc, id);
+        Value parentKey = world.entityKey(loc, parent);
+        tree.branch(tree.same(tree.load(cursors, parentKey), tree.i64(-1)),
+                    [&] {
+          Value base = tree.load(total, totalAt);
+          Value below = tree.load(sizes, parentKey);
+          tree.store(add(base, add(below, tree.i64(1))), total, totalAt);
+          if (after) {
+            tree.store(base, cursors, parentKey);
+            place(parent, none, add(base, below));
+          } else {
+            tree.store(add(base, tree.i64(1)), cursors, parentKey);
+            place(parent, none, base);
+          }
+        });
+        Value start = tree.load(cursors, parentKey);
+        Value size = tree.load(sizes, key);
+        tree.store(add(start, size), cursors, parentKey);
+        if (after) {
+          tree.store(start, cursors, key);
+          place(id, parent, add(start, add(size, tree.i64(-1))));
+        } else {
+          tree.store(add(start, tree.i64(1)), cursors, key);
+          place(id, parent, start);
+        }
+      });
+      count = asIndex(tree.load(total, totalAt));
+    }
+    // Breadth first: the order above, parents first, taken depth by
+    // depth. An entity's depth is its parent's and one (an entity without
+    // a parent has none: 0, and is not in this order); how many there are
+    // of each says where each depth starts, and the entities go there in
+    // the order they have, so that the children of one are next to each
+    // other and in their order.
+    Value from = zero;
+    if (!depthFirst) {
+      Value all = count;
+      from = arith::ConstantIndexOp::create(rewriter, loc,
+                                            2 * relation.capacity);
+      tree.forEach(zero, keys, [&](Value key) {
+        tree.store(tree.i64(0), sizes, key);
+        tree.store(tree.i64(0), cursors, key);
+      });
+      forListed(/*backwards=*/false, [&](Value id, Value parent) {
+        Value depth = add(tree.load(sizes, world.entityKey(loc, parent)),
+                          tree.i64(1));
+        tree.store(depth, sizes, world.entityKey(loc, id));
+        Value at = asIndex(depth);
+        tree.store(add(tree.load(cursors, at), tree.i64(1)), cursors, at);
+      });
+      auto starts = scf::ForOp::create(rewriter, loc, zero, keys, one,
+                                       ValueRange{tree.i64(0)});
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(starts.getBody());
+        Value depth = starts.getInductionVar();
+        Value start = starts.getRegionIterArg(0);
+        Value number = tree.load(cursors, depth);
+        tree.store(start, cursors, depth);
+        scf::YieldOp::create(rewriter, loc, ValueRange{add(start, number)});
+      }
+      tree.forEach(zero, all, [&](Value k) {
+        Value id = tree.load(out, k);
+        Value parent = tree.load(outParents, k);
+        tree.branch(tree.negate(tree.same(parent, none)), [&] {
+          Value depth = asIndex(tree.load(sizes, world.entityKey(loc, id)));
+          Value at = tree.load(cursors, depth);
+          tree.store(add(at, tree.i64(1)), cursors, depth);
+          Value to = arith::AddIOp::create(rewriter, loc, from, asIndex(at));
+          tree.store(id, out, to);
+          tree.store(parent, outParents, to);
+        });
+      });
+      count = asIndex(starts.getResult(0));
+    }
+    // Depth first, an entity without a parent is in the order if it has
+    // children, with them; one without is visited here, before the
+    // others or (children first) after them.
+    auto visitAlone = [&] {
+      if (!depthFirst || !visitsRoots)
+        return;
+      for (const WorldArchetype &archetype : layout.archetypes) {
+        if (!matches(archetype, query))
+          continue;
+        Operation *loops = emitEntityLoops(
+            rewriter, loc, archetype, world, sequential,
+            /*entityLocal=*/false,
+            [&](Value entity, Value rows, bool) {
+              Value id = world.entityId(loc, archetype, entity);
+              Value hasParent =
+                  emitParent(rewriter, loc, layout, world, relation, id).first;
+              Value alone = tree.both(
+                  tree.negate(hasParent),
+                  tree.same(tree.load(sizes, world.entityKey(loc, id)),
+                            tree.i64(0)));
+              auto ifAlone = scf::IfOp::create(rewriter, loc, alone);
+              rewriter.setInsertionPointToStart(ifAlone.thenBlock());
+              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                            layout, entity, rows, tick, seen,
+                            /*parallel=*/false, /*directApplies=*/true,
+                            KnownParent(), marks);
+            },
+            startCounts.lookup(&archetype));
+        hoistResourceReads(rewriter, loops, world);
+      }
+    };
+    if (!leavesFirst)
+      visitAlone();
+    // (Breadth first, children first: the order from its end.)
+    bool backwards = leavesFirst && !depthFirst;
+    auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      Value at = loop.getInductionVar();
+      if (backwards)
+        at = arith::SubIOp::create(
+            rewriter, loc, arith::SubIOp::create(rewriter, loc, count, one),
+            at);
+      at = arith::AddIOp::create(rewriter, loc, from, at);
+      Value id = tree.load(out, at);
+      Value parent = tree.load(outParents, at);
+      Value isRoot = tree.same(parent, none);
+      emitLocate(
+          rewriter, loc, layout, world, id,
+          [&](const WorldArchetype &archetype) {
+            return matches(archetype, query);
+          },
+          FlatSymbolRefAttr(), TypeRange{},
+          [&](const WorldArchetype &archetype, Value row,
+              Value) -> SmallVector<Value> {
+            OpBuilder::InsertionGuard inner(rewriter);
+            auto body = [&](KnownParent known) {
+              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                            layout, row, world.count(loc, archetype), tick,
+                            seen, /*parallel=*/false, /*directApplies=*/true,
+                            known, marks);
+            };
+            auto branch = scf::IfOp::create(rewriter, loc, isRoot,
+                                            /*withElseRegion=*/true);
+            if (depthFirst && visitsRoots) {
+              rewriter.setInsertionPointToStart(branch.thenBlock());
+              body(KnownParent());
+            }
+            rewriter.setInsertionPointToStart(branch.elseBlock());
+            body(KnownParent{&relation, parent});
+            return {};
+          },
+          []() -> SmallVector<Value> { return {}; });
+    }
+    hoistResourceReads(rewriter, loop, world);
+    rewriter.setInsertionPoint(query);
+    if (leavesFirst) {
+      visitAlone();
+      if (!depthFirst)
+        emitRoots();
+    }
+  } else if (matched && sorted) {
     // Every entity with a parent is in the sorted archetype: its rows
     // after those without one, up or down, each with its parent's row.
     if (matches(*sorted, query)) {

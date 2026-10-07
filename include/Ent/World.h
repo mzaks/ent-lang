@@ -285,6 +285,24 @@ struct WorldRelation {
   /// and after those the tick of the latest connect of any entity, by
   /// which a query knows whether to look at them at all.
   uint64_t connectedOffset = 0;
+  /// For a tree some query goes through in an order it works out (`dfs`,
+  /// or `bfs` where the tree's list is not by depth): the entities in
+  /// that order and next to each its parent (ids; no parent for an entity
+  /// without one), four for every edge the tree may have (depth first
+  /// takes two, with the entities without a parent; breadth first is made
+  /// from that in the other two), and per entity key two numbers to work
+  /// it out with (i64).
+  uint64_t walkOrderOffset = 0;
+  uint64_t walkParentsOffset = 0;
+  uint64_t walkSizesOffset = 0;
+  uint64_t walkCursorsOffset = 0;
+  int64_t walkCapacity() const { return 4 * capacity; }
+  /// Whether a query in the order `traversal` works the order out, rather
+  /// than going through the tree as it is stored.
+  bool walksInOrder(StringRef traversal) const {
+    return traversal == "dfs" ||
+           (traversal == "bfs" && linked && !isOrdered());
+  }
   /// For a tree sorted in several archetypes: next to each entity of the
   /// list where its row is and where its parent's is (packed locations),
   /// as the sort left them, for going through a deep tree by its list.

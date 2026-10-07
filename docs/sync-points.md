@@ -226,6 +226,15 @@ had. A trigger `down @R` (children first) is the event of any child of the
 entity, in the same open window, and of the entity gaining or losing a
 child.
 
+**Q11.** A cascading query with a traversal (`cascade @R bfs`, `dfs`) visits
+in exactly that order, whichever way the tree is stored: `bfs` by depth,
+the entities without a parent first, and within a depth the children of
+one entity together, parents in the order they were visited; `dfs` an
+entity and then everything below it, child by child. `leaves first` is
+the `bfs` order from its end, and for `dfs` everything below an entity
+and then the entity. Without a traversal the order within those
+constraints is the storage's (Q9).
+
 **R4.** An event log never loses an event unnoticed. Entries a reader has
 not read are not written over; an event that finds its log full is lost to
 every reader of the log, each of which visits every entity on its next run

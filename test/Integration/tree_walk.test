@@ -1,0 +1,74 @@
+// The orders a `for` goes through a tree in (Inputs/tree_walk.ent):
+// `top down bfs` depth by depth and `bottom up bfs` the same from its
+// end; `top down dfs` a node and then all below it, `bottom up dfs` all
+// below a node and then the node. The same lines whether the tree is as
+// it is, `sorted`, `ordered` or both: the order is the tree's, not its
+// storage's.
+// RUN: %ent run %S/Inputs/tree_walk.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tree_walk.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/ tree capacity 16/ tree sorted capacity 16/' \
+// RUN:     %S/Inputs/tree_walk.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted" %t.sorted.ent
+// RUN: %ent run %t.sorted.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/ tree capacity 16/ tree ordered by Node.at capacity 16/' \
+// RUN:     %S/Inputs/tree_walk.ent > %t.ordered.ent
+// RUN: grep -q "tree ordered" %t.ordered.ent
+// RUN: %ent run %t.ordered.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/ tree capacity 16/ tree sorted ordered by Node.at capacity 16/' \
+// RUN:     %S/Inputs/tree_walk.ent > %t.both.ent
+// RUN: grep -q "tree sorted ordered" %t.both.ent
+// RUN: %ent run %t.both.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+//   root -- a -- a1 -- a11        lone
+//       |     `- a2
+//       `- b -- b1
+// The nodes without a parent first, then depth by depth, the children
+// of one node next to each other.
+// CHECK:      top down bfs
+// CHECK-NEXT:   root
+// CHECK-NEXT:   lone
+// CHECK-NEXT:   a
+// CHECK-NEXT:   b
+// CHECK-NEXT:   a1
+// CHECK-NEXT:   a2
+// CHECK-NEXT:   b1
+// CHECK-NEXT:   a11
+// The same from its end.
+// CHECK-NEXT: bottom up bfs
+// CHECK-NEXT:   a11
+// CHECK-NEXT:   b1
+// CHECK-NEXT:   a2
+// CHECK-NEXT:   a1
+// CHECK-NEXT:   b
+// CHECK-NEXT:   a
+// CHECK-NEXT:   root
+// CHECK-NEXT:   lone
+// A node, then all below it; the node that is alone first.
+// CHECK-NEXT: top down dfs
+// CHECK-NEXT:   lone
+// CHECK-NEXT:   root
+// CHECK-NEXT:   a
+// CHECK-NEXT:   a1
+// CHECK-NEXT:   a11
+// CHECK-NEXT:   a2
+// CHECK-NEXT:   b
+// CHECK-NEXT:   b1
+// All below a node, then the node.
+// CHECK-NEXT: bottom up dfs
+// CHECK-NEXT:   a11
+// CHECK-NEXT:   a1
+// CHECK-NEXT:   a2
+// CHECK-NEXT:   a
+// CHECK-NEXT:   b1
+// CHECK-NEXT:   b
+// CHECK-NEXT:   root
+// CHECK-NEXT:   lone
+// CHECK-NEXT: top down dfs, below another
+// CHECK-NEXT:   a below root
+// CHECK-NEXT:   a1 below a
+// CHECK-NEXT:   a11 below a1
+// CHECK-NEXT:   a2 below a
+// CHECK-NEXT:   b below root
+// CHECK-NEXT:   b1 below b
+// CHECK-NOT:  {{.}}

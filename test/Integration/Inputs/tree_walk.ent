@@ -1,0 +1,47 @@
+// The orders a `for` can go through a tree in (tree_walk.test): breadth
+// first and depth first, from the top down and from the bottom up.
+//
+//   root -- a -- a1 -- a11        lone
+//       |     `- a2
+//       `- b -- b1
+import console
+
+component Node { name: text[8], at: i32 }
+default_capacity 16
+relation (Node)-[Under]->(Node) tree capacity 16
+
+world {
+  let root = spawn { Node { name: "root", at: 0 } }
+  let a = spawn { Node { name: "a", at: 0 } }
+  let b = spawn { Node { name: "b", at: 0 } }
+  let a1 = spawn { Node { name: "a1", at: 0 } }
+  let a2 = spawn { Node { name: "a2", at: 0 } }
+  let b1 = spawn { Node { name: "b1", at: 0 } }
+  let a11 = spawn { Node { name: "a11", at: 0 } }
+  spawn { Node { name: "lone", at: 0 } }
+  // Not in the order of the tree: b1 and a11 before their parents.
+  connect (b1)-[Under]->(b)
+  connect (a11)-[Under]->(a1)
+  connect (a)-[Under]->(root)<-[Under]-(b)
+  connect (a1)-[Under]->(a)<-[Under]-(a2)
+}
+
+system walk() {
+  put("top down bfs")
+  for n: Node top down bfs Under { put("  {n.name}") }
+  put("bottom up bfs")
+  for n: Node bottom up bfs Under { put("  {n.name}") }
+  put("top down dfs")
+  for n: Node top down dfs Under { put("  {n.name}") }
+  put("bottom up dfs")
+  for n: Node bottom up dfs Under { put("  {n.name}") }
+  // With an arrow up the tree, no node without a parent.
+  put("top down dfs, below another")
+  for (n: Node)-[Under]->(above: Node) top down dfs Under {
+    put("  {n.name} below {above.name}")
+  }
+  flush()
+}
+
+schedule once() { walk() }
+main { once() }

@@ -221,9 +221,11 @@ module.exports = grammar({
     with: ($) => seq('with', list(choice($._name, $.any))),
     any: ($) => seq('any', '(', list($._name), ')'),
     without: ($) => seq('without', list($._name)),
+    // top down R, bottom up R: along a tree; with bfs or dfs, in exactly
+    // that order.
     cascade: ($) =>
-      seq('cascade', field('along', $._name),
-          optional(seq('leaves', 'first'))),
+      seq(choice(seq('top', 'down'), seq('bottom', 'up')),
+          optional(choice('bfs', 'dfs')), field('along', $._name)),
     where: ($) => seq('where', $._expression),
     on: ($) => seq('on', list($.trigger)),
     // changed Component.field, changed binding.field, and of a child:

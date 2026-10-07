@@ -94,6 +94,10 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
     return false;
   FlatSymbolRefAttr cascade = query.getCascade();
   const WorldRelation &tree = getRelation(cascade.getAttr());
+  // (An order that is asked for exactly is not the order events are
+  // followed in.)
+  if (!query.getTraversal().empty())
+    return false;
   // (A tree in several archetypes whose children are in an order is gone
   // through by its list, not depth by depth.)
   if (tree.sortedArchetypes.size() > 1 && tree.isOrdered())
@@ -580,6 +584,27 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       layout.zeroed.push_back(
           {relation.connectedOffset, uint64_t(8 * (layout.entityKeys + 1))});
     }
+  // Room to work an order out in, for a tree some query asks one of.
+  for (WorldRelation &relation : layout.relations) {
+    bool asked = false;
+    module.walk([&](QueryOp query) {
+      asked |= query.getCascade() &&
+               query.getCascade().getAttr() ==
+                   RelationOp(relation.op).getSymNameAttr() &&
+               relation.walksInOrder(query.getTraversal());
+    });
+    if (!asked)
+      continue;
+    uint64_t idBytes = scheme.idBits / 8;
+    relation.walkOrderOffset = llvm::alignTo(end, kColumnAlignment);
+    end = relation.walkOrderOffset + idBytes * relation.walkCapacity();
+    relation.walkParentsOffset = llvm::alignTo(end, kColumnAlignment);
+    end = relation.walkParentsOffset + idBytes * relation.walkCapacity();
+    relation.walkSizesOffset = llvm::alignTo(end, kColumnAlignment);
+    end = relation.walkSizesOffset + 8 * (layout.entityKeys + 1);
+    relation.walkCursorsOffset = llvm::alignTo(end, kColumnAlignment);
+    end = relation.walkCursorsOffset + 8 * (layout.entityKeys + 1);
+  }
   // When each entity's children last changed, for a tree some trigger is
   // down.
   for (WorldRelation &relation : layout.relations) {
