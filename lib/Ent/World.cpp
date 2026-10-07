@@ -125,12 +125,18 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
   if (!tree.linked &&
       refs([](RefType ref) { return ref.getHops() != 1 || ref.hasPath(); }))
     return false;
-  // (What an entity adds into its parent, the parent, which comes after
-  // it, would have to hear of.)
+  // (What an entity adds into its parent is an event for the parent,
+  // which comes after it: the parent itself must be what it adds into.)
   if (leavesFirst) {
-    bool sends = false;
-    query.getBody().walk([&](CombineOp) { sends = true; });
-    if (sends)
+    bool further = false;
+    query.getBody().walk([&](CombineOp combine) {
+      auto ref = cast<RefType>(combine.getRef().getType());
+      further |= ref.getVia() != cascade || ref.getHops() != 1 ||
+                 ref.hasPath() ||
+                 (!ref.getIsDirect() &&
+                  tree.getTrusted(/*target=*/true) != ref.getComponent());
+    });
+    if (further)
       return false;
   }
   for (const Trigger &trigger : triggers) {

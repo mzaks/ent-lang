@@ -8055,6 +8055,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     // by its row.
     bool follows = layout.cascadeFollowsEvents(query);
     bool toRoots = layout.cascadeFollowsToRoots(query);
+    bool addsUp = false;
+    query.getBody().walk([&](CombineOp) { addsUp = true; });
     auto markEntity = [&](Value id) {
       Value link = tree.load(tree.position(), world.entityKey(loc, id));
       tree.branch(
@@ -8194,6 +8196,35 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                             layout, row, world.count(loc, archetype), tick, seen,
                             /*parallel=*/false, /*directApplies=*/true, parent,
                             marks);
+            }
+            // What the body added into the parent is an event of the
+            // parent's, which comes later: for itself, or for the one it
+            // is under in turn, which it passes it on to when it is come
+            // to.
+            if (leavesFirst && addsUp) {
+              auto holds = [&](const WorldArchetype &home) {
+                return llvm::any_of(triggers, [&](const Trigger &trigger) {
+                  return home.findStamp(getStamp(trigger)) != nullptr;
+                });
+              };
+              Value got = emitLocate(
+                  rewriter, loc, layout, world, parent.id, holds,
+                  FlatSymbolRefAttr(), TypeRange{rewriter.getI1Type()},
+                  [&](const WorldArchetype &home, Value at,
+                      Value) -> SmallVector<Value> {
+                    Value any = tree.i1(false);
+                    for (const Trigger &trigger : triggers)
+                      if (const WorldColumn *column =
+                              home.findStamp(getStamp(trigger)))
+                        any = arith::OrIOp::create(
+                            rewriter, loc, any,
+                            tree.same(tree.load(world.stamps(home, *column),
+                                                at),
+                                      tick));
+                    return {any};
+                  },
+                  [&]() -> SmallVector<Value> { return {tree.i1(false)}; })[0];
+              tree.branch(got, [&] { markEntity(parent.id); });
             }
             // (And for the sibling after, where a trigger is before the
             // tree, and for the parent, which comes later from the leaves,
@@ -9284,7 +9315,7 @@ static std::string describe(const Trigger &trigger) {
 static void warnAboutReactiveQueries(ModuleOp module) {
   SmallVector<Operation *> causers;
   module.walk([&](Operation *op) {
-    if (isa<SetOp, ApplyOp, AddOp, RemoveOp>(op))
+    if (isa<SetOp, ApplyOp, CombineOp, AddOp, RemoveOp>(op))
       causers.push_back(op);
   });
   module.walk([&](QueryOp query) {
@@ -9310,11 +9341,14 @@ static void warnAboutReactiveQueries(ModuleOp module) {
                  "entities spawned with it or gaining it";
       }
       // (An ancestor's event that the query causes where it visits the
-      // ancestor is what a trigger up a tree is for.)
+      // ancestor is what a trigger up a tree is for; and what it adds
+      // into an ancestor from the leaves, that one takes in when the
+      // query comes to it.)
       Operation *own = nullptr;
       if (!trigger.via)
         query.getBody().walk([&](Operation *op) {
-          if (!own && causes(op, trigger))
+          if (!own && causes(op, trigger) &&
+              !(isa<CombineOp>(op) && query.getCascade()))
             own = op;
         });
       if (own) {

@@ -2,7 +2,9 @@
 // links: from a node with an event up to its parent (a trigger on a
 // child's, from the leaves), down to its children, and on to the sibling
 // after it (a trigger on the sibling before's), each passing on what its
-// body changed; the nodes without a parent are come to by their rows.
+// body changed (or added into its parent); the nodes without a parent
+// are come to by their rows, and a node that has other children or
+// siblings than before is come to itself.
 // Inputs/tree_follow.ent works a wide tree out that way and, without
 // triggers, by going through all of it, in every frame of forty in which
 // sizes change, the order of siblings, a leaf goes and a node moves with
