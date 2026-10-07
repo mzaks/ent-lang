@@ -89,7 +89,8 @@ struct WorldArchetype {
   /// events down it (see WorldLayout::cascadeFollowsEvents): per row its
   /// children's rows in each of the tree's archetypes, in their order
   /// (begin and end, i32; both 0 for none), and a mark per row (a bit, in
-  /// i64 words; all 0 between queries).
+  /// i64 words; all 0 between queries). The children's rows also where a
+  /// query adds into ancestors along the tree, for its parallel form.
   SmallVector<std::pair<uint64_t, uint64_t>, 2> childRangeOffsets;
   uint64_t marksOffset = 0;
   int64_t markWords() const { return (capacity + 63) / 64; }

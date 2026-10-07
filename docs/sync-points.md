@@ -133,7 +133,10 @@ the order a query with a `proc` visits entities in) therefore follows the
 tree; ids, and everything read through them, do not change. A cascading
 query over a sorted tree in several archetypes visits the entities of one
 depth by archetype, then by row; the order within a depth is fixed, and
-another than the unsorted tree's.
+another than the unsorted tree's. (A deep tree, with fewer than 64 entities
+a depth, is visited in the order of the tree's list instead, unless the
+query is reactive: also fixed for a given tree, and another within a
+depth.)
 
 ## The commit point: the end of a query
 

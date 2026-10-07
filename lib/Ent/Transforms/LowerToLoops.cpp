@@ -6177,7 +6177,9 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       held += archetype->capacity;
     bool levelsInParallel =
         options.parallelEntities && isDepthLocal(query) && !marks &&
-        triggers.empty() && connects.empty() && !sends &&
+        triggers.empty() && connects.empty() &&
+        !(sends && (world.hasStamps() ||
+                    levelled.front()->childRangeOffsets.empty())) &&
         held >= options.parallelMinEntities;
     auto walkDepths = [&] {
       auto levels = scf::ForOp::create(rewriter, loc, zero, depths, one);
@@ -6216,7 +6218,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                           layout, row, world.count(loc, *archetype), tick, seen,
                           parallel, /*directApplies=*/true, parent, marks);
           };
-          auto oneAfterAnother = [&] {
+          auto rowsInOrder = [&](Value from, Value to, bool parallel) {
             auto rows = scf::ForOp::create(
                 rewriter, loc, zero,
                 arith::SubIOp::create(rewriter, loc, to, from), one);
@@ -6231,12 +6233,16 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                       : arith::AddIOp::create(rewriter, loc, from,
                                               rows.getInductionVar())
                             .getResult(),
-                  /*parallel=*/false);
+                  parallel);
+          };
+          auto oneAfterAnother = [&] {
+            rowsInOrder(from, to, /*parallel=*/false);
           };
           // The rows an archetype has of one depth do not depend on each
           // other, nor on those the other archetypes have of it: in
           // parallel where there are parallel-min-level of them, the body
-          // only reads and writes its entity and reads its ancestors, and
+          // only reads and writes its entity and reads or adds into its
+          // ancestors, and
           // the archetype can be large enough.
           if (!levelsInParallel || archetype->capacity < options.parallelMinLevel) {
             oneAfterAnother();
@@ -6252,10 +6258,82 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           rewriter.setInsertionPointToStart(perDepth.elseBlock());
           oneAfterAnother();
           rewriter.setInsertionPointToStart(perDepth.thenBlock());
-          auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{from},
-                                              ValueRange{to}, ValueRange{one});
+          if (!sends) {
+            auto each = scf::ParallelOp::create(rewriter, loc,
+                                                ValueRange{from},
+                                                ValueRange{to},
+                                                ValueRange{one});
+            rewriter.setInsertionPoint(each.getBody()->getTerminator());
+            visit(each.getInductionVars().front(), /*parallel=*/true);
+            continue;
+          }
+          // What entities send to their parent is added up per parent, in
+          // the order they are visited. The archetypes take their turns
+          // as ever, and one archetype's rows of the depth are cut into
+          // pieces at rows where a parent's children begin (they are next
+          // to each other), which run in parallel, each its rows in order:
+          // a parent gets what it gets from one thread at a time and in
+          // the order it always does, so the sums are the same to the bit.
+          unsigned holder =
+              llvm::find(levelled, archetype) - levelled.begin();
+          Value pieces = arith::ConstantIndexOp::create(rewriter, loc, 64);
+          Value number = arith::SubIOp::create(rewriter, loc, to, from);
+          Value last = arith::SubIOp::create(rewriter, loc, to, one);
+          auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                              ValueRange{pieces},
+                                              ValueRange{one});
           rewriter.setInsertionPoint(each.getBody()->getTerminator());
-          visit(each.getInductionVars().front(), /*parallel=*/true);
+          Value piece = each.getInductionVars().front();
+          auto beginOf = [&](Value index) -> Value {
+            Value share = arith::AddIOp::create(
+                rewriter, loc, from,
+                arith::DivUIOp::create(
+                    rewriter, loc,
+                    arith::MulIOp::create(rewriter, loc, index, number),
+                    pieces));
+            Value row = arith::MinUIOp::create(rewriter, loc, share, last);
+            auto [where, parentRow] = world.unpackLocation(
+                loc, memref::LoadOp::create(rewriter, loc,
+                                            world.parentLocations(*archetype),
+                                            ValueRange{row}));
+            // The first of the row's siblings here, which its parent has,
+            // wherever that is.
+            Value begin = row;
+            for (const WorldArchetype *home : levelled) {
+              auto ifThere = scf::IfOp::create(
+                  rewriter, loc, TypeRange{rewriter.getIndexType()},
+                  arith::CmpIOp::create(
+                      rewriter, loc, arith::CmpIPredicate::eq, where,
+                      arith::ConstantIntOp::create(
+                          rewriter, loc, home->index,
+                          layout.entities.locationBits)),
+                  /*withElseRegion=*/true);
+              OpBuilder::InsertionGuard inner(rewriter);
+              rewriter.setInsertionPointToStart(ifThere.thenBlock());
+              scf::YieldOp::create(
+                  rewriter, loc,
+                  ValueRange{world.toIndex(
+                      loc,
+                      memref::LoadOp::create(
+                          rewriter, loc,
+                          world.childRange(*home, holder, /*begin=*/true),
+                          ValueRange{parentRow}))});
+              rewriter.setInsertionPointToStart(ifThere.elseBlock());
+              scf::YieldOp::create(rewriter, loc, ValueRange{begin});
+              begin = ifThere.getResult(0);
+            }
+            Value isFirst = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::eq, index, zero);
+            Value isPast = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::eq, index, pieces);
+            return arith::SelectOp::create(
+                rewriter, loc, isFirst, from,
+                arith::SelectOp::create(rewriter, loc, isPast, to, begin));
+          };
+          Value begin = beginOf(piece);
+          Value end =
+              beginOf(arith::AddIOp::create(rewriter, loc, piece, one));
+          rowsInOrder(begin, end, /*parallel=*/true);
         }
       }
       hoistResourceReads(rewriter, levels, world);

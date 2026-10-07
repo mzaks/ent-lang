@@ -407,7 +407,7 @@ other entities), the archetype has room for a million entities and the
 depth holds 32,768 or more. The result is the same to the bit: what
 children send to a parent is still added in their order. Over a `sorted`
 tree in several archetypes the same holds for each archetype's entities
-of a depth, unless the body adds into an ancestor.
+of a depth.
 
 ## Statements
 

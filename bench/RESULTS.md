@@ -2692,3 +2692,81 @@ rows in each, gone through depth by depth):
   through every row, as it did, at the full query's time or more.
 - Not measured: the parallel form with a body of more than an add; a
   tree in more than two archetypes.
+
+## 2026-10-07: three more on reactive and sorted trees
+
+1e6 nodes, native; one core (`taskset -c 2`) unless said; us per step,
+medians of 3 processes (5 for the river).
+
+### Where a reactive query's time goes when most of a tree changes
+
+`bench/scene/run.py`, deep tree, 1000 moves a step (every pass goes
+through the whole list and places most nodes), with parts of the
+lowering switched off one at a time (the results are then wrong; only
+the times count):
+
+| | reactive | reactive-sorted |
+|---|---|---|
+| as it was | 1,800 | 1,596 |
+| without appending to event logs | 1,155 | 986 |
+| and without the tick of each entity's last connect | 957 | 762 |
+| and without writing ticks at all | 626 | 515 |
+| the query without `on` | 457 | 389 |
+
+So: 645 us events that find their log full, 200 the connect ticks, 330
+writing ticks, 170 reading them and the masked body. Two changes from
+that:
+
+- An event looks first whether the log's readers have already been told
+  of a lost one (and none has finished with the log since): then it is
+  lost too, and nothing else of the log is read.
+- The relation keeps the tick of its latest connect of any entity; a
+  query in whose time nothing was connected looks at no entity's.
+
+| shape | moves | reactive | reactive-sorted |
+|---|---|---|---|
+| deep | 100 | 1,793.2 -> 1,442.5 | 1,610.1 -> 1,303.7 |
+| deep | 1000 | 1,843.4 -> 1,478.0 | 1,657.6 -> 1,339.7 |
+| deep | 1 | 596.0 -> 545.9 | 529.7 -> 439.4 |
+| bushy | 1000 | 1,729.4 -> 1,606.2 | 633.0 -> 579.0 |
+| bushy | 100 | 146.1 -> 139.3 | 64.1 -> 61.2 |
+
+4.1x the query without `on` has become 3.3x. Less than the parts
+promised (957): the first eighth of the events of a pass is still
+appended, and every later one still looks. What is left is mostly the
+ticks, written and read, which a reactive query cannot do without.
+
+### A deep tree sorted across archetypes, by its list
+
+Going depth by depth through 219,241 depths, each with a start to look
+up in every archetype, cost more than the rows. A tree with fewer than
+64 nodes a depth is now gone through by the tree's list, with each
+entity's row and its parent's next to it.
+
+| | one archetype | two, by depth | two, by list |
+|---|---|---|---|
+| scene, `full-*-sorted`, deep | 375.3 | 1,440.9 | 651.5 |
+| river, `ent-*-sorted`, deep | 882.1 | (about 2x, 2026-10-06) | 897.8 |
+
+- The scene graph (parents first, reading the parent) is at 1.7x of one
+  archetype, the river (children first, adding into the parent) at 1.02x.
+- A reactive query went the other way, 1,436 us by depth and 2,944 by
+  the list with nothing moved, and keeps to the depths. Not understood.
+
+### A depth in parallel across archetypes, adding into ancestors
+
+`bench/river/run.py`, bushy, 12 threads (`OMP_PLACES=cores
+OMP_PROC_BIND=close`, not pinned), 5 processes:
+
+| ent-sorted | ent-sorted-par | ent-two-sorted | ent-two-sorted-par |
+|---|---|---|---|
+| 399.7 (394.7 pinned) | 185.8 | 477.6 (481.7 pinned) | 308.4 |
+
+- One archetype's rows of a depth are cut into 64 pieces at rows where a
+  parent's children begin, and the archetypes take their turns as when
+  one core does it: checksum and total are the same to the bit as the
+  one-core run's (bushy and deep).
+- 0.64x of one pinned core with two archetypes, 0.47x with one: each
+  archetype has half of a depth, and fewer depths are worth a fork.
+- The deep tree goes by its list on one core (972 against 887: the
+  other loop of the step being parallel).

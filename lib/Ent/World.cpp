@@ -453,11 +453,20 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
                       query.getCascade().getAttr() == archetype.sortedBy &&
                       layout.cascadeFollowsEvents(query);
         });
-        if (followed) {
+        // (A query that adds into ancestors wants every row's children
+        // too, to keep those of one parent with one thread.)
+        bool sends = false;
+        module.walk([&](QueryOp query) {
+          if (query.getCascade() &&
+              query.getCascade().getAttr() == archetype.sortedBy)
+            query.getBody().walk([&](CombineOp) { sends = true; });
+        });
+        if (followed || sends)
           for (int64_t other = 0; other < others; ++other) {
             uint64_t begin = place(4);
             archetype.childRangeOffsets.push_back({begin, place(4)});
           }
+        if (followed) {
           archetype.marksOffset = llvm::alignTo(end, kColumnAlignment);
           end = archetype.marksOffset + 8 * archetype.markWords();
           layout.zeroed.push_back(
