@@ -677,7 +677,11 @@ next query and at its end where it connected outside queries (once,
 however many connects: sorting after each made building a tree of n
 entities cost n sorts), and at the end of a query that connected or
 disconnected. A sorted tree's sort does not count and sort twice: it
-notes each source's last edge and goes through the keys in order. It
+notes each source's last edge and goes through the keys in order. And a
+connect of an entity that had an edge when the tree was last sorted sets
+that edge in place, at the entity's offset, instead of appending one for
+the sort to prefer: giving an entity another parent then needs no room in
+a table that is full. It
 drops dead edges and edges to entities no longer alive. With generational
 ids a slot may be reused before the next sort, so a loop only counts edges
 whose own end is the visited entity. An apply inside an edge loop has, per
@@ -700,7 +704,9 @@ extern fns and procs alone, with the texts they take: what the C of a
 device includes. The header allocates ids exactly as
 the lowered program does. Creating a world zeroes only the counts, resources
 and entity counters, so capacity costs address space, not memory, until
-columns are written. Parallel stages and loops assume nothing else writes the
+columns are written; and, for every tree that is not sorted, the owners of
+its slots (an id's width per entity key), which say whether a slot holds
+an edge and must not be whatever the memory held. Parallel stages and loops assume nothing else writes the
 arena while a schedule runs.
 
 ## Entity ids

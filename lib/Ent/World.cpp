@@ -279,6 +279,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       entry.orderCountOffset = end;
       end += 8;
     }
+    if (entry.tree && !entry.linked) {
+      entry.sortedCountOffset = end;
+      end += 8;
+    }
     layout.relations.push_back(std::move(entry));
   }
   end = llvm::alignTo(end, 8);
@@ -533,6 +537,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       relation.nextSiblingOffset = perKey(link);
       relation.previousSiblingOffset = perKey(link);
       relation.positionOffset = perKey(link);
+      // A slot's owner says whether it holds an edge, 0 for none, from the
+      // start. (The links are made when the tree is first built, which is
+      // before anything follows them: a new world's trees are unclean.)
+      layout.zeroed.push_back({relation.sourceOffset, idBytes * keys});
       relation.orderCapacity = 2 * relation.capacity;
       auto perEdge = [&](uint64_t bytes) {
         uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;

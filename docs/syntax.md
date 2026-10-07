@@ -348,8 +348,9 @@ ancestor needs the `for` to cascade along that tree.
   (at most once per entity; not inside an edge loop). A system that
   connects in a loop outside a `for` sorts the edges once, before its next
   `for` or when it ends, which is also when a tree is found to have a
-  cycle, or more edges than its capacity is counted with the edges that a
-  later `connect` of the same entity replaces.
+  cycle. Giving an entity of a tree another parent takes no room in the
+  tree's capacity: a tree with as many edges as it may have can still be
+  changed.
 - `spawn { Position { x: 1.0, y: 0.0 }, Velocity { dx: 2.0, dy: 0.0 } }`
   creates an entity; as an expression it returns its id
   (`let id = spawn { ... }`).

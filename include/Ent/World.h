@@ -231,6 +231,11 @@ struct WorldRelation {
   bool tree = false;
   uint64_t orderOffset = 0;
   uint64_t orderParentOffset = 0;
+  /// For a sorted tree, in the header (i64): how many edges the table had
+  /// when it was last sorted. Those are in order, with the offsets by
+  /// source for them; a connect of an entity that has one of them sets it
+  /// in place.
+  uint64_t sortedCountOffset = 0;
   /// Elements of the list: an edge each, or for a linked tree twice that,
   /// which leaves room for the entries of entities that moved to its end
   /// (their old ones are all ones, and skipped) before it is made again.
@@ -439,6 +444,11 @@ struct WorldLayout {
   uint64_t countsBytes = 0;
   /// Bytes taken by the counts and resources, which a new world zeroes.
   uint64_t headerBytes = 0;
+  /// What else a new world zeroes, as (offset, bytes): the owners of a
+  /// linked tree's slots, where zero says that a slot holds no edge. The
+  /// memory a world is given need not be zero, and what it holds could be
+  /// taken for the edges of entities that exist.
+  SmallVector<std::pair<uint64_t, uint64_t>, 0> zeroed;
   /// Total size of the arena.
   uint64_t totalBytes = 0;
 

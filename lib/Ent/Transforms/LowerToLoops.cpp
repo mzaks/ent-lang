@@ -623,6 +623,9 @@ public:
   Value treeOrderCount(const WorldRelation &relation) {
     return scalar(relation.orderCountOffset);
   }
+  Value sortedCount(const WorldRelation &relation) {
+    return scalar(relation.sortedCountOffset);
+  }
   /// A view of `elements` values of `type` at `offset`.
   Value array(uint64_t offset, int64_t elements, Type type) {
     return view(offset, elements, type);
@@ -3336,6 +3339,61 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
     return;
   }
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  OpBuilder::InsertionGuard guard(rewriter);
+  // A sorted tree: an entity that had an edge when the table was last
+  // sorted has it at its offset, and gets the new one there. So changing
+  // a parent takes no room in the table, which a tree with as many edges
+  // as it may have has none of. (The table and what is made from it are
+  // put in order again by the sort, as for any connect.)
+  if (relation.tree) {
+    auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation,
+                                      /*in=*/false,
+                                      world.entityKey(loc, source));
+    Value sorted = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc, world.sortedCount(relation),
+                                    ValueRange{zero}));
+    Value inTable = arith::AndIOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, begin,
+                              end),
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, begin,
+                              sorted));
+    auto ifInTable = scf::IfOp::create(rewriter, loc,
+                                       TypeRange{rewriter.getI1Type()},
+                                       inTable, /*withElseRegion=*/true);
+    rewriter.setInsertionPointToStart(ifInTable.thenBlock());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq,
+            memref::LoadOp::create(rewriter, loc,
+                                   world.edgeIds(relation, /*source=*/true),
+                                   ValueRange{begin}),
+            source)});
+    rewriter.setInsertionPointToStart(ifInTable.elseBlock());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 1)});
+    rewriter.setInsertionPointAfter(ifInTable);
+    auto ifHas = scf::IfOp::create(rewriter, loc, ifInTable.getResult(0),
+                                   /*withElseRegion=*/true);
+    rewriter.setInsertionPointToStart(ifHas.thenBlock());
+    memref::StoreOp::create(rewriter, loc, target,
+                            world.edgeIds(relation, /*source=*/false),
+                            ValueRange{begin});
+    for (auto [value, field] : llvm::zip(values, relation.fields))
+      memref::StoreOp::create(rewriter, loc, value,
+                              world.edgeField(relation, field),
+                              ValueRange{begin});
+    if (relation.deadOffset)
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+          world.edgeDead(relation), ValueRange{begin});
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                            world.edgesClean(relation), ValueRange{zero});
+    rewriter.setInsertionPointToStart(ifHas.elseBlock());
+  }
   Value counter = world.edgeCount(relation);
   Value count = memref::LoadOp::create(rewriter, loc, counter,
                                        ValueRange{zero});
@@ -4254,6 +4312,11 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
       rewriter, loc,
       arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(), kept),
       world.edgeCount(relation), ValueRange{zero});
+  if (relation.tree)
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(), kept),
+        world.sortedCount(relation), ValueRange{zero});
 
   // Both ways: the index by target, listing each target's edges in table
   // order.
@@ -5769,6 +5832,18 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
                                                ValueRange{index});
                        scf::YieldOp::create(builder, loc);
                      });
+  // And the columns in which zero says "none", which must say so from
+  // the start: the memory need not be zero.
+  for (auto [offset, bytes] : layout.zeroed)
+    scf::ForOp::create(
+        rewriter, loc, arith::ConstantIndexOp::create(rewriter, loc, offset),
+        arith::ConstantIndexOp::create(rewriter, loc, offset + bytes), one,
+        ValueRange{},
+        [&](OpBuilder &builder, Location loc, Value index, ValueRange) {
+          memref::StoreOp::create(builder, loc, zeroByte, created,
+                                  ValueRange{index});
+          scf::YieldOp::create(builder, loc);
+        });
   func::CallOp::create(rewriter, loc, body.getSymName(), TypeRange{},
                        ValueRange{created});
   memref::DeallocOp::create(rewriter, loc, created);

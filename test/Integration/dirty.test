@@ -1,0 +1,38 @@
+// A world's memory need not be zero when the world gets it. A host that
+// fills it first with what would read as an edge (Inputs/dirty_main.c)
+// runs the river, whose tree keeps a slot per entity in which zero says
+// "no edge": unsorted and sorted, the sums are right.
+// RUN: mkdir -p %t.dir %t.sdir
+// RUN: ent-translate --import-ent %S/../../examples/river.ent -o %t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/river_world.h
+// RUN: FileCheck %s --check-prefix=HEADER --input-file=%t.dir/river_world.h
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/dirty_main.c -o %t.exe
+// RUN: %t.exe | FileCheck %s
+// RUN: sed 's/ tree capacity 1024$/ tree sorted capacity 1024/' \
+// RUN:     %S/../../examples/river.ent > %t.sorted.ent
+// RUN: grep -q "tree sorted" %t.sorted.ent
+// RUN: ent-translate --import-ent %t.sorted.ent -o %t.s.mlir
+// RUN: ent-translate --ent-to-c-header %t.s.mlir -o %t.sdir/river_world.h
+// RUN: ent-opt %t.s.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.s.ll
+// RUN: clang -O2 -Wno-override-module %t.s.ll -I%t.sdir \
+// RUN:     %S/Inputs/dirty_main.c -o %t.s.exe
+// RUN: %t.s.exe | FileCheck %s
+
+// The header zeroes the counts, and the owners of the tree's slots.
+// HEADER:      static inline ent_world *ent_world_create(void) {
+// HEADER:        memset(arena, 0, {{[0-9]+}});
+// HEADER-NEXT:   memset((char *)arena + {{[0-9]+}}, 0, 4096);
+// HEADER-NEXT:   return (ent_world *)arena;
+
+// Twice the rain: the sea has its own and the river's, the lake its own
+// and the brook's.
+// CHECK:      0: 22
+// CHECK-NEXT: 1: 20
+// CHECK-NEXT: 2: 200
+// CHECK-NEXT: 3: 210

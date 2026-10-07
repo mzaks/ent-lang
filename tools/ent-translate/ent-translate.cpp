@@ -238,7 +238,8 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
   os << llvm::formatv("#define ENT_WORLD_ALIGNMENT {0}\n\n",
                       WorldLayout::kArenaAlignment);
 
-  os << "// Counts and resources start at zero. Columns are left "
+  os << "// Counts and resources start at zero, and so do the slots of "
+        "trees, where\n// zero is no edge. Columns are left "
         "uninitialised:\n// nothing reads beyond an archetype's count, and "
         "untouched pages cost\n// no memory.\n"
         "static inline ent_world *ent_world_create(void) {\n"
@@ -246,6 +247,10 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "  if (posix_memalign(&arena, ENT_WORLD_ALIGNMENT, ENT_WORLD_BYTES))\n"
         "    return NULL;\n";
   os << llvm::formatv("  memset(arena, 0, {0});\n", layout->headerBytes);
+  // The columns in which zero says "none" (a tree's slots and links).
+  for (auto [offset, bytes] : layout->zeroed)
+    os << llvm::formatv("  memset((char *)arena + {0}, 0, {1});\n", offset,
+                        bytes);
   os << "  return (ent_world *)arena;\n}\n\n"
         "static inline void ent_world_destroy(ent_world *world) { "
         "free(world); }\n";

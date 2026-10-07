@@ -2,10 +2,11 @@
 // (Inputs/tree_churn.ent): each goes to the order's end with what is
 // below it, the order fills with the gaps they leave, and is made again
 // when it has no room. The sums are those of the same tree sorted, which
-// is put in order from scratch for every change (it needs room in its
-// table for the edges that are replaced, so it gets 8).
+// is put in order from scratch for every change, and whose table, with
+// room for 4 edges and 4 in it, takes each new parent in the old one's
+// place.
 // RUN: %ent run %S/Inputs/tree_churn.ent 2>/dev/null > %t.out
-// RUN: sed 's/ tree capacity 4/ tree sorted capacity 8/' \
+// RUN: sed 's/ tree capacity 4/ tree sorted capacity 4/' \
 // RUN:     %S/Inputs/tree_churn.ent > %t.sorted.ent
 // RUN: grep -q "tree sorted" %t.sorted.ent
 // RUN: %ent run %t.sorted.ent 2>/dev/null | sort > %t.sorted.out
