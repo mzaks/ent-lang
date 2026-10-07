@@ -2385,3 +2385,65 @@ us per step (spread); before is the entry above:
 - A step in which rows moved: the locations of the whole list are then
   read from the entity table once, which should cost about what a step
   cost before this entry less what it costs now, 1 ms at 1e6.
+
+## 2026-10-07: a sorted tree's depths in parallel
+
+The entities of one depth of a tree do not depend on each other. A sorted
+tree in one archetype has its rows by depth; its sort now also notes where
+each depth starts and, for every row, the rows of its children, which are
+next to each other. With `parallel-entities=1` a cascading query whose
+body is local to a depth goes depth by depth where a depth holds 256
+entities on average, and runs a depth of at least `parallel-min-level`
+entities (32,768) in parallel. The river combines into the parent, so a
+depth's rows are cut into 64 pieces at rows where a parent's children
+begin, and the pieces run in parallel, each in order. `ent-sorted-par` is
+that (with `parallel-min-entities=1`, which also makes the loop that
+sets every node's flow parallel). Same machine and flags; 200 steps after
+50, medians of 7 processes, `OMP_NUM_THREADS=12 OMP_PLACES=cores
+OMP_PROC_BIND=close`, nothing pinned to one core. Checksums agree: the
+sums are the same to the bit.
+
+us per step (spread):
+
+| nodes | shape | depth | c-sorted | ent-sorted | ent-sorted-par |
+|---|---|---|---|---|---|
+| 1e5 | bushy | 25 | 39.2 (67%) | 38.5 (147%) | 66.0 (21%) |
+| 1e5 | deep | 21,920 | 85.7 (29%) | 85.2 (171%) | 120.2 (3%) |
+| 1e5 | shuffled | 25 | 56.5 (62%) | 44.0 (147%) | 72.6 (24%) |
+| 1e6 | bushy | 31 | 376.0 (9%) | 388.6 (3%) | 182.2 (15%) |
+| 1e6 | deep | 219,241 | 840.2 (2%) | 867.8 (19%) | 937.5 (1%) |
+| 1e6 | shuffled | 31 | 376.1 (3%) | 388.3 (9%) | 180.1 (14%) |
+
+With `OMP_NUM_THREADS=4` (the Zen 5 cores, by `OMP_PLACES=cores`), 5
+rounds, 1e6 bushy: 144.8 (3%) against 396.0 (29%).
+
+### What holds
+
+- At 1e6 nodes in a bushy tree the parallel form takes 0.47x the time of
+  the one loop with 12 threads, and 0.37x with 4: the four fast cores do
+  better alone than with the eight slower ones.
+- A deep tree is not gone through by depth (four or five nodes a depth)
+  and takes 1.08x: the price of the other loop of the step being
+  parallel, here forced on.
+- At 1e5 it loses, 1.4-1.7x: a step of 40-85 us is less than forking
+  costs. With the default `parallel-min-entities` of 1e6 a world of that
+  size has no parallel loop.
+
+### How it got here
+
+- First, the parents of a depth in parallel, each with a loop over its
+  children: 446 us at 1e6 bushy, no better than the one loop's 392. That
+  measurement was of nothing, though: the test for a wide tree asked for
+  32,768 nodes a depth on average, which a tree of 1e6 nodes and 31
+  depths just misses, so the one loop ran, and the 446 were the other
+  loop's forks.
+- The loop per parent was replaced, unmeasured, by pieces of rows cut at
+  parents' boundaries, which read the rows as the one loop does.
+
+### Not measured
+
+- A tree across archetypes, which stays on one core.
+- A body with more work per node than an add, which is where more cores
+  have more to gain: the river's step is two streams through memory.
+- A query that only reads its parent (parents first, nothing combined),
+  whose depths run over their rows directly.

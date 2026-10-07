@@ -271,7 +271,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     for (const WorldArchetype &archetype : layout.archetypes)
       if (archetype.sortedBy == relation.getSymNameAttr())
         entry.sortedArchetypes.push_back(archetype.index);
-    if (entry.sortedArchetypes.size() > 1) {
+    if (!entry.sortedArchetypes.empty()) {
       entry.depthOffset = end;
       end += 8;
     }
@@ -411,14 +411,16 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
         }
       if (others == 1) {
         archetype.parentRowOffset = place(4);
+        archetype.childBeginOffset = place(4);
+        archetype.childEndOffset = place(4);
       } else {
         archetype.parentLocationOffset = place(scheme.locationBits / 8);
-        // A depth for every entity that can have a parent, and two more.
-        archetype.levelCapacity = sources + 2;
-        uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
-        archetype.levelStartOffset = offset;
-        end = offset + 4 * archetype.levelCapacity;
       }
+      // A depth for every entity that can have a parent, and two more.
+      archetype.levelCapacity = sources + 2;
+      uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+      archetype.levelStartOffset = offset;
+      end = offset + 4 * archetype.levelCapacity;
       archetype.newRowOffset = place(4);
       for (const WorldColumn &column : archetype.columns)
         archetype.columnScratchOffsets.push_back(

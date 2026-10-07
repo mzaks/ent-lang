@@ -53,6 +53,10 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
            /*default=*/"16384",
            "Pending event-log entries from which a reactive query walks its "
            "logs' segments in parallel (with parallel-entities)">,
+    Option<"parallelMinLevel", "parallel-min-level", "int64_t",
+           /*default=*/"32768",
+           "Entities of one depth of a sorted tree from which a cascading "
+           "query visits the depth in parallel (with parallel-entities)">,
     Option<"fuseSystems", "fuse-systems", "bool", /*default=*/"false",
            "Inline the systems of each schedule and fuse their queries into "
            "one loop per archetype">,

@@ -23,6 +23,17 @@
 // RUN: %t.entsorted 3 1 bushy | sed 's/.*depth/depth/' > %t.es.out
 // RUN: %t.entsorted 3 1 deep | sed 's/.*depth/depth/' >> %t.es.out
 // RUN: %t.entsorted 3 1 shuffled | sed 's/.*depth/depth/' >> %t.es.out
+// And that with every depth of the tree in parallel.
+// RUN: ent-opt %t.s.mlir \
+// RUN:     "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-level=1" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.sp.ll
+// RUN: clang -O2 -Wno-override-module -ffp-contract=off -DVARIANT=2 -DN=1024 \
+// RUN:     %t.sp.ll -I%t.sdir %S/../../bench/river/river.c %openmp -o %t.entpar
+// RUN: %t.entpar 3 1 bushy | sed 's/.*depth/depth/' > %t.ep.out
+// RUN: %t.entpar 3 1 deep | sed 's/.*depth/depth/' >> %t.ep.out
+// RUN: %t.entpar 3 1 shuffled | sed 's/.*depth/depth/' >> %t.ep.out
 // RUN: clang -O2 -ffp-contract=off -DVARIANT=0 -DN=1024 \
 // RUN:     %S/../../bench/river/river.c -o %t.c
 // RUN: clang -O2 -ffp-contract=off -DVARIANT=1 -DN=1024 \
@@ -70,6 +81,7 @@
 // RUN: cmp %t.totals.out %t.twos.out
 // RUN: cmp %t.ent.out %t.sorted.out
 // RUN: cmp %t.ent.out %t.es.out
+// RUN: cmp %t.ent.out %t.ep.out
 // RUN: FileCheck %s --input-file=%t.ent.out
 // CHECK:      depth={{[0-9]+}} checksum={{[0-9a-f]+}} total={{[0-9.e+]+}}
 // CHECK-NEXT: depth={{[0-9]+}} checksum={{[0-9a-f]+}} total={{[0-9.e+]+}}

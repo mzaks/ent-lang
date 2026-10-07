@@ -349,9 +349,17 @@ for e, n: Node, parent: Node up Under cascade Under where parent.total > 100 {
   visit it. A tree can be grown, pruned and rearranged from a `for` that
   walks it, and is walked as it was.
 
-Not yet: a cascading `for` has no `on`, and it visits one entity after
-another, on one core. Combining into an ancestor needs the `for` to
-cascade along that tree.
+Not yet: a cascading `for` has no `on`. Combining into an ancestor needs
+the `for` to cascade along that tree.
+
+A cascading `for` visits one entity after another, with one exception:
+over a `sorted` tree in one archetype, built with parallel loops
+(`tools/ent --parallel`), the entities of one depth are visited on all
+cores where the body only reads and writes the entity and what is above
+it (fields, `up` bindings, `+=` into an ancestor, reads of uniques and of
+other entities), the archetype has room for a million entities and the
+depth holds 32,768 or more. The result is the same to the bit: what
+children send to a parent is still added in their order.
 
 ## Statements
 

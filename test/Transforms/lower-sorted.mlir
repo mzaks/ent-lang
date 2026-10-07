@@ -1,6 +1,14 @@
 // RUN: ent-opt %s --ent-lower-to-loops | FileCheck %s
 // RUN: ent-opt %s --ent-print-access 2>&1 | FileCheck %s --check-prefix=ACCESS
 // RUN: ent-translate --ent-to-c-header %s | FileCheck %s --check-prefix=HEADER
+// With parallel entity loops a cascading query goes depth by depth, and a
+// depth that holds enough runs in parallel.
+// RUN: ent-opt %s "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-level=4" \
+// RUN:   | FileCheck %s --check-prefix=PAR
+// RUN: ent-opt %s "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-level=4" \
+// RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o /dev/null
 
 // A tree whose entities are stored in its order: the rows of their
 // archetype are the entities without a parent, then the others, every one
@@ -18,6 +26,20 @@ ent.archetype @Cell (@Node) capacity 16
 
 // Children first is the rows after the roots from the last down, each
 // with its parent's row at hand: no list of ids, no id looked up.
+// What nodes send to their parents: the depth's rows in 64 pieces cut
+// where a parent's children begin, the pieces in parallel, each its rows
+// in order.
+// PAR-LABEL:   func.func private @run(
+// PAR:         scf.if %{{.*}} {
+// PAR:           scf.for %{{.*}} = %{{.*}} to %[[DEPTHS:.*]] step
+// PAR:             scf.if %{{.*}} {
+// PAR:               scf.parallel (%{{.*}}) = (%{{.*}}) to (%c64{{.*}}) step
+// PAR:                 scf.for
+// PAR:             } else {
+// PAR:               scf.for
+// PAR:         } else {
+// PAR:           scf.for
+// PAR:         return
 // CHECK-LABEL: func.func private @run(
 // (The archetype is counted when the query starts.)
 // CHECK:       arith.index_cast %{{.*}} : i64 to index
@@ -44,6 +66,14 @@ ent.system @run() {
 }
 
 // Parents first: the roots, then the rows after them going up.
+// Nothing sent: a depth's rows in parallel as they are.
+// PAR-LABEL:   func.func private @down(
+// PAR:         scf.for %{{.*}} = %{{.*}} to %{{.*}} step
+// PAR:           scf.if %{{.*}} {
+// PAR:             scf.parallel (%[[ROW:.*]]) = (%{{.*}}) to (%{{.*}}) step
+// PAR-NOT:           scf.for
+// PAR:           } else {
+// PAR:         return
 // CHECK-LABEL: func.func private @down(
 // CHECK:       scf.for %{{.*}} = %{{.*}} to %[[ROOTS:.*]] step
 // CHECK:       scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step %{{.*}} {

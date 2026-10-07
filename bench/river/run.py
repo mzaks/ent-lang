@@ -35,6 +35,10 @@ ENT_OPT = os.path.join(ROOT, "build", "bin", "ent-opt")
 ENT_TRANSLATE = os.path.join(ROOT, "build", "bin", "ent-translate")
 LOWER = ["--convert-scf-to-cf", "--convert-to-llvm",
          "--reconcile-unrealized-casts"]
+OPENMP = ["-fopenmp", f"-I{LLVM}/include", f"-L{LLVM}/lib",
+          f"-Wl,-rpath,{LLVM}/lib"]
+PARALLEL = ["--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1",
+            "--convert-scf-to-openmp", "--canonicalize", "--ent-omp-nowait"]
 # name: (VARIANT, program, ent-opt passes before LOWER[, a change to the
 # program's text])
 VARIANTS = {
@@ -46,6 +50,11 @@ VARIANTS = {
     "ent-sorted": (2, "river.ent", ["--ent-lower-to-loops"],
                    lambda text: text.replace(" tree capacity 1024",
                                              " tree sorted capacity 1024")),
+    # The sorted tree with a depth's nodes visited in parallel.
+    "ent-sorted-par": (2, "river.ent", PARALLEL,
+                       lambda text: text.replace(
+                           " tree capacity 1024",
+                           " tree sorted capacity 1024"), [], True),
     # Nodes of two shapes, half of them in a second archetype: a tree
     # across archetypes, as it is and sorted.
     "ent-two": (2, "river.ent", ["--ent-lower-to-loops"],
@@ -87,7 +96,8 @@ REORDERED = {"ent-two-sorted", "ent-two-mortal-sorted"}
 DEFAULT = ["c-order", "c-pairs", "c-sorted", "ent", "ent-sorted"]
 
 
-def build(name, number, program, passes, n, transform=None, defines=()):
+def build(name, number, program, passes, n, transform=None, defines=(),
+          openmp=False):
     exe = os.path.join(OUT, f"{name}-{n}")
     extra = []
     if program:
@@ -114,6 +124,8 @@ def build(name, number, program, passes, n, transform=None, defines=()):
         subprocess.run([f"{LLVM}/bin/mlir-translate", "--mlir-to-llvmir",
                         "-o", ll], input=lowered, text=True, check=True)
         extra = [ll, "-Wno-override-module", f"-I{directory}"]
+    if openmp:
+        extra += OPENMP
     subprocess.run([f"{LLVM}/bin/clang", "-O2", *EXTRA_CFLAGS,
                     "-ffp-contract=off", f"-DVARIANT={number}", f"-DN={n}",
                     *defines,

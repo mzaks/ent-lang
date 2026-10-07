@@ -213,8 +213,11 @@ where the result is the same:
   one, or react to events: those depend on other queries having reached
   their commit points.
 - **Cascading queries**: the entities of one depth are independent of each
-  other (Q9) and could be visited in parallel; the compiler visits them one
-  after another so far.
+  other (Q9). Over a sorted tree in one archetype, whose rows are by depth,
+  a depth may be visited in parallel where the body only reads and writes
+  its entity and that entity's ancestors; what the entities of a depth
+  combine into their parents is then added per parent by one thread, in
+  the order the rows have, so the result is the one a single pass gives.
 
 **Determinism.** Given the same world and arguments, a frame's result does
 not depend on these choices or on the number of threads: bodies cannot

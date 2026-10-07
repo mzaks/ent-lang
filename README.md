@@ -384,8 +384,9 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   `ent.connect` and `ent.disconnect` take effect when the whole query has
   run, as in any query (the rows of entities that go or move are marked as
   they are visited and listed in order at the end), and `ent.spawn` at
-  once, its entity not visited. A cascading query is not reactive so far,
-  and runs on one core.
+  once, its entity not visited. A cascading query is not reactive so far.
+  It runs on one core unless its tree is sorted in one archetype (see
+  Fusion and entity parallelism).
   A tree may be `sorted` (`... from @Node to @Node tree sorted capacity
   N`): the archetype that holds its entities, declared or inferred, keeps
   its rows in the tree's order, every entity after its parent, and a query
@@ -838,6 +839,22 @@ different archetypes share no columns. Two consequences the lowering uses:
   it, parallel loops pay off from about 2e5 entities in the fused example
   and 4e5 unfused (`bench/RESULTS.md`), and the default is not lowered
   yet.
+
+- A cascading query over a sorted tree in one archetype can run a depth
+  in parallel with `parallel-entities=1`: the sort notes where each depth
+  starts in the rows, and for every row the rows of its children, which
+  are next to each other. Where the body is local to a depth (gets and
+  sets, refs up the tree, `ent.combine`, reads; nothing deferred, no
+  proc), the archetype's capacity is at least `parallel-min-entities` and
+  a depth holds 256 entities on average, the query goes depth by depth
+  instead of row by row, and a depth of at least `parallel-min-level`
+  entities (default 32,768) is an `scf.parallel`: over its rows, or, where
+  the body combines into the parent, over 64 pieces of them cut at rows
+  where a parent's children begin, each piece its rows in order, so every
+  parent's sum is one thread's and has the order it always has. A deep
+  tree, with few entities a depth, keeps its one loop. On the river at
+  1e6 nodes that takes 0.47x the time of the one loop with 12 threads and
+  0.37x with 4 on the fast cores (see `bench/RESULTS.md`).
 
 ## Benchmarks
 

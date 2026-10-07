@@ -67,18 +67,24 @@ struct WorldArchetype {
   /// have no parent; and for sorting, the row each row goes to (i32) and a
   /// copy of every column (in the order of `columns`) and of the ids.
   ///
+  /// `levelStart` has, per depth d from 1 (i32), the first row of that
+  /// depth; the entry after the last depth is the number of rows.
+  ///
   /// Where the tree lives in this archetype alone, the others are in the
-  /// order the tree lists them, every parent before its children, and each
-  /// row has the row of its parent (i32, -1 for none).
+  /// order the tree lists them, every parent before its children and the
+  /// children of one parent next to each other, in their parents' order.
+  /// Each row has the row of its parent (i32, -1 for none) and the rows
+  /// its children are in, from `childBegin` to `childEnd` (i32; equal for
+  /// none).
   ///
   /// Where it lives in several, each row has its parent's packed location
-  /// (archetype and row, at the width of a location), and `levelStart`
-  /// has, per depth d from 1 (i32), the first row of that depth; the entry
-  /// after the last depth is the number of rows.
+  /// (archetype and row, at the width of a location).
   StringAttr sortedBy;
   uint64_t rootCountOffset = 0;
   uint64_t parentRowOffset = 0;
   uint64_t parentLocationOffset = 0;
+  uint64_t childBeginOffset = 0;
+  uint64_t childEndOffset = 0;
   uint64_t levelStartOffset = 0;
   int64_t levelCapacity = 0;
   uint64_t newRowOffset = 0;

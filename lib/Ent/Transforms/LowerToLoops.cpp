@@ -591,6 +591,11 @@ public:
     return view(archetype.parentRowOffset, archetype.capacity,
                 rewriter.getI32Type());
   }
+  /// And the rows of its children, from `begin` to the other.
+  Value childRows(const WorldArchetype &archetype, bool begin) {
+    return view(begin ? archetype.childBeginOffset : archetype.childEndOffset,
+                archetype.capacity, rewriter.getI32Type());
+  }
   /// Where a sorted tree lives in several archetypes: per row its parent's
   /// packed location, per depth the archetype's first row of it, and the
   /// tree's depth.
@@ -738,6 +743,9 @@ struct LoopOptions {
   /// Pending log entries from which a reactive query walks its event logs'
   /// segments in parallel.
   int64_t parallelMinEvents;
+  /// Entities of one depth of a sorted tree from which a cascading query
+  /// visits the depth in parallel.
+  int64_t parallelMinLevel;
   /// Emit remarks explaining lowering decisions.
   bool explain;
   /// Combine unobserved applies directly in loops that never run in
@@ -4443,21 +4451,38 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
               arith::ConstantIntOp::create(rewriter, loc, 1, 64)),
           length, ValueRange{zero});
     };
-    forEach(zero, kept, [&](Value k) {
-      Value parent =
-          memref::LoadOp::create(rewriter, loc, targets, ValueRange{k});
-      auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation,
-                                        /*in=*/false,
-                                        world.entityKey(loc, parent));
-      auto ifRoot = scf::IfOp::create(
-          rewriter, loc,
-          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, begin,
-                                end));
-      OpBuilder::InsertionGuard inner(rewriter);
-      rewriter.setInsertionPointToStart(ifRoot.thenBlock());
-      list(memref::LoadOp::create(rewriter, loc, sources, ValueRange{k}),
-           parent);
-    });
+    // (The entities without a parent are taken archetype by archetype in
+    // the order of their rows, which is the order they keep: so the
+    // children of one parent are next to each other all the way down,
+    // and the parents of what is next to each other are in order.)
+    for (unsigned index : relation.sortedArchetypes) {
+      const WorldArchetype &archetype = layout.archetypes[index];
+      Value ids = world.ids(archetype);
+      forEach(zero, world.count(loc, archetype), [&](Value row) {
+        Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{row});
+        Value hasParent =
+            emitParent(rewriter, loc, layout, world, relation, id).first;
+        auto ifRoot = scf::IfOp::create(
+            rewriter, loc,
+            arith::XOrIOp::create(
+                rewriter, loc, hasParent,
+                arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(ifRoot.thenBlock());
+        auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation,
+                                          /*in=*/true,
+                                          world.entityKey(loc, id));
+        forEach(begin, end, [&](Value position) {
+          Value edge = world.toIndex(
+              loc, memref::LoadOp::create(rewriter, loc,
+                                          world.indexEdges(relation),
+                                          ValueRange{position}));
+          list(memref::LoadOp::create(rewriter, loc, sources,
+                                      ValueRange{edge}),
+               id);
+        });
+      });
+    }
     scf::WhileOp::create(
         rewriter, loc, TypeRange{rewriter.getIndexType()}, ValueRange{zero},
         [&](OpBuilder &, Location, ValueRange state) {
@@ -4569,16 +4594,7 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
       auto locationOf = [&](Value id) {
         return world.getLocation(loc, world.idSlot(loc, id));
       };
-      if (alone) {
-        forEach(zero, entries, [&](Value k) {
-          Value id =
-              memref::LoadOp::create(rewriter, loc, order, ValueRange{k});
-          memref::StoreOp::create(
-              rewriter, loc,
-              asRow(arith::AddIOp::create(rewriter, loc, roots[0], k)),
-              newRowsOf(*holders[0]), ValueRange{locationOf(id).second});
-        });
-      } else {
+      {
         // The list is by depth: an entity's is its parent's and one, kept
         // per entity in the sort's cursors, which are free now. Each goes
         // to the next row of its archetype, and where the depth moves on,
@@ -4655,6 +4671,11 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                                   asRow(place.getResult(1 + index)),
                                   world.levelStarts(*archetype),
                                   ValueRange{past});
+        // Depth 0, the entities without a parent, starts at row 0.
+        for (const WorldArchetype *archetype : holders)
+          memref::StoreOp::create(rewriter, loc, asRow(zero),
+                                  world.levelStarts(*archetype),
+                                  ValueRange{zero});
       }
       for (const WorldArchetype *archetype : holders) {
         Value rows = world.count(loc, *archetype);
@@ -4716,6 +4737,48 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
           memref::StoreOp::create(
               rewriter, loc, asRow(locationOf(parent).second), parentRows,
               ValueRange{arith::AddIOp::create(rewriter, loc, roots[0], k)});
+        });
+        // And every row the rows of its children, which are next to each
+        // other: where a row's parent is another than the row's before,
+        // the parent's children begin, and the one before's have ended.
+        const WorldArchetype &only = *holders[0];
+        Value rows = world.count(loc, only);
+        Value begins = world.childRows(only, /*begin=*/true);
+        Value ends = world.childRows(only, /*begin=*/false);
+        Value none = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
+        forEach(zero, rows, [&](Value row) {
+          memref::StoreOp::create(rewriter, loc, none, begins,
+                                  ValueRange{row});
+          memref::StoreOp::create(rewriter, loc, none, ends, ValueRange{row});
+        });
+        forEach(roots[0], rows, [&](Value row) {
+          Value parent = world.toIndex(
+              loc, memref::LoadOp::create(rewriter, loc, parentRows,
+                                          ValueRange{row}));
+          Value isFirst = arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::eq, row, roots[0]);
+          Value before = world.toIndex(
+              loc, memref::LoadOp::create(
+                       rewriter, loc, parentRows,
+                       ValueRange{arith::SelectOp::create(
+                           rewriter, loc, isFirst, row,
+                           arith::SubIOp::create(rewriter, loc, row, one))}));
+          Value starts = arith::OrIOp::create(
+              rewriter, loc, isFirst,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                    parent, before));
+          auto ifStarts = scf::IfOp::create(rewriter, loc, starts);
+          {
+            OpBuilder::InsertionGuard inner(rewriter);
+            rewriter.setInsertionPointToStart(ifStarts.thenBlock());
+            memref::StoreOp::create(rewriter, loc, asRow(row), begins,
+                                    ValueRange{parent});
+          }
+          // The last of its children so far: the end moves on with them.
+          memref::StoreOp::create(
+              rewriter, loc,
+              asRow(arith::AddIOp::create(rewriter, loc, row, one)), ends,
+              ValueRange{parent});
         });
       } else {
         forEach(zero, entries, [&](Value k) {
@@ -4999,6 +5062,20 @@ static void commitStructure(IRRewriter &rewriter, Location loc,
 /// `leaves first` the order is the other way: the list from its end, then
 /// the entities without a parent. What the query combines into ancestors
 /// it combines as it visits, which is the order of the depths' ends.
+/// True if a cascading query's body only reads and writes the entity it
+/// visits and its ancestors' components (through refs up the tree), so
+/// the entities of one depth can be visited in any order, or at once.
+static bool isDepthLocal(QueryOp query) {
+  WalkResult result = query.getBody().walk([](Operation *op) {
+    if (isa<GetOp, SetOp, ReadOp, EntityOp, HasOp, LookupOp, CombineOp,
+            YieldOp>(op) ||
+        !hasOwnEffects(op))
+      return WalkResult::advance();
+    return WalkResult::interrupt();
+  });
+  return !result.wasInterrupted();
+}
+
 static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                          const WorldLayout &layout, WorldAccess &world,
                          const LoopOptions &options) {
@@ -5159,28 +5236,151 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
       Value rows = world.count(loc, *sorted);
       Value roots = rootCount(*sorted);
-      auto loop = scf::ForOp::create(
-          rewriter, loc, zero,
-          arith::SubIOp::create(rewriter, loc, rows, roots), one);
-      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-      Value row = leavesFirst
-                      ? arith::SubIOp::create(
-                            rewriter, loc,
-                            arith::SubIOp::create(rewriter, loc, rows, one),
-                            loop.getInductionVar())
-                            .getResult()
-                      : arith::AddIOp::create(rewriter, loc, roots,
-                                              loop.getInductionVar())
-                            .getResult();
-      KnownParent parent{
-          &relation, Value(), sorted,
-          world.toIndex(loc, memref::LoadOp::create(rewriter, loc,
-                                                    world.parentRows(*sorted),
-                                                    ValueRange{row}))};
-      emitQueryBody(rewriter, query, IRMapping(), *sorted, world, layout, row,
-                    rows, tick, Value(), /*parallel=*/false,
-                    /*directApplies=*/true, parent, marks);
-      hoistResourceReads(rewriter, loop, world);
+      auto parentOf = [&](Value row) {
+        return world.toIndex(
+            loc, memref::LoadOp::create(rewriter, loc,
+                                        world.parentRows(*sorted),
+                                        ValueRange{row}));
+      };
+      auto body = [&](Value row, Value parentRow, bool parallel) {
+        KnownParent parent{&relation, Value(), sorted, parentRow};
+        emitQueryBody(rewriter, query, IRMapping(), *sorted, world, layout,
+                      row, rows, tick, Value(), parallel,
+                      /*directApplies=*/true, parent, marks);
+      };
+      // The rows from `from` to `to`, up, or down for children first.
+      auto inOrder = [&](Value from, Value to,
+                         bool parallel = false) -> Operation * {
+        auto loop = scf::ForOp::create(
+            rewriter, loc, zero, arith::SubIOp::create(rewriter, loc, to, from),
+            one);
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+        Value row = leavesFirst
+                        ? arith::SubIOp::create(
+                              rewriter, loc,
+                              arith::SubIOp::create(rewriter, loc, to, one),
+                              loop.getInductionVar())
+                              .getResult()
+                        : arith::AddIOp::create(rewriter, loc, from,
+                                                loop.getInductionVar())
+                              .getResult();
+        body(row, parentOf(row), parallel);
+        return loop;
+      };
+      // The entities of one depth do not depend on each other, so a depth
+      // can be visited in parallel: where the body only reads and writes
+      // the entity and its ancestors and the archetype can be large
+      // enough. Going depth by depth costs a little for every depth, which
+      // a deep tree has more of than it gains: so only where a depth holds
+      // 256 entities on average (or parallel-min-level, if that is less),
+      // and then each depth of at least parallel-min-level entities in
+      // parallel. Else the rows after one another, as they are.
+      bool combines = false;
+      query.getBody().walk([&](CombineOp) { combines = true; });
+      bool mayRunInParallel =
+          options.parallelEntities && isDepthLocal(query) && !marks &&
+          connects.empty() && !(combines && world.hasStamps()) &&
+          sorted->capacity >= options.parallelMinEntities;
+      if (!mayRunInParallel) {
+        hoistResourceReads(rewriter, inOrder(roots, rows), world);
+      } else {
+        Value depths = world.toIndex(
+            loc, memref::LoadOp::create(rewriter, loc,
+                                        world.treeDepth(relation),
+                                        ValueRange{zero}));
+        Value level = arith::ConstantIndexOp::create(
+            rewriter, loc, options.parallelMinLevel);
+        Value wide = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sge,
+            arith::SubIOp::create(rewriter, loc, rows, roots),
+            arith::MulIOp::create(
+                rewriter, loc, depths,
+                arith::ConstantIndexOp::create(
+                    rewriter, loc,
+                    std::min<int64_t>(256, options.parallelMinLevel))));
+        auto choice = scf::IfOp::create(rewriter, loc, wide,
+                                        /*withElseRegion=*/true);
+        rewriter.setInsertionPointToStart(choice.elseBlock());
+        inOrder(roots, rows);
+        rewriter.setInsertionPointToStart(choice.thenBlock());
+        Value starts = world.levelStarts(*sorted);
+        auto startOf = [&](Value depth) {
+          return world.toIndex(
+              loc, memref::LoadOp::create(rewriter, loc, starts,
+                                          ValueRange{depth}));
+        };
+        auto levels = scf::ForOp::create(rewriter, loc, zero, depths, one);
+        rewriter.setInsertionPoint(levels.getBody()->getTerminator());
+        Value depth =
+            leavesFirst
+                ? arith::SubIOp::create(rewriter, loc, depths,
+                                        levels.getInductionVar())
+                      .getResult()
+                : arith::AddIOp::create(rewriter, loc,
+                                        levels.getInductionVar(), one)
+                      .getResult();
+        Value from = startOf(depth);
+        Value to = startOf(arith::AddIOp::create(rewriter, loc, depth, one));
+        Value many = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sge,
+            arith::SubIOp::create(rewriter, loc, to, from), level);
+        auto perDepth = scf::IfOp::create(rewriter, loc, many,
+                                          /*withElseRegion=*/true);
+        rewriter.setInsertionPointToStart(perDepth.elseBlock());
+        inOrder(from, to);
+        rewriter.setInsertionPointToStart(perDepth.thenBlock());
+        if (!combines) {
+          auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{from},
+                                              ValueRange{to}, ValueRange{one});
+          rewriter.setInsertionPoint(each.getBody()->getTerminator());
+          Value row = each.getInductionVars().front();
+          body(row, parentOf(row), /*parallel=*/true);
+        } else {
+          // What entities send to their parent is added up per parent, so
+          // the children of one parent stay with one thread: the depth's
+          // rows are cut into pieces at the rows where a parent's children
+          // begin, and the pieces run in parallel, each its rows after one
+          // another as they are when all are, so the sums are the same to
+          // the bit.
+          Value pieces = arith::ConstantIndexOp::create(rewriter, loc, 64);
+          Value number = arith::SubIOp::create(rewriter, loc, to, from);
+          Value last = arith::SubIOp::create(rewriter, loc, to, one);
+          auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                              ValueRange{pieces},
+                                              ValueRange{one});
+          rewriter.setInsertionPoint(each.getBody()->getTerminator());
+          Value piece = each.getInductionVars().front();
+          // Where piece `index` begins: the first row of the children that
+          // the row at its share of the depth is one of.
+          auto beginOf = [&](Value index) -> Value {
+            Value share = arith::AddIOp::create(
+                rewriter, loc, from,
+                arith::DivUIOp::create(
+                    rewriter, loc,
+                    arith::MulIOp::create(rewriter, loc, index, number),
+                    pieces));
+            Value row = arith::MinUIOp::create(rewriter, loc, share, last);
+            Value begin = world.toIndex(
+                loc, memref::LoadOp::create(
+                         rewriter, loc,
+                         world.childRows(*sorted, /*begin=*/true),
+                         ValueRange{parentOf(row)}));
+            Value isFirst = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::eq, index, zero);
+            Value isPast = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::eq, index, pieces);
+            return arith::SelectOp::create(
+                rewriter, loc, isFirst, from,
+                arith::SelectOp::create(rewriter, loc, isPast, to, begin));
+          };
+          Value begin = beginOf(piece);
+          Value end =
+              beginOf(arith::AddIOp::create(rewriter, loc, piece, one));
+          inOrder(begin, end, /*parallel=*/true);
+        }
+        hoistResourceReads(rewriter, choice, world);
+      }
     }
     if (leavesFirst)
       emitRoots();
@@ -6488,7 +6688,8 @@ struct EntLowerToLoops
     for (const WorldRelation &relation : layout->relations)
       emitSortFunction(rewriter, module, *layout, relation, arenaType);
     LoopOptions options{parallelEntities, parallelMinEntities,
-                        parallelMinEvents, explain, directApplies};
+                        parallelMinEvents, parallelMinLevel, explain,
+                        directApplies};
     SymbolTable symbols(module);
 
     for (ExternOp external : module.getOps<ExternOp>())
