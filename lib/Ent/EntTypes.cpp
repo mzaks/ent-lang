@@ -40,6 +40,7 @@ Type RefType::parse(AsmParser &parser) {
   bool isMutable = false, isBefore = false, isOptional = false;
   bool isDirect = false, isAfter = false;
   unsigned hops = 1;
+  ArrayAttr path;
   while (succeeded(parser.parseOptionalComma())) {
     if (succeeded(parser.parseOptionalKeyword("up"))) {
       if (parser.parseAttribute(via))
@@ -59,6 +60,28 @@ Type RefType::parse(AsmParser &parser) {
     } else if (succeeded(parser.parseOptionalKeyword("hops"))) {
       if (parser.parseInteger(hops))
         return {};
+    } else if (succeeded(parser.parseOptionalKeyword("path"))) {
+      // [["parent", @R], ["up", @R, @C, ...], ...]; the first step's tree
+      // is the ref's.
+      if (parser.parseAttribute(path))
+        return {};
+      bool wellFormed = !path.empty();
+      for (Attribute attr : path) {
+        auto step = dyn_cast<ArrayAttr>(attr);
+        wellFormed &= step && step.size() >= 2 && isa<StringAttr>(step[0]) &&
+                      llvm::all_of(step.getValue().drop_front(),
+                                   [](Attribute part) {
+                                     return isa<FlatSymbolRefAttr>(part);
+                                   });
+      }
+      if (!wellFormed) {
+        parser.emitError(parser.getCurrentLocation(),
+                         "a path is steps, each a kind and a relation: "
+                         "[[\"parent\", @R], [\"up\", @R, @C]]");
+        return {};
+      }
+      via = cast<FlatSymbolRefAttr>(cast<ArrayAttr>(path[0])[1]);
+      isDirect = true;
     } else if (succeeded(parser.parseOptionalKeyword("optional"))) {
       isOptional = true;
     } else if (parser.parseKeyword("mut")) {
@@ -70,14 +93,16 @@ Type RefType::parse(AsmParser &parser) {
   if (parser.parseGreater())
     return {};
   return RefType::get(parser.getContext(), component, isMutable, via,
-                      isBefore, isOptional, isDirect, isAfter, hops);
+                      isBefore, isOptional, isDirect, isAfter, hops, path);
 }
 
 void RefType::print(AsmPrinter &printer) const {
   printer << "<" << getComponent();
   if (getIsMutable())
     printer << ", mut";
-  if (getVia())
+  if (hasPath())
+    printer << ", path " << getPath();
+  else if (getVia())
     printer << (getIsBefore()   ? ", before "
                 : getIsAfter()  ? ", after "
                 : getIsDirect() ? ", parent "

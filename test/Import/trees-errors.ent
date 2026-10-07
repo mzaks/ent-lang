@@ -253,8 +253,30 @@ component Body { x: f32 }
 relation (Body)-[Orbits]->(Body) tree capacity 8
 default_capacity 8
 system s() {
-  // expected-error @+1 {{arrows go on only up a tree, parent by parent: '(name)-[R]->(mid: C)-[R]->(far: C)'}}
-  for (b: Body)-[Orbits*]->(p: Body)-[Orbits]->(g: Body) {
+  // expected-error @+1 {{arrows go on only up, from the visited entity: '(name)-[R]->(mid: C)-[R]->(far: C)'}}
+  for (b: Body), (p: Body)<-[Orbits]-(b)-[Orbits]->(g: Body) {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation (Body)-[Orbits]->(Body) tree capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{'*' leads to the nearest ancestor that has what its node binds, and this one binds nothing}}
+  for (b: Body)-[Orbits*]->()-[Orbits]->(g: Body) {
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+relation (Body)-[Orbits]->(Body) tree capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{the event of an entity more than one arrow away is not asked yet}}
+  for (b: Body)-[Orbits]->()-[Orbits]->(g: Body) top down Orbits on changed g {
   }
 }
 

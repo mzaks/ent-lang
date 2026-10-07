@@ -2177,6 +2177,9 @@ LogicalResult Parser::parseFor() {
     bool after = false;
     /// How many arrows up: `(name)-[R]->()-[R]->(far: C)` is two.
     unsigned hops = 1;
+    /// Or the steps to it, where they are not all to a parent along one
+    /// tree (see RefType).
+    ArrayAttr path = {};
   };
   // A relation `up` or `cascade` follows: a tree. (`treeIsOrdered`:
   // whether the one last parsed has its entities in an order.)
@@ -2379,44 +2382,19 @@ LogicalResult Parser::parseFor() {
                      "a loop in the body, 'for (child: C)-[" + relationName +
                          "]->(name) { ... }'");
       }
-      // What a node at the other end of an arrow binds: components of
-      // that entity, and its id if the node names it (which takes a
-      // component to reach it by: what the relation says its ends have,
-      // if the node binds none).
-      std::string endComponent = treeEnds[arrow->sibling ? 0 : 1];
-      auto bindOther = [&](Node &other, unsigned hops) -> LogicalResult {
-        // (`(name)` alone is parsed as bare.)
-        std::string named = other.name;
-        if (!named.empty() && other.bindings.empty()) {
-          if (endComponent.empty())
-            return error(other.loc,
-                         "'" + relationName + "' does not say what the "
-                         "entity at this end has; bind a component of it "
-                         "to reach it by: '(" + named + ", c: C)'");
-          other.bindings.push_back({"$" + named, endComponent, false, {}});
-        }
-        for (Binding &binding : other.bindings) {
-          if (arrow->sibling && binding.mut)
-            return error(other.loc, "a sibling is only read");
-          binding.via = *relation;
-          binding.before = arrow->sibling && !fromOwn;
-          binding.after = arrow->sibling && fromOwn;
-          binding.optional = optional;
-          binding.direct = !arrow->sibling && !nearest;
-          binding.hops = hops;
-          bindings.push_back(binding);
-        }
-        if (!named.empty())
-          otherNames.push_back({named, unsigned(bindings.size() - 1)});
-        return success();
+      // The arrows of the pattern and the nodes they lead to: one, or,
+      // up a tree from the visited entity, several, each a step from the
+      // node before it, along any tree, to the parent or (`*`) to the
+      // nearest ancestor that has what its node binds.
+      struct Link {
+        FlatSymbolRefAttr relation;
+        std::string end; // what the relation says its targets have
+        bool nearest;
+        Node node;
       };
-      Node *last = leftIsOwn ? &*right : &*left;
-      if (failed(bindOther(*last, 1)))
-        return failure();
-      // On up the tree: `(name)-[R]->(mid: C)-[R]->(far: C)`, each arrow
-      // a step from the node before it.
-      unsigned hops = 1;
-      FailureOr<Node> further = failure();
+      SmallVector<Link, 2> links;
+      links.push_back({*relation, treeEnds[arrow->sibling ? 0 : 1], nearest,
+                       leftIsOwn ? *right : *left});
       while (atArrow()) {
         FailureOr<ArrowStart> next = parseArrowStart();
         if (failed(next))
@@ -2426,25 +2404,83 @@ LogicalResult Parser::parseFor() {
             parseTree("an arrow in the head of a 'for'");
         if (failed(nextRelation))
           return failure();
-        if (!leftIsOwn || arrow->sibling || arrow->reversed || nearest ||
-            next->sibling || next->reversed || token.is(Token::Star) ||
-            *nextRelation != *relation)
-          return error(nextAt, "arrows go on only up a tree, parent by "
-                               "parent: '(name)-[R]->(mid: C)-[R]->(far: "
+        if (!leftIsOwn || arrow->sibling || arrow->reversed ||
+            next->sibling || next->reversed)
+          return error(nextAt, "arrows go on only up, from the visited "
+                               "entity: '(name)-[R]->(mid: C)-[R]->(far: "
                                "C)'");
+        bool star = consumeIf(Token::Star);
         if (failed(parseArrowEnd(*next)))
           return failure();
-        further = parseNode();
+        FailureOr<Node> further = parseNode();
         if (failed(further))
           return failure();
-        last = &*further;
-        if (failed(bindOther(*last, ++hops)))
-          return failure();
+        links.push_back({*nextRelation, treeEnds[1], star, *further});
       }
-      if (last->name.empty() && last->bindings.empty())
-        return error(last->loc, "the other end of an arrow binds what is "
-                                "read of it, or names it: '(outer: C)', "
-                                "'(parent)'");
+      // A node that only names its entity is reached by a component the
+      // relation says that end has.
+      for (Link &link : links) {
+        Node &node = link.node;
+        if (node.name.empty() || !node.bindings.empty())
+          continue;
+        if (link.end.empty())
+          return error(node.loc,
+                       "'" + link.relation.getValue().str() +
+                           "' does not say what the entity at this end has; "
+                           "bind a component of it to reach it by: '(" +
+                           node.name + ", c: C)'");
+        node.bindings.push_back({"$" + node.name, link.end, false, {}});
+      }
+      Node &last = links.back().node;
+      if (last.bindings.empty())
+        return error(last.loc, "the other end of an arrow binds what is "
+                               "read of it, or names it: '(outer: C)', "
+                               "'(parent)'");
+      // Plain arrows along one tree are so many steps to a parent. With a
+      // `*` among several arrows or to a node that binds several
+      // components, or with more than one tree, the way is a path: its
+      // steps, and for `*` what the ancestor is to have.
+      SmallVector<Attribute> steps;
+      bool plain = true;
+      for (auto [index, link] : llvm::enumerate(links)) {
+        Node &node = link.node;
+        if (link.nearest && node.bindings.empty())
+          return error(node.loc, "'*' leads to the nearest ancestor that "
+                                 "has what its node binds, and this one "
+                                 "binds nothing");
+        SmallVector<Attribute, 4> step{
+            builder.getStringAttr(link.nearest ? "up" : "parent"),
+            link.relation};
+        if (link.nearest)
+          for (Binding &binding : node.bindings)
+            step.push_back(symbol(binding.component));
+        steps.push_back(builder.getArrayAttr(step));
+        plain &= link.relation == *relation &&
+                 (!link.nearest ||
+                  (links.size() == 1 && node.bindings.size() == 1));
+        for (Binding &binding : node.bindings) {
+          if (arrow->sibling && binding.mut)
+            return error(node.loc, "a sibling is only read");
+          binding.via = *relation;
+          binding.optional = optional;
+          if (plain) {
+            binding.before = arrow->sibling && !fromOwn;
+            binding.after = arrow->sibling && fromOwn;
+            binding.direct = !arrow->sibling && !link.nearest;
+            binding.hops = index + 1;
+          } else {
+            if (binding.mut)
+              return error(node.loc, "what a path of several arrows or a "
+                                     "'*' to several components leads to "
+                                     "is only read");
+            binding.direct = true;
+            binding.path = builder.getArrayAttr(steps);
+          }
+          bindings.push_back(binding);
+        }
+        if (!node.name.empty())
+          otherNames.push_back({node.name, unsigned(bindings.size() - 1)});
+      }
     }
     first = false;
     if (!consumeIf(Token::Comma))
@@ -2614,9 +2650,11 @@ LogicalResult Parser::parseFor() {
           if (*kind != "changed")
             return error(componentAt, "only 'changed' can be asked of "
                                       "another entity");
+          if (bound->path || bound->hops != 1)
+            return error(componentAt, "the event of an entity more than "
+                                      "one arrow away is not asked yet");
           if (bound->after)
-            return error(componentAt, "the event of the sibling after is "
-                                      "not asked yet");
+            entry.push_back(builder.getStringAttr("after"));
           if (bound->before)
             entry.push_back(builder.getStringAttr("before"));
           entry.push_back(bound->via);
@@ -2660,7 +2698,8 @@ LogicalResult Parser::parseFor() {
     block->addArgument(
         RefType::get(context, symbol(binding.component), binding.mut,
                      binding.via, binding.before, binding.optional,
-                     binding.direct, binding.after, binding.hops),
+                     binding.direct, binding.after, binding.hops,
+                     binding.path),
         loc(at));
   Operation *query = builder.create(state);
 

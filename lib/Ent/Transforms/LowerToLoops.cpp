@@ -612,6 +612,10 @@ public:
     return view(relation.siblingsBeforeOffset, layout.entityKeys,
                 offsetType(relation));
   }
+  Value siblingsAfter(const WorldRelation &relation) {
+    return view(relation.siblingsAfterOffset, layout.entityKeys,
+                offsetType(relation));
+  }
   /// Per entity key, the tick at which the entity last gained or lost a
   /// child in the tree.
   Value childTicks(const WorldRelation &relation) {
@@ -1573,6 +1577,11 @@ static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
                             FlatSymbolRefAttr component,
                             const WorldArchetype &archetype, Value row,
                             bool after);
+static std::pair<Value, Value> emitParent(IRRewriter &rewriter, Location loc,
+                                          const WorldLayout &layout,
+                                          WorldAccess &world,
+                                          const WorldRelation &relation,
+                                          Value id);
 namespace {
 /// Bounds that ids are checked against, loaded ahead by a caller that
 /// knows they cannot change (see emitLocate).
@@ -1720,7 +1729,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
       }
       // Another sibling before it than it had, for a trigger before a
       // tree (that sibling's own events join below, with the ancestors').
-      if (trigger.where == Trigger::Before) {
+      if (trigger.where == Trigger::Before ||
+          trigger.where == Trigger::After) {
         const WorldRelation &tree =
             layout.getRelation(trigger.via.getAttr());
         if (tree.siblingTicksOffset)
@@ -1792,7 +1802,84 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         layout.getRelation(refType.getVia().getAttr());
     KnownParent known = parent.relation == &relation ? parent : KnownParent();
     Ancestor ancestor;
-    if (refType.getIsBefore() || refType.getIsAfter()) {
+    if (refType.hasPath()) {
+      // Step by step from the entity: to a parent, or to the nearest
+      // ancestor that has what the step names, each along its own tree.
+      Type i1 = rewriter.getI1Type();
+      Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+      Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+      Value own = world.entityId(loc, archetype, entity);
+      Value at = own, has = yes;
+      // Whether the entity `id` is alive and has `component`.
+      auto holds = [&](Value id, FlatSymbolRefAttr component) -> Value {
+        return emitLocate(
+            rewriter, loc, layout, world, id,
+            [](const WorldArchetype &) { return true; }, component,
+            TypeRange{i1},
+            [&](const WorldArchetype &home, Value,
+                Value present) -> SmallVector<Value> {
+              if (!ArchetypeOp(home.op).contains(component))
+                return {no};
+              return {present ? present : yes};
+            },
+            [&]() -> SmallVector<Value> { return {no}; })[0];
+      };
+      for (Attribute attr : refType.getPath()) {
+        auto step = cast<ArrayAttr>(attr);
+        const WorldRelation &tree =
+            layout.getRelation(cast<FlatSymbolRefAttr>(step[1]).getAttr());
+        // (Where a step before led nowhere, the entity is asked in its
+        // place, to no effect.)
+        Value from = arith::SelectOp::create(rewriter, loc, has, at, own);
+        if (cast<StringAttr>(step[0]).getValue() == "parent") {
+          auto [more, next] =
+              emitParent(rewriter, loc, layout, world, tree, from);
+          has = arith::AndIOp::create(rewriter, loc, has, more);
+          at = next;
+          continue;
+        }
+        // Up: parent by parent, until one has all the step names.
+        auto [first, parentOf] =
+            emitParent(rewriter, loc, layout, world, tree, from);
+        auto climb = scf::WhileOp::create(
+            rewriter, loc, TypeRange{world.idType(), i1, i1},
+            ValueRange{parentOf, no,
+                       arith::AndIOp::create(rewriter, loc, has, first)},
+            [&](OpBuilder &builder, Location, ValueRange state) {
+              scf::ConditionOp::create(builder, loc, state[2], state);
+            },
+            [&](OpBuilder &, Location, ValueRange state) {
+              Value all = yes;
+              for (Attribute part : step.getValue().drop_front(2))
+                all = arith::AndIOp::create(
+                    rewriter, loc, all,
+                    holds(state[0], cast<FlatSymbolRefAttr>(part)));
+              auto further = scf::IfOp::create(
+                  rewriter, loc, TypeRange{world.idType(), i1}, all,
+                  /*withElseRegion=*/true);
+              {
+                OpBuilder::InsertionGuard guard(rewriter);
+                rewriter.setInsertionPointToStart(further.thenBlock());
+                scf::YieldOp::create(rewriter, loc, ValueRange{state[0], no});
+                rewriter.setInsertionPointToStart(further.elseBlock());
+                auto [more, next] =
+                    emitParent(rewriter, loc, layout, world, tree, state[0]);
+                scf::YieldOp::create(rewriter, loc, ValueRange{next, more});
+              }
+              scf::YieldOp::create(
+                  rewriter, loc,
+                  ValueRange{further.getResult(0), all,
+                             further.getResult(1)});
+            });
+        has = arith::AndIOp::create(rewriter, loc, has, climb.getResult(1));
+        at = climb.getResult(0);
+      }
+      at = arith::SelectOp::create(rewriter, loc, has, at,
+                                   world.noEntity(loc));
+      ancestor = {arith::AndIOp::create(rewriter, loc, has,
+                                        holds(at, refType.getComponent())),
+                  at, /*trusted=*/false, {}, Value(), Value()};
+    } else if (refType.getIsBefore() || refType.getIsAfter()) {
       // The sibling before or after, by the tree's links.
       ancestor = emitSibling(rewriter, loc, layout, world, relation,
                              refType.getComponent(), archetype, entity,
@@ -1857,9 +1944,10 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
       for (const Trigger &trigger : getTriggers(query)) {
         if (trigger.via != refType.getVia() ||
             trigger.component != refType.getComponent() ||
-            trigger.where !=
-                (refType.getIsBefore() ? Trigger::Before : Trigger::Up) ||
-            refType.getIsAfter())
+            trigger.where != (refType.getIsBefore()  ? Trigger::Before
+                              : refType.getIsAfter() ? Trigger::After
+                                                     : Trigger::Up) ||
+            refType.hasPath())
           continue;
         Stamp stamp = getStamp(trigger);
         Type i64 = rewriter.getI64Type();
@@ -1922,8 +2010,11 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
             arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
                                   seen, zero),
             zero, arith::AddIOp::create(rewriter, loc, seen, one));
-        fires(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
-                                    stamped, passed));
+        // (The sibling after is visited after the entity: what this query
+        // did to it the last time has not been taken in, and counts.)
+        fires(arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sgt, stamped,
+            trigger.where == Trigger::After ? seen : passed));
       }
   }
   // A trigger down a tree: an event of one of the entity's children,
@@ -4414,13 +4505,15 @@ struct LinkedTree {
     Value parent = world.entityKey(loc, load(targets(), slot));
     Value previous = load(previousSibling(), slot);
     Value next = load(nextSibling(), slot);
-    // (The one after it has another sibling before it from here on.)
+    // (The one after it has another sibling before it from here on, and
+    // the one before it another after it.)
     if (relation.siblingTicksOffset)
-      branch(negate(isNone(next)), [&] {
-        store(world.currentTick(loc), world.siblingTicks(relation),
-              arith::SubIOp::create(rewriter, loc, world.toIndex(loc, next),
-                                    one));
-      });
+      for (Value neighbour : {next, previous})
+        branch(negate(isNone(neighbour)), [&] {
+          store(world.currentTick(loc), world.siblingTicks(relation),
+                arith::SubIOp::create(rewriter, loc,
+                                      world.toIndex(loc, neighbour), one));
+        });
     auto before = [&](Value linkValue) {
       return arith::SubIOp::create(rewriter, loc,
                                    world.toIndex(loc, linkValue), one)
@@ -4814,6 +4907,8 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
     tree.forEach(zero, keys, [&](Value key) {
       tree.store(tree.load(tree.previousSibling(), key),
                  world.siblingsBefore(relation), key);
+      tree.store(tree.load(tree.nextSibling(), key),
+                 world.siblingsAfter(relation), key);
     });
   // The edges that stay, counted, and every link cleared.
   tree.store(tree.i64(0), world.edgeCount(relation), zero);
@@ -4980,10 +5075,13 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
   if (relation.siblingTicksOffset)
     tree.forEach(zero, keys, [&](Value key) {
       tree.branch(
-          tree.both(hasEdge(key),
-                    tree.negate(tree.same(
-                        tree.load(tree.previousSibling(), key),
-                        tree.load(world.siblingsBefore(relation), key)))),
+          tree.both(
+              hasEdge(key),
+              tree.negate(tree.both(
+                  tree.same(tree.load(tree.previousSibling(), key),
+                            tree.load(world.siblingsBefore(relation), key)),
+                  tree.same(tree.load(tree.nextSibling(), key),
+                            tree.load(world.siblingsAfter(relation), key))))),
           [&] {
             tree.store(world.currentTick(loc), world.siblingTicks(relation),
                        key);

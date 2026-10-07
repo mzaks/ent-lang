@@ -128,7 +128,7 @@ struct Trigger {
   /// `before @R`, the sibling before's (the one a ref `before @R` leads
   /// to), or `down @R`, that of any of its children.
   FlatSymbolRefAttr via = {};
-  enum Where { Own, Up, Down, Before };
+  enum Where { Own, Up, Down, Before, After };
   Where where = Own;
 };
 

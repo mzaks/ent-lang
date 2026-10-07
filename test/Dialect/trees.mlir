@@ -117,6 +117,17 @@ ent.system @reach() {
   }
 }
 
+// A path of steps, along two trees, and an event of the sibling after.
+// CHECK-LABEL: ent.system @far() {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Node, mut>, %{{.*}}: !ent.ref<@Mark, path {{\[\[}}"parent", @Row], ["up", @Under, @Mark, @Node]]>, %{{.*}}: !ent.ref<@Node, after @Row>) on [changed @Node "total" after @Row] {
+ent.system @far() {
+  ent.query (%n: !ent.ref<@Node, mut>,
+             %m: !ent.ref<@Mark, path [["parent", @Row], ["up", @Under, @Mark, @Node]]>,
+             %a: !ent.ref<@Node, after @Row>)
+      on [changed @Node "total" after @Row] {
+  }
+}
+
 // A tree whose entities are stored in its order.
 // CHECK: ent.relation @In (w: f32) from @Cell to @Cell tree sorted capacity 8
 ent.component @Cell (v: f32)

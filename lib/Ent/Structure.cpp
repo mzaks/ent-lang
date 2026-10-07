@@ -206,8 +206,9 @@ SmallVector<Trigger> mlir::ent::getTriggers(QueryOp query) {
       if (auto capacity = dyn_cast<IntegerAttr>(extra)) {
         logCapacity = capacity.getInt();
       } else if (auto direction = dyn_cast<StringAttr>(extra)) {
-        where = direction.getValue() == "down" ? Trigger::Down
-                                                : Trigger::Before;
+        where = direction.getValue() == "down"    ? Trigger::Down
+                : direction.getValue() == "after" ? Trigger::After
+                                                  : Trigger::Before;
       } else {
         via = cast<FlatSymbolRefAttr>(extra);
         if (where == Trigger::Own)

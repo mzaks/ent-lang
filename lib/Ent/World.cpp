@@ -112,12 +112,13 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
       // to, not passed down.)
       llvm::any_of(query.getBody().getArgumentTypes(), [&](Type type) {
         auto ref = dyn_cast<RefType>(type);
-        return ref && ref.getHops() != 1;
+        return ref && (ref.getHops() != 1 || ref.hasPath());
       }))
     return false;
   for (const Trigger &trigger : triggers) {
     // (Events of children and of siblings are not followed yet.)
-    if (trigger.where == Trigger::Down || trigger.where == Trigger::Before)
+    if (trigger.where == Trigger::Down || trigger.where == Trigger::Before ||
+        trigger.where == Trigger::After)
       return false;
     if (!findLog(getStamp(trigger)))
       return false;
@@ -625,7 +626,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
             trigger.via.getAttr() != RelationOp(relation.op).getSymNameAttr())
           continue;
         asked |= trigger.where == Trigger::Down;
-        siblings |= trigger.where == Trigger::Before;
+        siblings |= trigger.where == Trigger::Before ||
+                    trigger.where == Trigger::After;
       }
     });
     if (asked) {
@@ -641,6 +643,9 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
           {relation.siblingTicksOffset, uint64_t(8 * layout.entityKeys)});
       relation.siblingsBeforeOffset = llvm::alignTo(end, kColumnAlignment);
       end = relation.siblingsBeforeOffset +
+            relation.offsetBits / 8 * layout.entityKeys;
+      relation.siblingsAfterOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.siblingsAfterOffset +
             relation.offsetBits / 8 * layout.entityKeys;
     }
   }

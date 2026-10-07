@@ -1026,7 +1026,7 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
       SmallVector<Attribute, 4> entry{builder.getStringAttr(kind), component,
                                       builder.getStringAttr(field)};
       // `up @R`, `down @R`, `before @R`: whose event along the tree.
-      for (StringRef direction : {"up", "down", "before"}) {
+      for (StringRef direction : {"up", "down", "before", "after"}) {
         if (failed(parser.parseOptionalKeyword(direction)))
           continue;
         FlatSymbolRefAttr via;
@@ -1222,17 +1222,22 @@ LogicalResult QueryOp::verify() {
     if (sibling && refType.getIsMutable())
       return emitOpError("binds ")
              << refType << "; a sibling is only read";
+    if (refType.hasPath() && refType.getIsMutable())
+      return emitOpError("binds ")
+             << refType << "; what a path of steps leads to is only read";
     if (refType.isUp()) {
       // An ancestor's component (or a sibling's): another entity's, so it
       // may also be bound or filtered by for the entity itself.
       // (Each way to another entity apart: up by its steps, before,
       // after.)
-      Attribute way = Builder(getContext())
-                          .getI64IntegerAttr(refType.getIsBefore()  ? -1
-                                             : refType.getIsAfter() ? -2
-                                             : refType.getIsDirect()
-                                                   ? refType.getHops()
-                                                   : 0);
+      Attribute way = refType.hasPath()
+                          ? Attribute(refType.getPath())
+                          : Builder(getContext())
+                                .getI64IntegerAttr(
+                                    refType.getIsBefore()   ? -1
+                                    : refType.getIsAfter()  ? -2
+                                    : refType.getIsDirect() ? refType.getHops()
+                                                            : 0);
       if (!seenWays.insert({refType.getComponent(), refType.getVia(), way})
                .second)
         return emitOpError("binds component ")
@@ -1336,6 +1341,10 @@ LogicalResult QueryOp::verify() {
     bool ordered = getCascade() == refType.getVia() &&
                    !(refType.getIsBefore() && isLeavesFirst()) &&
                    !refType.getIsAfter();
+    // (A path is up the tree the query goes along, all of it, or not.)
+    if (refType.hasPath())
+      for (Attribute step : refType.getPath())
+        ordered &= cast<ArrayAttr>(step)[1] == getCascade();
     Operation *writer = nullptr;
     StringRef what;
     getBody().walk([&](Operation *op) {
@@ -1398,45 +1407,42 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
              << trigger.field.getValue() << "'";
     if (trigger.via) {
       // Another entity's event along a tree: of the ancestor a ref up it
-      // binds, of the sibling a ref before it binds, or of a child.
-      StringRef direction = trigger.where == Trigger::Down     ? "down"
-                            : trigger.where == Trigger::Before ? "before"
-                                                               : "up";
+      // binds, of the sibling a ref before or after it binds, or of a
+      // child.
+      bool before = trigger.where == Trigger::Before;
+      bool after = trigger.where == Trigger::After;
+      bool down = trigger.where == Trigger::Down;
+      StringRef direction =
+          down ? "down" : before ? "before" : after ? "after" : "up";
       if (trigger.kind != Trigger::Changed)
         return emitOpError("reacts to ")
-               << (trigger.where == Trigger::Down     ? "a child"
-                   : trigger.where == Trigger::Before ? "the sibling before"
-                                                      : "an ancestor")
+               << (down     ? "a child"
+                   : before ? "the sibling before"
+                   : after  ? "the sibling after"
+                            : "an ancestor")
                << " gaining or losing " << trigger.component
-               << "; only 'changed' can be '"
-               << direction << "' a tree";
-      if (getCascade() != trigger.via)
+               << "; only 'changed' can be '" << direction << "' a tree";
+      // (The sibling after is not visited first whichever way the query
+      // goes: its events count like the entity's own, the next time.)
+      if (!after && getCascade() != trigger.via)
         return emitOpError("reacts to changed ")
                << trigger.component << " " << direction << " " << trigger.via
                << " without 'cascade " << trigger.via
                << "': the other entity is seen to change where it is "
                << "visited first";
-      if (trigger.where == Trigger::Down) {
+      auto relation =
+          symbolTable.lookupNearestSymbolFrom<RelationOp>(*this, trigger.via);
+      if (trigger.where != Trigger::Up && relation && relation.getSorted())
+        return emitOpError("reacts to changed ")
+               << trigger.component << " " << direction << " " << trigger.via
+               << ", a sorted tree, which is not supported yet";
+      if (down) {
         if (!isLeavesFirst())
           return emitOpError("reacts to changed ")
                  << trigger.component << " down " << trigger.via
                  << " without 'leaves first': children are visited first "
                  << "only then";
-        auto relation = symbolTable.lookupNearestSymbolFrom<RelationOp>(
-            *this, trigger.via);
-        if (relation && relation.getSorted())
-          return emitOpError("reacts to changed ")
-                 << trigger.component << " down " << trigger.via
-                 << ", a sorted tree, which is not supported yet";
       } else {
-        bool before = trigger.where == Trigger::Before;
-        if (before)
-          if (auto relation = symbolTable.lookupNearestSymbolFrom<RelationOp>(
-                  *this, trigger.via);
-              relation && relation.getSorted())
-            return emitOpError("reacts to changed ")
-                   << trigger.component << " before " << trigger.via
-                   << ", a sorted tree, which is not supported yet";
         if (before && isLeavesFirst())
           return emitOpError("reacts to changed ")
                  << trigger.component << " before " << trigger.via
@@ -1445,7 +1451,8 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
         bool bound =
             llvm::any_of(getBody().getArgumentTypes(), [&](Type type) {
               auto ref = cast<RefType>(type);
-              return ref.getVia() == trigger.via && !ref.getIsAfter() &&
+              return ref.getVia() == trigger.via && !ref.hasPath() &&
+                     ref.getIsAfter() == after &&
                      ref.getIsBefore() == before &&
                      ref.getComponent() == trigger.component;
             });
@@ -1455,7 +1462,7 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
                  << trigger.via << ", but binds no '!ent.ref<"
                  << trigger.component << ", " << direction << " "
                  << trigger.via << ">': the "
-                 << (before ? "sibling" : "ancestor")
+                 << (before || after ? "sibling" : "ancestor")
                  << " is the one such a ref leads to";
       }
     }
@@ -1514,6 +1521,31 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
                           : refType.getIsAfter() ? "binds after"
                                                  : "binds up")))
       return failure();
+    if (refType.hasPath())
+      for (Attribute attr : refType.getPath()) {
+        auto step = cast<ArrayAttr>(attr);
+        StringRef kind = cast<StringAttr>(step[0]).getValue();
+        if (kind != "parent" && kind != "up")
+          return emitOpError("binds by a path with a step '")
+                 << kind << "'; expected 'parent' or 'up'";
+        if (failed(verifyTree(cast<FlatSymbolRefAttr>(step[1]),
+                              "binds by a path up")))
+          return failure();
+        if ((kind == "up") != (step.size() > 2))
+          return emitOpError("binds by a path whose step '")
+                 << kind << "' "
+                 << (kind == "up" ? "names no component: it leads to the "
+                                    "nearest ancestor that has those it "
+                                    "names"
+                                  : "names components, which only 'up' "
+                                    "looks for");
+        for (Attribute part : step.getValue().drop_front(2))
+          if (!lookupComponent(symbolTable, *this,
+                               cast<FlatSymbolRefAttr>(part)))
+            return emitOpError("binds by a path that looks for unknown "
+                               "component ")
+                   << part;
+      }
     if ((refType.getIsBefore() || refType.getIsAfter()) &&
         !symbolTable
              .lookupNearestSymbolFrom<RelationOp>(*this, refType.getVia())

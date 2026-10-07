@@ -470,6 +470,18 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
         if (!refType.isUp())
           continue;
         followTree(query, refType.getVia());
+        // (And every tree a path goes up, with what it looks for there.)
+        if (refType.hasPath())
+          for (Attribute attr : refType.getPath()) {
+            auto step = cast<ArrayAttr>(attr);
+            followTree(query, cast<FlatSymbolRefAttr>(step[1]));
+            for (Attribute part : step.getValue().drop_front(2))
+              for (ArchetypeOp archetype : archetypes)
+                if (archetype.isOptional(cast<FlatSymbolRefAttr>(part)))
+                  access.reads.insert(
+                      {archetype.getSymNameAttr(),
+                       cast<FlatSymbolRefAttr>(part).getAttr(), presence});
+          }
         for (ArchetypeOp archetype : archetypes)
           if (archetype.isOptional(refType.getComponent()))
             access.reads.insert({archetype.getSymNameAttr(),

@@ -190,10 +190,16 @@ for with Enemy { Count += 1 }     // nor the entity
   same parent that comes right before the entity in a tree whose children
   are in an order (`tree ordered by`), if it has the component. It is
   read, never written.
-- Arrows go on up the tree, parent by parent:
-  `(b: Box)-[Inside]->(outer: Box)-[Inside]->(far: Box)` binds the
-  parent's and the parent's parent's, and a node on the way may be left
-  empty, `()`, where nothing of it is read.
+- Arrows go on up from the visited entity, each a step from the node
+  before it: `(b: Box)-[Inside]->(outer: Box)-[Inside]->(far: Box)` binds
+  the parent's and the parent's parent's, and a node on the way may be
+  left empty, `()`, where nothing of it is read. A step may be `*`, to
+  the nearest ancestor of the node before it that has all its node binds
+  (`(t: Thing)-[Inside]->(floor: Thing)-[Inside*]->(c: Tint)`: the
+  nearest above the floor with a `Tint`), and may be along another tree
+  (`(room)-[Inside]->(home)-[Feeds]->(p: Power)`). What several arrows,
+  or a `*` to a node that binds several components, lead to is read,
+  not written.
 - The other way along the siblings, `(b)~[Inside]~>(next: Box)` binds the
   sibling after. It is yet to be visited: a `for` does not read from it a
   field it writes.
@@ -522,6 +528,11 @@ thereby passed down: the next time it runs that is no event.
 
 - Only `changed` can be asked of another entity; the `for` must go along
   the tree the binding is reached by.
+- `changed next`, of a binding to the sibling after, runs the `for` for
+  a node whose sibling after had the event, or which has another sibling
+  after it than it had. That sibling is visited after the node whichever
+  way the `for` goes, so its events count like the node's own: the next
+  time the `for` runs. The `for` need not go along the tree.
 - `changed prev`, of a binding from the sibling before, is the same for
   that sibling: the `for` runs for a node whose
   sibling before had the event, also in the same pass, or which has
@@ -547,8 +558,8 @@ thereby passed down: the next time it runs that is no event.
   that feed each other (as in `examples/layout.ent`, where sizes go up
   the tree and room comes down) write only what differs
   (`if b.w != w { b.w = w }`), or each would set the other off for good.
-- Triggers on children and on the sibling before are for unsorted trees
-  so far, and
+- Triggers on children and on siblings are for unsorted trees so far;
+  one on what several arrows lead to is not there yet; and
   a `for` with one goes through its whole tree, running its body where a
   trigger fired.
 - What a node sees through the binding also changes when the node is

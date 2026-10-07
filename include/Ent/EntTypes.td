@@ -31,6 +31,15 @@ def Ent_RefType : Ent_Type<"Ref", "ref"> {
     that many steps up: the parent's parent, and so on, whatever those on
     the way have.
 
+    With a path
+    (`!ent.ref<@Position, path [["parent", @ChildOf], ["up", @Owns, @Tint]]>`)
+    the entity is reached step by step from the visited one, each step
+    along a tree of its own: `"parent"` to the parent, `"up"` to the
+    nearest ancestor that has all of the components the step names. The
+    ref is to the component of the entity the last step leads to, and to
+    nothing if a step leads nowhere or that entity does not have it. It
+    is read only.
+
     `!ent.ref<@Position, after @ChildOf>` is the sibling after, as
     `before` is the one before. A query never reads through it a field it
     writes: that sibling is yet to be visited.
@@ -48,23 +57,24 @@ def Ent_RefType : Ent_Type<"Ref", "ref"> {
   let parameters = (ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
                         "FlatSymbolRefAttr":$via, "bool":$isBefore,
                         "bool":$isOptional, "bool":$isDirect,
-                        "bool":$isAfter, "unsigned":$hops);
+                        "bool":$isAfter, "unsigned":$hops,
+                        "ArrayAttr":$path);
   let hasCustomAssemblyFormat = 1;
   let builders = [
     TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable), [{
       return $_get($_ctxt, component, isMutable, ::mlir::FlatSymbolRefAttr(),
-                   false, false, false, false, 1u);
+                   false, false, false, false, 1u, ::mlir::ArrayAttr());
     }]>,
     TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
                      "FlatSymbolRefAttr":$via), [{
       return $_get($_ctxt, component, isMutable, via, false, false, false,
-                   false, 1u);
+                   false, 1u, ::mlir::ArrayAttr());
     }]>,
     TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
                      "FlatSymbolRefAttr":$via, "bool":$isBefore,
                      "bool":$isOptional), [{
       return $_get($_ctxt, component, isMutable, via, isBefore, isOptional,
-                   false, false, 1u);
+                   false, false, 1u, ::mlir::ArrayAttr());
     }]>
   ];
   let extraClassDeclaration = [{
@@ -72,6 +82,9 @@ def Ent_RefType : Ent_Type<"Ref", "ref"> {
     /// tree: an ancestor (`up @Relation`) or, with `isBefore`, the
     /// sibling before (`before @Relation`).
     bool isUp() const { return static_cast<bool>(getVia()); }
+    /// Whether the entity is reached by a path of steps (`path [...]`):
+    /// `getVia` is then the tree of its first step.
+    bool hasPath() const { return getPath() && !getPath().empty(); }
   }];
 }
 

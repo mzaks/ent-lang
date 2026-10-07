@@ -384,3 +384,25 @@ ent.system @s() {
   }
 }
 
+// -----
+
+ent.component @N (v: i32)
+ent.relation @R () tree capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  // expected-error @+1 {{binds by a path whose step 'up' names no component: it leads to the nearest ancestor that has those it names}}
+  ent.query (%n: !ent.ref<@N>, %p: !ent.ref<@N, path [["parent", @R], ["up", @R]]>) {
+  }
+}
+
+// -----
+
+ent.component @N (v: i32)
+ent.relation @R () tree ordered by @N "v" capacity 4
+ent.archetype @A (@N) capacity 4
+ent.system @s() {
+  // expected-error @+1 {{reacts to changed @N after @R, but binds no '!ent.ref<@N, after @R>': the sibling is the one such a ref leads to}}
+  ent.query (%n: !ent.ref<@N>) on [changed @N after @R] {
+  }
+}
+

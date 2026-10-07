@@ -1,0 +1,37 @@
+// Arrows that go on up with `*` among them and along more than one tree,
+// and a `for` that reacts to the sibling after
+// (Inputs/tree_paths.ent).
+// RUN: %ent run %S/Inputs/tree_paths.ent 2>/dev/null | FileCheck %s
+
+//   house(7) -- ground -- hall        house -Feeds-> fuse (60 watts)
+//           |          `- den
+//           `- upper(3) -- bed
+// The parent, then from there the nearest with a colour: the floor's own
+// is not asked, so the bed gets the house's, not `upper`'s.
+// CHECK:      hall in ground, coloured 7
+// CHECK-NEXT: den in ground, coloured 7
+// CHECK-NEXT: bed in upper, coloured 7
+// The nearest with a colour, and what that is in: only the bed has one
+// that is in something.
+// CHECK-NEXT: bed: 3 of upper in house
+// Up one tree and on along another.
+// CHECK-NEXT: upper in house on 60 watts
+// CHECK-NEXT: ground in house on 60 watts
+// The first time, every thing with a sibling after it: ground and hall.
+// Then the den changes, which the hall is before.
+// CHECK-NEXT: 2: house 0
+// CHECK-NEXT: 2: fuse 0
+// CHECK-NEXT: 2: ground 1
+// CHECK-NEXT: 2: upper 0
+// CHECK-NEXT: 2: hall 2
+// CHECK-NEXT: 2: den 0
+// CHECK-NEXT: 2: bed 0
+// Nothing changes: nothing runs.
+// CHECK-NEXT: 3: house 0
+// CHECK-NEXT: 3: fuse 0
+// CHECK-NEXT: 3: ground 1
+// CHECK-NEXT: 3: upper 0
+// CHECK-NEXT: 3: hall 2
+// CHECK-NEXT: 3: den 0
+// CHECK-NEXT: 3: bed 0
+// CHECK-NOT:  {{.}}

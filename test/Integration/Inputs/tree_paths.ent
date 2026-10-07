@@ -1,0 +1,57 @@
+// Arrows that go on up, with `*` among them and along two trees
+// (tree_paths.test), and a `for` that reacts to the sibling after.
+//
+// Rooms in floors in a house (Inside), and the house fed by a fuse
+// (Feeds). Only some things have a colour, and only the fuse has power.
+import console
+
+component Thing { name: text[8], at: i32, seen: i32 }
+component Tint { colour: i32 }
+component Power { watts: i32 }
+default_capacity 16
+relation (Thing)-[Inside]->(Thing) tree ordered by Thing.at capacity 16
+relation (Thing)-[Feeds]->(Thing) tree capacity 16
+unique Frame: i32
+
+world {
+  let house = spawn { Thing { name: "house", at: 0, seen: 0 }, Tint { colour: 7 } }
+  let ground = spawn { Thing { name: "ground", at: 0, seen: 0 } }
+  let upper = spawn { Thing { name: "upper", at: 1, seen: 0 }, Tint { colour: 3 } }
+  let hall = spawn { Thing { name: "hall", at: 0, seen: 0 } }
+  let den = spawn { Thing { name: "den", at: 1, seen: 0 } }
+  let bed = spawn { Thing { name: "bed", at: 0, seen: 0 } }
+  connect (ground)-[Inside]->(house)<-[Inside]-(upper)
+  connect (hall)-[Inside]->(ground)<-[Inside]-(den)
+  connect (bed)-[Inside]->(upper)
+  let fuse = spawn { Thing { name: "fuse", at: 0, seen: 0 }, Power { watts: 60 } }
+  connect (house)-[Feeds]->(fuse)
+}
+
+system show() {
+  Frame += 1
+  // From the parent on, the nearest that has a colour: the floor's own
+  // is not asked, so `upper`'s rooms get the house's.
+  for (t: Thing)-[Inside]->(floor: Thing)-[Inside*]->(c: Tint) where Frame == 1 {
+    put("{t.name} in {floor.name}, coloured {c.colour}")
+  }
+  // The nearest with a colour, and what is above that.
+  for (t: Thing)-[Inside*]->(c: Tint, owner: Thing)-[Inside]->(above: Thing)
+      where Frame == 1 {
+    put("{t.name}: {c.colour} of {owner.name} in {above.name}")
+  }
+  // Up one tree and on along another: the fuse of the house a floor is in.
+  for (t: Thing)-[Inside]->(home: Thing)-[Feeds]->(p: Power) where Frame == 1 {
+    put("{t.name} in {home.name} on {p.watts} watts")
+  }
+  // In the second frame the den changes: the hall, which is before it,
+  // is told.
+  for t: mut Thing where Frame == 2 && t.name == "den" { t.at = 5 }
+  for (t: mut Thing), (t)~[Inside]~>(next: Thing) on changed next {
+    t.seen += 1
+  }
+  for t: Thing top down bfs Inside where Frame > 1 { put("{Frame}: {t.name} {t.seen}") }
+  flush()
+}
+
+schedule frame() { show() }
+main { loop { frame() } until Frame == 3 }

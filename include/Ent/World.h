@@ -315,12 +315,13 @@ struct WorldRelation {
   /// as the sort left them, for going through a deep tree by its list.
   uint64_t rowOrderOffset = 0;
   uint64_t rowOrderParentOffset = 0;
-  /// Where a reactive query has a trigger before this tree: per entity
-  /// key the tick at which the entity last got another sibling before it
-  /// (i64), and, while the tree's order is made, the sibling each had
-  /// before (a link).
+  /// Where a reactive query has a trigger before or after this tree: per
+  /// entity key the tick at which the entity last got another sibling
+  /// before it or after it (i64), and, while the tree's order is made,
+  /// the siblings each had before and after (links).
   uint64_t siblingTicksOffset = 0;
   uint64_t siblingsBeforeOffset = 0;
+  uint64_t siblingsAfterOffset = 0;
   /// Where a reactive query has a trigger down this tree: per entity key
   /// the tick at which the entity last gained or lost a child (i64).
   uint64_t childTicksOffset = 0;
