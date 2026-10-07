@@ -283,6 +283,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       entry.sortedCountOffset = end;
       end += 8;
     }
+    if (entry.linked && scheme.hasIds()) {
+      entry.staleOffset = end;
+      end += 8;
+    }
     layout.relations.push_back(std::move(entry));
   }
   end = llvm::alignTo(end, 8);
@@ -549,6 +553,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       };
       relation.orderOffset = perEdge(idBytes);
       relation.orderParentOffset = perEdge(idBytes);
+      if (scheme.hasIds()) {
+        relation.orderLocationOffset = perEdge(scheme.locationBits / 8);
+        relation.orderParentLocationOffset =
+            perEdge(scheme.locationBits / 8);
+      }
       continue;
     }
     auto place = [&](uint64_t bytes, int64_t elements) {

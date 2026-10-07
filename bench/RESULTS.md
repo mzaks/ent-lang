@@ -2343,3 +2343,45 @@ us per step (spread):
   tree, in time by the number of its children.
 - A tree whose relation does not name what its ends have, or whose
   program removes that component: there the checks stay.
+
+## 2026-10-07: rows without the entity table, for a tree whose nodes can go
+
+In a program that destroys entities an id is a slot, and a cascading
+query over an unsorted tree read the entity table twice a node: for the
+node's row and for its parent's. The tree's list now has, next to each
+entity's id and its parent's, the packed location of both, so a walk goes
+to the rows from the list. The locations are noted when an entry is made.
+When rows of an archetype that can hold the tree's entities move (a
+despawn's swap, a move to another archetype, a sorted archetype put in
+order) the tree is marked stale, and where its relation is next looked
+over the locations are read from the entity table again, once. Same
+machine, pinning and flags; 200 steps after 50, medians of 5 processes;
+checksums agree.
+
+us per step (spread); before is the entry above:
+
+| nodes | shape | ent | ent-mortal before | ent-mortal | ent-mortal-sorted | ent-two | ent-two-mortal before | ent-two-mortal |
+|---|---|---|---|---|---|---|---|---|
+| 1e5 | bushy | 46.7 (3%) | 84.1 | 52.0 (2%) | 37.0 (3%) | 62.3 (4%) | 85.8 | 59.7 (2%) |
+| 1e5 | deep | 80.9 (2%) | 90.4 | 81.6 (3%) | 86.0 (1%) | 93.0 (1%) | 93.9 | 86.6 (2%) |
+| 1e5 | shuffled | 55.5 (2%) | 92.6 | 61.9 (3%) | 37.5 (4%) | 66.0 (1%) | 108.2 | 70.8 (2%) |
+| 1e6 | bushy | 685.5 (8%) | 1,991.2 | 907.2 (9%) | 391.4 (2%) | 863.8 (2%) | 2,156.5 | 1,087.8 (6%) |
+| 1e6 | deep | 855.4 (4%) | 967.1 | 876.8 (3%) | 873.6 (1%) | 982.5 (9%) | 1,004.2 | 909.1 (9%) |
+| 1e6 | shuffled | 823.1 (24%) | 2,129.0 | 1,011.8 (20%) | 392.2 (3%) | 952.0 (12%) | 2,335.4 | 1,197.6 (17%) |
+
+### What holds
+
+- The tree whose nodes can go takes 0.46-0.51x the time it took at 1e6
+  bushy and shuffled, and 0.62-0.70x at 1e5.
+- It is left at 1.2-1.3x of the tree whose nodes cannot go at 1e6 bushy
+  and shuffled, 1.0-1.1x at 1e5, and what that one takes when deep: a
+  location to take apart per row, and two more columns of the list to
+  read.
+- Since the first entry on such trees it is 0.23-0.26x in one archetype
+  and 0.13-0.14x in two (3,878 and 7,765 us at 1e6 bushy).
+
+### Not measured
+
+- A step in which rows moved: the locations of the whole list are then
+  read from the entity table once, which should cost about what a step
+  cost before this entry less what it costs now, 1 ms at 1e6.

@@ -626,6 +626,23 @@ public:
   Value sortedCount(const WorldRelation &relation) {
     return scalar(relation.sortedCountOffset);
   }
+  /// A linked tree's list, where ids are not rows: each entity's packed
+  /// location and its parent's, and whether they are stale.
+  Value treeOrderLocations(const WorldRelation &relation, bool parent) {
+    return view(parent ? relation.orderParentLocationOffset
+                       : relation.orderLocationOffset,
+                relation.orderCapacity,
+                rewriter.getIntegerType(layout.entities.locationBits));
+  }
+  Value treeStale(const WorldRelation &relation) {
+    return scalar(relation.staleOffset);
+  }
+  /// The packed location of the entity `id` (in its stored form), from
+  /// the entity table.
+  Value packedLocation(Location loc, Value id) {
+    return memref::LoadOp::create(rewriter, loc, locations(),
+                                  ValueRange{idSlot(loc, id)});
+  }
   /// A view of `elements` values of `type` at `offset`.
   Value array(uint64_t offset, int64_t elements, Type type) {
     return view(offset, elements, type);
@@ -1530,7 +1547,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
       } else {
         ancestor = emitAncestor(rewriter, loc, layout, world, relation,
                                 refType.getComponent(),
-                                world.entityId(loc, archetype, entity));
+                                world.entityId(loc, archetype, entity),
+                                known.id);
       }
     } else {
       if (known.row)
@@ -2082,8 +2100,18 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
                                            Value row, Value present)>
                found,
            function_ref<SmallVector<Value>()> missing,
-           const LocateBounds &bounds = {}, bool trusted = false) {
+           const LocateBounds &bounds = {}, bool trusted = false,
+           Value location = Value()) {
   const EntityScheme &scheme = layout.entities;
+  // (`location`: the trusted entity's packed location, where the caller
+  // has it and the entity table need not be asked.)
+  auto whereAndRow = [&]() -> std::pair<Value, Value> {
+    if (location)
+      return world.unpackLocation(loc, location);
+    return scheme.kind == EntityScheme::Rows
+               ? world.unpackRows(loc, id)
+               : world.getLocation(loc, world.idSlot(loc, id));
+  };
   if (trusted) {
     const WorldArchetype *only = nullptr;
     unsigned candidates = 0;
@@ -2092,17 +2120,10 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
         only = &archetype;
         ++candidates;
       }
-    if (candidates == 1) {
-      Value row = scheme.kind == EntityScheme::Rows
-                      ? world.unpackRows(loc, id).second
-                      : world.getLocation(loc, world.idSlot(loc, id)).second;
-      return found(*only, row, Value());
-    }
+    if (candidates == 1)
+      return found(*only, whereAndRow().second, Value());
     if (candidates > 1) {
-      auto [where, row] =
-          scheme.kind == EntityScheme::Rows
-              ? world.unpackRows(loc, id)
-              : world.getLocation(loc, world.idSlot(loc, id));
+      auto [where, row] = whereAndRow();
       unsigned bits = cast<IntegerType>(where.getType()).getWidth();
       OpBuilder::InsertionGuard guard(rewriter);
       scf::IfOp top;
@@ -3621,6 +3642,12 @@ struct LinkedTree {
     Value at = world.toIndex(loc, length);
     store(id, world.treeOrder(relation), at);
     store(parent, world.treeOrderParents(relation), at);
+    if (relation.hasLocations()) {
+      store(world.packedLocation(loc, id),
+            world.treeOrderLocations(relation, /*parent=*/false), at);
+      store(world.packedLocation(loc, parent),
+            world.treeOrderLocations(relation, /*parent=*/true), at);
+    }
     store(link(arith::AddIOp::create(rewriter, loc, at, one)), position(),
           key);
     store(arith::AddIOp::create(rewriter, loc, length, i64(1)),
@@ -3839,10 +3866,13 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
         tree.branch(
             inOrder,
             [&] {
-              tree.store(target, world.treeOrderParents(relation),
-                         arith::SubIOp::create(rewriter, loc,
-                                               world.toIndex(loc, ownAt),
-                                               one));
+              Value at = arith::SubIOp::create(
+                  rewriter, loc, world.toIndex(loc, ownAt), one);
+              tree.store(target, world.treeOrderParents(relation), at);
+              if (relation.hasLocations())
+                tree.store(
+                    world.packedLocation(loc, target),
+                    world.treeOrderLocations(relation, /*parent=*/true), at);
             },
             moveOrMark);
       },
@@ -4039,6 +4069,29 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
     });
   });
   tree.store(tree.i64(1), world.edgesClean(relation), zero);
+  if (!relation.hasLocations())
+    return;
+  // The list has the entities' and their parents' locations fresh from
+  // being made. Otherwise, where rows have moved since they were noted,
+  // they are read from the entity table again.
+  tree.store(tree.i64(0), world.treeStale(relation), zero);
+  rewriter.setInsertionPointAfter(ifUnclean);
+  Value stale = tree.negate(
+      tree.same(tree.load(world.treeStale(relation), zero), tree.i64(0)));
+  tree.branch(stale, [&] {
+    tree.forEach(zero, world.toIndex(loc, tree.listed()), [&](Value at) {
+      Value id = tree.load(world.treeOrder(relation), at);
+      tree.branch(tree.negate(tree.same(id, world.noEntity(loc))), [&] {
+        tree.store(world.packedLocation(loc, id),
+                   world.treeOrderLocations(relation, /*parent=*/false), at);
+        tree.store(
+            world.packedLocation(
+                loc, tree.load(world.treeOrderParents(relation), at)),
+            world.treeOrderLocations(relation, /*parent=*/true), at);
+      });
+    });
+    tree.store(tree.i64(0), world.treeStale(relation), zero);
+  });
 }
 
 /// Emit the function that, if `relation` is unclean, sorts its edges by
@@ -4605,6 +4658,16 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
               memref::LoadOp::create(rewriter, loc, ids, ValueRange{row});
           world.setLocation(loc, world.idSlot(loc, id), *archetype, row);
         });
+        // Its rows have moved: another tree that keeps a slot for its
+        // entities has their locations to read again.
+        for (const WorldRelation &other : layout.relations)
+          if (other.hasLocations() && canHoldEnd(*archetype, other)) {
+            memref::StoreOp::create(
+                rewriter, loc,
+                arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+                world.treeStale(other), ValueRange{zero});
+            callSort(rewriter, loc, other, world.getArena());
+          }
       }
       if (alone) {
         Value parentRows = world.parentRows(*holders[0]);
@@ -5045,11 +5108,21 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                                 world.noEntity(loc)));
       rewriter.setInsertionPointToStart(ifThere.thenBlock());
     }
-    // The list has each entity's parent next to it.
+    // The list has each entity's parent next to it, and where ids are
+    // not rows, the locations of both.
     KnownParent parent{&relation,
                        memref::LoadOp::create(rewriter, loc,
                                               world.treeOrderParents(relation),
                                               ValueRange{at})};
+    Value location;
+    if (relation.hasLocations()) {
+      location = memref::LoadOp::create(
+          rewriter, loc, world.treeOrderLocations(relation, /*parent=*/false),
+          ValueRange{at});
+      parent.location = memref::LoadOp::create(
+          rewriter, loc, world.treeOrderLocations(relation, /*parent=*/true),
+          ValueRange{at});
+    }
     // The listed entities are sources of edges. Where those cannot die
     // (the relation's sources are trusted, or nothing dies at all) and can
     // only live in one archetype, each is found there without a check.
@@ -5083,7 +5156,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                         /*parallel=*/false, /*directApplies=*/true, parent);
           return {};
         },
-        []() -> SmallVector<Value> { return {}; }, LocateBounds(), certain);
+        []() -> SmallVector<Value> { return {}; }, LocateBounds(), certain,
+        certain ? location : Value());
     hoistResourceReads(rewriter, loop, world);
     if (leavesFirst)
       emitRoots();
@@ -5385,6 +5459,27 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
           rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
           world.edgesClean(tree), ValueRange{zero});
       changedRelations.insert(archetype->sortedBy);
+    }
+    // Rows of this archetype move: the locations that the trees keeping a
+    // slot for its entities have noted are stale, and read again where
+    // the relations are looked over below.
+    for (const WorldRelation &tree : layout.relations) {
+      if (!tree.hasLocations() || !canHoldEnd(*archetype, tree))
+        continue;
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value pending = memref::LoadOp::create(
+          rewriter, loc, world.pendingCount(*archetype), ValueRange{zero});
+      auto ifAny = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::ne, pending,
+              arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(ifAny.thenBlock());
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+          world.treeStale(tree), ValueRange{zero});
+      changedRelations.insert(RelationOp(tree.op).getSymNameAttr());
     }
     applyPending(rewriter, loc, layout, *archetype, world, tick);
   }

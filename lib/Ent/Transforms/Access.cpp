@@ -279,6 +279,26 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       into.insert({archetype.getSymNameAttr(), component, field});
   };
 
+  // The trees that keep a slot for the entities of `archetype` (those
+  // that are not sorted, and whose ends it can hold) are written where
+  // its entities go or its rows move.
+  auto touchesTrees = [&](ArchetypeOp archetype) {
+    for (RelationOp relation :
+         system->getParentOfType<ModuleOp>().getOps<RelationOp>()) {
+      if (!relation.getTree() || relation.getSorted())
+        continue;
+      bool holds = false;
+      for (bool target : {false, true}) {
+        FlatSymbolRefAttr component = relation.getEndpoint(target);
+        holds |= !component || archetype.contains(component);
+      }
+      if (holds)
+        for (const Column &column :
+             relationColumns(relation.getSymNameAttr()))
+          access.writes.insert(column);
+    }
+  };
+
   system.getBody().walk([&](Operation *op) {
     if (auto get = dyn_cast<GetOp>(op))
       return record(op, get.getRef(), get.getFieldAttr(), access.reads);
@@ -317,6 +337,9 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
         if (change.kind == ComponentChange::Move) {
           writeStructure(archetype);
           writeStructure(change.target);
+          // Rows move: a tree that keeps a slot for these entities notes
+          // their locations again.
+          touchesTrees(archetype);
           continue;
         }
         if (change.kind == ComponentChange::Presence) {
@@ -404,20 +427,7 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
         writeStructure(archetype);
         sortsTree(archetype);
         // A tree that is not sorted drops the entity's edges with it.
-        for (RelationOp relation :
-             system->getParentOfType<ModuleOp>().getOps<RelationOp>()) {
-          if (!relation.getTree() || relation.getSorted())
-            continue;
-          bool holds = false;
-          for (bool target : {false, true}) {
-            FlatSymbolRefAttr component = relation.getEndpoint(target);
-            holds |= !component || archetype.contains(component);
-          }
-          if (holds)
-            for (const Column &column :
-                 relationColumns(relation.getSymNameAttr()))
-              access.writes.insert(column);
-        }
+        touchesTrees(archetype);
       }
       return;
     }

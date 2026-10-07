@@ -610,11 +610,15 @@ entries in the list set to all ones), so no edge of the tree has a dead
 end. That makes the ends of a tree's edges trusted whatever the program
 despawns, as long as it does not remove the component the relation names:
 a cascading query over a tree whose nodes can be destroyed finds them and
-their parents without checking a generation. With ids that are slots it
-still goes through the entity table for both, which is what is left of
-the difference to a tree whose nodes cannot go: 2.3-2.9x the time at 1e6
-nodes in a bushy tree, where it was 5.7x (8.9x in two archetypes; see
-`bench/RESULTS.md`). A cascading
+their parents without checking a generation. Its ids are slots, so where
+an entity is would come from the entity table; instead the tree's list has
+each entity's packed location and its parent's next to their ids, noted
+when the entry is made. When rows of an archetype that can hold the tree's
+entities move (a despawn's swap, a move, a sort), the tree is marked
+stale, and where the relation is next looked over the locations are read
+from the entity table again, once. Such a tree takes 1.2-1.3x the time of
+one whose nodes cannot go at 1e6 nodes when bushy, where it took 5.7x
+(8.9x in two archetypes; see `bench/RESULTS.md`). A cascading
 query first runs a loop per archetype for the entities without a parent,
 then walks that list (`leaves first`: the list from its end, then that
 loop), finding each entity by its id, without a check where the

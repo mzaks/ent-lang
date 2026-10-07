@@ -236,6 +236,16 @@ struct WorldRelation {
   /// source for them; a connect of an entity that has one of them sets it
   /// in place.
   uint64_t sortedCountOffset = 0;
+  /// For a linked tree where ids are not rows: next to each entity in the
+  /// list its packed location and its parent's, so a walk of the list
+  /// goes to their rows without the entity table; and in the header (i64)
+  /// whether those are stale, which they are once a row of an archetype
+  /// that can hold the tree's entities has moved. Stale, they are read
+  /// from the entity table again where the relation is next looked over.
+  uint64_t orderLocationOffset = 0;
+  uint64_t orderParentLocationOffset = 0;
+  uint64_t staleOffset = 0;
+  bool hasLocations() const { return orderLocationOffset != 0; }
   /// Elements of the list: an edge each, or for a linked tree twice that,
   /// which leaves room for the entries of entities that moved to its end
   /// (their old ones are all ones, and skipped) before it is made again.
