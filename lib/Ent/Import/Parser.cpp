@@ -908,9 +908,6 @@ LogicalResult Parser::parseRelation() {
       return error(orderedAt, "only a tree's entities have siblings to be "
                               "in an order: 'relation " + *name +
                                   " ... tree ordered by C.f capacity N'");
-    if (sorted)
-      return error(orderedAt, "a tree that is 'sorted' and 'ordered' is not "
-                              "supported yet");
     if (failed(expectKeyword("by")))
       return failure();
     llvm::SMLoc componentAt = token.loc;

@@ -370,9 +370,6 @@ LogicalResult RelationOp::verify() {
     if (!getTree())
       return emitOpError("is 'ordered' but not a 'tree'; only a tree's "
                          "entities have siblings to be in an order");
-    if (getSorted())
-      return emitOpError("is 'sorted' and 'ordered', which is not supported "
-                         "yet");
     if (!getOrderFieldAttr())
       return emitOpError("is ordered by a component but names no field");
   }

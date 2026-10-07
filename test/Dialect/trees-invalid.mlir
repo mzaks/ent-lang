@@ -316,12 +316,6 @@ ent.relation @R () tree ordered by @N "v" capacity 4
 // -----
 
 ent.component @N (v: i32)
-// expected-error @+1 {{is 'sorted' and 'ordered', which is not supported yet}}
-ent.relation @R () from @N to @N tree sorted ordered by @N "v" capacity 4
-
-// -----
-
-ent.component @N (v: i32)
 ent.relation @R () tree capacity 4
 ent.archetype @A (@N) capacity 4
 ent.system @s() {

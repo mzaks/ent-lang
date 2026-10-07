@@ -333,8 +333,12 @@ it in the same box ends, the first where the box they are in starts.
   million nodes, so this is for trees that are reordered now and then.
   A host that writes the field through the header is not noticed until
   something is connected.
-- Not yet: together with `sorted`; a trigger on the sibling before for
-  a reactive `for`; an order by a float.
+- Together with `sorted` (`tree sorted ordered by Slot.at`), the rows
+  are in the tree's order with the children of an entity in theirs: the
+  sibling before is the row before. Across several archetypes such a
+  tree is read by its list.
+- Not yet: a trigger on the sibling before for a reactive `for`; an
+  order by a float.
 
 **Sorted trees.** A tree may ask for its entities to be stored in its
 order:

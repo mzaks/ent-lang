@@ -3,8 +3,20 @@
 // order they were connected where those are the same; a binding `before`
 // the tree is the sibling before, and with `optional` the `for` also
 // visits the first of them, and the root, which has no parent either.
+// The same lines where the tree is also `sorted`: across the two
+// archetypes its nodes are in (with a slot and without), and in one,
+// every node having a slot.
 // RUN: %ent run %S/Inputs/tree_order.ent 2>/dev/null > %t.out
 // RUN: %ent run --parallel %S/Inputs/tree_order.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/ tree ordered by / tree sorted ordered by /' \
+// RUN:     %S/Inputs/tree_order.ent > %t.two.ent
+// RUN: grep -q "tree sorted ordered" %t.two.ent
+// RUN: %ent run %t.two.ent 2>/dev/null | cmp - %t.out
+// RUN: %ent run --parallel %t.two.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/start: 0 } }$/start: 0 }, Slot { at: 0 } }/' %t.two.ent > %t.one.ent
+// RUN: grep -c "Slot { at: 0 } }" %t.one.ent | grep -q 3
+// RUN: %ent run %t.one.ent 2>/dev/null | cmp - %t.out
+// RUN: %ent run --parallel %t.one.ent 2>/dev/null | cmp - %t.out
 // RUN: FileCheck %s --input-file=%t.out
 
 // Connected a, b, c with slots 2, 1, 3: b (20 wide) first, then a (10),

@@ -140,7 +140,8 @@ def Ent_RelationOp : Ent_RecordOp<"relation", [
     an edge loop over the edges into an entity too, and a ref `before` the
     tree (`!ent.ref<@C, before @R>`) leads to the child before. The order
     is restored before the next query after a connect or a write to the
-    field. Not together with `sorted` yet.
+    field. Together with `sorted`, the rows are in the tree's order with
+    the children of an entity in theirs.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        StrArrayAttr:$field_names,

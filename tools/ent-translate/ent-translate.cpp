@@ -734,12 +734,23 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "  if (*count >= ENT_{2}_CAPACITY)\n    return false;\n"
         "  ent_{2}_source(world)[*count] = source;\n"
         "  ent_{2}_target(world)[*count] = target;\n"
-        "{3}{6}"
+        "{3}{6}{7}"
         "  ++*count;\n"
         "  *(int64_t *)((char *)world + {4}) = 0; // unclean\n"
         "  return true;\n}\n",
         connect, params, name, stores, relation.cleanOffset, checks,
-        connected);
+        connected,
+        relation.isOrdered()
+            ? llvm::formatv(
+                  "  {{\n"
+                  "    int64_t *numbers = (int64_t *)((char *)world + {0});\n"
+                  "    numbers[{2}] = ++numbers[{1}];\n  }\n",
+                  relation.sequenceOffset, layout->entityKeys,
+                  scheme.hasIds() ? "(uint64_t)source & ((UINT64_C(1) << "
+                                    "ENT__SLOT_BITS) - 1)"
+                                  : "(uint64_t)source")
+                  .str()
+            : std::string());
   }
 
   os << "\n// Schedules. The lowered function receives the arena as a "

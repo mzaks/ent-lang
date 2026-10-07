@@ -94,6 +94,10 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
     return false;
   FlatSymbolRefAttr cascade = query.getCascade();
   const WorldRelation &tree = getRelation(cascade.getAttr());
+  // (A tree in several archetypes whose children are in an order is gone
+  // through by its list, not depth by depth.)
+  if (tree.sortedArchetypes.size() > 1 && tree.isOrdered())
+    return false;
   if (!(tree.linked || !tree.sortedArchetypes.empty()) ||
       llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
         auto ref = dyn_cast<RefType>(type);
@@ -452,6 +456,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
         archetype.childEndOffset = place(4);
       } else {
         archetype.parentLocationOffset = place(scheme.locationBits / 8);
+        if (layout.getRelation(archetype.sortedBy).isOrdered())
+          archetype.beforeIdOffset = place(scheme.idBits / 8);
         bool followed = false;
         module.walk([&](QueryOp query) {
           followed |= query.getCascade() &&
