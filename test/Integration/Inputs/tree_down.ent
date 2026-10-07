@@ -4,7 +4,7 @@
 import console
 component Node { name: text[8], own: i32, total: i32, runs: i32 }
 default_capacity 16
-relation Under from Node to Node tree capacity 16
+relation (Node)-[Under]->(Node) tree capacity 16
 unique Frame: i32
 unique Mid: entity
 unique Top: entity
@@ -15,10 +15,10 @@ world {
   let b = spawn { Node { name: "b", own: 20, total: 0, runs: 0 } }
   let a1 = spawn { Node { name: "a1", own: 100, total: 0, runs: 0 } }
   let a2 = spawn { Node { name: "a2", own: 200, total: 0, runs: 0 } }
-  connect(a, root, Under)
-  connect(b, root, Under)
-  connect(a1, a, Under)
-  connect(a2, a, Under)
+  connect (a)-[Under]->(root)
+  connect (b)-[Under]->(root)
+  connect (a1)-[Under]->(a)
+  connect (a2)-[Under]->(a)
   Mid = b
   Top = root
 }
@@ -27,14 +27,14 @@ world {
 system change() {
   Frame += 1
   for n: mut Node where Frame == 3 && n.own == 100 { n.own = 101 }
-  for e, n: Node where Frame == 4 && n.own == 200 { connect(e, Mid, Under) }
+  for e, n: Node where Frame == 4 && n.own == 200 { connect (e)-[Under]->(Mid) }
 }
 
 system add() {
-  for e, n: mut Node cascade Under leaves first
-      on changed Node.own, changed Node.total down Under {
+  for (e, n: mut Node) cascade Under leaves first
+      on changed Node.own, changed (: Node.total)-[Under]->(e) {
     n.total = n.own
-    for edge, child in e.in(Under) {
+    for (child)-[edge: Under]->(e) {
       if let t = Node(child).total { n.total += t }
     }
     n.runs += 1

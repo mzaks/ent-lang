@@ -8,7 +8,7 @@ import console
 component Node { name: text[8], size: i32, start: i32 }
 component Slot { at: i32 }
 default_capacity 16
-relation Under from Node to Node tree ordered by Slot.at capacity 16
+relation (Node)-[Under]->(Node) tree ordered by Slot.at capacity 16
 unique Frame: i32
 unique Root: entity
 
@@ -18,15 +18,15 @@ world {
   let a = spawn { Node { name: "a", size: 10, start: 0 }, Slot { at: 2 } }
   let b = spawn { Node { name: "b", size: 20, start: 0 }, Slot { at: 1 } }
   let c = spawn { Node { name: "c", size: 30, start: 0 }, Slot { at: 3 } }
-  connect(a, root, Under)
-  connect(b, root, Under)
-  connect(c, root, Under)
+  connect (a)-[Under]->(root)
+  connect (b)-[Under]->(root)
+  connect (c)-[Under]->(root)
   // Under b: one with a slot of 0 and one without, which counts as 0 and
   // comes before it, being connected first.
   let b1 = spawn { Node { name: "b1", size: 1, start: 0 }, Slot { at: 0 } }
   let b2 = spawn { Node { name: "b2", size: 2, start: 0 } }
-  connect(b2, b, Under)
-  connect(b1, b, Under)
+  connect (b2)-[Under]->(b)
+  connect (b1)-[Under]->(b)
   Root = root
 }
 
@@ -37,13 +37,15 @@ system change() {
   for s: mut Slot where Frame == 2 && s.at == 3 { s.at = 0 }
   if Frame == 3 {
     let d = spawn { Node { name: "d", size: 40, start: 0 }, Slot { at: 2 } }
-    connect(d, Root, Under)
+    connect (d)-[Under]->(Root)
   }
 }
 
 system starts() {
-  for n: mut Node, optional before: Node before Under,
-      optional above: Node up Under cascade Under {
+  for (n: mut Node),
+      optional (before: Node)~[Under]~>(n),
+      optional (n)-[Under]->(above: Node)
+      cascade Under {
     n.start = 100
     if let start = above.start { n.start = start }
     if let start = before.start, let size = before.size {

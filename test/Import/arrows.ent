@@ -1,0 +1,62 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+// RUN: ent-translate --import-ent %s | ent-opt | FileCheck %s
+
+// Arrows: what a relation's ends have, the edges a `connect` makes (one
+// per arrow, either way round), the other entities a `for` binds (the
+// parent, the nearest ancestor with `*`, the sibling before with `~`),
+// and the loops over an entity's edges, out of it and into it.
+// CHECK: ent.relation @Inside () from @Box to @Box tree ordered by @Slot "at" capacity 16
+// CHECK: ent.connect @Inside %[[SIDE:.*]], %[[ROOT:.*]] ()
+// CHECK: ent.connect @Inside %[[REST:.*]], %[[ROOT]] ()
+// CHECK: ent.connect @Synapse %[[SIDE]], %[[REST]] (%{{.*}}) : f32
+// CHECK: ent.connect @Follows %[[SIDE]], %[[REST]] ()
+// CHECK: ent.query (%{{.*}}: !ent.ref<@Box, mut>, %{{.*}}: !ent.ref<@Size>, %{{.*}}: !ent.ref<@Box, parent @Inside>, %{{.*}}: !ent.ref<@Stack, parent @Inside>, %{{.*}}: !ent.ref<@Box, before @Inside, optional>) cascade @Inside {
+// CHECK: ent.query (%{{.*}}: !ent.ref<@Box>, %{{.*}}: !ent.ref<@Size, up @Inside>) {
+// CHECK: ent.edges @Synapse out (%{{.*}}: !ent.ref<@Synapse>, %{{.*}}: !ent.entity) {
+// CHECK: ent.edges @Synapse in (%{{.*}}: !ent.ref<@Synapse, mut>, %{{.*}}: !ent.entity) {
+// The other end's components: the body runs where it has them.
+// CHECK: ent.edges @Synapse in (%{{.*}}: !ent.ref<@Synapse>, %[[PRE:.*]]: !ent.entity) {
+// CHECK:   %{{.*}}, %[[HAS:.*]] = ent.lookup %[[PRE]] @Neuron "input" : f32
+// CHECK:   scf.if %[[HAS]] {
+// CHECK: ent.edges @Inside in (%{{.*}}: !ent.ref<@Inside>, %[[INNER:.*]]: !ent.entity) {
+// CHECK:   ent.lookup %[[INNER]] @Box "w" : f32
+component Box { w: f32, x: f32 }
+component Size { n: i32 }
+component Stack { pad: f32 }
+component Content { width: f32 }
+component Slot { at: i32 }
+component Neuron { input: f32 }
+tag Spiked
+default_capacity 16
+relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 16
+relation Synapse { weight: f32 } capacity 16
+relation Follows capacity 16
+world {
+  let root = spawn { Box { w: 1.0, x: 0.0 }, Size { n: 0 }, Stack { pad: 0.0 }, Content { width: 0.0 } }
+  let side = spawn { Box { w: 1.0, x: 0.0 }, Size { n: 0 }, Stack { pad: 0.0 }, Content { width: 0.0 } }
+  let rest = spawn { Box { w: 1.0, x: 0.0 }, Size { n: 0 }, Stack { pad: 0.0 }, Content { width: 0.0 } }
+  connect (side)-[Inside]->(root)<-[Inside]-(rest)
+  connect (side)-[Synapse { weight: 0.5 }]->(rest)
+  connect (side)-[Follows]->(rest)
+}
+system a() {
+  for (b: mut Box, s: Size)-[Inside]->(outer: Box, k: Stack),
+      optional (b)<~[Inside]~(prev: Box) cascade Inside {
+    b.x = outer.x + k.pad
+    if let x = prev.x { b.x = x }
+  }
+  for (b: Box), (outer: Size)<-[Inside*]-(b) { }
+  for e with Spiked {
+    for (e)-[s: Synapse]->(post) { Neuron(post).input += s.weight }
+  }
+  for n: mut Neuron {
+    for (pre)-[mut s: Synapse]->(n) {
+      s.weight *= 0.99
+      if s.weight < 0.001 { s.disconnect() }
+    }
+    for (pre, m: Neuron)-[Synapse]->(n) { }
+  }
+  for c: mut Content {
+    for (inner: Box)-[Inside]->(c) { c.width += inner.w }
+  }
+}

@@ -3,9 +3,9 @@
 // is (Inputs/reparent_main.c, over bench/scene/scene.ent made reactive):
 // unsorted and sorted.
 // RUN: mkdir -p %t.dir %t.sdir
-// RUN: sed 's/cascade Under {/cascade Under on changed Local, changed World up Under {/' \
+// RUN: sed 's/cascade Under {/cascade Under on changed l, changed above {/' \
 // RUN:     %S/../../bench/scene/scene.ent > %t.ent
-// RUN: grep -q "changed World up Under" %t.ent
+// RUN: grep -q "changed l, changed above" %t.ent
 // RUN: ent-translate --import-ent %t.ent -o %t.mlir
 // RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/scene_world.h
 // RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \

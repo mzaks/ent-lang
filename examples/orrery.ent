@@ -20,7 +20,7 @@ default_capacity 64
 
 // From a body to the one it circles. A tree: a body circles one other,
 // and none circles itself, however far around.
-relation Orbits from Orbit to Body tree capacity 64
+relation (Orbit)-[Orbits]->(Body) tree capacity 64
 
 world {
   Window.width = 800
@@ -44,30 +44,30 @@ world {
     Body { x: 0.0, y: 0.0, radius: 16.0 },
     Orbit { distance: 240.0, angle: 3.0, speed: 0.3 }, Tint { color: 0xd08040 }
   }
-  connect(inner, sun, Orbits)
-  connect(earth, sun, Orbits)
-  connect(giant, sun, Orbits)
+  connect (inner)-[Orbits]->(sun)
+  connect (earth)-[Orbits]->(sun)
+  connect (giant)-[Orbits]->(sun)
 
   // Moons have no colour of their own.
   let moon = spawn {
     Body { x: 0.0, y: 0.0, radius: 4.0 },
     Orbit { distance: 24.0, angle: 0.0, speed: 4.0 }
   }
-  connect(moon, earth, Orbits)
+  connect (moon)-[Orbits]->(earth)
   for i in 0..4 {
     let around = spawn {
       Body { x: 0.0, y: 0.0, radius: 3.0 },
       Orbit { distance: 26.0 + i as f32 * 9.0, angle: i as f32 * 1.7,
               speed: 3.0 - i as f32 * 0.5 }
     }
-    connect(around, giant, Orbits)
+    connect (around)-[Orbits]->(giant)
   }
   // A station around the moon, in a colour of its own.
   let station = spawn {
     Body { x: 0.0, y: 0.0, radius: 2.0 },
     Orbit { distance: 9.0, angle: 0.0, speed: 9.0 }, Tint { color: 0xff4060 }
   }
-  connect(station, moon, Orbits)
+  connect (station)-[Orbits]->(moon)
 }
 
 system turn() {
@@ -81,7 +81,7 @@ system turn() {
 // `center` is that other body; `cascade` visits it first, so its place is
 // this frame's: the station follows the moon, which follows the planet.
 system place() {
-  for b: mut Body, o: Orbit, center: Body up Orbits cascade Orbits {
+  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) cascade Orbits {
     b.x = center.x + cos(o.angle) * o.distance
     b.y = center.y + sin(o.angle) * o.distance
   }
@@ -92,7 +92,7 @@ system draw() {
     circle(b.x, b.y, b.radius, t.color)
   }
   // Without a colour: that of the nearest body up the tree that has one.
-  for b: Body, t: Tint up Orbits without Tint {
+  for (b: Body)-[Orbits*]->(t: Tint) without Tint {
     circle(b.x, b.y, b.radius, t.color)
   }
   label("space: hold", 8.0, 6.0, 16.0, 0x808890)

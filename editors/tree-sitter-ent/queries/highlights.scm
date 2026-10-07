@@ -75,17 +75,17 @@
 (run system: (identifier) @function)
 (run system: (qualified_name name: (identifier) @function))
 ((call function: (identifier) @function.builtin)
-  (#any-of? @function.builtin "min" "max" "len" "connect"))
+  (#any-of? @function.builtin "min" "max" "len"))
 
 [
   "import" "component" "tag" "unique" "enum" "relation" "archetype"
   "system" "extern" "fn" "proc" "schedule" "world" "main"
-  "default_capacity" "capacity" "optional" "from" "to" "tree"
+  "default_capacity" "capacity" "optional" "tree"
   "sorted" "ordered" "by"
   "reads" "writes" "let" "var" "mut" "spawn" "as"
   "with" "without" "any" "where" "on" "changed" "added" "removed" "log"
-  "up" "before" "cascade" "leaves" "first"
-  "out" "run_if"
+  "cascade" "leaves" "first" "connect"
+  "run_if"
 ] @keyword
 
 [ "if" "else" "for" "in" "loop" "until" ] @keyword.control

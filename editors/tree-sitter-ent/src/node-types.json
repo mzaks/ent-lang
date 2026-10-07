@@ -155,6 +155,46 @@
     }
   },
   {
+    "type": "arrow",
+    "named": true,
+    "fields": {
+      "edge": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "relation": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "field_init",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "assignment",
     "named": true,
     "fields": {
@@ -581,20 +621,6 @@
             "named": true
           }
         ]
-      },
-      "via": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          },
-          {
-            "type": "qualified_name",
-            "named": true
-          }
-        ]
       }
     }
   },
@@ -631,11 +657,11 @@
           "named": true
         },
         {
-          "type": "counted_for",
+          "type": "connect",
           "named": true
         },
         {
-          "type": "edges_for",
+          "type": "counted_for",
           "named": true
         },
         {
@@ -1024,6 +1050,21 @@
     }
   },
   {
+    "type": "connect",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "pattern",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "counted_for",
     "named": true,
     "fields": {
@@ -1207,80 +1248,6 @@
       "types": [
         {
           "type": "integer",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
-    "type": "edges_for",
-    "named": true,
-    "fields": {
-      "body": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "block",
-            "named": true
-          }
-        ]
-      },
-      "direction": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "in",
-            "named": false
-          },
-          {
-            "type": "out",
-            "named": false
-          }
-        ]
-      },
-      "edge": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      },
-      "entity": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      },
-      "other": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      }
-    },
-    "children": {
-      "multiple": false,
-      "required": true,
-      "types": [
-        {
-          "type": "identifier",
-          "named": true
-        },
-        {
-          "type": "qualified_name",
           "named": true
         }
       ]
@@ -2295,6 +2262,114 @@
     }
   },
   {
+    "type": "node",
+    "named": true,
+    "fields": {
+      "component": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      },
+      "field": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "binary",
+          "named": true
+        },
+        {
+          "type": "binding",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "call",
+          "named": true
+        },
+        {
+          "type": "cast",
+          "named": true
+        },
+        {
+          "type": "character",
+          "named": true
+        },
+        {
+          "type": "field_expression",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "index",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "spawn",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "unary",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "on",
     "named": true,
     "fields": {},
@@ -2442,6 +2517,25 @@
     }
   },
   {
+    "type": "pattern",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "arrow",
+          "named": true
+        },
+        {
+          "type": "node",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "primitive_type",
     "named": true,
     "fields": {}
@@ -2514,6 +2608,10 @@
           "named": true
         },
         {
+          "type": "pattern",
+          "named": true
+        },
+        {
           "type": "where",
           "named": true
         },
@@ -2555,6 +2653,29 @@
           "type": "fields",
           "named": true
         },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "relation_end",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "relation_end",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
         {
           "type": "identifier",
           "named": true
@@ -2974,32 +3095,25 @@
   {
     "type": "trigger",
     "named": true,
-    "fields": {
-      "via": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          },
-          {
-            "type": "qualified_name",
-            "named": true
-          }
-        ]
-      }
-    },
+    "fields": {},
     "children": {
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "arrow",
+          "named": true
+        },
         {
           "type": "identifier",
           "named": true
         },
         {
           "type": "integer",
+          "named": true
+        },
+        {
+          "type": "node",
           "named": true
         },
         {
@@ -3601,10 +3715,6 @@
     "named": false
   },
   {
-    "type": "before",
-    "named": false
-  },
-  {
     "type": "bool",
     "named": false
   },
@@ -3638,11 +3748,11 @@
     "named": false
   },
   {
-    "type": "default_capacity",
+    "type": "connect",
     "named": false
   },
   {
-    "type": "down",
+    "type": "default_capacity",
     "named": false
   },
   {
@@ -3691,10 +3801,6 @@
   },
   {
     "type": "for",
-    "named": false
-  },
-  {
-    "type": "from",
     "named": false
   },
   {
@@ -3786,10 +3892,6 @@
     "named": false
   },
   {
-    "type": "out",
-    "named": false
-  },
-  {
     "type": "proc",
     "named": false
   },
@@ -3838,10 +3940,6 @@
     "named": false
   },
   {
-    "type": "to",
-    "named": false
-  },
-  {
     "type": "tree",
     "named": false
   },
@@ -3855,10 +3953,6 @@
   },
   {
     "type": "until",
-    "named": false
-  },
-  {
-    "type": "up",
     "named": false
   },
   {
@@ -3895,6 +3989,10 @@
   },
   {
     "type": "}",
+    "named": false
+  },
+  {
+    "type": "~",
     "named": false
   }
 ]

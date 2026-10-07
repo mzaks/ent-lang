@@ -7,7 +7,7 @@
 
 component Neuron { v: f32, input: f32, bias: f32, fired: f32 } capacity 1024
 archetype Cell { Neuron } capacity 1024
-relation Synapse { weight: f32 } from Neuron to Neuron capacity 65536
+relation (Neuron)-[Synapse { weight: f32 }]->(Neuron) capacity 65536
 unique Stats { spikes: i64 }
 
 system integrate(decay: f32, threshold: f32) {
@@ -31,7 +31,7 @@ system integrate(decay: f32, threshold: f32) {
 // the end, but every neuron walks all its incoming edges.
 system propagate() {
   for e, n: mut Neuron {
-    for s, pre in e.in(Synapse) {
+    for (pre)-[s: Synapse]->(e) {
       if let fired = Neuron(pre).fired {
         n.input += s.weight * fired
       }

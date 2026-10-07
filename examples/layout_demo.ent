@@ -41,8 +41,8 @@ world {
     Size { w: Sizing.Grow, h: Sizing.Grow },
     Stack { row: false, pad: 0.0, gap: 12.0 }, Tint { color: 0x101418 }
   }
-  connect(side, root, Inside)
-  connect(rest, root, Inside)
+  connect (side)-[Inside]->(root)
+  connect (rest)-[Inside]->(root)
 
   // The side bar's entries: as wide as the bar, 34 pixels high.
   for i in 0..6 {
@@ -52,7 +52,7 @@ world {
       Stack { row: true, pad: 0.0, gap: 0.0 },
       Tint { color: if i == 1 { 0x3a7bd5 } else { 0x2a3640 } }
     }
-    connect(entry, side, Inside)
+    connect (entry)-[Inside]->(side)
   }
 
   // A header as high as its buttons need, the cards with the room that
@@ -74,9 +74,9 @@ world {
     Stack { row: true, pad: 6.0, gap: 6.0 }, Tint { color: 0x1c242c },
     Footer
   }
-  connect(header, rest, Inside)
-  connect(cards, rest, Inside)
-  connect(footer, rest, Inside)
+  connect (header)-[Inside]->(rest)
+  connect (cards)-[Inside]->(rest)
+  connect (footer)-[Inside]->(rest)
 
   for i in 0..4 {
     let button = spawn {
@@ -84,7 +84,7 @@ world {
       Size { w: Sizing.Fixed, h: Sizing.Fixed },
       Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x3a7bd5 }
     }
-    connect(button, header, Inside)
+    connect (button)-[Inside]->(header)
   }
 
   // Three cards share the width; in each, a picture with the height that
@@ -95,21 +95,21 @@ world {
       Size { w: Sizing.Grow, h: Sizing.Grow },
       Stack { row: false, pad: 10.0, gap: 6.0 }, Tint { color: 0x242e38 }
     }
-    connect(card, cards, Inside)
+    connect (card)-[Inside]->(cards)
     let picture = spawn {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
       Size { w: Sizing.Grow, h: Sizing.Grow },
       Stack { row: true, pad: 0.0, gap: 0.0 },
       Tint { color: 0x805030 + i * 0x203040 }
     }
-    connect(picture, card, Inside)
+    connect (picture)-[Inside]->(card)
     for j in 0..3 {
       let text = spawn {
         Box { x: 0.0, y: 0.0, w: 120.0 - j as f32 * 30.0, h: 10.0 },
         Size { w: Sizing.Fixed, h: Sizing.Fixed },
         Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x5a6a78 }
       }
-      connect(text, card, Inside)
+      connect (text)-[Inside]->(card)
     }
   }
 }

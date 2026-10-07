@@ -75,9 +75,13 @@ module.exports = grammar({
           optional(list($.enum_case)), '}'),
     enum_case: ($) => $.identifier,
 
+    // relation Name { fields } ..., or with what its ends have:
+    // relation (Source)-[Name { fields }]->(Target) ...
     relation: ($) =>
-      seq('relation', field('name', $.identifier), optional($.fields),
-          optional(seq('from', $._name)), optional(seq('to', $._name)),
+      seq('relation',
+          choice(seq(field('name', $.identifier), optional($.fields)),
+                 seq($.relation_end, '-', '[', field('name', $.identifier),
+                     optional($.fields), ']', '-', '>', $.relation_end)),
           optional(seq('tree', optional('sorted'),
                        optional(seq('ordered', 'by', $._name, '.',
                                     $.identifier)))),
@@ -151,7 +155,7 @@ module.exports = grammar({
         $.var,
         $.counted_for,
         $.query_for,
-        $.edges_for,
+        $.connect,
         $.assignment,
         $._expression,
       ),
@@ -166,23 +170,54 @@ module.exports = grammar({
       seq('var', $._pattern, optional(seq(':', field('type', $._type))), '=',
           field('value', $._expression)),
 
+    relation_end: ($) => seq('(', optional($._name), ')'),
+
     counted_for: ($) =>
       seq('for', field('counter', $.identifier), 'in',
           field('from', $._expression), '..', field('to', $._expression),
           field('body', $.block)),
 
+    // for e, a: A, b: mut B ... { }: the entity's own. With arrows, the
+    // head is patterns: for (a: A)-[R]->(outer: B), optional
+    // (prev: A)~[R]~>(a) ... { }. Inside a `for`, a pattern is a loop
+    // over the visited entity's edges.
     query_for: ($) =>
       seq('for',
-          optional(list(choice($.binding, field('entity', $.identifier)))),
+          optional(choice(
+              list(choice($.binding, field('entity', $.identifier))),
+              list($.pattern))),
           repeat(choice($.with, $.without)),
           optional($.cascade),
           optional($.where),
           optional($.on),
           field('body', $.block)),
     binding: ($) =>
-      seq(optional('optional'), field('name', $.identifier), ':',
-          optional('mut'), field('component', $._name),
-          optional(seq(choice('up', 'before'), field('via', $._name)))),
+      seq(field('name', $.identifier), ':', optional('mut'),
+          field('component', $._name)),
+    // (name), (e, a: A), (: C.f), (expr): an entity and what is bound of
+    // it; in `connect`, an entity by any expression.
+    node: ($) =>
+      seq('(',
+          optional(choice(
+              list(choice($.binding, $._expression)),
+              seq(':', field('component', $._name),
+                  optional(seq('.', field('field', $.identifier))))),
+          ),
+          ')'),
+    // -[R]-> and <-[R]-, an edge; ~[R]~> and <~[R]~, to the sibling
+    // after. In the brackets: [mut] [name:] Relation [*] [{ fields }].
+    arrow: ($) =>
+      choice(seq('-', $._edge, '-', '>'), seq('<', '-', $._edge, '-'),
+             seq('~', $._edge, '~', '>'), seq('<', '~', $._edge, '~')),
+    _edge: ($) =>
+      seq('[', optional('mut'),
+          optional(seq(field('edge', $.identifier), ':')),
+          field('relation', $._name), optional('*'),
+          optional(seq('{', optional(list($.field_init)), '}')), ']'),
+    pattern: ($) =>
+      prec.right(
+          seq(optional('optional'), $.node, repeat(seq($.arrow, $.node)))),
+    connect: ($) => seq('connect', $.pattern),
     with: ($) => seq('with', list(choice($._name, $.any))),
     any: ($) => seq('any', '(', list($._name), ')'),
     without: ($) => seq('without', list($._name)),
@@ -191,18 +226,13 @@ module.exports = grammar({
           optional(seq('leaves', 'first'))),
     where: ($) => seq('where', $._expression),
     on: ($) => seq('on', list($.trigger)),
+    // changed Component.field, changed binding.field, and of a child:
+    // changed (: C.f)-[R]->(name)
     trigger: ($) =>
-      seq(choice('changed', 'added', 'removed'), $._name,
-          optional(seq('.', $.identifier)),
-          optional(seq(choice('up', 'down', 'before'),
-                       field('via', $._name))),
+      seq(choice('changed', 'added', 'removed'),
+          choice(seq($._name, optional(seq('.', $.identifier))),
+                 seq($.node, $.arrow, $.node)),
           optional(seq('log', $.integer))),
-
-    edges_for: ($) =>
-      seq('for', optional('mut'), field('edge', $.identifier), ',',
-          field('other', $.identifier), 'in', field('entity', $.identifier),
-          '.', field('direction', choice('out', 'in')), '(', $._name, ')',
-          field('body', $.block)),
 
     if_let: ($) =>
       seq('let', field('name', $.identifier), '=',

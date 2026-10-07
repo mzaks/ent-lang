@@ -38,10 +38,15 @@ Type RefType::parse(AsmParser &parser) {
   if (parser.parseLess() || parser.parseAttribute(component))
     return {};
   bool isMutable = false, isBefore = false, isOptional = false;
+  bool isDirect = false;
   while (succeeded(parser.parseOptionalComma())) {
     if (succeeded(parser.parseOptionalKeyword("up"))) {
       if (parser.parseAttribute(via))
         return {};
+    } else if (succeeded(parser.parseOptionalKeyword("parent"))) {
+      if (parser.parseAttribute(via))
+        return {};
+      isDirect = true;
     } else if (succeeded(parser.parseOptionalKeyword("before"))) {
       if (parser.parseAttribute(via))
         return {};
@@ -57,7 +62,7 @@ Type RefType::parse(AsmParser &parser) {
   if (parser.parseGreater())
     return {};
   return RefType::get(parser.getContext(), component, isMutable, via,
-                      isBefore, isOptional);
+                      isBefore, isOptional, isDirect);
 }
 
 void RefType::print(AsmPrinter &printer) const {
@@ -65,7 +70,10 @@ void RefType::print(AsmPrinter &printer) const {
   if (getIsMutable())
     printer << ", mut";
   if (getVia())
-    printer << (getIsBefore() ? ", before " : ", up ") << getVia();
+    printer << (getIsBefore()   ? ", before "
+                : getIsDirect() ? ", parent "
+                                : ", up ")
+            << getVia();
   if (getIsOptional())
     printer << ", optional";
   printer << ">";

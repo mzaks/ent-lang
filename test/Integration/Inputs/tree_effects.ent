@@ -5,7 +5,7 @@ import console
 
 component Node { name: text[8], local: i32, total: i32, hit: i32 }
 default_capacity 16
-relation Under from Node to Node tree capacity 16
+relation (Node)-[Under]->(Node) tree capacity 16
 unique Frame: i32
 unique Count: i32
 unique Deepest: i32
@@ -17,10 +17,10 @@ world {
   let b = spawn { Node { name: "b", local: 100, total: 0, hit: 0 } }
   let c = spawn { Node { name: "c", local: 1000, total: 0, hit: 0 } }
   let d = spawn { Node { name: "d", local: 5, total: 0, hit: 0 } }
-  connect(a, root, Under)
-  connect(b, a, Under)
-  connect(c, b, Under)
-  connect(d, root, Under)
+  connect (a)-[Under]->(root)
+  connect (b)-[Under]->(a)
+  connect (c)-[Under]->(b)
+  connect (d)-[Under]->(root)
   Sink = root
 }
 
@@ -33,7 +33,7 @@ system sum() {
     n.total = n.local
     n.hit = 0
   }
-  for n: mut Node, parent: Node up Under cascade Under {
+  for (n: mut Node)-[Under]->(parent: Node) cascade Under {
     n.total = parent.total + n.local
     Count += 1
     Deepest max= n.total
@@ -51,7 +51,8 @@ system strike() {
 // b, and c with it, which is visited as the tree was though b goes too.
 system prune() {
   let from = if Frame == 2 { 11 } else { 1000000 }
-  for e, n: Node, parent: Node up Under cascade Under where parent.total >= from {
+  for (e, n: Node)-[Under]->(parent: Node)
+      cascade Under where parent.total >= from {
     e.destroy()
   }
 }

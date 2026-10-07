@@ -5,7 +5,7 @@
 import console
 
 component Node { name: text[8], rain: i32, flow: i32, height: i32, top: i32 }
-relation Flows from Node to Node tree sorted capacity 16
+relation (Node)-[Flows]->(Node) tree sorted capacity 16
 default_capacity 16
 unique Frame: i32
 unique Keep { river: entity, creek: entity, lake: entity }
@@ -18,10 +18,10 @@ world {
   let lake = spawn { Node { name: "lake", rain: 5, flow: 0, height: 50, top: 0 } }
   let river = spawn { Node { name: "river", rain: 10, flow: 0, height: 20, top: 0 } }
   let sea = spawn { Node { name: "sea", rain: 1, flow: 0, height: 0, top: 0 } }
-  connect(river, sea, Flows)
-  connect(brook, river, Flows)
-  connect(spring, brook, Flows)
-  connect(creek, river, Flows)
+  connect (river)-[Flows]->(sea)
+  connect (brook)-[Flows]->(river)
+  connect (spring)-[Flows]->(brook)
+  connect (creek)-[Flows]->(river)
   Keep.river = river
   Keep.creek = creek
   Keep.lake = lake
@@ -32,13 +32,13 @@ system change() {
   // A new node, flowing into the river.
   if Frame == 2 {
     let pond = spawn { Node { name: "pond", rain: 7, flow: 0, height: 60, top: 0 } }
-    connect(pond, Keep.river, Flows)
+    connect (pond)-[Flows]->(Keep.river)
   }
   // The brook goes, and the spring above it is on its own.
   let goes = if Frame == 3 { 300 } else { -1 }
   for e, n: Node where n.height == goes { e.destroy() }
   // The creek flows into the lake instead.
-  if Frame == 4 { connect(Keep.creek, Keep.lake, Flows) }
+  if Frame == 4 { connect (Keep.creek)-[Flows]->(Keep.lake) }
 }
 
 system gather() {
@@ -46,7 +46,7 @@ system gather() {
     n.flow = n.rain
     n.top = n.height
   }
-  for n: Node, down: mut Node up Flows cascade Flows leaves first {
+  for (n: Node)-[Flows]->(down: mut Node) cascade Flows leaves first {
     down.flow += n.flow
     down.top max= n.top
   }
@@ -54,7 +54,7 @@ system gather() {
 
 // Where the water came down: every node after the one it flows into.
 system trace() {
-  for n: mut Node, down: Node up Flows cascade Flows {
+  for (n: mut Node)-[Flows]->(down: Node) cascade Flows {
     n.height = down.height + 1
   }
 }

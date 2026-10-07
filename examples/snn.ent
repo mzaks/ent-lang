@@ -15,7 +15,7 @@
 
 component Neuron { v: f32, input: f32, bias: f32, fired: f32 } capacity 1024
 archetype Cell { Neuron } capacity 1024
-relation Synapse { weight: f32 } from Neuron to Neuron capacity 65536
+relation (Neuron)-[Synapse { weight: f32 }]->(Neuron) capacity 65536
 unique Stats { spikes: i64 }
 
 system integrate(decay: f32, threshold: f32) {
@@ -36,7 +36,7 @@ system integrate(decay: f32, threshold: f32) {
 // Push: combined into the targets when the query ends, in a fixed order.
 system propagate() {
   for e, n: Neuron where n.fired != 0.0 {
-    for s, post in e.out(Synapse) {
+    for (e)-[s: Synapse]->(post) {
       Neuron(post).input += s.weight
     }
   }

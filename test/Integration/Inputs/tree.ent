@@ -6,7 +6,7 @@ import console
 component Node { name: text[8], local: i32, total: i32 }
 component Mark { color: i32 }
 default_capacity 16
-relation Under from Node to Node tree capacity 16
+relation (Node)-[Under]->(Node) tree capacity 16
 unique Frame: i32
 unique Keep { leaf: entity, side: entity, top: entity }
 
@@ -16,11 +16,11 @@ world {
   let top = spawn { Node { name: "top", local: 100, total: 0 }, Mark { color: 7 } }
   let side = spawn { Node { name: "side", local: 1000, total: 0 }, Mark { color: 9 } }
   spawn { Node { name: "lone", local: 5, total: 0 } }
-  connect(leaf, mid, Under)
-  connect(mid, side, Under)
-  connect(side, top, Under)
+  connect (leaf)-[Under]->(mid)
+  connect (mid)-[Under]->(side)
+  connect (side)-[Under]->(top)
   // A node has one parent: the last connect wins.
-  connect(mid, top, Under)
+  connect (mid)-[Under]->(top)
   Keep.leaf = leaf
   Keep.side = side
   Keep.top = top
@@ -29,20 +29,20 @@ world {
 system change() {
   Frame += 1
   // Under another parent, at once.
-  if Frame == 2 { connect(Keep.leaf, Keep.side, Under) }
+  if Frame == 2 { connect (Keep.leaf)-[Under]->(Keep.side) }
   // Its parent dies: the leaf has no ancestor until it gets a new one.
   let dies = if Frame == 3 { 1000 } else { -1 }
   for e, n: Node where n.local == dies { e.destroy() }
   // A new node, in the dead one's slot.
   if Frame == 4 {
     let fresh = spawn { Node { name: "fresh", local: 2000, total: 0 }, Mark { color: 3 } }
-    connect(fresh, Keep.top, Under)
+    connect (fresh)-[Under]->(Keep.top)
   }
 }
 
 system sum() {
   for n: mut Node { n.total = n.local }
-  for n: mut Node, parent: Node up Under cascade Under {
+  for (n: mut Node)-[Under]->(parent: Node) cascade Under {
     n.total = parent.total + n.local
   }
 }
@@ -50,7 +50,7 @@ system sum() {
 system show() {
   for n: Node { put("{Frame}: {n.name} {n.total}") }
   // The nearest ancestor that has a Mark, for the nodes without one.
-  for n: Node, m: Mark up Under without Mark {
+  for (n: Node)-[Under*]->(m: Mark) without Mark {
     put("{Frame}: {n.name} marked {m.color}")
   }
   for n: Node cascade Under { put("{Frame}: visit {n.name}") }

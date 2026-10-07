@@ -6,7 +6,7 @@ import console
 
 component Node { name: text[8], value: i32, got: i32, kids: i32, heard: i32 }
 default_capacity 16
-relation Under { weight: i32 } from Node to Node tree capacity 16
+relation (Node)-[Under { weight: i32 }]->(Node) tree capacity 16
 unique Frame: i32
 
 world {
@@ -15,10 +15,10 @@ world {
   let b = spawn { Node { name: "b", value: 20, got: 0, kids: 0, heard: 0 } }
   let c = spawn { Node { name: "c", value: 30, got: 0, kids: 0, heard: 0 } }
   let d = spawn { Node { name: "d", value: 40, got: 0, kids: 0, heard: 0 } }
-  connect(a, top, Under { weight: 1 })
-  connect(b, top, Under { weight: 2 })
-  connect(c, top, Under { weight: 3 })
-  connect(d, a, Under { weight: 4 })
+  connect (a)-[Under { weight: 1 }]->(top)
+  connect (b)-[Under { weight: 2 }]->(top)
+  connect (c)-[Under { weight: 3 }]->(top)
+  connect (d)-[Under { weight: 4 }]->(a)
 }
 
 // Along the edge out: every node sends its value, times the edge's
@@ -26,7 +26,7 @@ world {
 system push() {
   Frame += 1
   for e, n: Node {
-    for s, parent in e.out(Under) {
+    for (e)-[s: Under]->(parent) {
       Node(parent).got += n.value * s.weight
     }
   }
@@ -38,7 +38,7 @@ system gather() {
   for e, n: mut Node {
     n.kids = 0
     n.heard = 0
-    for s, child in e.in(Under) {
+    for (child)-[s: Under]->(e) {
       n.kids += 1
       if let value = Node(child).value { n.heard += value * s.weight }
     }
@@ -48,7 +48,7 @@ system gather() {
 // The edges' own fields, written from the end they lead to.
 system grow() {
   for e with Node {
-    for mut s, child in e.in(Under) { s.weight += 10 }
+    for (child)-[mut s: Under]->(e) { s.weight += 10 }
   }
 }
 
@@ -56,7 +56,7 @@ system grow() {
 system cut() {
   let goes = if Frame == 2 { 30 } else { -1 }
   for e, n: Node where n.value == goes {
-    for s, parent in e.out(Under) { s.disconnect() }
+    for (e)-[s: Under]->(parent) { s.disconnect() }
   }
 }
 

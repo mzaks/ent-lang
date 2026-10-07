@@ -46,6 +46,7 @@ struct Token {
     Greater,
     GreaterEqual,
     Not,
+    Tilde, // ~, of the arrow to the sibling after: (a)~[R]~>(b)
     AndAnd,
     OrOr,
   };

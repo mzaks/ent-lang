@@ -5,7 +5,7 @@ import console
 
 component Node { name: text[8], rain: i32, flow: i32, height: i32, top: i32 }
 default_capacity 16
-relation Flows from Node to Node tree capacity 16
+relation (Node)-[Flows]->(Node) tree capacity 16
 unique Frame: i32
 
 world {
@@ -17,10 +17,10 @@ world {
   let spring = spawn { Node { name: "spring", rain: 10000, flow: 0, height: 900, top: 0 } }
   let creek = spawn { Node { name: "creek", rain: 100, flow: 0, height: 500, top: 0 } }
   spawn { Node { name: "lake", rain: 5, flow: 0, height: 50, top: 0 } }
-  connect(river, sea, Flows)
-  connect(brook, river, Flows)
-  connect(spring, brook, Flows)
-  connect(creek, river, Flows)
+  connect (river)-[Flows]->(sea)
+  connect (brook)-[Flows]->(river)
+  connect (spring)-[Flows]->(brook)
+  connect (creek)-[Flows]->(river)
 }
 
 system gather() {
@@ -31,7 +31,7 @@ system gather() {
   }
   // What has gathered here goes on down; the highest place it came from
   // goes with it.
-  for n: Node, down: mut Node up Flows cascade Flows leaves first {
+  for (n: Node)-[Flows]->(down: mut Node) cascade Flows leaves first {
     down.flow += n.flow
     down.top max= n.top
   }

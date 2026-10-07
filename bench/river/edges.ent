@@ -6,13 +6,13 @@
 
 component Node { rain: f32, sum: f32 } capacity 1024
 archetype Cell { Node } capacity 1024
-relation Flows from Node to Node tree capacity 1024
+relation (Node)-[Flows]->(Node) tree capacity 1024
 
 // Along the edges in: the rain on the nodes right above.
 system gather(wet: f32) {
   for e, n: mut Node {
     n.sum = 0.0
-    for s, above in e.in(Flows) {
+    for (above)-[s: Flows]->(e) {
       if let rain = Node(above).rain { n.sum += rain * wet }
     }
   }
@@ -22,7 +22,7 @@ system gather(wet: f32) {
 system send(wet: f32) {
   for n: mut Node { n.sum = 0.0 }
   for e, n: Node {
-    for s, below in e.out(Flows) { Node(below).sum += n.rain * wet }
+    for (e)-[s: Flows]->(below) { Node(below).sum += n.rain * wet }
   }
 }
 

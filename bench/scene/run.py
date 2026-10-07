@@ -45,7 +45,7 @@ TWO = ("archetype Picks {", "component Mass { m: i32 } capacity 1024\n"
        "archetype Heavy { Local, World, Mass } capacity 1024\n"
        "archetype Picks {")
 PLAIN = "cascade Under {"
-REACTIVE = "cascade Under\n      on changed Local, changed World up Under {"
+REACTIVE = "cascade Under\n      on changed l, changed above {"
 SORTED = (" tree capacity 1024", " tree sorted capacity 1024")
 # name: the changes to the program's text
 VARIANTS = {

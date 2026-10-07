@@ -133,7 +133,7 @@ system filters() {
 
 // Relations: edges with data. Inside a `for`, `for [mut] s, other in
 // e.out(R)` / `e.in(R)` visits the entity's edges; `s.disconnect()` drops
-// one; `connect(a, b, R { ... })` adds one.
+// one; `connect (a)-[R { ... }]->(b)` adds one.
 // CHECK: ent.relation @Synapse (weight: f32) capacity 64
 // CHECK: ent.relation @Follows () capacity 16
 relation Synapse { weight: f32 } capacity 64
@@ -141,8 +141,8 @@ relation Follows capacity 16
 // The components the ends have, if the relation names them.
 // CHECK: ent.relation @Aims (w: f32) from @Health to @Position capacity 8
 // CHECK: ent.relation @Owns () to @Health capacity 8
-relation Aims { w: f32 } from Health to Position capacity 8
-relation Owns to Health capacity 8
+relation (Health)-[Aims { w: f32 }]->(Position) capacity 8
+relation ()-[Owns]->(Health) capacity 8
 // CHECK-LABEL: ent.system @wire() {
 // CHECK:      ent.query (%{{.*}}: !ent.ref<@Health>) {
 // CHECK:        ent.edges @Synapse out (%[[S:.*]]: !ent.ref<@Synapse>, %[[T:.*]]: !ent.entity) {
@@ -155,15 +155,15 @@ relation Owns to Health capacity 8
 // CHECK:        ent.connect @Synapse %[[A]], %[[B]] (%{{.*}}) : f32
 system wire() {
   for e, h: Health {
-    for s, t in e.out(Synapse) {
+    for (e)-[s: Synapse]->(t) {
       Position(t).x += s.weight
     }
   }
   for e, h: Health {
-    for f, p in e.in(Follows) {
+    for (p)-[f: Follows]->(e) {
       Position(p).x += 1.0
     }
-    connect(e, e, Synapse { weight: 0.5 })
+    connect (e)-[Synapse { weight: 0.5 }]->(e)
   }
 }
 // CHECK-LABEL: ent.system @prune() {
@@ -172,7 +172,7 @@ system wire() {
 // CHECK:          ent.disconnect
 system prune() {
   for e, h: Health {
-    for mut s, t in e.out(Synapse) {
+    for (e)-[mut s: Synapse]->(t) {
       s.weight *= 0.5
       if s.weight < 0.01 { s.disconnect() }
     }

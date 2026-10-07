@@ -113,7 +113,7 @@ system look() {
     Score += seen
   }
   for e, h: Hull {
-    for s, other in e.out(Link) {
+    for (e)-[s: Link]->(other) {
       // A var of an edge loop's own body.
       var w = s.w
       if w < 0 { w = 0 }

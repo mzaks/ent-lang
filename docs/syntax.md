@@ -89,10 +89,10 @@ enum Way { Right, Down, Left, Up }          // a type of named cases
 archetype Gun { Position, optional Stunned } capacity 4
 relation Synapse { weight: f32 } capacity 100000  // edges with data
 relation Follows capacity 1000                     // edges without
-relation Aims { w: f32 } from Ship to Target capacity 64  // typed ends
-relation Orbits from Orbit to Body tree capacity 64       // one parent each
-relation Flows from Node to Node tree sorted capacity 64  // stored in its order
-relation Inside from Box to Box tree ordered by Slot.at capacity 64  // children in order
+relation (Ship)-[Aims { w: f32 }]->(Target) capacity 64   // typed ends
+relation (Orbit)-[Orbits]->(Body) tree capacity 64        // one parent each
+relation (Node)-[Flows]->(Node) tree sorted capacity 64   // stored in its order
+relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 64  // children in order
 default_capacity 1024
 capacity Inside 4096                        // another capacity for one declared before
 ```
@@ -114,8 +114,8 @@ capacity Inside 4096                        // another capacity for one declared
 - A relation's edges go from a source entity to a target entity and carry
   its fields. They are not entities; `capacity` bounds how many there are.
   An entity may have any number of edges, also several to the same target.
-  `from C` and `to D` name the components the sources and targets have;
-  connecting checks them. Where no system despawns entities with `C` or
+  `(C)-[Name]->(D)` names the components the sources and targets have
+  (either may be left open, `()`); connecting checks them. Where no system despawns entities with `C` or
   removes it (and likewise for `D`), reading `C` of an edge's other end
   (`if let x = C(other).f`) is compiled without checking the id, though it
   is still written with `if let`.
@@ -123,7 +123,7 @@ capacity Inside 4096                        // another capacity for one declared
   its parent, and lets none be its own ancestor. Connecting an entity that
   has a parent gives it the new one instead (the last `connect` wins); an
   edge that closes a cycle stops the program. A `for` can read up a tree
-  and follow it in order (`up`, `cascade`, below).
+  and follow it in order (arrows in its head and `cascade`, below).
 
 ## Systems and queries
 
@@ -166,49 +166,77 @@ for with Enemy { Count += 1 }     // nor the entity
   a system filtering by `C` does not wait for one writing `C`'s fields. Where
   an archetype always or never holds the component, the compiler decides for
   the whole archetype; where it holds it optionally, per entity.
-- `name: Component up Relation` binds a component of another entity: of
-  the nearest ancestor along the tree `Relation` that has it, which is the
-  entity's parent, or else the parent's parent, and so on. The `for` visits
-  only the entities with such an ancestor; the entity itself need not have
-  the component, and may be filtered not to (`t: Tint up Orbits without
-  Tint`). With `mut` (`down: mut Node up Flows`) its fields can be
-  combined into (`+=`, `-=`, `min=`, `max=`), in a `for` that cascades
-  along the tree.
-- `name: Component before Relation` binds a component of the sibling
-  before: the child of the same parent that comes right before the entity
-  in a tree whose children are in an order (`tree ordered by`), if it has
-  the component. The `for` visits only the entities with such a sibling.
-  It is read, never written.
-- `optional name: Component up Relation` (or `before Relation`): the
-  `for` also visits the entities without that ancestor or sibling, and the
-  binding is read with `if let v = name.field { ... } else { ... }`. See
-  Trees below.
+- With arrows, the head is patterns, and binds components of other
+  entities too. A node is an entity in parentheses with what is bound of
+  it; the first node is the entity the `for` visits.
+
+  ```
+  for (b: mut Box, s: Size)-[Inside]->(outer: Box, k: Stack) { ... }
+  ```
+
+  `-[Relation]->` leads to the entity's parent along a tree: `outer` and
+  `k` are the parent's `Box` and `Stack`, and the `for` visits only the
+  entities whose parent has both. The entity itself need not have what
+  is bound of the parent, and may be filtered not to. With `mut`
+  (`(n: Node)-[Flows]->(down: mut Node)`) a field can be combined into
+  (`+=`, `-=`, `min=`, `max=`), in a `for` that cascades along the tree.
+- `-[Relation*]->` leads to the nearest ancestor that has what is bound:
+  the parent, or else the parent's parent, and so on
+  (`(b: Body)-[Orbits*]->(t: Tint)`).
+- Further patterns follow after commas, each from or to the visited
+  entity, which is named by its own name or one of its bindings:
+  `(prev: Box)~[Inside]~>(b)` binds the sibling before, the child of the
+  same parent that comes right before the entity in a tree whose children
+  are in an order (`tree ordered by`), if it has the component. It is
+  read, never written.
+- `optional` before a pattern: the `for` also visits the entities without
+  that parent, ancestor or sibling, and what the pattern binds is read
+  with `if let v = name.field { ... } else { ... }`. See Trees below.
+- After the first pattern, an arrow can be written either way round,
+  `(outer: Box)<-[Inside]-(b)` and `(b)<~[Inside]~(prev: Box)`: it is the
+  arrow's direction that says which end is which. An arrow to the visited
+  entity (from its children) is not for the head: see the loop below.
 - `cascade Relation`, after the filters, visits parents before their
   children along the tree: first the entities without a parent, then their
   children, and so on, each seeing what the `for` wrote before it.
   `cascade Relation leaves first` visits children before their parents.
   See Trees below.
 - `where cond` runs the body only where `cond` holds.
-- `on changed C.f, changed C, added C, removed C` makes the query reactive
-  (`changed C up Relation`, in a `for` that cascades: see Trees below);
+- `on changed C.f, changed C, added C, removed C` makes the query reactive.
+  A component can be named by its binding (`changed b.w`), and another
+  entity's event is asked that way (`changed outer.x`, in a `for` that
+  cascades: see Trees below);
   `log N` after a trigger sets its event log's capacity (`log 0`: none).
 
-Inside a `for` that names its entity, another `for` visits the entity's
-edges:
+Inside a `for`, another `for` with an arrow visits the entity's edges.
+One end is the visited entity, by its name or one of its bindings; the
+arrow says whether the edges go out of it or come into it:
 
 ```
 for e with Spiked {
-  for s, post in e.out(Synapse) {         // edges from e; post: the target
+  for (e)-[s: Synapse]->(post) {          // edges from e; post: the target
     Neuron(post).input += s.weight
   }
 }
-for e, n: mut Neuron {
-  for mut s, pre in e.in(Synapse) {       // edges to e; pre: the source
+for n: mut Neuron {
+  for (pre)-[mut s: Synapse]->(n) {       // edges to n; pre: the source
     s.weight *= 0.99                      // `mut`: the edge's fields
     if s.weight < 0.001 { s.disconnect() }
   }
 }
+for c: mut Content {
+  for (inner: Box)-[Inside]->(c) {        // the boxes inside this one
+    c.width += inner.w
+  }
+}
 ```
+
+In the brackets: the relation, before it a name for the edge where its
+fields are read (`s: Synapse`), and `mut` where they are written. The
+other end is `(name)` for its id, `()` for nothing, or binds components of
+it (`(inner: Box)`, `(pre, n: Neuron)`): the body then runs for the edges
+whose other end has them, and a field is read like any other
+(`inner.w`).
 
 Edges are visited in a fixed order: by source, then in the order they were
 connected (a tree's edges into an entity: in the order they were
@@ -220,10 +248,10 @@ edge loop runs once per edge.
 ### Trees
 
 ```
-relation Orbits from Orbit to Body tree capacity 64
+relation (Orbit)-[Orbits]->(Body) tree capacity 64
 
 system place() {
-  for b: mut Body, o: Orbit, center: Body up Orbits cascade Orbits {
+  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) cascade Orbits {
     b.x = center.x + cos(o.angle) * o.distance
     b.y = center.y + sin(o.angle) * o.distance
   }
@@ -231,7 +259,7 @@ system place() {
 
 system draw() {
   for b: Body, t: Tint { circle(b.x, b.y, b.radius, t.color) }
-  for b: Body, t: Tint up Orbits without Tint {
+  for (b: Body)-[Orbits*]->(t: Tint) without Tint {
     circle(b.x, b.y, b.radius, t.color)
   }
 }
@@ -249,7 +277,7 @@ tree, and in whichever order the bodies were spawned. Without `cascade
 Orbits` the compiler rejects `place`. `draw` reads `Tint`, which it does
 not write, and needs no order.
 
-- With a binding `up` the tree it cascades along, a `for` visits no entity
+- With an arrow up the tree it cascades along, a `for` visits no entity
   without a parent, since that has no ancestor. Without one it visits
   those first.
 - Which of two entities that are not above one another comes first is
@@ -268,17 +296,18 @@ not write, and needs no order.
   from then on, with all that is below them as it was. (Other relations
   keep the edges of a destroyed entity until they are next sorted.)
 - Where the relation says what its targets have (`to Body`) and nothing
-  destroys bodies or takes `Body` away, `Body up Orbits` is the parent's,
+  destroys bodies or takes `Body` away, `-[Orbits*]->(c: Body)` is the
+  parent's too,
   read without a search or a check.
 
 The other way, from the leaves:
 
 ```
-relation Flows from Node to Node tree capacity 100000
+relation (Node)-[Flows]->(Node) tree capacity 100000
 
 system run() {
   for n: mut Node { n.flow = n.rain }
-  for n: Node, down: mut Node up Flows cascade Flows leaves first {
+  for (n: Node)-[Flows]->(down: mut Node) cascade Flows leaves first {
     down.flow += n.flow
   }
 }
@@ -290,7 +319,7 @@ the entities without a parent, so a node has what all above it sent when
 it passes its own on. What goes into an ancestor through a `mut` binding
 lands when the depth that sent it is through, combined in the order the
 `for` visits the entities, which is fixed; so the `for` may read the field
-of its own entity, but not through a binding `up` the tree or with `if
+of its own entity, but not through an arrow up the tree or with `if
 let`, where it would see what others of its depth sent. An ancestor's
 field is only combined into, never assigned.
 
@@ -299,9 +328,9 @@ order, by an integer field of theirs:
 
 ```
 component Slot { at: i32 }
-relation Inside from Box to Box tree ordered by Slot.at capacity 256
+relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 256
 
-for b: mut Box, outer: Box up Inside, optional prev: Box before Inside
+for (b: mut Box)-[Inside]->(outer: Box), optional (prev: Box)~[Inside]~>(b)
     cascade Inside {
   b.x = outer.x
   if let x = prev.x, let w = prev.w { b.x = x + w }
@@ -318,13 +347,14 @@ it in the same box ends, the first where the box they are in starts.
 - A `for` that cascades along the tree visits the children of an entity
   in that order (parents first; not with `leaves first`), and so does an
   edge loop over the edges into an entity. So such a `for` may read
-  through `before` what it writes, as it may through `up`: the sibling
+  from the sibling before what it writes, as it may from the parent: the
+  sibling
   before has been visited.
-- `before` is the sibling right before, and only that: if it does not
+- `~[R]~>` is from the sibling right before, and only that: if it does not
   have the component, the binding is not there (the `for` does not visit
   the entity, or with `optional` finds nothing), and no earlier sibling
   is taken instead.
-- With every binding `up` or `before` the tree `optional`, a cascading
+- With every pattern along the tree `optional`, a cascading
   `for` visits the entities without a parent too, first, as one without
   such bindings does.
 - Reordering is a write to the field, in any `for`. The tree puts its
@@ -343,7 +373,7 @@ it in the same box ends, the first where the box they are in starts.
 order:
 
 ```
-relation Flows from Node to Node tree sorted capacity 100000
+relation (Node)-[Flows]->(Node) tree sorted capacity 100000
 ```
 
 The archetypes that hold them, declared or not, then have their rows in
@@ -368,7 +398,7 @@ choice of storage, and it has its price:
 - No entity's id is its row in such a program: reading another entity
   (`if let`, `+=`) goes through a table, everywhere.
 - Which archetypes are sorted follows from what the relation says its
-  ends have (`from`, `to`, which it must, and which nothing may remove):
+  ends have (which it must, and which nothing may remove):
   every archetype with either. A tree in one archetype is one pass over
   its rows. A tree in several (the orrery's bodies come in three shapes)
   is read depth by depth, in each the rows every archetype has of it: in a
@@ -389,7 +419,8 @@ A cascading `for` may also do what any `for` does to the world beyond its
 own entity:
 
 ```
-for e, n: Node, parent: Node up Under cascade Under where parent.total > 100 {
+for (e, n: Node)-[Under]->(parent: Node) cascade Under
+    where parent.total > 100 {
   Pruned += 1                // into a unique
   Stats(Keeper).lost += n.local   // into an entity it has the id of
   e.destroy()
@@ -418,15 +449,15 @@ the ancestor it binds as well:
 
 ```
 system place() {
-  for w: mut World, l: Local, above: World up Under
+  for (w: mut World, l: Local)-[Under]->(above: World)
       cascade Under
-      on changed Local, changed World.x up Under {
+      on changed l, changed above.x {
     w.x = above.x + l.x
   }
 }
 ```
 
-`changed World.x up Under` is the event of the entity `above` is taken
+`changed above.x` is the event of the entity `above` is taken
 from: the body runs for a node whose own `Local` changed since the `for`
 last ran, or whose ancestor's `World.x` did, which includes what this
 `for` wrote when it visited the ancestor a moment before. So moving one
@@ -434,24 +465,23 @@ node places it and everything below it again in the same pass, and no
 other node's body runs. What the `for` wrote into ancestors it has
 thereby passed down: the next time it runs that is no event.
 
-- Only `changed` can be `up` a tree; the `for` must bind that component
-  `up` that tree and cascade along it.
-- `changed C before Relation` is the same for the sibling before, which
-  a binding `before` the tree leads to: the `for` runs for a node whose
+- Only `changed` can be asked of another entity; the `for` must cascade
+  along the tree the binding is reached by.
+- `changed prev`, of a binding from the sibling before, is the same for
+  that sibling: the `for` runs for a node whose
   sibling before had the event, also in the same pass, or which has
   another sibling before it than it had (one came, went or was moved).
-- `changed C down Relation`, in a `for` that cascades `leaves first`, is
-  the event of any of the node's children, also one the `for` has just
+- `changed (: C.f)-[Relation]->(name)`, in a `for` that cascades `leaves
+  first`, is the event of any of the node's children (no binding stands
+  for them in the head, so a pattern says it), also one the `for` has just
   caused in a child; a child that comes or goes is one too. No binding
   goes with it: a node reads its children in an edge loop,
 
   ```
-  for e, n: mut Node cascade Under leaves first
-      on changed Node.own, changed Node.total down Under {
+  for n: mut Node cascade Under leaves first
+      on changed n.own, changed (: Node.total)-[Under]->(n) {
     n.total = n.own
-    for edge, child in e.in(Under) {
-      if let t = Node(child).total { n.total += t }
-    }
+    for (child: Node)-[Under]->(n) { n.total += child.total }
   }
   ```
 
@@ -462,11 +492,12 @@ thereby passed down: the next time it runs that is no event.
   that feed each other (as in `examples/layout.ent`, where sizes go up
   the tree and room comes down) write only what differs
   (`if b.w != w { b.w = w }`), or each would set the other off for good.
-- Triggers `down` and `before` a tree are for unsorted trees so far, and
+- Triggers on children and on the sibling before are for unsorted trees
+  so far, and
   a `for` with one goes through its whole tree, running its body where a
   trigger fired.
 - What a node sees through the binding also changes when the node is
-  given another parent: `connect(node, other, Under)` is such an event
+  given another parent: `connect (node)-[Under]->(other)` is such an event
   for `node`, whether a system or the host connects it, and the `for`
   places it and everything below it again the next time it runs.
 - Such a `for` goes only where the events lead: to the nodes that had
@@ -479,10 +510,11 @@ thereby passed down: the next time it runs that is no event.
   a node in a hundred or so is placed again, the `for` without `on` is
   the faster one, up to four times where most of the tree moves.
 - It goes through the whole tree instead, running its body where a
-  trigger fired, with `leaves first`, without a binding `up` the tree,
+  trigger fired, with `leaves first`, without an arrow up the tree,
   where a trigger's event log has capacity 0 or has lost events, on its
   first run, where the tree's targets do not all have the component of a
-  trigger `up` it (`to World` says they do), and over a `sorted` tree in
+  trigger up it (`->(World)` in its declaration says they do), and over a
+  `sorted` tree in
   several archetypes that is deep (fewer than 64 nodes a depth). That
   saves the body, not the walk.
 - It runs on one core.
@@ -494,7 +526,7 @@ A cascading `for` visits one entity after another, with one exception:
 over a `sorted` tree in one archetype, built with parallel loops
 (`tools/ent --parallel`), the entities of one depth are visited on all
 cores where the body only reads and writes the entity and what is above
-it (fields, `up` bindings, `+=` into an ancestor, reads of uniques and of
+it (fields, what arrows bind, `+=` into an ancestor, reads of uniques and of
 other entities), the archetype has room for a million entities and the
 depth holds 32,768 or more. The result is the same to the bit: what
 children send to a parent is still added in their order. Over a `sorted`
@@ -520,8 +552,10 @@ of a depth.
   into one `if let` with `, let` between them
   (`if let x = prev.x, let w = prev.w { ... }`): the first block runs
   where all are there.
-- `connect(a, b, Synapse { weight: 0.5 })` adds an edge from `a` to `b`
-  (`connect(a, b, Follows)` without fields). Outside a `for` it is there
+- `connect (a)-[Synapse { weight: 0.5 }]->(b)` adds an edge from `a` to
+  `b` (`connect (a)-[Follows]->(b)` without fields); a node is any
+  expression that gives an entity, and arrows can go on, each an edge:
+  `connect (side)-[Inside]->(root)<-[Inside]-(rest)`. Outside a `for` it is there
   for the next `for` and everything after; inside one, when the `for` ends
   (at most once per entity; not inside an edge loop). A system that
   connects in a loop outside a `for` sorts the edges once, before its next

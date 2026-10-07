@@ -38,7 +38,7 @@ component Content {
 
 // From a box to the one it is in; the boxes in one box are in the order
 // of their slots.
-relation Inside from Box to Box tree ordered by Slot.at capacity 256
+relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 256
 
 // Three passes over the boxes, each a `for` along the tree, and each
 // reactive: it runs for a box only where something it reads has changed
@@ -57,10 +57,10 @@ system layout() {
   // a box adds up the boxes inside it, which have been visited. Only
   // where it is asked for another size, stands them another way, or one
   // of them has another size, or has come or gone.
-  for e, b: mut Box, s: Size, k: Stack, c: mut Content
+  for (b: mut Box, s: Size, k: Stack, c: mut Content)
       cascade Inside leaves first
-      on changed Size, changed Stack, changed Box.w down Inside,
-         changed Box.h down Inside, changed Size down Inside {
+      on changed s, changed k, changed (: Box.w)-[Inside]->(b),
+         changed (: Box.h)-[Inside]->(b), changed (: Size)-[Inside]->(b) {
     c.count = 0
     c.sum_w = 0.0
     c.max_w = 0.0
@@ -68,17 +68,14 @@ system layout() {
     c.max_h = 0.0
     c.grow_w = 0
     c.grow_h = 0
-    for inside, child in e.in(Inside) {
-      if let w = Box(child).w, let h = Box(child).h,
-         let sw = Size(child).w, let sh = Size(child).h {
-        c.count += 1
-        c.sum_w += w
-        c.max_w max= w
-        c.sum_h += h
-        c.max_h max= h
-        if sw == Sizing.Grow { c.grow_w += 1 }
-        if sh == Sizing.Grow { c.grow_h += 1 }
-      }
+    for (inner: Box, wants: Size)-[Inside]->(b) {
+      c.count += 1
+      c.sum_w += inner.w
+      c.max_w max= inner.w
+      c.sum_h += inner.h
+      c.max_h max= inner.h
+      if wants.w == Sizing.Grow { c.grow_w += 1 }
+      if wants.h == Sizing.Grow { c.grow_h += 1 }
     }
     let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
     if s.w == Sizing.Fit {
@@ -95,11 +92,9 @@ system layout() {
   // along the row or column in equal shares, across it all of it. From
   // the outermost boxes in, since a box that grew has more room to give;
   // only where the box it is in has another size or other boxes in it.
-  for b: mut Box, s: Size,
-      outer: Box up Inside, k: Stack up Inside, c: Content up Inside
+  for (b: mut Box, s: Size)-[Inside]->(outer: Box, k: Stack, c: Content)
       cascade Inside
-      on changed Size, changed Box.w up Inside, changed Box.h up Inside,
-         changed Stack up Inside, changed Content up Inside {
+      on changed s, changed outer.w, changed outer.h, changed k, changed c {
     let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
     let room_w = outer.w - 2.0 * k.pad
     let room_h = outer.h - 2.0 * k.pad
@@ -119,10 +114,10 @@ system layout() {
   // gap further; the first inside the padding of the box they are in.
   // Only where the box it is in has moved, or the one before it has
   // moved, has another size or is another.
-  for b: mut Box, outer: Box up Inside, k: Stack up Inside,
-      optional prev: Box before Inside cascade Inside
-      on changed Box.x up Inside, changed Box.y up Inside,
-         changed Stack up Inside, changed Box before Inside {
+  for (b: mut Box)-[Inside]->(outer: Box, k: Stack),
+      optional (prev: Box)~[Inside]~>(b)
+      cascade Inside
+      on changed outer.x, changed outer.y, changed k, changed prev {
     var x = outer.x + k.pad
     var y = outer.y + k.pad
     if let px = prev.x, let py = prev.y, let w = prev.w, let h = prev.h {

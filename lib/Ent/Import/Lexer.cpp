@@ -131,6 +131,8 @@ Token Lexer::next() {
   case '>':
     return make(followedBy('=') ? Token::GreaterEqual : Token::Greater,
                 start);
+  case '~':
+    return make(Token::Tilde, start);
   case '&':
     if (followedBy('&'))
       return make(Token::AndAnd, start);

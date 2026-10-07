@@ -6,7 +6,7 @@ import console
 
 component Node { name: text[8], local: i32, total: i32 }
 default_capacity 8
-relation Under from Node to Node tree capacity 4
+relation (Node)-[Under]->(Node) tree capacity 4
 unique Frame: i32
 unique Keep { root: entity, a: entity, b: entity, c: entity, d: entity }
 
@@ -16,10 +16,10 @@ world {
   let b = spawn { Node { name: "b", local: 100, total: 0 } }
   let c = spawn { Node { name: "c", local: 1000, total: 0 } }
   let d = spawn { Node { name: "d", local: 10000, total: 0 } }
-  connect(a, root, Under)
-  connect(b, root, Under)
-  connect(c, root, Under)
-  connect(d, root, Under)
+  connect (a)-[Under]->(root)
+  connect (b)-[Under]->(root)
+  connect (c)-[Under]->(root)
+  connect (d)-[Under]->(root)
   Keep.root = root
   Keep.a = a
   Keep.b = b
@@ -29,19 +29,19 @@ world {
 
 system change() {
   Frame += 1
-  if Frame == 1 { connect(Keep.a, Keep.d, Under) }     // a to the end
-  if Frame == 2 { connect(Keep.b, Keep.a, Under) }     // b after it
-  if Frame == 3 { connect(Keep.c, Keep.b, Under) }     // and c
-  if Frame == 4 { connect(Keep.a, Keep.root, Under) }  // in place
-  if Frame == 5 { connect(Keep.d, Keep.c, Under) }     // d: the order is full
-  if Frame == 6 { connect(Keep.c, Keep.root, Under) }  // in place
-  if Frame == 7 { connect(Keep.b, Keep.d, Under) }     // no room: made again
-  if Frame == 8 { connect(Keep.a, Keep.b, Under) }     // a, alone now
+  if Frame == 1 { connect (Keep.a)-[Under]->(Keep.d) }     // a to the end
+  if Frame == 2 { connect (Keep.b)-[Under]->(Keep.a) }     // b after it
+  if Frame == 3 { connect (Keep.c)-[Under]->(Keep.b) }     // and c
+  if Frame == 4 { connect (Keep.a)-[Under]->(Keep.root) }  // in place
+  if Frame == 5 { connect (Keep.d)-[Under]->(Keep.c) }     // d: the order is full
+  if Frame == 6 { connect (Keep.c)-[Under]->(Keep.root) }  // in place
+  if Frame == 7 { connect (Keep.b)-[Under]->(Keep.d) }     // no room: made again
+  if Frame == 8 { connect (Keep.a)-[Under]->(Keep.b) }     // a, alone now
 }
 
 system sum() {
   for n: mut Node { n.total = n.local }
-  for n: mut Node, parent: Node up Under cascade Under {
+  for (n: mut Node)-[Under]->(parent: Node) cascade Under {
     n.total = parent.total + n.local
   }
 }

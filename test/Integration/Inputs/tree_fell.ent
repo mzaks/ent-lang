@@ -5,7 +5,7 @@ import console
 
 component Node { name: text[8], value: i32, kids: i32, heard: i32, under: i32 }
 default_capacity 16
-relation Under from Node to Node tree capacity 16
+relation (Node)-[Under]->(Node) tree capacity 16
 unique Frame: i32
 unique Top: entity
 
@@ -14,9 +14,9 @@ world {
   let a = spawn { Node { name: "a", value: 10, kids: 0, heard: 0, under: 0 } }
   let b = spawn { Node { name: "b", value: 20, kids: 0, heard: 0, under: 0 } }
   let d = spawn { Node { name: "d", value: 40, kids: 0, heard: 0, under: 0 } }
-  connect(a, top, Under)
-  connect(b, top, Under)
-  connect(d, a, Under)
+  connect (a)-[Under]->(top)
+  connect (b)-[Under]->(top)
+  connect (d)-[Under]->(a)
   Top = top
 }
 
@@ -28,7 +28,7 @@ system change() {
   // A new node in a's slot, under top; d is not its child.
   if Frame == 3 {
     let fresh = spawn { Node { name: "fresh", value: 80, kids: 0, heard: 0, under: 0 } }
-    connect(fresh, Top, Under)
+    connect (fresh)-[Under]->(Top)
   }
 }
 
@@ -37,11 +37,11 @@ system look() {
     n.kids = 0
     n.heard = 0
     n.under = 0
-    for s, child in e.in(Under) {
+    for (child)-[s: Under]->(e) {
       n.kids += 1
       if let value = Node(child).value { n.heard += value }
     }
-    for s, parent in e.out(Under) {
+    for (e)-[s: Under]->(parent) {
       if let value = Node(parent).value { n.under = value }
     }
   }
@@ -49,7 +49,7 @@ system look() {
 
 system show() {
   for n: Node { put("{Frame}: {n.name} kids {n.kids} heard {n.heard} under {n.under}") }
-  for n: Node, above: Node up Under { put("{Frame}: {n.name} below {above.name}") }
+  for (n: Node)-[Under]->(above: Node) { put("{Frame}: {n.name} below {above.name}") }
   flush()
 }
 

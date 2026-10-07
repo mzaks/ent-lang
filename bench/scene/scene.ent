@@ -6,7 +6,7 @@ component Local { x: i32 } capacity 1024
 component World { x: i32 } capacity 1024
 archetype Node { Local, World } capacity 1024
 // From a node to the one it hangs under; the first node hangs under none.
-relation Under from Local to World tree capacity 1024
+relation (Local)-[Under]->(World) tree capacity 1024
 
 // The nodes to move in a step, which the host names.
 component Pick { node: entity, by: i32 }
@@ -20,7 +20,7 @@ system move() {
 
 // Every node, every step.
 system place() {
-  for w: mut World, l: Local, above: World up Under cascade Under {
+  for (w: mut World, l: Local)-[Under]->(above: World) cascade Under {
     w.x = above.x + l.x
   }
 }

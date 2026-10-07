@@ -253,8 +253,8 @@ component Position { x: f32 }
 relation Synapse { weight: f32 } capacity 4
 system s() {
   for p: Position {
-    // expected-error @+1 {{edges are visited from the entity a 'for' visits; name it: 'for e, ...'}}
-    for w, t in e.out(Synapse) {
+    // expected-error @+1 {{one end of the arrow is the entity the 'for' visits, by one of its names ('p'), and the other is the entity at the other end}}
+    for (e)-[w: Synapse]->(t) {
     }
   }
 }
@@ -265,8 +265,8 @@ component Position { x: f32 }
 relation Synapse { weight: f32 } capacity 4
 system s() {
   for e, p: Position {
-    for w, t in e.out(Synapse) {
-      // expected-error @+1 {{'w' is not 'mut': bind it as 'for mut w, ...' to write it}}
+    for (e)-[w: Synapse]->(t) {
+      // expected-error @+1 {{'w' is not 'mut': bind it as '[mut w: Synapse]' to write it}}
       w.weight = 1.0
     }
   }
@@ -279,7 +279,7 @@ relation Synapse { weight: f32 } capacity 4
 system s() {
   for e, p: Position {
     // expected-error @+1 {{'Synapse' needs a value for 'weight'}}
-    connect(e, e, Synapse)
+    connect (e)-[Synapse]->(e)
   }
 }
 
@@ -289,7 +289,7 @@ component Position { x: f32 }
 system s() {
   for e, p: Position {
     // expected-error @+1 {{unknown relation 'Synapse'}}
-    for w, t in e.out(Synapse) {
+    for (e)-[w: Synapse]->(t) {
     }
   }
 }
@@ -298,7 +298,7 @@ system s() {
 
 component Position { x: f32 }
 // expected-error @+1 {{unknown component 'Neuron'}}
-relation Synapse { weight: f32 } from Position to Neuron capacity 4
+relation (Position)-[Synapse { weight: f32 }]->(Neuron) capacity 4
 
 // -----
 
@@ -610,7 +610,7 @@ relation Link { w: i32 } capacity 8
 system s() {
   for e, n: mut Node {
     var sum = 0
-    for l, other in e.out(Link) {
+    for (e)-[l: Link]->(other) {
       // expected-error @+1 {{assigning a var from outside an edge loop is not supported yet}}
       sum += l.w
     }

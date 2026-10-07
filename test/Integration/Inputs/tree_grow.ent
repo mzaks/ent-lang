@@ -8,7 +8,7 @@ component Node { name: text[8], depth: i32, total: i32, local: i32 }
 component Flag { since: i32 }
 archetype Plain { Node } capacity 16
 archetype Flagged { Node, Flag } capacity 16
-relation Under from Node to Node tree capacity 32
+relation (Node)-[Under]->(Node) tree capacity 32
 unique Frame: i32
 
 world {
@@ -16,9 +16,9 @@ world {
   let a = spawn { Node { name: "a", depth: 0, total: 0, local: 10 } }
   let b = spawn { Node { name: "b", depth: 0, total: 0, local: 100 } }
   let c = spawn { Node { name: "c", depth: 0, total: 0, local: 1000 } }
-  connect(a, root, Under)
-  connect(b, root, Under)
-  connect(c, a, Under)
+  connect (a)-[Under]->(root)
+  connect (b)-[Under]->(root)
+  connect (c)-[Under]->(a)
 }
 
 system sum() {
@@ -27,7 +27,7 @@ system sum() {
     n.depth = 0
     n.total = n.local
   }
-  for n: mut Node, parent: Node up Under cascade Under {
+  for (n: mut Node)-[Under]->(parent: Node) cascade Under {
     n.depth = parent.depth + 1
     n.total = parent.total + n.local
   }
@@ -37,9 +37,10 @@ system sum() {
 // are there at once and not visited; their edges come when the `for` ends.
 system grow() {
   let now = Frame == 2
-  for e, n: Node, parent: Node up Under cascade Under where now && n.depth == 2 {
+  for (e, n: Node)-[Under]->(parent: Node)
+      cascade Under where now && n.depth == 2 {
     let bud = spawn { Node { name: "bud", depth: 0, total: 0, local: 5 } }
-    connect(bud, e, Under)
+    connect (bud)-[Under]->(e)
   }
 }
 
@@ -47,7 +48,8 @@ system grow() {
 // the other archetype. Frame 4: they are not any more, leaves first.
 system flag() {
   let now = Frame == 3
-  for e, n: Node, parent: Node up Under cascade Under where now && n.depth >= 2 {
+  for (e, n: Node)-[Under]->(parent: Node)
+      cascade Under where now && n.depth >= 2 {
     e.add(Flag { since: Frame })
   }
   let back = Frame == 4
@@ -60,7 +62,7 @@ system flag() {
 system cut() {
   let now = Frame == 5
   for e, n: Node cascade Under {
-    for s, parent in e.out(Under) {
+    for (e)-[s: Under]->(parent) {
       if now && n.depth == 1 { s.disconnect() }
     }
   }

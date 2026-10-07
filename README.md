@@ -229,10 +229,10 @@ come with the compiler, in `devices/`, and two more that need
   is; `examples/layout_demo.ent` is a window of boxes inside boxes, laid
   out by the library `examples/layout.ent` (fixed, fit and grow sizes in
   rows and columns, after Clay) in three reactive `for`s along a tree
-  whose children are in an order (`tree ordered by Slot.at`; a binding
-  `before` the tree is the sibling before, and an `optional` one may find
-  none), each running only where something it reads changed, in the box,
-  above it (`up`), before it (`before`) or inside it (`down`):
+  whose children are in an order (`tree ordered by Slot.at`), each
+  running only where something it reads changed, in the box, in the one
+  it is in (`(b: Box)-[Inside]->(outer: Box)`), in the one before it
+  (`(prev: Box)~[Inside]~>(b)`) or in one inside it:
   `tools/ent run -I examples examples/layout_demo.ent`; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are
   entities, ways, modes and the game's state are enums, and the only C is
   that of the devices and the math module. A module's `name.link` names the

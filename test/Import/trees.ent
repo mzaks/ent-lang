@@ -9,17 +9,17 @@ default_capacity 8
 
 // CHECK: ent.relation @Orbits () from @Orbit to @Body tree capacity 8
 // CHECK: ent.relation @Owns (share: f32) tree capacity 4
-relation Orbits from Orbit to Body tree capacity 8
+relation (Orbit)-[Orbits]->(Body) tree capacity 8
 relation Owns { share: f32 } tree capacity 4
 
 // `up` after a binding's component: the nearest ancestor's that has it.
 // `cascade`, after the filters: parents before their children.
 // CHECK-LABEL: ent.system @place() {
-// CHECK:   ent.query (%[[B:.*]]: !ent.ref<@Body, mut>, %[[O:.*]]: !ent.ref<@Orbit>, %[[C:.*]]: !ent.ref<@Body, up @Orbits>) cascade @Orbits {
-// CHECK:     %[[X:.*]] = ent.get %[[C]] "x" : <@Body, up @Orbits> -> f32
+// CHECK:   ent.query (%[[B:.*]]: !ent.ref<@Body, mut>, %[[O:.*]]: !ent.ref<@Orbit>, %[[C:.*]]: !ent.ref<@Body, parent @Orbits>) cascade @Orbits {
+// CHECK:     %[[X:.*]] = ent.get %[[C]] "x" : <@Body, parent @Orbits> -> f32
 // CHECK:     ent.set %[[B]] "x", %{{.*}} : <@Body, mut>, f32
 system place() {
-  for b: mut Body, o: Orbit, center: Body up Orbits cascade Orbits {
+  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) cascade Orbits {
     b.x = center.x + o.distance
   }
 }
@@ -30,7 +30,7 @@ system place() {
 // CHECK:   ent.query (%{{.*}}: !ent.ref<@Body>) with [@Orbit] cascade @Owns {
 // CHECK:     scf.if
 system inherit() {
-  for b: Body, t: Tint up Orbits without Tint {
+  for (b: Body)-[Orbits*]->(t: Tint) without Tint {
     let color = t.color
   }
   for b: Body with Orbit cascade Owns where b.x > 0.0 {
@@ -48,31 +48,30 @@ system keys() {
 // Children before their parents; `+=` through a `mut` binding up the tree
 // combines into the ancestor.
 // CHECK-LABEL: ent.system @gather() {
-// CHECK:   ent.query (%[[N:.*]]: !ent.ref<@Body>, %[[D:.*]]: !ent.ref<@Body, mut, up @Orbits>) cascade @Orbits leaves first {
-// CHECK:     ent.combine %[[D]] "x" add %{{.*}} : <@Body, mut, up @Orbits>, f32
+// CHECK:   ent.query (%[[N:.*]]: !ent.ref<@Body>, %[[D:.*]]: !ent.ref<@Body, mut, parent @Orbits>) cascade @Orbits leaves first {
+// CHECK:     ent.combine %[[D]] "x" add %{{.*}} : <@Body, mut, parent @Orbits>, f32
 // CHECK:     %[[NEG:.*]] = arith.subf %{{.*}}, %{{.*}} : f32
-// CHECK:     ent.combine %[[D]] "x" add %[[NEG]] : <@Body, mut, up @Orbits>, f32
+// CHECK:     ent.combine %[[D]] "x" add %[[NEG]] : <@Body, mut, parent @Orbits>, f32
 system gather() {
-  for b: Body, down: mut Body up Orbits cascade Orbits leaves first {
+  for (b: Body)-[Orbits]->(down: mut Body) cascade Orbits leaves first {
     down.x += b.x
     down.x -= 1.0
   }
 }
 // CHECK-LABEL: ent.system @highest() {
-// CHECK:     ent.combine %{{.*}} "x" max %{{.*}} : <@Body, mut, up @Orbits>, f32
+// CHECK:     ent.combine %{{.*}} "x" max %{{.*}} : <@Body, mut, parent @Orbits>, f32
 system highest() {
-  for b: Body, down: mut Body up Orbits cascade Orbits {
+  for (b: Body)-[Orbits]->(down: mut Body) cascade Orbits {
     down.x max= b.x
   }
 }
 
 // Reactive: where the entity's own events fired, or the ancestor's.
 // CHECK-LABEL: ent.system @settle() {
-// CHECK:   ent.query (%{{.*}}: !ent.ref<@Body, mut>, %{{.*}}: !ent.ref<@Orbit>, %{{.*}}: !ent.ref<@Body, up @Orbits>) cascade @Orbits on [changed @Orbit, changed @Body "x" up @Orbits] {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Body, mut>, %{{.*}}: !ent.ref<@Orbit>, %{{.*}}: !ent.ref<@Body, parent @Orbits>) cascade @Orbits on [changed @Orbit, changed @Body "x" up @Orbits] {
 system settle() {
-  for b: mut Body, o: Orbit, center: Body up Orbits
-      cascade Orbits
-      on changed Orbit, changed Body.x up Orbits {
+  for (b: mut Body, o: Orbit)-[Orbits]->(center: Body) cascade Orbits
+      on changed Orbit, changed center.x {
     b.x = center.x + o.distance
   }
 }
@@ -81,16 +80,17 @@ system settle() {
 // that may lead nowhere, read with `if let`.
 // CHECK: ent.relation @Row () from @Leaf2 to @Leaf2 tree ordered by @Leaf2 "at" capacity 8
 // CHECK-LABEL: ent.system @line() {
-// CHECK:   ent.query (%{{.*}}: !ent.ref<@Leaf2, mut>, %[[P:.*]]: !ent.ref<@Leaf2, before @Row, optional>, %[[U:.*]]: !ent.ref<@Leaf2, up @Row>) cascade @Row {
+// CHECK:   ent.query (%{{.*}}: !ent.ref<@Leaf2, mut>, %[[U:.*]]: !ent.ref<@Leaf2, parent @Row>, %[[P:.*]]: !ent.ref<@Leaf2, before @Row, optional>) cascade @Row {
 // CHECK:     %[[THERE:.*]] = ent.bound %[[P]] : <@Leaf2, before @Row, optional>
 // CHECK:     %[[V:.*]] = ent.get %[[P]] "v" : <@Leaf2, before @Row, optional> -> f32
 // CHECK:     %[[THERE2:.*]] = ent.bound %[[P]]
 // CHECK:     %[[BOTH:.*]] = arith.andi %[[THERE]], %[[THERE2]]
 // CHECK:     scf.if %[[BOTH]] {
 component Leaf2 { v: f32, at: i32 }
-relation Row from Leaf2 to Leaf2 tree ordered by Leaf2.at capacity 8
+relation (Leaf2)-[Row]->(Leaf2) tree ordered by Leaf2.at capacity 8
 system line() {
-  for l: mut Leaf2, optional prev: Leaf2 before Row, above: Leaf2 up Row
+  for (l: mut Leaf2)-[Row]->(above: Leaf2),
+      optional (prev: Leaf2)~[Row]~>(l)
       cascade Row {
     if let v = prev.v, let at = prev.at {
       l.v = v + 1.0
@@ -103,4 +103,4 @@ system line() {
 // A tree whose entities are stored in its order.
 // CHECK: ent.relation @Under () from @Leaf to @Leaf tree sorted capacity 8
 component Leaf { v: f32 }
-relation Under from Leaf to Leaf tree sorted capacity 8
+relation (Leaf)-[Under]->(Leaf) tree sorted capacity 8

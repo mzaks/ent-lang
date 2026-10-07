@@ -6,7 +6,7 @@ import console
 component World { name: text[8], x: i32, placed: i32 }
 component Local { x: i32 }
 default_capacity 16
-relation Under from Local to World tree capacity 16
+relation (Local)-[Under]->(World) tree capacity 16
 unique Frame: i32
 unique Placed: i32
 unique Arm: entity
@@ -21,12 +21,12 @@ world {
   let a2 = spawn { World { name: "a2", x: 0, placed: 0 }, Local { x: 200 } }
   let b1 = spawn { World { name: "b1", x: 0, placed: 0 }, Local { x: 300 } }
   let a11 = spawn { World { name: "a11", x: 0, placed: 0 }, Local { x: 1000 } }
-  connect(a11, a1, Under)
-  connect(a, root, Under)
-  connect(b, root, Under)
-  connect(a1, a, Under)
-  connect(a2, a, Under)
-  connect(b1, b, Under)
+  connect (a11)-[Under]->(a1)
+  connect (a)-[Under]->(root)
+  connect (b)-[Under]->(root)
+  connect (a1)-[Under]->(a)
+  connect (a2)-[Under]->(a)
+  connect (b1)-[Under]->(b)
   Arm = a
   Twig = a1
   Other = b
@@ -44,16 +44,15 @@ system move() {
   for w: mut World without Local where Frame == 5 { w.x += 1 }
   if Frame == 7 {
     let a3 = spawn { World { name: "a3", x: 0, placed: 0 }, Local { x: 400 } }
-    connect(a3, Arm, Under)
+    connect (a3)-[Under]->(Arm)
   }
   for l: mut Local where Frame == 8 && l.x == 11 { l.x += 1 }
-  if Frame == 9 { connect(Twig, Other, Under) }
+  if Frame == 9 { connect (Twig)-[Under]->(Other) }
 }
 
 system place() {
-  for w: mut World, l: Local, p: World up Under
-      cascade Under
-      on changed Local, changed World.x up Under {
+  for (w: mut World, l: Local)-[Under]->(p: World) cascade Under
+      on changed Local, changed p.x {
     w.x = p.x + l.x
     w.placed += 1
     Placed += 1

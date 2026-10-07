@@ -25,8 +25,8 @@ world {
     Size { w: Sizing.Grow, h: Sizing.Grow },
     Stack { row: false, pad: 0.0, gap: 6.0 }, Name { name: "rest" }
   }
-  connect(side, root, Inside)
-  connect(rest, root, Inside)
+  connect (side)-[Inside]->(root)
+  connect (rest)-[Inside]->(root)
 
   let header = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
@@ -38,8 +38,8 @@ world {
     Size { w: Sizing.Grow, h: Sizing.Grow },
     Stack { row: true, pad: 0.0, gap: 20.0 }, Name { name: "body" }
   }
-  connect(header, rest, Inside)
-  connect(body, rest, Inside)
+  connect (header)-[Inside]->(rest)
+  connect (body)-[Inside]->(rest)
 
   let ok = spawn {
     Box { x: 0.0, y: 0.0, w: 60.0, h: 20.0 },
@@ -53,8 +53,8 @@ world {
     Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "cancel" },
     Slot { at: 1 }
   }
-  connect(ok, header, Inside)
-  connect(cancel, header, Inside)
+  connect (ok)-[Inside]->(header)
+  connect (cancel)-[Inside]->(header)
 
   let left = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
@@ -66,8 +66,8 @@ world {
     Size { w: Sizing.Grow, h: Sizing.Grow },
     Stack { row: false, pad: 0.0, gap: 0.0 }, Name { name: "right" }
   }
-  connect(left, body, Inside)
-  connect(right, body, Inside)
+  connect (left)-[Inside]->(body)
+  connect (right)-[Inside]->(body)
 }
 
 // In the second frame the side bar is narrower, in the third the body's

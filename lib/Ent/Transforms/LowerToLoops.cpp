@@ -1546,7 +1546,7 @@ static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
                              const WorldLayout &layout, WorldAccess &world,
                              const WorldRelation &relation,
                              FlatSymbolRefAttr component, Value id,
-                             Value parent = Value());
+                             Value parent = Value(), bool direct = false);
 static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
                             const WorldLayout &layout, WorldAccess &world,
                             const WorldRelation &relation,
@@ -1805,7 +1805,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         ancestor = emitAncestor(rewriter, loc, layout, world, relation,
                                 refType.getComponent(),
                                 world.entityId(loc, archetype, entity),
-                                known.id);
+                                known.id, refType.getIsDirect());
       }
     } else {
       if (known.row)
@@ -1815,7 +1815,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
       ancestor = emitAncestor(rewriter, loc, layout, world, relation,
                               refType.getComponent(),
                               world.entityId(loc, archetype, entity),
-                              known.id);
+                              known.id, refType.getIsDirect());
     }
     // Null: every entity the caller visits has one. (Through an optional
     // ref the body sees whether there is one, and runs either way.)
@@ -2939,12 +2939,13 @@ static std::pair<Value, Value> emitParent(IRRewriter &rewriter, Location loc,
 /// as long as the entities on the way are alive. Where the relation's
 /// targets are trusted to have the component, that is the parent. A caller
 /// that has the entity's parent at hand gives it as `parent`; `found` is
-/// then null where the parent is the ancestor without a doubt.
+/// then null where the parent is the ancestor without a doubt. With
+/// `direct` it is the parent or nothing: no further ancestor is asked.
 static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
                              const WorldLayout &layout, WorldAccess &world,
                              const WorldRelation &relation,
                              FlatSymbolRefAttr component, Value id,
-                             Value parent) {
+                             Value parent, bool direct) {
   Type i1 = rewriter.getI1Type();
   Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
   Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
@@ -2957,6 +2958,20 @@ static Ancestor emitAncestor(IRRewriter &rewriter, Location loc,
         emitParent(rewriter, loc, layout, world, relation, id);
   if (trusted)
     return {has, parent, /*trusted=*/true};
+  if (direct) {
+    Value holds = emitLocate(
+        rewriter, loc, layout, world, parent,
+        [](const WorldArchetype &) { return true; }, component, TypeRange{i1},
+        [&](const WorldArchetype &archetype, Value,
+            Value present) -> SmallVector<Value> {
+          if (!ArchetypeOp(archetype.op).contains(component))
+            return {no};
+          return {present ? present : yes};
+        },
+        [&]() -> SmallVector<Value> { return {no}; })[0];
+    return {arith::AndIOp::create(rewriter, loc, has, holds), parent,
+            /*trusted=*/false};
+  }
   // (the entity to look at, whether it is the ancestor, whether to look)
   auto climb = scf::WhileOp::create(
       rewriter, loc, TypeRange{world.idType(), i1, i1},

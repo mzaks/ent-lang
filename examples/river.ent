@@ -13,7 +13,7 @@ archetype Cell { Node } capacity 1024
 // the one it flows into: the sum then reads them one after another
 // (bench/river measures both), and every change to the tree or to which
 // nodes there are moves them all.
-relation Flows from Node to Node tree capacity 1024
+relation (Node)-[Flows]->(Node) tree capacity 1024
 
 system fall(wet: f32) {
   for n: mut Node {
@@ -24,7 +24,7 @@ system fall(wet: f32) {
 // Children before their parents: when a node passes its flow on, all that
 // is above it has arrived. `down` is the node it flows into.
 system run() {
-  for n: Node, down: mut Node up Flows cascade Flows leaves first {
+  for (n: Node)-[Flows]->(down: mut Node) cascade Flows leaves first {
     down.flow += n.flow
   }
 }
@@ -36,7 +36,7 @@ schedule step(wet: f32) {
 
 // A node changes where it flows into.
 system reroute(node: entity, into: entity) {
-  connect(node, into, Flows)
+  connect (node)-[Flows]->(into)
 }
 
 schedule divert(node: entity, into: entity) {

@@ -23,6 +23,10 @@ def Ent_RefType : Ent_Type<"Ref", "ref"> {
     component. `ent.get` reads through it; with `mut` (`!ent.ref<@Position,
     mut, up @ChildOf>`) `ent.combine` combines values into its fields.
 
+    `!ent.ref<@Position, parent @ChildOf>` is a ref to the component of
+    the visited entity's parent itself, and to nothing if the parent does
+    not have the component: no further ancestor is looked at.
+
     `!ent.ref<@Position, before @ChildOf>` is a ref to the component of the
     visited entity's sibling before it: the child of the same parent that
     comes right before it in the tree's order (`tree ordered by`). It is
@@ -35,16 +39,22 @@ def Ent_RefType : Ent_Type<"Ref", "ref"> {
   }];
   let parameters = (ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
                         "FlatSymbolRefAttr":$via, "bool":$isBefore,
-                        "bool":$isOptional);
+                        "bool":$isOptional, "bool":$isDirect);
   let hasCustomAssemblyFormat = 1;
   let builders = [
     TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable), [{
       return $_get($_ctxt, component, isMutable, ::mlir::FlatSymbolRefAttr(),
-                   false, false);
+                   false, false, false);
     }]>,
     TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
                      "FlatSymbolRefAttr":$via), [{
-      return $_get($_ctxt, component, isMutable, via, false, false);
+      return $_get($_ctxt, component, isMutable, via, false, false, false);
+    }]>,
+    TypeBuilder<(ins "FlatSymbolRefAttr":$component, "bool":$isMutable,
+                     "FlatSymbolRefAttr":$via, "bool":$isBefore,
+                     "bool":$isOptional), [{
+      return $_get($_ctxt, component, isMutable, via, isBefore, isOptional,
+                   false);
     }]>
   ];
   let extraClassDeclaration = [{
