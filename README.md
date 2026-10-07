@@ -396,8 +396,11 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   over the tree's order (an unsorted tree's list, with the children's
   links; the rows of a tree sorted in one archetype, with each row's
   range of child rows) and visits the marked ones in that order, so its
-  time follows the entities it comes to. Otherwise (a sorted tree in
-  several archetypes, `leaves first`, no log, a log that lost events)
+  time follows the entities it comes to; a tree sorted in several
+  archetypes has a bitmap per archetype and for every row its children's
+  rows in each, and is gone through depth by depth. Otherwise (`leaves
+  first`, no log, a log that lost events, a deep tree in several
+  archetypes)
   it goes through the whole tree and runs its body where a trigger
   fired.
   It runs on one core unless its tree is sorted in one archetype (see

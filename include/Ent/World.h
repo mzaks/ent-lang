@@ -85,6 +85,14 @@ struct WorldArchetype {
   uint64_t parentLocationOffset = 0;
   uint64_t childBeginOffset = 0;
   uint64_t childEndOffset = 0;
+  /// Where the tree is in several archetypes and a reactive query follows
+  /// events down it (see WorldLayout::cascadeFollowsEvents): per row its
+  /// children's rows in each of the tree's archetypes, in their order
+  /// (begin and end, i32; both 0 for none), and a mark per row (a bit, in
+  /// i64 words; all 0 between queries).
+  SmallVector<std::pair<uint64_t, uint64_t>, 2> childRangeOffsets;
+  uint64_t marksOffset = 0;
+  int64_t markWords() const { return (capacity + 63) / 64; }
   /// Where a reactive query has a trigger up the tree: per row the tick
   /// at which its entity was last connected (i64), a copy of what the
   /// relation keeps per entity key, made where the rows are put in order,
@@ -447,7 +455,7 @@ struct WorldLayout {
   /// triggers' event logs, and from each one it changes, down to the
   /// children. That needs an order in which an entity's children come
   /// after it and can be found from it (a linked tree's list and links,
-  /// or the rows of a tree sorted in one archetype), parents first, a log
+  /// or a sorted tree's rows), parents first, a log
   /// for every trigger, a ref up the tree (so that the entities without a
   /// parent are not visited), and for a trigger up the tree the parent
   /// itself to be the

@@ -4,10 +4,10 @@
 // pass that sees it and nothing else is visited. As the tree is, the
 // `for` goes from the events down the children's links (the lowered
 // program counts the zeros below a mark). Sorted, the tree is in two
-// archetypes here (the root has no Local) and the `for` goes through
-// every row; with a Local for the root it is in one, and the `for` goes
-// from the events down the rows' child ranges. All give the same lines,
-// the sorted ones in another order of rows.
+// archetypes here (the root has no Local), and with a Local for the root
+// in one: the `for` goes from the events down the rows' ranges of child
+// rows, in every archetype or in the one. All give the same lines, the
+// sorted ones in another order of rows.
 // RUN: ent-translate --import-ent -I %S/../../devices %S/Inputs/tree_reactive.ent 2>/dev/null \
 // RUN:   | ent-opt --ent-lower-to-loops 2>/dev/null | grep -q "llvm.intr.cttz"
 // RUN: %ent run %S/Inputs/tree_reactive.ent 2>/dev/null > %t.out
@@ -25,7 +25,7 @@
 // RUN: ent-translate --import-ent -I %S/../../devices %t.one.ent 2>/dev/null \
 // RUN:   | ent-opt --ent-lower-to-loops 2>/dev/null | grep -q "llvm.intr.cttz"
 // RUN: ent-translate --import-ent -I %S/../../devices %t.sorted.ent 2>/dev/null \
-// RUN:   | ent-opt --ent-lower-to-loops 2>/dev/null | not grep -q "llvm.intr.cttz"
+// RUN:   | ent-opt --ent-lower-to-loops 2>/dev/null | grep -q "llvm.intr.cttz"
 // RUN: %ent run %t.one.ent 2>/dev/null | sort | cmp - %t.sorted.out
 // RUN: FileCheck %s --input-file=%t.out
 

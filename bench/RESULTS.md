@@ -2605,3 +2605,90 @@ Reactive variants, us per step, before -> after:
   keys, so that one read jumps where the others read on. A tick per row
   would not; not built.
 - Not measured: a step that does connect nodes.
+
+## 2026-10-07: three follow-ups on reactive and sorted trees
+
+`bench/scene/run.py` at 1e6 nodes, native; one core (`taskset -c 2`)
+unless said, 3 processes of 100 steps (5 for the parallel runs). us per
+step, medians.
+
+### The tick of a connect per row
+
+A sorted archetype keeps a copy per row of when each entity was last
+connected (the relation has it per entity key), made where the rows are
+put in order. `reactive-sorted`, before connects were events -> with the
+tick by key -> with the copy:
+
+| shape | moves | us |
+|---|---|---|
+| bushy | 100 | 63.2 -> 71.6 -> 65.9 |
+| bushy | 1000 | 638.8 -> 1,091.9 -> 685.8 |
+| deep | 1 | 453.2 -> 550.2 -> 514.2 |
+| deep | 100 | 1,746.3 -> 2,000.0 -> 1,895.9 |
+
+Most of what reacting to a new parent cost a sorted tree is back; the
+rest is one more column read per row.
+
+### A query that changes more than its logs hold
+
+Two changes to event logs. A lost event (the log is full for a reader)
+moved the segment's count and noted it, each time; now once, until a
+reader has finished with the log. And an event's segment was its row's
+share of the rows, a division per event; one loop takes the row's low
+bits (a parallel one keeps the shares, which keep its threads apart).
+
+| shape | moves | reactive | reactive-sorted | full | full-sorted |
+|---|---|---|---|---|---|
+| deep | 100 | 2,212.5 -> 1,793.2 | 1,895.9 -> 1,610.1 | 454.8 | 380.6 |
+| deep | 1000 | 2,283.2 -> 1,843.4 | 1,970.2 -> 1,657.6 | 452.3 | 386.0 |
+| bushy | 1000 | 1,776.7 -> 1,729.4 | 685.8 -> 633.0 | 666.0 | 241.3 |
+
+- Telling of lost events once took 2,283 to 1,808; the segment without
+  a division made no difference that shows (1,843, within the spread),
+  and is kept for what it does to a run of rows that change together,
+  which now fills the whole log before it overflows and not a 64th.
+- It is still 4x the query without `on` where most of a deep tree is
+  placed again. What is left is the reactive query's own work per
+  entity (three ticks read, one written, an event logged) on top of a
+  body of one add; where the 1,300 us go among those was not measured.
+  No rule that switches to the full walk helps here: the full walk of a
+  reactive query is this.
+
+### A sorted tree across archetypes
+
+Half the nodes in a second archetype (`-two-`). Parallel: 12 threads,
+`OMP_PLACES=cores OMP_PROC_BIND=close`, not pinned, where the one-core
+numbers of the same run are in brackets (they are noisier unpinned).
+
+| shape | full-sorted | full-sorted-par | full-two-sorted | full-two-sorted-par |
+|---|---|---|---|---|
+| bushy | 242.8 [452.5] | 121.3 | 287.9 [532.9] | 226.3 |
+| deep | 375.3 [395.7] | 403.8 | 1,440.9 [1,462.2] | 1,419.5 |
+
+`reactive-two-sorted`, going through every depth's rows -> following
+events (a mark per row of each archetype, each row with its children's
+rows in each, gone through depth by depth):
+
+| shape | moves | us | full-two-sorted |
+|---|---|---|---|
+| bushy | 0 | 611.0 -> 12.0 | 290.9 |
+| bushy | 1 | 606.6 -> 13.1 | 289.2 |
+| bushy | 100 | 641.3 -> 97.9 | 290.2 |
+| bushy | 1000 | 970.7 -> 888.7 | 298.1 |
+| deep | 0 | 1,435.8 | 1,439.9 |
+| deep | 1 | 1,823.8 | 1,439.9 |
+| deep | 100 | 2,912.7 | 1,434.8 |
+
+- A depth in parallel across two archetypes: 0.79x of one pinned core in
+  the bushy tree, where one archetype gets 0.50x. Each archetype has half
+  of a depth, so fewer depths reach the 32,768 rows that are worth a
+  fork. Nothing in the deep tree, as before.
+- Following events: 13 us for a moved node where the full query takes
+  289; it wins up to about 300 moves a step.
+- An idle step is 12 us, not the one archetype's 3.3: 31 depths times two
+  archetypes of ranges to look at.
+- The deep tree (219,241 depths) is not followed: fewer than 64 nodes a
+  depth, and going through the depths costs more than the rows. It goes
+  through every row, as it did, at the full query's time or more.
+- Not measured: the parallel form with a body of more than an add; a
+  tree in more than two archetypes.

@@ -387,12 +387,12 @@ thereby passed down: the next time it runs that is no event.
   a node in a hundred or so is placed again, the `for` without `on` is
   the faster one, up to four times where most of the tree moves.
 - It goes through the whole tree instead, running its body where a
-  trigger fired, over a `sorted` tree in several archetypes, with
-  `leaves first`, without a
-  binding `up` the tree, where a trigger's event log has capacity 0 or
-  has lost events, on its first run, and where the tree's targets do not
-  all have the component of a trigger `up` it (`to World` says they do).
-  That saves the body, not the walk.
+  trigger fired, with `leaves first`, without a binding `up` the tree,
+  where a trigger's event log has capacity 0 or has lost events, on its
+  first run, where the tree's targets do not all have the component of a
+  trigger `up` it (`to World` says they do), and over a `sorted` tree in
+  several archetypes that is deep (fewer than 64 nodes a depth). That
+  saves the body, not the walk.
 - It runs on one core.
 
 Not yet: combining into an ancestor needs the `for` to cascade along
@@ -405,7 +405,9 @@ cores where the body only reads and writes the entity and what is above
 it (fields, `up` bindings, `+=` into an ancestor, reads of uniques and of
 other entities), the archetype has room for a million entities and the
 depth holds 32,768 or more. The result is the same to the bit: what
-children send to a parent is still added in their order.
+children send to a parent is still added in their order. Over a `sorted`
+tree in several archetypes the same holds for each archetype's entities
+of a depth, unless the body adds into an ancestor.
 
 ## Statements
 

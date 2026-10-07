@@ -94,7 +94,7 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
     return false;
   FlatSymbolRefAttr cascade = query.getCascade();
   const WorldRelation &tree = getRelation(cascade.getAttr());
-  if (!(tree.linked || tree.sortedArchetype() >= 0) ||
+  if (!(tree.linked || !tree.sortedArchetypes.empty()) ||
       llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
         auto ref = dyn_cast<RefType>(type);
         return ref && ref.getVia() == cascade;
@@ -447,6 +447,22 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
         archetype.childEndOffset = place(4);
       } else {
         archetype.parentLocationOffset = place(scheme.locationBits / 8);
+        bool followed = false;
+        module.walk([&](QueryOp query) {
+          followed |= query.getCascade() &&
+                      query.getCascade().getAttr() == archetype.sortedBy &&
+                      layout.cascadeFollowsEvents(query);
+        });
+        if (followed) {
+          for (int64_t other = 0; other < others; ++other) {
+            uint64_t begin = place(4);
+            archetype.childRangeOffsets.push_back({begin, place(4)});
+          }
+          archetype.marksOffset = llvm::alignTo(end, kColumnAlignment);
+          end = archetype.marksOffset + 8 * archetype.markWords();
+          layout.zeroed.push_back(
+              {archetype.marksOffset, uint64_t(8 * archetype.markWords())});
+        }
       }
       // A depth for every entity that can have a parent, and two more.
       archetype.levelCapacity = sources + 2;
