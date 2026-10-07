@@ -303,6 +303,9 @@ struct WorldRelation {
   /// first, 3 breadth first) and how many entities it has (i64): an
   /// order is kept until the tree changes.
   uint64_t walkStateOffset = 0;
+  /// And per entity key where the entity is in that order (i64, -1 if it
+  /// is not), for the queries that follow events in it.
+  uint64_t walkPlacesOffset = 0;
   int64_t walkCapacity() const { return 4 * capacity; }
   /// Whether a query in the order `traversal` works the order out, rather
   /// than going through the tree as it is stored.
@@ -533,9 +536,9 @@ struct WorldLayout {
   /// a trigger is before or after it. That children or siblings have come
   /// or gone is in no log: then the whole tree is gone through.
   bool cascadeFollowsEvents(QueryOp query) const;
-  /// Whether a query that follows events from the leaves also visits the
-  /// entities without a parent, which a mark per row of their archetypes
-  /// is kept for.
+  /// Whether a query that follows events also visits the entities
+  /// without a parent (so one from the leaves, the others naming a
+  /// parent), which a mark per row of their archetypes is kept for.
   bool cascadeFollowsToRoots(QueryOp query) const;
 
   /// Reactive queries: the stamps and where they are stored, the tick

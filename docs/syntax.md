@@ -592,14 +592,13 @@ thereby passed down: the next time it runs that is no event.
   boxes of which one is another height each frame, a frame takes 18 us,
   against 1,500 going through all of them (`bench/boxes`).
 - It goes through the whole tree instead, running its body where a
-  trigger fired: with `dfs` (and with `bfs` where that is not the order
-  the tree is kept in, as it is for an unsorted tree `ordered by`);
-  `top down` without an arrow up the tree; `bottom up` over a `sorted`
-  tree, or where the body adds into a parent; where a trigger's event
-  log has capacity 0 or has lost events, on its first run, and with
-  events for more than a sixteenth of the tree; in a run before which a
-  node has got or lost a child (with a trigger on children) or another
-  sibling next to it (with one on siblings), which no log has; over a
+  trigger fired: with `bfs` or `dfs` over a `sorted` tree; `top down`
+  without an arrow up the tree; `bottom up` over a `sorted` tree, or
+  where the body adds into an entity further up than its parent; where a
+  trigger's event log has capacity 0 or has lost events, on its first
+  run, and with events for more than a sixteenth of the tree; where more
+  than 256 nodes got or lost a child or a sibling since it last ran;
+  over a
   `sorted` tree where its targets do not all have the component of a
   trigger up it (`->(World)` in its declaration says they do) or the
   head has arrows that go on (`(b)-[R]->()-[R]->(far: C)`); with a

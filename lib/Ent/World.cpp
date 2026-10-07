@@ -95,10 +95,10 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
   FlatSymbolRefAttr cascade = query.getCascade();
   const WorldRelation &tree = getRelation(cascade.getAttr());
   bool leavesFirst = query.isLeavesFirst();
-  // (An order that is asked for exactly is the order events are followed
-  // in only where it is the one the tree is stored in.)
+  // (An order that is asked for exactly is followed in where the tree
+  // has links to find the children by: the order says where each is.)
   StringRef traversal = query.getTraversal();
-  if (!traversal.empty() && (!tree.linked || tree.walksInOrder(traversal)))
+  if (!traversal.empty() && !tree.linked)
     return false;
   // (A tree in several archetypes whose children are in an order is gone
   // through by its list, not depth by depth.)
@@ -176,7 +176,7 @@ bool WorldLayout::cascadeFollowsEvents(QueryOp query) const {
 }
 
 bool WorldLayout::cascadeFollowsToRoots(QueryOp query) const {
-  if (!cascadeFollowsEvents(query) || !query.isLeavesFirst())
+  if (!cascadeFollowsEvents(query))
     return false;
   FlatSymbolRefAttr cascade = query.getCascade();
   return llvm::none_of(query.getBody().getArgumentTypes(), [&](Type type) {
@@ -672,6 +672,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     relation.walkStateOffset = llvm::alignTo(end, kColumnAlignment);
     end = relation.walkStateOffset + 16;
     layout.zeroed.push_back({relation.walkStateOffset, 16});
+    relation.walkPlacesOffset = llvm::alignTo(end, kColumnAlignment);
+    end = relation.walkPlacesOffset + 8 * layout.entityKeys;
   }
   // When each entity's children last changed, for a tree some trigger is
   // down.
@@ -813,7 +815,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       // before anything follows them: a new world's trees are unclean.)
       layout.zeroed.push_back({relation.sourceOffset, idBytes * keys});
       relation.orderCapacity = 2 * relation.capacity;
-      placeMarks(relation, relation.orderCapacity);
+      // (A mark per place of the list, or of an order worked out.)
+      placeMarks(relation, relation.walkOrderOffset
+                               ? relation.walkCapacity()
+                               : relation.orderCapacity);
       auto perEdge = [&](uint64_t bytes) {
         uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
         end = offset + bytes * relation.orderCapacity;

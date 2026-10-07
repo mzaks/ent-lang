@@ -596,6 +596,10 @@ public:
   Value walkState(const WorldRelation &relation) {
     return view(relation.walkStateOffset, 2, rewriter.getI64Type());
   }
+  Value walkPlaces(const WorldRelation &relation) {
+    return view(relation.walkPlacesOffset, layout.entityKeys,
+                rewriter.getI64Type());
+  }
   Value walkNumbers(const WorldRelation &relation, bool cursors) {
     return view(cursors ? relation.walkCursorsOffset
                         : relation.walkSizesOffset,
@@ -7153,9 +7157,13 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                            [&](const WorldArchetype &archetype) {
                              return matches(archetype, query);
                            });
-  if (matched && inOrder) {
-    rewriter.setInsertionPoint(query);
-    LinkedTree tree(rewriter, loc, world, relation);
+  // (The order's making, for the queries that go by it: where the order
+  // is, where its entities' parents are, how many are below each, where
+  // it starts and how many it has.)
+  struct Walk {
+    Value out, outParents, sizes, from, count;
+  };
+  auto buildWalk = [&](LinkedTree &tree) -> Walk {
     Value zero = tree.zero, one = tree.one;
     Type index = rewriter.getIndexType();
     Value keys =
@@ -7214,6 +7222,14 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         tree.store(tree.i64(0), sizes, key);
         tree.store(tree.i64(-1), cursors, key);
       });
+      // (Where each is in the order, for the queries that follow events
+      // in it: nowhere, until it is given its place.)
+      tree.forEach(zero,
+                   arith::ConstantIndexOp::create(rewriter, loc,
+                                                  layout.entityKeys),
+                   [&](Value key) {
+                     tree.store(tree.i64(-1), world.walkPlaces(relation), key);
+                   });
       forListed(/*backwards=*/true, [&](Value id, Value parent) {
         Value key = world.entityKey(loc, id);
         Value size = add(tree.load(sizes, key), tree.i64(1));
@@ -7232,6 +7248,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       auto place = [&](Value id, Value parent, Value at) {
         tree.store(id, out, asIndex(at));
         tree.store(parent, outParents, asIndex(at));
+        tree.store(at, world.walkPlaces(relation), world.entityKey(loc, id));
       };
       forListed(/*backwards=*/false, [&](Value id, Value parent) {
         Value key = world.entityKey(loc, id);
@@ -7295,6 +7312,10 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       tree.forEach(zero, all, [&](Value k) {
         Value id = tree.load(out, k);
         Value parent = tree.load(outParents, k);
+        tree.branch(tree.same(parent, none), [&] {
+          tree.store(tree.i64(-1), world.walkPlaces(relation),
+                     world.entityKey(loc, id));
+        });
         tree.branch(tree.negate(tree.same(parent, none)), [&] {
           Value depth = asIndex(tree.load(sizes, world.entityKey(loc, id)));
           Value at = tree.load(cursors, depth);
@@ -7302,6 +7323,9 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           Value to = arith::AddIOp::create(rewriter, loc, from, asIndex(at));
           tree.store(id, out, to);
           tree.store(parent, outParents, to);
+          tree.store(arith::IndexCastOp::create(rewriter, loc,
+                                                rewriter.getI64Type(), to),
+                     world.walkPlaces(relation), world.entityKey(loc, id));
         });
       });
       count = asIndex(starts.getResult(0));
@@ -7312,41 +7336,52 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     tree.store(kind, state, zero);
     rewriter.setInsertionPointAfter(ifNotThere);
     count = asIndex(tree.load(state, one));
-    // Depth first, an entity without a parent is in the order if it has
-    // children, with them; one without is visited here, before the
-    // others or (children first) after them.
-    auto visitAlone = [&] {
-      if (!depthFirst || !visitsRoots)
-        return;
-      for (const WorldArchetype &archetype : layout.archetypes) {
-        if (!matches(archetype, query))
-          continue;
-        rewriter.setInsertionPoint(query);
-        Operation *loops = emitEntityLoops(
-            rewriter, loc, archetype, world, sequential,
-            /*entityLocal=*/false,
-            [&](Value entity, Value rows, bool) {
-              Value id = world.entityId(loc, archetype, entity);
-              Value hasParent =
-                  emitParent(rewriter, loc, layout, world, relation, id).first;
-              Value alone = tree.both(
-                  tree.negate(hasParent),
-                  tree.same(tree.load(sizes, world.entityKey(loc, id)),
-                            tree.i64(0)));
-              auto ifAlone = scf::IfOp::create(rewriter, loc, alone);
-              rewriter.setInsertionPointToStart(ifAlone.thenBlock());
-              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                            layout, entity, rows, tick, seen,
-                            /*parallel=*/false, /*directApplies=*/true,
-                            KnownParent(), marks);
-            },
-            startCounts.lookup(&archetype));
-        hoistResourceReads(rewriter, loops, world);
-        rewriter.setInsertionPoint(query);
-      }
-    };
+    return {out, outParents, sizes, from, count};
+  };
+  // Depth first, an entity without a parent is in the order if it has
+  // children, with them; one without is visited here, before the
+  // others or (children first) after them.
+  auto visitAlone = [&](LinkedTree &tree, Value sizes) {
+    if (!depthFirst || !visitsRoots)
+      return;
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (!matches(archetype, query))
+        continue;
+      rewriter.setInsertionPoint(rootsAt);
+      Operation *loops = emitEntityLoops(
+          rewriter, loc, archetype, world, sequential,
+          /*entityLocal=*/false,
+          [&](Value entity, Value rows, bool) {
+            Value id = world.entityId(loc, archetype, entity);
+            Value hasParent =
+                emitParent(rewriter, loc, layout, world, relation, id).first;
+            Value alone = tree.both(
+                tree.negate(hasParent),
+                tree.same(tree.load(sizes, world.entityKey(loc, id)),
+                          tree.i64(0)));
+            auto ifAlone = scf::IfOp::create(rewriter, loc, alone);
+            rewriter.setInsertionPointToStart(ifAlone.thenBlock());
+            emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                          layout, entity, rows, tick, seen,
+                          /*parallel=*/false, /*directApplies=*/true,
+                          KnownParent(), marks);
+          },
+          startCounts.lookup(&archetype));
+      hoistResourceReads(rewriter, loops, world);
+      rewriter.setInsertionPoint(rootsAt);
+    }
+  };
+  bool followsOrder = inOrder && layout.cascadeFollowsEvents(query);
+  if (matched && inOrder && !followsOrder) {
+    rewriter.setInsertionPoint(query);
+    LinkedTree tree(rewriter, loc, world, relation);
+    Walk walk = buildWalk(tree);
+    Value zero = tree.zero, one = tree.one;
+    Value out = walk.out, outParents = walk.outParents, sizes = walk.sizes;
+    Value from = walk.from, count = walk.count;
+    Value none = world.noEntity(loc);
     if (!leavesFirst)
-      visitAlone();
+      visitAlone(tree, sizes);
     // (Breadth first, children first: the order from its end.)
     bool backwards = leavesFirst && !depthFirst;
     auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
@@ -7392,7 +7427,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     hoistResourceReads(rewriter, loop, world);
     rewriter.setInsertionPoint(query);
     if (leavesFirst) {
-      visitAlone();
+      visitAlone(tree, sizes);
       if (!depthFirst)
         emitRoots();
     }
@@ -8076,24 +8111,58 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     rewriter.setInsertionPoint(query);
     Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
     Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-    Value count = world.toIndex(
-        loc, memref::LoadOp::create(rewriter, loc,
-                                    world.treeOrderCount(relation),
-                                    ValueRange{zero}));
+    LinkedTree tree(rewriter, loc, world, relation);
+    // The order gone by: the tree's list, or, for a query that follows
+    // its events in an order asked for exactly, that order (from `base`,
+    // `count` of them; the list's entities' parents are next to them, and
+    // so are the order's, where an entity without a parent has none).
+    Walk walk;
+    if (followsOrder)
+      walk = buildWalk(tree);
+    Value none = world.noEntity(loc);
+    Value base = followsOrder ? walk.from : zero;
+    Value count =
+        followsOrder
+            ? walk.count
+            : world.toIndex(
+                  loc, memref::LoadOp::create(rewriter, loc,
+                                              world.treeOrderCount(relation),
+                                              ValueRange{zero}));
+    Value limit =
+        followsOrder
+            ? arith::AddIOp::create(rewriter, loc, base, count).getResult()
+            : count;
+    Value orderIds = followsOrder ? walk.out : world.treeOrder(relation);
+    Value orderParents =
+        followsOrder ? walk.outParents : world.treeOrderParents(relation);
+    // (From the end: the list for children first; an order worked out is
+    // made that way, but for breadth first.)
+    bool reverse = followsOrder ? leavesFirst && traversal != "dfs"
+                                : leavesFirst;
+    // Whether the entity with the key `key` is in the order, and where.
+    auto placeOf = [&](Value key) -> std::pair<Value, Value> {
+      if (followsOrder) {
+        Value place = tree.load(world.walkPlaces(relation), key);
+        return {arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
+                                      place, tree.i64(0)),
+                arith::IndexCastOp::create(rewriter, loc,
+                                           rewriter.getIndexType(), place)};
+      }
+      Value link = tree.load(tree.position(), key);
+      return {tree.negate(tree.isNone(link)),
+              arith::SubIOp::create(rewriter, loc, world.toIndex(loc, link),
+                                    one)};
+    };
     // The entities with a mark are the ones a query that follows events
     // has yet to look at (see WorldLayout::cascadeFollowsEvents): a bit
-    // per element of the list.
-    LinkedTree tree(rewriter, loc, world, relation);
+    // per place of the order.
     auto markAt = [&](Value position) {
       markBit(rewriter, loc, world.treeMarks(relation), position);
     };
-    // The entity with the key `key`, if it is in the list.
+    // The entity with the key `key`, if it is in the order.
     auto markKey = [&](Value key) {
-      Value link = tree.load(tree.position(), key);
-      tree.branch(tree.negate(tree.isNone(link)), [&] {
-        markAt(arith::SubIOp::create(rewriter, loc, world.toIndex(loc, link),
-                                     one));
-      });
+      auto [there, at] = placeOf(key);
+      tree.branch(there, [&, at = at] { markAt(at); });
     };
     // The sibling after the entity with the key `key`, or the one before.
     auto markSibling = [&](Value key, bool after) {
@@ -8111,13 +8180,9 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     bool addsUp = false;
     query.getBody().walk([&](CombineOp) { addsUp = true; });
     auto markEntity = [&](Value id) {
-      Value link = tree.load(tree.position(), world.entityKey(loc, id));
+      auto [there, at] = placeOf(world.entityKey(loc, id));
       tree.branch(
-          tree.negate(tree.isNone(link)),
-          [&] {
-            markAt(arith::SubIOp::create(rewriter, loc,
-                                         world.toIndex(loc, link), one));
-          },
+          there, [&, at = at] { markAt(at); },
           [&] {
             if (!toRoots)
               return;
@@ -8138,20 +8203,18 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     // The parent of the entity `id`, which may be no more: if the list
     // has it, with its parent next to it.
     auto markParentOf = [&](Value id) {
-      Value link = tree.load(tree.position(), world.entityKey(loc, id));
-      Value at = arith::SubIOp::create(rewriter, loc,
-                                       world.toIndex(loc, link), one);
+      auto [there, at] = placeOf(world.entityKey(loc, id));
       tree.branch(
-          tree.both(tree.negate(tree.isNone(link)),
+          tree.both(there,
                     arith::CmpIOp::create(rewriter, loc,
                                           arith::CmpIPredicate::ult, at,
-                                          count)),
-          [&] {
-            tree.branch(
-                tree.same(tree.load(world.treeOrder(relation), at), id), [&] {
-                  markEntity(
-                      tree.load(world.treeOrderParents(relation), at));
-                });
+                                          limit)),
+          [&, at = at] {
+            tree.branch(tree.same(tree.load(orderIds, at), id), [&] {
+              Value above = tree.load(orderParents, at);
+              tree.branch(tree.negate(tree.same(above, none)),
+                          [&] { markEntity(above); });
+            });
           });
     };
     // The entities so many levels below the one with the key `key`: its
@@ -8183,14 +8246,16 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     for (const Trigger &trigger : triggers)
       if (trigger.where == Trigger::Up)
         stepsUp.insert(trigger.hops);
-    // The body for the entity at `at` of the list, at the insertion point.
+    // The body for the entity at `at` of the order, at the insertion point
+    // (`visitWith`: for the entity and the parent that were found there).
+    std::function<void(Value, Value, KnownParent, bool)> visitWith;
     auto visitAt = [&](Value at, bool following) {
       OpBuilder::InsertionGuard guard(rewriter);
-      Value id = memref::LoadOp::create(rewriter, loc, world.treeOrder(relation),
+      Value id = memref::LoadOp::create(rewriter, loc, orderIds,
                                         ValueRange{at});
       // (A linked tree's list has entries of all ones where an entity has
       // moved to its end.)
-      if (relation.linked) {
+      if (relation.linked && !followsOrder) {
         auto ifThere = scf::IfOp::create(
             rewriter, loc,
             arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, id,
@@ -8200,11 +8265,26 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       // The list has each entity's parent next to it, and where ids are
       // not rows, the locations of both.
       KnownParent parent{&relation,
-                         memref::LoadOp::create(rewriter, loc,
-                                                world.treeOrderParents(relation),
+                         memref::LoadOp::create(rewriter, loc, orderParents,
                                                 ValueRange{at})};
+      // (An order worked out has, depth first, the entities without a
+      // parent that have children: visited if the query visits those,
+      // with no parent to name.)
+      if (followsOrder) {
+        tree.branch(
+            tree.same(parent.id, none),
+            [&] {
+              if (visitsRoots)
+                visitWith(at, id, KnownParent(), following);
+            },
+            [&] { visitWith(at, id, parent, following); });
+        return;
+      }
+      visitWith(at, id, parent, following);
+    };
+    visitWith = [&](Value at, Value id, KnownParent parent, bool following) {
       Value location;
-      if (relation.hasLocations()) {
+      if (relation.hasLocations() && !followsOrder) {
         location = memref::LoadOp::create(
             rewriter, loc, world.treeOrderLocations(relation, /*parent=*/false),
             ValueRange{at});
@@ -8231,6 +8311,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                                 !layout.entities.hasGenerations();
       for (const WorldArchetype &archetype : layout.archetypes)
         certain &= !isHome(archetype) || matches(archetype, query);
+      // (An entity without a parent is the source of no edge.)
+      certain &= !followsOrder;
       emitLocate(
           rewriter, loc, layout, world, id,
           [&](const WorldArchetype &archetype) {
@@ -8265,7 +8347,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
             // parent's, which comes later: for itself, or for the one it
             // is under in turn, which it passes it on to when it is come
             // to.
-            if (leavesFirst && addsUp) {
+            if (leavesFirst && addsUp && parent.relation) {
               auto holds = [&](const WorldArchetype &home) {
                 return llvm::any_of(triggers, [&](const Trigger &trigger) {
                   return home.findStamp(getStamp(trigger)) != nullptr;
@@ -8327,7 +8409,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                   markBelow(world.entityKey(loc, id), steps);
                 else if (where == Trigger::Before)
                   markSibling(world.entityKey(loc, id), /*after=*/true);
-                else
+                else if (parent.relation)
                   markEntity(parent.id);
               });
             }
@@ -8342,10 +8424,12 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         OpBuilder::InsertionGuard guard(rewriter);
         rewriter.setInsertionPoint(loop.getBody()->getTerminator());
         Value at = loop.getInductionVar();
-        if (leavesFirst)
+        if (reverse)
           at = arith::SubIOp::create(
               rewriter, loc, arith::SubIOp::create(rewriter, loc, count, one),
               at);
+        if (followsOrder)
+          at = arith::AddIOp::create(rewriter, loc, base, at);
         visitAt(at, /*following=*/false);
       }
       hoistResourceReads(rewriter, loop, world);
@@ -8418,10 +8502,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                      case Trigger::Own:
                        if (toRoots) {
                          // (An entity in no list may be no more.)
-                         Value link = tree.load(tree.position(), key);
                          tree.branch(
-                             tree.negate(tree.isNone(link)),
-                             [&] { markKey(key); },
+                             placeOf(key).first, [&] { markKey(key); },
                              [&] {
                                emitLocate(
                                    rewriter, loc, layout, world, id,
@@ -8463,8 +8545,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                      }
                    });
       scf::ForOp sweep =
-          (leavesFirst ? sweepMarksDown : sweepMarks)(
-              rewriter, loc, world.treeMarks(relation), count,
+          (reverse ? sweepMarksDown : sweepMarks)(
+              rewriter, loc, world.treeMarks(relation), limit,
               [&](Value at) { visitAt(at, /*following=*/true); });
       hoistResourceReads(rewriter, sweep, world);
       // Then the marked ones without a parent, by their rows.
@@ -8485,10 +8567,14 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       rewriter.setInsertionPoint(query);
       closeLogs(rewriter, query, layout, world);
       if (leavesFirst) {
-        // (Everything: so too the ones without a parent.)
+        // (Everything: so too the ones without a parent. Depth first
+        // those with children were in the order.)
         auto ifScan = scf::IfOp::create(rewriter, loc, scan);
         rootsAt = ifScan.thenBlock()->getTerminator();
-        emitRoots();
+        if (followsOrder && traversal == "dfs")
+          visitAlone(tree, walk.sizes);
+        else
+          emitRoots();
         rootsAt = query;
         rewriter.setInsertionPoint(query);
       }
