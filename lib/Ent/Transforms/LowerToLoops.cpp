@@ -1319,6 +1319,25 @@ static void markPending(IRRewriter &rewriter, Location loc,
                               ValueRange{row});
 }
 
+/// Whether a write of `value` to a field that holds `old` (both in their
+/// stored form) changes it, at the insertion point: an event for a
+/// reactive query is a field getting another value, not a write of the
+/// one it has. Null where the two cannot be compared with one op (a
+/// text): such a write counts.
+static Value emitDiffers(IRRewriter &rewriter, Location loc, Value old,
+                         Value value) {
+  Type type = value.getType();
+  if (type != old.getType())
+    return Value();
+  if (isa<IntegerType, IndexType>(type))
+    return arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, old,
+                                 value);
+  if (isa<FloatType>(type))
+    return arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::UNE, old,
+                                 value);
+  return Value();
+}
+
 /// Replace the get/set/add/remove/despawn/entity ops nested in `roots` by
 /// loads and stores at `entity` in the columns of `archetype`. With a
 /// `mask`, every store keeps the old value where the mask is false: the
@@ -1349,26 +1368,39 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
   // stamps it updates (none unless some query observes it).
   // An entity whose stamp moves on to this tick is appended to the
   // stamp's event log, if it has one.
+  // (`when`: where the event happened at all, a field got another value;
+  // null for always.)
   auto stamp = [&](Location loc, Trigger::Kind kind, StringAttr component,
-                   StringAttr field = StringAttr()) {
+                   StringAttr field = StringAttr(), Value when = Value()) {
+    Value happened = mask && when
+                         ? arith::AndIOp::create(rewriter, loc, mask, when)
+                               .getResult()
+                         : mask ? mask : when;
     for (const WorldColumn *column :
          stampsFor(archetype, kind, component, field)) {
       assert(tick && "an event is stamped without a tick");
       Value stamps = world.stamps(archetype, *column);
       const WorldLog *log = layout.findLog(*column->stamp);
-      Value old = log ? memref::LoadOp::create(rewriter, loc, stamps,
+      Value old = log || happened
+                      ? memref::LoadOp::create(rewriter, loc, stamps,
                                                ValueRange{entity})
                             .getResult()
                       : Value();
-      store(loc, tick, stamps);
+      memref::StoreOp::create(
+          rewriter, loc,
+          happened ? arith::SelectOp::create(rewriter, loc, happened, tick,
+                                             old)
+                         .getResult()
+                   : tick,
+          stamps, ValueRange{entity});
       if (log)
         appendToLog(rewriter, loc, world, *log,
                     // (By row range only where threads share the
                     // log: it costs a division an event.)
                     segmentOf(rewriter, loc, world, *log, entity,
                               parallel ? rows : Value()),
-                    world.entityId(loc, archetype, entity), tick, old, mask,
-                    parallel);
+                    world.entityId(loc, archetype, entity), tick, old,
+                    happened, parallel);
     }
   };
 
@@ -1392,9 +1424,30 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
     } else if (auto set = dyn_cast<SetOp>(op)) {
       FlatSymbolRefAttr component =
           cast<RefType>(set.getRef().getType()).getComponent();
-      store(loc, set.getValue(),
-            column(component.getAttr(), set.getFieldAttr()));
-      stamp(loc, Trigger::Changed, component.getAttr(), set.getFieldAttr());
+      // An event, and another order for a tree ordered by the field,
+      // only where the field gets another value: compared where either
+      // matters.
+      Value target = column(component.getAttr(), set.getFieldAttr());
+      bool ordersTree =
+          llvm::any_of(layout.relations, [&](const WorldRelation &relation) {
+            return relation.orderComponent == component.getAttr() &&
+                   relation.orderField == set.getFieldAttr();
+          });
+      Value differs;
+      if (ordersTree || !stampsFor(archetype, Trigger::Changed,
+                                   component.getAttr(), set.getFieldAttr())
+                             .empty())
+        differs = emitDiffers(
+            rewriter, loc,
+            memref::LoadOp::create(rewriter, loc, target, ValueRange{entity}),
+            world.toStorage(loc, set.getValue()));
+      store(loc, set.getValue(), target);
+      stamp(loc, Trigger::Changed, component.getAttr(), set.getFieldAttr(),
+            differs);
+      Value moved = mask && differs
+                        ? arith::AndIOp::create(rewriter, loc, mask, differs)
+                              .getResult()
+                        : mask ? mask : differs;
       // What a tree's children are ordered by: the tree is looked over
       // when the query ends (see noteOrderWrites).
       for (const WorldRelation &relation : layout.relations) {
@@ -1404,9 +1457,9 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
         Value clean = world.edgesClean(relation);
         Value unclean = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
-        if (mask)
+        if (moved)
           unclean = arith::SelectOp::create(
-              rewriter, loc, mask, unclean,
+              rewriter, loc, moved, unclean,
               memref::LoadOp::create(rewriter, loc, clean, ValueRange{zero}));
         memref::StoreOp::create(rewriter, loc, unclean, clean,
                                 ValueRange{zero});
@@ -2965,9 +3018,13 @@ static void combineAtRow(IRRewriter &rewriter, Location loc,
                          StringRef rule, Value value, Value id, Value tick) {
   Value field = world.column(target, component, fieldName);
   Value old = memref::LoadOp::create(rewriter, loc, field, ValueRange{row});
-  memref::StoreOp::create(rewriter, loc,
-                          combine(rewriter, loc, rule, old, value), field,
-                          ValueRange{row});
+  Value combined = combine(rewriter, loc, rule, old, value);
+  memref::StoreOp::create(rewriter, loc, combined, field, ValueRange{row});
+  // (An event only where the field has another value for it.)
+  Value differs =
+      stampsFor(target, Trigger::Changed, component, fieldName).empty()
+          ? Value()
+          : emitDiffers(rewriter, loc, old, combined);
   // What a tree's children are ordered by: the tree is looked over when
   // the query ends (see noteOrderWrites).
   for (const WorldRelation &relation : layout.relations)
@@ -2982,16 +3039,22 @@ static void combineAtRow(IRRewriter &rewriter, Location loc,
        stampsFor(target, Trigger::Changed, component, fieldName)) {
     Value stamps = world.stamps(target, *column);
     const WorldLog *log = layout.findLog(*column->stamp);
-    Value before = log ? memref::LoadOp::create(rewriter, loc, stamps,
+    Value before = log || differs
+                       ? memref::LoadOp::create(rewriter, loc, stamps,
                                                 ValueRange{row})
                              .getResult()
                        : Value();
-    memref::StoreOp::create(rewriter, loc, tick, stamps, ValueRange{row});
+    memref::StoreOp::create(
+        rewriter, loc,
+        differs ? arith::SelectOp::create(rewriter, loc, differs, tick, before)
+                      .getResult()
+                : tick,
+        stamps, ValueRange{row});
     if (log)
       appendToLog(rewriter, loc, world, *log,
                   segmentOf(rewriter, loc, world, *log, row, Value()),
                   id ? id : world.entityId(loc, target, row), tick, before,
-                  Value(), /*atomic=*/false);
+                  differs, /*atomic=*/false);
   }
 }
 

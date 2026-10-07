@@ -1,0 +1,26 @@
+// A write of the value a field has is no event (changed_same.test).
+import console
+
+component Cell { v: i32, f: f32, seen: i32 }
+default_capacity 4
+unique Frame: i32
+
+world {
+  spawn { Cell { v: 1, f: 0.5, seen: 0 } }
+}
+
+// 2: the same values again. 3: another v. 4: the same again. 5: another f.
+system write() {
+  Frame += 1
+  for c: mut Cell {
+    c.v = if Frame >= 3 { 2 } else { 1 }
+    c.f = if Frame >= 5 { 1.5 } else { 0.5 }
+  }
+}
+system watch() {
+  for c: mut Cell on changed c.v, changed c.f { c.seen += 1 }
+  for c: Cell { put("{Frame}: seen {c.seen}") }
+  flush()
+}
+schedule frame() { write()  watch() }
+main { loop { frame() } until Frame == 6 }

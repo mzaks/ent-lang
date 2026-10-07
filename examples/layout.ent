@@ -67,8 +67,8 @@ relation (Float)-[Over]->(Box) tree capacity 256
 // Four passes over the boxes, each a `for` along a tree, and each
 // reactive: it runs for a box only where something it reads has changed
 // since it last ran, in the box itself, in the box it is in, in the one
-// before it or in one inside it. A box that is given the size it has is
-// not written, so that nothing follows from it.
+// before it or in one inside it. Giving a box the size it has is no
+// change, and nothing follows from it.
 system layout() {
   for e, b: Box without Content {
     e.add(Content {
@@ -105,11 +105,11 @@ system layout() {
     let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
     if s.w == Sizing.Fit {
       let w = (if k.row { c.sum_w + gaps } else { c.max_w }) + 2.0 * k.pad
-      if b.w != w { b.w = w }
+      b.w = w
     }
     if s.h == Sizing.Fit {
       let h = (if k.row { c.max_h } else { c.sum_h + gaps }) + 2.0 * k.pad
-      if b.h != h { b.h = h }
+      b.h = h
     }
   }
 
@@ -126,12 +126,12 @@ system layout() {
     if s.w == Sizing.Grow {
       let w = if k.row { b.w + (room_w - c.sum_w - gaps) / c.grow_w as f32 }
               else { room_w }
-      if b.w != w { b.w = w }
+      b.w = w
     }
     if s.h == Sizing.Grow {
       let h = if k.row { room_h }
               else { b.h + (room_h - c.sum_h - gaps) / c.grow_h as f32 }
-      if b.h != h { b.h = h }
+      b.h = h
     }
   }
 
@@ -160,9 +160,9 @@ system layout() {
     if let px = prev.x, let py = prev.y, let w = prev.w, let h = prev.h {
       if k.row { x = px + w + k.gap } else { y = py + h + k.gap }
     }
-    if b.x != x { b.x = x }
-    if b.y != y { b.y = y }
-    if l.z != ol.z { l.z = ol.z }
+    b.x = x
+    b.y = y
+    l.z = ol.z
   }
 
   // A box that floats is so far from the corner of the one it floats
@@ -172,9 +172,9 @@ system layout() {
       on changed o, changed under.x, changed under.y, changed ul {
     let x = under.x + o.dx
     let y = under.y + o.dy
-    if f.x != x { f.x = x }
-    if f.y != y { f.y = y }
-    if l.z != ul.z + 1 { l.z = ul.z + 1 }
+    f.x = x
+    f.y = y
+    l.z = ul.z + 1
   }
 
   // And what is inside a box that floats is placed from where that is
@@ -197,8 +197,8 @@ system layout() {
     if let px = prev.x, let py = prev.y, let w = prev.w, let h = prev.h {
       if k.row { x = px + w + k.gap } else { y = py + h + k.gap }
     }
-    if b.x != x { b.x = x }
-    if b.y != y { b.y = y }
-    if l.z != ol.z { l.z = ol.z }
+    b.x = x
+    b.y = y
+    l.z = ol.z
   }
 }

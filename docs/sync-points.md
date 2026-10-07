@@ -200,6 +200,10 @@ by closing its window: events caused after that — its own included — count o
 its next run. On its first run every existing entity counts as added and
 changed.
 
+A write is a `changed` event where it gives a field another value than it
+had (an integer, a float, an enum, an entity; a write to a text always is
+one). Adding a component is an event of all its fields.
+
 **R2.** An event is "visible" to a reactive query once the query causing it
 has reached its commit point; since reactive queries never run concurrently
 with the systems causing their events (the scheduler orders them through the

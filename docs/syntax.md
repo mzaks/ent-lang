@@ -554,10 +554,12 @@ thereby passed down: the next time it runs that is no event.
   which it may though the `for` writes `total`: where a `for` goes
   along a tree, the other end of the tree's edges it visits has been
   visited (the children `bottom up`, the parent `top down`).
-- A trigger fires on a write, whether the value is another or not. Passes
-  that feed each other (as in `examples/layout.ent`, where sizes go up
-  the tree and room comes down) write only what differs
-  (`if b.w != w { b.w = w }`), or each would set the other off for good.
+- `changed` means changed: a write of the value a field has is no
+  event. So passes that feed each other (as in `examples/layout.ent`,
+  where sizes go up the tree and room comes down) settle by themselves,
+  each running only as long as something still gets another value.
+  (Compared where the field is written, and only for fields some `for`
+  reacts to. A text is not compared: writing one counts.)
 - Triggers on children and on siblings are for unsorted trees so far;
   one on what several arrows lead to is not there yet; and
   a `for` with one goes through its whole tree, running its body where a

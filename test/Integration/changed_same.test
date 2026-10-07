@@ -1,0 +1,15 @@
+// `changed` is a field getting another value (Inputs/changed_same.ent): a
+// `for` that writes a cell every frame sets off the one that reacts to
+// it only in the frames where what it writes is another value.
+// RUN: %ent run %S/Inputs/changed_same.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/changed_same.ent 2>/dev/null | FileCheck %s
+
+// New, so once.
+// CHECK:      1: seen 1
+// CHECK-NEXT: 2: seen 1
+// Another v.
+// CHECK-NEXT: 3: seen 2
+// CHECK-NEXT: 4: seen 2
+// Another f.
+// CHECK-NEXT: 5: seen 3
+// CHECK-NEXT: 6: seen 3

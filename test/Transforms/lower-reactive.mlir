@@ -21,11 +21,17 @@ ent.archetype @A (@H, @B) capacity 8
 // CHECK-DAG:  %[[TICKS:.*]] = memref.view %{{.*}} : memref<16384xi8> to memref<64xi64>
 // CHECK:      %[[C:.*]] = memref.load %[[COUNTER]][%c0]
 // CHECK-NEXT: %[[TICK:.*]] = arith.addi %[[C]], %c1_i64
+// The write is an event where the field gets another value: there the
+// stamp takes the tick, and the entity goes into the log.
 // CHECK:      scf.for %[[ROW:.*]] =
-// CHECK-NEXT:   memref.store %{{.*}}, %[[HP]][%[[ROW]]]
+// CHECK-NEXT:   %[[WAS:.*]] = memref.load %[[HP]][%[[ROW]]]
+// CHECK-NEXT:   %[[DIFFERS:.*]] = arith.cmpf une, %[[WAS]], %[[VALUE:.*]] : f32
+// CHECK-NEXT:   memref.store %[[VALUE]], %[[HP]][%[[ROW]]]
 // CHECK-NEXT:   %[[OLD:.*]] = memref.load %[[STAMP]][%[[ROW]]]
-// CHECK-NEXT:   memref.store %[[TICK]], %[[STAMP]][%[[ROW]]]
-// CHECK:        %[[NEW:.*]] = arith.cmpi ne, %[[OLD]], %[[TICK]] : i64
+// CHECK-NEXT:   %[[STAMPED:.*]] = arith.select %[[DIFFERS]], %[[TICK]], %[[OLD]] : i64
+// CHECK-NEXT:   memref.store %[[STAMPED]], %[[STAMP]][%[[ROW]]]
+// CHECK:        %[[LATER:.*]] = arith.cmpi ne, %[[OLD]], %[[TICK]] : i64
+// CHECK-NEXT:   %[[NEW:.*]] = arith.andi %[[LATER]], %[[DIFFERS]] : i1
 // CHECK-NEXT:   %[[TOLD:.*]] = memref.load %[[COUNTS]][%c3]
 // CHECK-NEXT:   %[[UNTOLD:.*]] = arith.cmpi eq, %[[TOLD]], %c0_i64
 // CHECK-NEXT:   %[[LIVE:.*]] = arith.andi %[[NEW]], %[[UNTOLD]] : i1
