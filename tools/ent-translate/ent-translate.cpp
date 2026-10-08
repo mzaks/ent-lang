@@ -777,7 +777,7 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     SmallVector<std::string> params, args;
     for (BlockArgument arg : schedule.getBody().getArguments()) {
       StringRef cType = getCType(arg.getType());
-      if (isa<TextType, StringType>(arg.getType()))
+      if (isa<TextType>(arg.getType()))
         return schedule.emitError("parameter #")
                << arg.getArgNumber()
                << " is a text, which a C host cannot pass yet; put it in a "

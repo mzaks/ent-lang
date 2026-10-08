@@ -657,7 +657,8 @@ LogicalResult ExternOp::verify() {
              << index
              << " is a component reference; references can only be bound "
                 "by 'ent.query'";
-    if (isa<TextType, StringType>(type))
+    // (One of any length is: as the address of its block.)
+    if (isa<TextType>(type))
       return emitOpError("parameter #")
              << index
              << " is a text, which cannot be passed to C yet; put it in a "

@@ -3,7 +3,8 @@
 // that runs is done (`ent.text.join`), so a fn gives it back like any
 // other; a text of a capacity that a fn gives back as one of any length
 // is kept the same way (`ent.text.keep`). A field that is given one takes
-// a copy. At the end the fields hold theirs, and nothing else is kept.
+// a copy, or, where the text was joined for it, what was joined. At the
+// end nothing is held or kept.
 // RUN: env ENT_TEXT_REPORT=1 %ent run %S/Inputs/text_join.ent > %t.out 2> %t.err
 // RUN: FileCheck %s --input-file=%t.out
 // RUN: FileCheck %s --check-prefix=HELD --input-file=%t.err
@@ -18,7 +19,7 @@
 // IR: ent.function @twice(%arg0: !ent.string) -> !ent.string {
 // IR: ent.text.join %arg0, %{{.*}}
 
-// HELD: texts held: 4
+// HELD: texts held: 0
 // HELD-NEXT: texts kept: 0
 
 // CHECK:      1: all the notes

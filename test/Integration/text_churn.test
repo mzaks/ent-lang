@@ -1,8 +1,9 @@
 // What the fields of entities hold of texts of any length is given back
 // when a field gets another text, when its component is removed (in
 // place, or by a move to another archetype) or set again, and when its
-// entity is destroyed: after thirty rounds of all of that, as many blocks
-// are held as fields have bytes. However the program ran.
+// entity is destroyed, and what fields still hold when the program is
+// done is given back then: after thirty rounds of all of that, none is
+// left. However the program ran.
 // RUN: env ENT_TEXT_REPORT=1 %ent run %S/Inputs/text_churn.ent > %t.out 2> %t.err
 // RUN: FileCheck %s --input-file=%t.out
 // RUN: FileCheck %s --check-prefix=HELD --input-file=%t.err
@@ -12,4 +13,4 @@
 // CHECK:      1: 989 notes, 520 extras
 // CHECK:      30: 480 notes, 309 extras
 // CHECK:      fields with bytes: 675
-// HELD:       texts held: 675
+// HELD:       texts held: 0

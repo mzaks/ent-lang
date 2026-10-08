@@ -101,6 +101,24 @@ uint64_t ent_text_join(uint64_t a, uint64_t b) {
   return (uint64_t)(uintptr_t)both;
 }
 
+// The same as a block of a field's own: for a field that is given what
+// is joined, without a copy in between.
+uint64_t ent_text_join_own(uint64_t a, uint64_t b) {
+  const ent_text *left = ent_text_of(a), *right = ent_text_of(b);
+  uint32_t length = left->length + right->length;
+  if (!length)
+    return 0;
+  ent_text *held = malloc(sizeof(ent_text) + length + 1);
+  if (!held)
+    abort();
+  held->length = length;
+  memcpy(held->bytes, left->bytes, left->length);
+  memcpy(held->bytes + left->length, right->bytes, right->length);
+  held->bytes[length] = 0;
+  ent_text_count(1);
+  return (uint64_t)(uintptr_t)held;
+}
+
 // A copy that is kept as long as a joined text is.
 uint64_t ent_text_keep(uint64_t view) {
   const ent_text *from = ent_text_of(view);

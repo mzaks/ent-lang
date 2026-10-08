@@ -1,0 +1,34 @@
+// Texts of any length and a C host: a schedule takes one from the host
+// (`const ent_text *`, or no address for one without bytes) and an extern
+// system one from the program; C reads those that fields hold. What the
+// program joins while a schedule runs is given back when the schedule is
+// done, also where the host runs it: none is kept at the end. (What the
+// fields hold stays: the world is the host's.)
+// RUN: mkdir -p %t.dir
+// RUN: ent-translate --import-ent %S/Inputs/text_host.ent -I %S/../../devices -o %t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/text_host_world.h
+// RUN: FileCheck %s --check-prefix=HEADER --input-file=%t.dir/text_host_world.h
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
+// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN:     %S/Inputs/text_host_main.c %S/../../devices/text.c -o %t.exe
+// RUN: env ENT_TEXT_REPORT=1 %t.exe > %t.out 2> %t.err
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t.err
+
+// HEADER: static inline void ent_frame(ent_world *world, const ent_text * arg0, int32_t arg1) {
+// HEADER: void ent_report(ent_world *world, const ent_text * arg0);
+
+// CHECK:      - one: (last: one)
+// CHECK-NEXT:   one 1! (6)
+// CHECK-NEXT: - two: (last: two)
+// CHECK-NEXT:   one 1!! (7)
+// CHECK-NEXT:   two 2! (6)
+// CHECK-NEXT: - : (last: )
+// CHECK-NEXT:   one 1!!! (8)
+// CHECK-NEXT:   two 2!! (7)
+// CHECK-NEXT:    3! (3)
+
+// HELD:      texts held: 4
+// HELD-NEXT: texts kept: 0

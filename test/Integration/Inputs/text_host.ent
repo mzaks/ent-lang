@@ -1,0 +1,23 @@
+// A program a C host runs, with texts of any length (text_host.test).
+import text
+
+component Note { words: text, n: i32 }
+unique Title: text
+default_capacity 16
+
+// Implemented by the host: prints the notes, each after `before`.
+extern system report(before: text) reads Note, Title
+
+system add(name: text, n: i32) {
+  spawn { Note { words: name + " " + "{n}", n: n } }
+  Title = "last: " + name
+}
+system grow() {
+  for n: mut Note { n.words += "!" }
+}
+
+schedule frame(name: text, n: i32) {
+  add(name, n)
+  grow()
+  report("- " + name + ": ")
+}

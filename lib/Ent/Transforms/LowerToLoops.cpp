@@ -10872,6 +10872,9 @@ static Value worldPointer(IRRewriter &rewriter, Location loc, Value arena) {
 static Type externParamType(Type type) {
   if (auto named = dyn_cast<EnumType>(type))
     return named.getStorageType();
+  // (A text of any length: the address of its block.)
+  if (isa<StringType>(type))
+    return LLVM::LLVMPointerType::get(type.getContext());
   return type.isInteger(1) ? IntegerType::get(type.getContext(), 8) : type;
 }
 
@@ -11056,6 +11059,7 @@ static void declareTextRuntime(IRRewriter &rewriter, ModuleOp module,
   declare("ent_text_equal", {i64, i64}, {i8});
   declare("ent_text_cut", {i64, i64, i32}, {});
   declare("ent_text_join", {i64, i64}, {i64});
+  declare("ent_text_join_own", {i64, i64}, {i64});
   declare("ent_text_keep", {i64}, {i64});
   declare("ent_text_release", {}, {});
 }
@@ -11078,6 +11082,22 @@ static Block *stackOf(Operation *op) {
 static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
                        SymbolTable &symbols,
                        ArrayRef<func::FuncOp> schedules) {
+  // What is joined only to be a field's own is made as that, and a copy
+  // that is kept only to be a field's own is not made: one block, not two.
+  SmallVector<TextOwnOp> owns;
+  module.walk([&](TextOwnOp own) { owns.push_back(own); });
+  SmallVector<std::pair<TextOwnOp, TextJoinOp>> joinedToOwn;
+  for (TextOwnOp own : owns) {
+    Operation *made = own.getValue().getDefiningOp();
+    if (!made || !made->hasOneUse() || made->getBlock() != own->getBlock())
+      continue;
+    if (auto keep = dyn_cast<TextKeepOp>(made)) {
+      own->setOperand(0, keep.getValue());
+      rewriter.eraseOp(keep);
+    } else if (auto join = dyn_cast<TextJoinOp>(made)) {
+      joinedToOwn.push_back({own, join});
+    }
+  }
   SmallVector<Operation *> ops;
   bool makes = false;
   module.walk([&](Operation *op) {
@@ -11086,11 +11106,15 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
       ops.push_back(op);
     makes |= isa<TextJoinOp, TextKeepOp>(op);
   });
+  // (Also where one only crosses to C: a call of `ent_text_view` is
+  // there already, or to come.)
   bool crosses = false;
-  module.walk([&](InvokeOp invoke) {
-    crosses |= llvm::any_of(invoke.getArgs(), [](Value arg) {
-      return isa<StringType>(arg.getType());
-    });
+  module.walk([&](Operation *op) {
+    if (isa<InvokeOp>(op) || isa<func::CallOp>(op))
+      crosses |= llvm::any_of(op->getOperandTypes(), [](Type type) {
+        return isa<StringType>(type);
+      }) || (isa<func::CallOp>(op) &&
+             cast<func::CallOp>(op).getCallee() == "ent_text_view");
   });
   if (ops.empty() && !crosses)
     return;
@@ -11127,6 +11151,11 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
   // The bytes of each text the program has written, once.
   llvm::StringMap<std::string> constants;
   for (Operation *op : ops) {
+    // (A join that is a field's own is lowered with what takes it.)
+    if (llvm::any_of(joinedToOwn, [&](auto &pair) {
+          return pair.second.getOperation() == op;
+        }))
+      continue;
     Location loc = op->getLoc();
     rewriter.setInsertionPoint(op);
     if (auto constant = dyn_cast<TextConstantOp>(op)) {
@@ -11253,6 +11282,20 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
                          {address(loc, keep.getValue())})
                         .getResult(0);
       rewriter.replaceOp(op, view(loc, block));
+    } else if (auto own = dyn_cast<TextOwnOp>(op);
+               own && llvm::any_of(joinedToOwn, [&](auto &pair) {
+                 return pair.first == own;
+               })) {
+      // (The join it takes is lowered with it: see above.)
+      TextJoinOp join = llvm::find_if(joinedToOwn, [&](auto &pair) {
+                          return pair.first == own;
+                        })->second;
+      Value block = call(loc, "ent_text_join_own", {i64},
+                         {address(loc, join.getLhs()),
+                          address(loc, join.getRhs())})
+                        .getResult(0);
+      rewriter.replaceOp(op, view(loc, block));
+      rewriter.eraseOp(join);
     } else if (auto own = dyn_cast<TextOwnOp>(op)) {
       Value block = call(loc, "ent_text_own", {i64},
                          {address(loc, own.getValue())})
@@ -11282,12 +11325,27 @@ static void lowerRun(IRRewriter &rewriter, RunOp run, Value arena,
       return;
     }
     SmallVector<Value> args{worldPointer(rewriter, loc, arena)};
-    for (Value arg : run.getArgs())
+    for (Value arg : run.getArgs()) {
+      if (isa<StringType>(arg.getType())) {
+        // (Never no address: that of a text without bytes.)
+        Value view = UnrealizedConversionCastOp::create(
+                         rewriter, loc, rewriter.getI64Type(), arg)
+                         .getResult(0);
+        Value shown = func::CallOp::create(rewriter, loc, "ent_text_view",
+                                           TypeRange{rewriter.getI64Type()},
+                                           ValueRange{view})
+                          .getResult(0);
+        args.push_back(LLVM::IntToPtrOp::create(
+            rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
+            shown));
+        continue;
+      }
       args.push_back(arg.getType().isInteger(1)
                          ? arith::ExtUIOp::create(rewriter, loc,
                                                   rewriter.getI8Type(), arg)
                                .getResult()
                          : arg);
+    }
     func::CallOp::create(rewriter, loc, external.getCName(), TypeRange{},
                          args);
     // Edges it connected (through the header) are sorted before the next
@@ -11385,6 +11443,41 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
   }
   WorldAccess world(rewriter, layout, arena);
   lowerResourceAccesses(rewriter, body, world);
+
+  // When the program is done, the texts of any length that fields and
+  // uniques still hold are given back.
+  SmallVector<func::ReturnOp> ends;
+  body.walk([&](func::ReturnOp end) { ends.push_back(end); });
+  for (func::ReturnOp end : ends) {
+    rewriter.setInsertionPoint(end);
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (llvm::none_of(archetype.columns, [](const WorldColumn &column) {
+            return !column.isStamp() && !column.isPresence() &&
+                   isa<StringType>(column.type);
+          }))
+        continue;
+      auto rows = scf::ForOp::create(
+          rewriter, loc, arith::ConstantIndexOp::create(rewriter, loc, 0),
+          world.count(loc, archetype),
+          arith::ConstantIndexOp::create(rewriter, loc, 1));
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(rows.getBody()->getTerminator());
+      dropHeldTexts(rewriter, loc, archetype, world, rows.getInductionVar(),
+                    [](FlatSymbolRefAttr) { return true; });
+    }
+    for (const WorldResource &resource : layout.resources)
+      for (const WorldResourceField &field : resource.fields) {
+        if (!isa<StringType>(field.type))
+          continue;
+        Value held = memref::LoadOp::create(
+            rewriter, loc,
+            world.resourceField(ResourceOp(resource.op).getSymNameAttr(),
+                                field.field),
+            ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
+        TextDropOp::create(rewriter, loc,
+                           world.fromStorage(loc, held, field.type));
+      }
+  }
 
   rewriter.setInsertionPoint(body);
   auto func = func::FuncOp::create(
@@ -11933,8 +12026,6 @@ struct EntLowerToLoops
           stored(same.getRhs()));
     }
 
-    lowerTexts(rewriter, module, symbols, scheduleFuncs);
-
     SmallVector<InvokeOp> invokes;
     module.walk([&](InvokeOp invoke) { invokes.push_back(invoke); });
     for (InvokeOp invoke : invokes) {
@@ -11945,6 +12036,7 @@ struct EntLowerToLoops
     for (auto main : llvm::make_early_inc_range(module.getOps<MainOp>()))
       if (failed(lowerMain(rewriter, main, module, *layout, arenaType)))
         return signalPassFailure();
+    lowerTexts(rewriter, module, symbols, scheduleFuncs);
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
       if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp, ExternOp,
