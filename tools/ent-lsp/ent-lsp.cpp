@@ -179,8 +179,16 @@ Analysis analyze(StringRef path, StringRef text,
   // Remarks are answers to what the server asked (who waits for whom);
   // the rest is for the reader.
   llvm::StringMap<std::vector<std::string>> waits;
+  // A file without `main` is a module for programs to import: which
+  // entities there are, and what else writes what it reacts to, is theirs
+  // to say, and no finding here.
+  bool library = false;
   context.getDiagEngine().registerHandler([&](Diagnostic &diagnostic) {
     std::string message = diagnostic.str();
+    if (library && diagnostic.getSeverity() == DiagnosticSeverity::Warning &&
+        (StringRef(message).starts_with("matches no archetype") ||
+         StringRef(message).contains(", but no system ")))
+      return success();
     if (diagnostic.getSeverity() == DiagnosticSeverity::Remark) {
       StringRef rest = message;
       if (rest.consume_front("@") && rest.contains(" waits for "))
@@ -211,6 +219,7 @@ Analysis analyze(StringRef path, StringRef text,
   if (!module)
     return analysis;
   analysis.parsed = true;
+  library = module->getOps<MainOp>().empty();
 
   // What scheduling and lowering say, on a copy: they take the program
   // apart.

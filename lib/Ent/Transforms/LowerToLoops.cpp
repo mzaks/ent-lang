@@ -869,7 +869,10 @@ private:
 
   /// A view of `size` elements of `type` at `offset`, created once.
   Value view(uint64_t offset, int64_t size, Type type) {
-    Value &value = columns[{~1u, offset}];
+    // (By what it is a view of, too: in a program without entities the
+    // arrays with a place per entity are empty, and several start at the
+    // same offset.)
+    Value &value = views[{offset, MemRefType::get({size}, type)}];
     if (!value)
       value = atEntry([&](Location loc) {
         Value start = arith::ConstantIndexOp::create(rewriter, loc, offset);
@@ -898,6 +901,7 @@ private:
   Operation *lastCreated = nullptr;
   Value countsView;
   llvm::DenseMap<std::pair<unsigned, uint64_t>, Value> columns;
+  llvm::DenseMap<std::pair<uint64_t, Type>, Value> views;
 };
 
 /// How entity loops are emitted.

@@ -126,6 +126,16 @@
 // CHECK:          "severity": 2,
 // CHECK:        "version": 3
 // -----
+{"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "test:///boxes.ent", "languageId": "ent", "version": 1, "text": "// A module: boxes in boxes.\ncomponent Box { x: f32, w: f32 }\ncomponent Slot { at: i32 }\nrelation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 16\nsystem place() {\n  for (b: mut Box)-[Inside]->(outer: Box), optional (prev: Box)~[Inside]~>(b)\n      top down Inside on changed b.w, changed outer, changed prev {\n    var x = outer.x\n    if let px = prev.x, let pw = prev.w { x = px + pw }\n    b.x = x\n  }\n}\n"}}}
+// A file without `main` is a module for programs to import. It has no
+// entities of its own, and nothing writes what it reacts to: neither is
+// a finding, and lowering it finds nothing wrong.
+// CHECK:      "method": "textDocument/publishDiagnostics"
+// CHECK-NEXT: "params": {
+// CHECK-NEXT:   "diagnostics": [],
+// CHECK-NEXT:   "uri": "test:///boxes.ent",
+// CHECK-NEXT:   "version": 1
+// -----
 {"jsonrpc": "2.0", "id": 10, "method": "shutdown"}
 // -----
 {"jsonrpc": "2.0", "method": "exit"}
