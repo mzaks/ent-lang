@@ -845,7 +845,7 @@ LogicalResult FunctionOp::verifyRegions() {
         op->getName().getDialectNamespace() != "ent")
       return;
     auto invoke = dyn_cast<InvokeOp>(op);
-    if (invoke && (!invoke.getProc() || getProc()))
+    if (isa<SameOp>(op) || (invoke && (!invoke.getProc() || getProc())))
       return;
     if (succeeded(result))
       result = op->emitOpError(invoke ? "calls a proc in a function's body; "

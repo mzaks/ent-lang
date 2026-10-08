@@ -1,0 +1,380 @@
+// Clay's "video demo" (examples/shared-layouts/clay-video-demo.c in
+// github.com/nicbarker/clay), with examples/layout.ent: a header bar with
+// buttons, of which "File" has a menu that drops down while the pointer
+// is on it; a side bar with five documents; and the one that is chosen,
+// in a box that scrolls. The sizes, paddings, gaps and colours are
+// Clay's.
+//
+//   tools/ent run -I examples examples/clay/video_demo.ent
+//
+// Clay says every frame what is there; here the boxes are made once, and
+// systems change what changes: the menu is made when the pointer comes
+// to "File" and goes when it leaves, the document's lines are other
+// texts when another is chosen.
+import window
+import layout
+import layout_window
+
+tag Root
+tag FileButton
+// (It has its menu.)
+tag Open
+tag Menu
+tag Main
+tag Title
+// A side bar's button for the document `n`, and the lines of the one
+// that is shown: line `i` of it.
+component Doc { n: i32 }
+component Line { i: i32 }
+// The document that is chosen, the one whose lines are in the boxes,
+// what was clicked this frame, and how many of "File" and its menu the
+// pointer is on.
+unique Chosen: i32
+unique Shows: i32
+unique Clicked: i32
+unique OnMenu: i32
+// The font the texts are in: one from a file, if there is one of these.
+unique Face: i32
+default_capacity 128
+
+// The documents: their titles, and their lines.
+fn title(doc: i32) -> text[30] {
+  if doc == 0 { "Squirrels" }
+  else if doc == 1 { "Lorem Ipsum" }
+  else if doc == 2 { "Vacuum Instructions" }
+  else if doc == 3 { "Article 4" }
+  else if doc == 4 { "Article 5" }
+  else { "" }
+}
+fn lines(doc: i32) -> i32 {
+  if doc == 0 { 18 }
+  else if doc == 1 { 1 }
+  else if doc == 2 { 23 }
+  else if doc == 3 { 1 }
+  else if doc == 4 { 1 }
+  else { 0 }
+}
+fn line_0(i: i32) -> text[1022] {
+  if i == 0 { "The Secret Life of Squirrels: Nature's Clever Acrobats" }
+  else if i == 1 { "Squirrels are often overlooked creatures, dismissed as mere park inhabitants or backyard nuisances. Yet, beneath their fluffy tails and twitching noses lies an intricate world of cunning, agility, and survival tactics that are nothing short of fascinating. As one of the most common mammals in North America, squirrels have adapted to a wide range of environments from bustling urban centers to tranquil forests and have developed a variety of unique behaviors that continue to intrigue scientists and nature enthusiasts alike." }
+  else if i == 2 { "" }
+  else if i == 3 { "Master Tree Climbers" }
+  else if i == 4 { "At the heart of a squirrel's skill set is its impressive ability to navigate trees with ease. Whether they're darting from branch to branch or leaping across wide gaps, squirrels possess an innate talent for acrobatics. Their powerful hind legs, which are longer than their front legs, give them remarkable jumping power. With a tail that acts as a counterbalance, squirrels can leap distances of up to ten times the length of their body, making them some of the best aerial acrobats in the animal kingdom." }
+  else if i == 5 { "But it's not just their agility that makes them exceptional climbers. Squirrels' sharp, curved claws allow them to grip tree bark with precision, while the soft pads on their feet provide traction on slippery surfaces. Their ability to run at high speeds and scale vertical trunks with ease is a testament to the evolutionary adaptations that have made them so successful in their arboreal habitats." }
+  else if i == 6 { "" }
+  else if i == 7 { "Food Hoarders Extraordinaire" }
+  else if i == 8 { "Squirrels are often seen frantically gathering nuts, seeds, and even fungi in preparation for winter. While this behavior may seem like instinctual hoarding, it is actually a survival strategy that has been honed over millions of years. Known as \"scatter hoarding,\" squirrels store their food in a variety of hidden locations, often burying it deep in the soil or stashing it in hollowed-out tree trunks." }
+  else if i == 9 { "Interestingly, squirrels have an incredible memory for the locations of their caches. Research has shown that they can remember thousands of hiding spots, often returning to them months later when food is scarce. However, they don't always recover every stash some forgotten caches eventually sprout into new trees, contributing to forest regeneration. This unintentional role as forest gardeners highlights the ecological importance of squirrels in their ecosystems." }
+  else if i == 10 { "" }
+  else if i == 11 { "The Great Squirrel Debate: Urban vs. Wild" }
+  else if i == 12 { "While squirrels are most commonly associated with rural or wooded areas, their adaptability has allowed them to thrive in urban environments as well. In cities, squirrels have become adept at finding food sources in places like parks, streets, and even garbage cans. However, their urban counterparts face unique challenges, including traffic, predators, and the lack of natural shelters. Despite these obstacles, squirrels in urban areas are often observed using human infrastructure such as buildings, bridges, and power lines as highways for their acrobatic escapades." }
+  else if i == 13 { "There is, however, a growing concern regarding the impact of urban life on squirrel populations. Pollution, deforestation, and the loss of natural habitats are making it more difficult for squirrels to find adequate food and shelter. As a result, conservationists are focusing on creating squirrel-friendly spaces within cities, with the goal of ensuring these resourceful creatures continue to thrive in both rural and urban landscapes." }
+  else if i == 14 { "" }
+  else if i == 15 { "A Symbol of Resilience" }
+  else if i == 16 { "In many cultures, squirrels are symbols of resourcefulness, adaptability, and preparation. Their ability to thrive in a variety of environments while navigating challenges with agility and grace serves as a reminder of the resilience inherent in nature. Whether you encounter them in a quiet forest, a city park, or your own backyard, squirrels are creatures that never fail to amaze with their endless energy and ingenuity." }
+  else if i == 17 { "In the end, squirrels may be small, but they are mighty in their ability to survive and thrive in a world that is constantly changing. So next time you spot one hopping across a branch or darting across your lawn, take a moment to appreciate the remarkable acrobat at work a true marvel of the natural world." }
+  else { "" }
+}
+fn line_1(i: i32) -> text[1022] {
+  if i == 0 { "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum." }
+  else { "" }
+}
+fn line_2(i: i32) -> text[1022] {
+  if i == 0 { "Chapter 3: Getting Started - Unpacking and Setup" }
+  else if i == 1 { "" }
+  else if i == 2 { "Congratulations on your new SuperClean Pro 5000 vacuum cleaner! In this section, we will guide you through the simple steps to get your vacuum up and running. Before you begin, please ensure that you have all the components listed in the \"Package Contents\" section on page 2." }
+  else if i == 3 { "" }
+  else if i == 4 { "1. Unboxing Your Vacuum" }
+  else if i == 5 { "Carefully remove the vacuum cleaner from the box. Avoid using sharp objects that could damage the product. Once removed, place the unit on a flat, stable surface to proceed with the setup. Inside the box, you should find:" }
+  else if i == 6 { "" }
+  else if i == 7 { "    The main vacuum unit" }
+  else if i == 8 { "    A telescoping extension wand" }
+  else if i == 9 { "    A set of specialized cleaning tools (crevice tool, upholstery brush, etc.)" }
+  else if i == 10 { "    A reusable dust bag (if applicable)" }
+  else if i == 11 { "    A power cord with a 3-prong plug" }
+  else if i == 12 { "    A set of quick-start instructions" }
+  else if i == 13 { "" }
+  else if i == 14 { "2. Assembling Your Vacuum" }
+  else if i == 15 { "Begin by attaching the extension wand to the main body of the vacuum cleaner. Line up the connectors and twist the wand into place until you hear a click. Next, select the desired cleaning tool and firmly attach it to the wand's end, ensuring it is securely locked in." }
+  else if i == 16 { "" }
+  else if i == 17 { "For models that require a dust bag, slide the bag into the compartment at the back of the vacuum, making sure it is properly aligned with the internal mechanism. If your vacuum uses a bagless system, ensure the dust container is correctly seated and locked in place before use." }
+  else if i == 18 { "" }
+  else if i == 19 { "3. Powering On" }
+  else if i == 20 { "To start the vacuum, plug the power cord into a grounded electrical outlet. Once plugged in, locate the power switch, usually positioned on the side of the handle or body of the unit, depending on your model. Press the switch to the \"On\" position, and you should hear the motor begin to hum. If the vacuum does not power on, check that the power cord is securely plugged in, and ensure there are no blockages in the power switch." }
+  else if i == 21 { "" }
+  else if i == 22 { "Note: Before first use, ensure that the vacuum filter (if your model has one) is properly installed. If unsure, refer to \"Section 5: Maintenance\" for filter installation instructions." }
+  else { "" }
+}
+fn line_3(i: i32) -> text[1022] {
+  if i == 0 { "Article 4" }
+  else { "" }
+}
+fn line_4(i: i32) -> text[1022] {
+  if i == 0 { "Article 5" }
+  else { "" }
+}
+fn line(doc: i32, i: i32) -> text[1022] {
+  if doc == 0 { line_0(i) }
+  else if doc == 1 { line_1(i) }
+  else if doc == 2 { line_2(i) }
+  else if doc == 3 { line_3(i) }
+  else if doc == 4 { line_4(i) }
+  else { "" }
+}
+
+world {
+  Window.width = 1024
+  Window.height = 768
+  Window.title = "ent-lang: Clay's video demo"
+  Window.background = 0x2b2933
+  Window.fps = 60
+  Window.resizable = true
+  Shows = -1
+
+  // OuterContainer: as big as the window, a column with 16 around and
+  // between.
+  let outer = spawn {
+    Box { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: false, pad: 16.0, gap: 16.0 }, Fill { colour: 0x2b2933 },
+    Root
+  }
+
+  // HeaderBar: 60 high, its buttons in the middle of that.
+  let header = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 60.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 16.0 },
+    Pad { left: 16.0, right: 16.0, top: 0.0, bottom: 0.0 },
+    Align { x: Place.Start, y: Place.Middle }, Fill { colour: 0x5a5a5a },
+    Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0,
+            bottom_right: 8.0 }
+  }
+  connect (header)-[Inside]->(outer)
+  let file = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Pad { left: 16.0, right: 16.0, top: 8.0, bottom: 8.0 },
+    Fill { colour: 0x8c8c8c },
+    Round { top_left: 5.0, top_right: 5.0, bottom_left: 5.0,
+            bottom_right: 5.0 },
+    Text { text: "File", size: 16.0, colour: 0xffffff },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+                breaks: Breaks.Words },
+    FileButton
+  }
+  connect (file)-[Inside]->(header)
+  for i in 1..6 {
+    // (The third is no button: it takes the room that is left, and so
+    // puts the last three at the right.)
+    if i == 2 {
+      let room = spawn {
+        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+        Size { w: Sizing.Grow, h: Sizing.Fit },
+        Stack { row: true, pad: 0.0, gap: 0.0 }
+      }
+      connect (room)-[Inside]->(header)
+    } else {
+      let button = spawn {
+        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+        Size { w: Sizing.Fit, h: Sizing.Fit },
+        Stack { row: true, pad: 0.0, gap: 0.0 },
+        Pad { left: 16.0, right: 16.0, top: 8.0, bottom: 8.0 },
+        Fill { colour: 0x8c8c8c },
+        Round { top_left: 5.0, top_right: 5.0, bottom_left: 5.0,
+                bottom_right: 5.0 },
+        Text { text: if i == 1 { "Edit" } else if i == 3 { "Upload" }
+                     else if i == 4 { "Media" } else { "Support" },
+               size: 16.0, colour: 0xffffff },
+        TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+                    breaks: Breaks.Words }
+      }
+      connect (button)-[Inside]->(header)
+    }
+  }
+
+  // LowerContent: the side bar, 250 wide, and the document.
+  let lower = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: true, pad: 0.0, gap: 16.0 }
+  }
+  connect (lower)-[Inside]->(outer)
+  let side = spawn {
+    Box { x: 0.0, y: 0.0, w: 250.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Grow },
+    Stack { row: false, pad: 16.0, gap: 8.0 }, Fill { colour: 0x5a5a5a }
+  }
+  connect (side)-[Inside]->(lower)
+  for i in 0..5 {
+    let entry = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Fit },
+      Stack { row: true, pad: 16.0, gap: 0.0 }, Fill { colour: 0x5a5a5a },
+      Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0,
+              bottom_right: 8.0 },
+      Text { text: title(i), size: 20.0, colour: 0xffffff },
+      TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+                  breaks: Breaks.Words },
+      Doc { n: i }
+    }
+    connect (entry)-[Inside]->(side)
+  }
+
+  // MainContent: it shows what is within it of the document, which the
+  // wheel moves, or the pointer.
+  let main_box = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 16.0, gap: 16.0 }, Fill { colour: 0x5a5a5a },
+    Clip { x: false, y: true }, Scroll { x: 0.0, y: 0.0 }, Drag, Main
+  }
+  connect (main_box)-[Inside]->(lower)
+  let heading = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "", size: 24.0, colour: 0xffffff },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+                breaks: Breaks.Words },
+    Title
+  }
+  connect (heading)-[Inside]->(main_box)
+  // (Clay has the document as one text with line breaks in it. A text
+  // here holds 1022 bytes: a box a line, as many as the longest
+  // document has, the ones a shorter one leaves over 0 high.)
+  let body = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: false, pad: 0.0, gap: 0.0 }
+  }
+  connect (body)-[Inside]->(main_box)
+  for i in 0..23 {
+    let part = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Fit },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Text { text: "", size: 0.0, colour: 0xffffff },
+      TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+                  breaks: Breaks.Words },
+      Line { i: i }
+    }
+    connect (part)-[Inside]->(body)
+  }
+}
+
+system interact() {
+  // The window's box is as big as the window.
+  for b: mut Box with Root
+      where b.w != Window.width as f32 || b.h != Window.height as f32 {
+    b.w = Window.width as f32
+    b.h = Window.height as f32
+  }
+  // A font from a file, where one of these is there: read when the
+  // window is open, and every text is in it from then on.
+  if Window.frame == 1 {
+    Face = font("examples/clay/Roboto-Regular.ttf", 24)
+    if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 24) }
+    if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24) }
+    if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 24) }
+  }
+  for st: mut TextStyle where st.font != Face { st.font = Face }
+
+  // The menu of "File": there while the pointer is on the button or on
+  // the menu, which floats from the button's bottom left corner. (8 of
+  // padding above its items, so that the pointer does not leave it on
+  // the way down.)
+  OnMenu = 0
+  for e with FileButton, Hovered { OnMenu += 1 }
+  for e with Menu, Hovered { OnMenu += 1 }
+  for e with FileButton, Hovered without Open {
+    let menu = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Fit, h: Sizing.Fit },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Pad { left: 0.0, right: 0.0, top: 8.0, bottom: 8.0 },
+      Float { dx: 0.0, dy: 0.0 },
+      Attach { own: Point.TopLeft, under: Point.BottomLeft }, Menu
+    }
+    connect (menu)-[Over]->(e)
+    let items = spawn {
+      Box { x: 0.0, y: 0.0, w: 200.0, h: 0.0 },
+      Size { w: Sizing.Fixed, h: Sizing.Fit },
+      Stack { row: false, pad: 0.0, gap: 0.0 }, Fill { colour: 0x282828 },
+      Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0,
+              bottom_right: 8.0 }
+    }
+    connect (items)-[Inside]->(menu)
+    let first = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Fit, h: Sizing.Fit },
+      Stack { row: true, pad: 16.0, gap: 0.0 },
+      Text { text: "New", size: 16.0, colour: 0xffffff },
+      TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Start,
+                  breaks: Breaks.Words }
+    }
+    connect (first)-[Inside]->(items)
+    let second = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Fit, h: Sizing.Fit },
+      Stack { row: true, pad: 16.0, gap: 0.0 },
+      Text { text: "Open", size: 16.0, colour: 0xffffff },
+      TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Start,
+                  breaks: Breaks.Words }
+    }
+    connect (second)-[Inside]->(items)
+    let third = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Fit, h: Sizing.Fit },
+      Stack { row: true, pad: 16.0, gap: 0.0 },
+      Text { text: "Close", size: 16.0, colour: 0xffffff },
+      TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Start,
+                  breaks: Breaks.Words }
+    }
+    connect (third)-[Inside]->(items)
+    e.add(Open)
+  }
+  if OnMenu == 0 {
+    for e with Menu without Gone { e.add(Gone) }
+    for e with FileButton, Open { e.remove(Open) }
+  }
+
+  // A document's button is lighter where it is the one chosen, or the
+  // pointer is on it; the one the pointer goes down on is chosen.
+  Clicked = -1
+  for d: Doc with Hovered where PointerTouch == Touch.PressedNow {
+    Clicked max= d.n
+  }
+  if Clicked >= 0 { Chosen = Clicked }
+  for e, f: mut Fill, d: Doc {
+    f.colour = if d.n == Chosen || e.has(Hovered) { 0x787878 } else { 0x5a5a5a }
+  }
+
+  // Another document: its title and its lines, from the top.
+  if Shows != Chosen {
+    for t: mut Text with Title { t.text = title(Chosen) }
+    for t: mut Text, l: Line {
+      if l.i < lines(Chosen) {
+        t.text = line(Chosen, l.i)
+        t.size = 24.0
+      } else {
+        t.text = ""
+        t.size = 0.0
+      }
+    }
+    for s: mut Scroll with Main { s.y = 0.0 }
+    Shows = Chosen
+  }
+}
+
+schedule frame() {
+  begin()
+  interact()
+  ui()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}

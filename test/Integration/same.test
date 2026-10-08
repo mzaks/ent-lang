@@ -1,0 +1,16 @@
+// Two entities are compared with `==` and `!=`: the one a `for` visits,
+// one a field or a unique holds, one at the other end of an arrow. They
+// are the same where their ids are (`ent.same`).
+// RUN: %ent run %S/Inputs/same.ent 2>/dev/null | FileCheck %s
+// RUN: ent-translate --import-ent %S/Inputs/same.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+
+// IR: ent.same
+
+// CHECK:      a is not the chosen one
+// CHECK-NEXT: b is the chosen one
+// CHECK-NEXT: c is not the chosen one
+// CHECK-NEXT: d is not the chosen one
+// CHECK-NEXT: b likes the one it is in
+// CHECK-NEXT: c likes another
+// CHECK-NEXT: d likes another

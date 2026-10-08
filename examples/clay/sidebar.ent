@@ -1,0 +1,533 @@
+// Clay's "sidebar scrolling container" example
+// (examples/raylib-sidebar-scrolling-container/main.c in
+// github.com/nicbarker/clay), with examples/layout.ent: a side bar with a
+// picture, a text and four boxes; a header with three buttons; a box of
+// texts and pictures that scrolls, with a bar at its right that shows how
+// far, and takes it there when dragged; a box that floats at its top; and
+// a list of a hundred texts that floats over the side bar's last box and
+// scrolls too. The sizes, paddings, gaps and colours are Clay's.
+//
+//   tools/ent run -I examples examples/clay/sidebar.ent
+//
+// The pictures are examples/clay/profile-picture.png where that is there
+// (Clay's is in its examples/raylib-sidebar-scrolling-container/resources),
+// and a colour where it is not. Clay's last text is one of 13421 bytes; a
+// text box holds 1022, so it is in parts here, each starting a line.
+import window
+import layout
+import layout_window
+
+tag Root
+tag HeaderButton
+tag Photos
+tag Main
+// The bar at the right of the box that scrolls.
+tag Bar
+// The font the texts are in, and the picture: from files, if there are.
+unique Face: i32
+unique Image: i32
+// Whether the pointer is on the bar; where it went down on it, and how
+// far the box was scrolled then.
+unique OnBar: i32
+unique Grab { on: bool, from: f32, was: f32 }
+// The box that scrolls: how high, how much of that for what is in it,
+// how high that is in all, and how far it is scrolled.
+unique View { h: f32, room: f32, all: f32, y: f32 }
+default_capacity 256
+
+world {
+  Window.width = 1024
+  Window.height = 768
+  Window.title = "ent-lang: Clay's sidebar scrolling container"
+  Window.background = 0x000000
+  Window.fps = 60
+  Window.resizable = true
+
+  // OuterContainer: as big as the window, a row with 16 around and
+  // between.
+  let outer = spawn {
+    Box { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 16.0, gap: 16.0 }, Fill { colour: 0xc8c8c8 },
+    Root
+  }
+
+  // SideBar: 300 wide, a column.
+  let side = spawn {
+    Box { x: 0.0, y: 0.0, w: 300.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Grow },
+    Stack { row: false, pad: 16.0, gap: 16.0 }, Fill { colour: 0x9696ff }
+  }
+  connect (side)-[Inside]->(outer)
+  // ProfilePictureOuter: a picture and a text, whose lines end at the
+  // right.
+  let profile = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 8.0, gap: 8.0 },
+    Align { x: Place.Start, y: Place.Middle }, Fill { colour: 0x8282ff }
+  }
+  connect (profile)-[Inside]->(side)
+  let face = spawn {
+    Box { x: 0.0, y: 0.0, w: 60.0, h: 60.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Fill { colour: 0xd0b090 }, Picture { image: 0, tint: 0xffffff }
+  }
+  connect (face)-[Inside]->(profile)
+  let who = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Profile Page one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.End,
+              breaks: Breaks.Words }
+  }
+  connect (who)-[Inside]->(profile)
+  // SidebarBlob1 to 4.
+  for i in 0..4 {
+    let blob = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 50.0 },
+      Size { w: Sizing.Grow, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Fill { colour: 0x6e6eff }
+    }
+    connect (blob)-[Inside]->(side)
+    // Blob4Floating2: over the last of them floats a box 200 high that
+    // scrolls (ScrollContainer), a row of two things 2 apart.
+    if i == 3 {
+      let over = spawn {
+        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+        Size { w: Sizing.Fit, h: Sizing.Fit },
+        Stack { row: true, pad: 0.0, gap: 0.0 },
+        Float { dx: 0.0, dy: 0.0 }, Raise { z: 1 }, Passthrough
+      }
+      connect (over)-[Over]->(blob)
+      let list = spawn {
+        Box { x: 0.0, y: 0.0, w: 0.0, h: 200.0 },
+        Size { w: Sizing.Fit, h: Sizing.Fixed },
+        Stack { row: true, pad: 0.0, gap: 2.0 },
+        Clip { x: false, y: true }, Scroll { x: 0.0, y: 0.0 }
+      }
+      connect (list)-[Inside]->(over)
+      // FloatingContainer2: one that floats over it, as high as it is,
+      // with a box 300 wide in it that says so.
+      let second = spawn {
+        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+        Size { w: Sizing.Fit, h: Sizing.Grow },
+        Stack { row: true, pad: 0.0, gap: 0.0 },
+        Float { dx: 0.0, dy: 0.0 }, Raise { z: 1 }, Passthrough
+      }
+      connect (second)-[Over]->(list)
+      let inner = spawn {
+        Box { x: 0.0, y: 0.0, w: 300.0, h: 0.0 },
+        Size { w: Sizing.Fixed, h: Sizing.Grow },
+        Stack { row: true, pad: 16.0, gap: 0.0 },
+        Fill { colour: 0xc88c50c8 }
+      }
+      connect (inner)-[Inside]->(second)
+      let says = spawn {
+        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+        Size { w: Sizing.Grow, h: Sizing.Fit },
+        Stack { row: true, pad: 0.0, gap: 0.0 },
+        Text { text: "I'm an inline floating container.", size: 24.0, colour: 0xffffff },
+        TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+                  breaks: Breaks.Words }
+      }
+      connect (says)-[Inside]->(inner)
+      // ScrollContainerInner: a column of a hundred texts.
+      let column = spawn {
+        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+        Size { w: Sizing.Fit, h: Sizing.Fit },
+        Stack { row: false, pad: 0.0, gap: 0.0 }, Fill { colour: 0xa0a0a0 }
+      }
+      connect (column)-[Inside]->(list)
+      for n in 0..100 {
+        let item = spawn {
+          Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+          Size { w: Sizing.Fit, h: Sizing.Fit },
+          Stack { row: true, pad: 0.0, gap: 0.0 },
+          Pad { left: 8.0, right: 8.0, top: 4.0, bottom: 4.0 },
+          Fill { colour: 0xb4b4b4 },
+          Text { text: "I'm a text field in a scroll container.", size: 24.0,
+                 colour: 0xffffff },
+          TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+                      breaks: Breaks.Words }
+        }
+        connect (item)-[Inside]->(column)
+      }
+    }
+  }
+
+  // RightPanel: a column of the header and the content.
+  let right = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 16.0 }
+  }
+  connect (right)-[Inside]->(outer)
+  // The header: three buttons at its right, blue, and orange under the
+  // pointer.
+  let header = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 8.0, gap: 8.0 },
+    Align { x: Place.End, y: Place.Start }, Fill { colour: 0xb4b4b4 }
+  }
+  connect (header)-[Inside]->(right)
+  for i in 1..4 {
+    let button = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Fit, h: Sizing.Fit },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Pad { left: 16.0, right: 16.0, top: 8.0, bottom: 8.0 },
+      Fill { colour: 0x6fada2 },
+      Text { text: "Header Item {i}", size: 16.0, colour: 0x000000 },
+      TextStyle { font: 0, spacing: 5.0, line: 0.0, align: Place.Start,
+                  breaks: Breaks.Words },
+      HeaderButton
+    }
+    connect (button)-[Inside]->(header)
+  }
+
+  // MainContent: a column that shows as much of what is in it as there
+  // is room for, and scrolls.
+  let content = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 16.0, gap: 16.0 }, Fill { colour: 0xc8c8ff },
+    Clip { x: false, y: true }, Scroll { x: 0.0, y: 0.0 }, Main
+  }
+  connect (content)-[Inside]->(right)
+  // FloatingContainer: half as wide, 300 high, its top's middle at the
+  // middle of the content's top; it stays there when that scrolls.
+  // (The pointer goes through it, to what is under it.)
+  let floating = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 300.0 },
+    Size { w: Sizing.Percent, h: Sizing.Fixed }, Share { w: 0.5, h: 0.0 },
+    Stack { row: true, pad: 16.0, gap: 0.0 }, Fill { colour: 0xc88c50c8 },
+    Border { left: 2.0, right: 2.0, top: 2.0, bottom: 2.0, between: 0.0,
+             colour: 0x505050 },
+    Float { dx: 0.0, dy: 0.0 },
+    Attach { own: Point.TopMiddle, under: Point.TopMiddle }, Raise { z: 1 },
+    Passthrough
+  }
+  connect (floating)-[Over]->(content)
+  let inline = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "I'm an inline floating container.", size: 24.0, colour: 0xffffff },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }, Passthrough
+  }
+  connect (inline)-[Inside]->(floating)
+  let lorem = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (lorem)-[Inside]->(content)
+  // Photos2: three pictures; what is under it shows through it while the
+  // pointer is on it.
+  let photos = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: true, pad: 16.0, gap: 16.0 }, Fill { colour: 0xb4b4dc },
+    Photos
+  }
+  connect (photos)-[Inside]->(content)
+  for i in 0..3 {
+    let photo = spawn {
+      Box { x: 0.0, y: 0.0, w: 120.0, h: 120.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Fill { colour: 0xd0b090 }, Picture { image: 0, tint: 0xffffff }
+    }
+    connect (photo)-[Inside]->(photos)
+  }
+  // A text whose lines are 60 apart, each in the middle.
+  let faucibus = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Faucibus purus in massa tempor nec. Nec ullamcorper sit amet risus nullam eget felis eget nunc. Diam vulputate ut pharetra sit amet aliquam id diam. Lacus suspendisse faucibus interdum posuere lorem. A diam sollicitudin tempor id. Amet massa vitae tortor condimentum lacinia. Aliquet nibh praesent tristique magna.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 60.0, align: Place.Middle,
+              breaks: Breaks.Words }
+  }
+  connect (faucibus)-[Inside]->(content)
+  let suspendisse = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Suspendisse in est ante in nibh. Amet venenatis urna cursus eget nunc scelerisque viverra. Elementum sagittis vitae et leo duis ut diam quam nulla. Enim nulla aliquet porttitor lacus. Pellentesque habitant morbi tristique senectus et. Facilisi nullam vehicula ipsum a arcu cursus vitae.\nSem fringilla ut morbi tincidunt. Euismod quis viverra nibh cras pulvinar mattis nunc sed. Velit sed ullamcorper morbi tincidunt ornare massa. Varius quam quisque id diam vel quam. Nulla pellentesque dignissim enim sit amet venenatis. Enim lobortis scelerisque fermentum dui faucibus in. Pretium viverra suspendisse potenti nullam ac tortor vitae. Lectus vestibulum mattis ullamcorper velit sed. Eget mauris pharetra et ultrices neque ornare aenean euismod elementum. Habitant morbi tristique senectus et. Integer vitae justo eget magna fermentum iaculis eu. Semper quis lectus nulla at volutpat diam. Enim praesent elementum facilisis leo. Massa vitae tortor condimentum lacinia quis vel.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (suspendisse)-[Inside]->(content)
+  // Photos: a picture half as wide as high, one with a text under it, and
+  // one twice as wide as high, in the middle.
+  let row = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 16.0, gap: 16.0 },
+    Align { x: Place.Middle, y: Place.Middle }, Fill { colour: 0xb4b4dc }
+  }
+  connect (row)-[Inside]->(content)
+  let tall = spawn {
+    Box { x: 0.0, y: 0.0, w: 120.0, h: 0.0 }, Size { w: Sizing.Fixed, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Aspect { ratio: 0.5 },
+    Fill { colour: 0xd0b090 }, Picture { image: 0, tint: 0xffffff }
+  }
+  connect (tall)-[Inside]->(row)
+  let card = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: false, pad: 8.0, gap: 0.0 },
+    Align { x: Place.Middle, y: Place.Start }, Fill { colour: 0xaaaadc }
+  }
+  connect (card)-[Inside]->(row)
+  let small = spawn {
+    Box { x: 0.0, y: 0.0, w: 60.0, h: 60.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Fill { colour: 0xd0b090 }, Picture { image: 0, tint: 0xffffff }
+  }
+  connect (small)-[Inside]->(card)
+  let caption = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Image caption below", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (caption)-[Inside]->(card)
+  let wide = spawn {
+    Box { x: 0.0, y: 0.0, w: 120.0, h: 0.0 }, Size { w: Sizing.Fixed, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Aspect { ratio: 2.0 },
+    Fill { colour: 0xd0b090 }, Picture { image: 0, tint: 0xffffff }
+  }
+  connect (wide)-[Inside]->(row)
+  // The last text, in parts.
+  let last = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: false, pad: 0.0, gap: 0.0 }
+  }
+  connect (last)-[Inside]->(content)
+  let part_0 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Amet cursus sit amet dictum sit amet justo donec. Et malesuada fames ac turpis egestas maecenas. A lacus vestibulum sed arcu non odio euismod lacinia. Gravida neque convallis a cras. Dui nunc mattis enim ut tellus elementum sagittis vitae et. Orci sagittis eu volutpat odio facilisis mauris. Neque gravida in fermentum et sollicitudin ac orci. Ultrices dui sapien eget mi proin sed libero. Euismod quis viverra nibh cras pulvinar mattis. Diam volutpat commodo sed egestas egestas. In fermentum posuere urna nec tincidunt praesent semper. Integer eget aliquet nibh praesent tristique magna.\nId cursus metus aliquam eleifend mi in. Sed pulvinar proin gravida hendrerit lectus a. Etiam tempor orci eu lobortis elementum nibh tellus. Nullam vehicula ipsum a arcu cursus vitae. Elit scelerisque mauris pellentesque pulvinar pellentesque habitant morbi tristique senectus. Condimentum lacinia quis vel eros donec ac odio. Mattis pellentesque id nibh tortor id aliquet lectus.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_0)-[Inside]->(last)
+  let part_1 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Turpis egestas integer eget aliquet nibh praesent tristique. Porttitor massa id neque aliquam vestibulum morbi. Mauris commodo quis imperdiet massa tincidunt nunc pulvinar sapien et. Nunc scelerisque viverra mauris in aliquam sem fringilla. Suspendisse ultrices gravida dictum fusce ut placerat orci nulla.\nLacus laoreet non curabitur gravida arcu ac tortor dignissim. Urna nec tincidunt praesent semper feugiat nibh sed pulvinar. Tristique senectus et netus et malesuada fames ac. Nunc aliquet bibendum enim facilisis gravida. Egestas maecenas pharetra convallis posuere morbi leo urna molestie. Sapien nec sagittis aliquam malesuada bibendum arcu vitae elementum curabitur. Ac turpis egestas maecenas pharetra convallis posuere morbi leo urna. Viverra vitae congue eu consequat. Aliquet enim tortor at auctor urna. Ornare massa eget egestas purus viverra accumsan in nisl nisi.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_1)-[Inside]->(last)
+  let part_2 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Elit pellentesque habitant morbi tristique senectus et netus et malesuada.\nSuspendisse ultrices gravida dictum fusce ut placerat orci nulla pellentesque. Lobortis feugiat vivamus at augue eget arcu. Vitae justo eget magna fermentum iaculis eu. Gravida rutrum quisque non tellus orci. Ipsum faucibus vitae aliquet nec. Nullam non nisi est sit amet. Nunc consequat interdum varius sit amet mattis vulputate enim. Sem fringilla ut morbi tincidunt augue interdum. Vitae purus faucibus ornare suspendisse. Massa tincidunt nunc pulvinar sapien et. Fringilla ut morbi tincidunt augue interdum velit euismod in. Donec massa sapien faucibus et. Est placerat in egestas erat imperdiet. Gravida rutrum quisque non tellus. Morbi non arcu risus quis varius quam quisque id diam. Habitant morbi tristique senectus et netus et malesuada fames ac. Eget lorem dolor sed viverra.\nOrnare massa eget egestas purus viverra. Varius vel pharetra vel turpis nunc eget lorem.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_2)-[Inside]->(last)
+  let part_3 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Consectetur purus ut faucibus pulvinar elementum. Placerat in egestas erat imperdiet sed euismod nisi. Interdum velit euismod in pellentesque massa placerat duis ultricies lacus. Aliquam nulla facilisi cras fermentum odio eu. Est pellentesque elit ullamcorper dignissim cras tincidunt. Nunc sed id semper risus in hendrerit gravida rutrum. A pellentesque sit amet porttitor eget dolor morbi. Pellentesque habitant morbi tristique senectus et netus et malesuada fames. Nisl nunc mi ipsum faucibus vitae aliquet nec ullamcorper. Sed id semper risus in hendrerit gravida. Tincidunt praesent semper feugiat nibh. Aliquet lectus proin nibh nisl condimentum id venenatis a. Enim sit amet venenatis urna cursus eget. In egestas erat imperdiet sed euismod nisi porta lorem mollis. Lacinia quis vel eros donec ac odio tempor orci. Donec pretium vulputate sapien nec sagittis aliquam malesuada bibendum arcu. Erat pellentesque adipiscing commodo elit at.\nEgestas sed sed risus pretium quam vulputate.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_3)-[Inside]->(last)
+  let part_4 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Vitae congue mauris rhoncus aenean vel elit scelerisque mauris pellentesque. Aliquam malesuada bibendum arcu vitae elementum. Congue mauris rhoncus aenean vel elit scelerisque mauris. Pellentesque dignissim enim sit amet venenatis urna cursus. Et malesuada fames ac turpis egestas sed tempus urna. Vel fringilla est ullamcorper eget nulla facilisi etiam dignissim. Nibh cras pulvinar mattis nunc sed blandit libero. Fringilla est ullamcorper eget nulla facilisi etiam dignissim. Aenean euismod elementum nisi quis eleifend quam adipiscing vitae proin. Mauris pharetra et ultrices neque ornare aenean euismod elementum. Ornare quam viverra orci sagittis eu. Odio ut sem nulla pharetra diam sit amet nisl suscipit. Ornare lectus sit amet est. Ullamcorper sit amet risus nullam eget. Tincidunt lobortis feugiat vivamus at augue eget arcu dictum.\nUrna nec tincidunt praesent semper feugiat nibh. Ut venenatis tellus in metus vulputate eu scelerisque felis. Cursus risus at ultrices mi tempus.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_4)-[Inside]->(last)
+  let part_5 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "In pellentesque massa placerat duis ultricies lacus sed turpis. Platea dictumst quisque sagittis purus. Cras adipiscing enim eu turpis egestas. Egestas sed tempus urna et pharetra pharetra. Netus et malesuada fames ac turpis egestas integer eget aliquet. Ac turpis egestas sed tempus. Sed lectus vestibulum mattis ullamcorper velit sed. Ante metus dictum at tempor commodo ullamcorper a. Augue neque gravida in fermentum et sollicitudin ac. Praesent semper feugiat nibh sed pulvinar proin gravida. Metus aliquam eleifend mi in nulla posuere sollicitudin aliquam ultrices. Neque gravida in fermentum et sollicitudin ac orci phasellus egestas.\nRidiculus mus mauris vitae ultricies. Morbi quis commodo odio aenean. Duis ultricies lacus sed turpis. Non pulvinar neque laoreet suspendisse interdum consectetur. Scelerisque eleifend donec pretium vulputate sapien nec sagittis aliquam. Volutpat est velit egestas dui id ornare arcu odio ut.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_5)-[Inside]->(last)
+  let part_6 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Viverra tellus in hac habitasse platea dictumst vestibulum rhoncus est. Vestibulum lectus mauris ultrices eros. Sed blandit libero volutpat sed cras ornare. Id leo in vitae turpis massa sed elementum tempus. Gravida dictum fusce ut placerat orci nulla pellentesque. Pretium quam vulputate dignissim suspendisse in. Nisl suscipit adipiscing bibendum est ultricies integer quis auctor. Risus viverra adipiscing at in tellus. Turpis nunc eget lorem dolor sed viverra ipsum. Senectus et netus et malesuada fames ac. Habitasse platea dictumst vestibulum rhoncus est. Nunc sed id semper risus in hendrerit gravida. Felis eget velit aliquet sagittis id. Eget felis eget nunc lobortis.\nMaecenas pharetra convallis posuere morbi leo. Maecenas volutpat blandit aliquam etiam. A condimentum vitae sapien pellentesque habitant morbi tristique senectus et. Pulvinar mattis nunc sed blandit libero volutpat sed. Feugiat in ante metus dictum at tempor commodo ullamcorper.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_6)-[Inside]->(last)
+  let part_7 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Vel pharetra vel turpis nunc eget lorem dolor. Est placerat in egestas erat imperdiet sed euismod. Quisque non tellus orci ac auctor augue mauris augue. Placerat vestibulum lectus mauris ultrices eros in cursus turpis. Enim nunc faucibus a pellentesque sit. Adipiscing vitae proin sagittis nisl. Iaculis at erat pellentesque adipiscing commodo elit at imperdiet. Aliquam sem fringilla ut morbi.\nArcu odio ut sem nulla pharetra diam sit amet nisl. Non diam phasellus vestibulum lorem sed. At erat pellentesque adipiscing commodo elit at. Lacus luctus accumsan tortor posuere ac ut consequat. Et malesuada fames ac turpis egestas integer. Tristique magna sit amet purus. A condimentum vitae sapien pellentesque habitant. Quis varius quam quisque id diam vel quam. Est ullamcorper eget nulla facilisi etiam dignissim diam quis. Augue interdum velit euismod in pellentesque massa. Elit scelerisque mauris pellentesque pulvinar pellentesque habitant. Vulputate eu scelerisque felis imperdiet.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_7)-[Inside]->(last)
+  let part_8 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Nibh tellus molestie nunc non blandit massa. Velit euismod in pellentesque massa placerat. Sed cras ornare arcu dui. Ut sem viverra aliquet eget sit. Eu lobortis elementum nibh tellus molestie nunc non. Blandit libero volutpat sed cras ornare arcu dui vivamus.\nSit amet aliquam id diam maecenas. Amet risus nullam eget felis eget nunc lobortis mattis aliquam. Magna sit amet purus gravida. Egestas purus viverra accumsan in nisl nisi. Leo duis ut diam quam. Ante metus dictum at tempor commodo ullamcorper. Ac turpis egestas integer eget. Fames ac turpis egestas integer eget aliquet nibh. Sem integer vitae justo eget magna fermentum. Semper auctor neque vitae tempus quam pellentesque nec nam aliquam. Vestibulum mattis ullamcorper velit sed. Consectetur adipiscing elit duis tristique sollicitudin nibh. Massa id neque aliquam vestibulum morbi blandit cursus risus.\nCursus sit amet dictum sit amet justo donec enim diam. Egestas erat imperdiet sed euismod.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_8)-[Inside]->(last)
+  let part_9 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Nullam vehicula ipsum a arcu cursus vitae congue mauris. Habitasse platea dictumst vestibulum rhoncus est pellentesque elit. Duis ultricies lacus sed turpis tincidunt id aliquet risus feugiat. Faucibus ornare suspendisse sed nisi lacus sed viverra. Pretium fusce id velit ut tortor pretium viverra. Fermentum odio eu feugiat pretium nibh ipsum consequat nisl vel. Senectus et netus et malesuada. Tellus pellentesque eu tincidunt tortor aliquam. Aenean sed adipiscing diam donec adipiscing tristique risus nec feugiat. Quis vel eros donec ac odio. Id interdum velit laoreet id donec ultrices tincidunt.\nMassa id neque aliquam vestibulum morbi blandit cursus risus at. Enim tortor at auctor urna nunc id cursus metus. Lorem ipsum dolor sit amet consectetur. At quis risus sed vulputate odio. Facilisis mauris sit amet massa vitae tortor condimentum lacinia quis. Et malesuada fames ac turpis egestas maecenas. Bibendum arcu vitae elementum curabitur vitae nunc sed velit dignissim.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_9)-[Inside]->(last)
+  let part_10 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Viverra orci sagittis eu volutpat odio facilisis mauris. Adipiscing bibendum est ultricies integer quis auctor elit sed. Neque viverra justo nec ultrices dui sapien. Elementum nibh tellus molestie nunc non blandit massa enim. Euismod elementum nisi quis eleifend quam adipiscing vitae proin sagittis. Faucibus ornare suspendisse sed nisi. Quis viverra nibh cras pulvinar mattis nunc sed blandit. Tristique senectus et netus et. Magnis dis parturient montes nascetur ridiculus mus.\nDolor magna eget est lorem ipsum dolor. Nibh sit amet commodo nulla. Donec pretium vulputate sapien nec sagittis aliquam malesuada. Cras adipiscing enim eu turpis egestas pretium. Cras ornare arcu dui vivamus arcu felis bibendum ut tristique. Mus mauris vitae ultricies leo integer. In nulla posuere sollicitudin aliquam ultrices sagittis orci. Quis hendrerit dolor magna eget. Nisl tincidunt eget nullam non. Vitae congue eu consequat ac felis donec et odio. Vivamus at augue eget arcu dictum varius duis at.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_10)-[Inside]->(last)
+  let part_11 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Ornare quam viverra orci sagittis.\nErat nam at lectus urna duis convallis. Massa placerat duis ultricies lacus sed turpis tincidunt id aliquet. Est ullamcorper eget nulla facilisi etiam dignissim diam. Arcu vitae elementum curabitur vitae nunc sed velit dignissim sodales. Tortor vitae purus faucibus ornare suspendisse sed nisi lacus. Neque viverra justo nec ultrices dui sapien eget mi proin. Viverra accumsan in nisl nisi scelerisque eu ultrices. Consequat interdum varius sit amet mattis. In aliquam sem fringilla ut morbi. Eget arcu dictum varius duis at. Nulla aliquet porttitor lacus luctus accumsan tortor posuere. Arcu bibendum at varius vel pharetra vel turpis. Hac habitasse platea dictumst quisque sagittis purus sit amet. Sapien eget mi proin sed libero enim sed. Quam elementum pulvinar etiam non quam lacus suspendisse faucibus interdum. Semper viverra nam libero justo. Fusce ut placerat orci nulla pellentesque dignissim enim sit amet.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_11)-[Inside]->(last)
+  let part_12 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Et malesuada fames ac turpis egestas maecenas pharetra convallis posuere.\nTurpis egestas sed tempus urna et pharetra pharetra massa. Gravida in fermentum et sollicitudin ac orci phasellus. Ornare suspendisse sed nisi lacus sed viverra tellus in. Fames ac turpis egestas maecenas pharetra convallis posuere. Mi proin sed libero enim sed faucibus turpis. Sit amet mauris commodo quis imperdiet massa tincidunt nunc. Ut etiam sit amet nisl purus in mollis nunc. Habitasse platea dictumst quisque sagittis purus sit amet volutpat consequat. Eget aliquet nibh praesent tristique magna. Sit amet est placerat in egestas erat. Commodo sed egestas egestas fringilla. Enim nulla aliquet porttitor lacus luctus accumsan tortor posuere ac. Et molestie ac feugiat sed lectus vestibulum mattis ullamcorper. Dignissim convallis aenean et tortor at risus viverra. Morbi blandit cursus risus at ultrices mi. Ac turpis egestas integer eget aliquet nibh praesent tristique magna.\nVolutpat sed cras ornare arcu dui.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_12)-[Inside]->(last)
+  let part_13 = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "Egestas erat imperdiet sed euismod nisi porta lorem mollis aliquam. Viverra justo nec ultrices dui sapien. Amet risus nullam eget felis eget nunc lobortis. Metus aliquam eleifend mi in. Ut eu sem integer vitae. Auctor elit sed vulputate mi sit amet. Nisl nisi scelerisque eu ultrices. Dictum fusce ut placerat orci nulla. Pellentesque habitant morbi tristique senectus et. Auctor elit sed vulputate mi sit. Tincidunt arcu non sodales neque. Mi in nulla posuere sollicitudin aliquam. Morbi non arcu risus quis varius quam quisque id diam. Cras adipiscing enim eu turpis egestas pretium aenean pharetra magna. At auctor urna nunc id cursus metus aliquam. Mauris a diam maecenas sed enim ut sem viverra. Nunc scelerisque viverra mauris in. In iaculis nunc sed augue lacus viverra vitae congue eu. Volutpat blandit aliquam etiam erat velit scelerisque in dictum non.", size: 24.0, colour: 0x000000 },
+    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+              breaks: Breaks.Words }
+  }
+  connect (part_13)-[Inside]->(last)
+
+  // ScrollBar: 12 wide at the content's right, as much of its height as
+  // it shows of what is in it, and as far down as that is scrolled.
+  let bar = spawn {
+    Box { x: 0.0, y: 0.0, w: 12.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Fill { colour: 0x967878a0 },
+    Round { top_left: 6.0, top_right: 6.0, bottom_left: 6.0,
+            bottom_right: 6.0 },
+    Float { dx: 0.0, dy: 0.0 },
+    Attach { own: Point.TopRight, under: Point.TopRight }, Raise { z: 1 },
+    Bar
+  }
+  connect (bar)-[Over]->(content)
+}
+
+system interact() {
+  // The window's box is as big as the window.
+  for b: mut Box with Root
+      where b.w != Window.width as f32 || b.h != Window.height as f32 {
+    b.w = Window.width as f32
+    b.h = Window.height as f32
+  }
+  // A font and the picture from files, where they are there: read when
+  // the window is open.
+  if Window.frame == 1 {
+    Face = font("examples/clay/Roboto-Regular.ttf", 24)
+    if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 24) }
+    if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24) }
+    if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 24) }
+    Image = picture_load("examples/clay/profile-picture.png")
+  }
+  for st: mut TextStyle where st.font != Face { st.font = Face }
+  for p: mut Picture where p.image != Image { p.image = Image }
+
+  // The buttons are orange under the pointer; the first row of pictures
+  // lets what is under it show.
+  for e, f: mut Fill with HeaderButton {
+    let colour = if e.has(Hovered) { 0xe18a32 } else { 0x6fada2 }
+    if f.colour != colour { f.colour = colour }
+  }
+  for e, f: mut Fill with Photos {
+    let colour = if e.has(Hovered) { 0x78b4b4dc } else { 0xb4b4dc }
+    if f.colour != colour { f.colour = colour }
+  }
+
+  // The bar: the pointer that goes down on it takes it along, and the
+  // content as many times as far as it is higher than what shows of it.
+  OnBar = 0
+  for e with Bar, Hovered { OnBar += 1 }
+  if !Pointer.down { Grab.on = false }
+  View.h = 0.0
+  View.room = 0.0
+  View.all = 0.0
+  View.y = 0.0
+  for s: Scroll, b: Box, rh: RoomH, all: Content with Main {
+    View.h max= b.h
+    View.room max= rh.room
+    View.all max= all.h
+    View.y min= s.y
+  }
+  if Pointer.down && !Grab.on && OnBar > 0 {
+    Grab.on = true
+    Grab.from = Pointer.y
+    Grab.was = View.y
+  } else if Grab.on && View.all > 0.0 && View.room > 0.0 {
+    View.y = Grab.was + (Grab.from - Pointer.y) * View.all / View.room
+    for s: mut Scroll with Main where s.y != View.y { s.y = View.y }
+  }
+  for e, f: mut Float, b: mut Box, c: mut Fill with Bar {
+    let part = if View.all > View.room { View.room / View.all } else { 1.0 }
+    let h = part * View.h
+    let dy = if View.all > 0.0 { 0.0 - View.y / View.all * View.h } else { 0.0 }
+    if b.h != h { b.h = h }
+    if f.dy != dy { f.dy = dy }
+    let colour = if e.has(Hovered) { 0x9664648c } else { 0x967878a0 }
+    if c.colour != colour { c.colour = colour }
+  }
+}
+
+schedule frame() {
+  begin()
+  interact()
+  ui()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}

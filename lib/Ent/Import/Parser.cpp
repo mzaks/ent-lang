@@ -5254,8 +5254,18 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
     predicate = arith::CmpIPredicate::sge;
     break;
   }
-  if (isa<EntityType>(type))
-    return error(expr.loc, "entities cannot be compared yet");
+  // Two entities: the same one or not.
+  if (isa<EntityType>(a->getType())) {
+    if (expr.op != Token::Equal && expr.op != Token::NotEqual)
+      return error(expr.loc, "entities are compared with '==' and '!='");
+    mlir::Value same =
+        SameOp::create(builder, at, builder.getI1Type(), *a, *b).getResult();
+    if (expr.op == Token::Equal)
+      return same;
+    return arith::XOrIOp::create(builder, at, same,
+                                 integer(at, builder.getI1Type(), 1))
+        .getResult();
+  }
   return arith::CmpIOp::create(builder, at, predicate, *a, *b).getResult();
 }
 

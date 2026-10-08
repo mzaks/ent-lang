@@ -38,11 +38,16 @@ void ent_window_shift(float dx, float dy) {
 }
 
 void ent_window_clip(float x, float y, float w, float h) {
-  // (More than any window: no clipping.)
-  if (w > 1e8f) {
+  // (More than any window: no clipping. Along one axis only: all there
+  // is of the other.)
+  if (w > 1e8f && h > 1e8f) {
     ent_window_unclip();
     return;
   }
+  if (w > 1e8f)
+    x = 0, w = ent_window_window_width();
+  if (h > 1e8f)
+    y = 0, h = ent_window_window_height();
   if (x == clip_at[0] && y == clip_at[1] && w == clip_at[2] && h == clip_at[3])
     return;
   clip_at[0] = x, clip_at[1] = y, clip_at[2] = w, clip_at[3] = h;
@@ -79,7 +84,7 @@ void ent_window_label(const ent_text126 *text, float x, float y, float size,
   printf("label %g %g \"%s\"\n", x, y, said);
 }
 
-void ent_window_write(const ent_text126 *text, float x, float y, float width,
+void ent_window_write(const ent_text1022 *text, float x, float y, float width,
                       int32_t font, float size, float spacing, float line,
                       int32_t breaks, int32_t along, int32_t color) {
   TEXT(said, text);
@@ -93,12 +98,12 @@ void ent_window_picture(int32_t image, float x, float y, float w, float h,
 }
 
 // A letter is half as wide as the text is high.
-float ent_window_text_extent(const ent_text126 *text, int32_t font, float size,
+float ent_window_text_extent(const ent_text1022 *text, int32_t font, float size,
                              float spacing, int32_t breaks) {
   return (float)text->length * size * 0.5f;
 }
 
-float ent_window_text_least(const ent_text126 *text, int32_t font, float size,
+float ent_window_text_least(const ent_text1022 *text, int32_t font, float size,
                             float spacing, int32_t breaks) {
   // The longest word.
   int longest = 0, run = 0;
@@ -110,7 +115,7 @@ float ent_window_text_least(const ent_text126 *text, int32_t font, float size,
   return (float)longest * size * 0.5f;
 }
 
-int32_t ent_window_text_lines(const ent_text126 *text, float width,
+int32_t ent_window_text_lines(const ent_text1022 *text, float width,
                               int32_t font, float size, float spacing,
                               int32_t breaks) {
   // Word after word, in the next line where one would reach past.

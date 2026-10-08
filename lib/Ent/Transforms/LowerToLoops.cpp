@@ -11570,6 +11570,22 @@ struct EntLowerToLoops
       shareParts(rewriter, func);
     }
 
+    // Two ids of one entity: the same number.
+    SmallVector<SameOp> sames;
+    module.walk([&](SameOp same) { sames.push_back(same); });
+    for (SameOp same : sames) {
+      rewriter.setInsertionPoint(same);
+      Type idType = rewriter.getIntegerType(layout->entities.idBits);
+      auto stored = [&](Value id) {
+        return UnrealizedConversionCastOp::create(rewriter, same.getLoc(),
+                                                  idType, id)
+            .getResult(0);
+      };
+      rewriter.replaceOpWithNewOp<arith::CmpIOp>(
+          same, arith::CmpIPredicate::eq, stored(same.getLhs()),
+          stored(same.getRhs()));
+    }
+
     SmallVector<InvokeOp> invokes;
     module.walk([&](InvokeOp invoke) { invokes.push_back(invoke); });
     for (InvokeOp invoke : invokes) {

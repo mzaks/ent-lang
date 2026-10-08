@@ -723,6 +723,19 @@ def Ent_BoundOp : Ent_Op<"bound"> {
   let hasVerifier = 1;
 }
 
+def Ent_SameOp : Ent_Op<"same", [Pure]> {
+  let summary = "Whether two ids are of one entity";
+  let description = [{
+    ```mlir
+    %is = ent.same %a, %b
+    ```
+    An entity's id is not a number to compute with; this compares two.
+  }];
+  let arguments = (ins Ent_EntityType:$lhs, Ent_EntityType:$rhs);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict";
+}
+
 def Ent_OtherOp : Ent_Op<"other"> {
   let summary = "The entity a ref to another entity's component leads to";
   let description = [{

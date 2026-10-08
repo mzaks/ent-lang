@@ -223,6 +223,9 @@ for with Enemy { Count += 1 }     // nor the entity
   binds: `(b: Box)-[Inside]->(parent)`, `(parent, outer: Box)`. The name
   is the entity's id, to send a value to (`Box(parent).w += 1.0`) or to
   connect; by itself it takes the relation to say what that end has.
+- Two entities are compared with `==` and `!=`, whatever names them: the
+  one a `for` visits, one at the other end of an arrow, one a field or a
+  unique holds (`if into != ez.up { ... }`).
 - `optional` before a pattern: the `for` also visits the entities without
   that parent, ancestor or sibling, and what the pattern binds is read
   with `if let v = name.field { ... } else { ... }`. See Trees below.

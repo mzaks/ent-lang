@@ -257,7 +257,14 @@ come with the compiler, in `devices/`, and two more that need
   the program's for a box the program draws itself (`Custom`), lists
   the boxes in a panel (`Inspector`), and offers all the steps as one
   schedule, `ui`:
-  `tools/ent run -I examples examples/layout_demo.ent`; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are
+  `tools/ent run -I examples examples/layout_demo.ent`;
+  `examples/clay` has three of Clay's own examples written with it: its
+  video demo (documents picked from a list, a menu that drops down), its
+  transitions (boxes that are shuffled, removed, added and given other
+  colours, each on its way to where it now is) and its side bar with a
+  container that scrolls (pictures, boxes that float, a list of a hundred
+  texts, a bar that is dragged):
+  `tools/ent run -I examples examples/clay/video_demo.ent`; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are
   entities, ways, modes and the game's state are enums, and the only C is
   that of the devices and the math module. A module's `name.link` names the
   libraries it needs (`-lraylib`).
@@ -500,6 +507,8 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   the query started (the query's own adds and removes land at its end, as
   far as `has` can tell, however the component is stored); a constant where
   the archetype always or never holds it.
+- `%b = ent.same %a, %c`: whether two entities are the same one (`==`,
+  `!=`).
 - `ent.get` / `ent.set`: field access through a ref; `set` needs `mut`.
 - `ent.schedule @frame(%params) { ent.run @s(...) }`: program order is the
   semantic order. `ent.run @s() if { ...; ent.yield %c : i1 }` runs the

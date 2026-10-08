@@ -1,0 +1,37 @@
+// Entities compared with `==` and `!=` (same.test).
+import console
+
+component Name { name: text[14] }
+component Likes { whom: entity }
+relation (Name)-[Inside]->(Name) tree capacity 16
+unique Chosen { one: entity }
+default_capacity 16
+
+fn word(same: bool) -> text[6] { if same { "is" } else { "is not" } }
+
+world {
+  let a = spawn { Name { name: "a" } }
+  let b = spawn { Name { name: "b" }, Likes { whom: a } }
+  let c = spawn { Name { name: "c" }, Likes { whom: b } }
+  let d = spawn { Name { name: "d" }, Likes { whom: b } }
+  connect (b)-[Inside]->(a)
+  connect (c)-[Inside]->(a)
+  connect (d)-[Inside]->(c)
+  Chosen.one = b
+}
+
+system show() {
+  // An entity and one a unique holds.
+  for e, n: Name {
+    let same = e == Chosen.one
+    put("{n.name} {word(same)} the chosen one")
+  }
+  // The entity a field holds and the one at the other end of an arrow.
+  for (n: Name, l: Likes)-[Inside]->(up) {
+    if l.whom == up { put("{n.name} likes the one it is in") }
+    if l.whom != up { put("{n.name} likes another") }
+  }
+}
+
+schedule once() { show() }
+main { once() }

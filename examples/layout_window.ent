@@ -39,7 +39,7 @@ component Picture { image: i32, tint: i32 }
 // least as big as the text and its padding (where it is not `Fixed`).
 // The text goes on in the next line where its box ends, so the box can
 // be as narrow as the longest word, and is as high as the lines come to.
-component Text { text: text[126], size: f32, colour: i32 }
+component Text { text: text[1022], size: f32, colour: i32 }
 // More about a text: its font (0: the window's own; others from the
 // window's `font`), more room between the letters, how far one line is
 // below the one before (0: as far as the text is high), where each line
@@ -69,6 +69,8 @@ tag Drag
 // out for how big it is right then), its `Fill` and `Overlay` colours,
 // how round its corners are, and its border's colour and widths. Each
 // sets out when it is to be another, and takes the seconds from then.
+// One that is put into another box goes there from where it was in the
+// window.
 // While it is on its way to another place, the pointer does not find it,
 // nor what is inside it, unless it says `touch`.
 component Transition {
@@ -116,7 +118,8 @@ unique Picked {
 // What this keeps for itself. How a `Drag` box is moving; what is laid on
 // a box right now, and how far from its place a box in a `Transition` is
 // drawn right now (its place: where it is in the box it is in, `rx` and
-// `ry`), how big and in what colour, where it started from in each of
+// `ry`; and where in the window, `ax` and `ay`, and which box that is,
+// `up`, for one that is put into another), how big and in what colour, where it started from in each of
 // those and
 // how far it has got (`tp` in its place, `tw` and `th` in its width and
 // height, `tc` in its colours: 0 to 1, and 2 for a width or height from
@@ -143,8 +146,9 @@ component ShownBorder {
 // find it.
 component Look { dx: f32, dy: f32, colour: i32, part: f32, away: bool }
 component Eased {
-  x: f32, y: f32, rx: f32, ry: f32, tp: f32, w: f32, tw: f32, h: f32,
-  th: f32, colour: i32, tint: i32, part: f32, tc: f32
+  x: f32, y: f32, rx: f32, ry: f32, ax: f32, ay: f32, up: entity,
+  known: bool, tp: f32, w: f32, tw: f32, h: f32, th: f32, colour: i32,
+  tint: i32, part: f32, tc: f32
 }
 component Dead { at: i32 }
 // (A box that is on its way out.)
@@ -364,22 +368,36 @@ system animate() {
   // `Gone` sets out for where it leaves to.
   // (Its place is where it is in the box it is in, or over: a box that
   // only goes with that one has not moved.)
-  for (s: Shown, ez: mut Eased, b: Box), optional (b)-[Inside]->(ob: Box)
+  // (In another box than it was in: from where it was in the window.)
+  for (s: Shown, ez: mut Eased, b: Box),
+      optional (b)-[Inside]->(into, ob: Box)
       without Float top down Inside
       on changed b.x, changed b.y, changed ob.x, changed ob.y {
     var x = b.x
     var y = b.y
+    var elsewhere = false
     if let ox = ob.x, let oy = ob.y {
       x -= ox
       y -= oy
+      elsewhere = ez.known && into != ez.up
+      ez.up = into
+      ez.known = true
     }
-    if x != ez.rx || y != ez.ry {
+    if elsewhere {
+      ez.x = s.dx + ez.ax - b.x
+      ez.y = s.dy + ez.ay - b.y
+      ez.rx = x
+      ez.ry = y
+      ez.tp = 0.0
+    } else if x != ez.rx || y != ez.ry {
       ez.x = s.dx + ez.rx - x
       ez.y = s.dy + ez.ry - y
       ez.rx = x
       ez.ry = y
       ez.tp = 0.0
     }
+    ez.ax = b.x
+    ez.ay = b.y
   }
   for (s: Shown, ez: mut Eased, b: Box)-[Over]->(ob: Box)
       top down Over
@@ -497,9 +515,9 @@ system animate() {
   // in a box that is new itself (which has no `Look` yet), unless the
   // `Enter` says always.
   for (e, b: Box, tr: Transition, optional f: Fill, optional en: Enter),
-      optional (e)-[Inside]->(ub: Box),
+      optional (e)-[Inside]->(into, ub: Box),
       optional (e)-[Inside]->(ul: Look),
-      optional (e)-[Over]->(ob: Box),
+      optional (e)-[Over]->(under, ob: Box),
       optional (e)-[Over]->(ol: Look)
       without Shown on added Transition {
     var x = 0.0
@@ -514,13 +532,20 @@ system animate() {
     // (Where it is in the box it is in, or over.)
     var rx = b.x
     var ry = b.y
+    // (And which box that is.)
+    var up = e
+    var known = false
     if let ux = ub.x, let uy = ub.y {
+      up = into
+      known = true
       rx -= ux
       ry -= uy
       old = false
       if let ud = ul.dx { old = true }
     }
     if let ox = ob.x, let oy = ob.y {
+      up = under
+      known = true
       rx -= ox
       ry -= oy
       old = false
@@ -539,8 +564,9 @@ system animate() {
     }
     e.add(Shown { w: w, h: h, colour: colour, dx: x, dy: y, away: false })
     let ts = if t < 1.0 { 0.0 } else { 2.0 }
-    e.add(Eased { x: x, y: y, rx: rx, ry: ry, tp: t, w: w, tw: ts, h: h,
-                  th: ts, colour: colour, tint: veil,
+    e.add(Eased { x: x, y: y, rx: rx, ry: ry, ax: b.x, ay: b.y, up: up,
+                  known: known, tp: t, w: w, tw: ts, h: h, th: ts,
+                  colour: colour, tint: veil,
                   part: if veil != 0 { 1.0 } else { 0.0 }, tc: t })
     e.add(Inner { w: w, h: h })
     if veil != 0 && !e.has(Tint) { e.add(Tint { colour: veil, part: 1.0 }) }

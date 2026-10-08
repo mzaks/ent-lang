@@ -164,7 +164,8 @@ float ent_window_text_width(const ent_text126 *text, float size) {
 // how many there are.
 static int ent_window_wrap(const char *text, float size, float width,
                            int draw, float x, float y, Color color) {
-  char line[128], trial[128];
+  // (A line is as long as a text can be, where nothing breaks it.)
+  char line[1024], trial[1024];
   int length = 0, lines = 0;
   float step = size + size / 4;
   const char *at = text;
@@ -315,7 +316,8 @@ typedef void ent_window_each_line(const char *line, float wide, int index,
 static int ent_window_set(const char *text, float width, int32_t font,
                           float size, float spacing, int breaks,
                           float *widest, ent_window_each_line *each, void *with) {
-  char line[128], trial[128];
+  // (A line is as long as a text can be, where nothing breaks it.)
+  char line[1024], trial[1024];
   int length = 0, lines = 0;
   float most = 0;
   const char *at = text;
@@ -332,7 +334,7 @@ static int ent_window_set(const char *text, float width, int32_t font,
   } while (0)
   if (breaks == 2) {
     // All of it, a line break a space.
-    for (; *at && length < 126; at++)
+    for (; *at && length < 1022; at++)
       line[length++] = *at == '\n' ? ' ' : *at;
     ENT_WINDOW_END_LINE();
   } else if (breaks == 1) {
@@ -341,7 +343,7 @@ static int ent_window_set(const char *text, float width, int32_t font,
         ENT_WINDOW_END_LINE();
         if (!*at)
           break;
-      } else if (length < 126) {
+      } else if (length < 1022) {
         line[length++] = *at;
       }
     }
@@ -400,7 +402,7 @@ static void ent_window_write_line(const char *line, float wide, int index,
              w->color);
 }
 
-void ent_window_write(const ent_text126 *text, float x, float y, float width,
+void ent_window_write(const ent_text1022 *text, float x, float y, float width,
                       int32_t font, float size, float spacing, float line,
                       int32_t breaks, int32_t align, int32_t color) {
   ENT_WINDOW_TEXT(all, text);
@@ -411,14 +413,14 @@ void ent_window_write(const ent_text126 *text, float x, float y, float width,
                  ent_window_write_line, &w);
 }
 
-int32_t ent_window_text_lines(const ent_text126 *text, float width,
+int32_t ent_window_text_lines(const ent_text1022 *text, float width,
                               int32_t font, float size, float spacing,
                               int32_t breaks) {
   ENT_WINDOW_TEXT(all, text);
   return ent_window_set(all, width, font, size, spacing, breaks, 0, 0, 0);
 }
 
-float ent_window_text_extent(const ent_text126 *text, int32_t font,
+float ent_window_text_extent(const ent_text1022 *text, int32_t font,
                              float size, float spacing, int32_t breaks) {
   ENT_WINDOW_TEXT(all, text);
   float widest = 0;
@@ -427,7 +429,7 @@ float ent_window_text_extent(const ent_text126 *text, int32_t font,
   return widest;
 }
 
-float ent_window_text_least(const ent_text126 *text, int32_t font, float size,
+float ent_window_text_least(const ent_text1022 *text, int32_t font, float size,
                             float spacing, int32_t breaks) {
   ENT_WINDOW_TEXT(all, text);
   float widest = 0;

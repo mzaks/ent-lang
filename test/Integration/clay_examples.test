@@ -1,0 +1,58 @@
+// examples/clay: three of Clay's examples (its video demo, its
+// transitions and its side bar with a container that scrolls) written
+// with the layout library, run without a window for three frames: what
+// they draw first.
+// RUN: sh %S/Inputs/headless.sh %t.dir
+// RUN: sed 's/until Window.closed/until Window.frame > 2/' \
+// RUN:     %S/../../examples/clay/video_demo.ent > %t.video.ent
+// RUN: %ent run -I %t.dir -I %S/../../examples %t.video.ent 2>/dev/null \
+// RUN:   | FileCheck %s --check-prefix=VIDEO
+// RUN: sed 's/until Window.closed/until Window.frame > 2/' \
+// RUN:     %S/../../examples/clay/transitions.ent > %t.transitions.ent
+// RUN: %ent run -I %t.dir -I %S/../../examples %t.transitions.ent \
+// RUN:     2>/dev/null | FileCheck %s --check-prefix=MOVES
+// RUN: sed 's/until Window.closed/until Window.frame > 2/' \
+// RUN:     %S/../../examples/clay/sidebar.ent > %t.sidebar.ent
+// RUN: %ent run -I %t.dir -I %S/../../examples %t.sidebar.ent \
+// RUN:     2>/dev/null | FileCheck %s --check-prefix=SIDE
+
+// The bar with its buttons, the list of documents, and the first of them.
+// VIDEO:      rect 0 0 1024 768 002b2933
+// VIDEO-NEXT: rounded 16 16 992 60 by 8 8 8 8 005a5a5a
+// VIDEO-NEXT: rounded 32 30 64 32 by 5 5 5 5 008c8c8c
+// VIDEO-NEXT: write 48 38 in 32 "File" 00ffffff
+// VIDEO:      write 920 38 in 56 "Support" 00ffffff
+// VIDEO:      write 48 124 in 186 "Squirrels" 00ffffff
+// VIDEO:      write 48 384 in 186 "Article 5" 00ffffff
+// VIDEO:      write 298 108 in 694 "Squirrels" 00ffffff
+// VIDEO-NEXT: write 298 148 in 694 "The Secret Life of Squirrels: Nature's Clever Acrobats" 00ffffff
+
+// Four buttons, and thirty boxes, six in a row.
+// MOVES:      rect 0 0 1024 768 00ffffff
+// MOVES-NEXT: rounded 16 16 992 60 by 12 12 12 12 00ae8fcc
+// MOVES:      write 48 36 in 90 "Randomise" 00ffffff
+// MOVES:      write 362 36 in 70 "Add Box" 00ffffff
+// MOVES:      write 16 133.6 in 155.333 "00" 009a7bb8
+// MOVES:      write 183.333 133.6 in 155.333 "01" 009a7bb8
+// MOVES:      "29"
+
+// The side bar with its picture (a colour, without the file) and four
+// boxes, the header's buttons at its right, and the content, which shows
+// what is in it down to where it ends; over the side bar's last box the
+// list, 200 high of its hundred texts, and the two boxes that float.
+// SIDE:      rect 0 0 1024 768 00c8c8c8
+// SIDE-NEXT: rect 16 16 300 736 009696ff
+// SIDE:      picture 0 40 {{.*}} 60 60
+// SIDE:      rect 864 24 136 32 006fada2
+// SIDE-NEXT: write 880 32 in 104 "Header Item 3" 00000000
+// SIDE-NEXT: rect 332 80 676 672 00c8c8ff
+// SIDE-NEXT: clip 0 80 1024 672
+// SIDE-NEXT: write 348 96 in 644 "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt." 00000000
+// SIDE:      unclip
+// SIDE:      clip 0 454 1024 200
+// SIDE-NEXT: rect 32 454 484 3200 00a0a0a0
+// SIDE:      unclip
+// SIDE-NEXT: rect 501 80 338 300 c88c50c8
+// SIDE-NEXT: write 517 96 in 306 "I'm an inline floating container." 00ffffff
+// SIDE-NEXT: edges 501 80 338 300 of 2 2 2 2 00505050
+// SIDE-NEXT: rect 32 454 300 200 c88c50c8

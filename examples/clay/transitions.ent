@@ -1,0 +1,273 @@
+// Clay's transitions example (examples/raylib-transitions in
+// github.com/nicbarker/clay), with examples/layout.ent: thirty boxes in
+// five rows of six, and four buttons. "Randomise" puts the boxes in
+// another order, "Blue" and "Pink" give them other colours, "Add Box"
+// adds one (while there are fewer than thirty), and a box that is
+// clicked goes. Every box gets to where and what it is to be in half a
+// second; a new one comes up from 20 below, out of white, and one that
+// goes leaves the same way.
+//
+//   tools/ent run -I examples examples/clay/transitions.ent
+//
+// In Clay the boxes are an array that the layout is made from anew every
+// frame. Here each box is an entity that knows its place in the order
+// (`Cell.at`); a system puts it into the row that place is in.
+import window
+import layout
+import layout_window
+
+tag Root
+// A button: what it does.
+component Button { does: i32 }
+// A box: its number, which it shows, and its place in the order. And the
+// row it has been put in.
+component Cell { id: i32, at: i32 }
+component Placed { row: i32 }
+// The five rows.
+unique Rows { r0: entity, r1: entity, r2: entity, r3: entity, r4: entity }
+// How many boxes there are, the number the next one gets, the place of
+// the one that was clicked, what a button was pressed for, and something
+// to shuffle by.
+unique Count: i32
+unique Next: i32
+unique Out: i32
+unique Pressed0: i32
+unique Seed: i32
+unique Face: i32
+// The colours the boxes are in: pink, or blue.
+unique Blue: bool
+default_capacity 128
+
+// A colour from its red, green and blue, none less than nought.
+fn rgb(r: i32, g: i32, b: i32) -> i32 {
+  max(r, 0) * 65536 + max(g, 0) * 256 + max(b, 0)
+}
+fn colour_of(id: i32, blue: bool) -> i32 {
+  if blue { rgb(255 - id * 4, 255 - id * 2, 255 - id) }
+  else { rgb(255 - id, 255 - id * 4, 255 - id * 2) }
+}
+// Nine tenths of it, for a box's border.
+fn darker(id: i32, blue: bool) -> i32 {
+  if blue { rgb((255 - id * 4) * 9 / 10, (255 - id * 2) * 9 / 10,
+                (255 - id) * 9 / 10) }
+  else { rgb((255 - id) * 9 / 10, (255 - id * 4) * 9 / 10,
+             (255 - id * 2) * 9 / 10) }
+}
+// Clay's way of easing: fast at first, slower and slower.
+fn cubic_out(t: f32) -> f32 { 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t) }
+// Another order: every place times a number that shares no factor with
+// how many there are, which is an order again.
+fn shared(a: i32, b: i32) -> i32 { if b == 0 { a } else { shared(b, a % b) } }
+fn stride(count: i32, seed: i32) -> i32 {
+  var by = 7 + seed % 5 * 2
+  while shared(by, count) != 1 { by += 2 }
+  by
+}
+
+world {
+  Window.width = 1024
+  Window.height = 768
+  Window.title = "ent-lang: Clay's transitions"
+  Window.background = 0xffffff
+  Window.fps = 60
+  Window.resizable = true
+  Count = 30
+  Next = 30
+
+  // OuterContainer: white, a column with 16 around and 12 between.
+  let outer = spawn {
+    Box { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: false, pad: 16.0, gap: 12.0 }, Fill { colour: 0xffffff },
+    Root
+  }
+  // The bar of buttons, 60 high.
+  let bar = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 60.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 16.0 },
+    Pad { left: 16.0, right: 0.0, top: 0.0, bottom: 0.0 },
+    Align { x: Place.Start, y: Place.Middle }, Fill { colour: 0xae8fcc },
+    Round { top_left: 12.0, top_right: 12.0, bottom_left: 12.0,
+            bottom_right: 12.0 }
+  }
+  connect (bar)-[Inside]->(outer)
+  for i in 0..4 {
+    let button = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Fit, h: Sizing.Fit },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Pad { left: 16.0, right: 16.0, top: 8.0, bottom: 8.0 },
+      Fill { colour: 0xae8fcc },
+      Round { top_left: 6.0, top_right: 6.0, bottom_left: 6.0,
+              bottom_right: 6.0 },
+      Border { left: 2.0, right: 2.0, top: 2.0, bottom: 2.0, between: 0.0,
+               colour: 0xffffff },
+      Text { text: if i == 0 { "Randomise" } else if i == 1 { "Blue" }
+                   else if i == 2 { "Pink" } else { "Add Box" },
+             size: 20.0, colour: 0xffffff },
+      TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+                  breaks: Breaks.Words },
+      Button { does: i }
+    }
+    connect (button)-[Inside]->(bar)
+  }
+  // Five rows that share the height, 12 between the boxes in each.
+  for i in 0..5 {
+    let row = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Grow },
+      Stack { row: true, pad: 0.0, gap: 12.0 }
+    }
+    connect (row)-[Inside]->(outer)
+    if i == 0 { Rows.r0 = row }
+    if i == 1 { Rows.r1 = row }
+    if i == 2 { Rows.r2 = row }
+    if i == 3 { Rows.r3 = row }
+    if i == 4 { Rows.r4 = row }
+    // And its six boxes.
+    for j in 0..6 {
+      let id = i * 6 + j
+      let cell = spawn {
+        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+        Size { w: Sizing.Grow, h: Sizing.Grow },
+        Stack { row: true, pad: 0.0, gap: 0.0 },
+        Align { x: Place.Middle, y: Place.Middle },
+        Fill { colour: colour_of(id, false) },
+        Round { top_left: 12.0, top_right: 12.0, bottom_left: 12.0,
+                bottom_right: 12.0 },
+        Border { left: 3.0, right: 3.0, top: 3.0, bottom: 3.0, between: 0.0,
+                 colour: darker(id, false) },
+        Text { text: if id < 10 { "0{id}" } else { "{id}" }, size: 32.0,
+               colour: 0x9a7bb8 },
+        TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Middle,
+                    breaks: Breaks.Words },
+        Transition { seconds: 0.5, ease: cubic_out, x: true, y: true,
+                     w: true, h: false, fill: true, overlay: true,
+                     round: false, border_colour: true, border_width: false,
+                     touch: true },
+        Enter { dx: 0.0, dy: 20.0, dw: 0.0, dh: 0.0, colour: 0xffffff,
+                always: false },
+        Leave { dx: 0.0, dy: 20.0, dw: 0.0, dh: 0.0, colour: 0xffffff,
+                order: Exit.Under, follows: false },
+        Slot { at: j }, Cell { id: id, at: id }, Placed { row: i }
+      }
+      connect (cell)-[Inside]->(row)
+    }
+  }
+}
+
+system interact() {
+  for b: mut Box with Root
+      where b.w != Window.width as f32 || b.h != Window.height as f32 {
+    b.w = Window.width as f32
+    b.h = Window.height as f32
+  }
+  if Window.frame == 1 {
+    Face = font("examples/clay/Roboto-Regular.ttf", 32)
+    if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 32) }
+    if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32) }
+    if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 32) }
+  }
+  for st: mut TextStyle where st.font != Face { st.font = Face }
+  Seed += 1
+
+  // A button is darker under the pointer, and does what it is for when
+  // the pointer goes down on it.
+  Pressed0 = -1
+  for e, f: mut Fill, k: Button {
+    f.colour = if e.has(Hovered) { 0x9a7bb8 } else { 0xae8fcc }
+  }
+  for k: Button with Hovered where PointerTouch == Touch.PressedNow {
+    Pressed0 max= k.does
+  }
+  // Randomise: another order.
+  if Pressed0 == 0 && Count > 1 {
+    for c: mut Cell without Gone {
+      c.at = (c.at * stride(Count, Seed) + Seed) % Count
+    }
+  }
+  // Blue, Pink: other colours, by each box's number.
+  if Pressed0 == 1 { Blue = true }
+  if Pressed0 == 2 { Blue = false }
+  if Pressed0 == 1 || Pressed0 == 2 {
+    for c: Cell, f: mut Fill, d: mut Border {
+      f.colour = colour_of(c.id, Blue)
+      d.colour = darker(c.id, Blue)
+    }
+  }
+  // Add Box: one more, somewhere among the others, which make room.
+  if Pressed0 == 3 && Count < 30 {
+    let at = Seed % (Count + 1)
+    for c: mut Cell without Gone where c.at >= at { c.at += 1 }
+    let id = Next
+    spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Grow },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Align { x: Place.Middle, y: Place.Middle },
+      Fill { colour: colour_of(id, Blue) },
+      Round { top_left: 12.0, top_right: 12.0, bottom_left: 12.0,
+              bottom_right: 12.0 },
+      Border { left: 3.0, right: 3.0, top: 3.0, bottom: 3.0, between: 0.0,
+               colour: darker(id, Blue) },
+      Text { text: "{id}", size: 32.0, colour: 0xffffff },
+      TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Middle,
+                  breaks: Breaks.Words },
+      Transition { seconds: 0.5, ease: cubic_out, x: true, y: true, w: true,
+                   h: false, fill: true, overlay: true, round: false,
+                   border_colour: true, border_width: false, touch: true },
+      Enter { dx: 0.0, dy: 20.0, dw: 0.0, dh: 0.0, colour: 0xffffff,
+              always: false },
+      Leave { dx: 0.0, dy: 20.0, dw: 0.0, dh: 0.0, colour: 0xffffff,
+              order: Exit.Under, follows: false },
+      Slot { at: 0 }, Cell { id: id, at: at }, Placed { row: -1 }
+    }
+    Count += 1
+    Next += 1
+  }
+
+  // A box under the pointer has grey laid on it; one the pointer goes
+  // down on goes, and those after it move up.
+  for e with Cell without Gone {
+    if e.has(Hovered) != e.has(Overlay) {
+      if e.has(Hovered) { e.add(Overlay { colour: 0x508c8c8c }) }
+      else { e.remove(Overlay) }
+    }
+  }
+  Out = -1
+  for e, c: Cell with Hovered without Gone
+      where PointerTouch == Touch.PressedNow {
+    Out max= c.at
+    e.add(Gone)
+  }
+  if Out >= 0 {
+    for c: mut Cell without Gone where c.at > Out { c.at -= 1 }
+    Count -= 1
+  }
+
+  // Every box into the row its place is in, at its place there.
+  for e, c: Cell, sl: mut Slot, pl: mut Placed without Gone
+      where pl.row != c.at / 6 || sl.at != c.at % 6 {
+    let row = c.at / 6
+    if row != pl.row {
+      let into = if row == 0 { Rows.r0 } else if row == 1 { Rows.r1 }
+                 else if row == 2 { Rows.r2 } else if row == 3 { Rows.r3 }
+                 else { Rows.r4 }
+      connect (e)-[Inside]->(into)
+    }
+    pl.row = row
+    sl.at = c.at % 6
+  }
+}
+
+schedule frame() {
+  begin()
+  interact()
+  ui()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}
