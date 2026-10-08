@@ -569,8 +569,10 @@ thereby passed down: the next time it runs that is no event.
 - A binding several arrows up has its events too
   (`(b)-[R]->()-[R]->(far: C) ... on changed far.x`): the `for` runs for
   an entity when what it finds there changed, and when an entity on the
-  way was put under another parent, since it then finds another. (Not
-  when one on the way of a `*` loses what the `*` asks for.)
+  way was put under another parent, since it then finds another; with
+  a `*`, also when one on the way lost what the `*` asks for, or got it
+  (also for the one arrow `-[R*]->`, unless the relation says that every
+  parent has the component).
 - What a node sees through the binding also changes when the node is
   given another parent: `connect (node)-[Under]->(other)` is such an event
   for `node`, whether a system or the host connects it, and the `for`
@@ -593,17 +595,16 @@ thereby passed down: the next time it runs that is no event.
 - Over a `sorted` tree the events are followed by its rows where the
   `for` goes `top down` with one arrow to the parent and triggers on
   itself and on that; with a trigger on a child or a sibling, `bottom
-  up`, with arrows that go on, or `bfs` or `dfs`, they are followed in a
+  up`, with no arrow up, with arrows that go on or a `*` to a component
+  not every parent has, or `bfs` or `dfs`, they are followed in a
   depth-first order that is worked out and kept until the tree changes
   (and everything is still gone through by the rows).
 - It goes through the whole tree instead, running its body where a
-  trigger fired: `top down` without an arrow up the tree; where the body
-  adds into an entity further up than its parent; with a trigger on a
-  binding that a `*` or another tree is on the way to; where a trigger's
-  event log has capacity 0 or has lost events, on its first run, and
-  with events for more than a sixteenth of the tree; and where more than
-  256 nodes got or lost a child or a sibling since it last ran. That
-  saves the body, not the walk.
+  trigger fired: where a trigger's event log has capacity 0 or has lost
+  events, on its first run, with events for more than a sixteenth of
+  the tree, and where more than 256 nodes got or lost a child or a
+  sibling since it last ran. (And with a way up that has two `*` along
+  a `sorted` tree.) That saves the body, not the walk.
 - It runs on one core.
 
 Not yet: combining into an ancestor needs the `for` to go along

@@ -6,7 +6,9 @@
 // are come to by their rows, and a node that has other children or
 // siblings than before is come to itself. A trigger on the node two
 // arrows up is followed two levels down, also from a node that is put
-// under another. And the same with every `for` depth first, where the
+// under another; one on what a `*` leads to back down the tree for as
+// long as the nodes have not got what the `*` asks for, also from a node
+// that lost that or got it. And the same with every `for` depth first, where the
 // events are followed in the order that is worked out for that.
 // Inputs/tree_follow.ent works a wide tree out that way and, without
 // triggers, by going through all of it, in every frame of forty in which
@@ -22,7 +24,7 @@
 // RUN: %ent run %t.dfs.ent 2>/dev/null | cmp - %t.out
 // RUN: ent-translate --import-ent %t.dfs.ent -I %S/../../devices -o %t.dfs.mlir
 // RUN: ent-opt %t.dfs.mlir "--ent-lower-to-loops=explain=1" -o /dev/null 2>&1 \
-// RUN:   | grep -c "remark: follows its events" | grep -q 6
+// RUN:   | grep -c "remark: follows its events" | grep -q 8
 // The same over a tree whose rows are kept in its order, in one archetype
 // and (the leaves given a component more) in two: followed there too, in
 // an order worked out from the tree's edges.
@@ -36,15 +38,18 @@
 // RUN: %ent run --parallel %t.two.ent 2>/dev/null | cmp - %t.out
 // RUN: ent-translate --import-ent %t.two.ent -I %S/../../devices -o %t.two.mlir
 // RUN: ent-opt %t.two.mlir "--ent-lower-to-loops=explain=1" -o /dev/null 2>&1 \
-// RUN:   | grep -c "remark: follows its events" | grep -q 6
+// RUN:   | grep -c "remark: follows its events" | grep -q 8
 // RUN: ent-translate --import-ent %S/Inputs/tree_follow.ent \
 // RUN:     -I %S/../../devices -o %t.mlir
 // RUN: ent-opt %t.mlir "--ent-lower-to-loops=explain=1" -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=EXPLAIN
 
-// The `for` from the leaves, the one from the roots, the one that adds
-// into its parent and the one that reacts to the node two above it; not
-// the one whose way up is the nearest node that has two components.
+// Every one of them: the `for` from the leaves, the one from the roots,
+// the one that adds into its parent, the one that reacts to the node two
+// above it, the two whose way up is to the nearest node that has some
+// components, the one that visits the nodes without a parent too, and
+// the one that adds into the node two above.
+// EXPLAIN-NOT:  goes through its whole tree
 // EXPLAIN:      remark: follows its events along the tree
 // EXPLAIN-NEXT: leaves first on [changed @Node "base", changed @Lazy "w" down @In
 // EXPLAIN:      remark: follows its events along the tree
@@ -53,12 +58,10 @@
 // EXPLAIN-NEXT: !ent.ref<@LazyTop, mut, parent @In>) cascade @In leaves first
 // EXPLAIN:      remark: follows its events along the tree
 // EXPLAIN-NEXT: changed @Node "base" up @In hops 2]
-// EXPLAIN:      remark: goes through its whole tree on each run
+// EXPLAIN:      remark: follows its events along the tree
 // EXPLAIN-NEXT: changed @Node "base" up @In path {{\[\[}}"parent", @In], ["up", @In, @Node, @Keep]]]
-// EXPLAIN:      remark: goes through its whole tree on each run
+// EXPLAIN:      remark: follows its events along the tree
 // EXPLAIN-NEXT: !ent.ref<@Keep, up @In>) cascade @In on
-// And the one that visits the nodes without a parent too, and the one
-// that adds into the node two above.
 // EXPLAIN:      remark: follows its events along the tree
 // EXPLAIN-NEXT: !ent.ref<@LazyDeep, parent @In, optional>) cascade @In on
 // EXPLAIN:      remark: follows its events along the tree

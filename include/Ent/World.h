@@ -340,6 +340,10 @@ struct WorldRelation {
   uint64_t childCountsOffset = 0;
   uint64_t siblingIdsBeforeOffset = 0;
   uint64_t siblingIdsAfterOffset = 0;
+  /// For a tree without links that some trigger's way goes up to the
+  /// nearest ancestor with some components: room to go down it from an
+  /// entity, a place per entity key (keys, i64).
+  uint64_t reachStackOffset = 0;
   static constexpr int64_t kTouched = 256;
   uint64_t touchedOffset = 0;
   uint64_t touchedTicksOffset = 0;

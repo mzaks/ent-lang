@@ -136,6 +136,13 @@ system change() {
   for e, n: Node where (Frame == 17 && n.index == 62) ||
                        (Frame == 33 && n.index == 123) { e.remove(Keep) }
   for e, n: Node where Frame == 26 && n.index == 62 { e.add(Keep { n: 9 }) }
+  // (While they are not kept, the node above each is another size, and
+  // has another number: for those that look past them.)
+  for n: mut Node, k: mut Keep where (Frame == 20 && n.index == 1) ||
+                                     (Frame == 36 && n.index == 0) {
+    n.base += 5.0
+    k.n += 1
+  }
   for e, n: Node where Frame % 7 == 0 && n.index == 0 {
     let made = spawn {
       Node { index: 1000 + Frame, base: 3.0, tip: 1.0 }, Slot { at: 1 },

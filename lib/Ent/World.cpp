@@ -140,15 +140,26 @@ bool WorldLayout::cascadeFollows(QueryOp query, bool links) const {
       // to the parent and no further.
       if (leavesFirst)
         return false;
-      // (Several steps up: so many levels down from the event, in a tree
-      // with links; not where the steps are of other kinds.)
-      if (trigger.path || (trigger.hops != 1 && !links))
-        return false;
-      if (tree.getTrusted(/*target=*/true) != trigger.component &&
-          !(links && !refs([&](RefType ref) {
-            return trigger.means(ref) && !ref.getIsDirect();
-          })))
-        return false;
+      // By its rows a tree is followed from parent to child, where the
+      // parent itself is the ancestor the trigger means: the tree's
+      // targets all have the component. Else back along the steps of the
+      // way, to the children along each tree, or, for a step to the
+      // nearest ancestor that has some components, down a tree with
+      // links for as long as those are not there.
+      if (!links) {
+        if (trigger.path || trigger.hops != 1 ||
+            tree.getTrusted(/*target=*/true) != trigger.component)
+          return false;
+        break;
+      }
+      // (Down a tree without links there is room for one such step.)
+      {
+        unsigned without = 0;
+        for (const TriggerStep &step : getSteps(trigger, query))
+          without += step.nearest && !getRelation(step.tree.getAttr()).linked;
+        if (without > 1)
+          return false;
+      }
       break;
     case Trigger::Down:
       if (!leavesFirst || !links)
@@ -680,6 +691,20 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     layout.zeroed.push_back({relation.walkStateOffset, 16});
     relation.walkPlacesOffset = llvm::alignTo(end, kColumnAlignment);
     end = relation.walkPlacesOffset + 8 * layout.entityKeys;
+  }
+  for (WorldRelation &relation : layout.relations) {
+    bool asked = false;
+    module.walk([&](QueryOp query) {
+      for (const Trigger &trigger : getTriggers(query))
+        for (const TriggerStep &step : getSteps(trigger, query))
+          asked |= step.nearest &&
+                   step.tree.getAttr() ==
+                       RelationOp(relation.op).getSymNameAttr();
+    });
+    if (asked && !relation.linked) {
+      relation.reachStackOffset = llvm::alignTo(end, kColumnAlignment);
+      end = relation.reachStackOffset + 8 * layout.entityKeys;
+    }
   }
   // When each entity's children last changed, for a tree some trigger is
   // down.

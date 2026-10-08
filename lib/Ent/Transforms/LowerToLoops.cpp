@@ -637,6 +637,11 @@ public:
                       : relation.siblingIdsBeforeOffset,
                 layout.entityKeys, idType());
   }
+  /// Room to go down a tree without links in: entity keys.
+  Value reachStack(const WorldRelation &relation) {
+    return view(relation.reachStackOffset, layout.entityKeys,
+                rewriter.getI64Type());
+  }
   /// The entities that last got other children or siblings in the tree,
   /// for the queries that follow events: their ids and the ticks, in a
   /// ring, and how many there have been ever and the tick of the newest
@@ -8482,54 +8487,262 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
             });
           });
     };
-    // The entities so many levels below the one with the key `key`: its
-    // children, or theirs, and so on.
-    std::function<void(Value, unsigned)> markBelow = [&](Value key,
-                                                         unsigned levels) {
-      // (Without links: the sources of the edges to it.)
-      if (!relation.linked) {
+    // The children of the entity with the key `key` in `along` (a tree):
+    // `each` for the key and the id of every one. By the tree's links, or
+    // without them the sources of the edges to it.
+    auto forChildren = [&](const WorldRelation &along, Value key,
+                           function_ref<void(Value, Value)> each) {
+      if (!along.linked) {
         auto [begin, end] =
-            emitEdgeRange(rewriter, loc, world, relation, /*in=*/true, key);
+            emitEdgeRange(rewriter, loc, world, along, /*in=*/true, key);
         tree.forEach(begin, end, [&](Value position) {
-          Value edge = relation.isSorted(/*in=*/true)
-                           ? position
-                           : world.toIndex(
-                                 loc, tree.load(world.indexEdges(relation),
-                                                position));
-          Value child = world.entityKey(
-              loc, tree.load(world.edgeIds(relation, /*source=*/true), edge));
-          if (levels == 1)
-            markKey(child);
-          else
-            markBelow(child, levels - 1);
+          Value edge =
+              along.isSorted(/*in=*/true)
+                  ? position
+                  : world.toIndex(loc, tree.load(world.indexEdges(along),
+                                                 position));
+          Value child =
+              tree.load(world.edgeIds(along, /*source=*/true), edge);
+          each(world.entityKey(loc, child), child);
         });
         return;
       }
-      Value first = tree.load(tree.firstChild(), key);
+      LinkedTree links(rewriter, loc, world, along);
+      Value first = links.load(links.firstChild(), key);
       scf::WhileOp::create(
           rewriter, loc, TypeRange{first.getType()}, ValueRange{first},
           [&](OpBuilder &, Location, ValueRange state) {
             scf::ConditionOp::create(rewriter, loc,
-                                     tree.negate(tree.isNone(state[0])),
+                                     links.negate(links.isNone(state[0])),
                                      state);
           },
           [&](OpBuilder &, Location, ValueRange state) {
             Value child = arith::SubIOp::create(
                 rewriter, loc, world.toIndex(loc, state[0]), one);
-            if (levels == 1)
-              markKey(child);
-            else
-              markBelow(child, levels - 1);
+            {
+              OpBuilder::InsertionGuard inner(rewriter);
+              each(child, links.sourceOf(child));
+            }
             scf::YieldOp::create(
                 rewriter, loc,
-                ValueRange{tree.load(tree.nextSibling(), child)});
+                ValueRange{links.load(links.nextSibling(), child)});
           });
     };
-    // How many steps up the triggers of the query go.
-    llvm::SmallSetVector<unsigned, 2> stepsUp;
-    for (const Trigger &trigger : triggers)
-      if (trigger.where == Trigger::Up)
-        stepsUp.insert(trigger.hops);
+    // Whether the entity `id` is alive and has all of `has`.
+    auto hasAll = [&](Value id, ArrayRef<FlatSymbolRefAttr> has) -> Value {
+      Value all = tree.i1(true);
+      for (FlatSymbolRefAttr component : has)
+        all = tree.both(
+            all,
+            emitLocate(
+                rewriter, loc, layout, world, id,
+                [](const WorldArchetype &) { return true; }, component,
+                TypeRange{rewriter.getI1Type()},
+                [&](const WorldArchetype &home, Value,
+                    Value present) -> SmallVector<Value> {
+                  if (!ArchetypeOp(home.op).contains(component))
+                    return {tree.i1(false)};
+                  return {present ? present : tree.i1(true)};
+                },
+                [&]() -> SmallVector<Value> { return {tree.i1(false)}; })[0]);
+      return all;
+    };
+    // The entities below the one with the key `key` in `along` (a tree
+    // with links) whose nearest ancestor with all of `has` it is, or
+    // would be if it had them: its children, and those of every one that
+    // has not all of them itself. Child by child, down where there is
+    // more to ask, else on to the next, back up where there is none.
+    auto forThoseBelow = [&](const WorldRelation &along, Value key,
+                             ArrayRef<FlatSymbolRefAttr> has,
+                             function_ref<void(Value, Value)> each) {
+      // (Without links: the ones still to be asked for their children
+      // wait in a row, each there once.)
+      if (!along.linked) {
+        Value waiting = world.reachStack(along);
+        Type i64 = rewriter.getI64Type();
+        tree.store(arith::IndexCastOp::create(rewriter, loc, i64, key),
+                   waiting, zero);
+        scf::WhileOp::create(
+            rewriter, loc, TypeRange{rewriter.getIndexType()},
+            ValueRange{one},
+            [&](OpBuilder &, Location, ValueRange state) {
+              scf::ConditionOp::create(
+                  rewriter, loc,
+                  arith::CmpIOp::create(rewriter, loc,
+                                        arith::CmpIPredicate::ne, state[0],
+                                        zero),
+                  state);
+            },
+            [&](OpBuilder &, Location, ValueRange state) {
+              Value top = arith::SubIOp::create(rewriter, loc, state[0], one);
+              Value from = arith::IndexCastOp::create(
+                  rewriter, loc, rewriter.getIndexType(),
+                  tree.load(waiting, top));
+              auto [begin, end] = emitEdgeRange(rewriter, loc, world, along,
+                                                /*in=*/true, from);
+              auto edges = scf::ForOp::create(rewriter, loc, begin, end, one,
+                                              ValueRange{top});
+              {
+                OpBuilder::InsertionGuard inner(rewriter);
+                rewriter.setInsertionPointToStart(edges.getBody());
+                Value position = edges.getInductionVar();
+                Value edge =
+                    along.isSorted(/*in=*/true)
+                        ? position
+                        : world.toIndex(loc,
+                                        tree.load(world.indexEdges(along),
+                                                  position));
+                Value id =
+                    tree.load(world.edgeIds(along, /*source=*/true), edge);
+                Value child = world.entityKey(loc, id);
+                {
+                  OpBuilder::InsertionGuard body(rewriter);
+                  each(child, id);
+                }
+                Value count = edges.getRegionIterArg(0);
+                Value more = tree.negate(hasAll(id, has));
+                tree.branch(more, [&] {
+                  tree.store(
+                      arith::IndexCastOp::create(rewriter, loc, i64, child),
+                      waiting, count);
+                });
+                scf::YieldOp::create(
+                    rewriter, loc,
+                    ValueRange{arith::SelectOp::create(
+                        rewriter, loc, more,
+                        arith::AddIOp::create(rewriter, loc, count, one),
+                        count)});
+              }
+              scf::YieldOp::create(rewriter, loc,
+                                   ValueRange{edges.getResult(0)});
+            });
+        return;
+      }
+      LinkedTree links(rewriter, loc, world, along);
+      Type link = world.offsetType(along);
+      Value first = links.load(links.firstChild(), key);
+      scf::WhileOp::create(
+          rewriter, loc, TypeRange{link}, ValueRange{first},
+          [&](OpBuilder &, Location, ValueRange state) {
+            scf::ConditionOp::create(rewriter, loc,
+                                     links.negate(links.isNone(state[0])),
+                                     state);
+          },
+          [&](OpBuilder &, Location, ValueRange state) {
+            Value child = arith::SubIOp::create(
+                rewriter, loc, world.toIndex(loc, state[0]), one);
+            Value id = links.sourceOf(child);
+            {
+              OpBuilder::InsertionGuard inner(rewriter);
+              each(child, id);
+            }
+            Value down = arith::SelectOp::create(
+                rewriter, loc, hasAll(id, has), links.noLink(),
+                links.load(links.firstChild(), child));
+            auto next = scf::IfOp::create(rewriter, loc, TypeRange{link},
+                                          links.negate(links.isNone(down)),
+                                          /*withElseRegion=*/true);
+            {
+              OpBuilder::InsertionGuard inner(rewriter);
+              rewriter.setInsertionPointToStart(next.thenBlock());
+              scf::YieldOp::create(rewriter, loc, ValueRange{down});
+              rewriter.setInsertionPointToStart(next.elseBlock());
+              auto climb = scf::WhileOp::create(
+                  rewriter, loc, TypeRange{rewriter.getIndexType()},
+                  ValueRange{child},
+                  [&](OpBuilder &, Location, ValueRange at) {
+                    scf::ConditionOp::create(
+                        rewriter, loc,
+                        links.both(
+                            arith::CmpIOp::create(rewriter, loc,
+                                                  arith::CmpIPredicate::ne,
+                                                  at[0], key),
+                            links.isNone(
+                                links.load(links.nextSibling(), at[0]))),
+                        at);
+                  },
+                  [&](OpBuilder &, Location, ValueRange at) {
+                    scf::YieldOp::create(
+                        rewriter, loc,
+                        ValueRange{world.entityKey(
+                            loc, links.load(links.targets(), at[0]))});
+                  });
+              Value top = climb.getResult(0);
+              scf::YieldOp::create(
+                  rewriter, loc,
+                  ValueRange{arith::SelectOp::create(
+                      rewriter, loc,
+                      arith::CmpIOp::create(rewriter, loc,
+                                            arith::CmpIPredicate::eq, top,
+                                            key),
+                      links.noLink(),
+                      links.load(links.nextSibling(), top))});
+            }
+            scf::YieldOp::create(rewriter, loc, ValueRange{next.getResult(0)});
+          });
+    };
+    // The triggers up the tree, by the steps of their ways: the entities
+    // whose way's step `step` (0: themselves) is the one with the key
+    // `key` get a mark.
+    SmallVector<std::pair<SmallVector<TriggerStep, 2>, SmallVector<unsigned>>>
+        waysUp;
+    for (auto [index, trigger] : llvm::enumerate(triggers)) {
+      if (trigger.where != Trigger::Up)
+        continue;
+      SmallVector<TriggerStep, 2> steps = getSteps(trigger, query);
+      auto same = [&](const auto &way) {
+        return way.first.size() == steps.size() &&
+               llvm::all_of(llvm::zip(way.first, steps), [](auto pair) {
+                 auto &[a, b] = pair;
+                 return a.nearest == b.nearest && a.tree == b.tree &&
+                        a.has == b.has;
+               });
+      };
+      auto *known = llvm::find_if(waysUp, same);
+      if (known == waysUp.end()) {
+        waysUp.push_back({steps, {}});
+        known = &waysUp.back();
+      }
+      known->second.push_back(index);
+    }
+    std::function<void(ArrayRef<TriggerStep>, unsigned, Value)> reach =
+        [&](ArrayRef<TriggerStep> steps, unsigned step, Value key) {
+          if (step == 0) {
+            markKey(key);
+            return;
+          }
+          const TriggerStep &last = steps[step - 1];
+          const WorldRelation &along = layout.getRelation(last.tree.getAttr());
+          auto further = [&](Value child, Value) {
+            reach(steps, step - 1, child);
+          };
+          if (last.nearest)
+            forThoseBelow(along, key, last.has, further);
+          else
+            forChildren(along, key, further);
+        };
+    // Those whose way goes along the edge of the entity with the key
+    // `key` in `along`, or past that entity where it has not got what a
+    // step asks for (`passed`, with `component` one of those).
+    auto reachAlong = [&](StringAttr along, Value key, bool passed,
+                          FlatSymbolRefAttr component) {
+      for (auto &[steps, which] : waysUp)
+        for (unsigned step = 1; step <= steps.size(); ++step) {
+          const TriggerStep &at = steps[step - 1];
+          if (passed ? !(at.nearest && llvm::is_contained(at.has, component))
+                     : at.tree.getAttr() != along)
+            continue;
+          // (Its own way, from this step on.)
+          if (!passed)
+            reach(steps, step - 1, key);
+          if (at.nearest)
+            forThoseBelow(layout.getRelation(at.tree.getAttr()), key, at.has,
+                          [&, steps = ArrayRef<TriggerStep>(steps)](
+                              Value child, Value) {
+                            reach(steps, step - 1, child);
+                          });
+        }
+    };
     // The body for the entity `id` at `row` of `archetype`, for a query
     // that follows its events, and what follows from what it changed.
     auto runAt = [&](const WorldArchetype &archetype, Value row, Value id,
@@ -8612,16 +8825,17 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       // tree, and for the parent, which comes later from the leaves,
       // where one is down it. The sibling before has been visited.)
       SmallVector<std::pair<Trigger::Where, unsigned>, 4> ways;
-      for (unsigned steps : stepsUp)
-        ways.push_back({Trigger::Up, steps});
-      ways.push_back({Trigger::Before, 1});
-      ways.push_back({Trigger::Down, 1});
-      for (auto [where, steps] : ways) {
+      for (unsigned way = 0; way < waysUp.size(); ++way)
+        ways.push_back({Trigger::Up, way});
+      ways.push_back({Trigger::Before, 0});
+      ways.push_back({Trigger::Down, 0});
+      for (auto [where, way] : ways) {
         Value changedHere;
-        for (const Trigger &trigger : triggers) {
+        for (auto [index, trigger] : llvm::enumerate(triggers)) {
           const WorldColumn *column =
               trigger.via && trigger.where == where &&
-                      trigger.hops == steps
+                      (where != Trigger::Up ||
+                       llvm::is_contained(waysUp[way].second, index))
                   ? archetype.findStamp(getStamp(trigger))
                   : nullptr;
           if (!column)
@@ -8642,7 +8856,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           continue;
         tree.branch(changedHere, [&] {
           if (where == Trigger::Up)
-            markBelow(world.entityKey(loc, id), steps);
+            reach(waysUp[way].first, waysUp[way].first.size(),
+                  world.entityKey(loc, id));
           else if (where == Trigger::Before)
             markSibling(world.entityKey(loc, id), /*after=*/true);
           else if (parent.relation)
@@ -8840,6 +9055,13 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       forEachEvent(rewriter, query, layout, world,
                    [&](const Trigger &trigger, Value id) {
                      Value key = world.entityKey(loc, id);
+                     // (An entity that lost or got what a `*` asks for:
+                     // those that went past it, or stop at it now.)
+                     if (trigger.onTheWay) {
+                       reachAlong(StringAttr(), key, /*passed=*/true,
+                                  trigger.component);
+                       return;
+                     }
                      switch (trigger.where) {
                      case Trigger::Own:
                        if (toRoots) {
@@ -8865,16 +9087,18 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                        } else {
                          markKey(key);
                        }
-                       // (Connected to another parent: those below it
-                       // that look further up than it see another too.)
+                       // (Connected to another parent: those whose way
+                       // up goes along that edge see another too.)
                        if (trigger.kind == Trigger::Connected)
-                         for (unsigned steps : stepsUp)
-                           for (unsigned below = 1; below < steps; ++below)
-                             markBelow(key, below);
+                         reachAlong(trigger.component.getAttr(), key,
+                                    /*passed=*/false, FlatSymbolRefAttr());
                        break;
-                     case Trigger::Up:
-                       markBelow(key, trigger.hops);
+                     case Trigger::Up: {
+                       SmallVector<TriggerStep, 2> steps =
+                           getSteps(trigger, query);
+                       reach(steps, steps.size(), key);
                        break;
+                     }
                      case Trigger::Down:
                        markParentOf(id);
                        break;
