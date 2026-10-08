@@ -2853,3 +2853,30 @@ bench/boxes/boxes.ent`: us a frame over 200 frames, three runs each.
   too (the tree keeps a ring of the last 256 entities that got other
   children or siblings), and placing and floating run until a round
   places nothing instead of three rounds: 17.6 - 17.8 us a frame here.
+
+## 2026-10-08: how long the layout demo takes to build
+
+`tools/ent run -I examples examples/layout_demo.ent` took 21 s before
+its window showed, 16 of them in `clang -O2` on one function: `layout`,
+430,000 lines of LLVM IR. A pass that follows its events had its body
+where it goes through everything, where it follows and where it visits
+the boxes without a parent, each time once for each of nine archetypes;
+and every field read through an arrow looked its entity up again.
+
+| | LLVM IR, lines | to LLVM IR | clang -O2 |
+|---|---|---|---|
+| before | 457,830 | 5.0 s | 16.0 s |
+| a body is one function for its places | 322,447 | 2.6 s | 6.5 s |
+| the entity an arrow leads to is found once | 263,863 | 2.5 s | 5.7 s |
+| and one function for all archetypes, given their columns | 113,132 | 1.2 s | 5.8 s |
+| which are given as places in the world's memory, not as views | 61,045 | 0.8 s | 1.0 s |
+
+- 1.8 s in all now. The parts are found after lowering: what is emitted
+  in several places is named where it is emitted, and the parts of a
+  name that are alike but for the values they take from outside become
+  one function with those as parameters.
+- A column given as a view is five values to LLVM, and a body takes a
+  hundred of them: giving the offsets instead was most of the last step.
+- At run time the same: `bench/boxes` 18.0 - 18.9 us a frame (17.2 -
+  17.4 before), the scene graph's `reactive` 1.2 us for one move and 157
+  for a thousand (1.1 and 174).

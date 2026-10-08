@@ -1,3 +1,4 @@
+#include <map>
 #include "Ent/Access.h"
 #include "Ent/EntOps.h"
 #include "Ent/Passes.h"
@@ -12,6 +13,8 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DenseMap.h"
 
 namespace mlir::ent {
@@ -2540,6 +2543,61 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         if (get.getRef() == arg)
           gets.push_back(get);
       });
+    // Where the ancestor is known by its id and several of its fields are
+    // read, it is found once, before the body, and all are read there:
+    // finding it is most of what a read costs, in time and in code.
+    if (!ancestor.row && gets.size() > 1 && !roots.empty()) {
+      FlatSymbolRefAttr component =
+          cast<RefType>(arg.getType()).getComponent();
+      SmallVector<StringAttr> fields;
+      SmallVector<Type> types;
+      for (GetOp get : gets)
+        if (!llvm::is_contained(fields, get.getFieldAttr())) {
+          fields.push_back(get.getFieldAttr());
+          types.push_back(world.storageType(get.getType()));
+        }
+      Location at = gets.front().getLoc();
+      rewriter.setInsertionPoint(roots.front());
+      auto nothing = [&]() -> SmallVector<Value> {
+        SmallVector<Value> zeros;
+        for (Type type : types)
+          zeros.push_back(arith::ConstantOp::create(
+              rewriter, at, cast<TypedAttr>(rewriter.getZeroAttr(type))));
+        return zeros;
+      };
+      auto holds = [&](const WorldArchetype &home) {
+        return ArchetypeOp(home.op).contains(component);
+      };
+      SmallVector<Value> values =
+          llvm::none_of(layout.archetypes, holds)
+              ? nothing()
+              : emitLocate(
+                    rewriter, at, layout, world, ancestor.id, holds,
+                    FlatSymbolRefAttr(), types,
+                    [&](const WorldArchetype &home, Value row,
+                        Value) -> SmallVector<Value> {
+                      SmallVector<Value> read;
+                      for (StringAttr field : fields)
+                        read.push_back(memref::LoadOp::create(
+                            rewriter, at,
+                            world.column(home, component.getAttr(), field),
+                            ValueRange{row}));
+                      return read;
+                    },
+                    nothing, LocateBounds(), ancestor.trusted && !mayBeNone);
+      SmallVector<Value> converted;
+      for (GetOp get : gets)
+        converted.push_back(world.fromStorage(
+            get.getLoc(),
+            values[llvm::find(fields, get.getFieldAttr()) - fields.begin()],
+            get.getType()));
+      for (auto [get, value] : llvm::zip(gets, converted)) {
+        Operation *op = get;
+        llvm::erase(roots, op);
+        rewriter.replaceOp(get, value);
+      }
+      gets.clear();
+    }
     for (GetOp get : gets) {
       rewriter.setInsertionPoint(get);
       Operation *op = get;
@@ -6662,6 +6720,344 @@ static void closeLogs(IRRewriter &rewriter, QueryOp query,
   }
 }
 
+//===----------------------------------------------------------------------===//
+// Parts emitted more than once
+//===----------------------------------------------------------------------===//
+
+/// A query that follows its events has its body, and what marks the
+/// entities to go to, in several places: where it goes through
+/// everything, where it follows, where it visits the entities without a
+/// parent. Each such part is emitted where it is used, in a region with
+/// a name (`emitPart`); when the function is lowered, the parts with one
+/// name become one function that the places call (`shareParts`).
+static const char kPartAttr[] = "ent.part";
+
+/// Emit what `emit` emits at the insertion point as the part `name`; as
+/// it is, if `name` is empty. The insertion point is after it then.
+static void emitPart(IRRewriter &rewriter, Location loc, const Twine &name,
+                     function_ref<void()> emit) {
+  std::string key = name.str();
+  if (key.empty()) {
+    OpBuilder::InsertionGuard guard(rewriter);
+    emit();
+    return;
+  }
+  auto part = scf::ExecuteRegionOp::create(rewriter, loc, TypeRange{});
+  part->setAttr(kPartAttr, rewriter.getStringAttr(key));
+  Block *block = part.getRegion().empty()
+                     ? rewriter.createBlock(&part.getRegion())
+                     : &part.getRegion().front();
+  rewriter.setInsertionPointToStart(block);
+  emit();
+  rewriter.setInsertionPointToEnd(block);
+  scf::YieldOp::create(rewriter, loc);
+  rewriter.setInsertionPointAfter(part);
+}
+
+namespace {
+/// Two parts gone through side by side: which value of the second stands
+/// where which value of the first does, for those defined inside.
+struct PartMatch {
+  llvm::DenseMap<Value, Value> inner;
+  llvm::DenseSet<Value> innerOfSecond;
+};
+} // namespace
+
+static bool matchRegions(Region &a, Region &b, PartMatch &match);
+
+/// Whether two ops are alike but for the values they take from outside
+/// their parts and for their constants (which count as from outside:
+/// where the parts have different ones, as for the columns of different
+/// archetypes, the function is given them).
+static bool matchOps(Operation &a, Operation &b, PartMatch &match) {
+  if (a.hasTrait<OpTrait::ConstantLike>() &&
+      b.hasTrait<OpTrait::ConstantLike>())
+    return a.getName() == b.getName() &&
+           a.getResult(0).getType() == b.getResult(0).getType();
+  if (a.getName() != b.getName() ||
+      a.getAttrDictionary() != b.getAttrDictionary() ||
+      a.getPropertiesAsAttribute() != b.getPropertiesAsAttribute() ||
+      a.getNumOperands() != b.getNumOperands() ||
+      a.getNumResults() != b.getNumResults() ||
+      a.getNumRegions() != b.getNumRegions())
+    return false;
+  for (auto [x, y] : llvm::zip(a.getOperands(), b.getOperands())) {
+    if (x.getType() != y.getType())
+      return false;
+    auto known = match.inner.find(x);
+    if (known != match.inner.end()) {
+      if (known->second != y)
+        return false;
+    } else if (match.innerOfSecond.contains(y)) {
+      return false;
+    }
+  }
+  for (auto [x, y] : llvm::zip(a.getResults(), b.getResults())) {
+    if (x.getType() != y.getType())
+      return false;
+    match.inner[x] = y;
+    match.innerOfSecond.insert(y);
+  }
+  for (auto [x, y] : llvm::zip(a.getRegions(), b.getRegions()))
+    if (!matchRegions(x, y, match))
+      return false;
+  return true;
+}
+
+static bool matchRegions(Region &a, Region &b, PartMatch &match) {
+  if (std::distance(a.begin(), a.end()) != std::distance(b.begin(), b.end()))
+    return false;
+  for (auto [x, y] : llvm::zip(a, b)) {
+    if (x.getNumArguments() != y.getNumArguments() ||
+        std::distance(x.begin(), x.end()) != std::distance(y.begin(), y.end()))
+      return false;
+    for (auto [p, q] : llvm::zip(x.getArguments(), y.getArguments())) {
+      if (p.getType() != q.getType())
+        return false;
+      match.inner[p] = q;
+      match.innerOfSecond.insert(q);
+    }
+    for (auto [p, q] : llvm::zip(x, y))
+      if (!matchOps(p, q, match))
+        return false;
+  }
+  return true;
+}
+
+/// The uses, in a part, of what it takes from outside (its constants
+/// too), in the order the ops come: the same places in parts that are
+/// alike.
+static void outerUses(Region &region, llvm::DenseSet<Value> &inner,
+                      SmallVectorImpl<OpOperand *> &uses) {
+  for (Block &block : region) {
+    for (Value argument : block.getArguments())
+      inner.insert(argument);
+    for (Operation &op : block) {
+      if (op.hasTrait<OpTrait::ConstantLike>())
+        continue;
+      for (OpOperand &operand : op.getOpOperands())
+        if (!inner.contains(operand.get()))
+          uses.push_back(&operand);
+      for (Value result : op.getResults())
+        inner.insert(result);
+      for (Region &nested : op.getRegions())
+        outerUses(nested, inner, uses);
+    }
+  }
+}
+
+/// Put what is in the part `part` in its place, as if it had no name.
+static void dissolvePart(IRRewriter &rewriter, scf::ExecuteRegionOp part) {
+  Block &block = part.getRegion().front();
+  rewriter.eraseOp(block.getTerminator());
+  rewriter.inlineBlockBefore(&block, part);
+  rewriter.eraseOp(part);
+}
+
+/// A value a function can make for itself rather than be given: a
+/// constant.
+static bool isMadeAnew(Value value) {
+  Operation *def = value.getDefiningOp();
+  return def && def->hasTrait<OpTrait::ConstantLike>();
+}
+
+/// The parts of `func` with one name become one function, called where
+/// they were: for the values each takes from outside, which stand in the
+/// same places in all of them (they are emitted by the same code), the
+/// function has parameters. A part that is the only one of its name, or
+/// that is not like the first of them, stays where it is.
+static void shareParts(IRRewriter &rewriter, func::FuncOp func) {
+  static unsigned serial = 0;
+  // Innermost first: a part in a part is a call by the time the outer
+  // ones are compared.
+  SmallVector<scf::ExecuteRegionOp> parts;
+  func.walk<WalkOrder::PostOrder>([&](scf::ExecuteRegionOp part) {
+    if (part->hasAttr(kPartAttr))
+      parts.push_back(part);
+  });
+  llvm::MapVector<Attribute, SmallVector<scf::ExecuteRegionOp>> byName;
+  for (scf::ExecuteRegionOp part : parts)
+    byName[part->getAttr(kPartAttr)].push_back(part);
+  // Those of a name that are alike, together: each with the first that
+  // it is like.
+  SmallVector<SmallVector<scf::ExecuteRegionOp>> groups;
+  for (auto &[name, named] : byName) {
+    size_t from = groups.size();
+    for (scf::ExecuteRegionOp part : named) {
+      part->removeAttr(kPartAttr);
+      bool placed = false;
+      for (size_t k = from; k < groups.size() && !placed; ++k) {
+        PartMatch match;
+        if (matchRegions(groups[k].front().getRegion(), part.getRegion(),
+                         match)) {
+          groups[k].push_back(part);
+          placed = true;
+        }
+      }
+      if (!placed)
+        groups.push_back({part});
+    }
+  }
+  for (auto &group : groups) {
+    scf::ExecuteRegionOp first = group.front();
+    if (group.size() == 1) {
+      dissolvePart(rewriter, first);
+      continue;
+    }
+    // What each takes from outside, place by place. The places where all
+    // of them take the same from the same are one parameter; a place
+    // where each has the same constant needs none.
+    SmallVector<SmallVector<OpOperand *>> uses(group.size());
+    for (auto [part, places] : llvm::zip(group, uses)) {
+      llvm::DenseSet<Value> inner;
+      outerUses(part.getRegion(), inner, places);
+    }
+    size_t places = uses.front().size();
+    auto sameConstant = [](Value a, Value b) {
+      return isMadeAnew(a) && isMadeAnew(b) && a.getType() == b.getType() &&
+             a.getDefiningOp()->getName() == b.getDefiningOp()->getName() &&
+             a.getDefiningOp()->getAttrDictionary() ==
+                 b.getDefiningOp()->getAttrDictionary() &&
+             a.getDefiningOp()->getPropertiesAsAttribute() ==
+                 b.getDefiningOp()->getPropertiesAsAttribute();
+    };
+    // (A slot: the places with the same values in every part.)
+    std::map<std::vector<void *>, unsigned> slots;
+    SmallVector<unsigned> slotOf(places);
+    SmallVector<size_t> firstPlace;
+    for (size_t place = 0; place < places; ++place) {
+      std::vector<void *> values;
+      for (auto &list : uses)
+        values.push_back(list[place]->get().getAsOpaquePointer());
+      unsigned next = slots.size();
+      auto [entry, isNew] = slots.insert({values, next});
+      slotOf[place] = entry->second;
+      if (isNew)
+        firstPlace.push_back(place);
+    }
+    // A slot is given to the function, or made in it: a constant that is
+    // the same in all, or a view of the world's memory, which the
+    // function makes from the memory and from where in it the view is
+    // (given too, where the parts have different ones: the columns of
+    // different archetypes).
+    enum Kind { Given, Made, View, ViewAt };
+    SmallVector<Kind> kinds(firstPlace.size(), Given);
+    auto viewOf = [](Value value) {
+      return dyn_cast_or_null<memref::ViewOp>(value.getDefiningOp());
+    };
+    Value memory;
+    for (auto [slot, place] : llvm::enumerate(firstPlace)) {
+      Value value = uses.front()[place]->get();
+      bool constant = true, view = true, sameShift = true;
+      memref::ViewOp firstView = viewOf(value);
+      for (auto &list : uses) {
+        Value there = list[place]->get();
+        constant &= sameConstant(value, there);
+        memref::ViewOp other = viewOf(there);
+        view &= firstView && other && there.getType() == value.getType() &&
+                other.getSource() == firstView.getSource() &&
+                other.getSizes().empty() && isMadeAnew(other.getByteShift());
+        if (view)
+          sameShift &=
+              sameConstant(firstView.getByteShift(), other.getByteShift());
+      }
+      if (constant) {
+        kinds[slot] = Made;
+      } else if (view) {
+        kinds[slot] = sameShift ? View : ViewAt;
+        memory = firstView.getSource();
+      }
+    }
+    SmallVector<Type> types;
+    if (memory)
+      types.push_back(memory.getType());
+    SmallVector<unsigned> parameter(firstPlace.size());
+    for (auto [slot, place] : llvm::enumerate(firstPlace)) {
+      if (kinds[slot] == Given || kinds[slot] == ViewAt) {
+        parameter[slot] = types.size();
+        types.push_back(kinds[slot] == Given
+                            ? uses.front()[place]->get().getType()
+                            : Type(rewriter.getIndexType()));
+      }
+    }
+    Location loc = first.getLoc();
+    // The arguments of each, before anything moves.
+    SmallVector<SmallVector<Value>> arguments(group.size());
+    for (auto [list, values] : llvm::zip(uses, arguments)) {
+      if (memory)
+        values.push_back(memory);
+      for (auto [slot, place] : llvm::enumerate(firstPlace)) {
+        Value value = list[place]->get();
+        if (kinds[slot] == Given)
+          values.push_back(value);
+        else if (kinds[slot] == ViewAt)
+          values.push_back(viewOf(value).getByteShift());
+      }
+    }
+    func::FuncOp shared;
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(func);
+      shared = func::FuncOp::create(
+          rewriter, loc, ("ent_part_" + Twine(serial++)).str(),
+          rewriter.getFunctionType(types, {}));
+      shared.setPrivate();
+      Block *entry = shared.addEntryBlock();
+      rewriter.setInsertionPointToStart(entry);
+      auto anew = [&](Value value) -> Value {
+        return rewriter.clone(*value.getDefiningOp())
+            ->getResult(cast<OpResult>(value).getResultNumber());
+      };
+      SmallVector<Value> inside(firstPlace.size());
+      for (auto [slot, place] : llvm::enumerate(firstPlace)) {
+        Value value = uses.front()[place]->get();
+        switch (kinds[slot]) {
+        case Given:
+          inside[slot] = entry->getArgument(parameter[slot]);
+          break;
+        case Made:
+          inside[slot] = anew(value);
+          break;
+        case View:
+        case ViewAt:
+          inside[slot] = memref::ViewOp::create(
+              rewriter, loc, cast<MemRefType>(value.getType()),
+              entry->getArgument(0),
+              kinds[slot] == View
+                  ? anew(viewOf(value).getByteShift())
+                  : Value(entry->getArgument(parameter[slot])),
+              ValueRange{});
+          break;
+        }
+      }
+      func::ReturnOp::create(rewriter, loc);
+      // The first one's ops move in, taking what they took from outside
+      // from the function.
+      for (auto [place, use] : llvm::enumerate(uses.front()))
+        use->set(inside[slotOf[place]]);
+      Block &block = first.getRegion().front();
+      rewriter.eraseOp(block.getTerminator());
+      SmallVector<Operation *> ops;
+      for (Operation &op : block)
+        ops.push_back(&op);
+      for (Operation *op : ops)
+        op->moveBefore(entry->getTerminator());
+    }
+    for (auto [part, values] : llvm::zip(group, arguments)) {
+      rewriter.setInsertionPoint(part);
+      // (A constant of the part's own goes with the part: made anew.)
+      for (Value &value : values)
+        if (isMadeAnew(value))
+          value = rewriter.clone(*value.getDefiningOp())
+                      ->getResult(cast<OpResult>(value).getResultNumber());
+      func::CallOp::create(rewriter, part.getLoc(), shared, values);
+      rewriter.eraseOp(part);
+    }
+  }
+
+}
+
+
 /// Marks: a bit per position in i64 words (`marks`), for the entities a
 /// query that follows events has yet to look at. Set the bit of
 /// `position` (an index), at the insertion point.
@@ -7344,6 +7740,29 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         loc, memref::LoadOp::create(rewriter, loc, world.rootCount(archetype),
                                     ValueRange{zero}));
   };
+  // The body for the entity at `row` of `archetype`, at the insertion
+  // point. A query that follows its events along a list has it in several
+  // places, which share it (see emitPart).
+  bool shares = layout.cascadeFollowsEvents(query) &&
+                !layout.cascadeFollows(query, /*links=*/false);
+  std::string partName;
+  if (shares)
+    partName = ("query" +
+                Twine(query->getAttrOfType<IntegerAttr>(
+                               WorldLayout::kReactiveIndexAttr)
+                          .getInt()))
+                   .str();
+  auto bodyAt = [&](const WorldArchetype &archetype, Value row,
+                    KnownParent known) {
+    emitPart(rewriter, loc,
+             shares ? partName + ".body" : Twine(),
+             [&] {
+               emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                             layout, row, world.count(loc, archetype), tick,
+                             seen, /*parallel=*/false, /*directApplies=*/true,
+                             known, marks);
+             });
+  };
   // (Before `rootsAt`: the query, or where a query that follows events
   // goes through everything instead.)
   Operation *rootsAt = query;
@@ -7381,10 +7800,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                   rewriter, loc, hasParent,
                   arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
           rewriter.setInsertionPointToStart(ifRoot.thenBlock());
-          emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                        layout, entity, rows, tick, seen,
-                        /*parallel=*/false, /*directApplies=*/true, KnownParent(),
-                        marks);
+          bodyAt(archetype, entity, KnownParent());
         },
         startCounts.lookup(&archetype));
     hoistResourceReads(rewriter, loops, world);
@@ -8296,10 +8712,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                           tree.i64(0)));
             auto ifAlone = scf::IfOp::create(rewriter, loc, alone);
             rewriter.setInsertionPointToStart(ifAlone.thenBlock());
-            emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                          layout, entity, rows, tick, seen,
-                          /*parallel=*/false, /*directApplies=*/true,
-                          KnownParent(), marks);
+            bodyAt(archetype, entity, KnownParent());
           },
           startCounts.lookup(&archetype));
       hoistResourceReads(rewriter, loops, world);
@@ -8449,7 +8862,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     query.getBody().walk([&](CombineOp combine) {
       addsInto.insert(combine.getRef().getType());
     });
-    auto markEntity = [&](Value id) {
+    auto markEntityHere = [&](Value id) {
       auto [there, at] = placeOf(world.entityKey(loc, id));
       tree.branch(
           there, [&, at = at] { markAt(at); },
@@ -8470,9 +8883,15 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                 []() -> SmallVector<Value> { return {}; });
           });
     };
+    auto partNamed = [&](StringRef what) {
+      return shares ? partName + "." + what.str() : std::string();
+    };
+    auto markEntity = [&](Value id) {
+      emitPart(rewriter, loc, partNamed("mark"), [&] { markEntityHere(id); });
+    };
     // The parent of the entity `id`, which may be no more: if the list
     // has it, with its parent next to it.
-    auto markParentOf = [&](Value id) {
+    auto markParentOfHere = [&](Value id) {
       auto [there, at] = placeOf(world.entityKey(loc, id));
       tree.branch(
           tree.both(there,
@@ -8486,6 +8905,10 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                           [&] { markEntity(above); });
             });
           });
+    };
+    auto markParentOf = [&](Value id) {
+      emitPart(rewriter, loc, partNamed("above"),
+               [&] { markParentOfHere(id); });
     };
     // The children of the entity with the key `key` in `along` (a tree):
     // `each` for the key and the id of every one. By the tree's links, or
@@ -8705,12 +9128,18 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       }
       known->second.push_back(index);
     }
-    std::function<void(ArrayRef<TriggerStep>, unsigned, Value)> reach =
+    std::function<void(ArrayRef<TriggerStep>, unsigned, Value)> reach,
+        reachHere;
+    reach = [&](ArrayRef<TriggerStep> steps, unsigned step, Value key) {
+      if (step == 0) {
+        markKey(key);
+        return;
+      }
+      emitPart(rewriter, loc, partNamed("reach"),
+               [&] { reachHere(steps, step, key); });
+    };
+    reachHere =
         [&](ArrayRef<TriggerStep> steps, unsigned step, Value key) {
-          if (step == 0) {
-            markKey(key);
-            return;
-          }
           const TriggerStep &last = steps[step - 1];
           const WorldRelation &along = layout.getRelation(last.tree.getAttr());
           auto further = [&](Value child, Value) {
@@ -8745,8 +9174,15 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     };
     // The body for the entity `id` at `row` of `archetype`, for a query
     // that follows its events, and what follows from what it changed.
+    std::function<void(const WorldArchetype &, Value, Value, KnownParent)>
+        runAtHere;
     auto runAt = [&](const WorldArchetype &archetype, Value row, Value id,
                      KnownParent parent) {
+      emitPart(rewriter, loc, partNamed("run"),
+               [&] { runAtHere(archetype, row, id, parent); });
+    };
+    runAtHere = [&](const WorldArchetype &archetype, Value row, Value id,
+                    KnownParent parent) {
       // Following events: what the body changed here that a trigger
       // up the tree means (its stamp has this query's tick, which no
       // other event has) is an event for the children, which come
@@ -8756,10 +9192,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       {
         OpBuilder::InsertionGuard body(rewriter);
         rewriter.setInsertionPointToStart(ran.thenBlock());
-        emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                      layout, row, world.count(loc, archetype), tick, seen,
-                      /*parallel=*/false, /*directApplies=*/true, parent,
-                      marks);
+        bodyAt(archetype, row, parent);
       }
       // What the body added into the parent is an event of the
       // parent's, which comes later: for itself, or for the one it
@@ -8942,10 +9375,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
               Value) -> SmallVector<Value> {
             OpBuilder::InsertionGuard inner(rewriter);
             if (!following) {
-              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                            layout, row, world.count(loc, archetype), tick, seen,
-                            /*parallel=*/false, /*directApplies=*/true, parent,
-                            marks);
+              bodyAt(archetype, row, parent);
               return {};
             }
             runAt(archetype, row, id, parent);
@@ -9138,10 +9568,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           scf::ForOp roots = sweepMarks(
               rewriter, loc, world.rowMarks(archetype),
               startCounts.lookup(&archetype), [&](Value row) {
-                emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                              layout, row, world.count(loc, archetype), tick,
-                              seen, /*parallel=*/false, /*directApplies=*/true,
-                              KnownParent(), marks);
+                bodyAt(archetype, row, KnownParent());
               });
           hoistResourceReads(rewriter, roots, world);
         }
@@ -10373,6 +10800,7 @@ struct EntLowerToLoops
         mergeBranchStores(rewriter, branch);
       lowerLookups(rewriter, func, *layout, world);
       lowerResourceAccesses(rewriter, func, world);
+      shareParts(rewriter, func);
     }
 
     SmallVector<InvokeOp> invokes;

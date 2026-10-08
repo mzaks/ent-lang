@@ -12,9 +12,15 @@
 // RUN:     -I %S/../../devices -I %S/../../examples -o %t.mlir
 // RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
 // RUN:     --convert-to-llvm --reconcile-unrealized-casts \
-// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s --check-prefix=LLVM
+// RUN:   | mlir-translate --mlir-to-llvmir > %t.ll
+// RUN: FileCheck %s --check-prefix=LLVM --input-file=%t.ll
+// A pass that follows its events has its body in several places, and
+// for every kind of box: one function that they call, not a copy in
+// each. (Seven times this much, before.)
+// RUN: wc -l < %t.ll | awk '{ exit !($1 < 100000) }'
 
 // LLVM-DAG: define {{.*}}void @ent_connect_layout.Inside(
+// LLVM-DAG: define {{.*}}void @ent_part_0(
 // LLVM-DAG: declare void @ent_window_rect(float, float, float, float, i32)
 
 // The side bar is 200 wide and as high as the window's inside; the rest
