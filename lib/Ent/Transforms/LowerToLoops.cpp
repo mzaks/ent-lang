@@ -5116,7 +5116,11 @@ static void assertEnds(IRRewriter &rewriter, Location loc,
     auto holds = [&](const WorldArchetype &archetype) {
       return ArchetypeOp(archetype.op).contains(component);
     };
-    Value has = emitLocate(
+    // (By a table where there are archetypes enough for one: not a
+    // branch for each, at every edge that is connected.)
+    std::optional<SmallVector<Value>> byTable = emitReadFields(
+        rewriter, loc, layout, world, id, component, {}, /*trusted=*/false);
+    Value has = byTable ? byTable->back() : emitLocate(
         rewriter, loc, layout, world, id, holds, component,
         TypeRange{rewriter.getI1Type()},
         [&](const WorldArchetype &, Value, Value present) -> SmallVector<Value> {

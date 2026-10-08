@@ -458,6 +458,7 @@ private:
   FailureOr<Type> parseCallableType(bool proc);
   Callable *callableOf(Type type);
   Callable *callableNamed(StringRef name);
+  Callable *callableThrough(const Expr &call);
   FailureOr<mlir::Value> emitFunctionValue(const Expr &expr,
                                            Callable &callable);
   FailureOr<SmallVector<mlir::Value>> emitCallThrough(const Expr &expr,
@@ -943,9 +944,9 @@ FailureOr<Type> Parser::parseCallableType(bool proc) {
     FailureOr<Type> type = parseType();
     if (failed(type))
       return failure();
-    if (!type->isIntOrFloat() && !isa<EnumType>(*type))
+    if (!type->isIntOrFloat() && !isa<EnumType, TextType>(*type))
       return error(resultAt, "a fn or proc that is a value gives a number, "
-                             "a bool or an enum, or nothing");
+                             "a bool, an enum or a text, or nothing");
     callable->result = *type;
   } else if (!proc) {
     return error(at, "a fn gives a value back ('-> type')");
@@ -999,6 +1000,19 @@ Callable *Parser::callableNamed(StringRef name) {
   if (!variable || variable->kind != Variable::Value)
     return nullptr;
   return callableOf(variable->value.getType());
+}
+
+/// The shape of what a call is through, if it is through a name or a
+/// field that holds a fn or proc (`paint(...)`, `c.draw(...)`).
+Callable *Parser::callableThrough(const Expr &call) {
+  if (call.field.empty())
+    return callableNamed(call.name);
+  Expr held;
+  held.kind = Expr::Field;
+  held.loc = call.loc;
+  held.name = call.name;
+  held.field = call.field;
+  return callableOf(typeOf(held));
 }
 
 /// The name of a fn or proc where a value of the shape `callable` is
@@ -1059,7 +1073,21 @@ Parser::emitCallThrough(const Expr &expr, Callable &callable) {
                                " argument(s), not " +
                                Twine(expr.operands.size()));
   SmallVector<mlir::Value> args;
-  args.push_back(lookup(expr.name)->value);
+  if (expr.field.empty()) {
+    args.push_back(lookup(expr.name)->value);
+  } else {
+    Expr held;
+    held.kind = Expr::Field;
+    held.loc = expr.loc;
+    held.name = expr.name;
+    held.field = expr.field;
+    FailureOr<mlir::Value> value = emit(
+        held, EnumType::get(context,
+                            FlatSymbolRefAttr::get(context, callable.name)));
+    if (failed(value))
+      return failure();
+    args.push_back(*value);
+  }
   for (auto [operand, type] : llvm::zip(expr.operands, callable.params)) {
     FailureOr<mlir::Value> arg = emit(*operand, type);
     if (failed(arg))
@@ -1123,6 +1151,8 @@ LogicalResult Parser::finishCallables() {
                      builder, at, named,
                      integer(at, named.getStorageType(), 0))
               .getResult(0);
+        if (auto text = dyn_cast<TextType>(callable->result))
+          return textConstant(at, "", text);
         return arith::ConstantOp::create(
             builder, at,
             cast<TypedAttr>(builder.getZeroAttr(callable->result)));
@@ -2073,6 +2103,32 @@ LogicalResult Parser::parseStatement() {
     return parseWhile(at);
   if (token.isKeyword("return"))
     return error("'" + token.spelling + "' is not supported yet");
+  // binding.field(args), where the field holds a proc: a call of that
+  // one.
+  if (token.is(Token::Identifier) && peek().is(Token::Dot)) {
+    Lexer ahead = lexer;
+    ahead.next();
+    Token field = ahead.next();
+    Token paren = ahead.next();
+    Expr held;
+    held.kind = Expr::Field;
+    held.loc = at;
+    held.name = token.spelling.str();
+    held.field = field.spelling.str();
+    if (field.is(Token::Identifier) && paren.is(Token::LParen) &&
+        field.spelling != "has" && lookup(held.name) &&
+        lookup(held.name)->kind == Variable::Ref)
+      if (Callable *through = callableOf(typeOf(held))) {
+        FailureOr<ExprPtr> call = parsePrimary();
+        if (failed(call))
+          return failure();
+        if (!through->proc)
+          return error(at, "'" + held.name + "." + held.field +
+                               "' holds a fn: it only gives a value, so "
+                               "calling it for nothing does nothing");
+        return emitCallThrough(**call, *through);
+      }
+  }
   // name(args), where the name holds a proc: a call of that one.
   if (token.is(Token::Identifier) && peek().is(Token::LParen))
     if (Callable *through = callableNamed(token.spelling)) {
@@ -4367,6 +4423,19 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
       node->field = *component;
       if (failed(expect(Token::RParen, "')'")))
         return failure();
+    } else if (consumeIf(Token::LParen)) {
+      // binding.field(args): a call of the fn or proc the field holds.
+      node->kind = Expr::Call;
+      while (!token.is(Token::RParen)) {
+        FailureOr<ExprPtr> arg = parseExpr();
+        if (failed(arg))
+          return failure();
+        node->operands.push_back(std::move(*arg));
+        if (!consumeIf(Token::Comma))
+          break;
+      }
+      if (failed(expect(Token::RParen, "')'")))
+        return failure();
     }
     return node;
   }
@@ -4459,8 +4528,10 @@ Type Parser::typeOf(const Expr &expr) {
     }
     }
   case Expr::Call:
-    if (Callable *through = callableNamed(expr.name))
+    if (Callable *through = callableThrough(expr))
       return through->result;
+    if (!expr.field.empty())
+      return {};
     if (expr.name == "len")
       return builder.getI32Type();
     if (functions.count(expr.name))
@@ -4585,7 +4656,7 @@ Parser::emitSeveral(const Expr &expr, ArrayRef<Type> expected) {
     return values;
   }
   case Expr::Call: {
-    if (!functions.count(expr.name) ||
+    if (!expr.field.empty() || !functions.count(expr.name) ||
         functions[expr.name].results.size() < 2)
       break;
     FailureOr<SmallVector<mlir::Value>> values = emitCall(expr);
@@ -4758,6 +4829,16 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                             symbol(expr.name), builder.getStringAttr("value"))
           .getResult();
     }
+    // `none`, where a fn or proc is expected: no function. Calling it
+    // does nothing, and gives nought.
+    if (expr.name == "none")
+      if (Callable *callable = callableOf(expected)) {
+        auto type = EnumType::get(
+            context, FlatSymbolRefAttr::get(context, callable->name));
+        return UnrealizedConversionCastOp::create(
+                   builder, at, type, integer(at, type.getStorageType(), 0))
+            .getResult(0);
+      }
     // A fn or proc by its name, where one of its shape is expected.
     if (functions.count(expr.name)) {
       if (Callable *callable = callableOf(expected))
@@ -4862,8 +4943,11 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   case Expr::Binary:
     return emitBinary(expr, expected);
   case Expr::Call: {
-    // (A name that holds a fn or proc: a call of that one.)
-    if (Callable *through = callableNamed(expr.name)) {
+    // (A name or a field that holds a fn or proc: a call of that one.)
+    if (!expr.field.empty() && !callableThrough(expr))
+      return error(expr.loc, "'" + expr.name + "." + expr.field +
+                                 "' is not a fn or proc to call");
+    if (Callable *through = callableThrough(expr)) {
       if (inFunction && through->proc && !inProc)
         return error(expr.loc, "'" + expr.name + "' is a proc: it acts, and "
                                "a fn only computes");

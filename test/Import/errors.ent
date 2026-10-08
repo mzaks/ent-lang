@@ -159,8 +159,17 @@ fn uses(show: proc(i32), n: i32) -> i32 {
 
 // -----
 
-// expected-error @+1 {{a fn or proc that is a value gives a number, a bool or an enum, or nothing}}
-component Shape { name: fn(i32) -> text[14] }
+// expected-error @+1 {{a fn or proc that is a value gives a number, a bool, an enum or a text, or nothing}}
+component Shape { owner: fn(i32) -> entity }
+
+// -----
+
+component Shape { side: f32 }
+default_capacity 4
+system s() {
+  // expected-error @+1 {{'p.side' is not a fn or proc to call}}
+  for p: Shape { let x = p.side(1.0) }
+}
 
 // -----
 

@@ -20,6 +20,12 @@
 // CHECK-NEXT: SHAPE 3
 // CHECK-NEXT:   big: 25.0
 // CHECK-NEXT:   (a square, 625.0 twice)
+// Called through the field itself, a fn that gives a text. `none` is no
+// function: calling it does nothing, and gives no text.
+// CHECK-NEXT: named 1: 'one'
+// CHECK-NEXT:   done with 1
+// CHECK-NEXT: named 5: ''
+// CHECK-NEXT:   nothing after 5
 // A proc that calls a proc and gives a value.
 // CHECK-NEXT: shape 7: 1.5
 // CHECK-NEXT: next 8

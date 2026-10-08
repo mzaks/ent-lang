@@ -987,13 +987,15 @@ system draw() {
 
 - `fn(T, ...) -> U` and `proc(T, ...)` (also `proc(T) -> U`) are types,
   of a field, a parameter or a unique. A parameter may be named in them,
-  for the reader. What such a fn gives is a number, a bool or an enum.
+  for the reader. What such a fn gives is a number, a bool, an enum or a
+  text.
 - The name of a fn or proc is a value where one of its shape is
   expected: its own, an imported module's or an `extern` one. It takes
   and gives exactly what the type says.
-- What holds one is called like a function: bound to a name first (`let
-  paint = c.draw`, a parameter), then `paint(...)`. A proc that is held
-  is called where procs are, and not in a fn.
+- What holds one is called like a function: a name (`let paint =
+  c.draw`, a parameter, then `paint(...)`) or the field itself
+  (`c.draw(b.x, b.y, b.w, b.h)`, `tr.ease(0.5)`). A proc that is held is
+  called where procs are, and not in a fn.
 - Two are compared with `==` and `!=` (`if tr.ease == linear`).
 - The program is closed: the compiler knows every fn and proc that is
   used as a value anywhere. A value is the number of its function among
@@ -1001,8 +1003,9 @@ system draw() {
   and calls that one: no pointers, and the call can be inlined. In the C
   header such a field is an enum of those functions
   (`ent_fn_of_f32_to_f32_ease_out`).
-- 0 is none, which is what memory that was never set holds: calling it
-  does nothing, and gives 0.
+- `none` is no function, where one is expected (`Custom { draw: none
+  }`, `if c.draw != none`): calling it does nothing, and gives 0 (no
+  text). It is the 0 that memory that was never set holds.
 
 ### Several values
 

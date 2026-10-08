@@ -3,6 +3,8 @@
 import console
 component Shape { area: fn(side: f32) -> f32, show: proc(n: i32, v: f32), side: f32 }
 component Plain { n: i32 }
+// One that may hold none, and one that gives a text.
+component Named { name: fn(n: i32) -> text[14], after: proc(n: i32) }
 default_capacity 8
 
 fn square(side: f32) -> f32 { side * side }
@@ -20,7 +22,12 @@ proc both(n: i32, v: f32) -> i32 {
 // A fn that takes one.
 fn twice(f: fn(f32) -> f32, x: f32) -> f32 { f(f(x)) }
 
+fn word(n: i32) -> text[14] { if n == 1 { "one" } else { "many" } }
+proc done(n: i32) { put("  done with {n}") }
+
 world {
+  spawn { Named { name: word, after: done }, Plain { n: 1 } }
+  spawn { Named { name: none, after: none }, Plain { n: 5 } }
   spawn { Shape { area: square, show: say, side: 2.0 }, Plain { n: 1 } }
   spawn { Shape { area: half, show: shout, side: 4.0 }, Plain { n: 2 } }
   spawn { Shape { area: square, show: shout, side: 5.0 }, Plain { n: 3 } }
@@ -33,6 +40,13 @@ system work() {
     if s.area == square { put("  (a square, {twice(area, s.side)} twice)") }
   }
   for s: mut Shape, p: Plain where p.n == 1 { s.show = shout }
+  // Called through the field itself; none does nothing and gives
+  // nothing (no text).
+  for d: Named, p: Plain {
+    put("named {p.n}: '{d.name(p.n)}'")
+    d.after(p.n)
+    if d.after == none { put("  nothing after {p.n}") }
+  }
   let next = both(7, 1.5)
   put("next {next}")
 }

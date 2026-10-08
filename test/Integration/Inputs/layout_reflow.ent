@@ -1,0 +1,57 @@
+// A box that gets narrower in half a second, with a text in it that
+// takes more lines the narrower it is: so the box is to be higher, again
+// and again while it is on its way (layout_reflow.test).
+import console
+import window
+import layout
+import layout_window
+
+tag Note
+unique Frame: i32
+default_capacity 16
+
+world {
+  Window.width = 400
+  Window.height = 400
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 400.0, h: 400.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: false, pad: 0.0, gap: 0.0 }
+  }
+  let note = spawn {
+    Box { x: 0.0, y: 0.0, w: 320.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fit },
+    Stack { row: false, pad: 0.0, gap: 0.0 }, Note,
+    Transition { seconds: 0.5, ease: linear, x: false, y: false, w: true,
+                 h: true, fill: false, overlay: false, round: false,
+                 border_colour: false, border_width: false, touch: false }
+  }
+  connect (note)-[Inside]->(root)
+  let words = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "one two three four five six seven eight nine ten", size: 16.0,
+           colour: 0xffffff }
+  }
+  connect (words)-[Inside]->(note)
+}
+
+// A tenth of a second a frame; in the third the box is to be 80 wide.
+system change() {
+  Frame += 1
+  Window.dt = 0.1
+  for b: mut Box with Note where Frame == 3 { b.w = 80.0 }
+}
+
+system show() {
+  for b: Box, s: Shown with Note {
+    put("{Frame}: {s.w} x {s.h}, to be {b.w} x {b.h}")
+  }
+}
+
+schedule frame() {
+  change()  measure()  layout_widths()  wrap()  layout_heights()  animate()
+  layout_widths()  wrap()  layout_heights()  settle()  show()
+}
+main { loop { frame() } until Frame == 12 }

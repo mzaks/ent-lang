@@ -109,7 +109,8 @@ unique Picked {
 // `ry`), how big and in what colour, where it started from in each of
 // those and
 // how far it has got (`tp` in its place, `tw` and `th` in its width and
-// height, `tc` in its colours: 0 to 1); a box that is to be destroyed.
+// height, `tc` in its colours: 0 to 1, and 2 for a width or height from
+// the frame after it got there); a box that is to be destroyed.
 component Glide { vx: f32, vy: f32, x: f32, y: f32, held: bool, was: bool }
 component Tint { colour: i32, part: f32 }
 component Shown {
@@ -136,8 +137,10 @@ component Eased {
   th: f32, colour: i32, tint: i32, part: f32, tc: f32
 }
 component Dead { at: i32 }
-// The line of the inspector's list a box is in.
-component Listed { line: i32 }
+// The line of the inspector's list a box is in, and whether it is in the
+// tree the list goes by: under the box it is in or floats over.
+component Listed { line: i32, tied: bool }
+relation (Box)-[Shows]->(Box) tree ordered by Slot.at capacity 256
 
 // The pointer is the mouse.
 system pointer() {
@@ -359,13 +362,20 @@ system animate() {
     ez.y = s.dy
     ez.tp = 0.0
   }
+  // (Its height first: where that is to be another while the box is
+  // on its way to another width, or has just got there, it is what is
+  // inside it that needs another at that width, a text that goes on in
+  // more lines: the box is as high as that at once, and its height is on
+  // its way with its width.)
+  for s: Shown, ez: mut Eased, b: Box on changed b.h {
+    if ez.tw < 2.0 { ez.th = 1.0 } else {
+      ez.h = s.h
+      ez.th = 0.0
+    }
+  }
   for s: Shown, ez: mut Eased, b: Box on changed b.w {
     ez.w = s.w
     ez.tw = 0.0
-  }
-  for s: Shown, ez: mut Eased, b: Box on changed b.h {
-    ez.h = s.h
-    ez.th = 0.0
   }
   // (One that leaves to another size, for that.)
   for s: Shown, ez: mut Eased, lv: Leave where lv.dw != 0.0 on added Gone {
@@ -491,8 +501,9 @@ system animate() {
       }
     }
     e.add(Shown { w: w, h: h, colour: colour, dx: x, dy: y, away: false })
-    e.add(Eased { x: x, y: y, rx: rx, ry: ry, tp: t, w: w, tw: t, h: h,
-                  th: t, colour: colour, tint: veil,
+    let ts = if t < 1.0 { 0.0 } else { 2.0 }
+    e.add(Eased { x: x, y: y, rx: rx, ry: ry, tp: t, w: w, tw: ts, h: h,
+                  th: ts, colour: colour, tint: veil,
                   part: if veil != 0 { 1.0 } else { 0.0 }, tc: t })
     e.add(Inner { w: w, h: h })
     if veil != 0 && !e.has(Tint) { e.add(Tint { colour: veil, part: 1.0 }) }
@@ -535,11 +546,19 @@ system animate() {
   // be destroyed.
   for e, b: Box, tr: Transition, s: mut Shown, ez: mut Eased, in: mut Inner,
       optional f: Fill, optional lv: Leave
-      where ez.tp < 1.0 || ez.tw < 1.0 || ez.th < 1.0 || ez.tc < 1.0 {
+      where ez.tp < 1.0 || ez.tw < 2.0 || ez.th < 2.0 || ez.tc < 1.0 {
     var place = further(ez.tp, tr.seconds, Window.dt)
     var colours = further(ez.tc, tr.seconds, Window.dt)
-    var wide = if tr.w { further(ez.tw, tr.seconds, Window.dt) } else { 1.0 }
-    var high = if tr.h { further(ez.th, tr.seconds, Window.dt) } else { 1.0 }
+    // (Its width and height are 1 when they have got there, and 2 from
+    // the frame after: see above for what that is asked for.)
+    var wide = if tr.w && ez.tw < 1.0 {
+      further(ez.tw, tr.seconds, Window.dt)
+    } else { ez.tw + 1.0 }
+    var high = if tr.h && ez.th < 1.0 {
+      further(ez.th, tr.seconds, Window.dt)
+    } else { ez.th + 1.0 }
+    wide = min(wide, 2.0)
+    high = min(high, 2.0)
     // (How far from its place: none, in the end, or as far as it leaves
     // to.)
     var x = 0.0
@@ -601,7 +620,7 @@ system animate() {
   // here would be there for both kinds.)
   for e, b: Box without Look on added Box {
     e.add(Look { dx: 0.0, dy: 0.0, colour: 0, part: 0.0, away: false })
-    e.add(Listed { line: 0 })
+    e.add(Listed { line: 0, tied: false })
   }
   // (In turns: what floats goes by the box under it, and what is inside
   // it by it.)
@@ -677,6 +696,17 @@ system animate() {
       lk.part = part
     }
   } until inside + over == 0
+}
+
+// After the layout that follows `animate`: a box on its way to another
+// width is as high as what is inside it needs at the width it has got
+// to, in the same frame.
+system settle() {
+  for b: Box, s: mut Shown, ez: Eased, in: mut Inner
+      where ez.tw < 2.0 && ez.th >= 1.0 && s.h != b.h {
+    s.h = b.h
+    in.h = b.h
+  }
 }
 
 // The pointer does not find a box that is on its way to another place,
@@ -947,65 +977,73 @@ system inspect() {
     Picked.bottom = 0.0
     Picked.gap = 0.0
     Picked.more = 0
+    // The list goes by a tree of its own: a box under the box it is in,
+    // or the one it floats over, which the layout has two trees for. A
+    // box is tied into it when it is first listed.
+    for (e, at: mut Listed)-[Inside]->(up) where !at.tied {
+      connect (e)-[Shows]->(up)
+      at.tied = true
+    }
+    for (e, at: mut Listed)-[Over]->(up) where !at.tied {
+      connect (e)-[Shows]->(up)
+      at.tied = true
+    }
     // A box is in the line after all that came before it, depth first:
-    // under the box it is in, after the boxes before it there and all
-    // that is in those. (What floats is listed by itself, as deep as it
-    // is over boxes, after the boxes of the layers below.)
+    // under the box it is in or over, after the boxes before it there
+    // and all that is in those.
     Inspector.line = 0
-    for layer in 0..8 {
-      for e, b: Box, l: Layer, z: Size, k: Stack, at: mut Listed,
-          optional f: Fill, optional p: Pad
-          top down dfs Inside where l.z == layer {
-        let n = Inspector.line
-        Inspector.line += 1
-        at.line = n
-        let y = 8.0 + Inspector.top + n as f32 * row
-        let picked = if inside { n == pointed } else {
-          e.has(Hovered) && l.z == PointerTop && l.depth == Inspector.depth
+    for e, b: Box, l: Layer, z: Size, k: Stack, at: mut Listed,
+        optional f: Fill, optional p: Pad
+        top down dfs Shows {
+      let n = Inspector.line
+      Inspector.line += 1
+      at.line = n
+      let y = 8.0 + Inspector.top + n as f32 * row
+      let picked = if inside { n == pointed } else {
+        e.has(Hovered) && l.z == PointerTop && l.depth == Inspector.depth
+      }
+      if y > -row && y + row <= about {
+        let x = left + 10.0 + l.depth as f32 * 12.0
+        if picked { rect(left + 1.0, y, wide - 1.0, row, 0x2a4a80) }
+        else if e.has(Hovered) { rect(left + 1.0, y, wide - 1.0, row, 0x202a34) }
+        var swatch = 0x3a4650
+        if let colour = f.colour { swatch = colour }
+        rect(x, y + 4.0, 10.0, 10.0, swatch)
+        var what: text[14] = if e.has(Float) { "float" } else if e.has(Clip) { "clip" }
+                   else if e.has(Text) { "text" }
+                   else if k.row { "row" } else { "column" }
+        label(says_line(what, b.w, b.h), x + 16.0, y + 3.0, 12.0,
+              if picked { 0xffffff } else { 0xa0b0c0 })
+      }
+      if picked {
+        Picked.any += 1
+        Picked.line += n
+        Picked.layer += l.z
+        Picked.depth += l.depth
+        Picked.x += b.x
+        Picked.y += b.y
+        Picked.w += b.w
+        Picked.h += b.h
+        Picked.wide += z.w as i32
+        Picked.high += z.h as i32
+        var left_pad = k.pad
+        var right_pad = k.pad
+        var top_pad = k.pad
+        var bottom_pad = k.pad
+        if let pl = p.left, let pr = p.right, let pt = p.top,
+           let pb = p.bottom {
+          left_pad = pl
+          right_pad = pr
+          top_pad = pt
+          bottom_pad = pb
         }
-        if y > -row && y + row <= about {
-          let x = left + 10.0 + l.depth as f32 * 12.0
-          if picked { rect(left + 1.0, y, wide - 1.0, row, 0x2a4a80) }
-          else if e.has(Hovered) { rect(left + 1.0, y, wide - 1.0, row, 0x202a34) }
-          var swatch = 0x3a4650
-          if let colour = f.colour { swatch = colour }
-          rect(x, y + 4.0, 10.0, 10.0, swatch)
-          var what: text[14] = if e.has(Float) { "float" } else if e.has(Clip) { "clip" }
-                     else if e.has(Text) { "text" }
-                     else if k.row { "row" } else { "column" }
-          label(says_line(what, b.w, b.h), x + 16.0, y + 3.0, 12.0,
-                if picked { 0xffffff } else { 0xa0b0c0 })
-        }
-        if picked {
-          Picked.any += 1
-          Picked.line += n
-          Picked.layer += l.z
-          Picked.depth += l.depth
-          Picked.x += b.x
-          Picked.y += b.y
-          Picked.w += b.w
-          Picked.h += b.h
-          Picked.wide += z.w as i32
-          Picked.high += z.h as i32
-          var left_pad = k.pad
-          var right_pad = k.pad
-          var top_pad = k.pad
-          var bottom_pad = k.pad
-          if let pl = p.left, let pr = p.right, let pt = p.top,
-             let pb = p.bottom {
-            left_pad = pl
-            right_pad = pr
-            top_pad = pt
-            bottom_pad = pb
-          }
-          Picked.left += left_pad
-          Picked.right += right_pad
-          Picked.top += top_pad
-          Picked.bottom += bottom_pad
-          Picked.gap += k.gap
-          Picked.more += if e.has(Scroll) { 1 } else if e.has(Transition) { 2 }
-                         else if e.has(Passthrough) { 3 } else { 0 }
-        }
+        Picked.left += left_pad
+        Picked.right += right_pad
+        Picked.top += top_pad
+        Picked.bottom += bottom_pad
+        Picked.gap += k.gap
+        Picked.more += if e.has(Scroll) { 1 } else if e.has(Transition) { 2 }
+                       else if e.has(Passthrough) { 3 } else { 0 }
       }
     }
     Inspector.lines = Inspector.line
@@ -1057,6 +1095,7 @@ schedule ui() {
   layout_widths()
   wrap()
   layout_heights()
+  settle()
   draw()
   inspect()
 }

@@ -1,0 +1,21 @@
+// A box on its way to another width, with a text in it that takes more
+// lines the narrower the box is: the box is as high as the text needs at
+// the width it has got to, in the same frame, and is as high as it is to
+// be when it is as wide as it is to be. (Its height is on its way with
+// its width: it does not set out again, for its own half second, each
+// time the text takes another line.)
+// RUN: mkdir -p %t.dir
+// RUN: cp %S/../../devices/window.ent %t.dir/window.ent
+// RUN: cp %S/Inputs/headless_window.c %t.dir/window.c
+// RUN: %ent run -I %t.dir -I %S/../../examples %S/Inputs/layout_reflow.ent \
+// RUN:     2>/dev/null | FileCheck %s
+
+// CHECK:      2: 320.0 x 32.0, to be 320.0 x 32.0
+// To be 80 wide: a fifth of the way a frame.
+// CHECK-NEXT: 3: 272.0 x 32.0, to be 80.0 x 32.0
+// CHECK-NEXT: 4: 224.0 x 32.0, to be 80.0 x 32.0
+// Three lines at this width, four at the next, six at the last.
+// CHECK-NEXT: 5: 176.0 x 48.0, to be 80.0 x 48.0
+// CHECK-NEXT: 6: 128.0 x 64.0, to be 80.0 x 64.0
+// CHECK-NEXT: 7: 80.0 x 96.0, to be 80.0 x 96.0
+// CHECK-NEXT: 8: 80.0 x 96.0, to be 80.0 x 96.0
