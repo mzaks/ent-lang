@@ -567,6 +567,8 @@ thereby passed down: the next time it runs that is no event.
   which it may though the `for` writes `total`: where a `for` goes
   along a tree, the other end of the tree's edges it visits has been
   visited (the children `bottom up`, the parent `top down`).
+  In a `for` that goes `top down` the children are visited after the
+  node: their events count for it the next time it runs, like its own.
 - `changed` means changed: a write of the value a field has is no
   event. So passes that feed each other (as in `examples/layout.ent`,
   where sizes go up the tree and room comes down) settle by themselves,
@@ -808,7 +810,10 @@ schedule frame(dt: f32) {
 
 Runs systems in order; arguments may be literals, which take the system
 parameter's type. Systems must be declared before the schedules that run
-them.
+them. A schedule can also run a schedule declared before it, its own or
+an imported module's: that one's runs take their place, with its
+parameters the values given (`schedule frame() { begin()  ui()
+present() }`, where `ui` is a module's schedule of the steps it needs).
 
 ```
 schedule frame(dt: f32) run_if !Paused {

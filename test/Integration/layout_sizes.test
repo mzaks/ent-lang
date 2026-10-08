@@ -1,0 +1,51 @@
+// The sizes examples/layout.ent gives, as Clay does: fixed, as big as the
+// content, growing into the room that is left (the smallest first, each
+// to its most), a share of the box it is in; padding side by side; where
+// the boxes stand in the room they leave; a ratio of width to height; a
+// box's own content; and a row whose boxes do not fit, which shrink, the
+// largest first, each to its least.
+// RUN: %ent run -I %S/../../examples %S/Inputs/layout_sizes.ent 2>/dev/null > %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// What `layout` works out from what changed in the second frame is what
+// it works out from nothing: the same with the changes made before it
+// first runs.
+// RUN: sed 's/Frame == 2/Frame == 1/' %S/Inputs/layout_sizes.ent > %t.direct.ent
+// RUN: grep "^3:" %t.out > %t.late
+// RUN: %ent run -I %S/../../examples %t.direct.ent 2>/dev/null | grep "^3:" | cmp - %t.late
+
+// 570 wide inside the padding. A quarter of 600 less padding and gaps
+// (60) is 135; the column is 100 by its tight row, which may be 90; so
+// the one that grows has 245 and takes the 100 it may. All of it is 425,
+// and starts 145 further right. Each is in the middle of 360.
+// CHECK:      1: root 0.0 0.0 600.0 400.0
+// CHECK-NEXT: 1: fixed 165.0 185.0 60.0 50.0
+// CHECK-NEXT: 1: quarter 235.0 120.0 135.0 180.0
+// CHECK-NEXT: 1: capped 380.0 170.0 100.0 80.0
+// CHECK-NEXT: 1: column 490.0 168.0 100.0 84.0
+// In the column, in the middle of its 90: the picture, 80 by 40; the
+// word, 40 by 12 and 3 around; and the row, where 50, 30 and 20 with two
+// gaps of 5 are 110, 20 too many: the widest gives them all.
+// CHECK-NEXT: 1: picture 500.0 173.0 80.0 40.0
+// CHECK-NEXT: 1: word 517.0 217.0 46.0 18.0
+// CHECK-NEXT: 1: tight 495.0 239.0 90.0 8.0
+// CHECK-NEXT: 1: wide 495.0 239.0 30.0 8.0
+// CHECK-NEXT: 1: mid 530.0 239.0 30.0 8.0
+// CHECK-NEXT: 1: small 565.0 239.0 20.0 8.0
+// Narrower, with other padding, at the left and the bottom. Half is 236.
+// The column, a row now, is 238 by what is in it and 233 at least, and
+// there are 62 too many: it gives 5, and the one that grows, with nothing
+// in it, has nothing to give.
+// CHECK:      3: root 0.0 0.0 520.0 400.0
+// CHECK-NEXT: 3: fixed 8.0 340.0 60.0 50.0
+// CHECK-NEXT: 3: quarter 78.0 197.0 236.0 193.0
+// CHECK-NEXT: 3: capped 324.0 310.0 0.0 80.0
+// CHECK-NEXT: 3: column 334.0 353.333344 233.0 36.666664
+// The picture is a third as high as wide. In the row of 223 the word
+// (70, and no less) and the tight row (70, at least 65) are 5 too many:
+// the row gives them, and its three are as narrow as they can be.
+// CHECK-NEXT: 3: picture 339.0 358.333344 80.0 26.666666
+// CHECK-NEXT: 3: word 423.0 358.333344 70.0 18.0
+// CHECK-NEXT: 3: tight 497.0 358.333344 65.0 8.0
+// CHECK-NEXT: 3: wide 497.0 358.333344 10.0 8.0
+// CHECK-NEXT: 3: mid 512.0 358.333344 25.0 8.0
+// CHECK-NEXT: 3: small 542.0 358.333344 20.0 8.0

@@ -55,6 +55,9 @@ extern fn text_width(text: text[126], size: f32) -> f32
 // past `width`: lines `size` pixels high, a quarter of that between them.
 extern proc paragraph(text: text[126], x: f32, y: f32, width: f32, size: f32,
                       color: i32)
+// How wide the longest word of a text is: the least width `paragraph`
+// can draw it in without a word reaching past it.
+extern fn text_min_width(text: text[126], size: f32) -> f32
 // How high `paragraph` draws a text of that size in that width.
 extern fn text_height(text: text[126], size: f32, width: f32) -> f32
 // Saves the picture as it is now (a .png) in the directory the program

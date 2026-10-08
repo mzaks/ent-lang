@@ -19,7 +19,7 @@ world {
     Box { x: 0.0, y: 0.0, w: 200.0, h: 0.0 },
     Size { w: Sizing.Fixed, h: Sizing.Grow },
     Stack { row: false, pad: 8.0, gap: 4.0 }, Name { name: "side" },
-    Align { across: Across.Middle }
+    Align { x: Place.Middle, y: Place.Start }
   }
   let rest = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },

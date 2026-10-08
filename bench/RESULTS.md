@@ -2887,3 +2887,24 @@ and every field read through an arrow looked its entity up again.
   `bench/boxes` went from 18 to 22 - 23 us a frame.
 - A program that was built is kept (`tools/ent`, see its --help): the
   demo starts in 0.4 s the second time.
+
+## 2026-10-08: the layout library with Clay's sizing
+
+`examples/layout.ent` sizes boxes as Clay does now (percent, limits,
+growing the smallest first and shrinking the largest first, padding
+side by side, alignment both ways, ratios, a box's own content): five
+passes where there were three, and every box has six components of the
+library's own.
+
+- `bench/boxes`: 24.0 - 25.5 us a frame (18 before).
+- The demo's first build: 5.0 s (1.6 before; started again it takes 0.4
+  from the cache). It was 10 s with the new library as first written:
+  a body that reads fields of the boxes inside a box in eight loops
+  looked each box up, by a branch for each of fifteen archetypes, for
+  every field. Now an entity is found once for the fields read of it,
+  and by a table: where it is says, by a chain of selects, where each
+  column starts, and one load reads it (469,178 lines of LLVM IR to
+  197,361). Bodies of plain reactive `for`s and of those that go in an
+  order worked out are one function for all archetypes too (165,639).
+- What is left is mostly the calls of those functions, each given some
+  fifty places in the world's memory for one archetype.

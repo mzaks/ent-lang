@@ -939,3 +939,22 @@ system s() {
   // expected-error @+1 {{a 'while' condition must be a bool}}
   while n { n += 1 }
 }
+
+// -----
+
+system a() { }
+schedule inner(by: i32) { a() }
+schedule frame() {
+  // expected-error @+1 {{'inner' takes 1 values, and is given 0}}
+  inner()
+}
+
+// -----
+
+unique On: bool
+system a() { }
+schedule inner() run_if On { a() }
+schedule frame() {
+  // expected-error @+1 {{'inner' runs only if its own condition holds, which a schedule that runs it would have to ask: not supported yet}}
+  inner()
+}

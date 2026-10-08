@@ -226,6 +226,7 @@ public:
         relations([this](StringRef name) { return resolve(name); }),
         systems([this](StringRef name) { return resolve(name); }),
         schedules([this](StringRef name) { return resolve(name); }),
+        scheduleOps([this](StringRef name) { return resolve(name); }),
         functions([this](StringRef name) { return resolve(name); }),
         enums([this](StringRef name) { return resolve(name); }) {
     advance();
@@ -547,6 +548,8 @@ private:
   }
   Declared<SmallVector<Type>> systems;
   Declared<SmallVector<Type>> schedules;
+  /// The schedules themselves, for a schedule that runs one.
+  Declared<Operation *> scheduleOps;
   Declared<Function> functions;
   /// The cases of every enum, in the order they number them.
   Declared<SmallVector<std::string>> enums;
@@ -1443,6 +1446,7 @@ LogicalResult Parser::parseSchedule() {
     block->addArgument(type, loc(at));
   state.addRegion(); // the condition, filled below if there is one
   Operation *schedule = builder.create(state);
+  scheduleOps[*name] = schedule;
   schedules.try_emplace(*name);
   for (auto &[param, type] : params)
     schedules[*name].push_back(type);
@@ -1473,6 +1477,57 @@ LogicalResult Parser::parseSchedule() {
     if (failed(system) || failed(expect(Token::LParen, "'('")))
       return failure();
     auto known = systems.find(*system);
+    // A schedule: its runs take their place here, with its parameters
+    // the values given.
+    auto whole = schedules.find(*system);
+    if (known == systems.end() && whole != schedules.end() &&
+        scheduleOps.count(*system)) {
+      Operation *other = scheduleOps[*system];
+      if (other == schedule)
+        return error(callAt, "a schedule does not run itself");
+      if (!other->getRegion(1).empty())
+        return error(callAt, "'" + *system + "' runs only if its own "
+                                 "condition holds, which a schedule that "
+                                 "runs it would have to ask: not supported "
+                                 "yet");
+      SmallVector<mlir::Value> given;
+      while (!token.is(Token::RParen)) {
+        FailureOr<ExprPtr> arg = parseExpr();
+        if (failed(arg))
+          return failure();
+        Type expected = given.size() < whole->second.size()
+                            ? whole->second[given.size()]
+                            : Type();
+        FailureOr<mlir::Value> value = emit(**arg, expected);
+        if (failed(value))
+          return failure();
+        given.push_back(*value);
+        if (!consumeIf(Token::Comma))
+          break;
+      }
+      if (failed(expect(Token::RParen, "')'")))
+        return failure();
+      if (given.size() != whole->second.size())
+        return error(callAt, "'" + *system + "' takes " +
+                                 Twine(whole->second.size()) +
+                                 " values, and is given " +
+                                 Twine(given.size()));
+      Block &runs = other->getRegion(0).front();
+      IRMapping mapping;
+      for (auto [parameter, value] : llvm::zip(runs.getArguments(), given)) {
+        if (parameter.getType() != value.getType())
+          return error(callAt, "a value given to '" + *system +
+                                   "' has another type than its parameter");
+        mapping.map(parameter, value);
+      }
+      for (Operation &op : runs.without_terminator())
+        builder.insert(op.clone(mapping));
+      if (token.isKeyword("run_if"))
+        return error("a schedule that is run in another has no condition "
+                     "there: give its runs theirs");
+      consumeIf(Token::Semicolon);
+      continue;
+    }
     if (known == systems.end())
       return error(callAt, "unknown system '" + *system +
                                "'; declare systems before the schedules "

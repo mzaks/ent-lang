@@ -118,6 +118,28 @@ static int ent_window_wrap(const char *text, float size, float width,
   return lines;
 }
 
+float ent_window_text_min_width(const ent_text126 *text, float size) {
+  ENT_WINDOW_TEXT(all, text);
+  char word[128];
+  int widest = 0;
+  const char *at = all;
+  for (;;) {
+    while (*at == ' ')
+      at++;
+    const char *end = at;
+    while (*end && *end != ' ')
+      end++;
+    if (end == at)
+      break;
+    snprintf(word, sizeof word, "%.*s", (int)(end - at), at);
+    int width = MeasureText(word, (int)size);
+    if (width > widest)
+      widest = width;
+    at = end;
+  }
+  return (float)widest;
+}
+
 void ent_window_paragraph(const ent_text126 *text, float x, float y,
                           float width, float size, int32_t color) {
   ENT_WINDOW_TEXT(all, text);

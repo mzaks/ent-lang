@@ -1467,11 +1467,8 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
                << "': the other entity is seen to change where it is "
                << "visited first";
       if (down) {
-        if (!isLeavesFirst())
-          return emitOpError("reacts to changed ")
-                 << trigger.component << " down " << trigger.via
-                 << " without 'leaves first': children are visited first "
-                 << "only then";
+        // (Parents first, a child is visited after the entity: its
+        // events count like the entity's own, the next time.)
       } else {
         if (before && isLeavesFirst())
           return emitOpError("reacts to changed ")
@@ -2140,9 +2137,17 @@ LogicalResult EdgesOp::verify() {
                        "of the entity the query visits");
   if ((*this)->getParentOfType<EdgesOp>())
     return emitOpError("cannot be nested in another 'ent.edges'");
+  // In a loop only where it sends nothing to the other ends and changes
+  // no edge: what it sends waits in a place per edge, once.
+  bool sends = false;
+  getBody().walk([&](Operation *op) {
+    sends |= isa<ApplyOp, ConnectOp, DisconnectOp>(op) ||
+             (isa<SetOp>(op) &&
+              cast<SetOp>(op).getRef() == getBody().getArgument(0));
+  });
   for (Operation *parent = (*this)->getParentOp(); !isa<QueryOp>(parent);
        parent = parent->getParentOp())
-    if (isa<LoopLikeOpInterface>(parent))
+    if (sends && isa<LoopLikeOpInterface>(parent))
       return emitOpError("must not be inside a loop ('")
              << parent->getName() << "')";
   Block &body = getBody().front();

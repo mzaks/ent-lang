@@ -1,6 +1,7 @@
-// A window laid out by examples/layout.ent: a bar at the side, and next
-// to it a header, three cards and a footer. Every box says how big it is
-// to be (so many pixels, what is inside it, or the room there is) and
+// A window laid out by examples/layout.ent and drawn by
+// examples/layout_window.ent: a bar at the side, and next to it a header,
+// three cards and a footer. Every box says how big it is to be (so many
+// pixels, what is inside it, the room there is, or a share of it) and
 // which box it is in; where it ends up is worked out every frame.
 //
 //   tools/ent run -I examples examples/layout_demo.ent
@@ -12,12 +13,10 @@
 // window ends the program.
 import window
 import layout
+import layout_window
 
-component Tint { color: i32 }
 tag SideBar
 tag Cards
-// A box as wide as its label and so much more, which the window measures.
-component Fitted { around: f32 }
 tag Note
 default_capacity 256
 
@@ -32,69 +31,72 @@ world {
   let root = spawn {
     Box { x: 0.0, y: 0.0, w: 900.0, h: 600.0 },
     Size { w: Sizing.Fixed, h: Sizing.Fixed },
-    Stack { row: true, pad: 12.0, gap: 12.0 }, Tint { color: 0x101418 }
+    Stack { row: true, pad: 12.0, gap: 12.0 }, Fill { colour: 0x101418 }
   }
   let side = spawn {
     Box { x: 0.0, y: 0.0, w: 180.0, h: 0.0 },
     Size { w: Sizing.Fixed, h: Sizing.Grow },
-    Stack { row: false, pad: 10.0, gap: 8.0 }, Tint { color: 0x1c242c },
+    Stack { row: false, pad: 10.0, gap: 8.0 }, Fill { colour: 0x1c242c },
     SideBar
   }
   let rest = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
     Size { w: Sizing.Grow, h: Sizing.Grow },
-    Stack { row: false, pad: 0.0, gap: 12.0 }, Tint { color: 0x101418 }
+    Stack { row: false, pad: 0.0, gap: 12.0 }
   }
   connect (side)-[Inside]->(root)
   connect (rest)-[Inside]->(root)
 
-  // The side bar's entries: as wide as the bar, 34 pixels high.
+  // The side bar's entries: as wide as the bar, 34 pixels high, what
+  // each says 10 in from its edge and in the middle of its height.
   for i in 0..6 {
     let entry = spawn {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 34.0 },
       Size { w: Sizing.Grow, h: Sizing.Fixed },
       Stack { row: true, pad: 0.0, gap: 0.0 },
-      Tint { color: if i == 1 { 0x3a7bd5 } else { 0x2a3640 } },
-      Label { text: "entry {i + 1}", size: 16.0, colour: 0xd0d8e0 }
+      Pad { left: 10.0, right: 10.0, top: 0.0, bottom: 0.0 },
+      Align { x: Place.Start, y: Place.Middle },
+      Fill { colour: if i == 1 { 0x3a7bd5 } else { 0x2a3640 } },
+      Text { text: "entry {i + 1}", size: 16.0, colour: 0xd0d8e0 }
     }
     connect (entry)-[Inside]->(side)
   }
 
-  // A header with its buttons in the middle of its height, the cards
-  // with the room that is left, a footer.
+  // A header with its buttons in the middle of its height and at its
+  // right end, the cards with the room that is left, a footer.
   let header = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 56.0 },
     Size { w: Sizing.Grow, h: Sizing.Fixed },
-    Stack { row: true, pad: 8.0, gap: 8.0 }, Tint { color: 0x1c242c },
-    Align { across: Across.Middle }
+    Stack { row: true, pad: 8.0, gap: 8.0 }, Fill { colour: 0x1c242c },
+    Align { x: Place.End, y: Place.Middle }
   }
   let cards = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
     Size { w: Sizing.Grow, h: Sizing.Grow },
-    Stack { row: true, pad: 0.0, gap: 12.0 }, Tint { color: 0x101418 },
-    Cards
+    Stack { row: true, pad: 0.0, gap: 12.0 }, Cards
   }
   let footer = spawn {
-    Box { x: 0.0, y: 0.0, w: 0.0, h: 28.0 },
-    Size { w: Sizing.Grow, h: Sizing.Fixed },
-    Stack { row: true, pad: 6.0, gap: 6.0 }, Tint { color: 0x1c242c },
-    Label { text: "drag: side bar   space: stack the cards", size: 14.0,
-            colour: 0x808890 }
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 6.0, gap: 6.0 }, Fill { colour: 0x1c242c },
+    Text { text: "drag: side bar   space: stack the cards", size: 14.0,
+           colour: 0x808890 }
   }
   connect (header)-[Inside]->(rest)
   connect (cards)-[Inside]->(rest)
   connect (footer)-[Inside]->(rest)
 
-  // Buttons as wide as what they say, and 12 more on either side.
+  // Buttons as big as what they say, and 12 more on either side.
   for i in 0..4 {
     let button = spawn {
-      Box { x: 0.0, y: 0.0, w: 0.0, h: 30.0 },
-      Size { w: Sizing.Fixed, h: Sizing.Fixed },
-      Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x3a7bd5 },
-      Label { text: if i == 0 { "open" } else if i == 1 { "save as" }
-                    else if i == 2 { "undo" } else { "preferences" },
-              size: 16.0, colour: 0xffffff },
-      Fitted { around: 12.0 }
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Fit, h: Sizing.Fit },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Pad { left: 12.0, right: 12.0, top: 7.0, bottom: 7.0 },
+      Fill { colour: 0x3a7bd5 },
+      Text { text: if i == 0 { "open" } else if i == 1 { "save as" }
+                   else if i == 2 { "undo" } else { "preferences" },
+             size: 16.0, colour: 0xffffff }
     }
     connect (button)-[Inside]->(header)
   }
@@ -104,15 +106,14 @@ world {
   let note = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
     Size { w: Sizing.Fit, h: Sizing.Fit },
-    Stack { row: true, pad: 4.0, gap: 0.0 }, Tint { color: 0xf0e0a0 },
+    Stack { row: true, pad: 4.0, gap: 0.0 }, Fill { colour: 0xf0e0a0 },
     Float { dx: 0.0, dy: 0.0 }, Note
   }
   let line = spawn {
-    Box { x: 0.0, y: 0.0, w: 0.0, h: 18.0 },
-    Size { w: Sizing.Fixed, h: Sizing.Fixed },
-    Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0xf0e0a0 },
-    Label { text: "a note that floats", size: 14.0, colour: 0x202020 },
-    Fitted { around: 4.0 }
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: true, pad: 2.0, gap: 0.0 },
+    Text { text: "a note that floats", size: 14.0, colour: 0x202020 }
   }
   connect (note)-[Over]->(root)
   connect (line)-[Inside]->(note)
@@ -121,39 +122,49 @@ world {
   let mark = spawn {
     Box { x: 0.0, y: 0.0, w: 8.0, h: 8.0 },
     Size { w: Sizing.Fixed, h: Sizing.Fixed },
-    Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0xd04030 },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Fill { colour: 0xd04030 },
     Float { dx: -6.0, dy: -6.0 }
   }
   connect (mark)-[Over]->(line)
 
-  // Three cards share the width; in each, a picture with the height that
-  // is left above a text, which is as high as its lines come to in the
-  // width of the card.
+  // Three cards share the width, the middle one never more than 260
+  // wide; in each, a picture that is twice as wide as high above a text,
+  // which is as high as its lines come to in the width of the card.
   for i in 0..3 {
     let card = spawn {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
       Size { w: Sizing.Grow, h: Sizing.Grow },
-      Stack { row: false, pad: 10.0, gap: 6.0 }, Tint { color: 0x242e38 }
+      Stack { row: false, pad: 10.0, gap: 6.0 }, Fill { colour: 0x242e38 },
+      Limits { min_w: 120.0, max_w: if i == 1 { 260.0 } else { 0.0 },
+               min_h: 0.0, max_h: 0.0 }
     }
     connect (card)-[Inside]->(cards)
     let picture = spawn {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
-      Size { w: Sizing.Grow, h: Sizing.Grow },
-      Stack { row: true, pad: 0.0, gap: 0.0 },
-      Tint { color: 0x805030 + i * 0x203040 }
+      Size { w: Sizing.Grow, h: Sizing.Fit },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Aspect { ratio: 2.0 },
+      Fill { colour: 0x805030 + i * 0x203040 }
     }
     connect (picture)-[Inside]->(card)
     let text = spawn {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
-      Size { w: Sizing.Grow, h: Sizing.Fixed },
-      Stack { row: true, pad: 0.0, gap: 0.0 }, Tint { color: 0x242e38 },
-      Label { text: if i == 0 { "A card is as wide as its share of the room, and its text breaks where the card ends." }
-                    else if i == 1 { "Drag the side bar: the lines break elsewhere, and the picture has what is left." }
-                    else { "Short." },
-              size: 16.0, colour: 0xa0b0c0 },
+      Size { w: Sizing.Grow, h: Sizing.Fit },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Text { text: if i == 0 { "A card is as wide as its share of the room, and its text breaks where the card ends." }
+                   else if i == 1 { "This one is never more than 260 wide; the others take what is left." }
+                   else { "Short." },
+             size: 16.0, colour: 0xa0b0c0 },
       Wrap
     }
     connect (text)-[Inside]->(card)
+    // And a bar that is half as wide as the card, at its bottom.
+    let bar = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 6.0 },
+      Size { w: Sizing.Percent, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Share { w: 0.5, h: 0.0 },
+      Fill { colour: 0x3a7bd5 }
+    }
+    connect (bar)-[Inside]->(card)
   }
 }
 
@@ -170,52 +181,12 @@ system interact() {
     o.dx = Mouse.x + 14.0
     o.dy = Mouse.y + 10.0
   }
-  // A box that fits its label is as wide as the window draws that: once,
-  // when it is made, since nothing here gives a label another text.
-  for b: mut Box, t: Label, f: Fitted on added Fitted {
-    let w = text_width(t.text, t.size) + 2.0 * f.around
-    b.w = w
-  }
-}
-
-// A text that goes on in the next line is as high as its lines come to
-// in the width `layout` gave its box: only where that is another.
-system wrap() {
-  for b: mut Box, t: Label with Wrap on changed b.w {
-    let h = text_height(t.text, t.size, b.w)
-    b.h = h
-  }
-}
-
-// A box is drawn after the one it is in, and so on top of it, and all that
-// is in a box before the next box: depth first. What floats is a layer
-// above, drawn after all of the layer below, with its texts.
-system draw() {
-  for z in 0..3 {
-    for b: Box, t: Tint, l: Layer top down dfs Inside where l.z == z {
-      rect(b.x, b.y, b.w, b.h, t.color)
-    }
-    for e, b: Box, t: Label, l: Layer, optional f: Fitted where l.z == z {
-      var around = 10.0
-      if let a = f.around { around = a }
-      if e.has(Wrap) { paragraph(t.text, b.x, b.y, b.w, t.size, t.colour) }
-      else {
-        label(t.text, b.x + around, b.y + (b.h - t.size) * 0.5, t.size,
-              t.colour)
-      }
-    }
-  }
 }
 
 schedule frame() {
   begin()
   interact()
-  // The widths, then the heights of the texts that those give, then
-  // what follows from these.
-  layout()
-  wrap()
-  layout()
-  draw()
+  ui()
   present()
 }
 

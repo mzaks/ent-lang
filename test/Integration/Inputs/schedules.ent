@@ -1,0 +1,11 @@
+// A schedule that runs another: its runs take their place (schedules.test).
+import console
+unique N: i32
+system add(by: i32) {
+  N += by
+  put("add {by}: {N}")
+}
+system say() { put("say {N}") }
+schedule both(by: i32) { add(by)  say() }
+schedule frame() { say()  both(10)  both(5)  add(1) }
+main { frame() }

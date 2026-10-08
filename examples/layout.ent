@@ -1,48 +1,57 @@
 // Layout: boxes inside boxes, each as wide and high as it is told, as its
-// content needs or as there is room, placed in a row or a column inside
-// the box it is in. A library: a program imports it, makes boxes, says
-// which is inside which, and runs `layout` every frame, which works out
-// what has changed since it last ran (examples/layout_demo.ent draws the
-// result in a window).
+// content needs, as there is room or as a share of the box it is in,
+// placed in a row or a column there. A library: a program imports it,
+// makes boxes, says which is inside which, and runs `layout` every frame,
+// which works out what has changed since it last ran.
 //
-// The sizes are those of Clay (github.com/nicbarker/clay): a box is
-// `fixed` (as wide as `w` says), `fit` (as wide as what is in it) or
-// `grow` (as wide as its share of the room that is left). Across its row
-// or column a box's contents can stand in the middle or at the end
-// (`Align`); a box can float over another (`Float`, `Over`), a layer
-// above it; and a box can carry a line of text (`Label`), or one that
-// goes on in the next line (`Wrap`).
+// The model is that of Clay (github.com/nicbarker/clay). A box is `Fixed`
+// (as wide as `Box.w` says), `Fit` (as wide as what is in it), `Grow` (as
+// wide as the room that is left, shared with the others that grow) or
+// `Percent` (a share of the box it is in), within `Limits`; where the
+// boxes in a row do not fit, those that can give way shrink, the largest
+// first. A box has padding (`Stack.pad`, or `Pad` side by side), a gap
+// between the boxes in it, and says where they stand (`Align`); it can
+// keep a ratio of width to height (`Aspect`), float over another box
+// (`Float`, `Over`), and its own content can have a size (`Natural`: a
+// text, a picture), which examples/layout_window.ent measures, and draws.
 
-// Where a box is and how big: what `layout` works out. A box that is
-// inside no other keeps what the program gave it.
+// Where a box is and how big: what `layout` works out. Of a `Fixed` box
+// it takes the width or height from here.
 component Box { x: f32, y: f32, w: f32, h: f32 }
 
-// How wide and how high a box is to be: `Fixed`, as `Box.w` and `Box.h`
-// say when `layout` starts; `Fit`, as what is inside it needs; `Grow`, as
-// there is room in the box it is in (starting from what `Box` says).
-enum Sizing { Fixed, Fit, Grow }
+// How wide and how high a box is to be.
+enum Sizing { Fixed, Fit, Grow, Percent }
 component Size { w: Sizing, h: Sizing }
+// For `Percent`: the share (0 to 1) of what the box it is in has inside
+// its padding and gaps.
+component Share { w: f32, h: f32 }
+// The least and the most a box that is not `Fixed` may be; a most of 0 is
+// none.
+component Limits { min_w: f32, max_w: f32, min_h: f32, max_h: f32 }
 
 // What a box does with the boxes inside it: one after another in a row,
-// or below one another; `pad` between its edge and them, `gap` between
+// or below one another; `pad` between its edges and them, `gap` between
 // them.
 component Stack { row: bool, pad: f32, gap: f32 }
+// The padding side by side, in place of `Stack.pad`.
+component Pad { left: f32, right: f32, top: f32, bottom: f32 }
 
-// Across its row or column, where the boxes inside a box stand: at the
-// start (as without this), in the middle or at the end.
-enum Across { Start, Middle, End }
-component Align { across: Across }
+// Where the boxes inside a box stand in the room they leave: at the
+// start (as without this), in the middle or at the end, from left to
+// right and from top to bottom.
+enum Place { Start, Middle, End }
+component Align { x: Place, y: Place }
 
-// A line of text in a box. The box is as big as the program makes it:
-// how wide a text is, only what draws it knows (examples/layout_demo.ent
-// asks the window).
-component Label { text: text[126], size: f32, colour: i32 }
+// A box whose height follows from its width: so many times as wide as
+// high.
+component Aspect { ratio: f32 }
 
-// A label whose text goes on in the next line where its box ends. How
-// high that makes it, again only what draws it knows: the program gives
-// the box that height when `layout` has given it its width, and runs
-// `layout` once more, which reacts to that alone.
-tag Wrap
+// What a box's own content needs, apart from the boxes inside it: a text,
+// a picture. `min_w` is the least it can be made (the longest word of a
+// text that may go on in the next line); `h` may follow from the width
+// the box got, and is then set between `layout_widths` and
+// `layout_heights` (examples/layout_window.ent does, for texts).
+component Natural { w: f32, min_w: f32, h: f32 }
 
 // A box that floats over another: so far from that one's corner, in
 // nobody's row, and with all that is inside it a layer above.
@@ -52,18 +61,23 @@ component Float { dx: f32, dy: f32 }
 // without one, or with the same, are in the order they were made.
 component Slot { at: i32 }
 
-// What `layout` keeps for itself, and gives to every box that has not
-// got it: what the boxes inside a box come to (how many, their widths and
-// heights added and the largest, and how many of them grow).
-component Content {
-  count: i32, sum_w: f32, max_w: f32, sum_h: f32, max_h: f32,
-  grow_w: i32, grow_h: i32
-}
-
 // The layer a box is in, which `layout` works out and a program draws
 // by: 0, and for a box that floats, with all inside it, one more than
 // the box it floats over.
 component Layer { z: i32 }
+
+// What `layout` keeps for itself, and gives to every box. What a box
+// comes to along one axis by its content and its own rules: the size, the
+// least it can shrink to, the most, its share and its way of sizing.
+component FitW { fit: f32, min: f32, max: f32, share: f32, kind: Sizing }
+component FitH { fit: f32, min: f32, max: f32, share: f32, kind: Sizing }
+// And what it has for the boxes inside it: `used` by padding and gaps,
+// the `room` inside the padding, whether they grow (1) or shrink (2) to a
+// `level`, and what they come to along the row or column (`extent`).
+component RoomW { used: f32, room: f32, mode: i32, level: f32, extent: f32 }
+component RoomH { used: f32, room: f32, mode: i32, level: f32, extent: f32 }
+// (Sums over the boxes inside a box, while they are added up.)
+component Sums { a: f32, b: f32, c: f32, d: f32, n: i32, g: i32, m: i32 }
 
 // From a box to the one it is in; the boxes in one box are in the order
 // of their slots.
@@ -71,78 +85,429 @@ relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 256
 // From a box that floats to the one it floats over.
 relation (Float)-[Over]->(Box) tree capacity 256
 
-// Passes over the boxes, each a `for` along a tree, and each reactive:
-// it runs for a box only where something it reads has changed since it
-// last ran, in the box itself, in the box it is in, in the one
-// before it or in one inside it. Giving a box the size it has is no
-// change, and nothing follows from it.
-system layout() {
-  // (Only the boxes that are new: asking every box whether it has got
-  // what `layout` keeps would be the one thing here done for all of
-  // them every frame.)
-  for e, b: Box without Content on added Box {
-    e.add(Content {
-      count: 0, sum_w: 0.0, max_w: 0.0, sum_h: 0.0, max_h: 0.0,
-      grow_w: 0, grow_h: 0
-    })
+// The widths: what each box comes to by what is in it, from the innermost
+// out; then what each gets, from the outermost in. Every `for` here is
+// reactive: it runs for a box only where something it reads has changed.
+system layout_widths() {
+  // (Only the boxes that are new are given what `layout` keeps.)
+  for e, b: Box without FitW on added Box {
+    e.add(FitW { fit: 0.0, min: 0.0, max: 0.0, share: 0.0, kind: Sizing.Fit })
+    e.add(FitH { fit: 0.0, min: 0.0, max: 0.0, share: 0.0, kind: Sizing.Fit })
+    e.add(RoomW { used: 0.0, room: 0.0, mode: 0, level: 0.0, extent: 0.0 })
+    e.add(RoomH { used: 0.0, room: 0.0, mode: 0, level: 0.0, extent: 0.0 })
+    e.add(Sums { a: 0.0, b: 0.0, c: 0.0, d: 0.0, n: 0, g: 0, m: 0 })
     e.add(Layer { z: 0 })
   }
 
-  // As wide and as high as what is in it, from the innermost boxes out:
-  // a box adds up the boxes inside it, which have been visited. Only
-  // where it is asked for another size, stands them another way, or one
-  // of them has another size, or has come or gone.
-  for (b: mut Box, s: Size, k: Stack, c: mut Content)
+  // By its content: the boxes inside it added up along a row, the widest
+  // of them in a column, with gaps and padding; or its own content, if
+  // that is wider. Within its limits, and the least it can shrink to the
+  // same way from theirs.
+  for (e, b: Box, s: Size, k: Stack, f: mut FitW, t: mut Sums,
+       optional p: Pad, optional l: Limits, optional sh: Share,
+       optional own: Natural)
       bottom up Inside
-      on changed s, changed k, changed (: Box.w)-[Inside]->(b),
-         changed (: Box.h)-[Inside]->(b), changed (: Size)-[Inside]->(b) {
-    c.count = 0
-    c.sum_w = 0.0
-    c.max_w = 0.0
-    c.sum_h = 0.0
-    c.max_h = 0.0
-    c.grow_w = 0
-    c.grow_h = 0
-    for (inner: Box, wants: Size)-[Inside]->(b) {
-      c.count += 1
-      c.sum_w += inner.w
-      c.max_w max= inner.w
-      c.sum_h += inner.h
-      c.max_h max= inner.h
-      if wants.w == Sizing.Grow { c.grow_w += 1 }
-      if wants.h == Sizing.Grow { c.grow_h += 1 }
+      on changed s.w, changed k, changed p, changed l, changed sh,
+         changed own, changed b.w, changed (: FitW)-[Inside]->(e) {
+    t.a = 0.0
+    t.b = 0.0
+    t.c = 0.0
+    t.d = 0.0
+    t.n = 0
+    for (child: FitW)-[Inside]->(e) {
+      t.n += 1
+      t.a += child.fit
+      t.b += child.min
+      t.c max= child.fit
+      t.d max= child.min
     }
-    let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
-    if s.w == Sizing.Fit {
-      let w = (if k.row { c.sum_w + gaps } else { c.max_w }) + 2.0 * k.pad
-      b.w = w
+    var pads = 2.0 * k.pad
+    if let left = p.left, let right = p.right { pads = left + right }
+    let gaps = if t.n > 1 { k.gap * (t.n - 1) as f32 } else { 0.0 }
+    var fit = pads + (if k.row { t.a + gaps } else { t.c })
+    var least = pads + (if k.row { t.b + gaps } else { t.d })
+    if let w = own.w, let m = own.min_w {
+      fit = max(fit, w + pads)
+      least = max(least, m + pads)
     }
-    if s.h == Sizing.Fit {
-      let h = (if k.row { c.max_h } else { c.sum_h + gaps }) + 2.0 * k.pad
-      b.h = h
+    var lo = 0.0
+    var hi = 1.0e30
+    if let a = l.min_w, let z = l.max_w {
+      lo = a
+      if z > 0.0 { hi = z }
     }
+    if s.w == Sizing.Fixed {
+      fit = b.w
+      least = b.w
+      hi = b.w
+    } else {
+      fit = min(max(fit, lo), hi)
+      least = min(max(least, lo), hi)
+      if s.w == Sizing.Percent { fit = 0.0 }
+    }
+    f.fit = fit
+    f.min = least
+    f.max = hi
+    f.share = 0.0
+    if let share = sh.w { f.share = share }
+    f.kind = s.w
   }
 
-  // The room that is left in a box goes to those inside it that grow:
-  // along the row or column in equal shares, across it all of it. From
-  // the outermost boxes in, since a box that grew has more room to give;
-  // only where the box it is in has another size or other boxes in it.
-  for (b: mut Box, s: Size)-[Inside]->(outer: Box, k: Stack, c: Content)
+  // What it gets: the size it came to, or a share of the box it is in;
+  // along that one's row what its level says, where the boxes there grow
+  // into the room that is left or shrink to fit, and across it no more
+  // than the room there is (all of it, if it grows). Then the same is
+  // worked out for the boxes inside it, which come after it.
+  for (e, b: mut Box, f: FitW, k: Stack, r: mut RoomW, t: mut Sums,
+       optional p: Pad),
+      optional (e)-[Inside]->(ob: Box, ok: Stack, oroom: RoomW)
       top down Inside
-      on changed s, changed outer.w, changed outer.h, changed k, changed c {
-    let gaps = if c.count > 1 { k.gap * (c.count - 1) as f32 } else { 0.0 }
-    let room_w = outer.w - 2.0 * k.pad
-    let room_h = outer.h - 2.0 * k.pad
-    if s.w == Sizing.Grow {
-      let w = if k.row { b.w + (room_w - c.sum_w - gaps) / c.grow_w as f32 }
-              else { room_w }
-      b.w = w
+      on changed f, changed k, changed p, changed ob.w, changed ok,
+         changed oroom, changed (: FitW)-[Inside]->(e) {
+    var w = f.fit
+    if let ow = ob.w, let orow = ok.row, let used = oroom.used,
+       let room = oroom.room, let mode = oroom.mode, let level = oroom.level {
+      if f.kind == Sizing.Percent {
+        w = (ow - used) * f.share
+      } else {
+        if f.kind != Sizing.Fixed {
+          if orow {
+            if mode == 2 { w = max(f.min, min(f.fit, level)) }
+            if mode == 1 && f.kind == Sizing.Grow {
+              w = min(f.max, max(f.fit, level))
+            }
+          } else {
+            if f.kind == Sizing.Grow { w = min(room, f.max) }
+            w = max(f.min, min(w, room))
+          }
+        }
+      }
     }
-    if s.h == Sizing.Grow {
-      let h = if k.row { room_h }
-              else { b.h + (room_h - c.sum_h - gaps) / c.grow_h as f32 }
-      b.h = h
+    b.w = w
+
+    // For the boxes inside it. How many, how many grow, what those that
+    // are not a share come to, the shares, and what those that can give
+    // way come to.
+    var pads = 2.0 * k.pad
+    if let left = p.left, let right = p.right { pads = left + right }
+    t.n = 0
+    t.g = 0
+    t.m = 0
+    t.a = 0.0
+    t.b = 0.0
+    t.c = 0.0
+    t.d = 0.0
+    for (child: FitW)-[Inside]->(e) {
+      t.n += 1
+      if child.kind == Sizing.Percent { t.b += child.share } else { t.a += child.fit }
+      if child.kind == Sizing.Grow {
+        t.g += 1
+        t.d += child.fit
+      }
+      if child.kind == Sizing.Fit || child.kind == Sizing.Grow {
+        t.m += 1
+        t.c += child.fit
+      }
     }
+    let count = t.n
+    let grows = t.g
+    let gaps = if count > 1 { k.gap * (count - 1) as f32 } else { 0.0 }
+    let used = pads + (if k.row { gaps } else { 0.0 })
+    var mode = 0
+    var level = 0.0
+    var extent = 0.0
+    if k.row {
+      let spare = w - pads - gaps - t.a - t.b * (w - used)
+      if spare < -0.001 && t.m > 0 {
+        // Too much: those that can give way come down to a level, none
+        // below the least it can be. The level is closed in on, and then
+        // worked out from which of them it leaves as they are.
+        mode = 2
+        let target = t.c + spare
+        var low = 0.0
+        var high = t.c
+        for round in 0..40 {
+          let mid = 0.5 * (low + high)
+          t.a = 0.0
+          for (child: FitW)-[Inside]->(e) {
+            if child.kind == Sizing.Fit || child.kind == Sizing.Grow {
+              t.a += max(child.min, min(child.fit, mid))
+            }
+          }
+          if t.a > target { high = mid } else { low = mid }
+        }
+        level = 0.5 * (low + high)
+        t.a = 0.0
+        t.m = 0
+        for (child: FitW)-[Inside]->(e) {
+          if child.kind == Sizing.Fit || child.kind == Sizing.Grow {
+            if child.min >= level { t.a += child.min } else {
+              if child.fit <= level { t.a += child.fit } else { t.m += 1 }
+            }
+          }
+        }
+        if t.m > 0 { level = (target - t.a) / t.m as f32 }
+      }
+      if spare > 0.001 && grows > 0 {
+        // Room left: those that grow come up to a level, the smallest
+        // first, none above the most it may be.
+        mode = 1
+        let target = t.d + spare
+        var low = 0.0
+        var high = target
+        for round in 0..40 {
+          let mid = 0.5 * (low + high)
+          t.a = 0.0
+          for (child: FitW)-[Inside]->(e) {
+            if child.kind == Sizing.Grow {
+              t.a += min(child.max, max(child.fit, mid))
+            }
+          }
+          if t.a > target { high = mid } else { low = mid }
+        }
+        level = 0.5 * (low + high)
+        t.a = 0.0
+        t.m = 0
+        for (child: FitW)-[Inside]->(e) {
+          if child.kind == Sizing.Grow {
+            if child.max <= level { t.a += child.max } else {
+              if child.fit >= level { t.a += child.fit } else { t.m += 1 }
+            }
+          }
+        }
+        if t.m > 0 { level = (target - t.a) / t.m as f32 }
+      }
+      // What they come to along the row, for where the first one starts.
+      t.a = 0.0
+      for (child: FitW)-[Inside]->(e) {
+        var each = child.fit
+        if child.kind == Sizing.Percent { each = (w - used) * child.share } else {
+          if child.kind != Sizing.Fixed {
+            if mode == 2 { each = max(child.min, min(child.fit, level)) }
+            if mode == 1 && child.kind == Sizing.Grow {
+              each = min(child.max, max(child.fit, level))
+            }
+          }
+        }
+        t.a += each
+      }
+      extent = t.a + gaps
+    }
+    r.used = used
+    r.room = w - pads
+    r.mode = mode
+    r.level = level
+    r.extent = extent
+  }
+}
+
+// The heights, the same way, and then where each box is.
+system layout_heights() {
+  // By its content, as the widths: the boxes inside it added up along a
+  // column, the highest of them in a row; or its own content, which may
+  // have got its height from the width the box has now. A box that keeps
+  // a ratio is as high as its width says, and stays so.
+  for (e, b: Box, s: Size, k: Stack, f: mut FitH, t: mut Sums,
+       optional p: Pad, optional l: Limits, optional sh: Share,
+       optional own: Natural, optional keeps: Aspect)
+      bottom up Inside
+      on changed s.h, changed k, changed p, changed l, changed sh,
+         changed own, changed keeps, changed b,
+         changed (: FitH)-[Inside]->(e) {
+    t.a = 0.0
+    t.b = 0.0
+    t.c = 0.0
+    t.d = 0.0
+    t.n = 0
+    for (child: FitH)-[Inside]->(e) {
+      t.n += 1
+      t.a += child.fit
+      t.b += child.min
+      t.c max= child.fit
+      t.d max= child.min
+    }
+    var pads = 2.0 * k.pad
+    if let top = p.top, let bottom = p.bottom { pads = top + bottom }
+    let gaps = if t.n > 1 { k.gap * (t.n - 1) as f32 } else { 0.0 }
+    var fit = pads + (if !k.row { t.a + gaps } else { t.c })
+    var least = pads + (if !k.row { t.b + gaps } else { t.d })
+    if let high = own.h {
+      fit = max(fit, high + pads)
+      least = max(least, high + pads)
+    }
+    var lo = 0.0
+    var hi = 1.0e30
+    if let a = l.min_h, let z = l.max_h {
+      lo = a
+      if z > 0.0 { hi = z }
+    }
+    if s.h == Sizing.Fixed {
+      fit = b.h
+      least = b.h
+      hi = b.h
+    } else {
+      fit = min(max(fit, lo), hi)
+      least = min(max(least, lo), hi)
+      if s.h == Sizing.Percent { fit = 0.0 }
+    }
+    var kind = s.h
+    if let ratio = keeps.ratio {
+      if ratio > 0.0 {
+        fit = b.w / ratio
+        least = fit
+        hi = fit
+        kind = Sizing.Fixed
+      }
+    }
+    f.fit = fit
+    f.min = least
+    f.max = hi
+    f.share = 0.0
+    if let share = sh.h { f.share = share }
+    f.kind = kind
+  }
+
+  // What it gets, as the widths, with columns for rows.
+  for (e, b: mut Box, f: FitH, k: Stack, r: mut RoomH, t: mut Sums,
+       optional p: Pad),
+      optional (e)-[Inside]->(ob: Box, ok: Stack, oroom: RoomH)
+      top down Inside
+      on changed f, changed k, changed p, changed ob.h, changed ok,
+         changed oroom, changed (: FitH)-[Inside]->(e) {
+    var h = f.fit
+    if let oh = ob.h, let orow = ok.row, let used = oroom.used,
+       let room = oroom.room, let mode = oroom.mode, let level = oroom.level {
+      if f.kind == Sizing.Percent {
+        h = (oh - used) * f.share
+      } else {
+        if f.kind != Sizing.Fixed {
+          if !orow {
+            if mode == 2 { h = max(f.min, min(f.fit, level)) }
+            if mode == 1 && f.kind == Sizing.Grow {
+              h = min(f.max, max(f.fit, level))
+            }
+          } else {
+            if f.kind == Sizing.Grow { h = min(room, f.max) }
+            h = max(f.min, min(h, room))
+          }
+        }
+      }
+    }
+    b.h = h
+
+    // For the boxes inside it. How many, how many grow, what those that
+    // are not a share come to, the shares, and what those that can give
+    // way come to.
+    var pads = 2.0 * k.pad
+    if let top = p.top, let bottom = p.bottom { pads = top + bottom }
+    t.n = 0
+    t.g = 0
+    t.m = 0
+    t.a = 0.0
+    t.b = 0.0
+    t.c = 0.0
+    t.d = 0.0
+    for (child: FitH)-[Inside]->(e) {
+      t.n += 1
+      if child.kind == Sizing.Percent { t.b += child.share } else { t.a += child.fit }
+      if child.kind == Sizing.Grow {
+        t.g += 1
+        t.d += child.fit
+      }
+      if child.kind == Sizing.Fit || child.kind == Sizing.Grow {
+        t.m += 1
+        t.c += child.fit
+      }
+    }
+    let count = t.n
+    let grows = t.g
+    let gaps = if count > 1 { k.gap * (count - 1) as f32 } else { 0.0 }
+    let used = pads + (if !k.row { gaps } else { 0.0 })
+    var mode = 0
+    var level = 0.0
+    var extent = 0.0
+    if !k.row {
+      let spare = h - pads - gaps - t.a - t.b * (h - used)
+      if spare < -0.001 && t.m > 0 {
+        // Too much: those that can give way come down to a level, none
+        // below the least it can be. The level is closed in on, and then
+        // worked out from which of them it leaves as they are.
+        mode = 2
+        let target = t.c + spare
+        var low = 0.0
+        var high = t.c
+        for round in 0..40 {
+          let mid = 0.5 * (low + high)
+          t.a = 0.0
+          for (child: FitH)-[Inside]->(e) {
+            if child.kind == Sizing.Fit || child.kind == Sizing.Grow {
+              t.a += max(child.min, min(child.fit, mid))
+            }
+          }
+          if t.a > target { high = mid } else { low = mid }
+        }
+        level = 0.5 * (low + high)
+        t.a = 0.0
+        t.m = 0
+        for (child: FitH)-[Inside]->(e) {
+          if child.kind == Sizing.Fit || child.kind == Sizing.Grow {
+            if child.min >= level { t.a += child.min } else {
+              if child.fit <= level { t.a += child.fit } else { t.m += 1 }
+            }
+          }
+        }
+        if t.m > 0 { level = (target - t.a) / t.m as f32 }
+      }
+      if spare > 0.001 && grows > 0 {
+        // Room left: those that grow come up to a level, the smallest
+        // first, none above the most it may be.
+        mode = 1
+        let target = t.d + spare
+        var low = 0.0
+        var high = target
+        for round in 0..40 {
+          let mid = 0.5 * (low + high)
+          t.a = 0.0
+          for (child: FitH)-[Inside]->(e) {
+            if child.kind == Sizing.Grow {
+              t.a += min(child.max, max(child.fit, mid))
+            }
+          }
+          if t.a > target { high = mid } else { low = mid }
+        }
+        level = 0.5 * (low + high)
+        t.a = 0.0
+        t.m = 0
+        for (child: FitH)-[Inside]->(e) {
+          if child.kind == Sizing.Grow {
+            if child.max <= level { t.a += child.max } else {
+              if child.fit >= level { t.a += child.fit } else { t.m += 1 }
+            }
+          }
+        }
+        if t.m > 0 { level = (target - t.a) / t.m as f32 }
+      }
+      // What they come to along the row, for where the first one starts.
+      t.a = 0.0
+      for (child: FitH)-[Inside]->(e) {
+        var each = child.fit
+        if child.kind == Sizing.Percent { each = (h - used) * child.share } else {
+          if child.kind != Sizing.Fixed {
+            if mode == 2 { each = max(child.min, min(child.fit, level)) }
+            if mode == 1 && child.kind == Sizing.Grow {
+              each = min(child.max, max(child.fit, level))
+            }
+          }
+        }
+        t.a += each
+      }
+      extent = t.a + gaps
+    }
+    r.used = used
+    r.room = h - pads
+    r.mode = mode
+    r.level = level
+    r.extent = extent
   }
 
   // Placing and floating take turns: a box that floats is put where the
@@ -152,28 +517,43 @@ system layout() {
   // `for` gives how many boxes its body ran for, and both give none.
   loop {
     // A box starts where the one before it in the same box ends, and a
-    // gap further; the first inside the padding of the box they are in.
-    // Across the row or column it stands at the padding, or where the box
-    // it is in says: in the middle of the room there, or at its end. Only
-    // where the box it is in or the one before it has moved, has another
-    // size or is another, or it has another size itself. It is in the
+    // gap further; the first inside the padding of the box they are in,
+    // and further in by the room the boxes leave along the row or
+    // column, half of it or all of it, where that box says so. Across it
+    // stands at the padding, in the middle or at the end. It is in the
     // layer of the box it is in.
     let placed =
-    for (b: mut Box, l: mut Layer)-[Inside]->(outer: Box, k: Stack, ol: Layer),
+    for (b: mut Box, l: mut Layer)
+            -[Inside]->(outer: Box, k: Stack, ol: Layer, rw: RoomW, rh: RoomH),
         optional (prev: Box)~[Inside]~>(b),
-        optional (b)-[Inside]->(how: Align)
+        optional (b)-[Inside]->(how: Align),
+        optional (b)-[Inside]->(pad: Pad)
         top down Inside
         on changed b.w, changed b.h, changed outer, changed k, changed ol,
-           changed prev, changed how {
-      var x = outer.x + k.pad
-      var y = outer.y + k.pad
-      var part = 0.0
-      if let across = how.across {
-        if across == Across.Middle { part = 0.5 }
-        if across == Across.End { part = 1.0 }
+           changed rw, changed rh, changed prev, changed how, changed pad {
+      var left = k.pad
+      var top = k.pad
+      if let pl = pad.left, let pt = pad.top {
+        left = pl
+        top = pt
       }
-      if k.row { y += (outer.h - 2.0 * k.pad - b.h) * part }
-      else { x += (outer.w - 2.0 * k.pad - b.w) * part }
+      var fx = 0.0
+      var fy = 0.0
+      if let ax = how.x, let ay = how.y {
+        if ax == Place.Middle { fx = 0.5 }
+        if ax == Place.End { fx = 1.0 }
+        if ay == Place.Middle { fy = 0.5 }
+        if ay == Place.End { fy = 1.0 }
+      }
+      var x = outer.x + left
+      var y = outer.y + top
+      if k.row {
+        x += (rw.room - rw.extent) * fx
+        y += (rh.room - b.h) * fy
+      } else {
+        x += (rw.room - b.w) * fx
+        y += (rh.room - rh.extent) * fy
+      }
       if let px = prev.x, let py = prev.y, let w = prev.w, let h = prev.h {
         if k.row { x = px + w + k.gap } else { y = py + h + k.gap }
       }
@@ -195,4 +575,12 @@ system layout() {
       l.z = ul.z + 1
     }
   } until placed + floated == 0
+}
+
+// All of it. (A program that has texts, whose heights follow from their
+// widths, runs the two halves with the measuring between them: as
+// examples/layout_window.ent does.)
+schedule layout() {
+  layout_widths()
+  layout_heights()
 }

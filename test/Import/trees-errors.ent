@@ -162,17 +162,6 @@ system s() {
 
 // -----
 
-component Body { x: f32 }
-relation (Body)-[Orbits]->(Body) tree capacity 8
-default_capacity 8
-system s() {
-  // expected-error @+1 {{reacts to changed @Body down @Orbits without 'leaves first': children are visited first only then}}
-  for e, b: Body top down Orbits on changed (: Body.x)-[Orbits]->(e) {
-  }
-}
-
-// -----
-
 // What a depth adds up must not be seen by the same depth.
 component Body { x: f32 }
 relation (Body)-[Orbits]->(Body) tree capacity 8

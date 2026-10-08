@@ -1,0 +1,11 @@
+// A schedule can run a schedule that was declared before it: that one's
+// runs take their place in it, with its parameters the values given. So a
+// module can offer the steps it needs in their order as one.
+// RUN: %ent run %S/Inputs/schedules.ent 2>/dev/null | FileCheck %s
+
+// CHECK:      say 0
+// CHECK-NEXT: add 10: 10
+// CHECK-NEXT: say 10
+// CHECK-NEXT: add 5: 15
+// CHECK-NEXT: say 15
+// CHECK-NEXT: add 1: 16

@@ -167,7 +167,7 @@ bool WorldLayout::cascadeFollows(QueryOp query, bool links) const {
       }
       break;
     case Trigger::Down:
-      if (!leavesFirst || !links)
+      if (!links)
         return false;
       break;
     case Trigger::Before:

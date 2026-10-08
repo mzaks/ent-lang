@@ -1,0 +1,136 @@
+// The sizes of examples/layout.ent: fixed, fit, grow and percent, limits,
+// padding side by side, where the boxes stand in the room they leave, a
+// ratio, a box's own content, and a row whose boxes do not fit
+// (layout_sizes.test). In the second frame much of it changes.
+import console
+import layout
+
+component Name { name: text[14] }
+unique Frame: i32
+default_capacity 64
+
+world {
+  // 600 by 400, 20 of padding left, 10 right, 30 top, 10 bottom; what is
+  // in it at the right and in the middle of the height.
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 600.0, h: 400.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 10.0 },
+    Pad { left: 20.0, right: 10.0, top: 30.0, bottom: 10.0 },
+    Align { x: Place.End, y: Place.Middle }, Name { name: "root" }
+  }
+  // 60 wide; a quarter of the room; one that grows to 100 at most; a
+  // column as big as what is in it.
+  let fixed = spawn {
+    Box { x: 0.0, y: 0.0, w: 60.0, h: 50.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "fixed" }
+  }
+  let quarter = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Percent, h: Sizing.Percent },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Share { w: 0.25, h: 0.5 },
+    Name { name: "quarter" }
+  }
+  let capped = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Limits { min_w: 0.0, max_w: 100.0, min_h: 0.0, max_h: 80.0 },
+    Name { name: "capped" }
+  }
+  let column = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: false, pad: 5.0, gap: 4.0 },
+    Align { x: Place.Middle, y: Place.Start }, Name { name: "column" }
+  }
+  connect (fixed)-[Inside]->(root)
+  connect (quarter)-[Inside]->(root)
+  connect (capped)-[Inside]->(root)
+  connect (column)-[Inside]->(root)
+  // In the column: a picture twice as wide as high, a word, and a row of
+  // three that is to be no wider than 90, which they are not by
+  // themselves.
+  let picture = spawn {
+    Box { x: 0.0, y: 0.0, w: 80.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Aspect { ratio: 2.0 },
+    Name { name: "picture" }
+  }
+  let word = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: true, pad: 3.0, gap: 0.0 },
+    Natural { w: 40.0, min_w: 40.0, h: 12.0 }, Name { name: "word" }
+  }
+  let tight = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 5.0 },
+    Limits { min_w: 0.0, max_w: 90.0, min_h: 0.0, max_h: 0.0 },
+    Name { name: "tight" }
+  }
+  connect (picture)-[Inside]->(column)
+  connect (word)-[Inside]->(column)
+  connect (tight)-[Inside]->(column)
+  // 50, 30 and 20 wide by what is in them, and no narrower than 10, 25
+  // and 20.
+  for i in 0..3 {
+    let part = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Fit, h: Sizing.Fit },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Natural { w: if i == 0 { 50.0 } else if i == 1 { 30.0 } else { 20.0 },
+                min_w: if i == 0 { 10.0 } else if i == 1 { 25.0 } else { 20.0 },
+                h: 8.0 },
+      Name { name: if i == 0 { "wide" } else if i == 1 { "mid" } else { "small" } }
+    }
+    connect (part)-[Inside]->(tight)
+  }
+}
+
+// In the second frame: the window is narrower, the padding another, what
+// is in it at the left and the bottom; the share is a half; the cap is
+// gone from the one that grows; the column is a row; the picture is three
+// times as wide as high; the word is longer; and the tight row may be 70
+// wide.
+system change() {
+  Frame += 1
+  for b: mut Box, p: mut Pad, a: mut Align, n: Name
+      where Frame == 2 && n.name == "root" {
+    b.w = 520.0
+    p.left = 8.0
+    p.top = 4.0
+    a.x = Place.Start
+    a.y = Place.End
+  }
+  for s: mut Share, n: Name where Frame == 2 && n.name == "quarter" {
+    s.w = 0.5
+  }
+  for l: mut Limits, n: Name where Frame == 2 && n.name == "capped" {
+    l.max_w = 0.0
+  }
+  for k: mut Stack, n: Name where Frame == 2 && n.name == "column" {
+    k.row = true
+  }
+  for a: mut Aspect, n: Name where Frame == 2 && n.name == "picture" {
+    a.ratio = 3.0
+  }
+  for c: mut Natural, n: Name where Frame == 2 && n.name == "word" {
+    c.w = 64.0
+    c.min_w = 64.0
+  }
+  for l: mut Limits, n: Name where Frame == 2 && n.name == "tight" {
+    l.max_w = 70.0
+  }
+}
+
+system show() {
+  for b: Box, n: Name top down dfs Inside {
+    put("{Frame}: {n.name} {b.x} {b.y} {b.w} {b.h}")
+  }
+}
+
+schedule frame() { change()  layout()  show() }
+main { loop { frame() } until Frame == 3 }
