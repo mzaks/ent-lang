@@ -87,6 +87,12 @@ component Expand { w: f32, h: f32 }
 // under it, unless it has `Passthrough`.
 unique Pointer { x: f32, y: f32, down: bool }
 unique PointerTop: i32
+// And whether it went down or was let go since `point` last ran, or is
+// as it was: a box that is `Hovered` when it is `ReleasedNow` was
+// clicked.
+enum Touch { PressedNow, Pressed, ReleasedNow, Released }
+unique PointerTouch: Touch
+unique PointerWas: bool
 tag Hovered
 tag Pressed
 tag Passthrough
@@ -827,6 +833,12 @@ system layout_heights() {
 // part of `layout`: it asks every box, every time, which a program
 // without a pointer need not pay for.)
 system point() {
+  PointerTouch = if Pointer.down {
+    if PointerWas { Touch.Pressed } else { Touch.PressedNow }
+  } else {
+    if PointerWas { Touch.ReleasedNow } else { Touch.Released }
+  }
+  PointerWas = Pointer.down
   PointerTop = -1
   for b: Box, l: Layer, v: Seen, optional more: Expand without Passthrough {
     var ew = 0.0

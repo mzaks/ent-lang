@@ -49,10 +49,13 @@ world {
     Border { left: 1.0, right: 1.0, top: 3.0, bottom: 1.0, between: 0.0,
              colour: 0x3a7bd5 },
     Overlay { colour: 0x40ff0000 }, Card,
-    Transition { seconds: 0.5, ease: Ease.Linear, place: true, size: true,
-                 colour: true },
-    Enter { dx: 0.0, dy: 40.0, colour: 0 },
-    Leave { dx: 0.0, dy: 0.0, colour: 0x101010 }
+    Transition { seconds: 0.5, ease: Ease.Linear, x: true, y: true,
+                   w: true, h: true, fill: true, overlay: true,
+                   round: true, border_colour: true,
+                   border_width: true, touch: false },
+    Enter { dx: 0.0, dy: 40.0, dw: 0.0, dh: 0.0, colour: 0,
+              always: true },
+    Leave { dx: 0.0, dy: 0.0, dw: 0.0, dh: 0.0, colour: 0x101010 }
   }
   connect (card)-[Inside]->(root)
   let words = spawn {
@@ -60,7 +63,14 @@ world {
     Size { w: Sizing.Grow, h: Sizing.Fit },
     Stack { row: true, pad: 0.0, gap: 0.0 },
     Text { text: "a text that goes on in the next line", size: 16.0,
-           colour: 0xa0b0c0 }
+           colour: 0xa0b0c0 },
+    // (It would come from 30 above, if the card it is in were not new
+    // itself.)
+    Transition { seconds: 0.5, ease: Ease.Linear, x: true, y: true,
+                 w: false, h: false, fill: false, overlay: false,
+                 round: false, border_colour: false, border_width: false,
+                 touch: false },
+    Enter { dx: 0.0, dy: -30.0, dw: 0.0, dh: 0.0, colour: 0, always: false }
   }
   connect (words)-[Inside]->(card)
   // And a dot that floats over the text, at its top right corner.
@@ -83,15 +93,44 @@ world {
 system change() {
   Frame += 1
   Window.dt = 0.1
-  Mouse.x = 50.0
+  // (On the card in the first frame and in the sixth.)
+  Mouse.x = if Frame == 1 || Frame == 6 { 200.0 } else { 50.0 }
   Mouse.y = if Frame == 4 { 70.0 } else { 100.0 }
   Mouse.left = Frame == 3 || Frame == 4
   for f: mut Fill with Card where Frame == 7 { f.colour = 0x30ff50 }
   for b: mut Box with List where Frame == 7 { b.w = 60.0 }
+  // Its corners are rounder then, and the edge at its top thicker and
+  // another colour.
+  for r: mut Round with Card where Frame == 7 { r.top_left = 18.0 }
+  for d: mut Border with Card where Frame == 7 {
+    d.top = 13.0
+    d.colour = 0xffffff
+  }
+  // In the fifth frame the card gets a bar under its text, which comes
+  // from 20 to the left: the card is not new.
+  for e with Card where Frame == 5 {
+    let bar = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 20.0 },
+      Size { w: Sizing.Grow, h: Sizing.Fixed },
+      Stack { row: true, pad: 4.0, gap: 0.0 }, Fill { colour: 0x505050 },
+      Transition { seconds: 0.5, ease: Ease.Linear, x: true, y: true,
+                   w: false, h: false, fill: false, overlay: false,
+                   round: false, border_colour: false, border_width: false,
+                   touch: false },
+      Enter { dx: -20.0, dy: 0.0, dw: 0.0, dh: 0.0, colour: 0,
+              always: false }
+    }
+    connect (bar)-[Inside]->(e)
+  }
   for e with Card without Gone where Frame == 9 { e.add(Gone) }
   if Frame == 15 { Inspector.on = true }
   put("frame {Frame}")
 }
 
-schedule frame() { change()  ui() }
+// Whether the pointer finds the card: not while it is on its way.
+system found() {
+  for e with Card, Hovered { put("the pointer is on the card") }
+}
+
+schedule frame() { change()  ui()  found() }
 main { loop { frame() } until Frame == 15 }

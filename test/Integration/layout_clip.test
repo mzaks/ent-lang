@@ -9,7 +9,9 @@
 // wide. The pointer is on the second. Over the last row, which is below
 // the list's end, two boxes float: the one that is `Confined` shows only
 // within the list, as the box inside it does; the other wherever it is.
-// CHECK:      1: free 10.0 310.0 shows 0.0 x 0.0 from -1000000000.0
+// (The pointer is up, and was.)
+// CHECK:      1: touch 3
+// CHECK-NEXT: 1: free 10.0 310.0 shows 0.0 x 0.0 from -1000000000.0
 // CHECK-NEXT: 1: root 0.0 0.0 300.0 200.0 shows 0.0 wide, content 180.0, over 1
 // CHECK-NEXT: 1: list 10.0 10.0 100.0 180.0 shows 0.0 wide, content 320.0, over 1
 // CHECK-NEXT: 1: row 0 10.0 10.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
@@ -21,6 +23,8 @@
 // CHECK-NEXT: 1: tip 10.0 310.0 shows 100.0 x 180.0 from 10.0
 // CHECK-NEXT: 1: word 10.0 310.0 shows 100.0 x 180.0 from 10.0
 // What is in the list is 100 further up, and the pointer on the third.
+// (It went down.)
+// CHECK-NEXT: 2: touch 0
 // CHECK-NEXT: 2: free 10.0 210.0 shows 0.0 x 0.0 from -1000000000.0
 // CHECK-NEXT: 2: root 0.0 0.0 300.0 200.0 shows 0.0 wide, content 180.0, over 1
 // CHECK-NEXT: 2: list 10.0 10.0 100.0 180.0 shows 0.0 wide, content 320.0, over 1
@@ -34,6 +38,8 @@
 // CHECK-NEXT: 2: word 10.0 210.0 shows 100.0 x 180.0 from 10.0
 // Where the third row is wider than the list, it does not show, and the
 // pointer is over the box next to the list, not over the row.
+// (It is down still.)
+// CHECK-NEXT: 3: touch 1
 // CHECK-NEXT: 3: free 10.0 210.0 shows 0.0 x 0.0 from -1000000000.0
 // CHECK-NEXT: 3: root 0.0 0.0 300.0 200.0 shows 0.0 wide, content 180.0, over 1
 // CHECK-NEXT: 3: list 10.0 10.0 100.0 180.0 shows 0.0 wide, content 320.0, over 0
@@ -46,6 +52,8 @@
 // CHECK-NEXT: 3: tip 10.0 210.0 shows 100.0 x 180.0 from 10.0
 // CHECK-NEXT: 3: word 10.0 210.0 shows 100.0 x 180.0 from 10.0
 // No longer `Confined`, the box that floats shows wherever it is.
+// (It was let go: what it is over was clicked.)
+// CHECK-NEXT: 4: touch 2
 // CHECK-NEXT: 4: free 10.0 210.0 shows 0.0 x 0.0 from -1000000000.0
 // CHECK-NEXT: 4: root 0.0 0.0 300.0 200.0 shows 0.0 wide, content 180.0, over 1
 // CHECK-NEXT: 4: list 10.0 10.0 100.0 180.0 shows 0.0 wide, content 320.0, over 1

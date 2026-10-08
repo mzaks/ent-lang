@@ -1,0 +1,62 @@
+// A box taken out of the box it is in, by a `for` that visits its edge
+// (layout_leave.test).
+import console
+import layout
+
+component Name { n: i32 }
+unique Frame: i32
+default_capacity 128
+
+world {
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { n: 0 }
+  }
+  // (Many boxes that have nothing to do with it: the passes go to the
+  // boxes their events lead to, not through all of them.)
+  let column = spawn {
+    Box { x: 0.0, y: 0.0, w: 10.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 0.0 }, Name { n: 10 }
+  }
+  connect (column)-[Inside]->(root)
+  for i in 0..60 {
+    let more = spawn {
+      Box { x: 0.0, y: 0.0, w: 5.0, h: 1.0 },
+      Size { w: Sizing.Fixed, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Name { n: 100 + i }
+    }
+    connect (more)-[Inside]->(column)
+  }
+  // A row of four that share 290.
+  let row = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { n: 7 }
+  }
+  connect (row)-[Inside]->(root)
+  for i in 0..4 {
+    let part = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Grow },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Name { n: i + 1 }
+    }
+    connect (part)-[Inside]->(row)
+  }
+}
+
+// In the second frame the second of them is taken out of the row.
+system change() {
+  Frame += 1
+  for e, n: Name where Frame == 2 && n.n == 2 {
+    for (e)-[was: Inside]->(up) { was.disconnect() }
+  }
+}
+
+system show() {
+  for b: Box, n: Name where n.n < 10 { put("{Frame}: {n.n} at {b.x} wide {b.w}") }
+}
+
+schedule frame() { change()  layout()  show() }
+main { loop { frame() } until Frame == 3 }

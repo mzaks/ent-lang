@@ -56,22 +56,32 @@ tag Drag
 
 // A box that is not at once where and what it is now to be: it gets
 // there in so many seconds, slowly at first (`In`), at the end (`Out`),
-// both or neither, in where it is (`place`: and what is inside it goes
-// with it), in how big it is (`size`: and what is inside it is laid out
-// for how big it is right then), and in its `Fill` and `Overlay`
-// colours. Each of the four sets out when it is to be another, and takes
-// the seconds from then.
+// both or neither, in what it says here: where it is from left to right
+// (`x`) and from top to bottom (`y`: and what is inside it goes with
+// it), how wide and high it is (`w`, `h`: and what is inside it is laid
+// out for how big it is right then), its `Fill` and `Overlay` colours,
+// how round its corners are, and its border's colour and widths. Each
+// sets out when it is to be another, and takes the seconds from then.
+// While it is on its way to another place, the pointer does not find it,
+// nor what is inside it, unless it says `touch`.
 enum Ease { Linear, In, Out, InOut }
 component Transition {
-  seconds: f32, ease: Ease, place: bool, size: bool, colour: bool
+  seconds: f32, ease: Ease, x: bool, y: bool, w: bool, h: bool, fill: bool,
+  overlay: bool, round: bool, border_colour: bool, border_width: bool,
+  touch: bool
 }
-// Where such a box comes from when it is new: so far from its place, and
-// from under this colour (0: none). And where it goes when it is `Gone`:
-// the program says so, and the box is destroyed, with all that is in it
-// or floats over that, when it has got there. (At once without a
-// `Transition`.)
-component Enter { dx: f32, dy: f32, colour: i32 }
-component Leave { dx: f32, dy: f32, colour: i32 }
+// Where such a box comes from when it is new: so far from its place, so
+// much bigger (or smaller), and from under this colour (0: none). Not
+// when the box it is in is new too, as when a program starts, unless it
+// says `always`.
+// And where it goes when it is `Gone`: the program says so, the box
+// takes no room in the box it is in from then on (the others there take
+// it, on their way if they have a `Transition`), and it is destroyed,
+// with all that is in it or floats over that, when it has got there. (At
+// once without a `Transition` or a `Leave`.) The pointer does not find
+// it any more.
+component Enter { dx: f32, dy: f32, dw: f32, dh: f32, colour: i32, always: bool }
+component Leave { dx: f32, dy: f32, dw: f32, dh: f32, colour: i32 }
 tag Gone
 
 // A panel at the right of the window that lists the boxes, each under
@@ -88,22 +98,36 @@ unique Picked {
 }
 
 // What this keeps for itself. How a `Drag` box is moving; what is laid on
-// a box right now, and where a box in a `Transition` is drawn right now,
-// how big and in what colour, where it started from in each of those and
+// a box right now, and how far from its place a box in a `Transition` is
+// drawn right now (its place: where it is in the box it is in, `rx` and
+// `ry`), how big and in what colour, where it started from in each of
+// those and
 // how far it has got (`tp` in its place, `tw` and `th` in its width and
 // height, `tc` in its colours: 0 to 1); a box that is to be destroyed.
 component Glide { vx: f32, vy: f32, x: f32, y: f32, held: bool, was: bool }
 component Tint { colour: i32, part: f32 }
 component Shown {
-  x: f32, y: f32, w: f32, h: f32, colour: i32, dx: f32, dy: f32
+  w: f32, h: f32, colour: i32, dx: f32, dy: f32, away: bool
+}
+// (The same for its corners and its border, where it has them.)
+component ShownRound {
+  top_left: f32, top_right: f32, bottom_left: f32, bottom_right: f32,
+  from_top_left: f32, from_top_right: f32, from_bottom_left: f32,
+  from_bottom_right: f32, t: f32
+}
+component ShownBorder {
+  left: f32, right: f32, top: f32, bottom: f32, between: f32, colour: i32,
+  from_left: f32, from_right: f32, from_top: f32, from_bottom: f32,
+  from_between: f32, from_colour: i32, t: f32
 }
 // And what follows from those for every box, with the boxes it is in:
-// how far from its place it is drawn, and under how much (0 to 1) of
-// what colour, all of that colour (AA ff).
-component Look { dx: f32, dy: f32, colour: i32, part: f32 }
+// how far from its place it is drawn, under how much (0 to 1) of what
+// colour, all of that colour (AA ff), and whether the pointer does not
+// find it.
+component Look { dx: f32, dy: f32, colour: i32, part: f32, away: bool }
 component Eased {
-  x: f32, y: f32, tp: f32, w: f32, tw: f32, h: f32, th: f32, colour: i32,
-  tint: i32, part: f32, tc: f32
+  x: f32, y: f32, rx: f32, ry: f32, tp: f32, w: f32, tw: f32, h: f32,
+  th: f32, colour: i32, tint: i32, part: f32, tc: f32
 }
 component Dead { at: i32 }
 // The line of the inspector's list a box is in.
@@ -274,12 +298,57 @@ system animate() {
     e.add(Tint { colour: lv.colour, part: 0.0 })
   }
 
+  // A box that is to go takes no room from now on: it floats over the
+  // box it was in, where it is and as big as it is, and shows only where
+  // that one does.
+  for (e, b: Box, z: mut Size, lv: Leave)-[Inside]->(over, ob: Box)
+      with Gone, Transition without Float on added Gone {
+    for (e)-[was: Inside]->(up) { was.disconnect() }
+    z.w = Sizing.Fixed
+    z.h = Sizing.Fixed
+    e.add(Float { dx: b.x - ob.x, dy: b.y - ob.y })
+    e.add(Confined)
+    connect (e)-[Over]->(over)
+  }
+
   // A box whose place, width, height or colours are no longer what they
   // were sets out again in that, from where it is right now. One that is
   // `Gone` sets out for where it leaves to.
-  for s: Shown, ez: mut Eased, b: Box on changed b.x, changed b.y, added Gone {
-    ez.x = s.x
-    ez.y = s.y
+  // (Its place is where it is in the box it is in, or over: a box that
+  // only goes with that one has not moved.)
+  for (s: Shown, ez: mut Eased, b: Box), optional (b)-[Inside]->(ob: Box)
+      without Float top down Inside
+      on changed b.x, changed b.y, changed ob.x, changed ob.y {
+    var x = b.x
+    var y = b.y
+    if let ox = ob.x, let oy = ob.y {
+      x -= ox
+      y -= oy
+    }
+    if x != ez.rx || y != ez.ry {
+      ez.x = s.dx + ez.rx - x
+      ez.y = s.dy + ez.ry - y
+      ez.rx = x
+      ez.ry = y
+      ez.tp = 0.0
+    }
+  }
+  for (s: Shown, ez: mut Eased, b: Box)-[Over]->(ob: Box)
+      top down Over
+      on changed b.x, changed b.y, changed ob.x, changed ob.y {
+    let x = b.x - ob.x
+    let y = b.y - ob.y
+    if x != ez.rx || y != ez.ry {
+      ez.x = s.dx + ez.rx - x
+      ez.y = s.dy + ez.ry - y
+      ez.rx = x
+      ez.ry = y
+      ez.tp = 0.0
+    }
+  }
+  for s: Shown, ez: mut Eased on added Gone {
+    ez.x = s.dx
+    ez.y = s.dy
     ez.tp = 0.0
   }
   for s: Shown, ez: mut Eased, b: Box on changed b.w {
@@ -289,6 +358,72 @@ system animate() {
   for s: Shown, ez: mut Eased, b: Box on changed b.h {
     ez.h = s.h
     ez.th = 0.0
+  }
+  // (One that leaves to another size, for that.)
+  for s: Shown, ez: mut Eased, lv: Leave where lv.dw != 0.0 on added Gone {
+    ez.w = s.w
+    ez.tw = 0.0
+  }
+  for s: Shown, ez: mut Eased, lv: Leave where lv.dh != 0.0 on added Gone {
+    ez.h = s.h
+    ez.th = 0.0
+  }
+  // Its corners and its border the same way, where it has them.
+  for e, r: Round with Transition without ShownRound {
+    e.add(ShownRound {
+      top_left: r.top_left, top_right: r.top_right,
+      bottom_left: r.bottom_left, bottom_right: r.bottom_right,
+      from_top_left: r.top_left, from_top_right: r.top_right,
+      from_bottom_left: r.bottom_left, from_bottom_right: r.bottom_right,
+      t: 1.0 })
+  }
+  for r: Round, sr: mut ShownRound on changed r {
+    sr.from_top_left = sr.top_left
+    sr.from_top_right = sr.top_right
+    sr.from_bottom_left = sr.bottom_left
+    sr.from_bottom_right = sr.bottom_right
+    sr.t = 0.0
+  }
+  for r: Round, tr: Transition, sr: mut ShownRound where sr.t < 1.0 {
+    let now = further(sr.t, tr.seconds, Window.dt)
+    let k = if tr.round && now < 1.0 { eased(now, tr.ease) } else { 1.0 }
+    sr.top_left = sr.from_top_left + (r.top_left - sr.from_top_left) * k
+    sr.top_right = sr.from_top_right + (r.top_right - sr.from_top_right) * k
+    sr.bottom_left =
+        sr.from_bottom_left + (r.bottom_left - sr.from_bottom_left) * k
+    sr.bottom_right =
+        sr.from_bottom_right + (r.bottom_right - sr.from_bottom_right) * k
+    sr.t = now
+  }
+  for e, d: Border with Transition without ShownBorder {
+    e.add(ShownBorder {
+      left: d.left, right: d.right, top: d.top, bottom: d.bottom,
+      between: d.between, colour: d.colour, from_left: d.left,
+      from_right: d.right, from_top: d.top, from_bottom: d.bottom,
+      from_between: d.between, from_colour: d.colour, t: 1.0 })
+  }
+  for d: Border, sb: mut ShownBorder on changed d {
+    sb.from_left = sb.left
+    sb.from_right = sb.right
+    sb.from_top = sb.top
+    sb.from_bottom = sb.bottom
+    sb.from_between = sb.between
+    sb.from_colour = sb.colour
+    sb.t = 0.0
+  }
+  for d: Border, tr: Transition, sb: mut ShownBorder where sb.t < 1.0 {
+    let now = further(sb.t, tr.seconds, Window.dt)
+    let k = if tr.border_width && now < 1.0 { eased(now, tr.ease) }
+            else { 1.0 }
+    sb.left = sb.from_left + (d.left - sb.from_left) * k
+    sb.right = sb.from_right + (d.right - sb.from_right) * k
+    sb.top = sb.from_top + (d.top - sb.from_top) * k
+    sb.bottom = sb.from_bottom + (d.bottom - sb.from_bottom) * k
+    sb.between = sb.from_between + (d.between - sb.from_between) * k
+    sb.colour = if tr.border_colour && now < 1.0 {
+      blend(sb.from_colour, d.colour, eased(now, tr.ease))
+    } else { d.colour }
+    sb.t = now
   }
   for s: Shown, ez: mut Eased, optional f: Fill, optional o: Overlay,
       optional t: Tint
@@ -303,27 +438,55 @@ system animate() {
     ez.tc = 0.0
   }
 
-  // A new one starts where it is to be, or where its `Enter` says.
-  for e, b: Box, tr: Transition, optional f: Fill, optional en: Enter
+  // A new one starts where it is to be, or where its `Enter` says: not
+  // in a box that is new itself (which has no `Look` yet), unless the
+  // `Enter` says always.
+  for (e, b: Box, tr: Transition, optional f: Fill, optional en: Enter),
+      optional (e)-[Inside]->(ub: Box),
+      optional (e)-[Inside]->(ul: Look),
+      optional (e)-[Over]->(ob: Box),
+      optional (e)-[Over]->(ol: Look)
       without Shown on added Transition {
-    var x = b.x
-    var y = b.y
+    var x = 0.0
+    var y = 0.0
+    var w = b.w
+    var h = b.h
     var colour = 0
     var veil = 0
     var t = 1.0
     if let c = f.colour { colour = c }
-    if let dx = en.dx, let dy = en.dy, let from = en.colour {
-      x += dx
-      y += dy
-      veil = from
-      t = 0.0
+    var old = true
+    // (Where it is in the box it is in, or over.)
+    var rx = b.x
+    var ry = b.y
+    if let ux = ub.x, let uy = ub.y {
+      rx -= ux
+      ry -= uy
+      old = false
+      if let ud = ul.dx { old = true }
     }
-    e.add(Shown { x: x, y: y, w: b.w, h: b.h, colour: colour, dx: x - b.x,
-                  dy: y - b.y })
-    e.add(Eased { x: x, y: y, tp: t, w: b.w, tw: 1.0, h: b.h, th: 1.0,
-                  colour: colour, tint: veil,
+    if let ox = ob.x, let oy = ob.y {
+      rx -= ox
+      ry -= oy
+      old = false
+      if let od = ol.dx { old = true }
+    }
+    if let dx = en.dx, let dy = en.dy, let dw = en.dw, let dh = en.dh,
+       let from = en.colour, let always = en.always {
+      if old || always {
+        x = dx
+        y = dy
+        w += dw
+        h += dh
+        veil = from
+        t = 0.0
+      }
+    }
+    e.add(Shown { w: w, h: h, colour: colour, dx: x, dy: y, away: false })
+    e.add(Eased { x: x, y: y, rx: rx, ry: ry, tp: t, w: w, tw: t, h: h,
+                  th: t, colour: colour, tint: veil,
                   part: if veil != 0 { 1.0 } else { 0.0 }, tc: t })
-    e.add(Inner { w: b.w, h: b.h })
+    e.add(Inner { w: w, h: h })
     if veil != 0 && !e.has(Tint) { e.add(Tint { colour: veil, part: 1.0 }) }
   }
 
@@ -332,7 +495,7 @@ system animate() {
       optional lv: Leave
       where ez.tc < 1.0 {
     let now = further(ez.tc, tr.seconds, Window.dt)
-    let k = if tr.colour { eased(now, tr.ease) } else { 1.0 }
+    let k = if tr.overlay { eased(now, tr.ease) } else { 1.0 }
     var veil = 0
     var part = 0.0
     if let c = o.colour {
@@ -367,60 +530,69 @@ system animate() {
       where ez.tp < 1.0 || ez.tw < 1.0 || ez.th < 1.0 || ez.tc < 1.0 {
     var place = further(ez.tp, tr.seconds, Window.dt)
     var colours = further(ez.tc, tr.seconds, Window.dt)
-    let wide = if tr.size { further(ez.tw, tr.seconds, Window.dt) } else { 1.0 }
-    let high = if tr.size { further(ez.th, tr.seconds, Window.dt) } else { 1.0 }
-    var x = b.x
-    var y = b.y
-    if e.has(Gone) {
+    var wide = if tr.w { further(ez.tw, tr.seconds, Window.dt) } else { 1.0 }
+    var high = if tr.h { further(ez.th, tr.seconds, Window.dt) } else { 1.0 }
+    // (How far from its place: none, in the end, or as far as it leaves
+    // to.)
+    var x = 0.0
+    var y = 0.0
+    var bw = b.w
+    var bh = b.h
+    let gone = e.has(Gone)
+    if gone {
       // (With nowhere to go, it has got there.)
       if !e.has(Leave) {
         place = 1.0
         colours = 1.0
+        wide = 1.0
+        high = 1.0
       }
-      if let dx = lv.dx, let dy = lv.dy {
-        x += dx
-        y += dy
+      if let dx = lv.dx, let dy = lv.dy, let dw = lv.dw, let dh = lv.dh {
+        x = dx
+        y = dy
+        bw += dw
+        bh += dh
       }
     }
-    if tr.place && place < 1.0 {
+    if place < 1.0 {
       let k = eased(place, tr.ease)
-      x = ez.x + (x - ez.x) * k
-      y = ez.y + (y - ez.y) * k
+      if tr.x { x = ez.x + (x - ez.x) * k }
+      if tr.y { y = ez.y + (y - ez.y) * k }
     }
-    s.x = x
-    s.y = y
-    s.dx = x - b.x
-    s.dy = y - b.y
-    let w = if wide < 1.0 { ez.w + (b.w - ez.w) * eased(wide, tr.ease) }
-            else { b.w }
-    let h = if high < 1.0 { ez.h + (b.h - ez.h) * eased(high, tr.ease) }
-            else { b.h }
+    s.dx = x
+    s.dy = y
+    let w = if wide < 1.0 { ez.w + (bw - ez.w) * eased(wide, tr.ease) }
+            else { bw }
+    let h = if high < 1.0 { ez.h + (bh - ez.h) * eased(high, tr.ease) }
+            else { bh }
     s.w = w
     s.h = h
     in.w = w
     in.h = h
     if let colour = f.colour {
-      s.colour = if tr.colour && colours < 1.0 {
+      s.colour = if tr.fill && colours < 1.0 {
         blend(ez.colour, colour, eased(colours, tr.ease))
       } else { colour }
     }
+    s.away = gone || (!tr.touch && place < 1.0 && (tr.x || tr.y))
     ez.tp = place
     ez.tw = wide
     ez.th = high
     ez.tc = colours
-    if place >= 1.0 && colours >= 1.0 && e.has(Gone) && !e.has(Dead) {
+    if gone && place >= 1.0 && colours >= 1.0 && wide >= 1.0 &&
+       high >= 1.0 && !e.has(Dead) {
       e.add(Dead { at: 0 })
     }
   }
 
   // What that comes to for each box: it is as far from its place as the
-  // box it is in or floats over, and under what is laid on that; or as
-  // far as its own `Transition` has it, and under its own.
+  // box it is in or floats over, and under what is laid on that; and as
+  // far again as its own `Transition` has it, and under its own too.
   // (With what the inspector keeps, which every box has from the start:
   // a box that got it later would be another kind of box, and everything
   // here would be there for both kinds.)
   for e, b: Box without Look on added Box {
-    e.add(Look { dx: 0.0, dy: 0.0, colour: 0, part: 0.0 })
+    e.add(Look { dx: 0.0, dy: 0.0, colour: 0, part: 0.0, away: false })
     e.add(Listed { line: 0 })
   }
   // (In turns: what floats goes by the box under it, and what is inside
@@ -435,16 +607,21 @@ system animate() {
       var dy = 0.0
       var colour = 0
       var part = 0.0
-      if let x = up.dx, let y = up.dy, let c = up.colour, let p = up.part {
+      var away = false
+      if let x = up.dx, let y = up.dy, let c = up.colour, let p = up.part,
+         let off = up.away {
         dx = x
         dy = y
         colour = c
         part = p
+        away = off
       }
-      if let x = s.dx, let y = s.dy {
-        dx = x
-        dy = y
+      if let x = s.dx, let y = s.dy, let off = s.away {
+        dx += x
+        dy += y
+        away = away || off
       }
+      lk.away = away
       // (Its own on what is laid on the box it is in or over: so much
       // of that still shows through as its own lets.)
       if let c = t.colour, let p = t.part {
@@ -469,10 +646,13 @@ system animate() {
       var dy = under.dy
       var colour = under.colour
       var part = under.part
-      if let x = s.dx, let y = s.dy {
-        dx = x
-        dy = y
+      var away = under.away
+      if let x = s.dx, let y = s.dy, let off = s.away {
+        dx += x
+        dy += y
+        away = away || off
       }
+      lk.away = away
       // (Its own on what is laid on the box it is in or over: so much
       // of that still shows through as its own lets.)
       if let c = t.colour, let p = t.part {
@@ -491,6 +671,14 @@ system animate() {
   } until inside + over == 0
 }
 
+// The pointer does not find a box that is on its way to another place,
+// or to go: after `point`, which does not know of that, and `animate`,
+// which says which they are.
+system reach() {
+  for e, lk: Look with Hovered where lk.away { e.remove(Hovered) }
+  for e, lk: Look with Pressed where lk.away { e.remove(Pressed) }
+}
+
 // A box is drawn after the one it is in, and so on top of it, and all
 // that is in a box before the next box: depth first. What floats is a
 // layer above, drawn after all of the layer below.
@@ -502,7 +690,8 @@ system draw() {
     for b: Box, l: Layer, v: Seen, lk: Look, optional f: Fill,
         optional t: Text, optional k: Stack, optional p: Pad,
         optional how: Align, optional st: TextStyle, optional more: Expand,
-        optional rc: Round, optional pic: Picture, optional own: Shown
+        optional rc: Round, optional pic: Picture, optional own: Shown,
+        optional sr: ShownRound
         top down dfs Inside
         where l.z == z && b.x < Window.width as f32 && b.x + b.w > 0.0 &&
               b.y < Window.height as f32 && b.y + b.h > 0.0 &&
@@ -530,8 +719,28 @@ system draw() {
           ew = w
           eh = h
         }
-        if let tl = rc.top_left, let tr = rc.top_right,
-           let bl = rc.bottom_left, let br = rc.bottom_right {
+        // (As round as its corners are right now, on their way.)
+        var round = false
+        var tl = 0.0
+        var tr = 0.0
+        var bl = 0.0
+        var br = 0.0
+        if let a = rc.top_left, let c = rc.top_right, let d = rc.bottom_left,
+           let g = rc.bottom_right {
+          round = true
+          tl = a
+          tr = c
+          bl = d
+          br = g
+        }
+        if let a = sr.top_left, let c = sr.top_right, let d = sr.bottom_left,
+           let g = sr.bottom_right {
+          tl = a
+          tr = c
+          bl = d
+          br = g
+        }
+        if round {
           rounded(b.x - ew, b.y - eh, bw + 2.0 * ew, bh + 2.0 * eh, tl, tr,
                   bl, br, paint)
         } else {
@@ -592,7 +801,8 @@ system draw() {
     // The edges of the layer's boxes over what is in them, and the lines
     // between the boxes in one.
     for b: Box, l: Layer, v: Seen, lk: Look, bd: Border, optional rc: Round,
-        optional own: Shown
+        optional own: Shown, optional sr: ShownRound,
+        optional sb: ShownBorder
         top down dfs Inside where l.z == z {
       clip(v.x, v.y, v.w, v.h)
       var bw = b.w
@@ -614,21 +824,41 @@ system draw() {
         bl = d
         br = g
       }
-      edges(b.x, b.y, bw, bh, bd.left, bd.right, bd.top, bd.bottom, tl, tr,
-            bl, br, bd.colour)
+      if let a = sr.top_left, let c = sr.top_right, let d = sr.bottom_left,
+         let g = sr.bottom_right {
+        tl = a
+        tr = c
+        bl = d
+        br = g
+      }
+      if let left = sb.left, let right = sb.right, let top = sb.top,
+         let bottom = sb.bottom, let colour = sb.colour {
+        edges(b.x, b.y, bw, bh, left, right, top, bottom, tl, tr, bl, br,
+              colour)
+      } else {
+        edges(b.x, b.y, bw, bh, bd.left, bd.right, bd.top, bd.bottom, tl, tr,
+              bl, br, bd.colour)
+      }
     }
     for (b: Box, l: Layer, v: Seen)
             -[Inside]->(ob: Box, ok: Stack, obd: Border, olk: Look),
-        (prev: Box)~[Inside]~>(b)
+        (prev: Box)~[Inside]~>(b),
+        optional (b)-[Inside]->(osb: ShownBorder)
         top down dfs Inside where l.z == z && obd.between > 0.0 {
       clip(v.x, v.y, v.w, v.h)
       shift(olk.dx, olk.dy)
       shade(olk.colour, olk.part)
-      let half = (ok.gap + obd.between) * 0.5
+      var thick = obd.between
+      var colour = obd.colour
+      if let now = osb.between, let c = osb.colour {
+        thick = now
+        colour = c
+      }
+      let half = (ok.gap + thick) * 0.5
       if ok.row {
-        rect(b.x - half, ob.y, obd.between, ob.h, obd.colour)
+        rect(b.x - half, ob.y, thick, ob.h, colour)
       } else {
-        rect(ob.x, b.y - half, ob.w, obd.between, obd.colour)
+        rect(ob.x, b.y - half, ob.w, thick, colour)
       }
     }
   }
@@ -810,6 +1040,7 @@ schedule ui() {
   layout_heights()
   point()
   animate()
+  reach()
   // (Again, for what is inside the boxes that are on their way to
   // another size: nothing, where none is.)
   layout_widths()

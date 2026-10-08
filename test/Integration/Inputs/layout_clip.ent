@@ -75,9 +75,12 @@ system change() {
   for s: mut Scroll where Frame == 2 { s.y = -100.0 }
   Pointer.x = if Frame == 3 { 140.0 } else { 50.0 }
   Pointer.y = if Frame == 3 { 60.0 } else { 90.0 }
+  // (Down in the second frame and the third.)
+  Pointer.down = Frame == 2 || Frame == 3
 }
 
 system show() {
+  put("{Frame}: touch {PointerTouch as i32}")
   for e, b: Box, v: Seen, n: Name, optional r: Content top down dfs Inside {
     var content = 0.0
     if let c = r.h { content = c }

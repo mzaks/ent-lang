@@ -686,11 +686,16 @@ public:
                                        WorldRelation::kTouched - 1));
     Value ticks = touchedTicks(relation);
     // (The entry this one takes the place of is lost; the first ones take
-    // the place of none, whose tick is 0.)
+    // the place of none, whose tick is 0. Not where one was lost later
+    // than that: an edge a body took away says so itself, see
+    // lowerEdges.)
     memref::StoreOp::create(
         rewriter, loc,
-        memref::LoadOp::create(rewriter, loc, ticks, ValueRange{slot}), state,
-        ValueRange{one});
+        arith::MaxSIOp::create(
+            rewriter, loc,
+            memref::LoadOp::create(rewriter, loc, state, ValueRange{one}),
+            memref::LoadOp::create(rewriter, loc, ticks, ValueRange{slot})),
+        state, ValueRange{one});
     memref::StoreOp::create(rewriter, loc, id, touchedIds(relation),
                             ValueRange{slot});
     memref::StoreOp::create(rewriter, loc, currentTick(loc), ticks,

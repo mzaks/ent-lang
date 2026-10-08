@@ -13,7 +13,7 @@
 // card ends. The entries and the buttons light up under the mouse, and
 // fade again. A note floats at the mouse, over everything else, with a
 // mark that floats over its text; the pointer goes through them. A card
-// goes dark while it is pressed. Enter
+// goes dark while it is pressed, and goes when it is clicked. Enter
 // sends the last card away; I shows the inspector, and O hides it. Escape
 // or closing the window ends the program.
 import window
@@ -71,8 +71,10 @@ world {
       Pad { left: 10.0, right: 10.0, top: 0.0, bottom: 0.0 },
       Align { x: Place.Start, y: Place.Middle },
       Fill { colour: 0x2a3640 }, Shade { idle: 0x2a3640, over: 0x3a7bd5 },
-      Transition { seconds: 0.3, ease: Ease.Out, place: false, size: false,
-                   colour: true },
+      Transition { seconds: 0.3, ease: Ease.Out, x: false, y: false,
+                   w: false, h: false, fill: true, overlay: true,
+                   round: false, border_colour: false,
+                   border_width: false, touch: false },
       Text { text: "entry {i + 1}", size: 16.0, colour: 0xd0d8e0 }
     }
     connect (entry)-[Inside]->(side)
@@ -125,8 +127,10 @@ world {
       Stack { row: true, pad: 0.0, gap: 0.0 },
       Pad { left: 12.0, right: 12.0, top: 7.0, bottom: 7.0 },
       Fill { colour: 0x3a7bd5 }, Shade { idle: 0x3a7bd5, over: 0x70c0ff },
-      Transition { seconds: 0.2, ease: Ease.Out, place: false, size: false,
-                   colour: true },
+      Transition { seconds: 0.2, ease: Ease.Out, x: false, y: false,
+                   w: false, h: false, fill: true, overlay: true,
+                   round: false, border_colour: false,
+                   border_width: false, touch: false },
       Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0,
               bottom_right: 8.0 },
       Text { text: if i == 0 { "open" } else if i == 1 { "save as" }
@@ -192,10 +196,13 @@ world {
                colour: 0x3a7bd5 },
       Limits { min_w: 120.0, max_w: if i == 1 { 260.0 } else { 0.0 },
                min_h: 0.0, max_h: 0.0 },
-      Transition { seconds: 0.25 + 0.15 * i as f32, ease: Ease.InOut,
-                   place: true, size: true, colour: true },
-      Enter { dx: 0.0, dy: 60.0, colour: 0x101418 },
-      Leave { dx: 0.0, dy: 80.0, colour: 0x101418 }, Card
+      Transition { seconds: 0.25 + 0.15 * i as f32, ease: Ease.InOut, x: true, y: true,
+                   w: true, h: true, fill: true, overlay: true,
+                   round: false, border_colour: false,
+                   border_width: false, touch: false },
+      Enter { dx: 0.0, dy: 60.0, dw: 0.0, dh: 0.0, colour: 0x101418,
+              always: true },
+      Leave { dx: 0.0, dy: 80.0, dw: 0.0, dh: 0.0, colour: 0x101418 }, Card
     }
     connect (card)-[Inside]->(cards)
     let picture = spawn {
@@ -247,6 +254,12 @@ system interact() {
       if e.has(Pressed) { e.add(Overlay { colour: 0x55000000 }) }
       else { e.remove(Overlay) }
     }
+  }
+  // A card that is clicked goes: the others take its room at once, on
+  // their way while it is on its.
+  for e with Card, Hovered without Gone
+      where PointerTouch == Touch.ReleasedNow {
+    e.add(Gone)
   }
   // The last card goes.
   for e, b: Box with Card without Gone where Keys.enter && b.x > 600.0 {
