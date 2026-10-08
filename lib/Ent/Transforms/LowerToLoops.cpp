@@ -2935,6 +2935,10 @@ static void applyPending(IRRewriter &rewriter, Location loc,
 /// Lower every ent.spawn in `func`: check the capacity, write the values
 /// into the next free row (optional components absent), allocate the id,
 /// bump the count.
+static SmallVector<Value>
+emitPartWith(IRRewriter &rewriter, Location loc, StringRef name,
+             TypeRange types, function_ref<SmallVector<Value>()> emit);
+
 static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
                         const WorldLayout &layout, WorldAccess &world) {
   SmallVector<SpawnOp> spawns;
@@ -2947,6 +2951,10 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
         archetype = &entry;
     Location loc = spawn.getLoc();
     rewriter.setInsertionPoint(spawn);
+    // (A part: a program that makes its world entity by entity has as
+    // many of these as entities, alike but for their values.)
+    Value made = emitPartWith(rewriter, loc, "spawn", {world.idType()},
+                              [&]() -> SmallVector<Value> {
     // A new entity is out of a sorted archetype's order until the next
     // sort.
     if (archetype->isSorted())
@@ -3033,7 +3041,9 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
     Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
     world.setCount(loc, *archetype,
                    arith::AddIOp::create(rewriter, loc, row, one));
-    rewriter.replaceOp(spawn, world.fromStorage(loc, id, spawn.getType()));
+    return {id};
+                              })[0];
+    rewriter.replaceOp(spawn, world.fromStorage(loc, made, spawn.getType()));
   }
 }
 
@@ -6758,6 +6768,24 @@ static void emitPart(IRRewriter &rewriter, Location loc, const Twine &name,
   rewriter.setInsertionPointAfter(part);
 }
 
+/// The same for a part that gives values (of `types`), which `emit`
+/// returns, emitting from the insertion point on and leaving it at the
+/// part's end.
+static SmallVector<Value>
+emitPartWith(IRRewriter &rewriter, Location loc, StringRef name,
+             TypeRange types, function_ref<SmallVector<Value>()> emit) {
+  auto part = scf::ExecuteRegionOp::create(rewriter, loc, types);
+  part->setAttr(kPartAttr, rewriter.getStringAttr(name));
+  Block *block = part.getRegion().empty()
+                     ? rewriter.createBlock(&part.getRegion())
+                     : &part.getRegion().front();
+  rewriter.setInsertionPointToStart(block);
+  SmallVector<Value> values = emit();
+  scf::YieldOp::create(rewriter, loc, values);
+  rewriter.setInsertionPointAfter(part);
+  return SmallVector<Value>(part->getResults());
+}
+
 namespace {
 /// Two parts gone through side by side: which value of the second stands
 /// where which value of the first does, for those defined inside.
@@ -6853,9 +6881,10 @@ static void outerUses(Region &region, llvm::DenseSet<Value> &inner,
 /// Put what is in the part `part` in its place, as if it had no name.
 static void dissolvePart(IRRewriter &rewriter, scf::ExecuteRegionOp part) {
   Block &block = part.getRegion().front();
+  SmallVector<Value> given(block.getTerminator()->getOperands());
   rewriter.eraseOp(block.getTerminator());
   rewriter.inlineBlockBefore(&block, part);
-  rewriter.eraseOp(part);
+  rewriter.replaceOp(part, given);
 }
 
 /// A value a function can make for itself rather than be given: a
@@ -7004,7 +7033,7 @@ static void shareParts(IRRewriter &rewriter, func::FuncOp func) {
       rewriter.setInsertionPoint(func);
       shared = func::FuncOp::create(
           rewriter, loc, ("ent_part_" + Twine(serial++)).str(),
-          rewriter.getFunctionType(types, {}));
+          rewriter.getFunctionType(types, first->getResultTypes()));
       shared.setPrivate();
       Block *entry = shared.addEntryBlock();
       rewriter.setInsertionPointToStart(entry);
@@ -7034,18 +7063,20 @@ static void shareParts(IRRewriter &rewriter, func::FuncOp func) {
           break;
         }
       }
-      func::ReturnOp::create(rewriter, loc);
       // The first one's ops move in, taking what they took from outside
-      // from the function.
+      // from the function, which gives what the part gave.
       for (auto [place, use] : llvm::enumerate(uses.front()))
         use->set(inside[slotOf[place]]);
       Block &block = first.getRegion().front();
+      SmallVector<Value> given(block.getTerminator()->getOperands());
       rewriter.eraseOp(block.getTerminator());
       SmallVector<Operation *> ops;
       for (Operation &op : block)
         ops.push_back(&op);
       for (Operation *op : ops)
-        op->moveBefore(entry->getTerminator());
+        op->moveBefore(entry, entry->end());
+      rewriter.setInsertionPointToEnd(entry);
+      func::ReturnOp::create(rewriter, loc, given);
     }
     for (auto [part, values] : llvm::zip(group, arguments)) {
       rewriter.setInsertionPoint(part);
@@ -7054,8 +7085,8 @@ static void shareParts(IRRewriter &rewriter, func::FuncOp func) {
         if (isMadeAnew(value))
           value = rewriter.clone(*value.getDefiningOp())
                       ->getResult(cast<OpResult>(value).getResultNumber());
-      func::CallOp::create(rewriter, part.getLoc(), shared, values);
-      rewriter.eraseOp(part);
+      auto call = func::CallOp::create(rewriter, part.getLoc(), shared, values);
+      rewriter.replaceOp(part, call.getResults());
     }
   }
 

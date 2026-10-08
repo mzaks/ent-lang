@@ -2880,3 +2880,10 @@ and every field read through an arrow looked its entity up again.
 - At run time the same: `bench/boxes` 18.0 - 18.9 us a frame (17.2 -
   17.4 before), the scene graph's `reactive` 1.2 us for one move and 157
   for a thousand (1.1 and 174).
+- Later: the spawns of a function that are alike are one function too
+  (`world_setup` 19,036 lines to 14,354; the build 1.6 s). Tried and
+  not kept: the same for the append to an event log, which every write
+  of a watched field has. 8,700 lines fewer, no faster to build, and
+  `bench/boxes` went from 18 to 22 - 23 us a frame.
+- A program that was built is kept (`tools/ent`, see its --help): the
+  demo starts in 0.4 s the second time.
