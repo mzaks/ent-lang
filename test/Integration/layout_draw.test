@@ -1,7 +1,8 @@
 // examples/layout_window.ent without a window: a device that prints what
 // would be drawn stands in for devices/window.c, which needs a display
 // and raylib. What is drawn, in which order, clipped, shifted and shaded
-// how; boxes on their way (Transition, Enter, Leave, Gone), overlays on
+// how; boxes on their way to another place, size and colour (Transition,
+// Enter, Leave, Gone), overlays on
 // one another, what scrolls dragged and let go, and the inspector.
 // RUN: mkdir -p %t.dir
 // RUN: cp %S/../../devices/window.ent %t.dir/window.ent
@@ -67,17 +68,30 @@
 // Slower and slower.
 // CHECK:      frame 6
 // CHECK:      write 14 -41.5 in 92 "row 0" 00ffffff
-// Its colour is to be another: a fifth of the way a frame.
+// Its colour is to be another: a fifth of the way a frame. And the list
+// is 40 narrower, so the card is to start 40 further left and be as
+// much wider: it is 32 from there still, and 8 wider. What is in it is
+// where it is to be, and as far off as the card; it shows only where the
+// card does, while that is not as big as it is to be.
 // CHECK:      frame 7
-// CHECK:      rounded 120 10 170 180 by 8 8 0 0 ff306650
+// CHECK:      rect 10 10 60 180 00202020
+// CHECK:      shift 32 0
+// CHECK:      rounded 80 10 178 180 by 8 8 0 0 ff306650
+// CHECK-NEXT: clip 112 10 178 180
+// CHECK-NEXT: write 90 20 in 190 "a text that goes on in the next line" 00a0b0c0
+// CHECK-NEXT: unclip
 // CHECK:      frame 8
-// CHECK:      rounded 120 10 170 180 by 8 8 0 0 ff308c50
+// CHECK:      shift 24 0
+// CHECK:      rounded 80 10 186 180 by 8 8 0 0 ff308c50
+// CHECK-NEXT: clip 104 10 186 180
 // It is to go: under more and more of the colour it leaves into.
 // CHECK:      frame 9
 // CHECK:      shade 760202 0.70
 // CHECK:      frame 13
 // CHECK:      shade 101010 1.00
-// CHECK-NEXT: rounded 120 10 170 180 by 8 8 0 0 0030ff50
+// CHECK-NEXT: rounded 80 10 210 180 by 8 8 0 0 0030ff50
+// (As big as it is to be, it clips nothing.)
+// CHECK-NEXT: write 90 20 in 190 "a text that goes on in the next line" 00a0b0c0
 // And is gone, with the text in it and what floated over that.
 // CHECK:      frame 14
 // CHECK-NOT:  rounded
@@ -89,10 +103,10 @@
 // on, which is marked in the window.
 // CHECK:      rect 380 0 320 200 f0141a20
 // CHECK:      label 406 11 "row 300 x 200"
-// CHECK:      label 418 29 "clip 100 x 180"
-// CHECK:      label 430 47 "text 100 x 100"
+// CHECK:      label 418 29 "clip 60 x 180"
+// CHECK:      label 430 47 "text 60 x 100"
 // CHECK:      clip 0 0 380 200
-// CHECK:      edges 10 {{[0-9.]+}} 100 100 of 2 2 2 2 00ffe040
+// CHECK:      edges 10 {{[0-9.]+}} 60 100 of 2 2 2 2 00ffe040
 // CHECK:      label 390 78 "line 4, layer 0, 2 deep"
 // CHECK:      label 390 114 "width grow, height fixed"
 // CHECK:      label 390 132 "padding 4 4 4 4, gap 0"

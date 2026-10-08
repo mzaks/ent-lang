@@ -57,7 +57,9 @@ tag Drag
 // A box that is not at once where and what it is now to be: it gets
 // there in so many seconds, slowly at first (`In`), at the end (`Out`),
 // both or neither, in where it is (`place`: and what is inside it goes
-// with it), in how big it is, and in its `Fill` and `Overlay` colours.
+// with it), in how big it is (`size`: what is inside it is as big as it
+// is to be at once, and shows only where the box does until that is as
+// big as it is to be), and in its `Fill` and `Overlay` colours.
 enum Ease { Linear, In, Out, InOut }
 component Transition {
   seconds: f32, ease: Ease, place: bool, size: bool, colour: bool
@@ -91,12 +93,19 @@ unique Picked {
 component Glide { vx: f32, vy: f32, x: f32, y: f32, held: bool, was: bool }
 component Tint { colour: i32, part: f32 }
 component Shown {
-  x: f32, y: f32, w: f32, h: f32, colour: i32, dx: f32, dy: f32
+  x: f32, y: f32, w: f32, h: f32, colour: i32, dx: f32, dy: f32,
+  sizing: bool
 }
 // And what follows from those for every box, with the boxes it is in:
 // how far from its place it is drawn, and under how much (0 to 1) of
-// what colour, all of that colour (AA ff).
-component Look { dx: f32, dy: f32, colour: i32, part: f32 }
+// what colour, all of that colour (AA ff). And the part of the window it
+// shows in while a box it is in is on its way to another size: what
+// shows of that box right now, as the boxes inside it are where and as
+// big as they are to be already.
+component Look {
+  dx: f32, dy: f32, colour: i32, part: f32, x0: f32, y0: f32, x1: f32,
+  y1: f32
+}
 component Eased {
   x: f32, y: f32, w: f32, h: f32, colour: i32, tint: i32, part: f32, t: f32
 }
@@ -299,7 +308,7 @@ system animate() {
       t = 0.0
     }
     e.add(Shown { x: x, y: y, w: b.w, h: b.h, colour: colour, dx: x - b.x,
-                  dy: y - b.y })
+                  dy: y - b.y, sizing: false })
     e.add(Eased { x: x, y: y, w: b.w, h: b.h, colour: colour, tint: veil,
                   part: if veil != 0 { 1.0 } else { 0.0 }, t: t })
     if veil != 0 && !e.has(Tint) { e.add(Tint { colour: veil, part: 1.0 }) }
@@ -365,6 +374,7 @@ system animate() {
     s.dy = y - b.y
     s.w = if tr.size { ez.w + (b.w - ez.w) * k } else { b.w }
     s.h = if tr.size { ez.h + (b.h - ez.h) * k } else { b.h }
+    s.sizing = s.w != b.w || s.h != b.h
     if let colour = f.colour {
       s.colour = if tr.colour { blend(ez.colour, colour, k) } else { colour }
     }
@@ -379,7 +389,8 @@ system animate() {
   // a box that got it later would be another kind of box, and everything
   // here would be there for both kinds.)
   for e, b: Box without Look on added Box {
-    e.add(Look { dx: 0.0, dy: 0.0, colour: 0, part: 0.0 })
+    e.add(Look { dx: 0.0, dy: 0.0, colour: 0, part: 0.0, x0: -1.0e9,
+                 y0: -1.0e9, x1: 1.0e9, y1: 1.0e9 })
     e.add(Listed { line: 0 })
   }
   // (In turns: what floats goes by the box under it, and what is inside
@@ -387,19 +398,44 @@ system animate() {
   loop {
     let inside =
     for (lk: mut Look, optional s: Shown, optional t: Tint),
-        optional (lk)-[Inside]->(up: Look)
+        optional (lk)-[Inside]->(up: Look),
+        optional (lk)-[Inside]->(us: Shown)
         without Float top down Inside
-        on changed up, changed s, changed t, removed Tint, added Look {
+        on changed up, changed us, changed s, changed t, removed Tint,
+           added Look {
       var dx = 0.0
       var dy = 0.0
       var colour = 0
       var part = 0.0
-      if let x = up.dx, let y = up.dy, let c = up.colour, let p = up.part {
+      var x0 = -1.0e9
+      var y0 = -1.0e9
+      var x1 = 1.0e9
+      var y1 = 1.0e9
+      if let x = up.dx, let y = up.dy, let c = up.colour, let p = up.part,
+         let left = up.x0, let top = up.y0, let right = up.x1,
+         let bottom = up.y1 {
         dx = x
         dy = y
         colour = c
         part = p
+        x0 = left
+        y0 = top
+        x1 = right
+        y1 = bottom
       }
+      if let sizing = us.sizing, let sx = us.x, let sy = us.y, let sw = us.w,
+         let sh = us.h {
+        if sizing {
+          x0 = max(x0, sx)
+          y0 = max(y0, sy)
+          x1 = min(x1, sx + sw)
+          y1 = min(y1, sy + sh)
+        }
+      }
+      lk.x0 = x0
+      lk.y0 = y0
+      lk.x1 = x1
+      lk.y1 = y1
       if let x = s.dx, let y = s.dy {
         dx = x
         dy = y
@@ -428,6 +464,10 @@ system animate() {
       var dy = under.dy
       var colour = under.colour
       var part = under.part
+      lk.x0 = under.x0
+      lk.y0 = under.y0
+      lk.x1 = under.x1
+      lk.y1 = under.y1
       if let x = s.dx, let y = s.dy {
         dx = x
         dy = y
@@ -467,7 +507,9 @@ system draw() {
               b.y < Window.height as f32 && b.y + b.h > 0.0 &&
               b.x < v.x + v.w && b.x + b.w > v.x &&
               b.y < v.y + v.h && b.y + b.h > v.y {
-      clip(v.x, v.y, v.w, v.h)
+      clip(max(v.x, lk.x0), max(v.y, lk.y0),
+           min(v.x + v.w, lk.x1) - max(v.x, lk.x0),
+           min(v.y + v.h, lk.y1) - max(v.y, lk.y0))
       // Where a box in a `Transition` is right now, and as big, with all
       // that is in it as far from its place; under what is laid on it,
       // or on the nearest box it is in.
@@ -553,7 +595,9 @@ system draw() {
     for b: Box, l: Layer, v: Seen, lk: Look, bd: Border, optional rc: Round,
         optional own: Shown
         top down dfs Inside where l.z == z {
-      clip(v.x, v.y, v.w, v.h)
+      clip(max(v.x, lk.x0), max(v.y, lk.y0),
+           min(v.x + v.w, lk.x1) - max(v.x, lk.x0),
+           min(v.y + v.h, lk.y1) - max(v.y, lk.y0))
       var bw = b.w
       var bh = b.h
       if let sw = own.w, let sh = own.h {
@@ -576,11 +620,13 @@ system draw() {
       edges(b.x, b.y, bw, bh, bd.left, bd.right, bd.top, bd.bottom, tl, tr,
             bl, br, bd.colour)
     }
-    for (b: Box, l: Layer, v: Seen)
+    for (b: Box, l: Layer, v: Seen, lk: Look)
             -[Inside]->(ob: Box, ok: Stack, obd: Border, olk: Look),
         (prev: Box)~[Inside]~>(b)
         top down dfs Inside where l.z == z && obd.between > 0.0 {
-      clip(v.x, v.y, v.w, v.h)
+      clip(max(v.x, lk.x0), max(v.y, lk.y0),
+           min(v.x + v.w, lk.x1) - max(v.x, lk.x0),
+           min(v.y + v.h, lk.y1) - max(v.y, lk.y0))
       shift(olk.dx, olk.dy)
       shade(olk.colour, olk.part)
       let half = (ok.gap + obd.between) * 0.5

@@ -76,7 +76,8 @@ world {
 
 // A tenth of a second a frame. The pointer goes down on the list in the
 // third frame and 30 up in the fourth, and lets go; in the seventh the
-// card's colour is another; in the ninth the card is to go, and is gone
+// card's colour is another, and the list 40 narrower, so the card that
+// much wider; in the ninth the card is to go, and is gone
 // after the thirteenth; in the last the inspector is on, the pointer on
 // the list.
 system change() {
@@ -86,6 +87,7 @@ system change() {
   Mouse.y = if Frame == 4 { 70.0 } else { 100.0 }
   Mouse.left = Frame == 3 || Frame == 4
   for f: mut Fill with Card where Frame == 7 { f.colour = 0x30ff50 }
+  for b: mut Box with List where Frame == 7 { b.w = 60.0 }
   for e with Card without Gone where Frame == 9 { e.add(Gone) }
   if Frame == 15 { Inspector.on = true }
   put("frame {Frame}")
