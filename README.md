@@ -141,7 +141,11 @@ A big program is optimised whole and then made into machine code in
 pieces, each on a core of its own (`ENT_PIECES=1`: in one piece;
 `ENT_SPLIT=first`: shared out before it is optimised, which builds a big
 program in two thirds of the time and runs it about a tenth slower). What
-makes the world, which runs once, is not optimised.
+makes the world, which runs once, is not optimised. Before the program is
+turned into LLVM's IR, what the lowering wrote more than once is written
+once (`--cse`) and the world's columns are read and written by their
+addresses (`--ent-lower-views`), which halves what LLVM gets for a
+program with many archetypes.
 
 A program with a `main` needs no C host: the compiler emits C's `main`,
 which creates the world and runs the schedules as `main` says, after the

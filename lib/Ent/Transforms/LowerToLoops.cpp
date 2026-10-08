@@ -1822,6 +1822,9 @@ static SmallVector<Operation *> carryOwnFields(IRRewriter &rewriter,
 static Value tableEntry(IRRewriter &rewriter, Location loc,
                         const WorldLayout &layout, Value where,
                         function_ref<uint64_t(const WorldArchetype &)> of);
+static Value constantTable(IRRewriter &rewriter, Location loc,
+                           const WorldLayout &layout,
+                           ArrayRef<int64_t> entries);
 namespace {
 /// Where a ref `up` a relation leads for one entity: whether it has such
 /// an ancestor, and the ancestor's id (in its stored form).
@@ -3291,6 +3294,13 @@ static void dropHeldTexts(IRRewriter &rewriter, Location loc,
   }
 }
 
+/// Whether an archetype has so many columns that what is done for each
+/// of them is better done in one place, by a table of them, than written
+/// out where it is needed.
+static bool isWide(const WorldArchetype &archetype) {
+  return archetype.columns.size() > 24;
+}
+
 /// Apply the rows listed as pending for `archetype`, at the insertion
 /// point, last listed first: despawn (free the id) or move the entity to
 /// another archetype, then remove the row by moving the archetype's last
@@ -3380,7 +3390,59 @@ static void applyPending(IRRewriter &rewriter, Location loc,
     {
       OpBuilder::InsertionGuard inner(rewriter);
       rewriter.setInsertionPointToStart(shift.thenBlock());
+      // An archetype of many columns: by a table of where each starts
+      // and how many bytes an element of it is, in one loop that moves
+      // the bytes; one of few, column by column as what they are.
+      bool byTable = isWide(archetype);
+      if (byTable) {
+        SmallVector<int64_t> entries;
+        for (const WorldColumn &column : archetype.columns) {
+          Type stored = column.isStamp() ? Type(rewriter.getI64Type())
+                        : column.isPresence()
+                            ? Type(rewriter.getI8Type())
+                            : world.storageType(column.type);
+          unsigned bits =
+              stored.isIndex() ? 64 : stored.getIntOrFloatBitWidth();
+          entries.push_back(int64_t(column.offset));
+          entries.push_back(int64_t((bits + 7) / 8));
+        }
+        Value table = constantTable(rewriter, loc, layout, entries);
+        Value two = arith::ConstantIndexOp::create(rewriter, loc, 2);
+        auto columns = scf::ForOp::create(
+            rewriter, loc, zero,
+            arith::ConstantIndexOp::create(rewriter, loc, entries.size()),
+            two);
+        rewriter.setInsertionPoint(columns.getBody()->getTerminator());
+        Value which = columns.getInductionVar();
+        Value start = world.toIndex(
+            loc, memref::LoadOp::create(rewriter, loc, table,
+                                        ValueRange{which}));
+        Value bytes = world.toIndex(
+            loc, memref::LoadOp::create(
+                     rewriter, loc, table,
+                     ValueRange{arith::AddIOp::create(rewriter, loc, which,
+                                                      one)}));
+        Value from = arith::AddIOp::create(
+            rewriter, loc, start,
+            arith::MulIOp::create(rewriter, loc, last, bytes));
+        Value to = arith::AddIOp::create(
+            rewriter, loc, start,
+            arith::MulIOp::create(rewriter, loc, row, bytes));
+        auto each = scf::ForOp::create(rewriter, loc, zero, bytes, one);
+        rewriter.setInsertionPoint(each.getBody()->getTerminator());
+        Value byte = memref::LoadOp::create(
+            rewriter, loc, world.getArena(),
+            ValueRange{arith::AddIOp::create(rewriter, loc, from,
+                                             each.getInductionVar())});
+        memref::StoreOp::create(
+            rewriter, loc, byte, world.getArena(),
+            ValueRange{arith::AddIOp::create(rewriter, loc, to,
+                                             each.getInductionVar())});
+        rewriter.setInsertionPointAfter(columns);
+      }
       for (const WorldColumn &column : archetype.columns) {
+        if (byTable)
+          break;
         Value view = column.isStamp()
                          ? world.stamps(archetype, column)
                          : world.column(archetype, column.component,
@@ -3740,20 +3802,16 @@ struct TableLocation {
 };
 } // namespace
 
-/// What `of` gives for the archetype numbered `where` (an index below
-/// the number of archetypes), at the insertion point: read from a table
-/// that is the program's own, one for every different table.
-static Value tableEntry(IRRewriter &rewriter, Location loc,
-                        const WorldLayout &layout, Value where,
-                        function_ref<uint64_t(const WorldArchetype &)> of) {
-  SmallVector<int64_t> entries;
-  for (const WorldArchetype &archetype : layout.archetypes)
-    entries.push_back(int64_t(of(archetype)));
+/// A table of numbers that is the program's own (one for every different
+/// table), at the insertion point.
+static Value constantTable(IRRewriter &rewriter, Location loc,
+                           const WorldLayout &layout,
+                           ArrayRef<int64_t> entries) {
   std::string name = "ent_table";
-  for (int64_t entry : entries)
+  for (int64_t entry : entries.take_front(8))
     name += "_" + llvm::utohexstr(uint64_t(entry));
   // (Long ones by what they come to.)
-  if (name.size() > 96)
+  if (entries.size() > 8 || name.size() > 96)
     name = "ent_table_" +
            llvm::utohexstr(llvm::hash_combine_range(entries.begin(),
                                                     entries.end())) +
@@ -3768,7 +3826,8 @@ static Value tableEntry(IRRewriter &rewriter, Location loc,
   for (unsigned again = 1; known; ++again) {
     auto global = cast<memref::GlobalOp>(known);
     auto values = cast<DenseIntElementsAttr>(*global.getInitialValue());
-    if (llvm::equal(values.getValues<int64_t>(), entries))
+    if (values.size() == int64_t(entries.size()) &&
+        llvm::equal(values.getValues<int64_t>(), entries))
       break;
     name += "_" + llvm::utostr(again);
     known = SymbolTable::lookupSymbolIn(module, name);
@@ -3781,10 +3840,22 @@ static Value tableEntry(IRRewriter &rewriter, Location loc,
         DenseIntElementsAttr::get(
             RankedTensorType::get({int64_t(entries.size())},
                                   rewriter.getI64Type()),
-            ArrayRef<int64_t>(entries)),
+            entries),
         /*constant=*/true, IntegerAttr());
   }
-  Value table = memref::GetGlobalOp::create(rewriter, loc, type, name);
+  return memref::GetGlobalOp::create(rewriter, loc, type, name);
+}
+
+/// What `of` gives for the archetype numbered `where` (an index below
+/// the number of archetypes), at the insertion point: read from such a
+/// table.
+static Value tableEntry(IRRewriter &rewriter, Location loc,
+                        const WorldLayout &layout, Value where,
+                        function_ref<uint64_t(const WorldArchetype &)> of) {
+  SmallVector<int64_t> entries;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    entries.push_back(int64_t(of(archetype)));
+  Value table = constantTable(rewriter, loc, layout, entries);
   return memref::LoadOp::create(rewriter, loc, table, ValueRange{where})
       .getResult();
 }
@@ -8491,6 +8562,43 @@ static void combineAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
 /// what depends on their rows is told (a sorted tree, and the locations a
 /// tree keeps), and the relations in `changedRelations`, with those that
 /// follow from that, are looked over.
+/// The function that applies what is pending for the archetype of a
+/// number, and the archetypes it is asked for (of the module that is
+/// being lowered).
+static const char kPendingFunction[] = "ent.pending";
+static llvm::SetVector<const WorldArchetype *> pendingAsked;
+
+/// Write the body of that function, if there is one: for each archetype
+/// it is asked for, what applyPending emits, as a part, so that
+/// archetypes whose rows are of the same shape share one.
+static void emitPendingFunction(IRRewriter &rewriter, ModuleOp module,
+                                const WorldLayout &layout) {
+  auto func = dyn_cast_or_null<func::FuncOp>(
+      SymbolTable::lookupSymbolIn(module, kPendingFunction));
+  if (!func)
+    return;
+  Location loc = func.getLoc();
+  Block *entry = &func.getBody().front();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(entry);
+  WorldAccess world(rewriter, layout, entry->getArgument(2));
+  for (const WorldArchetype *archetype : pendingAsked) {
+    rewriter.setInsertionPoint(entry->getTerminator());
+    auto here = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq, entry->getArgument(0),
+            arith::ConstantIndexOp::create(rewriter, loc, archetype->index)));
+    rewriter.setInsertionPointToStart(here.thenBlock());
+    emitPart(rewriter, loc, "pending", [&] {
+      applyPending(rewriter, loc, layout, *archetype, world,
+                   entry->getArgument(1));
+    });
+  }
+  shareParts(rewriter, func);
+  pendingAsked.clear();
+}
+
 static void commitStructure(IRRewriter &rewriter, Location loc,
                             const WorldLayout &layout, WorldAccess &world,
                             ArrayRef<const WorldArchetype *> changed,
@@ -8536,11 +8644,43 @@ static void commitStructure(IRRewriter &rewriter, Location loc,
           world.treeStale(tree), ValueRange{zero});
       changedRelations.insert(RelationOp(tree.op).getSymNameAttr());
     }
-    // (A part: every query that changes what entities there are does
-    // this for the archetypes it may change, the same way each time.)
-    emitPart(rewriter, loc, "pending", [&] {
-      applyPending(rewriter, loc, layout, *archetype, world, tick);
-    });
+    // An archetype of few columns: here, as a part, which the queries of
+    // a system that do the same share.
+    if (!isWide(*archetype)) {
+      emitPart(rewriter, loc, "pending", [&] {
+        applyPending(rewriter, loc, layout, *archetype, world, tick);
+      });
+      continue;
+    }
+    // One of many: in one function for the program, since every query
+    // that changes what entities there are does this for the archetypes
+    // it may change, the same way each time. (It is written when it is
+    // known for which archetypes it is asked: see emitPendingFunction.)
+    pendingAsked.insert(archetype);
+    Operation *module = ArchetypeOp(archetype->op)->getParentOp();
+    if (!SymbolTable::lookupSymbolIn(module, kPendingFunction)) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToEnd(cast<ModuleOp>(module).getBody());
+      auto func = func::FuncOp::create(
+          rewriter, loc, kPendingFunction,
+          rewriter.getFunctionType({rewriter.getIndexType(),
+                                    rewriter.getI64Type(),
+                                    world.getArena().getType()},
+                                   {}));
+      func.setPrivate();
+      rewriter.setInsertionPointToStart(func.addEntryBlock());
+      func::ReturnOp::create(rewriter, loc);
+    }
+    func::CallOp::create(
+        rewriter, loc, kPendingFunction, TypeRange{},
+        // (A program in which nothing is stamped has no tick: none is
+        // asked for either.)
+        ValueRange{arith::ConstantIndexOp::create(rewriter, loc,
+                                                  archetype->index),
+                   tick ? tick
+                        : arith::ConstantIntOp::create(rewriter, loc, 0, 64)
+                              .getResult(),
+                   world.getArena()});
   }
   // Then the changed relations are sorted, which also drops edges to the
   // entities just despawned.
@@ -12227,6 +12367,7 @@ struct EntLowerToLoops
     for (auto main : llvm::make_early_inc_range(module.getOps<MainOp>()))
       if (failed(lowerMain(rewriter, main, module, *layout, arenaType)))
         return signalPassFailure();
+    emitPendingFunction(rewriter, module, *layout);
     lowerTexts(rewriter, module, symbols, scheduleFuncs);
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
