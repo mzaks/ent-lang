@@ -2,7 +2,7 @@
 // `loop ... until`, each run for the entity it is at. `while` is a
 // statement of systems and fns too, and a `for` over entities stands
 // where a statement's value is worked out, giving how many its body ran
-// for.
+// for. And a `for` over entities stands in an `if` of a system.
 // RUN: %ent run %S/Inputs/loops.ent 2>/dev/null | sort > %t.out
 // RUN: %ent run --parallel %S/Inputs/loops.ent 2>/dev/null | sort | cmp - %t.out
 // RUN: FileCheck %s --input-file=%t.out
@@ -16,3 +16,7 @@
 // Three set and three found; three more to 10 and to 100; four turns
 // down from 3 and two times ten up to 2.
 // CHECK-NEXT: both 6 total 13 left 103 turns 24
+// A `for` in an `if` runs or not: one cell is raised in four turns of
+// six; the `for` that reacts runs in the other two, for all three cells
+// the first time and for the one that was raised since the second.
+// CHECK-NEXT: chose 4 times, v 6

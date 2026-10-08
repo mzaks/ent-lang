@@ -11,7 +11,8 @@
 //   main { loop { frame() } until Window.closed }
 //
 // What is drawn later lies on top. Coordinates are pixels from the top
-// left corner; a colour is 0xRRGGBB.
+// left corner; a colour is 0xRRGGBB, or 0xAARRGGBB for one that lets what
+// is under it show through (AA from 01, nearly all of it, to ff, none).
 //
 // Implemented with raylib (devices/window.c, devices/window.link).
 
@@ -107,6 +108,14 @@ extern proc picture_load(file: text[126]) -> i32
 extern proc picture(image: i32, x: f32, y: f32, width: f32, height: f32,
                     tint: i32)
 extern fn picture_ratio(image: i32) -> f32
+// A colour `part` of the way (0 to 1) from one to another.
+extern fn blend(from: i32, to: i32, part: f32) -> i32
+// What is drawn from here on has so much (0 to 1) of this colour laid on
+// it, until another `shade`; a frame begins with none.
+extern proc shade(color: i32, part: f32)
+// And is so far to the right and down from where it says, until another
+// `shift`.
+extern proc shift(dx: f32, dy: f32)
 // What is drawn from here on shows only within this rectangle, until
 // `unclip` or the frame's end.
 extern proc clip(x: f32, y: f32, width: f32, height: f32)

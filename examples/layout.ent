@@ -67,6 +67,10 @@ component Attach { own: Point, under: Point }
 // A layer of its own choosing, if that is higher than the one above the
 // box it floats over.
 component Raise { z: i32 }
+// A box that floats and shows only where the box it floats over does:
+// not outside the boxes that clip that one, nor outside that one itself
+// where it clips.
+tag Confined
 // So much more on every side than its box, for what draws it and for the
 // pointer; the boxes inside it stay where they are.
 component Expand { w: f32, h: f32 }
@@ -88,8 +92,8 @@ component Slot { at: i32 }
 
 // The layer a box is in, which `layout` works out and a program draws
 // by: 0, and for a box that floats, with all inside it, one more than
-// the box it floats over.
-component Layer { z: i32 }
+// the box it floats over. And how many boxes it is inside of, or over.
+component Layer { z: i32, depth: i32 }
 
 // A box that shows only what of the boxes inside it is within itself,
 // from left to right, from top to bottom or both: they are as wide and
@@ -131,8 +135,9 @@ component Seen { x: f32, y: f32, w: f32, h: f32 }
 // From a box to the one it is in; the boxes in one box are in the order
 // of their slots.
 relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 256
-// From a box that floats to the one it floats over.
-relation (Float)-[Over]->(Box) tree capacity 256
+// From a box that floats to the one it floats over; those over one box
+// in the order of their slots too.
+relation (Float)-[Over]->(Box) tree ordered by Slot.at capacity 256
 
 // The widths: what each box comes to by what is in it, from the innermost
 // out; then what each gets, from the outermost in. Every `for` here is
@@ -149,7 +154,7 @@ system layout_widths() {
     e.add(Content { w: 0.0, h: 0.0 })
     e.add(Sums { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, n: 0, g: 0, m: 0 })
     e.add(Seen { x: -1.0e9, y: -1.0e9, w: 2.0e9, h: 2.0e9 })
-    e.add(Layer { z: 0 })
+    e.add(Layer { z: 0, depth: 0 })
   }
 
   // (In rounds: a box that floats may be as wide as the one it floats
@@ -711,6 +716,7 @@ system layout_heights() {
       b.x = x
       b.y = y
       l.z = ol.z
+      l.depth = ol.depth + 1
     }
 
     // A box that floats is so far from the corner of the one it floats
@@ -737,33 +743,70 @@ system layout_heights() {
       var z = ul.z + 1
       if let asked = up.z { z = max(z, asked) }
       l.z = z
+      l.depth = ul.depth + 1
     }
   } until placed + floated == 0
 
   // What of each box shows: what of the box it is in shows, and of that
-  // only what is within that box, where it clips.
-  for (v: mut Seen)-[Inside]->(ob: Box, ov: Seen),
-      optional (v)-[Inside]->(oc: Clip)
-      top down Inside on changed ob, changed ov, changed oc {
-    var x0 = ov.x
-    var y0 = ov.y
-    var x1 = ov.x + ov.w
-    var y1 = ov.y + ov.h
-    if let cx = oc.x, let cy = oc.y {
-      if cx {
-        x0 = max(x0, ob.x)
-        x1 = min(x1, ob.x + ob.w)
-      }
-      if cy {
-        y0 = max(y0, ob.y)
-        y1 = min(y1, ob.y + ob.h)
-      }
-    }
-    v.x = x0
-    v.y = y0
-    v.w = max(0.0, x1 - x0)
-    v.h = max(0.0, y1 - y0)
+  // only what is within that box, where it clips. So too for a box that
+  // floats and is `Confined`, with the box it floats over; any other
+  // shows wherever it is. (In turns, as above: what floats has boxes
+  // inside it, and those others that float over them.)
+  for v: mut Seen, f: Float without Confined on removed Confined {
+    v.x = -1.0e9
+    v.y = -1.0e9
+    v.w = 2.0e9
+    v.h = 2.0e9
   }
+  loop {
+    let inside =
+    for (v: mut Seen)-[Inside]->(ob: Box, ov: Seen),
+        optional (v)-[Inside]->(oc: Clip)
+        top down Inside on changed ob, changed ov, changed oc {
+      var x0 = ov.x
+      var y0 = ov.y
+      var x1 = ov.x + ov.w
+      var y1 = ov.y + ov.h
+      if let cx = oc.x, let cy = oc.y {
+        if cx {
+          x0 = max(x0, ob.x)
+          x1 = min(x1, ob.x + ob.w)
+        }
+        if cy {
+          y0 = max(y0, ob.y)
+          y1 = min(y1, ob.y + ob.h)
+        }
+      }
+      v.x = x0
+      v.y = y0
+      v.w = max(0.0, x1 - x0)
+      v.h = max(0.0, y1 - y0)
+    }
+    let over =
+    for (v: mut Seen)-[Over]->(ob: Box, ov: Seen),
+        optional (v)-[Over]->(oc: Clip)
+        with Confined top down Over
+        on changed ob, changed ov, changed oc, added Confined {
+      var x0 = ov.x
+      var y0 = ov.y
+      var x1 = ov.x + ov.w
+      var y1 = ov.y + ov.h
+      if let cx = oc.x, let cy = oc.y {
+        if cx {
+          x0 = max(x0, ob.x)
+          x1 = min(x1, ob.x + ob.w)
+        }
+        if cy {
+          y0 = max(y0, ob.y)
+          y1 = min(y1, ob.y + ob.h)
+        }
+      }
+      v.x = x0
+      v.y = y0
+      v.w = max(0.0, x1 - x0)
+      v.h = max(0.0, y1 - y0)
+    }
+  } until inside + over == 0
 }
 
 // Which boxes the pointer is over: after they have been placed. (Not a

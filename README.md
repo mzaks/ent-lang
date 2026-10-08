@@ -233,10 +233,17 @@ come with the compiler, in `devices/`, and two more that need
   is; `examples/layout_demo.ent` is a window of boxes inside boxes, laid
   out by the library `examples/layout.ent`, which sizes and places boxes
   as Clay does (fixed, fit, grow and percent sizes with limits, padding,
-  gaps, alignment, ratios, boxes that float), in reactive `for`s along a
-  tree whose children are in an order, each running only where
-  something it reads changed; `examples/layout_window.ent` measures the
-  texts, draws, and offers all the steps as one schedule, `ui`:
+  gaps, alignment, ratios, boxes that float, clip and scroll), in
+  reactive `for`s along a tree whose children are in an order, each
+  running only where something it reads changed;
+  `examples/layout_window.ent` measures the texts, draws (rounded
+  corners, borders, pictures, colours that let what is under them show,
+  a colour laid on a box and all that is in it), moves what scrolls with
+  the wheel or the pointer, takes boxes from where and what they were to
+  where and what they are to be in so many seconds (`Transition`, with
+  where a new box comes from and where one that goes away goes), lists
+  the boxes in a panel (`Inspector`), and offers all the steps as one
+  schedule, `ui`:
   `tools/ent run -I examples examples/layout_demo.ent`; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are
   entities, ways, modes and the game's state are enums, and the only C is
   that of the devices and the math module. A module's `name.link` names the

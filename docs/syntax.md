@@ -48,6 +48,9 @@ there (`Position`, `tick()`); there is no access control yet.
   (a schedule) and `ent_clock_sleep` (an extern system to define).
 - A module may have a `world`. `main` and `default_capacity` belong to
   the program's own file.
+- A module's `for` that matches no entity the program can have is left
+  out without a word (a library has `for`s for what a program may not
+  use); for one of the program's own the compiler says so.
 
 A module with an implementation next to its `m.ent` is a device: that
 defines its extern procs and fns (and extern systems), and `tools/ent`
@@ -140,8 +143,8 @@ A system takes parameters and runs statements; its access is inferred. It
 may declare a contract the compiler checks: `system move(dt: f32) reads
 Velocity writes Position { ... }`.
 
-`for` (at the top level of a system, or in a counted `for` or a `loop`
-there) visits
+`for` (at the top level of a system, or in a counted `for`, a `loop` or
+an `if` there) visits
 every entity with the bound components:
 
 ```
@@ -679,6 +682,10 @@ of a depth.
   or in rounds, where a reactive `for` reacts each time to what has
   changed since the time before, and does nothing in a round that has
   nothing new for it. A system with such a loop is not fused with others.
+- An `if` in a system can have `for`s over entities in its branches too,
+  which run or do not (`if Inspector.on { for b: Box { ... } }`). A
+  reactive `for` there reacts, when it does run, to all that has changed
+  since it last did.
 - `loop { ... } until cond` runs its statements, and again until the
   condition holds after them (at least once); a var they assign goes
   round with it, and the condition can ask what they named with `let`.

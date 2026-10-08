@@ -2139,7 +2139,7 @@ LogicalResult Parser::parseWhile(llvm::SMLoc at) {
     types.push_back(state.value.getType());
   }
   Operation *around = builder.getInsertionBlock()->getParentOp();
-  while (around && isa<scf::ForOp, scf::WhileOp>(around))
+  while (around && isa<scf::ForOp, scf::WhileOp, scf::IfOp>(around))
     around = around->getParentOp();
   llvm::SaveAndRestore inLoop(
       inSystemLoop, around ? isa<SystemOp>(around) : inSystemLoop);
@@ -2210,7 +2210,7 @@ LogicalResult Parser::parseLoop(llvm::SMLoc at) {
     types.push_back(state.value.getType());
   }
   Operation *around = builder.getInsertionBlock()->getParentOp();
-  while (around && isa<scf::ForOp, scf::WhileOp>(around))
+  while (around && isa<scf::ForOp, scf::WhileOp, scf::IfOp>(around))
     around = around->getParentOp();
   llvm::SaveAndRestore inLoop(
       inSystemLoop, around ? isa<SystemOp>(around) : inSystemLoop);
@@ -2380,13 +2380,13 @@ LogicalResult Parser::parseFor() {
     return error(at, "a fn only computes: it counts ('for i in a..b'), and "
                      "a system visits entities");
   // In a system, or in a counted `for` or a `loop` of one, which runs it
-  // so many times.
+  // so many times, or in an `if` there, which runs it or not.
   Operation *around = builder.getInsertionBlock()->getParentOp();
-  while (around && isa<scf::ForOp, scf::WhileOp>(around))
+  while (around && isa<scf::ForOp, scf::WhileOp, scf::IfOp>(around))
     around = around->getParentOp();
   if (around ? !isa<SystemOp>(around) : !inSystemLoop)
     return error(at, "a 'for' over entities is at the top level of a system, "
-                     "or in a counted 'for' or a 'loop' there");
+                     "or in a counted 'for', a 'loop' or an 'if' there");
 
   struct Binding {
     std::string name, component;

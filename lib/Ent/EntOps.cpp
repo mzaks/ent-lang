@@ -1189,14 +1189,15 @@ LogicalResult QueryOp::verify() {
              << arg.getType();
   if (getRequired().empty() && getWithout().empty() && getAnyGroups().empty())
     return emitOpError("must bind or filter by at least one component");
-  // In a system, or in a loop of one.
+  // In a system, or in a loop or a branch of one.
   Operation *parent = (*this)->getParentOp();
   while (parent && (parent->getName().getStringRef() == "scf.for" ||
-                    parent->getName().getStringRef() == "scf.while"))
+                    parent->getName().getStringRef() == "scf.while" ||
+                    parent->getName().getStringRef() == "scf.if"))
     parent = parent->getParentOp();
   if (!parent || !isa<SystemOp>(parent))
-    return emitOpError("expects to be an op of a system, or of an 'scf.for' "
-                       "or 'scf.while' in one");
+    return emitOpError("expects to be an op of a system, or of an 'scf.for', "
+                       "'scf.while' or 'scf.if' in one");
 
   // Every component appears in at most one term: two would be redundant
   // (with, any) or contradict each other (without).

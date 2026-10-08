@@ -118,11 +118,17 @@
 // CHECK:      "id": 9
 // CHECK:      "value": "```ent\nsystem move()
 // -----
-{"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": {"uri": "test:///game.ent", "version": 3}, "contentChanges": [{"text": "import console\n\n// Where something is.\ncomponent Position { x: f32, y: f32 } capacity 8\nunique Score: i32\nenum Way { Left, Right }\n\n// Twice as much.\nfn twice(x: f32) -> f32 { x * 2.0 }\n\n// Moves everything to the right.\nsystem move() {\n  for p: mut Position { p.x = twice(p.x) }\n}\n\nsystem report() {\n  for p: Position { Score += 1 }\n  \n}\n\nschedule frame() {\n  move()\n  report()\n  write()\n  clear()\n}\n\nworld { spawn { Position { x: 1.0, y: 2.0 } } }\n\nmain { frame() }\n"}]}}
-// What lowering finds is reported too: in a module's file, at the top of
-// this one, with the place.
+{"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": {"uri": "test:///game.ent", "version": 3}, "contentChanges": [{"text": "import console\n\n// Where something is.\ncomponent Position { x: f32, y: f32 } capacity 8\nunique Score: i32\nenum Way { Left, Right } tag Marked\n\n// Twice as much.\nfn twice(x: f32) -> f32 { x * 2.0 }\n\n// Moves everything to the right.\nsystem move() {\n  for p: mut Position { p.x = twice(p.x) }\n}\n\nsystem report() {\n  for p: Position { Score += 1 }\n  for p: Position with Marked { Score += 1 }\n}\n\nschedule frame() {\n  move()\n  report()\n  write()\n  clear()\n}\n\nworld { spawn { Position { x: 1.0, y: 2.0 } } }\n\nmain { frame() }\n"}]}}
+// What lowering finds is reported too, where it is. (Not what it finds
+// in a module: `console` has queries for what this program does not
+// print.)
 // CHECK:      "method": "textDocument/publishDiagnostics"
-// CHECK:          "message": "console.ent:{{[0-9]+}}: matches no archetype; the query is removed",
+// CHECK-NOT:      console.ent
+// CHECK:          "message": "matches no archetype; the query is removed",
+// CHECK-NEXT:     "range": {
+// CHECK-NEXT:       "end": {
+// CHECK-NEXT:         "character": 44,
+// CHECK-NEXT:         "line": 17
 // CHECK:          "severity": 2,
 // CHECK:        "version": 3
 // -----

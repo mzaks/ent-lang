@@ -3,6 +3,7 @@ import console
 import layout
 
 component Name { name: text[14] }
+tag Tip
 unique Frame: i32
 default_capacity 64
 
@@ -29,6 +30,31 @@ world {
       Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "row {i}" }
     }
     connect (row)-[Inside]->(list)
+    // Over the last one, which shows 15 high at the list's end, two
+    // boxes that float, 40 further down: one that shows only where the
+    // row does, with a box inside it, and one that shows wherever it is.
+    if i == 4 {
+      let tip = spawn {
+        Box { x: 0.0, y: 0.0, w: 120.0, h: 30.0 },
+        Size { w: Sizing.Fixed, h: Sizing.Fixed },
+        Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "tip" },
+        Float { dx: 0.0, dy: 40.0 }, Confined, Tip
+      }
+      connect (tip)-[Over]->(row)
+      let word = spawn {
+        Box { x: 0.0, y: 0.0, w: 50.0, h: 10.0 },
+        Size { w: Sizing.Fixed, h: Sizing.Fixed },
+        Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "word" }
+      }
+      connect (word)-[Inside]->(tip)
+      let free = spawn {
+        Box { x: 0.0, y: 0.0, w: 120.0, h: 30.0 },
+        Size { w: Sizing.Fixed, h: Sizing.Fixed },
+        Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "free" },
+        Float { dx: 0.0, dy: 40.0 }
+      }
+      connect (free)-[Over]->(row)
+    }
   }
   // Next to it one that would shrink the same rows if it did not clip.
   let plain = spawn {
@@ -41,9 +67,11 @@ world {
 
 // In the second frame what is in the list is 100 further up; the pointer
 // is where the list's second row was, and then where the third row is
-// wider than the list.
+// wider than the list. In the fourth the box that floats shows wherever
+// it is, as the other one.
 system change() {
   Frame += 1
+  for e with Tip where Frame == 4 { e.remove(Confined) }
   for s: mut Scroll where Frame == 2 { s.y = -100.0 }
   Pointer.x = if Frame == 3 { 140.0 } else { 50.0 }
   Pointer.y = if Frame == 3 { 60.0 } else { 90.0 }
@@ -56,9 +84,14 @@ system show() {
     let over = if e.has(Hovered) { 1 } else { 0 }
     // (What shows of a box that nothing clips is all there is.)
     let shows = if v.w > 1.0e8 { 0.0 } else { v.w }
-    put("{Frame}: {n.name} {b.x} {b.y} {b.w} {b.h} shows {shows} wide, content {content}, over {over}")
+    let high = if v.h > 1.0e8 { 0.0 } else { v.h }
+    if e.has(Float) || n.name == "word" {
+      put("{Frame}: {n.name} {b.x} {b.y} shows {shows} x {high} from {v.y}")
+    } else {
+      put("{Frame}: {n.name} {b.x} {b.y} {b.w} {b.h} shows {shows} wide, content {content}, over {over}")
+    }
   }
 }
 
 schedule frame() { change()  layout()  point()  show() }
-main { loop { frame() } until Frame == 3 }
+main { loop { frame() } until Frame == 4 }

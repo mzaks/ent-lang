@@ -2926,3 +2926,27 @@ library's own.
   floats, builds in 7.5 s the first time (253,701 lines of LLVM IR).
   That is the open end of this: every feature is more optional
   components, so more archetypes, and more to give each shared body.
+- With the rest of what Clay has (colours with alpha and overlays,
+  floats that clip with the box under them, dragging and momentum,
+  transitions, the inspector) `bench/boxes` is at 38 us a frame: none of
+  it is in `examples/layout.ent` but the floats that clip, which this
+  program has none of. The demo builds in 10.5 s the first time (416,001
+  lines of LLVM IR), and was at 19 s on the way:
+  - The inspector wrote what it says about a box, seven texts put
+    together from numbers, in the body of a `for`: once for each of
+    seventeen archetypes. In fns they are there once (177,000 lines of
+    that system's 180,000 to 40,000).
+  - A box in a transition moves all that is in it, and an overlay lies
+    on all that is in the box: the drawing looked up the tree for the
+    nearest such box, twice for every box, and that search is not one
+    of the shared bodies (80,000 lines to 30,000 when every box was
+    given how far it is drawn from its place and under what, worked out
+    from the box it is in when that changes).
+  - What an `if` asks is often known for an archetype: whether it has a
+    component (`if let` of an optional binding, `e.has`). Such an `if`
+    is now the branch that runs, before the body is lowered for that
+    archetype; the drawing of texts and pictures is no longer there for
+    the boxes that have neither (8,000 lines here).
+  What is left of the inspector, 38,000 lines, is its four passes along
+  the trees, which number the lines: such a pass is still a body for
+  each archetype where it does not follow events.

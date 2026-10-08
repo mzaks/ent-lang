@@ -81,5 +81,25 @@ system rounds() {
   }
 }
 
-schedule frame() { work()  rounds() }
+// A `for` over entities in an `if`: it runs or it does not. One that
+// reacts sees, when it does run, all that changed since it last did.
+system choose() {
+  var seen = 0
+  for turn in 0..6 {
+    if turn % 3 != 2 {
+      for c: mut Cell where c.sum == 1 { c.v += 1 }
+    } else {
+      seen += for c: Cell on changed c.v { }
+    }
+  }
+  if seen > 3 {
+    for c: Cell where c.sum == 1 { put("chose {seen} times, v {c.v}") }
+  } else if seen > 0 {
+    for c: Cell where c.sum == 1 { put("chose {seen} times") }
+  } else {
+    for c: Cell { put("chose none") }
+  }
+}
+
+schedule frame() { work()  rounds()  choose() }
 main { frame() }

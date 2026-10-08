@@ -9,10 +9,47 @@
 #include <stdio.h>
 #include <string.h>
 
-// 0xRRGGBB, opaque.
+// 0xRRGGBB, opaque; or 0xAARRGGBB, so much of it (AA from 01, nearly
+// nothing, to ff, all; 00 is all too, so that 0xRRGGBB is itself).
+// With what `shade` laid on everything that is drawn: so much of that
+// colour in place of its own.
+static Color ent_window_shading;
+static float ent_window_shading_part;
+
 static Color ent_window_color(int32_t rgb) {
-  return (Color){(unsigned char)(rgb >> 16), (unsigned char)(rgb >> 8),
-                 (unsigned char)rgb, 255};
+  unsigned char alpha = (unsigned char)((uint32_t)rgb >> 24);
+  Color color = {(unsigned char)(rgb >> 16), (unsigned char)(rgb >> 8),
+                 (unsigned char)rgb, alpha ? alpha : 255};
+  if (ent_window_shading_part > 0) {
+    float part = ent_window_shading_part * (float)ent_window_shading.a / 255.0f;
+    color.r += (unsigned char)(((float)ent_window_shading.r - color.r) * part);
+    color.g += (unsigned char)(((float)ent_window_shading.g - color.g) * part);
+    color.b += (unsigned char)(((float)ent_window_shading.b - color.b) * part);
+  }
+  return color;
+}
+
+void ent_window_shade(int32_t color, float part) {
+  ent_window_shading_part = 0;
+  ent_window_shading = ent_window_color(color);
+  ent_window_shading_part = part < 0 ? 0 : part > 1 ? 1 : part;
+}
+
+// What is drawn from here on is so far to the right and down from where
+// it says: whole pixels, which keep texts sharp.
+static int ent_window_shifted;
+
+void ent_window_shift(float dx, float dy) {
+  if (ent_window_shifted)
+    rlPopMatrix();
+  ent_window_shifted = 0;
+  dx = (float)(int)(dx < 0 ? dx - 0.5f : dx + 0.5f);
+  dy = (float)(int)(dy < 0 ? dy - 0.5f : dy + 0.5f);
+  if (dx == 0 && dy == 0)
+    return;
+  rlPushMatrix();
+  rlTranslatef(dx, dy, 0);
+  ent_window_shifted = 1;
 }
 
 // raylib takes its texts terminated.
@@ -38,11 +75,15 @@ void ent_window_begin_frame(int32_t background, int32_t fps) {
     held = fps;
   }
   BeginDrawing();
+  ent_window_shading_part = 0;
   ClearBackground(ent_window_color(background));
 }
 
 void ent_window_end_frame(void) {
-  ent_window_unclip(); EndDrawing(); }
+  ent_window_shift(0, 0);
+  ent_window_unclip();
+  EndDrawing();
+}
 
 float ent_window_mouse_x(void) { return (float)GetMouseX(); }
 float ent_window_mouse_y(void) { return (float)GetMouseY(); }
@@ -422,7 +463,14 @@ void ent_window_picture(int32_t image, float x, float y, float w, float h,
   DrawTexturePro(texture,
                  (Rectangle){0, 0, (float)texture.width, (float)texture.height},
                  (Rectangle){x, y, w, h}, (Vector2){0, 0}, 0,
-                 ent_window_color(tint));
+                 (Color){(unsigned char)(tint >> 16), (unsigned char)(tint >> 8),
+                         (unsigned char)tint, 255});
+  // (What `shade` lays on everything, over the picture.)
+  if (ent_window_shading_part > 0) {
+    Color over = ent_window_shading;
+    over.a = (unsigned char)((float)over.a * ent_window_shading_part);
+    DrawRectangleRec((Rectangle){x, y, w, h}, over);
+  }
 }
 
 float ent_window_picture_ratio(int32_t image) {
@@ -431,6 +479,27 @@ float ent_window_picture_ratio(int32_t image) {
     return 1;
   return (float)ent_window_pictures[image].width /
          (float)ent_window_pictures[image].height;
+}
+
+// From one colour to another: `part` of the way (0 to 1), each of red,
+// green, blue and how much of it there is.
+int32_t ent_window_blend(int32_t from, int32_t to, float part) {
+  if (part <= 0)
+    return from;
+  if (part >= 1)
+    return to;
+  uint32_t a = (uint32_t)from, b = (uint32_t)to;
+  // (No AA is all of it.)
+  if (!(a >> 24))
+    a |= 0xff000000u;
+  if (!(b >> 24))
+    b |= 0xff000000u;
+  uint32_t result = 0;
+  for (int shift = 0; shift < 32; shift += 8) {
+    float x = (float)((a >> shift) & 255), y = (float)((b >> shift) & 255);
+    result |= (uint32_t)(x + (y - x) * part + 0.5f) << shift;
+  }
+  return (int32_t)result;
 }
 
 float ent_window_mouse_wheel_x(void) { return GetMouseWheelMoveV().x; }

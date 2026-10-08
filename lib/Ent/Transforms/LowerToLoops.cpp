@@ -1366,6 +1366,72 @@ static constexpr llvm::StringLiteral kUnobservedAttr = "ent.unobserved";
 /// to: it is located without checks.
 static constexpr llvm::StringLiteral kTrustedAttr = "ent.trusted";
 
+// What a condition comes to, where that is known without running: a
+// constant, or `and`, `or` and `xor` of what is.
+static std::optional<bool> knownCondition(Value value, unsigned depth = 0) {
+  if (!value.getType().isInteger(1) || depth > 8)
+    return std::nullopt;
+  APInt constant;
+  if (matchPattern(value, m_ConstantInt(&constant)))
+    return !constant.isZero();
+  Operation *op = value.getDefiningOp();
+  if (!op || !isa<arith::AndIOp, arith::OrIOp, arith::XOrIOp>(op))
+    return std::nullopt;
+  std::optional<bool> left = knownCondition(op->getOperand(0), depth + 1);
+  std::optional<bool> right = knownCondition(op->getOperand(1), depth + 1);
+  if (isa<arith::AndIOp>(op)) {
+    if ((left && !*left) || (right && !*right))
+      return false;
+    if (left && right)
+      return true;
+  } else if (isa<arith::OrIOp>(op)) {
+    if ((left && *left) || (right && *right))
+      return true;
+    if (left && right)
+      return false;
+  } else if (left && right) {
+    return *left != *right;
+  }
+  return std::nullopt;
+}
+
+// An `if` whose condition is known is the branch that runs, and nothing
+// where none does: so that what a query's body does for a component is
+// not lowered for the archetypes that have none. `roots` are the ops of
+// the body, of which an `if` may be one.
+static void pruneBranches(IRRewriter &rewriter,
+                          SmallVectorImpl<Operation *> &roots) {
+  // (Innermost first: a walk comes to an op after the ops in it.)
+  SmallVector<scf::IfOp> decided;
+  for (Operation *root : roots)
+    root->walk([&](scf::IfOp branch) {
+      if (knownCondition(branch.getCondition()))
+        decided.push_back(branch);
+    });
+  for (scf::IfOp branch : decided) {
+    bool taken = *knownCondition(branch.getCondition());
+    Region &region = taken ? branch.getThenRegion() : branch.getElseRegion();
+    SmallVector<Value> results;
+    SmallVector<Operation *> moved;
+    if (!region.empty()) {
+      Block &block = region.front();
+      Operation *yield = block.getTerminator();
+      results.assign(yield->operand_begin(), yield->operand_end());
+      for (Operation &op : llvm::make_early_inc_range(block.without_terminator())) {
+        op.moveBefore(branch);
+        moved.push_back(&op);
+      }
+    }
+    Operation *op = branch;
+    auto *at = llvm::find(roots, op);
+    if (at != roots.end()) {
+      at = roots.erase(at);
+      roots.insert(at, moved.begin(), moved.end());
+    }
+    rewriter.replaceOp(branch, results);
+  }
+}
+
 static bool appliesDirectly(Operation *apply, bool directApplies) {
   return directApplies && isa<ApplyOp, AccumulateOp>(apply) &&
          apply->hasAttr(kUnobservedAttr);
@@ -2585,6 +2651,28 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
       rewriter.replaceOp(op, answer);
     }
   }
+  // Whether the entity has a component is known for most archetypes too.
+  {
+    SmallVector<HasOp> tests;
+    for (Operation *root : roots)
+      root->walk([&](HasOp has) {
+        if (!presence.lookup(has.getComponentAttr()))
+          tests.push_back(has);
+      });
+    for (HasOp has : tests) {
+      rewriter.setInsertionPoint(has);
+      Operation *op = has;
+      llvm::erase(roots, op);
+      rewriter.replaceOp(
+          has, arith::ConstantIntOp::create(
+                   rewriter, has.getLoc(),
+                   archetypeOp.contains(has.getComponentAttr()), 1)
+                   .getResult());
+    }
+  }
+  // So what an `if` asks may be known here, and only one of its branches
+  // is this archetype's.
+  pruneBranches(rewriter, roots);
   // Reading through a ref to an ancestor is a lookup of the ancestor,
   // which is known to be found.
   for (auto &[arg, ancestor] : ancestors) {
@@ -8062,6 +8150,14 @@ static bool isDepthLocal(QueryOp query) {
   return !result.wasInterrupted();
 }
 
+// Whether a query is in a system of a module the program imports (which
+// are named `module.system`), not in one of its own.
+static bool ofModule(QueryOp query) {
+  // (The system is a function by now, of the same name.)
+  auto system = query->getParentOfType<func::FuncOp>();
+  return system && system.getSymName().contains('.');
+}
+
 static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                          const WorldLayout &layout, WorldAccess &world,
                          const LoopOptions &options) {
@@ -10070,7 +10166,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         rewriter.setInsertionPoint(query);
       }
     }
-  } else {
+  } else if (!ofModule(query)) {
     query.emitWarning("matches no archetype; the query is removed");
   }
   // The marked rows, in order, are the pending list; then the query's end
@@ -10358,7 +10454,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
 
   // The set of archetypes is closed, so a query that matches none of them
   // can never run; that is almost certainly a mistake in the program.
-  if (!matched)
+  // (Not in a module it imports, which has queries for what a program
+  // may not use.)
+  if (!matched && !ofModule(query))
     query.emitWarning("matches no archetype; the query is removed");
   rewriter.eraseOp(query);
 }

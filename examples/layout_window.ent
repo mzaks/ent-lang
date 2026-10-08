@@ -1,6 +1,8 @@
 // examples/layout.ent in a window: what a box looks like and says, the
 // measuring of texts, which only what draws them can do, and the
-// drawing. A program imports this, makes boxes, and runs `ui` between the
+// drawing; what moves by the wheel and the pointer, boxes that take
+// their time to get where they are to be (`Transition`), and a panel
+// that lists them all (`Inspector`). A program imports this, makes boxes, and runs `ui` between the
 // window's `begin` and `present`:
 //
 //   import layout_window
@@ -43,6 +45,65 @@ component TextStyle {
   font: i32, spacing: f32, line: f32, align: Place, breaks: Breaks
 }
 
+// A colour laid on a box and on all that is in it, as much of it as its
+// AA says (0x80ff0000: half red). Of the boxes a box is in, the nearest
+// that has one decides, or the box itself.
+component Overlay { colour: i32 }
+
+// What is in a box that scrolls can be dragged with the pointer, and
+// goes on by itself when let go, slower and slower.
+tag Drag
+
+// A box that is not at once where and what it is now to be: it gets
+// there in so many seconds, slowly at first (`In`), at the end (`Out`),
+// both or neither, in where it is (`place`: and what is inside it goes
+// with it), in how big it is, and in its `Fill` and `Overlay` colours.
+enum Ease { Linear, In, Out, InOut }
+component Transition {
+  seconds: f32, ease: Ease, place: bool, size: bool, colour: bool
+}
+// Where such a box comes from when it is new: so far from its place, and
+// from under this colour (0: none). And where it goes when it is `Gone`:
+// the program says so, and the box is destroyed, with all that is in it
+// or floats over that, when it has got there. (At once without a
+// `Transition`.)
+component Enter { dx: f32, dy: f32, colour: i32 }
+component Leave { dx: f32, dy: f32, colour: i32 }
+tag Gone
+
+// A panel at the right of the window that lists the boxes, each under
+// the one it is in, and says all about the one the pointer is on, in the
+// list or in the window, where it is marked: while `on`. (The wheel
+// moves the list.)
+unique Inspector { on: bool, top: f32, lines: i32, depth: i32 }
+// (The box it says all about, as the list comes by it: added up over the
+// one box that is.)
+unique Picked {
+  any: i32, line: i32, layer: i32, depth: i32, x: f32, y: f32, w: f32,
+  h: f32, wide: i32, high: i32, left: f32, right: f32, top: f32,
+  bottom: f32, gap: f32, more: i32
+}
+
+// What this keeps for itself. How a `Drag` box is moving; what is laid on
+// a box right now, and where a box in a `Transition` is drawn right now,
+// how big and in what colour, where it started from and how far it has
+// got (`t`: 0 to 1); a box that is to be destroyed.
+component Glide { vx: f32, vy: f32, x: f32, y: f32, held: bool, was: bool }
+component Tint { colour: i32, part: f32 }
+component Shown {
+  x: f32, y: f32, w: f32, h: f32, colour: i32, dx: f32, dy: f32
+}
+// And what follows from those for every box, with the boxes it is in:
+// how far from its place it is drawn, and under how much of what colour.
+component Look { dx: f32, dy: f32, colour: i32, part: f32 }
+component Eased {
+  x: f32, y: f32, w: f32, h: f32, colour: i32, tint: i32, part: f32, t: f32
+}
+component Dead { at: i32 }
+// The line of the inspector's list a box is in, and how many lines it
+// takes with all that is in it and floats over it (`floats`: those).
+component Listed { line: i32, count: i32, floats: i32 }
+
 // The pointer is the mouse.
 system pointer() {
   Pointer.x = Mouse.x
@@ -52,12 +113,56 @@ system pointer() {
 
 // The wheel moves what is in the boxes that clip and have a `Scroll`,
 // under the pointer: 40 pixels a notch, and no further than to the ends
-// of what is in them (which is also seen to when that gets smaller).
+// of what is in them (which is also seen to when that gets smaller). So
+// does the pointer in those with `Drag`, from where it went down in one
+// for as long as it is down; let go, they go on as fast as they were, and
+// lose a twentieth of that every sixtieth of a second.
 system scroll() {
+  for e with Drag without Glide {
+    e.add(Glide { vx: 0.0, vy: 0.0, x: 0.0, y: 0.0, held: false, was: false })
+  }
+  for e, s: mut Scroll, c: Clip, g: mut Glide {
+    var x = s.x
+    var y = s.y
+    var vx = g.vx
+    var vy = g.vy
+    var held = g.held
+    if Pointer.down {
+      if !g.was && e.has(Hovered) {
+        held = true
+        vx = 0.0
+        vy = 0.0
+      } else if held {
+        let dx = if c.x { Pointer.x - g.x } else { 0.0 }
+        let dy = if c.y { Pointer.y - g.y } else { 0.0 }
+        x += dx
+        y += dy
+        if Window.dt > 0.0 {
+          vx = (vx + dx / Window.dt) * 0.5
+          vy = (vy + dy / Window.dt) * 0.5
+        }
+      }
+    } else {
+      held = false
+      let keep = max(0.0, 1.0 - 3.0 * Window.dt)
+      x += vx * Window.dt
+      y += vy * Window.dt
+      vx = if max(vx, -vx) < 4.0 { 0.0 } else { vx * keep }
+      vy = if max(vy, -vy) < 4.0 { 0.0 } else { vy * keep }
+    }
+    if x != s.x { s.x = x }
+    if y != s.y { s.y = y }
+    g.vx = vx
+    g.vy = vy
+    g.held = held
+    g.x = Pointer.x
+    g.y = Pointer.y
+    g.was = Pointer.down
+  }
   for e, s: mut Scroll, c: Clip, rw: RoomW, rh: RoomH, all: Content {
     var x = s.x
     var y = s.y
-    if e.has(Hovered) {
+    if e.has(Hovered) && !(Inspector.on && Pointer.x >= Window.width as f32 - 320.0) {
       if c.x { x += Mouse.wheel_x * 40.0 }
       if c.y { y += Mouse.wheel_y * 40.0 }
     }
@@ -117,6 +222,225 @@ system wrap() {
   }
 }
 
+// How far along a box is that is `t` of its time on its way.
+fn eased(t: f32, ease: Ease) -> f32 {
+  if ease == Ease.In { t * t }
+  else if ease == Ease.Out { 1.0 - (1.0 - t) * (1.0 - t) }
+  else if ease == Ease.InOut {
+    if t < 0.5 { 2.0 * t * t } else { 1.0 - 2.0 * (1.0 - t) * (1.0 - t) }
+  } else { t }
+}
+
+// What is laid on the boxes, and where those in a `Transition` are right
+// now: after `layout_heights`, which says where they are to be.
+system animate() {
+  // Boxes that are to go, with all that is in them; those that float
+  // over one of them are `Gone` first, and go the same way.
+  for (e, f: Float)-[Over]->(d: Dead) without Gone on changed d {
+    e.add(Gone)
+  }
+  for (e, f: Float)-[Over]->()-[Inside*]->(d: Dead) without Gone
+      on changed d {
+    e.add(Gone)
+  }
+  for (e, b: Box)-[Inside*]->(d: Dead) on changed d { e.destroy() }
+  for e, d: Dead { e.destroy() }
+  for e with Gone without Transition, Dead { e.add(Dead { at: 0 }) }
+
+  // An overlay is laid on as it is, where the box has no `Transition`.
+  for e, o: Overlay without Tint on added Overlay {
+    e.add(Tint { colour: o.colour, part: if e.has(Shown) { 0.0 } else { 1.0 } })
+  }
+  for o: Overlay, t: mut Tint without Transition on changed o {
+    t.colour = o.colour
+    t.part = 1.0
+  }
+  for e, t: Tint without Overlay, Transition on removed Overlay {
+    e.remove(Tint)
+  }
+  for e, lv: Leave without Tint where lv.colour != 0 on added Gone {
+    e.add(Tint { colour: lv.colour, part: 0.0 })
+  }
+
+  // A box whose place, size or colours are no longer what they were sets
+  // out again, from where it is right now. So does one that is `Gone`.
+  for b: Box, s: Shown, ez: mut Eased, optional f: Fill, optional o: Overlay,
+      optional t: Tint
+      on changed b, changed f, changed o, removed Overlay, added Tint,
+         added Gone {
+    ez.x = s.x
+    ez.y = s.y
+    ez.w = s.w
+    ez.h = s.h
+    ez.colour = s.colour
+    var part = 0.0
+    if let veil = t.colour, let p = t.part {
+      ez.tint = veil
+      part = p
+    }
+    ez.part = part
+    ez.t = 0.0
+  }
+
+  // A new one starts where it is to be, or where its `Enter` says.
+  for e, b: Box, tr: Transition, optional f: Fill, optional en: Enter
+      without Shown on added Transition {
+    var x = b.x
+    var y = b.y
+    var colour = 0
+    var veil = 0
+    var t = 1.0
+    if let c = f.colour { colour = c }
+    if let dx = en.dx, let dy = en.dy, let from = en.colour {
+      x += dx
+      y += dy
+      veil = from
+      t = 0.0
+    }
+    e.add(Shown { x: x, y: y, w: b.w, h: b.h, colour: colour, dx: x - b.x,
+                  dy: y - b.y })
+    e.add(Eased { x: x, y: y, w: b.w, h: b.h, colour: colour, tint: veil,
+                  part: if veil != 0 { 1.0 } else { 0.0 }, t: t })
+    if veil != 0 && !e.has(Tint) { e.add(Tint { colour: veil, part: 1.0 }) }
+  }
+
+  // What is laid on a box on its way: from what was to what is to be.
+  for e, tr: Transition, ez: Eased, t: mut Tint, optional o: Overlay,
+      optional lv: Leave
+      where ez.t < 1.0 {
+    var now = 1.0
+    if tr.seconds > 0.0 { now = min(1.0, ez.t + Window.dt / tr.seconds) }
+    let k = if tr.colour { eased(now, tr.ease) } else { 1.0 }
+    var veil = 0
+    var part = 0.0
+    if let c = o.colour {
+      veil = c
+      part = 1.0
+    }
+    if e.has(Gone) {
+      if let c = lv.colour {
+        if c != 0 {
+          veil = c
+          part = 1.0
+        }
+      }
+    }
+    if part == 0.0 {
+      t.colour = ez.tint
+      t.part = ez.part * (1.0 - k)
+    } else if ez.part == 0.0 {
+      t.colour = veil
+      t.part = k
+    } else {
+      t.colour = blend(ez.tint, veil, k)
+      t.part = 1.0
+    }
+  }
+  // And where it is, how big and in what colour. One that is `Gone` and
+  // has got there is to be destroyed.
+  for e, b: Box, tr: Transition, s: mut Shown, ez: mut Eased,
+      optional f: Fill, optional lv: Leave
+      where ez.t < 1.0 {
+    var now = 1.0
+    if tr.seconds > 0.0 { now = min(1.0, ez.t + Window.dt / tr.seconds) }
+    var x = b.x
+    var y = b.y
+    if e.has(Gone) {
+      // (With nowhere to go, it has got there.)
+      if !e.has(Leave) { now = 1.0 }
+      if let dx = lv.dx, let dy = lv.dy {
+        x += dx
+        y += dy
+      }
+    }
+    let k = eased(now, tr.ease)
+    if tr.place {
+      x = ez.x + (x - ez.x) * k
+      y = ez.y + (y - ez.y) * k
+    }
+    s.x = x
+    s.y = y
+    s.dx = x - b.x
+    s.dy = y - b.y
+    s.w = if tr.size { ez.w + (b.w - ez.w) * k } else { b.w }
+    s.h = if tr.size { ez.h + (b.h - ez.h) * k } else { b.h }
+    if let colour = f.colour {
+      s.colour = if tr.colour { blend(ez.colour, colour, k) } else { colour }
+    }
+    ez.t = now
+    if now >= 1.0 && e.has(Gone) && !e.has(Dead) { e.add(Dead { at: 0 }) }
+  }
+
+  // What that comes to for each box: it is as far from its place as the
+  // box it is in or floats over, and under what is laid on that; or as
+  // far as its own `Transition` has it, and under its own.
+  // (With what the inspector keeps, which every box has from the start:
+  // a box that got it later would be another kind of box, and everything
+  // here would be there for both kinds.)
+  for e, b: Box without Look on added Box {
+    e.add(Look { dx: 0.0, dy: 0.0, colour: 0, part: 0.0 })
+    e.add(Listed { line: 0, count: 1, floats: 0 })
+  }
+  // (In turns: what floats goes by the box under it, and what is inside
+  // it by it.)
+  loop {
+    let inside =
+    for (lk: mut Look, optional s: Shown, optional t: Tint),
+        optional (lk)-[Inside]->(up: Look)
+        without Float top down Inside
+        on changed up, changed s, changed t, removed Tint, added Look {
+      var dx = 0.0
+      var dy = 0.0
+      var colour = 0
+      var part = 0.0
+      if let x = up.dx, let y = up.dy, let c = up.colour, let p = up.part {
+        dx = x
+        dy = y
+        colour = c
+        part = p
+      }
+      if let x = s.dx, let y = s.dy {
+        dx = x
+        dy = y
+      }
+      if let c = t.colour, let p = t.part {
+        if p > 0.0 {
+          colour = c
+          part = p
+        }
+      }
+      lk.dx = dx
+      lk.dy = dy
+      lk.colour = colour
+      lk.part = part
+    }
+    let over =
+    for (lk: mut Look, optional s: Shown, optional t: Tint)
+            -[Over]->(under: Look)
+        top down Over
+        on changed under, changed s, changed t, removed Tint, added Look {
+      var dx = under.dx
+      var dy = under.dy
+      var colour = under.colour
+      var part = under.part
+      if let x = s.dx, let y = s.dy {
+        dx = x
+        dy = y
+      }
+      if let c = t.colour, let p = t.part {
+        if p > 0.0 {
+          colour = c
+          part = p
+        }
+      }
+      lk.dx = dx
+      lk.dy = dy
+      lk.colour = colour
+      lk.part = part
+    }
+  } until inside + over == 0
+}
+
 // A box is drawn after the one it is in, and so on top of it, and all
 // that is in a box before the next box: depth first. What floats is a
 // layer above, drawn after all of the layer below.
@@ -125,17 +449,31 @@ system draw() {
     // (Not what is outside the window.)
     // (Nor what the boxes it is in clip away: each within what shows of
     // it.)
-    for b: Box, l: Layer, v: Seen, optional f: Fill, optional t: Text,
-        optional k: Stack, optional p: Pad, optional how: Align,
-        optional st: TextStyle, optional more: Expand, optional rc: Round,
-        optional pic: Picture
+    for b: Box, l: Layer, v: Seen, lk: Look, optional f: Fill,
+        optional t: Text, optional k: Stack, optional p: Pad,
+        optional how: Align, optional st: TextStyle, optional more: Expand,
+        optional rc: Round, optional pic: Picture, optional own: Shown
         top down dfs Inside
         where l.z == z && b.x < Window.width as f32 && b.x + b.w > 0.0 &&
               b.y < Window.height as f32 && b.y + b.h > 0.0 &&
               b.x < v.x + v.w && b.x + b.w > v.x &&
               b.y < v.y + v.h && b.y + b.h > v.y {
       clip(v.x, v.y, v.w, v.h)
-      if let colour = f.colour {
+      // Where a box in a `Transition` is right now, and as big, with all
+      // that is in it as far from its place; under what is laid on it,
+      // or on the nearest box it is in.
+      var bw = b.w
+      var bh = b.h
+      var paint = 0
+      if let colour = f.colour { paint = colour }
+      if let sw = own.w, let sh = own.h, let colour = own.colour {
+        bw = sw
+        bh = sh
+        paint = colour
+      }
+      shift(lk.dx, lk.dy)
+      shade(lk.colour, lk.part)
+      if let filled = f.colour {
         var ew = 0.0
         var eh = 0.0
         if let w = more.w, let h = more.h {
@@ -144,10 +482,10 @@ system draw() {
         }
         if let tl = rc.top_left, let tr = rc.top_right,
            let bl = rc.bottom_left, let br = rc.bottom_right {
-          rounded(b.x - ew, b.y - eh, b.w + 2.0 * ew, b.h + 2.0 * eh, tl, tr,
-                  bl, br, colour)
+          rounded(b.x - ew, b.y - eh, bw + 2.0 * ew, bh + 2.0 * eh, tl, tr,
+                  bl, br, paint)
         } else {
-          rect(b.x - ew, b.y - eh, b.w + 2.0 * ew, b.h + 2.0 * eh, colour)
+          rect(b.x - ew, b.y - eh, bw + 2.0 * ew, bh + 2.0 * eh, paint)
         }
       }
       if let image = pic.image, let tint = pic.tint {
@@ -203,9 +541,18 @@ system draw() {
     }
     // The edges of the layer's boxes over what is in them, and the lines
     // between the boxes in one.
-    for b: Box, l: Layer, v: Seen, bd: Border, optional rc: Round
+    for b: Box, l: Layer, v: Seen, lk: Look, bd: Border, optional rc: Round,
+        optional own: Shown
         top down dfs Inside where l.z == z {
       clip(v.x, v.y, v.w, v.h)
+      var bw = b.w
+      var bh = b.h
+      if let sw = own.w, let sh = own.h {
+        bw = sw
+        bh = sh
+      }
+      shift(lk.dx, lk.dy)
+      shade(lk.colour, lk.part)
       var tl = 0.0
       var tr = 0.0
       var bl = 0.0
@@ -217,13 +564,16 @@ system draw() {
         bl = d
         br = g
       }
-      edges(b.x, b.y, b.w, b.h, bd.left, bd.right, bd.top, bd.bottom, tl, tr,
+      edges(b.x, b.y, bw, bh, bd.left, bd.right, bd.top, bd.bottom, tl, tr,
             bl, br, bd.colour)
     }
-    for (b: Box, l: Layer, v: Seen)-[Inside]->(ob: Box, ok: Stack, obd: Border),
+    for (b: Box, l: Layer, v: Seen)
+            -[Inside]->(ob: Box, ok: Stack, obd: Border, olk: Look),
         (prev: Box)~[Inside]~>(b)
         top down dfs Inside where l.z == z && obd.between > 0.0 {
       clip(v.x, v.y, v.w, v.h)
+      shift(olk.dx, olk.dy)
+      shade(olk.colour, olk.part)
       let half = (ok.gap + obd.between) * 0.5
       if ok.row {
         rect(b.x - half, ob.y, obd.between, ob.h, obd.colour)
@@ -232,7 +582,203 @@ system draw() {
       }
     }
   }
+  shift(0.0, 0.0)
+  shade(0, 0.0)
   unclip()
+}
+
+// What the inspector says. (In fns: said once, not once for every kind
+// of box there is.)
+fn sizing(how: i32) -> text[14] {
+  if how == Sizing.Fixed as i32 { "fixed" }
+  else if how == Sizing.Fit as i32 { "fit" }
+  else if how == Sizing.Grow as i32 { "grow" } else { "percent" }
+}
+fn says_line(what: text[14], w: f32, h: f32) -> text[126] {
+  "{what} {w as i32} x {h as i32}"
+}
+fn says_where(line: i32, layer: i32, depth: i32) -> text[126] {
+  "line {line + 1}, layer {layer}, {depth} deep"
+}
+fn says_box(x: f32, y: f32, w: f32, h: f32) -> text[126] {
+  "at {x as i32}, {y as i32}: {w as i32} x {h as i32}"
+}
+fn says_sizes(w: i32, h: i32) -> text[126] {
+  "width {sizing(w)}, height {sizing(h)}"
+}
+fn says_padding(left: f32, right: f32, top: f32, bottom: f32, gap: f32)
+    -> text[126] {
+  "padding {left as i32} {right as i32} {top as i32} {bottom as i32}, gap {gap as i32}"
+}
+
+// The panel that lists the boxes, over everything else.
+system inspect() {
+  if Inspector.on {
+    let wide = 320.0
+    let left = Window.width as f32 - wide
+    let high = Window.height as f32
+    let row = 18.0
+    // (The list ends where what is said about one box begins.)
+    let about = high - 132.0
+    let inside = Pointer.x >= left
+    if inside {
+      Inspector.top += Mouse.wheel_y * 2.0 * row
+    }
+    Inspector.top = min(0.0, max(Inspector.top,
+        min(0.0, about - 8.0 - Inspector.lines as f32 * row)))
+    let pointed = if inside && Pointer.y < about {
+      ((Pointer.y - 8.0 - Inspector.top) / row) as i32
+    } else { -1 }
+    // In the window, the pointer is on the innermost of the boxes it is
+    // over.
+    Inspector.depth = -1
+    for l: Layer with Hovered where l.z == PointerTop {
+      Inspector.depth max= l.depth
+    }
+    shift(0.0, 0.0)
+    shade(0, 0.0)
+    unclip()
+    rect(left, 0.0, wide, high, 0xf0141a20)
+    rect(left, 0.0, 1.0, high, 0x3a4650)
+    // Which line each box is in: under the box it is in, after the boxes
+    // before it there and all that is in those; what floats over a box
+    // after all that is in it. From how many lines each takes, which the
+    // innermost say first, and the topmost layer.
+    for at: mut Listed {
+      at.count = 1
+      at.floats = 0
+    }
+    for down in 0..8 {
+      let z = 7 - down
+      for (at: Listed, l: Layer)-[Inside]->(up: mut Listed)
+          bottom up Inside where l.z == z {
+        up.count += at.count
+      }
+      for (at: Listed, l: Layer)-[Over]->(up: mut Listed)
+          bottom up Over where l.z == z {
+        up.count += at.count
+        up.floats += at.count
+      }
+    }
+    Inspector.lines = 0
+    for at: Listed, l: Layer where l.depth == 0 { Inspector.lines += at.count }
+    for z in 0..8 {
+      for (at: mut Listed, l: Layer)-[Inside]->(up: Listed),
+          optional (prev: Listed)~[Inside]~>(at)
+          top down Inside where l.z == z {
+        var line = up.line + 1
+        if let before = prev.line, let takes = prev.count {
+          line = before + takes
+        }
+        at.line = line
+      }
+      for (at: mut Listed)-[Over]->(up: Listed, ul: Layer),
+          optional (prev: Listed)~[Over]~>(at)
+          top down Over where ul.z == z {
+        var line = up.line + up.count - up.floats
+        if let before = prev.line, let takes = prev.count {
+          line = before + takes
+        }
+        at.line = line
+      }
+    }
+    Picked.any = 0
+    Picked.line = 0
+    Picked.layer = 0
+    Picked.depth = 0
+    Picked.x = 0.0
+    Picked.y = 0.0
+    Picked.w = 0.0
+    Picked.h = 0.0
+    Picked.wide = 0
+    Picked.high = 0
+    Picked.left = 0.0
+    Picked.right = 0.0
+    Picked.top = 0.0
+    Picked.bottom = 0.0
+    Picked.gap = 0.0
+    Picked.more = 0
+    for e, b: Box, l: Layer, z: Size, k: Stack, at: Listed, optional f: Fill,
+        optional p: Pad {
+      let n = at.line
+      let y = 8.0 + Inspector.top + n as f32 * row
+      let picked = if inside { n == pointed } else {
+        e.has(Hovered) && l.z == PointerTop && l.depth == Inspector.depth
+      }
+      if y > -row && y + row <= about {
+        let x = left + 10.0 + l.depth as f32 * 12.0
+        if picked { rect(left + 1.0, y, wide - 1.0, row, 0x2a4a80) }
+        else if e.has(Hovered) { rect(left + 1.0, y, wide - 1.0, row, 0x202a34) }
+        var swatch = 0x3a4650
+        if let colour = f.colour { swatch = colour }
+        rect(x, y + 4.0, 10.0, 10.0, swatch)
+        var what: text[14] = if e.has(Float) { "float" } else if e.has(Clip) { "clip" }
+                   else if e.has(Text) { "text" }
+                   else if k.row { "row" } else { "column" }
+        label(says_line(what, b.w, b.h), x + 16.0, y + 3.0, 12.0,
+              if picked { 0xffffff } else { 0xa0b0c0 })
+      }
+      if picked {
+        Picked.any += 1
+        Picked.line += n
+        Picked.layer += l.z
+        Picked.depth += l.depth
+        Picked.x += b.x
+        Picked.y += b.y
+        Picked.w += b.w
+        Picked.h += b.h
+        Picked.wide += z.w as i32
+        Picked.high += z.h as i32
+        var left_pad = k.pad
+        var right_pad = k.pad
+        var top_pad = k.pad
+        var bottom_pad = k.pad
+        if let pl = p.left, let pr = p.right, let pt = p.top,
+           let pb = p.bottom {
+          left_pad = pl
+          right_pad = pr
+          top_pad = pt
+          bottom_pad = pb
+        }
+        Picked.left += left_pad
+        Picked.right += right_pad
+        Picked.top += top_pad
+        Picked.bottom += bottom_pad
+        Picked.gap += k.gap
+        Picked.more += if e.has(Scroll) { 1 } else if e.has(Transition) { 2 }
+                       else if e.has(Passthrough) { 3 } else { 0 }
+      }
+    }
+    // The one the pointer is on: marked in the window, and all about it
+    // below the list.
+    if Picked.any == 1 {
+      clip(0.0, 0.0, left, high)
+      rect(Picked.x, Picked.y, Picked.w, Picked.h, 0x40ffe040)
+      edges(Picked.x, Picked.y, Picked.w, Picked.h, 2.0, 2.0, 2.0, 2.0, 0.0,
+            0.0, 0.0, 0.0, 0xffe040)
+      unclip()
+      rect(left + 1.0, about, wide - 1.0, high - about, 0x1c242c)
+      rect(left, about, wide, 1.0, 0x3a4650)
+      let x = left + 10.0
+      label(says_where(Picked.line, Picked.layer, Picked.depth), x,
+            about + 10.0, 12.0, 0xffffff)
+      label(says_box(Picked.x, Picked.y, Picked.w, Picked.h), x, about + 28.0,
+            12.0, 0xd0d8e0)
+      label(says_sizes(Picked.wide, Picked.high), x, about + 46.0, 12.0,
+            0xd0d8e0)
+      label(says_padding(Picked.left, Picked.right, Picked.top, Picked.bottom,
+                         Picked.gap),
+            x, about + 64.0, 12.0, 0xd0d8e0)
+      var more: text[30] = if Picked.more == 1 { "scrolls" }
+                 else if Picked.more == 2 { "in a transition" }
+                 else if Picked.more == 3 { "lets the pointer through" }
+                 else { "" }
+      label(more, x, about + 82.0, 12.0, 0xd0d8e0)
+      for at: Listed, t: Text where at.line == Picked.line {
+        label(t.text, x, about + 100.0, 12.0, 0x808890)
+      }
+    }
+  }
 }
 
 // The whole of it, between the window's `begin` and `present`.
@@ -244,5 +790,7 @@ schedule ui() {
   wrap()
   layout_heights()
   point()
+  animate()
   draw()
+  inspect()
 }
