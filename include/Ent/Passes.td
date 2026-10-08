@@ -111,6 +111,28 @@ def EntOmpNowait : Pass<"ent-omp-nowait"> {
   let dependentDialects = ["::mlir::omp::OpenMPDialect"];
 }
 
+def EntLowerViews : Pass<"ent-lower-views", "::mlir::func::FuncOp"> {
+  let summary = "Read and write the world's columns by their addresses";
+  let description = [{
+    After `--ent-lower-to-loops` a column is a `memref.view` of the world's
+    memory, and what is read and written of it a `memref.load` or
+    `memref.store` through that view. A view is a memref of its own: a
+    record of five values once it is lowered, made and taken apart for
+    every column a function touches, which is most of what a program with
+    many archetypes is lowered to.
+
+    This pass gives each such load and store the address it needs instead
+    (`llvm.getelementptr` from the memory's own address, `llvm.load`,
+    `llvm.store`), and drops the views nothing else uses. It changes
+    nothing in what the program does; run it last before the conversion
+    to the LLVM dialect.
+  }];
+  let dependentDialects = [
+    "::mlir::LLVM::LLVMDialect", "::mlir::arith::ArithDialect",
+    "::mlir::memref::MemRefDialect"
+  ];
+}
+
 def EntPrintAccess : Pass<"ent-print-access", "ModuleOp"> {
   let summary = "Report the columns each system reads and writes";
   let description = [{

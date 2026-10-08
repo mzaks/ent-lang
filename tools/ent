@@ -265,9 +265,10 @@ def build(arguments, output, directory):
     # tool to read again.
     llvm = os.path.join(directory, stem + ".bc")
     run([optimise, module] + passes +
-        # (What the lowering wrote more than once, once: less to turn
-        # into LLVM's IR, and for LLVM to read.)
-        ["--cse"] +
+        # (What the lowering wrote more than once, once, and the columns
+        # read and written by their addresses: less to turn into LLVM's
+        # IR, and for LLVM to read.)
+        ["--cse", "--ent-lower-views"] +
         ["--convert-scf-to-cf", "--convert-to-llvm",
          "--reconcile-unrealized-casts", "--ent-emit-llvm=output=" + llvm,
          "-o", os.devnull])

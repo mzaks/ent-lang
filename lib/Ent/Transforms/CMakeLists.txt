@@ -2,6 +2,7 @@ add_mlir_library(MLIREntTransforms
   Access.cpp
   InferArchetypes.cpp
   LowerToLoops.cpp
+  LowerViews.cpp
   OmpNowait.cpp
   PrintAccess.cpp
   Schedule.cpp
