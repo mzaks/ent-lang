@@ -123,6 +123,25 @@ def Ent_TextType : Ent_Type<"Text", "text"> {
   }];
 }
 
+def Ent_StringType : Ent_Type<"String", "string"> {
+  let summary = "Text of any length, held by the world";
+  let description = [{
+    `!ent.string` is a text without a capacity (`text` in a program). A
+    value of it is a view: the address of a block of a 32-bit length and
+    the bytes after it (0: no bytes), which stays where it is as long as
+    the value is used. A field of it holds a block of its own: what is
+    assigned to the field is copied (`ent.text.own`), and what the field
+    held is given back (`ent.text.drop`). It is stored, and computed with,
+    as that address: `builtin.unrealized_conversion_cast` takes a value to
+    and from `i64`.
+  }];
+  let extraClassDeclaration = [{
+    ::mlir::IntegerType getStorageType() const {
+      return ::mlir::IntegerType::get(getContext(), 64);
+    }
+  }];
+}
+
 def Ent_EnumType : Ent_Type<"Enum", "enum"> {
   let summary = "One of the cases an `ent.enum` names";
   let description = [{

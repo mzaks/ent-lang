@@ -303,7 +303,7 @@ static LogicalResult verifyRecord(Operation *op, ArrayAttr names,
     // is one too (a relation).
     Type type = cast<TypeAttr>(typeAttr).getValue();
     if (!isa<IntegerType, FloatType, IndexType, EntityType, TextType,
-             EnumType>(type))
+             StringType, EnumType>(type))
       return op->emitOpError("field '")
              << name << "' has type " << type
              << "; only integer, float, index, entity, text and enum fields "
@@ -657,7 +657,7 @@ LogicalResult ExternOp::verify() {
              << index
              << " is a component reference; references can only be bound "
                 "by 'ent.query'";
-    if (isa<TextType>(type))
+    if (isa<TextType, StringType>(type))
       return emitOpError("parameter #")
              << index
              << " is a text, which cannot be passed to C yet; put it in a "
@@ -677,7 +677,8 @@ LogicalResult ExternOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 
 /// The types a value can cross to C with.
 static bool crossesToC(Type type) {
-  return isa<FloatType, TextType, EnumType>(type) || type.isSignlessInteger();
+  return isa<FloatType, TextType, StringType, EnumType>(type) ||
+         type.isSignlessInteger();
 }
 
 //===----------------------------------------------------------------------===//
@@ -814,7 +815,7 @@ LogicalResult FunctionOp::verify() {
   if (getResults().size() > 1)
     return emitOpError("gives several values, which C cannot give back");
   if (std::optional<Type> result = getResult()) {
-    if (isa<TextType>(*result))
+    if (isa<TextType, StringType>(*result))
       return emitOpError("gives a text, which C cannot give back yet");
     if (!crossesToC(*result))
       return emitOpError("gives a ")
@@ -845,7 +846,9 @@ LogicalResult FunctionOp::verifyRegions() {
         op->getName().getDialectNamespace() != "ent")
       return;
     auto invoke = dyn_cast<InvokeOp>(op);
-    if (isa<SameOp>(op) || (invoke && (!invoke.getProc() || getProc())))
+    if (isa<SameOp, TextConstantOp, TextOfOp, TextCutOp, TextLengthOp,
+            TextAtOp, TextEqualOp>(op) ||
+        (invoke && (!invoke.getProc() || getProc())))
       return;
     if (succeeded(result))
       result = op->emitOpError(invoke ? "calls a proc in a function's body; "

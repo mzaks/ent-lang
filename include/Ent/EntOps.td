@@ -736,6 +736,117 @@ def Ent_SameOp : Ent_Op<"same", [Pure]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict";
 }
 
+def Ent_TextConstantOp : Ent_Op<"text.constant", [Pure]> {
+  let summary = "A text of any length that is written in the program";
+  let description = [{
+    ```mlir
+    %t = ent.text.constant "some words"
+    ```
+    A view of bytes that are the program's own, and never change.
+  }];
+  let arguments = (ins StrAttr:$value);
+  let results = (outs Ent_StringType:$result);
+  let assemblyFormat = "$value attr-dict";
+}
+
+def Ent_TextOfOp : Ent_Op<"text.of", [Pure]> {
+  let summary = "A text of a capacity as one of any length";
+  let description = [{
+    ```mlir
+    %t = ent.text.of %fixed : !ent.text<30>
+    ```
+    A view of the bytes `%fixed` holds, which are kept for as long as the
+    function it is in runs.
+  }];
+  let arguments = (ins Ent_TextType:$value);
+  let results = (outs Ent_StringType:$result);
+  let assemblyFormat = "$value attr-dict `:` type($value)";
+}
+
+def Ent_TextCutOp : Ent_Op<"text.cut", [NoMemoryEffect]> {
+  let summary = "A text of any length as one of a capacity";
+  let description = [{
+    ```mlir
+    %fixed = ent.text.cut %t : !ent.text<30>
+    ```
+    The bytes of `%t`, as many of them as the capacity holds.
+
+    (Like the other ops that look into a text of any length, it is not
+    run where its value is not asked for: a field of a component an
+    entity lacks holds no address to look at.)
+  }];
+  let arguments = (ins Ent_StringType:$value);
+  let results = (outs Ent_TextType:$result);
+  let assemblyFormat = "$value attr-dict `:` type($result)";
+}
+
+def Ent_TextLengthOp : Ent_Op<"text.length", [NoMemoryEffect]> {
+  let summary = "How many bytes a text of any length has";
+  let description = [{
+    ```mlir
+    %n = ent.text.length %t
+    ```
+  }];
+  let arguments = (ins Ent_StringType:$value);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$value attr-dict";
+}
+
+def Ent_TextAtOp : Ent_Op<"text.at", [NoMemoryEffect]> {
+  let summary = "A byte of a text of any length";
+  let description = [{
+    ```mlir
+    %b = ent.text.at %t, %i : i32
+    ```
+    Byte `%i` of `%t`; 0 where there is none.
+  }];
+  let arguments = (ins Ent_StringType:$value, AnySignlessInteger:$index);
+  let results = (outs I8:$result);
+  let assemblyFormat = "$value `,` $index attr-dict `:` type($index)";
+}
+
+def Ent_TextEqualOp : Ent_Op<"text.equal", [NoMemoryEffect]> {
+  let summary = "Whether two texts of any length have the same bytes";
+  let description = [{
+    ```mlir
+    %is = ent.text.equal %a, %b
+    ```
+  }];
+  let arguments = (ins Ent_StringType:$lhs, Ent_StringType:$rhs);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict";
+}
+
+def Ent_TextOwnOp : Ent_Op<"text.own", [
+    MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "A block of its own with the bytes of a text";
+  let description = [{
+    ```mlir
+    %held = ent.text.own %t
+    ```
+    What a field is given to hold: a copy of the bytes of `%t` (nothing,
+    the address 0, for none), which is the field's until `ent.text.drop`
+    takes it.
+  }];
+  let arguments = (ins Ent_StringType:$value);
+  let results = (outs Ent_StringType:$result);
+  let assemblyFormat = "$value attr-dict";
+}
+
+def Ent_TextDropOp : Ent_Op<"text.drop", [
+    MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Give back the block a field held";
+  let description = [{
+    ```mlir
+    ent.text.drop %held
+    ```
+    `%held` is what a field holds that is given another text, or that
+    goes with its entity: no view of it is used after this.
+  }];
+  let arguments = (ins Ent_StringType:$value);
+  let assemblyFormat = "$value attr-dict";
+}
+
 def Ent_OtherOp : Ent_Op<"other"> {
   let summary = "The entity a ref to another entity's component leads to";
   let description = [{

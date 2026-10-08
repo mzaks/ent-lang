@@ -1,0 +1,37 @@
+// Texts of any length (text_any.test).
+import console
+
+component Note { words: text, n: i32 }
+unique Title: text
+unique Round: i32
+default_capacity 16
+
+fn pick(i: i32) -> text {
+  if i == 0 { "nothing" } else { "a much longer text than any small capacity would hold, and then some more words after that" }
+}
+fn longer(a: text, b: text) -> text { if len(a) > len(b) { a } else { b } }
+
+world {
+  Title = "The title"
+  spawn { Note { words: "first", n: 1 } }
+  spawn { Note { words: pick(1), n: 2 } }
+  spawn { Note { words: "", n: 3 } }
+  let four = 4
+  spawn { Note { words: "number {four}", n: four } }
+}
+
+system show() {
+  Round += 1
+  put("{Round}: {Title as text[40]} ({len(Title)})")
+  for n: Note {
+    let first = n.words == "first"
+    let title = n.words == Title
+    put("  {n.n}: {len(n.words)} bytes, starts '{n.words as text[12]}', third byte {n.words[2]}, is first: {first}, is title: {title}")
+  }
+  for n: mut Note where n.n == 1 { n.words = longer(n.words, pick(Round - 1)) }
+  for n: mut Note where n.n == 3 { n.words = "round {Round}" }
+  if Round == 2 { Title = "first" }
+}
+
+schedule frame() { show() }
+main { loop { frame() } until Round == 3 }

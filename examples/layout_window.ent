@@ -39,7 +39,8 @@ component Picture { image: i32, tint: i32 }
 // least as big as the text and its padding (where it is not `Fixed`).
 // The text goes on in the next line where its box ends, so the box can
 // be as narrow as the longest word, and is as high as the lines come to.
-component Text { text: text[1022], size: f32, colour: i32 }
+// (Of any length.)
+component Text { text: text, size: f32, colour: i32 }
 // More about a text: its font (0: the window's own; others from the
 // window's `font`), more room between the letters, how far one line is
 // below the one before (0: as far as the text is high), where each line

@@ -101,7 +101,7 @@ capacity Inside 4096                        // another capacity for one declared
 ```
 
 - Types: `f32`, `f64`, `bool`, `i8`, `i16`, `i32`, `i64`, `index`, `entity`,
-  `text[N]` (see Text below), and the enums the program declares (see
+  `text[N]` and `text` (see Text below), and the enums the program declares (see
   Enums below).
 - `capacity` on a component bounds how many entities can have it; an
   archetype the compiler infers from spawns takes the smallest capacity
@@ -828,6 +828,43 @@ well as for text: any byte may be in it, nothing ends it.
 
 Text has no order (`<`), search or slices yet, and its bytes cannot be
 changed one by one.
+
+### Text of any length
+
+```
+component Page { words: text }
+unique Title: text
+fn longer(a: text, b: text) -> text { if len(a) > len(b) { a } else { b } }
+```
+
+`text` without a capacity holds as many bytes as it is given. A field or
+a unique of it costs eight bytes in its column; the bytes are the
+world's, apart from the columns: what is assigned to the field is copied,
+and what the field held is given back, as it is when the field's
+component is removed or its entity destroyed.
+
+- A literal put where a `text` is expected is one, however long, and a
+  `text[N]` goes where a `text` is expected as it is; a `text` where a
+  `text[N]` is expected is cut to the bytes that fit (`t as text[N]` in
+  an expression, `t as text` the other way).
+- `len(t)`, `t[i]`, `a == b` and `a != b` (with a text of either kind)
+  are as for a `text[N]`.
+- It is not joined (`+`) or put into another text (`"{t}"`): what is
+  made of texts is made of `text[N]`, and assigned to a `text` when it
+  is done (`page.words = "{n} of {all}"`).
+- A fn or proc takes and gives them; a fn gives back a literal or a
+  `text` it was given, not a `text[N]` of its own. An extern fn or proc
+  takes one as `const ent_text *`: a `uint32_t length` and the bytes
+  after it, with a 0 after them (which does not count).
+- A value of it is what a field holds or a literal is, seen, not a
+  copy: a `var` does not hold one, and a `let` does not keep the text of
+  a unique or of a `mut` binding, which may be given another while the
+  `let` is there. (`t as text[N]` is a copy.)
+- In the C header such a column is an array of `const ent_text *` (none:
+  no bytes), which C reads and leaves to the program to change.
+- `tools/ent` builds `runtime/text.c` with every program: what keeps the
+  bytes. A program run with `ENT_TEXT_REPORT` set says at its end how
+  many texts fields held.
 
 ## Schedules
 

@@ -444,8 +444,73 @@ schedule world_init() {
 
 // -----
 
-// expected-error @+1 {{expected '[' and the text's capacity, found '}'}}
+// A text of any length is held by a field, and seen where it is used: a
+// var does not hold one.
 component Label { name: text }
+system s() {
+  for l: Label {
+    // expected-error @+1 {{a var does not hold a text of any length; one of a capacity it does ('as text[N]')}}
+    var kept = l.name
+  }
+}
+
+// -----
+
+component Label { name: text }
+system s() {
+  for l: mut Label {
+    // expected-error @+1 {{a 'let' does not keep the text a unique or a 'mut' binding holds: that may be given another meanwhile. Keep a copy of a capacity ('as text[N]')}}
+    let kept = l.name
+    l.name = "another"
+  }
+}
+
+// -----
+
+component Label { name: text }
+tag Old
+system s() {
+  for e, l: Label {
+    let kept = l.name
+    // expected-error @+1 {{'kept' keeps a text of any length, and 'Label' has one that goes here: keep a copy of a capacity ('as text[N]')}}
+    e.remove(Label)
+  }
+}
+
+// -----
+
+// expected-error @+1 {{a text of a capacity is not given back as a 'text': it is this fn's own, and gone when the fn has run; give back a 'text[N]'}}
+fn name(i: i32) -> text { "number {i}" }
+
+// -----
+
+component Label { name: text }
+system s() {
+  for l: mut Label {
+    // expected-error @+1 {{a text of any length can only be assigned ('=')}}
+    l.name += "more"
+  }
+}
+
+// -----
+
+component Label { name: text, both: text[62] }
+system s() {
+  for l: mut Label {
+    // expected-error @+1 {{a text of any length can be compared with '==' and '!='; to join it, cut it to a capacity first ('as text[N]')}}
+    l.both = l.name + "more"
+  }
+}
+
+// -----
+
+component Label { name: text, both: text[62] }
+system s() {
+  for l: mut Label {
+    // expected-error @+1 {{a text of any length is not put into another text; cut it to a capacity first ('as text[N]')}}
+    l.both = "is {l.name}"
+  }
+}
 
 // -----
 
@@ -918,7 +983,7 @@ enum Nothing { }
 
 // -----
 
-// expected-error @+1 {{unknown type 'Way'; expected f32, f64, bool, i8, i16, i32, i64, index, entity, text[N] or an enum}}
+// expected-error @+1 {{unknown type 'Way'; expected f32, f64, bool, i8, i16, i32, i64, index, entity, text, text[N] or an enum}}
 component Ghost { way: Way }
 enum Way { Left, Right }
 

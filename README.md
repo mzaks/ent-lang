@@ -304,7 +304,15 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   bytes and their number, stored inline as one integer (the length in its
   low 16 bits, the bytes above, zero past the length), which is what the
   lowering turns the type into; `text[30]` in ent-lang, whose literals,
-  joins and comparisons are integer ops on it (`docs/syntax.md`).
+  joins and comparisons are integer ops on it (`docs/syntax.md`). Or a
+  text of any length, `words: !ent.string` (`text` in ent-lang): the
+  column holds the address of a block of its own (a length and the
+  bytes), which `ent.text.own` makes of a value and `ent.text.drop` gives
+  back, where a field is assigned, its component removed or its entity
+  destroyed; a value is a view of such a block or of a literal's
+  (`ent.text.constant`, `ent.text.of` a text of a capacity,
+  `ent.text.cut` to one, `ent.text.length`, `ent.text.at`,
+  `ent.text.equal`). The lowering calls `runtime/text.c` for them.
 - `%id = ent.spawn (@Position, @Velocity)(%x, %y, %dx, %dy) : f32, f32, f32,
   f32` creates an entity with these components, a value for every field in
   order, and returns its id. Archetypes need not be declared: the compiler

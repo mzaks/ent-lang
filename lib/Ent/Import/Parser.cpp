@@ -440,6 +440,12 @@ private:
   // Text: a value of !ent.text<N> is one integer (see TextType), which
   // these compute with.
   Type textTypeOf(const Expr &expr);
+  bool isAnyText(const Expr &expr);
+  bool mayBeAssigned(const Expr &expr);
+  LogicalResult keepsNoText(llvm::SMLoc at, StringRef component);
+  /// Set while the value a fn gives back is emitted, where that is a
+  /// text of any length.
+  bool givesText = false;
   TextType textType(llvm::SMLoc at, unsigned capacity);
   mlir::Value integer(Location at, Type type, uint64_t value);
   mlir::Value textBits(Location at, mlir::Value text);
@@ -874,9 +880,11 @@ FailureOr<Type> Parser::parseType() {
                   .Case("entity", EntityType::get(context))
                   .Default(Type());
   if (*name == "text") {
+    // text: of any length, held by the world.
+    if (!token.is(Token::LBracket))
+      return Type(StringType::get(context));
     // text[N]: up to N bytes, stored inline.
-    if (failed(expect(Token::LBracket, "'[' and the text's capacity")))
-      return failure();
+    advance();
     FailureOr<int64_t> capacity = integer("a capacity in bytes");
     if (failed(capacity) || failed(expect(Token::RBracket, "']'")))
       return failure();
@@ -890,7 +898,7 @@ FailureOr<Type> Parser::parseType() {
   if (!type)
     return error(at, "unknown type '" + *name +
                          "'; expected f32, f64, bool, i8, i16, i32, i64, "
-                         "index, entity, text[N] or an enum");
+                         "index, entity, text, text[N] or an enum");
   return type;
 }
 
@@ -902,6 +910,8 @@ static std::string shapeWord(Type type) {
     return ("text" + Twine(text.getCapacity())).str();
   if (isa<EntityType>(type))
     return "entity";
+  if (isa<StringType>(type))
+    return "text";
   std::string word;
   llvm::raw_string_ostream os(word);
   if (auto named = dyn_cast<EnumType>(type))
@@ -944,7 +954,7 @@ FailureOr<Type> Parser::parseCallableType(bool proc) {
     FailureOr<Type> type = parseType();
     if (failed(type))
       return failure();
-    if (!type->isIntOrFloat() && !isa<EnumType, TextType>(*type))
+    if (!type->isIntOrFloat() && !isa<EnumType, TextType, StringType>(*type))
       return error(resultAt, "a fn or proc that is a value gives a number, "
                              "a bool, an enum or a text, or nothing");
     callable->result = *type;
@@ -1153,6 +1163,9 @@ LogicalResult Parser::finishCallables() {
               .getResult(0);
         if (auto text = dyn_cast<TextType>(callable->result))
           return textConstant(at, "", text);
+        if (isa<StringType>(callable->result))
+          return TextConstantOp::create(builder, at, callable->result, "")
+              .getResult();
         return arith::ConstantOp::create(
             builder, at,
             cast<TypedAttr>(builder.getZeroAttr(callable->result)));
@@ -1588,7 +1601,7 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     if (isExtern && several)
       return error(resultAt, "C gives one value back; a fn with a body may "
                              "give several");
-    if (isExtern && isa<TextType>(function.results.front()))
+    if (isExtern && isa<TextType, StringType>(function.results.front()))
       return error(resultAt, "C cannot give a text back yet");
     if (!several)
       function.result = function.results.front();
@@ -1678,6 +1691,10 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   FailureOr<ExprPtr> body = parseExpr();
   if (failed(body))
     return failure();
+  llvm::SaveAndRestore<bool> gives(
+      givesText, llvm::any_of(results, [](Type type) {
+        return isa<StringType>(type);
+      }));
   SmallVector<mlir::Value> values;
   if (results.size() > 1) {
     FailureOr<SmallVector<mlir::Value>> several = emitSeveral(**body, results);
@@ -2686,6 +2703,9 @@ LogicalResult Parser::parseVar() {
     return failure();
   if (type && emitted->getType() != type)
     return error((*value)->loc, "value has a different type than the var");
+  if (isa<StringType>(emitted->getType()))
+    return error((*value)->loc, "a var does not hold a text of any length; "
+                                "one of a capacity it does ('as text[N]')");
   bind(*name, Variable::ofVar(*emitted));
   return success();
 }
@@ -3600,6 +3620,18 @@ LogicalResult Parser::emitAssignment(
     return failure();
   if (rhs->getType() != type)
     return error(value.loc, "value has a different type than the target");
+  if (isa<StringType>(type)) {
+    // What it holds is its own: a copy of the value, and what it held
+    // before is given back (after: the value may be a view of that).
+    if (op != Token::Assign || rule)
+      return error(at, "a text of any length can only be assigned ('=')");
+    mlir::Value old = load();
+    if (failed(store(TextOwnOp::create(builder, loc(at), type, *rhs)
+                         .getResult())))
+      return failure();
+    TextDropOp::create(builder, loc(at), old);
+    return success();
+  }
   if (op == Token::Assign && !rule)
     return store(*rhs);
   if (auto text = dyn_cast<TextType>(type)) {
@@ -3973,6 +4005,8 @@ LogicalResult Parser::parseMethod(const std::string &entity, llvm::SMLoc at) {
     FailureOr<ComponentInit> init = parseComponentInit();
     if (failed(init) || failed(expect(Token::RParen, "')'")))
       return failure();
+    if (failed(keepsNoText(at, init->component)))
+      return failure();
     FailureOr<SmallVector<mlir::Value>> values = emitInitValues(*init);
     if (failed(values))
       return failure();
@@ -3986,6 +4020,8 @@ LogicalResult Parser::parseMethod(const std::string &entity, llvm::SMLoc at) {
       return failure();
     if (!components.count(*component))
       return error(componentAt, "unknown component '" + *component + "'");
+    if (failed(keepsNoText(at, *component)))
+      return failure();
     RemoveOp::create(builder, loc(at), symbol(*component));
     return success();
   }
@@ -4195,6 +4231,19 @@ LogicalResult Parser::emitLet(const Let &let, bool isVar) {
     if (failed(value))
       return failure();
     values.push_back(*value);
+  }
+  for (mlir::Value value : values) {
+    if (!isa<StringType>(value.getType()))
+      continue;
+    if (isVar)
+      return error(let.value->loc, "a var does not hold a text of any "
+                                   "length; one of a capacity it does ('as "
+                                   "text[N]')");
+    if (mayBeAssigned(*let.value))
+      return error(let.value->loc,
+                   "a 'let' does not keep the text a unique or a 'mut' "
+                   "binding holds: that may be given another meanwhile. "
+                   "Keep a copy of a capacity ('as text[N]')");
   }
   for (auto [name, value] : llvm::zip(let.names, values))
     bind(name, isVar ? Variable::ofVar(value) : Variable::ofValue(value));
@@ -4718,6 +4767,18 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
   auto to = dyn_cast_or_null<TextType>(expected);
   if (from && to && from != to)
     return textResize(loc(expr.loc), *value, to);
+  // A text of a capacity where one of any length is expected, and the
+  // other way round: as it is, or cut to what fits.
+  if (from && expected && isa<StringType>(expected)) {
+    if (givesText)
+      return error(expr.loc, "a text of a capacity is not given back as a "
+                             "'text': it is this fn's own, and gone when "
+                             "the fn has run; give back a 'text[N]'");
+    return TextOfOp::create(builder, loc(expr.loc), expected, *value)
+        .getResult();
+  }
+  if (to && isa<StringType>(value->getType()))
+    return TextCutOp::create(builder, loc(expr.loc), to, *value).getResult();
   return value;
 }
 
@@ -4727,6 +4788,9 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   case Expr::String: {
     // A literal takes the capacity it is put into, where it fits.
     unsigned size = expr.name.size();
+    if (expected && isa<StringType>(expected))
+      return TextConstantOp::create(builder, at, expected, expr.name)
+          .getResult();
     if (auto text = dyn_cast_or_null<TextType>(expected)) {
       if (size > text.getCapacity())
         return error(expr.loc, "this text has " + Twine(size) +
@@ -4743,6 +4807,22 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   }
   case Expr::Index: {
     Type textTy = textTypeOf(*expr.operands[0]);
+    if (isAnyText(*expr.operands[0])) {
+      FailureOr<mlir::Value> text =
+          emit(*expr.operands[0], StringType::get(context));
+      Type indexTy = typeOf(*expr.operands[1]);
+      if (!indexTy)
+        indexTy = builder.getI32Type();
+      FailureOr<mlir::Value> index = emit(*expr.operands[1], indexTy);
+      if (failed(text) || failed(index))
+        return failure();
+      if (!index->getType().isSignlessInteger() ||
+          index->getType().isInteger(1))
+        return error(expr.operands[1]->loc, "an index is an integer");
+      return TextAtOp::create(builder, at, builder.getIntegerType(8), *text,
+                              *index)
+          .getResult();
+    }
     if (!textTy)
       return error(expr.loc, "only a text can be indexed");
     FailureOr<mlir::Value> text = emit(*expr.operands[0], textTy);
@@ -4760,6 +4840,10 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     Type type = typeOf(*expr.operands[0]);
     if (!type)
       type = defaultType(*expr.operands[0]);
+    if (isa<StringType>(type))
+      return error(expr.operands[0]->loc,
+                   "a text of any length is not put into another text; cut "
+                   "it to a capacity first ('as text[N]')");
     FailureOr<mlir::Value> value = emit(*expr.operands[0], type);
     if (failed(value))
       return failure();
@@ -4962,6 +5046,15 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return failure();
       return values->front();
     }
+    if (expr.name == "len" && expr.operands.size() == 1 &&
+        isAnyText(*expr.operands[0])) {
+      FailureOr<mlir::Value> text =
+          emit(*expr.operands[0], StringType::get(context));
+      if (failed(text))
+        return failure();
+      return TextLengthOp::create(builder, at, builder.getI32Type(), *text)
+          .getResult();
+    }
     if (expr.name == "len") {
       Type textTy = expr.operands.size() == 1
                         ? textTypeOf(*expr.operands[0])
@@ -4999,6 +5092,20 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     return combine(at, expr.name, *a, *b);
   }
   case Expr::Cast: {
+    // `as text`: of any length; `as text[N]` of one of any length: cut.
+    if (isa<StringType>(expr.castType) ||
+        (isa<TextType>(expr.castType) && isAnyText(*expr.operands[0]))) {
+      if (!isAnyText(*expr.operands[0]) && !textTypeOf(*expr.operands[0]))
+        return error(expr.loc, "only a text can be cast to a text; a "
+                               "number is put into one with \"{value}\"");
+      FailureOr<mlir::Value> value =
+          emit(*expr.operands[0], StringType::get(context));
+      if (failed(value))
+        return failure();
+      if (auto text = dyn_cast<TextType>(expr.castType))
+        return TextCutOp::create(builder, at, text, *value).getResult();
+      return value;
+    }
     if (auto text = dyn_cast<TextType>(expr.castType)) {
       // `as text[N]`: the same text, cut to N bytes if it is longer.
       Type operand = textTypeOf(*expr.operands[0]);
@@ -5154,6 +5261,30 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
   }
   bool comparison = precedenceOf(expr.op) == 3 || precedenceOf(expr.op) == 4;
   Type leftText = textTypeOf(lhs), rightText = textTypeOf(rhs);
+  if (isAnyText(lhs) || isAnyText(rhs)) {
+    // One of any length: compared byte for byte, with one of either kind.
+    if (!(leftText || isAnyText(lhs)) || !(rightText || isAnyText(rhs)))
+      return error(expr.loc, "a text is compared to texts; a number is put "
+                             "into one with \"{value}\"");
+    if (expr.op != Token::Equal && expr.op != Token::NotEqual)
+      return error(expr.loc, "a text of any length can be compared with "
+                             "'==' and '!='; to join it, cut it to a "
+                             "capacity first ('as text[N]')");
+    Type any = StringType::get(context);
+    FailureOr<mlir::Value> a = emit(lhs, any);
+    FailureOr<mlir::Value> b = emit(rhs, any);
+    if (failed(a) || failed(b))
+      return failure();
+    mlir::Value same =
+        TextEqualOp::create(builder, at, builder.getI1Type(), *a, *b)
+            .getResult();
+    if (expr.op == Token::Equal)
+      return same;
+    return arith::XOrIOp::create(
+               builder, at, same,
+               arith::ConstantIntOp::create(builder, at, 1, 1))
+        .getResult();
+  }
   if (leftText || rightText) {
     if (!leftText || !rightText)
       return error(expr.loc, "a text is joined with and compared to texts; "
@@ -5382,6 +5513,52 @@ FailureOr<ExprPtr> Parser::parseString() {
     joined = std::move(node);
   }
   return joined;
+}
+
+/// Where `component`, which is added or removed, has a text of any
+/// length: no `let` keeps one, which may be what the entity's field held.
+LogicalResult Parser::keepsNoText(llvm::SMLoc at, StringRef component) {
+  bool holds = llvm::any_of(components[component].fields, [](auto &field) {
+    return isa<StringType>(field.second);
+  });
+  if (!holds)
+    return success();
+  for (auto &scope : scopes)
+    for (auto &entry : scope)
+      if (entry.second.kind == Variable::Value && entry.second.value &&
+          isa<StringType>(entry.second.value.getType()))
+        return error(at, "'" + entry.first() + "' keeps a text of any "
+                         "length, and '" + component + "' has one that goes "
+                         "here: keep a copy of a capacity ('as text[N]')");
+  return success();
+}
+
+/// Whether `expr` is a text of any length.
+bool Parser::isAnyText(const Expr &expr) {
+  if (expr.kind == Expr::String)
+    return false;
+  Type type = typeOf(expr);
+  return type && isa<StringType>(type);
+}
+
+/// Whether the text of any length that `expr` gives may be what a field
+/// holds that can be assigned where `expr` is: a unique's, or that of a
+/// `mut` binding.
+bool Parser::mayBeAssigned(const Expr &expr) {
+  switch (expr.kind) {
+  case Expr::Field:
+  case Expr::Name:
+    if (const Variable *variable = lookup(expr.name))
+      return variable->kind == Variable::Ref && variable->mut;
+    return uniques.count(expr.name);
+  case Expr::If:
+    return (expr.thenBranch && mayBeAssigned(*expr.thenBranch->value)) ||
+           (expr.elseBranch && mayBeAssigned(*expr.elseBranch->value));
+  default:
+    return llvm::any_of(expr.operands, [&](const ExprPtr &operand) {
+      return mayBeAssigned(*operand);
+    });
+  }
 }
 
 /// The text type of `expr` if it is a text: for a literal the one that
@@ -5803,6 +5980,10 @@ Parser::emitInitValues(const ComponentInit &init) {
     if (emitted->getType() != type)
       return error(value->loc, "value for '" + field +
                                    "' has a different type than the field");
+    // (The field's own copy.)
+    if (isa<StringType>(type))
+      emitted = TextOwnOp::create(builder, loc(value->loc), type, *emitted)
+                    .getResult();
     values.push_back(*emitted);
   }
   for (auto &[name, expr] : init.fields)

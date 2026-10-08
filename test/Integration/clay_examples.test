@@ -26,6 +26,8 @@
 // VIDEO:      write 48 384 in 186 "Article 5" 00ffffff
 // VIDEO:      write 298 108 in 694 "Squirrels" 00ffffff
 // VIDEO-NEXT: write 298 148 in 694 "The Secret Life of Squirrels: Nature's Clever Acrobats" 00ffffff
+// (A line without bytes is one too.)
+// VIDEO:      write 298 {{[0-9.]+}} in 694 "" 00ffffff
 
 // Four buttons, and thirty boxes, six in a row.
 // MOVES:      rect 0 0 1024 768 00ffffff

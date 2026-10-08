@@ -150,7 +150,9 @@ module.exports = grammar({
     primitive_type: (_) =>
       choice('f32', 'f64', 'bool', 'i1', 'i8', 'i16', 'i32', 'i64', 'index',
              'entity'),
-    text_type: ($) => seq('text', '[', $.integer, ']'),
+    // text: of any length; text[N]: up to N bytes.
+    text_type: ($) =>
+      prec.right(seq('text', optional(seq('[', $.integer, ']')))),
 
     // Statements
 

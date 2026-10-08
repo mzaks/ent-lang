@@ -1,0 +1,64 @@
+// Texts of any length that come and go with fields, components and
+// entities (text_churn.test).
+import console
+
+component Note { words: text, n: i32 }
+component Extra { more: text }
+tag Marked
+unique Round: i32
+unique Count: i32
+default_capacity 4096
+
+fn words_of(i: i32) -> text {
+  if i % 3 == 0 { "short" }
+  else if i % 3 == 1 { "a text that is quite a bit longer than the short one, to make blocks of another size" }
+  else { "" }
+}
+
+world {
+  for i in 0..1000 {
+    if i % 2 == 0 { spawn { Note { words: words_of(i), n: i } } }
+    else { spawn { Note { words: "made {i}", n: i }, Extra { more: "extra of {i}" } } }
+  }
+}
+
+system churn() {
+  Round += 1
+  // Other words for every one; some lose their extra, some get one, some
+  // are marked (a move to another archetype), some go, new ones come.
+  for n: mut Note { n.words = "{n.n} in round {Round}" }
+  for e, n: Note with Extra where (n.n + Round) % 5 == 0 { e.remove(Extra) }
+  for e, n: Note without Extra where (n.n + Round) % 7 == 0 {
+    e.add(Extra { more: "an extra that entity {n.n} got in round {Round}, which is long enough to be a block" })
+  }
+  for e, n: Note, x: mut Extra where (n.n + Round) % 4 == 0 { x.more = words_of(n.n + Round) }
+  for e, n: Note without Marked where (n.n + Round) % 6 == 0 { e.add(Marked) }
+  for e, n: Note with Marked where (n.n + Round) % 9 == 0 { e.remove(Marked) }
+  for e, n: Note where (n.n * 7 + Round) % 11 == 0 { e.destroy() }
+  for i in 0..80 { spawn { Note { words: words_of(i + Round), n: 1000 + Round * 100 + i }, Extra { more: words_of(i) } } }
+  Count = 0
+  var bytes = 0
+  for n: Note { Count += 1 }
+  let extras = for x: Extra { }
+  put("{Round}: {Count} notes, {extras} extras")
+}
+
+system sum() {
+  for n: Note, optional x: Extra where n.n % 97 == 0 {
+    var more = 0
+    if let m = x.more { more = len(m) }
+    put("  {n.n}: '{n.words as text[30]}' + {more}")
+  }
+}
+
+system held() {
+  if Round == 30 {
+    Count = 0
+    for n: Note where len(n.words) > 0 { Count += 1 }
+    for x: Extra where len(x.more) > 0 { Count += 1 }
+    put("fields with bytes: {Count}")
+  }
+}
+
+schedule frame() { churn() sum() held() }
+main { loop { frame() } until Round == 30 }

@@ -84,11 +84,10 @@ void ent_window_label(const ent_text126 *text, float x, float y, float size,
   printf("label %g %g \"%s\"\n", x, y, said);
 }
 
-void ent_window_write(const ent_text1022 *text, float x, float y, float width,
+void ent_window_write(const ent_text *text, float x, float y, float width,
                       int32_t font, float size, float spacing, float line,
                       int32_t breaks, int32_t along, int32_t color) {
-  TEXT(said, text);
-  printf("write %g %g in %g \"%s\" %08x\n", x, y, width, said,
+  printf("write %g %g in %g \"%s\" %08x\n", x, y, width, text->bytes,
          (unsigned)color);
 }
 
@@ -98,12 +97,12 @@ void ent_window_picture(int32_t image, float x, float y, float w, float h,
 }
 
 // A letter is half as wide as the text is high.
-float ent_window_text_extent(const ent_text1022 *text, int32_t font, float size,
+float ent_window_text_extent(const ent_text *text, int32_t font, float size,
                              float spacing, int32_t breaks) {
   return (float)text->length * size * 0.5f;
 }
 
-float ent_window_text_least(const ent_text1022 *text, int32_t font, float size,
+float ent_window_text_least(const ent_text *text, int32_t font, float size,
                             float spacing, int32_t breaks) {
   // The longest word.
   int longest = 0, run = 0;
@@ -115,7 +114,7 @@ float ent_window_text_least(const ent_text1022 *text, int32_t font, float size,
   return (float)longest * size * 0.5f;
 }
 
-int32_t ent_window_text_lines(const ent_text1022 *text, float width,
+int32_t ent_window_text_lines(const ent_text *text, float width,
                               int32_t font, float size, float spacing,
                               int32_t breaks) {
   // Word after word, in the next line where one would reach past.

@@ -60,6 +60,8 @@ public:
       return text.getStorageType();
     if (auto named = dyn_cast<EnumType>(type))
       return named.getStorageType();
+    if (auto held = dyn_cast<StringType>(type))
+      return held.getStorageType();
     return type;
   }
   /// Convert a value to and from its stored form. Entity ids cross with a
@@ -1136,6 +1138,16 @@ static void lowerResourceAccesses(IRRewriter &rewriter, func::FuncOp func,
 /// division, for example, is not: it may be undefined on such values.
 static bool canRunForAbsentEntities(QueryOp query) {
   WalkResult result = query.getBody().walk([](Operation *op) {
+    // (What a field of a component that comes or goes held is given
+    // back: only where there is such a field.)
+    if (isa<AddOp, RemoveOp>(op) &&
+        llvm::any_of(
+            SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
+                op, cast<FlatSymbolRefAttr>(op->getAttr("component")))
+                .getFieldTypes()
+                .getAsValueRange<TypeAttr>(),
+            [](Type type) { return isa<StringType>(type); }))
+      return WalkResult::interrupt();
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
             ApplyOp, AccumulateOp, YieldOp, scf::IfOp, scf::YieldOp>(op))
       return WalkResult::advance();
@@ -1641,8 +1653,41 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       ValueRange values = isAdd ? cast<AddOp>(op).getValues() : ValueRange();
       auto componentOp =
           SymbolTable::lookupNearestSymbolFrom<ComponentOp>(op, componentRef);
+      // A text of any length that a field holds is given back where the
+      // field gets another, or goes: if the entity has the component.
+      auto dropHeld = [&](bool always) {
+        for (auto [field, type] :
+             llvm::zip(componentOp.getFieldNames(),
+                       componentOp.getFieldTypes().getAsValueRange<TypeAttr>())) {
+          if (!isa<StringType>(type))
+            continue;
+          assert(!mask && "a text given back in a masked body");
+          Value cell = column(component, cast<StringAttr>(field));
+          OpBuilder::InsertionGuard guard(rewriter);
+          if (!always) {
+            Value has = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ne,
+                memref::LoadOp::create(
+                    rewriter, loc,
+                    column(component, rewriter.getStringAttr("")),
+                    ValueRange{entity}),
+                arith::ConstantIntOp::create(rewriter, loc, 0, 8));
+            auto present = scf::IfOp::create(rewriter, loc, has);
+            rewriter.setInsertionPointToStart(present.thenBlock());
+          }
+          Value held =
+              memref::LoadOp::create(rewriter, loc, cell, ValueRange{entity});
+          TextDropOp::create(rewriter, loc,
+                             world.fromStorage(loc, held, type));
+          memref::StoreOp::create(
+              rewriter, loc,
+              arith::ConstantIntOp::create(rewriter, loc, 0, 64), cell,
+              ValueRange{entity});
+        }
+      };
       switch (classifyChange(archetype.op, componentRef, isAdd).kind) {
       case ComponentChange::Presence:
+        dropHeld(/*always=*/false);
         if (isAdd)
           for (auto [value, field] :
                llvm::zip(values, componentOp.getFieldNames()))
@@ -1653,6 +1698,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
           stamp(loc, Trigger::Changed, component);
         break;
       case ComponentChange::Overwrite:
+        dropHeld(/*always=*/true);
         for (auto [value, field] :
              llvm::zip(values, componentOp.getFieldNames()))
           store(loc, value, column(component, cast<StringAttr>(field)));
@@ -3156,6 +3202,40 @@ static bool canHoldEnd(const WorldArchetype &archetype,
   return false;
 }
 
+/// Give back the texts of any length that the fields of the entity at
+/// `row` of `archetype` hold, of the components `goes` says: those it has.
+static void dropHeldTexts(IRRewriter &rewriter, Location loc,
+                          const WorldArchetype &archetype, WorldAccess &world,
+                          Value row,
+                          function_ref<bool(FlatSymbolRefAttr)> goes) {
+  ArchetypeOp archetypeOp = archetype.op;
+  for (const WorldColumn &column : archetype.columns) {
+    auto component = FlatSymbolRefAttr::get(column.component);
+    if (column.isStamp() || column.isPresence() ||
+        !isa<StringType>(column.type) || !goes(component))
+      continue;
+    OpBuilder::InsertionGuard guard(rewriter);
+    if (archetypeOp.isOptional(component)) {
+      Value has = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ne,
+          memref::LoadOp::create(
+              rewriter, loc,
+              world.column(archetype, column.component,
+                           rewriter.getStringAttr("")),
+              ValueRange{row}),
+          arith::ConstantIntOp::create(rewriter, loc, 0, 8));
+      auto present = scf::IfOp::create(rewriter, loc, has);
+      rewriter.setInsertionPointToStart(present.thenBlock());
+    }
+    Value held = memref::LoadOp::create(
+        rewriter, loc,
+        world.column(archetype, column.component, column.field),
+        ValueRange{row});
+    TextDropOp::create(rewriter, loc,
+                       world.fromStorage(loc, held, column.type));
+  }
+}
+
 /// Apply the rows listed as pending for `archetype`, at the insertion
 /// point, last listed first: despawn (free the id) or move the entity to
 /// another archetype, then remove the row by moving the archetype's last
@@ -3209,6 +3289,8 @@ static void applyPending(IRRewriter &rewriter, Location loc,
             func::CallOp::create(rewriter, loc, dropFunctionName(relation),
                                  TypeRange{},
                                  ValueRange{id, world.getArena()});
+        dropHeldTexts(rewriter, loc, archetype, world, row,
+                      [](FlatSymbolRefAttr) { return true; });
         world.freeEntity(loc, id);
       };
       if (!action) {
@@ -3227,6 +3309,12 @@ static void applyPending(IRRewriter &rewriter, Location loc,
       rewriter.setInsertionPointToStart(moves.thenBlock());
       applyMove(rewriter, loc, layout, archetype, move, world, row, slot, id,
                 tick);
+      // (What the component that goes with this move held.)
+      if (!move.add)
+        dropHeldTexts(rewriter, loc, archetype, world, row,
+                      [&](FlatSymbolRefAttr component) {
+                        return component.getAttr() == move.component;
+                      });
     }
     // Swap-remove the row.
     Value last = arith::SubIOp::create(rewriter, loc,
@@ -5745,6 +5833,8 @@ static void emitConnectFunction(IRRewriter &rewriter, ModuleOp module,
       type = text.getStorageType();
     else if (auto named = dyn_cast<EnumType>(type))
       type = named.getStorageType();
+    else if (auto held = dyn_cast<StringType>(type))
+      type = held.getStorageType();
     inputs.push_back(type);
   }
   inputs.push_back(arenaType);
@@ -10809,7 +10899,7 @@ static LogicalResult declareExtern(IRRewriter &rewriter, ExternOp external,
 /// How a value of `type` crosses to a C function: a bool as a byte, a text
 /// as a pointer to it.
 static Type functionParamType(Type type) {
-  if (isa<TextType>(type))
+  if (isa<TextType, StringType>(type))
     return LLVM::LLVMPointerType::get(type.getContext());
   return externParamType(type);
 }
@@ -10890,7 +10980,20 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
               .getResult(0);
       memref::StoreOp::create(rewriter, loc, bits, slot, ValueRange{});
       args.push_back(worldPointer(rewriter, loc, slot));
-    } else if (arg.getType().isInteger(1)) {
+    } else if (isa<StringType>(arg.getType())) {
+      // A text of any length crosses as the address of its block: that
+      // of one without bytes where it has none.
+      Value view = UnrealizedConversionCastOp::create(
+                       rewriter, loc, rewriter.getI64Type(), arg)
+                       .getResult(0);
+      Value shown = func::CallOp::create(rewriter, loc, "ent_text_view",
+                                         TypeRange{rewriter.getI64Type()},
+                                         ValueRange{view})
+                        .getResult(0);
+      args.push_back(LLVM::IntToPtrOp::create(
+          rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
+          shown));
+} else if (arg.getType().isInteger(1)) {
       args.push_back(
           arith::ExtUIOp::create(rewriter, loc, rewriter.getI8Type(), arg));
     } else if (auto named = dyn_cast<EnumType>(arg.getType())) {
@@ -10924,6 +11027,216 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     results.assign(scope.getResults().begin(), scope.getResults().end());
   }
   rewriter.replaceOp(invoke, results);
+}
+
+/// The functions that keep texts of any length (runtime/text.c), declared
+/// where the program uses one: each takes and gives addresses as `i64`.
+static void declareTextRuntime(IRRewriter &rewriter, ModuleOp module,
+                               SymbolTable &symbols) {
+  Type i64 = rewriter.getI64Type();
+  Type i32 = rewriter.getI32Type();
+  Type i8 = rewriter.getI8Type();
+  auto declare = [&](StringRef name, ArrayRef<Type> inputs,
+                     ArrayRef<Type> results) {
+    if (symbols.lookup(name))
+      return;
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(module.getBody());
+    auto func = func::FuncOp::create(rewriter, module.getLoc(), name,
+                                     rewriter.getFunctionType(inputs, results));
+    func.setPrivate();
+    symbols.insert(func);
+  };
+  declare("ent_text_view", {i64}, {i64});
+  declare("ent_text_own", {i64}, {i64});
+  declare("ent_text_drop", {i64}, {});
+  declare("ent_text_length", {i64}, {i32});
+  declare("ent_text_at", {i64, i64}, {i8});
+  declare("ent_text_equal", {i64, i64}, {i8});
+  declare("ent_text_cut", {i64, i64, i32}, {});
+}
+
+/// The start of what `op` is in that has a stack of its own (its
+/// function, or the part of it a thread runs): what is put on the stack
+/// there is not put there again each time a loop comes round.
+static Block *stackOf(Operation *op) {
+  Operation *scope = op;
+  Region *inside = nullptr;
+  do {
+    inside = scope->getParentRegion();
+    scope = scope->getParentOp();
+  } while (!scope->hasTrait<OpTrait::AutomaticAllocationScope>());
+  return &inside->front();
+}
+
+/// Lower the ops on texts of any length: to their blocks, and to calls
+/// of the functions that keep them.
+static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
+                       SymbolTable &symbols) {
+  SmallVector<Operation *> ops;
+  module.walk([&](Operation *op) {
+    if (isa<TextConstantOp, TextOfOp, TextCutOp, TextLengthOp, TextAtOp,
+            TextEqualOp, TextOwnOp, TextDropOp>(op))
+      ops.push_back(op);
+  });
+  bool crosses = false;
+  module.walk([&](InvokeOp invoke) {
+    crosses |= llvm::any_of(invoke.getArgs(), [](Value arg) {
+      return isa<StringType>(arg.getType());
+    });
+  });
+  if (ops.empty() && !crosses)
+    return;
+  declareTextRuntime(rewriter, module, symbols);
+  MLIRContext *context = module.getContext();
+  Type i64 = rewriter.getI64Type();
+  Type held = StringType::get(context);
+  auto address = [&](Location loc, Value view) -> Value {
+    return UnrealizedConversionCastOp::create(rewriter, loc, i64, view)
+        .getResult(0);
+  };
+  auto view = [&](Location loc, Value bits) -> Value {
+    return UnrealizedConversionCastOp::create(rewriter, loc, held, bits)
+        .getResult(0);
+  };
+  auto addressOf = [&](Location loc, Value memory) -> Value {
+    Value index =
+        memref::ExtractAlignedPointerAsIndexOp::create(rewriter, loc, memory);
+    return arith::IndexCastOp::create(rewriter, loc, i64, index);
+  };
+  auto call = [&](Location loc, StringRef name, ArrayRef<Type> results,
+                  ArrayRef<Value> args) {
+    return func::CallOp::create(rewriter, loc, name, results, args);
+  };
+  // The bytes of each text the program has written, once.
+  llvm::StringMap<std::string> constants;
+  for (Operation *op : ops) {
+    Location loc = op->getLoc();
+    rewriter.setInsertionPoint(op);
+    if (auto constant = dyn_cast<TextConstantOp>(op)) {
+      StringRef bytes = constant.getValue();
+      std::string &name = constants[bytes];
+      if (name.empty()) {
+        name = ("ent_text_" + Twine(constants.size())).str();
+        // Its length, as the four bytes of a 32-bit number, and its
+        // bytes, to a multiple of eight.
+        std::string block(4, 0);
+        uint32_t length = bytes.size();
+        for (unsigned i = 0; i < 4; ++i)
+          block[i] = char(length >> (8 * i));
+        block += bytes.str();
+        block.resize(llvm::alignTo(block.size() + 1, 8), 0);
+        auto type = MemRefType::get({int64_t(block.size())},
+                                    rewriter.getI8Type());
+        auto tensor = RankedTensorType::get({int64_t(block.size())},
+                                            rewriter.getI8Type());
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(module.getBody());
+        memref::GlobalOp::create(
+            rewriter, loc, name, rewriter.getStringAttr("private"), type,
+            DenseElementsAttr::getFromRawBuffer(
+                tensor, ArrayRef<char>(block.data(), block.size())),
+            /*constant=*/true, rewriter.getI64IntegerAttr(8));
+      }
+      auto type = MemRefType::get(
+          {int64_t(llvm::alignTo(4 + constant.getValue().size() + 1, 8))},
+          rewriter.getI8Type());
+      Value global = memref::GetGlobalOp::create(rewriter, loc, type, name);
+      rewriter.replaceOp(op, view(loc, addressOf(loc, global)));
+    } else if (auto of = dyn_cast<TextOfOp>(op)) {
+      // On the stack: the length as 32 bits, then the bytes. (The text's
+      // integer has it as 16 bits, and the bytes right after.)
+      auto text = cast<TextType>(of.getValue().getType());
+      IntegerType storage = text.getStorageType();
+      IntegerType wide =
+          rewriter.getIntegerType(storage.getWidth() + 128);
+      Value slot;
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(stackOf(op));
+        slot = memref::AllocaOp::create(rewriter, loc,
+                                        MemRefType::get({}, wide),
+                                        ValueRange{},
+                                        rewriter.getI64IntegerAttr(16));
+      }
+      Value bits = UnrealizedConversionCastOp::create(rewriter, loc, storage,
+                                                      of.getValue())
+                       .getResult(0);
+      Value all = arith::ExtUIOp::create(rewriter, loc, wide, bits);
+      auto number = [&](uint64_t value) -> Value {
+        return arith::ConstantOp::create(
+            rewriter, loc,
+            rewriter.getIntegerAttr(wide, APInt(wide.getWidth(), value)));
+      };
+      Value length = arith::AndIOp::create(rewriter, loc, all, number(0xffff));
+      Value rest = arith::ShLIOp::create(
+          rewriter, loc,
+          arith::ShRUIOp::create(rewriter, loc, all, number(16)), number(32));
+      memref::StoreOp::create(
+          rewriter, loc, arith::OrIOp::create(rewriter, loc, length, rest),
+          slot, ValueRange{});
+      rewriter.replaceOp(op, view(loc, addressOf(loc, slot)));
+    } else if (auto cut = dyn_cast<TextCutOp>(op)) {
+      auto text = cast<TextType>(cut.getResult().getType());
+      IntegerType storage = text.getStorageType();
+      Value slot;
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(stackOf(op));
+        slot = memref::AllocaOp::create(rewriter, loc,
+                                        MemRefType::get({}, storage),
+                                        ValueRange{},
+                                        rewriter.getI64IntegerAttr(16));
+      }
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::ConstantOp::create(rewriter, loc,
+                                    rewriter.getZeroAttr(storage)),
+          slot, ValueRange{});
+      call(loc, "ent_text_cut", {},
+           {address(loc, cut.getValue()), addressOf(loc, slot),
+            arith::ConstantIntOp::create(rewriter, loc, text.getCapacity(),
+                                         32)});
+      Value bits = memref::LoadOp::create(rewriter, loc, slot, ValueRange{});
+      rewriter.replaceOp(
+          op, UnrealizedConversionCastOp::create(rewriter, loc, Type(text),
+                                                 bits)
+                  .getResult(0));
+    } else if (auto length = dyn_cast<TextLengthOp>(op)) {
+      rewriter.replaceOp(op, call(loc, "ent_text_length",
+                                  {rewriter.getI32Type()},
+                                  {address(loc, length.getValue())})
+                                 .getResults());
+    } else if (auto at = dyn_cast<TextAtOp>(op)) {
+      Value index = at.getIndex();
+      if (index.getType() != i64)
+        index = index.getType().getIntOrFloatBitWidth() > 64
+                    ? arith::TruncIOp::create(rewriter, loc, i64, index)
+                          .getResult()
+                    : arith::ExtSIOp::create(rewriter, loc, i64, index)
+                          .getResult();
+      rewriter.replaceOp(op, call(loc, "ent_text_at", {rewriter.getI8Type()},
+                                  {address(loc, at.getValue()), index})
+                                 .getResults());
+    } else if (auto equal = dyn_cast<TextEqualOp>(op)) {
+      Value is = call(loc, "ent_text_equal", {rewriter.getI8Type()},
+                      {address(loc, equal.getLhs()),
+                       address(loc, equal.getRhs())})
+                     .getResult(0);
+      rewriter.replaceOp(op, arith::TruncIOp::create(
+                                 rewriter, loc, rewriter.getI1Type(), is)
+                                 .getResult());
+    } else if (auto own = dyn_cast<TextOwnOp>(op)) {
+      Value block = call(loc, "ent_text_own", {i64},
+                         {address(loc, own.getValue())})
+                        .getResult(0);
+      rewriter.replaceOp(op, view(loc, block));
+    } else {
+      call(loc, "ent_text_drop", {},
+           {address(loc, cast<TextDropOp>(op).getValue())});
+      rewriter.eraseOp(op);
+    }
+  }
 }
 
 /// Replace `run` by a call of its system, guarded by its condition if it
@@ -11299,7 +11612,7 @@ static void warnAboutReactiveQueries(ModuleOp module) {
 static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
   MLIRContext *context = module.getContext();
   auto isEntity = [](Type type) {
-    return isa<EntityType, TextType, EnumType>(type);
+    return isa<EntityType, TextType, EnumType, StringType>(type);
   };
   bool used = module
                   .walk([&](Operation *op) {
@@ -11325,6 +11638,8 @@ static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
       [](TextType text) -> Type { return text.getStorageType(); });
   converter.addConversion(
       [](EnumType named) -> Type { return named.getStorageType(); });
+  converter.addConversion(
+      [](StringType held) -> Type { return held.getStorageType(); });
   auto materialize = [](OpBuilder &builder, Type type, ValueRange inputs,
                         Location loc) -> Value {
     return UnrealizedConversionCastOp::create(builder, loc, type, inputs)
@@ -11588,6 +11903,8 @@ struct EntLowerToLoops
           same, arith::CmpIPredicate::eq, stored(same.getLhs()),
           stored(same.getRhs()));
     }
+
+    lowerTexts(rewriter, module, symbols);
 
     SmallVector<InvokeOp> invokes;
     module.walk([&](InvokeOp invoke) { invokes.push_back(invoke); });

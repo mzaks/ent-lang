@@ -7,6 +7,7 @@
 #include <raylib.h>
 #include <rlgl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // 0xRRGGBB, opaque; or 0xAARRGGBB, so much of it (AA from 01, nearly
@@ -52,7 +53,8 @@ void ent_window_shift(float dx, float dy) {
   ent_window_shifted = 1;
 }
 
-// raylib takes its texts terminated.
+// raylib takes its texts terminated. (One of any length is: a 0 comes
+// after its bytes.)
 #define ENT_WINDOW_TEXT(name, text)                                          \
   char name[sizeof((text)->bytes) + 1];                                      \
   memcpy(name, (text)->bytes, (text)->length);                               \
@@ -337,8 +339,9 @@ typedef void ent_window_each_line(const char *line, float wide, int index,
 static int ent_window_set(const char *text, float width, int32_t font,
                           float size, float spacing, int breaks,
                           float *widest, ent_window_each_line *each, void *with) {
-  // (A line is as long as a text can be, where nothing breaks it.)
-  char line[1024], trial[1024];
+  // (A line is as long as the text, where nothing breaks it.)
+  int room = (int)strlen(text) + 2;
+  char *line = malloc(2 * (size_t)room), *trial = line + room;
   int length = 0, lines = 0;
   float most = 0;
   const char *at = text;
@@ -355,7 +358,7 @@ static int ent_window_set(const char *text, float width, int32_t font,
   } while (0)
   if (breaks == 2) {
     // All of it, a line break a space.
-    for (; *at && length < 1022; at++)
+    for (; *at; at++)
       line[length++] = *at == '\n' ? ' ' : *at;
     ENT_WINDOW_END_LINE();
   } else if (breaks == 1) {
@@ -364,7 +367,7 @@ static int ent_window_set(const char *text, float width, int32_t font,
         ENT_WINDOW_END_LINE();
         if (!*at)
           break;
-      } else if (length < 1022) {
+      } else {
         line[length++] = *at;
       }
     }
@@ -384,13 +387,12 @@ static int ent_window_set(const char *text, float width, int32_t font,
       if (!word)
         break;
       line[length] = 0;
-      int both = length ? snprintf(trial, sizeof trial, "%s %.*s", line,
-                                   word, at)
-                        : snprintf(trial, sizeof trial, "%.*s", word, at);
+      int both = length ? snprintf(trial, room, "%s %.*s", line, word, at)
+                        : snprintf(trial, room, "%.*s", word, at);
       if (length &&
           ent_window_measure(trial, font, size, spacing) > width + 0.01f) {
         ENT_WINDOW_END_LINE();
-        length = snprintf(line, sizeof line, "%.*s", word, at);
+        length = snprintf(line, room, "%.*s", word, at);
       } else {
         memcpy(line, trial, both + 1);
         length = both;
@@ -401,6 +403,7 @@ static int ent_window_set(const char *text, float width, int32_t font,
       ENT_WINDOW_END_LINE();
   }
 #undef ENT_WINDOW_END_LINE
+  free(line);
   if (widest)
     *widest = most;
   return lines;
@@ -423,10 +426,10 @@ static void ent_window_write_line(const char *line, float wide, int index,
              w->color);
 }
 
-void ent_window_write(const ent_text1022 *text, float x, float y, float width,
+void ent_window_write(const ent_text *text, float x, float y, float width,
                       int32_t font, float size, float spacing, float line,
                       int32_t breaks, int32_t align, int32_t color) {
-  ENT_WINDOW_TEXT(all, text);
+  const char *all = text->bytes;
   struct ent_window_writing w = {x, y, width, size, spacing,
                                  line > 0 ? line : size, font, align,
                                  ent_window_color(color)};
@@ -434,25 +437,25 @@ void ent_window_write(const ent_text1022 *text, float x, float y, float width,
                  ent_window_write_line, &w);
 }
 
-int32_t ent_window_text_lines(const ent_text1022 *text, float width,
+int32_t ent_window_text_lines(const ent_text *text, float width,
                               int32_t font, float size, float spacing,
                               int32_t breaks) {
-  ENT_WINDOW_TEXT(all, text);
+  const char *all = text->bytes;
   return ent_window_set(all, width, font, size, spacing, breaks, 0, 0, 0);
 }
 
-float ent_window_text_extent(const ent_text1022 *text, int32_t font,
+float ent_window_text_extent(const ent_text *text, int32_t font,
                              float size, float spacing, int32_t breaks) {
-  ENT_WINDOW_TEXT(all, text);
+  const char *all = text->bytes;
   float widest = 0;
   // (With all the room it wants: broken only where it must be.)
   ent_window_set(all, 1.0e30f, font, size, spacing, breaks, &widest, 0, 0);
   return widest;
 }
 
-float ent_window_text_least(const ent_text1022 *text, int32_t font, float size,
+float ent_window_text_least(const ent_text *text, int32_t font, float size,
                             float spacing, int32_t breaks) {
-  ENT_WINDOW_TEXT(all, text);
+  const char *all = text->bytes;
   float widest = 0;
   // (With no room at all: every word a line, where it breaks at words.)
   ent_window_set(all, 0, font, size, spacing, breaks, &widest, 0, 0);

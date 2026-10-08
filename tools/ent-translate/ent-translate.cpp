@@ -35,6 +35,9 @@ static StringRef getCType(Type type) {
     return names.insert(llvm::formatv("ent_text{0}", text.getCapacity()).str())
         .first->getKey();
   }
+  // A text of any length: the address of its block (none: no bytes).
+  if (isa<StringType>(type))
+    return "const ent_text *";
   if (isa<IndexType>(type))
     return "int64_t";
   if (auto integer = dyn_cast<IntegerType>(type)) {
@@ -86,6 +89,13 @@ static void emitLanguageClose(raw_ostream &os) {
 /// can be included together.
 static void emitTexts(ModuleOp module, raw_ostream &os,
                       const std::set<unsigned> &capacities) {
+  os << "\n// A text of any length: `length` bytes of `bytes`, and a 0 "
+        "after them.\n// (A field holds the address of one, or none for no "
+        "bytes; the program\n// keeps them: C reads them.)\n"
+        "#ifndef ENT_TEXT\n#define ENT_TEXT\n"
+        "typedef struct {\n  uint32_t length;\n"
+        "#ifdef __cplusplus\n  char bytes[1];\n#else\n  char bytes[];\n"
+        "#endif\n} ent_text;\n#endif\n";
   if (!capacities.empty())
     os << "\n// Texts: `length` bytes of `bytes` count, the rest are zero "
           "(keep them\n// so when writing: equal texts are equal byte for "
@@ -767,7 +777,7 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     SmallVector<std::string> params, args;
     for (BlockArgument arg : schedule.getBody().getArguments()) {
       StringRef cType = getCType(arg.getType());
-      if (isa<TextType>(arg.getType()))
+      if (isa<TextType, StringType>(arg.getType()))
         return schedule.emitError("parameter #")
                << arg.getArgNumber()
                << " is a text, which a C host cannot pass yet; put it in a "

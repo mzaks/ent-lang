@@ -1,0 +1,51 @@
+// A text of any length (`text` without a capacity, `!ent.string`): a
+// field or a unique holds one, of bytes that are its own; a fn takes and
+// gives them; a text of a capacity goes where one is expected and the
+// other way round (cut); `len`, a byte of it, `==`; and what a field held
+// is given back when it gets another.
+// RUN: %ent run %S/Inputs/text_any.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/text_any.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/text_any.ent -I %S/../../devices -o %t.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir | FileCheck %s --check-prefix=HEADER
+
+// A field of one; a literal is the program's own bytes; assigning copies
+// (`own`) and gives back what was there (`drop`).
+// IR: ent.component @Note (words: !ent.string, n: i32)
+// IR: ent.function @pick(%arg0: i32) -> !ent.string {
+// IR: ent.text.constant "nothing"
+// IR: ent.function @longer(%arg0: !ent.string, %arg1: !ent.string) -> !ent.string {
+// IR: ent.text.length %arg0
+// IR: %[[NEW:.*]] = ent.text.constant "The title"
+// IR-NEXT: %[[OLD:.*]] = ent.read @Title "value" : !ent.string
+// IR-NEXT: %[[OWN:.*]] = ent.text.own %[[NEW]]
+// IR-NEXT: ent.write @Title "value", %[[OWN]] : !ent.string
+// IR-NEXT: ent.text.drop %[[OLD]]
+// (One of a capacity where one of any length is expected.)
+// IR-DAG: ent.text.of %{{.*}} : <
+// IR-DAG: ent.text.cut %{{.*}} : <12>
+// IR-DAG: ent.text.at
+// IR-DAG: ent.text.equal
+
+// C reads them: the address of a length and the bytes after it.
+// HEADER: typedef struct {
+// HEADER-NEXT:   uint32_t length;
+// HEADER: } ent_text;
+// HEADER: static inline const ent_text * *ent_Note_archetype_Note_words(ent_world *world) {
+
+// CHECK:      1: The title (9)
+// CHECK-NEXT:   1: 5 bytes, starts 'first', third byte 114, is first: true, is title: false
+// CHECK-NEXT:   2: 90 bytes, starts 'a much longe', third byte 109, is first: false, is title: false
+// CHECK-NEXT:   3: 0 bytes, starts '', third byte 0, is first: false, is title: false
+// CHECK-NEXT:   4: 8 bytes, starts 'number 4', third byte 109, is first: false, is title: false
+// CHECK-NEXT: 2: The title (9)
+// CHECK-NEXT:   1: 7 bytes, starts 'nothing', third byte 116, is first: false, is title: false
+// CHECK-NEXT:   2: 90 bytes, starts 'a much longe', third byte 109, is first: false, is title: false
+// CHECK-NEXT:   3: 7 bytes, starts 'round 1', third byte 117, is first: false, is title: false
+// CHECK-NEXT:   4: 8 bytes, starts 'number 4', third byte 109, is first: false, is title: false
+// CHECK-NEXT: 3: first (5)
+// CHECK-NEXT:   1: 90 bytes, starts 'a much longe', third byte 109, is first: false, is title: false
+// CHECK-NEXT:   2: 90 bytes, starts 'a much longe', third byte 109, is first: false, is title: false
+// CHECK-NEXT:   3: 7 bytes, starts 'round 2', third byte 117, is first: false, is title: false
+// CHECK-NEXT:   4: 8 bytes, starts 'number 4', third byte 109, is first: false, is title: false
