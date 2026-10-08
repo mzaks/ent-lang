@@ -1,0 +1,35 @@
+// Texts of any length joined and put into texts (text_join.test).
+import console
+import text
+
+component Note { words: text, n: i32 }
+unique Title: text
+unique Round: i32
+default_capacity 64
+
+fn named(i: i32) -> text { "note number {i}" }
+fn twice(t: text) -> text { t + ", " + t }
+fn framed(t: text) -> text { "<{t}>" }
+
+world {
+  Title = "all " + "the notes"
+  for i in 0..3 { spawn { Note { words: named(i), n: i } } }
+}
+
+system show() {
+  Round += 1
+  for n: mut Note {
+    if n.n == 0 { n.words += " and more" }
+    if n.n == 1 { n.words = twice(n.words) }
+    if n.n == 2 { n.words = framed("{n.words} in round {Round}") }
+  }
+  put("{Round}: {Title}")
+  for n: Note {
+    let same = n.words + "" == n.words
+    put("  {n.n} ({len(n.words)}): {n.words} {same}")
+  }
+  Title += "!"
+}
+
+schedule frame() { show() }
+main { loop { frame() } until Round == 3 }

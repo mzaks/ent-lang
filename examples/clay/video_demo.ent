@@ -131,7 +131,7 @@ world {
   Window.resizable = true
 
   // A font from a file, where one of these is there.
-  Face = font("examples/clay/Roboto-Regular.ttf", 24)
+  Face = font("Roboto-Regular.ttf", 24)
   if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 24) }
   if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24) }
   if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 24) }

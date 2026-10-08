@@ -39,8 +39,13 @@ system s() {
 // -----
 
 import text
-// expected-error @+1 {{a text of a capacity is not given back as a 'text': it is this fn's own, and gone when the fn has run; give back a 'text[N]'}}
-fn name(i: i32) -> text { "number {i}" }
+component Label { name: text, n: i32 }
+system s() {
+  for l: mut Label {
+    // expected-error @+1 {{texts can be joined ('+') and compared with '==' and '!='}}
+    l.n = if l.name < "m" { 1 } else { 2 }
+  }
+}
 
 // -----
 
@@ -48,29 +53,7 @@ import text
 component Label { name: text }
 system s() {
   for l: mut Label {
-    // expected-error @+1 {{a text of any length can only be assigned ('=')}}
-    l.name += "more"
-  }
-}
-
-// -----
-
-import text
-component Label { name: text, both: text[62] }
-system s() {
-  for l: mut Label {
-    // expected-error @+1 {{a text of any length can be compared with '==' and '!='; to join it, cut it to a capacity first ('as text[N]')}}
-    l.both = l.name + "more"
-  }
-}
-
-// -----
-
-import text
-component Label { name: text, both: text[62] }
-system s() {
-  for l: mut Label {
-    // expected-error @+1 {{a text of any length is not put into another text; cut it to a capacity first ('as text[N]')}}
-    l.both = "is {l.name}"
+    // expected-error @+1 {{a text can be assigned ('=') or added to ('+=')}}
+    l.name -= "more"
   }
 }

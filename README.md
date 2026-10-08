@@ -273,6 +273,11 @@ come with the compiler, in `devices/`, and two more that need
   that of the devices and the math module. A module's `name.link` names the
   libraries it needs (`-lraylib`).
 
+  A font, a picture or a sound file is named by its path from where the
+  program was started, or else from the folder its source is in (`ent
+  run`) or the program itself (`ent build`): a program finds the files
+  next to it wherever it is run from (`devices/ent_files.h`).
+
 - `sound`: a program makes a sound by spawning a `Tone { pitch, to,
   seconds, after, volume, wave }`, made up on the spot (a square,
   triangle or sine wave or a hiss, sliding from one pitch to another), or

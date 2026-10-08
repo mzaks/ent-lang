@@ -1,0 +1,35 @@
+// Texts of any length are joined (`+`, `+=`) and put into texts
+// (`"{t}"`): what that makes is nobody's, and kept until the schedule
+// that runs is done (`ent.text.join`), so a fn gives it back like any
+// other; a text of a capacity that a fn gives back as one of any length
+// is kept the same way (`ent.text.keep`). A field that is given one takes
+// a copy. At the end the fields hold theirs, and nothing else is kept.
+// RUN: env ENT_TEXT_REPORT=1 %ent run %S/Inputs/text_join.ent > %t.out 2> %t.err
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t.err
+// RUN: env ENT_TEXT_REPORT=1 %ent run --parallel %S/Inputs/text_join.ent 2> %t.perr | cmp - %t.out
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t.perr
+// RUN: ent-translate --import-ent %S/Inputs/text_join.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+
+// IR: ent.function @named(%arg0: i32) -> !ent.string {
+// IR: %[[SEEN:.*]] = ent.text.of %{{.*}} : <
+// IR-NEXT: %{{.*}} = ent.text.keep %[[SEEN]]
+// IR: ent.function @twice(%arg0: !ent.string) -> !ent.string {
+// IR: ent.text.join %arg0, %{{.*}}
+
+// HELD: texts held: 4
+// HELD-NEXT: texts kept: 0
+
+// CHECK:      1: all the notes
+// CHECK-NEXT:   0 (22): note number 0 and more true
+// CHECK-NEXT:   1 (28): note number 1, note number 1 true
+// CHECK-NEXT:   2 (26): <note number 2 in round 1> true
+// CHECK-NEXT: 2: all the notes!
+// CHECK-NEXT:   0 (31): note number 0 and more and more true
+// CHECK-NEXT:   1 (58): note number 1, note number 1, note number 1, note number 1 true
+// CHECK-NEXT:   2 (39): <<note number 2 in round 1> in round 2> true
+// CHECK-NEXT: 3: all the notes!!
+// CHECK-NEXT:   0 (40): note number 0 and more and more and more true
+// CHECK-NEXT:   1 (118): note number 1, note number 1, note number 1, note number 1, note number 1, note number 1, note number 1, note numbe
+// CHECK-NEXT:   2 (52): <<<note number 2 in round 1> in round 2> in round 3> true

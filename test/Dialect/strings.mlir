@@ -14,12 +14,16 @@ ent.archetype @Labelled (@Label) capacity 8
 // CHECK:   %{{.*}} = ent.text.equal %[[A]], %[[B]]
 // CHECK:   %{{.*}} = ent.text.at %[[A]], %[[N]] : i32
 // CHECK:   %{{.*}} = ent.text.cut %[[A]] : <14>
+// CHECK:   %[[BOTH:.*]] = ent.text.join %[[A]], %[[B]]
+// CHECK:   %{{.*}} = ent.text.keep %[[BOTH]]
 ent.function @longest(%a: !ent.string, %b: !ent.text<14>) -> i32 {
   %n = ent.text.length %a
   %view = ent.text.of %b : !ent.text<14>
   %same = ent.text.equal %a, %view
   %byte = ent.text.at %a, %n : i32
   %cut = ent.text.cut %a : !ent.text<14>
+  %both = ent.text.join %a, %view
+  %kept = ent.text.keep %both
   ent.yield %n : i32
 }
 

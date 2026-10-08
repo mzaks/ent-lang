@@ -3632,10 +3632,14 @@ LogicalResult Parser::emitAssignment(
   if (isa<StringType>(type)) {
     // What it holds is its own: a copy of the value, and what it held
     // before is given back (after: the value may be a view of that).
-    if (op != Token::Assign || rule)
-      return error(at, "a text of any length can only be assigned ('=')");
+    if ((op != Token::Assign && op != Token::PlusAssign) || rule)
+      return error(at, "a text can be assigned ('=') or added to ('+=')");
     mlir::Value old = load();
-    if (failed(store(TextOwnOp::create(builder, loc(at), type, *rhs)
+    mlir::Value value = *rhs;
+    if (op == Token::PlusAssign)
+      value = TextJoinOp::create(builder, loc(at), type, old, value)
+                  .getResult();
+    if (failed(store(TextOwnOp::create(builder, loc(at), type, value)
                          .getResult())))
       return failure();
     TextDropOp::create(builder, loc(at), old);
@@ -4520,7 +4524,7 @@ Type Parser::typeOf(const Expr &expr) {
     Type type = typeOf(*expr.operands[0]);
     if (!type)
       type = defaultType(*expr.operands[0]);
-    if (isa<TextType>(type))
+    if (isa<TextType, StringType>(type))
       return type;
     if (type.isInteger(1))
       return TextType::get(context, 5);
@@ -4576,8 +4580,14 @@ Type Parser::typeOf(const Expr &expr) {
     case Token::OrOr:
       return builder.getI1Type();
     default: {
-      // Joining texts gives a text that holds both.
+      // Joining texts gives a text that holds both: one of any length
+      // where one of them is.
       Type a = textTypeOf(*expr.operands[0]), b = textTypeOf(*expr.operands[1]);
+      bool anyA = isAnyText(*expr.operands[0]);
+      bool anyB = isAnyText(*expr.operands[1]);
+      if (expr.op == Token::Plus && (anyA || anyB) && (a || anyA) &&
+          (b || anyB))
+        return StringType::get(context);
       if (expr.op == Token::Plus && a && b)
         return TextType::get(
             context, std::min<unsigned>(cast<TextType>(a).getCapacity() +
@@ -4779,12 +4789,14 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
   // A text of a capacity where one of any length is expected, and the
   // other way round: as it is, or cut to what fits.
   if (from && expected && isa<StringType>(expected)) {
+    mlir::Value seen =
+        TextOfOp::create(builder, loc(expr.loc), expected, *value).getResult();
+    // (What a fn gives back of its own is gone when the fn has run: a
+    // copy that is kept while the schedule runs.)
     if (givesText)
-      return error(expr.loc, "a text of a capacity is not given back as a "
-                             "'text': it is this fn's own, and gone when "
-                             "the fn has run; give back a 'text[N]'");
-    return TextOfOp::create(builder, loc(expr.loc), expected, *value)
-        .getResult();
+      return TextKeepOp::create(builder, loc(expr.loc), expected, seen)
+          .getResult();
+    return seen;
   }
   if (to && isa<StringType>(value->getType()))
     return TextCutOp::create(builder, loc(expr.loc), to, *value).getResult();
@@ -4849,10 +4861,10 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     Type type = typeOf(*expr.operands[0]);
     if (!type)
       type = defaultType(*expr.operands[0]);
+    // (One of any length as it is: what it is joined with makes the
+    // text.)
     if (isa<StringType>(type))
-      return error(expr.operands[0]->loc,
-                   "a text of any length is not put into another text; cut "
-                   "it to a capacity first ('as text[N]')");
+      return emit(*expr.operands[0], type);
     FailureOr<mlir::Value> value = emit(*expr.operands[0], type);
     if (failed(value))
       return failure();
@@ -5275,15 +5287,18 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
     if (!(leftText || isAnyText(lhs)) || !(rightText || isAnyText(rhs)))
       return error(expr.loc, "a text is compared to texts; a number is put "
                              "into one with \"{value}\"");
-    if (expr.op != Token::Equal && expr.op != Token::NotEqual)
-      return error(expr.loc, "a text of any length can be compared with "
-                             "'==' and '!='; to join it, cut it to a "
-                             "capacity first ('as text[N]')");
+    if (expr.op != Token::Equal && expr.op != Token::NotEqual &&
+        expr.op != Token::Plus)
+      return error(expr.loc, "texts can be joined ('+') and compared with "
+                             "'==' and '!='");
     Type any = StringType::get(context);
     FailureOr<mlir::Value> a = emit(lhs, any);
     FailureOr<mlir::Value> b = emit(rhs, any);
     if (failed(a) || failed(b))
       return failure();
+    // Joined: a text that is kept while the schedule runs.
+    if (expr.op == Token::Plus)
+      return TextJoinOp::create(builder, at, any, *a, *b).getResult();
     mlir::Value same =
         TextEqualOp::create(builder, at, builder.getI1Type(), *a, *b)
             .getResult();

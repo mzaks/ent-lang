@@ -847,7 +847,7 @@ LogicalResult FunctionOp::verifyRegions() {
       return;
     auto invoke = dyn_cast<InvokeOp>(op);
     if (isa<SameOp, TextConstantOp, TextOfOp, TextCutOp, TextLengthOp,
-            TextAtOp, TextEqualOp>(op) ||
+            TextAtOp, TextEqualOp, TextJoinOp, TextKeepOp>(op) ||
         (invoke && (!invoke.getProc() || getProc())))
       return;
     if (succeeded(result))

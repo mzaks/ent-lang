@@ -817,6 +817,37 @@ def Ent_TextEqualOp : Ent_Op<"text.equal", [NoMemoryEffect]> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict";
 }
 
+def Ent_TextJoinOp : Ent_Op<"text.join", [NoMemoryEffect]> {
+  let summary = "Two texts of any length as one";
+  let description = [{
+    ```mlir
+    %both = ent.text.join %a, %b
+    ```
+    A view of a block with the bytes of `%a` and then those of `%b`,
+    which is nobody's: it is kept until the schedule that runs is done,
+    so the view is good wherever it goes meanwhile, and a field that is
+    to hold it takes a copy like any other (`ent.text.own`).
+  }];
+  let arguments = (ins Ent_StringType:$lhs, Ent_StringType:$rhs);
+  let results = (outs Ent_StringType:$result);
+  let assemblyFormat = "$lhs `,` $rhs attr-dict";
+}
+
+def Ent_TextKeepOp : Ent_Op<"text.keep", [NoMemoryEffect]> {
+  let summary = "A copy of a text that is kept while the schedule runs";
+  let description = [{
+    ```mlir
+    %kept = ent.text.keep %t
+    ```
+    A view of a block with the bytes of `%t`, kept like one that
+    `ent.text.join` makes: for a text whose own bytes do not stay (those
+    of a text of a capacity that a fn gives back as one of any length).
+  }];
+  let arguments = (ins Ent_StringType:$value);
+  let results = (outs Ent_StringType:$result);
+  let assemblyFormat = "$value attr-dict";
+}
+
 def Ent_TextOwnOp : Ent_Op<"text.own", [
     MemoryEffects<[MemRead, MemWrite]>]> {
   let summary = "A block of its own with the bytes of a text";

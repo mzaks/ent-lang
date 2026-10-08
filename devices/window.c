@@ -3,6 +3,7 @@
 // (ent_extern.h); it never sees the world.
 
 #include "ent_extern.h"
+#include "ent_files.h"
 
 #include <raylib.h>
 #include <rlgl.h>
@@ -246,7 +247,7 @@ static int ent_window_font_count = 1;
 // read at. (A few sizes of each are kept.)
 #define ENT_WINDOW_SIZES 4
 static struct {
-  char file[128];
+  char file[1024];
   Font at[ENT_WINDOW_SIZES];
   int pixels[ENT_WINDOW_SIZES];
   int next;
@@ -306,10 +307,13 @@ static Font ent_window_font_of(int32_t font) {
 }
 
 int32_t ent_window_font(const ent_text126 *file, int32_t size) {
-  ENT_WINDOW_TEXT(name, file);
-  if (ent_window_font_count >= 16 || !FileExists(name))
+  ENT_WINDOW_TEXT(named, file);
+  char found[1024];
+  const char *name = ent_file_find(named, found, sizeof found);
+  if (ent_window_font_count >= 16 || !FileExists(name) ||
+      strlen(name) >= sizeof ent_window_faces[0].file)
     return 0;
-  strncpy(ent_window_faces[ent_window_font_count].file, name, 127);
+  strcpy(ent_window_faces[ent_window_font_count].file, name);
   ent_window_faces[ent_window_font_count].size = size;
   return ent_window_font_count++;
 }
@@ -548,7 +552,9 @@ static Image ent_window_images[64];
 static int ent_window_picture_count = 1;
 
 int32_t ent_window_picture_load(const ent_text126 *file) {
-  ENT_WINDOW_TEXT(name, file);
+  ENT_WINDOW_TEXT(named, file);
+  char found[1024];
+  const char *name = ent_file_find(named, found, sizeof found);
   if (ent_window_picture_count >= 64 || !FileExists(name))
     return 0;
   Image image = LoadImage(name);

@@ -380,6 +380,10 @@ def main():
     arguments = parser.parse_args(own)
 
     stem = os.path.splitext(os.path.basename(arguments.program))[0]
+    # A program that is run from here is told where its source is: the
+    # files it names are looked for there too (devices/ent_files.h).
+    where = dict(os.environ, ENT_PROGRAM_DIR=os.path.dirname(
+        os.path.abspath(arguments.program)))
     # A program that was built from just this is taken as it is. (Not
     # where the generated files are asked for: those come from building.)
     key = None
@@ -394,7 +398,7 @@ def main():
             if arguments.command == "build":
                 shutil.copy2(kept, arguments.output or stem)
                 return 0
-            return subprocess.run([kept] + rest).returncode
+            return subprocess.run([kept] + rest, env=where).returncode
 
     with tempfile.TemporaryDirectory() as temporary:
         directory = temporary
@@ -411,7 +415,7 @@ def main():
         build(arguments, executable, directory)
         if key:
             executable = keep_in_cache(executable, key, stem)
-        return subprocess.run([executable] + rest).returncode
+        return subprocess.run([executable] + rest, env=where).returncode
 
 
 if __name__ == "__main__":

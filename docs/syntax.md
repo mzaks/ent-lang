@@ -850,11 +850,14 @@ component is removed or its entity destroyed.
   an expression, `t as text` the other way).
 - `len(t)`, `t[i]`, `a == b` and `a != b` (with a text of either kind)
   are as for a `text[N]`.
-- It is not joined (`+`) or put into another text (`"{t}"`): what is
-  made of texts is made of `text[N]`, and assigned to a `text` when it
-  is done (`page.words = "{n} of {all}"`).
-- A fn or proc takes and gives them; a fn gives back a literal or a
-  `text` it was given, not a `text[N]` of its own. An extern fn or proc
+- `a + b` with a `text` on either side joins them into a `text`, and
+  so does a `text` put into one (`"<{t}>"`); `t += u` joins and stores.
+  What joining makes is nobody's: the world keeps it until the schedule
+  that runs is done, and a field that is given it takes its copy. (So a
+  loop that joins for every entity keeps as many texts until then.)
+- A fn or proc takes and gives them: a literal, a `text` it was given,
+  one it joined, or a `text[N]` of its own, which is then kept like a
+  joined one. An extern fn or proc
   takes one as `const ent_text *`: a `uint32_t length` and the bytes
   after it, with a 0 after them (which does not count).
 - A value of it is what a field holds or a literal is, seen, not a

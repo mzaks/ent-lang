@@ -9,9 +9,9 @@
 //
 //   tools/ent run -I examples examples/clay/sidebar.ent
 //
-// The pictures are examples/clay/profile-picture.png where that is there
-// (Clay's is in its examples/raylib-sidebar-scrolling-container/resources),
-// and a colour where it is not.
+// The pictures are profile-picture.png, next to this file (Clay's, from
+// its examples/raylib-sidebar-scrolling-container/resources), and a
+// colour where that is not there.
 import window
 import layout
 import layout_window
@@ -43,11 +43,11 @@ world {
   Window.resizable = true
 
   // A font and the picture from files, where they are there.
-  Face = font("examples/clay/Roboto-Regular.ttf", 24)
+  Face = font("Roboto-Regular.ttf", 24)
   if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 24) }
   if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24) }
   if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 24) }
-  Image = picture_load("examples/clay/profile-picture.png")
+  Image = picture_load("profile-picture.png")
 
   // OuterContainer: as big as the window, a row with 16 around and
   // between.

@@ -106,6 +106,9 @@ extern fn text_least(text: text, font: i32, size: f32, spacing: f32,
 // and gives its number; 0, the window's own, if there is no such file.
 // The window need not be open: `world` may ask. (It is read when it is
 // first used; a file that is no font then gives the window's own.)
+// A file is named by its path: from where the program was started, or
+// else from where its source is (`ent run`) or the program itself (built
+// with `ent build`); so for a picture.
 extern proc font(file: text[126], size: i32) -> i32
 // A filled rectangle whose corners are rounded, each with its own
 // radius: top left, top right, bottom left, bottom right.

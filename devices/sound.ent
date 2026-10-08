@@ -28,8 +28,10 @@ component Tone {
   pitch: f32, to: f32, seconds: f32, after: f32, volume: f32, wave: Wave
 } capacity 64
 
-// A sound file (.wav, .ogg, .mp3), by its path from where the program
-// runs. It is read the first time it is played.
+// A sound file (.wav, .ogg, .mp3), by its path: from where the program
+// was started, or else from where its source is (`ent run`) or the
+// program itself (built with `ent build`). It is read the first time it
+// is played.
 component Sample { file: text[126], volume: f32 } capacity 16
 
 // The shapes `play` looks for, whether or not the program makes any.

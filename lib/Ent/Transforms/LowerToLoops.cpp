@@ -11055,6 +11055,9 @@ static void declareTextRuntime(IRRewriter &rewriter, ModuleOp module,
   declare("ent_text_at", {i64, i64}, {i8});
   declare("ent_text_equal", {i64, i64}, {i8});
   declare("ent_text_cut", {i64, i64, i32}, {});
+  declare("ent_text_join", {i64, i64}, {i64});
+  declare("ent_text_keep", {i64}, {i64});
+  declare("ent_text_release", {}, {});
 }
 
 /// The start of what `op` is in that has a stack of its own (its
@@ -11073,12 +11076,15 @@ static Block *stackOf(Operation *op) {
 /// Lower the ops on texts of any length: to their blocks, and to calls
 /// of the functions that keep them.
 static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
-                       SymbolTable &symbols) {
+                       SymbolTable &symbols,
+                       ArrayRef<func::FuncOp> schedules) {
   SmallVector<Operation *> ops;
+  bool makes = false;
   module.walk([&](Operation *op) {
     if (isa<TextConstantOp, TextOfOp, TextCutOp, TextLengthOp, TextAtOp,
-            TextEqualOp, TextOwnOp, TextDropOp>(op))
+            TextEqualOp, TextOwnOp, TextDropOp, TextJoinOp, TextKeepOp>(op))
       ops.push_back(op);
+    makes |= isa<TextJoinOp, TextKeepOp>(op);
   });
   bool crosses = false;
   module.walk([&](InvokeOp invoke) {
@@ -11089,6 +11095,15 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
   if (ops.empty() && !crosses)
     return;
   declareTextRuntime(rewriter, module, symbols);
+  // The texts that were made while a schedule ran are given back when it
+  // is done: nothing has a view of one then.
+  if (makes)
+    for (func::FuncOp schedule : schedules)
+      schedule.walk([&](func::ReturnOp done) {
+        rewriter.setInsertionPoint(done);
+        func::CallOp::create(rewriter, done.getLoc(), "ent_text_release",
+                             TypeRange{}, ValueRange{});
+      });
   MLIRContext *context = module.getContext();
   Type i64 = rewriter.getI64Type();
   Type held = StringType::get(context);
@@ -11227,6 +11242,17 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
       rewriter.replaceOp(op, arith::TruncIOp::create(
                                  rewriter, loc, rewriter.getI1Type(), is)
                                  .getResult());
+    } else if (auto join = dyn_cast<TextJoinOp>(op)) {
+      Value block = call(loc, "ent_text_join", {i64},
+                         {address(loc, join.getLhs()),
+                          address(loc, join.getRhs())})
+                        .getResult(0);
+      rewriter.replaceOp(op, view(loc, block));
+    } else if (auto keep = dyn_cast<TextKeepOp>(op)) {
+      Value block = call(loc, "ent_text_keep", {i64},
+                         {address(loc, keep.getValue())})
+                        .getResult(0);
+      rewriter.replaceOp(op, view(loc, block));
     } else if (auto own = dyn_cast<TextOwnOp>(op)) {
       Value block = call(loc, "ent_text_own", {i64},
                          {address(loc, own.getValue())})
@@ -11801,6 +11827,7 @@ struct EntLowerToLoops
 
     // Schedules first: fusion reads the systems' bodies before they are
     // lowered themselves.
+    SmallVector<func::FuncOp> scheduleFuncs;
     for (auto schedule :
          llvm::make_early_inc_range(module.getOps<ScheduleOp>())) {
       // The function replaces the schedule; keep its condition apart.
@@ -11809,6 +11836,7 @@ struct EntLowerToLoops
       auto [func, arena] = convertToFunc(rewriter, schedule,
                                          schedule.getSymName(),
                                          schedule.getBody(), arenaType);
+      scheduleFuncs.push_back(func);
       func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
       WorldAccess world(rewriter, *layout, arena);
       if (fuseSystems)
@@ -11905,7 +11933,7 @@ struct EntLowerToLoops
           stored(same.getRhs()));
     }
 
-    lowerTexts(rewriter, module, symbols);
+    lowerTexts(rewriter, module, symbols, scheduleFuncs);
 
     SmallVector<InvokeOp> invokes;
     module.walk([&](InvokeOp invoke) { invokes.push_back(invoke); });

@@ -3,6 +3,7 @@
 // it never sees the world.
 
 #include "ent_extern.h"
+#include "ent_files.h"
 
 #include <math.h>
 #include <raylib.h>
@@ -129,7 +130,8 @@ void ent_sound_sample(const ent_text126 *file, float volume) {
       return;
     found = count++;
     strcpy(files[found].name, name);
-    files[found].sound = LoadSound(name);
+    char where[1024];
+    files[found].sound = LoadSound(ent_file_find(name, where, sizeof where));
     files[found].loaded = files[found].sound.frameCount > 0;
   }
   if (!files[found].loaded)
