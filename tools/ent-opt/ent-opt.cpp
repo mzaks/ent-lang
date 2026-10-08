@@ -13,6 +13,9 @@
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -44,6 +47,33 @@ struct EmitLLVM : mlir::PassWrapper<EmitLLVM, mlir::OperationPass<mlir::ModuleOp
     if (!translated) {
       module.emitError("cannot be translated to LLVM IR");
       return signalPassFailure();
+    }
+    // What makes the world runs once: it is not worth the time it takes
+    // to make it fast, nor is what only it calls.
+    llvm::SmallPtrSet<llvm::Function *, 16> once;
+    for (llvm::Function &function : *translated)
+      if (!function.isDeclaration() &&
+          (function.getName() == "world_setup" ||
+           function.getName().ends_with(".world_setup")))
+        once.insert(&function);
+    for (bool grew = !once.empty(); grew;) {
+      grew = false;
+      for (llvm::Function &function : *translated) {
+        if (function.isDeclaration() || once.count(&function) ||
+            !function.hasLocalLinkage() || function.use_empty())
+          continue;
+        bool only = llvm::all_of(function.users(), [&](llvm::User *user) {
+          auto *call = llvm::dyn_cast<llvm::CallBase>(user);
+          return call && call->getCalledFunction() == &function &&
+                 once.count(call->getFunction());
+        });
+        if (only)
+          grew |= once.insert(&function).second;
+      }
+    }
+    for (llvm::Function *function : once) {
+      function->addFnAttr(llvm::Attribute::OptimizeNone);
+      function->addFnAttr(llvm::Attribute::NoInline);
     }
     std::error_code error;
     llvm::raw_fd_ostream file(output, error, llvm::sys::fs::OF_None);

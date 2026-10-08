@@ -264,6 +264,9 @@ def build(arguments, output, directory):
     # tool to read again.
     llvm = os.path.join(directory, stem + ".bc")
     run([optimise, module] + passes +
+        # (What the lowering wrote more than once, once: less to turn
+        # into LLVM's IR, and for LLVM to read.)
+        ["--cse"] +
         ["--convert-scf-to-cf", "--convert-to-llvm",
          "--reconcile-unrealized-casts", "--ent-emit-llvm=output=" + llvm,
          "-o", os.devnull])
@@ -305,14 +308,22 @@ def build(arguments, output, directory):
         # A big program is optimised whole, and then made into machine
         # code in pieces, each on a core of its own: its functions shared
         # out, those of one piece that another calls known to both.
+        # (With ENT_SPLIT=first it is shared out before it is optimised:
+        # built in two thirds of the time, and a tenth slower to run,
+        # since no piece can take in what another has.)
+        first = os.environ.get("ENT_SPLIT") == "first"
         whole = os.path.join(directory, stem + ".opt.bc")
-        run([clang, *flags, "-emit-llvm", llvm, "-o", whole])
+        if first:
+            whole = llvm
+        else:
+            run([clang, *flags, "-emit-llvm", llvm, "-o", whole])
         prefix = os.path.join(directory, stem + ".piece")
         run([split, f"-j{pieces}", whole, "-o", prefix])
         objects = [f"{prefix}{index}.o" for index in range(pieces)]
         compilers = [subprocess.Popen(
-            [clang, *flags, "-Xclang", "-disable-llvm-passes", "-x", "ir",
-             f"{prefix}{index}", "-o", built])
+            [clang, *flags] +
+            ([] if first else ["-Xclang", "-disable-llvm-passes"]) +
+            ["-x", "ir", f"{prefix}{index}", "-o", built])
             for index, built in enumerate(objects)]
         failed = [compiler.wait() for compiler in compilers]
         if any(failed):

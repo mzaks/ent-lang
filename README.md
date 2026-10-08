@@ -138,7 +138,10 @@ the compiler and the flags are the same: running it again starts at once.
 `--no-cache` builds anew and keeps nothing.
 
 A big program is optimised whole and then made into machine code in
-pieces, each on a core of its own (`ENT_PIECES=1`: in one piece).
+pieces, each on a core of its own (`ENT_PIECES=1`: in one piece;
+`ENT_SPLIT=first`: shared out before it is optimised, which builds a big
+program in two thirds of the time and runs it about a tenth slower). What
+makes the world, which runs once, is not optimised.
 
 A program with a `main` needs no C host: the compiler emits C's `main`,
 which creates the world and runs the schedules as `main` says, after the
@@ -274,9 +277,10 @@ come with the compiler, in `devices/`, and two more that need
   libraries it needs (`-lraylib`).
 
   A font, a picture or a sound file is named by its path from where the
-  program was started, or else from the folder its source is in (`ent
-  run`) or the program itself (`ent build`): a program finds the files
-  next to it wherever it is run from (`devices/ent_files.h`).
+  program was started, or else from the folder its source is in or that
+  of a module it imports (`ent run`), or the program itself (`ent
+  build`): a program and a module find the files next to them wherever
+  the program is run from (`devices/ent_files.h`).
 
 - `sound`: a program makes a sound by spawning a `Tone { pitch, to,
   seconds, after, volume, wave }`, made up on the spot (a square,

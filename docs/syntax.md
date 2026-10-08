@@ -853,13 +853,18 @@ component is removed or its entity destroyed.
 - `a + b` with a `text` on either side joins them into a `text`, and
   so does a `text` put into one (`"<{t}>"`); `t += u` joins and stores.
   What joining makes is nobody's: the world keeps it until the schedule
-  that runs is done, and a field that is given it takes its copy. (So a
-  loop that joins for every entity keeps as many texts until then.)
+  that runs is done, and a field that is given it takes its copy. (What
+  is joined right where a field is given it, `t.words = a + b` or `+=`,
+  is made as the field's own: nothing is kept for it.)
 - A fn or proc takes and gives them: a literal, a `text` it was given,
   one it joined, or a `text[N]` of its own, which is then kept like a
   joined one. An extern fn or proc
   takes one as `const ent_text *`: a `uint32_t length` and the bytes
-  after it, with a 0 after them (which does not count).
+  after it, with a 0 after them (which does not count). So does an
+  extern system, and a schedule from a C host that runs it (no address:
+  a text without bytes).
+- When `main` is done, what fields and uniques still hold is given back.
+  (A C host's world keeps what it holds.)
 - A value of it is what a field holds or a literal is, seen, not a
   copy: a `var` does not hold one, and a `let` does not keep the text of
   a unique or of a `mut` binding, which may be given another while the
