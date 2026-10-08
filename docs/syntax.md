@@ -510,6 +510,11 @@ for (e, n: Node)-[Under]->(parent: Node) top down Under
   not read a unique it adds into, nor read or set a field it sends to
   that way, of any entity: an entity of the same depth would see what
   those before it sent.
+  A `for` that goes depth first (`top down dfs R`, `bottom up dfs R`)
+  has one order, an entity and all below it before the next, and may
+  read a unique it adds into: each entity sees what those before it
+  added (`let line = Next` and `Next += 1` number them as they come).
+  That is the order where it reacts too, among those it runs for.
 - `e.destroy()` takes effect when the whole `for` has run, as in any
   `for`: every entity is visited as the tree was when it started, a
   destroyed node's children too, with their parent still there to read.

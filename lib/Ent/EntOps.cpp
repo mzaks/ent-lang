@@ -1316,6 +1316,11 @@ LogicalResult QueryOp::verify() {
       if (sender)
         return;
       if (auto accumulate = dyn_cast<AccumulateOp>(op)) {
+        // (Depth first there is one order, an entity and all below it
+        // before the next: each sees what those before it added to a
+        // unique.)
+        if (getTraversal() == "dfs")
+          return;
         getBody().walk([&](ReadOp read) {
           if (!seer && read.getResourceAttr() == accumulate.getResourceAttr() &&
               read.getField() == accumulate.getField())

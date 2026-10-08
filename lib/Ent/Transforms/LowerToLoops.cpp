@@ -14,6 +14,7 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DenseMap.h"
@@ -454,6 +455,12 @@ public:
                                       ValueRange{});
       });
     return value;
+  }
+
+  /// What is read where there is nothing: zeros, as a column of `type`
+  /// that only its first place is read of.
+  Value nothing(int64_t capacity, Type type) {
+    return view(layout.nothingOffset, capacity, type);
   }
 
   /// A one-element view of a resource field.
@@ -1432,6 +1439,21 @@ static void pruneBranches(IRRewriter &rewriter,
   }
 }
 
+// What a body that is one for all archetypes reads of a component an
+// archetype may not have as it reads it of one that has it: a number,
+// which there is room for where there is nothing.
+static bool readsUniformly(Type stored) {
+  return stored.isIntOrFloat() &&
+         stored.getIntOrFloatBitWidth() <= 8 * WorldLayout::kNothingBytes;
+}
+
+// Whether the body being lowered is to be the same code for every
+// archetype, but for where its columns are (it becomes one function for
+// all, see shareParts): then what it asks of a component the archetype
+// may not have is read, from the component or from where there is
+// nothing, and not known beforehand.
+static bool uniformBodies = false;
+
 static bool appliesDirectly(Operation *apply, bool directApplies) {
   return directApplies && isa<ApplyOp, AccumulateOp>(apply) &&
          apply->hasAttr(kUnobservedAttr);
@@ -1878,6 +1900,31 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                           bool parallel, bool directApplies = false,
                           KnownParent parent = {},
                           bool marksPending = false) {
+  // Where a body that is one for all archetypes reads a column: at the
+  // entity's row, or, of what is read where there is nothing, at the
+  // first place. (The row times one or nought: the same ops for both.)
+  auto placeOf = [&](bool there) -> Value {
+    return arith::MulIOp::create(
+        rewriter, query.getLoc(), entity,
+        arith::ConstantIndexOp::create(rewriter, query.getLoc(), there));
+  };
+  // Only where the archetypes the query runs for differ in it: what all
+  // of them have, or none, is known in the one body as in each of
+  // several.
+  auto differ = [&](function_ref<int(const WorldArchetype &)> how) {
+    if (!uniformBodies)
+      return false;
+    int here = how(archetype);
+    return llvm::any_of(layout.archetypes, [&](const WorldArchetype &other) {
+      return matches(other, query) && how(other) != here;
+    });
+  };
+  auto differInHaving = [&](FlatSymbolRefAttr component) {
+    return differ([&](const WorldArchetype &other) {
+      ArchetypeOp op(other.op);
+      return op.isOptional(component) ? 2 : op.contains(component) ? 1 : 0;
+    });
+  };
   Location loc = query.getLoc();
   ArchetypeOp archetypeOp = archetype.op;
   Value mask;
@@ -1951,10 +1998,18 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
       }
       const WorldColumn *column = archetype.findStamp(getStamp(trigger));
       // (Another entity's, or one that is asked on the way up.)
-      if (!column || trigger.via || trigger.onTheWay)
+      if (trigger.via || trigger.onTheWay)
+        continue;
+      bool uniform = differ([&](const WorldArchetype &other) {
+        return other.findStamp(getStamp(trigger)) ? 1 : 0;
+      });
+      if (!column && !uniform)
         continue;
       Value stamped = memref::LoadOp::create(
-          rewriter, loc, world.stamps(archetype, *column), ValueRange{entity});
+          rewriter, loc,
+          column ? world.stamps(archetype, *column)
+                 : world.nothing(archetype.capacity, rewriter.getI64Type()),
+          ValueRange{uniform ? placeOf(column != nullptr) : entity});
       fires(arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
                                   stamped, seen));
     }
@@ -1973,6 +2028,32 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                                       arith::CmpIPredicate::ne, byte, zero);
     }
     return present;
+  };
+  // The same for a component it always or never has, where the body is
+  // one for all archetypes: read where there is nothing, and turned
+  // round for one it always has.
+  llvm::DenseMap<Attribute, Value> having;
+  auto hasUniformly = [&](FlatSymbolRefAttr component) {
+    Value &has = having[component];
+    if (!has) {
+      bool optional = archetypeOp.isOptional(component);
+      Value column =
+          optional ? world.column(archetype, component.getAttr(),
+                                  rewriter.getStringAttr(""))
+                   : world.nothing(archetype.capacity,
+                                   rewriter.getIntegerType(8));
+      Value byte = memref::LoadOp::create(rewriter, loc, column,
+                                          ValueRange{placeOf(optional)});
+      Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
+      has = arith::XOrIOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, byte,
+                                zero),
+          arith::ConstantIntOp::create(
+              rewriter, loc, !optional && archetypeOp.contains(component),
+              1));
+    }
+    return has;
   };
   auto require = [&](Value term) {
     mask = mask ? arith::AndIOp::create(rewriter, loc, mask, term).getResult()
@@ -1996,15 +2077,22 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   }
   // `ent.has` answers as of the query's start: read before the body runs.
   query.getBody().walk([&](HasOp has) {
-    if (archetypeOp.isOptional(has.getComponentAttr()))
+    if (differInHaving(has.getComponentAttr()))
+      presence[has.getComponentAttr()] =
+          hasUniformly(has.getComponentAttr());
+    else if (archetypeOp.isOptional(has.getComponentAttr()))
       isPresent(has.getComponentAttr());
   });
   // So does an optional ref to a component of the entity's own.
   for (Type type : query.getBody().getArgumentTypes())
     if (auto refType = cast<RefType>(type);
-        !refType.isUp() && refType.getIsOptional() &&
-        archetypeOp.isOptional(refType.getComponent()))
-      isPresent(refType.getComponent());
+        !refType.isUp() && refType.getIsOptional()) {
+      if (differInHaving(refType.getComponent()))
+        presence[refType.getComponent()] =
+            hasUniformly(refType.getComponent());
+      else if (archetypeOp.isOptional(refType.getComponent()))
+        isPresent(refType.getComponent());
+    }
   // A ref up a relation: find the ancestor it leads to. The body applies
   // only to the entities that have one.
   SmallVector<std::pair<BlockArgument, Ancestor>> ancestors;
@@ -2612,6 +2700,37 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   SmallVector<Operation *> roots;
   for (Operation &op : query.getBody().front().without_terminator())
     roots.push_back(rewriter.clone(op, mapping));
+  // Depth first, a unique the body adds into is read as it is right
+  // then, with what the entities visited before have added: not once
+  // before them all, as what no query changes is.
+  if (query.getTraversal() == "dfs") {
+    SmallVector<std::pair<Attribute, Attribute>> added;
+    query.getBody().walk([&](AccumulateOp accumulate) {
+      added.emplace_back(accumulate.getResourceAttr(),
+                         accumulate.getFieldAttr());
+    });
+    SmallVector<ReadOp> reads;
+    if (!added.empty())
+      for (Operation *root : roots)
+        root->walk([&](ReadOp read) {
+          if (llvm::is_contained(
+                  added, std::pair<Attribute, Attribute>(
+                             read.getResourceAttr(), read.getFieldAttr())))
+            reads.push_back(read);
+        });
+    for (ReadOp read : reads) {
+      rewriter.setInsertionPoint(read);
+      Value field = world.resourceField(read.getResourceAttr().getAttr(),
+                                        read.getFieldAttr());
+      Value at = arith::ConstantIndexOp::create(rewriter, read.getLoc(), 0);
+      Value value = memref::LoadOp::create(rewriter, read.getLoc(), field,
+                                           ValueRange{at});
+      Operation *op = read;
+      llvm::erase(roots, op);
+      rewriter.replaceOp(read, world.fromStorage(read.getLoc(), value,
+                                                 read.getType()));
+    }
+  }
   // An optional ref to a component of the entity's own leads somewhere
   // where the entity has the component: what its archetype says, or for
   // a component held optionally the entity itself. Where the archetype
@@ -2622,6 +2741,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
       continue;
     FlatSymbolRefAttr component = refType.getComponent();
     bool held = archetypeOp.contains(component);
+    bool uniform = differInHaving(component);
     SmallVector<Operation *> uses;
     for (Operation *root : roots)
       root->walk([&](Operation *op) {
@@ -2629,7 +2749,10 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
             bound && bound.getRef() == arg)
           uses.push_back(op);
         else if (auto get = dyn_cast<GetOp>(op);
-                 get && get.getRef() == arg && !held)
+                 get && get.getRef() == arg &&
+                 (!held ||
+                  (uniform &&
+                   readsUniformly(world.storageType(get.getType())))))
           uses.push_back(op);
       });
     for (Operation *op : uses) {
@@ -2641,11 +2764,23 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
           answer = arith::ConstantIntOp::create(rewriter, op->getLoc(), held, 1);
       } else {
         Type stored = world.storageType(op->getResult(0).getType());
-        answer = world.fromStorage(
-            op->getLoc(),
-            arith::ConstantOp::create(rewriter, op->getLoc(),
-                                      cast<TypedAttr>(rewriter.getZeroAttr(stored))),
-            op->getResult(0).getType());
+        // (Read where there is nothing, in a body that is one for all
+        // archetypes: as the others read the field.)
+        Value none =
+            uniform && readsUniformly(stored)
+                ? memref::LoadOp::create(
+                      rewriter, op->getLoc(),
+                      held ? world.column(archetype, component.getAttr(),
+                                          cast<GetOp>(op).getFieldAttr())
+                           : world.nothing(archetype.capacity, stored),
+                      ValueRange{placeOf(held)})
+                      .getResult()
+                : arith::ConstantOp::create(
+                      rewriter, op->getLoc(),
+                      cast<TypedAttr>(rewriter.getZeroAttr(stored)))
+                      .getResult();
+        answer = world.fromStorage(op->getLoc(), none,
+                                   op->getResult(0).getType());
       }
       llvm::erase(roots, op);
       rewriter.replaceOp(op, answer);
@@ -7279,6 +7414,30 @@ struct PartMatch {
 
 static bool matchRegions(Region &a, Region &b, PartMatch &match);
 
+/// Whether two values a part takes from outside are of one type, or are
+/// columns of one type of element in archetypes with room for different
+/// numbers of entities: views of the world's memory, which the shared
+/// function makes for itself, as one type (a view's size is in its type
+/// only).
+static bool alikeOutside(Value x, Value y) {
+  if (x.getType() == y.getType())
+    return true;
+  auto column = [](Value value) -> MemRefType {
+    auto view = dyn_cast_or_null<memref::ViewOp>(value.getDefiningOp());
+    auto type = dyn_cast<MemRefType>(value.getType());
+    if (!view || !type || type.getRank() != 1 || !view.getSizes().empty())
+      return MemRefType();
+    Operation *shift = view.getByteShift().getDefiningOp();
+    return shift && shift->hasTrait<OpTrait::ConstantLike>() ? type
+                                                              : MemRefType();
+  };
+  MemRefType first = column(x), second = column(y);
+  return first && second &&
+         first.getElementType() == second.getElementType() &&
+         cast<memref::ViewOp>(x.getDefiningOp()).getSource() ==
+             cast<memref::ViewOp>(y.getDefiningOp()).getSource();
+}
+
 /// Whether two ops are alike but for the values they take from outside
 /// their parts and for their constants (which count as from outside:
 /// where the parts have different ones, as for the columns of different
@@ -7296,13 +7455,11 @@ static bool matchOps(Operation &a, Operation &b, PartMatch &match) {
       a.getNumRegions() != b.getNumRegions())
     return false;
   for (auto [x, y] : llvm::zip(a.getOperands(), b.getOperands())) {
-    if (x.getType() != y.getType())
-      return false;
     auto known = match.inner.find(x);
     if (known != match.inner.end()) {
-      if (known->second != y)
+      if (known->second != y || x.getType() != y.getType())
         return false;
-    } else if (match.innerOfSecond.contains(y)) {
+    } else if (match.innerOfSecond.contains(y) || !alikeOutside(x, y)) {
       return false;
     }
   }
@@ -7485,7 +7642,7 @@ static void shareParts(IRRewriter &rewriter, func::FuncOp func) {
         Value there = list[place]->get();
         constant &= sameConstant(value, there);
         memref::ViewOp other = viewOf(there);
-        view &= firstView && other && there.getType() == value.getType() &&
+        view &= firstView && other && alikeOutside(value, there) &&
                 other.getSource() == firstView.getSource() &&
                 other.getSizes().empty() && isMadeAnew(other.getByteShift());
         if (view)
@@ -8301,6 +8458,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     emitPart(rewriter, loc,
              shares ? partName + ".body" : Twine(),
              [&] {
+               llvm::SaveAndRestore uniform(uniformBodies, shares);
                emitQueryBody(rewriter, query, IRMapping(), archetype, world,
                              layout, row, world.count(loc, archetype), tick,
                              seen, /*parallel=*/false, /*directApplies=*/true,
@@ -9298,11 +9456,9 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           [&](const WorldArchetype &archetype, Value row,
               Value) -> SmallVector<Value> {
             OpBuilder::InsertionGuard inner(rewriter);
+            // (One function for all archetypes: see bodyAt.)
             auto body = [&](KnownParent known) {
-              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                            layout, row, world.count(loc, archetype), tick,
-                            seen, /*parallel=*/false, /*directApplies=*/true,
-                            known, marks);
+              bodyAt(archetype, row, known);
             };
             auto branch = scf::IfOp::create(rewriter, loc, isRoot,
                                             /*withElseRegion=*/true);
@@ -10006,9 +10162,10 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       auto scanOrFollow = scf::IfOp::create(rewriter, loc, scan,
                                             /*withElseRegion=*/true);
       rewriter.setInsertionPointToStart(scanOrFollow.thenBlock());
-      if (byWalk) {
+      if (byWalk && traversal.empty()) {
         // (Everything: a sorted tree by its rows, as ever, those without
-        // a parent with it.)
+        // a parent with it. Not where an order is asked for exactly:
+        // that one, as below.)
         rowsAt = rootsAt = scanOrFollow.thenBlock()->getTerminator();
         if (!leavesFirst)
           emitRoots();
@@ -10375,6 +10532,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
         rewriter, loc, archetype, world, options, entityLocal,
         [&](Value entity, Value rows, bool parallel) {
           emitPart(rewriter, loc, asPart && !parallel ? "body" : "", [&] {
+            llvm::SaveAndRestore uniform(uniformBodies, asPart && !parallel);
             emitQueryBody(rewriter, query, IRMapping(), archetype, world,
                           layout, entity, rows, tick, seen, parallel,
                           sequentialOnly);

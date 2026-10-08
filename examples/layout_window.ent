@@ -75,7 +75,7 @@ tag Gone
 // the one it is in, and says all about the one the pointer is on, in the
 // list or in the window, where it is marked: while `on`. (The wheel
 // moves the list.)
-unique Inspector { on: bool, top: f32, lines: i32, depth: i32 }
+unique Inspector { on: bool, top: f32, lines: i32, line: i32, depth: i32 }
 // (The box it says all about, as the list comes by it: added up over the
 // one box that is.)
 unique Picked {
@@ -100,9 +100,8 @@ component Eased {
   x: f32, y: f32, w: f32, h: f32, colour: i32, tint: i32, part: f32, t: f32
 }
 component Dead { at: i32 }
-// The line of the inspector's list a box is in, and how many lines it
-// takes with all that is in it and floats over it (`floats`: those).
-component Listed { line: i32, count: i32, floats: i32 }
+// The line of the inspector's list a box is in.
+component Listed { line: i32 }
 
 // The pointer is the mouse.
 system pointer() {
@@ -379,7 +378,7 @@ system animate() {
   // here would be there for both kinds.)
   for e, b: Box without Look on added Box {
     e.add(Look { dx: 0.0, dy: 0.0, colour: 0, part: 0.0 })
-    e.add(Listed { line: 0, count: 1, floats: 0 })
+    e.add(Listed { line: 0 })
   }
   // (In turns: what floats goes by the box under it, and what is inside
   // it by it.)
@@ -640,48 +639,6 @@ system inspect() {
     unclip()
     rect(left, 0.0, wide, high, 0xf0141a20)
     rect(left, 0.0, 1.0, high, 0x3a4650)
-    // Which line each box is in: under the box it is in, after the boxes
-    // before it there and all that is in those; what floats over a box
-    // after all that is in it. From how many lines each takes, which the
-    // innermost say first, and the topmost layer.
-    for at: mut Listed {
-      at.count = 1
-      at.floats = 0
-    }
-    for down in 0..8 {
-      let z = 7 - down
-      for (at: Listed, l: Layer)-[Inside]->(up: mut Listed)
-          bottom up Inside where l.z == z {
-        up.count += at.count
-      }
-      for (at: Listed, l: Layer)-[Over]->(up: mut Listed)
-          bottom up Over where l.z == z {
-        up.count += at.count
-        up.floats += at.count
-      }
-    }
-    Inspector.lines = 0
-    for at: Listed, l: Layer where l.depth == 0 { Inspector.lines += at.count }
-    for z in 0..8 {
-      for (at: mut Listed, l: Layer)-[Inside]->(up: Listed),
-          optional (prev: Listed)~[Inside]~>(at)
-          top down Inside where l.z == z {
-        var line = up.line + 1
-        if let before = prev.line, let takes = prev.count {
-          line = before + takes
-        }
-        at.line = line
-      }
-      for (at: mut Listed)-[Over]->(up: Listed, ul: Layer),
-          optional (prev: Listed)~[Over]~>(at)
-          top down Over where ul.z == z {
-        var line = up.line + up.count - up.floats
-        if let before = prev.line, let takes = prev.count {
-          line = before + takes
-        }
-        at.line = line
-      }
-    }
     Picked.any = 0
     Picked.line = 0
     Picked.layer = 0
@@ -698,9 +655,17 @@ system inspect() {
     Picked.bottom = 0.0
     Picked.gap = 0.0
     Picked.more = 0
-    for e, b: Box, l: Layer, z: Size, k: Stack, at: Listed, optional f: Fill,
-        optional p: Pad {
-      let n = at.line
+    // A box is in the line after all that came before it, depth first:
+    // under the box it is in, after the boxes before it there and all
+    // that is in those. (What floats is listed by itself, as deep as it
+    // is over boxes.)
+    Inspector.line = 0
+    for e, b: Box, l: Layer, z: Size, k: Stack, at: mut Listed,
+        optional f: Fill, optional p: Pad
+        top down dfs Inside {
+      let n = Inspector.line
+      Inspector.line += 1
+      at.line = n
       let y = 8.0 + Inspector.top + n as f32 * row
       let picked = if inside { n == pointed } else {
         e.has(Hovered) && l.z == PointerTop && l.depth == Inspector.depth
@@ -749,6 +714,7 @@ system inspect() {
                        else if e.has(Passthrough) { 3 } else { 0 }
       }
     }
+    Inspector.lines = Inspector.line
     // The one the pointer is on: marked in the window, and all about it
     // below the list.
     if Picked.any == 1 {

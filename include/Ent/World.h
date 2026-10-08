@@ -568,6 +568,11 @@ struct WorldLayout {
   StampPlan stamps;
   uint64_t tickOffset = 0;
   SmallVector<uint64_t> reactiveOffsets;
+  /// Bytes that are always zero: what is read for a component an
+  /// archetype does not have, by a body that is the same code for those
+  /// that have it. (Room for one value: a text of up to 1022 bytes.)
+  static constexpr uint64_t kNothingBytes = 1024;
+  uint64_t nothingOffset = 0;
   /// One log per stamp, in the order of `stamps.getStamps()`.
   SmallVector<WorldLog> logs;
   /// Per reactive query (by index) and trigger (in order): the header

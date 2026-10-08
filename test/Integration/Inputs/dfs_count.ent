@@ -1,0 +1,62 @@
+// A `for` that goes depth first reads a unique it adds to: each entity
+// sees what those before it added (dfs_count.test).
+import console
+component Box { a: i32 }
+component Slot { at: i32 }
+component Mark { n: i32 }
+component Line { n: i32 }
+relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 128
+default_capacity 128
+unique Next: i32
+unique Sum: i32
+unique Frame: i32
+world {
+ let a = spawn { Box { a: 1 }, Line { n: 0 } }
+ let b = spawn { Box { a: 2 }, Line { n: 0 }, Mark { n: 1 } }
+ let c = spawn { Box { a: 3 }, Line { n: 0 } }
+ let d = spawn { Box { a: 4 }, Line { n: 0 }, Mark { n: 2 } }
+ let f = spawn { Box { a: 5 }, Line { n: 0 } }
+ let g = spawn { Box { a: 6 }, Line { n: 0 } }
+ let h = spawn { Box { a: 7 }, Line { n: 0 } }
+ connect (b)-[Inside]->(a)
+ connect (c)-[Inside]->(a)
+ connect (d)-[Inside]->(b)
+ connect (h)-[Inside]->(b)
+ connect (g)-[Inside]->(f)
+ // (And many more under the third, so that the two that change later
+ // are few among them: they are gone to by their events, not found by
+ // going through all.)
+ for i in 0..60 {
+   let more = spawn { Box { a: 100 + i }, Line { n: 0 } }
+   connect (more)-[Inside]->(c)
+ }
+}
+system s() {
+  Frame += 1
+  Next = 0
+  Sum = 0
+  for b: Box, l: mut Line top down dfs Inside {
+    l.n = Next
+    Next += 1
+    Sum += b.a * Next
+  }
+  for b: Box, l: Line top down dfs Inside where b.a < 100 {
+    put("{Frame}: line {l.n}: box {b.a}")
+  }
+  put("{Frame}: {Next} lines, sum {Sum}")
+  // Only some, and what is below an entity before it.
+  Next = 0
+  for b: Box bottom up dfs Inside where b.a % 2 == 0 && b.a < 100 {
+    Next += 1
+    put("{Frame}: up {Next}: box {b.a}")
+  }
+  // And one that reacts: among those it runs for, in the same order.
+  Next = 0
+  for b: Box top down dfs Inside on changed b.a {
+    Next += 1
+    if b.a < 100 { put("{Frame}: changed {Next}: box {b.a}") }
+  }
+  for b: mut Box where Frame == 1 && (b.a == 7 || b.a == 3) { b.a += 10 }
+}
+schedule frame() { s() }
+main { loop { frame() } until Frame == 2 }

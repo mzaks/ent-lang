@@ -135,9 +135,8 @@ component Seen { x: f32, y: f32, w: f32, h: f32 }
 // From a box to the one it is in; the boxes in one box are in the order
 // of their slots.
 relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 256
-// From a box that floats to the one it floats over; those over one box
-// in the order of their slots too.
-relation (Float)-[Over]->(Box) tree ordered by Slot.at capacity 256
+// From a box that floats to the one it floats over.
+relation (Float)-[Over]->(Box) tree capacity 256
 
 // The widths: what each box comes to by what is in it, from the innermost
 // out; then what each gets, from the outermost in. Every `for` here is

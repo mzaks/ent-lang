@@ -1028,6 +1028,19 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     layout.generationOffset = placeTable(scheme.generationStorageBits / 8);
   if (scheme.hasIds())
     layout.locationOffset = placeTable(scheme.locationBits / 8);
+  // Where there is nothing, for the bodies that are one for all
+  // archetypes (those of reactive queries and of queries along a tree):
+  // last, and only in a program that has such a query.
+  bool anyShared = false;
+  module.walk([&](QueryOp query) {
+    anyShared |= !getTriggers(query).empty() || query.getCascade();
+  });
+  if (anyShared) {
+    end = llvm::alignTo(end, kColumnAlignment);
+    layout.nothingOffset = end;
+    layout.zeroed.push_back({end, WorldLayout::kNothingBytes});
+    end += WorldLayout::kNothingBytes;
+  }
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;
 }

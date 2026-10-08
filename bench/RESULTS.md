@@ -2950,3 +2950,28 @@ library's own.
   What is left of the inspector, 38,000 lines, is its four passes along
   the trees, which number the lines: such a pass is still a body for
   each archetype where it does not follow events.
+- Then 6.5 s (251,577 lines of LLVM IR), with `bench/boxes` still at
+  38 - 39 us a frame:
+  - A `for` that goes depth first may read a unique it adds to, so the
+    inspector numbers its lines with one counter in the `for` that
+    draws them, not with four passes (38,000 lines to 11,000).
+  - The bodies that are one function for all archetypes were often
+    three: for the archetypes without some optional component, for those
+    with it, and for those that have a stamp to ask where the others
+    have none. Where the archetypes a query runs for differ in a
+    component, its body now reads it of all of them the same way: the
+    column at the entity's row, or a kilobyte of zeros that
+    the world has for this, at its first place (the row times one or
+    nought). Whether an entity has it is read the same way, and turned
+    round for those that always do. Columns of archetypes with room for
+    different numbers of entities count as alike too. 104 shared
+    functions to 62, 143,000 lines in them to 60,000. (Reading
+    everything optional this way cost 7% in `bench/boxes`, whose boxes
+    all have the same components: so only where they differ.)
+  - A `for` in an order asked for that reacts to nothing, as each of the
+    drawing's three, had its body once for every archetype: it is one of
+    those functions now (30,000 lines to 6,500).
+  - The program is optimised whole, and then made into machine code in
+    pieces on a core each (`llvm-split`): 5.0 s of clang to 3.5. Split
+    before optimising it was 1.8 s, and `bench/boxes` 12% slower, as
+    nothing is inlined from one piece into another: not done.

@@ -24,10 +24,13 @@
 // RUN:     %S/Inputs/dirty_main.c -o %t.s.exe
 // RUN: %t.s.exe | FileCheck %s
 
-// The header zeroes the counts, and the owners of the tree's slots.
+// The header zeroes the counts, and the owners of the tree's slots. (And
+// where there is nothing: what a body that is one for all archetypes
+// reads of a component one of them does not have.)
 // HEADER:      static inline ent_world *ent_world_create(void) {
 // HEADER:        memset(arena, 0, {{[0-9]+}});
 // HEADER-NEXT:   memset((char *)arena + {{[0-9]+}}, 0, 4096);
+// HEADER-NEXT:   memset((char *)arena + {{[0-9]+}}, 0, 1024);
 // HEADER-NEXT:   return (ent_world *)arena;
 
 // Twice the rain: the sea has its own and the river's, the lake its own

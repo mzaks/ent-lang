@@ -28,6 +28,10 @@ knows where the machine's libraries are: `cc` and `c++`, or what ENT_CC and
 ENT_CXX name. ENT_CFLAGS has more flags for compiling the program itself
 (-march=native, say).
 
+A big program is optimised whole and then made into machine code in pieces,
+on a core each: one piece for every two megabytes of its LLVM IR, up to
+sixteen. ENT_PIECES says how many instead (1: all in one).
+
 Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 
 A module that needs libraries says so in `m.link`: the linker's arguments
@@ -144,7 +148,8 @@ def cache_key(arguments):
                      host_compiler("ENT_CXX", ["c++"], "clang++")):
         note_tool(shutil.which(compiler) or compiler)
     note_tool(os.path.abspath(__file__))
-    note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""))
+    note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
+         os.environ.get("ENT_PIECES", ""), os.cpu_count())
 
     include_directories = arguments.I + [os.path.join(ROOT, "devices")]
     files = []
@@ -199,6 +204,15 @@ def keep_in_cache(executable, key, stem, limit=64):
     except OSError:
         # (A cache that cannot be written is no reason not to run.)
         return executable
+
+
+def piece_count(llvm):
+    """In how many pieces a program's LLVM IR is compiled: ENT_PIECES, or
+    one for every two megabytes of it, on up to sixteen cores."""
+    asked = os.environ.get("ENT_PIECES", "")
+    if asked.isdigit():
+        return int(asked)
+    return min(os.path.getsize(llvm) // 2_000_000, os.cpu_count() or 1, 16)
 
 
 def run(command, **options):
@@ -282,9 +296,29 @@ def build(arguments, output, directory):
         host["PATH"] = os.pathsep.join(
             path for path in os.environ.get("PATH", "").split(os.pathsep)
             if os.path.realpath(path) not in toolchain)
-    objects = [os.path.join(directory, stem + ".o")]
-    run([clang, "-O2", *shlex.split(os.environ.get("ENT_CFLAGS", "")),
-         "-Wno-override-module", "-c", llvm, "-o", objects[0]])
+    flags = ["-O2", *shlex.split(os.environ.get("ENT_CFLAGS", "")),
+             "-Wno-override-module", "-c"]
+    pieces = piece_count(llvm)
+    split = shutil.which("llvm-split", path=os.path.dirname(clang))
+    if pieces > 1 and split:
+        # A big program is optimised whole, and then made into machine
+        # code in pieces, each on a core of its own: its functions shared
+        # out, those of one piece that another calls known to both.
+        whole = os.path.join(directory, stem + ".bc")
+        run([clang, *flags, "-emit-llvm", llvm, "-o", whole])
+        prefix = os.path.join(directory, stem + ".piece")
+        run([split, f"-j{pieces}", whole, "-o", prefix])
+        objects = [f"{prefix}{index}.o" for index in range(pieces)]
+        compilers = [subprocess.Popen(
+            [clang, *flags, "-Xclang", "-disable-llvm-passes", "-x", "ir",
+             f"{prefix}{index}", "-o", built])
+            for index, built in enumerate(objects)]
+        failed = [compiler.wait() for compiler in compilers]
+        if any(failed):
+            sys.exit(max(failed))
+    else:
+        objects = [os.path.join(directory, stem + ".o")]
+        run([clang, *flags, llvm, "-o", objects[0]])
     for index, path in enumerate(given):
         name, extension = os.path.splitext(os.path.basename(path))
         built = os.path.join(directory, f"{name}.{index}.o")

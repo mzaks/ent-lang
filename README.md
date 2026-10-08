@@ -137,6 +137,9 @@ and not built again while its files, its modules', what implements them,
 the compiler and the flags are the same: running it again starts at once.
 `--no-cache` builds anew and keeps nothing.
 
+A big program is optimised whole and then made into machine code in
+pieces, each on a core of its own (`ENT_PIECES=1`: in one piece).
+
 A program with a `main` needs no C host: the compiler emits C's `main`,
 which creates the world and runs the schedules as `main` says, after the
 statements of `world`, the state the program starts with. What the

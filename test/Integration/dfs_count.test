@@ -1,0 +1,41 @@
+// A `for` that goes depth first has one order, an entity and all below it
+// before the next: it may read a unique it adds to, and each entity sees
+// what those before it added. The same in threads, and along a tree
+// whose archetype is sorted by it; and where the `for` reacts, both when
+// it goes through everything and when it goes to the few that changed.
+// RUN: %ent run %S/Inputs/dfs_count.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/dfs_count.ent 2>/dev/null | cmp - %t.out
+// RUN: sed 's/ tree ordered by / tree sorted ordered by /' \
+// RUN:     %S/Inputs/dfs_count.ent > %t.sorted.ent
+// RUN: grep -c "tree sorted" %t.sorted.ent | grep -q 1
+// RUN: %ent run %t.sorted.ent 2>/dev/null | cmp - %t.out
+// RUN: %ent run --parallel %t.sorted.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// Each box's line is how many came before it; the third has sixty boxes
+// in it, which take the lines from 5 on.
+// CHECK:      1: line 0: box 1
+// CHECK-NEXT: 1: line 1: box 2
+// CHECK-NEXT: 1: line 2: box 4
+// CHECK-NEXT: 1: line 3: box 7
+// CHECK-NEXT: 1: line 4: box 3
+// CHECK-NEXT: 1: line 65: box 5
+// CHECK-NEXT: 1: line 66: box 6
+// CHECK-NEXT: 1: 67 lines, sum 294622
+// What is below a box before it, counting only some.
+// CHECK-NEXT: 1: up 1: box 4
+// CHECK-NEXT: 1: up 2: box 2
+// CHECK-NEXT: 1: up 3: box 6
+// Reacting: all of them the first time, in the same order.
+// CHECK-NEXT: 1: changed 1: box 1
+// CHECK-NEXT: 1: changed 2: box 2
+// CHECK-NEXT: 1: changed 3: box 4
+// CHECK-NEXT: 1: changed 4: box 7
+// CHECK-NEXT: 1: changed 5: box 3
+// CHECK-NEXT: 1: changed 66: box 5
+// CHECK-NEXT: 1: changed 67: box 6
+// CHECK:      2: 67 lines, sum 294712
+// Then the two that changed: the one deeper in the tree first, which
+// comes before the other depth first, though after it by depth.
+// CHECK:      2: changed 1: box 17
+// CHECK-NEXT: 2: changed 2: box 13
