@@ -1,0 +1,22 @@
+// A program that was built is kept, and not built again while nothing it
+// is made of has changed; --no-cache builds anew and keeps nothing.
+// RUN: rm -rf %t.cache %t.none && mkdir -p %t.d
+// RUN: cp %S/Inputs/for_rounds.ent %t.d/rounds.ent
+// RUN: env ENT_CACHE=%t.cache %cached-ent run %t.d/rounds.ent 2>/dev/null > %t.first
+// RUN: ls %t.cache | count 1
+// The same again: the same program, and nothing more kept.
+// RUN: env ENT_CACHE=%t.cache %cached-ent run %t.d/rounds.ent 2>/dev/null | cmp - %t.first
+// RUN: ls %t.cache | count 1
+// `build` takes it from there too.
+// RUN: env ENT_CACHE=%t.cache %cached-ent build %t.d/rounds.ent -o %t.exe 2>/dev/null
+// RUN: %t.exe | cmp - %t.first
+// RUN: ls %t.cache | count 1
+// Another program: another one kept.
+// RUN: echo "// changed" >> %t.d/rounds.ent
+// RUN: env ENT_CACHE=%t.cache %cached-ent run %t.d/rounds.ent 2>/dev/null | cmp - %t.first
+// RUN: ls %t.cache | count 2
+// Without the cache: built, run, and nothing kept.
+// RUN: env ENT_CACHE=%t.none %cached-ent run --no-cache %t.d/rounds.ent 2>/dev/null | cmp - %t.first
+// RUN: not ls %t.none
+// RUN: FileCheck %s --input-file=%t.first
+// CHECK: layer 0: 2

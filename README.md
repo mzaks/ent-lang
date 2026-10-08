@@ -132,6 +132,10 @@ tools/ent run examples/hello.ent       # or: tools/ent build ... -o hello
 (`--parallel` stages and fuses the systems and runs them on all cores,
 `--keep dir` keeps the IR and the header). It finds the compiler in
 `build/bin` and LLVM under `$LLVM_PREFIX`, `build/toolchain` or Homebrew.
+A program that was built is kept (in `$ENT_CACHE`, else `~/.cache/ent`)
+and not built again while its files, its modules', what implements them,
+the compiler and the flags are the same: running it again starts at once.
+`--no-cache` builds anew and keeps nothing.
 
 A program with a `main` needs no C host: the compiler emits C's `main`,
 which creates the world and runs the schedules as `main` says, after the

@@ -32,9 +32,16 @@ Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 
 A module that needs libraries says so in `m.link`: the linker's arguments
 for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
+
+A program that was built before is not built again while nothing it is
+made of has changed: its files and its modules', what implements them, the
+compiler and the flags. The built programs are kept in $ENT_CACHE, else in
+$XDG_CACHE_HOME/ent or ~/.cache/ent, the 64 that were last used. --no-cache
+builds anew and keeps nothing.
 """
 
 import argparse
+import hashlib
 import os
 import re
 import shlex
@@ -96,6 +103,102 @@ def modules_of(path, include_directories, seen):
             if os.path.isfile(candidate):
                 modules_of(candidate, include_directories, seen)
                 break
+
+
+def cache_directory():
+    chosen = os.environ.get("ENT_CACHE")
+    if chosen:
+        return chosen
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "ent")
+
+
+def cache_key(arguments):
+    """What says which program a build gives: a digest of everything it is
+    made of. None if that cannot be told (a module built by a command of
+    its own, which may read anything)."""
+    digest = hashlib.sha256()
+
+    def note(*parts):
+        for part in parts:
+            digest.update(str(part).encode())
+            digest.update(b"\0")
+
+    def note_file(path):
+        note(os.path.realpath(path))
+        with open(path, "rb") as source:
+            digest.update(hashlib.sha256(source.read()).digest())
+
+    def note_tool(path):
+        # (A compiler is told by where it is and when it was built.)
+        status = os.stat(path)
+        note(os.path.realpath(path), status.st_size, status.st_mtime_ns)
+
+    own = [os.environ.get("ENT_BIN"), os.path.join(ROOT, "build/bin")]
+    own = [path for path in own if path]
+    for tool in ("ent-translate", "ent-opt"):
+        note_tool(find_tool(tool, own))
+    for tool in ("mlir-translate", "clang"):
+        note_tool(find_tool(tool, llvm_directories()))
+    for compiler in (host_compiler("ENT_CC", ["cc"], "clang"),
+                     host_compiler("ENT_CXX", ["c++"], "clang++")):
+        note_tool(shutil.which(compiler) or compiler)
+    note_tool(os.path.abspath(__file__))
+    note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""))
+
+    include_directories = arguments.I + [os.path.join(ROOT, "devices")]
+    files = []
+    modules_of(arguments.program, include_directories, files)
+    directories = []
+    for path in files:
+        note_file(path)
+        stem = os.path.splitext(path)[0]
+        if os.path.isfile(stem + ".build"):
+            return None
+        for extension in IMPLEMENTATIONS + (".link",):
+            if os.path.isfile(stem + extension):
+                note_file(stem + extension)
+        if os.path.dirname(path) not in directories:
+            directories.append(os.path.dirname(path))
+    for path in arguments.sources:
+        if os.path.isfile(path):
+            note_file(path)
+            if os.path.dirname(os.path.realpath(path)) not in directories:
+                directories.append(os.path.dirname(os.path.realpath(path)))
+    # The headers next to them, which the C may include.
+    for directory in directories:
+        for name in sorted(os.listdir(directory)):
+            if name.endswith((".h", ".hpp")):
+                note_file(os.path.join(directory, name))
+    return digest.hexdigest()[:32]
+
+
+def cached(key, stem):
+    """Where the program with this key is kept, and whether it is there."""
+    path = os.path.join(cache_directory(), key, stem)
+    return path, os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def keep_in_cache(executable, key, stem, limit=64):
+    """Put a built program in the cache, and drop the ones that were used
+    longest ago beyond `limit`."""
+    root = cache_directory()
+    try:
+        os.makedirs(os.path.join(root, key), exist_ok=True)
+        target = os.path.join(root, key, stem)
+        # (Whole or not at all: another `ent` may be doing the same.)
+        partial = f"{target}.{os.getpid()}"
+        shutil.copy2(executable, partial)
+        os.replace(partial, target)
+        entries = [os.path.join(root, name) for name in os.listdir(root)]
+        entries = [path for path in entries if os.path.isdir(path)]
+        entries.sort(key=os.path.getmtime, reverse=True)
+        for path in entries[limit:]:
+            shutil.rmtree(path, ignore_errors=True)
+        return target
+    except OSError:
+        # (A cache that cannot be written is no reason not to run.)
+        return executable
 
 
 def run(command, **options):
@@ -232,23 +335,47 @@ def main():
                         "cores (OpenMP)")
     parser.add_argument("--keep", metavar="dir", help="keep the generated "
                         "files (IR, header) in this directory")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="build anew, whether or not the program was "
+                        "built before, and do not keep what is built")
     own, rest = sys.argv[1:], []
     if "--" in own:
         rest = own[own.index("--") + 1:]
         own = own[:own.index("--")]
     arguments = parser.parse_args(own)
 
+    stem = os.path.splitext(os.path.basename(arguments.program))[0]
+    # A program that was built from just this is taken as it is. (Not
+    # where the generated files are asked for: those come from building.)
+    key = None
+    if not arguments.no_cache and not arguments.keep:
+        if not os.path.isfile(arguments.program):
+            sys.exit(f"ent: cannot find '{arguments.program}'")
+        key = cache_key(arguments)
+    if key:
+        kept, there = cached(key, stem)
+        if there:
+            os.utime(os.path.dirname(kept))
+            if arguments.command == "build":
+                shutil.copy2(kept, arguments.output or stem)
+                return 0
+            return subprocess.run([kept] + rest).returncode
+
     with tempfile.TemporaryDirectory() as temporary:
         directory = temporary
         if arguments.keep:
             directory = arguments.keep
             os.makedirs(directory, exist_ok=True)
-        stem = os.path.splitext(os.path.basename(arguments.program))[0]
         if arguments.command == "build":
-            build(arguments, arguments.output or stem, directory)
+            output = arguments.output or stem
+            build(arguments, output, directory)
+            if key:
+                keep_in_cache(output, key, stem)
             return 0
         executable = os.path.join(temporary, stem)
         build(arguments, executable, directory)
+        if key:
+            executable = keep_in_cache(executable, key, stem)
         return subprocess.run([executable] + rest).returncode
 
 

@@ -22,17 +22,17 @@ llvm_config.add_tool_substitutions(
 # The build driver, using the tools under test and the same LLVM.
 import sys
 
-config.substitutions.append(
-    (
-        "%ent",
-        "env ENT_BIN={} LLVM_PREFIX={} {} {}".format(
-            config.ent_tools_dir,
-            os.path.dirname(config.llvm_tools_dir),
-            sys.executable,
-            os.path.join(os.path.dirname(config.test_source_root), "tools", "ent"),
-        ),
-    )
+ent_driver = "env ENT_BIN={} LLVM_PREFIX={} {} {}".format(
+    config.ent_tools_dir,
+    os.path.dirname(config.llvm_tools_dir),
+    sys.executable,
+    os.path.join(os.path.dirname(config.test_source_root), "tools", "ent"),
 )
+# (The tests build what they run: nothing of theirs is kept, or taken from
+# what was kept. `%cached-ent` is the driver as it is, for the test of
+# that.)
+config.substitutions.append(("%cached-ent", ent_driver))
+config.substitutions.append(("%ent", ent_driver + " --no-cache"))
 # Link flags for the OpenMP runtime that ships with the same LLVM.
 config.substitutions.append(
     ("%openmp", f"-L{config.llvm_lib_dir} -lomp -Wl,-rpath,{config.llvm_lib_dir}")
