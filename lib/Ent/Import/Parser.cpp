@@ -127,9 +127,11 @@ struct Expr {
     Index,  // text[i]
     Format, // {value} inside a string: the value as text
     Tuple,  // (a, b): the values a fn gives
+    Given,  // a value that is there already (`given`)
   };
   Kind kind;
   llvm::SMLoc loc;
+  mlir::Value given;
   int64_t intValue = 0;
   double floatValue = 0;
   bool boolValue = false;
@@ -364,11 +366,12 @@ private:
   // Statements (emitted as they are parsed)
   //===--------------------------------------------------------------===//
 
-  LogicalResult parseBlock();
+  LogicalResult parseBlock(bool ownScope = true);
   LogicalResult parseStatement();
   LogicalResult parseFor();
   LogicalResult parseCountedFor(llvm::SMLoc at);
   LogicalResult parseLoop(llvm::SMLoc at);
+  FailureOr<ExprPtr> parseStatementValue();
   LogicalResult parseIf();
   LogicalResult parseIfLet(llvm::SMLoc at);
   LogicalResult parseNameStatement();
@@ -431,7 +434,7 @@ private:
   FailureOr<SmallVector<mlir::Value>> emitCall(const Expr &expr);
   FailureOr<SmallVector<mlir::Value>>
   emitSeveral(const Expr &expr, ArrayRef<Type> expected);
-  FailureOr<Let> parseLet();
+  FailureOr<Let> parseLet(bool statement = false);
   LogicalResult emitLet(const Let &let, bool isVar);
   scf::IfOp giveFromBranches(scf::IfOp branch, ArrayRef<mlir::Value> thenValues,
                              ArrayRef<mlir::Value> elseValues);
@@ -550,6 +553,12 @@ private:
   bool inSystem = false;
   /// Parsing the body of a fn, which only computes from its parameters.
   bool inFunction = false;
+  /// The unique a `for` over entities that is being parsed counts into:
+  /// one that is asked how many entities its body ran for.
+  FlatSymbolRefAttr countsInto;
+  unsigned countedFors = 0;
+  /// The system whose body is being parsed (not `world`).
+  Operation *systemOp = nullptr;
   /// In a `loop` of a system, whose body is built before the loop is in
   /// the system.
   bool inSystemLoop = false;
@@ -1176,6 +1185,7 @@ LogicalResult Parser::parseSystem(bool isExtern) {
   }
   systems[*name] = types;
   Operation *system = builder.create(state);
+  llvm::SaveAndRestore<Operation *> inThis(systemOp, system);
 
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToEnd(block);
@@ -1623,10 +1633,13 @@ LogicalResult Parser::parseMainBlock() {
 //===----------------------------------------------------------------------===//
 
 // { statement* }, at the builder's insertion point.
-LogicalResult Parser::parseBlock() {
+LogicalResult Parser::parseBlock(bool ownScope) {
   if (failed(expect(Token::LBrace, "'{'")))
     return failure();
-  ScopeGuard scope(*this);
+  // (Or in the caller's scope, which outlives the block.)
+  std::optional<ScopeGuard> scope;
+  if (ownScope)
+    scope.emplace(*this);
   while (!token.is(Token::RBrace)) {
     if (token.is(Token::Eof))
       return error("expected '}'");
@@ -1641,7 +1654,7 @@ LogicalResult Parser::parseBlock() {
 LogicalResult Parser::parseStatement() {
   llvm::SMLoc at = token.loc;
   if (consumeKeyword("let")) {
-    FailureOr<Let> let = parseLet();
+    FailureOr<Let> let = parseLet(/*statement=*/true);
     if (failed(let))
       return failure();
     return emitLet(*let, /*isVar=*/false);
@@ -1649,7 +1662,7 @@ LogicalResult Parser::parseStatement() {
   if (consumeKeyword("var")) {
     // var (a, b) = values: each a var of its own.
     if (token.is(Token::LParen)) {
-      FailureOr<Let> let = parseLet();
+      FailureOr<Let> let = parseLet(/*statement=*/true);
       if (failed(let))
         return failure();
       return emitLet(*let, /*isVar=*/true);
@@ -2084,7 +2097,8 @@ LogicalResult Parser::parseLoop(llvm::SMLoc at) {
           state.value = argument;
         restoreVars(inside);
         mlir::Value done;
-        if (failed(parseBlock())) {
+        // (What the statements name, the condition after them can ask.)
+        if (failed(parseBlock(/*ownScope=*/false))) {
           parsed = failure();
         } else if (!consumeKeyword("until")) {
           parsed = error("a 'loop' ends with 'until' and what is to hold "
@@ -2143,7 +2157,8 @@ LogicalResult Parser::parseVar() {
   }
   if (failed(expect(Token::Assign, "'=': a var starts with a value")))
     return failure();
-  FailureOr<ExprPtr> value = parseExpr();
+  bool counted = token.isKeyword("for");
+  FailureOr<ExprPtr> value = counted ? parseStatementValue() : parseExpr();
   if (failed(value))
     return failure();
   FailureOr<mlir::Value> emitted = emit(**value, type);
@@ -2848,8 +2863,16 @@ LogicalResult Parser::parseFor() {
     auto branch = scf::IfOp::create(builder, loc(where->loc), *condition);
     builder.setInsertionPoint(branch.thenBlock()->getTerminator());
   }
+  FlatSymbolRefAttr counter = countsInto;
+  countsInto = FlatSymbolRefAttr();
   if (failed(parseBlock()))
     return failure();
+  // (One more that the body ran for, where the `for` is asked how many.)
+  if (counter)
+    AccumulateOp::create(builder, loc(at), counter,
+                         builder.getStringAttr("value"),
+                         builder.getStringAttr("add"),
+                         arith::ConstantIntOp::create(builder, loc(at), 1, 32));
   QueryOp::ensureTerminator(query->getRegion(0), builder, loc(at));
   return success();
 }
@@ -3535,7 +3558,56 @@ FailureOr<ExprPtr> Parser::parseUnary() {
 }
 
 // After `let` (or `var`): name = value, or (a, b) = values.
-FailureOr<Let> Parser::parseLet() {
+// What a statement gives a name: a value, or `for ... { }`, a `for` over
+// entities, which gives how many of them its body ran for.
+FailureOr<ExprPtr> Parser::parseStatementValue() {
+  if (!token.isKeyword("for"))
+    return parseExpr();
+  llvm::SMLoc at = token.loc;
+  advance();
+  if (inQuery || inFunction ||
+      (token.is(Token::Identifier) && peek().isKeyword("in")))
+    return error(at, "only a 'for' over entities gives a number, how many "
+                     "its body ran for: at the top level of a system, or in "
+                     "a loop there");
+  if (!systemOp)
+    return error(at, "only a 'for' over entities gives a number, how many "
+                     "its body ran for: at the top level of a system, or in "
+                     "a loop there");
+  // The count is a unique of its own, which the body adds one to.
+  Type i32 = builder.getI32Type();
+  StringAttr name;
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(systemOp);
+    name = declareSymbol(at, ("for_count_" + Twine(countedFors++)).str());
+    ResourceOp::create(builder, loc(at), name,
+                       builder.getArrayAttr({builder.getStringAttr("value")}),
+                       builder.getArrayAttr({TypeAttr::get(i32)}));
+  }
+  FlatSymbolRefAttr counter = FlatSymbolRefAttr::get(name);
+  StringAttr value = builder.getStringAttr("value");
+  // (A system that says what it writes writes this too.)
+  auto system = cast<SystemOp>(systemOp);
+  if (ArrayAttr writes = system.getWritesAttr()) {
+    SmallVector<Attribute> all(writes.begin(), writes.end());
+    all.push_back(counter);
+    system.setWritesAttr(builder.getArrayAttr(all));
+  }
+  WriteOp::create(builder, loc(at), counter, value,
+                  arith::ConstantIntOp::create(builder, loc(at), 0, 32));
+  llvm::SaveAndRestore counting(countsInto, counter);
+  if (failed(parseFor()))
+    return failure();
+  auto expr = std::make_unique<Expr>();
+  expr->kind = Expr::Given;
+  expr->loc = at;
+  expr->given =
+      ReadOp::create(builder, loc(at), i32, counter, value).getResult();
+  return expr;
+}
+
+FailureOr<Let> Parser::parseLet(bool statement) {
   Let let;
   if (consumeIf(Token::LParen)) {
     let.several = true;
@@ -3555,7 +3627,7 @@ FailureOr<Let> Parser::parseLet() {
   }
   if (failed(expect(Token::Assign, "'='")))
     return failure();
-  FailureOr<ExprPtr> value = parseExpr();
+  FailureOr<ExprPtr> value = statement ? parseStatementValue() : parseExpr();
   if (failed(value))
     return failure();
   let.value = std::move(*value);
@@ -3912,6 +3984,8 @@ Type Parser::typeOf(const Expr &expr) {
     return EntityType::get(context);
   case Expr::Has:
     return builder.getI1Type();
+  case Expr::Given:
+    return expr.given.getType();
   case Expr::Tuple:
     return {};
   }
@@ -4401,6 +4475,8 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     if (inFunction)
       return error(expr.loc, "a fn only computes; a system spawns");
     return emitSpawn(expr);
+  case Expr::Given:
+    return expr.given;
   case Expr::Tuple:
     return error(expr.loc, "'(a, b)' is several values, which a fn gives "
                            "back and 'let (a, b) = ...' takes apart; one "

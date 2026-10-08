@@ -16,3 +16,11 @@
 // Raised until none is below 6: three rounds, and one that raises none.
 // From 27 to 1 in 111 steps, counted by a `loop` in a fn.
 // CHECK-NEXT: 4 rounds, 111 steps
+// A `for` gives how many entities its body ran for, to a `let` or a
+// `var`: here until neither of two has run for any.
+// CHECK-NEXT: 3 cells, 2 above
+// CHECK-NEXT: turn 1: 2 raised, 3 heard
+// CHECK-NEXT: turn 2: 2 raised, 2 heard
+// CHECK-NEXT: turn 3: 1 raised, 1 heard
+// CHECK-NEXT: turn 4: 1 raised, 1 heard
+// CHECK-NEXT: turn 5: 0 raised, 0 heard

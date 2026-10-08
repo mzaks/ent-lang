@@ -2128,6 +2128,10 @@
             "named": true
           },
           {
+            "type": "query_for",
+            "named": true
+          },
+          {
             "type": "spawn",
             "named": true
           },
@@ -3513,6 +3517,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "query_for",
             "named": true
           },
           {

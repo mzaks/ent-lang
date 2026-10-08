@@ -65,10 +65,6 @@ component Content {
 // the box it floats over.
 component Layer { z: i32 }
 
-// How many boxes the round of placing that is running has placed:
-// `layout`'s own.
-unique Placed: i32
-
 // From a box to the one it is in; the boxes in one box are in the order
 // of their slots.
 relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 256
@@ -152,10 +148,9 @@ system layout() {
   // Placing and floating take turns: a box that floats is put where the
   // box under it is, which must have been placed; and what is inside it
   // is placed from where it has been put, with what floats over that in
-  // turn. Round after round until one has nothing new to react to, and
-  // places nothing.
+  // turn. Round after round until one has nothing new to react to: a
+  // `for` gives how many boxes its body ran for, and both give none.
   loop {
-    Placed = 0
     // A box starts where the one before it in the same box ends, and a
     // gap further; the first inside the padding of the box they are in.
     // Across the row or column it stands at the padding, or where the box
@@ -163,6 +158,7 @@ system layout() {
     // where the box it is in or the one before it has moved, has another
     // size or is another, or it has another size itself. It is in the
     // layer of the box it is in.
+    let placed =
     for (b: mut Box, l: mut Layer)-[Inside]->(outer: Box, k: Stack, ol: Layer),
         optional (prev: Box)~[Inside]~>(b),
         optional (b)-[Inside]->(how: Align)
@@ -184,11 +180,11 @@ system layout() {
       b.x = x
       b.y = y
       l.z = ol.z
-      Placed += 1
     }
 
     // A box that floats is so far from the corner of the one it floats
     // over, which has just been placed, and a layer above it.
+    let floated =
     for (f: mut Box, o: Float, l: mut Layer)-[Over]->(under: Box, ul: Layer)
         top down Over
         on changed o, changed under.x, changed under.y, changed ul {
@@ -197,7 +193,6 @@ system layout() {
       f.x = x
       f.y = y
       l.z = ul.z + 1
-      Placed += 1
     }
-  } until Placed == 0
+  } until placed + floated == 0
 }

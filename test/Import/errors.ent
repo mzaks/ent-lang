@@ -921,3 +921,24 @@ system s(on: bool) {
     for b: mut Body { b.x += 1.0 }
   }
 }
+
+// -----
+
+component Body { x: f32 }
+default_capacity 8
+system s() {
+  for b: mut Body {
+    // expected-error @+1 {{only a 'for' over entities gives a number, how many its body ran for: at the top level of a system, or in a loop there}}
+    let n = for i in 0..3 { b.x += 1.0 }
+  }
+}
+
+// -----
+
+component Body { x: f32 }
+default_capacity 8
+fn count() -> i32 {
+  // expected-error @+1 {{only a 'for' over entities gives a number, how many its body ran for: at the top level of a system, or in a loop there}}
+  let n = for i in 0..3 { }
+  n
+}

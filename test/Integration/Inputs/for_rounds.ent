@@ -48,6 +48,19 @@ system work() {
     rounds += 1
   } until Raised == 0
   for c: Cell where c.layer == 0 { put("{rounds} rounds, {steps(27)} steps") }
+  // A `for` gives how many entities its body ran for: all three, then
+  // the two that are in a layer above 0; and, reacting, the ones that
+  // changed since it last ran, round after round until none has.
+  let all = for c: mut Cell { c.v = 0 }
+  var above = for c: Cell where c.layer > 0 { }
+  put("{all} cells, {above} above")
+  var turns = 0
+  loop {
+    let raised = for c: mut Cell where c.v < c.layer * 2 { c.v += 1 }
+    let heard = for c: Cell, e: mut Echo on changed c.v { e.v = c.v }
+    turns += 1
+    put("turn {turns}: {raised} raised, {heard} heard")
+  } until raised + heard == 0
 }
 schedule frame() { work() }
 main { frame() }

@@ -667,12 +667,17 @@ of a depth.
   nothing new for it. A system with such a loop is not fused with others.
 - `loop { ... } until cond` runs its statements, and again until the
   condition holds after them (at least once); a var they assign goes
-  round with it. In a system it may hold `for`s over entities, as a
-  counted `for` may: rounds until one changes nothing, where each `for`
-  counts what it does in a unique,
-  `loop { Placed = 0  for ... { ...  Placed += 1 }  } until Placed == 0`
-  (so `examples/layout.ent` places what floats, however deep). Not in a
-  `for` over entities.
+  round with it, and the condition can ask what they named with `let`.
+  In a system it may hold `for`s over entities, as a counted `for` may:
+  rounds until one changes nothing. Not in a `for` over entities.
+- A `for` over entities gives a number where a `let` or a `var` takes
+  it: how many entities its body ran for (an `i32`; those a `where` or
+  the triggers left out are not counted).
+  `let hit = for h: mut Hull where h.hp < 0.0 { ... }`. So rounds end
+  when no `for` has anything left to do,
+  `loop { let placed = for ... { }  let floated = for ... { } } until
+  placed + floated == 0` (as `examples/layout.ent` places what floats,
+  however deep).
 
 ### Vars
 

@@ -165,11 +165,15 @@ module.exports = grammar({
       choice(field('name', $.identifier),
              seq('(', list(field('name', $.identifier)), ')')),
 
-    let: ($) => seq('let', $._pattern, '=', field('value', $._expression)),
+    // (The value may be a `for` over entities: how many its body ran
+    // for.)
+    let: ($) =>
+      seq('let', $._pattern, '=',
+          field('value', choice($._expression, $.query_for))),
 
     var: ($) =>
       seq('var', $._pattern, optional(seq(':', field('type', $._type))), '=',
-          field('value', $._expression)),
+          field('value', choice($._expression, $.query_for))),
 
     relation_end: ($) => seq('(', optional($._name), ')'),
 
