@@ -237,6 +237,39 @@ float ent_window_text_height(const ent_text126 *text, float size,
 // Fonts: the window's own, and those read from files.
 static Font ent_window_fonts[16];
 static int ent_window_font_count = 1;
+// A font from a file is drawn from letters made as big as they are to
+// show: read again at that size where the window's zoom, or a screen
+// with small pixels, has them more pixels high than the size they were
+// read at. (A few sizes of each are kept.)
+#define ENT_WINDOW_SIZES 4
+static struct {
+  char file[128];
+  Font at[ENT_WINDOW_SIZES];
+  int pixels[ENT_WINDOW_SIZES];
+  int next;
+} ent_window_faces[16];
+
+static Font ent_window_font_shown(int32_t font, float size) {
+  if (font <= 0 || font >= ent_window_font_count)
+    return GetFontDefault();
+  int pixels = (int)(size * ent_window_zoom * GetWindowScaleDPI().y + 0.5f);
+  if (pixels <= ent_window_fonts[font].baseSize)
+    return ent_window_fonts[font];
+  for (int i = 0; i < ENT_WINDOW_SIZES; ++i)
+    if (ent_window_faces[font].pixels[i] == pixels)
+      return ent_window_faces[font].at[i];
+  Font made = LoadFontEx(ent_window_faces[font].file, pixels, 0, 0);
+  if (made.texture.id == 0)
+    return ent_window_fonts[font];
+  SetTextureFilter(made.texture, TEXTURE_FILTER_BILINEAR);
+  int slot = ent_window_faces[font].next;
+  ent_window_faces[font].next = (slot + 1) % ENT_WINDOW_SIZES;
+  if (ent_window_faces[font].pixels[slot])
+    UnloadFont(ent_window_faces[font].at[slot]);
+  ent_window_faces[font].at[slot] = made;
+  ent_window_faces[font].pixels[slot] = pixels;
+  return made;
+}
 
 static Font ent_window_font_of(int32_t font) {
   if (font <= 0 || font >= ent_window_font_count)
@@ -251,7 +284,9 @@ int32_t ent_window_font(const ent_text126 *file, int32_t size) {
   Font font = LoadFontEx(name, size, 0, 0);
   if (font.texture.id == 0)
     return 0;
+  SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
   ent_window_fonts[ent_window_font_count] = font;
+  strncpy(ent_window_faces[ent_window_font_count].file, name, 127);
   return ent_window_font_count++;
 }
 
@@ -359,7 +394,7 @@ static void ent_window_write_line(const char *line, float wide, int index,
   struct ent_window_writing *w = with;
   float x = w->x + (w->width - wide) * (w->align == 1 ? 0.5f
                                         : w->align == 2 ? 1.0f : 0.0f);
-  DrawTextEx(ent_window_font_of(w->font), line,
+  DrawTextEx(ent_window_font_shown(w->font, w->size), line,
              (Vector2){(float)(int)x, (float)(int)(w->y + index * w->line)},
              w->size, ent_window_spacing(w->font, w->size, w->spacing),
              w->color);

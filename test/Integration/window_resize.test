@@ -4,9 +4,7 @@
 // lays out for them follows. With the window device that has no window
 // (it is "dragged" 100 wider and 60 higher in its third frame, and 1280
 // by 720 while it fills the screen, and as big as the program asks).
-// RUN: mkdir -p %t.dir
-// RUN: cp %S/../../devices/window.ent %t.dir/window.ent
-// RUN: cp %S/Inputs/headless_window.c %t.dir/window.c
+// RUN: sh %S/Inputs/headless.sh %t.dir
 // RUN: %ent run -I %t.dir -I %S/../../examples %S/Inputs/window_resize.ent \
 // RUN:     2>/dev/null | FileCheck %s
 

@@ -6,9 +6,7 @@
 // way of easing that is the program's (a proc and a fn as values),
 // overlays on
 // one another, what scrolls dragged and let go, and the inspector.
-// RUN: mkdir -p %t.dir
-// RUN: cp %S/../../devices/window.ent %t.dir/window.ent
-// RUN: cp %S/Inputs/headless_window.c %t.dir/window.c
+// RUN: sh %S/Inputs/headless.sh %t.dir
 // RUN: %ent run -I %t.dir -I %S/../../examples %S/Inputs/layout_draw.ent \
 // RUN:     2>/dev/null | FileCheck %s
 

@@ -1,8 +1,8 @@
 // The window device (devices/window.ent) without a window: what would be
 // drawn is printed, a line a call, and a text is as wide as its letters
 // are many (half its size each). For tests, which cannot ask for a
-// display and raylib: copied next to a copy of window.ent, in place of
-// devices/window.c.
+// display and raylib: headless.sh puts it next to a copy of window.ent,
+// in place of devices/window.c.
 
 #include "ent_extern.h"
 
@@ -158,27 +158,16 @@ float ent_window_strength(int32_t color, float part) {
   return part * (alpha ? (float)alpha / 255.0f : 1.0f);
 }
 
-// The rest does nothing here.
-bool ent_window_key_down(int32_t key) { return false; }
-void ent_window_circle(float x, float y, float r, int32_t color) {}
-void ent_window_sector(float x, float y, float r, float from, float to,
-                       int32_t color) {}
-void ent_window_line(float x0, float y0, float x1, float y1, int32_t color) {}
+// What gives something other than nought here. (The rest of what the
+// device declares does nothing and gives nought: headless_build.sh writes
+// those from the declarations, so a new one needs nothing written here.)
 float ent_window_text_width(const ent_text126 *text, float size) {
   return (float)text->length * size * 0.5f;
-}
-void ent_window_paragraph(const ent_text126 *text, float x, float y,
-                          float width, float size, int32_t color) {}
-float ent_window_text_min_width(const ent_text126 *text, float size) {
-  return 0;
 }
 float ent_window_text_height(const ent_text126 *text, float size, float width) {
   return size;
 }
-int32_t ent_window_font(const ent_text126 *file, int32_t size) { return 0; }
-int32_t ent_window_picture_load(const ent_text126 *file) { return 0; }
 float ent_window_picture_ratio(int32_t image) { return 1; }
-void ent_window_screenshot(const ent_text126 *file) {}
 // A window that is as big as it was opened; one that can be given
 // another size is 100 wider and 60 higher from its third frame on, as if
 // the user had dragged its corner; and 1280 by 720 while it fills the
@@ -199,7 +188,6 @@ int32_t ent_window_window_height(void) {
   return fills ? 720 : opened_height + (can_resize && frames >= 2 ? 60 : 0);
 }
 void ent_window_fill_screen(bool on) { fills = on; }
-void ent_window_window_limits(int32_t min_width, int32_t min_height) {}
 float ent_window_window_scale(void) { return 1; }
 // (The program gives it another size: that one, from then on.)
 void ent_window_resize_window(int32_t width, int32_t height) {
@@ -207,14 +195,6 @@ void ent_window_resize_window(int32_t width, int32_t height) {
   opened_height = height;
   can_resize = false;
 }
-bool ent_window_should_close(void) { return false; }
-float ent_window_frame_seconds(void) { return 0; }
 void ent_window_begin_frame(int32_t background, int32_t fps, float zoom) {
   ++frames;
 }
-void ent_window_end_frame(void) {}
-float ent_window_mouse_x(void) { return 0; }
-float ent_window_mouse_y(void) { return 0; }
-bool ent_window_mouse_down(int32_t button) { return false; }
-float ent_window_mouse_wheel_x(void) { return 0; }
-float ent_window_mouse_wheel_y(void) { return 0; }
