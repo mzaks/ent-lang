@@ -1,0 +1,29 @@
+// examples/towers.ent, a tower defence game: the bars are boxes of the
+// layout library, the board is drawn into the box between them, and a
+// tower looks at the foes (a foe at the blasts and the frost towers) with
+// a `for` inside its own `for`. Running it needs a display, raylib and
+// sound, which a test cannot ask for: it compiles, and says what it reads.
+// RUN: ent-translate --import-ent %S/../../examples/towers.ent \
+// RUN:     -I %S/../../devices -I %S/../../examples -o %t.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --cse --ent-lower-views \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s --check-prefix=LLVM
+// RUN: ent-opt %t.mlir --ent-print-access -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=ACCESS
+
+// A tower's `for` over the foes, with the vars that go round it, and what
+// it sends to the one it finds.
+// IR-LABEL: ent.system @shoot()
+// IR: "ent.each"(%{{.*}}) <{entity}> ({
+// IR: ^bb0(%{{.*}}: !ent.ref<@At>, %{{.*}}: !ent.ref<@Walk>, %{{.*}}: !ent.entity,
+// IR: ent.apply %{{.*}} @Health "hp" add
+
+// LLVM-DAG: define {{.*}}void @frame(
+// LLVM-DAG: declare void @ent_window_circle(float, float, float, i32)
+// LLVM-DAG: declare void @ent_sound_tone(
+
+// Shooting reads where the foes are and how far along, and writes what
+// they have left (which it sends).
+// ACCESS: remark: reads window.Window.dt, Tower_Site_Aim.Tower.kind, {{.*}}Foe_At_Walk_Health_Chill.Walk.far, Foe_At_Walk_Health_Chill.At.x, Foe_At_Walk_Health_Chill.At.y, Foe_At_Walk_Health_Chill.count, Foe_At_Walk_Health_Chill.id, entities{{.*}}; writes {{.*}}Foe_At_Walk_Health_Chill.Health.hp
+// ACCESS-NEXT: ent.system @shoot()
