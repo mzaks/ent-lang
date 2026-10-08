@@ -313,6 +313,22 @@ int32_t ent_window_font(const ent_text126 *file, int32_t size) {
   if (ent_window_font_count >= 16 || !FileExists(name) ||
       strlen(name) >= sizeof ent_window_faces[0].file)
     return 0;
+  // A file that is no font is none: one starts with what says which
+  // kind of font it is.
+  if (IsFileExtension(name, ".ttf;.otf")) {
+    unsigned char start[4] = {0};
+    FILE *from = fopen(name, "rb");
+    size_t got = from ? fread(start, 1, sizeof start, from) : 0;
+    if (from)
+      fclose(from);
+    static const char *const kinds[] = {"\0\1\0\0", "OTTO", "true", "ttcf",
+                                        "typ1"};
+    int known = 0;
+    for (int i = 0; i < 5 && got == 4; ++i)
+      known |= !memcmp(start, kinds[i], 4);
+    if (!known)
+      return 0;
+  }
   strcpy(ent_window_faces[ent_window_font_count].file, name);
   ent_window_faces[ent_window_font_count].size = size;
   return ent_window_font_count++;

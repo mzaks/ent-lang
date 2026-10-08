@@ -794,12 +794,27 @@ LogicalResult Parser::parseImport() {
   llvm::append_range(dirs, importDirs);
   SmallString<256> path;
   bool found = false;
-  for (const std::string &dir : dirs) {
+  for (auto [index, dir] : llvm::enumerate(dirs)) {
     SmallString<256> candidate(dir);
     llvm::sys::path::append(candidate, *name + ".ent");
-    if (!llvm::sys::fs::real_path(candidate, path) &&
-        llvm::sys::fs::is_regular_file(path)) {
+    SmallString<256> real;
+    if (llvm::sys::fs::real_path(candidate, real) ||
+        !llvm::sys::fs::is_regular_file(real))
+      continue;
+    if (!found) {
       found = true;
+      path = real;
+      // (Only a file next to the importing one can stand in for a
+      // module unasked: the other folders were named, in their order.)
+      if (index != 0)
+        break;
+      continue;
+    }
+    if (real != path) {
+      emitWarning(loc(at))
+          << "'" << *name << ".ent' next to this file is imported, not the "
+          << "module '" << *name << "' in '" << dir
+          << "'; give the file another name to import that one";
       break;
     }
   }

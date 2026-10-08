@@ -2,10 +2,11 @@
 // the devices' C.
 //
 // A name that is not a whole path is looked for as it is, from where the
-// program was started; then in the folder of the program's source, when
-// it was started with `ent run` (which says where that is, in
-// ENT_PROGRAM_DIR); then in the folder the program itself is in, as one
-// built with `ent build` and kept with its files.
+// program was started; then in the folder of the program's source and
+// in those of the modules it imports, when it was started with `ent run`
+// (which says where they are, in ENT_PROGRAM_DIR); then in the folder
+// the program itself is in, as one built with `ent build` and kept with
+// its files.
 #ifndef ENT_FILES_H
 #define ENT_FILES_H
 
@@ -17,6 +18,13 @@
 #include <stdint.h>
 #elif defined(__linux__)
 #include <unistd.h>
+#endif
+
+// (What is between the folders of a list of them.)
+#ifdef _WIN32
+#define ENT_FILES_BETWEEN ";"
+#else
+#define ENT_FILES_BETWEEN ":"
 #endif
 
 static int ent_file_is_there(const char *path) {
@@ -32,11 +40,19 @@ static int ent_file_is_there(const char *path) {
 static const char *ent_file_find(const char *name, char *found, size_t size) {
   if (!*name || *name == '/' || ent_file_is_there(name))
     return name;
-  const char *source = getenv("ENT_PROGRAM_DIR");
-  if (source && *source &&
-      snprintf(found, size, "%s/%s", source, name) < (int)size &&
-      ent_file_is_there(found))
-    return found;
+  // (The program's folder first, then those of the modules it imports.)
+  const char *sources = getenv("ENT_PROGRAM_DIR");
+  while (sources && *sources) {
+    size_t length = strcspn(sources, ENT_FILES_BETWEEN);
+    if (length &&
+        snprintf(found, size, "%.*s/%s", (int)length, sources, name) <
+            (int)size &&
+        ent_file_is_there(found))
+      return found;
+    sources += length;
+    if (*sources)
+      ++sources;
+  }
   char program[1024];
   long length = -1;
 #if defined(__APPLE__)

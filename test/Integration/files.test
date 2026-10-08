@@ -1,0 +1,10 @@
+// A file a program names by a path that is not there from where the
+// program was started is looked for where the program's source is, and
+// where that of a module it imports is: `ent run` says where those are.
+// (devices/ent_files.h, which the devices' C finds fonts, pictures and
+// sounds with.)
+// RUN: %ent run -I %S/Inputs/files %S/Inputs/files_use.ent | FileCheck %s
+
+// CHECK:      files_words.txt: words that lie next to the program
+// CHECK-NEXT: module_words.txt: words that lie next to the module
+// CHECK-NEXT: nowhere.txt: not there

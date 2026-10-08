@@ -1,0 +1,2 @@
+// A file of a program's own that is named like a module (shadow.test).
+fn one() -> i32 { 1 }

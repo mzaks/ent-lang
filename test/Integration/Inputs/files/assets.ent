@@ -1,0 +1,6 @@
+// A module that has a file of its own next to it (files.test).
+
+// Says the first line of a file, or that it is not there.
+extern proc show(file: text[62])
+
+proc show_own() { show("module_words.txt") }

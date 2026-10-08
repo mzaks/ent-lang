@@ -1,0 +1,11 @@
+// A file next to the importing one is found before a module of the same
+// name in a folder that was named: the program is told, since what it
+// gets is not the module (here `text`, which keeps texts of any length).
+// RUN: ent-translate --import-ent %S/Inputs/shadow/use.ent \
+// RUN:     -I %S/../../devices -o /dev/null 2>&1 | FileCheck %s
+// One that is found in a named folder only is taken without a word.
+// RUN: ent-translate --import-ent %S/modules.ent -I %S/Inputs \
+// RUN:     -I %S/../../devices -o /dev/null 2>&1 | FileCheck %s --check-prefix=QUIET --allow-empty
+
+// CHECK: use.ent:2:1: warning: 'text.ent' next to this file is imported, not the module 'text' in '{{.*}}devices'; give the file another name to import that one
+// QUIET-NOT: warning

@@ -1,0 +1,15 @@
+// A program that names files by where it and a module it imports are
+// (files.test).
+import assets
+
+unique Done: bool
+
+system say() {
+  show("files_words.txt")
+  show_own()
+  show("nowhere.txt")
+  Done = true
+}
+
+schedule once() { say() }
+main { loop { once() } until Done }

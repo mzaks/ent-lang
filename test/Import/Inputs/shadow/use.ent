@@ -1,0 +1,6 @@
+// Imports the file next to it, not the module of that name (shadow.test).
+import text
+
+unique N: i32
+system s() { N = one() }
+schedule f() { s() }

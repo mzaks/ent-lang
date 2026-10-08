@@ -103,9 +103,9 @@ extern fn text_extent(text: text, font: i32, size: f32, spacing: f32,
 extern fn text_least(text: text, font: i32, size: f32, spacing: f32,
                      breaks: i32) -> f32
 // Reads a font from a file (.ttf, .otf) for texts `size` pixels high,
-// and gives its number; 0, the window's own, if there is no such file.
-// The window need not be open: `world` may ask. (It is read when it is
-// first used; a file that is no font then gives the window's own.)
+// and gives its number; 0, the window's own, if there is no such file
+// or it is no font. The window need not be open: `world` may ask. (It
+// is read when it is first used.)
 // A file is named by its path: from where the program was started, or
 // else from where its source is (`ent run`) or the program itself (built
 // with `ent build`); so for a picture.

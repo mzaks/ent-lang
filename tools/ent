@@ -380,10 +380,19 @@ def main():
     arguments = parser.parse_args(own)
 
     stem = os.path.splitext(os.path.basename(arguments.program))[0]
-    # A program that is run from here is told where its source is: the
-    # files it names are looked for there too (devices/ent_files.h).
-    where = dict(os.environ, ENT_PROGRAM_DIR=os.path.dirname(
-        os.path.abspath(arguments.program)))
+    # A program that is run from here is told where its source is, and
+    # that of the modules it imports: the files they name are looked for
+    # there too (devices/ent_files.h).
+    where = dict(os.environ)
+    if os.path.isfile(arguments.program):
+        sources = []
+        modules_of(arguments.program,
+                   arguments.I + [os.path.join(ROOT, "devices")], sources)
+        folders = []
+        for path in sources:
+            if os.path.dirname(path) not in folders:
+                folders.append(os.path.dirname(path))
+        where["ENT_PROGRAM_DIR"] = os.pathsep.join(folders)
     # A program that was built from just this is taken as it is. (Not
     # where the generated files are asked for: those come from building.)
     key = None
