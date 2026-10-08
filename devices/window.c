@@ -62,13 +62,33 @@ void ent_window_open_window(int32_t width, int32_t height,
                             const ent_text62 *title, bool resizable) {
   ENT_WINDOW_TEXT(name, title);
   SetTraceLogLevel(LOG_WARNING);
-  if (resizable)
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+  // (In points: on a screen with small pixels the picture has more of
+  // them, and everything is as big as on any other.)
+  SetConfigFlags(FLAG_WINDOW_HIGHDPI | (resizable ? FLAG_WINDOW_RESIZABLE : 0));
   InitWindow(width, height, name);
 }
 
-int32_t ent_window_window_width(void) { return GetScreenWidth(); }
-int32_t ent_window_window_height(void) { return GetScreenHeight(); }
+void ent_window_window_limits(int32_t min_width, int32_t min_height) {
+  SetWindowMinSize(min_width, min_height);
+}
+
+float ent_window_window_scale(void) { return GetWindowScaleDPI().x; }
+
+void ent_window_resize_window(int32_t width, int32_t height) {
+  SetWindowSize(width, height);
+}
+
+// How big the window is, in points: by the picture that is drawn into,
+// which is as big as the window really is (one that the program asked
+// another size for may not have got it).
+int32_t ent_window_window_width(void) {
+  float scale = GetWindowScaleDPI().x;
+  return (int32_t)((float)GetRenderWidth() / (scale > 0 ? scale : 1) + 0.5f);
+}
+int32_t ent_window_window_height(void) {
+  float scale = GetWindowScaleDPI().y;
+  return (int32_t)((float)GetRenderHeight() / (scale > 0 ? scale : 1) + 0.5f);
+}
 
 // Without a border, as big as the screen it is on: no other video mode,
 // and it is as it was when it is no longer asked for.
@@ -80,7 +100,10 @@ void ent_window_fill_screen(bool on) {
 bool ent_window_should_close(void) { return WindowShouldClose(); }
 float ent_window_frame_seconds(void) { return GetFrameTime(); }
 
-void ent_window_begin_frame(int32_t background, int32_t fps) {
+// Everything is drawn so many times as big as it says (`Window.zoom`).
+static float ent_window_zoom = 1;
+
+void ent_window_begin_frame(int32_t background, int32_t fps, float zoom) {
   static int32_t held = -1;
   if (fps != held) {
     SetTargetFPS(fps);
@@ -89,11 +112,15 @@ void ent_window_begin_frame(int32_t background, int32_t fps) {
   BeginDrawing();
   ent_window_shading_part = 0;
   ClearBackground(ent_window_color(background));
+  ent_window_zoom = zoom > 0 ? zoom : 1;
+  rlPushMatrix();
+  rlScalef(ent_window_zoom, ent_window_zoom, 1);
 }
 
 void ent_window_end_frame(void) {
   ent_window_shift(0, 0);
   ent_window_unclip();
+  rlPopMatrix();
   EndDrawing();
 }
 
@@ -540,13 +567,18 @@ void ent_window_unclip(void) {
 }
 
 void ent_window_clip(float x, float y, float width, float height) {
+  // (As big as it is drawn.)
+  x *= ent_window_zoom;
+  y *= ent_window_zoom;
+  width *= ent_window_zoom;
+  height *= ent_window_zoom;
   // (All of the window, or more: no clipping.)
   if (x <= 0 && y <= 0 && x + width >= GetScreenWidth() &&
       y + height >= GetScreenHeight()) {
     ent_window_unclip();
     return;
   }
-  int at[4] = {(int)x, (int)y, (int)width, (int)height};
+  int at[4] = {(int)x, (int)y, (int)(width + 0.5f), (int)(height + 0.5f)};
   if (at[2] < 0)
     at[2] = 0;
   if (at[3] < 0)

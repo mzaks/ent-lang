@@ -18,7 +18,8 @@
 // sends the last card away; I shows the inspector, and O hides it. Drag
 // the window's edge to give it another size, or press F to have it fill
 // the screen and F again to have it back: the boxes are laid out for the
-// window as it is. Escape or closing the window ends the program.
+// window as it is. Z makes everything half as big again, then twice as
+// big, then as it was. Escape or closing the window ends the program.
 import window
 import layout
 import layout_window
@@ -29,6 +30,7 @@ tag Note
 tag Root
 // (Whether F was down the frame before: it is the going down that counts.)
 unique WasF: bool
+unique WasZ: bool
 tag Dial
 tag Card
 // A box that is another colour while the pointer is over it.
@@ -52,6 +54,8 @@ world {
   Window.background = 0x101418
   Window.fps = 60
   Window.resizable = true
+  Window.min_width = 480
+  Window.min_height = 320
 
   // The window: the side bar and the rest, next to each other.
   let root = spawn {
@@ -277,6 +281,13 @@ system interact() {
   let f = key_down('F' as i32)
   if f && !WasF { Window.fullscreen = !Window.fullscreen }
   WasF = f
+  // Z: everything half as big again, twice as big, and as it was.
+  let z = key_down('Z' as i32)
+  if z && !WasZ {
+    Window.zoom = if Window.zoom < 1.25 { 1.5 }
+                  else if Window.zoom < 1.75 { 2.0 } else { 1.0 }
+  }
+  WasZ = z
   for b: mut Box with SideBar where Mouse.right {
     b.w = max(80.0, min(Mouse.x - 12.0, 500.0))
   }

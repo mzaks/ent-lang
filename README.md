@@ -233,7 +233,9 @@ come with the compiler, in `devices/`, and two more that need
   `Window.fps`. The window can be given another size by the user
   (`Window.resizable`) and fills the screen while `Window.fullscreen`
   says so; `Window.width` and `Window.height` are what it is, every
-  frame. `examples/bounce.ent` is a program with it:
+  frame, in points that are as big on every screen. `Window.zoom` draws
+  everything so many times as big, and `resize_window` gives the window
+  another size. `examples/bounce.ent` is a program with it:
   `tools/ent run examples/bounce.ent`; `examples/orrery.ent` has moons
   around planets around a sun, each placed from where the body it circles
   is; `examples/layout_demo.ent` is a window of boxes inside boxes, laid

@@ -34,9 +34,13 @@ world {
 }
 
 // The window's box is as big as the window, which is asked to fill the
-// screen in the fifth frame, and does in the sixth.
+// screen in the fifth frame, and does in the sixth. In the seventh
+// everything is twice as big, so the window has half the points; in the
+// eighth the program has given it another size.
 system follow() {
   Window.fullscreen = Window.frame == 5
+  Window.zoom = if Window.frame >= 6 { 2.0 } else { 1.0 }
+  if Window.frame == 7 { resize_window(600, 400) }
   for b: mut Box with Root {
     b.w = Window.width as f32
     b.h = Window.height as f32
@@ -50,4 +54,4 @@ system show() {
 }
 
 schedule frame() { begin()  follow()  layout()  show()  present() }
-main { loop { frame() } until Window.frame == 6 }
+main { loop { frame() } until Window.frame == 8 }

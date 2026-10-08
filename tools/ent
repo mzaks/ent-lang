@@ -142,7 +142,7 @@ def cache_key(arguments):
     own = [path for path in own if path]
     for tool in ("ent-translate", "ent-opt"):
         note_tool(find_tool(tool, own))
-    for tool in ("mlir-translate", "clang"):
+    for tool in ("clang",):
         note_tool(find_tool(tool, llvm_directories()))
     for compiler in (host_compiler("ENT_CC", ["cc"], "clang"),
                      host_compiler("ENT_CXX", ["c++"], "clang++")):
@@ -208,11 +208,12 @@ def keep_in_cache(executable, key, stem, limit=64):
 
 def piece_count(llvm):
     """In how many pieces a program's LLVM IR is compiled: ENT_PIECES, or
-    one for every two megabytes of it, on up to sixteen cores."""
+    one for every 160 kilobytes of its bitcode (some two megabytes as
+    text), on up to sixteen cores."""
     asked = os.environ.get("ENT_PIECES", "")
     if asked.isdigit():
         return int(asked)
-    return min(os.path.getsize(llvm) // 2_000_000, os.cpu_count() or 1, 16)
+    return min(os.path.getsize(llvm) // 160_000, os.cpu_count() or 1, 16)
 
 
 def run(command, **options):
@@ -227,7 +228,6 @@ def build(arguments, output, directory):
     own = [path for path in own if path]
     translate = find_tool("ent-translate", own)
     optimise = find_tool("ent-opt", own)
-    mlir_translate = find_tool("mlir-translate", llvm_directories())
     clang = find_tool("clang", llvm_directories())
 
     include_directories = arguments.I + [os.path.join(ROOT, "devices")]
@@ -260,12 +260,13 @@ def build(arguments, output, directory):
         library = os.path.join(os.path.dirname(os.path.dirname(clang)), "lib")
         runtime = "libomp.dylib" if sys.platform == "darwin" else "libomp.so"
         link = [os.path.join(library, runtime), "-Wl,-rpath," + library]
-    lowered = run([optimise, module] + passes +
-                  ["--convert-scf-to-cf", "--convert-to-llvm",
-                   "--reconcile-unrealized-casts"],
-                  stdout=subprocess.PIPE).stdout
-    llvm = os.path.join(directory, stem + ".ll")
-    run([mlir_translate, "--mlir-to-llvmir", "-o", llvm], input=lowered)
+    # To LLVM bitcode in the same run: not written out as text for another
+    # tool to read again.
+    llvm = os.path.join(directory, stem + ".bc")
+    run([optimise, module] + passes +
+        ["--convert-scf-to-cf", "--convert-to-llvm",
+         "--reconcile-unrealized-casts", "--ent-emit-llvm=output=" + llvm,
+         "-o", os.devnull])
 
     files = []
     modules_of(program, include_directories, files)
@@ -304,7 +305,7 @@ def build(arguments, output, directory):
         # A big program is optimised whole, and then made into machine
         # code in pieces, each on a core of its own: its functions shared
         # out, those of one piece that another calls known to both.
-        whole = os.path.join(directory, stem + ".bc")
+        whole = os.path.join(directory, stem + ".opt.bc")
         run([clang, *flags, "-emit-llvm", llvm, "-o", whole])
         prefix = os.path.join(directory, stem + ".piece")
         run([split, f"-j{pieces}", whole, "-o", prefix])

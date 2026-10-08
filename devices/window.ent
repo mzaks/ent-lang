@@ -21,15 +21,23 @@
 // (`resizable`); `background` and `fps` every frame. `fps` is the frames
 // per second to hold, which `present` waits for; 0 does not wait.
 // From then on `width` and `height` are how big the window is, every
-// frame: another size when the user has given it one, or when it fills
-// the screen, which it does for as long as `fullscreen` says so (set it
-// whenever; the window is as big as it was again after).
+// frame: another size when the user has given it one (never less than
+// `min_width` by `min_height`, where those are set), when the program
+// has (`resize_window`), or when it fills the screen, which it does for
+// as long as `fullscreen` says so (set it whenever; the window is as big
+// as it was again after).
+// Sizes and places are in points, which are as big on every screen: on
+// one with small pixels a point is several of them (`scale` says how
+// many across), and what is drawn is as big and as sharp as the screen
+// can show it. `zoom` makes everything so many times as big again (0 or
+// 1: as it is): the window then has fewer points to draw in, which
+// `width` and `height` say, and the mouse is where it points in those.
 // `closed` says that the user closed the window or pressed Escape. `dt`
 // is the seconds the previous frame took, `frame` the number of `begin`s.
 unique Window {
   width: i32, height: i32, title: text[62], background: i32, fps: i32,
   open: bool, closed: bool, dt: f32, frame: i64, resizable: bool,
-  fullscreen: bool
+  fullscreen: bool, min_width: i32, min_height: i32, scale: f32, zoom: f32
 }
 
 // Where the mouse is, and which of its buttons are down.
@@ -141,9 +149,13 @@ extern proc window_width() -> i32
 extern proc window_height() -> i32
 // The window fills the screen, or is as it was: where that is not so yet.
 extern proc fill_screen(on: bool)
+extern proc window_limits(min_width: i32, min_height: i32)
+extern proc window_scale() -> f32
+// Another size for the window, from the program.
+extern proc resize_window(width: i32, height: i32)
 extern proc should_close() -> bool
 extern proc frame_seconds() -> f32
-extern proc begin_frame(background: i32, fps: i32)
+extern proc begin_frame(background: i32, fps: i32, zoom: f32)
 extern proc end_frame()
 extern proc mouse_x() -> f32
 extern proc mouse_y() -> f32
@@ -158,16 +170,21 @@ system begin() {
     Window.width = width
     Window.height = height
     open_window(width, height, Window.title, Window.resizable)
+    if Window.min_width > 0 || Window.min_height > 0 {
+      window_limits(Window.min_width, Window.min_height)
+    }
     Window.open = true
   }
+  Window.scale = window_scale()
   fill_screen(Window.fullscreen)
-  Window.width = window_width()
-  Window.height = window_height()
+  let zoom = if Window.zoom > 0.0 { Window.zoom } else { 1.0 }
+  Window.width = (window_width() as f32 / zoom) as i32
+  Window.height = (window_height() as f32 / zoom) as i32
   Window.closed = should_close()
   Window.dt = frame_seconds()
   Window.frame += 1
-  Mouse.x = mouse_x()
-  Mouse.y = mouse_y()
+  Mouse.x = mouse_x() / zoom
+  Mouse.y = mouse_y() / zoom
   Mouse.left = mouse_down(0)
   Mouse.right = mouse_down(1)
   Mouse.wheel_x = mouse_wheel_x()
@@ -178,7 +195,7 @@ system begin() {
   Keys.up = key_down(265)
   Keys.space = key_down(32)
   Keys.enter = key_down(257)
-  begin_frame(Window.background, Window.fps)
+  begin_frame(Window.background, Window.fps, zoom)
 }
 
 system present() {

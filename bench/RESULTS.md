@@ -2980,6 +2980,16 @@ library's own.
     table now, as other entities are read: the demo's 356,000 lines of
     LLVM IR to 307,000 (its `world`, with sixty connects, 17,700 to
     11,000).
+  - Later still (the demo had grown to 8.4 s with what was added to
+    it): the compiler wrote the program out as 30 MB of text for
+    `mlir-translate` to read again, and that wrote 17 MB of LLVM IR as
+    text for clang to read. `ent-opt` writes LLVM bitcode itself now
+    (`--ent-emit-llvm`): 7.1 s. Of what is left, 1.6 s is the lowering
+    (half of that finding the parts that are alike), 1.1 s the way to
+    LLVM, 2.9 s clang's optimising, 0.9 s the machine code in pieces.
+    Tried and not kept: one function per archetype for what a query's
+    end does to its rows (the same code, elsewhere), and one body for
+    all archetypes of a `for` that reacts to nothing (1% less).
   - Tried after that, and not kept: what an event marks as one function
     for all logs. 10,000 lines less in the demo (6%), and `bench/boxes`
     at 39.5 us a frame where it is at 38.4: a call for every event.

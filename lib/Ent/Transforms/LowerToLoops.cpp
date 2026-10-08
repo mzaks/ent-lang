@@ -1917,7 +1917,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   // of them have, or none, is known in the one body as in each of
   // several.
   auto differ = [&](function_ref<int(const WorldArchetype &)> how) {
-    if (!uniformBodies)
+    // (And only in a world that has a place where there is nothing.)
+    if (!uniformBodies || !layout.nothingOffset)
       return false;
     int here = how(archetype);
     return llvm::any_of(layout.archetypes, [&](const WorldArchetype &other) {
