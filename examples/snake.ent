@@ -1,0 +1,241 @@
+// Snake, in a window of any size: the board is as big as fits in it.
+//
+//   tools/ent run examples/snake.ent
+//
+// Arrow keys (or W A S D) turn the snake, space or enter starts a game,
+// F fills the screen. The snake dies at the board's edges and on itself,
+// and gets faster as it grows.
+//
+// Every piece of the snake is an entity that knows where it is and for
+// how many more steps it stays. A step puts a new piece where the head
+// goes and takes a step off all the others: the one with none left is
+// the end of the tail, and goes. Eating makes the snake longer by not
+// taking that step off.
+import window
+
+enum State { Ready, Playing, Over }
+enum Way { Right, Down, Left, Up }
+
+// A piece of the snake: its place on the board, and the steps it has left.
+component Part { col: i32, row: i32, left: i32 }
+
+unique Game { state: State, score: i32, best: i32, wait: f32, won: bool }
+// Where the head is, where it went last, where it is to go next, and how
+// many pieces the snake has.
+unique Snake { col: i32, row: i32, way: Way, want: Way, length: i32 }
+unique Food { col: i32, row: i32 }
+// The board in the window: its top left corner, and how big a cell is.
+unique Board { x: f32, y: f32, cell: f32 }
+// For what comes by chance; the keys as they were a frame ago.
+unique Seed: i64
+unique Was { go: bool, f: bool }
+default_capacity 512
+
+fn cols() -> i32 { 24 }
+fn rows() -> i32 { 16 }
+fn opposite(a: Way, b: Way) -> bool { (a as i32 + 2) % 4 == b as i32 }
+// The seconds a step takes for a snake that long.
+fn pace(length: i32) -> f32 { max(0.06, 0.16 - 0.003 * (length - 3) as f32) }
+// The next of the numbers that come by chance, and one of them below `n`.
+fn next(seed: i64) -> i64 { (seed * 1103515245 + 12345) % 2147483648 }
+fn below(seed: i64, n: i32) -> i32 { ((seed / 65536) % n as i64) as i32 }
+fn across(way: Way) -> i32 {
+  if way == Way.Right { 1 } else if way == Way.Left { -1 } else { 0 }
+}
+fn along(way: Way) -> i32 {
+  if way == Way.Down { 1 } else if way == Way.Up { -1 } else { 0 }
+}
+// From the tail's dark green to the head's light one.
+fn green(part: f32) -> i32 { blend(0x1f7a3a, 0x7be07f, part) }
+
+world {
+  Window.width = 960
+  Window.height = 720
+  Window.min_width = 420
+  Window.min_height = 340
+  Window.title = "ent-lang: snake"
+  Window.background = 0x10141a
+  Window.fps = 60
+  Window.resizable = true
+  Game.state = State.Ready
+  Snake.length = 3
+  Food.col = -1
+}
+
+// The board: cells as big as fit, whole pixels, in the middle of what is
+// under the line with the score.
+system fit() {
+  let top = 56.0
+  let wide = (Window.width as f32 - 32.0) / cols() as f32
+  let high = (Window.height as f32 - top - 16.0) / rows() as f32
+  let cell = max(4.0, (min(wide, high) as i32) as f32)
+  Board.cell = cell
+  Board.x = ((Window.width as f32 - cell * cols() as f32) * 0.5) as i32 as f32
+  Board.y = top + ((Window.height as f32 - top - 16.0 - cell * rows() as f32) * 0.5) as i32 as f32
+}
+
+system keys() {
+  let f = key_down('F' as i32)
+  if f && !Was.f { Window.fullscreen = !Window.fullscreen }
+  Was.f = f
+
+  // (Not back the way it came: that is into its own neck.)
+  var want = Snake.want
+  if Keys.right || key_down('D' as i32) { want = Way.Right }
+  if Keys.down || key_down('S' as i32) { want = Way.Down }
+  if Keys.left || key_down('A' as i32) { want = Way.Left }
+  if Keys.up || key_down('W' as i32) { want = Way.Up }
+  if !opposite(want, Snake.way) { Snake.want = want }
+
+  // A new game: the old snake goes, and one of three pieces sets out to
+  // the right from the middle of the left half.
+  let go = Keys.space || Keys.enter
+  if go && !Was.go && Game.state != State.Playing {
+    for e with Part { e.destroy() }
+    Seed = next(Seed + Window.frame as i64 * 7919 + 1)
+    Snake.length = 3
+    Snake.col = cols() / 4
+    Snake.row = rows() / 2
+    Snake.way = Way.Right
+    Snake.want = Way.Right
+    for i in 0..3 {
+      spawn { Part { col: Snake.col - 2 + i, row: Snake.row, left: i + 1 } }
+    }
+    Food.col = cols() * 3 / 4
+    Food.row = rows() / 2
+    Game.score = 0
+    Game.won = false
+    Game.wait = pace(3)
+    Game.state = State.Playing
+  }
+  Was.go = go
+}
+
+system step() {
+  Game.wait -= Window.dt
+  if Game.wait <= 0.0 {
+    Game.wait += pace(Snake.length)
+    Snake.way = Snake.want
+    let col = Snake.col + across(Snake.way)
+    let row = Snake.row + along(Snake.way)
+    // (The end of the tail is gone by the time the head is there.)
+    let bitten = for p: Part where p.col == col && p.row == row && p.left > 1 { }
+    if col < 0 || col >= cols() || row < 0 || row >= rows() || bitten > 0 {
+      Game.state = State.Over
+      Game.best = max(Game.best, Game.score)
+    } else {
+      let eats = col == Food.col && row == Food.row
+      if eats {
+        Snake.length += 1
+        Game.score += 1
+      } else {
+        for e, p: mut Part {
+          p.left -= 1
+          if p.left <= 0 { e.destroy() }
+        }
+      }
+      Snake.col = col
+      Snake.row = row
+      spawn { Part { col: col, row: row, left: Snake.length } }
+      if eats && Snake.length >= cols() * rows() {
+        // Nowhere left for food: the board is the snake's.
+        Game.state = State.Over
+        Game.won = true
+        Game.best = max(Game.best, Game.score)
+        Food.col = -1
+      } else if eats {
+        // Other food, somewhere the snake is not.
+        loop {
+          Seed = next(Seed)
+          Food.col = below(Seed, cols())
+          Seed = next(Seed)
+          Food.row = below(Seed, rows())
+          let taken = for p: Part where p.col == Food.col && p.row == Food.row { }
+        } until taken == 0
+      }
+    }
+  }
+}
+
+system draw() {
+  let cell = Board.cell
+  let wide = cell * cols() as f32
+  let high = cell * rows() as f32
+  // The board, a little lighter in every other cell.
+  rounded(Board.x - 6.0, Board.y - 6.0, wide + 12.0, high + 12.0, 8.0, 8.0,
+          8.0, 8.0, 0x2a3442)
+  rect(Board.x, Board.y, wide, high, 0x161c24)
+  for r in 0..rows() {
+    for c in 0..cols() {
+      if (r + c) % 2 == 0 {
+        rect(Board.x + c as f32 * cell, Board.y + r as f32 * cell, cell, cell,
+             0x1a212b)
+      }
+    }
+  }
+
+  if Food.col >= 0 {
+    circle(Board.x + (Food.col as f32 + 0.5) * cell,
+           Board.y + (Food.row as f32 + 0.5) * cell, cell * 0.36, 0xe8503a)
+    circle(Board.x + (Food.col as f32 + 0.38) * cell,
+           Board.y + (Food.row as f32 + 0.38) * cell, cell * 0.1, 0xf6a08f)
+  }
+
+  // The snake: lighter towards its head, which has eyes that look where
+  // it goes; grey when it is dead.
+  let dead = Game.state == State.Over && !Game.won
+  for p: Part {
+    let x = Board.x + p.col as f32 * cell
+    let y = Board.y + p.row as f32 * cell
+    let part = p.left as f32 / max(1, Snake.length) as f32
+    let colour = if dead { blend(0x4a5058, 0x8a9098, part) } else { green(part) }
+    let gap = max(1.0, cell * 0.06)
+    let round = cell * 0.28
+    rounded(x + gap, y + gap, cell - 2.0 * gap, cell - 2.0 * gap, round,
+            round, round, round, colour)
+    if p.left == Snake.length {
+      let dx = across(Snake.way) as f32
+      let dy = along(Snake.way) as f32
+      let cx = x + cell * 0.5 + dx * cell * 0.16
+      let cy = y + cell * 0.5 + dy * cell * 0.16
+      // (To both sides of the way it goes.)
+      circle(cx - dy * cell * 0.2, cy + dx * cell * 0.2, cell * 0.1, 0x10141a)
+      circle(cx + dy * cell * 0.2, cy - dx * cell * 0.2, cell * 0.1, 0x10141a)
+    }
+  }
+
+  // The score above the board, and what to do in its middle.
+  label("score {Game.score}", Board.x, 18.0, 24.0, 0xd8e0ea)
+  let best = "best {Game.best}"
+  label(best, Board.x + wide - text_width(best, 24.0), 18.0, 24.0, 0x7a8696)
+  if Game.state != State.Playing {
+    var title: text[30] = if Game.state == State.Ready { "snake" }
+                          else if Game.won { "the board is yours" }
+                          else { "game over" }
+    var hint: text[62] = if Game.state == State.Ready { "space to start; arrows turn, F fills the screen" }
+                         else { "space to play again" }
+    let big = max(24.0, cell * 1.6)
+    let small = max(14.0, cell * 0.6)
+    let box = max(text_width(title, big), text_width(hint, small)) + 48.0
+    let tall = big + small + 44.0
+    rounded(Board.x + (wide - box) * 0.5, Board.y + (high - tall) * 0.5, box,
+            tall, 10.0, 10.0, 10.0, 10.0, 0xd010141a)
+    label(title, Board.x + (wide - text_width(title, big)) * 0.5,
+          Board.y + (high - tall) * 0.5 + 16.0, big, 0xf0f4f8)
+    label(hint, Board.x + (wide - text_width(hint, small)) * 0.5,
+          Board.y + (high - tall) * 0.5 + 28.0 + big, small, 0x9aa6b4)
+  }
+}
+
+schedule frame() {
+  begin()
+  fit()
+  keys()
+  step() run_if Game.state == State.Playing
+  draw()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}

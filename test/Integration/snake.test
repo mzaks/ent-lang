@@ -1,0 +1,16 @@
+// examples/snake.ent, a game in ent-lang only: the snake's pieces are
+// entities that are counted (`let n = for ...`) to see what the head
+// runs into and where food can go, in a `loop` that looks until it finds
+// a free cell. Run without a window for three frames: the board, as big
+// as fits in the window, and what it says before a game.
+// RUN: sh %S/Inputs/headless.sh %t.dir
+// RUN: sed 's/until Window.closed/until Window.frame > 2/' \
+// RUN:     %S/../../examples/snake.ent > %t.snake.ent
+// RUN: %ent run -I %t.dir %t.snake.ent 2>/dev/null | FileCheck %s
+
+// (960 by 720: cells of 38, 24 by 16 of them.)
+// CHECK:      rounded 18 70 924 620 by 8 8 8 8 002a3442
+// CHECK-NEXT: rect 24 76 912 608 00161c24
+// CHECK:      label 24 18 "score 0"
+// CHECK:      "snake"
+// CHECK:      "space to start; arrows turn, F fills the screen"
