@@ -1,0 +1,18 @@
+// A `for` over entities can have loops in its body: counted, `while` and
+// `loop ... until`, each run for the entity it is at. `while` is a
+// statement of systems and fns too, and a `for` over entities stands
+// where a statement's value is worked out, giving how many its body ran
+// for.
+// RUN: %ent run %S/Inputs/loops.ent 2>/dev/null | sort > %t.out
+// RUN: %ent run --parallel %S/Inputs/loops.ent 2>/dev/null | sort | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// 1 + ... + v, how often v halves, its square root; and 400 in all.
+// CHECK:      1: sum 1 steps 0 root 1.0 extra 0 total 400
+// CHECK-NEXT: 27: sum 378 steps 4 root 5.196192 extra 0 total 400
+// As often as the largest of 4, 2 and 0, and once more.
+// CHECK-NEXT: 5 rounds, log2(64) = 6, none 0
+// CHECK-NEXT: 6: sum 21 steps 2 root 2.449494 extra 30 total 400
+// Three set and three found; three more to 10 and to 100; four turns
+// down from 3 and two times ten up to 2.
+// CHECK-NEXT: both 6 total 13 left 103 turns 24

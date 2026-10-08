@@ -88,7 +88,7 @@
   "run_if"
 ] @keyword
 
-[ "if" "else" "for" "in" "loop" "until" ] @keyword.control
+[ "if" "else" "for" "in" "loop" "until" "while" ] @keyword.control
 
 [
   "=" "+=" "-=" "*=" "/=" "+" "-" "*" "/" "%" "==" "!=" "<" "<=" ">" ">="

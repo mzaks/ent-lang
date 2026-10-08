@@ -154,8 +154,10 @@ module.exports = grammar({
         $.let,
         $.var,
         $.counted_for,
-        $.query_for,
+        // (As a statement rather than as a value that is dropped.)
+        prec(1, $.query_for),
         $.until_loop,
+        $.while_loop,
         $.connect,
         $.assignment,
         $._expression,
@@ -168,12 +170,11 @@ module.exports = grammar({
     // (The value may be a `for` over entities: how many its body ran
     // for.)
     let: ($) =>
-      seq('let', $._pattern, '=',
-          field('value', choice($._expression, $.query_for))),
+      seq('let', $._pattern, '=', field('value', $._expression)),
 
     var: ($) =>
       seq('var', $._pattern, optional(seq(':', field('type', $._type))), '=',
-          field('value', choice($._expression, $.query_for))),
+          field('value', $._expression)),
 
     relation_end: ($) => seq('(', optional($._name), ')'),
 
@@ -184,6 +185,9 @@ module.exports = grammar({
 
     // loop { ... } until done: the statements, until the condition holds
     // after them.
+    // while going { ... }
+    while_loop: ($) =>
+      seq('while', field('condition', $._expression), field('body', $.block)),
     until_loop: ($) =>
       seq('loop', field('body', $.block), 'until', $._expression),
     // for e, a: A, b: mut B ... { }: the entity's own. With arrows, the
@@ -279,6 +283,9 @@ module.exports = grammar({
         $.spawn,
         $.tuple,
         $.parenthesized,
+        // (A `for` over entities, where a statement's value is worked
+        // out: how many its body ran for.)
+        $.query_for,
       ),
 
     _name: ($) => choice($.identifier, $.qualified_name),

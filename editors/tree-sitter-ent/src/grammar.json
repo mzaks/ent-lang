@@ -1499,12 +1499,20 @@
           "name": "counted_for"
         },
         {
-          "type": "SYMBOL",
-          "name": "query_for"
+          "type": "PREC",
+          "value": 1,
+          "content": {
+            "type": "SYMBOL",
+            "name": "query_for"
+          }
         },
         {
           "type": "SYMBOL",
           "name": "until_loop"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "while_loop"
         },
         {
           "type": "SYMBOL",
@@ -1610,17 +1618,8 @@
           "type": "FIELD",
           "name": "value",
           "content": {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "SYMBOL",
-                "name": "_expression"
-              },
-              {
-                "type": "SYMBOL",
-                "name": "query_for"
-              }
-            ]
+            "type": "SYMBOL",
+            "name": "_expression"
           }
         }
       ]
@@ -1669,17 +1668,8 @@
           "type": "FIELD",
           "name": "value",
           "content": {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "SYMBOL",
-                "name": "_expression"
-              },
-              {
-                "type": "SYMBOL",
-                "name": "query_for"
-              }
-            ]
+            "type": "SYMBOL",
+            "name": "_expression"
           }
         }
       ]
@@ -1743,6 +1733,31 @@
         {
           "type": "FIELD",
           "name": "to",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_expression"
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "body",
+          "content": {
+            "type": "SYMBOL",
+            "name": "block"
+          }
+        }
+      ]
+    },
+    "while_loop": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "while"
+        },
+        {
+          "type": "FIELD",
+          "name": "condition",
           "content": {
             "type": "SYMBOL",
             "name": "_expression"
@@ -3010,6 +3025,10 @@
         {
           "type": "SYMBOL",
           "name": "parenthesized"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "query_for"
         }
       ]
     },

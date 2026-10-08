@@ -371,7 +371,9 @@ private:
   LogicalResult parseFor();
   LogicalResult parseCountedFor(llvm::SMLoc at);
   LogicalResult parseLoop(llvm::SMLoc at);
+  LogicalResult parseWhile(llvm::SMLoc at);
   FailureOr<ExprPtr> parseStatementValue();
+  FailureOr<ExprPtr> parseCountedQuery();
   LogicalResult parseIf();
   LogicalResult parseIfLet(llvm::SMLoc at);
   LogicalResult parseNameStatement();
@@ -556,6 +558,9 @@ private:
   /// The unique a `for` over entities that is being parsed counts into:
   /// one that is asked how many entities its body ran for.
   FlatSymbolRefAttr countsInto;
+  /// Whether a `for` over entities may stand where a value does: in the
+  /// value of a statement, which is worked out there and then.
+  bool forValueAllowed = false;
   unsigned countedFors = 0;
   /// The system whose body is being parsed (not `world`).
   Operation *systemOp = nullptr;
@@ -1291,7 +1296,7 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   advance();
   while (true) {
     bool statement = token.isKeyword("let") || token.isKeyword("var") ||
-                     token.isKeyword("for") ||
+                     token.isKeyword("for") || token.isKeyword("while") ||
                      (token.isKeyword("loop") && peek().is(Token::LBrace));
     if (token.isKeyword("if"))
       statement = ifIsStatement();
@@ -1683,7 +1688,9 @@ LogicalResult Parser::parseStatement() {
   }
   if (consumeKeyword("loop"))
     return parseLoop(at);
-  if (token.isKeyword("return") || token.isKeyword("while"))
+  if (consumeKeyword("while"))
+    return parseWhile(at);
+  if (token.isKeyword("return"))
     return error("'" + token.spelling + "' is not supported yet");
   // name(args): a call for what it does.
   if (token.is(Token::Identifier) && peek().is(Token::LParen) &&
@@ -2065,13 +2072,78 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
   return success();
 }
 
+// while condition { statements }: the statements, for as long as the
+// condition holds before them (not at all if it does not at first).
+LogicalResult Parser::parseWhile(llvm::SMLoc at) {
+  Location where = loc(at);
+  SmallVector<VarState> vars = captureVars();
+  SmallVector<mlir::Value> starts;
+  SmallVector<Type> types;
+  for (const VarState &state : vars) {
+    starts.push_back(state.value);
+    types.push_back(state.value.getType());
+  }
+  Operation *around = builder.getInsertionBlock()->getParentOp();
+  while (around && isa<scf::ForOp, scf::WhileOp>(around))
+    around = around->getParentOp();
+  llvm::SaveAndRestore inLoop(
+      inSystemLoop, around ? isa<SystemOp>(around) : inSystemLoop);
+  LogicalResult parsed = success();
+  auto bindTo = [&](ValueRange values) {
+    SmallVector<VarState> inside = vars;
+    for (auto [state, value] : llvm::zip(inside, values))
+      state.value = value;
+    restoreVars(inside);
+  };
+  auto loop = scf::WhileOp::create(
+      builder, where, types, starts,
+      [&](OpBuilder &, Location, ValueRange arguments) {
+        ScopeGuard scope(*this);
+        bindTo(arguments);
+        mlir::Value goesOn;
+        FailureOr<ExprPtr> condition = parseStatementValue();
+        FailureOr<mlir::Value> value =
+            failed(condition) ? FailureOr<mlir::Value>(failure())
+                              : emit(**condition, builder.getI1Type());
+        if (failed(value))
+          parsed = failure();
+        else if (!value->getType().isInteger(1))
+          parsed = error((*condition)->loc,
+                         "a 'while' condition must be a bool");
+        else
+          goesOn = *value;
+        if (!goesOn)
+          goesOn = arith::ConstantIntOp::create(builder, where, 0, 1);
+        scf::ConditionOp::create(builder, where, goesOn, arguments);
+      },
+      [&](OpBuilder &, Location, ValueRange arguments) {
+        ScopeGuard scope(*this);
+        bindTo(arguments);
+        SmallVector<mlir::Value> ends(arguments.begin(), arguments.end());
+        if (succeeded(parsed)) {
+          if (failed(parseBlock())) {
+            parsed = failure();
+          } else {
+            ends.clear();
+            for (const VarState &state : captureVars())
+              if (ends.size() < vars.size())
+                ends.push_back(state.value);
+          }
+        }
+        scf::YieldOp::create(builder, where, ends);
+      });
+  if (failed(parsed))
+    return failure();
+  for (auto [state, result] : llvm::zip(vars, loop.getResults()))
+    state.value = result;
+  restoreVars(vars);
+  return success();
+}
+
 // loop { statements } until condition: the statements, again and again
 // until, after them, the condition holds. In a system the statements may
 // be `for`s over entities, which then run in rounds.
 LogicalResult Parser::parseLoop(llvm::SMLoc at) {
-  if (inQuery)
-    return error(at, "a 'loop' inside a 'for' over entities is not "
-                     "supported yet");
   Location where = loc(at);
   // Every var goes round with the loop: what a round leaves in it the
   // next one starts with, and the loop gives what the last one left.
@@ -2104,7 +2176,7 @@ LogicalResult Parser::parseLoop(llvm::SMLoc at) {
           parsed = error("a 'loop' ends with 'until' and what is to hold "
                          "then: 'loop { ... } until done'");
         } else {
-          FailureOr<ExprPtr> condition = parseExpr();
+          FailureOr<ExprPtr> condition = parseStatementValue();
           FailureOr<mlir::Value> value =
               failed(condition) ? FailureOr<mlir::Value>(failure())
                                 : emit(**condition, builder.getI1Type());
@@ -2157,8 +2229,8 @@ LogicalResult Parser::parseVar() {
   }
   if (failed(expect(Token::Assign, "'=': a var starts with a value")))
     return failure();
-  bool counted = token.isKeyword("for");
-  FailureOr<ExprPtr> value = counted ? parseStatementValue() : parseExpr();
+
+  FailureOr<ExprPtr> value = parseStatementValue();
   if (failed(value))
     return failure();
   FailureOr<mlir::Value> emitted = emit(**value, type);
@@ -2245,9 +2317,6 @@ scf::IfOp Parser::giveFromBranches(scf::IfOp branch,
 LogicalResult Parser::parseFor() {
   llvm::SMLoc at = token.loc;
   if (token.is(Token::Identifier) && peek().isKeyword("in")) {
-    if (inQuery)
-      return error(at, "a counted 'for' inside a 'for' over entities is not "
-                       "supported yet");
     return parseCountedFor(at);
   }
   if (inQuery)
@@ -3111,7 +3180,7 @@ LogicalResult Parser::parseNameStatement() {
     auto op = parseAssignOp();
     if (failed(op))
       return failure();
-    FailureOr<ExprPtr> value = parseExpr();
+    FailureOr<ExprPtr> value = parseStatementValue();
     if (failed(value))
       return failure();
     StringRef rule;
@@ -3168,7 +3237,7 @@ LogicalResult Parser::parseNameStatement() {
     auto op = parseAssignOp();
     if (failed(op))
       return failure();
-    FailureOr<ExprPtr> value = parseExpr();
+    FailureOr<ExprPtr> value = parseStatementValue();
     if (failed(value))
       return failure();
     StringRef rule;
@@ -3234,7 +3303,7 @@ LogicalResult Parser::parseNameStatement() {
     auto op = parseAssignOp();
     if (failed(op))
       return failure();
-    FailureOr<ExprPtr> value = parseExpr();
+    FailureOr<ExprPtr> value = parseStatementValue();
     if (failed(value))
       return failure();
     if (inQuery) {
@@ -3319,7 +3388,7 @@ LogicalResult Parser::parseNameStatement() {
       auto op = parseAssignOp();
       if (failed(op))
         return failure();
-      FailureOr<ExprPtr> value = parseExpr();
+      FailureOr<ExprPtr> value = parseStatementValue();
       if (failed(value))
         return failure();
       StringRef rule;
@@ -3363,7 +3432,7 @@ LogicalResult Parser::parseNameStatement() {
     auto op = parseAssignOp();
     if (failed(op))
       return failure();
-    FailureOr<ExprPtr> value = parseExpr();
+    FailureOr<ExprPtr> value = parseStatementValue();
     if (failed(value))
       return failure();
     mlir::Value ref = variable->value;
@@ -3396,7 +3465,7 @@ LogicalResult Parser::parseNameStatement() {
     auto op = parseAssignOp();
     if (failed(op))
       return failure();
-    FailureOr<ExprPtr> value = parseExpr();
+    FailureOr<ExprPtr> value = parseStatementValue();
     if (failed(value))
       return failure();
     Variable &target = scopes[scope][name];
@@ -3561,10 +3630,20 @@ FailureOr<ExprPtr> Parser::parseUnary() {
 // What a statement gives a name: a value, or `for ... { }`, a `for` over
 // entities, which gives how many of them its body ran for.
 FailureOr<ExprPtr> Parser::parseStatementValue() {
-  if (!token.isKeyword("for"))
-    return parseExpr();
+  llvm::SaveAndRestore allowed(forValueAllowed, true);
+  return parseExpr();
+}
+
+// for ... { }, where a value stands: the `for` runs here, before the rest
+// of the value is worked out, and gives its number.
+FailureOr<ExprPtr> Parser::parseCountedQuery() {
   llvm::SMLoc at = token.loc;
   advance();
+  if (!forValueAllowed)
+    return error(at, "a 'for' over entities gives its number to a "
+                     "statement ('let n = for ...', 'n += for ...'), not "
+                     "where a value may not be asked for at all (in an "
+                     "'if' that gives a value)");
   if (inQuery || inFunction ||
       (token.is(Token::Identifier) && peek().isKeyword("in")))
     return error(at, "only a 'for' over entities gives a number, how many "
@@ -3657,6 +3736,8 @@ LogicalResult Parser::emitLet(const Let &let, bool isVar) {
 FailureOr<std::unique_ptr<Branch>> Parser::parseBranch() {
   if (failed(expect(Token::LBrace, "'{'")))
     return failure();
+  // (Only one of the branches is worked out: no place for a `for`.)
+  llvm::SaveAndRestore lazy(forValueAllowed, false);
   auto branch = std::make_unique<Branch>();
   while (consumeKeyword("let")) {
     FailureOr<Let> let = parseLet();
@@ -3704,6 +3785,8 @@ FailureOr<ComponentInit> Parser::parseComponentInit() {
 }
 
 FailureOr<ExprPtr> Parser::parsePrimary() {
+  if (token.isKeyword("for"))
+    return parseCountedQuery();
   auto node = std::make_unique<Expr>();
   node->loc = token.loc;
   switch (token.kind) {

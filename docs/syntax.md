@@ -658,7 +658,7 @@ of a depth.
 - `for i in a..b { ... }` runs its statements with `i` = `a`, `a + 1`, ...
   `b - 1` (not at all if `a >= b`). The bounds are integers of one type,
   which `i` has too; literal bounds take the other bound's type, two
-  literals count in `i32`. Outside a `for` over entities only; loops nest.
+  literals count in `i32`. Loops nest.
 - A counted `for` in a system can have `for`s over entities in it, and
   runs them so many times: once for each layer, with the count in the
   filter (`for z in 0..3 { for b: Box, l: Layer where l.z == z { ... } }`),
@@ -669,11 +669,21 @@ of a depth.
   condition holds after them (at least once); a var they assign goes
   round with it, and the condition can ask what they named with `let`.
   In a system it may hold `for`s over entities, as a counted `for` may:
-  rounds until one changes nothing. Not in a `for` over entities.
-- A `for` over entities gives a number where a `let` or a `var` takes
-  it: how many entities its body ran for (an `i32`; those a `where` or
-  the triggers left out are not counted).
-  `let hit = for h: mut Hull where h.hp < 0.0 { ... }`. So rounds end
+  rounds until one changes nothing.
+- `while cond { ... }` runs its statements for as long as the condition
+  holds before them (not at all, if it does not at first).
+- All three loops can stand in the body of a `for` over entities, and
+  run there for the entity it is at (`for i in 0..c.n { c.sum += i }`).
+  Such a body runs only for the entities that have what the `for`
+  binds, where otherwise it may run for all with its writes left out.
+- A `for` over entities gives a number where the value of a statement
+  is worked out (of a `let`, a `var`, an assignment, the condition of a
+  `loop` or a `while`): how many entities its body ran for (an `i32`;
+  those a `where` or the triggers left out are not counted).
+  `let hit = for h: mut Hull where h.hp < 0.0 { ... }`,
+  `total += for ... { }`, `until (for ... { }) == 0`. It runs where it
+  stands, before the rest of the value is worked out; not in an `if`
+  that gives a value, of which only one branch is. So rounds end
   when no `for` has anything left to do,
   `loop { let placed = for ... { }  let floated = for ... { } } until
   placed + floated == 0` (as `examples/layout.ent` places what floats,
@@ -1085,9 +1095,8 @@ header, as before.
 
 ## Not yet supported
 
-`proc` with a body, `device` declarations, prefabs, optional bindings (`T?`),
-`while` loops, and counted loops and `loop` inside a `for` over entities: each
-is reported as "not supported yet" where it would start. Of relations, not
+`proc` with a body, `device` declarations, prefabs, optional bindings
+(`T?`): each is reported as "not supported yet" where it would start. Of relations, not
 yet: joins over relation variables, accumulating into a unique and
 connecting inside an edge loop, disconnecting by pair, and of trees what
 Trees above lists.

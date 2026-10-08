@@ -136,6 +136,10 @@
           "named": true
         },
         {
+          "type": "query_for",
+          "named": true
+        },
+        {
           "type": "spawn",
           "named": true
         },
@@ -289,6 +293,10 @@
             "named": true
           },
           {
+            "type": "query_for",
+            "named": true
+          },
+          {
             "type": "spawn",
             "named": true
           },
@@ -360,6 +368,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "query_for",
             "named": true
           },
           {
@@ -440,6 +452,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "query_for",
             "named": true
           },
           {
@@ -572,6 +588,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "query_for",
             "named": true
           },
           {
@@ -727,6 +747,10 @@
         {
           "type": "var",
           "named": true
+        },
+        {
+          "type": "while_loop",
+          "named": true
         }
       ]
     }
@@ -794,6 +818,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "query_for",
             "named": true
           },
           {
@@ -974,6 +1002,10 @@
             "named": true
           },
           {
+            "type": "query_for",
+            "named": true
+          },
+          {
             "type": "spawn",
             "named": true
           },
@@ -1149,6 +1181,10 @@
             "named": true
           },
           {
+            "type": "query_for",
+            "named": true
+          },
+          {
             "type": "spawn",
             "named": true
           },
@@ -1220,6 +1256,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "query_for",
             "named": true
           },
           {
@@ -1467,6 +1507,10 @@
             "named": true
           },
           {
+            "type": "query_for",
+            "named": true
+          },
+          {
             "type": "spawn",
             "named": true
           },
@@ -1554,6 +1598,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "query_for",
             "named": true
           },
           {
@@ -1700,6 +1748,10 @@
           "named": true
         },
         {
+          "type": "query_for",
+          "named": true
+        },
+        {
           "type": "spawn",
           "named": true
         },
@@ -1786,6 +1838,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "query_for",
             "named": true
           },
           {
@@ -1885,6 +1941,10 @@
             "named": true
           },
           {
+            "type": "query_for",
+            "named": true
+          },
+          {
             "type": "spawn",
             "named": true
           },
@@ -1957,6 +2017,10 @@
         },
         {
           "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "query_for",
           "named": true
         },
         {
@@ -2036,6 +2100,10 @@
         },
         {
           "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "query_for",
           "named": true
         },
         {
@@ -2216,6 +2284,10 @@
           "named": true
         },
         {
+          "type": "query_for",
+          "named": true
+        },
+        {
           "type": "spawn",
           "named": true
         },
@@ -2356,6 +2428,10 @@
         },
         {
           "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "query_for",
           "named": true
         },
         {
@@ -2503,6 +2579,10 @@
         },
         {
           "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "query_for",
           "named": true
         },
         {
@@ -2814,6 +2894,10 @@
         },
         {
           "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "query_for",
           "named": true
         },
         {
@@ -3192,6 +3276,10 @@
           "named": true
         },
         {
+          "type": "query_for",
+          "named": true
+        },
+        {
           "type": "spawn",
           "named": true
         },
@@ -3268,6 +3356,10 @@
         },
         {
           "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "query_for",
           "named": true
         },
         {
@@ -3406,6 +3498,10 @@
         },
         {
           "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "query_for",
           "named": true
         },
         {
@@ -3604,6 +3700,10 @@
           "named": true
         },
         {
+          "type": "query_for",
+          "named": true
+        },
+        {
           "type": "spawn",
           "named": true
         },
@@ -3620,6 +3720,100 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "while_loop",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "condition": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call",
+            "named": true
+          },
+          {
+            "type": "cast",
+            "named": true
+          },
+          {
+            "type": "character",
+            "named": true
+          },
+          {
+            "type": "field_expression",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "index",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "parenthesized",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "query_for",
+            "named": true
+          },
+          {
+            "type": "spawn",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "tuple",
+            "named": true
+          },
+          {
+            "type": "unary",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -4075,6 +4269,10 @@
   },
   {
     "type": "where",
+    "named": false
+  },
+  {
+    "type": "while",
     "named": false
   },
   {

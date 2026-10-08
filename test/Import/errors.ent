@@ -352,17 +352,6 @@ world {
 
 // -----
 
-component Position { x: f32 }
-system s() {
-  for p: Position {
-    // expected-error @+1 {{a counted 'for' inside a 'for' over entities is not supported yet}}
-    for i in 0..2 {
-    }
-  }
-}
-
-// -----
-
 system s(n: f32) {
   // expected-error @+1 {{a 'for' counts over integers}}
   for i in 0..n {
@@ -904,17 +893,6 @@ system s() {
 
 component Body { x: f32 }
 default_capacity 8
-system s() {
-  for b: mut Body {
-    // expected-error @+1 {{a 'loop' inside a 'for' over entities is not supported yet}}
-    loop { b.x += 1.0 } until b.x > 3.0
-  }
-}
-
-// -----
-
-component Body { x: f32 }
-default_capacity 8
 system s(on: bool) {
   if on {
     // expected-error @+1 {{a 'for' over entities is at the top level of a system, or in a counted 'for' or a 'loop' there}}
@@ -941,4 +919,23 @@ fn count() -> i32 {
   // expected-error @+1 {{only a 'for' over entities gives a number, how many its body ran for: at the top level of a system, or in a loop there}}
   let n = for i in 0..3 { }
   n
+}
+
+// -----
+
+component Body { x: f32 }
+default_capacity 8
+system s() {
+  // expected-error @+1 {{a 'for' over entities gives its number to a statement ('let n = for ...', 'n += for ...'), not where a value may not be asked for at all (in an 'if' that gives a value)}}
+  let n = if true { for b: Body { } } else { 0 }
+}
+
+// -----
+
+component Body { x: f32 }
+default_capacity 8
+system s() {
+  var n = 0
+  // expected-error @+1 {{a 'while' condition must be a bool}}
+  while n { n += 1 }
 }

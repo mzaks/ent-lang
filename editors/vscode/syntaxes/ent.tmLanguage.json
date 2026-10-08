@@ -151,7 +151,7 @@
       "patterns": [
         {
           "name": "keyword.control.ent",
-          "match": "\\b(if|else|for|in|loop|until)\\b"
+          "match": "\\b(if|else|for|in|loop|until|while)\\b"
         },
         {
           "name": "keyword.other.declaration.ent",

@@ -1,0 +1,85 @@
+// Loops in a `for` over entities, `while`, and a `for` where a value
+// stands (loops.test).
+import console
+component Cell { v: i32, steps: i32, sum: i32, root: f32 }
+component Mark { n: i32 }
+default_capacity 8
+unique Total: i32
+world {
+  spawn { Cell { v: 27, steps: 0, sum: 0, root: 0.0 } }
+  spawn { Cell { v: 6, steps: 0, sum: 0, root: 0.0 }, Mark { n: 3 } }
+  spawn { Cell { v: 1, steps: 0, sum: 0, root: 0.0 } }
+}
+system work() {
+  for c: mut Cell {
+    // A counted loop: 1 + 2 + ... + v, into a field and into a var.
+    var triangle = 0
+    for i in 1..c.v + 1 {
+      triangle += i
+      c.sum += i
+    }
+    // A while: how often v halves before it is 1 or less.
+    var k = c.v
+    while k > 1 {
+      k = k / 2
+      c.steps += 1
+    }
+    // A loop until: Newton's steps to the square root.
+    var x = c.v as f32
+    loop { x = 0.5 * (x + c.v as f32 / x) } until x * x - c.v as f32 < 0.01
+    c.root = x
+    Total += triangle
+  }
+  for c: Cell, optional m: Mark {
+    var extra = 0
+    if let n = m.n { for i in 0..n { extra += 10 } }
+    put("{c.v}: sum {c.sum} steps {c.steps} root {c.root} extra {extra} total {Total}")
+  }
+}
+
+// How often 64 halves: a `while` in a fn.
+fn log2(n: i32) -> i32 {
+  var k = n
+  var steps = 0
+  while k > 1 {
+    k = k / 2
+    steps += 1
+  }
+  steps
+}
+
+unique Left: i32
+system rounds() {
+  // While any is above 0: as many rounds as the largest, and one more.
+  for c: mut Cell { c.v = c.steps }
+  var rounds = 0
+  Left = 1
+  while Left > 0 {
+    Left = 0
+    for c: mut Cell where c.v > 0 {
+      c.v -= 1
+      Left += 1
+    }
+    rounds += 1
+  }
+  // (Not at all, where the condition does not hold at first.)
+  var none = 0
+  while none > 0 { none -= 1 }
+  // A `for` where a value stands: in a sum, added to a var and to a
+  // unique, and in the condition of a loop.
+  let both = (for c: mut Cell { c.v = 3 }) + (for c: Cell where c.v == 3 { })
+  var total = 10
+  total += for c: Cell { }
+  Left = 100
+  Left += for c: Cell { }
+  var turns = 0
+  loop { turns += 1 } until (for c: mut Cell where c.v > 0 { c.v -= 1 }) == 0
+  while (for c: mut Cell where c.v < 2 { c.v += 1 }) > 0 { turns += 10 }
+  for c: Cell where c.sum == 1 {
+    put("{rounds} rounds, log2(64) = {log2(64)}, none {none}")
+    put("both {both} total {total} left {Left} turns {turns}")
+  }
+}
+
+schedule frame() { work()  rounds() }
+main { frame() }
