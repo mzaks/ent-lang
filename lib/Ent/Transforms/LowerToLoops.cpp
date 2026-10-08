@@ -3672,17 +3672,67 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
 /// Where the component is optional, `found` is its presence.
 namespace {
 /// An entity found without a branch for each archetype it may be in:
-/// whether it is alive and in one of `homes`, which of them it is in
-/// (`isHere`, one for each), and its row (0 where it is not found). What
-/// is read of it comes from where a chain of selects says its column
-/// starts in the world's memory, by one load: for programs with many
-/// archetypes, where a branch for each is most of the code.
+/// whether it is alive and in one of `homes`, the number of the archetype
+/// it is in (`where`: one that there is, also where the entity is not
+/// found), and its row (0 where it is not found). What is read of it
+/// comes from where a table says its column starts in the world's
+/// memory, by one load: for programs with many archetypes, where a
+/// branch for each is most of the code.
 struct TableLocation {
   SmallVector<const WorldArchetype *> homes;
-  SmallVector<Value> isHere;
+  Value where;
   Value found, row, rows;
 };
 } // namespace
+
+/// What `of` gives for the archetype numbered `where` (an index below
+/// the number of archetypes), at the insertion point: read from a table
+/// that is the program's own, one for every different table.
+static Value tableEntry(IRRewriter &rewriter, Location loc,
+                        const WorldLayout &layout, Value where,
+                        function_ref<uint64_t(const WorldArchetype &)> of) {
+  SmallVector<int64_t> entries;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    entries.push_back(int64_t(of(archetype)));
+  std::string name = "ent_table";
+  for (int64_t entry : entries)
+    name += "_" + llvm::utohexstr(uint64_t(entry));
+  // (Long ones by what they come to.)
+  if (name.size() > 96)
+    name = "ent_table_" +
+           llvm::utohexstr(llvm::hash_combine_range(entries.begin(),
+                                                    entries.end())) +
+           "_" + llvm::utostr(entries.size());
+  // (The module, by an archetype: what is being written may not be in
+  // it yet.)
+  Operation *module = ArchetypeOp(layout.archetypes[0].op)->getParentOp();
+  auto type =
+      MemRefType::get({int64_t(entries.size())}, rewriter.getI64Type());
+  auto *known = SymbolTable::lookupSymbolIn(module, name);
+  // (Two tables that come to the same are told apart by what is in them.)
+  for (unsigned again = 1; known; ++again) {
+    auto global = cast<memref::GlobalOp>(known);
+    auto values = cast<DenseIntElementsAttr>(*global.getInitialValue());
+    if (llvm::equal(values.getValues<int64_t>(), entries))
+      break;
+    name += "_" + llvm::utostr(again);
+    known = SymbolTable::lookupSymbolIn(module, name);
+  }
+  if (!known) {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(cast<ModuleOp>(module).getBody());
+    memref::GlobalOp::create(
+        rewriter, loc, name, rewriter.getStringAttr("private"), type,
+        DenseIntElementsAttr::get(
+            RankedTensorType::get({int64_t(entries.size())},
+                                  rewriter.getI64Type()),
+            ArrayRef<int64_t>(entries)),
+        /*constant=*/true, IntegerAttr());
+  }
+  Value table = memref::GetGlobalOp::create(rewriter, loc, type, name);
+  return memref::LoadOp::create(rewriter, loc, table, ValueRange{where})
+      .getResult();
+}
 
 /// Find the entity `id` (in its stored form) among `homes`, at the
 /// insertion point. With `trusted` it is known to be alive and in one.
@@ -3721,19 +3771,29 @@ locateByTable(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
   }
   auto [where, row] =
       byRows ? world.unpackRows(loc, id) : world.getLocation(loc, slot);
-  unsigned bits = cast<IntegerType>(where.getType()).getWidth();
-  Value there = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
-  for (const WorldArchetype *home : homes) {
-    at.isHere.push_back(arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::eq, where,
-        arith::ConstantIntOp::create(rewriter, loc, home->index, bits)));
-    there = arith::OrIOp::create(rewriter, loc, there, at.isHere.back());
-  }
+  // The archetype's number, as one that there is: what is not an
+  // entity's may say anything.
+  Value number = arith::IndexCastUIOp::create(rewriter, loc, index, where);
+  Value known = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::ult, number,
+      arith::ConstantIndexOp::create(rewriter, loc,
+                                     layout.archetypes.size()));
+  at.where = arith::SelectOp::create(
+      rewriter, loc, known, number,
+      arith::ConstantIndexOp::create(rewriter, loc, homes[0]->index));
+  Value there = both(
+      known,
+      arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ne,
+          tableEntry(rewriter, loc, layout, at.where,
+                     [&](const WorldArchetype &archetype) {
+                       return llvm::is_contained(homes, &archetype);
+                     }),
+          arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
   // (An id that is a row is of an entity if its archetype has so many.)
   if (!trusted && byRows) {
     Value which = arith::SelectOp::create(
-        rewriter, loc, there,
-        arith::IndexCastUIOp::create(rewriter, loc, index, where),
+        rewriter, loc, there, at.where,
         arith::ConstantIndexOp::create(rewriter, loc, homes[0]->index));
     Value count = arith::IndexCastOp::create(
         rewriter, loc, index,
@@ -3756,16 +3816,18 @@ locateByTable(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
 /// What the entity at `at` has in the column that starts, for each of its
 /// homes, at the offset `column` gives.
 static Value
-readByTable(IRRewriter &rewriter, Location loc, WorldAccess &world,
-            const TableLocation &at, Type type,
+readByTable(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
+            WorldAccess &world, const TableLocation &at, Type type,
             function_ref<uint64_t(const WorldArchetype &)> column) {
-  Value offset =
-      arith::ConstantIndexOp::create(rewriter, loc, column(*at.homes[0]));
-  for (unsigned k = 1; k < at.homes.size(); ++k)
-    offset = arith::SelectOp::create(
-        rewriter, loc, at.isHere[k],
-        arith::ConstantIndexOp::create(rewriter, loc, column(*at.homes[k])),
-        offset);
+  // (Of an archetype that is none of its homes: the first one's.)
+  Value offset = arith::IndexCastOp::create(
+      rewriter, loc, rewriter.getIndexType(),
+      tableEntry(rewriter, loc, layout, at.where,
+                 [&](const WorldArchetype &archetype) {
+                   return column(llvm::is_contained(at.homes, &archetype)
+                                     ? archetype
+                                     : *at.homes[0]);
+                 }));
   Value view = memref::ViewOp::create(
       rewriter, loc, MemRefType::get({ShapedType::kDynamic}, type),
       world.getArena(), offset, ValueRange{at.rows});
@@ -3794,7 +3856,7 @@ emitReadFields(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
   for (StringAttr field : fields) {
     Type type =
         world.storageType(homes[0]->find(component.getAttr(), field)->type);
-    Value value = readByTable(rewriter, loc, world, at, type,
+    Value value = readByTable(rewriter, loc, layout, world, at, type,
                               [&](const WorldArchetype &home) {
                                 return home.find(component.getAttr(), field)
                                     ->offset;
@@ -3818,16 +3880,20 @@ emitReadFields(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
     // there is read, and not asked.)
     const WorldArchetype *withByte = *llvm::find_if(homes, optionally);
     Value byte = readByTable(
-        rewriter, loc, world, at, rewriter.getI8Type(),
+        rewriter, loc, layout, world, at, rewriter.getI8Type(),
         [&](const WorldArchetype &home) {
           return (optionally(&home) ? home : *withByte)
               .find(component.getAttr(), none)
               ->offset;
         });
-    Value optional = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
-    for (auto [k, home] : llvm::enumerate(homes))
-      if (optionally(home))
-        optional = arith::OrIOp::create(rewriter, loc, optional, at.isHere[k]);
+    Value optional = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ne,
+        tableEntry(rewriter, loc, layout, at.where,
+                   [&](const WorldArchetype &archetype) {
+                     return llvm::is_contained(homes, &archetype) &&
+                            optionally(&archetype);
+                   }),
+        arith::ConstantIntOp::create(rewriter, loc, 0, 64));
     Value has = arith::CmpIOp::create(
         rewriter, loc, arith::CmpIPredicate::ne, byte,
         arith::ConstantIntOp::create(rewriter, loc, 0, 8));
@@ -3856,7 +3922,7 @@ emitReadStamp(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
   TableLocation at =
       locateByTable(rewriter, loc, layout, world, id, homes, trusted);
   Type i64 = rewriter.getI64Type();
-  Value stamped = readByTable(rewriter, loc, world, at, i64,
+  Value stamped = readByTable(rewriter, loc, layout, world, at, i64,
                               [&](const WorldArchetype &home) {
                                 return home.findStamp(stamp)->offset;
                               });
@@ -7869,6 +7935,53 @@ static void markBit(IRRewriter &rewriter, Location loc, Value marks,
                           ValueRange{word});
 }
 
+/// Set the mark of the row of the entity `id` in its archetype's own
+/// marks, if it is alive and in one of those `candidate` takes, at the
+/// insertion point. Where those are many, by a table: one piece of code
+/// that is told where the archetype's marks are, not one for each (see
+/// TableLocation).
+static void
+markEntityRow(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
+              WorldAccess &world, Value id,
+              function_ref<bool(const WorldArchetype &)> candidate) {
+  SmallVector<const WorldArchetype *> homes;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    if (candidate(archetype))
+      homes.push_back(&archetype);
+  if (homes.size() < 3) {
+    emitLocate(
+        rewriter, loc, layout, world, id, candidate, FlatSymbolRefAttr(),
+        TypeRange{},
+        [&](const WorldArchetype &archetype, Value row,
+            Value) -> SmallVector<Value> {
+          markBit(rewriter, loc, world.rowMarks(archetype), row);
+          return {};
+        },
+        []() -> SmallVector<Value> { return {}; });
+    return;
+  }
+  TableLocation at =
+      locateByTable(rewriter, loc, layout, world, id, homes, /*trusted=*/false);
+  Value offset = arith::IndexCastOp::create(
+      rewriter, loc, rewriter.getIndexType(),
+      tableEntry(rewriter, loc, layout, at.where,
+                 [&](const WorldArchetype &archetype) {
+                   return archetype.marksOffset;
+                 }));
+  OpBuilder::InsertionGuard guard(rewriter);
+  auto ifFound = scf::IfOp::create(rewriter, loc, at.found);
+  rewriter.setInsertionPointToStart(ifFound.thenBlock());
+  Value sixtyFour = arith::ConstantIndexOp::create(rewriter, loc, 64);
+  Value word = arith::DivUIOp::create(rewriter, loc, at.row, sixtyFour);
+  Value words = arith::AddIOp::create(
+      rewriter, loc, word, arith::ConstantIndexOp::create(rewriter, loc, 1));
+  Value marks = memref::ViewOp::create(
+      rewriter, loc,
+      MemRefType::get({ShapedType::kDynamic}, rewriter.getI64Type()),
+      world.getArena(), offset, ValueRange{words});
+  markBit(rewriter, loc, marks, at.row);
+}
+
 /// Go through the marks of the first `count` positions from the lowest,
 /// at the insertion point: each is taken away and `visit` emits what
 /// happens at its position, which may set marks of later positions. The
@@ -8332,7 +8445,11 @@ static void commitStructure(IRRewriter &rewriter, Location loc,
           world.treeStale(tree), ValueRange{zero});
       changedRelations.insert(RelationOp(tree.op).getSymNameAttr());
     }
-    applyPending(rewriter, loc, layout, *archetype, world, tick);
+    // (A part: every query that changes what entities there are does
+    // this for the archetypes it may change, the same way each time.)
+    emitPart(rewriter, loc, "pending", [&] {
+      applyPending(rewriter, loc, layout, *archetype, world, tick);
+    });
   }
   // Then the changed relations are sorted, which also drops edges to the
   // entities just despawned.
@@ -9672,18 +9789,10 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           [&] {
             if (!toRoots)
               return;
-            emitLocate(
-                rewriter, loc, layout, world, id,
-                [&](const WorldArchetype &archetype) {
-                  return matches(archetype, query);
-                },
-                FlatSymbolRefAttr(), TypeRange{},
-                [&](const WorldArchetype &archetype, Value row,
-                    Value) -> SmallVector<Value> {
-                  markBit(rewriter, loc, world.rowMarks(archetype), row);
-                  return {};
-                },
-                []() -> SmallVector<Value> { return {}; });
+            markEntityRow(rewriter, loc, layout, world, id,
+                          [&](const WorldArchetype &archetype) {
+                            return matches(archetype, query);
+                          });
           });
     };
     auto partNamed = [&](StringRef what) {
@@ -10338,20 +10447,11 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                          tree.branch(
                              placeOf(key).first, [&] { markKey(key); },
                              [&] {
-                               emitLocate(
+                               markEntityRow(
                                    rewriter, loc, layout, world, id,
                                    [&](const WorldArchetype &archetype) {
                                      return matches(archetype, query);
-                                   },
-                                   FlatSymbolRefAttr(), TypeRange{},
-                                   [&](const WorldArchetype &archetype,
-                                       Value row,
-                                       Value) -> SmallVector<Value> {
-                                     markBit(rewriter, loc,
-                                             world.rowMarks(archetype), row);
-                                     return {};
-                                   },
-                                   []() -> SmallVector<Value> { return {}; });
+                                   });
                              });
                        } else {
                          markKey(key);
