@@ -33,6 +33,16 @@ bool mlir::ent::matches(QueryOp query, ArchetypeOp archetype) {
       });
 }
 
+bool mlir::ent::matches(EachOp each, ArchetypeOp archetype) {
+  for (FlatSymbolRefAttr component : each.getRequired())
+    if (!archetype.contains(component))
+      return false;
+  for (FlatSymbolRefAttr component : each.getExcluded())
+    if (archetype.contains(component) && !archetype.isOptional(component))
+      return false;
+  return true;
+}
+
 SmallVector<FlatSymbolRefAttr> PresenceTest::components() const {
   SmallVector<FlatSymbolRefAttr> all(present);
   all.append(absent.begin(), absent.end());

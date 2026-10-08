@@ -37,6 +37,10 @@ struct PresenceTest {
 
 /// Whether `query` matches `archetype` (some of its entities may match).
 bool matches(QueryOp query, ArchetypeOp archetype);
+/// Whether entities of `archetype` may be among those `each` runs for:
+/// it holds every component they have to have, and none they must not
+/// have, unless optionally (which is then asked of each entity).
+bool matches(EachOp each, ArchetypeOp archetype);
 
 /// The presence test of `query` in an archetype it matches.
 PresenceTest getPresenceTest(QueryOp query, ArchetypeOp archetype);

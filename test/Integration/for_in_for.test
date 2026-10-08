@@ -1,0 +1,44 @@
+// A `for` over entities inside another: for each tower, the enemies in
+// its range that are not hidden; the nearest is left in the vars of the
+// tower's own body, which go round the inner loop, and what is done to
+// it is sent after the loop. (`ent.each`, which is lowered to a loop over
+// the rows of every archetype its entities may be in.) However the
+// program ran.
+// RUN: %ent run %S/Inputs/for_in_for.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/for_in_for.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/for_in_for.ent -I %S/../../devices -o %t.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
+// What the inner one reads is told as the system's.
+// RUN: ent-opt %t.mlir --ent-print-access -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=ACCESS
+
+// IR: "ent.each"(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) <{entity, without = [@Hidden]}> ({
+// IR: ^bb0(%{{.*}}: !ent.ref<@Enemy>, %{{.*}}: !ent.entity, %{{.*}}: f32,
+// IR: ent.apply %{{.*}} @Life "hp" add
+
+// ACCESS: remark: reads {{.*}}Enemy_Life.Enemy.x, {{.*}}Enemy_Life.count, Enemy_Life.id, entities
+// ACCESS-NEXT: ent.system @aim()
+
+// CHECK:      1: tower at 0.0 sees 1, found true
+// CHECK-NEXT: 1: tower at 10.0 sees 2, found true
+// CHECK-NEXT: 1: tower at 20.0 sees 0, found false
+// CHECK-NEXT: 1:   enemy at 20.0: 3.0
+// CHECK-NEXT: 1:   enemy at 0.0: 2.0
+// CHECK-NEXT: 1:   enemy at 4.0: 3.0
+// CHECK-NEXT: 1:   enemy at 8.0: 3.0
+// CHECK-NEXT: 1:   enemy at 12.0: 2.0
+// CHECK-NEXT: 1:   enemy at 16.0: 3.0
+// CHECK-NEXT: 1:   enemy at 24.0: 3.0
+// CHECK-NEXT: 1:   enemy at 28.0: 3.0
+// CHECK-NEXT: 2: tower at 0.0 sees 2, found true
+// CHECK-NEXT: 2: tower at 10.0 sees 1, found true
+// CHECK-NEXT: 2: tower at 20.0 sees 1, found true
+// CHECK-NEXT: 2:   enemy at 18.0: 3.0
+// CHECK-NEXT: 2:   enemy at -2.0: 2.0
+// CHECK-NEXT: 2:   enemy at 2.0: 2.0
+// CHECK-NEXT: 2:   enemy at 6.0: 3.0
+// CHECK-NEXT: 2:   enemy at 10.0: 1.0
+// CHECK-NEXT: 2:   enemy at 14.0: 3.0
+// CHECK-NEXT: 2:   enemy at 22.0: 2.0
+// CHECK-NEXT: 2:   enemy at 26.0: 3.0

@@ -242,11 +242,65 @@ system s() {
 
 // -----
 
+// A `for` over entities inside another reads its entities, and never a
+// component the outer one changes of its own.
 component Position { x: f32 }
 system s() {
-  for e, p: Position {
-    // expected-error @+1 {{a 'for' cannot be nested in another 'for'}}
+  for e, p: mut Position {
+    // expected-error @+1 {{'Position' of other entities is not read where the 'for' around changes its own ('p' is 'mut'): some would be changed already and some not. Keep what is read of others in a component of its own}}
     for q: Position {
+    }
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+component Other { x: f32 }
+system s() {
+  for e, p: Position {
+    // expected-error @+1 {{a 'for' inside a 'for' reads its entities; what is to change of one is sent to it after the loop ('Component(entity).field += value')}}
+    for q: mut Other {
+    }
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+component Other { x: f32 }
+system s() {
+  for e, p: Position {
+    for o, q: Other {
+      // expected-error @+1 {{sending a value to another entity is done after the 'for' that goes through other entities, not in it: that one only reads them}}
+      Other(o).x += 1.0
+    }
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+component Other { x: f32 }
+system s() {
+  for e, p: Position {
+    for o, q: Other {
+      // expected-error @+1 {{an entity is destroyed, and given or rid of a component, after the 'for' that goes through other entities, not in it: that one only reads them}}
+      e.destroy()
+    }
+  }
+}
+
+// -----
+
+component Position { x: f32 }
+component Other { x: f32 }
+system s() {
+  for e, p: Position {
+    for q: Other {
+      // expected-error @+1 {{a 'for' over entities is one deep in another: this one is already inside one that is}}
+      for r: Other {
+      }
     }
   }
 }

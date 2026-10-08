@@ -265,8 +265,18 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       into.insert({StringAttr(), relation.getSymNameAttr(), field});
       return;
     }
-    auto query = op->getParentOfType<QueryOp>();
     auto refType = cast<RefType>(ref.getType());
+    // Of the entities an `ent.each` runs for: in the archetypes those
+    // may be in.
+    if (auto arg = dyn_cast<BlockArgument>(ref))
+      if (auto each = dyn_cast<EachOp>(arg.getOwner()->getParentOp())) {
+        for (ArchetypeOp archetype : archetypes)
+          if (matches(each, archetype))
+            into.insert({archetype.getSymNameAttr(),
+                         refType.getComponent().getAttr(), field});
+        return;
+      }
+    auto query = op->getParentOfType<QueryOp>();
     if (refType.isUp()) {
       // An ancestor's: like a lookup, in any archetype holding the
       // component.
@@ -304,6 +314,25 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
   };
 
   system.getBody().walk([&](Operation *op) {
+    // How many entities each archetype has, which of them have what is
+    // asked of each, and their ids where they are asked for.
+    if (auto each = dyn_cast<EachOp>(op)) {
+      for (ArchetypeOp archetype : archetypes) {
+        if (!matches(each, archetype))
+          continue;
+        StringAttr name = archetype.getSymNameAttr();
+        access.reads.insert({name, empty, empty});
+        if (each.getEntity()) {
+          access.reads.insert({name, empty, idField});
+          access.reads.insert(entityTable);
+        }
+        for (auto list : {each.getRequired(), each.getExcluded()})
+          for (FlatSymbolRefAttr component : list)
+            if (archetype.isOptional(component))
+              access.reads.insert({name, component.getAttr(), presence});
+      }
+      return;
+    }
     if (auto get = dyn_cast<GetOp>(op))
       return record(op, get.getRef(), get.getFieldAttr(), access.reads);
     if (auto set = dyn_cast<SetOp>(op); set && relationOf(set.getRef()))

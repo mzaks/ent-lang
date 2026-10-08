@@ -255,6 +255,43 @@ for with Enemy { Count += 1 }     // nor the entity
   goes along a tree: see Trees below);
   `log N` after a trigger sets its event log's capacity (`log 0`: none).
 
+Inside a `for`, another `for` over entities runs its body for every
+entity of a kind, for the entity the outer one visits:
+
+```
+for me, t: Tower, a: mut Aim {
+  var best = t.range * t.range
+  var target = me
+  var found = false
+  for e, en: Enemy without Hidden
+      where (en.x - t.x) * (en.x - t.x) + (en.y - t.y) * (en.y - t.y) < best {
+    best = (en.x - t.x) * (en.x - t.x) + (en.y - t.y) * (en.y - t.y)
+    target = e
+    found = true
+  }
+  a.found = found
+  if found { Life(target).hp -= t.damage }
+}
+```
+
+- It has a name for the entity (optional, first), bindings, `with`,
+  `without` and `where`; no `mut`, `optional`, `on`, arrows or order. It
+  visits its entities in a fixed order, all of them for every entity of
+  the outer `for`: as many runs as the two numbers multiplied.
+- It reads its entities. What the outer body finds it keeps in its own
+  vars, which the inner body may assign: they go round with the loop.
+  The inner entity's name is a value (`target = e`), to send to after
+  the loop (`Life(target).hp -= damage`) or to keep in a field.
+- The outer entity's own fields are read and written in it as outside.
+- Sending, accumulating into a unique, connecting, spawning, destroying,
+  `add` and `remove` are for after the loop, not in it.
+- It never binds a component the outer `for` binds `mut`: of the other
+  entities some would be changed already and some not. (What is read of
+  others is kept in a component of its own: `Place` read, `Next`
+  written.)
+- One deep: no `for` over entities inside it, and none inside a `for`
+  over edges.
+
 Inside a `for`, another `for` with an arrow visits the entity's edges.
 One end is the visited entity, by its name or one of its bindings; the
 arrow says whether the edges go out of it or come into it:

@@ -425,6 +425,9 @@ private:
   FailureOr<ExprPtr> parsePrimary();
   LogicalResult parseRelation();
   LogicalResult parseEdges(llvm::SMLoc at);
+  LogicalResult parseEach(llvm::SMLoc at);
+  /// Inside the body of a `for` over entities that is in another.
+  bool inEach = false;
   LogicalResult parseConnect(llvm::SMLoc at);
   LogicalResult emitCondition(const Expr &expr);
   FailureOr<std::unique_ptr<Branch>> parseBranch();
@@ -2200,6 +2203,175 @@ LogicalResult Parser::parseStatement() {
 
 // for (e)-[s: R]->(other) { } / for (child: C)-[R]->(e) { }, inside a
 // `for`: the edges of the entity it visits, out of it or into it.
+// for [name,] [binding: Component, ...] [with A, B] [without C] [where c]
+// { statements }, inside a `for` over entities: the statements for every
+// entity that has those, for the entity the outer one visits. It reads
+// them; what it finds it leaves in the vars of the body it is in.
+LogicalResult Parser::parseEach(llvm::SMLoc at) {
+  if (inEach)
+    return error(at, "a 'for' over entities is one deep in another: this "
+                     "one is already inside one that is");
+  if (inEdges)
+    return error(at, "a 'for' over entities cannot be inside a 'for' over "
+                     "edges");
+  struct Bound {
+    std::string name, component;
+  };
+  SmallVector<Bound> bindings;
+  std::string entity;
+  auto filter = [&] {
+    return token.isKeyword("with") || token.isKeyword("without") ||
+           token.isKeyword("where") || token.is(Token::LBrace);
+  };
+  auto known = [&](llvm::SMLoc where,
+                   StringRef name) -> LogicalResult {
+    if (!components.count(name))
+      return error(where, "unknown component '" + name + "'");
+    return success();
+  };
+  while (!filter()) {
+    if (token.isKeyword("optional") || token.isKeyword("on") ||
+        token.isKeyword("top") || token.isKeyword("bottom"))
+      return error("a 'for' inside a 'for' visits every entity that has "
+                   "what it binds: no 'optional', 'on' or order");
+    llvm::SMLoc nameAt = token.loc;
+    FailureOr<std::string> name = identifier("a name");
+    if (failed(name))
+      return failure();
+    if (!consumeIf(Token::Colon)) {
+      // The entity's name: first, and once.
+      if (!entity.empty() || !bindings.empty())
+        return error(nameAt, "expected '" + *name + ": Component'");
+      entity = *name;
+      if (!consumeIf(Token::Comma) && !filter())
+        return error("expected ',' and a binding, a filter or '{'");
+      continue;
+    }
+    if (token.isKeyword("mut"))
+      return error("a 'for' inside a 'for' reads its entities; what is to "
+                   "change of one is sent to it after the loop "
+                   "('Component(entity).field += value')");
+    llvm::SMLoc componentAt = token.loc;
+    FailureOr<std::string> component = identifier("a component");
+    if (failed(component) || failed(known(componentAt, *component)))
+      return failure();
+    // What the outer `for` changes of its own entity, this one would
+    // read of others: changed or not, as the outer one got to them.
+    for (auto &scope : scopes)
+      for (auto &entry : scope)
+        if (entry.second.kind == Variable::Ref && entry.second.mut &&
+            entry.second.component == *component)
+          return error(componentAt,
+                       "'" + *component + "' of other entities is not read "
+                       "where the 'for' around changes its own ('" +
+                           entry.first() + "' is 'mut'): some would be "
+                       "changed already and some not. Keep what is read of "
+                       "others in a component of its own");
+    bindings.push_back({*name, *component});
+    if (!consumeIf(Token::Comma))
+      break;
+  }
+  SmallVector<Attribute> with, without;
+  while (token.isKeyword("with") || token.isKeyword("without")) {
+    SmallVector<Attribute> &into = token.isKeyword("with") ? with : without;
+    advance();
+    do {
+      llvm::SMLoc componentAt = token.loc;
+      FailureOr<std::string> component = identifier("a component");
+      if (failed(component) || failed(known(componentAt, *component)))
+        return failure();
+      into.push_back(symbol(*component));
+    } while (consumeIf(Token::Comma));
+  }
+  if (bindings.empty() && with.empty())
+    return error(at, "a 'for' inside a 'for' binds a component, or says "
+                     "what its entities have ('with')");
+  ExprPtr condition;
+  if (consumeKeyword("where")) {
+    FailureOr<ExprPtr> parsed = parseExpr();
+    if (failed(parsed))
+      return failure();
+    condition = std::move(*parsed);
+  }
+  if (!token.is(Token::LBrace))
+    return error("expected '{' and the statements to run for each entity");
+
+  // Every var goes round: what one entity leaves in it the next starts
+  // with, and the loop gives what the last one left.
+  Location where = loc(at);
+  SmallVector<VarState> vars = captureVars();
+  OperationState state(where, EachOp::getOperationName());
+  for (const VarState &var : vars) {
+    state.addOperands(var.value);
+    state.addTypes(var.value.getType());
+  }
+  if (!with.empty())
+    state.addAttribute("with", builder.getArrayAttr(with));
+  if (!without.empty())
+    state.addAttribute("without", builder.getArrayAttr(without));
+  if (!entity.empty())
+    state.addAttribute("entity", builder.getUnitAttr());
+  auto *block = new Block();
+  state.addRegion()->push_back(block);
+  for (const Bound &bound : bindings)
+    block->addArgument(RefType::get(context, symbol(bound.component), false),
+                       where);
+  if (!entity.empty())
+    block->addArgument(EntityType::get(context), where);
+  for (const VarState &var : vars)
+    block->addArgument(var.value.getType(), where);
+  Operation *each = builder.create(state);
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToEnd(block);
+    ScopeGuard scope(*this);
+    llvm::SaveAndRestore inside(inEach, true);
+    unsigned next = 0;
+    for (const Bound &bound : bindings)
+      bind(bound.name, {Variable::Ref, block->getArgument(next++),
+                        bound.component, false});
+    // (A value: `has`, `destroy` and the like are for the entity the
+    // outer `for` visits.)
+    if (!entity.empty())
+      bind(entity, Variable::ofValue(block->getArgument(next++)));
+    SmallVector<VarState> round = vars;
+    for (VarState &var : round)
+      var.value = block->getArgument(next++);
+    restoreVars(round);
+    if (condition) {
+      FailureOr<mlir::Value> holds = emit(*condition, builder.getI1Type());
+      if (failed(holds))
+        return failure();
+      if (!holds->getType().isInteger(1))
+        return error(condition->loc, "'where' takes a bool");
+      auto branch = scf::IfOp::create(builder, where, *holds,
+                                      /*withElseRegion=*/true);
+      SmallVector<VarState> before = captureVars();
+      {
+        OpBuilder::InsertionGuard inner(builder);
+        builder.setInsertionPoint(branch.thenBlock()->getTerminator());
+        if (failed(parseBlock()))
+          return failure();
+      }
+      SmallVector<VarState> thenVars = captureVars();
+      restoreVars(before);
+      branch.getElseRegion().getBlocks().clear();
+      mergeBranches(branch, before, thenVars, before);
+    } else if (failed(parseBlock())) {
+      return failure();
+    }
+    SmallVector<mlir::Value> ends;
+    for (const VarState &var : captureVars())
+      if (ends.size() < vars.size())
+        ends.push_back(var.value);
+    YieldOp::create(builder, where, ends);
+  }
+  for (auto [var, result] : llvm::zip(vars, each->getResults()))
+    var.value = result;
+  restoreVars(vars);
+  return success();
+}
+
 LogicalResult Parser::parseEdges(llvm::SMLoc at) {
   if (inEdges)
     return error(at, "edge loops cannot be nested");
@@ -2459,6 +2631,10 @@ LogicalResult Parser::parseConnect(llvm::SMLoc at) {
       if (!record->second.fieldType(name))
         return error(expr->loc, "relation '" + *relation +
                                     "' has no field '" + name + "'");
+    if (inEach)
+      return error(at, "connecting is done after the 'for' that goes through "
+                       "other entities, not in it: that one only reads "
+                       "them");
     ConnectOp::create(builder, loc(at), symbol(*relation),
                       arrow->reversed ? *next : *last,
                       arrow->reversed ? *last : *next, values);
@@ -2811,6 +2987,10 @@ LogicalResult Parser::parseFor() {
   if (token.is(Token::Identifier) && peek().isKeyword("in")) {
     return parseCountedFor(at);
   }
+  // Inside a `for` over entities: its edges, with an arrow, or other
+  // entities, for each of which the body runs.
+  if (inQuery && !token.is(Token::LParen))
+    return parseEach(at);
   if (inQuery)
     return parseEdges(at);
   if (inFunction)
@@ -3736,6 +3916,10 @@ LogicalResult Parser::parseNameStatement() {
         return failure();
       v = *negated;
     }
+    if (inEach)
+      return error(at, "sending a value to another entity is done after the 'for' that goes through "
+                       "other entities, not in it: that one only reads "
+                       "them");
     ApplyOp::create(builder, loc(at), *entity, symbol(name),
                     builder.getStringAttr(*field), builder.getStringAttr(rule),
                     v);
@@ -3792,6 +3976,10 @@ LogicalResult Parser::parseNameStatement() {
         return failure();
       v = *negated;
     }
+    if (inEach)
+      return error(at, "sending a value to another entity is done after the 'for' that goes through "
+                       "other entities, not in it: that one only reads "
+                       "them");
     ApplyOp::create(builder, loc(at), variable->value,
                     symbol(variable->component),
                     builder.getStringAttr(*field), builder.getStringAttr(rule),
@@ -3863,6 +4051,10 @@ LogicalResult Parser::parseNameStatement() {
           return failure();
         v = *negated;
       }
+      if (inEach)
+        return error(at, "setting or accumulating into a unique is done after the 'for' that goes through "
+                         "other entities, not in it: that one only reads "
+                         "them");
       AccumulateOp::create(builder, loc(at), symbol(name),
                            builder.getStringAttr(field),
                            builder.getStringAttr(rule), v);
@@ -3946,6 +4138,10 @@ LogicalResult Parser::parseNameStatement() {
           return failure();
         v = *negated;
       }
+      if (inEach)
+        return error(at, "adding into an ancestor is done after the 'for' that goes through "
+                         "other entities, not in it: that one only reads "
+                         "them");
       CombineOp::create(builder, loc(at), variable->value,
                         builder.getStringAttr(*field),
                         builder.getStringAttr(rule), v);
@@ -4016,6 +4212,10 @@ LogicalResult Parser::parseNameStatement() {
 
 // e.destroy() / e.add(C { .. }) / e.remove(C)
 LogicalResult Parser::parseMethod(const std::string &entity, llvm::SMLoc at) {
+  if (inEach)
+    return error(at, "an entity is destroyed, and given or rid of a "
+                     "component, after the 'for' that goes through other "
+                     "entities, not in it: that one only reads them");
   llvm::SMLoc methodAt = token.loc;
   FailureOr<std::string> method = identifier("a method");
   if (failed(method) || failed(expect(Token::LParen, "'('")))
@@ -6033,6 +6233,10 @@ Parser::emitInitValues(const ComponentInit &init) {
 }
 
 FailureOr<mlir::Value> Parser::emitSpawn(const Expr &expr) {
+  if (inEach)
+    return error(expr.loc, "an entity is spawned after the 'for' that goes "
+                           "through other entities, not in it: that one "
+                           "only reads them");
   SmallVector<Attribute> listed;
   SmallVector<mlir::Value> values;
   for (const ComponentInit &init : expr.inits) {

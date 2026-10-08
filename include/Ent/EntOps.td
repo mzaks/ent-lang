@@ -930,6 +930,56 @@ def Ent_EdgesOp : Ent_Op<"edges", [
   }];
 }
 
+def Ent_EachOp : Ent_Op<"each", [
+    SingleBlockImplicitTerminator<"YieldOp">, RecursiveMemoryEffects]> {
+  let summary = "Run the body for every entity of a kind, for the visited one";
+  let description = [{
+    ```mlir
+    %nearest = "ent.each"(%far) ({
+    ^bb0(%p: !ent.ref<@Place>, %e: !ent.entity, %best: f32):
+      %x = ent.get %p "x" : !ent.ref<@Place> -> f32
+      ...
+      ent.yield %less : f32
+    }) {entity, without = [@Hidden]} : (f32) -> f32
+    ```
+    A `for` over entities inside the body of an `ent.query`: for the
+    entity the query visits, the body runs once for every entity that has
+    the components of the refs (the block's first arguments) and of
+    `with`, and none of `without`, one after another in a fixed order (by
+    archetype, then row). With `entity` the argument after the refs is
+    that entity's id. The remaining arguments are values that go round:
+    each starts as the operand of that place, is in every run what the
+    run before yielded, and what the last run yields is the op's result.
+
+    The body only reads those entities (`ent.get` through the refs, which
+    are not `mut`), and never a component the enclosing query writes: what
+    the query changes of other entities it sends (`ent.apply`), after the
+    loop. It may read and write what the enclosing query binds. Nothing in
+    it changes what entities there are, sends or accumulates.
+  }];
+  let arguments = (ins Variadic<AnyType>:$inits,
+                       OptionalAttr<ArrayAttr>:$with,
+                       OptionalAttr<ArrayAttr>:$without, UnitAttr:$entity);
+  let results = (outs Variadic<AnyType>:$results);
+  let regions = (region SizedRegion<1>:$body);
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    /// The refs: the block's leading arguments.
+    unsigned getNumRefs() {
+      unsigned count = 0;
+      for (::mlir::BlockArgument arg : getBody().front().getArguments()) {
+        if (!::llvm::isa<RefType>(arg.getType()))
+          break;
+        ++count;
+      }
+      return count;
+    }
+    /// The components an entity has to have, and those it must not.
+    ::llvm::SmallVector<::mlir::FlatSymbolRefAttr> getRequired();
+    ::llvm::SmallVector<::mlir::FlatSymbolRefAttr> getExcluded();
+  }];
+}
+
 def Ent_ConnectOp : Ent_Op<"connect", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Add an edge from one entity to another";
@@ -1261,7 +1311,7 @@ def Ent_LoopOp : Ent_Op<"loop", [
 def Ent_YieldOp : Ent_Op<"yield", [
     Pure, Terminator,
     ParentOneOf<["SystemOp", "ScheduleOp", "QueryOp", "StageOp", "RunOp",
-                 "EdgesOp", "MainOp", "LoopOp", "FunctionOp"]>]> {
+                 "EdgesOp", "MainOp", "LoopOp", "FunctionOp", "EachOp"]>]> {
   let summary = "Region terminator; implicit in the custom syntax";
   let description = [{
     Ends a body without operands, and a condition or a function with its

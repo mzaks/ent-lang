@@ -10843,9 +10843,127 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
 /// unless this is its first run or more events happened since it last read
 /// a log than the log holds; then it scans every entity, keeping the
 /// effects where a trigger's stamp is newer.
+/// Replace an `ent.each` by what it does: a loop over the rows of every
+/// archetype its entities may be in, one after another, with the values
+/// that go round handed from each to the next. What it reads of those
+/// entities is loaded from their columns; what its body reads and writes
+/// of the entity the enclosing query visits stays as it is, for that
+/// query's lowering, which comes after.
+static void lowerEach(IRRewriter &rewriter, EachOp each,
+                      const WorldLayout &layout, WorldAccess &world) {
+  Location loc = each.getLoc();
+  Block &body = each.getBody().front();
+  unsigned refs = each.getNumRefs();
+  unsigned given = refs + (each.getEntity() ? 1 : 0);
+  SmallVector<Type> types(each.getResultTypes());
+  SmallVector<Value> carried(each.getInits());
+  Value zero, one;
+  rewriter.setInsertionPoint(each);
+  for (const WorldArchetype &archetype : layout.archetypes) {
+    ArchetypeOp archetypeOp = archetype.op;
+    if (!matches(each, archetypeOp))
+      continue;
+    if (!zero) {
+      zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    }
+    auto rows = scf::ForOp::create(rewriter, loc, zero,
+                                   world.count(loc, archetype), one, carried);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(rows.getBody());
+    Value row = rows.getInductionVar();
+    // Where the archetype holds a component optionally, the entity is
+    // asked whether it has it (or has it not).
+    Value takes;
+    auto ask = [&](FlatSymbolRefAttr component, bool has) {
+      if (!archetypeOp.isOptional(component))
+        return;
+      Value byte = memref::LoadOp::create(
+          rewriter, loc,
+          world.column(archetype, component.getAttr(),
+                       rewriter.getStringAttr("")),
+          ValueRange{row});
+      Value is = arith::CmpIOp::create(
+          rewriter, loc,
+          has ? arith::CmpIPredicate::ne : arith::CmpIPredicate::eq, byte,
+          arith::ConstantIntOp::create(rewriter, loc, 0, 8));
+      takes = takes ? arith::AndIOp::create(rewriter, loc, takes, is)
+                          .getResult()
+                    : is;
+    };
+    for (FlatSymbolRefAttr component : each.getRequired())
+      ask(component, /*has=*/true);
+    for (FlatSymbolRefAttr component : each.getExcluded())
+      ask(component, /*has=*/false);
+    scf::IfOp guarded;
+    if (takes) {
+      guarded = scf::IfOp::create(rewriter, loc, types, takes,
+                                  /*withElseRegion=*/true);
+      rewriter.setInsertionPointToStart(guarded.elseBlock());
+      if (!types.empty())
+        scf::YieldOp::create(rewriter, loc, rows.getRegionIterArgs());
+      rewriter.setInsertionPointToStart(guarded.thenBlock());
+    }
+    // The body, for this entity: its values that go round are the
+    // loop's, its entity this row's.
+    IRMapping mapping;
+    if (each.getEntity())
+      mapping.map(body.getArgument(refs),
+                  world.fromStorage(loc, world.entityId(loc, archetype, row),
+                                    body.getArgument(refs).getType()));
+    for (auto [arg, value] : llvm::zip(body.getArguments().drop_front(given),
+                                       rows.getRegionIterArgs()))
+      mapping.map(arg, value);
+    SmallVector<Operation *> copies;
+    for (Operation &op : body.without_terminator())
+      copies.push_back(rewriter.clone(op, mapping));
+    SmallVector<Value> next;
+    for (Value value : body.getTerminator()->getOperands())
+      next.push_back(mapping.lookupOrDefault(value));
+    // What is read through its refs: this row of the column.
+    SmallVector<GetOp> gets;
+    for (Operation *copy : copies)
+      copy->walk([&](GetOp get) {
+        auto arg = dyn_cast<BlockArgument>(get.getRef());
+        if (arg && arg.getOwner() == &body)
+          gets.push_back(get);
+      });
+    for (GetOp get : gets) {
+      rewriter.setInsertionPoint(get);
+      StringAttr component =
+          cast<RefType>(get.getRef().getType()).getComponent().getAttr();
+      Value stored = memref::LoadOp::create(
+          rewriter, get.getLoc(),
+          world.column(archetype, component, get.getFieldAttr()),
+          ValueRange{row});
+      rewriter.replaceOp(
+          get, world.fromStorage(get.getLoc(), stored, get.getType()));
+    }
+    if (guarded) {
+      rewriter.setInsertionPointToEnd(guarded.thenBlock());
+      if (!types.empty())
+        scf::YieldOp::create(rewriter, loc, next);
+      next.assign(guarded.getResults().begin(), guarded.getResults().end());
+    }
+    // (A loop that hands values on has no end of its own yet.)
+    if (!types.empty()) {
+      rewriter.setInsertionPointToEnd(rows.getBody());
+      scf::YieldOp::create(rewriter, loc, next);
+    }
+    carried.assign(rows.getResults().begin(), rows.getResults().end());
+  }
+  rewriter.replaceOp(each, carried);
+}
+
 static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const WorldLayout &layout, WorldAccess &world,
                        const LoopOptions &options) {
+  // The `for`s over other entities in its body, first: what is left of
+  // each is loops that read columns.
+  SmallVector<EachOp> eaches;
+  query.walk([&](EachOp each) { eaches.push_back(each); });
+  for (EachOp each : eaches)
+    lowerEach(rewriter, each, layout, world);
   if (query.getCascade())
     return lowerCascade(rewriter, query, layout, world, options);
   Location loc = query.getLoc();

@@ -1631,6 +1631,100 @@ LogicalResult GetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+SmallVector<FlatSymbolRefAttr> EachOp::getRequired() {
+  SmallVector<FlatSymbolRefAttr> required;
+  for (BlockArgument arg :
+       getBody().front().getArguments().take_front(getNumRefs()))
+    required.push_back(cast<RefType>(arg.getType()).getComponent());
+  if (std::optional<ArrayAttr> with = getWith())
+    for (Attribute attr : *with)
+      required.push_back(cast<FlatSymbolRefAttr>(attr));
+  return required;
+}
+
+SmallVector<FlatSymbolRefAttr> EachOp::getExcluded() {
+  SmallVector<FlatSymbolRefAttr> excluded;
+  if (std::optional<ArrayAttr> without = getWithout())
+    for (Attribute attr : *without)
+      excluded.push_back(cast<FlatSymbolRefAttr>(attr));
+  return excluded;
+}
+
+LogicalResult EachOp::verify() {
+  auto query = (*this)->getParentOfType<QueryOp>();
+  if (!query)
+    return emitOpError("must be inside an 'ent.query': it runs for the "
+                       "entity that one visits");
+  for (Operation *around = (*this)->getParentOp(); around != query;
+       around = around->getParentOp())
+    if (isa<EachOp, EdgesOp>(around))
+      return emitOpError("cannot be nested in '")
+             << around->getName() << "'";
+  for (Attribute list : {getWithAttr(), getWithoutAttr()})
+    if (list)
+      for (Attribute attr : cast<ArrayAttr>(list))
+        if (!isa<FlatSymbolRefAttr>(attr))
+          return emitOpError("'with' and 'without' list components");
+  Block &block = getBody().front();
+  unsigned refs = getNumRefs();
+  if (getRequired().empty())
+    return emitOpError("binds or names no component: its entities are told "
+                       "by what they have");
+  for (BlockArgument arg : block.getArguments().take_front(refs)) {
+    auto ref = cast<RefType>(arg.getType());
+    if (ref.getIsMutable() || ref.getIsOptional() || ref.isUp() ||
+        ref.getIsBefore() || ref.getIsAfter())
+      return emitOpError("binds ")
+             << ref << "; it only reads the components of its entities";
+    for (Operation *user : arg.getUsers())
+      if (!isa<GetOp>(user))
+        return user->emitOpError("uses a ref of 'ent.each', which is only "
+                                 "read ('ent.get')");
+    // What the enclosing query writes of its own entities this would
+    // read of others, changed or not as the query got to them.
+    for (BlockArgument outer : query.getBody().front().getArguments()) {
+      auto written = dyn_cast<RefType>(outer.getType());
+      if (written && written.getIsMutable() && !written.isUp() &&
+          written.getComponent() == ref.getComponent())
+        return emitOpError("reads ")
+               << ref.getComponent()
+               << " of other entities, which the enclosing query writes";
+    }
+  }
+  unsigned given = refs + (getEntity() ? 1 : 0);
+  if (block.getNumArguments() != given + getInits().size() ||
+      (getEntity() && !isa<EntityType>(block.getArgument(refs).getType())))
+    return emitOpError("has a body of ")
+           << block.getNumArguments() << " arguments; expected its refs, "
+           << (getEntity() ? "the entity, " : "") << "and a value for each "
+           << "of its " << getInits().size() << " operands";
+  auto terminator = cast<YieldOp>(block.getTerminator());
+  if (terminator.getNumOperands() != getInits().size() ||
+      getNumResults() != getInits().size())
+    return emitOpError("yields ")
+           << terminator.getNumOperands() << " values and gives "
+           << getNumResults() << "; expected as many as its "
+           << getInits().size() << " operands";
+  for (unsigned i = 0; i < getInits().size(); ++i) {
+    Type type = getInits()[i].getType();
+    if (block.getArgument(given + i).getType() != type ||
+        terminator.getOperand(i).getType() != type ||
+        getResult(i).getType() != type)
+      return emitOpError("value #")
+             << i << " changes its type on the way round; it is " << type;
+  }
+  LogicalResult result = success();
+  getBody().walk([&](Operation *op) {
+    if (succeeded(result) &&
+        isa<ApplyOp, AccumulateOp, CombineOp, ConnectOp, SpawnOp, DespawnOp,
+            AddOp, RemoveOp>(op))
+      result = op->emitOpError("cannot be in an 'ent.each': its body reads "
+                               "other entities, and what it finds is acted "
+                               "on after it");
+  });
+  return result;
+}
+
 LogicalResult SetOp::verify() {
   if (!getRef().getType().getIsMutable())
     return emitOpError("requires a mutable reference, got ")

@@ -1,0 +1,45 @@
+// A `for` over entities inside another (for_in_for.test).
+import console
+component Tower { x: f32, y: f32, range: f32 }
+component Aim { target: entity, found: bool, seen: i32 }
+component Enemy { x: f32, y: f32 }
+component Life { hp: f32 }
+tag Hidden
+unique Round: i32
+default_capacity 64
+world {
+  for i in 0..3 {
+    let t = spawn { Tower { x: 10.0 * i as f32, y: 0.0, range: 6.0 } }
+    spawn { Tower { x: 10.0 * i as f32, y: 20.0, range: 3.0 }, Aim { target: t, found: false, seen: 0 } }
+  }
+  for i in 0..8 {
+    if i == 5 { spawn { Enemy { x: 4.0 * i as f32, y: 19.0 }, Life { hp: 3.0 }, Hidden } }
+    else { spawn { Enemy { x: 4.0 * i as f32, y: 19.0 }, Life { hp: 3.0 } } }
+  }
+}
+system aim() {
+  Round += 1
+  // Each tower with an aim: the nearest enemy in range that is not hidden.
+  for me, t: Tower, a: mut Aim {
+    var best = t.range * t.range
+    var target = me
+    var found = false
+    var seen = 0
+    for e, en: Enemy without Hidden where (en.x - t.x) * (en.x - t.x) + (en.y - t.y) * (en.y - t.y) <= best {
+      best = (en.x - t.x) * (en.x - t.x) + (en.y - t.y) * (en.y - t.y)
+      target = e
+      found = true
+      seen += 1
+    }
+    a.target = target
+    a.found = found
+    a.seen = seen
+    if found { Life(target).hp -= 1.0 }
+  }
+  for t: Tower, a: Aim { put("{Round}: tower at {t.x} sees {a.seen}, found {a.found}") }
+  for en: Enemy, l: Life { put("{Round}:   enemy at {en.x}: {l.hp}") }
+  // The enemies move left.
+  for en: mut Enemy { en.x -= 2.0 }
+}
+schedule f() { aim() }
+main { loop { f() } until Round == 2 }
