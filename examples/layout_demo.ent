@@ -13,7 +13,8 @@
 // card ends. The entries and the buttons light up under the mouse, and
 // fade again. A note floats at the mouse, over everything else, with a
 // mark that floats over its text; the pointer goes through them. A card
-// goes dark while it is pressed, and goes when it is clicked. Enter
+// goes dark while it is pressed, and goes when it is clicked. The dial
+// in the header is drawn by this program, where the layout puts it. Enter
 // sends the last card away; I shows the inspector, and O hides it. Escape
 // or closing the window ends the program.
 import window
@@ -23,10 +24,21 @@ import layout_window
 tag SideBar
 tag Cards
 tag Note
+tag Dial
 tag Card
 // A box that is another colour while the pointer is over it.
 component Shade { idle: i32, over: i32 }
 default_capacity 256
+
+// A box the program draws itself: a dial, as far round as `data` says
+// (of 360), in the box the layout gives it.
+proc dial(x: f32, y: f32, w: f32, h: f32, data: i32) {
+  let r = min(w, h) * 0.5
+  circle(x + w * 0.5, y + h * 0.5, r, 0x2a3640)
+  sector(x + w * 0.5, y + h * 0.5, r - 3.0, -90.0, data as f32 - 90.0,
+         0x3a7bd5)
+  circle(x + w * 0.5, y + h * 0.5, r * 0.45, 0x1c242c)
+}
 
 world {
   Window.width = 900
@@ -71,7 +83,7 @@ world {
       Pad { left: 10.0, right: 10.0, top: 0.0, bottom: 0.0 },
       Align { x: Place.Start, y: Place.Middle },
       Fill { colour: 0x2a3640 }, Shade { idle: 0x2a3640, over: 0x3a7bd5 },
-      Transition { seconds: 0.3, ease: Ease.Out, x: false, y: false,
+      Transition { seconds: 0.3, ease: ease_out, x: false, y: false,
                    w: false, h: false, fill: true, overlay: true,
                    round: false, border_colour: false,
                    border_width: false, touch: false },
@@ -119,6 +131,14 @@ world {
   connect (cards)-[Inside]->(rest)
   connect (footer)-[Inside]->(rest)
 
+  // A dial before the buttons, which the program draws.
+  let turns = spawn {
+    Box { x: 0.0, y: 0.0, w: 36.0, h: 36.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Custom { draw: dial, data: 0 },
+    Dial
+  }
+  connect (turns)-[Inside]->(header)
   // Buttons as big as what they say, and 12 more on either side.
   for i in 0..4 {
     let button = spawn {
@@ -127,7 +147,7 @@ world {
       Stack { row: true, pad: 0.0, gap: 0.0 },
       Pad { left: 12.0, right: 12.0, top: 7.0, bottom: 7.0 },
       Fill { colour: 0x3a7bd5 }, Shade { idle: 0x3a7bd5, over: 0x70c0ff },
-      Transition { seconds: 0.2, ease: Ease.Out, x: false, y: false,
+      Transition { seconds: 0.2, ease: ease_out, x: false, y: false,
                    w: false, h: false, fill: true, overlay: true,
                    round: false, border_colour: false,
                    border_width: false, touch: false },
@@ -196,7 +216,7 @@ world {
                colour: 0x3a7bd5 },
       Limits { min_w: 120.0, max_w: if i == 1 { 260.0 } else { 0.0 },
                min_h: 0.0, max_h: 0.0 },
-      Transition { seconds: 0.25 + 0.15 * i as f32, ease: Ease.InOut, x: true, y: true,
+      Transition { seconds: 0.25 + 0.15 * i as f32, ease: ease_in_out, x: true, y: true,
                    w: true, h: true, fill: true, overlay: true,
                    round: false, border_colour: false,
                    border_width: false, touch: false },
@@ -248,6 +268,8 @@ system interact() {
   for e, f: mut Fill, s: Shade {
     f.colour = if e.has(Hovered) { s.over } else { s.idle }
   }
+  // The dial goes round, once in six seconds.
+  for c: mut Custom with Dial { c.data = (Window.frame % 360) as i32 }
   // A card that is pressed has black laid on it, a third of it.
   for e with Card {
     if e.has(Pressed) != e.has(Overlay) {

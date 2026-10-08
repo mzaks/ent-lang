@@ -2,7 +2,9 @@
 // would be drawn stands in for devices/window.c, which needs a display
 // and raylib. What is drawn, in which order, clipped, shifted and shaded
 // how; boxes on their way to another place, size, colour, corners and
-// border (Transition, Enter, Leave, Gone), overlays on
+// border (Transition, Enter, Leave, Gone), a box the program draws and a
+// way of easing that is the program's (a proc and a fn as values),
+// overlays on
 // one another, what scrolls dragged and let go, and the inspector.
 // RUN: mkdir -p %t.dir
 // RUN: cp %S/../../devices/window.ent %t.dir/window.ent
@@ -48,7 +50,12 @@
 // CHECK-NEXT: shift 0 32
 // CHECK-NEXT: shade 180000 0.53
 // CHECK-NEXT: rect 277 17 6 6 00e05040
+// And a box the program draws itself: its proc is called where the box
+// comes, under what is laid on the window.
 // CHECK-NEXT: shift 0 0
+// CHECK-NEXT: shade 000000 0.50
+// CHECK-NEXT: rect 20 170 60 16 00123456
+// CHECK-NEXT: label 22 172 "mark 7"
 // CHECK-NEXT: shade 000000 0.00
 // (The pointer is where the card is, and does not find it: it is on its
 // way.)
@@ -63,22 +70,23 @@
 // CHECK:      shift 0 8
 // Let go, the list goes on, and the third row shows; the card is where
 // it is to be, under a quarter of red on half of black. It has a bar
-// under its text now, which comes from 20 to the left, a fifth of the
-// way a frame: the card was there before it.
+// under its text now, which comes from 20 to the left: the card was
+// there before it. In a way of the program's own, a fn that the bar's
+// Transition names: not at all for half the time, and then all at once.
 // CHECK:      frame 5
 // CHECK:      write 14 -31 in 92 "row 0" 00ffffff
 // CHECK:      write 14 189 in 92 "row 2" 00ffffff
 // CHECK:      shade 660000 0.63
 // CHECK-NEXT: rounded 120 10 170 180 by 8 8 0 0 00304050
 // CHECK-NEXT: write 130 20 in 150 "a text that goes on in the next line" 00a0b0c0
-// CHECK-NEXT: shift -16 0
+// CHECK-NEXT: shift -20 0
 // CHECK-NEXT: rect 130 68 150 20 00505050
 // CHECK-NEXT: shift 0 0
 // Slower and slower. The pointer is on the card, which is where it is to
 // be.
 // CHECK:      frame 6
 // CHECK:      write 14 -41.5 in 92 "row 0" 00ffffff
-// CHECK:      shift -12 0
+// CHECK:      shift -20 0
 // CHECK:      the pointer is on the card
 // Its colour is to be another: a fifth of the way a frame. And the list
 // is 40 narrower, so the card is to start 40 further left and be as
@@ -86,14 +94,13 @@
 // laid out for how wide it is right now: the text has 8 more, and what
 // floats at the text's corner is 8 further right. Its first corner is to
 // be 10 rounder, and the edge at its top 10 thicker and white: each a
-// fifth of the way. The bar is as far from its place as the card and as
-// its own way has it.
+// fifth of the way. The bar is as far from its place as the card: it is
+// where it is to be in the card now.
 // CHECK-NEXT: frame 7
 // CHECK:      rect 10 10 60 180 00202020
 // CHECK:      shift 32 0
 // CHECK:      rounded 80 10 178 180 by 10 8 0 0 ff306650
 // CHECK-NEXT: write 90 20 in 158 "a text that goes on in the next line" 00a0b0c0
-// CHECK-NEXT: shift 24 0
 // CHECK-NEXT: rect 90 52 150 20 00505050
 // CHECK:      edges 80 10 178 180 of 1 1 5 1 ff6195dd
 // CHECK:      rect 245 17 6 6 00e05040

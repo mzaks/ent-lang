@@ -1,0 +1,40 @@
+// A fn or proc is a value where a type says what it takes and gives
+// (`fn(f32) -> f32`, `proc(i32, f32)`): a field holds one, a fn takes
+// one, and what holds one is called like the function itself. The
+// program is closed, so the value is the number of the function among
+// those of its shape that are used as values, and a call through it asks
+// which one it is. A proc has a body in ent too: it acts by the procs it
+// calls, and may give a value.
+// RUN: %ent run %S/Inputs/fn_values.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/fn_values.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/fn_values.ent -I %S/../../devices -o %t.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir | FileCheck %s --check-prefix=HEADER
+
+// Each shape by its own fn and its own proc.
+// CHECK:      shape 1: 4.0
+// CHECK-NEXT:   (a square, 16.0 twice)
+// CHECK-NEXT: SHAPE 2
+// CHECK-NEXT:   small: 8.0
+// CHECK-NEXT: SHAPE 3
+// CHECK-NEXT:   big: 25.0
+// CHECK-NEXT:   (a square, 625.0 twice)
+// A proc that calls a proc and gives a value.
+// CHECK-NEXT: shape 7: 1.5
+// CHECK-NEXT: next 8
+// The first holds another proc now.
+// CHECK-NEXT: SHAPE 1
+// CHECK-NEXT:   small: 4.0
+
+// The shapes are enums of the functions used as values; a call through
+// one is a call of a function that calls the one it is.
+// IR-DAG: ent.enum @fn_of_f32_to_f32 ["none", "square", "half"]
+// IR-DAG: ent.enum @proc_of_i32_f32 ["none", "say", "shout"]
+// IR-DAG: ent.function @call_fn_of_f32_to_f32(
+// IR-DAG: ent.function proc @call_proc_of_i32_f32(
+
+// A host sees them as that: the number of a function.
+// HEADER: ent_fn_of_f32_to_f32_none = 0,
+// HEADER: ent_fn_of_f32_to_f32_square = 1,
+// HEADER: ent_fn_of_f32_to_f32_half = 2

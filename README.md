@@ -246,7 +246,9 @@ come with the compiler, in `devices/`, and two more that need
   where and what they are to be in so many seconds (`Transition`: place,
   size, colours, corners and border, each or not; with where a new box
   comes from and where one that goes away goes, which takes no room
-  while it does), lists
+  while it does; how far along it is at each moment is a fn the
+  `Transition` names, the library's or the program's), calls a proc of
+  the program's for a box the program draws itself (`Custom`), lists
   the boxes in a panel (`Inspector`), and offers all the steps as one
   schedule, `ui`:
   `tools/ent run -I examples examples/layout_demo.ent`; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are

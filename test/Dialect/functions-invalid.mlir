@@ -67,8 +67,21 @@ ent.main {
 
 // -----
 
-// expected-error @+1 {{is a proc with a body, which is not supported yet}}
+// A proc with a body acts by the procs it calls; it has nothing of the
+// world either.
+ent.resource @Count (n: i32)
 ent.function proc @beep(%x: i32) -> i32 {
+  // expected-error @+1 {{'ent.read' op must be inside an 'ent.system', a condition or 'ent.main'}}
+  %n = ent.read @Count "n" : i32
+  ent.yield %x : i32
+}
+
+// -----
+
+ent.function proc @act(i32)
+ent.function @count(%x: i32) -> i32 {
+  // expected-error @+1 {{calls a proc in a function's body; a function only computes}}
+  ent.invoke proc @act(%x) : (i32) -> ()
   ent.yield %x : i32
 }
 

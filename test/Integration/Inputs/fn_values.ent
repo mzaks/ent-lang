@@ -1,0 +1,40 @@
+// A fn or a proc as a value: in a field, in a parameter, called through
+// what holds it, compared; and procs with bodies (fn_values.test).
+import console
+component Shape { area: fn(side: f32) -> f32, show: proc(n: i32, v: f32), side: f32 }
+component Plain { n: i32 }
+default_capacity 8
+
+fn square(side: f32) -> f32 { side * side }
+fn half(side: f32) -> f32 { side * side * 0.5 }
+proc say(n: i32, v: f32) { put("shape {n}: {v}") }
+proc shout(n: i32, v: f32) {
+  put("SHAPE {n}")
+  if v > 10.0 { put("  big: {v}") } else { put("  small: {v}") }
+}
+// A proc that gives something, and calls another.
+proc both(n: i32, v: f32) -> i32 {
+  say(n, v)
+  n + 1
+}
+// A fn that takes one.
+fn twice(f: fn(f32) -> f32, x: f32) -> f32 { f(f(x)) }
+
+world {
+  spawn { Shape { area: square, show: say, side: 2.0 }, Plain { n: 1 } }
+  spawn { Shape { area: half, show: shout, side: 4.0 }, Plain { n: 2 } }
+  spawn { Shape { area: square, show: shout, side: 5.0 }, Plain { n: 3 } }
+}
+system work() {
+  for s: Shape, p: Plain {
+    let area = s.area
+    let show = s.show
+    show(p.n, area(s.side))
+    if s.area == square { put("  (a square, {twice(area, s.side)} twice)") }
+  }
+  for s: mut Shape, p: Plain where p.n == 1 { s.show = shout }
+  let next = both(7, 1.5)
+  put("next {next}")
+}
+schedule frame() { work() }
+main { frame()  frame() }

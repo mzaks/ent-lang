@@ -111,8 +111,8 @@ module.exports = grammar({
       seq('->', choice($._type, seq('(', list($._type), ')'))),
 
     function: ($) =>
-      seq('fn', field('name', $.identifier), $.parameters, $.result,
-          field('body', $.block)),
+      seq(choice('fn', 'proc'), field('name', $.identifier), $.parameters,
+          optional($.result), field('body', $.block)),
 
     extern_function: ($) =>
       prec.right(seq('extern', choice('fn', 'proc'),
@@ -138,7 +138,15 @@ module.exports = grammar({
 
     // Types
 
-    _type: ($) => choice($.primitive_type, $.text_type, $._name),
+    _type: ($) =>
+      choice($.primitive_type, $.text_type, $.callable_type, $._name),
+    // fn(t: f32) -> f32, proc(i32): a fn or proc of that shape, as a value.
+    callable_type: ($) =>
+      prec.right(seq(choice('fn', 'proc'), '(',
+                     optional(list(choice(
+                         seq(field('name', $.identifier), ':', $._type),
+                         $._type))),
+                     ')', optional(seq('->', $._type)))),
     primitive_type: (_) =>
       choice('f32', 'f64', 'bool', 'i1', 'i8', 'i16', 'i32', 'i64', 'index',
              'entity'),

@@ -24,6 +24,12 @@ component Round { top_left: f32, top_right: f32, bottom_left: f32,
 component Border {
   left: f32, right: f32, top: f32, bottom: f32, between: f32, colour: i32
 }
+// A box the program draws itself: its proc is called where the box
+// comes among the others, with where the box is, how big, and `data`,
+// which is the program's to say what with.
+component Custom {
+  draw: proc(x: f32, y: f32, w: f32, h: f32, data: i32), data: i32
+}
 // A picture from a file (the window's `picture_load` gives its number),
 // drawn into the box, its colours times `tint` (0xffffff: as they are).
 // (`Aspect { ratio: picture_ratio(image) }` keeps its shape.)
@@ -55,8 +61,9 @@ component Overlay { colour: i32 }
 tag Drag
 
 // A box that is not at once where and what it is now to be: it gets
-// there in so many seconds, slowly at first (`In`), at the end (`Out`),
-// both or neither, in what it says here: where it is from left to right
+// there in so many seconds, as far along at each moment as its `ease`
+// says (`linear`, `ease_in`, `ease_out`, `ease_in_out`, or a fn of the
+// program's from 0 to 1), in what it says here: where it is from left to right
 // (`x`) and from top to bottom (`y`: and what is inside it goes with
 // it), how wide and high it is (`w`, `h`: and what is inside it is laid
 // out for how big it is right then), its `Fill` and `Overlay` colours,
@@ -64,9 +71,8 @@ tag Drag
 // sets out when it is to be another, and takes the seconds from then.
 // While it is on its way to another place, the pointer does not find it,
 // nor what is inside it, unless it says `touch`.
-enum Ease { Linear, In, Out, InOut }
 component Transition {
-  seconds: f32, ease: Ease, x: bool, y: bool, w: bool, h: bool, fill: bool,
+  seconds: f32, ease: fn(t: f32) -> f32, x: bool, y: bool, w: bool, h: bool, fill: bool,
   overlay: bool, round: bool, border_colour: bool, border_width: bool,
   touch: bool
 }
@@ -257,14 +263,16 @@ fn further(t: f32, seconds: f32, frame: f32) -> f32 {
   if seconds > 0.0 { min(1.0, t + frame / seconds) } else { 1.0 }
 }
 
-// How far along a box is that is `t` of its time on its way.
-fn eased(t: f32, ease: Ease) -> f32 {
-  if ease == Ease.In { t * t }
-  else if ease == Ease.Out { 1.0 - (1.0 - t) * (1.0 - t) }
-  else if ease == Ease.InOut {
-    if t < 0.5 { 2.0 * t * t } else { 1.0 - 2.0 * (1.0 - t) * (1.0 - t) }
-  } else { t }
+// How far along a box is that is `t` of its time on its way: as its
+// `Transition` says, which names one of these, or a fn of the program's.
+// (Each takes 0 to 1 and gives 0 to 1.)
+fn linear(t: f32) -> f32 { t }
+fn ease_in(t: f32) -> f32 { t * t }
+fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t) * (1.0 - t) }
+fn ease_in_out(t: f32) -> f32 {
+  if t < 0.5 { 2.0 * t * t } else { 1.0 - 2.0 * (1.0 - t) * (1.0 - t) }
 }
+fn eased(t: f32, ease: fn(f32) -> f32) -> f32 { ease(t) }
 
 // What is laid on the boxes, and where those in a `Transition` are right
 // now: after `layout_heights`, which says where they are to be.
@@ -691,7 +699,7 @@ system draw() {
         optional t: Text, optional k: Stack, optional p: Pad,
         optional how: Align, optional st: TextStyle, optional more: Expand,
         optional rc: Round, optional pic: Picture, optional own: Shown,
-        optional sr: ShownRound
+        optional sr: ShownRound, optional cu: Custom
         top down dfs Inside
         where l.z == z && b.x < Window.width as f32 && b.x + b.w > 0.0 &&
               b.y < Window.height as f32 && b.y + b.h > 0.0 &&
@@ -749,6 +757,9 @@ system draw() {
       }
       if let image = pic.image, let tint = pic.tint {
         picture(image, b.x, b.y, b.w, b.h, tint)
+      }
+      if let paint = cu.draw, let data = cu.data {
+        paint(b.x, b.y, bw, bh, data)
       }
       if let said = t.text, let size = t.size, let ink = t.colour {
         var left = 0.0

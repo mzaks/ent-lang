@@ -180,6 +180,27 @@ struct Function {
   bool proc = false;
 };
 
+/// The fns or procs of one shape (what they take and give) as values: a
+/// field can hold one, and what holds one can be called. The program is
+/// closed, so a value is the number of the function among those of the
+/// shape that are used as values anywhere (0: none), kept as an enum of
+/// them, and a call through one calls a fn that asks which it is and
+/// calls that one.
+struct Callable {
+  /// The enum's IR symbol (no module's: one shape, one type everywhere).
+  std::string name;
+  bool proc = false;
+  SmallVector<Type> params;
+  /// What it gives back, if anything.
+  Type result;
+  /// The IR symbols of the functions used as values, in their order:
+  /// case `i + 1` of the enum.
+  SmallVector<std::string> targets;
+  /// Whether anything calls through such a value.
+  bool called = false;
+  Operation *op = nullptr;
+};
+
 /// What a name stands for in a body.
 struct Variable {
   /// (Other: a component of the entity at the other end of an edge that
@@ -434,6 +455,14 @@ private:
   FailureOr<mlir::Value> emitIf(const Expr &expr, Type expected);
   FailureOr<mlir::Value> emitSpawn(const Expr &expr);
   FailureOr<mlir::Value> emitInvoke(const Expr &expr);
+  FailureOr<Type> parseCallableType(bool proc);
+  Callable *callableOf(Type type);
+  Callable *callableNamed(StringRef name);
+  FailureOr<mlir::Value> emitFunctionValue(const Expr &expr,
+                                           Callable &callable);
+  FailureOr<SmallVector<mlir::Value>> emitCallThrough(const Expr &expr,
+                                                      Callable &callable);
+  LogicalResult finishCallables();
   FailureOr<SmallVector<mlir::Value>> emitCall(const Expr &expr);
   FailureOr<SmallVector<mlir::Value>>
   emitSeveral(const Expr &expr, ArrayRef<Type> expected);
@@ -551,6 +580,13 @@ private:
   /// The schedules themselves, for a schedule that runs one.
   Declared<Operation *> scheduleOps;
   Declared<Function> functions;
+  /// The shapes of fns and procs that are types, by how they are written
+  /// out (see callableKey) and by their enum's symbol.
+  std::vector<std::unique_ptr<Callable>> callables;
+  llvm::StringMap<Callable *> callablesByKey;
+  llvm::StringMap<Callable *> callablesByName;
+  /// Parsing the body of a proc: a function that may call procs.
+  bool inProc = false;
   /// The cases of every enum, in the order they number them.
   Declared<SmallVector<std::string>> enums;
   /// Parsing the body of a system (or `world`) or of a fn: where functions
@@ -620,6 +656,8 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
     return nullptr;
   root->loading = false;
   finished.push_back(root);
+  if (failed(finishCallables()))
+    return nullptr;
 
   // Every module's world is set up before `main` does anything else, a
   // module's after those it imports, wherever they were declared.
@@ -666,6 +704,8 @@ LogicalResult Parser::parseDeclarations() {
     }
     else if (consumeKeyword("fn"))
       result = parseFunction(/*proc=*/false, /*isExtern=*/false);
+    else if (consumeKeyword("proc"))
+      result = parseFunction(/*proc=*/true, /*isExtern=*/false);
     else if (consumeKeyword("enum"))
       result = parseEnum();
     else if (consumeKeyword("schedule"))
@@ -712,13 +752,8 @@ LogicalResult Parser::parseDeclarations() {
                              "archetype declared before this: 'capacity' "
                              "gives one of those another capacity");
       declared->setAttr("capacity", builder.getI64IntegerAttr(*capacity));
-    } else if (token.isKeyword("proc") || token.isKeyword("device") ||
-               token.isKeyword("prefab")) {
-      result = error(
-          token.isKeyword("proc")
-              ? "'proc' with a body is not supported yet; 'extern proc' "
-                "declares one implemented in C"
-              : "'" + token.spelling + "' is not supported yet");
+    } else if (token.isKeyword("device") || token.isKeyword("prefab")) {
+      result = error("'" + token.spelling + "' is not supported yet");
     } else {
       result = error("expected a declaration (import, component, tag, "
                      "unique, enum, relation, archetype, system, fn, "
@@ -815,6 +850,13 @@ LogicalResult Parser::parseImport() {
 
 FailureOr<Type> Parser::parseType() {
   llvm::SMLoc at = token.loc;
+  // fn(T, ...) -> U, proc(T, ...): one of the fns or procs of that shape.
+  if ((token.isKeyword("fn") || token.isKeyword("proc")) &&
+      peek().is(Token::LParen)) {
+    bool proc = token.isKeyword("proc");
+    advance();
+    return parseCallableType(proc);
+  }
   FailureOr<std::string> name = identifier("a type");
   if (failed(name))
     return failure();
@@ -849,6 +891,269 @@ FailureOr<Type> Parser::parseType() {
                          "'; expected f32, f64, bool, i8, i16, i32, i64, "
                          "index, entity, text[N] or an enum");
   return type;
+}
+
+/// How a type is written in the name of a shape's enum.
+static std::string shapeWord(Type type) {
+  if (type.isInteger(1))
+    return "bool";
+  if (auto text = dyn_cast<TextType>(type))
+    return ("text" + Twine(text.getCapacity())).str();
+  if (isa<EntityType>(type))
+    return "entity";
+  std::string word;
+  llvm::raw_string_ostream os(word);
+  if (auto named = dyn_cast<EnumType>(type))
+    os << named.getName().getValue();
+  else
+    os << type;
+  for (char &c : word)
+    if (!llvm::isAlnum(c))
+      c = '_';
+  return word;
+}
+
+// (name: T, ...) [-> U], after `fn` or `proc`: the type of the fns or
+// procs that take and give those.
+FailureOr<Type> Parser::parseCallableType(bool proc) {
+  llvm::SMLoc at = token.loc;
+  if (failed(expect(Token::LParen, "'('")))
+    return failure();
+  auto callable = std::make_unique<Callable>();
+  callable->proc = proc;
+  while (!token.is(Token::RParen)) {
+    // (A parameter may be named, for the reader.)
+    if (token.is(Token::Identifier) && peek().is(Token::Colon)) {
+      advance();
+      advance();
+    }
+    FailureOr<Type> type = parseType();
+    if (failed(type))
+      return failure();
+    callable->params.push_back(*type);
+    if (!consumeIf(Token::Comma))
+      break;
+  }
+  if (failed(expect(Token::RParen, "')'")))
+    return failure();
+  if (token.is(Token::Minus) && peek().is(Token::Greater)) {
+    advance();
+    advance();
+    llvm::SMLoc resultAt = token.loc;
+    FailureOr<Type> type = parseType();
+    if (failed(type))
+      return failure();
+    if (!type->isIntOrFloat() && !isa<EnumType>(*type))
+      return error(resultAt, "a fn or proc that is a value gives a number, "
+                             "a bool or an enum, or nothing");
+    callable->result = *type;
+  } else if (!proc) {
+    return error(at, "a fn gives a value back ('-> type')");
+  }
+  std::string key = proc ? "proc" : "fn";
+  std::string name = proc ? "proc_of" : "fn_of";
+  for (Type type : callable->params) {
+    llvm::raw_string_ostream(key) << " " << type;
+    name += "_" + shapeWord(type);
+  }
+  if (callable->result) {
+    llvm::raw_string_ostream(key) << " -> " << callable->result;
+    name += "_to_" + shapeWord(callable->result);
+  }
+  auto known = callablesByKey.find(key);
+  if (known != callablesByKey.end())
+    return Type(EnumType::get(
+        context, FlatSymbolRefAttr::get(context, known->second->name)));
+  // (Two shapes whose names come out the same are told apart.)
+  while (callablesByName.count(name) ||
+         SymbolTable::lookupSymbolIn(module, name))
+    name += "_";
+  callable->name = name;
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToStart(module.getBody());
+    callable->op = EnumOp::create(builder, loc(at),
+                                  builder.getStringAttr(name),
+                                  builder.getStrArrayAttr({"none"}));
+  }
+  enums.ofSymbol(name) = {"none"};
+  Callable *made = callable.get();
+  callablesByKey[key] = made;
+  callablesByName[name] = made;
+  callables.push_back(std::move(callable));
+  return Type(EnumType::get(context, FlatSymbolRefAttr::get(context, name)));
+}
+
+/// The shape a type stands for, if it is the type of fns or procs.
+Callable *Parser::callableOf(Type type) {
+  auto named = dyn_cast_or_null<EnumType>(type);
+  if (!named)
+    return nullptr;
+  auto known = callablesByName.find(named.getName().getValue());
+  return known == callablesByName.end() ? nullptr : known->second;
+}
+
+/// The shape of what the name `name` holds, if that is a fn or proc.
+Callable *Parser::callableNamed(StringRef name) {
+  const Variable *variable = lookup(name);
+  if (!variable || variable->kind != Variable::Value)
+    return nullptr;
+  return callableOf(variable->value.getType());
+}
+
+/// The name of a fn or proc where a value of the shape `callable` is
+/// expected: that function, as one of the shape's.
+FailureOr<mlir::Value> Parser::emitFunctionValue(const Expr &expr,
+                                                 Callable &callable) {
+  Function &function = functions[expr.name];
+  StringRef kind = callable.proc ? "proc" : "fn";
+  if (function.proc != callable.proc)
+    return error(expr.loc, "'" + expr.name + "' is a " +
+                               (function.proc ? "proc" : "fn") + ", and a " +
+                               kind + " is expected here");
+  if (TypeRange(function.params) != TypeRange(callable.params) ||
+      function.results.size() != (callable.result ? 1u : 0u) ||
+      (callable.result && function.result != callable.result))
+    return error(expr.loc, "'" + expr.name + "' does not take and give "
+                           "what the " + kind + " expected here does");
+  std::string target = symbol(expr.name).getValue().str();
+  auto *known = llvm::find(callable.targets, target);
+  unsigned number = known - callable.targets.begin() + 1;
+  if (known == callable.targets.end()) {
+    if (number >= EnumType::kMaxCases)
+      return error(expr.loc, "more than " +
+                                 Twine(unsigned(EnumType::kMaxCases) - 1) +
+                                 " fns or procs of one shape are used as "
+                                 "values");
+    callable.targets.push_back(target);
+    std::string label = target;
+    for (char &c : label)
+      if (!llvm::isAlnum(c))
+        c = '_';
+    SmallVector<std::string> &labels = enums.ofSymbol(callable.name);
+    labels.push_back(label);
+    SmallVector<StringRef> all(labels.begin(), labels.end());
+    callable.op->setAttr("cases", builder.getStrArrayAttr(all));
+  }
+  auto type =
+      EnumType::get(context, FlatSymbolRefAttr::get(context, callable.name));
+  Location at = loc(expr.loc);
+  return UnrealizedConversionCastOp::create(
+             builder, at, type, integer(at, type.getStorageType(), number))
+      .getResult(0);
+}
+
+/// A call through a name that holds a fn or proc: of the fn that asks
+/// which one it is and calls that (see finishCallables).
+FailureOr<SmallVector<mlir::Value>>
+Parser::emitCallThrough(const Expr &expr, Callable &callable) {
+  if (!inSystem)
+    return error(expr.loc, "'" + expr.name + "' can only be called in a "
+                           "system, a fn or a proc");
+  if (inFunction && callable.proc && !inProc)
+    return error(expr.loc, "'" + expr.name + "' is a proc: it acts, and a "
+                           "fn only computes");
+  if (expr.operands.size() != callable.params.size())
+    return error(expr.loc, "'" + expr.name + "' takes " +
+                               Twine(callable.params.size()) +
+                               " argument(s), not " +
+                               Twine(expr.operands.size()));
+  SmallVector<mlir::Value> args;
+  args.push_back(lookup(expr.name)->value);
+  for (auto [operand, type] : llvm::zip(expr.operands, callable.params)) {
+    FailureOr<mlir::Value> arg = emit(*operand, type);
+    if (failed(arg))
+      return failure();
+    if (arg->getType() != type)
+      return error(operand->loc, "argument has a different type than the "
+                                 "parameter");
+    args.push_back(*arg);
+  }
+  callable.called = true;
+  SmallVector<Type> results;
+  if (callable.result)
+    results.push_back(callable.result);
+  auto invoke = InvokeOp::create(
+      builder, loc(expr.loc), results,
+      FlatSymbolRefAttr::get(context, "call_" + callable.name), args,
+      callable.proc ? builder.getUnitAttr() : UnitAttr());
+  return SmallVector<mlir::Value>(invoke.getResults());
+}
+
+/// When everything is parsed, and every fn and proc that is used as a
+/// value is known: for each shape something calls through, the function
+/// that takes one of them and what it takes, and calls the one it is.
+/// None does nothing, and gives nought.
+LogicalResult Parser::finishCallables() {
+  for (auto &callable : callables) {
+    if (!callable->called)
+      continue;
+    Location at = callable->op->getLoc();
+    auto type = EnumType::get(
+        context, FlatSymbolRefAttr::get(context, callable->name));
+    SmallVector<Type> params{type};
+    params.append(callable->params.begin(), callable->params.end());
+    SmallVector<Type> results;
+    if (callable->result)
+      results.push_back(callable->result);
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToEnd(module.getBody());
+    auto op = FunctionOp::create(
+        builder, at, builder.getStringAttr("call_" + callable->name),
+        builder.getTypeArrayAttr(params), builder.getTypeArrayAttr(results),
+        callable->proc);
+    auto *block = new Block();
+    op.getBody().push_back(block);
+    for (Type param : params)
+      block->addArgument(param, at);
+    builder.setInsertionPointToEnd(block);
+    mlir::Value which =
+        UnrealizedConversionCastOp::create(builder, at, type.getStorageType(),
+                                           block->getArgument(0))
+            .getResult(0);
+    ArrayRef<BlockArgument> given = block->getArguments().drop_front();
+    // One after another: is it this one? Then that is called.
+    std::function<mlir::Value(unsigned)> from = [&](unsigned index)
+        -> mlir::Value {
+      if (index == callable->targets.size()) {
+        if (!callable->result)
+          return {};
+        if (auto named = dyn_cast<EnumType>(callable->result))
+          return UnrealizedConversionCastOp::create(
+                     builder, at, named,
+                     integer(at, named.getStorageType(), 0))
+              .getResult(0);
+        return arith::ConstantOp::create(
+            builder, at,
+            cast<TypedAttr>(builder.getZeroAttr(callable->result)));
+      }
+      mlir::Value is = arith::CmpIOp::create(
+          builder, at, arith::CmpIPredicate::eq, which,
+          integer(at, type.getStorageType(), index + 1));
+      auto branch = scf::IfOp::create(builder, at, results, is,
+                                      /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard inner(builder);
+        builder.setInsertionPointToStart(branch.thenBlock());
+        auto invoke = InvokeOp::create(
+            builder, at, results,
+            FlatSymbolRefAttr::get(context, callable->targets[index]),
+            ValueRange(given),
+            callable->proc ? builder.getUnitAttr() : UnitAttr());
+        if (callable->result)
+          scf::YieldOp::create(builder, at, invoke.getResults());
+        builder.setInsertionPointToStart(branch.elseBlock());
+        mlir::Value other = from(index + 1);
+        if (callable->result)
+          scf::YieldOp::create(builder, at, other);
+      }
+      return callable->result ? branch.getResult(0) : mlir::Value();
+    };
+    mlir::Value value = from(0);
+    YieldOp::create(builder, at,
+                    value ? ValueRange(value) : ValueRange());
+  }
+  return success();
 }
 
 // enum Name { First, Second, ... }
@@ -1267,8 +1572,8 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     return error(at,
                  "an extern " + kind + " has no body; it is implemented in C");
   if (!isExtern && !token.is(Token::LBrace))
-    return error(at, "a fn has a body ('{ value }'); 'extern fn' declares "
-                     "one implemented in C");
+    return error(at, "a " + kind + " has a body ('{ ... }'); 'extern " +
+                         kind + "' declares one implemented in C");
   if (isExtern)
     consumeIf(Token::Semicolon);
   if (name->size() == 3 && (*name == "min" || *name == "max" || *name == "len"))
@@ -1295,8 +1600,22 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     bind(param, Variable::ofValue(block->addArgument(type, loc(at))));
   llvm::SaveAndRestore<bool> calls(inSystem, true);
   llvm::SaveAndRestore<bool> computes(inFunction, true);
-  // Statements, then the value the fn gives.
+  llvm::SaveAndRestore<bool> acts(inProc, proc);
   advance();
+  // A proc that gives nothing: statements, to the end.
+  if (results.empty()) {
+    while (!token.is(Token::RBrace)) {
+      if (token.is(Token::Eof))
+        return error("expected '}' at the end of the proc's body");
+      if (failed(parseStatement()))
+        return failure();
+      consumeIf(Token::Semicolon);
+    }
+    advance();
+    YieldOp::create(builder, loc(at), ValueRange());
+    return success();
+  }
+  // Statements, then the value the fn gives.
   while (true) {
     bool statement = token.isKeyword("let") || token.isKeyword("var") ||
                      token.isKeyword("for") || token.isKeyword("while") ||
@@ -1311,6 +1630,13 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
                   next.is(Token::SlashAssign) || next.isKeyword("min") ||
                   next.isKeyword("max");
     }
+    // (In a proc: a call of a proc, for what it does.)
+    if (proc && token.is(Token::Identifier) && peek().is(Token::LParen)) {
+      Callable *through = callableNamed(token.spelling);
+      statement = through ? through->proc && !through->result
+                          : functions.count(token.spelling) &&
+                                functions[token.spelling].results.empty();
+    }
     if (!statement)
       break;
     if (failed(parseStatement()))
@@ -1318,7 +1644,7 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     consumeIf(Token::Semicolon);
   }
   if (token.is(Token::RBrace))
-    return error("a fn's body ends with the value it gives");
+    return error("a " + kind + "'s body ends with the value it gives");
   FailureOr<ExprPtr> body = parseExpr();
   if (failed(body))
     return failure();
@@ -1747,6 +2073,17 @@ LogicalResult Parser::parseStatement() {
     return parseWhile(at);
   if (token.isKeyword("return"))
     return error("'" + token.spelling + "' is not supported yet");
+  // name(args), where the name holds a proc: a call of that one.
+  if (token.is(Token::Identifier) && peek().is(Token::LParen))
+    if (Callable *through = callableNamed(token.spelling)) {
+      FailureOr<ExprPtr> call = parsePrimary();
+      if (failed(call))
+        return failure();
+      if (!through->proc)
+        return error(at, "'" + (*call)->name + "' holds a fn: it only gives "
+                         "a value, so calling it for nothing does nothing");
+      return emitCallThrough(**call, *through);
+    }
   // name(args): a call for what it does.
   if (token.is(Token::Identifier) && peek().is(Token::LParen) &&
       functions.count(token.spelling)) {
@@ -4122,6 +4459,8 @@ Type Parser::typeOf(const Expr &expr) {
     }
     }
   case Expr::Call:
+    if (Callable *through = callableNamed(expr.name))
+      return through->result;
     if (expr.name == "len")
       return builder.getI32Type();
     if (functions.count(expr.name))
@@ -4184,7 +4523,7 @@ FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
     return error(expr.loc, "'" + expr.name + "' can only be called in a "
                            "system; conditions and 'main' read uniques a "
                            "system has written");
-  if (inFunction && function.proc)
+  if (inFunction && function.proc && !inProc)
     return error(expr.loc, "'" + expr.name + "' is a proc: it acts, and a "
                            "fn only computes");
   if (expr.operands.size() != function.params.size())
@@ -4419,6 +4758,16 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                             symbol(expr.name), builder.getStringAttr("value"))
           .getResult();
     }
+    // A fn or proc by its name, where one of its shape is expected.
+    if (functions.count(expr.name)) {
+      if (Callable *callable = callableOf(expected))
+        return emitFunctionValue(expr, *callable);
+      return error(expr.loc, "'" + expr.name + "' is a " +
+                                 (functions[expr.name].proc ? "proc" : "fn") +
+                                 ": call it, or give it where a field or a "
+                                 "parameter says what it takes and gives "
+                                 "('fn(f32) -> f32', 'proc(i32)')");
+    }
     return error(expr.loc, "unknown name '" + expr.name + "'");
   }
   case Expr::Field: {
@@ -4513,6 +4862,19 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   case Expr::Binary:
     return emitBinary(expr, expected);
   case Expr::Call: {
+    // (A name that holds a fn or proc: a call of that one.)
+    if (Callable *through = callableNamed(expr.name)) {
+      if (inFunction && through->proc && !inProc)
+        return error(expr.loc, "'" + expr.name + "' is a proc: it acts, and "
+                               "a fn only computes");
+      if (!through->result)
+        return error(expr.loc, "'" + expr.name + "' gives no value");
+      FailureOr<SmallVector<mlir::Value>> values =
+          emitCallThrough(expr, *through);
+      if (failed(values))
+        return failure();
+      return values->front();
+    }
     if (expr.name == "len") {
       Type textTy = expr.operands.size() == 1
                         ? textTypeOf(*expr.operands[0])
@@ -4525,6 +4887,9 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return textLength(at, *text);
     }
     if (functions.count(expr.name)) {
+      if (inFunction && functions[expr.name].proc && !inProc)
+        return error(expr.loc, "'" + expr.name + "' is a proc: it acts, and "
+                               "a fn only computes");
       if (functions[expr.name].results.empty())
         return error(expr.loc, "'" + expr.name + "' gives no value");
       return emitInvoke(expr);

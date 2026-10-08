@@ -855,6 +855,48 @@
     }
   },
   {
+    "type": "callable_type",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "callable_type",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "primitive_type",
+          "named": true
+        },
+        {
+          "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "text_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "capacity",
     "named": true,
     "fields": {},
@@ -927,6 +969,10 @@
         "multiple": false,
         "required": true,
         "types": [
+          {
+            "type": "callable_type",
+            "named": true
+          },
           {
             "type": "identifier",
             "named": true
@@ -1416,6 +1462,10 @@
         "multiple": false,
         "required": true,
         "types": [
+          {
+            "type": "callable_type",
+            "named": true
+          },
           {
             "type": "identifier",
             "named": true
@@ -2487,6 +2537,10 @@
         "required": true,
         "types": [
           {
+            "type": "callable_type",
+            "named": true
+          },
+          {
             "type": "identifier",
             "named": true
           },
@@ -2783,6 +2837,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "callable_type",
+          "named": true
+        },
         {
           "type": "identifier",
           "named": true
@@ -3400,6 +3458,10 @@
         "required": false,
         "types": [
           {
+            "type": "callable_type",
+            "named": true
+          },
+          {
             "type": "identifier",
             "named": true
           },
@@ -3541,6 +3603,10 @@
         "multiple": false,
         "required": false,
         "types": [
+          {
+            "type": "callable_type",
+            "named": true
+          },
           {
             "type": "identifier",
             "named": true

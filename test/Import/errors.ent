@@ -100,9 +100,67 @@ system s() {
 
 // -----
 
-// expected-error @+1 {{'proc' with a body is not supported yet; 'extern proc' declares one implemented in C}}
+unique Count: i32
 proc nearest() {
+  // expected-error @+1 {{a fn computes from its parameters only; pass it what it needs of unique 'Count'}}
+  let n = Count
 }
+
+// -----
+
+proc act(n: i32) { }
+fn count(n: i32) -> i32 {
+  // expected-error @+1 {{'act' is a proc: it acts, and a fn only computes}}
+  act(n)
+  n
+}
+
+// -----
+
+// What holds a fn or proc: one that takes and gives what the type says.
+component Shape { area: fn(f32) -> f32, show: proc(i32) }
+fn square(side: f32) -> f32 { side * side }
+fn count(n: i32) -> i32 { n }
+proc say(n: i32) { }
+default_capacity 4
+world {
+  // expected-error @+1 {{'count' does not take and give what the fn expected here does}}
+  spawn { Shape { area: count, show: say } }
+}
+
+// -----
+
+component Shape { area: fn(f32) -> f32, show: proc(i32) }
+fn square(side: f32) -> f32 { side * side }
+default_capacity 4
+world {
+  // expected-error @+1 {{'square' is a fn, and a proc is expected here}}
+  spawn { Shape { area: square, show: square } }
+}
+
+// -----
+
+fn square(side: f32) -> f32 { side * side }
+system s() {
+  // expected-error @+1 {{'square' is a fn: call it, or give it where a field or a parameter says what it takes and gives ('fn(f32) -> f32', 'proc(i32)')}}
+  let f = square
+}
+
+// -----
+
+component Shape { show: proc(i32) }
+default_capacity 4
+// A fn only computes: it does not call a proc it is given.
+fn uses(show: proc(i32), n: i32) -> i32 {
+  // expected-error @+1 {{'show' is a proc: it acts, and a fn only computes}}
+  show(n)
+  n
+}
+
+// -----
+
+// expected-error @+1 {{a fn or proc that is a value gives a number, a bool or an enum, or nothing}}
+component Shape { name: fn(i32) -> text[14] }
 
 // -----
 
@@ -498,7 +556,7 @@ fn nothing(x: i32) {
 
 // -----
 
-// expected-error @+1 {{a fn has a body ('{ value }'); 'extern fn' declares one implemented in C}}
+// expected-error @+1 {{a fn has a body ('{ ... }'); 'extern fn' declares one implemented in C}}
 fn twice(x: i32) -> i32
 system s() {
 }

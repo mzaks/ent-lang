@@ -940,7 +940,69 @@ fn clamp(x: i32, low: i32, high: i32) -> i32 {
 - A module's fns are visible to the files that import it, like its other
   declarations. C does not hear of them: they are in no header.
 
-`proc` with a body in ent-lang is not supported yet.
+A `proc` acts: it is called for what it does, by the procs it calls in
+turn (a device's, in the end: `rect`, `put`), and may give a value too.
+
+```
+proc mark(x: f32, y: f32, w: f32, h: f32, colour: i32) {
+  rect(x, y, w, h, colour)
+  if w > 40.0 { label("wide", x + 2.0, y + 2.0, 12.0, 0xffffff) }
+}
+proc both(n: i32) -> i32 {
+  put("number {n}")
+  n + 1
+}
+```
+
+- Its body is statements; one that gives a value ends with it, as a fn
+  does.
+- Like a fn it has nothing of the world: no uniques, no entities. What
+  it needs it is given.
+- A proc is called where an `extern proc` is: in systems, `world` and
+  other procs; not in a fn, which only computes.
+
+### Fns and procs as values
+
+A fn or a proc is a value where a type says what it takes and gives:
+
+```
+component Custom { draw: proc(x: f32, y: f32, w: f32, h: f32), data: i32 }
+component Transition { seconds: f32, ease: fn(t: f32) -> f32 }
+
+fn ease_out(t: f32) -> f32 { 1.0 - (1.0 - t) * (1.0 - t) }
+proc dial(x: f32, y: f32, w: f32, h: f32) { circle(x, y, w, 0x3a7bd5) }
+
+world {
+  spawn { Custom { draw: dial, data: 0 },
+          Transition { seconds: 0.5, ease: ease_out } }
+}
+system draw() {
+  for b: Box, c: Custom, tr: Transition {
+    let paint = c.draw
+    let ease = tr.ease
+    paint(b.x, b.y, b.w * ease(0.5), b.h)
+  }
+}
+```
+
+- `fn(T, ...) -> U` and `proc(T, ...)` (also `proc(T) -> U`) are types,
+  of a field, a parameter or a unique. A parameter may be named in them,
+  for the reader. What such a fn gives is a number, a bool or an enum.
+- The name of a fn or proc is a value where one of its shape is
+  expected: its own, an imported module's or an `extern` one. It takes
+  and gives exactly what the type says.
+- What holds one is called like a function: bound to a name first (`let
+  paint = c.draw`, a parameter), then `paint(...)`. A proc that is held
+  is called where procs are, and not in a fn.
+- Two are compared with `==` and `!=` (`if tr.ease == linear`).
+- The program is closed: the compiler knows every fn and proc that is
+  used as a value anywhere. A value is the number of its function among
+  those of its shape, a byte, and a call through it asks which one it is
+  and calls that one: no pointers, and the call can be inlined. In the C
+  header such a field is an enum of those functions
+  (`ent_fn_of_f32_to_f32_ease_out`).
+- 0 is none, which is what memory that was never set holds: calling it
+  does nothing, and gives 0.
 
 ### Several values
 
@@ -1131,7 +1193,7 @@ header, as before.
 
 ## Not yet supported
 
-`proc` with a body, `device` declarations, prefabs, optional bindings
+`device` declarations, prefabs, optional bindings
 (`T?`): each is reported as "not supported yet" where it would start. Of relations, not
 yet: joins over relation variables, accumulating into a unique and
 connecting inside an edge loop, disconnecting by pair, and of trees what

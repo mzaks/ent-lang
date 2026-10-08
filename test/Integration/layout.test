@@ -18,7 +18,7 @@
 // for every kind of box: one function that they call, not a copy in
 // each, and a box that is looked up is found by a table, not by a branch
 // for every kind. (Three times this much, without.)
-// RUN: wc -l < %t.ll | awk '{ exit !($1 < 300000) }'
+// RUN: wc -l < %t.ll | awk '{ exit !($1 < 330000) }'
 
 // LLVM-DAG: define {{.*}}void @ent_connect_layout.Inside(
 // LLVM-DAG: declare float @ent_window_text_min_width(

@@ -793,10 +793,9 @@ void FunctionOp::print(OpAsmPrinter &p) {
 
 LogicalResult FunctionOp::verify() {
   if (isDefined()) {
-    // The program's own: any value may go in and come out.
-    if (getProc())
-      return emitOpError("is a proc with a body, which is not supported yet");
-    if (getResults().empty())
+    // The program's own: any value may go in and come out. (A proc may
+    // give nothing: it is called for what it does.)
+    if (!getProc() && getResults().empty())
       return emitOpError("has a body, so it gives a value ('-> type')");
     if (!getBody().hasOneBlock())
       return emitOpError("body must be one block");
@@ -830,20 +829,23 @@ LogicalResult FunctionOp::verifyRegions() {
   auto yield = dyn_cast<YieldOp>(&getBody().front().back());
   SmallVector<Type> results = getResultTypes();
   if (!yield || TypeRange(results) != yield.getResults().getTypes()) {
+    if (results.empty())
+      return emitOpError("body must end with 'ent.yield' of nothing");
     InFlightDiagnostic diag =
         emitOpError("body must end with 'ent.yield' of ");
     if (results.size() == 1)
       return diag << "one " << results.front() << ", the function's value";
     return diag << "(" << results << "), the function's values";
   }
-  // Only computing: nothing of the world, nothing that acts.
+  // Only computing: nothing of the world, nothing that acts. (A proc
+  // acts by the procs it calls, and has nothing of the world either.)
   LogicalResult result = success();
   getBody().walk([&](Operation *op) {
     if (op == yield.getOperation() ||
         op->getName().getDialectNamespace() != "ent")
       return;
     auto invoke = dyn_cast<InvokeOp>(op);
-    if (invoke && !invoke.getProc())
+    if (invoke && (!invoke.getProc() || getProc()))
       return;
     if (succeeded(result))
       result = op->emitOpError(invoke ? "calls a proc in a function's body; "
