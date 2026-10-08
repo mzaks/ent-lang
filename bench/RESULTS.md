@@ -2917,3 +2917,12 @@ library's own.
   everything. A `for` along a tree that never runs reads no log now.
   (`point`, which asks every box whether the pointer is over it, costs
   some 9 ns a box and is not part of `layout`.)
+- With clipping and scrolling `bench/boxes` is at 39 us a frame. On the
+  way it was at 730: how wide and high what is in a box is in all was a
+  field of what the size passes react to, and one column a box higher
+  made the row's three hundred columns work their boxes out again. It is
+  a component of its own now.
+- The demo, with a list that scrolls, rounded corners, borders and
+  floats, builds in 7.5 s the first time (253,701 lines of LLVM IR).
+  That is the open end of this: every feature is more optional
+  components, so more archetypes, and more to give each shared body.

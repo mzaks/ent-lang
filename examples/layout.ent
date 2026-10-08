@@ -91,18 +91,42 @@ component Slot { at: i32 }
 // the box it floats over.
 component Layer { z: i32 }
 
+// A box that shows only what of the boxes inside it is within itself,
+// from left to right, from top to bottom or both: they are as wide and
+// high as they want, and it is not made bigger for them. `Scroll` moves
+// them, so far to the right and down (to see what is further down, up:
+// a negative `y`).
+component Clip { x: bool, y: bool }
+component Scroll { x: f32, y: f32 }
+
 // What `layout` keeps for itself, and gives to every box. What a box
 // comes to along one axis by its content and its own rules: the size, the
 // least it can shrink to, the most, its share and its way of sizing.
 component FitW { fit: f32, min: f32, max: f32, share: f32, kind: Sizing }
 component FitH { fit: f32, min: f32, max: f32, share: f32, kind: Sizing }
 // And what it has for the boxes inside it: `used` by padding and gaps,
-// the `room` inside the padding, whether they grow (1) or shrink (2) to a
-// `level`, and what they come to along the row or column (`extent`).
-component RoomW { used: f32, room: f32, mode: i32, level: f32, extent: f32 }
-component RoomH { used: f32, room: f32, mode: i32, level: f32, extent: f32 }
+// the `room` inside the padding, how wide one of them can be across a
+// column (`most`: the room, or more where the box clips), whether they
+// grow (1) or shrink (2) to a `level`, and what they come to along the
+// row (`extent`).
+component RoomW {
+  used: f32, room: f32, most: f32, mode: i32, level: f32, extent: f32
+}
+component RoomH {
+  used: f32, room: f32, most: f32, mode: i32, level: f32, extent: f32
+}
+// How wide and high what is in a box is in all, inside its padding: more
+// than the room there, where the box clips. (By itself: nothing in
+// `layout` goes by it.)
+component Content { w: f32, h: f32 }
 // (Sums over the boxes inside a box, while they are added up.)
-component Sums { a: f32, b: f32, c: f32, d: f32, n: i32, g: i32, m: i32 }
+component Sums {
+  a: f32, b: f32, c: f32, d: f32, e: f32, n: i32, g: i32, m: i32
+}
+// The part of the window a box shows in: all of it, less what the boxes
+// it is in clip away. What draws a box draws it within that, and the
+// pointer is over it only there.
+component Seen { x: f32, y: f32, w: f32, h: f32 }
 
 // From a box to the one it is in; the boxes in one box are in the order
 // of their slots.
@@ -118,9 +142,13 @@ system layout_widths() {
   for e, b: Box without FitW on added Box {
     e.add(FitW { fit: 0.0, min: 0.0, max: 0.0, share: 0.0, kind: Sizing.Fit })
     e.add(FitH { fit: 0.0, min: 0.0, max: 0.0, share: 0.0, kind: Sizing.Fit })
-    e.add(RoomW { used: 0.0, room: 0.0, mode: 0, level: 0.0, extent: 0.0 })
-    e.add(RoomH { used: 0.0, room: 0.0, mode: 0, level: 0.0, extent: 0.0 })
-    e.add(Sums { a: 0.0, b: 0.0, c: 0.0, d: 0.0, n: 0, g: 0, m: 0 })
+    e.add(RoomW { used: 0.0, room: 0.0, most: 0.0, mode: 0, level: 0.0,
+                  extent: 0.0 })
+    e.add(RoomH { used: 0.0, room: 0.0, most: 0.0, mode: 0, level: 0.0,
+                  extent: 0.0 })
+    e.add(Content { w: 0.0, h: 0.0 })
+    e.add(Sums { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, n: 0, g: 0, m: 0 })
+    e.add(Seen { x: -1.0e9, y: -1.0e9, w: 2.0e9, h: 2.0e9 })
     e.add(Layer { z: 0 })
   }
 
@@ -134,11 +162,11 @@ system layout_widths() {
   let fitted =
   for (e, b: Box, s: Size, k: Stack, f: mut FitW, t: mut Sums,
        optional p: Pad, optional l: Limits, optional sh: Share,
-       optional own: Natural),
+       optional own: Natural, optional cl: Clip),
       optional (e)-[Over]->(under: Box)
       bottom up Inside
       on changed s.w, changed k, changed p, changed l, changed sh,
-         changed own, changed b.w, changed under.w,
+         changed own, changed cl, changed b.w, changed under.w,
          changed (: FitW)-[Inside]->(e) {
     t.a = 0.0
     t.b = 0.0
@@ -157,6 +185,9 @@ system layout_widths() {
     let gaps = if t.n > 1 { k.gap * (t.n - 1) as f32 } else { 0.0 }
     var fit = pads + (if k.row { t.a + gaps } else { t.c })
     var least = pads + (if k.row { t.b + gaps } else { t.d })
+    // (What a box clips can be any size without it: it need not make
+    // room.)
+    if let clips = cl.x { if clips { least = pads } }
     if let w = own.w, let m = own.min_w {
       fit = max(fit, w + pads)
       least = max(least, m + pads)
@@ -202,14 +233,14 @@ system layout_widths() {
   // worked out for the boxes inside it, which come after it.
   let sized =
   for (e, b: mut Box, f: FitW, k: Stack, r: mut RoomW, t: mut Sums,
-       optional p: Pad),
+       all: mut Content, optional p: Pad, optional cl: Clip),
       optional (e)-[Inside]->(ob: Box, ok: Stack, oroom: RoomW)
       top down Inside
-      on changed f, changed k, changed p, changed ob.w, changed ok,
-         changed oroom, changed (: FitW)-[Inside]->(e) {
+      on changed f, changed k, changed p, changed cl, changed ob.w,
+         changed ok, changed oroom, changed (: FitW)-[Inside]->(e) {
     var w = f.fit
     if let ow = ob.w, let orow = ok.row, let used = oroom.used,
-       let room = oroom.room, let mode = oroom.mode, let level = oroom.level {
+       let room = oroom.most, let mode = oroom.mode, let level = oroom.level {
       if f.kind == Sizing.Percent {
         w = (ow - used) * f.share
       } else {
@@ -240,9 +271,13 @@ system layout_widths() {
     t.b = 0.0
     t.c = 0.0
     t.d = 0.0
+    t.e = 0.0
     for (child: FitW)-[Inside]->(e) {
       t.n += 1
-      if child.kind == Sizing.Percent { t.b += child.share } else { t.a += child.fit }
+      if child.kind == Sizing.Percent { t.b += child.share } else {
+        t.a += child.fit
+        t.e max= child.fit
+      }
       if child.kind == Sizing.Grow {
         t.g += 1
         t.d += child.fit
@@ -259,9 +294,15 @@ system layout_widths() {
     var mode = 0
     var level = 0.0
     var extent = 0.0
+    var content = 0.0
+    var clips = false
+    if let does = cl.x { clips = does }
+    // (Across a column a box inside can be as wide as the room, or, where
+    // this one clips, as the widest of them wants.)
+    let most = if clips { max(w - pads, t.e) } else { w - pads }
     if k.row {
       let spare = w - pads - gaps - t.a - t.b * (w - used)
-      if spare < -0.001 && t.m > 0 {
+      if spare < -0.001 && t.m > 0 && !clips {
         // Too much: those that can give way come down to a level, none
         // below the least it can be. The level is closed in on, and then
         // worked out from which of them it leaves as they are.
@@ -335,12 +376,29 @@ system layout_widths() {
         t.a += each
       }
       extent = t.a + gaps
+      content = extent
+    } else {
+      // Across: the widest of them, as each will be.
+      t.a = 0.0
+      for (child: FitW)-[Inside]->(e) {
+        var each = child.fit
+        if child.kind == Sizing.Percent { each = (w - used) * child.share } else {
+          if child.kind != Sizing.Fixed {
+            if child.kind == Sizing.Grow { each = min(most, child.max) }
+            each = max(child.min, min(each, most))
+          }
+        }
+        t.a max= each
+      }
+      content = t.a
     }
     r.used = used
     r.room = w - pads
+    r.most = most
     r.mode = mode
     r.level = level
     r.extent = extent
+    all.w = content
   }
   } until fitted + sized == 0
 }
@@ -355,11 +413,12 @@ system layout_heights() {
   let fitted =
   for (e, b: Box, s: Size, k: Stack, f: mut FitH, t: mut Sums,
        optional p: Pad, optional l: Limits, optional sh: Share,
-       optional own: Natural, optional keeps: Aspect),
+       optional own: Natural, optional keeps: Aspect, optional cl: Clip),
       optional (e)-[Over]->(under: Box)
       bottom up Inside
       on changed s.h, changed k, changed p, changed l, changed sh,
-         changed own, changed keeps, changed b, changed under.h,
+         changed own, changed keeps, changed cl, changed b,
+         changed under.h,
          changed (: FitH)-[Inside]->(e) {
     t.a = 0.0
     t.b = 0.0
@@ -378,6 +437,7 @@ system layout_heights() {
     let gaps = if t.n > 1 { k.gap * (t.n - 1) as f32 } else { 0.0 }
     var fit = pads + (if !k.row { t.a + gaps } else { t.c })
     var least = pads + (if !k.row { t.b + gaps } else { t.d })
+    if let clips = cl.y { if clips { least = pads } }
     if let high = own.h {
       fit = max(fit, high + pads)
       least = max(least, high + pads)
@@ -426,14 +486,14 @@ system layout_heights() {
   // What it gets, as the widths, with columns for rows.
   let sized =
   for (e, b: mut Box, f: FitH, k: Stack, r: mut RoomH, t: mut Sums,
-       optional p: Pad),
+       all: mut Content, optional p: Pad, optional cl: Clip),
       optional (e)-[Inside]->(ob: Box, ok: Stack, oroom: RoomH)
       top down Inside
-      on changed f, changed k, changed p, changed ob.h, changed ok,
-         changed oroom, changed (: FitH)-[Inside]->(e) {
+      on changed f, changed k, changed p, changed cl, changed ob.h,
+         changed ok, changed oroom, changed (: FitH)-[Inside]->(e) {
     var h = f.fit
     if let oh = ob.h, let orow = ok.row, let used = oroom.used,
-       let room = oroom.room, let mode = oroom.mode, let level = oroom.level {
+       let room = oroom.most, let mode = oroom.mode, let level = oroom.level {
       if f.kind == Sizing.Percent {
         h = (oh - used) * f.share
       } else {
@@ -464,9 +524,13 @@ system layout_heights() {
     t.b = 0.0
     t.c = 0.0
     t.d = 0.0
+    t.e = 0.0
     for (child: FitH)-[Inside]->(e) {
       t.n += 1
-      if child.kind == Sizing.Percent { t.b += child.share } else { t.a += child.fit }
+      if child.kind == Sizing.Percent { t.b += child.share } else {
+        t.a += child.fit
+        t.e max= child.fit
+      }
       if child.kind == Sizing.Grow {
         t.g += 1
         t.d += child.fit
@@ -483,9 +547,15 @@ system layout_heights() {
     var mode = 0
     var level = 0.0
     var extent = 0.0
+    var content = 0.0
+    var clips = false
+    if let does = cl.y { clips = does }
+    // (Across a column a box inside can be as wide as the room, or, where
+    // this one clips, as the widest of them wants.)
+    let most = if clips { max(h - pads, t.e) } else { h - pads }
     if !k.row {
       let spare = h - pads - gaps - t.a - t.b * (h - used)
-      if spare < -0.001 && t.m > 0 {
+      if spare < -0.001 && t.m > 0 && !clips {
         // Too much: those that can give way come down to a level, none
         // below the least it can be. The level is closed in on, and then
         // worked out from which of them it leaves as they are.
@@ -559,12 +629,29 @@ system layout_heights() {
         t.a += each
       }
       extent = t.a + gaps
+      content = extent
+    } else {
+      // Across: the widest of them, as each will be.
+      t.a = 0.0
+      for (child: FitH)-[Inside]->(e) {
+        var each = child.fit
+        if child.kind == Sizing.Percent { each = (h - used) * child.share } else {
+          if child.kind != Sizing.Fixed {
+            if child.kind == Sizing.Grow { each = min(most, child.max) }
+            each = max(child.min, min(each, most))
+          }
+        }
+        t.a max= each
+      }
+      content = t.a
     }
     r.used = used
     r.room = h - pads
+    r.most = most
     r.mode = mode
     r.level = level
     r.extent = extent
+    all.h = content
   }
   } until fitted + sized == 0
 
@@ -585,10 +672,12 @@ system layout_heights() {
             -[Inside]->(outer: Box, k: Stack, ol: Layer, rw: RoomW, rh: RoomH),
         optional (prev: Box)~[Inside]~>(b),
         optional (b)-[Inside]->(how: Align),
-        optional (b)-[Inside]->(pad: Pad)
+        optional (b)-[Inside]->(pad: Pad),
+        optional (b)-[Inside]->(moved: Scroll)
         top down Inside
         on changed b.w, changed b.h, changed outer, changed k, changed ol,
-           changed rw, changed rh, changed prev, changed how, changed pad {
+           changed rw, changed rh, changed prev, changed how, changed pad,
+           changed moved {
       var left = k.pad
       var top = k.pad
       if let pl = pad.left, let pt = pad.top {
@@ -605,6 +694,10 @@ system layout_heights() {
       }
       var x = outer.x + left
       var y = outer.y + top
+      if let mx = moved.x, let my = moved.y {
+        x += mx
+        y += my
+      }
       if k.row {
         x += (rw.room - rw.extent) * fx
         y += (rh.room - b.h) * fy
@@ -646,6 +739,31 @@ system layout_heights() {
       l.z = z
     }
   } until placed + floated == 0
+
+  // What of each box shows: what of the box it is in shows, and of that
+  // only what is within that box, where it clips.
+  for (v: mut Seen)-[Inside]->(ob: Box, ov: Seen),
+      optional (v)-[Inside]->(oc: Clip)
+      top down Inside on changed ob, changed ov, changed oc {
+    var x0 = ov.x
+    var y0 = ov.y
+    var x1 = ov.x + ov.w
+    var y1 = ov.y + ov.h
+    if let cx = oc.x, let cy = oc.y {
+      if cx {
+        x0 = max(x0, ob.x)
+        x1 = min(x1, ob.x + ob.w)
+      }
+      if cy {
+        y0 = max(y0, ob.y)
+        y1 = min(y1, ob.y + ob.h)
+      }
+    }
+    v.x = x0
+    v.y = y0
+    v.w = max(0.0, x1 - x0)
+    v.h = max(0.0, y1 - y0)
+  }
 }
 
 // Which boxes the pointer is over: after they have been placed. (Not a
@@ -653,7 +771,7 @@ system layout_heights() {
 // without a pointer need not pay for.)
 system point() {
   PointerTop = -1
-  for b: Box, l: Layer, optional more: Expand without Passthrough {
+  for b: Box, l: Layer, v: Seen, optional more: Expand without Passthrough {
     var ew = 0.0
     var eh = 0.0
     if let w = more.w, let h = more.h {
@@ -661,11 +779,13 @@ system point() {
       eh = h
     }
     if Pointer.x >= b.x - ew && Pointer.x < b.x + b.w + ew &&
-       Pointer.y >= b.y - eh && Pointer.y < b.y + b.h + eh {
+       Pointer.y >= b.y - eh && Pointer.y < b.y + b.h + eh &&
+       Pointer.x >= v.x && Pointer.x < v.x + v.w &&
+       Pointer.y >= v.y && Pointer.y < v.y + v.h {
       PointerTop max= l.z
     }
   }
-  for e, b: Box, l: Layer, optional more: Expand {
+  for e, b: Box, l: Layer, v: Seen, optional more: Expand {
     var ew = 0.0
     var eh = 0.0
     if let w = more.w, let h = more.h {
@@ -674,6 +794,8 @@ system point() {
     }
     let over = Pointer.x >= b.x - ew && Pointer.x < b.x + b.w + ew &&
                Pointer.y >= b.y - eh && Pointer.y < b.y + b.h + eh &&
+               Pointer.x >= v.x && Pointer.x < v.x + v.w &&
+               Pointer.y >= v.y && Pointer.y < v.y + v.h &&
                l.z >= PointerTop && !e.has(Passthrough)
     if over != e.has(Hovered) {
       if over { e.add(Hovered) } else { e.remove(Hovered) }

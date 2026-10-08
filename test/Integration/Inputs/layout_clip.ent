@@ -1,0 +1,64 @@
+// A box that clips what is inside it, and moves it (layout_clip.test).
+import console
+import layout
+
+component Name { name: text[14] }
+unique Frame: i32
+default_capacity 64
+
+world {
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 300.0, h: 200.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 10.0, gap: 10.0 }, Name { name: "root" }
+  }
+  // A list 100 wide that grows to the height there is, with five rows
+  // of 60 in it: 300 and four gaps of 5 are more than its 180.
+  let list = spawn {
+    Box { x: 0.0, y: 0.0, w: 100.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 5.0 }, Name { name: "list" },
+    Clip { x: true, y: true }, Scroll { x: 0.0, y: 0.0 }
+  }
+  connect (list)-[Inside]->(root)
+  for i in 0..5 {
+    let row = spawn {
+      // (The third is wider than the list.)
+      Box { x: 0.0, y: 0.0, w: if i == 2 { 150.0 } else { 80.0 }, h: 60.0 },
+      Size { w: Sizing.Fixed, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "row {i}" }
+    }
+    connect (row)-[Inside]->(list)
+  }
+  // Next to it one that would shrink the same rows if it did not clip.
+  let plain = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 0.0 }, Name { name: "plain" }
+  }
+  connect (plain)-[Inside]->(root)
+}
+
+// In the second frame what is in the list is 100 further up; the pointer
+// is where the list's second row was, and then where the third row is
+// wider than the list.
+system change() {
+  Frame += 1
+  for s: mut Scroll where Frame == 2 { s.y = -100.0 }
+  Pointer.x = if Frame == 3 { 140.0 } else { 50.0 }
+  Pointer.y = if Frame == 3 { 60.0 } else { 90.0 }
+}
+
+system show() {
+  for e, b: Box, v: Seen, n: Name, optional r: Content top down dfs Inside {
+    var content = 0.0
+    if let c = r.h { content = c }
+    let over = if e.has(Hovered) { 1 } else { 0 }
+    // (What shows of a box that nothing clips is all there is.)
+    let shows = if v.w > 1.0e8 { 0.0 } else { v.w }
+    put("{Frame}: {n.name} {b.x} {b.y} {b.w} {b.h} shows {shows} wide, content {content}, over {over}")
+  }
+}
+
+schedule frame() { change()  layout()  point()  show() }
+main { loop { frame() } until Frame == 3 }

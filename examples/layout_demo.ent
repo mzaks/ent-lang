@@ -7,8 +7,9 @@
 //   tools/ent run -I examples examples/layout_demo.ent
 //
 // Hold the left mouse button to drag the side bar's edge; hold Space to
-// put the cards below one another. The text in a card goes on in the next
-// line where the card ends. The entries and the buttons light up under
+// put the cards below one another; turn the wheel over the side bar to
+// move its entries. The text in a card goes on in the next line where
+// the card ends. The entries and the buttons light up under
 // the mouse. A note floats at the mouse, over everything else, with a
 // mark that floats over its text; the pointer goes through them. Escape
 // or closing the window ends the program.
@@ -40,7 +41,11 @@ world {
     Box { x: 0.0, y: 0.0, w: 180.0, h: 0.0 },
     Size { w: Sizing.Fixed, h: Sizing.Grow },
     Stack { row: false, pad: 10.0, gap: 8.0 }, Fill { colour: 0x1c242c },
-    SideBar
+    SideBar, Clip { x: true, y: true }, Scroll { x: 0.0, y: 0.0 },
+    Round { top_left: 10.0, top_right: 10.0, bottom_left: 10.0,
+            bottom_right: 10.0 },
+    Border { left: 0.0, right: 0.0, top: 0.0, bottom: 0.0, between: 1.0,
+             colour: 0x3a4650 }
   }
   let rest = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
@@ -51,8 +56,10 @@ world {
   connect (rest)-[Inside]->(root)
 
   // The side bar's entries: as wide as the bar, 34 pixels high, what
-  // each says 10 in from its edge and in the middle of its height.
-  for i in 0..6 {
+  // each says 10 in from its edge and in the middle of its height. More
+  // of them than the bar is high: it clips them, and the wheel moves
+  // them.
+  for i in 0..24 {
     let entry = spawn {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 34.0 },
       Size { w: Sizing.Grow, h: Sizing.Fixed },
@@ -97,6 +104,8 @@ world {
       Stack { row: true, pad: 0.0, gap: 0.0 },
       Pad { left: 12.0, right: 12.0, top: 7.0, bottom: 7.0 },
       Fill { colour: 0x3a7bd5 }, Shade { idle: 0x3a7bd5, over: 0x5a9bf5 },
+      Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0,
+              bottom_right: 8.0 },
       Text { text: if i == 0 { "open" } else if i == 1 { "save as" }
                    else if i == 2 { "undo" } else { "preferences" },
              size: 16.0, colour: 0xffffff }
@@ -151,6 +160,10 @@ world {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
       Size { w: Sizing.Grow, h: Sizing.Grow },
       Stack { row: false, pad: 10.0, gap: 6.0 }, Fill { colour: 0x242e38 },
+      Round { top_left: 12.0, top_right: 12.0, bottom_left: 0.0,
+              bottom_right: 0.0 },
+      Border { left: 1.0, right: 1.0, top: 3.0, bottom: 1.0, between: 0.0,
+               colour: 0x3a7bd5 },
       Limits { min_w: 120.0, max_w: if i == 1 { 260.0 } else { 0.0 },
                min_h: 0.0, max_h: 0.0 }
     }

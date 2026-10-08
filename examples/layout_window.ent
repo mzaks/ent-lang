@@ -13,6 +13,20 @@ import layout
 // A box that is filled with a colour.
 component Fill { colour: i32 }
 
+// Its corners rounded, each with its own radius.
+component Round { top_left: f32, top_right: f32, bottom_left: f32,
+                  bottom_right: f32 }
+// Edges, each so thick (0 for none), drawn over what is in the box; and
+// lines so thick between the boxes inside it (`between`), in the middle
+// of its gaps.
+component Border {
+  left: f32, right: f32, top: f32, bottom: f32, between: f32, colour: i32
+}
+// A picture from a file (the window's `picture_load` gives its number),
+// drawn into the box, its colours times `tint` (0xffffff: as they are).
+// (`Aspect { ratio: picture_ratio(image) }` keeps its shape.)
+component Picture { image: i32, tint: i32 }
+
 // A box that says something: a text `size` pixels high. Its box is at
 // least as big as the text and its padding (where it is not `Fixed`).
 // The text goes on in the next line where its box ends, so the box can
@@ -34,6 +48,24 @@ system pointer() {
   Pointer.x = Mouse.x
   Pointer.y = Mouse.y
   Pointer.down = Mouse.left
+}
+
+// The wheel moves what is in the boxes that clip and have a `Scroll`,
+// under the pointer: 40 pixels a notch, and no further than to the ends
+// of what is in them (which is also seen to when that gets smaller).
+system scroll() {
+  for e, s: mut Scroll, c: Clip, rw: RoomW, rh: RoomH, all: Content {
+    var x = s.x
+    var y = s.y
+    if e.has(Hovered) {
+      if c.x { x += Mouse.wheel_x * 40.0 }
+      if c.y { y += Mouse.wheel_y * 40.0 }
+    }
+    x = min(0.0, max(x, min(0.0, rw.room - all.w)))
+    y = min(0.0, max(y, min(0.0, rh.room - all.h)))
+    if x != s.x { s.x = x }
+    if y != s.y { s.y = y }
+  }
 }
 
 // How big each text is: when it is new or says something else.
@@ -91,12 +123,18 @@ system wrap() {
 system draw() {
   for z in 0..8 {
     // (Not what is outside the window.)
-    for b: Box, l: Layer, optional f: Fill, optional t: Text,
+    // (Nor what the boxes it is in clip away: each within what shows of
+    // it.)
+    for b: Box, l: Layer, v: Seen, optional f: Fill, optional t: Text,
         optional k: Stack, optional p: Pad, optional how: Align,
-        optional st: TextStyle, optional more: Expand
+        optional st: TextStyle, optional more: Expand, optional rc: Round,
+        optional pic: Picture
         top down dfs Inside
         where l.z == z && b.x < Window.width as f32 && b.x + b.w > 0.0 &&
-              b.y < Window.height as f32 && b.y + b.h > 0.0 {
+              b.y < Window.height as f32 && b.y + b.h > 0.0 &&
+              b.x < v.x + v.w && b.x + b.w > v.x &&
+              b.y < v.y + v.h && b.y + b.h > v.y {
+      clip(v.x, v.y, v.w, v.h)
       if let colour = f.colour {
         var ew = 0.0
         var eh = 0.0
@@ -104,7 +142,16 @@ system draw() {
           ew = w
           eh = h
         }
-        rect(b.x - ew, b.y - eh, b.w + 2.0 * ew, b.h + 2.0 * eh, colour)
+        if let tl = rc.top_left, let tr = rc.top_right,
+           let bl = rc.bottom_left, let br = rc.bottom_right {
+          rounded(b.x - ew, b.y - eh, b.w + 2.0 * ew, b.h + 2.0 * eh, tl, tr,
+                  bl, br, colour)
+        } else {
+          rect(b.x - ew, b.y - eh, b.w + 2.0 * ew, b.h + 2.0 * eh, colour)
+        }
+      }
+      if let image = pic.image, let tint = pic.tint {
+        picture(image, b.x, b.y, b.w, b.h, tint)
       }
       if let said = t.text, let size = t.size, let ink = t.colour {
         var left = 0.0
@@ -154,12 +201,44 @@ system draw() {
               font, size, spacing, line, breaks, along, ink)
       }
     }
+    // The edges of the layer's boxes over what is in them, and the lines
+    // between the boxes in one.
+    for b: Box, l: Layer, v: Seen, bd: Border, optional rc: Round
+        top down dfs Inside where l.z == z {
+      clip(v.x, v.y, v.w, v.h)
+      var tl = 0.0
+      var tr = 0.0
+      var bl = 0.0
+      var br = 0.0
+      if let a = rc.top_left, let c = rc.top_right, let d = rc.bottom_left,
+         let g = rc.bottom_right {
+        tl = a
+        tr = c
+        bl = d
+        br = g
+      }
+      edges(b.x, b.y, b.w, b.h, bd.left, bd.right, bd.top, bd.bottom, tl, tr,
+            bl, br, bd.colour)
+    }
+    for (b: Box, l: Layer, v: Seen)-[Inside]->(ob: Box, ok: Stack, obd: Border),
+        (prev: Box)~[Inside]~>(b)
+        top down dfs Inside where l.z == z && obd.between > 0.0 {
+      clip(v.x, v.y, v.w, v.h)
+      let half = (ok.gap + obd.between) * 0.5
+      if ok.row {
+        rect(b.x - half, ob.y, obd.between, ob.h, obd.colour)
+      } else {
+        rect(ob.x, b.y - half, ob.w, obd.between, obd.colour)
+      }
+    }
   }
+  unclip()
 }
 
 // The whole of it, between the window's `begin` and `present`.
 schedule ui() {
   pointer()
+  scroll()
   measure()
   layout_widths()
   wrap()

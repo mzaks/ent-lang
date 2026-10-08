@@ -41,7 +41,8 @@ void ent_window_begin_frame(int32_t background, int32_t fps) {
   ClearBackground(ent_window_color(background));
 }
 
-void ent_window_end_frame(void) { EndDrawing(); }
+void ent_window_end_frame(void) {
+  ent_window_unclip(); EndDrawing(); }
 
 float ent_window_mouse_x(void) { return (float)GetMouseX(); }
 float ent_window_mouse_y(void) { return (float)GetMouseY(); }
@@ -318,6 +319,153 @@ float ent_window_text_least(const ent_text126 *text, int32_t font, float size,
   // (With no room at all: every word a line, where it breaks at words.)
   ent_window_set(all, 0, font, size, spacing, breaks, &widest, 0, 0);
   return widest;
+}
+
+// A quarter of a disc or of a ring at a corner: `quarter` 0 top left, 1
+// top right, 2 bottom right, 3 bottom left (angles go clockwise from the
+// right).
+static void ent_window_corner(float cx, float cy, float inner, float outer,
+                              int quarter, Color color) {
+  static const float from[4] = {180, 270, 0, 90};
+  if (outer <= 0)
+    return;
+  if (inner <= 0)
+    DrawCircleSector((Vector2){cx, cy}, outer, from[quarter],
+                     from[quarter] + 90, 12, color);
+  else
+    DrawRing((Vector2){cx, cy}, inner, outer, from[quarter],
+             from[quarter] + 90, 12, color);
+}
+
+void ent_window_rounded(float x, float y, float w, float h, float tl,
+                        float tr, float bl, float br, int32_t rgb) {
+  Color color = ent_window_color(rgb);
+  float most = (w < h ? w : h) / 2;
+  if (tl > most) tl = most;
+  if (tr > most) tr = most;
+  if (bl > most) bl = most;
+  if (br > most) br = most;
+  float left = tl > bl ? tl : bl, right = tr > br ? tr : br;
+  // The middle, then the two sides between their corners, then those.
+  DrawRectangleRec((Rectangle){x + left, y, w - left - right, h}, color);
+  DrawRectangleRec((Rectangle){x, y + tl, left, h - tl - bl}, color);
+  DrawRectangleRec((Rectangle){x + w - right, y + tr, right, h - tr - br},
+                   color);
+  if (tl < left)
+    DrawRectangleRec((Rectangle){x + tl, y, left - tl, tl}, color);
+  if (bl < left)
+    DrawRectangleRec((Rectangle){x + bl, y + h - bl, left - bl, bl}, color);
+  if (tr < right)
+    DrawRectangleRec((Rectangle){x + w - right, y, right - tr, tr}, color);
+  if (br < right)
+    DrawRectangleRec((Rectangle){x + w - right, y + h - br, right - br, br},
+                     color);
+  ent_window_corner(x + tl, y + tl, 0, tl, 0, color);
+  ent_window_corner(x + w - tr, y + tr, 0, tr, 1, color);
+  ent_window_corner(x + w - br, y + h - br, 0, br, 2, color);
+  ent_window_corner(x + bl, y + h - bl, 0, bl, 3, color);
+}
+
+void ent_window_edges(float x, float y, float w, float h, float left,
+                      float right, float top, float bottom, float tl,
+                      float tr, float bl, float br, int32_t rgb) {
+  Color color = ent_window_color(rgb);
+  // The straight parts, between the corners; a corner is a ring as thick
+  // as the thicker of the two edges that meet in it, or their square
+  // where it is not rounded.
+  if (top > 0)
+    DrawRectangleRec((Rectangle){x + tl, y, w - tl - tr, top}, color);
+  if (bottom > 0)
+    DrawRectangleRec((Rectangle){x + bl, y + h - bottom, w - bl - br, bottom},
+                     color);
+  if (left > 0)
+    DrawRectangleRec((Rectangle){x, y + tl, left, h - tl - bl}, color);
+  if (right > 0)
+    DrawRectangleRec((Rectangle){x + w - right, y + tr, right, h - tr - br},
+                     color);
+#define ENT_WINDOW_THICK(a, b) ((a) > (b) ? (a) : (b))
+  if (tl > 0 && (top > 0 || left > 0))
+    ent_window_corner(x + tl, y + tl, tl - ENT_WINDOW_THICK(top, left), tl, 0,
+                      color);
+  if (tr > 0 && (top > 0 || right > 0))
+    ent_window_corner(x + w - tr, y + tr, tr - ENT_WINDOW_THICK(top, right),
+                      tr, 1, color);
+  if (br > 0 && (bottom > 0 || right > 0))
+    ent_window_corner(x + w - br, y + h - br,
+                      br - ENT_WINDOW_THICK(bottom, right), br, 2, color);
+  if (bl > 0 && (bottom > 0 || left > 0))
+    ent_window_corner(x + bl, y + h - bl, bl - ENT_WINDOW_THICK(bottom, left),
+                      bl, 3, color);
+#undef ENT_WINDOW_THICK
+}
+
+// Pictures read from files.
+static Texture2D ent_window_pictures[64];
+static int ent_window_picture_count = 1;
+
+int32_t ent_window_picture_load(const ent_text126 *file) {
+  ENT_WINDOW_TEXT(name, file);
+  if (ent_window_picture_count >= 64 || !FileExists(name))
+    return 0;
+  Texture2D texture = LoadTexture(name);
+  if (texture.id == 0)
+    return 0;
+  ent_window_pictures[ent_window_picture_count] = texture;
+  return ent_window_picture_count++;
+}
+
+void ent_window_picture(int32_t image, float x, float y, float w, float h,
+                        int32_t tint) {
+  if (image <= 0 || image >= ent_window_picture_count)
+    return;
+  Texture2D texture = ent_window_pictures[image];
+  DrawTexturePro(texture,
+                 (Rectangle){0, 0, (float)texture.width, (float)texture.height},
+                 (Rectangle){x, y, w, h}, (Vector2){0, 0}, 0,
+                 ent_window_color(tint));
+}
+
+float ent_window_picture_ratio(int32_t image) {
+  if (image <= 0 || image >= ent_window_picture_count ||
+      !ent_window_pictures[image].height)
+    return 1;
+  return (float)ent_window_pictures[image].width /
+         (float)ent_window_pictures[image].height;
+}
+
+float ent_window_mouse_wheel_x(void) { return GetMouseWheelMoveV().x; }
+float ent_window_mouse_wheel_y(void) { return GetMouseWheelMoveV().y; }
+
+// The rectangle drawing is clipped to, if any: set again only where it
+// is another, since setting it sends what was drawn so far on its way.
+static int ent_window_clipped;
+static int ent_window_clip_at[4];
+
+void ent_window_unclip(void) {
+  if (ent_window_clipped)
+    EndScissorMode();
+  ent_window_clipped = 0;
+}
+
+void ent_window_clip(float x, float y, float width, float height) {
+  // (All of the window, or more: no clipping.)
+  if (x <= 0 && y <= 0 && x + width >= GetScreenWidth() &&
+      y + height >= GetScreenHeight()) {
+    ent_window_unclip();
+    return;
+  }
+  int at[4] = {(int)x, (int)y, (int)width, (int)height};
+  if (at[2] < 0)
+    at[2] = 0;
+  if (at[3] < 0)
+    at[3] = 0;
+  if (ent_window_clipped && !memcmp(at, ent_window_clip_at, sizeof at))
+    return;
+  if (ent_window_clipped)
+    EndScissorMode();
+  BeginScissorMode(at[0], at[1], at[2], at[3]);
+  memcpy(ent_window_clip_at, at, sizeof at);
+  ent_window_clipped = 1;
 }
 
 void ent_window_screenshot(const ent_text126 *file) {

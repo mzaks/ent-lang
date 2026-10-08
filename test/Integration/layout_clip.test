@@ -1,0 +1,36 @@
+// A box that clips what is inside it, as Clay has it: the boxes inside
+// are as big as they want (a row of them is not shrunk to fit, and one
+// across can be wider than the box), `Scroll` moves them, each shows only
+// within the box, and the pointer is over it only there.
+// RUN: %ent run -I %S/../../examples %S/Inputs/layout_clip.ent 2>/dev/null | FileCheck %s
+
+// Five rows of 60 with gaps of 5 are 320 in a list that is 180 high: none
+// is made smaller. Each shows within the list's 100, the third being 150
+// wide. The pointer is on the second.
+// CHECK:      1: root 0.0 0.0 300.0 200.0 shows 0.0 wide, content 180.0, over 1
+// CHECK-NEXT: 1: list 10.0 10.0 100.0 180.0 shows 0.0 wide, content 320.0, over 1
+// CHECK-NEXT: 1: row 0 10.0 10.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 1: row 1 10.0 75.0 80.0 60.0 shows 100.0 wide, content 0.0, over 1
+// CHECK-NEXT: 1: row 2 10.0 140.0 150.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 1: row 3 10.0 205.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 1: row 4 10.0 270.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 1: plain 120.0 10.0 170.0 180.0 shows 0.0 wide, content 0.0, over 0
+// What is in the list is 100 further up, and the pointer on the third.
+// CHECK-NEXT: 2: root 0.0 0.0 300.0 200.0 shows 0.0 wide, content 180.0, over 1
+// CHECK-NEXT: 2: list 10.0 10.0 100.0 180.0 shows 0.0 wide, content 320.0, over 1
+// CHECK-NEXT: 2: row 0 10.0 -90.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 2: row 1 10.0 -25.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 2: row 2 10.0 40.0 150.0 60.0 shows 100.0 wide, content 0.0, over 1
+// CHECK-NEXT: 2: row 3 10.0 105.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 2: row 4 10.0 170.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 2: plain 120.0 10.0 170.0 180.0 shows 0.0 wide, content 0.0, over 0
+// Where the third row is wider than the list, it does not show, and the
+// pointer is over the box next to the list, not over the row.
+// CHECK-NEXT: 3: root 0.0 0.0 300.0 200.0 shows 0.0 wide, content 180.0, over 1
+// CHECK-NEXT: 3: list 10.0 10.0 100.0 180.0 shows 0.0 wide, content 320.0, over 0
+// CHECK-NEXT: 3: row 0 10.0 -90.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 3: row 1 10.0 -25.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 3: row 2 10.0 40.0 150.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 3: row 3 10.0 105.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 3: row 4 10.0 170.0 80.0 60.0 shows 100.0 wide, content 0.0, over 0
+// CHECK-NEXT: 3: plain 120.0 10.0 170.0 180.0 shows 0.0 wide, content 0.0, over 1

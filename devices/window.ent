@@ -26,7 +26,11 @@ unique Window {
 }
 
 // Where the mouse is, and which of its buttons are down.
-unique Mouse { x: f32, y: f32, left: bool, right: bool }
+// (`wheel_x`, `wheel_y`: how far the wheel was turned since the frame
+// before, in notches; up and to the left are positive.)
+unique Mouse {
+  x: f32, y: f32, left: bool, right: bool, wheel_x: f32, wheel_y: f32
+}
 
 // The keys most programs ask for: down or not.
 unique Keys {
@@ -84,6 +88,29 @@ extern fn text_least(text: text[126], font: i32, size: f32, spacing: f32,
 // and gives its number; 0, the window's own, if it cannot. The window
 // must be open.
 extern proc font(file: text[126], size: i32) -> i32
+// A filled rectangle whose corners are rounded, each with its own
+// radius: top left, top right, bottom left, bottom right.
+extern proc rounded(x: f32, y: f32, width: f32, height: f32, top_left: f32,
+                    top_right: f32, bottom_left: f32, bottom_right: f32,
+                    color: i32)
+// The edges of a rectangle, each so thick (0 for none), going round
+// corners with those radii.
+extern proc edges(x: f32, y: f32, width: f32, height: f32, left: f32,
+                  right: f32, top: f32, bottom: f32, top_left: f32,
+                  top_right: f32, bottom_left: f32, bottom_right: f32,
+                  color: i32)
+// A picture from a file (.png, .jpg, ...): `picture_load` gives its
+// number, 0 if it cannot be read; `picture` draws it into a rectangle,
+// its colours times `tint` (0xffffff: as they are); `picture_ratio` is
+// its width over its height. The window must be open.
+extern proc picture_load(file: text[126]) -> i32
+extern proc picture(image: i32, x: f32, y: f32, width: f32, height: f32,
+                    tint: i32)
+extern fn picture_ratio(image: i32) -> f32
+// What is drawn from here on shows only within this rectangle, until
+// `unclip` or the frame's end.
+extern proc clip(x: f32, y: f32, width: f32, height: f32)
+extern proc unclip()
 // Saves the picture as it is now (a .png) in the directory the program
 // runs in.
 extern proc screenshot(file: text[126])
@@ -97,6 +124,8 @@ extern proc end_frame()
 extern proc mouse_x() -> f32
 extern proc mouse_y() -> f32
 extern proc mouse_down(button: i32) -> bool
+extern proc mouse_wheel_x() -> f32
+extern proc mouse_wheel_y() -> f32
 
 system begin() {
   if !Window.open {
@@ -114,6 +143,8 @@ system begin() {
   Mouse.y = mouse_y()
   Mouse.left = mouse_down(0)
   Mouse.right = mouse_down(1)
+  Mouse.wheel_x = mouse_wheel_x()
+  Mouse.wheel_y = mouse_wheel_y()
   Keys.right = key_down(262)
   Keys.left = key_down(263)
   Keys.down = key_down(264)
