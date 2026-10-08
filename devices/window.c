@@ -481,6 +481,17 @@ float ent_window_picture_ratio(int32_t image) {
          (float)ent_window_pictures[image].height;
 }
 
+// A colour with all of it there (AA ff), and how much of a colour there
+// is when `part` of it is laid on: its AA's share of that.
+int32_t ent_window_solid(int32_t color) {
+  return (int32_t)((uint32_t)color | 0xff000000u);
+}
+
+float ent_window_strength(int32_t color, float part) {
+  uint32_t alpha = (uint32_t)color >> 24;
+  return part * (alpha ? (float)alpha / 255.0f : 1.0f);
+}
+
 // From one colour to another: `part` of the way (0 to 1), each of red,
 // green, blue and how much of it there is.
 int32_t ent_window_blend(int32_t from, int32_t to, float part) {

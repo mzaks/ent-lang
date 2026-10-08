@@ -46,8 +46,8 @@ component TextStyle {
 }
 
 // A colour laid on a box and on all that is in it, as much of it as its
-// AA says (0x80ff0000: half red). Of the boxes a box is in, the nearest
-// that has one decides, or the box itself.
+// AA says (0x80ff0000: half red). A box with one in a box with one has
+// both: its own on the other.
 component Overlay { colour: i32 }
 
 // What is in a box that scrolls can be dragged with the pointer, and
@@ -94,7 +94,8 @@ component Shown {
   x: f32, y: f32, w: f32, h: f32, colour: i32, dx: f32, dy: f32
 }
 // And what follows from those for every box, with the boxes it is in:
-// how far from its place it is drawn, and under how much of what colour.
+// how far from its place it is drawn, and under how much (0 to 1) of
+// what colour, all of that colour (AA ff).
 component Look { dx: f32, dy: f32, colour: i32, part: f32 }
 component Eased {
   x: f32, y: f32, w: f32, h: f32, colour: i32, tint: i32, part: f32, t: f32
@@ -242,9 +243,10 @@ system animate() {
       on changed d {
     e.add(Gone)
   }
+  // (One that has no `Transition` goes at once.)
+  for e with Gone without Transition, Dead { e.add(Dead { at: 0 }) }
   for (e, b: Box)-[Inside*]->(d: Dead) on changed d { e.destroy() }
   for e, d: Dead { e.destroy() }
-  for e with Gone without Transition, Dead { e.add(Dead { at: 0 }) }
 
   // An overlay is laid on as it is, where the box has no `Transition`.
   for e, o: Overlay without Tint on added Overlay {
@@ -402,10 +404,14 @@ system animate() {
         dx = x
         dy = y
       }
+      // (Its own on what is laid on the box it is in or over: so much
+      // of that still shows through as its own lets.)
       if let c = t.colour, let p = t.part {
-        if p > 0.0 {
-          colour = c
-          part = p
+        let own = strength(c, p)
+        let all = 1.0 - (1.0 - part) * (1.0 - own)
+        if all > 0.0 {
+          colour = blend(colour, solid(c), own / all)
+          part = all
         }
       }
       lk.dx = dx
@@ -426,10 +432,14 @@ system animate() {
         dx = x
         dy = y
       }
+      // (Its own on what is laid on the box it is in or over: so much
+      // of that still shows through as its own lets.)
       if let c = t.colour, let p = t.part {
-        if p > 0.0 {
-          colour = c
-          part = p
+        let own = strength(c, p)
+        let all = 1.0 - (1.0 - part) * (1.0 - own)
+        if all > 0.0 {
+          colour = blend(colour, solid(c), own / all)
+          part = all
         }
       }
       lk.dx = dx
@@ -658,60 +668,62 @@ system inspect() {
     // A box is in the line after all that came before it, depth first:
     // under the box it is in, after the boxes before it there and all
     // that is in those. (What floats is listed by itself, as deep as it
-    // is over boxes.)
+    // is over boxes, after the boxes of the layers below.)
     Inspector.line = 0
-    for e, b: Box, l: Layer, z: Size, k: Stack, at: mut Listed,
-        optional f: Fill, optional p: Pad
-        top down dfs Inside {
-      let n = Inspector.line
-      Inspector.line += 1
-      at.line = n
-      let y = 8.0 + Inspector.top + n as f32 * row
-      let picked = if inside { n == pointed } else {
-        e.has(Hovered) && l.z == PointerTop && l.depth == Inspector.depth
-      }
-      if y > -row && y + row <= about {
-        let x = left + 10.0 + l.depth as f32 * 12.0
-        if picked { rect(left + 1.0, y, wide - 1.0, row, 0x2a4a80) }
-        else if e.has(Hovered) { rect(left + 1.0, y, wide - 1.0, row, 0x202a34) }
-        var swatch = 0x3a4650
-        if let colour = f.colour { swatch = colour }
-        rect(x, y + 4.0, 10.0, 10.0, swatch)
-        var what: text[14] = if e.has(Float) { "float" } else if e.has(Clip) { "clip" }
-                   else if e.has(Text) { "text" }
-                   else if k.row { "row" } else { "column" }
-        label(says_line(what, b.w, b.h), x + 16.0, y + 3.0, 12.0,
-              if picked { 0xffffff } else { 0xa0b0c0 })
-      }
-      if picked {
-        Picked.any += 1
-        Picked.line += n
-        Picked.layer += l.z
-        Picked.depth += l.depth
-        Picked.x += b.x
-        Picked.y += b.y
-        Picked.w += b.w
-        Picked.h += b.h
-        Picked.wide += z.w as i32
-        Picked.high += z.h as i32
-        var left_pad = k.pad
-        var right_pad = k.pad
-        var top_pad = k.pad
-        var bottom_pad = k.pad
-        if let pl = p.left, let pr = p.right, let pt = p.top,
-           let pb = p.bottom {
-          left_pad = pl
-          right_pad = pr
-          top_pad = pt
-          bottom_pad = pb
+    for layer in 0..8 {
+      for e, b: Box, l: Layer, z: Size, k: Stack, at: mut Listed,
+          optional f: Fill, optional p: Pad
+          top down dfs Inside where l.z == layer {
+        let n = Inspector.line
+        Inspector.line += 1
+        at.line = n
+        let y = 8.0 + Inspector.top + n as f32 * row
+        let picked = if inside { n == pointed } else {
+          e.has(Hovered) && l.z == PointerTop && l.depth == Inspector.depth
         }
-        Picked.left += left_pad
-        Picked.right += right_pad
-        Picked.top += top_pad
-        Picked.bottom += bottom_pad
-        Picked.gap += k.gap
-        Picked.more += if e.has(Scroll) { 1 } else if e.has(Transition) { 2 }
-                       else if e.has(Passthrough) { 3 } else { 0 }
+        if y > -row && y + row <= about {
+          let x = left + 10.0 + l.depth as f32 * 12.0
+          if picked { rect(left + 1.0, y, wide - 1.0, row, 0x2a4a80) }
+          else if e.has(Hovered) { rect(left + 1.0, y, wide - 1.0, row, 0x202a34) }
+          var swatch = 0x3a4650
+          if let colour = f.colour { swatch = colour }
+          rect(x, y + 4.0, 10.0, 10.0, swatch)
+          var what: text[14] = if e.has(Float) { "float" } else if e.has(Clip) { "clip" }
+                     else if e.has(Text) { "text" }
+                     else if k.row { "row" } else { "column" }
+          label(says_line(what, b.w, b.h), x + 16.0, y + 3.0, 12.0,
+                if picked { 0xffffff } else { 0xa0b0c0 })
+        }
+        if picked {
+          Picked.any += 1
+          Picked.line += n
+          Picked.layer += l.z
+          Picked.depth += l.depth
+          Picked.x += b.x
+          Picked.y += b.y
+          Picked.w += b.w
+          Picked.h += b.h
+          Picked.wide += z.w as i32
+          Picked.high += z.h as i32
+          var left_pad = k.pad
+          var right_pad = k.pad
+          var top_pad = k.pad
+          var bottom_pad = k.pad
+          if let pl = p.left, let pr = p.right, let pt = p.top,
+             let pb = p.bottom {
+            left_pad = pl
+            right_pad = pr
+            top_pad = pt
+            bottom_pad = pb
+          }
+          Picked.left += left_pad
+          Picked.right += right_pad
+          Picked.top += top_pad
+          Picked.bottom += bottom_pad
+          Picked.gap += k.gap
+          Picked.more += if e.has(Scroll) { 1 } else if e.has(Transition) { 2 }
+                         else if e.has(Passthrough) { 3 } else { 0 }
+        }
       }
     }
     Inspector.lines = Inspector.line

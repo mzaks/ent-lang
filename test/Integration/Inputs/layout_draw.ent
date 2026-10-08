@@ -1,0 +1,95 @@
+// examples/layout_window.ent without a window: what it draws, frame by
+// frame (layout_draw.test).
+import console
+import window
+import layout
+import layout_window
+
+tag Card
+tag List
+unique Frame: i32
+default_capacity 64
+
+world {
+  Window.width = 700
+  Window.height = 200
+  // A window with an overlay, half black: a list that scrolls, and next
+  // to it a card with a quarter of red laid on it, which comes up from
+  // 40 below in half a second.
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 300.0, h: 200.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 10.0, gap: 10.0 }, Fill { colour: 0x101010 },
+    Overlay { colour: 0x80000000 }
+  }
+  let list = spawn {
+    Box { x: 0.0, y: 0.0, w: 100.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 10.0 }, Fill { colour: 0x202020 },
+    Clip { x: true, y: true }, Scroll { x: 0.0, y: 0.0 }, Drag, List,
+    Border { left: 0.0, right: 0.0, top: 0.0, bottom: 0.0, between: 2.0,
+             colour: 0x404040 }
+  }
+  connect (list)-[Inside]->(root)
+  for i in 0..3 {
+    let row = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 100.0 },
+      Size { w: Sizing.Grow, h: Sizing.Fixed },
+      Stack { row: true, pad: 4.0, gap: 0.0 },
+      Text { text: "row {i}", size: 16.0, colour: 0xffffff }
+    }
+    connect (row)-[Inside]->(list)
+  }
+  let card = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 10.0, gap: 0.0 }, Fill { colour: 0x304050 },
+    Round { top_left: 8.0, top_right: 8.0, bottom_left: 0.0,
+            bottom_right: 0.0 },
+    Border { left: 1.0, right: 1.0, top: 3.0, bottom: 1.0, between: 0.0,
+             colour: 0x3a7bd5 },
+    Overlay { colour: 0x40ff0000 }, Card,
+    Transition { seconds: 0.5, ease: Ease.Linear, place: true, size: true,
+                 colour: true },
+    Enter { dx: 0.0, dy: 40.0, colour: 0 },
+    Leave { dx: 0.0, dy: 0.0, colour: 0x101010 }
+  }
+  connect (card)-[Inside]->(root)
+  let words = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "a text that goes on in the next line", size: 16.0,
+           colour: 0xa0b0c0 }
+  }
+  connect (words)-[Inside]->(card)
+  // And a dot that floats over the text, at its top right corner.
+  let dot = spawn {
+    Box { x: 0.0, y: 0.0, w: 6.0, h: 6.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Fill { colour: 0xe05040 },
+    Float { dx: 0.0, dy: 0.0 },
+    Attach { own: Point.Middle, under: Point.TopRight }, Passthrough
+  }
+  connect (dot)-[Over]->(words)
+}
+
+// A tenth of a second a frame. The pointer goes down on the list in the
+// third frame and 30 up in the fourth, and lets go; in the seventh the
+// card's colour is another; in the ninth the card is to go, and is gone
+// after the thirteenth; in the last the inspector is on, the pointer on
+// the list.
+system change() {
+  Frame += 1
+  Window.dt = 0.1
+  Mouse.x = 50.0
+  Mouse.y = if Frame == 4 { 70.0 } else { 100.0 }
+  Mouse.left = Frame == 3 || Frame == 4
+  for f: mut Fill with Card where Frame == 7 { f.colour = 0x30ff50 }
+  for e with Card without Gone where Frame == 9 { e.add(Gone) }
+  if Frame == 15 { Inspector.on = true }
+  put("frame {Frame}")
+}
+
+schedule frame() { change()  ui() }
+main { loop { frame() } until Frame == 15 }

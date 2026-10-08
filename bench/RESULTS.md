@@ -2975,3 +2975,6 @@ library's own.
     pieces on a core each (`llvm-split`): 5.0 s of clang to 3.5. Split
     before optimising it was 1.8 s, and `bench/boxes` 12% slower, as
     nothing is inlined from one piece into another: not done.
+  - Tried after that, and not kept: what an event marks as one function
+    for all logs. 10,000 lines less in the demo (6%), and `bench/boxes`
+    at 39.5 us a frame where it is at 38.4: a call for every event.

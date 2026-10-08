@@ -1,0 +1,99 @@
+// examples/layout_window.ent without a window: a device that prints what
+// would be drawn stands in for devices/window.c, which needs a display
+// and raylib. What is drawn, in which order, clipped, shifted and shaded
+// how; boxes on their way (Transition, Enter, Leave, Gone), overlays on
+// one another, what scrolls dragged and let go, and the inspector.
+// RUN: mkdir -p %t.dir
+// RUN: cp %S/../../devices/window.ent %t.dir/window.ent
+// RUN: cp %S/Inputs/headless_window.c %t.dir/window.c
+// RUN: %ent run -I %t.dir -I %S/../../examples %S/Inputs/layout_draw.ent \
+// RUN:     2>/dev/null | FileCheck %s
+
+// Under half of black, the window and the list; what is in the list
+// within it, and not the third row, which is below its end.
+// CHECK:      frame 1
+// CHECK-NEXT: shade 000000 0.50
+// CHECK-NEXT: rect 0 0 300 200 00101010
+// CHECK-NEXT: rect 10 10 100 180 00202020
+// CHECK-NEXT: clip 10 10 100 180
+// CHECK-NEXT: write 14 14 in 92 "row 0" 00ffffff
+// CHECK-NEXT: write 14 124 in 92 "row 1" 00ffffff
+// CHECK-NEXT: unclip
+// The card is on its way up from 40 below, a fifth of the way; its red
+// comes on with it, on the black: more of both together than of either.
+// The text in it goes with it.
+// CHECK-NEXT: shift 0 32
+// CHECK-NEXT: shade 180000 0.53
+// CHECK-NEXT: rounded 120 10 170 180 by 8 8 0 0 ff304050
+// CHECK-NEXT: write 130 20 in 150 "a text that goes on in the next line" 00a0b0c0
+// The edges after all the boxes, each as its box is drawn; and the lines
+// between the rows of the list, in the middle of its gaps.
+// CHECK-NEXT: shift 0 0
+// CHECK-NEXT: shade 000000 0.50
+// CHECK-NEXT: edges 10 10 100 180 of 0 0 0 0 00404040
+// CHECK-NEXT: shift 0 32
+// CHECK-NEXT: shade 180000 0.53
+// CHECK-NEXT: edges 120 10 170 180 of 1 1 3 1 003a7bd5
+// CHECK-NEXT: clip 10 10 100 180
+// CHECK-NEXT: shift 0 0
+// CHECK-NEXT: shade 000000 0.50
+// CHECK-NEXT: rect 10 114 100 2 00404040
+// CHECK-NEXT: rect 10 224 100 2 00404040
+// CHECK-NEXT: unclip
+// What floats, a layer above: with the box it floats over, its middle on
+// that one's corner.
+// CHECK-NEXT: shift 0 32
+// CHECK-NEXT: shade 180000 0.53
+// CHECK-NEXT: rect 277 17 6 6 00e05040
+// CHECK-NEXT: shift 0 0
+// CHECK-NEXT: shade 000000 0.00
+// CHECK-NEXT: frame 2
+// CHECK:      shift 0 24
+// CHECK:      frame 3
+// CHECK:      write 14 14 in 92 "row 0" 00ffffff
+// CHECK:      shift 0 16
+// The pointer went down on the list, and is 30 further up.
+// CHECK:      frame 4
+// CHECK:      write 14 -16 in 92 "row 0" 00ffffff
+// CHECK:      shift 0 8
+// Let go, the list goes on, and the third row shows; the card is where
+// it is to be, under a quarter of red on half of black.
+// CHECK:      frame 5
+// CHECK:      write 14 -31 in 92 "row 0" 00ffffff
+// CHECK:      write 14 189 in 92 "row 2" 00ffffff
+// CHECK-NOT:  shift
+// CHECK:      shade 660000 0.63
+// CHECK-NEXT: rounded 120 10 170 180 by 8 8 0 0 00304050
+// Slower and slower.
+// CHECK:      frame 6
+// CHECK:      write 14 -41.5 in 92 "row 0" 00ffffff
+// Its colour is to be another: a fifth of the way a frame.
+// CHECK:      frame 7
+// CHECK:      rounded 120 10 170 180 by 8 8 0 0 ff306650
+// CHECK:      frame 8
+// CHECK:      rounded 120 10 170 180 by 8 8 0 0 ff308c50
+// It is to go: under more and more of the colour it leaves into.
+// CHECK:      frame 9
+// CHECK:      shade 760202 0.70
+// CHECK:      frame 13
+// CHECK:      shade 101010 1.00
+// CHECK-NEXT: rounded 120 10 170 180 by 8 8 0 0 0030ff50
+// And is gone, with the text in it and what floated over that.
+// CHECK:      frame 14
+// CHECK-NOT:  rounded
+// CHECK-NOT:  a text that goes on
+// CHECK-NOT:  rect 277 17 6 6
+// CHECK:      frame 15
+// The inspector, at the right of the window: the boxes line by line, each
+// further in than the box it is in, and all about the one the pointer is
+// on, which is marked in the window.
+// CHECK:      rect 380 0 320 200 f0141a20
+// CHECK:      label 406 11 "row 300 x 200"
+// CHECK:      label 418 29 "clip 100 x 180"
+// CHECK:      label 430 47 "text 100 x 100"
+// CHECK:      clip 0 0 380 200
+// CHECK:      edges 10 {{[0-9.]+}} 100 100 of 2 2 2 2 00ffe040
+// CHECK:      label 390 78 "line 4, layer 0, 2 deep"
+// CHECK:      label 390 114 "width grow, height fixed"
+// CHECK:      label 390 132 "padding 4 4 4 4, gap 0"
+// CHECK:      label 390 168 "row 1"
