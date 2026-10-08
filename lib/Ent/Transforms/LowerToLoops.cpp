@@ -1858,7 +1858,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
               seen));
       }
       const WorldColumn *column = archetype.findStamp(getStamp(trigger));
-      if (!column || trigger.via)
+      // (Another entity's, or one that is asked on the way up.)
+      if (!column || trigger.via || trigger.onTheWay)
         continue;
       Value stamped = memref::LoadOp::create(
           rewriter, loc, world.stamps(archetype, *column), ValueRange{entity});
@@ -1948,7 +1949,44 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                           .getResult()
                     : newer;
     };
-    if (refType.hasPath()) {
+    // (The nearest ancestor that has the component is found step by step
+    // too where a trigger means it and not every parent has it: on the
+    // way it shows whether one has lost or got it.)
+    ArrayAttr path = refType.getPath();
+    if (!path && tracks && !refType.getIsDirect() && refType.getHops() == 1 &&
+        !refType.getIsBefore() && !refType.getIsAfter() &&
+        relation.getTrusted(/*target=*/true) != refType.getComponent()) {
+      Builder builder(rewriter.getContext());
+      path = builder.getArrayAttr({builder.getArrayAttr(
+          {builder.getStringAttr("up"), refType.getVia(),
+           refType.getComponent()})});
+    }
+    // Whether the entity `id` has had `component` taken from it, or given
+    // to it, since the query last ran.
+    auto changedHaving = [&](Value id, FlatSymbolRefAttr component,
+                             Trigger::Kind kind) -> Value {
+      Stamp stamp{kind, component.getAttr(), rewriter.getStringAttr("")};
+      auto stores = [&](const WorldArchetype &home) {
+        return home.findStamp(stamp) != nullptr;
+      };
+      Type i64 = rewriter.getI64Type();
+      Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+      if (llvm::none_of(layout.archetypes, stores))
+        return arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+      Value stamped = emitLocate(
+          rewriter, loc, layout, world, id, stores, FlatSymbolRefAttr(),
+          TypeRange{i64},
+          [&](const WorldArchetype &home, Value row,
+              Value) -> SmallVector<Value> {
+            return {memref::LoadOp::create(
+                rewriter, loc, world.stamps(home, *home.findStamp(stamp)),
+                ValueRange{row})};
+          },
+          [&]() -> SmallVector<Value> { return {zero}; })[0];
+      return arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
+                                   stamped, seen);
+    };
+    if (path) {
       // Step by step from the entity: to a parent, or to the nearest
       // ancestor that has what the step names, each along its own tree.
       Type i1 = rewriter.getI1Type();
@@ -1970,7 +2008,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
             },
             [&]() -> SmallVector<Value> { return {no}; })[0];
       };
-      for (Attribute attr : refType.getPath()) {
+      for (Attribute attr : path) {
         auto step = cast<ArrayAttr>(attr);
         const WorldRelation &tree =
             layout.getRelation(cast<FlatSymbolRefAttr>(step[1]).getAttr());
@@ -2013,13 +2051,21 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                 rewriter.setInsertionPointToStart(further.elseBlock());
                 auto [more, next] =
                     emitParent(rewriter, loc, layout, world, tree, state[0]);
-                // (On past this one: along its edge.)
+                // (On past this one: along its edge. And if it has lost
+                // what the step asks for, it was where the step ended.)
                 Value newer = state[3];
                 if (climbs)
                   newer = arith::OrIOp::create(
                       rewriter, loc, newer,
                       arith::AndIOp::create(rewriter, loc, more,
                                             newlyConnected(tree, state[0])));
+                if (tracks)
+                  for (Attribute part : step.getValue().drop_front(2))
+                    newer = arith::OrIOp::create(
+                        rewriter, loc, newer,
+                        changedHaving(state[0],
+                                      cast<FlatSymbolRefAttr>(part),
+                                      Trigger::Removed));
                 scf::YieldOp::create(rewriter, loc,
                                      ValueRange{next, more, newer});
               }
@@ -2028,11 +2074,25 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                   ValueRange{further.getResult(0), all, further.getResult(1),
                              further.getResult(2)});
             });
-        if (climbs)
-          moved = moved ? arith::OrIOp::create(rewriter, loc, moved,
-                                               climb.getResult(3))
+        if (tracks) {
+          // (And where it ends now: one that has just got what it asks
+          // for was passed before.)
+          Value other = climb.getResult(3);
+          Value found =
+              arith::AndIOp::create(rewriter, loc, has, climb.getResult(1));
+          Value end = arith::SelectOp::create(rewriter, loc, found,
+                                              climb.getResult(0), own);
+          for (Attribute part : step.getValue().drop_front(2))
+            other = arith::OrIOp::create(
+                rewriter, loc, other,
+                arith::AndIOp::create(
+                    rewriter, loc, found,
+                    changedHaving(end, cast<FlatSymbolRefAttr>(part),
+                                  Trigger::Added)));
+          moved = moved ? arith::OrIOp::create(rewriter, loc, moved, other)
                               .getResult()
-                        : climb.getResult(3);
+                        : other;
+        }
         has = arith::AndIOp::create(rewriter, loc, has, climb.getResult(1));
         at = climb.getResult(0);
       }
@@ -9779,7 +9839,7 @@ static void warnAboutReactiveQueries(ModuleOp module) {
   module.walk([&](QueryOp query) {
     for (const Trigger &trigger : getTriggers(query)) {
       // (Not a trigger the program wrote.)
-      if (trigger.kind == Trigger::Connected)
+      if (trigger.kind == Trigger::Connected || trigger.onTheWay)
         continue;
       // (A module's query reacts to what the program that imports it may
       // do, which is not the module's to know: `module.name` is one.)

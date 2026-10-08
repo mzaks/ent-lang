@@ -135,6 +135,11 @@ struct Trigger {
   /// [...]`).
   unsigned hops = 1;
   ArrayAttr path = {};
+  /// No trigger a program writes either: brought along by a trigger up a
+  /// tree whose way goes to the nearest ancestor that has some components
+  /// (`*`). That an entity lost one of them (Removed) or got one (Added)
+  /// makes the nearest one another for those below it.
+  bool onTheWay = false;
   /// Whether `ref` is the ref whose entity the trigger means.
   bool means(RefType ref) const {
     return via && ref.getVia() == via && ref.getComponent() == component &&
@@ -143,6 +148,18 @@ struct Trigger {
            ref.getHops() == hops && ref.getPath() == path;
   }
 };
+
+/// A step of the way from the visited entity to the one a trigger up a
+/// tree means: to the parent along `tree`, or (`nearest`) to the nearest
+/// ancestor along it that has all of `has`.
+struct TriggerStep {
+  bool nearest;
+  FlatSymbolRefAttr tree;
+  SmallVector<FlatSymbolRefAttr, 2> has;
+};
+/// The steps of a trigger of `query` that is up a tree, from the visited
+/// entity on.
+SmallVector<TriggerStep, 2> getSteps(const Trigger &trigger, QueryOp query);
 
 /// The triggers of `query`, in order; empty if it is not reactive. After
 /// those it names comes a Connected one for every tree some trigger of it

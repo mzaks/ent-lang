@@ -245,7 +245,68 @@ SmallVector<Trigger> mlir::ent::getTriggers(QueryOp query) {
                             StringAttr::get(query->getContext(), ""),
                             std::nullopt});
   }
+  // And for what a `*` on the way asks its ancestor to have: that one
+  // lost it, or got it.
+  for (size_t named = triggers.size(), k = 0; k < named; ++k) {
+    if (triggers[k].where != Trigger::Up)
+      continue;
+    for (const TriggerStep &step : getSteps(triggers[k], query)) {
+      if (!step.nearest)
+        continue;
+      for (FlatSymbolRefAttr component : step.has)
+        for (Trigger::Kind kind : {Trigger::Removed, Trigger::Added})
+          if (llvm::none_of(triggers, [&](const Trigger &other) {
+                return other.onTheWay && other.kind == kind &&
+                       other.component == component;
+              })) {
+            Trigger implied{kind, component,
+                            StringAttr::get(query->getContext(), ""),
+                            std::nullopt};
+            implied.onTheWay = true;
+            triggers.push_back(implied);
+          }
+    }
+  }
   return triggers;
+}
+
+SmallVector<TriggerStep, 2> mlir::ent::getSteps(const Trigger &trigger,
+                                                QueryOp query) {
+  SmallVector<TriggerStep, 2> steps;
+  if (trigger.where != Trigger::Up)
+    return steps;
+  if (trigger.path) {
+    for (Attribute attr : trigger.path) {
+      auto entry = cast<ArrayAttr>(attr);
+      TriggerStep step{cast<StringAttr>(entry[0]).getValue() == "up",
+                       cast<FlatSymbolRefAttr>(entry[1]), {}};
+      for (Attribute part : entry.getValue().drop_front(2))
+        step.has.push_back(cast<FlatSymbolRefAttr>(part));
+      steps.push_back(std::move(step));
+    }
+    return steps;
+  }
+  // So many parents up; or, one step, the nearest ancestor that has the
+  // component, which is the parent where every target of the tree's edges
+  // has it.
+  bool nearest = false;
+  if (trigger.hops == 1) {
+    for (Type type : query.getBody().getArgumentTypes())
+      if (auto ref = dyn_cast<RefType>(type); ref && trigger.means(ref))
+        nearest = !ref.getIsDirect();
+    if (nearest)
+      if (auto relation = SymbolTable::lookupNearestSymbolFrom<RelationOp>(
+              query, trigger.via))
+        nearest = getTrustedEndpoint(relation, /*target=*/true) !=
+                  trigger.component;
+  }
+  if (nearest) {
+    steps.push_back({true, trigger.via, {trigger.component}});
+    return steps;
+  }
+  for (unsigned hop = 0; hop < trigger.hops; ++hop)
+    steps.push_back({false, trigger.via, {}});
+  return steps;
 }
 
 Stamp mlir::ent::getStamp(const Trigger &trigger) {
@@ -275,6 +336,14 @@ StampPlan StampPlan::compute(ModuleOp module) {
       if (it == plan.stamps.end()) {
         plan.stamps.push_back(stamp);
         observers.emplace_back();
+      }
+      // What an entity on some other's way lost or got is looked for
+      // wherever an entity without it, or with it, can be.
+      if (trigger.onTheWay) {
+        for (ArchetypeOp archetype : module.getOps<ArchetypeOp>())
+          if (isMeaningful(archetype, stamp))
+            observers[index].push_back(archetype);
+        continue;
       }
       // An ancestor's event is looked for wherever the component is.
       if (trigger.via) {

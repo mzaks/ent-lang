@@ -18,7 +18,7 @@
 // RUN: FileCheck %s --input-file=%t.out
 // RUN: sed 's/bottom up In/bottom up dfs In/; s/top down In/top down dfs In/' \
 // RUN:     %S/Inputs/tree_follow.ent > %t.dfs.ent
-// RUN: grep -c "dfs In" %t.dfs.ent | grep -q 13
+// RUN: grep -c "dfs In" %t.dfs.ent | grep -q 16
 // RUN: %ent run %t.dfs.ent 2>/dev/null | cmp - %t.out
 // RUN: ent-translate --import-ent %t.dfs.ent -I %S/../../devices -o %t.dfs.mlir
 // RUN: ent-opt %t.dfs.mlir "--ent-lower-to-loops=explain=1" -o /dev/null 2>&1 \
@@ -54,7 +54,9 @@
 // EXPLAIN:      remark: follows its events along the tree
 // EXPLAIN-NEXT: changed @Node "base" up @In hops 2]
 // EXPLAIN:      remark: goes through its whole tree on each run
-// EXPLAIN-NEXT: changed @Node "base" up @In path {{\[\[}}"parent", @In], ["up", @In, @Node, @Slot]]]
+// EXPLAIN-NEXT: changed @Node "base" up @In path {{\[\[}}"parent", @In], ["up", @In, @Node, @Keep]]]
+// EXPLAIN:      remark: goes through its whole tree on each run
+// EXPLAIN-NEXT: !ent.ref<@Keep, up @In>) cascade @In on
 // And the one that visits the nodes without a parent too, and the one
 // that adds into the node two above.
 // EXPLAIN:      remark: follows its events along the tree

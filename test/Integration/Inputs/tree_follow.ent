@@ -19,10 +19,14 @@ component FullTop { top: f32 }
 // A node's size and that of the node two above it.
 component LazyFar { v: f32 }
 component FullFar { v: f32 }
-// The same, found another way: the nearest above the parent that has a
-// size and a slot, which is the one above it (this `for` goes through
-// all of them and runs its body where a trigger fired).
+// Much the same, found another way: the nearest above the parent that has
+// a size and is kept, which is the one above it until that is kept no
+// more. And what the nearest above a node that is kept has for a number.
+component Keep { n: i32 }
 component LazyPath { v: f32 }
+component FullPath { v: f32 }
+component LazyNear { v: i32 }
+component FullNear { v: i32 }
 // The sizes from a node up to the one without a parent, which is visited
 // too: the `for` names a parent only where there is one.
 // The largest size two below a node, and two below those: each adds into
@@ -50,6 +54,7 @@ world {
     Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
       LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
   }
@@ -63,6 +68,7 @@ world {
       Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
       LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
     }
@@ -75,6 +81,7 @@ world {
         Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
       LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
       }
@@ -90,6 +97,7 @@ world {
       Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
       LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
     }
@@ -123,6 +131,11 @@ system change() {
   }
   for e, n: Node where Frame == 23 && n.index == 488 { e.destroy() }
   for e, n: Node where Frame == 31 && n.index == 123 { connect (e)-[In]->(Home) }
+  // A node of the spine is kept no more from frame 17 on, and again, with
+  // another number, from frame 26; and so one that has just moved, in 33.
+  for e, n: Node where (Frame == 17 && n.index == 62) ||
+                       (Frame == 33 && n.index == 123) { e.remove(Keep) }
+  for e, n: Node where Frame == 26 && n.index == 62 { e.add(Keep { n: 9 }) }
   for e, n: Node where Frame % 7 == 0 && n.index == 0 {
     let made = spawn {
       Node { index: 1000 + Frame, base: 3.0, tip: 1.0 }, Slot { at: 1 },
@@ -130,6 +143,7 @@ system change() {
       Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
       LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
     }
@@ -164,9 +178,13 @@ system lazy() {
       on changed n.base, changed far.base {
     f.v = n.base + far.base
   }
-  for (n: Node, f: mut LazyPath)-[In]->()-[In*]->(far: Node, s: Slot)
+  for (n: Node, f: mut LazyPath)-[In]->()-[In*]->(far: Node, k: Keep)
       top down In on changed n.base, changed far.base {
     f.v = n.base + far.base
+  }
+  for (n: Node, f: mut LazyNear)-[In*]->(far: Keep)
+      top down In on changed far.n {
+    f.v = n.index + far.n
   }
   for (n: Node, d: mut LazyDeep), optional (n)-[In]->(p: LazyDeep)
       top down In on changed n.base, changed p.v {
@@ -198,6 +216,13 @@ system full() {
   for (n: Node, f: mut FullFar)-[In]->()-[In]->(far: Node) top down In {
     f.v = n.base + far.base
   }
+  for (n: Node, f: mut FullPath)-[In]->()-[In*]->(far: Node, k: Keep)
+      top down In {
+    f.v = n.base + far.base
+  }
+  for (n: Node, f: mut FullNear)-[In*]->(far: Keep) top down In {
+    f.v = n.index + far.n
+  }
   for (n: Node, t: FullSkip)-[In]->()-[In]->(g: mut FullSkip) bottom up In {
     g.top max= max(n.base, t.top)
   }
@@ -217,7 +242,8 @@ system compare() {
   for l: Lazy, f: Full where l.w != f.w || l.x != f.x { Wrong += 1 }
   for l: LazyTop, f: FullTop where l.top != f.top { Wrong += 1 }
   for l: LazyFar, f: FullFar where l.v != f.v { Wrong += 1 }
-  for l: LazyPath, f: FullFar where l.v != f.v { Wrong += 1 }
+  for l: LazyPath, f: FullPath where l.v != f.v { Wrong += 1 }
+  for l: LazyNear, f: FullNear where l.v != f.v { Wrong += 1 }
   for l: LazyDeep, f: FullDeep where l.v != f.v { Wrong += 1 }
   for l: LazySkip, f: FullSkip where l.top != f.top { Wrong += 1 }
   for l: mut Lazy where l.runs > 0 {

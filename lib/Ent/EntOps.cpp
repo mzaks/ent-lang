@@ -1426,7 +1426,7 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto system = (*this)->getParentOfType<SystemOp>();
   for (const Trigger &trigger : getTriggers(*this)) {
     // (Brought along by a trigger up a tree, which is checked itself.)
-    if (trigger.kind == Trigger::Connected)
+    if (trigger.kind == Trigger::Connected || trigger.onTheWay)
       continue;
     ComponentOp component =
         lookupComponent(symbolTable, *this, trigger.component);
