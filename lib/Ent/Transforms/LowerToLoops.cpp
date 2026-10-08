@@ -3918,6 +3918,9 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
 /// IEEE-754 minimum/maximum (NaN-propagating) for floats.
 static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
                      Value a, Value b) {
+  // (The last one sent.)
+  if (rule == "set")
+    return b;
   bool isFloat = isa<FloatType>(a.getType());
   if (rule == "add")
     return isFloat ? arith::AddFOp::create(rewriter, loc, a, b).getResult()

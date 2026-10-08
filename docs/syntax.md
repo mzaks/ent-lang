@@ -662,9 +662,12 @@ of a depth.
   `var best: i64 = 0`, `var line: text[30] = ""`. See Vars below.
 - `binding.field = expr`, and `+=`, `-=`, `*=`, `/=`, `min=`, `max=`.
 - Uniques: `Clock.frame += 1`, `Score += 10` (the shorthand's value).
-  Outside a `for` this reads and writes; inside one only `+=`, `-=`,
-  `min=` and `max=` are allowed, and they accumulate (combined when the
-  query ends, in a fixed order).
+  Outside a `for` this reads and writes; inside one `+=`, `-=`, `min=`
+  and `max=` accumulate (combined when the query ends, in a fixed
+  order), and `=` sets it to what the last entity that sets it gives, in
+  the order of the `for`, when the `for` ends: a number, a bool, an enum
+  or an entity (`for b: Box with Main { View.h = b.h }`). Read in the
+  same `for`, it is as it was before.
 - Another entity: `Hull(target).hp -= damage` (also `+=`, `min=`, `max=`)
   combines into its field when the query ends; reading one may find nothing,
   so it is `if let hp = Hull(target).hp { ... } else { ... }`. So is a
@@ -759,8 +762,8 @@ left in it, after a loop what the last round did.
   own: every entity starts with a fresh one.
 - A `var` from outside a `for` over entities can be read in it but not
   assigned: every entity would assign it, in an order that is not the
-  program's to choose. What entities add up goes into a unique (`+=`,
-  `-=`, `min=`, `max=`).
+  program's to choose. What entities add up, or what one of them has,
+  goes into a unique (`+=`, `-=`, `min=`, `max=`, `=`).
 - A `let` keeps the value a var had where the `let` was made.
 - A var is not storage: the compiler follows its values, and reading and
   assigning one cost what the values cost.

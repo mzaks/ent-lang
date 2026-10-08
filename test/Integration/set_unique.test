@@ -1,0 +1,17 @@
+// A unique is set inside a `for`: to what the last entity that sets it
+// gives, in the order of the `for`, when the `for` ends (`ent.accumulate`
+// with the rule `set`). An integer, a float, a bool, an enum, an entity;
+// as it was where no entity sets it; and read in the same `for`, as it
+// was before. However the `for` ran.
+// RUN: %ent run %S/Inputs/set_unique.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/set_unique.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/set_unique.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+
+// IR: ent.accumulate @Seen "n" set
+
+// CHECK:      17 8.5 true true false last 36 rounds 11 was 1
+// CHECK-NEXT: it is 17
+// CHECK-NEXT: 17 8.5 true true false last 36 rounds 22 was 12
+// CHECK-NEXT: it is 17

@@ -1,0 +1,48 @@
+// A unique set inside a `for` (set_unique.test).
+import console
+
+enum Kind { Small, Big }
+component Size { n: i32, w: f32 }
+tag Main
+unique Seen { n: i32, w: f32, big: bool, kind: Kind, who: entity, any: bool }
+unique Last: i32
+unique Rounds: i32
+unique Was: i32
+default_capacity 64
+
+world {
+  for i in 0..40 {
+    if i == 17 {
+      spawn { Size { n: i, w: 0.5 * i as f32 }, Main }
+    } else {
+      spawn { Size { n: i, w: 0.5 * i as f32 } }
+    }
+  }
+  Last = -1
+}
+
+system look() {
+  Rounds += 1
+  // What the one entity that is `Main` has: an integer, a float, a bool,
+  // an enum, and which entity it is.
+  for e, s: Size with Main {
+    Seen.n = s.n
+    Seen.w = s.w
+    Seen.big = s.n > 10
+    Seen.kind = if s.n > 10 { Kind.Big } else { Kind.Small }
+    Seen.who = e
+  }
+  // Of many that set it, the last one's; of none, as it was.
+  for s: Size { if s.n % 7 == Rounds { Last = s.n } }
+  for s: Size where s.n > 100 { Seen.any = true }
+  // Read in the same `for`, it is as it was before.
+  for s: Size where s.n < 3 {
+    Rounds = Rounds + 10
+    Was = Rounds
+  }
+  put("{Seen.n} {Seen.w} {Seen.big} {Seen.kind == Kind.Big} {Seen.any} last {Last} rounds {Rounds} was {Was}")
+  for e, s: Size { if e == Seen.who { put("it is {s.n}") } }
+}
+
+schedule frame() { look() }
+main { loop { frame() } until Rounds > 20 }

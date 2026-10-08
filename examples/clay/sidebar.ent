@@ -459,7 +459,7 @@ world {
             bottom_right: 6.0 },
     Float { dx: 0.0, dy: 0.0 },
     Attach { own: Point.TopRight, under: Point.TopRight }, Raise { z: 1 },
-    Bar
+    Passthrough, Bar
   }
   connect (bar)-[Over]->(content)
 }
@@ -493,15 +493,11 @@ system interact() {
   OnBar = 0
   for e with Bar, Hovered { OnBar += 1 }
   if !Pointer.down { Grab.on = false }
-  View.h = 0.0
-  View.room = 0.0
-  View.all = 0.0
-  View.y = 0.0
   for s: Scroll, b: Box, rh: RoomH, all: Content with Main {
-    View.h max= b.h
-    View.room max= rh.room
-    View.all max= all.h
-    View.y min= s.y
+    View.h = b.h
+    View.room = rh.room
+    View.all = all.h
+    View.y = s.y
   }
   if Pointer.down && !Grab.on && OnBar > 0 {
     Grab.on = true

@@ -3773,7 +3773,8 @@ LogicalResult Parser::parseNameStatement() {
     if (failed(value))
       return failure();
     if (inQuery) {
-      // Inside a query a unique can only be accumulated into.
+      // Inside a query a unique is accumulated into, or set: to what
+      // the last entity that sets it gives.
       StringRef rule;
       bool negate = false;
       if (op->second)
@@ -3782,10 +3783,12 @@ LogicalResult Parser::parseNameStatement() {
         rule = "add";
       else if (op->first == Token::MinusAssign)
         rule = "add", negate = true;
+      else if (op->first == Token::Assign)
+        rule = "set";
       else
-        return error(at, "inside a 'for', a unique can only be accumulated "
-                         "into ('+=', '-=', 'min=', 'max='): every entity "
-                         "would write the same field");
+        return error(at, "inside a 'for', a unique can only be set or "
+                         "accumulated into ('=', '+=', '-=', 'min=', "
+                         "'max='): every entity writes the same field");
       FailureOr<mlir::Value> rhs = emit(**value, type);
       if (failed(rhs))
         return failure();

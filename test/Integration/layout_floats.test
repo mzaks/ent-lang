@@ -8,12 +8,12 @@
 // right. The veil is as big as the window, in the layer it asked for. The
 // menu is half as wide as the panel and a quarter as high, under its
 // bottom left corner, and what is in it fills it. The pointer is on the
-// panel: over it and the window, the veil letting it through.
+// panel: over it and the window, the veil letting it through, and having it too.
 // CHECK:      1: root 0.0 0.0 400.0 300.0 layer 0 pointer 1
 // CHECK-NEXT: 1: panel 20.0 20.0 200.0 100.0 layer 0 pointer 1
 // CHECK-NEXT: 1: item 22.0 122.0 96.0 21.0 layer 1 pointer 0
 // CHECK-NEXT: 1: badge 213.0 115.0 20.0 10.0 layer 1 pointer 0
-// CHECK-NEXT: 1: veil 0.0 0.0 400.0 300.0 layer 5 pointer 0
+// CHECK-NEXT: 1: veil 0.0 0.0 400.0 300.0 layer 5 pointer 1
 // CHECK-NEXT: 1: menu 20.0 120.0 100.0 25.0 layer 1 pointer 0
 // On the menu: over it and what is in it, and no more over the window
 // under them.
@@ -21,7 +21,7 @@
 // CHECK-NEXT: 2: panel 20.0 20.0 200.0 100.0 layer 0 pointer 0
 // CHECK-NEXT: 2: item 22.0 122.0 96.0 21.0 layer 1 pointer 1
 // CHECK-NEXT: 2: badge 213.0 115.0 20.0 10.0 layer 1 pointer 0
-// CHECK-NEXT: 2: veil 0.0 0.0 400.0 300.0 layer 5 pointer 0
+// CHECK-NEXT: 2: veil 0.0 0.0 400.0 300.0 layer 5 pointer 1
 // CHECK-NEXT: 2: menu 20.0 120.0 100.0 25.0 layer 1 pointer 1
 // Just outside the menu, which is 4 bigger for the pointer than its box,
 // and down.
@@ -29,7 +29,7 @@
 // CHECK-NEXT: 3: panel 20.0 20.0 200.0 100.0 layer 0 pointer 0
 // CHECK-NEXT: 3: item 22.0 122.0 96.0 21.0 layer 1 pointer 0
 // CHECK-NEXT: 3: badge 213.0 115.0 20.0 10.0 layer 1 pointer 0
-// CHECK-NEXT: 3: veil 0.0 0.0 400.0 300.0 layer 5 pointer 0
+// CHECK-NEXT: 3: veil 0.0 0.0 400.0 300.0 layer 5 pointer 2
 // CHECK-NEXT: 3: menu 20.0 120.0 100.0 25.0 layer 1 pointer 2
 // The panel is narrower: what floats over it is where and as big as it
 // says now, in the same frame.
@@ -37,5 +37,5 @@
 // CHECK-NEXT: 4: panel 20.0 20.0 100.0 100.0 layer 0 pointer 0
 // CHECK-NEXT: 4: item 22.0 122.0 46.0 21.0 layer 1 pointer 0
 // CHECK-NEXT: 4: badge 113.0 115.0 20.0 10.0 layer 1 pointer 0
-// CHECK-NEXT: 4: veil 0.0 0.0 400.0 300.0 layer 5 pointer 0
+// CHECK-NEXT: 4: veil 0.0 0.0 400.0 300.0 layer 5 pointer 1
 // CHECK-NEXT: 4: menu 20.0 120.0 50.0 25.0 layer 1 pointer 0

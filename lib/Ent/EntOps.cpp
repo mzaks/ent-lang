@@ -2056,6 +2056,10 @@ static LogicalResult verifyCombining(Operation *op, StringRef rule) {
   // accumulate there has no such buffer yet.
   if (isa<AccumulateOp>(op) && op->getParentOfType<EdgesOp>())
     return op->emitOpError("inside 'ent.edges' is not supported yet");
+  // (The last value sent, for a resource only: an entity's field is set
+  // by the entity itself.)
+  if (rule == "set" && isa<AccumulateOp>(op))
+    return success();
   if (rule != "add" && rule != "min" && rule != "max")
     return op->emitOpError("has unknown rule '")
            << rule << "'; expected 'add', 'min' or 'max'";
@@ -2412,10 +2416,14 @@ AccumulateOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     return emitOpError("value type ")
            << getValue().getType() << " does not match field '" << getField()
            << "' of type " << *fieldType;
-  if (!isCombinable(*fieldType))
+  bool settable = isCombinable(*fieldType) || fieldType->isInteger(1) ||
+                  isa<EnumType, EntityType>(*fieldType);
+  if (getRule() == "set" ? !settable : !isCombinable(*fieldType))
     return emitOpError("cannot combine field '")
            << getField() << "' of type " << *fieldType
-           << "; only integers (not i1) and floats can";
+           << (getRule() == "set"
+                   ? "; only integers, floats, enums and entities are set"
+                   : "; only integers (not i1) and floats can");
   // One rule per field and query: mixed rules would not commute.
   AccumulateOp other;
   (*this)->getParentOfType<QueryOp>().walk([&](AccumulateOp accumulate) {

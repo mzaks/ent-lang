@@ -92,7 +92,8 @@ component Expand { w: f32, h: f32 }
 // mouse), and what `point` makes of it: the boxes it is over have
 // `Hovered`, and `Pressed` while it is down. Of the boxes it is over,
 // those in the topmost layer: what floats takes the pointer from what is
-// under it, unless it has `Passthrough`.
+// under it, unless it has `Passthrough`. (Such a box has the pointer too,
+// with what is under it, where nothing above it takes it.)
 unique Pointer { x: f32, y: f32, down: bool }
 unique PointerTop: i32
 // And whether it went down or was let go since `point` last ran, or is
@@ -961,7 +962,7 @@ system point() {
                Pointer.y >= b.y - eh && Pointer.y < b.y + b.h + eh &&
                Pointer.x >= v.x && Pointer.x < v.x + v.w &&
                Pointer.y >= v.y && Pointer.y < v.y + v.h &&
-               l.z >= PointerTop && !e.has(Passthrough)
+               l.z >= PointerTop
     if over != e.has(Hovered) {
       if over { e.add(Hovered) } else { e.remove(Hovered) }
     }

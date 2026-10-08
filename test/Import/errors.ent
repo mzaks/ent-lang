@@ -33,8 +33,8 @@ component Position { x: f32 }
 unique Clock { frame: i64 }
 system s() {
   for p: Position {
-    // expected-error @+1 {{inside a 'for', a unique can only be accumulated into ('+=', '-=', 'min=', 'max='): every entity would write the same field}}
-    Clock.frame = 1
+    // expected-error @+1 {{inside a 'for', a unique can only be set or accumulated into ('=', '+=', '-=', 'min=', 'max='): every entity writes the same field}}
+    Clock.frame *= 2
   }
 }
 

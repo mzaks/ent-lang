@@ -934,9 +934,10 @@ def Ent_AccumulateOp : Ent_Op<"accumulate", [
     ent.accumulate @Score "points" add %bonus : i64
     ```
     Combines `%bonus` into field `points` of `@Score` with the rule `add`,
-    `min` or `max` (signed for integers). A resource cannot be written
-    inside a query, where every entity would write the same field; an
-    accumulate is the commutative alternative. Like `ent.apply`, its values
+    `min` or `max` (signed for integers), or `set`: the last value sent is
+    the field's. A resource cannot be written inside a query, where every
+    entity would write the same field; an accumulate is the alternative
+    that does not depend on how the query ran. Like `ent.apply`, its values
     are combined when the query ends, in a fixed order (by accumulate, then
     archetype, then row), so the result does not depend on how the query
     ran, in parallel or not, even for floating-point `add`; reads of the
@@ -945,7 +946,8 @@ def Ent_AccumulateOp : Ent_Op<"accumulate", [
     A system that declares its access must list the resource in `writes`. An
     accumulate must be inside a query and not inside a loop there, all
     accumulates of one query to the same field use the same rule, and the field
-    must be an integer (not `i1`) or a float.
+    must be an integer (not `i1`) or a float; `set` also takes an `i1`, an
+    enum and an entity.
   }];
   let arguments = (ins FlatSymbolRefAttr:$resource, StrAttr:$field,
                        StrAttr:$rule, AnyType:$value);
