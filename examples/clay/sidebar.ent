@@ -78,7 +78,7 @@ world {
   let face = spawn {
     Box { x: 0.0, y: 0.0, w: 60.0, h: 60.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
     Stack { row: true, pad: 0.0, gap: 0.0 },
-    Fill { colour: 0xd0b090 }, Picture { image: Image, tint: 0xffffff }
+    Picture { image: Image, tint: 0xffffff }
   }
   connect (face)-[Inside]->(profile)
   let who = spawn {
@@ -249,7 +249,7 @@ world {
     let photo = spawn {
       Box { x: 0.0, y: 0.0, w: 120.0, h: 120.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
       Stack { row: true, pad: 0.0, gap: 0.0 },
-      Fill { colour: 0xd0b090 }, Picture { image: Image, tint: 0xffffff }
+      Picture { image: Image, tint: 0xffffff }
     }
     connect (photo)-[Inside]->(photos)
   }
@@ -284,7 +284,7 @@ world {
   let tall = spawn {
     Box { x: 0.0, y: 0.0, w: 120.0, h: 0.0 }, Size { w: Sizing.Fixed, h: Sizing.Fit },
     Stack { row: true, pad: 0.0, gap: 0.0 }, Aspect { ratio: 0.5 },
-    Fill { colour: 0xd0b090 }, Picture { image: Image, tint: 0xffffff }
+    Picture { image: Image, tint: 0xffffff }
   }
   connect (tall)-[Inside]->(row)
   let card = spawn {
@@ -297,7 +297,7 @@ world {
   let small = spawn {
     Box { x: 0.0, y: 0.0, w: 60.0, h: 60.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
     Stack { row: true, pad: 0.0, gap: 0.0 },
-    Fill { colour: 0xd0b090 }, Picture { image: Image, tint: 0xffffff }
+    Picture { image: Image, tint: 0xffffff }
   }
   connect (small)-[Inside]->(card)
   let caption = spawn {
@@ -312,7 +312,7 @@ world {
   let wide = spawn {
     Box { x: 0.0, y: 0.0, w: 120.0, h: 0.0 }, Size { w: Sizing.Fixed, h: Sizing.Fit },
     Stack { row: true, pad: 0.0, gap: 0.0 }, Aspect { ratio: 2.0 },
-    Fill { colour: 0xd0b090 }, Picture { image: Image, tint: 0xffffff }
+    Picture { image: Image, tint: 0xffffff }
   }
   connect (wide)-[Inside]->(row)
   // The last text, in parts.
@@ -470,6 +470,11 @@ system interact() {
       where b.w != Window.width as f32 || b.h != Window.height as f32 {
     b.w = Window.width as f32
     b.h = Window.height as f32
+  }
+
+  // Without the picture's file, a colour where the pictures are.
+  for e with Picture without Fill where Image == 0 {
+    e.add(Fill { colour: 0xd0b090 })
   }
 
   // The buttons are orange under the pointer; the first row of pictures
