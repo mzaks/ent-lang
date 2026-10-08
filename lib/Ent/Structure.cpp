@@ -278,8 +278,9 @@ SmallVector<TriggerStep, 2> mlir::ent::getSteps(const Trigger &trigger,
   if (trigger.path) {
     for (Attribute attr : trigger.path) {
       auto entry = cast<ArrayAttr>(attr);
-      TriggerStep step{cast<StringAttr>(entry[0]).getValue() == "up",
-                       cast<FlatSymbolRefAttr>(entry[1]), {}};
+      StringRef kind = cast<StringAttr>(entry[0]).getValue();
+      TriggerStep step{kind == "up", cast<FlatSymbolRefAttr>(entry[1]), {},
+                       kind == "after" ? 1 : kind == "before" ? -1 : 0};
       for (Attribute part : entry.getValue().drop_front(2))
         step.has.push_back(cast<FlatSymbolRefAttr>(part));
       steps.push_back(std::move(step));

@@ -156,6 +156,8 @@ struct TriggerStep {
   bool nearest;
   FlatSymbolRefAttr tree;
   SmallVector<FlatSymbolRefAttr, 2> has;
+  /// Or to the sibling after (1) or before (-1) along the tree.
+  int sibling = 0;
 };
 /// The steps of a trigger of `query` that is up a tree, from the visited
 /// entity on.

@@ -2573,15 +2573,19 @@ LogicalResult Parser::parseFor() {
       // up a tree from the visited entity, several, each a step from the
       // node before it, along any tree, to the parent or (`*`) to the
       // nearest ancestor that has what its node binds.
+      // (Or, along a tree whose children are in an order, to the sibling
+      // after or before: `sibling` 1 or -1.)
       struct Link {
         FlatSymbolRefAttr relation;
         std::string end; // what the relation says its targets have
         bool nearest;
         Node node;
+        int sibling = 0;
       };
       SmallVector<Link, 2> links;
       links.push_back({*relation, treeEnds[arrow->sibling ? 0 : 1], nearest,
-                       leftIsOwn ? *right : *left});
+                       leftIsOwn ? *right : *left,
+                       arrow->sibling ? (fromOwn ? 1 : -1) : 0});
       while (atArrow()) {
         FailureOr<ArrowStart> next = parseArrowStart();
         if (failed(next))
@@ -2591,18 +2595,28 @@ LogicalResult Parser::parseFor() {
             parseTree("an arrow in the head of a 'for'");
         if (failed(nextRelation))
           return failure();
-        if (!leftIsOwn || arrow->sibling || arrow->reversed ||
-            next->sibling || next->reversed)
-          return error(nextAt, "arrows go on only up, from the visited "
-                               "entity: '(name)-[R]->(mid: C)-[R]->(far: "
+        if (!leftIsOwn || (!next->sibling && next->reversed))
+          return error(nextAt, "arrows go on from the visited entity, up "
+                               "or to a sibling: '(name)-[R]->(mid: C)-[R]->"
+                               "(far: C)', '(name)-[R]->(mid: C)~[R]~>(next: "
                                "C)'");
+        if (next->sibling && !treeIsOrdered)
+          return error(nextAt,
+                       "the entities of '" + nextRelation->getValue().str() +
+                           "' are in no order: 'relation ... tree ordered by "
+                           "C.f capacity N'");
+        std::string end = treeEnds[next->sibling ? 0 : 1];
         bool star = consumeIf(Token::Star);
+        if (star && next->sibling)
+          return error(nextAt, "'*' is for ancestors: a sibling is the one "
+                               "before or the one after");
         if (failed(parseArrowEnd(*next)))
           return failure();
         FailureOr<Node> further = parseNode();
         if (failed(further))
           return failure();
-        links.push_back({*nextRelation, treeEnds[1], star, *further});
+        links.push_back({*nextRelation, end, star, *further,
+                         next->sibling ? (next->reversed ? -1 : 1) : 0});
       }
       // A node that only names its entity is reached by a component the
       // relation says that end has.
@@ -2636,7 +2650,10 @@ LogicalResult Parser::parseFor() {
                                  "has what its node binds, and this one "
                                  "binds nothing");
         SmallVector<Attribute, 4> step{
-            builder.getStringAttr(link.nearest ? "up" : "parent"),
+            builder.getStringAttr(link.sibling > 0   ? "after"
+                                  : link.sibling < 0 ? "before"
+                                  : link.nearest     ? "up"
+                                                     : "parent"),
             link.relation};
         if (link.nearest)
           for (Binding &binding : node.bindings)
@@ -2644,9 +2661,10 @@ LogicalResult Parser::parseFor() {
         steps.push_back(builder.getArrayAttr(step));
         plain &= link.relation == *relation &&
                  (!link.nearest ||
-                  (links.size() == 1 && node.bindings.size() == 1));
+                  (links.size() == 1 && node.bindings.size() == 1)) &&
+                 (!link.sibling || links.size() == 1);
         for (Binding &binding : node.bindings) {
-          if (arrow->sibling && binding.mut)
+          if (link.sibling && binding.mut)
             return error(node.loc, "a sibling is only read");
           if (binding.optional)
             return error(node.loc, "what another entity may be without is "

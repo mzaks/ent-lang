@@ -1374,9 +1374,13 @@ LogicalResult QueryOp::verify() {
                    !(refType.getIsBefore() && isLeavesFirst()) &&
                    !refType.getIsAfter();
     // (A path is up the tree the query goes along, all of it, or not.)
+    // (And a sibling on the way may be one yet to be visited.)
     if (refType.hasPath())
-      for (Attribute step : refType.getPath())
-        ordered &= cast<ArrayAttr>(step)[1] == getCascade();
+      for (Attribute step : refType.getPath()) {
+        StringRef kind = cast<StringAttr>(cast<ArrayAttr>(step)[0]).getValue();
+        ordered &= cast<ArrayAttr>(step)[1] == getCascade() &&
+                   (kind == "parent" || kind == "up");
+      }
     Operation *writer = nullptr;
     StringRef what;
     getBody().walk([&](Operation *op) {
@@ -1547,12 +1551,21 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       for (Attribute attr : refType.getPath()) {
         auto step = cast<ArrayAttr>(attr);
         StringRef kind = cast<StringAttr>(step[0]).getValue();
-        if (kind != "parent" && kind != "up")
+        if (kind != "parent" && kind != "up" && kind != "before" &&
+            kind != "after")
           return emitOpError("binds by a path with a step '")
-                 << kind << "'; expected 'parent' or 'up'";
+                 << kind << "'; expected 'parent', 'up', 'before' or 'after'";
         if (failed(verifyTree(cast<FlatSymbolRefAttr>(step[1]),
                               "binds by a path up")))
           return failure();
+        if ((kind == "before" || kind == "after") &&
+            !symbolTable
+                 .lookupNearestSymbolFrom<RelationOp>(
+                     *this, cast<FlatSymbolRefAttr>(step[1]))
+                 .isOrdered())
+          return emitOpError("binds by a path with a step '")
+                 << kind << "' along " << step[1]
+                 << ", whose entities are in no order ('tree ordered by')";
         if ((kind == "up") != (step.size() > 2))
           return emitOpError("binds by a path whose step '")
                  << kind << "' "

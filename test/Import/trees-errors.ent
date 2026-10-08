@@ -253,7 +253,7 @@ component Body { x: f32 }
 relation (Body)-[Orbits]->(Body) tree capacity 8
 default_capacity 8
 system s() {
-  // expected-error @+1 {{arrows go on only up, from the visited entity: '(name)-[R]->(mid: C)-[R]->(far: C)'}}
+  // expected-error @+1 {{arrows go on from the visited entity, up or to a sibling: '(name)-[R]->(mid: C)-[R]->(far: C)', '(name)-[R]->(mid: C)~[R]~>(next: C)'}}
   for (b: Body), (p: Body)<-[Orbits]-(b)-[Orbits]->(g: Body) {
   }
 }
@@ -300,3 +300,28 @@ component Body { x: f32 }
 default_capacity 8
 // expected-error @+1 {{the children are ordered by an integer, and 'Body.x' is not one}}
 relation (Body)-[Orbits]->(Body) tree ordered by Body.x capacity 8
+
+// -----
+
+component Body { x: f32 }
+relation (Body)-[Orbits]->(Body) tree capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{the entities of 'Orbits' are in no order: 'relation ... tree ordered by C.f capacity N'}}
+  for (b: Body)-[Orbits]->()~[Orbits]~>(aunt: Body) {
+  }
+}
+
+// -----
+
+// What is read of a sibling on the way may be of one yet to be visited.
+component Body { x: f32, at: i32 }
+relation (Body)-[Orbits]->(Body) tree ordered by Body.at capacity 8
+default_capacity 8
+system s() {
+  // expected-error @+1 {{reads @Body "x"}}
+  for (b: mut Body)-[Orbits]->()~[Orbits]~>(aunt: Body) top down Orbits {
+    // expected-note @+1 {{changed here}}
+    b.x = aunt.x
+  }
+}

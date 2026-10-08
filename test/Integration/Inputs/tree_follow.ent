@@ -33,6 +33,10 @@ component FullNear { v: i32 }
 // the node two above it.
 component LazySkip { top: f32 }
 component FullSkip { top: f32 }
+// A node's size, that of the sibling after its parent, and that of the
+// one before it if there is one.
+component LazyAside { v: f32 }
+component FullAside { v: f32 }
 component LazyDeep { v: f32 }
 component FullDeep { v: f32 }
 default_capacity 512
@@ -56,7 +60,8 @@ world {
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
       FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
-      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 },
+      LazyAside { v: 0.0 }, FullAside { v: 0.0 }
   }
   Home = root
   var spine = root
@@ -70,7 +75,8 @@ world {
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
       FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
-      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 },
+      LazyAside { v: 0.0 }, FullAside { v: 0.0 }
     }
     connect (next)-[In]->(spine)
     for j in 0..60 {
@@ -83,7 +89,8 @@ world {
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
       FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
-      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 },
+      LazyAside { v: 0.0 }, FullAside { v: 0.0 }
       }
       connect (leaf)-[In]->(spine)
     }
@@ -99,7 +106,8 @@ world {
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
       FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
-      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 },
+      LazyAside { v: 0.0 }, FullAside { v: 0.0 }
     }
   }
 }
@@ -129,6 +137,9 @@ system change() {
   for s: mut Slot, n: Node where Frame % 5 == 0 && n.index == (Frame * 31) % 489 {
     s.at = Frame
   }
+  // (In frame 15 a node of the spine goes to the front of its siblings:
+  // those under it have another node after the one they are under.)
+  for s: mut Slot, n: Node where Frame == 15 && n.index == 62 { s.at = -5 }
   for e, n: Node where Frame == 23 && n.index == 488 { e.destroy() }
   for e, n: Node where Frame == 31 && n.index == 123 { connect (e)-[In]->(Home) }
   // A node of the spine is kept no more from frame 17 on, and again, with
@@ -152,7 +163,8 @@ system change() {
       LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
       FullPath { v: 0.0 }, LazyNear { v: 0 }, FullNear { v: 0 }, Keep { n: 7 },
       LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
-      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 },
+      LazyAside { v: 0.0 }, FullAside { v: 0.0 }
     }
     if Frame % 14 != 0 { connect (made)-[In]->(e) }
   }
@@ -203,6 +215,13 @@ system lazy() {
       on changed n.base, changed t.top {
     g.top max= max(n.base, t.top)
   }
+  for (n: Node, a: mut LazyAside)-[In]->()~[In]~>(aunt: Node),
+      optional (n)-[In]->()<~[In]~(uncle: Node)
+      top down In on changed n.base, changed aunt.base, changed uncle.base {
+    var v = n.base + aunt.base
+    if let other = uncle.base { v += other }
+    a.v = v
+  }
 }
 
 system full() {
@@ -230,6 +249,12 @@ system full() {
   for (n: Node, f: mut FullNear)-[In*]->(far: Keep) top down In {
     f.v = n.index + far.n
   }
+  for (n: Node, a: mut FullAside)-[In]->()~[In]~>(aunt: Node),
+      optional (n)-[In]->()<~[In]~(uncle: Node) top down In {
+    var v = n.base + aunt.base
+    if let other = uncle.base { v += other }
+    a.v = v
+  }
   for (n: Node, t: FullSkip)-[In]->()-[In]->(g: mut FullSkip) bottom up In {
     g.top max= max(n.base, t.top)
   }
@@ -253,6 +278,7 @@ system compare() {
   for l: LazyNear, f: FullNear where l.v != f.v { Wrong += 1 }
   for l: LazyDeep, f: FullDeep where l.v != f.v { Wrong += 1 }
   for l: LazySkip, f: FullSkip where l.top != f.top { Wrong += 1 }
+  for l: LazyAside, f: FullAside where l.v != f.v { Wrong += 1 }
   for l: mut Lazy where l.runs > 0 {
     Runs += l.runs
     l.runs = 0

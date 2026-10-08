@@ -152,11 +152,16 @@ bool WorldLayout::cascadeFollows(QueryOp query, bool links) const {
           return false;
         break;
       }
-      // (Down a tree without links there is room for one such step.)
+      // (Down a tree without links there is room for one such step. And
+      // who got another sibling is known of the tree the query goes
+      // along.)
       {
         unsigned without = 0;
-        for (const TriggerStep &step : getSteps(trigger, query))
+        for (const TriggerStep &step : getSteps(trigger, query)) {
           without += step.nearest && !getRelation(step.tree.getAttr()).linked;
+          if (step.sibling && step.tree != cascade)
+            return false;
+        }
         if (without > 1)
           return false;
       }
@@ -718,6 +723,21 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
         asked |= trigger.where == Trigger::Down;
         siblings |= trigger.where == Trigger::Before ||
                     trigger.where == Trigger::After;
+      }
+      // (A way that goes on to a sibling of an entity it has come to
+      // wants the siblings known by the entities' keys, where the tree
+      // has no links, and what changes them noted, where a trigger asks.)
+      for (Type type : query.getBody().getArgumentTypes()) {
+        auto ref = dyn_cast<RefType>(type);
+        if (!ref || !ref.hasPath())
+          continue;
+        for (Attribute attr : ref.getPath()) {
+          auto step = cast<ArrayAttr>(attr);
+          StringRef kind = cast<StringAttr>(step[0]).getValue();
+          siblings |= (kind == "before" || kind == "after") &&
+                      cast<FlatSymbolRefAttr>(step[1]).getAttr() ==
+                          RelationOp(relation.op).getSymNameAttr();
+        }
       }
     });
     if (asked) {

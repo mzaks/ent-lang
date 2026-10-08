@@ -2029,7 +2029,68 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         Value from = arith::SelectOp::create(rewriter, loc, has, at, own);
         walked(tree, from, has);
         bool climbs = tracks && tree.connectedOffset;
-        if (cast<StringAttr>(step[0]).getValue() == "parent") {
+        StringRef kind = cast<StringAttr>(step[0]).getValue();
+        if (kind == "before" || kind == "after") {
+          // To the sibling before or after: by the tree's links, or what
+          // the sort noted for the entity's key.
+          bool after = kind == "after";
+          Value key = world.entityKey(loc, from);
+          Value more, next;
+          if (tree.linked) {
+            Value mine = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::eq,
+                memref::LoadOp::create(rewriter, loc,
+                                       world.edgeIds(tree, /*source=*/true),
+                                       ValueRange{key}),
+                world.slotOwner(loc, from));
+            Value link = memref::LoadOp::create(
+                rewriter, loc,
+                world.treeLinks(tree, after ? tree.nextSiblingOffset
+                                            : tree.previousSiblingOffset),
+                ValueRange{key});
+            more = arith::AndIOp::create(
+                rewriter, loc, mine,
+                arith::CmpIOp::create(
+                    rewriter, loc, arith::CmpIPredicate::ne, link,
+                    arith::ConstantIntOp::create(rewriter, loc, 0,
+                                                 tree.offsetBits)));
+            Value slot = arith::SelectOp::create(
+                rewriter, loc, more,
+                arith::SubIOp::create(
+                    rewriter, loc, world.toIndex(loc, link),
+                    arith::ConstantIndexOp::create(rewriter, loc, 1)),
+                arith::ConstantIndexOp::create(rewriter, loc, 0));
+            next = world.ownerId(
+                loc, memref::LoadOp::create(
+                         rewriter, loc, world.edgeIds(tree, /*source=*/true),
+                         ValueRange{slot}));
+          } else {
+            next = memref::LoadOp::create(rewriter, loc,
+                                          world.siblingIds(tree, after),
+                                          ValueRange{key});
+            more = arith::CmpIOp::create(rewriter, loc,
+                                         arith::CmpIPredicate::ne, next,
+                                         world.noEntity(loc));
+          }
+          // (Another sibling there than when the query last ran.)
+          if (tracks && tree.siblingTicksOffset) {
+            Value newer = arith::AndIOp::create(
+                rewriter, loc, has,
+                arith::CmpIOp::create(
+                    rewriter, loc, arith::CmpIPredicate::sgt,
+                    memref::LoadOp::create(rewriter, loc,
+                                           world.siblingTicks(tree),
+                                           ValueRange{key}),
+                    seen));
+            moved = moved ? arith::OrIOp::create(rewriter, loc, moved, newer)
+                                .getResult()
+                          : newer;
+          }
+          has = arith::AndIOp::create(rewriter, loc, has, more);
+          at = next;
+          continue;
+        }
+        if (kind == "parent") {
           auto [more, next] =
               emitParent(rewriter, loc, layout, world, tree, from);
           has = arith::AndIOp::create(rewriter, loc, has, more);
@@ -9153,7 +9214,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                llvm::all_of(llvm::zip(way.first, steps), [](auto pair) {
                  auto &[a, b] = pair;
                  return a.nearest == b.nearest && a.tree == b.tree &&
-                        a.has == b.has;
+                        a.has == b.has && a.sibling == b.sibling;
                });
       };
       auto *known = llvm::find_if(waysUp, same);
@@ -9180,6 +9241,27 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           auto further = [&](Value child, Value) {
             reach(steps, step - 1, child);
           };
+          // (To the sibling after: so from the one before it.)
+          if (last.sibling) {
+            bool after = last.sibling < 0;
+            if (!along.linked) {
+              Value sibling =
+                  tree.load(world.siblingIds(along, after), key);
+              tree.branch(tree.negate(tree.same(sibling, none)), [&] {
+                reach(steps, step - 1, world.entityKey(loc, sibling));
+              });
+              return;
+            }
+            LinkedTree links(rewriter, loc, world, along);
+            Value link = links.load(
+                after ? links.nextSibling() : links.previousSibling(), key);
+            links.branch(links.negate(links.isNone(link)), [&] {
+              reach(steps, step - 1,
+                    arith::SubIOp::create(rewriter, loc,
+                                          world.toIndex(loc, link), one));
+            });
+            return;
+          }
           if (last.nearest)
             forThoseBelow(along, key, last.has, further);
           else
@@ -9455,12 +9537,18 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       // That an entity has other children or siblings than it had is in
       // a ring the tree keeps of those: all are asked where it has lost
       // one since the query last ran.
+      bool sideways = llvm::any_of(waysUp, [](const auto &way) {
+        return llvm::any_of(way.first, [](const TriggerStep &step) {
+          return step.sibling != 0;
+        });
+      });
       bool touches = relation.touchedOffset &&
-                     llvm::any_of(triggers, [](const Trigger &trigger) {
-                       return trigger.where == Trigger::Down ||
-                              trigger.where == Trigger::Before ||
-                              trigger.where == Trigger::After;
-                     });
+                     (sideways ||
+                      llvm::any_of(triggers, [](const Trigger &trigger) {
+                        return trigger.where == Trigger::Down ||
+                               trigger.where == Trigger::Before ||
+                               trigger.where == Trigger::After;
+                      }));
       if (touches)
         scan = arith::OrIOp::create(
             rewriter, loc, scan,
@@ -9514,7 +9602,15 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
               arith::CmpIOp::create(
                   rewriter, loc, arith::CmpIPredicate::sgt,
                   tree.load(world.touchedTicks(relation), slot), seen),
-              [&] { markEntity(tree.load(world.touchedIds(relation), slot)); });
+              [&] {
+                Value touched = tree.load(world.touchedIds(relation), slot);
+                markEntity(touched);
+                // (And those whose way goes on from it to a sibling.)
+                for (auto &[steps, which] : waysUp)
+                  for (unsigned step = 1; step <= steps.size(); ++step)
+                    if (steps[step - 1].sibling)
+                      reach(steps, step - 1, world.entityKey(loc, touched));
+              });
         });
       }
       forEachEvent(rewriter, query, layout, world,

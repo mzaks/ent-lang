@@ -206,6 +206,13 @@ for with Enemy { Count += 1 }     // nor the entity
   (`(room)-[Inside]->(home)-[Feeds]->(p: Power)`). What several arrows,
   or a `*` to a node that binds several components, lead to is read,
   not written.
+- An arrow that goes on can also lead to a sibling of the node before
+  it, along a tree whose children are in an order:
+  `(b)-[Inside]->(outer)~[Inside]~>(aunt: Box)` binds what the box after
+  the one `b` is in has, `(b)-[Inside]->()<~[Inside]~(uncle: Box)` the
+  one before it. Read, not written; and since a sibling on the way may
+  be one the `for` has yet to visit, it does not read from it a field it
+  writes.
 - The other way along the siblings, `(b)~[Inside]~>(next: Box)` binds the
   sibling after. It is yet to be visited: a `for` does not read from it a
   field it writes.

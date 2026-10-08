@@ -12,6 +12,8 @@
 // CHECK: ent.connect @Follows %[[SIDE]], %[[REST]] ()
 // CHECK: ent.query (%{{.*}}: !ent.ref<@Box, mut>, %{{.*}}: !ent.ref<@Size>, %{{.*}}: !ent.ref<@Box, parent @Inside>, %{{.*}}: !ent.ref<@Stack, parent @Inside>, %{{.*}}: !ent.ref<@Box, before @Inside, optional>) cascade @Inside {
 // CHECK: ent.query (%{{.*}}: !ent.ref<@Box>, %{{.*}}: !ent.ref<@Size, up @Inside>) {
+// On from the parent to its sibling after, and to the one before it.
+// CHECK: ent.query (%{{.*}}: !ent.ref<@Box>, %{{.*}}: !ent.ref<@Box, path {{\[\[}}"parent", @Inside], ["after", @Inside]]>, %{{.*}}: !ent.ref<@Box, path {{\[\[}}"parent", @Inside], ["before", @Inside]], optional>) cascade @Inside on [changed @Box "w" up @Inside path {{\[\[}}"parent", @Inside], ["after", @Inside]]] {
 // CHECK: ent.edges @Synapse out (%{{.*}}: !ent.ref<@Synapse>, %{{.*}}: !ent.entity) {
 // CHECK: ent.edges @Synapse in (%{{.*}}: !ent.ref<@Synapse, mut>, %{{.*}}: !ent.entity) {
 // The other end's components: the body runs where it has them.
@@ -46,6 +48,9 @@ system a() {
     if let x = prev.x { b.x = x }
   }
   for (b: Box), (outer: Size)<-[Inside*]-(b) { }
+  for (b: Box)-[Inside]->()~[Inside]~>(aunt: Box),
+      optional (b)-[Inside]->()<~[Inside]~(uncle: Box)
+      top down Inside on changed aunt.w { }
   for e with Spiked {
     for (e)-[s: Synapse]->(post) { Neuron(post).input += s.weight }
   }
