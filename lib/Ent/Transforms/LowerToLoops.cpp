@@ -1819,6 +1819,9 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                              Value row, Value tick, bool directApplies);
 static SmallVector<Operation *> carryOwnFields(IRRewriter &rewriter,
                                                scf::ForOp loop);
+static Value tableEntry(IRRewriter &rewriter, Location loc,
+                        const WorldLayout &layout, Value where,
+                        function_ref<uint64_t(const WorldArchetype &)> of);
 namespace {
 /// Where a ref `up` a relation leads for one entity: whether it has such
 /// an ancestor, and the ancestor's id (in its stored form).
@@ -1927,6 +1930,56 @@ emitAtHome(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
   if (!results.empty())
     scf::YieldOp::create(rewriter, loc, values);
   return SmallVector<Value>(top.getResults());
+}
+
+/// What the ancestor, whose row is known, has in the column (of elements
+/// of `type`, as they are stored) that starts where `column` says for
+/// each of its homes: read in its one home directly, in a branch for
+/// each of two, and where there are more by a table of where the columns
+/// start (see TableLocation), which is one load whatever their number.
+template <typename Access>
+static Value readAtHome(IRRewriter &rewriter, Location loc,
+                        const WorldLayout &layout, Access &world,
+                        const Ancestor &ancestor, Type type,
+                        function_ref<uint64_t(const WorldArchetype &)> column,
+                        function_ref<Value(const WorldArchetype &)> view) {
+  ArrayRef<const WorldArchetype *> homes = ancestor.homes;
+  if (homes.size() < 3)
+    return emitAtHome(rewriter, loc, layout, ancestor, TypeRange{type},
+                      [&](const WorldArchetype &home) -> SmallVector<Value> {
+                        return {memref::LoadOp::create(
+                            rewriter, loc, view(home),
+                            ValueRange{ancestor.row})};
+                      })[0];
+  // (The archetype's number, as one that there is.)
+  Value number = arith::IndexCastUIOp::create(
+      rewriter, loc, rewriter.getIndexType(), ancestor.where);
+  Value known = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::ult, number,
+      arith::ConstantIndexOp::create(rewriter, loc,
+                                     layout.archetypes.size()));
+  Value where = arith::SelectOp::create(
+      rewriter, loc, known, number,
+      arith::ConstantIndexOp::create(rewriter, loc, homes.back()->index));
+  Value offset = arith::IndexCastOp::create(
+      rewriter, loc, rewriter.getIndexType(),
+      tableEntry(rewriter, loc, layout, where,
+                 [&](const WorldArchetype &archetype) {
+                   // (Of one that is none of its homes: the last one's,
+                   // as a branch for each would read.)
+                   return column(llvm::is_contained(homes, &archetype)
+                                     ? archetype
+                                     : *homes.back());
+                 }));
+  Value rows = arith::AddIOp::create(
+      rewriter, loc, ancestor.row,
+      arith::ConstantIndexOp::create(rewriter, loc, 1));
+  Value memory = memref::ViewOp::create(
+      rewriter, loc, MemRefType::get({ShapedType::kDynamic}, type),
+      world.getArena(), offset, ValueRange{rows});
+  return memref::LoadOp::create(rewriter, loc, memory,
+                                ValueRange{ancestor.row})
+      .getResult();
 }
 } // namespace
 /// Combine `value` (in its stored form) into a field of the entity at
@@ -2493,11 +2546,14 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         };
         auto read = [&]() -> Value {
           if (ancestor.row)
-            return emitAtHome(rewriter, loc, layout, ancestor, TypeRange{i64},
-                              [&](const WorldArchetype &home)
-                                  -> SmallVector<Value> {
-                                return {stampAt(home, ancestor.row)};
-                              })[0];
+            return readAtHome(
+                rewriter, loc, layout, world, ancestor, i64,
+                [&](const WorldArchetype &home) {
+                  return home.findStamp(stamp)->offset;
+                },
+                [&](const WorldArchetype &home) {
+                  return world.stamps(home, *home.findStamp(stamp));
+                });
           FlatSymbolRefAttr component = refType.getComponent();
           // (No entity has the component: none has had an event of it.)
           if (llvm::none_of(layout.archetypes,
@@ -2980,18 +3036,17 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
       rewriter.setInsertionPoint(get);
       Operation *op = get;
       if (ancestor.row) {
-        Value value = emitAtHome(
-            rewriter, get.getLoc(), layout, ancestor,
-            TypeRange{world.storageType(get.getType())},
-            [&](const WorldArchetype &home) -> SmallVector<Value> {
-              return {memref::LoadOp::create(
-                  rewriter, get.getLoc(),
-                  world.column(
-                      home,
-                      cast<RefType>(arg.getType()).getComponent().getAttr(),
-                      get.getFieldAttr()),
-                  ValueRange{ancestor.row})};
-            })[0];
+        StringAttr held =
+            cast<RefType>(arg.getType()).getComponent().getAttr();
+        Value value = readAtHome(
+            rewriter, get.getLoc(), layout, world, ancestor,
+            world.storageType(get.getType()),
+            [&](const WorldArchetype &home) {
+              return home.find(held, get.getFieldAttr())->offset;
+            },
+            [&](const WorldArchetype &home) {
+              return world.column(home, held, get.getFieldAttr());
+            });
         auto *at = llvm::find(roots, op);
         if (at != roots.end())
           *at = value.getDefiningOp();
@@ -7618,7 +7673,8 @@ static bool matchOps(Operation &a, Operation &b, PartMatch &match) {
            a.getResult(0).getType() == b.getResult(0).getType();
   if (a.getName() != b.getName() ||
       a.getAttrDictionary() != b.getAttrDictionary() ||
-      a.getPropertiesAsAttribute() != b.getPropertiesAsAttribute() ||
+      !a.getName().compareOpProperties(a.getPropertiesStorage(),
+                                       b.getPropertiesStorage()) ||
       a.getNumOperands() != b.getNumOperands() ||
       a.getNumResults() != b.getNumResults() ||
       a.getNumRegions() != b.getNumRegions())
@@ -7707,6 +7763,32 @@ static bool isMadeAnew(Value value) {
 /// same places in all of them (they are emitted by the same code), the
 /// function has parameters. A part that is the only one of its name, or
 /// that is not like the first of them, stays where it is.
+/// What two parts that are alike have the same of, for sure, and most
+/// that are not do not: told once for each part, so that only parts that
+/// may be alike are looked at op by op (see matchOps).
+static llvm::hash_code shapeOf(Region &region) {
+  llvm::hash_code shape = llvm::hash_value(0);
+  for (Block &block : region) {
+    shape = llvm::hash_combine(shape, block.getNumArguments());
+    for (Operation &op : block) {
+      shape = llvm::hash_combine(
+          shape, op.getName().getTypeID().getAsOpaquePointer(),
+          op.getNumResults());
+      if (op.hasTrait<OpTrait::ConstantLike>()) {
+        shape = llvm::hash_combine(shape, op.getResult(0).getType());
+        continue;
+      }
+      shape = llvm::hash_combine(shape, op.getNumOperands(),
+                                 op.getNumRegions());
+      for (Type type : op.getResultTypes())
+        shape = llvm::hash_combine(shape, type);
+      for (Region &inner : op.getRegions())
+        shape = llvm::hash_combine(shape, shapeOf(inner));
+    }
+  }
+  return shape;
+}
+
 static void shareParts(IRRewriter &rewriter, func::FuncOp func) {
   static unsigned serial = 0;
   // Innermost first: a part in a part is a call by the time the outer
@@ -7722,12 +7804,16 @@ static void shareParts(IRRewriter &rewriter, func::FuncOp func) {
   // Those of a name that are alike, together: each with the first that
   // it is like.
   SmallVector<SmallVector<scf::ExecuteRegionOp>> groups;
+  SmallVector<llvm::hash_code> shapes;
   for (auto &[name, named] : byName) {
     size_t from = groups.size();
     for (scf::ExecuteRegionOp part : named) {
       part->removeAttr(kPartAttr);
+      llvm::hash_code shape = shapeOf(part.getRegion());
       bool placed = false;
       for (size_t k = from; k < groups.size() && !placed; ++k) {
+        if (shapes[k] != shape)
+          continue;
         PartMatch match;
         if (matchRegions(groups[k].front().getRegion(), part.getRegion(),
                          match)) {
@@ -7735,19 +7821,24 @@ static void shareParts(IRRewriter &rewriter, func::FuncOp func) {
           placed = true;
         }
       }
-      if (!placed)
+      if (!placed) {
         groups.push_back({part});
+        shapes.push_back(shape);
+      }
     }
   }
   // Innermost first: by how many parts deep the parts in each are (the
   // same for all of a group, which are alike).
   llvm::DenseMap<Operation *, unsigned> height;
+  llvm::DenseSet<Operation *> isPart;
+  for (scf::ExecuteRegionOp part : parts)
+    isPart.insert(part);
   for (scf::ExecuteRegionOp part : parts) {
     unsigned own = height.lookup(part) + 1;
     height[part] = own;
     for (Operation *around = part->getParentOp(); around;
          around = around->getParentOp())
-      if (llvm::is_contained(parts, dyn_cast<scf::ExecuteRegionOp>(around))) {
+      if (isPart.contains(around)) {
         height[around] = std::max(height.lookup(around), own);
         break;
       }
