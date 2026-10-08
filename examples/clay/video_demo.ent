@@ -129,6 +129,12 @@ world {
   Window.background = 0x2b2933
   Window.fps = 60
   Window.resizable = true
+
+  // A font from a file, where one of these is there.
+  Face = font("examples/clay/Roboto-Regular.ttf", 24)
+  if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 24) }
+  if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24) }
+  if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 24) }
   Shows = -1
 
   // OuterContainer: as big as the window, a column with 16 around and
@@ -160,7 +166,7 @@ world {
     Round { top_left: 5.0, top_right: 5.0, bottom_left: 5.0,
             bottom_right: 5.0 },
     Text { text: "File", size: 16.0, colour: 0xffffff },
-    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+    TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Start,
                 breaks: Breaks.Words },
     FileButton
   }
@@ -187,7 +193,7 @@ world {
         Text { text: if i == 1 { "Edit" } else if i == 3 { "Upload" }
                      else if i == 4 { "Media" } else { "Support" },
                size: 16.0, colour: 0xffffff },
-        TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+        TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Start,
                     breaks: Breaks.Words }
       }
       connect (button)-[Inside]->(header)
@@ -215,7 +221,7 @@ world {
       Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0,
               bottom_right: 8.0 },
       Text { text: title(i), size: 20.0, colour: 0xffffff },
-      TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+      TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Start,
                   breaks: Breaks.Words },
       Doc { n: i }
     }
@@ -236,7 +242,7 @@ world {
     Size { w: Sizing.Grow, h: Sizing.Fit },
     Stack { row: true, pad: 0.0, gap: 0.0 },
     Text { text: "", size: 24.0, colour: 0xffffff },
-    TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+    TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Start,
                 breaks: Breaks.Words },
     Title
   }
@@ -256,7 +262,7 @@ world {
       Size { w: Sizing.Grow, h: Sizing.Fit },
       Stack { row: true, pad: 0.0, gap: 0.0 },
       Text { text: "", size: 0.0, colour: 0xffffff },
-      TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+      TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Start,
                   breaks: Breaks.Words },
       Line { i: i }
     }
@@ -271,15 +277,6 @@ system interact() {
     b.w = Window.width as f32
     b.h = Window.height as f32
   }
-  // A font from a file, where one of these is there: read when the
-  // window is open, and every text is in it from then on.
-  if Window.frame == 1 {
-    Face = font("examples/clay/Roboto-Regular.ttf", 24)
-    if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 24) }
-    if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24) }
-    if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 24) }
-  }
-  for st: mut TextStyle where st.font != Face { st.font = Face }
 
   // The menu of "File": there while the pointer is on the button or on
   // the menu, which floats from the button's bottom left corner. (8 of

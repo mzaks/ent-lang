@@ -248,10 +248,35 @@ static struct {
   Font at[ENT_WINDOW_SIZES];
   int pixels[ENT_WINDOW_SIZES];
   int next;
+  int size, read, broken;
 } ent_window_faces[16];
 
-static Font ent_window_font_shown(int32_t font, float size) {
+// A font is read when it is first asked for with the window open: its
+// number is given before, so a program can ask for it in `world`.
+static void ent_window_font_read(int32_t font) {
+  if (ent_window_faces[font].read || !IsWindowReady())
+    return;
+  ent_window_faces[font].read = 1;
+  Font made = LoadFontEx(ent_window_faces[font].file,
+                         ent_window_faces[font].size, 0, 0);
+  // (One that cannot be read after all: the window's own.)
+  if (made.texture.id == 0) {
+    ent_window_faces[font].broken = 1;
+    return;
+  }
+  SetTextureFilter(made.texture, TEXTURE_FILTER_BILINEAR);
+  ent_window_fonts[font] = made;
+}
+
+static int ent_window_font_known(int32_t font) {
   if (font <= 0 || font >= ent_window_font_count)
+    return 0;
+  ent_window_font_read(font);
+  return ent_window_faces[font].read && !ent_window_faces[font].broken;
+}
+
+static Font ent_window_font_shown(int32_t font, float size) {
+  if (!ent_window_font_known(font))
     return GetFontDefault();
   int pixels = (int)(size * ent_window_zoom * GetWindowScaleDPI().y + 0.5f);
   if (pixels <= ent_window_fonts[font].baseSize)
@@ -273,7 +298,7 @@ static Font ent_window_font_shown(int32_t font, float size) {
 }
 
 static Font ent_window_font_of(int32_t font) {
-  if (font <= 0 || font >= ent_window_font_count)
+  if (!ent_window_font_known(font))
     return GetFontDefault();
   return ent_window_fonts[font];
 }
@@ -282,18 +307,14 @@ int32_t ent_window_font(const ent_text126 *file, int32_t size) {
   ENT_WINDOW_TEXT(name, file);
   if (ent_window_font_count >= 16 || !FileExists(name))
     return 0;
-  Font font = LoadFontEx(name, size, 0, 0);
-  if (font.texture.id == 0)
-    return 0;
-  SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
-  ent_window_fonts[ent_window_font_count] = font;
   strncpy(ent_window_faces[ent_window_font_count].file, name, 127);
+  ent_window_faces[ent_window_font_count].size = size;
   return ent_window_font_count++;
 }
 
 // (raylib draws its own font with a tenth of the size between letters.)
 static float ent_window_spacing(int32_t font, float size, float spacing) {
-  if (font <= 0 || font >= ent_window_font_count)
+  if (!ent_window_font_known(font))
     spacing += size < 10 ? 1 : size / 10;
   return spacing;
 }
@@ -516,18 +537,21 @@ void ent_window_edges(float x, float y, float w, float h, float left,
 #undef ENT_WINDOW_THICK
 }
 
-// Pictures read from files.
+// Pictures read from files: read at once, and given to the screen when
+// first drawn, so a program can ask for one in `world`, before the
+// window is open.
 static Texture2D ent_window_pictures[64];
+static Image ent_window_images[64];
 static int ent_window_picture_count = 1;
 
 int32_t ent_window_picture_load(const ent_text126 *file) {
   ENT_WINDOW_TEXT(name, file);
   if (ent_window_picture_count >= 64 || !FileExists(name))
     return 0;
-  Texture2D texture = LoadTexture(name);
-  if (texture.id == 0)
+  Image image = LoadImage(name);
+  if (!image.data)
     return 0;
-  ent_window_pictures[ent_window_picture_count] = texture;
+  ent_window_images[ent_window_picture_count] = image;
   return ent_window_picture_count++;
 }
 
@@ -535,7 +559,14 @@ void ent_window_picture(int32_t image, float x, float y, float w, float h,
                         int32_t tint) {
   if (image <= 0 || image >= ent_window_picture_count)
     return;
+  if (ent_window_images[image].data) {
+    ent_window_pictures[image] = LoadTextureFromImage(ent_window_images[image]);
+    UnloadImage(ent_window_images[image]);
+    ent_window_images[image].data = 0;
+  }
   Texture2D texture = ent_window_pictures[image];
+  if (texture.id == 0)
+    return;
   DrawTexturePro(texture,
                  (Rectangle){0, 0, (float)texture.width, (float)texture.height},
                  (Rectangle){x, y, w, h}, (Vector2){0, 0}, 0,
@@ -550,11 +581,15 @@ void ent_window_picture(int32_t image, float x, float y, float w, float h,
 }
 
 float ent_window_picture_ratio(int32_t image) {
-  if (image <= 0 || image >= ent_window_picture_count ||
-      !ent_window_pictures[image].height)
+  if (image <= 0 || image >= ent_window_picture_count)
     return 1;
-  return (float)ent_window_pictures[image].width /
-         (float)ent_window_pictures[image].height;
+  // (As wide and high as it was read, given to the screen or not yet.)
+  int width = ent_window_images[image].data ? ent_window_images[image].width
+                                            : ent_window_pictures[image].width;
+  int height = ent_window_images[image].data
+                   ? ent_window_images[image].height
+                   : ent_window_pictures[image].height;
+  return height ? (float)width / (float)height : 1;
 }
 
 // A colour with all of it there (AA ff), and how much of a colour there

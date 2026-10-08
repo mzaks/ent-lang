@@ -100,8 +100,9 @@ extern fn text_extent(text: text[1022], font: i32, size: f32, spacing: f32,
 extern fn text_least(text: text[1022], font: i32, size: f32, spacing: f32,
                      breaks: i32) -> f32
 // Reads a font from a file (.ttf, .otf) for texts `size` pixels high,
-// and gives its number; 0, the window's own, if it cannot. The window
-// must be open.
+// and gives its number; 0, the window's own, if there is no such file.
+// The window need not be open: `world` may ask. (It is read when it is
+// first used; a file that is no font then gives the window's own.)
 extern proc font(file: text[126], size: i32) -> i32
 // A filled rectangle whose corners are rounded, each with its own
 // radius: top left, top right, bottom left, bottom right.
@@ -117,7 +118,8 @@ extern proc edges(x: f32, y: f32, width: f32, height: f32, left: f32,
 // A picture from a file (.png, .jpg, ...): `picture_load` gives its
 // number, 0 if it cannot be read; `picture` draws it into a rectangle,
 // its colours times `tint` (0xffffff: as they are); `picture_ratio` is
-// its width over its height. The window must be open.
+// its width over its height. The window need not be open for
+// `picture_load` and `picture_ratio`: `world` may ask.
 extern proc picture_load(file: text[126]) -> i32
 extern proc picture(image: i32, x: f32, y: f32, width: f32, height: f32,
                     tint: i32)

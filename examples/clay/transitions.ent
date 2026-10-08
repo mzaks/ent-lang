@@ -71,6 +71,12 @@ world {
   Window.background = 0xffffff
   Window.fps = 60
   Window.resizable = true
+
+  // A font from a file, where one of these is there.
+  Face = font("examples/clay/Roboto-Regular.ttf", 32)
+  if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 32) }
+  if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32) }
+  if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 32) }
   Count = 30
   Next = 30
 
@@ -106,7 +112,7 @@ world {
       Text { text: if i == 0 { "Randomise" } else if i == 1 { "Blue" }
                    else if i == 2 { "Pink" } else { "Add Box" },
              size: 20.0, colour: 0xffffff },
-      TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Start,
+      TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Start,
                   breaks: Breaks.Words },
       Button { does: i }
     }
@@ -140,7 +146,7 @@ world {
                  colour: darker(id, false) },
         Text { text: if id < 10 { "0{id}" } else { "{id}" }, size: 32.0,
                colour: 0x9a7bb8 },
-        TextStyle { font: 0, spacing: 0.0, line: 0.0, align: Place.Middle,
+        TextStyle { font: Face, spacing: 0.0, line: 0.0, align: Place.Middle,
                     breaks: Breaks.Words },
         Transition { seconds: 0.5, ease: cubic_out, x: true, y: true,
                      w: true, h: false, fill: true, overlay: true,
@@ -163,13 +169,6 @@ system interact() {
     b.w = Window.width as f32
     b.h = Window.height as f32
   }
-  if Window.frame == 1 {
-    Face = font("examples/clay/Roboto-Regular.ttf", 32)
-    if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 32) }
-    if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32) }
-    if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 32) }
-  }
-  for st: mut TextStyle where st.font != Face { st.font = Face }
   Seed += 1
 
   // A button is darker under the pointer, and does what it is for when
