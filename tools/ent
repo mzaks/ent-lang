@@ -149,7 +149,8 @@ def cache_key(arguments):
         note_tool(shutil.which(compiler) or compiler)
     note_tool(os.path.abspath(__file__))
     note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
-         os.environ.get("ENT_PIECES", ""), os.cpu_count())
+         os.environ.get("ENT_PIECES", ""), os.environ.get("ENT_SPLIT", ""),
+         os.cpu_count())
 
     include_directories = arguments.I + [os.path.join(ROOT, "devices")]
     files = []
