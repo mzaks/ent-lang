@@ -57,9 +57,10 @@ tag Drag
 // A box that is not at once where and what it is now to be: it gets
 // there in so many seconds, slowly at first (`In`), at the end (`Out`),
 // both or neither, in where it is (`place`: and what is inside it goes
-// with it), in how big it is (`size`: what is inside it is as big as it
-// is to be at once, and shows only where the box does until that is as
-// big as it is to be), and in its `Fill` and `Overlay` colours.
+// with it), in how big it is (`size`: and what is inside it is laid out
+// for how big it is right then), and in its `Fill` and `Overlay`
+// colours. Each of the four sets out when it is to be another, and takes
+// the seconds from then.
 enum Ease { Linear, In, Out, InOut }
 component Transition {
   seconds: f32, ease: Ease, place: bool, size: bool, colour: bool
@@ -88,26 +89,21 @@ unique Picked {
 
 // What this keeps for itself. How a `Drag` box is moving; what is laid on
 // a box right now, and where a box in a `Transition` is drawn right now,
-// how big and in what colour, where it started from and how far it has
-// got (`t`: 0 to 1); a box that is to be destroyed.
+// how big and in what colour, where it started from in each of those and
+// how far it has got (`tp` in its place, `tw` and `th` in its width and
+// height, `tc` in its colours: 0 to 1); a box that is to be destroyed.
 component Glide { vx: f32, vy: f32, x: f32, y: f32, held: bool, was: bool }
 component Tint { colour: i32, part: f32 }
 component Shown {
-  x: f32, y: f32, w: f32, h: f32, colour: i32, dx: f32, dy: f32,
-  sizing: bool
+  x: f32, y: f32, w: f32, h: f32, colour: i32, dx: f32, dy: f32
 }
 // And what follows from those for every box, with the boxes it is in:
 // how far from its place it is drawn, and under how much (0 to 1) of
-// what colour, all of that colour (AA ff). And the part of the window it
-// shows in while a box it is in is on its way to another size: what
-// shows of that box right now, as the boxes inside it are where and as
-// big as they are to be already.
-component Look {
-  dx: f32, dy: f32, colour: i32, part: f32, x0: f32, y0: f32, x1: f32,
-  y1: f32
-}
+// what colour, all of that colour (AA ff).
+component Look { dx: f32, dy: f32, colour: i32, part: f32 }
 component Eased {
-  x: f32, y: f32, w: f32, h: f32, colour: i32, tint: i32, part: f32, t: f32
+  x: f32, y: f32, tp: f32, w: f32, tw: f32, h: f32, th: f32, colour: i32,
+  tint: i32, part: f32, tc: f32
 }
 component Dead { at: i32 }
 // The line of the inspector's list a box is in.
@@ -231,6 +227,12 @@ system wrap() {
   }
 }
 
+// How far a box that had `t` of its time behind it has now: a frame
+// more, of the seconds it takes.
+fn further(t: f32, seconds: f32, frame: f32) -> f32 {
+  if seconds > 0.0 { min(1.0, t + frame / seconds) } else { 1.0 }
+}
+
 // How far along a box is that is `t` of its time on its way.
 fn eased(t: f32, ease: Ease) -> f32 {
   if ease == Ease.In { t * t }
@@ -272,16 +274,25 @@ system animate() {
     e.add(Tint { colour: lv.colour, part: 0.0 })
   }
 
-  // A box whose place, size or colours are no longer what they were sets
-  // out again, from where it is right now. So does one that is `Gone`.
-  for b: Box, s: Shown, ez: mut Eased, optional f: Fill, optional o: Overlay,
-      optional t: Tint
-      on changed b, changed f, changed o, removed Overlay, added Tint,
-         added Gone {
+  // A box whose place, width, height or colours are no longer what they
+  // were sets out again in that, from where it is right now. One that is
+  // `Gone` sets out for where it leaves to.
+  for s: Shown, ez: mut Eased, b: Box on changed b.x, changed b.y, added Gone {
     ez.x = s.x
     ez.y = s.y
+    ez.tp = 0.0
+  }
+  for s: Shown, ez: mut Eased, b: Box on changed b.w {
     ez.w = s.w
+    ez.tw = 0.0
+  }
+  for s: Shown, ez: mut Eased, b: Box on changed b.h {
     ez.h = s.h
+    ez.th = 0.0
+  }
+  for s: Shown, ez: mut Eased, optional f: Fill, optional o: Overlay,
+      optional t: Tint
+      on changed f, changed o, removed Overlay, added Tint, added Gone {
     ez.colour = s.colour
     var part = 0.0
     if let veil = t.colour, let p = t.part {
@@ -289,7 +300,7 @@ system animate() {
       part = p
     }
     ez.part = part
-    ez.t = 0.0
+    ez.tc = 0.0
   }
 
   // A new one starts where it is to be, or where its `Enter` says.
@@ -308,18 +319,19 @@ system animate() {
       t = 0.0
     }
     e.add(Shown { x: x, y: y, w: b.w, h: b.h, colour: colour, dx: x - b.x,
-                  dy: y - b.y, sizing: false })
-    e.add(Eased { x: x, y: y, w: b.w, h: b.h, colour: colour, tint: veil,
-                  part: if veil != 0 { 1.0 } else { 0.0 }, t: t })
+                  dy: y - b.y })
+    e.add(Eased { x: x, y: y, tp: t, w: b.w, tw: 1.0, h: b.h, th: 1.0,
+                  colour: colour, tint: veil,
+                  part: if veil != 0 { 1.0 } else { 0.0 }, tc: t })
+    e.add(Inner { w: b.w, h: b.h })
     if veil != 0 && !e.has(Tint) { e.add(Tint { colour: veil, part: 1.0 }) }
   }
 
   // What is laid on a box on its way: from what was to what is to be.
   for e, tr: Transition, ez: Eased, t: mut Tint, optional o: Overlay,
       optional lv: Leave
-      where ez.t < 1.0 {
-    var now = 1.0
-    if tr.seconds > 0.0 { now = min(1.0, ez.t + Window.dt / tr.seconds) }
+      where ez.tc < 1.0 {
+    let now = further(ez.tc, tr.seconds, Window.dt)
     let k = if tr.colour { eased(now, tr.ease) } else { 1.0 }
     var veil = 0
     var part = 0.0
@@ -346,25 +358,32 @@ system animate() {
       t.part = 1.0
     }
   }
-  // And where it is, how big and in what colour. One that is `Gone` and
-  // has got there is to be destroyed.
-  for e, b: Box, tr: Transition, s: mut Shown, ez: mut Eased,
+  // And where it is, how big and in what colour: each as far along as it
+  // has got since it set out in that. What is inside it is laid out for
+  // how big it is right now. One that is `Gone` and has got there is to
+  // be destroyed.
+  for e, b: Box, tr: Transition, s: mut Shown, ez: mut Eased, in: mut Inner,
       optional f: Fill, optional lv: Leave
-      where ez.t < 1.0 {
-    var now = 1.0
-    if tr.seconds > 0.0 { now = min(1.0, ez.t + Window.dt / tr.seconds) }
+      where ez.tp < 1.0 || ez.tw < 1.0 || ez.th < 1.0 || ez.tc < 1.0 {
+    var place = further(ez.tp, tr.seconds, Window.dt)
+    var colours = further(ez.tc, tr.seconds, Window.dt)
+    let wide = if tr.size { further(ez.tw, tr.seconds, Window.dt) } else { 1.0 }
+    let high = if tr.size { further(ez.th, tr.seconds, Window.dt) } else { 1.0 }
     var x = b.x
     var y = b.y
     if e.has(Gone) {
       // (With nowhere to go, it has got there.)
-      if !e.has(Leave) { now = 1.0 }
+      if !e.has(Leave) {
+        place = 1.0
+        colours = 1.0
+      }
       if let dx = lv.dx, let dy = lv.dy {
         x += dx
         y += dy
       }
     }
-    let k = eased(now, tr.ease)
-    if tr.place {
+    if tr.place && place < 1.0 {
+      let k = eased(place, tr.ease)
       x = ez.x + (x - ez.x) * k
       y = ez.y + (y - ez.y) * k
     }
@@ -372,14 +391,26 @@ system animate() {
     s.y = y
     s.dx = x - b.x
     s.dy = y - b.y
-    s.w = if tr.size { ez.w + (b.w - ez.w) * k } else { b.w }
-    s.h = if tr.size { ez.h + (b.h - ez.h) * k } else { b.h }
-    s.sizing = s.w != b.w || s.h != b.h
+    let w = if wide < 1.0 { ez.w + (b.w - ez.w) * eased(wide, tr.ease) }
+            else { b.w }
+    let h = if high < 1.0 { ez.h + (b.h - ez.h) * eased(high, tr.ease) }
+            else { b.h }
+    s.w = w
+    s.h = h
+    in.w = w
+    in.h = h
     if let colour = f.colour {
-      s.colour = if tr.colour { blend(ez.colour, colour, k) } else { colour }
+      s.colour = if tr.colour && colours < 1.0 {
+        blend(ez.colour, colour, eased(colours, tr.ease))
+      } else { colour }
     }
-    ez.t = now
-    if now >= 1.0 && e.has(Gone) && !e.has(Dead) { e.add(Dead { at: 0 }) }
+    ez.tp = place
+    ez.tw = wide
+    ez.th = high
+    ez.tc = colours
+    if place >= 1.0 && colours >= 1.0 && e.has(Gone) && !e.has(Dead) {
+      e.add(Dead { at: 0 })
+    }
   }
 
   // What that comes to for each box: it is as far from its place as the
@@ -389,8 +420,7 @@ system animate() {
   // a box that got it later would be another kind of box, and everything
   // here would be there for both kinds.)
   for e, b: Box without Look on added Box {
-    e.add(Look { dx: 0.0, dy: 0.0, colour: 0, part: 0.0, x0: -1.0e9,
-                 y0: -1.0e9, x1: 1.0e9, y1: 1.0e9 })
+    e.add(Look { dx: 0.0, dy: 0.0, colour: 0, part: 0.0 })
     e.add(Listed { line: 0 })
   }
   // (In turns: what floats goes by the box under it, and what is inside
@@ -398,44 +428,19 @@ system animate() {
   loop {
     let inside =
     for (lk: mut Look, optional s: Shown, optional t: Tint),
-        optional (lk)-[Inside]->(up: Look),
-        optional (lk)-[Inside]->(us: Shown)
+        optional (lk)-[Inside]->(up: Look)
         without Float top down Inside
-        on changed up, changed us, changed s, changed t, removed Tint,
-           added Look {
+        on changed up, changed s, changed t, removed Tint, added Look {
       var dx = 0.0
       var dy = 0.0
       var colour = 0
       var part = 0.0
-      var x0 = -1.0e9
-      var y0 = -1.0e9
-      var x1 = 1.0e9
-      var y1 = 1.0e9
-      if let x = up.dx, let y = up.dy, let c = up.colour, let p = up.part,
-         let left = up.x0, let top = up.y0, let right = up.x1,
-         let bottom = up.y1 {
+      if let x = up.dx, let y = up.dy, let c = up.colour, let p = up.part {
         dx = x
         dy = y
         colour = c
         part = p
-        x0 = left
-        y0 = top
-        x1 = right
-        y1 = bottom
       }
-      if let sizing = us.sizing, let sx = us.x, let sy = us.y, let sw = us.w,
-         let sh = us.h {
-        if sizing {
-          x0 = max(x0, sx)
-          y0 = max(y0, sy)
-          x1 = min(x1, sx + sw)
-          y1 = min(y1, sy + sh)
-        }
-      }
-      lk.x0 = x0
-      lk.y0 = y0
-      lk.x1 = x1
-      lk.y1 = y1
       if let x = s.dx, let y = s.dy {
         dx = x
         dy = y
@@ -464,10 +469,6 @@ system animate() {
       var dy = under.dy
       var colour = under.colour
       var part = under.part
-      lk.x0 = under.x0
-      lk.y0 = under.y0
-      lk.x1 = under.x1
-      lk.y1 = under.y1
       if let x = s.dx, let y = s.dy {
         dx = x
         dy = y
@@ -507,9 +508,7 @@ system draw() {
               b.y < Window.height as f32 && b.y + b.h > 0.0 &&
               b.x < v.x + v.w && b.x + b.w > v.x &&
               b.y < v.y + v.h && b.y + b.h > v.y {
-      clip(max(v.x, lk.x0), max(v.y, lk.y0),
-           min(v.x + v.w, lk.x1) - max(v.x, lk.x0),
-           min(v.y + v.h, lk.y1) - max(v.y, lk.y0))
+      clip(v.x, v.y, v.w, v.h)
       // Where a box in a `Transition` is right now, and as big, with all
       // that is in it as far from its place; under what is laid on it,
       // or on the nearest box it is in.
@@ -595,9 +594,7 @@ system draw() {
     for b: Box, l: Layer, v: Seen, lk: Look, bd: Border, optional rc: Round,
         optional own: Shown
         top down dfs Inside where l.z == z {
-      clip(max(v.x, lk.x0), max(v.y, lk.y0),
-           min(v.x + v.w, lk.x1) - max(v.x, lk.x0),
-           min(v.y + v.h, lk.y1) - max(v.y, lk.y0))
+      clip(v.x, v.y, v.w, v.h)
       var bw = b.w
       var bh = b.h
       if let sw = own.w, let sh = own.h {
@@ -620,13 +617,11 @@ system draw() {
       edges(b.x, b.y, bw, bh, bd.left, bd.right, bd.top, bd.bottom, tl, tr,
             bl, br, bd.colour)
     }
-    for (b: Box, l: Layer, v: Seen, lk: Look)
+    for (b: Box, l: Layer, v: Seen)
             -[Inside]->(ob: Box, ok: Stack, obd: Border, olk: Look),
         (prev: Box)~[Inside]~>(b)
         top down dfs Inside where l.z == z && obd.between > 0.0 {
-      clip(max(v.x, lk.x0), max(v.y, lk.y0),
-           min(v.x + v.w, lk.x1) - max(v.x, lk.x0),
-           min(v.y + v.h, lk.y1) - max(v.y, lk.y0))
+      clip(v.x, v.y, v.w, v.h)
       shift(olk.dx, olk.dy)
       shade(olk.colour, olk.part)
       let half = (ok.gap + obd.between) * 0.5
@@ -815,6 +810,11 @@ schedule ui() {
   layout_heights()
   point()
   animate()
+  // (Again, for what is inside the boxes that are on their way to
+  // another size: nothing, where none is.)
+  layout_widths()
+  wrap()
+  layout_heights()
   draw()
   inspect()
 }

@@ -1,0 +1,36 @@
+// An event a `for` causes for itself where its order does not bring it
+// in the same pass counts the next time it runs (late_events.test).
+import console
+component Node { own: i32, total: i32 }
+component Slot { at: i32 }
+component Tall { h: i32, runs: i32 }
+relation (Node)-[Under]->(Node) tree ordered by Slot.at capacity 16
+relation (Tall)-[Beside]->(Tall) tree capacity 16
+default_capacity 16
+unique Frame: i32
+world {
+  let a = spawn { Node { own: 1, total: 0 }, Tall { h: 1, runs: 0 } }
+  let b = spawn { Node { own: 2, total: 0 }, Tall { h: 2, runs: 0 } }
+  let c = spawn { Node { own: 3, total: 0 }, Tall { h: 3, runs: 0 } }
+  connect (b)-[Under]->(a)
+  connect (c)-[Under]->(b)
+  connect (a)-[Beside]->(b)
+  connect (b)-[Beside]->(c)
+}
+system work() {
+  Frame += 1
+  // In the second frame the third's `h` is another, set by the system
+  // below; this `for` runs for it, and for the second, which is beside
+  // it. Running for the third it raises `h` again: an event for the
+  // second, which it may have been at already.
+  let side = for (t: mut Tall, n: Node), optional (t)-[Beside]->(o: Tall)
+      on changed t.h, changed o.h {
+    t.runs += 1
+    if Frame == 2 && n.own == 3 { t.h = 30 }
+  }
+  put("{Frame}: {side} ran")
+  for n: Node, t: Tall { put("{Frame}: {n.own}: h {t.h} runs {t.runs}") }
+}
+system poke() { for t: mut Tall, n: Node where Frame == 1 && n.own == 3 { t.h = 4 } }
+schedule frame() { work() poke() }
+main { loop { frame() } until Frame == 4 }

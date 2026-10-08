@@ -71,6 +71,11 @@ component Raise { z: i32 }
 // not outside the boxes that clip that one, nor outside that one itself
 // where it clips.
 tag Confined
+// What is inside a box is laid out as if the box were this wide and
+// high; for the box it is in, the box is as big as it is. (So a box can
+// be shown on its way from one size to another with what is in it as it
+// fits right then: examples/layout_window.ent does, for a `Transition`.)
+component Inner { w: f32, h: f32 }
 // So much more on every side than its box, for what draws it and for the
 // pointer; the boxes inside it stay where they are.
 component Expand { w: f32, h: f32 }
@@ -111,13 +116,16 @@ component FitH { fit: f32, min: f32, max: f32, share: f32, kind: Sizing }
 // And what it has for the boxes inside it: `used` by padding and gaps,
 // the `room` inside the padding, how wide one of them can be across a
 // column (`most`: the room, or more where the box clips), whether they
-// grow (1) or shrink (2) to a `level`, and what they come to along the
-// row (`extent`).
+// grow (1) or shrink (2) to a `level`, what they come to along the
+// row (`extent`), and how big the box is for them (`inner`: as big as it
+// is, or as its `Inner` says).
 component RoomW {
-  used: f32, room: f32, most: f32, mode: i32, level: f32, extent: f32
+  used: f32, room: f32, most: f32, mode: i32, level: f32, extent: f32,
+  inner: f32
 }
 component RoomH {
-  used: f32, room: f32, most: f32, mode: i32, level: f32, extent: f32
+  used: f32, room: f32, most: f32, mode: i32, level: f32, extent: f32,
+  inner: f32
 }
 // How wide and high what is in a box is in all, inside its padding: more
 // than the room there, where the box clips. (By itself: nothing in
@@ -147,9 +155,9 @@ system layout_widths() {
     e.add(FitW { fit: 0.0, min: 0.0, max: 0.0, share: 0.0, kind: Sizing.Fit })
     e.add(FitH { fit: 0.0, min: 0.0, max: 0.0, share: 0.0, kind: Sizing.Fit })
     e.add(RoomW { used: 0.0, room: 0.0, most: 0.0, mode: 0, level: 0.0,
-                  extent: 0.0 })
+                  extent: 0.0, inner: 0.0 })
     e.add(RoomH { used: 0.0, room: 0.0, most: 0.0, mode: 0, level: 0.0,
-                  extent: 0.0 })
+                  extent: 0.0, inner: 0.0 })
     e.add(Content { w: 0.0, h: 0.0 })
     e.add(Sums { a: 0.0, b: 0.0, c: 0.0, d: 0.0, e: 0.0, n: 0, g: 0, m: 0 })
     e.add(Seen { x: -1.0e9, y: -1.0e9, w: 2.0e9, h: 2.0e9 })
@@ -237,13 +245,14 @@ system layout_widths() {
   // worked out for the boxes inside it, which come after it.
   let sized =
   for (e, b: mut Box, f: FitW, k: Stack, r: mut RoomW, t: mut Sums,
-       all: mut Content, optional p: Pad, optional cl: Clip),
-      optional (e)-[Inside]->(ob: Box, ok: Stack, oroom: RoomW)
+       all: mut Content, optional p: Pad, optional cl: Clip,
+       optional in: Inner),
+      optional (e)-[Inside]->(ok: Stack, oroom: RoomW)
       top down Inside
-      on changed f, changed k, changed p, changed cl, changed ob.w,
+      on changed f, changed k, changed p, changed cl, changed in.w,
          changed ok, changed oroom, changed (: FitW)-[Inside]->(e) {
     var w = f.fit
-    if let ow = ob.w, let orow = ok.row, let used = oroom.used,
+    if let ow = oroom.inner, let orow = ok.row, let used = oroom.used,
        let room = oroom.most, let mode = oroom.mode, let level = oroom.level {
       if f.kind == Sizing.Percent {
         w = (ow - used) * f.share
@@ -262,6 +271,8 @@ system layout_widths() {
       }
     }
     b.w = w
+    // (From here on, as wide as what is inside it is laid out for.)
+    if let wide = in.w { w = wide }
 
     // For the boxes inside it. How many, how many grow, what those that
     // are not a share come to, the shares, and what those that can give
@@ -398,6 +409,7 @@ system layout_widths() {
     }
     r.used = used
     r.room = w - pads
+    r.inner = w
     r.most = most
     r.mode = mode
     r.level = level
@@ -490,13 +502,14 @@ system layout_heights() {
   // What it gets, as the widths, with columns for rows.
   let sized =
   for (e, b: mut Box, f: FitH, k: Stack, r: mut RoomH, t: mut Sums,
-       all: mut Content, optional p: Pad, optional cl: Clip),
-      optional (e)-[Inside]->(ob: Box, ok: Stack, oroom: RoomH)
+       all: mut Content, optional p: Pad, optional cl: Clip,
+       optional in: Inner),
+      optional (e)-[Inside]->(ok: Stack, oroom: RoomH)
       top down Inside
-      on changed f, changed k, changed p, changed cl, changed ob.h,
+      on changed f, changed k, changed p, changed cl, changed in.h,
          changed ok, changed oroom, changed (: FitH)-[Inside]->(e) {
     var h = f.fit
-    if let oh = ob.h, let orow = ok.row, let used = oroom.used,
+    if let oh = oroom.inner, let orow = ok.row, let used = oroom.used,
        let room = oroom.most, let mode = oroom.mode, let level = oroom.level {
       if f.kind == Sizing.Percent {
         h = (oh - used) * f.share
@@ -515,6 +528,7 @@ system layout_heights() {
       }
     }
     b.h = h
+    if let high = in.h { h = high }
 
     // For the boxes inside it. How many, how many grow, what those that
     // are not a share come to, the shares, and what those that can give
@@ -651,6 +665,7 @@ system layout_heights() {
     }
     r.used = used
     r.room = h - pads
+    r.inner = h
     r.most = most
     r.mode = mode
     r.level = level

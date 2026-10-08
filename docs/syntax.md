@@ -582,6 +582,13 @@ thereby passed down: the next time it runs that is no event.
   `(e)-[Over]->(under: Box) ... on changed under.w`: they count the next
   time the `for` runs, since nothing says which of the two is visited
   first.
+- An event that counts the next time is not lost, and no entity reads
+  an old value for it: what a `for` reads of another entity where its
+  order says nothing (a sibling after, a child `top down`, along another
+  tree) it may not change. Where one thing is to follow from another in
+  the same frame both ways, that is two `for`s, each reading what the
+  other writes, in a `loop` until neither has anything to do
+  (`loop { let a = for ... { }  let b = for ... { } } until a + b == 0`).
 - `changed` means changed: a write of the value a field has is no
   event. So passes that feed each other (as in `examples/layout.ent`,
   where sizes go up the tree and room comes down) settle by themselves,

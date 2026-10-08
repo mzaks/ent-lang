@@ -71,27 +71,31 @@
 // Its colour is to be another: a fifth of the way a frame. And the list
 // is 40 narrower, so the card is to start 40 further left and be as
 // much wider: it is 32 from there still, and 8 wider. What is in it is
-// where it is to be, and as far off as the card; it shows only where the
-// card does, while that is not as big as it is to be.
+// laid out for how wide it is right now: the text has 8 more, and what
+// floats at the text's corner is 8 further right.
 // CHECK:      frame 7
 // CHECK:      rect 10 10 60 180 00202020
 // CHECK:      shift 32 0
 // CHECK:      rounded 80 10 178 180 by 8 8 0 0 ff306650
-// CHECK-NEXT: clip 112 10 178 180
-// CHECK-NEXT: write 90 20 in 190 "a text that goes on in the next line" 00a0b0c0
-// CHECK-NEXT: unclip
+// CHECK-NEXT: write 90 20 in 158 "a text that goes on in the next line" 00a0b0c0
+// CHECK:      rect 245 17 6 6 00e05040
 // CHECK:      frame 8
 // CHECK:      shift 24 0
 // CHECK:      rounded 80 10 186 180 by 8 8 0 0 ff308c50
-// CHECK-NEXT: clip 104 10 186 180
-// It is to go: under more and more of the colour it leaves into.
+// CHECK-NEXT: write 90 20 in 166 "a text that goes on in the next line" 00a0b0c0
+// CHECK:      rect 253 17 6 6 00e05040
+// It is to go: under more and more of the colour it leaves into. It
+// goes on getting wider as it did, and is as wide as it is to be half a
+// second after it set out for that.
 // CHECK:      frame 9
 // CHECK:      shade 760202 0.70
+// CHECK-NEXT: rounded 80 10 194 180 by 8 8 0 0 ff30a350
+// CHECK:      frame 11
+// CHECK:      rounded 80 10 210 180 by 8 8 0 0 ff30d150
+// CHECK-NEXT: write 90 20 in 190 "a text that goes on in the next line" 00a0b0c0
 // CHECK:      frame 13
 // CHECK:      shade 101010 1.00
 // CHECK-NEXT: rounded 80 10 210 180 by 8 8 0 0 0030ff50
-// (As big as it is to be, it clips nothing.)
-// CHECK-NEXT: write 90 20 in 190 "a text that goes on in the next line" 00a0b0c0
 // And is gone, with the text in it and what floated over that.
 // CHECK:      frame 14
 // CHECK-NOT:  rounded

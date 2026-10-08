@@ -1,0 +1,22 @@
+// A `for` reacts to what a binding along another tree leads to. What it
+// changes there itself is an event for an entity it may have been at
+// already: nothing says which of the two comes first. That event is not
+// lost: it counts the next time the `for` runs. (What the `for` would
+// read there it may not change, so no entity sees an old value: a `for`
+// that is to see what it does to others in the same frame is two, in a
+// `loop` until neither has anything to do.)
+// RUN: %ent run %S/Inputs/late_events.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/late_events.ent 2>/dev/null | FileCheck %s
+
+// CHECK:      1: 3 ran
+// The third, whose `h` another system changed, and the second, beside it.
+// CHECK:      2: 2 ran
+// CHECK-NEXT: 2: 1: h 1 runs 1
+// CHECK-NEXT: 2: 2: h 2 runs 2
+// CHECK-NEXT: 2: 3: h 30 runs 2
+// The third again, and the second for what the `for` did to the third.
+// CHECK-NEXT: 3: 2 ran
+// CHECK-NEXT: 3: 1: h 1 runs 1
+// CHECK-NEXT: 3: 2: h 2 runs 3
+// CHECK-NEXT: 3: 3: h 30 runs 3
+// CHECK-NEXT: 4: 0 ran
