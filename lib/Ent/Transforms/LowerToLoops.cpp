@@ -7334,7 +7334,10 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   bool byWalk = layout.cascadeFollowsByWalk(query);
   bool inOrder = relation.walksInOrder(traversal) || byWalk;
   bool depthFirst = traversal == "dfs" || (byWalk && traversal.empty());
-  if (!leavesFirst && !(inOrder && depthFirst))
+  // (A query that follows its events to those without a parent visits
+  // them where it goes through everything, further down.)
+  if (!leavesFirst && !(inOrder && depthFirst) &&
+      !layout.cascadeFollowsToRoots(query))
     emitRoots();
   else
     matched = llvm::any_of(layout.archetypes,
@@ -8376,8 +8379,11 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     // by its row.
     bool follows = layout.cascadeFollowsEvents(query);
     bool toRoots = layout.cascadeFollowsToRoots(query);
-    bool addsUp = false;
-    query.getBody().walk([&](CombineOp) { addsUp = true; });
+    // What the body adds into, up the tree.
+    llvm::SmallSetVector<Type, 2> addsInto;
+    query.getBody().walk([&](CombineOp combine) {
+      addsInto.insert(combine.getRef().getType());
+    });
     auto markEntity = [&](Value id) {
       auto [there, at] = placeOf(world.entityKey(loc, id));
       tree.branch(
@@ -8464,6 +8470,126 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     for (const Trigger &trigger : triggers)
       if (trigger.where == Trigger::Up)
         stepsUp.insert(trigger.hops);
+    // The body for the entity `id` at `row` of `archetype`, for a query
+    // that follows its events, and what follows from what it changed.
+    auto runAt = [&](const WorldArchetype &archetype, Value row, Value id,
+                     KnownParent parent) {
+      // Following events: what the body changed here that a trigger
+      // up the tree means (its stamp has this query's tick, which no
+      // other event has) is an event for the children, which come
+      // later in the list.
+      auto ran = scf::IfOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 1));
+      {
+        OpBuilder::InsertionGuard body(rewriter);
+        rewriter.setInsertionPointToStart(ran.thenBlock());
+        emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                      layout, row, world.count(loc, archetype), tick, seen,
+                      /*parallel=*/false, /*directApplies=*/true, parent,
+                      marks);
+      }
+      // What the body added into the parent is an event of the
+      // parent's, which comes later: for itself, or for the one it
+      // is under in turn, which it passes it on to when it is come
+      // to.
+      // (Or into one further up: found as the body found it.)
+      if (leavesFirst && parent.relation) {
+        auto holds = [&](const WorldArchetype &home) {
+          return llvm::any_of(triggers, [&](const Trigger &trigger) {
+            return home.findStamp(getStamp(trigger)) != nullptr;
+          });
+        };
+        // Whether the entity `above` has an event of this run.
+        auto markIfChanged = [&](Value above) {
+          Value got = emitLocate(
+              rewriter, loc, layout, world, above, holds,
+              FlatSymbolRefAttr(), TypeRange{rewriter.getI1Type()},
+              [&](const WorldArchetype &home, Value at,
+                  Value) -> SmallVector<Value> {
+                Value any = tree.i1(false);
+                for (const Trigger &trigger : triggers)
+                  if (const WorldColumn *column =
+                          home.findStamp(getStamp(trigger)))
+                    any = arith::OrIOp::create(
+                        rewriter, loc, any,
+                        tree.same(tree.load(world.stamps(home, *column),
+                                            at),
+                                  tick));
+                return {any};
+              },
+              [&]() -> SmallVector<Value> { return {tree.i1(false)}; })[0];
+          tree.branch(got, [&] { markEntity(above); });
+        };
+        bool toParent = false;
+        for (Type type : addsInto) {
+          auto ref = cast<RefType>(type);
+          if (ref.getHops() == 1 &&
+              (ref.getIsDirect() ||
+               relation.getTrusted(/*target=*/true) == ref.getComponent())) {
+            toParent = true;
+            continue;
+          }
+          Ancestor further =
+              emitAncestor(rewriter, loc, layout, world, relation,
+                           ref.getComponent(), id, Value(), ref.getIsDirect(),
+                           ref.getHops());
+          Value there = further.found ? further.found : tree.i1(true);
+          tree.branch(there, [&] {
+            Value above = further.id;
+            if (!above)
+              above = emitAtHome(
+                  rewriter, loc, layout, further, TypeRange{world.idType()},
+                  [&](const WorldArchetype &home) -> SmallVector<Value> {
+                    return {world.entityId(loc, home, further.row)};
+                  })[0];
+            markIfChanged(above);
+          });
+        }
+        if (toParent)
+          markIfChanged(parent.id);
+      }
+      // (And for the sibling after, where a trigger is before the
+      // tree, and for the parent, which comes later from the leaves,
+      // where one is down it. The sibling before has been visited.)
+      SmallVector<std::pair<Trigger::Where, unsigned>, 4> ways;
+      for (unsigned steps : stepsUp)
+        ways.push_back({Trigger::Up, steps});
+      ways.push_back({Trigger::Before, 1});
+      ways.push_back({Trigger::Down, 1});
+      for (auto [where, steps] : ways) {
+        Value changedHere;
+        for (const Trigger &trigger : triggers) {
+          const WorldColumn *column =
+              trigger.via && trigger.where == where &&
+                      trigger.hops == steps
+                  ? archetype.findStamp(getStamp(trigger))
+                  : nullptr;
+          if (!column)
+            continue;
+          Value now = arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::eq,
+              memref::LoadOp::create(rewriter, loc,
+                                     world.stamps(archetype, *column),
+                                     ValueRange{row}),
+              tick);
+          changedHere = changedHere
+                            ? arith::OrIOp::create(rewriter, loc,
+                                                   changedHere, now)
+                                  .getResult()
+                            : now;
+        }
+        if (!changedHere)
+          continue;
+        tree.branch(changedHere, [&] {
+          if (where == Trigger::Up)
+            markBelow(world.entityKey(loc, id), steps);
+          else if (where == Trigger::Before)
+            markSibling(world.entityKey(loc, id), /*after=*/true);
+          else if (parent.relation)
+            markEntity(parent.id);
+        });
+      }
+    };
     // The body for the entity at `at` of the order, at the insertion point
     // (`visitWith`: for the entity and the parent that were found there).
     std::function<void(Value, Value, KnownParent, bool)> visitWith;
@@ -8547,90 +8673,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                             marks);
               return {};
             }
-            // Following events: what the body changed here that a trigger
-            // up the tree means (its stamp has this query's tick, which no
-            // other event has) is an event for the children, which come
-            // later in the list.
-            auto ran = scf::IfOp::create(
-                rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 1));
-            {
-              OpBuilder::InsertionGuard body(rewriter);
-              rewriter.setInsertionPointToStart(ran.thenBlock());
-              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
-                            layout, row, world.count(loc, archetype), tick, seen,
-                            /*parallel=*/false, /*directApplies=*/true, parent,
-                            marks);
-            }
-            // What the body added into the parent is an event of the
-            // parent's, which comes later: for itself, or for the one it
-            // is under in turn, which it passes it on to when it is come
-            // to.
-            if (leavesFirst && addsUp && parent.relation) {
-              auto holds = [&](const WorldArchetype &home) {
-                return llvm::any_of(triggers, [&](const Trigger &trigger) {
-                  return home.findStamp(getStamp(trigger)) != nullptr;
-                });
-              };
-              Value got = emitLocate(
-                  rewriter, loc, layout, world, parent.id, holds,
-                  FlatSymbolRefAttr(), TypeRange{rewriter.getI1Type()},
-                  [&](const WorldArchetype &home, Value at,
-                      Value) -> SmallVector<Value> {
-                    Value any = tree.i1(false);
-                    for (const Trigger &trigger : triggers)
-                      if (const WorldColumn *column =
-                              home.findStamp(getStamp(trigger)))
-                        any = arith::OrIOp::create(
-                            rewriter, loc, any,
-                            tree.same(tree.load(world.stamps(home, *column),
-                                                at),
-                                      tick));
-                    return {any};
-                  },
-                  [&]() -> SmallVector<Value> { return {tree.i1(false)}; })[0];
-              tree.branch(got, [&] { markEntity(parent.id); });
-            }
-            // (And for the sibling after, where a trigger is before the
-            // tree, and for the parent, which comes later from the leaves,
-            // where one is down it. The sibling before has been visited.)
-            SmallVector<std::pair<Trigger::Where, unsigned>, 4> ways;
-            for (unsigned steps : stepsUp)
-              ways.push_back({Trigger::Up, steps});
-            ways.push_back({Trigger::Before, 1});
-            ways.push_back({Trigger::Down, 1});
-            for (auto [where, steps] : ways) {
-              Value changedHere;
-              for (const Trigger &trigger : triggers) {
-                const WorldColumn *column =
-                    trigger.via && trigger.where == where &&
-                            trigger.hops == steps
-                        ? archetype.findStamp(getStamp(trigger))
-                        : nullptr;
-                if (!column)
-                  continue;
-                Value now = arith::CmpIOp::create(
-                    rewriter, loc, arith::CmpIPredicate::eq,
-                    memref::LoadOp::create(rewriter, loc,
-                                           world.stamps(archetype, *column),
-                                           ValueRange{row}),
-                    tick);
-                changedHere = changedHere
-                                  ? arith::OrIOp::create(rewriter, loc,
-                                                         changedHere, now)
-                                        .getResult()
-                                  : now;
-              }
-              if (!changedHere)
-                continue;
-              tree.branch(changedHere, [&] {
-                if (where == Trigger::Up)
-                  markBelow(world.entityKey(loc, id), steps);
-                else if (where == Trigger::Before)
-                  markSibling(world.entityKey(loc, id), /*after=*/true);
-                else if (parent.relation)
-                  markEntity(parent.id);
-              });
-            }
+            runAt(archetype, row, id, parent);
             return {};
           },
           []() -> SmallVector<Value> { return {}; }, LocateBounds(), certain,
@@ -8696,6 +8739,17 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         goThroughRows();
         rowsAt = rootsAt = query;
       } else {
+        // (Parents first, those without a parent before the others.)
+        if (toRoots && !leavesFirst) {
+          rootsAt = scanOrFollow.thenBlock()->getTerminator();
+          if (followsOrder && depthFirst)
+            visitAlone(tree, walk.sizes);
+          else
+            emitRoots();
+          rootsAt = query;
+          rewriter.setInsertionPoint(
+              scanOrFollow.thenBlock()->getTerminator());
+        }
         visitAll();
       }
       rewriter.setInsertionPointToStart(scanOrFollow.elseBlock());
@@ -8772,13 +8826,28 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
                        break;
                      }
                    });
+      // Parents first, the marked ones without a parent come first, by
+      // their rows: what the body changes in one is an event for those
+      // below it.
+      if (toRoots && !leavesFirst)
+        for (const WorldArchetype &archetype : layout.archetypes) {
+          if (!matches(archetype, query))
+            continue;
+          scf::ForOp roots = sweepMarks(
+              rewriter, loc, world.rowMarks(archetype),
+              startCounts.lookup(&archetype), [&](Value row) {
+                runAt(archetype, row, world.entityId(loc, archetype, row),
+                      KnownParent());
+              });
+          hoistResourceReads(rewriter, roots, world);
+        }
       scf::ForOp sweep =
           (reverse ? sweepMarksDown : sweepMarks)(
               rewriter, loc, world.treeMarks(relation), limit,
               [&](Value at) { visitAt(at, /*following=*/true); });
       hoistResourceReads(rewriter, sweep, world);
       // Then the marked ones without a parent, by their rows.
-      if (toRoots)
+      if (toRoots && leavesFirst)
         for (const WorldArchetype &archetype : layout.archetypes) {
           if (!matches(archetype, query))
             continue;

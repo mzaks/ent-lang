@@ -23,6 +23,14 @@ component FullFar { v: f32 }
 // size and a slot, which is the one above it (this `for` goes through
 // all of them and runs its body where a trigger fired).
 component LazyPath { v: f32 }
+// The sizes from a node up to the one without a parent, which is visited
+// too: the `for` names a parent only where there is one.
+// The largest size two below a node, and two below those: each adds into
+// the node two above it.
+component LazySkip { top: f32 }
+component FullSkip { top: f32 }
+component LazyDeep { v: f32 }
+component FullDeep { v: f32 }
 default_capacity 512
 relation (Node)-[In]->(Node) tree ordered by Slot.at capacity 512
 unique Frame: i32
@@ -41,7 +49,9 @@ world {
     Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
     Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
-      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
   }
   Home = root
   var spine = root
@@ -52,7 +62,9 @@ world {
       Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
       Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
-      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
     }
     connect (next)-[In]->(spine)
     for j in 0..60 {
@@ -62,7 +74,9 @@ world {
         Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
         Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
-      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
       }
       connect (leaf)-[In]->(spine)
     }
@@ -75,7 +89,9 @@ world {
       Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
       Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
-      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
     }
   }
 }
@@ -113,7 +129,9 @@ system change() {
       Lazy { sum: 0.0, w: 0.0, x: 0.0, runs: 0 },
       Full { sum: 0.0, w: 0.0, x: 0.0 },
       LazyTop { top: 0.0 }, FullTop { top: 0.0 },
-      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 }
+      LazyFar { v: 0.0 }, FullFar { v: 0.0 }, LazyPath { v: 0.0 },
+      LazyDeep { v: 0.0 }, FullDeep { v: 0.0 },
+      LazySkip { top: 0.0 }, FullSkip { top: 0.0 }
     }
     if Frame % 14 != 0 { connect (made)-[In]->(e) }
   }
@@ -150,6 +168,16 @@ system lazy() {
       top down In on changed n.base, changed far.base {
     f.v = n.base + far.base
   }
+  for (n: Node, d: mut LazyDeep), optional (n)-[In]->(p: LazyDeep)
+      top down In on changed n.base, changed p.v {
+    var v = n.base
+    if let above = p.v { v += above }
+    d.v = v
+  }
+  for (n: Node, t: LazySkip)-[In]->()-[In]->(g: mut LazySkip) bottom up In
+      on changed n.base, changed t.top {
+    g.top max= max(n.base, t.top)
+  }
 }
 
 system full() {
@@ -170,6 +198,15 @@ system full() {
   for (n: Node, f: mut FullFar)-[In]->()-[In]->(far: Node) top down In {
     f.v = n.base + far.base
   }
+  for (n: Node, t: FullSkip)-[In]->()-[In]->(g: mut FullSkip) bottom up In {
+    g.top max= max(n.base, t.top)
+  }
+  for (n: Node, d: mut FullDeep), optional (n)-[In]->(p: FullDeep)
+      top down In {
+    var v = n.base
+    if let above = p.v { v += above }
+    d.v = v
+  }
 }
 
 // How many nodes the two disagree about, and how often a body that
@@ -181,6 +218,8 @@ system compare() {
   for l: LazyTop, f: FullTop where l.top != f.top { Wrong += 1 }
   for l: LazyFar, f: FullFar where l.v != f.v { Wrong += 1 }
   for l: LazyPath, f: FullFar where l.v != f.v { Wrong += 1 }
+  for l: LazyDeep, f: FullDeep where l.v != f.v { Wrong += 1 }
+  for l: LazySkip, f: FullSkip where l.top != f.top { Wrong += 1 }
   for l: mut Lazy where l.runs > 0 {
     Runs += l.runs
     l.runs = 0
