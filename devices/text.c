@@ -1,5 +1,5 @@
-// Texts of any length (`text` without a capacity; `!ent.string`): what a
-// program that has one calls. `tools/ent` builds this with every program.
+// Texts of any length (`text` without a capacity; `!ent.string`): what
+// the compiler calls for a program that has one (devices/text.ent).
 //
 // A text is a block: its length, 32 bits, and its bytes after that. A
 // value in the program is the address of one (0 for a text without

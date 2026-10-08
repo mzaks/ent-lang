@@ -16,6 +16,9 @@
 //
 // Implemented with raylib (devices/window.c, devices/window.link).
 
+// (For the texts of any length that `write` and its like take.)
+import text
+
 // `width`, `height` (800 by 450 if left 0) and `title` are read when the
 // window opens, and whether the user can make it another size
 // (`resizable`); `background` and `fps` every frame. `fps` is the frames

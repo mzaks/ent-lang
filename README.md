@@ -210,10 +210,12 @@ call, which `tools/ent` compiles against the declarations generated for
 them (`ent_extern.h`, which has no world in it). Instead of `name.c` it
 may be `name.cpp`, an object or archive (`name.o`, `name.a`), or a command
 that builds one (`name.build`), so a device can be written in any language
-that defines C functions; see [`docs/syntax.md`](docs/syntax.md). Three
+that defines C functions; see [`docs/syntax.md`](docs/syntax.md). Four
 come with the compiler, in `devices/`, and two more that need
 [raylib](https://www.raylib.com) installed:
 
+- `text`: what keeps the bytes of a `text` without a capacity, of any
+  length; a module that has one imports it (`docs/syntax.md`, Text).
 - `math`: `sqrt`, `sin`, `cos`, `atan2`, `floor`, `pow` and the like from
   the machine's math library, and `abs`, `clamp`, `lerp`, `length`, `pi()`
   and more written in ent-lang on top. All are fns, for `f32` by their
@@ -312,7 +314,9 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   destroyed; a value is a view of such a block or of a literal's
   (`ent.text.constant`, `ent.text.of` a text of a capacity,
   `ent.text.cut` to one, `ent.text.length`, `ent.text.at`,
-  `ent.text.equal`). The lowering calls `runtime/text.c` for them.
+  `ent.text.equal`). The lowering calls the C of the
+  module `text` for them (`devices/text.c`), which a module that has
+  such a text imports.
 - `%id = ent.spawn (@Position, @Velocity)(%x, %y, %dx, %dy) : f32, f32, f32,
   f32` creates an entity with these components, a value for every field in
   order, and returns its id. Archetypes need not be declared: the compiler

@@ -11,6 +11,7 @@
 // (examples/layout_demo.ent is one.)
 import window
 import layout
+import text
 
 // A box that is filled with a colour.
 component Fill { colour: i32 }

@@ -148,7 +148,6 @@ def cache_key(arguments):
                      host_compiler("ENT_CXX", ["c++"], "clang++")):
         note_tool(shutil.which(compiler) or compiler)
     note_tool(os.path.abspath(__file__))
-    note_file(os.path.join(ROOT, "runtime", "text.c"))
     note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
          os.environ.get("ENT_PIECES", ""), os.cpu_count())
 
@@ -279,8 +278,6 @@ def build(arguments, output, directory):
             sys.exit(f"ent: do not know how to build '{path}' (expected "
                      ".c, .cpp, .o or .a)")
     given += arguments.sources
-    # What keeps texts of any length: with every program.
-    given.append(os.path.join(ROOT, "runtime", "text.c"))
     # The libraries the modules ask for, after everything that uses them.
     for path in files:
         flags = os.path.splitext(path)[0] + ".link"

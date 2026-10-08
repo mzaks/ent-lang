@@ -1,6 +1,7 @@
 // Texts of any length that come and go with fields, components and
 // entities (text_churn.test).
 import console
+import text
 
 component Note { words: text, n: i32 }
 component Extra { more: text }

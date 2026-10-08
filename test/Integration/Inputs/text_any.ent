@@ -1,5 +1,6 @@
 // Texts of any length (text_any.test).
 import console
+import text
 
 component Note { words: text, n: i32 }
 unique Title: text

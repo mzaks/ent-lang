@@ -880,9 +880,18 @@ FailureOr<Type> Parser::parseType() {
                   .Case("entity", EntityType::get(context))
                   .Default(Type());
   if (*name == "text") {
-    // text: of any length, held by the world.
-    if (!token.is(Token::LBracket))
+    // text: of any length, held by the world; the module `text` keeps
+    // the bytes.
+    if (!token.is(Token::LBracket)) {
+      if (current->name != "text" &&
+          llvm::none_of(current->imports, [](SourceModule *module) {
+            return module->name == "text";
+          }))
+        return error(at, "a text of any length is kept by the module "
+                         "'text': 'import text' (or give it a capacity, "
+                         "'text[N]')");
       return Type(StringType::get(context));
+    }
     // text[N]: up to N bytes, stored inline.
     advance();
     FailureOr<int64_t> capacity = integer("a capacity in bytes");

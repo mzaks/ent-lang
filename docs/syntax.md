@@ -832,6 +832,7 @@ changed one by one.
 ### Text of any length
 
 ```
+import text
 component Page { words: text }
 unique Title: text
 fn longer(a: text, b: text) -> text { if len(a) > len(b) { a } else { b } }
@@ -862,9 +863,9 @@ component is removed or its entity destroyed.
   `let` is there. (`t as text[N]` is a copy.)
 - In the C header such a column is an array of `const ent_text *` (none:
   no bytes), which C reads and leaves to the program to change.
-- `tools/ent` builds `runtime/text.c` with every program: what keeps the
-  bytes. A program run with `ENT_TEXT_REPORT` set says at its end how
-  many texts fields held.
+- The module `text` keeps the bytes (`devices/text.ent`, with its C): a
+  module that has a `text` says `import text`. A program run with
+  `ENT_TEXT_REPORT` set says at its end how many texts fields held.
 
 ## Schedules
 

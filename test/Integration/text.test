@@ -1,7 +1,7 @@
-// Text end to end (Inputs/text.ent): the program builds lines, an extern
+// Text end to end (Inputs/text_lines.ent): the program builds lines, an extern
 // system prints them from the columns.
 // RUN: mkdir -p %t.dir
-// RUN: ent-translate --import-ent %S/Inputs/text.ent -o %t.mlir
+// RUN: ent-translate --import-ent %S/Inputs/text_lines.ent -o %t.mlir
 // RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/text_world.h
 // RUN: ent-opt %t.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \

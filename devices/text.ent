@@ -1,0 +1,15 @@
+// Texts of any length: what keeps the bytes of a `text` without a
+// capacity. A module that has such a text imports this one:
+//
+//   import text
+//   component Page { words: text }
+//
+// There is nothing here to call. The compiler does: where a field is
+// given a text it asks for a block with a copy of the bytes, and where a
+// field gets another, its component goes or its entity is destroyed, it
+// gives the block back; `len`, `t[i]`, `==` and `as text[N]` look into
+// one. All of that is in devices/text.c, which is built with a program
+// that imports this module, like any module's C.
+//
+// A program run with ENT_TEXT_REPORT set says at its end how many blocks
+// its fields held.

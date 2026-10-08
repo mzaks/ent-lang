@@ -11029,7 +11029,8 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
   rewriter.replaceOp(invoke, results);
 }
 
-/// The functions that keep texts of any length (runtime/text.c), declared
+/// The functions that keep texts of any length (devices/text.c, the C of
+/// the module `text`, which a module with such a text imports), declared
 /// where the program uses one: each takes and gives addresses as `i64`.
 static void declareTextRuntime(IRRewriter &rewriter, ModuleOp module,
                                SymbolTable &symbols) {
