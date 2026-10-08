@@ -1,0 +1,54 @@
+// A box that is in a box but not in its row (layout_apart.test).
+import console
+import layout
+
+component Name { n: i32 }
+unique Frame: i32
+default_capacity 16
+
+world {
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 400.0, h: 100.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { n: 0 }
+  }
+  // A row as wide as the four in it, 50 each with gaps of 10, and 5
+  // around them.
+  let row = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Fit, h: Sizing.Fit },
+    Stack { row: true, pad: 5.0, gap: 10.0 }, Name { n: 9 }
+  }
+  connect (row)-[Inside]->(root)
+  for i in 0..4 {
+    let part = spawn {
+      Box { x: 0.0, y: 0.0, w: 50.0, h: 30.0 },
+      Size { w: Sizing.Fixed, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, Name { n: i + 1 }
+    }
+    connect (part)-[Inside]->(row)
+  }
+}
+
+// In the second frame the second is not in the row any more, but 7 from
+// the row's inside to the right and 40 down; in the third the first is
+// not either, and in the fourth the second is back.
+system change() {
+  Frame += 1
+  for e, n: Name where Frame == 2 && n.n == 2 {
+    e.add(Apart { dx: 7.0, dy: 40.0, next_x: 0.0, next_y: 0.0 })
+  }
+  for e, n: Name where Frame == 3 && n.n == 1 {
+    e.add(Apart { dx: 0.0, dy: 60.0, next_x: 0.0, next_y: 0.0 })
+  }
+  for e, n: Name where Frame == 4 && n.n == 2 { e.remove(Apart) }
+}
+
+system show() {
+  for b: Box, n: Name where n.n > 0 {
+    put("{Frame}: {n.n} at {b.x} {b.y}, {b.w} x {b.h}")
+  }
+}
+
+schedule frame() { change()  layout()  show() }
+main { loop { frame() } until Frame == 4 }

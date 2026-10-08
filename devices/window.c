@@ -59,10 +59,22 @@ void ent_window_shift(float dx, float dy) {
   name[(text)->length] = 0
 
 void ent_window_open_window(int32_t width, int32_t height,
-                            const ent_text62 *title) {
+                            const ent_text62 *title, bool resizable) {
   ENT_WINDOW_TEXT(name, title);
   SetTraceLogLevel(LOG_WARNING);
+  if (resizable)
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
   InitWindow(width, height, name);
+}
+
+int32_t ent_window_window_width(void) { return GetScreenWidth(); }
+int32_t ent_window_window_height(void) { return GetScreenHeight(); }
+
+// Without a border, as big as the screen it is on: no other video mode,
+// and it is as it was when it is no longer asked for.
+void ent_window_fill_screen(bool on) {
+  if (IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE) != on)
+    ToggleBorderlessWindowed();
 }
 
 bool ent_window_should_close(void) { return WindowShouldClose(); }

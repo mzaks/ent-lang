@@ -15,8 +15,10 @@
 // mark that floats over its text; the pointer goes through them. A card
 // goes dark while it is pressed, and goes when it is clicked. The dial
 // in the header is drawn by this program, where the layout puts it. Enter
-// sends the last card away; I shows the inspector, and O hides it. Escape
-// or closing the window ends the program.
+// sends the last card away; I shows the inspector, and O hides it. Drag
+// the window's edge to give it another size, or press F to have it fill
+// the screen and F again to have it back: the boxes are laid out for the
+// window as it is. Escape or closing the window ends the program.
 import window
 import layout
 import layout_window
@@ -24,6 +26,9 @@ import layout_window
 tag SideBar
 tag Cards
 tag Note
+tag Root
+// (Whether F was down the frame before: it is the going down that counts.)
+unique WasF: bool
 tag Dial
 tag Card
 // A box that is another colour while the pointer is over it.
@@ -46,12 +51,14 @@ world {
   Window.title = "ent-lang: layout"
   Window.background = 0x101418
   Window.fps = 60
+  Window.resizable = true
 
   // The window: the side bar and the rest, next to each other.
   let root = spawn {
     Box { x: 0.0, y: 0.0, w: 900.0, h: 600.0 },
     Size { w: Sizing.Fixed, h: Sizing.Fixed },
-    Stack { row: true, pad: 12.0, gap: 12.0 }, Fill { colour: 0x101418 }
+    Stack { row: true, pad: 12.0, gap: 12.0 }, Fill { colour: 0x101418 },
+    Root
   }
   let side = spawn {
     Box { x: 0.0, y: 0.0, w: 180.0, h: 0.0 },
@@ -222,7 +229,8 @@ world {
                    border_width: false, touch: false },
       Enter { dx: 0.0, dy: 60.0, dw: 0.0, dh: 0.0, colour: 0x101418,
               always: true },
-      Leave { dx: 0.0, dy: 80.0, dw: 0.0, dh: 0.0, colour: 0x101418 }, Card
+      Leave { dx: 0.0, dy: 80.0, dw: 0.0, dh: 0.0, colour: 0x101418,
+              order: Exit.Under, follows: false }, Card
     }
     connect (card)-[Inside]->(cards)
     let picture = spawn {
@@ -258,6 +266,17 @@ world {
 }
 
 system interact() {
+  // The window's box is as big as the window: another size when the
+  // user gives the window one, or when it fills the screen. Everything
+  // in it follows from that.
+  for b: mut Box with Root
+      where b.w != Window.width as f32 || b.h != Window.height as f32 {
+    b.w = Window.width as f32
+    b.h = Window.height as f32
+  }
+  let f = key_down('F' as i32)
+  if f && !WasF { Window.fullscreen = !Window.fullscreen }
+  WasF = f
   for b: mut Box with SideBar where Mouse.right {
     b.w = max(80.0, min(Mouse.x - 12.0, 500.0))
   }

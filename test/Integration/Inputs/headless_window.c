@@ -179,11 +179,29 @@ int32_t ent_window_font(const ent_text126 *file, int32_t size) { return 0; }
 int32_t ent_window_picture_load(const ent_text126 *file) { return 0; }
 float ent_window_picture_ratio(int32_t image) { return 1; }
 void ent_window_screenshot(const ent_text126 *file) {}
+// A window that is as big as it was opened; one that can be given
+// another size is 100 wider and 60 higher from its third frame on, as if
+// the user had dragged its corner; and 1280 by 720 while it fills the
+// screen.
+static int32_t opened_width, opened_height, frames;
+static bool can_resize, fills;
+
 void ent_window_open_window(int32_t width, int32_t height,
-                            const ent_text62 *title) {}
+                            const ent_text62 *title, bool resizable) {
+  opened_width = width;
+  opened_height = height;
+  can_resize = resizable;
+}
+int32_t ent_window_window_width(void) {
+  return fills ? 1280 : opened_width + (can_resize && frames >= 2 ? 100 : 0);
+}
+int32_t ent_window_window_height(void) {
+  return fills ? 720 : opened_height + (can_resize && frames >= 2 ? 60 : 0);
+}
+void ent_window_fill_screen(bool on) { fills = on; }
 bool ent_window_should_close(void) { return false; }
 float ent_window_frame_seconds(void) { return 0; }
-void ent_window_begin_frame(int32_t background, int32_t fps) {}
+void ent_window_begin_frame(int32_t background, int32_t fps) { ++frames; }
 void ent_window_end_frame(void) {}
 float ent_window_mouse_x(void) { return 0; }
 float ent_window_mouse_y(void) { return 0; }

@@ -59,7 +59,10 @@
 // CHECK-NEXT: shade 000000 0.00
 // (The pointer is where the card is, and does not find it: it is on its
 // way.)
+// With nothing left out for being out of sight, the third row too: it
+// is drawn, and the list lets none of it show.
 // CHECK-NEXT: frame 2
+// CHECK:      write 14 234 in 92 "row 2" 00ffffff
 // CHECK:      shift 0 24
 // CHECK:      frame 3
 // CHECK:      write 14 14 in 92 "row 0" 00ffffff
@@ -110,18 +113,30 @@
 // CHECK-NEXT: write 90 20 in 166 "a text that goes on in the next line" 00a0b0c0
 // CHECK:      edges 80 10 186 180 of 1 1 7 1 ff89b0e6
 // CHECK:      rect 253 17 6 6 00e05040
-// It is to go: it takes no room any more, and floats where it was, drawn
-// after the boxes of the window, under more and more of the colour it
+// It is to go: it takes no room in the window's row any more, and is
+// apart where it was, drawn before the others there (so under them,
+// where they come to be over it), under more and more of the colour it
 // leaves into. It goes on getting wider and rounder as it did, and is as
 // wide as it is to be half a second after it set out for that.
 // CHECK:      frame 9
-// CHECK:      edges 10 10 60 180 of 0 0 0 0 00404040
-// CHECK:      shade 760202 0.70
+// CHECK-NEXT: shade 000000 0.50
+// CHECK-NEXT: rect 0 0 300 200 00101010
+// CHECK-NEXT: shift {{[0-9.]+}} 0
+// CHECK-NEXT: shade 760202 0.70
 // CHECK-NEXT: rounded 80 10 194 180 by 14 8 0 0 ff30a350
 // CHECK-NEXT: write 90 20 in 174 "a text that goes on in the next line" 00a0b0c0
+// CHECK:      rect 10 10 60 180 00202020
+// The text in it goes its own way out with it, 30 down in half a
+// second: its `Leave` says it follows. It is apart in the card from then
+// on, as wide as it was, and the bar is where the text was.
+// CHECK:      frame 10
+// CHECK:      shift {{[0-9.]+}} 6
+// CHECK-NEXT: write 90 20 in 174 "a text that goes on in the next line" 00a0b0c0
+// CHECK:      rect 90 20 174 20 00505050
 // CHECK:      frame 11
 // CHECK:      rounded 80 10 210 180 by 18 8 0 0 ff30d150
-// CHECK-NEXT: write 90 20 in 190 "a text that goes on in the next line" 00a0b0c0
+// CHECK-NEXT: shift {{[0-9.]+}} 12
+// CHECK-NEXT: write 90 20 in 174 "a text that goes on in the next line" 00a0b0c0
 // CHECK:      edges 80 10 210 180 of 1 1 13 1 00ffffff
 // CHECK:      frame 13
 // CHECK:      shade 101010 1.00

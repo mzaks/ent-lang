@@ -85,10 +85,20 @@ component Transition {
 // it, on their way if they have a `Transition`), and it is destroyed,
 // with all that is in it or floats over that, when it has got there. (At
 // once without a `Transition` or a `Leave`.) The pointer does not find
-// it any more.
+// it any more. On its way it is drawn under the others in that box where
+// they come to be over it, among them where it was, or over them
+// (`order`). A box in it goes with it as it is; one whose own `Leave`
+// says `follows` goes its own way out at the same time.
 component Enter { dx: f32, dy: f32, dw: f32, dh: f32, colour: i32, always: bool }
-component Leave { dx: f32, dy: f32, dw: f32, dh: f32, colour: i32 }
+enum Exit { Under, Among, Over }
+component Leave {
+  dx: f32, dy: f32, dw: f32, dh: f32, colour: i32, order: Exit, follows: bool
+}
 tag Gone
+
+// A box that is outside the window where it is drawn, or outside what the
+// boxes it is in let show of it, is not drawn: unless this says `off`.
+unique Culling { off: bool }
 
 // A panel at the right of the window that lists the boxes, each under
 // the one it is in, and says all about the one the pointer is on, in the
@@ -137,6 +147,8 @@ component Eased {
   th: f32, colour: i32, tint: i32, part: f32, tc: f32
 }
 component Dead { at: i32 }
+// (A box that is on its way out.)
+component Going { at: i32 }
 // The line of the inspector's list a box is in, and whether it is in the
 // tree the list goes by: under the box it is in or floats over.
 component Listed { line: i32, tied: bool }
@@ -309,17 +321,42 @@ system animate() {
     e.add(Tint { colour: lv.colour, part: 0.0 })
   }
 
-  // A box that is to go takes no room from now on: it floats over the
-  // box it was in, where it is and as big as it is, and shows only where
-  // that one does.
-  for (e, b: Box, z: mut Size, lv: Leave)-[Inside]->(over, ob: Box)
-      with Gone, Transition without Float on added Gone {
-    for (e)-[was: Inside]->(up) { was.disconnect() }
+  // A box in a box that is on its way out goes its own way out too,
+  // where its `Leave` says it follows.
+  for (e, lv: Leave)-[Inside*]->(g: Going) with Transition without Gone
+      where lv.follows on changed g {
+    e.add(Gone)
+  }
+  // A box that is to go takes no room from now on: it is apart, where it
+  // is and as big as it is, in the box it was in the row of.
+  for (e, b: Box, z: mut Size, lv: Leave)-[Inside]->(ob: Box, ok: Stack),
+      optional (e)-[Inside]->(op: Pad),
+      optional (e)-[Inside]->(os: Scroll)
+      with Gone, Transition without Apart on added Gone {
+    var ox = ob.x + ok.pad
+    var oy = ob.y + ok.pad
+    if let left = op.left, let top = op.top {
+      ox = ob.x + left
+      oy = ob.y + top
+    }
+    if let sx = os.x, let sy = os.y {
+      ox += sx
+      oy += sy
+    }
     z.w = Sizing.Fixed
     z.h = Sizing.Fixed
-    e.add(Float { dx: b.x - ob.x, dy: b.y - ob.y })
-    e.add(Confined)
-    connect (e)-[Over]->(over)
+    e.add(Apart { dx: b.x - ox, dy: b.y - oy, next_x: 0.0, next_y: 0.0 })
+    e.add(Going { at: 0 })
+  }
+  // And is drawn before the others there, so under them where they come
+  // to be over it, or after them all, or where it was among them.
+  for sl: mut Slot, lv: Leave with Gone where lv.order != Exit.Among
+      on added Gone {
+    sl.at = if lv.order == Exit.Under { -1000000 } else { 1000000 }
+  }
+  for e, lv: Leave with Gone without Slot where lv.order != Exit.Among
+      on added Gone {
+    e.add(Slot { at: if lv.order == Exit.Under { -1000000 } else { 1000000 } })
   }
 
   // A box whose place, width, height or colours are no longer what they
@@ -731,10 +768,13 @@ system draw() {
         optional rc: Round, optional pic: Picture, optional own: Shown,
         optional sr: ShownRound, optional cu: Custom
         top down dfs Inside
-        where l.z == z && b.x < Window.width as f32 && b.x + b.w > 0.0 &&
-              b.y < Window.height as f32 && b.y + b.h > 0.0 &&
-              b.x < v.x + v.w && b.x + b.w > v.x &&
-              b.y < v.y + v.h && b.y + b.h > v.y {
+        where l.z == z &&
+              (Culling.off ||
+               (b.x + lk.dx < Window.width as f32 && b.x + lk.dx + b.w > 0.0 &&
+                b.y + lk.dy < Window.height as f32 &&
+                b.y + lk.dy + b.h > 0.0 &&
+                b.x + lk.dx < v.x + v.w && b.x + lk.dx + b.w > v.x &&
+                b.y + lk.dy < v.y + v.h && b.y + lk.dy + b.h > v.y)) {
       clip(v.x, v.y, v.w, v.h)
       // Where a box in a `Transition` is right now, and as big, with all
       // that is in it as far from its place; under what is laid on it,

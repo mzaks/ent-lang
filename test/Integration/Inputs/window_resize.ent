@@ -1,0 +1,53 @@
+// A window the user gives another size, and one that fills the screen:
+// what is laid out in it follows (window_resize.test).
+import console
+import window
+import layout
+
+tag Root
+tag Side
+tag Rest
+default_capacity 8
+
+world {
+  Window.width = 400
+  Window.height = 300
+  Window.resizable = true
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 10.0, gap: 10.0 }, Root
+  }
+  // A bar 100 wide, and the rest of the window.
+  let side = spawn {
+    Box { x: 0.0, y: 0.0, w: 100.0, h: 0.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 0.0 }, Side
+  }
+  let rest = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: false, pad: 0.0, gap: 0.0 }, Rest
+  }
+  connect (side)-[Inside]->(root)
+  connect (rest)-[Inside]->(root)
+}
+
+// The window's box is as big as the window, which is asked to fill the
+// screen in the fifth frame, and does in the sixth.
+system follow() {
+  Window.fullscreen = Window.frame == 5
+  for b: mut Box with Root {
+    b.w = Window.width as f32
+    b.h = Window.height as f32
+  }
+}
+
+system show() {
+  for b: Box with Rest {
+    put("{Window.frame}: window {Window.width} x {Window.height}, the rest {b.w} x {b.h} at {b.x}")
+  }
+}
+
+schedule frame() { begin()  follow()  layout()  show()  present() }
+main { loop { frame() } until Window.frame == 6 }

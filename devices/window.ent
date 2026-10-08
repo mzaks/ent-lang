@@ -17,13 +17,19 @@
 // Implemented with raylib (devices/window.c, devices/window.link).
 
 // `width`, `height` (800 by 450 if left 0) and `title` are read when the
-// window opens; `background` and `fps` every frame. `fps` is the frames
+// window opens, and whether the user can make it another size
+// (`resizable`); `background` and `fps` every frame. `fps` is the frames
 // per second to hold, which `present` waits for; 0 does not wait.
+// From then on `width` and `height` are how big the window is, every
+// frame: another size when the user has given it one, or when it fills
+// the screen, which it does for as long as `fullscreen` says so (set it
+// whenever; the window is as big as it was again after).
 // `closed` says that the user closed the window or pressed Escape. `dt`
 // is the seconds the previous frame took, `frame` the number of `begin`s.
 unique Window {
   width: i32, height: i32, title: text[62], background: i32, fps: i32,
-  open: bool, closed: bool, dt: f32, frame: i64
+  open: bool, closed: bool, dt: f32, frame: i64, resizable: bool,
+  fullscreen: bool
 }
 
 // Where the mouse is, and which of its buttons are down.
@@ -129,7 +135,12 @@ extern proc unclip()
 extern proc screenshot(file: text[126])
 
 // The device's own: what `begin` and `present` are made of.
-extern proc open_window(width: i32, height: i32, title: text[62])
+extern proc open_window(width: i32, height: i32, title: text[62],
+                        resizable: bool)
+extern proc window_width() -> i32
+extern proc window_height() -> i32
+// The window fills the screen, or is as it was: where that is not so yet.
+extern proc fill_screen(on: bool)
 extern proc should_close() -> bool
 extern proc frame_seconds() -> f32
 extern proc begin_frame(background: i32, fps: i32)
@@ -146,9 +157,12 @@ system begin() {
     let height = if Window.height > 0 { Window.height } else { 450 }
     Window.width = width
     Window.height = height
-    open_window(width, height, Window.title)
+    open_window(width, height, Window.title, Window.resizable)
     Window.open = true
   }
+  fill_screen(Window.fullscreen)
+  Window.width = window_width()
+  Window.height = window_height()
   Window.closed = should_close()
   Window.dt = frame_seconds()
   Window.frame += 1

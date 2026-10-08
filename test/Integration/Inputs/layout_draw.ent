@@ -64,7 +64,8 @@ world {
                    border_width: true, touch: false },
     Enter { dx: 0.0, dy: 40.0, dw: 0.0, dh: 0.0, colour: 0,
               always: true },
-    Leave { dx: 0.0, dy: 0.0, dw: 0.0, dh: 0.0, colour: 0x101010 }
+    Leave { dx: 0.0, dy: 0.0, dw: 0.0, dh: 0.0, colour: 0x101010,
+              order: Exit.Under, follows: false }
   }
   connect (card)-[Inside]->(root)
   let words = spawn {
@@ -79,7 +80,10 @@ world {
                  w: false, h: false, fill: false, overlay: false,
                  round: false, border_colour: false, border_width: false,
                  touch: false },
-    Enter { dx: 0.0, dy: -30.0, dw: 0.0, dh: 0.0, colour: 0, always: false }
+    Enter { dx: 0.0, dy: -30.0, dw: 0.0, dh: 0.0, colour: 0, always: false },
+    // (And it goes its own way out, 30 down, when the card goes.)
+    Leave { dx: 0.0, dy: 30.0, dw: 0.0, dh: 0.0, colour: 0,
+            order: Exit.Among, follows: true }
   }
   connect (words)-[Inside]->(card)
   // And a dot that floats over the text, at its top right corner.
@@ -114,6 +118,8 @@ system change() {
   Mouse.x = if Frame == 1 || Frame == 6 { 200.0 } else { 50.0 }
   Mouse.y = if Frame == 4 { 70.0 } else { 100.0 }
   Mouse.left = Frame == 3 || Frame == 4
+  // (In the second frame nothing is left out for being out of sight.)
+  Culling.off = Frame == 2
   for f: mut Fill with Card where Frame == 7 { f.colour = 0x30ff50 }
   for b: mut Box with List where Frame == 7 { b.w = 60.0 }
   // Its corners are rounder then, and the edge at its top thicker and

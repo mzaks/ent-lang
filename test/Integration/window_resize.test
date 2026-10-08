@@ -1,0 +1,21 @@
+// A window can be given another size by the user (`Window.resizable`),
+// and fills the screen while `Window.fullscreen` says so: `Window.width`
+// and `Window.height` are what it is, every frame, and what a program
+// lays out for them follows. With the window device that has no window
+// (it is "dragged" 100 wider and 60 higher in its third frame, and 1280
+// by 720 while it fills the screen).
+// RUN: mkdir -p %t.dir
+// RUN: cp %S/../../devices/window.ent %t.dir/window.ent
+// RUN: cp %S/Inputs/headless_window.c %t.dir/window.c
+// RUN: %ent run -I %t.dir -I %S/../../examples %S/Inputs/window_resize.ent \
+// RUN:     2>/dev/null | FileCheck %s
+
+// As it was opened: 400 less the bar, the padding and the gap.
+// CHECK:      1: window 400 x 300, the rest 270.0 x 280.0 at 120.0
+// CHECK-NEXT: 2: window 400 x 300, the rest 270.0 x 280.0 at 120.0
+// Another size.
+// CHECK-NEXT: 3: window 500 x 360, the rest 370.0 x 340.0 at 120.0
+// CHECK-NEXT: 4: window 500 x 360, the rest 370.0 x 340.0 at 120.0
+// The screen: asked for in a frame, it is so in the next.
+// CHECK-NEXT: 5: window 500 x 360, the rest 370.0 x 340.0 at 120.0
+// CHECK-NEXT: 6: window 1280 x 720, the rest 1150.0 x 700.0 at 120.0

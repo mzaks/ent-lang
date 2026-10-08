@@ -230,13 +230,17 @@ come with the compiler, in `devices/`, and two more that need
   `begin()` opens it, fills `Window`, `Mouse` and `Keys` and clears the
   picture; systems then draw with `rect`, `circle`, `sector`, `line`,
   `label` and `paragraph` (colours are `0xRRGGBB`); `present()` shows the frame and holds
-  `Window.fps`. `examples/bounce.ent` is a program with it:
+  `Window.fps`. The window can be given another size by the user
+  (`Window.resizable`) and fills the screen while `Window.fullscreen`
+  says so; `Window.width` and `Window.height` are what it is, every
+  frame. `examples/bounce.ent` is a program with it:
   `tools/ent run examples/bounce.ent`; `examples/orrery.ent` has moons
   around planets around a sun, each placed from where the body it circles
   is; `examples/layout_demo.ent` is a window of boxes inside boxes, laid
   out by the library `examples/layout.ent`, which sizes and places boxes
   as Clay does (fixed, fit, grow and percent sizes with limits, padding,
-  gaps, alignment, ratios, boxes that float, clip and scroll), in
+  gaps, alignment, ratios, boxes that float, clip and scroll, boxes that
+  are in a box but not in its row), for the window as big as it is, in
   reactive `for`s along a tree whose children are in an order, each
   running only where something it reads changed;
   `examples/layout_window.ent` measures the texts, draws (rounded
@@ -246,7 +250,7 @@ come with the compiler, in `devices/`, and two more that need
   where and what they are to be in so many seconds (`Transition`: place,
   size, colours, corners and border, each or not; with where a new box
   comes from and where one that goes away goes, which takes no room
-  while it does; how far along it is at each moment is a fn the
+  while it does and is drawn under, among or over the others there; how far along it is at each moment is a fn the
   `Transition` names, the library's or the program's), calls a proc of
   the program's for a box the program draws itself (`Custom`), lists
   the boxes in a panel (`Inspector`), and offers all the steps as one
