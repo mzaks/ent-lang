@@ -60,6 +60,30 @@ extern proc paragraph(text: text[126], x: f32, y: f32, width: f32, size: f32,
 extern fn text_min_width(text: text[126], size: f32) -> f32
 // How high `paragraph` draws a text of that size in that width.
 extern fn text_height(text: text[126], size: f32, width: f32) -> f32
+// Text set in lines, in a font: 0 is the window's own, others come from
+// `font`. `spacing` is more room between the letters, `line` how far
+// one line is below the one before (0: as far as the text is high).
+// `breaks` says where a text goes on in the next line: 0 where the next
+// word would reach past `width`, and at "\n"; 1 at "\n" only; 2
+// nowhere. `align` puts each line at the left (0), in the middle (1) or
+// at the right (2) of `width`.
+extern proc write(text: text[126], x: f32, y: f32, width: f32, font: i32,
+                  size: f32, spacing: f32, line: f32, breaks: i32, align: i32,
+                  color: i32)
+// How many lines `write` sets a text in.
+extern fn text_lines(text: text[126], width: f32, font: i32, size: f32,
+                     spacing: f32, breaks: i32) -> i32
+// How wide a text is where it has all the room it wants, and the least
+// width it can be set in: that of its longest word, line or all of it,
+// as `breaks` says.
+extern fn text_extent(text: text[126], font: i32, size: f32, spacing: f32,
+                      breaks: i32) -> f32
+extern fn text_least(text: text[126], font: i32, size: f32, spacing: f32,
+                     breaks: i32) -> f32
+// Reads a font from a file (.ttf, .otf) for texts `size` pixels high,
+// and gives its number; 0, the window's own, if it cannot. The window
+// must be open.
+extern proc font(file: text[126], size: i32) -> i32
 // Saves the picture as it is now (a .png) in the directory the program
 // runs in.
 extern proc screenshot(file: text[126])

@@ -1460,7 +1460,10 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
                << "; only 'changed' can be '" << direction << "' a tree";
       // (The sibling after is not visited first whichever way the query
       // goes: its events count like the entity's own, the next time.)
-      if (!after && getCascade() != trigger.via)
+      // (Nor is an ancestor along another tree than the query goes
+      // along, or along none: its events count the next time too.)
+      bool up = trigger.where == Trigger::Up;
+      if (!after && !up && getCascade() != trigger.via)
         return emitOpError("reacts to changed ")
                << trigger.component << " " << direction << " " << trigger.via
                << " without 'cascade " << trigger.via

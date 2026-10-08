@@ -8,9 +8,10 @@
 //
 // Hold the left mouse button to drag the side bar's edge; hold Space to
 // put the cards below one another. The text in a card goes on in the next
-// line where the card ends. A note floats at the mouse, over everything
-// else, with a mark that floats over its text. Escape or closing the
-// window ends the program.
+// line where the card ends. The entries and the buttons light up under
+// the mouse. A note floats at the mouse, over everything else, with a
+// mark that floats over its text; the pointer goes through them. Escape
+// or closing the window ends the program.
 import window
 import layout
 import layout_window
@@ -18,6 +19,8 @@ import layout_window
 tag SideBar
 tag Cards
 tag Note
+// A box that is another colour while the pointer is over it.
+component Shade { idle: i32, over: i32 }
 default_capacity 256
 
 world {
@@ -56,7 +59,7 @@ world {
       Stack { row: true, pad: 0.0, gap: 0.0 },
       Pad { left: 10.0, right: 10.0, top: 0.0, bottom: 0.0 },
       Align { x: Place.Start, y: Place.Middle },
-      Fill { colour: if i == 1 { 0x3a7bd5 } else { 0x2a3640 } },
+      Fill { colour: 0x2a3640 }, Shade { idle: 0x2a3640, over: 0x3a7bd5 },
       Text { text: "entry {i + 1}", size: 16.0, colour: 0xd0d8e0 }
     }
     connect (entry)-[Inside]->(side)
@@ -93,12 +96,24 @@ world {
       Size { w: Sizing.Fit, h: Sizing.Fit },
       Stack { row: true, pad: 0.0, gap: 0.0 },
       Pad { left: 12.0, right: 12.0, top: 7.0, bottom: 7.0 },
-      Fill { colour: 0x3a7bd5 },
+      Fill { colour: 0x3a7bd5 }, Shade { idle: 0x3a7bd5, over: 0x5a9bf5 },
       Text { text: if i == 0 { "open" } else if i == 1 { "save as" }
                    else if i == 2 { "undo" } else { "preferences" },
              size: 16.0, colour: 0xffffff }
     }
     connect (button)-[Inside]->(header)
+    // On the last one a dot, its middle on the button's top right
+    // corner.
+    if i == 3 {
+      let dot = spawn {
+        Box { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
+        Size { w: Sizing.Fixed, h: Sizing.Fixed },
+        Stack { row: true, pad: 0.0, gap: 0.0 }, Fill { colour: 0xe05040 },
+        Float { dx: 0.0, dy: 0.0 },
+        Attach { own: Point.Middle, under: Point.TopRight }, Passthrough
+      }
+      connect (dot)-[Over]->(button)
+    }
   }
 
   // A note that floats over the window, where the mouse is: as big as
@@ -107,13 +122,14 @@ world {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
     Size { w: Sizing.Fit, h: Sizing.Fit },
     Stack { row: true, pad: 4.0, gap: 0.0 }, Fill { colour: 0xf0e0a0 },
-    Float { dx: 0.0, dy: 0.0 }, Note
+    Float { dx: 0.0, dy: 0.0 }, Note, Passthrough
   }
   let line = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
     Size { w: Sizing.Fit, h: Sizing.Fit },
     Stack { row: true, pad: 2.0, gap: 0.0 },
-    Text { text: "a note that floats", size: 14.0, colour: 0x202020 }
+    Text { text: "a note that floats", size: 14.0, colour: 0x202020 },
+    Passthrough
   }
   connect (note)-[Over]->(root)
   connect (line)-[Inside]->(note)
@@ -123,7 +139,7 @@ world {
     Box { x: 0.0, y: 0.0, w: 8.0, h: 8.0 },
     Size { w: Sizing.Fixed, h: Sizing.Fixed },
     Stack { row: true, pad: 0.0, gap: 0.0 }, Fill { colour: 0xd04030 },
-    Float { dx: -6.0, dy: -6.0 }
+    Float { dx: -6.0, dy: -6.0 }, Passthrough
   }
   connect (mark)-[Over]->(line)
 
@@ -152,9 +168,12 @@ world {
       Stack { row: true, pad: 0.0, gap: 0.0 },
       Text { text: if i == 0 { "A card is as wide as its share of the room, and its text breaks where the card ends." }
                    else if i == 1 { "This one is never more than 260 wide; the others take what is left." }
-                   else { "Short." },
+                   else { "Short.\nTwo lines." },
              size: 16.0, colour: 0xa0b0c0 },
-      Wrap
+      TextStyle { font: 0, spacing: if i == 1 { 1.0 } else { 0.0 },
+                  line: if i == 1 { 22.0 } else { 0.0 },
+                  align: if i == 1 { Place.Middle } else { Place.Start },
+                  breaks: Breaks.Words }
     }
     connect (text)-[Inside]->(card)
     // And a bar that is half as wide as the card, at its bottom.
@@ -174,6 +193,10 @@ system interact() {
   }
   for k: mut Stack with Cards where k.row == Keys.space {
     k.row = !Keys.space
+  }
+  // What the pointer is over is lit.
+  for e, f: mut Fill, s: Shade {
+    f.colour = if e.has(Hovered) { s.over } else { s.idle }
   }
   // The note, a little off the mouse.
   for o: mut Float with Note

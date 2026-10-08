@@ -138,7 +138,9 @@ bool WorldLayout::cascadeFollows(QueryOp query, bool links) const {
       // The parent itself must be the ancestor the trigger means: the
       // relation's targets all have the component, or the refs to it are
       // to the parent and no further.
-      if (leavesFirst)
+      // (From the leaves a parent comes after its children; one along
+      // another tree is like anything else that changed.)
+      if (leavesFirst && trigger.via == cascade)
         return false;
       // By its rows a tree is followed from parent to child, where the
       // parent itself is the ancestor the trigger means: the tree's
@@ -476,6 +478,14 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       // (A cascading query that goes through its whole tree reads no
       // log.)
       bool scans = query.getCascade() && !layout.cascadeFollowsEvents(query);
+      // (Nor does one that matches no archetype, and never runs: a
+      // reader that never reads would make every log it has look full to
+      // the others.)
+      scans |= query.getCascade() &&
+               llvm::none_of(layout.archetypes,
+                             [&](const WorldArchetype &archetype) {
+                               return matches(query, archetype.op);
+                             });
       if (!log.exists() || scans) {
         positions.push_back(0);
         continue;

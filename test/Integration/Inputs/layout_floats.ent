@@ -1,0 +1,76 @@
+// Boxes that float, and the pointer (layout_floats.test).
+import console
+import layout
+
+component Name { name: text[14] }
+unique Frame: i32
+default_capacity 64
+
+world {
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 20.0, gap: 10.0 }, Name { name: "root" }
+  }
+  let panel = spawn {
+    Box { x: 0.0, y: 0.0, w: 200.0, h: 100.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "panel" }
+  }
+  connect (panel)-[Inside]->(root)
+  // Its middle on the panel's bottom right corner, and 3 further right.
+  let badge = spawn {
+    Box { x: 0.0, y: 0.0, w: 20.0, h: 10.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "badge" },
+    Float { dx: 3.0, dy: 0.0 },
+    Attach { own: Point.Middle, under: Point.BottomRight }
+  }
+  connect (badge)-[Over]->(panel)
+  // As big as the window, in layer 5; the pointer goes through it.
+  let veil = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "veil" },
+    Float { dx: 0.0, dy: 0.0 }, Raise { z: 5 }, Passthrough
+  }
+  connect (veil)-[Over]->(root)
+  // Half as wide as the panel and a quarter as high, under its bottom
+  // edge; and in it one that fills it.
+  let menu = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Percent, h: Sizing.Percent },
+    Stack { row: true, pad: 2.0, gap: 0.0 }, Name { name: "menu" },
+    Share { w: 0.5, h: 0.25 }, Float { dx: 0.0, dy: 0.0 },
+    Attach { own: Point.TopLeft, under: Point.BottomLeft },
+    Expand { w: 4.0, h: 4.0 }
+  }
+  connect (menu)-[Over]->(panel)
+  let item = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, Name { name: "item" }
+  }
+  connect (item)-[Inside]->(menu)
+}
+
+// The pointer: on the panel alone; on the menu, over the root; just
+// outside the menu, where it is 4 bigger than its box; and down. In the
+// fourth frame the panel is narrower: what floats over it goes with it.
+system change() {
+  Frame += 1
+  Pointer.x = if Frame == 1 { 100.0 } else if Frame == 2 { 60.0 } else { 122.0 }
+  Pointer.y = if Frame == 1 { 50.0 } else { 130.0 }
+  Pointer.down = Frame == 3
+  for b: mut Box, n: Name where Frame == 4 && n.name == "panel" { b.w = 100.0 }
+}
+
+system show() {
+  for e, b: Box, l: Layer, n: Name {
+    let state = if e.has(Pressed) { 2 } else if e.has(Hovered) { 1 } else { 0 }
+    put("{Frame}: {n.name} {b.x} {b.y} {b.w} {b.h} layer {l.z} pointer {state}")
+  }
+}
+
+schedule frame() { change()  layout()  point()  show() }
+main { loop { frame() } until Frame == 4 }

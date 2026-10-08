@@ -569,6 +569,11 @@ thereby passed down: the next time it runs that is no event.
   visited (the children `bottom up`, the parent `top down`).
   In a `for` that goes `top down` the children are visited after the
   node: their events count for it the next time it runs, like its own.
+- A binding along another tree than the one the `for` goes along (or of
+  a `for` that goes along none) has its events too,
+  `(e)-[Over]->(under: Box) ... on changed under.w`: they count the next
+  time the `for` runs, since nothing says which of the two is visited
+  first.
 - `changed` means changed: a write of the value a field has is no
   event. So passes that feed each other (as in `examples/layout.ent`,
   where sizes go up the tree and room comes down) settle by themselves,

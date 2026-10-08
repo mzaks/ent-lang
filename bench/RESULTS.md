@@ -2908,3 +2908,12 @@ library's own.
   order worked out are one function for all archetypes too (165,639).
 - What is left is mostly the calls of those functions, each given some
   fifty places in the world's memory for one archetype.
+- With floats that may be as big as the box under them (the size passes
+  in rounds) `bench/boxes` is at 31.7 - 32.2 us a frame. It was at
+  2,300 for a while: the library's `for` over the boxes that float
+  matches no archetype in this program and never runs, but was still
+  counted as a reader of the event logs of what it reacts to, which then
+  looked full to the passes that share them, and they went through
+  everything. A `for` along a tree that never runs reads no log now.
+  (`point`, which asks every box whether the pointer is over it, costs
+  some 9 ns a box and is not part of `layout`.)

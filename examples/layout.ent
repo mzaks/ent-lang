@@ -53,9 +53,34 @@ component Aspect { ratio: f32 }
 // `layout_heights` (examples/layout_window.ent does, for texts).
 component Natural { w: f32, min_w: f32, h: f32 }
 
-// A box that floats over another: so far from that one's corner, in
-// nobody's row, and with all that is inside it a layer above.
+// A box that floats over another (`Over`): in nobody's row, and with all
+// that is inside it a layer above. So far from that one's corner, or
+// from one point of it to one of its own (`Attach`): corners, the middles
+// of the sides, the middle. If it grows it is as big as the box it floats
+// over, and a share of it if that is how it is sized.
 component Float { dx: f32, dy: f32 }
+enum Point {
+  TopLeft, MiddleLeft, BottomLeft, TopMiddle, Middle, BottomMiddle,
+  TopRight, MiddleRight, BottomRight
+}
+component Attach { own: Point, under: Point }
+// A layer of its own choosing, if that is higher than the one above the
+// box it floats over.
+component Raise { z: i32 }
+// So much more on every side than its box, for what draws it and for the
+// pointer; the boxes inside it stay where they are.
+component Expand { w: f32, h: f32 }
+
+// The pointer, which a program sets (examples/layout_window.ent, from the
+// mouse), and what `point` makes of it: the boxes it is over have
+// `Hovered`, and `Pressed` while it is down. Of the boxes it is over,
+// those in the topmost layer: what floats takes the pointer from what is
+// under it, unless it has `Passthrough`.
+unique Pointer { x: f32, y: f32, down: bool }
+unique PointerTop: i32
+tag Hovered
+tag Pressed
+tag Passthrough
 
 // Where a box comes among those in the same box: smaller first. Boxes
 // without one, or with the same, are in the order they were made.
@@ -99,16 +124,22 @@ system layout_widths() {
     e.add(Layer { z: 0 })
   }
 
+  // (In rounds: a box that floats may be as wide as the one it floats
+  // over, which is known when that one has got its width.)
+  loop {
   // By its content: the boxes inside it added up along a row, the widest
   // of them in a column, with gaps and padding; or its own content, if
   // that is wider. Within its limits, and the least it can shrink to the
   // same way from theirs.
+  let fitted =
   for (e, b: Box, s: Size, k: Stack, f: mut FitW, t: mut Sums,
        optional p: Pad, optional l: Limits, optional sh: Share,
-       optional own: Natural)
+       optional own: Natural),
+      optional (e)-[Over]->(under: Box)
       bottom up Inside
       on changed s.w, changed k, changed p, changed l, changed sh,
-         changed own, changed b.w, changed (: FitW)-[Inside]->(e) {
+         changed own, changed b.w, changed under.w,
+         changed (: FitW)-[Inside]->(e) {
     t.a = 0.0
     t.b = 0.0
     t.c = 0.0
@@ -145,12 +176,23 @@ system layout_widths() {
       least = min(max(least, lo), hi)
       if s.w == Sizing.Percent { fit = 0.0 }
     }
+    var share = 0.0
+    if let given = sh.w { share = given }
+    var kind = s.w
+    // (Floating: as wide as the box under it, or a share of it.)
+    if let wide = under.w {
+      if s.w == Sizing.Grow || s.w == Sizing.Percent {
+        fit = if s.w == Sizing.Grow { wide } else { wide * share }
+        least = fit
+        hi = fit
+        kind = Sizing.Fixed
+      }
+    }
     f.fit = fit
     f.min = least
     f.max = hi
-    f.share = 0.0
-    if let share = sh.w { f.share = share }
-    f.kind = s.w
+    f.share = share
+    f.kind = kind
   }
 
   // What it gets: the size it came to, or a share of the box it is in;
@@ -158,6 +200,7 @@ system layout_widths() {
   // into the room that is left or shrink to fit, and across it no more
   // than the room there is (all of it, if it grows). Then the same is
   // worked out for the boxes inside it, which come after it.
+  let sized =
   for (e, b: mut Box, f: FitW, k: Stack, r: mut RoomW, t: mut Sums,
        optional p: Pad),
       optional (e)-[Inside]->(ob: Box, ok: Stack, oroom: RoomW)
@@ -299,6 +342,7 @@ system layout_widths() {
     r.level = level
     r.extent = extent
   }
+  } until fitted + sized == 0
 }
 
 // The heights, the same way, and then where each box is.
@@ -307,12 +351,15 @@ system layout_heights() {
   // column, the highest of them in a row; or its own content, which may
   // have got its height from the width the box has now. A box that keeps
   // a ratio is as high as its width says, and stays so.
+  loop {
+  let fitted =
   for (e, b: Box, s: Size, k: Stack, f: mut FitH, t: mut Sums,
        optional p: Pad, optional l: Limits, optional sh: Share,
-       optional own: Natural, optional keeps: Aspect)
+       optional own: Natural, optional keeps: Aspect),
+      optional (e)-[Over]->(under: Box)
       bottom up Inside
       on changed s.h, changed k, changed p, changed l, changed sh,
-         changed own, changed keeps, changed b,
+         changed own, changed keeps, changed b, changed under.h,
          changed (: FitH)-[Inside]->(e) {
     t.a = 0.0
     t.b = 0.0
@@ -359,15 +406,25 @@ system layout_heights() {
         kind = Sizing.Fixed
       }
     }
+    var share = 0.0
+    if let given = sh.h { share = given }
+    if let high = under.h {
+      if s.h == Sizing.Grow || s.h == Sizing.Percent {
+        fit = if s.h == Sizing.Grow { high } else { high * share }
+        least = fit
+        hi = fit
+        kind = Sizing.Fixed
+      }
+    }
     f.fit = fit
     f.min = least
     f.max = hi
-    f.share = 0.0
-    if let share = sh.h { f.share = share }
+    f.share = share
     f.kind = kind
   }
 
   // What it gets, as the widths, with columns for rows.
+  let sized =
   for (e, b: mut Box, f: FitH, k: Stack, r: mut RoomH, t: mut Sums,
        optional p: Pad),
       optional (e)-[Inside]->(ob: Box, ok: Stack, oroom: RoomH)
@@ -509,6 +566,7 @@ system layout_heights() {
     r.level = level
     r.extent = extent
   }
+  } until fitted + sized == 0
 
   // Placing and floating take turns: a box that floats is put where the
   // box under it is, which must have been placed; and what is inside it
@@ -563,18 +621,68 @@ system layout_heights() {
     }
 
     // A box that floats is so far from the corner of the one it floats
-    // over, which has just been placed, and a layer above it.
+    // over, which has just been placed (or from the point of that one it
+    // is attached to, to its own), and a layer above it, or in the layer
+    // it asks for if that is higher.
     let floated =
-    for (f: mut Box, o: Float, l: mut Layer)-[Over]->(under: Box, ul: Layer)
+    for (f: mut Box, o: Float, l: mut Layer, optional at: Attach,
+         optional up: Raise)
+            -[Over]->(under: Box, ul: Layer)
         top down Over
-        on changed o, changed under.x, changed under.y, changed ul {
-      let x = under.x + o.dx
-      let y = under.y + o.dy
+        on changed o, changed at, changed up, changed f.w, changed f.h,
+           changed under, changed ul {
+      var x = under.x + o.dx
+      var y = under.y + o.dy
+      if let mine = at.own, let theirs = at.under {
+        let m = mine as i32
+        let u = theirs as i32
+        x += under.w * 0.5 * (u / 3) as f32 - f.w * 0.5 * (m / 3) as f32
+        y += under.h * 0.5 * (u % 3) as f32 - f.h * 0.5 * (m % 3) as f32
+      }
       f.x = x
       f.y = y
-      l.z = ul.z + 1
+      var z = ul.z + 1
+      if let asked = up.z { z = max(z, asked) }
+      l.z = z
     }
   } until placed + floated == 0
+}
+
+// Which boxes the pointer is over: after they have been placed. (Not a
+// part of `layout`: it asks every box, every time, which a program
+// without a pointer need not pay for.)
+system point() {
+  PointerTop = -1
+  for b: Box, l: Layer, optional more: Expand without Passthrough {
+    var ew = 0.0
+    var eh = 0.0
+    if let w = more.w, let h = more.h {
+      ew = w
+      eh = h
+    }
+    if Pointer.x >= b.x - ew && Pointer.x < b.x + b.w + ew &&
+       Pointer.y >= b.y - eh && Pointer.y < b.y + b.h + eh {
+      PointerTop max= l.z
+    }
+  }
+  for e, b: Box, l: Layer, optional more: Expand {
+    var ew = 0.0
+    var eh = 0.0
+    if let w = more.w, let h = more.h {
+      ew = w
+      eh = h
+    }
+    let over = Pointer.x >= b.x - ew && Pointer.x < b.x + b.w + ew &&
+               Pointer.y >= b.y - eh && Pointer.y < b.y + b.h + eh &&
+               l.z >= PointerTop && !e.has(Passthrough)
+    if over != e.has(Hovered) {
+      if over { e.add(Hovered) } else { e.remove(Hovered) }
+    }
+    let pressed = over && Pointer.down
+    if pressed != e.has(Pressed) {
+      if pressed { e.add(Pressed) } else { e.remove(Pressed) }
+    }
+  }
 }
 
 // All of it. (A program that has texts, whose heights follow from their

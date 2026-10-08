@@ -13,35 +13,74 @@ import layout
 // A box that is filled with a colour.
 component Fill { colour: i32 }
 
-// A box that says something: a line of text `size` pixels high. Its box
-// is at least as big as the text and its padding (where it is not
-// `Fixed`), and the text stands in it where the box's own `Align` says.
-component Text { text: text[126], size: f32, colour: i32 }
-// A text that goes on in the next line where its box ends: the box can
+// A box that says something: a text `size` pixels high. Its box is at
+// least as big as the text and its padding (where it is not `Fixed`).
+// The text goes on in the next line where its box ends, so the box can
 // be as narrow as the longest word, and is as high as the lines come to.
-tag Wrap
+component Text { text: text[126], size: f32, colour: i32 }
+// More about a text: its font (0: the window's own; others from the
+// window's `font`), more room between the letters, how far one line is
+// below the one before (0: as far as the text is high), where each line
+// stands in the box, and where the text goes on in the next line: where
+// a word would reach past the box and at "\n" (`Words`, as without
+// this), at "\n" only, or nowhere.
+enum Breaks { Words, Lines, Nowhere }
+component TextStyle {
+  font: i32, spacing: f32, line: f32, align: Place, breaks: Breaks
+}
+
+// The pointer is the mouse.
+system pointer() {
+  Pointer.x = Mouse.x
+  Pointer.y = Mouse.y
+  Pointer.down = Mouse.left
+}
 
 // How big each text is: when it is new or says something else.
 system measure() {
   for e, t: Text without Natural on added Text {
     e.add(Natural { w: 0.0, min_w: 0.0, h: 0.0 })
   }
-  for e, t: Text, n: mut Natural on changed t, added Natural {
-    let w = text_width(t.text, t.size)
-    n.w = w
-    n.min_w = if e.has(Wrap) { text_min_width(t.text, t.size) } else { w }
-    n.h = t.size
+  for t: Text, n: mut Natural, optional st: TextStyle
+      on changed t, changed st, added Natural {
+    var font = 0
+    var spacing = 0.0
+    var breaks = 0
+    var line = t.size
+    if let f = st.font, let sp = st.spacing, let br = st.breaks,
+       let high = st.line {
+      font = f
+      spacing = sp
+      breaks = br as i32
+      if high > 0.0 { line = high }
+    }
+    n.w = text_extent(t.text, font, t.size, spacing, breaks)
+    n.min_w = text_least(t.text, font, t.size, spacing, breaks)
+    n.h = line
   }
 }
 
-// A text that goes on in the next line is as high as its lines come to in
-// the width `layout_widths` gave its box.
+// A text is as high as its lines come to in the width `layout_widths`
+// gave its box.
 system wrap() {
-  for b: Box, t: Text, k: Stack, n: mut Natural, optional p: Pad with Wrap
-      on changed b.w, changed t, changed k, changed p {
+  for b: Box, t: Text, k: Stack, n: mut Natural, optional p: Pad,
+      optional st: TextStyle
+      on changed b.w, changed t, changed k, changed p, changed st {
     var pads = 2.0 * k.pad
     if let left = p.left, let right = p.right { pads = left + right }
-    let h = text_height(t.text, t.size, b.w - pads)
+    var font = 0
+    var spacing = 0.0
+    var breaks = 0
+    var line = t.size
+    if let f = st.font, let sp = st.spacing, let br = st.breaks,
+       let high = st.line {
+      font = f
+      spacing = sp
+      breaks = br as i32
+      if high > 0.0 { line = high }
+    }
+    let lines = text_lines(t.text, b.w - pads, font, t.size, spacing, breaks)
+    let h = line * (lines - 1) as f32 + t.size
     n.h = h
   }
 }
@@ -51,10 +90,22 @@ system wrap() {
 // layer above, drawn after all of the layer below.
 system draw() {
   for z in 0..8 {
-    for e, b: Box, l: Layer, optional f: Fill, optional t: Text,
-        optional k: Stack, optional p: Pad, optional how: Align
-        top down dfs Inside where l.z == z {
-      if let colour = f.colour { rect(b.x, b.y, b.w, b.h, colour) }
+    // (Not what is outside the window.)
+    for b: Box, l: Layer, optional f: Fill, optional t: Text,
+        optional k: Stack, optional p: Pad, optional how: Align,
+        optional st: TextStyle, optional more: Expand
+        top down dfs Inside
+        where l.z == z && b.x < Window.width as f32 && b.x + b.w > 0.0 &&
+              b.y < Window.height as f32 && b.y + b.h > 0.0 {
+      if let colour = f.colour {
+        var ew = 0.0
+        var eh = 0.0
+        if let w = more.w, let h = more.h {
+          ew = w
+          eh = h
+        }
+        rect(b.x - ew, b.y - eh, b.w + 2.0 * ew, b.h + 2.0 * eh, colour)
+      }
       if let said = t.text, let size = t.size, let ink = t.colour {
         var left = 0.0
         var right = 0.0
@@ -73,30 +124,34 @@ system draw() {
           top = pt
           bottom = pb
         }
+        // Each line where the text's own style says, or else where the
+        // box puts what is in it; all of it at the top, in the middle
+        // or at the bottom, as the box says.
+        var along = 0
+        var fy = 0.0
+        if let ax = how.x, let ay = how.y {
+          along = ax as i32
+          if ay == Place.Middle { fy = 0.5 }
+          if ay == Place.End { fy = 1.0 }
+        }
+        var font = 0
+        var spacing = 0.0
+        var breaks = 0
+        var line = size
+        if let f = st.font, let sp = st.spacing, let br = st.breaks,
+           let high = st.line, let where = st.align {
+          font = f
+          spacing = sp
+          breaks = br as i32
+          if high > 0.0 { line = high }
+          along = where as i32
+        }
         let room_w = b.w - left - right
         let room_h = b.h - top - bottom
-        if e.has(Wrap) {
-          let high = text_height(said, size, room_w)
-          var fy = 0.0
-          if let ay = how.y {
-            if ay == Place.Middle { fy = 0.5 }
-            if ay == Place.End { fy = 1.0 }
-          }
-          paragraph(said, b.x + left, b.y + top + (room_h - high) * fy,
-                    room_w, size, ink)
-        } else {
-          var fx = 0.0
-          var fy = 0.0
-          if let ax = how.x, let ay = how.y {
-            if ax == Place.Middle { fx = 0.5 }
-            if ax == Place.End { fx = 1.0 }
-            if ay == Place.Middle { fy = 0.5 }
-            if ay == Place.End { fy = 1.0 }
-          }
-          let wide = text_width(said, size)
-          label(said, b.x + left + (room_w - wide) * fx,
-                b.y + top + (room_h - size) * fy, size, ink)
-        }
+        let lines = text_lines(said, room_w, font, size, spacing, breaks)
+        let high = line * (lines - 1) as f32 + size
+        write(said, b.x + left, b.y + top + (room_h - high) * fy, room_w,
+              font, size, spacing, line, breaks, along, ink)
       }
     }
   }
@@ -104,9 +159,11 @@ system draw() {
 
 // The whole of it, between the window's `begin` and `present`.
 schedule ui() {
+  pointer()
   measure()
   layout_widths()
   wrap()
   layout_heights()
+  point()
   draw()
 }

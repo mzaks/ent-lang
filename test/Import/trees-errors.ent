@@ -133,17 +133,6 @@ component Body { x: f32 }
 relation (Body)-[Orbits]->(Body) tree capacity 8
 default_capacity 8
 system s() {
-  // expected-error @+1 {{reacts to changed @Body up @Orbits without 'cascade @Orbits'}}
-  for (b: Body)-[Orbits]->(p: Body) on changed p {
-  }
-}
-
-// -----
-
-component Body { x: f32 }
-relation (Body)-[Orbits]->(Body) tree capacity 8
-default_capacity 8
-system s() {
   // expected-error @+1 {{only 'changed' can be asked of another entity}}
   for (b: Body)-[Orbits]->(p: Body) top down Orbits on added p {
   }

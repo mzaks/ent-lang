@@ -32,6 +32,9 @@ static MemRefType getArenaType(MLIRContext *context,
                          IntegerType::get(context, 8));
 }
 
+/// Marks, while a function is lowered, the ops a query became.
+static const char kScopeAttr[] = "ent.scope";
+
 namespace {
 
 /// Access to the world inside one lowered function. Entity counts and
@@ -2347,7 +2350,10 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
         // did to it the last time has not been taken in, and counts.)
         fires(arith::CmpIOp::create(
             rewriter, loc, arith::CmpIPredicate::sgt, stamped,
-            trigger.where == Trigger::After ? seen : passed));
+            trigger.where == Trigger::After ||
+                    trigger.via != query.getCascade()
+                ? seen
+                : passed));
       }
   }
   // A trigger down a tree: an event of one of the entity's children,
@@ -3547,24 +3553,43 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
                          const WorldLayout &layout, WorldAccess &world) {
   SmallVector<LookupOp> lookups;
   func.walk([&](LookupOp lookup) { lookups.push_back(lookup); });
-  if (lookups.empty())
+  if (lookups.empty()) {
+    func.walk([](Operation *op) { op->removeAttr(kScopeAttr); });
     return;
+  }
   // Lookups of several fields of one component of one entity find the
   // entity once, where the first of them stands, and read all the fields
   // there: finding it is most of what a lookup costs, in time and in
   // code. Only where that one is before the others whatever happens, and
   // nothing between could have written the component (nothing does in
   // the loop they are in).
+  // (The loop they are in: what one query became, which is marked, or
+  // else what is around them in the function's body.)
   auto scopeOf = [&](Operation *op) {
-    while (op->getParentOp() != func.getOperation())
+    while (!op->hasAttr(kScopeAttr) &&
+           op->getParentOp() != func.getOperation())
       op = op->getParentOp();
-    return op;
+    if (!op->hasAttr(kScopeAttr))
+      return op;
+    // (The first of those with its mark, for all of them.)
+    Operation *first = op;
+    while (first->getPrevNode() &&
+           first->getPrevNode()->getAttr(kScopeAttr) ==
+               op->getAttr(kScopeAttr))
+      first = first->getPrevNode();
+    return first;
   };
   llvm::DenseMap<std::pair<Operation *, Attribute>, bool> written;
-  auto writes = [&](Operation *scope, FlatSymbolRefAttr component) {
-    auto [entry, isNew] = written.insert({{scope, component}, false});
+  auto writes = [&](Operation *first, FlatSymbolRefAttr component) {
+    auto [entry, isNew] = written.insert({{first, component}, false});
     if (!isNew)
       return entry->second;
+    SmallVector<Operation *> scopes{first};
+    if (Attribute mark = first->getAttr(kScopeAttr))
+      for (Operation *next = first->getNextNode();
+           next && next->getAttr(kScopeAttr) == mark;
+           next = next->getNextNode())
+        scopes.push_back(next);
     llvm::DenseSet<Value> columns;
     for (const WorldArchetype &archetype : layout.archetypes)
       for (const WorldColumn &column : archetype.columns)
@@ -3572,15 +3597,17 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
           columns.insert(
               world.column(archetype, column.component, column.field));
     bool any = false;
-    scope->walk([&](memref::StoreOp store) {
-      any |= columns.contains(store.getMemRef());
-    });
-    // (Or what is not lowered yet may: a combine into another entity.)
-    scope->walk([&](Operation *op) {
-      if (auto apply = dyn_cast<ApplyOp>(op))
-        any |= apply.getComponentAttr() == component;
-    });
-    return written[{scope, component}] = any;
+    for (Operation *scope : scopes) {
+      scope->walk([&](memref::StoreOp store) {
+        any |= columns.contains(store.getMemRef());
+      });
+      // (Or what is not lowered yet may: a combine into another entity.)
+      scope->walk([&](Operation *op) {
+        if (auto apply = dyn_cast<ApplyOp>(op))
+          any |= apply.getComponentAttr() == component;
+      });
+    }
+    return written[{first, component}] = any;
   };
   DominanceInfo dominance(func);
   SmallVector<SmallVector<LookupOp, 4>> groups;
@@ -3655,6 +3682,7 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
     for (auto [lookup, value] : llvm::zip(group, converted))
       rewriter.replaceOp(lookup, {value, results.back()});
   }
+  func.walk([](Operation *op) { op->removeAttr(kScopeAttr); });
 }
 
 /// `a ⊕ b` under an apply's rule; min and max are signed for integers and
@@ -11250,8 +11278,19 @@ struct EntLowerToLoops
                      layout->getRelation(cast<StringAttr>(relation)), arena);
         }
       }
-      for (QueryOp query : queries)
+      // (What each query becomes is marked as its own: lookups are
+      // merged within it, see lowerLookups.)
+      int64_t scope = 0;
+      for (QueryOp query : queries) {
+        Block *block = query->getBlock();
+        Operation *before = query->getPrevNode();
+        Operation *after = query->getNextNode();
         lowerQuery(rewriter, query, *layout, world, options);
+        ++scope;
+        for (Operation *op = before ? before->getNextNode() : &block->front();
+             op && op != after; op = op->getNextNode())
+          op->setAttr(kScopeAttr, rewriter.getI64IntegerAttr(scope));
+      }
       lowerSpawns(rewriter, func, *layout, world);
       lowerConnects(rewriter, func, *layout, world);
       // Innermost first, so an outer `if` sees merged inner ones.
