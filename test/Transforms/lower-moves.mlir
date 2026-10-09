@@ -44,7 +44,7 @@ ent.archetype @E2 (@M, @N) capacity 10
 // CHECK:      scf.for
 // CHECK:        scf.if
 // CHECK-NOT:    scf.if
-// CHECK:          cf.assert %{{.*}}, "moving an entity exceeds the capacity of @E2"
+// CHECK:          cf.assert %{{.*}}, "no room for another entity: moving an entity exceeds the capacity of @E2 (10); 'capacity' gives more"
 // CHECK:          memref.store %{{.*}}, %[[E2_M]]
 // CHECK:          %[[N:.*]] = memref.load %[[VALUES]]
 // CHECK-NEXT:     memref.store %[[N]], %[[E2_N]]

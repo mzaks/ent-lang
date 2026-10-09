@@ -944,6 +944,11 @@ struct LoopOptions {
   /// since what an entity of the query costs is that many times more.
   int64_t innerCapacity = 0;
   Value innerRows = Value();
+  /// How much one entity's turn is, against one that only computes with
+  /// what lies in its columns: a body that calls out (an extern fn: a
+  /// sine, a root) is not done sixteen entities at a time, and is worth
+  /// sharing out from far fewer entities on.
+  int64_t bodyWeight = 1;
 };
 
 } // namespace
@@ -1079,7 +1084,8 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
   // (With a `for` over other entities in the body, the work is the two
   // numbers multiplied.)
   int64_t most = int64_t(archetype.capacity) *
-                 std::max<int64_t>(1, options.innerCapacity);
+                 std::max<int64_t>(1, options.innerCapacity) *
+                 options.bodyWeight;
   if (!options.parallelEntities || !entityLocal ||
       most < options.parallelMinEntities)
     return emitSequential();
@@ -1093,6 +1099,10 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
                                            options.innerRows)
                          .getResult()
                    : count;
+  if (options.bodyWeight > 1)
+    work = arith::MulIOp::create(
+        rewriter, loc, work,
+        arith::ConstantIndexOp::create(rewriter, loc, options.bodyWeight));
   Value large = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
                                       work, threshold);
   auto branch = scf::IfOp::create(rewriter, loc, large,
@@ -3208,8 +3218,11 @@ static void applyMove(IRRewriter &rewriter, Location loc,
       rewriter, loc,
       arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, to,
                             capacity),
-      rewriter.getStringAttr("moving an entity exceeds the capacity of @" +
-                             targetOp.getSymName()));
+      rewriter.getStringAttr(
+          "no room for another entity: moving an entity exceeds the "
+          "capacity of @" +
+          targetOp.getSymName() + " (" + Twine(target->capacity) +
+          "); 'capacity' gives more"));
   for (const WorldColumn &column : target->columns) {
     auto component = FlatSymbolRefAttr::get(column.component);
     Value value;
@@ -3535,8 +3548,10 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
                                        row, capacity);
     cf::AssertOp::create(
         rewriter, loc, fits,
-        rewriter.getStringAttr("ent.spawn exceeds the capacity of @" +
-                               spawn.getArchetypeAttr().getValue()));
+        rewriter.getStringAttr(
+            "no room for another entity: ent.spawn exceeds the capacity of @" +
+            spawn.getArchetypeAttr().getValue() + " (" +
+            Twine(archetype->capacity) + "); 'capacity' gives more"));
     ArchetypeOp archetypeOp = archetype->op;
     // Where each component the entity starts with finds its values: in the
     // order the spawn lists them, or the archetype holds them.
@@ -11053,6 +11068,15 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // each is loops that read columns. (How many those entities are says
   // from how many of its own the query is worth running in parallel.)
   LoopOptions options = given;
+  // (Calls out of the body, for each entity: see `bodyWeight`.)
+  query.walk([&](InvokeOp invoke) {
+    if (invoke->getParentOfType<EachOp>())
+      return;
+    auto callee = SymbolTable::lookupNearestSymbolFrom<FunctionOp>(
+        invoke, invoke.getCalleeAttr());
+    if (callee && !callee.isDefined())
+      options.bodyWeight += 32;
+  });
   SmallVector<EachOp> eaches;
   query.walk([&](EachOp each) { eaches.push_back(each); });
   for (EachOp each : eaches) {

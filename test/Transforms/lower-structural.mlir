@@ -97,7 +97,7 @@ ent.system @age(%dt: f32) writes [@L, @Bullet] {
 // CHECK:      %[[ROWI:.*]] = arith.index_cast %{{.*}} : i64 to index
 // CHECK-NEXT: %[[CAP:.*]] = arith.constant 100 : index
 // CHECK-NEXT: %[[FITS:.*]] = arith.cmpi ult, %[[ROWI]], %[[CAP]] : index
-// CHECK-NEXT: cf.assert %[[FITS]], "ent.spawn exceeds the capacity of @Bullet"
+// CHECK-NEXT: cf.assert %[[FITS]], "no room for another entity: ent.spawn exceeds the capacity of @Bullet (100); 'capacity' gives more"
 // CHECK-NEXT: memref.store %[[X]], %{{.*}}[%[[ROWI]]] : memref<100xf32>
 // CHECK-NEXT: memref.store %{{.*}}, %{{.*}}[%[[ROWI]]] : memref<100xf32>
 // CHECK-NEXT: %[[ABSENT:.*]] = arith.constant 0 : i8

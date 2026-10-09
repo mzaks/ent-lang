@@ -1,0 +1,679 @@
+// Swarm: a shoot-'em-up on a field much bigger than the window, with
+// foes, shots and sparks in their thousands.
+//
+//   tools/ent run --parallel -I examples examples/swarm/swarm.ent
+//
+// (`--parallel`: on all the cores. With KMP_BLOCKTIME=0 before it the
+// cores that wait sleep, which leaves the one that draws faster.)
+//
+// W A S D (or the arrows) move, the mouse aims and the hero shoots where
+// it points. What falls leaves a gem; gems make the hero stronger (more
+// shots at once, sooner). Enter starts, and starts again after a fall.
+// F fills the screen, M turns the sound off, and B is the stress: the
+// field filled to what it holds and the hero shooting rings, to see what
+// the machine makes of it (the numbers are at the top left).
+//
+// What it is made of, and what it asks of the language:
+//
+// - Everything that moves is an entity: up to 250,000 foes, 16,000
+//   shots, 60,000 bolts (what the spitters shoot), 100,000 gems and
+//   100,000 sparks. Most systems are a `for` over one kind that touches only its
+//   own entity, which `--parallel` shares out over the cores.
+// - Which shot hits which foe is a `for` inside a `for`: every foe
+//   against every shot, and every shot against every foe. That is the
+//   expensive part, so only the foes near the hero take part: a foe that
+//   comes into the shots' reach is given the tag `Close`, which moves it
+//   to an archetype of its own, and the two `for`s go over that one.
+// - The kinds of foes are a table, and a foe holds its kind's row.
+// - The music is four pieces, declared as assets: one for the title, one
+//   for the fight, one when the swarm is thick, and one heard once when
+//   the hero falls. One goes quiet under the next.
+import window
+import sound
+import math
+
+asset calm = "music/calm.ogg"
+asset fight = "music/fight.ogg"
+asset frenzy = "music/frenzy.ogg"
+asset fall = "music/fall.ogg"
+
+enum State { Title, Playing, Fallen }
+enum Breed { Mite, Wasp, Hulk, Spitter }
+
+// The foes by their breed: what one takes before it falls, how far it
+// goes in a second, how big it is, what its touch costs the hero in a
+// second, its colour, what its gem is worth, and whether it shoots.
+table breeds[Breed] {
+  life: f32, pace: f32, girth: f32, harm: f32, hue: i32, worth: i32,
+  spits: bool
+} = [
+  Mite:    { life: 10.0, pace: 95.0, girth: 9.0, harm: 8.0, hue: 0x7fd36b,
+             worth: 1, spits: false },
+  Wasp:    { life: 6.0, pace: 175.0, girth: 7.0, harm: 6.0, hue: 0xf2d14b,
+             worth: 1, spits: false },
+  Hulk:    { life: 90.0, pace: 55.0, girth: 20.0, harm: 25.0, hue: 0xb277e8,
+             worth: 5, spits: false },
+  Spitter: { life: 22.0, pace: 80.0, girth: 11.0, harm: 5.0, hue: 0xf0825a,
+             worth: 3, spits: true }
+]
+
+// Where something is on the field, and where it goes in a second.
+component At { x: f32, y: f32 } capacity 262144
+component Dir { dx: f32, dy: f32 } capacity 262144
+
+// A foe: its breed's row, how long until it may shoot again, the side it
+// comes round the hero by, and its number (the map shows every 64th).
+component Foe { breed: row of breeds, cool: f32, lane: f32, lot: i32 } capacity 250000
+component Health { hp: f32 } capacity 250000
+// How near a shot has to come to hit it: its breed's girth and a little,
+// kept with the foe. (The `for` that holds every shot against every foe
+// reads it for each pair: a number that lies in a column of its own is
+// read sixteen at a time, one that is looked up in the breed's row one
+// by one, which made that `for` sixty times as slow.)
+component Size { touch: f32 } capacity 250000
+// A foe in the reach of the hero's shots is `Close`. Close foes are an
+// archetype of their own, declared: the shots are held against these
+// only, in a `for` that goes over all of them for every shot, and so
+// they lie one after another. (Left to itself the compiler keeps a tag
+// that comes and goes in place, as a byte with each foe: cheap to give
+// and take, but a `for` over the close ones then walks every foe.)
+tag Close capacity 250000
+archetype Roaming { Foe, Health, Size, At } capacity 250000
+archetype Closing { Foe, Health, Size, At, Close } capacity 250000
+
+// The hero's shot: how long it still flies, and that it hit something.
+component Shot { left: f32, spent: bool } capacity 16000
+// A spitter's bolt.
+component Bolt { left: f32 } capacity 60000
+// What a foe leaves, and what flies off it.
+component Gem { worth: i32 } capacity 100000
+component Spark { left: f32, hue: i32 } capacity 100000
+
+unique Game {
+  state: State, time: f32, score: i32, kills: i32, stress: bool,
+  owed: f32, made: i32, sung: bool, thick: bool
+}
+unique Hero {
+  x: f32, y: f32, hp: f32, cool: f32, xp: i32, level: i32, flash: f32,
+  aim: f32
+}
+// The window's top left corner on the field.
+unique Cam { x: f32, y: f32 }
+// How many there are of each kind, counted once a frame.
+unique Count {
+  foes: i32, close: i32, shots: i32, bolts: i32, gems: i32, sparks: i32
+}
+// What a frame adds up, for the system after to take: what the hero is
+// hurt by, the worth of the gems it reached, how many foes fell.
+unique Hurt: f32
+unique Gained: i32
+unique Fell: i32
+// How long a frame takes, evened out; for what comes by chance; the keys
+// a frame ago.
+unique Pace: f32
+unique Seed: i64
+unique Was { stress: bool, full: bool, go: bool, mute: bool }
+default_capacity 256
+
+fn field() -> f32 { 8000.0 }
+// How far a shot gets, and from where a foe counts as close (and, a bit
+// further, not any more).
+fn reach() -> f32 { 1000.0 }
+fn near() -> f32 { 1100.0 }
+fn far() -> f32 { 1250.0 }
+// What the field holds (as the capacities above say), with room to spare
+// for what a frame adds.
+fn most_foes() -> i32 { 245000 }
+fn most_shots() -> i32 { 15500 }
+fn most_bolts() -> i32 { 58000 }
+fn most_gems() -> i32 { 97000 }
+fn most_sparks() -> i32 { 94000 }
+
+fn next(seed: i64) -> i64 { (seed * 1103515245 + 12345) % 2147483648 }
+// (From 0 to 1, and a whole number below `n`.)
+fn unit(seed: i64) -> f32 { ((seed / 65536) % 4096) as f32 / 4096.0 }
+fn below(seed: i64, n: i32) -> i32 { ((seed / 65536) % n as i64) as i32 }
+// A number from 0 to 1 that a place gives: the same for the same place.
+fn chance(x: f32, y: f32) -> f32 { fract(sin(x * 12.9898 + y * 78.233) * 43758.547) }
+fn apart(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+  (ax - bx) * (ax - bx) + (ay - by) * (ay - by)
+}
+
+// The hero by its level: shots at once, the wait between them, what one
+// takes off a foe; and the gems the next level asks.
+fn guns(level: i32) -> i32 { min(1 + level, 15) }
+fn pause(level: i32) -> f32 { max(0.06, 0.2 - 0.01 * level as f32) }
+fn harm(level: i32) -> f32 { 6.0 + level as f32 }
+fn asked(level: i32) -> i32 { 8 + level * 10 }
+// How many foes come in a second, that long into a game; and which breed
+// one is, by a number below 100.
+fn crowd(time: f32) -> f32 { min(900.0, 12.0 + time * 2.5 + time * time * 0.02) }
+fn breed_of(pick: i32, time: f32) -> Breed {
+  if time > 45.0 && pick < 6 { Breed.Hulk }
+  else if time > 20.0 && pick < 22 { Breed.Spitter }
+  else if pick < 55 { Breed.Wasp }
+  else { Breed.Mite }
+}
+
+world {
+  Window.width = 1280
+  Window.height = 800
+  Window.min_width = 800
+  Window.min_height = 520
+  Window.title = "ent-lang: swarm"
+  Window.background = 0x0d1117
+  Window.fps = 60
+  Window.resizable = true
+  Game.state = State.Title
+  Hero.x = 4000.0
+  Hero.y = 4000.0
+  Hero.hp = 100.0
+  Seed = 20261009
+  Music.volume = 0.5
+}
+
+// The keys: the game's state, the hero's way, where it aims, its shots.
+system control() {
+  let dt = min(Window.dt, 0.05)
+  Pace = Pace * 0.95 + Window.dt * 0.05
+
+  let full = key_down('F' as i32)
+  if full && !Was.full { Window.fullscreen = !Window.fullscreen }
+  Was.full = full
+  let mute = key_down('M' as i32)
+  if mute && !Was.mute { Sound.off = !Sound.off }
+  Was.mute = mute
+  let stress = key_down('B' as i32)
+  if stress && !Was.stress && Game.state == State.Playing {
+    Game.stress = !Game.stress
+  }
+  Was.stress = stress
+
+  // Enter: a new game. The field is cleared, the hero is in its middle.
+  let go = Keys.enter
+  if go && !Was.go && Game.state != State.Playing {
+    for e with Foe { e.destroy() }
+    for e with Shot { e.destroy() }
+    for e with Bolt { e.destroy() }
+    for e with Gem { e.destroy() }
+    for e with Spark { e.destroy() }
+    Game.state = State.Playing
+    Game.time = 0.0
+    Game.score = 0
+    Game.kills = 0
+    Game.stress = false
+    Game.owed = 0.0
+    Game.sung = false
+    Game.thick = false
+    Hero.x = field() * 0.5
+    Hero.y = field() * 0.5
+    Hero.hp = 100.0
+    Hero.cool = 0.0
+    Hero.xp = 0
+    Hero.level = 0
+    Hero.flash = 0.0
+  }
+  Was.go = go
+
+  if Game.state == State.Playing {
+    Game.time += dt
+    var dx = 0.0
+    var dy = 0.0
+    if Keys.left || key_down('A' as i32) { dx -= 1.0 }
+    if Keys.right || key_down('D' as i32) { dx += 1.0 }
+    if Keys.up || key_down('W' as i32) { dy -= 1.0 }
+    if Keys.down || key_down('S' as i32) { dy += 1.0 }
+    let pace = if dx != 0.0 && dy != 0.0 { 240.0 } else { 340.0 }
+    Hero.x = clamp(Hero.x + dx * pace * dt, 20.0, field() - 20.0)
+    Hero.y = clamp(Hero.y + dy * pace * dt, 20.0, field() - 20.0)
+  }
+  // The window shows the field around the hero, and not past its edges.
+  let wide = Window.width as f32
+  let high = Window.height as f32
+  Cam.x = clamp(Hero.x - wide * 0.5, 0.0, max(0.0, field() - wide))
+  Cam.y = clamp(Hero.y - high * 0.5, 0.0, max(0.0, field() - high))
+
+  if Game.state == State.Playing {
+    Hero.aim = atan2(Mouse.y + Cam.y - Hero.y, Mouse.x + Cam.x - Hero.x)
+    Hero.cool -= dt
+    if Hero.cool <= 0.0 {
+      // A volley: a fan round where the hero aims; in the stress, a ring.
+      var many = guns(Hero.level)
+      var spread = 0.07
+      Hero.cool = pause(Hero.level)
+      if Game.stress {
+        many = 240
+        spread = tau() / 240.0
+        Hero.cool = 0.03
+      }
+      if Count.shots + many < most_shots() {
+        for i in 0..many {
+          let angle = Hero.aim + (i as f32 - (many - 1) as f32 * 0.5) * spread
+          spawn {
+            At { x: Hero.x + cos(angle) * 16.0, y: Hero.y + sin(angle) * 16.0 },
+            Dir { dx: cos(angle) * 900.0, dy: sin(angle) * 900.0 },
+            Shot { left: reach() / 900.0, spent: false }
+          }
+        }
+        if !Game.stress {
+          spawn { Tone { pitch: 900.0, to: 500.0, seconds: 0.04, after: 0.0,
+                         volume: 0.08, wave: Wave.Square } }
+        }
+      }
+    }
+  }
+}
+
+// How many there are of everything: what the systems after hold on to.
+system count() {
+  Count.foes = for with Foe { }
+  Count.close = for with Foe, Close { }
+  Count.shots = for with Shot { }
+  Count.bolts = for with Bolt { }
+  Count.gems = for with Gem { }
+  Count.sparks = for with Spark { }
+}
+
+// Foes come: round the hero, out of sight; more the longer a game goes.
+// In the stress, all over the field, until it holds no more.
+system arrive() {
+  let dt = min(Window.dt, 0.05)
+  var come = 0
+  if Game.stress {
+    come = min(6000, most_foes() - Count.foes)
+  } else {
+    Game.owed += crowd(Game.time) * dt
+    come = min(Game.owed as i32, most_foes() - Count.foes)
+    Game.owed -= (Game.owed as i32) as f32
+  }
+  for i in 0..come {
+    Seed = next(Seed)
+    let angle = unit(Seed) * tau()
+    Seed = next(Seed)
+    var out = 900.0 + unit(Seed) * 700.0
+    if Game.stress { out = 300.0 + unit(Seed) * 4200.0 }
+    Seed = next(Seed)
+    // (In the stress, every breed from the start.)
+    let breed = breed_of(below(Seed, 100),
+                         if Game.stress { 60.0 } else { Game.time })
+    Seed = next(Seed)
+    Game.made += 1
+    spawn {
+      Foe { breed: breeds[breed], cool: 1.0 + unit(Seed) * 2.0,
+            lane: angle * 3.0, lot: Game.made },
+      Health { hp: breeds[breed].life },
+      Size { touch: breeds[breed].girth + 4.0 },
+      At { x: clamp(Hero.x + cos(angle) * out, 10.0, field() - 10.0),
+           y: clamp(Hero.y + sin(angle) * out, 10.0, field() - 10.0) }
+    }
+  }
+}
+
+// Every foe goes for the hero, swaying a little on its way; a spitter
+// stops short of it.
+system steer() {
+  let dt = min(Window.dt, 0.05)
+  for f: mut Foe, a: mut At {
+    let dx = Hero.x - a.x
+    let dy = Hero.y - a.y
+    let off = sqrt(dx * dx + dy * dy) + 0.001
+    let sway = sin(Game.time * 2.0 + f.lane) * 0.45
+    var step = f.breed.pace * dt
+    if f.breed.spits && off < 380.0 { step = 0.0 }
+    a.x += (dx / off - dy / off * sway) * step
+    a.y += (dy / off + dx / off * sway) * step
+    if f.cool > 0.0 { f.cool -= dt }
+  }
+}
+
+// A foe that comes into the shots' reach is close, and one that leaves
+// it is not: close foes are an archetype of their own, the only ones the
+// shots are held against.
+system gather() {
+  let inside = near() * near()
+  let outside = far() * far()
+  for e, a: At with Foe without Close
+      where apart(a.x, a.y, Hero.x, Hero.y) < inside {
+    e.add(Close)
+  }
+  for e, a: At with Foe, Close
+      where apart(a.x, a.y, Hero.x, Hero.y) > outside {
+    e.remove(Close)
+  }
+}
+
+// A close spitter that is ready shoots at the hero.
+system spit() {
+  let room = Count.bolts < most_bolts()
+  for f: mut Foe, a: At with Close
+      where f.breed.spits && f.cool <= 0.0 && room {
+    f.cool = 2.4
+    let dx = Hero.x - a.x
+    let dy = Hero.y - a.y
+    let off = sqrt(dx * dx + dy * dy) + 0.001
+    spawn { At { x: a.x, y: a.y },
+            Dir { dx: dx / off * 260.0, dy: dy / off * 260.0 },
+            Bolt { left: 5.0 } }
+  }
+}
+
+// Whatever flies goes on.
+system fly() {
+  let dt = min(Window.dt, 0.05)
+  for a: mut At, d: Dir {
+    a.x += d.dx * dt
+    a.y += d.dy * dt
+  }
+}
+
+// Every close foe against every shot: each shot on it takes some of what
+// the foe has left.
+system strike() {
+  let dent = harm(Hero.level)
+  for a: At, z: Size, h: mut Health with Close {
+    let touch = z.touch * z.touch
+    var hits = 0
+    for p: At with Shot where apart(p.x, p.y, a.x, a.y) < touch {
+      hits += 1
+    }
+    if hits > 0 { h.hp -= dent * hits as f32 }
+  }
+}
+
+// And every shot against every close foe: one that hit is spent.
+system spend() {
+  for a: At, s: mut Shot {
+    var hits = 0
+    for p: At, z: Size with Close
+        where apart(p.x, p.y, a.x, a.y) < z.touch * z.touch {
+      hits += 1
+    }
+    if hits > 0 { s.spent = true }
+  }
+}
+
+// A foe with nothing left falls: a gem where it was, sparks off it.
+system reap() {
+  let gems = Count.gems < most_gems()
+  let sparks = Count.sparks < most_sparks()
+  for e, f: Foe, a: At, h: Health where h.hp <= 0.0 {
+    Fell += 1
+    if gems { spawn { At { x: a.x, y: a.y }, Gem { worth: f.breed.worth } } }
+    if sparks {
+      let turn = chance(a.x, a.y) * tau()
+      spawn { At { x: a.x, y: a.y },
+              Dir { dx: cos(turn) * 150.0, dy: sin(turn) * 150.0 },
+              Spark { left: 0.45, hue: f.breed.hue } }
+      spawn { At { x: a.x, y: a.y },
+              Dir { dx: cos(turn + 2.1) * 110.0, dy: sin(turn + 2.1) * 110.0 },
+              Spark { left: 0.6, hue: f.breed.hue } }
+      spawn { At { x: a.x, y: a.y },
+              Dir { dx: cos(turn + 4.2) * 190.0, dy: sin(turn + 4.2) * 190.0 },
+              Spark { left: 0.35, hue: 0xffffff } }
+    }
+    e.destroy()
+  }
+}
+
+// What ends: a shot that is spent or has flown its way, a bolt that
+// reached the hero or went too far, a spark that has burnt out.
+system fade() {
+  let dt = min(Window.dt, 0.05)
+  for e, s: mut Shot {
+    s.left -= dt
+    if s.left <= 0.0 || s.spent { e.destroy() }
+  }
+  for e, a: At, b: mut Bolt {
+    b.left -= dt
+    if apart(a.x, a.y, Hero.x, Hero.y) < 14.0 * 14.0 {
+      Hurt += 7.0
+      e.destroy()
+    } else if b.left <= 0.0 {
+      e.destroy()
+    }
+  }
+  for e, s: mut Spark {
+    s.left -= dt
+    if s.left <= 0.0 { e.destroy() }
+  }
+}
+
+// A foe on the hero hurts it for as long as it is there.
+system maul() {
+  let dt = min(Window.dt, 0.05)
+  for f: Foe, a: At with Close
+      where apart(a.x, a.y, Hero.x, Hero.y) <
+            (f.breed.girth + 12.0) * (f.breed.girth + 12.0) {
+    Hurt += f.breed.harm * dt
+  }
+}
+
+// A gem near the hero flies to it, and one that is there is taken.
+system gems() {
+  let dt = min(Window.dt, 0.05)
+  for e, a: mut At, g: Gem {
+    let dx = Hero.x - a.x
+    let dy = Hero.y - a.y
+    let off = dx * dx + dy * dy
+    if off < 24.0 * 24.0 {
+      Gained += g.worth
+      e.destroy()
+    } else if off < 170.0 * 170.0 {
+      let far = sqrt(off)
+      a.x += dx / far * 520.0 * dt
+      a.y += dy / far * 520.0 * dt
+    }
+  }
+}
+
+// What the frame added up comes to the hero: hurt, gems, and with enough
+// gems the next level. With nothing left it falls. (In the stress it is
+// not hurt: the stress is for looking.)
+system hero() {
+  let dt = min(Window.dt, 0.05)
+  if Hero.flash > 0.0 { Hero.flash = max(0.0, Hero.flash - dt) }
+  if Hurt > 0.0 && !Game.stress {
+    Hero.hp -= Hurt
+    Hero.flash = 0.12
+  }
+  Hurt = 0.0
+  Hero.xp += Gained
+  Game.score += Gained * 10
+  Gained = 0
+  if Hero.xp >= asked(Hero.level) {
+    Hero.xp -= asked(Hero.level)
+    Hero.level += 1
+    Hero.hp = min(100.0, Hero.hp + 12.0)
+    spawn { Tone { pitch: 520.0, to: 1040.0, seconds: 0.25, after: 0.0,
+                   volume: 0.25, wave: Wave.Triangle } }
+  }
+  Game.kills += Fell
+  Game.score += Fell
+  // (One sound for all that fell in a frame.)
+  if Fell > 0 && !Game.stress {
+    spawn { Tone { pitch: 180.0, to: 90.0, seconds: 0.06, after: 0.0,
+                   volume: 0.14, wave: Wave.Noise } }
+  }
+  Fell = 0
+  if Hero.hp <= 0.0 {
+    Hero.hp = 0.0
+    Game.state = State.Fallen
+    Game.stress = false
+  }
+}
+
+// The music: a piece for the title, one for the fight, another while the
+// swarm is thick round the hero (from 500 close foes, until fewer than
+// 200), and when the hero falls a few notes once, then the title's again.
+// A piece goes quiet under the one that comes.
+system tune() {
+  if Game.state == State.Title {
+    Music.once = false
+    Music.fade = 1.0
+    Music.file = calm
+  } else if Game.state == State.Playing {
+    if Count.close > 500 || Game.stress { Game.thick = true }
+    if Count.close < 200 && !Game.stress { Game.thick = false }
+    Music.once = false
+    Music.fade = 1.5
+    if Game.thick { Music.file = frenzy } else { Music.file = fight }
+  } else if !Game.sung {
+    Game.sung = true
+    Music.fade = 0.15
+    Music.once = true
+    Music.file = fall
+  } else if music_over() {
+    Music.once = false
+    Music.fade = 2.0
+    Music.file = calm
+  }
+}
+
+// The field as the window shows it.
+system draw() {
+  let wide = Window.width as f32
+  let high = Window.height as f32
+  let cx = Cam.x
+  let cy = Cam.y
+  // The ground: lines every 200, and the field's edge.
+  let first_x = floor(cx / 200.0) * 200.0
+  let first_y = floor(cy / 200.0) * 200.0
+  for i in 0..12 {
+    let x = first_x + i as f32 * 200.0 - cx
+    if x >= 0.0 && x <= wide { rect(x, 0.0, 1.0, high, 0x18202b) }
+    let y = first_y + i as f32 * 200.0 - cy
+    if y >= 0.0 && y <= high { rect(0.0, y, wide, 1.0, 0x18202b) }
+  }
+  edges(-cx, -cy, field(), field(), 3.0, 3.0, 3.0, 3.0, 0.0, 0.0, 0.0, 0.0,
+        0x3a4a5f)
+
+  // (Only what is in the window.)
+  for a: At, g: Gem
+      where a.x > cx - 8.0 && a.x < cx + wide + 8.0 &&
+            a.y > cy - 8.0 && a.y < cy + high + 8.0 {
+    rect(a.x - cx - 2.5, a.y - cy - 2.5, 5.0, 5.0, 0x5ad1e6)
+  }
+  for a: At, s: Spark
+      where a.x > cx && a.x < cx + wide && a.y > cy && a.y < cy + high {
+    rect(a.x - cx - 1.5, a.y - cy - 1.5, 3.0, 3.0, s.hue)
+  }
+  for f: Foe, a: At, h: Health
+      where a.x > cx - 24.0 && a.x < cx + wide + 24.0 &&
+            a.y > cy - 24.0 && a.y < cy + high + 24.0 {
+    let hurt = h.hp < f.breed.life
+    let hue = if hurt { blend(f.breed.hue, 0xffffff, 0.35) } else { f.breed.hue }
+    let r = f.breed.girth
+    // (The small ones as squares: thousands of them are cheaper so.)
+    if r < 10.0 { rect(a.x - cx - r, a.y - cy - r, r * 2.0, r * 2.0, hue) }
+    else { circle(a.x - cx, a.y - cy, r, hue) }
+  }
+  for a: At, b: Bolt
+      where a.x > cx && a.x < cx + wide && a.y > cy && a.y < cy + high {
+    rect(a.x - cx - 3.0, a.y - cy - 3.0, 6.0, 6.0, 0xff5a5a)
+  }
+  for a: At, s: Shot
+      where a.x > cx && a.x < cx + wide && a.y > cy && a.y < cy + high {
+    rect(a.x - cx - 2.0, a.y - cy - 2.0, 4.0, 4.0, 0xfff2a8)
+  }
+
+  // The hero, and where it aims.
+  let hx = Hero.x - cx
+  let hy = Hero.y - cy
+  line(hx, hy, hx + cos(Hero.aim) * 26.0, hy + sin(Hero.aim) * 26.0, 0x8fa3b8)
+  circle(hx, hy, 12.0, if Hero.flash > 0.0 { 0xff8a8a } else { 0xe8eef5 })
+  circle(hx, hy, 6.0, 0x3b82f6)
+}
+
+// What is written over the field: the hero's state, the numbers, the
+// whole field small, and what to do.
+system hud() {
+  let wide = Window.width as f32
+  let high = Window.height as f32
+  // What the hero has left, and how far the next level is.
+  rounded(16.0, high - 34.0, 260.0, 12.0, 4.0, 4.0, 4.0, 4.0, 0x1c2531)
+  rounded(16.0, high - 34.0, 260.0 * Hero.hp / 100.0, 12.0, 4.0, 4.0, 4.0,
+          4.0, 0xe5484d)
+  rounded(16.0, high - 18.0, 260.0, 6.0, 3.0, 3.0, 3.0, 3.0, 0x1c2531)
+  rounded(16.0, high - 18.0,
+          260.0 * Hero.xp as f32 / asked(Hero.level) as f32, 6.0, 3.0, 3.0,
+          3.0, 3.0, 0x5ad1e6)
+  label("level {Hero.level + 1}   score {Game.score}   fallen {Game.kills}",
+        290.0, high - 36.0, 18.0, 0xc9d4e0)
+
+  // The numbers: what there is, what the shots are held against, and how
+  // long a frame takes.
+  let all = Count.foes + Count.shots + Count.bolts + Count.gems + Count.sparks
+  let pairs = (Count.close as f32 * Count.shots as f32 * 2.0 / 1000.0) as i32
+  let tenths = (Pace * 10000.0) as i32
+  rounded(10.0, 10.0, 330.0, if Game.stress { 142.0 } else { 122.0 }, 6.0,
+          6.0, 6.0, 6.0, 0xc00d1117)
+  label("{all} entities   {tenths / 10}.{tenths % 10} ms a frame", 20.0, 16.0,
+        16.0, 0xe8eef5)
+  label("foes {Count.foes}   close {Count.close}", 20.0, 38.0, 16.0, 0x9fb0c3)
+  label("shots {Count.shots}   bolts {Count.bolts}", 20.0, 58.0, 16.0,
+        0x9fb0c3)
+  label("gems {Count.gems}   sparks {Count.sparks}", 20.0, 78.0, 16.0,
+        0x9fb0c3)
+  label("{pairs} thousand shot-foe tests", 20.0, 98.0, 16.0, 0x9fb0c3)
+  if Game.stress {
+    label("the stress (B ends it)", 20.0, 118.0, 16.0, 0xffb454)
+  }
+
+  // The whole field: one foe in 64, and the hero.
+  let size = 170.0
+  let mx = wide - size - 14.0
+  let my = 14.0
+  let small = size / field()
+  rounded(mx - 4.0, my - 4.0, size + 8.0, size + 8.0, 6.0, 6.0, 6.0, 6.0,
+          0xc00d1117)
+  for f: Foe, a: At where f.lot % 64 == 0 {
+    rect(mx + a.x * small - 1.0, my + a.y * small - 1.0, 2.0, 2.0, f.breed.hue)
+  }
+  edges(mx + Cam.x * small, my + Cam.y * small, wide * small, high * small,
+        1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0x8fa3b8)
+  rect(mx + Hero.x * small - 2.0, my + Hero.y * small - 2.0, 4.0, 4.0,
+       0x3b82f6)
+
+  if Game.state != State.Playing {
+    var title: text[30] = "swarm"
+    var hint: text[80] = "enter to start: W A S D move, the mouse aims, B is the stress"
+    if Game.state == State.Fallen {
+      title = "the hero fell"
+      hint = "score {Game.score}; enter to go again"
+    }
+    let box = max(text_width(title, 56.0), text_width(hint, 20.0)) + 64.0
+    rounded((wide - box) * 0.5, high * 0.5 - 70.0, box, 140.0, 10.0, 10.0,
+            10.0, 10.0, 0xd00d1117)
+    label(title, (wide - text_width(title, 56.0)) * 0.5, high * 0.5 - 52.0,
+          56.0, 0xf0f4f8)
+    label(hint, (wide - text_width(hint, 20.0)) * 0.5, high * 0.5 + 26.0, 20.0,
+          0x9fb0c3)
+  }
+}
+
+schedule frame() {
+  begin()
+  control()
+  count()
+  arrive() run_if Game.state == State.Playing
+  steer() run_if Game.state == State.Playing
+  gather() run_if Game.state == State.Playing
+  spit() run_if Game.state == State.Playing
+  fly() run_if Game.state == State.Playing
+  strike() run_if Game.state == State.Playing
+  spend() run_if Game.state == State.Playing
+  reap() run_if Game.state == State.Playing
+  fade() run_if Game.state == State.Playing
+  maul() run_if Game.state == State.Playing
+  gems() run_if Game.state == State.Playing
+  hero() run_if Game.state == State.Playing
+  tune()
+  play()
+  draw()
+  hud()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}

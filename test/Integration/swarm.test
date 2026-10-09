@@ -1,0 +1,39 @@
+// examples/swarm/swarm.ent, a shoot-'em-up with foes and shots in their
+// thousands, compiles, alone and for all the cores: the close foes are
+// an archetype of their own (declared), every shot is held against every
+// one of them in a `for` inside a `for`, and those run on all the cores.
+// So does the `for` that steers every foe: its body calls out (a root,
+// a sine), so it is worth sharing out from far fewer entities on than
+// one that only computes. Running it needs a window.
+// RUN: ent-translate --import-ent %S/../../examples/swarm/swarm.ent \
+// RUN:     -I %S/../../devices -I %S/../../examples -o %t.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --cse --ent-lower-views \
+// RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:     -o /dev/null
+// RUN: ent-opt %t.mlir --ent-schedule \
+// RUN:     --ent-lower-to-loops="fuse-systems=1 parallel-entities=1 parallel-stages=1" \
+// RUN:     --symbol-dce --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
+// RUN:     -o %t.par.mlir
+// RUN: FileCheck %s --check-prefix=PAR --input-file=%t.par.mlir
+// (And on to LLVM: a body with a loop of its own is in no scope that
+// would keep the loop from becoming blocks.)
+// RUN: ent-opt %t.par.mlir --cse --ent-lower-views --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts -o /dev/null
+
+// IR-DAG: ent.archetype @Roaming (@Foe, @Health, @Size, @At) capacity 250000
+// IR-DAG: ent.archetype @Closing (@Foe, @Health, @Size, @At, @Close) capacity 250000
+// IR:     ent.system @strike()
+// IR:       ent.query
+// IR:         ent.each
+
+// PAR-LABEL: func.func private @steer(
+// PAR:         omp.parallel
+// PAR-LABEL: func.func private @gather(
+// PAR-LABEL: func.func private @strike(
+// PAR:         omp.parallel
+// PAR:           omp.loop_nest
+// PAR-NOT:         memref.alloca_scope
+// PAR:             scf.for
+// PAR-LABEL: func.func private @spend(
+// PAR:         omp.parallel

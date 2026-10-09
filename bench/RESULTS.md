@@ -2993,3 +2993,57 @@ library's own.
   - Tried after that, and not kept: what an event marks as one function
     for all logs. 10,000 lines less in the demo (6%), and `bench/boxes`
     at 39.5 us a frame where it is at 38.4: a call for every event.
+
+## 2026-10-09: a game as a benchmark (examples/swarm)
+
+`examples/swarm/swarm.ent` is a shoot-'em-up on a field of 8000 by 8000
+with capacities meant to load the machine: 250,000 foes, 16,000 shots,
+60,000 bolts, 100,000 gems, 100,000 sparks. `bench/swarm/run.py` plays
+it by itself in steps of a sixtieth of a second and, from frame 600 on,
+runs its stress: the field filled, the hero shooting rings of 240. At
+frame 1800 there are 382,561 entities (244,630 foes, 31,913 of them
+close to the hero, 4,299 shots: 274 million shot-foe tests a frame).
+Native, in a window of 1400 by 836, 24 cores:
+
+| | a frame | computing | drawing |
+|---|---|---|---|
+| one core | 33.5 ms | 20.7 ms | 12.3 ms |
+| `--parallel` | 20.6 ms | 4.3 ms | 15.8 ms |
+| `--parallel`, `KMP_BLOCKTIME=0` | 14.8 ms | 4.5 ms | 10.0 ms |
+
+Of the computing on one core, 8.6 ms and 9.1 ms are the two `for`s
+inside a `for` (every close foe against every shot, every shot against
+every close foe: 137 million tests each, sixteen at a time), and 2.4 ms
+the `for` that steers every foe (a root and a sine each). On all cores
+those are 1.3, 1.5 and 0.4 ms. What is left is the drawing: 15,000 to
+20,000 calls of the window device a frame, one for each thing in the
+window, which no core but one can make. (And slower with the other
+cores spinning while they wait: hence `KMP_BLOCKTIME=0`.)
+
+What the game showed, and what was done about it:
+
+- Which shot hits which foe, written the plain way (`for` every shot,
+  `for` every foe `with Close`), took 89 ms a frame with a quarter of
+  those numbers. Two things, each worth more than an order:
+  - `e.add(Close)` on a tag keeps the tag in place, a byte with each
+    foe, so `with Close` walked every foe and read each one's byte, and
+    with that the loop loaded its values one by one (masked gathers).
+    Declaring the archetype of the close foes moves them there: 57 ms to
+    1.6 ms. In the game now; the compiler still chooses "in place" by
+    itself for what is added and removed.
+  - The foe's size was read through its breed's row (`f.breed.girth`)
+    for every pair: a look-up, not a column. Kept with the foe in a
+    component of its own (`Size`).
+- `--parallel` did not build: the body of a parallel loop that calls a
+  function stayed in a `memref.alloca_scope`, and a loop inside it could
+  then not become blocks. `--ent-omp-nowait` takes such a body out of
+  its scope where it puts nothing on the stack.
+- The `for` over all foes (245,000) ran on one core: a loop is shared
+  out from 1,000,000 entities on, a number found for bodies that only
+  compute. A body that calls out (an extern fn) now counts 33 times as
+  much for each call: 4.6 ms to 0.4 ms for that `for`.
+
+Not done: a way to draw many things with one call (the window device
+takes one thing at a time), and letting a program say that a tag is to
+be an archetype of its own without declaring every archetype it is in.
+

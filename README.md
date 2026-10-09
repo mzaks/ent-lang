@@ -273,7 +273,12 @@ come with the compiler, in `devices/`, and two more that need
   colours, each on its way to where it now is) and its side bar with a
   container that scrolls (pictures, boxes that float, a list of a hundred
   texts, a bar that is dragged):
-  `tools/ent run -I examples examples/clay/video_demo.ent`; `examples/towers.ent` is a tower defence game (bars of the layout
+  `tools/ent run -I examples examples/clay/video_demo.ent`; `examples/swarm/swarm.ent` is a shoot-'em-up on a field bigger than
+  the window with foes, shots and sparks in their hundreds of thousands
+  (its B key fills the field to what it holds; `bench/swarm/run.py`
+  plays it by itself and says how long a frame takes), with music that
+  follows the game: `tools/ent run --parallel -I examples
+  examples/swarm/swarm.ent`; `examples/towers.ent` is a tower defence game (bars of the layout
   library around a board that is drawn into the box between them; towers
   that look at the foes with a `for` inside their own, and send what
   they do to the one they pick; two maps, each one's road a table that

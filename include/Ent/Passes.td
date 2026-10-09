@@ -107,6 +107,12 @@ def EntOmpNowait : Pass<"ent-omp-nowait"> {
     when it is the last op of its parallel region, since the region's own
     barrier follows. Constructs with reductions or private values are left
     alone. Run it after `--convert-scf-to-openmp`.
+
+    It also takes the body of a parallel loop out of the
+    `memref.alloca_scope` that conversion puts it in, where the body puts
+    nothing on the stack: a body with loops of its own cannot stay in a
+    scope when those become blocks, and the canonicalizer keeps the scope
+    wherever the body calls a function.
   }];
   let dependentDialects = ["::mlir::omp::OpenMPDialect"];
 }
