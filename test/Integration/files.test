@@ -46,3 +46,22 @@
 // built.
 // RUN: not %ent build -I %S/Inputs/files %t.src/files_use.ent -o %t.one/again 2>&1 | FileCheck %s --check-prefix=GONE
 // GONE: files_use.ent:{{.*}}: error: there is no file 'files_words.txt' next to 'files_use.ent'
+
+// What the program is made of is the compiler's to say, and what builds
+// it asks: its sources, the program's first, and the files it declares.
+// RUN: ent-translate --ent-to-sources %S/Inputs/files_use.ent -I %S/Inputs/files \
+// RUN:   | FileCheck %s --check-prefix=MADE
+// MADE:      source{{.}}{{.*}}Inputs{{.}}files_use.ent
+// MADE-NEXT: source{{.}}{{.*}}files{{.}}assets.ent
+// MADE-NEXT: asset{{.}}module_words.txt{{.}}{{.*}}files{{.}}module_words.txt
+// MADE-NEXT: asset{{.}}steps/step1.txt{{.}}
+// MADE-NEXT: asset{{.}}steps/step2.txt{{.}}
+// MADE-NEXT: asset{{.}}steps/step10.txt{{.}}
+// MADE-NEXT: asset{{.}}files_words.txt{{.}}
+
+// One name is one file: two modules cannot each have their own of it.
+// RUN: rm -rf %t.two && mkdir -p %t.two/kit && echo a > %t.two/words.txt && echo b > %t.two/kit/words.txt
+// RUN: echo 'asset "words.txt"' > %t.two/kit/kit.ent
+// RUN: echo 'import kit  asset "words.txt"  main { }' > %t.two/p.ent
+// RUN: not %ent build -I %t.two/kit %t.two/p.ent -o %t.two/p 2>&1 | FileCheck %s --check-prefix=TWO
+// TWO: error: two files are the asset 'words.txt':

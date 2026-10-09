@@ -901,6 +901,23 @@ int main(int argc, char **argv) {
       [](DialectRegistry &registry) {
         registry.insert<EntDialect, arith::ArithDialect, scf::SCFDialect>();
       });
+  // What a program is made of, for what builds it: one line for each
+  // source (`source`, a tab, its path) and each file it declares
+  // (`asset`, its name, its path).
+  TranslateRegistration sources(
+      "ent-to-sources",
+      "List the sources of an ent-lang program and the files it declares",
+      [](const std::shared_ptr<llvm::SourceMgr> &sourceMgr, raw_ostream &os,
+         MLIRContext *context) -> LogicalResult {
+        ImportedFiles files;
+        if (!importEnt(*sourceMgr, context, {}, &files))
+          return failure();
+        for (const std::string &path : files.sources)
+          os << "source\t" << path << "\n";
+        for (auto &[name, path] : files.assets)
+          os << "asset\t" << name << "\t" << path << "\n";
+        return success();
+      });
   TranslateFromMLIRRegistration header(
       "ent-to-c-header", "Emit the C API of an ent-lang program's world",
       [](Operation *op, raw_ostream &os) -> LogicalResult {

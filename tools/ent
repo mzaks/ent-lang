@@ -54,7 +54,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -99,54 +98,33 @@ def host_compiler(variable, names, fallback):
     return find_tool(fallback, llvm_directories())
 
 
-def modules_of(path, include_directories, seen):
-    """The files of the modules `path` imports, itself included, found as
-    the compiler finds them."""
-    path = os.path.realpath(path)
-    if path in seen:
-        return
-    seen.append(path)
-    with open(path) as source:
-        text = re.sub(r"//[^\n]*", "", source.read())
-    for name in re.findall(r"^\s*import\s+(\w+)", text, re.MULTILINE):
-        for directory in [os.path.dirname(path)] + include_directories:
-            candidate = os.path.join(directory, name + ".ent")
-            if os.path.isfile(candidate):
-                modules_of(candidate, include_directories, seen)
-                break
-
-
-def assets_of(files):
-    """The files the sources `files` declare with `asset "name"`: for each
-    name where the file is, in the order they are written."""
-    found = {}
-    for path in files:
-        with open(path) as source:
-            text = re.sub(r"//[^\n]*", "", source.read())
-        written = re.findall(r'^\s*asset\s+(?:\w+\s*=\s*)?"([^"\n]*)"',
-                             text, re.MULTILINE)
-        names = []
-        for name in written:
-            # (With a `*`: every file there is of that name.)
-            folder, pattern = os.path.split(name)
-            there = os.path.join(os.path.dirname(path), folder)
-            if "*" not in pattern or not os.path.isdir(there):
-                names.append(name)
-                continue
-            matches = re.compile(
-                ".*".join(map(re.escape, pattern.split("*"))) + r"\Z",
-                re.DOTALL)
-            names += [os.path.join(folder, file)
-                      for file in sorted(os.listdir(there))
-                      if matches.match(file) and not file.startswith(".")
-                      and os.path.isfile(os.path.join(there, file))]
-        for name in names:
-            where = os.path.join(os.path.dirname(path), name)
-            if os.path.realpath(found.setdefault(name, where)) != \
-                    os.path.realpath(where):
-                sys.exit(f"ent: two files are the asset '{name}': "
-                         f"'{found[name]}' and '{where}'")
-    return found
+def made_of(arguments, known={}):
+    """What the program is made of, as the compiler finds it: the files of
+    its source and of the modules it imports, the program's first; and the
+    files it declares with `asset`, for each name where the file is. (One
+    place knows how modules and such files are found: the compiler.)"""
+    key = (os.path.abspath(arguments.program), tuple(arguments.I))
+    if key not in known:
+        own = [os.environ.get("ENT_BIN"), os.path.join(ROOT, "build/bin")]
+        translate = find_tool("ent-translate", [path for path in own if path])
+        includes = [flag
+                    for path in arguments.I + [os.path.join(ROOT, "devices")]
+                    for flag in ("-I", path)]
+        listed = subprocess.run(
+            [translate, "--ent-to-sources", arguments.program] + includes,
+            stdout=subprocess.PIPE, text=True)
+        if listed.returncode:
+            sys.exit(listed.returncode)
+        sources, assets = [], {}
+        for line in listed.stdout.splitlines():
+            what, _, rest = line.partition("\t")
+            if what == "source":
+                sources.append(rest)
+            elif what == "asset":
+                name, _, where = rest.partition("\t")
+                assets[name] = where
+        known[key] = (sources, assets)
+    return known[key]
 
 
 def copy_assets(arguments, output):
@@ -154,11 +132,8 @@ def copy_assets(arguments, output):
     (unless they are in it: --embed)."""
     if arguments.embed:
         return
-    files = []
-    modules_of(arguments.program,
-               arguments.I + [os.path.join(ROOT, "devices")], files)
     folder = os.path.dirname(os.path.abspath(output))
-    for name, where in assets_of(files).items():
+    for name, where in made_of(arguments)[1].items():
         to = os.path.join(folder, name)
         if os.path.realpath(to) == os.path.realpath(where):
             continue
@@ -213,8 +188,7 @@ def cache_key(arguments):
          os.cpu_count())
 
     include_directories = arguments.I + [os.path.join(ROOT, "devices")]
-    files = []
-    modules_of(arguments.program, include_directories, files)
+    files, assets = made_of(arguments)
     directories = []
     for path in files:
         note_file(path)
@@ -232,7 +206,7 @@ def cache_key(arguments):
             if os.path.dirname(os.path.realpath(path)) not in directories:
                 directories.append(os.path.dirname(os.path.realpath(path)))
     # (The files that are put into the program are of what it is made.)
-    for name, where in assets_of(files).items():
+    for name, where in assets.items():
         note(name, os.path.realpath(where), os.path.isfile(where))
         if arguments.embed and os.path.isfile(where):
             note_file(where)
@@ -338,8 +312,7 @@ def build(arguments, output, directory):
          "--reconcile-unrealized-casts", "--ent-emit-llvm=output=" + llvm,
          "-o", os.devnull])
 
-    files = []
-    modules_of(program, include_directories, files)
+    files, assets = made_of(arguments)
     given = [os.path.splitext(path)[0] + extension for path in files
              for extension in IMPLEMENTATIONS
              if os.path.isfile(os.path.splitext(path)[0] + extension)]
@@ -436,7 +409,7 @@ def build(arguments, output, directory):
         # With --embed, also the files it declares, by the names it
         # knows them by. Their bytes the assembler takes from the files
         # as they are, however many they are.
-        held = list(assets_of(files).items()) if arguments.embed else []
+        held = list(assets.items()) if arguments.embed else []
         if held:
             for index in range(len(held)):
                 source.write("extern const unsigned char "
@@ -508,9 +481,7 @@ def main():
     # there too (devices/ent_files.h).
     where = dict(os.environ)
     if os.path.isfile(arguments.program):
-        sources = []
-        modules_of(arguments.program,
-                   arguments.I + [os.path.join(ROOT, "devices")], sources)
+        sources = made_of(arguments)[0]
         folders = []
         for path in sources:
             if os.path.dirname(path) not in folders:

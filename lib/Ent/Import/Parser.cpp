@@ -340,6 +340,8 @@ public:
   }
 
   OwningOpRef<ModuleOp> parseModule();
+  /// Where what the program is made of is written, if anyone asks.
+  ImportedFiles *files = nullptr;
 
 private:
   //===--------------------------------------------------------------===//
@@ -611,6 +613,22 @@ private:
   llvm::StringMap<RowKind *> rowKindByKey;
   llvm::StringMap<RowKind *> rowKindByName;
   LogicalResult parseAsset();
+  /// (For who asks what the program is made of: a file by its whole
+  /// path.)
+  LogicalResult noteAsset(llvm::SMLoc at, StringRef name, StringRef path) {
+    SmallString<256> whole;
+    if (llvm::sys::fs::real_path(path, whole))
+      whole = path;
+    // (A program knows a file by its name: one name, one file.)
+    auto [known, isNew] = assetPaths.try_emplace(name, whole.str().str());
+    if (!isNew && known->second != whole)
+      return error(at, "two files are the asset '" + name + "': '" +
+                           known->second + "' and '" + whole + "'");
+    if (files && isNew)
+      files->assets.push_back({name.str(), whole.str().str()});
+    return success();
+  }
+  llvm::StringMap<std::string> assetPaths;
   bool isWholeRow(const Expr &expr);
   FailureOr<Variable> emitRow(const Expr &expr);
   Expr fieldOfRow(const Variable &row, StringRef field, llvm::SMLoc at);
@@ -816,6 +834,8 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
   SmallString<256> path;
   if (!llvm::sys::fs::real_path(file, path))
     modulesByPath[path] = root;
+  if (files)
+    files->sources.push_back(path.empty() ? file.str() : path.str().str());
   if (failed(parseDeclarations()) || hadError)
     return nullptr;
   root->loading = false;
@@ -1023,6 +1043,8 @@ LogicalResult Parser::parseAsset() {
     if (!llvm::sys::fs::is_regular_file(path))
       return error(at, "there is no file '" + name + "' next to '" +
                            llvm::sys::path::filename(declaring) + "'");
+    if (failed(noteAsset(at, name, path)))
+      return failure();
     if (!given.empty()) {
       declareSymbol(nameAt, given);
       assetFiles[given] = name;
@@ -1056,11 +1078,17 @@ LogicalResult Parser::parseAsset() {
   if (files.empty())
     return error(at, "there is no file '" + name + "' next to '" +
                          llvm::sys::path::filename(declaring) + "'");
-  if (given.empty())
-    return success();
   llvm::sort(files, [](const std::string &a, const std::string &b) {
     return namedBefore(a, b);
   });
+  for (const std::string &file : files) {
+    SmallString<256> where(llvm::sys::path::parent_path(declaring));
+    llvm::sys::path::append(where, file);
+    if (failed(noteAsset(at, file, where)))
+      return failure();
+  }
+  if (given.empty())
+    return success();
   // The list: a table of the files' names.
   unsigned longest = 0;
   for (const std::string &file : files)
@@ -1161,6 +1189,8 @@ LogicalResult Parser::parseImport() {
     return error(at, "cannot read '" + path + "'");
   StringRef text = (*buffer)->getBuffer();
   sourceMgr.AddNewSourceBuffer(std::move(*buffer), at);
+  if (files)
+    files->sources.push_back(path.str().str());
 
   modules.push_back(std::make_unique<SourceModule>());
   SourceModule *imported = modules.back().get();
@@ -8255,8 +8285,9 @@ FailureOr<mlir::Value> Parser::emitSpawn(const Expr &expr) {
 
 OwningOpRef<ModuleOp>
 mlir::ent::importEnt(llvm::SourceMgr &sourceMgr, MLIRContext *context,
-                     ArrayRef<std::string> directories) {
+                     ArrayRef<std::string> directories, ImportedFiles *files) {
   context->loadDialect<EntDialect, arith::ArithDialect, scf::SCFDialect>();
   Parser parser(sourceMgr, context, directories);
+  parser.files = files;
   return parser.parseModule();
 }
