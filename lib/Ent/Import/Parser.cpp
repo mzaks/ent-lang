@@ -92,7 +92,60 @@ static Type widerInteger(Type a, Type b) {
   auto y = dyn_cast_or_null<IntegerType>(b);
   if (!x || !y || x.getWidth() == 1 || y.getWidth() == 1)
     return {};
+  // (One with a sign and one without are not computed with together.)
+  if (x.isUnsigned() != y.isUnsigned())
+    return {};
   return x.getWidth() >= y.getWidth() ? a : b;
+}
+
+/// The operator an assignment computes with (`+` for `+=`); Eof for `=`
+/// and for what is no assignment.
+static Token::Kind computedBy(Token::Kind assign) {
+  switch (assign) {
+  case Token::PlusAssign:
+    return Token::Plus;
+  case Token::MinusAssign:
+    return Token::Minus;
+  case Token::StarAssign:
+    return Token::Star;
+  case Token::SlashAssign:
+    return Token::Slash;
+  case Token::PercentAssign:
+    return Token::Percent;
+  case Token::AmpAssign:
+    return Token::Amp;
+  case Token::PipeAssign:
+    return Token::Pipe;
+  case Token::CaretAssign:
+    return Token::Caret;
+  case Token::ShiftLeftAssign:
+    return Token::ShiftLeft;
+  case Token::ShiftRightAssign:
+    return Token::ShiftRight;
+  default:
+    return Token::Eof;
+  }
+}
+
+/// A whole number without a sign: u8, u16, u32 or u64.
+static bool isUnsigned(Type type) {
+  auto whole = dyn_cast_or_null<IntegerType>(type);
+  return whole && whole.isUnsigned();
+}
+
+/// A whole number, with a sign or without (not a bool).
+static bool isWhole(Type type) {
+  auto whole = dyn_cast_or_null<IntegerType>(type);
+  return whole && whole.getWidth() != 1;
+}
+
+/// What a whole number is computed with: one without a sign as its bits,
+/// an integer of as many (the operations say that it has none).
+static Type bitsType(Type type) {
+  if (!isUnsigned(type))
+    return type;
+  return IntegerType::get(type.getContext(),
+                          cast<IntegerType>(type).getWidth());
 }
 
 struct Expr;
@@ -575,6 +628,12 @@ private:
   bool givesText = false;
   TextType textType(llvm::SMLoc at, unsigned capacity);
   mlir::Value integer(Location at, Type type, uint64_t value);
+  /// A number without a sign as its bits, and bits as such a number.
+  mlir::Value bits(Location at, mlir::Value value);
+  mlir::Value fromBits(Location at, mlir::Value bits, Type type);
+  /// A number without a sign where one says which row or byte: the same
+  /// number as one with a sign.
+  mlir::Value countable(Location at, mlir::Value value);
   mlir::Value textBits(Location at, mlir::Value text);
   mlir::Value textFromBits(Location at, mlir::Value bits, TextType type);
   mlir::Value textConstant(Location at, StringRef bytes, TextType type);
@@ -1266,6 +1325,10 @@ FailureOr<Type> Parser::parseType() {
                   .Case("i16", builder.getIntegerType(16))
                   .Case("i32", builder.getI32Type())
                   .Case("i64", builder.getI64Type())
+                  .Case("u8", builder.getIntegerType(8, /*isSigned=*/false))
+                  .Case("u16", builder.getIntegerType(16, /*isSigned=*/false))
+                  .Case("u32", builder.getIntegerType(32, /*isSigned=*/false))
+                  .Case("u64", builder.getIntegerType(64, /*isSigned=*/false))
                   .Case("index", builder.getIndexType())
                   .Case("entity", EntityType::get(context))
                   .Default(Type());
@@ -1304,7 +1367,8 @@ FailureOr<Type> Parser::parseType() {
   if (!type)
     return error(at, "unknown type '" + *name +
                          "'; expected f32, f64, bool, i8, i16, i32, i64, "
-                         "index, entity, text, text[N] or an enum");
+                         "u8, u16, u32, u64, index, entity, text, text[N] "
+                         "or an enum");
   return type;
 }
 
@@ -1531,6 +1595,8 @@ mlir::Value Parser::noughtOf(Location at, Type type) {
     return textConstant(at, "", text);
   if (isa<StringType>(type))
     return TextConstantOp::create(builder, at, type, "").getResult();
+  if (isUnsigned(type))
+    return integer(at, type, 0);
   return arith::ConstantOp::create(builder, at,
                                    cast<TypedAttr>(builder.getZeroAttr(type)));
 }
@@ -2259,9 +2325,7 @@ LogicalResult Parser::finishCallables() {
         if (isa<StringType>(callable->result))
           return TextConstantOp::create(builder, at, callable->result, "")
               .getResult();
-        return arith::ConstantOp::create(
-            builder, at,
-            cast<TypedAttr>(builder.getZeroAttr(callable->result)));
+        return noughtOf(at, callable->result);
       }
       mlir::Value is = arith::CmpIOp::create(
           builder, at, arith::CmpIPredicate::eq, which,
@@ -2351,6 +2415,15 @@ FailureOr<Attribute> Parser::constantOf(const Expr &expr, Type type) {
   if (auto whole = dyn_cast<IntegerType>(type)) {
     if (value->kind != Expr::Int)
       return error(expr.loc, "expected a whole number as it is written");
+    if (whole.isUnsigned()) {
+      if (negative && value->intValue != 0)
+        return error(expr.loc, "a u" + Twine(whole.getWidth()) +
+                                   " is not less than nought");
+      if (whole.getWidth() < 64 &&
+          uint64_t(value->intValue) >> whole.getWidth() != 0)
+        return error(expr.loc, "this number is more than a u" +
+                                   Twine(whole.getWidth()) + " holds");
+    }
     return Attribute(builder.getIntegerAttr(
         whole, APInt(whole.getWidth(),
                      uint64_t(negative ? -value->intValue : value->intValue),
@@ -2793,7 +2866,7 @@ LogicalResult Parser::parseRelation() {
     if (!type)
       return error(fieldAt, "component '" + *component + "' has no field '" +
                                 *field + "'");
-    if (!isa<IntegerType>(type) || type.isInteger(1))
+    if (!type.isSignlessInteger() || type.isInteger(1))
       return error(fieldAt, "the children are ordered by an integer, and '" +
                                 *component + "." + *field + "' is not one");
     orderComponent = symbol(*component);
@@ -3091,10 +3164,9 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     // name op value: an assignment (`==` would be part of the value).
     if (token.is(Token::Identifier) && lookup(token.spelling)) {
       Token next = peek();
-      statement = next.is(Token::Assign) || next.is(Token::PlusAssign) ||
-                  next.is(Token::MinusAssign) || next.is(Token::StarAssign) ||
-                  next.is(Token::SlashAssign) || next.isKeyword("min") ||
-                  next.isKeyword("max");
+      statement = next.is(Token::Assign) ||
+                  computedBy(next.kind) != Token::Eof ||
+                  next.isKeyword("min") || next.isKeyword("max");
     }
     // (In a proc: a call of a proc, for what it does.)
     if (proc && token.is(Token::Identifier) && peek().is(Token::LParen)) {
@@ -5377,20 +5449,14 @@ LogicalResult Parser::parseIfLet(llvm::SMLoc at) {
   return success();
 }
 
-// `=`, `+=`, `-=`, `*=`, `/=`, `min=`, `max=`
+// `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`,
+// `min=`, `max=`
 FailureOr<std::pair<Token::Kind, std::optional<StringRef>>>
 Parser::parseAssignOp() {
   Token::Kind kind = token.kind;
-  switch (kind) {
-  case Token::Assign:
-  case Token::PlusAssign:
-  case Token::MinusAssign:
-  case Token::StarAssign:
-  case Token::SlashAssign:
+  if (kind == Token::Assign || computedBy(kind) != Token::Eof) {
     advance();
     return std::make_pair(kind, std::optional<StringRef>());
-  default:
-    break;
   }
   if (token.isKeyword("min") || token.isKeyword("max")) {
     StringRef rule = token.isKeyword("min") ? "min" : "max";
@@ -5399,8 +5465,8 @@ Parser::parseAssignOp() {
       return failure();
     return std::make_pair(Token::Assign, std::optional<StringRef>(rule));
   }
-  return error("expected an assignment ('=', '+=', '-=', '*=', '/=', "
-               "'min=', 'max='), found '" +
+  return error("expected an assignment ('=', '+=', '-=', '*=', '/=', '%=', "
+               "'&=', '|=', '^=', '<<=', '>>=', 'min=', 'max='), found '" +
                token.spelling + "'");
 }
 
@@ -5423,6 +5489,8 @@ std::string Parser::typeWords(Type type) {
     return "an entity";
   if (type.isInteger(1))
     return "a bool";
+  if (isUnsigned(type))
+    return ("a u" + Twine(type.getIntOrFloatBitWidth())).str();
   std::string words;
   llvm::raw_string_ostream(words) << type;
   return "an " + words;
@@ -5472,11 +5540,8 @@ LogicalResult Parser::emitAssignment(
   mlir::Value old = load();
   if (rule)
     return store(combine(loc(at), *rule, old, *rhs));
-  Token::Kind arith = op == Token::PlusAssign    ? Token::Plus
-                      : op == Token::MinusAssign ? Token::Minus
-                      : op == Token::StarAssign  ? Token::Star
-                                                 : Token::Slash;
-  FailureOr<mlir::Value> result = arithmetic(loc(at), arith, old, *rhs);
+  FailureOr<mlir::Value> result =
+      arithmetic(loc(at), computedBy(op), old, *rhs);
   if (failed(result))
     return failure();
   return store(*result);
@@ -5530,8 +5595,7 @@ LogicalResult Parser::parseNameStatement() {
     if (negate) {
       FailureOr<mlir::Value> negated = arithmetic(
           loc(at), Token::Minus,
-          arith::ConstantOp::create(builder, loc(at),
-                                    builder.getZeroAttr(type)),
+          noughtOf(loc(at), type),
           v);
       if (failed(negated))
         return failure();
@@ -5588,8 +5652,7 @@ LogicalResult Parser::parseNameStatement() {
     if (negate) {
       FailureOr<mlir::Value> negated = arithmetic(
           loc(at), Token::Minus,
-          arith::ConstantOp::create(builder, loc(at),
-                                    builder.getZeroAttr(type)),
+          noughtOf(loc(at), type),
           v);
       if (failed(negated))
         return failure();
@@ -5663,8 +5726,7 @@ LogicalResult Parser::parseNameStatement() {
       if (negate) {
         FailureOr<mlir::Value> negated = arithmetic(
             loc(at), Token::Minus,
-            arith::ConstantOp::create(builder, loc(at),
-                                      builder.getZeroAttr(type)),
+            noughtOf(loc(at), type),
             v);
         if (failed(negated))
           return failure();
@@ -5748,8 +5810,7 @@ LogicalResult Parser::parseNameStatement() {
       if (negate) {
         FailureOr<mlir::Value> negated = arithmetic(
             loc(at), Token::Minus,
-            arith::ConstantOp::create(builder, loc(at),
-                                      builder.getZeroAttr(type)),
+            noughtOf(loc(at), type),
             v);
         if (failed(negated))
           return failure();
@@ -5907,13 +5968,22 @@ static int precedenceOf(Token::Kind kind) {
   case Token::Greater:
   case Token::GreaterEqual:
     return 4;
+  case Token::Pipe:
+    return 5;
+  case Token::Caret:
+    return 6;
+  case Token::Amp:
+    return 7;
+  case Token::ShiftLeft:
+  case Token::ShiftRight:
+    return 8;
   case Token::Plus:
   case Token::Minus:
-    return 5;
+    return 9;
   case Token::Star:
   case Token::Slash:
   case Token::Percent:
-    return 6;
+    return 10;
   default:
     return -1;
   }
@@ -5943,7 +6013,8 @@ FailureOr<ExprPtr> Parser::parseBinary(int minPrecedence) {
 }
 
 FailureOr<ExprPtr> Parser::parseUnary() {
-  if (token.is(Token::Minus) || token.is(Token::Not)) {
+  if (token.is(Token::Minus) || token.is(Token::Not) ||
+      token.is(Token::Tilde)) {
     Token op = token;
     advance();
     FailureOr<ExprPtr> operand = parseUnary();
@@ -6701,6 +6772,10 @@ Type Parser::typeOf(const Expr &expr) {
     case Token::AndAnd:
     case Token::OrOr:
       return builder.getI1Type();
+    // (What is shifted, whatever says by how much.)
+    case Token::ShiftLeft:
+    case Token::ShiftRight:
+      return typeOf(*expr.operands[0]);
     default: {
       // Joining texts gives a text that holds both: one of any length
       // where one of them is.
@@ -6933,9 +7008,16 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
   // cut to what fits.
   // A whole number goes where one of more bits is expected, as it is.
   if (expected && widerInteger(value->getType(), expected) == expected &&
-      value->getType() != expected)
-    return arith::ExtSIOp::create(builder, loc(expr.loc), expected, *value)
-        .getResult();
+      value->getType() != expected) {
+    Location at = loc(expr.loc);
+    if (isUnsigned(expected))
+      return fromBits(at,
+                      arith::ExtUIOp::create(builder, at, bitsType(expected),
+                                             bits(at, *value))
+                          .getResult(),
+                      expected);
+    return arith::ExtSIOp::create(builder, at, expected, *value).getResult();
+  }
   auto from = dyn_cast<TextType>(value->getType());
   auto to = dyn_cast_or_null<TextType>(expected);
   if (from && to && from != to)
@@ -7010,6 +7092,7 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
           emit(*expr.operands[0], builder.getI32Type());
       if (failed(index))
         return failure();
+      *index = countable(at, *index);
       if (!index->getType().isSignlessInteger() ||
           index->getType().isInteger(1))
         return error(expr.operands[0]->loc, "a row's number is an integer");
@@ -7063,6 +7146,7 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                    "table '" + expr.name + "' has rows that are counted; one "
                    "with a row for each case is declared 'table " +
                        expr.name + "[Enum]'");
+    *index = countable(at, *index);
     if (!index->getType().isSignlessInteger() || index->getType().isInteger(1))
       return error(expr.operands[0]->loc, "a row's number is an integer");
     return TableAtOp::create(builder, at, type, symbol(expr.name),
@@ -7083,6 +7167,7 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       FailureOr<mlir::Value> index = emit(*expr.operands[1], indexTy);
       if (failed(text) || failed(index))
         return failure();
+      *index = countable(at, *index);
       if (!index->getType().isSignlessInteger() ||
           index->getType().isInteger(1))
         return error(expr.operands[1]->loc, "an index is an integer");
@@ -7099,6 +7184,7 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     FailureOr<mlir::Value> index = emit(*expr.operands[1], indexTy);
     if (failed(text) || failed(index))
       return failure();
+    *index = countable(at, *index);
     if (!index->getType().isSignlessInteger() || index->getType().isInteger(1))
       return error(expr.operands[1]->loc, "an index is an integer");
     return textIndex(at, *text, *index);
@@ -7137,9 +7223,15 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       if (width < 64 && bits >> width != 0)
         return error(expr.loc, "this hex literal has more than the " +
                                    Twine(width) + " bits of its type");
-      return arith::ConstantOp::create(
-                 builder, at, IntegerAttr::get(type, APInt(width, bits)))
-          .getResult();
+      return integer(at, type, bits);
+    }
+    if (isUnsigned(type)) {
+      // (A literal has no sign of its own: '-' before it is computed.)
+      unsigned width = type.getIntOrFloatBitWidth();
+      if (width < 64 && uint64_t(expr.intValue) >> width != 0)
+        return error(expr.loc, "this number is more than a u" + Twine(width) +
+                                   " holds");
+      return integer(at, type, uint64_t(expr.intValue));
     }
     return arith::ConstantOp::create(
                builder, at, builder.getIntegerAttr(type, expr.intValue))
@@ -7315,11 +7407,18 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     FailureOr<mlir::Value> operand = emit(*expr.operands[0], type);
     if (failed(operand))
       return failure();
+    if (expr.op == Token::Tilde) {
+      // Every bit turned over.
+      if (!isWhole(operand->getType()) && !operand->getType().isIndex())
+        return error(expr.loc, "'~' turns over the bits of a whole number");
+      return arithmetic(at, Token::Caret, *operand,
+                        integer(at, operand->getType(), ~uint64_t(0)));
+    }
     if (isa<FloatType>(operand->getType()))
       return arith::NegFOp::create(builder, at, *operand).getResult();
-    return arithmetic(at, Token::Minus,
-                      arith::ConstantOp::create(
-                          builder, at, builder.getZeroAttr(operand->getType())),
+    if (!operand->getType().isIntOrIndex() || operand->getType().isInteger(1))
+      return error(expr.loc, "'-' needs a number");
+    return arithmetic(at, Token::Minus, integer(at, operand->getType(), 0),
                       *operand);
   }
   case Expr::Binary:
@@ -7460,7 +7559,7 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       if (from == expr.castType)
         return *value;
       Type other = toEnum ? from : expr.castType;
-      if (!other.isSignlessInteger() || other.isInteger(1))
+      if (!isWhole(other))
         return error(expr.loc, "an enum is cast to and from an integer, the "
                                "number of its case");
       Type byte = builder.getIntegerType(8);
@@ -7469,22 +7568,25 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         mlir::Value number =
             UnrealizedConversionCastOp::create(builder, at, byte, *value)
                 .getResult(0);
-        return width == 8 ? number
-                          : arith::ExtUIOp::create(builder, at, other, number)
-                                .getResult();
+        return fromBits(at,
+                        width == 8 ? number
+                                   : arith::ExtUIOp::create(
+                                         builder, at, bitsType(other), number)
+                                         .getResult(),
+                        other);
       }
       mlir::Value number =
-          width == 8
-              ? *value
-              : arith::TruncIOp::create(builder, at, byte, *value).getResult();
+          width == 8 ? bits(at, *value)
+                     : arith::TruncIOp::create(builder, at, byte,
+                                               bits(at, *value))
+                           .getResult();
       return UnrealizedConversionCastOp::create(builder, at, expr.castType,
                                                 number)
           .getResult(0);
     }
     // A literal is written in the type it is cast to (`5000000000 as i64`).
     if (!from && (isa<FloatType>(expr.castType) ||
-                  (expr.castType.isSignlessInteger() &&
-                   !expr.castType.isInteger(1) &&
+                  (isWhole(expr.castType) &&
                    !defaultType(*expr.operands[0]).isF32())))
       from = expr.castType;
     if (!from)
@@ -7501,15 +7603,38 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                  ? arith::ExtFOp::create(builder, at, to, *value).getResult()
                  : arith::TruncFOp::create(builder, at, to, *value)
                        .getResult();
+    if (fromFloat && isUnsigned(to))
+      return fromBits(
+          at,
+          arith::FPToUIOp::create(builder, at, bitsType(to), *value)
+              .getResult(),
+          to);
+    if (isUnsigned(from) && toFloat)
+      return arith::UIToFPOp::create(builder, at, to, bits(at, *value))
+          .getResult();
     if (fromFloat && to.isSignlessInteger())
       return arith::FPToSIOp::create(builder, at, to, *value).getResult();
     if (from.isSignlessInteger() && toFloat)
       return arith::SIToFPOp::create(builder, at, to, *value).getResult();
-    if (from.isSignlessInteger() && to.isSignlessInteger())
-      return from.getIntOrFloatBitWidth() < to.getIntOrFloatBitWidth()
-                 ? arith::ExtSIOp::create(builder, at, to, *value).getResult()
-                 : arith::TruncIOp::create(builder, at, to, *value)
-                       .getResult();
+    if (isWhole(from) && isWhole(to)) {
+      // More bits: those of the sign where the value has one, noughts
+      // where it has none. Fewer: the low ones. As many: the same bits.
+      unsigned had = from.getIntOrFloatBitWidth();
+      unsigned wanted = to.getIntOrFloatBitWidth();
+      mlir::Value held = bits(at, *value);
+      Type target = bitsType(to);
+      if (had < wanted)
+        held = isUnsigned(from)
+                   ? arith::ExtUIOp::create(builder, at, target, held)
+                         .getResult()
+                   : arith::ExtSIOp::create(builder, at, target, held)
+                         .getResult();
+      else if (had > wanted)
+        held = arith::TruncIOp::create(builder, at, target, held).getResult();
+      return fromBits(at, held, to);
+    }
+    if (isUnsigned(from) || isUnsigned(to))
+      return error(expr.loc, "cannot cast between these types");
     if (from.isIntOrIndex() && to.isIntOrIndex())
       return arith::IndexCastOp::create(builder, at, to, *value).getResult();
     return error(expr.loc, "cannot cast between these types");
@@ -7554,35 +7679,102 @@ FailureOr<mlir::Value> Parser::arithmetic(Location at, Token::Kind op,
   bool isFloat = isa<FloatType>(type);
   if (!isFloat && (!type.isIntOrIndex() || type.isInteger(1)))
     return emitError(at, "arithmetic needs numbers"), failure();
+  // One without a sign: computed with as its bits, by the operations that
+  // take them so.
+  bool noSign = isUnsigned(type);
+  a = bits(at, a);
+  b = bits(at, b);
+  auto whole = [&](StringRef what) -> LogicalResult {
+    if (!isFloat)
+      return success();
+    return emitError(at, "'" + what + "' is of whole numbers: a float has "
+                         "no bits to say"),
+           failure();
+  };
+  mlir::Value result;
   switch (op) {
   case Token::Plus:
-    return isFloat ? arith::AddFOp::create(builder, at, a, b).getResult()
-                   : arith::AddIOp::create(builder, at, a, b).getResult();
+    result = isFloat ? arith::AddFOp::create(builder, at, a, b).getResult()
+                     : arith::AddIOp::create(builder, at, a, b).getResult();
+    break;
   case Token::Minus:
-    return isFloat ? arith::SubFOp::create(builder, at, a, b).getResult()
-                   : arith::SubIOp::create(builder, at, a, b).getResult();
+    result = isFloat ? arith::SubFOp::create(builder, at, a, b).getResult()
+                     : arith::SubIOp::create(builder, at, a, b).getResult();
+    break;
   case Token::Star:
-    return isFloat ? arith::MulFOp::create(builder, at, a, b).getResult()
-                   : arith::MulIOp::create(builder, at, a, b).getResult();
+    result = isFloat ? arith::MulFOp::create(builder, at, a, b).getResult()
+                     : arith::MulIOp::create(builder, at, a, b).getResult();
+    break;
   case Token::Slash:
-    return isFloat ? arith::DivFOp::create(builder, at, a, b).getResult()
-                   : arith::DivSIOp::create(builder, at, a, b).getResult();
+    result = isFloat   ? arith::DivFOp::create(builder, at, a, b).getResult()
+             : noSign ? arith::DivUIOp::create(builder, at, a, b).getResult()
+                      : arith::DivSIOp::create(builder, at, a, b).getResult();
+    break;
   case Token::Percent:
-    return isFloat ? arith::RemFOp::create(builder, at, a, b).getResult()
-                   : arith::RemSIOp::create(builder, at, a, b).getResult();
+    result = isFloat   ? arith::RemFOp::create(builder, at, a, b).getResult()
+             : noSign ? arith::RemUIOp::create(builder, at, a, b).getResult()
+                      : arith::RemSIOp::create(builder, at, a, b).getResult();
+    break;
+  case Token::Amp:
+    if (failed(whole("&")))
+      return failure();
+    result = arith::AndIOp::create(builder, at, a, b).getResult();
+    break;
+  case Token::Pipe:
+    if (failed(whole("|")))
+      return failure();
+    result = arith::OrIOp::create(builder, at, a, b).getResult();
+    break;
+  case Token::Caret:
+    if (failed(whole("^")))
+      return failure();
+    result = arith::XOrIOp::create(builder, at, a, b).getResult();
+    break;
+  case Token::ShiftLeft:
+  case Token::ShiftRight: {
+    if (failed(whole(op == Token::ShiftLeft ? "<<" : ">>")))
+      return failure();
+    // By the amount's low bits, as many as say a place in the number: a
+    // shift by its width or more is one by what is left of that.
+    unsigned width = type.isIndex() ? 64 : type.getIntOrFloatBitWidth();
+    mlir::Value amount = arith::AndIOp::create(
+        builder, at, b,
+        arith::ConstantOp::create(
+            builder, at,
+            IntegerAttr::get(a.getType(),
+                             APInt(type.isIndex() ? 64 : width, width - 1))));
+    // To the right, the bits that come in are the sign's, or noughts for
+    // a number that has none.
+    result = op == Token::ShiftLeft
+                 ? arith::ShLIOp::create(builder, at, a, amount).getResult()
+             : noSign
+                 ? arith::ShRUIOp::create(builder, at, a, amount).getResult()
+                 : arith::ShRSIOp::create(builder, at, a, amount).getResult();
+    break;
+  }
   default:
     return emitError(at, "not an arithmetic operator"), failure();
   }
+  return fromBits(at, result, type);
 }
 
 mlir::Value Parser::combine(Location at, StringRef rule, mlir::Value a,
                             mlir::Value b) {
-  bool isFloat = isa<FloatType>(a.getType());
+  Type type = a.getType();
+  bool isFloat = isa<FloatType>(type);
+  bool noSign = isUnsigned(type);
+  a = bits(at, a);
+  b = bits(at, b);
+  mlir::Value result;
   if (rule == "min")
-    return isFloat ? arith::MinimumFOp::create(builder, at, a, b).getResult()
-                   : arith::MinSIOp::create(builder, at, a, b).getResult();
-  return isFloat ? arith::MaximumFOp::create(builder, at, a, b).getResult()
-                 : arith::MaxSIOp::create(builder, at, a, b).getResult();
+    result = isFloat  ? arith::MinimumFOp::create(builder, at, a, b).getResult()
+             : noSign ? arith::MinUIOp::create(builder, at, a, b).getResult()
+                      : arith::MinSIOp::create(builder, at, a, b).getResult();
+  else
+    result = isFloat  ? arith::MaximumFOp::create(builder, at, a, b).getResult()
+             : noSign ? arith::MaxUIOp::create(builder, at, a, b).getResult()
+                      : arith::MaxSIOp::create(builder, at, a, b).getResult();
+  return fromBits(at, result, type);
 }
 
 FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
@@ -7658,6 +7850,36 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
                                  x, y)
         .getResult();
   }
+  if (expr.op == Token::ShiftLeft || expr.op == Token::ShiftRight) {
+    // What is shifted says the type; by how much is any whole number, of
+    // which the low bits count.
+    Type type = typeOf(lhs);
+    if (!type)
+      type = expected ? expected : defaultType(lhs);
+    FailureOr<mlir::Value> a = emit(lhs, type);
+    if (failed(a))
+      return failure();
+    if (!isWhole(a->getType()))
+      return error(expr.loc, "'<<' and '>>' shift the bits of a whole "
+                             "number");
+    Type amountType = typeOf(rhs);
+    if (!amountType)
+      amountType = a->getType();
+    FailureOr<mlir::Value> b = emit(rhs, amountType);
+    if (failed(b))
+      return failure();
+    if (!isWhole(b->getType()))
+      return error(rhs.loc, "a shift is by a whole number of bits");
+    unsigned had = b->getType().getIntOrFloatBitWidth();
+    unsigned wanted = a->getType().getIntOrFloatBitWidth();
+    mlir::Value amount = bits(at, *b);
+    Type held = bitsType(a->getType());
+    if (had < wanted)
+      amount = arith::ExtUIOp::create(builder, at, held, amount);
+    else if (had > wanted)
+      amount = arith::TruncIOp::create(builder, at, held, amount);
+    return arithmetic(at, expr.op, *a, fromBits(at, amount, a->getType()));
+  }
   Type type = typeOf(lhs);
   if (!type)
     type = typeOf(rhs);
@@ -7672,7 +7894,12 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
   if (failed(a) || failed(b))
     return failure();
   if (a->getType() != b->getType())
-    return error(expr.loc, "operands have different types");
+    return error(expr.loc,
+                 isWhole(a->getType()) && isWhole(b->getType()) &&
+                         isUnsigned(a->getType()) != isUnsigned(b->getType())
+                     ? "one of these has a sign and the other has none: "
+                       "say which it is to be, with 'as'"
+                     : "operands have different types");
   if (auto named = dyn_cast<EnumType>(a->getType())) {
     if (expr.op != Token::Equal && expr.op != Token::NotEqual)
       return error(expr.loc, "enum values are compared with '==' and '!='; "
@@ -7714,6 +7941,7 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
     }
     return arith::CmpFOp::create(builder, at, predicate, *a, *b).getResult();
   }
+  bool noSign = isUnsigned(a->getType());
   arith::CmpIPredicate predicate;
   switch (expr.op) {
   case Token::Equal:
@@ -7723,16 +7951,16 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
     predicate = arith::CmpIPredicate::ne;
     break;
   case Token::Less:
-    predicate = arith::CmpIPredicate::slt;
+    predicate = noSign ? arith::CmpIPredicate::ult : arith::CmpIPredicate::slt;
     break;
   case Token::LessEqual:
-    predicate = arith::CmpIPredicate::sle;
+    predicate = noSign ? arith::CmpIPredicate::ule : arith::CmpIPredicate::sle;
     break;
   case Token::Greater:
-    predicate = arith::CmpIPredicate::sgt;
+    predicate = noSign ? arith::CmpIPredicate::ugt : arith::CmpIPredicate::sgt;
     break;
   default:
-    predicate = arith::CmpIPredicate::sge;
+    predicate = noSign ? arith::CmpIPredicate::uge : arith::CmpIPredicate::sge;
     break;
   }
   // Two entities: the same one or not.
@@ -7747,7 +7975,9 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
                                  integer(at, builder.getI1Type(), 1))
         .getResult();
   }
-  return arith::CmpIOp::create(builder, at, predicate, *a, *b).getResult();
+  return arith::CmpIOp::create(builder, at, predicate, bits(at, *a),
+                               bits(at, *b))
+      .getResult();
 }
 
 //===----------------------------------------------------------------------===//
@@ -7920,9 +8150,45 @@ Type Parser::textTypeOf(const Expr &expr) {
 }
 
 mlir::Value Parser::integer(Location at, Type type, uint64_t value) {
-  return arith::ConstantOp::create(
-      builder, at,
-      IntegerAttr::get(type, APInt(type.getIntOrFloatBitWidth(), value)));
+  Type held = bitsType(type);
+  unsigned width = held.isIndex() ? 64 : held.getIntOrFloatBitWidth();
+  return fromBits(at,
+                  arith::ConstantOp::create(
+                      builder, at,
+                      IntegerAttr::get(held, APInt(width, value,
+                                                   /*isSigned=*/false,
+                                                   /*implicitTrunc=*/true))),
+                  type);
+}
+
+mlir::Value Parser::bits(Location at, mlir::Value value) {
+  if (!isUnsigned(value.getType()))
+    return value;
+  return UnrealizedConversionCastOp::create(
+             builder, at, bitsType(value.getType()), value)
+      .getResult(0);
+}
+
+mlir::Value Parser::countable(Location at, mlir::Value value) {
+  if (!isUnsigned(value.getType()))
+    return value;
+  // (A u64 from 2^63 on is less than nought then: no row, as it should
+  // be.)
+  unsigned width = value.getType().getIntOrFloatBitWidth();
+  mlir::Value held = bits(at, value);
+  if (width == 64)
+    return held;
+  return arith::ExtUIOp::create(
+             builder, at,
+             width < 32 ? builder.getI32Type() : builder.getI64Type(), held)
+      .getResult();
+}
+
+mlir::Value Parser::fromBits(Location at, mlir::Value bits, Type type) {
+  if (bits.getType() == type)
+    return bits;
+  return UnrealizedConversionCastOp::create(builder, at, type, bits)
+      .getResult(0);
 }
 
 mlir::Value Parser::textBits(Location at, mlir::Value text) {
@@ -8155,6 +8421,13 @@ FailureOr<mlir::Value> Parser::formatValue(llvm::SMLoc where,
     TextType five = TextType::get(context, 5);
     return choose(value, textConstant(at, "true", five),
                   textConstant(at, "false", five));
+  }
+  if (isUnsigned(type)) {
+    // Without a sign: its digits.
+    mlir::Value wide = bits(at, value);
+    if (wide.getType() != i64)
+      wide = arith::ExtUIOp::create(builder, at, i64, wide);
+    return formatUnsigned(at, wide);
   }
   if (type.isIntOrIndex()) {
     mlir::Value wide = value;

@@ -34,6 +34,12 @@ struct Token {
     MinusAssign,
     StarAssign,
     SlashAssign,
+    PercentAssign,
+    AmpAssign,        // &=
+    PipeAssign,       // |=
+    CaretAssign,      // ^=
+    ShiftLeftAssign,  // <<=
+    ShiftRightAssign, // >>=
     Plus,
     Minus,
     Star,
@@ -46,7 +52,14 @@ struct Token {
     Greater,
     GreaterEqual,
     Not,
-    Tilde, // ~, of the arrow to the sibling after: (a)~[R]~>(b)
+    // ~: the bits of a number turned over, and of the arrow to the sibling
+    // after: (a)~[R]~>(b)
+    Tilde,
+    Amp,        // &
+    Pipe,       // |
+    Caret,      // ^
+    ShiftLeft,  // <<
+    ShiftRight, // >>
     AndAnd,
     OrOr,
   };

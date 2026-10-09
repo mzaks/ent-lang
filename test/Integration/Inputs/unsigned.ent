@@ -1,0 +1,6 @@
+// A device that takes and gives numbers without a sign, and a buffer of
+// them (numbers.test): in C they are `uint8_t` .. `uint64_t`.
+buffer Bytes { value: u8, at: u16 } capacity 8
+extern fn rotate(bits: u32, by: u32) -> u32
+extern fn widest() -> u64
+extern proc show_bytes(them: Bytes) -> u32

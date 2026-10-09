@@ -41,17 +41,18 @@ static StringRef getCType(Type type) {
   if (isa<IndexType>(type))
     return "int64_t";
   if (auto integer = dyn_cast<IntegerType>(type)) {
+    bool noSign = integer.isUnsigned();
     switch (integer.getWidth()) {
     case 1:
       return "bool";
     case 8:
-      return "int8_t";
+      return noSign ? "uint8_t" : "int8_t";
     case 16:
-      return "int16_t";
+      return noSign ? "uint16_t" : "int16_t";
     case 32:
-      return "int32_t";
+      return noSign ? "uint32_t" : "int32_t";
     case 64:
-      return "int64_t";
+      return noSign ? "uint64_t" : "int64_t";
     }
   }
   if (type.isF32())

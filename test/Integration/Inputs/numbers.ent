@@ -1,0 +1,103 @@
+// The bits of whole numbers, and whole numbers without a sign
+// (numbers.test).
+import console
+import unsigned
+
+component Spin { angle: u32, step: u32, shade: u8 } capacity 16
+component Aim { at: entity } capacity 4
+unique Sum: u32
+unique Top { most: u32, least: u32, last: u8, flags: i32 }
+table masks: u32 = [0x80000000, 255, 4000000000]
+table kinds { bits: u8, wide: u64 } = [
+  { bits: 200, wide: 0x8ac7230489e80000 }, { bits: 7, wide: 1 }
+]
+table shades: i32 = [10, 20, 30, 40]
+
+// 16.16 fixed point: the product of two, by way of 64 bits.
+fn fixed_mul(a: i32, b: i32) -> i32 {
+  ((a as i64 * b as i64) >> 16) as i32
+}
+fn turned(angle: u32, by: u32) -> u32 { angle + by }
+fn fine(angle: u32) -> i32 { (angle >> 19) as i32 }
+
+world {
+  Top.least = 0xffffffff
+  let a = spawn { Spin { angle: 0xf0000000, step: 0x20000000, shade: 250 } }
+  spawn { Spin { angle: 1, step: 0x90000000, shade: 3 } }
+  spawn { Aim { at: a } }
+  spawn { Aim { at: a } }
+}
+
+system bits() {
+  let a = 0x00030000
+  let b = -0x00028000
+  put("mul {fixed_mul(a, b)}")
+  put("and {a & 0xffff} or {a | 5} xor {a ^ 0x10001} not {~a}")
+  put("shl {1 << 4} shr {-256 >> 4} wide {(1 as i64) << 40}")
+  // `&` before `|`, both after a shift, that after `+`; all before `==`.
+  put("order {1 | 2 & 3 << 1 + 1} {6 & 3 == 2}")
+  // A shift by the width or more is one by what is left of it.
+  let n = 33
+  put("round {1 << n} {(-8) >> 35}")
+  var flags = 0x0f
+  flags &= ~0x05
+  flags |= 0x100
+  flags ^= 0x02
+  flags <<= 2
+  flags >>= 1
+  flags %= 500
+  put("flags {flags}")
+  Top.flags |= 6
+  Top.flags &= 3
+  put("unique {Top.flags}")
+}
+
+system unsigned() {
+  let u = 0xf0000000 as u32
+  let v = 4000000000 as u32
+  put("u {u} v {v} sum {u + v} shr {u >> 28} div {v / 3} rem {v % 7}")
+  put("less {u < v} more {u > v} min {min(u, v)} max {max(u, v)}")
+  put("as i32 {u as i32} as u8 {v as u8} as i64 {v as i64} float {v as f32}")
+  let angle = 0xc0000000 as u32
+  put("fine {(angle + 0x80000000) >> 19} neg {-angle} not {~angle}")
+  let byte = 250 as u8
+  put("wrap {byte + 10} wider {byte + v} from {(-1) as u16} {3e9 as u32}")
+  put("widest {widest()} rotate {rotate(0x80000001, 4)}")
+  // A number without a sign says which row, and which byte.
+  var word: text[3] = "abc"
+  put("row {shades[byte - 248]} {shades[v]} byte {word[byte - 249]}")
+}
+
+system turn() {
+  for s: mut Spin {
+    s.angle = turned(s.angle, s.step)
+    s.shade += 10
+    s.shade |= 1
+    Sum += s.angle
+    Top.most max= s.angle
+    Top.least min= s.angle
+    Top.last = s.shade
+  }
+  for a: Aim {
+    Spin(a.at).step += 0x70000000
+  }
+  Bytes = []
+  for s: Spin where s.angle > 0x0fffffff {
+    Bytes += { value: s.shade, at: 65535 }
+  }
+  for s: Spin {
+    put("angle {s.angle} fine {fine(s.angle)} step {s.step} shade {s.shade}")
+  }
+  put("sum {Sum} most {Top.most} least {Top.least} last {Top.last}")
+  let shown = show_bytes(Bytes)
+  put("bytes {len(Bytes)}: {shown} {Bytes[0].value} {Bytes[0].at} {Bytes[5].value}")
+  put("masks {masks[0]} {masks[1] & masks[2]} {masks[9]}")
+  put("kinds {kinds[0].bits} {kinds[0].wide} {kinds[1].wide}")
+  var n: u16 = 65530
+  for i in 0..10 { n += 1 }
+  put("n {n}")
+}
+
+schedule once() { bits() unsigned() turn() }
+schedule again() { turn() }
+main { once() again() }

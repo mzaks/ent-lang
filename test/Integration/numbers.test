@@ -1,0 +1,55 @@
+// The bits of whole numbers (`&`, `|`, `^`, `~`, `<<`, `>>` and their
+// assignments) and whole numbers without a sign (`u8` .. `u64`), in
+// everything that holds a number: Inputs/numbers.ent, with a device that
+// takes and gives them (Inputs/unsigned.ent, unsigned.c).
+// RUN: %ent run %S/Inputs/numbers.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/numbers.ent | FileCheck %s
+// RUN: %ent build %S/Inputs/numbers.ent -o %t.exe --keep %t.dir
+// RUN: FileCheck %s --check-prefix=HEADER --input-file=%t.dir/ent_extern.h
+
+// HEADER-DAG: uint32_t ent_unsigned_rotate(uint32_t arg0, uint32_t arg1);
+// HEADER-DAG: uint64_t ent_unsigned_widest(void);
+// HEADER-DAG: uint32_t ent_unsigned_show_bytes(int32_t arg0_count, const uint8_t *arg0_value, const uint16_t *arg0_at);
+
+// 3.0 times -2.5 in 16.16 fixed point: -7.5.
+// CHECK:      mul -491520
+// CHECK-NEXT: and 0 or 196613 xor 131073 not -196609
+// CHECK-NEXT: shl 16 shr -16 wide 1099511627776
+// `&` before `|`, a shift before both and `+` before that; all before `==`.
+// CHECK-NEXT: order 1 true
+// A shift by 33 of 32 bits is one by 1; by 35, one by 3.
+// CHECK-NEXT: round 2 -1
+// CHECK-NEXT: flags 28
+// CHECK-NEXT: unique 2
+// Without a sign: sums go round at 2^32, a shift to the right brings in
+// noughts, and dividing and comparing are of the whole range.
+// CHECK-NEXT: u 4026531840 v 4000000000 sum 3731564544 shr 15 div 1333333333 rem 3
+// CHECK-NEXT: less false more true min 4000000000 max 4026531840
+// CHECK-NEXT: as i32 -268435456 as u8 0 as i64 4000000000 float 4000000000.0
+// CHECK-NEXT: fine 2048 neg 1073741824 not 1073741823
+// CHECK-NEXT: wrap 4 wider 4000000250 from 65535 3000000000
+// To C and back (Inputs/unsigned.c).
+// CHECK-NEXT: widest 18446744073709551615 rotate 24
+// As the number of a row and of a byte.
+// CHECK-NEXT: row 30 0 byte 98
+// In components, uniques, a buffer and tables. The most and the least
+// are of numbers from 2^31 on, which with a sign would be below nought.
+// CHECK-NEXT: angle 268435456 fine 512 step 0 shade 5
+// CHECK-NEXT: angle 2415919105 fine 4608 step 2415919104 shade 13
+// CHECK-NEXT: sum 2684354561 most 2415919105 least 268435456 last 13
+// CHECK-NEXT:   byte 5 at 65535
+// CHECK-NEXT:   byte 13 at 65535
+// CHECK-NEXT: bytes 2: 18 5 65535 0
+// CHECK-NEXT: masks 2147483648 0 0
+// CHECK-NEXT: kinds 200 10000000000000000000 1
+// CHECK-NEXT: n 4
+// CHECK-NEXT: angle 268435456 fine 512 step 3758096384 shade 15
+// CHECK-NEXT: angle 536870913 fine 1024 step 2415919104 shade 23
+// CHECK-NEXT: sum 3489660930 most 2415919105 least 268435456 last 23
+// CHECK-NEXT:   byte 15 at 65535
+// CHECK-NEXT:   byte 23 at 65535
+// CHECK-NEXT: bytes 2: 38 15 65535 0
+// CHECK-NEXT: masks 2147483648 0 0
+// CHECK-NEXT: kinds 200 10000000000000000000 1
+// CHECK-NEXT: n 4
+// CHECK-NOT:  {{.}}

@@ -559,7 +559,7 @@ LogicalResult RelationOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       return emitOpError("is ordered by ")
              << getOrderComponentAttr() << " \"" << *getOrderField()
              << "\", but the component has no such field";
-    if (!isa<IntegerType>(type) || type.isInteger(1))
+    if (!type.isSignlessInteger() || type.isInteger(1))
       return emitOpError("is ordered by a field of type ")
              << type << "; the children are ordered by an integer";
   }
@@ -844,8 +844,7 @@ LogicalResult ExternOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 
 /// The types a value can cross to C with.
 static bool crossesToC(Type type) {
-  return isa<FloatType, TextType, StringType, EnumType>(type) ||
-         type.isSignlessInteger();
+  return isa<FloatType, TextType, StringType, EnumType, IntegerType>(type);
 }
 
 //===----------------------------------------------------------------------===//

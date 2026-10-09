@@ -172,7 +172,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.ent",
-          "match": "\\b(f32|f64|bool|i1|i8|i16|i32|i64|index|entity|text)\\b"
+          "match": "\\b(f32|f64|bool|i1|i8|i16|i32|i64|u8|u16|u32|u64|index|entity|text)\\b"
         },
         {
           "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(\\.)\\s*([A-Z][A-Za-z0-9_]*)\\b",
@@ -262,11 +262,11 @@
       "patterns": [
         {
           "name": "keyword.operator.assignment.ent",
-          "match": "(\\+=|-=|\\*=|/=|\\b(min|max)\\s*=(?!=)|=(?!=))"
+          "match": "(\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>=|\\b(min|max)\\s*=(?!=)|=(?!=))"
         },
         {
           "name": "keyword.operator.ent",
-          "match": "(->|\\.\\.|==|!=|<=|>=|&&|\\|\\||[-+*/%<>!])"
+          "match": "(->|\\.\\.|==|!=|<<|>>|<=|>=|&&|\\|\\||[-+*/%<>!&|^~])"
         }
       ]
     }

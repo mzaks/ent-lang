@@ -7,11 +7,15 @@ const PREC = {
   and: 2,
   equal: 3,
   compare: 4,
-  add: 5,
-  multiply: 6,
-  unary: 7,
-  cast: 8,
-  postfix: 9,
+  bit_or: 5,
+  bit_xor: 6,
+  bit_and: 7,
+  shift: 8,
+  add: 9,
+  multiply: 10,
+  unary: 11,
+  cast: 12,
+  postfix: 13,
 };
 
 const list = (rule) => seq(rule, repeat(seq(',', rule)), optional(','));
@@ -184,8 +188,8 @@ module.exports = grammar({
                          $._type))),
                      ')', optional(seq('->', $._type)))),
     primitive_type: (_) =>
-      choice('f32', 'f64', 'bool', 'i1', 'i8', 'i16', 'i32', 'i64', 'index',
-             'entity'),
+      choice('f32', 'f64', 'bool', 'i1', 'i8', 'i16', 'i32', 'i64', 'u8',
+             'u16', 'u32', 'u64', 'index', 'entity'),
     // rows { field: type, .. }, rows type, rows[Enum] ..: a table of
     // that shape, as a value.
     rows_type: ($) =>
@@ -323,7 +327,8 @@ module.exports = grammar({
     assignment: ($) =>
       prec.right(seq(field('target', $._expression),
                      field('operator',
-                           choice('=', '+=', '-=', '*=', '/=', seq('min', '='),
+                           choice('=', '+=', '-=', '*=', '/=', '%=', '&=',
+                                  '|=', '^=', '<<=', '>>=', seq('min', '='),
                                   seq('max', '='))),
                      // (A buffer is given a row, or none.)
                      field('value',
@@ -375,7 +380,7 @@ module.exports = grammar({
            seq(field('value', $._expression), '[', $._expression, ']')),
 
     unary: ($) =>
-      prec(PREC.unary, seq(choice('-', '!'), $._expression)),
+      prec(PREC.unary, seq(choice('-', '!', '~'), $._expression)),
 
     binary: ($) =>
       choice(
@@ -388,6 +393,11 @@ module.exports = grammar({
           ['<=', PREC.compare],
           ['>', PREC.compare],
           ['>=', PREC.compare],
+          ['|', PREC.bit_or],
+          ['^', PREC.bit_xor],
+          ['&', PREC.bit_and],
+          ['<<', PREC.shift],
+          ['>>', PREC.shift],
           ['+', PREC.add],
           ['-', PREC.add],
           ['*', PREC.multiply],

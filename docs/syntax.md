@@ -102,13 +102,14 @@ default_capacity 1024
 capacity Inside 4096                        // another capacity for one declared before
 ```
 
-- Types: `f32`, `f64`, `bool`, `i8`, `i16`, `i32`, `i64`, `index`, `entity`,
-  `text[N]` and `text` (see Text below), and the enums the program declares (see
-  Enums below).
+- Types: `f32`, `f64`, `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`,
+  `u32`, `u64`, `index`, `entity`, `text[N]` and `text` (see Text below),
+  and the enums the program declares (see Enums below).
 - A whole number goes where one of more bits is expected as it is (an
   `i32` where an `i64` is, as a value, an argument or one side of `+`
   or `<`: two of different sizes are computed with as the bigger). The
-  other way round takes `as`.
+  other way round takes `as`. So does going between a number with a sign
+  and one without (`u8` .. `u64`): see Whole numbers below.
 - `none`, where an entity is expected, is no entity: the same as itself
   (`target == none`) and as no other; what is sent to it goes nowhere,
   and what is looked up of it is not found.
@@ -743,10 +744,12 @@ of a depth.
 
 - `let name = expr`: an immutable local.
 - `var name = expr`, `var name: type = expr`: a local that can be assigned,
-  with `=`, `+=`, `-=`, `*=`, `/=`, `min=`, `max=` (a text with `=` and
+  with `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`,
+  `min=`, `max=` (a text with `=` and
   `+=`). It has the type of the value it starts with, or the one written:
   `var best: i64 = 0`, `var line: text[30] = ""`. See Vars below.
-- `binding.field = expr`, and `+=`, `-=`, `*=`, `/=`, `min=`, `max=`.
+- `binding.field = expr`, and `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`,
+  `^=`, `<<=`, `>>=`, `min=`, `max=`.
 - Uniques: `Clock.frame += 1`, `Score += 10` (the shorthand's value).
   Outside a `for` this reads and writes; inside one `+=`, `-=`, `min=`
   and `max=` accumulate (combined when the query ends, in a fixed
@@ -866,8 +869,9 @@ in a branch of an `if` that gives a value, which is made of `let`s.
 ## Expressions
 
 Literals (`1`, `2.5`, `1e8`, `true`), locals and parameters, `binding.field`,
-`Unique.field`, `Unique` (shorthand), `- !`, `* / %`, `+ -`, comparisons,
-`&&`, `||` (in that order of precedence, all left-associative),
+`Unique.field`, `Unique` (shorthand), `- ! ~`, `* / %`, `+ -`, `<< >>`,
+`&`, `^`, `|`, comparisons, `&&`, `||` (in that order of precedence, all
+left-associative),
 `min(a, b)`, `max(a, b)`, `expr as T`, and
 `if cond { let ...; value } else { value }` (also with `else if cond
 { value }` between). A literal takes the type of the
@@ -877,6 +881,57 @@ i32 and a float an f32. There are no implicit conversions.
 An integer may be written in hex (`0xff8800`): the bits of the type it
 takes, so `0xff` is an i8 (all its bits, the number -1) and a ninth bit
 does not fit one. It is never a float.
+
+### Whole numbers
+
+```
+fn fixed_mul(a: i32, b: i32) -> i32 {      // 16.16 fixed point
+  ((a as i64 * b as i64) >> 16) as i32
+}
+fn fine(angle: u32) -> i32 { (angle >> 19) as i32 }
+
+component Thing { flags: i32, angle: u32, shade: u8 }
+for t: mut Thing {
+  t.flags &= ~0x04
+  t.angle += 0x40000000        // a quarter turn; a whole one is nought again
+  if t.flags & 0x10 != 0 { t.shade = 255 }
+}
+```
+
+- `i8`, `i16`, `i32`, `i64` have a sign; `u8`, `u16`, `u32`, `u64` have
+  none, and hold nought to 255, 65535, 2^32 - 1, 2^64 - 1.
+- `+`, `-` and `*` keep the low bits of what they come to, in every one
+  of these types: one more than the most a type holds is the least it
+  holds (`250 as u8 + 10` is 4). `-x` of a number without a sign is what
+  added to `x` gives nought.
+- `&`, `|` and `^` take two whole numbers of one type bit by bit: where
+  both have a bit, where either has, where just one has. `~x` is `x` with
+  every bit turned over. They come after a shift and before a comparison,
+  `&` before `^` before `|`: `flags & mask == 0` asks of `flags & mask`.
+- `x << n` and `x >> n` move the bits of `x` up and down by `n` places,
+  and are of the type of `x`; `n` is any whole number. Moving down, the
+  bits that come in are the sign's for a number with one (`-256 >> 4` is
+  -16) and noughts for one without. Of `n` the low bits count, as many as
+  say a place in `x`: a shift of an `i32` by 33 is one by 1. Shifts come
+  after `+` and before `&`.
+- Dividing, the remainder, comparing, `min`, `max` and a value's text
+  (`"{angle}"`) are of the number as its type reads it: `0xf0000000 as
+  u32` is more than `1`, and as an `i32` it is less.
+- A number with a sign and one without are not computed with together,
+  and neither goes where the other is expected: `as` says which it is to
+  be. To a type of more bits `as` fills in the sign's bits for a number
+  that has a sign and noughts for one that has none; to one of fewer it
+  keeps the low bits; to one of as many, all of them (`-1 as u32` is
+  2^32 - 1). A float is cast to and from both.
+- A literal takes a type without a sign like any other (`let top =
+  4000000000 as u32`, `shade: 255`), and is an error where it is more
+  than the type holds. One above 2^63 - 1 is written in hex.
+- A number without a sign may say which row of a table or a buffer, and
+  which byte of a text.
+- For C a `u32` is a `uint32_t`, and so the others.
+
+Not yet: `for i in a..b` over numbers without a sign, and a tree `ordered
+by` a field that is one.
 
 ## Assets
 

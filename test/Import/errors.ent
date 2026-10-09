@@ -285,7 +285,7 @@ system s() {
 component Position { x: f32 }
 system s() {
   for p: mut Position {
-    // expected-error @+1 {{expected an assignment ('=', '+=', '-=', '*=', '/=', 'min=', 'max='), found '1.0'}}
+    // expected-error @+1 {{expected an assignment ('=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=', 'min=', 'max='), found '1.0'}}
     p.x 1.0
   }
 }
@@ -947,7 +947,7 @@ enum Nothing { }
 
 // -----
 
-// expected-error @+1 {{unknown type 'Way'; expected f32, f64, bool, i8, i16, i32, i64, index, entity, text, text[N] or an enum}}
+// expected-error @+1 {{unknown type 'Way'; expected f32, f64, bool, i8, i16, i32, i64, u8, u16, u32, u64, index, entity, text, text[N] or an enum}}
 component Ghost { way: Way }
 enum Way { Left, Right }
 

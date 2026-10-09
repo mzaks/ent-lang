@@ -123,12 +123,20 @@ Token Lexer::next() {
   case '/':
     return make(followedBy('=') ? Token::SlashAssign : Token::Slash, start);
   case '%':
-    return make(Token::Percent, start);
+    return make(followedBy('=') ? Token::PercentAssign : Token::Percent,
+                start);
   case '!':
     return make(followedBy('=') ? Token::NotEqual : Token::Not, start);
   case '<':
+    if (followedBy('<'))
+      return make(followedBy('=') ? Token::ShiftLeftAssign : Token::ShiftLeft,
+                  start);
     return make(followedBy('=') ? Token::LessEqual : Token::Less, start);
   case '>':
+    if (followedBy('>'))
+      return make(followedBy('=') ? Token::ShiftRightAssign
+                                  : Token::ShiftRight,
+                  start);
     return make(followedBy('=') ? Token::GreaterEqual : Token::Greater,
                 start);
   case '~':
@@ -136,11 +144,13 @@ Token Lexer::next() {
   case '&':
     if (followedBy('&'))
       return make(Token::AndAnd, start);
-    break;
+    return make(followedBy('=') ? Token::AmpAssign : Token::Amp, start);
   case '|':
     if (followedBy('|'))
       return make(Token::OrOr, start);
-    break;
+    return make(followedBy('=') ? Token::PipeAssign : Token::Pipe, start);
+  case '^':
+    return make(followedBy('=') ? Token::CaretAssign : Token::Caret, start);
   default:
     break;
   }

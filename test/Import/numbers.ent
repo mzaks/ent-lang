@@ -1,0 +1,80 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+
+// The bits of whole numbers, and whole numbers without a sign: `u8`,
+// `u16`, `u32`, `u64` are the types `ui8` .. `ui64`, computed with as the
+// integers of as many bits, by the operations that take them without a
+// sign.
+// CHECK: ent.resource @Bits (flags: i32, angle: ui32, shade: ui8, wide: ui64)
+unique Bits { flags: i32, angle: u32, shade: u8, wide: u64 }
+
+// CHECK-LABEL: ent.system @signed() {
+system signed() {
+  let a = Bits.flags
+  // `&` first, then `^`, then `|`.
+  // CHECK: %[[AND:.*]] = arith.andi
+  // CHECK: %[[XOR:.*]] = arith.xori
+  // CHECK: arith.ori %[[AND]], %[[XOR]]
+  Bits.flags = a & 3 | 4 ^ a
+  // Every bit turned over.
+  // CHECK: %[[ONES:.*]] = arith.constant -1 : i32
+  // CHECK: arith.xori %{{.*}}, %[[ONES]]
+  Bits.flags = ~a
+  // A shift is by the low bits of what says how far; to the right, the
+  // sign's bits come in.
+  // CHECK: %[[MASK:.*]] = arith.constant 31 : i32
+  // CHECK: %[[BY:.*]] = arith.andi %{{.*}}, %[[MASK]]
+  // CHECK: arith.shli %{{.*}}, %[[BY]]
+  Bits.flags = a << 3
+  // CHECK: arith.shrsi
+  Bits.flags = a >> 3
+  // CHECK: arith.andi
+  Bits.flags &= 5
+  // CHECK: arith.shli
+  Bits.flags <<= 2
+  // CHECK: arith.remsi
+  Bits.flags %= 7
+}
+
+// CHECK-LABEL: ent.system @unsigned() {
+system unsigned() {
+  // CHECK: %[[READ:.*]] = ent.read @Bits "angle" : ui32
+  let a = Bits.angle
+  // A literal is the bits of its type; the sum is of the bits of both.
+  // CHECK: %[[C:.*]] = arith.constant -294967296 : i32
+  // CHECK: %[[LITERAL:.*]] = builtin.unrealized_conversion_cast %[[C]] : i32 to ui32
+  // CHECK: %[[A:.*]] = builtin.unrealized_conversion_cast %[[READ]] : ui32 to i32
+  // CHECK: %[[B:.*]] = builtin.unrealized_conversion_cast %[[LITERAL]] : ui32 to i32
+  // CHECK: %[[SUM:.*]] = arith.addi %[[A]], %[[B]] : i32
+  // CHECK: builtin.unrealized_conversion_cast %[[SUM]] : i32 to ui32
+  Bits.angle = a + 4000000000
+  // CHECK: arith.divui
+  Bits.angle = a / 3
+  // CHECK: arith.remui
+  Bits.angle = a % 3
+  // Noughts come in from the left.
+  // CHECK: arith.shrui
+  Bits.angle = a >> 19
+  // CHECK: arith.cmpi ult
+  // CHECK: arith.cmpi uge
+  if a < 5 || a >= 9 { Bits.angle = 0 }
+  // CHECK: arith.minui
+  // CHECK: arith.maxui
+  Bits.angle = max(min(a, 7), 2)
+  // To more bits: noughts for one without a sign, the sign's for one with.
+  // CHECK: arith.extui %{{.*}} : i32 to i64
+  Bits.wide = a as u64
+  // CHECK: arith.extsi %{{.*}} : i32 to i64
+  Bits.wide = Bits.flags as u64
+  // One of fewer bits goes where one of more is expected, as it is.
+  // CHECK: arith.extui %{{.*}} : i8 to i32
+  Bits.angle = a + Bits.shade
+  // CHECK: arith.trunci %{{.*}} : i32 to i8
+  Bits.shade = a as u8
+  // As many bits: the same ones.
+  // CHECK-NOT: arith
+  // CHECK: builtin.unrealized_conversion_cast %{{.*}} : i32 to ui32
+  Bits.angle = Bits.flags as u32
+  // CHECK: arith.uitofp
+  // CHECK: arith.fptoui
+  Bits.angle = (a as f32 * 0.5) as u32
+}

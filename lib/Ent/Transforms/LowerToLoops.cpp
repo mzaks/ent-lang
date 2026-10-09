@@ -38,6 +38,17 @@ static const char kScopeAttr[] = "ent.scope";
 
 namespace {
 
+/// A whole number without a sign (u8, u16, u32, u64): stored and computed
+/// with as its bits, by the operations that take them so.
+static bool hasNoSign(Type type) {
+  auto whole = dyn_cast_or_null<IntegerType>(type);
+  return whole && whole.isUnsigned();
+}
+static Type bitsOf(Type type) {
+  return IntegerType::get(type.getContext(),
+                          cast<IntegerType>(type).getWidth());
+}
+
 /// Access to the world inside one lowered function. Entity counts and
 /// column views are created at the function's entry the first time they
 /// are needed, so a function only carries what it uses.
@@ -54,6 +65,9 @@ public:
   /// The type a value of `type` is stored as: entity ids become integers
   /// of the width the layout chose; everything else is stored as is.
   Type storageType(Type type) {
+    // (A whole number without a sign is stored as its bits.)
+    if (hasNoSign(type))
+      return bitsOf(type);
     if (isa<EntityType>(type))
       return rewriter.getIntegerType(layout.entities.idBits);
     if (auto text = dyn_cast<TextType>(type))
@@ -1435,7 +1449,7 @@ static void combineDirectly(IRRewriter &rewriter, ApplyOp apply,
                             const WorldLayout &layout, WorldAccess &world,
                             Value id, Value value, Value tick);
 static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
-                     Value a, Value b);
+                     Value a, Value b, bool noSign);
 
 /// Marks an `ent.apply` whose field nothing else in its query touches (no
 /// get, set or lookup of the field, no other apply to it, no add or remove
@@ -1833,7 +1847,8 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       memref::StoreOp::create(
           rewriter, loc,
           combine(rewriter, loc, accumulate.getRule(), old,
-                  world.toStorage(loc, accumulate.getValue())),
+                  world.toStorage(loc, accumulate.getValue()),
+                  hasNoSign(accumulate.getValue().getType())),
           field, ValueRange{zero});
       rewriter.eraseOp(op);
     } else if (auto accumulate = dyn_cast<AccumulateOp>(op)) {
@@ -4290,10 +4305,12 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
   func.walk([](Operation *op) { op->removeAttr(kScopeAttr); });
 }
 
-/// `a ⊕ b` under an apply's rule; min and max are signed for integers and
-/// IEEE-754 minimum/maximum (NaN-propagating) for floats.
+/// `a ⊕ b` under an apply's rule, of two values as they are stored; min
+/// and max are signed for integers (or not, for one of a type without a
+/// sign: `noSign`) and IEEE-754 minimum/maximum (NaN-propagating) for
+/// floats.
 static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
-                     Value a, Value b) {
+                     Value a, Value b, bool noSign) {
   // (The last one sent.)
   if (rule == "set")
     return b;
@@ -4302,11 +4319,13 @@ static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
     return isFloat ? arith::AddFOp::create(rewriter, loc, a, b).getResult()
                    : arith::AddIOp::create(rewriter, loc, a, b).getResult();
   if (rule == "min")
-    return isFloat ? arith::MinimumFOp::create(rewriter, loc, a, b).getResult()
-                   : arith::MinSIOp::create(rewriter, loc, a, b).getResult();
+    return isFloat  ? arith::MinimumFOp::create(rewriter, loc, a, b).getResult()
+           : noSign ? arith::MinUIOp::create(rewriter, loc, a, b).getResult()
+                    : arith::MinSIOp::create(rewriter, loc, a, b).getResult();
   assert(rule == "max" && "the verifier admits add, min and max");
-  return isFloat ? arith::MaximumFOp::create(rewriter, loc, a, b).getResult()
-                 : arith::MaxSIOp::create(rewriter, loc, a, b).getResult();
+  return isFloat  ? arith::MaximumFOp::create(rewriter, loc, a, b).getResult()
+         : noSign ? arith::MaxUIOp::create(rewriter, loc, a, b).getResult()
+                  : arith::MaxSIOp::create(rewriter, loc, a, b).getResult();
 }
 
 /// The bounds the ids an apply sends to are checked against, loaded once:
@@ -4367,7 +4386,9 @@ static void combineAtRow(IRRewriter &rewriter, Location loc,
                          StringRef rule, Value value, Value id, Value tick) {
   Value field = world.column(target, component, fieldName);
   Value old = memref::LoadOp::create(rewriter, loc, field, ValueRange{row});
-  Value combined = combine(rewriter, loc, rule, old, value);
+  Value combined =
+      combine(rewriter, loc, rule, old, value,
+              hasNoSign(target.find(component, fieldName)->type));
   memref::StoreOp::create(rewriter, loc, combined, field, ValueRange{row});
   // (An event only where the field has another value for it.)
   Value differs =
@@ -8716,7 +8737,9 @@ static void combineAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
   Value value = memref::LoadOp::create(rewriter, loc, values, ValueRange{row});
   Value next = arith::SelectOp::create(
       rewriter, loc, sent,
-      combine(rewriter, loc, accumulate.getRule(), sum, value), sum);
+      combine(rewriter, loc, accumulate.getRule(), sum, value,
+              hasNoSign(accumulate.getValue().getType())),
+      sum);
   scf::YieldOp::create(rewriter, loc, ValueRange{next});
   rewriter.setInsertionPointAfter(loop);
   memref::StoreOp::create(rewriter, loc, loop.getResult(0), field,
@@ -12619,7 +12642,8 @@ static void warnAboutReactiveQueries(ModuleOp module) {
 static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
   MLIRContext *context = module.getContext();
   auto isEntity = [](Type type) {
-    return isa<EntityType, TextType, EnumType, StringType>(type);
+    return isa<EntityType, TextType, EnumType, StringType>(type) ||
+           hasNoSign(type);
   };
   bool used = module
                   .walk([&](Operation *op) {
@@ -12647,6 +12671,9 @@ static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
       [](EnumType named) -> Type { return named.getStorageType(); });
   converter.addConversion(
       [](StringType held) -> Type { return held.getStorageType(); });
+  converter.addConversion([](IntegerType whole) -> Type {
+    return whole.isSignless() ? Type(whole) : bitsOf(whole);
+  });
   auto materialize = [](OpBuilder &builder, Type type, ValueRange inputs,
                         Location loc) -> Value {
     return UnrealizedConversionCastOp::create(builder, loc, type, inputs)
@@ -13018,6 +13045,13 @@ struct EntLowerToLoops
         continue;
       }
       Type stored = cast<TypedAttr>(values[0]).getType();
+      // (Numbers without a sign: their bits.)
+      SmallVector<Attribute> held(values.begin(), values.end());
+      if (hasNoSign(stored)) {
+        stored = bitsOf(stored);
+        for (Attribute &value : held)
+          value = IntegerAttr::get(stored, cast<IntegerAttr>(value).getValue());
+      }
       auto type = MemRefType::get({int64_t(values.size())}, stored);
       if (!SymbolTable::lookupSymbolIn(module, name)) {
         rewriter.setInsertionPointToStart(module.getBody());
@@ -13025,7 +13059,7 @@ struct EntLowerToLoops
             rewriter, loc, name, rewriter.getStringAttr("private"), type,
             DenseElementsAttr::get(
                 RankedTensorType::get({int64_t(values.size())}, stored),
-                values.getValue()),
+                held),
             /*constant=*/true, IntegerAttr());
       }
       rewriter.setInsertionPoint(read);
