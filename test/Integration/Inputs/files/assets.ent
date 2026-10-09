@@ -3,4 +3,6 @@
 // Says the first line of a file, or that it is not there.
 extern proc show(file: text[62])
 
+// (The module's own file goes where a program with it is built.)
+asset "module_words.txt"
 proc show_own() { show("module_words.txt") }

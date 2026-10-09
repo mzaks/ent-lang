@@ -2,6 +2,8 @@
 // (files.test).
 import assets
 
+asset "files_words.txt"
+
 unique Done: bool
 
 system say() {

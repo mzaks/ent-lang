@@ -110,7 +110,8 @@ extern fn text_least(text: text, font: i32, size: f32, spacing: f32,
 // A file is named by its path: from where the program was started, or
 // else from where its source is (`ent run`), the program itself (built
 // with `ent build`) or where its source was when it was built; so for
-// a picture.
+// a picture. One that is declared (`asset "name.ttf"`) is taken along
+// by `ent build`: next to the program, or in it (`--embed`).
 extern proc font(file: text[126], size: i32) -> i32
 // A filled rectangle whose corners are rounded, each with its own
 // radius: top left, top right, bottom left, bottom right.

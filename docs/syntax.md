@@ -861,6 +861,34 @@ An integer may be written in hex (`0xff8800`): the bits of the type it
 takes, so `0xff` is an i8 (all its bits, the number -1) and a ninth bit
 does not fit one. It is never a float.
 
+## Assets
+
+```
+asset "Roboto-Regular.ttf"
+asset "sounds/hit.wav"
+
+world { Face = font("Roboto-Regular.ttf", 24) }
+```
+
+An asset is a file the program needs when it runs: a font, a picture, a
+sound.
+
+- It is declared at the top level of the program or module that uses it,
+  by its path from the folder of that file (no `..`, not a whole path),
+  and is there when the program is built: a missing file is an error
+  then, not a font that is not there when the program runs.
+- The program names it as it is declared, in what it gives the devices
+  (`font`, `picture_load`, a `Sample`'s file).
+- `ent build` copies the declared files to where it writes the program,
+  with their folders, where the program finds them; `ent build --embed`
+  puts them into the program itself, so that it is one file. A file on
+  its own (where the program is started, next to its source under `ent
+  run`, next to the program) comes before the one in the program.
+- Two files in different folders cannot be the same asset name in one
+  program.
+- A file that is not declared is still found by its name, where it is;
+  only nothing takes it along.
+
 ## Text
 
 ```

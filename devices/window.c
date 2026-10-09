@@ -247,7 +247,9 @@ static int ent_window_font_count = 1;
 // read at. (A few sizes of each are kept.)
 #define ENT_WINDOW_SIZES 4
 static struct {
-  char file[1024];
+  // (The file's bytes, kept: letters of another size are made of them.)
+  struct ent_file file;
+  char kind[8];
   Font at[ENT_WINDOW_SIZES];
   int pixels[ENT_WINDOW_SIZES];
   int next;
@@ -260,8 +262,10 @@ static void ent_window_font_read(int32_t font) {
   if (ent_window_faces[font].read || !IsWindowReady())
     return;
   ent_window_faces[font].read = 1;
-  Font made = LoadFontEx(ent_window_faces[font].file,
-                         ent_window_faces[font].size, 0, 0);
+  Font made = LoadFontFromMemory(ent_window_faces[font].kind,
+                                 ent_window_faces[font].file.bytes,
+                                 (int)ent_window_faces[font].file.size,
+                                 ent_window_faces[font].size, 0, 0);
   // (One that cannot be read after all: the window's own.)
   if (made.texture.id == 0) {
     ent_window_faces[font].broken = 1;
@@ -287,7 +291,10 @@ static Font ent_window_font_shown(int32_t font, float size) {
   for (int i = 0; i < ENT_WINDOW_SIZES; ++i)
     if (ent_window_faces[font].pixels[i] == pixels)
       return ent_window_faces[font].at[i];
-  Font made = LoadFontEx(ent_window_faces[font].file, pixels, 0, 0);
+  Font made = LoadFontFromMemory(ent_window_faces[font].kind,
+                                 ent_window_faces[font].file.bytes,
+                                 (int)ent_window_faces[font].file.size,
+                                 pixels, 0, 0);
   if (made.texture.id == 0)
     return ent_window_fonts[font];
   SetTextureFilter(made.texture, TEXTURE_FILTER_BILINEAR);
@@ -316,9 +323,8 @@ static uint32_t ent_window_long(const unsigned char *at) {
          (uint32_t)at[2] << 8 | at[3];
 }
 
-static int ent_window_font_whole(const char *name) {
-  int size = 0;
-  unsigned char *all = LoadFileData(name, &size);
+static int ent_window_font_whole(const char *name, const unsigned char *all,
+                                 size_t size) {
   const char *wrong = 0;
   char tag[5] = {0};
   uint32_t start = 0;
@@ -330,10 +336,8 @@ static int ent_window_font_whole(const char *name) {
     if (start < 16 || start > (uint32_t)size - 12)
       wrong = "is a collection without a first font";
   }
-  if (!wrong && !memcmp(all + start, "typ1", 4)) {
-    UnloadFileData(all);
+  if (!wrong && !memcmp(all + start, "typ1", 4))
     return 1;
-  }
   if (!wrong && memcmp(all + start, "\0\1\0\0", 4) &&
       memcmp(all + start, "OTTO", 4) && memcmp(all + start, "true", 4))
     wrong = "does not start as a font does";
@@ -380,8 +384,6 @@ static int ent_window_font_whole(const char *name) {
   if (!wrong && ((has & 31) != 31 ||
                  !((has & 96) == 96 || (has & 384))))
     wrong = "lacks a table a font needs";
-  if (all)
-    UnloadFileData(all);
   if (wrong) {
     fprintf(stderr, "ent: the font '%s' %s%s%s%s\n", name, wrong,
             tag[0] ? " (table '" : "", tag, tag[0] ? "')" : "");
@@ -392,15 +394,20 @@ static int ent_window_font_whole(const char *name) {
 
 int32_t ent_window_font(const ent_text126 *file, int32_t size) {
   ENT_WINDOW_TEXT(named, file);
-  char found[1024];
-  const char *name = ent_file_find(named, found, sizeof found);
-  if (ent_window_font_count >= 16 || !FileExists(name) ||
-      strlen(name) >= sizeof ent_window_faces[0].file)
+  const char *kind = GetFileExtension(named);
+  struct ent_file held;
+  if (ent_window_font_count >= 16 || !kind ||
+      strlen(kind) >= sizeof ent_window_faces[0].kind ||
+      !ent_file_open(named, &held))
     return 0;
   // A file that is no font, or a damaged one, is none.
-  if (IsFileExtension(name, ".ttf;.otf") && !ent_window_font_whole(name))
+  if (IsFileExtension(named, ".ttf;.otf") &&
+      !ent_window_font_whole(named, held.bytes, held.size)) {
+    ent_file_close(&held);
     return 0;
-  strcpy(ent_window_faces[ent_window_font_count].file, name);
+  }
+  ent_window_faces[ent_window_font_count].file = held;
+  strcpy(ent_window_faces[ent_window_font_count].kind, kind);
   ent_window_faces[ent_window_font_count].size = size;
   return ent_window_font_count++;
 }
@@ -640,11 +647,12 @@ static int ent_window_picture_count = 1;
 
 int32_t ent_window_picture_load(const ent_text126 *file) {
   ENT_WINDOW_TEXT(named, file);
-  char found[1024];
-  const char *name = ent_file_find(named, found, sizeof found);
-  if (ent_window_picture_count >= 64 || !FileExists(name))
+  const char *kind = GetFileExtension(named);
+  struct ent_file held;
+  if (ent_window_picture_count >= 64 || !kind || !ent_file_open(named, &held))
     return 0;
-  Image image = LoadImage(name);
+  Image image = LoadImageFromMemory(kind, held.bytes, (int)held.size);
+  ent_file_close(&held);
   if (!image.data)
     return 0;
   ent_window_images[ent_window_picture_count] = image;

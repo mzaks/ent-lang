@@ -87,7 +87,7 @@
   (#any-of? @function.builtin "min" "max" "len"))
 
 [
-  "import" "component" "tag" "unique" "enum" "table" "prefab" "relation"
+  "import" "asset" "component" "tag" "unique" "enum" "table" "prefab" "relation"
   "archetype"
   "system" "extern" "fn" "proc" "schedule" "world" "main"
   "default_capacity" "capacity" "optional" "tree"

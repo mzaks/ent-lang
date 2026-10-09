@@ -9,6 +9,11 @@
 // its files; then where the program's source and its modules' were when
 // it was built, which a built program knows (so it runs on the machine
 // it was built on without its files being brought to it).
+//
+// A file the program declares (`asset "name"`) may also be in the
+// program itself (`ent build --embed`): `ent_file_open` gives a file's
+// bytes from wherever it is, the ones in the program where the file is
+// not next to where it was started, to its source or to itself.
 #ifndef ENT_FILES_H
 #define ENT_FILES_H
 
@@ -36,6 +41,19 @@ __attribute__((weak))
 #endif
 const char ent_program_folders[] = "";
 
+// The files that are in the program itself: for each its name as the
+// program writes it, its bytes and how many they are; after the last, one
+// without a name.
+struct ent_asset {
+  const char *name;
+  const unsigned char *bytes;
+  unsigned long size;
+};
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+const struct ent_asset ent_program_assets[] = {{0, 0, 0}};
+
 static int ent_file_is_there(const char *path) {
   FILE *file = fopen(path, "rb");
   if (!file)
@@ -62,13 +80,13 @@ static int ent_file_among(const char *folders, const char *name, char *found,
   return 0;
 }
 
-// The path of the file `name`: `name` itself where that is one, or where
-// it is nowhere; else written into `found`, which holds `size` bytes.
-static const char *ent_file_find(const char *name, char *found, size_t size) {
-  if (!*name || *name == '/' || ent_file_is_there(name))
-    return name;
+// Whether `name` is where the program was started, where `ent run` says
+// its source is, or where the program itself is. Its path is in `found`.
+static int ent_file_near(const char *name, char *found, size_t size) {
+  if (ent_file_is_there(name))
+    return snprintf(found, size, "%s", name) < (int)size;
   if (ent_file_among(getenv("ENT_PROGRAM_DIR"), name, found, size))
-    return found;
+    return 1;
   char program[1024];
   long length = -1;
 #if defined(__APPLE__)
@@ -85,12 +103,81 @@ static const char *ent_file_find(const char *name, char *found, size_t size) {
       *slash = 0;
       if (snprintf(found, size, "%s/%s", program, name) < (int)size &&
           ent_file_is_there(found))
-        return found;
+        return 1;
     }
   }
-  if (ent_file_among(ent_program_folders, name, found, size))
+  return 0;
+}
+
+// The path of the file `name`: `name` itself where that is one, or where
+// it is nowhere; else written into `found`, which holds `size` bytes.
+// (Of a file on its own; one in the program has no path.)
+static const char *ent_file_find(const char *name, char *found, size_t size) {
+  if (!*name || *name == '/')
+    return name;
+  if (ent_file_near(name, found, size) ||
+      ent_file_among(ent_program_folders, name, found, size))
     return found;
   return name;
+}
+
+// A file's bytes. (`own` is what was read of a file on its own, which
+// `ent_file_close` gives back; the bytes of one in the program stay.)
+struct ent_file {
+  const unsigned char *bytes;
+  size_t size;
+  void *own;
+};
+
+static int ent_file_read(const char *path, struct ent_file *file) {
+  FILE *from = fopen(path, "rb");
+  if (!from)
+    return 0;
+  long size = fseek(from, 0, SEEK_END) == 0 ? ftell(from) : -1;
+  unsigned char *bytes = size >= 0 ? (unsigned char *)malloc(size + 1) : 0;
+  if (!bytes || fseek(from, 0, SEEK_SET) != 0 ||
+      fread(bytes, 1, size, from) != (size_t)size) {
+    free(bytes);
+    fclose(from);
+    return 0;
+  }
+  fclose(from);
+  bytes[size] = 0;
+  file->bytes = bytes;
+  file->size = size;
+  file->own = bytes;
+  return 1;
+}
+
+// The bytes of the file `name`, from wherever it is; 0 if nowhere.
+static int ent_file_open(const char *name, struct ent_file *file) {
+  char found[1024];
+  file->bytes = 0;
+  file->size = 0;
+  file->own = 0;
+  if (!*name)
+    return 0;
+  if (*name == '/')
+    return ent_file_read(name, file);
+  if (ent_file_near(name, found, sizeof found))
+    return ent_file_read(found, file);
+  for (const struct ent_asset *asset = ent_program_assets; asset->name;
+       ++asset)
+    if (!strcmp(asset->name, name)) {
+      file->bytes = asset->bytes;
+      file->size = asset->size;
+      return 1;
+    }
+  if (ent_file_among(ent_program_folders, name, found, sizeof found))
+    return ent_file_read(found, file);
+  return 0;
+}
+
+static void ent_file_close(struct ent_file *file) {
+  free(file->own);
+  file->bytes = 0;
+  file->size = 0;
+  file->own = 0;
 }
 
 #endif // ENT_FILES_H

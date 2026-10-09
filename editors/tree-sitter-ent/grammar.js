@@ -50,9 +50,13 @@ module.exports = grammar({
         $.main,
         $.default_capacity,
         $.capacity_of,
+        $.asset,
       ),
 
     import: ($) => seq('import', field('module', $.identifier)),
+
+    // asset "name.ttf": a file the program needs when it runs.
+    asset: ($) => seq('asset', field('file', $.string)),
 
     default_capacity: ($) => seq('default_capacity', $.integer),
     capacity_of: ($) => seq('capacity', field('of', $._name), $.integer),

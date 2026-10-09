@@ -291,8 +291,11 @@ come with the compiler, in `devices/`, and two more that need
   build`): a program and a module find the files next to them wherever
   the program is run from (`devices/ent_files.h`). A built program also
   knows the folders it was built from and looks there last, so it runs
-  on the machine it was built on as it is; to take it elsewhere, its
-  files go next to it. A font file is checked before it is used (its
+  on the machine it was built on as it is. The files a program
+  needs are declared where they are used (`asset "name.ttf"`, checked
+  when it is built): `ent build` copies them to where it writes the
+  program, and `ent build --embed` puts them into the program itself,
+  which is then one file to take along. A font file is checked before it is used (its
   tables are all there and add up to their sums): a damaged one is no
   font, and said so.
 

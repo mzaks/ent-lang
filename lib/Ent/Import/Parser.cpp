@@ -563,6 +563,7 @@ private:
                                         StringRef field);
   mlir::Value noughtOf(Location at, Type type);
   LogicalResult finishRows();
+  LogicalResult parseAsset();
   bool isWholeRow(const Expr &expr);
   FailureOr<Variable> emitRow(const Expr &expr);
   Expr fieldOfRow(const Variable &row, StringRef field, llvm::SMLoc at);
@@ -827,6 +828,8 @@ LogicalResult Parser::parseDeclarations() {
       result = parseSchedule();
     else if (token.isKeyword("import"))
       result = parseImport();
+    else if (token.isKeyword("asset") && peek().is(Token::String))
+      result = parseAsset();
     else if (token.isKeyword("main"))
       result = current == root
                    ? parseMain()
@@ -885,6 +888,38 @@ LogicalResult Parser::parseDeclarations() {
 
 // import name: the declarations of name.ent, found next to the importing
 // file or in an -I directory.
+// asset "name": a file the program needs when it runs (a font, a
+// picture, a sound), next to the file that says so. It is there when the
+// program is built, and `ent build` takes it along; the program names it
+// as it is written here.
+LogicalResult Parser::parseAsset() {
+  advance();
+  llvm::SMLoc at = token.loc;
+  std::string name =
+      StringRef(token.spelling).drop_front().drop_back().str();
+  advance();
+  consumeIf(Token::Semicolon);
+  StringRef written = name;
+  if (written.empty() || llvm::sys::path::is_absolute(written) ||
+      written.contains('\\') || written.contains(':') ||
+      written.contains('{') ||
+      llvm::is_contained(llvm::split(written, '/'), "..") ||
+      llvm::is_contained(llvm::split(written, '/'), "") ||
+      llvm::is_contained(llvm::split(written, '/'), "."))
+    return error(at, "an asset is named by its path from the folder of the "
+                     "file that declares it ('fonts/name.ttf'), without "
+                     "'..'");
+  StringRef declaring =
+      sourceMgr.getMemoryBuffer(sourceMgr.FindBufferContainingLoc(at))
+          ->getBufferIdentifier();
+  SmallString<256> path(llvm::sys::path::parent_path(declaring));
+  llvm::sys::path::append(path, written);
+  if (!llvm::sys::fs::is_regular_file(path))
+    return error(at, "there is no file '" + name + "' next to '" +
+                         llvm::sys::path::filename(declaring) + "'");
+  return success();
+}
+
 LogicalResult Parser::parseImport() {
   llvm::SMLoc at = token.loc;
   advance();

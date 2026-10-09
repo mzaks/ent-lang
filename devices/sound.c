@@ -130,8 +130,17 @@ void ent_sound_sample(const ent_text126 *file, float volume) {
       return;
     found = count++;
     strcpy(files[found].name, name);
-    char where[1024];
-    files[found].sound = LoadSound(ent_file_find(name, where, sizeof where));
+    // (From the file's bytes, wherever they are: also in the program.)
+    const char *kind = GetFileExtension(name);
+    struct ent_file held;
+    if (kind && ent_file_open(name, &held)) {
+      Wave wave = LoadWaveFromMemory(kind, held.bytes, (int)held.size);
+      ent_file_close(&held);
+      if (wave.data) {
+        files[found].sound = LoadSoundFromWave(wave);
+        UnloadWave(wave);
+      }
+    }
     files[found].loaded = files[found].sound.frameCount > 0;
   }
   if (!files[found].loaded)

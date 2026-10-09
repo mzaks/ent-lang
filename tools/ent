@@ -37,6 +37,12 @@ Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 A module that needs libraries says so in `m.link`: the linker's arguments
 for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
 
+A file a program needs when it runs is declared where it is used (`asset
+"name.ttf"`, next to the file that says so). `ent build` copies those
+files to where the program is written, where it finds them; with --embed
+they are put into the program itself instead, which is then all there is
+to take along.
+
 A program that was built before is not built again while nothing it is
 made of has changed: its files and its modules', what implements them, the
 compiler and the flags. The built programs are kept in $ENT_CACHE, else in
@@ -110,6 +116,42 @@ def modules_of(path, include_directories, seen):
                 break
 
 
+def assets_of(files):
+    """The files the sources `files` declare with `asset "name"`: for each
+    name where the file is, in the order they are written."""
+    found = {}
+    for path in files:
+        with open(path) as source:
+            text = re.sub(r"//[^\n]*", "", source.read())
+        for name in re.findall(r'^\s*asset\s+"([^"\n]*)"', text,
+                               re.MULTILINE):
+            where = os.path.join(os.path.dirname(path), name)
+            if os.path.realpath(found.setdefault(name, where)) != \
+                    os.path.realpath(where):
+                sys.exit(f"ent: two files are the asset '{name}': "
+                         f"'{found[name]}' and '{where}'")
+    return found
+
+
+def copy_assets(arguments, output):
+    """Puts the files the program declares next to the built program
+    (unless they are in it: --embed)."""
+    if arguments.embed:
+        return
+    files = []
+    modules_of(arguments.program,
+               arguments.I + [os.path.join(ROOT, "devices")], files)
+    folder = os.path.dirname(os.path.abspath(output))
+    for name, where in assets_of(files).items():
+        to = os.path.join(folder, name)
+        if os.path.realpath(to) == os.path.realpath(where):
+            continue
+        if not os.path.isfile(where):
+            sys.exit(f"ent: there is no file '{where}'")
+        os.makedirs(os.path.dirname(to), exist_ok=True)
+        shutil.copy2(where, to)
+
+
 def cache_directory():
     chosen = os.environ.get("ENT_CACHE")
     if chosen:
@@ -149,6 +191,7 @@ def cache_key(arguments):
                      host_compiler("ENT_CXX", ["c++"], "clang++")):
         note_tool(shutil.which(compiler) or compiler)
     note_tool(os.path.abspath(__file__))
+    note("embed", arguments.embed)
     note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
          os.environ.get("ENT_PIECES", ""), os.environ.get("ENT_SPLIT", ""),
          os.cpu_count())
@@ -172,6 +215,11 @@ def cache_key(arguments):
             note_file(path)
             if os.path.dirname(os.path.realpath(path)) not in directories:
                 directories.append(os.path.dirname(os.path.realpath(path)))
+    # (The files that are put into the program are of what it is made.)
+    for name, where in assets_of(files).items():
+        note(name, os.path.realpath(where), os.path.isfile(where))
+        if arguments.embed and os.path.isfile(where):
+            note_file(where)
     # The headers next to them, which the C may include.
     for directory in directories:
         for name in sorted(os.listdir(directory)):
@@ -369,6 +417,25 @@ def build(arguments, output, directory):
     with open(written, "w") as source:
         source.write("const char ent_program_folders[] = %s;\n"
                      % json.dumps(os.pathsep.join(folders)))
+        # With --embed, also the files it declares: their bytes, by the
+        # names it knows them by.
+        if arguments.embed:
+            held = list(assets_of(files).items())
+            for index, (name, where) in enumerate(held):
+                with open(where, "rb") as asset:
+                    data = asset.read()
+                source.write(f"static const unsigned char asset_{index}[] = {{")
+                for start in range(0, len(data), 4096):
+                    source.write(",".join(map(str, data[start:start + 4096])))
+                    source.write(",\n")
+                source.write("0};\n")
+            source.write("const struct { const char *name; const unsigned "
+                         "char *bytes; unsigned long size; } "
+                         "ent_program_assets[] = {\n")
+            for index, (name, where) in enumerate(held):
+                source.write(f"  {{{json.dumps(name)}, asset_{index}, "
+                             f"{os.path.getsize(where)}}},\n")
+            source.write("  {0, 0, 0}};\n")
     objects.append(os.path.join(directory, "ent_folders.o"))
     run([cc, "-c", written, "-o", objects[-1]], env=host)
     # C++ brings its library; other languages' objects say what they need
@@ -394,6 +461,9 @@ def main():
     parser.add_argument("--parallel", action="store_true",
                         help="stage and fuse systems and run them on all "
                         "cores (OpenMP)")
+    parser.add_argument("--embed", action="store_true",
+                        help="put the files the program declares (`asset`) "
+                        "into the program itself, not next to it")
     parser.add_argument("--keep", metavar="dir", help="keep the generated "
                         "files (IR, header) in this directory")
     parser.add_argument("--no-cache", action="store_true",
@@ -432,6 +502,7 @@ def main():
             os.utime(os.path.dirname(kept))
             if arguments.command == "build":
                 shutil.copy2(kept, arguments.output or stem)
+                copy_assets(arguments, arguments.output or stem)
                 return 0
             return subprocess.run([kept] + rest, env=where).returncode
 
@@ -443,6 +514,7 @@ def main():
         if arguments.command == "build":
             output = arguments.output or stem
             build(arguments, output, directory)
+            copy_assets(arguments, output)
             if key:
                 keep_in_cache(output, key, stem)
             return 0

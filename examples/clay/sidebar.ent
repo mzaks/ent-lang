@@ -16,6 +16,9 @@ import window
 import layout
 import layout_window
 
+// (The picture goes where the program is built, or into it.)
+asset "profile-picture.png"
+
 tag Root
 tag HeaderButton
 tag Photos

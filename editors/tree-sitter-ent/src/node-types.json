@@ -199,6 +199,22 @@
     }
   },
   {
+    "type": "asset",
+    "named": true,
+    "fields": {
+      "file": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "assignment",
     "named": true,
     "fields": {
@@ -3371,6 +3387,10 @@
           "named": true
         },
         {
+          "type": "asset",
+          "named": true
+        },
+        {
           "type": "capacity_of",
           "named": true
         },
@@ -4679,6 +4699,10 @@
   },
   {
     "type": "as",
+    "named": false
+  },
+  {
+    "type": "asset",
     "named": false
   },
   {

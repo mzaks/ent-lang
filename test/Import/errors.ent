@@ -1180,3 +1180,15 @@ system s() {
   // expected-error @+1 {{a 'for' counts from a number to another ('a..b'), or goes over the cases of an enum or the rows of a table}}
   for n in N { }
 }
+
+// -----
+
+// A file a program declares is named from its folder. (That it is there:
+// Integration/files.test.)
+// expected-error @+1 {{an asset is named by its path from the folder of the file that declares it ('fonts/name.ttf'), without '..'}}
+asset "../errors.ent"
+
+// -----
+
+// expected-error @+1 {{an asset is named by its path from the folder of the file that declares it ('fonts/name.ttf'), without '..'}}
+asset "/etc/hosts"

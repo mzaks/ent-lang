@@ -19,3 +19,25 @@
 // RUN: echo "words that lie next to the built program" > %t/module_words.txt
 // RUN: cd %t/elsewhere && env -u ENT_PROGRAM_DIR %t/files_use | FileCheck %s --check-prefix=NEXT
 // NEXT: module_words.txt: words that lie next to the built program
+
+// The files a program and its modules declare (`asset "name"`) are
+// copied to where `ent build` writes the program.
+// RUN: test -f %t/files_words.txt
+// RUN: rm -rf %t.out && mkdir -p %t.out && %ent build -I %S/Inputs/files %S/Inputs/files_use.ent -o %t.out/files_use
+// RUN: cmp %t.out/files_words.txt %S/Inputs/files_words.txt
+// RUN: cmp %t.out/module_words.txt %S/Inputs/files/module_words.txt
+
+// With --embed they are in the program itself, which needs no file next
+// to it: it says what the files said when it was built, whatever became
+// of them since.
+// RUN: rm -rf %t.src %t.one && mkdir -p %t.src %t.one
+// RUN: cp %S/Inputs/files_use.ent %S/Inputs/files_words.txt %t.src
+// RUN: %ent build --embed -I %S/Inputs/files %t.src/files_use.ent -o %t.one/files_use
+// RUN: ls %t.one | count 1
+// RUN: rm %t.src/files_words.txt
+// RUN: cd %t/elsewhere && env -u ENT_PROGRAM_DIR %t.one/files_use | FileCheck %s
+
+// A file that is declared and not there is told when the program is
+// built.
+// RUN: not %ent build -I %S/Inputs/files %t.src/files_use.ent -o %t.one/again 2>&1 | FileCheck %s --check-prefix=GONE
+// GONE: files_use.ent:{{.*}}: error: there is no file 'files_words.txt' next to 'files_use.ent'
