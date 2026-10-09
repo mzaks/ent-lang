@@ -138,8 +138,10 @@ module.exports = grammar({
           optional($.capacity)),
 
     parameters: ($) => seq('(', optional(list($.parameter)), ')'),
+    // (`mut`: a buffer a proc is given to change.)
     parameter: ($) =>
-      seq(field('name', $.identifier), ':', field('type', $._type)),
+      seq(field('name', $.identifier), ':', optional('mut'),
+          field('type', $._type)),
 
     access: ($) =>
       repeat1(choice(seq('reads', list($._name)), seq('writes', list($._name)))),
@@ -339,8 +341,12 @@ module.exports = grammar({
                                   seq('max', '='))),
                      // (A buffer is given a row, or none.)
                      field('value',
-                           choice($._expression, $.row, $.no_rows)))),
+                           choice($._expression, $.row, $.no_rows,
+                                  $.rows_alike)))),
     no_rows: ($) => seq('[', ']'),
+    // [{ field: value, .. }; n]: so many rows, all alike.
+    rows_alike: ($) =>
+      seq('[', $.row, ';', field('count', $._expression), ']'),
 
     // Expressions
 
