@@ -9,6 +9,7 @@
 #include <raylib.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 enum { ENT_SOUND_RATE = 44100, ENT_SOUND_VOICES = 24, ENT_SOUND_FILES = 32 };
 
@@ -151,27 +152,57 @@ void ent_sound_sample(const ent_text126 *file, float volume) {
 
 // The piece of music that is heard: read bit by bit, from its file or
 // from the bytes of it that are in the program.
-static Music ent_sound_piece;
-static bool ent_sound_piece_loaded;
+// The pieces of music: the one that is heard, and the one before it
+// while it goes quiet under the one that comes. Each is read bit by bit,
+// from its file or from the bytes of it that are in the program.
+static struct ent_sound_piece {
+  Music music;
+  bool loaded;
+  // How much of its loudness it has (0 to 1), on its way up or down.
+  float part;
+} ent_sound_now, ent_sound_before;
+static bool ent_sound_ended;
 
-float ent_sound_music_at(void) {
-  return ent_sound_piece_loaded ? GetMusicTimePlayed(ent_sound_piece) : 0;
+static double ent_sound_seconds(void) {
+  struct timespec now;
+  timespec_get(&now, TIME_UTC);
+  return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
 }
 
-void ent_sound_music(const ent_text126 *file, float volume) {
+static void ent_sound_drop(struct ent_sound_piece *piece) {
+  if (piece->loaded) {
+    StopMusicStream(piece->music);
+    UnloadMusicStream(piece->music);
+  }
+  piece->loaded = false;
+  piece->part = 0;
+}
+
+float ent_sound_music_at(void) {
+  return ent_sound_now.loaded ? GetMusicTimePlayed(ent_sound_now.music) : 0;
+}
+
+bool ent_sound_music_over(void) { return ent_sound_ended; }
+
+void ent_sound_music(const ent_text126 *file, float volume, bool once,
+                     float fade) {
   static char playing[sizeof(file->bytes) + 1];
-#define piece ent_sound_piece
-#define loaded ent_sound_piece_loaded
+  static double before;
+  double now = ent_sound_seconds();
+  // (How far a piece gets on its way in or out since the last time.)
+  float step = fade > 0 && before > 0 ? (float)((now - before) / fade) : 1;
+  before = now;
   char name[sizeof(file->bytes) + 1];
   memcpy(name, file->bytes, file->length);
   name[file->length] = 0;
   if (strcmp(name, playing) != 0) {
-    // Another piece, or none.
-    if (loaded) {
-      StopMusicStream(piece);
-      UnloadMusicStream(piece);
-      loaded = false;
-    }
+    // Another piece, or none: the one that was heard goes quiet under
+    // it (at once without `fade`).
+    ent_sound_drop(&ent_sound_before);
+    ent_sound_before = ent_sound_now;
+    ent_sound_now.loaded = false;
+    ent_sound_now.part = 0;
+    ent_sound_ended = false;
     strcpy(playing, name);
     char where[1024];
     struct ent_file held;
@@ -180,19 +211,38 @@ void ent_sound_music(const ent_text126 *file, float volume) {
                     ? ent_file_place(name, where, sizeof where, &held)
                     : 0;
     if (place == 1)
-      piece = LoadMusicStream(where);
+      ent_sound_now.music = LoadMusicStream(where);
     else if (place == 2)
-      piece = LoadMusicStreamFromMemory(kind, held.bytes, (int)held.size);
-    loaded = place && piece.frameCount > 0;
-    if (loaded) {
-      piece.looping = true;
-      PlayMusicStream(piece);
+      ent_sound_now.music =
+          LoadMusicStreamFromMemory(kind, held.bytes, (int)held.size);
+    ent_sound_now.loaded = place && ent_sound_now.music.frameCount > 0;
+    if (ent_sound_now.loaded) {
+      // (The first piece of all is there at once; one that follows
+      // another comes as that one goes.)
+      ent_sound_now.part = ent_sound_before.loaded && fade > 0 ? 0 : 1;
+      PlayMusicStream(ent_sound_now.music);
     }
   }
-  if (!loaded)
+  volume = fminf(fmaxf(volume, 0), 1);
+  if (ent_sound_before.loaded) {
+    ent_sound_before.part -= step;
+    if (ent_sound_before.part <= 0) {
+      ent_sound_drop(&ent_sound_before);
+    } else {
+      SetMusicVolume(ent_sound_before.music, volume * ent_sound_before.part);
+      UpdateMusicStream(ent_sound_before.music);
+    }
+  }
+  if (!ent_sound_now.loaded)
     return;
-  SetMusicVolume(piece, fminf(fmaxf(volume, 0), 1));
-  UpdateMusicStream(piece);
+  ent_sound_now.part = fminf(ent_sound_now.part + step, 1);
+  // Again and again from its start, or once: then it is over, until
+  // another piece is asked for.
+  ent_sound_now.music.looping = !once;
+  SetMusicVolume(ent_sound_now.music, volume * ent_sound_now.part);
+  UpdateMusicStream(ent_sound_now.music);
+  if (once && !IsMusicStreamPlaying(ent_sound_now.music)) {
+    ent_sound_drop(&ent_sound_now);
+    ent_sound_ended = true;
+  }
 }
-#undef piece
-#undef loaded

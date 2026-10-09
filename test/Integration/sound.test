@@ -21,7 +21,7 @@
 // CHECK:     void ent_sound_tone(float arg0, float arg1, float arg2, float arg3, float arg4, ent_sound_Wave arg5);
 // CHECK:     void ent_sound_sample(const ent_text126 *arg0, float arg1);
 // (Music: a file that is read as it plays, which `play` goes on with.)
-// CHECK:     void ent_sound_music(const ent_text126 *arg0, float arg1);
+// CHECK:     void ent_sound_music(const ent_text126 *arg0, float arg1, bool arg2, float arg3);
 
 // LLVM-DAG: declare void @ent_sound_tone(float, float, float, float, float, i8)
 // LLVM-DAG: declare void @ent_sound_sample(ptr, float)

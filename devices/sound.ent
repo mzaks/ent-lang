@@ -35,12 +35,17 @@ component Tone {
 // is played.
 component Sample { file: text[126], volume: f32 } capacity 16
 
-// A long piece (music): the file that is heard now, again and again
-// from its start, and how loud; no file, no music. It is read bit by bit
-// as it plays, not all at once.
+// A long piece (music): the file that is heard now, and how loud; no
+// file, no music. It is read bit by bit as it plays, not all at once.
+// It is heard again and again from its start, or with `once` one time:
+// then `music_over()` says so, until another file is asked for. Where
+// the file becomes another, the piece that was heard goes quiet under
+// the one that comes over `fade` seconds (0: at once); to no file, it
+// just goes quiet.
 //
 //   Music.file = "tune.ogg"
-unique Music { file: text[126], volume: f32 }
+//   Music.fade = 2.0
+unique Music { file: text[126], volume: f32, once: bool, fade: f32 }
 
 // The shapes `play` looks for, whether or not the program makes any.
 archetype Tones { Tone } capacity 64
@@ -60,7 +65,9 @@ extern proc tone(pitch: f32, to: f32, seconds: f32, after: f32, volume: f32,
                  wave: Wave)
 extern proc sample(file: text[126], volume: f32)
 // (Once a frame: goes on with the piece, or over to another.)
-extern proc music(file: text[126], volume: f32)
+extern proc music(file: text[126], volume: f32, once: bool, fade: f32)
+// Whether a piece that was to be heard once has ended.
+extern proc music_over() -> bool
 // How many seconds into the piece the music is (0 without any).
 extern proc music_at() -> f32
 
@@ -76,5 +83,5 @@ system play() {
     if volume > 0.0 { sample(s.file, s.volume * volume) }
     e.destroy()
   }
-  music(Music.file, Music.volume * volume)
+  music(Music.file, Music.volume * volume, Music.once, Music.fade)
 }
