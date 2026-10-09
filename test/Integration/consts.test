@@ -1,0 +1,12 @@
+// Consts: a value by a name, written with numbers, bools and other
+// consts; of the type it is given or the one its value has; a module's
+// are its importers' too. A local of the name comes first.
+// RUN: %ent run -I %S/Inputs/consts %S/Inputs/consts.ent | FileCheck %s
+
+// CHECK:      unit 65536 whole 7 one 11930464 quarter 1073741824
+// CHECK-NEXT: speed 2.5 steps 15000000000 half 0.5 loud true
+// CHECK-NEXT: module 16 shade 44 row 30
+// CHECK-NEXT: thing 2 at 2.5
+// CHECK-NEXT: thing 4 at 3.0
+// CHECK-NEXT: local 9
+// CHECK-NOT:  {{.}}

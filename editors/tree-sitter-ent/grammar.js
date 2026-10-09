@@ -43,6 +43,7 @@ module.exports = grammar({
         $.buffer,
         $.enum,
         $.table,
+        $.const,
         $.prefab,
         $.relation,
         $.archetype,
@@ -98,6 +99,12 @@ module.exports = grammar({
     // table name { field: type, .. } = [ { field: value, .. }, .. ]
     // table name: type = [ value, .. ]
     // table name[Enum] .. = [ Case: row or value, .. ]
+    // const NAME = value, const NAME: type = value
+    const: ($) =>
+      seq('const', field('name', $.identifier),
+          optional(seq(':', field('type', $._type))), '=',
+          field('value', $._expression)),
+
     table: ($) =>
       seq('table', field('name', $.identifier),
           optional(seq('[', field('key', $._name), ']')),

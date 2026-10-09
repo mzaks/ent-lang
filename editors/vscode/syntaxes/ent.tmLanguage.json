@@ -155,7 +155,7 @@
         },
         {
           "name": "keyword.other.declaration.ent",
-          "match": "\\b(import|component|tag|unique|enum|relation|archetype|system|extern|fn|proc|schedule|world|main|default_capacity|capacity|optional|reads|writes)\\b"
+          "match": "\\b(import|const|component|tag|unique|enum|relation|archetype|system|extern|fn|proc|schedule|world|main|default_capacity|capacity|optional|reads|writes)\\b"
         },
         {
           "name": "keyword.other.ent",

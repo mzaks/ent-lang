@@ -15,21 +15,31 @@
 import fixed
 import tables
 
-fn ang45() -> u32 { 0x20000000 }
-fn ang90() -> u32 { 0x40000000 }
-fn ang180() -> u32 { 0x80000000 }
-fn ang270() -> u32 { 0xc0000000 }
+const ANG45: u32 = 0x20000000
+const ANG90: u32 = 0x40000000
+const ANG180: u32 = 0x80000000
+const ANG270: u32 = 0xc0000000
+
+// A fine angle is the top 13 bits of an angle: 8192 to the turn.
+const FINEANGLES = 8192
+const FINEMASK = FINEANGLES - 1
+const ANGLETOFINESHIFT = 19
+
+// A slope is so many 2048ths, in `tantoangle`; the bits of a fraction
+// that it has not.
+const SLOPERANGE = 2048
+const DBITS = FRACBITS - 11
 
 // The cosine of a fine angle: the sine a quarter turn on.
-fn finecosine(fine: i32) -> i32 { finesine[fine + 2048] }
+fn finecosine(fine: i32) -> i32 { finesine[fine + FINEANGLES / 4] }
 
 // `num / den` as a place in `tantoangle`, 0 to 2048 (SlopeDiv).
 fn slope_div(num: u32, den: u32) -> i32 {
   if den < 512 {
-    2048
+    SLOPERANGE
   } else {
     let ans = (num << 3) / (den >> 8)
-    if ans <= 2048 { ans as i32 } else { 2048 }
+    if ans <= SLOPERANGE as u32 { ans as i32 } else { SLOPERANGE }
   }
 }
 
@@ -45,30 +55,30 @@ fn point_to_angle(dx: i32, dy: i32) -> u32 {
       if dx > dy {
         tantoangle[slope_div(dy as u32, dx as u32)]            // octant 0
       } else {
-        0x3fffffff - tantoangle[slope_div(dx as u32, dy as u32)]  // octant 1
+        ANG90 - 1 - tantoangle[slope_div(dx as u32, dy as u32)]   // octant 1
       }
     } else {
       let y = -dy
       if dx > y {
         -tantoangle[slope_div(y as u32, dx as u32)]            // octant 8
       } else {
-        0xc0000000 + tantoangle[slope_div(dx as u32, y as u32)]   // octant 7
+        ANG270 + tantoangle[slope_div(dx as u32, y as u32)]       // octant 7
       }
     }
   } else {
     let x = -dx
     if dy >= 0 {
       if x > dy {
-        0x7fffffff - tantoangle[slope_div(dy as u32, x as u32)]   // octant 3
+        ANG180 - 1 - tantoangle[slope_div(dy as u32, x as u32)]  // octant 3
       } else {
-        0x40000000 + tantoangle[slope_div(x as u32, dy as u32)]   // octant 2
+        ANG90 + tantoangle[slope_div(x as u32, dy as u32)]        // octant 2
       }
     } else {
       let y = -dy
       if x > y {
-        0x80000000 + tantoangle[slope_div(y as u32, x as u32)]    // octant 4
+        ANG180 + tantoangle[slope_div(y as u32, x as u32)]        // octant 4
       } else {
-        0xbfffffff - tantoangle[slope_div(x as u32, y as u32)]    // octant 5
+        ANG270 - 1 - tantoangle[slope_div(x as u32, y as u32)]   // octant 5
       }
     }
   }
@@ -82,7 +92,7 @@ fn point_to_dist(dx: i32, dy: i32) -> i32 {
   let long = max(ax, ay)
   let short = min(ax, ay)
   let frac = if long != 0 { fixed_div(short, long) } else { 0 }
-  let angle = ((tantoangle[frac >> 5] + 0x40000000) >> 19) as i32
+  let angle = ((tantoangle[frac >> DBITS] + ANG90) >> ANGLETOFINESHIFT) as i32
   fixed_div(long, finesine[angle])
 }
 

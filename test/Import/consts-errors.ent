@@ -1,0 +1,48 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+const LIMIT = 4
+// expected-error @+1 {{'LIMIT' is already declared}}
+const LIMIT = 5
+
+// -----
+
+unique Score: i32
+// expected-error @+1 {{a const's value is written out: numbers and bools, other consts, and what computes with them ('1 << 16', 'ANG45 / 45')}}
+const START = Score + 1
+
+// -----
+
+fn twice(x: i32) -> i32 { x * 2 }
+// expected-error @+1 {{a const's value is written out: numbers and bools, other consts, and what computes with them ('1 << 16', 'ANG45 / 45')}}
+const FOUR = twice(2)
+
+// -----
+
+// expected-error @+1 {{this number is more than a u8 holds}}
+const SHADE: u8 = 300
+
+// -----
+
+// expected-error @+1 {{a float cannot be used here}}
+const WHOLE: i32 = 2.5
+
+// -----
+
+const A: i32 = 1
+const B: u32 = 2
+// expected-error @+1 {{one of these has a sign and the other has none: say which it is to be, with 'as'}}
+const C = A + B
+
+// -----
+
+// expected-error @+1 {{a const is a number or a bool}}
+const NAME: text[8] = "doom"
+
+// -----
+
+const LIMIT = 4
+unique Score: i32
+system s() {
+  // expected-error @+1 {{'LIMIT' is a const and cannot be assigned}}
+  LIMIT = 5
+}

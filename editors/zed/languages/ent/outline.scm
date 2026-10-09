@@ -4,6 +4,7 @@
 (unique "unique" @context name: (identifier) @name) @item
 (enum "enum" @context name: (identifier) @name) @item
 (table "table" @context name: (identifier) @name) @item
+(const "const" @context name: (identifier) @name) @item
 (prefab "prefab" @context name: (identifier) @name) @item
 (relation "relation" @context name: (identifier) @name) @item
 (archetype "archetype" @context name: (identifier) @name) @item

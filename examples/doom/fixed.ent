@@ -12,18 +12,18 @@
 // GNU General Public License for more details.
 //
 // Fixed point (m_fixed.c): a number with a fraction is an i32 with 16
-// bits before the point and 16 after it, so 1.0 is 0x10000 (`fracunit()`)
+// bits before the point and 16 after it, so 1.0 is 0x10000 (`FRACUNIT`)
 // and adding, subtracting and comparing are those of whole numbers.
 
-fn fracbits() -> i32 { 16 }
-fn fracunit() -> i32 { 0x10000 }
+const FRACBITS = 16
+const FRACUNIT = 1 << FRACBITS
 
 // How much a number is, whatever its sign.
 fn abs(x: i32) -> i32 { if x < 0 { -x } else { x } }
 
 // The product of two: of 64 bits, with the 16 of the fraction dropped.
 fn fixed_mul(a: i32, b: i32) -> i32 {
-  ((a as i64 * b as i64) >> 16) as i32
+  ((a as i64 * b as i64) >> FRACBITS) as i32
 }
 
 // One divided by another. Where the quotient is more than an i32 holds
@@ -32,6 +32,6 @@ fn fixed_div(a: i32, b: i32) -> i32 {
   if (abs(a) >> 14) >= abs(b) {
     if (a ^ b) < 0 { 0x80000000 } else { 0x7fffffff }
   } else {
-    (((a as i64) << 16) / b as i64) as i32
+    (((a as i64) << FRACBITS) / b as i64) as i32
   }
 }

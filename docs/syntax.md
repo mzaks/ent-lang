@@ -1280,6 +1280,39 @@ be a field, a parameter or a local, and a call that gives several cannot
 stand where one value is expected. An `extern fn` gives one value, as C
 does.
 
+## Consts
+
+```
+const FRACBITS = 16
+const FRACUNIT = 1 << FRACBITS
+const ANG45: u32 = 0x20000000
+const ANG1 = ANG45 / 45
+const SOLID = 0x02
+
+fn whole(x: i32) -> i32 { x >> FRACBITS }
+for t: mut Thing where t.flags & SOLID != 0 { t.angle += ANG45 }
+```
+
+A const is a value by a name: a number or a bool that is the program's
+own and never changes.
+
+- Its value is written out: numbers and bools as they are, other consts
+  declared before it, and what computes with them (`+`, `<<`, `|`, `!`,
+  `as` a number's type).
+- It has the type after its name (`const ANG45: u32 = ...`, which its
+  value is written in), or else the one its value has: that of a const
+  in it, an `i32` for whole numbers and an `f32` where a float is among
+  them. It is of that type wherever it is used, like a value a `let`
+  names.
+- It is declared at the top level, before what uses it, and belongs to
+  its module like a fn (`limits::FRACBITS`). A local of its name comes
+  before it.
+- It is used where a value is computed: in systems, `world`, fns and
+  procs, and other consts.
+
+Not yet: a const where a number is written as it is, which is a
+capacity (`capacity N`, `text[N]`) and a value of a table's row.
+
 ## Tables
 
 ```

@@ -1,0 +1,40 @@
+// Consts: values by a name, a module's too (consts.test).
+import console
+import limits
+
+const SPEED = 2.5
+const STEPS: i64 = 3
+const HALF: f32 = 1 / 2.0
+const SOLID = 0x02
+const SHOOTABLE = 0x04
+const BOTH = SOLID | SHOOTABLE
+const LOUD = !false
+const ANG90 = ANG45 * 2
+const SHADE: u8 = 200
+
+component Thing { flags: i32, at: f32 } capacity 4
+table shades: i32 = [10, 20, 30]
+
+fn fixed(x: i32) -> i32 { x * FRACUNIT }
+
+world {
+  spawn { Thing { flags: SOLID, at: SPEED } }
+  spawn { Thing { flags: BOTH, at: HALF } }
+}
+
+system show() {
+  put("unit {FRACUNIT} whole {whole(fixed(7) + 3)} one {ANG1} quarter {ANG90}")
+  put("speed {SPEED} steps {STEPS * 5000000000} half {HALF} loud {LOUD}")
+  put("module {limits::FRACBITS} shade {SHADE + 100} row {shades[FRACBITS - 14]}")
+  for t: mut Thing where t.flags & SHOOTABLE != 0 {
+    t.flags &= ~SOLID
+    t.at += SPEED
+  }
+  for t: Thing { put("thing {t.flags} at {t.at}") }
+  // A local of the same name comes first.
+  let SPEED = 9
+  put("local {SPEED}")
+}
+
+schedule once() { show() }
+main { once() }

@@ -23,6 +23,7 @@
 (archetype name: (identifier) @type)
 (enum_case (identifier) @constant)
 (table name: (identifier) @constant)
+(const name: (identifier) @constant)
 (asset name: (identifier) @constant)
 (table key: (identifier) @type)
 (keyed_row case: (identifier) @constant)
@@ -93,7 +94,7 @@
   (#any-of? @function.builtin "min" "max" "len"))
 
 [
-  "import" "asset" "component" "tag" "unique" "buffer" "enum" "table" "prefab"
+  "import" "asset" "component" "tag" "unique" "buffer" "enum" "table" "const" "prefab"
   "relation"
   "archetype"
   "system" "extern" "fn" "proc" "schedule" "world" "main"

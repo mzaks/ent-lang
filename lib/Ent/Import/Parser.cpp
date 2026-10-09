@@ -207,6 +207,7 @@ struct Expr {
     Row,    // table[i].field: name the table, field the field (or none)
     Of,     // value.field: a field of the row a value is
     Given,  // a value that is there already (`given`)
+    Const,  // a `const` by its name: name is its IR symbol
   };
   Kind kind;
   llvm::SMLoc loc;
@@ -389,6 +390,7 @@ public:
         tables([this](StringRef name) { return resolve(name); }),
         buffers([this](StringRef name) { return resolve(name); }),
         assetFiles([this](StringRef name) { return resolve(name); }),
+        constants([this](StringRef name) { return resolve(name); }),
         prefabs([this](StringRef name) { return resolve(name); }) {
     advance();
   }
@@ -536,6 +538,7 @@ private:
   LogicalResult parseFunction(bool proc, bool isExtern);
   LogicalResult parseEnum();
   LogicalResult parseTable();
+  LogicalResult parseConst();
   LogicalResult parsePrefab();
   FailureOr<std::vector<SpawnEntry>> parseSpawnEntries();
   FailureOr<SpawnEntry> parseSpawnIf();
@@ -834,6 +837,12 @@ private:
   /// The files that have a name (`asset name = "file"`): as the program
   /// writes them.
   Declared<std::string> assetFiles;
+  /// A `const`: a value by a name, written out again wherever it is used.
+  struct Constant {
+    Type type;
+    ExprPtr value;
+  };
+  Declared<Constant> constants;
   llvm::StringMap<unsigned> tableRows;
   /// Of a table with a row for each case of an enum: that enum's symbol.
   llvm::StringMap<std::string> tableKeys;
@@ -964,6 +973,8 @@ LogicalResult Parser::parseDeclarations() {
       result = parseFunction(/*proc=*/true, /*isExtern=*/false);
     else if (consumeKeyword("enum"))
       result = parseEnum();
+    else if (token.isKeyword("const") && peek().is(Token::Identifier))
+      result = parseConst();
     else if (token.isKeyword("table") && peek().is(Token::Identifier))
       result = parseTable();
     else if (consumeKeyword("schedule"))
@@ -2466,6 +2477,80 @@ FailureOr<Attribute> Parser::constantOf(const Expr &expr, Type type) {
 // table name { field: type, ... } = [ { field: value, ... }, ... ]
 // table name: type = [ value, ... ]
 // table name[Enum] ... = [ Case: row or value, ... ]: one for each case.
+/// Whether a const's value is made of what one may be: numbers and bools
+/// as they are written, other consts, and what computes with them.
+static bool isWrittenOut(const Expr &expr) {
+  switch (expr.kind) {
+  case Expr::Int:
+  case Expr::Float:
+  case Expr::Bool:
+  case Expr::Const:
+    return true;
+  case Expr::Unary:
+  case Expr::Binary:
+    return llvm::all_of(expr.operands, [](const ExprPtr &operand) {
+      return isWrittenOut(*operand);
+    });
+  case Expr::Cast:
+    return (expr.castType.isIntOrFloat() || expr.castType.isIndex()) &&
+           isWrittenOut(*expr.operands[0]);
+  default:
+    return false;
+  }
+}
+
+// const NAME = value, const NAME: type = value
+LogicalResult Parser::parseConst() {
+  advance();
+  llvm::SMLoc at = token.loc;
+  FailureOr<std::string> name = identifier("a const's name");
+  if (failed(name))
+    return failure();
+  if (current->names.contains(*name))
+    return error(at, "'" + *name + "' is already declared");
+  Type type;
+  if (consumeIf(Token::Colon)) {
+    llvm::SMLoc typeAt = token.loc;
+    FailureOr<Type> written = parseType();
+    if (failed(written))
+      return failure();
+    if (!written->isIntOrFloat() && !written->isIndex())
+      return error(typeAt, "a const is a number or a bool");
+    type = *written;
+  }
+  if (failed(expect(Token::Assign, "'=' and the const's value")))
+    return failure();
+  llvm::SMLoc valueAt = token.loc;
+  FailureOr<ExprPtr> value = parseExpr();
+  if (failed(value))
+    return failure();
+  if (!isWrittenOut(**value))
+    return error(valueAt, "a const's value is written out: numbers and "
+                          "bools, other consts, and what computes with "
+                          "them ('1 << 16', 'ANG45 / 45')");
+  if (!type)
+    type = typeOf(**value);
+  if (!type)
+    type = defaultType(**value);
+  // Written once here, to see that it is a value of its type; what it
+  // makes is thrown away.
+  {
+    Block scratch;
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToEnd(&scratch);
+    FailureOr<mlir::Value> made = emit(**value, type);
+    if (failed(made))
+      return failure();
+    if (made->getType() != type)
+      return mismatch(valueAt, made->getType(), type);
+  }
+  declareSymbol(at, *name);
+  Constant &constant = constants[*name];
+  constant.type = type;
+  constant.value = std::move(*value);
+  return success();
+}
+
 LogicalResult Parser::parseTable() {
   advance();
   llvm::SMLoc at = token.loc;
@@ -5888,6 +5973,8 @@ LogicalResult Parser::parseNameStatement() {
   if (variable)
     return error(at, "'" + name + "' is a value and cannot be assigned: "
                                   "declare it with 'var' instead of 'let'");
+  if (constants.count(name))
+    return error(at, "'" + name + "' is a const and cannot be assigned");
   return error(at, "unknown name '" + name + "'");
 }
 
@@ -6653,6 +6740,12 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
     }
     return node;
   }
+  // (A const by its name: its value, written here again.)
+  if (!lookup(name) && constants.count(name)) {
+    node->kind = Expr::Const;
+    node->name = resolve(name);
+    return node;
+  }
   // (A file by its name: the text that names it.)
   if (!lookup(name) && assetFiles.count(name)) {
     node->kind = Expr::String;
@@ -6824,6 +6917,8 @@ Type Parser::typeOf(const Expr &expr) {
     return builder.getI1Type();
   case Expr::Given:
     return expr.given.getType();
+  case Expr::Const:
+    return constants.ofSymbol(expr.name).type;
   case Expr::Of:
     if (RowKind *kind = rowOf(typeOf(*expr.operands[0])))
       for (auto &[field, type] : kind->fields)
@@ -6841,6 +6936,8 @@ Type Parser::typeOf(const Expr &expr) {
 Type Parser::defaultType(const Expr &expr) {
   if (expr.kind == Expr::Float)
     return builder.getF32Type();
+  if (expr.kind == Expr::Const)
+    return constants.ofSymbol(expr.name).type;
   for (const ExprPtr &operand : expr.operands)
     if (defaultType(*operand).isF32())
       return builder.getF32Type();
@@ -7647,6 +7744,10 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     return emitSpawn(expr);
   case Expr::Given:
     return expr.given;
+  case Expr::Const: {
+    Constant &constant = constants.ofSymbol(expr.name);
+    return emit(*constant.value, constant.type);
+  }
   case Expr::Of: {
     Type held = typeOf(*expr.operands[0]);
     if (!rowOf(held))

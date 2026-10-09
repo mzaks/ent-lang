@@ -1,0 +1,19 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+
+// A const leaves nothing in the program but its value where it is used.
+const FRACBITS = 16
+const FRACUNIT = 1 << FRACBITS
+const ANG90: u32 = 0x40000000
+unique Bits { whole: i32, angle: u32 }
+
+// CHECK-NOT: FRACBITS
+// CHECK-LABEL: ent.system @set() {
+system set() {
+  // CHECK: %[[ONE:.*]] = arith.constant 1 : i32
+  // CHECK: %[[BITS:.*]] = arith.constant 16 : i32
+  // CHECK: arith.shli %[[ONE]],
+  Bits.whole = FRACUNIT
+  // CHECK: arith.constant 1073741824 : i32
+  // CHECK: ent.write @Bits "angle", %{{.*}} : ui32
+  Bits.angle = ANG90
+}

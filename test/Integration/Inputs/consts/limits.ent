@@ -1,0 +1,7 @@
+// A module's consts (consts.test).
+const FRACBITS = 16
+const FRACUNIT = 1 << FRACBITS
+const ANG45: u32 = 0x20000000
+const ANG1 = ANG45 / 45
+
+fn whole(x: i32) -> i32 { x >> FRACBITS }
