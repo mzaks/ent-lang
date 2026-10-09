@@ -1,0 +1,181 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// What the view is drawn with (r_data.c): the textures of walls, each
+// made of patches; the flats of floors and ceilings; and the colour maps
+// that make a colour darker.
+//
+// Everything a pixel is taken from is in `Bytes`, the WAD's bytes, and is
+// meant by where it starts there: a column of a patch, a flat, a colour
+// map. What the WAD has not as it is (the columns of a texture where
+// patches overlap) is put together once and added after the WAD's bytes.
+import files
+import wad
+
+// What is known of it all: the first flat's lump and how many flats
+// there are, where the colour maps start, the flat that stands for the
+// sky and the texture that is drawn there.
+unique Data {
+  firstflat: i32, numflats: i32, colormaps: i32, skyflatnum: i32,
+  skytexture: i32
+}
+
+// A texture: its name, how wide and high it is, the most its width
+// allows of the bits of a column's number, and where its columns start
+// in `TextureColumns`.
+buffer Textures {
+  name: u64, width: i32, height: i32, mask: i32, columns: i32
+} capacity 2048
+
+// A column of a texture: where its pixels start in `Bytes`. (While the
+// textures are read: the patch's lump it is from, and how many patches
+// have it.)
+buffer TextureColumns { at: i32, lump: i32, count: i32 } capacity 262144
+
+// The lumps of the patches, by their numbers in the textures (PNAMES).
+buffer Patchlookup { lump: i32 } capacity 4096
+
+// A name in capitals, as the lumps have theirs.
+fn upper_name(name: u64) -> u64 {
+  var upper = 0 as u64
+  for i in 0..8 {
+    var c = (name >> (i * 8)) & 0xff
+    if c >= 97 && c <= 122 { c -= 32 }
+    upper |= c << (i * 8)
+  }
+  upper
+}
+
+// The number of the texture of that name: the first, 0 for "-" (none)
+// and -1 if there is none of the name (R_CheckTextureNumForName).
+fn texture_number(textures: Textures, name: u64) -> i32 {
+  let wanted = upper_name(name)
+  var found = -1
+  if wanted & 0xff == 45 {
+    found = 0
+  } else {
+    for i in 0..len(textures) {
+      if found < 0 && textures[i].name == wanted { found = i }
+    }
+  }
+  found
+}
+
+// Where the pixels of a texture's column are (R_GetColumn).
+fn get_column(textures: Textures, columns: TextureColumns, texture: i32,
+              column: i32) -> i32 {
+  columns[textures[texture].columns + (column & textures[texture].mask)].at
+}
+
+// Reads the textures and puts their columns together (R_InitTextures,
+// R_GenerateLookup, R_GenerateComposite), and finds the flats and the
+// colour maps (R_InitFlats, R_InitColormaps).
+system init_data() {
+  Textures = []
+  TextureColumns = []
+  Patchlookup = []
+  // (A WAD without patches has no textures: nothing is read of them.)
+  let named = lump_number(Lumps, lump_name("PNAMES"))
+  let pnames = Lumps[named].at
+  for i in 0..if named < 0 { 0 } else { long_at(Bytes, pnames) } {
+    Patchlookup += {
+      lump: lump_number(Lumps, upper_name(name_at(Bytes, pnames + 4 + i * 8)))
+    }
+  }
+  for which in 0..2 {
+    let lump = if which == 0 {
+      lump_number(Lumps, lump_name("TEXTURE1"))
+    } else {
+      lump_number(Lumps, lump_name("TEXTURE2"))
+    }
+    if lump >= 0 && named >= 0 {
+      let base = Lumps[lump].at
+      for i in 0..long_at(Bytes, base) {
+        // Its name, (four bytes), width, height, (four bytes), how many
+        // patches; then the patches, ten bytes each: where on the
+        // texture, and which.
+        let at = base + long_at(Bytes, base + 4 + i * 4)
+        let width = short_at(Bytes, at + 12)
+        let height = short_at(Bytes, at + 14)
+        let patches = short_at(Bytes, at + 20)
+        var mask = 1
+        while mask * 2 <= width { mask <<= 1 }
+        let columns = len(TextureColumns)
+        Textures += {
+          name: upper_name(name_at(Bytes, at)), width: width, height: height,
+          mask: mask - 1, columns: columns
+        }
+        for x in 0..width { TextureColumns += { at: 0, lump: 0, count: 0 } }
+        // Each column from the last patch that has it.
+        for j in 0..patches {
+          let patch = Patchlookup[short_at(Bytes, at + 22 + j * 10 + 4)].lump
+          let from = Lumps[patch].at
+          let x1 = short_at(Bytes, at + 22 + j * 10)
+          let x2 = min(x1 + short_at(Bytes, from), width)
+          for x in max(x1, 0)..x2 {
+            TextureColumns[columns + x].count += 1
+            TextureColumns[columns + x].lump = patch
+            TextureColumns[columns + x].at =
+                from + long_at(Bytes, from + 8 + (x - x1) * 4) + 3
+          }
+        }
+        // A column that several patches have is put together, in a
+        // block after the WAD's bytes.
+        let block = len(Bytes)
+        var size = 0
+        for x in 0..width {
+          if TextureColumns[columns + x].count > 1 {
+            TextureColumns[columns + x].lump = -1
+            TextureColumns[columns + x].at = block + size
+            size += height
+          }
+        }
+        for k in 0..size { Bytes += { value: 0 } }
+        for j in 0..patches {
+          let patch = Patchlookup[short_at(Bytes, at + 22 + j * 10 + 4)].lump
+          let from = Lumps[patch].at
+          let x1 = short_at(Bytes, at + 22 + j * 10)
+          let originy = short_at(Bytes, at + 22 + j * 10 + 2)
+          let x2 = min(x1 + short_at(Bytes, from), width)
+          for x in max(x1, 0)..x2 {
+            if TextureColumns[columns + x].lump < 0 {
+              // R_DrawColumnInCache: the patch's column is posts, each
+              // where it starts, how many pixels, a byte, the pixels, a
+              // byte; 255 ends them.
+              let cache = TextureColumns[columns + x].at
+              var post = from + long_at(Bytes, from + 8 + (x - x1) * 4)
+              while Bytes[post].value != 255 {
+                var count = Bytes[post + 1].value as i32
+                var position = originy + Bytes[post].value as i32
+                if position < 0 {
+                  count += position
+                  position = 0
+                }
+                if position + count > height { count = height - position }
+                for k in 0..count {
+                  Bytes[cache + position + k].value = Bytes[post + 3 + k].value
+                }
+                post += Bytes[post + 1].value as i32 + 4
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  Data.firstflat = lump_number(Lumps, lump_name("F_START")) + 1
+  Data.numflats = lump_number(Lumps, lump_name("F_END")) - Data.firstflat
+  Data.colormaps = Lumps[lump_number(Lumps, lump_name("COLORMAP"))].at
+  Data.skyflatnum = lump_number(Lumps, lump_name("F_SKY1")) - Data.firstflat
+  Data.skytexture = texture_number(Textures, lump_name("SKY1"))
+}

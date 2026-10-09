@@ -17,6 +17,7 @@
 import files
 import wad
 import fixed
+import data
 
 // Which lump after the level's name is what (doomdata.h).
 const ML_THINGS = 1
@@ -48,18 +49,18 @@ unique Level { episode: i32, map: i32, lump: i32 }
 // The corners of the level's lines.
 buffer Vertexes { x: i32, y: i32 } capacity 32768
 
-// A room: how high its floor and its ceiling are, how light it is, and
-// what is special about it.
+// A room: how high its floor and its ceiling are, the flats on them (by
+// their numbers), how light it is, and what is special about it.
 buffer Sectors {
-  floorheight: i32, ceilingheight: i32, floorpic: u64, ceilingpic: u64,
+  floorheight: i32, ceilingheight: i32, floorpic: i32, ceilingpic: i32,
   lightlevel: i32, special: i32, tag: i32
 } capacity 4096
 
-// A side of a line: the pictures on it, how they are shifted, and the
-// sector it looks into.
+// A side of a line: the textures on it (by their numbers; 0 is none),
+// how they are shifted, and the sector it looks into.
 buffer Sides {
-  textureoffset: i32, rowoffset: i32, toptexture: u64, bottomtexture: u64,
-  midtexture: u64, sector: i32
+  textureoffset: i32, rowoffset: i32, toptexture: i32, bottomtexture: i32,
+  midtexture: i32, sector: i32
 } capacity 32768
 
 // A line of the level: from (x1, y1) to (x2, y2), which is (dx, dy) on;
@@ -107,7 +108,8 @@ fn side_sector(sides: Sides, side: i32) -> i32 {
   if side < 0 { -1 } else { sides[side].sector }
 }
 
-// Reads the level `Level` names (P_SetupLevel).
+// Reads the level `Level` names (P_SetupLevel), after `init_data`: the
+// textures and flats are meant by their numbers.
 system load_level() {
   var name: text[8] = "E{Level.episode}M{Level.map}"
   let lump = lump_number(Lumps, lump_name(name))
@@ -137,7 +139,8 @@ system load_level() {
       Sectors += {
         floorheight: short_at(Bytes, at) << FRACBITS,
         ceilingheight: short_at(Bytes, at + 2) << FRACBITS,
-        floorpic: name_at(Bytes, at + 4), ceilingpic: name_at(Bytes, at + 12),
+        floorpic: lump_number(Lumps, name_at(Bytes, at + 4)) - Data.firstflat,
+        ceilingpic: lump_number(Lumps, name_at(Bytes, at + 12)) - Data.firstflat,
         lightlevel: short_at(Bytes, at + 20),
         special: short_at(Bytes, at + 22), tag: short_at(Bytes, at + 24)
       }
@@ -149,9 +152,10 @@ system load_level() {
       Sides += {
         textureoffset: short_at(Bytes, at) << FRACBITS,
         rowoffset: short_at(Bytes, at + 2) << FRACBITS,
-        toptexture: name_at(Bytes, at + 4),
-        bottomtexture: name_at(Bytes, at + 12),
-        midtexture: name_at(Bytes, at + 20), sector: short_at(Bytes, at + 28)
+        toptexture: texture_number(Textures, name_at(Bytes, at + 4)),
+        bottomtexture: texture_number(Textures, name_at(Bytes, at + 12)),
+        midtexture: texture_number(Textures, name_at(Bytes, at + 20)),
+        sector: short_at(Bytes, at + 28)
       }
     }
     // P_LoadLineDefs: 14 bytes each.

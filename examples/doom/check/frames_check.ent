@@ -1,0 +1,79 @@
+// The pictures of a level from many places in it, without what is
+// masked: for each of the views the reference wrote (the table `views`),
+// the walls, floors and ceilings as the port draws them, one picture
+// after another in the file `frames.port`, to hold against the
+// reference's. See check/view.sh.
+import console
+import files
+import wad
+import data
+import level
+import video
+import render
+import views
+
+capacity Bytes 16777216
+
+world {
+  Wad.file = "doom1.wad"
+  Level.episode = 1
+  Level.map = 1
+}
+
+// Which of the views is next; and where the picture is put in `Bytes`
+// to be written from.
+unique Next: i32
+unique Room: i32
+// All the pictures in one number (FNV-1a over their pixels).
+unique Hash: u32
+
+system reserve() {
+  Hash = 2166136261
+  Room = len(Bytes)
+  for i in 0..SCREENWIDTH * SCREENHEIGHT { Bytes += { value: 0 } }
+}
+
+system look() {
+  Viewpoint.x = views[Next].x
+  Viewpoint.y = views[Next].y
+  Viewpoint.z = views[Next].z
+  Viewpoint.angle = views[Next].angle
+}
+
+system keep() {
+  var hash = Hash
+  for i in 0..len(Screen) {
+    Bytes[Room + i].value = Screen[i].pixel
+    hash = (hash ^ Screen[i].pixel as u32) * 16777619
+  }
+  Hash = hash
+  if !write_bytes("frames.port", Bytes, Room, SCREENWIDTH * SCREENHEIGHT,
+                  Next > 0) {
+    put("could not write frames.port")
+  }
+  Next += 1
+}
+
+schedule setup() {
+  load_wad()
+  init_data()
+  load_level()
+  set_view_size()
+  init_view_tables()
+  reserve()
+}
+schedule one() {
+  look()
+  clear_screen()
+  render_view()
+  draw_walls()
+  draw_planes()
+  keep()
+}
+system report() { put("pictures {Next}: {Hash}") }
+schedule done() { report() }
+main {
+  setup()
+  loop { one() } until Next == len(views)
+  done()
+}

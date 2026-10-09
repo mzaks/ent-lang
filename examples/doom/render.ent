@@ -15,9 +15,12 @@
 // tree is walked from the front to the back, and of every wall the
 // columns of the picture are found that it is seen in and nothing nearer
 // has taken.
+import files
+import wad
 import fixed
 import tables
 import angles
+import data
 import level
 import video
 
@@ -60,9 +63,11 @@ buffer Frame {
 // right, with one before the view and one after it (solidsegs).
 buffer Solidsegs { first: i32, last: i32 } capacity 33
 
-// The pieces of walls that are seen, nearest first: the columns from
-// `first` to `last` of a seg.
-buffer Walls { first: i32, last: i32, seg: i32 } capacity 4096
+// What the walk finds, in its order: a subsector it comes to (`seg` is
+// -1, `first` the subsector), and the pieces of its walls that are seen,
+// the columns from `first` to `last` of a seg, whose first end is seen at
+// the angle `angle1`. The nearest come first.
+buffer Walls { first: i32, last: i32, seg: i32, angle1: u32 } capacity 8192
 
 // Which corners of a box are its ends as seen from each of the nine
 // places around and in it (checkcoord).
@@ -121,16 +126,18 @@ fn point_in_subsector(nodes: Nodes, x: i32, y: i32) -> i32 {
   num & ~NF_SUBSECTOR
 }
 
-// A piece of a wall that is seen: so far, noted. (R_StoreWallRange.)
-proc store_wall_range(walls: mut Walls, seg: i32, first: i32, last: i32) {
-  walls += { first: first, last: last, seg: seg }
+// A piece of a wall that is seen: noted, for `draw_walls` to store and
+// draw (R_StoreWallRange).
+proc store_wall_range(walls: mut Walls, seg: i32, first: i32, last: i32,
+                      angle1: u32) {
+  walls += { first: first, last: last, seg: seg, angle1: angle1 }
 }
 
 // A wall that nothing is seen through, in the columns from `first` to
 // `last`: what of it is not behind a nearer wall is seen, and the
 // columns are full from now on (R_ClipSolidWallSegment).
 proc clip_solid(frame: mut Frame, solid: mut Solidsegs, walls: mut Walls,
-                seg: i32, first: i32, last: i32) {
+                seg: i32, first: i32, last: i32, angle1: u32) {
   // The first range that reaches up to it.
   var start = 0
   while solid[start].last < first - 1 { start += 1 }
@@ -138,7 +145,7 @@ proc clip_solid(frame: mut Frame, solid: mut Solidsegs, walls: mut Walls,
   if first < solid[start].first {
     if last < solid[start].first - 1 {
       // All of it is seen: a range of its own, put in before `start`.
-      store_wall_range(walls, seg, first, last)
+      store_wall_range(walls, seg, first, last, angle1)
       var next = frame[0].newend
       frame[0].newend += 1
       while next != start {
@@ -151,7 +158,7 @@ proc clip_solid(frame: mut Frame, solid: mut Solidsegs, walls: mut Walls,
       done = true
     } else {
       // Up to where `start` begins, which then begins with it.
-      store_wall_range(walls, seg, first, solid[start].first - 1)
+      store_wall_range(walls, seg, first, solid[start].first - 1, angle1)
       solid[start].first = first
     }
   }
@@ -162,7 +169,7 @@ proc clip_solid(frame: mut Frame, solid: mut Solidsegs, walls: mut Walls,
     while !met && last >= solid[next + 1].first - 1 {
       // What is between two ranges, which are then one.
       store_wall_range(walls, seg, solid[next].last + 1,
-                       solid[next + 1].first - 1)
+                       solid[next + 1].first - 1, angle1)
       next += 1
       if last <= solid[next].last {
         solid[start].last = solid[next].last
@@ -170,7 +177,7 @@ proc clip_solid(frame: mut Frame, solid: mut Solidsegs, walls: mut Walls,
       }
     }
     if !met {
-      store_wall_range(walls, seg, solid[next].last + 1, last)
+      store_wall_range(walls, seg, solid[next].last + 1, last, angle1)
       solid[start].last = last
     }
     // The ranges that `start` took in are taken out. (One more is moved
@@ -194,27 +201,27 @@ proc clip_solid(frame: mut Frame, solid: mut Solidsegs, walls: mut Walls,
 // nearer wall is seen, and the columns stay as they are
 // (R_ClipPassWallSegment).
 proc clip_pass(solid: Solidsegs, walls: mut Walls, seg: i32, first: i32,
-               last: i32) {
+               last: i32, angle1: u32) {
   var start = 0
   while solid[start].last < first - 1 { start += 1 }
   var done = false
   if first < solid[start].first {
     if last < solid[start].first - 1 {
-      store_wall_range(walls, seg, first, last)
+      store_wall_range(walls, seg, first, last, angle1)
       done = true
     } else {
-      store_wall_range(walls, seg, first, solid[start].first - 1)
+      store_wall_range(walls, seg, first, solid[start].first - 1, angle1)
     }
   }
   if !done && last > solid[start].last {
     var met = false
     while !met && last >= solid[start + 1].first - 1 {
       store_wall_range(walls, seg, solid[start].last + 1,
-                       solid[start + 1].first - 1)
+                       solid[start + 1].first - 1, angle1)
       start += 1
       if last <= solid[start].last { met = true }
     }
-    if !met { store_wall_range(walls, seg, solid[start].last + 1, last) }
+    if !met { store_wall_range(walls, seg, solid[start].last + 1, last, angle1) }
   }
 }
 
@@ -270,14 +277,13 @@ proc add_line(segs: Segs, sectors: Sectors, sides: Sides, map: Viewangletox,
         } else if sectors[back].ceilingpic != sectors[front].ceilingpic ||
                   sectors[back].floorpic != sectors[front].floorpic ||
                   sectors[back].lightlevel != sectors[front].lightlevel ||
-                  sides[segs[seg].side].midtexture & 0xff != 45 {
-          // (No texture is written "-": its first byte is 45.)
+                  sides[segs[seg].side].midtexture != 0 {
           open = true
         }
         if solid_wall {
-          clip_solid(frame, solid, walls, seg, x1, x2 - 1)
+          clip_solid(frame, solid, walls, seg, x1, x2 - 1, seen1)
         } else if open {
-          clip_pass(solid, walls, seg, x1, x2 - 1)
+          clip_pass(solid, walls, seg, x1, x2 - 1, seen1)
         }
       }
     }
@@ -358,6 +364,7 @@ proc render_subsector(subsectors: Subsectors, segs: Segs, sectors: Sectors,
                       solid: mut Solidsegs, walls: mut Walls, num: i32) {
   let front = subsectors[num].sector
   let first = subsectors[num].firstline
+  walls += { first: num, last: 0, seg: -1, angle1: 0 }
   for i in 0..subsectors[num].numlines {
     add_line(segs, sectors, sides, map, frame, solid, walls, first + i, front)
   }
@@ -478,4 +485,611 @@ system render_view() {
   Walls = []
   render_bsp_node(Nodes, Boxes, Subsectors, Segs, Sectors, Sides,
                   Viewangletox, Frame, Solidsegs, Walls, len(Nodes) - 1)
+}
+
+//
+// What the walk found is drawn (r_segs.c, r_plane.c, r_draw.c): the
+// walls column by column, nearest first, each column from the wall's top
+// to its bottom as far as nothing nearer is there; and what the walls
+// leave open above and below them, the ceilings and floors, in spans
+// along the rows.
+//
+
+// How many pieces of walls are stored at most: the rest are not drawn.
+const MAXDRAWSEGS = 256
+// A height on the screen is kept with 12 bits after the point.
+const HEIGHTBITS = 12
+const HEIGHTUNIT = 1 << HEIGHTBITS
+
+// Light: 16 levels of it, each with a colour map for each of 48 scales
+// (of walls) and 128 distances (of floors and ceilings); of the 32
+// colour maps the first is the lightest.
+const LIGHTLEVELS = 16
+const LIGHTSEGSHIFT = 4
+const MAXLIGHTSCALE = 48
+const LIGHTSCALESHIFT = 12
+const MAXLIGHTZ = 128
+const LIGHTZSHIFT = 20
+const NUMCOLORMAPS = 32
+const DISTMAP = 2
+// Where the colour map is in `Bytes`, for a light level l and a scale s
+// (row l * 48 + s) or a distance z (row l * 128 + z).
+buffer Scalelight { map: i32 } capacity 768
+buffer Zlight { map: i32 } capacity 2048
+
+const ANGLETOSKYSHIFT = 22
+
+// For each column of the view: the rows nothing is drawn in yet are
+// those between `ceiling` and `floor` (ceilingclip, floorclip); and how
+// much farther a point is that is seen in the column than straight on
+// (distscale).
+buffer Clips { ceiling: i32, floor: i32 } capacity 320
+buffer Distscale { scale: i32 } capacity 320
+
+// For each row: how far a floor one unit below the eye is seen there
+// (yslope); what was worked out for the height that was last drawn there
+// (cached..); and the column a span that is open there started in.
+buffer Spans {
+  yslope: i32, cachedheight: i32, cacheddistance: i32, cachedxstep: i32,
+  cachedystep: i32, spanstart: i32
+} capacity 200
+
+// A floor or a ceiling that is seen: its height, flat and light, and the
+// columns it is seen in. The rows of each column are in `Planetops`:
+// for plane p and column x, row p * 322 + x + 1 (one more column before
+// and after, which are empty). A column with nothing has 255 for `top`.
+buffer Visplanes {
+  height: i32, picnum: i32, lightlevel: i32, minx: i32, maxx: i32
+} capacity 128
+buffer Planetops { top: u8, bottom: u8 } capacity 41216
+
+// What was worked out for each piece of a wall that was stored, for
+// holding it against the reference's (check/view.sh).
+buffer Stored {
+  seg: i32, distance: i32, scale: i32, scalestep: i32, offset: i32,
+  centerangle: u32, midtexturemid: i32, topfrac: i32, bottomfrac: i32,
+  midtexture: i32, toptexture: i32, bottomtexture: i32, masked: bool,
+  markfloor: bool, markceiling: bool
+} capacity 256
+
+// How much smaller than it is a wall is seen at an angle (the scale of
+// its texture), for one whose normal is at `normal` and that is
+// `distance` away along it (R_ScaleFromGlobalAngle).
+fn scale_from_global_angle(visangle: u32, viewangle: u32, normal: u32,
+                           distance: i32, projection: i32) -> i32 {
+  let sinea = finesine[(ANG90 + (visangle - viewangle)) >> ANGLETOFINESHIFT]
+  let sineb = finesine[(ANG90 + (visangle - normal)) >> ANGLETOFINESHIFT]
+  let num = fixed_mul(projection, sineb)
+  let den = fixed_mul(distance, sinea)
+  if den > num >> FRACBITS {
+    let scale = fixed_div(num, den)
+    if scale > 64 * FRACUNIT {
+      64 * FRACUNIT
+    } else if scale < 256 {
+      256
+    } else {
+      scale
+    }
+  } else {
+    64 * FRACUNIT
+  }
+}
+
+// The plane of that height, flat and light, a new one if there is none
+// (R_FindPlane).
+proc find_plane(planes: mut Visplanes, tops: mut Planetops, height: i32,
+                picnum: i32, lightlevel: i32, skyflatnum: i32) -> i32 {
+  // (All the sky is one.)
+  let h = if picnum == skyflatnum { 0 } else { height }
+  let light = if picnum == skyflatnum { 0 } else { lightlevel }
+  var found = -1
+  for i in 0..len(planes) {
+    if found < 0 && planes[i].height == h && planes[i].picnum == picnum &&
+       planes[i].lightlevel == light {
+      found = i
+    }
+  }
+  if found < 0 {
+    found = len(planes)
+    planes += {
+      height: h, picnum: picnum, lightlevel: light, minx: SCREENWIDTH,
+      maxx: -1
+    }
+    for x in 0..322 { tops += { top: 255, bottom: 0 } }
+  }
+  found
+}
+
+// The plane to mark in the columns from `start` to `stop`: `pl`, if it
+// has nothing there yet, else a new one like it (R_CheckPlane).
+proc check_plane(planes: mut Visplanes, tops: mut Planetops, pl: i32,
+                 start: i32, stop: i32) -> i32 {
+  let minx = planes[pl].minx
+  let maxx = planes[pl].maxx
+  let intrl = max(start, minx)
+  let unionl = min(start, minx)
+  let intrh = min(stop, maxx)
+  let unionh = max(stop, maxx)
+  var free = true
+  for x in intrl..intrh + 1 {
+    if tops[pl * 322 + x + 1].top != 255 { free = false }
+  }
+  var used = pl
+  if free {
+    planes[pl].minx = unionl
+    planes[pl].maxx = unionh
+  } else {
+    used = len(planes)
+    planes += {
+      height: planes[pl].height, picnum: planes[pl].picnum,
+      lightlevel: planes[pl].lightlevel, minx: start, maxx: stop
+    }
+    for x in 0..322 { tops += { top: 255, bottom: 0 } }
+  }
+  used
+}
+
+// A column of a texture, from row `yl` to `yh` of the view's column `x`:
+// each pixel from the texture's column at `source`, `iscale` on for each
+// row, made darker by the colour map at `colormap` (R_DrawColumn).
+proc draw_column(screen: mut Screen, bytes: Bytes, x: i32, yl: i32, yh: i32,
+                 iscale: i32, texturemid: i32, source: i32, colormap: i32,
+                 centery: i32, left: i32, top: i32) {
+  var dest = (yl + top) * SCREENWIDTH + left + x
+  var frac = texturemid + (yl - centery) * iscale
+  for y in yl..yh + 1 {
+    screen[dest].pixel =
+        bytes[colormap + bytes[source + ((frac >> FRACBITS) & 127)].value as i32].value
+    dest += SCREENWIDTH
+    frac += iscale
+  }
+}
+
+// A span of a flat, the columns `x1` to `x2` of the view's row `y`: the
+// flat is 64 by 64 at `source`, the first pixel from (xfrac, yfrac) of
+// it and each next one (xstep, ystep) on (R_DrawSpan).
+proc draw_span(screen: mut Screen, bytes: Bytes, y: i32, x1: i32, x2: i32,
+               xfrac: i32, yfrac: i32, xstep: i32, ystep: i32, source: i32,
+               colormap: i32, left: i32, top: i32) {
+  // Both in one number: 16 bits each, of which 6 say the pixel.
+  var position = (((xfrac as u32) << 10) & 0xffff0000) |
+                 (((yfrac >> 6) as u32) & 0x0000ffff)
+  let step = (((xstep as u32) << 10) & 0xffff0000) |
+             (((ystep >> 6) as u32) & 0x0000ffff)
+  var dest = (y + top) * SCREENWIDTH + left + x1
+  for x in x1..x2 + 1 {
+    let spot = (position >> 26) | ((position >> 4) & 0x0fc0)
+    screen[dest].pixel =
+        bytes[colormap + bytes[source + spot as i32].value as i32].value
+    dest += 1
+    position += step
+  }
+}
+
+// What depends on the size of the view and on nothing else: how far the
+// floor is seen in each row, how much farther the edges of the view are
+// than its middle, and the colour maps of the light levels
+// (R_ExecuteSetViewSize, R_InitLightTables). After `set_view_size` and
+// `init_data`.
+system init_view_tables() {
+  Spans = []
+  for y in 0..View.height {
+    let dy = abs(((y - View.height / 2) << FRACBITS) + FRACUNIT / 2)
+    Spans += {
+      yslope: fixed_div(View.width / 2 * FRACUNIT, dy), cachedheight: 0,
+      cacheddistance: 0, cachedxstep: 0, cachedystep: 0, spanstart: 0
+    }
+  }
+  Distscale = []
+  for x in 0..View.width {
+    let cosadj =
+        abs(finecosine((Xtoviewangle[x].angle >> ANGLETOFINESHIFT) as i32))
+    Distscale += { scale: fixed_div(FRACUNIT, cosadj) }
+  }
+  Scalelight = []
+  Zlight = []
+  for i in 0..LIGHTLEVELS {
+    let startmap = ((LIGHTLEVELS - 1 - i) * 2) * NUMCOLORMAPS / LIGHTLEVELS
+    for j in 0..MAXLIGHTSCALE {
+      let level = startmap - j * SCREENWIDTH / View.width / DISTMAP
+      Scalelight += {
+        map: Data.colormaps + min(max(level, 0), NUMCOLORMAPS - 1) * 256
+      }
+    }
+    for j in 0..MAXLIGHTZ {
+      let scale = fixed_div(SCREENWIDTH / 2 * FRACUNIT, (j + 1) << LIGHTZSHIFT) >>
+                  LIGHTSCALESHIFT
+      let level = startmap - scale / DISTMAP
+      Zlight += {
+        map: Data.colormaps + min(max(level, 0), NUMCOLORMAPS - 1) * 256
+      }
+    }
+  }
+}
+
+// Stores and draws the pieces of walls the walk found, in its order, and
+// marks the planes they leave open (R_Subsector's planes,
+// R_StoreWallRange, R_RenderSegLoop). After `render_view`.
+system draw_walls() {
+  let vx = Frame[0].x
+  let vy = Frame[0].y
+  let vz = Frame[0].z
+  let viewangle = Frame[0].angle
+  // R_ClearPlanes: nothing is drawn in any column yet.
+  Clips = [{ ceiling: -1, floor: View.height }; View.width]
+  Visplanes = []
+  Planetops = []
+  Stored = []
+  var drawsegs = 0
+  var front = 0
+  var floorplane = -1
+  var ceilingplane = -1
+  for i in 0..len(Walls) {
+    if Walls[i].seg < 0 {
+      // A subsector: its floor is seen if it is below the eye, its
+      // ceiling if it is above it or the sky.
+      front = Subsectors[Walls[i].first].sector
+      floorplane = if Sectors[front].floorheight < vz {
+        find_plane(Visplanes, Planetops, Sectors[front].floorheight,
+                   Sectors[front].floorpic, Sectors[front].lightlevel,
+                   Data.skyflatnum)
+      } else {
+        -1
+      }
+      ceilingplane = if Sectors[front].ceilingheight > vz ||
+                        Sectors[front].ceilingpic == Data.skyflatnum {
+        find_plane(Visplanes, Planetops, Sectors[front].ceilingheight,
+                   Sectors[front].ceilingpic, Sectors[front].lightlevel,
+                   Data.skyflatnum)
+      } else {
+        -1
+      }
+    } else if drawsegs < MAXDRAWSEGS {
+      let seg = Walls[i].seg
+      let start = Walls[i].first
+      let stop = Walls[i].last
+      let rw_angle1 = Walls[i].angle1
+      let side = Segs[seg].side
+      let line = Segs[seg].line
+      let back = Segs[seg].back
+      // (It has been seen: the map shows it.)
+      Lines[line].flags |= ML_MAPPED
+
+      // How far the wall is, along its normal.
+      let rw_normalangle = Segs[seg].angle + ANG90
+      let offset1 = abs((rw_normalangle as i32) - (rw_angle1 as i32)) as u32
+      let distangle = ANG90 - min(offset1, ANG90)
+      let hyp = point_to_dist(Segs[seg].x1 - vx, Segs[seg].y1 - vy)
+      let rw_distance = fixed_mul(hyp, finesine[distangle >> ANGLETOFINESHIFT])
+
+      // Its scale at both ends, and the step between two columns.
+      let scale1 = scale_from_global_angle(
+          viewangle + Xtoviewangle[start].angle, viewangle, rw_normalangle,
+          rw_distance, View.projection)
+      let rw_scalestep = if stop > start {
+        (scale_from_global_angle(viewangle + Xtoviewangle[stop].angle,
+                                 viewangle, rw_normalangle, rw_distance,
+                                 View.projection) - scale1) / (stop - start)
+      } else {
+        0
+      }
+
+      // Which textures there are, and where each one's top is.
+      let frontfloor = Sectors[front].floorheight
+      let frontceiling = Sectors[front].ceilingheight
+      var worldtop = frontceiling - vz
+      var worldbottom = frontfloor - vz
+      var worldhigh = 0
+      var worldlow = 0
+      var midtexture = 0
+      var toptexture = 0
+      var bottomtexture = 0
+      var maskedtexture = false
+      var markfloor = true
+      var markceiling = true
+      var rw_midtexturemid = 0
+      var rw_toptexturemid = 0
+      var rw_bottomtexturemid = 0
+      if back < 0 {
+        // One side: one texture from the ceiling to the floor.
+        midtexture = Sides[side].midtexture
+        rw_midtexturemid = if Lines[line].flags & ML_DONTPEGBOTTOM != 0 {
+          // (Its bottom at the floor.)
+          frontfloor + (Textures[midtexture].height << FRACBITS) - vz
+        } else {
+          worldtop
+        }
+        rw_midtexturemid += Sides[side].rowoffset
+      } else {
+        // Two sides: a texture above the opening and one below it.
+        let backfloor = Sectors[back].floorheight
+        let backceiling = Sectors[back].ceilingheight
+        worldhigh = backceiling - vz
+        worldlow = backfloor - vz
+        // (The sky on both sides: no wall is seen between them.)
+        if Sectors[front].ceilingpic == Data.skyflatnum &&
+           Sectors[back].ceilingpic == Data.skyflatnum {
+          worldtop = worldhigh
+        }
+        markfloor = worldlow != worldbottom ||
+                    Sectors[back].floorpic != Sectors[front].floorpic ||
+                    Sectors[back].lightlevel != Sectors[front].lightlevel
+        markceiling = worldhigh != worldtop ||
+                      Sectors[back].ceilingpic != Sectors[front].ceilingpic ||
+                      Sectors[back].lightlevel != Sectors[front].lightlevel
+        // (A door that is shut.)
+        if backceiling <= frontfloor || backfloor >= frontceiling {
+          markceiling = true
+          markfloor = true
+        }
+        if worldhigh < worldtop {
+          toptexture = Sides[side].toptexture
+          rw_toptexturemid = if Lines[line].flags & ML_DONTPEGTOP != 0 {
+            worldtop
+          } else {
+            backceiling + (Textures[toptexture].height << FRACBITS) - vz
+          }
+        }
+        if worldlow > worldbottom {
+          bottomtexture = Sides[side].bottomtexture
+          rw_bottomtexturemid = if Lines[line].flags & ML_DONTPEGBOTTOM != 0 {
+            worldtop
+          } else {
+            worldlow
+          }
+        }
+        rw_toptexturemid += Sides[side].rowoffset
+        rw_bottomtexturemid += Sides[side].rowoffset
+        // (One in the opening is drawn later, with what is masked.)
+        maskedtexture = Sides[side].midtexture != 0
+      }
+
+      // Where along the texture each column is, and how light.
+      let segtextured = midtexture != 0 || toptexture != 0 ||
+                        bottomtexture != 0 || maskedtexture
+      var rw_offset = 0
+      var rw_centerangle = 0 as u32
+      var walllights = 0
+      if segtextured {
+        var offsetangle = rw_normalangle - rw_angle1
+        if offsetangle > ANG180 { offsetangle = -offsetangle }
+        if offsetangle > ANG90 { offsetangle = ANG90 }
+        rw_offset = fixed_mul(hyp, finesine[offsetangle >> ANGLETOFINESHIFT])
+        if rw_normalangle - rw_angle1 < ANG180 { rw_offset = -rw_offset }
+        rw_offset += Sides[side].textureoffset + Segs[seg].offset
+        rw_centerangle = ANG90 + viewangle - rw_normalangle
+        // (A wall along the grid is a little darker or lighter.)
+        var lightnum = Sectors[front].lightlevel >> LIGHTSEGSHIFT
+        if Segs[seg].y1 == Segs[seg].y2 {
+          lightnum -= 1
+        } else if Segs[seg].x1 == Segs[seg].x2 {
+          lightnum += 1
+        }
+        walllights = min(max(lightnum, 0), LIGHTLEVELS - 1) * MAXLIGHTSCALE
+      }
+
+      // (What is not seen from here is not marked.)
+      if frontfloor >= vz { markfloor = false }
+      if frontceiling <= vz && Sectors[front].ceilingpic != Data.skyflatnum {
+        markceiling = false
+      }
+
+      // The rows of the wall's top and bottom at the first column, and
+      // the step between two columns.
+      worldtop >>= 4
+      worldbottom >>= 4
+      let centeryfrac = View.centeryfrac >> 4
+      let topstep = -fixed_mul(rw_scalestep, worldtop)
+      let bottomstep = -fixed_mul(rw_scalestep, worldbottom)
+      var topfrac = centeryfrac - fixed_mul(worldtop, scale1)
+      var bottomfrac = centeryfrac - fixed_mul(worldbottom, scale1)
+      var pixhigh = 0
+      var pixhighstep = 0
+      var pixlow = 0
+      var pixlowstep = 0
+      if back >= 0 {
+        worldhigh >>= 4
+        worldlow >>= 4
+        if worldhigh < worldtop {
+          pixhigh = centeryfrac - fixed_mul(worldhigh, scale1)
+          pixhighstep = -fixed_mul(rw_scalestep, worldhigh)
+        }
+        if worldlow > worldbottom {
+          pixlow = centeryfrac - fixed_mul(worldlow, scale1)
+          pixlowstep = -fixed_mul(rw_scalestep, worldlow)
+        }
+      }
+
+      Stored += {
+        seg: seg, distance: rw_distance, scale: scale1, scalestep: rw_scalestep,
+        offset: rw_offset, centerangle: rw_centerangle,
+        midtexturemid: rw_midtexturemid, topfrac: topfrac,
+        bottomfrac: bottomfrac, midtexture: midtexture, toptexture: toptexture,
+        bottomtexture: bottomtexture, masked: maskedtexture,
+        markfloor: markfloor, markceiling: markceiling
+      }
+      if markceiling {
+        ceilingplane = check_plane(Visplanes, Planetops, ceilingplane, start, stop)
+      }
+      if markfloor {
+        floorplane = check_plane(Visplanes, Planetops, floorplane, start, stop)
+      }
+
+      // R_RenderSegLoop: column by column.
+      var rw_scale = scale1
+      for x in start..stop + 1 {
+        let ceilingclip = Clips[x].ceiling
+        let floorclip = Clips[x].floor
+        // What is above the wall is the ceiling's.
+        let yl = max((topfrac + HEIGHTUNIT - 1) >> HEIGHTBITS, ceilingclip + 1)
+        if markceiling {
+          let top = ceilingclip + 1
+          let bottom = min(yl - 1, floorclip - 1)
+          if top <= bottom {
+            Planetops[ceilingplane * 322 + x + 1].top = top as u8
+            Planetops[ceilingplane * 322 + x + 1].bottom = bottom as u8
+          }
+        }
+        // What is below it is the floor's.
+        let yh = min(bottomfrac >> HEIGHTBITS, floorclip - 1)
+        if markfloor {
+          let top = max(yh + 1, ceilingclip + 1)
+          let bottom = floorclip - 1
+          if top <= bottom {
+            Planetops[floorplane * 322 + x + 1].top = top as u8
+            Planetops[floorplane * 322 + x + 1].bottom = bottom as u8
+          }
+        }
+        // The texture's column, its colour map and its step.
+        var texturecolumn = 0
+        var colormap = 0
+        var iscale = 0
+        if segtextured {
+          let angle = (rw_centerangle + Xtoviewangle[x].angle) >> ANGLETOFINESHIFT
+          texturecolumn =
+              (rw_offset - fixed_mul(finetangent[angle], rw_distance)) >> FRACBITS
+          colormap = Scalelight[
+              walllights + min(rw_scale >> LIGHTSCALESHIFT, MAXLIGHTSCALE - 1)
+          ].map
+          iscale = (0xffffffff as u32 / rw_scale as u32) as i32
+        }
+        if midtexture != 0 {
+          // One side: the whole column, which is then full.
+          draw_column(Screen, Bytes, x, yl, yh, iscale, rw_midtexturemid,
+                      get_column(Textures, TextureColumns, midtexture,
+                                 texturecolumn),
+                      colormap, View.centery, View.x, View.y)
+          Clips[x].ceiling = View.height
+          Clips[x].floor = -1
+        } else {
+          if toptexture != 0 {
+            let mid = min(pixhigh >> HEIGHTBITS, floorclip - 1)
+            pixhigh += pixhighstep
+            if mid >= yl {
+              draw_column(Screen, Bytes, x, yl, mid, iscale, rw_toptexturemid,
+                          get_column(Textures, TextureColumns, toptexture,
+                                     texturecolumn),
+                          colormap, View.centery, View.x, View.y)
+              Clips[x].ceiling = mid
+            } else {
+              Clips[x].ceiling = yl - 1
+            }
+          } else if markceiling {
+            Clips[x].ceiling = yl - 1
+          }
+          if bottomtexture != 0 {
+            let mid = max((pixlow + HEIGHTUNIT - 1) >> HEIGHTBITS,
+                          Clips[x].ceiling + 1)
+            pixlow += pixlowstep
+            if mid <= yh {
+              draw_column(Screen, Bytes, x, mid, yh, iscale, rw_bottomtexturemid,
+                          get_column(Textures, TextureColumns, bottomtexture,
+                                     texturecolumn),
+                          colormap, View.centery, View.x, View.y)
+              Clips[x].floor = mid
+            } else {
+              Clips[x].floor = yh + 1
+            }
+          } else if markfloor {
+            Clips[x].floor = yh + 1
+          }
+        }
+        rw_scale += rw_scalestep
+        topfrac += topstep
+        bottomfrac += bottomstep
+      }
+      drawsegs += 1
+    }
+  }
+}
+
+// Draws the floors and ceilings the walls left open (R_DrawPlanes,
+// R_MakeSpans, R_MapPlane): the sky column by column, a flat in spans
+// along the rows, each as far away as its row says. After `draw_walls`.
+system draw_planes() {
+  let vx = Frame[0].x
+  let vy = Frame[0].y
+  let vz = Frame[0].z
+  let viewangle = Frame[0].angle
+  // (What a unit to the right and a unit on are in the flat, at a
+  // distance of one: R_ClearPlanes.)
+  let turned = ((viewangle - ANG90) >> ANGLETOFINESHIFT) as i32
+  let basexscale = fixed_div(finecosine(turned), View.centerxfrac)
+  let baseyscale = -fixed_div(finesine[turned], View.centerxfrac)
+  for y in 0..len(Spans) { Spans[y].cachedheight = 0 }
+  for pl in 0..len(Visplanes) {
+    let minx = Visplanes[pl].minx
+    let maxx = Visplanes[pl].maxx
+    let base = pl * 322 + 1
+    if minx > maxx {
+      // (Nothing of it was marked.)
+    } else if Visplanes[pl].picnum == Data.skyflatnum {
+      // The sky: a texture that turns with the eye and is always as big.
+      for x in minx..maxx + 1 {
+        let yl = Planetops[base + x].top as i32
+        let yh = Planetops[base + x].bottom as i32
+        if yl <= yh {
+          let angle = ((viewangle + Xtoviewangle[x].angle) >> ANGLETOSKYSHIFT) as i32
+          draw_column(Screen, Bytes, x, yl, yh,
+                      FRACUNIT * SCREENWIDTH / View.width,
+                      SCREENHEIGHT / 2 * FRACUNIT,
+                      get_column(Textures, TextureColumns, Data.skytexture,
+                                 angle),
+                      Data.colormaps, View.centery, View.x, View.y)
+        }
+      }
+    } else {
+      let source = Lumps[Data.firstflat + Visplanes[pl].picnum].at
+      let planeheight = abs(Visplanes[pl].height - vz)
+      let light = min(max(Visplanes[pl].lightlevel >> LIGHTSEGSHIFT, 0),
+                      LIGHTLEVELS - 1) * MAXLIGHTZ
+      Planetops[base + maxx + 1].top = 255
+      Planetops[base + minx - 1].top = 255
+      for x in minx..maxx + 2 {
+        // R_MakeSpans: the rows of the column before and of this one;
+        // where a row ends a span is drawn, where one starts it is
+        // noted.
+        var t1 = Planetops[base + x - 1].top as i32
+        var b1 = Planetops[base + x - 1].bottom as i32
+        var t2 = Planetops[base + x].top as i32
+        var b2 = Planetops[base + x].bottom as i32
+        // Rows that end: the top ones, then the bottom ones.
+        for part in 0..2 {
+          var more = if part == 0 { t1 < t2 && t1 <= b1 } else { b1 > b2 && b1 >= t1 }
+          while more {
+            let y = if part == 0 { t1 } else { b1 }
+            // R_MapPlane.
+            let x1 = Spans[y].spanstart
+            if planeheight != Spans[y].cachedheight {
+              let far = fixed_mul(planeheight, Spans[y].yslope)
+              Spans[y].cachedheight = planeheight
+              Spans[y].cacheddistance = far
+              Spans[y].cachedxstep = fixed_mul(far, basexscale)
+              Spans[y].cachedystep = fixed_mul(far, baseyscale)
+            }
+            let distance = Spans[y].cacheddistance
+            let length = fixed_mul(distance, Distscale[x1].scale)
+            let angle = ((viewangle + Xtoviewangle[x1].angle) >> ANGLETOFINESHIFT) as i32
+            draw_span(Screen, Bytes, y, x1, x - 1,
+                      vx + fixed_mul(finecosine(angle), length),
+                      -vy - fixed_mul(finesine[angle], length),
+                      Spans[y].cachedxstep, Spans[y].cachedystep, source,
+                      Zlight[light + min(distance >> LIGHTZSHIFT, MAXLIGHTZ - 1)].map,
+                      View.x, View.y)
+            if part == 0 { t1 += 1 } else { b1 -= 1 }
+            more = if part == 0 { t1 < t2 && t1 <= b1 } else { b1 > b2 && b1 >= t1 }
+          }
+        }
+        // Rows that start.
+        while t2 < t1 && t2 <= b2 {
+          Spans[t2].spanstart = x
+          t2 += 1
+        }
+        while b2 > b1 && b2 >= t2 {
+          Spans[b2].spanstart = x
+          b2 -= 1
+        }
+      }
+    }
+  }
 }

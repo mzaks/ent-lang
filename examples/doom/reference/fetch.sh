@@ -33,10 +33,14 @@ if [ ! -f "$doom/wad/doom1.wad" ]; then
 fi
 echo "$wad_sha1  $doom/wad/doom1.wad" | sha1sum -c -
 
+# (-fwrapv: a sum that is more than an int holds goes round, as it did in
+# the program this follows. Without it the compiler may take it that
+# there is none, and what is seen of a wall whose angles are half a turn
+# apart comes out wrong.)
 if [ ! -x "$doom/ref/build/src/chocolate-doom" ]; then
   cmake -S "$doom/ref/chocolate-doom" -B "$doom/ref/build" \
     -DENABLE_SDL2_NET=Off -DENABLE_SDL2_MIXER=Off \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo > /dev/null
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS=-fwrapv > /dev/null
   cmake --build "$doom/ref/build" --target chocolate-doom
 fi
 

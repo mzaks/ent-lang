@@ -1,6 +1,7 @@
 #!/bin/sh
 # Loads the shareware WAD (after reference/fetch.sh) and E1M1, draws the
 # map of it and says what it found; the picture is build/doom/run/level.ppm.
+# (The bytes are the WAD's and the textures put together after them.)
 # The numbers of lumps, vertexes, sectors, sides and lines, and the hashes
 # after them, are those an independent reading of the file gives. Needs
 # the compiler built (build/bin) and its LLVM (LLVM_PREFIX, as for
@@ -16,7 +17,7 @@ cp "$doom/wad/doom1.wad" "$doom/run/doom1.wad"
   ENT_BIN=${ENT_BIN:-$root/build/bin} python3 "$root/tools/ent" run \
     -I "$here/.." "$here/automap_check.ent") > "$doom/run/level.port"
 cat > "$doom/run/level.expected" <<'END'
-wad 4196020 bytes, 1264 lumps; level lump 6
+wad 4871156 bytes, 1264 lumps; level lump 6
 vertexes 467 2733697916 sectors 85 2163873991 sides 648 4033627395
 lines 475
 map scale 3909 from -50331648 -318767104: 2911 pixels lit, 2737625973

@@ -10,10 +10,14 @@ them as systems. It is being built; what is here so far:
   it: vertexes, sectors and sides in buffers, the lines as entities.
 - `video.ent`, `automap.ent`: the picture of 320 by 200 pixels with its
   palette, and the map of the level drawn into it.
-- `render.ent`: the view of the level, as far as it is: the walk through
-  the tree from the front to the back, and the pieces of walls that are
-  seen.
-- `doom.ent`: the program, which so far shows the map of E1M1.
+- `data.ent`: the textures, put together of their patches, the flats and
+  the colour maps.
+- `render.ent`: the view of the level: the walk through its tree from the
+  front to the back, the pieces of walls that are seen, and the walls,
+  floors, ceilings and sky drawn. Not yet what is masked: the things in
+  the level and the textures in openings.
+- `doom.ent`: the program, which so far shows E1M1 from where the player
+  starts (the arrow keys move the eye; Tab shows the map).
 - `check/`: programs that print what the port computes, to hold against
   the reference.
 - `reference/`: what the port is compared against. `fetch.sh` fetches
@@ -27,7 +31,7 @@ them as systems. It is being built; what is here so far:
 examples/doom/reference/fetch.sh demo1 demo2 demo3   # the traces to match
 examples/doom/check/maths.sh                         # "the same: 24 lines"
 examples/doom/check/automap.sh                       # E1M1 read and drawn
-examples/doom/check/view.sh                          # the walls that are seen
+examples/doom/check/view.sh                          # what is seen, pixel for pixel
 cd build/doom/wad &&                                 # where doom1.wad is
   ../../../tools/ent run -I ../../../examples/doom ../../../examples/doom/doom.ent
 ```

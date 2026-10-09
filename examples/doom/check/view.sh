@@ -1,9 +1,11 @@
 #!/bin/sh
-# The walls that are seen, against the reference's (after
-# reference/fetch.sh): from where the player starts in E1M1, and from
-# where each thing of the level is, turned another way each time. Says
-# nothing but "the same" where they agree. Needs the compiler built
-# (build/bin) and its LLVM (LLVM_PREFIX, as for tools/ent).
+# What is seen of E1M1, against the reference's (after
+# reference/fetch.sh): the pieces of walls from where each thing of the
+# level is (the player first), turned another way each time; and the
+# pictures from all those places, pixel for pixel, without what is masked (sprites and
+# the textures in openings). Says nothing but "the same" where they
+# agree. Needs the compiler built (build/bin) and its LLVM (LLVM_PREFIX,
+# as for tools/ent).
 set -e
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -23,11 +25,6 @@ port() {
 
 cp "$doom/wad/doom1.wad" "$run/doom1.wad"
 
-reference env DOOM_VIEW="$run/view.reference"
-port view_check.ent > "$run/view.port"
-diff "$run/view.reference" "$run/view.port"
-echo "the same: $(grep -c '^wall' "$run/view.port") pieces of walls from the start"
-
 reference env DOOM_VIEW="$run/views.reference" DOOM_VIEW_COUNT=1000
 # The views the reference took, as a table for the port to take them by.
 {
@@ -36,6 +33,18 @@ reference env DOOM_VIEW="$run/views.reference" DOOM_VIEW_COUNT=1000
     awk '{ printf "%s  { x: %s, y: %s, z: %s, angle: %s }", (NR > 1 ? ",\n" : ""), $2, $3, $4, $5 }'
   printf '\n]\n'
 } > "$run/views.ent"
-port views_check.ent > "$run/views.port"
+# (The port also writes what it worked out for each piece, which is
+# looked at by hand where a picture differs: DOOM_VIEW_DETAIL makes the
+# reference write the same.)
+port views_check.ent | grep -E '^(view|wall)' > "$run/views.port"
 diff "$run/views.reference" "$run/views.port"
 echo "the same: $(grep -c '^wall' "$run/views.port") pieces of walls from $(grep -c '^view' "$run/views.port") places"
+
+# The pictures: the reference's without what is masked, one after
+# another, and the port's.
+reference env DOOM_VIEW="$run/frames.reference" DOOM_VIEW_COUNT=1000 \
+  DOOM_VIEW_SKIP=m
+rm -f "$run/frames.port"
+port frames_check.ent
+cmp "$run/frames.reference.raw" "$run/frames.port"
+echo "the same: $(($(wc -c < "$run/frames.port") / 64000)) pictures, pixel for pixel"

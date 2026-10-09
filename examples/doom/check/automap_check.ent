@@ -4,6 +4,7 @@
 import console
 import files
 import wad
+import data
 import level
 import video
 import automap
@@ -69,6 +70,7 @@ system write_picture() {
 schedule check() {
   load_wad()
   load_palette()
+  init_data()
   load_level()
   clear_screen()
   fit_automap()

@@ -7,6 +7,7 @@ import files
 import wad
 import level
 import video
+import data
 import render
 import views
 
@@ -31,19 +32,33 @@ system look() {
 
 system report() {
   put("view {Viewpoint.x} {Viewpoint.y} {Viewpoint.z} {Viewpoint.angle} window {View.width} {View.height} at {View.x} {View.y}")
+  // Each piece as it was found, and what was worked out for it when it
+  // was stored (the first 256 are).
+  var stored = 0
   for i in 0..len(Walls) {
-    put("wall {Walls[i].first} {Walls[i].last} {Walls[i].seg}")
+    if Walls[i].seg >= 0 {
+      put("wall {Walls[i].first} {Walls[i].last} {Walls[i].seg}")
+      if stored < len(Stored) {
+        put("stored {Stored[stored].seg}: {Stored[stored].distance} {Stored[stored].scale} {Stored[stored].scalestep} {Stored[stored].offset} {Stored[stored].centerangle} {Stored[stored].midtexturemid} {Stored[stored].topfrac} {Stored[stored].bottomfrac}")
+        put("  tex {Stored[stored].midtexture} {Stored[stored].toptexture} {Stored[stored].bottomtexture} {Stored[stored].masked as i32} mark {Stored[stored].markfloor as i32} {Stored[stored].markceiling as i32}")
+        stored += 1
+      }
+    }
   }
 }
 
 schedule setup() {
   load_wad()
+  init_data()
   load_level()
   set_view_size()
+  init_view_tables()
 }
 schedule one() {
   look()
+  clear_screen()
   render_view()
+  draw_walls()
   report()
 }
 main {

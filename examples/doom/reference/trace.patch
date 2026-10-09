@@ -16,7 +16,7 @@ index 06aa0ff..84c685b 100644
      DEH_printf("S_Init: Setting up sound.\n");
      S_Init (sfxVolume * 8, musicVolume * 8);
 diff --git i/src/doom/p_tick.c w/src/doom/p_tick.c
-index 5a93b80..0cac0f0 100644
+index 5a93b80..d35a2b7 100644
 --- i/src/doom/p_tick.c
 +++ w/src/doom/p_tick.c
 @@ -23,6 +23,141 @@
@@ -161,7 +161,20 @@ index 5a93b80..0cac0f0 100644
  
  int	leveltime;
  
-@@ -148,6 +283,8 @@ void P_Ticker (void)
+@@ -126,6 +261,12 @@ void P_Ticker (void)
+ {
+     int		i;
+     
++    // ent-lang: the level stays as it was loaded while views of it are
++    // written (R_RenderPlayerView): no light has flickered and no wall
++    // has moved.
++    if (getenv ("DOOM_VIEW"))
++	return;
++
+     // run the tic
+     if (paused)
+ 	return;
+@@ -148,6 +289,8 @@ void P_Ticker (void)
      P_UpdateSpecials ();
      P_RespawnSpecials ();
  
@@ -293,7 +306,7 @@ index 970bd19..8968f2f 100644
 +    R_RenderView (NULL);
 +}
 diff --git i/src/doom/r_segs.c w/src/doom/r_segs.c
-index 06881a5..9d118fc 100644
+index 06881a5..144a1b2 100644
 --- i/src/doom/r_segs.c
 +++ w/src/doom/r_segs.c
 @@ -382,6 +382,15 @@ R_StoreWallRange
@@ -312,3 +325,23 @@ index 06881a5..9d118fc 100644
  		
  #ifdef RANGECHECK
      if (start >=viewwidth || start > stop)
+@@ -701,6 +710,19 @@ R_StoreWallRange
+ 	}
+     }
+     
++    {
++	// ent-lang: see R_RenderPlayerView.
++	extern FILE *r_dump;
++
++	if (r_dump && getenv ("DOOM_VIEW_DETAIL"))
++	    fprintf (r_dump, "stored %d: %d %d %d %d %u %d %d %d tex %d %d %d %d mark %d %d\n",
++		     (int) (curline - segs), rw_distance, rw_scale,
++		     rw_scalestep, rw_offset, (unsigned int) rw_centerangle,
++		     rw_midtexturemid, topfrac, bottomfrac, midtexture,
++		     toptexture, bottomtexture, maskedtexture, markfloor,
++		     markceiling);
++    }
++
+     // render it
+     if (markceiling)
+ 	ceilingplane = R_CheckPlane (ceilingplane, rw_x, rw_stopx-1);
