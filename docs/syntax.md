@@ -103,6 +103,13 @@ capacity Inside 4096                        // another capacity for one declared
 - Types: `f32`, `f64`, `bool`, `i8`, `i16`, `i32`, `i64`, `index`, `entity`,
   `text[N]` and `text` (see Text below), and the enums the program declares (see
   Enums below).
+- A whole number goes where one of more bits is expected as it is (an
+  `i32` where an `i64` is, as a value, an argument or one side of `+`
+  or `<`: two of different sizes are computed with as the bigger). The
+  other way round takes `as`.
+- `none`, where an entity is expected, is no entity: the same as itself
+  (`target == none`) and as no other; what is sent to it goes nowhere,
+  and what is looked up of it is not found.
 - `capacity` on a component bounds how many entities can have it; an
   archetype the compiler infers from spawns takes the smallest capacity
   among its required components, or `default_capacity`.
@@ -280,17 +287,39 @@ for me, t: Tower, a: mut Aim {
   the outer `for`: as many runs as the two numbers multiplied.
 - It reads its entities. What the outer body finds it keeps in its own
   vars, which the inner body may assign: they go round with the loop.
-  The inner entity's name is a value (`target = e`), to send to after
-  the loop (`Life(target).hp -= damage`) or to keep in a field.
+  The inner entity's name is a value (`target = e`), to send to
+  (`Life(target).hp -= damage`) or to keep in a field. A var that is to
+  say which entity starts as `none`.
 - The outer entity's own fields are read and written in it as outside.
-- Sending, accumulating into a unique, connecting, spawning, destroying,
-  `add` and `remove` are for after the loop, not in it.
-- It never binds a component the outer `for` binds `mut`: of the other
-  entities some would be changed already and some not. (What is read of
-  others is kept in a component of its own: `Place` read, `Next`
-  written.)
+- What it sends to another entity (`Health(foe).hp -= harm`, to every
+  foe near a blast) and what it accumulates into a unique (`Hits += 1`)
+  lands as it goes, once for each of its entities; so nothing else in
+  the outer `for` reads or sets that field, or reads that unique.
+- Connecting, spawning, destroying, `add` and `remove` are for after the
+  loop, not in it.
+- It may bind a component the outer `for` binds `mut`, and read the
+  fields that one does not set. A field the outer one sets it reads only
+  as it was before the outer `for` started, with `old`:
+
+  ```
+  for me, s: mut Spot {
+    var sum = 0.0
+    var n = 0.0
+    for o, other: old Spot where o != me {
+      sum += other.x
+      n += 1.0
+    }
+    if n > 0.0 { s.x += (sum / n - s.x) * 0.1 }
+  }
+  ```
+
+  Without `old` that is an error, since of the others some would be set
+  already and some not. With it a copy of the column is kept for as long
+  as the outer `for` runs, and the inner one reads the copy: every entity
+  sees the others as they were, at the price of the copy. (Or the new
+  value goes into another field, and a second `for` copies it over.)
 - One deep: no `for` over entities inside it, and none inside a `for`
-  over edges.
+  over edges. A `for` with one in it runs on one thread.
 
 Inside a `for`, another `for` with an arrow visits the entity's edges.
 One end is the visited entity, by its name or one of its bindings; the
@@ -725,7 +754,13 @@ of a depth.
   changed.
 - `spawn { Position { x: 1.0, y: 0.0 }, Velocity { dx: 2.0, dy: 0.0 } }`
   creates an entity; as an expression it returns its id
-  (`let id = spawn { ... }`).
+  (`let id = spawn { ... }`). An entry of its list may be an `if` that
+  says which components it is (`if i == 0 { Gold } else { Lives, Tint {
+  rgb: 0xff0000 } }`, with no comma needed after it), or a prefab with
+  what it is given (see Prefabs below); a component listed again takes
+  the later values. Every way through is a spawn of its own, so which
+  components an entity can have is still known when the program is
+  compiled.
 - `if cond { ... } else if cond { ... } else { ... }`.
 - `for i in a..b { ... }` runs its statements with `i` = `a`, `a + 1`, ...
   `b - 1` (not at all if `a >= b`). The bounds are integers of one type,
@@ -1129,6 +1164,62 @@ be a field, a parameter or a local, and a call that gives several cannot
 stand where one value is expected. An `extern fn` gives one value, as C
 does.
 
+## Tables
+
+```
+table road { x: f32, y: f32 } = [
+  { x: -1.0, y: 2.0 }, { x: 4.0, y: 2.0 }, { x: 4.0, y: 8.0 }
+]
+table primes: i32 = [2, 3, 5, 7, 11]
+
+let tx = road[w.leg + 1].x
+for i in 0..len(primes) { sum += primes[i] }
+```
+
+A table is a list of rows that is the program's own and never changes:
+with named fields, each row giving a value for every one of them, or of
+one type (a plain list).
+
+- `name[i].field` and `name[i]` read a row, in systems and in fns (a
+  table is not of the world); where there is no row `i` they give nought
+  (`false`, the first case of an enum, an empty text), as a text's byte
+  past its end does. `len(name)` is the number of rows, an `i32`.
+- A field is a number, a bool, an enum (`kind: Kind.Frost`) or a
+  `text[N]`; a value is written as it is: a literal, with `-` before a
+  number.
+- A row is `{ field: value, ... }` with every field, in any order.
+- It is declared at the top level, before what reads it, and belongs to
+  its module like a fn.
+
+## Prefabs
+
+```
+prefab caption(says: text, size: f32, colour: i32) {
+  Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+  Size { w: Sizing.Fit, h: Sizing.Fit },
+  Stack { row: true, pad: 0.0, gap: 0.0 },
+  Text { text: says, size: size, colour: colour }
+}
+
+let label = spawn {
+  caption("gold", 22.0, 0xf0c85a),
+  if i == 0 { GoldLabel } else { LivesLabel }
+}
+```
+
+A prefab is a named list of what a `spawn` lists, with parameters. A
+spawn, or another prefab, names it with a value for each parameter, and
+its entries are then the spawn's, as if written there.
+
+- Its entries are components with their values, other prefabs (declared
+  before it) and `if`s; their values are worked out from its parameters
+  and from what any expression can read where the spawn is.
+- What a spawn lists after a prefab comes after its entries: a component
+  the prefab has too takes the spawn's values (`caption(...), Size { w:
+  Sizing.Grow, h: Sizing.Fit }`).
+- It belongs to its module and is found like a fn; its entries name
+  things as its own module does.
+
 ## Enums
 
 ```
@@ -1285,7 +1376,7 @@ header, as before.
 
 ## Not yet supported
 
-`device` declarations, prefabs, optional bindings
+`device` declarations, optional bindings
 (`T?`): each is reported as "not supported yet" where it would start. Of relations, not
 yet: joins over relation variables, accumulating into a unique and
 connecting inside an edge loop, disconnecting by pair, and of trees what

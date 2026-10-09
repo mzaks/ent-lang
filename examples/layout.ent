@@ -162,6 +162,14 @@ component Sums {
 // pointer is over it only there.
 component Seen { x: f32, y: f32, w: f32, h: f32 }
 
+// A box with nothing in it that takes the room that is left in a row:
+// what comes after it is at the row's end.
+prefab spacer() {
+  Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+  Size { w: Sizing.Grow, h: Sizing.Fit },
+  Stack { row: true, pad: 0.0, gap: 0.0 }
+}
+
 // From a box to the one it is in; the boxes in one box are in the order
 // of their slots.
 relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 256

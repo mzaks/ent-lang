@@ -22,6 +22,9 @@
 (relation name: (identifier) @type)
 (archetype name: (identifier) @type)
 (enum_case (identifier) @constant)
+(table name: (identifier) @constant)
+(prefab name: (identifier) @function)
+(prefab_use prefab: (identifier) @function)
 (import module: (identifier) @namespace)
 (qualified_name module: (identifier) @namespace)
 
@@ -78,11 +81,12 @@
   (#any-of? @function.builtin "min" "max" "len"))
 
 [
-  "import" "component" "tag" "unique" "enum" "relation" "archetype"
+  "import" "component" "tag" "unique" "enum" "table" "prefab" "relation"
+  "archetype"
   "system" "extern" "fn" "proc" "schedule" "world" "main"
   "default_capacity" "capacity" "optional" "tree"
   "sorted" "ordered" "by"
-  "reads" "writes" "let" "var" "mut" "spawn" "as"
+  "reads" "writes" "let" "var" "mut" "old" "spawn" "as"
   "with" "without" "any" "where" "on" "changed" "added" "removed" "log"
   "top" "down" "bottom" "up" "bfs" "dfs" "connect"
   "run_if"

@@ -540,12 +540,19 @@ is specified in [`docs/sync-points.md`](docs/sync-points.md).
   the archetype always or never holds it.
 - `%b = ent.same %a, %c`: whether two entities are the same one (`==`,
   `!=`).
+- `%none = ent.nobody`: the id of no entity (`none`).
+- `"ent.table"() {sym_name, field_names, field_types, values}`: rows that
+  are the program's own; `%x = ent.table.at @road "x"[%i : i32] : f32`
+  reads one (nought past the last). A `prefab` and an `if` in a spawn's
+  list leave nothing in the IR but the spawns they come to.
 - `ent.get` / `ent.set`: field access through a ref; `set` needs `mut`.
 - `"ent.each"(%inits) ({ ^bb0(%refs..., %entity, %values...): ... })`: a `for`
   over entities inside a query's body; it runs for every entity that has
   the refs' components, for the entity the query visits, reads them, and
   hands its values from one run to the next. It is lowered to a loop
-  over the rows of each archetype those may be in, before the query is.
+  over the rows of each archetype those may be in, before the query is. What
+  it sends or accumulates is combined as it goes; a ref listed in `old`
+  reads a copy of its column made before the query started.
 - `ent.schedule @frame(%params) { ent.run @s(...) }`: program order is the
   semantic order. `ent.run @s() if { ...; ent.yield %c : i1 }` runs the
   system only if the condition holds when the run would start;

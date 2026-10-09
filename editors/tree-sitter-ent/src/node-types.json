@@ -2678,6 +2678,66 @@
     }
   },
   {
+    "type": "prefab",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "parameters",
+          "named": true
+        },
+        {
+          "type": "spawn_list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "prefab_use",
+    "named": true,
+    "fields": {
+      "prefab": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "arguments",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "primitive_type",
     "named": true,
     "fields": {}
@@ -2855,6 +2915,21 @@
         },
         {
           "type": "text_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "row",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "field_init",
           "named": true
         }
       ]
@@ -3082,6 +3157,10 @@
           "named": true
         },
         {
+          "type": "prefab",
+          "named": true
+        },
+        {
           "type": "relation",
           "named": true
         },
@@ -3091,6 +3170,10 @@
         },
         {
           "type": "system",
+          "named": true
+        },
+        {
+          "type": "table",
           "named": true
         },
         {
@@ -3110,6 +3193,112 @@
   },
   {
     "type": "spawn",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "spawn_list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "spawn_if",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "binary",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "call",
+          "named": true
+        },
+        {
+          "type": "cast",
+          "named": true
+        },
+        {
+          "type": "character",
+          "named": true
+        },
+        {
+          "type": "field_expression",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "index",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "query_for",
+          "named": true
+        },
+        {
+          "type": "spawn",
+          "named": true
+        },
+        {
+          "type": "spawn_if",
+          "named": true
+        },
+        {
+          "type": "spawn_list",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "unary",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "spawn_list",
     "named": true,
     "fields": {
       "component": {
@@ -3133,6 +3322,14 @@
       "types": [
         {
           "type": "component_init",
+          "named": true
+        },
+        {
+          "type": "prefab_use",
+          "named": true
+        },
+        {
+          "type": "spawn_if",
           "named": true
         }
       ]
@@ -3196,6 +3393,134 @@
         },
         {
           "type": "parameters",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "table",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "callable_type",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "primitive_type",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "text_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "binary",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "call",
+          "named": true
+        },
+        {
+          "type": "cast",
+          "named": true
+        },
+        {
+          "type": "character",
+          "named": true
+        },
+        {
+          "type": "field_expression",
+          "named": true
+        },
+        {
+          "type": "fields",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "index",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "query_for",
+          "named": true
+        },
+        {
+          "type": "row",
+          "named": true
+        },
+        {
+          "type": "spawn",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "unary",
           "named": true
         }
       ]
@@ -4246,6 +4571,10 @@
     "named": false
   },
   {
+    "type": "old",
+    "named": false
+  },
+  {
     "type": "on",
     "named": false
   },
@@ -4255,6 +4584,10 @@
   },
   {
     "type": "ordered",
+    "named": false
+  },
+  {
+    "type": "prefab",
     "named": false
   },
   {
@@ -4295,6 +4628,10 @@
   },
   {
     "type": "system",
+    "named": false
+  },
+  {
+    "type": "table",
     "named": false
   },
   {

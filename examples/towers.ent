@@ -12,15 +12,18 @@
 // - A frost tower shoots nothing: foes in its reach walk at half their pace.
 //
 // What it is made of: the bars are boxes of the layout library, the board
-// is drawn into the box between them; foes, towers, shells and blasts are
-// entities. A tower looks at the foes with a `for` inside its own `for`,
-// and what it does to the one it picks it sends to it; a foe looks at the
-// blasts and at the frost towers the same way.
+// is drawn into the box between them (after the boxes, before what floats
+// over them); the road, the towers and the foes are tables; foes, towers
+// and shells are entities. A tower looks at the foes with a `for` inside
+// its own `for`, and what it does to the one it picks it sends to it; a
+// shell that lands sends to every foe near it from inside such a `for`; a
+// foe looks at the frost towers the same way.
 import window
 import sound
 import math
 import layout
 import layout_window
+import text
 
 enum State { Playing, Won, Lost }
 enum Kind { Arrow, Cannon, Frost }
@@ -40,10 +43,9 @@ component Tower { kind: Kind, cool: f32 }
 component Site { col: i32, row: i32 }
 component Aim { found: bool, tx: f32, ty: f32, flash: f32 }
 
-// A cannon's shell on its way, and what it leaves where it lands: for one
-// frame it hurts, for a few more it shows.
+// A cannon's shell on its way, and the blast that shows where it landed.
 component Shell { x: f32, y: f32, tx: f32, ty: f32, harm: f32 }
-component Blast { x: f32, y: f32, r: f32, harm: f32, left: f32, fresh: bool }
+component Blast { x: f32, y: f32, r: f32, left: f32 }
 
 // The boxes of the bars.
 tag Root
@@ -78,27 +80,19 @@ fn waves() -> i32 { 10 }
 
 // The road: from point to point, each in the middle of a field (the
 // first and the last are off the board).
-fn points() -> i32 { 8 }
-fn road_x(i: i32) -> f32 {
-  if i == 0 { -1.0 } else if i == 1 { 4.0 } else if i == 2 { 4.0 }
-  else if i == 3 { 9.0 } else if i == 4 { 9.0 } else if i == 5 { 15.0 }
-  else if i == 6 { 15.0 } else { 20.0 }
-}
-fn road_y(i: i32) -> f32 {
-  if i == 0 { 2.0 } else if i == 1 { 2.0 } else if i == 2 { 8.0 }
-  else if i == 3 { 8.0 } else if i == 4 { 3.0 } else if i == 5 { 3.0 }
-  else if i == 6 { 9.0 } else { 9.0 }
-}
+table road { x: f32, y: f32 } = [
+  { x: -1.0, y: 2.0 }, { x: 4.0, y: 2.0 }, { x: 4.0, y: 8.0 },
+  { x: 9.0, y: 8.0 }, { x: 9.0, y: 3.0 }, { x: 15.0, y: 3.0 },
+  { x: 15.0, y: 9.0 }, { x: 20.0, y: 9.0 }
+]
 fn on_road(col: i32, row: i32) -> bool {
   var on = false
-  let last = points() - 1
+  let last = len(road) - 1
   for i in 0..last {
-    let x0 = min(road_x(i), road_x(i + 1))
-    let x1 = max(road_x(i), road_x(i + 1))
-    let y0 = min(road_y(i), road_y(i + 1))
-    let y1 = max(road_y(i), road_y(i + 1))
-    if col as f32 >= x0 && col as f32 <= x1 && row as f32 >= y0 &&
-       row as f32 <= y1 {
+    if col as f32 >= min(road[i].x, road[i + 1].x) &&
+       col as f32 <= max(road[i].x, road[i + 1].x) &&
+       row as f32 >= min(road[i].y, road[i + 1].y) &&
+       row as f32 <= max(road[i].y, road[i + 1].y) {
       on = true
     }
   }
@@ -108,25 +102,29 @@ fn apart(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
   (ax - bx) * (ax - bx) + (ay - by) * (ay - by)
 }
 
-// The towers.
-fn cost(kind: Kind) -> i32 {
-  if kind == Kind.Arrow { 40 } else if kind == Kind.Cannon { 70 } else { 60 }
-}
-fn reach(kind: Kind) -> f32 {
-  if kind == Kind.Arrow { 3.2 } else if kind == Kind.Cannon { 2.6 } else { 2.2 }
-}
-fn pause(kind: Kind) -> f32 { if kind == Kind.Arrow { 0.45 } else { 1.4 } }
-fn harm(kind: Kind) -> f32 { if kind == Kind.Arrow { 9.0 } else { 16.0 } }
-fn tint(kind: Kind) -> i32 {
-  if kind == Kind.Arrow { 0xd9a441 } else if kind == Kind.Cannon { 0xc8553d }
-  else { 0x5fb4e8 }
-}
-fn named(kind: Kind) -> text[14] {
-  if kind == Kind.Arrow { "arrow" } else if kind == Kind.Cannon { "cannon" }
-  else { "frost" }
-}
+// The towers, by their kind: what one costs, how far it reaches (in
+// fields), how long it rests between shots, and how much a shot hurts.
+table towers {
+  name: text[14], cost: i32, reach: f32, pause: f32, harm: f32, tint: i32
+} = [
+  { name: "arrow", cost: 40, reach: 3.2, pause: 0.45, harm: 9.0, tint: 0xd9a441 },
+  { name: "cannon", cost: 70, reach: 2.6, pause: 1.4, harm: 16.0, tint: 0xc8553d },
+  { name: "frost", cost: 60, reach: 2.2, pause: 0.0, harm: 0.0, tint: 0x5fb4e8 }
+]
+fn cost(kind: Kind) -> i32 { towers[kind as i32].cost }
+fn reach(kind: Kind) -> f32 { towers[kind as i32].reach }
 
-// The foes: which comes when in a wave, and what each is like in it.
+// The foes, by their breed: what one has at first (more with every
+// wave), how many fields it walks in a second, what its fall pays, and
+// how it looks.
+table breeds {
+  life: f32, pace: f32, bounty: i32, hue: i32, girth: f32
+} = [
+  { life: 26.0, pace: 1.5, bounty: 5, hue: 0x8fbf5a, girth: 0.28 },
+  { life: 15.0, pace: 2.6, bounty: 4, hue: 0xe6d15a, girth: 0.22 },
+  { life: 90.0, pace: 0.9, bounty: 12, hue: 0xa66bd6, girth: 0.38 }
+]
+// Which comes when in a wave, and how many there are in it.
 fn breed_of(wave: i32, i: i32) -> Breed {
   if wave >= 4 && i % 5 == 4 { Breed.Brute }
   else if wave >= 2 && i % 3 == 1 { Breed.Runner }
@@ -134,22 +132,18 @@ fn breed_of(wave: i32, i: i32) -> Breed {
 }
 fn crowd(wave: i32) -> i32 { 8 + 2 * wave }
 fn life(breed: Breed, wave: i32) -> f32 {
-  let base = if breed == Breed.Grunt { 26.0 } else if breed == Breed.Runner { 15.0 }
-             else { 90.0 }
-  base * (1.0 + 0.42 * (wave - 1) as f32)
+  breeds[breed as i32].life * (1.0 + 0.42 * (wave - 1) as f32)
 }
-fn pace(breed: Breed) -> f32 {
-  if breed == Breed.Grunt { 1.5 } else if breed == Breed.Runner { 2.6 } else { 0.9 }
-}
-fn bounty(breed: Breed) -> i32 {
-  if breed == Breed.Grunt { 5 } else if breed == Breed.Runner { 4 } else { 12 }
-}
-fn hue(breed: Breed) -> i32 {
-  if breed == Breed.Grunt { 0x8fbf5a } else if breed == Breed.Runner { 0xe6d15a }
-  else { 0xa66bd6 }
-}
-fn girth(breed: Breed) -> f32 {
-  if breed == Breed.Grunt { 0.28 } else if breed == Breed.Runner { 0.22 } else { 0.38 }
+
+// A button of the bar below: what it says, in a colour, and what it does.
+prefab button(says: text, colour: i32, does: i32) {
+  caption(says, 18.0, colour),
+  Pad { left: 16.0, right: 16.0, top: 9.0, bottom: 9.0 },
+  Fill { colour: 0x2a3442 },
+  Round { top_left: 6.0, top_right: 6.0, bottom_left: 6.0, bottom_right: 6.0 },
+  Border { left: 2.0, right: 2.0, top: 2.0, bottom: 2.0, between: 0.0,
+           colour: 0x2a3442 },
+  Button { does: does }
 }
 
 world {
@@ -189,32 +183,12 @@ world {
   }
   connect (top)-[Inside]->(root)
   for i in 0..3 {
-    let colour = if i == 0 { 0xf0c85a } else if i == 1 { 0xf07a6a } else { 0xb8c4d2 }
-    if i == 0 {
-      let label = spawn {
-        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
-        Size { w: Sizing.Fit, h: Sizing.Fit },
-        Stack { row: true, pad: 0.0, gap: 0.0 },
-        Text { text: "", size: 22.0, colour: colour }, GoldLabel
-      }
-      connect (label)-[Inside]->(top)
-    } else if i == 1 {
-      let label = spawn {
-        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
-        Size { w: Sizing.Fit, h: Sizing.Fit },
-        Stack { row: true, pad: 0.0, gap: 0.0 },
-        Text { text: "", size: 22.0, colour: colour }, LivesLabel
-      }
-      connect (label)-[Inside]->(top)
-    } else {
-      let label = spawn {
-        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
-        Size { w: Sizing.Fit, h: Sizing.Fit },
-        Stack { row: true, pad: 0.0, gap: 0.0 },
-        Text { text: "", size: 22.0, colour: colour }, WaveLabel
-      }
-      connect (label)-[Inside]->(top)
+    let label = spawn {
+      caption("", 22.0,
+              if i == 0 { 0xf0c85a } else if i == 1 { 0xf07a6a } else { 0xb8c4d2 }),
+      if i == 0 { GoldLabel } else if i == 1 { LivesLabel } else { WaveLabel }
     }
+    connect (label)-[Inside]->(top)
   }
   let board = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
@@ -233,35 +207,14 @@ world {
   }
   connect (bar)-[Inside]->(root)
   // A button for each tower, room, and one for the next wave.
-  for i in 0..5 {
-    if i == 3 {
-      let room = spawn {
-        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
-        Size { w: Sizing.Grow, h: Sizing.Fit },
-        Stack { row: true, pad: 0.0, gap: 0.0 }
-      }
-      connect (room)-[Inside]->(bar)
-    } else {
-      let kind = min(i, 2) as Kind
-      var says: text[30] = "next wave  (space)"
-      if i < 3 { says = "{named(kind)}  {cost(kind)}" }
-      let button = spawn {
-        Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
-        Size { w: Sizing.Fit, h: Sizing.Fit },
-        Stack { row: true, pad: 0.0, gap: 0.0 },
-        Pad { left: 16.0, right: 16.0, top: 9.0, bottom: 9.0 },
-        Fill { colour: 0x2a3442 },
-        Round { top_left: 6.0, top_right: 6.0, bottom_left: 6.0,
-                bottom_right: 6.0 },
-        Border { left: 2.0, right: 2.0, top: 2.0, bottom: 2.0, between: 0.0,
-                 colour: 0x2a3442 },
-        Text { text: says, size: 18.0,
-               colour: if i < 3 { tint(kind) } else { 0xd8e0ea } },
-        Button { does: i }
-      }
-      connect (button)-[Inside]->(bar)
-    }
+  for i in 0..len(towers) {
+    let one = spawn { button("{towers[i].name}  {towers[i].cost}", towers[i].tint, i) }
+    connect (one)-[Inside]->(bar)
   }
+  let room = spawn { spacer() }
+  connect (room)-[Inside]->(bar)
+  let next = spawn { button("next wave  (space)", 0xd8e0ea, 4) }
+  connect (next)-[Inside]->(bar)
 }
 
 // The boxes as the game is: as big as the window, the labels saying what
@@ -377,8 +330,8 @@ system marshal() {
       let breed = breed_of(Game.wave, crowd(Game.wave) - Game.left)
       let hp = life(breed, Game.wave)
       spawn {
-        Foe { breed: breed, reward: bounty(breed) },
-        At { x: road_x(0), y: road_y(0) }, Walk { leg: 0, far: 0.0 },
+        Foe { breed: breed, reward: breeds[breed as i32].bounty },
+        At { x: road[0].x, y: road[0].y }, Walk { leg: 0, far: 0.0 },
         Health { hp: hp, full: hp }, Chill { left: 0.0 }
       }
       Game.left -= 1
@@ -406,17 +359,17 @@ system marshal() {
 system walk() {
   let dt = min(Window.dt, 0.05)
   for e, f: Foe, a: mut At, w: mut Walk, c: Chill {
-    var step = pace(f.breed) * dt
+    var step = breeds[f.breed as i32].pace * dt
     if c.left > 0.0 { step = step * 0.5 }
-    let tx = road_x(w.leg + 1)
-    let ty = road_y(w.leg + 1)
+    let tx = road[w.leg + 1].x
+    let ty = road[w.leg + 1].y
     let away = sqrt(apart(a.x, a.y, tx, ty))
     if away <= step {
       a.x = tx
       a.y = ty
       w.leg += 1
       w.far = w.leg as f32 * 100.0
-      if w.leg >= points() - 1 {
+      if w.leg >= len(road) - 1 {
         Lives -= 1
         e.destroy()
       }
@@ -448,14 +401,14 @@ system frost() {
 // shell sets out for where it is.
 system shoot() {
   let dt = min(Window.dt, 0.05)
-  for me, t: mut Tower, s: Site, a: mut Aim where t.kind != Kind.Frost {
+  for t: mut Tower, s: Site, a: mut Aim where t.kind != Kind.Frost {
     if t.cool > 0.0 { t.cool = max(0.0, t.cool - dt) }
     if a.flash > 0.0 { a.flash = max(0.0, a.flash - dt) }
     let x = s.col as f32
     let y = s.row as f32
     let far = reach(t.kind) * reach(t.kind)
     var first = -1.0
-    var target = me
+    var target: entity = none
     var found = false
     var tx = 0.0
     var ty = 0.0
@@ -472,14 +425,15 @@ system shoot() {
       a.tx = tx
       a.ty = ty
       if t.cool <= 0.0 {
-        t.cool = pause(t.kind)
+        t.cool = towers[t.kind as i32].pause
         if t.kind == Kind.Arrow {
           a.flash = 0.09
-          Health(target).hp -= harm(Kind.Arrow)
+          Health(target).hp -= towers[t.kind as i32].harm
           spawn { Tone { pitch: 880.0, to: 660.0, seconds: 0.04, after: 0.0,
                          volume: 0.12, wave: Wave.Square } }
         } else {
-          spawn { Shell { x: x, y: y, tx: tx, ty: ty, harm: harm(Kind.Cannon) } }
+          spawn { Shell { x: x, y: y, tx: tx, ty: ty,
+                          harm: towers[t.kind as i32].harm } }
           spawn { Tone { pitch: 150.0, to: 70.0, seconds: 0.12, after: 0.0,
                          volume: 0.3, wave: Wave.Noise } }
         }
@@ -488,15 +442,18 @@ system shoot() {
   }
 }
 
-// A shell flies to where it was sent and bursts there.
+// A shell flies to where it was sent and bursts there: every foe near
+// that place is hurt.
 system shells() {
   let dt = min(Window.dt, 0.05)
   for e, s: mut Shell {
     let away = sqrt(apart(s.x, s.y, s.tx, s.ty))
     let step = 9.0 * dt
     if away <= step {
-      spawn { Blast { x: s.tx, y: s.ty, r: 1.2, harm: s.harm, left: 0.25,
-                      fresh: true } }
+      for foe, a: At where apart(a.x, a.y, s.tx, s.ty) <= 1.2 * 1.2 {
+        Health(foe).hp -= s.harm
+      }
+      spawn { Blast { x: s.tx, y: s.ty, r: 1.2, left: 0.25 } }
       e.destroy()
     } else {
       s.x += (s.tx - s.x) / away * step
@@ -505,19 +462,10 @@ system shells() {
   }
 }
 
-// A blast hurts every foe near it, once; a foe with nothing left falls,
-// and pays.
-system burst() {
+// A blast shows for a moment; a foe with nothing left falls, and pays.
+system falls() {
   let dt = min(Window.dt, 0.05)
-  for a: At, h: mut Health {
-    var hurt = 0.0
-    for b: Blast where b.fresh && apart(a.x, a.y, b.x, b.y) <= b.r * b.r {
-      hurt += b.harm
-    }
-    if hurt > 0.0 { h.hp -= hurt }
-  }
   for e, b: mut Blast {
-    b.fresh = false
     b.left -= dt
     if b.left <= 0.0 { e.destroy() }
   }
@@ -527,7 +475,10 @@ system burst() {
   }
 }
 
+// The board, into its box: after the boxes are drawn, before what floats
+// over them.
 system draw_board() {
+  clip(Area.x, Area.y, Area.w, Area.h)
   let cell = Grid.cell
   let gx = Grid.x
   let gy = Grid.y
@@ -562,7 +513,7 @@ system draw_board() {
     let half = cell * 0.4
     rounded(x - half, y - half, 2.0 * half, 2.0 * half, cell * 0.14,
             cell * 0.14, cell * 0.14, cell * 0.14, 0x3a4656)
-    circle(x, y, cell * 0.27, tint(t.kind))
+    circle(x, y, cell * 0.27, towers[t.kind as i32].tint)
     if t.kind == Kind.Frost {
       circle(x, y, reach(Kind.Frost) * cell, 0x145fb4e8)
       circle(x, y, cell * 0.12, 0xe8f6ff)
@@ -583,10 +534,10 @@ system draw_board() {
   for f: Foe, a: At, h: Health, c: Chill {
     let x = gx + (a.x + 0.5) * cell
     let y = gy + (a.y + 0.5) * cell
-    let r = girth(f.breed) * cell
+    let r = breeds[f.breed as i32].girth * cell
+    let hue = breeds[f.breed as i32].hue
     circle(x, y, r + 2.0, 0x1a1f26)
-    circle(x, y, r, if c.left > 0.0 { blend(hue(f.breed), 0x9fd8ff, 0.6) }
-                    else { hue(f.breed) })
+    circle(x, y, r, if c.left > 0.0 { blend(hue, 0x9fd8ff, 0.6) } else { hue })
     let part = max(0.0, h.hp / h.full)
     rect(x - r, y - r - 7.0, 2.0 * r, 4.0, 0x1a1f26)
     rect(x - r, y - r - 7.0, 2.0 * r * part, 4.0, 0x6fe07a)
@@ -623,20 +574,22 @@ system draw_board() {
     label(hint, gx + (wide - text_width(hint, 18.0)) * 0.5,
           gy + (high - tall) * 0.5 + 28.0 + big, 18.0, 0x9aa6b4)
   }
+  unclip()
 }
 
 schedule frame() {
   begin()
   bars()
-  ui()
+  ui_base()
   input()
   marshal()
   walk() run_if Game.state == State.Playing
   frost() run_if Game.state == State.Playing
   shoot() run_if Game.state == State.Playing
   shells() run_if Game.state == State.Playing
-  burst() run_if Game.state == State.Playing
+  falls() run_if Game.state == State.Playing
   draw_board()
+  ui_top()
   play()
   present()
 }

@@ -37,6 +37,8 @@ module.exports = grammar({
         $.tag,
         $.unique,
         $.enum,
+        $.table,
+        $.prefab,
         $.relation,
         $.archetype,
         $.system,
@@ -73,6 +75,19 @@ module.exports = grammar({
     enum: ($) =>
       seq('enum', field('name', $.identifier), '{',
           optional(list($.enum_case)), '}'),
+
+    // table name { field: type, .. } = [ { field: value, .. }, .. ]
+    // table name: type = [ value, .. ]
+    table: ($) =>
+      seq('table', field('name', $.identifier),
+          choice($.fields, seq(':', field('type', $._type))), '=', '[',
+          optional(list(choice($.row, $._expression))), ']'),
+    row: ($) => seq('{', optional(list($.field_init)), '}'),
+
+    // prefab name(parameter: type, ..) { what a spawn lists }
+    prefab: ($) =>
+      seq('prefab', field('name', $.identifier), $.parameters,
+          $.spawn_list),
     enum_case: ($) => $.identifier,
 
     // relation Name { fields } ..., or with what its ends have:
@@ -215,9 +230,10 @@ module.exports = grammar({
           optional($.on),
           field('body', $.block)),
     // (`optional`: a component the entity may be without.)
+    // (`old`, in a `for` inside a `for`: as it was before the outer one.)
     binding: ($) =>
       seq(optional('optional'), field('name', $.identifier), ':',
-          optional('mut'), field('component', $._name)),
+          optional(choice('mut', 'old')), field('component', $._name)),
     // (name), (e, a: A), (: C.f), (expr): an entity and what is bound of
     // it; in `connect`, an entity by any expression.
     node: ($) =>
@@ -355,10 +371,18 @@ module.exports = grammar({
 
     // In a spawn a component without fields is its name alone; so it is as
     // an argument (`e.add(Shield)`), where it is an expression like any.
-    spawn: ($) =>
-      seq('spawn', '{',
-          optional(list(choice($.component_init, field('component', $._name)))),
-          '}'),
+    // (In its list also a prefab with what it is given, and an `if`
+    // that picks, which needs no comma after it.)
+    spawn: ($) => seq('spawn', $.spawn_list),
+    spawn_list: ($) =>
+      seq('{', repeat(seq($._spawn_entry, optional(','))), '}'),
+    _spawn_entry: ($) =>
+      choice($.component_init, field('component', $._name), $.prefab_use,
+             $.spawn_if),
+    prefab_use: ($) => seq(field('prefab', $._name), $.arguments),
+    spawn_if: ($) =>
+      prec.right(seq('if', $._expression, $.spawn_list,
+                     optional(seq('else', choice($.spawn_list, $.spawn_if))))),
     component_init: ($) =>
       seq(field('component', $._name), '{', optional(list($.field_init)), '}'),
     field_init: ($) =>

@@ -44,6 +44,14 @@ component Picture { image: i32, tint: i32 }
 // be as narrow as the longest word, and is as high as the lines come to.
 // (Of any length.)
 component Text { text: text, size: f32, colour: i32 }
+// A box that says something and is as big as that: what such a box
+// has, to list in a `spawn` with what else it is to have.
+prefab caption(says: text, size: f32, colour: i32) {
+  Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+  Size { w: Sizing.Fit, h: Sizing.Fit },
+  Stack { row: true, pad: 0.0, gap: 0.0 },
+  Text { text: says, size: size, colour: colour }
+}
 // More about a text: its font (0: the window's own; others from the
 // window's `font`), more room between the letters, how far one line is
 // below the one before (0: as far as the text is high), where each line
