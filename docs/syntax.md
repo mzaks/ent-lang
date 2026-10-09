@@ -1229,10 +1229,11 @@ one type (a plain list).
   (`false`, the first case of an enum, an empty text), as a text's byte
   past its end does. `len(name)` is the number of rows, an `i32`.
 - `let point = name[i]` gives a row a name, and `point.field` reads it;
-  `for point in name { }` goes over the rows in their order. Such a name
-  is read by its fields only (a row is not a value that is passed on or
-  kept), and never assigned. A row of a plain list is its value (`for
-  number in odd { all += number }`).
+  `for point in name { }` goes over the rows in their order, and `for i,
+  point in name { }` gives each one's number too (its case, for a table
+  with a row for each case). Such a name is read by its fields, and
+  never assigned. A row of a plain list is its value (`for number in odd
+  { all += number }`).
 - A field is a number, a bool, an enum (`kind: Kind.Frost`), a
   `text[N]` or a `text` of any length; a value is written as it is: a
   literal, with `-` before a number.
@@ -1292,6 +1293,35 @@ for i in 0..len(l.road) { ... l.road[i].y ... }
   kept in one table, one's after another's, and a read through a value
   reads there, from where its table starts: as fast with many such
   tables as with one.
+
+A row is a value where a type says what its fields are:
+
+```
+component Walker { at: row { x: f32, y: f32 }, way: rows { x: f32, y: f32 } }
+
+fn last(way: rows { x: f32, y: f32 }) -> row { x: f32, y: f32 } {
+  way[len(way) - 1]
+}
+fn apart(a: row { x: f32, y: f32 }, b: row { x: f32, y: f32 }) -> f32 { ... }
+
+w.at = w.way[w.leg]
+if w.at == last(w.way) { ... }
+let far = apart(w.at, road_a[0]) + w.at.x
+```
+
+- `row { field: type, ... }` is the type of the rows with such fields,
+  of whichever table (one with counted rows, or one with a row for each
+  case). A field, a unique, a parameter and a fn's result may have it.
+- `table[i]`, `value[i]` of the table a value holds, a name that stands
+  for a row (`let point = road[i]`) and `none` are such values where one
+  is expected. A row the table has not is `none`.
+- What holds one is read by its fields: `w.at.x`, `last(way).y`,
+  `Home.x` for a unique that is a row. `none` reads as nought.
+- Two are compared with `==` and `!=`: the same row of the same table.
+- A value is 32 bits: the row's number among all the rows of the tables
+  that such rows are taken of anywhere in the program, which are also
+  kept in one table. Reading a field is one read of that, whichever
+  table the row is of.
 
 ## Prefabs
 

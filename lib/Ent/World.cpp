@@ -12,8 +12,8 @@ uint64_t mlir::ent::getStorageBytes(Type type) {
     return 8;
   if (auto text = dyn_cast<TextType>(type))
     return text.getStorageBytes();
-  if (isa<EnumType>(type))
-    return 1;
+  if (auto named = dyn_cast<EnumType>(type))
+    return named.getBits() / 8;
   if (auto integer = dyn_cast<IntegerType>(type)) {
     switch (integer.getWidth()) {
     case 1:

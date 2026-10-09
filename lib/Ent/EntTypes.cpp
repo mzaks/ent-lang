@@ -14,14 +14,22 @@ using namespace mlir::ent;
 // !ent.enum<@Name>
 Type EnumType::parse(AsmParser &parser) {
   FlatSymbolRefAttr name;
-  if (parser.parseLess() || parser.parseAttribute(name) ||
-      parser.parseGreater())
+  unsigned bits = 8;
+  if (parser.parseLess() || parser.parseAttribute(name))
     return {};
-  return EnumType::get(parser.getContext(), name);
+  // (, bits: of more than a byte tells apart.)
+  if (succeeded(parser.parseOptionalComma()) && parser.parseInteger(bits))
+    return {};
+  if (parser.parseGreater())
+    return {};
+  return EnumType::get(parser.getContext(), name, bits);
 }
 
 void EnumType::print(AsmPrinter &printer) const {
-  printer << "<" << getName() << ">";
+  printer << "<" << getName();
+  if (getBits() != 8)
+    printer << ", " << getBits();
+  printer << ">";
 }
 
 void EntDialect::registerTypes() {

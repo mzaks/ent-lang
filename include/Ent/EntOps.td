@@ -63,7 +63,9 @@ def Ent_EnumOp : Ent_Op<"enum", [Symbol]> {
     A value of the type `!ent.enum<@Way>` is one of the cases, stored as
     the byte that numbers it: `Right` is 0, `Down` 1, and so on. Fields,
     parameters and results may have the type. A generated C header names
-    the cases (`ent_Way_Right`).
+    the cases (`ent_Way_Right`). With the attribute `bits` its values are of
+    that many bits and more than its cases, which only name the first ones
+    (`!ent.enum<@Rows, 32>`).
   }];
   let arguments = (ins SymbolNameAttr:$sym_name, StrArrayAttr:$cases);
   let assemblyFormat = "$sym_name $cases attr-dict";

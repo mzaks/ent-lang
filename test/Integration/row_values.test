@@ -1,0 +1,54 @@
+// A row of a table is a value where a `row` type says what its fields
+// are: a field, a unique or a parameter holds one, a fn gives one, and
+// what holds one is read by its fields (`w.at.x`). `table[i]`, a row of
+// the table a value holds, a name that stands for a row and `none` are
+// such values where one is expected. The value is the row's number among
+// all the rows of the tables such rows are taken of, kept in one table:
+// reading a field is one read, whichever table the row is of. A `for`
+// over rows gives each one's number too (`for i, row in table`), or its
+// case.
+// RUN: %ent run %S/Inputs/row_values.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/row_values.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/row_values.ent -I %S/../../devices -o %t.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
+// RUN: ent-translate --ent-to-c-header %t.mlir | FileCheck %s --check-prefix=HEADER
+
+// More than a byte tells apart: 32 bits, in the world and for C.
+// IR-DAG: ent.enum @row_of_x_f32_y_f32 ["none"] {bits = 32 : i32}
+// IR-DAG: ent.component @Walker (at: !ent.enum<@row_of_x_f32_y_f32, 32>, way: !ent.enum<@rows_of_x_f32_y_f32>)
+// (The rows of road_a, of spots and of road_b: in the order rows were
+// taken of them.)
+// IR-DAG: sym_name = "row_row_of_x_f32_y_f32__all", values = {{\[\[}}0.000000e+00 : f32, 4.000000e+00 : f32, 4.000000e+00 : f32, 7.000000e+00 : f32, 8.000000e+00 : f32, 0.000000e+00 : f32, 8.000000e+00 : f32]
+// IR: ent.function @row_row_of_x_f32_y_f32__x(%arg0: !ent.enum<@row_of_x_f32_y_f32, 32>) -> f32 {
+// IR:   ent.table.at @row_row_of_x_f32_y_f32__all "x"
+// IR: ent.function @row_row_of_x_f32_y_f32__of_rows_of_x_f32_y_f32(
+
+// HEADER: typedef uint32_t ent_row_of_x_f32_y_f32;
+
+// CHECK:      1: at 4.0 1.0; ends at 4.0 6.0; home 8.0; apart 5.0 8.0
+// CHECK-NEXT: 1: at 0.0 0.0; ends at 8.0 9.0; home 8.0; apart 9.0 8.0
+// CHECK-NEXT:   there
+// CHECK-NEXT: 1: built arrow for 40
+// CHECK-NEXT: b 0: 0.0 9.0
+// CHECK-NEXT: b 1: 8.0 9.0
+// CHECK-NEXT: Arrow: arrow
+// CHECK-NEXT: Cannon: cannon
+// CHECK-NEXT: odd 0: 1
+// CHECK-NEXT: odd 1: 3
+// CHECK-NEXT: odd 2: 5
+// CHECK-NEXT:   way 0: 0.0
+// CHECK-NEXT:   way 1: 4.0
+// CHECK-NEXT:   way 2: 4.0
+// CHECK-NEXT:   way 0: 0.0
+// CHECK-NEXT:   way 1: 8.0
+// CHECK-NEXT: 2: at 4.0 1.0; ends at 4.0 6.0; home 0.0; apart 5.0 8.0
+// CHECK-NEXT:   there
+// CHECK-NEXT: 2: at 8.0 9.0; ends at 8.0 9.0; home 0.0; apart 0.0 8.0
+// CHECK-NEXT:   nowhere
+// CHECK-NEXT: 2: built cannon for 70
+// CHECK-NEXT: 3: at 4.0 6.0; ends at 4.0 6.0; home 0.0; apart 0.0 8.0
+// CHECK-NEXT:   nowhere
+// CHECK-NEXT: 3: at 0.0 0.0; ends at 8.0 9.0; home 0.0; apart 9.0 8.0
+// CHECK-NEXT:   nowhere
+// CHECK-NEXT: 3: built cannon for 70

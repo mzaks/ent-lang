@@ -43,6 +43,7 @@
 (primitive_type) @type.builtin
 (text_type "text" @type.builtin)
 (rows_type "rows" @type.builtin)
+(row_type "row" @type.builtin)
 (rows_type key: (identifier) @type)
 (field type: (identifier) @type)
 (parameter type: (identifier) @type)

@@ -1202,3 +1202,39 @@ asset frames = "*/walk.png"
 
 // expected-error @+1 {{expected '=' and the file's name}}
 asset frames "walk.png"
+
+// -----
+
+// A row is a value of the tables whose rows have its fields.
+table road { x: f32, y: f32 } = [ { x: 0.0, y: 1.0 } ]
+table cost { c: i32 } = [ { c: 1 } ]
+component W { at: row { x: f32, y: f32 } }
+system s() {
+  // expected-error @+1 {{a row of table 'cost' is not the row expected here}}
+  for w: mut W { w.at = cost[0] }
+}
+
+// -----
+
+component W { at: row { x: f32, y: f32 } }
+unique N: f32
+system s() {
+  // expected-error @+1 {{this row has no field 'z'}}
+  for w: W { N = w.at.z }
+}
+
+// -----
+
+fn one() -> f32 { 1.0 }
+unique N: f32
+system s() {
+  // expected-error @+1 {{only a row of a table has fields to read with '.'}}
+  N = one().x
+}
+
+// -----
+
+system s() {
+  // expected-error @+1 {{a 'for' has a number and a row ('for i, row in table') over the rows of a table}}
+  for i, x in 0..3 { }
+}

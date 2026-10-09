@@ -150,14 +150,23 @@ def Ent_EnumType : Ent_Type<"Enum", "enum"> {
     is stored as one byte, the number of the case (the first is 0), and
     computed with as that byte: `builtin.unrealized_conversion_cast` takes
     a value to and from `i8`, as for a text and its integer.
+
+    `!ent.enum<@Rows, 32>` is one of more things than a byte tells apart,
+    which have no names: stored and computed with as an integer of that
+    many bits (a row of one of the tables of a shape is such a value).
   }];
-  let parameters = (ins "FlatSymbolRefAttr":$name);
+  let parameters = (ins "FlatSymbolRefAttr":$name, "unsigned":$bits);
+  let builders = [
+    TypeBuilder<(ins "::mlir::FlatSymbolRefAttr":$name), [{
+      return $_get($_ctxt, name, 8u);
+    }]>
+  ];
   let hasCustomAssemblyFormat = 1;
   let extraClassDeclaration = [{
     /// At most this many cases: what a byte tells apart.
     static constexpr unsigned kMaxCases = 256;
     ::mlir::IntegerType getStorageType() const {
-      return ::mlir::IntegerType::get(getContext(), 8);
+      return ::mlir::IntegerType::get(getContext(), getBits());
     }
   }];
 }

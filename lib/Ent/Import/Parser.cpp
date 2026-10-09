@@ -152,6 +152,7 @@ struct Expr {
     Format, // {value} inside a string: the value as text
     Tuple,  // (a, b): the values a fn gives
     Row,    // table[i].field: name the table, field the field (or none)
+    Of,     // value.field: a field of the row a value is
     Given,  // a value that is there already (`given`)
   };
   Kind kind;
@@ -256,6 +257,26 @@ struct RowsShape {
   Operation *op = nullptr;
 };
 
+/// The rows of the tables whose rows have such fields, as values: a
+/// field or a parameter can hold one (`row { x: f32, y: f32 }`), and what
+/// holds one is read by its fields. The rows of every table one is taken
+/// of are kept in one table, one's after another's; a value is the
+/// number of the row in it, counted from 1 (0: none, which reads as
+/// nought).
+struct RowKind {
+  std::string name;
+  SmallVector<std::pair<std::string, Type>> fields;
+  /// The tables rows are taken of, and where each one's rows start.
+  SmallVector<std::string> targets;
+  SmallVector<unsigned> starts;
+  unsigned total = 0;
+  /// The fields something reads of such a value.
+  llvm::StringSet<> read;
+  /// The shapes of table values that rows are taken through.
+  SmallVector<RowsShape *> through;
+  Operation *op = nullptr;
+};
+
 /// What a name stands for in a body.
 struct Variable {
   /// (Other: a component of the entity at the other end of an edge that
@@ -330,6 +351,18 @@ private:
   Token peek() {
     Lexer ahead = lexer;
     return ahead.next();
+  }
+  /// Whether a counted `for` starts here: `name in`, or `number, name in`.
+  bool atCountedFor() {
+    if (!token.is(Token::Identifier))
+      return false;
+    Lexer ahead = lexer;
+    Token next = ahead.next();
+    if (next.isKeyword("in"))
+      return true;
+    if (!next.is(Token::Comma) || !ahead.next().is(Token::Identifier))
+      return false;
+    return ahead.next().isKeyword("in");
   }
 
   Location loc(llvm::SMLoc at) {
@@ -564,6 +597,17 @@ private:
                                         StringRef field);
   mlir::Value noughtOf(Location at, Type type);
   LogicalResult finishRows();
+  LogicalResult finishRowKinds();
+  FailureOr<Type> parseRowType();
+  RowKind *rowOf(Type type);
+  bool isRowSource(const Expr &expr);
+  unsigned rowsStart(RowKind &kind, StringRef target);
+  FailureOr<mlir::Value> emitRowValue(const Expr &expr, RowKind &kind);
+  FailureOr<mlir::Value> readRowValue(llvm::SMLoc at, mlir::Value row,
+                                      StringRef field);
+  std::vector<std::unique_ptr<RowKind>> rowKinds;
+  llvm::StringMap<RowKind *> rowKindByKey;
+  llvm::StringMap<RowKind *> rowKindByName;
   LogicalResult parseAsset();
   bool isWholeRow(const Expr &expr);
   FailureOr<Variable> emitRow(const Expr &expr);
@@ -774,7 +818,8 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
     return nullptr;
   root->loading = false;
   finished.push_back(root);
-  if (failed(finishRows()) || failed(finishCallables()))
+  if (failed(finishRowKinds()) || failed(finishRows()) ||
+      failed(finishCallables()))
     return nullptr;
 
   // Every module's world is set up before `main` does anything else, a
@@ -1156,6 +1201,11 @@ FailureOr<Type> Parser::parseType() {
        peek().is(Token::Identifier))) {
     advance();
     return parseRowsType();
+  }
+  // row { field: type, .. }: a row of one of the tables with such rows.
+  if (token.isKeyword("row") && peek().is(Token::LBrace)) {
+    advance();
+    return parseRowType();
   }
   FailureOr<std::string> name = identifier("a type");
   if (failed(name))
@@ -1592,6 +1642,296 @@ LogicalResult Parser::finishRows() {
            [&](mlir::Value which, mlir::Value) -> mlir::Value {
              return listed(count, which);
            });
+  }
+  return success();
+}
+
+// (`row` is read.) '{' field: type, .. '}'
+FailureOr<Type> Parser::parseRowType() {
+  llvm::SMLoc at = token.loc;
+  auto kind = std::make_unique<RowKind>();
+  Record record;
+  if (failed(parseFields(record)))
+    return failure();
+  kind->fields = record.fields;
+  if (kind->fields.empty())
+    return error(at, "a table's rows have at least one field");
+  std::string key = "row";
+  std::string name = "row_of";
+  for (auto &[field, type] : kind->fields) {
+    llvm::raw_string_ostream(key) << " " << field << ": " << type;
+    name += "_" + field + "_" + shapeWord(type);
+  }
+  auto typeOfKind = [&](StringRef symbol) {
+    return Type(EnumType::get(context, FlatSymbolRefAttr::get(context, symbol),
+                              32));
+  };
+  auto known = rowKindByKey.find(key);
+  if (known != rowKindByKey.end())
+    return typeOfKind(known->second->name);
+  while (rowKindByName.count(name) || SymbolTable::lookupSymbolIn(module, name))
+    name += "_";
+  kind->name = name;
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToStart(module.getBody());
+    kind->op = EnumOp::create(builder, loc(at), builder.getStringAttr(name),
+                              builder.getStrArrayAttr({"none"}));
+    // (More rows than a byte tells apart.)
+    kind->op->setAttr("bits", builder.getI32IntegerAttr(32));
+  }
+  enums.ofSymbol(name) = {"none"};
+  RowKind *made = kind.get();
+  rowKindByKey[key] = made;
+  rowKindByName[name] = made;
+  rowKinds.push_back(std::move(kind));
+  return typeOfKind(name);
+}
+
+/// The kind of row a type stands for, if it is the type of rows.
+RowKind *Parser::rowOf(Type type) {
+  auto named = dyn_cast_or_null<EnumType>(type);
+  if (!named)
+    return nullptr;
+  auto known = rowKindByName.find(named.getName().getValue());
+  return known == rowKindByName.end() ? nullptr : known->second;
+}
+
+/// Whether `expr` is a row that is not a value yet: `table[i]`,
+/// `value[i]`, a name that stands for one, or `none`.
+bool Parser::isRowSource(const Expr &expr) {
+  if (expr.kind == Expr::Name) {
+    const Variable *variable = lookup(expr.name);
+    return variable ? variable->kind == Variable::Row : expr.name == "none";
+  }
+  return isWholeRow(expr);
+}
+
+/// Where the rows of the table `target` start among those of `kind`:
+/// after those of the tables rows were taken of before.
+unsigned Parser::rowsStart(RowKind &kind, StringRef target) {
+  for (auto [known, start] : llvm::zip(kind.targets, kind.starts))
+    if (known == target)
+      return start;
+  kind.targets.push_back(target.str());
+  kind.starts.push_back(kind.total);
+  kind.total += tableRows[target];
+  return kind.starts.back();
+}
+
+/// A row (see isRowSource) as a value of `kind`: its number among all
+/// the rows of the kind, from 1; none (0) where the table has no such
+/// row.
+FailureOr<mlir::Value> Parser::emitRowValue(const Expr &expr, RowKind &kind) {
+  Location at = loc(expr.loc);
+  Type i32 = builder.getI32Type();
+  auto type =
+      EnumType::get(context, FlatSymbolRefAttr::get(context, kind.name), 32);
+  auto asRow = [&](mlir::Value number) {
+    return UnrealizedConversionCastOp::create(builder, at, Type(type), number)
+        .getResult(0);
+  };
+  // Which table, and which row of it: of a name that stands for a row,
+  // or as it is written.
+  std::string table;
+  mlir::Value which, index;
+  if (expr.kind == Expr::Name) {
+    const Variable *variable = lookup(expr.name);
+    if (!variable)
+      return asRow(integer(at, i32, 0));
+    table = variable->component;
+    which = variable->which;
+    index = variable->value;
+  } else {
+    FailureOr<Variable> row = emitRow(expr);
+    if (failed(row))
+      return failure();
+    table = row->component;
+    which = row->which;
+    index = row->value;
+  }
+  // (The row's number as an i32: a case as its number.)
+  if (auto named = dyn_cast<EnumType>(index.getType()))
+    index = UnrealizedConversionCastOp::create(builder, at,
+                                               named.getStorageType(), index)
+                .getResult(0);
+  unsigned width = cast<IntegerType>(index.getType()).getWidth();
+  if (width < 32)
+    index = arith::ExtUIOp::create(builder, at, i32, index);
+  else if (width > 32)
+    index = arith::TruncIOp::create(builder, at, i32, index);
+
+  if (which) {
+    // Of the table a value holds: asked of the fn that knows where the
+    // rows of each such table are (see finishRowKinds).
+    RowsShape *shape = rowsOf(which.getType());
+    if (shape->fields != kind.fields)
+      return error(expr.loc, "the rows of this table are not the rows "
+                             "expected here");
+    if (!llvm::is_contained(kind.through, shape))
+      kind.through.push_back(shape);
+    shape->counted = true;
+    return InvokeOp::create(
+               builder, at, Type(type),
+               FlatSymbolRefAttr::get(context, "row_" + kind.name + "__of_" +
+                                                   shape->name),
+               ValueRange{which, index}, UnitAttr())
+        ->getResult(0);
+  }
+  if (tables[table].fields != kind.fields)
+    return error(expr.loc, "a row of table '" + table + "' is not the row "
+                           "expected here");
+  std::string target = resolve(table);
+  unsigned start = rowsStart(kind, target);
+  mlir::Value there = arith::CmpIOp::create(
+      builder, at, arith::CmpIPredicate::ult, index,
+      integer(at, i32, tableRows[target]));
+  mlir::Value number = arith::AddIOp::create(builder, at, index,
+                                             integer(at, i32, start + 1));
+  mlir::Value picked = arith::SelectOp::create(builder, at, there, number,
+                                               integer(at, i32, 0));
+  return asRow(picked);
+}
+
+/// What the row that `row` is has in `field`: of the fn that reads the
+/// table of all the rows of its kind (see finishRowKinds).
+FailureOr<mlir::Value> Parser::readRowValue(llvm::SMLoc where, mlir::Value row,
+                                            StringRef field) {
+  RowKind *kind = rowOf(row.getType());
+  Type type;
+  for (auto &[name, fieldType] : kind->fields)
+    if (name == field)
+      type = fieldType;
+  if (!type)
+    return error(where, "this row has no field '" + field + "'");
+  kind->read.insert(field);
+  return InvokeOp::create(
+             builder, loc(where), type,
+             FlatSymbolRefAttr::get(context,
+                                    ("row_" + kind->name + "__" + field).str()),
+             ValueRange{row}, UnitAttr())
+      ->getResult(0);
+}
+
+/// When everything is parsed: for each kind of row, the table of all the
+/// rows of the tables rows are taken of; the fns that read a field of
+/// such a value; and for each shape of table values rows are taken
+/// through, the fn that makes of a table and a row's number in it the
+/// row's number among all.
+LogicalResult Parser::finishRowKinds() {
+  for (auto &kind : rowKinds) {
+    Location at = kind->op->getLoc();
+    auto type =
+        EnumType::get(context, FlatSymbolRefAttr::get(context, kind->name), 32);
+    Type i32 = builder.getI32Type();
+    // (Every table that may be the one a value holds.)
+    for (RowsShape *shape : kind->through)
+      for (const std::string &target : shape->targets)
+        rowsStart(*kind, target);
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToEnd(module.getBody());
+    auto declare = [&](const Twine &name, ArrayRef<StringRef> names,
+                       ArrayRef<Type> types, ArrayRef<Attribute> values) {
+      OperationState state(at, TableOp::getOperationName());
+      state.addAttribute("sym_name", builder.getStringAttr(name));
+      state.addAttribute("field_names", builder.getStrArrayAttr(names));
+      state.addAttribute("field_types", builder.getTypeArrayAttr(types));
+      state.addAttribute("values", builder.getArrayAttr(values));
+      builder.create(state);
+    };
+    auto make = [&](const Twine &name, ArrayRef<Type> params, Type result,
+                    function_ref<mlir::Value(Block &)> of) {
+      OpBuilder::InsertionGuard inner(builder);
+      auto op = FunctionOp::create(builder, at, builder.getStringAttr(name),
+                                   builder.getTypeArrayAttr(params),
+                                   builder.getTypeArrayAttr({result}),
+                                   /*proc=*/false);
+      auto *block = new Block();
+      op.getBody().push_back(block);
+      for (Type param : params)
+        block->addArgument(param, at);
+      builder.setInsertionPointToEnd(block);
+      YieldOp::create(builder, at, ValueRange{of(*block)});
+    };
+    std::string all = "row_" + kind->name + "__all";
+    if (kind->total) {
+      SmallVector<SmallVector<Attribute>> columns(kind->fields.size());
+      for (const std::string &target : kind->targets) {
+        auto table =
+            cast<TableOp>(SymbolTable::lookupSymbolIn(module, target));
+        for (auto [column, values] : llvm::zip(columns, table.getValues()))
+          llvm::append_range(column, cast<ArrayAttr>(values));
+      }
+      SmallVector<StringRef> names;
+      SmallVector<Type> types;
+      SmallVector<Attribute> values;
+      for (auto [field, column] : llvm::zip(kind->fields, columns)) {
+        names.push_back(field.first);
+        types.push_back(field.second);
+        values.push_back(builder.getArrayAttr(column));
+      }
+      declare(all, names, types, values);
+    }
+    for (auto &[field, fieldType] : kind->fields) {
+      if (!kind->read.contains(field))
+        continue;
+      StringRef name = field;
+      Type result = fieldType;
+      make("row_" + kind->name + "__" + name, {type}, result,
+           [&](Block &block) -> mlir::Value {
+             // (No table has such a row: every one is none.)
+             if (!kind->total)
+               return noughtOf(at, result);
+             // Row 0 is none: before the first, which reads as nought.
+             mlir::Value number = UnrealizedConversionCastOp::create(
+                                      builder, at, i32, block.getArgument(0))
+                                      .getResult(0);
+             return TableAtOp::create(
+                        builder, at, result,
+                        FlatSymbolRefAttr::get(context, all),
+                        builder.getStringAttr(name),
+                        arith::SubIOp::create(builder, at, number,
+                                              integer(at, i32, 1)))
+                 .getResult();
+           });
+    }
+    for (RowsShape *shape : kind->through) {
+      // For each table of the shape (none first), where its rows start.
+      SmallVector<Attribute> starts{builder.getI32IntegerAttr(0)};
+      for (const std::string &target : shape->targets)
+        starts.push_back(builder.getI32IntegerAttr(rowsStart(*kind, target)));
+      std::string start = "row_" + kind->name + "__in_" + shape->name;
+      declare(start, {""}, {i32}, {builder.getArrayAttr(starts)});
+      auto held =
+          EnumType::get(context, FlatSymbolRefAttr::get(context, shape->name));
+      make("row_" + kind->name + "__of_" + shape->name, {held, i32}, type,
+           [&](Block &block) -> mlir::Value {
+             mlir::Value which = arith::ExtUIOp::create(
+                 builder, at, i32,
+                 UnrealizedConversionCastOp::create(
+                     builder, at, held.getStorageType(), block.getArgument(0))
+                     .getResult(0));
+             mlir::Value index = block.getArgument(1);
+             auto listed = [&](StringRef list) -> mlir::Value {
+               return TableAtOp::create(builder, at, i32,
+                                        FlatSymbolRefAttr::get(context, list),
+                                        builder.getStringAttr(""), which)
+                   .getResult();
+             };
+             mlir::Value there = arith::CmpIOp::create(
+                 builder, at, arith::CmpIPredicate::ult, index,
+                 listed("rows_" + shape->name + "__count"));
+             mlir::Value number = arith::AddIOp::create(
+                 builder, at,
+                 arith::AddIOp::create(builder, at, listed(start), index),
+                 integer(at, i32, 1));
+             mlir::Value row = arith::SelectOp::create(
+                 builder, at, there, number, integer(at, i32, 0));
+             return UnrealizedConversionCastOp::create(builder, at,
+                                                       Type(type), row)
+                 .getResult(0);
+           });
+    }
   }
   return success();
 }
@@ -3601,7 +3941,18 @@ LogicalResult Parser::parseConnect(llvm::SMLoc at) {
 // `for` over entities.
 LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
   FailureOr<std::string> name = identifier("a name");
-  if (failed(name) || failed(expectKeyword("in")))
+  if (failed(name))
+    return failure();
+  // for number, row in table { }: the row's number (or its case) too.
+  std::string numbered;
+  llvm::SMLoc numberedAt = token.loc;
+  if (consumeIf(Token::Comma)) {
+    numbered = *name;
+    name = identifier("a name");
+    if (failed(name))
+      return failure();
+  }
+  if (failed(expectKeyword("in")))
     return failure();
   Location where = loc(at);
   // for case in Enum { }: every case of it, in their order.
@@ -3699,6 +4050,12 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
       counted = UnrealizedConversionCastOp::create(builder, where,
                                                    Type(cases), counted)
                     .getResult(0);
+    if (!numbered.empty()) {
+      if (!overRows)
+        return error(numberedAt, "a 'for' has a number and a row ('for i, "
+                                 "row in table') over the rows of a table");
+      bind(numbered, Variable::ofValue(counted));
+    }
     if (overRows) {
       // (A row with fields is read by them; of a plain list it is the
       // value.)
@@ -4017,7 +4374,7 @@ scf::IfOp Parser::giveFromBranches(scf::IfOp branch,
 //     [cascade R [leaves first]] [where cond] [on trigger, ...] { }
 LogicalResult Parser::parseFor() {
   llvm::SMLoc at = token.loc;
-  if (token.is(Token::Identifier) && peek().isKeyword("in")) {
+  if (atCountedFor()) {
     return parseCountedFor(at);
   }
   // Inside a `for` over entities: its edges, with an arrow, or other
@@ -5366,8 +5723,21 @@ FailureOr<ExprPtr> Parser::parseUnary() {
   if (failed(primary))
     return failure();
   // text[i]: one byte of a text. table[i], table[i].field: of a row.
-  while (token.is(Token::LBracket)) {
+  // value.field: of the row a value is (what a fn gives, a field holds).
+  while (token.is(Token::LBracket) || token.is(Token::Dot)) {
     llvm::SMLoc at = token.loc;
+    if (consumeIf(Token::Dot)) {
+      FailureOr<std::string> field = identifier("a field");
+      if (failed(field))
+        return failure();
+      auto node = std::make_unique<Expr>();
+      node->kind = Expr::Of;
+      node->loc = at;
+      node->field = *field;
+      node->operands.push_back(std::move(*primary));
+      primary = std::move(node);
+      continue;
+    }
     advance();
     FailureOr<ExprPtr> index = parseExpr();
     if (failed(index) || failed(expect(Token::RBracket, "']'")))
@@ -5440,8 +5810,7 @@ FailureOr<ExprPtr> Parser::parseCountedQuery() {
                      "statement ('let n = for ...', 'n += for ...'), not "
                      "where a value may not be asked for at all (in an "
                      "'if' that gives a value)");
-  if (inQuery || inFunction ||
-      (token.is(Token::Identifier) && peek().isKeyword("in")))
+  if (inQuery || inFunction || atCountedFor())
     return error(at, "only a 'for' over entities gives a number, how many "
                      "its body ran for: at the top level of a system, or in "
                      "a loop there");
@@ -6055,8 +6424,22 @@ Type Parser::typeOf(const Expr &expr) {
         return recordOf(*variable).fieldType(expr.field);
       if (variable->kind == Variable::Row)
         return typeOf(fieldOfRow(*variable, expr.field, expr.loc));
+      if (variable->kind == Variable::Value && variable->value)
+        if (RowKind *kind = rowOf(variable->value.getType())) {
+          for (auto &[field, type] : kind->fields)
+            if (field == expr.field)
+              return type;
+          return {};
+        }
     }
     auto unique = uniques.find(expr.name);
+    if (unique != uniques.end() && unique->second.shorthand)
+      if (RowKind *kind = rowOf(unique->second.fieldType("value"))) {
+        for (auto &[field, type] : kind->fields)
+          if (field == expr.field)
+            return type;
+        return {};
+      }
     if (unique != uniques.end())
       return unique->second.fieldType(expr.field);
     // Enum.Case
@@ -6126,6 +6509,12 @@ Type Parser::typeOf(const Expr &expr) {
     return builder.getI1Type();
   case Expr::Given:
     return expr.given.getType();
+  case Expr::Of:
+    if (RowKind *kind = rowOf(typeOf(*expr.operands[0])))
+      for (auto &[field, type] : kind->fields)
+        if (field == expr.field)
+          return type;
+    return {};
   case Expr::Tuple:
     return {};
   }
@@ -6313,6 +6702,10 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
 
 FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   Location at = loc(expr.loc);
+  // A row of a table, where one is expected as a value.
+  if (RowKind *kind = rowOf(expected))
+    if (isRowSource(expr))
+      return emitRowValue(expr, *kind);
   switch (expr.kind) {
   case Expr::String: {
     // A literal takes the capacity it is put into, where it fits.
@@ -6548,6 +6941,9 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     if (const Variable *variable = lookup(expr.name)) {
       if (variable->kind == Variable::Row)
         return emit(fieldOfRow(*variable, expr.field, expr.loc), expected);
+      if (variable->kind == Variable::Value && variable->value &&
+          rowOf(variable->value.getType()))
+        return readRowValue(expr.loc, variable->value, expr.field);
       if (variable->kind == Variable::Other) {
         Type type = recordOf(*variable).fieldType(expr.field);
         if (!type)
@@ -6584,6 +6980,15 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return error(expr.loc, "a fn computes from its parameters only; pass "
                              "it what it needs of unique '" +
                                  expr.name + "'");
+    // (A unique that is a row: a field of the row.)
+    if (unique != uniques.end() && unique->second.shorthand &&
+        rowOf(unique->second.fieldType("value"))) {
+      mlir::Value row =
+          ReadOp::create(builder, at, unique->second.fieldType("value"),
+                         symbol(expr.name), builder.getStringAttr("value"))
+              .getResult();
+      return readRowValue(expr.loc, row, expr.field);
+    }
     if (unique != uniques.end()) {
       Type type = unique->second.fieldType(expr.field);
       if (!type)
@@ -6822,6 +7227,16 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     return emitSpawn(expr);
   case Expr::Given:
     return expr.given;
+  case Expr::Of: {
+    Type held = typeOf(*expr.operands[0]);
+    if (!rowOf(held))
+      return error(expr.loc, "only a row of a table has fields to read "
+                             "with '.'");
+    FailureOr<mlir::Value> row = emit(*expr.operands[0], held);
+    if (failed(row))
+      return failure();
+    return readRowValue(expr.loc, *row, expr.field);
+  }
   case Expr::Tuple:
     return error(expr.loc, "'(a, b)' is several values, which a fn gives "
                            "back and 'let (a, b) = ...' takes apart; one "
@@ -7410,6 +7825,11 @@ FailureOr<mlir::Value> Parser::formatValue(llvm::SMLoc where,
                                                 textBits(at, b)),
                         text);
   };
+  if (rowOf(type) || rowsOf(type))
+    return error(where, rowOf(type) ? "a row of a table is no text; its "
+                                      "fields are ('{row.field}')"
+                                    : "a table is no text; its rows' "
+                                      "fields are");
   // An enum: the name of its case.
   if (auto named = dyn_cast<EnumType>(type)) {
     const SmallVector<std::string> &labels =

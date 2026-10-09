@@ -167,6 +167,7 @@ module.exports = grammar({
 
     _type: ($) =>
       choice($.primitive_type, $.text_type, $.callable_type, $.rows_type,
+             $.row_type,
              $._name),
     // fn(t: f32) -> f32, proc(i32): a fn or proc of that shape, as a value.
     callable_type: ($) =>
@@ -183,6 +184,8 @@ module.exports = grammar({
     rows_type: ($) =>
       prec.right(seq('rows', optional(seq('[', field('key', $._name), ']')),
                      choice($.fields, $._type))),
+    // row { x: f32, y: f32 }: a row of one of the tables with such rows.
+    row_type: ($) => seq('row', $.fields),
     // text: of any length; text[N]: up to N bytes.
     text_type: ($) =>
       prec.right(seq('text', optional(seq('[', $.integer, ']')))),
@@ -224,7 +227,9 @@ module.exports = grammar({
     // (Or `for case in Enum { }`: every case of an enum; `for row in
     // table { }`: every row of a table, or of the one a value holds.)
     counted_for: ($) =>
-      seq('for', field('counter', $.identifier), 'in',
+      seq('for',
+          optional(seq(field('number', $.identifier), ',')),
+          field('counter', $.identifier), 'in',
           choice(seq(field('from', $._expression), '..',
                      field('to', $._expression)),
                  field('over', $._expression)),

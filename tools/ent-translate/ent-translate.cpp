@@ -136,9 +136,13 @@ static void emitEnums(ModuleOp module, raw_ostream &os) {
       os << "\n// Enums: a value is the number of its case, in one byte.\n";
     any = true;
     std::string name = named.getCName();
+    // (One of more than a byte tells apart: of as many bits as it says.)
     os << llvm::formatv("#ifndef ENT_ENUM_{0}\n#define ENT_ENUM_{0}\n"
-                        "typedef uint8_t {0};\nenum {{",
-                        name);
+                        "typedef uint{1}_t {0};\nenum {{",
+                        name,
+                        named->hasAttr("bits")
+                            ? named->getAttrOfType<IntegerAttr>("bits").getInt()
+                            : 8);
     for (auto [index, label] :
          llvm::enumerate(named.getCases().getAsValueRange<StringAttr>()))
       os << llvm::formatv("{0}\n  {1}_{2} = {3}", index ? "," : "", name,

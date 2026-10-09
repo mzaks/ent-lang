@@ -1723,6 +1723,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "row_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "_name"
         }
       ]
@@ -1974,6 +1978,19 @@
           }
         ]
       }
+    },
+    "row_type": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "row"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "fields"
+        }
+      ]
     },
     "text_type": {
       "type": "PREC_RIGHT",
@@ -2272,6 +2289,31 @@
         {
           "type": "STRING",
           "value": "for"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "FIELD",
+                  "name": "number",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "identifier"
+                  }
+                },
+                {
+                  "type": "STRING",
+                  "value": ","
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         },
         {
           "type": "FIELD",

@@ -1,0 +1,66 @@
+// Rows of tables as values, and a `for` over rows with their numbers
+// (row_values.test).
+import console
+import text
+enum Kind { Arrow, Cannon }
+table road_a { x: f32, y: f32 } = [ { x: 0.0, y: 1.0 }, { x: 4.0, y: 1.0 }, { x: 4.0, y: 6.0 } ]
+table road_b { x: f32, y: f32 } = [ { x: 0.0, y: 9.0 }, { x: 8.0, y: 9.0 } ]
+table spots[Kind] { x: f32, y: f32 } = [ Arrow: { x: 7.0, y: 7.0 }, Cannon: { x: 8.0, y: 8.0 } ]
+table towers[Kind] { name: text, cost: i32 } = [
+  Arrow: { name: "arrow", cost: 40 }, Cannon: { name: "cannon", cost: 70 }
+]
+table odd: i32 = [1, 3, 5]
+
+// A row in a field, and the table it is of; a row in a unique.
+component Walker { at: row { x: f32, y: f32 }, way: rows { x: f32, y: f32 } }
+component Built { what: row { name: text, cost: i32 } }
+unique Home: row { x: f32, y: f32 }
+unique Round: i32
+default_capacity 8
+
+// Rows as what a fn takes and gives.
+fn apart(a: row { x: f32, y: f32 }, b: row { x: f32, y: f32 }) -> f32 {
+  max(b.x - a.x, b.y - a.y)
+}
+fn last(way: rows { x: f32, y: f32 }) -> row { x: f32, y: f32 } {
+  way[len(way) - 1]
+}
+fn dearest() -> row { name: text, cost: i32 } {
+  var best = 0
+  for tower in towers { best = max(best, tower.cost) }
+  if towers[Kind.Arrow].cost == best { towers[Kind.Arrow] }
+  else { towers[Kind.Cannon] }
+}
+world {
+  spawn { Walker { at: road_a[1], way: road_a } }
+  spawn { Walker { at: none, way: road_b } }
+  spawn { Built { what: towers[Kind.Arrow] } }
+  Home = spots[Kind.Cannon]
+}
+system s() {
+  Round += 1
+  for w: mut Walker {
+    let end = last(w.way)
+    put("{Round}: at {w.at.x} {w.at.y}; ends at {end.x} {last(w.way).y}; home {Home.x}; apart {apart(w.at, end)} {apart(road_a[0], road_b[1])}")
+    // (A row the table has not is none.)
+    w.at = w.way[Round]
+    if w.at == end { put("  there") }
+    if w.at == none { put("  nowhere") }
+  }
+  for b: mut Built {
+    put("{Round}: built {b.what.name} for {b.what.cost}")
+    b.what = dearest()
+  }
+  // A name that stands for a row is one where a row is expected.
+  let first = road_a[0]
+  Home = first
+  if Round == 1 {
+    // Each row with its number, or its case.
+    for i, point in road_b { put("b {i}: {point.x} {point.y}") }
+    for kind, tower in towers { put("{kind}: {tower.name}") }
+    for i, number in odd { put("odd {i}: {number}") }
+    for w: Walker { for i, point in w.way { put("  way {i}: {point.x}") } }
+  }
+}
+schedule f() { s() }
+main { loop { f() } until Round == 3 }
