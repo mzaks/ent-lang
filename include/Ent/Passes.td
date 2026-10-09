@@ -87,7 +87,9 @@ def EntInferArchetypes : Pass<"ent-infer-archetypes", "ModuleOp"> {
     archetypes this needs, marked `inferred` (see `inferArchetypes`): one per
     distinct set of spawned components, holding as optional the components
     adds and removes reach, sized by the smallest capacity among its
-    required components. The other passes and `ent-translate` run it
+    required components. For a component declared `apart` it adds the
+    archetypes entities move to as they are given it and lose it. The
+    other passes and `ent-translate` run it
     themselves; on its own it shows what they infer.
   }];
 }

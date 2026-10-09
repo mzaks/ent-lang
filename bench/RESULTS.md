@@ -3047,3 +3047,43 @@ Not done: a way to draw many things with one call (the window device
 takes one thing at a time), and letting a program say that a tag is to
 be an archetype of its own without declaring every archetype it is in.
 
+## 2026-10-09: threads that sleep, and a tag stored apart
+
+The two things the game left open (above). Same machine, this time on
+battery (the `balanced` profile), where every number is higher than
+above and moves by a tenth or two from run to run; what is compared was
+measured one after the other. `bench/swarm/run.py 1800 --parallel`, the
+last three reports of each run, two runs each:
+
+| threads without work | a frame | computing | drawing | CPU for the run |
+|---|---|---|---|---|
+| spin 200 ms (the runtime's own) | 19.7 to 21.2 ms | 3.9 to 4.6 ms | 15.4 to 16.6 ms | 476 s |
+| sleep at once (`KMP_BLOCKTIME=0`) | 16.8 to 18.5 ms | 5.8 to 6.5 ms | 10.7 to 11.9 ms | 94 s |
+| spin 200 us | 16.7 to 18.7 ms | 5.9 to 6.5 ms | 10.4 to 11.8 ms | 122 s |
+| spin 1 ms | 15.9 to 17.5 ms | 5.6 to 6.1 ms | 10.0 to 11.1 ms | 173 s |
+
+- A program built with `--parallel` now says the last of these itself
+  when it starts (`tools/ent`: a line of C next to the program's
+  folders), unless `KMP_BLOCKTIME` or `OMP_WAIT_POLICY` is set where it
+  runs. A millisecond rather than none: a program whose frames follow
+  one another in less (the 2026-09 runs of `bench/`, where spinning was
+  worth 2.4x at a million entities) keeps its threads awake, and one
+  that draws for ten milliseconds has them asleep for nine.
+- The computing is slower with threads that sleep (4.2 to 6 ms), and
+  not in the first parallel loop of a frame only: `strike` and `spend`,
+  in the middle, take 1.9 and 2.1 ms against 1.3 and 1.4 (`--laps`). On
+  mains the same comparison was 4.3 against 4.5 ms (above). Not
+  explained; that cores which sleep most of a frame are clocked lower on
+  battery would fit, and is not verified.
+
+`tag Close apart` in place of the two archetypes the game declared by
+hand (`Roaming`, `Closing`): the compiler makes the same two
+(`At_Foe_Health_Size` and the one with `Close`). Measured one after the
+other, the last two reports:
+
+| | declared by hand | `apart` |
+|---|---|---|
+| `--parallel`, computing | 5.9 to 6.1 ms | 5.7 to 5.9 ms |
+| one core, computing | 20.1 to 21.7 ms | 20.2 to 21.1 ms |
+
+The same, as it should be: it is the same storage, said in one word.

@@ -425,6 +425,7 @@ bool StampPlan::stores(ArchetypeOp archetype, const Stamp &stamp) const {
 LogicalResult mlir::ent::inferArchetypes(ModuleOp module) {
   // Spawn shapes still without an archetype, as component sets in
   // declaration order.
+  using Set = llvm::SmallPtrSet<Attribute, 8>;
   SmallVector<ComponentOp> declared(module.getOps<ComponentOp>());
   auto inOrder = [&](const llvm::SmallPtrSetImpl<Attribute> &set) {
     SmallVector<Attribute> ordered;
@@ -435,20 +436,25 @@ LogicalResult mlir::ent::inferArchetypes(ModuleOp module) {
     }
     return ordered;
   };
+  Set apart;
+  for (ComponentOp component : declared)
+    if (component.getApart())
+      apart.insert(FlatSymbolRefAttr::get(component.getSymNameAttr()));
   llvm::MapVector<ArrayAttr, SmallVector<SpawnOp>> shapes;
   Builder builder(module.getContext());
   module.walk([&](SpawnOp spawn) {
     if (spawn.getArchetypeAttr() || !spawn.getComponentsAttr())
       return;
-    llvm::SmallPtrSet<Attribute, 8> set(spawn.getComponentsAttr().begin(),
-                                        spawn.getComponentsAttr().end());
+    Set set(spawn.getComponentsAttr().begin(),
+            spawn.getComponentsAttr().end());
     shapes[builder.getArrayAttr(inOrder(set))].push_back(spawn);
   });
-  if (shapes.empty())
+  if (shapes.empty() && apart.empty())
     return success();
 
   // What queries add and remove, and the queries doing it.
   struct Change {
+    Operation *op;
     QueryOp query;
     Attribute component;
     bool add;
@@ -458,11 +464,76 @@ LogicalResult mlir::ent::inferArchetypes(ModuleOp module) {
     if (!isa<AddOp, RemoveOp>(op))
       return;
     Change change;
+    change.op = op;
     change.query = op->getParentOfType<QueryOp>();
     change.component = op->getAttr("component");
     change.add = isa<AddOp>(op);
     changes.push_back(std::move(change));
   });
+
+  // The archetypes that entities move between as they are given and lose
+  // components declared `apart`: one for each set of components such an
+  // entity can have (`members`, each with what first asks for it: a spawn,
+  // an add or a remove). What the others hold optionally they all do, so
+  // that a move has an archetype with exactly what the entity then has.
+  struct Family {
+    SmallVector<Set> members;
+    SmallVector<Operation *> causes;
+    Set optional;
+    /// The archetype there was that the others are made for; what it
+    /// holds optionally is then all that they do.
+    ArchetypeOp given = {};
+  };
+  auto same = [](const Set &one, const Set &other) {
+    return one.size() == other.size() &&
+           llvm::all_of(one, [&](Attribute c) { return other.contains(c); });
+  };
+  // Members and optional members: what adds and removes reach, until
+  // nothing changes.
+  auto grow = [&](Family &family) {
+    for (bool grew = true; grew;) {
+      grew = false;
+      for (size_t at = 0; at < family.members.size(); ++at)
+        for (const Change &change : changes) {
+          bool has = family.members[at].contains(change.component);
+          if (family.optional.contains(change.component) ||
+              change.add == has)
+            continue;
+          bool moves = apart.contains(change.component);
+          if (!moves && family.given)
+            continue;
+          bool matches = canMatch(
+              change.query,
+              [&](Attribute component) {
+                return family.members[at].contains(component) ||
+                       family.optional.contains(component);
+              },
+              [&](Attribute component) {
+                return family.members[at].contains(component) &&
+                       !family.optional.contains(component);
+              });
+          if (!matches)
+            continue;
+          if (!moves) {
+            family.optional.insert(change.component);
+            grew = true;
+            continue;
+          }
+          Set next = family.members[at];
+          if (change.add)
+            next.insert(change.component);
+          else
+            next.erase(change.component);
+          if (next.empty() ||
+              llvm::any_of(family.members,
+                           [&](const Set &member) { return same(member, next); }))
+            continue;
+          family.members.push_back(std::move(next));
+          family.causes.push_back(change.op);
+          grew = true;
+        }
+    }
+  };
 
   SymbolTable symbols(module);
   auto defaultCapacity =
@@ -473,97 +544,202 @@ LogicalResult mlir::ent::inferArchetypes(ModuleOp module) {
     if (isa<ComponentOp, ArchetypeOp>(op))
       after = &op;
   OpBuilder insert(module.getContext());
-  insert.setInsertionPointAfter(after);
+  if (after)
+    insert.setInsertionPointAfter(after);
 
-  for (auto &[listed, spawns] : shapes) {
-    llvm::SmallPtrSet<Attribute, 8> base(listed.begin(), listed.end());
-    // A declared archetype with exactly these required components.
-    ArchetypeOp chosen;
+  // An archetype with exactly these required components.
+  auto withRequired = [&](const Set &wanted) -> ArchetypeOp {
     for (ArchetypeOp archetype : module.getOps<ArchetypeOp>()) {
-      llvm::SmallPtrSet<Attribute, 8> required;
+      Set required;
       for (Attribute attr : archetype.getComponents())
         if (!archetype.isOptional(cast<FlatSymbolRefAttr>(attr)))
           required.insert(attr);
-      if (required.size() == base.size() &&
-          llvm::all_of(required, [&](Attribute component) {
-            return base.contains(component);
-          })) {
-        chosen = archetype;
-        break;
-      }
+      if (same(required, wanted))
+        return archetype;
     }
+    return {};
+  };
+  // The archetype of a family's member: one there is, or a new one.
+  auto archetypeOf = [&](const Family &family, size_t at) -> ArchetypeOp {
+    const Set &member = family.members[at];
+    Operation *cause = family.causes[at];
+    ArchetypeOp given = family.given;
+    Set required;
+    for (Attribute component : member)
+      if (!family.optional.contains(component))
+        required.insert(component);
+    if (ArchetypeOp chosen = withRequired(required))
+      return chosen;
+    Set all(member.begin(), member.end());
+    all.insert(family.optional.begin(), family.optional.end());
+    SmallVector<Attribute> listed = inOrder(member);
 
-    if (!chosen) {
-      // Optional members: what adds and removes reach, until nothing
-      // changes.
-      llvm::SmallPtrSet<Attribute, 8> optional;
-      for (bool grew = true; grew;) {
-        grew = false;
-        for (const Change &change : changes) {
-          bool matches = canMatch(
-              change.query,
-              [&](Attribute component) {
-                return base.contains(component) ||
-                       optional.contains(component);
-              },
-              [&](Attribute component) {
-                return base.contains(component) &&
-                       !optional.contains(component);
-              });
-          if (!matches || optional.contains(change.component))
-            continue;
-          if (change.add ? !base.contains(change.component)
-                         : base.contains(change.component)) {
-            optional.insert(change.component);
-            grew = true;
-          }
-        }
-      }
-      llvm::SmallPtrSet<Attribute, 8> all(base.begin(), base.end());
-      all.insert(optional.begin(), optional.end());
+    // Capacity: the smallest among the required components, and no more
+    // than that of the archetype there was.
+    std::optional<int64_t> capacity;
+    if (given)
+      capacity = given.getCapacity();
+    for (Attribute component : listed) {
+      if (family.optional.contains(component))
+        continue;
+      auto componentOp = symbols.lookup<ComponentOp>(
+          cast<FlatSymbolRefAttr>(component).getAttr());
+      if (std::optional<int64_t> limit = componentOp.getCapacity())
+        capacity = std::min(capacity.value_or(*limit), *limit);
+    }
+    if (!capacity && defaultCapacity)
+      capacity = defaultCapacity.getInt();
 
-      // Capacity: the smallest among the required components.
-      std::optional<int64_t> capacity;
-      for (Attribute component : listed) {
-        if (optional.contains(component))
-          continue;
-        auto componentOp = symbols.lookup<ComponentOp>(
-            cast<FlatSymbolRefAttr>(component).getAttr());
-        if (std::optional<int64_t> limit = componentOp.getCapacity())
-          capacity = std::min(capacity.value_or(*limit), *limit);
-      }
-      if (!capacity && defaultCapacity)
-        capacity = defaultCapacity.getInt();
-
-      std::string name;
+    // Named by its components, or by the archetype there was and what
+    // it has more or less.
+    std::string name;
+    if (given) {
+      name = given.getSymName().str();
+      for (Attribute component : listed)
+        if (!given.contains(cast<FlatSymbolRefAttr>(component)))
+          name += ("_" + cast<FlatSymbolRefAttr>(component).getValue()).str();
+      for (Attribute component : inOrder(family.members.front()))
+        if (!member.contains(component))
+          name += ("_without_" +
+                   cast<FlatSymbolRefAttr>(component).getValue())
+                      .str();
+    } else {
       for (Attribute component : listed) {
         if (!name.empty())
           name += "_";
         name += cast<FlatSymbolRefAttr>(component).getValue();
       }
-      if (symbols.lookup(name))
-        name += "_archetype";
-      if (symbols.lookup(name))
-        return spawns.front().emitOpError("needs an archetype named @")
-               << name << ", but that name is taken";
-      if (!capacity) {
-        InFlightDiagnostic diag =
-            spawns.front().emitOpError("spawns into an archetype (@")
-            << name << ") with no capacity: give one of its required "
-            << "components a capacity, or set ent.default_capacity on the "
-               "module";
-        return diag;
-      }
+    }
+    if (symbols.lookup(name))
+      name += "_archetype";
+    if (symbols.lookup(name)) {
+      cause->emitOpError("needs an archetype named @")
+          << name << ", but that name is taken";
+      return {};
+    }
+    if (!capacity) {
+      cause->emitOpError(isa<SpawnOp>(cause) ? "spawns into"
+                                             : "moves entities to")
+          << " an archetype (@" << name
+          << ") with no capacity: give one of its required "
+          << "components a capacity, or set ent.default_capacity on the "
+             "module";
+      return {};
+    }
 
-      SmallVector<Attribute> optionalList = inOrder(optional);
-      chosen = ArchetypeOp::create(
-          insert, spawns.front().getLoc(), insert.getStringAttr(name),
-          insert.getArrayAttr(inOrder(all)),
-          optionalList.empty() ? ArrayAttr()
-                               : insert.getArrayAttr(optionalList),
-          insert.getI64IntegerAttr(*capacity), insert.getUnitAttr());
-      symbols.insert(chosen);
-      insert.setInsertionPointAfter(chosen);
+    SmallVector<Attribute> optionalList = inOrder(family.optional);
+    ArchetypeOp chosen = ArchetypeOp::create(
+        insert, cause->getLoc(), insert.getStringAttr(name),
+        insert.getArrayAttr(inOrder(all)),
+        optionalList.empty() ? ArrayAttr()
+                             : insert.getArrayAttr(optionalList),
+        insert.getI64IntegerAttr(*capacity), insert.getUnitAttr());
+    symbols.insert(chosen);
+    insert.setInsertionPointAfter(chosen);
+    return chosen;
+  };
+
+  // What the entities of the archetypes there are move to.
+  if (!apart.empty()) {
+    SmallVector<ArchetypeOp> given(module.getOps<ArchetypeOp>());
+    for (ArchetypeOp archetype : given) {
+      Family family;
+      family.given = archetype;
+      family.members.emplace_back(archetype.getComponents().begin(),
+                                  archetype.getComponents().end());
+      family.causes.push_back(archetype);
+      if (ArrayAttr optional = archetype.getOptionalAttr())
+        family.optional.insert(optional.begin(), optional.end());
+      grow(family);
+      for (size_t at = 1; at < family.members.size(); ++at)
+        if (!archetypeOf(family, at))
+          return failure();
+    }
+  }
+
+  // The families of the spawns' shapes. Two that come to share a member
+  // are one.
+  std::vector<Family> families;
+  for (auto &[listed, spawns] : shapes) {
+    Set base(listed.begin(), listed.end());
+    auto holdsBase = [&](const Family &family) {
+      return llvm::any_of(family.members, [&](const Set &member) {
+        return same(member, base);
+      });
+    };
+    if (withRequired(base) || llvm::any_of(families, holdsBase))
+      continue;
+    Family family;
+    family.members.push_back(base);
+    family.causes.push_back(spawns.front());
+    grow(family);
+    for (bool joined = true; joined;) {
+      joined = false;
+      for (Family &other : families) {
+        bool shared = llvm::any_of(other.members, [&](const Set &theirs) {
+          return llvm::any_of(family.members, [&](const Set &ours) {
+            return same(ours, theirs);
+          });
+        });
+        if (!shared)
+          continue;
+        for (size_t at = 0; at < other.members.size(); ++at) {
+          const Set &member = other.members[at];
+          if (llvm::any_of(family.members, [&](const Set &ours) {
+                return same(ours, member);
+              }))
+            continue;
+          family.members.push_back(member);
+          family.causes.push_back(other.causes[at]);
+        }
+        family.optional.insert(other.optional.begin(), other.optional.end());
+        families.erase(families.begin() + (&other - families.data()));
+        grow(family);
+        joined = true;
+        break;
+      }
+    }
+    families.push_back(std::move(family));
+  }
+  for (const Family &family : families)
+    for (size_t at = 0; at < family.members.size(); ++at)
+      if (!archetypeOf(family, at))
+        return failure();
+
+  // An archetype there was before may be in the way of one to move to:
+  // the same required components, and others it holds optionally.
+  for (const Change &change : changes) {
+    if (!apart.contains(change.component))
+      continue;
+    auto component = cast<FlatSymbolRefAttr>(change.component);
+    for (ArchetypeOp archetype : getMatchedArchetypes(change.query)) {
+      if (classifyChange(archetype, component, change.add).kind !=
+          ComponentChange::NoTarget)
+        continue;
+      return change.op->emitOpError(change.add ? "adds " : "removes ")
+             << component << (change.add ? " to" : " from")
+             << " entities of @" << archetype.getSymName()
+             << ", but the archetype they would move to holds other "
+                "components optionally than @"
+             << archetype.getSymName() << " does";
+    }
+  }
+
+  for (auto &[listed, spawns] : shapes) {
+    Set base(listed.begin(), listed.end());
+    // A declared archetype with exactly these required components, or
+    // the one of the shape's family.
+    ArchetypeOp chosen = withRequired(base);
+    for (const Family &family : families) {
+      if (chosen)
+        break;
+      Set required;
+      for (Attribute component : base)
+        if (!family.optional.contains(component))
+          required.insert(component);
+      if (llvm::any_of(family.members,
+                       [&](const Set &member) { return same(member, base); }))
+        chosen = withRequired(required);
     }
     for (SpawnOp spawn : spawns)
       spawn.setArchetypeAttr(

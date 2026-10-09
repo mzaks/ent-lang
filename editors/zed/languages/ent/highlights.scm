@@ -96,7 +96,7 @@
   "import" "asset" "component" "tag" "unique" "enum" "table" "prefab" "relation"
   "archetype"
   "system" "extern" "fn" "proc" "schedule" "world" "main"
-  "default_capacity" "capacity" "optional" "tree"
+  "default_capacity" "capacity" "optional" "apart" "tree"
   "sorted" "ordered" "by"
   "reads" "writes" "let" "var" "mut" "old" "spawn" "as"
   "with" "without" "any" "where" "on" "changed" "added" "removed" "log"

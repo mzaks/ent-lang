@@ -32,6 +32,12 @@ A big program is optimised whole and then made into machine code in pieces,
 on a core each: one piece for every two megabytes of its LLVM IR, up to
 sixteen. ENT_PIECES says how many instead (1: all in one).
 
+With --parallel the program runs its systems on all cores (OpenMP). A
+thread without work waits a millisecond for more and then sleeps, so that
+what the program does on one core (drawing, say) has the machine to
+itself; KMP_BLOCKTIME or OMP_WAIT_POLICY, where the program runs, say
+otherwise.
+
 Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 
 A module that needs libraries says so in `m.link`: the linker's arguments
@@ -421,6 +427,18 @@ def build(arguments, output, directory):
                 source.write(f"  {{{json.dumps(name)}, ent_asset_{index}, "
                              f"{os.path.getsize(where)}}},\n")
             source.write("  {0, 0, 0}};\n")
+        if arguments.parallel:
+            # A thread without work waits a millisecond for more, then
+            # sleeps. (The OpenMP runtime would have it spin for a fifth
+            # of a second: through all a frame does on one core, drawing
+            # say, which the spinning cores slow down.) What the
+            # environment says holds over this.
+            source.write(
+                "#include <stdlib.h>\n"
+                "__attribute__((constructor)) static void "
+                "ent_threads_wait(void) {\n"
+                '  if (!getenv("OMP_WAIT_POLICY")) '
+                'setenv("KMP_BLOCKTIME", "1", 0);\n}\n')
     if held:
         apple = sys.platform == "darwin"
         bytes_of = os.path.join(directory, "ent_assets.s")

@@ -1,0 +1,34 @@
+// A tag that is `apart`: the entities with it in an archetype of their
+// own (apart.test).
+import console
+component At { x: f32 }
+component Foe { hp: i32 }
+tag Close apart
+tag Hurt
+default_capacity 16
+unique Frame: i32
+
+world {
+  spawn { At { x: 0.0 }, Foe { hp: 1 } }
+  spawn { At { x: 1.0 }, Foe { hp: 2 } }
+  spawn { At { x: 9.0 }, Foe { hp: 3 } }
+  spawn { At { x: 2.0 }, Foe { hp: 4 }, Close }
+}
+
+system gather() {
+  Frame += 1
+  for e, a: At with Foe without Close where a.x < 3.0 { e.add(Close) }
+  for e, a: At with Foe, Close where a.x > 4.0 { e.remove(Close) }
+  for e, f: Foe with Close where f.hp < 2 { e.add(Hurt) }
+}
+system move() {
+  for a: mut At { a.x += 1.0 }
+}
+system tell() {
+  for a: At, f: Foe with Close { put("{Frame}: close {a.x} {f.hp}") }
+  for a: At, f: Foe with Hurt { put("{Frame}: hurt {a.x} {f.hp}") }
+  for a: At, f: Foe without Close { put("{Frame}: far {a.x} {f.hp}") }
+  flush()
+}
+schedule frame() { gather() move() tell() }
+main { loop { frame() } until Frame == 6 }

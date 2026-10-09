@@ -35,3 +35,36 @@ ent.system @cull() reads [@Position] {
     ent.despawn
   }
 }
+
+// -----
+
+// The archetype the entities move to as they lose a component that is
+// `apart` needs a capacity as any other: Close, which bounds how many
+// there are with it, says nothing of those without.
+ent.component @Position (x: f32)
+ent.component @Close () apart capacity 8
+ent.system @make(%x: f32) {
+  ent.spawn (@Position, @Close)(%x) : f32
+}
+ent.system @gather() {
+  ent.query (%p: !ent.ref<@Position>) with [@Close] {
+    // expected-error @+1 {{moves entities to an archetype (@Position_archetype) with no capacity}}
+    ent.remove @Close
+  }
+}
+
+// -----
+
+// A declared archetype in the way of the one to move to: the same
+// required components, and another that it holds optionally.
+ent.component @Position (x: f32) capacity 8
+ent.component @Close () apart
+ent.component @Lit ()
+ent.archetype @Far (@Position) capacity 8
+ent.archetype @Near (@Position, @Close, optional @Lit) capacity 8
+ent.system @gather() {
+  ent.query (%p: !ent.ref<@Position>) without [@Close] {
+    // expected-error @+1 {{adds @Close to entities of @Far, but the archetype they would move to holds other components optionally than @Far does}}
+    ent.add @Close()
+  }
+}

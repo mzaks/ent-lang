@@ -13,6 +13,10 @@ component Health { hp: i32, alive: bool }
 component Target { who: entity }
 // CHECK: ent.component @Enemy ()
 tag Enemy
+// CHECK: ent.component @Near () apart capacity 64
+tag Near apart capacity 64
+// CHECK: ent.component @Lit (glow: f32) apart
+component Lit { glow: f32 } apart
 // CHECK: ent.resource @Clock (dt: f32, frame: i64)
 unique Clock { dt: f32, frame: i64 }
 // A unique with one value: its field is "value".

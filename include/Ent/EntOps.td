@@ -33,12 +33,19 @@ def Ent_ComponentOp : Ent_RecordOp<"component"> {
     `capacity` bounds how many entities can have the component at once. An
     archetype the compiler infers from spawns holds as many entities as the
     smallest capacity among its required components allows.
+
+    With `apart` (`ent.component @Close () apart capacity 1000`) the
+    entities that have the component are stored apart from those that do
+    not: no inferred archetype holds it optionally, and `ent.add` and
+    `ent.remove` of it move the entity to an archetype the compiler infers
+    for the purpose (see `inferArchetypes`).
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        StrArrayAttr:$field_names,
                        TypeArrayAttr:$field_types,
                        OptionalAttr<ConfinedAttr<I64Attr, [IntPositive]>>:
-                           $capacity);
+                           $capacity,
+                       UnitAttr:$apart);
 }
 
 def Ent_ResourceOp : Ent_RecordOp<"resource"> {

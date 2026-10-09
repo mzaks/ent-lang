@@ -86,6 +86,7 @@ be callable from threads its language did not create.
 ```
 component Position { x: f32, y: f32 } capacity 1000
 tag Enemy                                   // a component without fields
+tag Close apart capacity 1000               // those with it stored apart
 unique Clock { dt: f32, frame: i64 }        // exists once (a resource)
 unique Score: i64                           // shorthand: one field, `value`
 enum Way { Right, Down, Left, Up }          // a type of named cases
@@ -121,6 +122,21 @@ capacity Inside 4096                        // another capacity for one declared
 - Archetypes need only be declared for shapes the host or an extern system
   spawns (which the compiler cannot see), or to name and size one
   explicitly.
+- A component or tag that entities are given and lose (`e.add`,
+  `e.remove`) is kept in place: a byte with each entity that might have
+  it, cheap to set, and a `for` over those that have it walks them all
+  and asks each. With `apart` (after the fields, before `capacity`) the
+  entities that have it are stored apart from those that do not, in an
+  archetype of their own, which the compiler makes for every kind of
+  entity that is given it or loses it: to give or take it then moves the
+  entity (all it has is copied), and a `for` over those that have it
+  goes over just these, one after another. Worth it where few of many
+  have it and a `for` over them is expensive (a `for` inside a `for`),
+  not where it comes and goes all the time. Such an archetype is as big
+  as the smallest `capacity` among its components allows (that of the
+  tag too), or `default_capacity`; one made for a declared archetype's
+  entities is named after it (`Gun_Close`), holds optionally what it
+  does, and is no bigger. No archetype can hold it as `optional`.
 - A relation's edges go from a source entity to a target entity and carry
   its fields. They are not entities; `capacity` bounds how many there are.
   An entity may have any number of edges, also several to the same target.

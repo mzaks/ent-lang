@@ -1,0 +1,39 @@
+// A tag declared `apart` (Inputs/apart.ent): the entities that have it
+// are in an archetype of their own, which the compiler makes, and they
+// move there and back as they are given the tag and lose it. What they
+// are given besides and keep in place (Hurt) they keep as they move.
+// RUN: %ent run %S/Inputs/apart.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/apart.ent | FileCheck %s
+// RUN: ent-translate --import-ent %S/Inputs/apart.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-infer-archetypes | FileCheck %s --check-prefix=KINDS
+
+// KINDS: ent.archetype @At_Foe (@At, @Foe, optional @Hurt) capacity 16 inferred
+// KINDS: ent.archetype @At_Foe_Close (@At, @Foe, @Close, optional @Hurt) capacity 16 inferred
+
+// Spawned close, and those that begin in reach.
+// CHECK:      1: close 3.0 4
+// CHECK-NEXT: 1: close 2.0 2
+// CHECK-NEXT: 1: close 1.0 1
+// CHECK-NEXT: 1: hurt 1.0 1
+// CHECK-NEXT: 1: far 10.0 3
+// CHECK:      3: close 5.0 4
+// CHECK-NEXT: 3: close 4.0 2
+// CHECK-NEXT: 3: close 3.0 1
+// One leaves the reach, and then another; the hurt one is still hurt
+// when it has left too.
+// CHECK:      4: close 4.0 1
+// CHECK-NEXT: 4: close 5.0 2
+// CHECK-NEXT: 4: hurt 4.0 1
+// CHECK-NEXT: 4: far 13.0 3
+// CHECK-NEXT: 4: far 6.0 4
+// CHECK-NEXT: 5: close 5.0 1
+// CHECK-NEXT: 5: hurt 5.0 1
+// CHECK-NEXT: 5: far 14.0 3
+// CHECK-NEXT: 5: far 7.0 4
+// CHECK-NEXT: 5: far 6.0 2
+// CHECK-NEXT: 6: hurt 6.0 1
+// CHECK-NEXT: 6: far 15.0 3
+// CHECK-NEXT: 6: far 8.0 4
+// CHECK-NEXT: 6: far 7.0 2
+// CHECK-NEXT: 6: far 6.0 1
+// CHECK-NOT:  {{.}}

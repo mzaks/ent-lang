@@ -231,8 +231,11 @@ static ParseResult parseRecord(OpAsmParser &parser, OperationState &result) {
     result.addAttribute(OpTy::getCapacityAttrName(result.name),
                         b.getI64IntegerAttr(capacity));
   }
-  // `capacity N`, for components.
+  // `[apart] [capacity N]`, for components.
   if constexpr (std::is_same_v<OpTy, ComponentOp>) {
+    if (succeeded(parser.parseOptionalKeyword("apart")))
+      result.addAttribute(OpTy::getApartAttrName(result.name),
+                          b.getUnitAttr());
     if (succeeded(parser.parseOptionalKeyword("capacity"))) {
       int64_t capacity;
       if (parser.parseInteger(capacity))
@@ -259,9 +262,12 @@ static void printRecord(OpTy op, OpAsmPrinter &p) {
                                    op.getFieldNamesAttrName(),
                                    op.getFieldTypesAttrName()};
   if constexpr (std::is_same_v<OpTy, ComponentOp>) {
+    if (op.getApart())
+      p << " apart";
     if (std::optional<int64_t> capacity = op.getCapacity())
       p << " capacity " << *capacity;
     elided.push_back(op.getCapacityAttrName());
+    elided.push_back(op.getApartAttrName());
   }
   if constexpr (std::is_same_v<OpTy, RelationOp>) {
     if (FlatSymbolRefAttr from = op.getFromAttr())
@@ -442,6 +448,14 @@ ArchetypeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     if (!lookupComponent(symbolTable, *this, ref))
       return emitOpError("contains unknown component ") << ref;
   }
+  if (ArrayAttr optional = getOptionalAttr())
+    for (Attribute attr : optional) {
+      auto ref = cast<FlatSymbolRefAttr>(attr);
+      if (lookupComponent(symbolTable, *this, ref).getApart())
+        return emitOpError("holds ")
+               << ref << " optionally, but the entities with " << ref
+               << " are stored apart ('apart' where it is declared)";
+    }
   return success();
 }
 
@@ -1869,8 +1883,11 @@ verifyComponentChange(SymbolTableCollection &symbolTable, Operation *op,
            << " does not declare it in 'writes'";
   for (ArchetypeOp archetype :
        getMatchedArchetypes(op->getParentOfType<QueryOp>())) {
-    if (classifyChange(archetype, componentRef, add).kind !=
-        ComponentChange::NoTarget)
+    // (For a component that is `apart` the archetype is inferred, and it
+    // is said there if there can be none.)
+    if (component.getApart() ||
+        classifyChange(archetype, componentRef, add).kind !=
+            ComponentChange::NoTarget)
       continue;
     InFlightDiagnostic diag =
         op->emitOpError(add ? "adds " : "removes ")

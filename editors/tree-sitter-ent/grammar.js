@@ -72,9 +72,11 @@ module.exports = grammar({
 
     component: ($) =>
       seq('component', field('name', $.identifier), $.fields,
-          optional($.capacity)),
+          optional('apart'), optional($.capacity)),
 
-    tag: ($) => seq('tag', field('name', $.identifier), optional($.capacity)),
+    tag: ($) =>
+      seq('tag', field('name', $.identifier), optional('apart'),
+          optional($.capacity)),
 
     unique: ($) =>
       seq('unique', field('name', $.identifier),

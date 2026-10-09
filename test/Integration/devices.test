@@ -20,6 +20,12 @@
 // CHECK-NEXT: the end
 // CHECK-NOT:  {{.}}
 
+// For all the cores, the program says how long a thread without work
+// waits before it sleeps (unless the environment says).
+// RUN: %ent build --parallel %S/Inputs/devices.ent -o %t.par.exe --keep %t.par
+// RUN: FileCheck %s --check-prefix=WAIT --input-file=%t.par/ent_folders.c
+// WAIT: setenv("KMP_BLOCKTIME", "1", 0)
+
 // KEPT-DAG: ent_world.h
 // KEPT-DAG: ent_extern.h
 // KEPT-DAG: devices.mlir

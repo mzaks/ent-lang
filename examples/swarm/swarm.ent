@@ -71,15 +71,13 @@ component Health { hp: f32 } capacity 250000
 // read sixteen at a time, one that is looked up in the breed's row one
 // by one, which made that `for` sixty times as slow.)
 component Size { touch: f32 } capacity 250000
-// A foe in the reach of the hero's shots is `Close`. Close foes are an
-// archetype of their own, declared: the shots are held against these
-// only, in a `for` that goes over all of them for every shot, and so
-// they lie one after another. (Left to itself the compiler keeps a tag
-// that comes and goes in place, as a byte with each foe: cheap to give
-// and take, but a `for` over the close ones then walks every foe.)
-tag Close capacity 250000
-archetype Roaming { Foe, Health, Size, At } capacity 250000
-archetype Closing { Foe, Health, Size, At, Close } capacity 250000
+// A foe in the reach of the hero's shots is `Close`. The close foes are
+// stored apart from the others: the shots are held against these only,
+// in a `for` that goes over all of them for every shot, and so they lie
+// one after another. (Without `apart` a tag that comes and goes is kept
+// in place, as a byte with each foe: cheap to give and take, but a `for`
+// over the close ones then walks every foe.)
+tag Close apart capacity 250000
 
 // The hero's shot: how long it still flies, and that it hit something.
 component Shot { left: f32, spent: bool } capacity 16000

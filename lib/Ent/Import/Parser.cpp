@@ -2538,7 +2538,8 @@ LogicalResult Parser::parseFields(Record &record) {
   return expect(Token::RBrace, "'}'");
 }
 
-// component Name { fields } [capacity N] / tag Name [capacity N]
+// component Name { fields } [apart] [capacity N] / tag Name [apart]
+// [capacity N]
 LogicalResult Parser::parseComponent(bool tag) {
   llvm::SMLoc at = token.loc;
   FailureOr<std::string> name = identifier("a component name");
@@ -2547,6 +2548,7 @@ LogicalResult Parser::parseComponent(bool tag) {
   Record record;
   if (!tag && failed(parseFields(record)))
     return failure();
+  bool apart = consumeKeyword("apart");
   IntegerAttr capacity;
   if (consumeKeyword("capacity")) {
     FailureOr<int64_t> value = integer("a capacity");
@@ -2561,7 +2563,7 @@ LogicalResult Parser::parseComponent(bool tag) {
   }
   ComponentOp::create(builder, loc(at), declareSymbol(at, *name),
                       builder.getArrayAttr(names), builder.getArrayAttr(types),
-                      capacity);
+                      capacity, apart ? builder.getUnitAttr() : UnitAttr());
   components[*name] = std::move(record);
   return success();
 }

@@ -267,6 +267,15 @@ ent.component @S (t: f32)
 
 // -----
 
+// The entities with a component that is `apart` are in archetypes of
+// their own: none holds it optionally.
+ent.component @P (x: f32)
+ent.component @S () apart
+// expected-error @+1 {{holds @S optionally, but the entities with @S are stored apart ('apart' where it is declared)}}
+ent.archetype @A (@P, optional @S) capacity 10
+
+// -----
+
 ent.component @P (x: f32)
 ent.component @S (t: f32)
 ent.archetype @A (@P, optional @S) capacity 10

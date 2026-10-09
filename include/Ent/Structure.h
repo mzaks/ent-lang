@@ -101,8 +101,8 @@ ComponentChange classifyChange(ArchetypeOp archetype,
 /// `inferred`. A spawn's components are the base of its archetype; a
 /// component some `ent.add` can give to the archetype's entities joins it
 /// as optional, and so does a listed one some `ent.remove` can take away
-/// (spawns still start with it), until nothing changes: entities never
-/// move between inferred archetypes. Capacity is the smallest among the
+/// (spawns still start with it), until nothing changes: entities move
+/// between inferred archetypes only for components declared `apart`. Capacity is the smallest among the
 /// components that stay required, or the module's `ent.default_capacity`
 /// if none has one. A declared archetype whose required components are
 /// exactly a spawn's is used instead. Names join the spawn's component
@@ -110,6 +110,18 @@ ComponentChange classifyChange(ArchetypeOp archetype,
 /// appended if that name is taken. Does nothing for spawns that already
 /// have an archetype; fails, with an error, if an archetype gets no
 /// capacity.
+///
+/// A component declared `apart` is never optional. Entities given it or
+/// losing it move, and the archetypes they move to are added too: for an
+/// inferred archetype and for a declared one, one with the component more
+/// or less for every `ent.add` and `ent.remove` of it that reaches its
+/// entities, and so on from those. The archetypes entities move between
+/// this way hold the same components optionally (those of the declared
+/// one, where one is; else what adds and removes reach in any of them),
+/// so that a move finds an archetype with exactly the entity's components.
+/// One made for a declared archetype is named after it (`Gun_Close`,
+/// `Gun_without_Close`) and takes its capacity, or a smaller one of its
+/// required components.
 LogicalResult inferArchetypes(ModuleOp module);
 
 /// An event a reactive query (`ent.query ... on [...]`) reacts to.
