@@ -1,0 +1,151 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The map of the level (am_map.c): its lines from above, drawn into the
+// picture. So far the whole level, fitted into the picture, with every
+// line shown as the cheat shows them.
+import fixed
+import level
+import video
+
+// The part of the picture the map is drawn in: above the status bar.
+const F_W = SCREENWIDTH
+const F_H = SCREENHEIGHT - 32
+
+// The colours of lines, by their places in the palette.
+const REDS = 256 - 5 * 16
+const BROWNS = 4 * 16
+const YELLOWS = 256 - 32 + 7
+const GRAYS = 6 * 16
+const WALLCOLORS = REDS
+const WALLRANGE = 16
+const TSWALLCOLORS = GRAYS
+const FDWALLCOLORS = BROWNS
+const CDWALLCOLORS = YELLOWS
+const SECRETWALLCOLORS = WALLCOLORS
+
+// What of the level is shown: the corner (x, y) of it that is at the
+// bottom left of the picture, and how many pixels a unit of the level
+// is, in fixed point (scale_mtof).
+unique Automap { x: i32, y: i32, scale: i32 }
+
+// The lines to draw this frame, in the picture: from, to, colour.
+buffer Mlines { x0: i32, y0: i32, x1: i32, y1: i32, color: i32 } capacity 16384
+
+// A length of the level in pixels, and a place of it in the picture
+// (MTOF, CXMTOF, CYMTOF).
+fn mtof(x: i32, scale: i32) -> i32 { fixed_mul(x, scale) >> FRACBITS }
+fn cxmtof(x: i32, left: i32, scale: i32) -> i32 { mtof(x - left, scale) }
+fn cymtof(y: i32, bottom: i32, scale: i32) -> i32 {
+  F_H - mtof(y - bottom, scale)
+}
+
+// The colour a line is drawn in, or -1 for one that is not drawn
+// (AM_drawWalls, with the cheat that shows every line).
+fn line_color(flags: i32, special: i32, front_floor: i32, front_ceiling: i32,
+              back: i32, back_floor: i32, back_ceiling: i32) -> i32 {
+  if back < 0 {
+    WALLCOLORS
+  } else if special == 39 {
+    WALLCOLORS + WALLRANGE / 2      // a teleporter
+  } else if flags & ML_SECRET != 0 {
+    SECRETWALLCOLORS
+  } else if back_floor != front_floor {
+    FDWALLCOLORS                    // the floor changes
+  } else if back_ceiling != front_ceiling {
+    CDWALLCOLORS                    // the ceiling changes
+  } else {
+    TSWALLCOLORS
+  }
+}
+
+// A line from one pixel to another, by whole steps (AM_drawFline:
+// Bresenham's).
+proc draw_fline(screen: mut Screen, x0: i32, y0: i32, x1: i32, y1: i32,
+                color: u8) {
+  let dx = x1 - x0
+  let ax = 2 * abs(dx)
+  let sx = if dx < 0 { -1 } else { 1 }
+  let dy = y1 - y0
+  let ay = 2 * abs(dy)
+  let sy = if dy < 0 { -1 } else { 1 }
+  var x = x0
+  var y = y0
+  if ax > ay {
+    var d = ay - ax / 2
+    loop {
+      plot(screen, x, y, color)
+      let done = x == x1
+      if !done {
+        if d >= 0 { y += sy  d -= ax }
+        x += sx
+        d += ay
+      }
+    } until done
+  } else {
+    var d = ax - ay / 2
+    loop {
+      plot(screen, x, y, color)
+      let done = y == y1
+      if !done {
+        if d >= 0 { x += sx  d -= ay }
+        y += sy
+        d += ax
+      }
+    } until done
+  }
+}
+
+// Fits the whole level into the picture (AM_findMinMaxBoundaries: the
+// smaller of what fits its width and what fits its height).
+system fit_automap() {
+  var min_x = 0x7fffffff
+  var min_y = 0x7fffffff
+  var max_x = -0x7fffffff
+  var max_y = -0x7fffffff
+  for i in 0..len(Vertexes) {
+    min_x min= Vertexes[i].x
+    max_x max= Vertexes[i].x
+    min_y min= Vertexes[i].y
+    max_y max= Vertexes[i].y
+  }
+  if len(Vertexes) > 0 {
+    let a = fixed_div(F_W << FRACBITS, max_x - min_x)
+    let b = fixed_div(F_H << FRACBITS, max_y - min_y)
+    Automap.scale = min(a, b)
+    Automap.x = min_x
+    Automap.y = min_y
+  }
+}
+
+// Draws the level's lines (AM_Drawer: AM_clearFB, AM_drawWalls).
+system draw_automap() {
+  Mlines = []
+  for l: Line where l.flags & ML_DONTDRAW == 0 {
+    let front = side_sector(Sides, l.front)
+    let back = side_sector(Sides, l.back)
+    Mlines += {
+      x0: cxmtof(l.x1, Automap.x, Automap.scale),
+      y0: cymtof(l.y1, Automap.y, Automap.scale),
+      x1: cxmtof(l.x2, Automap.x, Automap.scale),
+      y1: cymtof(l.y2, Automap.y, Automap.scale),
+      color: line_color(l.flags, l.special, Sectors[front].floorheight,
+                        Sectors[front].ceilingheight, back,
+                        Sectors[back].floorheight, Sectors[back].ceilingheight)
+    }
+  }
+  for i in 0..len(Mlines) {
+    draw_fline(Screen, Mlines[i].x0, Mlines[i].y0, Mlines[i].x1, Mlines[i].y1,
+               Mlines[i].color as u8)
+  }
+}

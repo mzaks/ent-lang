@@ -1,0 +1,138 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// A level as the WAD has it (p_setup.c): the lumps after the one that
+// names it ("E1M1"), read into what the game computes with. Heights and
+// places are in fixed point from here on.
+import files
+import wad
+import fixed
+
+// Which lump after the level's name is what (doomdata.h).
+const ML_THINGS = 1
+const ML_LINEDEFS = 2
+const ML_SIDEDEFS = 3
+const ML_VERTEXES = 4
+const ML_SEGS = 5
+const ML_SSECTORS = 6
+const ML_NODES = 7
+const ML_SECTORS = 8
+const ML_REJECT = 9
+const ML_BLOCKMAP = 10
+
+// What a line's flags say.
+const ML_BLOCKING = 1
+const ML_BLOCKMONSTERS = 2
+const ML_TWOSIDED = 4
+const ML_DONTPEGTOP = 8
+const ML_DONTPEGBOTTOM = 16
+const ML_SECRET = 32
+const ML_SOUNDBLOCK = 64
+const ML_DONTDRAW = 128
+const ML_MAPPED = 256
+
+// The level to load, and what loading it found: the lump that names it
+// (-1: there is no such level).
+unique Level { episode: i32, map: i32, lump: i32 }
+
+// The corners of the level's lines.
+buffer Vertexes { x: i32, y: i32 } capacity 32768
+
+// A room: how high its floor and its ceiling are, how light it is, and
+// what is special about it.
+buffer Sectors {
+  floorheight: i32, ceilingheight: i32, floorpic: u64, ceilingpic: u64,
+  lightlevel: i32, special: i32, tag: i32
+} capacity 4096
+
+// A side of a line: the pictures on it, how they are shifted, and the
+// sector it looks into.
+buffer Sides {
+  textureoffset: i32, rowoffset: i32, toptexture: u64, bottomtexture: u64,
+  midtexture: u64, sector: i32
+} capacity 32768
+
+// A line of the level, an entity: from (x1, y1) to (x2, y2), which is
+// (dx, dy) on; its sides by their numbers, the back one -1 where it has
+// none; `number` is which line of the level it is.
+component Line {
+  x1: i32, y1: i32, x2: i32, y2: i32, dx: i32, dy: i32,
+  flags: i32, special: i32, tag: i32, front: i32, back: i32, number: i32
+} capacity 16384
+
+// The sector a side looks into, or -1 for no side.
+fn side_sector(sides: Sides, side: i32) -> i32 {
+  if side < 0 { -1 } else { sides[side].sector }
+}
+
+// Reads the level `Level` names (P_SetupLevel).
+system load_level() {
+  var name: text[8] = "E{Level.episode}M{Level.map}"
+  let lump = lump_number(Lumps, lump_name(name))
+  Level.lump = lump
+  Vertexes = []
+  Sectors = []
+  Sides = []
+  if lump >= 0 {
+    // P_LoadVertexes: two shorts each.
+    let vertexes = Lumps[lump + ML_VERTEXES].at
+    for i in 0..Lumps[lump + ML_VERTEXES].size / 4 {
+      Vertexes += {
+        x: short_at(Bytes, vertexes + i * 4) << FRACBITS,
+        y: short_at(Bytes, vertexes + i * 4 + 2) << FRACBITS
+      }
+    }
+    // P_LoadSectors: 26 bytes each.
+    let sectors = Lumps[lump + ML_SECTORS].at
+    for i in 0..Lumps[lump + ML_SECTORS].size / 26 {
+      let at = sectors + i * 26
+      Sectors += {
+        floorheight: short_at(Bytes, at) << FRACBITS,
+        ceilingheight: short_at(Bytes, at + 2) << FRACBITS,
+        floorpic: name_at(Bytes, at + 4), ceilingpic: name_at(Bytes, at + 12),
+        lightlevel: short_at(Bytes, at + 20),
+        special: short_at(Bytes, at + 22), tag: short_at(Bytes, at + 24)
+      }
+    }
+    // P_LoadSideDefs: 30 bytes each.
+    let sides = Lumps[lump + ML_SIDEDEFS].at
+    for i in 0..Lumps[lump + ML_SIDEDEFS].size / 30 {
+      let at = sides + i * 30
+      Sides += {
+        textureoffset: short_at(Bytes, at) << FRACBITS,
+        rowoffset: short_at(Bytes, at + 2) << FRACBITS,
+        toptexture: name_at(Bytes, at + 4),
+        bottomtexture: name_at(Bytes, at + 12),
+        midtexture: name_at(Bytes, at + 20), sector: short_at(Bytes, at + 28)
+      }
+    }
+    // P_LoadLineDefs: 14 bytes each, an entity for each.
+    let lines = Lumps[lump + ML_LINEDEFS].at
+    for i in 0..Lumps[lump + ML_LINEDEFS].size / 14 {
+      let at = lines + i * 14
+      let v1 = ushort_at(Bytes, at)
+      let v2 = ushort_at(Bytes, at + 2)
+      spawn {
+        Line {
+          x1: Vertexes[v1].x, y1: Vertexes[v1].y,
+          x2: Vertexes[v2].x, y2: Vertexes[v2].y,
+          dx: Vertexes[v2].x - Vertexes[v1].x,
+          dy: Vertexes[v2].y - Vertexes[v1].y,
+          flags: short_at(Bytes, at + 4), special: short_at(Bytes, at + 6),
+          tag: short_at(Bytes, at + 8), front: short_at(Bytes, at + 10),
+          back: short_at(Bytes, at + 12), number: i
+        }
+      }
+    }
+  }
+}

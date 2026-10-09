@@ -1,0 +1,85 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The WAD (w_wad.c): one file with all the game's data in lumps, each a
+// run of bytes with a name of up to eight characters. The file's bytes
+// are in `Bytes` (the module `files`); `Lumps` says where each lump is.
+import files
+
+// The file to read: set it before `load_wad` runs. `lumps` is how many
+// lumps it has, nought where it could not be read.
+unique Wad { file: text[126], lumps: i32 }
+
+// A lump: where its bytes start in the file, how many they are, and its
+// name: the eight bytes as one number, the first the lowest (those after
+// the name's end are nought).
+buffer Lumps { at: i32, size: i32, name: u64 } capacity 4096
+
+// Numbers in the file: the low byte first.
+fn byte_at(wad: Bytes, at: i32) -> i32 { wad[at].value as i32 }
+fn ushort_at(wad: Bytes, at: i32) -> i32 {
+  byte_at(wad, at) | byte_at(wad, at + 1) << 8
+}
+fn short_at(wad: Bytes, at: i32) -> i32 { (ushort_at(wad, at) as i16) as i32 }
+fn long_at(wad: Bytes, at: i32) -> i32 {
+  ushort_at(wad, at) | ushort_at(wad, at + 2) << 16
+}
+
+// The eight bytes of a name in the file, as a lump's name is kept.
+fn name_at(wad: Bytes, at: i32) -> u64 {
+  var name = 0 as u64
+  for i in 0..8 { name |= (wad[at + i].value as u64) << (i * 8) }
+  name
+}
+
+// A name as a lump's is kept: in capitals.
+fn lump_name(name: text[8]) -> u64 {
+  var packed = 0 as u64
+  for i in 0..len(name) {
+    var c = name[i]
+    if c >= 'a' && c <= 'z' { c -= 32 }
+    packed |= (c as u8 as u64) << (i * 8)
+  }
+  packed
+}
+
+// The number of the lump of that name, the last if there are several
+// (a later one stands in for an earlier one); -1 if there is none
+// (W_CheckNumForName).
+fn lump_number(lumps: Lumps, name: u64) -> i32 {
+  var found = -1
+  for i in 0..len(lumps) {
+    if lumps[i].name == name { found = i }
+  }
+  found
+}
+
+// Reads the file and its list of lumps (W_AddFile): the header says how
+// many there are and where the list is, sixteen bytes for each.
+system load_wad() {
+  Lumps = []
+  Wad.lumps = 0
+  let size = read_file(Wad.file, Bytes)
+  if size >= 12 && size == len(Bytes) {
+    let count = long_at(Bytes, 4)
+    let table = long_at(Bytes, 8)
+    for i in 0..count {
+      let entry = table + i * 16
+      Lumps += {
+        at: long_at(Bytes, entry), size: long_at(Bytes, entry + 4),
+        name: name_at(Bytes, entry + 8)
+      }
+    }
+    Wad.lumps = count
+  }
+}

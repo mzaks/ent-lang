@@ -1,0 +1,45 @@
+// Doom in ent-lang, as far as it is: reads the WAD and shows the map of
+// a level. Start it where `doom1.wad` is (examples/doom/reference/fetch.sh
+// puts the shareware one in build/doom/wad):
+//
+//   cd build/doom/wad && ../../../tools/ent run -I ../../../examples/doom \
+//       ../../../examples/doom/doom.ent
+import window
+import files
+import wad
+import level
+import video
+import automap
+
+// As many bytes as the biggest WAD.
+capacity Bytes 16777216
+
+world {
+  Window.width = 960
+  Window.height = 600
+  Window.title = "DOOM"
+  Window.fps = 35
+  Wad.file = "doom1.wad"
+  Level.episode = 1
+  Level.map = 1
+}
+
+schedule setup() {
+  load_wad()
+  load_palette()
+  load_level()
+  fit_automap()
+}
+
+schedule frame() {
+  begin()
+  clear_screen()
+  draw_automap()
+  show_screen()
+  present()
+}
+
+main {
+  setup()
+  loop { frame() } until Window.closed
+}

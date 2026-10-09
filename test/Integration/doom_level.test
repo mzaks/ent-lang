@@ -1,0 +1,26 @@
+// Doom's WAD, a level of it and the map of the level in ent-lang
+// (examples/doom: wad.ent, level.ent, video.ent, automap.ent), on a small
+// WAD made for it (Inputs/doom/make_wad.py): a square room with a step
+// across it. The file is read into a buffer by the module `files`, its
+// lumps and the level are read out of that by fns that are given the
+// buffer, the lines are entities, and the map is drawn into a buffer a
+// pixel at a time, by a proc that is given it to change.
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: %python %S/Inputs/doom/make_wad.py %t
+// RUN: cd %t && %ent run -I %S/../../examples/doom \
+// RUN:     %S/../../examples/doom/check/automap_check.ent | FileCheck %s
+// The picture: its header, and as many bytes as 320 by 200 pixels take.
+// RUN: head -c 14 %t/level.ppm | FileCheck %s --check-prefix=PICTURE
+// RUN: wc -c < %t/level.ppm | FileCheck %s --check-prefix=SIZE
+
+// CHECK:      wad 1370 bytes, 12 lumps; level lump 1
+// CHECK-NEXT: vertexes 6 3875660850 sectors 2 2193965797 sides 7 737302980
+// CHECK-NEXT: lines 8
+// The room is as high as the map's part of the picture (168 pixels to
+// 256 units); the line that is not to be drawn is not; the walls are
+// 670 pixels and the step 169.
+// CHECK-NEXT: map scale 43008 from 0 0: 7 lines, 839 pixels lit, 3924037125
+// CHECK-NOT:  {{.}}
+
+// PICTURE: P6 320 200 255
+// SIZE: 192015

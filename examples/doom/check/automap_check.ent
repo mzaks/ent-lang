@@ -1,0 +1,83 @@
+// What loading the WAD and a level gives, and the map drawn of it: in
+// numbers, and as a picture (level.ppm, written where this is started).
+// See check/automap.sh.
+import console
+import files
+import wad
+import level
+import video
+import automap
+
+capacity Bytes 16777216
+
+world {
+  Wad.file = "doom1.wad"
+  Level.episode = 1
+  Level.map = 1
+}
+
+// One more value into a hash (FNV-1a over its four bytes).
+fn mixed(hash: u32, value: i32) -> u32 {
+  var all = hash
+  for i in 0..4 {
+    all = (all ^ ((value >> (i * 8)) & 0xff) as u32) * 16777619
+  }
+  all
+}
+
+unique Count: i32
+
+system report() {
+  put("wad {len(Bytes)} bytes, {Wad.lumps} lumps; level lump {Level.lump}")
+  var vertexes = 2166136261 as u32
+  for i in 0..len(Vertexes) {
+    vertexes = mixed(mixed(vertexes, Vertexes[i].x), Vertexes[i].y)
+  }
+  var sectors = 2166136261 as u32
+  for i in 0..len(Sectors) {
+    sectors = mixed(mixed(mixed(sectors, Sectors[i].floorheight),
+                          Sectors[i].ceilingheight), Sectors[i].lightlevel)
+  }
+  var sides = 2166136261 as u32
+  for i in 0..len(Sides) {
+    sides = mixed(mixed(sides, Sides[i].sector), Sides[i].rowoffset)
+  }
+  put("vertexes {len(Vertexes)} {vertexes} sectors {len(Sectors)} {sectors} sides {len(Sides)} {sides}")
+  Count = 0
+  for l: Line { Count += 1 }
+  put("lines {Count}")
+  var screen = 2166136261 as u32
+  var lit = 0
+  for i in 0..len(Screen) {
+    screen = mixed(screen, Screen[i].pixel as i32)
+    if Screen[i].pixel != 0 { lit += 1 }
+  }
+  put("map scale {Automap.scale} from {Automap.x} {Automap.y}: {len(Mlines)} lines, {lit} pixels lit, {screen}")
+}
+
+// The picture as a file anyone can look at: "P6", its size, and three
+// bytes for each pixel. (It takes the place of the WAD's bytes.)
+system write_picture() {
+  var header: text[20] = "P6 320 200 255\n"
+  Bytes = []
+  for i in 0..len(header) { Bytes += { value: header[i] as u8 } }
+  for i in 0..len(Screen) {
+    let rgb = Palette[Screen[i].pixel].rgb
+    Bytes += { value: (rgb >> 16) as u8 }
+    Bytes += { value: (rgb >> 8) as u8 }
+    Bytes += { value: rgb as u8 }
+  }
+  if !write_file("level.ppm", Bytes) { put("could not write level.ppm") }
+}
+
+schedule check() {
+  load_wad()
+  load_palette()
+  load_level()
+  clear_screen()
+  fit_automap()
+  draw_automap()
+  report()
+  write_picture()
+}
+main { check() }
