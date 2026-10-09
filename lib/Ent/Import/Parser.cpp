@@ -7890,6 +7890,15 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return arith::FPToSIOp::create(builder, at, to, *value).getResult();
     if (from.isSignlessInteger() && toFloat)
       return arith::SIToFPOp::create(builder, at, to, *value).getResult();
+    // A bool as a number: 1 for true, 0 for false.
+    if (from.isInteger(1) && isWhole(to))
+      return fromBits(at,
+                      arith::ExtUIOp::create(builder, at, bitsType(to), *value)
+                          .getResult(),
+                      to);
+    if (from.isInteger(1) || to.isInteger(1))
+      return error(expr.loc, "a bool is cast to a whole number (1 or 0); a "
+                             "number is made a bool by comparing it");
     if (isWhole(from) && isWhole(to)) {
       // More bits: those of the sign where the value has one, noughts
       // where it has none. Fewer: the low ones. As many: the same bits.

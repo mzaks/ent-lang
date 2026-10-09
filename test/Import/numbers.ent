@@ -74,6 +74,10 @@ system unsigned() {
   // CHECK-NOT: arith
   // CHECK: builtin.unrealized_conversion_cast %{{.*}} : i32 to ui32
   Bits.angle = Bits.flags as u32
+  // A bool as a number: 1 or 0.
+  // CHECK: %[[LESS:.*]] = arith.cmpi ult
+  // CHECK: arith.extui %[[LESS]] : i1 to i32
+  Bits.flags = (a < 5) as i32
   // CHECK: arith.uitofp
   // CHECK: arith.fptoui
   Bits.angle = (a as f32 * 0.5) as u32

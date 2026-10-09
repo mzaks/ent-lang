@@ -30,3 +30,9 @@ extern proc read_file(name: text[126], into: mut Bytes) -> i32
 // Writes the bytes of `from` as the file `name`, in place of one that is
 // there; false where it could not.
 extern proc write_file(name: text[126], from: Bytes) -> bool
+
+// Writes `count` of the bytes of `from`, from the one at `first` on, as
+// the file `name`: after what the file has where `append` says so, else
+// in place of it. False where it could not, or `from` has not so many.
+extern proc write_bytes(name: text[126], from: Bytes, first: i32, count: i32,
+                        append: bool) -> bool

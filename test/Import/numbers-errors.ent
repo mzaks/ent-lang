@@ -71,3 +71,11 @@ component Box { n: u32 } capacity 4
 component Slot { at: u32 } capacity 4
 // expected-error @+1 {{the children are ordered by an integer, and 'Slot.at' is not one}}
 relation (Box)-[Inside]->(Box) tree ordered by Slot.at capacity 4
+
+// -----
+
+unique Bits { flags: i32, on: bool }
+system s() {
+  // expected-error @+1 {{a bool is cast to a whole number (1 or 0); a number is made a bool by comparing it}}
+  Bits.on = Bits.flags as bool
+}

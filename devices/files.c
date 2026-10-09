@@ -30,3 +30,18 @@ bool ent_files_write_file(const ent_text126 *name, int32_t count,
   bool written = fwrite(value, 1, (size_t)count, to) == (size_t)count;
   return fclose(to) == 0 && written;
 }
+
+bool ent_files_write_bytes(const ent_text126 *name, int32_t count,
+                           const uint8_t *value, int32_t first, int32_t wanted,
+                           bool append) {
+  char path[127];
+  if (first < 0 || wanted < 0 || (int64_t)first + wanted > count)
+    return false;
+  memcpy(path, name->bytes, name->length);
+  path[name->length] = 0;
+  FILE *to = fopen(path, append ? "ab" : "wb");
+  if (!to)
+    return false;
+  bool written = fwrite(value + first, 1, (size_t)wanted, to) == (size_t)wanted;
+  return fclose(to) == 0 && written;
+}

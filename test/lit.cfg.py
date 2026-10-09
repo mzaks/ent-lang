@@ -32,6 +32,13 @@ ent_driver = "env ENT_BIN={} LLVM_PREFIX={} {} {}".format(
 # what was kept. `%cached-ent` is the driver as it is, for the test of
 # that.)
 config.substitutions.append(("%python", sys.executable))
+# The shareware WAD, where examples/doom/reference/fetch.sh has put it:
+# the tests of Doom that need the real thing run only then.
+doom_wad = os.path.join(os.path.dirname(config.test_source_root), "build",
+                        "doom", "wad", "doom1.wad")
+if os.path.exists(doom_wad):
+    config.available_features.add("doom-wad")
+config.substitutions.append(("%doom-wad", doom_wad))
 config.substitutions.append(("%cached-ent", ent_driver))
 config.substitutions.append(("%ent", ent_driver + " --no-cache"))
 # Link flags for the OpenMP runtime that ships with the same LLVM.
