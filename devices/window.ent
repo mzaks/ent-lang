@@ -81,6 +81,16 @@ system shapes() {
   draw_shapes(Shapes)
   Shapes = []
 }
+// A picture the program makes itself, a pixel at a time: the rows of
+// `Pixels` are its pixels, from the left to the right and row under row,
+// each a colour (0xRRGGBB). `draw_pixels` draws the first `width *
+// height` of them as a picture so many pixels wide and high, with its
+// top left corner at (x, y), stretched to `w` by `h` points (each pixel a
+// square of one colour, however big). It holds 64000 (320 by 200);
+// `capacity Pixels N` in the program gives it more.
+buffer Pixels { color: i32 } capacity 64000
+extern proc draw_pixels(them: Pixels, width: i32, height: i32, x: f32,
+                        y: f32, w: f32, h: f32)
 // A filled slice of a circle, from one angle to another: degrees, 0 to
 // the right and growing clockwise (90 is down).
 extern proc sector(x: f32, y: f32, radius: f32, from: f32, to: f32, color: i32)

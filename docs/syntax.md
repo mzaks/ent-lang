@@ -55,7 +55,8 @@ there (`Position`, `tick()`); there is no access control yet.
 A module with an implementation next to its `m.ent` is a device: that
 defines its extern procs and fns (and extern systems), and `tools/ent`
 builds and links it with the program. The compiler's own are in `devices/`
-(`console`, `clock`, `window`, `sound`, and `math`, see Math below), found
+(`console`, `clock`, `window`, `sound`, `files`, and `math`, see Math
+below), found
 without `-I` by `tools/ent`; each says in its `.ent` file how it is used. The
 implementation is any of:
 

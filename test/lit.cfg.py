@@ -31,6 +31,7 @@ ent_driver = "env ENT_BIN={} LLVM_PREFIX={} {} {}".format(
 # (The tests build what they run: nothing of theirs is kept, or taken from
 # what was kept. `%cached-ent` is the driver as it is, for the test of
 # that.)
+config.substitutions.append(("%python", sys.executable))
 config.substitutions.append(("%cached-ent", ent_driver))
 config.substitutions.append(("%ent", ent_driver + " --no-cache"))
 # Link flags for the OpenMP runtime that ships with the same LLVM.

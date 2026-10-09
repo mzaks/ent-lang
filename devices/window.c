@@ -855,6 +855,36 @@ void ent_window_picture(int32_t image, float x, float y, float w, float h,
   }
 }
 
+// The program's own picture: its pixels go to the graphics card as they
+// are each time, in a texture that is made anew when the size changes.
+void ent_window_draw_pixels(int32_t count, const int32_t *color, int32_t width,
+                            int32_t height, float x, float y, float w,
+                            float h) {
+  static Texture2D texture;
+  static Color *pixels;
+  if (width <= 0 || height <= 0 || count < width * height)
+    return;
+  if (texture.id == 0 || texture.width != width || texture.height != height) {
+    if (texture.id != 0)
+      UnloadTexture(texture);
+    free(pixels);
+    pixels = malloc(sizeof(Color) * (size_t)width * (size_t)height);
+    Image image = GenImageColor(width, height, BLACK);
+    texture = LoadTextureFromImage(image);
+    UnloadImage(image);
+    SetTextureFilter(texture, TEXTURE_FILTER_POINT);
+  }
+  if (!pixels || texture.id == 0)
+    return;
+  for (int32_t i = 0; i < width * height; i++)
+    pixels[i] = (Color){(unsigned char)(color[i] >> 16),
+                        (unsigned char)(color[i] >> 8),
+                        (unsigned char)color[i], 255};
+  UpdateTexture(texture, pixels);
+  DrawTexturePro(texture, (Rectangle){0, 0, (float)width, (float)height},
+                 (Rectangle){x, y, w, h}, (Vector2){0, 0}, 0, WHITE);
+}
+
 float ent_window_picture_ratio(int32_t image) {
   if (image <= 0 || image >= ent_window_picture_count)
     return 1;

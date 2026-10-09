@@ -1,0 +1,32 @@
+// Files: the bytes of one, read into a buffer.
+//
+//   import files
+//   capacity Bytes 1048576          // as many bytes as the biggest file
+//   system load() {
+//     let size = read_file("level.dat", Bytes)
+//     if size < 0 { .. there is no such file .. }
+//     let first = Bytes[0].value
+//   }
+//
+// A file is looked for by its name as a font or a picture is: from where
+// the program was started, next to its source under `ent run`, next to
+// the program; one the program declares (`asset "level.dat"`) is taken
+// along with it.
+//
+// `write_file` writes a buffer's bytes as a file, where the program was
+// started (or where a whole path says).
+//
+// `read_file` and `write_file` are implemented in devices/files.c.
+
+// What was read last: a row for each byte.
+buffer Bytes { value: u8 } capacity 65536
+
+// Reads the file `name` into `into`, in place of what that had, and gives
+// how many bytes the file has: -1 where there is no such file (`into` is
+// then empty), and more than `into` holds where it did not fit (`into`
+// then has the first of them, as many as it holds).
+extern proc read_file(name: text[126], into: mut Bytes) -> i32
+
+// Writes the bytes of `from` as the file `name`, in place of one that is
+// there; false where it could not.
+extern proc write_file(name: text[126], from: Bytes) -> bool
