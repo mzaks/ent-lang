@@ -80,37 +80,44 @@ table checkcoord { a: i32, b: i32, c: i32, d: i32 } = [
   { a: 2, b: 1, c: 3, d: 0 }
 ]
 
-// Which side of a node's line a point is on: 0 the right, 1 the left
-// (R_PointOnSide).
-fn point_on_side(nodes: Nodes, node: i32, x: i32, y: i32) -> i32 {
-  let nx = nodes[node].x
-  let ny = nodes[node].y
-  let ndx = nodes[node].dx
-  let ndy = nodes[node].dy
-  if ndx == 0 {
-    if x <= nx {
-      if ndy > 0 { 1 } else { 0 }
+// Which side of a line a point (x, y) is on, the line from (lx, ly),
+// (ldx, ldy) on: 0 its right, 1 its left.
+fn side_of_line(lx: i32, ly: i32, ldx: i32, ldy: i32, x: i32, y: i32) -> i32 {
+  if ldx == 0 {
+    if x <= lx {
+      if ldy > 0 { 1 } else { 0 }
     } else {
-      if ndy < 0 { 1 } else { 0 }
+      if ldy < 0 { 1 } else { 0 }
     }
-  } else if ndy == 0 {
-    if y <= ny {
-      if ndx < 0 { 1 } else { 0 }
+  } else if ldy == 0 {
+    if y <= ly {
+      if ldx < 0 { 1 } else { 0 }
     } else {
-      if ndx > 0 { 1 } else { 0 }
+      if ldx > 0 { 1 } else { 0 }
     }
   } else {
-    let dx = x - nx
-    let dy = y - ny
+    let dx = x - lx
+    let dy = y - ly
     // By the signs alone, where they say it.
-    if (ndy ^ ndx ^ dx ^ dy) & 0x80000000 != 0 {
-      if (ndy ^ dx) & 0x80000000 != 0 { 1 } else { 0 }
+    if (ldy ^ ldx ^ dx ^ dy) & 0x80000000 != 0 {
+      if (ldy ^ dx) & 0x80000000 != 0 { 1 } else { 0 }
     } else {
-      let left = fixed_mul(ndy >> FRACBITS, dx)
-      let right = fixed_mul(dy, ndx >> FRACBITS)
+      let left = fixed_mul(ldy >> FRACBITS, dx)
+      let right = fixed_mul(dy, ldx >> FRACBITS)
       if right < left { 0 } else { 1 }
     }
   }
+}
+
+// Which side of a node's line a point is on (R_PointOnSide), and of a
+// seg (R_PointOnSegSide).
+fn point_on_side(nodes: Nodes, node: i32, x: i32, y: i32) -> i32 {
+  side_of_line(nodes[node].x, nodes[node].y, nodes[node].dx, nodes[node].dy,
+               x, y)
+}
+fn point_on_seg_side(segs: Segs, seg: i32, x: i32, y: i32) -> i32 {
+  side_of_line(segs[seg].x1, segs[seg].y1, segs[seg].x2 - segs[seg].x1,
+               segs[seg].y2 - segs[seg].y1, x, y)
 }
 
 // The subsector a point is in (R_PointInSubsector).
@@ -454,15 +461,15 @@ system set_view_size() {
 
 // The eye where the first player starts: 41 above the floor there.
 system start_viewpoint() {
-  for i in 0..len(Things) {
-    if Things[i].type == 1 {
-      let x = Things[i].x << FRACBITS
-      let y = Things[i].y << FRACBITS
+  for i in 0..len(Mapthings) {
+    if Mapthings[i].type == 1 {
+      let x = Mapthings[i].x << FRACBITS
+      let y = Mapthings[i].y << FRACBITS
       let sector = Subsectors[point_in_subsector(Nodes, x, y)].sector
       Viewpoint.x = x
       Viewpoint.y = y
       Viewpoint.z = Sectors[sector].floorheight + 41 * FRACUNIT
-      Viewpoint.angle = ANG45 * ((Things[i].angle / 45) as u32)
+      Viewpoint.angle = ANG45 * ((Mapthings[i].angle / 45) as u32)
     }
   }
 }
@@ -542,6 +549,32 @@ buffer Visplanes {
   height: i32, picnum: i32, lightlevel: i32, minx: i32, maxx: i32
 } capacity 128
 buffer Planetops { top: u8, bottom: u8 } capacity 41216
+
+// A piece of a wall that was stored, for what is drawn after the walls
+// (the things, and textures in openings) to be cut by: its columns and
+// its scale at both ends; whether it hides what is behind it below a
+// height (`bsilheight`), above one (`tsilheight`), or both; and where in
+// `Openings` its rows are, by column: those a thing behind it is cut to
+// at the top and at the bottom, and the columns of a texture in its
+// opening (-1: none). A row of column x is at the number + x.
+buffer Drawsegs {
+  seg: i32, x1: i32, x2: i32, scale1: i32, scale2: i32, scalestep: i32,
+  silhouette: i32, bsilheight: i32, tsilheight: i32, sprtopclip: i32,
+  sprbottomclip: i32, maskedtexturecol: i32
+} capacity 256
+const SIL_BOTTOM = 1
+const SIL_TOP = 2
+const SIL_BOTH = 3
+
+// Rows of the view by its columns, for cutting what is masked: first 320
+// for a thing's top and 320 for its bottom (worked out for each thing),
+// then 320 that are the view's height and 320 that are -1 (what cuts
+// nothing, below and above), then those of the pieces of walls.
+buffer Openings { value: i32 } capacity 21760
+const CLIPTOP = 0
+const CLIPBOTTOM = 320
+const SCREENHEIGHTARRAY = 640
+const NEGONEARRAY = 960
 
 // What was worked out for each piece of a wall that was stored, for
 // holding it against the reference's (check/view.sh).
@@ -720,6 +753,10 @@ system draw_walls() {
   Visplanes = []
   Planetops = []
   Stored = []
+  Drawsegs = []
+  Openings = [{ value: 0 }; 640]
+  for x in 0..320 { Openings += { value: View.height } }
+  for x in 0..320 { Openings += { value: -1 } }
   var drawsegs = 0
   var front = 0
   var floorplane = -1
@@ -766,10 +803,15 @@ system draw_walls() {
       let scale1 = scale_from_global_angle(
           viewangle + Xtoviewangle[start].angle, viewangle, rw_normalangle,
           rw_distance, View.projection)
+      let scale2 = if stop > start {
+        scale_from_global_angle(viewangle + Xtoviewangle[stop].angle,
+                                viewangle, rw_normalangle, rw_distance,
+                                View.projection)
+      } else {
+        scale1
+      }
       let rw_scalestep = if stop > start {
-        (scale_from_global_angle(viewangle + Xtoviewangle[stop].angle,
-                                 viewangle, rw_normalangle, rw_distance,
-                                 View.projection) - scale1) / (stop - start)
+        (scale2 - scale1) / (stop - start)
       } else {
         0
       }
@@ -790,7 +832,19 @@ system draw_walls() {
       var rw_midtexturemid = 0
       var rw_toptexturemid = 0
       var rw_bottomtexturemid = 0
+      // What it hides of the things behind it.
+      var silhouette = 0
+      var bsilheight = 0
+      var tsilheight = 0
+      var sprtopclip = -1
+      var sprbottomclip = -1
+      var maskedtexturecol = -1
       if back < 0 {
+        silhouette = SIL_BOTH
+        sprtopclip = SCREENHEIGHTARRAY
+        sprbottomclip = NEGONEARRAY
+        bsilheight = 0x7fffffff
+        tsilheight = 0x80000000
         // One side: one texture from the ceiling to the floor.
         midtexture = Sides[side].midtexture
         rw_midtexturemid = if Lines[line].flags & ML_DONTPEGBOTTOM != 0 {
@@ -804,6 +858,30 @@ system draw_walls() {
         // Two sides: a texture above the opening and one below it.
         let backfloor = Sectors[back].floorheight
         let backceiling = Sectors[back].ceilingheight
+        if frontfloor > backfloor {
+          silhouette = SIL_BOTTOM
+          bsilheight = frontfloor
+        } else if backfloor > vz {
+          silhouette = SIL_BOTTOM
+          bsilheight = 0x7fffffff
+        }
+        if frontceiling < backceiling {
+          silhouette |= SIL_TOP
+          tsilheight = frontceiling
+        } else if backceiling < vz {
+          silhouette |= SIL_TOP
+          tsilheight = 0x80000000
+        }
+        if backceiling <= frontfloor {
+          sprbottomclip = NEGONEARRAY
+          bsilheight = 0x7fffffff
+          silhouette |= SIL_BOTTOM
+        }
+        if backfloor >= frontceiling {
+          sprtopclip = SCREENHEIGHTARRAY
+          tsilheight = 0x80000000
+          silhouette |= SIL_TOP
+        }
         worldhigh = backceiling - vz
         worldlow = backfloor - vz
         // (The sky on both sides: no wall is seen between them.)
@@ -840,8 +918,13 @@ system draw_walls() {
         }
         rw_toptexturemid += Sides[side].rowoffset
         rw_bottomtexturemid += Sides[side].rowoffset
-        // (One in the opening is drawn later, with what is masked.)
+        // (One in the opening is drawn later, with what is masked: its
+        // columns are noted.)
         maskedtexture = Sides[side].midtexture != 0
+        if maskedtexture {
+          maskedtexturecol = len(Openings) - start
+          for x in start..stop + 1 { Openings += { value: 0 } }
+        }
       }
 
       // Where along the texture each column is, and how light.
@@ -993,10 +1076,39 @@ system draw_walls() {
           } else if markfloor {
             Clips[x].floor = yh + 1
           }
+          if maskedtexture {
+            // (Kept in 16 bits.)
+            Openings[maskedtexturecol + x].value = (texturecolumn as i16) as i32
+          }
         }
         rw_scale += rw_scalestep
         topfrac += topstep
         bottomfrac += bottomstep
+      }
+      // The rows that are left open in its columns, for the things
+      // behind it.
+      if (silhouette & SIL_TOP != 0 || maskedtexture) && sprtopclip < 0 {
+        sprtopclip = len(Openings) - start
+        for x in start..stop + 1 { Openings += { value: Clips[x].ceiling } }
+      }
+      if (silhouette & SIL_BOTTOM != 0 || maskedtexture) && sprbottomclip < 0 {
+        sprbottomclip = len(Openings) - start
+        for x in start..stop + 1 { Openings += { value: Clips[x].floor } }
+      }
+      if maskedtexture && silhouette & SIL_TOP == 0 {
+        silhouette |= SIL_TOP
+        tsilheight = 0x80000000
+      }
+      if maskedtexture && silhouette & SIL_BOTTOM == 0 {
+        silhouette |= SIL_BOTTOM
+        bsilheight = 0x7fffffff
+      }
+      Drawsegs += {
+        seg: seg, x1: start, x2: stop, scale1: scale1, scale2: scale2,
+        scalestep: rw_scalestep, silhouette: silhouette,
+        bsilheight: bsilheight, tsilheight: tsilheight,
+        sprtopclip: sprtopclip, sprbottomclip: sprbottomclip,
+        maskedtexturecol: maskedtexturecol
       }
       drawsegs += 1
     }

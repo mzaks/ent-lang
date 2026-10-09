@@ -306,10 +306,28 @@ index 970bd19..8968f2f 100644
 +    R_RenderView (NULL);
 +}
 diff --git i/src/doom/r_segs.c w/src/doom/r_segs.c
-index 06881a5..144a1b2 100644
+index 06881a5..3595d65 100644
 --- i/src/doom/r_segs.c
 +++ w/src/doom/r_segs.c
-@@ -382,6 +382,15 @@ R_StoreWallRange
+@@ -151,6 +151,17 @@ R_RenderMaskedSegRange
+     if (fixedcolormap)
+ 	dc_colormap = fixedcolormap;
+     
++    {
++	// ent-lang: see R_RenderPlayerView.
++	extern FILE *r_dump;
++
++	if (r_dump && getenv ("DOOM_VIEW_DETAIL"))
++	    fprintf (r_dump, "masked %d: %d %d of %d %d mid %d scale %d %d clips %d %d\n",
++		     (int) (ds - drawsegs), x1, x2, ds->x1, ds->x2,
++		     dc_texturemid, spryscale, rw_scalestep,
++		     mceilingclip[x1], mfloorclip[x1]);
++    }
++
+     // draw the columns
+     for (dc_x = x1 ; dc_x <= x2 ; dc_x++)
+     {
+@@ -382,6 +393,15 @@ R_StoreWallRange
      // don't overflow and crash
      if (ds_p == &drawsegs[MAXDRAWSEGS])
  	return;		
@@ -325,7 +343,7 @@ index 06881a5..144a1b2 100644
  		
  #ifdef RANGECHECK
      if (start >=viewwidth || start > stop)
-@@ -701,6 +710,19 @@ R_StoreWallRange
+@@ -701,6 +721,19 @@ R_StoreWallRange
  	}
      }
      
@@ -345,3 +363,43 @@ index 06881a5..144a1b2 100644
      // render it
      if (markceiling)
  	ceilingplane = R_CheckPlane (ceilingplane, rw_x, rw_stopx-1);
+diff --git i/src/doom/r_things.c w/src/doom/r_things.c
+index ca20a47..6f7315e 100644
+--- i/src/doom/r_things.c
++++ w/src/doom/r_things.c
+@@ -21,6 +21,7 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ 
+ 
+ #include "deh_main.h"
+@@ -565,6 +566,15 @@ void R_ProjectSprite (mobj_t* thing)
+     if (vis->x1 > x1)
+ 	vis->startfrac += vis->xiscale*(vis->x1-x1);
+     vis->patch = lump;
++    {
++	// ent-lang: see R_RenderPlayerView.
++	extern FILE *r_dump;
++
++	if (r_dump && getenv ("DOOM_VIEW_DETAIL"))
++	    fprintf (r_dump, "sprite %d: %d %d scale %d frac %d %d at %d %d %d\n",
++		     lump, vis->x1, vis->x2, vis->scale, vis->startfrac,
++		     vis->xiscale, thing->x, thing->y, thing->z);
++    }
+     
+     // get light level
+     if (thing->flags & MF_SHADOW)
+@@ -974,7 +984,10 @@ void R_DrawMasked (void)
+     
+     // draw the psprites on top of everything
+     //  but does not draw on side views
+-    if (!viewangleoffset)		
++    // ent-lang: DOOM_VIEW_SKIP with a 'w' leaves out the player's weapon
++    // (see R_RenderPlayerView).
++    if (!viewangleoffset
++	&& !(getenv ("DOOM_VIEW_SKIP") && strchr (getenv ("DOOM_VIEW_SKIP"), 'w')))
+ 	R_DrawPlayerSprites ();
+ }
+ 

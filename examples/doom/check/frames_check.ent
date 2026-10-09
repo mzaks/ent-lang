@@ -1,7 +1,6 @@
-// The pictures of a level from many places in it, without what is
-// masked: for each of the views the reference wrote (the table `views`),
-// the walls, floors and ceilings as the port draws them, one picture
-// after another in the file `frames.port`, to hold against the
+// The pictures of a level from many places in it: for each of the views
+// the reference wrote (the table `views`), the walls, floors, ceilings
+// and things as the port draws them, one picture after another in the file `frames.port`, to hold against the
 // reference's. See check/view.sh.
 import console
 import files
@@ -10,6 +9,9 @@ import data
 import level
 import video
 import render
+import info
+import things
+import sprites
 import views
 
 capacity Bytes 16777216
@@ -18,6 +20,7 @@ world {
   Wad.file = "doom1.wad"
   Level.episode = 1
   Level.map = 1
+  Level.skill = 2
 }
 
 // Which of the views is next; and where the picture is put in `Bytes`
@@ -57,7 +60,9 @@ system keep() {
 schedule setup() {
   load_wad()
   init_data()
+  init_sprites()
   load_level()
+  spawn_things()
   set_view_size()
   init_view_tables()
   reserve()
@@ -68,6 +73,7 @@ schedule one() {
   render_view()
   draw_walls()
   draw_planes()
+  draw_masked()
   keep()
 }
 system report() { put("pictures {Next}: {Hash}") }

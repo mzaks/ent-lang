@@ -1,14 +1,16 @@
 // Doom's view of a level in ent-lang (examples/doom: data.ent,
-// render.ent): the textures put together, the walk through the level's
-// tree, and the walls, floors, ceilings and sky drawn. E1M1 of the
+// render.ent, things.ent, sprites.ent): the textures put together, the
+// walk through the level's tree, the walls, floors, ceilings and sky
+// drawn, and the level's things by their sprites. E1M1 of the
 // shareware WAD from 92 places (Inputs/doom/views.ent), all the pictures
 // as one number: that of pictures that are the reference's pixel for
-// pixel (examples/doom/check/view.sh compares them). Runs where the WAD
+// pixel, but for four pixels the original reads from past a lump's end
+// (examples/doom/check/view.sh compares them). Runs where the WAD
 // is (examples/doom/reference/fetch.sh fetches it).
 // REQUIRES: doom-wad
 // RUN: rm -rf %t && mkdir -p %t && cp %doom-wad %t/doom1.wad
 // RUN: cd %t && %ent run -I %S/../../examples/doom -I %S/Inputs/doom \
 // RUN:     %S/../../examples/doom/check/frames_check.ent | FileCheck %s
 
-// CHECK:     pictures 92: 2861219589
+// CHECK:     pictures 92: 1017864855
 // CHECK-NOT: {{.}}

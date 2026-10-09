@@ -43,8 +43,9 @@ const ML_DONTDRAW = 128
 const ML_MAPPED = 256
 
 // The level to load, and what loading it found: the lump that names it
-// (-1: there is no such level).
-unique Level { episode: i32, map: i32, lump: i32 }
+// (-1: there is no such level). `skill` is how hard the game is, 0 to 4
+// (2 is "Hurt me plenty"): it says which things are there.
+unique Level { episode: i32, map: i32, lump: i32, skill: i32 }
 
 // The corners of the level's lines.
 buffer Vertexes { x: i32, y: i32 } capacity 32768
@@ -101,7 +102,9 @@ const BOXRIGHT = 3
 
 // What is put into the level, as the WAD has it: where, turned which
 // way (in degrees), what it is, and at which skills it is there.
-buffer Things { x: i32, y: i32, angle: i32, type: i32, options: i32 } capacity 16384
+buffer Mapthings {
+  x: i32, y: i32, angle: i32, type: i32, options: i32
+} capacity 16384
 
 // The sector a side looks into, or -1 for no side.
 fn side_sector(sides: Sides, side: i32) -> i32 {
@@ -122,7 +125,7 @@ system load_level() {
   Subsectors = []
   Nodes = []
   Boxes = []
-  Things = []
+  Mapthings = []
   if lump >= 0 {
     // P_LoadVertexes: two shorts each.
     let vertexes = Lumps[lump + ML_VERTEXES].at
@@ -228,7 +231,7 @@ system load_level() {
     let things = Lumps[lump + ML_THINGS].at
     for i in 0..Lumps[lump + ML_THINGS].size / 10 {
       let at = things + i * 10
-      Things += {
+      Mapthings += {
         x: short_at(Bytes, at), y: short_at(Bytes, at + 2),
         angle: short_at(Bytes, at + 4), type: short_at(Bytes, at + 6),
         options: short_at(Bytes, at + 8)

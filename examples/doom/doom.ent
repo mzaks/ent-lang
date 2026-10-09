@@ -1,5 +1,5 @@
 // Doom in ent-lang, as far as it is: reads the WAD and shows a level as
-// it is seen from where the player starts, without the things in it;
+// it is seen from where the player starts, with the things in it;
 // Tab shows the map instead. Until there is a player, the arrow keys
 // turn the eye and move it, through walls too. Start it where
 // `doom1.wad` is (examples/doom/reference/fetch.sh puts the shareware one
@@ -18,6 +18,9 @@ import fixed
 import tables
 import angles
 import render
+import info
+import things
+import sprites
 
 // As many bytes as the biggest WAD.
 capacity Bytes 16777216
@@ -30,6 +33,7 @@ world {
   Wad.file = "doom1.wad"
   Level.episode = 1
   Level.map = 1
+  Level.skill = 2
 }
 
 // Whether the map is shown, and whether Tab was down the frame before.
@@ -60,7 +64,9 @@ schedule setup() {
   load_wad()
   load_palette()
   init_data()
+  init_sprites()
   load_level()
+  spawn_things()
   fit_automap()
   set_view_size()
   init_view_tables()
@@ -74,6 +80,7 @@ schedule frame() {
   render_view() run_if !Shown.map
   draw_walls() run_if !Shown.map
   draw_planes() run_if !Shown.map
+  draw_masked() run_if !Shown.map
   draw_automap() run_if Shown.map
   show_screen()
   present()

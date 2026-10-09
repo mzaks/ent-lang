@@ -1,0 +1,431 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// What is drawn after the walls and planes (r_things.c, and of r_segs.c
+// what draws a texture in an opening): the things, by their sprites, the
+// farthest first, each cut by the walls that are nearer than it.
+import files
+import wad
+import fixed
+import tables
+import angles
+import data
+import info
+import level
+import video
+import render
+import things
+
+// Nearer than this to the eye nothing is drawn of a thing.
+const MINZ = FRACUNIT * 4
+// How many things are drawn at most.
+const MAXVISSPRITES = 128
+
+// Where the sprites' lumps start, and how many they are.
+unique Spritedata { firstlump: i32, numlumps: i32 }
+
+// A sprite's picture as a lump: how wide it is, and how far its left
+// edge and its top are from the thing's place.
+buffer Spritelumps { width: i32, offset: i32, topoffset: i32 } capacity 4096
+
+// A sprite: how many pictures (frames) it has, and its first in
+// `Spriteframes`. A frame is one lump for every way it is seen from
+// (`rotate` 0), or eight, by the eighth of a turn (`rotate` 1); -1: the
+// WAD has none. Frame f's lumps are the rows f * 8 on of `Spriterots`,
+// each with whether it is mirrored.
+buffer Spritedefs { numframes: i32, first: i32 } capacity 256
+buffer Spriteframes { rotate: i32 } capacity 4096
+buffer Spriterots { lump: i32, flip: bool } capacity 32768
+
+// The sectors the walk came to, in its order: the things of one that
+// was come to first come first (-1: not come to).
+buffer Sectorrank { rank: i32 } capacity 4096
+
+// A thing that is seen (a vissprite): the columns it is in, where it is
+// and how high it reaches, the column of its picture at its first
+// column and the step to the next, its scale, the lump of its picture
+// and the colour map (-1: a shadow), and where it comes among the things
+// as the original finds them.
+buffer Vissprites {
+  x1: i32, x2: i32, gx: i32, gy: i32, gz: i32, gzt: i32, startfrac: i32,
+  scale: i32, xiscale: i32, texturemid: i32, patch: i32, colormap: i32,
+  rank: i32, linked: i32
+} capacity 2048
+
+// The things that are seen, as the original finds them (`Found`) and as
+// they are drawn, the smallest first (`Sorted`): rows of `Vissprites`.
+buffer Found { index: i32 } capacity 2048
+buffer Sorted { index: i32, used: bool } capacity 2048
+
+// Reads what the sprites' lumps are, and which lump is which picture of
+// which sprite, by their names: four letters of the sprite, a letter for
+// the frame and a digit for the way it is seen from, and those two once
+// more for a picture that is this one mirrored (R_InitSpriteLumps,
+// R_InitSpriteDefs).
+system init_sprites() {
+  let first = lump_number(Lumps, lump_name("S_START")) + 1
+  let count = lump_number(Lumps, lump_name("S_END")) - first
+  Spritedata.firstlump = first
+  Spritedata.numlumps = count
+  Spritelumps = []
+  for i in 0..count {
+    let at = Lumps[first + i].at
+    Spritelumps += {
+      width: short_at(Bytes, at) << FRACBITS,
+      offset: short_at(Bytes, at + 4) << FRACBITS,
+      topoffset: short_at(Bytes, at + 6) << FRACBITS
+    }
+  }
+  Spritedefs = []
+  Spriteframes = []
+  Spriterots = []
+  for s in 0..len(sprnames) {
+    // How many frames: the highest letter there is.
+    var maxframe = -1
+    for l in 0..count {
+      let name = Lumps[first + l].name
+      if (name & 0xffffffff) as u32 == sprnames[s] {
+        maxframe max= ((name >> 32) & 0xff) as i32 - 65
+        if (name >> 48) & 0xff != 0 {
+          maxframe max= ((name >> 48) & 0xff) as i32 - 65
+        }
+      }
+    }
+    let frames = len(Spriteframes)
+    Spritedefs += { numframes: maxframe + 1, first: frames }
+    for f in 0..maxframe + 1 {
+      Spriteframes += { rotate: -1 }
+      for r in 0..8 { Spriterots += { lump: -1, flip: false } }
+    }
+    for l in 0..count {
+      let name = Lumps[first + l].name
+      if (name & 0xffffffff) as u32 == sprnames[s] {
+        // The picture, and the one it is mirrored (R_InstallSpriteLump).
+        for part in 0..2 {
+          let shift = 32 + part * 16
+          if (name >> shift) & 0xff != 0 {
+            let frame = frames + ((name >> shift) & 0xff) as i32 - 65
+            let rotation = ((name >> (shift + 8)) & 0xff) as i32 - 48
+            if rotation == 0 {
+              Spriteframes[frame].rotate = 0
+              for r in 0..8 {
+                Spriterots[frame * 8 + r].lump = l
+                Spriterots[frame * 8 + r].flip = part == 1
+              }
+            } else {
+              Spriteframes[frame].rotate = 1
+              Spriterots[frame * 8 + rotation - 1].lump = l
+              Spriterots[frame * 8 + rotation - 1].flip = part == 1
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// A column of a picture that has holes: posts, each where it starts, how
+// many pixels, a byte, the pixels, a byte; 255 ends them. Drawn where
+// the rows `ceilings` and `floors` of `Openings` leave room in the
+// view's column x (R_DrawMaskedColumn).
+proc draw_masked_column(screen: mut Screen, bytes: Bytes, openings: Openings,
+                        column: i32, x: i32, spryscale: i32,
+                        sprtopscreen: i32, texturemid: i32, iscale: i32,
+                        colormap: i32, ceilings: i32, floors: i32,
+                        centery: i32, left: i32, top: i32) {
+  var post = column
+  while bytes[post].value != 255 {
+    let topdelta = bytes[post].value as i32
+    let length = bytes[post + 1].value as i32
+    let topscreen = sprtopscreen + spryscale * topdelta
+    let bottomscreen = topscreen + spryscale * length
+    let yl = max((topscreen + FRACUNIT - 1) >> FRACBITS,
+                 openings[ceilings + x].value + 1)
+    let yh = min((bottomscreen - 1) >> FRACBITS, openings[floors + x].value - 1)
+    if yl <= yh {
+      draw_column(screen, bytes, x, yl, yh, iscale,
+                  texturemid - (topdelta << FRACBITS), post + 3, colormap,
+                  centery, left, top)
+    }
+    post += length + 4
+  }
+}
+
+// The texture in the opening of a piece of a wall, in its columns from
+// `x1` to `x2`; a column that was drawn is not drawn again
+// (R_RenderMaskedSegRange).
+proc render_masked_seg_range(screen: mut Screen, bytes: Bytes,
+                             openings: mut Openings, drawsegs: Drawsegs,
+                             segs: Segs, lines: Lines, sides: Sides,
+                             sectors: Sectors, textures: Textures,
+                             columns: TextureColumns, lights: Scalelight,
+                             ds: i32, x1: i32, x2: i32, viewz: i32,
+                             centery: i32, centeryfrac: i32, left: i32,
+                             top: i32) {
+  let seg = drawsegs[ds].seg
+  let front = segs[seg].front
+  let back = segs[seg].back
+  let side = segs[seg].side
+  let texnum = sides[side].midtexture
+  var lightnum = sectors[front].lightlevel >> LIGHTSEGSHIFT
+  if segs[seg].y1 == segs[seg].y2 {
+    lightnum -= 1
+  } else if segs[seg].x1 == segs[seg].x2 {
+    lightnum += 1
+  }
+  let walllights = min(max(lightnum, 0), LIGHTLEVELS - 1) * MAXLIGHTSCALE
+  let maskedtexturecol = drawsegs[ds].maskedtexturecol
+  let scalestep = drawsegs[ds].scalestep
+  // Its bottom at the higher floor, or its top at the lower ceiling.
+  let texturemid = if lines[segs[seg].line].flags & ML_DONTPEGBOTTOM != 0 {
+    max(sectors[front].floorheight, sectors[back].floorheight) +
+        (textures[texnum].height << FRACBITS) - viewz
+  } else {
+    min(sectors[front].ceilingheight, sectors[back].ceilingheight) - viewz
+  } + sides[side].rowoffset
+  var spryscale = drawsegs[ds].scale1 + (x1 - drawsegs[ds].x1) * scalestep
+  for x in x1..x2 + 1 {
+    if openings[maskedtexturecol + x].value != 0x7fff {
+      draw_masked_column(
+          screen, bytes, openings,
+          get_column(textures, columns, texnum,
+                     openings[maskedtexturecol + x].value) - 3,
+          x, spryscale, centeryfrac - fixed_mul(texturemid, spryscale),
+          texturemid, (0xffffffff as u32 / spryscale as u32) as i32,
+          lights[walllights + min(spryscale >> LIGHTSCALESHIFT,
+                                  MAXLIGHTSCALE - 1)].map,
+          drawsegs[ds].sprtopclip, drawsegs[ds].sprbottomclip, centery, left,
+          top)
+      openings[maskedtexturecol + x].value = 0x7fff
+    }
+    spryscale += scalestep
+  }
+}
+
+// Draws the things and the textures in openings (R_AddSprites,
+// R_ProjectSprite, R_SortVisSprites, R_DrawSprite, R_DrawVisSprite,
+// R_DrawMasked). After `draw_planes`.
+system draw_masked() {
+  let vx = Frame[0].x
+  let vy = Frame[0].y
+  let vz = Frame[0].z
+
+  // The sectors the walk came to, in its order.
+  Sectorrank = [{ rank: -1 }; len(Sectors)]
+  var ranks = 0
+  for i in 0..len(Walls) {
+    if Walls[i].seg < 0 {
+      let sector = Subsectors[Walls[i].first].sector
+      if Sectorrank[sector].rank < 0 {
+        Sectorrank[sector].rank = ranks
+        ranks += 1
+      }
+    }
+  }
+
+  // Each thing in such a sector: where it is seen, if it is in front of
+  // the eye and in the view.
+  Vissprites = []
+  for m: Mobj where m.flags & MF_NOSECTOR == 0 {
+    let sector = Subsectors[m.subsector].sector
+    let tr_x = m.x - vx
+    let tr_y = m.y - vy
+    // How far in front of the eye, and how far to its right.
+    let tz = fixed_mul(tr_x, Frame[0].cos) + fixed_mul(tr_y, Frame[0].sin)
+    let tx = fixed_mul(tr_x, Frame[0].sin) - fixed_mul(tr_y, Frame[0].cos)
+    let xscale = if tz >= MINZ { fixed_div(View.projection, tz) } else { 0 }
+    // The picture: by the way the thing is turned as it is seen, if it
+    // has one for each.
+    let frame = Spritedefs[m.sprite].first + (m.frame & FF_FRAMEMASK)
+    let rot = if Spriteframes[frame].rotate != 0 {
+      ((point_to_angle(tr_x, tr_y) - m.angle + ANG45 / 2 * 9) >> 29) as i32
+    } else {
+      0
+    }
+    let lump = Spriterots[frame * 8 + rot].lump
+    let flip = Spriterots[frame * 8 + rot].flip
+    let left = tx - Spritelumps[lump].offset
+    let x1 = (View.centerxfrac + fixed_mul(left, xscale)) >> FRACBITS
+    let x2 = ((View.centerxfrac +
+               fixed_mul(left + Spritelumps[lump].width, xscale)) >> FRACBITS) - 1
+    if Sectorrank[sector].rank >= 0 && tz >= MINZ && abs(tx) <= tz << 2 &&
+       x1 <= View.width && x2 >= 0 {
+      let iscale = fixed_div(FRACUNIT, xscale)
+      let xiscale = if flip { -iscale } else { iscale }
+      let first = max(x1, 0)
+      let gzt = m.z + Spritelumps[lump].topoffset
+      let lightnum = min(max(Sectors[sector].lightlevel >> LIGHTSEGSHIFT, 0),
+                         LIGHTLEVELS - 1)
+      Vissprites += {
+        x1: first, x2: min(x2, View.width - 1), gx: m.x, gy: m.y, gz: m.z,
+        gzt: gzt,
+        startfrac: if flip { Spritelumps[lump].width - 1 } else { 0 } +
+                   xiscale * (first - x1),
+        scale: xscale, xiscale: xiscale, texturemid: gzt - vz, patch: lump,
+        colormap: if m.flags & MF_SHADOW != 0 {
+          -1
+        } else if m.frame & FF_FULLBRIGHT != 0 {
+          Data.colormaps
+        } else {
+          Scalelight[lightnum * MAXLIGHTSCALE +
+                     min(xscale >> LIGHTSCALESHIFT, MAXLIGHTSCALE - 1)].map
+        },
+        rank: Sectorrank[sector].rank, linked: m.linked
+      }
+    }
+  }
+
+  // In the order the original finds them: sector by sector as the walk
+  // came to them, and in a sector the thing that was put there last
+  // first. No more than it keeps.
+  Found = []
+  for i in 0..len(Vissprites) {
+    Found += { index: i }
+    var at = i
+    var settled = false
+    while at > 0 && !settled {
+      let before = Found[at - 1].index
+      if Vissprites[before].rank > Vissprites[i].rank ||
+         (Vissprites[before].rank == Vissprites[i].rank &&
+          Vissprites[before].linked < Vissprites[i].linked) {
+        Found[at].index = before
+        at -= 1
+      } else {
+        settled = true
+      }
+    }
+    Found[at].index = i
+  }
+  let count = min(len(Found), MAXVISSPRITES)
+
+  // The smallest first, of two as small the one found first
+  // (R_SortVisSprites).
+  Sorted = []
+  for i in 0..count { Sorted += { index: 0, used: false } }
+  for i in 0..count {
+    var best = -1
+    var bestscale = 0x7fffffff
+    for k in 0..count {
+      if !Sorted[k].used && Vissprites[Found[k].index].scale < bestscale {
+        bestscale = Vissprites[Found[k].index].scale
+        best = k
+      }
+    }
+    // (One as big as can be is no smaller than that: the first left.)
+    if best < 0 {
+      for k in 0..count {
+        if best < 0 && !Sorted[k].used { best = k }
+      }
+    }
+    Sorted[best].used = true
+    Sorted[i].index = Found[best].index
+  }
+
+  for i in 0..count {
+    let spr = Sorted[i].index
+    let x1 = Vissprites[spr].x1
+    let x2 = Vissprites[spr].x2
+    let scale = Vissprites[spr].scale
+    // R_DrawSprite: the pieces of walls from the nearest on cut it, where
+    // they are nearer than it; a texture in an opening that is behind it
+    // is drawn first.
+    for x in x1..x2 + 1 {
+      Openings[CLIPTOP + x].value = -2
+      Openings[CLIPBOTTOM + x].value = -2
+    }
+    for back in 0..len(Drawsegs) {
+      let ds = len(Drawsegs) - 1 - back
+      if Drawsegs[ds].x1 <= x2 && Drawsegs[ds].x2 >= x1 &&
+         (Drawsegs[ds].silhouette != 0 || Drawsegs[ds].maskedtexturecol >= 0) {
+        let r1 = max(Drawsegs[ds].x1, x1)
+        let r2 = min(Drawsegs[ds].x2, x2)
+        if max(Drawsegs[ds].scale1, Drawsegs[ds].scale2) < scale ||
+           (min(Drawsegs[ds].scale1, Drawsegs[ds].scale2) < scale &&
+            point_on_seg_side(Segs, Drawsegs[ds].seg, Vissprites[spr].gx,
+                              Vissprites[spr].gy) == 0) {
+          // The wall is behind the thing.
+          if Drawsegs[ds].maskedtexturecol >= 0 {
+            render_masked_seg_range(Screen, Bytes, Openings, Drawsegs, Segs,
+                                    Lines, Sides, Sectors, Textures,
+                                    TextureColumns, Scalelight, ds, r1, r2, vz,
+                                    View.centery, View.centeryfrac, View.x,
+                                    View.y)
+          }
+        } else {
+          var silhouette = Drawsegs[ds].silhouette
+          if Vissprites[spr].gz >= Drawsegs[ds].bsilheight {
+            silhouette &= ~SIL_BOTTOM
+          }
+          if Vissprites[spr].gzt <= Drawsegs[ds].tsilheight {
+            silhouette &= ~SIL_TOP
+          }
+          if silhouette & SIL_BOTTOM != 0 {
+            for x in r1..r2 + 1 {
+              if Openings[CLIPBOTTOM + x].value == -2 {
+                Openings[CLIPBOTTOM + x].value =
+                    Openings[Drawsegs[ds].sprbottomclip + x].value
+              }
+            }
+          }
+          if silhouette & SIL_TOP != 0 {
+            for x in r1..r2 + 1 {
+              if Openings[CLIPTOP + x].value == -2 {
+                Openings[CLIPTOP + x].value =
+                    Openings[Drawsegs[ds].sprtopclip + x].value
+              }
+            }
+          }
+        }
+      }
+    }
+    // (What nothing cut is open to the view's edges.)
+    for x in x1..x2 + 1 {
+      if Openings[CLIPBOTTOM + x].value == -2 {
+        Openings[CLIPBOTTOM + x].value = View.height
+      }
+      if Openings[CLIPTOP + x].value == -2 { Openings[CLIPTOP + x].value = -1 }
+    }
+    // R_DrawVisSprite: the picture's columns. (A shadow is drawn as it
+    // is, for now.)
+    let patch = Lumps[Spritedata.firstlump + Vissprites[spr].patch].at
+    let texturemid = Vissprites[spr].texturemid
+    let xiscale = Vissprites[spr].xiscale
+    let colormap = if Vissprites[spr].colormap < 0 {
+      Data.colormaps
+    } else {
+      Vissprites[spr].colormap
+    }
+    var frac = Vissprites[spr].startfrac
+    for x in x1..x2 + 1 {
+      draw_masked_column(
+          Screen, Bytes, Openings,
+          patch + long_at(Bytes, patch + 8 + (frac >> FRACBITS) * 4), x, scale,
+          View.centeryfrac - fixed_mul(texturemid, scale), texturemid,
+          abs(xiscale), colormap, CLIPTOP, CLIPBOTTOM, View.centery, View.x,
+          View.y)
+      frac += xiscale
+    }
+  }
+
+  // The textures in openings that no thing was in front of.
+  for back in 0..len(Drawsegs) {
+    let ds = len(Drawsegs) - 1 - back
+    if Drawsegs[ds].maskedtexturecol >= 0 {
+      render_masked_seg_range(Screen, Bytes, Openings, Drawsegs, Segs, Lines,
+                              Sides, Sectors, Textures, TextureColumns,
+                              Scalelight, ds, Drawsegs[ds].x1, Drawsegs[ds].x2,
+                              vz, View.centery, View.centeryfrac, View.x,
+                              View.y)
+    }
+  }
+}

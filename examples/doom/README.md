@@ -14,8 +14,11 @@ them as systems. It is being built; what is here so far:
   the colour maps.
 - `render.ent`: the view of the level: the walk through its tree from the
   front to the back, the pieces of walls that are seen, and the walls,
-  floors, ceilings and sky drawn. Not yet what is masked: the things in
-  the level and the textures in openings.
+  floors, ceilings and sky drawn.
+- `info.ent`, `things.ent`: the kinds of things with the states they go
+  through, and the things of a level as entities.
+- `sprites.ent`: what is drawn after the walls: the things by their
+  sprites, and textures in openings.
 - `doom.ent`: the program, which so far shows E1M1 from where the player
   starts (the arrow keys move the eye; Tab shows the map).
 - `check/`: programs that print what the port computes, to hold against
@@ -25,7 +28,7 @@ them as systems. It is being built; what is here so far:
   first with `trace.patch`, which makes it write a line for each tic of a
   level; `compare.py` finds the first tic at which two such traces
   differ. `make_tables.py` wrote `tables.ent` and `random.ent` from the
-  reference's C.
+  reference's C, `make_info.py` wrote `info.ent`.
 
 ```sh
 examples/doom/reference/fetch.sh demo1 demo2 demo3   # the traces to match

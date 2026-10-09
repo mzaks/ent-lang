@@ -1,0 +1,123 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The things in a level (p_mobj.c): each an entity with a `Mobj`, made
+// of what the level says is where (`Mapthings`) and what its kind starts
+// as (info.ent).
+import fixed
+import tables
+import angles
+import random
+import info
+import level
+import render
+
+// A thing: where it is and which way it is turned; its kind, the state
+// it is in and how long for, and the sprite and picture that state
+// shows; its flags and health and how big it is; the subsector it is in,
+// with the floor and ceiling there; and `linked`, a number that says
+// when it was last put where it is: of the things in a sector, the one
+// put there last comes first.
+component Mobj {
+  x: i32, y: i32, z: i32, angle: u32, type: i32, state: i32, tics: i32,
+  sprite: i32, frame: i32, flags: i32, health: i32, radius: i32,
+  height: i32, reactiontime: i32, lastlook: i32, subsector: i32,
+  floorz: i32, ceilingz: i32, linked: i32
+} capacity 2048
+
+// How many times a thing was put somewhere (the last `linked` given),
+// and what there is to kill and to find in the level.
+unique Spawned { links: i32, kills: i32, items: i32 }
+
+// In a thing of the level: not there in a game for one; and deaf, so
+// that it waits to see the player.
+const MTF_NOTSINGLE = 16
+const MTF_AMBUSH = 8
+
+// Makes the level's things (P_LoadThings, P_SpawnMapThing, P_SpawnMobj,
+// P_SpawnPlayer): those that are there at the level's skill, in the
+// order the level has them. After `load_level`.
+system spawn_things() {
+  // Which bit of a thing's options the skill is.
+  let bit = if Level.skill == 0 {
+    1
+  } else if Level.skill == 4 {
+    4
+  } else {
+    1 << (Level.skill - 1)
+  }
+  var links = 0
+  var kills = 0
+  var items = 0
+  for i in 0..len(Mapthings) {
+    let type = Mapthings[i].type
+    let options = Mapthings[i].options
+    // Its kind: the first player's start is the player; the other
+    // players' and the deathmatch starts (11) are nothing in a game for
+    // one.
+    var kind = -1
+    if type == 1 {
+      kind = MT_PLAYER
+    } else if type > 4 && type != 11 && options & MTF_NOTSINGLE == 0 &&
+              options & bit != 0 {
+      for k in 0..len(mobjinfo) {
+        if kind < 0 && mobjinfo[k].doomednum == type { kind = k }
+      }
+    }
+    if kind >= 0 {
+      let x = Mapthings[i].x << FRACBITS
+      let y = Mapthings[i].y << FRACBITS
+      // (Which player it looks for first is drawn.)
+      Random.play = random_after(Random.play)
+      let lastlook = random_at(Random.play) % 4
+      let state = mobjinfo[kind].spawnstate
+      let subsector = point_in_subsector(Nodes, x, y)
+      let sector = Subsectors[subsector].sector
+      let floorz = Sectors[sector].floorheight
+      let ceilingz = Sectors[sector].ceilingheight
+      let player = kind == MT_PLAYER
+      // (And how long it stays in its first state.)
+      var tics = states[state].tics
+      if !player && tics > 0 {
+        Random.play = random_after(Random.play)
+        tics = 1 + random_at(Random.play) % tics
+      }
+      var flags = mobjinfo[kind].flags
+      if !player && options & MTF_AMBUSH != 0 { flags |= MF_AMBUSH }
+      if !player && flags & MF_COUNTKILL != 0 { kills += 1 }
+      if !player && flags & MF_COUNTITEM != 0 { items += 1 }
+      links += 1
+      spawn {
+        Mobj {
+          x: x, y: y,
+          z: if !player && flags & MF_SPAWNCEILING != 0 {
+            ceilingz - mobjinfo[kind].height
+          } else {
+            floorz
+          },
+          angle: ANG45 * ((Mapthings[i].angle / 45) as u32), type: kind,
+          state: state, tics: tics, sprite: states[state].sprite,
+          frame: states[state].frame, flags: flags,
+          health: mobjinfo[kind].spawnhealth, radius: mobjinfo[kind].radius,
+          height: mobjinfo[kind].height,
+          reactiontime: mobjinfo[kind].reactiontime, lastlook: lastlook,
+          subsector: subsector, floorz: floorz, ceilingz: ceilingz,
+          linked: links
+        }
+      }
+    }
+  }
+  Spawned.links = links
+  Spawned.kills = kills
+  Spawned.items = items
+}

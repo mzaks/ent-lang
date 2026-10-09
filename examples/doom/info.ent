@@ -1,0 +1,2524 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// What things are (info.c, info.h), written by reference/make_info.py:
+// the sprites by their names, the states a thing goes through, and what
+// each kind of thing starts as. Every sprite (SPR_..), state (S_..) and
+// kind (MT_..) is a const, its number; so is every flag of a thing
+// (MF_..) and everything a state may do (A_..).
+import fixed
+
+// A thing's flags (p_mobj.h).
+const MF_SPECIAL = 0x1
+const MF_SOLID = 0x2
+const MF_SHOOTABLE = 0x4
+const MF_NOSECTOR = 0x8
+const MF_NOBLOCKMAP = 0x10
+const MF_AMBUSH = 0x20
+const MF_JUSTHIT = 0x40
+const MF_JUSTATTACKED = 0x80
+const MF_SPAWNCEILING = 0x100
+const MF_NOGRAVITY = 0x200
+const MF_DROPOFF = 0x400
+const MF_PICKUP = 0x800
+const MF_NOCLIP = 0x1000
+const MF_SLIDE = 0x2000
+const MF_FLOAT = 0x4000
+const MF_TELEPORT = 0x8000
+const MF_MISSILE = 0x10000
+const MF_DROPPED = 0x20000
+const MF_SHADOW = 0x40000
+const MF_NOBLOOD = 0x80000
+const MF_CORPSE = 0x100000
+const MF_INFLOAT = 0x200000
+const MF_COUNTKILL = 0x400000
+const MF_COUNTITEM = 0x800000
+const MF_SKULLFLY = 0x1000000
+const MF_NOTDMATCH = 0x2000000
+const MF_TRANSLATION = 0xc000000
+const MF_TRANSSHIFT = 0x1a
+
+// In a state's frame: drawn as light as can be, whatever the light; the
+// rest of it says which picture.
+const FF_FULLBRIGHT = 0x8000
+const FF_FRAMEMASK = 0x7fff
+
+// The sprites: four letters, the first the lowest byte of the number.
+const SPR_TROO = 0
+const SPR_SHTG = 1
+const SPR_PUNG = 2
+const SPR_PISG = 3
+const SPR_PISF = 4
+const SPR_SHTF = 5
+const SPR_SHT2 = 6
+const SPR_CHGG = 7
+const SPR_CHGF = 8
+const SPR_MISG = 9
+const SPR_MISF = 10
+const SPR_SAWG = 11
+const SPR_PLSG = 12
+const SPR_PLSF = 13
+const SPR_BFGG = 14
+const SPR_BFGF = 15
+const SPR_BLUD = 16
+const SPR_PUFF = 17
+const SPR_BAL1 = 18
+const SPR_BAL2 = 19
+const SPR_PLSS = 20
+const SPR_PLSE = 21
+const SPR_MISL = 22
+const SPR_BFS1 = 23
+const SPR_BFE1 = 24
+const SPR_BFE2 = 25
+const SPR_TFOG = 26
+const SPR_IFOG = 27
+const SPR_PLAY = 28
+const SPR_POSS = 29
+const SPR_SPOS = 30
+const SPR_VILE = 31
+const SPR_FIRE = 32
+const SPR_FATB = 33
+const SPR_FBXP = 34
+const SPR_SKEL = 35
+const SPR_MANF = 36
+const SPR_FATT = 37
+const SPR_CPOS = 38
+const SPR_SARG = 39
+const SPR_HEAD = 40
+const SPR_BAL7 = 41
+const SPR_BOSS = 42
+const SPR_BOS2 = 43
+const SPR_SKUL = 44
+const SPR_SPID = 45
+const SPR_BSPI = 46
+const SPR_APLS = 47
+const SPR_APBX = 48
+const SPR_CYBR = 49
+const SPR_PAIN = 50
+const SPR_SSWV = 51
+const SPR_KEEN = 52
+const SPR_BBRN = 53
+const SPR_BOSF = 54
+const SPR_ARM1 = 55
+const SPR_ARM2 = 56
+const SPR_BAR1 = 57
+const SPR_BEXP = 58
+const SPR_FCAN = 59
+const SPR_BON1 = 60
+const SPR_BON2 = 61
+const SPR_BKEY = 62
+const SPR_RKEY = 63
+const SPR_YKEY = 64
+const SPR_BSKU = 65
+const SPR_RSKU = 66
+const SPR_YSKU = 67
+const SPR_STIM = 68
+const SPR_MEDI = 69
+const SPR_SOUL = 70
+const SPR_PINV = 71
+const SPR_PSTR = 72
+const SPR_PINS = 73
+const SPR_MEGA = 74
+const SPR_SUIT = 75
+const SPR_PMAP = 76
+const SPR_PVIS = 77
+const SPR_CLIP = 78
+const SPR_AMMO = 79
+const SPR_ROCK = 80
+const SPR_BROK = 81
+const SPR_CELL = 82
+const SPR_CELP = 83
+const SPR_SHEL = 84
+const SPR_SBOX = 85
+const SPR_BPAK = 86
+const SPR_BFUG = 87
+const SPR_MGUN = 88
+const SPR_CSAW = 89
+const SPR_LAUN = 90
+const SPR_PLAS = 91
+const SPR_SHOT = 92
+const SPR_SGN2 = 93
+const SPR_COLU = 94
+const SPR_SMT2 = 95
+const SPR_GOR1 = 96
+const SPR_POL2 = 97
+const SPR_POL5 = 98
+const SPR_POL4 = 99
+const SPR_POL3 = 100
+const SPR_POL1 = 101
+const SPR_POL6 = 102
+const SPR_GOR2 = 103
+const SPR_GOR3 = 104
+const SPR_GOR4 = 105
+const SPR_GOR5 = 106
+const SPR_SMIT = 107
+const SPR_COL1 = 108
+const SPR_COL2 = 109
+const SPR_COL3 = 110
+const SPR_COL4 = 111
+const SPR_CAND = 112
+const SPR_CBRA = 113
+const SPR_COL6 = 114
+const SPR_TRE1 = 115
+const SPR_TRE2 = 116
+const SPR_ELEC = 117
+const SPR_CEYE = 118
+const SPR_FSKU = 119
+const SPR_COL5 = 120
+const SPR_TBLU = 121
+const SPR_TGRN = 122
+const SPR_TRED = 123
+const SPR_SMBT = 124
+const SPR_SMGT = 125
+const SPR_SMRT = 126
+const SPR_HDB1 = 127
+const SPR_HDB2 = 128
+const SPR_HDB3 = 129
+const SPR_HDB4 = 130
+const SPR_HDB5 = 131
+const SPR_HDB6 = 132
+const SPR_POB1 = 133
+const SPR_POB2 = 134
+const SPR_BRS1 = 135
+const SPR_TLMP = 136
+const SPR_TLP2 = 137
+table sprnames: u32 = [
+  0x4f4f5254, 0x47544853, 0x474e5550, 0x47534950, 0x46534950, 0x46544853,  // TROO SHTG PUNG PISG PISF SHTF
+  0x32544853, 0x47474843, 0x46474843, 0x4753494d, 0x4653494d, 0x47574153,  // SHT2 CHGG CHGF MISG MISF SAWG
+  0x47534c50, 0x46534c50, 0x47474642, 0x46474642, 0x44554c42, 0x46465550,  // PLSG PLSF BFGG BFGF BLUD PUFF
+  0x314c4142, 0x324c4142, 0x53534c50, 0x45534c50, 0x4c53494d, 0x31534642,  // BAL1 BAL2 PLSS PLSE MISL BFS1
+  0x31454642, 0x32454642, 0x474f4654, 0x474f4649, 0x59414c50, 0x53534f50,  // BFE1 BFE2 TFOG IFOG PLAY POSS
+  0x534f5053, 0x454c4956, 0x45524946, 0x42544146, 0x50584246, 0x4c454b53,  // SPOS VILE FIRE FATB FBXP SKEL
+  0x464e414d, 0x54544146, 0x534f5043, 0x47524153, 0x44414548, 0x374c4142,  // MANF FATT CPOS SARG HEAD BAL7
+  0x53534f42, 0x32534f42, 0x4c554b53, 0x44495053, 0x49505342, 0x534c5041,  // BOSS BOS2 SKUL SPID BSPI APLS
+  0x58425041, 0x52425943, 0x4e494150, 0x56575353, 0x4e45454b, 0x4e524242,  // APBX CYBR PAIN SSWV KEEN BBRN
+  0x46534f42, 0x314d5241, 0x324d5241, 0x31524142, 0x50584542, 0x4e414346,  // BOSF ARM1 ARM2 BAR1 BEXP FCAN
+  0x314e4f42, 0x324e4f42, 0x59454b42, 0x59454b52, 0x59454b59, 0x554b5342,  // BON1 BON2 BKEY RKEY YKEY BSKU
+  0x554b5352, 0x554b5359, 0x4d495453, 0x4944454d, 0x4c554f53, 0x564e4950,  // RSKU YSKU STIM MEDI SOUL PINV
+  0x52545350, 0x534e4950, 0x4147454d, 0x54495553, 0x50414d50, 0x53495650,  // PSTR PINS MEGA SUIT PMAP PVIS
+  0x50494c43, 0x4f4d4d41, 0x4b434f52, 0x4b4f5242, 0x4c4c4543, 0x504c4543,  // CLIP AMMO ROCK BROK CELL CELP
+  0x4c454853, 0x584f4253, 0x4b415042, 0x47554642, 0x4e55474d, 0x57415343,  // SHEL SBOX BPAK BFUG MGUN CSAW
+  0x4e55414c, 0x53414c50, 0x544f4853, 0x324e4753, 0x554c4f43, 0x32544d53,  // LAUN PLAS SHOT SGN2 COLU SMT2
+  0x31524f47, 0x324c4f50, 0x354c4f50, 0x344c4f50, 0x334c4f50, 0x314c4f50,  // GOR1 POL2 POL5 POL4 POL3 POL1
+  0x364c4f50, 0x32524f47, 0x33524f47, 0x34524f47, 0x35524f47, 0x54494d53,  // POL6 GOR2 GOR3 GOR4 GOR5 SMIT
+  0x314c4f43, 0x324c4f43, 0x334c4f43, 0x344c4f43, 0x444e4143, 0x41524243,  // COL1 COL2 COL3 COL4 CAND CBRA
+  0x364c4f43, 0x31455254, 0x32455254, 0x43454c45, 0x45594543, 0x554b5346,  // COL6 TRE1 TRE2 ELEC CEYE FSKU
+  0x354c4f43, 0x554c4254, 0x4e524754, 0x44455254, 0x54424d53, 0x54474d53,  // COL5 TBLU TGRN TRED SMBT SMGT
+  0x54524d53, 0x31424448, 0x32424448, 0x33424448, 0x34424448, 0x35424448,  // SMRT HDB1 HDB2 HDB3 HDB4 HDB5
+  0x36424448, 0x31424f50, 0x32424f50, 0x31535242, 0x504d4c54, 0x32504c54,  // HDB6 POB1 POB2 BRS1 TLMP TLP2
+]
+
+// What a state may do when a thing comes to it.
+const A_None = 0
+const A_Light0 = 1
+const A_WeaponReady = 2
+const A_Lower = 3
+const A_Raise = 4
+const A_Punch = 5
+const A_ReFire = 6
+const A_FirePistol = 7
+const A_Light1 = 8
+const A_FireShotgun = 9
+const A_Light2 = 10
+const A_FireShotgun2 = 11
+const A_CheckReload = 12
+const A_OpenShotgun2 = 13
+const A_LoadShotgun2 = 14
+const A_CloseShotgun2 = 15
+const A_FireCGun = 16
+const A_GunFlash = 17
+const A_FireMissile = 18
+const A_Saw = 19
+const A_FirePlasma = 20
+const A_BFGsound = 21
+const A_FireBFG = 22
+const A_BFGSpray = 23
+const A_Explode = 24
+const A_Pain = 25
+const A_PlayerScream = 26
+const A_Fall = 27
+const A_XScream = 28
+const A_Look = 29
+const A_Chase = 30
+const A_FaceTarget = 31
+const A_PosAttack = 32
+const A_Scream = 33
+const A_SPosAttack = 34
+const A_VileChase = 35
+const A_VileStart = 36
+const A_VileTarget = 37
+const A_VileAttack = 38
+const A_StartFire = 39
+const A_Fire = 40
+const A_FireCrackle = 41
+const A_Tracer = 42
+const A_SkelWhoosh = 43
+const A_SkelFist = 44
+const A_SkelMissile = 45
+const A_FatRaise = 46
+const A_FatAttack1 = 47
+const A_FatAttack2 = 48
+const A_FatAttack3 = 49
+const A_BossDeath = 50
+const A_CPosAttack = 51
+const A_CPosRefire = 52
+const A_TroopAttack = 53
+const A_SargAttack = 54
+const A_HeadAttack = 55
+const A_BruisAttack = 56
+const A_SkullAttack = 57
+const A_Metal = 58
+const A_SpidRefire = 59
+const A_BabyMetal = 60
+const A_BspiAttack = 61
+const A_Hoof = 62
+const A_CyberAttack = 63
+const A_PainAttack = 64
+const A_PainDie = 65
+const A_KeenDie = 66
+const A_BrainPain = 67
+const A_BrainScream = 68
+const A_BrainDie = 69
+const A_BrainAwake = 70
+const A_BrainSpit = 71
+const A_SpawnSound = 72
+const A_SpawnFly = 73
+const A_BrainExplode = 74
+
+// The states.
+const S_NULL = 0
+const S_LIGHTDONE = 1
+const S_PUNCH = 2
+const S_PUNCHDOWN = 3
+const S_PUNCHUP = 4
+const S_PUNCH1 = 5
+const S_PUNCH2 = 6
+const S_PUNCH3 = 7
+const S_PUNCH4 = 8
+const S_PUNCH5 = 9
+const S_PISTOL = 10
+const S_PISTOLDOWN = 11
+const S_PISTOLUP = 12
+const S_PISTOL1 = 13
+const S_PISTOL2 = 14
+const S_PISTOL3 = 15
+const S_PISTOL4 = 16
+const S_PISTOLFLASH = 17
+const S_SGUN = 18
+const S_SGUNDOWN = 19
+const S_SGUNUP = 20
+const S_SGUN1 = 21
+const S_SGUN2 = 22
+const S_SGUN3 = 23
+const S_SGUN4 = 24
+const S_SGUN5 = 25
+const S_SGUN6 = 26
+const S_SGUN7 = 27
+const S_SGUN8 = 28
+const S_SGUN9 = 29
+const S_SGUNFLASH1 = 30
+const S_SGUNFLASH2 = 31
+const S_DSGUN = 32
+const S_DSGUNDOWN = 33
+const S_DSGUNUP = 34
+const S_DSGUN1 = 35
+const S_DSGUN2 = 36
+const S_DSGUN3 = 37
+const S_DSGUN4 = 38
+const S_DSGUN5 = 39
+const S_DSGUN6 = 40
+const S_DSGUN7 = 41
+const S_DSGUN8 = 42
+const S_DSGUN9 = 43
+const S_DSGUN10 = 44
+const S_DSNR1 = 45
+const S_DSNR2 = 46
+const S_DSGUNFLASH1 = 47
+const S_DSGUNFLASH2 = 48
+const S_CHAIN = 49
+const S_CHAINDOWN = 50
+const S_CHAINUP = 51
+const S_CHAIN1 = 52
+const S_CHAIN2 = 53
+const S_CHAIN3 = 54
+const S_CHAINFLASH1 = 55
+const S_CHAINFLASH2 = 56
+const S_MISSILE = 57
+const S_MISSILEDOWN = 58
+const S_MISSILEUP = 59
+const S_MISSILE1 = 60
+const S_MISSILE2 = 61
+const S_MISSILE3 = 62
+const S_MISSILEFLASH1 = 63
+const S_MISSILEFLASH2 = 64
+const S_MISSILEFLASH3 = 65
+const S_MISSILEFLASH4 = 66
+const S_SAW = 67
+const S_SAWB = 68
+const S_SAWDOWN = 69
+const S_SAWUP = 70
+const S_SAW1 = 71
+const S_SAW2 = 72
+const S_SAW3 = 73
+const S_PLASMA = 74
+const S_PLASMADOWN = 75
+const S_PLASMAUP = 76
+const S_PLASMA1 = 77
+const S_PLASMA2 = 78
+const S_PLASMAFLASH1 = 79
+const S_PLASMAFLASH2 = 80
+const S_BFG = 81
+const S_BFGDOWN = 82
+const S_BFGUP = 83
+const S_BFG1 = 84
+const S_BFG2 = 85
+const S_BFG3 = 86
+const S_BFG4 = 87
+const S_BFGFLASH1 = 88
+const S_BFGFLASH2 = 89
+const S_BLOOD1 = 90
+const S_BLOOD2 = 91
+const S_BLOOD3 = 92
+const S_PUFF1 = 93
+const S_PUFF2 = 94
+const S_PUFF3 = 95
+const S_PUFF4 = 96
+const S_TBALL1 = 97
+const S_TBALL2 = 98
+const S_TBALLX1 = 99
+const S_TBALLX2 = 100
+const S_TBALLX3 = 101
+const S_RBALL1 = 102
+const S_RBALL2 = 103
+const S_RBALLX1 = 104
+const S_RBALLX2 = 105
+const S_RBALLX3 = 106
+const S_PLASBALL = 107
+const S_PLASBALL2 = 108
+const S_PLASEXP = 109
+const S_PLASEXP2 = 110
+const S_PLASEXP3 = 111
+const S_PLASEXP4 = 112
+const S_PLASEXP5 = 113
+const S_ROCKET = 114
+const S_BFGSHOT = 115
+const S_BFGSHOT2 = 116
+const S_BFGLAND = 117
+const S_BFGLAND2 = 118
+const S_BFGLAND3 = 119
+const S_BFGLAND4 = 120
+const S_BFGLAND5 = 121
+const S_BFGLAND6 = 122
+const S_BFGEXP = 123
+const S_BFGEXP2 = 124
+const S_BFGEXP3 = 125
+const S_BFGEXP4 = 126
+const S_EXPLODE1 = 127
+const S_EXPLODE2 = 128
+const S_EXPLODE3 = 129
+const S_TFOG = 130
+const S_TFOG01 = 131
+const S_TFOG02 = 132
+const S_TFOG2 = 133
+const S_TFOG3 = 134
+const S_TFOG4 = 135
+const S_TFOG5 = 136
+const S_TFOG6 = 137
+const S_TFOG7 = 138
+const S_TFOG8 = 139
+const S_TFOG9 = 140
+const S_TFOG10 = 141
+const S_IFOG = 142
+const S_IFOG01 = 143
+const S_IFOG02 = 144
+const S_IFOG2 = 145
+const S_IFOG3 = 146
+const S_IFOG4 = 147
+const S_IFOG5 = 148
+const S_PLAY = 149
+const S_PLAY_RUN1 = 150
+const S_PLAY_RUN2 = 151
+const S_PLAY_RUN3 = 152
+const S_PLAY_RUN4 = 153
+const S_PLAY_ATK1 = 154
+const S_PLAY_ATK2 = 155
+const S_PLAY_PAIN = 156
+const S_PLAY_PAIN2 = 157
+const S_PLAY_DIE1 = 158
+const S_PLAY_DIE2 = 159
+const S_PLAY_DIE3 = 160
+const S_PLAY_DIE4 = 161
+const S_PLAY_DIE5 = 162
+const S_PLAY_DIE6 = 163
+const S_PLAY_DIE7 = 164
+const S_PLAY_XDIE1 = 165
+const S_PLAY_XDIE2 = 166
+const S_PLAY_XDIE3 = 167
+const S_PLAY_XDIE4 = 168
+const S_PLAY_XDIE5 = 169
+const S_PLAY_XDIE6 = 170
+const S_PLAY_XDIE7 = 171
+const S_PLAY_XDIE8 = 172
+const S_PLAY_XDIE9 = 173
+const S_POSS_STND = 174
+const S_POSS_STND2 = 175
+const S_POSS_RUN1 = 176
+const S_POSS_RUN2 = 177
+const S_POSS_RUN3 = 178
+const S_POSS_RUN4 = 179
+const S_POSS_RUN5 = 180
+const S_POSS_RUN6 = 181
+const S_POSS_RUN7 = 182
+const S_POSS_RUN8 = 183
+const S_POSS_ATK1 = 184
+const S_POSS_ATK2 = 185
+const S_POSS_ATK3 = 186
+const S_POSS_PAIN = 187
+const S_POSS_PAIN2 = 188
+const S_POSS_DIE1 = 189
+const S_POSS_DIE2 = 190
+const S_POSS_DIE3 = 191
+const S_POSS_DIE4 = 192
+const S_POSS_DIE5 = 193
+const S_POSS_XDIE1 = 194
+const S_POSS_XDIE2 = 195
+const S_POSS_XDIE3 = 196
+const S_POSS_XDIE4 = 197
+const S_POSS_XDIE5 = 198
+const S_POSS_XDIE6 = 199
+const S_POSS_XDIE7 = 200
+const S_POSS_XDIE8 = 201
+const S_POSS_XDIE9 = 202
+const S_POSS_RAISE1 = 203
+const S_POSS_RAISE2 = 204
+const S_POSS_RAISE3 = 205
+const S_POSS_RAISE4 = 206
+const S_SPOS_STND = 207
+const S_SPOS_STND2 = 208
+const S_SPOS_RUN1 = 209
+const S_SPOS_RUN2 = 210
+const S_SPOS_RUN3 = 211
+const S_SPOS_RUN4 = 212
+const S_SPOS_RUN5 = 213
+const S_SPOS_RUN6 = 214
+const S_SPOS_RUN7 = 215
+const S_SPOS_RUN8 = 216
+const S_SPOS_ATK1 = 217
+const S_SPOS_ATK2 = 218
+const S_SPOS_ATK3 = 219
+const S_SPOS_PAIN = 220
+const S_SPOS_PAIN2 = 221
+const S_SPOS_DIE1 = 222
+const S_SPOS_DIE2 = 223
+const S_SPOS_DIE3 = 224
+const S_SPOS_DIE4 = 225
+const S_SPOS_DIE5 = 226
+const S_SPOS_XDIE1 = 227
+const S_SPOS_XDIE2 = 228
+const S_SPOS_XDIE3 = 229
+const S_SPOS_XDIE4 = 230
+const S_SPOS_XDIE5 = 231
+const S_SPOS_XDIE6 = 232
+const S_SPOS_XDIE7 = 233
+const S_SPOS_XDIE8 = 234
+const S_SPOS_XDIE9 = 235
+const S_SPOS_RAISE1 = 236
+const S_SPOS_RAISE2 = 237
+const S_SPOS_RAISE3 = 238
+const S_SPOS_RAISE4 = 239
+const S_SPOS_RAISE5 = 240
+const S_VILE_STND = 241
+const S_VILE_STND2 = 242
+const S_VILE_RUN1 = 243
+const S_VILE_RUN2 = 244
+const S_VILE_RUN3 = 245
+const S_VILE_RUN4 = 246
+const S_VILE_RUN5 = 247
+const S_VILE_RUN6 = 248
+const S_VILE_RUN7 = 249
+const S_VILE_RUN8 = 250
+const S_VILE_RUN9 = 251
+const S_VILE_RUN10 = 252
+const S_VILE_RUN11 = 253
+const S_VILE_RUN12 = 254
+const S_VILE_ATK1 = 255
+const S_VILE_ATK2 = 256
+const S_VILE_ATK3 = 257
+const S_VILE_ATK4 = 258
+const S_VILE_ATK5 = 259
+const S_VILE_ATK6 = 260
+const S_VILE_ATK7 = 261
+const S_VILE_ATK8 = 262
+const S_VILE_ATK9 = 263
+const S_VILE_ATK10 = 264
+const S_VILE_ATK11 = 265
+const S_VILE_HEAL1 = 266
+const S_VILE_HEAL2 = 267
+const S_VILE_HEAL3 = 268
+const S_VILE_PAIN = 269
+const S_VILE_PAIN2 = 270
+const S_VILE_DIE1 = 271
+const S_VILE_DIE2 = 272
+const S_VILE_DIE3 = 273
+const S_VILE_DIE4 = 274
+const S_VILE_DIE5 = 275
+const S_VILE_DIE6 = 276
+const S_VILE_DIE7 = 277
+const S_VILE_DIE8 = 278
+const S_VILE_DIE9 = 279
+const S_VILE_DIE10 = 280
+const S_FIRE1 = 281
+const S_FIRE2 = 282
+const S_FIRE3 = 283
+const S_FIRE4 = 284
+const S_FIRE5 = 285
+const S_FIRE6 = 286
+const S_FIRE7 = 287
+const S_FIRE8 = 288
+const S_FIRE9 = 289
+const S_FIRE10 = 290
+const S_FIRE11 = 291
+const S_FIRE12 = 292
+const S_FIRE13 = 293
+const S_FIRE14 = 294
+const S_FIRE15 = 295
+const S_FIRE16 = 296
+const S_FIRE17 = 297
+const S_FIRE18 = 298
+const S_FIRE19 = 299
+const S_FIRE20 = 300
+const S_FIRE21 = 301
+const S_FIRE22 = 302
+const S_FIRE23 = 303
+const S_FIRE24 = 304
+const S_FIRE25 = 305
+const S_FIRE26 = 306
+const S_FIRE27 = 307
+const S_FIRE28 = 308
+const S_FIRE29 = 309
+const S_FIRE30 = 310
+const S_SMOKE1 = 311
+const S_SMOKE2 = 312
+const S_SMOKE3 = 313
+const S_SMOKE4 = 314
+const S_SMOKE5 = 315
+const S_TRACER = 316
+const S_TRACER2 = 317
+const S_TRACEEXP1 = 318
+const S_TRACEEXP2 = 319
+const S_TRACEEXP3 = 320
+const S_SKEL_STND = 321
+const S_SKEL_STND2 = 322
+const S_SKEL_RUN1 = 323
+const S_SKEL_RUN2 = 324
+const S_SKEL_RUN3 = 325
+const S_SKEL_RUN4 = 326
+const S_SKEL_RUN5 = 327
+const S_SKEL_RUN6 = 328
+const S_SKEL_RUN7 = 329
+const S_SKEL_RUN8 = 330
+const S_SKEL_RUN9 = 331
+const S_SKEL_RUN10 = 332
+const S_SKEL_RUN11 = 333
+const S_SKEL_RUN12 = 334
+const S_SKEL_FIST1 = 335
+const S_SKEL_FIST2 = 336
+const S_SKEL_FIST3 = 337
+const S_SKEL_FIST4 = 338
+const S_SKEL_MISS1 = 339
+const S_SKEL_MISS2 = 340
+const S_SKEL_MISS3 = 341
+const S_SKEL_MISS4 = 342
+const S_SKEL_PAIN = 343
+const S_SKEL_PAIN2 = 344
+const S_SKEL_DIE1 = 345
+const S_SKEL_DIE2 = 346
+const S_SKEL_DIE3 = 347
+const S_SKEL_DIE4 = 348
+const S_SKEL_DIE5 = 349
+const S_SKEL_DIE6 = 350
+const S_SKEL_RAISE1 = 351
+const S_SKEL_RAISE2 = 352
+const S_SKEL_RAISE3 = 353
+const S_SKEL_RAISE4 = 354
+const S_SKEL_RAISE5 = 355
+const S_SKEL_RAISE6 = 356
+const S_FATSHOT1 = 357
+const S_FATSHOT2 = 358
+const S_FATSHOTX1 = 359
+const S_FATSHOTX2 = 360
+const S_FATSHOTX3 = 361
+const S_FATT_STND = 362
+const S_FATT_STND2 = 363
+const S_FATT_RUN1 = 364
+const S_FATT_RUN2 = 365
+const S_FATT_RUN3 = 366
+const S_FATT_RUN4 = 367
+const S_FATT_RUN5 = 368
+const S_FATT_RUN6 = 369
+const S_FATT_RUN7 = 370
+const S_FATT_RUN8 = 371
+const S_FATT_RUN9 = 372
+const S_FATT_RUN10 = 373
+const S_FATT_RUN11 = 374
+const S_FATT_RUN12 = 375
+const S_FATT_ATK1 = 376
+const S_FATT_ATK2 = 377
+const S_FATT_ATK3 = 378
+const S_FATT_ATK4 = 379
+const S_FATT_ATK5 = 380
+const S_FATT_ATK6 = 381
+const S_FATT_ATK7 = 382
+const S_FATT_ATK8 = 383
+const S_FATT_ATK9 = 384
+const S_FATT_ATK10 = 385
+const S_FATT_PAIN = 386
+const S_FATT_PAIN2 = 387
+const S_FATT_DIE1 = 388
+const S_FATT_DIE2 = 389
+const S_FATT_DIE3 = 390
+const S_FATT_DIE4 = 391
+const S_FATT_DIE5 = 392
+const S_FATT_DIE6 = 393
+const S_FATT_DIE7 = 394
+const S_FATT_DIE8 = 395
+const S_FATT_DIE9 = 396
+const S_FATT_DIE10 = 397
+const S_FATT_RAISE1 = 398
+const S_FATT_RAISE2 = 399
+const S_FATT_RAISE3 = 400
+const S_FATT_RAISE4 = 401
+const S_FATT_RAISE5 = 402
+const S_FATT_RAISE6 = 403
+const S_FATT_RAISE7 = 404
+const S_FATT_RAISE8 = 405
+const S_CPOS_STND = 406
+const S_CPOS_STND2 = 407
+const S_CPOS_RUN1 = 408
+const S_CPOS_RUN2 = 409
+const S_CPOS_RUN3 = 410
+const S_CPOS_RUN4 = 411
+const S_CPOS_RUN5 = 412
+const S_CPOS_RUN6 = 413
+const S_CPOS_RUN7 = 414
+const S_CPOS_RUN8 = 415
+const S_CPOS_ATK1 = 416
+const S_CPOS_ATK2 = 417
+const S_CPOS_ATK3 = 418
+const S_CPOS_ATK4 = 419
+const S_CPOS_PAIN = 420
+const S_CPOS_PAIN2 = 421
+const S_CPOS_DIE1 = 422
+const S_CPOS_DIE2 = 423
+const S_CPOS_DIE3 = 424
+const S_CPOS_DIE4 = 425
+const S_CPOS_DIE5 = 426
+const S_CPOS_DIE6 = 427
+const S_CPOS_DIE7 = 428
+const S_CPOS_XDIE1 = 429
+const S_CPOS_XDIE2 = 430
+const S_CPOS_XDIE3 = 431
+const S_CPOS_XDIE4 = 432
+const S_CPOS_XDIE5 = 433
+const S_CPOS_XDIE6 = 434
+const S_CPOS_RAISE1 = 435
+const S_CPOS_RAISE2 = 436
+const S_CPOS_RAISE3 = 437
+const S_CPOS_RAISE4 = 438
+const S_CPOS_RAISE5 = 439
+const S_CPOS_RAISE6 = 440
+const S_CPOS_RAISE7 = 441
+const S_TROO_STND = 442
+const S_TROO_STND2 = 443
+const S_TROO_RUN1 = 444
+const S_TROO_RUN2 = 445
+const S_TROO_RUN3 = 446
+const S_TROO_RUN4 = 447
+const S_TROO_RUN5 = 448
+const S_TROO_RUN6 = 449
+const S_TROO_RUN7 = 450
+const S_TROO_RUN8 = 451
+const S_TROO_ATK1 = 452
+const S_TROO_ATK2 = 453
+const S_TROO_ATK3 = 454
+const S_TROO_PAIN = 455
+const S_TROO_PAIN2 = 456
+const S_TROO_DIE1 = 457
+const S_TROO_DIE2 = 458
+const S_TROO_DIE3 = 459
+const S_TROO_DIE4 = 460
+const S_TROO_DIE5 = 461
+const S_TROO_XDIE1 = 462
+const S_TROO_XDIE2 = 463
+const S_TROO_XDIE3 = 464
+const S_TROO_XDIE4 = 465
+const S_TROO_XDIE5 = 466
+const S_TROO_XDIE6 = 467
+const S_TROO_XDIE7 = 468
+const S_TROO_XDIE8 = 469
+const S_TROO_RAISE1 = 470
+const S_TROO_RAISE2 = 471
+const S_TROO_RAISE3 = 472
+const S_TROO_RAISE4 = 473
+const S_TROO_RAISE5 = 474
+const S_SARG_STND = 475
+const S_SARG_STND2 = 476
+const S_SARG_RUN1 = 477
+const S_SARG_RUN2 = 478
+const S_SARG_RUN3 = 479
+const S_SARG_RUN4 = 480
+const S_SARG_RUN5 = 481
+const S_SARG_RUN6 = 482
+const S_SARG_RUN7 = 483
+const S_SARG_RUN8 = 484
+const S_SARG_ATK1 = 485
+const S_SARG_ATK2 = 486
+const S_SARG_ATK3 = 487
+const S_SARG_PAIN = 488
+const S_SARG_PAIN2 = 489
+const S_SARG_DIE1 = 490
+const S_SARG_DIE2 = 491
+const S_SARG_DIE3 = 492
+const S_SARG_DIE4 = 493
+const S_SARG_DIE5 = 494
+const S_SARG_DIE6 = 495
+const S_SARG_RAISE1 = 496
+const S_SARG_RAISE2 = 497
+const S_SARG_RAISE3 = 498
+const S_SARG_RAISE4 = 499
+const S_SARG_RAISE5 = 500
+const S_SARG_RAISE6 = 501
+const S_HEAD_STND = 502
+const S_HEAD_RUN1 = 503
+const S_HEAD_ATK1 = 504
+const S_HEAD_ATK2 = 505
+const S_HEAD_ATK3 = 506
+const S_HEAD_PAIN = 507
+const S_HEAD_PAIN2 = 508
+const S_HEAD_PAIN3 = 509
+const S_HEAD_DIE1 = 510
+const S_HEAD_DIE2 = 511
+const S_HEAD_DIE3 = 512
+const S_HEAD_DIE4 = 513
+const S_HEAD_DIE5 = 514
+const S_HEAD_DIE6 = 515
+const S_HEAD_RAISE1 = 516
+const S_HEAD_RAISE2 = 517
+const S_HEAD_RAISE3 = 518
+const S_HEAD_RAISE4 = 519
+const S_HEAD_RAISE5 = 520
+const S_HEAD_RAISE6 = 521
+const S_BRBALL1 = 522
+const S_BRBALL2 = 523
+const S_BRBALLX1 = 524
+const S_BRBALLX2 = 525
+const S_BRBALLX3 = 526
+const S_BOSS_STND = 527
+const S_BOSS_STND2 = 528
+const S_BOSS_RUN1 = 529
+const S_BOSS_RUN2 = 530
+const S_BOSS_RUN3 = 531
+const S_BOSS_RUN4 = 532
+const S_BOSS_RUN5 = 533
+const S_BOSS_RUN6 = 534
+const S_BOSS_RUN7 = 535
+const S_BOSS_RUN8 = 536
+const S_BOSS_ATK1 = 537
+const S_BOSS_ATK2 = 538
+const S_BOSS_ATK3 = 539
+const S_BOSS_PAIN = 540
+const S_BOSS_PAIN2 = 541
+const S_BOSS_DIE1 = 542
+const S_BOSS_DIE2 = 543
+const S_BOSS_DIE3 = 544
+const S_BOSS_DIE4 = 545
+const S_BOSS_DIE5 = 546
+const S_BOSS_DIE6 = 547
+const S_BOSS_DIE7 = 548
+const S_BOSS_RAISE1 = 549
+const S_BOSS_RAISE2 = 550
+const S_BOSS_RAISE3 = 551
+const S_BOSS_RAISE4 = 552
+const S_BOSS_RAISE5 = 553
+const S_BOSS_RAISE6 = 554
+const S_BOSS_RAISE7 = 555
+const S_BOS2_STND = 556
+const S_BOS2_STND2 = 557
+const S_BOS2_RUN1 = 558
+const S_BOS2_RUN2 = 559
+const S_BOS2_RUN3 = 560
+const S_BOS2_RUN4 = 561
+const S_BOS2_RUN5 = 562
+const S_BOS2_RUN6 = 563
+const S_BOS2_RUN7 = 564
+const S_BOS2_RUN8 = 565
+const S_BOS2_ATK1 = 566
+const S_BOS2_ATK2 = 567
+const S_BOS2_ATK3 = 568
+const S_BOS2_PAIN = 569
+const S_BOS2_PAIN2 = 570
+const S_BOS2_DIE1 = 571
+const S_BOS2_DIE2 = 572
+const S_BOS2_DIE3 = 573
+const S_BOS2_DIE4 = 574
+const S_BOS2_DIE5 = 575
+const S_BOS2_DIE6 = 576
+const S_BOS2_DIE7 = 577
+const S_BOS2_RAISE1 = 578
+const S_BOS2_RAISE2 = 579
+const S_BOS2_RAISE3 = 580
+const S_BOS2_RAISE4 = 581
+const S_BOS2_RAISE5 = 582
+const S_BOS2_RAISE6 = 583
+const S_BOS2_RAISE7 = 584
+const S_SKULL_STND = 585
+const S_SKULL_STND2 = 586
+const S_SKULL_RUN1 = 587
+const S_SKULL_RUN2 = 588
+const S_SKULL_ATK1 = 589
+const S_SKULL_ATK2 = 590
+const S_SKULL_ATK3 = 591
+const S_SKULL_ATK4 = 592
+const S_SKULL_PAIN = 593
+const S_SKULL_PAIN2 = 594
+const S_SKULL_DIE1 = 595
+const S_SKULL_DIE2 = 596
+const S_SKULL_DIE3 = 597
+const S_SKULL_DIE4 = 598
+const S_SKULL_DIE5 = 599
+const S_SKULL_DIE6 = 600
+const S_SPID_STND = 601
+const S_SPID_STND2 = 602
+const S_SPID_RUN1 = 603
+const S_SPID_RUN2 = 604
+const S_SPID_RUN3 = 605
+const S_SPID_RUN4 = 606
+const S_SPID_RUN5 = 607
+const S_SPID_RUN6 = 608
+const S_SPID_RUN7 = 609
+const S_SPID_RUN8 = 610
+const S_SPID_RUN9 = 611
+const S_SPID_RUN10 = 612
+const S_SPID_RUN11 = 613
+const S_SPID_RUN12 = 614
+const S_SPID_ATK1 = 615
+const S_SPID_ATK2 = 616
+const S_SPID_ATK3 = 617
+const S_SPID_ATK4 = 618
+const S_SPID_PAIN = 619
+const S_SPID_PAIN2 = 620
+const S_SPID_DIE1 = 621
+const S_SPID_DIE2 = 622
+const S_SPID_DIE3 = 623
+const S_SPID_DIE4 = 624
+const S_SPID_DIE5 = 625
+const S_SPID_DIE6 = 626
+const S_SPID_DIE7 = 627
+const S_SPID_DIE8 = 628
+const S_SPID_DIE9 = 629
+const S_SPID_DIE10 = 630
+const S_SPID_DIE11 = 631
+const S_BSPI_STND = 632
+const S_BSPI_STND2 = 633
+const S_BSPI_SIGHT = 634
+const S_BSPI_RUN1 = 635
+const S_BSPI_RUN2 = 636
+const S_BSPI_RUN3 = 637
+const S_BSPI_RUN4 = 638
+const S_BSPI_RUN5 = 639
+const S_BSPI_RUN6 = 640
+const S_BSPI_RUN7 = 641
+const S_BSPI_RUN8 = 642
+const S_BSPI_RUN9 = 643
+const S_BSPI_RUN10 = 644
+const S_BSPI_RUN11 = 645
+const S_BSPI_RUN12 = 646
+const S_BSPI_ATK1 = 647
+const S_BSPI_ATK2 = 648
+const S_BSPI_ATK3 = 649
+const S_BSPI_ATK4 = 650
+const S_BSPI_PAIN = 651
+const S_BSPI_PAIN2 = 652
+const S_BSPI_DIE1 = 653
+const S_BSPI_DIE2 = 654
+const S_BSPI_DIE3 = 655
+const S_BSPI_DIE4 = 656
+const S_BSPI_DIE5 = 657
+const S_BSPI_DIE6 = 658
+const S_BSPI_DIE7 = 659
+const S_BSPI_RAISE1 = 660
+const S_BSPI_RAISE2 = 661
+const S_BSPI_RAISE3 = 662
+const S_BSPI_RAISE4 = 663
+const S_BSPI_RAISE5 = 664
+const S_BSPI_RAISE6 = 665
+const S_BSPI_RAISE7 = 666
+const S_ARACH_PLAZ = 667
+const S_ARACH_PLAZ2 = 668
+const S_ARACH_PLEX = 669
+const S_ARACH_PLEX2 = 670
+const S_ARACH_PLEX3 = 671
+const S_ARACH_PLEX4 = 672
+const S_ARACH_PLEX5 = 673
+const S_CYBER_STND = 674
+const S_CYBER_STND2 = 675
+const S_CYBER_RUN1 = 676
+const S_CYBER_RUN2 = 677
+const S_CYBER_RUN3 = 678
+const S_CYBER_RUN4 = 679
+const S_CYBER_RUN5 = 680
+const S_CYBER_RUN6 = 681
+const S_CYBER_RUN7 = 682
+const S_CYBER_RUN8 = 683
+const S_CYBER_ATK1 = 684
+const S_CYBER_ATK2 = 685
+const S_CYBER_ATK3 = 686
+const S_CYBER_ATK4 = 687
+const S_CYBER_ATK5 = 688
+const S_CYBER_ATK6 = 689
+const S_CYBER_PAIN = 690
+const S_CYBER_DIE1 = 691
+const S_CYBER_DIE2 = 692
+const S_CYBER_DIE3 = 693
+const S_CYBER_DIE4 = 694
+const S_CYBER_DIE5 = 695
+const S_CYBER_DIE6 = 696
+const S_CYBER_DIE7 = 697
+const S_CYBER_DIE8 = 698
+const S_CYBER_DIE9 = 699
+const S_CYBER_DIE10 = 700
+const S_PAIN_STND = 701
+const S_PAIN_RUN1 = 702
+const S_PAIN_RUN2 = 703
+const S_PAIN_RUN3 = 704
+const S_PAIN_RUN4 = 705
+const S_PAIN_RUN5 = 706
+const S_PAIN_RUN6 = 707
+const S_PAIN_ATK1 = 708
+const S_PAIN_ATK2 = 709
+const S_PAIN_ATK3 = 710
+const S_PAIN_ATK4 = 711
+const S_PAIN_PAIN = 712
+const S_PAIN_PAIN2 = 713
+const S_PAIN_DIE1 = 714
+const S_PAIN_DIE2 = 715
+const S_PAIN_DIE3 = 716
+const S_PAIN_DIE4 = 717
+const S_PAIN_DIE5 = 718
+const S_PAIN_DIE6 = 719
+const S_PAIN_RAISE1 = 720
+const S_PAIN_RAISE2 = 721
+const S_PAIN_RAISE3 = 722
+const S_PAIN_RAISE4 = 723
+const S_PAIN_RAISE5 = 724
+const S_PAIN_RAISE6 = 725
+const S_SSWV_STND = 726
+const S_SSWV_STND2 = 727
+const S_SSWV_RUN1 = 728
+const S_SSWV_RUN2 = 729
+const S_SSWV_RUN3 = 730
+const S_SSWV_RUN4 = 731
+const S_SSWV_RUN5 = 732
+const S_SSWV_RUN6 = 733
+const S_SSWV_RUN7 = 734
+const S_SSWV_RUN8 = 735
+const S_SSWV_ATK1 = 736
+const S_SSWV_ATK2 = 737
+const S_SSWV_ATK3 = 738
+const S_SSWV_ATK4 = 739
+const S_SSWV_ATK5 = 740
+const S_SSWV_ATK6 = 741
+const S_SSWV_PAIN = 742
+const S_SSWV_PAIN2 = 743
+const S_SSWV_DIE1 = 744
+const S_SSWV_DIE2 = 745
+const S_SSWV_DIE3 = 746
+const S_SSWV_DIE4 = 747
+const S_SSWV_DIE5 = 748
+const S_SSWV_XDIE1 = 749
+const S_SSWV_XDIE2 = 750
+const S_SSWV_XDIE3 = 751
+const S_SSWV_XDIE4 = 752
+const S_SSWV_XDIE5 = 753
+const S_SSWV_XDIE6 = 754
+const S_SSWV_XDIE7 = 755
+const S_SSWV_XDIE8 = 756
+const S_SSWV_XDIE9 = 757
+const S_SSWV_RAISE1 = 758
+const S_SSWV_RAISE2 = 759
+const S_SSWV_RAISE3 = 760
+const S_SSWV_RAISE4 = 761
+const S_SSWV_RAISE5 = 762
+const S_KEENSTND = 763
+const S_COMMKEEN = 764
+const S_COMMKEEN2 = 765
+const S_COMMKEEN3 = 766
+const S_COMMKEEN4 = 767
+const S_COMMKEEN5 = 768
+const S_COMMKEEN6 = 769
+const S_COMMKEEN7 = 770
+const S_COMMKEEN8 = 771
+const S_COMMKEEN9 = 772
+const S_COMMKEEN10 = 773
+const S_COMMKEEN11 = 774
+const S_COMMKEEN12 = 775
+const S_KEENPAIN = 776
+const S_KEENPAIN2 = 777
+const S_BRAIN = 778
+const S_BRAIN_PAIN = 779
+const S_BRAIN_DIE1 = 780
+const S_BRAIN_DIE2 = 781
+const S_BRAIN_DIE3 = 782
+const S_BRAIN_DIE4 = 783
+const S_BRAINEYE = 784
+const S_BRAINEYESEE = 785
+const S_BRAINEYE1 = 786
+const S_SPAWN1 = 787
+const S_SPAWN2 = 788
+const S_SPAWN3 = 789
+const S_SPAWN4 = 790
+const S_SPAWNFIRE1 = 791
+const S_SPAWNFIRE2 = 792
+const S_SPAWNFIRE3 = 793
+const S_SPAWNFIRE4 = 794
+const S_SPAWNFIRE5 = 795
+const S_SPAWNFIRE6 = 796
+const S_SPAWNFIRE7 = 797
+const S_SPAWNFIRE8 = 798
+const S_BRAINEXPLODE1 = 799
+const S_BRAINEXPLODE2 = 800
+const S_BRAINEXPLODE3 = 801
+const S_ARM1 = 802
+const S_ARM1A = 803
+const S_ARM2 = 804
+const S_ARM2A = 805
+const S_BAR1 = 806
+const S_BAR2 = 807
+const S_BEXP = 808
+const S_BEXP2 = 809
+const S_BEXP3 = 810
+const S_BEXP4 = 811
+const S_BEXP5 = 812
+const S_BBAR1 = 813
+const S_BBAR2 = 814
+const S_BBAR3 = 815
+const S_BON1 = 816
+const S_BON1A = 817
+const S_BON1B = 818
+const S_BON1C = 819
+const S_BON1D = 820
+const S_BON1E = 821
+const S_BON2 = 822
+const S_BON2A = 823
+const S_BON2B = 824
+const S_BON2C = 825
+const S_BON2D = 826
+const S_BON2E = 827
+const S_BKEY = 828
+const S_BKEY2 = 829
+const S_RKEY = 830
+const S_RKEY2 = 831
+const S_YKEY = 832
+const S_YKEY2 = 833
+const S_BSKULL = 834
+const S_BSKULL2 = 835
+const S_RSKULL = 836
+const S_RSKULL2 = 837
+const S_YSKULL = 838
+const S_YSKULL2 = 839
+const S_STIM = 840
+const S_MEDI = 841
+const S_SOUL = 842
+const S_SOUL2 = 843
+const S_SOUL3 = 844
+const S_SOUL4 = 845
+const S_SOUL5 = 846
+const S_SOUL6 = 847
+const S_PINV = 848
+const S_PINV2 = 849
+const S_PINV3 = 850
+const S_PINV4 = 851
+const S_PSTR = 852
+const S_PINS = 853
+const S_PINS2 = 854
+const S_PINS3 = 855
+const S_PINS4 = 856
+const S_MEGA = 857
+const S_MEGA2 = 858
+const S_MEGA3 = 859
+const S_MEGA4 = 860
+const S_SUIT = 861
+const S_PMAP = 862
+const S_PMAP2 = 863
+const S_PMAP3 = 864
+const S_PMAP4 = 865
+const S_PMAP5 = 866
+const S_PMAP6 = 867
+const S_PVIS = 868
+const S_PVIS2 = 869
+const S_CLIP = 870
+const S_AMMO = 871
+const S_ROCK = 872
+const S_BROK = 873
+const S_CELL = 874
+const S_CELP = 875
+const S_SHEL = 876
+const S_SBOX = 877
+const S_BPAK = 878
+const S_BFUG = 879
+const S_MGUN = 880
+const S_CSAW = 881
+const S_LAUN = 882
+const S_PLAS = 883
+const S_SHOT = 884
+const S_SHOT2 = 885
+const S_COLU = 886
+const S_STALAG = 887
+const S_BLOODYTWITCH = 888
+const S_BLOODYTWITCH2 = 889
+const S_BLOODYTWITCH3 = 890
+const S_BLOODYTWITCH4 = 891
+const S_DEADTORSO = 892
+const S_DEADBOTTOM = 893
+const S_HEADSONSTICK = 894
+const S_GIBS = 895
+const S_HEADONASTICK = 896
+const S_HEADCANDLES = 897
+const S_HEADCANDLES2 = 898
+const S_DEADSTICK = 899
+const S_LIVESTICK = 900
+const S_LIVESTICK2 = 901
+const S_MEAT2 = 902
+const S_MEAT3 = 903
+const S_MEAT4 = 904
+const S_MEAT5 = 905
+const S_STALAGTITE = 906
+const S_TALLGRNCOL = 907
+const S_SHRTGRNCOL = 908
+const S_TALLREDCOL = 909
+const S_SHRTREDCOL = 910
+const S_CANDLESTIK = 911
+const S_CANDELABRA = 912
+const S_SKULLCOL = 913
+const S_TORCHTREE = 914
+const S_BIGTREE = 915
+const S_TECHPILLAR = 916
+const S_EVILEYE = 917
+const S_EVILEYE2 = 918
+const S_EVILEYE3 = 919
+const S_EVILEYE4 = 920
+const S_FLOATSKULL = 921
+const S_FLOATSKULL2 = 922
+const S_FLOATSKULL3 = 923
+const S_HEARTCOL = 924
+const S_HEARTCOL2 = 925
+const S_BLUETORCH = 926
+const S_BLUETORCH2 = 927
+const S_BLUETORCH3 = 928
+const S_BLUETORCH4 = 929
+const S_GREENTORCH = 930
+const S_GREENTORCH2 = 931
+const S_GREENTORCH3 = 932
+const S_GREENTORCH4 = 933
+const S_REDTORCH = 934
+const S_REDTORCH2 = 935
+const S_REDTORCH3 = 936
+const S_REDTORCH4 = 937
+const S_BTORCHSHRT = 938
+const S_BTORCHSHRT2 = 939
+const S_BTORCHSHRT3 = 940
+const S_BTORCHSHRT4 = 941
+const S_GTORCHSHRT = 942
+const S_GTORCHSHRT2 = 943
+const S_GTORCHSHRT3 = 944
+const S_GTORCHSHRT4 = 945
+const S_RTORCHSHRT = 946
+const S_RTORCHSHRT2 = 947
+const S_RTORCHSHRT3 = 948
+const S_RTORCHSHRT4 = 949
+const S_HANGNOGUTS = 950
+const S_HANGBNOBRAIN = 951
+const S_HANGTLOOKDN = 952
+const S_HANGTSKULL = 953
+const S_HANGTLOOKUP = 954
+const S_HANGTNOBRAIN = 955
+const S_COLONGIBS = 956
+const S_SMALLPOOL = 957
+const S_BRAINSTEM = 958
+const S_TECHLAMP = 959
+const S_TECHLAMP2 = 960
+const S_TECHLAMP3 = 961
+const S_TECHLAMP4 = 962
+const S_TECH2LAMP = 963
+const S_TECH2LAMP2 = 964
+const S_TECH2LAMP3 = 965
+const S_TECH2LAMP4 = 966
+
+// A state: the sprite and its picture, how many tics it lasts (-1: for
+// good), what it does, the state after it, and two numbers for what it
+// does.
+table states {
+  sprite: i32, frame: i32, tics: i32, action: i32, nextstate: i32,
+  misc1: i32, misc2: i32
+} = [
+  { sprite: 0, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 4, tics: 0, action: 1, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 2, frame: 0, tics: 1, action: 2, nextstate: 2, misc1: 0, misc2: 0 },
+  { sprite: 2, frame: 0, tics: 1, action: 3, nextstate: 3, misc1: 0, misc2: 0 },
+  { sprite: 2, frame: 0, tics: 1, action: 4, nextstate: 4, misc1: 0, misc2: 0 },
+  { sprite: 2, frame: 1, tics: 4, action: 0, nextstate: 6, misc1: 0, misc2: 0 },
+  { sprite: 2, frame: 2, tics: 4, action: 5, nextstate: 7, misc1: 0, misc2: 0 },
+  { sprite: 2, frame: 3, tics: 5, action: 0, nextstate: 8, misc1: 0, misc2: 0 },
+  { sprite: 2, frame: 2, tics: 4, action: 0, nextstate: 9, misc1: 0, misc2: 0 },
+  { sprite: 2, frame: 1, tics: 5, action: 6, nextstate: 2, misc1: 0, misc2: 0 },
+  { sprite: 3, frame: 0, tics: 1, action: 2, nextstate: 10, misc1: 0, misc2: 0 },
+  { sprite: 3, frame: 0, tics: 1, action: 3, nextstate: 11, misc1: 0, misc2: 0 },
+  { sprite: 3, frame: 0, tics: 1, action: 4, nextstate: 12, misc1: 0, misc2: 0 },
+  { sprite: 3, frame: 0, tics: 4, action: 0, nextstate: 14, misc1: 0, misc2: 0 },
+  { sprite: 3, frame: 1, tics: 6, action: 7, nextstate: 15, misc1: 0, misc2: 0 },
+  { sprite: 3, frame: 2, tics: 4, action: 0, nextstate: 16, misc1: 0, misc2: 0 },
+  { sprite: 3, frame: 1, tics: 5, action: 6, nextstate: 10, misc1: 0, misc2: 0 },
+  { sprite: 4, frame: 32768, tics: 7, action: 8, nextstate: 1, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 0, tics: 1, action: 2, nextstate: 18, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 0, tics: 1, action: 3, nextstate: 19, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 0, tics: 1, action: 4, nextstate: 20, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 0, tics: 3, action: 0, nextstate: 22, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 0, tics: 7, action: 9, nextstate: 23, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 1, tics: 5, action: 0, nextstate: 24, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 2, tics: 5, action: 0, nextstate: 25, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 3, tics: 4, action: 0, nextstate: 26, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 2, tics: 5, action: 0, nextstate: 27, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 1, tics: 5, action: 0, nextstate: 28, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 0, tics: 3, action: 0, nextstate: 29, misc1: 0, misc2: 0 },
+  { sprite: 1, frame: 0, tics: 7, action: 6, nextstate: 18, misc1: 0, misc2: 0 },
+  { sprite: 5, frame: 32768, tics: 4, action: 8, nextstate: 31, misc1: 0, misc2: 0 },
+  { sprite: 5, frame: 32769, tics: 3, action: 10, nextstate: 1, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 0, tics: 1, action: 2, nextstate: 32, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 0, tics: 1, action: 3, nextstate: 33, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 0, tics: 1, action: 4, nextstate: 34, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 0, tics: 3, action: 0, nextstate: 36, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 0, tics: 7, action: 11, nextstate: 37, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 1, tics: 7, action: 0, nextstate: 38, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 2, tics: 7, action: 12, nextstate: 39, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 3, tics: 7, action: 13, nextstate: 40, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 4, tics: 7, action: 0, nextstate: 41, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 5, tics: 7, action: 14, nextstate: 42, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 6, tics: 6, action: 0, nextstate: 43, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 7, tics: 6, action: 15, nextstate: 44, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 0, tics: 5, action: 6, nextstate: 32, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 1, tics: 7, action: 0, nextstate: 46, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 0, tics: 3, action: 0, nextstate: 33, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 32776, tics: 5, action: 8, nextstate: 48, misc1: 0, misc2: 0 },
+  { sprite: 6, frame: 32777, tics: 4, action: 10, nextstate: 1, misc1: 0, misc2: 0 },
+  { sprite: 7, frame: 0, tics: 1, action: 2, nextstate: 49, misc1: 0, misc2: 0 },
+  { sprite: 7, frame: 0, tics: 1, action: 3, nextstate: 50, misc1: 0, misc2: 0 },
+  { sprite: 7, frame: 0, tics: 1, action: 4, nextstate: 51, misc1: 0, misc2: 0 },
+  { sprite: 7, frame: 0, tics: 4, action: 16, nextstate: 53, misc1: 0, misc2: 0 },
+  { sprite: 7, frame: 1, tics: 4, action: 16, nextstate: 54, misc1: 0, misc2: 0 },
+  { sprite: 7, frame: 1, tics: 0, action: 6, nextstate: 49, misc1: 0, misc2: 0 },
+  { sprite: 8, frame: 32768, tics: 5, action: 8, nextstate: 1, misc1: 0, misc2: 0 },
+  { sprite: 8, frame: 32769, tics: 5, action: 10, nextstate: 1, misc1: 0, misc2: 0 },
+  { sprite: 9, frame: 0, tics: 1, action: 2, nextstate: 57, misc1: 0, misc2: 0 },
+  { sprite: 9, frame: 0, tics: 1, action: 3, nextstate: 58, misc1: 0, misc2: 0 },
+  { sprite: 9, frame: 0, tics: 1, action: 4, nextstate: 59, misc1: 0, misc2: 0 },
+  { sprite: 9, frame: 1, tics: 8, action: 17, nextstate: 61, misc1: 0, misc2: 0 },
+  { sprite: 9, frame: 1, tics: 12, action: 18, nextstate: 62, misc1: 0, misc2: 0 },
+  { sprite: 9, frame: 1, tics: 0, action: 6, nextstate: 57, misc1: 0, misc2: 0 },
+  { sprite: 10, frame: 32768, tics: 3, action: 8, nextstate: 64, misc1: 0, misc2: 0 },
+  { sprite: 10, frame: 32769, tics: 4, action: 0, nextstate: 65, misc1: 0, misc2: 0 },
+  { sprite: 10, frame: 32770, tics: 4, action: 10, nextstate: 66, misc1: 0, misc2: 0 },
+  { sprite: 10, frame: 32771, tics: 4, action: 10, nextstate: 1, misc1: 0, misc2: 0 },
+  { sprite: 11, frame: 2, tics: 4, action: 2, nextstate: 68, misc1: 0, misc2: 0 },
+  { sprite: 11, frame: 3, tics: 4, action: 2, nextstate: 67, misc1: 0, misc2: 0 },
+  { sprite: 11, frame: 2, tics: 1, action: 3, nextstate: 69, misc1: 0, misc2: 0 },
+  { sprite: 11, frame: 2, tics: 1, action: 4, nextstate: 70, misc1: 0, misc2: 0 },
+  { sprite: 11, frame: 0, tics: 4, action: 19, nextstate: 72, misc1: 0, misc2: 0 },
+  { sprite: 11, frame: 1, tics: 4, action: 19, nextstate: 73, misc1: 0, misc2: 0 },
+  { sprite: 11, frame: 1, tics: 0, action: 6, nextstate: 67, misc1: 0, misc2: 0 },
+  { sprite: 12, frame: 0, tics: 1, action: 2, nextstate: 74, misc1: 0, misc2: 0 },
+  { sprite: 12, frame: 0, tics: 1, action: 3, nextstate: 75, misc1: 0, misc2: 0 },
+  { sprite: 12, frame: 0, tics: 1, action: 4, nextstate: 76, misc1: 0, misc2: 0 },
+  { sprite: 12, frame: 0, tics: 3, action: 20, nextstate: 78, misc1: 0, misc2: 0 },
+  { sprite: 12, frame: 1, tics: 20, action: 6, nextstate: 74, misc1: 0, misc2: 0 },
+  { sprite: 13, frame: 32768, tics: 4, action: 8, nextstate: 1, misc1: 0, misc2: 0 },
+  { sprite: 13, frame: 32769, tics: 4, action: 8, nextstate: 1, misc1: 0, misc2: 0 },
+  { sprite: 14, frame: 0, tics: 1, action: 2, nextstate: 81, misc1: 0, misc2: 0 },
+  { sprite: 14, frame: 0, tics: 1, action: 3, nextstate: 82, misc1: 0, misc2: 0 },
+  { sprite: 14, frame: 0, tics: 1, action: 4, nextstate: 83, misc1: 0, misc2: 0 },
+  { sprite: 14, frame: 0, tics: 20, action: 21, nextstate: 85, misc1: 0, misc2: 0 },
+  { sprite: 14, frame: 1, tics: 10, action: 17, nextstate: 86, misc1: 0, misc2: 0 },
+  { sprite: 14, frame: 1, tics: 10, action: 22, nextstate: 87, misc1: 0, misc2: 0 },
+  { sprite: 14, frame: 1, tics: 20, action: 6, nextstate: 81, misc1: 0, misc2: 0 },
+  { sprite: 15, frame: 32768, tics: 11, action: 8, nextstate: 89, misc1: 0, misc2: 0 },
+  { sprite: 15, frame: 32769, tics: 6, action: 10, nextstate: 1, misc1: 0, misc2: 0 },
+  { sprite: 16, frame: 2, tics: 8, action: 0, nextstate: 91, misc1: 0, misc2: 0 },
+  { sprite: 16, frame: 1, tics: 8, action: 0, nextstate: 92, misc1: 0, misc2: 0 },
+  { sprite: 16, frame: 0, tics: 8, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 17, frame: 32768, tics: 4, action: 0, nextstate: 94, misc1: 0, misc2: 0 },
+  { sprite: 17, frame: 1, tics: 4, action: 0, nextstate: 95, misc1: 0, misc2: 0 },
+  { sprite: 17, frame: 2, tics: 4, action: 0, nextstate: 96, misc1: 0, misc2: 0 },
+  { sprite: 17, frame: 3, tics: 4, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 18, frame: 32768, tics: 4, action: 0, nextstate: 98, misc1: 0, misc2: 0 },
+  { sprite: 18, frame: 32769, tics: 4, action: 0, nextstate: 97, misc1: 0, misc2: 0 },
+  { sprite: 18, frame: 32770, tics: 6, action: 0, nextstate: 100, misc1: 0, misc2: 0 },
+  { sprite: 18, frame: 32771, tics: 6, action: 0, nextstate: 101, misc1: 0, misc2: 0 },
+  { sprite: 18, frame: 32772, tics: 6, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 19, frame: 32768, tics: 4, action: 0, nextstate: 103, misc1: 0, misc2: 0 },
+  { sprite: 19, frame: 32769, tics: 4, action: 0, nextstate: 102, misc1: 0, misc2: 0 },
+  { sprite: 19, frame: 32770, tics: 6, action: 0, nextstate: 105, misc1: 0, misc2: 0 },
+  { sprite: 19, frame: 32771, tics: 6, action: 0, nextstate: 106, misc1: 0, misc2: 0 },
+  { sprite: 19, frame: 32772, tics: 6, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 20, frame: 32768, tics: 6, action: 0, nextstate: 108, misc1: 0, misc2: 0 },
+  { sprite: 20, frame: 32769, tics: 6, action: 0, nextstate: 107, misc1: 0, misc2: 0 },
+  { sprite: 21, frame: 32768, tics: 4, action: 0, nextstate: 110, misc1: 0, misc2: 0 },
+  { sprite: 21, frame: 32769, tics: 4, action: 0, nextstate: 111, misc1: 0, misc2: 0 },
+  { sprite: 21, frame: 32770, tics: 4, action: 0, nextstate: 112, misc1: 0, misc2: 0 },
+  { sprite: 21, frame: 32771, tics: 4, action: 0, nextstate: 113, misc1: 0, misc2: 0 },
+  { sprite: 21, frame: 32772, tics: 4, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32768, tics: 1, action: 0, nextstate: 114, misc1: 0, misc2: 0 },
+  { sprite: 23, frame: 32768, tics: 4, action: 0, nextstate: 116, misc1: 0, misc2: 0 },
+  { sprite: 23, frame: 32769, tics: 4, action: 0, nextstate: 115, misc1: 0, misc2: 0 },
+  { sprite: 24, frame: 32768, tics: 8, action: 0, nextstate: 118, misc1: 0, misc2: 0 },
+  { sprite: 24, frame: 32769, tics: 8, action: 0, nextstate: 119, misc1: 0, misc2: 0 },
+  { sprite: 24, frame: 32770, tics: 8, action: 23, nextstate: 120, misc1: 0, misc2: 0 },
+  { sprite: 24, frame: 32771, tics: 8, action: 0, nextstate: 121, misc1: 0, misc2: 0 },
+  { sprite: 24, frame: 32772, tics: 8, action: 0, nextstate: 122, misc1: 0, misc2: 0 },
+  { sprite: 24, frame: 32773, tics: 8, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 25, frame: 32768, tics: 8, action: 0, nextstate: 124, misc1: 0, misc2: 0 },
+  { sprite: 25, frame: 32769, tics: 8, action: 0, nextstate: 125, misc1: 0, misc2: 0 },
+  { sprite: 25, frame: 32770, tics: 8, action: 0, nextstate: 126, misc1: 0, misc2: 0 },
+  { sprite: 25, frame: 32771, tics: 8, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32769, tics: 8, action: 24, nextstate: 128, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32770, tics: 6, action: 0, nextstate: 129, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32771, tics: 4, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32768, tics: 6, action: 0, nextstate: 131, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32769, tics: 6, action: 0, nextstate: 132, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32768, tics: 6, action: 0, nextstate: 133, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32769, tics: 6, action: 0, nextstate: 134, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32770, tics: 6, action: 0, nextstate: 135, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32771, tics: 6, action: 0, nextstate: 136, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32772, tics: 6, action: 0, nextstate: 137, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32773, tics: 6, action: 0, nextstate: 138, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32774, tics: 6, action: 0, nextstate: 139, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32775, tics: 6, action: 0, nextstate: 140, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32776, tics: 6, action: 0, nextstate: 141, misc1: 0, misc2: 0 },
+  { sprite: 26, frame: 32777, tics: 6, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 27, frame: 32768, tics: 6, action: 0, nextstate: 143, misc1: 0, misc2: 0 },
+  { sprite: 27, frame: 32769, tics: 6, action: 0, nextstate: 144, misc1: 0, misc2: 0 },
+  { sprite: 27, frame: 32768, tics: 6, action: 0, nextstate: 145, misc1: 0, misc2: 0 },
+  { sprite: 27, frame: 32769, tics: 6, action: 0, nextstate: 146, misc1: 0, misc2: 0 },
+  { sprite: 27, frame: 32770, tics: 6, action: 0, nextstate: 147, misc1: 0, misc2: 0 },
+  { sprite: 27, frame: 32771, tics: 6, action: 0, nextstate: 148, misc1: 0, misc2: 0 },
+  { sprite: 27, frame: 32772, tics: 6, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 0, tics: 4, action: 0, nextstate: 151, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 1, tics: 4, action: 0, nextstate: 152, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 2, tics: 4, action: 0, nextstate: 153, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 3, tics: 4, action: 0, nextstate: 150, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 4, tics: 12, action: 0, nextstate: 149, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 32773, tics: 6, action: 0, nextstate: 154, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 6, tics: 4, action: 0, nextstate: 157, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 6, tics: 4, action: 25, nextstate: 149, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 7, tics: 10, action: 0, nextstate: 159, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 8, tics: 10, action: 26, nextstate: 160, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 9, tics: 10, action: 27, nextstate: 161, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 10, tics: 10, action: 0, nextstate: 162, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 11, tics: 10, action: 0, nextstate: 163, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 12, tics: 10, action: 0, nextstate: 164, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 13, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 14, tics: 5, action: 0, nextstate: 166, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 15, tics: 5, action: 28, nextstate: 167, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 16, tics: 5, action: 27, nextstate: 168, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 17, tics: 5, action: 0, nextstate: 169, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 18, tics: 5, action: 0, nextstate: 170, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 19, tics: 5, action: 0, nextstate: 171, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 20, tics: 5, action: 0, nextstate: 172, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 21, tics: 5, action: 0, nextstate: 173, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 22, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 0, tics: 10, action: 29, nextstate: 175, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 1, tics: 10, action: 29, nextstate: 174, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 0, tics: 4, action: 30, nextstate: 177, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 0, tics: 4, action: 30, nextstate: 178, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 1, tics: 4, action: 30, nextstate: 179, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 1, tics: 4, action: 30, nextstate: 180, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 2, tics: 4, action: 30, nextstate: 181, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 2, tics: 4, action: 30, nextstate: 182, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 3, tics: 4, action: 30, nextstate: 183, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 3, tics: 4, action: 30, nextstate: 176, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 4, tics: 10, action: 31, nextstate: 185, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 5, tics: 8, action: 32, nextstate: 186, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 4, tics: 8, action: 0, nextstate: 176, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 6, tics: 3, action: 0, nextstate: 188, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 6, tics: 3, action: 25, nextstate: 176, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 7, tics: 5, action: 0, nextstate: 190, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 8, tics: 5, action: 33, nextstate: 191, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 9, tics: 5, action: 27, nextstate: 192, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 10, tics: 5, action: 0, nextstate: 193, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 11, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 12, tics: 5, action: 0, nextstate: 195, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 13, tics: 5, action: 28, nextstate: 196, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 14, tics: 5, action: 27, nextstate: 197, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 15, tics: 5, action: 0, nextstate: 198, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 16, tics: 5, action: 0, nextstate: 199, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 17, tics: 5, action: 0, nextstate: 200, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 18, tics: 5, action: 0, nextstate: 201, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 19, tics: 5, action: 0, nextstate: 202, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 20, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 10, tics: 5, action: 0, nextstate: 204, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 9, tics: 5, action: 0, nextstate: 205, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 8, tics: 5, action: 0, nextstate: 206, misc1: 0, misc2: 0 },
+  { sprite: 29, frame: 7, tics: 5, action: 0, nextstate: 176, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 0, tics: 10, action: 29, nextstate: 208, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 1, tics: 10, action: 29, nextstate: 207, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 0, tics: 3, action: 30, nextstate: 210, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 0, tics: 3, action: 30, nextstate: 211, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 1, tics: 3, action: 30, nextstate: 212, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 1, tics: 3, action: 30, nextstate: 213, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 2, tics: 3, action: 30, nextstate: 214, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 2, tics: 3, action: 30, nextstate: 215, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 3, tics: 3, action: 30, nextstate: 216, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 3, tics: 3, action: 30, nextstate: 209, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 4, tics: 10, action: 31, nextstate: 218, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 32773, tics: 10, action: 34, nextstate: 219, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 4, tics: 10, action: 0, nextstate: 209, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 6, tics: 3, action: 0, nextstate: 221, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 6, tics: 3, action: 25, nextstate: 209, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 7, tics: 5, action: 0, nextstate: 223, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 8, tics: 5, action: 33, nextstate: 224, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 9, tics: 5, action: 27, nextstate: 225, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 10, tics: 5, action: 0, nextstate: 226, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 11, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 12, tics: 5, action: 0, nextstate: 228, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 13, tics: 5, action: 28, nextstate: 229, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 14, tics: 5, action: 27, nextstate: 230, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 15, tics: 5, action: 0, nextstate: 231, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 16, tics: 5, action: 0, nextstate: 232, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 17, tics: 5, action: 0, nextstate: 233, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 18, tics: 5, action: 0, nextstate: 234, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 19, tics: 5, action: 0, nextstate: 235, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 20, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 11, tics: 5, action: 0, nextstate: 237, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 10, tics: 5, action: 0, nextstate: 238, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 9, tics: 5, action: 0, nextstate: 239, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 8, tics: 5, action: 0, nextstate: 240, misc1: 0, misc2: 0 },
+  { sprite: 30, frame: 7, tics: 5, action: 0, nextstate: 209, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 0, tics: 10, action: 29, nextstate: 242, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 1, tics: 10, action: 29, nextstate: 241, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 0, tics: 2, action: 35, nextstate: 244, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 0, tics: 2, action: 35, nextstate: 245, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 1, tics: 2, action: 35, nextstate: 246, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 1, tics: 2, action: 35, nextstate: 247, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 2, tics: 2, action: 35, nextstate: 248, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 2, tics: 2, action: 35, nextstate: 249, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 3, tics: 2, action: 35, nextstate: 250, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 3, tics: 2, action: 35, nextstate: 251, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 4, tics: 2, action: 35, nextstate: 252, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 4, tics: 2, action: 35, nextstate: 253, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 5, tics: 2, action: 35, nextstate: 254, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 5, tics: 2, action: 35, nextstate: 243, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32774, tics: 0, action: 36, nextstate: 256, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32774, tics: 10, action: 31, nextstate: 257, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32775, tics: 8, action: 37, nextstate: 258, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32776, tics: 8, action: 31, nextstate: 259, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32777, tics: 8, action: 31, nextstate: 260, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32778, tics: 8, action: 31, nextstate: 261, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32779, tics: 8, action: 31, nextstate: 262, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32780, tics: 8, action: 31, nextstate: 263, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32781, tics: 8, action: 31, nextstate: 264, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32782, tics: 8, action: 38, nextstate: 265, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32783, tics: 20, action: 0, nextstate: 243, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32794, tics: 10, action: 0, nextstate: 267, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32795, tics: 10, action: 0, nextstate: 268, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 32796, tics: 10, action: 0, nextstate: 243, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 16, tics: 5, action: 0, nextstate: 270, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 16, tics: 5, action: 25, nextstate: 243, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 16, tics: 7, action: 0, nextstate: 272, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 17, tics: 7, action: 33, nextstate: 273, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 18, tics: 7, action: 27, nextstate: 274, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 19, tics: 7, action: 0, nextstate: 275, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 20, tics: 7, action: 0, nextstate: 276, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 21, tics: 7, action: 0, nextstate: 277, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 22, tics: 7, action: 0, nextstate: 278, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 23, tics: 5, action: 0, nextstate: 279, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 24, tics: 5, action: 0, nextstate: 280, misc1: 0, misc2: 0 },
+  { sprite: 31, frame: 25, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32768, tics: 2, action: 39, nextstate: 282, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32769, tics: 2, action: 40, nextstate: 283, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32768, tics: 2, action: 40, nextstate: 284, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32769, tics: 2, action: 40, nextstate: 285, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32770, tics: 2, action: 41, nextstate: 286, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32769, tics: 2, action: 40, nextstate: 287, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32770, tics: 2, action: 40, nextstate: 288, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32769, tics: 2, action: 40, nextstate: 289, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32770, tics: 2, action: 40, nextstate: 290, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32771, tics: 2, action: 40, nextstate: 291, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32770, tics: 2, action: 40, nextstate: 292, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32771, tics: 2, action: 40, nextstate: 293, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32770, tics: 2, action: 40, nextstate: 294, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32771, tics: 2, action: 40, nextstate: 295, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32772, tics: 2, action: 40, nextstate: 296, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32771, tics: 2, action: 40, nextstate: 297, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32772, tics: 2, action: 40, nextstate: 298, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32771, tics: 2, action: 40, nextstate: 299, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32772, tics: 2, action: 41, nextstate: 300, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32773, tics: 2, action: 40, nextstate: 301, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32772, tics: 2, action: 40, nextstate: 302, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32773, tics: 2, action: 40, nextstate: 303, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32772, tics: 2, action: 40, nextstate: 304, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32773, tics: 2, action: 40, nextstate: 305, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32774, tics: 2, action: 40, nextstate: 306, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32775, tics: 2, action: 40, nextstate: 307, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32774, tics: 2, action: 40, nextstate: 308, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32775, tics: 2, action: 40, nextstate: 309, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32774, tics: 2, action: 40, nextstate: 310, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32775, tics: 2, action: 40, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 17, frame: 1, tics: 4, action: 0, nextstate: 312, misc1: 0, misc2: 0 },
+  { sprite: 17, frame: 2, tics: 4, action: 0, nextstate: 313, misc1: 0, misc2: 0 },
+  { sprite: 17, frame: 1, tics: 4, action: 0, nextstate: 314, misc1: 0, misc2: 0 },
+  { sprite: 17, frame: 2, tics: 4, action: 0, nextstate: 315, misc1: 0, misc2: 0 },
+  { sprite: 17, frame: 3, tics: 4, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 33, frame: 32768, tics: 2, action: 42, nextstate: 317, misc1: 0, misc2: 0 },
+  { sprite: 33, frame: 32769, tics: 2, action: 42, nextstate: 316, misc1: 0, misc2: 0 },
+  { sprite: 34, frame: 32768, tics: 8, action: 0, nextstate: 319, misc1: 0, misc2: 0 },
+  { sprite: 34, frame: 32769, tics: 6, action: 0, nextstate: 320, misc1: 0, misc2: 0 },
+  { sprite: 34, frame: 32770, tics: 4, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 0, tics: 10, action: 29, nextstate: 322, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 1, tics: 10, action: 29, nextstate: 321, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 0, tics: 2, action: 30, nextstate: 324, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 0, tics: 2, action: 30, nextstate: 325, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 1, tics: 2, action: 30, nextstate: 326, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 1, tics: 2, action: 30, nextstate: 327, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 2, tics: 2, action: 30, nextstate: 328, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 2, tics: 2, action: 30, nextstate: 329, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 3, tics: 2, action: 30, nextstate: 330, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 3, tics: 2, action: 30, nextstate: 331, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 4, tics: 2, action: 30, nextstate: 332, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 4, tics: 2, action: 30, nextstate: 333, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 5, tics: 2, action: 30, nextstate: 334, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 5, tics: 2, action: 30, nextstate: 323, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 6, tics: 0, action: 31, nextstate: 336, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 6, tics: 6, action: 43, nextstate: 337, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 7, tics: 6, action: 31, nextstate: 338, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 8, tics: 6, action: 44, nextstate: 323, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 32777, tics: 0, action: 31, nextstate: 340, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 32777, tics: 10, action: 31, nextstate: 341, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 10, tics: 10, action: 45, nextstate: 342, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 10, tics: 10, action: 31, nextstate: 323, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 11, tics: 5, action: 0, nextstate: 344, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 11, tics: 5, action: 25, nextstate: 323, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 11, tics: 7, action: 0, nextstate: 346, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 12, tics: 7, action: 0, nextstate: 347, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 13, tics: 7, action: 33, nextstate: 348, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 14, tics: 7, action: 27, nextstate: 349, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 15, tics: 7, action: 0, nextstate: 350, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 16, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 16, tics: 5, action: 0, nextstate: 352, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 15, tics: 5, action: 0, nextstate: 353, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 14, tics: 5, action: 0, nextstate: 354, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 13, tics: 5, action: 0, nextstate: 355, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 12, tics: 5, action: 0, nextstate: 356, misc1: 0, misc2: 0 },
+  { sprite: 35, frame: 11, tics: 5, action: 0, nextstate: 323, misc1: 0, misc2: 0 },
+  { sprite: 36, frame: 32768, tics: 4, action: 0, nextstate: 358, misc1: 0, misc2: 0 },
+  { sprite: 36, frame: 32769, tics: 4, action: 0, nextstate: 357, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32769, tics: 8, action: 0, nextstate: 360, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32770, tics: 6, action: 0, nextstate: 361, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32771, tics: 4, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 0, tics: 15, action: 29, nextstate: 363, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 1, tics: 15, action: 29, nextstate: 362, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 0, tics: 4, action: 30, nextstate: 365, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 0, tics: 4, action: 30, nextstate: 366, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 1, tics: 4, action: 30, nextstate: 367, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 1, tics: 4, action: 30, nextstate: 368, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 2, tics: 4, action: 30, nextstate: 369, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 2, tics: 4, action: 30, nextstate: 370, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 3, tics: 4, action: 30, nextstate: 371, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 3, tics: 4, action: 30, nextstate: 372, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 4, tics: 4, action: 30, nextstate: 373, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 4, tics: 4, action: 30, nextstate: 374, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 5, tics: 4, action: 30, nextstate: 375, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 5, tics: 4, action: 30, nextstate: 364, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 6, tics: 20, action: 46, nextstate: 377, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 32775, tics: 10, action: 47, nextstate: 378, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 8, tics: 5, action: 31, nextstate: 379, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 6, tics: 5, action: 31, nextstate: 380, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 32775, tics: 10, action: 48, nextstate: 381, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 8, tics: 5, action: 31, nextstate: 382, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 6, tics: 5, action: 31, nextstate: 383, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 32775, tics: 10, action: 49, nextstate: 384, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 8, tics: 5, action: 31, nextstate: 385, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 6, tics: 5, action: 31, nextstate: 364, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 9, tics: 3, action: 0, nextstate: 387, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 9, tics: 3, action: 25, nextstate: 364, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 10, tics: 6, action: 0, nextstate: 389, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 11, tics: 6, action: 33, nextstate: 390, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 12, tics: 6, action: 27, nextstate: 391, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 13, tics: 6, action: 0, nextstate: 392, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 14, tics: 6, action: 0, nextstate: 393, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 15, tics: 6, action: 0, nextstate: 394, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 16, tics: 6, action: 0, nextstate: 395, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 17, tics: 6, action: 0, nextstate: 396, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 18, tics: 6, action: 0, nextstate: 397, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 19, tics: -1, action: 50, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 17, tics: 5, action: 0, nextstate: 399, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 16, tics: 5, action: 0, nextstate: 400, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 15, tics: 5, action: 0, nextstate: 401, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 14, tics: 5, action: 0, nextstate: 402, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 13, tics: 5, action: 0, nextstate: 403, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 12, tics: 5, action: 0, nextstate: 404, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 11, tics: 5, action: 0, nextstate: 405, misc1: 0, misc2: 0 },
+  { sprite: 37, frame: 10, tics: 5, action: 0, nextstate: 364, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 0, tics: 10, action: 29, nextstate: 407, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 1, tics: 10, action: 29, nextstate: 406, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 0, tics: 3, action: 30, nextstate: 409, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 0, tics: 3, action: 30, nextstate: 410, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 1, tics: 3, action: 30, nextstate: 411, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 1, tics: 3, action: 30, nextstate: 412, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 2, tics: 3, action: 30, nextstate: 413, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 2, tics: 3, action: 30, nextstate: 414, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 3, tics: 3, action: 30, nextstate: 415, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 3, tics: 3, action: 30, nextstate: 408, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 4, tics: 10, action: 31, nextstate: 417, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 32773, tics: 4, action: 51, nextstate: 418, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 32772, tics: 4, action: 51, nextstate: 419, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 5, tics: 1, action: 52, nextstate: 417, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 6, tics: 3, action: 0, nextstate: 421, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 6, tics: 3, action: 25, nextstate: 408, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 7, tics: 5, action: 0, nextstate: 423, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 8, tics: 5, action: 33, nextstate: 424, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 9, tics: 5, action: 27, nextstate: 425, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 10, tics: 5, action: 0, nextstate: 426, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 11, tics: 5, action: 0, nextstate: 427, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 12, tics: 5, action: 0, nextstate: 428, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 13, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 14, tics: 5, action: 0, nextstate: 430, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 15, tics: 5, action: 28, nextstate: 431, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 16, tics: 5, action: 27, nextstate: 432, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 17, tics: 5, action: 0, nextstate: 433, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 18, tics: 5, action: 0, nextstate: 434, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 19, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 13, tics: 5, action: 0, nextstate: 436, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 12, tics: 5, action: 0, nextstate: 437, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 11, tics: 5, action: 0, nextstate: 438, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 10, tics: 5, action: 0, nextstate: 439, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 9, tics: 5, action: 0, nextstate: 440, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 8, tics: 5, action: 0, nextstate: 441, misc1: 0, misc2: 0 },
+  { sprite: 38, frame: 7, tics: 5, action: 0, nextstate: 408, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 0, tics: 10, action: 29, nextstate: 443, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 1, tics: 10, action: 29, nextstate: 442, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 0, tics: 3, action: 30, nextstate: 445, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 0, tics: 3, action: 30, nextstate: 446, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 1, tics: 3, action: 30, nextstate: 447, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 1, tics: 3, action: 30, nextstate: 448, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 2, tics: 3, action: 30, nextstate: 449, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 2, tics: 3, action: 30, nextstate: 450, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 3, tics: 3, action: 30, nextstate: 451, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 3, tics: 3, action: 30, nextstate: 444, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 4, tics: 8, action: 31, nextstate: 453, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 5, tics: 8, action: 31, nextstate: 454, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 6, tics: 6, action: 53, nextstate: 444, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 7, tics: 2, action: 0, nextstate: 456, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 7, tics: 2, action: 25, nextstate: 444, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 8, tics: 8, action: 0, nextstate: 458, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 9, tics: 8, action: 33, nextstate: 459, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 10, tics: 6, action: 0, nextstate: 460, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 11, tics: 6, action: 27, nextstate: 461, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 12, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 13, tics: 5, action: 0, nextstate: 463, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 14, tics: 5, action: 28, nextstate: 464, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 15, tics: 5, action: 0, nextstate: 465, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 16, tics: 5, action: 27, nextstate: 466, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 17, tics: 5, action: 0, nextstate: 467, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 18, tics: 5, action: 0, nextstate: 468, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 19, tics: 5, action: 0, nextstate: 469, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 20, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 12, tics: 8, action: 0, nextstate: 471, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 11, tics: 8, action: 0, nextstate: 472, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 10, tics: 6, action: 0, nextstate: 473, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 9, tics: 6, action: 0, nextstate: 474, misc1: 0, misc2: 0 },
+  { sprite: 0, frame: 8, tics: 6, action: 0, nextstate: 444, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 0, tics: 10, action: 29, nextstate: 476, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 1, tics: 10, action: 29, nextstate: 475, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 0, tics: 2, action: 30, nextstate: 478, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 0, tics: 2, action: 30, nextstate: 479, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 1, tics: 2, action: 30, nextstate: 480, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 1, tics: 2, action: 30, nextstate: 481, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 2, tics: 2, action: 30, nextstate: 482, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 2, tics: 2, action: 30, nextstate: 483, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 3, tics: 2, action: 30, nextstate: 484, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 3, tics: 2, action: 30, nextstate: 477, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 4, tics: 8, action: 31, nextstate: 486, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 5, tics: 8, action: 31, nextstate: 487, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 6, tics: 8, action: 54, nextstate: 477, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 7, tics: 2, action: 0, nextstate: 489, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 7, tics: 2, action: 25, nextstate: 477, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 8, tics: 8, action: 0, nextstate: 491, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 9, tics: 8, action: 33, nextstate: 492, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 10, tics: 4, action: 0, nextstate: 493, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 11, tics: 4, action: 27, nextstate: 494, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 12, tics: 4, action: 0, nextstate: 495, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 13, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 13, tics: 5, action: 0, nextstate: 497, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 12, tics: 5, action: 0, nextstate: 498, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 11, tics: 5, action: 0, nextstate: 499, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 10, tics: 5, action: 0, nextstate: 500, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 9, tics: 5, action: 0, nextstate: 501, misc1: 0, misc2: 0 },
+  { sprite: 39, frame: 8, tics: 5, action: 0, nextstate: 477, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 0, tics: 10, action: 29, nextstate: 502, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 0, tics: 3, action: 30, nextstate: 503, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 1, tics: 5, action: 31, nextstate: 505, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 2, tics: 5, action: 31, nextstate: 506, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 32771, tics: 5, action: 55, nextstate: 503, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 4, tics: 3, action: 0, nextstate: 508, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 4, tics: 3, action: 25, nextstate: 509, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 5, tics: 6, action: 0, nextstate: 503, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 6, tics: 8, action: 0, nextstate: 511, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 7, tics: 8, action: 33, nextstate: 512, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 8, tics: 8, action: 0, nextstate: 513, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 9, tics: 8, action: 0, nextstate: 514, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 10, tics: 8, action: 27, nextstate: 515, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 11, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 11, tics: 8, action: 0, nextstate: 517, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 10, tics: 8, action: 0, nextstate: 518, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 9, tics: 8, action: 0, nextstate: 519, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 8, tics: 8, action: 0, nextstate: 520, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 7, tics: 8, action: 0, nextstate: 521, misc1: 0, misc2: 0 },
+  { sprite: 40, frame: 6, tics: 8, action: 0, nextstate: 503, misc1: 0, misc2: 0 },
+  { sprite: 41, frame: 32768, tics: 4, action: 0, nextstate: 523, misc1: 0, misc2: 0 },
+  { sprite: 41, frame: 32769, tics: 4, action: 0, nextstate: 522, misc1: 0, misc2: 0 },
+  { sprite: 41, frame: 32770, tics: 6, action: 0, nextstate: 525, misc1: 0, misc2: 0 },
+  { sprite: 41, frame: 32771, tics: 6, action: 0, nextstate: 526, misc1: 0, misc2: 0 },
+  { sprite: 41, frame: 32772, tics: 6, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 0, tics: 10, action: 29, nextstate: 528, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 1, tics: 10, action: 29, nextstate: 527, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 0, tics: 3, action: 30, nextstate: 530, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 0, tics: 3, action: 30, nextstate: 531, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 1, tics: 3, action: 30, nextstate: 532, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 1, tics: 3, action: 30, nextstate: 533, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 2, tics: 3, action: 30, nextstate: 534, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 2, tics: 3, action: 30, nextstate: 535, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 3, tics: 3, action: 30, nextstate: 536, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 3, tics: 3, action: 30, nextstate: 529, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 4, tics: 8, action: 31, nextstate: 538, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 5, tics: 8, action: 31, nextstate: 539, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 6, tics: 8, action: 56, nextstate: 529, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 7, tics: 2, action: 0, nextstate: 541, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 7, tics: 2, action: 25, nextstate: 529, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 8, tics: 8, action: 0, nextstate: 543, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 9, tics: 8, action: 33, nextstate: 544, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 10, tics: 8, action: 0, nextstate: 545, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 11, tics: 8, action: 27, nextstate: 546, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 12, tics: 8, action: 0, nextstate: 547, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 13, tics: 8, action: 0, nextstate: 548, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 14, tics: -1, action: 50, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 14, tics: 8, action: 0, nextstate: 550, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 13, tics: 8, action: 0, nextstate: 551, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 12, tics: 8, action: 0, nextstate: 552, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 11, tics: 8, action: 0, nextstate: 553, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 10, tics: 8, action: 0, nextstate: 554, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 9, tics: 8, action: 0, nextstate: 555, misc1: 0, misc2: 0 },
+  { sprite: 42, frame: 8, tics: 8, action: 0, nextstate: 529, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 0, tics: 10, action: 29, nextstate: 557, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 1, tics: 10, action: 29, nextstate: 556, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 0, tics: 3, action: 30, nextstate: 559, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 0, tics: 3, action: 30, nextstate: 560, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 1, tics: 3, action: 30, nextstate: 561, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 1, tics: 3, action: 30, nextstate: 562, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 2, tics: 3, action: 30, nextstate: 563, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 2, tics: 3, action: 30, nextstate: 564, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 3, tics: 3, action: 30, nextstate: 565, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 3, tics: 3, action: 30, nextstate: 558, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 4, tics: 8, action: 31, nextstate: 567, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 5, tics: 8, action: 31, nextstate: 568, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 6, tics: 8, action: 56, nextstate: 558, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 7, tics: 2, action: 0, nextstate: 570, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 7, tics: 2, action: 25, nextstate: 558, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 8, tics: 8, action: 0, nextstate: 572, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 9, tics: 8, action: 33, nextstate: 573, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 10, tics: 8, action: 0, nextstate: 574, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 11, tics: 8, action: 27, nextstate: 575, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 12, tics: 8, action: 0, nextstate: 576, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 13, tics: 8, action: 0, nextstate: 577, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 14, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 14, tics: 8, action: 0, nextstate: 579, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 13, tics: 8, action: 0, nextstate: 580, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 12, tics: 8, action: 0, nextstate: 581, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 11, tics: 8, action: 0, nextstate: 582, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 10, tics: 8, action: 0, nextstate: 583, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 9, tics: 8, action: 0, nextstate: 584, misc1: 0, misc2: 0 },
+  { sprite: 43, frame: 8, tics: 8, action: 0, nextstate: 558, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32768, tics: 10, action: 29, nextstate: 586, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32769, tics: 10, action: 29, nextstate: 585, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32768, tics: 6, action: 30, nextstate: 588, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32769, tics: 6, action: 30, nextstate: 587, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32770, tics: 10, action: 31, nextstate: 590, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32771, tics: 4, action: 57, nextstate: 591, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32770, tics: 4, action: 0, nextstate: 592, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32771, tics: 4, action: 0, nextstate: 591, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32772, tics: 3, action: 0, nextstate: 594, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32772, tics: 3, action: 25, nextstate: 587, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32773, tics: 6, action: 0, nextstate: 596, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32774, tics: 6, action: 33, nextstate: 597, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32775, tics: 6, action: 0, nextstate: 598, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 32776, tics: 6, action: 27, nextstate: 599, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 9, tics: 6, action: 0, nextstate: 600, misc1: 0, misc2: 0 },
+  { sprite: 44, frame: 10, tics: 6, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 0, tics: 10, action: 29, nextstate: 602, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 1, tics: 10, action: 29, nextstate: 601, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 0, tics: 3, action: 58, nextstate: 604, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 0, tics: 3, action: 30, nextstate: 605, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 1, tics: 3, action: 30, nextstate: 606, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 1, tics: 3, action: 30, nextstate: 607, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 2, tics: 3, action: 58, nextstate: 608, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 2, tics: 3, action: 30, nextstate: 609, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 3, tics: 3, action: 30, nextstate: 610, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 3, tics: 3, action: 30, nextstate: 611, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 4, tics: 3, action: 58, nextstate: 612, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 4, tics: 3, action: 30, nextstate: 613, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 5, tics: 3, action: 30, nextstate: 614, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 5, tics: 3, action: 30, nextstate: 603, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 32768, tics: 20, action: 31, nextstate: 616, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 32774, tics: 4, action: 34, nextstate: 617, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 32775, tics: 4, action: 34, nextstate: 618, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 32775, tics: 1, action: 59, nextstate: 616, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 8, tics: 3, action: 0, nextstate: 620, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 8, tics: 3, action: 25, nextstate: 603, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 9, tics: 20, action: 33, nextstate: 622, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 10, tics: 10, action: 27, nextstate: 623, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 11, tics: 10, action: 0, nextstate: 624, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 12, tics: 10, action: 0, nextstate: 625, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 13, tics: 10, action: 0, nextstate: 626, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 14, tics: 10, action: 0, nextstate: 627, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 15, tics: 10, action: 0, nextstate: 628, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 16, tics: 10, action: 0, nextstate: 629, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 17, tics: 10, action: 0, nextstate: 630, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 18, tics: 30, action: 0, nextstate: 631, misc1: 0, misc2: 0 },
+  { sprite: 45, frame: 18, tics: -1, action: 50, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 0, tics: 10, action: 29, nextstate: 633, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 1, tics: 10, action: 29, nextstate: 632, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 0, tics: 20, action: 0, nextstate: 635, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 0, tics: 3, action: 60, nextstate: 636, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 0, tics: 3, action: 30, nextstate: 637, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 1, tics: 3, action: 30, nextstate: 638, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 1, tics: 3, action: 30, nextstate: 639, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 2, tics: 3, action: 30, nextstate: 640, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 2, tics: 3, action: 30, nextstate: 641, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 3, tics: 3, action: 60, nextstate: 642, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 3, tics: 3, action: 30, nextstate: 643, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 4, tics: 3, action: 30, nextstate: 644, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 4, tics: 3, action: 30, nextstate: 645, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 5, tics: 3, action: 30, nextstate: 646, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 5, tics: 3, action: 30, nextstate: 635, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 32768, tics: 20, action: 31, nextstate: 648, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 32774, tics: 4, action: 61, nextstate: 649, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 32775, tics: 4, action: 0, nextstate: 650, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 32775, tics: 1, action: 59, nextstate: 648, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 8, tics: 3, action: 0, nextstate: 652, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 8, tics: 3, action: 25, nextstate: 635, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 9, tics: 20, action: 33, nextstate: 654, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 10, tics: 7, action: 27, nextstate: 655, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 11, tics: 7, action: 0, nextstate: 656, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 12, tics: 7, action: 0, nextstate: 657, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 13, tics: 7, action: 0, nextstate: 658, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 14, tics: 7, action: 0, nextstate: 659, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 15, tics: -1, action: 50, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 15, tics: 5, action: 0, nextstate: 661, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 14, tics: 5, action: 0, nextstate: 662, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 13, tics: 5, action: 0, nextstate: 663, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 12, tics: 5, action: 0, nextstate: 664, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 11, tics: 5, action: 0, nextstate: 665, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 10, tics: 5, action: 0, nextstate: 666, misc1: 0, misc2: 0 },
+  { sprite: 46, frame: 9, tics: 5, action: 0, nextstate: 635, misc1: 0, misc2: 0 },
+  { sprite: 47, frame: 32768, tics: 5, action: 0, nextstate: 668, misc1: 0, misc2: 0 },
+  { sprite: 47, frame: 32769, tics: 5, action: 0, nextstate: 667, misc1: 0, misc2: 0 },
+  { sprite: 48, frame: 32768, tics: 5, action: 0, nextstate: 670, misc1: 0, misc2: 0 },
+  { sprite: 48, frame: 32769, tics: 5, action: 0, nextstate: 671, misc1: 0, misc2: 0 },
+  { sprite: 48, frame: 32770, tics: 5, action: 0, nextstate: 672, misc1: 0, misc2: 0 },
+  { sprite: 48, frame: 32771, tics: 5, action: 0, nextstate: 673, misc1: 0, misc2: 0 },
+  { sprite: 48, frame: 32772, tics: 5, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 0, tics: 10, action: 29, nextstate: 675, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 1, tics: 10, action: 29, nextstate: 674, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 0, tics: 3, action: 62, nextstate: 677, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 0, tics: 3, action: 30, nextstate: 678, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 1, tics: 3, action: 30, nextstate: 679, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 1, tics: 3, action: 30, nextstate: 680, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 2, tics: 3, action: 30, nextstate: 681, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 2, tics: 3, action: 30, nextstate: 682, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 3, tics: 3, action: 58, nextstate: 683, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 3, tics: 3, action: 30, nextstate: 676, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 4, tics: 6, action: 31, nextstate: 685, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 5, tics: 12, action: 63, nextstate: 686, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 4, tics: 12, action: 31, nextstate: 687, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 5, tics: 12, action: 63, nextstate: 688, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 4, tics: 12, action: 31, nextstate: 689, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 5, tics: 12, action: 63, nextstate: 676, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 6, tics: 10, action: 25, nextstate: 676, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 7, tics: 10, action: 0, nextstate: 692, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 8, tics: 10, action: 33, nextstate: 693, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 9, tics: 10, action: 0, nextstate: 694, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 10, tics: 10, action: 0, nextstate: 695, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 11, tics: 10, action: 0, nextstate: 696, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 12, tics: 10, action: 27, nextstate: 697, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 13, tics: 10, action: 0, nextstate: 698, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 14, tics: 10, action: 0, nextstate: 699, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 15, tics: 30, action: 0, nextstate: 700, misc1: 0, misc2: 0 },
+  { sprite: 49, frame: 15, tics: -1, action: 50, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 0, tics: 10, action: 29, nextstate: 701, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 0, tics: 3, action: 30, nextstate: 703, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 0, tics: 3, action: 30, nextstate: 704, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 1, tics: 3, action: 30, nextstate: 705, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 1, tics: 3, action: 30, nextstate: 706, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 2, tics: 3, action: 30, nextstate: 707, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 2, tics: 3, action: 30, nextstate: 702, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 3, tics: 5, action: 31, nextstate: 709, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 4, tics: 5, action: 31, nextstate: 710, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 32773, tics: 5, action: 31, nextstate: 711, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 32773, tics: 0, action: 64, nextstate: 702, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 6, tics: 6, action: 0, nextstate: 713, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 6, tics: 6, action: 25, nextstate: 702, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 32775, tics: 8, action: 0, nextstate: 715, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 32776, tics: 8, action: 33, nextstate: 716, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 32777, tics: 8, action: 0, nextstate: 717, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 32778, tics: 8, action: 0, nextstate: 718, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 32779, tics: 8, action: 65, nextstate: 719, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 32780, tics: 8, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 12, tics: 8, action: 0, nextstate: 721, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 11, tics: 8, action: 0, nextstate: 722, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 10, tics: 8, action: 0, nextstate: 723, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 9, tics: 8, action: 0, nextstate: 724, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 8, tics: 8, action: 0, nextstate: 725, misc1: 0, misc2: 0 },
+  { sprite: 50, frame: 7, tics: 8, action: 0, nextstate: 702, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 0, tics: 10, action: 29, nextstate: 727, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 1, tics: 10, action: 29, nextstate: 726, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 0, tics: 3, action: 30, nextstate: 729, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 0, tics: 3, action: 30, nextstate: 730, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 1, tics: 3, action: 30, nextstate: 731, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 1, tics: 3, action: 30, nextstate: 732, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 2, tics: 3, action: 30, nextstate: 733, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 2, tics: 3, action: 30, nextstate: 734, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 3, tics: 3, action: 30, nextstate: 735, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 3, tics: 3, action: 30, nextstate: 728, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 4, tics: 10, action: 31, nextstate: 737, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 5, tics: 10, action: 31, nextstate: 738, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 32774, tics: 4, action: 51, nextstate: 739, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 5, tics: 6, action: 31, nextstate: 740, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 32774, tics: 4, action: 51, nextstate: 741, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 5, tics: 1, action: 52, nextstate: 737, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 7, tics: 3, action: 0, nextstate: 743, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 7, tics: 3, action: 25, nextstate: 728, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 8, tics: 5, action: 0, nextstate: 745, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 9, tics: 5, action: 33, nextstate: 746, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 10, tics: 5, action: 27, nextstate: 747, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 11, tics: 5, action: 0, nextstate: 748, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 12, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 13, tics: 5, action: 0, nextstate: 750, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 14, tics: 5, action: 28, nextstate: 751, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 15, tics: 5, action: 27, nextstate: 752, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 16, tics: 5, action: 0, nextstate: 753, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 17, tics: 5, action: 0, nextstate: 754, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 18, tics: 5, action: 0, nextstate: 755, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 19, tics: 5, action: 0, nextstate: 756, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 20, tics: 5, action: 0, nextstate: 757, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 21, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 12, tics: 5, action: 0, nextstate: 759, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 11, tics: 5, action: 0, nextstate: 760, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 10, tics: 5, action: 0, nextstate: 761, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 9, tics: 5, action: 0, nextstate: 762, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 8, tics: 5, action: 0, nextstate: 728, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 0, tics: -1, action: 0, nextstate: 763, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 0, tics: 6, action: 0, nextstate: 765, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 1, tics: 6, action: 0, nextstate: 766, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 2, tics: 6, action: 33, nextstate: 767, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 3, tics: 6, action: 0, nextstate: 768, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 4, tics: 6, action: 0, nextstate: 769, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 5, tics: 6, action: 0, nextstate: 770, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 6, tics: 6, action: 0, nextstate: 771, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 7, tics: 6, action: 0, nextstate: 772, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 8, tics: 6, action: 0, nextstate: 773, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 9, tics: 6, action: 0, nextstate: 774, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 10, tics: 6, action: 66, nextstate: 775, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 11, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 12, tics: 4, action: 0, nextstate: 777, misc1: 0, misc2: 0 },
+  { sprite: 52, frame: 12, tics: 8, action: 25, nextstate: 763, misc1: 0, misc2: 0 },
+  { sprite: 53, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 53, frame: 1, tics: 36, action: 67, nextstate: 778, misc1: 0, misc2: 0 },
+  { sprite: 53, frame: 0, tics: 100, action: 68, nextstate: 781, misc1: 0, misc2: 0 },
+  { sprite: 53, frame: 0, tics: 10, action: 0, nextstate: 782, misc1: 0, misc2: 0 },
+  { sprite: 53, frame: 0, tics: 10, action: 0, nextstate: 783, misc1: 0, misc2: 0 },
+  { sprite: 53, frame: 0, tics: -1, action: 69, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 0, tics: 10, action: 29, nextstate: 784, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 0, tics: 181, action: 70, nextstate: 786, misc1: 0, misc2: 0 },
+  { sprite: 51, frame: 0, tics: 150, action: 71, nextstate: 786, misc1: 0, misc2: 0 },
+  { sprite: 54, frame: 32768, tics: 3, action: 72, nextstate: 788, misc1: 0, misc2: 0 },
+  { sprite: 54, frame: 32769, tics: 3, action: 73, nextstate: 789, misc1: 0, misc2: 0 },
+  { sprite: 54, frame: 32770, tics: 3, action: 73, nextstate: 790, misc1: 0, misc2: 0 },
+  { sprite: 54, frame: 32771, tics: 3, action: 73, nextstate: 787, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32768, tics: 4, action: 40, nextstate: 792, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32769, tics: 4, action: 40, nextstate: 793, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32770, tics: 4, action: 40, nextstate: 794, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32771, tics: 4, action: 40, nextstate: 795, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32772, tics: 4, action: 40, nextstate: 796, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32773, tics: 4, action: 40, nextstate: 797, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32774, tics: 4, action: 40, nextstate: 798, misc1: 0, misc2: 0 },
+  { sprite: 32, frame: 32775, tics: 4, action: 40, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32769, tics: 10, action: 0, nextstate: 800, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32770, tics: 10, action: 0, nextstate: 801, misc1: 0, misc2: 0 },
+  { sprite: 22, frame: 32771, tics: 10, action: 74, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 55, frame: 0, tics: 6, action: 0, nextstate: 803, misc1: 0, misc2: 0 },
+  { sprite: 55, frame: 32769, tics: 7, action: 0, nextstate: 802, misc1: 0, misc2: 0 },
+  { sprite: 56, frame: 0, tics: 6, action: 0, nextstate: 805, misc1: 0, misc2: 0 },
+  { sprite: 56, frame: 32769, tics: 6, action: 0, nextstate: 804, misc1: 0, misc2: 0 },
+  { sprite: 57, frame: 0, tics: 6, action: 0, nextstate: 807, misc1: 0, misc2: 0 },
+  { sprite: 57, frame: 1, tics: 6, action: 0, nextstate: 806, misc1: 0, misc2: 0 },
+  { sprite: 58, frame: 32768, tics: 5, action: 0, nextstate: 809, misc1: 0, misc2: 0 },
+  { sprite: 58, frame: 32769, tics: 5, action: 33, nextstate: 810, misc1: 0, misc2: 0 },
+  { sprite: 58, frame: 32770, tics: 5, action: 0, nextstate: 811, misc1: 0, misc2: 0 },
+  { sprite: 58, frame: 32771, tics: 10, action: 24, nextstate: 812, misc1: 0, misc2: 0 },
+  { sprite: 58, frame: 32772, tics: 10, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 59, frame: 32768, tics: 4, action: 0, nextstate: 814, misc1: 0, misc2: 0 },
+  { sprite: 59, frame: 32769, tics: 4, action: 0, nextstate: 815, misc1: 0, misc2: 0 },
+  { sprite: 59, frame: 32770, tics: 4, action: 0, nextstate: 813, misc1: 0, misc2: 0 },
+  { sprite: 60, frame: 0, tics: 6, action: 0, nextstate: 817, misc1: 0, misc2: 0 },
+  { sprite: 60, frame: 1, tics: 6, action: 0, nextstate: 818, misc1: 0, misc2: 0 },
+  { sprite: 60, frame: 2, tics: 6, action: 0, nextstate: 819, misc1: 0, misc2: 0 },
+  { sprite: 60, frame: 3, tics: 6, action: 0, nextstate: 820, misc1: 0, misc2: 0 },
+  { sprite: 60, frame: 2, tics: 6, action: 0, nextstate: 821, misc1: 0, misc2: 0 },
+  { sprite: 60, frame: 1, tics: 6, action: 0, nextstate: 816, misc1: 0, misc2: 0 },
+  { sprite: 61, frame: 0, tics: 6, action: 0, nextstate: 823, misc1: 0, misc2: 0 },
+  { sprite: 61, frame: 1, tics: 6, action: 0, nextstate: 824, misc1: 0, misc2: 0 },
+  { sprite: 61, frame: 2, tics: 6, action: 0, nextstate: 825, misc1: 0, misc2: 0 },
+  { sprite: 61, frame: 3, tics: 6, action: 0, nextstate: 826, misc1: 0, misc2: 0 },
+  { sprite: 61, frame: 2, tics: 6, action: 0, nextstate: 827, misc1: 0, misc2: 0 },
+  { sprite: 61, frame: 1, tics: 6, action: 0, nextstate: 822, misc1: 0, misc2: 0 },
+  { sprite: 62, frame: 0, tics: 10, action: 0, nextstate: 829, misc1: 0, misc2: 0 },
+  { sprite: 62, frame: 32769, tics: 10, action: 0, nextstate: 828, misc1: 0, misc2: 0 },
+  { sprite: 63, frame: 0, tics: 10, action: 0, nextstate: 831, misc1: 0, misc2: 0 },
+  { sprite: 63, frame: 32769, tics: 10, action: 0, nextstate: 830, misc1: 0, misc2: 0 },
+  { sprite: 64, frame: 0, tics: 10, action: 0, nextstate: 833, misc1: 0, misc2: 0 },
+  { sprite: 64, frame: 32769, tics: 10, action: 0, nextstate: 832, misc1: 0, misc2: 0 },
+  { sprite: 65, frame: 0, tics: 10, action: 0, nextstate: 835, misc1: 0, misc2: 0 },
+  { sprite: 65, frame: 32769, tics: 10, action: 0, nextstate: 834, misc1: 0, misc2: 0 },
+  { sprite: 66, frame: 0, tics: 10, action: 0, nextstate: 837, misc1: 0, misc2: 0 },
+  { sprite: 66, frame: 32769, tics: 10, action: 0, nextstate: 836, misc1: 0, misc2: 0 },
+  { sprite: 67, frame: 0, tics: 10, action: 0, nextstate: 839, misc1: 0, misc2: 0 },
+  { sprite: 67, frame: 32769, tics: 10, action: 0, nextstate: 838, misc1: 0, misc2: 0 },
+  { sprite: 68, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 69, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 70, frame: 32768, tics: 6, action: 0, nextstate: 843, misc1: 0, misc2: 0 },
+  { sprite: 70, frame: 32769, tics: 6, action: 0, nextstate: 844, misc1: 0, misc2: 0 },
+  { sprite: 70, frame: 32770, tics: 6, action: 0, nextstate: 845, misc1: 0, misc2: 0 },
+  { sprite: 70, frame: 32771, tics: 6, action: 0, nextstate: 846, misc1: 0, misc2: 0 },
+  { sprite: 70, frame: 32770, tics: 6, action: 0, nextstate: 847, misc1: 0, misc2: 0 },
+  { sprite: 70, frame: 32769, tics: 6, action: 0, nextstate: 842, misc1: 0, misc2: 0 },
+  { sprite: 71, frame: 32768, tics: 6, action: 0, nextstate: 849, misc1: 0, misc2: 0 },
+  { sprite: 71, frame: 32769, tics: 6, action: 0, nextstate: 850, misc1: 0, misc2: 0 },
+  { sprite: 71, frame: 32770, tics: 6, action: 0, nextstate: 851, misc1: 0, misc2: 0 },
+  { sprite: 71, frame: 32771, tics: 6, action: 0, nextstate: 848, misc1: 0, misc2: 0 },
+  { sprite: 72, frame: 32768, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 73, frame: 32768, tics: 6, action: 0, nextstate: 854, misc1: 0, misc2: 0 },
+  { sprite: 73, frame: 32769, tics: 6, action: 0, nextstate: 855, misc1: 0, misc2: 0 },
+  { sprite: 73, frame: 32770, tics: 6, action: 0, nextstate: 856, misc1: 0, misc2: 0 },
+  { sprite: 73, frame: 32771, tics: 6, action: 0, nextstate: 853, misc1: 0, misc2: 0 },
+  { sprite: 74, frame: 32768, tics: 6, action: 0, nextstate: 858, misc1: 0, misc2: 0 },
+  { sprite: 74, frame: 32769, tics: 6, action: 0, nextstate: 859, misc1: 0, misc2: 0 },
+  { sprite: 74, frame: 32770, tics: 6, action: 0, nextstate: 860, misc1: 0, misc2: 0 },
+  { sprite: 74, frame: 32771, tics: 6, action: 0, nextstate: 857, misc1: 0, misc2: 0 },
+  { sprite: 75, frame: 32768, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 76, frame: 32768, tics: 6, action: 0, nextstate: 863, misc1: 0, misc2: 0 },
+  { sprite: 76, frame: 32769, tics: 6, action: 0, nextstate: 864, misc1: 0, misc2: 0 },
+  { sprite: 76, frame: 32770, tics: 6, action: 0, nextstate: 865, misc1: 0, misc2: 0 },
+  { sprite: 76, frame: 32771, tics: 6, action: 0, nextstate: 866, misc1: 0, misc2: 0 },
+  { sprite: 76, frame: 32770, tics: 6, action: 0, nextstate: 867, misc1: 0, misc2: 0 },
+  { sprite: 76, frame: 32769, tics: 6, action: 0, nextstate: 862, misc1: 0, misc2: 0 },
+  { sprite: 77, frame: 32768, tics: 6, action: 0, nextstate: 869, misc1: 0, misc2: 0 },
+  { sprite: 77, frame: 1, tics: 6, action: 0, nextstate: 868, misc1: 0, misc2: 0 },
+  { sprite: 78, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 79, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 80, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 81, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 82, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 83, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 84, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 85, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 86, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 87, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 88, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 89, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 90, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 91, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 92, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 93, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 94, frame: 32768, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 95, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 96, frame: 0, tics: 10, action: 0, nextstate: 889, misc1: 0, misc2: 0 },
+  { sprite: 96, frame: 1, tics: 15, action: 0, nextstate: 890, misc1: 0, misc2: 0 },
+  { sprite: 96, frame: 2, tics: 8, action: 0, nextstate: 891, misc1: 0, misc2: 0 },
+  { sprite: 96, frame: 1, tics: 6, action: 0, nextstate: 888, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 13, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 28, frame: 18, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 97, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 98, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 99, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 100, frame: 32768, tics: 6, action: 0, nextstate: 898, misc1: 0, misc2: 0 },
+  { sprite: 100, frame: 32769, tics: 6, action: 0, nextstate: 897, misc1: 0, misc2: 0 },
+  { sprite: 101, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 102, frame: 0, tics: 6, action: 0, nextstate: 901, misc1: 0, misc2: 0 },
+  { sprite: 102, frame: 1, tics: 8, action: 0, nextstate: 900, misc1: 0, misc2: 0 },
+  { sprite: 103, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 104, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 105, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 106, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 107, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 108, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 109, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 110, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 111, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 112, frame: 32768, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 113, frame: 32768, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 114, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 115, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 116, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 117, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 118, frame: 32768, tics: 6, action: 0, nextstate: 918, misc1: 0, misc2: 0 },
+  { sprite: 118, frame: 32769, tics: 6, action: 0, nextstate: 919, misc1: 0, misc2: 0 },
+  { sprite: 118, frame: 32770, tics: 6, action: 0, nextstate: 920, misc1: 0, misc2: 0 },
+  { sprite: 118, frame: 32769, tics: 6, action: 0, nextstate: 917, misc1: 0, misc2: 0 },
+  { sprite: 119, frame: 32768, tics: 6, action: 0, nextstate: 922, misc1: 0, misc2: 0 },
+  { sprite: 119, frame: 32769, tics: 6, action: 0, nextstate: 923, misc1: 0, misc2: 0 },
+  { sprite: 119, frame: 32770, tics: 6, action: 0, nextstate: 921, misc1: 0, misc2: 0 },
+  { sprite: 120, frame: 0, tics: 14, action: 0, nextstate: 925, misc1: 0, misc2: 0 },
+  { sprite: 120, frame: 1, tics: 14, action: 0, nextstate: 924, misc1: 0, misc2: 0 },
+  { sprite: 121, frame: 32768, tics: 4, action: 0, nextstate: 927, misc1: 0, misc2: 0 },
+  { sprite: 121, frame: 32769, tics: 4, action: 0, nextstate: 928, misc1: 0, misc2: 0 },
+  { sprite: 121, frame: 32770, tics: 4, action: 0, nextstate: 929, misc1: 0, misc2: 0 },
+  { sprite: 121, frame: 32771, tics: 4, action: 0, nextstate: 926, misc1: 0, misc2: 0 },
+  { sprite: 122, frame: 32768, tics: 4, action: 0, nextstate: 931, misc1: 0, misc2: 0 },
+  { sprite: 122, frame: 32769, tics: 4, action: 0, nextstate: 932, misc1: 0, misc2: 0 },
+  { sprite: 122, frame: 32770, tics: 4, action: 0, nextstate: 933, misc1: 0, misc2: 0 },
+  { sprite: 122, frame: 32771, tics: 4, action: 0, nextstate: 930, misc1: 0, misc2: 0 },
+  { sprite: 123, frame: 32768, tics: 4, action: 0, nextstate: 935, misc1: 0, misc2: 0 },
+  { sprite: 123, frame: 32769, tics: 4, action: 0, nextstate: 936, misc1: 0, misc2: 0 },
+  { sprite: 123, frame: 32770, tics: 4, action: 0, nextstate: 937, misc1: 0, misc2: 0 },
+  { sprite: 123, frame: 32771, tics: 4, action: 0, nextstate: 934, misc1: 0, misc2: 0 },
+  { sprite: 124, frame: 32768, tics: 4, action: 0, nextstate: 939, misc1: 0, misc2: 0 },
+  { sprite: 124, frame: 32769, tics: 4, action: 0, nextstate: 940, misc1: 0, misc2: 0 },
+  { sprite: 124, frame: 32770, tics: 4, action: 0, nextstate: 941, misc1: 0, misc2: 0 },
+  { sprite: 124, frame: 32771, tics: 4, action: 0, nextstate: 938, misc1: 0, misc2: 0 },
+  { sprite: 125, frame: 32768, tics: 4, action: 0, nextstate: 943, misc1: 0, misc2: 0 },
+  { sprite: 125, frame: 32769, tics: 4, action: 0, nextstate: 944, misc1: 0, misc2: 0 },
+  { sprite: 125, frame: 32770, tics: 4, action: 0, nextstate: 945, misc1: 0, misc2: 0 },
+  { sprite: 125, frame: 32771, tics: 4, action: 0, nextstate: 942, misc1: 0, misc2: 0 },
+  { sprite: 126, frame: 32768, tics: 4, action: 0, nextstate: 947, misc1: 0, misc2: 0 },
+  { sprite: 126, frame: 32769, tics: 4, action: 0, nextstate: 948, misc1: 0, misc2: 0 },
+  { sprite: 126, frame: 32770, tics: 4, action: 0, nextstate: 949, misc1: 0, misc2: 0 },
+  { sprite: 126, frame: 32771, tics: 4, action: 0, nextstate: 946, misc1: 0, misc2: 0 },
+  { sprite: 127, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 128, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 129, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 130, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 131, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 132, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 133, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 134, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 135, frame: 0, tics: -1, action: 0, nextstate: 0, misc1: 0, misc2: 0 },
+  { sprite: 136, frame: 32768, tics: 4, action: 0, nextstate: 960, misc1: 0, misc2: 0 },
+  { sprite: 136, frame: 32769, tics: 4, action: 0, nextstate: 961, misc1: 0, misc2: 0 },
+  { sprite: 136, frame: 32770, tics: 4, action: 0, nextstate: 962, misc1: 0, misc2: 0 },
+  { sprite: 136, frame: 32771, tics: 4, action: 0, nextstate: 959, misc1: 0, misc2: 0 },
+  { sprite: 137, frame: 32768, tics: 4, action: 0, nextstate: 964, misc1: 0, misc2: 0 },
+  { sprite: 137, frame: 32769, tics: 4, action: 0, nextstate: 965, misc1: 0, misc2: 0 },
+  { sprite: 137, frame: 32770, tics: 4, action: 0, nextstate: 966, misc1: 0, misc2: 0 },
+  { sprite: 137, frame: 32771, tics: 4, action: 0, nextstate: 963, misc1: 0, misc2: 0 }
+]
+
+// The kinds of things.
+const MT_PLAYER = 0
+const MT_POSSESSED = 1
+const MT_SHOTGUY = 2
+const MT_VILE = 3
+const MT_FIRE = 4
+const MT_UNDEAD = 5
+const MT_TRACER = 6
+const MT_SMOKE = 7
+const MT_FATSO = 8
+const MT_FATSHOT = 9
+const MT_CHAINGUY = 10
+const MT_TROOP = 11
+const MT_SERGEANT = 12
+const MT_SHADOWS = 13
+const MT_HEAD = 14
+const MT_BRUISER = 15
+const MT_BRUISERSHOT = 16
+const MT_KNIGHT = 17
+const MT_SKULL = 18
+const MT_SPIDER = 19
+const MT_BABY = 20
+const MT_CYBORG = 21
+const MT_PAIN = 22
+const MT_WOLFSS = 23
+const MT_KEEN = 24
+const MT_BOSSBRAIN = 25
+const MT_BOSSSPIT = 26
+const MT_BOSSTARGET = 27
+const MT_SPAWNSHOT = 28
+const MT_SPAWNFIRE = 29
+const MT_BARREL = 30
+const MT_TROOPSHOT = 31
+const MT_HEADSHOT = 32
+const MT_ROCKET = 33
+const MT_PLASMA = 34
+const MT_BFG = 35
+const MT_ARACHPLAZ = 36
+const MT_PUFF = 37
+const MT_BLOOD = 38
+const MT_TFOG = 39
+const MT_IFOG = 40
+const MT_TELEPORTMAN = 41
+const MT_EXTRABFG = 42
+const MT_MISC0 = 43
+const MT_MISC1 = 44
+const MT_MISC2 = 45
+const MT_MISC3 = 46
+const MT_MISC4 = 47
+const MT_MISC5 = 48
+const MT_MISC6 = 49
+const MT_MISC7 = 50
+const MT_MISC8 = 51
+const MT_MISC9 = 52
+const MT_MISC10 = 53
+const MT_MISC11 = 54
+const MT_MISC12 = 55
+const MT_INV = 56
+const MT_MISC13 = 57
+const MT_INS = 58
+const MT_MISC14 = 59
+const MT_MISC15 = 60
+const MT_MISC16 = 61
+const MT_MEGA = 62
+const MT_CLIP = 63
+const MT_MISC17 = 64
+const MT_MISC18 = 65
+const MT_MISC19 = 66
+const MT_MISC20 = 67
+const MT_MISC21 = 68
+const MT_MISC22 = 69
+const MT_MISC23 = 70
+const MT_MISC24 = 71
+const MT_MISC25 = 72
+const MT_CHAINGUN = 73
+const MT_MISC26 = 74
+const MT_MISC27 = 75
+const MT_MISC28 = 76
+const MT_SHOTGUN = 77
+const MT_SUPERSHOTGUN = 78
+const MT_MISC29 = 79
+const MT_MISC30 = 80
+const MT_MISC31 = 81
+const MT_MISC32 = 82
+const MT_MISC33 = 83
+const MT_MISC34 = 84
+const MT_MISC35 = 85
+const MT_MISC36 = 86
+const MT_MISC37 = 87
+const MT_MISC38 = 88
+const MT_MISC39 = 89
+const MT_MISC40 = 90
+const MT_MISC41 = 91
+const MT_MISC42 = 92
+const MT_MISC43 = 93
+const MT_MISC44 = 94
+const MT_MISC45 = 95
+const MT_MISC46 = 96
+const MT_MISC47 = 97
+const MT_MISC48 = 98
+const MT_MISC49 = 99
+const MT_MISC50 = 100
+const MT_MISC51 = 101
+const MT_MISC52 = 102
+const MT_MISC53 = 103
+const MT_MISC54 = 104
+const MT_MISC55 = 105
+const MT_MISC56 = 106
+const MT_MISC57 = 107
+const MT_MISC58 = 108
+const MT_MISC59 = 109
+const MT_MISC60 = 110
+const MT_MISC61 = 111
+const MT_MISC62 = 112
+const MT_MISC63 = 113
+const MT_MISC64 = 114
+const MT_MISC65 = 115
+const MT_MISC66 = 116
+const MT_MISC67 = 117
+const MT_MISC68 = 118
+const MT_MISC69 = 119
+const MT_MISC70 = 120
+const MT_MISC71 = 121
+const MT_MISC72 = 122
+const MT_MISC73 = 123
+const MT_MISC74 = 124
+const MT_MISC75 = 125
+const MT_MISC76 = 126
+const MT_MISC77 = 127
+const MT_MISC78 = 128
+const MT_MISC79 = 129
+const MT_MISC80 = 130
+const MT_MISC81 = 131
+const MT_MISC82 = 132
+const MT_MISC83 = 133
+const MT_MISC84 = 134
+const MT_MISC85 = 135
+const MT_MISC86 = 136
+
+// A kind of thing: the number the levels call it by (-1: none), its
+// states, sounds and numbers, and the flags it starts with.
+table mobjinfo {
+  doomednum: i32, spawnstate: i32, spawnhealth: i32, seestate: i32, seesound: i32, reactiontime: i32, attacksound: i32, painstate: i32, painchance: i32, painsound: i32, meleestate: i32, missilestate: i32, deathstate: i32, xdeathstate: i32, deathsound: i32, speed: i32, radius: i32, height: i32, mass: i32, damage: i32, activesound: i32, flags: i32, raisestate: i32
+} = [
+  { doomednum: -1, spawnstate: 149, spawnhealth: 100, seestate: 150, seesound: 0, reactiontime: 0, attacksound: 0, painstate: 156, painchance: 255, painsound: 25, meleestate: 0, missilestate: 154, deathstate: 158, xdeathstate: 165, deathsound: 57, speed: 0, radius: 1048576, height: 3670016, mass: 100, damage: 0, activesound: 0, flags: 33557510, raisestate: 0 },
+  { doomednum: 3004, spawnstate: 174, spawnhealth: 20, seestate: 176, seesound: 36, reactiontime: 8, attacksound: 1, painstate: 187, painchance: 200, painsound: 27, meleestate: 0, missilestate: 184, deathstate: 189, xdeathstate: 194, deathsound: 59, speed: 8, radius: 1310720, height: 3670016, mass: 100, damage: 0, activesound: 75, flags: 4194310, raisestate: 203 },
+  { doomednum: 9, spawnstate: 207, spawnhealth: 30, seestate: 209, seesound: 37, reactiontime: 8, attacksound: 0, painstate: 220, painchance: 170, painsound: 27, meleestate: 0, missilestate: 217, deathstate: 222, xdeathstate: 227, deathsound: 60, speed: 8, radius: 1310720, height: 3670016, mass: 100, damage: 0, activesound: 75, flags: 4194310, raisestate: 236 },
+  { doomednum: 64, spawnstate: 241, spawnhealth: 700, seestate: 243, seesound: 48, reactiontime: 8, attacksound: 0, painstate: 269, painchance: 10, painsound: 28, meleestate: 0, missilestate: 255, deathstate: 271, xdeathstate: 0, deathsound: 71, speed: 15, radius: 1310720, height: 3670016, mass: 500, damage: 0, activesound: 80, flags: 4194310, raisestate: 0 },
+  { doomednum: -1, spawnstate: 281, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 528, raisestate: 0 },
+  { doomednum: 66, spawnstate: 321, spawnhealth: 300, seestate: 323, seesound: 106, reactiontime: 8, attacksound: 0, painstate: 343, painchance: 100, painsound: 27, meleestate: 335, missilestate: 339, deathstate: 345, xdeathstate: 0, deathsound: 74, speed: 10, radius: 1310720, height: 3670016, mass: 500, damage: 0, activesound: 105, flags: 4194310, raisestate: 351 },
+  { doomednum: -1, spawnstate: 316, spawnhealth: 1000, seestate: 0, seesound: 107, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 318, xdeathstate: 0, deathsound: 82, speed: 655360, radius: 720896, height: 524288, mass: 100, damage: 10, activesound: 0, flags: 67088, raisestate: 0 },
+  { doomednum: -1, spawnstate: 311, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 528, raisestate: 0 },
+  { doomednum: 67, spawnstate: 362, spawnhealth: 600, seestate: 364, seesound: 49, reactiontime: 8, attacksound: 0, painstate: 386, painchance: 80, painsound: 29, meleestate: 0, missilestate: 376, deathstate: 388, xdeathstate: 0, deathsound: 100, speed: 8, radius: 3145728, height: 4194304, mass: 1000, damage: 0, activesound: 75, flags: 4194310, raisestate: 398 },
+  { doomednum: -1, spawnstate: 357, spawnhealth: 1000, seestate: 0, seesound: 16, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 359, xdeathstate: 0, deathsound: 17, speed: 1310720, radius: 393216, height: 524288, mass: 100, damage: 8, activesound: 0, flags: 67088, raisestate: 0 },
+  { doomednum: 65, spawnstate: 406, spawnhealth: 70, seestate: 408, seesound: 37, reactiontime: 8, attacksound: 0, painstate: 420, painchance: 170, painsound: 27, meleestate: 0, missilestate: 416, deathstate: 422, xdeathstate: 429, deathsound: 60, speed: 8, radius: 1310720, height: 3670016, mass: 100, damage: 0, activesound: 75, flags: 4194310, raisestate: 435 },
+  { doomednum: 3001, spawnstate: 442, spawnhealth: 60, seestate: 444, seesound: 39, reactiontime: 8, attacksound: 0, painstate: 455, painchance: 200, painsound: 27, meleestate: 452, missilestate: 452, deathstate: 457, xdeathstate: 462, deathsound: 62, speed: 8, radius: 1310720, height: 3670016, mass: 100, damage: 0, activesound: 76, flags: 4194310, raisestate: 470 },
+  { doomednum: 3002, spawnstate: 475, spawnhealth: 150, seestate: 477, seesound: 41, reactiontime: 8, attacksound: 52, painstate: 488, painchance: 180, painsound: 26, meleestate: 485, missilestate: 0, deathstate: 490, xdeathstate: 0, deathsound: 64, speed: 10, radius: 1966080, height: 3670016, mass: 400, damage: 0, activesound: 77, flags: 4194310, raisestate: 496 },
+  { doomednum: 58, spawnstate: 475, spawnhealth: 150, seestate: 477, seesound: 41, reactiontime: 8, attacksound: 52, painstate: 488, painchance: 180, painsound: 26, meleestate: 485, missilestate: 0, deathstate: 490, xdeathstate: 0, deathsound: 64, speed: 10, radius: 1966080, height: 3670016, mass: 400, damage: 0, activesound: 77, flags: 4456454, raisestate: 496 },
+  { doomednum: 3005, spawnstate: 502, spawnhealth: 400, seestate: 503, seesound: 42, reactiontime: 8, attacksound: 0, painstate: 507, painchance: 128, painsound: 26, meleestate: 0, missilestate: 504, deathstate: 510, xdeathstate: 0, deathsound: 65, speed: 8, radius: 2031616, height: 3670016, mass: 400, damage: 0, activesound: 77, flags: 4211206, raisestate: 516 },
+  { doomednum: 3003, spawnstate: 527, spawnhealth: 1000, seestate: 529, seesound: 43, reactiontime: 8, attacksound: 0, painstate: 540, painchance: 50, painsound: 26, meleestate: 537, missilestate: 537, deathstate: 542, xdeathstate: 0, deathsound: 67, speed: 8, radius: 1572864, height: 4194304, mass: 1000, damage: 0, activesound: 77, flags: 4194310, raisestate: 549 },
+  { doomednum: -1, spawnstate: 522, spawnhealth: 1000, seestate: 0, seesound: 16, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 524, xdeathstate: 0, deathsound: 17, speed: 983040, radius: 393216, height: 524288, mass: 100, damage: 8, activesound: 0, flags: 67088, raisestate: 0 },
+  { doomednum: 69, spawnstate: 556, spawnhealth: 500, seestate: 558, seesound: 47, reactiontime: 8, attacksound: 0, painstate: 569, painchance: 50, painsound: 26, meleestate: 566, missilestate: 566, deathstate: 571, xdeathstate: 0, deathsound: 72, speed: 8, radius: 1572864, height: 4194304, mass: 1000, damage: 0, activesound: 77, flags: 4194310, raisestate: 578 },
+  { doomednum: 3006, spawnstate: 585, spawnhealth: 100, seestate: 587, seesound: 0, reactiontime: 8, attacksound: 51, painstate: 593, painchance: 256, painsound: 26, meleestate: 0, missilestate: 589, deathstate: 595, xdeathstate: 0, deathsound: 17, speed: 8, radius: 1048576, height: 3670016, mass: 50, damage: 3, activesound: 77, flags: 16902, raisestate: 0 },
+  { doomednum: 7, spawnstate: 601, spawnhealth: 3000, seestate: 603, seesound: 45, reactiontime: 8, attacksound: 2, painstate: 619, painchance: 40, painsound: 26, meleestate: 0, missilestate: 615, deathstate: 621, xdeathstate: 0, deathsound: 69, speed: 12, radius: 8388608, height: 6553600, mass: 1000, damage: 0, activesound: 77, flags: 4194310, raisestate: 0 },
+  { doomednum: 68, spawnstate: 632, spawnhealth: 500, seestate: 634, seesound: 46, reactiontime: 8, attacksound: 0, painstate: 651, painchance: 128, painsound: 26, meleestate: 0, missilestate: 647, deathstate: 653, xdeathstate: 0, deathsound: 70, speed: 12, radius: 4194304, height: 4194304, mass: 600, damage: 0, activesound: 78, flags: 4194310, raisestate: 660 },
+  { doomednum: 16, spawnstate: 674, spawnhealth: 4000, seestate: 676, seesound: 44, reactiontime: 8, attacksound: 0, painstate: 690, painchance: 20, painsound: 26, meleestate: 0, missilestate: 684, deathstate: 691, xdeathstate: 0, deathsound: 68, speed: 16, radius: 2621440, height: 7208960, mass: 1000, damage: 0, activesound: 77, flags: 4194310, raisestate: 0 },
+  { doomednum: 71, spawnstate: 701, spawnhealth: 400, seestate: 702, seesound: 50, reactiontime: 8, attacksound: 0, painstate: 712, painchance: 128, painsound: 30, meleestate: 0, missilestate: 708, deathstate: 714, xdeathstate: 0, deathsound: 73, speed: 8, radius: 2031616, height: 3670016, mass: 400, damage: 0, activesound: 77, flags: 4211206, raisestate: 720 },
+  { doomednum: 84, spawnstate: 726, spawnhealth: 50, seestate: 728, seesound: 101, reactiontime: 8, attacksound: 0, painstate: 742, painchance: 170, painsound: 27, meleestate: 0, missilestate: 736, deathstate: 744, xdeathstate: 749, deathsound: 102, speed: 8, radius: 1310720, height: 3670016, mass: 100, damage: 0, activesound: 75, flags: 4194310, raisestate: 758 },
+  { doomednum: 72, spawnstate: 763, spawnhealth: 100, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 776, painchance: 256, painsound: 103, meleestate: 0, missilestate: 0, deathstate: 764, xdeathstate: 0, deathsound: 104, speed: 0, radius: 1048576, height: 4718592, mass: 10000000, damage: 0, activesound: 0, flags: 4195078, raisestate: 0 },
+  { doomednum: 88, spawnstate: 778, spawnhealth: 250, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 779, painchance: 255, painsound: 97, meleestate: 0, missilestate: 0, deathstate: 780, xdeathstate: 0, deathsound: 98, speed: 0, radius: 1048576, height: 1048576, mass: 10000000, damage: 0, activesound: 0, flags: 6, raisestate: 0 },
+  { doomednum: 89, spawnstate: 784, spawnhealth: 1000, seestate: 785, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 2097152, mass: 100, damage: 0, activesound: 0, flags: 24, raisestate: 0 },
+  { doomednum: 87, spawnstate: 0, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 2097152, mass: 100, damage: 0, activesound: 0, flags: 24, raisestate: 0 },
+  { doomednum: -1, spawnstate: 787, spawnhealth: 1000, seestate: 0, seesound: 94, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 17, speed: 655360, radius: 393216, height: 2097152, mass: 100, damage: 3, activesound: 0, flags: 71184, raisestate: 0 },
+  { doomednum: -1, spawnstate: 791, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 528, raisestate: 0 },
+  { doomednum: 2035, spawnstate: 806, spawnhealth: 20, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 808, xdeathstate: 0, deathsound: 82, speed: 0, radius: 655360, height: 2752512, mass: 100, damage: 0, activesound: 0, flags: 524294, raisestate: 0 },
+  { doomednum: -1, spawnstate: 97, spawnhealth: 1000, seestate: 0, seesound: 16, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 99, xdeathstate: 0, deathsound: 17, speed: 655360, radius: 393216, height: 524288, mass: 100, damage: 3, activesound: 0, flags: 67088, raisestate: 0 },
+  { doomednum: -1, spawnstate: 102, spawnhealth: 1000, seestate: 0, seesound: 16, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 104, xdeathstate: 0, deathsound: 17, speed: 655360, radius: 393216, height: 524288, mass: 100, damage: 5, activesound: 0, flags: 67088, raisestate: 0 },
+  { doomednum: -1, spawnstate: 114, spawnhealth: 1000, seestate: 0, seesound: 14, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 127, xdeathstate: 0, deathsound: 82, speed: 1310720, radius: 720896, height: 524288, mass: 100, damage: 20, activesound: 0, flags: 67088, raisestate: 0 },
+  { doomednum: -1, spawnstate: 107, spawnhealth: 1000, seestate: 0, seesound: 8, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 109, xdeathstate: 0, deathsound: 17, speed: 1638400, radius: 851968, height: 524288, mass: 100, damage: 5, activesound: 0, flags: 67088, raisestate: 0 },
+  { doomednum: -1, spawnstate: 115, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 117, xdeathstate: 0, deathsound: 15, speed: 1638400, radius: 851968, height: 524288, mass: 100, damage: 100, activesound: 0, flags: 67088, raisestate: 0 },
+  { doomednum: -1, spawnstate: 667, spawnhealth: 1000, seestate: 0, seesound: 8, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 669, xdeathstate: 0, deathsound: 17, speed: 1638400, radius: 851968, height: 524288, mass: 100, damage: 5, activesound: 0, flags: 67088, raisestate: 0 },
+  { doomednum: -1, spawnstate: 93, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 528, raisestate: 0 },
+  { doomednum: -1, spawnstate: 90, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 16, raisestate: 0 },
+  { doomednum: -1, spawnstate: 130, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 528, raisestate: 0 },
+  { doomednum: -1, spawnstate: 142, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 528, raisestate: 0 },
+  { doomednum: 14, spawnstate: 0, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 24, raisestate: 0 },
+  { doomednum: -1, spawnstate: 123, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 528, raisestate: 0 },
+  { doomednum: 2018, spawnstate: 802, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2019, spawnstate: 804, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2014, spawnstate: 816, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 8388609, raisestate: 0 },
+  { doomednum: 2015, spawnstate: 822, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 8388609, raisestate: 0 },
+  { doomednum: 5, spawnstate: 828, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 33554433, raisestate: 0 },
+  { doomednum: 13, spawnstate: 830, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 33554433, raisestate: 0 },
+  { doomednum: 6, spawnstate: 832, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 33554433, raisestate: 0 },
+  { doomednum: 39, spawnstate: 838, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 33554433, raisestate: 0 },
+  { doomednum: 38, spawnstate: 836, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 33554433, raisestate: 0 },
+  { doomednum: 40, spawnstate: 834, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 33554433, raisestate: 0 },
+  { doomednum: 2011, spawnstate: 840, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2012, spawnstate: 841, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2013, spawnstate: 842, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 8388609, raisestate: 0 },
+  { doomednum: 2022, spawnstate: 848, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 8388609, raisestate: 0 },
+  { doomednum: 2023, spawnstate: 852, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 8388609, raisestate: 0 },
+  { doomednum: 2024, spawnstate: 853, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 8388609, raisestate: 0 },
+  { doomednum: 2025, spawnstate: 861, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2026, spawnstate: 862, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 8388609, raisestate: 0 },
+  { doomednum: 2045, spawnstate: 868, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 8388609, raisestate: 0 },
+  { doomednum: 83, spawnstate: 857, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 8388609, raisestate: 0 },
+  { doomednum: 2007, spawnstate: 870, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2048, spawnstate: 871, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2010, spawnstate: 872, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2046, spawnstate: 873, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2047, spawnstate: 874, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 17, spawnstate: 875, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2008, spawnstate: 876, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2049, spawnstate: 877, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 8, spawnstate: 878, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2006, spawnstate: 879, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2002, spawnstate: 880, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2005, spawnstate: 881, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2003, spawnstate: 882, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2004, spawnstate: 883, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 2001, spawnstate: 884, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 82, spawnstate: 885, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 1, raisestate: 0 },
+  { doomednum: 85, spawnstate: 959, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 86, spawnstate: 963, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 2028, spawnstate: 886, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 30, spawnstate: 907, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 31, spawnstate: 908, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 32, spawnstate: 909, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 33, spawnstate: 910, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 37, spawnstate: 913, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 36, spawnstate: 924, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 41, spawnstate: 917, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 42, spawnstate: 921, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 43, spawnstate: 914, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 44, spawnstate: 926, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 45, spawnstate: 930, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 46, spawnstate: 934, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 55, spawnstate: 938, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 56, spawnstate: 942, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 57, spawnstate: 946, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 47, spawnstate: 906, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 48, spawnstate: 916, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 34, spawnstate: 911, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 35, spawnstate: 912, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 49, spawnstate: 888, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 4456448, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 50, spawnstate: 902, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 5505024, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 51, spawnstate: 903, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 5505024, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 52, spawnstate: 904, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 4456448, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 53, spawnstate: 905, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 3407872, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 59, spawnstate: 902, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 5505024, mass: 100, damage: 0, activesound: 0, flags: 768, raisestate: 0 },
+  { doomednum: 60, spawnstate: 904, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 4456448, mass: 100, damage: 0, activesound: 0, flags: 768, raisestate: 0 },
+  { doomednum: 61, spawnstate: 903, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 3407872, mass: 100, damage: 0, activesound: 0, flags: 768, raisestate: 0 },
+  { doomednum: 62, spawnstate: 905, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 3407872, mass: 100, damage: 0, activesound: 0, flags: 768, raisestate: 0 },
+  { doomednum: 63, spawnstate: 888, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 4456448, mass: 100, damage: 0, activesound: 0, flags: 768, raisestate: 0 },
+  { doomednum: 22, spawnstate: 515, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 15, spawnstate: 164, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 18, spawnstate: 193, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 21, spawnstate: 495, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 23, spawnstate: 600, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 20, spawnstate: 461, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 19, spawnstate: 226, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 10, spawnstate: 173, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 12, spawnstate: 173, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 28, spawnstate: 894, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 24, spawnstate: 895, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 0, raisestate: 0 },
+  { doomednum: 27, spawnstate: 896, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 29, spawnstate: 897, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 25, spawnstate: 899, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 26, spawnstate: 900, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 54, spawnstate: 915, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 2097152, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 70, spawnstate: 813, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 2, raisestate: 0 },
+  { doomednum: 73, spawnstate: 950, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 5767168, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 74, spawnstate: 951, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 5767168, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 75, spawnstate: 952, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 4194304, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 76, spawnstate: 953, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 4194304, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 77, spawnstate: 954, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 4194304, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 78, spawnstate: 955, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1048576, height: 4194304, mass: 100, damage: 0, activesound: 0, flags: 770, raisestate: 0 },
+  { doomednum: 79, spawnstate: 956, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 16, raisestate: 0 },
+  { doomednum: 80, spawnstate: 957, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 16, raisestate: 0 },
+  { doomednum: 81, spawnstate: 958, spawnhealth: 1000, seestate: 0, seesound: 0, reactiontime: 8, attacksound: 0, painstate: 0, painchance: 0, painsound: 0, meleestate: 0, missilestate: 0, deathstate: 0, xdeathstate: 0, deathsound: 0, speed: 0, radius: 1310720, height: 1048576, mass: 100, damage: 0, activesound: 0, flags: 16, raisestate: 0 }
+]
