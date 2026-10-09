@@ -1,0 +1,16 @@
+// Doom's fixed point, angle tables and random numbers in ent-lang
+// (examples/doom: fixed.ent, tables.ent, angles.ent, random.ent), by what
+// they give for a million pairs of numbers. The numbers here are those of
+// the C they were ported from: examples/doom/check/maths.sh compares the
+// two, where the reference is there (examples/doom/reference/fetch.sh).
+// RUN: %ent run -I %S/../../examples/doom %S/../../examples/doom/check/maths.ent | FileCheck %s
+
+// CHECK:      tables 1855389718 3561017569 479422538
+// CHECK-NEXT: 0: 1015568748 1586005467 mul 1491847289 div 41964 slope 618 angle 873410239
+// CHECK-NEXT:   dist 2147483647 aprox 2093789841
+// CHECK:      900000: -827960916 -27782 mul 350988924 div 2147483647 slope 117 angle 2147483648
+// CHECK-NEXT:   dist 827973549 aprox 827974807
+// CHECK-NEXT: mul 3416598475 div 1762905654 slope 1833318430
+// CHECK-NEXT: angle 2373923027 dist 1311878617 aprox 1150365838
+// CHECK-NEXT: random 3100241346 at 88
+// CHECK-NOT:  {{.}}

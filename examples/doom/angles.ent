@@ -1,0 +1,95 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// Angles and distances by the tables (tables.c, r_main.c, p_maputl.c).
+import fixed
+import tables
+
+fn ang45() -> u32 { 0x20000000 }
+fn ang90() -> u32 { 0x40000000 }
+fn ang180() -> u32 { 0x80000000 }
+fn ang270() -> u32 { 0xc0000000 }
+
+// The cosine of a fine angle: the sine a quarter turn on.
+fn finecosine(fine: i32) -> i32 { finesine[fine + 2048] }
+
+// `num / den` as a place in `tantoangle`, 0 to 2048 (SlopeDiv).
+fn slope_div(num: u32, den: u32) -> i32 {
+  if den < 512 {
+    2048
+  } else {
+    let ans = (num << 3) / (den >> 8)
+    if ans <= 2048 { ans as i32 } else { 2048 }
+  }
+}
+
+// The angle of the point (dx, dy) as seen from nought (R_PointToAngle,
+// which is given a point and takes the view's place from it: here who
+// asks does that). The point is turned into the first eighth of a turn,
+// where the table has the angle of its slope.
+fn point_to_angle(dx: i32, dy: i32) -> u32 {
+  if dx == 0 && dy == 0 {
+    0
+  } else if dx >= 0 {
+    if dy >= 0 {
+      if dx > dy {
+        tantoangle[slope_div(dy as u32, dx as u32)]            // octant 0
+      } else {
+        0x3fffffff - tantoangle[slope_div(dx as u32, dy as u32)]  // octant 1
+      }
+    } else {
+      let y = -dy
+      if dx > y {
+        -tantoangle[slope_div(y as u32, dx as u32)]            // octant 8
+      } else {
+        0xc0000000 + tantoangle[slope_div(dx as u32, y as u32)]   // octant 7
+      }
+    }
+  } else {
+    let x = -dx
+    if dy >= 0 {
+      if x > dy {
+        0x7fffffff - tantoangle[slope_div(dy as u32, x as u32)]   // octant 3
+      } else {
+        0x40000000 + tantoangle[slope_div(x as u32, dy as u32)]   // octant 2
+      }
+    } else {
+      let y = -dy
+      if x > y {
+        0x80000000 + tantoangle[slope_div(y as u32, x as u32)]    // octant 4
+      } else {
+        0xbfffffff - tantoangle[slope_div(x as u32, y as u32)]    // octant 5
+      }
+    }
+  }
+}
+
+// How far the point (dx, dy) is from nought (R_PointToDist): the longer
+// side over the cosine of the angle between it and the line to the point.
+fn point_to_dist(dx: i32, dy: i32) -> i32 {
+  let ax = abs(dx)
+  let ay = abs(dy)
+  let long = max(ax, ay)
+  let short = min(ax, ay)
+  let frac = if long != 0 { fixed_div(short, long) } else { 0 }
+  let angle = ((tantoangle[frac >> 5] + 0x40000000) >> 19) as i32
+  fixed_div(long, finesine[angle])
+}
+
+// About how far (dx, dy) is from nought, without a table: the longer
+// side and half the shorter (P_AproxDistance).
+fn aprox_distance(dx: i32, dy: i32) -> i32 {
+  let ax = abs(dx)
+  let ay = abs(dy)
+  if ax < ay { ax + ay - (ax >> 1) } else { ax + ay - (ay >> 1) }
+}

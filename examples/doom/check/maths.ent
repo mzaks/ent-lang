@@ -1,0 +1,71 @@
+// The fixed point, the tables and the random numbers against the
+// reference: prints what `DOOM_MATHS=file chocolate-doom ...` writes
+// (reference/trace.patch), line for line. See check/maths.sh.
+import console
+import fixed
+import tables
+import angles
+import random
+
+// One more value into a hash (FNV-1a over its four bytes).
+fn mixed(hash: u32, value: i32) -> u32 {
+  var all = hash
+  for i in 0..4 {
+    all = (all ^ ((value >> (i * 8)) & 0xff) as u32) * 16777619
+  }
+  all
+}
+
+// The next of the numbers the check computes with.
+fn after(state: u32) -> u32 { state * 1664525 + 1013904223 }
+
+system tables_as_they_are() {
+  var sine = 2166136261 as u32
+  for i in 0..len(finesine) { sine = mixed(sine, finesine[i]) }
+  var tangent = 2166136261 as u32
+  for i in 0..len(finetangent) { tangent = mixed(tangent, finetangent[i]) }
+  var angle = 2166136261 as u32
+  for i in 0..len(tantoangle) { angle = mixed(angle, tantoangle[i] as i32) }
+  put("tables {sine} {tangent} {angle}")
+}
+
+system computing() {
+  var state = 1 as u32
+  var mul = 2166136261 as u32
+  var div = 2166136261 as u32
+  var slope = 2166136261 as u32
+  var angle = 2166136261 as u32
+  var dist = 2166136261 as u32
+  var aprox = 2166136261 as u32
+  for i in 0..1000000 {
+    // Two numbers of every size: all 32 bits, or fewer of them.
+    state = after(state)
+    let a = (state as i32) >> (i % 24)
+    state = after(state)
+    let b = (state as i32) >> ((i / 24) % 24)
+    mul = mixed(mul, fixed_mul(a, b))
+    div = mixed(div, fixed_div(a, b))
+    slope = mixed(slope, slope_div(a as u32, b as u32))
+    angle = mixed(angle, point_to_angle(a, b) as i32)
+    dist = mixed(dist, point_to_dist(a, b))
+    aprox = mixed(aprox, aprox_distance(a, b))
+    if i % 100000 == 0 {
+      put("{i}: {a} {b} mul {fixed_mul(a, b)} div {fixed_div(a, b)} slope {slope_div(a as u32, b as u32)} angle {point_to_angle(a, b)}")
+      put("  dist {point_to_dist(a, b)} aprox {aprox_distance(a, b)}")
+    }
+  }
+  put("mul {mul} div {div} slope {slope}")
+  put("angle {angle} dist {dist} aprox {aprox}")
+}
+
+system drawing() {
+  var sum = 2166136261 as u32
+  for i in 0..600 {
+    Random.play = random_after(Random.play)
+    sum = mixed(sum, random_at(Random.play))
+  }
+  put("random {sum} at {Random.play}")
+}
+
+schedule check() { tables_as_they_are() computing() drawing() }
+main { check() }

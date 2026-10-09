@@ -1,0 +1,172 @@
+diff --git i/src/doom/d_main.c w/src/doom/d_main.c
+index 06aa0ff..84c685b 100644
+--- i/src/doom/d_main.c
++++ w/src/doom/d_main.c
+@@ -1960,6 +1960,12 @@ void D_DoomMain (void)
+ 
+     DEH_printf("\nP_Init: Init Playloop state.\n");
+     P_Init ();
++    {
++	// ent-lang: see p_tick.c.
++	extern void P_MathsCheck (void);
++
++	P_MathsCheck ();
++    }
+ 
+     DEH_printf("S_Init: Setting up sound.\n");
+     S_Init (sfxVolume * 8, musicVolume * 8);
+diff --git i/src/doom/p_tick.c w/src/doom/p_tick.c
+index 5a93b80..0cac0f0 100644
+--- i/src/doom/p_tick.c
++++ w/src/doom/p_tick.c
+@@ -23,6 +23,141 @@
+ 
+ #include "doomstat.h"
+ 
++#include <stdio.h>
++#include <stdlib.h>
++#include "m_random.h"
++#include "i_system.h"
++#include "tables.h"
++#include "r_main.h"
++#include "r_state.h"
++
++// ent-lang: one line for each tic of a level, to compare a port against.
++// The hash of the map objects does not depend on their order.
++extern int prndindex;
++
++static unsigned int TraceMix (unsigned int hash, int value)
++{
++    int i;
++
++    for (i = 0; i < 4; i++)
++    {
++	hash ^= (unsigned int) (value >> (i * 8)) & 0xff;
++	hash *= 16777619u;
++    }
++    return hash;
++}
++
++// ent-lang: what the fixed point, the tables and the random numbers give
++// for a million pairs of numbers, to compare a port's against
++// (examples/doom/check/maths.ent prints the same).
++void P_MathsCheck (void)
++{
++    const char *name = getenv ("DOOM_MATHS");
++    FILE *file;
++    unsigned int state = 1;
++    unsigned int mul = 2166136261u, div = 2166136261u, slope = 2166136261u;
++    unsigned int angle = 2166136261u, dist = 2166136261u;
++    unsigned int aprox = 2166136261u;
++    unsigned int sine = 2166136261u, tangent = 2166136261u;
++    unsigned int arc = 2166136261u, sum = 2166136261u;
++    int i;
++
++    if (!name)
++	return;
++    file = fopen (name, "w");
++    if (!file)
++	I_Error ("P_MathsCheck: cannot write %s", name);
++
++    for (i = 0; i < 10240; i++)
++	sine = TraceMix (sine, finesine[i]);
++    for (i = 0; i < 4096; i++)
++	tangent = TraceMix (tangent, finetangent[i]);
++    for (i = 0; i < 2049; i++)
++	arc = TraceMix (arc, (int) tantoangle[i]);
++    fprintf (file, "tables %u %u %u\n", sine, tangent, arc);
++
++    viewx = viewy = 0;
++    for (i = 0; i < 1000000; i++)
++    {
++	int a, b;
++
++	state = state * 1664525u + 1013904223u;
++	a = (int) state >> (i % 24);
++	state = state * 1664525u + 1013904223u;
++	b = (int) state >> ((i / 24) % 24);
++	mul = TraceMix (mul, FixedMul (a, b));
++	div = TraceMix (div, FixedDiv (a, b));
++	slope = TraceMix (slope, SlopeDiv (a, b));
++	angle = TraceMix (angle, (int) R_PointToAngle (a, b));
++	dist = TraceMix (dist, R_PointToDist (a, b));
++	aprox = TraceMix (aprox, P_AproxDistance (a, b));
++	if (i % 100000 == 0)
++	{
++	    fprintf (file, "%d: %d %d mul %d div %d slope %d angle %u\n",
++		     i, a, b, FixedMul (a, b), FixedDiv (a, b),
++		     SlopeDiv (a, b), (unsigned int) R_PointToAngle (a, b));
++	    fprintf (file, "  dist %d aprox %d\n", R_PointToDist (a, b),
++		     P_AproxDistance (a, b));
++	}
++    }
++    fprintf (file, "mul %u div %u slope %u\n", mul, div, slope);
++    fprintf (file, "angle %u dist %u aprox %u\n", angle, dist, aprox);
++
++    M_ClearRandom ();
++    for (i = 0; i < 600; i++)
++	sum = TraceMix (sum, P_Random ());
++    fprintf (file, "random %u at %d\n", sum, prndindex);
++    fclose (file);
++    exit (0);
++}
++
++static void P_Trace (void)
++{
++    static FILE *file;
++    static boolean asked;
++    thinker_t *thinker;
++    unsigned int all = 0;
++    int count = 0;
++    player_t *player = &players[consoleplayer];
++
++    if (!asked)
++    {
++	const char *name = getenv ("DOOM_TRACE");
++
++	asked = true;
++	if (name)
++	    file = fopen (name, "w");
++    }
++    if (!file)
++	return;
++
++    for (thinker = thinkercap.next; thinker != &thinkercap;
++	 thinker = thinker->next)
++    {
++	mobj_t *mobj;
++	unsigned int hash = 2166136261u;
++
++	if (thinker->function.acp1 != (actionf_p1) P_MobjThinker)
++	    continue;
++	mobj = (mobj_t *) thinker;
++	hash = TraceMix (hash, mobj->type);
++	hash = TraceMix (hash, mobj->x);
++	hash = TraceMix (hash, mobj->y);
++	hash = TraceMix (hash, mobj->z);
++	hash = TraceMix (hash, (int) mobj->angle);
++	hash = TraceMix (hash, mobj->health);
++	hash = TraceMix (hash, (int) (mobj->state - states));
++	hash = TraceMix (hash, mobj->tics);
++	all += hash;
++	count++;
++    }
++    fprintf (file, "%d %d %d %d %d %d %d %u %d %d %08x\n",
++	     gameepisode, gamemap, leveltime, prndindex,
++	     player->mo->x, player->mo->y, player->mo->z,
++	     (unsigned int) player->mo->angle, player->health, count, all);
++    fflush (file);
++}
++
+ 
+ int	leveltime;
+ 
+@@ -148,6 +283,8 @@ void P_Ticker (void)
+     P_UpdateSpecials ();
+     P_RespawnSpecials ();
+ 
++    P_Trace ();
++
+     // for par times
+     leveltime++;	
+ }

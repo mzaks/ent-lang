@@ -1,0 +1,37 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// Fixed point (m_fixed.c): a number with a fraction is an i32 with 16
+// bits before the point and 16 after it, so 1.0 is 0x10000 (`fracunit()`)
+// and adding, subtracting and comparing are those of whole numbers.
+
+fn fracbits() -> i32 { 16 }
+fn fracunit() -> i32 { 0x10000 }
+
+// How much a number is, whatever its sign.
+fn abs(x: i32) -> i32 { if x < 0 { -x } else { x } }
+
+// The product of two: of 64 bits, with the 16 of the fraction dropped.
+fn fixed_mul(a: i32, b: i32) -> i32 {
+  ((a as i64 * b as i64) >> 16) as i32
+}
+
+// One divided by another. Where the quotient is more than an i32 holds
+// (and where `b` is nought), the most or the least there is, by the sign.
+fn fixed_div(a: i32, b: i32) -> i32 {
+  if (abs(a) >> 14) >= abs(b) {
+    if (a ^ b) < 0 { 0x80000000 } else { 0x7fffffff }
+  } else {
+    (((a as i64) << 16) / b as i64) as i32
+  }
+}
