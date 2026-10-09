@@ -1,0 +1,4 @@
+// A device that fills a buffer it is handed, and reads one (given.test).
+buffer Bytes { value: u8 } capacity 64
+extern proc fill_bytes(into: mut Bytes, from: i32)
+extern proc sum_bytes(them: Bytes) -> i32

@@ -1309,13 +1309,13 @@ buffer Marks { name: text[8] } capacity 8
 // -----
 
 buffer Marks { at: f32 } capacity 8
-// expected-error @+1 {{'Marks' is a buffer: a parameter of an extern proc may be one, and nothing else}}
+// expected-error @+1 {{'Marks' is a buffer: a parameter of a fn or proc may be one, and nothing else}}
 component Holder { marks: Marks }
 
 // -----
 
 buffer Marks { at: f32 } capacity 8
-// expected-error @+1 {{'Marks' is a buffer: a parameter of an extern proc may be one, and nothing else}}
+// expected-error @+1 {{an extern fn computes from values; a buffer is handed to an extern proc}}
 extern fn sum(marks: Marks) -> f32
 
 // -----
@@ -1344,6 +1344,6 @@ system s() {
 
 buffer Marks { at: f32 } capacity 8
 fn first() -> f32 {
-  // expected-error @+1 {{'Marks' is a buffer, which a system reads: a fn or proc only computes with what it is given}}
+  // expected-error @+1 {{'Marks' is a buffer, which a system reads: a fn or proc reads one it is given ('name: Marks')}}
   Marks[0].at
 }

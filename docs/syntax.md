@@ -1463,7 +1463,12 @@ to a device at once (all there is to draw), in place of a call for each.
   `for`'s entities, however it ran. An entity gives one row for each `+=`
   the `for` has (under an `if`, or none), not in a loop inside it.
   Such a `for` only computes: `--parallel` runs it on all the cores.
-- `Name = []` empties it, outside a `for`.
+- `Name = []` empties it, outside a `for`. `Name = [{ field: value, .. };
+  n]` gives it `n` rows, all alike, in place of those it had (none where
+  `n` is below nought; more than it holds stops the program).
+- `Name[i].field = value` gives a row it has another value in a field,
+  and so `+=`, `|=` and the other assignments; where it has no row `i`,
+  nothing happens. Outside a `for` over entities.
 - `len(Name)` is how many rows it has and `Name[i].field` a row's field
   (nought where it has no row `i`); in a `for` that gives it rows, as it
   was before the `for`.
@@ -1479,7 +1484,49 @@ to a device at once (all there is to draw), in place of a call for each.
   emptied or filled anew after.
 - A buffer is not of an entity and no `for` goes over it; it is of the
   world like a unique, and systems that fill or read it keep their order
-  as with one. A fn or proc does not read it: a system does.
+  as with one.
+
+A fn or proc has nothing of the world, and so no buffer but one it is
+given:
+
+```
+buffer Bytes { value: u8 } capacity 4096
+buffer Screen { pixel: u8 } capacity 64000
+
+fn short_at(bytes: Bytes, at: i32) -> i32 {
+  bytes[at].value as i32 | (bytes[at + 1].value as i32) << 8
+}
+proc plot(screen: mut Screen, x: i32, y: i32, shade: u8) {
+  screen[y * 320 + x].pixel = shade
+}
+extern proc read_file(name: text[126], into: mut Bytes)
+
+system load() {
+  read_file("doom1.wad", Bytes)
+  let lumps = short_at(Bytes, 4)
+  plot(Screen, 10, 20, 255)
+}
+```
+
+- A parameter's type may be a buffer, by its name: the fn or proc is
+  given that buffer, by its name too (`short_at(Bytes, 4)`), and reads it
+  under the parameter's name as a system does: `bytes[i].field`,
+  `len(bytes)`. It may pass it on to another.
+- A fn only reads it. It is still computing, of the rows the buffer has:
+  a `for` over entities may call it for each of them, and runs on all
+  the cores if it could without.
+- A proc may be given one `mut`, and changes it as a system does: a
+  row's field, a row more (`screen += { .. }`), none (`screen = []`), so
+  many alike. It is given it outside a `for` over entities, and the
+  system that gives it writes the buffer. What was given `mut` may be
+  passed on to read; what was given to read is not passed on `mut`.
+- An `extern proc` that is handed a buffer `mut` fills or changes it. In
+  C the parameter is where the number of its rows is (an `int32_t *`:
+  how many there are, and for the proc to say how many it left), how
+  many rows it holds at most (an `int32_t`), and where each field's
+  values are, not `const`: `void ent_read_file(const ent_text126 *name,
+  int32_t *count, int32_t capacity, uint8_t *value)`. A count it leaves
+  below nought is nought, and one above what the buffer holds is that.
 
 The window (`devices/window.ent`) has one, `Shapes`, and a system
 `shapes` that draws its rows with one call: `examples/swarm` draws all

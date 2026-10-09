@@ -32,6 +32,29 @@ void EnumType::print(AsmPrinter &printer) const {
   printer << ">";
 }
 
+// !ent.buffer<@Buffer> or !ent.buffer<@Buffer, mut>
+Type BufferType::parse(AsmParser &parser) {
+  FlatSymbolRefAttr name;
+  if (parser.parseLess() || parser.parseAttribute(name))
+    return {};
+  bool isMutable = false;
+  if (succeeded(parser.parseOptionalComma())) {
+    if (parser.parseKeyword("mut"))
+      return {};
+    isMutable = true;
+  }
+  if (parser.parseGreater())
+    return {};
+  return BufferType::get(parser.getContext(), name, isMutable);
+}
+
+void BufferType::print(AsmPrinter &printer) const {
+  printer << "<" << getName();
+  if (getMut())
+    printer << ", mut";
+  printer << ">";
+}
+
 void EntDialect::registerTypes() {
   addTypes<
 #define GET_TYPEDEF_LIST

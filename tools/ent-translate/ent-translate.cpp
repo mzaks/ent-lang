@@ -180,11 +180,19 @@ emitFunctions(ModuleOp module, raw_ostream &os,
         // A buffer: how many rows it has, and each field's values.
         auto buffer = SymbolTable::lookupNearestSymbolFrom<BufferOp>(
             function, handed.getName());
-        params.push_back(llvm::formatv("int32_t arg{0}_count", index));
+        // (One to change: where its count is, for the proc to say how
+        // many rows it left, and how many it holds at most.)
+        if (handed.getMut()) {
+          params.push_back(llvm::formatv("int32_t *arg{0}_count", index));
+          params.push_back(llvm::formatv("int32_t arg{0}_capacity", index));
+        } else {
+          params.push_back(llvm::formatv("int32_t arg{0}_count", index));
+        }
         for (auto [field, fieldType] :
              llvm::zip(buffer.getFieldNames().getAsValueRange<StringAttr>(),
                        buffer.getFieldTypes().getAsValueRange<TypeAttr>()))
-          params.push_back(llvm::formatv("const {0} *arg{1}_{2}",
+          params.push_back(llvm::formatv("{0}{1} *arg{2}_{3}",
+                                         handed.getMut() ? "" : "const ",
                                          getCType(fieldType), index, field));
       } else if (isa<TextType>(type))
         params.push_back(

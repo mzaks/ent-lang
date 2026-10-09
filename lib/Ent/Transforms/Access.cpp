@@ -550,12 +550,15 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
           access.reads.insert({archetype.getSymNameAttr(), empty, empty});
       return;
     }
-    if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferOfOp>(op)) {
+    if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferOfOp,
+            BufferSetOp, BufferFillOp>(op)) {
       // A buffer is one thing: its rows and how many they are.
       Column buffer{StringAttr(),
                     cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr(),
                     StringAttr::get(context, "rows")};
-      if (isa<AppendOp, ClearOp>(op))
+      auto handed = dyn_cast<BufferOfOp>(op);
+      if (isa<AppendOp, ClearOp, BufferSetOp, BufferFillOp>(op) ||
+          (handed && handed.getResult().getType().getMut()))
         access.writes.insert(buffer);
       else
         access.reads.insert(buffer);

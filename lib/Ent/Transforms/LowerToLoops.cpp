@@ -11686,6 +11686,9 @@ static SmallVector<Type> functionParamTypes(ArrayRef<Type> types,
       continue;
     }
     MLIRContext *context = type.getContext();
+    // (To change: where its count is, and how many rows it holds.)
+    if (handed.getMut())
+      inputs.push_back(LLVM::LLVMPointerType::get(context));
     inputs.push_back(IntegerType::get(context, 32));
     auto buffer = symbols.lookup<BufferOp>(handed.getName().getAttr());
     inputs.append(buffer.getFieldNames().size(),
@@ -11697,8 +11700,13 @@ static SmallVector<Type> functionParamTypes(ArrayRef<Type> types,
 /// Declare the C function of an extern fn or proc, `ent_<name>(params...)`,
 /// or make the function of a fn with a body, under the same name: its
 /// body with its values as they are.
-static LogicalResult declareFunction(IRRewriter &rewriter, FunctionOp function,
-                                     SymbolTable &symbols) {
+///
+/// A buffer a function with a body is given is the world's memory to it,
+/// where the buffer is: `given` gets such a function with that argument.
+static LogicalResult
+declareFunction(IRRewriter &rewriter, FunctionOp function,
+                SymbolTable &symbols, MemRefType arenaType,
+                SmallVectorImpl<std::pair<func::FuncOp, Value>> &given) {
   std::string name = function.getCName();
   if (Operation *other = symbols.lookup(name)) {
     InFlightDiagnostic diag =
@@ -11714,6 +11722,10 @@ static LogicalResult declareFunction(IRRewriter &rewriter, FunctionOp function,
   SmallVector<Type> results;
   if (!defined)
     inputs = functionParamTypes(inputs, symbols);
+  else
+    for (Type &input : inputs)
+      if (isa<BufferType>(input))
+        input = arenaType;
   for (Type result : function.getResultTypes())
     results.push_back(defined ? result : externParamType(result));
   rewriter.setInsertionPoint(function);
@@ -11724,6 +11736,20 @@ static LogicalResult declareFunction(IRRewriter &rewriter, FunctionOp function,
     return success();
   rewriter.inlineRegionBefore(function.getBody(), func.getBody(),
                               func.getBody().end());
+  Block &entry = func.getBody().front();
+  Value arena;
+  for (unsigned i = 0; i < entry.getNumArguments(); ++i) {
+    BlockArgument old = entry.getArgument(i);
+    if (!isa<BufferType>(old.getType()))
+      continue;
+    Value memory = entry.insertArgument(i, arenaType, old.getLoc());
+    entry.getArgument(i + 1).replaceAllUsesWith(memory);
+    entry.eraseArgument(i + 1);
+    if (!arena)
+      arena = memory;
+  }
+  if (arena)
+    given.push_back({func, arena});
   Operation *terminator = func.getBody().front().getTerminator();
   SmallVector<Value> values(terminator->getOperands());
   rewriter.setInsertionPoint(terminator);
@@ -11751,9 +11777,15 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     rewriter.replaceOp(invoke, call.getResults());
     return;
   }
+  // (What is put on the stack for the call: a text, and the count of a
+  // buffer that is handed over to be changed.)
   bool hasText = llvm::any_of(invoke.getArgs(), [](Value arg) {
     return isa<TextType>(arg.getType());
-  });
+  }) || llvm::any_of(function.getParams().getAsValueRange<TypeAttr>(),
+                     [](Type type) {
+                       auto handed = dyn_cast<BufferType>(type);
+                       return handed && handed.getMut();
+                     });
   SmallVector<Type> resultTypes;
   if (invoke.getResult())
     resultTypes.push_back(invoke.getResult().getType());
@@ -11764,8 +11796,38 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     scope = memref::AllocaScopeOp::create(rewriter, loc, resultTypes);
     rewriter.createBlock(&scope.getBodyRegion());
   }
+  // (A buffer by what the function says it takes: one that was given to
+  // a function is the world's memory by now.)
+  SmallVector<Type> params(function.getParams().getAsValueRange<TypeAttr>());
+  // A buffer handed over to be changed: its count goes and comes back as
+  // the `int32_t` C knows it as.
+  SmallVector<std::pair<const WorldBuffer *, Value>> counts;
   SmallVector<Value> args;
-  for (Value arg : invoke.getArgs()) {
+  for (auto [arg, param] : llvm::zip(invoke.getArgs(), params)) {
+    if (auto handed = dyn_cast<BufferType>(param)) {
+      const WorldBuffer &buffer = layout->getBuffer(handed.getName().getAttr());
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value count = arith::TruncIOp::create(
+          rewriter, loc, rewriter.getI32Type(),
+          memref::LoadOp::create(rewriter, loc, world->bufferCount(buffer),
+                                 ValueRange{zero}));
+      if (handed.getMut()) {
+        Value slot = memref::AllocaOp::create(
+            rewriter, loc, MemRefType::get({}, rewriter.getI32Type()),
+            ValueRange{});
+        memref::StoreOp::create(rewriter, loc, count, slot, ValueRange{});
+        args.push_back(worldPointer(rewriter, loc, slot));
+        args.push_back(arith::ConstantIntOp::create(rewriter, loc,
+                                                    buffer.capacity, 32));
+        counts.push_back({&buffer, slot});
+      } else {
+        args.push_back(count);
+      }
+      for (const WorldColumn &field : buffer.fields)
+        args.push_back(
+            worldPointer(rewriter, loc, world->bufferField(buffer, field)));
+      continue;
+    }
     if (auto text = dyn_cast<TextType>(arg.getType())) {
       IntegerType storage = text.getStorageType();
       Value slot = memref::AllocaOp::create(
@@ -11789,18 +11851,6 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
       args.push_back(LLVM::IntToPtrOp::create(
           rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
           shown));
-    } else if (isa<BufferType>(arg.getType())) {
-      auto handed = cast<BufferOfOp>(arg.getDefiningOp());
-      const WorldBuffer &buffer =
-          layout->getBuffer(handed.getBufferAttr().getAttr());
-      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-      Value count = memref::LoadOp::create(
-          rewriter, loc, world->bufferCount(buffer), ValueRange{zero});
-      args.push_back(arith::TruncIOp::create(rewriter, loc,
-                                             rewriter.getI32Type(), count));
-      for (const WorldColumn &field : buffer.fields)
-        args.push_back(
-            worldPointer(rewriter, loc, world->bufferField(buffer, field)));
     } else if (arg.getType().isInteger(1)) {
       args.push_back(
           arith::ExtUIOp::create(rewriter, loc, rewriter.getI8Type(), arg));
@@ -11818,6 +11868,21 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     callResults.push_back(externParamType(type));
   auto call = func::CallOp::create(rewriter, loc, function.getCName(),
                                    callResults, args);
+  // How many rows the function left: none below nought, and no more than
+  // the buffer holds.
+  for (auto [buffer, slot] : counts) {
+    Value left = memref::LoadOp::create(rewriter, loc, slot, ValueRange{});
+    left = arith::MaxSIOp::create(
+        rewriter, loc, left, arith::ConstantIntOp::create(rewriter, loc, 0, 32));
+    left = arith::MinSIOp::create(
+        rewriter, loc, left,
+        arith::ConstantIntOp::create(rewriter, loc, buffer->capacity, 32));
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(), left),
+        world->bufferCount(*buffer),
+        ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
+  }
   SmallVector<Value> results;
   if (!resultTypes.empty()) {
     Value result = call.getResult(0);
@@ -11842,15 +11907,20 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
 /// the calls of C functions that are handed one.
 static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                          const WorldLayout &layout, WorldAccess &world,
-                         SymbolTable &symbols) {
+                         SymbolTable &symbols,
+                         const SmallPtrSetImpl<Operation *> &defined) {
+  auto takesBuffer = [&](InvokeOp invoke) {
+    auto function = symbols.lookup<FunctionOp>(invoke.getCallee());
+    return llvm::any_of(function.getParams().getAsValueRange<TypeAttr>(),
+                        [](Type type) { return isa<BufferType>(type); });
+  };
   SmallVector<Operation *> uses;
   func.walk([&](Operation *op) {
-    if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp>(op))
+    if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferSetOp,
+            BufferFillOp>(op))
       uses.push_back(op);
     else if (auto invoke = dyn_cast<InvokeOp>(op);
-             invoke && llvm::any_of(invoke.getArgs(), [](Value arg) {
-               return isa<BufferType>(arg.getType());
-             }))
+             invoke && takesBuffer(invoke))
       uses.push_back(op);
   });
   for (Operation *op : uses) {
@@ -11858,9 +11928,17 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
     rewriter.setInsertionPoint(op);
     Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
     if (auto invoke = dyn_cast<InvokeOp>(op)) {
-      lowerInvoke(rewriter, invoke,
-                  symbols.lookup<FunctionOp>(invoke.getCallee()),
-                  /*defined=*/false, &layout, &world);
+      auto function = symbols.lookup<FunctionOp>(invoke.getCallee());
+      // One with a body is given the world's memory for a buffer, and is
+      // called where the other calls are.
+      if (defined.contains(function)) {
+        for (OpOperand &arg : invoke->getOpOperands())
+          if (isa<BufferType>(arg.get().getType()))
+            arg.set(world.getArena());
+        continue;
+      }
+      lowerInvoke(rewriter, invoke, function, /*defined=*/false, &layout,
+                  &world);
       continue;
     }
     const WorldBuffer &buffer = layout.getBuffer(
@@ -11891,6 +11969,55 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
     } else if (isa<BufferLenOp>(op)) {
       rewriter.replaceOpWithNewOp<arith::TruncIOp>(
           op, rewriter.getI32Type(), count);
+    } else if (auto set = dyn_cast<BufferSetOp>(op)) {
+      // Where the buffer has the row; else nothing.
+      const WorldColumn *field = buffer.find(set.getField());
+      Value index = set.getIndex();
+      if (index.getType() != rewriter.getI64Type())
+        index = arith::ExtSIOp::create(rewriter, loc, rewriter.getI64Type(),
+                                       index);
+      Value there = arith::CmpIOp::create(rewriter, loc,
+                                          arith::CmpIPredicate::ult, index,
+                                          count);
+      Value stored = world.toStorage(loc, set.getValue());
+      auto branch = scf::IfOp::create(rewriter, loc, there,
+                                      /*withElseRegion=*/false);
+      rewriter.setInsertionPointToStart(branch.thenBlock());
+      memref::StoreOp::create(rewriter, loc, stored,
+                              world.bufferField(buffer, *field),
+                              ValueRange{world.toIndex(loc, index)});
+      rewriter.eraseOp(op);
+    } else if (auto fill = dyn_cast<BufferFillOp>(op)) {
+      Value rows = arith::MaxSIOp::create(
+          rewriter, loc, fill.getCount(),
+          arith::ConstantIntOp::create(rewriter, loc, 0, 32));
+      rows = arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(),
+                                    rows);
+      Value fits = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ule, rows,
+          arith::ConstantIntOp::create(rewriter, loc, buffer.capacity, 64));
+      cf::AssertOp::create(
+          rewriter, loc, fits,
+          rewriter.getStringAttr("no room for so many rows: the buffer @" +
+                                 BufferOp(buffer.op).getSymName() +
+                                 " holds " + Twine(buffer.capacity) +
+                                 "; 'capacity' gives more"));
+      SmallVector<Value> values;
+      for (Value value : fill.getValues())
+        values.push_back(world.toStorage(loc, value));
+      SmallVector<Value> columns;
+      for (const WorldColumn &field : buffer.fields)
+        columns.push_back(world.bufferField(buffer, field));
+      auto loop = scf::ForOp::create(
+          rewriter, loc, zero, world.toIndex(loc, rows),
+          arith::ConstantIndexOp::create(rewriter, loc, 1));
+      rewriter.setInsertionPointToStart(loop.getBody());
+      for (auto [value, column] : llvm::zip(values, columns))
+        memref::StoreOp::create(rewriter, loc, value, column,
+                                ValueRange{loop.getInductionVar()});
+      rewriter.setInsertionPointAfter(loop);
+      memref::StoreOp::create(rewriter, loc, rows, counter, ValueRange{zero});
+      rewriter.eraseOp(op);
     } else {
       // A row it has not reads as nought: row 0 is read, which there is
       // room for whatever it holds, and nought is given.
@@ -12829,12 +12956,15 @@ struct EntLowerToLoops
       if (failed(declareExtern(rewriter, external, symbols)))
         return signalPassFailure();
 
-    // The functions with a body, which lowering takes out of them.
+    // The functions with a body, which lowering takes out of them; and
+    // those of them that are given a buffer, with the world's memory.
     SmallPtrSet<Operation *, 8> defined;
+    SmallVector<std::pair<func::FuncOp, Value>> givenBuffers;
     for (FunctionOp function : module.getOps<FunctionOp>()) {
       if (function.isDefined())
         defined.insert(function);
-      if (failed(declareFunction(rewriter, function, symbols)))
+      if (failed(declareFunction(rewriter, function, symbols, arenaType,
+                                 givenBuffers)))
         return signalPassFailure();
     }
 
@@ -12954,7 +13084,7 @@ struct EntLowerToLoops
       }
       lowerSpawns(rewriter, func, *layout, world);
       lowerConnects(rewriter, func, *layout, world);
-      lowerBuffers(rewriter, func, *layout, world, symbols);
+      lowerBuffers(rewriter, func, *layout, world, symbols, defined);
       // Innermost first, so an outer `if` sees merged inner ones.
       SmallVector<scf::IfOp> branches;
       func.walk<WalkOrder::PostOrder>(
@@ -12964,6 +13094,12 @@ struct EntLowerToLoops
       lowerLookups(rewriter, func, *layout, world);
       lowerResourceAccesses(rewriter, func, world);
       shareParts(rewriter, func);
+    }
+
+    // What the functions that are given a buffer do with it.
+    for (auto [func, arena] : givenBuffers) {
+      WorldAccess world(rewriter, *layout, arena);
+      lowerBuffers(rewriter, func, *layout, world, symbols, defined);
     }
 
     // What is read of a table: from its field's values, which are the

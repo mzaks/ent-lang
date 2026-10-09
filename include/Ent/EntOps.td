@@ -149,6 +149,44 @@ def Ent_BufferAtOp : Ent_Op<"buffer.at", [
   }];
 }
 
+def Ent_BufferSetOp : Ent_Op<"buffer.set", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Give a row of a buffer another value";
+  let description = [{
+    ```mlir
+    ent.buffer.set @Shapes "x"[%i : i32] = %x : f32
+    ```
+    Row `%i` has `%x` in that field after it; nothing happens where the
+    buffer has no such row. Outside queries, in a system that may write
+    the buffer or in a proc that was given it `mut`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, StrAttr:$field,
+                       AnySignlessInteger:$index, AnyType:$value);
+  let assemblyFormat = [{
+    $buffer $field `[` $index `:` type($index) `]` `=` $value attr-dict
+    `:` type($value)
+  }];
+}
+
+def Ent_BufferFillOp : Ent_Op<"buffer.fill", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Give a buffer so many rows, all alike";
+  let description = [{
+    ```mlir
+    ent.buffer.fill @Shapes (%kind, %x, %y) times %n : i32, f32, f32
+    ```
+    The buffer has `%n` rows after it (none where `%n` is below nought),
+    each with these values, in the order of the fields; what it had is
+    gone. More rows than it holds is an error at run time. Outside
+    queries, like `ent.buffer.set`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, Variadic<AnyType>:$values,
+                       I32:$count);
+  let assemblyFormat = [{
+    $buffer `(` $values `)` `times` $count attr-dict (`:` type($values)^)?
+  }];
+}
+
 def Ent_BufferOfOp : Ent_Op<"buffer.of", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "A buffer, to hand to a function in C";
@@ -157,9 +195,11 @@ def Ent_BufferOfOp : Ent_Op<"buffer.of", [
     %shapes = ent.buffer.of @Shapes : !ent.buffer<@Shapes>
     ent.invoke proc @draw(%shapes) : (!ent.buffer<@Shapes>) -> ()
     ```
-    The rows the buffer has, for an `ent.invoke` of a function without a
-    body, in the system that holds both and outside its queries. The
-    function reads them while it runs and keeps nothing.
+    The buffer, for an `ent.invoke` next to it of a function that takes
+    it. One without a body (in C) is handed it outside queries, reads its
+    rows while it runs and keeps nothing; one with a body may be given it
+    in a query too, to read. As `!ent.buffer<@Shapes, mut>` it is given to
+    be changed, outside queries, and the system writes the buffer.
   }];
   let arguments = (ins FlatSymbolRefAttr:$buffer);
   let results = (outs Ent_BufferType:$result);

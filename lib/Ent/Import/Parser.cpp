@@ -268,6 +268,8 @@ struct Function {
   /// The value it gives back, if that is one; else null.
   Type result;
   bool proc = false;
+  /// Implemented in C.
+  bool isExtern = false;
 };
 
 /// The fns or procs of one shape (what they take and give) as values: a
@@ -410,6 +412,32 @@ private:
     Lexer ahead = lexer;
     return ahead.next();
   }
+  /// Whether a statement on the buffer named here starts: `name = ..`,
+  /// `name += ..`, or `name[i].field` with an assignment after it (and
+  /// not a value read of it).
+  bool atBufferStatement() {
+    if (!token.is(Token::Identifier) || !bufferNamed(token.spelling))
+      return false;
+    Lexer ahead = lexer;
+    Token next = ahead.next();
+    if (next.is(Token::Assign) || next.is(Token::PlusAssign))
+      return true;
+    if (!next.is(Token::LBracket))
+      return false;
+    for (int brackets = 0; !next.is(Token::Eof); next = ahead.next()) {
+      if (next.is(Token::LBracket))
+        ++brackets;
+      else if (next.is(Token::RBracket) && --brackets == 0)
+        break;
+    }
+    if (!ahead.next().is(Token::Dot) || !ahead.next().is(Token::Identifier))
+      return false;
+    next = ahead.next();
+    return next.is(Token::Assign) || next.isKeyword("min") ||
+           next.isKeyword("max") ||
+           (next.kind >= Token::PlusAssign &&
+            next.kind <= Token::ShiftRightAssign);
+  }
   /// Whether a counted `for` starts here: `name in`, or `number, name in`.
   bool atCountedFor() {
     if (!token.is(Token::Identifier))
@@ -529,6 +557,27 @@ private:
   LogicalResult parseComponent(bool tag);
   LogicalResult parseBuffer();
   LogicalResult parseBufferStatement(const std::string &name, llvm::SMLoc at);
+  /// The buffer a name stands for where it is used: the buffer of that
+  /// name, or the one a fn or proc was given under it (to change, or only
+  /// to read).
+  struct BufferUse {
+    std::string symbol;
+    bool mut = true;
+    /// By a parameter: its value.
+    mlir::Value given;
+  };
+  std::optional<BufferUse> bufferNamed(StringRef name) {
+    if (const Variable *variable = lookup(name)) {
+      if (variable->kind == Variable::Value && variable->value)
+        if (auto handed = dyn_cast<BufferType>(variable->value.getType()))
+          return BufferUse{handed.getName().getValue().str(),
+                           handed.getMut(), variable->value};
+      return std::nullopt;
+    }
+    if (buffers.count(name))
+      return BufferUse{resolve(name), true, mlir::Value()};
+    return std::nullopt;
+  }
   /// Whether a type being parsed may be a buffer: the parameter of an
   /// extern proc.
   bool handsBuffers = false;
@@ -1371,8 +1420,8 @@ FailureOr<Type> Parser::parseType() {
   // A buffer, where an extern proc says what it is handed.
   if (!type && buffers.count(*name)) {
     if (!handsBuffers)
-      return error(at, "'" + *name + "' is a buffer: a parameter of an "
-                       "extern proc may be one, and nothing else");
+      return error(at, "'" + *name + "' is a buffer: a parameter of a fn "
+                       "or proc may be one, and nothing else");
     return Type(BufferType::get(context, symbol(*name)));
   }
   if (!type)
@@ -2758,67 +2807,147 @@ LogicalResult Parser::parseBuffer() {
 // Name += { field: value, ... } / Name = []: a row more, or none.
 LogicalResult Parser::parseBufferStatement(const std::string &name,
                                            llvm::SMLoc at) {
-  const Record &buffer = buffers[name];
-  if (inFunction)
+  BufferUse held = *bufferNamed(name);
+  const Record &buffer = buffers.ofSymbol(held.symbol);
+  auto target = FlatSymbolRefAttr::get(context, held.symbol);
+  if (inFunction && !held.given)
     return error(at, "'" + name + "' is a buffer, which a system fills: a "
-                     "fn or proc only computes with what it is given");
+                     "proc changes one it is given ('name: mut " + name +
+                         "')");
+  if (!held.mut)
+    return error(at, "'" + name + "' was given to read: a proc that changes "
+                     "a buffer takes it as 'name: mut Buffer'");
+  // { field: value, .. }: a row, with every field.
+  auto parseRow = [&]() -> FailureOr<SmallVector<mlir::Value>> {
+    llvm::SMLoc rowAt = token.loc;
+    if (failed(expect(Token::LBrace, "'{': a row, '{ field: value, .. }'")))
+      return failure();
+    SmallVector<ExprPtr> given(buffer.fields.size());
+    while (!token.is(Token::RBrace)) {
+      llvm::SMLoc fieldAt = token.loc;
+      FailureOr<std::string> field = identifier("a field");
+      if (failed(field) || failed(expect(Token::Colon, "':'")))
+        return failure();
+      size_t place = 0;
+      while (place < buffer.fields.size() &&
+             buffer.fields[place].first != *field)
+        ++place;
+      if (place == buffer.fields.size())
+        return error(fieldAt,
+                     "buffer '" + name + "' has no field '" + *field + "'");
+      if (given[place])
+        return error(fieldAt, "'" + *field + "' is given twice");
+      FailureOr<ExprPtr> value = parseExpr();
+      if (failed(value))
+        return failure();
+      given[place] = std::move(*value);
+      if (!consumeIf(Token::Comma))
+        break;
+    }
+    if (failed(expect(Token::RBrace, "'}'")))
+      return failure();
+    SmallVector<mlir::Value> values;
+    for (auto [value, field] : llvm::zip(given, buffer.fields)) {
+      if (!value)
+        return error(rowAt, "the row has no '" + field.first +
+                                "': a row gives every field of '" + name +
+                                "'");
+      FailureOr<mlir::Value> emitted = emit(*value, field.second);
+      if (failed(emitted))
+        return failure();
+      if (emitted->getType() != field.second)
+        return mismatch(value->loc, emitted->getType(), field.second);
+      values.push_back(*emitted);
+    }
+    return values;
+  };
+  // name[i].field op value: another value for a row it has.
+  if (consumeIf(Token::LBracket)) {
+    FailureOr<ExprPtr> number = parseExpr();
+    if (failed(number) || failed(expect(Token::RBracket, "']'")) ||
+        failed(expect(Token::Dot, "'.' and a field: a row is changed by "
+                                  "its fields")))
+      return failure();
+    llvm::SMLoc fieldAt = token.loc;
+    FailureOr<std::string> field = identifier("a field");
+    if (failed(field))
+      return failure();
+    Type type = buffer.fieldType(*field);
+    if (!type)
+      return error(fieldAt,
+                   "buffer '" + name + "' has no field '" + *field + "'");
+    auto op = parseAssignOp();
+    if (failed(op))
+      return failure();
+    FailureOr<ExprPtr> value = parseExpr();
+    if (failed(value))
+      return failure();
+    if (inQuery)
+      return error(at, "a row of a buffer is changed outside a 'for' over "
+                       "entities: what it kept would depend on their order");
+    Type indexType = typeOf(**number);
+    FailureOr<mlir::Value> index =
+        emit(**number, indexType ? indexType : builder.getI32Type());
+    if (failed(index))
+      return failure();
+    *index = countable(loc(at), *index);
+    if (!index->getType().isSignlessInteger() || index->getType().isInteger(1))
+      return error((*number)->loc, "a row's number is an integer");
+    StringAttr fieldName = builder.getStringAttr(*field);
+    return emitAssignment(
+        at, op->first, op->second, [&] { return type; },
+        [&] {
+          return BufferAtOp::create(builder, loc(at), type, target, fieldName,
+                                    *index)
+              .getResult();
+        },
+        [&](mlir::Value stored) {
+          BufferSetOp::create(builder, loc(at), target, fieldName, *index,
+                              stored);
+          return success();
+        },
+        **value);
+  }
   if (consumeIf(Token::Assign)) {
-    if (failed(expect(Token::LBracket, "'[]': a buffer is assigned no rows")) ||
-        failed(expect(Token::RBracket, "']': a buffer is assigned no rows, "
-                                       "and given rows with '+='")))
+    if (failed(expect(Token::LBracket, "'[]': a buffer is assigned no rows, "
+                                       "or '[{ .. }; n]', n rows alike")))
       return failure();
     if (inQuery)
       return error(at, "a buffer is emptied outside a 'for': every entity "
                        "would empty it");
-    ClearOp::create(builder, loc(at), symbol(name));
+    if (consumeIf(Token::RBracket)) {
+      ClearOp::create(builder, loc(at), target);
+      return success();
+    }
+    // [{ field: value, .. }; n]: so many rows, all alike.
+    FailureOr<SmallVector<mlir::Value>> values = parseRow();
+    if (failed(values) ||
+        failed(expect(Token::Semicolon, "';' and how many rows: "
+                                        "'[{ .. }; n]'")))
+      return failure();
+    FailureOr<ExprPtr> count = parseExpr();
+    if (failed(count) || failed(expect(Token::RBracket, "']'")))
+      return failure();
+    FailureOr<mlir::Value> rows = emit(**count, builder.getI32Type());
+    if (failed(rows))
+      return failure();
+    if (!rows->getType().isInteger(32))
+      return error((*count)->loc, "how many rows is an i32");
+    BufferFillOp::create(builder, loc(at), target, *values, *rows);
     return success();
   }
   if (!consumeIf(Token::PlusAssign))
     return error(at, "'" + name + "' is a buffer: '" + name + " += { field: "
                      "value, .. }' gives it a row, '" + name + " = []' "
-                     "empties it");
+                     "empties it, '" + name + "[i].field = value' changes "
+                     "a row");
   if (inEdges || inEach)
     return error(at, "a row is given to a buffer once for each entity of a "
                      "'for', not in a loop over others in it");
-  llvm::SMLoc rowAt = token.loc;
-  if (failed(expect(Token::LBrace, "'{': a row, '{ field: value, .. }'")))
+  FailureOr<SmallVector<mlir::Value>> values = parseRow();
+  if (failed(values))
     return failure();
-  SmallVector<ExprPtr> given(buffer.fields.size());
-  while (!token.is(Token::RBrace)) {
-    llvm::SMLoc fieldAt = token.loc;
-    FailureOr<std::string> field = identifier("a field");
-    if (failed(field) || failed(expect(Token::Colon, "':'")))
-      return failure();
-    size_t place = 0;
-    while (place < buffer.fields.size() && buffer.fields[place].first != *field)
-      ++place;
-    if (place == buffer.fields.size())
-      return error(fieldAt,
-                   "buffer '" + name + "' has no field '" + *field + "'");
-    if (given[place])
-      return error(fieldAt, "'" + *field + "' is given twice");
-    FailureOr<ExprPtr> value = parseExpr();
-    if (failed(value))
-      return failure();
-    given[place] = std::move(*value);
-    if (!consumeIf(Token::Comma))
-      break;
-  }
-  if (failed(expect(Token::RBrace, "'}'")))
-    return failure();
-  SmallVector<mlir::Value> values;
-  for (auto [value, field] : llvm::zip(given, buffer.fields)) {
-    if (!value)
-      return error(rowAt, "the row has no '" + field.first +
-                              "': a row gives every field of '" + name + "'");
-    FailureOr<mlir::Value> emitted = emit(*value, field.second);
-    if (failed(emitted))
-      return failure();
-    if (emitted->getType() != field.second)
-      return mismatch(value->loc, emitted->getType(), field.second);
-    values.push_back(*emitted);
-  }
-  AppendOp::create(builder, loc(at), symbol(name), values);
+  AppendOp::create(builder, loc(at), target, *values);
   return success();
 }
 
@@ -3146,15 +3275,33 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     return failure();
   Function function;
   function.proc = proc;
+  function.isExtern = isExtern;
   SmallVector<std::string> names;
   while (!token.is(Token::RParen)) {
     FailureOr<std::string> param = identifier("a parameter name");
     if (failed(param) || failed(expect(Token::Colon, "':'")))
       return failure();
-    llvm::SaveAndRestore<bool> hands(handsBuffers, isExtern && proc);
+    // name: Buffer, to read; name: mut Buffer, to change (a proc's).
+    llvm::SMLoc typeAt = token.loc;
+    bool changed = token.isKeyword("mut") && peek().is(Token::Identifier);
+    if (changed)
+      advance();
+    llvm::SaveAndRestore<bool> hands(handsBuffers, true);
     FailureOr<Type> type = parseType();
     if (failed(type))
       return failure();
+    if (auto handed = dyn_cast<BufferType>(*type)) {
+      if (isExtern && !proc)
+        return error(typeAt, "an extern fn computes from values; a buffer "
+                             "is handed to an extern proc");
+      if (changed && !proc)
+        return error(typeAt, "a fn only computes: it reads a buffer it is "
+                             "given, and a proc may change one ('mut')");
+      *type = BufferType::get(context, handed.getName(), changed);
+    } else if (changed) {
+      return error(typeAt, "'mut' is of a buffer a proc is given to "
+                           "change; a value is its own");
+    }
     names.push_back(*param);
     function.params.push_back(*type);
     if (!consumeIf(Token::Comma))
@@ -3253,6 +3400,9 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
                   computedBy(next.kind) != Token::Eof ||
                   next.isKeyword("min") || next.isKeyword("max");
     }
+    // (A buffer it was given, changed.)
+    if (atBufferStatement())
+      statement = true;
     // (In a proc: a call of a proc, for what it does.)
     if (proc && token.is(Token::Identifier) && peek().is(Token::LParen)) {
       Callable *through = callableNamed(token.spelling);
@@ -5639,6 +5789,11 @@ LogicalResult Parser::parseNameStatement() {
   std::string name = token.spelling.str();
   advance();
 
+  // A buffer, also one a proc was given: a row more, none, or another
+  // value for one.
+  if (bufferNamed(name) && !token.is(Token::LParen) && !token.is(Token::Dot))
+    return parseBufferStatement(name, at);
+
   // Component(id).field op value: combine into another entity's field.
   if (token.is(Token::LParen) && components.count(name)) {
     advance();
@@ -5761,7 +5916,7 @@ LogicalResult Parser::parseNameStatement() {
   if (!variable && unique != uniques.end() && inFunction)
     return error(at, "a fn only computes; it cannot write unique '" + name +
                          "'. Give the value back and let a system write it");
-  if (!variable && buffers.count(name))
+  if (bufferNamed(name))
     return parseBufferStatement(name, at);
   if (!variable && unique != uniques.end()) {
     std::string field = "value";
@@ -6137,9 +6292,9 @@ FailureOr<ExprPtr> Parser::parseUnary() {
     FailureOr<ExprPtr> index = parseExpr();
     if (failed(index) || failed(expect(Token::RBracket, "']'")))
       return failure();
-    if ((*primary)->kind == Expr::Name && !lookup((*primary)->name) &&
-        (tables.count((*primary)->name) ||
-         buffers.count((*primary)->name))) {
+    if ((*primary)->kind == Expr::Name &&
+        ((!lookup((*primary)->name) && tables.count((*primary)->name)) ||
+         bufferNamed((*primary)->name))) {
       auto node = std::make_unique<Expr>();
       node->kind = Expr::Row;
       node->loc = at;
@@ -6781,8 +6936,8 @@ Type Parser::typeOf(const Expr &expr) {
             return type;
       return {};
     }
-    if (buffers.count(expr.name))
-      return buffers[expr.name].fieldType(expr.field);
+    if (std::optional<BufferUse> held = bufferNamed(expr.name))
+      return buffers.ofSymbol(held->symbol).fieldType(expr.field);
     auto table = tables.find(expr.name);
     return table == tables.end() ? Type()
                                  : table->second.fieldType(expr.field);
@@ -6981,18 +7136,37 @@ FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
   for (auto [operand, type] : llvm::zip(expr.operands, function.params)) {
     // A buffer is handed by its name.
     if (auto handed = dyn_cast<BufferType>(type)) {
-      if (operand->kind != Expr::Name || lookup(operand->name) ||
-          !buffers.count(operand->name) ||
-          symbol(operand->name) != handed.getName())
+      std::optional<BufferUse> held = operand->kind == Expr::Name
+                                          ? bufferNamed(operand->name)
+                                          : std::nullopt;
+      if (!held || held->symbol != handed.getName().getValue())
         return error(operand->loc,
                      "'" + expr.name + "' is handed the buffer '" +
                          handed.getName().getValue() + "' here, by its name");
-      if (inQuery)
-        return error(operand->loc, "a buffer is handed over outside a "
-                                   "'for': not once for each entity");
+      if (handed.getMut() && !held->mut)
+        return error(operand->loc,
+                     "'" + operand->name + "' was given to read, and '" +
+                         expr.name + "' changes the buffer it is given");
+      // (One that was given: passed on as it is.)
+      if (held->given) {
+        args.push_back(held->given);
+        continue;
+      }
+      if (inFunction)
+        return error(operand->loc,
+                     "'" + operand->name + "' is a buffer, which a system "
+                     "hands over: a fn or proc passes on one it is given");
+      // One with a body may read it for each entity of a `for`.
+      if (inQuery && (function.isExtern || handed.getMut()))
+        return error(operand->loc,
+                     handed.getMut()
+                         ? "a buffer is given to be changed outside a "
+                           "'for': not once for each entity"
+                         : "a buffer is handed over outside a 'for': not "
+                           "once for each entity");
       args.push_back(
           BufferOfOp::create(builder, loc(operand->loc), type,
-                             symbol(operand->name))
+                             FlatSymbolRefAttr::get(context, held->symbol))
               .getResult());
       continue;
     }
@@ -7171,8 +7345,8 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return emitRowThrough(expr, *shape, *expr.operands[1],
                             *expr.operands[0], expr.field);
     }
-    if (buffers.count(expr.name)) {
-      Type type = buffers[expr.name].fieldType(expr.field);
+    if (std::optional<BufferUse> held = bufferNamed(expr.name)) {
+      Type type = buffers.ofSymbol(held->symbol).fieldType(expr.field);
       if (!type)
         return error(expr.loc,
                      expr.field.empty()
@@ -7181,19 +7355,21 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                                "[i].field'"
                          : "buffer '" + expr.name + "' has no field '" +
                                expr.field + "'");
-      if (inFunction)
+      if (inFunction && !held->given)
         return error(expr.loc, "'" + expr.name + "' is a buffer, which a "
-                               "system reads: a fn or proc only computes "
-                               "with what it is given");
-      FailureOr<mlir::Value> index =
-          emit(*expr.operands[0], builder.getI32Type());
+                               "system reads: a fn or proc reads one it is "
+                               "given ('name: " + expr.name + "')");
+      Type indexType = typeOf(*expr.operands[0]);
+      FailureOr<mlir::Value> index = emit(
+          *expr.operands[0], indexType ? indexType : builder.getI32Type());
       if (failed(index))
         return failure();
       *index = countable(at, *index);
       if (!index->getType().isSignlessInteger() ||
           index->getType().isInteger(1))
         return error(expr.operands[0]->loc, "a row's number is an integer");
-      return BufferAtOp::create(builder, at, type, symbol(expr.name),
+      return BufferAtOp::create(builder, at, type,
+                                FlatSymbolRefAttr::get(context, held->symbol),
                                 builder.getStringAttr(expr.field), *index)
           .getResult();
     }
@@ -7555,14 +7731,15 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     // (Of a buffer: how many rows it has now.)
     if (expr.name == "len" && expr.operands.size() == 1 &&
         expr.operands[0]->kind == Expr::Name &&
-        !lookup(expr.operands[0]->name) &&
-        buffers.count(expr.operands[0]->name)) {
-      if (inFunction)
+        bufferNamed(expr.operands[0]->name)) {
+      BufferUse held = *bufferNamed(expr.operands[0]->name);
+      if (inFunction && !held.given)
         return error(expr.loc, "'" + expr.operands[0]->name + "' is a "
                                "buffer, which a system reads: a fn or proc "
-                               "only computes with what it is given");
+                               "reads one it is given ('name: " +
+                                   expr.operands[0]->name + "')");
       return BufferLenOp::create(builder, at, builder.getI32Type(),
-                                 symbol(expr.operands[0]->name))
+                                 FlatSymbolRefAttr::get(context, held.symbol))
           .getResult();
     }
     // (Of a table: how many rows it has, which is known.)

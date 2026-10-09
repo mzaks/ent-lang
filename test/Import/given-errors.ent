@@ -1,0 +1,86 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+buffer Screen { pixel: u8 } capacity 8
+// expected-error @+1 {{a fn only computes: it reads a buffer it is given, and a proc may change one ('mut')}}
+fn plot(screen: mut Screen, at: i32) -> i32 { at }
+
+// -----
+
+buffer Screen { pixel: u8 } capacity 8
+// expected-error @+1 {{'mut' is of a buffer a proc is given to change; a value is its own}}
+proc plot(at: mut i32) { }
+
+// -----
+
+buffer Screen { pixel: u8 } capacity 8
+fn shade(screen: Screen, at: i32) -> u8 {
+  // expected-error @+1 {{'screen' was given to read: a proc that changes a buffer takes it as 'name: mut Buffer'}}
+  screen[at].pixel = 3
+  screen[at].pixel
+}
+
+// -----
+
+buffer Screen { pixel: u8 } capacity 8
+proc plot(screen: mut Screen, at: i32) { screen[at].pixel = 1 }
+proc look(screen: Screen, at: i32) {
+  // expected-error @+1 {{'screen' was given to read, and 'plot' changes the buffer it is given}}
+  plot(screen, at)
+}
+
+// -----
+
+buffer Screen { pixel: u8 } capacity 8
+fn shade(at: i32) -> u8 {
+  // expected-error @+1 {{'Screen' is a buffer, which a system reads: a fn or proc reads one it is given ('name: Screen')}}
+  Screen[at].pixel
+}
+
+// -----
+
+buffer Screen { pixel: u8 } capacity 8
+buffer Other { pixel: u8 } capacity 8
+fn shade(screen: Screen, at: i32) -> u8 { screen[at].pixel }
+system s() {
+  // expected-error @+1 {{'shade' is handed the buffer 'Screen' here, by its name}}
+  let a = shade(Other, 1)
+}
+
+// -----
+
+buffer Screen { pixel: u8 } capacity 8
+component Dot { at: i32 } capacity 4
+proc plot(screen: mut Screen, at: i32) { screen[at].pixel = 1 }
+system s() {
+  for d: Dot {
+    // expected-error @+1 {{a buffer is given to be changed outside a 'for': not once for each entity}}
+    plot(Screen, d.at)
+  }
+}
+
+// -----
+
+buffer Screen { pixel: u8 } capacity 8
+component Dot { at: i32 } capacity 4
+system s() {
+  for d: Dot {
+    // expected-error @+1 {{a row of a buffer is changed outside a 'for' over entities: what it kept would depend on their order}}
+    Screen[d.at].pixel = 1
+  }
+}
+
+// -----
+
+buffer Screen { pixel: u8 } capacity 8
+system s() {
+  // expected-error @+1 {{buffer 'Screen' has no field 'shade'}}
+  Screen[1].shade = 1
+}
+
+// -----
+
+buffer Screen { pixel: u8 } capacity 8
+system s() {
+  // expected-error @+1 {{';' and how many rows: '[{ .. }; n]'}}
+  Screen = [{ pixel: 1 }]
+}

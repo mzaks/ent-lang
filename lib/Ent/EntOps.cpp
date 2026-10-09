@@ -396,14 +396,22 @@ LogicalResult AppendOp::verify() {
         return emitOpError("must not be inside a loop ('")
                << parent->getName()
                << "') in a query: it may run at most once per entity";
-  } else if (!(*this)->getParentOfType<SystemOp>()) {
+  } else if (!(*this)->getParentOfType<SystemOp>() &&
+             !(*this)->getParentOfType<FunctionOp>()) {
     return emitOpError("must be inside an 'ent.system'");
   }
   return success();
 }
 
+static BufferOp verifyBufferUse(SymbolTableCollection &symbolTable,
+                                Operation *op, FlatSymbolRefAttr name,
+                                bool writes, bool outside,
+                                StringRef what = {});
+
 LogicalResult AppendOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  BufferOp buffer = lookupBuffer(symbolTable, *this, getBufferAttr());
+  BufferOp buffer = verifyBufferUse(symbolTable, *this, getBufferAttr(),
+                                    /*writes=*/true, /*outside=*/false,
+                                    "appends to ");
   if (!buffer)
     return failure();
   ArrayAttr fieldTypes = buffer.getFieldTypes();
@@ -418,34 +426,53 @@ LogicalResult AppendOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
              << index << " has type " << value.getType() << ", but field '"
              << cast<StringAttr>(buffer.getFieldNames()[index]).getValue()
              << "' has type " << cast<TypeAttr>(typeAttr).getValue();
-  auto system = (*this)->getParentOfType<SystemOp>();
-  if (!system.canWrite(getBufferAttr()))
-    return emitOpError("appends to ")
-           << getBufferAttr() << " but system @" << system.getSymName()
-           << " does not declare it in 'writes'";
   return success();
 }
 
-/// What the ops that read or empty a buffer share: the buffer is one,
-/// the op is in a system (and, where `outside`, in none of its queries),
-/// and the system may read it, or write it.
+/// What the ops that read or change a buffer share: the buffer is one,
+/// the op is in a system (and, where `outside`, in none of its queries)
+/// that may read it, or write it; or in the body of a function that was
+/// given the buffer (`mut`, to change it).
 static BufferOp verifyBufferUse(SymbolTableCollection &symbolTable,
                                 Operation *op, FlatSymbolRefAttr name,
-                                bool writes, bool outside) {
+                                bool writes, bool outside, StringRef what) {
   BufferOp buffer = lookupBuffer(symbolTable, op, name);
   if (!buffer)
     return {};
+  if (what.empty())
+    what = writes ? "empties " : "reads ";
   auto system = op->getParentOfType<SystemOp>();
   if (!system) {
-    op->emitOpError("must be inside an 'ent.system'");
-    return {};
+    auto function = op->getParentOfType<FunctionOp>();
+    if (!function) {
+      op->emitOpError("must be inside an 'ent.system'");
+      return {};
+    }
+    bool given = false, changed = false;
+    for (Type type : function.getParams().getAsValueRange<TypeAttr>())
+      if (auto handed = dyn_cast<BufferType>(type);
+          handed && handed.getName() == name) {
+        given = true;
+        changed |= handed.getMut();
+      }
+    if (!given || (writes && !changed)) {
+      op->emitOpError(what)
+          << name << " but function @" << function.getSymName()
+          << (given ? " is given it to read: it has no parameter of type "
+                      "'!ent.buffer<"
+                    : " is not given it: it has no parameter of type "
+                      "'!ent.buffer<")
+          << name << (given ? ", mut>'" : ">'");
+      return {};
+    }
+    return buffer;
   }
   if (outside && op->getParentOfType<QueryOp>()) {
     op->emitOpError("must not be inside a query");
     return {};
   }
   if (writes ? !system.canWrite(name) : !system.canRead(name)) {
-    op->emitOpError(writes ? "empties " : "reads ")
+    op->emitOpError(what)
         << name << " but system @" << system.getSymName()
         << " does not declare it in " << (writes ? "'writes'" : "'reads'");
     return {};
@@ -485,19 +512,63 @@ BufferAtOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 }
 
 LogicalResult
-BufferOfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  if (!verifyBufferUse(symbolTable, *this, getBufferAttr(), /*writes=*/false,
-                       /*outside=*/true))
+BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  BufferOp buffer = verifyBufferUse(symbolTable, *this, getBufferAttr(),
+                                    /*writes=*/true, /*outside=*/true,
+                                    "changes ");
+  if (!buffer)
     return failure();
-  if (getResult().getType().getName() != getBufferAttr())
+  Type type = buffer.getFieldType(getField());
+  if (!type)
+    return emitOpError("sets '")
+           << getField() << "', which " << getBufferAttr() << " has not";
+  if (type != getValue().getType())
     return emitOpError("gives ")
-           << getResult().getType() << ", which is not " << getBufferAttr();
+           << getValue().getType() << ", but the field is " << type;
+  return success();
+}
+
+LogicalResult
+BufferFillOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  BufferOp buffer = verifyBufferUse(symbolTable, *this, getBufferAttr(),
+                                    /*writes=*/true, /*outside=*/true,
+                                    "fills ");
+  if (!buffer)
+    return failure();
+  ArrayAttr fieldTypes = buffer.getFieldTypes();
+  if (fieldTypes.size() != getValues().size())
+    return emitOpError("gives ")
+           << getValues().size() << " values, but " << getBufferAttr()
+           << " has " << fieldTypes.size() << " fields";
+  for (auto [index, value, typeAttr] :
+       llvm::enumerate(getValues(), fieldTypes))
+    if (value.getType() != cast<TypeAttr>(typeAttr).getValue())
+      return emitOpError("value #")
+             << index << " has type " << value.getType() << ", but the field "
+             << "has type " << cast<TypeAttr>(typeAttr).getValue();
+  return success();
+}
+
+LogicalResult
+BufferOfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  bool changed = getResult().getType().getMut();
+  // (One with a body may be given it in a query, to read.)
+  bool inC = changed;
   for (Operation *user : getResult().getUsers()) {
     auto invoke = dyn_cast<InvokeOp>(user);
     if (!invoke || invoke->getParentOp() != (*this)->getParentOp())
       return emitOpError("is for an 'ent.invoke' next to it: a buffer is "
                          "handed to a function, and not kept");
+    auto function = symbolTable.lookupNearestSymbolFrom<FunctionOp>(
+        invoke, invoke.getCalleeAttr());
+    inC |= function && !function.isDefined();
   }
+  if (!verifyBufferUse(symbolTable, *this, getBufferAttr(), changed,
+                       /*outside=*/inC, changed ? "hands over " : "reads "))
+    return failure();
+  if (getResult().getType().getName() != getBufferAttr())
+    return emitOpError("gives ")
+           << getResult().getType() << ", which is not " << getBufferAttr();
   return success();
 }
 
@@ -970,6 +1041,13 @@ LogicalResult FunctionOp::verify() {
     if (TypeRange(params) != TypeRange(getBody().front().getArgumentTypes()))
       return emitOpError("body's arguments do not match the parameters (")
              << params << ")";
+    // (A fn only computes: what it is given it reads.)
+    for (auto [index, type] : llvm::enumerate(params))
+      if (auto handed = dyn_cast<BufferType>(type);
+          handed && handed.getMut() && !getProc())
+        return emitOpError("parameter #")
+               << index << " is a buffer to change, which only a proc is "
+               << "given";
     return verifyNoRefParams(*this, getBody());
   }
   for (auto [index, type] :
@@ -1025,6 +1103,11 @@ LogicalResult FunctionOp::verifyRegions() {
             TextAtOp, TextEqualOp, TextJoinOp, TextKeepOp>(op) ||
         (invoke && (!invoke.getProc() || getProc())))
       return;
+    // (A buffer it was given: each of these says for itself whether it
+    // was, and given to be changed.)
+    if (isa<BufferAtOp, BufferLenOp, BufferSetOp, BufferFillOp, AppendOp,
+            ClearOp>(op))
+      return;
     if (succeeded(result))
       result = op->emitOpError(invoke ? "calls a proc in a function's body; "
                                         "a function only computes"
@@ -1050,7 +1133,18 @@ LogicalResult InvokeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   if (!function)
     return emitOpError("references unknown function ") << getCalleeAttr();
   SmallVector<Type> params(function.getParams().getAsValueRange<TypeAttr>());
-  if (TypeRange(params) != getArgs().getTypes())
+  // (A buffer given to be changed may be passed on to be read.)
+  bool same = params.size() == getArgs().size();
+  for (auto [param, arg] : llvm::zip(params, getArgs().getTypes())) {
+    if (!same)
+      break;
+    auto wanted = dyn_cast<BufferType>(param);
+    auto handed = dyn_cast<BufferType>(arg);
+    same = param == arg ||
+           (wanted && handed && wanted.getName() == handed.getName() &&
+            !wanted.getMut());
+  }
+  if (!same)
     return emitOpError("argument types (")
            << getArgs().getTypes() << ") do not match the parameters ("
            << params << ") of function " << getCalleeAttr();
@@ -1068,9 +1162,14 @@ LogicalResult InvokeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 void InvokeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  // A proc acts on the outside, which no resource here stands for.
-  if (!getProc())
+  // A proc acts on the outside, which no resource here stands for. A fn
+  // that is given a buffer reads its rows.
+  if (!getProc()) {
+    if (llvm::any_of(getArgs().getTypes(),
+                     [](Type type) { return isa<BufferType>(type); }))
+      effects.emplace_back(MemoryEffects::Read::get());
     return;
+  }
   effects.emplace_back(MemoryEffects::Read::get());
   effects.emplace_back(MemoryEffects::Write::get());
 }

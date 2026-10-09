@@ -1,0 +1,81 @@
+// Buffers given to fns and procs, changed row by row, and filled
+// (given.test).
+import console
+import filled
+
+buffer Screen { pixel: u8, depth: i32 } capacity 32
+component Dot { at: i32, shade: u8 } capacity 8
+unique Total: i32
+
+// A fn reads a buffer it is given: two bytes as one number, low first.
+fn short_at(bytes: Bytes, at: i32) -> i32 {
+  bytes[at].value as i32 | (bytes[at + 1].value as i32) << 8
+}
+
+// And passes it on.
+fn sum_of_shorts(bytes: Bytes, count: i32) -> i32 {
+  var sum = 0
+  for i in 0..count { sum += short_at(bytes, i * 2) }
+  sum
+}
+
+fn shade_at(screen: Screen, at: i32) -> u8 { screen[at].pixel }
+
+// A proc changes one it is given `mut`: a row's field, a row more, none.
+proc plot(screen: mut Screen, at: i32, shade: u8) {
+  screen[at].pixel = shade
+  screen[at].depth += 1
+}
+proc line(screen: mut Screen, from: i32, to: i32, shade: u8) -> i32 {
+  for at in from..to { plot(screen, at, shade) }
+  // (Given to be changed, it is passed on to be read as well.)
+  shade_at(screen, from) as i32 + len(screen)
+}
+proc more(screen: mut Screen) {
+  screen += { pixel: 9, depth: 90 }
+}
+proc none(screen: mut Screen) { screen = [] }
+
+world {
+  spawn { Dot { at: 1, shade: 0 } }
+  spawn { Dot { at: 12, shade: 0 } }
+}
+
+system fill() {
+  Bytes = []
+  fill_bytes(Bytes, 1)
+  fill_bytes(Bytes, 100)
+  put("bytes {len(Bytes)}: sum {sum_bytes(Bytes)} short {short_at(Bytes, 0)} shorts {sum_of_shorts(Bytes, 3)}")
+  // More than it holds are not left.
+  for i in 0..10 { fill_bytes(Bytes, 0) }
+  put("full {len(Bytes)}")
+}
+
+system draw() {
+  // Sixteen rows alike; a row it has is changed, one it has not is not.
+  Screen = [{ pixel: 1, depth: 0 }; 16]
+  Screen[3].pixel = 200
+  Screen[3].pixel += 100
+  Screen[4].depth -= 5
+  Screen[16].pixel = 7
+  Screen[-1].pixel = 7
+  put("screen {len(Screen)}: {Screen[2].pixel} {Screen[3].pixel} {Screen[4].depth} {Screen[16].pixel}")
+  let gave = line(Screen, 8, 12, 50)
+  put("line {gave}: {Screen[7].pixel} {Screen[8].pixel} {Screen[11].depth} {Screen[12].pixel}")
+  more(Screen)
+  put("more {len(Screen)}: {Screen[16].pixel} {Screen[16].depth}")
+  // A fn may read it for each entity of a `for`.
+  for d: mut Dot {
+    d.shade = shade_at(Screen, d.at)
+    Total += short_at(Bytes, d.at)
+  }
+  for d: Dot { put("dot at {d.at}: {d.shade}") }
+  put("total {Total}")
+  none(Screen)
+  put("none {len(Screen)}")
+  Screen = [{ pixel: 3, depth: 3 }; 2]
+  put("again {len(Screen)}: {Screen[1].pixel} {Screen[2].pixel}")
+}
+
+schedule once() { fill() draw() }
+main { once() }

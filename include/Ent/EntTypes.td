@@ -172,16 +172,28 @@ def Ent_EnumType : Ent_Type<"Enum", "enum"> {
 }
 
 def Ent_BufferType : Ent_Type<"Buffer", "buffer"> {
-  let summary = "The rows an `ent.buffer` holds, as a function in C takes them";
+  let summary = "The rows an `ent.buffer` holds, as a function takes them";
   let description = [{
-    `!ent.buffer<@Shapes>` is what a function without a body is given for
-    a parameter that is the buffer `@Shapes`: in C the number of its rows
-    (an `int32_t`) and then, for each of its fields, where that field's
-    values are, one for each row (`const float *`). `ent.buffer.of` gives
-    the value; nothing is computed with it.
+    `!ent.buffer<@Shapes>` is what a function is given for a parameter
+    that is the buffer `@Shapes`, to read. For one without a body, in C,
+    that is the number of its rows (an `int32_t`) and then, for each of
+    its fields, where that field's values are, one for each row (`const
+    float *`). `ent.buffer.of` gives the value; nothing is computed with
+    it but by the operations of a buffer, in the body of the function that
+    was given it.
+
+    `!ent.buffer<@Shapes, mut>` is one given to a proc to change as well:
+    in C where the number of its rows is (an `int32_t *`, for the proc to
+    say how many there are after it), how many it holds at most (an
+    `int32_t`), and where each field's values are (`float *`).
   }];
-  let parameters = (ins "FlatSymbolRefAttr":$name);
-  let assemblyFormat = "`<` $name `>`";
+  let parameters = (ins "FlatSymbolRefAttr":$name, "bool":$mut);
+  let builders = [
+    TypeBuilder<(ins "::mlir::FlatSymbolRefAttr":$name), [{
+      return $_get($_ctxt, name, false);
+    }]>
+  ];
+  let hasCustomAssemblyFormat = 1;
 }
 
 #endif // ENT_TYPES
