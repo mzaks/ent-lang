@@ -148,3 +148,51 @@ void ent_sound_sample(const ent_text126 *file, float volume) {
   SetSoundVolume(files[found].sound, fminf(volume, 1));
   PlaySound(files[found].sound);
 }
+
+// The piece of music that is heard: read bit by bit, from its file or
+// from the bytes of it that are in the program.
+static Music ent_sound_piece;
+static bool ent_sound_piece_loaded;
+
+float ent_sound_music_at(void) {
+  return ent_sound_piece_loaded ? GetMusicTimePlayed(ent_sound_piece) : 0;
+}
+
+void ent_sound_music(const ent_text126 *file, float volume) {
+  static char playing[sizeof(file->bytes) + 1];
+#define piece ent_sound_piece
+#define loaded ent_sound_piece_loaded
+  char name[sizeof(file->bytes) + 1];
+  memcpy(name, file->bytes, file->length);
+  name[file->length] = 0;
+  if (strcmp(name, playing) != 0) {
+    // Another piece, or none.
+    if (loaded) {
+      StopMusicStream(piece);
+      UnloadMusicStream(piece);
+      loaded = false;
+    }
+    strcpy(playing, name);
+    char where[1024];
+    struct ent_file held;
+    const char *kind = GetFileExtension(name);
+    int place = *name && kind && ent_sound_ready()
+                    ? ent_file_place(name, where, sizeof where, &held)
+                    : 0;
+    if (place == 1)
+      piece = LoadMusicStream(where);
+    else if (place == 2)
+      piece = LoadMusicStreamFromMemory(kind, held.bytes, (int)held.size);
+    loaded = place && piece.frameCount > 0;
+    if (loaded) {
+      piece.looping = true;
+      PlayMusicStream(piece);
+    }
+  }
+  if (!loaded)
+    return;
+  SetMusicVolume(piece, fminf(fmaxf(volume, 0), 1));
+  UpdateMusicStream(piece);
+}
+#undef piece
+#undef loaded

@@ -23,6 +23,7 @@
 (archetype name: (identifier) @type)
 (enum_case (identifier) @constant)
 (table name: (identifier) @constant)
+(asset name: (identifier) @constant)
 (table key: (identifier) @type)
 (keyed_row case: (identifier) @constant)
 ; (for case in Enum: an enum by its capital; a table is a value.)

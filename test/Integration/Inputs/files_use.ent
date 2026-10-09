@@ -9,6 +9,7 @@ unique Done: bool
 system say() {
   show("files_words.txt")
   show_own()
+  show_steps()
   show("nowhere.txt")
   Done = true
 }

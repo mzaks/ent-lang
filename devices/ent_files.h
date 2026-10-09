@@ -173,6 +173,31 @@ static int ent_file_open(const char *name, struct ent_file *file) {
   return 0;
 }
 
+// Where the file `name` is, for what reads a file bit by bit (a long
+// piece of music): 1 and its path in `found` if it is on its own, 2 and
+// its bytes in `file` if it is in the program, 0 if nowhere.
+static int ent_file_place(const char *name, char *found, size_t size,
+                          struct ent_file *file) {
+  file->bytes = 0;
+  file->size = 0;
+  file->own = 0;
+  if (!*name)
+    return 0;
+  if (*name == '/')
+    return ent_file_is_there(name) &&
+           snprintf(found, size, "%s", name) < (int)size;
+  if (ent_file_near(name, found, size))
+    return 1;
+  for (const struct ent_asset *asset = ent_program_assets; asset->name;
+       ++asset)
+    if (!strcmp(asset->name, name)) {
+      file->bytes = asset->bytes;
+      file->size = asset->size;
+      return 2;
+    }
+  return ent_file_among(ent_program_folders, name, found, size);
+}
+
 static void ent_file_close(struct ent_file *file) {
   free(file->own);
   file->bytes = 0;

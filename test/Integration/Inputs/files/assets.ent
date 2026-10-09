@@ -4,5 +4,9 @@
 extern proc show(file: text[62])
 
 // (The module's own file goes where a program with it is built.)
-asset "module_words.txt"
-proc show_own() { show("module_words.txt") }
+// By a name, which is the text that names it; and every file of a name
+// with a `*` in it, as a list in the files' order (2 before 10).
+asset own = "module_words.txt"
+asset steps = "steps/step*.txt"
+proc show_own() { show(own) }
+proc show_steps() { for step in steps { show(step) } }

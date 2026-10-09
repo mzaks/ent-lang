@@ -1192,3 +1192,13 @@ asset "../errors.ent"
 
 // expected-error @+1 {{an asset is named by its path from the folder of the file that declares it ('fonts/name.ttf'), without '..'}}
 asset "/etc/hosts"
+
+// -----
+
+// expected-error @+1 {{the '*' is in the file's name, not in its folder's ('walk/*.png')}}
+asset frames = "*/walk.png"
+
+// -----
+
+// expected-error @+1 {{expected '=' and the file's name}}
+asset frames "walk.png"

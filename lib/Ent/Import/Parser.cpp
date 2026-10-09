@@ -313,6 +313,7 @@ public:
         functions([this](StringRef name) { return resolve(name); }),
         enums([this](StringRef name) { return resolve(name); }),
         tables([this](StringRef name) { return resolve(name); }),
+        assetFiles([this](StringRef name) { return resolve(name); }),
         prefabs([this](StringRef name) { return resolve(name); }) {
     advance();
   }
@@ -699,6 +700,9 @@ private:
   /// Tables: their fields (one without a name for a plain list), and how
   /// many rows each has.
   Declared<Record> tables;
+  /// The files that have a name (`asset name = "file"`): as the program
+  /// writes them.
+  Declared<std::string> assetFiles;
   llvm::StringMap<unsigned> tableRows;
   /// Of a table with a row for each case of an enum: that enum's symbol.
   llvm::StringMap<std::string> tableKeys;
@@ -828,7 +832,8 @@ LogicalResult Parser::parseDeclarations() {
       result = parseSchedule();
     else if (token.isKeyword("import"))
       result = parseImport();
-    else if (token.isKeyword("asset") && peek().is(Token::String))
+    else if (token.isKeyword("asset") &&
+             (peek().is(Token::String) || peek().is(Token::Identifier)))
       result = parseAsset();
     else if (token.isKeyword("main"))
       result = current == root
@@ -888,12 +893,63 @@ LogicalResult Parser::parseDeclarations() {
 
 // import name: the declarations of name.ent, found next to the importing
 // file or in an -I directory.
-// asset "name": a file the program needs when it runs (a font, a
-// picture, a sound), next to the file that says so. It is there when the
-// program is built, and `ent build` takes it along; the program names it
-// as it is written here.
+/// Whether `name` is what `pattern` says, in which a `*` is any letters.
+static bool matchesPattern(StringRef name, StringRef pattern) {
+  size_t star = pattern.find('*');
+  if (star == StringRef::npos)
+    return name == pattern;
+  if (!name.starts_with(pattern.take_front(star)))
+    return false;
+  name = name.drop_front(star);
+  pattern = pattern.drop_front(star + 1);
+  for (size_t skipped = 0; skipped <= name.size(); ++skipped)
+    if (matchesPattern(name.drop_front(skipped), pattern))
+      return true;
+  return false;
+}
+
+/// Whether `a` comes before `b`, numbers in them by how much they are:
+/// walk2.png before walk10.png.
+static bool namedBefore(StringRef a, StringRef b) {
+  while (!a.empty() && !b.empty()) {
+    if (llvm::isDigit(a[0]) && llvm::isDigit(b[0])) {
+      StringRef x = a.take_while(llvm::isDigit);
+      StringRef y = b.take_while(llvm::isDigit);
+      StringRef m = x.ltrim('0'), n = y.ltrim('0');
+      if (m.size() != n.size())
+        return m.size() < n.size();
+      if (m != n)
+        return m < n;
+      a = a.drop_front(x.size());
+      b = b.drop_front(y.size());
+      continue;
+    }
+    if (a[0] != b[0])
+      return a[0] < b[0];
+    a = a.drop_front();
+    b = b.drop_front();
+  }
+  return a.size() < b.size();
+}
+
+// asset "file", asset name = "file": a file the program needs when it
+// runs (a font, a picture, a sound), next to the file that says so. It
+// is there when the program is built, and `ent build` takes it along;
+// the program names it as it is written here, or by the name it is
+// given. With a `*` in the file's name ("walk/*.png") it is every file
+// there is of that name, and the name a list of them, in their order.
 LogicalResult Parser::parseAsset() {
   advance();
+  llvm::SMLoc nameAt = token.loc;
+  std::string given;
+  if (token.is(Token::Identifier)) {
+    given = token.spelling;
+    advance();
+    if (failed(expect(Token::Assign, "'=' and the file's name")))
+      return failure();
+    if (!token.is(Token::String))
+      return error("expected the file's name, as a text");
+  }
   llvm::SMLoc at = token.loc;
   std::string name =
       StringRef(token.spelling).drop_front().drop_back().str();
@@ -914,9 +970,78 @@ LogicalResult Parser::parseAsset() {
           ->getBufferIdentifier();
   SmallString<256> path(llvm::sys::path::parent_path(declaring));
   llvm::sys::path::append(path, written);
-  if (!llvm::sys::fs::is_regular_file(path))
+
+  // One file.
+  if (!written.contains('*')) {
+    if (!llvm::sys::fs::is_regular_file(path))
+      return error(at, "there is no file '" + name + "' next to '" +
+                           llvm::sys::path::filename(declaring) + "'");
+    if (!given.empty()) {
+      declareSymbol(nameAt, given);
+      assetFiles[given] = name;
+    }
+    return success();
+  }
+
+  // Every file of that name: in their order, numbers by how much they
+  // are.
+  StringRef folder = llvm::sys::path::parent_path(written);
+  StringRef pattern = llvm::sys::path::filename(written);
+  if (folder.contains('*'))
+    return error(at, "the '*' is in the file's name, not in its folder's "
+                     "('walk/*.png')");
+  std::vector<std::string> files;
+  std::error_code problem;
+  // (Next to a file that is named without a folder: where the compiler
+  // is run.)
+  StringRef inside = llvm::sys::path::parent_path(path);
+  for (llvm::sys::fs::directory_iterator
+           entry(inside.empty() ? "." : inside, problem),
+       end;
+       !problem && entry != end; entry.increment(problem)) {
+    StringRef file = llvm::sys::path::filename(entry->path());
+    if (file.starts_with(".") || !matchesPattern(file, pattern) ||
+        !llvm::sys::fs::is_regular_file(entry->path()))
+      continue;
+    files.push_back(folder.empty() ? file.str()
+                                   : (folder + "/" + file).str());
+  }
+  if (files.empty())
     return error(at, "there is no file '" + name + "' next to '" +
                          llvm::sys::path::filename(declaring) + "'");
+  if (given.empty())
+    return success();
+  llvm::sort(files, [](const std::string &a, const std::string &b) {
+    return namedBefore(a, b);
+  });
+  // The list: a table of the files' names.
+  unsigned longest = 0;
+  for (const std::string &file : files)
+    longest = std::max<unsigned>(longest, file.size());
+  if (longest > TextType::kMaxCapacity)
+    return error(at, "a file's name here has at most " +
+                         Twine(unsigned(TextType::kMaxCapacity)) + " bytes");
+  auto text = TextType::get(context, longest);
+  IntegerType storage = text.getStorageType();
+  SmallVector<Attribute> values;
+  for (const std::string &file : files) {
+    APInt bits(storage.getWidth(), file.size());
+    for (auto [index, byte] : llvm::enumerate(file))
+      bits.insertBits(static_cast<unsigned char>(byte), 16 + 8 * index, 8);
+    values.push_back(IntegerAttr::get(storage, bits));
+  }
+  Record record;
+  record.fields.push_back({"", text});
+  StringAttr symbolName = declareSymbol(nameAt, given);
+  OperationState state(loc(nameAt), TableOp::getOperationName());
+  state.addAttribute("sym_name", symbolName);
+  state.addAttribute("field_names", builder.getStrArrayAttr({""}));
+  state.addAttribute("field_types", builder.getTypeArrayAttr({text}));
+  state.addAttribute("values",
+                     builder.getArrayAttr({builder.getArrayAttr(values)}));
+  builder.create(state);
+  tableRows[symbolName.getValue()] = files.size();
+  tables[given] = std::move(record);
   return success();
 }
 
@@ -5848,6 +5973,12 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
       if (failed(expect(Token::RParen, "')'")))
         return failure();
     }
+    return node;
+  }
+  // (A file by its name: the text that names it.)
+  if (!lookup(name) && assetFiles.count(name)) {
+    node->kind = Expr::String;
+    node->name = assetFiles[name];
     return node;
   }
   node->kind = Expr::Name;

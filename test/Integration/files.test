@@ -7,6 +7,9 @@
 
 // CHECK:      files_words.txt: words that lie next to the program
 // CHECK-NEXT: module_words.txt: words that lie next to the module
+// CHECK-NEXT: steps/step1.txt: step one
+// CHECK-NEXT: steps/step2.txt: step two
+// CHECK-NEXT: steps/step10.txt: step ten
 // CHECK-NEXT: nowhere.txt: not there
 
 // A program built with `ent build` knows where its source and its
@@ -26,6 +29,8 @@
 // RUN: rm -rf %t.out && mkdir -p %t.out && %ent build -I %S/Inputs/files %S/Inputs/files_use.ent -o %t.out/files_use
 // RUN: cmp %t.out/files_words.txt %S/Inputs/files_words.txt
 // RUN: cmp %t.out/module_words.txt %S/Inputs/files/module_words.txt
+// (Those of a name with a `*` with their folder, and no other file of it.)
+// RUN: ls %t.out/steps | count 3
 
 // With --embed they are in the program itself, which needs no file next
 // to it: it says what the files said when it was built, whatever became

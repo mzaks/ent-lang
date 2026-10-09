@@ -864,10 +864,14 @@ does not fit one. It is never a float.
 ## Assets
 
 ```
-asset "Roboto-Regular.ttf"
+asset face = "Roboto-Regular.ttf"
+asset walk = "walk/step*.png"
 asset "sounds/hit.wav"
 
-world { Face = font("Roboto-Regular.ttf", 24) }
+world {
+  Face = font(face, 24)
+  for file in walk { ... picture_load(file) ... }
+}
 ```
 
 An asset is a file the program needs when it runs: a font, a picture, a
@@ -877,13 +881,22 @@ sound.
   by its path from the folder of that file (no `..`, not a whole path),
   and is there when the program is built: a missing file is an error
   then, not a font that is not there when the program runs.
-- The program names it as it is declared, in what it gives the devices
-  (`font`, `picture_load`, a `Sample`'s file).
+- With a name (`asset face = "..."`) the name is the text that names the
+  file, wherever a text goes: `font(face, 24)`. It belongs to its module
+  like a fn (`kit::face`). Without one the program names the file as it
+  is declared.
+- With a `*` in the file's name (not in a folder's) it is every file
+  there is of that name, and the name is a list of them: a table of
+  texts (`walk[i]`, `len(walk)`, `for file in walk { }`), in the order
+  of their names, numbers in them by how much they are (`step2.png`
+  before `step10.png`). No such file is an error. Files whose names
+  start with a `.` are not among them.
 - `ent build` copies the declared files to where it writes the program,
   with their folders, where the program finds them; `ent build --embed`
-  puts them into the program itself, so that it is one file. A file on
-  its own (where the program is started, next to its source under `ent
-  run`, next to the program) comes before the one in the program.
+  puts them into the program itself, so that it is one file (as they
+  are, of any size). A file on its own (where the program is started,
+  next to its source under `ent run`, next to the program) comes before
+  the one in the program.
 - Two files in different folders cannot be the same asset name in one
   program.
 - A file that is not declared is still found by its name, where it is;

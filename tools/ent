@@ -123,8 +123,24 @@ def assets_of(files):
     for path in files:
         with open(path) as source:
             text = re.sub(r"//[^\n]*", "", source.read())
-        for name in re.findall(r'^\s*asset\s+"([^"\n]*)"', text,
-                               re.MULTILINE):
+        written = re.findall(r'^\s*asset\s+(?:\w+\s*=\s*)?"([^"\n]*)"',
+                             text, re.MULTILINE)
+        names = []
+        for name in written:
+            # (With a `*`: every file there is of that name.)
+            folder, pattern = os.path.split(name)
+            there = os.path.join(os.path.dirname(path), folder)
+            if "*" not in pattern or not os.path.isdir(there):
+                names.append(name)
+                continue
+            matches = re.compile(
+                ".*".join(map(re.escape, pattern.split("*"))) + r"\Z",
+                re.DOTALL)
+            names += [os.path.join(folder, file)
+                      for file in sorted(os.listdir(there))
+                      if matches.match(file) and not file.startswith(".")
+                      and os.path.isfile(os.path.join(there, file))]
+        for name in names:
             where = os.path.join(os.path.dirname(path), name)
             if os.path.realpath(found.setdefault(name, where)) != \
                     os.path.realpath(where):
@@ -417,25 +433,36 @@ def build(arguments, output, directory):
     with open(written, "w") as source:
         source.write("const char ent_program_folders[] = %s;\n"
                      % json.dumps(os.pathsep.join(folders)))
-        # With --embed, also the files it declares: their bytes, by the
-        # names it knows them by.
-        if arguments.embed:
-            held = list(assets_of(files).items())
-            for index, (name, where) in enumerate(held):
-                with open(where, "rb") as asset:
-                    data = asset.read()
-                source.write(f"static const unsigned char asset_{index}[] = {{")
-                for start in range(0, len(data), 4096):
-                    source.write(",".join(map(str, data[start:start + 4096])))
-                    source.write(",\n")
-                source.write("0};\n")
+        # With --embed, also the files it declares, by the names it
+        # knows them by. Their bytes the assembler takes from the files
+        # as they are, however many they are.
+        held = list(assets_of(files).items()) if arguments.embed else []
+        if held:
+            for index in range(len(held)):
+                source.write("extern const unsigned char "
+                             f"ent_asset_{index}[];\n")
             source.write("const struct { const char *name; const unsigned "
                          "char *bytes; unsigned long size; } "
                          "ent_program_assets[] = {\n")
             for index, (name, where) in enumerate(held):
-                source.write(f"  {{{json.dumps(name)}, asset_{index}, "
+                source.write(f"  {{{json.dumps(name)}, ent_asset_{index}, "
                              f"{os.path.getsize(where)}}},\n")
             source.write("  {0, 0, 0}};\n")
+    if held:
+        apple = sys.platform == "darwin"
+        bytes_of = os.path.join(directory, "ent_assets.s")
+        with open(bytes_of, "w") as source:
+            source.write("  .section __TEXT,__const\n" if apple
+                         else '  .section .rodata\n')
+            for index, (name, where) in enumerate(held):
+                label = ("_" if apple else "") + f"ent_asset_{index}"
+                source.write(f"  .globl {label}\n  .p2align 4\n{label}:\n"
+                             f"  .incbin {json.dumps(os.path.abspath(where))}"
+                             "\n  .byte 0\n")
+            if not apple:
+                source.write('  .section .note.GNU-stack,"",%progbits\n')
+        objects.append(os.path.join(directory, "ent_assets.o"))
+        run([cc, "-c", bytes_of, "-o", objects[-1]], env=host)
     objects.append(os.path.join(directory, "ent_folders.o"))
     run([cc, "-c", written, "-o", objects[-1]], env=host)
     # C++ brings its library; other languages' objects say what they need

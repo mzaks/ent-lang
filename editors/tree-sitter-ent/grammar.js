@@ -56,7 +56,11 @@ module.exports = grammar({
     import: ($) => seq('import', field('module', $.identifier)),
 
     // asset "name.ttf": a file the program needs when it runs.
-    asset: ($) => seq('asset', field('file', $.string)),
+    // asset face = "name.ttf": by a name; with a `*` in the file's name,
+    // the name is a list of the files there are.
+    asset: ($) =>
+      seq('asset', optional(seq(field('name', $.identifier), '=')),
+          field('file', $.string)),
 
     default_capacity: ($) => seq('default_capacity', $.integer),
     capacity_of: ($) => seq('capacity', field('of', $._name), $.integer),

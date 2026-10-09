@@ -17,7 +17,7 @@ import layout
 import layout_window
 
 // (The picture goes where the program is built, or into it.)
-asset "profile-picture.png"
+asset portrait = "profile-picture.png"
 
 tag Root
 tag HeaderButton
@@ -50,7 +50,7 @@ world {
   if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 24) }
   if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24) }
   if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 24) }
-  Image = picture_load("profile-picture.png")
+  Image = picture_load(portrait)
 
   // OuterContainer: as big as the window, a row with 16 around and
   // between.
