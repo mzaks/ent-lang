@@ -878,6 +878,56 @@ def Ent_TextDropOp : Ent_Op<"text.drop", [
   let assemblyFormat = "$value attr-dict";
 }
 
+def Ent_TableOp : Ent_Op<"table", [Symbol]> {
+  let summary = "Declare a table: rows of values that are the program's own";
+  let description = [{
+    ```mlir
+    "ent.table"() {sym_name = "road", field_names = ["x", "y"],
+                   field_types = [f32, f32],
+                   values = [[-1.0 : f32, 4.0 : f32], [2.0 : f32, 2.0 : f32]]}
+    ```
+    A list of rows that never changes, each with a value for every field
+    (`values` holds them field by field, as they are stored: a number as
+    it is, an enum's case as its byte, a text as its integer). A plain
+    list has one field without a name. `ent.table.at` reads it.
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name, StrArrayAttr:$field_names,
+                       TypeArrayAttr:$field_types, ArrayAttr:$values);
+  let hasVerifier = 1;
+  let extraClassDeclaration = [{
+    /// How many rows it has.
+    unsigned getNumRows() {
+      return ::llvm::cast<::mlir::ArrayAttr>(getValues()[0]).size();
+    }
+    /// The place of the field `name` among its fields, if it has one.
+    std::optional<unsigned> findField(::llvm::StringRef name) {
+      for (auto [index, field] : ::llvm::enumerate(
+               getFieldNames().getAsValueRange<::mlir::StringAttr>()))
+        if (field == name)
+          return index;
+      return std::nullopt;
+    }
+  }];
+}
+
+def Ent_TableAtOp : Ent_Op<"table.at", [
+    Pure, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "A value of a row of a table";
+  let description = [{
+    ```mlir
+    %x = ent.table.at @road "x" [%i : i32] : f32
+    ```
+    What row `%i` has in that field; nought (the first case, an empty
+    text) where the table has no such row.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$table, StrAttr:$field,
+                       AnySignlessInteger:$index);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = [{
+    $table $field `[` $index `:` type($index) `]` attr-dict `:` type($result)
+  }];
+}
+
 def Ent_NobodyOp : Ent_Op<"nobody", [Pure]> {
   let summary = "The id of no entity";
   let description = [{

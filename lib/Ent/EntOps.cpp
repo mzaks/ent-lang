@@ -847,7 +847,8 @@ LogicalResult FunctionOp::verifyRegions() {
         op->getName().getDialectNamespace() != "ent")
       return;
     auto invoke = dyn_cast<InvokeOp>(op);
-    if (isa<SameOp, NobodyOp, TextConstantOp, TextOfOp, TextCutOp, TextLengthOp,
+    if (isa<SameOp, NobodyOp, TableAtOp, TextConstantOp, TextOfOp, TextCutOp,
+            TextLengthOp,
             TextAtOp, TextEqualOp, TextJoinOp, TextKeepOp>(op) ||
         (invoke && (!invoke.getProc() || getProc())))
       return;
@@ -1628,6 +1629,46 @@ LogicalResult GetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     return emitOpError("result type ")
            << getResult().getType() << " does not match field '" << getField()
            << "' of type " << *fieldType;
+  return success();
+}
+
+LogicalResult TableOp::verify() {
+  size_t fields = getFieldNames().size();
+  if (fields == 0 || getFieldTypes().size() != fields ||
+      getValues().size() != fields)
+    return emitOpError("has ")
+           << fields << " field names, " << getFieldTypes().size()
+           << " types and values for " << getValues().size()
+           << " fields; expected as many of each, and at least one";
+  size_t rows = 0;
+  for (auto [index, column] : llvm::enumerate(getValues())) {
+    auto values = dyn_cast<ArrayAttr>(column);
+    if (!values || values.empty() || (index && values.size() != rows))
+      return emitOpError("has a field without values, or with another "
+                         "number of them than the first");
+    rows = values.size();
+    for (Attribute value : values)
+      if (!isa<IntegerAttr, FloatAttr>(value))
+        return emitOpError("holds ")
+               << value << "; a table's values are numbers as they are "
+               << "stored";
+  }
+  return success();
+}
+
+LogicalResult TableAtOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto table =
+      symbolTable.lookupNearestSymbolFrom<TableOp>(*this, getTableAttr());
+  if (!table)
+    return emitOpError("refers to unknown table ") << getTableAttr();
+  std::optional<unsigned> field = table.findField(getField());
+  if (!field)
+    return emitOpError("reads '")
+           << getField() << "', which " << getTableAttr() << " has not";
+  Type type = cast<TypeAttr>(table.getFieldTypes()[*field]).getValue();
+  if (type != getResult().getType())
+    return emitOpError("gives ")
+           << getResult().getType() << ", but the field is " << type;
   return success();
 }
 

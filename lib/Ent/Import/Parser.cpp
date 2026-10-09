@@ -105,6 +105,20 @@ struct ComponentInit {
   SmallVector<std::pair<std::string, ExprPtr>> fields;
 };
 
+/// What a `spawn` lists, or a prefab: a component with its values, a
+/// prefab with what it is given, or an `if` that says which of two lists
+/// it is.
+struct SpawnEntry {
+  enum Kind { Init, Prefab, If };
+  Kind kind = Init;
+  llvm::SMLoc loc;
+  ComponentInit init;
+  std::string prefab;
+  std::vector<ExprPtr> args;
+  ExprPtr condition;
+  std::vector<SpawnEntry> then, otherwise;
+};
+
 /// `let a = value`, or `let (a, b) = values` for what a fn gives.
 struct Let {
   SmallVector<std::string> names;
@@ -137,6 +151,7 @@ struct Expr {
     Index,  // text[i]
     Format, // {value} inside a string: the value as text
     Tuple,  // (a, b): the values a fn gives
+    Row,    // table[i].field: name the table, field the field (or none)
     Given,  // a value that is there already (`given`)
   };
   Kind kind;
@@ -154,7 +169,7 @@ struct Expr {
   SmallVector<ExprPtr> operands;
   Type castType;
   std::unique_ptr<Branch> thenBranch, elseBranch;
-  SmallVector<ComponentInit> inits;
+  std::vector<SpawnEntry> entries;
 };
 
 /// A record declared in the source: a component or a unique.
@@ -177,6 +192,16 @@ struct Record {
         return type;
     return {};
   }
+};
+
+struct SourceModule;
+/// A named list of what a `spawn` lists, with parameters: written out
+/// where a spawn (or another prefab) names it.
+struct Prefab {
+  SmallVector<std::pair<std::string, Type>> params;
+  std::vector<SpawnEntry> entries;
+  /// The module it is declared in, whose names its entries use.
+  SourceModule *home = nullptr;
 };
 
 /// A function over values: the program's own (`fn`) or one implemented in
@@ -259,7 +284,9 @@ public:
         schedules([this](StringRef name) { return resolve(name); }),
         scheduleOps([this](StringRef name) { return resolve(name); }),
         functions([this](StringRef name) { return resolve(name); }),
-        enums([this](StringRef name) { return resolve(name); }) {
+        enums([this](StringRef name) { return resolve(name); }),
+        tables([this](StringRef name) { return resolve(name); }),
+        prefabs([this](StringRef name) { return resolve(name); }) {
     advance();
   }
 
@@ -386,6 +413,20 @@ private:
   LogicalResult parseSystem(bool isExtern);
   LogicalResult parseFunction(bool proc, bool isExtern);
   LogicalResult parseEnum();
+  LogicalResult parseTable();
+  LogicalResult parsePrefab();
+  FailureOr<std::vector<SpawnEntry>> parseSpawnEntries();
+  FailureOr<SpawnEntry> parseSpawnIf();
+  /// The components of the entity that is being spawned, with their
+  /// values, in the order they were first listed.
+  struct Spawned {
+    SmallVector<std::pair<std::string, SmallVector<mlir::Value>>> parts;
+  };
+  FailureOr<mlir::Value>
+  emitSpawnEntries(const std::vector<SpawnEntry> &entries, size_t from,
+                   Spawned spawned, llvm::SMLoc at,
+                   function_ref<FailureOr<mlir::Value>(Spawned)> rest);
+  FailureOr<Attribute> constantOf(const Expr &expr, Type type);
   LogicalResult parseSchedule();
   LogicalResult parseMain();
   LogicalResult parseWorld();
@@ -609,6 +650,11 @@ private:
   bool inProc = false;
   /// The cases of every enum, in the order they number them.
   Declared<SmallVector<std::string>> enums;
+  /// Tables: their fields (one without a name for a plain list), and how
+  /// many rows each has.
+  Declared<Record> tables;
+  llvm::StringMap<unsigned> tableRows;
+  Declared<Prefab> prefabs;
   /// Parsing the body of a system (or `world`) or of a fn: where functions
   /// are called.
   bool inSystem = false;
@@ -728,6 +774,8 @@ LogicalResult Parser::parseDeclarations() {
       result = parseFunction(/*proc=*/true, /*isExtern=*/false);
     else if (consumeKeyword("enum"))
       result = parseEnum();
+    else if (token.isKeyword("table") && peek().is(Token::Identifier))
+      result = parseTable();
     else if (consumeKeyword("schedule"))
       result = parseSchedule();
     else if (token.isKeyword("import"))
@@ -772,7 +820,9 @@ LogicalResult Parser::parseDeclarations() {
                              "archetype declared before this: 'capacity' "
                              "gives one of those another capacity");
       declared->setAttr("capacity", builder.getI64IntegerAttr(*capacity));
-    } else if (token.isKeyword("device") || token.isKeyword("prefab")) {
+    } else if (token.isKeyword("prefab")) {
+      result = parsePrefab();
+    } else if (token.isKeyword("device")) {
       result = error("'" + token.spelling + "' is not supported yet");
     } else {
       result = error("expected a declaration (import, component, tag, "
@@ -1268,6 +1318,169 @@ LogicalResult Parser::parseEnum() {
   EnumOp::create(builder, loc(at), declareSymbol(at, *name),
                  builder.getStrArrayAttr(labels));
   enums[*name] = std::move(cases);
+  return success();
+}
+
+/// What `expr` is as a value of `type` that is known as it is written: a
+/// number, a bool, a case of an enum, a text; as it is stored.
+FailureOr<Attribute> Parser::constantOf(const Expr &expr, Type type) {
+  const Expr *value = &expr;
+  bool negative = false;
+  if (expr.kind == Expr::Unary && expr.op == Token::Minus) {
+    negative = true;
+    value = expr.operands[0].get();
+  }
+  if (auto real = dyn_cast<FloatType>(type)) {
+    if (value->kind != Expr::Int && value->kind != Expr::Float)
+      return error(expr.loc, "expected a number as it is written");
+    double number = value->kind == Expr::Int ? double(value->intValue)
+                                             : value->floatValue;
+    return Attribute(builder.getFloatAttr(real, negative ? -number : number));
+  }
+  if (type.isInteger(1)) {
+    if (value->kind != Expr::Bool || negative)
+      return error(expr.loc, "expected 'true' or 'false'");
+    return Attribute(builder.getIntegerAttr(type, value->boolValue));
+  }
+  if (auto whole = dyn_cast<IntegerType>(type)) {
+    if (value->kind != Expr::Int)
+      return error(expr.loc, "expected a whole number as it is written");
+    return Attribute(builder.getIntegerAttr(
+        whole, APInt(whole.getWidth(),
+                     uint64_t(negative ? -value->intValue : value->intValue),
+                     /*isSigned=*/true, /*implicitTrunc=*/true)));
+  }
+  if (auto named = dyn_cast<EnumType>(type)) {
+    StringRef symbol = named.getName().getValue();
+    if (value->kind != Expr::Field || negative ||
+        resolve(value->name) != symbol)
+      return error(expr.loc, "expected a case of the enum");
+    const SmallVector<std::string> &cases = enums.ofSymbol(symbol);
+    auto *at = llvm::find(cases, value->field);
+    if (at == cases.end())
+      return error(expr.loc, "the enum has no case '" + value->field + "'");
+    return Attribute(
+        builder.getIntegerAttr(named.getStorageType(), at - cases.begin()));
+  }
+  if (auto text = dyn_cast<TextType>(type)) {
+    if (value->kind != Expr::String || negative)
+      return error(expr.loc, "expected a text as it is written");
+    if (value->name.size() > text.getCapacity())
+      return error(expr.loc, "this text has " + Twine(value->name.size()) +
+                                 " bytes, but the field is a text[" +
+                                 Twine(text.getCapacity()) + "]");
+    IntegerType storage = text.getStorageType();
+    APInt bits(storage.getWidth(), value->name.size());
+    for (auto [index, byte] : llvm::enumerate(value->name))
+      bits.insertBits(static_cast<unsigned char>(byte), 16 + 8 * index, 8);
+    return Attribute(IntegerAttr::get(storage, bits));
+  }
+  return error(expr.loc, "a table holds numbers, bools, cases of enums and "
+                         "texts of a capacity");
+}
+
+// table name { field: type, ... } = [ { field: value, ... }, ... ]
+// table name: type = [ value, ... ]
+LogicalResult Parser::parseTable() {
+  advance();
+  llvm::SMLoc at = token.loc;
+  FailureOr<std::string> name = identifier("a table's name");
+  if (failed(name))
+    return failure();
+  Record record;
+  bool plain = consumeIf(Token::Colon);
+  if (plain) {
+    FailureOr<Type> type = parseType();
+    if (failed(type))
+      return failure();
+    record.fields.push_back({std::string(), *type});
+  } else if (failed(parseFields(record))) {
+    return failure();
+  }
+  if (record.fields.empty())
+    return error(at, "a table's rows have at least one field");
+  for (auto &[field, type] : record.fields)
+    if (!type.isIntOrFloat() && !isa<EnumType, TextType>(type))
+      return error(at, "a table holds numbers, bools, cases of enums and "
+                       "texts of a capacity");
+  if (failed(expect(Token::Assign, "'=' and the table's rows")) ||
+      failed(expect(Token::LBracket, "'[' and the table's rows")))
+    return failure();
+  SmallVector<SmallVector<Attribute>> columns(record.fields.size());
+  while (!token.is(Token::RBracket)) {
+    llvm::SMLoc rowAt = token.loc;
+    if (plain) {
+      FailureOr<ExprPtr> value = parseExpr();
+      if (failed(value))
+        return failure();
+      FailureOr<Attribute> stored =
+          constantOf(**value, record.fields[0].second);
+      if (failed(stored))
+        return failure();
+      columns[0].push_back(*stored);
+    } else {
+      // { field: value, ... }: every field, once.
+      if (failed(expect(Token::LBrace, "'{' and a row")))
+        return failure();
+      SmallVector<Attribute> row(record.fields.size());
+      while (!token.is(Token::RBrace)) {
+        llvm::SMLoc fieldAt = token.loc;
+        FailureOr<std::string> field = identifier("a field");
+        if (failed(field) || failed(expect(Token::Colon, "':'")))
+          return failure();
+        unsigned place = 0;
+        while (place < record.fields.size() &&
+               record.fields[place].first != *field)
+          ++place;
+        if (place == record.fields.size())
+          return error(fieldAt, "table '" + *name + "' has no field '" +
+                                    *field + "'");
+        if (row[place])
+          return error(fieldAt, "'" + *field + "' is given twice");
+        FailureOr<ExprPtr> value = parseExpr();
+        if (failed(value))
+          return failure();
+        FailureOr<Attribute> stored =
+            constantOf(**value, record.fields[place].second);
+        if (failed(stored))
+          return failure();
+        row[place] = *stored;
+        if (!consumeIf(Token::Comma))
+          break;
+      }
+      if (failed(expect(Token::RBrace, "'}'")))
+        return failure();
+      for (auto [place, value] : llvm::enumerate(row)) {
+        if (!value)
+          return error(rowAt, "this row needs a value for '" +
+                                  record.fields[place].first + "'");
+        columns[place].push_back(value);
+      }
+    }
+    if (!consumeIf(Token::Comma))
+      break;
+  }
+  if (failed(expect(Token::RBracket, "']'")))
+    return failure();
+  if (columns[0].empty())
+    return error(at, "a table has at least one row");
+  SmallVector<StringRef> names;
+  SmallVector<Type> types;
+  SmallVector<Attribute> values;
+  for (auto [field, column] : llvm::zip(record.fields, columns)) {
+    names.push_back(field.first);
+    types.push_back(field.second);
+    values.push_back(builder.getArrayAttr(column));
+  }
+  StringAttr symbolName = declareSymbol(at, *name);
+  OperationState state(loc(at), TableOp::getOperationName());
+  state.addAttribute("sym_name", symbolName);
+  state.addAttribute("field_names", builder.getStrArrayAttr(names));
+  state.addAttribute("field_types", builder.getTypeArrayAttr(types));
+  state.addAttribute("values", builder.getArrayAttr(values));
+  builder.create(state);
+  tableRows[symbolName.getValue()] = columns[0].size();
+  tables[*name] = std::move(record);
   return success();
 }
 
@@ -4339,13 +4552,29 @@ FailureOr<ExprPtr> Parser::parseUnary() {
   FailureOr<ExprPtr> primary = parsePrimary();
   if (failed(primary))
     return failure();
-  // text[i]: one byte of a text.
+  // text[i]: one byte of a text. table[i], table[i].field: of a row.
   while (token.is(Token::LBracket)) {
     llvm::SMLoc at = token.loc;
     advance();
     FailureOr<ExprPtr> index = parseExpr();
     if (failed(index) || failed(expect(Token::RBracket, "']'")))
       return failure();
+    if ((*primary)->kind == Expr::Name && !lookup((*primary)->name) &&
+        tables.count((*primary)->name)) {
+      auto node = std::make_unique<Expr>();
+      node->kind = Expr::Row;
+      node->loc = at;
+      node->name = (*primary)->name;
+      node->operands.push_back(std::move(*index));
+      if (consumeIf(Token::Dot)) {
+        FailureOr<std::string> field = identifier("a field");
+        if (failed(field))
+          return failure();
+        node->field = *field;
+      }
+      primary = std::move(node);
+      continue;
+    }
     auto node = std::make_unique<Expr>();
     node->kind = Expr::Index;
     node->loc = at;
@@ -4513,6 +4742,117 @@ FailureOr<std::unique_ptr<Branch>> Parser::parseBranch() {
 }
 
 // Component { field: value, ... } or a tag: Component [{}]
+// if condition { entries } [else if ... | else { entries }], in a list of
+// what is spawned (`if` is read).
+FailureOr<SpawnEntry> Parser::parseSpawnIf() {
+  SpawnEntry entry;
+  entry.kind = SpawnEntry::If;
+  entry.loc = token.loc;
+  FailureOr<ExprPtr> condition = parseExpr();
+  if (failed(condition))
+    return failure();
+  entry.condition = std::move(*condition);
+  FailureOr<std::vector<SpawnEntry>> then = parseSpawnEntries();
+  if (failed(then))
+    return failure();
+  entry.then = std::move(*then);
+  if (consumeKeyword("else")) {
+    if (consumeKeyword("if")) {
+      FailureOr<SpawnEntry> nested = parseSpawnIf();
+      if (failed(nested))
+        return failure();
+      entry.otherwise.push_back(std::move(*nested));
+    } else {
+      FailureOr<std::vector<SpawnEntry>> otherwise = parseSpawnEntries();
+      if (failed(otherwise))
+        return failure();
+      entry.otherwise = std::move(*otherwise);
+    }
+  }
+  return entry;
+}
+
+// { entry, ... }: a component with its values, a prefab with what it is
+// given, or an `if` that picks (which needs no comma after it).
+FailureOr<std::vector<SpawnEntry>> Parser::parseSpawnEntries() {
+  if (failed(expect(Token::LBrace, "'{'")))
+    return failure();
+  std::vector<SpawnEntry> entries;
+  while (!token.is(Token::RBrace)) {
+    if (consumeKeyword("if")) {
+      FailureOr<SpawnEntry> entry = parseSpawnIf();
+      if (failed(entry))
+        return failure();
+      entries.push_back(std::move(*entry));
+      consumeIf(Token::Comma);
+      continue;
+    }
+    SpawnEntry entry;
+    entry.loc = token.loc;
+    if (token.is(Token::Identifier) && peek().is(Token::LParen) &&
+        prefabs.count(token.spelling)) {
+      entry.kind = SpawnEntry::Prefab;
+      entry.prefab = token.spelling.str();
+      advance();
+      advance();
+      while (!token.is(Token::RParen)) {
+        FailureOr<ExprPtr> arg = parseExpr();
+        if (failed(arg))
+          return failure();
+        entry.args.push_back(std::move(*arg));
+        if (!consumeIf(Token::Comma))
+          break;
+      }
+      if (failed(expect(Token::RParen, "')'")))
+        return failure();
+    } else {
+      FailureOr<ComponentInit> init = parseComponentInit();
+      if (failed(init))
+        return failure();
+      entry.init = std::move(*init);
+    }
+    entries.push_back(std::move(entry));
+    if (!consumeIf(Token::Comma))
+      break;
+  }
+  if (failed(expect(Token::RBrace, "'}'")))
+    return failure();
+  return entries;
+}
+
+// prefab name(parameter: type, ...) { entries }
+LogicalResult Parser::parsePrefab() {
+  advance();
+  llvm::SMLoc at = token.loc;
+  FailureOr<std::string> name = identifier("a prefab's name");
+  if (failed(name) || failed(expect(Token::LParen, "'('")))
+    return failure();
+  Prefab prefab;
+  prefab.home = current;
+  while (!token.is(Token::RParen)) {
+    FailureOr<std::string> param = identifier("a parameter");
+    if (failed(param) || failed(expect(Token::Colon, "':'")))
+      return failure();
+    FailureOr<Type> type = parseType();
+    if (failed(type))
+      return failure();
+    prefab.params.push_back({*param, *type});
+    if (!consumeIf(Token::Comma))
+      break;
+  }
+  if (failed(expect(Token::RParen, "')'")))
+    return failure();
+  if (prefabs.count(*name) || functions.count(*name))
+    return error(at, "'" + *name + "' is declared already");
+  FailureOr<std::vector<SpawnEntry>> entries = parseSpawnEntries();
+  if (failed(entries))
+    return failure();
+  prefab.entries = std::move(*entries);
+  (void)declareSymbol(at, *name);
+  prefabs[*name] = std::move(prefab);
+  return success();
+}
+
 FailureOr<ComponentInit> Parser::parseComponentInit() {
   ComponentInit init;
   init.loc = token.loc;
@@ -4659,16 +4999,10 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
   }
   if (consumeKeyword("spawn")) {
     node->kind = Expr::Spawn;
-    if (failed(expect(Token::LBrace, "'{'")))
+    FailureOr<std::vector<SpawnEntry>> entries = parseSpawnEntries();
+    if (failed(entries))
       return failure();
-    do {
-      FailureOr<ComponentInit> init = parseComponentInit();
-      if (failed(init))
-        return failure();
-      node->inits.push_back(std::move(*init));
-    } while (consumeIf(Token::Comma));
-    if (failed(expect(Token::RBrace, "'}'")))
-      return failure();
+    node->entries = std::move(*entries);
     return node;
   }
 
@@ -4745,6 +5079,11 @@ Type Parser::typeOf(const Expr &expr) {
     return {};
   case Expr::Index:
     return builder.getIntegerType(8);
+  case Expr::Row: {
+    auto table = tables.find(expr.name);
+    return table == tables.end() ? Type()
+                                 : table->second.fieldType(expr.field);
+  }
   case Expr::Format: {
     Type type = typeOf(*expr.operands[0]);
     if (!type)
@@ -5060,6 +5399,32 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     return textConstant(at, expr.name,
                         TextType::get(context, std::max(size, 1u)));
   }
+  case Expr::Row: {
+    const Record &table = tables[expr.name];
+    Type type = table.fieldType(expr.field);
+    if (!type)
+      return error(expr.loc,
+                   expr.field.empty()
+                       ? "a row of table '" + expr.name + "' has fields: '" +
+                             expr.name + "[i].field'"
+                       : table.fields.size() == 1 &&
+                                 table.fields[0].first.empty()
+                             ? "table '" + expr.name +
+                                   "' is a plain list: '" + expr.name + "[i]'"
+                             : "table '" + expr.name + "' has no field '" +
+                                   expr.field + "'");
+    Type indexTy = typeOf(*expr.operands[0]);
+    if (!indexTy)
+      indexTy = builder.getI32Type();
+    FailureOr<mlir::Value> index = emit(*expr.operands[0], indexTy);
+    if (failed(index))
+      return failure();
+    if (!index->getType().isSignlessInteger() || index->getType().isInteger(1))
+      return error(expr.operands[0]->loc, "a row's number is an integer");
+    return TableAtOp::create(builder, at, type, symbol(expr.name),
+                             builder.getStringAttr(expr.field), *index)
+        .getResult();
+  }
   case Expr::Index: {
     Type textTy = textTypeOf(*expr.operands[0]);
     if (isAnyText(*expr.operands[0])) {
@@ -5304,6 +5669,13 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return failure();
       return values->front();
     }
+    // (Of a table: how many rows it has, which is known.)
+    if (expr.name == "len" && expr.operands.size() == 1 &&
+        expr.operands[0]->kind == Expr::Name &&
+        !lookup(expr.operands[0]->name) &&
+        tables.count(expr.operands[0]->name))
+      return integer(at, builder.getI32Type(),
+                     tableRows[resolve(expr.operands[0]->name)]);
     if (expr.name == "len" && expr.operands.size() == 1 &&
         isAnyText(*expr.operands[0])) {
       FailureOr<mlir::Value> text =
@@ -6258,25 +6630,131 @@ Parser::emitInitValues(const ComponentInit &init) {
   return values;
 }
 
+/// Emit what the entries from `from` on add to `spawned`, and then
+/// `rest`, which gives the entity (the entries of the list this one is
+/// in that come after it, and in the end the spawn itself). An `if`
+/// makes two ways on, each with all that follows; a prefab's entries are
+/// emitted where its parameters are what it was given, and nothing else
+/// of where it is named is in sight.
+FailureOr<mlir::Value>
+Parser::emitSpawnEntries(const std::vector<SpawnEntry> &entries, size_t from,
+                         Spawned spawned, llvm::SMLoc at,
+                         function_ref<FailureOr<mlir::Value>(Spawned)> rest) {
+  if (from == entries.size())
+    return rest(std::move(spawned));
+  const SpawnEntry &entry = entries[from];
+  auto next = [&](Spawned so) {
+    return emitSpawnEntries(entries, from + 1, std::move(so), at, rest);
+  };
+  switch (entry.kind) {
+  case SpawnEntry::Init: {
+    FailureOr<SmallVector<mlir::Value>> values = emitInitValues(entry.init);
+    if (failed(values))
+      return failure();
+    std::string component = resolve(entry.init.component);
+    auto *known = llvm::find_if(spawned.parts, [&](auto &part) {
+      return part.first == component;
+    });
+    if (known == spawned.parts.end()) {
+      spawned.parts.push_back({component, std::move(*values)});
+    } else {
+      // Listed again: the later one's values. (A text the earlier one
+      // was to hold is given back.)
+      for (mlir::Value value : known->second)
+        if (isa<StringType>(value.getType()))
+          TextDropOp::create(builder, loc(entry.loc), value);
+      known->second = std::move(*values);
+    }
+    return next(std::move(spawned));
+  }
+  case SpawnEntry::Prefab: {
+    Prefab &prefab = prefabs[entry.prefab];
+    if (entry.args.size() != prefab.params.size())
+      return error(entry.loc, "'" + entry.prefab + "' takes " +
+                                  Twine(prefab.params.size()) +
+                                  " argument(s), not " +
+                                  Twine(entry.args.size()));
+    llvm::StringMap<Variable> given;
+    for (auto [arg, param] : llvm::zip(entry.args, prefab.params)) {
+      FailureOr<mlir::Value> value = emit(*arg, param.second);
+      if (failed(value))
+        return failure();
+      if (value->getType() != param.second)
+        return error(arg->loc, "argument has a different type than the "
+                               "parameter");
+      given[param.first] = Variable::ofValue(*value);
+    }
+    // Its entries where only its parameters are, in its own module; what
+    // comes after it, back where it was named.
+    auto here = std::move(scopes);
+    SourceModule *module = current;
+    scopes.clear();
+    scopes.push_back(std::move(given));
+    current = prefab.home;
+    FailureOr<mlir::Value> entity = emitSpawnEntries(
+        prefab.entries, 0, std::move(spawned), at,
+        [&](Spawned so) -> FailureOr<mlir::Value> {
+          auto inside = std::move(scopes);
+          scopes = std::move(here);
+          current = module;
+          FailureOr<mlir::Value> result = next(std::move(so));
+          here = std::move(scopes);
+          scopes = std::move(inside);
+          current = prefab.home;
+          return result;
+        });
+    scopes = std::move(here);
+    current = module;
+    return entity;
+  }
+  case SpawnEntry::If: {
+    FailureOr<mlir::Value> condition =
+        emit(*entry.condition, builder.getI1Type());
+    if (failed(condition))
+      return failure();
+    if (!condition->getType().isInteger(1))
+      return error(entry.condition->loc, "an 'if' condition must be a bool");
+    auto branch =
+        scf::IfOp::create(builder, loc(entry.loc), EntityType::get(context),
+                          *condition, /*withElseRegion=*/true);
+    for (bool taken : {true, false}) {
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToEnd(taken ? branch.thenBlock()
+                                           : branch.elseBlock());
+      FailureOr<mlir::Value> entity = emitSpawnEntries(
+          taken ? entry.then : entry.otherwise, 0, spawned, at, next);
+      if (failed(entity))
+        return failure();
+      scf::YieldOp::create(builder, loc(entry.loc), *entity);
+    }
+    return branch.getResult(0);
+  }
+  }
+  llvm_unreachable("unknown kind of entry");
+}
+
 FailureOr<mlir::Value> Parser::emitSpawn(const Expr &expr) {
   if (inEach)
     return error(expr.loc, "an entity is spawned after the 'for' that goes "
                            "through other entities, not in it: that one "
                            "only reads them");
-  SmallVector<Attribute> listed;
-  SmallVector<mlir::Value> values;
-  for (const ComponentInit &init : expr.inits) {
-    FailureOr<SmallVector<mlir::Value>> fields = emitInitValues(init);
-    if (failed(fields))
-      return failure();
-    listed.push_back(symbol(init.component));
-    values.append(fields->begin(), fields->end());
-  }
-  OperationState state(loc(expr.loc), SpawnOp::getOperationName());
-  state.addAttribute("components", builder.getArrayAttr(listed));
-  state.addOperands(values);
-  state.addTypes(EntityType::get(context));
-  return builder.create(state)->getResult(0);
+  return emitSpawnEntries(
+      expr.entries, 0, Spawned(), expr.loc,
+      [&](Spawned spawned) -> FailureOr<mlir::Value> {
+        if (spawned.parts.empty())
+          return error(expr.loc, "a spawn lists at least one component");
+        SmallVector<Attribute> listed;
+        SmallVector<mlir::Value> values;
+        for (auto &[component, fields] : spawned.parts) {
+          listed.push_back(FlatSymbolRefAttr::get(context, component));
+          values.append(fields.begin(), fields.end());
+        }
+        OperationState state(loc(expr.loc), SpawnOp::getOperationName());
+        state.addAttribute("components", builder.getArrayAttr(listed));
+        state.addOperands(values);
+        state.addTypes(EntityType::get(context));
+        return builder.create(state)->getResult(0);
+      });
 }
 
 OwningOpRef<ModuleOp>

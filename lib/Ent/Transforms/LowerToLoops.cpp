@@ -12459,6 +12459,52 @@ struct EntLowerToLoops
       shareParts(rewriter, func);
     }
 
+    // What is read of a table: from its field's values, which are the
+    // program's own, and nought where it has no such row.
+    SmallVector<TableAtOp> reads;
+    module.walk([&](TableAtOp read) { reads.push_back(read); });
+    for (TableAtOp read : reads) {
+      Location loc = read.getLoc();
+      auto table = symbols.lookup<TableOp>(read.getTable());
+      unsigned field = *table.findField(read.getField());
+      auto values = cast<ArrayAttr>(table.getValues()[field]);
+      Type stored = cast<TypedAttr>(values[0]).getType();
+      std::string name =
+          ("ent_rows." + table.getSymName() + "." + read.getField()).str();
+      auto type = MemRefType::get({int64_t(values.size())}, stored);
+      if (!SymbolTable::lookupSymbolIn(module, name)) {
+        rewriter.setInsertionPointToStart(module.getBody());
+        memref::GlobalOp::create(
+            rewriter, loc, name, rewriter.getStringAttr("private"), type,
+            DenseElementsAttr::get(
+                RankedTensorType::get({int64_t(values.size())}, stored),
+                values.getValue()),
+            /*constant=*/true, IntegerAttr());
+      }
+      rewriter.setInsertionPoint(read);
+      Value index = read.getIndex();
+      Value row = arith::IndexCastOp::create(rewriter, loc,
+                                             rewriter.getIndexType(), index);
+      Value there = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ult, row,
+          arith::ConstantIndexOp::create(rewriter, loc, values.size()));
+      Value safe = arith::SelectOp::create(
+          rewriter, loc, there, row,
+          arith::ConstantIndexOp::create(rewriter, loc, 0));
+      Value global = memref::GetGlobalOp::create(rewriter, loc, type, name);
+      Value value =
+          memref::LoadOp::create(rewriter, loc, global, ValueRange{safe});
+      value = arith::SelectOp::create(
+          rewriter, loc, there, value,
+          arith::ConstantOp::create(
+              rewriter, loc, cast<TypedAttr>(rewriter.getZeroAttr(stored))));
+      if (stored != read.getResult().getType())
+        value = UnrealizedConversionCastOp::create(
+                    rewriter, loc, read.getResult().getType(), value)
+                    .getResult(0);
+      rewriter.replaceOp(read, value);
+    }
+
     // The id of no entity: all ones, as in the buffers of what is sent.
     SmallVector<NobodyOp> nobodies;
     module.walk([&](NobodyOp nobody) { nobodies.push_back(nobody); });
@@ -12504,7 +12550,7 @@ struct EntLowerToLoops
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
       if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp, ExternOp,
-              FunctionOp, EnumOp>(op))
+              FunctionOp, EnumOp, TableOp>(op))
         rewriter.eraseOp(&op);
 
     if (failed(convertEntityTypes(module, layout->entities.idBits)))
