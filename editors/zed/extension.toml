@@ -12,7 +12,7 @@ repository = "https://github.com/mzaks/ent-lang"
 # repository = "file:///path/to/ent-lang", with a commit of it.
 [grammars.ent]
 repository = "https://github.com/mzaks/ent-lang"
-rev = "59125a7fb733d41778b0e3fbac97e93ba259f8a4"
+rev = "54160b07e7296ffa1d6fb4f54c788e50b19f3a06"
 path = "editors/tree-sitter-ent"
 
 [language_servers.ent-lsp]
