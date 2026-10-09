@@ -1721,15 +1721,35 @@ LogicalResult EachOp::verify() {
       if (!isa<GetOp>(user))
         return user->emitOpError("uses a ref of 'ent.each', which is only "
                                  "read ('ent.get')");
-    // What the enclosing query writes of its own entities this would
-    // read of others, changed or not as the query got to them.
-    for (BlockArgument outer : query.getBody().front().getArguments()) {
-      auto written = dyn_cast<RefType>(outer.getType());
-      if (written && written.getIsMutable() && !written.isUp() &&
-          written.getComponent() == ref.getComponent())
-        return emitOpError("reads ")
-               << ref.getComponent()
-               << " of other entities, which the enclosing query writes";
+    // A field the enclosing query sets of its own entities this would
+    // read of others set or not, as the query got to them: only as it
+    // was before (`old`).
+    if (isOld(arg.getArgNumber()))
+      continue;
+    llvm::SmallPtrSet<Attribute, 4> read;
+    for (Operation *user : arg.getUsers())
+      read.insert(cast<GetOp>(user).getFieldAttr());
+    Operation *sets = nullptr;
+    query.walk([&](SetOp set) {
+      auto written = dyn_cast<BlockArgument>(set.getRef());
+      if (written && written.getOwner() == &query.getBody().front() &&
+          cast<RefType>(set.getRef().getType()).getComponent() ==
+              ref.getComponent() &&
+          read.contains(set.getFieldAttr()))
+        sets = set;
+    });
+    if (sets) {
+      InFlightDiagnostic diag = emitError(
+          "this 'for' reads '")
+          << cast<SetOp>(sets).getFieldAttr().getValue() << "' of '"
+          << ref.getComponent().getValue()
+          << "' of other entities, which the 'for' around sets of its own: "
+          << "some would be set already and some not. Bind it 'old' ('name: "
+          << "old " << ref.getComponent().getValue()
+          << "') to read what it was before that 'for' started (a copy is "
+          << "kept for it), or set another field and copy it over after";
+      diag.attachNote(sets->getLoc()) << "set here";
+      return diag;
     }
   }
   unsigned given = refs + (getEntity() ? 1 : 0);
@@ -1756,12 +1776,60 @@ LogicalResult EachOp::verify() {
   }
   LogicalResult result = success();
   getBody().walk([&](Operation *op) {
-    if (succeeded(result) &&
-        isa<ApplyOp, AccumulateOp, CombineOp, ConnectOp, SpawnOp, DespawnOp,
-            AddOp, RemoveOp>(op))
-      result = op->emitOpError("cannot be in an 'ent.each': its body reads "
-                               "other entities, and what it finds is acted "
-                               "on after it");
+    if (failed(result))
+      return;
+    if (isa<CombineOp, ConnectOp, SpawnOp, DespawnOp, AddOp, RemoveOp>(op)) {
+      result = op->emitOpError("cannot be in an 'ent.each': what entities "
+                               "there are, and what is connected, changes "
+                               "after it");
+      return;
+    }
+    // What is sent or accumulated here is combined right away, once for
+    // each entity of the loop: nothing else in the query may see it.
+    Operation *seen = nullptr;
+    if (auto apply = dyn_cast<ApplyOp>(op)) {
+      query.walk([&](Operation *other) {
+        auto touches = [&](Value ref, StringAttr field) {
+          return cast<RefType>(ref.getType()).getComponent() ==
+                     apply.getComponentAttr() &&
+                 field == apply.getFieldAttr();
+        };
+        if (auto get = dyn_cast<GetOp>(other)) {
+          if (touches(get.getRef(), get.getFieldAttr()))
+            seen = other;
+        } else if (auto set = dyn_cast<SetOp>(other)) {
+          if (touches(set.getRef(), set.getFieldAttr()))
+            seen = other;
+        } else if (auto lookup = dyn_cast<LookupOp>(other)) {
+          if (lookup.getComponentAttr() == apply.getComponentAttr() &&
+              lookup.getFieldAttr() == apply.getFieldAttr())
+            seen = other;
+        }
+      });
+      if (seen) {
+        InFlightDiagnostic diag = op->emitError(
+            "what a 'for' inside a 'for' sends to a field lands as it "
+            "goes, so the 'for' around does not read or set that field ('")
+            << apply.getFieldAttr().getValue() << "' of '"
+            << apply.getComponentAttr().getValue() << "') too";
+        diag.attachNote(seen->getLoc()) << "it does here";
+        result = diag;
+      }
+    } else if (auto accumulate = dyn_cast<AccumulateOp>(op)) {
+      query.walk([&](ReadOp read) {
+        if (read.getResourceAttr() == accumulate.getResourceAttr() &&
+            read.getFieldAttr() == accumulate.getFieldAttr())
+          seen = read;
+      });
+      if (seen) {
+        InFlightDiagnostic diag = op->emitError(
+            "what a 'for' inside a 'for' accumulates lands as it goes, so "
+            "the 'for' around does not read that unique ('")
+            << accumulate.getResourceAttr().getValue() << "') too";
+        diag.attachNote(seen->getLoc()) << "it does here";
+        result = diag;
+      }
+    }
   });
   return result;
 }

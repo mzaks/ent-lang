@@ -1,0 +1,41 @@
+// Prefabs, and an `if` in what is spawned (prefabs.test).
+import console
+import text
+component Box { w: f32, h: f32 }
+component Words { said: text, size: f32 }
+component Colour { rgb: i32 }
+tag Gold
+tag Lives
+tag Wide
+unique Done: bool
+default_capacity 32
+
+prefab sized(w: f32) { Box { w: w, h: 10.0 } }
+prefab label(words: text, big: bool) {
+  sized(if big { 200.0 } else { 100.0 }),
+  Words { said: words, size: if big { 30.0 } else { 20.0 } },
+  if big { Wide }
+}
+
+world {
+  for i in 0..4 {
+    spawn {
+      label("label {i}", i == 2),
+      if i == 0 { Gold } else if i == 1 { Lives, Colour { rgb: 0xff0000 } }
+      Colour { rgb: i }
+    }
+  }
+  // (Listed again: the later one's.)
+  spawn { label("last", false), Box { w: 1.0, h: 2.0 } }
+}
+
+system show() {
+  for e, b: Box, w: Words, optional c: Colour {
+    var rgb = -1
+    if let v = c.rgb { rgb = v }
+    put("{w.said as text[20]}: {b.w} x {b.h}, size {w.size}, colour {rgb}, gold {e.has(Gold)} lives {e.has(Lives)} wide {e.has(Wide)}")
+  }
+  Done = true
+}
+schedule f() { show() }
+main { loop { f() } until Done }

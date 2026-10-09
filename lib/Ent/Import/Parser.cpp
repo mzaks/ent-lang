@@ -2439,6 +2439,7 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
                      "edges");
   struct Bound {
     std::string name, component;
+    bool old;
   };
   SmallVector<Bound> bindings;
   std::string entity;
@@ -2474,23 +2475,17 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
       return error("a 'for' inside a 'for' reads its entities; what is to "
                    "change of one is sent to it after the loop "
                    "('Component(entity).field += value')");
+    // `old`: as it was before the `for` around started.
+    bool old = false;
+    if (token.isKeyword("old") && peek().is(Token::Identifier)) {
+      old = true;
+      advance();
+    }
     llvm::SMLoc componentAt = token.loc;
     FailureOr<std::string> component = identifier("a component");
     if (failed(component) || failed(known(componentAt, *component)))
       return failure();
-    // What the outer `for` changes of its own entity, this one would
-    // read of others: changed or not, as the outer one got to them.
-    for (auto &scope : scopes)
-      for (auto &entry : scope)
-        if (entry.second.kind == Variable::Ref && entry.second.mut &&
-            entry.second.component == *component)
-          return error(componentAt,
-                       "'" + *component + "' of other entities is not read "
-                       "where the 'for' around changes its own ('" +
-                           entry.first() + "' is 'mut'): some would be "
-                       "changed already and some not. Keep what is read of "
-                       "others in a component of its own");
-    bindings.push_back({*name, *component});
+    bindings.push_back({*name, *component, old});
     if (!consumeIf(Token::Comma))
       break;
   }
@@ -2534,6 +2529,12 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
     state.addAttribute("without", builder.getArrayAttr(without));
   if (!entity.empty())
     state.addAttribute("entity", builder.getUnitAttr());
+  SmallVector<int64_t> old;
+  for (auto [number, bound] : llvm::enumerate(bindings))
+    if (bound.old)
+      old.push_back(number);
+  if (!old.empty())
+    state.addAttribute("old", builder.getI64ArrayAttr(old));
   auto *block = new Block();
   state.addRegion()->push_back(block);
   for (const Bound &bound : bindings)
@@ -4139,10 +4140,6 @@ LogicalResult Parser::parseNameStatement() {
         return failure();
       v = *negated;
     }
-    if (inEach)
-      return error(at, "sending a value to another entity is done after the 'for' that goes through "
-                       "other entities, not in it: that one only reads "
-                       "them");
     ApplyOp::create(builder, loc(at), *entity, symbol(name),
                     builder.getStringAttr(*field), builder.getStringAttr(rule),
                     v);
@@ -4199,10 +4196,6 @@ LogicalResult Parser::parseNameStatement() {
         return failure();
       v = *negated;
     }
-    if (inEach)
-      return error(at, "sending a value to another entity is done after the 'for' that goes through "
-                       "other entities, not in it: that one only reads "
-                       "them");
     ApplyOp::create(builder, loc(at), variable->value,
                     symbol(variable->component),
                     builder.getStringAttr(*field), builder.getStringAttr(rule),
@@ -4274,10 +4267,6 @@ LogicalResult Parser::parseNameStatement() {
           return failure();
         v = *negated;
       }
-      if (inEach)
-        return error(at, "setting or accumulating into a unique is done after the 'for' that goes through "
-                         "other entities, not in it: that one only reads "
-                         "them");
       AccumulateOp::create(builder, loc(at), symbol(name),
                            builder.getStringAttr(field),
                            builder.getStringAttr(rule), v);

@@ -1,0 +1,32 @@
+// No entity, and whole numbers of different sizes (none_and_wider.test).
+import console
+component Aim { target: entity }
+component Life { hp: i32 }
+unique Big: i64
+unique Small: i32
+unique Done: bool
+default_capacity 8
+fn twice(x: i64) -> i64 { x * 2 }
+world {
+  let a = spawn { Life { hp: 5 } }
+  spawn { Aim { target: a } }
+  spawn { Aim { target: none } }
+  Big = 5000000000
+  Small = 7
+}
+system s() {
+  let sum = Big + Small
+  let t = twice(Small)
+  var wide: i64 = Small
+  wide += 1
+  put("{sum} {t} {wide} {Small < Big} {'a' + 1}")
+  for a: Aim {
+    let nobody = a.target == none
+    put("aims at nobody: {nobody}")
+    Life(a.target).hp -= 1
+  }
+  for l: Life { put("hp {l.hp}") }
+  Done = true
+}
+schedule f() { s() }
+main { loop { f() } until Done }

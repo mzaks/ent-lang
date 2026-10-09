@@ -1,0 +1,25 @@
+// A table is a list of rows that never changes: with fields, or of one
+// type; read by `name[i].field` and `name[i]` (nought where there is no
+// such row), counted with `len`, in systems and fns. Numbers, bools,
+// cases of enums and texts.
+// RUN: %ent run %S/Inputs/tables.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tables.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/tables.ent -I %S/../../devices -o %t.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
+// RUN: ent-opt %t.mlir | ent-opt | FileCheck %s --check-prefix=IR
+
+// IR: "ent.table"() {{.*}}field_names = ["x", "y"], field_types = [f32, f32], sym_name = "road"
+// IR: ent.table.at @road "x"[%{{.*}} : i32] : f32
+
+// CHECK:      4 points, 16.0 long; 5 primes
+// CHECK-NEXT: prime -1: 0
+// CHECK-NEXT: prime 0: 2
+// CHECK-NEXT: prime 1: 3
+// CHECK-NEXT: prime 2: 5
+// CHECK-NEXT: prime 3: 7
+// CHECK-NEXT: prime 4: 11
+// CHECK-NEXT: prime 5: 0
+// CHECK-NEXT: tower 0: arrow 40 false false
+// CHECK-NEXT: tower 1: frost 60 true true
+// CHECK-NEXT: tower 2:  0 false false

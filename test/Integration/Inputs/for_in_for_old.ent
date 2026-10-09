@@ -1,0 +1,22 @@
+// A `for` inside a `for` that reads what the outer one sets (for_in_for_old.test).
+import console
+// Each one moves a tenth of the way to the middle of all the others.
+component Spot { x: f32, weight: f32 }
+unique Round: i32
+default_capacity 16
+world { for i in 0..5 { spawn { Spot { x: (i * i) as f32, weight: 1.0 } } } }
+system gather() {
+  Round += 1
+  for me, s: mut Spot {
+    var sum = 0.0
+    var n = 0.0
+    for o, other: old Spot where o != me {
+      sum += other.x * other.weight
+      n += other.weight
+    }
+    if n > 0.0 { s.x += (sum / n - s.x) * 0.1 }
+  }
+  for s: Spot { put("{Round}: {s.x}") }
+}
+schedule f() { gather() }
+main { loop { f() } until Round == 2 }

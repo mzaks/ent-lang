@@ -8,6 +8,8 @@
 //   import layout_window
 //   schedule frame() { begin()  ...  ui()  present() }
 //
+// (or `ui_base` and `ui_top`, with its own drawing between them)
+//
 // (examples/layout_demo.ent is one.)
 import window
 import layout
@@ -784,9 +786,12 @@ system reach() {
 
 // A box is drawn after the one it is in, and so on top of it, and all
 // that is in a box before the next box: depth first. What floats is a
-// layer above, drawn after all of the layer below.
-system draw() {
-  for z in 0..8 {
+// layer above, drawn after all of the layer below. (The layers from
+// `from` up to, not with, `to`: all eight of them, or the boxes that do
+// not float first and what floats later, with what a program draws
+// itself in between; see `ui_base` and `ui_top`.)
+system draw(from: i32, to: i32) {
+  for z in from..to {
     // (Not what is outside the window.)
     // (Nor what the boxes it is in clip away: each within what shows of
     // it.)
@@ -1164,6 +1169,36 @@ schedule ui() {
   wrap()
   layout_heights()
   settle()
-  draw()
+  draw(0, 8)
+  inspect()
+}
+
+// The same in two halves, for a program that draws something of its own
+// into a box (a board, a map, a chart: what a `Custom` box's proc cannot
+// draw, since a proc sees nothing of the world). `ui_base` is all of `ui`
+// up to the boxes that do not float, drawn; then the program's systems
+// draw, into the rectangle of a box of theirs (its `Box`, which they may
+// `clip` to); then `ui_top` draws what floats, over that, and the
+// inspector:
+//
+//   schedule frame() { begin()  ui_base()  draw_board()  ui_top()  present() }
+schedule ui_base() {
+  pointer()
+  scroll()
+  measure()
+  layout_widths()
+  wrap()
+  layout_heights()
+  point()
+  animate()
+  reach()
+  layout_widths()
+  wrap()
+  layout_heights()
+  settle()
+  draw(0, 1)
+}
+schedule ui_top() {
+  draw(1, 8)
   inspect()
 }

@@ -1,0 +1,28 @@
+// Sending and accumulating in a `for` inside a `for` (for_in_for_sends.test).
+import console
+component Bomb { x: f32, r: f32, harm: f32 }
+component At { x: f32 }
+component Health { hp: f32 }
+unique Hits: i32
+unique Round: i32
+default_capacity 64
+world {
+  spawn { Bomb { x: 5.0, r: 2.5, harm: 1.5 } }
+  spawn { Bomb { x: 8.0, r: 1.5, harm: 4.0 } }
+  for i in 0..10 { spawn { At { x: i as f32 }, Health { hp: 10.0 } } }
+}
+system blast() {
+  Round += 1
+  Hits = 0
+  // Each bomb hurts every one near it: sent from inside the loop.
+  for b: Bomb {
+    for e, a: At where a.x >= b.x - b.r && a.x <= b.x + b.r {
+      Health(e).hp -= b.harm
+      Hits += 1
+    }
+  }
+  put("{Round}: {Hits} hits")
+  for a: At, h: Health { put("  {a.x}: {h.hp}") }
+}
+schedule f() { blast() }
+main { loop { f() } until Round == 2 }

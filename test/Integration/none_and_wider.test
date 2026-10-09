@@ -1,0 +1,17 @@
+// `none` where an entity is expected is no entity: the same as itself
+// and as no other, and what is sent to it goes nowhere. A whole number
+// goes where one of more bits is expected as it is, and two of
+// different sizes are computed with as the bigger.
+// RUN: %ent run %S/Inputs/none_and_wider.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/none_and_wider.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/none_and_wider.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+
+// IR-DAG: ent.nobody
+// IR-DAG: arith.extsi %{{.*}} : i32 to i64
+
+// CHECK:      5000000007 14 8 true 98
+// CHECK-NEXT: aims at nobody: false
+// CHECK-NEXT: aims at nobody: true
+// CHECK-NEXT: hp 4

@@ -1,0 +1,20 @@
+// A prefab is a named list of what a spawn lists, with parameters,
+// written out where a spawn or another prefab names it; an entry of such
+// a list may be an `if` that picks components; a component listed again
+// takes the later values. The archetype of each way through is known
+// when the program is compiled: a spawn for each.
+// RUN: %ent run %S/Inputs/prefabs.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/prefabs.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/prefabs.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+
+// IR-DAG: ent.spawn (@Box, @Words, @Wide, @Gold, @Colour)
+// IR-DAG: ent.spawn (@Box, @Words, @Lives, @Colour)
+// IR-DAG: ent.spawn (@Box, @Words, @Colour)
+
+// CHECK:      label 2: 200.0 x 10.0, size 30.0, colour 2, gold false lives false wide true
+// CHECK-NEXT: label 0: 100.0 x 10.0, size 20.0, colour 0, gold true lives false wide false
+// CHECK-NEXT: label 1: 100.0 x 10.0, size 20.0, colour 1, gold false lives true wide false
+// CHECK-NEXT: label 3: 100.0 x 10.0, size 20.0, colour 3, gold false lives false wide false
+// CHECK-NEXT: last: 1.0 x 2.0, size 20.0, colour -1, gold false lives false wide false

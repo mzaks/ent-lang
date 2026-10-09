@@ -1,0 +1,31 @@
+// Tables: rows that are the program's own (tables.test).
+import console
+enum Kind { Arrow, Cannon, Frost }
+table road { x: f32, y: f32 } = [
+  { x: -1.0, y: 2.0 }, { x: 4.0, y: 2.0 },
+  { x: 4.0,  y: 8.0 }, { y: 8.0, x: 9.0 }
+]
+table primes: i32 = [2, 3, 5, 7, 11]
+table towers { kind: Kind, name: text[14], cost: i32, slow: bool } = [
+  { kind: Kind.Arrow, name: "arrow", cost: 40, slow: false },
+  { kind: Kind.Frost, name: "frost", cost: 60, slow: true }
+]
+unique Done: bool
+fn length() -> f32 {
+  var all = 0.0
+  let last = len(road) - 1
+  for i in 0..last {
+    all += max(road[i + 1].x - road[i].x, road[i + 1].y - road[i].y)
+  }
+  all
+}
+system s() {
+  put("{len(road)} points, {length()} long; {len(primes)} primes")
+  for i in -1..6 { put("prime {i}: {primes[i]}") }
+  for i in 0..3 {
+    put("tower {i}: {towers[i].name} {towers[i].cost} {towers[i].slow} {towers[i].kind == Kind.Frost}")
+  }
+  Done = true
+}
+schedule f() { s() }
+main { loop { f() } until Done }

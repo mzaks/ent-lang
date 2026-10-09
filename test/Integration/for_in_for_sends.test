@@ -1,0 +1,29 @@
+// What a `for` inside a `for` sends to the entities it finds, and what it
+// accumulates into a unique, lands as it goes: once for each of its
+// entities, in the order it visits them.
+// RUN: %ent run %S/Inputs/for_in_for_sends.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/for_in_for_sends.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK:      1: 8 hits
+// CHECK-NEXT:   0.0: 10.0
+// CHECK-NEXT:   1.0: 10.0
+// CHECK-NEXT:   2.0: 10.0
+// CHECK-NEXT:   3.0: 8.5
+// CHECK-NEXT:   4.0: 8.5
+// CHECK-NEXT:   5.0: 8.5
+// CHECK-NEXT:   6.0: 8.5
+// CHECK-NEXT:   7.0: 4.5
+// CHECK-NEXT:   8.0: 6.0
+// CHECK-NEXT:   9.0: 6.0
+// CHECK-NEXT: 2: 8 hits
+// CHECK-NEXT:   0.0: 10.0
+// CHECK-NEXT:   1.0: 10.0
+// CHECK-NEXT:   2.0: 10.0
+// CHECK-NEXT:   3.0: 7.0
+// CHECK-NEXT:   4.0: 7.0
+// CHECK-NEXT:   5.0: 7.0
+// CHECK-NEXT:   6.0: 7.0
+// CHECK-NEXT:   7.0: -1.0
+// CHECK-NEXT:   8.0: 2.0
+// CHECK-NEXT:   9.0: 2.0

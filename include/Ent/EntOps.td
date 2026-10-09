@@ -915,7 +915,7 @@ def Ent_TableAtOp : Ent_Op<"table.at", [
   let summary = "A value of a row of a table";
   let description = [{
     ```mlir
-    %x = ent.table.at @road "x" [%i : i32] : f32
+    %x = ent.table.at @road "x"[%i : i32] : f32
     ```
     What row `%i` has in that field; nought (the first case, an empty
     text) where the table has no such row.
@@ -1017,14 +1017,20 @@ def Ent_EachOp : Ent_Op<"each", [
     run before yielded, and what the last run yields is the op's result.
 
     The body only reads those entities (`ent.get` through the refs, which
-    are not `mut`), and never a component the enclosing query writes: what
-    the query changes of other entities it sends (`ent.apply`), after the
-    loop. It may read and write what the enclosing query binds. Nothing in
-    it changes what entities there are, sends or accumulates.
+    are not `mut`), and never a field the enclosing query sets of its own
+    entities, of which some would be set already and some not; unless the
+    ref is one of `old` (the numbers of such refs), which reads what the
+    field was when the query started, of which a copy is kept for as long
+    as the query runs. It may read and write what the enclosing query
+    binds. What it sends (`ent.apply`) or accumulates is combined right
+    away, once for each of its entities, so nothing else in the query
+    reads or sets that field. Nothing in it changes what entities there
+    are.
   }];
   let arguments = (ins Variadic<AnyType>:$inits,
                        OptionalAttr<ArrayAttr>:$with,
-                       OptionalAttr<ArrayAttr>:$without, UnitAttr:$entity);
+                       OptionalAttr<ArrayAttr>:$without, UnitAttr:$entity,
+                       OptionalAttr<I64ArrayAttr>:$old);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$body);
   let hasVerifier = 1;
@@ -1042,6 +1048,15 @@ def Ent_EachOp : Ent_Op<"each", [
     /// The components an entity has to have, and those it must not.
     ::llvm::SmallVector<::mlir::FlatSymbolRefAttr> getRequired();
     ::llvm::SmallVector<::mlir::FlatSymbolRefAttr> getExcluded();
+    /// Whether the ref of that number reads what was before the query.
+    bool isOld(unsigned ref) {
+      if (std::optional<::mlir::ArrayAttr> old = getOld())
+        for (::mlir::Attribute number : *old)
+          if (::llvm::cast<::mlir::IntegerAttr>(number).getInt() ==
+              int64_t(ref))
+            return true;
+      return false;
+    }
   }];
 }
 

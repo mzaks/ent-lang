@@ -1471,9 +1471,18 @@ static bool readsUniformly(Type stored) {
 // nothing, and not known beforehand.
 static bool uniformBodies = false;
 
+/// Marks an `ent.apply` or `ent.accumulate` that was in an `ent.each`: it
+/// runs once for every entity of that loop, not once for the entity the
+/// query visits, so its value has no place in a buffer of one for each
+/// row and is combined where it is. (Such a query never runs in
+/// parallel, and nothing else in it touches the field: see EachOp.)
+static constexpr llvm::StringLiteral kInEachAttr = "ent.in_each";
+
 static bool appliesDirectly(Operation *apply, bool directApplies) {
-  return directApplies && isa<ApplyOp, AccumulateOp>(apply) &&
-         apply->hasAttr(kUnobservedAttr);
+  if (!isa<ApplyOp, AccumulateOp>(apply))
+    return false;
+  return apply->hasAttr(kInEachAttr) ||
+         (directApplies && apply->hasAttr(kUnobservedAttr));
 }
 
 /// What recordPending does, for a query that does not visit rows in their
@@ -10858,6 +10867,51 @@ static void lowerEach(IRRewriter &rewriter, EachOp each,
   SmallVector<Type> types(each.getResultTypes());
   SmallVector<Value> carried(each.getInits());
   Value zero, one;
+  // What is read as it was before the query started (`old`): a copy of
+  // each such column, made before the query and given back after it, for
+  // as many rows as there were then.
+  auto query = each->getParentOfType<QueryOp>();
+  std::map<std::tuple<unsigned, const void *, const void *>, Value> before;
+  llvm::DenseMap<unsigned, Value> rowsBefore;
+  for (unsigned ref = 0; ref < refs; ++ref) {
+    if (!each.isOld(ref))
+      continue;
+    BlockArgument arg = body.getArgument(ref);
+    StringAttr component =
+        cast<RefType>(arg.getType()).getComponent().getAttr();
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (!matches(each, ArchetypeOp(archetype.op)))
+        continue;
+      for (Operation *user : arg.getUsers()) {
+        auto get = cast<GetOp>(user);
+        Value &copy = before[{archetype.index, component.getAsOpaquePointer(),
+                              get.getFieldAttr().getAsOpaquePointer()}];
+        if (copy)
+          continue;
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPoint(query);
+        Value &count = rowsBefore[archetype.index];
+        if (!count)
+          count = world.count(loc, archetype);
+        Value column = world.column(archetype, component, get.getFieldAttr());
+        Type stored = cast<MemRefType>(column.getType()).getElementType();
+        copy = memref::AllocOp::create(
+            rewriter, loc, MemRefType::get({ShapedType::kDynamic}, stored),
+            ValueRange{count});
+        auto rows = scf::ForOp::create(
+            rewriter, loc, arith::ConstantIndexOp::create(rewriter, loc, 0),
+            count, arith::ConstantIndexOp::create(rewriter, loc, 1));
+        rewriter.setInsertionPointToStart(rows.getBody());
+        memref::StoreOp::create(
+            rewriter, loc,
+            memref::LoadOp::create(rewriter, loc, column,
+                                   ValueRange{rows.getInductionVar()}),
+            copy, ValueRange{rows.getInductionVar()});
+        rewriter.setInsertionPointAfter(query);
+        memref::DeallocOp::create(rewriter, loc, copy);
+      }
+    }
+  }
   rewriter.setInsertionPoint(each);
   for (const WorldArchetype &archetype : layout.archetypes) {
     ArchetypeOp archetypeOp = archetype.op;
@@ -10867,8 +10921,12 @@ static void lowerEach(IRRewriter &rewriter, EachOp each,
       zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
       one = arith::ConstantIndexOp::create(rewriter, loc, 1);
     }
-    auto rows = scf::ForOp::create(rewriter, loc, zero,
-                                   world.count(loc, archetype), one, carried);
+    // (Of what is read as it was before: the rows there were then.)
+    Value count = rowsBefore.lookup(archetype.index);
+    if (!count)
+      count = world.count(loc, archetype);
+    auto rows =
+        scf::ForOp::create(rewriter, loc, zero, count, one, carried);
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(rows.getBody());
     Value row = rows.getInductionVar();
@@ -10917,6 +10975,12 @@ static void lowerEach(IRRewriter &rewriter, EachOp each,
     SmallVector<Operation *> copies;
     for (Operation &op : body.without_terminator())
       copies.push_back(rewriter.clone(op, mapping));
+    // (What it sends and accumulates, once for each of its entities.)
+    for (Operation *copy : copies)
+      copy->walk([&](Operation *op) {
+        if (isa<ApplyOp, AccumulateOp>(op))
+          op->setAttr(kInEachAttr, rewriter.getUnitAttr());
+      });
     SmallVector<Value> next;
     for (Value value : body.getTerminator()->getOperands())
       next.push_back(mapping.lookupOrDefault(value));
@@ -10932,9 +10996,14 @@ static void lowerEach(IRRewriter &rewriter, EachOp each,
       rewriter.setInsertionPoint(get);
       StringAttr component =
           cast<RefType>(get.getRef().getType()).getComponent().getAttr();
+      auto copy = before.find({archetype.index, component.getAsOpaquePointer(),
+                               get.getFieldAttr().getAsOpaquePointer()});
       Value stored = memref::LoadOp::create(
           rewriter, get.getLoc(),
-          world.column(archetype, component, get.getFieldAttr()),
+          copy != before.end() &&
+                  each.isOld(cast<BlockArgument>(get.getRef()).getArgNumber())
+              ? copy->second
+              : world.column(archetype, component, get.getFieldAttr()),
           ValueRange{row});
       rewriter.replaceOp(
           get, world.fromStorage(get.getLoc(), stored, get.getType()));
@@ -11094,8 +11163,17 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     // Directly combined accumulates: their resource cells in registers.
     if (auto loop = dyn_cast<scf::ForOp>(loops); loop && sequentialOnly) {
       SmallVector<Value> cells;
+      // (Not one that a loop in the body accumulates into: that is not
+      // followed through the loop.)
+      llvm::DenseSet<std::pair<Attribute, Attribute>> looped;
       for (AccumulateOp accumulate : accumulates)
-        if (appliesDirectly(accumulate, true))
+        if (accumulate->hasAttr(kInEachAttr))
+          looped.insert({accumulate.getResourceAttr(),
+                         accumulate.getFieldAttr()});
+      for (AccumulateOp accumulate : accumulates)
+        if (appliesDirectly(accumulate, true) &&
+            !looped.contains({accumulate.getResourceAttr(),
+                              accumulate.getFieldAttr()}))
           cells.push_back(
               world.resourceField(accumulate.getResourceAttr().getAttr(),
                                   accumulate.getFieldAttr()));
