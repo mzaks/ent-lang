@@ -334,6 +334,7 @@ public:
         functions([this](StringRef name) { return resolve(name); }),
         enums([this](StringRef name) { return resolve(name); }),
         tables([this](StringRef name) { return resolve(name); }),
+        buffers([this](StringRef name) { return resolve(name); }),
         assetFiles([this](StringRef name) { return resolve(name); }),
         prefabs([this](StringRef name) { return resolve(name); }) {
     advance();
@@ -471,6 +472,11 @@ private:
     return success();
   }
   LogicalResult parseComponent(bool tag);
+  LogicalResult parseBuffer();
+  LogicalResult parseBufferStatement(const std::string &name, llvm::SMLoc at);
+  /// Whether a type being parsed may be a buffer: the parameter of an
+  /// extern proc.
+  bool handsBuffers = false;
   LogicalResult parseUnique();
   LogicalResult parseArchetype();
   LogicalResult parseSystem(bool isExtern);
@@ -764,6 +770,8 @@ private:
   /// Tables: their fields (one without a name for a plain list), and how
   /// many rows each has.
   Declared<Record> tables;
+  /// The buffers, by their fields.
+  Declared<Record> buffers;
   /// The files that have a name (`asset name = "file"`): as the program
   /// writes them.
   Declared<std::string> assetFiles;
@@ -870,6 +878,10 @@ LogicalResult Parser::parseDeclarations() {
       result = parseComponent(/*tag=*/true);
     else if (consumeKeyword("unique"))
       result = parseUnique();
+    else if (token.isKeyword("buffer") && peek().is(Token::Identifier)) {
+      advance();
+      result = parseBuffer();
+    }
     else if (consumeKeyword("relation"))
       result = parseRelation();
     else if (consumeKeyword("archetype"))
@@ -937,10 +949,12 @@ LogicalResult Parser::parseDeclarations() {
       Operation *declared =
           SymbolTable::lookupSymbolIn(module,
                                       symbol(*name).getAttr());
-      if (!declared || !isa<ComponentOp, RelationOp, ArchetypeOp>(declared))
-        return error(nameAt, "'" + *name + "' is no component, relation or "
-                             "archetype declared before this: 'capacity' "
-                             "gives one of those another capacity");
+      if (!declared ||
+          !isa<ComponentOp, RelationOp, ArchetypeOp, BufferOp>(declared))
+        return error(nameAt, "'" + *name + "' is no component, relation, "
+                             "archetype or buffer declared before this: "
+                             "'capacity' gives one of those another "
+                             "capacity");
       declared->setAttr("capacity", builder.getI64IntegerAttr(*capacity));
     } else if (token.isKeyword("prefab")) {
       result = parsePrefab();
@@ -1280,6 +1294,13 @@ FailureOr<Type> Parser::parseType() {
   }
   if (!type && enums.count(*name))
     return Type(EnumType::get(context, symbol(*name)));
+  // A buffer, where an extern proc says what it is handed.
+  if (!type && buffers.count(*name)) {
+    if (!handsBuffers)
+      return error(at, "'" + *name + "' is a buffer: a parameter of an "
+                       "extern proc may be one, and nothing else");
+    return Type(BufferType::get(context, symbol(*name)));
+  }
   if (!type)
     return error(at, "unknown type '" + *name +
                          "'; expected f32, f64, bool, i8, i16, i32, i64, "
@@ -2538,6 +2559,111 @@ LogicalResult Parser::parseFields(Record &record) {
   return expect(Token::RBrace, "'}'");
 }
 
+// buffer Name { fields } capacity N
+LogicalResult Parser::parseBuffer() {
+  llvm::SMLoc at = token.loc;
+  FailureOr<std::string> name = identifier("a buffer name");
+  if (failed(name))
+    return failure();
+  Record record;
+  llvm::SMLoc fieldsAt = token.loc;
+  if (failed(parseFields(record)))
+    return failure();
+  if (record.fields.empty())
+    return error(fieldsAt, "a buffer's rows have fields");
+  for (auto &[field, type] : record.fields)
+    if (!isa<IntegerType, FloatType, EnumType>(type))
+      return error(fieldsAt, "'" + field + "': a buffer's fields are "
+                             "numbers, bools and enums");
+  if (!token.isKeyword("capacity"))
+    return error(at, "a buffer says how many rows it holds at most: 'capacity "
+                 "N' (a program gives a module's another with 'capacity " +
+                 *name + " N')");
+  advance();
+  FailureOr<int64_t> capacity = integer("a capacity");
+  if (failed(capacity))
+    return failure();
+  if (*capacity <= 0)
+    return error(at, "a capacity is at least 1");
+  SmallVector<Attribute> names, types;
+  for (auto &[field, type] : record.fields) {
+    names.push_back(builder.getStringAttr(field));
+    types.push_back(TypeAttr::get(type));
+  }
+  BufferOp::create(builder, loc(at), declareSymbol(at, *name),
+                   builder.getArrayAttr(names), builder.getArrayAttr(types),
+                   builder.getI64IntegerAttr(*capacity));
+  buffers[*name] = std::move(record);
+  return success();
+}
+
+// Name += { field: value, ... } / Name = []: a row more, or none.
+LogicalResult Parser::parseBufferStatement(const std::string &name,
+                                           llvm::SMLoc at) {
+  const Record &buffer = buffers[name];
+  if (inFunction)
+    return error(at, "'" + name + "' is a buffer, which a system fills: a "
+                     "fn or proc only computes with what it is given");
+  if (consumeIf(Token::Assign)) {
+    if (failed(expect(Token::LBracket, "'[]': a buffer is assigned no rows")) ||
+        failed(expect(Token::RBracket, "']': a buffer is assigned no rows, "
+                                       "and given rows with '+='")))
+      return failure();
+    if (inQuery)
+      return error(at, "a buffer is emptied outside a 'for': every entity "
+                       "would empty it");
+    ClearOp::create(builder, loc(at), symbol(name));
+    return success();
+  }
+  if (!consumeIf(Token::PlusAssign))
+    return error(at, "'" + name + "' is a buffer: '" + name + " += { field: "
+                     "value, .. }' gives it a row, '" + name + " = []' "
+                     "empties it");
+  if (inEdges || inEach)
+    return error(at, "a row is given to a buffer once for each entity of a "
+                     "'for', not in a loop over others in it");
+  llvm::SMLoc rowAt = token.loc;
+  if (failed(expect(Token::LBrace, "'{': a row, '{ field: value, .. }'")))
+    return failure();
+  SmallVector<ExprPtr> given(buffer.fields.size());
+  while (!token.is(Token::RBrace)) {
+    llvm::SMLoc fieldAt = token.loc;
+    FailureOr<std::string> field = identifier("a field");
+    if (failed(field) || failed(expect(Token::Colon, "':'")))
+      return failure();
+    size_t place = 0;
+    while (place < buffer.fields.size() && buffer.fields[place].first != *field)
+      ++place;
+    if (place == buffer.fields.size())
+      return error(fieldAt,
+                   "buffer '" + name + "' has no field '" + *field + "'");
+    if (given[place])
+      return error(fieldAt, "'" + *field + "' is given twice");
+    FailureOr<ExprPtr> value = parseExpr();
+    if (failed(value))
+      return failure();
+    given[place] = std::move(*value);
+    if (!consumeIf(Token::Comma))
+      break;
+  }
+  if (failed(expect(Token::RBrace, "'}'")))
+    return failure();
+  SmallVector<mlir::Value> values;
+  for (auto [value, field] : llvm::zip(given, buffer.fields)) {
+    if (!value)
+      return error(rowAt, "the row has no '" + field.first +
+                              "': a row gives every field of '" + name + "'");
+    FailureOr<mlir::Value> emitted = emit(*value, field.second);
+    if (failed(emitted))
+      return failure();
+    if (emitted->getType() != field.second)
+      return mismatch(value->loc, emitted->getType(), field.second);
+    values.push_back(*emitted);
+  }
+  AppendOp::create(builder, loc(at), symbol(name), values);
+  return success();
+}
+
 // component Name { fields } [apart] [capacity N] / tag Name [apart]
 // [capacity N]
 LogicalResult Parser::parseComponent(bool tag) {
@@ -2867,6 +2993,7 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     FailureOr<std::string> param = identifier("a parameter name");
     if (failed(param) || failed(expect(Token::Colon, "':'")))
       return failure();
+    llvm::SaveAndRestore<bool> hands(handsBuffers, isExtern && proc);
     FailureOr<Type> type = parseType();
     if (failed(type))
       return failure();
@@ -5486,6 +5613,8 @@ LogicalResult Parser::parseNameStatement() {
   if (!variable && unique != uniques.end() && inFunction)
     return error(at, "a fn only computes; it cannot write unique '" + name +
                          "'. Give the value back and let a system write it");
+  if (!variable && buffers.count(name))
+    return parseBufferStatement(name, at);
   if (!variable && unique != uniques.end()) {
     std::string field = "value";
     if (consumeIf(Token::Dot)) {
@@ -5851,7 +5980,8 @@ FailureOr<ExprPtr> Parser::parseUnary() {
     if (failed(index) || failed(expect(Token::RBracket, "']'")))
       return failure();
     if ((*primary)->kind == Expr::Name && !lookup((*primary)->name) &&
-        tables.count((*primary)->name)) {
+        (tables.count((*primary)->name) ||
+         buffers.count((*primary)->name))) {
       auto node = std::make_unique<Expr>();
       node->kind = Expr::Row;
       node->loc = at;
@@ -6487,6 +6617,8 @@ Type Parser::typeOf(const Expr &expr) {
             return type;
       return {};
     }
+    if (buffers.count(expr.name))
+      return buffers[expr.name].fieldType(expr.field);
     auto table = tables.find(expr.name);
     return table == tables.end() ? Type()
                                  : table->second.fieldType(expr.field);
@@ -6675,6 +6807,23 @@ FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
                                Twine(expr.operands.size()));
   SmallVector<mlir::Value> args;
   for (auto [operand, type] : llvm::zip(expr.operands, function.params)) {
+    // A buffer is handed by its name.
+    if (auto handed = dyn_cast<BufferType>(type)) {
+      if (operand->kind != Expr::Name || lookup(operand->name) ||
+          !buffers.count(operand->name) ||
+          symbol(operand->name) != handed.getName())
+        return error(operand->loc,
+                     "'" + expr.name + "' is handed the buffer '" +
+                         handed.getName().getValue() + "' here, by its name");
+      if (inQuery)
+        return error(operand->loc, "a buffer is handed over outside a "
+                                   "'for': not once for each entity");
+      args.push_back(
+          BufferOfOp::create(builder, loc(operand->loc), type,
+                             symbol(operand->name))
+              .getResult());
+      continue;
+    }
     FailureOr<mlir::Value> arg = emit(*operand, type);
     if (failed(arg))
       return failure();
@@ -6842,6 +6991,31 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return error(expr.loc, "only a row of a table has fields");
       return emitRowThrough(expr, *shape, *expr.operands[1],
                             *expr.operands[0], expr.field);
+    }
+    if (buffers.count(expr.name)) {
+      Type type = buffers[expr.name].fieldType(expr.field);
+      if (!type)
+        return error(expr.loc,
+                     expr.field.empty()
+                         ? "a row of buffer '" + expr.name +
+                               "' is read by its fields: '" + expr.name +
+                               "[i].field'"
+                         : "buffer '" + expr.name + "' has no field '" +
+                               expr.field + "'");
+      if (inFunction)
+        return error(expr.loc, "'" + expr.name + "' is a buffer, which a "
+                               "system reads: a fn or proc only computes "
+                               "with what it is given");
+      FailureOr<mlir::Value> index =
+          emit(*expr.operands[0], builder.getI32Type());
+      if (failed(index))
+        return failure();
+      if (!index->getType().isSignlessInteger() ||
+          index->getType().isInteger(1))
+        return error(expr.operands[0]->loc, "a row's number is an integer");
+      return BufferAtOp::create(builder, at, type, symbol(expr.name),
+                                builder.getStringAttr(expr.field), *index)
+          .getResult();
     }
     const Record &table = tables[expr.name];
     Type type = table.fieldType(expr.field);
@@ -7182,6 +7356,19 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                    ValueRange{*which}, UnitAttr())
             ->getResult(0);
       }
+    // (Of a buffer: how many rows it has now.)
+    if (expr.name == "len" && expr.operands.size() == 1 &&
+        expr.operands[0]->kind == Expr::Name &&
+        !lookup(expr.operands[0]->name) &&
+        buffers.count(expr.operands[0]->name)) {
+      if (inFunction)
+        return error(expr.loc, "'" + expr.operands[0]->name + "' is a "
+                               "buffer, which a system reads: a fn or proc "
+                               "only computes with what it is given");
+      return BufferLenOp::create(builder, at, builder.getI32Type(),
+                                 symbol(expr.operands[0]->name))
+          .getResult();
+    }
     // (Of a table: how many rows it has, which is known.)
     if (expr.name == "len" && expr.operands.size() == 1 &&
         expr.operands[0]->kind == Expr::Name &&

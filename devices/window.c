@@ -5,7 +5,9 @@
 #include "ent_extern.h"
 #include "ent_files.h"
 
+#include <math.h>
 #include <raylib.h>
+#include <raymath.h>
 #include <rlgl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -135,6 +137,175 @@ bool ent_window_key_down(int32_t key) { return IsKeyDown(key); }
 void ent_window_rect(float x, float y, float width, float height,
                      int32_t color) {
   DrawRectangleRec((Rectangle){x, y, width, height}, ent_window_color(color));
+}
+
+// Many rectangles and circles with one call. Where the graphics card
+// takes a picture for each of many things in one go (OpenGL 3.3), the
+// buffer's columns are handed to it as they are: a corner of a square is
+// placed by a row's `x`, `y`, `w`, `h`, and a row that is `round` shows
+// the disc inside its square, with a soft edge.
+static const char *const ent_window_shapes_vertex =
+    "#version 330\n"
+    "in vec2 corner;\n"
+    "in float sx;\nin float sy;\nin float sw;\nin float sh;\n"
+    "in vec4 scolor;\nin float sround;\n"
+    "uniform mat4 mvp;\nuniform vec4 shade;\n"
+    "out vec2 at;\nout vec4 tint;\nout float rounded;\n"
+    "void main() {\n"
+    "  at = corner;\n"
+    "  rounded = sround;\n"
+    // (The bytes of 0xAARRGGBB as they lie; no AA is all of it.)
+    "  vec4 c = scolor.bgra;\n"
+    "  if (c.a == 0.0) c.a = 1.0;\n"
+    "  c.rgb += (shade.rgb - c.rgb) * shade.a;\n"
+    "  tint = c;\n"
+    "  gl_Position = mvp * vec4(sx + corner.x * sw, sy + corner.y * sh,\n"
+    "                           0.0, 1.0);\n"
+    "}\n";
+static const char *const ent_window_shapes_fragment =
+    "#version 330\n"
+    "in vec2 at;\nin vec4 tint;\nin float rounded;\n"
+    "out vec4 color;\n"
+    "void main() {\n"
+    "  float cover = 1.0;\n"
+    "  if (rounded > 0.5) {\n"
+    "    float far = length(at - vec2(0.5)) * 2.0;\n"
+    "    cover = clamp((1.0 - far) / max(fwidth(far), 1e-6), 0.0, 1.0);\n"
+    "  }\n"
+    "  color = vec4(tint.rgb, tint.a * cover);\n"
+    "}\n";
+
+static bool ent_window_shapes_at_once(int32_t count, const float *x,
+                                      const float *y, const float *w,
+                                      const float *h, const int32_t *color,
+                                      const bool *round) {
+  enum { COLUMNS = 6 };
+  static const char *const names[COLUMNS] = {"sx", "sy", "sw",
+                                             "sh", "scolor", "sround"};
+  static const int sizes[COLUMNS] = {4, 4, 4, 4, 4, 1};
+  static int tried, room;
+  static unsigned int shader, array, corners, columns[COLUMNS];
+  static int mvp, shade;
+  if (!tried) {
+    tried = 1;
+    int version = rlGetVersion();
+    if (version == RL_OPENGL_33 || version == RL_OPENGL_43)
+      shader = rlLoadShaderProgram(ent_window_shapes_vertex,
+                                   ent_window_shapes_fragment);
+    if (shader) {
+      mvp = rlGetLocationUniform(shader, "mvp");
+      shade = rlGetLocationUniform(shader, "shade");
+    }
+  }
+  if (!shader)
+    return false;
+  if (count > room) {
+    // More rows than there was room for on the card: room for these,
+    // and half as many again.
+    if (array) {
+      rlUnloadVertexArray(array);
+      rlUnloadVertexBuffer(corners);
+      for (int i = 0; i < COLUMNS; i++)
+        rlUnloadVertexBuffer(columns[i]);
+    }
+    room = count + count / 2 + 1024;
+    static const float square[12] = {0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0};
+    array = rlLoadVertexArray();
+    rlEnableVertexArray(array);
+    corners = rlLoadVertexBuffer(square, sizeof(square), false);
+    unsigned int place = (unsigned int)rlGetLocationAttrib(shader, "corner");
+    rlSetVertexAttribute(place, 2, RL_FLOAT, false, 0, 0);
+    rlEnableVertexAttribute(place);
+    for (int i = 0; i < COLUMNS; i++) {
+      columns[i] = rlLoadVertexBuffer(NULL, room * sizes[i], true);
+      int found = rlGetLocationAttrib(shader, names[i]);
+      if (found < 0)
+        continue;
+      place = (unsigned int)found;
+      if (i < 4)
+        rlSetVertexAttribute(place, 1, RL_FLOAT, false, 0, 0);
+      else if (i == 4)
+        rlSetVertexAttribute(place, 4, RL_UNSIGNED_BYTE, true, 0, 0);
+      else
+        rlSetVertexAttribute(place, 1, RL_UNSIGNED_BYTE, false, 0, 0);
+      rlEnableVertexAttribute(place);
+      rlSetVertexAttributeDivisor(place, 1);
+    }
+    rlDisableVertexArray();
+  }
+  // What was drawn before lies under these.
+  rlDrawRenderBatchActive();
+  const void *const data[COLUMNS] = {x, y, w, h, color, round};
+  for (int i = 0; i < COLUMNS; i++)
+    rlUpdateVertexBuffer(columns[i], data[i], count * sizes[i], 0);
+  rlEnableShader(shader);
+  rlSetUniformMatrix(mvp, MatrixMultiply(MatrixMultiply(rlGetMatrixTransform(),
+                                                       rlGetMatrixModelview()),
+                                         rlGetMatrixProjection()));
+  float part = ent_window_shading_part * (float)ent_window_shading.a / 255.0f;
+  float shading[4] = {(float)ent_window_shading.r / 255.0f,
+                      (float)ent_window_shading.g / 255.0f,
+                      (float)ent_window_shading.b / 255.0f, part};
+  rlSetUniform(shade, shading, RL_SHADER_UNIFORM_VEC4, 1);
+  rlEnableVertexArray(array);
+  rlDrawVertexArrayInstanced(0, 6, count);
+  rlDisableVertexArray();
+  rlDisableShader();
+  return true;
+}
+
+// Elsewhere each is one quad of a picture of a white disc, a circle all
+// of it and a rectangle its middle, so that both are of one batch and lie
+// in the order they came in.
+void ent_window_draw_shapes(int32_t count, const float *x, const float *y,
+                            const float *w, const float *h,
+                            const int32_t *color, const bool *round) {
+  enum { SIDE = 128, AT_ONCE = 1024 };
+  static Texture2D disc;
+  if (count <= 0 ||
+      ent_window_shapes_at_once(count, x, y, w, h, color, round))
+    return;
+  if (!disc.id) {
+    Image image = GenImageColor(SIDE, SIDE, BLANK);
+    Color *pixels = image.data;
+    for (int row = 0; row < SIDE; row++)
+      for (int column = 0; column < SIDE; column++) {
+        // (How much of the pixel the disc covers: a soft edge one pixel
+        // wide.)
+        float dx = (float)column + 0.5f - SIDE / 2.0f;
+        float dy = (float)row + 0.5f - SIDE / 2.0f;
+        float inside = SIDE / 2.0f - sqrtf(dx * dx + dy * dy);
+        float cover = inside < 0 ? 0 : inside > 1 ? 1 : inside;
+        pixels[row * SIDE + column] =
+            (Color){255, 255, 255, (unsigned char)(cover * 255.0f)};
+      }
+    disc = LoadTextureFromImage(image);
+    UnloadImage(image);
+    GenTextureMipmaps(&disc);
+    SetTextureFilter(disc, TEXTURE_FILTER_TRILINEAR);
+  }
+  rlSetTexture(disc.id);
+  for (int32_t from = 0; from < count; from += AT_ONCE) {
+    int32_t to = from + AT_ONCE < count ? from + AT_ONCE : count;
+    rlCheckRenderBatchLimit(4 * (to - from));
+    rlBegin(RL_QUADS);
+    rlNormal3f(0.0f, 0.0f, 1.0f);
+    for (int32_t i = from; i < to; i++) {
+      Color c = ent_window_color(color[i]);
+      float low = round[i] ? 0.0f : 0.5f, high = round[i] ? 1.0f : 0.5f;
+      rlColor4ub(c.r, c.g, c.b, c.a);
+      rlTexCoord2f(low, low);
+      rlVertex2f(x[i], y[i]);
+      rlTexCoord2f(low, high);
+      rlVertex2f(x[i], y[i] + h[i]);
+      rlTexCoord2f(high, high);
+      rlVertex2f(x[i] + w[i], y[i] + h[i]);
+      rlTexCoord2f(high, low);
+      rlVertex2f(x[i] + w[i], y[i]);
+    }
+    rlEnd();
+  }
+  rlSetTexture(0);
 }
 
 void ent_window_circle(float x, float y, float radius, int32_t color) {

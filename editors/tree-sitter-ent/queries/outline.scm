@@ -1,5 +1,6 @@
 (component "component" @context name: (identifier) @name) @item
 (tag "tag" @context name: (identifier) @name) @item
+(buffer "buffer" @context name: (identifier) @name) @item
 (unique "unique" @context name: (identifier) @name) @item
 (enum "enum" @context name: (identifier) @name) @item
 (table "table" @context name: (identifier) @name) @item

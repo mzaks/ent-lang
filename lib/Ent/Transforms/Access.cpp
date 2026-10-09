@@ -550,6 +550,21 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
           access.reads.insert({archetype.getSymNameAttr(), empty, empty});
       return;
     }
+    if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferOfOp>(op)) {
+      // A buffer is one thing: its rows and how many they are.
+      Column buffer{StringAttr(),
+                    cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr(),
+                    StringAttr::get(context, "rows")};
+      if (isa<AppendOp, ClearOp>(op))
+        access.writes.insert(buffer);
+      else
+        access.reads.insert(buffer);
+      if (isa<AppendOp>(op) && op->getParentOfType<QueryOp>())
+        for (ArchetypeOp archetype :
+             matchedArchetypes(op->getParentOfType<QueryOp>()))
+          access.reads.insert({archetype.getSymNameAttr(), empty, empty});
+      return;
+    }
     if (auto has = dyn_cast<HasOp>(op)) {
       FlatSymbolRefAttr component = has.getComponentAttr();
       for (ArchetypeOp archetype :

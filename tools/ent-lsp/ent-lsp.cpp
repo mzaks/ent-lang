@@ -100,6 +100,8 @@ std::pair<StringRef, lsp::SymbolKind> describe(Operation *op) {
             lsp::SymbolKind::Struct};
   if (isa<ResourceOp>(op))
     return {"unique", lsp::SymbolKind::Variable};
+  if (isa<BufferOp>(op))
+    return {"buffer", lsp::SymbolKind::Array};
   if (isa<RelationOp>(op))
     return {"relation", lsp::SymbolKind::Interface};
   if (isa<ArchetypeOp>(op))

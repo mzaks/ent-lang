@@ -1,0 +1,50 @@
+// A buffer: rows a program fills, in a `for` too, reads, and hands to a
+// device (buffers.test).
+import console
+import handed
+component At { x: f32 }
+component Lamp { on: bool }
+component Box { n: i32 }
+relation (Box)-[Inside]->(Box) tree capacity 16
+default_capacity 16
+buffer Seen { n: i32 } capacity 8
+unique Frame: i32
+
+world {
+  for i in 0..5 { spawn { At { x: i as f32 } } }
+  for i in 0..3 { spawn { At { x: 10.0 + i as f32 }, Lamp { on: i == 1 } } }
+  let a = spawn { Box { n: 1 } }
+  let b = spawn { Box { n: 2 } }
+  let c = spawn { Box { n: 3 } }
+  connect (b)-[Inside]->(a)
+  connect (c)-[Inside]->(b)
+}
+
+system fill() {
+  Frame += 1
+  Shapes = []
+  // Outside a `for`: there at once.
+  Shapes += { kind: 9, x: -1.0, bright: false }
+  // In one: when it ends, in the order of its entities. Fields in any
+  // order.
+  for a: At without Lamp where a.x > 1.5 {
+    Shapes += { x: a.x, kind: len(Shapes), bright: false }
+  }
+  // Not every entity gives a row.
+  for a: At, l: Lamp {
+    if l.on || Frame == 2 { Shapes += { kind: 1, x: a.x, bright: l.on } }
+  }
+  // And in a `for` that follows a tree.
+  Seen = []
+  for b: Box top down Inside where b.n != 2 {
+    Seen += { n: b.n * Frame }
+  }
+}
+system tell() {
+  let shown = show(Shapes, 2.0)
+  put("frame {Frame}: {len(Shapes)} rows, shown {shown}, second x {Shapes[1].x}, tenth x {Shapes[9].x}")
+  for i in 0..len(Seen) { put("  seen {Seen[i].n}") }
+  flush()
+}
+schedule frame() { fill() tell() }
+main { loop { frame() } until Frame == 2 }

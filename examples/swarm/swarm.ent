@@ -3,8 +3,7 @@
 //
 //   tools/ent run --parallel -I examples examples/swarm/swarm.ent
 //
-// (`--parallel`: on all the cores. With KMP_BLOCKTIME=0 before it the
-// cores that wait sleep, which leaves the one that draws faster.)
+// (`--parallel`: on all the cores.)
 //
 // W A S D (or the arrows) move, the mouse aims and the hero shoots where
 // it points. What falls leaves a gem; gems make the hero stronger (more
@@ -25,6 +24,9 @@
 //   comes into the shots' reach is given the tag `Close`, which moves it
 //   to an archetype of its own, and the two `for`s go over that one.
 // - The kinds of foes are a table, and a foe holds its kind's row.
+// - What is drawn is rows of a buffer, the window's `Shapes`: the `for`s
+//   over all that moves give it a row for each thing in the window, on
+//   all the cores, and the window draws them with one call.
 // - The music is four pieces, declared as assets: one for the title, one
 //   for the fight, one when the swarm is thick, and one heard once when
 //   the hero falls. One goes quiet under the next.
@@ -112,6 +114,8 @@ unique Pace: f32
 unique Seed: i64
 unique Was { stress: bool, full: bool, go: bool, mute: bool }
 default_capacity 256
+// (As many as there can be of all that moves.)
+capacity Shapes 526000
 
 fn field() -> f32 { 8000.0 }
 // How far a shot gets, and from where a foe counts as close (and, a bit
@@ -528,7 +532,7 @@ system tune() {
 }
 
 // The field as the window shows it.
-system draw() {
+system ground() {
   let wide = Window.width as f32
   let high = Window.height as f32
   let cx = Cam.x
@@ -544,16 +548,28 @@ system draw() {
   }
   edges(-cx, -cy, field(), field(), 3.0, 3.0, 3.0, 3.0, 0.0, 0.0, 0.0, 0.0,
         0x3a4a5f)
+}
 
+// Everything that moves: a row of the window's `Shapes` each, which
+// `shapes` then draws with one call. (A call of `rect` or `circle` for
+// each took three times as long, and all of it on one core: these
+// `for`s only compute, and so run on all.)
+system draw() {
+  let wide = Window.width as f32
+  let high = Window.height as f32
+  let cx = Cam.x
+  let cy = Cam.y
   // (Only what is in the window.)
   for a: At, g: Gem
       where a.x > cx - 8.0 && a.x < cx + wide + 8.0 &&
             a.y > cy - 8.0 && a.y < cy + high + 8.0 {
-    rect(a.x - cx - 2.5, a.y - cy - 2.5, 5.0, 5.0, 0x5ad1e6)
+    Shapes += { x: a.x - cx - 2.5, y: a.y - cy - 2.5, w: 5.0, h: 5.0,
+                color: 0x5ad1e6, round: false }
   }
   for a: At, s: Spark
       where a.x > cx && a.x < cx + wide && a.y > cy && a.y < cy + high {
-    rect(a.x - cx - 1.5, a.y - cy - 1.5, 3.0, 3.0, s.hue)
+    Shapes += { x: a.x - cx - 1.5, y: a.y - cy - 1.5, w: 3.0, h: 3.0,
+                color: s.hue, round: false }
   }
   for f: Foe, a: At, h: Health
       where a.x > cx - 24.0 && a.x < cx + wide + 24.0 &&
@@ -561,22 +577,26 @@ system draw() {
     let hurt = h.hp < f.breed.life
     let hue = if hurt { blend(f.breed.hue, 0xffffff, 0.35) } else { f.breed.hue }
     let r = f.breed.girth
-    // (The small ones as squares: thousands of them are cheaper so.)
-    if r < 10.0 { rect(a.x - cx - r, a.y - cy - r, r * 2.0, r * 2.0, hue) }
-    else { circle(a.x - cx, a.y - cy, r, hue) }
+    // (The small ones as squares.)
+    Shapes += { x: a.x - cx - r, y: a.y - cy - r, w: r * 2.0, h: r * 2.0,
+                color: hue, round: r >= 10.0 }
   }
   for a: At, b: Bolt
       where a.x > cx && a.x < cx + wide && a.y > cy && a.y < cy + high {
-    rect(a.x - cx - 3.0, a.y - cy - 3.0, 6.0, 6.0, 0xff5a5a)
+    Shapes += { x: a.x - cx - 3.0, y: a.y - cy - 3.0, w: 6.0, h: 6.0,
+                color: 0xff5a5a, round: false }
   }
   for a: At, s: Shot
       where a.x > cx && a.x < cx + wide && a.y > cy && a.y < cy + high {
-    rect(a.x - cx - 2.0, a.y - cy - 2.0, 4.0, 4.0, 0xfff2a8)
+    Shapes += { x: a.x - cx - 2.0, y: a.y - cy - 2.0, w: 4.0, h: 4.0,
+                color: 0xfff2a8, round: false }
   }
+}
 
-  // The hero, and where it aims.
-  let hx = Hero.x - cx
-  let hy = Hero.y - cy
+// The hero, and where it aims: over all the rest.
+system front() {
+  let hx = Hero.x - Cam.x
+  let hy = Hero.y - Cam.y
   line(hx, hy, hx + cos(Hero.aim) * 26.0, hy + sin(Hero.aim) * 26.0, 0x8fa3b8)
   circle(hx, hy, 12.0, if Hero.flash > 0.0 { 0xff8a8a } else { 0xe8eef5 })
   circle(hx, hy, 6.0, 0x3b82f6)
@@ -667,7 +687,10 @@ schedule frame() {
   hero() run_if Game.state == State.Playing
   tune()
   play()
+  ground()
   draw()
+  shapes()
+  front()
   hud()
   present()
 }

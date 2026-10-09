@@ -389,6 +389,10 @@
             "named": true
           },
           {
+            "type": "no_rows",
+            "named": true
+          },
+          {
             "type": "parenthesized",
             "named": true
           },
@@ -398,6 +402,10 @@
           },
           {
             "type": "query_for",
+            "named": true
+          },
+          {
+            "type": "row",
             "named": true
           },
           {
@@ -785,6 +793,36 @@
     "type": "boolean",
     "named": true,
     "fields": {}
+  },
+  {
+    "type": "buffer",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "capacity",
+          "named": true
+        },
+        {
+          "type": "fields",
+          "named": true
+        }
+      ]
+    }
   },
   {
     "type": "call",
@@ -2628,6 +2666,11 @@
     }
   },
   {
+    "type": "no_rows",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "node",
     "named": true,
     "fields": {
@@ -3476,6 +3519,10 @@
         },
         {
           "type": "asset",
+          "named": true
+        },
+        {
+          "type": "buffer",
           "named": true
         },
         {
@@ -4819,6 +4866,10 @@
   },
   {
     "type": "bottom",
+    "named": false
+  },
+  {
+    "type": "buffer",
     "named": false
   },
   {

@@ -400,6 +400,33 @@ struct WorldConnect {
   const Buffer &find(unsigned archetype) const;
 };
 
+/// A buffer's storage: how many rows it has (an i64 in the header) and a
+/// column per field, `capacity` values each.
+struct WorldBuffer {
+  Operation *op;
+  int64_t capacity;
+  uint64_t countOffset = 0;
+  /// One column per field; `component` is the buffer's name.
+  SmallVector<WorldColumn> fields;
+
+  /// The column of `field`, or null.
+  const WorldColumn *find(StringRef field) const;
+};
+
+/// The rows one `ent.append` inside a query adds, from the entities of
+/// each archetype the query matches: per row a byte that says whether the
+/// row added one, and the values.
+struct WorldAppend {
+  struct Slots {
+    unsigned archetype;
+    uint64_t sentOffset;
+    SmallVector<uint64_t> valueOffsets;
+  };
+  SmallVector<Slots> slots;
+
+  const Slots &find(unsigned archetype) const;
+};
+
 /// The event log of one observed stamp: (entity id, tick) entries, one per
 /// entity whose stamp an event set to a new tick, so that a reactive query
 /// can visit the entities with events instead of scanning every row.
@@ -524,6 +551,13 @@ struct WorldLayout {
   SmallVector<WorldConnect> connects;
   static constexpr llvm::StringLiteral kConnectIndexAttr =
       "ent.connect_index";
+  /// Buffers in declaration order, and one entry per `ent.append` inside
+  /// a query, in walk order (tagged with kAppendIndexAttr).
+  SmallVector<WorldBuffer, 1> buffers;
+  SmallVector<WorldAppend> appends;
+  static constexpr llvm::StringLiteral kAppendIndexAttr = "ent.append_index";
+  /// The layout of `buffer`; it must be declared in the module.
+  const WorldBuffer &getBuffer(StringAttr buffer) const;
   /// The number of entity keys relations index their edges by: the
   /// entity table's size, or for row ids `archetypes << rowBits`.
   int64_t entityKeys = 0;

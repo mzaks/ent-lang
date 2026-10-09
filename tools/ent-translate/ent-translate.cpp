@@ -168,12 +168,24 @@ emitFunctions(ModuleOp module, raw_ostream &os,
             "define each\n// one. They get values and never the world. A fn "
             "gives the same result\n// for the same arguments and does "
             "nothing else: the program may call it\n// from several threads, "
-            "or not at all.\n";
+            "or not at all. A proc that is handed a buffer\n// gets how "
+            "many rows it has and each field's values, one for each row,\n"
+            "// to read while it runs.\n";
     any = true;
     SmallVector<std::string> params;
     for (auto [index, type] :
          llvm::enumerate(function.getParams().getAsValueRange<TypeAttr>())) {
-      if (isa<TextType>(type))
+      if (auto handed = dyn_cast<BufferType>(type)) {
+        // A buffer: how many rows it has, and each field's values.
+        auto buffer = SymbolTable::lookupNearestSymbolFrom<BufferOp>(
+            function, handed.getName());
+        params.push_back(llvm::formatv("int32_t arg{0}_count", index));
+        for (auto [field, fieldType] :
+             llvm::zip(buffer.getFieldNames().getAsValueRange<StringAttr>(),
+                       buffer.getFieldTypes().getAsValueRange<TypeAttr>()))
+          params.push_back(llvm::formatv("const {0} *arg{1}_{2}",
+                                         getCType(fieldType), index, field));
+      } else if (isa<TextType>(type))
         params.push_back(
             llvm::formatv("const {0} *arg{1}", getCType(type), index));
       else

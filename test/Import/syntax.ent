@@ -260,3 +260,29 @@ main {
   } until Clock.frame >= 8
   boot()
 }
+
+// A buffer: rows the program fills. A row more with `+=` (every field,
+// in any order), none with `= []`; how many, and a row's field; and a
+// device's proc is handed it by its name.
+// CHECK: ent.buffer @Marks (at: f32, kind: i32, lit: i1) capacity 32
+buffer Marks { at: f32, kind: i32, lit: bool } capacity 32
+// CHECK: ent.function proc @show_marks(!ent.buffer<@Marks>, f32)
+extern proc show_marks(marks: Marks, scale: f32)
+// CHECK-LABEL: ent.system @mark() {
+system mark() {
+  // CHECK: ent.clear @Marks
+  Marks = []
+  // CHECK: ent.append @Marks(%{{.*}}, %{{.*}}, %{{.*}}) : f32, i32, i1
+  Marks += { kind: 3, at: 1.5, lit: true }
+  // CHECK: ent.query
+  for p: Position {
+    // CHECK: %[[N:.*]] = ent.buffer.len @Marks
+    // CHECK: ent.append @Marks(%{{.*}}, %[[N]], %{{.*}}) : f32, i32, i1
+    Marks += { at: p.x, kind: len(Marks), lit: false }
+  }
+  // CHECK: ent.buffer.at @Marks "at"{{\[}}%{{.*}} : i32] : f32
+  let first = Marks[0].at
+  // CHECK: %[[M:.*]] = ent.buffer.of @Marks : <@Marks>
+  // CHECK: ent.invoke proc @show_marks(%[[M]], %{{.*}}) : (!ent.buffer<@Marks>, f32) -> ()
+  show_marks(Marks, first)
+}

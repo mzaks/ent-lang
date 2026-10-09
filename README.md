@@ -276,7 +276,8 @@ come with the compiler, in `devices/`, and two more that need
   `tools/ent run -I examples examples/clay/video_demo.ent`; `examples/swarm/swarm.ent` is a shoot-'em-up on a field bigger than
   the window with foes, shots and sparks in their hundreds of thousands
   (its B key fills the field to what it holds; `bench/swarm/run.py`
-  plays it by itself and says how long a frame takes), with music that
+  plays it by itself and says how long a frame takes), all of them drawn
+  with one call (rows of a buffer the window is handed), with music that
   follows the game: `tools/ent run --parallel -I examples
   examples/swarm/swarm.ent`; `examples/towers.ent` is a tower defence game (bars of the layout
   library around a board that is drawn into the box between them; towers

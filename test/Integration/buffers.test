@@ -1,0 +1,40 @@
+// A buffer (Inputs/buffers.ent): rows a program gives it outside a `for`
+// and in one (also one that follows a tree, and one that runs on all the
+// cores), in the order of the `for`'s entities; emptied, counted, read;
+// and handed to a device (Inputs/handed.ent, handed.c), which gets how
+// many rows there are and each field's values.
+// RUN: %ent run %S/Inputs/buffers.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/buffers.ent | FileCheck %s
+// RUN: %ent build %S/Inputs/buffers.ent -o %t.exe --keep %t.dir
+// RUN: FileCheck %s --check-prefix=HEADER --input-file=%t.dir/ent_extern.h
+
+// HEADER: int32_t ent_handed_show(int32_t arg0_count, const int32_t *arg0_kind, const float *arg0_x, const bool *arg0_bright, float arg1);
+
+// (The second `for` reads how many rows there were before it: one.)
+// CHECK:      shape 0: kind 9 x -2.0
+// CHECK-NEXT: shape 1: kind 1 x 4.0
+// CHECK-NEXT: shape 2: kind 1 x 6.0
+// CHECK-NEXT: shape 3: kind 1 x 8.0
+// CHECK-NEXT: shape 4: kind 1 x 22.0 bright
+// A row the buffer has not reads as nought.
+// CHECK-NEXT: frame 1: 5 rows, shown 5, second x 2.0, tenth x 0.0
+// CHECK-NEXT:   seen 1
+// CHECK-NEXT:   seen 3
+// Emptied, and filled anew.
+// CHECK-NEXT: shape 0: kind 9 x -2.0
+// CHECK-NEXT: shape 1: kind 1 x 4.0
+// CHECK-NEXT: shape 2: kind 1 x 6.0
+// CHECK-NEXT: shape 3: kind 1 x 8.0
+// CHECK-NEXT: shape 4: kind 1 x 20.0
+// CHECK-NEXT: shape 5: kind 1 x 22.0 bright
+// CHECK-NEXT: shape 6: kind 1 x 24.0
+// CHECK-NEXT: frame 2: 7 rows, shown 7, second x 2.0, tenth x 0.0
+// CHECK-NEXT:   seen 2
+// CHECK-NEXT:   seen 6
+// CHECK-NOT:  {{.}}
+
+// More rows than it holds stop the program. (What it says then,
+// Transforms/lower-buffers.mlir has: it is lost where the output is not
+// a terminal.)
+// RUN: %ent build %S/Inputs/buffers_full.ent -o %t.full.exe
+// RUN: not --crash %t.full.exe

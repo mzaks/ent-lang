@@ -47,6 +47,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "buffer"
+        },
+        {
+          "type": "SYMBOL",
           "name": "enum"
         },
         {
@@ -379,6 +383,31 @@
               "type": "BLANK"
             }
           ]
+        }
+      ]
+    },
+    "buffer": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "buffer"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "SYMBOL",
+          "name": "fields"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "capacity"
         }
       ]
     },
@@ -3661,12 +3690,38 @@
             "type": "FIELD",
             "name": "value",
             "content": {
-              "type": "SYMBOL",
-              "name": "_expression"
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "_expression"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "row"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "no_rows"
+                }
+              ]
             }
           }
         ]
       }
+    },
+    "no_rows": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "["
+        },
+        {
+          "type": "STRING",
+          "value": "]"
+        }
+      ]
     },
     "_expression": {
       "type": "CHOICE",

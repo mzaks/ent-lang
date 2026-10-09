@@ -1,0 +1,9 @@
+// A buffer with no room for another row (buffers.test).
+import console
+component At { x: f32 }
+default_capacity 16
+buffer Few { x: f32 } capacity 2
+world { for i in 0..3 { spawn { At { x: i as f32 } } } }
+system fill() { for a: At { Few += { x: a.x } } }
+schedule frame() { fill() }
+main { frame() }

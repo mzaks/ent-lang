@@ -81,6 +81,27 @@ const WorldColumn *WorldRelation::find(StringAttr field) const {
   return nullptr;
 }
 
+const WorldColumn *WorldBuffer::find(StringRef field) const {
+  for (const WorldColumn &column : fields)
+    if (column.field.getValue() == field)
+      return &column;
+  return nullptr;
+}
+
+const WorldAppend::Slots &WorldAppend::find(unsigned archetype) const {
+  for (const Slots &entry : slots)
+    if (entry.archetype == archetype)
+      return entry;
+  llvm_unreachable("no append slots for the archetype");
+}
+
+const WorldBuffer &WorldLayout::getBuffer(StringAttr buffer) const {
+  for (const WorldBuffer &entry : buffers)
+    if (BufferOp(entry.op).getSymNameAttr() == buffer)
+      return entry;
+  llvm_unreachable("unknown buffer");
+}
+
 const WorldConnect::Buffer &WorldConnect::find(unsigned archetype) const {
   for (const Buffer &buffer : buffers)
     if (buffer.archetype == archetype)
@@ -412,6 +433,16 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       end += 8;
     }
     layout.relations.push_back(std::move(entry));
+  }
+  // Buffers: how many rows each has.
+  for (BufferOp buffer : module.getOps<BufferOp>()) {
+    WorldBuffer entry;
+    entry.op = buffer;
+    entry.capacity = buffer.getCapacity();
+    end = llvm::alignTo(end, 8);
+    entry.countOffset = end;
+    end += 8;
+    layout.buffers.push_back(std::move(entry));
   }
   end = llvm::alignTo(end, 8);
   layout.nextSlotOffset = end;
@@ -973,6 +1004,47 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       }
     }
   }
+
+  // Buffers: a column per field. And the rows appended inside queries:
+  // per row whether it added one, and the values, for each archetype the
+  // query matches.
+  for (WorldBuffer &buffer : layout.buffers) {
+    BufferOp op(buffer.op);
+    for (auto [fieldName, typeAttr] :
+         llvm::zip(op.getFieldNames(), op.getFieldTypes())) {
+      Type type = cast<TypeAttr>(typeAttr).getValue();
+      uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+      end = offset + storageBytes(type) * buffer.capacity;
+      buffer.fields.push_back(
+          {op.getSymNameAttr(), cast<StringAttr>(fieldName), type, offset});
+    }
+  }
+  module.walk([&](AppendOp append) {
+    auto query = append->getParentOfType<QueryOp>();
+    if (!query)
+      return;
+    auto buffer = symbols.lookup<BufferOp>(append.getBufferAttr().getAttr());
+    WorldAppend entry;
+    for (ArchetypeOp source : getMatchedArchetypes(query)) {
+      for (WorldArchetype &archetype : layout.archetypes) {
+        if (archetype.op != source)
+          continue;
+        auto place = [&](uint64_t bytes) {
+          uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+          end = offset + bytes * archetype.capacity;
+          return offset;
+        };
+        WorldAppend::Slots slots;
+        slots.archetype = archetype.index;
+        slots.sentOffset = place(1);
+        for (Attribute typeAttr : buffer.getFieldTypes())
+          slots.valueOffsets.push_back(
+              place(storageBytes(cast<TypeAttr>(typeAttr).getValue())));
+        entry.slots.push_back(std::move(slots));
+      }
+    }
+    layout.appends.push_back(std::move(entry));
+  });
 
   // Edges connected inside queries: per row a source, a target and the
   // values, for each archetype the query matches.

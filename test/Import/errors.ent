@@ -1260,3 +1260,90 @@ component W { at: row of road }
 table odd: i32 = [1, 3]
 // expected-error @+1 {{table 'odd' is a plain list: a row of it is its value}}
 component W { at: row of odd }
+
+// -----
+
+buffer Marks { at: f32 } capacity 8
+component Position { x: f32 }
+system s() {
+  for p: Position {
+    // expected-error @+1 {{a buffer is emptied outside a 'for': every entity would empty it}}
+    Marks = []
+  }
+}
+
+// -----
+
+buffer Marks { at: f32, kind: i32 } capacity 8
+system s() {
+  // expected-error @+1 {{the row has no 'kind': a row gives every field of 'Marks'}}
+  Marks += { at: 1.0 }
+}
+
+// -----
+
+buffer Marks { at: f32 } capacity 8
+system s() {
+  // expected-error @+1 {{buffer 'Marks' has no field 'size'}}
+  Marks += { at: 1.0, size: 2.0 }
+}
+
+// -----
+
+buffer Marks { at: f32 } capacity 8
+system s() {
+  // expected-error @+1 {{'Marks' is a buffer: 'Marks += { field: value, .. }' gives it a row, 'Marks = []' empties it}}
+  Marks -= 1
+}
+
+// -----
+
+// expected-error @+1 {{a buffer says how many rows it holds at most: 'capacity N' (a program gives a module's another with 'capacity Marks N')}}
+buffer Marks { at: f32 }
+
+// -----
+
+// expected-error @+1 {{'name': a buffer's fields are numbers, bools and enums}}
+buffer Marks { name: text[8] } capacity 8
+
+// -----
+
+buffer Marks { at: f32 } capacity 8
+// expected-error @+1 {{'Marks' is a buffer: a parameter of an extern proc may be one, and nothing else}}
+component Holder { marks: Marks }
+
+// -----
+
+buffer Marks { at: f32 } capacity 8
+// expected-error @+1 {{'Marks' is a buffer: a parameter of an extern proc may be one, and nothing else}}
+extern fn sum(marks: Marks) -> f32
+
+// -----
+
+buffer Marks { at: f32 } capacity 8
+buffer Others { at: f32 } capacity 8
+extern proc show(marks: Marks)
+system s() {
+  // expected-error @+1 {{'show' is handed the buffer 'Marks' here, by its name}}
+  show(Others)
+}
+
+// -----
+
+buffer Marks { at: f32 } capacity 8
+component Position { x: f32 }
+extern proc show(marks: Marks)
+system s() {
+  for p: Position {
+    // expected-error @+1 {{a buffer is handed over outside a 'for': not once for each entity}}
+    show(Marks)
+  }
+}
+
+// -----
+
+buffer Marks { at: f32 } capacity 8
+fn first() -> f32 {
+  // expected-error @+1 {{'Marks' is a buffer, which a system reads: a fn or proc only computes with what it is given}}
+  Marks[0].at
+}

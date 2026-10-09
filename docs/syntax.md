@@ -89,6 +89,7 @@ tag Enemy                                   // a component without fields
 tag Close apart capacity 1000               // those with it stored apart
 unique Clock { dt: f32, frame: i64 }        // exists once (a resource)
 unique Score: i64                           // shorthand: one field, `value`
+buffer Marks { x: f32, kind: i32 } capacity 4096   // rows the program fills
 enum Way { Right, Down, Left, Up }          // a type of named cases
 archetype Gun { Position, optional Stunned } capacity 4
 relation Synapse { weight: f32 } capacity 100000  // edges with data
@@ -1343,6 +1344,59 @@ let far = apart(w.at, road_a[0]) + w.at.x
   kept in one table. Reading a field is one read of that, whichever
   table the row is of.
 
+## Buffers
+
+```
+buffer Shapes { x: f32, y: f32, w: f32, h: f32, color: i32, round: bool } capacity 4096
+extern proc draw_shapes(them: Shapes)
+
+system draw() {
+  Shapes = []
+  Shapes += { x: 0.0, y: 0.0, w: 800.0, h: 2.0, color: 0x202020, round: false }
+  for p: Position, b: Ball where p.x > 0.0 {
+    Shapes += { x: p.x - b.r, y: p.y - b.r, w: b.r * 2.0, h: b.r * 2.0,
+                color: b.hue, round: true }
+  }
+  draw_shapes(Shapes)
+}
+```
+
+A buffer is a list of rows that the program fills: where many things go
+to a device at once (all there is to draw), in place of a call for each.
+
+- `buffer Name { field: type, ... } capacity N`, at the top level. A
+  field is a number, a bool or an enum. It holds at most `N` rows; a row
+  more stops the program, which says so. `capacity Name N` gives a
+  buffer that was declared before, a module's too, another capacity.
+- `Name += { field: value, ... }` gives it a row after those it has:
+  every field, in any order. Outside a `for` the row is there at once.
+  In a `for` over entities it is there when the `for` ends, with those of
+  the entities before it before it: the rows lie in the order of the
+  `for`'s entities, however it ran. An entity gives one row for each `+=`
+  the `for` has (under an `if`, or none), not in a loop inside it.
+  Such a `for` only computes: `--parallel` runs it on all the cores.
+- `Name = []` empties it, outside a `for`.
+- `len(Name)` is how many rows it has and `Name[i].field` a row's field
+  (nought where it has no row `i`); in a `for` that gives it rows, as it
+  was before the `for`.
+- An `extern proc` may have a buffer for a parameter (`them: Shapes`),
+  and is handed it by its name, outside a `for`. In C the parameter is
+  how many rows there are (an `int32_t`) and then, for each field, where
+  its values are, one for each row (`const float *`, `const int32_t *`,
+  `const bool *`; an enum's are its bytes): `void ent_draw_shapes(int32_t
+  count, const float *x, const float *y, ..., const bool *round)`. The
+  values of a field lie one after another, so a device can pass them on
+  as they are (to a graphics card, say). The proc reads them while it
+  runs and keeps nothing: the buffer is the program's, and may be
+  emptied or filled anew after.
+- A buffer is not of an entity and no `for` goes over it; it is of the
+  world like a unique, and systems that fill or read it keep their order
+  as with one. A fn or proc does not read it: a system does.
+
+The window (`devices/window.ent`) has one, `Shapes`, and a system
+`shapes` that draws its rows with one call: `examples/swarm` draws all
+that moves so.
+
 ## Prefabs
 
 ```
@@ -1481,6 +1535,8 @@ has nothing to get wrong about it. Prefer them to extern systems.
 - Parameters and results are numbers and bools; a parameter may also be a
   text, which C gets as `const ent_textN *`. A text argument of another
   capacity is widened or cut like anywhere else.
+- A proc's parameter may also be a buffer, which C gets as how many rows
+  it has and where each field's values are (see Buffers).
 - In C, `extern proc put` is `void ent_put(const ent_text126 *line)`, and
   a module `console`'s is `ent_console_put`. `tools/ent` generates their
   declarations as `ent_extern.h` (`ent-translate

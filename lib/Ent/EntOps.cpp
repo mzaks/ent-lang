@@ -231,6 +231,14 @@ static ParseResult parseRecord(OpAsmParser &parser, OperationState &result) {
     result.addAttribute(OpTy::getCapacityAttrName(result.name),
                         b.getI64IntegerAttr(capacity));
   }
+  // `capacity N`, for buffers.
+  if constexpr (std::is_same_v<OpTy, BufferOp>) {
+    int64_t capacity;
+    if (parser.parseKeyword("capacity") || parser.parseInteger(capacity))
+      return failure();
+    result.addAttribute(OpTy::getCapacityAttrName(result.name),
+                        b.getI64IntegerAttr(capacity));
+  }
   // `[apart] [capacity N]`, for components.
   if constexpr (std::is_same_v<OpTy, ComponentOp>) {
     if (succeeded(parser.parseOptionalKeyword("apart")))
@@ -261,6 +269,10 @@ static void printRecord(OpTy op, OpAsmPrinter &p) {
   SmallVector<StringRef, 4> elided{op.getSymNameAttrName(),
                                    op.getFieldNamesAttrName(),
                                    op.getFieldTypesAttrName()};
+  if constexpr (std::is_same_v<OpTy, BufferOp>) {
+    p << " capacity " << op.getCapacity();
+    elided.push_back(op.getCapacityAttrName());
+  }
   if constexpr (std::is_same_v<OpTy, ComponentOp>) {
     if (op.getApart())
       p << " apart";
@@ -341,6 +353,152 @@ LogicalResult ComponentOp::verify() {
 }
 Type ComponentOp::getFieldType(StringRef name) {
   return lookupFieldType(getFieldNames(), getFieldTypes(), name);
+}
+
+ParseResult BufferOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseRecord<BufferOp>(parser, result);
+}
+void BufferOp::print(OpAsmPrinter &p) { printRecord(*this, p); }
+LogicalResult BufferOp::verify() {
+  if (failed(verifyRecord(*this, getFieldNames(), getFieldTypes())))
+    return failure();
+  if (getFieldNames().empty())
+    return emitOpError("has no fields");
+  for (auto [name, type] :
+       llvm::zip(getFieldNames().getAsValueRange<StringAttr>(),
+                 getFieldTypes().getAsValueRange<TypeAttr>()))
+    if (!isa<IntegerType, FloatType, EnumType>(type))
+      return emitOpError("field '")
+             << name << "' has type " << type
+             << "; a buffer's fields are numbers, bools and enums";
+  return success();
+}
+Type BufferOp::getFieldType(StringRef name) {
+  return lookupFieldType(getFieldNames(), getFieldTypes(), name);
+}
+
+/// The buffer `op` names, or an error.
+static BufferOp lookupBuffer(SymbolTableCollection &symbolTable, Operation *op,
+                             FlatSymbolRefAttr name) {
+  auto buffer = symbolTable.lookupNearestSymbolFrom<BufferOp>(op, name);
+  if (!buffer)
+    op->emitOpError("refers to unknown buffer ") << name;
+  return buffer;
+}
+
+LogicalResult AppendOp::verify() {
+  if (auto query = (*this)->getParentOfType<QueryOp>()) {
+    if ((*this)->getParentOfType<EdgesOp>())
+      return emitOpError("inside 'ent.edges' is not supported yet");
+    for (Operation *parent = (*this)->getParentOp(); parent != query;
+         parent = parent->getParentOp())
+      if (isa<LoopLikeOpInterface>(parent))
+        return emitOpError("must not be inside a loop ('")
+               << parent->getName()
+               << "') in a query: it may run at most once per entity";
+  } else if (!(*this)->getParentOfType<SystemOp>()) {
+    return emitOpError("must be inside an 'ent.system'");
+  }
+  return success();
+}
+
+LogicalResult AppendOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  BufferOp buffer = lookupBuffer(symbolTable, *this, getBufferAttr());
+  if (!buffer)
+    return failure();
+  ArrayAttr fieldTypes = buffer.getFieldTypes();
+  if (fieldTypes.size() != getValues().size())
+    return emitOpError("gives ")
+           << getValues().size() << " values, but " << getBufferAttr()
+           << " has " << fieldTypes.size() << " fields";
+  for (auto [index, value, typeAttr] :
+       llvm::enumerate(getValues(), fieldTypes))
+    if (value.getType() != cast<TypeAttr>(typeAttr).getValue())
+      return emitOpError("value #")
+             << index << " has type " << value.getType() << ", but field '"
+             << cast<StringAttr>(buffer.getFieldNames()[index]).getValue()
+             << "' has type " << cast<TypeAttr>(typeAttr).getValue();
+  auto system = (*this)->getParentOfType<SystemOp>();
+  if (!system.canWrite(getBufferAttr()))
+    return emitOpError("appends to ")
+           << getBufferAttr() << " but system @" << system.getSymName()
+           << " does not declare it in 'writes'";
+  return success();
+}
+
+/// What the ops that read or empty a buffer share: the buffer is one,
+/// the op is in a system (and, where `outside`, in none of its queries),
+/// and the system may read it, or write it.
+static BufferOp verifyBufferUse(SymbolTableCollection &symbolTable,
+                                Operation *op, FlatSymbolRefAttr name,
+                                bool writes, bool outside) {
+  BufferOp buffer = lookupBuffer(symbolTable, op, name);
+  if (!buffer)
+    return {};
+  auto system = op->getParentOfType<SystemOp>();
+  if (!system) {
+    op->emitOpError("must be inside an 'ent.system'");
+    return {};
+  }
+  if (outside && op->getParentOfType<QueryOp>()) {
+    op->emitOpError("must not be inside a query");
+    return {};
+  }
+  if (writes ? !system.canWrite(name) : !system.canRead(name)) {
+    op->emitOpError(writes ? "empties " : "reads ")
+        << name << " but system @" << system.getSymName()
+        << " does not declare it in " << (writes ? "'writes'" : "'reads'");
+    return {};
+  }
+  return buffer;
+}
+
+LogicalResult ClearOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifyBufferUse(symbolTable, *this, getBufferAttr(), /*writes=*/true,
+                         /*outside=*/true)
+             ? success()
+             : failure();
+}
+
+LogicalResult
+BufferLenOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifyBufferUse(symbolTable, *this, getBufferAttr(),
+                         /*writes=*/false, /*outside=*/false)
+             ? success()
+             : failure();
+}
+
+LogicalResult
+BufferAtOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  BufferOp buffer = verifyBufferUse(symbolTable, *this, getBufferAttr(),
+                                    /*writes=*/false, /*outside=*/false);
+  if (!buffer)
+    return failure();
+  Type type = buffer.getFieldType(getField());
+  if (!type)
+    return emitOpError("reads '")
+           << getField() << "', which " << getBufferAttr() << " has not";
+  if (type != getResult().getType())
+    return emitOpError("gives ")
+           << getResult().getType() << ", but the field is " << type;
+  return success();
+}
+
+LogicalResult
+BufferOfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  if (!verifyBufferUse(symbolTable, *this, getBufferAttr(), /*writes=*/false,
+                       /*outside=*/true))
+    return failure();
+  if (getResult().getType().getName() != getBufferAttr())
+    return emitOpError("gives ")
+           << getResult().getType() << ", which is not " << getBufferAttr();
+  for (Operation *user : getResult().getUsers()) {
+    auto invoke = dyn_cast<InvokeOp>(user);
+    if (!invoke || invoke->getParentOp() != (*this)->getParentOp())
+      return emitOpError("is for an 'ent.invoke' next to it: a buffer is "
+                         "handed to a function, and not kept");
+  }
+  return success();
 }
 
 ParseResult ResourceOp::parse(OpAsmParser &parser, OperationState &result) {
@@ -567,8 +725,8 @@ static LogicalResult verifyAccessSymbols(SymbolTableCollection &symbolTable,
     for (Attribute attr : list) {
       auto ref = cast<FlatSymbolRefAttr>(attr);
       Operation *target = symbolTable.lookupNearestSymbolFrom(op, ref);
-      if (!isa_and_nonnull<ComponentOp, ResourceOp, ArchetypeOp, RelationOp>(
-              target))
+      if (!isa_and_nonnull<ComponentOp, ResourceOp, ArchetypeOp, RelationOp,
+                           BufferOp>(target))
         return op->emitOpError("declares access to unknown component, "
                                "resource, relation "
                                "or archetype ")
@@ -816,11 +974,19 @@ LogicalResult FunctionOp::verify() {
     return verifyNoRefParams(*this, getBody());
   }
   for (auto [index, type] :
-       llvm::enumerate(getParams().getAsValueRange<TypeAttr>()))
-    if (!crossesToC(type))
+       llvm::enumerate(getParams().getAsValueRange<TypeAttr>())) {
+    if (isa<BufferType>(type)) {
+      // (Its rows are read while the function runs: not what the same
+      // arguments give the same result for.)
+      if (!getProc())
+        return emitOpError("parameter #")
+               << index << " is a buffer, which only a proc is handed";
+    } else if (!crossesToC(type)) {
       return emitOpError("parameter #")
              << index << " has type " << type
              << ", which cannot be passed to C";
+    }
+  }
   if (getResults().size() > 1)
     return emitOpError("gives several values, which C cannot give back");
   if (std::optional<Type> result = getResult()) {
@@ -1786,7 +1952,8 @@ LogicalResult EachOp::verify() {
   getBody().walk([&](Operation *op) {
     if (failed(result))
       return;
-    if (isa<CombineOp, ConnectOp, SpawnOp, DespawnOp, AddOp, RemoveOp>(op)) {
+    if (isa<CombineOp, ConnectOp, AppendOp, SpawnOp, DespawnOp, AddOp,
+            RemoveOp>(op)) {
       result = op->emitOpError("cannot be in an 'ent.each': what entities "
                                "there are, and what is connected, changes "
                                "after it");

@@ -4,7 +4,9 @@
 // against every one of them in a `for` inside a `for`, and those run on all the cores.
 // So does the `for` that steers every foe: its body calls out (a root,
 // a sine), so it is worth sharing out from far fewer entities on than
-// one that only computes. Running it needs a window.
+// one that only computes. And so do the `for`s that say what is drawn:
+// each gives the window's buffer a row for a thing in the window, and no
+// `for` calls the window. Running it needs a window.
 // RUN: ent-translate --import-ent %S/../../examples/swarm/swarm.ent \
 // RUN:     -I %S/../../devices -I %S/../../examples -o %t.mlir
 // RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
@@ -22,6 +24,7 @@
 // RUN: ent-opt %t.par.mlir --cse --ent-lower-views --convert-scf-to-cf \
 // RUN:     --convert-to-llvm --reconcile-unrealized-casts -o /dev/null
 
+// IR:     ent.buffer @window.Shapes (x: f32, y: f32, w: f32, h: f32, color: i32, round: i1) capacity 526000
 // IR:     ent.component @Close () apart capacity 250000
 // IR:     ent.system @strike()
 // IR:       ent.query
@@ -30,6 +33,8 @@
 // KINDS: ent.archetype @At_Foe_Health_Size (@At, @Foe, @Health, @Size) capacity 250000 inferred
 // KINDS: ent.archetype @At_Foe_Health_Size_Close (@At, @Foe, @Health, @Size, @Close) capacity 250000 inferred
 
+// PAR-LABEL: func.func private @window.shapes(
+// PAR:         call @ent_window_draw_shapes(
 // PAR-LABEL: func.func private @steer(
 // PAR:         omp.parallel
 // PAR-LABEL: func.func private @gather(
@@ -40,3 +45,7 @@
 // PAR:             scf.for
 // PAR-LABEL: func.func private @spend(
 // PAR:         omp.parallel
+// PAR-LABEL: func.func private @draw(
+// PAR:         omp.parallel
+// PAR-NOT:     call @ent_window_{{rect|circle}}
+// PAR-LABEL: func.func private @front(

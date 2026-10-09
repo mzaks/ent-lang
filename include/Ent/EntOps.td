@@ -61,6 +61,111 @@ def Ent_ResourceOp : Ent_RecordOp<"resource"> {
   }];
 }
 
+def Ent_BufferOp : Ent_RecordOp<"buffer"> {
+  let summary = "Declare a buffer: rows the program fills, in their order";
+  let description = [{
+    ```mlir
+    ent.buffer @Shapes (kind: i32, x: f32, y: f32) capacity 4096
+    ```
+    A list of rows, each with a value for every field, that the program
+    appends to (`ent.append`), empties (`ent.clear`) and reads
+    (`ent.buffer.len`, `ent.buffer.at`), and that a function in C is
+    handed whole (`ent.buffer.of`). It is no entity's: no query visits it.
+    It is stored field by field, the values of one field one after
+    another, and holds at most `capacity` rows. A field is a number, a
+    bool or an enum. Systems name it in `reads` and `writes` like a
+    resource.
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       StrArrayAttr:$field_names,
+                       TypeArrayAttr:$field_types,
+                       ConfinedAttr<I64Attr, [IntPositive]>:$capacity);
+}
+
+def Ent_AppendOp : Ent_Op<"append", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Add a row to a buffer";
+  let description = [{
+    ```mlir
+    ent.append @Shapes (%kind, %x, %y) : i32, f32, f32
+    ```
+    Adds a row after those the buffer has, with its fields in declaration
+    order. Outside a query it is there at once. Inside one it is deferred
+    to the end of the query, like `ent.connect`, and may run at most once
+    per entity (not inside a loop or `ent.edges`); the rows are added in a
+    fixed order (by append, archetype, row), however the query ran.
+    Appending beyond the buffer's capacity is an error at run time. A
+    system that declares its access must list the buffer in `writes`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, Variadic<AnyType>:$values);
+  let assemblyFormat = [{
+    $buffer `(` $values `)` attr-dict (`:` type($values)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Ent_ClearOp : Ent_Op<"clear", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Empty a buffer";
+  let description = [{
+    ```mlir
+    ent.clear @Shapes
+    ```
+    The buffer has no rows after it. In a system, outside its queries.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer);
+  let assemblyFormat = "$buffer attr-dict";
+}
+
+def Ent_BufferLenOp : Ent_Op<"buffer.len", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "How many rows a buffer has";
+  let description = [{
+    ```mlir
+    %n = ent.buffer.len @Shapes
+    ```
+    In a query, how many it had when the query started.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$buffer attr-dict";
+}
+
+def Ent_BufferAtOp : Ent_Op<"buffer.at", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "A value of a row of a buffer";
+  let description = [{
+    ```mlir
+    %x = ent.buffer.at @Shapes "x"[%i : i32] : f32
+    ```
+    What row `%i` has in that field; nought (the first case of an enum)
+    where the buffer has no such row.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, StrAttr:$field,
+                       AnySignlessInteger:$index);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = [{
+    $buffer $field `[` $index `:` type($index) `]` attr-dict `:` type($result)
+  }];
+}
+
+def Ent_BufferOfOp : Ent_Op<"buffer.of", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "A buffer, to hand to a function in C";
+  let description = [{
+    ```mlir
+    %shapes = ent.buffer.of @Shapes : !ent.buffer<@Shapes>
+    ent.invoke proc @draw(%shapes) : (!ent.buffer<@Shapes>) -> ()
+    ```
+    The rows the buffer has, for an `ent.invoke` of a function without a
+    body, in the system that holds both and outside its queries. The
+    function reads them while it runs and keeps nothing.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer);
+  let results = (outs Ent_BufferType:$result);
+  let assemblyFormat = "$buffer attr-dict `:` type($result)";
+}
+
 def Ent_EnumOp : Ent_Op<"enum", [Symbol]> {
   let summary = "Declare an enum: a type whose values are named cases";
   let description = [{

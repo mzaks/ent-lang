@@ -171,4 +171,17 @@ def Ent_EnumType : Ent_Type<"Enum", "enum"> {
   }];
 }
 
+def Ent_BufferType : Ent_Type<"Buffer", "buffer"> {
+  let summary = "The rows an `ent.buffer` holds, as a function in C takes them";
+  let description = [{
+    `!ent.buffer<@Shapes>` is what a function without a body is given for
+    a parameter that is the buffer `@Shapes`: in C the number of its rows
+    (an `int32_t`) and then, for each of its fields, where that field's
+    values are, one for each row (`const float *`). `ent.buffer.of` gives
+    the value; nothing is computed with it.
+  }];
+  let parameters = (ins "FlatSymbolRefAttr":$name);
+  let assemblyFormat = "`<` $name `>`";
+}
+
 #endif // ENT_TYPES

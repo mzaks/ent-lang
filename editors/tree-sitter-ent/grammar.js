@@ -36,6 +36,7 @@ module.exports = grammar({
         $.component,
         $.tag,
         $.unique,
+        $.buffer,
         $.enum,
         $.table,
         $.prefab,
@@ -77,6 +78,10 @@ module.exports = grammar({
     tag: ($) =>
       seq('tag', field('name', $.identifier), optional('apart'),
           optional($.capacity)),
+
+    // buffer Name { field: type, .. } capacity N
+    buffer: ($) =>
+      seq('buffer', field('name', $.identifier), $.fields, $.capacity),
 
     unique: ($) =>
       seq('unique', field('name', $.identifier),
@@ -320,7 +325,10 @@ module.exports = grammar({
                      field('operator',
                            choice('=', '+=', '-=', '*=', '/=', seq('min', '='),
                                   seq('max', '='))),
-                     field('value', $._expression))),
+                     // (A buffer is given a row, or none.)
+                     field('value',
+                           choice($._expression, $.row, $.no_rows)))),
+    no_rows: ($) => seq('[', ']'),
 
     // Expressions
 

@@ -1,0 +1,4 @@
+// A device that is handed a buffer (buffers.test): the buffer is the
+// module's, the program fills it.
+buffer Shapes { kind: i32, x: f32, bright: bool } capacity 16
+extern proc show(them: Shapes, scale: f32) -> i32

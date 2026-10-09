@@ -64,6 +64,23 @@ extern proc key_down(key: i32) -> bool
 extern proc rect(x: f32, y: f32, width: f32, height: f32, color: i32)
 // A filled circle, by its centre.
 extern proc circle(x: f32, y: f32, radius: f32, color: i32)
+// Many things at once: a row of `Shapes` is a filled rectangle by its top
+// left corner and its size, or with `round` the circle (the ellipse) that
+// just fits in it. A system gives it rows (`Shapes += { x: .., y: .., w:
+// .., h: .., color: .., round: false }`, in a `for` over what is to be
+// drawn, which then runs on all the cores it is given), and `shapes`,
+// run after it, draws them in their order with one call and empties the
+// buffer. Thousands of things are drawn so in a fraction of the time one
+// `rect` or `circle` each takes. It holds 16384; `capacity Shapes N` in
+// the program gives it more.
+buffer Shapes {
+  x: f32, y: f32, w: f32, h: f32, color: i32, round: bool
+} capacity 16384
+extern proc draw_shapes(them: Shapes)
+system shapes() {
+  draw_shapes(Shapes)
+  Shapes = []
+}
 // A filled slice of a circle, from one angle to another: degrees, 0 to
 // the right and growing clockwise (90 is down).
 extern proc sector(x: f32, y: f32, radius: f32, from: f32, to: f32, color: i32)

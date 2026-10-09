@@ -587,6 +587,36 @@ public:
   Value edgeCount(const WorldRelation &relation) {
     return scalar(relation.countOffset);
   }
+
+  /// A buffer's storage: how many rows it has (an i64 scalar) and a
+  /// field's values.
+  Value bufferCount(const WorldBuffer &buffer) {
+    return scalar(buffer.countOffset);
+  }
+  Value bufferField(const WorldBuffer &buffer, const WorldColumn &field) {
+    return view(field.offset, buffer.capacity, storageType(field.type));
+  }
+  /// The places of an append inside a query, for the rows of `archetype`:
+  /// whether the row added one (a byte), and a column per field.
+  struct AppendSlots {
+    Value sent;
+    SmallVector<Value> values;
+  };
+  AppendSlots appendSlots(AppendOp append, const WorldArchetype &archetype) {
+    auto index =
+        append->getAttrOfType<IntegerAttr>(WorldLayout::kAppendIndexAttr);
+    const WorldAppend::Slots &slots =
+        layout.appends[index.getInt()].find(archetype.index);
+    const WorldBuffer &buffer =
+        layout.getBuffer(append.getBufferAttr().getAttr());
+    AppendSlots result;
+    result.sent = view(slots.sentOffset, archetype.capacity,
+                       rewriter.getI8Type());
+    for (auto [offset, field] : llvm::zip(slots.valueOffsets, buffer.fields))
+      result.values.push_back(
+          view(offset, archetype.capacity, storageType(field.type)));
+    return result;
+  }
   Value edgesClean(const WorldRelation &relation) {
     return scalar(relation.cleanOffset);
   }
@@ -1024,8 +1054,8 @@ static bool isEntityLocal(QueryOp query) {
     // Edge loops visit the entity's own edges (each edge belongs to one
     // entity's range); connects fill the entity's own slot of a buffer.
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
-            ApplyOp, AccumulateOp, YieldOp, EdgesOp, ConnectOp, DisconnectOp>(
-            op) ||
+            ApplyOp, AccumulateOp, YieldOp, EdgesOp, ConnectOp, DisconnectOp,
+            AppendOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
     return WalkResult::interrupt();
@@ -1181,7 +1211,8 @@ static bool canRunForAbsentEntities(QueryOp query) {
             [](Type type) { return isa<StringType>(type); }))
       return WalkResult::interrupt();
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
-            ApplyOp, AccumulateOp, YieldOp, scf::IfOp, scf::YieldOp>(op))
+            ApplyOp, AccumulateOp, AppendOp, YieldOp, scf::IfOp,
+            scf::YieldOp>(op))
       return WalkResult::advance();
     if (op->getNumRegions() == 0 && isPure(op))
       return WalkResult::advance();
@@ -1630,7 +1661,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
   for (Operation *root : roots)
     root->walk([&](Operation *op) {
       if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp, EntityOp, ApplyOp,
-              AccumulateOp, ConnectOp>(op))
+              AccumulateOp, ConnectOp, AppendOp>(op))
         accesses.push_back(op);
     });
   for (Operation *op : accesses) {
@@ -1833,6 +1864,19 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                               buffers.targets, ValueRange{entity});
       for (auto [value, column] :
            llvm::zip(connect.getValues(), buffers.values))
+        memref::StoreOp::create(rewriter, loc, world.toStorage(loc, value),
+                                column, ValueRange{entity});
+      rewriter.eraseOp(op);
+    } else if (auto append = dyn_cast<AppendOp>(op)) {
+      // Fill this entity's places; the query's end appends the row.
+      WorldAccess::AppendSlots slots = world.appendSlots(append, archetype);
+      Value sent = arith::ConstantIntOp::create(rewriter, loc, 1, 8);
+      if (mask)
+        sent = arith::ExtUIOp::create(rewriter, loc, rewriter.getI8Type(),
+                                      mask);
+      memref::StoreOp::create(rewriter, loc, sent, slots.sent,
+                              ValueRange{entity});
+      for (auto [value, column] : llvm::zip(append.getValues(), slots.values))
         memref::StoreOp::create(rewriter, loc, world.toStorage(loc, value),
                                 column, ValueRange{entity});
       rewriter.eraseOp(op);
@@ -2830,13 +2874,19 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   // target". So must an apply in an edge loop, whose row slot says whether
   // the loop ran.
   query.getBody().walk([&](Operation *apply) {
-    if (!isa<ApplyOp, AccumulateOp, ConnectOp>(apply) ||
+    if (!isa<ApplyOp, AccumulateOp, ConnectOp, AppendOp>(apply) ||
         appliesDirectly(apply, directApplies))
       return;
     bool inEdges = apply->getParentOfType<EdgesOp>() != nullptr;
     if (!inEdges && !guarded &&
         apply->getBlock() == &query.getBody().front())
       return;
+    if (auto append = dyn_cast<AppendOp>(apply)) {
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+          world.appendSlots(append, archetype).sent, ValueRange{entity});
+      return;
+    }
     Value ids = isa<ConnectOp>(apply)
                     ? world.connectBuffer(cast<ConnectOp>(apply), archetype)
                           .sources
@@ -5643,6 +5693,75 @@ static void appendConnected(IRRewriter &rewriter, ConnectOp connect,
   appendEdge(rewriter, loc, layout, world, relation, source, target, values);
 }
 
+/// The row `at` (an index) of `buffer` gets `values` (stored form); the
+/// program stops where the buffer has no such row.
+static void storeRow(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                     const WorldBuffer &buffer, Value at, ValueRange values) {
+  Value fits = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::ult, at,
+      arith::ConstantIndexOp::create(rewriter, loc, buffer.capacity));
+  cf::AssertOp::create(
+      rewriter, loc, fits,
+      rewriter.getStringAttr("no room for another row: the buffer @" +
+                             BufferOp(buffer.op).getSymName() + " holds " +
+                             Twine(buffer.capacity) +
+                             "; 'capacity' gives more"));
+  for (auto [value, field] : llvm::zip(values, buffer.fields))
+    memref::StoreOp::create(rewriter, loc, value,
+                            world.bufferField(buffer, field), ValueRange{at});
+}
+
+/// Append the rows `append` (inside a query) noted for the first `count`
+/// rows of `archetype`, row after row, at the insertion point.
+static void appendAppended(IRRewriter &rewriter, AppendOp append,
+                           const WorldLayout &layout,
+                           const WorldArchetype &archetype,
+                           WorldAccess &world, Value count) {
+  Location loc = append.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  const WorldBuffer &buffer =
+      layout.getBuffer(append.getBufferAttr().getAttr());
+  WorldAccess::AppendSlots slots = world.appendSlots(append, archetype);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value counter = world.bufferCount(buffer);
+  Value start = world.toIndex(
+      loc, memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}));
+  // (How many it has is carried round, and written once.)
+  auto loop = scf::ForOp::create(
+      rewriter, loc, zero, count, one, ValueRange{start},
+      [&](OpBuilder &, Location, Value row, ValueRange carried) {
+        Value at = carried[0];
+        Value sent = memref::LoadOp::create(rewriter, loc, slots.sent,
+                                            ValueRange{row});
+        Value added = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne, sent,
+            arith::ConstantIntOp::create(rewriter, loc, 0, 8));
+        auto ifAdded = scf::IfOp::create(
+            rewriter, loc, TypeRange{rewriter.getIndexType()}, added,
+            /*withElseRegion=*/true);
+        rewriter.setInsertionPointToStart(ifAdded.thenBlock());
+        SmallVector<Value> values;
+        for (Value column : slots.values)
+          values.push_back(
+              memref::LoadOp::create(rewriter, loc, column, ValueRange{row}));
+        storeRow(rewriter, loc, world, buffer, at, values);
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::AddIOp::create(rewriter, loc, at, one)});
+        rewriter.setInsertionPointToStart(ifAdded.elseBlock());
+        scf::YieldOp::create(rewriter, loc, ValueRange{at});
+        rewriter.setInsertionPointAfter(ifAdded);
+        scf::YieldOp::create(rewriter, loc, ifAdded.getResults());
+      });
+  rewriter.setInsertionPointAfter(loop);
+  memref::StoreOp::create(
+      rewriter, loc,
+      arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                 loop.getResult(0)),
+      counter, ValueRange{zero});
+}
+
 /// The name of the function that sorts `relation`'s edges if it is
 /// unclean.
 static std::string sortFunctionName(const WorldRelation &relation) {
@@ -7549,12 +7668,13 @@ static std::optional<std::string> whyScans(QueryOp query,
   }
   bool applies = false, spawns = false;
   query.getBody().walk([&](Operation *op) {
-    applies |= isa<ApplyOp, AccumulateOp, ConnectOp>(op);
+    applies |= isa<ApplyOp, AccumulateOp, ConnectOp, AppendOp>(op);
     spawns |= isa<SpawnOp>(op);
   });
   if (applies)
-    return std::string("it applies or accumulates values or connects "
-                       "edges, which are combined in row order");
+    return std::string("it applies or accumulates values, connects "
+                       "edges or appends rows, which are combined in row "
+                       "order");
   if (spawns || llvm::any_of(getMatchedArchetypes(query),
                              [&](ArchetypeOp archetype) {
                                return isStructuralFor(query, archetype);
@@ -8554,7 +8674,7 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
           rewriter.setInsertionPointToStart(branch.thenBlock());
           bool sends = false;
           query.getBody().walk([&](Operation *op) {
-            sends |= isa<ApplyOp, AccumulateOp, ConnectOp>(op);
+            sends |= isa<ApplyOp, AccumulateOp, ConnectOp, AppendOp>(op);
           });
           emitPart(rewriter, loc, sends || parallel ? "" : "body", [&] {
             emitQueryBody(rewriter, query, IRMapping(), archetype, world,
@@ -8893,6 +9013,24 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       memref::StoreOp::create(
           rewriter, loc, world.noEntity(loc),
           world.connectBuffer(connect, archetype).sources,
+          ValueRange{clear.getInductionVar()});
+    }
+  // And the rows it appends to buffers, the same way.
+  SmallVector<AppendOp> appends;
+  query.getBody().walk([&](AppendOp append) { appends.push_back(append); });
+  for (AppendOp append : appends)
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      Value rows = startCounts.lookup(&archetype);
+      if (!rows)
+        continue;
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+      auto clear = scf::ForOp::create(rewriter, loc, zero, rows, one);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(clear.getBody()->getTerminator());
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+          world.appendSlots(append, archetype).sent,
           ValueRange{clear.getInductionVar()});
     }
   {
@@ -10865,6 +11003,10 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     for (const WorldArchetype &archetype : layout.archetypes)
       if (Value rows = startCounts.lookup(&archetype))
         appendConnected(rewriter, connect, layout, archetype, world, rows);
+  for (AppendOp append : appends)
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (Value rows = startCounts.lookup(&archetype))
+        appendAppended(rewriter, append, layout, archetype, world, rows);
   // A query that reacts to its ancestors' events has passed down the ones
   // it caused itself. The counter moves on, so that these are the only
   // events of their tick and the next time can tell them from what came
@@ -11152,6 +11294,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       [&](AccumulateOp accumulate) { accumulates.push_back(accumulate); });
   SmallVector<ConnectOp> connects;
   query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
+  SmallVector<AppendOp> appends;
+  query.getBody().walk([&](AppendOp append) { appends.push_back(append); });
   // Relations whose edges the query changes: sorted when it ends.
   llvm::SetVector<Attribute> changedRelations;
   noteOrderWrites(rewriter, query, layout, world, changedRelations);
@@ -11197,7 +11341,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       continue;
     rewriter.setInsertionPoint(anchor);
     Value rows = startCounts.lookup(&archetype);
-    if (!applies.empty() || !accumulates.empty() || !connects.empty())
+    if (!applies.empty() || !accumulates.empty() || !connects.empty() ||
+        !appends.empty())
       visited.push_back({&archetype, rows});
     // A loop that never runs in parallel visits the entities in the order
     // applies are combined in, so it may combine unobserved ones directly.
@@ -11294,6 +11439,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   for (ConnectOp connect : connects)
     for (auto [archetype, count] : visited)
       appendConnected(rewriter, connect, layout, *archetype, world, count);
+  // And the rows appended to buffers, in the same order.
+  for (AppendOp append : appends)
+    for (auto [archetype, count] : visited)
+      appendAppended(rewriter, append, layout, *archetype, world, count);
 
   // Despawns and moves take effect when the whole query has run, so an
   // entity moved into another archetype the query matches is not visited
@@ -11413,7 +11562,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
           system
               .walk([](Operation *op) {
                 return isa<WriteOp, SpawnOp, DespawnOp, LookupOp, ApplyOp,
-                           AccumulateOp, EdgesOp, ConnectOp>(op)
+                           AccumulateOp, EdgesOp, ConnectOp, AppendOp,
+                           ClearOp, BufferLenOp, BufferAtOp, BufferOfOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -11500,6 +11650,27 @@ static Type functionParamType(Type type) {
   return externParamType(type);
 }
 
+/// What a C function takes for the parameters `types`. A buffer is
+/// several: how many rows it has (an `int32_t`), and where each of its
+/// fields' values are.
+static SmallVector<Type> functionParamTypes(ArrayRef<Type> types,
+                                            SymbolTable &symbols) {
+  SmallVector<Type> inputs;
+  for (Type type : types) {
+    auto handed = dyn_cast<BufferType>(type);
+    if (!handed) {
+      inputs.push_back(functionParamType(type));
+      continue;
+    }
+    MLIRContext *context = type.getContext();
+    inputs.push_back(IntegerType::get(context, 32));
+    auto buffer = symbols.lookup<BufferOp>(handed.getName().getAttr());
+    inputs.append(buffer.getFieldNames().size(),
+                  LLVM::LLVMPointerType::get(context));
+  }
+  return inputs;
+}
+
 /// Declare the C function of an extern fn or proc, `ent_<name>(params...)`,
 /// or make the function of a fn with a body, under the same name: its
 /// body with its values as they are.
@@ -11516,9 +11687,10 @@ static LogicalResult declareFunction(IRRewriter &rewriter, FunctionOp function,
     return diag;
   }
   bool defined = function.isDefined();
-  SmallVector<Type> inputs, results;
-  for (Type type : function.getParams().getAsValueRange<TypeAttr>())
-    inputs.push_back(defined ? type : functionParamType(type));
+  SmallVector<Type> inputs(function.getParams().getAsValueRange<TypeAttr>());
+  SmallVector<Type> results;
+  if (!defined)
+    inputs = functionParamTypes(inputs, symbols);
   for (Type result : function.getResultTypes())
     results.push_back(defined ? result : externParamType(result));
   rewriter.setInsertionPoint(function);
@@ -11540,8 +11712,13 @@ static LogicalResult declareFunction(IRRewriter &rewriter, FunctionOp function,
 /// takes the values as they are. For a C function a text argument is put
 /// on the stack for the call, which gets its address; the stack is given
 /// back right after, since the call may sit in a loop.
+///
+/// A buffer it is handed (`world` is then the system's): how many rows it
+/// has, and where each field's values are.
 static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
-                        FunctionOp function, bool defined) {
+                        FunctionOp function, bool defined,
+                        const WorldLayout *layout = nullptr,
+                        WorldAccess *world = nullptr) {
   Location loc = invoke.getLoc();
   if (defined) {
     rewriter.setInsertionPoint(invoke);
@@ -11589,7 +11766,19 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
       args.push_back(LLVM::IntToPtrOp::create(
           rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
           shown));
-} else if (arg.getType().isInteger(1)) {
+    } else if (isa<BufferType>(arg.getType())) {
+      auto handed = cast<BufferOfOp>(arg.getDefiningOp());
+      const WorldBuffer &buffer =
+          layout->getBuffer(handed.getBufferAttr().getAttr());
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value count = memref::LoadOp::create(
+          rewriter, loc, world->bufferCount(buffer), ValueRange{zero});
+      args.push_back(arith::TruncIOp::create(rewriter, loc,
+                                             rewriter.getI32Type(), count));
+      for (const WorldColumn &field : buffer.fields)
+        args.push_back(
+            worldPointer(rewriter, loc, world->bufferField(buffer, field)));
+    } else if (arg.getType().isInteger(1)) {
       args.push_back(
           arith::ExtUIOp::create(rewriter, loc, rewriter.getI8Type(), arg));
     } else if (auto named = dyn_cast<EnumType>(arg.getType())) {
@@ -11623,6 +11812,98 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     results.assign(scope.getResults().begin(), scope.getResults().end());
   }
   rewriter.replaceOp(invoke, results);
+}
+
+/// Lower what `func`, a system, does with buffers outside its queries: a
+/// row appended is there at once, as is none after a clear; reads; and
+/// the calls of C functions that are handed one.
+static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
+                         const WorldLayout &layout, WorldAccess &world,
+                         SymbolTable &symbols) {
+  SmallVector<Operation *> uses;
+  func.walk([&](Operation *op) {
+    if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp>(op))
+      uses.push_back(op);
+    else if (auto invoke = dyn_cast<InvokeOp>(op);
+             invoke && llvm::any_of(invoke.getArgs(), [](Value arg) {
+               return isa<BufferType>(arg.getType());
+             }))
+      uses.push_back(op);
+  });
+  for (Operation *op : uses) {
+    Location loc = op->getLoc();
+    rewriter.setInsertionPoint(op);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    if (auto invoke = dyn_cast<InvokeOp>(op)) {
+      lowerInvoke(rewriter, invoke,
+                  symbols.lookup<FunctionOp>(invoke.getCallee()),
+                  /*defined=*/false, &layout, &world);
+      continue;
+    }
+    const WorldBuffer &buffer = layout.getBuffer(
+        cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr());
+    Value counter = world.bufferCount(buffer);
+    if (isa<ClearOp>(op)) {
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+          counter, ValueRange{zero});
+      rewriter.eraseOp(op);
+      continue;
+    }
+    Value count =
+        memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero});
+    if (auto append = dyn_cast<AppendOp>(op)) {
+      SmallVector<Value> values;
+      for (Value value : append.getValues())
+        values.push_back(world.toStorage(loc, value));
+      storeRow(rewriter, loc, world, buffer, world.toIndex(loc, count),
+               values);
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::AddIOp::create(
+              rewriter, loc, count,
+              arith::ConstantIntOp::create(rewriter, loc, 1, 64)),
+          counter, ValueRange{zero});
+      rewriter.eraseOp(op);
+    } else if (isa<BufferLenOp>(op)) {
+      rewriter.replaceOpWithNewOp<arith::TruncIOp>(
+          op, rewriter.getI32Type(), count);
+    } else {
+      // A row it has not reads as nought: row 0 is read, which there is
+      // room for whatever it holds, and nought is given.
+      auto at = cast<BufferAtOp>(op);
+      const WorldColumn *field = buffer.find(at.getField());
+      Value index = at.getIndex();
+      if (index.getType() != rewriter.getI64Type())
+        index = arith::ExtSIOp::create(rewriter, loc, rewriter.getI64Type(),
+                                       index);
+      Value there = arith::CmpIOp::create(rewriter, loc,
+                                          arith::CmpIPredicate::ult, index,
+                                          count);
+      Value row = arith::SelectOp::create(
+          rewriter, loc, there, world.toIndex(loc, index), zero);
+      Value stored = memref::LoadOp::create(
+          rewriter, loc, world.bufferField(buffer, *field), ValueRange{row});
+      Value nought;
+      if (isa<FloatType>(stored.getType()))
+        nought = arith::ConstantOp::create(
+            rewriter, loc,
+            rewriter.getFloatAttr(stored.getType(), 0.0));
+      else
+        nought = arith::ConstantIntOp::create(rewriter, loc,
+                                              stored.getType(), 0);
+      rewriter.replaceOp(
+          op, world.fromStorage(
+                  loc,
+                  arith::SelectOp::create(rewriter, loc, there, stored,
+                                          nought),
+                  at.getResult().getType()));
+    }
+  }
+  SmallVector<BufferOfOp> handed;
+  func.walk([&](BufferOfOp of) { handed.push_back(of); });
+  for (BufferOfOp of : handed)
+    rewriter.eraseOp(of);
 }
 
 /// The functions that keep texts of any length (devices/text.c, the C of
@@ -12503,6 +12784,12 @@ struct EntLowerToLoops
         connect->setAttr(WorldLayout::kConnectIndexAttr,
                          rewriter.getI64IntegerAttr(connectIndex++));
     });
+    unsigned appendIndex = 0;
+    module.walk([&](AppendOp append) {
+      if (append->getParentOfType<QueryOp>())
+        append->setAttr(WorldLayout::kAppendIndexAttr,
+                        rewriter.getI64IntegerAttr(appendIndex++));
+    });
     MemRefType arenaType = getArenaType(module.getContext(), *layout);
     for (const WorldRelation &relation : layout->relations)
       emitSortFunction(rewriter, module, *layout, relation, arenaType);
@@ -12640,6 +12927,7 @@ struct EntLowerToLoops
       }
       lowerSpawns(rewriter, func, *layout, world);
       lowerConnects(rewriter, func, *layout, world);
+      lowerBuffers(rewriter, func, *layout, world, symbols);
       // Innermost first, so an outer `if` sees merged inner ones.
       SmallVector<scf::IfOp> branches;
       func.walk<WalkOrder::PostOrder>(
@@ -12809,7 +13097,7 @@ struct EntLowerToLoops
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
       if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp, ExternOp,
-              FunctionOp, EnumOp, TableOp>(op))
+              FunctionOp, EnumOp, TableOp, BufferOp>(op))
         rewriter.eraseOp(&op);
 
     if (failed(convertEntityTypes(module, layout->entities.idBits)))

@@ -3105,3 +3105,50 @@ The same, as it should be: it is the same storage, said in one word.
   power profile, which fits cores being clocked lower while they sleep,
   and is still not verified.
 
+## 2026-10-09: all that moves drawn with one call (buffers)
+
+What the game left open first: 15,000 to 20,000 calls of the window a
+frame, one for each thing in the window. Where the 12 ms of `draw` went
+(mains, the `performance` profile, the window's `rect` and `circle` made
+to return at once, one and then the other):
+
+| | |
+|---|---|
+| the `for`s over all that moves, and their calls, with nothing drawn | 3.9 ms |
+| raylib drawing the rectangles | 4.1 ms |
+| raylib drawing the circles | 3.1 ms |
+
+So a third was the program's own: a `for` that calls a proc visits its
+entities one at a time, on one core.
+
+Now a buffer (`docs/syntax.md`, Buffers): the `for`s give the window's
+`Shapes` a row for each thing in the window, and `shapes` hands the
+buffer to the window once. `bench/swarm/run.py 1800`, the last three
+reports, the same commit with the game drawing as it did before and as
+it does now, in a window of 1400 by 836:
+
+| | a frame | computing | drawing |
+|---|---|---|---|
+| `--parallel`, a call each | 14.6 to 15.5 ms | 4.6 to 4.9 ms | 9.8 to 10.5 ms |
+| `--parallel`, the buffer | 6.1 to 6.7 ms | 3.8 to 4.3 ms | 1.9 to 2.1 ms |
+| one core, a call each | 32.3 to 34.7 ms | 19.8 to 21.5 ms | 12.1 to 13.2 ms |
+| one core, the buffer | 23.0 to 24.6 ms | 19.9 to 21.6 ms | 2.5 ms |
+
+Of the 2 ms that drawing takes now on all cores (`--laps`): 1.0 ms the
+five `for`s that fill the buffer (on all cores, and the rows copied out
+in their order after each), 0.5 ms the window drawing them, 1.0 ms the
+texts at the top (`hud`: unchanged), 0.3 ms `present`.
+
+- The window is handed the buffer as how many rows there are and where
+  each field's values lie, and where the graphics card takes many things
+  in one go (OpenGL 3.3: instancing) it passes those on as they are: a
+  square for each row, placed and coloured by the row, a circle cut out
+  of it where the row is `round`. Nothing is computed for a row on the
+  way.
+- Elsewhere it draws a quad a row through raylib's batch. That alone,
+  tried by turning the first way off, takes four times as long for the
+  window's part (2.1 ms at frame 900, against 0.5 ms at frame 1800 with
+  more to draw), and is still twice as fast as a call each.
+- The order of what is drawn is that of the `for`s and, in each, of the
+  entities: the same on one core and on all.
+
