@@ -657,12 +657,6 @@ LogicalResult ExternOp::verify() {
              << index
              << " is a component reference; references can only be bound "
                 "by 'ent.query'";
-    // (One of any length is: as the address of its block.)
-    if (isa<TextType>(type))
-      return emitOpError("parameter #")
-             << index
-             << " is a text, which cannot be passed to C yet; put it in a "
-                "component or resource the system reads";
   }
   return verifyAccessLists(*this, getReadsAttr(), getWritesAttr());
 }

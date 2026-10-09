@@ -20,10 +20,3 @@ ent.archetype @A (@P) capacity 10
 // expected-error @+1 {{C name 'ent_A_P_x' is generated twice}}
 ent.resource @A_P (x: f32)
 
-// -----
-
-ent.component @P (x: f32)
-ent.archetype @A (@P) capacity 10
-// expected-error @+1 {{parameter #0 is a text, which a C host cannot pass yet; put it in a resource the schedule's systems read}}
-ent.schedule @f(%t: !ent.text<8>) {
-}

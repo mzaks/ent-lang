@@ -11454,9 +11454,13 @@ static LogicalResult declareExtern(IRRewriter &rewriter, ExternOp external,
     diag.attachNote(other->getLoc()) << "declared here";
     return diag;
   }
+  // (A text crosses as a pointer to it, as to an extern proc.)
   SmallVector<Type> inputs{LLVM::LLVMPointerType::get(rewriter.getContext())};
   for (Type type : external.getParams().getAsValueRange<TypeAttr>())
-    inputs.push_back(externParamType(type));
+    inputs.push_back(isa<TextType>(type)
+                         ? Type(LLVM::LLVMPointerType::get(
+                               rewriter.getContext()))
+                         : externParamType(type));
   rewriter.setInsertionPoint(external);
   auto func = func::FuncOp::create(rewriter, external.getLoc(), name,
                                    rewriter.getFunctionType(inputs, {}));
@@ -11903,6 +11907,19 @@ static void lowerRun(IRRewriter &rewriter, RunOp run, Value arena,
         args.push_back(LLVM::IntToPtrOp::create(
             rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
             shown));
+        continue;
+      }
+      if (auto text = dyn_cast<TextType>(arg.getType())) {
+        // A text of a capacity: a pointer to it, kept while the C runs.
+        IntegerType storage = text.getStorageType();
+        Value slot = memref::AllocaOp::create(
+            rewriter, loc, MemRefType::get({}, storage), ValueRange{},
+            rewriter.getI64IntegerAttr(16));
+        Value bits =
+            UnrealizedConversionCastOp::create(rewriter, loc, storage, arg)
+                .getResult(0);
+        memref::StoreOp::create(rewriter, loc, bits, slot, ValueRange{});
+        args.push_back(worldPointer(rewriter, loc, slot));
         continue;
       }
       args.push_back(arg.getType().isInteger(1)
@@ -12496,6 +12513,41 @@ struct EntLowerToLoops
                                          schedule.getBody(), arenaType);
       scheduleFuncs.push_back(func);
       func->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
+      // A schedule that takes a text of a capacity has a way in for a C
+      // host that takes a pointer to it: C has no such value to pass.
+      if (llvm::any_of(func.getArgumentTypes(),
+                       [](Type type) { return isa<TextType>(type); })) {
+        Location loc = func.getLoc();
+        Type pointer = LLVM::LLVMPointerType::get(rewriter.getContext());
+        SmallVector<Type> inputs;
+        for (Type type : func.getArgumentTypes())
+          inputs.push_back(isa<TextType>(type) ? pointer : type);
+        rewriter.setInsertionPointAfter(func);
+        auto host = func::FuncOp::create(
+            rewriter, loc, (func.getSymName() + ".host").str(),
+            rewriter.getFunctionType(inputs, {}));
+        host->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
+        Block *block = host.addEntryBlock();
+        rewriter.setInsertionPointToEnd(block);
+        SmallVector<Value> args;
+        for (auto [given, type] :
+             llvm::zip(block->getArguments(), func.getArgumentTypes())) {
+          auto text = dyn_cast<TextType>(type);
+          if (!text) {
+            args.push_back(given);
+            continue;
+          }
+          Value bits = LLVM::LoadOp::create(rewriter, loc,
+                                            text.getStorageType(), given,
+                                            /*alignment=*/1);
+          args.push_back(
+              UnrealizedConversionCastOp::create(rewriter, loc, type, bits)
+                  .getResult(0));
+        }
+        func::CallOp::create(rewriter, loc, func.getSymName(), TypeRange{},
+                             args);
+        func::ReturnOp::create(rewriter, loc);
+      }
       WorldAccess world(rewriter, *layout, arena);
       if (fuseSystems)
         fuseSchedule(rewriter, func, symbols, *layout, world, options);

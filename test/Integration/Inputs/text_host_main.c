@@ -26,11 +26,22 @@ void ent_report(ent_world *world, const ent_text *before) {
            words[i] ? (unsigned)words[i]->length : 0u);
 }
 
+void ent_stamp(ent_world *world, const ent_text14 *mark, int32_t n) {
+  (void)world;
+  printf("stamp %.*s (%u) %d\n", (int)mark->length, mark->bytes,
+         (unsigned)mark->length, n);
+}
+
 int main(void) {
   ent_world *world = ent_world_create();
   ent_frame(world, text_of("one"), 1);
   ent_frame(world, text_of("two"), 2);
   // (No address: a text without bytes.)
   ent_frame(world, 0, 3);
+  // A text of a capacity: the length, then the bytes, by a pointer.
+  ent_text14 with = {5, "hello"};
+  ent_mark(world, &with, 6);
+  // The world given back, with the texts its fields hold.
+  ent_world_destroy(world);
   return 0;
 }

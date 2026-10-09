@@ -7,6 +7,8 @@ default_capacity 16
 
 // Implemented by the host: prints the notes, each after `before`.
 extern system report(before: text) reads Note, Title
+// (A text of a capacity crosses both ways too: as a pointer to it.)
+extern system stamp(mark: text[14], n: i32)
 
 system add(name: text, n: i32) {
   spawn { Note { words: name + " " + "{n}", n: n } }
@@ -20,4 +22,7 @@ schedule frame(name: text, n: i32) {
   add(name, n)
   grow()
   report("- " + name + ": ")
+}
+schedule mark(with: text[14], n: i32) {
+  stamp(with, n + 1)
 }

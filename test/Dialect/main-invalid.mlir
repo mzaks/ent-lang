@@ -100,7 +100,3 @@ ent.schedule @f() {
   ent.call @f()
 }
 
-// -----
-
-// expected-error @+1 {{parameter #0 is a text, which cannot be passed to C yet; put it in a component or resource the system reads}}
-ent.extern @e(!ent.text<8>)

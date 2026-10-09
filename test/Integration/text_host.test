@@ -2,8 +2,10 @@
 // (`const ent_text *`, or no address for one without bytes) and an extern
 // system one from the program; C reads those that fields hold. What the
 // program joins while a schedule runs is given back when the schedule is
-// done, also where the host runs it: none is kept at the end. (What the
-// fields hold stays: the world is the host's.)
+// done, also where the host runs it: none is kept at the end. What the
+// fields hold stays while the world is the host's, and goes with it
+// (`ent_world_destroy`). A text of a capacity crosses as a pointer to it:
+// into a schedule from the host, and to an extern system.
 // RUN: mkdir -p %t.dir
 // RUN: ent-translate --import-ent %S/Inputs/text_host.ent -I %S/../../devices -o %t.mlir
 // RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/text_host_world.h
@@ -17,8 +19,13 @@
 // RUN: FileCheck %s --input-file=%t.out
 // RUN: FileCheck %s --check-prefix=HELD --input-file=%t.err
 
+// HEADER: void ent_text_drop(uint64_t held);
+// HEADER: static inline void ent_world_destroy(ent_world *world) {
+// HEADER:   ent_text_drop(
 // HEADER: static inline void ent_frame(ent_world *world, const ent_text * arg0, int32_t arg1) {
+// HEADER: static inline void ent_mark(ent_world *world, const ent_text14 *arg0, int32_t arg1) {
 // HEADER: void ent_report(ent_world *world, const ent_text * arg0);
+// HEADER: void ent_stamp(ent_world *world, const ent_text14 *arg0, int32_t arg1);
 
 // CHECK:      - one: (last: one)
 // CHECK-NEXT:   one 1! (6)
@@ -30,5 +37,9 @@
 // CHECK-NEXT:   two 2!! (7)
 // CHECK-NEXT:    3! (3)
 
-// HELD:      texts held: 4
+// CHECK-NEXT: stamp hello (5) 7
+
+// (None held at the end: `ent_world_destroy` gives back what the fields
+// held.)
+// HELD:      texts held: 0
 // HELD-NEXT: texts kept: 0

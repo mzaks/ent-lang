@@ -261,9 +261,33 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
   for (auto [offset, bytes] : layout->zeroed)
     os << llvm::formatv("  memset((char *)arena + {0}, 0, {1});\n", offset,
                         bytes);
-  os << "  return (ent_world *)arena;\n}\n\n"
-        "static inline void ent_world_destroy(ent_world *world) { "
-        "free(world); }\n";
+  os << "  return (ent_world *)arena;\n}\n\n";
+  // A world is given back with the texts of any length its fields hold:
+  // each a block of its own (as a program's `main` gives them back at
+  // its end).
+  std::string drops;
+  for (const WorldArchetype &archetype : layout->archetypes)
+    for (const WorldColumn &column : archetype.columns)
+      if (isa<StringType>(column.type))
+        drops += llvm::formatv(
+                     "  for (int64_t row = 0, rows = ((const int64_t *)"
+                     "world)[{0}]; row < rows; ++row)\n"
+                     "    ent_text_drop(((const uint64_t *)((char *)world + "
+                     "{1}))[row]);\n",
+                     archetype.index, column.offset)
+                     .str();
+  for (const WorldResource &resource : layout->resources)
+    for (const WorldResourceField &field : resource.fields)
+      if (isa<StringType>(field.type))
+        drops += llvm::formatv("  ent_text_drop(*(const uint64_t *)((char *)"
+                               "world + {0}));\n",
+                               field.offset)
+                     .str();
+  if (!drops.empty())
+    os << "void ent_text_drop(uint64_t held);\n";
+  os << "static inline void ent_world_destroy(ent_world *world) {\n"
+        "  if (!world)\n    return;\n"
+     << drops << "  free(world);\n}\n";
 
   // Texts: one struct per capacity some field has, laid out as the program
   // stores them.
@@ -275,6 +299,15 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         if (auto text = dyn_cast<TextType>(type))
           textCapacities.insert(text.getCapacity());
   addFunctionTexts(module, textCapacities);
+  // (And those a schedule or an extern system takes.)
+  for (ScheduleOp schedule : module.getOps<ScheduleOp>())
+    for (Type type : schedule.getBody().getArgumentTypes())
+      if (auto text = dyn_cast<TextType>(type))
+        textCapacities.insert(text.getCapacity());
+  for (ExternOp external : module.getOps<ExternOp>())
+    for (Type type : external.getParams().getAsValueRange<TypeAttr>())
+      if (auto text = dyn_cast<TextType>(type))
+        textCapacities.insert(text.getCapacity());
   emitTexts(module, os, textCapacities);
   emitEnums(module, os);
 
@@ -775,13 +808,18 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     if (failed(claim(schedule, name)))
       return failure();
     SmallVector<std::string> params, args;
+    // (A text of a capacity is passed by a pointer to it, through the way
+    // in the program has for that.)
+    bool byPointer = false;
     for (BlockArgument arg : schedule.getBody().getArguments()) {
       StringRef cType = getCType(arg.getType());
-      if (isa<TextType>(arg.getType()))
-        return schedule.emitError("parameter #")
-               << arg.getArgNumber()
-               << " is a text, which a C host cannot pass yet; put it in a "
-                  "resource the schedule's systems read";
+      if (isa<TextType>(arg.getType())) {
+        byPointer = true;
+        params.push_back(llvm::formatv("const {0} *arg{1}", cType,
+                                       arg.getArgNumber()));
+        args.push_back(llvm::formatv("arg{0}", arg.getArgNumber()));
+        continue;
+      }
       if (cType.empty())
         return schedule.emitError("parameter #")
                << arg.getArgNumber() << " has type " << arg.getType()
@@ -798,9 +836,9 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     // C name (a module's schedule, `m.frame`), it is declared under one
     // and bound to the symbol.
     std::string label;
-    if (name != schedule.getSymName())
-      label = llvm::formatv(" ENT__SYMBOL(\"_mlir_ciface_{0}\")",
-                            schedule.getSymName());
+    if (name != schedule.getSymName() || byPointer)
+      label = llvm::formatv(" ENT__SYMBOL(\"_mlir_ciface_{0}{1}\")",
+                            schedule.getSymName(), byPointer ? ".host" : "");
     os << llvm::formatv("\nvoid _mlir_ciface_{0}({1}ent_arena_descriptor "
                         "*world){2};\n",
                         name, declParams, label);
@@ -832,7 +870,10 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         return external.emitError("parameter #")
                << index << " has type " << type
                << ", which has no C equivalent here";
-      params += llvm::formatv(", {0} arg{1}", cType, index).str();
+      params += llvm::formatv(isa<TextType>(type) ? ", const {0} *arg{1}"
+                                                  : ", {0} arg{1}",
+                              cType, index)
+                    .str();
     }
     os << llvm::formatv("void {0}(ent_world *world{1});\n",
                         external.getCName(), params);
