@@ -3087,3 +3087,21 @@ other, the last two reports:
 | one core, computing | 20.1 to 21.7 ms | 20.2 to 21.1 ms |
 
 The same, as it should be: it is the same storage, said in one word.
+
+### The same on mains (the `performance` profile)
+
+| threads without work | a frame | computing | drawing | CPU for the run |
+|---|---|---|---|---|
+| spin 200 ms, first run | 20.1 to 21.5 ms | 4.0 to 4.4 ms | 15.6 to 16.8 ms | 487 s |
+| spin 200 ms, second run | 14.9 to 16.0 ms | 3.6 to 3.9 ms | 11.1 to 12.0 ms | 353 s |
+| sleep at once (`KMP_BLOCKTIME=0`) | 14.7 to 16.1 ms | 4.6 to 5.0 ms | 9.9 to 11.1 ms | 81 s |
+| spin 1 ms (what a program now says) | 14.4 to 15.6 ms | 4.4 to 4.8 ms | 9.8 to 10.8 ms | 147 s |
+
+- With threads that sleep the two runs of each agree to a tenth of a
+  millisecond; with threads that spin one run drew in 16 ms and the
+  other in 11.5 ms. Why the two differ is not known.
+- The computing is 0.5 to 0.8 ms slower with threads that sleep (on
+  battery it was 1.7 ms): most of what was seen there went with the
+  power profile, which fits cores being clocked lower while they sleep,
+  and is still not verified.
+
