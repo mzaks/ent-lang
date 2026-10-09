@@ -276,7 +276,8 @@ come with the compiler, in `devices/`, and two more that need
   `tools/ent run -I examples examples/clay/video_demo.ent`; `examples/towers.ent` is a tower defence game (bars of the layout
   library around a board that is drawn into the box between them; towers
   that look at the foes with a `for` inside their own, and send what
-  they do to the one they pick): `tools/ent run -I examples
+  they do to the one they pick; two maps, each one's road a table that
+  a fn gives as a value): `tools/ent run -I examples
   examples/towers.ent`; `examples/snake.ent` is snake on a board as big as fits in the
   window, each piece of the snake an entity that stays for so many more
   steps; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are

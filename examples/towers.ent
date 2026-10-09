@@ -5,7 +5,8 @@
 //   tools/ent run -I examples examples/towers.ent
 //
 // Click a tower in the bar below, then a field beside the road. Space
-// calls the next wave early, F fills the screen, enter starts over.
+// calls the next wave early, F fills the screen, enter starts over (and,
+// after a map is held, the next of the two maps).
 //
 // - An arrow tower hits the foe in its reach that is furthest along.
 // - A cannon lobs a shell at it, which hurts every foe near where it lands.
@@ -13,9 +14,9 @@
 //
 // What it is made of: the bars are boxes of the layout library, the board
 // is drawn into the box between them (after the boxes, before what floats
-// over them); the road is a table of points, and the towers and the foes
-// are tables with a row for each kind; foes, towers and shells are
-// entities. A tower looks at the foes with a `for` inside its own `for`,
+// over them); each map's road is a table of points, and the road of the
+// map that is played a table that a fn gives; the towers and the foes are
+// tables with a row for each kind; foes, towers and shells are entities. A tower looks at the foes with a `for` inside its own `for`,
 // and what it does to the one it picks it sends to it; a shell that
 // lands sends to every foe near it from inside such a `for`; a foe looks
 // at the frost towers the same way.
@@ -57,8 +58,8 @@ component Counter { what: Tally }
 component Button { does: i32 }
 
 unique Game {
-  state: State, wave: i32, left: i32, gap: f32, rest: f32, chosen: Kind,
-  alive: i32
+  state: State, map: i32, wave: i32, left: i32, gap: f32, rest: f32,
+  chosen: Kind, alive: i32
 }
 unique Gold: i32
 unique Lives: i32
@@ -70,7 +71,7 @@ unique Grid { x: f32, y: f32, cell: f32 }
 unique Hover { col: i32, row: i32, on: bool }
 // What the labels say now; what a button was asked to do this frame; the
 // keys as they were.
-unique Said { gold: i32, lives: i32, wave: i32 }
+unique Said { gold: i32, lives: i32, wave: i32, map: i32 }
 unique Did: i32
 unique Was { go: bool, f: bool, again: bool }
 default_capacity 512
@@ -79,21 +80,31 @@ fn cols() -> i32 { 20 }
 fn rows() -> i32 { 12 }
 fn waves() -> i32 { 10 }
 
-// The road: from point to point, each in the middle of a field (the
-// first and the last are off the board).
-table road { x: f32, y: f32 } = [
+// The roads, one for each map: from point to point, each in the middle
+// of a field (the first and the last are off the board). A map's road is
+// a table, and `road` gives the one of a map: a table as a value.
+table west_road { x: f32, y: f32 } = [
   { x: -1.0, y: 2.0 }, { x: 4.0, y: 2.0 }, { x: 4.0, y: 8.0 },
   { x: 9.0, y: 8.0 }, { x: 9.0, y: 3.0 }, { x: 15.0, y: 3.0 },
   { x: 15.0, y: 9.0 }, { x: 20.0, y: 9.0 }
 ]
-fn on_road(col: i32, row: i32) -> bool {
+table north_road { x: f32, y: f32 } = [
+  { x: 10.0, y: -1.0 }, { x: 10.0, y: 2.0 }, { x: 3.0, y: 2.0 },
+  { x: 3.0, y: 6.0 }, { x: 13.0, y: 6.0 }, { x: 13.0, y: 10.0 },
+  { x: 6.0, y: 10.0 }, { x: 6.0, y: 12.0 }
+]
+fn maps() -> i32 { 2 }
+fn road(map: i32) -> rows { x: f32, y: f32 } {
+  if map == 0 { west_road } else { north_road }
+}
+fn on_road(way: rows { x: f32, y: f32 }, col: i32, row: i32) -> bool {
   var on = false
-  let last = len(road) - 1
+  let last = len(way) - 1
   for i in 0..last {
-    if col as f32 >= min(road[i].x, road[i + 1].x) &&
-       col as f32 <= max(road[i].x, road[i + 1].x) &&
-       row as f32 >= min(road[i].y, road[i + 1].y) &&
-       row as f32 <= max(road[i].y, road[i + 1].y) {
+    if col as f32 >= min(way[i].x, way[i + 1].x) &&
+       col as f32 <= max(way[i].x, way[i + 1].x) &&
+       row as f32 >= min(way[i].y, way[i + 1].y) &&
+       row as f32 <= max(way[i].y, way[i + 1].y) {
       on = true
     }
   }
@@ -241,11 +252,12 @@ system bars() {
     }
     Said.lives = Lives
   }
-  if Said.wave != Game.wave {
+  if Said.wave != Game.wave || Said.map != Game.map {
     for t: mut Text, c: Counter where c.what == Tally.Wave {
-      t.text = "wave {Game.wave} of {waves()}"
+      t.text = "map {Game.map + 1}, wave {Game.wave} of {waves()}"
     }
     Said.wave = Game.wave
+    Said.map = Game.map
   }
   for e, k: Button, f: mut Fill, d: mut Border {
     let fill = if e.has(Hovered) { 0x364354 } else { 0x2a3442 }
@@ -261,7 +273,9 @@ system bars() {
     Area.w = b.w
     Area.h = b.h
   }
-  let cell = max(4.0, floor(min(Area.w / cols() as f32, Area.h / rows() as f32)))
+  // (With room around them for the board's frame.)
+  let cell = max(4.0, floor(min((Area.w - 12.0) / cols() as f32,
+                                (Area.h - 12.0) / rows() as f32)))
   Grid.cell = cell
   Grid.x = floor(Area.x + (Area.w - cell * cols() as f32) * 0.5)
   Grid.y = floor(Area.y + (Area.h - cell * rows() as f32) * 0.5)
@@ -294,7 +308,7 @@ system input() {
   Hover.col = col
   Hover.row = row
   if Hover.on && PointerTouch == Touch.PressedNow &&
-     Game.state == State.Playing && !on_road(col, row) &&
+     Game.state == State.Playing && !on_road(road(Game.map), col, row) &&
      Gold >= cost(Game.chosen) {
     let taken = for s: Site where s.col == col && s.row == row { }
     if taken == 0 {
@@ -308,9 +322,11 @@ system input() {
     }
   }
 
-  // Enter: from the start.
+  // Enter: from the start; on the next map after one that was held, and
+  // on the first again after the last.
   let again = Keys.enter
   if again && !Was.again {
+    if Game.state == State.Won { Game.map = (Game.map + 1) % maps() }
     for e with Foe { e.destroy() }
     for e with Tower { e.destroy() }
     for e with Shell { e.destroy() }
@@ -341,7 +357,8 @@ system marshal() {
       let hp = life(breed, Game.wave)
       spawn {
         Foe { breed: breed, reward: breeds[breed].bounty },
-        At { x: road[0].x, y: road[0].y }, Walk { leg: 0, far: 0.0 },
+        At { x: road(Game.map)[0].x, y: road(Game.map)[0].y },
+        Walk { leg: 0, far: 0.0 },
         Health { hp: hp, full: hp }, Chill { left: 0.0 }
       }
       Game.left -= 1
@@ -368,18 +385,19 @@ system marshal() {
 // is cold; one that gets to the end costs a life.
 system walk() {
   let dt = min(Window.dt, 0.05)
+  let way = road(Game.map)
   for e, f: Foe, a: mut At, w: mut Walk, c: Chill {
     var step = breeds[f.breed].pace * dt
     if c.left > 0.0 { step = step * 0.5 }
-    let tx = road[w.leg + 1].x
-    let ty = road[w.leg + 1].y
+    let tx = way[w.leg + 1].x
+    let ty = way[w.leg + 1].y
     let away = sqrt(apart(a.x, a.y, tx, ty))
     if away <= step {
       a.x = tx
       a.y = ty
       w.leg += 1
       w.far = w.leg as f32 * 100.0
-      if w.leg >= len(road) - 1 {
+      if w.leg >= len(way) - 1 {
         Lives -= 1
         e.destroy()
       }
@@ -494,12 +512,13 @@ system draw_board() {
   let gy = Grid.y
   let wide = cell * cols() as f32
   let high = cell * rows() as f32
+  let way = road(Game.map)
   // Grass, a little lighter in every other field, and the road.
   rounded(gx - 5.0, gy - 5.0, wide + 10.0, high + 10.0, 8.0, 8.0, 8.0, 8.0,
           0x2a3442)
   for r in 0..rows() {
     for c in 0..cols() {
-      let colour = if on_road(c, r) { 0x8a7a5c }
+      let colour = if on_road(way, c, r) { 0x8a7a5c }
                    else if (r + c) % 2 == 0 { 0x2f5d3a } else { 0x2b5536 }
       rect(gx + c as f32 * cell, gy + r as f32 * cell, cell, cell, colour)
     }
@@ -507,7 +526,8 @@ system draw_board() {
 
   // Where the chosen tower would stand and reach, under the pointer.
   if Hover.on && Game.state == State.Playing {
-    let free = !on_road(Hover.col, Hover.row) && Gold >= cost(Game.chosen)
+    let free = !on_road(way, Hover.col, Hover.row) &&
+               Gold >= cost(Game.chosen)
     let x = gx + (Hover.col as f32 + 0.5) * cell
     let y = gy + (Hover.row as f32 + 0.5) * cell
     circle(x, y, reach(Game.chosen) * cell,
@@ -573,7 +593,10 @@ system draw_board() {
   if Game.state != State.Playing {
     var title: text[30] = "the road is held"
     if Game.state == State.Lost { title = "they got through" }
-    let hint = "enter to start over"
+    var hint: text[30] = "enter to start over"
+    if Game.state == State.Won && Game.map + 1 < maps() {
+      hint = "enter for the next map"
+    }
     let big = max(26.0, cell * 0.9)
     let box = max(text_width(title, big), text_width(hint, 18.0)) + 56.0
     let tall = big + 18.0 + 46.0
