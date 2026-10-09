@@ -19,6 +19,11 @@ them as systems. It is being built; what is here so far:
   through, and the things of a level as entities.
 - `sprites.ent`: what is drawn after the walls: the things by their
   sprites, and textures in openings.
+- `demo.ent`, `specials.ent`, `items.ent`, `play.ent`: a demo's keys tic
+  by tic; the lights of sectors; what the player has and picks up; and
+  the player moved through the level, stopped by walls and things and
+  sliding along them. Not yet: doors and lifts, weapons, and anything a
+  monster does.
 - `doom.ent`: the program, which so far shows E1M1 from where the player
   starts (the arrow keys move the eye; Tab shows the map).
 - `check/`: programs that print what the port computes, to hold against
@@ -35,6 +40,7 @@ examples/doom/reference/fetch.sh demo1 demo2 demo3   # the traces to match
 examples/doom/check/maths.sh                         # "the same: 24 lines"
 examples/doom/check/automap.sh                       # E1M1 read and drawn
 examples/doom/check/view.sh                          # what is seen, pixel for pixel
+examples/doom/check/trace.sh                         # the demos, tic by tic
 cd build/doom/wad &&                                 # where doom1.wad is
   ../../../tools/ent run -I ../../../examples/doom ../../../examples/doom/doom.ent
 ```

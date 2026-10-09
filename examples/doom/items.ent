@@ -1,0 +1,309 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// What the player has and picks up (p_inter.c, the giving half): health
+// and armour, weapons and what they shoot, keys, and powers that last a
+// while.
+import fixed
+import info
+import things
+
+// What the player has, one row: armour, the weapons owned and the keys
+// (a bit for each), the weapon in hand and the one that is coming up,
+// and what was found.
+buffer Inv {
+  armorpoints: i32, armortype: i32, weapons: i32, cards: i32, backpack: bool,
+  readyweapon: i32, pendingweapon: i32, itemcount: i32, bonuscount: i32
+} capacity 1
+// The four kinds of ammunition: how much the player has and can have.
+buffer Ammo { count: i32, most: i32 } capacity 4
+// The six powers: how many tics each has left (the berserk pack: how
+// long it has been had).
+buffer Powers { tics: i32 } capacity 6
+// The things that were picked up this tic, by their numbers.
+buffer Taken { id: i32 } capacity 256
+
+const WP_FIST = 0
+const WP_PISTOL = 1
+const WP_SHOTGUN = 2
+const WP_CHAINGUN = 3
+const WP_MISSILE = 4
+const WP_PLASMA = 5
+const WP_BFG = 6
+const WP_CHAINSAW = 7
+const WP_SUPERSHOTGUN = 8
+const WP_NOCHANGE = 10
+
+const AM_CLIP = 0
+const AM_SHELL = 1
+const AM_CELL = 2
+const AM_MISL = 3
+const AM_NOAMMO = 5
+
+const PW_INVULNERABILITY = 0
+const PW_STRENGTH = 1
+const PW_INVISIBILITY = 2
+const PW_IRONFEET = 3
+const PW_ALLMAP = 4
+const PW_INFRARED = 5
+
+const IT_BLUECARD = 0
+const IT_YELLOWCARD = 1
+const IT_REDCARD = 2
+const IT_BLUESKULL = 3
+const IT_YELLOWSKULL = 4
+const IT_REDSKULL = 5
+
+const MAXHEALTH = 100
+const BONUSADD = 6
+const TICRATE = 35
+
+// What a weapon shoots, and how much of each kind a clip is.
+table weaponammo: i32 = [5, 0, 1, 0, 3, 2, 2, 5, 1]
+table clipammo: i32 = [10, 4, 20, 1]
+
+fn is_taken(taken: Taken, id: i32) -> bool {
+  var found = false
+  for i in 0..len(taken) {
+    if taken[i].id == id { found = true }
+  }
+  found
+}
+
+// So many clips of a kind of ammunition (nought: half a clip), if the
+// player can carry more; with the first of a kind, the weapon for it
+// comes up (P_GiveAmmo).
+proc give_ammo(inv: mut Inv, ammo: mut Ammo, kind: i32, clips: i32,
+               skill: i32) -> bool {
+  var given = false
+  if kind != AM_NOAMMO && ammo[kind].count != ammo[kind].most {
+    let some = if clips != 0 { clips * clipammo[kind] } else { clipammo[kind] / 2 }
+    // (Twice as much for those who find it too hard, or play it
+    // hardest.)
+    let num = if skill == 0 || skill == 4 { some << 1 } else { some }
+    let old = ammo[kind].count
+    ammo[kind].count = min(old + num, ammo[kind].most)
+    if old == 0 {
+      let ready = inv[0].readyweapon
+      let owned = inv[0].weapons
+      if kind == AM_CLIP {
+        if ready == WP_FIST {
+          inv[0].pendingweapon = if owned & 1 << WP_CHAINGUN != 0 {
+            WP_CHAINGUN
+          } else {
+            WP_PISTOL
+          }
+        }
+      } else if kind == AM_SHELL {
+        if (ready == WP_FIST || ready == WP_PISTOL) && owned & 1 << WP_SHOTGUN != 0 {
+          inv[0].pendingweapon = WP_SHOTGUN
+        }
+      } else if kind == AM_CELL {
+        if (ready == WP_FIST || ready == WP_PISTOL) && owned & 1 << WP_PLASMA != 0 {
+          inv[0].pendingweapon = WP_PLASMA
+        }
+      } else if kind == AM_MISL {
+        if ready == WP_FIST && owned & 1 << WP_MISSILE != 0 {
+          inv[0].pendingweapon = WP_MISSILE
+        }
+      }
+    }
+    given = true
+  }
+  given
+}
+
+// A weapon, with ammunition for it (P_GiveWeapon, in a game for one).
+proc give_weapon(inv: mut Inv, ammo: mut Ammo, weapon: i32, dropped: bool,
+                 skill: i32) -> bool {
+  let gaveammo = give_ammo(inv, ammo, weaponammo[weapon],
+                           if dropped { 1 } else { 2 }, skill)
+  var gaveweapon = false
+  if inv[0].weapons & 1 << weapon == 0 {
+    gaveweapon = true
+    inv[0].weapons |= 1 << weapon
+    inv[0].pendingweapon = weapon
+  }
+  gaveweapon || gaveammo
+}
+
+// Health, up to a hundred (P_GiveBody).
+proc give_body(pmo: mut Pmo, num: i32) -> bool {
+  var given = false
+  if pmo[0].health < MAXHEALTH {
+    pmo[0].health = min(pmo[0].health + num, MAXHEALTH)
+    given = true
+  }
+  given
+}
+
+// Armour of a class, if it is better than what the player has
+// (P_GiveArmor).
+proc give_armor(inv: mut Inv, class: i32) -> bool {
+  var given = false
+  if inv[0].armorpoints < class * 100 {
+    inv[0].armortype = class
+    inv[0].armorpoints = class * 100
+    given = true
+  }
+  given
+}
+
+// A power (P_GivePower).
+proc give_power(pmo: mut Pmo, powers: mut Powers, power: i32) -> bool {
+  var given = true
+  if power == PW_INVULNERABILITY {
+    powers[power].tics = 30 * TICRATE
+  } else if power == PW_INVISIBILITY {
+    powers[power].tics = 60 * TICRATE
+    pmo[0].flags |= MF_SHADOW
+  } else if power == PW_INFRARED {
+    powers[power].tics = 120 * TICRATE
+  } else if power == PW_IRONFEET {
+    powers[power].tics = 60 * TICRATE
+  } else if power == PW_STRENGTH {
+    let healed = give_body(pmo, 100)
+    powers[power].tics = 1
+  } else if powers[power].tics != 0 {
+    given = false
+  } else {
+    powers[power].tics = 1
+  }
+  given
+}
+
+// The player touches a thing that can be picked up (row `n` of `Near`):
+// if it is within reach and of use, the player has it and the thing is
+// gone (P_TouchSpecialThing).
+proc touch_special(near: mut Near, taken: mut Taken, pmo: mut Pmo,
+                   inv: mut Inv, ammo: mut Ammo, powers: mut Powers, n: i32,
+                   z: i32, skill: i32) {
+  let delta = near[n].z - z
+  if !near[n].gone && delta <= pmo[0].height && delta >= -8 * FRACUNIT &&
+     pmo[0].health > 0 {
+    let sprite = near[n].sprite
+    let dropped = near[n].flags & MF_DROPPED != 0
+    var got = true
+    if sprite == SPR_ARM1 {
+      got = give_armor(inv, 1)
+    } else if sprite == SPR_ARM2 {
+      got = give_armor(inv, 2)
+    } else if sprite == SPR_BON1 {
+      // (A little health, over a hundred too.)
+      pmo[0].health = min(pmo[0].health + 1, 200)
+    } else if sprite == SPR_BON2 {
+      inv[0].armorpoints = min(inv[0].armorpoints + 1, 200)
+      if inv[0].armortype == 0 { inv[0].armortype = 1 }
+    } else if sprite == SPR_SOUL {
+      pmo[0].health = min(pmo[0].health + 100, 200)
+    } else if sprite == SPR_MEGA {
+      // (Not in this game.)
+      got = false
+    } else if sprite == SPR_BKEY {
+      if inv[0].cards & 1 << IT_BLUECARD == 0 { inv[0].bonuscount = BONUSADD }
+      inv[0].cards |= 1 << IT_BLUECARD
+    } else if sprite == SPR_YKEY {
+      if inv[0].cards & 1 << IT_YELLOWCARD == 0 { inv[0].bonuscount = BONUSADD }
+      inv[0].cards |= 1 << IT_YELLOWCARD
+    } else if sprite == SPR_RKEY {
+      if inv[0].cards & 1 << IT_REDCARD == 0 { inv[0].bonuscount = BONUSADD }
+      inv[0].cards |= 1 << IT_REDCARD
+    } else if sprite == SPR_BSKU {
+      if inv[0].cards & 1 << IT_BLUESKULL == 0 { inv[0].bonuscount = BONUSADD }
+      inv[0].cards |= 1 << IT_BLUESKULL
+    } else if sprite == SPR_YSKU {
+      if inv[0].cards & 1 << IT_YELLOWSKULL == 0 { inv[0].bonuscount = BONUSADD }
+      inv[0].cards |= 1 << IT_YELLOWSKULL
+    } else if sprite == SPR_RSKU {
+      if inv[0].cards & 1 << IT_REDSKULL == 0 { inv[0].bonuscount = BONUSADD }
+      inv[0].cards |= 1 << IT_REDSKULL
+    } else if sprite == SPR_STIM {
+      got = give_body(pmo, 10)
+    } else if sprite == SPR_MEDI {
+      got = give_body(pmo, 25)
+    } else if sprite == SPR_PINV {
+      got = give_power(pmo, powers, PW_INVULNERABILITY)
+    } else if sprite == SPR_PSTR {
+      got = give_power(pmo, powers, PW_STRENGTH)
+      if got && inv[0].readyweapon != WP_FIST { inv[0].pendingweapon = WP_FIST }
+    } else if sprite == SPR_PINS {
+      got = give_power(pmo, powers, PW_INVISIBILITY)
+    } else if sprite == SPR_SUIT {
+      got = give_power(pmo, powers, PW_IRONFEET)
+    } else if sprite == SPR_PMAP {
+      got = give_power(pmo, powers, PW_ALLMAP)
+    } else if sprite == SPR_PVIS {
+      got = give_power(pmo, powers, PW_INFRARED)
+    } else if sprite == SPR_CLIP {
+      got = give_ammo(inv, ammo, AM_CLIP, if dropped { 0 } else { 1 }, skill)
+    } else if sprite == SPR_AMMO {
+      got = give_ammo(inv, ammo, AM_CLIP, 5, skill)
+    } else if sprite == SPR_ROCK {
+      got = give_ammo(inv, ammo, AM_MISL, 1, skill)
+    } else if sprite == SPR_BROK {
+      got = give_ammo(inv, ammo, AM_MISL, 5, skill)
+    } else if sprite == SPR_CELL {
+      got = give_ammo(inv, ammo, AM_CELL, 1, skill)
+    } else if sprite == SPR_CELP {
+      got = give_ammo(inv, ammo, AM_CELL, 5, skill)
+    } else if sprite == SPR_SHEL {
+      got = give_ammo(inv, ammo, AM_SHELL, 1, skill)
+    } else if sprite == SPR_SBOX {
+      got = give_ammo(inv, ammo, AM_SHELL, 5, skill)
+    } else if sprite == SPR_BPAK {
+      // Twice as much can be carried, and a clip of each kind.
+      if !inv[0].backpack {
+        for i in 0..4 { ammo[i].most *= 2 }
+        inv[0].backpack = true
+      }
+      for i in 0..4 {
+        let some = give_ammo(inv, ammo, i, 1, skill)
+      }
+    } else if sprite == SPR_BFUG {
+      got = give_weapon(inv, ammo, WP_BFG, false, skill)
+    } else if sprite == SPR_MGUN {
+      got = give_weapon(inv, ammo, WP_CHAINGUN, dropped, skill)
+    } else if sprite == SPR_CSAW {
+      got = give_weapon(inv, ammo, WP_CHAINSAW, false, skill)
+    } else if sprite == SPR_LAUN {
+      got = give_weapon(inv, ammo, WP_MISSILE, false, skill)
+    } else if sprite == SPR_PLAS {
+      got = give_weapon(inv, ammo, WP_PLASMA, false, skill)
+    } else if sprite == SPR_SHOT {
+      got = give_weapon(inv, ammo, WP_SHOTGUN, dropped, skill)
+    } else if sprite == SPR_SGN2 {
+      got = give_weapon(inv, ammo, WP_SUPERSHOTGUN, dropped, skill)
+    } else {
+      got = false
+    }
+    if got {
+      if near[n].flags & MF_COUNTITEM != 0 { inv[0].itemcount += 1 }
+      near[n].gone = true
+      taken += { id: near[n].id }
+      inv[0].bonuscount += BONUSADD
+    }
+  }
+}
+
+// A tic of the powers: each has one less, the berserk pack one more; a
+// player that is seen again is no shadow (of P_PlayerThink).
+proc count_powers(pmo: mut Pmo, powers: mut Powers) {
+  if powers[PW_STRENGTH].tics != 0 { powers[PW_STRENGTH].tics += 1 }
+  if powers[PW_INVULNERABILITY].tics != 0 { powers[PW_INVULNERABILITY].tics -= 1 }
+  if powers[PW_INVISIBILITY].tics != 0 {
+    powers[PW_INVISIBILITY].tics -= 1
+    if powers[PW_INVISIBILITY].tics == 0 { pmo[0].flags &= ~MF_SHADOW }
+  }
+  if powers[PW_INFRARED].tics != 0 { powers[PW_INFRARED].tics -= 1 }
+  if powers[PW_IRONFEET].tics != 0 { powers[PW_IRONFEET].tics -= 1 }
+}

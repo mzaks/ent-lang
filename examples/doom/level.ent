@@ -44,8 +44,11 @@ const ML_MAPPED = 256
 
 // The level to load, and what loading it found: the lump that names it
 // (-1: there is no such level). `skill` is how hard the game is, 0 to 4
-// (2 is "Hurt me plenty"): it says which things are there.
-unique Level { episode: i32, map: i32, lump: i32, skill: i32 }
+// (2 is "Hurt me plenty"): it says which things are there; with
+// `nomonsters` none of them is a monster.
+unique Level {
+  episode: i32, map: i32, lump: i32, skill: i32, nomonsters: bool
+}
 
 // The corners of the level's lines.
 buffer Vertexes { x: i32, y: i32 } capacity 32768
@@ -66,12 +69,31 @@ buffer Sides {
 
 // A line of the level: from (x1, y1) to (x2, y2), which is (dx, dy) on;
 // its sides by their numbers, the back one -1 where it has none, and the
-// sectors they look into (-1: none behind).
+// sectors they look into (-1: none behind); which way it slopes and the
+// box around it, for what moves to be held against; and `validcount`,
+// which says in which looking-through of the level it was last looked
+// at (a line is in several blocks of the blockmap, and is looked at
+// once).
 buffer Lines {
   x1: i32, y1: i32, x2: i32, y2: i32, dx: i32, dy: i32,
   flags: i32, special: i32, tag: i32, front: i32, back: i32,
-  frontsector: i32, backsector: i32
+  frontsector: i32, backsector: i32, slopetype: i32, top: i32,
+  bottom: i32, left: i32, right: i32, validcount: i32
 } capacity 16384
+const ST_HORIZONTAL = 0
+const ST_VERTICAL = 1
+const ST_POSITIVE = 2
+const ST_NEGATIVE = 3
+
+// The blockmap, one row: the level cut into squares of 128 by 128, from
+// (orgx, orgy) on, `width` by `height` of them, each with the lines that
+// touch it. `at` is where the lump is in `Bytes`: shorts, four about the
+// map, then for each square where its list of lines starts (counted in
+// shorts from the lump's start), then the lists, each ended by -1.
+buffer Bmap { orgx: i32, orgy: i32, width: i32, height: i32, at: i32 } capacity 1
+const MAPBLOCKSHIFT = FRACBITS + 7
+const MAPBLOCKSIZE = 128 * FRACUNIT
+const MAPBTOFRAC = 7
 
 // A piece of a line that is one side of a subsector: its ends, the angle
 // it runs at, how far along its line it starts, its line and the side of
@@ -178,7 +200,21 @@ system load_level() {
         tag: short_at(Bytes, at + 8), front: short_at(Bytes, at + 10),
         back: short_at(Bytes, at + 12),
         frontsector: side_sector(Sides, short_at(Bytes, at + 10)),
-        backsector: side_sector(Sides, short_at(Bytes, at + 12))
+        backsector: side_sector(Sides, short_at(Bytes, at + 12)),
+        slopetype: if Vertexes[v2].x == Vertexes[v1].x {
+          ST_VERTICAL
+        } else if Vertexes[v2].y == Vertexes[v1].y {
+          ST_HORIZONTAL
+        } else if fixed_div(Vertexes[v2].y - Vertexes[v1].y,
+                            Vertexes[v2].x - Vertexes[v1].x) > 0 {
+          ST_POSITIVE
+        } else {
+          ST_NEGATIVE
+        },
+        top: max(Vertexes[v1].y, Vertexes[v2].y),
+        bottom: min(Vertexes[v1].y, Vertexes[v2].y),
+        left: min(Vertexes[v1].x, Vertexes[v2].x),
+        right: max(Vertexes[v1].x, Vertexes[v2].x), validcount: 0
       }
     }
     // P_LoadSubsectors: 4 bytes each. (Its sector is that of its first
@@ -231,6 +267,14 @@ system load_level() {
     for i in 0..len(Subsectors) {
       Subsectors[i].sector = Segs[Subsectors[i].firstline].front
     }
+    // P_LoadBlockMap.
+    let blockmap = Lumps[lump + ML_BLOCKMAP].at
+    Bmap = [{
+      orgx: short_at(Bytes, blockmap) << FRACBITS,
+      orgy: short_at(Bytes, blockmap + 2) << FRACBITS,
+      width: short_at(Bytes, blockmap + 4),
+      height: short_at(Bytes, blockmap + 6), at: blockmap
+    }; 1]
     // P_LoadThings: 10 bytes each.
     let things = Lumps[lump + ML_THINGS].at
     for i in 0..Lumps[lump + ML_THINGS].size / 10 {

@@ -32,9 +32,26 @@ component Mobj {
   x: i32, y: i32, z: i32, angle: u32, type: i32, state: i32, tics: i32,
   sprite: i32, frame: i32, flags: i32, health: i32, radius: i32,
   height: i32, reactiontime: i32, lastlook: i32, subsector: i32,
-  floorz: i32, ceilingz: i32, linked: i32
+  floorz: i32, ceilingz: i32, linked: i32, id: i32
 } capacity 2048
 
+// The player's thing while it is moved (play.ent), one row: what a
+// `Mobj` has of it, and how fast it moves. What is here is the player's;
+// the player's entity is made like it after every tic.
+buffer Pmo {
+  x: i32, y: i32, z: i32, angle: u32, momx: i32, momy: i32, momz: i32,
+  state: i32, tics: i32, flags: i32, health: i32, radius: i32, height: i32,
+  reactiontime: i32, subsector: i32, floorz: i32, ceilingz: i32, linked: i32
+} capacity 1
+
+// The things near the player, and `Nearorder`, their rows in the order
+// the blockmap gives them in: square by square, in a square the thing
+// put there last first.
+buffer Near {
+  id: i32, x: i32, y: i32, z: i32, radius: i32, height: i32, flags: i32,
+  type: i32, sprite: i32, bx: i32, by: i32, linked: i32, gone: bool
+} capacity 2048
+buffer Nearorder { index: i32 } capacity 2048
 // How many times a thing was put somewhere (the last `linked` given),
 // and what there is to kill and to find in the level.
 unique Spawned { links: i32, kills: i32, items: i32 }
@@ -73,6 +90,10 @@ system spawn_things() {
       for k in 0..len(mobjinfo) {
         if kind < 0 && mobjinfo[k].doomednum == type { kind = k }
       }
+      if Level.nomonsters && kind >= 0 &&
+         (kind == MT_SKULL || mobjinfo[kind].flags & MF_COUNTKILL != 0) {
+        kind = -1
+      }
     }
     if kind >= 0 {
       let x = Mapthings[i].x << FRACBITS
@@ -97,6 +118,17 @@ system spawn_things() {
       if !player && flags & MF_COUNTKILL != 0 { kills += 1 }
       if !player && flags & MF_COUNTITEM != 0 { items += 1 }
       links += 1
+      if player {
+        Pmo = [{
+          x: x, y: y, z: floorz,
+          angle: ANG45 * ((Mapthings[i].angle / 45) as u32), momx: 0, momy: 0,
+          momz: 0, state: state, tics: tics, flags: flags,
+          health: mobjinfo[kind].spawnhealth, radius: mobjinfo[kind].radius,
+          height: mobjinfo[kind].height, reactiontime: 0,
+          subsector: subsector, floorz: floorz, ceilingz: ceilingz,
+          linked: links
+        }; 1]
+      }
       spawn {
         Mobj {
           x: x, y: y,
@@ -112,7 +144,7 @@ system spawn_things() {
           height: mobjinfo[kind].height,
           reactiontime: mobjinfo[kind].reactiontime, lastlook: lastlook,
           subsector: subsector, floorz: floorz, ceilingz: ceilingz,
-          linked: links
+          linked: links, id: links
         }
       }
     }

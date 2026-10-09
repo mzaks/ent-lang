@@ -1,0 +1,774 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The player moved (p_user.c, and what of p_map.c, p_maputl.c and
+// p_mobj.c moves a thing): a tic's keys make the player's thing faster,
+// it is moved as far as the walls and the other things let it, sliding
+// along what stops it, and stands on the floor it comes to.
+//
+// The player's thing is the row of `Pmo` while this goes on (things.ent)
+// and what of the player is no thing's the row of `Pl`; the things near
+// enough to be in the way are rows of `Near`, taken from the entities
+// before and brought back to them after.
+import files
+import wad
+import fixed
+import tables
+import angles
+import info
+import level
+import render
+import things
+import demo
+import items
+
+// The tic of the level that is played, counted from when it started.
+unique Clock { leveltime: i32 }
+
+const VIEWHEIGHT = 41 * FRACUNIT
+const MAXBOB = 0x100000
+const MAXRADIUS = 32 * FRACUNIT
+const GRAVITY = FRACUNIT
+const MAXMOVE = 30 * FRACUNIT
+const STOPSPEED = 0x1000
+const FRICTION = 0xe800
+// How high a step a thing takes.
+const MAXSTEP = 24 * FRACUNIT
+
+// What of the player is not its thing, one row: where the eye is and
+// how it bobs, whether the use key was down, and the tic's keys.
+buffer Pl {
+  viewz: i32, viewheight: i32, deltaviewheight: i32, bob: i32, usedown: bool,
+  forwardmove: i32, sidemove: i32, angleturn: i32, buttons: i32
+} capacity 1
+
+// What checking a place leaves behind, one row (the tm.. of p_map.c):
+// the floor and ceiling there, the lowest floor it touches, the line
+// that made the ceiling (-1: none); the number of the looking-through
+// (see `Lines`); what sliding found; and how many times a thing was put
+// somewhere.
+buffer Tm {
+  floorz: i32, ceilingz: i32, dropoffz: i32, ceilingline: i32,
+  validcount: i32, bestslidefrac: i32, bestslideline: i32, links: i32
+} capacity 1
+
+// The lines with something special that a place that was checked
+// touches, and the lines a path crosses with how far along it.
+buffer Spechit { line: i32 } capacity 64
+// The things that can be picked up which a place that was checked
+// touches (rows of `Near`), with how high the player was then.
+buffer Touched { index: i32, z: i32 } capacity 1024
+buffer Intercepts { frac: i32, line: i32 } capacity 256
+
+// How far from the player a thing is taken into `Near`: more than a
+// tic's way and the widest two things.
+const NEARREACH = 256 * FRACUNIT
+
+// Which side of a line a point is on: 0 its front, 1 its back
+// (P_PointOnLineSide).
+fn point_on_line_side(lines: Lines, line: i32, x: i32, y: i32) -> i32 {
+  let ldx = lines[line].dx
+  let ldy = lines[line].dy
+  if ldx == 0 {
+    if x <= lines[line].x1 { (ldy > 0) as i32 } else { (ldy < 0) as i32 }
+  } else if ldy == 0 {
+    if y <= lines[line].y1 { (ldx < 0) as i32 } else { (ldx > 0) as i32 }
+  } else {
+    let left = fixed_mul(ldy >> FRACBITS, x - lines[line].x1)
+    let right = fixed_mul(y - lines[line].y1, ldx >> FRACBITS)
+    if right < left { 0 } else { 1 }
+  }
+}
+
+// Which side of a line a box is on, or -1 if the line goes through it
+// (P_BoxOnLineSide).
+fn box_on_line_side(lines: Lines, line: i32, top: i32, bottom: i32, left: i32,
+                    right: i32) -> i32 {
+  let slope = lines[line].slopetype
+  let p1 = if slope == ST_HORIZONTAL {
+    (top > lines[line].y1) as i32 ^ (lines[line].dx < 0) as i32
+  } else if slope == ST_VERTICAL {
+    (right < lines[line].x1) as i32 ^ (lines[line].dy < 0) as i32
+  } else if slope == ST_POSITIVE {
+    point_on_line_side(lines, line, left, top)
+  } else {
+    point_on_line_side(lines, line, right, top)
+  }
+  let p2 = if slope == ST_HORIZONTAL {
+    (bottom > lines[line].y1) as i32 ^ (lines[line].dx < 0) as i32
+  } else if slope == ST_VERTICAL {
+    (left < lines[line].x1) as i32 ^ (lines[line].dy < 0) as i32
+  } else if slope == ST_POSITIVE {
+    point_on_line_side(lines, line, right, bottom)
+  } else {
+    point_on_line_side(lines, line, left, bottom)
+  }
+  if p1 == p2 { p1 } else { -1 }
+}
+
+// Which side of a path a point is on, the path from (lx, ly), (ldx, ldy)
+// on (P_PointOnDivlineSide).
+fn point_on_divline_side(x: i32, y: i32, lx: i32, ly: i32, ldx: i32,
+                         ldy: i32) -> i32 {
+  if ldx == 0 {
+    if x <= lx { (ldy > 0) as i32 } else { (ldy < 0) as i32 }
+  } else if ldy == 0 {
+    if y <= ly { (ldx < 0) as i32 } else { (ldx > 0) as i32 }
+  } else {
+    let dx = x - lx
+    let dy = y - ly
+    if (ldy ^ ldx ^ dx ^ dy) & 0x80000000 != 0 {
+      if (ldy ^ dx) & 0x80000000 != 0 { 1 } else { 0 }
+    } else {
+      let left = fixed_mul(ldy >> 8, dx >> 8)
+      let right = fixed_mul(dy >> 8, ldx >> 8)
+      if right < left { 0 } else { 1 }
+    }
+  }
+}
+
+// How far along the path v2 the line v1 crosses it, 1.0 being its end
+// (P_InterceptVector).
+fn intercept_vector(v2x: i32, v2y: i32, v2dx: i32, v2dy: i32, v1x: i32,
+                    v1y: i32, v1dx: i32, v1dy: i32) -> i32 {
+  let den = fixed_mul(v1dy >> 8, v2dx) - fixed_mul(v1dx >> 8, v2dy)
+  if den == 0 {
+    0
+  } else {
+    fixed_div(fixed_mul((v1x - v2x) >> 8, v1dy) +
+                  fixed_mul((v2y - v1y) >> 8, v1dx),
+              den)
+  }
+}
+
+// The opening of a line with two sides: the lower ceiling, the higher
+// floor and the lower floor of its two sectors (P_LineOpening).
+fn open_top(lines: Lines, sectors: Sectors, line: i32) -> i32 {
+  min(sectors[lines[line].frontsector].ceilingheight,
+      sectors[lines[line].backsector].ceilingheight)
+}
+fn open_bottom(lines: Lines, sectors: Sectors, line: i32) -> i32 {
+  max(sectors[lines[line].frontsector].floorheight,
+      sectors[lines[line].backsector].floorheight)
+}
+fn low_floor(lines: Lines, sectors: Sectors, line: i32) -> i32 {
+  min(sectors[lines[line].frontsector].floorheight,
+      sectors[lines[line].backsector].floorheight)
+}
+
+// Whether the player's thing can be at (x, y): no wall and no solid
+// thing is in its way there. Leaves in `Tm` the floor and ceiling it
+// would have, and in `Spechit` the special lines it touches
+// (P_CheckPosition, PIT_CheckThing, PIT_CheckLine).
+proc check_position(lines: mut Lines, sectors: Sectors,
+                    subsectors: Subsectors, nodes: Nodes, bytes: Bytes,
+                    bmap: Bmap, near: Near, order: Nearorder, tm: mut Tm,
+                    spechit: mut Spechit, touched: mut Touched, x: i32,
+                    y: i32, z: i32, radius: i32, flags: i32) -> bool {
+  let top = y + radius
+  let bottom = y - radius
+  let right = x + radius
+  let left = x - radius
+  let sector = subsectors[point_in_subsector(nodes, x, y)].sector
+  tm[0].ceilingline = -1
+  tm[0].floorz = sectors[sector].floorheight
+  tm[0].dropoffz = sectors[sector].floorheight
+  tm[0].ceilingz = sectors[sector].ceilingheight
+  tm[0].validcount += 1
+  spechit = []
+  let validcount = tm[0].validcount
+  let orgx = bmap[0].orgx
+  let orgy = bmap[0].orgy
+  var ok = true
+  if flags & MF_NOCLIP == 0 {
+    // The things in the squares around, each as wide as the widest.
+    let txl = (left - orgx - MAXRADIUS) >> MAPBLOCKSHIFT
+    let txh = (right - orgx + MAXRADIUS) >> MAPBLOCKSHIFT
+    let tyl = (bottom - orgy - MAXRADIUS) >> MAPBLOCKSHIFT
+    let tyh = (top - orgy + MAXRADIUS) >> MAPBLOCKSHIFT
+    for k in 0..len(order) {
+      let n = order[k].index
+      if ok && !near[n].gone && near[n].bx >= txl && near[n].bx <= txh &&
+         near[n].by >= tyl && near[n].by <= tyh &&
+         near[n].flags & (MF_SOLID | MF_SPECIAL | MF_SHOOTABLE) != 0 {
+        let blockdist = near[n].radius + radius
+        if abs(near[n].x - x) < blockdist && abs(near[n].y - y) < blockdist {
+          // What can be picked up is touched (and picked up after the
+          // player has moved, in this order); what is solid stops.
+          if near[n].flags & MF_SPECIAL != 0 && flags & MF_PICKUP != 0 {
+            touched += { index: n, z: z }
+          }
+          if near[n].flags & MF_SOLID != 0 { ok = false }
+        }
+      }
+    }
+    // The lines in the squares it is in.
+    let xl = (left - orgx) >> MAPBLOCKSHIFT
+    let xh = (right - orgx) >> MAPBLOCKSHIFT
+    let yl = (bottom - orgy) >> MAPBLOCKSHIFT
+    let yh = (top - orgy) >> MAPBLOCKSHIFT
+    for bx in xl..xh + 1 {
+      for by in yl..yh + 1 {
+        if ok && bx >= 0 && by >= 0 && bx < bmap[0].width && by < bmap[0].height {
+          var list = bmap[0].at +
+              short_at(bytes, bmap[0].at + (4 + by * bmap[0].width + bx) * 2) * 2
+          while ok && short_at(bytes, list) != -1 {
+            let l = short_at(bytes, list)
+            list += 2
+            if lines[l].validcount != validcount {
+              lines[l].validcount = validcount
+              if right <= lines[l].left || left >= lines[l].right ||
+                 top <= lines[l].bottom || bottom >= lines[l].top {
+                // (Not near it.)
+              } else if box_on_line_side(lines, l, top, bottom, left, right) != -1 {
+                // (All on one side of it.)
+              } else if lines[l].backsector < 0 || lines[l].flags & ML_BLOCKING != 0 {
+                // A wall, or a line that stops everything.
+                ok = false
+              } else {
+                // An opening: the place is as high as it lets it be.
+                let opentop = open_top(lines, sectors, l)
+                if opentop < tm[0].ceilingz {
+                  tm[0].ceilingz = opentop
+                  tm[0].ceilingline = l
+                }
+                tm[0].floorz max= open_bottom(lines, sectors, l)
+                tm[0].dropoffz min= low_floor(lines, sectors, l)
+                if lines[l].special != 0 { spechit += { line: l } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  ok
+}
+
+// Moves the player's thing to (x, y) if it can be there and gets there:
+// it fits, and the step up is not too high (P_TryMove).
+proc try_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
+              nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
+              order: Nearorder, tm: mut Tm, spechit: mut Spechit,
+              touched: mut Touched, pmo: mut Pmo, x: i32, y: i32) -> bool {
+  let flags = pmo[0].flags
+  var moved = false
+  if check_position(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
+                    tm, spechit, touched, x, y, pmo[0].z, pmo[0].radius, flags) {
+    let height = pmo[0].height
+    let z = pmo[0].z
+    if flags & MF_NOCLIP != 0 ||
+       (tm[0].ceilingz - tm[0].floorz >= height &&
+        (flags & MF_TELEPORT != 0 ||
+         (tm[0].ceilingz - z >= height && tm[0].floorz - z <= MAXSTEP)) &&
+        (flags & (MF_DROPOFF | MF_FLOAT) != 0 ||
+         tm[0].floorz - tm[0].dropoffz <= MAXSTEP)) {
+      pmo[0].floorz = tm[0].floorz
+      pmo[0].ceilingz = tm[0].ceilingz
+      pmo[0].x = x
+      pmo[0].y = y
+      pmo[0].subsector = point_in_subsector(nodes, x, y)
+      tm[0].links += 1
+      pmo[0].linked = tm[0].links
+      // (The special lines it crossed do what they do, when there are
+      // those.)
+      moved = true
+    }
+  }
+  moved
+}
+
+// The lines a path from (x1, y1) to (x2, y2) crosses, into `Intercepts`
+// with how far along it each is (P_PathTraverse with PT_ADDLINES,
+// PIT_AddLineIntercepts).
+proc path_lines(lines: mut Lines, bytes: Bytes, bmap: Bmap, tm: mut Tm,
+                intercepts: mut Intercepts, x1in: i32, y1in: i32, x2in: i32,
+                y2in: i32) {
+  tm[0].validcount += 1
+  let validcount = tm[0].validcount
+  intercepts = []
+  let orgx = bmap[0].orgx
+  let orgy = bmap[0].orgy
+  // (Not from exactly on the edge of a square.)
+  let tx = if (x1in - orgx) & (MAPBLOCKSIZE - 1) == 0 { x1in + FRACUNIT } else { x1in }
+  let ty = if (y1in - orgy) & (MAPBLOCKSIZE - 1) == 0 { y1in + FRACUNIT } else { y1in }
+  let tdx = x2in - tx
+  let tdy = y2in - ty
+  let x1 = tx - orgx
+  let y1 = ty - orgy
+  let x2 = x2in - orgx
+  let y2 = y2in - orgy
+  let xt1 = x1 >> MAPBLOCKSHIFT
+  let yt1 = y1 >> MAPBLOCKSHIFT
+  let xt2 = x2 >> MAPBLOCKSHIFT
+  let yt2 = y2 >> MAPBLOCKSHIFT
+  // From square to square along the path.
+  let mapxstep = if xt2 > xt1 { 1 } else if xt2 < xt1 { -1 } else { 0 }
+  let ystep = if xt2 != xt1 { fixed_div(y2 - y1, abs(x2 - x1)) } else { 256 * FRACUNIT }
+  let xpartial = if xt2 > xt1 {
+    FRACUNIT - ((x1 >> MAPBTOFRAC) & (FRACUNIT - 1))
+  } else if xt2 < xt1 {
+    (x1 >> MAPBTOFRAC) & (FRACUNIT - 1)
+  } else {
+    FRACUNIT
+  }
+  var yintercept = (y1 >> MAPBTOFRAC) + fixed_mul(xpartial, ystep)
+  let mapystep = if yt2 > yt1 { 1 } else if yt2 < yt1 { -1 } else { 0 }
+  let xstep = if yt2 != yt1 { fixed_div(x2 - x1, abs(y2 - y1)) } else { 256 * FRACUNIT }
+  let ypartial = if yt2 > yt1 {
+    FRACUNIT - ((y1 >> MAPBTOFRAC) & (FRACUNIT - 1))
+  } else if yt2 < yt1 {
+    (y1 >> MAPBTOFRAC) & (FRACUNIT - 1)
+  } else {
+    FRACUNIT
+  }
+  var xintercept = (x1 >> MAPBTOFRAC) + fixed_mul(ypartial, xstep)
+  var mapx = xt1
+  var mapy = yt1
+  var there = false
+  let long = tdx > FRACUNIT * 16 || tdy > FRACUNIT * 16 ||
+             tdx < -FRACUNIT * 16 || tdy < -FRACUNIT * 16
+  for count in 0..64 {
+    if !there {
+      if mapx >= 0 && mapy >= 0 && mapx < bmap[0].width && mapy < bmap[0].height {
+        var list = bmap[0].at +
+            short_at(bytes, bmap[0].at + (4 + mapy * bmap[0].width + mapx) * 2) * 2
+        while short_at(bytes, list) != -1 {
+          let l = short_at(bytes, list)
+          list += 2
+          if lines[l].validcount != validcount {
+            lines[l].validcount = validcount
+            // Its ends on two sides of the path, or the path's ends on
+            // two sides of it: by the first where the path is long.
+            let s1 = if long {
+              point_on_divline_side(lines[l].x1, lines[l].y1, tx, ty, tdx, tdy)
+            } else {
+              point_on_line_side(lines, l, tx, ty)
+            }
+            let s2 = if long {
+              point_on_divline_side(lines[l].x2, lines[l].y2, tx, ty, tdx, tdy)
+            } else {
+              point_on_line_side(lines, l, tx + tdx, ty + tdy)
+            }
+            if s1 != s2 {
+              let frac = intercept_vector(tx, ty, tdx, tdy, lines[l].x1,
+                                          lines[l].y1, lines[l].dx, lines[l].dy)
+              if frac >= 0 { intercepts += { frac: frac, line: l } }
+            }
+          }
+        }
+      }
+      if mapx == xt2 && mapy == yt2 {
+        there = true
+      } else if yintercept >> FRACBITS == mapy {
+        yintercept += ystep
+        mapx += mapxstep
+      } else if xintercept >> FRACBITS == mapx {
+        xintercept += xstep
+        mapy += mapystep
+      }
+    }
+  }
+}
+
+// The nearest line on a path that stops the player's thing, into `Tm`
+// if it is nearer than what was found (P_TraverseIntercepts with
+// PTR_SlideTraverse).
+proc slide_traverse(lines: mut Lines, sectors: Sectors, bytes: Bytes,
+                    bmap: Bmap, tm: mut Tm, intercepts: mut Intercepts,
+                    pmo: Pmo, x1: i32, y1: i32, x2: i32, y2: i32) {
+  path_lines(lines, bytes, bmap, tm, intercepts, x1, y1, x2, y2)
+  var left = len(intercepts)
+  var going = true
+  while going && left > 0 {
+    left -= 1
+    // The nearest that is left.
+    var dist = 0x7fffffff
+    var nearest = 0
+    for s in 0..len(intercepts) {
+      if intercepts[s].frac < dist {
+        dist = intercepts[s].frac
+        nearest = s
+      }
+    }
+    if dist > FRACUNIT {
+      going = false
+    } else {
+      let li = intercepts[nearest].line
+      // A wall stops it, from its front; an opening if the thing does
+      // not fit or the step is too high.
+      let blocking = if lines[li].flags & ML_TWOSIDED == 0 {
+        point_on_line_side(lines, li, pmo[0].x, pmo[0].y) == 0
+      } else {
+        open_top(lines, sectors, li) - open_bottom(lines, sectors, li) < pmo[0].height ||
+        open_top(lines, sectors, li) - pmo[0].z < pmo[0].height ||
+        open_bottom(lines, sectors, li) - pmo[0].z > MAXSTEP
+      }
+      if blocking {
+        if dist < tm[0].bestslidefrac {
+          tm[0].bestslidefrac = dist
+          tm[0].bestslideline = li
+        }
+        going = false
+      } else {
+        intercepts[nearest].frac = 0x7fffffff
+      }
+    }
+  }
+}
+
+// The player's thing could not go where it was going: it goes as far as
+// it can, and along the line that stopped it with what is left of its
+// way (P_SlideMove, P_HitSlideLine).
+proc slide_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
+                nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
+                order: Nearorder, tm: mut Tm, spechit: mut Spechit,
+                touched: mut Touched, intercepts: mut Intercepts,
+                pmo: mut Pmo) {
+  var hitcount = 0
+  var done = false
+  while !done {
+    hitcount += 1
+    // (Not for ever: the third time it steps one way, then the other.)
+    var stairstep = hitcount == 3
+    if !stairstep {
+      let radius = pmo[0].radius
+      let x = pmo[0].x
+      let y = pmo[0].y
+      let momx = pmo[0].momx
+      let momy = pmo[0].momy
+      // Its three corners that lead.
+      let leadx = if momx > 0 { x + radius } else { x - radius }
+      let trailx = if momx > 0 { x - radius } else { x + radius }
+      let leady = if momy > 0 { y + radius } else { y - radius }
+      let traily = if momy > 0 { y - radius } else { y + radius }
+      tm[0].bestslidefrac = FRACUNIT + 1
+      slide_traverse(lines, sectors, bytes, bmap, tm, intercepts, pmo, leadx,
+                     leady, leadx + momx, leady + momy)
+      slide_traverse(lines, sectors, bytes, bmap, tm, intercepts, pmo, trailx,
+                     leady, trailx + momx, leady + momy)
+      slide_traverse(lines, sectors, bytes, bmap, tm, intercepts, pmo, leadx,
+                     traily, leadx + momx, traily + momy)
+      if tm[0].bestslidefrac == FRACUNIT + 1 {
+        // (Nothing was hit: one of the things, then.)
+        stairstep = true
+      } else {
+        // Up to the wall, a little short of it.
+        var frac = tm[0].bestslidefrac - 0x800
+        var went = true
+        if frac > 0 {
+          went = try_move(lines, sectors, subsectors, nodes, bytes, bmap, near,
+                          order, tm, spechit, touched, pmo, x + fixed_mul(momx, frac),
+                          y + fixed_mul(momy, frac))
+          if !went { stairstep = true }
+        }
+        if went {
+          // What is left of the way, along the wall.
+          frac = min(FRACUNIT - (frac + 0x800), FRACUNIT)
+          if frac <= 0 {
+            done = true
+          } else {
+            let li = tm[0].bestslideline
+            var tmxmove = fixed_mul(momx, frac)
+            var tmymove = fixed_mul(momy, frac)
+            if lines[li].slopetype == ST_HORIZONTAL {
+              tmymove = 0
+            } else if lines[li].slopetype == ST_VERTICAL {
+              tmxmove = 0
+            } else {
+              let side = point_on_line_side(lines, li, pmo[0].x, pmo[0].y)
+              let lineangle = point_to_angle(lines[li].dx, lines[li].dy) +
+                              if side == 1 { ANG180 } else { 0 }
+              let delta = point_to_angle(tmxmove, tmymove) - lineangle
+              let deltaangle = if delta > ANG180 { delta + ANG180 } else { delta }
+              let newlen = fixed_mul(
+                  aprox_distance(tmxmove, tmymove),
+                  finecosine((deltaangle >> ANGLETOFINESHIFT) as i32))
+              tmxmove = fixed_mul(newlen, finecosine((lineangle >> ANGLETOFINESHIFT) as i32))
+              tmymove = fixed_mul(newlen, finesine[lineangle >> ANGLETOFINESHIFT])
+            }
+            pmo[0].momx = tmxmove
+            pmo[0].momy = tmymove
+            done = try_move(lines, sectors, subsectors, nodes, bytes, bmap, near,
+                            order, tm, spechit, touched, pmo, pmo[0].x + tmxmove,
+                            pmo[0].y + tmymove)
+          }
+        }
+      }
+    }
+    if stairstep {
+      if !try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
+                   tm, spechit, touched, pmo, pmo[0].x, pmo[0].y + pmo[0].momy) {
+        let other = try_move(lines, sectors, subsectors, nodes, bytes, bmap,
+                             near, order, tm, spechit, touched, pmo,
+                             pmo[0].x + pmo[0].momx, pmo[0].y)
+      }
+      done = true
+    }
+  }
+}
+
+// A tic of the player (P_PlayerThink as far as it is, and P_MobjThinker
+// of the player's thing): turned and made faster by the keys, moved,
+// slowed by the floor, and brought to the floor.
+proc player_tic(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
+                nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
+                order: Nearorder, tm: mut Tm, spechit: mut Spechit,
+                touched: mut Touched, intercepts: mut Intercepts,
+                pmo: mut Pmo, pl: mut Pl, leveltime: i32) {
+  // P_MovePlayer.
+  if pmo[0].reactiontime != 0 {
+    pmo[0].reactiontime -= 1
+  } else {
+    pmo[0].angle += (pl[0].angleturn << FRACBITS) as u32
+    let onground = pmo[0].z <= pmo[0].floorz
+    let fine = (pmo[0].angle >> ANGLETOFINESHIFT) as i32
+    if pl[0].forwardmove != 0 && onground {
+      pmo[0].momx += fixed_mul(pl[0].forwardmove * 2048, finecosine(fine))
+      pmo[0].momy += fixed_mul(pl[0].forwardmove * 2048, finesine[fine])
+    }
+    let side = ((pmo[0].angle - ANG90) >> ANGLETOFINESHIFT) as i32
+    if pl[0].sidemove != 0 && onground {
+      pmo[0].momx += fixed_mul(pl[0].sidemove * 2048, finecosine(side))
+      pmo[0].momy += fixed_mul(pl[0].sidemove * 2048, finesine[side])
+    }
+    if (pl[0].forwardmove != 0 || pl[0].sidemove != 0) && pmo[0].state == S_PLAY {
+      pmo[0].state = S_PLAY_RUN1
+      pmo[0].tics = states[S_PLAY_RUN1].tics
+    }
+  }
+  // P_CalcHeight: the eye bobs with how fast the player goes.
+  pl[0].bob = min((fixed_mul(pmo[0].momx, pmo[0].momx) +
+                   fixed_mul(pmo[0].momy, pmo[0].momy)) >> 2, MAXBOB)
+  if pmo[0].z > pmo[0].floorz {
+    pl[0].viewz = pmo[0].z + pl[0].viewheight
+  } else {
+    let bob = fixed_mul(pl[0].bob / 2,
+                        finesine[(FINEANGLES / 20 * leveltime) & FINEMASK])
+    pl[0].viewheight += pl[0].deltaviewheight
+    if pl[0].viewheight > VIEWHEIGHT {
+      pl[0].viewheight = VIEWHEIGHT
+      pl[0].deltaviewheight = 0
+    }
+    if pl[0].viewheight < VIEWHEIGHT / 2 {
+      pl[0].viewheight = VIEWHEIGHT / 2
+      if pl[0].deltaviewheight <= 0 { pl[0].deltaviewheight = 1 }
+    }
+    if pl[0].deltaviewheight != 0 {
+      pl[0].deltaviewheight += FRACUNIT / 4
+      if pl[0].deltaviewheight == 0 { pl[0].deltaviewheight = 1 }
+    }
+    pl[0].viewz = min(pmo[0].z + pl[0].viewheight + bob,
+                      pmo[0].ceilingz - 4 * FRACUNIT)
+  }
+
+  // P_XYMovement.
+  if pmo[0].momx != 0 || pmo[0].momy != 0 {
+    pmo[0].momx = min(max(pmo[0].momx, -MAXMOVE), MAXMOVE)
+    pmo[0].momy = min(max(pmo[0].momy, -MAXMOVE), MAXMOVE)
+    var xmove = pmo[0].momx
+    var ymove = pmo[0].momy
+    loop {
+      // (A long way in two halves.)
+      var ptryx = pmo[0].x + xmove
+      var ptryy = pmo[0].y + ymove
+      if xmove > MAXMOVE / 2 || ymove > MAXMOVE / 2 {
+        ptryx = pmo[0].x + xmove / 2
+        ptryy = pmo[0].y + ymove / 2
+        xmove >>= 1
+        ymove >>= 1
+      } else {
+        xmove = 0
+        ymove = 0
+      }
+      if !try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
+                   tm, spechit, touched, pmo, ptryx, ptryy) {
+        slide_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
+                   tm, spechit, touched, intercepts, pmo)
+      }
+    } until xmove == 0 && ymove == 0
+    // On the floor it slows down, and stops when it is slow and no key
+    // moves it.
+    if pmo[0].z <= pmo[0].floorz {
+      if pmo[0].momx > -STOPSPEED && pmo[0].momx < STOPSPEED &&
+         pmo[0].momy > -STOPSPEED && pmo[0].momy < STOPSPEED &&
+         pl[0].forwardmove == 0 && pl[0].sidemove == 0 {
+        if (pmo[0].state - S_PLAY_RUN1) as u32 < 4 {
+          pmo[0].state = S_PLAY
+          pmo[0].tics = states[S_PLAY].tics
+        }
+        pmo[0].momx = 0
+        pmo[0].momy = 0
+      } else {
+        pmo[0].momx = fixed_mul(pmo[0].momx, FRICTION)
+        pmo[0].momy = fixed_mul(pmo[0].momy, FRICTION)
+      }
+    }
+  }
+
+  // P_ZMovement.
+  if pmo[0].z != pmo[0].floorz || pmo[0].momz != 0 {
+    // (Up a step: the eye follows smoothly.)
+    if pmo[0].z < pmo[0].floorz {
+      pl[0].viewheight -= pmo[0].floorz - pmo[0].z
+      pl[0].deltaviewheight = (VIEWHEIGHT - pl[0].viewheight) >> 3
+    }
+    pmo[0].z += pmo[0].momz
+    if pmo[0].z <= pmo[0].floorz {
+      if pmo[0].momz < 0 {
+        // (Landed hard: the eye dips.)
+        if pmo[0].momz < -GRAVITY * 8 { pl[0].deltaviewheight = pmo[0].momz >> 3 }
+        pmo[0].momz = 0
+      }
+      pmo[0].z = pmo[0].floorz
+    } else if pmo[0].flags & MF_NOGRAVITY == 0 {
+      if pmo[0].momz == 0 {
+        pmo[0].momz = -GRAVITY * 2
+      } else {
+        pmo[0].momz -= GRAVITY
+      }
+    }
+    if pmo[0].z + pmo[0].height > pmo[0].ceilingz {
+      if pmo[0].momz > 0 { pmo[0].momz = 0 }
+      pmo[0].z = pmo[0].ceilingz - pmo[0].height
+    }
+  }
+
+  // Its state goes on.
+  if pmo[0].tics != -1 {
+    pmo[0].tics -= 1
+    if pmo[0].tics == 0 {
+      pmo[0].state = states[pmo[0].state].nextstate
+      pmo[0].tics = states[pmo[0].state].tics
+    }
+  }
+}
+
+// What the player and the checking of places start with, after
+// `spawn_things`.
+system start_player() {
+  Pl = [{
+    viewz: Pmo[0].z + VIEWHEIGHT, viewheight: VIEWHEIGHT, deltaviewheight: 0,
+    bob: 0, usedown: false, forwardmove: 0, sidemove: 0, angleturn: 0,
+    buttons: 0
+  }; 1]
+  Tm = [{
+    floorz: 0, ceilingz: 0, dropoffz: 0, ceilingline: -1, validcount: 1,
+    bestslidefrac: 0, bestslideline: 0, links: Spawned.links
+  }; 1]
+  // G_PlayerReborn: a pistol, fifty bullets and two fists.
+  Inv = [{
+    armorpoints: 0, armortype: 0, weapons: 1 << WP_FIST | 1 << WP_PISTOL,
+    cards: 0, backpack: false, readyweapon: WP_PISTOL,
+    pendingweapon: WP_NOCHANGE, itemcount: 0, bonuscount: 0
+  }; 1]
+  Ammo = []
+  Ammo += { count: 50, most: 200 }
+  Ammo += { count: 0, most: 50 }
+  Ammo += { count: 0, most: 300 }
+  Ammo += { count: 0, most: 50 }
+  Powers = [{ tics: 0 }; 6]
+}
+
+// A tic of the player: the demo's keys for it, the things near enough to
+// be in the way, the player moved, and the player's entity made like
+// what came of it.
+system move_player() {
+  Pl[0].forwardmove = Ticcmds[Demo.tic].forwardmove
+  Pl[0].sidemove = Ticcmds[Demo.tic].sidemove
+  Pl[0].angleturn = Ticcmds[Demo.tic].angleturn
+  Pl[0].buttons = Ticcmds[Demo.tic].buttons
+  Demo.tic += 1
+
+  Near = []
+  for m: Mobj where m.type != MT_PLAYER && m.flags & MF_NOBLOCKMAP == 0 {
+    if abs(m.x - Pmo[0].x) < NEARREACH && abs(m.y - Pmo[0].y) < NEARREACH {
+      Near += {
+        id: m.id, x: m.x, y: m.y, z: m.z, radius: m.radius, height: m.height,
+        flags: m.flags, type: m.type, sprite: m.sprite,
+        bx: (m.x - Bmap[0].orgx) >> MAPBLOCKSHIFT,
+        by: (m.y - Bmap[0].orgy) >> MAPBLOCKSHIFT, linked: m.linked, gone: false
+      }
+    }
+  }
+  Nearorder = []
+  for i in 0..len(Near) {
+    Nearorder += { index: i }
+    var at = i
+    var settled = false
+    while at > 0 && !settled {
+      let before = Nearorder[at - 1].index
+      if Near[before].bx > Near[i].bx ||
+         (Near[before].bx == Near[i].bx &&
+          (Near[before].by > Near[i].by ||
+           (Near[before].by == Near[i].by && Near[before].linked < Near[i].linked))) {
+        Nearorder[at].index = before
+        at -= 1
+      } else {
+        settled = true
+      }
+    }
+    Nearorder[at].index = i
+  }
+
+  Touched = []
+  Taken = []
+  player_tic(Lines, Sectors, Subsectors, Nodes, Bytes, Bmap, Near, Nearorder,
+             Tm, Spechit, Touched, Intercepts, Pmo, Pl, Clock.leveltime)
+  // What was touched is picked up, if the player has a use for it, and
+  // is then no more.
+  for k in 0..len(Touched) {
+    touch_special(Near, Taken, Pmo, Inv, Ammo, Powers, Touched[k].index,
+                  Touched[k].z, Level.skill)
+  }
+  count_powers(Pmo, Powers)
+  for e, m: Mobj where m.type != MT_PLAYER {
+    if is_taken(Taken, m.id) { e.destroy() }
+  }
+
+  for m: mut Mobj where m.type == MT_PLAYER {
+    m.x = Pmo[0].x
+    m.y = Pmo[0].y
+    m.z = Pmo[0].z
+    m.angle = Pmo[0].angle
+    m.state = Pmo[0].state
+    m.tics = Pmo[0].tics
+    m.sprite = states[Pmo[0].state].sprite
+    m.frame = states[Pmo[0].state].frame
+    m.flags = Pmo[0].flags
+    m.health = Pmo[0].health
+    m.subsector = Pmo[0].subsector
+    m.floorz = Pmo[0].floorz
+    m.ceilingz = Pmo[0].ceilingz
+    m.linked = Pmo[0].linked
+  }
+}
+
+// A tic of every other thing (P_MobjThinker, P_SetMobjState): its state
+// lasts a tic less, and when it is over the next one starts; one that
+// lasts no time goes straight on to the one after.
+system think_things() {
+  for m: mut Mobj where m.type != MT_PLAYER && m.tics != -1 {
+    m.tics -= 1
+    if m.tics == 0 {
+      var state = states[m.state].nextstate
+      loop {
+        m.state = state
+        m.tics = states[state].tics
+        m.sprite = states[state].sprite
+        m.frame = states[state].frame
+        state = states[state].nextstate
+      } until m.tics != 0
+    }
+  }
+}
