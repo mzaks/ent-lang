@@ -1187,6 +1187,11 @@ one type (a plain list).
   table is not of the world); where there is no row `i` they give nought
   (`false`, the first case of an enum, an empty text), as a text's byte
   past its end does. `len(name)` is the number of rows, an `i32`.
+- `let point = name[i]` gives a row a name, and `point.field` reads it;
+  `for point in name { }` goes over the rows in their order. Such a name
+  is read by its fields only (a row is not a value that is passed on or
+  kept), and never assigned. A row of a plain list is its value (`for
+  number in odd { all += number }`).
 - A field is a number, a bool, an enum (`kind: Kind.Frost`), a
   `text[N]` or a `text` of any length; a value is written as it is: a
   literal, with `-` before a number.
@@ -1240,10 +1245,12 @@ for i in 0..len(l.road) { ... l.road[i].y ... }
 - A table's name is such a value where one of its shape is expected;
   `none` is the table without rows (`len` 0, every read nought).
 - What holds one is read like the table: `value[i].field`, `value[i]`,
-  `len(value)`.
+  `len(value)`, `let row = value[i]`, `for row in value { }`.
 - The program is closed, so the value is the number of the table among
-  those of its shape that are used as values, and a read through one
-  asks which it is: one test for each such table.
+  those of its shape that are used as values. The rows of those are also
+  kept in one table, one's after another's, and a read through a value
+  reads there, from where its table starts: as fast with many such
+  tables as with one.
 
 ## Prefabs
 

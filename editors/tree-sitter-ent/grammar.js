@@ -213,12 +213,13 @@ module.exports = grammar({
 
     relation_end: ($) => seq('(', optional($._name), ')'),
 
-    // (Or `for case in Enum { }`: every case of an enum.)
+    // (Or `for case in Enum { }`: every case of an enum; `for row in
+    // table { }`: every row of a table, or of the one a value holds.)
     counted_for: ($) =>
       seq('for', field('counter', $.identifier), 'in',
           choice(seq(field('from', $._expression), '..',
                      field('to', $._expression)),
-                 field('cases', $._name)),
+                 field('over', $._expression)),
           field('body', $.block)),
 
     // loop { ... } until done: the statements, until the condition holds

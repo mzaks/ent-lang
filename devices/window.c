@@ -306,6 +306,90 @@ static Font ent_window_font_of(int32_t font) {
   return ent_window_fonts[font];
 }
 
+// Whether a file is a font all of which is there: it starts with what
+// says which kind of font it is, lists its tables, each of which lies in
+// the file and adds up to the sum the list has for it, and has the
+// tables a font cannot be without. (What reads a font's letters trusts
+// the file: of one that is cut short or damaged it reads past the end.)
+static uint32_t ent_window_long(const unsigned char *at) {
+  return (uint32_t)at[0] << 24 | (uint32_t)at[1] << 16 |
+         (uint32_t)at[2] << 8 | at[3];
+}
+
+static int ent_window_font_whole(const char *name) {
+  int size = 0;
+  unsigned char *all = LoadFileData(name, &size);
+  const char *wrong = 0;
+  char tag[5] = {0};
+  uint32_t start = 0;
+  if (!all || size < 12)
+    wrong = "is too short";
+  // (Of a collection of fonts, the first is the one that is used.)
+  if (!wrong && !memcmp(all, "ttcf", 4)) {
+    start = size >= 16 ? ent_window_long(all + 12) : 0;
+    if (start < 16 || start > (uint32_t)size - 12)
+      wrong = "is a collection without a first font";
+  }
+  if (!wrong && !memcmp(all + start, "typ1", 4)) {
+    UnloadFileData(all);
+    return 1;
+  }
+  if (!wrong && memcmp(all + start, "\0\1\0\0", 4) &&
+      memcmp(all + start, "OTTO", 4) && memcmp(all + start, "true", 4))
+    wrong = "does not start as a font does";
+  uint32_t tables = wrong ? 0 : all[start + 4] << 8 | all[start + 5];
+  if (!wrong && (!tables || (uint64_t)start + 12 + 16ull * tables >
+                                (uint64_t)size))
+    wrong = "is cut short in its list of tables";
+  // (cmap, head, hhea, hmtx, maxp; the letters' shapes one way or other.)
+  int has = 0;
+  static const char *const needed[] = {"cmap", "head", "hhea", "hmtx",
+                                       "maxp", "glyf", "loca", "CFF ",
+                                       "CFF2"};
+  for (uint32_t i = 0; i < tables && !wrong; ++i) {
+    const unsigned char *entry = all + start + 12 + 16 * i;
+    uint32_t sum = ent_window_long(entry + 4);
+    uint32_t from = ent_window_long(entry + 8);
+    uint32_t length = ent_window_long(entry + 12);
+    memcpy(tag, entry, 4);
+    if ((uint64_t)from + length > (uint64_t)size) {
+      wrong = "is cut short";
+      break;
+    }
+    for (int k = 0; k < 9; ++k)
+      if (!memcmp(tag, needed[k], 4))
+        has |= 1 << k;
+    // (The table's bytes as numbers of four, the last filled with
+    // zeros; in `head`, without the sum over the whole file it holds.)
+    int head = !memcmp(tag, "head", 4);
+    uint32_t added = 0;
+    for (uint32_t at = 0; at < length; at += 4) {
+      unsigned char four[4] = {0};
+      memcpy(four, all + from + at, length - at < 4 ? length - at : 4);
+      if (!(head && at == 8))
+        added += ent_window_long(four);
+    }
+    if (added != sum)
+      wrong = "is damaged";
+    else if (head && (length < 54 ||
+                      ent_window_long(all + from + 12) != 0x5F0F3CF5u))
+      wrong = "is damaged";
+    if (!wrong)
+      tag[0] = 0;
+  }
+  if (!wrong && ((has & 31) != 31 ||
+                 !((has & 96) == 96 || (has & 384))))
+    wrong = "lacks a table a font needs";
+  if (all)
+    UnloadFileData(all);
+  if (wrong) {
+    fprintf(stderr, "ent: the font '%s' %s%s%s%s\n", name, wrong,
+            tag[0] ? " (table '" : "", tag, tag[0] ? "')" : "");
+    return 0;
+  }
+  return 1;
+}
+
 int32_t ent_window_font(const ent_text126 *file, int32_t size) {
   ENT_WINDOW_TEXT(named, file);
   char found[1024];
@@ -313,22 +397,9 @@ int32_t ent_window_font(const ent_text126 *file, int32_t size) {
   if (ent_window_font_count >= 16 || !FileExists(name) ||
       strlen(name) >= sizeof ent_window_faces[0].file)
     return 0;
-  // A file that is no font is none: one starts with what says which
-  // kind of font it is.
-  if (IsFileExtension(name, ".ttf;.otf")) {
-    unsigned char start[4] = {0};
-    FILE *from = fopen(name, "rb");
-    size_t got = from ? fread(start, 1, sizeof start, from) : 0;
-    if (from)
-      fclose(from);
-    static const char *const kinds[] = {"\0\1\0\0", "OTTO", "true", "ttcf",
-                                        "typ1"};
-    int known = 0;
-    for (int i = 0; i < 5 && got == 4; ++i)
-      known |= !memcmp(start, kinds[i], 4);
-    if (!known)
-      return 0;
-  }
+  // A file that is no font, or a damaged one, is none.
+  if (IsFileExtension(name, ".ttf;.otf") && !ent_window_font_whole(name))
+    return 0;
   strcpy(ent_window_faces[ent_window_font_count].file, name);
   ent_window_faces[ent_window_font_count].size = size;
   return ent_window_font_count++;

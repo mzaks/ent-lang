@@ -3,7 +3,7 @@
 // (or `none`, which has no rows), a fn gives one, and what holds one is
 // read like the table itself. The program is closed, so the value is the
 // number of the table among those of its shape that are used so, and a
-// read through it asks a fn which one it is.
+// read through it is one of a table of all their rows (table_rows.test).
 // RUN: %ent run %S/Inputs/tables_as_values.ent 2>/dev/null > %t.out
 // RUN: %ent run --parallel %S/Inputs/tables_as_values.ent 2>/dev/null | cmp - %t.out
 // RUN: FileCheck %s --input-file=%t.out

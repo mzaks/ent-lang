@@ -8,3 +8,14 @@
 // CHECK:      files_words.txt: words that lie next to the program
 // CHECK-NEXT: module_words.txt: words that lie next to the module
 // CHECK-NEXT: nowhere.txt: not there
+
+// A program built with `ent build` knows where its source and its
+// modules' were, and looks there last: it finds the same files started
+// from anywhere, and without `ent run` telling it.
+// RUN: rm -rf %t && mkdir -p %t/elsewhere
+// RUN: %ent build -I %S/Inputs/files %S/Inputs/files_use.ent -o %t/files_use
+// RUN: cd %t/elsewhere && env -u ENT_PROGRAM_DIR %t/files_use | FileCheck %s
+// A file next to the built program comes before those.
+// RUN: echo "words that lie next to the built program" > %t/module_words.txt
+// RUN: cd %t/elsewhere && env -u ENT_PROGRAM_DIR %t/files_use | FileCheck %s --check-prefix=NEXT
+// NEXT: module_words.txt: words that lie next to the built program

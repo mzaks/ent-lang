@@ -1,0 +1,53 @@
+// A row of a table has a name where a `let` gives it one (`let point =
+// road[i]`, then `point.x`), and a `for` goes over a table's rows (`for
+// point in road { }`): of a table by its name, and of the one a value
+// holds. A row of a plain list is its value. What is read through a
+// value is read from one table of all the rows of the tables of that
+// shape, by where the value's table starts in it: without asking which
+// table it is.
+// RUN: %ent run %S/Inputs/table_rows.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/table_rows.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/table_rows.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+
+// IR: sym_name = "rows_rows_of_x_f32_y_f32__count", values = {{\[\[}}0 : i32, 3 : i32, 2 : i32]]
+// IR: sym_name = "rows_rows_of_x_f32_y_f32__all"
+// IR: sym_name = "rows_rows_of_x_f32_y_f32__start", values = {{\[\[}}0 : i32, 0 : i32, 3 : i32]]
+// IR:      ent.function @row_rows_of_x_f32_y_f32__x(
+// IR-NOT:  arith.cmpi eq
+// IR:      ent.table.at @rows_rows_of_x_f32_y_f32__count
+// IR:      ent.table.at @rows_rows_of_x_f32_y_f32__all
+// IR:      ent.yield
+
+// CHECK:      the second point: 4.0 1.0
+// CHECK-NEXT: b: 0.0 9.0
+// CHECK-NEXT: b: 8.0 9.0
+// CHECK-NEXT: a cannon costs 70 of 170
+// CHECK-NEXT: odd 1
+// CHECK-NEXT: odd 3
+// CHECK-NEXT: odd 5
+// CHECK-NEXT: 1: 3 points, 9.0 long, as far as 6.0
+// CHECK-NEXT:   0.0 1.0
+// CHECK-NEXT:   4.0 1.0
+// CHECK-NEXT:   4.0 6.0
+// CHECK-NEXT: 1: 2 points, 8.0 long, as far as 9.0
+// CHECK-NEXT:   0.0 9.0
+// CHECK-NEXT:   8.0 9.0
+// CHECK-NEXT: 1: 0 points, 0.0 long, as far as 0.0
+// CHECK-NEXT: 1: arrow 40
+// CHECK-NEXT: 1: cannon 70
+// CHECK-NEXT: 1: frost 60
+// CHECK-NEXT: 1: frost of 170; numbers add up to 9; a row that is not there: 0.0 0.0
+// CHECK-NEXT: 2: 3 points, 9.0 long, as far as 6.0
+// CHECK-NEXT:   0.0 1.0
+// CHECK-NEXT:   4.0 1.0
+// CHECK-NEXT:   4.0 6.0
+// CHECK-NEXT: 2: 2 points, 8.0 long, as far as 9.0
+// CHECK-NEXT:   0.0 9.0
+// CHECK-NEXT:   8.0 9.0
+// CHECK-NEXT: 2: 0 points, 0.0 long, as far as 0.0
+// CHECK-NEXT: 2: dear arrow 80
+// CHECK-NEXT: 2: dear cannon 140
+// CHECK-NEXT: 2: dear frost 120
+// CHECK-NEXT: 2: dear frost of 340; numbers add up to 6; a row that is not there: 0.0 0.0

@@ -6,7 +6,9 @@
 // in those of the modules it imports, when it was started with `ent run`
 // (which says where they are, in ENT_PROGRAM_DIR); then in the folder
 // the program itself is in, as one built with `ent build` and kept with
-// its files.
+// its files; then where the program's source and its modules' were when
+// it was built, which a built program knows (so it runs on the machine
+// it was built on without its files being brought to it).
 #ifndef ENT_FILES_H
 #define ENT_FILES_H
 
@@ -27,6 +29,13 @@
 #define ENT_FILES_BETWEEN ":"
 #endif
 
+// The folders a program was built from, as `ent` writes them into it;
+// none in a program that was built another way.
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+const char ent_program_folders[] = "";
+
 static int ent_file_is_there(const char *path) {
   FILE *file = fopen(path, "rb");
   if (!file)
@@ -35,24 +44,31 @@ static int ent_file_is_there(const char *path) {
   return 1;
 }
 
+// Whether `name` is in one of the folders of a list of them: the program's
+// first, then those of the modules it imports. Its path is in `found`.
+static int ent_file_among(const char *folders, const char *name, char *found,
+                          size_t size) {
+  while (folders && *folders) {
+    size_t length = strcspn(folders, ENT_FILES_BETWEEN);
+    if (length &&
+        snprintf(found, size, "%.*s/%s", (int)length, folders, name) <
+            (int)size &&
+        ent_file_is_there(found))
+      return 1;
+    folders += length;
+    if (*folders)
+      ++folders;
+  }
+  return 0;
+}
+
 // The path of the file `name`: `name` itself where that is one, or where
 // it is nowhere; else written into `found`, which holds `size` bytes.
 static const char *ent_file_find(const char *name, char *found, size_t size) {
   if (!*name || *name == '/' || ent_file_is_there(name))
     return name;
-  // (The program's folder first, then those of the modules it imports.)
-  const char *sources = getenv("ENT_PROGRAM_DIR");
-  while (sources && *sources) {
-    size_t length = strcspn(sources, ENT_FILES_BETWEEN);
-    if (length &&
-        snprintf(found, size, "%.*s/%s", (int)length, sources, name) <
-            (int)size &&
-        ent_file_is_there(found))
-      return found;
-    sources += length;
-    if (*sources)
-      ++sources;
-  }
+  if (ent_file_among(getenv("ENT_PROGRAM_DIR"), name, found, size))
+    return found;
   char program[1024];
   long length = -1;
 #if defined(__APPLE__)
@@ -72,6 +88,8 @@ static const char *ent_file_find(const char *name, char *found, size_t size) {
         return found;
     }
   }
+  if (ent_file_among(ent_program_folders, name, found, size))
+    return found;
   return name;
 }
 

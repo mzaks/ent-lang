@@ -46,6 +46,7 @@ builds anew and keeps nothing.
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -358,6 +359,18 @@ def build(arguments, output, directory):
             if not os.path.isfile(built):
                 sys.exit(f"ent: '{path}' did not write $ENT_OUTPUT")
         objects.append(built)
+    # Where the program's source and its modules' are, written into it:
+    # the files they name are looked for there last (devices/ent_files.h).
+    folders = []
+    for path in files:
+        if os.path.dirname(path) not in folders:
+            folders.append(os.path.dirname(path))
+    written = os.path.join(directory, "ent_folders.c")
+    with open(written, "w") as source:
+        source.write("const char ent_program_folders[] = %s;\n"
+                     % json.dumps(os.pathsep.join(folders)))
+    objects.append(os.path.join(directory, "ent_folders.o"))
+    run([cc, "-c", written, "-o", objects[-1]], env=host)
     # C++ brings its library; other languages' objects say what they need
     # in their module's .link.
     uses_cxx = any(path.endswith(".cpp") for path in given)

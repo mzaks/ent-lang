@@ -1,0 +1,86 @@
+// Rows of tables by a name, and a `for` over a table's rows
+// (table_rows.test).
+import console
+import text
+enum Kind { Arrow, Cannon, Frost }
+table road_a { x: f32, y: f32 } = [ { x: 0.0, y: 1.0 }, { x: 4.0, y: 1.0 }, { x: 4.0, y: 6.0 } ]
+table road_b { x: f32, y: f32 } = [ { x: 0.0, y: 9.0 }, { x: 8.0, y: 9.0 } ]
+table towers[Kind] { name: text, cost: i32 } = [
+  Arrow: { name: "arrow", cost: 40 }, Cannon: { name: "cannon", cost: 70 },
+  Frost: { name: "frost", cost: 60 }
+]
+table dear[Kind] { name: text, cost: i32 } = [
+  Arrow: { name: "dear arrow", cost: 80 },
+  Cannon: { name: "dear cannon", cost: 140 },
+  Frost: { name: "dear frost", cost: 120 }
+]
+table odd: i32 = [1, 3, 5]
+table even: i32 = [2, 4]
+
+component Level { road: rows { x: f32, y: f32 } }
+unique Prices: rows[Kind] { name: text, cost: i32 }
+unique Numbers: rows i32
+unique Round: i32
+default_capacity 8
+
+fn road(level: i32) -> rows { x: f32, y: f32 } {
+  if level == 0 { road_a } else if level == 1 { road_b } else { none }
+}
+// (A row by a name, of the table a value holds; and each row of it.)
+fn length(way: rows { x: f32, y: f32 }) -> f32 {
+  var all = 0.0
+  let last = len(way) - 1
+  for i in 0..last {
+    let from = way[i]
+    let to = way[i + 1]
+    all += max(to.x - from.x, to.y - from.y)
+  }
+  all
+}
+fn furthest(way: rows { x: f32, y: f32 }) -> f32 {
+  var far = 0.0
+  for point in way { far = max(far, max(point.x, point.y)) }
+  far
+}
+fn sum(numbers: rows i32) -> i32 {
+  var all = 0
+  for number in numbers { all += number }
+  all
+}
+world {
+  spawn { Level { road: road_a } }
+  spawn { Level { road: road_b } }
+  spawn { Level { road: none } }
+  Prices = towers
+  Numbers = odd
+}
+system s() {
+  Round += 1
+  // Of a table by its name.
+  if Round == 1 {
+    let second = road_a[1]
+    put("the second point: {second.x} {second.y}")
+    for point in road_b { put("b: {point.x} {point.y}") }
+    var all = 0
+    for tower in towers { all += tower.cost }
+    let cannon = towers[Kind.Cannon]
+    put("a {cannon.name} costs {cannon.cost} of {all}")
+    for number in odd { put("odd {number}") }
+  }
+  // Of the table a value holds.
+  for l: Level {
+    put("{Round}: {len(l.road)} points, {length(l.road)} long, as far as {furthest(l.road)}")
+    for point in l.road { put("  {point.x} {point.y}") }
+  }
+  var all = 0
+  for price in Prices {
+    put("{Round}: {price.name} {price.cost}")
+    all += price.cost
+  }
+  let frost = Prices[Kind.Frost]
+  put("{Round}: {frost.name} of {all}; numbers add up to {sum(Numbers)}; a row that is not there: {road(0)[7].x} {road(5)[0].y}")
+  Prices = dear
+  Numbers = even
+}
+schedule f() { s() }
+main { loop { f() } until Round == 2 }

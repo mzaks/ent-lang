@@ -104,11 +104,13 @@ extern fn text_least(text: text, font: i32, size: f32, spacing: f32,
                      breaks: i32) -> f32
 // Reads a font from a file (.ttf, .otf) for texts `size` pixels high,
 // and gives its number; 0, the window's own, if there is no such file
-// or it is no font. The window need not be open: `world` may ask. (It
-// is read when it is first used.)
+// or it is no font, or a damaged one (cut short, or a table of it not
+// adding up to its sum; which, is said on stderr). The window need not
+// be open: `world` may ask. (It is read when it is first used.)
 // A file is named by its path: from where the program was started, or
-// else from where its source is (`ent run`) or the program itself (built
-// with `ent build`); so for a picture.
+// else from where its source is (`ent run`), the program itself (built
+// with `ent build`) or where its source was when it was built; so for
+// a picture.
 extern proc font(file: text[126], size: i32) -> i32
 // A filled rectangle whose corners are rounded, each with its own
 // radius: top left, top right, bottom left, bottom right.

@@ -1140,3 +1140,43 @@ fn far(way: rows { x: f32, y: f32 }) -> f32 {
   // expected-error @+1 {{the rows of this table have no field 'z'}}
   way[0].z
 }
+
+// -----
+
+// A row of a table that has a name is read by its fields, and stays as
+// it is.
+table points { x: f32, y: f32 } = [ { x: 1.0, y: 2.0 } ]
+unique N: f32
+system s() {
+  let point = points[0]
+  // expected-error @+1 {{'point' is a row of a table; read a field of it: 'point.field'}}
+  N = point
+}
+
+// -----
+
+table points { x: f32, y: f32 } = [ { x: 1.0, y: 2.0 } ]
+system s() {
+  for point in points {
+    // expected-error @+1 {{'point' is a row of a table, and a table never changes}}
+    point.x = 3.0
+  }
+}
+
+// -----
+
+table points { x: f32, y: f32 } = [ { x: 1.0, y: 2.0 } ]
+unique N: f32
+system s() {
+  let point = points[0]
+  // expected-error @+1 {{table 'points' has no field 'z'}}
+  N = point.z
+}
+
+// -----
+
+unique N: i32
+system s() {
+  // expected-error @+1 {{a 'for' counts from a number to another ('a..b'), or goes over the cases of an enum or the rows of a table}}
+  for n in N { }
+}

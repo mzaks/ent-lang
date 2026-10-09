@@ -101,10 +101,10 @@ fn on_road(way: rows { x: f32, y: f32 }, col: i32, row: i32) -> bool {
   var on = false
   let last = len(way) - 1
   for i in 0..last {
-    if col as f32 >= min(way[i].x, way[i + 1].x) &&
-       col as f32 <= max(way[i].x, way[i + 1].x) &&
-       row as f32 >= min(way[i].y, way[i + 1].y) &&
-       row as f32 <= max(way[i].y, way[i + 1].y) {
+    let from = way[i]
+    let to = way[i + 1]
+    if col as f32 >= min(from.x, to.x) && col as f32 <= max(from.x, to.x) &&
+       row as f32 >= min(from.y, to.y) && row as f32 <= max(from.y, to.y) {
       on = true
     }
   }
