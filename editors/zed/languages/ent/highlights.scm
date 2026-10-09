@@ -52,7 +52,7 @@
 ; Components, where they are named.
 (binding component: (identifier) @type)
 (component_init component: (identifier) @type)
-(spawn component: (identifier) @type)
+(spawn_list component: (identifier) @type)
 (with (identifier) @type)
 (any (identifier) @type)
 (without (identifier) @type)

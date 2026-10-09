@@ -4,3 +4,7 @@
 // RUN: cmp %S/../../editors/tree-sitter-ent/queries/outline.scm %S/../../editors/zed/languages/ent/outline.scm
 // RUN: cmp %S/../../editors/tree-sitter-ent/queries/brackets.scm %S/../../editors/zed/languages/ent/brackets.scm
 // RUN: cmp %S/../../editors/tree-sitter-ent/queries/indents.scm %S/../../editors/zed/languages/ent/indents.scm
+// And they are queries of the grammar as it is: one that names something
+// the grammar has not makes Zed drop all of them. (Asked of tree-sitter
+// where that is there.)
+// RUN: sh %S/Inputs/check_queries.sh %S/../../editors/tree-sitter-ent %S/../../examples/towers.ent
