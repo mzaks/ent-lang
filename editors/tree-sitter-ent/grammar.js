@@ -182,10 +182,14 @@ module.exports = grammar({
     // rows { field: type, .. }, rows type, rows[Enum] ..: a table of
     // that shape, as a value.
     rows_type: ($) =>
-      prec.right(seq('rows', optional(seq('[', field('key', $._name), ']')),
-                     choice($.fields, $._type))),
+      prec.right(seq('rows',
+                     choice(seq('of', field('table', $._name)),
+                            seq(optional(seq('[', field('key', $._name), ']')),
+                                choice($.fields, $._type))))),
     // row { x: f32, y: f32 }: a row of one of the tables with such rows.
-    row_type: ($) => seq('row', $.fields),
+    // rows of road, row of road: with rows as those of that table.
+    row_type: ($) =>
+      seq('row', choice($.fields, seq('of', field('table', $._name)))),
     // text: of any length; text[N]: up to N bytes.
     text_type: ($) =>
       prec.right(seq('text', optional(seq('[', $.integer, ']')))),

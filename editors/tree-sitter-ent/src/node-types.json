@@ -3190,10 +3190,25 @@
   {
     "type": "row_type",
     "named": true,
-    "fields": {},
+    "fields": {
+      "table": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      }
+    },
     "children": {
       "multiple": false,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "fields",
@@ -3219,11 +3234,25 @@
             "named": true
           }
         ]
+      },
+      "table": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
       }
     },
     "children": {
       "multiple": false,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "callable_type",
@@ -4943,6 +4972,10 @@
   },
   {
     "type": "mut",
+    "named": false
+  },
+  {
+    "type": "of",
     "named": false
   },
   {

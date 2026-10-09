@@ -1238,3 +1238,25 @@ system s() {
   // expected-error @+1 {{a 'for' has a number and a row ('for i, row in table') over the rows of a table}}
   for i, x in 0..3 { }
 }
+
+// -----
+
+// What a value is and what it goes into, where they differ.
+table road { x: f32, y: f32 } = [ { x: 0.0, y: 1.0 } ]
+component W { at: row of road }
+unique N: f32
+system s() {
+  // expected-error @+1 {{value has a different type than the target: it is a row of a table, and the target holds an f32}}
+  for w: W { N = w.at }
+}
+
+// -----
+
+// expected-error @+1 {{'road' is no table}}
+component W { at: row of road }
+
+// -----
+
+table odd: i32 = [1, 3]
+// expected-error @+1 {{table 'odd' is a plain list: a row of it is its value}}
+component W { at: row of odd }

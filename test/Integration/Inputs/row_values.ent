@@ -13,16 +13,18 @@ table odd: i32 = [1, 3, 5]
 
 // A row in a field, and the table it is of; a row in a unique.
 component Walker { at: row { x: f32, y: f32 }, way: rows { x: f32, y: f32 } }
-component Built { what: row { name: text, cost: i32 } }
+// (`row of table`, `rows of table`: with rows as that table's; the same
+// types as those written out.)
+component Built { what: row of towers }
 unique Home: row { x: f32, y: f32 }
 unique Round: i32
 default_capacity 8
 
 // Rows as what a fn takes and gives.
-fn apart(a: row { x: f32, y: f32 }, b: row { x: f32, y: f32 }) -> f32 {
+fn apart(a: row of road_a, b: row { x: f32, y: f32 }) -> f32 {
   max(b.x - a.x, b.y - a.y)
 }
-fn last(way: rows { x: f32, y: f32 }) -> row { x: f32, y: f32 } {
+fn last(way: rows of road_b) -> row of road_a {
   way[len(way) - 1]
 }
 fn dearest() -> row { name: text, cost: i32 } {

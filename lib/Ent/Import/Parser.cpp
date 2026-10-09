@@ -597,6 +597,8 @@ private:
                                         StringRef field);
   mlir::Value noughtOf(Location at, Type type);
   LogicalResult finishRows();
+  std::string typeWords(Type type);
+  LogicalResult mismatch(llvm::SMLoc at, Type value, Type target);
   LogicalResult finishRowKinds();
   FailureOr<Type> parseRowType();
   RowKind *rowOf(Type type);
@@ -1203,7 +1205,8 @@ FailureOr<Type> Parser::parseType() {
     return parseRowsType();
   }
   // row { field: type, .. }: a row of one of the tables with such rows.
-  if (token.isKeyword("row") && peek().is(Token::LBrace)) {
+  if (token.isKeyword("row") &&
+      (peek().is(Token::LBrace) || peek().isKeyword("of"))) {
     advance();
     return parseRowType();
   }
@@ -1351,7 +1354,20 @@ FailureOr<Type> Parser::parseCallableType(bool proc) {
 FailureOr<Type> Parser::parseRowsType() {
   llvm::SMLoc at = token.loc;
   auto shape = std::make_unique<RowsShape>();
-  if (consumeIf(Token::LBracket)) {
+  // rows of table: the tables with rows as that one's.
+  if (token.isKeyword("of") && peek().is(Token::Identifier)) {
+    advance();
+    llvm::SMLoc tableAt = token.loc;
+    FailureOr<std::string> table = identifier("a table");
+    if (failed(table))
+      return failure();
+    if (!tables.count(*table))
+      return error(tableAt, "'" + *table + "' is no table");
+    shape->fields = tables[*table].fields;
+    auto keyed = tableKeys.find(resolve(*table));
+    if (keyed != tableKeys.end())
+      shape->key = keyed->second;
+  } else if (consumeIf(Token::LBracket)) {
     llvm::SMLoc keyAt = token.loc;
     FailureOr<std::string> named = identifier("an enum");
     if (failed(named) || failed(expect(Token::RBracket, "']'")))
@@ -1360,7 +1376,9 @@ FailureOr<Type> Parser::parseRowsType() {
       return error(keyAt, "'" + *named + "' is no enum");
     shape->key = resolve(*named);
   }
-  if (token.is(Token::LBrace)) {
+  if (!shape->fields.empty()) {
+    // (Said by a table.)
+  } else if (token.is(Token::LBrace)) {
     Record record;
     if (failed(parseFields(record)))
       return failure();
@@ -1650,10 +1668,24 @@ LogicalResult Parser::finishRows() {
 FailureOr<Type> Parser::parseRowType() {
   llvm::SMLoc at = token.loc;
   auto kind = std::make_unique<RowKind>();
-  Record record;
-  if (failed(parseFields(record)))
-    return failure();
-  kind->fields = record.fields;
+  // row of table: a row with fields as that one's.
+  if (consumeKeyword("of")) {
+    llvm::SMLoc tableAt = token.loc;
+    FailureOr<std::string> table = identifier("a table");
+    if (failed(table))
+      return failure();
+    if (!tables.count(*table))
+      return error(tableAt, "'" + *table + "' is no table");
+    if (tables[*table].fieldType(""))
+      return error(tableAt, "table '" + *table + "' is a plain list: a row "
+                            "of it is its value");
+    kind->fields = tables[*table].fields;
+  } else {
+    Record record;
+    if (failed(parseFields(record)))
+      return failure();
+    kind->fields = record.fields;
+  }
   if (kind->fields.empty())
     return error(at, "a table's rows have at least one field");
   std::string key = "row";
@@ -2546,8 +2578,16 @@ LogicalResult Parser::parseRelation() {
   if (current->names.contains(*name))
     return error(at, "'" + *name + "' is already declared");
   Record record;
+  llvm::SMLoc fieldsAt = token.loc;
   if (token.is(Token::LBrace) && failed(parseFields(record)))
     return failure();
+  // (An edge's fields are moved as plain values wherever edges are put
+  // in order or taken away: nothing there gives a text's block back.)
+  for (auto &[field, type] : record.fields)
+    if (isa<StringType>(type))
+      return error(fieldsAt, "an edge does not hold a text of any length "
+                             "yet ('" + field + "'): give it a capacity "
+                             "('text[N]')");
   if (hasEnds && (failed(parseArrowEnd(arrow)) || failed(parseEnd(1))))
     return failure();
   if (token.isKeyword("from") || token.isKeyword("to"))
@@ -5206,6 +5246,36 @@ Parser::parseAssignOp() {
 }
 
 /// Emit `target op value`: a plain store for `=`, or load, combine, store.
+/// A type in the words of a program.
+std::string Parser::typeWords(Type type) {
+  if (rowOf(type))
+    return "a row of a table";
+  if (rowsOf(type))
+    return "a table";
+  if (callableOf(type))
+    return "a fn or proc";
+  if (auto named = dyn_cast<EnumType>(type))
+    return ("a '" + named.getName().getValue() + "'").str();
+  if (auto text = dyn_cast<TextType>(type))
+    return ("a text[" + Twine(text.getCapacity()) + "]").str();
+  if (isa<StringType>(type))
+    return "a text";
+  if (isa<EntityType>(type))
+    return "an entity";
+  if (type.isInteger(1))
+    return "a bool";
+  std::string words;
+  llvm::raw_string_ostream(words) << type;
+  return "an " + words;
+}
+
+/// What is said where a value is not of the type of what it goes into.
+LogicalResult Parser::mismatch(llvm::SMLoc at, Type value, Type target) {
+  return error(at, "value has a different type than the target: it is " +
+                       typeWords(value) + ", and the target holds " +
+                       typeWords(target));
+}
+
 LogicalResult Parser::emitAssignment(
     llvm::SMLoc at, Token::Kind op, std::optional<StringRef> rule,
     function_ref<Type()> targetType, function_ref<mlir::Value()> load,
@@ -5215,7 +5285,7 @@ LogicalResult Parser::emitAssignment(
   if (failed(rhs))
     return failure();
   if (rhs->getType() != type)
-    return error(value.loc, "value has a different type than the target");
+    return mismatch(value.loc, rhs->getType(), type);
   if (isa<StringType>(type)) {
     // What it holds is its own: a copy of the value, and what it held
     // before is given back (after: the value may be a view of that).
@@ -5353,6 +5423,8 @@ LogicalResult Parser::parseNameStatement() {
     FailureOr<mlir::Value> rhs = emit(**value, type);
     if (failed(rhs))
       return failure();
+    if (rhs->getType() != type)
+      return mismatch((*value)->loc, rhs->getType(), type);
     mlir::Value v = *rhs;
     if (negate) {
       FailureOr<mlir::Value> negated = arithmetic(
@@ -5424,6 +5496,8 @@ LogicalResult Parser::parseNameStatement() {
       FailureOr<mlir::Value> rhs = emit(**value, type);
       if (failed(rhs))
         return failure();
+      if (rhs->getType() != type)
+        return mismatch((*value)->loc, rhs->getType(), type);
       mlir::Value v = *rhs;
       if (negate) {
         FailureOr<mlir::Value> negated = arithmetic(
@@ -5507,6 +5581,8 @@ LogicalResult Parser::parseNameStatement() {
       FailureOr<mlir::Value> rhs = emit(**value, type);
       if (failed(rhs))
         return failure();
+      if (rhs->getType() != type)
+        return mismatch((*value)->loc, rhs->getType(), type);
       mlir::Value v = *rhs;
       if (negate) {
         FailureOr<mlir::Value> negated = arithmetic(

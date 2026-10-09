@@ -25,5 +25,5 @@
 
 // Shooting reads where the foes are and how far along, and writes what
 // they have left (which it sends).
-// ACCESS: remark: reads window.Window.dt, Tower_Site_Aim.Tower.kind, {{.*}}Foe_At_Walk_Health_Chill.Walk.far, Foe_At_Walk_Health_Chill.At.x, Foe_At_Walk_Health_Chill.At.y, Foe_At_Walk_Health_Chill.count, Foe_At_Walk_Health_Chill.id, entities{{.*}}; writes {{.*}}Foe_At_Walk_Health_Chill.Health.hp
+// ACCESS: remark: reads window.Window.dt, Tower_Site_Aim.Tower.kind, {{.*}}At_Walk_Health_Chill_Foe.Walk.far, At_Walk_Health_Chill_Foe.At.x, At_Walk_Health_Chill_Foe.At.y, At_Walk_Health_Chill_Foe.count, At_Walk_Health_Chill_Foe.id, entities{{.*}}; writes {{.*}}At_Walk_Health_Chill_Foe.Health.hp
 // ACCESS-NEXT: ent.system @shoot()

@@ -35,7 +35,7 @@ enum Tally { Gold, Lives, Wave }
 // A foe: where it is on the board (in fields, from the top left one's
 // corner), which stretch of the road it is on and how far along the road
 // that makes it, what it has left, and how long it is still cold.
-component Foe { breed: Breed, reward: i32 }
+// (`Foe` itself is where the breeds are: it holds a row of their table.)
 component At { x: f32, y: f32 }
 component Walk { leg: i32, far: f32 }
 component Health { hp: f32, full: f32 }
@@ -94,10 +94,10 @@ table north_road { x: f32, y: f32 } = [
   { x: 6.0, y: 10.0 }, { x: 6.0, y: 12.0 }
 ]
 fn maps() -> i32 { 2 }
-fn road(map: i32) -> rows { x: f32, y: f32 } {
+fn road(map: i32) -> rows of west_road {
   if map == 0 { west_road } else { north_road }
 }
-fn on_road(way: rows { x: f32, y: f32 }, col: i32, row: i32) -> bool {
+fn on_road(way: rows of west_road, col: i32, row: i32) -> bool {
   var on = false
   let last = len(way) - 1
   for i in 0..last {
@@ -139,6 +139,9 @@ table breeds[Breed] {
   Runner: { life: 15.0, pace: 2.6, bounty: 4, hue: 0xe6d15a, girth: 0.22 },
   Brute:  { life: 90.0, pace: 0.9, bounty: 12, hue: 0xa66bd6, girth: 0.38 }
 ]
+// A foe is of a breed: it holds that breed's row, and what the row says
+// is read of the foe (`f.breed.pace`).
+component Foe { breed: row of breeds }
 // Which comes when in a wave, and how many there are in it.
 fn breed_of(wave: i32, i: i32) -> Breed {
   if wave >= 4 && i % 5 == 4 { Breed.Brute }
@@ -356,7 +359,7 @@ system marshal() {
       let breed = breed_of(Game.wave, crowd(Game.wave) - Game.left)
       let hp = life(breed, Game.wave)
       spawn {
-        Foe { breed: breed, reward: breeds[breed].bounty },
+        Foe { breed: breeds[breed] },
         At { x: road(Game.map)[0].x, y: road(Game.map)[0].y },
         Walk { leg: 0, far: 0.0 },
         Health { hp: hp, full: hp }, Chill { left: 0.0 }
@@ -387,7 +390,7 @@ system walk() {
   let dt = min(Window.dt, 0.05)
   let way = road(Game.map)
   for e, f: Foe, a: mut At, w: mut Walk, c: Chill {
-    var step = breeds[f.breed].pace * dt
+    var step = f.breed.pace * dt
     if c.left > 0.0 { step = step * 0.5 }
     let tx = way[w.leg + 1].x
     let ty = way[w.leg + 1].y
@@ -498,7 +501,7 @@ system falls() {
     if b.left <= 0.0 { e.destroy() }
   }
   for e, f: Foe, h: Health where h.hp <= 0.0 {
-    Gold += f.reward
+    Gold += f.breed.bounty
     e.destroy()
   }
 }
@@ -564,8 +567,8 @@ system draw_board() {
   for f: Foe, a: At, h: Health, c: Chill {
     let x = gx + (a.x + 0.5) * cell
     let y = gy + (a.y + 0.5) * cell
-    let r = breeds[f.breed].girth * cell
-    let hue = breeds[f.breed].hue
+    let r = f.breed.girth * cell
+    let hue = f.breed.hue
     circle(x, y, r + 2.0, 0x1a1f26)
     circle(x, y, r, if c.left > 0.0 { blend(hue, 0x9fd8ff, 0.6) } else { hue })
     let part = max(0.0, h.hp / h.full)

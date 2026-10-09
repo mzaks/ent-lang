@@ -1312,6 +1312,10 @@ let far = apart(w.at, road_a[0]) + w.at.x
 - `row { field: type, ... }` is the type of the rows with such fields,
   of whichever table (one with counted rows, or one with a row for each
   case). A field, a unique, a parameter and a fn's result may have it.
+- `row of road` is the same type said by a table that has such rows,
+  and `rows of road` the type of the tables with rows as that one's
+  (and a row for each case of the same enum, if it has that): no fields
+  to write out again. The table is declared before.
 - `table[i]`, `value[i]` of the table a value holds, a name that stands
   for a row (`let point = road[i]`) and `none` are such values where one
   is expected. A row the table has not is `none`.

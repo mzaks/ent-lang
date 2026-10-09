@@ -57,3 +57,10 @@ system s() {
     l.name -= "more"
   }
 }
+
+// -----
+
+// An edge's fields are plain values: a text in one has a capacity.
+import text
+// expected-error @+1 {{an edge does not hold a text of any length yet ('note'): give it a capacity ('text[N]')}}
+relation Link { note: text } capacity 8
