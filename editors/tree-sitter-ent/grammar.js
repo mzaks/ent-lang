@@ -78,11 +78,15 @@ module.exports = grammar({
 
     // table name { field: type, .. } = [ { field: value, .. }, .. ]
     // table name: type = [ value, .. ]
+    // table name[Enum] .. = [ Case: row or value, .. ]
     table: ($) =>
       seq('table', field('name', $.identifier),
+          optional(seq('[', field('key', $._name), ']')),
           choice($.fields, seq(':', field('type', $._type))), '=', '[',
-          optional(list(choice($.row, $._expression))), ']'),
+          optional(list(choice($.row, $._expression, $.keyed_row))), ']'),
     row: ($) => seq('{', optional(list($.field_init)), '}'),
+    keyed_row: ($) =>
+      seq(field('case', $.identifier), ':', choice($.row, $._expression)),
 
     // prefab name(parameter: type, ..) { what a spawn lists }
     prefab: ($) =>
@@ -203,9 +207,12 @@ module.exports = grammar({
 
     relation_end: ($) => seq('(', optional($._name), ')'),
 
+    // (Or `for case in Enum { }`: every case of an enum.)
     counted_for: ($) =>
       seq('for', field('counter', $.identifier), 'in',
-          field('from', $._expression), '..', field('to', $._expression),
+          choice(seq(field('from', $._expression), '..',
+                     field('to', $._expression)),
+                 field('cases', $._name)),
           field('body', $.block)),
 
     // loop { ... } until done: the statements, until the condition holds

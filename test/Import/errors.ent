@@ -1043,3 +1043,42 @@ schedule frame() {
   // expected-error @+1 {{'inner' runs only if its own condition holds, which a schedule that runs it would have to ask: not supported yet}}
   inner()
 }
+
+// -----
+
+// A table with a row for each case of an enum has one for every case,
+// once, and is read by a case.
+enum Kind { A, B, C }
+// expected-error @+1 {{table 't' has no row for 'C': it has one for every case of 'Kind'}}
+table t[Kind]: i32 = [ A: 1, B: 2 ]
+
+// -----
+
+enum Kind { A, B }
+// expected-error @+1 {{'A' has its row already}}
+table t[Kind]: i32 = [ A: 1, B: 2, A: 3 ]
+
+// -----
+
+enum Kind { A, B }
+// expected-error @+1 {{'Kind' has no case 'D'}}
+table t[Kind]: i32 = [ A: 1, D: 2 ]
+
+// -----
+
+enum Kind { A, B }
+table t[Kind]: i32 = [ A: 1, B: 2 ]
+// expected-error @+1 {{table 't' has a row for each case of an enum, and is read by one ('t[case]'), not by a number}}
+fn f(i: i32) -> i32 { t[i] }
+
+// -----
+
+enum Kind { A, B }
+table t: i32 = [ 1, 2 ]
+// expected-error @+1 {{table 't' has rows that are counted; one with a row for each case is declared 'table t[Enum]'}}
+fn f(k: Kind) -> i32 { t[k] }
+
+// -----
+
+// expected-error @+1 {{'Nope' is no enum: a table has a row for each case of one ('table t[Enum]'), or rows that are counted}}
+table t[Nope]: i32 = [ 1, 2 ]

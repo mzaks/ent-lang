@@ -654,6 +654,8 @@ private:
   /// many rows each has.
   Declared<Record> tables;
   llvm::StringMap<unsigned> tableRows;
+  /// Of a table with a row for each case of an enum: that enum's symbol.
+  llvm::StringMap<std::string> tableKeys;
   Declared<Prefab> prefabs;
   /// Parsing the body of a system (or `world`) or of a fn: where functions
   /// are called.
@@ -1381,12 +1383,28 @@ FailureOr<Attribute> Parser::constantOf(const Expr &expr, Type type) {
 
 // table name { field: type, ... } = [ { field: value, ... }, ... ]
 // table name: type = [ value, ... ]
+// table name[Enum] ... = [ Case: row or value, ... ]: one for each case.
 LogicalResult Parser::parseTable() {
   advance();
   llvm::SMLoc at = token.loc;
   FailureOr<std::string> name = identifier("a table's name");
   if (failed(name))
     return failure();
+  // [Enum]: a row for every case of it, which says which row is read.
+  std::string key;
+  if (consumeIf(Token::LBracket)) {
+    llvm::SMLoc keyAt = token.loc;
+    FailureOr<std::string> named = identifier("an enum");
+    if (failed(named) || failed(expect(Token::RBracket, "']'")))
+      return failure();
+    if (!enums.count(*named))
+      return error(keyAt, "'" + *named + "' is no enum: a table has a row "
+                          "for each case of one ('table " + *name +
+                              "[Enum]'), or rows that are counted");
+    key = *named;
+  }
+  // (The case each row is for, in the order the rows are written.)
+  SmallVector<unsigned> order;
   Record record;
   bool plain = consumeIf(Token::Colon);
   if (plain) {
@@ -1409,6 +1427,18 @@ LogicalResult Parser::parseTable() {
   SmallVector<SmallVector<Attribute>> columns(record.fields.size());
   while (!token.is(Token::RBracket)) {
     llvm::SMLoc rowAt = token.loc;
+    if (!key.empty()) {
+      FailureOr<std::string> label = identifier("a case of '" + key + "'");
+      if (failed(label) || failed(expect(Token::Colon, "':' and its row")))
+        return failure();
+      const SmallVector<std::string> &cases = enums[key];
+      auto *found = llvm::find(cases, *label);
+      if (found == cases.end())
+        return error(rowAt, "'" + key + "' has no case '" + *label + "'");
+      if (llvm::is_contained(order, unsigned(found - cases.begin())))
+        return error(rowAt, "'" + *label + "' has its row already");
+      order.push_back(found - cases.begin());
+    }
     if (plain) {
       FailureOr<ExprPtr> value = parseExpr();
       if (failed(value))
@@ -1464,6 +1494,20 @@ LogicalResult Parser::parseTable() {
     return failure();
   if (columns[0].empty())
     return error(at, "a table has at least one row");
+  if (!key.empty()) {
+    // Every case, and the rows in the order of the cases.
+    const SmallVector<std::string> &cases = enums[key];
+    for (auto [number, label] : llvm::enumerate(cases))
+      if (!llvm::is_contained(order, unsigned(number)))
+        return error(at, "table '" + *name + "' has no row for '" + label +
+                             "': it has one for every case of '" + key + "'");
+    for (SmallVector<Attribute> &column : columns) {
+      SmallVector<Attribute> sorted(column.size());
+      for (auto [written, number] : llvm::enumerate(order))
+        sorted[number] = column[written];
+      column = std::move(sorted);
+    }
+  }
   SmallVector<StringRef> names;
   SmallVector<Type> types;
   SmallVector<Attribute> values;
@@ -1478,6 +1522,10 @@ LogicalResult Parser::parseTable() {
   state.addAttribute("field_names", builder.getStrArrayAttr(names));
   state.addAttribute("field_types", builder.getTypeArrayAttr(types));
   state.addAttribute("values", builder.getArrayAttr(values));
+  if (!key.empty()) {
+    state.addAttribute("key", symbol(key));
+    tableKeys[symbolName.getValue()] = resolve(key);
+  }
   builder.create(state);
   tableRows[symbolName.getValue()] = columns[0].size();
   tables[*name] = std::move(record);
@@ -2873,28 +2921,43 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
   FailureOr<std::string> name = identifier("a name");
   if (failed(name) || failed(expectKeyword("in")))
     return failure();
-  FailureOr<ExprPtr> first = parseExpr();
-  if (failed(first) || failed(expect(Token::DotDot, "'..'")))
-    return failure();
-  FailureOr<ExprPtr> end = parseExpr();
-  if (failed(end))
-    return failure();
-  // Literal bounds take the other bound's type; two literals count in i32.
-  Type type = typeOf(**end);
-  if (!type)
-    type = typeOf(**first);
-  if (!type)
-    type = builder.getI32Type();
-  if (!type.isSignlessInteger() || type.isInteger(1))
-    return error((*first)->loc, "a 'for' counts over integers");
-  FailureOr<mlir::Value> low = emit(**first, type);
-  FailureOr<mlir::Value> high = emit(**end, type);
-  if (failed(low) || failed(high))
-    return failure();
-  if (low->getType() != type || high->getType() != type)
-    return error((*first)->loc, "the bounds of a 'for' must have the same "
-                                "integer type");
   Location where = loc(at);
+  // for case in Enum { }: every case of it, in their order.
+  EnumType cases;
+  Type type;
+  FailureOr<mlir::Value> low = failure(), high = failure();
+  if (token.is(Token::Identifier) && peek().is(Token::LBrace) &&
+      !lookup(token.spelling) && enums.count(token.spelling)) {
+    cases = EnumType::get(context, symbol(token.spelling));
+    type = cases.getStorageType();
+    low = integer(where, builder.getI32Type(), 0);
+    high = integer(where, builder.getI32Type(),
+                   enums[token.spelling].size());
+    advance();
+  } else {
+    FailureOr<ExprPtr> first = parseExpr();
+    if (failed(first) || failed(expect(Token::DotDot, "'..'")))
+      return failure();
+    FailureOr<ExprPtr> end = parseExpr();
+    if (failed(end))
+      return failure();
+    // Literal bounds take the other bound's type; two literals count in
+    // i32.
+    type = typeOf(**end);
+    if (!type)
+      type = typeOf(**first);
+    if (!type)
+      type = builder.getI32Type();
+    if (!type.isSignlessInteger() || type.isInteger(1))
+      return error((*first)->loc, "a 'for' counts over integers");
+    low = emit(**first, type);
+    high = emit(**end, type);
+    if (failed(low) || failed(high))
+      return failure();
+    if (low->getType() != type || high->getType() != type)
+      return error((*first)->loc, "the bounds of a 'for' must have the same "
+                                  "integer type");
+  }
   Type index = builder.getIndexType();
   mlir::Value lower = arith::IndexCastOp::create(builder, where, index, *low);
   mlir::Value upper = arith::IndexCastOp::create(builder, where, index, *high);
@@ -2908,8 +2971,14 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(loop.getBody()->getTerminator());
     ScopeGuard scope(*this);
-    bind(*name, Variable::ofValue(arith::IndexCastOp::create(
-                    builder, where, type, loop.getInductionVar())));
+    mlir::Value counted = arith::IndexCastOp::create(
+        builder, where, type, loop.getInductionVar());
+    // (A case: its number, as the enum's type.)
+    if (cases)
+      counted = UnrealizedConversionCastOp::create(builder, where,
+                                                   Type(cases), counted)
+                    .getResult(0);
+    bind(*name, Variable::ofValue(counted));
     SmallVector<VarState> inside = before;
     for (VarState &state : inside) {
       auto placeholder = UnrealizedConversionCastOp::create(
@@ -5402,12 +5471,39 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                                    "' is a plain list: '" + expr.name + "[i]'"
                              : "table '" + expr.name + "' has no field '" +
                                    expr.field + "'");
+    // A table with a row for each case of an enum is read by a case.
+    auto keyed = tableKeys.find(resolve(expr.name));
+    if (keyed != tableKeys.end()) {
+      auto named = EnumType::get(
+          context, FlatSymbolRefAttr::get(context, keyed->second));
+      FailureOr<mlir::Value> which = emit(*expr.operands[0], named);
+      if (failed(which))
+        return failure();
+      if (which->getType() != named)
+        return error(expr.operands[0]->loc,
+                     "table '" + expr.name + "' has a row for each case of "
+                     "an enum, and is read by one ('" + expr.name +
+                         "[case]'), not by a number");
+      mlir::Value byte = UnrealizedConversionCastOp::create(
+                             builder, at, named.getStorageType(), *which)
+                             .getResult(0);
+      mlir::Value row =
+          arith::ExtUIOp::create(builder, at, builder.getI32Type(), byte);
+      return TableAtOp::create(builder, at, type, symbol(expr.name),
+                               builder.getStringAttr(expr.field), row)
+          .getResult();
+    }
     Type indexTy = typeOf(*expr.operands[0]);
     if (!indexTy)
       indexTy = builder.getI32Type();
     FailureOr<mlir::Value> index = emit(*expr.operands[0], indexTy);
     if (failed(index))
       return failure();
+    if (isa<EnumType>(index->getType()))
+      return error(expr.operands[0]->loc,
+                   "table '" + expr.name + "' has rows that are counted; one "
+                   "with a row for each case is declared 'table " +
+                       expr.name + "[Enum]'");
     if (!index->getType().isSignlessInteger() || index->getType().isInteger(1))
       return error(expr.operands[0]->loc, "a row's number is an integer");
     return TableAtOp::create(builder, at, type, symbol(expr.name),

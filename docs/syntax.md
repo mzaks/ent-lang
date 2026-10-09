@@ -1191,6 +1191,31 @@ one type (a plain list).
 - It is declared at the top level, before what reads it, and belongs to
   its module like a fn.
 
+A table may have a row for each case of an enum instead of rows that are
+counted:
+
+```
+enum Kind { Arrow, Cannon, Frost }
+table towers[Kind] { cost: i32, reach: f32 } = [
+  Arrow:  { cost: 40, reach: 3.2 },
+  Cannon: { cost: 70, reach: 2.6 },
+  Frost:  { cost: 60, reach: 2.2 }
+]
+table short[Kind]: i8 = [ Arrow: 'a', Cannon: 'c', Frost: 'f' ]
+
+let c = towers[t.kind].cost
+for kind in Kind { all += towers[kind].cost }
+```
+
+- Each row is named by its case, in any order, and every case has one,
+  once: an enum that gets another case does not compile until its
+  tables have a row for it.
+- It is read by a value of that enum (`towers[kind]`), not by a number,
+  and a table of counted rows not by an enum: no cast, and no row that
+  is not there.
+- `for name in Enum { ... }` runs its statements for every case of an
+  enum, in their order; `name` is the case.
+
 ## Prefabs
 
 ```

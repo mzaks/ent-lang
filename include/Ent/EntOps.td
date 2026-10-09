@@ -889,10 +889,13 @@ def Ent_TableOp : Ent_Op<"table", [Symbol]> {
     A list of rows that never changes, each with a value for every field
     (`values` holds them field by field, as they are stored: a number as
     it is, an enum's case as its byte, a text as its integer). A plain
-    list has one field without a name. `ent.table.at` reads it.
+    list has one field without a name. `ent.table.at` reads it. With
+    `key` it has a row for each case of that enum, in their order, and is
+    read by the number of a case.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name, StrArrayAttr:$field_names,
-                       TypeArrayAttr:$field_types, ArrayAttr:$values);
+                       TypeArrayAttr:$field_types, ArrayAttr:$values,
+                       OptionalAttr<FlatSymbolRefAttr>:$key);
   let hasVerifier = 1;
   let extraClassDeclaration = [{
     /// How many rows it has.

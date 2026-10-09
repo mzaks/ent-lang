@@ -13,11 +13,12 @@
 //
 // What it is made of: the bars are boxes of the layout library, the board
 // is drawn into the box between them (after the boxes, before what floats
-// over them); the road, the towers and the foes are tables; foes, towers
-// and shells are entities. A tower looks at the foes with a `for` inside
-// its own `for`, and what it does to the one it picks it sends to it; a
-// shell that lands sends to every foe near it from inside such a `for`; a
-// foe looks at the frost towers the same way.
+// over them); the road is a table of points, and the towers and the foes
+// are tables with a row for each kind; foes, towers and shells are
+// entities. A tower looks at the foes with a `for` inside its own `for`,
+// and what it does to the one it picks it sends to it; a shell that
+// lands sends to every foe near it from inside such a `for`; a foe looks
+// at the frost towers the same way.
 import window
 import sound
 import math
@@ -104,25 +105,28 @@ fn apart(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
 
 // The towers, by their kind: what one costs, how far it reaches (in
 // fields), how long it rests between shots, and how much a shot hurts.
-table towers {
+table towers[Kind] {
   name: text[14], cost: i32, reach: f32, pause: f32, harm: f32, tint: i32
 } = [
-  { name: "arrow", cost: 40, reach: 3.2, pause: 0.45, harm: 9.0, tint: 0xd9a441 },
-  { name: "cannon", cost: 70, reach: 2.6, pause: 1.4, harm: 16.0, tint: 0xc8553d },
-  { name: "frost", cost: 60, reach: 2.2, pause: 0.0, harm: 0.0, tint: 0x5fb4e8 }
+  Arrow:  { name: "arrow", cost: 40, reach: 3.2, pause: 0.45, harm: 9.0,
+            tint: 0xd9a441 },
+  Cannon: { name: "cannon", cost: 70, reach: 2.6, pause: 1.4, harm: 16.0,
+            tint: 0xc8553d },
+  Frost:  { name: "frost", cost: 60, reach: 2.2, pause: 0.0, harm: 0.0,
+            tint: 0x5fb4e8 }
 ]
-fn cost(kind: Kind) -> i32 { towers[kind as i32].cost }
-fn reach(kind: Kind) -> f32 { towers[kind as i32].reach }
+fn cost(kind: Kind) -> i32 { towers[kind].cost }
+fn reach(kind: Kind) -> f32 { towers[kind].reach }
 
 // The foes, by their breed: what one has at first (more with every
 // wave), how many fields it walks in a second, what its fall pays, and
 // how it looks.
-table breeds {
+table breeds[Breed] {
   life: f32, pace: f32, bounty: i32, hue: i32, girth: f32
 } = [
-  { life: 26.0, pace: 1.5, bounty: 5, hue: 0x8fbf5a, girth: 0.28 },
-  { life: 15.0, pace: 2.6, bounty: 4, hue: 0xe6d15a, girth: 0.22 },
-  { life: 90.0, pace: 0.9, bounty: 12, hue: 0xa66bd6, girth: 0.38 }
+  Grunt:  { life: 26.0, pace: 1.5, bounty: 5, hue: 0x8fbf5a, girth: 0.28 },
+  Runner: { life: 15.0, pace: 2.6, bounty: 4, hue: 0xe6d15a, girth: 0.22 },
+  Brute:  { life: 90.0, pace: 0.9, bounty: 12, hue: 0xa66bd6, girth: 0.38 }
 ]
 // Which comes when in a wave, and how many there are in it.
 fn breed_of(wave: i32, i: i32) -> Breed {
@@ -132,7 +136,7 @@ fn breed_of(wave: i32, i: i32) -> Breed {
 }
 fn crowd(wave: i32) -> i32 { 8 + 2 * wave }
 fn life(breed: Breed, wave: i32) -> f32 {
-  breeds[breed as i32].life * (1.0 + 0.42 * (wave - 1) as f32)
+  breeds[breed].life * (1.0 + 0.42 * (wave - 1) as f32)
 }
 
 // A button of the bar below: what it says, in a colour, and what it does.
@@ -207,8 +211,9 @@ world {
   }
   connect (bar)-[Inside]->(root)
   // A button for each tower, room, and one for the next wave.
-  for i in 0..len(towers) {
-    let one = spawn { button("{towers[i].name}  {towers[i].cost}", towers[i].tint, i) }
+  for kind in Kind {
+    let one = spawn { button("{towers[kind].name}  {towers[kind].cost}",
+                             towers[kind].tint, kind as i32) }
     connect (one)-[Inside]->(bar)
   }
   let room = spawn { spacer() }
@@ -330,7 +335,7 @@ system marshal() {
       let breed = breed_of(Game.wave, crowd(Game.wave) - Game.left)
       let hp = life(breed, Game.wave)
       spawn {
-        Foe { breed: breed, reward: breeds[breed as i32].bounty },
+        Foe { breed: breed, reward: breeds[breed].bounty },
         At { x: road[0].x, y: road[0].y }, Walk { leg: 0, far: 0.0 },
         Health { hp: hp, full: hp }, Chill { left: 0.0 }
       }
@@ -359,7 +364,7 @@ system marshal() {
 system walk() {
   let dt = min(Window.dt, 0.05)
   for e, f: Foe, a: mut At, w: mut Walk, c: Chill {
-    var step = breeds[f.breed as i32].pace * dt
+    var step = breeds[f.breed].pace * dt
     if c.left > 0.0 { step = step * 0.5 }
     let tx = road[w.leg + 1].x
     let ty = road[w.leg + 1].y
@@ -425,15 +430,15 @@ system shoot() {
       a.tx = tx
       a.ty = ty
       if t.cool <= 0.0 {
-        t.cool = towers[t.kind as i32].pause
+        t.cool = towers[t.kind].pause
         if t.kind == Kind.Arrow {
           a.flash = 0.09
-          Health(target).hp -= towers[t.kind as i32].harm
+          Health(target).hp -= towers[t.kind].harm
           spawn { Tone { pitch: 880.0, to: 660.0, seconds: 0.04, after: 0.0,
                          volume: 0.12, wave: Wave.Square } }
         } else {
           spawn { Shell { x: x, y: y, tx: tx, ty: ty,
-                          harm: towers[t.kind as i32].harm } }
+                          harm: towers[t.kind].harm } }
           spawn { Tone { pitch: 150.0, to: 70.0, seconds: 0.12, after: 0.0,
                          volume: 0.3, wave: Wave.Noise } }
         }
@@ -513,7 +518,7 @@ system draw_board() {
     let half = cell * 0.4
     rounded(x - half, y - half, 2.0 * half, 2.0 * half, cell * 0.14,
             cell * 0.14, cell * 0.14, cell * 0.14, 0x3a4656)
-    circle(x, y, cell * 0.27, towers[t.kind as i32].tint)
+    circle(x, y, cell * 0.27, towers[t.kind].tint)
     if t.kind == Kind.Frost {
       circle(x, y, reach(Kind.Frost) * cell, 0x145fb4e8)
       circle(x, y, cell * 0.12, 0xe8f6ff)
@@ -534,8 +539,8 @@ system draw_board() {
   for f: Foe, a: At, h: Health, c: Chill {
     let x = gx + (a.x + 0.5) * cell
     let y = gy + (a.y + 0.5) * cell
-    let r = breeds[f.breed as i32].girth * cell
-    let hue = breeds[f.breed as i32].hue
+    let r = breeds[f.breed].girth * cell
+    let hue = breeds[f.breed].hue
     circle(x, y, r + 2.0, 0x1a1f26)
     circle(x, y, r, if c.left > 0.0 { blend(hue, 0x9fd8ff, 0.6) } else { hue })
     let part = max(0.0, h.hp / h.full)

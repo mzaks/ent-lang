@@ -1,0 +1,18 @@
+// A table may have a row for each case of an enum (`table name[Enum]`),
+// named by the case and written in any order: it is read by a case, not
+// by a number, and has a row for every one, so there is no row that is
+// not there. `for case in Enum` goes through the cases in their order.
+// RUN: %ent run %S/Inputs/tables_by_enum.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tables_by_enum.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/tables_by_enum.ent -I %S/../../devices -o %t.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
+// RUN: ent-opt %t.mlir | ent-opt | FileCheck %s --check-prefix=IR
+
+// (The rows in the order of the cases, whatever order they were written in.)
+// IR: "ent.table"() <{field_names = ["name", "cost", "reach"], {{.*}}key = @Kind, sym_name = "towers", values = [{{.*}}[40 : i32, 70 : i32, 60 : i32]
+
+// CHECK:      Arrow: arrow costs 40, reaches 3.2, short 97
+// CHECK-NEXT: Cannon: cannon costs 70, reaches 2.6, short 99
+// CHECK-NEXT: Frost: frost costs 60, reaches 2.2, short 102
+// CHECK-NEXT: 3 kinds, 170 in all; the dearest is Cannon

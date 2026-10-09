@@ -1,0 +1,26 @@
+// Tables with a row for each case of an enum (tables_by_enum.test).
+import console
+enum Kind { Arrow, Cannon, Frost }
+table towers[Kind] { name: text[14], cost: i32, reach: f32 } = [
+  Frost:  { name: "frost", cost: 60, reach: 2.2 },
+  Arrow:  { name: "arrow", cost: 40, reach: 3.2 },
+  Cannon: { name: "cannon", cost: 70, reach: 2.6 }
+]
+table short[Kind]: i8 = [ Arrow: 'a', Cannon: 'c', Frost: 'f' ]
+unique Done: bool
+fn dearest() -> Kind {
+  var best = Kind.Arrow
+  for k in Kind { if towers[k].cost > towers[best].cost { best = k } }
+  best
+}
+system s() {
+  var all = 0
+  for k in Kind {
+    put("{k}: {towers[k].name} costs {towers[k].cost}, reaches {towers[k].reach}, short {short[k]}")
+    all += towers[k].cost
+  }
+  put("{len(towers)} kinds, {all} in all; the dearest is {dearest()}")
+  Done = true
+}
+schedule f() { s() }
+main { loop { f() } until Done }
