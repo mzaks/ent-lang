@@ -29,6 +29,7 @@ import text
 enum State { Playing, Won, Lost }
 enum Kind { Arrow, Cannon, Frost }
 enum Breed { Grunt, Runner, Brute }
+enum Tally { Gold, Lives, Wave }
 
 // A foe: where it is on the board (in fields, from the top left one's
 // corner), which stretch of the road it is on and how far along the road
@@ -51,9 +52,8 @@ component Blast { x: f32, y: f32, r: f32, left: f32 }
 // The boxes of the bars.
 tag Root
 tag BoardBox
-tag GoldLabel
-tag LivesLabel
-tag WaveLabel
+// A label of the bar above: which of the things you have it counts.
+component Counter { what: Tally }
 component Button { does: i32 }
 
 unique Game {
@@ -139,6 +139,9 @@ fn life(breed: Breed, wave: i32) -> f32 {
   breeds[breed].life * (1.0 + 0.42 * (wave - 1) as f32)
 }
 
+// The labels of the bar above, by what each counts: its colour.
+table tallies[Tally]: i32 = [ Gold: 0xf0c85a, Lives: 0xf07a6a, Wave: 0xb8c4d2 ]
+
 // A button of the bar below: what it says, in a colour, and what it does.
 prefab button(says: text, colour: i32, does: i32) {
   caption(says, 18.0, colour),
@@ -186,12 +189,8 @@ world {
             bottom_right: 8.0 }
   }
   connect (top)-[Inside]->(root)
-  for i in 0..3 {
-    let label = spawn {
-      caption("", 22.0,
-              if i == 0 { 0xf0c85a } else if i == 1 { 0xf07a6a } else { 0xb8c4d2 }),
-      if i == 0 { GoldLabel } else if i == 1 { LivesLabel } else { WaveLabel }
-    }
+  for what in Tally {
+    let label = spawn { caption("", 22.0, tallies[what]), Counter { what: what } }
     connect (label)-[Inside]->(top)
   }
   let board = spawn {
@@ -231,15 +230,21 @@ system bars() {
     b.h = Window.height as f32
   }
   if Said.gold != Gold {
-    for t: mut Text with GoldLabel { t.text = "gold {Gold}" }
+    for t: mut Text, c: Counter where c.what == Tally.Gold {
+      t.text = "gold {Gold}"
+    }
     Said.gold = Gold
   }
   if Said.lives != Lives {
-    for t: mut Text with LivesLabel { t.text = "lives {max(Lives, 0)}" }
+    for t: mut Text, c: Counter where c.what == Tally.Lives {
+      t.text = "lives {max(Lives, 0)}"
+    }
     Said.lives = Lives
   }
   if Said.wave != Game.wave {
-    for t: mut Text with WaveLabel { t.text = "wave {Game.wave} of {waves()}" }
+    for t: mut Text, c: Counter where c.what == Tally.Wave {
+      t.text = "wave {Game.wave} of {waves()}"
+    }
     Said.wave = Game.wave
   }
   for e, k: Button, f: mut Fill, d: mut Border {
