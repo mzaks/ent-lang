@@ -1,0 +1,42 @@
+// Tables as values (tables_as_values.test).
+import console
+enum Kind { Arrow, Cannon }
+table road_a { x: f32, y: f32 } = [ { x: 0.0, y: 1.0 }, { x: 4.0, y: 1.0 }, { x: 4.0, y: 6.0 } ]
+table road_b { x: f32, y: f32 } = [ { x: 0.0, y: 9.0 }, { x: 8.0, y: 9.0 } ]
+table easy[Kind]: i32 = [ Arrow: 30, Cannon: 50 ]
+table hard[Kind]: i32 = [ Arrow: 45, Cannon: 80 ]
+table odd: i32 = [1, 3, 5]
+table even: i32 = [2, 4]
+
+component Level { road: rows { x: f32, y: f32 }, costs: rows[Kind] i32 }
+unique Numbers: rows i32
+unique Round: i32
+default_capacity 8
+
+fn road(level: i32) -> rows { x: f32, y: f32 } {
+  if level == 0 { road_a } else if level == 1 { road_b } else { none }
+}
+fn length(way: rows { x: f32, y: f32 }) -> f32 {
+  var all = 0.0
+  let last = len(way) - 1
+  for i in 0..last {
+    all += max(way[i + 1].x - way[i].x, way[i + 1].y - way[i].y)
+  }
+  all
+}
+world {
+  spawn { Level { road: road_a, costs: easy } }
+  spawn { Level { road: road_b, costs: hard } }
+  Numbers = odd
+}
+system s() {
+  Round += 1
+  for l: mut Level {
+    put("{Round}: a road of {len(l.road)} points, {length(l.road)} long, ends at {l.road[len(l.road) - 1].x}; a cannon costs {l.costs[Kind.Cannon]}")
+    if Round == 1 { l.costs = hard }
+  }
+  put("{Round}: numbers {len(Numbers)}: {Numbers[0]} {Numbers[1]} {Numbers[2]}; road 2 has {len(road(2))} points")
+  Numbers = even
+}
+schedule f() { s() }
+main { loop { f() } until Round == 2 }

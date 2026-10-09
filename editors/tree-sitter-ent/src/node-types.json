@@ -890,6 +890,10 @@
           "named": true
         },
         {
+          "type": "rows_type",
+          "named": true
+        },
+        {
           "type": "text_type",
           "named": true
         }
@@ -983,6 +987,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "rows_type",
             "named": true
           },
           {
@@ -1490,6 +1498,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "rows_type",
             "named": true
           },
           {
@@ -2665,6 +2677,10 @@
             "named": true
           },
           {
+            "type": "rows_type",
+            "named": true
+          },
+          {
             "type": "text_type",
             "named": true
           }
@@ -3026,6 +3042,10 @@
           "named": true
         },
         {
+          "type": "rows_type",
+          "named": true
+        },
+        {
           "type": "text_type",
           "named": true
         }
@@ -3042,6 +3062,60 @@
       "types": [
         {
           "type": "field_init",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "rows_type",
+    "named": true,
+    "fields": {
+      "key": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "callable_type",
+          "named": true
+        },
+        {
+          "type": "fields",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "primitive_type",
+          "named": true
+        },
+        {
+          "type": "qualified_name",
+          "named": true
+        },
+        {
+          "type": "rows_type",
+          "named": true
+        },
+        {
+          "type": "text_type",
           "named": true
         }
       ]
@@ -3559,6 +3633,10 @@
             "named": true
           },
           {
+            "type": "rows_type",
+            "named": true
+          },
+          {
             "type": "text_type",
             "named": true
           }
@@ -3929,6 +4007,10 @@
             "named": true
           },
           {
+            "type": "rows_type",
+            "named": true
+          },
+          {
             "type": "text_type",
             "named": true
           }
@@ -4072,6 +4154,10 @@
           },
           {
             "type": "qualified_name",
+            "named": true
+          },
+          {
+            "type": "rows_type",
             "named": true
           },
           {
@@ -4734,6 +4820,10 @@
   },
   {
     "type": "removed",
+    "named": false
+  },
+  {
+    "type": "rows",
     "named": false
   },
   {

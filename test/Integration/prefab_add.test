@@ -1,0 +1,14 @@
+// `e.add(prefab(..))` adds every component the prefab comes to, with its
+// `if`s decided for that entity.
+// RUN: %ent run %S/Inputs/prefab_add.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/prefab_add.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK:      1: unit 0: armour -1, banner -1, elite false
+// CHECK-NEXT: 1: unit 1: armour 2, banner -1, elite false
+// CHECK-NEXT: 1: unit 2: armour 4, banner 16711682, elite true
+// CHECK-NEXT: 1: unit 3: armour 6, banner 16711683, elite true
+// CHECK-NEXT: 2: unit 0: armour -1, banner -1, elite false
+// CHECK-NEXT: 2: unit 1: armour 2, banner -1, elite false
+// CHECK-NEXT: 2: unit 2: armour 4, banner 16711682, elite true
+// CHECK-NEXT: 2: unit 3: armour 6, banner 16711683, elite true

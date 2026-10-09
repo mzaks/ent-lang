@@ -1,0 +1,27 @@
+// Tables of texts of any length (tables_text.test).
+import console
+import text
+enum Kind { Arrow, Cannon }
+table help[Kind] { name: text[14], says: text } = [
+  Arrow:  { name: "arrow", says: "Hits the foe in its reach that is furthest along the road, again and again, and that one only." },
+  Cannon: { name: "cannon", says: "" }
+]
+table lines: text = ["first", "the second line, which is longer than the first one by quite a bit", "third"]
+component Note { words: text }
+unique Done: bool
+default_capacity 8
+fn longest() -> text {
+  var best = 0
+  for i in 0..len(lines) { if len(lines[i]) > len(lines[best]) { best = i } }
+  lines[best]
+}
+world { for k in Kind { spawn { Note { words: help[k].says } } } }
+system s() {
+  for k in Kind { put("{help[k].name}: {len(help[k].says)} bytes: {help[k].says}") }
+  for i in -1..4 { put("line {i} ({len(lines[i])}): {lines[i]}") }
+  put("longest: {longest()}")
+  for n: Note { put("a note of {len(n.words)} bytes") }
+  Done = true
+}
+schedule f() { s() }
+main { loop { f() } until Done }

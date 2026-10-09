@@ -40,6 +40,8 @@
 ; Types where a type is expected.
 (primitive_type) @type.builtin
 (text_type "text" @type.builtin)
+(rows_type "rows" @type.builtin)
+(rows_type key: (identifier) @type)
 (field type: (identifier) @type)
 (parameter type: (identifier) @type)
 (result (identifier) @type)

@@ -12584,9 +12584,76 @@ struct EntLowerToLoops
       auto table = symbols.lookup<TableOp>(read.getTable());
       unsigned field = *table.findField(read.getField());
       auto values = cast<ArrayAttr>(table.getValues()[field]);
-      Type stored = cast<TypedAttr>(values[0]).getType();
       std::string name =
           ("ent_rows." + table.getSymName() + "." + read.getField()).str();
+      // Texts of any length: their blocks one after another (a length,
+      // the bytes, a 0; then one without bytes, for a row that is not
+      // there), and for each row how far in its block starts.
+      if (isa<StringAttr>(values[0])) {
+        std::string blocks;
+        SmallVector<int64_t> starts;
+        auto add = [&](StringRef bytes) {
+          starts.push_back(blocks.size());
+          uint32_t length = bytes.size();
+          for (unsigned i = 0; i < 4; ++i)
+            blocks += char(length >> (8 * i));
+          blocks += bytes.str();
+          blocks.resize(llvm::alignTo(blocks.size() + 1, 8), 0);
+        };
+        for (Attribute value : values)
+          add(cast<StringAttr>(value).getValue());
+        add("");
+        auto bytesType = MemRefType::get({int64_t(blocks.size())},
+                                         rewriter.getI8Type());
+        auto startsType = MemRefType::get({int64_t(starts.size())},
+                                          rewriter.getI64Type());
+        if (!SymbolTable::lookupSymbolIn(module, name)) {
+          rewriter.setInsertionPointToStart(module.getBody());
+          memref::GlobalOp::create(
+              rewriter, loc, name, rewriter.getStringAttr("private"),
+              bytesType,
+              DenseElementsAttr::getFromRawBuffer(
+                  RankedTensorType::get({int64_t(blocks.size())},
+                                        rewriter.getI8Type()),
+                  ArrayRef<char>(blocks.data(), blocks.size())),
+              /*constant=*/true, rewriter.getI64IntegerAttr(8));
+          memref::GlobalOp::create(
+              rewriter, loc, name + ".at", rewriter.getStringAttr("private"),
+              startsType,
+              DenseIntElementsAttr::get(
+                  RankedTensorType::get({int64_t(starts.size())},
+                                        rewriter.getI64Type()),
+                  ArrayRef<int64_t>(starts)),
+              /*constant=*/true, IntegerAttr());
+        }
+        rewriter.setInsertionPoint(read);
+        Value row = arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getIndexType(), read.getIndex());
+        Value there = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ult, row,
+            arith::ConstantIndexOp::create(rewriter, loc, values.size()));
+        // (A row that is not there: the block without bytes, the last.)
+        Value safe = arith::SelectOp::create(
+            rewriter, loc, there, row,
+            arith::ConstantIndexOp::create(rewriter, loc, values.size()));
+        Value start = memref::LoadOp::create(
+            rewriter, loc,
+            memref::GetGlobalOp::create(rewriter, loc, startsType,
+                                        name + ".at"),
+            ValueRange{safe});
+        Value base = arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getI64Type(),
+            memref::ExtractAlignedPointerAsIndexOp::create(
+                rewriter, loc,
+                memref::GetGlobalOp::create(rewriter, loc, bytesType, name)));
+        Value address = arith::AddIOp::create(rewriter, loc, base, start);
+        rewriter.replaceOp(
+            read, UnrealizedConversionCastOp::create(
+                      rewriter, loc, read.getResult().getType(), address)
+                      .getResult(0));
+        continue;
+      }
+      Type stored = cast<TypedAttr>(values[0]).getType();
       auto type = MemRefType::get({int64_t(values.size())}, stored);
       if (!SymbolTable::lookupSymbolIn(module, name)) {
         rewriter.setInsertionPointToStart(module.getBody());

@@ -319,7 +319,10 @@ for me, t: Tower, a: mut Aim {
   sees the others as they were, at the price of the copy. (Or the new
   value goes into another field, and a second `for` copies it over.)
 - One deep: no `for` over entities inside it, and none inside a `for`
-  over edges. A `for` with one in it runs on one thread.
+  over edges. A `for` with one in it that only reads runs in parallel
+  like any other (from fewer entities: its work is the two numbers
+  multiplied); one whose inner `for` sends or accumulates runs on one
+  thread, in order.
 
 Inside a `for`, another `for` with an arrow visits the entity's edges.
 One end is the visited entity, by its name or one of its bindings; the
@@ -1184,9 +1187,9 @@ one type (a plain list).
   table is not of the world); where there is no row `i` they give nought
   (`false`, the first case of an enum, an empty text), as a text's byte
   past its end does. `len(name)` is the number of rows, an `i32`.
-- A field is a number, a bool, an enum (`kind: Kind.Frost`) or a
-  `text[N]`; a value is written as it is: a literal, with `-` before a
-  number.
+- A field is a number, a bool, an enum (`kind: Kind.Frost`), a
+  `text[N]` or a `text` of any length; a value is written as it is: a
+  literal, with `-` before a number.
 - A row is `{ field: value, ... }` with every field, in any order.
 - It is declared at the top level, before what reads it, and belongs to
   its module like a fn.
@@ -1216,6 +1219,32 @@ for kind in Kind { all += towers[kind].cost }
 - `for name in Enum { ... }` runs its statements for every case of an
   enum, in their order; `name` is the case.
 
+A table is a value where a type says what its rows are:
+
+```
+table road_a { x: f32, y: f32 } = [ ... ]
+table road_b { x: f32, y: f32 } = [ ... ]
+component Level { road: rows { x: f32, y: f32 }, costs: rows[Kind] i32 }
+
+fn road(level: i32) -> rows { x: f32, y: f32 } {
+  if level == 0 { road_a } else { road_b }
+}
+let tx = road(Game.level)[w.leg + 1].x
+for i in 0..len(l.road) { ... l.road[i].y ... }
+```
+
+- `rows { field: type, ... }` is the type of the tables with such rows,
+  `rows type` that of the plain lists of a type, and `rows[Enum] ...`
+  that of those with a row for each case. A field, a unique, a parameter
+  and a fn's result may have it.
+- A table's name is such a value where one of its shape is expected;
+  `none` is the table without rows (`len` 0, every read nought).
+- What holds one is read like the table: `value[i].field`, `value[i]`,
+  `len(value)`.
+- The program is closed, so the value is the number of the table among
+  those of its shape that are used as values, and a read through one
+  asks which it is: one test for each such table.
+
 ## Prefabs
 
 ```
@@ -1244,6 +1273,8 @@ its entries are then the spawn's, as if written there.
   Sizing.Grow, h: Sizing.Fit }`).
 - It belongs to its module and is found like a fn; its entries name
   things as its own module does.
+- `e.add(name(values))`, in a `for`, adds every component the prefab
+  comes to for that entity, its `if`s decided there.
 
 ## Enums
 

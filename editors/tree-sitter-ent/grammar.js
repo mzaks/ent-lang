@@ -158,7 +158,8 @@ module.exports = grammar({
     // Types
 
     _type: ($) =>
-      choice($.primitive_type, $.text_type, $.callable_type, $._name),
+      choice($.primitive_type, $.text_type, $.callable_type, $.rows_type,
+             $._name),
     // fn(t: f32) -> f32, proc(i32): a fn or proc of that shape, as a value.
     callable_type: ($) =>
       prec.right(seq(choice('fn', 'proc'), '(',
@@ -169,6 +170,11 @@ module.exports = grammar({
     primitive_type: (_) =>
       choice('f32', 'f64', 'bool', 'i1', 'i8', 'i16', 'i32', 'i64', 'index',
              'entity'),
+    // rows { field: type, .. }, rows type, rows[Enum] ..: a table of
+    // that shape, as a value.
+    rows_type: ($) =>
+      prec.right(seq('rows', optional(seq('[', field('key', $._name), ']')),
+                     choice($.fields, $._type))),
     // text: of any length; text[N]: up to N bytes.
     text_type: ($) =>
       prec.right(seq('text', optional(seq('[', $.integer, ']')))),

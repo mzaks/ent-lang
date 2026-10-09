@@ -1125,3 +1125,18 @@ system s() {
     for other: A where other.x > a.x { N += 1 }
   }
 }
+
+// -----
+
+// A table goes where one of its shape is expected.
+table points { x: f32, y: f32 } = [ { x: 1.0, y: 2.0 } ]
+// expected-error @+1 {{table 'points' has not the rows of the tables expected here}}
+fn pick() -> rows { x: f32 } { points }
+
+// -----
+
+table points { x: f32, y: f32 } = [ { x: 1.0, y: 2.0 } ]
+fn far(way: rows { x: f32, y: f32 }) -> f32 {
+  // expected-error @+1 {{the rows of this table have no field 'z'}}
+  way[0].z
+}

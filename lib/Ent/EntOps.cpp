@@ -1648,10 +1648,10 @@ LogicalResult TableOp::verify() {
                          "number of them than the first");
     rows = values.size();
     for (Attribute value : values)
-      if (!isa<IntegerAttr, FloatAttr>(value))
+      if (!isa<IntegerAttr, FloatAttr, StringAttr>(value))
         return emitOpError("holds ")
                << value << "; a table's values are numbers as they are "
-               << "stored";
+               << "stored, and the bytes of texts of any length";
   }
   return success();
 }

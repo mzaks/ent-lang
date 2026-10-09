@@ -236,6 +236,26 @@ struct Callable {
   Operation *op = nullptr;
 };
 
+/// The tables of one shape (the fields of their rows, and the enum they
+/// have a row for each case of, if any) as values: a field or a
+/// parameter can hold one, and what holds one is read like the table
+/// itself. As with fns: a value is the number of the table among those
+/// of the shape that are used as values anywhere (0: none, which has no
+/// rows), kept as an enum of them, and a read through one asks a fn that
+/// reads the one it is.
+struct RowsShape {
+  std::string name;
+  SmallVector<std::pair<std::string, Type>> fields;
+  /// The IR symbol of the enum its rows are for, or empty.
+  std::string key;
+  SmallVector<std::string> targets;
+  /// The fields something reads through such a value, and whether
+  /// something asks one for its number of rows.
+  llvm::StringSet<> read;
+  bool counted = false;
+  Operation *op = nullptr;
+};
+
 /// What a name stands for in a body.
 struct Variable {
   /// (Other: a component of the entity at the other end of an edge that
@@ -417,6 +437,9 @@ private:
   LogicalResult parsePrefab();
   FailureOr<std::vector<SpawnEntry>> parseSpawnEntries();
   FailureOr<SpawnEntry> parseSpawnIf();
+  LogicalResult parsePrefabUse(SpawnEntry &entry);
+  LogicalResult emitAddEntries(const std::vector<SpawnEntry> &entries,
+                               llvm::SMLoc at);
   /// The components of the entity that is being spawned, with their
   /// values, in the order they were first listed.
   struct Spawned {
@@ -525,6 +548,17 @@ private:
   FailureOr<SmallVector<mlir::Value>> emitCallThrough(const Expr &expr,
                                                       Callable &callable);
   LogicalResult finishCallables();
+  FailureOr<Type> parseRowsType();
+  RowsShape *rowsOf(Type type);
+  FailureOr<mlir::Value> emitTableValue(const Expr &expr, RowsShape &shape);
+  FailureOr<mlir::Value> emitRowThrough(const Expr &expr, RowsShape &shape,
+                                        const Expr &base, const Expr &index,
+                                        StringRef field);
+  mlir::Value noughtOf(Location at, Type type);
+  LogicalResult finishRows();
+  std::vector<std::unique_ptr<RowsShape>> rowShapes;
+  llvm::StringMap<RowsShape *> rowsByKey;
+  llvm::StringMap<RowsShape *> rowsByName;
   FailureOr<SmallVector<mlir::Value>> emitCall(const Expr &expr);
   FailureOr<SmallVector<mlir::Value>>
   emitSeveral(const Expr &expr, ArrayRef<Type> expected);
@@ -725,7 +759,7 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
     return nullptr;
   root->loading = false;
   finished.push_back(root);
-  if (failed(finishCallables()))
+  if (failed(finishRows()) || failed(finishCallables()))
     return nullptr;
 
   // Every module's world is set up before `main` does anything else, a
@@ -945,6 +979,14 @@ FailureOr<Type> Parser::parseType() {
     advance();
     return parseCallableType(proc);
   }
+  // rows { field: type, .. }, rows type, rows[Enum] ..: one of the tables
+  // of that shape.
+  if (token.isKeyword("rows") &&
+      (peek().is(Token::LBrace) || peek().is(Token::LBracket) ||
+       peek().is(Token::Identifier))) {
+    advance();
+    return parseRowsType();
+  }
   FailureOr<std::string> name = identifier("a type");
   if (failed(name))
     return failure();
@@ -1083,6 +1125,254 @@ FailureOr<Type> Parser::parseCallableType(bool proc) {
   callablesByName[name] = made;
   callables.push_back(std::move(callable));
   return Type(EnumType::get(context, FlatSymbolRefAttr::get(context, name)));
+}
+
+// (`rows` is read.) [ '[' Enum ']' ] ( '{' field: type, .. '}' | type )
+FailureOr<Type> Parser::parseRowsType() {
+  llvm::SMLoc at = token.loc;
+  auto shape = std::make_unique<RowsShape>();
+  if (consumeIf(Token::LBracket)) {
+    llvm::SMLoc keyAt = token.loc;
+    FailureOr<std::string> named = identifier("an enum");
+    if (failed(named) || failed(expect(Token::RBracket, "']'")))
+      return failure();
+    if (!enums.count(*named))
+      return error(keyAt, "'" + *named + "' is no enum");
+    shape->key = resolve(*named);
+  }
+  if (token.is(Token::LBrace)) {
+    Record record;
+    if (failed(parseFields(record)))
+      return failure();
+    shape->fields = record.fields;
+  } else {
+    FailureOr<Type> type = parseType();
+    if (failed(type))
+      return failure();
+    shape->fields.push_back({std::string(), *type});
+  }
+  if (shape->fields.empty())
+    return error(at, "a table's rows have at least one field");
+  std::string key = "rows " + shape->key;
+  std::string name = "rows_of";
+  for (auto &[field, type] : shape->fields) {
+    llvm::raw_string_ostream(key) << " " << field << ": " << type;
+    name += "_" + (field.empty() ? std::string() : field + "_") +
+            shapeWord(type);
+  }
+  if (!shape->key.empty()) {
+    name += "_by_";
+    for (char c : shape->key)
+      name += llvm::isAlnum(c) ? c : '_';
+  }
+  auto known = rowsByKey.find(key);
+  if (known != rowsByKey.end())
+    return Type(EnumType::get(
+        context, FlatSymbolRefAttr::get(context, known->second->name)));
+  // (Two shapes whose names come out the same are told apart.)
+  while (rowsByName.count(name) || SymbolTable::lookupSymbolIn(module, name))
+    name += "_";
+  shape->name = name;
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToStart(module.getBody());
+    shape->op = EnumOp::create(builder, loc(at), builder.getStringAttr(name),
+                               builder.getStrArrayAttr({"none"}));
+  }
+  enums.ofSymbol(name) = {"none"};
+  RowsShape *made = shape.get();
+  rowsByKey[key] = made;
+  rowsByName[name] = made;
+  rowShapes.push_back(std::move(shape));
+  return Type(EnumType::get(context, FlatSymbolRefAttr::get(context, name)));
+}
+
+/// The shape a type stands for, if it is the type of tables.
+RowsShape *Parser::rowsOf(Type type) {
+  auto named = dyn_cast_or_null<EnumType>(type);
+  if (!named)
+    return nullptr;
+  auto known = rowsByName.find(named.getName().getValue());
+  return known == rowsByName.end() ? nullptr : known->second;
+}
+
+/// A table by its name, where one of its shape is expected: its number
+/// among those of the shape that are used so.
+FailureOr<mlir::Value> Parser::emitTableValue(const Expr &expr,
+                                              RowsShape &shape) {
+  const Record &table = tables[expr.name];
+  std::string target = symbol(expr.name).getValue().str();
+  auto keyed = tableKeys.find(target);
+  std::string key = keyed == tableKeys.end() ? std::string() : keyed->second;
+  if (table.fields != shape.fields || key != shape.key)
+    return error(expr.loc, "table '" + expr.name + "' has not the rows of "
+                           "the tables expected here");
+  auto *known = llvm::find(shape.targets, target);
+  unsigned number = known - shape.targets.begin() + 1;
+  if (known == shape.targets.end()) {
+    if (number >= EnumType::kMaxCases)
+      return error(expr.loc, "more than " +
+                                 Twine(unsigned(EnumType::kMaxCases) - 1) +
+                                 " tables of one shape are used as values");
+    shape.targets.push_back(target);
+    std::string label = target;
+    for (char &c : label)
+      if (!llvm::isAlnum(c))
+        c = '_';
+    SmallVector<std::string> &labels = enums.ofSymbol(shape.name);
+    labels.push_back(label);
+    SmallVector<StringRef> all(labels.begin(), labels.end());
+    shape.op->setAttr("cases", builder.getStrArrayAttr(all));
+  }
+  auto type =
+      EnumType::get(context, FlatSymbolRefAttr::get(context, shape.name));
+  Location at = loc(expr.loc);
+  return UnrealizedConversionCastOp::create(
+             builder, at, type, integer(at, type.getStorageType(), number))
+      .getResult(0);
+}
+
+/// Nought of a type: 0, false, the first case, a text without bytes.
+mlir::Value Parser::noughtOf(Location at, Type type) {
+  if (auto named = dyn_cast<EnumType>(type))
+    return UnrealizedConversionCastOp::create(
+               builder, at, named, integer(at, named.getStorageType(), 0))
+        .getResult(0);
+  if (auto text = dyn_cast<TextType>(type))
+    return textConstant(at, "", text);
+  if (isa<StringType>(type))
+    return TextConstantOp::create(builder, at, type, "").getResult();
+  return arith::ConstantOp::create(builder, at,
+                                   cast<TypedAttr>(builder.getZeroAttr(type)));
+}
+
+/// What row `index` of the table that `base` holds has in `field`: of
+/// the fn that asks which table it is and reads that one (see
+/// finishRows).
+FailureOr<mlir::Value> Parser::emitRowThrough(const Expr &expr,
+                                              RowsShape &shape,
+                                              const Expr &base,
+                                              const Expr &index,
+                                              StringRef field) {
+  Type type;
+  for (auto &[name, fieldType] : shape.fields)
+    if (name == field)
+      type = fieldType;
+  if (!type)
+    return error(expr.loc,
+                 field.empty() ? Twine("a row of this table has fields: "
+                                       "'table[i].field'")
+                               : "the rows of this table have no field '" +
+                                     field + "'");
+  auto held =
+      EnumType::get(context, FlatSymbolRefAttr::get(context, shape.name));
+  FailureOr<mlir::Value> which = emit(base, held);
+  if (failed(which))
+    return failure();
+  Location at = loc(expr.loc);
+  mlir::Value row;
+  if (!shape.key.empty()) {
+    auto named =
+        EnumType::get(context, FlatSymbolRefAttr::get(context, shape.key));
+    FailureOr<mlir::Value> picked = emit(index, named);
+    if (failed(picked))
+      return failure();
+    if (picked->getType() != named)
+      return error(index.loc, "this table has a row for each case of an "
+                              "enum, and is read by one, not by a number");
+    row = arith::ExtUIOp::create(
+        builder, at, builder.getI32Type(),
+        UnrealizedConversionCastOp::create(builder, at,
+                                           named.getStorageType(), *picked)
+            .getResult(0));
+  } else {
+    FailureOr<mlir::Value> counted = emit(index, builder.getI32Type());
+    if (failed(counted))
+      return failure();
+    if (!counted->getType().isInteger(32))
+      return error(index.loc, "a row's number is an i32 here (or less)");
+    row = *counted;
+  }
+  shape.read.insert(field);
+  auto invoke = InvokeOp::create(
+      builder, at, type,
+      FlatSymbolRefAttr::get(context,
+                             ("row_" + shape.name + "__" + field).str()),
+      ValueRange{*which, row}, UnitAttr());
+  return invoke->getResult(0);
+}
+
+/// When everything is parsed, and every table that is used as a value is
+/// known: for each shape and each field that is read through such a
+/// value, the fn that takes one and a row's number and reads the table
+/// it is; and the one that says how many rows it has. None has no rows.
+LogicalResult Parser::finishRows() {
+  for (auto &shape : rowShapes) {
+    Location at = shape->op->getLoc();
+    auto type =
+        EnumType::get(context, FlatSymbolRefAttr::get(context, shape->name));
+    Type i32 = builder.getI32Type();
+    auto make = [&](const Twine &name, bool takesRow, Type result,
+                    function_ref<mlir::Value(unsigned, mlir::Value)> of) {
+      SmallVector<Type> params{type};
+      if (takesRow)
+        params.push_back(i32);
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToEnd(module.getBody());
+      auto op = FunctionOp::create(builder, at, builder.getStringAttr(name),
+                                   builder.getTypeArrayAttr(params),
+                                   builder.getTypeArrayAttr({result}),
+                                   /*proc=*/false);
+      auto *block = new Block();
+      op.getBody().push_back(block);
+      for (Type param : params)
+        block->addArgument(param, at);
+      builder.setInsertionPointToEnd(block);
+      mlir::Value which = UnrealizedConversionCastOp::create(
+                              builder, at, type.getStorageType(),
+                              block->getArgument(0))
+                              .getResult(0);
+      mlir::Value row = takesRow ? block->getArgument(1) : mlir::Value();
+      std::function<mlir::Value(unsigned)> from =
+          [&](unsigned index) -> mlir::Value {
+        if (index == shape->targets.size())
+          return noughtOf(at, result);
+        mlir::Value is = arith::CmpIOp::create(
+            builder, at, arith::CmpIPredicate::eq, which,
+            integer(at, type.getStorageType(), index + 1));
+        auto branch = scf::IfOp::create(builder, at, result, is,
+                                        /*withElseRegion=*/true);
+        OpBuilder::InsertionGuard inner(builder);
+        builder.setInsertionPointToStart(branch.thenBlock());
+        scf::YieldOp::create(builder, at, of(index, row));
+        builder.setInsertionPointToStart(branch.elseBlock());
+        scf::YieldOp::create(builder, at, from(index + 1));
+        return branch.getResult(0);
+      };
+      YieldOp::create(builder, at, ValueRange{from(0)});
+    };
+    for (auto &[field, fieldType] : shape->fields) {
+      if (!shape->read.contains(field))
+        continue;
+      StringRef name = field;
+      Type result = fieldType;
+      make("row_" + shape->name + "__" + name, /*takesRow=*/true, result,
+           [&](unsigned index, mlir::Value row) -> mlir::Value {
+             return TableAtOp::create(
+                        builder, at, result,
+                        FlatSymbolRefAttr::get(context,
+                                               shape->targets[index]),
+                        builder.getStringAttr(name), row)
+                 .getResult();
+           });
+    }
+    if (shape->counted)
+      make("rows_" + shape->name, /*takesRow=*/false, i32,
+           [&](unsigned index, mlir::Value) -> mlir::Value {
+             return integer(at, i32, tableRows[shape->targets[index]]);
+           });
+  }
+  return success();
 }
 
 /// The shape a type stands for, if it is the type of fns or procs.
@@ -1378,8 +1668,13 @@ FailureOr<Attribute> Parser::constantOf(const Expr &expr, Type type) {
       bits.insertBits(static_cast<unsigned char>(byte), 16 + 8 * index, 8);
     return Attribute(IntegerAttr::get(storage, bits));
   }
+  if (isa<StringType>(type)) {
+    if (value->kind != Expr::String || negative)
+      return error(expr.loc, "expected a text as it is written");
+    return Attribute(builder.getStringAttr(value->name));
+  }
   return error(expr.loc, "a table holds numbers, bools, cases of enums and "
-                         "texts of a capacity");
+                         "texts");
 }
 
 // table name { field: type, ... } = [ { field: value, ... }, ... ]
@@ -1419,9 +1714,9 @@ LogicalResult Parser::parseTable() {
   if (record.fields.empty())
     return error(at, "a table's rows have at least one field");
   for (auto &[field, type] : record.fields)
-    if (!type.isIntOrFloat() && !isa<EnumType, TextType>(type))
+    if (!type.isIntOrFloat() && !isa<EnumType, TextType, StringType>(type))
       return error(at, "a table holds numbers, bools, cases of enums and "
-                       "texts of a capacity");
+                       "texts");
   if (failed(expect(Token::Assign, "'=' and the table's rows")) ||
       failed(expect(Token::LBracket, "'[' and the table's rows")))
     return failure();
@@ -4609,6 +4904,16 @@ LogicalResult Parser::parseMethod(const std::string &entity, llvm::SMLoc at) {
     DespawnOp::create(builder, loc(at));
     return success();
   }
+  if (*method == "add" && token.is(Token::Identifier) &&
+      peek().is(Token::LParen) && prefabs.count(token.spelling)) {
+    // A prefab with what it is given: every component it comes to.
+    std::vector<SpawnEntry> one(1);
+    one[0].loc = token.loc;
+    if (failed(parsePrefabUse(one[0])) ||
+        failed(expect(Token::RParen, "')'")))
+      return failure();
+    return emitAddEntries(one, at);
+  }
   if (*method == "add") {
     FailureOr<ComponentInit> init = parseComponentInit();
     if (failed(init) || failed(expect(Token::RParen, "')'")))
@@ -4737,6 +5042,17 @@ FailureOr<ExprPtr> Parser::parseUnary() {
     node->loc = at;
     node->operands.push_back(std::move(*primary));
     node->operands.push_back(std::move(*index));
+    // (value[i].field: a row of the table a value holds; the row's
+    // number first, as for a table by its name.)
+    if (token.is(Token::Dot)) {
+      advance();
+      FailureOr<std::string> field = identifier("a field");
+      if (failed(field))
+        return failure();
+      node->kind = Expr::Row;
+      node->field = *field;
+      std::swap(node->operands[0], node->operands[1]);
+    }
     primary = std::move(node);
   }
   while (token.isKeyword("as")) {
@@ -4929,6 +5245,95 @@ FailureOr<SpawnEntry> Parser::parseSpawnIf() {
   return entry;
 }
 
+// name(value, ...): a prefab with what it is given, into `entry` (the
+// name is the token).
+LogicalResult Parser::parsePrefabUse(SpawnEntry &entry) {
+  entry.kind = SpawnEntry::Prefab;
+  entry.prefab = token.spelling.str();
+  advance();
+  advance();
+  while (!token.is(Token::RParen)) {
+    FailureOr<ExprPtr> arg = parseExpr();
+    if (failed(arg))
+      return failure();
+    entry.args.push_back(std::move(*arg));
+    if (!consumeIf(Token::Comma))
+      break;
+  }
+  return expect(Token::RParen, "')'");
+}
+
+/// Add to the visited entity what the entries list (of a prefab that
+/// `e.add` names): a component with its values as `e.add` of it, a
+/// prefab's entries where its parameters are what it was given, the
+/// entries of an `if` where it holds.
+LogicalResult Parser::emitAddEntries(const std::vector<SpawnEntry> &entries,
+                                     llvm::SMLoc at) {
+  for (const SpawnEntry &entry : entries) {
+    switch (entry.kind) {
+    case SpawnEntry::Init: {
+      if (failed(keepsNoText(at, entry.init.component)))
+        return failure();
+      FailureOr<SmallVector<mlir::Value>> values = emitInitValues(entry.init);
+      if (failed(values))
+        return failure();
+      AddOp::create(builder, loc(at), symbol(entry.init.component), *values);
+      break;
+    }
+    case SpawnEntry::Prefab: {
+      Prefab &prefab = prefabs[entry.prefab];
+      if (entry.args.size() != prefab.params.size())
+        return error(entry.loc, "'" + entry.prefab + "' takes " +
+                                    Twine(prefab.params.size()) +
+                                    " argument(s), not " +
+                                    Twine(entry.args.size()));
+      llvm::StringMap<Variable> given;
+      for (auto [arg, param] : llvm::zip(entry.args, prefab.params)) {
+        FailureOr<mlir::Value> value = emit(*arg, param.second);
+        if (failed(value))
+          return failure();
+        if (value->getType() != param.second)
+          return error(arg->loc, "argument has a different type than the "
+                                 "parameter");
+        given[param.first] = Variable::ofValue(*value);
+      }
+      auto here = std::move(scopes);
+      SourceModule *module = current;
+      scopes.clear();
+      scopes.push_back(std::move(given));
+      current = prefab.home;
+      LogicalResult added = emitAddEntries(prefab.entries, at);
+      scopes = std::move(here);
+      current = module;
+      if (failed(added))
+        return failure();
+      break;
+    }
+    case SpawnEntry::If: {
+      FailureOr<mlir::Value> condition =
+          emit(*entry.condition, builder.getI1Type());
+      if (failed(condition))
+        return failure();
+      if (!condition->getType().isInteger(1))
+        return error(entry.condition->loc,
+                     "an 'if' condition must be a bool");
+      auto branch = scf::IfOp::create(builder, loc(entry.loc), *condition,
+                                      /*withElseRegion=*/true);
+      for (bool taken : {true, false}) {
+        OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPoint(
+            (taken ? branch.thenBlock() : branch.elseBlock())
+                ->getTerminator());
+        if (failed(emitAddEntries(taken ? entry.then : entry.otherwise, at)))
+          return failure();
+      }
+      break;
+    }
+    }
+  }
+  return success();
+}
+
 // { entry, ... }: a component with its values, a prefab with what it is
 // given, or an `if` that picks (which needs no comma after it).
 FailureOr<std::vector<SpawnEntry>> Parser::parseSpawnEntries() {
@@ -4948,19 +5353,7 @@ FailureOr<std::vector<SpawnEntry>> Parser::parseSpawnEntries() {
     entry.loc = token.loc;
     if (token.is(Token::Identifier) && peek().is(Token::LParen) &&
         prefabs.count(token.spelling)) {
-      entry.kind = SpawnEntry::Prefab;
-      entry.prefab = token.spelling.str();
-      advance();
-      advance();
-      while (!token.is(Token::RParen)) {
-        FailureOr<ExprPtr> arg = parseExpr();
-        if (failed(arg))
-          return failure();
-        entry.args.push_back(std::move(*arg));
-        if (!consumeIf(Token::Comma))
-          break;
-      }
-      if (failed(expect(Token::RParen, "')'")))
+      if (failed(parsePrefabUse(entry)))
         return failure();
     } else {
       FailureOr<ComponentInit> init = parseComponentInit();
@@ -5235,8 +5628,20 @@ Type Parser::typeOf(const Expr &expr) {
   case Expr::String:
     return {};
   case Expr::Index:
+    // (Of the table a value holds, where that is a plain list.)
+    if (RowsShape *shape = rowsOf(typeOf(*expr.operands[0])))
+      return shape->fields.size() == 1 && shape->fields[0].first.empty()
+                 ? shape->fields[0].second
+                 : Type();
     return builder.getIntegerType(8);
   case Expr::Row: {
+    if (expr.name.empty()) {
+      if (RowsShape *shape = rowsOf(typeOf(*expr.operands[1])))
+        for (auto &[field, type] : shape->fields)
+          if (field == expr.field)
+            return type;
+      return {};
+    }
     auto table = tables.find(expr.name);
     return table == tables.end() ? Type()
                                  : table->second.fieldType(expr.field);
@@ -5557,6 +5962,13 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                         TextType::get(context, std::max(size, 1u)));
   }
   case Expr::Row: {
+    if (expr.name.empty()) {
+      RowsShape *shape = rowsOf(typeOf(*expr.operands[1]));
+      if (!shape)
+        return error(expr.loc, "only a row of a table has fields");
+      return emitRowThrough(expr, *shape, *expr.operands[1],
+                            *expr.operands[0], expr.field);
+    }
     const Record &table = tables[expr.name];
     Type type = table.fieldType(expr.field);
     if (!type)
@@ -5610,6 +6022,9 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         .getResult();
   }
   case Expr::Index: {
+    if (RowsShape *shape = rowsOf(typeOf(*expr.operands[0])))
+      return emitRowThrough(expr, *shape, *expr.operands[0],
+                            *expr.operands[1], "");
     Type textTy = textTypeOf(*expr.operands[0]);
     if (isAnyText(*expr.operands[0])) {
       FailureOr<mlir::Value> text =
@@ -5719,6 +6134,13 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return ReadOp::create(builder, at, unique->second.fieldType("value"),
                             symbol(expr.name), builder.getStringAttr("value"))
           .getResult();
+    }
+    // A table, or `none`, where one of a shape is expected.
+    if (RowsShape *shape = rowsOf(expected)) {
+      if (tables.count(expr.name))
+        return emitTableValue(expr, *shape);
+      if (expr.name == "none")
+        return noughtOf(at, expected);
     }
     // `none`, where an entity is expected: no entity.
     if (expr.name == "none" && expected && isa<EntityType>(expected))
@@ -5853,6 +6275,21 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return failure();
       return values->front();
     }
+    // (Of the table a value holds: asked of the fn that knows them.)
+    if (expr.name == "len" && expr.operands.size() == 1)
+      if (RowsShape *shape = rowsOf(typeOf(*expr.operands[0]))) {
+        auto held = EnumType::get(
+            context, FlatSymbolRefAttr::get(context, shape->name));
+        FailureOr<mlir::Value> which = emit(*expr.operands[0], held);
+        if (failed(which))
+          return failure();
+        shape->counted = true;
+        return InvokeOp::create(
+                   builder, at, builder.getI32Type(),
+                   FlatSymbolRefAttr::get(context, "rows_" + shape->name),
+                   ValueRange{*which}, UnitAttr())
+            ->getResult(0);
+      }
     // (Of a table: how many rows it has, which is known.)
     if (expr.name == "len" && expr.operands.size() == 1 &&
         expr.operands[0]->kind == Expr::Name &&

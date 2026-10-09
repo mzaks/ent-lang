@@ -1,0 +1,26 @@
+// A prefab given to `add` (prefab_add.test).
+import console
+component Unit { n: i32 }
+component Armour { thick: i32 }
+component Banner { colour: i32 }
+tag Elite
+unique Round: i32
+default_capacity 16
+prefab kit(level: i32) {
+  Armour { thick: level * 2 },
+  if level >= 2 { Elite, Banner { colour: 0xff0000 + level } }
+}
+world { for i in 0..4 { spawn { Unit { n: i } } } }
+system promote() {
+  Round += 1
+  for e, u: Unit where Round == 1 && u.n > 0 { e.add(kit(u.n)) }
+  for e, u: Unit, optional a: Armour, optional b: Banner {
+    var thick = -1
+    var colour = -1
+    if let t = a.thick { thick = t }
+    if let c = b.colour { colour = c }
+    put("{Round}: unit {u.n}: armour {thick}, banner {colour}, elite {e.has(Elite)}")
+  }
+}
+schedule f() { promote() }
+main { loop { f() } until Round == 2 }

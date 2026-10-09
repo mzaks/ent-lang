@@ -1,0 +1,18 @@
+// A table's field, or a plain list, may be a text of any length: the
+// bytes are the program's own, and what is read is a view of them (a
+// text without bytes where there is no such row), which a field takes a
+// copy of like any other.
+// RUN: %ent run %S/Inputs/tables_text.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tables_text.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK:      arrow: 94 bytes: Hits the foe in its reach that is furthest along the road, again and again, and that one only.
+// CHECK-NEXT: cannon: 0 bytes: 
+// CHECK-NEXT: line -1 (0): 
+// CHECK-NEXT: line 0 (5): first
+// CHECK-NEXT: line 1 (66): the second line, which is longer than the first one by quite a bit
+// CHECK-NEXT: line 2 (5): third
+// CHECK-NEXT: line 3 (0): 
+// CHECK-NEXT: longest: the second line, which is longer than the first one by quite a bit
+// CHECK-NEXT: a note of 94 bytes
+// CHECK-NEXT: a note of 0 bytes

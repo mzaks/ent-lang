@@ -1,0 +1,23 @@
+// A table is a value where a `rows` type says what its rows are: a
+// field, a unique or a parameter holds one of the tables of that shape
+// (or `none`, which has no rows), a fn gives one, and what holds one is
+// read like the table itself. The program is closed, so the value is the
+// number of the table among those of its shape that are used so, and a
+// read through it asks a fn which one it is.
+// RUN: %ent run %S/Inputs/tables_as_values.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/tables_as_values.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: ent-translate --import-ent %S/Inputs/tables_as_values.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+
+// IR-DAG: ent.enum @rows_of_x_f32_y_f32 ["none", "road_a", "road_b"]
+// IR-DAG: ent.enum @rows_of_i32_by_Kind ["none", "easy", "hard"]
+// IR-DAG: ent.function @row_rows_of_x_f32_y_f32__x(
+// IR-DAG: ent.function @rows_rows_of_x_f32_y_f32(
+
+// CHECK:      1: a road of 3 points, 9.0 long, ends at 4.0; a cannon costs 50
+// CHECK-NEXT: 1: a road of 2 points, 8.0 long, ends at 8.0; a cannon costs 80
+// CHECK-NEXT: 1: numbers 3: 1 3 5; road 2 has 0 points
+// CHECK-NEXT: 2: a road of 3 points, 9.0 long, ends at 4.0; a cannon costs 80
+// CHECK-NEXT: 2: a road of 2 points, 8.0 long, ends at 8.0; a cannon costs 80
+// CHECK-NEXT: 2: numbers 2: 2 4 0; road 2 has 0 points
