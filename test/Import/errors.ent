@@ -1082,3 +1082,46 @@ fn f(k: Kind) -> i32 { t[k] }
 
 // expected-error @+1 {{'Nope' is no enum: a table has a row for each case of one ('table t[Enum]'), or rows that are counted}}
 table t[Nope]: i32 = [ 1, 2 ]
+
+// -----
+
+// What a `for` inside a `for` must hold of the one around it is told
+// where the program says it, when all of the outer one is read.
+component Spot { x: f32 }
+system s() {
+  for me, s: mut Spot {
+    var sum = 0.0
+    // expected-error @+1 {{this 'for' reads 'x' of 'Spot' of other entities, which the 'for' around sets of its own: some would be set already and some not. Bind it 'old' ('name: old Spot') to read what it was before that 'for' started (a copy is kept for it), or set another field and copy it over after}}
+    for other: Spot { sum += other.x }
+    // expected-note @+1 {{set here}}
+    s.x = sum
+  }
+}
+
+// -----
+
+component A { x: f32 }
+component H { hp: f32 }
+system s() {
+  for a: A, h: H {
+    // expected-note @+1 {{it does here}}
+    let was = h.hp
+    for o, other: A where other.x > a.x {
+      // expected-error @+1 {{what a 'for' inside a 'for' sends to a field lands as it goes, so the 'for' around does not read or set that field ('hp' of 'H') too}}
+      H(o).hp -= 1.0
+    }
+  }
+}
+
+// -----
+
+component A { x: f32 }
+unique N: i32
+system s() {
+  for a: A {
+    // expected-note @+1 {{it is read here}}
+    let n = N
+    // expected-error @+1 {{what a 'for' inside a 'for' accumulates lands as it goes, so the 'for' around does not read that unique ('N') too}}
+    for other: A where other.x > a.x { N += 1 }
+  }
+}

@@ -27,3 +27,11 @@
 // CHECK-NEXT:   7.0: -1.0
 // CHECK-NEXT:   8.0: 2.0
 // CHECK-NEXT:   9.0: 2.0
+
+// (Such a `for` runs on one thread: what it sends lands in its order.)
+// RUN: ent-translate --import-ent %S/Inputs/for_in_for_sends.ent -I %S/../../devices \
+// RUN:   | ent-opt "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:   | FileCheck %s --check-prefix=SEQ
+// SEQ-LABEL: func.func private @blast(
+// SEQ-NOT: scf.parallel
+// SEQ: return

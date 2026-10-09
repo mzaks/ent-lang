@@ -477,6 +477,7 @@ private:
   LogicalResult parseRelation();
   LogicalResult parseEdges(llvm::SMLoc at);
   LogicalResult parseEach(llvm::SMLoc at);
+  LogicalResult checkEaches(Operation *query);
   /// Inside the body of a `for` over entities that is in another.
   bool inEach = false;
   LogicalResult parseConnect(llvm::SMLoc at);
@@ -2474,6 +2475,102 @@ LogicalResult Parser::parseStatement() {
 
 // for (e)-[s: R]->(other) { } / for (child: C)-[R]->(e) { }, inside a
 // `for`: the edges of the entity it visits, out of it or into it.
+/// What a `for` over entities that is now whole must hold of the `for`s
+/// inside it, which can only be told when all of its body is there: none
+/// reads a field the outer one sets of its own entities (unless as it
+/// was before: `old`), and what one sends or accumulates nothing else in
+/// the outer one touches. (As EachOp's verifier says of the IR; here
+/// with the program's words, at the program's lines.)
+LogicalResult Parser::checkEaches(Operation *query) {
+  LogicalResult result = success();
+  auto report = [&](Operation *at, const Twine &message, Operation *other,
+                    StringRef note) {
+    if (failed(result))
+      return;
+    InFlightDiagnostic diag = emitError(at->getLoc()) << message;
+    diag.attachNote(other->getLoc()) << note;
+    hadError = true;
+    result = failure();
+  };
+  Block &outer = query->getRegion(0).front();
+  query->walk([&](EachOp each) {
+    Block &body = each.getBody().front();
+    for (BlockArgument arg : body.getArguments().take_front(
+             each.getNumRefs())) {
+      if (each.isOld(arg.getArgNumber()))
+        continue;
+      FlatSymbolRefAttr component =
+          cast<RefType>(arg.getType()).getComponent();
+      llvm::SmallPtrSet<Attribute, 4> read;
+      for (Operation *user : arg.getUsers())
+        if (auto get = dyn_cast<GetOp>(user))
+          read.insert(get.getFieldAttr());
+      query->walk([&](SetOp set) {
+        auto written = dyn_cast<BlockArgument>(set.getRef());
+        if (!written || written.getOwner() != &outer ||
+            cast<RefType>(set.getRef().getType()).getComponent() !=
+                component ||
+            !read.contains(set.getFieldAttr()))
+          return;
+        StringRef name = component.getValue();
+        name = name.substr(name.rfind('.') + 1);
+        report(each,
+               "this 'for' reads '" + set.getFieldAttr().getValue() +
+                   "' of '" + name + "' of other entities, which the 'for' "
+                   "around sets of its own: some would be set already and "
+                   "some not. Bind it 'old' ('name: old " + name +
+                   "') to read what it was before that 'for' started (a "
+                   "copy is kept for it), or set another field and copy it "
+                   "over after",
+               set, "set here");
+      });
+    }
+    each.getBody().walk([&](Operation *op) {
+      if (auto apply = dyn_cast<ApplyOp>(op)) {
+        query->walk([&](Operation *other) {
+          Value ref;
+          StringAttr field;
+          if (auto get = dyn_cast<GetOp>(other))
+            ref = get.getRef(), field = get.getFieldAttr();
+          else if (auto set = dyn_cast<SetOp>(other))
+            ref = set.getRef(), field = set.getFieldAttr();
+          bool touches =
+              ref && field == apply.getFieldAttr() &&
+              cast<RefType>(ref.getType()).getComponent() ==
+                  apply.getComponentAttr();
+          if (auto lookup = dyn_cast<LookupOp>(other))
+            touches = lookup.getComponentAttr() == apply.getComponentAttr() &&
+                      lookup.getFieldAttr() == apply.getFieldAttr();
+          if (!touches)
+            return;
+          StringRef name = apply.getComponentAttr().getValue();
+          name = name.substr(name.rfind('.') + 1);
+          report(op,
+                 "what a 'for' inside a 'for' sends to a field lands as it "
+                 "goes, so the 'for' around does not read or set that "
+                 "field ('" + apply.getFieldAttr().getValue() + "' of '" +
+                     name + "') too",
+                 other, "it does here");
+        });
+      } else if (auto accumulate = dyn_cast<AccumulateOp>(op)) {
+        query->walk([&](ReadOp read) {
+          if (read.getResourceAttr() != accumulate.getResourceAttr() ||
+              read.getFieldAttr() != accumulate.getFieldAttr())
+            return;
+          StringRef name = accumulate.getResourceAttr().getValue();
+          name = name.substr(name.rfind('.') + 1);
+          report(op,
+                 "what a 'for' inside a 'for' accumulates lands as it goes, "
+                 "so the 'for' around does not read that unique ('" + name +
+                     "') too",
+                 read, "it is read here");
+        });
+      }
+    });
+  });
+  return result;
+}
+
 // for [name,] [binding: Component, ...] [with A, B] [without C] [where c]
 // { statements }, inside a `for` over entities: the statements for every
 // entity that has those, for the entity the outer one visits. It reads
@@ -3926,6 +4023,8 @@ LogicalResult Parser::parseFor() {
                          builder.getStringAttr("add"),
                          arith::ConstantIntOp::create(builder, loc(at), 1, 32));
   QueryOp::ensureTerminator(query->getRegion(0), builder, loc(at));
+  if (failed(checkEaches(query)))
+    return failure();
   return success();
 }
 

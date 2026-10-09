@@ -13,6 +13,14 @@
 // RUN: ent-opt %t.mlir --ent-print-access -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=ACCESS
 
+// A `for` with one in it that only reads runs in parallel like any other
+// (from fewer entities: its work is the two numbers multiplied).
+// RUN: ent-opt %t.mlir "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN:   | FileCheck %s --check-prefix=PAR
+// PAR-LABEL: func.func private @aim(
+// PAR: scf.parallel
+// PAR: scf.for
+
 // IR: "ent.each"(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) <{entity, without = [@Hidden]}> ({
 // IR: ^bb0(%{{.*}}: !ent.ref<@Enemy>, %{{.*}}: !ent.entity, %{{.*}}: f32,
 // IR: ent.apply %{{.*}} @Life "hp" add

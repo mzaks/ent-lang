@@ -939,6 +939,11 @@ struct LoopOptions {
   /// Combine unobserved applies directly in loops that never run in
   /// parallel.
   bool directApplies;
+  /// For a query with a `for` over other entities in its body: how many
+  /// of those there can be at most, and how many there are (an index),
+  /// since what an entity of the query costs is that many times more.
+  int64_t innerCapacity = 0;
+  Value innerRows = Value();
 };
 
 } // namespace
@@ -997,6 +1002,14 @@ static bool isEntityLocal(QueryOp query) {
     if (isStructuralFor(query, archetype))
       return false;
   WalkResult result = query.getBody().walk([](Operation *op) {
+    // What a `for` inside the body became (see lowerEach): it reads the
+    // columns of other entities, which the query does not write (what it
+    // sets of its own is not read there, or read from a copy); but what
+    // it sends or accumulates there is combined as it goes, in order.
+    if (isa<memref::LoadOp>(op))
+      return WalkResult::advance();
+    if (op->hasAttr("ent.in_each"))
+      return WalkResult::interrupt();
     // Resource reads are fine: no query writes a resource. Adding and
     // removing components without moving (checked above) only writes the
     // entity's own row; its id is its own.
@@ -1063,16 +1076,25 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
     return loop;
   };
 
+  // (With a `for` over other entities in the body, the work is the two
+  // numbers multiplied.)
+  int64_t most = int64_t(archetype.capacity) *
+                 std::max<int64_t>(1, options.innerCapacity);
   if (!options.parallelEntities || !entityLocal ||
-      archetype.capacity < options.parallelMinEntities)
+      most < options.parallelMinEntities)
     return emitSequential();
   if (options.parallelMinEntities <= 1)
     return emitParallel();
 
   Value threshold = arith::ConstantIndexOp::create(
       rewriter, loc, options.parallelMinEntities);
+  Value work = options.innerRows
+                   ? arith::MulIOp::create(rewriter, loc, count,
+                                           options.innerRows)
+                         .getResult()
+                   : count;
   Value large = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
-                                      count, threshold);
+                                      work, threshold);
   auto branch = scf::IfOp::create(rewriter, loc, large,
                                   /*withElseRegion=*/true);
   rewriter.setInsertionPointToStart(branch.thenBlock());
@@ -11026,15 +11048,31 @@ static void lowerEach(IRRewriter &rewriter, EachOp each,
 
 static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const WorldLayout &layout, WorldAccess &world,
-                       const LoopOptions &options) {
+                       const LoopOptions &given) {
   // The `for`s over other entities in its body, first: what is left of
-  // each is loops that read columns.
+  // each is loops that read columns. (How many those entities are says
+  // from how many of its own the query is worth running in parallel.)
+  LoopOptions options = given;
   SmallVector<EachOp> eaches;
   query.walk([&](EachOp each) { eaches.push_back(each); });
-  for (EachOp each : eaches)
+  for (EachOp each : eaches) {
+    rewriter.setInsertionPoint(query);
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (!matches(each, ArchetypeOp(archetype.op)))
+        continue;
+      options.innerCapacity += archetype.capacity;
+      Value rows = world.count(query.getLoc(), archetype);
+      options.innerRows =
+          options.innerRows
+              ? arith::AddIOp::create(rewriter, query.getLoc(),
+                                      options.innerRows, rows)
+                    .getResult()
+              : rows;
+    }
     lowerEach(rewriter, each, layout, world);
+  }
   if (query.getCascade())
-    return lowerCascade(rewriter, query, layout, world, options);
+    return lowerCascade(rewriter, query, layout, world, given);
   Location loc = query.getLoc();
   bool entityLocal = isEntityLocal(query);
   bool matched = false;
