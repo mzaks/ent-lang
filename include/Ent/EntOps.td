@@ -878,6 +878,21 @@ def Ent_TextDropOp : Ent_Op<"text.drop", [
   let assemblyFormat = "$value attr-dict";
 }
 
+def Ent_NobodyOp : Ent_Op<"nobody", [Pure]> {
+  let summary = "The id of no entity";
+  let description = [{
+    ```mlir
+    %none = ent.nobody
+    ```
+    An id that is no entity's, and never will be (`none` in a program):
+    for a value that is to say which entity before one is found. It is
+    the same as itself (`ent.same`) and as no other id; what is sent to
+    it goes nowhere, and what is looked up of it is not found.
+  }];
+  let results = (outs Ent_EntityType:$result);
+  let assemblyFormat = "attr-dict";
+}
+
 def Ent_OtherOp : Ent_Op<"other"> {
   let summary = "The entity a ref to another entity's component leads to";
   let description = [{

@@ -847,7 +847,7 @@ LogicalResult FunctionOp::verifyRegions() {
         op->getName().getDialectNamespace() != "ent")
       return;
     auto invoke = dyn_cast<InvokeOp>(op);
-    if (isa<SameOp, TextConstantOp, TextOfOp, TextCutOp, TextLengthOp,
+    if (isa<SameOp, NobodyOp, TextConstantOp, TextOfOp, TextCutOp, TextLengthOp,
             TextAtOp, TextEqualOp, TextJoinOp, TextKeepOp>(op) ||
         (invoke && (!invoke.getProc() || getProc())))
       return;

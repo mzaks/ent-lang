@@ -481,8 +481,8 @@ system s(n: f32) {
 
 // -----
 
-system s(a: i32, b: i64) {
-  // expected-error @+1 {{the bounds of a 'for' must have the same integer type}}
+system s(a: i32, b: f32) {
+  // expected-error @+1 {{a 'for' counts over integers}}
   for i in a..b {
   }
 }

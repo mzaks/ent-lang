@@ -12459,6 +12459,20 @@ struct EntLowerToLoops
       shareParts(rewriter, func);
     }
 
+    // The id of no entity: all ones, as in the buffers of what is sent.
+    SmallVector<NobodyOp> nobodies;
+    module.walk([&](NobodyOp nobody) { nobodies.push_back(nobody); });
+    for (NobodyOp nobody : nobodies) {
+      rewriter.setInsertionPoint(nobody);
+      Value id = arith::ConstantIntOp::create(rewriter, nobody.getLoc(), -1,
+                                              layout->entities.idBits);
+      rewriter.replaceOp(nobody,
+                         UnrealizedConversionCastOp::create(
+                             rewriter, nobody.getLoc(),
+                             nobody.getResult().getType(), id)
+                             .getResult(0));
+    }
+
     // Two ids of one entity: the same number.
     SmallVector<SameOp> sames;
     module.walk([&](SameOp same) { sames.push_back(same); });

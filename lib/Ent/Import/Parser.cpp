@@ -85,6 +85,16 @@ private:
   llvm::StringMap<T> map;
 };
 
+/// Of two whole-number types (not a bool's), the one of more bits; null
+/// if either is something else.
+static Type widerInteger(Type a, Type b) {
+  auto x = dyn_cast_or_null<IntegerType>(a);
+  auto y = dyn_cast_or_null<IntegerType>(b);
+  if (!x || !y || x.getWidth() == 1 || y.getWidth() == 1)
+    return {};
+  return x.getWidth() >= y.getWidth() ? a : b;
+}
+
 struct Expr;
 using ExprPtr = std::unique_ptr<Expr>;
 
@@ -4808,8 +4818,12 @@ Type Parser::typeOf(const Expr &expr) {
             context, std::min<unsigned>(cast<TextType>(a).getCapacity() +
                                             cast<TextType>(b).getCapacity(),
                                         TextType::kMaxCapacity));
-      if (Type type = typeOf(*expr.operands[0]))
+      if (Type type = typeOf(*expr.operands[0])) {
+        if (Type other = typeOf(*expr.operands[1]))
+          if (Type wider = widerInteger(type, other))
+            return wider;
         return type;
+      }
       return typeOf(*expr.operands[1]);
     }
     }
@@ -4997,6 +5011,11 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
     return failure();
   // A text goes where a text of another capacity is expected: widened, or
   // cut to what fits.
+  // A whole number goes where one of more bits is expected, as it is.
+  if (expected && widerInteger(value->getType(), expected) == expected &&
+      value->getType() != expected)
+    return arith::ExtSIOp::create(builder, loc(expr.loc), expected, *value)
+        .getResult();
   auto from = dyn_cast<TextType>(value->getType());
   auto to = dyn_cast_or_null<TextType>(expected);
   if (from && to && from != to)
@@ -5152,6 +5171,9 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                             symbol(expr.name), builder.getStringAttr("value"))
           .getResult();
     }
+    // `none`, where an entity is expected: no entity.
+    if (expr.name == "none" && expected && isa<EntityType>(expected))
+      return NobodyOp::create(builder, at, expected).getResult();
     // `none`, where a fn or proc is expected: no function. Calling it
     // does nothing, and gives nought.
     if (expr.name == "none")
@@ -5557,6 +5579,10 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
   Type type = typeOf(lhs);
   if (!type)
     type = typeOf(rhs);
+  // (Whole numbers of different sizes: both as the one of more bits.)
+  else if (Type other = typeOf(rhs))
+    if (Type wider = widerInteger(type, other))
+      type = wider;
   if (!type)
     type = comparison || !expected ? defaultType(expr) : expected;
   FailureOr<mlir::Value> a = emit(lhs, type);
