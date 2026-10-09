@@ -15,11 +15,31 @@ index 06aa0ff..84c685b 100644
  
      DEH_printf("S_Init: Setting up sound.\n");
      S_Init (sfxVolume * 8, musicVolume * 8);
+diff --git i/src/doom/p_setup.c w/src/doom/p_setup.c
+index fbb1a18..c2ea4e0 100644
+--- i/src/doom/p_setup.c
++++ w/src/doom/p_setup.c
+@@ -815,6 +815,15 @@ P_SetupLevel
+ 
+     //printf ("free memory: 0x%x\n", Z_FreeMemory());
+ 
++    {
++	// ent-lang: see P_Trace in p_tick.c.
++	extern void P_Trace (void);
++
++	leveltime = -1;
++	P_Trace ();
++	leveltime = 0;
++    }
++
+ }
+ 
+ 
 diff --git i/src/doom/p_tick.c w/src/doom/p_tick.c
-index 5a93b80..d35a2b7 100644
+index 5a93b80..7766c78 100644
 --- i/src/doom/p_tick.c
 +++ w/src/doom/p_tick.c
-@@ -23,6 +23,141 @@
+@@ -23,6 +23,143 @@
  
  #include "doomstat.h"
  
@@ -111,7 +131,9 @@ index 5a93b80..d35a2b7 100644
 +    exit (0);
 +}
 +
-+static void P_Trace (void)
++// (Also called when a level has been set up, before its first tic: the
++// line then says tic -1.)
++void P_Trace (void)
 +{
 +    static FILE *file;
 +    static boolean asked;
@@ -151,7 +173,7 @@ index 5a93b80..d35a2b7 100644
 +	all += hash;
 +	count++;
 +    }
-+    fprintf (file, "%d %d %d %d %d %d %d %u %d %d %08x\n",
++    fprintf (file, "%d %d %d %d %d %d %d %u %d %d %u\n",
 +	     gameepisode, gamemap, leveltime, prndindex,
 +	     player->mo->x, player->mo->y, player->mo->z,
 +	     (unsigned int) player->mo->angle, player->health, count, all);
@@ -161,7 +183,7 @@ index 5a93b80..d35a2b7 100644
  
  int	leveltime;
  
-@@ -126,6 +261,12 @@ void P_Ticker (void)
+@@ -126,6 +263,12 @@ void P_Ticker (void)
  {
      int		i;
      
@@ -174,7 +196,7 @@ index 5a93b80..d35a2b7 100644
      // run the tic
      if (paused)
  	return;
-@@ -148,6 +289,8 @@ void P_Ticker (void)
+@@ -148,6 +291,8 @@ void P_Ticker (void)
      P_UpdateSpecials ();
      P_RespawnSpecials ();
  

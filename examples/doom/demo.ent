@@ -1,0 +1,62 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// A demo (g_game.c): a game as it was played, the player's keys tic by
+// tic, which played again goes the same way.
+import files
+import wad
+
+// The demo to read (the name of its lump, "DEMO1"), what it says of the
+// game it is of, and which tic is played next.
+unique Demo {
+  lump: text[8], version: i32, skill: i32, episode: i32, map: i32, tic: i32
+}
+
+// What the player did in a tic: how fast forward and to the side, how
+// far turned (the top 16 bits of an angle), and the buttons.
+buffer Ticcmds {
+  forwardmove: i32, sidemove: i32, angleturn: i32, buttons: i32
+} capacity 131072
+
+// The buttons of a tic.
+const BT_ATTACK = 1
+const BT_USE = 2
+const BT_CHANGE = 4
+const BT_WEAPONMASK = 8 + 16 + 32
+const BT_WEAPONSHIFT = 3
+const BT_SPECIAL = 128
+
+// Reads the demo (G_DoPlayDemo, G_ReadDemoTiccmd): thirteen bytes about
+// the game, then four for each tic of the one player; 128 ends them.
+system read_demo() {
+  Ticcmds = []
+  Demo.tic = 0
+  let lump = lump_number(Lumps, lump_name(Demo.lump))
+  if lump >= 0 {
+    let at = Lumps[lump].at
+    Demo.version = byte_at(Bytes, at)
+    Demo.skill = byte_at(Bytes, at + 1)
+    Demo.episode = byte_at(Bytes, at + 2)
+    Demo.map = byte_at(Bytes, at + 3)
+    var tic = at + 13
+    while byte_at(Bytes, tic) != 128 && tic + 4 <= at + Lumps[lump].size {
+      Ticcmds += {
+        forwardmove: (byte_at(Bytes, tic) as i8) as i32,
+        sidemove: (byte_at(Bytes, tic + 1) as i8) as i32,
+        angleturn: ((byte_at(Bytes, tic + 2) << 8) as i16) as i32,
+        buttons: byte_at(Bytes, tic + 3)
+      }
+      tic += 4
+    }
+  }
+}

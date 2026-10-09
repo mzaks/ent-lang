@@ -1,0 +1,170 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// What is special about sectors and lines (p_spec.c, p_lights.c): lights
+// that flicker and glow, so far.
+//
+// What a sector does over time is a row of a buffer, not an entity: the
+// rows are gone through one after another in the order they were made,
+// and each may draw a random number, which the next one's then follows.
+import fixed
+import random
+import level
+
+// A light of a sector that changes: which kind it is, its sector, the
+// tics until it changes next, and what it changes between.
+buffer Lights {
+  kind: i32, sector: i32, count: i32, maxlight: i32, minlight: i32,
+  maxtime: i32, mintime: i32, darktime: i32, brighttime: i32, direction: i32
+} capacity 4096
+const LIGHT_FIRE = 0
+const LIGHT_FLASH = 1
+const LIGHT_STROBE = 2
+const LIGHT_GLOW = 3
+
+const GLOWSPEED = 8
+const STROBEBRIGHT = 5
+const FASTDARK = 15
+const SLOWDARK = 35
+
+// How many secrets the level has.
+unique Secrets: i32
+
+// The least light of the sectors next to a sector, if less than `most`
+// (P_FindMinSurroundingLight).
+fn min_surrounding_light(lines: Lines, sectors: Sectors, sector: i32,
+                         most: i32) -> i32 {
+  var least = most
+  for i in 0..len(lines) {
+    if lines[i].flags & ML_TWOSIDED != 0 {
+      if lines[i].frontsector == sector {
+        least min= sectors[lines[i].backsector].lightlevel
+      } else if lines[i].backsector == sector {
+        least min= sectors[lines[i].frontsector].lightlevel
+      }
+    }
+  }
+  least
+}
+
+// Starts what the level's sectors do by themselves (P_SpawnSpecials).
+// After `spawn_things`: the random numbers go on from there.
+system spawn_specials() {
+  Lights = []
+  Secrets = 0
+  for i in 0..len(Sectors) {
+    let special = Sectors[i].special
+    let light = Sectors[i].lightlevel
+    let least = min_surrounding_light(Lines, Sectors, i, light)
+    if special == 1 {
+      // Flashes at random.
+      Random.play = random_after(Random.play)
+      Lights += {
+        kind: LIGHT_FLASH, sector: i, count: (random_at(Random.play) & 64) + 1,
+        maxlight: light, minlight: least, maxtime: 64, mintime: 7,
+        darktime: 0, brighttime: 0, direction: 0
+      }
+      Sectors[i].special = 0
+    } else if special == 2 || special == 3 || special == 4 || special == 12 ||
+              special == 13 {
+      // Blinks, fast or slow, in step with the others or not.
+      let sync = special == 12 || special == 13
+      var count = 1
+      if !sync {
+        Random.play = random_after(Random.play)
+        count = (random_at(Random.play) & 7) + 1
+      }
+      Lights += {
+        kind: LIGHT_STROBE, sector: i, count: count, maxlight: light,
+        minlight: if least == light { 0 } else { least }, maxtime: 0,
+        mintime: 0,
+        darktime: if special == 3 || special == 12 { SLOWDARK } else { FASTDARK },
+        brighttime: STROBEBRIGHT, direction: 0
+      }
+      // (One that also hurts stays what it is.)
+      Sectors[i].special = if special == 4 { 4 } else { 0 }
+    } else if special == 8 {
+      Lights += {
+        kind: LIGHT_GLOW, sector: i, count: 0, maxlight: light,
+        minlight: least, maxtime: 0, mintime: 0, darktime: 0, brighttime: 0,
+        direction: -1
+      }
+      Sectors[i].special = 0
+    } else if special == 9 {
+      Secrets += 1
+    } else if special == 17 {
+      Lights += {
+        kind: LIGHT_FIRE, sector: i, count: 4, maxlight: light,
+        minlight: least + 16, maxtime: 0, mintime: 0, darktime: 0,
+        brighttime: 0, direction: 0
+      }
+      Sectors[i].special = 0
+    }
+  }
+}
+
+// A tic of the lights (T_FireFlicker, T_LightFlash, T_StrobeFlash,
+// T_Glow), each in its turn.
+system run_lights() {
+  for i in 0..len(Lights) {
+    let sector = Lights[i].sector
+    let kind = Lights[i].kind
+    if kind == LIGHT_GLOW {
+      if Lights[i].direction == -1 {
+        Sectors[sector].lightlevel -= GLOWSPEED
+        if Sectors[sector].lightlevel <= Lights[i].minlight {
+          Sectors[sector].lightlevel += GLOWSPEED
+          Lights[i].direction = 1
+        }
+      } else {
+        Sectors[sector].lightlevel += GLOWSPEED
+        if Sectors[sector].lightlevel >= Lights[i].maxlight {
+          Sectors[sector].lightlevel -= GLOWSPEED
+          Lights[i].direction = -1
+        }
+      }
+    } else {
+      Lights[i].count -= 1
+      if Lights[i].count == 0 {
+        if kind == LIGHT_FIRE {
+          Random.play = random_after(Random.play)
+          let amount = (random_at(Random.play) & 3) * 16
+          Sectors[sector].lightlevel =
+              if Sectors[sector].lightlevel - amount < Lights[i].minlight {
+                Lights[i].minlight
+              } else {
+                Lights[i].maxlight - amount
+              }
+          Lights[i].count = 4
+        } else if kind == LIGHT_FLASH {
+          Random.play = random_after(Random.play)
+          if Sectors[sector].lightlevel == Lights[i].maxlight {
+            Sectors[sector].lightlevel = Lights[i].minlight
+            Lights[i].count = (random_at(Random.play) & Lights[i].mintime) + 1
+          } else {
+            Sectors[sector].lightlevel = Lights[i].maxlight
+            Lights[i].count = (random_at(Random.play) & Lights[i].maxtime) + 1
+          }
+        } else {
+          if Sectors[sector].lightlevel == Lights[i].minlight {
+            Sectors[sector].lightlevel = Lights[i].maxlight
+            Lights[i].count = Lights[i].brighttime
+          } else {
+            Sectors[sector].lightlevel = Lights[i].minlight
+            Lights[i].count = Lights[i].darktime
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,74 @@
+// A demo played, a line for each tic as the reference writes them
+// (DOOM_TRACE, reference/trace.patch): the level, the tic, where the
+// random numbers are, where the player is, the player's health, how many
+// things there are and a hash of them all. `Tics` says how many tics
+// are played (the line before the first tic is tic -1). See
+// check/trace.sh.
+import console
+import files
+import wad
+import fixed
+import random
+import data
+import level
+import info
+import render
+import things
+import demo
+import specials
+
+capacity Bytes 16777216
+
+world {
+  Wad.file = "doom1.wad"
+  Demo.lump = "DEMO1"
+}
+
+unique Tics: i32
+unique Leveltime: i32
+// The things: how many, and their hashes added up.
+unique Count: i32
+unique Hash: u32
+
+fn mixed(hash: u32, value: i32) -> u32 {
+  var all = hash
+  for i in 0..4 {
+    all = (all ^ ((value >> (i * 8)) & 0xff) as u32) * 16777619
+  }
+  all
+}
+
+system begin_level() {
+  Level.episode = Demo.episode
+  Level.map = Demo.map
+  Level.skill = Demo.skill
+  Random.play = 0
+  Random.other = 0
+  Leveltime = -1
+}
+
+system trace() {
+  Count = 0
+  Hash = 0
+  for m: Mobj {
+    Count += 1
+    Hash += mixed(mixed(mixed(mixed(mixed(mixed(mixed(mixed(
+        2166136261, m.type), m.x), m.y), m.z), m.angle as i32), m.health),
+        m.state), m.tics)
+  }
+  for m: Mobj where m.type == MT_PLAYER {
+    put("{Level.episode} {Level.map} {Leveltime} {Random.play} {m.x} {m.y} {m.z} {m.angle} {m.health} {Count} {Hash}")
+  }
+}
+
+schedule setup() {
+  load_wad()
+  init_data()
+  read_demo()
+  begin_level()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  trace()
+}
+main { setup() }

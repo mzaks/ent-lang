@@ -65,10 +65,12 @@ buffer Sides {
 } capacity 32768
 
 // A line of the level: from (x1, y1) to (x2, y2), which is (dx, dy) on;
-// its sides by their numbers, the back one -1 where it has none.
+// its sides by their numbers, the back one -1 where it has none, and the
+// sectors they look into (-1: none behind).
 buffer Lines {
   x1: i32, y1: i32, x2: i32, y2: i32, dx: i32, dy: i32,
-  flags: i32, special: i32, tag: i32, front: i32, back: i32
+  flags: i32, special: i32, tag: i32, front: i32, back: i32,
+  frontsector: i32, backsector: i32
 } capacity 16384
 
 // A piece of a line that is one side of a subsector: its ends, the angle
@@ -174,7 +176,9 @@ system load_level() {
         dy: Vertexes[v2].y - Vertexes[v1].y,
         flags: short_at(Bytes, at + 4), special: short_at(Bytes, at + 6),
         tag: short_at(Bytes, at + 8), front: short_at(Bytes, at + 10),
-        back: short_at(Bytes, at + 12)
+        back: short_at(Bytes, at + 12),
+        frontsector: side_sector(Sides, short_at(Bytes, at + 10)),
+        backsector: side_sector(Sides, short_at(Bytes, at + 12))
       }
     }
     // P_LoadSubsectors: 4 bytes each. (Its sector is that of its first
