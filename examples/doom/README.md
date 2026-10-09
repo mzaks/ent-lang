@@ -19,11 +19,13 @@ them as systems. It is being built; what is here so far:
   through, and the things of a level as entities.
 - `sprites.ent`: what is drawn after the walls: the things by their
   sprites, and textures in openings.
-- `demo.ent`, `specials.ent`, `items.ent`, `play.ent`: a demo's keys tic
-  by tic; the lights of sectors; what the player has and picks up; and
-  the player moved through the level, stopped by walls and things and
-  sliding along them. Not yet: doors and lifts, weapons, and anything a
-  monster does.
+- `demo.ent`, `specials.ent`, `items.ent`, `play.ent`, `movers.ent`: a
+  demo's keys tic by tic; the lights of sectors; what the player has and
+  picks up; the player moved through the level, stopped by walls and
+  things and sliding along them; and doors and lifts, set off by the use
+  key and by lines that are walked over. Not yet: floors, ceilings and
+  stairs that move, teleporters, the ways out, floors that hurt,
+  weapons, and anything a monster does.
 - `doom.ent`: the program, which so far shows E1M1 from where the player
   starts (the arrow keys move the eye; Tab shows the map).
 - `check/`: programs that print what the port computes, to hold against

@@ -1,0 +1,21 @@
+// Doom's game in ent-lang, as far as it is (examples/doom: demo.ent,
+// play.ent, items.ent, specials.ent, movers.ent): the third demo of the
+// shareware WAD played without its monsters, to its end. Where the
+// player is after its 2134 tics, the way the player is turned and the
+// player's health are the reference's, as they are in every tic before
+// (examples/doom/check/trace.sh compares them all): the keys, the walls
+// and the things in the way, what is picked up, the doors and the lifts
+// came out the same. Runs where the WAD is
+// (examples/doom/reference/fetch.sh fetches it).
+// REQUIRES: doom-wad
+// RUN: rm -rf %t && mkdir -p %t && cp %doom-wad %t/doom1.wad
+// RUN: sed 's/DEMO1/DEMO3/; s/Without = false/Without = true/; s/Tics = 300/Tics = 100000/' \
+// RUN:     %S/../../examples/doom/check/trace_check.ent > %t/demo3.ent
+// RUN: cd %t && %ent run -I %S/../../examples/doom %t/demo3.ent > %t/demo3.port
+// RUN: tail -1 %t/demo3.port | FileCheck %s
+// RUN: wc -l < %t/demo3.port | FileCheck %s --check-prefix=TICS
+
+// (After them: the random index, how many things there are and their
+// hash, which are not yet the reference's: the player shoots.)
+// CHECK: 1 7 2133 {{[0-9]+}} -32408488 -54320199 0 117440512 102 {{[0-9]+}} {{[0-9]+}}
+// TICS: 2135

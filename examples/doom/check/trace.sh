@@ -10,7 +10,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 doom=$root/build/doom
 run=$doom/run
-tics=${1:-2000}
+tics=${1:-100000}
 
 cp "$doom/wad/doom1.wad" "$run/doom1.wad"
 for number in 1 2 3; do

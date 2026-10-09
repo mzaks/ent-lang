@@ -37,7 +37,6 @@ unique Clock { leveltime: i32 }
 
 const VIEWHEIGHT = 41 * FRACUNIT
 const MAXBOB = 0x100000
-const MAXRADIUS = 32 * FRACUNIT
 const GRAVITY = FRACUNIT
 const MAXMOVE = 30 * FRACUNIT
 const STOPSPEED = 0x1000
@@ -68,6 +67,9 @@ buffer Spechit { line: i32 } capacity 64
 // The things that can be picked up which a place that was checked
 // touches (rows of `Near`), with how high the player was then.
 buffer Touched { index: i32, z: i32 } capacity 1024
+// The lines the player set off this tic, in their order: used (and from
+// which side: 0 its front), or walked over (and the side come from).
+buffer Triggered { line: i32, used: bool, side: i32 } capacity 256
 buffer Intercepts { frac: i32, line: i32 } capacity 256
 
 // How far from the player a thing is taken into `Near`: more than a
@@ -166,6 +168,52 @@ fn low_floor(lines: Lines, sectors: Sectors, line: i32) -> i32 {
       sectors[lines[line].backsector].floorheight)
 }
 
+// The floor and the ceiling a thing of that width has at (x, y): those
+// of the sector it is in, made narrower by every opening it reaches
+// into; a wall it is in ends the looking (the lines' half of
+// P_CheckPosition, for things that are where they are).
+fn heights_at(lines: Lines, sectors: Sectors, subsectors: Subsectors,
+              nodes: Nodes, bytes: Bytes, bmap: Bmap, x: i32, y: i32,
+              radius: i32, flags: i32, monster: bool) -> (i32, i32) {
+  let top = y + radius
+  let bottom = y - radius
+  let right = x + radius
+  let left = x - radius
+  let sector = subsectors[point_in_subsector(nodes, x, y)].sector
+  var floorz = sectors[sector].floorheight
+  var ceilingz = sectors[sector].ceilingheight
+  var ok = flags & MF_NOCLIP == 0
+  let xl = (left - bmap[0].orgx) >> MAPBLOCKSHIFT
+  let xh = (right - bmap[0].orgx) >> MAPBLOCKSHIFT
+  let yl = (bottom - bmap[0].orgy) >> MAPBLOCKSHIFT
+  let yh = (top - bmap[0].orgy) >> MAPBLOCKSHIFT
+  for bx in xl..xh + 1 {
+    for by in yl..yh + 1 {
+      if ok && bx >= 0 && by >= 0 && bx < bmap[0].width && by < bmap[0].height {
+        var list = bmap[0].at +
+            short_at(bytes, bmap[0].at + (4 + by * bmap[0].width + bx) * 2) * 2
+        while ok && short_at(bytes, list) != -1 {
+          let l = short_at(bytes, list)
+          list += 2
+          if right <= lines[l].left || left >= lines[l].right ||
+             top <= lines[l].bottom || bottom >= lines[l].top {
+            // (Not near it.)
+          } else if box_on_line_side(lines, l, top, bottom, left, right) != -1 {
+            // (All on one side of it.)
+          } else if lines[l].backsector < 0 || lines[l].flags & ML_BLOCKING != 0 ||
+                    (monster && lines[l].flags & ML_BLOCKMONSTERS != 0) {
+            ok = false
+          } else {
+            ceilingz min= open_top(lines, sectors, l)
+            floorz max= open_bottom(lines, sectors, l)
+          }
+        }
+      }
+    }
+  }
+  (floorz, ceilingz)
+}
+
 // Whether the player's thing can be at (x, y): no wall and no solid
 // thing is in its way there. Leaves in `Tm` the floor and ceiling it
 // would have, and in `Spechit` the special lines it touches
@@ -260,7 +308,8 @@ proc check_position(lines: mut Lines, sectors: Sectors,
 proc try_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
               nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
               order: Nearorder, tm: mut Tm, spechit: mut Spechit,
-              touched: mut Touched, pmo: mut Pmo, x: i32, y: i32) -> bool {
+              touched: mut Touched, triggered: mut Triggered, pmo: mut Pmo,
+              x: i32, y: i32) -> bool {
   let flags = pmo[0].flags
   var moved = false
   if check_position(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
@@ -273,6 +322,8 @@ proc try_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
          (tm[0].ceilingz - z >= height && tm[0].floorz - z <= MAXSTEP)) &&
         (flags & (MF_DROPOFF | MF_FLOAT) != 0 ||
          tm[0].floorz - tm[0].dropoffz <= MAXSTEP)) {
+      let oldx = pmo[0].x
+      let oldy = pmo[0].y
       pmo[0].floorz = tm[0].floorz
       pmo[0].ceilingz = tm[0].ceilingz
       pmo[0].x = x
@@ -280,8 +331,17 @@ proc try_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
       pmo[0].subsector = point_in_subsector(nodes, x, y)
       tm[0].links += 1
       pmo[0].linked = tm[0].links
-      // (The special lines it crossed do what they do, when there are
-      // those.)
+      // The special lines it came across, the last found first: they
+      // do what they do when the player has moved.
+      if flags & (MF_TELEPORT | MF_NOCLIP) == 0 {
+        for back in 0..len(spechit) {
+          let ld = spechit[len(spechit) - 1 - back].line
+          let oldside = point_on_line_side(lines, ld, oldx, oldy)
+          if point_on_line_side(lines, ld, x, y) != oldside && lines[ld].special != 0 {
+            triggered += { line: ld, used: false, side: oldside }
+          }
+        }
+      }
       moved = true
     }
   }
@@ -433,8 +493,8 @@ proc slide_traverse(lines: mut Lines, sectors: Sectors, bytes: Bytes,
 proc slide_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
                 nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
                 order: Nearorder, tm: mut Tm, spechit: mut Spechit,
-                touched: mut Touched, intercepts: mut Intercepts,
-                pmo: mut Pmo) {
+                touched: mut Touched, triggered: mut Triggered,
+                intercepts: mut Intercepts, pmo: mut Pmo) {
   var hitcount = 0
   var done = false
   while !done {
@@ -468,7 +528,7 @@ proc slide_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
         var went = true
         if frac > 0 {
           went = try_move(lines, sectors, subsectors, nodes, bytes, bmap, near,
-                          order, tm, spechit, touched, pmo, x + fixed_mul(momx, frac),
+                          order, tm, spechit, touched, triggered, pmo, x + fixed_mul(momx, frac),
                           y + fixed_mul(momy, frac))
           if !went { stairstep = true }
         }
@@ -500,7 +560,7 @@ proc slide_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
             pmo[0].momx = tmxmove
             pmo[0].momy = tmymove
             done = try_move(lines, sectors, subsectors, nodes, bytes, bmap, near,
-                            order, tm, spechit, touched, pmo, pmo[0].x + tmxmove,
+                            order, tm, spechit, touched, triggered, pmo, pmo[0].x + tmxmove,
                             pmo[0].y + tmymove)
           }
         }
@@ -508,9 +568,9 @@ proc slide_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
     }
     if stairstep {
       if !try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                   tm, spechit, touched, pmo, pmo[0].x, pmo[0].y + pmo[0].momy) {
+                   tm, spechit, touched, triggered, pmo, pmo[0].x, pmo[0].y + pmo[0].momy) {
         let other = try_move(lines, sectors, subsectors, nodes, bytes, bmap,
-                             near, order, tm, spechit, touched, pmo,
+                             near, order, tm, spechit, touched, triggered, pmo,
                              pmo[0].x + pmo[0].momx, pmo[0].y)
       }
       done = true
@@ -518,14 +578,10 @@ proc slide_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
   }
 }
 
-// A tic of the player (P_PlayerThink as far as it is, and P_MobjThinker
-// of the player's thing): turned and made faster by the keys, moved,
-// slowed by the floor, and brought to the floor.
-proc player_tic(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-                nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-                order: Nearorder, tm: mut Tm, spechit: mut Spechit,
-                touched: mut Touched, intercepts: mut Intercepts,
-                pmo: mut Pmo, pl: mut Pl, leveltime: i32) {
+// What the player does in a tic before anything moves (P_PlayerThink as
+// far as it is): turned and made faster by the keys, and the eye where
+// that puts it.
+proc player_think(pmo: mut Pmo, pl: mut Pl, leveltime: i32) {
   // P_MovePlayer.
   if pmo[0].reactiontime != 0 {
     pmo[0].reactiontime -= 1
@@ -571,7 +627,15 @@ proc player_tic(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
     pl[0].viewz = min(pmo[0].z + pl[0].viewheight + bob,
                       pmo[0].ceilingz - 4 * FRACUNIT)
   }
+}
 
+// The player's thing in a tic (P_MobjThinker): moved, slowed by the
+// floor, and brought to the floor.
+proc player_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
+                 nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
+                 order: Nearorder, tm: mut Tm, spechit: mut Spechit,
+                 touched: mut Touched, triggered: mut Triggered,
+                 intercepts: mut Intercepts, pmo: mut Pmo, pl: mut Pl) {
   // P_XYMovement.
   if pmo[0].momx != 0 || pmo[0].momy != 0 {
     pmo[0].momx = min(max(pmo[0].momx, -MAXMOVE), MAXMOVE)
@@ -592,9 +656,9 @@ proc player_tic(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
         ymove = 0
       }
       if !try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                   tm, spechit, touched, pmo, ptryx, ptryy) {
+                   tm, spechit, touched, triggered, pmo, ptryx, ptryy) {
         slide_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                   tm, spechit, touched, intercepts, pmo)
+                   tm, spechit, touched, triggered, intercepts, pmo)
       }
     } until xmove == 0 && ymove == 0
     // On the floor it slows down, and stops when it is slow and no key
@@ -680,16 +744,22 @@ system start_player() {
   Powers = [{ tics: 0 }; 6]
 }
 
-// A tic of the player: the demo's keys for it, the things near enough to
-// be in the way, the player moved, and the player's entity made like
-// what came of it.
-system move_player() {
+// The player's tic starts: the demo's keys for it, and what the player
+// does before anything moves.
+system think_player() {
   Pl[0].forwardmove = Ticcmds[Demo.tic].forwardmove
   Pl[0].sidemove = Ticcmds[Demo.tic].sidemove
   Pl[0].angleturn = Ticcmds[Demo.tic].angleturn
   Pl[0].buttons = Ticcmds[Demo.tic].buttons
   Demo.tic += 1
+  Demo.over = Demo.tic >= len(Ticcmds)
+  player_think(Pmo, Pl, Clock.leveltime)
+}
 
+// The player's thing is moved: the things near enough to be in the way
+// are taken from the entities, the player moved among them, what was
+// touched picked up, and the player's entity made like what came of it.
+system move_player() {
   Near = []
   for m: Mobj where m.type != MT_PLAYER && m.flags & MF_NOBLOCKMAP == 0 {
     if abs(m.x - Pmo[0].x) < NEARREACH && abs(m.y - Pmo[0].y) < NEARREACH {
@@ -723,8 +793,8 @@ system move_player() {
 
   Touched = []
   Taken = []
-  player_tic(Lines, Sectors, Subsectors, Nodes, Bytes, Bmap, Near, Nearorder,
-             Tm, Spechit, Touched, Intercepts, Pmo, Pl, Clock.leveltime)
+  player_move(Lines, Sectors, Subsectors, Nodes, Bytes, Bmap, Near, Nearorder,
+              Tm, Spechit, Touched, Triggered, Intercepts, Pmo, Pl)
   // What was touched is picked up, if the player has a use for it, and
   // is then no more.
   for k in 0..len(Touched) {
@@ -735,7 +805,10 @@ system move_player() {
   for e, m: Mobj where m.type != MT_PLAYER {
     if is_taken(Taken, m.id) { e.destroy() }
   }
+}
 
+// The player's entity is made like the player's thing as it is now.
+system mirror_player() {
   for m: mut Mobj where m.type == MT_PLAYER {
     m.x = Pmo[0].x
     m.y = Pmo[0].y

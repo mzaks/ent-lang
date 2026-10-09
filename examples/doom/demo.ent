@@ -20,7 +20,7 @@ import wad
 // game it is of, and which tic is played next.
 unique Demo {
   lump: text[8], version: i32, skill: i32, episode: i32, map: i32,
-  nomonsters: bool, tic: i32
+  nomonsters: bool, tic: i32, over: bool
 }
 
 // What the player did in a tic: how fast forward and to the side, how
@@ -42,6 +42,7 @@ const BT_SPECIAL = 128
 system read_demo() {
   Ticcmds = []
   Demo.tic = 0
+  Demo.over = false
   let lump = lump_number(Lumps, lump_name(Demo.lump))
   if lump >= 0 {
     let at = Lumps[lump].at

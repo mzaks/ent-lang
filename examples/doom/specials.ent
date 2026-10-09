@@ -32,6 +32,45 @@ const LIGHT_FLASH = 1
 const LIGHT_STROBE = 2
 const LIGHT_GLOW = 3
 
+// What moves a sector's floor or ceiling (a door, a lift, a floor, a
+// ceiling), one row for each that is at it, in the order they started:
+// what kind it is and of which sort, its sector, which way it goes and
+// how fast, the heights it goes between, how long it waits and has
+// waited, and whether it crushes. One that is done is no longer
+// `active`, and its row stays.
+buffer Movers {
+  kind: i32, active: bool, sector: i32, type: i32, direction: i32,
+  speed: i32, high: i32, low: i32, wait: i32, count: i32, crush: bool,
+  status: i32, oldstatus: i32, tag: i32
+} capacity 4096
+const MOVER_DOOR = 0
+const MOVER_PLAT = 1
+
+// The sorts of lifts (plattype_e), and what one is doing (plat_e).
+const PLAT_PERPETUALRAISE = 0
+const PLAT_DOWNWAITUPSTAY = 1
+const PLAT_RAISEANDCHANGE = 2
+const PLAT_RAISETONEARESTANDCHANGE = 3
+const PLAT_BLAZEDWUS = 4
+const PLAT_UP = 0
+const PLAT_DOWN = 1
+const PLAT_WAITING = 2
+const PLAT_IN_STASIS = 3
+const PLATWAIT = 3
+const PLATSPEED = FRACUNIT
+
+// The sorts of doors (vldoor_e).
+const VLD_NORMAL = 0
+const VLD_CLOSE30THENOPEN = 1
+const VLD_CLOSE = 2
+const VLD_OPEN = 3
+const VLD_RAISEIN5MINS = 4
+const VLD_BLAZERAISE = 5
+const VLD_BLAZEOPEN = 6
+const VLD_BLAZECLOSE = 7
+const VDOORSPEED = FRACUNIT * 2
+const VDOORWAIT = 150
+
 const GLOWSPEED = 8
 const STROBEBRIGHT = 5
 const FASTDARK = 15
@@ -57,10 +96,89 @@ fn min_surrounding_light(lines: Lines, sectors: Sectors, sector: i32,
   least
 }
 
+// The lowest ceiling of the sectors next to a sector
+// (P_FindLowestCeilingSurrounding).
+fn lowest_ceiling_surrounding(lines: Lines, sectors: Sectors,
+                              sector: i32) -> i32 {
+  var height = 0x7fffffff
+  for i in 0..len(lines) {
+    if lines[i].flags & ML_TWOSIDED != 0 {
+      if lines[i].frontsector == sector {
+        height min= sectors[lines[i].backsector].ceilingheight
+      } else if lines[i].backsector == sector {
+        height min= sectors[lines[i].frontsector].ceilingheight
+      }
+    }
+  }
+  height
+}
+
+// The lowest and the highest floor of a sector and those next to it
+// (P_FindLowestFloorSurrounding; P_FindHighestFloorSurrounding, which
+// starts 500 below nought), and the lowest floor next to it that is
+// higher than a height, that height if there is none
+// (P_FindNextHighestFloor).
+fn lowest_floor_surrounding(lines: Lines, sectors: Sectors, sector: i32) -> i32 {
+  var floor = sectors[sector].floorheight
+  for i in 0..len(lines) {
+    if lines[i].flags & ML_TWOSIDED != 0 {
+      if lines[i].frontsector == sector {
+        floor min= sectors[lines[i].backsector].floorheight
+      } else if lines[i].backsector == sector {
+        floor min= sectors[lines[i].frontsector].floorheight
+      }
+    }
+  }
+  floor
+}
+fn highest_floor_surrounding(lines: Lines, sectors: Sectors, sector: i32) -> i32 {
+  var floor = -500 * FRACUNIT
+  for i in 0..len(lines) {
+    if lines[i].flags & ML_TWOSIDED != 0 {
+      if lines[i].frontsector == sector {
+        floor max= sectors[lines[i].backsector].floorheight
+      } else if lines[i].backsector == sector {
+        floor max= sectors[lines[i].frontsector].floorheight
+      }
+    }
+  }
+  floor
+}
+fn next_highest_floor(lines: Lines, sectors: Sectors, sector: i32,
+                      height: i32) -> i32 {
+  var least = 0x7fffffff
+  for i in 0..len(lines) {
+    if lines[i].flags & ML_TWOSIDED != 0 {
+      let other = if lines[i].frontsector == sector {
+        lines[i].backsector
+      } else if lines[i].backsector == sector {
+        lines[i].frontsector
+      } else {
+        -1
+      }
+      if other >= 0 && sectors[other].floorheight > height {
+        least min= sectors[other].floorheight
+      }
+    }
+  }
+  if least == 0x7fffffff { height } else { least }
+}
+
+// The next sector after `start` with a tag, or -1
+// (P_FindSectorFromLineTag).
+fn sector_from_tag(sectors: Sectors, tag: i32, start: i32) -> i32 {
+  var found = -1
+  for i in 0..len(sectors) {
+    if found < 0 && i > start && sectors[i].tag == tag { found = i }
+  }
+  found
+}
+
 // Starts what the level's sectors do by themselves (P_SpawnSpecials).
 // After `spawn_things`: the random numbers go on from there.
 system spawn_specials() {
   Lights = []
+  Movers = []
   Secrets = 0
   for i in 0..len(Sectors) {
     let special = Sectors[i].special
@@ -102,6 +220,26 @@ system spawn_specials() {
       Sectors[i].special = 0
     } else if special == 9 {
       Secrets += 1
+    } else if special == 10 {
+      // A door that shuts after thirty seconds.
+      Movers += {
+        kind: MOVER_DOOR, active: true, sector: i, type: VLD_NORMAL,
+        direction: 0, speed: VDOORSPEED, high: 0, low: 0, wait: 0,
+        count: 30 * 35, crush: false, status: 0, oldstatus: 0, tag: 0
+      }
+      Sectors[i].special = 0
+      Sectors[i].specialdata = len(Movers)
+    } else if special == 14 {
+      // A door that opens after five minutes.
+      Movers += {
+        kind: MOVER_DOOR, active: true, sector: i, type: VLD_RAISEIN5MINS,
+        direction: 2, speed: VDOORSPEED,
+        high: lowest_ceiling_surrounding(Lines, Sectors, i) - 4 * FRACUNIT,
+        low: 0, wait: VDOORWAIT, count: 5 * 60 * 35, crush: false, status: 0,
+        oldstatus: 0, tag: 0
+      }
+      Sectors[i].special = 0
+      Sectors[i].specialdata = len(Movers)
     } else if special == 17 {
       Lights += {
         kind: LIGHT_FIRE, sector: i, count: 4, maxlight: light,

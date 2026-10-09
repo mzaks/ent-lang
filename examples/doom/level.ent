@@ -54,11 +54,17 @@ unique Level {
 buffer Vertexes { x: i32, y: i32 } capacity 32768
 
 // A room: how high its floor and its ceiling are, the flats on them (by
-// their numbers), how light it is, and what is special about it.
+// their numbers), how light it is, and what is special about it; what
+// is moving it (`specialdata`: nought for nothing, else a row of the
+// movers and one); and the squares of the blockmap its lines reach,
+// with room for the widest thing.
 buffer Sectors {
   floorheight: i32, ceilingheight: i32, floorpic: i32, ceilingpic: i32,
-  lightlevel: i32, special: i32, tag: i32
+  lightlevel: i32, special: i32, tag: i32, specialdata: i32, bbtop: i32,
+  bbbottom: i32, bbleft: i32, bbright: i32
 } capacity 4096
+// The widest a thing is, from its middle.
+const MAXRADIUS = 32 * FRACUNIT
 
 // A side of a line: the textures on it (by their numbers; 0 is none),
 // how they are shifted, and the sector it looks into.
@@ -169,7 +175,8 @@ system load_level() {
         floorpic: lump_number(Lumps, name_at(Bytes, at + 4)) - Data.firstflat,
         ceilingpic: lump_number(Lumps, name_at(Bytes, at + 12)) - Data.firstflat,
         lightlevel: short_at(Bytes, at + 20),
-        special: short_at(Bytes, at + 22), tag: short_at(Bytes, at + 24)
+        special: short_at(Bytes, at + 22), tag: short_at(Bytes, at + 24),
+        specialdata: 0, bbtop: 0, bbbottom: 0, bbleft: 0, bbright: 0
       }
     }
     // P_LoadSideDefs: 30 bytes each.
@@ -275,6 +282,27 @@ system load_level() {
       width: short_at(Bytes, blockmap + 4),
       height: short_at(Bytes, blockmap + 6), at: blockmap
     }; 1]
+    // P_GroupLines: the squares each sector's lines reach.
+    for s in 0..len(Sectors) {
+      var top = -0x7fffffff
+      var bottom = 0x7fffffff
+      var left = 0x7fffffff
+      var right = -0x7fffffff
+      for l in 0..len(Lines) {
+        if Lines[l].frontsector == s || Lines[l].backsector == s {
+          top max= Lines[l].top
+          bottom min= Lines[l].bottom
+          left min= Lines[l].left
+          right max= Lines[l].right
+        }
+      }
+      Sectors[s].bbtop = min((top - Bmap[0].orgy + MAXRADIUS) >> MAPBLOCKSHIFT,
+                             Bmap[0].height - 1)
+      Sectors[s].bbbottom = max((bottom - Bmap[0].orgy - MAXRADIUS) >> MAPBLOCKSHIFT, 0)
+      Sectors[s].bbright = min((right - Bmap[0].orgx + MAXRADIUS) >> MAPBLOCKSHIFT,
+                               Bmap[0].width - 1)
+      Sectors[s].bbleft = max((left - Bmap[0].orgx - MAXRADIUS) >> MAPBLOCKSHIFT, 0)
+    }
     // P_LoadThings: 10 bytes each.
     let things = Lumps[lump + ML_THINGS].at
     for i in 0..Lumps[lump + ML_THINGS].size / 10 {

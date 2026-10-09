@@ -1,9 +1,9 @@
-// Doom in ent-lang, as far as it is: reads the WAD and shows a level as
-// it is seen from where the player starts, with the things in it;
-// Tab shows the map instead. Until there is a player, the arrow keys
-// turn the eye and move it, through walls too. Start it where
-// `doom1.wad` is (examples/doom/reference/fetch.sh puts the shareware one
-// in build/doom/wad):
+// Doom in ent-lang, as far as it is: reads the WAD and plays a level of
+// it, without its monsters and without weapons: the arrow keys walk and
+// turn (A and D step aside, Shift runs), Space opens doors and works
+// switches, Tab shows the map. Start it where `doom1.wad` is
+// (examples/doom/reference/fetch.sh puts the shareware one in
+// build/doom/wad):
 //
 //   cd build/doom/wad && ../../../tools/ent run -I ../../../examples/doom \
 //       ../../../examples/doom/doom.ent
@@ -21,6 +21,12 @@ import render
 import info
 import things
 import sprites
+import random
+import demo
+import specials
+import items
+import play
+import movers
 
 // As many bytes as the biggest WAD.
 capacity Bytes 16777216
@@ -34,30 +40,41 @@ world {
   Level.episode = 1
   Level.map = 1
   Level.skill = 2
+  Level.nomonsters = true
 }
 
 // Whether the map is shown, and whether Tab was down the frame before.
 unique Shown { map: bool, tab: bool }
 
-// The eye, moved by the keys: not the player yet, and nothing stops it.
-system fly() {
-  if Keys.left { Viewpoint.angle += ANG45 / 16 }
-  if Keys.right { Viewpoint.angle -= ANG45 / 16 }
-  let fine = (Viewpoint.angle >> ANGLETOFINESHIFT) as i32
-  if Keys.up {
-    Viewpoint.x += finecosine(fine) * 12
-    Viewpoint.y += finesine[fine] * 12
+// The keys of this tic as a demo has them (of G_BuildTiccmd): one row
+// more for the player to be moved by. So what is played is a demo too.
+system read_keys() {
+  let run = key_down(340) || key_down(344)
+  var forward = 0
+  var side = 0
+  var turn = 0
+  if Keys.up { forward += if run { 50 } else { 25 } }
+  if Keys.down { forward -= if run { 50 } else { 25 } }
+  if key_down('D' as i32) { side += if run { 40 } else { 24 } }
+  if key_down('A' as i32) { side -= if run { 40 } else { 24 } }
+  if Keys.left { turn += if run { 1280 } else { 640 } }
+  if Keys.right { turn -= if run { 1280 } else { 640 } }
+  Ticcmds += {
+    forwardmove: forward, sidemove: side, angleturn: turn,
+    buttons: if Keys.space { BT_USE } else { 0 }
   }
-  if Keys.down {
-    Viewpoint.x -= finecosine(fine) * 12
-    Viewpoint.y -= finesine[fine] * 12
-  }
-  // (Its height follows the floor it is over.)
-  let sector = Subsectors[point_in_subsector(Nodes, Viewpoint.x, Viewpoint.y)].sector
-  Viewpoint.z = Sectors[sector].floorheight + 41 * FRACUNIT
   let tab = key_down(258)
   if tab && !Shown.tab { Shown.map = !Shown.map }
   Shown.tab = tab
+}
+
+// The level is seen from the player's eye.
+system look() {
+  Viewpoint.x = Pmo[0].x
+  Viewpoint.y = Pmo[0].y
+  Viewpoint.z = Pl[0].viewz
+  Viewpoint.angle = Pmo[0].angle
+  Clock.leveltime += 1
 }
 
 schedule setup() {
@@ -67,15 +84,27 @@ schedule setup() {
   init_sprites()
   load_level()
   spawn_things()
+  spawn_specials()
+  start_player()
   fit_automap()
   set_view_size()
   init_view_tables()
-  start_viewpoint()
 }
 
 schedule frame() {
   begin()
-  fly()
+  read_keys()
+  think_player()
+  use_lines()
+  trigger_lines()
+  move_player()
+  trigger_lines()
+  mirror_player()
+  think_things()
+  run_lights()
+  run_movers()
+  mirror_player()
+  look()
   clear_screen()
   render_view() run_if !Shown.map
   draw_walls() run_if !Shown.map

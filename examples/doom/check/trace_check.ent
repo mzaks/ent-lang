@@ -17,6 +17,7 @@ import things
 import demo
 import specials
 import play
+import movers
 
 capacity Bytes 16777216
 
@@ -84,13 +85,20 @@ schedule setup() {
   first()
 }
 schedule tic() {
+  think_player()
+  use_lines()
+  trigger_lines()
   move_player()
+  trigger_lines()
+  mirror_player()
   think_things()
   run_lights()
+  run_movers()
+  mirror_player()
   trace()
   next()
 }
 main {
   setup()
-  loop { tic() } until Clock.leveltime == Tics
+  loop { tic() } until Clock.leveltime == Tics || Demo.over
 }
