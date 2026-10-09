@@ -2,7 +2,8 @@
 # What the port is compared against: Chocolate Doom, with a patch
 # (trace.patch) that writes a line for each tic of a level where
 # DOOM_TRACE names a file, and what its fixed point, tables and random
-# numbers give where DOOM_MATHS does (see ../check/maths.sh); and the
+# numbers give where DOOM_MATHS does (see ../check/maths.sh), and what
+# it sees of a level where DOOM_VIEW does (see ../check/view.sh); and the
 # shareware WAD (v1.9). Both go to build/doom, which is not committed.
 # Needs git, curl, cmake, a C compiler and SDL2.
 #

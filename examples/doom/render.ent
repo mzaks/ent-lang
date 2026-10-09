@@ -1,0 +1,481 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The view of the level (r_main.c, r_bsp.c): from where it is seen, the
+// tree is walked from the front to the back, and of every wall the
+// columns of the picture are found that it is seen in and nothing nearer
+// has taken.
+import fixed
+import tables
+import angles
+import level
+import video
+
+// What is seen to the left and the right of straight on: a quarter turn
+// in all.
+const FIELDOFVIEW = 2048
+// The status bar's height, which the view is above.
+const SBARHEIGHT = 32
+// How many ranges of columns that are full the walk keeps at most.
+const MAXSEGS = 32
+
+// How big the view is in the picture (R_ExecuteSetViewSize): `blocks` is
+// the size the player chose, 3 to 11 (nought: 9, as it starts; 10 is as
+// wide as the picture, 11 the whole of it).
+unique View {
+  blocks: i32, width: i32, height: i32, x: i32, y: i32, centerx: i32,
+  centery: i32, centerxfrac: i32, centeryfrac: i32, projection: i32,
+  clipangle: u32
+}
+
+// Where the level is seen from: until there is a player, where one
+// starts.
+unique Viewpoint { x: i32, y: i32, z: i32, angle: u32 }
+
+// The column of the view an angle from straight on is seen in, for the
+// fine angles of the half turn in front; and the angle a column is
+// seen at (R_InitTextureMapping).
+buffer Viewangletox { x: i32 } capacity 4096
+buffer Xtoviewangle { angle: u32 } capacity 321
+
+// What a frame is drawn with, one row (R_SetupFrame): the eye, the
+// sine and cosine of where it looks, and how far the walk has got in
+// `Solidsegs`.
+buffer Frame {
+  x: i32, y: i32, z: i32, angle: u32, sin: i32, cos: i32, clipangle: u32,
+  newend: i32
+} capacity 1
+
+// The ranges of columns that walls have filled, from the left to the
+// right, with one before the view and one after it (solidsegs).
+buffer Solidsegs { first: i32, last: i32 } capacity 33
+
+// The pieces of walls that are seen, nearest first: the columns from
+// `first` to `last` of a seg.
+buffer Walls { first: i32, last: i32, seg: i32 } capacity 4096
+
+// Which corners of a box are its ends as seen from each of the nine
+// places around and in it (checkcoord).
+table checkcoord { a: i32, b: i32, c: i32, d: i32 } = [
+  { a: 3, b: 0, c: 2, d: 1 }, { a: 3, b: 0, c: 2, d: 0 },
+  { a: 3, b: 1, c: 2, d: 0 }, { a: 0, b: 0, c: 0, d: 0 },
+  { a: 2, b: 0, c: 2, d: 1 }, { a: 0, b: 0, c: 0, d: 0 },
+  { a: 3, b: 1, c: 3, d: 0 }, { a: 0, b: 0, c: 0, d: 0 },
+  { a: 2, b: 0, c: 3, d: 1 }, { a: 2, b: 1, c: 3, d: 1 },
+  { a: 2, b: 1, c: 3, d: 0 }
+]
+
+// Which side of a node's line a point is on: 0 the right, 1 the left
+// (R_PointOnSide).
+fn point_on_side(nodes: Nodes, node: i32, x: i32, y: i32) -> i32 {
+  let nx = nodes[node].x
+  let ny = nodes[node].y
+  let ndx = nodes[node].dx
+  let ndy = nodes[node].dy
+  if ndx == 0 {
+    if x <= nx {
+      if ndy > 0 { 1 } else { 0 }
+    } else {
+      if ndy < 0 { 1 } else { 0 }
+    }
+  } else if ndy == 0 {
+    if y <= ny {
+      if ndx < 0 { 1 } else { 0 }
+    } else {
+      if ndx > 0 { 1 } else { 0 }
+    }
+  } else {
+    let dx = x - nx
+    let dy = y - ny
+    // By the signs alone, where they say it.
+    if (ndy ^ ndx ^ dx ^ dy) & 0x80000000 != 0 {
+      if (ndy ^ dx) & 0x80000000 != 0 { 1 } else { 0 }
+    } else {
+      let left = fixed_mul(ndy >> FRACBITS, dx)
+      let right = fixed_mul(dy, ndx >> FRACBITS)
+      if right < left { 0 } else { 1 }
+    }
+  }
+}
+
+// The subsector a point is in (R_PointInSubsector).
+fn point_in_subsector(nodes: Nodes, x: i32, y: i32) -> i32 {
+  var num = len(nodes) - 1
+  while num & NF_SUBSECTOR == 0 {
+    num = if point_on_side(nodes, num, x, y) == 0 {
+      nodes[num].child0
+    } else {
+      nodes[num].child1
+    }
+  }
+  num & ~NF_SUBSECTOR
+}
+
+// A piece of a wall that is seen: so far, noted. (R_StoreWallRange.)
+proc store_wall_range(walls: mut Walls, seg: i32, first: i32, last: i32) {
+  walls += { first: first, last: last, seg: seg }
+}
+
+// A wall that nothing is seen through, in the columns from `first` to
+// `last`: what of it is not behind a nearer wall is seen, and the
+// columns are full from now on (R_ClipSolidWallSegment).
+proc clip_solid(frame: mut Frame, solid: mut Solidsegs, walls: mut Walls,
+                seg: i32, first: i32, last: i32) {
+  // The first range that reaches up to it.
+  var start = 0
+  while solid[start].last < first - 1 { start += 1 }
+  var done = false
+  if first < solid[start].first {
+    if last < solid[start].first - 1 {
+      // All of it is seen: a range of its own, put in before `start`.
+      store_wall_range(walls, seg, first, last)
+      var next = frame[0].newend
+      frame[0].newend += 1
+      while next != start {
+        solid[next].first = solid[next - 1].first
+        solid[next].last = solid[next - 1].last
+        next -= 1
+      }
+      solid[next].first = first
+      solid[next].last = last
+      done = true
+    } else {
+      // Up to where `start` begins, which then begins with it.
+      store_wall_range(walls, seg, first, solid[start].first - 1)
+      solid[start].first = first
+    }
+  }
+  // (Its end is in `start`: nothing more.)
+  if !done && last > solid[start].last {
+    var next = start
+    var met = false
+    while !met && last >= solid[next + 1].first - 1 {
+      // What is between two ranges, which are then one.
+      store_wall_range(walls, seg, solid[next].last + 1,
+                       solid[next + 1].first - 1)
+      next += 1
+      if last <= solid[next].last {
+        solid[start].last = solid[next].last
+        met = true
+      }
+    }
+    if !met {
+      store_wall_range(walls, seg, solid[next].last + 1, last)
+      solid[start].last = last
+    }
+    // The ranges that `start` took in are taken out. (One more is moved
+    // down than there are, as the original does: it lies after the
+    // range that ends them all, and nothing looks there.)
+    if next != start {
+      let end = frame[0].newend
+      var to = start
+      while next != end {
+        next += 1
+        to += 1
+        solid[to].first = solid[next].first
+        solid[to].last = solid[next].last
+      }
+      frame[0].newend = to + 1
+    }
+  }
+}
+
+// A wall with something seen through it: what of it is not behind a
+// nearer wall is seen, and the columns stay as they are
+// (R_ClipPassWallSegment).
+proc clip_pass(solid: Solidsegs, walls: mut Walls, seg: i32, first: i32,
+               last: i32) {
+  var start = 0
+  while solid[start].last < first - 1 { start += 1 }
+  var done = false
+  if first < solid[start].first {
+    if last < solid[start].first - 1 {
+      store_wall_range(walls, seg, first, last)
+      done = true
+    } else {
+      store_wall_range(walls, seg, first, solid[start].first - 1)
+    }
+  }
+  if !done && last > solid[start].last {
+    var met = false
+    while !met && last >= solid[start + 1].first - 1 {
+      store_wall_range(walls, seg, solid[start].last + 1,
+                       solid[start + 1].first - 1)
+      start += 1
+      if last <= solid[start].last { met = true }
+    }
+    if !met { store_wall_range(walls, seg, solid[start].last + 1, last) }
+  }
+}
+
+// A seg of the subsector that is being walked: the columns it is seen
+// in, if it faces the eye and is in the view, and what kind of wall it
+// is there (R_AddLine).
+proc add_line(segs: Segs, sectors: Sectors, sides: Sides, map: Viewangletox,
+              frame: mut Frame, solid: mut Solidsegs, walls: mut Walls,
+              seg: i32, front: i32) {
+  let clip = frame[0].clipangle
+  let seen1 = point_to_angle(segs[seg].x1 - frame[0].x, segs[seg].y1 - frame[0].y)
+  let seen2 = point_to_angle(segs[seg].x2 - frame[0].x, segs[seg].y2 - frame[0].y)
+  // (From its first end to its second the angle falls, if it faces the
+  // eye.)
+  let span = seen1 - seen2
+  if span < ANG180 {
+    var angle1 = seen1 - frame[0].angle
+    var angle2 = seen2 - frame[0].angle
+    var seen = true
+    var tspan = angle1 + clip
+    if tspan > 2 * clip {
+      tspan -= 2 * clip
+      // All of it to the left of the view.
+      if tspan >= span { seen = false }
+      angle1 = clip
+    }
+    tspan = clip - angle2
+    if tspan > 2 * clip {
+      tspan -= 2 * clip
+      // All of it to the right.
+      if tspan >= span { seen = false }
+      angle2 = -clip
+    }
+    if seen {
+      let x1 = map[(angle1 + ANG90) >> ANGLETOFINESHIFT].x
+      let x2 = map[(angle2 + ANG90) >> ANGLETOFINESHIFT].x
+      // (Not a column wide.)
+      if x1 != x2 {
+        let back = segs[seg].back
+        // Nothing behind it, or a door that is shut: solid. A window:
+        // seen through. Two sectors alike with nothing on the line
+        // between them: not there at all.
+        var solid_wall = false
+        var open = false
+        if back < 0 {
+          solid_wall = true
+        } else if sectors[back].ceilingheight <= sectors[front].floorheight ||
+                  sectors[back].floorheight >= sectors[front].ceilingheight {
+          solid_wall = true
+        } else if sectors[back].ceilingheight != sectors[front].ceilingheight ||
+                  sectors[back].floorheight != sectors[front].floorheight {
+          open = true
+        } else if sectors[back].ceilingpic != sectors[front].ceilingpic ||
+                  sectors[back].floorpic != sectors[front].floorpic ||
+                  sectors[back].lightlevel != sectors[front].lightlevel ||
+                  sides[segs[seg].side].midtexture & 0xff != 45 {
+          // (No texture is written "-": its first byte is 45.)
+          open = true
+        }
+        if solid_wall {
+          clip_solid(frame, solid, walls, seg, x1, x2 - 1)
+        } else if open {
+          clip_pass(solid, walls, seg, x1, x2 - 1)
+        }
+      }
+    }
+  }
+}
+
+// Whether anything in a node's box may be seen: it is in the view, and
+// the columns it is seen in are not all full (R_CheckBBox). `box` is the
+// box's first row in `Boxes`.
+fn check_bbox(boxes: Boxes, map: Viewangletox, frame: Frame, solid: Solidsegs,
+              box: i32) -> bool {
+  let vx = frame[0].x
+  let vy = frame[0].y
+  let clip = frame[0].clipangle
+  // Where the eye is, of the nine places around and in the box.
+  let boxx = if vx <= boxes[box + BOXLEFT].edge {
+    0
+  } else if vx < boxes[box + BOXRIGHT].edge {
+    1
+  } else {
+    2
+  }
+  let boxy = if vy >= boxes[box + BOXTOP].edge {
+    0
+  } else if vy > boxes[box + BOXBOTTOM].edge {
+    1
+  } else {
+    2
+  }
+  let boxpos = (boxy << 2) + boxx
+  var seen = true
+  // (In the box: seen.)
+  if boxpos != 5 {
+    let x1 = boxes[box + checkcoord[boxpos].a].edge
+    let y1 = boxes[box + checkcoord[boxpos].b].edge
+    let x2 = boxes[box + checkcoord[boxpos].c].edge
+    let y2 = boxes[box + checkcoord[boxpos].d].edge
+    var angle1 = point_to_angle(x1 - vx, y1 - vy) - frame[0].angle
+    var angle2 = point_to_angle(x2 - vx, y2 - vy) - frame[0].angle
+    let span = angle1 - angle2
+    // (The eye is on the box's edge: seen.)
+    if span < ANG180 {
+      var tspan = angle1 + clip
+      if tspan > 2 * clip {
+        tspan -= 2 * clip
+        if tspan >= span { seen = false }
+        angle1 = clip
+      }
+      tspan = clip - angle2
+      if tspan > 2 * clip {
+        tspan -= 2 * clip
+        if tspan >= span { seen = false }
+        angle2 = -clip
+      }
+      if seen {
+        let sx1 = map[(angle1 + ANG90) >> ANGLETOFINESHIFT].x
+        let sx2 = map[(angle2 + ANG90) >> ANGLETOFINESHIFT].x - 1
+        if sx1 == sx2 + 1 {
+          // Not a column wide.
+          seen = false
+        } else {
+          var start = 0
+          while solid[start].last < sx2 { start += 1 }
+          // All its columns are full.
+          if sx1 >= solid[start].first && sx2 <= solid[start].last {
+            seen = false
+          }
+        }
+      }
+    }
+  }
+  seen
+}
+
+// The segs of a subsector (R_Subsector).
+proc render_subsector(subsectors: Subsectors, segs: Segs, sectors: Sectors,
+                      sides: Sides, map: Viewangletox, frame: mut Frame,
+                      solid: mut Solidsegs, walls: mut Walls, num: i32) {
+  let front = subsectors[num].sector
+  let first = subsectors[num].firstline
+  for i in 0..subsectors[num].numlines {
+    add_line(segs, sectors, sides, map, frame, solid, walls, first + i, front)
+  }
+}
+
+// What is under a node, the side the eye is on first, the other if its
+// box may be seen (R_RenderBSPNode).
+proc render_bsp_node(nodes: Nodes, boxes: Boxes, subsectors: Subsectors,
+                     segs: Segs, sectors: Sectors, sides: Sides,
+                     map: Viewangletox, frame: mut Frame,
+                     solid: mut Solidsegs, walls: mut Walls, bspnum: i32) {
+  if bspnum & NF_SUBSECTOR != 0 {
+    render_subsector(subsectors, segs, sectors, sides, map, frame, solid,
+                     walls, bspnum & ~NF_SUBSECTOR)
+  } else {
+    let side = point_on_side(nodes, bspnum, frame[0].x, frame[0].y)
+    let near = if side == 0 { nodes[bspnum].child0 } else { nodes[bspnum].child1 }
+    let far = if side == 0 { nodes[bspnum].child1 } else { nodes[bspnum].child0 }
+    render_bsp_node(nodes, boxes, subsectors, segs, sectors, sides, map,
+                    frame, solid, walls, near)
+    if check_bbox(boxes, map, frame, solid, bspnum * 8 + (side ^ 1) * 4) {
+      render_bsp_node(nodes, boxes, subsectors, segs, sectors, sides, map,
+                      frame, solid, walls, far)
+    }
+  }
+}
+
+// How big the view is, and which column each angle is seen in
+// (R_ExecuteSetViewSize, R_InitTextureMapping).
+system set_view_size() {
+  let blocks = if View.blocks == 0 { 9 } else { View.blocks }
+  let width = if blocks == 11 { SCREENWIDTH } else { blocks * 32 }
+  let height = if blocks == 11 {
+    SCREENHEIGHT
+  } else {
+    (blocks * 168 / 10) & ~7
+  }
+  let centerxfrac = (width / 2) << FRACBITS
+  View.width = width
+  View.height = height
+  View.centerx = width / 2
+  View.centery = height / 2
+  View.centerxfrac = centerxfrac
+  View.centeryfrac = (height / 2) << FRACBITS
+  View.projection = centerxfrac
+  View.x = (SCREENWIDTH - width) >> 1
+  View.y = if width == SCREENWIDTH {
+    0
+  } else {
+    (SCREENHEIGHT - SBARHEIGHT - height) >> 1
+  }
+  // The column of each angle: by its tangent, as far from the middle as
+  // the edge of the view is at a quarter turn's half.
+  let focallength =
+      fixed_div(centerxfrac, finetangent[FINEANGLES / 4 + FIELDOFVIEW / 2])
+  Viewangletox = []
+  for i in 0..FINEANGLES / 2 {
+    var t = 0
+    if finetangent[i] > FRACUNIT * 2 {
+      t = -1
+    } else if finetangent[i] < -FRACUNIT * 2 {
+      t = width + 1
+    } else {
+      t = fixed_mul(finetangent[i], focallength)
+      t = (centerxfrac - t + FRACUNIT - 1) >> FRACBITS
+      if t < -1 { t = -1 } else if t > width + 1 { t = width + 1 }
+    }
+    Viewangletox += { x: t }
+  }
+  // The angle of each column: the smallest that is seen in it.
+  Xtoviewangle = []
+  for x in 0..width + 1 {
+    var i = 0
+    while Viewangletox[i].x > x { i += 1 }
+    Xtoviewangle += { angle: ((i << ANGLETOFINESHIFT) as u32) - ANG90 }
+  }
+  // (What is outside the view is at its edge.)
+  for i in 0..FINEANGLES / 2 {
+    if Viewangletox[i].x == -1 {
+      Viewangletox[i].x = 0
+    } else if Viewangletox[i].x == width + 1 {
+      Viewangletox[i].x = width
+    }
+  }
+  View.clipangle = Xtoviewangle[0].angle
+}
+
+// The eye where the first player starts: 41 above the floor there.
+system start_viewpoint() {
+  for i in 0..len(Things) {
+    if Things[i].type == 1 {
+      let x = Things[i].x << FRACBITS
+      let y = Things[i].y << FRACBITS
+      let sector = Subsectors[point_in_subsector(Nodes, x, y)].sector
+      Viewpoint.x = x
+      Viewpoint.y = y
+      Viewpoint.z = Sectors[sector].floorheight + 41 * FRACUNIT
+      Viewpoint.angle = ANG45 * ((Things[i].angle / 45) as u32)
+    }
+  }
+}
+
+// The walls that are seen from the viewpoint (R_RenderPlayerView, as
+// far as it is).
+system render_view() {
+  let fine = Viewpoint.angle >> ANGLETOFINESHIFT
+  Frame = [{
+    x: Viewpoint.x, y: Viewpoint.y, z: Viewpoint.z, angle: Viewpoint.angle,
+    sin: finesine[fine], cos: finecosine(fine as i32),
+    clipangle: View.clipangle, newend: 2
+  }; 1]
+  // R_ClearClipSegs: nothing is full but what is outside the view.
+  Solidsegs = [{ first: 0, last: 0 }; MAXSEGS + 1]
+  Solidsegs[0].first = -0x7fffffff
+  Solidsegs[0].last = -1
+  Solidsegs[1].first = View.width
+  Solidsegs[1].last = 0x7fffffff
+  Walls = []
+  render_bsp_node(Nodes, Boxes, Subsectors, Segs, Sectors, Sides,
+                  Viewangletox, Frame, Solidsegs, Walls, len(Nodes) - 1)
+}

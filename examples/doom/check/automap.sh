@@ -19,7 +19,7 @@ cat > "$doom/run/level.expected" <<'END'
 wad 4196020 bytes, 1264 lumps; level lump 6
 vertexes 467 2733697916 sectors 85 2163873991 sides 648 4033627395
 lines 475
-map scale 3909 from -50331648 -318767104: 467 lines, 2911 pixels lit, 2737625973
+map scale 3909 from -50331648 -318767104: 2911 pixels lit, 2737625973
 END
 diff "$doom/run/level.expected" "$doom/run/level.port"
 echo "the same: E1M1 as the WAD has it"

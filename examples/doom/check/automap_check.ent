@@ -25,8 +25,6 @@ fn mixed(hash: u32, value: i32) -> u32 {
   all
 }
 
-unique Count: i32
-
 system report() {
   put("wad {len(Bytes)} bytes, {Wad.lumps} lumps; level lump {Level.lump}")
   var vertexes = 2166136261 as u32
@@ -43,16 +41,14 @@ system report() {
     sides = mixed(mixed(sides, Sides[i].sector), Sides[i].rowoffset)
   }
   put("vertexes {len(Vertexes)} {vertexes} sectors {len(Sectors)} {sectors} sides {len(Sides)} {sides}")
-  Count = 0
-  for l: Line { Count += 1 }
-  put("lines {Count}")
+  put("lines {len(Lines)}")
   var screen = 2166136261 as u32
   var lit = 0
   for i in 0..len(Screen) {
     screen = mixed(screen, Screen[i].pixel as i32)
     if Screen[i].pixel != 0 { lit += 1 }
   }
-  put("map scale {Automap.scale} from {Automap.x} {Automap.y}: {len(Mlines)} lines, {lit} pixels lit, {screen}")
+  put("map scale {Automap.scale} from {Automap.x} {Automap.y}: {lit} pixels lit, {screen}")
 }
 
 // The picture as a file anyone can look at: "P6", its size, and three

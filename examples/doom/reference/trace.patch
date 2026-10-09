@@ -170,3 +170,145 @@ index 5a93b80..0cac0f0 100644
      // for par times
      leveltime++;	
  }
+diff --git i/src/doom/r_main.c w/src/doom/r_main.c
+index 970bd19..8968f2f 100644
+--- i/src/doom/r_main.c
++++ w/src/doom/r_main.c
+@@ -23,10 +23,15 @@
+ 
+ 
+ #include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
+ #include <math.h>
+ 
+ 
+ #include "doomdef.h"
++#include "p_local.h"
++#include "i_video.h"
++#include "i_system.h"
+ #include "d_loop.h"
+ 
+ #include "m_bbox.h"
+@@ -859,10 +864,18 @@ void R_SetupFrame (player_t* player)
+ //
+ // R_RenderView
+ //
+-void R_RenderPlayerView (player_t* player)
+-{	
+-    R_SetupFrame (player);
++// ent-lang: where DOOM_VIEW names a file, the level is drawn as it is
++// seen from where each of its things is (the first DOOM_VIEW_COUNT of
++// them; the player's own view where that is not set) when the first view
++// is to be drawn, and for each the file gets where it is seen from and
++// every range of columns a wall is stored for; the pixels of each go to
++// that name with ".raw" after it, one picture after another. Then the
++// program ends. DOOM_VIEW_SKIP leaves out the planes ('p') and what is
++// masked ('m').
++FILE *r_dump;
+ 
++static void R_RenderView (const char *skip)
++{
+     // Clear buffers.
+     R_ClearClipSegs ();
+     R_ClearDrawSegs ();
+@@ -878,13 +891,77 @@ void R_RenderPlayerView (player_t* player)
+     // Check for new console commands.
+     NetUpdate ();
+     
+-    R_DrawPlanes ();
++    if (!skip || !strchr (skip, 'p'))
++	R_DrawPlanes ();
+     
+     // Check for new console commands.
+     NetUpdate ();
+     
+-    R_DrawMasked ();
++    if (!skip || !strchr (skip, 'm'))
++	R_DrawMasked ();
+ 
+     // Check for new console commands.
+     NetUpdate ();				
+ }
++
++static void R_DumpView (FILE *raw, const char *skip)
++{
++    memset (I_VideoBuffer, 0, SCREENWIDTH * SCREENHEIGHT);
++    viewsin = finesine[viewangle>>ANGLETOFINESHIFT];
++    viewcos = finecosine[viewangle>>ANGLETOFINESHIFT];
++    fprintf (r_dump, "view %d %d %d %u window %d %d at %d %d\n",
++	     viewx, viewy, viewz, (unsigned int) viewangle,
++	     viewwidth, viewheight, viewwindowx, viewwindowy);
++    R_RenderView (skip);
++    if (raw)
++	fwrite (I_VideoBuffer, 1, SCREENWIDTH * SCREENHEIGHT, raw);
++}
++
++void R_RenderPlayerView (player_t* player)
++{	
++    const char *dump_name = getenv ("DOOM_VIEW");
++    const char *dump_skip = getenv ("DOOM_VIEW_SKIP");
++    const char *dump_count = getenv ("DOOM_VIEW_COUNT");
++
++    R_SetupFrame (player);
++
++    if (dump_name)
++    {
++	char raw_name[1024];
++	FILE *raw;
++	thinker_t *thinker;
++	int left = dump_count ? atoi (dump_count) : 0;
++	unsigned int turn = 0;
++
++	r_dump = fopen (dump_name, "w");
++	if (!r_dump)
++	    I_Error ("R_RenderPlayerView: cannot write %s", dump_name);
++	snprintf (raw_name, sizeof raw_name, "%s.raw", dump_name);
++	raw = fopen (raw_name, "wb");
++	if (left <= 0)
++	    R_DumpView (raw, dump_skip);
++	for (thinker = thinkercap.next; thinker != &thinkercap && left > 0;
++	     thinker = thinker->next)
++	{
++	    mobj_t *mobj = (mobj_t *) thinker;
++
++	    if (thinker->function.acp1 != (actionf_p1) P_MobjThinker)
++		continue;
++	    // (Turned another way each time, and not along the grid.)
++	    viewx = mobj->x;
++	    viewy = mobj->y;
++	    viewz = mobj->floorz + 41 * FRACUNIT;
++	    viewangle = mobj->angle + turn;
++	    turn += 0x12345678u;
++	    validcount++;
++	    R_DumpView (raw, dump_skip);
++	    left--;
++	}
++	fclose (r_dump);
++	if (raw)
++	    fclose (raw);
++	exit (0);
++    }
++
++    R_RenderView (NULL);
++}
+diff --git i/src/doom/r_segs.c w/src/doom/r_segs.c
+index 06881a5..9d118fc 100644
+--- i/src/doom/r_segs.c
++++ w/src/doom/r_segs.c
+@@ -382,6 +382,15 @@ R_StoreWallRange
+     // don't overflow and crash
+     if (ds_p == &drawsegs[MAXDRAWSEGS])
+ 	return;		
++
++    {
++	// ent-lang: see R_RenderPlayerView.
++	extern FILE *r_dump;
++
++	if (r_dump)
++	    fprintf (r_dump, "wall %d %d %d\n", start, stop,
++		     (int) (curline - segs));
++    }
+ 		
+ #ifdef RANGECHECK
+     if (start >=viewwidth || start > stop)

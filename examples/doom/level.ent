@@ -62,13 +62,45 @@ buffer Sides {
   midtexture: u64, sector: i32
 } capacity 32768
 
-// A line of the level, an entity: from (x1, y1) to (x2, y2), which is
-// (dx, dy) on; its sides by their numbers, the back one -1 where it has
-// none; `number` is which line of the level it is.
-component Line {
+// A line of the level: from (x1, y1) to (x2, y2), which is (dx, dy) on;
+// its sides by their numbers, the back one -1 where it has none.
+buffer Lines {
   x1: i32, y1: i32, x2: i32, y2: i32, dx: i32, dy: i32,
-  flags: i32, special: i32, tag: i32, front: i32, back: i32, number: i32
+  flags: i32, special: i32, tag: i32, front: i32, back: i32
 } capacity 16384
+
+// A piece of a line that is one side of a subsector: its ends, the angle
+// it runs at, how far along its line it starts, its line and the side of
+// it that is seen, and the sectors in front of it and behind it (-1:
+// none behind).
+buffer Segs {
+  x1: i32, y1: i32, x2: i32, y2: i32, angle: u32, offset: i32,
+  line: i32, side: i32, front: i32, back: i32
+} capacity 32768
+
+// A piece of a sector that is convex: so many segs from the first one.
+buffer Subsectors { sector: i32, numlines: i32, firstline: i32 } capacity 32768
+
+// The tree that says what is in front of what: a node is a line (from
+// (x, y), (dx, dy) on) with what is on its right (child0) and on its
+// left (child1), each a node, or a subsector where the bit NF_SUBSECTOR
+// is set. The boxes around the two are in `Boxes`.
+buffer Nodes {
+  x: i32, y: i32, dx: i32, dy: i32, child0: i32, child1: i32
+} capacity 32768
+const NF_SUBSECTOR = 0x8000
+
+// The boxes of the nodes: for node n and its side s, rows n * 8 + s * 4
+// on are the box's top, bottom, left and right.
+buffer Boxes { edge: i32 } capacity 262144
+const BOXTOP = 0
+const BOXBOTTOM = 1
+const BOXLEFT = 2
+const BOXRIGHT = 3
+
+// What is put into the level, as the WAD has it: where, turned which
+// way (in degrees), what it is, and at which skills it is there.
+buffer Things { x: i32, y: i32, angle: i32, type: i32, options: i32 } capacity 16384
 
 // The sector a side looks into, or -1 for no side.
 fn side_sector(sides: Sides, side: i32) -> i32 {
@@ -83,6 +115,12 @@ system load_level() {
   Vertexes = []
   Sectors = []
   Sides = []
+  Lines = []
+  Segs = []
+  Subsectors = []
+  Nodes = []
+  Boxes = []
+  Things = []
   if lump >= 0 {
     // P_LoadVertexes: two shorts each.
     let vertexes = Lumps[lump + ML_VERTEXES].at
@@ -116,22 +154,80 @@ system load_level() {
         midtexture: name_at(Bytes, at + 20), sector: short_at(Bytes, at + 28)
       }
     }
-    // P_LoadLineDefs: 14 bytes each, an entity for each.
+    // P_LoadLineDefs: 14 bytes each.
     let lines = Lumps[lump + ML_LINEDEFS].at
     for i in 0..Lumps[lump + ML_LINEDEFS].size / 14 {
       let at = lines + i * 14
       let v1 = ushort_at(Bytes, at)
       let v2 = ushort_at(Bytes, at + 2)
-      spawn {
-        Line {
-          x1: Vertexes[v1].x, y1: Vertexes[v1].y,
-          x2: Vertexes[v2].x, y2: Vertexes[v2].y,
-          dx: Vertexes[v2].x - Vertexes[v1].x,
-          dy: Vertexes[v2].y - Vertexes[v1].y,
-          flags: short_at(Bytes, at + 4), special: short_at(Bytes, at + 6),
-          tag: short_at(Bytes, at + 8), front: short_at(Bytes, at + 10),
-          back: short_at(Bytes, at + 12), number: i
+      Lines += {
+        x1: Vertexes[v1].x, y1: Vertexes[v1].y,
+        x2: Vertexes[v2].x, y2: Vertexes[v2].y,
+        dx: Vertexes[v2].x - Vertexes[v1].x,
+        dy: Vertexes[v2].y - Vertexes[v1].y,
+        flags: short_at(Bytes, at + 4), special: short_at(Bytes, at + 6),
+        tag: short_at(Bytes, at + 8), front: short_at(Bytes, at + 10),
+        back: short_at(Bytes, at + 12)
+      }
+    }
+    // P_LoadSubsectors: 4 bytes each. (Its sector is that of its first
+    // seg, below: P_GroupLines.)
+    let subsectors = Lumps[lump + ML_SSECTORS].at
+    for i in 0..Lumps[lump + ML_SSECTORS].size / 4 {
+      Subsectors += {
+        sector: 0, numlines: short_at(Bytes, subsectors + i * 4),
+        firstline: short_at(Bytes, subsectors + i * 4 + 2)
+      }
+    }
+    // P_LoadNodes: 28 bytes each.
+    let nodes = Lumps[lump + ML_NODES].at
+    for i in 0..Lumps[lump + ML_NODES].size / 28 {
+      let at = nodes + i * 28
+      Nodes += {
+        x: short_at(Bytes, at) << FRACBITS,
+        y: short_at(Bytes, at + 2) << FRACBITS,
+        dx: short_at(Bytes, at + 4) << FRACBITS,
+        dy: short_at(Bytes, at + 6) << FRACBITS,
+        child0: ushort_at(Bytes, at + 24), child1: ushort_at(Bytes, at + 26)
+      }
+      for k in 0..8 {
+        Boxes += { edge: short_at(Bytes, at + 8 + k * 2) << FRACBITS }
+      }
+    }
+    // P_LoadSegs: 12 bytes each.
+    let segs = Lumps[lump + ML_SEGS].at
+    for i in 0..Lumps[lump + ML_SEGS].size / 12 {
+      let at = segs + i * 12
+      let v1 = ushort_at(Bytes, at)
+      let v2 = ushort_at(Bytes, at + 2)
+      let line = short_at(Bytes, at + 6)
+      let side = short_at(Bytes, at + 8)
+      let near = if side == 0 { Lines[line].front } else { Lines[line].back }
+      let far = if side == 0 { Lines[line].back } else { Lines[line].front }
+      Segs += {
+        x1: Vertexes[v1].x, y1: Vertexes[v1].y,
+        x2: Vertexes[v2].x, y2: Vertexes[v2].y,
+        angle: (short_at(Bytes, at + 4) << FRACBITS) as u32,
+        offset: short_at(Bytes, at + 10) << FRACBITS,
+        line: line, side: near, front: Sides[near].sector,
+        back: if Lines[line].flags & ML_TWOSIDED != 0 {
+          side_sector(Sides, far)
+        } else {
+          -1
         }
+      }
+    }
+    for i in 0..len(Subsectors) {
+      Subsectors[i].sector = Segs[Subsectors[i].firstline].front
+    }
+    // P_LoadThings: 10 bytes each.
+    let things = Lumps[lump + ML_THINGS].at
+    for i in 0..Lumps[lump + ML_THINGS].size / 10 {
+      let at = things + i * 10
+      Things += {
+        x: short_at(Bytes, at), y: short_at(Bytes, at + 2),
+        angle: short_at(Bytes, at + 4), type: short_at(Bytes, at + 6),
+        options: short_at(Bytes, at + 8)
       }
     }
   }

@@ -39,9 +39,6 @@ const SECRETWALLCOLORS = WALLCOLORS
 // is, in fixed point (scale_mtof).
 unique Automap { x: i32, y: i32, scale: i32 }
 
-// The lines to draw this frame, in the picture: from, to, colour.
-buffer Mlines { x0: i32, y0: i32, x1: i32, y1: i32, color: i32 } capacity 16384
-
 // A length of the level in pixels, and a place of it in the picture
 // (MTOF, CXMTOF, CYMTOF).
 fn mtof(x: i32, scale: i32) -> i32 { fixed_mul(x, scale) >> FRACBITS }
@@ -128,24 +125,21 @@ system fit_automap() {
   }
 }
 
-// Draws the level's lines (AM_Drawer: AM_clearFB, AM_drawWalls).
+// Draws the level's lines (AM_Drawer: AM_drawWalls).
 system draw_automap() {
-  Mlines = []
-  for l: Line where l.flags & ML_DONTDRAW == 0 {
-    let front = side_sector(Sides, l.front)
-    let back = side_sector(Sides, l.back)
-    Mlines += {
-      x0: cxmtof(l.x1, Automap.x, Automap.scale),
-      y0: cymtof(l.y1, Automap.y, Automap.scale),
-      x1: cxmtof(l.x2, Automap.x, Automap.scale),
-      y1: cymtof(l.y2, Automap.y, Automap.scale),
-      color: line_color(l.flags, l.special, Sectors[front].floorheight,
-                        Sectors[front].ceilingheight, back,
-                        Sectors[back].floorheight, Sectors[back].ceilingheight)
+  for i in 0..len(Lines) {
+    if Lines[i].flags & ML_DONTDRAW == 0 {
+      let front = side_sector(Sides, Lines[i].front)
+      let back = side_sector(Sides, Lines[i].back)
+      draw_fline(
+          Screen, cxmtof(Lines[i].x1, Automap.x, Automap.scale),
+          cymtof(Lines[i].y1, Automap.y, Automap.scale),
+          cxmtof(Lines[i].x2, Automap.x, Automap.scale),
+          cymtof(Lines[i].y2, Automap.y, Automap.scale),
+          line_color(Lines[i].flags, Lines[i].special,
+                     Sectors[front].floorheight, Sectors[front].ceilingheight,
+                     back, Sectors[back].floorheight,
+                     Sectors[back].ceilingheight) as u8)
     }
-  }
-  for i in 0..len(Mlines) {
-    draw_fline(Screen, Mlines[i].x0, Mlines[i].y0, Mlines[i].x1, Mlines[i].y1,
-               Mlines[i].color as u8)
   }
 }
