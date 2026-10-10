@@ -61,7 +61,8 @@ buffer Vertexes { x: i32, y: i32 } capacity 32768
 buffer Sectors {
   floorheight: i32, ceilingheight: i32, floorpic: i32, ceilingpic: i32,
   lightlevel: i32, special: i32, tag: i32, specialdata: i32, bbtop: i32,
-  bbbottom: i32, bbleft: i32, bbright: i32
+  bbbottom: i32, bbleft: i32, bbright: i32, validcount: i32,
+  soundtraversed: i32, soundtarget: i32
 } capacity 4096
 // The widest a thing is, from its middle.
 const MAXRADIUS = 32 * FRACUNIT
@@ -176,7 +177,8 @@ system load_level() {
         ceilingpic: lump_number(Lumps, name_at(Bytes, at + 12)) - Data.firstflat,
         lightlevel: short_at(Bytes, at + 20),
         special: short_at(Bytes, at + 22), tag: short_at(Bytes, at + 24),
-        specialdata: 0, bbtop: 0, bbbottom: 0, bbleft: 0, bbright: 0
+        specialdata: 0, bbtop: 0, bbbottom: 0, bbleft: 0, bbright: 0,
+        validcount: 0, soundtraversed: 0, soundtarget: 0
       }
     }
     // P_LoadSideDefs: 30 bytes each.

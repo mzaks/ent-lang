@@ -27,6 +27,7 @@ import specials
 import items
 import play
 import enemy
+import weapon
 import movers
 
 // As many bytes as the biggest WAD.
@@ -89,6 +90,7 @@ schedule setup() {
   spawn_things()
   spawn_specials()
   start_player()
+  start_weapon()
   fit_automap()
   set_view_size()
   init_view_tables()
@@ -100,6 +102,7 @@ schedule frame() {
   think_player()
   use_lines()
   trigger_lines()
+  think_weapon()
   think_things()
   trigger_lines()
   run_lights()

@@ -182,17 +182,16 @@ proc give_power(things: mut Mobj, me: entity, powers: mut Powers, power: i32) ->
   given
 }
 
-// The player touches a thing that can be picked up (row `n` of `Near`):
+// The player touches a thing that can be picked up (`it`):
 // if it is within reach and of use, the player has it and the thing is
 // gone (P_TouchSpecialThing).
-proc touch_special(near: mut Near, taken: mut Taken, things: mut Mobj, me: entity,
-                   inv: mut Inv, ammo: mut Ammo, powers: mut Powers, n: i32,
-                   z: i32, skill: i32) {
-  let delta = near[n].z - z
-  if !near[n].gone && delta <= things[me].height && delta >= -8 * FRACUNIT &&
+proc touch_special(things: mut Mobj, me: entity, it: entity, inv: mut Inv,
+                   ammo: mut Ammo, powers: mut Powers, z: i32, skill: i32) {
+  let delta = things[it].z - z
+  if !things[it].gone && delta <= things[me].height && delta >= -8 * FRACUNIT &&
      things[me].health > 0 {
-    let sprite = near[n].sprite
-    let dropped = near[n].flags & MF_DROPPED != 0
+    let sprite = things[it].sprite
+    let dropped = things[it].flags & MF_DROPPED != 0
     var got = true
     if sprite == SPR_ARM1 {
       got = give_armor(inv, 1)
@@ -287,9 +286,8 @@ proc touch_special(near: mut Near, taken: mut Taken, things: mut Mobj, me: entit
       got = false
     }
     if got {
-      if near[n].flags & MF_COUNTITEM != 0 { inv[0].itemcount += 1 }
-      near[n].gone = true
-      taken += { id: near[n].id }
+      if things[it].flags & MF_COUNTITEM != 0 { inv[0].itemcount += 1 }
+      things[it].gone = true
       inv[0].bonuscount += BONUSADD
     }
   }

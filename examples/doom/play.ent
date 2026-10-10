@@ -45,10 +45,13 @@ const FRICTION = 0xe800
 const MAXSTEP = 24 * FRACUNIT
 
 // What of the player is not its thing, one row: where the eye is and
-// how it bobs, whether the use key was down, and the tic's keys.
+// how it bobs, whether the use key was down, and the tic's keys; whether
+// the fire key was down, how many shots in a row, how much lighter a
+// shot makes everything, and whether the player is dead.
 buffer Pl {
   viewz: i32, viewheight: i32, deltaviewheight: i32, bob: i32, usedown: bool,
-  forwardmove: i32, sidemove: i32, angleturn: i32, buttons: i32
+  forwardmove: i32, sidemove: i32, angleturn: i32, buttons: i32,
+  attackdown: bool, refire: i32, extralight: i32, dead: bool
 } capacity 1
 
 // What checking a place leaves behind, one row (the tm.. of p_map.c):
@@ -65,13 +68,14 @@ buffer Tm {
 // touches, and the lines a path crosses with how far along it.
 buffer Spechit { line: i32 } capacity 64
 // The things that can be picked up which a place that was checked
-// touches (rows of `Near`), with how high the player was then.
-buffer Touched { index: i32, z: i32 } capacity 1024
+// touches (by their `id`), with how high the player was then.
+buffer Touched { id: i32, z: i32 } capacity 1024
 // The lines the player set off this tic, in their order: used (and from
 // which side: 0 its front), or walked over (and the side come from).
 // (`player`: by the player, not by a monster, which sets off less.)
 buffer Triggered { line: i32, used: bool, side: i32, player: bool } capacity 256
-buffer Intercepts { frac: i32, line: i32 } capacity 256
+// (`thing`: the `id` of a thing a shot's path crosses; 0 for a line.)
+buffer Intercepts { frac: i32, line: i32, thing: i32 } capacity 256
 
 // How far from the player a thing is taken into `Near`: more than a
 // tic's way and the widest two things.
@@ -215,6 +219,46 @@ fn heights_at(lines: Lines, sectors: Sectors, subsectors: Subsectors,
   (floorz, ceilingz)
 }
 
+// The things near enough to one to be in its way, into `Near`, and
+// `Nearorder`: their rows in the order the blockmap has them in, square
+// by square, in a square the one put there last first.
+proc gather_near(things: Mobj, me: entity, bmap: Bmap, near: mut Near,
+                 order: mut Nearorder) {
+  near = []
+  order = []
+  let x = things[me].x
+  let y = things[me].y
+  for o, other in things
+      where o != me && !other.gone && other.flags & MF_NOBLOCKMAP == 0 &&
+            abs(other.x - x) < NEARREACH && abs(other.y - y) < NEARREACH {
+    near += {
+      id: other.id, x: other.x, y: other.y, z: other.z, radius: other.radius,
+      height: other.height, flags: other.flags, type: other.type,
+      sprite: other.sprite, bx: (other.x - bmap[0].orgx) >> MAPBLOCKSHIFT,
+      by: (other.y - bmap[0].orgy) >> MAPBLOCKSHIFT, linked: other.linked,
+      gone: false
+    }
+  }
+  for i in 0..len(near) {
+    order += { index: i }
+    var at = i
+    var settled = false
+    while at > 0 && !settled {
+      let before = order[at - 1].index
+      if near[before].bx > near[i].bx ||
+         (near[before].bx == near[i].bx &&
+          (near[before].by > near[i].by ||
+           (near[before].by == near[i].by && near[before].linked < near[i].linked))) {
+        order[at].index = before
+        at -= 1
+      } else {
+        settled = true
+      }
+    }
+    order[at].index = i
+  }
+}
+
 // Whether the player's thing can be at (x, y): no wall and no solid
 // thing is in its way there. Leaves in `Tm` the floor and ceiling it
 // would have, and in `Spechit` the special lines it touches
@@ -256,7 +300,7 @@ proc check_position(lines: mut Lines, sectors: Sectors,
           // What can be picked up is touched (and picked up after the
           // player has moved, in this order); what is solid stops.
           if near[n].flags & MF_SPECIAL != 0 && flags & MF_PICKUP != 0 {
-            touched += { index: n, z: z }
+            touched += { id: near[n].id, z: z }
           }
           if near[n].flags & MF_SOLID != 0 { ok = false }
         }
@@ -311,12 +355,13 @@ proc check_position(lines: mut Lines, sectors: Sectors,
 // Moves the thing whose turn it is to (x, y) if it can be there and gets there:
 // it fits, and the step up is not too high (P_TryMove).
 proc try_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-              nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-              order: Nearorder, tm: mut Tm, spechit: mut Spechit,
+              nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut Near,
+              order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
               touched: mut Touched, triggered: mut Triggered, things: mut Mobj, me: entity,
               x: i32, y: i32) -> bool {
   let flags = things[me].flags
   var moved = false
+  gather_near(things, me, bmap, near, order)
   if check_position(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
                     tm, spechit, touched, x, y, things[me].z, things[me].radius, flags,
                     (things[me].type == MT_PLAYER)) {
@@ -369,9 +414,12 @@ proc try_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
 // The lines a path from (x1, y1) to (x2, y2) crosses, into `Intercepts`
 // with how far along it each is (P_PathTraverse with PT_ADDLINES,
 // PIT_AddLineIntercepts).
-proc path_lines(lines: mut Lines, bytes: Bytes, bmap: Bmap, tm: mut Tm,
-                intercepts: mut Intercepts, x1in: i32, y1in: i32, x2in: i32,
-                y2in: i32) {
+// With `addthings`, the things in the squares it goes through too, each
+// by the diagonal of its square that lies across the path
+// (PIT_AddThingIntercepts).
+proc path_lines(things: Mobj, addthings: bool, lines: mut Lines, bytes: Bytes,
+                bmap: Bmap, tm: mut Tm, intercepts: mut Intercepts,
+                x1in: i32, y1in: i32, x2in: i32, y2in: i32) {
   tm[0].validcount += 1
   let validcount = tm[0].validcount
   intercepts = []
@@ -441,7 +489,24 @@ proc path_lines(lines: mut Lines, bytes: Bytes, bmap: Bmap, tm: mut Tm,
             if s1 != s2 {
               let frac = intercept_vector(tx, ty, tdx, tdy, lines[l].x1,
                                           lines[l].y1, lines[l].dx, lines[l].dy)
-              if frac >= 0 { intercepts += { frac: frac, line: l } }
+              if frac >= 0 { intercepts += { frac: frac, line: l, thing: 0 } }
+            }
+          }
+        }
+        if addthings {
+          let positive = tdx ^ tdy > 0
+          for other in things
+              where !other.gone && other.flags & MF_NOBLOCKMAP == 0 &&
+                    (other.x - orgx) >> MAPBLOCKSHIFT == mapx &&
+                    (other.y - orgy) >> MAPBLOCKSHIFT == mapy {
+            let ax = other.x - other.radius
+            let ay = if positive { other.y + other.radius } else { other.y - other.radius }
+            let bx = other.x + other.radius
+            let by = if positive { other.y - other.radius } else { other.y + other.radius }
+            if point_on_divline_side(ax, ay, tx, ty, tdx, tdy) !=
+               point_on_divline_side(bx, by, tx, ty, tdx, tdy) {
+              let frac = intercept_vector(tx, ty, tdx, tdy, ax, ay, bx - ax, by - ay)
+              if frac >= 0 { intercepts += { frac: frac, line: 0, thing: other.id } }
             }
           }
         }
@@ -465,7 +530,7 @@ proc path_lines(lines: mut Lines, bytes: Bytes, bmap: Bmap, tm: mut Tm,
 proc slide_traverse(lines: mut Lines, sectors: Sectors, bytes: Bytes,
                     bmap: Bmap, tm: mut Tm, intercepts: mut Intercepts,
                     things: Mobj, me: entity, x1: i32, y1: i32, x2: i32, y2: i32) {
-  path_lines(lines, bytes, bmap, tm, intercepts, x1, y1, x2, y2)
+  path_lines(things, false, lines, bytes, bmap, tm, intercepts, x1, y1, x2, y2)
   var left = len(intercepts)
   var going = true
   while going && left > 0 {
@@ -509,8 +574,8 @@ proc slide_traverse(lines: mut Lines, sectors: Sectors, bytes: Bytes,
 // it can, and along the line that stopped it with what is left of its
 // way (P_SlideMove, P_HitSlideLine).
 proc slide_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-                nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-                order: Nearorder, tm: mut Tm, spechit: mut Spechit,
+                nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut Near,
+                order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
                 touched: mut Touched, triggered: mut Triggered,
                 intercepts: mut Intercepts, things: mut Mobj, me: entity) {
   var hitcount = 0
@@ -651,8 +716,8 @@ proc player_think(things: mut Mobj, me: entity, pl: mut Pl, leveltime: i32) {
 // the player slides along what is in the way, anything else stops; on
 // the floor it is slowed down.
 proc thing_xy(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-              nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-              order: Nearorder, tm: mut Tm, spechit: mut Spechit,
+              nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut Near,
+              order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
               touched: mut Touched, triggered: mut Triggered,
               intercepts: mut Intercepts, things: mut Mobj, me: entity, pl: mut Pl) {
   let player = (things[me].type == MT_PLAYER)
@@ -746,7 +811,8 @@ system start_player() {
   Pl = [{
     viewz: Spawned.playerz + VIEWHEIGHT, viewheight: VIEWHEIGHT,
     deltaviewheight: 0, bob: 0, usedown: false, forwardmove: 0, sidemove: 0,
-    angleturn: 0, buttons: 0
+    angleturn: 0, buttons: 0, attackdown: false, refire: 0, extralight: 0,
+    dead: false
   }; 1]
   Tm = [{
     floorz: 0, ceilingz: 0, dropoffz: 0, ceilingline: -1, validcount: 1,

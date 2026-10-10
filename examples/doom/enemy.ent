@@ -31,6 +31,7 @@ import angles
 import random
 import info
 import level
+import data
 import render
 import things
 import demo
@@ -191,25 +192,67 @@ proc check_sight(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
   sees
 }
 
-// Whether the thing whose turn it is sees the player, who is then the
-// one it is after: in front of it, or near enough behind it, or
-// (`allaround`) anywhere (P_LookForPlayers, in a game for one: the three
-// who are not there are looked for too, which takes its turns).
+// What a tic's procs are told of the level and the game, one row: where
+// the level says which sectors see nothing of which, the skill, the flat
+// that is the sky, and the tic.
+buffer Env { reject: i32, skill: i32, sky: i32, leveltime: i32 } capacity 1
+
+const MISSILERANGE = 32 * 64 * FRACUNIT
+const BASETHRESHOLD = 100
+// Where a thing is made: on the floor, or under the ceiling, of where
+// it is.
+const ONFLOORZ = -2147483647 - 1
+const ONCEILINGZ = 2147483647
+const SFX_PODTH1 = 59
+const SFX_PODTH3 = 61
+const SFX_BGDTH1 = 62
+const SFX_BGDTH2 = 63
+
+// A number drawn and another taken from it (P_SubRandom).
+proc sub_random(rnd: mut Rnd) -> i32 {
+  let r = p_random(rnd)
+  r - p_random(rnd)
+}
+
+// The thing with that number, or none.
+fn thing_by_id(things: Mobj, id: i32) -> entity {
+  var found: entity = none
+  for o, other in things where other.id == id { found = o }
+  found
+}
+
+// Whether a thing sees another (P_CheckSight of two things).
+proc sees(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
+          segs: Segs, nodes: Nodes, bytes: Bytes, tm: mut Tm,
+          sight: mut Sight, env: Env, things: Mobj, me: entity,
+          it: entity) -> bool {
+  check_sight(lines, sectors, subsectors, segs, nodes, bytes, tm, sight,
+              env[0].reject, things[me].x, things[me].y, things[me].z,
+              things[me].height, things[me].subsector, things[it].x,
+              things[it].y, things[it].z, things[it].height,
+              things[it].subsector)
+}
+
+// Whether a thing sees the player, who is then the one it is after: in
+// front of it, or near enough behind it, or (`allaround`) anywhere
+// (P_LookForPlayers, in a game for one: the three who are not there are
+// looked for too, which takes its turns).
 proc look_for_players(lines: mut Lines, sectors: Sectors,
                       subsectors: Subsectors, segs: Segs, nodes: Nodes,
-                      bytes: Bytes, tm: mut Tm, sight: mut Sight,
-                      reject: i32, things: mut Mobj, me: entity, player: entity,
+                      bytes: Bytes, tm: mut Tm, sight: mut Sight, env: Env,
+                      things: mut Mobj, me: entity, player: entity,
                       allaround: bool) -> bool {
   var c = 0
   let stop = (things[me].lastlook - 1) & 3
   var found = false
   var going = true
+  let here = there(things, player)
   while going {
-    if things[me].lastlook != 0 || !there(things, player) {
+    if things[me].lastlook != 0 || !here {
       // (Not in the game.)
       things[me].lastlook = (things[me].lastlook + 1) & 3
       // (Nobody is: round once, and no more.)
-      if !there(things, player) {
+      if !here {
         c += 1
         if c > 4 { going = false }
       }
@@ -217,17 +260,19 @@ proc look_for_players(lines: mut Lines, sectors: Sectors,
       going = false
     } else {
       c += 1
-      var seen = things[player].health > 0 &&
-                 check_sight(lines, sectors, subsectors, segs, nodes, bytes, tm,
-                             sight, reject, things[me].x, things[me].y, things[me].z,
-                             things[me].height, things[me].subsector, things[player].x, things[player].y,
-                             things[player].z, things[player].height, things[player].subsector)
+      var seen = things[player].health > 0
+      if seen {
+        seen = sees(lines, sectors, subsectors, segs, nodes, bytes, tm, sight,
+                    env, things, me, player)
+      }
       if seen && !allaround {
-        let an = point_to_angle(things[player].x - things[me].x, things[player].y - things[me].y) -
+        let an = point_to_angle(things[player].x - things[me].x,
+                                things[player].y - things[me].y) -
                  things[me].angle
         // (Behind its back, and not near.)
         if an > ANG90 && an < ANG270 &&
-           aprox_distance(things[player].x - things[me].x, things[player].y - things[me].y) > MELEERANGE {
+           aprox_distance(things[player].x - things[me].x,
+                          things[player].y - things[me].y) > MELEERANGE {
           seen = false
         }
       }
@@ -243,16 +288,486 @@ proc look_for_players(lines: mut Lines, sectors: Sectors,
   found
 }
 
-// A monster that waits looks for the player; the state it goes on in
-// when it has seen it, or -1 (A_Look). (Not yet: that it hears.)
-proc a_look(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-            segs: Segs, nodes: Nodes, bytes: Bytes, tm: mut Tm,
-            sight: mut Sight, reject: i32, things: mut Mobj, me: entity, player: entity,
-            rnd: mut Rnd) -> i32 {
+// A thing goes into a state and does what the state does (below, after
+// all that a state may do).
+proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+               Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+               touched: mut Touched, triggered: mut Triggered, intercepts: mut
+               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
+               powers: Powers, env: Env, things: mut Mobj, player: entity, me:
+               entity, first: i32)
+
+// A thing is made (P_SpawnMobj): of that kind, there, in the first state
+// of its kind. It comes last of the things, and has its turn in the tic
+// it was made in.
+proc spawn_mobj(things: mut Mobj, sectors: Sectors, subsectors: Subsectors,
+                nodes: Nodes, tm: mut Tm, rnd: mut Rnd, env: Env, x: i32,
+                y: i32, z: i32, type: i32) -> entity {
+  tm[0].links += 1
+  let lastlook = p_random(rnd) % 4
+  let state = mobjinfo[type].spawnstate
+  let subsector = point_in_subsector(nodes, x, y)
+  let sector = subsectors[subsector].sector
+  let floorz = sectors[sector].floorheight
+  let ceilingz = sectors[sector].ceilingheight
+  let height = mobjinfo[type].height
+  spawn {
+    Mobj {
+      x: x, y: y,
+      z: if z == ONFLOORZ {
+        floorz
+      } else if z == ONCEILINGZ {
+        ceilingz - height
+      } else {
+        z
+      },
+      angle: 0, type: type, state: state, tics: states[state].tics,
+      sprite: states[state].sprite, frame: states[state].frame,
+      flags: mobjinfo[type].flags, health: mobjinfo[type].spawnhealth,
+      radius: mobjinfo[type].radius, height: height,
+      reactiontime: if env[0].skill == 4 { 0 } else { mobjinfo[type].reactiontime },
+      lastlook: lastlook, subsector: subsector, floorz: floorz,
+      ceilingz: ceilingz, linked: tm[0].links, id: tm[0].links, momx: 0,
+      momy: 0, momz: 0, movedir: DI_EAST, movecount: 0, threshold: 0,
+      target: none, gone: false
+    }
+  }
+}
+
+// What a shot leaves on a wall (P_SpawnPuff), and in what it hits
+// (P_SpawnBlood): a little up or down, and for a little shorter or
+// longer.
+proc spawn_puff(lines: mut Lines, sectors: mut Sectors, subsectors:
+                Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                spechit: mut Spechit, touched: mut Touched, triggered: mut
+                Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
+                mut Rnd, inv: mut Inv, powers: Powers, env: Env, things: mut
+                Mobj, player: entity, x: i32, y: i32, z: i32, punch: bool) {
+  let up = sub_random(rnd) << 10
+  let th = spawn_mobj(things, sectors, subsectors, nodes, tm, rnd, env, x, y,
+                      z + up, MT_PUFF)
+  things[th].momz = FRACUNIT
+  things[th].tics = max(things[th].tics - (p_random(rnd) & 3), 1)
+  // (A fist makes no spark on the wall.)
+  if punch { set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, th, S_PUFF3) }
+}
+proc spawn_blood(lines: mut Lines, sectors: mut Sectors, subsectors:
+                 Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                 Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                 spechit: mut Spechit, touched: mut Touched, triggered: mut
+                 Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
+                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, things: mut
+                 Mobj, player: entity, x: i32, y: i32, z: i32, damage: i32) {
+  let up = sub_random(rnd) << 10
+  let th = spawn_mobj(things, sectors, subsectors, nodes, tm, rnd, env, x, y,
+                      z + up, MT_BLOOD)
+  things[th].momz = FRACUNIT * 2
+  things[th].tics = max(things[th].tics - (p_random(rnd) & 3), 1)
+  if damage <= 12 && damage >= 9 {
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, th, S_BLOOD2)
+  } else if damage < 9 {
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, th, S_BLOOD3)
+  }
+}
+
+// A thing dies (P_KillMobj): it is no more to be shot, lies low, and
+// goes into the states of its dying; some leave what they carried.
+proc kill_mobj(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+               Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+               touched: mut Touched, triggered: mut Triggered, intercepts: mut
+               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
+               powers: Powers, env: Env, things: mut Mobj, player: entity,
+               source: entity, target: entity) {
+  let type = things[target].type
+  things[target].flags &= ~(MF_SHOOTABLE | MF_FLOAT | MF_SKULLFLY)
+  if type != MT_SKULL { things[target].flags &= ~MF_NOGRAVITY }
+  things[target].flags |= MF_CORPSE | MF_DROPOFF
+  things[target].height >>= 2
+  // (The player's: nothing stands in its place.)
+  if type == MT_PLAYER { things[target].flags &= ~MF_SOLID }
+  if things[target].health < -mobjinfo[type].spawnhealth &&
+     mobjinfo[type].xdeathstate != 0 {
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, target, mobjinfo[type].xdeathstate)
+  } else {
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, target, mobjinfo[type].deathstate)
+  }
+  things[target].tics = max(things[target].tics - (p_random(rnd) & 3), 1)
+  let item = if type == MT_WOLFSS || type == MT_POSSESSED {
+    MT_CLIP
+  } else if type == MT_SHOTGUY {
+    MT_SHOTGUN
+  } else if type == MT_CHAINGUY {
+    MT_CHAINGUN
+  } else {
+    -1
+  }
+  if item >= 0 {
+    let mo = spawn_mobj(things, sectors, subsectors, nodes, tm, rnd, env,
+                        things[target].x, things[target].y, ONFLOORZ, item)
+    things[mo].flags |= MF_DROPPED
+  }
+}
+
+// A thing is hurt (P_DamageMobj) by another (`inflictor`: what hit it;
+// `source`: who is to blame, whom it goes after; either may be none): it
+// is pushed away, the player's armour takes its part, and it dies, or
+// flinches, and wakes.
+proc damage_mobj(lines: mut Lines, sectors: mut Sectors, subsectors:
+                 Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                 Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                 spechit: mut Spechit, touched: mut Touched, triggered: mut
+                 Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
+                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, things: mut
+                 Mobj, player: entity, target: entity, inflictor: entity,
+                 source: entity, harm: i32) {
+  if things[target].flags & MF_SHOOTABLE != 0 && things[target].health > 0 {
+    let type = things[target].type
+    let isplayer = type == MT_PLAYER
+    var damage = harm
+    if things[target].flags & MF_SKULLFLY != 0 {
+      things[target].momx = 0
+      things[target].momy = 0
+      things[target].momz = 0
+    }
+    if isplayer && env[0].skill == 0 { damage >>= 1 }
+    // (Not by a chainsaw, which pulls.)
+    if inflictor != none && things[target].flags & MF_NOCLIP == 0 &&
+       (source == none || things[source].type != MT_PLAYER ||
+        inv[0].readyweapon != WP_CHAINSAW) {
+      var ang = point_to_angle(things[target].x - things[inflictor].x,
+                               things[target].y - things[inflictor].y)
+      var thrust = damage * (FRACUNIT >> 3) * 100 / mobjinfo[type].mass
+      // (Now and then it falls forwards off a ledge.)
+      if damage < 40 && damage > things[target].health &&
+         things[target].z - things[inflictor].z > 64 * FRACUNIT {
+        if p_random(rnd) & 1 != 0 {
+          ang += ANG180
+          thrust *= 4
+        }
+      }
+      let fine = (ang >> ANGLETOFINESHIFT) as i32
+      things[target].momx += fixed_mul(thrust, finecosine(fine))
+      things[target].momy += fixed_mul(thrust, finesine[fine])
+    }
+    var hurts = true
+    if isplayer {
+      // (Not to death where the level ends by it.)
+      let sector = subsectors[things[target].subsector].sector
+      if sectors[sector].special == 11 && damage >= things[target].health {
+        damage = things[target].health - 1
+      }
+      if damage < 1000 && powers[PW_INVULNERABILITY].tics != 0 {
+        hurts = false
+      } else if inv[0].armortype != 0 {
+        var saved = if inv[0].armortype == 1 { damage / 3 } else { damage / 2 }
+        if inv[0].armorpoints <= saved {
+          saved = inv[0].armorpoints
+          inv[0].armortype = 0
+        }
+        inv[0].armorpoints -= saved
+        damage -= saved
+      }
+    }
+    if hurts {
+      things[target].health -= damage
+      if things[target].health <= 0 {
+        kill_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, source, target)
+      } else {
+        if p_random(rnd) < mobjinfo[type].painchance &&
+           things[target].flags & MF_SKULLFLY == 0 {
+          // (It fights back.)
+          things[target].flags |= MF_JUSTHIT
+          set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, target, mobjinfo[type].painstate)
+        }
+        things[target].reactiontime = 0
+        if (things[target].threshold == 0 || type == MT_VILE) && source != none &&
+           source != target && things[source].type != MT_VILE {
+          // It is after who did it, for a while.
+          things[target].target = source
+          things[target].threshold = BASETHRESHOLD
+          if things[target].state == mobjinfo[type].spawnstate &&
+             mobjinfo[type].seestate != S_NULL {
+            set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, target, mobjinfo[type].seestate)
+          }
+        }
+      }
+    }
+  }
+}
+
+// Where a shot from a thing along `angle` would go to hit something:
+// how steeply, and what (P_AimLineAttack, PTR_AimTraverse); 0 and none
+// if there is nothing to hit.
+proc aim_line_attack(things: Mobj, me: entity, lines: mut Lines,
+                     sectors: Sectors, bytes: Bytes, bmap: Bmap, tm: mut Tm,
+                     intercepts: mut Intercepts, angle: u32,
+                     distance: i32) -> (i32, entity) {
+  let fine = (angle >> ANGLETOFINESHIFT) as i32
+  let shootz = things[me].z + (things[me].height >> 1) + 8 * FRACUNIT
+  path_lines(things, true, lines, bytes, bmap, tm, intercepts, things[me].x,
+             things[me].y,
+             things[me].x + (distance >> FRACBITS) * finecosine(fine),
+             things[me].y + (distance >> FRACBITS) * finesine[fine])
+  var topslope = 100 * FRACUNIT / 160
+  var bottomslope = -100 * FRACUNIT / 160
+  var aimslope = 0
+  var linetarget: entity = none
+  var left = len(intercepts)
+  var going = true
+  while going && left > 0 {
+    left -= 1
+    var frac = 0x7fffffff
+    var nearest = 0
+    for s in 0..len(intercepts) {
+      if intercepts[s].frac < frac {
+        frac = intercepts[s].frac
+        nearest = s
+      }
+    }
+    if frac > FRACUNIT {
+      going = false
+    } else {
+      intercepts[nearest].frac = 0x7fffffff
+      let dist = fixed_mul(distance, frac)
+      if intercepts[nearest].thing == 0 {
+        let li = intercepts[nearest].line
+        if lines[li].flags & ML_TWOSIDED == 0 {
+          going = false
+        } else {
+          let opentop = open_top(lines, sectors, li)
+          let openbottom = open_bottom(lines, sectors, li)
+          if openbottom >= opentop {
+            going = false
+          } else {
+            let front = lines[li].frontsector
+            let back = lines[li].backsector
+            if sectors[front].floorheight != sectors[back].floorheight {
+              bottomslope max= fixed_div(openbottom - shootz, dist)
+            }
+            if sectors[front].ceilingheight != sectors[back].ceilingheight {
+              topslope min= fixed_div(opentop - shootz, dist)
+            }
+            if topslope <= bottomslope { going = false }
+          }
+        }
+      } else {
+        let th = thing_by_id(things, intercepts[nearest].thing)
+        if th != me && things[th].flags & MF_SHOOTABLE != 0 {
+          let thingtop = fixed_div(things[th].z + things[th].height - shootz, dist)
+          let thingbottom = fixed_div(things[th].z - shootz, dist)
+          // (Not over it, and not under it.)
+          if thingtop >= bottomslope && thingbottom <= topslope {
+            aimslope = (min(thingtop, topslope) + max(thingbottom, bottomslope)) / 2
+            linetarget = th
+            going = false
+          }
+        }
+      }
+    }
+  }
+  (if linetarget != none { aimslope } else { 0 }, linetarget)
+}
+
+// A shot from a thing along `angle`, as steeply as `slope`: the first
+// wall or thing in its way is hit, and a thing hurt by so much
+// (P_LineAttack, PTR_ShootTraverse). (Not yet: the switches a shot sets
+// off.)
+proc line_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
+                 Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                 Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                 spechit: mut Spechit, touched: mut Touched, triggered: mut
+                 Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
+                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, things: mut
+                 Mobj, player: entity, me: entity, angle: u32, distance: i32,
+                 slope: i32, damage: i32) {
+  let fine = (angle >> ANGLETOFINESHIFT) as i32
+  let shootz = things[me].z + (things[me].height >> 1) + 8 * FRACUNIT
+  let tracex = things[me].x
+  let tracey = things[me].y
+  let x2 = tracex + (distance >> FRACBITS) * finecosine(fine)
+  let y2 = tracey + (distance >> FRACBITS) * finesine[fine]
+  path_lines(things, true, lines, bytes, bmap, tm, intercepts, tracex, tracey,
+             x2, y2)
+  // (The path as it was gone along: from off the edge of a square.)
+  let orgx = bmap[0].orgx
+  let orgy = bmap[0].orgy
+  let tx = if (tracex - orgx) & (MAPBLOCKSIZE - 1) == 0 { tracex + FRACUNIT } else { tracex }
+  let ty = if (tracey - orgy) & (MAPBLOCKSIZE - 1) == 0 { tracey + FRACUNIT } else { tracey }
+  let tdx = x2 - tx
+  let tdy = y2 - ty
+  var left = len(intercepts)
+  var going = true
+  while going && left > 0 {
+    left -= 1
+    var frac = 0x7fffffff
+    var nearest = 0
+    for s in 0..len(intercepts) {
+      if intercepts[s].frac < frac {
+        frac = intercepts[s].frac
+        nearest = s
+      }
+    }
+    if frac > FRACUNIT {
+      going = false
+    } else {
+      intercepts[nearest].frac = 0x7fffffff
+      let dist = fixed_mul(distance, frac)
+      if intercepts[nearest].thing == 0 {
+        let li = intercepts[nearest].line
+        var hit = lines[li].flags & ML_TWOSIDED == 0
+        if !hit {
+          let front = lines[li].frontsector
+          let back = lines[li].backsector
+          if sectors[front].floorheight != sectors[back].floorheight &&
+             fixed_div(open_bottom(lines, sectors, li) - shootz, dist) > slope {
+            hit = true
+          }
+          if sectors[front].ceilingheight != sectors[back].ceilingheight &&
+             fixed_div(open_top(lines, sectors, li) - shootz, dist) < slope {
+            hit = true
+          }
+        }
+        if hit {
+          // A little before the wall; nothing where it is the sky.
+          let at = frac - fixed_div(4 * FRACUNIT, distance)
+          let z = shootz + fixed_mul(slope, fixed_mul(at, distance))
+          let front = lines[li].frontsector
+          let back = lines[li].backsector
+          var sky = false
+          if sectors[front].ceilingpic == env[0].sky {
+            if z > sectors[front].ceilingheight { sky = true }
+            if back >= 0 && sectors[back].ceilingpic == env[0].sky { sky = true }
+          }
+          if !sky {
+            spawn_puff(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, tx + fixed_mul(tdx, at), ty + fixed_mul(tdy, at), z,
+                       distance == MELEERANGE)
+          }
+          going = false
+        }
+      } else {
+        let th = thing_by_id(things, intercepts[nearest].thing)
+        if th != me && things[th].flags & MF_SHOOTABLE != 0 &&
+           fixed_div(things[th].z + things[th].height - shootz, dist) >= slope &&
+           fixed_div(things[th].z - shootz, dist) <= slope {
+          let at = frac - fixed_div(10 * FRACUNIT, distance)
+          let x = tx + fixed_mul(tdx, at)
+          let y = ty + fixed_mul(tdy, at)
+          let z = shootz + fixed_mul(slope, fixed_mul(at, distance))
+          if things[th].flags & MF_NOBLOOD != 0 {
+            spawn_puff(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, x, y, z, distance == MELEERANGE)
+          } else {
+            spawn_blood(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, x, y, z, damage)
+          }
+          if damage != 0 { damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, th, me, me, damage) }
+          going = false
+        }
+      }
+    }
+  }
+}
+
+// A thing turns to the one it is after (A_FaceTarget); not quite, if
+// that one is hard to see.
+proc face_target(things: mut Mobj, me: entity, rnd: mut Rnd) {
+  let target = things[me].target
+  if there(things, target) {
+    things[me].flags &= ~MF_AMBUSH
+    things[me].angle = point_to_angle(things[target].x - things[me].x,
+                                      things[target].y - things[me].y)
+    if things[target].flags & MF_SHADOW != 0 {
+      things[me].angle += (sub_random(rnd) << 21) as u32
+    }
+  }
+}
+
+// It shoots at the one it is after: so many times, each a little off
+// (A_PosAttack: once; A_SPosAttack: three times; A_CPosAttack: once).
+proc shoot(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+           segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut Near,
+           order: mut Nearorder, tm: mut Tm, spechit: mut Spechit, touched:
+           mut Touched, triggered: mut Triggered, intercepts: mut Intercepts,
+           sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env:
+           Env, things: mut Mobj, player: entity, me: entity, shots: i32) {
+  if there(things, things[me].target) {
+    face_target(things, me, rnd)
+    let bangle = things[me].angle
+    let (slope, aimed) = aim_line_attack(things, me, lines, sectors, bytes,
+                                         bmap, tm, intercepts, bangle,
+                                         MISSILERANGE)
+    for i in 0..shots {
+      let angle = bangle + (sub_random(rnd) << 20) as u32
+      let damage = (p_random(rnd) % 5 + 1) * 3
+      line_attack(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me, angle, MISSILERANGE, slope, damage)
+    }
+  }
+}
+
+// Whether it is near enough the one it is after to hit it, and sees it
+// (P_CheckMeleeRange).
+proc in_melee_range(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
+                    segs: Segs, nodes: Nodes, bytes: Bytes, tm: mut Tm,
+                    sight: mut Sight, env: Env, things: Mobj,
+                    me: entity) -> bool {
+  let target = things[me].target
+  var near = there(things, target) &&
+             aprox_distance(things[target].x - things[me].x,
+                            things[target].y - things[me].y) <
+                 MELEERANGE - 20 * FRACUNIT + mobjinfo[things[target].type].radius
+  if near {
+    near = sees(lines, sectors, subsectors, segs, nodes, bytes, tm, sight, env,
+                things, me, target)
+  }
+  near
+}
+
+// It bites (A_SargAttack).
+proc bite(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+          segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut Near,
+          order: mut Nearorder, tm: mut Tm, spechit: mut Spechit, touched: mut
+          Touched, triggered: mut Triggered, intercepts: mut Intercepts,
+          sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env:
+          Env, things: mut Mobj, player: entity, me: entity) {
+  if there(things, things[me].target) {
+    face_target(things, me, rnd)
+    if in_melee_range(lines, sectors, subsectors, segs, nodes, bytes, tm,
+                      sight, env, things, me) {
+      let damage = (p_random(rnd) % 10 + 1) * 4
+      damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, things[me].target, me, me, damage)
+    }
+  }
+}
+
+// A monster that waits looks for the player, or has heard it; the state
+// it goes on in when it has, or -1 (A_Look).
+proc a_look(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+            segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+            Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+            touched: mut Touched, triggered: mut Triggered, intercepts: mut
+            Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers:
+            Powers, env: Env, things: mut Mobj, player: entity, me: entity) -> i32 {
   things[me].threshold = 0
+  var found = false
+  // What made a noise where it is: after it, if it is not one that waits
+  // to see.
+  let sector = subsectors[things[me].subsector].sector
+  if sectors[sector].soundtarget != 0 && there(things, player) &&
+     things[player].flags & MF_SHOOTABLE != 0 {
+    things[me].target = player
+    found = true
+    if things[me].flags & MF_AMBUSH != 0 {
+      found = sees(lines, sectors, subsectors, segs, nodes, bytes, tm, sight,
+                   env, things, me, player)
+    }
+  }
+  if !found {
+    found = look_for_players(lines, sectors, subsectors, segs, nodes, bytes,
+                             tm, sight, env, things, me, player, false)
+  }
   var next = -1
-  if look_for_players(lines, sectors, subsectors, segs, nodes, bytes, tm, sight,
-                      reject, things, me, player, false) {
+  if found {
     // (Which of the sounds it makes is drawn.)
     let sound = mobjinfo[things[me].type].seesound
     if sound >= SFX_POSIT1 && sound <= SFX_POSIT3 {
@@ -268,17 +783,17 @@ proc a_look(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
 
 // A step the way the thing walks, if it can take it; if a door is in
 // the way that it can open, it opens it (P_Move).
-proc p_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-            nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-            order: Nearorder, tm: mut Tm, spechit: mut Spechit,
-            touched: mut Touched, triggered: mut Triggered,
-            things: mut Mobj, me: entity) -> bool {
+proc p_move(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+            segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+            Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+            touched: mut Touched, triggered: mut Triggered, intercepts: mut
+            Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers:
+            Powers, env: Env, things: mut Mobj, player: entity, me: entity) -> bool {
   let dir = things[me].movedir
   var moved = false
   if dir != DI_NODIR {
     let speed = mobjinfo[things[me].type].speed
-    if try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order, tm,
-                spechit, touched, triggered, things, me, things[me].x + speed * xspeed[dir],
+    if try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, things, me, things[me].x + speed * xspeed[dir],
                 things[me].y + speed * yspeed[dir]) {
       things[me].flags &= ~MF_INFLOAT
       if things[me].flags & MF_FLOAT == 0 { things[me].z = things[me].floorz }
@@ -304,13 +819,14 @@ proc p_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
 
 // The same, and for how many steps it goes on that way is drawn
 // (P_TryWalk).
-proc try_walk(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-              nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-              order: Nearorder, tm: mut Tm, spechit: mut Spechit,
-              touched: mut Touched, triggered: mut Triggered, things: mut Mobj, me: entity,
-              rnd: mut Rnd) -> bool {
-  let walked = p_move(lines, sectors, subsectors, nodes, bytes, bmap, near,
-                      order, tm, spechit, touched, triggered, things, me)
+proc try_walk(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+              segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+              Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+              touched: mut Touched, triggered: mut Triggered, intercepts: mut
+              Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
+              powers: Powers, env: Env, things: mut Mobj, player: entity, me:
+              entity) -> bool {
+  let walked = p_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
   if walked { things[me].movecount = p_random(rnd) & 15 }
   walked
 }
@@ -318,15 +834,18 @@ proc try_walk(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
 // Another way to walk, towards the thing it is after if it can: straight
 // at it, or one of the two ways that lead nearer, or as it went, or any
 // way but back, or back (P_NewChaseDir).
-proc new_chase_dir(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-                   nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-                   order: Nearorder, tm: mut Tm, spechit: mut Spechit,
-                   touched: mut Touched, triggered: mut Triggered,
-                   things: mut Mobj, me: entity, rnd: mut Rnd) {
+proc new_chase_dir(lines: mut Lines, sectors: mut Sectors, subsectors:
+                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                   Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                   spechit: mut Spechit, touched: mut Touched, triggered: mut
+                   Triggered, intercepts: mut Intercepts, sight: mut Sight,
+                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env,
+                   things: mut Mobj, player: entity, me: entity) {
+  let target = things[me].target
   let olddir = things[me].movedir
   let turnaround = opposite[olddir]
-  let deltax = things[things[me].target].x - things[me].x
-  let deltay = things[things[me].target].y - things[me].y
+  let deltax = things[target].x - things[me].x
+  let deltay = things[target].y - things[me].y
   var d1 = if deltax > 10 * FRACUNIT {
     DI_EAST
   } else if deltax < -10 * FRACUNIT {
@@ -344,10 +863,7 @@ proc new_chase_dir(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
   var done = false
   if d1 != DI_NODIR && d2 != DI_NODIR {
     things[me].movedir = diags[(((deltay < 0) as i32) << 1) + ((deltax > 0) as i32)]
-    if things[me].movedir != turnaround {
-      done = try_walk(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                      tm, spechit, touched, triggered, things, me, rnd)
-    }
+    if things[me].movedir != turnaround { done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me) }
   }
   if !done {
     // (The other of the two first, now and then, or if it is the longer
@@ -362,19 +878,16 @@ proc new_chase_dir(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
     if d2 == turnaround { d2 = DI_NODIR }
     if d1 != DI_NODIR {
       things[me].movedir = d1
-      done = try_walk(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                      tm, spechit, touched, triggered, things, me, rnd)
+      done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
     }
   }
   if !done && d2 != DI_NODIR {
     things[me].movedir = d2
-    done = try_walk(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                    tm, spechit, touched, triggered, things, me, rnd)
+    done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
   }
   if !done && olddir != DI_NODIR {
     things[me].movedir = olddir
-    done = try_walk(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                    tm, spechit, touched, triggered, things, me, rnd)
+    done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
   }
   if !done {
     // Any way, round the one way or the other.
@@ -383,15 +896,13 @@ proc new_chase_dir(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
       let tdir = if forwards { step } else { DI_SOUTHEAST - step }
       if !done && tdir != turnaround {
         things[me].movedir = tdir
-        done = try_walk(lines, sectors, subsectors, nodes, bytes, bmap, near,
-                        order, tm, spechit, touched, triggered, things, me, rnd)
+        done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
       }
     }
   }
   if !done && turnaround != DI_NODIR {
     things[me].movedir = turnaround
-    done = try_walk(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                    tm, spechit, touched, triggered, things, me, rnd)
+    done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
   }
   if !done { things[me].movedir = DI_NODIR }
 }
@@ -399,16 +910,17 @@ proc new_chase_dir(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
 // A monster that has seen the player goes after it, and attacks when it
 // can; the state it goes on in, or -1 for the one after its own
 // (A_Chase).
-proc a_chase(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-             segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-             order: Nearorder, tm: mut Tm, spechit: mut Spechit,
-             touched: mut Touched, triggered: mut Triggered,
-             sight: mut Sight, reject: i32, things: mut Mobj, me: entity, player: entity,
-             rnd: mut Rnd) -> i32 {
+proc a_chase(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+             segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+             Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+             touched: mut Touched, triggered: mut Triggered, intercepts: mut
+             Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers:
+             Powers, env: Env, things: mut Mobj, player: entity, me: entity) -> i32 {
   let type = things[me].type
+  let target = things[me].target
   if things[me].reactiontime != 0 { things[me].reactiontime -= 1 }
   if things[me].threshold != 0 {
-    if !there(things, things[me].target) || things[things[me].target].health <= 0 {
+    if !there(things, target) || things[target].health <= 0 {
       things[me].threshold = 0
     } else {
       things[me].threshold -= 1
@@ -425,55 +937,50 @@ proc a_chase(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
     }
   }
   var next = -1
-  if !there(things, things[me].target) || things[things[me].target].flags & MF_SHOOTABLE == 0 {
+  if !there(things, target) || things[target].flags & MF_SHOOTABLE == 0 {
     // Nothing to be after: it looks for the player, or waits again.
     if !look_for_players(lines, sectors, subsectors, segs, nodes, bytes, tm,
-                         sight, reject, things, me, player, true) {
+                         sight, env, things, me, player, true) {
       next = mobjinfo[type].spawnstate
     }
   } else if things[me].flags & MF_JUSTATTACKED != 0 {
     // (Not twice in a row.)
     things[me].flags &= ~MF_JUSTATTACKED
-    new_chase_dir(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                  tm, spechit, touched, triggered, things, me, rnd)
+    new_chase_dir(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
   } else {
-    // Near enough to hit (P_CheckMeleeRange).
+    // Near enough to hit.
     if mobjinfo[type].meleestate != 0 &&
-       aprox_distance(things[things[me].target].x - things[me].x, things[things[me].target].y - things[me].y) <
-           MELEERANGE - 20 * FRACUNIT + mobjinfo[things[things[me].target].type].radius &&
-       check_sight(lines, sectors, subsectors, segs, nodes, bytes, tm, sight,
-                   reject, things[me].x, things[me].y, things[me].z, things[me].height,
-                   things[me].subsector, things[things[me].target].x, things[things[me].target].y, things[things[me].target].z, things[things[me].target].height,
-                   things[things[me].target].subsector) {
+       in_melee_range(lines, sectors, subsectors, segs, nodes, bytes, tm,
+                      sight, env, things, me) {
       next = mobjinfo[type].meleestate
     }
     // Or to shoot, which it does the sooner the nearer it is
     // (P_CheckMissileRange).
-    if next < 0 && mobjinfo[type].missilestate != 0 && things[me].movecount == 0 &&
-       check_sight(lines, sectors, subsectors, segs, nodes, bytes, tm, sight,
-                   reject, things[me].x, things[me].y, things[me].z, things[me].height,
-                   things[me].subsector, things[things[me].target].x, things[things[me].target].y, things[things[me].target].z, things[things[me].target].height,
-                   things[things[me].target].subsector) {
+    if next < 0 && mobjinfo[type].missilestate != 0 && things[me].movecount == 0 {
       var shoots = false
-      if things[me].flags & MF_JUSTHIT != 0 {
-        // (Hit: it shoots back at once.)
-        things[me].flags &= ~MF_JUSTHIT
-        shoots = true
-      } else if things[me].reactiontime == 0 {
-        var dist = aprox_distance(things[me].x - things[things[me].target].x, things[me].y - things[things[me].target].y) -
-                   64 * FRACUNIT
-        if mobjinfo[type].meleestate == 0 { dist -= 128 * FRACUNIT }
-        dist >>= FRACBITS
-        var far = false
-        if type == MT_VILE && dist > 14 * 64 { far = true }
-        if type == MT_UNDEAD {
-          if dist < 196 { far = true }
-          dist >>= 1
+      if sees(lines, sectors, subsectors, segs, nodes, bytes, tm, sight, env,
+              things, me, target) {
+        if things[me].flags & MF_JUSTHIT != 0 {
+          // (Hit: it shoots back at once.)
+          things[me].flags &= ~MF_JUSTHIT
+          shoots = true
+        } else if things[me].reactiontime == 0 {
+          var dist = aprox_distance(things[me].x - things[target].x,
+                                    things[me].y - things[target].y) -
+                     64 * FRACUNIT
+          if mobjinfo[type].meleestate == 0 { dist -= 128 * FRACUNIT }
+          dist >>= FRACBITS
+          var far = false
+          if type == MT_VILE && dist > 14 * 64 { far = true }
+          if type == MT_UNDEAD {
+            if dist < 196 { far = true }
+            dist >>= 1
+          }
+          if type == MT_CYBORG || type == MT_SPIDER || type == MT_SKULL { dist >>= 1 }
+          dist = min(dist, 200)
+          if type == MT_CYBORG { dist = min(dist, 160) }
+          if !far { shoots = p_random(rnd) >= dist }
         }
-        if type == MT_CYBORG || type == MT_SPIDER || type == MT_SKULL { dist >>= 1 }
-        dist = min(dist, 200)
-        if type == MT_CYBORG { dist = min(dist, 160) }
-        if !far { shoots = p_random(rnd) >= dist }
       }
       if shoots {
         next = mobjinfo[type].missilestate
@@ -484,14 +991,8 @@ proc a_chase(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
       // It walks on, or another way if it cannot.
       things[me].movecount -= 1
       var on = things[me].movecount >= 0
-      if on {
-        on = p_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                    tm, spechit, touched, triggered, things, me)
-      }
-      if !on {
-        new_chase_dir(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                      tm, spechit, touched, triggered, things, me, rnd)
-      }
+      if on { on = p_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me) }
+      if !on { new_chase_dir(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me) }
       // (Now and then it makes a sound.)
       if mobjinfo[type].activesound != 0 {
         let sounds = p_random(rnd) < 3
@@ -501,15 +1002,17 @@ proc a_chase(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
   next
 }
 
-// The thing whose turn it is goes into a state, and does what the state
-// does; one that lasts no time goes straight on to the one after, and
-// what it does may be to go into another (P_SetMobjState). Into no
-// state: the thing is no more.
-proc set_state(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-               order: Nearorder, tm: mut Tm, spechit: mut Spechit,
-               touched: mut Touched, triggered: mut Triggered,
-               sight: mut Sight, reject: i32, things: mut Mobj, me: entity, player: entity, rnd: mut Rnd, first: i32) {
+// A thing goes into a state, and does what the state does; one that
+// lasts no time goes straight on to the one after, and what it does may
+// be to go into another (P_SetMobjState). Into no state: the thing is no
+// more.
+proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+               Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+               touched: mut Touched, triggered: mut Triggered, intercepts: mut
+               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
+               powers: Powers, env: Env, things: mut Mobj, player: entity, me:
+               entity, first: i32) {
   var state = first
   var going = true
   while going {
@@ -520,25 +1023,34 @@ proc set_state(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
     } else {
       things[me].state = state
       things[me].tics = states[state].tics
+      things[me].sprite = states[state].sprite
+      things[me].frame = states[state].frame
       let action = states[state].action
       var asked = -1
       if action == A_Look {
-        asked = a_look(lines, sectors, subsectors, segs, nodes, bytes, tm, sight,
-                       reject, things, me, player, rnd)
+        asked = a_look(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
       } else if action == A_Chase {
-        asked = a_chase(lines, sectors, subsectors, segs, nodes, bytes, bmap,
-                        near, order, tm, spechit, touched, triggered, sight,
-                        reject, things, me, player, rnd)
+        asked = a_chase(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
       } else if action == A_FaceTarget {
-        // (A_FaceTarget.)
-        if there(things, things[me].target) {
-          things[me].flags &= ~MF_AMBUSH
-          things[me].angle = point_to_angle(things[things[me].target].x - things[me].x, things[things[me].target].y - things[me].y)
-          if things[things[me].target].flags & MF_SHADOW != 0 {
-            let r = p_random(rnd)
-            things[me].angle += ((r - p_random(rnd)) << 21) as u32
-          }
+        face_target(things, me, rnd)
+      } else if action == A_PosAttack || action == A_CPosAttack {
+        shoot(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me, 1)
+      } else if action == A_SPosAttack {
+        shoot(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me, 3)
+      } else if action == A_SargAttack {
+        bite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me)
+      } else if action == A_Scream {
+        // (Which of the sounds it makes is drawn.)
+        let sound = mobjinfo[things[me].type].deathsound
+        if sound >= SFX_PODTH1 && sound <= SFX_PODTH3 {
+          let which = p_random(rnd) % 3
         }
+        if sound == SFX_BGDTH1 || sound == SFX_BGDTH2 {
+          let which = p_random(rnd) % 2
+        }
+      } else if action == A_Fall {
+        // (What lies dead is walked over.)
+        things[me].flags &= ~MF_SOLID
       }
       if asked >= 0 {
         state = asked
@@ -550,106 +1062,61 @@ proc set_state(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
   }
 }
 
-// A tic of the thing whose turn it is (P_MobjThinker): it moves as fast
-// as it goes, comes to the floor, and its state lasts a tic less.
-proc thing_tic(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: Near,
-               order: Nearorder, tm: mut Tm, spechit: mut Spechit,
-               touched: mut Touched, triggered: mut Triggered,
-               intercepts: mut Intercepts, sight: mut Sight, reject: i32,
-               things: mut Mobj, me: entity, pl: mut Pl, player: entity, rnd: mut Rnd) {
+// A tic of a thing (P_MobjThinker): it moves as fast as it goes, comes
+// to the floor, and its state lasts a tic less.
+proc thing_tic(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+               Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+               touched: mut Touched, triggered: mut Triggered, intercepts: mut
+               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
+               powers: Powers, env: Env, things: mut Mobj, player: entity, me:
+               entity, pl: mut Pl) {
   if things[me].momx != 0 || things[me].momy != 0 {
     thing_xy(lines, sectors, subsectors, nodes, bytes, bmap, near, order, tm,
              spechit, touched, triggered, intercepts, things, me, pl)
   }
-  if things[me].z != things[me].floorz || things[me].momz != 0 { thing_z(things, me, pl) }
+  if things[me].z != things[me].floorz || things[me].momz != 0 {
+    thing_z(things, me, pl)
+  }
   if things[me].tics != -1 {
     things[me].tics -= 1
     if things[me].tics == 0 {
-      set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order,
-                tm, spechit, touched, triggered, sight, reject, things, me, player, rnd,
-                states[things[me].state].nextstate)
+      set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, me, states[things[me].state].nextstate)
     }
   }
 }
 
-// The things near enough to one to be in its way, into `Near`, and
-// `Nearorder`: their rows in the order the blockmap has them in, square
-// by square, in a square the one put there last first.
-proc gather_near(things: Mobj, me: entity, bmap: Bmap, near: mut Near,
-                 order: mut Nearorder) {
-  near = []
-  order = []
-  let x = things[me].x
-  let y = things[me].y
-  for o, other in things
-      where o != me && !other.gone && other.flags & MF_NOBLOCKMAP == 0 &&
-            abs(other.x - x) < NEARREACH && abs(other.y - y) < NEARREACH {
-    near += {
-      id: other.id, x: other.x, y: other.y, z: other.z, radius: other.radius,
-      height: other.height, flags: other.flags, type: other.type,
-      sprite: other.sprite, bx: (other.x - bmap[0].orgx) >> MAPBLOCKSHIFT,
-      by: (other.y - bmap[0].orgy) >> MAPBLOCKSHIFT, linked: other.linked,
-      gone: false
-    }
-  }
-  for i in 0..len(near) {
-    order += { index: i }
-    var at = i
-    var settled = false
-    while at > 0 && !settled {
-      let before = order[at - 1].index
-      if near[before].bx > near[i].bx ||
-         (near[before].bx == near[i].bx &&
-          (near[before].by > near[i].by ||
-           (near[before].by == near[i].by && near[before].linked < near[i].linked))) {
-        order[at].index = before
-        at -= 1
-      } else {
-        settled = true
-      }
-    }
-    order[at].index = i
+// What the player's thing touched is picked up, in the order it was
+// touched in, if the player has a use for it, and is then no more.
+proc pick_up(things: mut Mobj, me: entity, touched: Touched, inv: mut Inv,
+             ammo: mut Ammo, powers: mut Powers, skill: i32) {
+  for k in 0..len(touched) {
+    touch_special(things, me, thing_by_id(things, touched[k].id), inv, ammo,
+                  powers, touched[k].z, skill)
   }
 }
 
 // A tic of every thing, in the order they were made in (P_RunThinkers).
-// What the player picks up is gone for those after it, and its entity
-// with the others that are no more when all have had their turn.
+// What is no more (picked up, or at the end of its states) is gone for
+// those after it, and its entity when all have had their turn.
 system think_things() {
-  let reject = Lumps[Level.lump + ML_REJECT].at
+  Env = [{
+    reject: Lumps[Level.lump + ML_REJECT].at, skill: Level.skill,
+    sky: Data.skyflatnum, leveltime: Clock.leveltime
+  }; 1]
   for e, m: mut Mobj in turn by m.id
       where !m.gone && (m.tics != -1 || m.momx != 0 || m.momy != 0 ||
                         m.momz != 0 || m.z != m.floorz) {
-    let player = m.type == MT_PLAYER
-    // (The things in its way, if it may move.)
-    if m.momx != 0 || m.momy != 0 || m.tics == 1 {
-      gather_near(Mobj, e, Bmap, Near, Nearorder)
-    } else {
-      Near = []
-      Nearorder = []
-    }
     Touched = []
     Rnd = [{ play: Random.play }; 1]
     thing_tic(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
               Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
-              reject, Mobj, e, Pl, Spawned.player, Rnd)
+              Rnd, Inv, Powers, Env, Mobj, Spawned.player, e, Pl)
     Random.play = Rnd[0].play
-    if player {
-      // What was touched is picked up, if the player has a use for it,
-      // and is then no more.
-      Taken = []
-      for k in 0..len(Touched) {
-        touch_special(Near, Taken, Mobj, e, Inv, Ammo, Powers, Touched[k].index,
-                      Touched[k].z, Level.skill)
-      }
+    if m.type == MT_PLAYER {
+      pick_up(Mobj, e, Touched, Inv, Ammo, Powers, Level.skill)
       count_powers(Mobj, e, Powers)
-      for o, other: Mobj where is_taken(Taken, other.id) {
-        Mobj(o).gone = true
-      }
     }
-    m.sprite = states[m.state].sprite
-    m.frame = states[m.state].frame
   }
   for e, m: Mobj where m.gone { e.destroy() }
 }

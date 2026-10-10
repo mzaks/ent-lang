@@ -48,7 +48,8 @@ unique Nofit: i32
 proc use_line(lines: mut Lines, sectors: Sectors, bytes: Bytes, bmap: Bmap,
               tm: mut Tm, intercepts: mut Intercepts, things: Mobj, me: entity) -> i32 {
   let fine = (things[me].angle >> ANGLETOFINESHIFT) as i32
-  path_lines(lines, bytes, bmap, tm, intercepts, things[me].x, things[me].y,
+  path_lines(things, false, lines, bytes, bmap, tm, intercepts, things[me].x,
+             things[me].y,
              things[me].x + (USERANGE >> FRACBITS) * finecosine(fine),
              things[me].y + (USERANGE >> FRACBITS) * finesine[fine])
   var used = -1

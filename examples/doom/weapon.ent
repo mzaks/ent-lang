@@ -1,0 +1,426 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The player moved (p_user.c, and what of p_map.c, p_maputl.c and
+// The player's weapon (p_pspr.c, and of p_user.c what changes it): the
+// two pictures of it in front of the eye, the weapon and its flash, go
+// through states as things do, and what the states do is that it comes
+// up and goes down, is ready, and shoots; a shot makes a noise that the
+// monsters hear (P_NoiseAlert). (Not yet: the rocket launcher, and the
+// weapons that are not in the first episode.)
+import files
+import wad
+import fixed
+import tables
+import angles
+import random
+import info
+import level
+import data
+import render
+import things
+import demo
+import items
+import play
+import enemy
+
+// The weapon's two pictures, a row each: the state (0: none), how long
+// for, and where on the screen.
+buffer Psp { state: i32, tics: i32, sx: i32, sy: i32 } capacity 2
+const PS_WEAPON = 0
+const PS_FLASH = 1
+
+const WEAPONBOTTOM = 128 * FRACUNIT
+const WEAPONTOP = 32 * FRACUNIT
+const LOWERSPEED = 6 * FRACUNIT
+const RAISESPEED = 6 * FRACUNIT
+
+// A weapon's states: coming up, going down, ready, shooting, and the
+// flash (d_items.c; what it shoots is `weaponammo`).
+table weaponinfo { up: i32, down: i32, ready: i32, atk: i32, flash: i32 } = [
+  { up: 4, down: 3, ready: 2, atk: 5, flash: 0 },
+  { up: 12, down: 11, ready: 10, atk: 13, flash: 17 },
+  { up: 20, down: 19, ready: 18, atk: 21, flash: 30 },
+  { up: 51, down: 50, ready: 49, atk: 52, flash: 55 },
+  { up: 59, down: 58, ready: 57, atk: 60, flash: 63 },
+  { up: 76, down: 75, ready: 74, atk: 77, flash: 79 },
+  { up: 83, down: 82, ready: 81, atk: 84, flash: 88 },
+  { up: 70, down: 69, ready: 67, atk: 71, flash: 0 },
+  { up: 34, down: 33, ready: 32, atk: 35, flash: 47 }
+]
+
+// A noise in a sector is heard in every sector it gets to through
+// openings, and through one line that stops sound but not two
+// (P_RecursiveSound).
+proc recursive_sound(lines: Lines, sectors: mut Sectors, validcount: i32,
+                     sec: i32, soundblocks: i32) {
+  if sectors[sec].validcount != validcount ||
+     sectors[sec].soundtraversed > soundblocks + 1 {
+    sectors[sec].validcount = validcount
+    sectors[sec].soundtraversed = soundblocks + 1
+    sectors[sec].soundtarget = 1
+    for l in 0..len(lines) {
+      let front = lines[l].frontsector
+      let back = lines[l].backsector
+      if (front == sec || back == sec) && lines[l].flags & ML_TWOSIDED != 0 &&
+         back >= 0 &&
+         open_top(lines, sectors, l) - open_bottom(lines, sectors, l) > 0 {
+        let other = if front == sec { back } else { front }
+        if lines[l].flags & ML_SOUNDBLOCK != 0 {
+          if soundblocks == 0 {
+            recursive_sound(lines, sectors, validcount, other, 1)
+          }
+        } else {
+          recursive_sound(lines, sectors, validcount, other, soundblocks)
+        }
+      }
+    }
+  }
+}
+
+// One of the weapon's pictures goes into a state and does what the state
+// does (below).
+proc set_psprite(lines: mut Lines, sectors: mut Sectors, subsectors:
+                 Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                 Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                 spechit: mut Spechit, touched: mut Touched, triggered: mut
+                 Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
+                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, things: mut
+                 Mobj, player: entity, pl: mut Pl, psp: mut Psp, ammo: mut
+                 Ammo, position: i32, first: i32)
+
+// The weapon that is to come comes up (P_BringUpWeapon).
+proc bring_up_weapon(lines: mut Lines, sectors: mut Sectors, subsectors:
+                     Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                     Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                     spechit: mut Spechit, touched: mut Touched, triggered:
+                     mut Triggered, intercepts: mut Intercepts, sight: mut
+                     Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env:
+                     Env, things: mut Mobj, player: entity, pl: mut Pl, psp:
+                     mut Psp, ammo: mut Ammo) {
+  if inv[0].pendingweapon == WP_NOCHANGE { inv[0].pendingweapon = inv[0].readyweapon }
+  let newstate = weaponinfo[inv[0].pendingweapon].up
+  inv[0].pendingweapon = WP_NOCHANGE
+  psp[PS_WEAPON].sy = WEAPONBOTTOM
+  set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, PS_WEAPON, newstate)
+}
+
+// Whether there is something to shoot with; if not, the weapon goes
+// down for the best there is something for (P_CheckAmmo).
+proc check_ammo(lines: mut Lines, sectors: mut Sectors, subsectors:
+                Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                spechit: mut Spechit, touched: mut Touched, triggered: mut
+                Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
+                mut Rnd, inv: mut Inv, powers: Powers, env: Env, things: mut
+                Mobj, player: entity, pl: mut Pl, psp: mut Psp, ammo: mut
+                Ammo) -> bool {
+  let kind = weaponammo[inv[0].readyweapon]
+  let count = if inv[0].readyweapon == WP_BFG {
+    40
+  } else if inv[0].readyweapon == WP_SUPERSHOTGUN {
+    2
+  } else {
+    1
+  }
+  var enough = kind == AM_NOAMMO
+  if !enough { enough = ammo[kind].count >= count }
+  if !enough {
+    let has = inv[0].weapons
+    inv[0].pendingweapon = if has & (1 << WP_CHAINGUN) != 0 && ammo[AM_CLIP].count != 0 {
+      WP_CHAINGUN
+    } else if has & (1 << WP_SHOTGUN) != 0 && ammo[AM_SHELL].count != 0 {
+      WP_SHOTGUN
+    } else if ammo[AM_CLIP].count != 0 {
+      WP_PISTOL
+    } else if has & (1 << WP_CHAINSAW) != 0 {
+      WP_CHAINSAW
+    } else if has & (1 << WP_MISSILE) != 0 && ammo[AM_MISL].count != 0 {
+      WP_MISSILE
+    } else {
+      WP_FIST
+    }
+    set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, PS_WEAPON, weaponinfo[inv[0].readyweapon].down)
+  }
+  enough
+}
+
+// The weapon shoots, if it has what to shoot with: the player is seen
+// to, and heard (P_FireWeapon).
+proc fire_weapon(lines: mut Lines, sectors: mut Sectors, subsectors:
+                 Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                 Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                 spechit: mut Spechit, touched: mut Touched, triggered: mut
+                 Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
+                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, things: mut
+                 Mobj, player: entity, pl: mut Pl, psp: mut Psp, ammo: mut
+                 Ammo) {
+  if check_ammo(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo) {
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, player, S_PLAY_ATK1)
+    set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, PS_WEAPON, weaponinfo[inv[0].readyweapon].atk)
+    tm[0].validcount += 1
+    recursive_sound(lines, sectors, tm[0].validcount,
+                    subsectors[things[player].subsector].sector, 0)
+  }
+}
+
+// How steeply the player's shot goes to hit what is in front, or a
+// little to either side (P_BulletSlope).
+proc bullet_slope(things: Mobj, me: entity, lines: mut Lines,
+                  sectors: Sectors, bytes: Bytes, bmap: Bmap, tm: mut Tm,
+                  intercepts: mut Intercepts) -> i32 {
+  let an = things[me].angle
+  let (slope, aimed) = aim_line_attack(things, me, lines, sectors, bytes, bmap,
+                                       tm, intercepts, an, 16 * 64 * FRACUNIT)
+  var bullet = slope
+  if aimed == none {
+    let (left, lefted) = aim_line_attack(things, me, lines, sectors, bytes,
+                                         bmap, tm, intercepts, an + (1 << 26),
+                                         16 * 64 * FRACUNIT)
+    bullet = left
+    if lefted == none {
+      let (right, righted) = aim_line_attack(
+          things, me, lines, sectors, bytes, bmap, tm, intercepts,
+          an + (1 << 26) - (2 << 26), 16 * 64 * FRACUNIT)
+      bullet = right
+    }
+  }
+  bullet
+}
+
+// A bullet (P_GunShot): the first of a row straight, the others a
+// little off.
+proc gun_shot(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+              segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+              Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+              touched: mut Touched, triggered: mut Triggered, intercepts: mut
+              Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
+              powers: Powers, env: Env, things: mut Mobj, player: entity, pl:
+              mut Pl, psp: mut Psp, ammo: mut Ammo, slope: i32, accurate:
+              bool) {
+  let damage = 5 * (p_random(rnd) % 3 + 1)
+  var angle = things[player].angle
+  if !accurate { angle += (sub_random(rnd) << 18) as u32 }
+  line_attack(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, player, angle, MISSILERANGE, slope, damage)
+}
+
+// What a state of the weapon does.
+proc weapon_action(lines: mut Lines, sectors: mut Sectors, subsectors:
+                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                   Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                   spechit: mut Spechit, touched: mut Touched, triggered: mut
+                   Triggered, intercepts: mut Intercepts, sight: mut Sight,
+                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env,
+                   things: mut Mobj, player: entity, pl: mut Pl, psp: mut Psp,
+                   ammo: mut Ammo, position: i32, action: i32, state: i32) {
+  if action == A_WeaponReady {
+    // The player is seen to stand again; the weapon goes down for
+    // another, or shoots, or bobs.
+    if things[player].state == S_PLAY_ATK1 || things[player].state == S_PLAY_ATK2 {
+      set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, player, S_PLAY)
+    }
+    if inv[0].pendingweapon != WP_NOCHANGE || things[player].health == 0 {
+      set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, PS_WEAPON, weaponinfo[inv[0].readyweapon].down)
+    } else {
+      var fires = false
+      if pl[0].buttons & BT_ATTACK != 0 {
+        if !pl[0].attackdown ||
+           (inv[0].readyweapon != WP_MISSILE && inv[0].readyweapon != WP_BFG) {
+          pl[0].attackdown = true
+          fire_weapon(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo)
+          fires = true
+        }
+      } else {
+        pl[0].attackdown = false
+      }
+      if !fires {
+        let angle = (128 * env[0].leveltime) & FINEMASK
+        psp[position].sx = FRACUNIT + fixed_mul(pl[0].bob, finecosine(angle))
+        psp[position].sy = WEAPONTOP +
+            fixed_mul(pl[0].bob, finesine[angle & (FINEANGLES / 2 - 1)])
+      }
+    }
+  } else if action == A_ReFire {
+    // The key is still down: again.
+    if pl[0].buttons & BT_ATTACK != 0 && inv[0].pendingweapon == WP_NOCHANGE &&
+       things[player].health != 0 {
+      pl[0].refire += 1
+      fire_weapon(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo)
+    } else {
+      pl[0].refire = 0
+      let enough = check_ammo(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo)
+    }
+  } else if action == A_CheckReload {
+    let enough = check_ammo(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo)
+  } else if action == A_Lower {
+    psp[position].sy += LOWERSPEED
+    if psp[position].sy >= WEAPONBOTTOM {
+      if pl[0].dead {
+        psp[position].sy = WEAPONBOTTOM
+      } else if things[player].health == 0 {
+        set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, PS_WEAPON, S_NULL)
+      } else {
+        inv[0].readyweapon = inv[0].pendingweapon
+        bring_up_weapon(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo)
+      }
+    }
+  } else if action == A_Raise {
+    psp[position].sy -= RAISESPEED
+    if psp[position].sy <= WEAPONTOP {
+      psp[position].sy = WEAPONTOP
+      set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, PS_WEAPON, weaponinfo[inv[0].readyweapon].ready)
+    }
+  } else if action == A_GunFlash {
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, player, S_PLAY_ATK2)
+    set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, PS_FLASH, weaponinfo[inv[0].readyweapon].flash)
+  } else if action == A_Light0 {
+    pl[0].extralight = 0
+  } else if action == A_Light1 {
+    pl[0].extralight = 1
+  } else if action == A_Light2 {
+    pl[0].extralight = 2
+  } else if action == A_Punch {
+    var damage = (p_random(rnd) % 10 + 1) << 1
+    if powers[PW_STRENGTH].tics != 0 { damage *= 10 }
+    let angle = things[player].angle + (sub_random(rnd) << 18) as u32
+    let (slope, hit) = aim_line_attack(things, player, lines, sectors, bytes,
+                                       bmap, tm, intercepts, angle, MELEERANGE)
+    line_attack(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, player, angle, MELEERANGE, slope, damage)
+    // (It turns to what it hit.)
+    if hit != none {
+      things[player].angle = point_to_angle(things[hit].x - things[player].x,
+                                            things[hit].y - things[player].y)
+    }
+  } else if action == A_FirePistol || action == A_FireShotgun ||
+            action == A_FireCGun {
+    let kind = weaponammo[inv[0].readyweapon]
+    // (A chaingun with nothing left only clicks.)
+    if action != A_FireCGun || ammo[kind].count != 0 {
+      set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, player, S_PLAY_ATK2)
+      ammo[kind].count -= 1
+      set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, PS_FLASH,
+                  weaponinfo[inv[0].readyweapon].flash +
+                      if action == A_FireCGun { state - S_CHAIN1 } else { 0 })
+      let slope = bullet_slope(things, player, lines, sectors, bytes, bmap, tm,
+                               intercepts)
+      if action == A_FireShotgun {
+        for i in 0..7 { gun_shot(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, slope, false) }
+      } else {
+        gun_shot(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, slope, pl[0].refire == 0)
+      }
+    }
+  }
+}
+
+// One of the weapon's pictures goes into a state, and does what the
+// state does; a state that lasts no time goes straight on to the one
+// after (P_SetPsprite). Into no state: the picture is not there.
+proc set_psprite(lines: mut Lines, sectors: mut Sectors, subsectors:
+                 Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                 Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                 spechit: mut Spechit, touched: mut Touched, triggered: mut
+                 Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
+                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, things: mut
+                 Mobj, player: entity, pl: mut Pl, psp: mut Psp, ammo: mut
+                 Ammo, position: i32, first: i32) {
+  var stnum = first
+  var going = true
+  while going {
+    if stnum == S_NULL {
+      psp[position].state = S_NULL
+      going = false
+    } else {
+      psp[position].state = stnum
+      psp[position].tics = states[stnum].tics
+      if states[stnum].misc1 != 0 {
+        psp[position].sx = states[stnum].misc1 << FRACBITS
+        psp[position].sy = states[stnum].misc2 << FRACBITS
+      }
+      if states[stnum].action != A_None {
+        weapon_action(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, position, states[stnum].action, stnum)
+      }
+      // (What it did may have put it into another state, or none.)
+      if psp[position].state == S_NULL {
+        going = false
+      } else {
+        stnum = states[psp[position].state].nextstate
+        going = psp[position].tics == 0
+      }
+    }
+  }
+}
+
+// A tic of the weapon's pictures (P_MovePsprites).
+proc move_psprites(lines: mut Lines, sectors: mut Sectors, subsectors:
+                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                   Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                   spechit: mut Spechit, touched: mut Touched, triggered: mut
+                   Triggered, intercepts: mut Intercepts, sight: mut Sight,
+                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env,
+                   things: mut Mobj, player: entity, pl: mut Pl, psp: mut Psp,
+                   ammo: mut Ammo) {
+  for i in 0..2 {
+    if psp[i].state != S_NULL && psp[i].tics != -1 {
+      psp[i].tics -= 1
+      if psp[i].tics == 0 {
+        set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, things, player, pl, psp, ammo, i, states[psp[i].state].nextstate)
+      }
+    }
+  }
+  psp[PS_FLASH].sx = psp[PS_WEAPON].sx
+  psp[PS_FLASH].sy = psp[PS_WEAPON].sy
+}
+
+// The weapon the player starts with comes up (P_SetupPsprites). After
+// `start_player`.
+system start_weapon() {
+  Env = [{
+    reject: Lumps[Level.lump + ML_REJECT].at, skill: Level.skill,
+    sky: Data.skyflatnum, leveltime: Clock.leveltime
+  }; 1]
+  Psp = [{ state: S_NULL, tics: 0, sx: 0, sy: 0 }; 2]
+  Inv[0].pendingweapon = Inv[0].readyweapon
+  Rnd = [{ play: Random.play }; 1]
+  bring_up_weapon(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
+                  Nearorder, Tm, Spechit, Touched, Triggered, Intercepts,
+                  Sight, Rnd, Inv, Powers, Env, Mobj, Spawned.player, Pl, Psp,
+                  Ammo)
+  Random.play = Rnd[0].play
+}
+
+// The player's weapon in a tic (of P_PlayerThink): another is asked
+// for, and its pictures go on. After `use_lines`.
+system think_weapon() {
+  Env = [{
+    reject: Lumps[Level.lump + ML_REJECT].at, skill: Level.skill,
+    sky: Data.skyflatnum, leveltime: Clock.leveltime
+  }; 1]
+  if Pl[0].buttons & BT_SPECIAL != 0 { Pl[0].buttons = 0 }
+  if Pl[0].buttons & BT_CHANGE != 0 && !Pl[0].dead {
+    var newweapon = (Pl[0].buttons & BT_WEAPONMASK) >> BT_WEAPONSHIFT
+    // (The saw for the fist, unless the fist is the stronger.)
+    if newweapon == WP_FIST && Inv[0].weapons & (1 << WP_CHAINSAW) != 0 &&
+       !(Inv[0].readyweapon == WP_CHAINSAW && Powers[PW_STRENGTH].tics != 0) {
+      newweapon = WP_CHAINSAW
+    }
+    if Inv[0].weapons & (1 << newweapon) != 0 && newweapon != Inv[0].readyweapon &&
+       newweapon != WP_PLASMA && newweapon != WP_BFG {
+      Inv[0].pendingweapon = newweapon
+    }
+  }
+  Rnd = [{ play: Random.play }; 1]
+  move_psprites(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
+                Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
+                Rnd, Inv, Powers, Env, Mobj, Spawned.player, Pl, Psp, Ammo)
+  Random.play = Rnd[0].play
+}
