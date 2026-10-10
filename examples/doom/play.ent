@@ -57,11 +57,12 @@ buffer Pl {
 // What checking a place leaves behind, one row (the tm.. of p_map.c):
 // the floor and ceiling there, the lowest floor it touches, the line
 // that made the ceiling (-1: none); the number of the looking-through
-// (see `Lines`); what sliding found; and how many times a thing was put
-// somewhere.
+// (see `Lines`); what sliding found; how many times a thing was put
+// somewhere; and the thing a missile ran into (`hit`, its `id`; 0: none).
 buffer Tm {
   floorz: i32, ceilingz: i32, dropoffz: i32, ceilingline: i32,
-  validcount: i32, bestslidefrac: i32, bestslideline: i32, links: i32
+  validcount: i32, bestslidefrac: i32, bestslideline: i32, links: i32,
+  hit: i32
 } capacity 1
 
 // The lines with something special that a place that was checked
@@ -268,7 +269,8 @@ proc check_position(lines: mut Lines, sectors: Sectors,
                     bmap: Bmap, near: Near, order: Nearorder, tm: mut Tm,
                     spechit: mut Spechit, touched: mut Touched, x: i32,
                     y: i32, z: i32, radius: i32, flags: i32,
-                    player: bool) -> bool {
+                    player: bool, height: i32, shooter: i32,
+                    shooterid: i32) -> bool {
   let top = y + radius
   let bottom = y - radius
   let right = x + radius
@@ -279,6 +281,7 @@ proc check_position(lines: mut Lines, sectors: Sectors,
   tm[0].dropoffz = sectors[sector].floorheight
   tm[0].ceilingz = sectors[sector].ceilingheight
   tm[0].validcount += 1
+  tm[0].hit = 0
   spechit = []
   let validcount = tm[0].validcount
   let orgx = bmap[0].orgx
@@ -297,12 +300,37 @@ proc check_position(lines: mut Lines, sectors: Sectors,
          near[n].flags & (MF_SOLID | MF_SPECIAL | MF_SHOOTABLE) != 0 {
         let blockdist = near[n].radius + radius
         if abs(near[n].x - x) < blockdist && abs(near[n].y - y) < blockdist {
-          // What can be picked up is touched (and picked up after the
-          // player has moved, in this order); what is solid stops.
-          if near[n].flags & MF_SPECIAL != 0 && flags & MF_PICKUP != 0 {
-            touched += { id: near[n].id, z: z }
+          if flags & MF_MISSILE != 0 {
+            // A missile: over it or under it, or into it. Not into the
+            // one that shot it, and it only stops at one of that one's
+            // kind; what cannot be hurt stops it if it is solid, and
+            // anything else is hit (`tm.hit`).
+            if z > near[n].z + near[n].height || z + height < near[n].z {
+              // (Past it.)
+            } else if shooter >= 0 && near[n].id == shooterid &&
+                      (shooter == near[n].type ||
+                       (shooter == MT_KNIGHT && near[n].type == MT_BRUISER) ||
+                       (shooter == MT_BRUISER && near[n].type == MT_KNIGHT)) {
+              // (Past the one that shot it.)
+            } else if shooter >= 0 && near[n].type != MT_PLAYER &&
+                      (shooter == near[n].type ||
+                       (shooter == MT_KNIGHT && near[n].type == MT_BRUISER) ||
+                       (shooter == MT_BRUISER && near[n].type == MT_KNIGHT)) {
+              ok = false
+            } else if near[n].flags & MF_SHOOTABLE == 0 {
+              if near[n].flags & MF_SOLID != 0 { ok = false }
+            } else {
+              tm[0].hit = near[n].id
+              ok = false
+            }
+          } else {
+            // What can be picked up is touched (and picked up after the
+            // player has moved, in this order); what is solid stops.
+            if near[n].flags & MF_SPECIAL != 0 && flags & MF_PICKUP != 0 {
+              touched += { id: near[n].id, z: z }
+            }
+            if near[n].flags & MF_SOLID != 0 { ok = false }
           }
-          if near[n].flags & MF_SOLID != 0 { ok = false }
         }
       }
     }
@@ -364,7 +392,13 @@ proc try_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
   gather_near(things, me, bmap, near, order)
   if check_position(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
                     tm, spechit, touched, x, y, things[me].z, things[me].radius, flags,
-                    (things[me].type == MT_PLAYER)) {
+                    things[me].type == MT_PLAYER, things[me].height,
+                    if there(things, things[me].target) {
+                      things[things[me].target].type
+                    } else {
+                      -1
+                    },
+                    things[things[me].target].id) {
     let height = things[me].height
     let z = things[me].z
     if flags & MF_NOCLIP != 0 ||
@@ -712,99 +746,6 @@ proc player_think(things: mut Mobj, me: entity, pl: mut Pl, leveltime: i32) {
   }
 }
 
-// The thing whose turn it is, moved as fast as it goes (P_XYMovement):
-// the player slides along what is in the way, anything else stops; on
-// the floor it is slowed down.
-proc thing_xy(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
-              nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut Near,
-              order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
-              touched: mut Touched, triggered: mut Triggered,
-              intercepts: mut Intercepts, things: mut Mobj, me: entity, pl: mut Pl) {
-  let player = (things[me].type == MT_PLAYER)
-  things[me].momx = min(max(things[me].momx, -MAXMOVE), MAXMOVE)
-  things[me].momy = min(max(things[me].momy, -MAXMOVE), MAXMOVE)
-  var xmove = things[me].momx
-  var ymove = things[me].momy
-  loop {
-    // (A long way in two halves.)
-    var ptryx = things[me].x + xmove
-    var ptryy = things[me].y + ymove
-    if xmove > MAXMOVE / 2 || ymove > MAXMOVE / 2 {
-      ptryx = things[me].x + xmove / 2
-      ptryy = things[me].y + ymove / 2
-      xmove >>= 1
-      ymove >>= 1
-    } else {
-      xmove = 0
-      ymove = 0
-    }
-    if !try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                 tm, spechit, touched, triggered, things, me, ptryx, ptryy) {
-      if player {
-        slide_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                   tm, spechit, touched, triggered, intercepts, things, me)
-      } else {
-        // (What flies and bursts is not there yet.)
-        things[me].momx = 0
-        things[me].momy = 0
-      }
-    }
-  } until xmove == 0 && ymove == 0
-  // On the floor it slows down, and stops when it is slow and no key
-  // moves it. (What is dead slides on off a ledge.)
-  let sliding = things[me].flags & MF_CORPSE != 0 &&
-                (things[me].momx > FRACUNIT / 4 || things[me].momx < -FRACUNIT / 4 ||
-                 things[me].momy > FRACUNIT / 4 || things[me].momy < -FRACUNIT / 4) &&
-                things[me].floorz != sectors[subsectors[things[me].subsector].sector].floorheight
-  if things[me].flags & (MF_MISSILE | MF_SKULLFLY) == 0 && things[me].z <= things[me].floorz &&
-     !sliding {
-    if things[me].momx > -STOPSPEED && things[me].momx < STOPSPEED &&
-       things[me].momy > -STOPSPEED && things[me].momy < STOPSPEED &&
-       (!player || (pl[0].forwardmove == 0 && pl[0].sidemove == 0)) {
-      if player && (things[me].state - S_PLAY_RUN1) as u32 < 4 {
-        things[me].state = S_PLAY
-        things[me].tics = states[S_PLAY].tics
-      }
-      things[me].momx = 0
-      things[me].momy = 0
-    } else {
-      things[me].momx = fixed_mul(things[me].momx, FRICTION)
-      things[me].momy = fixed_mul(things[me].momy, FRICTION)
-    }
-  }
-}
-
-// And brought to the floor, or held under the ceiling (P_ZMovement).
-proc thing_z(things: mut Mobj, me: entity, pl: mut Pl) {
-  let player = (things[me].type == MT_PLAYER)
-  // (Up a step: the eye follows smoothly.)
-  if player && things[me].z < things[me].floorz {
-    pl[0].viewheight -= things[me].floorz - things[me].z
-    pl[0].deltaviewheight = (VIEWHEIGHT - pl[0].viewheight) >> 3
-  }
-  things[me].z += things[me].momz
-  if things[me].z <= things[me].floorz {
-    if things[me].momz < 0 {
-      // (Landed hard: the eye dips.)
-      if player && things[me].momz < -GRAVITY * 8 {
-        pl[0].deltaviewheight = things[me].momz >> 3
-      }
-      things[me].momz = 0
-    }
-    things[me].z = things[me].floorz
-  } else if things[me].flags & MF_NOGRAVITY == 0 {
-    if things[me].momz == 0 {
-      things[me].momz = -GRAVITY * 2
-    } else {
-      things[me].momz -= GRAVITY
-    }
-  }
-  if things[me].z + things[me].height > things[me].ceilingz {
-    if things[me].momz > 0 { things[me].momz = 0 }
-    things[me].z = things[me].ceilingz - things[me].height
-  }
-}
-
 // What the player and the checking of places start with, after
 // `spawn_things`.
 system start_player() {
@@ -816,7 +757,7 @@ system start_player() {
   }; 1]
   Tm = [{
     floorz: 0, ceilingz: 0, dropoffz: 0, ceilingline: -1, validcount: 1,
-    bestslidefrac: 0, bestslideline: 0, links: Spawned.links
+    bestslidefrac: 0, bestslideline: 0, links: Spawned.links, hit: 0
   }; 1]
   // G_PlayerReborn: a pistol, fifty bullets and two fists.
   Inv = [{

@@ -27,12 +27,14 @@ capacity Bytes 16777216
 unique Tics: i32
 // The demo is played without its monsters, whatever it says.
 unique Without: bool
+unique Dump: i32
 
 world {
   Wad.file = "doom1.wad"
   Demo.lump = "DEMO1"
   Tics = 300
   Without = false
+  Dump = -5
 }
 
 // The things: how many, and their hashes added up.
@@ -67,7 +69,12 @@ system trace() {
         m.state), m.tics)
   }
   for m: Mobj where m.type == MT_PLAYER {
-    put("{Level.episode} {Level.map} {Clock.leveltime} {Random.play} {m.x} {m.y} {m.z} {m.angle} {m.health} {Count} {Hash}")
+    put("{Level.episode} {Level.map} {Clock.leveltime} {Random.play} {m.x} {m.y} {m.z} {m.angle} {max(m.health, 0)} {Count} {Hash}")
+  }
+  // (With `Dump` a tic: every thing of that tic as well, a line each, as
+  // the reference writes them with DOOM_DUMP, for finding what differs.)
+  for m: Mobj by m.id where Clock.leveltime == Dump {
+    put("thing {m.type} {m.x} {m.y} {m.z} {m.angle} {m.health} {m.state} {m.tics}")
   }
 }
 
@@ -89,12 +96,14 @@ schedule setup() {
 }
 schedule tic() {
   think_player()
+  player_sector()
   use_lines()
   trigger_lines()
   think_weapon()
-  think_things()
-  trigger_lines()
+  think_things(false)
   run_lights()
+  think_things(true)
+  trigger_lines()
   run_movers()
   trace()
   next()

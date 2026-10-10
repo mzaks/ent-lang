@@ -36,10 +36,10 @@ index fbb1a18..c2ea4e0 100644
  
  
 diff --git i/src/doom/p_tick.c w/src/doom/p_tick.c
-index 5a93b80..7766c78 100644
+index 5a93b80..ca01c78 100644
 --- i/src/doom/p_tick.c
 +++ w/src/doom/p_tick.c
-@@ -23,6 +23,143 @@
+@@ -23,6 +23,171 @@
  
  #include "doomstat.h"
  
@@ -153,6 +153,34 @@ index 5a93b80..7766c78 100644
 +    if (!file)
 +	return;
 +
++    // ent-lang: with DOOM_DUMP=tic, every map object of that tic as well,
++    // a line each, into the file DOOM_DUMPFILE.
++    {
++	static int dumptic = -2;
++	static FILE *dumpfile;
++
++	if (dumptic == -2)
++	{
++	    dumptic = getenv ("DOOM_DUMP") ? atoi (getenv ("DOOM_DUMP")) : -3;
++	    if (dumptic != -3 && getenv ("DOOM_DUMPFILE"))
++		dumpfile = fopen (getenv ("DOOM_DUMPFILE"), "w");
++	}
++	if (dumpfile && leveltime == dumptic)
++	{
++	    for (thinker = thinkercap.next; thinker != &thinkercap;
++		 thinker = thinker->next)
++	    {
++		mobj_t *mobj = (mobj_t *) thinker;
++
++		if (thinker->function.acp1 != (actionf_p1) P_MobjThinker)
++		    continue;
++		fprintf (dumpfile, "%d %d %d %d %u %d %d %d\n", mobj->type,
++			 mobj->x, mobj->y, mobj->z, (unsigned int) mobj->angle,
++			 mobj->health, (int) (mobj->state - states), mobj->tics);
++	    }
++	    fflush (dumpfile);
++	}
++    }
 +    for (thinker = thinkercap.next; thinker != &thinkercap;
 +	 thinker = thinker->next)
 +    {
@@ -183,7 +211,7 @@ index 5a93b80..7766c78 100644
  
  int	leveltime;
  
-@@ -126,6 +263,12 @@ void P_Ticker (void)
+@@ -126,6 +291,12 @@ void P_Ticker (void)
  {
      int		i;
      
@@ -196,7 +224,7 @@ index 5a93b80..7766c78 100644
      // run the tic
      if (paused)
  	return;
-@@ -148,6 +291,8 @@ void P_Ticker (void)
+@@ -148,6 +319,8 @@ void P_Ticker (void)
      P_UpdateSpecials ();
      P_RespawnSpecials ();
  
