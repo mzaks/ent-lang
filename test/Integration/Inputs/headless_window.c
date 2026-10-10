@@ -192,6 +192,7 @@ int32_t ent_window_window_height(void) {
   return fills ? 720 : opened_height + (can_resize && frames >= 2 ? 60 : 0);
 }
 void ent_window_fill_screen(bool on) { fills = on; }
+void ent_window_own_escape(bool own) { (void)own; }
 float ent_window_window_scale(void) { return 1; }
 // (The program gives it another size: that one, from then on.)
 void ent_window_resize_window(int32_t width, int32_t height) {

@@ -102,6 +102,10 @@ void ent_window_fill_screen(bool on) {
     ToggleBorderlessWindowed();
 }
 
+// The key that closes the window: Escape, or none where the program
+// wants that key for itself.
+void ent_window_own_escape(bool own) { SetExitKey(own ? KEY_NULL : KEY_ESCAPE); }
+
 bool ent_window_should_close(void) { return WindowShouldClose(); }
 float ent_window_frame_seconds(void) { return GetFrameTime(); }
 

@@ -35,12 +35,15 @@ import text
 // can show it. `zoom` makes everything so many times as big again (0 or
 // 1: as it is): the window then has fewer points to draw in, which
 // `width` and `height` say, and the mouse is where it points in those.
-// `closed` says that the user closed the window or pressed Escape. `dt`
+// `closed` says that the user closed the window or pressed Escape; with
+// `escape` set the Escape key is the program's own and closes nothing
+// (`key_down(256)` says whether it is down: for a menu, say). `dt`
 // is the seconds the previous frame took, `frame` the number of `begin`s.
 unique Window {
   width: i32, height: i32, title: text[62], background: i32, fps: i32,
   open: bool, closed: bool, dt: f32, frame: i64, resizable: bool,
-  fullscreen: bool, min_width: i32, min_height: i32, scale: f32, zoom: f32
+  fullscreen: bool, min_width: i32, min_height: i32, scale: f32, zoom: f32,
+  escape: bool
 }
 
 // Where the mouse is, and which of its buttons are down.
@@ -187,6 +190,8 @@ extern proc window_width() -> i32
 extern proc window_height() -> i32
 // The window fills the screen, or is as it was: where that is not so yet.
 extern proc fill_screen(on: bool)
+// Whether the Escape key is left to the program.
+extern proc own_escape(own: bool)
 extern proc window_limits(min_width: i32, min_height: i32)
 extern proc window_scale() -> f32
 // Another size for the window, from the program.
@@ -215,6 +220,7 @@ system begin() {
   }
   Window.scale = window_scale()
   fill_screen(Window.fullscreen)
+  own_escape(Window.escape)
   let zoom = if Window.zoom > 0.0 { Window.zoom } else { 1.0 }
   Window.width = (window_width() as f32 / zoom) as i32
   Window.height = (window_height() as f32 / zoom) as i32
