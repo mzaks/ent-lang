@@ -33,6 +33,7 @@ import tick
 import sounds
 import audio
 import screen
+import between
 
 // As many bytes as the biggest WAD.
 capacity Bytes 16777216
@@ -46,7 +47,6 @@ world {
   Level.episode = 1
   Level.map = 1
   Level.skill = 2
-  Level.nomonsters = true
 }
 
 // Whether the map is shown, and whether Tab was down the frame before.
@@ -65,11 +65,18 @@ system read_keys() {
   if key_down('A' as i32) { side -= if run { 40 } else { 24 } }
   if Keys.left { turn += if run { 1280 } else { 640 } }
   if Keys.right { turn -= if run { 1280 } else { 640 } }
+  // (The keys 1 to 7 ask for a weapon: the first of them that is down.)
+  var change = 0
+  for i in 0..7 {
+    if change == 0 && key_down('1' as i32 + i) {
+      change = BT_CHANGE | i << BT_WEAPONSHIFT
+    }
+  }
   Ticcmds += {
     forwardmove: forward, sidemove: side, angleturn: turn,
     // (The left Ctrl key shoots.)
     buttons: (if Keys.space { BT_USE } else { 0 }) |
-             (if key_down(341) { BT_ATTACK } else { 0 })
+             (if key_down(341) { BT_ATTACK } else { 0 }) | change
   }
   let tab = key_down(258)
   if tab && !Shown.tab { Shown.map = !Shown.map }
@@ -116,7 +123,7 @@ schedule setup() {
   init_view_tables()
 }
 
-schedule frame() {
+schedule frame() run_if !Wi.on {
   begin()
   read_keys()
   begin_sounds()
@@ -146,10 +153,42 @@ schedule frame() {
   draw_automap() run_if Shown.map
   show_screen()
   present()
+  complete_level()
 }
 
-// The next level, or the same again after the player's death.
-schedule again() run_if Level.exited || Level.reborn {
+// Between two levels: what was done in the one is counted up, and the
+// way to the other shown, in the colours as they are.
+system plain() { Shade.palette = 0 }
+schedule between() run_if Wi.on {
+  begin()
+  read_keys()
+  begin_sounds()
+  tick_between()
+  hear()
+  plain()
+  clear_screen()
+  draw_between()
+  show_screen()
+  present()
+}
+schedule onward() run_if Wi.over {
+  leave_level()
+  leave_between()
+  quiet()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  start_player(false)
+  start_weapon()
+  start_status()
+  start_messages()
+  fit_automap()
+  arrive()
+}
+
+// The same level again after the player's death; and after the last
+// level the first, until what comes after it is there.
+schedule again() run_if Level.reborn || (Level.exited && Level.map == 8) {
   leave_level()
   quiet()
   load_level()
@@ -167,6 +206,8 @@ schedule again() run_if Level.exited || Level.reborn {
 main {
   setup()
   loop {
+    onward()
+    between()
     frame()
     again()
   } until Window.closed

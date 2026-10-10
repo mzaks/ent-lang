@@ -1,8 +1,8 @@
 diff --git i/src/doom/d_main.c w/src/doom/d_main.c
-index 06aa0ff..9d452d2 100644
+index 06aa0ff..4e89d80 100644
 --- i/src/doom/d_main.c
 +++ w/src/doom/d_main.c
-@@ -402,6 +402,54 @@ boolean D_GrabMouseCallback(void)
+@@ -402,6 +402,62 @@ boolean D_GrabMouseCallback(void)
  //
  //  D_RunFrame
  //
@@ -16,6 +16,7 @@ index 06aa0ff..9d452d2 100644
 +    static int tics[256];
 +    static int count = -1;
 +    static int next;
++    static int base = -1;
 +
 +    if (count < 0)
 +    {
@@ -39,25 +40,32 @@ index 06aa0ff..9d452d2 100644
 +    // (The first screen that is drawn at or after each: several tics may
 +    // go by between two. Which tic it was is said on stdout, and which of
 +    // the palettes the screen is shown in.)
-+    if (!file || next >= count || gamestate != GS_LEVEL
-+	|| leveltime <= tics[next])
++    // (The tics are counted from the demo's first, through the levels
++    // and what is between them.)
++    if (!file || next >= count
++	|| (gamestate != GS_LEVEL && gamestate != GS_INTERMISSION))
++	return;
++    if (base < 0)
++	base = gametic - leveltime;
++    if (gametic - base <= tics[next])
 +	return;
 +    fwrite (I_VideoBuffer, 1, SCREENWIDTH * SCREENHEIGHT, file);
 +    fflush (file);
 +    {
 +	extern int st_palette;
 +
-+	printf ("shot %d %d\n", leveltime - 1, st_palette);
++	printf ("shot %d %d\n", gametic - base - 1,
++		gamestate == GS_LEVEL ? st_palette : 0);
 +    }
 +    fflush (stdout);
-+    while (next < count && leveltime > tics[next])
++    while (next < count && gametic - base > tics[next])
 +	next++;
 +}
 +
  void D_RunFrame()
  {
      int nowtime;
-@@ -437,7 +485,9 @@ void D_RunFrame()
+@@ -437,7 +493,9 @@ void D_RunFrame()
      // Update display, next frame, with current state if no profiling is on
      if (screenvisible && !nodrawers)
      {
@@ -68,7 +76,7 @@ index 06aa0ff..9d452d2 100644
          {
              // start wipe on this frame
              wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
-@@ -1960,6 +2010,12 @@ void D_DoomMain (void)
+@@ -1960,6 +2018,12 @@ void D_DoomMain (void)
  
      DEH_printf("\nP_Init: Init Playloop state.\n");
      P_Init ();

@@ -1,0 +1,171 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// What is seen between two levels (the drawing of wi_stuff.c): the map
+// of the episode with its pictures that move; over it, what the player
+// did in the level that is left, counted up, and then the levels that
+// are done, each with a splat on it, and an arrow at the one that comes.
+// What is counted and when is `tick_between` (tick.ent).
+import files
+import wad
+import video
+import things
+import play
+import tick
+import screen
+
+// Where on the map each of the nine levels is, and each of the ten
+// pictures that move.
+table wi_levels { x: i32, y: i32 } = [
+  { x: 185, y: 164 }, { x: 148, y: 143 }, { x: 69, y: 122 },
+  { x: 209, y: 102 }, { x: 116, y: 89 }, { x: 166, y: 55 }, { x: 71, y: 56 },
+  { x: 135, y: 29 }, { x: 71, y: 24 }
+]
+table wi_moving { x: i32, y: i32 } = [
+  { x: 224, y: 104 }, { x: 184, y: 160 }, { x: 112, y: 136 },
+  { x: 72, y: 112 }, { x: 88, y: 96 }, { x: 64, y: 48 }, { x: 192, y: 40 },
+  { x: 136, y: 16 }, { x: 80, y: 16 }, { x: 64, y: 24 }
+]
+const WI_TITLEY = 2
+const SP_STATSX = 50
+const SP_STATSY = 50
+const SP_TIMEX = 16
+const SP_TIMEY = SCREENHEIGHT - 32
+
+// A number, its last digit ending at `x`: with as many digits as it
+// has, or with `digits` of them. Where it starts (WI_drawNum).
+proc wi_number(screen: mut Screen, bytes: Bytes, lumps: Lumps, atx: i32,
+               y: i32, number: i32, digits: i32) -> i32 {
+  let width = short_at(bytes, pic(lumps, "WINUM0"))
+  var left = digits
+  var n = number
+  if left < 0 {
+    left = if n == 0 { 1 } else { 0 }
+    var rest = n
+    while rest != 0 {
+      rest /= 10
+      left += 1
+    }
+  }
+  var x = atx
+  while left > 0 {
+    x -= width
+    draw_patch(screen, bytes, pic(lumps, "WINUM{n % 10}"), x, y)
+    n /= 10
+    left -= 1
+  }
+  x
+}
+
+// So many of a hundred; nothing while it is not counted yet.
+proc wi_percent(screen: mut Screen, bytes: Bytes, lumps: Lumps, x: i32,
+                y: i32, percent: i32) {
+  if percent >= 0 {
+    draw_patch(screen, bytes, pic(lumps, "WIPCNT"), x, y)
+    let start = wi_number(screen, bytes, lumps, x, y, percent, -1)
+  }
+}
+
+// A time in seconds, as minutes and seconds (and hours); too long a
+// time is said in a word (WI_drawTime).
+proc wi_time(screen: mut Screen, bytes: Bytes, lumps: Lumps, atx: i32, y: i32,
+             seconds: i32) {
+  if seconds >= 0 {
+    if seconds <= 61 * 59 {
+      let colon = pic(lumps, "WICOLON")
+      var x = atx
+      var div = 1
+      var more = true
+      while more {
+        x = wi_number(screen, bytes, lumps, x, y, seconds / div % 60, 2) -
+            short_at(bytes, colon)
+        div *= 60
+        if div == 60 || seconds / div != 0 { draw_patch(screen, bytes, colon, x, y) }
+        more = seconds / div != 0
+      }
+    } else {
+      let sucks = pic(lumps, "WISUCKS")
+      draw_patch(screen, bytes, sucks, atx - short_at(bytes, sucks), y)
+    }
+  }
+}
+
+// A picture in the middle of the screen from left to right; how high it
+// is.
+proc wi_centred(screen: mut Screen, bytes: Bytes, patch: i32, y: i32) -> i32 {
+  draw_patch(screen, bytes, patch, (SCREENWIDTH - short_at(bytes, patch)) / 2, y)
+  short_at(bytes, patch + 2)
+}
+
+// A mark on a level of the map, if all of it is on the screen there
+// (WI_drawOnLnode); whether it was.
+proc wi_mark(screen: mut Screen, bytes: Bytes, patch: i32, level: i32) -> bool {
+  let left = wi_levels[level].x - short_at(bytes, patch + 4)
+  let top = wi_levels[level].y - short_at(bytes, patch + 6)
+  let fits = left >= 0 && left + short_at(bytes, patch) < SCREENWIDTH && top >= 0 &&
+             top + short_at(bytes, patch + 2) < SCREENHEIGHT
+  if fits { draw_patch(screen, bytes, patch, wi_levels[level].x, wi_levels[level].y) }
+  fits
+}
+
+// WI_Drawer. While `Wi.on`, in place of the view and the status bar.
+system draw_between() {
+  draw_patch(Screen, Bytes, pic(Lumps, "WIMAP0"), 0, 0)
+  for i in 0..len(Wianims) {
+    if Wianims[i].ctr >= 0 {
+      draw_patch(Screen, Bytes, pic(Lumps, "WIA00{i}0{Wianims[i].ctr}"),
+                 wi_moving[i].x, wi_moving[i].y)
+    }
+  }
+  if Wi.state == 0 {
+    // The level that is finished, and what was done in it.
+    let name = pic(Lumps, "WILV0{Wi.last - 1}")
+    let high = wi_centred(Screen, Bytes, name, WI_TITLEY)
+    let done = wi_centred(Screen, Bytes, pic(Lumps, "WIF"), WI_TITLEY + 5 * high / 4)
+    let lh = 3 * short_at(Bytes, pic(Lumps, "WINUM0") + 2) / 2
+    draw_patch(Screen, Bytes, pic(Lumps, "WIOSTK"), SP_STATSX, SP_STATSY)
+    wi_percent(Screen, Bytes, Lumps, SCREENWIDTH - SP_STATSX, SP_STATSY, Wi.kills)
+    draw_patch(Screen, Bytes, pic(Lumps, "WIOSTI"), SP_STATSX, SP_STATSY + lh)
+    wi_percent(Screen, Bytes, Lumps, SCREENWIDTH - SP_STATSX, SP_STATSY + lh, Wi.items)
+    draw_patch(Screen, Bytes, pic(Lumps, "WISCRT2"), SP_STATSX, SP_STATSY + 2 * lh)
+    wi_percent(Screen, Bytes, Lumps, SCREENWIDTH - SP_STATSX, SP_STATSY + 2 * lh,
+               Wi.secrets)
+    draw_patch(Screen, Bytes, pic(Lumps, "WITIME"), SP_TIMEX, SP_TIMEY)
+    wi_time(Screen, Bytes, Lumps, SCREENWIDTH / 2 - SP_TIMEX, SP_TIMEY, Wi.time)
+    draw_patch(Screen, Bytes, pic(Lumps, "WIPAR"), SCREENWIDTH / 2 + SP_TIMEX, SP_TIMEY)
+    wi_time(Screen, Bytes, Lumps, SCREENWIDTH - SP_TIMEX, SP_TIMEY, Wi.par)
+  } else {
+    // The levels that are done, and where it goes on. (In the last
+    // moment the arrow is there whatever it was: WI_drawNoState.)
+    if Wi.state == 2 { Wi.pointer = true }
+    let last = if Wi.last == 9 { Wi.next - 2 } else { Wi.last - 1 }
+    let splat = pic(Lumps, "WISPLAT")
+    for i in 0..last + 1 {
+      let there = wi_mark(Screen, Bytes, splat, i)
+    }
+    if Wi.didsecret {
+      let there = wi_mark(Screen, Bytes, splat, 8)
+    }
+    if Wi.pointer {
+      // (The arrow that points the other way, where the first does not
+      // fit.)
+      if !wi_mark(Screen, Bytes, pic(Lumps, "WIURH0"), Wi.next - 1) {
+        let there = wi_mark(Screen, Bytes, pic(Lumps, "WIURH1"), Wi.next - 1)
+      }
+    }
+    let name = pic(Lumps, "WILV0{Wi.next - 1}")
+    let high = wi_centred(Screen, Bytes, pic(Lumps, "WIENTER"), WI_TITLEY)
+    let next = wi_centred(Screen, Bytes, name,
+                          WI_TITLEY + 5 * short_at(Bytes, name + 2) / 4)
+  }
+}

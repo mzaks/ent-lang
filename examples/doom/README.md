@@ -39,10 +39,12 @@ them as systems. It is being built; what is here so far:
   ceilings that crush, the donut; the ways out; lights switched.
 - `tick.ent`: a tic of the level: the things, the lights and what moves
   sectors, each in its turn in the order they were made in (`for .. in
-  turn by m.id`), the player's thing among them; a level left for the
-  next, or started again after a death.
-- `screen.ent`: the player's weapon over the view, and the status bar
-  with its numbers and its face.
+  turn by m.id`), the player's thing among them; a level started again
+  after a death, or left for the next through the tics in which what
+  was done in it is counted up. `between.ent` draws those: the map of
+  the episode, the numbers, and where it goes on.
+- `screen.ent`: the player's weapon over the view, the status bar with
+  its numbers and its face, and what the player is told at the top.
 - `sounds.ent`, `audio.ent`: the sounds of a tic, each with how loud it
   is heard and from which side; and what plays them from the WAD's
   lumps, eight at a time (the sound device's `voice`). The music is not
@@ -51,15 +53,15 @@ them as systems. It is being built; what is here so far:
   used are in `specials.ent`; the palettes the screen is shown in (red
   when hurt, yellow for something picked up, green in the suit) and the
   one colour map of seeing in the dark are chosen in `items.ent`.
-- Not yet: the messages at the top of the screen, the border of a
-  smaller view, the screens between levels (and the tics they take),
-  the title and the menus; the monsters and weapons that are not in the
-  first episode. Ceilings that move and the donut are written but were
+- Not yet: the border of a smaller view, what comes after the last
+  level, the title and the menus; the monsters and weapons that are not
+  in the first episode. Ceilings that move and the donut are written but were
   never set off: the shareware levels have no such ceiling, and no demo
   here uses the donut. The sounds were never heard by anyone yet.
-- `doom.ent`: the program, which plays E1M1 with the keyboard (the arrow
-  keys, the space bar to use, the left Ctrl key to shoot; Tab shows the
-  map).
+- `doom.ent`: the program, which plays the episode from E1M1 with the
+  keyboard (the arrow keys, A and D to step aside, Shift to run, the
+  space bar to use, the left Ctrl key to shoot, 1 to 7 for a weapon; Tab
+  shows the map).
 - `check/`: programs that print what the port computes, to hold against
   the reference.
 - `reference/`: what the port is compared against. `fetch.sh` fetches
@@ -75,11 +77,12 @@ examples/doom/check/maths.sh                         # "the same: 24 lines"
 examples/doom/check/automap.sh                       # E1M1 read and drawn
 examples/doom/check/view.sh                          # what is seen, pixel for pixel
 examples/doom/check/trace.sh                         # the demos, tic by tic
-examples/doom/reference/fetch_demos.sh               # 53 more demos, of all nine levels
+examples/doom/reference/fetch_demos.sh               # 56 more demos: of all nine levels, and through the episode
 examples/doom/check/demos.sh                         # each of them, tic by tic, and its sounds
 DUMP=205 examples/doom/check/demos.sh e1m5_uv_max    # what differs at a tic
 examples/doom/check/shots.sh 3 0,50,100,300,600      # whole screens, and their palettes
 examples/doom/check/shots.sh e1m5_uv_max 1700,3700   # of a fetched demo
+examples/doom/check/shots.sh ep1_nomo 300,330,400    # between two levels too
 cd build/doom/wad &&                                 # where doom1.wad is
   ../../../tools/ent run -I ../../../examples/doom ../../../examples/doom/doom.ent
 ```

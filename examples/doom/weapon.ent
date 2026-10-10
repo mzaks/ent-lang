@@ -463,7 +463,14 @@ system start_weapon() {
     reject: Lumps[Level.lump + ML_REJECT].at, skill: Level.skill,
     sky: Data.skyflatnum, leveltime: Clock.leveltime, map: Level.map
   }; 1]
-  Psp = [{ state: S_NULL, tics: 0, sx: 0, sy: 0 }; 2]
+  // (In a next level the pictures are where they were, in no state:
+  // the weapon comes up as far to the side as it last swayed.)
+  if Level.exited && !Level.reborn && len(Psp) == 2 {
+    Psp[PS_WEAPON].state = S_NULL
+    Psp[PS_FLASH].state = S_NULL
+  } else {
+    Psp = [{ state: S_NULL, tics: 0, sx: 0, sy: 0 }; 2]
+  }
   Inv[0].pendingweapon = Inv[0].readyweapon
   Rnd = [{ play: Random.play, other: Random.other }; 1]
   bring_up_weapon(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
