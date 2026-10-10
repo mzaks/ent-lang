@@ -85,6 +85,8 @@ system look() {
   }
   Viewpoint.z = Pl[0].viewz
   View.extralight = Pl[0].extralight
+  View.fixed = fixed_colormap(Powers)
+  Shade.palette = screen_palette(Inv, Powers)
   Clock.leveltime += 1
 }
 

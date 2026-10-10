@@ -23,8 +23,12 @@ const SCREENHEIGHT = 200
 // The picture: row under row, from the top.
 buffer Screen { pixel: u8 } capacity 64000
 
-// The colours a pixel may be: 256 of them, from the WAD ("PLAYPAL").
-buffer Palette { rgb: i32 } capacity 256
+// The colours a pixel may be: 256 of them, fourteen times over, from
+// the WAD ("PLAYPAL").
+buffer Palette { rgb: i32 } capacity 3584
+// Which of them the screen is shown in: 0 as it is; the others are for
+// when the whole screen is to look redder, yellower or green.
+unique Shade { palette: i32 }
 
 // One pixel, if it is in the picture.
 proc plot(screen: mut Screen, x: i32, y: i32, color: u8) {
@@ -44,7 +48,7 @@ system load_palette() {
   let lump = lump_number(Lumps, lump_name("PLAYPAL"))
   if lump >= 0 {
     let at = Lumps[lump].at
-    for i in 0..256 {
+    for i in 0..256 * min(Lumps[lump].size / 768, 14) {
       Palette += {
         rgb: byte_at(Bytes, at + i * 3) << 16 |
              byte_at(Bytes, at + i * 3 + 1) << 8 | byte_at(Bytes, at + i * 3 + 2)
@@ -57,7 +61,8 @@ system load_palette() {
 // (I_FinishUpdate).
 system show_screen() {
   Pixels = [{ color: 0 }; SCREENWIDTH * SCREENHEIGHT]
-  for i in 0..len(Screen) { Pixels[i].color = Palette[Screen[i].pixel].rgb }
+  let first = if Shade.palette * 256 + 256 <= len(Palette) { Shade.palette * 256 } else { 0 }
+  for i in 0..len(Screen) { Pixels[i].color = Palette[first + Screen[i].pixel as i32].rgb }
   draw_pixels(Pixels, SCREENWIDTH, SCREENHEIGHT, 0.0, 0.0,
               Window.width as f32, Window.height as f32)
 }

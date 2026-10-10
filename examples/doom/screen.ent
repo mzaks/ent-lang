@@ -35,7 +35,7 @@ unique Stview {
 system draw_weapon() {
   for m: Mobj where m.type == MT_PLAYER {
     Stview.sector = Subsectors[m.subsector].sector
-    Stview.health = m.health
+    Stview.health = max(m.health, 0)
   }
   let sector = Stview.sector
   let lightnum = min(max((Sectors[sector].lightlevel >> LIGHTSEGSHIFT) +
@@ -72,6 +72,8 @@ system draw_weapon() {
         let unseen = Powers[PW_INVISIBILITY].tics
         let colormap = if unseen > 4 * 32 || unseen & 8 != 0 {
           -(Data.colormaps + 6 * 256)
+        } else if View.fixed != 0 {
+          Data.colormaps + View.fixed * 256
         } else if states[state].frame & FF_FULLBRIGHT != 0 {
           Data.colormaps
         } else {

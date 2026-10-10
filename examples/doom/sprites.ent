@@ -207,7 +207,7 @@ proc render_masked_seg_range(screen: mut Screen, bytes: Bytes, fuzz: mut Fuzz,
                              columns: TextureColumns, textrans: Textrans,
                              lights: Scalelight, ds: i32, x1: i32, x2: i32, viewz: i32,
                              centery: i32, centeryfrac: i32, left: i32,
-                             top: i32, extralight: i32) {
+                             top: i32, extralight: i32, fixedmap: i32) {
   let seg = drawsegs[ds].seg
   let front = segs[seg].front
   let back = segs[seg].back
@@ -238,8 +238,12 @@ proc render_masked_seg_range(screen: mut Screen, bytes: Bytes, fuzz: mut Fuzz,
                      openings[maskedtexturecol + x].value) - 3,
           x, spryscale, centeryfrac - fixed_mul(texturemid, spryscale),
           texturemid, (0xffffffff as u32 / spryscale as u32) as i32,
-          lights[walllights + min(spryscale >> LIGHTSCALESHIFT,
-                                  MAXLIGHTSCALE - 1)].map,
+          if fixedmap != 0 {
+            fixedmap
+          } else {
+            lights[walllights + min(spryscale >> LIGHTSCALESHIFT,
+                                    MAXLIGHTSCALE - 1)].map
+          },
           drawsegs[ds].sprtopclip, drawsegs[ds].sprbottomclip, centery, left,
           top)
       openings[maskedtexturecol + x].value = 0x7fff
@@ -311,6 +315,8 @@ system draw_masked() {
         scale: xscale, xiscale: xiscale, texturemid: gzt - vz, patch: lump,
         colormap: if m.flags & MF_SHADOW != 0 {
           -(Data.colormaps + 6 * 256)
+        } else if View.fixed != 0 {
+          Data.colormaps + View.fixed * 256
         } else if m.frame & FF_FULLBRIGHT != 0 {
           Data.colormaps
         } else {
@@ -396,7 +402,8 @@ system draw_masked() {
                                     Lines, Sides, Sectors, Textures,
                                     TextureColumns, Textrans, Scalelight, ds, r1, r2, vz,
                                     View.centery, View.centeryfrac, View.x,
-                                    View.y, View.extralight)
+                                    View.y, View.extralight,
+                              if View.fixed != 0 { Data.colormaps + View.fixed * 256 } else { 0 })
           }
         } else {
           var silhouette = Drawsegs[ds].silhouette
@@ -457,7 +464,8 @@ system draw_masked() {
                               Sides, Sectors, Textures, TextureColumns, Textrans,
                               Scalelight, ds, Drawsegs[ds].x1, Drawsegs[ds].x2,
                               vz, View.centery, View.centeryfrac, View.x,
-                              View.y, View.extralight)
+                              View.y, View.extralight,
+                              if View.fixed != 0 { Data.colormaps + View.fixed * 256 } else { 0 })
     }
   }
 }

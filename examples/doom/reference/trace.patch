@@ -1,8 +1,8 @@
 diff --git i/src/doom/d_main.c w/src/doom/d_main.c
-index 06aa0ff..310a005 100644
+index 06aa0ff..9d452d2 100644
 --- i/src/doom/d_main.c
 +++ w/src/doom/d_main.c
-@@ -402,6 +402,49 @@ boolean D_GrabMouseCallback(void)
+@@ -402,6 +402,54 @@ boolean D_GrabMouseCallback(void)
  //
  //  D_RunFrame
  //
@@ -37,13 +37,18 @@ index 06aa0ff..310a005 100644
 +	}
 +    }
 +    // (The first screen that is drawn at or after each: several tics may
-+    // go by between two. Which tic it was is said on stdout.)
++    // go by between two. Which tic it was is said on stdout, and which of
++    // the palettes the screen is shown in.)
 +    if (!file || next >= count || gamestate != GS_LEVEL
 +	|| leveltime <= tics[next])
 +	return;
 +    fwrite (I_VideoBuffer, 1, SCREENWIDTH * SCREENHEIGHT, file);
 +    fflush (file);
-+    printf ("shot %d\n", leveltime - 1);
++    {
++	extern int st_palette;
++
++	printf ("shot %d %d\n", leveltime - 1, st_palette);
++    }
 +    fflush (stdout);
 +    while (next < count && leveltime > tics[next])
 +	next++;
@@ -52,7 +57,7 @@ index 06aa0ff..310a005 100644
  void D_RunFrame()
  {
      int nowtime;
-@@ -437,7 +480,9 @@ void D_RunFrame()
+@@ -437,7 +485,9 @@ void D_RunFrame()
      // Update display, next frame, with current state if no profiling is on
      if (screenvisible && !nodrawers)
      {
@@ -63,7 +68,7 @@ index 06aa0ff..310a005 100644
          {
              // start wipe on this frame
              wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
-@@ -1960,6 +2005,12 @@ void D_DoomMain (void)
+@@ -1960,6 +2010,12 @@ void D_DoomMain (void)
  
      DEH_printf("\nP_Init: Init Playloop state.\n");
      P_Init ();
@@ -563,3 +568,17 @@ index 7674889..df4c15a 100644
      // hacks to vary the sfx pitches
      if (sfx_id >= sfx_sawup && sfx_id <= sfx_sawhit)
      {
+diff --git i/src/doom/st_stuff.c w/src/doom/st_stuff.c
+index da9b8bc..e80bff3 100644
+--- i/src/doom/st_stuff.c
++++ w/src/doom/st_stuff.c
+@@ -877,7 +877,8 @@ void ST_Ticker (void)
+ 
+ }
+ 
+-static int st_palette = 0;
++// ent-lang: seen by D_Shot.
++int		st_palette = 0;
+ 
+ void ST_doPaletteStuff(void)
+ {

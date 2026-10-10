@@ -36,11 +36,13 @@ const MAXSEGS = 32
 // the size the player chose, 3 to 11 (nought: 9, as it starts; 10 is as
 // wide as the picture, 11 the whole of it).
 // (`extralight`: how much lighter everything is, for the flash of a
-// shot.)
+// shot. `fixed`: the one colour map everything is drawn with, by its
+// number, while the player sees in the dark or cannot be hurt; 0 for
+// none.)
 unique View {
   blocks: i32, width: i32, height: i32, x: i32, y: i32, centerx: i32,
   centery: i32, centerxfrac: i32, centeryfrac: i32, projection: i32,
-  clipangle: u32, extralight: i32
+  clipangle: u32, extralight: i32, fixed: i32
 }
 
 // Where the level is seen from: until there is a player, where one
@@ -1035,9 +1037,13 @@ system draw_walls() {
           let angle = (rw_centerangle + Xtoviewangle[x].angle) >> ANGLETOFINESHIFT
           texturecolumn =
               (rw_offset - fixed_mul(finetangent[angle], rw_distance)) >> FRACBITS
-          colormap = Scalelight[
-              walllights + min(rw_scale >> LIGHTSCALESHIFT, MAXLIGHTSCALE - 1)
-          ].map
+          colormap = if View.fixed != 0 {
+            Data.colormaps + View.fixed * 256
+          } else {
+            Scalelight[
+                walllights + min(rw_scale >> LIGHTSCALESHIFT, MAXLIGHTSCALE - 1)
+            ].map
+          }
           iscale = (0xffffffff as u32 / rw_scale as u32) as i32
         }
         if midtexture != 0 {
@@ -1190,7 +1196,11 @@ system draw_planes() {
                       vx + fixed_mul(finecosine(angle), length),
                       -vy - fixed_mul(finesine[angle], length),
                       Spans[y].cachedxstep, Spans[y].cachedystep, source,
-                      Zlight[light + min(distance >> LIGHTZSHIFT, MAXLIGHTZ - 1)].map,
+                      if View.fixed != 0 {
+                        Data.colormaps + View.fixed * 256
+                      } else {
+                        Zlight[light + min(distance >> LIGHTZSHIFT, MAXLIGHTZ - 1)].map
+                      },
                       View.x, View.y)
             if part == 0 { t1 += 1 } else { b1 -= 1 }
             more = if part == 0 { t1 < t2 && t1 <= b1 } else { b1 > b2 && b1 >= t1 }

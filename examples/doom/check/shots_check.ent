@@ -31,6 +31,8 @@ capacity Bytes 16777216
 unique Next: i32
 unique Room: i32
 unique Now: bool
+unique Drawn: bool
+unique Again: bool
 
 world {
   Wad.file = "doom1.wad"
@@ -53,6 +55,10 @@ system begin_level() {
 // Whether this tic's screen is one that is asked for.
 system ask() {
   Now = Next < len(shots) && Clock.leveltime == shots[Next]
+  // (The reference has two tics before its first screen, so the first
+  // tic is not drawn: a shadow's look depends on all the shadows drawn
+  // before.)
+  Drawn = Clock.leveltime > 0 || Again
 }
 
 system look() {
@@ -63,6 +69,8 @@ system look() {
   }
   Viewpoint.z = Pl[0].viewz
   View.extralight = Pl[0].extralight
+  View.fixed = fixed_colormap(Powers)
+  Shade.palette = screen_palette(Inv, Powers)
 }
 
 system keep() {
@@ -71,13 +79,19 @@ system keep() {
                   Next > 0) {
     put("could not write shots.port")
   }
+  // (And which of the palettes it is shown in.)
+  put("shot {Clock.leveltime} {Shade.palette}")
   Next += 1
 }
 
 // (The reference melts the first screen of a level in, by 320 random
-// numbers, which the face then goes on from.)
+// numbers, which the face then goes on from. Its first screen is the
+// one after the second tic, see `ask`; of a level that is started
+// again, the one after the first.)
 system melt() {
-  if Clock.leveltime == 0 { Random.other = (Random.other + 320) & 0xff }
+  if Clock.leveltime == if Again { 0 } else { 1 } {
+    Random.other = (Random.other + 320) & 0xff
+  }
 }
 
 system next() { Clock.leveltime += 1 }
@@ -116,20 +130,35 @@ schedule tic() {
   tick_status()
   melt()
   ask()
-  // (Every tic is drawn, as the reference draws it: a shadow's look
-  // depends on all the shadows drawn before.)
-  look()
-  clear_screen()
-  render_view()
-  draw_walls()
-  draw_planes()
-  draw_masked()
-  draw_weapon()
-  draw_status()
+  // (Every tic but the first is drawn, as the reference draws them.)
+  look() run_if Drawn
+  clear_screen() run_if Drawn
+  render_view() run_if Drawn
+  draw_walls() run_if Drawn
+  draw_planes() run_if Drawn
+  draw_masked() run_if Drawn
+  draw_weapon() run_if Drawn
+  draw_status() run_if Drawn
   keep() run_if Now
   next()
 }
+// The level again, after the player's death.
+system once_more() { Again = true }
+schedule again() run_if Level.reborn {
+  leave_level()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  start_player(true)
+  start_weapon()
+  start_status()
+  arrive()
+  once_more()
+}
 main {
   setup()
-  loop { tic() } until Next == len(shots) || Demo.over || Level.exited
+  loop {
+    tic()
+    again()
+  } until Next == len(shots) || Demo.over || Level.exited
 }

@@ -75,6 +75,44 @@ const TICRATE = 35
 table weaponammo: i32 = [5, 0, 1, 0, 3, 2, 2, 5, 1]
 table clipammo: i32 = [10, 4, 20, 1]
 
+// The colour map everything is seen in while a power lasts, by its
+// number: all light and dark the other way round while nothing hurts,
+// all light while the dark is seen through; in a power's last seconds
+// it comes and goes. 0: none. (The end of P_PlayerThink.)
+const INVERSECOLORMAP = 32
+fn fixed_colormap(powers: Powers) -> i32 {
+  let safe = powers[PW_INVULNERABILITY].tics
+  let sight = powers[PW_INFRARED].tics
+  if safe != 0 {
+    if safe > 4 * 32 || safe & 8 != 0 { INVERSECOLORMAP } else { 0 }
+  } else if sight != 0 {
+    if sight > 4 * 32 || sight & 8 != 0 { 1 } else { 0 }
+  } else {
+    0
+  }
+}
+
+// The colours the whole screen is shown in, of the WAD's fourteen
+// (ST_doPaletteStuff): redder the more the player was just hurt (and
+// while the berserk pack is new), yellower for something picked up,
+// green in the suit that keeps the slime out; 0 as they are.
+fn screen_palette(inv: Inv, powers: Powers) -> i32 {
+  var count = inv[0].damagecount
+  if powers[PW_STRENGTH].tics != 0 {
+    count = max(count, 12 - (powers[PW_STRENGTH].tics >> 6))
+  }
+  let suit = powers[PW_IRONFEET].tics
+  if count != 0 {
+    min((count + 7) >> 3, 7) + 1
+  } else if inv[0].bonuscount != 0 {
+    min((inv[0].bonuscount + 7) >> 3, 3) + 9
+  } else if suit > 4 * 32 || suit & 8 != 0 {
+    13
+  } else {
+    0
+  }
+}
+
 fn is_taken(taken: Taken, id: i32) -> bool {
   var found = false
   for i in 0..len(taken) {
