@@ -53,9 +53,11 @@ them as systems. It is being built; what is here so far:
   used are in `specials.ent`; the palettes the screen is shown in (red
   when hurt, yellow for something picked up, green in the suit) and the
   one colour map of seeing in the dark are chosen in `items.ent`.
-- Not yet: the border of a smaller view, what comes after the last
-  level, the title and the menus; the monsters and weapons that are not
-  in the first episode. Ceilings that move and the donut are written but were
+- After the last level its text is written out, and then the picture
+  shown (`tick_finale`, `draw_finale`).
+- Not yet: the border of a smaller view, the title and the menus, the
+  melt from one screen to the next; the monsters and weapons that are
+  not in the first episode. Ceilings that move and the donut are written but were
   never set off: the shareware levels have no such ceiling, and no demo
   here uses the donut. The sounds were never heard by anyone yet.
 - `doom.ent`: the program, which plays the episode from E1M1 with the

@@ -1,8 +1,8 @@
 diff --git i/src/doom/d_main.c w/src/doom/d_main.c
-index 06aa0ff..4e89d80 100644
+index 06aa0ff..9869a79 100644
 --- i/src/doom/d_main.c
 +++ w/src/doom/d_main.c
-@@ -402,6 +402,62 @@ boolean D_GrabMouseCallback(void)
+@@ -402,6 +402,63 @@ boolean D_GrabMouseCallback(void)
  //
  //  D_RunFrame
  //
@@ -43,7 +43,8 @@ index 06aa0ff..4e89d80 100644
 +    // (The tics are counted from the demo's first, through the levels
 +    // and what is between them.)
 +    if (!file || next >= count
-+	|| (gamestate != GS_LEVEL && gamestate != GS_INTERMISSION))
++	|| (gamestate != GS_LEVEL && gamestate != GS_INTERMISSION
++	    && gamestate != GS_FINALE))
 +	return;
 +    if (base < 0)
 +	base = gametic - leveltime;
@@ -65,7 +66,7 @@ index 06aa0ff..4e89d80 100644
  void D_RunFrame()
  {
      int nowtime;
-@@ -437,7 +493,9 @@ void D_RunFrame()
+@@ -437,7 +494,9 @@ void D_RunFrame()
      // Update display, next frame, with current state if no profiling is on
      if (screenvisible && !nodrawers)
      {
@@ -76,7 +77,7 @@ index 06aa0ff..4e89d80 100644
          {
              // start wipe on this frame
              wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
-@@ -1960,6 +2018,12 @@ void D_DoomMain (void)
+@@ -1960,6 +2019,12 @@ void D_DoomMain (void)
  
      DEH_printf("\nP_Init: Init Playloop state.\n");
      P_Init ();

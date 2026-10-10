@@ -123,7 +123,7 @@ schedule setup() {
   init_view_tables()
 }
 
-schedule frame() run_if !Wi.on {
+schedule frame() run_if !Wi.on && !Fin.on {
   begin()
   read_keys()
   begin_sounds()
@@ -159,6 +159,20 @@ schedule frame() run_if !Wi.on {
 // Between two levels: what was done in the one is counted up, and the
 // way to the other shown, in the colours as they are.
 system plain() { Shade.palette = 0 }
+// After the last level: the text, and then the picture, for as long as
+// the window is open.
+schedule ending() run_if Fin.on {
+  begin()
+  read_keys()
+  begin_sounds()
+  tick_finale()
+  hear()
+  plain()
+  clear_screen()
+  draw_finale()
+  show_screen()
+  present()
+}
 schedule between() run_if Wi.on {
   begin()
   read_keys()
@@ -186,16 +200,14 @@ schedule onward() run_if Wi.over {
   arrive()
 }
 
-// The same level again after the player's death; and after the last
-// level the first, until what comes after it is there.
-schedule again() run_if Level.reborn || (Level.exited && Level.map == 8) {
+// The same level again after the player's death.
+schedule again() run_if Level.reborn {
   leave_level()
   quiet()
   load_level()
   spawn_things()
   spawn_specials()
-  start_player(true) run_if Level.reborn
-  start_player(false) run_if Level.exited
+  start_player(true)
   start_weapon()
   start_status()
   start_messages()
@@ -206,6 +218,7 @@ schedule again() run_if Level.reborn || (Level.exited && Level.map == 8) {
 main {
   setup()
   loop {
+    ending()
     onward()
     between()
     frame()

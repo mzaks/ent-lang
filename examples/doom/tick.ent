@@ -150,6 +150,31 @@ const WI_FRAMES = 3
 // The seconds a level of the first episode is to take.
 table pars: i32 = [0, 30, 75, 120, 90, 165, 180, 180, 30, 165]
 
+// After the last level (f_finale.c): a text is written out letter by
+// letter, three tics for each, and after a while more a picture is
+// shown. `stage`: 0 the text, 1 the picture; `count`: the tics of it.
+unique Fin { on: bool, stage: i32, count: i32 }
+// The text of the first episode, line by line (E1TEXT).
+table finale_text: text[48] = [
+  "Once you beat the big badasses and",
+  "clean out the moon base you're supposed",
+  "to win, aren't you? Aren't you? Where's",
+  "your fat reward and ticket home? What",
+  "the hell is this? It's not supposed to",
+  "end this way!",
+  "",
+  "It stinks like rotten meat, but looks",
+  "like the lost Deimos base.  Looks like",
+  "you're stuck on The Shores of Hell.",
+  "The only way out is through.",
+  "",
+  "To continue the DOOM experience, play",
+  "The Shores of Hell and its amazing",
+  "sequel, Inferno!"
+]
+const TEXTSPEED = 3
+const TEXTWAIT = 250
+
 // The pictures that move start anew, each a little later than the one
 // before by a number drawn (WI_initAnimatedBack).
 proc wi_start_anims(anims: mut Wianims, rnd: mut Rnd, tics: i32) {
@@ -163,6 +188,13 @@ proc wi_start_anims(anims: mut Wianims, rnd: mut Rnd, tics: i32) {
 // tic in which the player went out, but out of the last level, after
 // which the game is won.
 system complete_level() {
+  // (The last level: what comes after the episode. G_DoCompleted,
+  // F_StartFinale.)
+  if Level.exited && !Fin.on && Level.map == 8 {
+    Fin.on = true
+    Fin.count = 0
+    Fin.stage = 0
+  }
   if Level.exited && !Wi.on && Level.map != 8 {
     if Level.map == 9 || Level.secret { Wi.didsecret = true }
     Wi.on = true
@@ -303,4 +335,20 @@ system tick_between() {
 system leave_between() {
   Wi.on = false
   Wi.over = false
+}
+
+// A tic after the last level (F_Ticker): it takes a tic of the keys as
+// every tic does.
+system tick_finale() {
+  Pl[0].buttons = Ticcmds[Demo.tic].buttons
+  Demo.tic += 1
+  Demo.over = Demo.tic >= len(Ticcmds)
+  Fin.count += 1
+  // (Every line counts one letter more: where it ends.)
+  var letters = 0
+  for i in 0..len(finale_text) { letters += len(finale_text[i]) + 1 }
+  if Fin.stage == 0 && Fin.count > letters * TEXTSPEED + TEXTWAIT {
+    Fin.count = 0
+    Fin.stage = 1
+  }
 }

@@ -118,6 +118,35 @@ proc wi_mark(screen: mut Screen, bytes: Bytes, patch: i32, level: i32) -> bool {
   fits
 }
 
+// A line of the text after the last level, as many of its letters as
+// `left` says (F_TextWrite). How many are left for the lines after it;
+// -1 where a letter did not fit the screen.
+proc finale_line(screen: mut Screen, bytes: Bytes, font: Hufont, words: text[48],
+                 y: i32, letters: i32) -> i32 {
+  var left = letters
+  var x = 10
+  for i in 0..len(words) {
+    if left > 0 {
+      left -= 1
+      var c = words[i] as u8 as i32
+      if c >= 97 && c <= 122 { c -= 32 }
+      if c < HU_FONTSTART || c > HU_FONTEND {
+        x += 4
+      } else {
+        let patch = font[c - HU_FONTSTART].at
+        let width = short_at(bytes, patch)
+        if x + width > SCREENWIDTH {
+          left = -1
+        } else {
+          draw_patch(screen, bytes, patch, x, y)
+          x += width
+        }
+      }
+    }
+  }
+  left
+}
+
 // WI_Drawer. While `Wi.on`, in place of the view and the status bar.
 system draw_between() {
   draw_patch(Screen, Bytes, pic(Lumps, "WIMAP0"), 0, 0)
@@ -167,5 +196,33 @@ system draw_between() {
     let high = wi_centred(Screen, Bytes, pic(Lumps, "WIENTER"), WI_TITLEY)
     let next = wi_centred(Screen, Bytes, name,
                           WI_TITLEY + 5 * short_at(Bytes, name + 2) / 4)
+  }
+}
+
+// What is seen after the last level (F_Drawer): the text so far, over a
+// flat that fills the screen; then the picture.
+system draw_finale() {
+  if Fin.stage == 0 {
+    let flat = Lumps[lump_number(Lumps, lump_name("FLOOR4_8"))].at
+    for y in 0..SCREENHEIGHT {
+      for x in 0..SCREENWIDTH {
+        Screen[y * SCREENWIDTH + x].pixel = Bytes[flat + ((y & 63) << 6) + (x & 63)].value
+      }
+    }
+    var left = max((Fin.count - 10) / TEXTSPEED, 0)
+    var cy = 10
+    var fits = true
+    for i in 0..len(finale_text) {
+      if fits && left > 0 {
+        left = finale_line(Screen, Bytes, Hufont, finale_text[i], cy, left)
+        // (A line that does not fit ends it all.)
+        if left < 0 { fits = false }
+        // (The end of the line is a letter as well.)
+        left -= 1
+        cy += 11
+      }
+    }
+  } else {
+    draw_patch(Screen, Bytes, pic(Lumps, "HELP2"), 0, 0)
   }
 }

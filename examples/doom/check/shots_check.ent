@@ -119,7 +119,7 @@ schedule setup() {
   set_view_size()
   init_view_tables()
 }
-schedule tic() run_if !Wi.on {
+schedule tic() run_if !Wi.on && !Fin.on {
   begin_sounds()
   think_player()
   player_sector()
@@ -157,6 +157,20 @@ system once_more() { Again = true }
 system melt_between() {
   if Wi.tics == 1 { Random.other = (Random.other + 320) & 0xff }
   Shade.palette = 0
+}
+// (What comes after the last level is melted in too.)
+system melt_finale() {
+  if Fin.count == 1 && Fin.stage == 0 { Random.other = (Random.other + 320) & 0xff }
+  Shade.palette = 0
+}
+schedule ending() run_if Fin.on {
+  begin_sounds()
+  tick_finale()
+  melt_finale()
+  ask()
+  clear_screen()
+  draw_finale()
+  keep() run_if Now
 }
 schedule between() run_if Wi.on {
   begin_sounds()
@@ -196,9 +210,10 @@ schedule again() run_if Level.reborn {
 main {
   setup()
   loop {
+    ending()
     onward()
     between()
     tic()
     again()
-  } until Next == len(shots) || Demo.over || (Level.exited && Level.map == 8)
+  } until Next == len(shots) || Demo.over
 }
