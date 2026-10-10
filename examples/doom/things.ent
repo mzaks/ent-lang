@@ -28,23 +28,57 @@ import render
 // with the floor and ceiling there; and `linked`, a number that says
 // when it was last put where it is: of the things in a sector, the one
 // put there last comes first.
+// How fast it moves; which of eight ways it walks (`movedir`) and for how
+// many steps more; the thing it is after (`target`, that one's `id`; 0:
+// none) and for how long it will not look for another; and `gone`, when
+// it is no more but its entity has yet to go, which it does when the tic
+// is over. `id` is the number it was made with, one more for each thing:
+// they take their turns in that order (the order of P_RunThinkers).
 component Mobj {
   x: i32, y: i32, z: i32, angle: u32, type: i32, state: i32, tics: i32,
   sprite: i32, frame: i32, flags: i32, health: i32, radius: i32,
   height: i32, reactiontime: i32, lastlook: i32, subsector: i32,
-  floorz: i32, ceilingz: i32, linked: i32, id: i32
+  floorz: i32, ceilingz: i32, linked: i32, id: i32, momx: i32, momy: i32,
+  momz: i32, movedir: i32, movecount: i32, threshold: i32, target: i32,
+  gone: bool
 } capacity 2048
 
-// The player's thing while it is moved (play.ent), one row: what a
-// `Mobj` has of it, and how fast it moves. What is here is the player's;
-// the player's entity is made like it after every tic.
+// The eight ways a thing walks, and none (dirtype_t).
+const DI_EAST = 0
+const DI_NORTHEAST = 1
+const DI_NORTH = 2
+const DI_NORTHWEST = 3
+const DI_WEST = 4
+const DI_SOUTHWEST = 5
+const DI_SOUTH = 6
+const DI_SOUTHEAST = 7
+const DI_NODIR = 8
+
+// The thing whose turn it is, one row: what its `Mobj` has, taken from
+// it when its turn starts and given back when it ends, for the procs
+// that move it and have it act (play.ent, enemy.ent), which are given no
+// entity. `player`: it is the player's; `removed`: it is to go.
 buffer Pmo {
   x: i32, y: i32, z: i32, angle: u32, momx: i32, momy: i32, momz: i32,
   state: i32, tics: i32, flags: i32, health: i32, radius: i32, height: i32,
-  reactiontime: i32, subsector: i32, floorz: i32, ceilingz: i32, linked: i32
+  reactiontime: i32, subsector: i32, floorz: i32, ceilingz: i32, linked: i32,
+  type: i32, movedir: i32, movecount: i32, threshold: i32, lastlook: i32,
+  target: i32, id: i32, player: bool, removed: bool
 } capacity 1
 
-// The things near the player, and `Nearorder`, their rows in the order
+// Another thing as the one whose turn it is finds it, one row each: the
+// thing it is after (`Tg`) and the player's (`Tp`). `there`: there is
+// one.
+buffer Tg {
+  there: bool, id: i32, x: i32, y: i32, z: i32, height: i32, type: i32,
+  flags: i32, health: i32, subsector: i32
+} capacity 1
+buffer Tp {
+  there: bool, id: i32, x: i32, y: i32, z: i32, height: i32, type: i32,
+  flags: i32, health: i32, subsector: i32
+} capacity 1
+
+// The things near the one whose turn it is, and `Nearorder`, their rows in the order
 // the blockmap gives them in: square by square, in a square the thing
 // put there last first.
 buffer Near {
@@ -54,7 +88,7 @@ buffer Near {
 buffer Nearorder { index: i32 } capacity 2048
 // How many times a thing was put somewhere (the last `linked` given),
 // and what there is to kill and to find in the level.
-unique Spawned { links: i32, kills: i32, items: i32 }
+unique Spawned { links: i32, kills: i32, items: i32, playerz: i32 }
 
 // In a thing of the level: not there in a game for one; and deaf, so
 // that it waits to see the player.
@@ -119,15 +153,7 @@ system spawn_things() {
       if !player && flags & MF_COUNTITEM != 0 { items += 1 }
       links += 1
       if player {
-        Pmo = [{
-          x: x, y: y, z: floorz,
-          angle: ANG45 * ((Mapthings[i].angle / 45) as u32), momx: 0, momy: 0,
-          momz: 0, state: state, tics: tics, flags: flags,
-          health: mobjinfo[kind].spawnhealth, radius: mobjinfo[kind].radius,
-          height: mobjinfo[kind].height, reactiontime: 0,
-          subsector: subsector, floorz: floorz, ceilingz: ceilingz,
-          linked: links
-        }; 1]
+        Spawned.playerz = floorz
       }
       spawn {
         Mobj {
@@ -142,9 +168,12 @@ system spawn_things() {
           frame: states[state].frame, flags: flags,
           health: mobjinfo[kind].spawnhealth, radius: mobjinfo[kind].radius,
           height: mobjinfo[kind].height,
-          reactiontime: mobjinfo[kind].reactiontime, lastlook: lastlook,
+          reactiontime: if Level.skill == 4 { 0 } else { mobjinfo[kind].reactiontime },
+          lastlook: lastlook,
           subsector: subsector, floorz: floorz, ceilingz: ceilingz,
-          linked: links, id: links
+          linked: links, id: links, momx: 0, momy: 0, momz: 0,
+          movedir: DI_EAST, movecount: 0, threshold: 0, target: 0,
+          gone: false
         }
       }
     }

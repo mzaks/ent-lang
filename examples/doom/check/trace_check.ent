@@ -17,6 +17,7 @@ import things
 import demo
 import specials
 import play
+import enemy
 import movers
 
 capacity Bytes 16777216
@@ -88,13 +89,10 @@ schedule tic() {
   think_player()
   use_lines()
   trigger_lines()
-  move_player()
-  trigger_lines()
-  mirror_player()
   think_things()
+  trigger_lines()
   run_lights()
   run_movers()
-  mirror_player()
   trace()
   next()
 }

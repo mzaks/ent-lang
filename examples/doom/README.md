@@ -21,11 +21,16 @@ them as systems. It is being built; what is here so far:
   sprites, and textures in openings.
 - `demo.ent`, `specials.ent`, `items.ent`, `play.ent`, `movers.ent`: a
   demo's keys tic by tic; the lights of sectors; what the player has and
-  picks up; the player moved through the level, stopped by walls and
-  things and sliding along them; and doors and lifts, set off by the use
-  key and by lines that are walked over. Not yet: floors, ceilings and
-  stairs that move, teleporters, the ways out, floors that hurt,
-  weapons, and anything a monster does.
+  picks up; a thing moved through the level, stopped by walls and things,
+  the player sliding along them; and doors and lifts, set off by the use
+  key, by lines that are walked over, and by monsters.
+- `enemy.ent`: a tic of every thing, each in its turn in the order they
+  were made in (`for .. in turn by m.id`), the player's among them; and
+  of what monsters do, that they look for the player (the line of sight
+  through the level's tree) and walk after it once they have seen it.
+  Not yet: that anything attacks or is hurt (weapons, shots, damage,
+  death), floors, ceilings and stairs that move, teleporters, the ways
+  out, floors that hurt.
 - `doom.ent`: the program, which so far shows E1M1 from where the player
   starts (the arrow keys move the eye; Tab shows the map).
 - `check/`: programs that print what the port computes, to hold against

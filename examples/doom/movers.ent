@@ -149,7 +149,9 @@ system use_lines() {
   let down = Pl[0].buttons & BT_USE != 0 && Pl[0].buttons & BT_SPECIAL == 0
   if down && !Pl[0].usedown {
     let used = use_line(Lines, Sectors, Bytes, Bmap, Tm, Intercepts, Pmo)
-    if used >= 0 { Triggered += { line: used >> 1, used: true, side: used & 1 } }
+    if used >= 0 {
+      Triggered += { line: used >> 1, used: true, side: used & 1, player: true }
+    }
   }
   Pl[0].usedown = down
 }
@@ -163,6 +165,7 @@ system trigger_lines() {
     let special = Lines[line].special
     let tag = Lines[line].tag
     let used = Triggered[t].used
+    let player = Triggered[t].player
     if used && Triggered[t].side == 0 &&
        (special == 1 || special == 26 || special == 27 || special == 28 ||
         special == 31 || special == 32 || special == 33 || special == 34 ||
@@ -172,9 +175,10 @@ system trigger_lines() {
       let blue = cards & (1 << IT_BLUECARD | 1 << IT_BLUESKULL) != 0
       let yellow = cards & (1 << IT_YELLOWCARD | 1 << IT_YELLOWSKULL) != 0
       let red = cards & (1 << IT_REDCARD | 1 << IT_REDSKULL) != 0
-      let locked = ((special == 26 || special == 32) && !blue) ||
-                   ((special == 27 || special == 34) && !yellow) ||
-                   ((special == 28 || special == 33) && !red)
+      // (A monster opens none that has a lock.)
+      let locked = ((special == 26 || special == 32) && (!blue || !player)) ||
+                   ((special == 27 || special == 34) && (!yellow || !player)) ||
+                   ((special == 28 || special == 33) && (!red || !player))
       let sector = Lines[line].backsector
       if !locked && sector >= 0 {
         let moving = Sectors[sector].specialdata
@@ -183,11 +187,12 @@ system trigger_lines() {
           // is there in its place goes at once.)
           if special == 1 || special == 26 || special == 27 || special == 28 ||
              special == 117 {
+            // (A monster never shuts one.)
             if Movers[moving - 1].kind == MOVER_PLAT {
-              Movers[moving - 1].wait = -1
+              if player { Movers[moving - 1].wait = -1 }
             } else if Movers[moving - 1].direction == -1 {
               Movers[moving - 1].direction = 1
-            } else {
+            } else if player {
               Movers[moving - 1].direction = -1
             }
           }
@@ -420,7 +425,7 @@ system run_movers() {
             // P_ChangeSector: every thing in the squares the sector
             // reaches finds its floor and ceiling anew.
             Nofit = 0
-            for m: mut Mobj where m.type != MT_PLAYER {
+            for m: mut Mobj {
               let bx = (m.x - Bmap[0].orgx) >> MAPBLOCKSHIFT
               let by = (m.y - Bmap[0].orgy) >> MAPBLOCKSHIFT
               if bx >= left && bx <= right && by >= bottom && by <= top &&
@@ -428,7 +433,8 @@ system run_movers() {
                 let onfloor = m.z == m.floorz
                 let (floorz, ceilingz) = heights_at(
                     Lines, Sectors, Subsectors, Nodes, Bytes, Bmap, m.x, m.y,
-                    m.radius, m.flags, m.flags & MF_MISSILE == 0)
+                    m.radius, m.flags,
+                    m.flags & MF_MISSILE == 0 && m.type != MT_PLAYER)
                 m.floorz = floorz
                 m.ceilingz = ceilingz
                 if onfloor {
@@ -442,26 +448,7 @@ system run_movers() {
                 }
               }
             }
-            // And the player's.
-            let px = (Pmo[0].x - Bmap[0].orgx) >> MAPBLOCKSHIFT
-            let py = (Pmo[0].y - Bmap[0].orgy) >> MAPBLOCKSHIFT
-            var nofit = Nofit != 0
-            if px >= left && px <= right && py >= bottom && py <= top {
-              let onfloor = Pmo[0].z == Pmo[0].floorz
-              let (floorz, ceilingz) = heights_at(
-                  Lines, Sectors, Subsectors, Nodes, Bytes, Bmap, Pmo[0].x,
-                  Pmo[0].y, Pmo[0].radius, Pmo[0].flags, false)
-              Pmo[0].floorz = floorz
-              Pmo[0].ceilingz = ceilingz
-              if onfloor {
-                Pmo[0].z = floorz
-              } else if Pmo[0].z + Pmo[0].height > ceilingz {
-                Pmo[0].z = ceilingz - Pmo[0].height
-              }
-              if ceilingz - floorz < Pmo[0].height && Pmo[0].health > 0 {
-                nofit = true
-              }
-            }
+            let nofit = Nofit != 0
             if pass == 0 {
               // What a thing in the way does to the move: it is taken
               // back, but for a floor going up or a ceiling coming down

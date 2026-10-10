@@ -26,6 +26,7 @@ import demo
 import specials
 import items
 import play
+import enemy
 import movers
 
 // As many bytes as the biggest WAD.
@@ -70,10 +71,12 @@ system read_keys() {
 
 // The level is seen from the player's eye.
 system look() {
-  Viewpoint.x = Pmo[0].x
-  Viewpoint.y = Pmo[0].y
+  for m: Mobj where m.type == MT_PLAYER {
+    Viewpoint.x = m.x
+    Viewpoint.y = m.y
+    Viewpoint.angle = m.angle
+  }
   Viewpoint.z = Pl[0].viewz
-  Viewpoint.angle = Pmo[0].angle
   Clock.leveltime += 1
 }
 
@@ -97,13 +100,10 @@ schedule frame() {
   think_player()
   use_lines()
   trigger_lines()
-  move_player()
-  trigger_lines()
-  mirror_player()
   think_things()
+  trigger_lines()
   run_lights()
   run_movers()
-  mirror_player()
   look()
   clear_screen()
   render_view() run_if !Shown.map
