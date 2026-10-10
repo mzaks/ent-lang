@@ -17,8 +17,9 @@
 //
 // Not here: the game's settings, saving and loading, and the fifth
 // skill (its monsters are faster and come back, which is not there).
-// The menu opens by any key while no game of the player's is going on;
-// in a game the window's Esc key ends the program.
+// The menu opens by any key while no game of the player's is going on,
+// and by the Esc key always, which shuts it too; the player's own game
+// stands still while it is open.
 import files
 import wad
 import window
@@ -56,7 +57,7 @@ const MENU_READ1 = 4
 const MENU_READ2 = 5
 unique Menu {
   which: i32, item: i32, skull: i32, count: i32, any: bool, up: bool,
-  down: bool, enter: bool, back: bool
+  down: bool, enter: bool, back: bool, esc: bool
 }
 const LINEHEIGHT = 16
 const SKULLXOFF = -32
@@ -65,6 +66,8 @@ world {
   Shell.page = -1
   Shell.turn = true
   Menu.count = 10
+  // (The Esc key is the menu's.)
+  Window.escape = true
 }
 
 // How many lines a menu has.
@@ -87,6 +90,9 @@ system menu_keys() {
   let down = Keys.down
   let enter = Keys.enter
   let back = key_down(259)
+  let esc = key_down(256)
+  let pressed_esc = esc && !Menu.esc
+  Menu.esc = esc
   let any = up || down || enter || back || Keys.space || Keys.left || Keys.right ||
             key_down(341)
   let pressed_up = up && !Menu.up
@@ -100,7 +106,17 @@ system menu_keys() {
   Menu.back = back
   Menu.any = any
   Rnd = [{ play: Random.play, other: Random.other }; 1]
-  if Menu.which == MENU_NONE {
+  if pressed_esc {
+    // The menu, or out of it.
+    if Menu.which == MENU_NONE {
+      Menu.which = MENU_MAIN
+      Menu.item = 0
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+    } else {
+      Menu.which = MENU_NONE
+      sound(Sounds, Rnd, SFX_SWTCHX, 0)
+    }
+  } else if Menu.which == MENU_NONE {
     // (Any key, while a demo or a picture is shown.)
     if pressed_any && !Shell.game {
       Menu.which = MENU_MAIN

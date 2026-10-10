@@ -163,7 +163,26 @@ schedule page() run_if !Shell.game && !Shell.demo {
 }
 
 // A tic of a level: the player's game by the keys, a demo by its own.
-schedule frame() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on {
+// The player's own game stands still while the menu is open: it is
+// drawn as it is, with the menu over it.
+schedule held() run_if Shell.game && Menu.which != MENU_NONE && !Wi.on && !Fin.on {
+  hear()
+  clear_screen()
+  render_view() run_if !Shown.map
+  draw_walls() run_if !Shown.map
+  draw_planes() run_if !Shown.map
+  draw_masked() run_if !Shown.map
+  draw_weapon() run_if !Shown.map
+  draw_status()
+  draw_messages()
+  draw_automap() run_if Shown.map
+  draw_menu()
+  show_screen()
+  present()
+}
+
+schedule frame() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on &&
+                        !(Shell.game && Menu.which != MENU_NONE) {
   read_keys() run_if Shell.game
   think_player()
   player_sector()
@@ -259,6 +278,7 @@ main {
     ending()
     onward()
     between()
+    held()
     frame()
     again()
     page()

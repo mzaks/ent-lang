@@ -69,8 +69,9 @@ them as systems. It is being built; what is here so far:
   key brings the menu (the arrow keys, Enter, Backspace to go back),
   and a new game plays the episode from E1M1 with the keyboard (the
   arrow keys, A and D to step aside, Shift to run, the space bar to use,
-  the left Ctrl key to shoot, 1 to 7 for a weapon; Tab shows the map;
-  Esc ends the program).
+  the left Ctrl key to shoot, 1 to 7 for a weapon; Tab shows the map).
+  Esc opens and shuts the menu at any time; the game stands still
+  while it is open, and Quit Game ends the program.
 - `check/`: programs that print what the port computes, to hold against
   the reference.
 - `reference/`: what the port is compared against. `fetch.sh` fetches
