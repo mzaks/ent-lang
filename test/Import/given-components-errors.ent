@@ -1,0 +1,45 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+component Thing { hp: i32 }
+proc hurt(things: Thing, who: entity) {
+  // expected-error @+1 {{'things' was given to read: a proc that changes its entities is given it 'mut' ('things: mut Thing')}}
+  things[who].hp -= 1
+}
+
+// -----
+
+component Thing { hp: i32 }
+proc hurt(things: mut Thing, who: entity) { things[who].hp -= 1 }
+system s() {
+  for e, t: Thing {
+    // expected-error @+1 {{the entities that have a component are given outside a 'for', or in one whose entities take turns ('in turn by')}}
+    hurt(Thing, e)
+  }
+}
+
+// -----
+
+component Thing { hp: i32 }
+component Other { n: i32 }
+proc make(things: mut Thing) {
+  // expected-error @+1 {{a proc spawns an entity of components it was given to change: 'Other' is not one ('name: mut Other')}}
+  spawn { Thing { hp: 1 }, Other { n: 2 } }
+}
+
+// -----
+
+component Thing { hp: i32 }
+// expected-error @+1 {{the entities that have a component are given to a fn or proc of the program, not to one in C}}
+extern proc hurt(things: mut Thing)
+
+// -----
+
+component Thing { hp: i32 }
+component Other { n: i32 }
+proc hurt(things: mut Thing, who: entity) { things[who].hp -= 1 }
+system s() {
+  for e, o: Other in turn by o.n {
+    // expected-error @+1 {{'hurt' is given the component 'Thing' here, by its name}}
+    hurt(Other, e)
+  }
+}

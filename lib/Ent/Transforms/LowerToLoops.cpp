@@ -4176,7 +4176,8 @@ emitReadStamp(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
 }
 
 static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
-                         const WorldLayout &layout, WorldAccess &world) {
+                         const WorldLayout &layout, WorldAccess &world,
+                         bool mayMerge = true) {
   SmallVector<LookupOp> lookups;
   func.walk([&](LookupOp lookup) { lookups.push_back(lookup); });
   if (lookups.empty()) {
@@ -4227,10 +4228,13 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
       scope->walk([&](memref::StoreOp store) {
         any |= columns.contains(store.getMemRef());
       });
-      // (Or what is not lowered yet may: a combine into another entity.)
+      // (Or what is not lowered yet may: a combine into another entity.
+      // Or a function that is called, which may have been given the
+      // component.)
       scope->walk([&](Operation *op) {
         if (auto apply = dyn_cast<ApplyOp>(op))
           any |= apply.getComponentAttr() == component;
+        any |= isa<InvokeOp, func::CallOp>(op);
       });
     }
     return written[{first, component}] = any;
@@ -4239,7 +4243,7 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
   SmallVector<SmallVector<LookupOp, 4>> groups;
   for (LookupOp lookup : lookups) {
     bool placed = false;
-    if (!writes(scopeOf(lookup), lookup.getComponentAttr()))
+    if (mayMerge && !writes(scopeOf(lookup), lookup.getComponentAttr()))
       for (auto &group : groups) {
         LookupOp first = group.front();
         if (first.getEntity() == lookup.getEntity() &&
@@ -11265,32 +11269,6 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
     if (isa<AppendOp>(op) || (turn && isa<ConnectOp>(op)))
       op->setAttr(kAtOnceAttr, rewriter.getUnitAttr());
   });
-  // Turn by turn, an entity the body spawns that the query would visit
-  // joins the list, by the value it was given.
-  if (turn) {
-    SmallVector<SpawnOp> spawns;
-    query.getBody().walk([&](SpawnOp spawn) { spawns.push_back(spawn); });
-    for (SpawnOp spawn : spawns) {
-      const WorldArchetype *home = nullptr;
-      for (const WorldArchetype *archetype : matched)
-        if (ArchetypeOp(archetype->op).getSymNameAttr() ==
-            spawn.getArchetypeAttr().getAttr())
-          home = archetype;
-      if (!home)
-        continue;
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointAfter(spawn);
-      Type type = home->find(byComponent, byField)->type;
-      auto lookup = LookupOp::create(rewriter, loc, type,
-                                     rewriter.getI1Type(), spawn.getEntity(),
-                                     query.getByComponent(), byField);
-      callOrderedInsert(rewriter, loc, module, keys, ids, cells,
-                        keyOf(world.toStorage(loc, lookup.getValue()), type),
-                        world.toStorage(loc, spawn.getEntity()),
-                        /*spawned=*/true);
-    }
-  }
-
   SmallVector<ConnectOp> connects;
   query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
   llvm::SetVector<Attribute> changedRelations;
@@ -11345,6 +11323,12 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
         Value at = memref::LoadOp::create(rewriter, loc, cells,
                                           ValueRange{one});
         Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{at});
+        // (How many there are of each kind before the body, to tell what
+        // it spawned: see below.)
+        SmallVector<Value> before;
+        if (turn)
+          for (const WorldArchetype *archetype : matched)
+            before.push_back(world.count(loc, *archetype));
         emitLocate(
             rewriter, loc, layout, world, id,
             [&](const WorldArchetype &archetype) {
@@ -11363,9 +11347,27 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
                             /*marksPending=*/!turn);
               if (!turn)
                 return {};
+              rewriter.setInsertionPoint(end);
+              // What was spawned in its turn that the query would visit
+              // joins the list, by the value it was given: the rows that
+              // are new, whoever made them (the body, or a function it
+              // called), before any row moves.
+              for (auto [home, had] : llvm::zip(matched, before)) {
+                auto fresh = scf::ForOp::create(rewriter, loc, had,
+                                                world.count(loc, *home), one);
+                OpBuilder::InsertionGuard inner(rewriter);
+                rewriter.setInsertionPointToStart(fresh.getBody());
+                Value row = fresh.getInductionVar();
+                Value stored = memref::LoadOp::create(
+                    rewriter, loc, world.column(*home, byComponent, byField),
+                    ValueRange{row});
+                callOrderedInsert(
+                    rewriter, loc, module, keys, ids, cells,
+                    keyOf(stored, home->find(byComponent, byField)->type),
+                    world.entityId(loc, *home, row), /*spawned=*/true);
+              }
               // Its own query's end: it is gone, or elsewhere, and the
               // edges are as it left them, for the next.
-              rewriter.setInsertionPoint(end);
               SmallVector<const WorldArchetype *> changed;
               if (llvm::is_contained(changing, &archetype))
                 changed.push_back(&archetype);
@@ -13272,6 +13274,9 @@ struct EntLowerToLoops
     // Applies whose field nothing else in their query touches.
     module.walk([&](ApplyOp apply) {
       auto query = apply->getParentOfType<QueryOp>();
+      // (In a function that was given the component: see lowerGiven.)
+      if (!query)
+        return;
       FlatSymbolRefAttr component = apply.getComponentAttr();
       StringAttr field = apply.getFieldAttr();
       auto refTo = [&](Value ref) {
@@ -13320,7 +13325,7 @@ struct EntLowerToLoops
         return;
       // (And one that goes by a field, in that order.)
       auto query = op->getParentOfType<QueryOp>();
-      if (query.getCascade() || query.hasBy())
+      if (query && (query.getCascade() || query.hasBy()))
         op->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
     });
     // Lookups and applies through a trusted end of an edge.
@@ -13507,7 +13512,29 @@ struct EntLowerToLoops
     // What the functions that are given a buffer do with it.
     for (auto [func, arena] : givenBuffers) {
       WorldAccess world(rewriter, *layout, arena);
+      // What one that was given the entities of a component does to
+      // them, where it stands: its loops over them, what it spawns, what
+      // it sets and what it reads.
+      SmallVector<EachOp> eaches;
+      func.walk([&](EachOp each) { eaches.push_back(each); });
+      for (EachOp each : eaches)
+        lowerEach(rewriter, each, *layout, world);
+      lowerSpawns(rewriter, func, *layout, world);
+      SmallVector<ApplyOp> applies;
+      func.walk([&](ApplyOp apply) { applies.push_back(apply); });
+      for (ApplyOp apply : applies) {
+        rewriter.setInsertionPoint(apply);
+        combineDirectly(rewriter, apply, *layout, world,
+                        world.toStorage(apply.getLoc(), apply.getEntity()),
+                        world.toStorage(apply.getLoc(), apply.getValue()),
+                        world.hasStamps() ? world.currentTick(apply.getLoc())
+                                          : Value());
+        rewriter.eraseOp(apply);
+      }
       lowerBuffers(rewriter, func, *layout, world, symbols, defined);
+      // (Each where it stands: between two of them the entity may have
+      // been set.)
+      lowerLookups(rewriter, func, *layout, world, /*mayMerge=*/false);
     }
 
     // What is read of a table: from its field's values, which are the

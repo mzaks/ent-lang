@@ -1,81 +1,71 @@
-// Buffers given to fns and procs, changed row by row, and filled
-// (given.test).
+// A proc that is given the entities of a component: it reads and sets
+// them, goes through them, and spawns (given.test).
 import console
-import filled
+component Thing { born: i32, hp: i32, foe: entity }
+component Mark { n: i32 }
+default_capacity 16
+unique Born: i32
+unique Round: i32
 
-buffer Screen { pixel: u8, depth: i32 } capacity 32
-component Dot { at: i32, shade: u8 } capacity 8
-unique Total: i32
-
-// A fn reads a buffer it is given: two bytes as one number, low first.
-fn short_at(bytes: Bytes, at: i32) -> i32 {
-  bytes[at].value as i32 | (bytes[at + 1].value as i32) << 8
+// The one with the most `hp` that is not `me`, and how many there are.
+fn strongest(things: Thing, me: entity) -> (entity, i32) {
+  var best = me
+  var most = -1
+  var count = 0
+  for o, other in things where o != me {
+    count += 1
+    if other.hp > most {
+      most = other.hp
+      best = o
+    }
+  }
+  (best, count)
 }
 
-// And passes it on.
-fn sum_of_shorts(bytes: Bytes, count: i32) -> i32 {
-  var sum = 0
-  for i in 0..count { sum += short_at(bytes, i * 2) }
-  sum
+// `me` hits its foe, and the foe remembers who did it; one that falls to
+// nought or below is given all its strength back, and a new one is made.
+proc hit(things: mut Thing, me: entity, damage: i32, born: i32) -> bool {
+  let foe = things[me].foe
+  things[foe].hp -= damage
+  things[foe].foe = me
+  var made = false
+  if things[foe].hp <= 0 && foe != me {
+    things[foe].hp = 10
+  }
+  // (Once: the first to hit that hard makes one.)
+  if things[foe].hp == 10 && born == 4 {
+    let it = spawn { Thing { born: born, hp: 3, foe: me } }
+    things[it].hp += things[me].born
+    made = true
+  }
+  made
 }
 
-fn shade_at(screen: Screen, at: i32) -> u8 { screen[at].pixel }
-
-// A proc changes one it is given `mut`: a row's field, a row more, none.
-proc plot(screen: mut Screen, at: i32, shade: u8) {
-  screen[at].pixel = shade
-  screen[at].depth += 1
+// Passed on: a proc gives what it was given.
+proc round(things: mut Thing, me: entity, born: i32) -> bool {
+  let (foe, count) = strongest(things, me)
+  things[me].foe = foe
+  hit(things, me, 4 + count, born)
 }
-proc line(screen: mut Screen, from: i32, to: i32, shade: u8) -> i32 {
-  for at in from..to { plot(screen, at, shade) }
-  // (Given to be changed, it is passed on to be read as well.)
-  shade_at(screen, from) as i32 + len(screen)
-}
-proc more(screen: mut Screen) {
-  screen += { pixel: 9, depth: 90 }
-}
-proc none(screen: mut Screen) { screen = [] }
 
 world {
-  spawn { Dot { at: 1, shade: 0 } }
-  spawn { Dot { at: 12, shade: 0 } }
+  spawn { Thing { born: 1, hp: 10, foe: none } }
+  spawn { Thing { born: 2, hp: 12, foe: none }, Mark { n: 1 } }
+  spawn { Thing { born: 3, hp: 11, foe: none } }
+  Born = 3
 }
 
-system fill() {
-  Bytes = []
-  fill_bytes(Bytes, 1)
-  fill_bytes(Bytes, 100)
-  put("bytes {len(Bytes)}: sum {sum_bytes(Bytes)} short {short_at(Bytes, 0)} shorts {sum_of_shorts(Bytes, 3)}")
-  // More than it holds are not left.
-  for i in 0..10 { fill_bytes(Bytes, 0) }
-  put("full {len(Bytes)}")
-}
-
-system draw() {
-  // Sixteen rows alike; a row it has is changed, one it has not is not.
-  Screen = [{ pixel: 1, depth: 0 }; 16]
-  Screen[3].pixel = 200
-  Screen[3].pixel += 100
-  Screen[4].depth -= 5
-  Screen[16].pixel = 7
-  Screen[-1].pixel = 7
-  put("screen {len(Screen)}: {Screen[2].pixel} {Screen[3].pixel} {Screen[4].depth} {Screen[16].pixel}")
-  let gave = line(Screen, 8, 12, 50)
-  put("line {gave}: {Screen[7].pixel} {Screen[8].pixel} {Screen[11].depth} {Screen[12].pixel}")
-  more(Screen)
-  put("more {len(Screen)}: {Screen[16].pixel} {Screen[16].depth}")
-  // A fn may read it for each entity of a `for`.
-  for d: mut Dot {
-    d.shade = shade_at(Screen, d.at)
-    Total += short_at(Bytes, d.at)
+system fight() {
+  Round += 1
+  for e, t: mut Thing in turn by t.born {
+    if round(Thing, e, Born + 1) { Born += 1 }
   }
-  for d: Dot { put("dot at {d.at}: {d.shade}") }
-  put("total {Total}")
-  none(Screen)
-  put("none {len(Screen)}")
-  Screen = [{ pixel: 3, depth: 3 }; 2]
-  put("again {len(Screen)}: {Screen[1].pixel} {Screen[2].pixel}")
+  for t: Thing by t.born {
+    var foe = 0
+    if let born = Thing(t.foe).born { foe = born }
+    put("{Round}: thing {t.born}: hp {t.hp}, after {foe}")
+  }
 }
 
-schedule once() { fill() draw() }
-main { once() }
+schedule frame() { fight() }
+main { frame() frame() frame() }

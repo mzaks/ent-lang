@@ -655,8 +655,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       return;
     WorldApply entry;
     entry.type = apply->getOperand(apply->getNumOperands() - 1).getType();
+    // (One in a function that was given the component lands where it
+    // stands: no buffer, but its place in the list.)
+    auto sender = apply->getParentOfType<QueryOp>();
     for (ArchetypeOp source :
-         getMatchedArchetypes(apply->getParentOfType<QueryOp>())) {
+         sender ? getMatchedArchetypes(sender) : SmallVector<ArchetypeOp>()) {
       for (WorldArchetype &archetype : layout.archetypes) {
         if (archetype.op != source)
           continue;

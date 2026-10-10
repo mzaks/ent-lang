@@ -1,26 +1,24 @@
-// Buffers beyond rows a system appends: a fn reads one it is given
-// (`bytes: Bytes`) and passes it on, also for each entity of a `for`; a
-// proc changes one it is given `mut` (a row's field, a row more, none); a
-// system changes a row (`Screen[i].pixel = ..`; nothing where there is no
-// such row) and fills a buffer with rows alike (`Screen = [{ .. }; n]`);
-// and a device is handed one to fill (Inputs/given/filled.ent, filled.c):
-// where its count is, how many rows it holds, and its fields' values.
-// RUN: %ent run -I %S/Inputs/given %S/Inputs/given.ent | FileCheck %s
-// RUN: %ent run --parallel -I %S/Inputs/given %S/Inputs/given.ent | FileCheck %s
-// RUN: %ent build -I %S/Inputs/given %S/Inputs/given.ent -o %t.exe --keep %t.dir
-// RUN: FileCheck %s --check-prefix=HEADER --input-file=%t.dir/ent_extern.h
+// A fn or proc that is given the entities of a component: it reads them
+// ('name[entity].field', nought where there is none), goes through them
+// ('for e, c in name'), and, given it 'mut', sets them and spawns; what
+// it spawns in a turn has its turn in the same `for`. The same built
+// with threads.
+// RUN: %ent run %S/Inputs/given.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/given.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
 
-// HEADER-DAG: void ent_filled_fill_bytes(int32_t *arg0_count, int32_t arg0_capacity, uint8_t *arg0_value, int32_t arg1);
-// HEADER-DAG: int32_t ent_filled_sum_bytes(int32_t arg0_count, const uint8_t *arg0_value);
-
-// CHECK:      bytes 20: sum 1100 short 513 shorts 3081
-// CHECK-NEXT: full 64
-// CHECK-NEXT: screen 16: 1 44 -5 0
-// CHECK-NEXT: line 66: 1 50 1 1
-// CHECK-NEXT: more 17: 9 90
-// CHECK-NEXT: dot at 1: 1
-// CHECK-NEXT: dot at 12: 1
-// CHECK-NEXT: total 27240
-// CHECK-NEXT: none 0
-// CHECK-NEXT: again 2: 3 0
-// CHECK-NOT:  {{.}}
+// Each hits the strongest of the others for 4 and one for each of them,
+// and the one hit is after the one that hit it until its own turn.
+// CHECK:      1: thing 1: hp 4, after 3
+// CHECK-NEXT: 1: thing 2: hp 6, after 3
+// CHECK-NEXT: 1: thing 3: hp 5, after 1
+// The first brings the second to nought, which is given ten again, and
+// makes a fourth, which takes its turn after the third and hits it.
+// CHECK-NEXT: 2: thing 1: hp 4, after 2
+// CHECK-NEXT: 2: thing 2: hp 3, after 3
+// CHECK-NEXT: 2: thing 3: hp 3, after 4
+// CHECK-NEXT: 2: thing 4: hp 4, after 3
+// CHECK-NEXT: 3: thing 1: hp 3, after 4
+// CHECK-NEXT: 3: thing 2: hp 3, after 4
+// CHECK-NEXT: 3: thing 3: hp 3, after 1
+// CHECK-NEXT: 3: thing 4: hp 3, after 1

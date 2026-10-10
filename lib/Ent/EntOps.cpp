@@ -386,6 +386,22 @@ static BufferOp lookupBuffer(SymbolTableCollection &symbolTable, Operation *op,
   return buffer;
 }
 
+/// Whether `op` is in a function that was given the entities that have
+/// `component` (a parameter of the type of a buffer's, by the component's
+/// name), to change them too where `toChange`.
+static bool isGiven(Operation *op, FlatSymbolRefAttr component,
+                    bool toChange) {
+  auto function = op->getParentOfType<FunctionOp>();
+  if (!function)
+    return false;
+  for (Type type : function.getParams().getAsValueRange<TypeAttr>())
+    if (auto handed = dyn_cast<BufferType>(type);
+        handed && handed.getName() == component &&
+        (handed.getMut() || !toChange))
+      return true;
+  return false;
+}
+
 /// Whether `op` is in a query that runs as one query per entity (`turn`):
 /// what it does there takes effect at once.
 static bool isInTurn(Operation *op) {
@@ -564,6 +580,33 @@ BufferFillOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 LogicalResult
 BufferOfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   bool changed = getResult().getType().getMut();
+  // The entities that have a component, for a function of the program:
+  // outside a query, or in one whose entities take turns.
+  if (lookupComponent(symbolTable, *this, getBufferAttr())) {
+    for (Operation *user : getResult().getUsers()) {
+      auto invoke = dyn_cast<InvokeOp>(user);
+      auto function =
+          invoke ? symbolTable.lookupNearestSymbolFrom<FunctionOp>(
+                       invoke, invoke.getCalleeAttr())
+                 : FunctionOp();
+      if (!function || !function.isDefined())
+        return emitOpError("gives the entities of a component to a "
+                           "function of the program, and to nothing else");
+    }
+    auto query = (*this)->getParentOfType<QueryOp>();
+    if (query && !query.isTurn())
+      return emitOpError("gives the entities of a component in a query "
+                         "whose entities do not take turns: what is read "
+                         "of them would depend on the order");
+    if (auto system = (*this)->getParentOfType<SystemOp>();
+        system && (changed ? !system.canWrite(getBufferAttr())
+                           : !system.canRead(getBufferAttr())))
+      return emitOpError("gives ")
+             << getBufferAttr() << " but system @" << system.getSymName()
+             << " does not declare it in "
+             << (changed ? "'writes'" : "'reads'");
+    return success();
+  }
   // (One with a body may be given it in a query, to read.)
   bool inC = changed;
   for (Operation *user : getResult().getUsers()) {
@@ -1119,6 +1162,12 @@ LogicalResult FunctionOp::verifyRegions() {
     // was, and given to be changed.)
     if (isa<BufferAtOp, BufferLenOp, BufferSetOp, BufferFillOp, AppendOp,
             ClearOp>(op))
+      return;
+    // (And the entities of a component it was given: read, gone through,
+    // set and spawned, each of which says for itself whether it may.)
+    if (isa<LookupOp, ApplyOp, SpawnOp, EachOp>(op))
+      return;
+    if (isa<GetOp, YieldOp>(op) && op->getParentOfType<EachOp>())
       return;
     if (succeeded(result))
       result = op->emitOpError(invoke ? "calls a proc in a function's body; "
@@ -2055,10 +2104,14 @@ SmallVector<FlatSymbolRefAttr> EachOp::getExcluded() {
 
 LogicalResult EachOp::verify() {
   auto query = (*this)->getParentOfType<QueryOp>();
-  if (!query)
+  // (Or in a function that was given the components, which reads the
+  // entities as they are.)
+  bool atOnce = !query || query.isTurn();
+  bool rows = !query || query.hasBy();
+  if (!query && !(*this)->getParentOfType<FunctionOp>())
     return emitOpError("must be inside an 'ent.query': it runs for the "
                        "entity that one visits");
-  for (Operation *around = (*this)->getParentOp(); around != query;
+  for (Operation *around = (*this)->getParentOp(); around && around != query;
        around = around->getParentOp())
     if (isa<EachOp, EdgesOp>(around))
       return emitOpError("cannot be nested in '")
@@ -2087,7 +2140,7 @@ LogicalResult EachOp::verify() {
     // read of others set or not, as the query got to them: only as it
     // was before (`old`).
     // (Turn by turn, they are read as they are then.)
-    if (isOld(arg.getArgNumber()) || query.isTurn())
+    if (isOld(arg.getArgNumber()) || atOnce)
       continue;
     llvm::SmallPtrSet<Attribute, 4> read;
     for (Operation *user : arg.getUsers())
@@ -2141,7 +2194,9 @@ LogicalResult EachOp::verify() {
   getBody().walk([&](Operation *op) {
     if (failed(result))
       return;
-    if (isa<AppendOp>(op) && query.hasBy())
+    if (isa<AppendOp>(op) && rows)
+      return;
+    if (isa<SpawnOp>(op) && !query)
       return;
     if (isa<CombineOp, ConnectOp, AppendOp, SpawnOp, DespawnOp, AddOp,
             RemoveOp>(op)) {
@@ -2153,7 +2208,7 @@ LogicalResult EachOp::verify() {
     // What is sent or accumulated here is combined right away, once for
     // each entity of the loop: nothing else in the query may see it.
     Operation *seen = nullptr;
-    if (query.isTurn())
+    if (atOnce)
       return;
     if (auto apply = dyn_cast<ApplyOp>(op)) {
       query.walk([&](Operation *other) {
@@ -2372,8 +2427,10 @@ bool SpawnOp::startsWith(FlatSymbolRefAttr component) {
 }
 
 LogicalResult SpawnOp::verify() {
-  if (!(*this)->getParentOfType<SystemOp>())
-    return emitOpError("must be inside an 'ent.system'");
+  if (!(*this)->getParentOfType<SystemOp>() &&
+      !(*this)->getParentOfType<FunctionOp>())
+    return emitOpError("must be inside an 'ent.system', or a function that "
+                       "was given its components");
   if (!getArchetypeAttr() && !getComponentsAttr())
     return emitOpError("names neither an archetype nor components");
   if (ArrayAttr components = getComponentsAttr()) {
@@ -2404,7 +2461,11 @@ LogicalResult SpawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       auto component = cast<FlatSymbolRefAttr>(attr);
       if (!lookupComponent(symbolTable, *this, component))
         return emitOpError("spawns unknown component ") << component;
-      if (!system.canWrite(component))
+      if (!system && !isGiven(*this, component, /*toChange=*/true))
+        return emitOpError("spawns ")
+               << component << " in a function that was not given it to "
+               << "change";
+      if (system && !system.canWrite(component))
         return emitOpError("spawns ")
                << component << " but system @" << system.getSymName()
                << " does not declare it in 'writes'";
@@ -2428,7 +2489,7 @@ LogicalResult SpawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       }
     }
   } else {
-    if (!system.canWrite(getArchetypeAttr()))
+    if (system && !system.canWrite(getArchetypeAttr()))
       return emitOpError("spawns into ")
              << getArchetypeAttr() << " but system @" << system.getSymName()
              << " does not declare it in 'writes'";
@@ -2467,8 +2528,10 @@ LogicalResult SpawnOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 }
 
 LogicalResult LookupOp::verify() {
-  if (!(*this)->getParentOfType<SystemOp>())
-    return emitOpError("must be inside an 'ent.system'");
+  if (!(*this)->getParentOfType<SystemOp>() &&
+      !(*this)->getParentOfType<FunctionOp>())
+    return emitOpError("must be inside an 'ent.system', or a function that "
+                       "was given the component");
   return success();
 }
 
@@ -2486,6 +2549,13 @@ LogicalResult LookupOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
            << getValue().getType() << " does not match field '" << getField()
            << "' of type " << fieldType;
   auto system = (*this)->getParentOfType<SystemOp>();
+  if (!system) {
+    if (!isGiven(*this, getComponentAttr(), /*toChange=*/false))
+      return emitOpError("looks up ")
+             << getComponentAttr()
+             << " in a function that was not given it";
+    return success();
+  }
   if (!system.canRead(getComponentAttr()))
     return emitOpError("looks up ")
            << getComponentAttr() << " but system @" << system.getSymName()
@@ -2623,6 +2693,13 @@ LogicalResult CombineOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 /// row), and a known rule.
 static LogicalResult verifyCombining(Operation *op, StringRef rule) {
   auto query = op->getParentOfType<QueryOp>();
+  // (In a function that was given the component: where it stands.)
+  if (!query && isa<ApplyOp>(op) && op->getParentOfType<FunctionOp>()) {
+    if (rule != "set" && rule != "add" && rule != "min" && rule != "max")
+      return op->emitOpError("has unknown rule '")
+             << rule << "'; expected 'set', 'add', 'min' or 'max'";
+    return success();
+  }
   if (!query)
     return op->emitOpError("must be inside an 'ent.query': its values are "
                            "combined when the query ends");
@@ -2687,6 +2764,13 @@ LogicalResult ApplyOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     return emitOpError("cannot combine field '")
            << getField() << "' of type i1; only integers and floats can";
   auto system = (*this)->getParentOfType<SystemOp>();
+  if (!system) {
+    if (!isGiven(*this, getComponentAttr(), /*toChange=*/true))
+      return emitOpError("applies to ")
+             << getComponentAttr()
+             << " in a function that was not given it to change";
+    return success();
+  }
   if (!system.canWrite(getComponentAttr()))
     return emitOpError("applies to ")
            << getComponentAttr() << " but system @" << system.getSymName()

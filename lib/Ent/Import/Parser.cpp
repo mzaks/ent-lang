@@ -270,6 +270,9 @@ struct Function {
   bool proc = false;
   /// Implemented in C.
   bool isExtern = false;
+  /// For each parameter: the component it is given, or nothing. (Such a
+  /// parameter is of the type of a buffer's, by the component's name.)
+  SmallVector<std::string> components;
 };
 
 /// The fns or procs of one shape (what they take and give) as values: a
@@ -416,7 +419,9 @@ private:
   /// `name += ..`, or `name[i].field` with an assignment after it (and
   /// not a value read of it).
   bool atBufferStatement() {
-    if (!token.is(Token::Identifier) || !bufferNamed(token.spelling))
+    // (So with a component that was given: `name[entity].field = ..`.)
+    if (!token.is(Token::Identifier) ||
+        (!bufferNamed(token.spelling) && !componentGiven(token.spelling)))
       return false;
     Lexer ahead = lexer;
     Token next = ahead.next();
@@ -568,7 +573,8 @@ private:
   };
   std::optional<BufferUse> bufferNamed(StringRef name) {
     if (const Variable *variable = lookup(name)) {
-      if (variable->kind == Variable::Value && variable->value)
+      if (variable->kind == Variable::Value && variable->value &&
+          !givenComponents.count(name))
         if (auto handed = dyn_cast<BufferType>(variable->value.getType()))
           return BufferUse{handed.getName().getValue().str(),
                            handed.getMut(), variable->value};
@@ -578,9 +584,41 @@ private:
       return BufferUse{resolve(name), true, mlir::Value()};
     return std::nullopt;
   }
+  /// The components the fn or proc that is being parsed was given, by
+  /// the names of its parameters: it reads the entities that have one
+  /// (`name[entity].field`, `for e, c in name { }`) and, given it `mut`,
+  /// changes them and spawns.
+  llvm::StringMap<std::string> givenComponents;
+  struct ComponentUse {
+    std::string component;
+    bool mut = false;
+    mlir::Value given;
+  };
+  std::optional<ComponentUse> componentGiven(StringRef name) {
+    auto given = givenComponents.find(name);
+    const Variable *variable = lookup(name);
+    if (given == givenComponents.end() || !variable || !variable->value)
+      return std::nullopt;
+    auto handed = dyn_cast<BufferType>(variable->value.getType());
+    if (!handed)
+      return std::nullopt;
+    return ComponentUse{given->second, handed.getMut(), variable->value};
+  }
+  /// Whether the proc that is being parsed was given `component` to
+  /// change.
+  bool givenToChange(StringRef component) {
+    for (auto &entry : givenComponents)
+      if (entry.second == component)
+        if (auto use = componentGiven(entry.first()); use && use->mut)
+          return true;
+    return false;
+  }
+  LogicalResult parseGivenStatement(const std::string &name, llvm::SMLoc at);
   /// Whether a type being parsed may be a buffer: the parameter of an
   /// extern proc.
   bool handsBuffers = false;
+  /// The component the type that was just parsed is, if it is one.
+  std::string typedComponent;
   LogicalResult parseUnique();
   LogicalResult parseArchetype();
   LogicalResult parseSystem(bool isExtern);
@@ -1425,6 +1463,12 @@ FailureOr<Type> Parser::parseType() {
     if (!handsBuffers)
       return error(at, "'" + *name + "' is a buffer: a parameter of a fn "
                        "or proc may be one, and nothing else");
+    return Type(BufferType::get(context, symbol(*name)));
+  }
+  // A component, where a fn or proc says it is given the entities that
+  // have it.
+  if (!type && components.count(*name) && handsBuffers) {
+    typedComponent = *name;
     return Type(BufferType::get(context, symbol(*name)));
   }
   if (!type)
@@ -3292,9 +3336,15 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     if (changed)
       advance();
     llvm::SaveAndRestore<bool> hands(handsBuffers, true);
+    typedComponent.clear();
     FailureOr<Type> type = parseType();
     if (failed(type))
       return failure();
+    function.components.push_back(typedComponent);
+    if (!typedComponent.empty() && isExtern)
+      return error(typeAt, "the entities that have a component are given "
+                           "to a fn or proc of the program, not to one in "
+                           "C");
     if (auto handed = dyn_cast<BufferType>(*type)) {
       if (isExtern && !proc)
         return error(typeAt, "an extern fn computes from values; a buffer "
@@ -3363,6 +3413,7 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   Type result = function.result;
   SmallVector<Type> results = function.results;
   SmallVector<Type> params = function.params;
+  SmallVector<std::string> given = function.components;
   functions[*name] = std::move(function);
   if (isExtern)
     return success();
@@ -3374,6 +3425,11 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   ScopeGuard scope(*this);
   for (auto [param, type] : llvm::zip(names, params))
     bind(param, Variable::ofValue(block->addArgument(type, loc(at))));
+  givenComponents.clear();
+  for (auto [param, component] : llvm::zip(names, given))
+    if (!component.empty())
+      givenComponents[param] = component;
+  llvm::scope_exit forget([&] { givenComponents.clear(); });
   llvm::SaveAndRestore<bool> calls(inSystem, true);
   llvm::SaveAndRestore<bool> computes(inFunction, true);
   llvm::SaveAndRestore<bool> acts(inProc, proc);
@@ -3409,7 +3465,8 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     if (atBufferStatement())
       statement = true;
     // (In a proc: a call of a proc, for what it does.)
-    if (proc && token.is(Token::Identifier) && peek().is(Token::LParen)) {
+    if (!statement && proc && token.is(Token::Identifier) &&
+        peek().is(Token::LParen)) {
       Callable *through = callableNamed(token.spelling);
       statement = through ? through->proc && !through->result
                           : functions.count(token.spelling) &&
@@ -3909,6 +3966,60 @@ LogicalResult Parser::parseStatement() {
   return error(at, "expected a statement, found '" + token.spelling + "'");
 }
 
+// name[entity].field op value, of a component a proc was given `mut`:
+// the field of the entity that has it is read as it is and set; where
+// the entity has it not, nothing happens.
+LogicalResult Parser::parseGivenStatement(const std::string &name,
+                                          llvm::SMLoc at) {
+  ComponentUse held = *componentGiven(name);
+  if (!held.mut)
+    return error(at, "'" + name + "' was given to read: a proc that "
+                     "changes its entities is given it 'mut' ('" + name +
+                         ": mut " + held.component + "')");
+  advance();
+  FailureOr<ExprPtr> which = parseExpr();
+  if (failed(which) || failed(expect(Token::RBracket, "']'")) ||
+      failed(expect(Token::Dot, "'.' and a field")))
+    return failure();
+  llvm::SMLoc fieldAt = token.loc;
+  FailureOr<std::string> field = identifier("a field");
+  if (failed(field))
+    return failure();
+  Type type = components[held.component].fieldType(*field);
+  if (!type)
+    return error(fieldAt, "component '" + held.component +
+                              "' has no field '" + *field + "'");
+  if (isa<TextType, StringType>(type))
+    return error(fieldAt, "a text of another entity is not set here yet");
+  auto op = parseAssignOp();
+  if (failed(op))
+    return failure();
+  FailureOr<ExprPtr> value = parseExpr();
+  if (failed(value))
+    return failure();
+  FailureOr<mlir::Value> entity = emit(**which, EntityType::get(context));
+  if (failed(entity))
+    return failure();
+  if (!isa<EntityType>(entity->getType()))
+    return error((*which)->loc, "an entity says which: '" + name +
+                                    "[entity].field'");
+  StringAttr fieldName = builder.getStringAttr(*field);
+  FlatSymbolRefAttr component = symbol(held.component);
+  return emitAssignment(
+      at, op->first, op->second, [&] { return type; },
+      [&]() -> mlir::Value {
+        return LookupOp::create(builder, loc(at), type, builder.getI1Type(),
+                                *entity, component, fieldName)
+            .getValue();
+      },
+      [&](mlir::Value v) -> LogicalResult {
+        ApplyOp::create(builder, loc(at), *entity, component, fieldName,
+                        builder.getStringAttr("set"), v);
+        return success();
+      },
+      **value);
+}
+
 // for (e)-[s: R]->(other) { } / for (child: C)-[R]->(e) { }, inside a
 // `for`: the edges of the entity it visits, out of it or into it.
 /// What a `for` over entities that is now whole must hold of the `for`s
@@ -4034,7 +4145,27 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
       return error(where, "unknown component '" + name + "'");
     return success();
   };
-  while (!filter()) {
+  // (In a fn or proc: `[e,] c in name`, of a component it was given.)
+  if (inFunction) {
+    FailureOr<std::string> first = identifier("a name");
+    if (failed(first))
+      return failure();
+    std::string binding = *first;
+    if (consumeIf(Token::Comma)) {
+      entity = *first;
+      FailureOr<std::string> second = identifier("a name");
+      if (failed(second))
+        return failure();
+      binding = *second;
+    }
+    if (failed(expectKeyword("in")))
+      return failure();
+    FailureOr<std::string> over = identifier("a component that was given");
+    if (failed(over))
+      return failure();
+    bindings.push_back({binding, componentGiven(*over)->component, false});
+  }
+  while (!inFunction && !filter()) {
     if (token.isKeyword("optional") || token.isKeyword("on") ||
         token.isKeyword("top") || token.isKeyword("bottom"))
       return error("a 'for' inside a 'for' visits every entity that has "
@@ -4886,6 +5017,19 @@ scf::IfOp Parser::giveFromBranches(scf::IfOp branch,
 //     [on trigger, ...] { }
 LogicalResult Parser::parseFor() {
   llvm::SMLoc at = token.loc;
+  // for [e,] c in name { }, over the entities of a component that was
+  // given: a `for` over entities, as one inside another is.
+  if (atCountedFor()) {
+    Lexer ahead = lexer;
+    Token next = ahead.next();
+    if (next.is(Token::Comma)) {
+      ahead.next();
+      next = ahead.next();
+    }
+    next = ahead.next();
+    if (next.is(Token::Identifier) && componentGiven(next.spelling))
+      return parseEach(at);
+  }
   if (atCountedFor()) {
     return parseCountedFor(at);
   }
@@ -5864,6 +6008,8 @@ LogicalResult Parser::parseNameStatement() {
   // value for one.
   if (bufferNamed(name) && !token.is(Token::LParen) && !token.is(Token::Dot))
     return parseBufferStatement(name, at);
+  if (componentGiven(name) && token.is(Token::LBracket))
+    return parseGivenStatement(name, at);
 
   // Component(id).field op value: combine into another entity's field.
   if (token.is(Token::LParen) && components.count(name)) {
@@ -6390,7 +6536,8 @@ FailureOr<ExprPtr> Parser::parseUnary() {
       return failure();
     if ((*primary)->kind == Expr::Name &&
         ((!lookup((*primary)->name) && tables.count((*primary)->name)) ||
-         bufferNamed((*primary)->name))) {
+         bufferNamed((*primary)->name) ||
+         componentGiven((*primary)->name))) {
       auto node = std::make_unique<Expr>();
       node->kind = Expr::Row;
       node->loc = at;
@@ -7034,6 +7181,8 @@ Type Parser::typeOf(const Expr &expr) {
     }
     if (std::optional<BufferUse> held = bufferNamed(expr.name))
       return buffers.ofSymbol(held->symbol).fieldType(expr.field);
+    if (std::optional<ComponentUse> held = componentGiven(expr.name))
+      return components[held->component].fieldType(expr.field);
     auto table = tables.find(expr.name);
     return table == tables.end() ? Type()
                                  : table->second.fieldType(expr.field);
@@ -7229,7 +7378,47 @@ FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
                                " argument(s), not " +
                                Twine(expr.operands.size()));
   SmallVector<mlir::Value> args;
-  for (auto [operand, type] : llvm::zip(expr.operands, function.params)) {
+  for (auto [number, operand, type] :
+       llvm::enumerate(expr.operands, function.params)) {
+    // The entities that have a component are given by its name, or
+    // passed on by the name they were given under.
+    if (const std::string &component = function.components[number];
+        !component.empty()) {
+      auto handed = cast<BufferType>(type);
+      if (operand->kind != Expr::Name)
+        return error(operand->loc, "'" + expr.name + "' is given the "
+                                   "component '" + component +
+                                       "' here, by its name");
+      if (std::optional<ComponentUse> held = componentGiven(operand->name)) {
+        if (held->component != component)
+          return error(operand->loc, "'" + expr.name + "' is given the "
+                                     "component '" + component + "' here");
+        if (handed.getMut() && !held->mut)
+          return error(operand->loc,
+                       "'" + operand->name + "' was given to read, and '" +
+                           expr.name + "' changes what it is given");
+        args.push_back(held->given);
+        continue;
+      }
+      if (operand->name != component || lookup(operand->name))
+        return error(operand->loc, "'" + expr.name + "' is given the "
+                                   "component '" + component +
+                                       "' here, by its name");
+      if (inFunction)
+        return error(operand->loc,
+                     "a fn or proc passes on a component it was given; a "
+                     "system gives one");
+      if (inQuery && !inTurn)
+        return error(operand->loc,
+                     "the entities that have a component are given outside "
+                     "a 'for', or in one whose entities take turns ('in "
+                     "turn by'): what is read of them would depend on the "
+                     "order else");
+      args.push_back(BufferOfOp::create(builder, loc(operand->loc), type,
+                                        symbol(component))
+                         .getResult());
+      continue;
+    }
     // A buffer is handed by its name.
     if (auto handed = dyn_cast<BufferType>(type)) {
       std::optional<BufferUse> held = operand->kind == Expr::Name
@@ -7440,6 +7629,33 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return error(expr.loc, "only a row of a table has fields");
       return emitRowThrough(expr, *shape, *expr.operands[1],
                             *expr.operands[0], expr.field);
+    }
+    // name[entity].field, of a component that was given: the field of
+    // the entity that has it, or nought where it has not.
+    if (std::optional<ComponentUse> held = componentGiven(expr.name)) {
+      Type type = components[held->component].fieldType(expr.field);
+      if (!type)
+        return error(expr.loc,
+                     expr.field.empty()
+                         ? "an entity of '" + expr.name + "' is read by "
+                           "its fields: '" + expr.name + "[entity].field'"
+                         : "component '" + held->component +
+                               "' has no field '" + expr.field + "'");
+      if (isa<TextType, StringType>(type))
+        return error(expr.loc, "a text of another entity is not read here "
+                               "yet");
+      FailureOr<mlir::Value> entity =
+          emit(*expr.operands[0], EntityType::get(context));
+      if (failed(entity))
+        return failure();
+      if (!isa<EntityType>(entity->getType()))
+        return error(expr.operands[0]->loc,
+                     "an entity says which: '" + expr.name +
+                         "[entity].field'");
+      return LookupOp::create(builder, at, type, builder.getI1Type(),
+                              *entity, symbol(held->component),
+                              builder.getStringAttr(expr.field))
+          .getValue();
     }
     if (std::optional<BufferUse> held = bufferNamed(expr.name)) {
       Type type = buffers.ofSymbol(held->symbol).fieldType(expr.field);
@@ -8021,8 +8237,12 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   case Expr::If:
     return emitIf(expr, expected);
   case Expr::Spawn:
-    if (inFunction)
-      return error(expr.loc, "a fn only computes; a system spawns");
+    // (A proc spawns what it was given to change: checked where the
+    // entity's components are known, in emitSpawn.)
+    if (inFunction && (!inProc || givenComponents.empty()))
+      return error(expr.loc, "a fn only computes; a system spawns, and a "
+                             "proc that was given the components to "
+                             "change ('name: mut Component')");
     return emitSpawn(expr);
   case Expr::Given:
     return expr.given;
@@ -9117,6 +9337,18 @@ FailureOr<mlir::Value> Parser::emitSpawn(const Expr &expr) {
         SmallVector<Attribute> listed;
         SmallVector<mlir::Value> values;
         for (auto &[component, fields] : spawned.parts) {
+          if (inFunction) {
+            bool given = false;
+            for (auto &entry : givenComponents)
+              if (symbol(entry.second).getValue() == component)
+                given |= givenToChange(entry.second);
+            if (!given)
+              return error(expr.loc,
+                           "a proc spawns an entity of components it was "
+                           "given to change: '" + component +
+                               "' is not one ('name: mut " + component +
+                               "')");
+          }
           listed.push_back(FlatSymbolRefAttr::get(context, component));
           values.append(fields.begin(), fields.end());
         }

@@ -1605,6 +1605,75 @@ system load() {
   int32_t *count, int32_t capacity, uint8_t *value)`. A count it leaves
   below nought is nought, and one above what the buffer holds is that.
 
+### Entities given to a fn or proc
+
+```
+component Mobj { health: i32, target: entity, born: i32 }
+
+fn strongest(things: Mobj, me: entity) -> entity {
+  var best = me
+  var most = -1
+  for o, other in things where o != me {
+    if other.health > most {
+      most = other.health
+      best = o
+    }
+  }
+  best
+}
+
+proc hurt(things: mut Mobj, me: entity, damage: i32, born: i32) {
+  let target = things[me].target
+  things[target].health -= damage
+  things[target].target = me              // it knows who did it
+  if things[target].health <= 0 {
+    spawn { Mobj { health: 1, target: none, born: born } }
+  }
+}
+
+system fight() {
+  for e, m: mut Mobj in turn by m.born {
+    m.target = strongest(Mobj, e)
+    hurt(Mobj, e, 10, Next)
+    Next += 1
+  }
+}
+```
+
+A fn or proc has no entities either, but those of a component it is
+given, as it is given a buffer: the parameter's type is the component's
+name, and the argument is the component, by its name.
+
+- `name[entity].field` is the field of that entity, and nought where
+  the entity is no more or has not the component (`none` for an entity,
+  the first case of an enum, `false`). No `if let`: what it finds is as
+  a buffer's row that is not there.
+- `for e, c in name { }`, or `for c in name { }`, with `where` if it is
+  to be only some: the body for every entity that has the component, in
+  a fixed order. `c.field` reads it; the vars of the fn or proc around
+  may be assigned in it, as in a `for` inside a `for`. One deep.
+- Given `mut` (a proc only), `name[entity].field = value` sets it, and
+  so `+=`, `|=` and the other assignments; where the entity has not the
+  component, nothing happens. And the proc may `spawn` an entity of
+  components it was given `mut`, all of them.
+- Everything is at once: what is set is read back by the next line, and
+  by whoever is called next.
+- A fn or proc passes on what it was given, under the name it was given
+  it by (`hurt(things, ..)`), and `mut` only what it was given `mut`.
+- A system gives a component outside a `for`, or in one whose entities
+  take turns (`in turn by`): there the order in which things are read
+  and set is the program's. The entity the `for` visits is one of them:
+  what a proc sets of it the body reads through its binding afterwards,
+  and what the body set before the proc reads. An entity that a proc
+  spawns in a turn has its own turn in the same `for`, as one that the
+  body spawns has.
+- The system that gives it reads the component, and with `mut` writes
+  it and spawns: that is how it is ordered among the others.
+
+Not yet: a text of such an entity read or set; `e.destroy()`, `add` and
+`remove` of an entity that is not the one a `for` visits; `with` and
+`without` on the `for`; an arrow or an edge in a fn or proc.
+
 The window (`devices/window.ent`) has one, `Shapes`, and a system
 `shapes` that draws its rows with one call: `examples/swarm` draws all
 that moves so.

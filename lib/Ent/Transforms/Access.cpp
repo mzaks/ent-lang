@@ -556,6 +556,35 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
           access.reads.insert({archetype.getSymNameAttr(), empty, empty});
       return;
     }
+    // The entities that have a component, given to a function: every
+    // field of it wherever it is held, read, or (given `mut`) written
+    // too, and what entities there are with it, since it may spawn.
+    if (auto handed = dyn_cast<BufferOfOp>(op);
+        handed && SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
+                      op, handed.getBufferAttr())) {
+      auto component = SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
+          op, handed.getBufferAttr());
+      bool changes = handed.getResult().getType().getMut();
+      access.reads.insert(entityTable);
+      for (ArchetypeOp archetype : archetypes) {
+        if (!archetype.contains(handed.getBufferAttr()))
+          continue;
+        StringAttr name = archetype.getSymNameAttr();
+        auto touch = [&](StringAttr field) {
+          Column column{name, handed.getBufferAttr().getAttr(), field};
+          access.reads.insert(column);
+          if (changes)
+            access.writes.insert(column);
+        };
+        for (Attribute field : component.getFieldNames())
+          touch(cast<StringAttr>(field));
+        if (archetype.isOptional(handed.getBufferAttr()))
+          touch(presence);
+        if (changes)
+          writeStructure(archetype);
+      }
+      return;
+    }
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferOfOp,
             BufferSetOp, BufferFillOp>(op)) {
       // A buffer is one thing: its rows and how many they are.

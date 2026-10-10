@@ -1670,6 +1670,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "where",
+          "named": true
+        }
+      ]
     }
   },
   {

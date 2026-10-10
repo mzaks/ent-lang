@@ -261,7 +261,9 @@ module.exports = grammar({
           field('counter', $.identifier), 'in',
           choice(seq(field('from', $._expression), '..',
                      field('to', $._expression)),
-                 field('over', $._expression)),
+                 // (Over a table, or in a fn or proc the entities of a
+                 // component it was given, which may have a `where`.)
+                 seq(field('over', $._expression), optional($.where))),
           field('body', $.block)),
 
     // loop { ... } until done: the statements, until the condition holds
