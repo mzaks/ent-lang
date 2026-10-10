@@ -504,6 +504,302 @@ proc damage_mobj(lines: mut Lines, sectors: mut Sectors, subsectors:
   }
 }
 
+// The things in some squares of the blockmap, into `Blast` in the
+// blockmap's order.
+proc gather_blast(things: Mobj, bmap: Bmap, blast: mut Blast, across: bool,
+                  xl: i32, xh: i32, yl: i32, yh: i32) {
+  blast = []
+  for other in things where !other.gone && other.flags & MF_NOBLOCKMAP == 0 {
+    let bx = (other.x - bmap[0].orgx) >> MAPBLOCKSHIFT
+    let by = (other.y - bmap[0].orgy) >> MAPBLOCKSHIFT
+    if bx >= xl && bx <= xh && by >= yl && by <= yh {
+      // (Row by row, in a row square by square, in a square the one put
+      // there last first; or with `across`, column by column.)
+      blast += { id: other.id, bx: bx, by: by, linked: other.linked }
+      var at = len(blast) - 1
+      var settled = false
+      while at > 0 && !settled {
+        let pby = blast[at - 1].by
+        let pbx = blast[at - 1].bx
+        let later = if across {
+          pbx > bx || (pbx == bx && pby > by)
+        } else {
+          pby > by || (pby == by && pbx > bx)
+        }
+        if later || (pby == by && pbx == bx && blast[at - 1].linked < other.linked) {
+          blast[at].id = blast[at - 1].id
+          blast[at].bx = blast[at - 1].bx
+          blast[at].by = blast[at - 1].by
+          blast[at].linked = blast[at - 1].linked
+          at -= 1
+        } else {
+          settled = true
+        }
+      }
+      blast[at].id = other.id
+      blast[at].bx = bx
+      blast[at].by = by
+      blast[at].linked = other.linked
+    }
+  }
+}
+
+// A thing that walks over a teleporter's line from its front comes out
+// where the level has put a mark in a sector of the line's tag, turned
+// as the mark is, with smoke where it was and where it is; the player
+// stands still a while, and kills what is in the way, which stops a
+// monster (EV_Teleport, P_TeleportMove, PIT_StompThing).
+proc teleport(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+              segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+              Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+              touched: mut Touched, triggered: mut Triggered, intercepts: mut
+              Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
+              powers: Powers, env: Env, blast: mut Blast, things: mut Mobj,
+              player: entity, me: entity, line: i32, side: i32) -> bool {
+  var went = false
+  if things[me].flags & MF_MISSILE == 0 && side == 0 {
+    // The first mark, of the things in their order, in the first sector
+    // of the tag.
+    var mark: entity = none
+    for i in 0..len(sectors) {
+      if mark == none && sectors[i].tag == lines[line].tag {
+        var first = 0x7fffffff
+        for o, other in things
+            where other.type == MT_TELEPORTMAN && !other.gone &&
+                  subsectors[other.subsector].sector == i {
+          if other.id < first {
+            first = other.id
+            mark = o
+          }
+        }
+      }
+    }
+    if mark != none {
+      let isplayer = things[me].type == MT_PLAYER
+      let x = things[mark].x
+      let y = things[mark].y
+      let radius = things[me].radius
+      // What is where it comes out.
+      gather_blast(things, bmap, blast, true,
+                   (x - radius - bmap[0].orgx - MAXRADIUS) >> MAPBLOCKSHIFT,
+                   (x + radius - bmap[0].orgx + MAXRADIUS) >> MAPBLOCKSHIFT,
+                   (y - radius - bmap[0].orgy - MAXRADIUS) >> MAPBLOCKSHIFT,
+                   (y + radius - bmap[0].orgy + MAXRADIUS) >> MAPBLOCKSHIFT)
+      tm[0].validcount += 1
+      spechit = []
+      var free = true
+      for k in 0..len(blast) {
+        let it = thing_by_id(things, blast[k].id)
+        if free && it != me && things[it].flags & MF_SHOOTABLE != 0 &&
+           abs(things[it].x - x) < things[it].radius + radius &&
+           abs(things[it].y - y) < things[it].radius + radius {
+          if isplayer {
+            damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, it, me, me, 10000)
+          } else {
+            free = false
+          }
+        }
+      }
+      if free {
+        let oldx = things[me].x
+        let oldy = things[me].y
+        let oldz = things[me].z
+        let subsector = point_in_subsector(nodes, x, y)
+        let sector = subsectors[subsector].sector
+        things[me].floorz = sectors[sector].floorheight
+        things[me].ceilingz = sectors[sector].ceilingheight
+        things[me].x = x
+        things[me].y = y
+        things[me].subsector = subsector
+        tm[0].links += 1
+        things[me].linked = tm[0].links
+        things[me].z = things[me].floorz
+        let here = spawn_mobj(things, sectors, subsectors, nodes, tm, rnd, env,
+                              oldx, oldy, oldz, MT_TFOG)
+        let an = (things[mark].angle >> ANGLETOFINESHIFT) as i32
+        let there = spawn_mobj(things, sectors, subsectors, nodes, tm, rnd, env,
+                               x + 20 * finecosine(an), y + 20 * finesine[an],
+                               things[me].z, MT_TFOG)
+        if isplayer { things[me].reactiontime = 18 }
+        things[me].angle = things[mark].angle
+        things[me].momx = 0
+        things[me].momy = 0
+        things[me].momz = 0
+        went = true
+      }
+    }
+  }
+  went
+}
+
+// Moves the thing whose turn it is to (x, y) if it can be there and gets there:
+// it fits, and the step up is not too high (P_TryMove).
+proc try_move(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+              segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+              Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+              touched: mut Touched, triggered: mut Triggered, intercepts: mut
+              Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
+              powers: Powers, env: Env, blast: mut Blast, things: mut Mobj,
+              player: entity, me: entity, x: i32, y: i32) -> bool {
+  let flags = things[me].flags
+  var moved = false
+  gather_near(things, me, bmap, near, order)
+  if check_position(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
+                    tm, spechit, touched, x, y, things[me].z, things[me].radius, flags,
+                    things[me].type == MT_PLAYER, things[me].height,
+                    if there(things, things[me].target) {
+                      things[things[me].target].type
+                    } else {
+                      -1
+                    },
+                    things[things[me].target].id) {
+    let height = things[me].height
+    let z = things[me].z
+    if flags & MF_NOCLIP != 0 ||
+       (tm[0].ceilingz - tm[0].floorz >= height &&
+        (flags & MF_TELEPORT != 0 ||
+         (tm[0].ceilingz - z >= height && tm[0].floorz - z <= MAXSTEP)) &&
+        (flags & (MF_DROPOFF | MF_FLOAT) != 0 ||
+         tm[0].floorz - tm[0].dropoffz <= MAXSTEP)) {
+      let oldx = things[me].x
+      let oldy = things[me].y
+      things[me].floorz = tm[0].floorz
+      things[me].ceilingz = tm[0].ceilingz
+      things[me].x = x
+      things[me].y = y
+      things[me].subsector = point_in_subsector(nodes, x, y)
+      tm[0].links += 1
+      things[me].linked = tm[0].links
+      // The special lines it came across, the last found first: they
+      // do what they do when the player has moved.
+      if flags & (MF_TELEPORT | MF_NOCLIP) == 0 {
+        for back in 0..len(spechit) {
+          let ld = spechit[len(spechit) - 1 - back].line
+          let oldside = point_on_line_side(lines, ld, oldx, oldy)
+          // (Of what a monster walks over, a few do something; of what
+          // a shot flies over, nothing: P_CrossSpecialLine.)
+          let special = lines[ld].special
+          let type = things[me].type
+          let does = (things[me].type == MT_PLAYER) ||
+                     ((special == 39 || special == 97 || special == 125 ||
+                       special == 126 || special == 4 || special == 10 ||
+                       special == 88) &&
+                      type != MT_ROCKET && type != MT_PLASMA && type != MT_BFG &&
+                      type != MT_TROOPSHOT && type != MT_HEADSHOT &&
+                      type != MT_BRUISERSHOT)
+          if point_on_line_side(lines, ld, things[me].x, things[me].y) != oldside &&
+             special != 0 && does {
+            if special == 39 || special == 97 || special == 125 || special == 126 {
+              // A teleporter, at once (the first two for all, the others
+              // for monsters): the thing goes on from where it comes
+              // out. One that works once has then worked.
+              let isplayer = things[me].type == MT_PLAYER
+              if special == 39 || special == 97 || !isplayer {
+                let went = teleport(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, ld, oldside)
+                if special == 39 || special == 125 { lines[ld].special = 0 }
+              }
+            } else {
+              triggered += { line: ld, used: false, side: oldside,
+                             player: (things[me].type == MT_PLAYER), shot: false }
+            }
+          }
+        }
+      }
+      moved = true
+    }
+  }
+  moved
+}
+
+// The player's thing could not go where it was going: it goes as far as
+// it can, and along the line that stopped it with what is left of its
+// way (P_SlideMove, P_HitSlideLine).
+proc slide_move(lines: mut Lines, sectors: mut Sectors, subsectors:
+                Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                spechit: mut Spechit, touched: mut Touched, triggered: mut
+                Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
+                mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut
+                Blast, things: mut Mobj, player: entity, me: entity) {
+  var hitcount = 0
+  var done = false
+  while !done {
+    hitcount += 1
+    // (Not for ever: the third time it steps one way, then the other.)
+    var stairstep = hitcount == 3
+    if !stairstep {
+      let radius = things[me].radius
+      let x = things[me].x
+      let y = things[me].y
+      let momx = things[me].momx
+      let momy = things[me].momy
+      // Its three corners that lead.
+      let leadx = if momx > 0 { x + radius } else { x - radius }
+      let trailx = if momx > 0 { x - radius } else { x + radius }
+      let leady = if momy > 0 { y + radius } else { y - radius }
+      let traily = if momy > 0 { y - radius } else { y + radius }
+      tm[0].bestslidefrac = FRACUNIT + 1
+      slide_traverse(lines, sectors, bytes, bmap, tm, intercepts, things, me, leadx,
+                     leady, leadx + momx, leady + momy)
+      slide_traverse(lines, sectors, bytes, bmap, tm, intercepts, things, me, trailx,
+                     leady, trailx + momx, leady + momy)
+      slide_traverse(lines, sectors, bytes, bmap, tm, intercepts, things, me, leadx,
+                     traily, leadx + momx, traily + momy)
+      if tm[0].bestslidefrac == FRACUNIT + 1 {
+        // (Nothing was hit: one of the things, then.)
+        stairstep = true
+      } else {
+        // Up to the wall, a little short of it.
+        var frac = tm[0].bestslidefrac - 0x800
+        var went = true
+        if frac > 0 {
+          went = try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, x + fixed_mul(momx, frac),
+                          y + fixed_mul(momy, frac))
+          if !went { stairstep = true }
+        }
+        if went {
+          // What is left of the way, along the wall.
+          frac = min(FRACUNIT - (frac + 0x800), FRACUNIT)
+          if frac <= 0 {
+            done = true
+          } else {
+            let li = tm[0].bestslideline
+            var tmxmove = fixed_mul(momx, frac)
+            var tmymove = fixed_mul(momy, frac)
+            if lines[li].slopetype == ST_HORIZONTAL {
+              tmymove = 0
+            } else if lines[li].slopetype == ST_VERTICAL {
+              tmxmove = 0
+            } else {
+              let side = point_on_line_side(lines, li, things[me].x, things[me].y)
+              let lineangle = point_to_angle(lines[li].dx, lines[li].dy) +
+                              if side == 1 { ANG180 } else { 0 }
+              let delta = point_to_angle(tmxmove, tmymove) - lineangle
+              let deltaangle = if delta > ANG180 { delta + ANG180 } else { delta }
+              let newlen = fixed_mul(
+                  aprox_distance(tmxmove, tmymove),
+                  finecosine((deltaangle >> ANGLETOFINESHIFT) as i32))
+              tmxmove = fixed_mul(newlen, finecosine((lineangle >> ANGLETOFINESHIFT) as i32))
+              tmymove = fixed_mul(newlen, finesine[lineangle >> ANGLETOFINESHIFT])
+            }
+            things[me].momx = tmxmove
+            things[me].momy = tmymove
+            done = try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, things[me].x + tmxmove,
+                            things[me].y + tmymove)
+          }
+        }
+      }
+    }
+    if stairstep {
+      if !try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, things[me].x, things[me].y + things[me].momy) {
+        let other = try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me,
+                             things[me].x + things[me].momx, things[me].y)
+      }
+      done = true
+    }
+  }
+}
+
 // A missile bursts (P_ExplodeMissile).
 proc explode_missile(lines: mut Lines, sectors: mut Sectors, subsectors:
                      Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
@@ -555,7 +851,7 @@ proc check_missile_spawn(lines: mut Lines, sectors: mut Sectors, subsectors:
   things[th].y += things[th].momy >> 1
   things[th].z += things[th].momz >> 1
   let me = th
-  if !try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, things, me, things[th].x, things[th].y) {
+  if !try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, things[th].x, things[th].y) {
     missile_stopped(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th)
   }
 }
@@ -592,43 +888,6 @@ proc spawn_missile(lines: mut Lines, sectors: mut Sectors, subsectors:
 // What hurts all around a thing does so (P_RadiusAttack): everything
 // that can be hurt, sees the place and is near enough, the more the
 // nearer, in the order the blockmap has them in.
-proc gather_blast(things: Mobj, bmap: Bmap, blast: mut Blast, across: bool,
-                  xl: i32, xh: i32, yl: i32, yh: i32) {
-  blast = []
-  for other in things where !other.gone && other.flags & MF_NOBLOCKMAP == 0 {
-    let bx = (other.x - bmap[0].orgx) >> MAPBLOCKSHIFT
-    let by = (other.y - bmap[0].orgy) >> MAPBLOCKSHIFT
-    if bx >= xl && bx <= xh && by >= yl && by <= yh {
-      // (Row by row, in a row square by square, in a square the one put
-      // there last first; or with `across`, column by column.)
-      blast += { id: other.id, bx: bx, by: by, linked: other.linked }
-      var at = len(blast) - 1
-      var settled = false
-      while at > 0 && !settled {
-        let pby = blast[at - 1].by
-        let pbx = blast[at - 1].bx
-        let later = if across {
-          pbx > bx || (pbx == bx && pby > by)
-        } else {
-          pby > by || (pby == by && pbx > bx)
-        }
-        if later || (pby == by && pbx == bx && blast[at - 1].linked < other.linked) {
-          blast[at].id = blast[at - 1].id
-          blast[at].bx = blast[at - 1].bx
-          blast[at].by = blast[at - 1].by
-          blast[at].linked = blast[at - 1].linked
-          at -= 1
-        } else {
-          settled = true
-        }
-      }
-      blast[at].id = other.id
-      blast[at].bx = bx
-      blast[at].by = by
-      blast[at].linked = other.linked
-    }
-  }
-}
 proc radius_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
                    Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
                    Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
@@ -637,7 +896,9 @@ proc radius_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
                    rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast,
                    things: mut Mobj, player: entity, spot:
                    entity, source: entity, damage: i32) {
-  let dist = (damage << FRACBITS) + MAXRADIUS
+  // (As the reference reckons it, by which the widest thing's half is
+  // lost: it overflows.)
+  let dist = (damage + MAXRADIUS) << FRACBITS
   gather_blast(things, bmap, blast, false,
                (things[spot].x - dist - bmap[0].orgx) >> MAPBLOCKSHIFT,
                (things[spot].x + dist - bmap[0].orgx) >> MAPBLOCKSHIFT,
@@ -688,10 +949,9 @@ proc thing_xy(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
       xmove = 0
       ymove = 0
     }
-    if !try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, things, me, ptryx, ptryy) {
+    if !try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, ptryx, ptryy) {
       if isplayer {
-        slide_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
-                   tm, spechit, touched, triggered, intercepts, things, me)
+        slide_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
       } else if things[me].flags & MF_MISSILE != 0 {
         missile_stopped(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
         // (Burst, it goes the rest of its way as what is left of it;
@@ -1075,7 +1335,7 @@ proc p_move(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
   var moved = false
   if dir != DI_NODIR {
     let speed = mobjinfo[things[me].type].speed
-    if try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, things, me, things[me].x + speed * xspeed[dir],
+    if try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, things[me].x + speed * xspeed[dir],
                 things[me].y + speed * yspeed[dir]) {
       things[me].flags &= ~MF_INFLOAT
       if things[me].flags & MF_FLOAT == 0 { things[me].z = things[me].floorz }
