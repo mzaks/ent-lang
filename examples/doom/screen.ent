@@ -409,3 +409,73 @@ system draw_status() {
   draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 314, 191, Ammo[2].most, 3)
   draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 314, 185, Ammo[3].most, 3)
 }
+
+// What the player is told, at the top of the screen for four seconds
+// (hu_stuff.c): the message that is shown, by its number, and how long
+// still.
+unique Hud { shown: i32, counter: i32, on: bool }
+// The pictures of the letters, from '!' to '_', by where their lumps
+// are.
+buffer Hufont { at: i32 } capacity 64
+const HU_FONTSTART = 33
+const HU_FONTEND = 95
+const HU_MSGTIMEOUT = 4 * 35
+
+// After `load_wad`.
+system init_messages() {
+  Hufont = []
+  for c in HU_FONTSTART..HU_FONTEND + 1 { Hufont += { at: pic(Lumps, "STCFN0{c}") } }
+}
+
+// A level starts with nothing said (HU_Start).
+system start_messages() {
+  Hud.on = false
+  Hud.counter = 0
+}
+
+// HU_Ticker: what was said goes after its time; what the player is told
+// now is shown instead.
+system tick_messages() {
+  if Hud.counter != 0 {
+    Hud.counter -= 1
+    if Hud.counter == 0 { Hud.on = false }
+  }
+  if Inv[0].message != 0 {
+    Hud.shown = Inv[0].message
+    Inv[0].message = 0
+    Hud.on = true
+    Hud.counter = HU_MSGTIMEOUT
+  }
+}
+
+// A line of text in the game's letters, all capitals, as far as it fits
+// (HUlib_drawTextLine).
+proc draw_text(screen: mut Screen, bytes: Bytes, font: Hufont, words: text[48],
+               atx: i32, y: i32) {
+  var x = atx
+  var fits = true
+  for i in 0..len(words) {
+    var c = words[i] as u8 as i32
+    if c >= 97 && c <= 122 { c -= 32 }
+    if fits {
+      if c != 32 && c >= HU_FONTSTART && c <= HU_FONTEND {
+        let patch = font[c - HU_FONTSTART].at
+        let width = short_at(bytes, patch)
+        if x + width > SCREENWIDTH {
+          fits = false
+        } else {
+          draw_patch(screen, bytes, patch, x, y)
+          x += width
+        }
+      } else {
+        x += 4
+        if x >= SCREENWIDTH { fits = false }
+      }
+    }
+  }
+}
+
+// After everything else of the level is drawn (HU_Drawer).
+system draw_messages() {
+  if Hud.on { draw_text(Screen, Bytes, Hufont, messages[Hud.shown], 0, 0) }
+}

@@ -22,11 +22,12 @@ import sounds
 
 // What the player has, one row: armour, the weapons owned and the keys
 // (a bit for each), the weapon in hand and the one that is coming up,
-// and what was found.
+// and what was found; and what the player is to be told (`message`:
+// one of `messages` by its number, 0 nothing).
 buffer Inv {
   armorpoints: i32, armortype: i32, weapons: i32, cards: i32, backpack: bool,
   readyweapon: i32, pendingweapon: i32, itemcount: i32, bonuscount: i32,
-  attacker: i32, damagecount: i32
+  attacker: i32, damagecount: i32, message: i32
 } capacity 1
 // The four kinds of ammunition: how much the player has and can have.
 buffer Ammo { count: i32, most: i32 } capacity 4
@@ -226,6 +227,160 @@ proc give_power(things: mut Mobj, me: entity, powers: mut Powers, power: i32) ->
 // The player touches a thing that can be picked up (`it`):
 // if it is within reach and of use, the player has it and the thing is
 // gone (P_TouchSpecialThing).
+// What the player is told at the top of the screen, by its number
+// (d_englsh.h); 0 is nothing.
+const MSG_GOTARMOR = 1
+const MSG_GOTMEGA = 2
+const MSG_GOTHTHBONUS = 3
+const MSG_GOTARMBONUS = 4
+const MSG_GOTSTIM = 5
+const MSG_GOTMEDINEED = 6
+const MSG_GOTMEDIKIT = 7
+const MSG_GOTSUPER = 8
+const MSG_GOTBLUECARD = 9
+const MSG_GOTYELWCARD = 10
+const MSG_GOTREDCARD = 11
+const MSG_GOTBLUESKUL = 12
+const MSG_GOTYELWSKUL = 13
+const MSG_GOTREDSKULL = 14
+const MSG_GOTINVUL = 15
+const MSG_GOTBERSERK = 16
+const MSG_GOTINVIS = 17
+const MSG_GOTSUIT = 18
+const MSG_GOTMAP = 19
+const MSG_GOTVISOR = 20
+const MSG_GOTMSPHERE = 21
+const MSG_GOTCLIP = 22
+const MSG_GOTCLIPBOX = 23
+const MSG_GOTROCKET = 24
+const MSG_GOTROCKBOX = 25
+const MSG_GOTCELL = 26
+const MSG_GOTCELLBOX = 27
+const MSG_GOTSHELLS = 28
+const MSG_GOTSHELLBOX = 29
+const MSG_GOTBACKPACK = 30
+const MSG_GOTBFG9000 = 31
+const MSG_GOTCHAINGUN = 32
+const MSG_GOTCHAINSAW = 33
+const MSG_GOTLAUNCHER = 34
+const MSG_GOTPLASMA = 35
+const MSG_GOTSHOTGUN = 36
+const MSG_GOTSHOTGUN2 = 37
+const MSG_PD_BLUEK = 38
+const MSG_PD_REDK = 39
+const MSG_PD_YELLOWK = 40
+table messages: text[48] = [
+  "",
+  "Picked up the armor.",
+  "Picked up the MegaArmor!",
+  "Picked up a health bonus.",
+  "Picked up an armor bonus.",
+  "Picked up a stimpack.",
+  "Picked up a medikit that you REALLY need!",
+  "Picked up a medikit.",
+  "Supercharge!",
+  "Picked up a blue keycard.",
+  "Picked up a yellow keycard.",
+  "Picked up a red keycard.",
+  "Picked up a blue skull key.",
+  "Picked up a yellow skull key.",
+  "Picked up a red skull key.",
+  "Invulnerability!",
+  "Berserk!",
+  "Partial Invisibility",
+  "Radiation Shielding Suit",
+  "Computer Area Map",
+  "Light Amplification Visor",
+  "MegaSphere!",
+  "Picked up a clip.",
+  "Picked up a box of bullets.",
+  "Picked up a rocket.",
+  "Picked up a box of rockets.",
+  "Picked up an energy cell.",
+  "Picked up an energy cell pack.",
+  "Picked up 4 shotgun shells.",
+  "Picked up a box of shotgun shells.",
+  "Picked up a backpack full of ammo!",
+  "You got the BFG9000!  Oh, yes.",
+  "You got the chaingun!",
+  "A chainsaw!  Find some meat!",
+  "You got the rocket launcher!",
+  "You got the plasma gun!",
+  "You got the shotgun!",
+  "You got the super shotgun!",
+  "You need a blue key to open this door",
+  "You need a red key to open this door",
+  "You need a yellow key to open this door"
+]
+
+// What picking a thing up says, by the thing's sprite (the keys say
+// theirs only the first time).
+fn pickup_message(sprite: i32) -> i32 {
+  if sprite == SPR_ARM1 {
+    MSG_GOTARMOR
+  } else if sprite == SPR_ARM2 {
+    MSG_GOTMEGA
+  } else if sprite == SPR_BON1 {
+    MSG_GOTHTHBONUS
+  } else if sprite == SPR_BON2 {
+    MSG_GOTARMBONUS
+  } else if sprite == SPR_SOUL {
+    MSG_GOTSUPER
+  } else if sprite == SPR_MEGA {
+    MSG_GOTMSPHERE
+  } else if sprite == SPR_STIM {
+    MSG_GOTSTIM
+  } else if sprite == SPR_MEDI {
+    MSG_GOTMEDIKIT
+  } else if sprite == SPR_PINV {
+    MSG_GOTINVUL
+  } else if sprite == SPR_PSTR {
+    MSG_GOTBERSERK
+  } else if sprite == SPR_PINS {
+    MSG_GOTINVIS
+  } else if sprite == SPR_SUIT {
+    MSG_GOTSUIT
+  } else if sprite == SPR_PMAP {
+    MSG_GOTMAP
+  } else if sprite == SPR_PVIS {
+    MSG_GOTVISOR
+  } else if sprite == SPR_CLIP {
+    MSG_GOTCLIP
+  } else if sprite == SPR_AMMO {
+    MSG_GOTCLIPBOX
+  } else if sprite == SPR_ROCK {
+    MSG_GOTROCKET
+  } else if sprite == SPR_BROK {
+    MSG_GOTROCKBOX
+  } else if sprite == SPR_CELL {
+    MSG_GOTCELL
+  } else if sprite == SPR_CELP {
+    MSG_GOTCELLBOX
+  } else if sprite == SPR_SHEL {
+    MSG_GOTSHELLS
+  } else if sprite == SPR_SBOX {
+    MSG_GOTSHELLBOX
+  } else if sprite == SPR_BPAK {
+    MSG_GOTBACKPACK
+  } else if sprite == SPR_BFUG {
+    MSG_GOTBFG9000
+  } else if sprite == SPR_MGUN {
+    MSG_GOTCHAINGUN
+  } else if sprite == SPR_CSAW {
+    MSG_GOTCHAINSAW
+  } else if sprite == SPR_LAUN {
+    MSG_GOTLAUNCHER
+  } else if sprite == SPR_PLAS {
+    MSG_GOTPLASMA
+  } else if sprite == SPR_SHOT {
+    MSG_GOTSHOTGUN
+  } else if sprite == SPR_SGN2 {
+    MSG_GOTSHOTGUN2
+  } else {
+    0
+  }
+}
+
 proc touch_special(things: mut Mobj, me: entity, it: entity, inv: mut Inv,
                    ammo: mut Ammo, powers: mut Powers, z: i32, skill: i32,
                    sounds: mut Sounds, rnd: mut Rnd) {
@@ -251,22 +406,40 @@ proc touch_special(things: mut Mobj, me: entity, it: entity, inv: mut Inv,
       // (Not in this game.)
       got = false
     } else if sprite == SPR_BKEY {
-      if inv[0].cards & 1 << IT_BLUECARD == 0 { inv[0].bonuscount = BONUSADD }
+      if inv[0].cards & 1 << IT_BLUECARD == 0 {
+        inv[0].bonuscount = BONUSADD
+        inv[0].message = MSG_GOTBLUECARD
+      }
       inv[0].cards |= 1 << IT_BLUECARD
     } else if sprite == SPR_YKEY {
-      if inv[0].cards & 1 << IT_YELLOWCARD == 0 { inv[0].bonuscount = BONUSADD }
+      if inv[0].cards & 1 << IT_YELLOWCARD == 0 {
+        inv[0].bonuscount = BONUSADD
+        inv[0].message = MSG_GOTYELWCARD
+      }
       inv[0].cards |= 1 << IT_YELLOWCARD
     } else if sprite == SPR_RKEY {
-      if inv[0].cards & 1 << IT_REDCARD == 0 { inv[0].bonuscount = BONUSADD }
+      if inv[0].cards & 1 << IT_REDCARD == 0 {
+        inv[0].bonuscount = BONUSADD
+        inv[0].message = MSG_GOTREDCARD
+      }
       inv[0].cards |= 1 << IT_REDCARD
     } else if sprite == SPR_BSKU {
-      if inv[0].cards & 1 << IT_BLUESKULL == 0 { inv[0].bonuscount = BONUSADD }
+      if inv[0].cards & 1 << IT_BLUESKULL == 0 {
+        inv[0].bonuscount = BONUSADD
+        inv[0].message = MSG_GOTBLUESKUL
+      }
       inv[0].cards |= 1 << IT_BLUESKULL
     } else if sprite == SPR_YSKU {
-      if inv[0].cards & 1 << IT_YELLOWSKULL == 0 { inv[0].bonuscount = BONUSADD }
+      if inv[0].cards & 1 << IT_YELLOWSKULL == 0 {
+        inv[0].bonuscount = BONUSADD
+        inv[0].message = MSG_GOTYELWSKUL
+      }
       inv[0].cards |= 1 << IT_YELLOWSKULL
     } else if sprite == SPR_RSKU {
-      if inv[0].cards & 1 << IT_REDSKULL == 0 { inv[0].bonuscount = BONUSADD }
+      if inv[0].cards & 1 << IT_REDSKULL == 0 {
+        inv[0].bonuscount = BONUSADD
+        inv[0].message = MSG_GOTREDSKULL
+      }
       inv[0].cards |= 1 << IT_REDSKULL
     } else if sprite == SPR_STIM {
       got = give_body(things, me, 10)
@@ -331,6 +504,8 @@ proc touch_special(things: mut Mobj, me: entity, it: entity, inv: mut Inv,
       if things[it].flags & MF_COUNTITEM != 0 { inv[0].itemcount += 1 }
       things[it].gone = true
       inv[0].bonuscount += BONUSADD
+      let says = pickup_message(sprite)
+      if says != 0 { inv[0].message = says }
       // (Heard as it is, wherever it was: a weapon, something that
       // gives a power, or anything else.)
       let weapon = sprite == SPR_BFUG || sprite == SPR_MGUN || sprite == SPR_CSAW ||

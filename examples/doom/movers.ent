@@ -301,7 +301,7 @@ proc switch_used(lines: mut Lines, sectors: Sectors, sides: mut Sides,
 
 proc work_lines(triggered: mut Triggered, lines: mut Lines,
                 sectors: mut Sectors, movers: mut Movers, lights: mut Lights,
-                inv: Inv, tm: mut Tm, rnd: mut Rnd, sides: mut Sides,
+                inv: mut Inv, tm: mut Tm, rnd: mut Rnd, sides: mut Sides,
                 switches: Switches, buttons: mut Buttons, things: Mobj,
                 listener: entity, env: Env, sounds: mut Sounds) -> i32 {
   var out = 0
@@ -346,7 +346,16 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
                    ((special == 28 || special == 33) && (!red || !player))
       let sector = lines[line].backsector
       // (A lock the player has no key for says so.)
-      if locked && triggered[t].player { sound(sounds, rnd, SFX_OOF, 0) }
+      if locked && triggered[t].player {
+        sound(sounds, rnd, SFX_OOF, 0)
+        inv[0].message = if special == 26 || special == 32 {
+          MSG_PD_BLUEK
+        } else if special == 27 || special == 34 {
+          MSG_PD_YELLOWK
+        } else {
+          MSG_PD_REDK
+        }
+      }
       if !locked && sector >= 0 {
         let moving = sectors[sector].specialdata
         if moving != 0 {

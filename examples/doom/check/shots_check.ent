@@ -102,6 +102,7 @@ schedule setup() {
   init_specials()
   init_sprites()
   init_status()
+  init_messages()
   read_demo()
   begin_level()
   load_level()
@@ -110,6 +111,7 @@ schedule setup() {
   start_player(true)
   start_weapon()
   start_status()
+  start_messages()
   start_screen()
   set_view_size()
   init_view_tables()
@@ -128,6 +130,7 @@ schedule tic() {
   update_specials()
   update_buttons()
   tick_status()
+  tick_messages()
   melt()
   ask()
   // (Every tic but the first is drawn, as the reference draws them.)
@@ -139,6 +142,7 @@ schedule tic() {
   draw_masked() run_if Drawn
   draw_weapon() run_if Drawn
   draw_status() run_if Drawn
+  draw_messages() run_if Drawn
   keep() run_if Now
   next()
 }
@@ -152,6 +156,7 @@ schedule again() run_if Level.reborn {
   start_player(true)
   start_weapon()
   start_status()
+  start_messages()
   arrive()
   once_more()
 }

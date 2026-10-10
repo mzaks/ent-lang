@@ -36,8 +36,8 @@ for lump in range(count):
 open(sys.argv[3], "wb").write(wad + demo)
 END
 fi
-# (The whole view above the status bar, and no messages.)
-printf 'screenblocks 10\nshow_messages 0\ndetaillevel 0\n' > "$run/shots.cfg"
+# (The whole view above the status bar.)
+printf 'screenblocks 10\nshow_messages 1\ndetaillevel 0\n' > "$run/shots.cfg"
 (cd "$run" && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
   DOOM_SHOTS="$run/shots.reference.raw" DOOM_SHOT_TICS=$tics \
   "$doom/ref/build/src/chocolate-doom" -iwad "$doom/wad/doom1.wad" \

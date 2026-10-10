@@ -100,6 +100,7 @@ schedule setup() {
   init_specials()
   init_sprites()
   init_status()
+  init_messages()
   init_audio()
   load_level()
   spawn_things()
@@ -107,6 +108,7 @@ schedule setup() {
   start_player(true)
   start_weapon()
   start_status()
+  start_messages()
   start_screen()
   fit_automap()
   whole_view()
@@ -131,6 +133,7 @@ schedule frame() {
   update_buttons()
   hear()
   tick_status()
+  tick_messages()
   look()
   clear_screen()
   render_view() run_if !Shown.map
@@ -139,6 +142,7 @@ schedule frame() {
   draw_masked() run_if !Shown.map
   draw_weapon() run_if !Shown.map
   draw_status()
+  draw_messages()
   draw_automap() run_if Shown.map
   show_screen()
   present()
@@ -155,6 +159,7 @@ schedule again() run_if Level.exited || Level.reborn {
   start_player(false) run_if Level.exited
   start_weapon()
   start_status()
+  start_messages()
   fit_automap()
   arrive()
 }
