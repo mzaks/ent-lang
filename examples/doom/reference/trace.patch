@@ -1,8 +1,69 @@
 diff --git i/src/doom/d_main.c w/src/doom/d_main.c
-index 06aa0ff..84c685b 100644
+index 06aa0ff..310a005 100644
 --- i/src/doom/d_main.c
 +++ w/src/doom/d_main.c
-@@ -1960,6 +1960,12 @@ void D_DoomMain (void)
+@@ -402,6 +402,49 @@ boolean D_GrabMouseCallback(void)
+ //
+ //  D_RunFrame
+ //
++// ent-lang: where DOOM_SHOTS names a file, the screen as it is drawn
++// after each of the level's tics that DOOM_SHOT_TICS lists (numbers with
++// commas between) is written to it, 320 by 200 bytes each, one after
++// another: what a port's screen is held against (check/shots.sh).
++static void D_Shot (void)
++{
++    static FILE *file;
++    static int tics[256];
++    static int count = -1;
++    static int next;
++
++    if (count < 0)
++    {
++	const char *name = getenv ("DOOM_SHOTS");
++	const char *list = getenv ("DOOM_SHOT_TICS");
++
++	count = 0;
++	if (name && list)
++	{
++	    file = fopen (name, "wb");
++	    while (*list && count < 256)
++	    {
++		tics[count++] = atoi (list);
++		while (*list && *list != ',')
++		    list++;
++		if (*list)
++		    list++;
++	    }
++	}
++    }
++    // (The first screen that is drawn at or after each: several tics may
++    // go by between two. Which tic it was is said on stdout.)
++    if (!file || next >= count || gamestate != GS_LEVEL
++	|| leveltime <= tics[next])
++	return;
++    fwrite (I_VideoBuffer, 1, SCREENWIDTH * SCREENHEIGHT, file);
++    fflush (file);
++    printf ("shot %d\n", leveltime - 1);
++    fflush (stdout);
++    while (next < count && leveltime > tics[next])
++	next++;
++}
++
+ void D_RunFrame()
+ {
+     int nowtime;
+@@ -437,7 +480,9 @@ void D_RunFrame()
+     // Update display, next frame, with current state if no profiling is on
+     if (screenvisible && !nodrawers)
+     {
+-        if ((wipe = D_Display ()))
++        wipe = D_Display ();
++        D_Shot ();
++        if (wipe)
+         {
+             // start wipe on this frame
+             wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
+@@ -1960,6 +2005,12 @@ void D_DoomMain (void)
  
      DEH_printf("\nP_Init: Init Playloop state.\n");
      P_Init ();

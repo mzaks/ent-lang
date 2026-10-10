@@ -1,0 +1,409 @@
+// What is drawn over and under the view of the level (r_things.c:
+// R_DrawPlayerSprites; st_stuff.c, st_lib.c): the player's weapon, and
+// the status bar.
+import files
+import wad
+import fixed
+import tables
+import angles
+import info
+import level
+import data
+import video
+import render
+import things
+import sprites
+import items
+import play
+import enemy
+import weapon
+import random
+
+const BASEYCENTER = 100
+
+// What is shown of the player's thing: the sector it is in, its health,
+// where it is and how it is turned; and of the one that hurt it, whether
+// there is one and where.
+unique Stview {
+  sector: i32, health: i32, x: i32, y: i32, angle: u32, id: i32,
+  attacked: bool, ax: i32, ay: i32
+}
+
+// The player's weapon and its flash, over the view (R_DrawPlayerSprites,
+// R_DrawPSprite): as light as where the player stands, the flash as
+// light as can be.
+system draw_weapon() {
+  for m: Mobj where m.type == MT_PLAYER {
+    Stview.sector = Subsectors[m.subsector].sector
+    Stview.health = m.health
+  }
+  let sector = Stview.sector
+  let lightnum = min(max((Sectors[sector].lightlevel >> LIGHTSEGSHIFT) +
+                             View.extralight, 0),
+                     LIGHTLEVELS - 1)
+  let pspritescale = FRACUNIT * View.width / SCREENWIDTH
+  let pspriteiscale = FRACUNIT * SCREENWIDTH / View.width
+  // (Nothing of the level is in front of it.)
+  for x in 0..View.width {
+    Openings[CLIPTOP + x].value = -1
+    Openings[CLIPBOTTOM + x].value = View.height
+  }
+  for i in 0..len(Psp) {
+    let state = Psp[i].state
+    if state != S_NULL {
+      let frame = Spritedefs[states[state].sprite].first +
+                  (states[state].frame & FF_FRAMEMASK)
+      let lump = Spriterots[frame * 8].lump
+      let flip = Spriterots[frame * 8].flip
+      let tx = Psp[i].sx - (SCREENWIDTH / 2) * FRACUNIT - Spritelumps[lump].offset
+      let x1 = (View.centerxfrac + fixed_mul(tx, pspritescale)) >> FRACBITS
+      let x2 = ((View.centerxfrac +
+                 fixed_mul(tx + Spritelumps[lump].width, pspritescale)) >> FRACBITS) - 1
+      if x1 <= View.width && x2 >= 0 {
+        let texturemid = (BASEYCENTER << FRACBITS) + FRACUNIT / 2 -
+                         (Psp[i].sy - Spritelumps[lump].topoffset)
+        let first = max(x1, 0)
+        let last = min(x2, View.width - 1)
+        let xiscale = if flip { -pspriteiscale } else { pspriteiscale }
+        var frac = if flip { Spritelumps[lump].width - 1 } else { 0 }
+        frac += xiscale * (first - x1)
+        // (A player that is hard to see has a weapon that is, but for the
+        // last seconds, when it comes and goes.)
+        let unseen = Powers[PW_INVISIBILITY].tics
+        let colormap = if unseen > 4 * 32 || unseen & 8 != 0 {
+          -(Data.colormaps + 6 * 256)
+        } else if states[state].frame & FF_FULLBRIGHT != 0 {
+          Data.colormaps
+        } else {
+          Scalelight[lightnum * MAXLIGHTSCALE + MAXLIGHTSCALE - 1].map
+        }
+        let patch = Lumps[Spritedata.firstlump + lump].at
+        for x in first..last + 1 {
+          draw_masked_column(
+              Screen, Bytes, Openings, Fuzz, View.height,
+              patch + long_at(Bytes, patch + 8 + (frac >> FRACBITS) * 4), x,
+              pspritescale,
+              View.centeryfrac - fixed_mul(texturemid, pspritescale),
+              texturemid, abs(xiscale), colormap, CLIPTOP, CLIPBOTTOM,
+              View.centery, View.x, View.y)
+          frac += xiscale
+        }
+      }
+    }
+  }
+}
+
+// The status bar's pictures, by where their lumps are: the ten big
+// numbers, the ten small yellow ones, the percent sign, the six keys,
+// the background of the weapons' numbers, their six grey numbers, the
+// bar itself, and the forty-two faces.
+buffer Stpics { at: i32 } capacity 96
+const ST_TALLNUM = 0
+const ST_SHORTNUM = 10
+const ST_PERCENT = 20
+const ST_KEYS = 21
+const ST_ARMSBG = 27
+const ST_ARMS = 28
+const ST_SBAR = 34
+const ST_FACES = 35
+
+// The face in the status bar (ST_updateFaceWidget): which, for how long,
+// how much it matters, how long the fire key has been down, the health
+// it last showed, the weapons it has grinned at, and the health the
+// row of faces was last worked out for with that row. And of the
+// weapons' numbers: which are shown as had (`arms`), and which were
+// drawn anew since the bar was first drawn (`redrawn`), under which the
+// reference leaves the bar's own background.
+buffer Face {
+  index: i32, count: i32, priority: i32, lastattackdown: i32, oldhealth: i32,
+  oldweapons: i32, painhealth: i32, painoffset: i32, arms: i32, redrawn: i32
+} capacity 1
+const ST_FACESTRIDE = 8
+const ST_TURNOFFSET = 3
+const ST_OUCHOFFSET = 5
+const ST_EVILGRINOFFSET = 6
+const ST_RAMPAGEOFFSET = 7
+const ST_GODFACE = 40
+const ST_DEADFACE = 41
+const ST_Y = 168
+
+// A picture drawn at (x, y), where it is not see-through (V_DrawPatch).
+proc draw_patch(screen: mut Screen, bytes: Bytes, patch: i32, atx: i32,
+                aty: i32) {
+  let width = short_at(bytes, patch)
+  let x = atx - short_at(bytes, patch + 4)
+  let y = aty - short_at(bytes, patch + 6)
+  for col in 0..width {
+    var post = patch + long_at(bytes, patch + 8 + col * 4)
+    while bytes[post].value != 255 {
+      let topdelta = bytes[post].value as i32
+      let length = bytes[post + 1].value as i32
+      for k in 0..length {
+        screen[(y + topdelta + k) * SCREENWIDTH + x + col].pixel =
+            bytes[post + 3 + k].value
+      }
+      post += length + 4
+    }
+  }
+}
+
+// The part of a picture drawn at (x, y) that is in a rectangle, from its
+// corner (x0, y0) to before (x1, y1).
+proc draw_patch_part(screen: mut Screen, bytes: Bytes, patch: i32, atx: i32,
+                     aty: i32, x0: i32, y0: i32, x1: i32, y1: i32) {
+  let width = short_at(bytes, patch)
+  let x = atx - short_at(bytes, patch + 4)
+  let y = aty - short_at(bytes, patch + 6)
+  for col in 0..width {
+    if x + col >= x0 && x + col < x1 {
+      var post = patch + long_at(bytes, patch + 8 + col * 4)
+      while bytes[post].value != 255 {
+        let topdelta = bytes[post].value as i32
+        let length = bytes[post + 1].value as i32
+        for k in 0..length {
+          let row = y + topdelta + k
+          if row >= y0 && row < y1 {
+            screen[row * SCREENWIDTH + x + col].pixel = bytes[post + 3 + k].value
+          }
+        }
+        post += length + 4
+      }
+    }
+  }
+}
+
+// A number, its last digit ending at x (STlib_drawNum).
+proc draw_number(screen: mut Screen, bytes: Bytes, pics: Stpics, font: i32,
+                 x: i32, y: i32, value: i32, digits: i32) {
+  let w = short_at(bytes, pics[font].at)
+  var num = value
+  if num < 0 {
+    if digits == 2 && num < -9 {
+      num = -9
+    } else if digits == 3 && num < -99 {
+      num = -99
+    }
+    num = -num
+  }
+  if num == 0 { draw_patch(screen, bytes, pics[font].at, x - w, y) }
+  var at = x
+  var left = digits
+  while num != 0 && left > 0 {
+    at -= w
+    draw_patch(screen, bytes, pics[font + num % 10].at, at, y)
+    num /= 10
+    left -= 1
+  }
+}
+
+fn pic(lumps: Lumps, name: text[8]) -> i32 {
+  lumps[lump_number(lumps, lump_name(name))].at
+}
+
+// The status bar's pictures are found (ST_loadGraphics), and the face
+// starts as it does (ST_initData). After `load_wad`.
+system init_status() {
+  Stpics = []
+  for i in 0..10 { Stpics += { at: pic(Lumps, "STTNUM{i}") } }
+  for i in 0..10 { Stpics += { at: pic(Lumps, "STYSNUM{i}") } }
+  Stpics += { at: pic(Lumps, "STTPRCNT") }
+  for i in 0..6 { Stpics += { at: pic(Lumps, "STKEYS{i}") } }
+  Stpics += { at: pic(Lumps, "STARMS") }
+  for i in 0..6 { Stpics += { at: pic(Lumps, "STGNUM{i + 2}") } }
+  Stpics += { at: pic(Lumps, "STBAR") }
+  for i in 0..5 {
+    for j in 0..3 { Stpics += { at: pic(Lumps, "STFST{i}{j}") } }
+    Stpics += { at: pic(Lumps, "STFTR{i}0") }
+    Stpics += { at: pic(Lumps, "STFTL{i}0") }
+    Stpics += { at: pic(Lumps, "STFOUCH{i}") }
+    Stpics += { at: pic(Lumps, "STFEVL{i}") }
+    Stpics += { at: pic(Lumps, "STFKILL{i}") }
+  }
+  Stpics += { at: pic(Lumps, "STFGOD0") }
+  Stpics += { at: pic(Lumps, "STFDEAD0") }
+  Face = [{
+    index: 0, count: 0, priority: 0, lastattackdown: -1, oldhealth: -1,
+    oldweapons: 0, painhealth: -1, painoffset: 0, arms: 0, redrawn: 0
+  }; 1]
+}
+
+// The shadows start where the table starts.
+system start_screen() {
+  Fuzz = [{ pos: 0 }; 1]
+}
+
+// (ST_Start: the face of a new level.)
+system start_status() {
+  Face[0].index = 0
+  Face[0].oldhealth = -1
+  Face[0].oldweapons = Inv[0].weapons
+  Face[0].arms = Inv[0].weapons
+  Face[0].redrawn = 0
+}
+
+// Which row of faces: the worse the less health (ST_calcPainOffset).
+proc pain_offset(face: mut Face, health: i32) -> i32 {
+  let capped = min(health, 100)
+  if capped != face[0].painhealth {
+    face[0].painoffset = ST_FACESTRIDE * (((100 - capped) * 5) / 101)
+    face[0].painhealth = capped
+  }
+  face[0].painoffset
+}
+
+// A tic of the status bar (ST_Ticker): a random number is drawn for it,
+// and the face is what the player has just been through: dead, grinning
+// at a new weapon, hurt and looking where from, angry, shooting on and
+// on, or looking about. After the things have had their tic.
+system tick_status() {
+  Random.other = random_after(Random.other)
+  let chance = random_at(Random.other)
+  for m: Mobj where m.type == MT_PLAYER {
+    Stview.health = max(m.health, 0)
+    Stview.x = m.x
+    Stview.y = m.y
+    Stview.angle = m.angle
+    Stview.id = m.id
+  }
+  // (Who hurt the player, if it is another.)
+  Stview.attacked = false
+  for other: Mobj where other.id == Inv[0].attacker && other.id != Stview.id {
+    Stview.attacked = true
+    Stview.ax = other.x
+    Stview.ay = other.y
+  }
+  let health = Stview.health
+  if Face[0].priority < 10 && health == 0 {
+    Face[0].priority = 9
+    Face[0].index = ST_DEADFACE
+    Face[0].count = 1
+  }
+  if Face[0].priority < 9 && Inv[0].bonuscount != 0 {
+    if Face[0].oldweapons != Inv[0].weapons {
+      Face[0].oldweapons = Inv[0].weapons
+      Face[0].priority = 8
+      Face[0].count = 2 * TICRATE
+      Face[0].index = pain_offset(Face, health) + ST_EVILGRINOFFSET
+    }
+  }
+  if Face[0].priority < 8 && Inv[0].damagecount != 0 && Stview.attacked {
+    Face[0].priority = 7
+    Face[0].count = TICRATE
+    if health - Face[0].oldhealth > 20 {
+      Face[0].index = pain_offset(Face, health) + ST_OUCHOFFSET
+    } else {
+      let badguy = point_to_angle(Stview.ax - Stview.x, Stview.ay - Stview.y)
+      let right = if badguy > Stview.angle {
+        badguy - Stview.angle > ANG180
+      } else {
+        Stview.angle - badguy <= ANG180
+      }
+      let diff = if badguy > Stview.angle {
+        badguy - Stview.angle
+      } else {
+        Stview.angle - badguy
+      }
+      Face[0].index = pain_offset(Face, health) +
+          if diff < ANG45 {
+            ST_RAMPAGEOFFSET
+          } else if right {
+            ST_TURNOFFSET
+          } else {
+            ST_TURNOFFSET + 1
+          }
+    }
+  }
+  if Face[0].priority < 7 && Inv[0].damagecount != 0 {
+    Face[0].count = TICRATE
+    if health - Face[0].oldhealth > 20 {
+      Face[0].priority = 7
+      Face[0].index = pain_offset(Face, health) + ST_OUCHOFFSET
+    } else {
+      Face[0].priority = 6
+      Face[0].index = pain_offset(Face, health) + ST_RAMPAGEOFFSET
+    }
+  }
+  if Face[0].priority < 6 {
+    if Pl[0].attackdown {
+      if Face[0].lastattackdown == -1 {
+        Face[0].lastattackdown = 2 * TICRATE
+      } else {
+        Face[0].lastattackdown -= 1
+        if Face[0].lastattackdown == 0 {
+          Face[0].priority = 5
+          Face[0].index = pain_offset(Face, health) + ST_RAMPAGEOFFSET
+          Face[0].count = 1
+          Face[0].lastattackdown = 1
+        }
+      }
+    } else {
+      Face[0].lastattackdown = -1
+    }
+  }
+  if Face[0].priority < 5 && Powers[PW_INVULNERABILITY].tics != 0 {
+    Face[0].priority = 4
+    Face[0].index = ST_GODFACE
+    Face[0].count = 1
+  }
+  if Face[0].count == 0 {
+    Face[0].index = pain_offset(Face, health) + chance % 3
+    Face[0].count = TICRATE / 2
+    Face[0].priority = 0
+  }
+  Face[0].count -= 1
+  Face[0].oldhealth = health
+  Face[0].redrawn |= Face[0].arms ^ Inv[0].weapons
+  Face[0].arms = Inv[0].weapons
+}
+
+// The status bar (ST_Drawer, all of it anew): the bar, how much there is
+// to shoot with, health, the weapons the player has, the face, armour,
+// the keys, and of each kind of ammunition how much there is and can
+// be.
+system draw_status() {
+  draw_patch(Screen, Bytes, Stpics[ST_SBAR].at, 0, ST_Y)
+  let kind = weaponammo[Inv[0].readyweapon]
+  if kind != AM_NOAMMO {
+    draw_number(Screen, Bytes, Stpics, ST_TALLNUM, 44, 171, Ammo[kind].count, 3)
+  }
+  draw_patch(Screen, Bytes, Stpics[ST_PERCENT].at, 90, 171)
+  draw_number(Screen, Bytes, Stpics, ST_TALLNUM, 90, 171, Stview.health, 3)
+  draw_patch(Screen, Bytes, Stpics[ST_ARMSBG].at, 104, ST_Y)
+  for i in 0..6 {
+    let has = Inv[0].weapons & (1 << (i + 1)) != 0
+    // (A number that was drawn anew was rubbed out first, to the bar
+    // under it: where the grey one was.)
+    if Face[0].redrawn & (1 << (i + 1)) != 0 {
+      let grey = Stpics[ST_ARMS + i].at
+      let x = 111 + (i % 3) * 12 - short_at(Bytes, grey + 4)
+      let y = 172 + (i / 3) * 10 - short_at(Bytes, grey + 6)
+      draw_patch_part(Screen, Bytes, Stpics[ST_SBAR].at, 0, ST_Y, x, y,
+                      x + short_at(Bytes, grey), y + short_at(Bytes, grey + 2))
+    }
+    draw_patch(Screen, Bytes,
+               if has { Stpics[ST_SHORTNUM + i + 2].at } else { Stpics[ST_ARMS + i].at },
+               111 + (i % 3) * 12, 172 + (i / 3) * 10)
+  }
+  draw_patch(Screen, Bytes, Stpics[ST_FACES + Face[0].index].at, 143, ST_Y)
+  draw_patch(Screen, Bytes, Stpics[ST_PERCENT].at, 221, 171)
+  draw_number(Screen, Bytes, Stpics, ST_TALLNUM, 221, 171, Inv[0].armorpoints, 3)
+  for i in 0..3 {
+    let cards = Inv[0].cards
+    let box = if cards & (1 << (i + 3)) != 0 {
+      i + 3
+    } else if cards & (1 << i) != 0 {
+      i
+    } else {
+      -1
+    }
+    if box >= 0 { draw_patch(Screen, Bytes, Stpics[ST_KEYS + box].at, 239, 171 + i * 10) }
+  }
+  draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 288, 173, Ammo[0].count, 3)
+  draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 288, 179, Ammo[1].count, 3)
+  draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 288, 191, Ammo[2].count, 3)
+  draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 288, 185, Ammo[3].count, 3)
+  draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 314, 173, Ammo[0].most, 3)
+  draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 314, 179, Ammo[1].most, 3)
+  draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 314, 191, Ammo[2].most, 3)
+  draw_number(Screen, Bytes, Stpics, ST_SHORTNUM, 314, 185, Ammo[3].most, 3)
+}

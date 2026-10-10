@@ -1,0 +1,130 @@
+// A demo played, and the screen as it is drawn after each of the tics
+// that `shots` lists (check/shots.sh writes the table from what the
+// reference says it drew), into shots.port: 320 by 200 bytes each, to
+// hold against the reference's.
+import console
+import files
+import wad
+import fixed
+import random
+import data
+import level
+import video
+import info
+import render
+import things
+import sprites
+import demo
+import specials
+import items
+import play
+import enemy
+import weapon
+import movers
+import tick
+import screen
+import shots
+
+capacity Bytes 16777216
+
+unique Next: i32
+unique Room: i32
+unique Now: bool
+
+world {
+  Wad.file = "doom1.wad"
+  Demo.lump = "DEMO1"
+  View.blocks = 10
+}
+
+system begin_level() {
+  Level.episode = Demo.episode
+  Level.map = Demo.map
+  Level.skill = Demo.skill
+  Level.nomonsters = Demo.nomonsters
+  Random.play = 0
+  Random.other = 0
+  Clock.leveltime = 0
+  Room = len(Bytes)
+  for i in 0..SCREENWIDTH * SCREENHEIGHT { Bytes += { value: 0 } }
+}
+
+// Whether this tic's screen is one that is asked for.
+system ask() {
+  Now = Next < len(shots) && Clock.leveltime == shots[Next]
+}
+
+system look() {
+  for m: Mobj where m.type == MT_PLAYER {
+    Viewpoint.x = m.x
+    Viewpoint.y = m.y
+    Viewpoint.angle = m.angle
+  }
+  Viewpoint.z = Pl[0].viewz
+  View.extralight = Pl[0].extralight
+}
+
+system keep() {
+  for i in 0..len(Screen) { Bytes[Room + i].value = Screen[i].pixel }
+  if !write_bytes("shots.port", Bytes, Room, SCREENWIDTH * SCREENHEIGHT,
+                  Next > 0) {
+    put("could not write shots.port")
+  }
+  Next += 1
+}
+
+// (The reference melts the first screen of a level in, by 320 random
+// numbers, which the face then goes on from.)
+system melt() {
+  if Clock.leveltime == 0 { Random.other = (Random.other + 320) & 0xff }
+}
+
+system next() { Clock.leveltime += 1 }
+
+schedule setup() {
+  load_wad()
+  init_data()
+  init_sprites()
+  init_status()
+  read_demo()
+  begin_level()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  start_player(true)
+  start_weapon()
+  start_status()
+  start_screen()
+  set_view_size()
+  init_view_tables()
+}
+schedule tic() {
+  think_player()
+  player_sector()
+  use_lines()
+  trigger_lines()
+  think_weapon()
+  think_things(false)
+  run_lights()
+  think_things(true)
+  run_movers()
+  tick_status()
+  melt()
+  ask()
+  // (Every tic is drawn, as the reference draws it: a shadow's look
+  // depends on all the shadows drawn before.)
+  look()
+  clear_screen()
+  render_view()
+  draw_walls()
+  draw_planes()
+  draw_masked()
+  draw_weapon()
+  draw_status()
+  keep() run_if Now
+  next()
+}
+main {
+  setup()
+  loop { tic() } until Next == len(shots) || Demo.over || Level.exited
+}

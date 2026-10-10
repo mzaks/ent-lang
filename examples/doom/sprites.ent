@@ -138,7 +138,37 @@ system init_sprites() {
 // many pixels, a byte, the pixels, a byte; 255 ends them. Drawn where
 // the rows `ceilings` and `floors` of `Openings` leave room in the
 // view's column x (R_DrawMaskedColumn).
+// Where a shadow reads what it darkens: the pixel above or below, by a
+// table of fifty that it goes round and round, for ever (fuzzoffset,
+// fuzzpos): so what a shadow looks like depends on every shadow that was
+// drawn before it.
+table fuzzoffset: i32 = [
+  1, -1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, 1, -1, 1, 1, 1, -1, -1, -1, -1, 1,
+  -1, -1, 1, 1, 1, 1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, -1, -1, -1, 1, 1, 1,
+  1, -1, 1, 1, -1, 1
+]
+buffer Fuzz { pos: i32 } capacity 1
+
+// A column of a shadow: what is there is made darker, by its neighbour
+// above or below (R_DrawFuzzColumn). `map`: the colours for that.
+proc draw_fuzz_column(screen: mut Screen, bytes: Bytes, fuzz: mut Fuzz, x: i32,
+                      top: i32, bottom: i32, map: i32, viewheight: i32,
+                      left: i32, up: i32) {
+  let yl = if top == 0 { 1 } else { top }
+  let yh = if bottom == viewheight - 1 { viewheight - 2 } else { bottom }
+  var dest = (yl + up) * SCREENWIDTH + left + x
+  for y in yl..yh + 1 {
+    screen[dest].pixel =
+        bytes[map + screen[dest + fuzzoffset[fuzz[0].pos] * SCREENWIDTH].pixel as i32].value
+    fuzz[0].pos = (fuzz[0].pos + 1) % 50
+    dest += SCREENWIDTH
+  }
+}
+
+// (`colormap` below nought: a shadow, with the colours at what it is
+// above nought.)
 proc draw_masked_column(screen: mut Screen, bytes: Bytes, openings: Openings,
+                        fuzz: mut Fuzz, viewheight: i32,
                         column: i32, x: i32, spryscale: i32,
                         sprtopscreen: i32, texturemid: i32, iscale: i32,
                         colormap: i32, ceilings: i32, floors: i32,
@@ -153,9 +183,14 @@ proc draw_masked_column(screen: mut Screen, bytes: Bytes, openings: Openings,
                  openings[ceilings + x].value + 1)
     let yh = min((bottomscreen - 1) >> FRACBITS, openings[floors + x].value - 1)
     if yl <= yh {
-      draw_column(screen, bytes, x, yl, yh, iscale,
-                  texturemid - (topdelta << FRACBITS), post + 3, colormap,
-                  centery, left, top)
+      if colormap < 0 {
+        draw_fuzz_column(screen, bytes, fuzz, x, yl, yh, -colormap, viewheight,
+                         left, top)
+      } else {
+        draw_column(screen, bytes, x, yl, yh, iscale,
+                    texturemid - (topdelta << FRACBITS), post + 3, colormap,
+                    centery, left, top)
+      }
     }
     post += length + 4
   }
@@ -164,20 +199,21 @@ proc draw_masked_column(screen: mut Screen, bytes: Bytes, openings: Openings,
 // The texture in the opening of a piece of a wall, in its columns from
 // `x1` to `x2`; a column that was drawn is not drawn again
 // (R_RenderMaskedSegRange).
-proc render_masked_seg_range(screen: mut Screen, bytes: Bytes,
+proc render_masked_seg_range(screen: mut Screen, bytes: Bytes, fuzz: mut Fuzz,
+                             viewheight: i32,
                              openings: mut Openings, drawsegs: Drawsegs,
                              segs: Segs, lines: Lines, sides: Sides,
                              sectors: Sectors, textures: Textures,
                              columns: TextureColumns, lights: Scalelight,
                              ds: i32, x1: i32, x2: i32, viewz: i32,
                              centery: i32, centeryfrac: i32, left: i32,
-                             top: i32) {
+                             top: i32, extralight: i32) {
   let seg = drawsegs[ds].seg
   let front = segs[seg].front
   let back = segs[seg].back
   let side = segs[seg].side
   let texnum = sides[side].midtexture
-  var lightnum = sectors[front].lightlevel >> LIGHTSEGSHIFT
+  var lightnum = (sectors[front].lightlevel >> LIGHTSEGSHIFT) + extralight
   if segs[seg].y1 == segs[seg].y2 {
     lightnum -= 1
   } else if segs[seg].x1 == segs[seg].x2 {
@@ -197,7 +233,7 @@ proc render_masked_seg_range(screen: mut Screen, bytes: Bytes,
   for x in x1..x2 + 1 {
     if openings[maskedtexturecol + x].value != 0x7fff {
       draw_masked_column(
-          screen, bytes, openings,
+          screen, bytes, openings, fuzz, viewheight,
           get_column(textures, columns, texnum,
                      openings[maskedtexturecol + x].value) - 3,
           x, spryscale, centeryfrac - fixed_mul(texturemid, spryscale),
@@ -264,7 +300,8 @@ system draw_masked() {
       let xiscale = if flip { -iscale } else { iscale }
       let first = max(x1, 0)
       let gzt = m.z + Spritelumps[lump].topoffset
-      let lightnum = min(max(Sectors[sector].lightlevel >> LIGHTSEGSHIFT, 0),
+      let lightnum = min(max((Sectors[sector].lightlevel >> LIGHTSEGSHIFT) +
+                                 View.extralight, 0),
                          LIGHTLEVELS - 1)
       Vissprites += {
         x1: first, x2: min(x2, View.width - 1), gx: m.x, gy: m.y, gz: m.z,
@@ -273,7 +310,7 @@ system draw_masked() {
                    xiscale * (first - x1),
         scale: xscale, xiscale: xiscale, texturemid: gzt - vz, patch: lump,
         colormap: if m.flags & MF_SHADOW != 0 {
-          -1
+          -(Data.colormaps + 6 * 256)
         } else if m.frame & FF_FULLBRIGHT != 0 {
           Data.colormaps
         } else {
@@ -355,11 +392,11 @@ system draw_masked() {
                               Vissprites[spr].gy) == 0) {
           // The wall is behind the thing.
           if Drawsegs[ds].maskedtexturecol >= 0 {
-            render_masked_seg_range(Screen, Bytes, Openings, Drawsegs, Segs,
+            render_masked_seg_range(Screen, Bytes, Fuzz, View.height, Openings, Drawsegs, Segs,
                                     Lines, Sides, Sectors, Textures,
                                     TextureColumns, Scalelight, ds, r1, r2, vz,
                                     View.centery, View.centeryfrac, View.x,
-                                    View.y)
+                                    View.y, View.extralight)
           }
         } else {
           var silhouette = Drawsegs[ds].silhouette
@@ -395,20 +432,15 @@ system draw_masked() {
       }
       if Openings[CLIPTOP + x].value == -2 { Openings[CLIPTOP + x].value = -1 }
     }
-    // R_DrawVisSprite: the picture's columns. (A shadow is drawn as it
-    // is, for now.)
+    // R_DrawVisSprite: the picture's columns.
     let patch = Lumps[Spritedata.firstlump + Vissprites[spr].patch].at
     let texturemid = Vissprites[spr].texturemid
     let xiscale = Vissprites[spr].xiscale
-    let colormap = if Vissprites[spr].colormap < 0 {
-      Data.colormaps
-    } else {
-      Vissprites[spr].colormap
-    }
+    let colormap = Vissprites[spr].colormap
     var frac = Vissprites[spr].startfrac
     for x in x1..x2 + 1 {
       draw_masked_column(
-          Screen, Bytes, Openings,
+          Screen, Bytes, Openings, Fuzz, View.height,
           patch + long_at(Bytes, patch + 8 + (frac >> FRACBITS) * 4), x, scale,
           View.centeryfrac - fixed_mul(texturemid, scale), texturemid,
           abs(xiscale), colormap, CLIPTOP, CLIPBOTTOM, View.centery, View.x,
@@ -421,11 +453,11 @@ system draw_masked() {
   for back in 0..len(Drawsegs) {
     let ds = len(Drawsegs) - 1 - back
     if Drawsegs[ds].maskedtexturecol >= 0 {
-      render_masked_seg_range(Screen, Bytes, Openings, Drawsegs, Segs, Lines,
+      render_masked_seg_range(Screen, Bytes, Fuzz, View.height, Openings, Drawsegs, Segs, Lines,
                               Sides, Sectors, Textures, TextureColumns,
                               Scalelight, ds, Drawsegs[ds].x1, Drawsegs[ds].x2,
                               vz, View.centery, View.centeryfrac, View.x,
-                              View.y)
+                              View.y, View.extralight)
     }
   }
 }

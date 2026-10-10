@@ -654,7 +654,8 @@ system start_player(fresh: bool) {
     Inv = [{
       armorpoints: 0, armortype: 0, weapons: 1 << WP_FIST | 1 << WP_PISTOL,
       cards: 0, backpack: false, readyweapon: WP_PISTOL,
-      pendingweapon: WP_NOCHANGE, itemcount: 0, bonuscount: 0, attacker: 0
+      pendingweapon: WP_NOCHANGE, itemcount: 0, bonuscount: 0, attacker: 0,
+      damagecount: 0
     }; 1]
     Ammo = []
     Ammo += { count: 50, most: 200 }
@@ -666,6 +667,7 @@ system start_player(fresh: bool) {
     Inv[0].cards = 0
     Inv[0].pendingweapon = WP_NOCHANGE
     Inv[0].bonuscount = 0
+    Inv[0].damagecount = 0
     Inv[0].attacker = 0
     for m: mut Mobj where m.type == MT_PLAYER { m.health = Kept.health }
   }

@@ -479,7 +479,10 @@ proc damage_mobj(lines: mut Lines, sectors: mut Sectors, subsectors:
     }
     if hurts {
       // (The player knows who did it, and turns to it when dead.)
-      if isplayer { inv[0].attacker = things[source].id }
+      if isplayer {
+        inv[0].attacker = things[source].id
+        inv[0].damagecount = min(inv[0].damagecount + damage, 100)
+      }
       things[target].health -= damage
       if things[target].health <= 0 {
         kill_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, source, target)

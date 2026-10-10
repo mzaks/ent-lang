@@ -35,10 +35,12 @@ const MAXSEGS = 32
 // How big the view is in the picture (R_ExecuteSetViewSize): `blocks` is
 // the size the player chose, 3 to 11 (nought: 9, as it starts; 10 is as
 // wide as the picture, 11 the whole of it).
+// (`extralight`: how much lighter everything is, for the flash of a
+// shot.)
 unique View {
   blocks: i32, width: i32, height: i32, x: i32, y: i32, centerx: i32,
   centery: i32, centerxfrac: i32, centeryfrac: i32, projection: i32,
-  clipangle: u32
+  clipangle: u32, extralight: i32
 }
 
 // Where the level is seen from: until there is a player, where one
@@ -942,7 +944,7 @@ system draw_walls() {
         rw_offset += Sides[side].textureoffset + Segs[seg].offset
         rw_centerangle = ANG90 + viewangle - rw_normalangle
         // (A wall along the grid is a little darker or lighter.)
-        var lightnum = Sectors[front].lightlevel >> LIGHTSEGSHIFT
+        var lightnum = (Sectors[front].lightlevel >> LIGHTSEGSHIFT) + View.extralight
         if Segs[seg].y1 == Segs[seg].y2 {
           lightnum -= 1
         } else if Segs[seg].x1 == Segs[seg].x2 {
@@ -1153,7 +1155,7 @@ system draw_planes() {
     } else {
       let source = Lumps[Data.firstflat + Visplanes[pl].picnum].at
       let planeheight = abs(Visplanes[pl].height - vz)
-      let light = min(max(Visplanes[pl].lightlevel >> LIGHTSEGSHIFT, 0),
+      let light = min(max((Visplanes[pl].lightlevel >> LIGHTSEGSHIFT) + View.extralight, 0),
                       LIGHTLEVELS - 1) * MAXLIGHTZ
       Planetops[base + maxx + 1].top = 255
       Planetops[base + minx - 1].top = 255

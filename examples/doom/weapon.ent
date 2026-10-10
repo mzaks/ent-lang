@@ -559,6 +559,11 @@ system think_weapon() {
                 Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
                 Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player, Pl, Psp, Ammo)
   Random.play = Rnd[0].play
-  // The powers the player has last a tic less.
-  if !Pl[0].dead { count_powers(Mobj, Spawned.player, Powers) }
+  // The powers the player has last a tic less, and so the flashes of
+  // being hurt and of picking up.
+  if !Pl[0].dead {
+    count_powers(Mobj, Spawned.player, Powers)
+    if Inv[0].bonuscount != 0 { Inv[0].bonuscount -= 1 }
+  }
+  if Inv[0].damagecount != 0 { Inv[0].damagecount -= 1 }
 }

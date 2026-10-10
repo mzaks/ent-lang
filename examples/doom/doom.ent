@@ -30,6 +30,7 @@ import enemy
 import weapon
 import movers
 import tick
+import screen
 
 // As many bytes as the biggest WAD.
 capacity Bytes 16777216
@@ -81,20 +82,28 @@ system look() {
     Viewpoint.angle = m.angle
   }
   Viewpoint.z = Pl[0].viewz
+  View.extralight = Pl[0].extralight
   Clock.leveltime += 1
 }
+
+// The view is all of the screen above the status bar.
+system whole_view() { View.blocks = 10 }
 
 schedule setup() {
   load_wad()
   load_palette()
   init_data()
   init_sprites()
+  init_status()
   load_level()
   spawn_things()
   spawn_specials()
   start_player(true)
   start_weapon()
+  start_status()
+  start_screen()
   fit_automap()
+  whole_view()
   set_view_size()
   init_view_tables()
 }
@@ -111,12 +120,15 @@ schedule frame() {
   run_lights()
   think_things(true)
   run_movers()
+  tick_status()
   look()
   clear_screen()
   render_view() run_if !Shown.map
   draw_walls() run_if !Shown.map
   draw_planes() run_if !Shown.map
   draw_masked() run_if !Shown.map
+  draw_weapon() run_if !Shown.map
+  draw_status()
   draw_automap() run_if Shown.map
   show_screen()
   present()
@@ -131,6 +143,7 @@ schedule again() run_if Level.exited || Level.reborn {
   start_player(true) run_if Level.reborn
   start_player(false) run_if Level.exited
   start_weapon()
+  start_status()
   fit_automap()
   arrive()
 }
