@@ -47,7 +47,8 @@ const ML_MAPPED = 256
 // (2 is "Hurt me plenty"): it says which things are there; with
 // `nomonsters` none of them is a monster.
 unique Level {
-  episode: i32, map: i32, lump: i32, skill: i32, nomonsters: bool
+  episode: i32, map: i32, lump: i32, skill: i32, nomonsters: bool,
+  exited: bool, secret: bool
 }
 
 // The corners of the level's lines.

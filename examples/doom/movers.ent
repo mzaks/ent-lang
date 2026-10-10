@@ -29,6 +29,7 @@ import demo
 import items
 import specials
 import play
+import enemy
 import random
 
 const USERANGE = 64 * FRACUNIT
@@ -94,6 +95,7 @@ const ACT_DOOR = 0
 const ACT_PLAT = 1
 const ACT_STOPPLAT = 2
 const ACT_FLOOR = 3
+const ACT_STAIRS = 4
 // The sorts of floors that move (floor_e).
 const FLOOR_LOWER = 0
 const FLOOR_LOWERTOLOWEST = 1
@@ -193,6 +195,10 @@ table triggers {
   { special: 24, walk: true, again: false, action: 3, type: 3, amount: 0 },
   { special: 46, walk: true, again: true, action: 0, type: 3, amount: 0 },
   { special: 47, walk: true, again: false, action: 1, type: 3, amount: 0 },
+  { special: 8, walk: true, again: false, action: 4, type: 0, amount: 0 },
+  { special: 100, walk: true, again: false, action: 4, type: 1, amount: 0 },
+  { special: 7, walk: false, again: false, action: 4, type: 0, amount: 0 },
+  { special: 127, walk: false, again: false, action: 4, type: 1, amount: 0 },
   { special: 54, walk: true, again: false, action: 2, type: 0, amount: 0 },
   { special: 89, walk: true, again: true, action: 2, type: 0, amount: 0 }
 ]
@@ -212,22 +218,36 @@ system use_lines() {
   Pl[0].usedown = down
 }
 
-// The lines the player set off do what they do, in their order
-// (P_UseSpecialLine, P_CrossSpecialLine, EV_VerticalDoor, EV_DoDoor,
-// EV_DoPlat, EV_StopPlat). After `use_lines`, and after `move_player`.
-system trigger_lines() {
-  for t in 0..len(Triggered) {
-    let line = Triggered[t].line
-    let special = Lines[line].special
-    let tag = Lines[line].tag
-    let used = Triggered[t].used
-    let player = Triggered[t].player
-    if used && Triggered[t].side == 0 &&
+// The lines that were set off do what they do, in their order
+// (P_UseSpecialLine, P_CrossSpecialLine, P_ShootSpecialLine,
+// EV_VerticalDoor, EV_DoDoor, EV_DoPlat, EV_StopPlat, EV_DoFloor,
+// EV_BuildStairs): right after the player's keys, and after the turn of
+// each thing that set one off, so that what they start or turn round
+// is so for what moves sectors, which comes later in the tic. Gives 1
+// where the level is left, 2 where by the secret way out, else 0.
+proc work_lines(triggered: mut Triggered, lines: mut Lines,
+                sectors: mut Sectors, movers: mut Movers, inv: Inv,
+                tm: mut Tm, rnd: mut Rnd) -> i32 {
+  var out = 0
+  for t in 0..len(triggered) {
+    let line = triggered[t].line
+    let special = lines[line].special
+    let tag = lines[line].tag
+    let used = triggered[t].used
+    let player = triggered[t].player
+    // The ways out, by a switch or by walking: the level is over when
+    // the tic is (G_ExitLevel, G_SecretExitLevel).
+    if player && !triggered[t].shot &&
+       ((used && triggered[t].side == 0 && (special == 11 || special == 51)) ||
+        (!used && (special == 52 || special == 124))) {
+      out = if special == 51 || special == 124 { 2 } else { 1 }
+    }
+    if used && triggered[t].side == 0 &&
        (special == 1 || special == 26 || special == 27 || special == 28 ||
         special == 31 || special == 32 || special == 33 || special == 34 ||
         special == 117 || special == 118) {
       // A door that is opened by hand: its key, if it has a lock.
-      let cards = Inv[0].cards
+      let cards = inv[0].cards
       let blue = cards & (1 << IT_BLUECARD | 1 << IT_BLUESKULL) != 0
       let yellow = cards & (1 << IT_YELLOWCARD | 1 << IT_YELLOWSKULL) != 0
       let red = cards & (1 << IT_REDCARD | 1 << IT_REDSKULL) != 0
@@ -235,28 +255,28 @@ system trigger_lines() {
       let locked = ((special == 26 || special == 32) && (!blue || !player)) ||
                    ((special == 27 || special == 34) && (!yellow || !player)) ||
                    ((special == 28 || special == 33) && (!red || !player))
-      let sector = Lines[line].backsector
+      let sector = lines[line].backsector
       if !locked && sector >= 0 {
-        let moving = Sectors[sector].specialdata
+        let moving = sectors[sector].specialdata
         if moving != 0 {
           // It is moving: one that shuts again turns round. (A lift that
           // is there in its place goes at once.)
           if special == 1 || special == 26 || special == 27 || special == 28 ||
              special == 117 {
             // (A monster never shuts one.)
-            if Movers[moving - 1].kind == MOVER_PLAT {
-              if player { Movers[moving - 1].wait = -1 }
-            } else if Movers[moving - 1].direction == -1 {
-              Movers[moving - 1].direction = 1
+            if movers[moving - 1].kind == MOVER_PLAT {
+              if player { movers[moving - 1].wait = -1 }
+            } else if movers[moving - 1].direction == -1 {
+              movers[moving - 1].direction = 1
             } else if player {
-              Movers[moving - 1].direction = -1
+              movers[moving - 1].direction = -1
             }
           }
         } else {
           let stays = special == 31 || special == 32 || special == 33 ||
                       special == 34 || special == 118
           let fast = special == 117 || special == 118
-          Movers += {
+          movers += {
             kind: MOVER_DOOR, active: true, sector: sector,
             type: if special == 117 {
               VLD_BLAZERAISE
@@ -268,23 +288,25 @@ system trigger_lines() {
               VLD_NORMAL
             },
             direction: 1, speed: if fast { VDOORSPEED * 4 } else { VDOORSPEED },
-            high: lowest_ceiling_surrounding(Lines, Sectors, sector) - 4 * FRACUNIT,
+            high: lowest_ceiling_surrounding(lines, sectors, sector) - 4 * FRACUNIT,
             low: 0, wait: VDOORWAIT, count: 0, crush: false, status: 0,
-            oldstatus: 0, tag: 0
+            oldstatus: 0, tag: 0, born: tm[0].links + 1,
+                  ran: -1
           }
-          Sectors[sector].specialdata = len(Movers)
+          sectors[sector].specialdata = len(movers)
+          tm[0].links += 1
           // (One that stays open is opened once.)
-          if stays { Lines[line].special = 0 }
+          if stays { lines[line].special = 0 }
         }
       }
-    } else if !used || Triggered[t].side == 0 {
+    } else if !used || triggered[t].side == 0 {
       // What the table says of the line.
       // (What a shot sets off, only a shot does.)
       let gun = special == 24 || special == 46 || special == 47
       var row = -1
       for k in 0..len(triggers) {
         if triggers[k].special == special && triggers[k].walk != used &&
-           gun == Triggered[t].shot {
+           gun == triggered[t].shot {
           row = k
         }
       }
@@ -294,58 +316,103 @@ system trigger_lines() {
         var started = false
         if action == ACT_STOPPLAT {
           // The lifts of the tag stand still.
-          for i in 0..len(Movers) {
-            if Movers[i].active && Movers[i].kind == MOVER_PLAT &&
-               Movers[i].tag == tag && Movers[i].status != PLAT_IN_STASIS {
-              Movers[i].oldstatus = Movers[i].status
-              Movers[i].status = PLAT_IN_STASIS
+          for i in 0..len(movers) {
+            if movers[i].active && movers[i].kind == MOVER_PLAT &&
+               movers[i].tag == tag && movers[i].status != PLAT_IN_STASIS {
+              movers[i].oldstatus = movers[i].status
+              movers[i].status = PLAT_IN_STASIS
             }
           }
         } else {
           // (Lifts of the tag that stand still go on.)
           if action == ACT_PLAT && type == PLAT_PERPETUALRAISE {
-            for i in 0..len(Movers) {
-              if Movers[i].active && Movers[i].kind == MOVER_PLAT &&
-                 Movers[i].tag == tag && Movers[i].status == PLAT_IN_STASIS {
-                Movers[i].status = Movers[i].oldstatus
+            for i in 0..len(movers) {
+              if movers[i].active && movers[i].kind == MOVER_PLAT &&
+                 movers[i].tag == tag && movers[i].status == PLAT_IN_STASIS {
+                movers[i].status = movers[i].oldstatus
               }
             }
           }
           // A door or a lift in every sector of the tag that nothing
           // moves.
-          var secnum = sector_from_tag(Sectors, tag, -1)
+          var secnum = sector_from_tag(sectors, tag, -1)
           while secnum >= 0 {
-            if Sectors[secnum].specialdata == 0 {
+            if sectors[secnum].specialdata == 0 {
               started = true
-              let floor = Sectors[secnum].floorheight
-              if action == ACT_FLOOR {
+              let floor = sectors[secnum].floorheight
+              if action == ACT_STAIRS {
+                // Stairs (EV_BuildStairs): the floor goes up a step, and
+                // from sector to sector, through the lines that face
+                // away, each next one with the same flat a step more.
+                // (What is in the way of a step is hurt as by a floor
+                // that crushes, which the reference does by a slip.)
+                let speed = if type == 0 { FLOORSPEED / 4 } else { FLOORSPEED * 4 }
+                let stairsize = if type == 0 { 8 * FRACUNIT } else { 16 * FRACUNIT }
+                var height = floor + stairsize
+                let flat = sectors[secnum].floorpic
+                movers += {
+                  kind: MOVER_FLOOR, active: true, sector: secnum,
+                  type: FLOOR_LOWER, direction: 1, speed: speed, high: height,
+                  low: 0, wait: 0, count: 0, crush: false, status: 1,
+                  oldstatus: 0, tag: 0, born: tm[0].links + 1,
+                  ran: -1
+                }
+                sectors[secnum].specialdata = len(movers)
+                tm[0].links += 1
+                var ok = true
+                while ok {
+                  ok = false
+                  for l in 0..len(lines) {
+                    if !ok && lines[l].flags & ML_TWOSIDED != 0 &&
+                       lines[l].frontsector == secnum {
+                      let next = lines[l].backsector
+                      if sectors[next].floorpic == flat {
+                        height += stairsize
+                        if sectors[next].specialdata == 0 {
+                          secnum = next
+                          movers += {
+                            kind: MOVER_FLOOR, active: true, sector: secnum,
+                            type: FLOOR_LOWER, direction: 1, speed: speed,
+                            high: height, low: 0, wait: 0, count: 0,
+                            crush: false, status: 1, oldstatus: 0, tag: 0, born: tm[0].links + 1,
+                  ran: -1
+                          }
+                          sectors[secnum].specialdata = len(movers)
+                          tm[0].links += 1
+                          ok = true
+                        }
+                      }
+                    }
+                  }
+                }
+              } else if action == ACT_FLOOR {
                 // A floor that goes to a height (EV_DoFloor).
                 var direction = 1
                 var speed = FLOORSPEED
                 var dest = floor
-                var flat = Sectors[secnum].floorpic
-                var newspecial = Sectors[secnum].special
+                var flat = sectors[secnum].floorpic
+                var newspecial = sectors[secnum].special
                 if type == FLOOR_LOWER {
                   direction = -1
-                  dest = highest_floor_surrounding(Lines, Sectors, secnum)
+                  dest = highest_floor_surrounding(lines, sectors, secnum)
                 } else if type == FLOOR_LOWERTOLOWEST || type == FLOOR_LOWERANDCHANGE {
                   direction = -1
-                  dest = lowest_floor_surrounding(Lines, Sectors, secnum)
+                  dest = lowest_floor_surrounding(lines, sectors, secnum)
                   if type == FLOOR_LOWERANDCHANGE {
                     // (The flat and what is special of the first sector
                     // next to it that is as low.)
                     var found = false
-                    for l in 0..len(Lines) {
-                      if !found && Lines[l].flags & ML_TWOSIDED != 0 &&
-                         (Lines[l].frontsector == secnum || Lines[l].backsector == secnum) {
-                        let other = if Lines[l].frontsector == secnum {
-                          Lines[l].backsector
+                    for l in 0..len(lines) {
+                      if !found && lines[l].flags & ML_TWOSIDED != 0 &&
+                         (lines[l].frontsector == secnum || lines[l].backsector == secnum) {
+                        let other = if lines[l].frontsector == secnum {
+                          lines[l].backsector
                         } else {
-                          Lines[l].frontsector
+                          lines[l].frontsector
                         }
-                        if Sectors[other].floorheight == dest {
-                          flat = Sectors[other].floorpic
-                          newspecial = Sectors[other].special
+                        if sectors[other].floorheight == dest {
+                          flat = sectors[other].floorpic
+                          newspecial = sectors[other].special
                           found = true
                         }
                       }
@@ -354,36 +421,37 @@ system trigger_lines() {
                 } else if type == FLOOR_TURBOLOWER {
                   direction = -1
                   speed = FLOORSPEED * 4
-                  dest = highest_floor_surrounding(Lines, Sectors, secnum)
+                  dest = highest_floor_surrounding(lines, sectors, secnum)
                   if dest != floor { dest += 8 * FRACUNIT }
                 } else if type == FLOOR_RAISE || type == FLOOR_RAISECRUSH {
-                  dest = min(lowest_ceiling_surrounding(Lines, Sectors, secnum),
-                             Sectors[secnum].ceilingheight)
+                  dest = min(lowest_ceiling_surrounding(lines, sectors, secnum),
+                             sectors[secnum].ceilingheight)
                   if type == FLOOR_RAISECRUSH { dest -= 8 * FRACUNIT }
                 } else if type == FLOOR_RAISETURBO {
                   speed = FLOORSPEED * 4
-                  dest = next_highest_floor(Lines, Sectors, secnum, floor)
+                  dest = next_highest_floor(lines, sectors, secnum, floor)
                 } else if type == FLOOR_RAISETONEAREST {
-                  dest = next_highest_floor(Lines, Sectors, secnum, floor)
+                  dest = next_highest_floor(lines, sectors, secnum, floor)
                 } else if type == FLOOR_RAISE24 {
                   dest = floor + 24 * FRACUNIT
                 } else if type == FLOOR_RAISE512 {
                   dest = floor + 512 * FRACUNIT
                 } else if type == FLOOR_RAISE24ANDCHANGE {
                   dest = floor + 24 * FRACUNIT
-                  Sectors[secnum].floorpic = Sectors[Lines[line].frontsector].floorpic
-                  Sectors[secnum].special = Sectors[Lines[line].frontsector].special
+                  sectors[secnum].floorpic = sectors[lines[line].frontsector].floorpic
+                  sectors[secnum].special = sectors[lines[line].frontsector].special
                 }
-                Movers += {
+                movers += {
                   kind: MOVER_FLOOR, active: true, sector: secnum, type: type,
                   direction: direction, speed: speed, high: dest, low: flat,
                   wait: newspecial, count: 0, crush: type == FLOOR_RAISECRUSH,
-                  status: 0, oldstatus: 0, tag: 0
+                  status: 0, oldstatus: 0, tag: 0, born: tm[0].links + 1,
+                  ran: -1
                 }
               } else if action == ACT_DOOR {
                 let down = type == VLD_BLAZECLOSE || type == VLD_CLOSE ||
                            type == VLD_CLOSE30THENOPEN
-                Movers += {
+                movers += {
                   kind: MOVER_DOOR, active: true, sector: secnum, type: type,
                   direction: if down { -1 } else { 1 },
                   speed: if type == VLD_BLAZECLOSE || type == VLD_BLAZERAISE ||
@@ -393,15 +461,16 @@ system trigger_lines() {
                     VDOORSPEED
                   },
                   high: if type == VLD_CLOSE30THENOPEN {
-                    Sectors[secnum].ceilingheight
+                    sectors[secnum].ceilingheight
                   } else {
-                    lowest_ceiling_surrounding(Lines, Sectors, secnum) - 4 * FRACUNIT
+                    lowest_ceiling_surrounding(lines, sectors, secnum) - 4 * FRACUNIT
                   },
                   low: 0, wait: VDOORWAIT, count: 0, crush: false, status: 0,
-                  oldstatus: 0, tag: 0
+                  oldstatus: 0, tag: 0, born: tm[0].links + 1,
+                  ran: -1
                 }
               } else {
-                let lowest = min(lowest_floor_surrounding(Lines, Sectors, secnum), floor)
+                let lowest = min(lowest_floor_surrounding(lines, sectors, secnum), floor)
                 var status = PLAT_DOWN
                 var speed = PLATSPEED
                 var low = lowest
@@ -409,16 +478,16 @@ system trigger_lines() {
                 var wait = TICRATE * PLATWAIT
                 if type == PLAT_RAISETONEARESTANDCHANGE {
                   speed = PLATSPEED / 2
-                  Sectors[secnum].floorpic = Sectors[Lines[line].frontsector].floorpic
-                  high = next_highest_floor(Lines, Sectors, secnum, floor)
+                  sectors[secnum].floorpic = sectors[lines[line].frontsector].floorpic
+                  high = next_highest_floor(lines, sectors, secnum, floor)
                   low = 0
                   wait = 0
                   status = PLAT_UP
                   // (It hurts no more.)
-                  Sectors[secnum].special = 0
+                  sectors[secnum].special = 0
                 } else if type == PLAT_RAISEANDCHANGE {
                   speed = PLATSPEED / 2
-                  Sectors[secnum].floorpic = Sectors[Lines[line].frontsector].floorpic
+                  sectors[secnum].floorpic = sectors[lines[line].frontsector].floorpic
                   high = floor + triggers[row].amount * FRACUNIT
                   low = 0
                   wait = 0
@@ -429,244 +498,302 @@ system trigger_lines() {
                   speed = PLATSPEED * 8
                 } else {
                   // Up and down for ever, starting either way.
-                  high = max(highest_floor_surrounding(Lines, Sectors, secnum), floor)
-                  Random.play = random_after(Random.play)
-                  status = random_at(Random.play) & 1
+                  high = max(highest_floor_surrounding(lines, sectors, secnum), floor)
+                  status = p_random(rnd) & 1
                 }
-                Movers += {
+                movers += {
                   kind: MOVER_PLAT, active: true, sector: secnum, type: type,
                   direction: 0, speed: speed, high: high, low: low, wait: wait,
-                  count: 0, crush: false, status: status, oldstatus: 0, tag: tag
+                  count: 0, crush: false, status: status, oldstatus: 0, tag: tag, born: tm[0].links + 1,
+                  ran: -1
                 }
               }
-              Sectors[secnum].specialdata = len(Movers)
+              sectors[secnum].specialdata = len(movers)
+              tm[0].links += 1
             }
-            secnum = sector_from_tag(Sectors, tag, secnum)
+            secnum = sector_from_tag(sectors, tag, secnum)
           }
         }
         // One that is walked over once is done; a switch that is used
         // once, when it started something.
-        if !triggers[row].again && (!used || started) { Lines[line].special = 0 }
+        if !triggers[row].again && (!used || started) { lines[line].special = 0 }
       }
     }
   }
-  Triggered = []
+  triggered = []
+  out
 }
 
-// A tic of what moves sectors, each in its turn (T_VerticalDoor,
-// T_MovePlane, P_ChangeSector): the plane is moved a step, every thing
-// in reach of the sector is fitted between floor and ceiling anew, and
-// if one does not fit the step is taken back.
-system run_movers() {
-  for i in 0..len(Movers) {
-    if Movers[i].active {
-      let sector = Movers[i].sector
-      let type = Movers[i].type
-      // What it does this tic: wait, or move a plane to a height.
-      var moving = false
-      var ceiling = true
-      var mdir = 0
-      var dest = 0
-      let speed = Movers[i].speed
-      // (A lift going down crushes nothing.)
-      let crush = Movers[i].crush && !(Movers[i].kind == MOVER_PLAT &&
-                                       Movers[i].status == PLAT_DOWN)
-      let plat = Movers[i].kind == MOVER_PLAT
-      let goes = Movers[i].kind == MOVER_FLOOR
-      let status = Movers[i].status
-      let dir = if plat || goes { 3 } else { Movers[i].direction }
-      if goes {
-        // A floor goes to its height.
-        ceiling = false
-        moving = true
-        mdir = Movers[i].direction
-        dest = Movers[i].high
-      } else if plat {
-        // A lift goes up, or down, or waits where it is.
-        ceiling = false
-        if status == PLAT_UP {
-          moving = true
-          mdir = 1
-          dest = Movers[i].high
-        } else if status == PLAT_DOWN {
-          moving = true
-          mdir = -1
-          dest = Movers[i].low
-        } else if status == PLAT_WAITING {
-          Movers[i].count -= 1
-          if Movers[i].count == 0 {
-            Movers[i].status = if Sectors[sector].floorheight == Movers[i].low {
-              PLAT_UP
-            } else {
-              PLAT_DOWN
-            }
-          }
-        }
-      } else if dir == 0 {
-        // A door waits at the top.
-        Movers[i].count -= 1
-        if Movers[i].count == 0 {
-          if type == VLD_BLAZERAISE || type == VLD_NORMAL {
-            Movers[i].direction = -1
-          } else if type == VLD_CLOSE30THENOPEN {
-            Movers[i].direction = 1
-          }
-        }
-      } else if dir == 2 {
-        // (It opens after a while.)
-        Movers[i].count -= 1
-        if Movers[i].count == 0 && type == VLD_RAISEIN5MINS {
-          Movers[i].direction = 1
-          Movers[i].type = VLD_NORMAL
-        }
-      } else if dir == -1 {
-        moving = true
-        mdir = -1
-        dest = Sectors[sector].floorheight
-      } else {
-        moving = true
-        mdir = 1
-        dest = Movers[i].high
-      }
+// After `use_lines`.
+system trigger_lines() {
+  Rnd = [{ play: Random.play }; 1]
+  let out = work_lines(Triggered, Lines, Sectors, Movers, Inv, Tm, Rnd)
+  Random.play = Rnd[0].play
+  if out != 0 {
+    Level.exited = true
+    Level.secret = out == 2
+  }
+}
 
-      var res = RES_OK
-      if moving {
-        // T_MovePlane.
-        let lastpos = if ceiling {
-          Sectors[sector].ceilingheight
+// A sector's floor or ceiling has moved (P_ChangeSector,
+// PIT_ChangeSector): every thing in the squares the sector reaches
+// finds its floor and ceiling anew, column by column as the blockmap has
+// them. What does not fit: the dead are crushed to bits, what was left
+// by the dead is gone, and anything else that can be hurt is in the way
+// (which is what is given back) and, with `crunches`, hurt every fourth
+// tic.
+proc change_sector(lines: mut Lines, sectors: mut Sectors, subsectors:
+                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                   Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                   spechit: mut Spechit, touched: mut Touched, triggered: mut
+                   Triggered, intercepts: mut Intercepts, sight: mut Sight,
+                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env,
+                   blast: mut Blast, things: mut Mobj, player: entity, sector:
+                   i32, crunches: bool) -> bool {
+  gather_blast(things, bmap, blast, true, sectors[sector].bbleft,
+               sectors[sector].bbright, sectors[sector].bbbottom,
+               sectors[sector].bbtop)
+  var nofit = false
+  for k in 0..len(blast) {
+    let it = thing_by_id(things, blast[k].id)
+    let onfloor = things[it].z == things[it].floorz
+    let (floorz, ceilingz) = heights_at(
+        lines, sectors, subsectors, nodes, bytes, bmap, things[it].x,
+        things[it].y, things[it].radius, things[it].flags,
+        things[it].flags & MF_MISSILE == 0 && things[it].type != MT_PLAYER)
+    things[it].floorz = floorz
+    things[it].ceilingz = ceilingz
+    if onfloor {
+      things[it].z = floorz
+    } else if things[it].z + things[it].height > ceilingz {
+      things[it].z = ceilingz - things[it].height
+    }
+    if ceilingz - floorz < things[it].height {
+      if things[it].health <= 0 {
+        things[it].state = S_GIBS
+        things[it].tics = states[S_GIBS].tics
+        things[it].sprite = states[S_GIBS].sprite
+        things[it].frame = states[S_GIBS].frame
+        things[it].flags &= ~MF_SOLID
+        things[it].height = 0
+        things[it].radius = 0
+      } else if things[it].flags & MF_DROPPED != 0 {
+        things[it].gone = true
+      } else if things[it].flags & MF_SHOOTABLE != 0 {
+        nofit = true
+        if crunches && env[0].leveltime & 3 == 0 {
+          damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, it, none, none, 10)
+          // (Blood, any way.)
+          let mo = spawn_mobj(things, sectors, subsectors, nodes, tm, rnd, env,
+                              things[it].x, things[it].y,
+                              things[it].z + things[it].height / 2, MT_BLOOD)
+          things[mo].momx = sub_random(rnd) << 12
+          things[mo].momy = sub_random(rnd) << 12
+        }
+      }
+    }
+  }
+  nofit
+}
+
+// A tic of what moves a sector (T_VerticalDoor, T_PlatRaise, T_MoveFloor,
+// T_MovePlane): the plane is moved a step, the things are fitted anew,
+// and if one does not fit the step is taken back.
+proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
+              segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
+              Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+              touched: mut Touched, triggered: mut Triggered, intercepts: mut
+              Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
+              powers: Powers, env: Env, blast: mut Blast, things: mut Mobj,
+              player: entity, movers: mut Movers, i: i32) {
+  let sector = movers[i].sector
+  let type = movers[i].type
+  // What it does this tic: wait, or move a plane to a height.
+  var moving = false
+  var ceiling = true
+  var mdir = 0
+  var dest = 0
+  let speed = movers[i].speed
+  // (A lift going down crushes nothing.)
+  let crush = movers[i].crush && !(movers[i].kind == MOVER_PLAT &&
+                                   movers[i].status == PLAT_DOWN)
+  let plat = movers[i].kind == MOVER_PLAT
+  // (What it crushes it hurts: a floor or a ceiling that crushes, and
+  // stairs. Doors and lifts hurt nothing.)
+  let crunches = movers[i].kind != MOVER_PLAT && movers[i].kind != MOVER_DOOR &&
+                 (movers[i].crush || movers[i].status == 1)
+  let goes = movers[i].kind == MOVER_FLOOR
+  let status = movers[i].status
+  let dir = if plat || goes { 3 } else { movers[i].direction }
+  if goes {
+    // A floor goes to its height.
+    ceiling = false
+    moving = true
+    mdir = movers[i].direction
+    dest = movers[i].high
+  } else if plat {
+    // A lift goes up, or down, or waits where it is.
+    ceiling = false
+    if status == PLAT_UP {
+      moving = true
+      mdir = 1
+      dest = movers[i].high
+    } else if status == PLAT_DOWN {
+      moving = true
+      mdir = -1
+      dest = movers[i].low
+    } else if status == PLAT_WAITING {
+      movers[i].count -= 1
+      if movers[i].count == 0 {
+        movers[i].status = if sectors[sector].floorheight == movers[i].low {
+          PLAT_UP
         } else {
-          Sectors[sector].floorheight
-        }
-        let past = if mdir == -1 { lastpos - speed < dest } else { lastpos + speed > dest }
-        let next = if past { dest } else { lastpos + mdir * speed }
-        let left = Sectors[sector].bbleft
-        let right = Sectors[sector].bbright
-        let bottom = Sectors[sector].bbbottom
-        let top = Sectors[sector].bbtop
-        var revert = false
-        for pass in 0..2 {
-          if pass == 0 || revert {
-            let height = if pass == 0 { next } else { lastpos }
-            if ceiling {
-              Sectors[sector].ceilingheight = height
-            } else {
-              Sectors[sector].floorheight = height
-            }
-            // P_ChangeSector: every thing in the squares the sector
-            // reaches finds its floor and ceiling anew.
-            Nofit = 0
-            for e, m: mut Mobj {
-              let bx = (m.x - Bmap[0].orgx) >> MAPBLOCKSHIFT
-              let by = (m.y - Bmap[0].orgy) >> MAPBLOCKSHIFT
-              if bx >= left && bx <= right && by >= bottom && by <= top &&
-                 m.flags & MF_NOBLOCKMAP == 0 {
-                let onfloor = m.z == m.floorz
-                let (floorz, ceilingz) = heights_at(
-                    Lines, Sectors, Subsectors, Nodes, Bytes, Bmap, m.x, m.y,
-                    m.radius, m.flags,
-                    m.flags & MF_MISSILE == 0 && m.type != MT_PLAYER)
-                m.floorz = floorz
-                m.ceilingz = ceilingz
-                if onfloor {
-                  m.z = floorz
-                } else if m.z + m.height > ceilingz {
-                  m.z = ceilingz - m.height
-                }
-                // What does not fit (PIT_ChangeSector): the dead are
-                // crushed to bits, what was left by the dead is gone,
-                // and anything else that can be hurt is in the way.
-                if ceilingz - floorz < m.height {
-                  if m.health <= 0 {
-                    m.state = S_GIBS
-                    m.tics = states[S_GIBS].tics
-                    m.sprite = states[S_GIBS].sprite
-                    m.frame = states[S_GIBS].frame
-                    m.flags &= ~MF_SOLID
-                    m.height = 0
-                    m.radius = 0
-                  } else if m.flags & MF_DROPPED != 0 {
-                    e.destroy()
-                  } else if m.flags & MF_SHOOTABLE != 0 {
-                    Nofit max= 1
-                  }
-                }
-              }
-            }
-            let nofit = Nofit != 0
-            if pass == 0 {
-              // What a thing in the way does to the move: it is taken
-              // back, but for a floor going up or a ceiling coming down
-              // that crushes, and a ceiling going up.
-              if nofit {
-                if past {
-                  revert = true
-                } else if ceiling && mdir == 1 {
-                  revert = false
-                } else {
-                  res = RES_CRUSHED
-                  revert = !(crush && ((ceiling && mdir == -1) || (!ceiling && mdir == 1)))
-                }
-              }
-              if past { res = RES_PASTDEST }
-            }
-          }
+          PLAT_DOWN
         }
       }
+    }
+  } else if dir == 0 {
+    // A door waits at the top.
+    movers[i].count -= 1
+    if movers[i].count == 0 {
+      if type == VLD_BLAZERAISE || type == VLD_NORMAL {
+        movers[i].direction = -1
+      } else if type == VLD_CLOSE30THENOPEN {
+        movers[i].direction = 1
+      }
+    }
+  } else if dir == 2 {
+    // (It opens after a while.)
+    movers[i].count -= 1
+    if movers[i].count == 0 && type == VLD_RAISEIN5MINS {
+      movers[i].direction = 1
+      movers[i].type = VLD_NORMAL
+    }
+  } else if dir == -1 {
+    moving = true
+    mdir = -1
+    dest = sectors[sector].floorheight
+  } else {
+    moving = true
+    mdir = 1
+    dest = movers[i].high
+  }
 
-      // What it does when it got there, or something was in the way.
-      if goes {
-        if res == RES_PASTDEST {
-          Sectors[sector].specialdata = 0
-          if type == FLOOR_LOWERANDCHANGE {
-            Sectors[sector].special = Movers[i].wait
-            Sectors[sector].floorpic = Movers[i].low
-          }
-          Movers[i].active = false
+  var res = RES_OK
+  if moving {
+    // T_MovePlane.
+    let lastpos = if ceiling {
+      sectors[sector].ceilingheight
+    } else {
+      sectors[sector].floorheight
+    }
+    let past = if mdir == -1 { lastpos - speed < dest } else { lastpos + speed > dest }
+    let next = if past { dest } else { lastpos + mdir * speed }
+    let left = sectors[sector].bbleft
+    let right = sectors[sector].bbright
+    let bottom = sectors[sector].bbbottom
+    let top = sectors[sector].bbtop
+    var revert = false
+    for pass in 0..2 {
+      if pass == 0 || revert {
+        let height = if pass == 0 { next } else { lastpos }
+        if ceiling {
+          sectors[sector].ceilingheight = height
+        } else {
+          sectors[sector].floorheight = height
         }
-      } else if moving && plat {
-        if status == PLAT_UP {
-          if res == RES_CRUSHED && !Movers[i].crush {
-            Movers[i].count = Movers[i].wait
-            Movers[i].status = PLAT_DOWN
-          } else if res == RES_PASTDEST {
-            Movers[i].count = Movers[i].wait
-            Movers[i].status = PLAT_WAITING
-            // (All but the one that goes for ever are done at the top.)
-            if type != PLAT_PERPETUALRAISE {
-              Sectors[sector].specialdata = 0
-              Movers[i].active = false
+        let nofit = change_sector(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, sector, crunches)
+        if pass == 0 {
+          // What a thing in the way does to the move: it is taken
+          // back, but for a floor going up or a ceiling coming down
+          // that crushes, and a ceiling going up.
+          if nofit {
+            if past {
+              revert = true
+            } else if ceiling && mdir == 1 {
+              revert = false
+            } else {
+              res = RES_CRUSHED
+              revert = !(crush && ((ceiling && mdir == -1) || (!ceiling && mdir == 1)))
             }
           }
-        } else if res == RES_PASTDEST {
-          Movers[i].count = Movers[i].wait
-          Movers[i].status = PLAT_WAITING
-        }
-      } else if moving && dir == -1 {
-        if res == RES_PASTDEST {
-          if type == VLD_CLOSE30THENOPEN {
-            Movers[i].direction = 0
-            Movers[i].count = 35 * 30
-          } else if type == VLD_BLAZERAISE || type == VLD_BLAZECLOSE ||
-                    type == VLD_NORMAL || type == VLD_CLOSE {
-            Sectors[sector].specialdata = 0
-            Movers[i].active = false
-          }
-        } else if res == RES_CRUSHED {
-          // (A door goes up again, unless it is one that shuts.)
-          if type != VLD_BLAZECLOSE && type != VLD_CLOSE { Movers[i].direction = 1 }
-        }
-      } else if moving && dir == 1 {
-        if res == RES_PASTDEST {
-          if type == VLD_BLAZERAISE || type == VLD_NORMAL {
-            Movers[i].direction = 0
-            Movers[i].count = Movers[i].wait
-          } else if type == VLD_CLOSE30THENOPEN || type == VLD_BLAZEOPEN ||
-                    type == VLD_OPEN {
-            Sectors[sector].specialdata = 0
-            Movers[i].active = false
-          }
+          if past { res = RES_PASTDEST }
         }
       }
+    }
+  }
+
+  // What it does when it got there, or something was in the way.
+  if goes {
+    if res == RES_PASTDEST {
+      sectors[sector].specialdata = 0
+      if type == FLOOR_LOWERANDCHANGE {
+        sectors[sector].special = movers[i].wait
+        sectors[sector].floorpic = movers[i].low
+      }
+      movers[i].active = false
+    }
+  } else if moving && plat {
+    if status == PLAT_UP {
+      if res == RES_CRUSHED && !movers[i].crush {
+        movers[i].count = movers[i].wait
+        movers[i].status = PLAT_DOWN
+      } else if res == RES_PASTDEST {
+        movers[i].count = movers[i].wait
+        movers[i].status = PLAT_WAITING
+        // (All but the one that goes for ever are done at the top.)
+        if type != PLAT_PERPETUALRAISE {
+          sectors[sector].specialdata = 0
+          movers[i].active = false
+        }
+      }
+    } else if res == RES_PASTDEST {
+      movers[i].count = movers[i].wait
+      movers[i].status = PLAT_WAITING
+    }
+  } else if moving && dir == -1 {
+    if res == RES_PASTDEST {
+      if type == VLD_CLOSE30THENOPEN {
+        movers[i].direction = 0
+        movers[i].count = 35 * 30
+      } else if type == VLD_BLAZERAISE || type == VLD_BLAZECLOSE ||
+                type == VLD_NORMAL || type == VLD_CLOSE {
+        sectors[sector].specialdata = 0
+        movers[i].active = false
+      }
+    } else if res == RES_CRUSHED {
+      // (A door goes up again, unless it is one that shuts.)
+      if type != VLD_BLAZECLOSE && type != VLD_CLOSE { movers[i].direction = 1 }
+    }
+  } else if moving && dir == 1 {
+    if res == RES_PASTDEST {
+      if type == VLD_BLAZERAISE || type == VLD_NORMAL {
+        movers[i].direction = 0
+        movers[i].count = movers[i].wait
+      } else if type == VLD_CLOSE30THENOPEN || type == VLD_BLAZEOPEN ||
+                type == VLD_OPEN {
+        sectors[sector].specialdata = 0
+        movers[i].active = false
+      }
+    }
+  }
+}
+
+// The movers that were made before the thing with that number, and have
+// not had their tic: they take their turns among the things in the
+// order all were made in.
+proc movers_before(lines: mut Lines, sectors: mut Sectors, subsectors:
+                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                   Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                   spechit: mut Spechit, touched: mut Touched, triggered: mut
+                   Triggered, intercepts: mut Intercepts, sight: mut Sight,
+                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env,
+                   blast: mut Blast, things: mut Mobj, player: entity, movers:
+                   mut Movers, id: i32) {
+  for i in 0..len(movers) {
+    if movers[i].active && movers[i].born < id && movers[i].ran != env[0].leveltime {
+      movers[i].ran = env[0].leveltime
+      move_one(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, movers, i)
     }
   }
 }

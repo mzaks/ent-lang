@@ -592,23 +592,27 @@ proc spawn_missile(lines: mut Lines, sectors: mut Sectors, subsectors:
 // What hurts all around a thing does so (P_RadiusAttack): everything
 // that can be hurt, sees the place and is near enough, the more the
 // nearer, in the order the blockmap has them in.
-proc gather_blast(things: Mobj, bmap: Bmap, blast: mut Blast, xl: i32,
-                  xh: i32, yl: i32, yh: i32) {
+proc gather_blast(things: Mobj, bmap: Bmap, blast: mut Blast, across: bool,
+                  xl: i32, xh: i32, yl: i32, yh: i32) {
   blast = []
   for other in things where !other.gone && other.flags & MF_NOBLOCKMAP == 0 {
     let bx = (other.x - bmap[0].orgx) >> MAPBLOCKSHIFT
     let by = (other.y - bmap[0].orgy) >> MAPBLOCKSHIFT
     if bx >= xl && bx <= xh && by >= yl && by <= yh {
       // (Row by row, in a row square by square, in a square the one put
-      // there last first.)
+      // there last first; or with `across`, column by column.)
       blast += { id: other.id, bx: bx, by: by, linked: other.linked }
       var at = len(blast) - 1
       var settled = false
       while at > 0 && !settled {
-        if blast[at - 1].by > by ||
-           (blast[at - 1].by == by &&
-            (blast[at - 1].bx > bx ||
-             (blast[at - 1].bx == bx && blast[at - 1].linked < other.linked))) {
+        let pby = blast[at - 1].by
+        let pbx = blast[at - 1].bx
+        let later = if across {
+          pbx > bx || (pbx == bx && pby > by)
+        } else {
+          pby > by || (pby == by && pbx > bx)
+        }
+        if later || (pby == by && pbx == bx && blast[at - 1].linked < other.linked) {
           blast[at].id = blast[at - 1].id
           blast[at].bx = blast[at - 1].bx
           blast[at].by = blast[at - 1].by
@@ -634,7 +638,7 @@ proc radius_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
                    things: mut Mobj, player: entity, spot:
                    entity, source: entity, damage: i32) {
   let dist = (damage << FRACBITS) + MAXRADIUS
-  gather_blast(things, bmap, blast,
+  gather_blast(things, bmap, blast, false,
                (things[spot].x - dist - bmap[0].orgx) >> MAPBLOCKSHIFT,
                (things[spot].x + dist - bmap[0].orgx) >> MAPBLOCKSHIFT,
                (things[spot].y - dist - bmap[0].orgy) >> MAPBLOCKSHIFT,
@@ -1389,31 +1393,3 @@ proc pick_up(things: mut Mobj, me: entity, touched: Touched, inv: mut Inv,
   }
 }
 
-// A tic of every thing, in the order they were made in (P_RunThinkers).
-// What is no more (picked up, or at the end of its states) is gone for
-// those after it, and its entity when all have had their turn.
-// (In two parts, as the reference's list has them: the things the level
-// started with, and after the lights of the sectors, which were made
-// next, those that were made since: `late`.)
-system think_things(late: bool) {
-  Env = [{
-    reject: Lumps[Level.lump + ML_REJECT].at, skill: Level.skill,
-    sky: Data.skyflatnum, leveltime: Clock.leveltime
-  }; 1]
-  for e, m: mut Mobj in turn by m.id
-      where !m.gone && (m.id > Spawned.links) == late &&
-            (m.tics != -1 || m.momx != 0 || m.momy != 0 || m.momz != 0 ||
-             m.z != m.floorz) {
-    Touched = []
-    Rnd = [{ play: Random.play }; 1]
-    thing_tic(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
-              Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
-              Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player, e, Pl)
-    Random.play = Rnd[0].play
-    if m.type == MT_PLAYER {
-      pick_up(Mobj, e, Touched, Inv, Ammo, Powers, Level.skill)
-      count_powers(Mobj, e, Powers)
-    }
-  }
-  for e, m: Mobj where m.gone { e.destroy() }
-}

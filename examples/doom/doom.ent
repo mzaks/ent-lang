@@ -29,6 +29,7 @@ import play
 import enemy
 import weapon
 import movers
+import tick
 
 // As many bytes as the biggest WAD.
 capacity Bytes 16777216
@@ -109,7 +110,6 @@ schedule frame() {
   think_things(false)
   run_lights()
   think_things(true)
-  trigger_lines()
   run_movers()
   look()
   clear_screen()

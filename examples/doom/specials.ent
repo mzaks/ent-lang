@@ -41,7 +41,7 @@ const LIGHT_GLOW = 3
 buffer Movers {
   kind: i32, active: bool, sector: i32, type: i32, direction: i32,
   speed: i32, high: i32, low: i32, wait: i32, count: i32, crush: bool,
-  status: i32, oldstatus: i32, tag: i32
+  status: i32, oldstatus: i32, tag: i32, born: i32, ran: i32
 } capacity 4096
 const MOVER_DOOR = 0
 const MOVER_PLAT = 1
@@ -229,7 +229,8 @@ system spawn_specials() {
       Movers += {
         kind: MOVER_DOOR, active: true, sector: i, type: VLD_NORMAL,
         direction: 0, speed: VDOORSPEED, high: 0, low: 0, wait: 0,
-        count: 30 * 35, crush: false, status: 0, oldstatus: 0, tag: 0
+        count: 30 * 35, crush: false, status: 0, oldstatus: 0, tag: 0, born: 1,
+        ran: -1
       }
       Sectors[i].special = 0
       Sectors[i].specialdata = len(Movers)
@@ -240,7 +241,8 @@ system spawn_specials() {
         direction: 2, speed: VDOORSPEED,
         high: lowest_ceiling_surrounding(Lines, Sectors, i) - 4 * FRACUNIT,
         low: 0, wait: VDOORWAIT, count: 5 * 60 * 35, crush: false, status: 0,
-        oldstatus: 0, tag: 0
+        oldstatus: 0, tag: 0, born: 1,
+        ran: -1
       }
       Sectors[i].special = 0
       Sectors[i].specialdata = len(Movers)

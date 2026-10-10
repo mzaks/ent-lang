@@ -1,0 +1,91 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The player moved (p_user.c, and what of p_map.c, p_maputl.c and
+// A tic of the level (p_tick.c: P_RunThinkers): the things, the lights
+// of the sectors and what moves sectors, each in its turn in the order
+// they were made in.
+import files
+import wad
+import fixed
+import tables
+import angles
+import random
+import info
+import level
+import data
+import render
+import things
+import demo
+import specials
+import items
+import play
+import enemy
+import weapon
+import movers
+
+// A tic of every thing, in the order they were made in (P_RunThinkers).
+// What is no more (picked up, or at the end of its states) is gone for
+// those after it, and its entity when all have had their turn.
+// (In two parts, as the reference's list has them: the things the level
+// started with, and after the lights of the sectors, which were made
+// next, those that were made since: `late`.)
+system think_things(late: bool) {
+  Env = [{
+    reject: Lumps[Level.lump + ML_REJECT].at, skill: Level.skill,
+    sky: Data.skyflatnum, leveltime: Clock.leveltime
+  }; 1]
+  for e, m: mut Mobj in turn by m.id
+      where !m.gone && (m.id > Spawned.links) == late &&
+            (m.tics != -1 || m.momx != 0 || m.momy != 0 || m.momz != 0 ||
+             m.z != m.floorz) {
+    Touched = []
+    Rnd = [{ play: Random.play }; 1]
+    // (What moves a sector and was made before this thing, first.)
+    if late {
+      movers_before(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
+                    Nearorder, Tm, Spechit, Touched, Triggered, Intercepts,
+                    Sight, Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player,
+                    Movers, m.id)
+    }
+    thing_tic(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
+              Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
+              Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player, e, Pl)
+    // (The lines it set off, at once.)
+    if len(Triggered) != 0 {
+      let out = work_lines(Triggered, Lines, Sectors, Movers, Inv, Tm, Rnd)
+      if out != 0 {
+        Level.exited = true
+        Level.secret = out == 2
+      }
+    }
+    Random.play = Rnd[0].play
+    if m.type == MT_PLAYER {
+      pick_up(Mobj, e, Touched, Inv, Ammo, Powers, Level.skill)
+      count_powers(Mobj, e, Powers)
+    }
+  }
+  for e, m: Mobj where m.gone { e.destroy() }
+}
+
+// What moves sectors and has not had its tic among the things has it
+// now: those made after the last thing.
+system run_movers() {
+  Rnd = [{ play: Random.play }; 1]
+  movers_before(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
+                Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
+                Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player, Movers,
+                0x7fffffff)
+  Random.play = Rnd[0].play
+  for e, m: Mobj where m.gone { e.destroy() }
+}

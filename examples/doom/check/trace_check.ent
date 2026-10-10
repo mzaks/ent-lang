@@ -20,6 +20,7 @@ import play
 import enemy
 import weapon
 import movers
+import tick
 
 capacity Bytes 16777216
 
@@ -103,12 +104,11 @@ schedule tic() {
   think_things(false)
   run_lights()
   think_things(true)
-  trigger_lines()
   run_movers()
   trace()
   next()
 }
 main {
   setup()
-  loop { tic() } until Clock.leveltime == Tics || Demo.over
+  loop { tic() } until Clock.leveltime == Tics || Demo.over || Level.exited
 }
