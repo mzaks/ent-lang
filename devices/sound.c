@@ -109,6 +109,52 @@ void ent_sound_tone(float pitch, float to, float seconds, float after,
   free(samples);
 }
 
+// The places for sounds of bytes: a program says which is heard where.
+enum { ENT_SOUND_PLACES = 16 };
+static Sound ent_sound_places[ENT_SOUND_PLACES];
+static bool ent_sound_placed[ENT_SOUND_PLACES];
+
+void ent_sound_voice_stop(int32_t place) {
+  if (place < 0 || place >= ENT_SOUND_PLACES || !ent_sound_placed[place])
+    return;
+  StopSound(ent_sound_places[place]);
+  UnloadSound(ent_sound_places[place]);
+  ent_sound_placed[place] = false;
+}
+
+void ent_sound_voice_set(int32_t place, float volume, float side) {
+  if (place < 0 || place >= ENT_SOUND_PLACES || !ent_sound_placed[place])
+    return;
+  SetSoundVolume(ent_sound_places[place], fminf(fmaxf(volume, 0), 1));
+  SetSoundPan(ent_sound_places[place], fminf(fmaxf(side, -1), 1));
+}
+
+bool ent_sound_voice_on(int32_t place) {
+  return place >= 0 && place < ENT_SOUND_PLACES && ent_sound_placed[place] &&
+         IsSoundPlaying(ent_sound_places[place]);
+}
+
+void ent_sound_voice(int32_t place, int32_t count, const uint8_t *value,
+                     int32_t first, int32_t wanted, int32_t rate, float volume,
+                     float side) {
+  if (place < 0 || place >= ENT_SOUND_PLACES)
+    return;
+  // (What was heard there is cut off, whatever becomes of the new one.)
+  if (ent_sound_ready())
+    ent_sound_voice_stop(place);
+  if (!ent_sound_ready() || first < 0 || wanted < 1 ||
+      (int64_t)first + wanted > count || rate < 1000 || rate > 192000)
+    return;
+  // (The bytes are copied: the program may do with its own what it likes.)
+  Wave wave = {(unsigned)wanted, (unsigned)rate, 8, 1, (void *)(value + first)};
+  ent_sound_places[place] = LoadSoundFromWave(wave);
+  if (ent_sound_places[place].frameCount == 0)
+    return;
+  ent_sound_placed[place] = true;
+  ent_sound_voice_set(place, volume, side);
+  PlaySound(ent_sound_places[place]);
+}
+
 void ent_sound_sample(const ent_text126 *file, float volume) {
   static struct {
     char name[sizeof(file->bytes) + 1];

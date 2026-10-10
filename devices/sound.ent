@@ -14,8 +14,12 @@
 // Tones sound together; a tune is tones with different `after`. A long
 // piece from a file is `Music.file`, read as it plays.
 //
+// A sound a program has as bytes is `voice`.
+//
 // Implemented with raylib (devices/sound.c, devices/sound.link). Where the
 // machine has nothing to play on, nothing is heard and nothing fails.
+
+import files
 
 // What a tone sounds like: hollow and buzzing (the sound of old games),
 // soft, pure, or a hiss.
@@ -46,6 +50,26 @@ component Sample { file: text[126], volume: f32 } capacity 16
 //   Music.file = "tune.ogg"
 //   Music.fade = 2.0
 unique Music { file: text[126], volume: f32, once: bool, fade: f32 }
+
+// A sound of bytes the program holds, as `files` reads them (a game's
+// own file with all its sounds in it): `count` of the bytes of `from`,
+// from the one at `first` on, each how high the wave is there (0 to
+// 255, 128 the middle), `rate` of them a second. It is heard in a place
+// of its own (`voice`, 0 to 15), instead of what was heard there: so a
+// program decides how many sound together and which gives way.
+// `volume` from 0 to 1; `side` from -1, the left, over 0 to 1, the
+// right. (`Sound.volume` is not taken into it: a program that wants it
+// multiplies.)
+//
+//   voice(0, Bytes, 24, 5000, 11025, 0.8, 0.0)
+extern proc voice(voice: i32, from: Bytes, first: i32, count: i32, rate: i32,
+                  volume: f32, side: f32)
+// What is heard there is heard otherwise from now on (as its maker comes
+// nearer), or no more.
+extern proc voice_set(voice: i32, volume: f32, side: f32)
+extern proc voice_stop(voice: i32)
+// Whether something is still heard there.
+extern proc voice_on(voice: i32) -> bool
 
 // The shapes `play` looks for, whether or not the program makes any.
 archetype Tones { Tone } capacity 64
