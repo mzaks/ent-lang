@@ -31,6 +31,7 @@ import weapon
 import movers
 import tick
 import sounds
+import audio
 import screen
 
 // As many bytes as the biggest WAD.
@@ -97,6 +98,7 @@ schedule setup() {
   init_specials()
   init_sprites()
   init_status()
+  init_audio()
   load_level()
   spawn_things()
   spawn_specials()
@@ -125,6 +127,7 @@ schedule frame() {
   run_movers()
   update_specials()
   update_buttons()
+  hear()
   tick_status()
   look()
   clear_screen()
@@ -142,6 +145,7 @@ schedule frame() {
 // The next level, or the same again after the player's death.
 schedule again() run_if Level.exited || Level.reborn {
   leave_level()
+  quiet()
   load_level()
   spawn_things()
   spawn_specials()

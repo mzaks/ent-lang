@@ -181,35 +181,46 @@ proc sound(sounds: mut Sounds, rnd: mut Rnd, sfx: i32, origin: i32) {
   heard(sounds, rnd, sfx, SFX_VOLUME, NORM_SEP, origin)
 }
 
-// A sound from a place, for a listener at (lx, ly) who looks along
-// `langle` (S_AdjustSoundParams): quieter the farther, and none beyond
-// 1200 units, but on the eighth level, where everything is heard; from
-// the side it comes from.
-proc sound_from(sounds: mut Sounds, rnd: mut Rnd, sfx: i32, origin: i32,
-                x: i32, y: i32, lx: i32, ly: i32, langle: u32, map: i32) {
+// How loud a sound from (x, y) is for a listener at (lx, ly)
+// (S_AdjustSoundParams): quieter the farther, and nought beyond 1200
+// units, but on the eighth level, where everything is heard.
+fn heard_volume(x: i32, y: i32, lx: i32, ly: i32, map: i32) -> i32 {
   let adx = abs(lx - x)
   let ady = abs(ly - y)
-  var dist = adx + ady - (min(adx, ady) >> 1)
-  if map == 8 || dist <= S_CLIPPING_DIST {
-    var angle = point_to_angle(x - lx, y - ly)
-    angle = if angle > langle {
-      angle - langle
-    } else {
-      angle + (0xffffffff - langle)
-    }
-    let fine = (angle >> ANGLETOFINESHIFT) as i32
-    var sep = NORM_SEP - (fixed_mul(S_STEREO_SWING, finesine[fine]) >> FRACBITS)
-    if x == lx && y == ly { sep = NORM_SEP }
-    var volume = SFX_VOLUME
-    if dist >= S_CLOSE_DIST {
-      if map == 8 {
-        dist min= S_CLIPPING_DIST
-        volume = 15 + (SFX_VOLUME - 15) * ((S_CLIPPING_DIST - dist) >> FRACBITS) / S_ATTENUATOR
-      } else {
-        volume = SFX_VOLUME * ((S_CLIPPING_DIST - dist) >> FRACBITS) / S_ATTENUATOR
-      }
-    }
-    if volume > 0 { heard(sounds, rnd, sfx, volume, sep, origin) }
+  let dist = adx + ady - (min(adx, ady) >> 1)
+  if map != 8 && dist > S_CLIPPING_DIST {
+    0
+  } else if dist < S_CLOSE_DIST {
+    SFX_VOLUME
+  } else if map == 8 {
+    15 + (SFX_VOLUME - 15) * ((S_CLIPPING_DIST - min(dist, S_CLIPPING_DIST)) >> FRACBITS) / S_ATTENUATOR
+  } else {
+    SFX_VOLUME * ((S_CLIPPING_DIST - dist) >> FRACBITS) / S_ATTENUATOR
+  }
+}
+
+// From which side it comes for a listener who looks along `langle`.
+fn heard_sep(x: i32, y: i32, lx: i32, ly: i32, langle: u32) -> i32 {
+  var angle = point_to_angle(x - lx, y - ly)
+  angle = if angle > langle {
+    angle - langle
+  } else {
+    angle + (0xffffffff - langle)
+  }
+  let fine = (angle >> ANGLETOFINESHIFT) as i32
+  if x == lx && y == ly {
+    NORM_SEP
+  } else {
+    NORM_SEP - (fixed_mul(S_STEREO_SWING, finesine[fine]) >> FRACBITS)
+  }
+}
+
+// A sound from a place, if it is heard there.
+proc sound_from(sounds: mut Sounds, rnd: mut Rnd, sfx: i32, origin: i32,
+                x: i32, y: i32, lx: i32, ly: i32, langle: u32, map: i32) {
+  let volume = heard_volume(x, y, lx, ly, map)
+  if volume > 0 {
+    heard(sounds, rnd, sfx, volume, heard_sep(x, y, lx, ly, langle), origin)
   }
 }
 

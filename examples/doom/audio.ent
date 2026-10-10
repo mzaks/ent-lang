@@ -1,0 +1,270 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// What is heard (s_sound.c, i_sound.c): the tic's sounds (`Sounds`) are
+// played from the WAD's lumps, eight at a time at most. A thing or a
+// sector is heard once at a time: its new sound cuts its old one off.
+// Where all eight places are taken, a sound takes the place of one that
+// matters no more than it does, or is not heard. While a sound lasts it
+// follows what makes it: louder as that comes nearer, and from the side
+// it is on then.
+//
+// (Not here: the music, which the WAD has as notes for a synthesizer.)
+import files
+import sound
+import wad
+import fixed
+import level
+import things
+import play
+import enemy
+import sounds
+
+// The sounds by their numbers: the lump each is in, and how much it
+// matters, the less the more (S_sfx).
+table sfxinfo { name: text[8], priority: i32 } = [
+  { name: "DSNONE", priority: 0 },
+  { name: "DSPISTOL", priority: 64 },
+  { name: "DSSHOTGN", priority: 64 },
+  { name: "DSSGCOCK", priority: 64 },
+  { name: "DSDSHTGN", priority: 64 },
+  { name: "DSDBOPN", priority: 64 },
+  { name: "DSDBCLS", priority: 64 },
+  { name: "DSDBLOAD", priority: 64 },
+  { name: "DSPLASMA", priority: 64 },
+  { name: "DSBFG", priority: 64 },
+  { name: "DSSAWUP", priority: 64 },
+  { name: "DSSAWIDL", priority: 118 },
+  { name: "DSSAWFUL", priority: 64 },
+  { name: "DSSAWHIT", priority: 64 },
+  { name: "DSRLAUNC", priority: 64 },
+  { name: "DSRXPLOD", priority: 70 },
+  { name: "DSFIRSHT", priority: 70 },
+  { name: "DSFIRXPL", priority: 70 },
+  { name: "DSPSTART", priority: 100 },
+  { name: "DSPSTOP", priority: 100 },
+  { name: "DSDOROPN", priority: 100 },
+  { name: "DSDORCLS", priority: 100 },
+  { name: "DSSTNMOV", priority: 119 },
+  { name: "DSSWTCHN", priority: 78 },
+  { name: "DSSWTCHX", priority: 78 },
+  { name: "DSPLPAIN", priority: 96 },
+  { name: "DSDMPAIN", priority: 96 },
+  { name: "DSPOPAIN", priority: 96 },
+  { name: "DSVIPAIN", priority: 96 },
+  { name: "DSMNPAIN", priority: 96 },
+  { name: "DSPEPAIN", priority: 96 },
+  { name: "DSSLOP", priority: 78 },
+  { name: "DSITEMUP", priority: 78 },
+  { name: "DSWPNUP", priority: 78 },
+  { name: "DSOOF", priority: 96 },
+  { name: "DSTELEPT", priority: 32 },
+  { name: "DSPOSIT1", priority: 98 },
+  { name: "DSPOSIT2", priority: 98 },
+  { name: "DSPOSIT3", priority: 98 },
+  { name: "DSBGSIT1", priority: 98 },
+  { name: "DSBGSIT2", priority: 98 },
+  { name: "DSSGTSIT", priority: 98 },
+  { name: "DSCACSIT", priority: 98 },
+  { name: "DSBRSSIT", priority: 94 },
+  { name: "DSCYBSIT", priority: 92 },
+  { name: "DSSPISIT", priority: 90 },
+  { name: "DSBSPSIT", priority: 90 },
+  { name: "DSKNTSIT", priority: 90 },
+  { name: "DSVILSIT", priority: 90 },
+  { name: "DSMANSIT", priority: 90 },
+  { name: "DSPESIT", priority: 90 },
+  { name: "DSSKLATK", priority: 70 },
+  { name: "DSSGTATK", priority: 70 },
+  { name: "DSSKEPCH", priority: 70 },
+  { name: "DSVILATK", priority: 70 },
+  { name: "DSCLAW", priority: 70 },
+  { name: "DSSKESWG", priority: 70 },
+  { name: "DSPLDETH", priority: 32 },
+  { name: "DSPDIEHI", priority: 32 },
+  { name: "DSPODTH1", priority: 70 },
+  { name: "DSPODTH2", priority: 70 },
+  { name: "DSPODTH3", priority: 70 },
+  { name: "DSBGDTH1", priority: 70 },
+  { name: "DSBGDTH2", priority: 70 },
+  { name: "DSSGTDTH", priority: 70 },
+  { name: "DSCACDTH", priority: 70 },
+  { name: "DSSKLDTH", priority: 70 },
+  { name: "DSBRSDTH", priority: 32 },
+  { name: "DSCYBDTH", priority: 32 },
+  { name: "DSSPIDTH", priority: 32 },
+  { name: "DSBSPDTH", priority: 32 },
+  { name: "DSVILDTH", priority: 32 },
+  { name: "DSKNTDTH", priority: 32 },
+  { name: "DSPEDTH", priority: 32 },
+  { name: "DSSKEDTH", priority: 32 },
+  { name: "DSPOSACT", priority: 120 },
+  { name: "DSBGACT", priority: 120 },
+  { name: "DSDMACT", priority: 120 },
+  { name: "DSBSPACT", priority: 100 },
+  { name: "DSBSPWLK", priority: 100 },
+  { name: "DSVILACT", priority: 100 },
+  { name: "DSNOWAY", priority: 78 },
+  { name: "DSBAREXP", priority: 60 },
+  { name: "DSPUNCH", priority: 64 },
+  { name: "DSHOOF", priority: 70 },
+  { name: "DSMETAL", priority: 70 },
+  { name: "DSCHGUN", priority: 64 },
+  { name: "DSTINK", priority: 60 },
+  { name: "DSBDOPN", priority: 100 },
+  { name: "DSBDCLS", priority: 100 },
+  { name: "DSITMBK", priority: 100 },
+  { name: "DSFLAME", priority: 32 },
+  { name: "DSFLAMST", priority: 32 },
+  { name: "DSGETPOW", priority: 60 },
+  { name: "DSBOSPIT", priority: 70 },
+  { name: "DSBOSCUB", priority: 70 },
+  { name: "DSBOSSIT", priority: 70 },
+  { name: "DSBOSPN", priority: 70 },
+  { name: "DSBOSDTH", priority: 70 },
+  { name: "DSMANATK", priority: 70 },
+  { name: "DSMANDTH", priority: 70 },
+  { name: "DSSSSIT", priority: 70 },
+  { name: "DSSSDTH", priority: 70 },
+  { name: "DSKEENPN", priority: 70 },
+  { name: "DSKEENDT", priority: 70 },
+  { name: "DSSKEACT", priority: 70 },
+  { name: "DSSKESIT", priority: 70 },
+  { name: "DSSKEATK", priority: 70 },
+  { name: "DSRADIO", priority: 60 }
+]
+
+// Where each sound's samples are in the WAD, how many, and how many of
+// them a second; no samples where the WAD has no such lump.
+buffer Sfxdata { at: i32, count: i32, rate: i32 } capacity 128
+
+// The eight places a sound is heard in: which sound (0: none), and what
+// makes it (as in `Sounds`).
+buffer Channels { sfx: i32, origin: i32 } capacity 8
+const NUMCHANNELS = 8
+
+// The lumps of the sounds are found: after the header of eight bytes,
+// sixteen bytes at either end that are not played. After `load_wad`.
+system init_audio() {
+  Sfxdata = []
+  for i in 0..len(sfxinfo) {
+    let lump = if i == 0 { -1 } else { lump_number(Lumps, lump_name(sfxinfo[i].name)) }
+    if lump >= 0 && Lumps[lump].size > 40 && ushort_at(Bytes, Lumps[lump].at) == 3 {
+      Sfxdata += {
+        at: Lumps[lump].at + 24,
+        count: min(long_at(Bytes, Lumps[lump].at + 4), Lumps[lump].size - 8) - 32,
+        rate: ushort_at(Bytes, Lumps[lump].at + 2)
+      }
+    } else {
+      Sfxdata += { at: 0, count: 0, rate: 0 }
+    }
+  }
+  Channels = [{ sfx: 0, origin: 0 }; 8]
+}
+
+// A level's sounds end with it (S_Start).
+system quiet() {
+  for c in 0..NUMCHANNELS {
+    voice_stop(c)
+    Channels[c].sfx = 0
+  }
+}
+
+// How loud (0 to 1) and from which side (-1 to 1) the device is to
+// play what the game has as 0 to 127 and 0 to 255.
+fn device_volume(volume: i32, loud: f32) -> f32 { (volume as f32) / 127.0 * loud }
+fn device_side(sep: i32) -> f32 { ((sep - NORM_SEP) as f32) / 128.0 }
+
+// The sounds that go on follow what makes them, and those that are over
+// or too far away now leave their places (S_UpdateSounds); a thing that
+// is no more takes its sound with it (P_RemoveMobj).
+proc update_channels(things: Mobj, player: entity, sectors: Sectors,
+                     channels: mut Channels, map: i32, loud: f32) {
+  for c in 0..NUMCHANNELS {
+    if channels[c].sfx != 0 {
+      let origin = channels[c].origin
+      var on = voice_on(c)
+      if on && origin != 0 && origin != things[player].id {
+        var x = 0
+        var y = 0
+        if origin < 0 {
+          x = sectors[-1 - origin].soundx
+          y = sectors[-1 - origin].soundy
+        } else {
+          let it = thing_by_id(things, origin)
+          on = there(things, it) && !things[it].gone
+          x = things[it].x
+          y = things[it].y
+        }
+        if on {
+          let volume = heard_volume(x, y, things[player].x, things[player].y, map)
+          if volume > 0 {
+            voice_set(c, device_volume(volume, loud),
+                      device_side(heard_sep(x, y, things[player].x, things[player].y,
+                                            things[player].angle)))
+          } else {
+            on = false
+          }
+        }
+      }
+      if !on {
+        voice_stop(c)
+        channels[c].sfx = 0
+      }
+    }
+  }
+}
+
+// The tic's sounds are started (the end of S_StartSound: S_StopSound,
+// S_GetChannel).
+proc start_channels(sounds: Sounds, data: Sfxdata, bytes: Bytes,
+                    channels: mut Channels, loud: f32) {
+  for s in 0..len(sounds) {
+    let sfx = sounds[s].sfx
+    let origin = sounds[s].origin
+    // (What made a sound before makes this one instead.)
+    if origin != 0 {
+      for c in 0..NUMCHANNELS {
+        if channels[c].sfx != 0 && channels[c].origin == origin {
+          voice_stop(c)
+          channels[c].sfx = 0
+        }
+      }
+    }
+    // A free place, or the place of one that matters no more.
+    var place = -1
+    for c in 0..NUMCHANNELS {
+      if place < 0 && channels[c].sfx == 0 { place = c }
+    }
+    if place < 0 {
+      for c in 0..NUMCHANNELS {
+        if place < 0 && sfxinfo[channels[c].sfx].priority >= sfxinfo[sfx].priority {
+          place = c
+        }
+      }
+    }
+    if place >= 0 && data[sfx].count > 0 {
+      channels[place].sfx = sfx
+      channels[place].origin = origin
+      voice(place, bytes, data[sfx].at, data[sfx].count, data[sfx].rate,
+            device_volume(sounds[s].volume, loud), device_side(sounds[s].sep))
+    }
+  }
+}
+
+// What is heard of a tic: after everything that starts a sound.
+system hear() {
+  let loud = if Sound.off { 0.0 } else { Sound.volume }
+  update_channels(Mobj, Spawned.player, Sectors, Channels, Level.map, loud)
+  start_channels(Sounds, Sfxdata, Bytes, Channels, loud)
+}
