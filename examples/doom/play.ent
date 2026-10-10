@@ -34,6 +34,8 @@ import items
 
 // The tic of the level that is played, counted from when it started.
 unique Clock { leveltime: i32 }
+// What the player takes to the next level of itself: its health.
+unique Kept { health: i32 }
 
 const VIEWHEIGHT = 41 * FRACUNIT
 const MAXBOB = 0x100000
@@ -631,11 +633,15 @@ proc player_think(things: mut Mobj, me: entity, pl: mut Pl, leveltime: i32) {
 
 // What the player and the checking of places start with, after
 // `spawn_things`.
-system start_player() {
+// (`fresh`: a new game, or the level again after a death: with the
+// pistol and fifty bullets. Else the player comes from the level before
+// with what it had, but the keys and the powers.)
+system start_player(fresh: bool) {
   Pl = [{
     viewz: Spawned.playerz + VIEWHEIGHT, viewheight: VIEWHEIGHT,
-    deltaviewheight: 0, bob: 0, usedown: false, forwardmove: 0, sidemove: 0,
-    angleturn: 0, buttons: 0, attackdown: false, refire: 0, extralight: 0,
+    // (The keys count as down, so that nothing is done at once.)
+    deltaviewheight: 0, bob: 0, usedown: true, forwardmove: 0, sidemove: 0,
+    angleturn: 0, buttons: 0, attackdown: true, refire: 0, extralight: 0,
     dead: false
   }; 1]
   Tm = [{
@@ -643,17 +649,26 @@ system start_player() {
     bestslidefrac: 0, bestslideline: 0, links: Spawned.links, hit: 0,
     overslope: 0, overset: false
   }; 1]
-  // G_PlayerReborn: a pistol, fifty bullets and two fists.
-  Inv = [{
-    armorpoints: 0, armortype: 0, weapons: 1 << WP_FIST | 1 << WP_PISTOL,
-    cards: 0, backpack: false, readyweapon: WP_PISTOL,
-    pendingweapon: WP_NOCHANGE, itemcount: 0, bonuscount: 0, attacker: 0
-  }; 1]
-  Ammo = []
-  Ammo += { count: 50, most: 200 }
-  Ammo += { count: 0, most: 50 }
-  Ammo += { count: 0, most: 300 }
-  Ammo += { count: 0, most: 50 }
+  if fresh {
+    // G_PlayerReborn: a pistol, fifty bullets and two fists.
+    Inv = [{
+      armorpoints: 0, armortype: 0, weapons: 1 << WP_FIST | 1 << WP_PISTOL,
+      cards: 0, backpack: false, readyweapon: WP_PISTOL,
+      pendingweapon: WP_NOCHANGE, itemcount: 0, bonuscount: 0, attacker: 0
+    }; 1]
+    Ammo = []
+    Ammo += { count: 50, most: 200 }
+    Ammo += { count: 0, most: 50 }
+    Ammo += { count: 0, most: 300 }
+    Ammo += { count: 0, most: 50 }
+  } else {
+    // (G_PlayerFinishLevel.)
+    Inv[0].cards = 0
+    Inv[0].pendingweapon = WP_NOCHANGE
+    Inv[0].bonuscount = 0
+    Inv[0].attacker = 0
+    for m: mut Mobj where m.type == MT_PLAYER { m.health = Kept.health }
+  }
   Powers = [{ tics: 0 }; 6]
 }
 

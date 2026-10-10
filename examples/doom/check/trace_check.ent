@@ -105,7 +105,7 @@ schedule setup() {
   load_level()
   spawn_things()
   spawn_specials()
-  start_player()
+  start_player(true)
   start_weapon()
   trace()
   first()
@@ -123,7 +123,21 @@ schedule tic() {
   trace()
   next()
 }
+// The level again, after the player's death.
+schedule again() run_if Level.reborn {
+  leave_level()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  start_player(true)
+  start_weapon()
+  trace()
+  arrive()
+}
 main {
   setup()
-  loop { tic() } until Clock.leveltime == Tics || Demo.over || Level.exited
+  loop {
+    tic()
+    again()
+  } until Clock.leveltime == Tics || Demo.over || Level.exited
 }

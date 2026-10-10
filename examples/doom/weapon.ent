@@ -477,6 +477,8 @@ system player_sector() {
     Pl[0].viewheight = max(Pl[0].viewheight - FRACUNIT, 6 * FRACUNIT)
     Pl[0].deltaviewheight = 0
     Pl[0].viewz = min(m.z + Pl[0].viewheight, m.ceilingz - 4 * FRACUNIT)
+    // (The use key: again from the start of the level.)
+    if Pl[0].buttons & BT_USE != 0 { Level.reborn = true }
     let me = m.id
     var found = false
     var ax = 0

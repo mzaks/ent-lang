@@ -92,7 +92,7 @@ schedule setup() {
   load_level()
   spawn_things()
   spawn_specials()
-  start_player()
+  start_player(true)
   start_weapon()
   fit_automap()
   set_view_size()
@@ -122,7 +122,23 @@ schedule frame() {
   present()
 }
 
+// The next level, or the same again after the player's death.
+schedule again() run_if Level.exited || Level.reborn {
+  leave_level()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  start_player(true) run_if Level.reborn
+  start_player(false) run_if Level.exited
+  start_weapon()
+  fit_automap()
+  arrive()
+}
+
 main {
   setup()
-  loop { frame() } until Window.closed
+  loop {
+    frame()
+    again()
+  } until Window.closed
 }

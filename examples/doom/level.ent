@@ -45,10 +45,12 @@ const ML_MAPPED = 256
 // The level to load, and what loading it found: the lump that names it
 // (-1: there is no such level). `skill` is how hard the game is, 0 to 4
 // (2 is "Hurt me plenty"): it says which things are there; with
-// `nomonsters` none of them is a monster.
+// `nomonsters` none of them is a monster. `exited`: the player has left
+// it (`secret`: by the secret way out); `reborn`: the player, dead,
+// wants it started again.
 unique Level {
   episode: i32, map: i32, lump: i32, skill: i32, nomonsters: bool,
-  exited: bool, secret: bool
+  exited: bool, secret: bool, reborn: bool
 }
 
 // The corners of the level's lines.

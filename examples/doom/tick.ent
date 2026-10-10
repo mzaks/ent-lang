@@ -89,3 +89,34 @@ system run_movers() {
   Random.play = Rnd[0].play
   for e, m: Mobj where m.gone { e.destroy() }
 }
+
+// The level is left, by a way out or because the player, dead, wants it
+// again (G_DoCompleted, G_DoReborn): its things are no more, and the
+// level that is loaded next is the one after it (the ninth after the
+// third by the secret way out, and the fourth after the ninth), or the
+// same. Before `load_level` and what sets a level up.
+system leave_level() {
+  for m: Mobj where m.type == MT_PLAYER { Kept.health = m.health }
+  for e with Mobj { e.destroy() }
+  Triggered = []
+  if Level.exited {
+    Level.map = if Level.secret {
+      9
+    } else if Level.map == 9 {
+      4
+    } else if Level.map == 8 {
+      1
+    } else {
+      Level.map + 1
+    }
+  }
+  Clock.leveltime = -1
+}
+
+// The level that was loaded is the one played from here on.
+system arrive() {
+  Level.exited = false
+  Level.secret = false
+  Level.reborn = false
+  Clock.leveltime = 0
+}
