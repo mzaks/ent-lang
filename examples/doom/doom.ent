@@ -30,6 +30,7 @@ import enemy
 import weapon
 import movers
 import tick
+import sounds
 import screen
 
 // As many bytes as the biggest WAD.
@@ -112,6 +113,7 @@ schedule setup() {
 schedule frame() {
   begin()
   read_keys()
+  begin_sounds()
   think_player()
   player_sector()
   use_lines()
@@ -122,6 +124,7 @@ schedule frame() {
   think_things(true)
   run_movers()
   update_specials()
+  update_buttons()
   tick_status()
   look()
   clear_screen()

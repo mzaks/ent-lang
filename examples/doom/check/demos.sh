@@ -7,7 +7,8 @@
 # DUMP=tic: what differs of the things at that tic too; with ALL=1, of
 # what the trace's hash leaves out as well (flags, the way a monster
 # walks, how fast a thing moves, its floor and ceiling). TICS=n: no
-# more than n tics of the port.
+# more than n tics of the port. The sounds that are heard are compared
+# as well.
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 doom=$root/build/doom
@@ -35,7 +36,8 @@ for lump in range(count):
 open(sys.argv[3], "wb").write(wad + demo)
 END
   (cd "$run/$name" && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
-    DOOM_TRACE="$run/$name/trace" DOOM_DUMP=${DUMP:--9} \
+    DOOM_TRACE="$run/$name/trace" DOOM_SOUNDS="$run/$name/sounds" \
+    DOOM_DUMP=${DUMP:--9} \
     DOOM_DUMPFILE="$run/$name/refdump" DOOM_DUMPALL=$all \
     "$doom/ref/build/src/chocolate-doom" -iwad "$doom/wad/doom1.wad" \
       -timedemo "$name" -nosound -nodraw > /dev/null 2>&1 || true)
@@ -43,10 +45,26 @@ END
     "$here/trace_check.ent" > "$run/$name/check.ent"
   (cd "$run/$name" && ENT_BIN=${ENT_BIN:-$root/build/bin} python3 "$root/tools/ent" \
     run -I "$here/.." "$run/$name/check.ent" 2>&1) > "$run/$name/out"
-  grep -v '^thing \|^more \|^also \|^last ' "$run/$name/out" > "$run/$name/port"
+  grep -v '^thing \|^more \|^also \|^last \|^sound ' "$run/$name/out" > "$run/$name/port"
+  # (The sounds of a tic in one order for both: the port starts some
+  # later in a tic than the reference: what the player picks up, and
+  # what a line that is walked over starts.)
+  sed -n 's/^sound //p' "$run/$name/out" | sort -s -n -k1,1 -k2,2 -k3,3 -k4,4 > "$run/$name/portsounds"
+  sort -s -n -k1,1 -k2,2 -k3,3 -k4,4 "$run/$name/sounds" > "$run/$name/sounds.sorted"
+  mv "$run/$name/sounds.sorted" "$run/$name/sounds"
   echo "$name ($(wc -l < "$run/$name/trace") tics):"
   python3 "$here/../reference/compare.py" "$run/$name/trace" "$run/$name/port" |
     sed 's/^/  /' | head -6
+  # (The sounds that are heard, each with its tic, how loud and from
+  # which side. Without TICS, which stops the port early.)
+  if [ -z "$TICS" ]; then
+    if cmp -s "$run/$name/sounds" "$run/$name/portsounds"; then
+      echo "  the same: $(wc -l < "$run/$name/sounds") sounds"
+    else
+      echo "  sounds differ (the reference's <, the port's >):"
+      diff "$run/$name/sounds" "$run/$name/portsounds" | sed 's/^/    /' | head -${LINES:-8}
+    fi
+  fi
   if [ -n "$DUMP" ]; then
     sed -n "s/^$lines //p" "$run/$name/out" > "$run/$name/portdump"
     if [ -n "$all" ]; then

@@ -380,9 +380,10 @@ buffer Switches { texture: i32 } capacity 64
 
 // A switch that was used shows its other texture, and one that can be
 // used again goes back after a second (P_ChangeSwitchTexture,
-// P_StartButton); one that cannot is no switch any more.
+// P_StartButton); one that cannot is no switch any more. Whether it
+// has a switch's texture at all.
 proc change_switch(lines: mut Lines, sides: mut Sides, switches: Switches,
-                   buttons: mut Buttons, line: i32, again: bool) {
+                   buttons: mut Buttons, line: i32, again: bool) -> bool {
   if !again { lines[line].special = 0 }
   let side = lines[line].front
   var where = -1
@@ -418,6 +419,7 @@ proc change_switch(lines: mut Lines, sides: mut Sides, switches: Switches,
       buttons[free].timer = BUTTONTIME
     }
   }
+  where >= 0
 }
 
 // The rows of pictures that move and the switches are found
@@ -451,8 +453,8 @@ system init_specials() {
 }
 
 // What a level's pictures do in a tic (P_UpdateSpecials): those that
-// move show the next of their row every eight tics, a wall that slides
-// slides on, and a switch that goes back does when its time is up.
+// move show the next of their row every eight tics, and a wall that
+// slides slides on. (The switches that go back: `update_buttons`.)
 // After the things have had their tic.
 system update_specials() {
   for a in 0..len(Anims) {
@@ -469,20 +471,5 @@ system update_specials() {
   }
   for i in 0..len(Scrollers) {
     Sides[Scrollers[i].side].textureoffset += FRACUNIT
-  }
-  for i in 0..len(Buttons) {
-    if Buttons[i].timer != 0 {
-      Buttons[i].timer -= 1
-      if Buttons[i].timer == 0 {
-        let side = Lines[Buttons[i].line].front
-        if Buttons[i].where == 0 {
-          Sides[side].toptexture = Buttons[i].texture
-        } else if Buttons[i].where == 1 {
-          Sides[side].midtexture = Buttons[i].texture
-        } else {
-          Sides[side].bottomtexture = Buttons[i].texture
-        }
-      }
-    }
   }
 }

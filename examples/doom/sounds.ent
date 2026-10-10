@@ -1,0 +1,217 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The sounds of a tic (s_sound.c): what starts one says so here, and
+// what is heard of it is worked out at once, since each sound that is
+// heard draws a number (for its pitch) from the numbers that everything
+// seen and heard shares: the face in the status bar follows them.
+import fixed
+import tables
+import angles
+import random
+
+// The sounds by their numbers (sfxenum_t).
+const SFX_PISTOL = 1
+const SFX_SHOTGN = 2
+const SFX_SGCOCK = 3
+const SFX_DSHTGN = 4
+const SFX_DBOPN = 5
+const SFX_DBCLS = 6
+const SFX_DBLOAD = 7
+const SFX_PLASMA = 8
+const SFX_BFG = 9
+const SFX_SAWUP = 10
+const SFX_SAWIDL = 11
+const SFX_SAWFUL = 12
+const SFX_SAWHIT = 13
+const SFX_RLAUNC = 14
+const SFX_RXPLOD = 15
+const SFX_FIRSHT = 16
+const SFX_FIRXPL = 17
+const SFX_PSTART = 18
+const SFX_PSTOP = 19
+const SFX_DOROPN = 20
+const SFX_DORCLS = 21
+const SFX_STNMOV = 22
+const SFX_SWTCHN = 23
+const SFX_SWTCHX = 24
+const SFX_PLPAIN = 25
+const SFX_DMPAIN = 26
+const SFX_POPAIN = 27
+const SFX_VIPAIN = 28
+const SFX_MNPAIN = 29
+const SFX_PEPAIN = 30
+const SFX_SLOP = 31
+const SFX_ITEMUP = 32
+const SFX_WPNUP = 33
+const SFX_OOF = 34
+const SFX_TELEPT = 35
+const SFX_POSIT1 = 36
+const SFX_POSIT2 = 37
+const SFX_POSIT3 = 38
+const SFX_BGSIT1 = 39
+const SFX_BGSIT2 = 40
+const SFX_SGTSIT = 41
+const SFX_CACSIT = 42
+const SFX_BRSSIT = 43
+const SFX_CYBSIT = 44
+const SFX_SPISIT = 45
+const SFX_BSPSIT = 46
+const SFX_KNTSIT = 47
+const SFX_VILSIT = 48
+const SFX_MANSIT = 49
+const SFX_PESIT = 50
+const SFX_SKLATK = 51
+const SFX_SGTATK = 52
+const SFX_SKEPCH = 53
+const SFX_VILATK = 54
+const SFX_CLAW = 55
+const SFX_SKESWG = 56
+const SFX_PLDETH = 57
+const SFX_PDIEHI = 58
+const SFX_PODTH1 = 59
+const SFX_PODTH2 = 60
+const SFX_PODTH3 = 61
+const SFX_BGDTH1 = 62
+const SFX_BGDTH2 = 63
+const SFX_SGTDTH = 64
+const SFX_CACDTH = 65
+const SFX_SKLDTH = 66
+const SFX_BRSDTH = 67
+const SFX_CYBDTH = 68
+const SFX_SPIDTH = 69
+const SFX_BSPDTH = 70
+const SFX_VILDTH = 71
+const SFX_KNTDTH = 72
+const SFX_PEDTH = 73
+const SFX_SKEDTH = 74
+const SFX_POSACT = 75
+const SFX_BGACT = 76
+const SFX_DMACT = 77
+const SFX_BSPACT = 78
+const SFX_BSPWLK = 79
+const SFX_VILACT = 80
+const SFX_NOWAY = 81
+const SFX_BAREXP = 82
+const SFX_PUNCH = 83
+const SFX_HOOF = 84
+const SFX_METAL = 85
+const SFX_CHGUN = 86
+const SFX_TINK = 87
+const SFX_BDOPN = 88
+const SFX_BDCLS = 89
+const SFX_ITMBK = 90
+const SFX_FLAME = 91
+const SFX_FLAMST = 92
+const SFX_GETPOW = 93
+const SFX_BOSPIT = 94
+const SFX_BOSCUB = 95
+const SFX_BOSSIT = 96
+const SFX_BOSPN = 97
+const SFX_BOSDTH = 98
+const SFX_MANATK = 99
+const SFX_MANDTH = 100
+const SFX_SSSIT = 101
+const SFX_SSDTH = 102
+const SFX_KEENPN = 103
+const SFX_KEENDT = 104
+const SFX_SKEACT = 105
+const SFX_SKESIT = 106
+const SFX_SKEATK = 107
+const SFX_RADIO = 108
+
+// The sounds that were started in this tic and are heard: how loud (0
+// to 127), from which side (0 the left, 128 the middle, 255 the right),
+// how high (128 as it is), and what made it: a thing's number, a
+// sector's as -1 less its number, or 0 nothing that has a place.
+buffer Sounds {
+  sfx: i32, volume: i32, sep: i32, pitch: i32, origin: i32
+} capacity 256
+
+// How loud sounds are at their loudest: the volume 8 of 15 that the game
+// starts with (snd_SfxVolume). What is too far to be heard depends on
+// it, so it is the same for every player here; what plays the sounds
+// may make them louder or quieter after.
+const SFX_VOLUME = 64
+const S_CLIPPING_DIST = 1200 * FRACUNIT
+const S_CLOSE_DIST = 200 * FRACUNIT
+const S_ATTENUATOR = 1000
+const S_STEREO_SWING = 96 * FRACUNIT
+const NORM_SEP = 128
+const NORM_PITCH = 127
+
+// The next of the numbers for what is seen and heard (M_Random).
+proc m_random(rnd: mut Rnd) -> i32 {
+  rnd[0].other = random_after(rnd[0].other)
+  random_at(rnd[0].other)
+}
+
+// A sound that is heard: its pitch is drawn (the saw's less far from its
+// own than the others'; picking something up and a bullet on a wall
+// sound always the same).
+proc heard(sounds: mut Sounds, rnd: mut Rnd, sfx: i32, volume: i32, sep: i32,
+           origin: i32) {
+  var pitch = NORM_PITCH
+  if sfx >= SFX_SAWUP && sfx <= SFX_SAWHIT {
+    pitch += 8 - (m_random(rnd) & 15)
+  } else if sfx != SFX_ITEMUP && sfx != SFX_TINK {
+    pitch += 16 - (m_random(rnd) & 31)
+  }
+  if len(sounds) < 256 {
+    sounds += {
+      sfx: sfx, volume: volume, sep: sep, pitch: max(min(pitch, 255), 0),
+      origin: origin
+    }
+  }
+}
+
+// A sound from nowhere, or the listener's own: as loud as can be, in
+// the middle.
+proc sound(sounds: mut Sounds, rnd: mut Rnd, sfx: i32, origin: i32) {
+  heard(sounds, rnd, sfx, SFX_VOLUME, NORM_SEP, origin)
+}
+
+// A sound from a place, for a listener at (lx, ly) who looks along
+// `langle` (S_AdjustSoundParams): quieter the farther, and none beyond
+// 1200 units, but on the eighth level, where everything is heard; from
+// the side it comes from.
+proc sound_from(sounds: mut Sounds, rnd: mut Rnd, sfx: i32, origin: i32,
+                x: i32, y: i32, lx: i32, ly: i32, langle: u32, map: i32) {
+  let adx = abs(lx - x)
+  let ady = abs(ly - y)
+  var dist = adx + ady - (min(adx, ady) >> 1)
+  if map == 8 || dist <= S_CLIPPING_DIST {
+    var angle = point_to_angle(x - lx, y - ly)
+    angle = if angle > langle {
+      angle - langle
+    } else {
+      angle + (0xffffffff - langle)
+    }
+    let fine = (angle >> ANGLETOFINESHIFT) as i32
+    var sep = NORM_SEP - (fixed_mul(S_STEREO_SWING, finesine[fine]) >> FRACBITS)
+    if x == lx && y == ly { sep = NORM_SEP }
+    var volume = SFX_VOLUME
+    if dist >= S_CLOSE_DIST {
+      if map == 8 {
+        dist min= S_CLIPPING_DIST
+        volume = 15 + (SFX_VOLUME - 15) * ((S_CLIPPING_DIST - dist) >> FRACBITS) / S_ATTENUATOR
+      } else {
+        volume = SFX_VOLUME * ((S_CLIPPING_DIST - dist) >> FRACBITS) / S_ATTENUATOR
+      }
+    }
+    if volume > 0 { heard(sounds, rnd, sfx, volume, sep, origin) }
+  }
+}
+
+// No sound yet: before everything else of a tic.
+system begin_sounds() { Sounds = [] }

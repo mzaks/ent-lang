@@ -22,6 +22,7 @@ import enemy
 import weapon
 import movers
 import tick
+import sounds
 
 capacity Bytes 16777216
 
@@ -61,6 +62,14 @@ system begin_level() {
   Random.play = 0
   Random.other = 0
   Clock.leveltime = -1
+}
+
+// The sounds of the tic that are heard, a line each, as the reference
+// writes them with DOOM_SOUNDS.
+system say_sounds() {
+  for i in 0..len(Sounds) {
+    put("sound {Clock.leveltime} {Sounds[i].sfx} {Sounds[i].volume} {Sounds[i].sep}")
+  }
 }
 
 system trace() {
@@ -112,6 +121,7 @@ schedule setup() {
   first()
 }
 schedule tic() {
+  begin_sounds()
   think_player()
   player_sector()
   use_lines()
@@ -122,6 +132,8 @@ schedule tic() {
   think_things(true)
   run_movers()
   update_specials()
+  update_buttons()
+  say_sounds()
   trace()
   next()
 }

@@ -33,6 +33,7 @@ import play
 import enemy
 import weapon
 import movers
+import sounds
 
 // A tic of every thing, in the order they were made in (P_RunThinkers).
 // What is no more (picked up, or at the end of its states) is gone for
@@ -50,30 +51,32 @@ system think_things(late: bool) {
             (m.tics != -1 || m.momx != 0 || m.momy != 0 || m.momz != 0 ||
              m.z != m.floorz) {
     Touched = []
-    Rnd = [{ play: Random.play }; 1]
+    Rnd = [{ play: Random.play, other: Random.other }; 1]
     // (What moves a sector and was made before this thing, first.)
     if late {
       movers_before(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
                     Nearorder, Tm, Spechit, Touched, Triggered, Intercepts,
-                    Sight, Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player,
+                    Sight, Rnd, Inv, Powers, Env, Blast, Sounds, Mobj, Spawned.player,
                     Movers, m.id)
     }
     thing_tic(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
               Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
-              Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player, e, Pl)
+              Rnd, Inv, Powers, Env, Blast, Sounds, Mobj, Spawned.player, e, Pl)
     // (The lines it set off, at once.)
     if len(Triggered) != 0 {
       let out = work_lines(Triggered, Lines, Sectors, Movers, Lights, Inv, Tm,
-                           Rnd, Sides, Switches, Buttons)
+                           Rnd, Sides, Switches, Buttons, Mobj, Spawned.player,
+                           Env, Sounds)
       if out != 0 {
         Level.exited = true
         Level.secret = out == 2
       }
     }
-    Random.play = Rnd[0].play
     if m.type == MT_PLAYER {
-      pick_up(Mobj, e, Touched, Inv, Ammo, Powers, Level.skill)
+      pick_up(Mobj, e, Touched, Inv, Ammo, Powers, Level.skill, Sounds, Rnd)
     }
+    Random.play = Rnd[0].play
+    Random.other = Rnd[0].other
   }
   for e, m: Mobj where m.gone { e.destroy() }
 }
@@ -81,12 +84,13 @@ system think_things(late: bool) {
 // What moves sectors and has not had its tic among the things has it
 // now: those made after the last thing.
 system run_movers() {
-  Rnd = [{ play: Random.play }; 1]
+  Rnd = [{ play: Random.play, other: Random.other }; 1]
   movers_before(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
                 Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
-                Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player, Movers,
+                Rnd, Inv, Powers, Env, Blast, Sounds, Mobj, Spawned.player, Movers,
                 0x7fffffff)
   Random.play = Rnd[0].play
+  Random.other = Rnd[0].other
   for e, m: Mobj where m.gone { e.destroy() }
 }
 

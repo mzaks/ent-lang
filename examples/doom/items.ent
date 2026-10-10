@@ -17,6 +17,8 @@
 import fixed
 import info
 import things
+import random
+import sounds
 
 // What the player has, one row: armour, the weapons owned and the keys
 // (a bit for each), the weapon in hand and the one that is coming up,
@@ -187,7 +189,8 @@ proc give_power(things: mut Mobj, me: entity, powers: mut Powers, power: i32) ->
 // if it is within reach and of use, the player has it and the thing is
 // gone (P_TouchSpecialThing).
 proc touch_special(things: mut Mobj, me: entity, it: entity, inv: mut Inv,
-                   ammo: mut Ammo, powers: mut Powers, z: i32, skill: i32) {
+                   ammo: mut Ammo, powers: mut Powers, z: i32, skill: i32,
+                   sounds: mut Sounds, rnd: mut Rnd) {
   let delta = things[it].z - z
   if !things[it].gone && delta <= things[me].height && delta >= -8 * FRACUNIT &&
      things[me].health > 0 {
@@ -290,6 +293,17 @@ proc touch_special(things: mut Mobj, me: entity, it: entity, inv: mut Inv,
       if things[it].flags & MF_COUNTITEM != 0 { inv[0].itemcount += 1 }
       things[it].gone = true
       inv[0].bonuscount += BONUSADD
+      // (Heard as it is, wherever it was: a weapon, something that
+      // gives a power, or anything else.)
+      let weapon = sprite == SPR_BFUG || sprite == SPR_MGUN || sprite == SPR_CSAW ||
+                   sprite == SPR_LAUN || sprite == SPR_PLAS || sprite == SPR_SHOT ||
+                   sprite == SPR_SGN2
+      let power = sprite == SPR_SOUL || sprite == SPR_MEGA || sprite == SPR_PINV ||
+                  sprite == SPR_PSTR || sprite == SPR_PINS || sprite == SPR_SUIT ||
+                  sprite == SPR_PMAP || sprite == SPR_PVIS
+      sound(sounds, rnd,
+            if weapon { SFX_WPNUP } else if power { SFX_GETPOW } else { SFX_ITEMUP },
+            0)
     }
   }
 }

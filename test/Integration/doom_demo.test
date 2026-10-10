@@ -17,12 +17,21 @@
 // RUN: cd %t && %ent run -I %S/../../examples/doom %t/demo1.ent > %t/demo1.port
 // RUN: cd %t && %ent run -I %S/../../examples/doom %t/demo2.ent > %t/demo2.port
 // RUN: cd %t && %ent run -I %S/../../examples/doom %t/demo3.ent > %t/demo3.port
-// RUN: tail -1 %t/demo1.port | FileCheck %s --check-prefix=ONE
-// RUN: tail -1 %t/demo2.port | FileCheck %s --check-prefix=TWO
-// RUN: tail -1 %t/demo3.port | FileCheck %s --check-prefix=THREE
-// RUN: wc -l < %t/demo1.port | FileCheck %s --check-prefix=TICS
+// RUN: grep -v '^sound ' %t/demo1.port | tail -1 | FileCheck %s --check-prefix=ONE
+// RUN: grep -v '^sound ' %t/demo2.port | tail -1 | FileCheck %s --check-prefix=TWO
+// RUN: grep -v '^sound ' %t/demo3.port | tail -1 | FileCheck %s --check-prefix=THREE
+// RUN: grep -vc '^sound ' %t/demo1.port | FileCheck %s --check-prefix=TICS
+// The sounds that are heard, as many as the reference hears, and the last.
+// RUN: grep -c '^sound ' %t/demo1.port | FileCheck %s --check-prefix=HEARD1
+// RUN: grep -c '^sound ' %t/demo2.port | FileCheck %s --check-prefix=HEARD2
+// RUN: grep -c '^sound ' %t/demo3.port | FileCheck %s --check-prefix=HEARD3
+// RUN: grep '^sound ' %t/demo1.port | tail -1 | FileCheck %s --check-prefix=LAST
 
 // ONE: 1 5 5025 181 87385351 84364146 5767168 2514731840 0 198 2015001010
 // TWO: 1 3 3835 75 -9362093 -84944896 3145728 2688383391 0 280 4251420830
 // THREE: 1 7 2133 207 -91417116 -164628508 7340032 2593932736 0 254 4196538785
 // TICS: 5027
+// HEARD1: 750
+// HEARD2: 459
+// HEARD3: 295
+// LAST: sound 4979 57 64 128

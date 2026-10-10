@@ -78,8 +78,11 @@ buffer Touched { id: i32, z: i32 } capacity 1024
 // (`player`: by the player, not by a monster, which sets off less.)
 // (`shot`: by a shot that hit it. `boss`: no line, but the last of the
 // barons dead, which lowers the floors with the tag 666.)
+// (Where the listener was and looked then, for the sound of what the
+// line starts; `now`: where it is.)
 buffer Triggered {
-  line: i32, used: bool, side: i32, player: bool, shot: bool, boss: bool
+  line: i32, used: bool, side: i32, player: bool, shot: bool, boss: bool,
+  now: bool, lx: i32, ly: i32, langle: u32
 } capacity 256
 // (`thing`: the `id` of a thing a shot's path crosses; 0 for a line.)
 buffer Intercepts { frac: i32, line: i32, thing: i32 } capacity 2048

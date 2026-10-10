@@ -53,8 +53,8 @@ fn random_after(index: i32) -> i32 { (index + 1) & 0xff }
 fn random_at(index: i32) -> i32 { rndtable[index] as i32 }
 
 // Where the game is in them while a proc draws, which is given no unique:
-// one row, made of `Random.play` before and read back into it after.
-buffer Rnd { play: i32 } capacity 1
+// one row, made of `Random` before and read back into it after.
+buffer Rnd { play: i32, other: i32 } capacity 1
 
 // The next number, 0 to 255 (P_Random).
 proc p_random(rnd: mut Rnd) -> i32 {

@@ -68,7 +68,7 @@ buffer Sectors {
   floorheight: i32, ceilingheight: i32, floorpic: i32, ceilingpic: i32,
   lightlevel: i32, special: i32, tag: i32, specialdata: i32, bbtop: i32,
   bbbottom: i32, bbleft: i32, bbright: i32, validcount: i32,
-  soundtraversed: i32, soundtarget: i32
+  soundtraversed: i32, soundtarget: i32, soundx: i32, soundy: i32
 } capacity 4096
 // The widest a thing is, from its middle.
 const MAXRADIUS = 32 * FRACUNIT
@@ -210,7 +210,8 @@ system load_level() {
         lightlevel: short_at(Bytes, at + 20),
         special: short_at(Bytes, at + 22), tag: short_at(Bytes, at + 24),
         specialdata: 0, bbtop: 0, bbbottom: 0, bbleft: 0, bbright: 0,
-        validcount: 0, soundtraversed: 0, soundtarget: 0
+        validcount: 0, soundtraversed: 0, soundtarget: 0, soundx: 0,
+        soundy: 0
       }
     }
     // P_LoadSideDefs: 30 bytes each.
@@ -330,6 +331,9 @@ system load_level() {
           right max= Lines[l].right
         }
       }
+      // (And where its sounds come from: the middle.)
+      Sectors[s].soundx = (right + left) / 2
+      Sectors[s].soundy = (top + bottom) / 2
       Sectors[s].bbtop = min((top - Bmap[0].orgy + MAXRADIUS) >> MAPBLOCKSHIFT,
                              Bmap[0].height - 1)
       Sectors[s].bbbottom = max((bottom - Bmap[0].orgy - MAXRADIUS) >> MAPBLOCKSHIFT, 0)

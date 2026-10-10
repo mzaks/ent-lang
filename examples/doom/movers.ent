@@ -30,6 +30,7 @@ import items
 import specials
 import play
 import enemy
+import sounds
 import random
 
 const USERANGE = 64 * FRACUNIT
@@ -47,7 +48,8 @@ unique Nofit: i32
 // it; -1 if there is none, or a wall comes first (P_UseLines,
 // PTR_UseTraverse).
 proc use_line(lines: mut Lines, sectors: Sectors, bytes: Bytes, bmap: mut Bmap,
-              tm: mut Tm, intercepts: mut Intercepts, things: Mobj, me: entity) -> i32 {
+              tm: mut Tm, intercepts: mut Intercepts, things: Mobj, me: entity,
+              sounds: mut Sounds, rnd: mut Rnd) -> i32 {
   let fine = (things[me].angle >> ANGLETOFINESHIFT) as i32
   path_lines(things, false, lines, bytes, bmap, tm, intercepts, things[me].x,
              things[me].y,
@@ -74,6 +76,8 @@ proc use_line(lines: mut Lines, sectors: Sectors, bytes: Bytes, bmap: mut Bmap,
         // Past it, if it is open.
         if lines[li].backsector < 0 ||
            open_top(lines, sectors, li) - open_bottom(lines, sectors, li) <= 0 {
+          // (A wall: nothing to use.)
+          sound(sounds, rnd, SFX_NOWAY, things[me].id)
           going = false
         }
         intercepts[nearest].frac = 0x7fffffff
@@ -247,11 +251,14 @@ table triggers {
 system use_lines() {
   let down = Pl[0].buttons & BT_USE != 0 && Pl[0].buttons & BT_SPECIAL == 0
   if down && !Pl[0].usedown {
+    Rnd = [{ play: Random.play, other: Random.other }; 1]
     let used = use_line(Lines, Sectors, Bytes, Bmap, Tm, Intercepts, Mobj,
-                        Spawned.player)
+                        Spawned.player, Sounds, Rnd)
+    Random.other = Rnd[0].other
     if used >= 0 {
       Triggered += { line: used >> 1, used: true, side: used & 1, player: true,
-                     shot: false, boss: false }
+                     shot: false, boss: false, now: true, lx: 0, ly: 0,
+                     langle: 0 }
     }
   }
   Pl[0].usedown = down
@@ -264,10 +271,39 @@ system use_lines() {
 // each thing that set one off, so that what they start or turn round
 // is so for what moves sectors, which comes later in the tic. Gives 1
 // where the level is left, 2 where by the secret way out, else 0.
+// A switch shows that it was used, and is heard (P_ChangeSwitchTexture):
+// from nowhere, or, while the first of the buttons is counting, from
+// that button's sector, which is what the reference's code comes to.
+// A sector's sound for a listener at a place (see `sound_sector`).
+proc sector_sound(sectors: Sectors, sounds: mut Sounds, rnd: mut Rnd, lx: i32,
+                  ly: i32, langle: u32, map: i32, sector: i32, sfx: i32) {
+  sound_from(sounds, rnd, sfx, -1 - sector, sectors[sector].soundx,
+             sectors[sector].soundy, lx, ly, langle, map)
+}
+
+proc switch_used(lines: mut Lines, sectors: Sectors, sides: mut Sides,
+                 switches: Switches, buttons: mut Buttons, sounds: mut Sounds,
+                 rnd: mut Rnd, lx: i32, ly: i32, langle: u32, map: i32,
+                 line: i32, again: bool) {
+  let from = if buttons[0].timer != 0 {
+    lines[buttons[0].line].frontsector
+  } else {
+    -1
+  }
+  if change_switch(lines, sides, switches, buttons, line, again) {
+    if from >= 0 {
+      sector_sound(sectors, sounds, rnd, lx, ly, langle, map, from, SFX_SWTCHN)
+    } else {
+      sound(sounds, rnd, SFX_SWTCHN, 0)
+    }
+  }
+}
+
 proc work_lines(triggered: mut Triggered, lines: mut Lines,
                 sectors: mut Sectors, movers: mut Movers, lights: mut Lights,
                 inv: Inv, tm: mut Tm, rnd: mut Rnd, sides: mut Sides,
-                switches: Switches, buttons: mut Buttons) -> i32 {
+                switches: Switches, buttons: mut Buttons, things: Mobj,
+                listener: entity, env: Env, sounds: mut Sounds) -> i32 {
   var out = 0
   for t in 0..len(triggered) {
     let line = triggered[t].line
@@ -276,13 +312,24 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
     let tag = if boss { 666 } else { lines[line].tag }
     let used = triggered[t].used
     let player = triggered[t].player
+    // (Where what it starts is heard from.)
+    let lx = if triggered[t].now { things[listener].x } else { triggered[t].lx }
+    let ly = if triggered[t].now { things[listener].y } else { triggered[t].ly }
+    let langle = if triggered[t].now {
+      things[listener].angle
+    } else {
+      triggered[t].langle
+    }
     // The ways out, by a switch or by walking: the level is over when
     // the tic is (G_ExitLevel, G_SecretExitLevel).
     if player && !triggered[t].shot &&
        ((used && triggered[t].side == 0 && (special == 11 || special == 51)) ||
         (!used && (special == 52 || special == 124))) {
       out = if special == 51 || special == 124 { 2 } else { 1 }
-      if used { change_switch(lines, sides, switches, buttons, line, false) }
+      if used {
+        switch_used(lines, sectors, sides, switches, buttons, sounds, rnd, lx,
+                      ly, langle, env[0].map, line, false)
+      }
     }
     if used && triggered[t].side == 0 &&
        (special == 1 || special == 26 || special == 27 || special == 28 ||
@@ -298,6 +345,8 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
                    ((special == 27 || special == 34) && (!yellow || !player)) ||
                    ((special == 28 || special == 33) && (!red || !player))
       let sector = lines[line].backsector
+      // (A lock the player has no key for says so.)
+      if locked && triggered[t].player { sound(sounds, rnd, SFX_OOF, 0) }
       if !locked && sector >= 0 {
         let moving = sectors[sector].specialdata
         if moving != 0 {
@@ -318,6 +367,7 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
           let stays = special == 31 || special == 32 || special == 33 ||
                       special == 34 || special == 118
           let fast = special == 117 || special == 118
+          sector_sound(sectors, sounds, rnd, lx, ly, langle, env[0].map, sector, if fast { SFX_BDOPN } else { SFX_DOROPN })
           movers += {
             kind: MOVER_DOOR, active: true, sector: sector,
             type: if special == 117 {
@@ -634,6 +684,21 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
               } else if action == ACT_DOOR {
                 let down = type == VLD_BLAZECLOSE || type == VLD_CLOSE ||
                            type == VLD_CLOSE30THENOPEN
+                // (One that is open already opens without a sound.)
+                if down {
+                  sector_sound(sectors, sounds, rnd, lx, ly, langle, env[0].map, secnum,
+                               if type == VLD_BLAZECLOSE { SFX_BDCLS } else { SFX_DORCLS })
+                } else if lowest_ceiling_surrounding(lines, sectors, secnum) - 4 * FRACUNIT !=
+                          sectors[secnum].ceilingheight &&
+                          (type == VLD_BLAZERAISE || type == VLD_BLAZEOPEN ||
+                           type == VLD_NORMAL || type == VLD_OPEN) {
+                  sector_sound(sectors, sounds, rnd, lx, ly, langle, env[0].map, secnum,
+                               if type == VLD_BLAZERAISE || type == VLD_BLAZEOPEN {
+                                 SFX_BDOPN
+                               } else {
+                                 SFX_DOROPN
+                               })
+                }
                 movers += {
                   kind: MOVER_DOOR, active: true, sector: secnum, type: type,
                   direction: if down { -1 } else { 1 },
@@ -684,6 +749,13 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
                   high = max(highest_floor_surrounding(lines, sectors, secnum), floor)
                   status = p_random(rnd) & 1
                 }
+                sector_sound(sectors, sounds, rnd, lx, ly, langle, env[0].map, secnum,
+                             if type == PLAT_RAISETONEARESTANDCHANGE ||
+                                type == PLAT_RAISEANDCHANGE {
+                               SFX_STNMOV
+                             } else {
+                               SFX_PSTART
+                             })
                 movers += {
                   kind: MOVER_PLAT, active: true, sector: secnum, type: type,
                   direction: 0, speed: speed, high: high, low: low, wait: wait,
@@ -707,7 +779,8 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
         // A switch shows that it was used, when it started something;
         // one that was shot, always.
         if !boss && ((used && started) || triggered[t].shot) {
-          change_switch(lines, sides, switches, buttons, line, triggers[row].again)
+          switch_used(lines, sectors, sides, switches, buttons, sounds, rnd, lx,
+                      ly, langle, env[0].map, line, triggers[row].again)
         }
       }
     }
@@ -718,10 +791,12 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
 
 // After `use_lines`.
 system trigger_lines() {
-  Rnd = [{ play: Random.play }; 1]
+  Rnd = [{ play: Random.play, other: Random.other }; 1]
   let out = work_lines(Triggered, Lines, Sectors, Movers, Lights, Inv, Tm, Rnd,
-                       Sides, Switches, Buttons)
+                       Sides, Switches, Buttons, Mobj, Spawned.player, Env,
+                       Sounds)
   Random.play = Rnd[0].play
+  Random.other = Rnd[0].other
   if out != 0 {
     Level.exited = true
     Level.secret = out == 2
@@ -740,7 +815,7 @@ proc change_sector(lines: mut Lines, sectors: mut Sectors, subsectors:
                    spechit: mut Spechit, touched: mut Touched, triggered: mut
                    Triggered, intercepts: mut Intercepts, sight: mut Sight,
                    rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env,
-                   blast: mut Blast, things: mut Mobj, player: entity, sector:
+                   blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, sector:
                    i32, crunches: bool) -> bool {
   gather_blast(things, bmap, blast, true, sectors[sector].bbleft,
                sectors[sector].bbright, sectors[sector].bbbottom,
@@ -791,7 +866,7 @@ proc change_sector(lines: mut Lines, sectors: mut Sectors, subsectors:
       } else if things[it].flags & MF_SHOOTABLE != 0 {
         nofit = true
         if crunches && env[0].leveltime & 3 == 0 {
-          damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, it, none, none, 10)
+          damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, it, none, none, 10)
           // (Blood, any way.)
           let mo = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env,
                               things[it].x, things[it].y,
@@ -812,7 +887,7 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
               touched: mut Touched, triggered: mut Triggered, intercepts: mut
               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
-              powers: Powers, env: Env, blast: mut Blast, things: mut Mobj,
+              powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj,
               player: entity, movers: mut Movers, i: i32) {
   let sector = movers[i].sector
   let type = movers[i].type
@@ -870,6 +945,7 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
         } else {
           PLAT_DOWN
         }
+        sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_PSTART)
       }
     }
   } else if dir == 0 {
@@ -878,8 +954,11 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
     if movers[i].count == 0 {
       if type == VLD_BLAZERAISE || type == VLD_NORMAL {
         movers[i].direction = -1
+        sound_sector(things, player, env, sectors, sounds, rnd, sector,
+                     if type == VLD_NORMAL { SFX_DORCLS } else { SFX_BDCLS })
       } else if type == VLD_CLOSE30THENOPEN {
         movers[i].direction = 1
+        sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_DOROPN)
       }
     }
   } else if dir == 2 {
@@ -888,6 +967,7 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
     if movers[i].count == 0 && type == VLD_RAISEIN5MINS {
       movers[i].direction = 1
       movers[i].type = VLD_NORMAL
+      sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_DOROPN)
     }
   } else if dir == -1 {
     moving = true
@@ -922,7 +1002,7 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
         } else {
           sectors[sector].floorheight = height
         }
-        let nofit = change_sector(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, sector, crunches)
+        let nofit = change_sector(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, sector, crunches)
         if pass == 0 {
           // What a thing in the way does to the move: it is taken
           // back, but for a floor going up or a ceiling coming down
@@ -943,8 +1023,16 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
     }
   }
 
-  // What it does when it got there, or something was in the way.
+  // What it does when it got there, or something was in the way. (What
+  // moves stone is heard every eighth tic, and when it stops.)
+  let grinds = moving && env[0].leveltime & 7 == 0
   if ceil {
+    if grinds && type != CEIL_SILENTCRUSHANDRAISE {
+      sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_STNMOV)
+    }
+    if moving && res == RES_PASTDEST && type == CEIL_SILENTCRUSHANDRAISE {
+      sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_PSTOP)
+    }
     if moving && mdir == 1 {
       if res == RES_PASTDEST {
         if type == CEIL_RAISETOHIGHEST {
@@ -973,6 +1061,7 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
       }
     }
   } else if goes {
+    if grinds { sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_STNMOV) }
     if res == RES_PASTDEST {
       sectors[sector].specialdata = 0
       if type == FLOOR_LOWERANDCHANGE || type == FLOOR_DONUTRAISE {
@@ -980,15 +1069,21 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
         sectors[sector].floorpic = movers[i].low
       }
       movers[i].active = false
+      sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_PSTOP)
     }
   } else if moving && plat {
     if status == PLAT_UP {
+      if grinds && (type == PLAT_RAISEANDCHANGE || type == PLAT_RAISETONEARESTANDCHANGE) {
+        sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_STNMOV)
+      }
       if res == RES_CRUSHED && !movers[i].crush {
         movers[i].count = movers[i].wait
         movers[i].status = PLAT_DOWN
+        sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_PSTART)
       } else if res == RES_PASTDEST {
         movers[i].count = movers[i].wait
         movers[i].status = PLAT_WAITING
+        sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_PSTOP)
         // (All but the one that goes for ever are done at the top.)
         if type != PLAT_PERPETUALRAISE {
           sectors[sector].specialdata = 0
@@ -998,6 +1093,7 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
     } else if res == RES_PASTDEST {
       movers[i].count = movers[i].wait
       movers[i].status = PLAT_WAITING
+      sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_PSTOP)
     }
   } else if moving && dir == -1 {
     if res == RES_PASTDEST {
@@ -1008,10 +1104,16 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
                 type == VLD_NORMAL || type == VLD_CLOSE {
         sectors[sector].specialdata = 0
         movers[i].active = false
+        if type == VLD_BLAZERAISE || type == VLD_BLAZECLOSE {
+          sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_BDCLS)
+        }
       }
     } else if res == RES_CRUSHED {
       // (A door goes up again, unless it is one that shuts.)
-      if type != VLD_BLAZECLOSE && type != VLD_CLOSE { movers[i].direction = 1 }
+      if type != VLD_BLAZECLOSE && type != VLD_CLOSE {
+        movers[i].direction = 1
+        sound_sector(things, player, env, sectors, sounds, rnd, sector, SFX_DOROPN)
+      }
     }
   } else if moving && dir == 1 {
     if res == RES_PASTDEST {
@@ -1035,12 +1137,45 @@ proc movers_before(lines: mut Lines, sectors: mut Sectors, subsectors:
                    spechit: mut Spechit, touched: mut Touched, triggered: mut
                    Triggered, intercepts: mut Intercepts, sight: mut Sight,
                    rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env,
-                   blast: mut Blast, things: mut Mobj, player: entity, movers:
+                   blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, movers:
                    mut Movers, id: i32) {
   for i in 0..len(movers) {
     if movers[i].active && movers[i].born < id && movers[i].ran != env[0].leveltime {
       movers[i].ran = env[0].leveltime
-      move_one(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, movers, i)
+      move_one(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, movers, i)
     }
   }
+}
+
+proc button_sound(things: Mobj, player: entity, sounds: mut Sounds,
+                  rnd: mut Rnd, x: i32, map: i32) {
+  sound_from(sounds, rnd, SFX_SWTCHN, 0, x, 0, things[player].x,
+             things[player].y, things[player].angle, map)
+}
+
+// The switches that go back do when their time is up (the buttons of
+// P_UpdateSpecials), and are heard: from the middle of the map, which
+// is what the place the reference takes the sound to come from comes
+// to (it reads the next button's numbers as a place). After
+// `update_specials`.
+system update_buttons() {
+  Rnd = [{ play: Random.play, other: Random.other }; 1]
+  for i in 0..len(Buttons) {
+    if Buttons[i].timer != 0 {
+      Buttons[i].timer -= 1
+      if Buttons[i].timer == 0 {
+        let side = Lines[Buttons[i].line].front
+        if Buttons[i].where == 0 {
+          Sides[side].toptexture = Buttons[i].texture
+        } else if Buttons[i].where == 1 {
+          Sides[side].midtexture = Buttons[i].texture
+        } else {
+          Sides[side].bottomtexture = Buttons[i].texture
+        }
+        let x = if i + 1 < len(Buttons) { Buttons[i + 1].timer } else { 0 }
+        button_sound(Mobj, Spawned.player, Sounds, Rnd, x, Level.map)
+      }
+    }
+  }
+  Random.other = Rnd[0].other
 }

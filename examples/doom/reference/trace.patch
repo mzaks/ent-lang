@@ -530,3 +530,36 @@ index ca20a47..6f7315e 100644
  	R_DrawPlayerSprites ();
  }
  
+diff --git i/src/doom/s_sound.c w/src/doom/s_sound.c
+index 7674889..df4c15a 100644
+--- i/src/doom/s_sound.c
++++ w/src/doom/s_sound.c
+@@ -491,6 +491,28 @@ void S_StartSound(void *origin_p, int sfx_id)
+         sep = NORM_SEP;
+     }
+ 
++    // ent-lang: with DOOM_SOUNDS=file, a line for each sound that is
++    // heard: the level's tic, the sound, how loud and from which side.
++    {
++	static FILE *file;
++	static boolean asked;
++	extern int leveltime;
++
++	if (!asked)
++	{
++	    const char *name = getenv ("DOOM_SOUNDS");
++
++	    asked = true;
++	    if (name)
++		file = fopen (name, "w");
++	}
++	if (file && gamestate == GS_LEVEL)
++	{
++	    fprintf (file, "%d %d %d %d\n", leveltime, sfx_id, volume, sep);
++	    fflush (file);
++	}
++    }
++
+     // hacks to vary the sfx pitches
+     if (sfx_id >= sfx_sawup && sfx_id <= sfx_sawhit)
+     {

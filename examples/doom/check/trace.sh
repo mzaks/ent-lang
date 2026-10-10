@@ -38,7 +38,8 @@ END
     sed "s/DEMO1/DEMO$number/; s/Without = false/Without = $without/; s/Tics = 300/Tics = $tics/" \
       "$here/trace_check.ent" > "$run/trace_check.ent"
     (cd "$run" && ENT_BIN=${ENT_BIN:-$root/build/bin} python3 "$root/tools/ent" \
-      run -I "$here/.." "$run/trace_check.ent") > "$run/$name.port"
+      run -I "$here/.." "$run/trace_check.ent") > "$run/$name.out"
+    grep -v '^sound ' "$run/$name.out" > "$run/$name.port"
     only=
     [ $without = true ] && only="--only x,y,z,angle,health"
     echo "$name:"

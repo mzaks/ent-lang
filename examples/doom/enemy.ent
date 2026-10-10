@@ -37,14 +37,11 @@ import things
 import demo
 import items
 import play
+import sounds
 
 const MELEERANGE = 64 * FRACUNIT
 // Some of the sounds a monster makes on seeing the player are one of
 // several, drawn (sounds.h).
-const SFX_POSIT1 = 36
-const SFX_POSIT3 = 38
-const SFX_BGSIT1 = 39
-const SFX_BGSIT2 = 40
 
 // How far a thing gets in a step each of the eight ways, for a speed of
 // one.
@@ -209,10 +206,29 @@ const BASETHRESHOLD = 100
 // it is.
 const ONFLOORZ = -2147483647 - 1
 const ONCEILINGZ = 2147483647
-const SFX_PODTH1 = 59
-const SFX_PODTH3 = 61
-const SFX_BGDTH1 = 62
-const SFX_BGDTH2 = 63
+
+// A sound a thing makes (S_StartSound): the player's own is heard as it
+// is, another's as from where the thing is.
+proc sound_of(things: Mobj, player: entity, env: Env, sounds: mut Sounds,
+              rnd: mut Rnd, who: entity, sfx: i32) {
+  if sfx != 0 {
+    if things[who].id == things[player].id {
+      sound(sounds, rnd, sfx, things[who].id)
+    } else {
+      sound_from(sounds, rnd, sfx, things[who].id, things[who].x, things[who].y,
+                 things[player].x, things[player].y, things[player].angle,
+                 env[0].map)
+    }
+  }
+}
+
+// A sound from a sector, which is from the middle of the box around it.
+proc sound_sector(things: Mobj, player: entity, env: Env, sectors: Sectors,
+                  sounds: mut Sounds, rnd: mut Rnd, sector: i32, sfx: i32) {
+  sound_from(sounds, rnd, sfx, -1 - sector, sectors[sector].soundx,
+             sectors[sector].soundy, things[player].x, things[player].y,
+             things[player].angle, env[0].map)
+}
 
 // A number drawn and another taken from it (P_SubRandom).
 proc sub_random(rnd: mut Rnd) -> i32 {
@@ -300,7 +316,7 @@ proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
                segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
                touched: mut Touched, triggered: mut Triggered, intercepts: mut
                Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
-               powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me:
+               powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me:
                entity, first: i32)
 
 // A thing is made (P_SpawnMobj): of that kind, there, in the first state
@@ -352,7 +368,7 @@ proc spawn_puff(lines: mut Lines, sectors: mut Sectors, subsectors:
                 Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                 spechit: mut Spechit, touched: mut Touched, triggered: mut
                 Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
-                mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut
+                mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut
                 Mobj, player: entity, x: i32, y: i32, z: i32, punch: bool) {
   let up = sub_random(rnd) << 10
   let th = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env, x, y,
@@ -360,13 +376,13 @@ proc spawn_puff(lines: mut Lines, sectors: mut Sectors, subsectors:
   things[th].momz = FRACUNIT
   things[th].tics = max(things[th].tics - (p_random(rnd) & 3), 1)
   // (A fist makes no spark on the wall.)
-  if punch { set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th, S_PUFF3) }
+  if punch { set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, th, S_PUFF3) }
 }
 proc spawn_blood(lines: mut Lines, sectors: mut Sectors, subsectors:
                  Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                  spechit: mut Spechit, touched: mut Touched, triggered: mut
                  Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
-                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut
+                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut
                  Mobj, player: entity, x: i32, y: i32, z: i32, damage: i32) {
   let up = sub_random(rnd) << 10
   let th = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env, x, y,
@@ -374,9 +390,9 @@ proc spawn_blood(lines: mut Lines, sectors: mut Sectors, subsectors:
   things[th].momz = FRACUNIT * 2
   things[th].tics = max(things[th].tics - (p_random(rnd) & 3), 1)
   if damage <= 12 && damage >= 9 {
-    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th, S_BLOOD2)
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, th, S_BLOOD2)
   } else if damage < 9 {
-    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th, S_BLOOD3)
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, th, S_BLOOD3)
   }
 }
 
@@ -386,7 +402,7 @@ proc kill_mobj(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
                segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
                touched: mut Touched, triggered: mut Triggered, intercepts: mut
                Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
-               powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity,
+               powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity,
                source: entity, target: entity) {
   let type = things[target].type
   things[target].flags &= ~(MF_SHOOTABLE | MF_FLOAT | MF_SKULLFLY)
@@ -397,9 +413,9 @@ proc kill_mobj(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
   if type == MT_PLAYER { things[target].flags &= ~MF_SOLID }
   if things[target].health < -mobjinfo[type].spawnhealth &&
      mobjinfo[type].xdeathstate != 0 {
-    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, target, mobjinfo[type].xdeathstate)
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, target, mobjinfo[type].xdeathstate)
   } else {
-    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, target, mobjinfo[type].deathstate)
+    set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, target, mobjinfo[type].deathstate)
   }
   things[target].tics = max(things[target].tics - (p_random(rnd) & 3), 1)
   let item = if type == MT_WOLFSS || type == MT_POSSESSED {
@@ -426,7 +442,7 @@ proc damage_mobj(lines: mut Lines, sectors: mut Sectors, subsectors:
                  Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                  spechit: mut Spechit, touched: mut Touched, triggered: mut
                  Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
-                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut
+                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut
                  Mobj, player: entity, target: entity, inflictor: entity,
                  source: entity, harm: i32) {
   if things[target].flags & MF_SHOOTABLE != 0 && things[target].health > 0 {
@@ -485,13 +501,13 @@ proc damage_mobj(lines: mut Lines, sectors: mut Sectors, subsectors:
       }
       things[target].health -= damage
       if things[target].health <= 0 {
-        kill_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, source, target)
+        kill_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, source, target)
       } else {
         if p_random(rnd) < mobjinfo[type].painchance &&
            things[target].flags & MF_SKULLFLY == 0 {
           // (It fights back.)
           things[target].flags |= MF_JUSTHIT
-          set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, target, mobjinfo[type].painstate)
+          set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, target, mobjinfo[type].painstate)
         }
         things[target].reactiontime = 0
         if (things[target].threshold == 0 || type == MT_VILE) && source != none &&
@@ -501,7 +517,7 @@ proc damage_mobj(lines: mut Lines, sectors: mut Sectors, subsectors:
           things[target].threshold = BASETHRESHOLD
           if things[target].state == mobjinfo[type].spawnstate &&
              mobjinfo[type].seestate != S_NULL {
-            set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, target, mobjinfo[type].seestate)
+            set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, target, mobjinfo[type].seestate)
           }
         }
       }
@@ -558,7 +574,7 @@ proc teleport(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
               touched: mut Touched, triggered: mut Triggered, intercepts: mut
               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
-              powers: Powers, env: Env, blast: mut Blast, things: mut Mobj,
+              powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj,
               player: entity, me: entity, line: i32, side: i32) -> bool {
   var went = false
   if things[me].flags & MF_MISSILE == 0 && side == 0 {
@@ -598,7 +614,7 @@ proc teleport(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
            abs(things[it].x - x) < things[it].radius + radius &&
            abs(things[it].y - y) < things[it].radius + radius {
           if isplayer {
-            damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, it, me, me, 10000)
+            damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, it, me, me, 10000)
           } else {
             free = false
           }
@@ -623,10 +639,12 @@ proc teleport(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
         things[me].z = things[me].floorz
         let here = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env,
                               oldx, oldy, oldz, MT_TFOG)
+        sound_of(things, player, env, sounds, rnd, here, SFX_TELEPT)
         let an = (things[mark].angle >> ANGLETOFINESHIFT) as i32
         let there = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env,
                                x + 20 * finecosine(an), y + 20 * finesine[an],
                                things[me].z, MT_TFOG)
+        sound_of(things, player, env, sounds, rnd, there, SFX_TELEPT)
         if isplayer { things[me].reactiontime = 18 }
         things[me].angle = things[mark].angle
         things[me].momx = 0
@@ -645,7 +663,7 @@ proc try_move(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
               touched: mut Touched, triggered: mut Triggered, intercepts: mut
               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
-              powers: Powers, env: Env, blast: mut Blast, things: mut Mobj,
+              powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj,
               player: entity, me: entity, x: i32, y: i32) -> bool {
   let flags = things[me].flags
   var moved = false
@@ -702,12 +720,13 @@ proc try_move(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
               // out. One that works once has then worked.
               let isplayer = things[me].type == MT_PLAYER
               if special == 39 || special == 97 || !isplayer {
-                let went = teleport(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, ld, oldside)
+                let went = teleport(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, ld, oldside)
                 if special == 39 || special == 125 { lines[ld].special = 0 }
               }
             } else {
               triggered += { line: ld, used: false, side: oldside,
-                             player: (things[me].type == MT_PLAYER), shot: false, boss: false }
+                             player: (things[me].type == MT_PLAYER), shot: false, boss: false, now: false, lx: things[player].x,
+                           ly: things[player].y, langle: things[player].angle }
             }
           }
         }
@@ -725,8 +744,7 @@ proc slide_move(lines: mut Lines, sectors: mut Sectors, subsectors:
                 Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                 spechit: mut Spechit, touched: mut Touched, triggered: mut
                 Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
-                mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut
-                Blast, things: mut Mobj, player: entity, me: entity) {
+                mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me: entity) {
   var hitcount = 0
   var done = false
   while !done {
@@ -759,7 +777,7 @@ proc slide_move(lines: mut Lines, sectors: mut Sectors, subsectors:
         var frac = tm[0].bestslidefrac - 0x800
         var went = true
         if frac > 0 {
-          went = try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, x + fixed_mul(momx, frac),
+          went = try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, x + fixed_mul(momx, frac),
                           y + fixed_mul(momy, frac))
           if !went { stairstep = true }
         }
@@ -790,15 +808,15 @@ proc slide_move(lines: mut Lines, sectors: mut Sectors, subsectors:
             }
             things[me].momx = tmxmove
             things[me].momy = tmymove
-            done = try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, things[me].x + tmxmove,
+            done = try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, things[me].x + tmxmove,
                             things[me].y + tmymove)
           }
         }
       }
     }
     if stairstep {
-      if !try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, things[me].x, things[me].y + things[me].momy) {
-        let other = try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me,
+      if !try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, things[me].x, things[me].y + things[me].momy) {
+        let other = try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me,
                              things[me].x + things[me].momx, things[me].y)
       }
       done = true
@@ -811,13 +829,14 @@ proc explode_missile(lines: mut Lines, sectors: mut Sectors, subsectors:
                      Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                      spechit: mut Spechit, touched: mut Touched, triggered:
                      mut Triggered, intercepts: mut Intercepts, sight: mut
-                     Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me: entity) {
+                     Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me: entity) {
   things[me].momx = 0
   things[me].momy = 0
   things[me].momz = 0
-  set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, mobjinfo[things[me].type].deathstate)
+  set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, mobjinfo[things[me].type].deathstate)
   things[me].tics = max(things[me].tics - (p_random(rnd) & 3), 1)
   things[me].flags &= ~MF_MISSILE
+  sound_of(things, player, env, sounds, rnd, me, mobjinfo[things[me].type].deathsound)
 }
 
 // A missile could not go on: what it ran into is hurt, and it bursts;
@@ -827,18 +846,18 @@ proc missile_stopped(lines: mut Lines, sectors: mut Sectors, subsectors:
                      Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                      spechit: mut Spechit, touched: mut Touched, triggered:
                      mut Triggered, intercepts: mut Intercepts, sight: mut
-                     Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me: entity) {
+                     Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me: entity) {
   if tm[0].hit != 0 {
     let it = thing_by_id(things, tm[0].hit)
     let damage = (p_random(rnd) % 8 + 1) * mobjinfo[things[me].type].damage
-    damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, it, me, things[me].target, damage)
+    damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, it, me, things[me].target, damage)
   }
   let line = tm[0].ceilingline
   if line >= 0 && lines[line].backsector >= 0 &&
      sectors[lines[line].backsector].ceilingpic == env[0].sky {
     things[me].gone = true
   } else {
-    explode_missile(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+    explode_missile(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
   }
 }
 
@@ -848,14 +867,14 @@ proc check_missile_spawn(lines: mut Lines, sectors: mut Sectors, subsectors:
                      Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                      spechit: mut Spechit, touched: mut Touched, triggered:
                      mut Triggered, intercepts: mut Intercepts, sight: mut
-                     Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, th: entity) {
+                     Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, th: entity) {
   things[th].tics = max(things[th].tics - (p_random(rnd) & 3), 1)
   things[th].x += things[th].momx >> 1
   things[th].y += things[th].momy >> 1
   things[th].z += things[th].momz >> 1
   let me = th
-  if !try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, things[th].x, things[th].y) {
-    missile_stopped(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th)
+  if !try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, things[th].x, things[th].y) {
+    missile_stopped(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, th)
   }
 }
 
@@ -866,12 +885,13 @@ proc spawn_missile(lines: mut Lines, sectors: mut Sectors, subsectors:
                    Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                    spechit: mut Spechit, touched: mut Touched, triggered: mut
                    Triggered, intercepts: mut Intercepts, sight: mut Sight,
-                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast,
+                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds,
                    things: mut Mobj, player: entity, source: entity, dest:
                    entity, type: i32) {
   let th = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env,
                       things[source].x, things[source].y,
                       things[source].z + 4 * 8 * FRACUNIT, type)
+  sound_of(things, player, env, sounds, rnd, th, mobjinfo[type].seesound)
   things[th].target = source
   var an = point_to_angle(things[dest].x - things[source].x,
                           things[dest].y - things[source].y)
@@ -884,7 +904,7 @@ proc spawn_missile(lines: mut Lines, sectors: mut Sectors, subsectors:
   let dist = max(aprox_distance(things[dest].x - things[source].x,
                                 things[dest].y - things[source].y) / speed, 1)
   things[th].momz = (things[dest].z - things[source].z) / dist
-  check_missile_spawn(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th)
+  check_missile_spawn(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, th)
 }
 
 // What hurts all around a thing does so (P_RadiusAttack): everything
@@ -894,7 +914,7 @@ proc radius_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
                    Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                    spechit: mut Spechit, touched: mut Touched, triggered: mut
                    Triggered, intercepts: mut Intercepts, sight: mut Sight,
-                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast,
+                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds,
                    things: mut Mobj, player: entity, spot:
                    entity, source: entity, damage: i32) {
   // (As the reference reckons it, by which the widest thing's half is
@@ -915,7 +935,7 @@ proc radius_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
       if away < damage {
         if sees(lines, sectors, subsectors, segs, nodes, bytes, tm, sight, env,
                 things, it, spot) {
-          damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, it, spot, source, damage - away)
+          damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, it, spot, source, damage - away)
         }
       }
     }
@@ -929,7 +949,7 @@ proc thing_xy(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
               touched: mut Touched, triggered: mut Triggered, intercepts: mut
               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
-              powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me:
+              powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me:
               entity, pl: mut Pl) {
   let isplayer = things[me].type == MT_PLAYER
   things[me].momx = min(max(things[me].momx, -MAXMOVE), MAXMOVE)
@@ -949,11 +969,11 @@ proc thing_xy(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
       xmove = 0
       ymove = 0
     }
-    if !try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, ptryx, ptryy) {
+    if !try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, ptryx, ptryy) {
       if isplayer {
-        slide_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+        slide_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
       } else if things[me].flags & MF_MISSILE != 0 {
-        missile_stopped(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+        missile_stopped(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
         // (Burst, it goes the rest of its way as what is left of it;
         // gone, no further.)
         if things[me].gone {
@@ -979,7 +999,7 @@ proc thing_xy(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
        things[me].momy > -STOPSPEED && things[me].momy < STOPSPEED &&
        (!isplayer || (pl[0].forwardmove == 0 && pl[0].sidemove == 0)) {
       if isplayer && (things[me].state - S_PLAY_RUN1) as u32 < 4 {
-        set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, S_PLAY)
+        set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, S_PLAY)
       }
       things[me].momx = 0
       things[me].momy = 0
@@ -996,7 +1016,7 @@ proc thing_z(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
              segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
              touched: mut Touched, triggered: mut Triggered, intercepts: mut
              Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers:
-             Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me: entity,
+             Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me: entity,
              pl: mut Pl) {
   let isplayer = things[me].type == MT_PLAYER
   // (Up a step: the eye follows smoothly.)
@@ -1011,6 +1031,7 @@ proc thing_z(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
       // (Landed hard: the eye dips.)
       if isplayer && things[me].momz < -GRAVITY * 8 {
         pl[0].deltaviewheight = things[me].momz >> 3
+        sound_of(things, player, env, sounds, rnd, me, SFX_OOF)
       }
       things[me].momz = 0
     }
@@ -1032,7 +1053,7 @@ proc thing_z(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
       burst = true
     }
   }
-  if burst { explode_missile(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me) }
+  if burst { explode_missile(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me) }
 }
 
 // Where a shot from a thing along `angle` would go to hit something:
@@ -1115,7 +1136,7 @@ proc line_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
                  Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                  spechit: mut Spechit, touched: mut Touched, triggered: mut
                  Triggered, intercepts: mut Intercepts, sight: mut Sight, rnd:
-                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut
+                 mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut
                  Mobj, player: entity, me: entity, angle: u32, distance: i32,
                  slope: i32, damage: i32) {
   let fine = (angle >> ANGLETOFINESHIFT) as i32
@@ -1157,7 +1178,8 @@ proc line_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
         let special = lines[li].special
         if special == 46 || (me == player && (special == 24 || special == 47)) {
           triggered += { line: li, used: false, side: 0, player: me == player,
-                         shot: true, boss: false }
+                         shot: true, boss: false, now: false, lx: things[player].x,
+                           ly: things[player].y, langle: things[player].angle }
         }
         var hit = lines[li].flags & ML_TWOSIDED == 0
         if !hit {
@@ -1184,7 +1206,7 @@ proc line_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
             if back >= 0 && sectors[back].ceilingpic == env[0].sky { sky = true }
           }
           if !sky {
-            spawn_puff(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, tx + fixed_mul(tdx, at), ty + fixed_mul(tdy, at), z,
+            spawn_puff(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, tx + fixed_mul(tdx, at), ty + fixed_mul(tdy, at), z,
                        distance == MELEERANGE)
           }
           going = false
@@ -1199,11 +1221,11 @@ proc line_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
           let y = ty + fixed_mul(tdy, at)
           let z = shootz + fixed_mul(slope, fixed_mul(at, distance))
           if things[th].flags & MF_NOBLOOD != 0 {
-            spawn_puff(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, x, y, z, distance == MELEERANGE)
+            spawn_puff(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, x, y, z, distance == MELEERANGE)
           } else {
-            spawn_blood(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, x, y, z, damage)
+            spawn_blood(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, x, y, z, damage)
           }
-          if damage != 0 { damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th, me, me, damage) }
+          if damage != 0 { damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, th, me, me, damage) }
           going = false
         }
       }
@@ -1231,7 +1253,7 @@ proc shoot(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
            segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near,
            order: mut Nearorder, tm: mut Tm, spechit: mut Spechit, touched:
            mut Touched, triggered: mut Triggered, intercepts: mut Intercepts,
-           sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me: entity, shots: i32) {
+           sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me: entity, shots: i32) {
   if there(things, things[me].target) {
     face_target(things, me, rnd)
     let bangle = things[me].angle
@@ -1241,7 +1263,7 @@ proc shoot(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
     for i in 0..shots {
       let angle = bangle + (sub_random(rnd) << 20) as u32
       let damage = (p_random(rnd) % 5 + 1) * 3
-      line_attack(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, angle, MISSILERANGE, slope, damage)
+      line_attack(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, angle, MISSILERANGE, slope, damage)
     }
   }
 }
@@ -1269,13 +1291,13 @@ proc bite(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
           segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near,
           order: mut Nearorder, tm: mut Tm, spechit: mut Spechit, touched: mut
           Touched, triggered: mut Triggered, intercepts: mut Intercepts,
-          sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me: entity) {
+          sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me: entity) {
   if there(things, things[me].target) {
     face_target(things, me, rnd)
     if in_melee_range(lines, sectors, subsectors, segs, nodes, bytes, tm,
                       sight, env, things, me) {
       let damage = (p_random(rnd) % 10 + 1) * 4
-      damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, things[me].target, me, me, damage)
+      damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, things[me].target, me, me, damage)
     }
   }
 }
@@ -1286,7 +1308,7 @@ proc a_look(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
             segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
             touched: mut Touched, triggered: mut Triggered, intercepts: mut
             Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers:
-            Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me: entity) -> i32 {
+            Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me: entity) -> i32 {
   things[me].threshold = 0
   var found = false
   // What made a noise where it is: after it, if it is not one that waits
@@ -1308,12 +1330,17 @@ proc a_look(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
   var next = -1
   if found {
     // (Which of the sounds it makes is drawn.)
-    let sound = mobjinfo[things[me].type].seesound
-    if sound >= SFX_POSIT1 && sound <= SFX_POSIT3 {
-      let which = p_random(rnd) % 3
+    var sfx = mobjinfo[things[me].type].seesound
+    if sfx >= SFX_POSIT1 && sfx <= SFX_POSIT3 {
+      sfx = SFX_POSIT1 + p_random(rnd) % 3
+    } else if sfx == SFX_BGSIT1 || sfx == SFX_BGSIT2 {
+      sfx = SFX_BGSIT1 + p_random(rnd) % 2
     }
-    if sound == SFX_BGSIT1 || sound == SFX_BGSIT2 {
-      let which = p_random(rnd) % 2
+    // (The two biggest are heard everywhere.)
+    if things[me].type == MT_SPIDER || things[me].type == MT_CYBORG {
+      if sfx != 0 { sound(sounds, rnd, sfx, 0) }
+    } else {
+      sound_of(things, player, env, sounds, rnd, me, sfx)
     }
     next = mobjinfo[things[me].type].seestate
   }
@@ -1326,12 +1353,12 @@ proc p_move(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
             segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
             touched: mut Touched, triggered: mut Triggered, intercepts: mut
             Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers:
-            Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me: entity) -> bool {
+            Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me: entity) -> bool {
   let dir = things[me].movedir
   var moved = false
   if dir != DI_NODIR {
     let speed = mobjinfo[things[me].type].speed
-    if try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, things[me].x + speed * xspeed[dir],
+    if try_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, things[me].x + speed * xspeed[dir],
                 things[me].y + speed * yspeed[dir]) {
       things[me].flags &= ~MF_INFLOAT
       if things[me].flags & MF_FLOAT == 0 { things[me].z = things[me].floorz }
@@ -1346,7 +1373,8 @@ proc p_move(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
         let special = lines[ld].special
         if lines[ld].flags & ML_SECRET == 0 &&
            (special == 1 || special == 32 || special == 33 || special == 34) {
-          triggered += { line: ld, used: true, side: 0, player: false, shot: false, boss: false }
+          triggered += { line: ld, used: true, side: 0, player: false, shot: false, boss: false, now: false, lx: things[player].x,
+                           ly: things[player].y, langle: things[player].angle }
           moved = true
         }
       }
@@ -1361,9 +1389,9 @@ proc try_walk(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
               segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
               touched: mut Touched, triggered: mut Triggered, intercepts: mut
               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
-              powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me:
+              powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me:
               entity) -> bool {
-  let walked = p_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+  let walked = p_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
   if walked { things[me].movecount = p_random(rnd) & 15 }
   walked
 }
@@ -1375,7 +1403,7 @@ proc new_chase_dir(lines: mut Lines, sectors: mut Sectors, subsectors:
                    Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                    spechit: mut Spechit, touched: mut Touched, triggered: mut
                    Triggered, intercepts: mut Intercepts, sight: mut Sight,
-                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast,
+                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds,
                    things: mut Mobj, player: entity, me: entity) {
   let target = things[me].target
   let olddir = things[me].movedir
@@ -1399,7 +1427,7 @@ proc new_chase_dir(lines: mut Lines, sectors: mut Sectors, subsectors:
   var done = false
   if d1 != DI_NODIR && d2 != DI_NODIR {
     things[me].movedir = diags[(((deltay < 0) as i32) << 1) + ((deltax > 0) as i32)]
-    if things[me].movedir != turnaround { done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me) }
+    if things[me].movedir != turnaround { done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me) }
   }
   if !done {
     // (The other of the two first, now and then, or if it is the longer
@@ -1414,16 +1442,16 @@ proc new_chase_dir(lines: mut Lines, sectors: mut Sectors, subsectors:
     if d2 == turnaround { d2 = DI_NODIR }
     if d1 != DI_NODIR {
       things[me].movedir = d1
-      done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+      done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
     }
   }
   if !done && d2 != DI_NODIR {
     things[me].movedir = d2
-    done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+    done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
   }
   if !done && olddir != DI_NODIR {
     things[me].movedir = olddir
-    done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+    done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
   }
   if !done {
     // Any way, round the one way or the other.
@@ -1432,13 +1460,13 @@ proc new_chase_dir(lines: mut Lines, sectors: mut Sectors, subsectors:
       let tdir = if forwards { step } else { DI_SOUTHEAST - step }
       if !done && tdir != turnaround {
         things[me].movedir = tdir
-        done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+        done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
       }
     }
   }
   if !done && turnaround != DI_NODIR {
     things[me].movedir = turnaround
-    done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+    done = try_walk(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
   }
   if !done { things[me].movedir = DI_NODIR }
 }
@@ -1450,7 +1478,7 @@ proc a_chase(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
              segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
              touched: mut Touched, triggered: mut Triggered, intercepts: mut
              Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv, powers:
-             Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me: entity) -> i32 {
+             Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me: entity) -> i32 {
   let type = things[me].type
   let target = things[me].target
   if things[me].reactiontime != 0 { things[me].reactiontime -= 1 }
@@ -1481,13 +1509,14 @@ proc a_chase(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
   } else if things[me].flags & MF_JUSTATTACKED != 0 {
     // (Not twice in a row.)
     things[me].flags &= ~MF_JUSTATTACKED
-    new_chase_dir(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+    new_chase_dir(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
   } else {
     // Near enough to hit.
     if mobjinfo[type].meleestate != 0 &&
        in_melee_range(lines, sectors, subsectors, segs, nodes, bytes, tm,
                       sight, env, things, me) {
       next = mobjinfo[type].meleestate
+      sound_of(things, player, env, sounds, rnd, me, mobjinfo[type].attacksound)
     }
     // Or to shoot, which it does the sooner the nearer it is
     // (P_CheckMissileRange).
@@ -1526,11 +1555,13 @@ proc a_chase(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
       // It walks on, or another way if it cannot.
       things[me].movecount -= 1
       var on = things[me].movecount >= 0
-      if on { on = p_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me) }
-      if !on { new_chase_dir(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me) }
+      if on { on = p_move(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me) }
+      if !on { new_chase_dir(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me) }
       // (Now and then it makes a sound.)
       if mobjinfo[type].activesound != 0 {
-        let sounds = p_random(rnd) < 3
+        if p_random(rnd) < 3 {
+          sound_of(things, player, env, sounds, rnd, me, mobjinfo[type].activesound)
+        }
       }
     }
   }
@@ -1545,7 +1576,7 @@ proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
                segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
                touched: mut Touched, triggered: mut Triggered, intercepts: mut
                Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
-               powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me:
+               powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me:
                entity, first: i32) {
   var state = first
   var going = true
@@ -1562,17 +1593,23 @@ proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
       let action = states[state].action
       var asked = -1
       if action == A_Look {
-        asked = a_look(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+        asked = a_look(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
       } else if action == A_Chase {
-        asked = a_chase(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+        asked = a_chase(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
       } else if action == A_FaceTarget {
         face_target(things, me, rnd)
       } else if action == A_PosAttack || action == A_CPosAttack {
-        shoot(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, 1)
+        if there(things, things[me].target) {
+          sound_of(things, player, env, sounds, rnd, me, if action == A_PosAttack { SFX_PISTOL } else { SFX_SHOTGN })
+        }
+        shoot(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, 1)
       } else if action == A_SPosAttack {
-        shoot(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, 3)
+        if there(things, things[me].target) {
+          sound_of(things, player, env, sounds, rnd, me, SFX_SHOTGN)
+        }
+        shoot(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, 3)
       } else if action == A_SargAttack {
-        bite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me)
+        bite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
       } else if action == A_TroopAttack {
         // It claws what is near, or throws fire (A_TroopAttack).
         let target = things[me].target
@@ -1580,10 +1617,11 @@ proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
           face_target(things, me, rnd)
           if in_melee_range(lines, sectors, subsectors, segs, nodes, bytes, tm,
                             sight, env, things, me) {
+            sound_of(things, player, env, sounds, rnd, me, SFX_CLAW)
             let damage = (p_random(rnd) % 8 + 1) * 3
-            damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, target, me, me, damage)
+            damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, target, me, me, damage)
           } else {
-            spawn_missile(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, target, MT_TROOPSHOT)
+            spawn_missile(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, target, MT_TROOPSHOT)
           }
         }
       } else if action == A_BruisAttack {
@@ -1592,10 +1630,11 @@ proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
         if there(things, target) {
           if in_melee_range(lines, sectors, subsectors, segs, nodes, bytes, tm,
                             sight, env, things, me) {
+            sound_of(things, player, env, sounds, rnd, me, SFX_CLAW)
             let damage = (p_random(rnd) % 8 + 1) * 10
-            damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, target, me, me, damage)
+            damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, target, me, me, damage)
           } else {
-            spawn_missile(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, target, MT_BRUISERSHOT)
+            spawn_missile(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, target, MT_BRUISERSHOT)
           }
         }
       } else if action == A_BossDeath {
@@ -1611,20 +1650,31 @@ proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
           }
           if !others {
             triggered += { line: -1, used: false, side: 0, player: true,
-                           shot: false, boss: true }
+                           shot: false, boss: true, now: false, lx: things[player].x,
+                           ly: things[player].y, langle: things[player].angle }
           }
         }
       } else if action == A_Explode {
-        radius_attack(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, things[me].target, 128)
+        radius_attack(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, things[me].target, 128)
       } else if action == A_Scream {
         // (Which of the sounds it makes is drawn.)
-        let sound = mobjinfo[things[me].type].deathsound
-        if sound >= SFX_PODTH1 && sound <= SFX_PODTH3 {
-          let which = p_random(rnd) % 3
+        var sfx = mobjinfo[things[me].type].deathsound
+        if sfx >= SFX_PODTH1 && sfx <= SFX_PODTH3 {
+          sfx = SFX_PODTH1 + p_random(rnd) % 3
+        } else if sfx == SFX_BGDTH1 || sfx == SFX_BGDTH2 {
+          sfx = SFX_BGDTH1 + p_random(rnd) % 2
         }
-        if sound == SFX_BGDTH1 || sound == SFX_BGDTH2 {
-          let which = p_random(rnd) % 2
+        if things[me].type == MT_SPIDER || things[me].type == MT_CYBORG {
+          if sfx != 0 { sound(sounds, rnd, sfx, 0) }
+        } else {
+          sound_of(things, player, env, sounds, rnd, me, sfx)
         }
+      } else if action == A_XScream {
+        sound_of(things, player, env, sounds, rnd, me, SFX_SLOP)
+      } else if action == A_Pain {
+        sound_of(things, player, env, sounds, rnd, me, mobjinfo[things[me].type].painsound)
+      } else if action == A_PlayerScream {
+        sound_of(things, player, env, sounds, rnd, me, SFX_PLDETH)
       } else if action == A_Fall {
         // (What lies dead is walked over.)
         things[me].flags &= ~MF_SOLID
@@ -1645,19 +1695,19 @@ proc thing_tic(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
                segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
                touched: mut Touched, triggered: mut Triggered, intercepts: mut
                Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
-               powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, me:
+               powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me:
                entity, pl: mut Pl) {
   if things[me].momx != 0 || things[me].momy != 0 {
-    thing_xy(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, pl)
+    thing_xy(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, pl)
   }
   if !things[me].gone &&
      (things[me].z != things[me].floorz || things[me].momz != 0) {
-    thing_z(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, pl)
+    thing_z(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, pl)
   }
   if !things[me].gone && things[me].tics != -1 {
     things[me].tics -= 1
     if things[me].tics == 0 {
-      set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, me, states[things[me].state].nextstate)
+      set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, states[things[me].state].nextstate)
     }
   }
 }
@@ -1665,10 +1715,11 @@ proc thing_tic(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
 // What the player's thing touched is picked up, in the order it was
 // touched in, if the player has a use for it, and is then no more.
 proc pick_up(things: mut Mobj, me: entity, touched: Touched, inv: mut Inv,
-             ammo: mut Ammo, powers: mut Powers, skill: i32) {
+             ammo: mut Ammo, powers: mut Powers, skill: i32,
+             sounds: mut Sounds, rnd: mut Rnd) {
   for k in 0..len(touched) {
     touch_special(things, me, thing_by_id(things, touched[k].id), inv, ammo,
-                  powers, touched[k].z, skill)
+                  powers, touched[k].z, skill, sounds, rnd)
   }
 }
 

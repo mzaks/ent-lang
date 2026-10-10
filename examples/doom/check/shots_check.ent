@@ -22,6 +22,7 @@ import enemy
 import weapon
 import movers
 import tick
+import sounds
 import screen
 import shots
 
@@ -100,6 +101,7 @@ schedule setup() {
   init_view_tables()
 }
 schedule tic() {
+  begin_sounds()
   think_player()
   player_sector()
   use_lines()
@@ -110,6 +112,7 @@ schedule tic() {
   think_things(true)
   run_movers()
   update_specials()
+  update_buttons()
   tick_status()
   melt()
   ask()
