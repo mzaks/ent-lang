@@ -543,6 +543,8 @@ system player_sector() {
         if !through { through = p_random(Rnd) < 5 }
         if through && now { harm = 20 }
       } else if special == 9 {
+        // (A secret place, found.)
+        Inv[0].secretcount += 1
         Sectors[sector].special = 0
       } else if special == 11 {
         if now { harm = 20 }

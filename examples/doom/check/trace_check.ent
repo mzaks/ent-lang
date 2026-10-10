@@ -120,7 +120,7 @@ schedule setup() {
   trace()
   first()
 }
-schedule tic() {
+schedule tic() run_if !Wi.on {
   begin_sounds()
   think_player()
   player_sector()
@@ -136,6 +136,23 @@ schedule tic() {
   say_sounds()
   trace()
   next()
+  complete_level()
+}
+// A tic between two levels, and the next level after the last of them.
+schedule between() run_if Wi.on {
+  begin_sounds()
+  tick_between()
+}
+schedule onward() run_if Wi.over {
+  leave_level()
+  leave_between()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  start_player(false)
+  start_weapon()
+  trace()
+  arrive()
 }
 // The level again, after the player's death.
 schedule again() run_if Level.reborn {
@@ -151,7 +168,9 @@ schedule again() run_if Level.reborn {
 main {
   setup()
   loop {
+    onward()
+    between()
     tic()
     again()
-  } until Clock.leveltime == Tics || Demo.over || Level.exited
+  } until Clock.leveltime == Tics || Demo.over || (Level.exited && Level.map == 8)
 }

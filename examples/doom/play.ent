@@ -638,11 +638,15 @@ proc player_think(things: mut Mobj, me: entity, pl: mut Pl, leveltime: i32) {
 // pistol and fifty bullets. Else the player comes from the level before
 // with what it had, but the keys and the powers.)
 system start_player(fresh: bool) {
+  // (In a next level the keys are down or not as they were.)
+  let usedown = fresh || Pl[0].usedown
+  let attackdown = fresh || Pl[0].attackdown
   Pl = [{
     viewz: Spawned.playerz + VIEWHEIGHT, viewheight: VIEWHEIGHT,
-    // (The keys count as down, so that nothing is done at once.)
-    deltaviewheight: 0, bob: 0, usedown: true, forwardmove: 0, sidemove: 0,
-    angleturn: 0, buttons: 0, attackdown: true, refire: 0, extralight: 0,
+    // (A new player's keys count as down, so that nothing is done at
+    // once.)
+    deltaviewheight: 0, bob: 0, usedown: usedown, forwardmove: 0, sidemove: 0,
+    angleturn: 0, buttons: 0, attackdown: attackdown, refire: 0, extralight: 0,
     dead: false
   }; 1]
   Tm = [{
@@ -656,7 +660,7 @@ system start_player(fresh: bool) {
       armorpoints: 0, armortype: 0, weapons: 1 << WP_FIST | 1 << WP_PISTOL,
       cards: 0, backpack: false, readyweapon: WP_PISTOL,
       pendingweapon: WP_NOCHANGE, itemcount: 0, bonuscount: 0, attacker: 0,
-      damagecount: 0, message: 0
+      damagecount: 0, message: 0, killcount: 0, secretcount: 0
     }; 1]
     Ammo = []
     Ammo += { count: 50, most: 200 }
@@ -671,6 +675,10 @@ system start_player(fresh: bool) {
     Inv[0].damagecount = 0
     Inv[0].attacker = 0
     Inv[0].message = 0
+    // (What was found is counted for each level: P_SetupLevel.)
+    Inv[0].itemcount = 0
+    Inv[0].killcount = 0
+    Inv[0].secretcount = 0
     for m: mut Mobj where m.type == MT_PLAYER { m.health = Kept.health }
   }
   Powers = [{ tics: 0 }; 6]

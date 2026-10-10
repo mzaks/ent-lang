@@ -124,3 +124,183 @@ system arrive() {
   Level.reborn = false
   Clock.leveltime = 0
 }
+
+// Between two levels (wi_stuff.c): what the player did in the level that
+// is left is counted up on the screen, then the way to the next is
+// shown. A tic of it takes a tic of the keys as a level's does, and the
+// fire or the use key hurries it on.
+//
+// `on`: it is going on; `over`: it is done, and the next level is to be
+// loaded. `state`: 0 counting, 1 showing where to, 2 a moment more.
+// `stage`: where the counting is (sp_state): 2 the kills, 4 the items, 6
+// the secrets, 8 the time, 10 done, with a pause at each odd one. The
+// four numbers shown so far (`kills`, `items`, `secrets` in hundredths,
+// `time` and `par` in seconds; -1 not yet), and what they come to.
+unique Wi {
+  on: bool, over: bool, state: i32, stage: i32, hurry: bool, pause: i32,
+  count: i32, tics: i32, pointer: bool, kills: i32, items: i32, secrets: i32,
+  time: i32, par: i32, allkills: i32, allitems: i32, allsecrets: i32,
+  alltime: i32, allpar: i32, last: i32, next: i32, didsecret: bool
+}
+// The ten pictures that move on the map of the episode: which of its
+// pictures each shows (-1 none yet) and when it shows the next.
+buffer Wianims { ctr: i32, nexttic: i32 } capacity 10
+const WI_PERIOD = 35 / 3
+const WI_FRAMES = 3
+// The seconds a level of the first episode is to take.
+table pars: i32 = [0, 30, 75, 120, 90, 165, 180, 180, 30, 165]
+
+// The pictures that move start anew, each a little later than the one
+// before by a number drawn (WI_initAnimatedBack).
+proc wi_start_anims(anims: mut Wianims, rnd: mut Rnd, tics: i32) {
+  anims = []
+  for i in 0..10 {
+    anims += { ctr: -1, nexttic: tics + 1 + m_random(rnd) % WI_PERIOD }
+  }
+}
+
+// The level that was left is over (G_DoCompleted, WI_Start): after a
+// tic in which the player went out, but out of the last level, after
+// which the game is won.
+system complete_level() {
+  if Level.exited && !Wi.on && Level.map != 8 {
+    if Level.map == 9 || Level.secret { Wi.didsecret = true }
+    Wi.on = true
+    Wi.over = false
+    Wi.last = Level.map
+    Wi.next = if Level.secret { 9 } else if Level.map == 9 { 4 } else { Level.map + 1 }
+    Wi.allkills = Inv[0].killcount * 100 / max(Spawned.kills, 1)
+    Wi.allitems = Inv[0].itemcount * 100 / max(Spawned.items, 1)
+    Wi.allsecrets = Inv[0].secretcount * 100 / max(Secrets, 1)
+    Wi.alltime = Clock.leveltime / 35
+    Wi.allpar = pars[Level.map]
+    Wi.state = 0
+    Wi.hurry = false
+    Wi.stage = 1
+    Wi.kills = -1
+    Wi.items = -1
+    Wi.secrets = -1
+    Wi.time = -1
+    Wi.par = -1
+    Wi.pause = 35
+    Wi.count = 0
+    Wi.tics = 0
+    Rnd = [{ play: Random.play, other: Random.other }; 1]
+    wi_start_anims(Wianims, Rnd, 0)
+    Random.other = Rnd[0].other
+  }
+}
+
+// A tic between two levels (WI_Ticker).
+system tick_between() {
+  Pl[0].buttons = Ticcmds[Demo.tic].buttons
+  Demo.tic += 1
+  Demo.over = Demo.tic >= len(Ticcmds)
+  Rnd = [{ play: Random.play, other: Random.other }; 1]
+  Wi.tics += 1
+  // A key newly down hurries it on (WI_checkForAccelerate).
+  if Pl[0].buttons & BT_ATTACK != 0 {
+    if !Pl[0].attackdown { Wi.hurry = true }
+    Pl[0].attackdown = true
+  } else {
+    Pl[0].attackdown = false
+  }
+  if Pl[0].buttons & BT_USE != 0 {
+    if !Pl[0].usedown { Wi.hurry = true }
+    Pl[0].usedown = true
+  } else {
+    Pl[0].usedown = false
+  }
+  // The pictures on the map go on (WI_updateAnimatedBack).
+  for i in 0..len(Wianims) {
+    if Wi.tics == Wianims[i].nexttic {
+      Wianims[i].ctr = (Wianims[i].ctr + 1) % WI_FRAMES
+      Wianims[i].nexttic = Wi.tics + WI_PERIOD
+    }
+  }
+  let ticks = Wi.tics & 3 == 0
+  if Wi.state == 0 {
+    // WI_updateStats.
+    if Wi.hurry && Wi.stage != 10 {
+      Wi.hurry = false
+      Wi.kills = Wi.allkills
+      Wi.items = Wi.allitems
+      Wi.secrets = Wi.allsecrets
+      Wi.time = Wi.alltime
+      Wi.par = Wi.allpar
+      sound(Sounds, Rnd, SFX_BAREXP, 0)
+      Wi.stage = 10
+    }
+    if Wi.stage == 2 {
+      Wi.kills += 2
+      if ticks { sound(Sounds, Rnd, SFX_PISTOL, 0) }
+      if Wi.kills >= Wi.allkills {
+        Wi.kills = Wi.allkills
+        sound(Sounds, Rnd, SFX_BAREXP, 0)
+        Wi.stage += 1
+      }
+    } else if Wi.stage == 4 {
+      Wi.items += 2
+      if ticks { sound(Sounds, Rnd, SFX_PISTOL, 0) }
+      if Wi.items >= Wi.allitems {
+        Wi.items = Wi.allitems
+        sound(Sounds, Rnd, SFX_BAREXP, 0)
+        Wi.stage += 1
+      }
+    } else if Wi.stage == 6 {
+      Wi.secrets += 2
+      if ticks { sound(Sounds, Rnd, SFX_PISTOL, 0) }
+      if Wi.secrets >= Wi.allsecrets {
+        Wi.secrets = Wi.allsecrets
+        sound(Sounds, Rnd, SFX_BAREXP, 0)
+        Wi.stage += 1
+      }
+    } else if Wi.stage == 8 {
+      if ticks { sound(Sounds, Rnd, SFX_PISTOL, 0) }
+      Wi.time = min(Wi.time + 3, Wi.alltime)
+      Wi.par += 3
+      if Wi.par >= Wi.allpar {
+        Wi.par = Wi.allpar
+        if Wi.time >= Wi.alltime {
+          sound(Sounds, Rnd, SFX_BAREXP, 0)
+          Wi.stage += 1
+        }
+      }
+    } else if Wi.stage == 10 {
+      if Wi.hurry {
+        sound(Sounds, Rnd, SFX_SGCOCK, 0)
+        // WI_initShowNextLoc.
+        Wi.state = 1
+        Wi.hurry = false
+        Wi.count = 4 * 35
+        wi_start_anims(Wianims, Rnd, Wi.tics)
+      }
+    } else {
+      Wi.pause -= 1
+      if Wi.pause == 0 {
+        Wi.stage += 1
+        Wi.pause = 35
+      }
+    }
+  } else if Wi.state == 1 {
+    // WI_updateShowNextLoc.
+    Wi.count -= 1
+    if Wi.count == 0 || Wi.hurry {
+      Wi.state = 2
+      Wi.hurry = false
+      Wi.count = 10
+    } else {
+      Wi.pointer = Wi.count & 31 < 20
+    }
+  } else {
+    Wi.count -= 1
+    if Wi.count == 0 { Wi.over = true }
+  }
+  Random.other = Rnd[0].other
+}
+
+// The next level is come to (G_DoWorldDone): after `leave_level`.
+system leave_between() {
+  Wi.on = false
+  Wi.over = false
+}

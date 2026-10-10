@@ -22,8 +22,30 @@ except Exception: pass')
     rm -rf "$into/tmp" && mkdir -p "$into/tmp"
     curl -s -L -m 60 -o "$into/tmp/demo.zip" "$url" || continue
     unzip -q -o "$into/tmp/demo.zip" -d "$into/tmp" 2> /dev/null || continue
+    chmod -R u+w "$into/tmp"
     lump=$(find "$into/tmp" -iname '*.lmp' | head -1)
     [ -n "$lump" ] && cp "$lump" "$into/$name.lmp" && echo "$name: $url"
   done
+done
+# And runs through the whole episode, which go through the screens
+# between the levels: ep1_uv_max through all nine, ep1_nomo through
+# eight. (ep1_uv_speed was recorded with another WAD's first level and
+# never leaves it here; the port and the reference still agree on it.)
+for category in "UV Speed" "UV Max" "NoMo"; do
+  name=ep1_$(echo "$category" | tr 'A-Z ' 'a-z_')
+  [ -f "$into/$name.lmp" ] && continue
+  url=$(curl -s -m 30 -G "https://dsdarchive.com/api/demos/records" \
+    --data-urlencode "wad=doom" --data-urlencode "level=Episode 1" \
+    --data-urlencode "category=$category" |
+    python3 -I -c 'import json,sys
+try: print(json.load(sys.stdin)["file"])
+except Exception: pass')
+  [ -z "$url" ] && continue
+  rm -rf "$into/tmp" && mkdir -p "$into/tmp"
+  curl -s -L -m 60 -o "$into/tmp/demo.zip" "$url" || continue
+  unzip -q -o "$into/tmp/demo.zip" -d "$into/tmp" 2> /dev/null || continue
+  chmod -R u+w "$into/tmp"
+  lump=$(find "$into/tmp" -iname '*.lmp' | head -1)
+  [ -n "$lump" ] && cp "$lump" "$into/$name.lmp" && echo "$name: $url"
 done
 rm -rf "$into/tmp"
