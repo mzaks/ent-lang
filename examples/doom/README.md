@@ -55,15 +55,22 @@ them as systems. It is being built; what is here so far:
   one colour map of seeing in the dark are chosen in `items.ent`.
 - After the last level its text is written out, and then the picture
   shown (`tick_finale`, `draw_finale`).
-- Not yet: the border of a smaller view, the title and the menus, the
-  melt from one screen to the next; the monsters and weapons that are
-  not in the first episode. Ceilings that move and the donut are written but were
+- `shell.ent`: what is around the game: the title, the WAD's three
+  demos played one after another with a picture between them, and the
+  menu over any of it, from which a new game is started in one of four
+  skills.
+- Not yet: the border of a smaller view, the melt from one screen to
+  the next, the music, the game's settings, saving and loading, the
+  fifth skill; the monsters and weapons that are not in the first
+  episode. Ceilings that move and the donut are written but were
   never set off: the shareware levels have no such ceiling, and no demo
   here uses the donut. The sounds were never heard by anyone yet.
-- `doom.ent`: the program, which plays the episode from E1M1 with the
-  keyboard (the arrow keys, A and D to step aside, Shift to run, the
-  space bar to use, the left Ctrl key to shoot, 1 to 7 for a weapon; Tab
-  shows the map).
+- `doom.ent`: the program. It starts with the title and the demos; any
+  key brings the menu (the arrow keys, Enter, Backspace to go back),
+  and a new game plays the episode from E1M1 with the keyboard (the
+  arrow keys, A and D to step aside, Shift to run, the space bar to use,
+  the left Ctrl key to shoot, 1 to 7 for a weapon; Tab shows the map;
+  Esc ends the program).
 - `check/`: programs that print what the port computes, to hold against
   the reference.
 - `reference/`: what the port is compared against. `fetch.sh` fetches

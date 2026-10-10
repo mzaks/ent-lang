@@ -1,0 +1,316 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// What is around the game (d_main.c's pages, m_menu.c): the title, the
+// WAD's three demos played one after another with a picture between
+// them, and over any of it the menu, from which a new game is started.
+//
+// Not here: the game's settings, saving and loading, and the fifth
+// skill (its monsters are faster and come back, which is not there).
+// The menu opens by any key while no game of the player's is going on;
+// in a game the window's Esc key ends the program.
+import files
+import wad
+import window
+import video
+import random
+import level
+import things
+import demo
+import play
+import tick
+import sounds
+import screen
+
+// `game`: the player's own game is going on; `demo`: a demo is played.
+// `page`: where the round of title, demos and pictures is (0 the title,
+// 1 the first demo, 2 a picture, 3 the second demo, 4 a picture, 5 the
+// third demo), `pagetic`: how long the picture stays. `turn`: the next
+// page is due. `start`: a new game was asked for, of `skill`; `wanted`:
+// a demo is to be started; `fresh`: one of the two, now. `quit`: the
+// program is to end.
+unique Shell {
+  game: bool, demo: bool, page: i32, pagetic: i32, turn: bool, start: bool,
+  skill: i32, wanted: bool, fresh: bool, quit: bool
+}
+
+// The menu: which one is shown (0 none, 1 the main one, 2 the episodes,
+// 3 the skills, 4 and 5 the two pages to read), which of its lines the
+// skull is at, which of the skull's two pictures is shown and for how
+// long still; and which keys were down the tic before.
+const MENU_NONE = 0
+const MENU_MAIN = 1
+const MENU_EPISODE = 2
+const MENU_SKILL = 3
+const MENU_READ1 = 4
+const MENU_READ2 = 5
+unique Menu {
+  which: i32, item: i32, skull: i32, count: i32, any: bool, up: bool,
+  down: bool, enter: bool, back: bool
+}
+const LINEHEIGHT = 16
+const SKULLXOFF = -32
+
+world {
+  Shell.page = -1
+  Shell.turn = true
+  Menu.count = 10
+}
+
+// How many lines a menu has.
+fn menu_lines(which: i32) -> i32 {
+  if which == MENU_MAIN {
+    6
+  } else if which == MENU_EPISODE {
+    3
+  } else if which == MENU_SKILL {
+    5
+  } else {
+    1
+  }
+}
+
+// The keys and what they do to the menu (M_Responder, M_Ticker). Once a
+// tic, before everything else.
+system menu_keys() {
+  let up = Keys.up
+  let down = Keys.down
+  let enter = Keys.enter
+  let back = key_down(259)
+  let any = up || down || enter || back || Keys.space || Keys.left || Keys.right ||
+            key_down(341)
+  let pressed_up = up && !Menu.up
+  let pressed_down = down && !Menu.down
+  let pressed_enter = enter && !Menu.enter
+  let pressed_back = back && !Menu.back
+  let pressed_any = any && !Menu.any
+  Menu.up = up
+  Menu.down = down
+  Menu.enter = enter
+  Menu.back = back
+  Menu.any = any
+  Rnd = [{ play: Random.play, other: Random.other }; 1]
+  if Menu.which == MENU_NONE {
+    // (Any key, while a demo or a picture is shown.)
+    if pressed_any && !Shell.game {
+      Menu.which = MENU_MAIN
+      Menu.item = 0
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+    }
+  } else {
+    let lines = menu_lines(Menu.which)
+    if pressed_down {
+      Menu.item = (Menu.item + 1) % lines
+      sound(Sounds, Rnd, SFX_PSTOP, 0)
+    } else if pressed_up {
+      Menu.item = (Menu.item + lines - 1) % lines
+      sound(Sounds, Rnd, SFX_PSTOP, 0)
+    } else if pressed_back {
+      // Back to the menu before, or out of the first.
+      Menu.which = if Menu.which == MENU_SKILL {
+        MENU_EPISODE
+      } else if Menu.which == MENU_MAIN {
+        MENU_NONE
+      } else {
+        MENU_MAIN
+      }
+      Menu.item = 0
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+    } else if pressed_enter {
+      if Menu.which == MENU_MAIN {
+        if Menu.item == 0 {
+          Menu.which = MENU_EPISODE
+          Menu.item = 0
+          sound(Sounds, Rnd, SFX_PISTOL, 0)
+        } else if Menu.item == 4 {
+          Menu.which = MENU_READ1
+          Menu.item = 0
+          sound(Sounds, Rnd, SFX_PISTOL, 0)
+        } else if Menu.item == 5 {
+          Shell.quit = true
+        } else {
+          // (Not there.)
+          sound(Sounds, Rnd, SFX_OOF, 0)
+        }
+      } else if Menu.which == MENU_EPISODE {
+        if Menu.item == 0 {
+          // (The skill that is asked for first: the middle one.)
+          Menu.which = MENU_SKILL
+          Menu.item = 2
+        } else {
+          // (The other episodes are not in this WAD: how to get them.)
+          Menu.which = MENU_READ1
+          Menu.item = 0
+        }
+        sound(Sounds, Rnd, SFX_PISTOL, 0)
+      } else if Menu.which == MENU_SKILL {
+        if Menu.item < 4 {
+          Shell.start = true
+          Shell.skill = Menu.item
+          Menu.which = MENU_NONE
+          sound(Sounds, Rnd, SFX_PISTOL, 0)
+        } else {
+          sound(Sounds, Rnd, SFX_OOF, 0)
+        }
+      } else if Menu.which == MENU_READ1 {
+        Menu.which = MENU_READ2
+        sound(Sounds, Rnd, SFX_PISTOL, 0)
+      } else {
+        Menu.which = MENU_MAIN
+        Menu.item = 0
+        sound(Sounds, Rnd, SFX_PISTOL, 0)
+      }
+    }
+  }
+  // The skull blinks.
+  Menu.count -= 1
+  if Menu.count <= 0 {
+    Menu.skull ^= 1
+    Menu.count = 8
+  }
+  Random.other = Rnd[0].other
+}
+
+// The next of the round (D_DoAdvanceDemo): a picture for some seconds,
+// or a demo.
+system turn_page() {
+  Shell.turn = false
+  Shell.game = false
+  Shell.demo = false
+  Shell.page = (Shell.page + 1) % 6
+  if Shell.page == 0 {
+    Shell.pagetic = 170
+  } else if Shell.page == 2 || Shell.page == 4 {
+    Shell.pagetic = 200
+  } else {
+    Demo.lump = if Shell.page == 1 {
+      "DEMO1"
+    } else if Shell.page == 3 {
+      "DEMO2"
+    } else {
+      "DEMO3"
+    }
+    Shell.wanted = true
+  }
+}
+
+// A game starts from nothing (G_InitNew): the player's own, of the
+// skill that was chosen, or a demo's, which says what it was played in.
+// After `read_demo` for a demo; before the level is loaded.
+system enter_game() {
+  Shell.fresh = true
+  if Shell.start {
+    Level.episode = 1
+    Level.map = 1
+    Level.skill = Shell.skill
+    Level.nomonsters = false
+    Ticcmds = []
+    Demo.tic = 0
+    Demo.over = false
+  } else {
+    Level.episode = Demo.episode
+    Level.map = Demo.map
+    Level.skill = Demo.skill
+    Level.nomonsters = Demo.nomonsters
+  }
+  Level.exited = false
+  Level.secret = false
+  Level.reborn = false
+  Wi.on = false
+  Wi.over = false
+  Wi.didsecret = false
+  Fin.on = false
+  Random.play = 0
+  Random.other = 0
+}
+
+// The level is loaded: the game goes on from here.
+system entered() {
+  Shell.game = Shell.start
+  Shell.demo = !Shell.start
+  Shell.start = false
+  Shell.wanted = false
+  Shell.fresh = false
+  Shell.turn = false
+}
+
+// A demo that is over is followed by the next of the round
+// (G_CheckDemoStatus). After a tic of the game.
+system demo_end() {
+  if Shell.demo && (Demo.over || Level.exited) { Shell.turn = true }
+}
+
+// A picture of the round stays its time (D_PageTicker).
+system page_tick() {
+  Shell.pagetic -= 1
+  if Shell.pagetic < 0 { Shell.turn = true }
+}
+
+// The picture of the round that is shown (D_PageDrawer).
+system draw_page() {
+  let name = if Shell.page == 0 {
+    pic(Lumps, "TITLEPIC")
+  } else if Shell.page == 2 {
+    pic(Lumps, "CREDIT")
+  } else {
+    pic(Lumps, "HELP2")
+  }
+  draw_patch(Screen, Bytes, name, 0, 0)
+}
+
+// The lines of a menu, one under the other, and the skull at one of
+// them.
+proc menu_skull(screen: mut Screen, bytes: Bytes, lumps: Lumps, x: i32, y: i32,
+                skull: i32) {
+  draw_patch(screen, bytes,
+             if skull == 0 { pic(lumps, "M_SKULL1") } else { pic(lumps, "M_SKULL2") },
+             x, y)
+}
+
+// The menu over whatever else is on the screen (M_Drawer).
+system draw_menu() {
+  if Menu.which == MENU_MAIN {
+    draw_patch(Screen, Bytes, pic(Lumps, "M_DOOM"), 94, 2)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_NGAME"), 97, 64)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_OPTION"), 97, 64 + LINEHEIGHT)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_LOADG"), 97, 64 + 2 * LINEHEIGHT)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_SAVEG"), 97, 64 + 3 * LINEHEIGHT)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_RDTHIS"), 97, 64 + 4 * LINEHEIGHT)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_QUITG"), 97, 64 + 5 * LINEHEIGHT)
+    menu_skull(Screen, Bytes, Lumps, 97 + SKULLXOFF, 64 - 5 + Menu.item * LINEHEIGHT,
+               Menu.skull)
+  } else if Menu.which == MENU_EPISODE {
+    draw_patch(Screen, Bytes, pic(Lumps, "M_EPISOD"), 54, 38)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_EPI1"), 48, 63)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_EPI2"), 48, 63 + LINEHEIGHT)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_EPI3"), 48, 63 + 2 * LINEHEIGHT)
+    menu_skull(Screen, Bytes, Lumps, 48 + SKULLXOFF, 63 - 5 + Menu.item * LINEHEIGHT,
+               Menu.skull)
+  } else if Menu.which == MENU_SKILL {
+    draw_patch(Screen, Bytes, pic(Lumps, "M_NEWG"), 96, 14)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_SKILL"), 54, 38)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_JKILL"), 48, 63)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_ROUGH"), 48, 63 + LINEHEIGHT)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_HURT"), 48, 63 + 2 * LINEHEIGHT)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_ULTRA"), 48, 63 + 3 * LINEHEIGHT)
+    draw_patch(Screen, Bytes, pic(Lumps, "M_NMARE"), 48, 63 + 4 * LINEHEIGHT)
+    menu_skull(Screen, Bytes, Lumps, 48 + SKULLXOFF, 63 - 5 + Menu.item * LINEHEIGHT,
+               Menu.skull)
+  } else if Menu.which == MENU_READ1 {
+    // (What to read: how to get the other episodes, then the keys.)
+    draw_patch(Screen, Bytes, pic(Lumps, "HELP2"), 0, 0)
+    menu_skull(Screen, Bytes, Lumps, 280 + SKULLXOFF, 185 - 5, Menu.skull)
+  } else if Menu.which == MENU_READ2 {
+    draw_patch(Screen, Bytes, pic(Lumps, "HELP1"), 0, 0)
+  }
+}

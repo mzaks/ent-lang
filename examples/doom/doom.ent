@@ -34,6 +34,7 @@ import sounds
 import audio
 import screen
 import between
+import shell
 
 // As many bytes as the biggest WAD.
 capacity Bytes 16777216
@@ -123,10 +124,47 @@ schedule setup() {
   init_view_tables()
 }
 
-schedule frame() run_if !Wi.on && !Fin.on {
+// In the colours as they are.
+system plain() { Shade.palette = 0 }
+
+// What every tic begins with: the keys and the menu; the next of the
+// round of title, demos and pictures; a new game or a demo started.
+schedule shell() {
   begin()
-  read_keys()
   begin_sounds()
+  menu_keys()
+  turn_page() run_if Shell.turn
+  read_demo() run_if Shell.wanted
+  enter_game() run_if Shell.start || Shell.wanted
+  leave_level() run_if Shell.fresh
+  quiet() run_if Shell.fresh
+  load_level() run_if Shell.fresh
+  spawn_things() run_if Shell.fresh
+  spawn_specials() run_if Shell.fresh
+  start_player(true) run_if Shell.fresh
+  start_weapon() run_if Shell.fresh
+  start_status() run_if Shell.fresh
+  start_messages() run_if Shell.fresh
+  fit_automap() run_if Shell.fresh
+  arrive() run_if Shell.fresh
+  entered() run_if Shell.fresh
+}
+
+// A picture of the round, and the menu over it.
+schedule page() run_if !Shell.game && !Shell.demo {
+  page_tick()
+  hear()
+  plain()
+  clear_screen()
+  draw_page()
+  draw_menu()
+  show_screen()
+  present()
+}
+
+// A tic of a level: the player's game by the keys, a demo by its own.
+schedule frame() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on {
+  read_keys() run_if Shell.game
   think_player()
   player_sector()
   use_lines()
@@ -151,37 +189,36 @@ schedule frame() run_if !Wi.on && !Fin.on {
   draw_status()
   draw_messages()
   draw_automap() run_if Shown.map
+  draw_menu()
   show_screen()
   present()
   complete_level()
+  demo_end()
 }
 
-// Between two levels: what was done in the one is counted up, and the
-// way to the other shown, in the colours as they are.
-system plain() { Shade.palette = 0 }
 // After the last level: the text, and then the picture, for as long as
 // the window is open.
-schedule ending() run_if Fin.on {
-  begin()
-  read_keys()
-  begin_sounds()
+schedule ending() run_if (Shell.game || Shell.demo) && Fin.on {
+  read_keys() run_if Shell.game
   tick_finale()
   hear()
   plain()
   clear_screen()
   draw_finale()
+  draw_menu()
   show_screen()
   present()
 }
-schedule between() run_if Wi.on {
-  begin()
-  read_keys()
-  begin_sounds()
+// Between two levels: what was done in the one is counted up, and the
+// way to the other shown, in the colours as they are.
+schedule between() run_if (Shell.game || Shell.demo) && Wi.on {
+  read_keys() run_if Shell.game
   tick_between()
   hear()
   plain()
   clear_screen()
   draw_between()
+  draw_menu()
   show_screen()
   present()
 }
@@ -218,10 +255,12 @@ schedule again() run_if Level.reborn {
 main {
   setup()
   loop {
+    shell()
     ending()
     onward()
     between()
     frame()
     again()
-  } until Window.closed
+    page()
+  } until Window.closed || Shell.quit
 }
