@@ -266,7 +266,8 @@ system use_lines() {
 // where the level is left, 2 where by the secret way out, else 0.
 proc work_lines(triggered: mut Triggered, lines: mut Lines,
                 sectors: mut Sectors, movers: mut Movers, lights: mut Lights,
-                inv: Inv, tm: mut Tm, rnd: mut Rnd) -> i32 {
+                inv: Inv, tm: mut Tm, rnd: mut Rnd, sides: mut Sides,
+                switches: Switches, buttons: mut Buttons) -> i32 {
   var out = 0
   for t in 0..len(triggered) {
     let line = triggered[t].line
@@ -281,6 +282,7 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
        ((used && triggered[t].side == 0 && (special == 11 || special == 51)) ||
         (!used && (special == 52 || special == 124))) {
       out = if special == 51 || special == 124 { 2 } else { 1 }
+      if used { change_switch(lines, sides, switches, buttons, line, false) }
     }
     if used && triggered[t].side == 0 &&
        (special == 1 || special == 26 || special == 27 || special == 28 ||
@@ -702,6 +704,11 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
         if !boss && !triggers[row].again && (!used || started) {
           lines[line].special = 0
         }
+        // A switch shows that it was used, when it started something;
+        // one that was shot, always.
+        if !boss && ((used && started) || triggered[t].shot) {
+          change_switch(lines, sides, switches, buttons, line, triggers[row].again)
+        }
       }
     }
   }
@@ -712,7 +719,8 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
 // After `use_lines`.
 system trigger_lines() {
   Rnd = [{ play: Random.play }; 1]
-  let out = work_lines(Triggered, Lines, Sectors, Movers, Lights, Inv, Tm, Rnd)
+  let out = work_lines(Triggered, Lines, Sectors, Movers, Lights, Inv, Tm, Rnd,
+                       Sides, Switches, Buttons)
   Random.play = Rnd[0].play
   if out != 0 {
     Level.exited = true

@@ -204,15 +204,15 @@ proc render_masked_seg_range(screen: mut Screen, bytes: Bytes, fuzz: mut Fuzz,
                              openings: mut Openings, drawsegs: Drawsegs,
                              segs: Segs, lines: Lines, sides: Sides,
                              sectors: Sectors, textures: Textures,
-                             columns: TextureColumns, lights: Scalelight,
-                             ds: i32, x1: i32, x2: i32, viewz: i32,
+                             columns: TextureColumns, textrans: Textrans,
+                             lights: Scalelight, ds: i32, x1: i32, x2: i32, viewz: i32,
                              centery: i32, centeryfrac: i32, left: i32,
                              top: i32, extralight: i32) {
   let seg = drawsegs[ds].seg
   let front = segs[seg].front
   let back = segs[seg].back
   let side = segs[seg].side
-  let texnum = sides[side].midtexture
+  let texnum = textrans[sides[side].midtexture].pic
   var lightnum = (sectors[front].lightlevel >> LIGHTSEGSHIFT) + extralight
   if segs[seg].y1 == segs[seg].y2 {
     lightnum -= 1
@@ -394,7 +394,7 @@ system draw_masked() {
           if Drawsegs[ds].maskedtexturecol >= 0 {
             render_masked_seg_range(Screen, Bytes, Fuzz, View.height, Openings, Drawsegs, Segs,
                                     Lines, Sides, Sectors, Textures,
-                                    TextureColumns, Scalelight, ds, r1, r2, vz,
+                                    TextureColumns, Textrans, Scalelight, ds, r1, r2, vz,
                                     View.centery, View.centeryfrac, View.x,
                                     View.y, View.extralight)
           }
@@ -454,7 +454,7 @@ system draw_masked() {
     let ds = len(Drawsegs) - 1 - back
     if Drawsegs[ds].maskedtexturecol >= 0 {
       render_masked_seg_range(Screen, Bytes, Fuzz, View.height, Openings, Drawsegs, Segs, Lines,
-                              Sides, Sectors, Textures, TextureColumns,
+                              Sides, Sectors, Textures, TextureColumns, Textrans,
                               Scalelight, ds, Drawsegs[ds].x1, Drawsegs[ds].x2,
                               vz, View.centery, View.centeryfrac, View.x,
                               View.y, View.extralight)

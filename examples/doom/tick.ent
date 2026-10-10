@@ -64,7 +64,7 @@ system think_things(late: bool) {
     // (The lines it set off, at once.)
     if len(Triggered) != 0 {
       let out = work_lines(Triggered, Lines, Sectors, Movers, Lights, Inv, Tm,
-                           Rnd)
+                           Rnd, Sides, Switches, Buttons)
       if out != 0 {
         Level.exited = true
         Level.secret = out == 2

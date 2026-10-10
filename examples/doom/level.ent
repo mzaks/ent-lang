@@ -19,6 +19,9 @@ import wad
 import fixed
 import data
 
+// The tic of the level that is played, counted from when it started.
+unique Clock { leveltime: i32 }
+
 // Which lump after the level's name is what (doomdata.h).
 const ML_THINGS = 1
 const ML_LINEDEFS = 2

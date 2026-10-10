@@ -848,10 +848,11 @@ system draw_walls() {
         bsilheight = 0x7fffffff
         tsilheight = 0x80000000
         // One side: one texture from the ceiling to the floor.
-        midtexture = Sides[side].midtexture
+        let mid = Sides[side].midtexture
+        midtexture = Textrans[mid].pic
         rw_midtexturemid = if Lines[line].flags & ML_DONTPEGBOTTOM != 0 {
           // (Its bottom at the floor.)
-          frontfloor + (Textures[midtexture].height << FRACBITS) - vz
+          frontfloor + (Textures[mid].height << FRACBITS) - vz
         } else {
           worldtop
         }
@@ -903,15 +904,16 @@ system draw_walls() {
           markfloor = true
         }
         if worldhigh < worldtop {
-          toptexture = Sides[side].toptexture
+          let high = Sides[side].toptexture
+          toptexture = Textrans[high].pic
           rw_toptexturemid = if Lines[line].flags & ML_DONTPEGTOP != 0 {
             worldtop
           } else {
-            backceiling + (Textures[toptexture].height << FRACBITS) - vz
+            backceiling + (Textures[high].height << FRACBITS) - vz
           }
         }
         if worldlow > worldbottom {
-          bottomtexture = Sides[side].bottomtexture
+          bottomtexture = Textrans[Sides[side].bottomtexture].pic
           rw_bottomtexturemid = if Lines[line].flags & ML_DONTPEGBOTTOM != 0 {
             worldtop
           } else {
@@ -1153,7 +1155,7 @@ system draw_planes() {
         }
       }
     } else {
-      let source = Lumps[Data.firstflat + Visplanes[pl].picnum].at
+      let source = Lumps[Data.firstflat + Flattrans[Visplanes[pl].picnum].pic].at
       let planeheight = abs(Visplanes[pl].height - vz)
       let light = min(max((Visplanes[pl].lightlevel >> LIGHTSEGSHIFT) + View.extralight, 0),
                       LIGHTLEVELS - 1) * MAXLIGHTZ

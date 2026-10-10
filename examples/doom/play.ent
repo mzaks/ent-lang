@@ -32,8 +32,6 @@ import things
 import demo
 import items
 
-// The tic of the level that is played, counted from when it started.
-unique Clock { leveltime: i32 }
 // What the player takes to the next level of itself: its health.
 unique Kept { health: i32 }
 

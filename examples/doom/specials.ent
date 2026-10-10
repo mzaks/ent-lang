@@ -20,6 +20,8 @@
 import fixed
 import random
 import level
+import wad
+import data
 
 // A light of a sector that changes: which kind it is, its sector, the
 // tics until it changes next, and what it changes between.
@@ -181,11 +183,26 @@ fn sector_from_tag(sectors: Sectors, tag: i32, start: i32) -> i32 {
   found
 }
 
+// A switch that goes back after a second: the line, which of its
+// textures (0 the top, 1 the middle, 2 the bottom), the texture it had,
+// and how long still.
+buffer Buttons { line: i32, where: i32, texture: i32, timer: i32 } capacity 16
+const BUTTONTIME = 35
+// The sides whose texture slides along (the lines with the special 48).
+buffer Scrollers { side: i32 } capacity 64
+
 // Starts what the level's sectors do by themselves (P_SpawnSpecials).
 // After `spawn_things`: the random numbers go on from there.
 system spawn_specials() {
   Lights = []
   Movers = []
+  Buttons = [{ line: 0, where: 0, texture: 0, timer: 0 }; 16]
+  Scrollers = []
+  for i in 0..len(Lines) {
+    if Lines[i].special == 48 && len(Scrollers) < 64 {
+      Scrollers += { side: Lines[i].front }
+    }
+  }
   Secrets = 0
   for i in 0..len(Sectors) {
     let special = Sectors[i].special
@@ -310,6 +327,160 @@ system run_lights() {
             Sectors[sector].lightlevel = Lights[i].minlight
             Lights[i].count = Lights[i].darktime
           }
+        }
+      }
+    }
+  }
+}
+
+// The rows of pictures that move: the last and the first of each, a
+// flat's or a texture's (animdefs; those of the other episodes are not
+// in this WAD and are left out where they are looked for).
+table animdefs { texture: bool, last: text[8], first: text[8] } = [
+  { texture: false, last: "NUKAGE3", first: "NUKAGE1" },
+  { texture: false, last: "FWATER4", first: "FWATER1" },
+  { texture: false, last: "SWATER4", first: "SWATER1" },
+  { texture: false, last: "LAVA4", first: "LAVA1" },
+  { texture: false, last: "BLOOD3", first: "BLOOD1" },
+  { texture: false, last: "RROCK08", first: "RROCK05" },
+  { texture: false, last: "SLIME04", first: "SLIME01" },
+  { texture: false, last: "SLIME08", first: "SLIME05" },
+  { texture: false, last: "SLIME12", first: "SLIME09" },
+  { texture: true, last: "BLODGR4", first: "BLODGR1" },
+  { texture: true, last: "SLADRIP3", first: "SLADRIP1" },
+  { texture: true, last: "BLODRIP4", first: "BLODRIP1" },
+  { texture: true, last: "FIREWALL", first: "FIREWALA" },
+  { texture: true, last: "GSTFONT3", first: "GSTFONT1" },
+  { texture: true, last: "FIRELAVA", first: "FIRELAV3" },
+  { texture: true, last: "FIREMAG3", first: "FIREMAG1" },
+  { texture: true, last: "FIREBLU2", first: "FIREBLU1" },
+  { texture: true, last: "ROCKRED3", first: "ROCKRED1" },
+  { texture: true, last: "BFALL4", first: "BFALL1" },
+  { texture: true, last: "SFALL4", first: "SFALL1" },
+  { texture: true, last: "WFALL4", first: "WFALL1" },
+  { texture: true, last: "DBRAIN4", first: "DBRAIN1" }
+]
+buffer Anims { texture: bool, basepic: i32, numpics: i32 } capacity 32
+
+// The textures of switches, off and on (alphSwitchList, the first
+// episode's), and by their numbers, each next to its other.
+table switchnames { off: text[8], on: text[8] } = [
+  { off: "SW1BRCOM", on: "SW2BRCOM" }, { off: "SW1BRN1", on: "SW2BRN1" },
+  { off: "SW1BRN2", on: "SW2BRN2" }, { off: "SW1BRNGN", on: "SW2BRNGN" },
+  { off: "SW1BROWN", on: "SW2BROWN" }, { off: "SW1COMM", on: "SW2COMM" },
+  { off: "SW1COMP", on: "SW2COMP" }, { off: "SW1DIRT", on: "SW2DIRT" },
+  { off: "SW1EXIT", on: "SW2EXIT" }, { off: "SW1GRAY", on: "SW2GRAY" },
+  { off: "SW1GRAY1", on: "SW2GRAY1" }, { off: "SW1METAL", on: "SW2METAL" },
+  { off: "SW1PIPE", on: "SW2PIPE" }, { off: "SW1SLAD", on: "SW2SLAD" },
+  { off: "SW1STARG", on: "SW2STARG" }, { off: "SW1STON1", on: "SW2STON1" },
+  { off: "SW1STON2", on: "SW2STON2" }, { off: "SW1STONE", on: "SW2STONE" },
+  { off: "SW1STRTN", on: "SW2STRTN" }
+]
+buffer Switches { texture: i32 } capacity 64
+
+// A switch that was used shows its other texture, and one that can be
+// used again goes back after a second (P_ChangeSwitchTexture,
+// P_StartButton); one that cannot is no switch any more.
+proc change_switch(lines: mut Lines, sides: mut Sides, switches: Switches,
+                   buttons: mut Buttons, line: i32, again: bool) {
+  if !again { lines[line].special = 0 }
+  let side = lines[line].front
+  var where = -1
+  var was = 0
+  for i in 0..len(switches) {
+    if where < 0 {
+      let texture = switches[i].texture
+      if texture == sides[side].toptexture {
+        where = 0
+        sides[side].toptexture = switches[i ^ 1].texture
+      } else if texture == sides[side].midtexture {
+        where = 1
+        sides[side].midtexture = switches[i ^ 1].texture
+      } else if texture == sides[side].bottomtexture {
+        where = 2
+        sides[side].bottomtexture = switches[i ^ 1].texture
+      }
+      was = texture
+    }
+  }
+  if where >= 0 && again {
+    // (A line has one button at a time.)
+    var free = -1
+    var has = false
+    for i in 0..len(buttons) {
+      if buttons[i].timer != 0 && buttons[i].line == line { has = true }
+      if free < 0 && buttons[i].timer == 0 { free = i }
+    }
+    if !has && free >= 0 {
+      buttons[free].line = line
+      buttons[free].where = where
+      buttons[free].texture = was
+      buttons[free].timer = BUTTONTIME
+    }
+  }
+}
+
+// The rows of pictures that move and the switches are found
+// (P_InitPicAnims, P_InitSwitchList). After `init_data`.
+system init_specials() {
+  Anims = []
+  for i in 0..len(animdefs) {
+    if animdefs[i].texture {
+      let first = texture_number(Textures, lump_name(animdefs[i].first))
+      if first >= 0 {
+        Anims += {
+          texture: true, basepic: first,
+          numpics: texture_number(Textures, lump_name(animdefs[i].last)) - first + 1
+        }
+      }
+    } else {
+      let first = lump_number(Lumps, lump_name(animdefs[i].first))
+      if first >= 0 {
+        Anims += {
+          texture: false, basepic: first - Data.firstflat,
+          numpics: lump_number(Lumps, lump_name(animdefs[i].last)) - first + 1
+        }
+      }
+    }
+  }
+  Switches = []
+  for i in 0..len(switchnames) {
+    Switches += { texture: texture_number(Textures, lump_name(switchnames[i].off)) }
+    Switches += { texture: texture_number(Textures, lump_name(switchnames[i].on)) }
+  }
+}
+
+// What a level's pictures do in a tic (P_UpdateSpecials): those that
+// move show the next of their row every eight tics, a wall that slides
+// slides on, and a switch that goes back does when its time is up.
+// After the things have had their tic.
+system update_specials() {
+  for a in 0..len(Anims) {
+    let base = Anims[a].basepic
+    let count = Anims[a].numpics
+    for i in base..base + count {
+      let pic = base + (Clock.leveltime / 8 + i) % count
+      if Anims[a].texture {
+        Textrans[i].pic = pic
+      } else {
+        Flattrans[i].pic = pic
+      }
+    }
+  }
+  for i in 0..len(Scrollers) {
+    Sides[Scrollers[i].side].textureoffset += FRACUNIT
+  }
+  for i in 0..len(Buttons) {
+    if Buttons[i].timer != 0 {
+      Buttons[i].timer -= 1
+      if Buttons[i].timer == 0 {
+        let side = Lines[Buttons[i].line].front
+        if Buttons[i].where == 0 {
+          Sides[side].toptexture = Buttons[i].texture
+        } else if Buttons[i].where == 1 {
+          Sides[side].midtexture = Buttons[i].texture
+        } else {
+          Sides[side].bottomtexture = Buttons[i].texture
         }
       }
     }

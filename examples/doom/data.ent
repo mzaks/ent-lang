@@ -77,6 +77,13 @@ fn get_column(textures: Textures, columns: TextureColumns, texture: i32,
   columns[textures[texture].columns + (column & textures[texture].mask)].at
 }
 
+// The texture and the flat that is drawn for each, by their numbers:
+// itself, but for those that move, of which another of their row is
+// drawn each few tics (texturetranslation, flattranslation; see
+// `update_specials`).
+buffer Textrans { pic: i32 } capacity 4096
+buffer Flattrans { pic: i32 } capacity 4096
+
 // Reads the textures and puts their columns together (R_InitTextures,
 // R_GenerateLookup, R_GenerateComposite), and finds the flats and the
 // colour maps (R_InitFlats, R_InitColormaps).
@@ -178,4 +185,8 @@ system init_data() {
   Data.colormaps = Lumps[lump_number(Lumps, lump_name("COLORMAP"))].at
   Data.skyflatnum = lump_number(Lumps, lump_name("F_SKY1")) - Data.firstflat
   Data.skytexture = texture_number(Textures, lump_name("SKY1"))
+  Textrans = []
+  for i in 0..len(Textures) { Textrans += { pic: i } }
+  Flattrans = []
+  for i in 0..Data.numflats { Flattrans += { pic: i } }
 }
