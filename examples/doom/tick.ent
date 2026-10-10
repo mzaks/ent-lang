@@ -43,7 +43,7 @@ import movers
 system think_things(late: bool) {
   Env = [{
     reject: Lumps[Level.lump + ML_REJECT].at, skill: Level.skill,
-    sky: Data.skyflatnum, leveltime: Clock.leveltime
+    sky: Data.skyflatnum, leveltime: Clock.leveltime, map: Level.map
   }; 1]
   for e, m: mut Mobj in turn by m.id
       where !m.gone && (m.id > Spawned.links) == late &&

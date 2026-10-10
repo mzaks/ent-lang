@@ -103,6 +103,32 @@ const MAPBLOCKSHIFT = FRACBITS + 7
 const MAPBLOCKSIZE = 128 * FRACUNIT
 const MAPBTOFRAC = 7
 
+// The square a thing at (x, y) is put in (P_SetThingPosition): its
+// number, row by row, or -1 where the blockmap has none there. A thing
+// keeps the number it was given when it was last put somewhere, and is
+// found in the square that has that number now (`block_x`, `block_y`:
+// which that is, -1 if none): the two differ once a shot has crossed
+// more than the reference has room for, which overwrites where the
+// blockmap starts and how wide it is (see `path_lines`).
+fn block_at(bmap: Bmap, x: i32, y: i32) -> i32 {
+  let bx = (x - bmap[0].orgx) >> MAPBLOCKSHIFT
+  let by = (y - bmap[0].orgy) >> MAPBLOCKSHIFT
+  if bx >= 0 && bx < bmap[0].width && by >= 0 && by < bmap[0].height {
+    by * bmap[0].width + bx
+  } else {
+    -1
+  }
+}
+fn block_found(bmap: Bmap, block: i32) -> bool {
+  block >= 0 && bmap[0].width > 0 && block / max(bmap[0].width, 1) < bmap[0].height
+}
+fn block_x(bmap: Bmap, block: i32) -> i32 {
+  if block_found(bmap, block) { block % max(bmap[0].width, 1) } else { -1 }
+}
+fn block_y(bmap: Bmap, block: i32) -> i32 {
+  if block_found(bmap, block) { block / max(bmap[0].width, 1) } else { -1 }
+}
+
 // A piece of a line that is one side of a subsector: its ends, the angle
 // it runs at, how far along its line it starts, its line and the side of
 // it that is seen, and the sectors in front of it and behind it (-1:

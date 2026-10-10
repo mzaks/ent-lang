@@ -58,11 +58,13 @@ buffer Pl {
 // the floor and ceiling there, the lowest floor it touches, the line
 // that made the ceiling (-1: none); the number of the looking-through
 // (see `Lines`); what sliding found; how many times a thing was put
-// somewhere; and the thing a missile ran into (`hit`, its `id`; 0: none).
+// somewhere; the thing a missile ran into (`hit`, its `id`; 0: none);
+// and what a path that crossed too much wrote over the slope of the
+// player's shots (`overslope`, if `overset`: see `path_lines`).
 buffer Tm {
   floorz: i32, ceilingz: i32, dropoffz: i32, ceilingline: i32,
   validcount: i32, bestslidefrac: i32, bestslideline: i32, links: i32,
-  hit: i32
+  hit: i32, overslope: i32, overset: bool
 } capacity 1
 
 // The lines with something special that a place that was checked
@@ -74,12 +76,13 @@ buffer Touched { id: i32, z: i32 } capacity 1024
 // The lines the player set off this tic, in their order: used (and from
 // which side: 0 its front), or walked over (and the side come from).
 // (`player`: by the player, not by a monster, which sets off less.)
-// (`shot`: by a shot that hit it.)
+// (`shot`: by a shot that hit it. `boss`: no line, but the last of the
+// barons dead, which lowers the floors with the tag 666.)
 buffer Triggered {
-  line: i32, used: bool, side: i32, player: bool, shot: bool
+  line: i32, used: bool, side: i32, player: bool, shot: bool, boss: bool
 } capacity 256
 // (`thing`: the `id` of a thing a shot's path crosses; 0 for a line.)
-buffer Intercepts { frac: i32, line: i32, thing: i32 } capacity 256
+buffer Intercepts { frac: i32, line: i32, thing: i32 } capacity 2048
 
 // How far from the player a thing is taken into `Near`: more than a
 // tic's way and the widest two things.
@@ -232,15 +235,21 @@ proc gather_near(things: Mobj, me: entity, bmap: Bmap, near: mut Near,
   order = []
   let x = things[me].x
   let y = things[me].y
-  for o, other in things
-      where o != me && !other.gone && other.flags & MF_NOBLOCKMAP == 0 &&
-            abs(other.x - x) < NEARREACH && abs(other.y - y) < NEARREACH {
-    near += {
-      id: other.id, x: other.x, y: other.y, z: other.z, radius: other.radius,
-      height: other.height, flags: other.flags, type: other.type,
-      sprite: other.sprite, bx: (other.x - bmap[0].orgx) >> MAPBLOCKSHIFT,
-      by: (other.y - bmap[0].orgy) >> MAPBLOCKSHIFT, linked: other.linked,
-      gone: false
+  let xl = (x - NEARREACH - bmap[0].orgx) >> MAPBLOCKSHIFT
+  let xh = (x + NEARREACH - bmap[0].orgx) >> MAPBLOCKSHIFT
+  let yl = (y - NEARREACH - bmap[0].orgy) >> MAPBLOCKSHIFT
+  let yh = (y + NEARREACH - bmap[0].orgy) >> MAPBLOCKSHIFT
+  for o, other in things where o != me && !other.gone && other.block >= 0 {
+    // (By the square it is found in, which is where it is unless the
+    // blockmap was written over.)
+    let bx = block_x(bmap, other.block)
+    let by = block_y(bmap, other.block)
+    if bx >= xl && bx <= xh && by >= yl && by <= yh && bx >= 0 {
+      near += {
+        id: other.id, x: other.x, y: other.y, z: other.z, radius: other.radius,
+        height: other.height, flags: other.flags, type: other.type,
+        sprite: other.sprite, bx: bx, by: by, linked: other.linked, gone: false
+      }
     }
   }
   for i in 0..len(near) {
@@ -386,11 +395,35 @@ proc check_position(lines: mut Lines, sectors: Sectors,
 // The lines a path from (x1, y1) to (x2, y2) crosses, into `Intercepts`
 // with how far along it each is (P_PathTraverse with PT_ADDLINES,
 // PIT_AddLineIntercepts).
+// A line or a thing that a path crosses is noted. The reference has
+// room for 128 of them and notes more all the same, over what lies
+// after: where the blockmap starts, how wide and how high it is, and the
+// slope of the player's shots are then what was noted there
+// (InterceptsOverrun). Some levels are played so.
+proc add_intercept(intercepts: mut Intercepts, bmap: mut Bmap, tm: mut Tm,
+                   frac: i32, line: i32, thing: i32) {
+  let n = len(intercepts)
+  intercepts += { frac: frac, line: line, thing: thing }
+  if n > 128 {
+    let isaline = (thing == 0) as i32
+    if n == 142 {
+      tm[0].overslope = isaline
+      tm[0].overset = true
+    }
+    if n == 147 { bmap[0].width = isaline }
+    if n == 148 {
+      bmap[0].orgx = frac
+      bmap[0].orgy = isaline
+    }
+    if n == 149 { bmap[0].height = frac }
+  }
+}
+
 // With `addthings`, the things in the squares it goes through too, each
 // by the diagonal of its square that lies across the path
 // (PIT_AddThingIntercepts).
 proc path_lines(things: Mobj, addthings: bool, lines: mut Lines, bytes: Bytes,
-                bmap: Bmap, tm: mut Tm, intercepts: mut Intercepts,
+                bmap: mut Bmap, tm: mut Tm, intercepts: mut Intercepts,
                 x1in: i32, y1in: i32, x2in: i32, y2in: i32) {
   tm[0].validcount += 1
   let validcount = tm[0].validcount
@@ -461,16 +494,19 @@ proc path_lines(things: Mobj, addthings: bool, lines: mut Lines, bytes: Bytes,
             if s1 != s2 {
               let frac = intercept_vector(tx, ty, tdx, tdy, lines[l].x1,
                                           lines[l].y1, lines[l].dx, lines[l].dy)
-              if frac >= 0 { intercepts += { frac: frac, line: l, thing: 0 } }
+              if frac >= 0 { add_intercept(intercepts, bmap, tm, frac, l, 0) }
             }
           }
         }
         if addthings {
           let positive = tdx ^ tdy > 0
-          for other in things
-              where !other.gone && other.flags & MF_NOBLOCKMAP == 0 &&
-                    (other.x - orgx) >> MAPBLOCKSHIFT == mapx &&
-                    (other.y - orgy) >> MAPBLOCKSHIFT == mapy {
+          let here = if mapx >= 0 && mapy >= 0 && mapx < bmap[0].width &&
+                        mapy < bmap[0].height {
+            mapy * bmap[0].width + mapx
+          } else {
+            -2
+          }
+          for other in things where !other.gone && other.block == here {
             let ax = other.x - other.radius
             let ay = if positive { other.y + other.radius } else { other.y - other.radius }
             let bx = other.x + other.radius
@@ -478,7 +514,7 @@ proc path_lines(things: Mobj, addthings: bool, lines: mut Lines, bytes: Bytes,
             if point_on_divline_side(ax, ay, tx, ty, tdx, tdy) !=
                point_on_divline_side(bx, by, tx, ty, tdx, tdy) {
               let frac = intercept_vector(tx, ty, tdx, tdy, ax, ay, bx - ax, by - ay)
-              if frac >= 0 { intercepts += { frac: frac, line: 0, thing: other.id } }
+              if frac >= 0 { add_intercept(intercepts, bmap, tm, frac, 0, other.id) }
             }
           }
         }
@@ -500,7 +536,7 @@ proc path_lines(things: Mobj, addthings: bool, lines: mut Lines, bytes: Bytes,
 // if it is nearer than what was found (P_TraverseIntercepts with
 // PTR_SlideTraverse).
 proc slide_traverse(lines: mut Lines, sectors: Sectors, bytes: Bytes,
-                    bmap: Bmap, tm: mut Tm, intercepts: mut Intercepts,
+                    bmap: mut Bmap, tm: mut Tm, intercepts: mut Intercepts,
                     things: Mobj, me: entity, x1: i32, y1: i32, x2: i32, y2: i32) {
   path_lines(things, false, lines, bytes, bmap, tm, intercepts, x1, y1, x2, y2)
   var left = len(intercepts)
@@ -604,7 +640,8 @@ system start_player() {
   }; 1]
   Tm = [{
     floorz: 0, ceilingz: 0, dropoffz: 0, ceilingline: -1, validcount: 1,
-    bestslidefrac: 0, bestslideline: 0, links: Spawned.links, hit: 0
+    bestslidefrac: 0, bestslideline: 0, links: Spawned.links, hit: 0,
+    overslope: 0, overset: false
   }; 1]
   // G_PlayerReborn: a pistol, fifty bullets and two fists.
   Inv = [{

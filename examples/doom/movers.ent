@@ -46,7 +46,7 @@ unique Nofit: i32
 // reach: the line's number twice, and one more if the player is behind
 // it; -1 if there is none, or a wall comes first (P_UseLines,
 // PTR_UseTraverse).
-proc use_line(lines: mut Lines, sectors: Sectors, bytes: Bytes, bmap: Bmap,
+proc use_line(lines: mut Lines, sectors: Sectors, bytes: Bytes, bmap: mut Bmap,
               tm: mut Tm, intercepts: mut Intercepts, things: Mobj, me: entity) -> i32 {
   let fine = (things[me].angle >> ANGLETOFINESHIFT) as i32
   path_lines(things, false, lines, bytes, bmap, tm, intercepts, things[me].x,
@@ -212,7 +212,7 @@ system use_lines() {
                         Spawned.player)
     if used >= 0 {
       Triggered += { line: used >> 1, used: true, side: used & 1, player: true,
-                     shot: false }
+                     shot: false, boss: false }
     }
   }
   Pl[0].usedown = down
@@ -231,8 +231,9 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
   var out = 0
   for t in 0..len(triggered) {
     let line = triggered[t].line
-    let special = lines[line].special
-    let tag = lines[line].tag
+    let boss = triggered[t].boss
+    let special = if boss { 38 } else { lines[line].special }
+    let tag = if boss { 666 } else { lines[line].tag }
     let used = triggered[t].used
     let player = triggered[t].player
     // The ways out, by a switch or by walking: the level is over when
@@ -516,7 +517,9 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
         }
         // One that is walked over once is done; a switch that is used
         // once, when it started something.
-        if !triggers[row].again && (!used || started) { lines[line].special = 0 }
+        if !boss && !triggers[row].again && (!used || started) {
+          lines[line].special = 0
+        }
       }
     }
   }
@@ -543,8 +546,7 @@ system trigger_lines() {
 // (which is what is given back) and, with `crunches`, hurt every fourth
 // tic.
 proc change_sector(lines: mut Lines, sectors: mut Sectors, subsectors:
-                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
-                   Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                    spechit: mut Spechit, touched: mut Touched, triggered: mut
                    Triggered, intercepts: mut Intercepts, sight: mut Sight,
                    rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env,
@@ -557,10 +559,27 @@ proc change_sector(lines: mut Lines, sectors: mut Sectors, subsectors:
   for k in 0..len(blast) {
     let it = thing_by_id(things, blast[k].id)
     let onfloor = things[it].z == things[it].floorz
-    let (floorz, ceilingz) = heights_at(
-        lines, sectors, subsectors, nodes, bytes, bmap, things[it].x,
-        things[it].y, things[it].radius, things[it].flags,
+    // (With something solid in it, a thing has the floor and ceiling of
+    // its own sector, whatever openings it reaches into: the reference
+    // stops looking there.)
+    let x = things[it].x
+    let y = things[it].y
+    let radius = things[it].radius
+    var inside = false
+    for o, other in things
+        where o != it && !other.gone && other.flags & MF_NOBLOCKMAP == 0 &&
+              other.flags & MF_SOLID != 0 &&
+              abs(other.x - x) < other.radius + radius &&
+              abs(other.y - y) < other.radius + radius {
+      inside = true
+    }
+    let own = subsectors[point_in_subsector(nodes, x, y)].sector
+    let (openfloor, openceiling) = heights_at(
+        lines, sectors, subsectors, nodes, bytes, bmap, x, y, radius,
+        things[it].flags,
         things[it].flags & MF_MISSILE == 0 && things[it].type != MT_PLAYER)
+    let floorz = if inside { sectors[own].floorheight } else { openfloor }
+    let ceilingz = if inside { sectors[own].ceilingheight } else { openceiling }
     things[it].floorz = floorz
     things[it].ceilingz = ceilingz
     if onfloor {
@@ -584,7 +603,7 @@ proc change_sector(lines: mut Lines, sectors: mut Sectors, subsectors:
         if crunches && env[0].leveltime & 3 == 0 {
           damage_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, it, none, none, 10)
           // (Blood, any way.)
-          let mo = spawn_mobj(things, sectors, subsectors, nodes, tm, rnd, env,
+          let mo = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env,
                               things[it].x, things[it].y,
                               things[it].z + things[it].height / 2, MT_BLOOD)
           things[mo].momx = sub_random(rnd) << 12
@@ -600,8 +619,7 @@ proc change_sector(lines: mut Lines, sectors: mut Sectors, subsectors:
 // T_MovePlane): the plane is moved a step, the things are fitted anew,
 // and if one does not fit the step is taken back.
 proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
-              segs: Segs, nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut
-              Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+              segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
               touched: mut Touched, triggered: mut Triggered, intercepts: mut
               Intercepts, sight: mut Sight, rnd: mut Rnd, inv: mut Inv,
               powers: Powers, env: Env, blast: mut Blast, things: mut Mobj,
@@ -783,8 +801,7 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
 // not had their tic: they take their turns among the things in the
 // order all were made in.
 proc movers_before(lines: mut Lines, sectors: mut Sectors, subsectors:
-                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
-                   Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
                    spechit: mut Spechit, touched: mut Touched, triggered: mut
                    Triggered, intercepts: mut Intercepts, sight: mut Sight,
                    rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env,
