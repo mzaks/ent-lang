@@ -19,27 +19,33 @@ them as systems. It is being built; what is here so far:
   through, and the things of a level as entities.
 - `sprites.ent`: what is drawn after the walls: the things by their
   sprites, and textures in openings.
-- `demo.ent`, `specials.ent`, `items.ent`, `play.ent`, `movers.ent`: a
-  demo's keys tic by tic; the lights of sectors; what the player has and
-  picks up; a thing moved through the level, stopped by walls and things,
-  the player sliding along them; and doors and lifts, set off by the use
-  key, by lines that are walked over, and by monsters.
-- `enemy.ent`: a tic of every thing, each in its turn in the order they
-  were made in (`for .. in turn by m.id`), the player's among them, by
-  procs that are given the things (`things: mut Mobj`): how a thing
-  moves and falls, the states it goes through and what they do. Monsters
-  look for the player and hear it, walk after it, shoot, bite and throw
-  fire; a shot's way through the level, what it leaves and what it does
-  to what it hits; missiles and blasts; pain, death, and what the dead
-  leave.
-- `weapon.ent`: the player's weapon in front of the eye (fist, pistol,
-  shotgun, chaingun, rocket launcher), the noise a shot makes, the
-  floors that hurt, and the player dead.
-- Not yet: ceilings and stairs that move, crushing, teleporters, the
-  ways out and the next level, the level started again after a death,
-  the weapon and the status bar drawn, sound; and of the things, those
-  that are not in the three demos (what floats, the other monsters'
-  attacks).
+- `demo.ent`, `specials.ent`, `items.ent`, `play.ent`: a demo's keys tic
+  by tic; the lights of sectors; what the player has and picks up; how
+  the player is turned and made faster by the keys, and what of moving a
+  thing needs no other thing: the walls around a place, the lines and
+  things a path crosses.
+- `enemy.ent`: what a thing does in its turn, by procs that are given
+  the things (`things: mut Mobj`): it moves and falls, stopped by walls
+  and things, the player sliding along them; it goes through its states
+  and does what they do. Monsters look for the player and hear it, walk
+  after it, shoot, bite, claw and throw fire; a shot's way through the
+  level, what it leaves and what it does to what it hits; missiles and
+  blasts; pain, death, and what the dead leave; teleporters.
+- `weapon.ent`: the player's weapon in front of the eye (fist, saw,
+  pistol, shotgun, chaingun, rocket launcher), the noise a shot makes,
+  the floors that hurt, and the player dead.
+- `movers.ent`: what the lines that are used, walked over or shot set
+  off, and what then moves a sector: doors, lifts, floors, stairs,
+  ceilings that crush, the donut; the ways out; lights switched.
+- `tick.ent`: a tic of the level: the things, the lights and what moves
+  sectors, each in its turn in the order they were made in (`for .. in
+  turn by m.id`), the player's thing among them; a level left for the
+  next, or started again after a death.
+- Not yet: the weapon and the status bar drawn, sound, the screens
+  between levels (and the tics they take), menus; the monsters and
+  weapons that are not in the first episode. Ceilings that move and the
+  donut are written but were never set off: the shareware levels have
+  no such ceiling, and no demo here uses the donut.
 - `doom.ent`: the program, which plays E1M1 with the keyboard (the arrow
   keys, the space bar to use, the left Ctrl key to shoot; Tab shows the
   map). The weapon is not drawn yet.
@@ -58,6 +64,9 @@ examples/doom/check/maths.sh                         # "the same: 24 lines"
 examples/doom/check/automap.sh                       # E1M1 read and drawn
 examples/doom/check/view.sh                          # what is seen, pixel for pixel
 examples/doom/check/trace.sh                         # the demos, tic by tic
+examples/doom/reference/fetch_demos.sh               # 53 more demos, of all nine levels
+examples/doom/check/demos.sh                         # each of them, tic by tic
+DUMP=205 examples/doom/check/demos.sh e1m5_uv_max    # what differs at a tic
 cd build/doom/wad &&                                 # where doom1.wad is
   ../../../tools/ent run -I ../../../examples/doom ../../../examples/doom/doom.ent
 ```

@@ -99,6 +99,17 @@ const ACT_STAIRS = 4
 // (Lights: 0 as light as the lightest sector next to it, 1 full, 2 dim,
 // 3 as dark as the darkest next to it, 4 flickering.)
 const ACT_LIGHT = 5
+const ACT_CEILING = 6
+const ACT_STOPCEILING = 7
+const ACT_DONUT = 8
+// The sorts of ceilings that move (ceiling_e).
+const CEIL_LOWERTOFLOOR = 0
+const CEIL_RAISETOHIGHEST = 1
+const CEIL_LOWERANDCRUSH = 2
+const CEIL_CRUSHANDRAISE = 3
+const CEIL_FASTCRUSHANDRAISE = 4
+const CEIL_SILENTCRUSHANDRAISE = 5
+const CEILSPEED = FRACUNIT
 // The sorts of floors that move (floor_e).
 const FLOOR_LOWER = 0
 const FLOOR_LOWERTOLOWEST = 1
@@ -111,6 +122,7 @@ const FLOOR_RAISE24 = 7
 const FLOOR_RAISE24ANDCHANGE = 8
 const FLOOR_RAISECRUSH = 9
 const FLOOR_RAISETURBO = 10
+const FLOOR_DONUTRAISE = 11
 const FLOOR_RAISE512 = 12
 const FLOORSPEED = FRACUNIT
 table triggers {
@@ -212,6 +224,20 @@ table triggers {
   { special: 17, walk: true, again: false, action: 5, type: 4, amount: 0 },
   { special: 138, walk: false, again: true, action: 5, type: 1, amount: 0 },
   { special: 139, walk: false, again: true, action: 5, type: 2, amount: 0 },
+  { special: 6, walk: true, again: false, action: 6, type: 4, amount: 0 },
+  { special: 25, walk: true, again: false, action: 6, type: 3, amount: 0 },
+  { special: 40, walk: true, again: false, action: 6, type: 1, amount: 0 },
+  { special: 44, walk: true, again: false, action: 6, type: 2, amount: 0 },
+  { special: 141, walk: true, again: false, action: 6, type: 5, amount: 0 },
+  { special: 57, walk: true, again: false, action: 7, type: 0, amount: 0 },
+  { special: 72, walk: true, again: true, action: 6, type: 2, amount: 0 },
+  { special: 73, walk: true, again: true, action: 6, type: 3, amount: 0 },
+  { special: 77, walk: true, again: true, action: 6, type: 4, amount: 0 },
+  { special: 74, walk: true, again: true, action: 7, type: 0, amount: 0 },
+  { special: 41, walk: false, again: false, action: 6, type: 0, amount: 0 },
+  { special: 49, walk: false, again: false, action: 6, type: 3, amount: 0 },
+  { special: 43, walk: false, again: true, action: 6, type: 0, amount: 0 },
+  { special: 9, walk: false, again: false, action: 8, type: 0, amount: 0 },
   { special: 54, walk: true, again: false, action: 2, type: 0, amount: 0 },
   { special: 89, walk: true, again: true, action: 2, type: 0, amount: 0 }
 ]
@@ -337,6 +363,16 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
               movers[i].status = PLAT_IN_STASIS
             }
           }
+        } else if action == ACT_STOPCEILING {
+          // The ceilings of the tag stand still (EV_CeilingCrushStop).
+          for i in 0..len(movers) {
+            if movers[i].active && movers[i].kind == MOVER_CEILING &&
+               movers[i].tag == tag && movers[i].direction != 0 {
+              movers[i].oldstatus = movers[i].direction
+              movers[i].direction = 0
+              started = true
+            }
+          }
         } else if action == ACT_LIGHT {
           // The sectors of the tag are lit otherwise (EV_LightTurnOn,
           // EV_TurnTagLightsOff, EV_StartLightStrobing). (A flicker that
@@ -391,6 +427,16 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
               }
             }
           }
+          // (Ceilings of the tag that stand still go on, where one that
+          // crushes is asked for: P_ActivateInStasisCeiling.)
+          if action == ACT_CEILING && type >= CEIL_CRUSHANDRAISE {
+            for i in 0..len(movers) {
+              if movers[i].active && movers[i].kind == MOVER_CEILING &&
+                 movers[i].tag == tag && movers[i].direction == 0 {
+                movers[i].direction = movers[i].oldstatus
+              }
+            }
+          }
           // A door or a lift in every sector of the tag that nothing
           // moves.
           var secnum = sector_from_tag(sectors, tag, -1)
@@ -398,7 +444,84 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
             if sectors[secnum].specialdata == 0 {
               started = true
               let floor = sectors[secnum].floorheight
-              if action == ACT_STAIRS {
+              var made = true
+              if action == ACT_DONUT {
+                // A pillar sinks into the ring around it, which rises,
+                // both to the floor of what is around the ring
+                // (EV_DoDonut): the ring is what is behind the pillar's
+                // first line, and what is around it what is behind the
+                // first line of the ring that is not the pillar's.
+                var ring = -1
+                for l in 0..len(lines) {
+                  if ring < 0 && lines[l].flags & ML_TWOSIDED != 0 &&
+                     (lines[l].frontsector == secnum || lines[l].backsector == secnum) {
+                    ring = if lines[l].frontsector == secnum {
+                      lines[l].backsector
+                    } else {
+                      lines[l].frontsector
+                    }
+                  }
+                }
+                var around = -1
+                if ring >= 0 {
+                  for l in 0..len(lines) {
+                    if around < 0 &&
+                       (lines[l].frontsector == ring || lines[l].backsector == ring) &&
+                       lines[l].backsector >= 0 && lines[l].backsector != secnum {
+                      around = lines[l].backsector
+                    }
+                  }
+                }
+                made = around >= 0
+                if around >= 0 {
+                  movers += {
+                    kind: MOVER_FLOOR, active: true, sector: ring,
+                    type: FLOOR_DONUTRAISE, direction: 1, speed: FLOORSPEED / 2,
+                    high: sectors[around].floorheight,
+                    low: sectors[around].floorpic, wait: 0, count: 0,
+                    crush: false, status: 0, oldstatus: 0, tag: 0,
+                    born: tm[0].links + 1, ran: -1
+                  }
+                  sectors[ring].specialdata = len(movers)
+                  tm[0].links += 1
+                  movers += {
+                    kind: MOVER_FLOOR, active: true, sector: secnum,
+                    type: FLOOR_LOWER, direction: -1, speed: FLOORSPEED / 2,
+                    high: sectors[around].floorheight, low: 0, wait: 0,
+                    count: 0, crush: false, status: 0, oldstatus: 0, tag: 0,
+                    born: tm[0].links + 1, ran: -1
+                  }
+                }
+              } else if action == ACT_CEILING {
+                // A ceiling that comes down, or goes up to the highest
+                // next to it (EV_DoCeiling); one that crushes goes up
+                // and down for ever.
+                var top = sectors[secnum].ceilingheight
+                if type == CEIL_RAISETOHIGHEST {
+                  top = 0
+                  for l in 0..len(lines) {
+                    if lines[l].flags & ML_TWOSIDED != 0 &&
+                       (lines[l].frontsector == secnum || lines[l].backsector == secnum) {
+                      let other = if lines[l].frontsector == secnum {
+                        lines[l].backsector
+                      } else {
+                        lines[l].frontsector
+                      }
+                      top max= sectors[other].ceilingheight
+                    }
+                  }
+                }
+                movers += {
+                  kind: MOVER_CEILING, active: true, sector: secnum, type: type,
+                  direction: if type == CEIL_RAISETOHIGHEST { 1 } else { -1 },
+                  speed: if type == CEIL_FASTCRUSHANDRAISE { CEILSPEED * 2 } else { CEILSPEED },
+                  high: top,
+                  low: if type == CEIL_LOWERTOFLOOR { floor } else { floor + 8 * FRACUNIT },
+                  wait: 0, count: 0, crush: type >= CEIL_CRUSHANDRAISE, status: 0,
+                  oldstatus: 0, tag: sectors[secnum].tag, born: tm[0].links + 1,
+                  ran: -1
+                }
+              } else if action == ACT_STAIRS {
                 // Stairs (EV_BuildStairs): the floor goes up a step, and
                 // from sector to sector, through the lines that face
                 // away, each next one with the same flat a step more.
@@ -566,8 +689,10 @@ proc work_lines(triggered: mut Triggered, lines: mut Lines,
                   ran: -1
                 }
               }
-              sectors[secnum].specialdata = len(movers)
-              tm[0].links += 1
+              if made {
+                sectors[secnum].specialdata = len(movers)
+                tm[0].links += 1
+              }
             }
             secnum = sector_from_tag(sectors, tag, secnum)
           }
@@ -695,12 +820,24 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
   let plat = movers[i].kind == MOVER_PLAT
   // (What it crushes it hurts: a floor or a ceiling that crushes, and
   // stairs. Doors and lifts hurt nothing.)
-  let crunches = movers[i].kind != MOVER_PLAT && movers[i].kind != MOVER_DOOR &&
-                 (movers[i].crush || movers[i].status == 1)
+  let ceil = movers[i].kind == MOVER_CEILING
+  let crunches = if ceil {
+    movers[i].crush && movers[i].direction == -1
+  } else {
+    movers[i].kind != MOVER_PLAT && movers[i].kind != MOVER_DOOR &&
+    (movers[i].crush || movers[i].status == 1)
+  }
   let goes = movers[i].kind == MOVER_FLOOR
   let status = movers[i].status
-  let dir = if plat || goes { 3 } else { movers[i].direction }
-  if goes {
+  let dir = if plat || goes || ceil { 3 } else { movers[i].direction }
+  if ceil {
+    // A ceiling goes up or down, or stands still.
+    if movers[i].direction != 0 {
+      moving = true
+      mdir = movers[i].direction
+      dest = if mdir == 1 { movers[i].high } else { movers[i].low }
+    }
+  } else if goes {
     // A floor goes to its height.
     ceiling = false
     moving = true
@@ -799,10 +936,38 @@ proc move_one(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
   }
 
   // What it does when it got there, or something was in the way.
-  if goes {
+  if ceil {
+    if moving && mdir == 1 {
+      if res == RES_PASTDEST {
+        if type == CEIL_RAISETOHIGHEST {
+          sectors[sector].specialdata = 0
+          movers[i].active = false
+        } else if type >= CEIL_CRUSHANDRAISE {
+          movers[i].direction = -1
+        }
+      }
+    } else if moving {
+      if res == RES_PASTDEST {
+        if type == CEIL_CRUSHANDRAISE || type == CEIL_SILENTCRUSHANDRAISE {
+          movers[i].speed = CEILSPEED
+        }
+        if type >= CEIL_CRUSHANDRAISE {
+          movers[i].direction = 1
+        } else {
+          sectors[sector].specialdata = 0
+          movers[i].active = false
+        }
+      } else if res == RES_CRUSHED &&
+                (type == CEIL_CRUSHANDRAISE || type == CEIL_SILENTCRUSHANDRAISE ||
+                 type == CEIL_LOWERANDCRUSH) {
+        // (Slowly through what is in the way.)
+        movers[i].speed = CEILSPEED / 8
+      }
+    }
+  } else if goes {
     if res == RES_PASTDEST {
       sectors[sector].specialdata = 0
-      if type == FLOOR_LOWERANDCHANGE {
+      if type == FLOOR_LOWERANDCHANGE || type == FLOOR_DONUTRAISE {
         sectors[sector].special = movers[i].wait
         sectors[sector].floorpic = movers[i].low
       }

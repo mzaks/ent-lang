@@ -49,6 +49,9 @@ const MOVER_PLAT = 1
 // `low` the flat and `wait` what is special of the sector when it is
 // there, for the sort that changes them.)
 const MOVER_FLOOR = 2
+// (A ceiling: `high` and `low` are the heights it goes between, and
+// `oldstatus` the way it went before it was made to stand still.)
+const MOVER_CEILING = 3
 
 // The sorts of lifts (plattype_e), and what one is doing (plat_e).
 const PLAT_PERPETUALRAISE = 0
