@@ -74,7 +74,10 @@ buffer Touched { id: i32, z: i32 } capacity 1024
 // The lines the player set off this tic, in their order: used (and from
 // which side: 0 its front), or walked over (and the side come from).
 // (`player`: by the player, not by a monster, which sets off less.)
-buffer Triggered { line: i32, used: bool, side: i32, player: bool } capacity 256
+// (`shot`: by a shot that hit it.)
+buffer Triggered {
+  line: i32, used: bool, side: i32, player: bool, shot: bool
+} capacity 256
 // (`thing`: the `id` of a thing a shot's path crosses; 0 for a line.)
 buffer Intercepts { frac: i32, line: i32, thing: i32 } capacity 256
 
@@ -435,7 +438,7 @@ proc try_move(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
                       type != MT_BRUISERSHOT)
           if point_on_line_side(lines, ld, x, y) != oldside && special != 0 && does {
             triggered += { line: ld, used: false, side: oldside,
-                           player: (things[me].type == MT_PLAYER) }
+                           player: (things[me].type == MT_PLAYER), shot: false }
           }
         }
       }

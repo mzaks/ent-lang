@@ -847,8 +847,7 @@ proc aim_line_attack(things: Mobj, me: entity, lines: mut Lines,
 
 // A shot from a thing along `angle`, as steeply as `slope`: the first
 // wall or thing in its way is hit, and a thing hurt by so much
-// (P_LineAttack, PTR_ShootTraverse). (Not yet: the switches a shot sets
-// off.)
+// (P_LineAttack, PTR_ShootTraverse).
 proc line_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
                  Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
                  Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
@@ -891,6 +890,13 @@ proc line_attack(lines: mut Lines, sectors: mut Sectors, subsectors:
       let dist = fixed_mul(distance, frac)
       if intercepts[nearest].thing == 0 {
         let li = intercepts[nearest].line
+        // (A line that a shot sets off, of which a monster's shot only
+        // opens doors: P_ShootSpecialLine.)
+        let special = lines[li].special
+        if special == 46 || (me == player && (special == 24 || special == 47)) {
+          triggered += { line: li, used: false, side: 0, player: me == player,
+                         shot: true }
+        }
         var hit = lines[li].flags & ML_TWOSIDED == 0
         if !hit {
           let front = lines[li].frontsector
@@ -1080,7 +1086,7 @@ proc p_move(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
         let special = lines[ld].special
         if lines[ld].flags & ML_SECRET == 0 &&
            (special == 1 || special == 32 || special == 33 || special == 34) {
-          triggered += { line: ld, used: true, side: 0, player: false }
+          triggered += { line: ld, used: true, side: 0, player: false, shot: false }
           moved = true
         }
       }

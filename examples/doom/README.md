@@ -25,14 +25,24 @@ them as systems. It is being built; what is here so far:
   the player sliding along them; and doors and lifts, set off by the use
   key, by lines that are walked over, and by monsters.
 - `enemy.ent`: a tic of every thing, each in its turn in the order they
-  were made in (`for .. in turn by m.id`), the player's among them; and
-  of what monsters do, that they look for the player (the line of sight
-  through the level's tree) and walk after it once they have seen it.
-  Not yet: that anything attacks or is hurt (weapons, shots, damage,
-  death), floors, ceilings and stairs that move, teleporters, the ways
-  out, floors that hurt.
-- `doom.ent`: the program, which so far shows E1M1 from where the player
-  starts (the arrow keys move the eye; Tab shows the map).
+  were made in (`for .. in turn by m.id`), the player's among them, by
+  procs that are given the things (`things: mut Mobj`): how a thing
+  moves and falls, the states it goes through and what they do. Monsters
+  look for the player and hear it, walk after it, shoot, bite and throw
+  fire; a shot's way through the level, what it leaves and what it does
+  to what it hits; missiles and blasts; pain, death, and what the dead
+  leave.
+- `weapon.ent`: the player's weapon in front of the eye (fist, pistol,
+  shotgun, chaingun, rocket launcher), the noise a shot makes, the
+  floors that hurt, and the player dead.
+- Not yet: ceilings and stairs that move, crushing, teleporters, the
+  ways out and the next level, the level started again after a death,
+  the weapon and the status bar drawn, sound; and of the things, those
+  that are not in the three demos (what floats, the other monsters'
+  attacks).
+- `doom.ent`: the program, which plays E1M1 with the keyboard (the arrow
+  keys, the space bar to use, the left Ctrl key to shoot; Tab shows the
+  map). The weapon is not drawn yet.
 - `check/`: programs that print what the port computes, to hold against
   the reference.
 - `reference/`: what the port is compared against. `fetch.sh` fetches

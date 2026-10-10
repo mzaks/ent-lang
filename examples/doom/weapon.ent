@@ -228,7 +228,7 @@ proc weapon_action(lines: mut Lines, sectors: mut Sectors, subsectors:
     if things[player].state == S_PLAY_ATK1 || things[player].state == S_PLAY_ATK2 {
       set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, player, S_PLAY)
     }
-    if inv[0].pendingweapon != WP_NOCHANGE || things[player].health == 0 {
+    if inv[0].pendingweapon != WP_NOCHANGE || things[player].health <= 0 {
       set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, pl, psp, ammo, PS_WEAPON, weaponinfo[inv[0].readyweapon].down)
     } else {
       var fires = false
@@ -252,7 +252,7 @@ proc weapon_action(lines: mut Lines, sectors: mut Sectors, subsectors:
   } else if action == A_ReFire {
     // The key is still down: again.
     if pl[0].buttons & BT_ATTACK != 0 && inv[0].pendingweapon == WP_NOCHANGE &&
-       things[player].health != 0 {
+       things[player].health > 0 {
       pl[0].refire += 1
       fire_weapon(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, pl, psp, ammo)
     } else {
@@ -266,7 +266,7 @@ proc weapon_action(lines: mut Lines, sectors: mut Sectors, subsectors:
     if psp[position].sy >= WEAPONBOTTOM {
       if pl[0].dead {
         psp[position].sy = WEAPONBOTTOM
-      } else if things[player].health == 0 {
+      } else if things[player].health <= 0 {
         set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, pl, psp, ammo, PS_WEAPON, S_NULL)
       } else {
         inv[0].readyweapon = inv[0].pendingweapon

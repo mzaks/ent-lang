@@ -45,6 +45,10 @@ buffer Movers {
 } capacity 4096
 const MOVER_DOOR = 0
 const MOVER_PLAT = 1
+// (A floor that goes to a height and stays: `high` is the height,
+// `low` the flat and `wait` what is special of the sector when it is
+// there, for the sort that changes them.)
+const MOVER_FLOOR = 2
 
 // The sorts of lifts (plattype_e), and what one is doing (plat_e).
 const PLAT_PERPETUALRAISE = 0

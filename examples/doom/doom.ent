@@ -63,7 +63,9 @@ system read_keys() {
   if Keys.right { turn -= if run { 1280 } else { 640 } }
   Ticcmds += {
     forwardmove: forward, sidemove: side, angleturn: turn,
-    buttons: if Keys.space { BT_USE } else { 0 }
+    // (The left Ctrl key shoots.)
+    buttons: (if Keys.space { BT_USE } else { 0 }) |
+             (if key_down(341) { BT_ATTACK } else { 0 })
   }
   let tab = key_down(258)
   if tab && !Shown.tab { Shown.map = !Shown.map }

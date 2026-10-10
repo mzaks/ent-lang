@@ -93,6 +93,21 @@ proc use_line(lines: mut Lines, sectors: Sectors, bytes: Bytes, bmap: Bmap,
 const ACT_DOOR = 0
 const ACT_PLAT = 1
 const ACT_STOPPLAT = 2
+const ACT_FLOOR = 3
+// The sorts of floors that move (floor_e).
+const FLOOR_LOWER = 0
+const FLOOR_LOWERTOLOWEST = 1
+const FLOOR_TURBOLOWER = 2
+const FLOOR_RAISE = 3
+const FLOOR_RAISETONEAREST = 4
+const FLOOR_RAISETOTEXTURE = 5
+const FLOOR_LOWERANDCHANGE = 6
+const FLOOR_RAISE24 = 7
+const FLOOR_RAISE24ANDCHANGE = 8
+const FLOOR_RAISECRUSH = 9
+const FLOOR_RAISETURBO = 10
+const FLOOR_RAISE512 = 12
+const FLOORSPEED = FRACUNIT
 table triggers {
   special: i32, walk: bool, again: bool, action: i32, type: i32, amount: i32
 } = [
@@ -140,6 +155,44 @@ table triggers {
   { special: 67, walk: false, again: true, action: 1, type: 2, amount: 32 },
   { special: 68, walk: false, again: true, action: 1, type: 3, amount: 0 },
   { special: 123, walk: false, again: true, action: 1, type: 4, amount: 0 },
+  { special: 5, walk: true, again: false, action: 3, type: 3, amount: 0 },
+  { special: 19, walk: true, again: false, action: 3, type: 0, amount: 0 },
+  { special: 36, walk: true, again: false, action: 3, type: 2, amount: 0 },
+  { special: 37, walk: true, again: false, action: 3, type: 6, amount: 0 },
+  { special: 38, walk: true, again: false, action: 3, type: 1, amount: 0 },
+  { special: 56, walk: true, again: false, action: 3, type: 9, amount: 0 },
+  { special: 58, walk: true, again: false, action: 3, type: 7, amount: 0 },
+  { special: 59, walk: true, again: false, action: 3, type: 8, amount: 0 },
+  { special: 119, walk: true, again: false, action: 3, type: 4, amount: 0 },
+  { special: 130, walk: true, again: false, action: 3, type: 10, amount: 0 },
+  { special: 82, walk: true, again: true, action: 3, type: 1, amount: 0 },
+  { special: 83, walk: true, again: true, action: 3, type: 0, amount: 0 },
+  { special: 84, walk: true, again: true, action: 3, type: 6, amount: 0 },
+  { special: 91, walk: true, again: true, action: 3, type: 3, amount: 0 },
+  { special: 92, walk: true, again: true, action: 3, type: 7, amount: 0 },
+  { special: 93, walk: true, again: true, action: 3, type: 8, amount: 0 },
+  { special: 94, walk: true, again: true, action: 3, type: 9, amount: 0 },
+  { special: 98, walk: true, again: true, action: 3, type: 2, amount: 0 },
+  { special: 128, walk: true, again: true, action: 3, type: 4, amount: 0 },
+  { special: 129, walk: true, again: true, action: 3, type: 10, amount: 0 },
+  { special: 18, walk: false, again: false, action: 3, type: 4, amount: 0 },
+  { special: 23, walk: false, again: false, action: 3, type: 1, amount: 0 },
+  { special: 55, walk: false, again: false, action: 3, type: 9, amount: 0 },
+  { special: 71, walk: false, again: false, action: 3, type: 2, amount: 0 },
+  { special: 101, walk: false, again: false, action: 3, type: 3, amount: 0 },
+  { special: 102, walk: false, again: false, action: 3, type: 0, amount: 0 },
+  { special: 131, walk: false, again: false, action: 3, type: 10, amount: 0 },
+  { special: 140, walk: false, again: false, action: 3, type: 12, amount: 0 },
+  { special: 45, walk: false, again: true, action: 3, type: 0, amount: 0 },
+  { special: 60, walk: false, again: true, action: 3, type: 1, amount: 0 },
+  { special: 64, walk: false, again: true, action: 3, type: 3, amount: 0 },
+  { special: 65, walk: false, again: true, action: 3, type: 9, amount: 0 },
+  { special: 69, walk: false, again: true, action: 3, type: 4, amount: 0 },
+  { special: 70, walk: false, again: true, action: 3, type: 2, amount: 0 },
+  { special: 132, walk: false, again: true, action: 3, type: 10, amount: 0 },
+  { special: 24, walk: true, again: false, action: 3, type: 3, amount: 0 },
+  { special: 46, walk: true, again: true, action: 0, type: 3, amount: 0 },
+  { special: 47, walk: true, again: false, action: 1, type: 3, amount: 0 },
   { special: 54, walk: true, again: false, action: 2, type: 0, amount: 0 },
   { special: 89, walk: true, again: true, action: 2, type: 0, amount: 0 }
 ]
@@ -152,7 +205,8 @@ system use_lines() {
     let used = use_line(Lines, Sectors, Bytes, Bmap, Tm, Intercepts, Mobj,
                         Spawned.player)
     if used >= 0 {
-      Triggered += { line: used >> 1, used: true, side: used & 1, player: true }
+      Triggered += { line: used >> 1, used: true, side: used & 1, player: true,
+                     shot: false }
     }
   }
   Pl[0].usedown = down
@@ -225,9 +279,14 @@ system trigger_lines() {
       }
     } else if !used || Triggered[t].side == 0 {
       // What the table says of the line.
+      // (What a shot sets off, only a shot does.)
+      let gun = special == 24 || special == 46 || special == 47
       var row = -1
       for k in 0..len(triggers) {
-        if triggers[k].special == special && triggers[k].walk != used { row = k }
+        if triggers[k].special == special && triggers[k].walk != used &&
+           gun == Triggered[t].shot {
+          row = k
+        }
       }
       if row >= 0 {
         let action = triggers[row].action
@@ -259,7 +318,69 @@ system trigger_lines() {
             if Sectors[secnum].specialdata == 0 {
               started = true
               let floor = Sectors[secnum].floorheight
-              if action == ACT_DOOR {
+              if action == ACT_FLOOR {
+                // A floor that goes to a height (EV_DoFloor).
+                var direction = 1
+                var speed = FLOORSPEED
+                var dest = floor
+                var flat = Sectors[secnum].floorpic
+                var newspecial = Sectors[secnum].special
+                if type == FLOOR_LOWER {
+                  direction = -1
+                  dest = highest_floor_surrounding(Lines, Sectors, secnum)
+                } else if type == FLOOR_LOWERTOLOWEST || type == FLOOR_LOWERANDCHANGE {
+                  direction = -1
+                  dest = lowest_floor_surrounding(Lines, Sectors, secnum)
+                  if type == FLOOR_LOWERANDCHANGE {
+                    // (The flat and what is special of the first sector
+                    // next to it that is as low.)
+                    var found = false
+                    for l in 0..len(Lines) {
+                      if !found && Lines[l].flags & ML_TWOSIDED != 0 &&
+                         (Lines[l].frontsector == secnum || Lines[l].backsector == secnum) {
+                        let other = if Lines[l].frontsector == secnum {
+                          Lines[l].backsector
+                        } else {
+                          Lines[l].frontsector
+                        }
+                        if Sectors[other].floorheight == dest {
+                          flat = Sectors[other].floorpic
+                          newspecial = Sectors[other].special
+                          found = true
+                        }
+                      }
+                    }
+                  }
+                } else if type == FLOOR_TURBOLOWER {
+                  direction = -1
+                  speed = FLOORSPEED * 4
+                  dest = highest_floor_surrounding(Lines, Sectors, secnum)
+                  if dest != floor { dest += 8 * FRACUNIT }
+                } else if type == FLOOR_RAISE || type == FLOOR_RAISECRUSH {
+                  dest = min(lowest_ceiling_surrounding(Lines, Sectors, secnum),
+                             Sectors[secnum].ceilingheight)
+                  if type == FLOOR_RAISECRUSH { dest -= 8 * FRACUNIT }
+                } else if type == FLOOR_RAISETURBO {
+                  speed = FLOORSPEED * 4
+                  dest = next_highest_floor(Lines, Sectors, secnum, floor)
+                } else if type == FLOOR_RAISETONEAREST {
+                  dest = next_highest_floor(Lines, Sectors, secnum, floor)
+                } else if type == FLOOR_RAISE24 {
+                  dest = floor + 24 * FRACUNIT
+                } else if type == FLOOR_RAISE512 {
+                  dest = floor + 512 * FRACUNIT
+                } else if type == FLOOR_RAISE24ANDCHANGE {
+                  dest = floor + 24 * FRACUNIT
+                  Sectors[secnum].floorpic = Sectors[Lines[line].frontsector].floorpic
+                  Sectors[secnum].special = Sectors[Lines[line].frontsector].special
+                }
+                Movers += {
+                  kind: MOVER_FLOOR, active: true, sector: secnum, type: type,
+                  direction: direction, speed: speed, high: dest, low: flat,
+                  wait: newspecial, count: 0, crush: type == FLOOR_RAISECRUSH,
+                  status: 0, oldstatus: 0, tag: 0
+                }
+              } else if action == ACT_DOOR {
                 let down = type == VLD_BLAZECLOSE || type == VLD_CLOSE ||
                            type == VLD_CLOSE30THENOPEN
                 Movers += {
@@ -351,9 +472,16 @@ system run_movers() {
       let crush = Movers[i].crush && !(Movers[i].kind == MOVER_PLAT &&
                                        Movers[i].status == PLAT_DOWN)
       let plat = Movers[i].kind == MOVER_PLAT
+      let goes = Movers[i].kind == MOVER_FLOOR
       let status = Movers[i].status
-      let dir = if plat { 3 } else { Movers[i].direction }
-      if plat {
+      let dir = if plat || goes { 3 } else { Movers[i].direction }
+      if goes {
+        // A floor goes to its height.
+        ceiling = false
+        moving = true
+        mdir = Movers[i].direction
+        dest = Movers[i].high
+      } else if plat {
         // A lift goes up, or down, or waits where it is.
         ceiling = false
         if status == PLAT_UP {
@@ -427,7 +555,7 @@ system run_movers() {
             // P_ChangeSector: every thing in the squares the sector
             // reaches finds its floor and ceiling anew.
             Nofit = 0
-            for m: mut Mobj {
+            for e, m: mut Mobj {
               let bx = (m.x - Bmap[0].orgx) >> MAPBLOCKSHIFT
               let by = (m.y - Bmap[0].orgy) >> MAPBLOCKSHIFT
               if bx >= left && bx <= right && by >= bottom && by <= top &&
@@ -444,9 +572,23 @@ system run_movers() {
                 } else if m.z + m.height > ceilingz {
                   m.z = ceilingz - m.height
                 }
-                if ceilingz - floorz < m.height && m.health > 0 &&
-                   m.flags & MF_DROPPED == 0 && m.flags & MF_SHOOTABLE != 0 {
-                  Nofit max= 1
+                // What does not fit (PIT_ChangeSector): the dead are
+                // crushed to bits, what was left by the dead is gone,
+                // and anything else that can be hurt is in the way.
+                if ceilingz - floorz < m.height {
+                  if m.health <= 0 {
+                    m.state = S_GIBS
+                    m.tics = states[S_GIBS].tics
+                    m.sprite = states[S_GIBS].sprite
+                    m.frame = states[S_GIBS].frame
+                    m.flags &= ~MF_SOLID
+                    m.height = 0
+                    m.radius = 0
+                  } else if m.flags & MF_DROPPED != 0 {
+                    e.destroy()
+                  } else if m.flags & MF_SHOOTABLE != 0 {
+                    Nofit max= 1
+                  }
                 }
               }
             }
@@ -472,7 +614,16 @@ system run_movers() {
       }
 
       // What it does when it got there, or something was in the way.
-      if moving && plat {
+      if goes {
+        if res == RES_PASTDEST {
+          Sectors[sector].specialdata = 0
+          if type == FLOOR_LOWERANDCHANGE {
+            Sectors[sector].special = Movers[i].wait
+            Sectors[sector].floorpic = Movers[i].low
+          }
+          Movers[i].active = false
+        }
+      } else if moving && plat {
         if status == PLAT_UP {
           if res == RES_CRUSHED && !Movers[i].crush {
             Movers[i].count = Movers[i].wait
