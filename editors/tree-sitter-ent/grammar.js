@@ -162,9 +162,11 @@ module.exports = grammar({
     result: ($) =>
       seq('->', choice($._type, seq('(', list($._type), ')'))),
 
+    // (Without a body: said now, its body further down.)
     function: ($) =>
-      seq(choice('fn', 'proc'), field('name', $.identifier), $.parameters,
-          optional($.result), field('body', $.block)),
+      prec.right(seq(choice('fn', 'proc'), field('name', $.identifier),
+                     $.parameters, optional($.result),
+                     optional(field('body', $.block)))),
 
     extern_function: ($) =>
       prec.right(seq('extern', choice('fn', 'proc'),

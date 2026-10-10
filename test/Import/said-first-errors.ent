@@ -1,0 +1,11 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+// expected-error @+1 {{'odd' is said here without a body, and given none further down ('extern' declares one implemented in C)}}
+proc odd(n: i32) -> bool
+
+// -----
+
+// expected-error @+1 {{said here}}
+proc odd(n: i32) -> bool
+// expected-error @+1 {{'odd' was said to take and give otherwise where it was said without its body}}
+proc odd(n: i64) -> bool { n != 0 }

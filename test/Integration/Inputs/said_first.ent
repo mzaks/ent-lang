@@ -1,0 +1,22 @@
+import console
+proc odd(n: i32) -> bool
+proc even(n: i32) -> bool {
+  var is = true
+  if n != 0 { is = odd(n - 1) }
+  is
+}
+proc odd(n: i32) -> bool {
+  var is = false
+  if n != 0 { is = even(n - 1) }
+  is
+}
+unique Done: bool
+system s() {
+  let a = even(10)
+  let b = odd(7)
+  let c = even(3)
+  put("{a} {b} {c}")
+  Done = true
+}
+schedule frame() { s() }
+main { frame() }

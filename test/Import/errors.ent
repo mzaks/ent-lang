@@ -594,7 +594,7 @@ fn nothing(x: i32) {
 
 // -----
 
-// expected-error @+1 {{a fn has a body ('{ ... }'); 'extern fn' declares one implemented in C}}
+// expected-error @+1 {{'twice' is said here without a body, and given none further down ('extern' declares one implemented in C)}}
 fn twice(x: i32) -> i32
 system s() {
 }

@@ -1276,6 +1276,31 @@ proc both(n: i32) -> i32 {
 - A proc is called where an `extern proc` is: in systems, `world` and
   other procs; not in a fn, which only computes.
 
+### Said first, with the body later
+
+```
+proc odd(n: i32) -> bool
+
+proc even(n: i32) -> bool {
+  var is = true
+  if n != 0 { is = odd(n - 1) }
+  is
+}
+
+proc odd(n: i32) -> bool {
+  var is = false
+  if n != 0 { is = even(n - 1) }
+  is
+}
+```
+
+A fn or proc is called by what is declared after it. Two that call each
+other cannot both come first, so one is said without its body, and what
+stands between it and its body may call it. The body follows further
+down in the same file, once, with the same parameters and result; a fn
+or proc that is said and never given one is an error. (`extern` is
+another thing: that one's body is in C.)
+
 ### Fns and procs as values
 
 A fn or a proc is a value where a type says what it takes and gives:

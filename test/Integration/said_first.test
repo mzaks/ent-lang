@@ -1,0 +1,4 @@
+// A proc said without its body may be called by what stands before the
+// body: two that call each other.
+// RUN: %ent run %S/Inputs/said_first.ent 2>/dev/null | FileCheck %s
+// CHECK: true true false

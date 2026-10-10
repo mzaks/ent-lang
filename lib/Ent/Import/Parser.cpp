@@ -70,6 +70,7 @@ public:
   using iterator = typename llvm::StringMap<T>::iterator;
   explicit Declared(std::function<std::string(StringRef)> resolve)
       : resolve(std::move(resolve)) {}
+  iterator begin() { return map.begin(); }
   iterator end() { return map.end(); }
   iterator find(StringRef name) { return map.find(resolve(name)); }
   size_t count(StringRef name) { return map.count(resolve(name)); }
@@ -273,6 +274,10 @@ struct Function {
   /// For each parameter: the component it is given, or nothing. (Such a
   /// parameter is of the type of a buffer's, by the component's name.)
   SmallVector<std::string> components;
+  /// Said, with its body yet to come (`proc name(..)` with none): its op,
+  /// and where it was said, until the body is there.
+  Operation *later = nullptr;
+  llvm::SMLoc laterAt;
 };
 
 /// The fns or procs of one shape (what they take and give) as values: a
@@ -1004,6 +1009,14 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
     files->sources.push_back(path.empty() ? file.str() : path.str().str());
   if (failed(parseDeclarations()) || hadError)
     return nullptr;
+  for (auto &entry : functions)
+    if (entry.second.later) {
+      emitError(loc(entry.second.laterAt))
+          << "'" << entry.first() << "' is said here without a body, and "
+             "given none further down ('extern' declares one implemented "
+             "in C)";
+      return nullptr;
+    }
   root->loading = false;
   finished.push_back(root);
   if (failed(finishRowKinds()) || failed(finishRows()) ||
@@ -3397,25 +3410,52 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   if (isExtern && token.is(Token::LBrace))
     return error(at,
                  "an extern " + kind + " has no body; it is implemented in C");
-  if (!isExtern && !token.is(Token::LBrace))
-    return error(at, "a " + kind + " has a body ('{ ... }'); 'extern " +
-                         kind + "' declares one implemented in C");
+  // Without a body, and not in C: said now, with its body further down,
+  // so that what stands between may call it (two that call each other).
+  bool later = !isExtern && !token.is(Token::LBrace);
   if (isExtern)
     consumeIf(Token::Semicolon);
   if (name->size() == 3 && (*name == "min" || *name == "max" || *name == "len"))
     return error(at, "'" + *name + "' is built in");
-  StringAttr symbolName = declareSymbol(at, *name);
-  auto op = FunctionOp::create(builder, loc(at), symbolName,
-                               builder.getTypeArrayAttr(function.params),
-                               builder.getTypeArrayAttr(function.results),
-                               proc);
+  // The body of one that was said before: as it was said.
+  auto said = functions.find(*name);
+  FunctionOp op;
+  bool defines = said != functions.end() && said->second.later && !isExtern &&
+                 !later;
+  if (defines) {
+    Function &before = said->second;
+    if (before.proc != proc || before.params != function.params ||
+        before.results != function.results ||
+        before.components != function.components) {
+      emitError(loc(at)) << "'" << *name << "' was said to take and give "
+                            "otherwise where it was said without its body";
+      emitError(loc(before.laterAt)) << "said here";
+      hadError = true;
+      return failure();
+    }
+    op = cast<FunctionOp>(before.later);
+    before.later = nullptr;
+  } else {
+    if (said != functions.end() && said->second.later)
+      return error(at, "'" + *name + "' was said before, without its body: "
+                       "what follows is its body, once");
+    StringAttr symbolName = declareSymbol(at, *name);
+    op = FunctionOp::create(builder, loc(at), symbolName,
+                            builder.getTypeArrayAttr(function.params),
+                            builder.getTypeArrayAttr(function.results), proc);
+    if (later) {
+      function.later = op;
+      function.laterAt = at;
+    }
+  }
   // Known before its body is parsed: a fn may call itself.
   Type result = function.result;
   SmallVector<Type> results = function.results;
   SmallVector<Type> params = function.params;
   SmallVector<std::string> given = function.components;
-  functions[*name] = std::move(function);
-  if (isExtern)
+  if (!defines)
+    functions[*name] = std::move(function);
+  if (isExtern || later)
     return success();
 
   auto *block = new Block();
