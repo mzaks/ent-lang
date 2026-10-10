@@ -46,11 +46,11 @@ unique Nofit: i32
 // it; -1 if there is none, or a wall comes first (P_UseLines,
 // PTR_UseTraverse).
 proc use_line(lines: mut Lines, sectors: Sectors, bytes: Bytes, bmap: Bmap,
-              tm: mut Tm, intercepts: mut Intercepts, pmo: Pmo) -> i32 {
-  let fine = (pmo[0].angle >> ANGLETOFINESHIFT) as i32
-  path_lines(lines, bytes, bmap, tm, intercepts, pmo[0].x, pmo[0].y,
-             pmo[0].x + (USERANGE >> FRACBITS) * finecosine(fine),
-             pmo[0].y + (USERANGE >> FRACBITS) * finesine[fine])
+              tm: mut Tm, intercepts: mut Intercepts, things: Mobj, me: entity) -> i32 {
+  let fine = (things[me].angle >> ANGLETOFINESHIFT) as i32
+  path_lines(lines, bytes, bmap, tm, intercepts, things[me].x, things[me].y,
+             things[me].x + (USERANGE >> FRACBITS) * finecosine(fine),
+             things[me].y + (USERANGE >> FRACBITS) * finesine[fine])
   var used = -1
   var left = len(intercepts)
   var going = true
@@ -76,7 +76,7 @@ proc use_line(lines: mut Lines, sectors: Sectors, bytes: Bytes, bmap: Bmap,
         }
         intercepts[nearest].frac = 0x7fffffff
       } else {
-        used = li * 2 + point_on_line_side(lines, li, pmo[0].x, pmo[0].y)
+        used = li * 2 + point_on_line_side(lines, li, things[me].x, things[me].y)
         going = false
       }
     }
@@ -148,7 +148,8 @@ table triggers {
 system use_lines() {
   let down = Pl[0].buttons & BT_USE != 0 && Pl[0].buttons & BT_SPECIAL == 0
   if down && !Pl[0].usedown {
-    let used = use_line(Lines, Sectors, Bytes, Bmap, Tm, Intercepts, Pmo)
+    let used = use_line(Lines, Sectors, Bytes, Bmap, Tm, Intercepts, Mobj,
+                        Spawned.player)
     if used >= 0 {
       Triggered += { line: used >> 1, used: true, side: used & 1, player: true }
     }

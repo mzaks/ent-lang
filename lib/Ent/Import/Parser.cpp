@@ -2990,7 +2990,7 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
                      "value, .. }' gives it a row, '" + name + " = []' "
                      "empties it, '" + name + "[i].field = value' changes "
                      "a row");
-  if ((inEach && !inTurn) || inEdges)
+  if ((inEach && !inTurn && !inFunction) || inEdges)
     return error(at, "a row is given to a buffer once for each entity of a "
                      "'for', not in a loop over others in it");
   FailureOr<SmallVector<mlir::Value>> values = parseRow();
