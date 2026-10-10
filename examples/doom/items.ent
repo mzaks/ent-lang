@@ -23,7 +23,8 @@ import things
 // and what was found.
 buffer Inv {
   armorpoints: i32, armortype: i32, weapons: i32, cards: i32, backpack: bool,
-  readyweapon: i32, pendingweapon: i32, itemcount: i32, bonuscount: i32
+  readyweapon: i32, pendingweapon: i32, itemcount: i32, bonuscount: i32,
+  attacker: i32
 } capacity 1
 // The four kinds of ammunition: how much the player has and can have.
 buffer Ammo { count: i32, most: i32 } capacity 4

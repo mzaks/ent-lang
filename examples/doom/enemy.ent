@@ -476,6 +476,8 @@ proc damage_mobj(lines: mut Lines, sectors: mut Sectors, subsectors:
       }
     }
     if hurts {
+      // (The player knows who did it, and turns to it when dead.)
+      if isplayer { inv[0].attacker = things[source].id }
       things[target].health -= damage
       if things[target].health <= 0 {
         kill_mobj(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, source, target)
@@ -540,6 +542,24 @@ proc missile_stopped(lines: mut Lines, sectors: mut Sectors, subsectors:
   }
 }
 
+// A missile that was just made starts a little way on, and bursts at
+// once if there is no room (P_CheckMissileSpawn).
+proc check_missile_spawn(lines: mut Lines, sectors: mut Sectors, subsectors:
+                     Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap:
+                     Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                     spechit: mut Spechit, touched: mut Touched, triggered:
+                     mut Triggered, intercepts: mut Intercepts, sight: mut
+                     Sight, rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, things: mut Mobj, player: entity, th: entity) {
+  things[th].tics = max(things[th].tics - (p_random(rnd) & 3), 1)
+  things[th].x += things[th].momx >> 1
+  things[th].y += things[th].momy >> 1
+  things[th].z += things[th].momz >> 1
+  let me = th
+  if !try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, things, me, things[th].x, things[th].y) {
+    missile_stopped(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th)
+  }
+}
+
 // A missile is shot from a thing at another (P_SpawnMissile,
 // P_CheckMissileSpawn): it starts a little way on, and bursts at once
 // if there is no room.
@@ -566,14 +586,7 @@ proc spawn_missile(lines: mut Lines, sectors: mut Sectors, subsectors:
   let dist = max(aprox_distance(things[dest].x - things[source].x,
                                 things[dest].y - things[source].y) / speed, 1)
   things[th].momz = (things[dest].z - things[source].z) / dist
-  things[th].tics = max(things[th].tics - (p_random(rnd) & 3), 1)
-  things[th].x += things[th].momx >> 1
-  things[th].y += things[th].momy >> 1
-  things[th].z += things[th].momz >> 1
-  let me = th
-  if !try_move(lines, sectors, subsectors, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, things, me, things[th].x, things[th].y) {
-    missile_stopped(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th)
-  }
+  check_missile_spawn(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th)
 }
 
 // What hurts all around a thing does so (P_RadiusAttack): everything

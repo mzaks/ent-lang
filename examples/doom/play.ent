@@ -763,7 +763,7 @@ system start_player() {
   Inv = [{
     armorpoints: 0, armortype: 0, weapons: 1 << WP_FIST | 1 << WP_PISTOL,
     cards: 0, backpack: false, readyweapon: WP_PISTOL,
-    pendingweapon: WP_NOCHANGE, itemcount: 0, bonuscount: 0
+    pendingweapon: WP_NOCHANGE, itemcount: 0, bonuscount: 0, attacker: 0
   }; 1]
   Ammo = []
   Ammo += { count: 50, most: 200 }
@@ -783,7 +783,9 @@ system think_player() {
   Demo.tic += 1
   Demo.over = Demo.tic >= len(Ticcmds)
   for e, m: mut Mobj in turn by m.id where m.type == MT_PLAYER {
-    player_think(Mobj, e, Pl, Clock.leveltime)
+    // (Dead, it does no more of this: see `player_sector`.)
+    if m.health <= 0 { Pl[0].dead = true }
+    if !Pl[0].dead { player_think(Mobj, e, Pl, Clock.leveltime) }
     m.sprite = states[m.state].sprite
     m.frame = states[m.state].frame
   }

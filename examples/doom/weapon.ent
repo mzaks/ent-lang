@@ -300,6 +300,45 @@ proc weapon_action(lines: mut Lines, sectors: mut Sectors, subsectors:
       things[player].angle = point_to_angle(things[hit].x - things[player].x,
                                             things[hit].y - things[player].y)
     }
+  } else if action == A_FireMissile {
+    // A rocket, at what is in front or a little to either side, or
+    // straight on (P_SpawnPlayerMissile).
+    ammo[weaponammo[inv[0].readyweapon]].count -= 1
+    let straight = things[player].angle
+    var an = straight
+    let (first, aimed) = aim_line_attack(things, player, lines, sectors, bytes,
+                                         bmap, tm, intercepts, an,
+                                         16 * 64 * FRACUNIT)
+    var slope = first
+    if aimed == none {
+      an = straight + (1 << 26)
+      let (second, lefted) = aim_line_attack(things, player, lines, sectors,
+                                             bytes, bmap, tm, intercepts, an,
+                                             16 * 64 * FRACUNIT)
+      slope = second
+      if lefted == none {
+        an = straight + (1 << 26) - (2 << 26)
+        let (third, righted) = aim_line_attack(things, player, lines, sectors,
+                                               bytes, bmap, tm, intercepts, an,
+                                               16 * 64 * FRACUNIT)
+        slope = third
+        if righted == none {
+          an = straight
+          slope = 0
+        }
+      }
+    }
+    let th = spawn_mobj(things, sectors, subsectors, nodes, tm, rnd, env,
+                        things[player].x, things[player].y,
+                        things[player].z + 4 * 8 * FRACUNIT, MT_ROCKET)
+    things[th].target = player
+    things[th].angle = an
+    let speed = mobjinfo[MT_ROCKET].speed
+    let fine = (an >> ANGLETOFINESHIFT) as i32
+    things[th].momx = fixed_mul(speed, finecosine(fine))
+    things[th].momy = fixed_mul(speed, finesine[fine])
+    things[th].momz = fixed_mul(speed, slope)
+    check_missile_spawn(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, th)
   } else if action == A_FirePistol || action == A_FireShotgun ||
             action == A_FireCGun {
     let kind = weaponammo[inv[0].readyweapon]
@@ -406,6 +445,32 @@ system player_sector() {
     sky: Data.skyflatnum, leveltime: Clock.leveltime
   }; 1]
   Rnd = [{ play: Random.play }; 1]
+  // Dead, the player sinks and turns to who did it (P_DeathThink).
+  for e, m: mut Mobj in turn by m.id where m.type == MT_PLAYER && Pl[0].dead {
+    Pl[0].viewheight = max(Pl[0].viewheight - FRACUNIT, 6 * FRACUNIT)
+    Pl[0].deltaviewheight = 0
+    Pl[0].viewz = min(m.z + Pl[0].viewheight, m.ceilingz - 4 * FRACUNIT)
+    let me = m.id
+    var found = false
+    var ax = 0
+    var ay = 0
+    for other: Mobj where other.id == Inv[0].attacker && other.id != me {
+      found = true
+      ax = other.x
+      ay = other.y
+    }
+    if found {
+      let angle = point_to_angle(ax - m.x, ay - m.y)
+      let delta = angle - m.angle
+      if delta < ANG90 / 18 || delta > 0 - ANG90 / 18 {
+        m.angle = angle
+      } else if delta < ANG180 {
+        m.angle += ANG90 / 18
+      } else {
+        m.angle -= ANG90 / 18
+      }
+    }
+  }
   for e, m: Mobj in turn by m.id where m.type == MT_PLAYER && !Pl[0].dead {
     let sector = Subsectors[m.subsector].sector
     let special = Sectors[sector].special
