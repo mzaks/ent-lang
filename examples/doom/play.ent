@@ -831,7 +831,7 @@ system mirror_player() {
 // lasts a tic less, and when it is over the next one starts; one that
 // lasts no time goes straight on to the one after.
 system think_things() {
-  for m: mut Mobj where m.type != MT_PLAYER && m.tics != -1 {
+  for m: mut Mobj in turn by m.id where m.type != MT_PLAYER && m.tics != -1 {
     m.tics -= 1
     if m.tics == 0 {
       var state = states[m.state].nextstate

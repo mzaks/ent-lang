@@ -1,0 +1,82 @@
+// A `for` that goes by a field, and one whose entities take turns
+// (in_turn.test).
+import console
+component Thing { born: i32, hp: i32, hits: i32 }
+component Fast { speed: i32 }
+default_capacity 16
+unique Stream: i32
+unique Born: i32
+unique Frame: i32
+buffer Seen { born: i32, hp: i32 } capacity 64
+
+// A number out of one stream: each that asks moves it on.
+proc next(seen: mut Seen, born: i32, hp: i32) {
+  seen += { born: born, hp: hp }
+}
+
+world {
+  // Not in the order of their numbers, and in two archetypes.
+  spawn { Thing { born: 3, hp: 10, hits: 0 } }
+  spawn { Thing { born: 1, hp: 10, hits: 0 }, Fast { speed: 2 } }
+  spawn { Thing { born: 4, hp: 10, hits: 0 } }
+  spawn { Thing { born: 2, hp: 10, hits: 0 }, Fast { speed: 3 } }
+  Born = 4
+}
+
+system ordered() {
+  Frame += 1
+  // By a field, one `for`: the rows of a buffer are in that order.
+  Seen = []
+  for t: Thing by t.born {
+    Seen += { born: t.born, hp: t.hp }
+  }
+  for i in 0..len(Seen) {
+    put("{Frame}: by: {Seen[i].born} hp {Seen[i].hp}")
+  }
+}
+
+system turns() {
+  // Turn by turn: each hits the one before it, which was hit already or
+  // not; each draws from one stream; and what one writes the next reads.
+  Seen = []
+  Stream = 100
+  for e, t: mut Thing in turn by t.born {
+    // The one with the highest number below this one's, as it is now.
+    var before = e
+    var found = false
+    var best = 0
+    var hp = 0
+    for o, other: Thing where other.born < t.born && other.born > best {
+      best = other.born
+      before = o
+      found = true
+      hp = other.hp
+    }
+    Stream += t.born
+    t.hits = Stream
+    if found {
+      // It was hit by the one before it, if that one had one before it.
+      Thing(before).hp -= 1
+      Thing(before).hits |= 0x1000
+    }
+    next(Seen, t.born, hp)
+    Seen[0].hp = len(Seen)
+    // The second spawns one that comes last, in this same `for`.
+    if t.born == 2 && Frame == 1 {
+      Born += 1
+      spawn { Thing { born: Born, hp: 7, hits: 0 } }
+    }
+    // The third goes, and those after it do not find it.
+    if t.born == 3 && Frame == 2 { e.destroy() }
+  }
+  for i in 0..len(Seen) {
+    put("{Frame}: turn: {Seen[i].born} saw hp {Seen[i].hp}")
+  }
+  for t: Thing by t.born {
+    put("{Frame}: thing {t.born}: hp {t.hp} hits {t.hits}")
+  }
+  put("{Frame}: stream {Stream}")
+}
+
+schedule frame() { ordered() turns() }
+main { frame() frame() }

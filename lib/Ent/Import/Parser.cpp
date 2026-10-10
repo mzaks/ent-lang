@@ -657,6 +657,9 @@ private:
   LogicalResult checkEaches(Operation *query);
   /// Inside the body of a `for` over entities that is in another.
   bool inEach = false;
+  /// Inside the body of a `for` whose entities take turns (`in turn by`):
+  /// what it does takes effect at once.
+  bool inTurn = false;
   LogicalResult parseConnect(llvm::SMLoc at);
   LogicalResult emitCondition(const Expr &expr);
   FailureOr<std::unique_ptr<Branch>> parseBranch();
@@ -2882,9 +2885,11 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
     FailureOr<ExprPtr> value = parseExpr();
     if (failed(value))
       return failure();
-    if (inQuery)
+    if (inQuery && !inTurn)
       return error(at, "a row of a buffer is changed outside a 'for' over "
-                       "entities: what it kept would depend on their order");
+                       "entities: what it kept would depend on their order "
+                       "(not of one whose entities take turns: 'in turn by "
+                       "name.field')");
     Type indexType = typeOf(**number);
     FailureOr<mlir::Value> index =
         emit(**number, indexType ? indexType : builder.getI32Type());
@@ -2912,7 +2917,7 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
     if (failed(expect(Token::LBracket, "'[]': a buffer is assigned no rows, "
                                        "or '[{ .. }; n]', n rows alike")))
       return failure();
-    if (inQuery)
+    if (inQuery && !inTurn)
       return error(at, "a buffer is emptied outside a 'for': every entity "
                        "would empty it");
     if (consumeIf(Token::RBracket)) {
@@ -2941,7 +2946,7 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
                      "value, .. }' gives it a row, '" + name + " = []' "
                      "empties it, '" + name + "[i].field = value' changes "
                      "a row");
-  if (inEdges || inEach)
+  if ((inEach && !inTurn) || inEdges)
     return error(at, "a row is given to a buffer once for each entity of a "
                      "'for', not in a loop over others in it");
   FailureOr<SmallVector<mlir::Value>> values = parseRow();
@@ -4877,7 +4882,8 @@ scf::IfOp Parser::giveFromBranches(scf::IfOp branch,
 }
 
 // for [e,] [p: [mut] P [up R], ...] [with A, any(B, C)] [without D]
-//     [cascade R [leaves first]] [where cond] [on trigger, ...] { }
+//     [top down R | bottom up R | [in turn] by name.field] [where cond]
+//     [on trigger, ...] { }
 LogicalResult Parser::parseFor() {
   llvm::SMLoc at = token.loc;
   if (atCountedFor()) {
@@ -5332,6 +5338,63 @@ LogicalResult Parser::parseFor() {
       return failure();
     cascade = *relation;
   }
+  // [in turn] by name.field: in the order of a whole number the entities
+  // have, one after another; `in turn`, each as a `for` of its own.
+  bool turn = false;
+  Attribute by;
+  llvm::SMLoc byAt = token.loc;
+  if (token.isKeyword("in") && peek().isKeyword("turn")) {
+    advance();
+    advance();
+    turn = true;
+    if (!token.isKeyword("by"))
+      return error("'in turn' needs an order: 'in turn by name.field', a "
+                   "whole number the entities have");
+  }
+  if (consumeKeyword("by")) {
+    if (cascade)
+      return error(byAt, "a 'for' goes along a tree or by a field: it has "
+                         "one order");
+    llvm::SMLoc componentAt = token.loc;
+    FailureOr<std::string> name = identifier("a component or a binding");
+    if (failed(name))
+      return failure();
+    const Binding *bound = nullptr;
+    for (const Binding &binding : bindings)
+      if (binding.name == *name)
+        bound = &binding;
+    std::string component = bound ? bound->component : *name;
+    if (!bound && !components.count(component))
+      return error(componentAt, "unknown component or binding '" + *name +
+                                    "'");
+    if (bound && (bound->via || bound->optional))
+      return error(componentAt, "the order is by a field every entity of "
+                                "the 'for' has itself");
+    if (!bound && !llvm::is_contained(with, Attribute(symbol(component))))
+      return error(componentAt, "the order is by a field every entity of "
+                                "the 'for' has: bind '" + component +
+                                    "' or name it after 'with'");
+    if (failed(expect(Token::Dot, "'.' and a field: the order is by a "
+                                  "whole number")))
+      return failure();
+    llvm::SMLoc fieldAt = token.loc;
+    FailureOr<std::string> field = identifier("a field");
+    if (failed(field))
+      return failure();
+    Type type = components[component].fieldType(*field);
+    if (!type)
+      return error(fieldAt, "component '" + component + "' has no field '" +
+                                *field + "'");
+    if (!type.isIntOrIndex() || type.isInteger(1))
+      return error(fieldAt, "the order is by a whole number; '" + *field +
+                                "' is " + typeWords(type));
+    by = builder.getArrayAttr(
+        {symbol(component), builder.getStringAttr(*field)});
+    for (const Binding &binding : bindings)
+      if (binding.via)
+        return error(byAt, "a 'for' that goes by a field binds what its "
+                           "own entities have, not along a tree");
+  }
   ExprPtr where;
   if (consumeKeyword("where")) {
     FailureOr<ExprPtr> condition = parseExpr();
@@ -5340,6 +5403,8 @@ LogicalResult Parser::parseFor() {
     where = std::move(*condition);
   }
   SmallVector<Attribute> triggers;
+  if (by && token.isKeyword("on"))
+    return error("a 'for' that goes by a field does not react ('on') yet");
   if (consumeKeyword("on")) {
     do {
       llvm::SMLoc triggerAt = token.loc;
@@ -5471,6 +5536,10 @@ LogicalResult Parser::parseFor() {
   if (!traversal.empty())
     state.addAttribute(QueryOp::kTraversalAttr,
                        builder.getStringAttr(traversal));
+  if (by)
+    state.addAttribute(QueryOp::kByAttr, by);
+  if (turn)
+    state.addAttribute(QueryOp::kTurnAttr, builder.getUnitAttr());
   Region *body = state.addRegion();
   auto *block = new Block();
   body->push_back(block);
@@ -5495,6 +5564,7 @@ LogicalResult Parser::parseFor() {
                                    block->getArgument(index))
                        .getResult()));
   inQuery = true;
+  llvm::SaveAndRestore turns(inTurn, turn);
   queryEntity = entity;
   queryNames.clear();
   if (!entity.empty())
@@ -5529,7 +5599,8 @@ LogicalResult Parser::parseFor() {
                          builder.getStringAttr("add"),
                          arith::ConstantIntOp::create(builder, loc(at), 1, 32));
   QueryOp::ensureTerminator(query->getRegion(0), builder, loc(at));
-  if (failed(checkEaches(query)))
+  // (Turn by turn, everything is read as it is then.)
+  if (!turn && failed(checkEaches(query)))
     return failure();
   return success();
 }
@@ -5815,6 +5886,31 @@ LogicalResult Parser::parseNameStatement() {
     FailureOr<ExprPtr> value = parseStatementValue();
     if (failed(value))
       return failure();
+    // Turn by turn it is written as any field is: read as it is now,
+    // and set.
+    if (inTurn) {
+      if (isa<TextType, StringType>(type))
+        return error(fieldAt, "a text of another entity is not set from "
+                              "here: that entity sets its own");
+      FailureOr<mlir::Value> entity = emit(**id, EntityType::get(context));
+      if (failed(entity))
+        return failure();
+      StringAttr fieldName = builder.getStringAttr(*field);
+      return emitAssignment(
+          at, op->first, op->second, [&] { return type; },
+          [&]() -> mlir::Value {
+            return LookupOp::create(builder, loc(at), type,
+                                    builder.getI1Type(), *entity,
+                                    symbol(name), fieldName)
+                .getValue();
+          },
+          [&](mlir::Value v) -> LogicalResult {
+            ApplyOp::create(builder, loc(at), *entity, symbol(name),
+                            fieldName, builder.getStringAttr("set"), v);
+            return success();
+          },
+          **value);
+    }
     StringRef rule;
     bool negate = false;
     if (op->second)
@@ -5940,7 +6036,7 @@ LogicalResult Parser::parseNameStatement() {
     FailureOr<ExprPtr> value = parseStatementValue();
     if (failed(value))
       return failure();
-    if (inQuery) {
+    if (inQuery && !inTurn) {
       // Inside a query a unique is accumulated into, or set: to what
       // the last entity that sets it gives.
       StringRef rule;
@@ -7157,7 +7253,7 @@ FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
                      "'" + operand->name + "' is a buffer, which a system "
                      "hands over: a fn or proc passes on one it is given");
       // One with a body may read it for each entity of a `for`.
-      if (inQuery && (function.isExtern || handed.getMut()))
+      if (inQuery && !inTurn && (function.isExtern || handed.getMut()))
         return error(operand->loc,
                      handed.getMut()
                          ? "a buffer is given to be changed outside a "

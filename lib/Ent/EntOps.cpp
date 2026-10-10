@@ -386,7 +386,19 @@ static BufferOp lookupBuffer(SymbolTableCollection &symbolTable, Operation *op,
   return buffer;
 }
 
+/// Whether `op` is in a query that runs as one query per entity (`turn`):
+/// what it does there takes effect at once.
+static bool isInTurn(Operation *op) {
+  auto query = op->getParentOfType<QueryOp>();
+  return query && query.isTurn();
+}
+
 LogicalResult AppendOp::verify() {
+  // (In a query that goes by a field, the row is there at once: wherever
+  // the op stands.)
+  if (auto query = (*this)->getParentOfType<QueryOp>();
+      query && query.hasBy())
+    return success();
   if (auto query = (*this)->getParentOfType<QueryOp>()) {
     if ((*this)->getParentOfType<EdgesOp>())
       return emitOpError("inside 'ent.edges' is not supported yet");
@@ -467,7 +479,7 @@ static BufferOp verifyBufferUse(SymbolTableCollection &symbolTable,
     }
     return buffer;
   }
-  if (outside && op->getParentOfType<QueryOp>()) {
+  if (outside && op->getParentOfType<QueryOp>() && !isInTurn(op)) {
     op->emitOpError("must not be inside a query");
     return {};
   }
@@ -1286,6 +1298,15 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
         if (succeeded(parser.parseOptionalKeyword(traversal)))
           result.addAttribute(kTraversalAttr, b.getStringAttr(traversal));
     }
+    if (succeeded(parser.parseOptionalKeyword("by"))) {
+      FlatSymbolRefAttr component;
+      StringAttr field;
+      if (parser.parseAttribute(component) || parser.parseAttribute(field))
+        return failure();
+      result.addAttribute(kByAttr, b.getArrayAttr({component, field}));
+      if (succeeded(parser.parseOptionalKeyword("turn")))
+        result.addAttribute(kTurnAttr, b.getUnitAttr());
+    }
     if (failed(parser.parseOptionalKeyword("on")))
       return success();
     Builder &builder = parser.getBuilder();
@@ -1360,6 +1381,9 @@ void QueryOp::print(OpAsmPrinter &p) {
   if (FlatSymbolRefAttr cascade = getCascade())
     p << " cascade " << cascade << (isLeavesFirst() ? " leaves first" : "")
       << (getTraversal().empty() ? "" : " ") << getTraversal();
+  if (hasBy())
+    p << " by " << getByComponent() << " " << getByField()
+      << (isTurn() ? " turn" : "");
   if (auto triggers = (*this)->getAttrOfType<ArrayAttr>(kTriggersAttr)) {
     p << " on [";
     llvm::interleaveComma(triggers, p, [&](Attribute attr) {
@@ -1387,7 +1411,7 @@ void QueryOp::print(OpAsmPrinter &p) {
   p.printOptionalAttrDictWithKeyword(
       (*this)->getAttrs(),
       {kTriggersAttr, kWithAttr, kWithoutAttr, kAnyAttr, kCascadeAttr,
-       kLeavesFirstAttr, kTraversalAttr});
+       kLeavesFirstAttr, kTraversalAttr, kByAttr, kTurnAttr});
   printBody(p, getBody());
 }
 
@@ -1502,6 +1526,29 @@ LogicalResult QueryOp::verify() {
   if (Attribute attr = (*this)->getAttr(kCascadeAttr))
     if (!isa<FlatSymbolRefAttr>(attr))
       return emitOpError("'cascade' must name a relation");
+  if (isTurn() && !hasBy())
+    return emitOpError("is 'turn' without a 'by': its entities take their "
+                       "turns in the order of a field");
+  if (hasBy()) {
+    if (!getByComponent() || !getByField())
+      return emitOpError("'by' must name a component and a field of it");
+    if (getCascade())
+      return emitOpError("goes 'by' a field and cascades along a tree; "
+                         "it has one order");
+    if ((*this)->hasAttr(kTriggersAttr))
+      return emitOpError("goes 'by' a field and is reactive, which is not "
+                         "supported yet");
+    if (!llvm::is_contained(getRequired(), getByComponent()))
+      return emitOpError("goes by a field of ")
+             << getByComponent()
+             << ", which its entities need not have: bind it or name it "
+                "in 'with'";
+    for (BlockArgument arg : body.getArguments())
+      if (cast<RefType>(arg.getType()).isUp())
+        return emitOpError("goes 'by' a field and binds a component of "
+                           "another entity along a tree, which is not "
+                           "supported yet");
+  }
   if (isLeavesFirst() && !getCascade())
     return emitOpError("is 'leaves first' without a 'cascade'");
   if ((*this)->hasAttr(kTraversalAttr)) {
@@ -1587,7 +1634,25 @@ LogicalResult QueryOp::verify() {
   // accumulates) lands when the depth that sent it is through; it despawns
   // when all of it has run, like any query. What else changes which
   // entities there are, or the tree, has no place in it yet.
-  if (getCascade()) {
+  // (So for a query that goes by a field and is one query still: what it
+  // sends is combined as it goes, in its order.)
+  bool byField = hasBy() && !isTurn();
+  if (byField) {
+    Operation *reader = nullptr;
+    getBody().walk([&](AppendOp append) {
+      getBody().walk([&](Operation *op) {
+        if (isa<BufferLenOp, BufferAtOp>(op) &&
+            op->getAttr("buffer") == append.getBufferAttr())
+          reader = op;
+      });
+    });
+    if (reader)
+      return reader->emitOpError("reads a buffer that the query, which goes "
+                                 "by a field, appends to: the rows are "
+                                 "there as it goes ('turn' makes that what "
+                                 "is meant)");
+  }
+  if (getCascade() || byField) {
     // Nothing of the query may see what a depth sends part way: an entity
     // of the same depth would see what those visited before it sent.
     Operation *sender = nullptr, *seer = nullptr;
@@ -1638,10 +1703,15 @@ LogicalResult QueryOp::verify() {
     });
     if (sender) {
       InFlightDiagnostic diag =
-          sender->emitOpError("in a cascading query combines into a field "
-                              "the query also reads or sets; what an entity "
-                              "sees of it would depend on the order within "
-                              "its depth");
+          sender->emitOpError(
+              byField ? "in a query that goes by a field combines into "
+                        "what the query also reads or sets; it is combined "
+                        "as the query goes ('turn' makes that what is "
+                        "meant)"
+                      : "in a cascading query combines into a field "
+                        "the query also reads or sets; what an entity "
+                        "sees of it would depend on the order within "
+                        "its depth");
       diag.attachNote(seer->getLoc()) << "read or set here";
       return diag;
     }
@@ -1713,6 +1783,26 @@ LogicalResult QueryOp::verify() {
 
 LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto system = (*this)->getParentOfType<SystemOp>();
+  if (hasBy()) {
+    ComponentOp component =
+        lookupComponent(symbolTable, *this, getByComponent());
+    if (!component)
+      return emitOpError("goes by a field of unknown component ")
+             << getByComponent();
+    Type type = component.getFieldType(getByField().getValue());
+    if (!type)
+      return emitOpError("goes by '")
+             << getByField().getValue() << "', which " << getByComponent()
+             << " has no field of";
+    if (!type.isIntOrIndex() || type.isInteger(1))
+      return emitOpError("goes by '")
+             << getByField().getValue() << "' of type " << type
+             << "; the order is that of a whole number";
+    if (!system.canRead(getByComponent()))
+      return emitOpError("goes by a field of ")
+             << getByComponent() << " but system @" << system.getSymName()
+             << " does not declare it in 'reads' or 'writes'";
+  }
   for (const Trigger &trigger : getTriggers(*this)) {
     // (Brought along by a trigger up a tree, which is checked itself.)
     if (trigger.kind == Trigger::Connected || trigger.onTheWay)
@@ -1996,7 +2086,8 @@ LogicalResult EachOp::verify() {
     // A field the enclosing query sets of its own entities this would
     // read of others set or not, as the query got to them: only as it
     // was before (`old`).
-    if (isOld(arg.getArgNumber()))
+    // (Turn by turn, they are read as they are then.)
+    if (isOld(arg.getArgNumber()) || query.isTurn())
       continue;
     llvm::SmallPtrSet<Attribute, 4> read;
     for (Operation *user : arg.getUsers())
@@ -2050,6 +2141,8 @@ LogicalResult EachOp::verify() {
   getBody().walk([&](Operation *op) {
     if (failed(result))
       return;
+    if (isa<AppendOp>(op) && query.hasBy())
+      return;
     if (isa<CombineOp, ConnectOp, AppendOp, SpawnOp, DespawnOp, AddOp,
             RemoveOp>(op)) {
       result = op->emitOpError("cannot be in an 'ent.each': what entities "
@@ -2060,6 +2153,8 @@ LogicalResult EachOp::verify() {
     // What is sent or accumulated here is combined right away, once for
     // each entity of the loop: nothing else in the query may see it.
     Operation *seen = nullptr;
+    if (query.isTurn())
+      return;
     if (auto apply = dyn_cast<ApplyOp>(op)) {
       query.walk([&](Operation *other) {
         auto touches = [&](Value ref, StringAttr field) {
@@ -2399,7 +2494,8 @@ LogicalResult LookupOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   // Within a query, the looked-up field must not change: other entities'
   // values would be old or new depending on iteration order.
   auto query = (*this)->getParentOfType<QueryOp>();
-  if (!query)
+  // (Turn by turn, it is read as it is then.)
+  if (!query || query.isTurn())
     return success();
   // Unless the query has been there: it cascades along a tree, and the
   // entity is the other end of one of the tree's edges that it visits,
@@ -2530,6 +2626,14 @@ static LogicalResult verifyCombining(Operation *op, StringRef rule) {
   if (!query)
     return op->emitOpError("must be inside an 'ent.query': its values are "
                            "combined when the query ends");
+  // (Turn by turn, a value lands where it is sent: wherever, and with the
+  // last one staying where they are set.)
+  if (query.isTurn()) {
+    if (rule != "set" && rule != "add" && rule != "min" && rule != "max")
+      return op->emitOpError("has unknown rule '")
+             << rule << "'; expected 'set', 'add', 'min' or 'max'";
+    return success();
+  }
   for (Operation *parent = op->getParentOp(); parent != query;
        parent = parent->getParentOp())
     if (isa<LoopLikeOpInterface>(parent))
@@ -2569,11 +2673,17 @@ LogicalResult ApplyOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     return emitOpError("value type ")
            << getValue().getType() << " does not match field '" << getField()
            << "' of type " << fieldType;
-  if (!isa<FloatType>(fieldType) && !fieldType.isIntOrIndex())
+  bool set = getRule() == "set";
+  if (set && !isCombinable(fieldType) && !fieldType.isInteger(1) &&
+      !isa<EnumType, EntityType>(fieldType))
+    return emitOpError("cannot set field '")
+           << getField() << "' of type " << fieldType
+           << "; only integers, floats, enums and entities are set";
+  if (!set && !isa<FloatType>(fieldType) && !fieldType.isIntOrIndex())
     return emitOpError("cannot combine field '")
            << getField() << "' of type " << fieldType
            << "; only integers and floats can";
-  if (fieldType.isInteger(1))
+  if (!set && fieldType.isInteger(1))
     return emitOpError("cannot combine field '")
            << getField() << "' of type i1; only integers and floats can";
   auto system = (*this)->getParentOfType<SystemOp>();
@@ -2584,6 +2694,8 @@ LogicalResult ApplyOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 
   // One rule per field and query: mixed rules would not commute.
   ApplyOp other;
+  if (isInTurn(*this))
+    return success();
   (*this)->getParentOfType<QueryOp>().walk([&](ApplyOp apply) {
     if (!other && apply.getComponentAttr() == getComponentAttr() &&
         apply.getField() == getField() && apply.getRule() != getRule())
@@ -2859,7 +2971,7 @@ LogicalResult ReadOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 LogicalResult WriteOp::verify() {
   if (!(*this)->getParentOfType<SystemOp>())
     return emitOpError("must be inside an 'ent.system'");
-  if ((*this)->getParentOfType<QueryOp>())
+  if ((*this)->getParentOfType<QueryOp>() && !isInTurn(*this))
     return emitOpError("cannot write a resource inside 'ent.query': every "
                        "entity would write the same field, which makes the "
                        "entities depend on each other; write it at system "
@@ -2909,6 +3021,8 @@ AccumulateOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
                    : "; only integers (not i1) and floats can");
   // One rule per field and query: mixed rules would not commute.
   AccumulateOp other;
+  if (isInTurn(*this))
+    return success();
   (*this)->getParentOfType<QueryOp>().walk([&](AccumulateOp accumulate) {
     if (!other && accumulate.getResourceAttr() == getResourceAttr() &&
         accumulate.getField() == getField() &&

@@ -19,6 +19,8 @@ const PREC = {
 };
 
 const list = (rule) => seq(rule, repeat(seq(',', rule)), optional(','));
+// (The same, with no comma after the last.)
+const several = (rule) => seq(rule, repeat(seq(',', rule)));
 
 module.exports = grammar({
   name: 'ent',
@@ -27,7 +29,10 @@ module.exports = grammar({
   word: ($) => $.identifier,
   // `capacity` after a declaration is its own (`... capacity 64`) or
   // starts the next one (`capacity Name 64`): what follows it tells.
-  conflicts: ($) => [[$.tag], [$.component], [$.relation], [$.archetype]],
+  // (`for a, b in`: a counted `for`, or the names of one whose entities
+  // take turns: the next word tells.)
+  conflicts: ($) => [[$.tag], [$.component], [$.relation], [$.archetype],
+                     [$.counted_for, $.query_for]],
 
   rules: {
     source_file: ($) => repeat($._declaration),
@@ -272,11 +277,17 @@ module.exports = grammar({
     // over the visited entity's edges.
     query_for: ($) =>
       seq('for',
-          optional(choice(
-              list(choice($.binding, field('entity', $.identifier))),
-              list($.pattern))),
-          repeat(choice($.with, $.without)),
-          optional($.cascade),
+          // (An order by a field comes after something bound or
+          // filtered by, and no comma: `by` and `in` are names too.)
+          choice(
+              seq(choice(
+                      several(choice($.binding, field('entity', $.identifier))),
+                      several($.pattern)),
+                  repeat(choice($.with, $.without)),
+                  optional(choice($.cascade, $.order))),
+              seq(repeat1(choice($.with, $.without)),
+                  optional(choice($.cascade, $.order))),
+              optional($.cascade)),
           optional($.where),
           optional($.on),
           field('body', $.block)),
@@ -317,6 +328,11 @@ module.exports = grammar({
     cascade: ($) =>
       seq(choice(seq('top', 'down'), seq('bottom', 'up')),
           optional(choice('bfs', 'dfs')), field('along', $._name)),
+    // by name.field: in the order of a whole number; in turn by
+    // name.field: each entity as a `for` of its own.
+    order: ($) =>
+      seq(optional(seq('in', 'turn')), 'by', field('of', $._name), '.',
+          field('field', $.identifier)),
     where: ($) => seq('where', $._expression),
     on: ($) => seq('on', list($.trigger)),
     // changed Component.field, changed binding.field, and of a child:

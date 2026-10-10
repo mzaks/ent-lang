@@ -649,6 +649,29 @@ def Ent_QueryOp : Ent_Op<"query", [
     goes only where its events lead (see
     WorldLayout::cascadeFollowsEvents); otherwise through
     its whole tree, running its body where a trigger fired.
+
+    `by @C "f"` orders the query by a whole-number field of a component
+    its entities have: they are visited one after another, the one with
+    the smallest value first (those with the same value in the storage's
+    order), by the values the field had when the query started. It is
+    still one query: what it sends (`ent.apply`, `ent.accumulate`,
+    `ent.append`) is combined in that order, and so it may not read or
+    set a field it sends to, read a unique it accumulates into, or read a
+    buffer it appends to.
+
+    `by @C "f" turn` runs it as one query per entity, each with its own
+    commit point:
+    ```mlir
+    ent.query (%m: !ent.ref<@Mobj, mut>) by @Mobj "id" turn { ... }
+    ```
+    What an entity's body sends, accumulates, writes to a resource
+    (`ent.write`) or does to a buffer takes effect at once, and what it
+    reads of other entities, resources and buffers is as it is then, with
+    all that the entities before it did. Despawns, moves and connects take
+    effect when that entity's body ends. An entity the body spawns is
+    visited by the same query if its value of the field is not below the
+    one of the entity that spawned it. Such a query is neither reactive
+    nor along a tree.
   }];
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
@@ -679,6 +702,25 @@ def Ent_QueryOp : Ent_Op<"query", [
       auto attr = (*this)->getAttrOfType<::mlir::StringAttr>(kTraversalAttr);
       return attr ? attr.getValue() : ::llvm::StringRef();
     }
+    /// The field the query's entities are visited by, smallest first: a
+    /// component the entity must have and a whole-number field of it.
+    static constexpr ::llvm::StringLiteral kByAttr = "by";
+    bool hasBy() { return (*this)->hasAttr(kByAttr); }
+    ::mlir::FlatSymbolRefAttr getByComponent() {
+      auto by = (*this)->getAttrOfType<::mlir::ArrayAttr>(kByAttr);
+      return by && by.size() == 2
+                 ? ::llvm::dyn_cast<::mlir::FlatSymbolRefAttr>(by[0])
+                 : ::mlir::FlatSymbolRefAttr();
+    }
+    ::mlir::StringAttr getByField() {
+      auto by = (*this)->getAttrOfType<::mlir::ArrayAttr>(kByAttr);
+      return by && by.size() == 2
+                 ? ::llvm::dyn_cast<::mlir::StringAttr>(by[1])
+                 : ::mlir::StringAttr();
+    }
+    /// With `by`: one query per entity, each with its own commit point.
+    static constexpr ::llvm::StringLiteral kTurnAttr = "turn";
+    bool isTurn() { return (*this)->hasAttr(kTurnAttr); }
     /// Whether an argument is a ref to an ancestor's component.
     bool hasUpRefs();
 

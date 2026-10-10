@@ -144,6 +144,29 @@ changes to the relation like any other: the order is as they left it from
 the commit point on (Q10), or for one outside a query before the system's
 next query.
 
+**Q12. By a field, and in turn.** A query that goes by a field (`by @C
+"f"`) visits its entities one after another, the one with the smallest
+value of the field first, those with the same value in the storage's
+order; the values are those of the query's start. It is one query: Q1 to
+Q8 hold, and what the order decides is the order of step 1 at its commit
+point, which is the order of its visits instead of that of archetypes and
+rows. (So the pass combines as it goes, and the verifier has the query
+read nothing of what it sends, as for a cascading query, Q9.)
+
+With `turn` it is one query per entity, in that order, each with its own
+commit point. So an entity's body sees everything the entities before it
+did, and Q3 and Q4 lose their restriction: it may look up a field the
+query sets, read a resource it writes, read a buffer it changes. What a
+body sends, accumulates, writes (`ent.write`) or does to a buffer takes
+effect where it stands, not at its commit point: a query of one entity
+has no other entity to keep it from, and the body itself may read it
+back. Structural changes are those of that entity's commit point (steps
+2 and 3): its despawn, its move, the edges it connected or disconnected.
+Q1 becomes: the next entity is the one with the next value of the field
+among those there are; an entity spawned by a body is one of them if its
+value is not below that of the entity that spawned it, and an entity is
+visited once, wherever its moves take it.
+
 ## The commit point: the end of a query
 
 When a query has run for every entity it visits, in this order:
@@ -266,6 +289,8 @@ where the result is the same:
   its entity and that entity's ancestors; what the entities of a depth
   combine into their parents is then added per parent by one thread, in
   the order the rows have, so the result is the one a single pass gives.
+
+A query that goes by a field has none of this freedom: it is its order.
 
 **Determinism.** Given the same world and arguments, a frame's result does
 not depend on these choices or on the number of threads: bodies cannot

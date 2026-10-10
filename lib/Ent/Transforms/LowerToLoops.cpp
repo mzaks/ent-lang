@@ -1554,6 +1554,9 @@ static bool uniformBodies = false;
 /// row and is combined where it is. (Such a query never runs in
 /// parallel, and nothing else in it touches the field: see EachOp.)
 static constexpr llvm::StringLiteral kInEachAttr = "ent.in_each";
+/// On an append or a connect of a query that goes by a field: it takes
+/// effect where it stands, as one outside a query does.
+static constexpr llvm::StringLiteral kAtOnceAttr = "ent.at_once";
 
 static bool appliesDirectly(Operation *apply, bool directApplies) {
   if (!isa<ApplyOp, AccumulateOp>(apply))
@@ -1674,8 +1677,10 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
   SmallVector<Operation *> accesses;
   for (Operation *root : roots)
     root->walk([&](Operation *op) {
+      // (What is done at once stays, for what lowers it outside queries.)
       if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp, EntityOp, ApplyOp,
-              AccumulateOp, ConnectOp, AppendOp>(op))
+              AccumulateOp, ConnectOp, AppendOp>(op) &&
+          !op->hasAttr(kAtOnceAttr))
         accesses.push_back(op);
     });
   for (Operation *op : accesses) {
@@ -2876,9 +2881,10 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   OpBuilder::InsertionGuard guard(rewriter);
   // Without an ancestor there is nothing to read: such a body never runs
   // masked.
+  // (Nor one that goes by a field: what it does is done at once.)
   bool guarded = mask && (!canRunForAbsentEntities(query) ||
                           isStructuralFor(query, archetypeOp) ||
-                          !ancestors.empty());
+                          !ancestors.empty() || query.hasBy());
   assert((mask || ancestors.empty() ||
           llvm::all_of(ancestors, [](auto &entry) {
             return !entry.second.found ||
@@ -2890,7 +2896,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   // the loop ran.
   query.getBody().walk([&](Operation *apply) {
     if (!isa<ApplyOp, AccumulateOp, ConnectOp, AppendOp>(apply) ||
-        appliesDirectly(apply, directApplies))
+        appliesDirectly(apply, directApplies) || apply->hasAttr(kAtOnceAttr))
       return;
     bool inEdges = apply->getParentOfType<EdgesOp>() != nullptr;
     if (!inEdges && !guarded &&
@@ -11046,6 +11052,402 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   rewriter.eraseOp(query);
 }
 
+/// The function that puts an entity into the list a query that goes by a
+/// field visits (see lowerOrdered), made when first asked for:
+/// `(keys, ids, cells, key, id, spawned)`. The list is `cells[0]` long and
+/// in the order of its keys, those alike in the order they came; the
+/// query is at `cells[1]` of it. One that was there when the query
+/// started goes where its key says. One spawned since goes among those
+/// still to come, and not at all with a key below that of the entity
+/// being visited; where the list is full, what was visited is dropped
+/// from it first.
+static const char kOrderedInsert[] = "ent.ordered.insert";
+static void callOrderedInsert(IRRewriter &rewriter, Location loc,
+                              Operation *module, Value keys, Value ids,
+                              Value cells, Value key, Value id,
+                              bool spawned) {
+  Type i64 = rewriter.getI64Type();
+  Type index = rewriter.getIndexType();
+  Type idType = id.getType();
+  MemRefType keysType = MemRefType::get({ShapedType::kDynamic}, i64);
+  MemRefType idsType = MemRefType::get({ShapedType::kDynamic}, idType);
+  MemRefType cellsType = MemRefType::get({2}, index);
+  Value flag = arith::ConstantIntOp::create(rewriter, loc, spawned, 1);
+  func::CallOp::create(rewriter, loc, kOrderedInsert, TypeRange{},
+                       ValueRange{keys, ids, cells, key, id, flag});
+  if (SymbolTable::lookupSymbolIn(module, kOrderedInsert))
+    return;
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(cast<ModuleOp>(module).getBody());
+  auto func = func::FuncOp::create(
+      rewriter, loc, kOrderedInsert,
+      rewriter.getFunctionType(
+          {keysType, idsType, cellsType, i64, idType, rewriter.getI1Type()},
+          {}));
+  func.setPrivate();
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  keys = entry->getArgument(0);
+  ids = entry->getArgument(1);
+  cells = entry->getArgument(2);
+  key = entry->getArgument(3);
+  id = entry->getArgument(4);
+  flag = entry->getArgument(5);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value capacity = memref::DimOp::create(rewriter, loc, keys, zero);
+  auto load = [&](Value from, Value at) -> Value {
+    return memref::LoadOp::create(rewriter, loc, from, ValueRange{at});
+  };
+  auto store = [&](Value value, Value to, Value at) {
+    memref::StoreOp::create(rewriter, loc, value, to, ValueRange{at});
+  };
+  // One spawned with a key below the visited entity's has had its turn.
+  Value count = load(cells, zero);
+  Value cursor = load(cells, one);
+  auto ifSpawned = scf::IfOp::create(rewriter, loc,
+                                     TypeRange{rewriter.getI1Type()}, flag,
+                                     /*withElseRegion=*/true);
+  rewriter.setInsertionPointToStart(ifSpawned.thenBlock());
+  scf::YieldOp::create(
+      rewriter, loc,
+      ValueRange{arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
+                                       key, load(keys, cursor))});
+  rewriter.setInsertionPointToStart(ifSpawned.elseBlock());
+  scf::YieldOp::create(
+      rewriter, loc,
+      ValueRange{arith::ConstantIntOp::create(rewriter, loc, 1, 1)});
+  rewriter.setInsertionPointAfter(ifSpawned);
+  auto ifComes = scf::IfOp::create(rewriter, loc, ifSpawned.getResult(0));
+  func::ReturnOp::create(rewriter, loc);
+  rewriter.setInsertionPointToStart(ifComes.thenBlock());
+  // Full: those visited make room. (Only one spawned finds it so.)
+  Value full = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                     count, capacity);
+  auto ifFull = scf::IfOp::create(rewriter, loc, full);
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(ifFull.thenBlock());
+    Value left = arith::SubIOp::create(rewriter, loc, count, cursor);
+    auto move = scf::ForOp::create(rewriter, loc, zero, left, one);
+    rewriter.setInsertionPointToStart(move.getBody());
+    Value from = arith::AddIOp::create(rewriter, loc, cursor,
+                                       move.getInductionVar());
+    store(load(keys, from), keys, move.getInductionVar());
+    store(load(ids, from), ids, move.getInductionVar());
+    rewriter.setInsertionPointAfter(move);
+    store(left, cells, zero);
+    store(zero, cells, one);
+  }
+  count = load(cells, zero);
+  cursor = load(cells, one);
+  Value lowest = arith::SelectOp::create(
+      rewriter, loc, flag, arith::AddIOp::create(rewriter, loc, cursor, one),
+      zero);
+  // From the end down to where its key is not below the one before.
+  auto place = scf::WhileOp::create(
+      rewriter, loc, TypeRange{index}, ValueRange{count},
+      [&](OpBuilder &, Location, ValueRange state) {
+        Value at = state[0];
+        Value above = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sgt, at, lowest);
+        auto ifAbove = scf::IfOp::create(rewriter, loc,
+                                         TypeRange{rewriter.getI1Type()},
+                                         above, /*withElseRegion=*/true);
+        {
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPointToStart(ifAbove.thenBlock());
+          Value before = load(keys,
+                              arith::SubIOp::create(rewriter, loc, at, one));
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::sgt, before, key)});
+          rewriter.setInsertionPointToStart(ifAbove.elseBlock());
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 1)});
+        }
+        scf::ConditionOp::create(rewriter, loc, ifAbove.getResult(0), state);
+      },
+      [&](OpBuilder &, Location, ValueRange state) {
+        Value at = state[0];
+        Value before = arith::SubIOp::create(rewriter, loc, at, one);
+        store(load(keys, before), keys, at);
+        store(load(ids, before), ids, at);
+        scf::YieldOp::create(rewriter, loc, ValueRange{before});
+      });
+  store(key, keys, place.getResult(0));
+  store(id, ids, place.getResult(0));
+  store(arith::AddIOp::create(rewriter, loc, count, one), cells, zero);
+}
+
+/// Replace a query that goes by a field (`by @C "f"`) by a loop over its
+/// entities in that order: they are listed with the field's values, the
+/// smallest first, and each is then found by its id, since rows may move
+/// while the loop runs.
+///
+/// Without `turn` it is one query: what it sends is combined as it goes
+/// (it reads none of that, see the verifier), and what changes which
+/// entities there are waits for its end. With `turn` each entity is a
+/// query of its own: everything in the body is lowered where it stands,
+/// reads and writes alike, its despawns and moves are applied when its
+/// body ends, and what it spawns is put into the list.
+static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
+                         const WorldLayout &layout, WorldAccess &world) {
+  Location loc = query.getLoc();
+  bool turn = query.isTurn();
+  StringAttr byComponent = query.getByComponent().getAttr();
+  StringAttr byField = query.getByField();
+  SmallVector<const WorldArchetype *> matched;
+  int64_t capacity = 1;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    if (matches(archetype, query)) {
+      matched.push_back(&archetype);
+      capacity += archetype.capacity;
+    }
+  if (matched.empty()) {
+    if (!ofModule(query))
+      query.emitWarning("matches no archetype; the query is removed");
+    rewriter.eraseOp(query);
+    return;
+  }
+  Operation *module = ArchetypeOp(matched.front()->op)->getParentOp();
+  rewriter.setInsertionPoint(query);
+  Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
+  Type i64 = rewriter.getI64Type();
+  Type index = rewriter.getIndexType();
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value size = arith::ConstantIndexOp::create(rewriter, loc, capacity);
+  Value keys = memref::AllocOp::create(
+      rewriter, loc, MemRefType::get({ShapedType::kDynamic}, i64),
+      ValueRange{size});
+  Value ids = memref::AllocOp::create(
+      rewriter, loc, MemRefType::get({ShapedType::kDynamic}, world.idType()),
+      ValueRange{size});
+  Value cells =
+      memref::AllocOp::create(rewriter, loc, MemRefType::get({2}, index));
+  memref::StoreOp::create(rewriter, loc, zero, cells, ValueRange{zero});
+  memref::StoreOp::create(rewriter, loc, zero, cells, ValueRange{one});
+  // A field's value as a key: its number, in 64 bits.
+  auto keyOf = [&](Value stored, Type type) -> Value {
+    unsigned width = cast<IntegerType>(stored.getType()).getWidth();
+    if (width == 64)
+      return stored;
+    return hasNoSign(type)
+               ? arith::ExtUIOp::create(rewriter, loc, i64, stored).getResult()
+               : arith::ExtSIOp::create(rewriter, loc, i64, stored)
+                     .getResult();
+  };
+
+  // The entities there are now, by their keys.
+  llvm::DenseMap<const WorldArchetype *, Value> startCounts;
+  for (const WorldArchetype *archetype : matched) {
+    Value rows = world.count(loc, *archetype);
+    startCounts[archetype] = rows;
+    auto gather = scf::ForOp::create(rewriter, loc, zero, rows, one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(gather.getBody());
+    Value row = gather.getInductionVar();
+    Value stored = memref::LoadOp::create(
+        rewriter, loc, world.column(*archetype, byComponent, byField),
+        ValueRange{row});
+    callOrderedInsert(rewriter, loc, module, keys, ids, cells,
+                      keyOf(stored, archetype->find(byComponent, byField)->type),
+                      world.entityId(loc, *archetype, row),
+                      /*spawned=*/false);
+  }
+
+  // What is done where it stands: a row given to a buffer and, turn by
+  // turn, an edge connected.
+  query.getBody().walk([&](Operation *op) {
+    if (isa<AppendOp>(op) || (turn && isa<ConnectOp>(op)))
+      op->setAttr(kAtOnceAttr, rewriter.getUnitAttr());
+  });
+  // Turn by turn, an entity the body spawns that the query would visit
+  // joins the list, by the value it was given.
+  if (turn) {
+    SmallVector<SpawnOp> spawns;
+    query.getBody().walk([&](SpawnOp spawn) { spawns.push_back(spawn); });
+    for (SpawnOp spawn : spawns) {
+      const WorldArchetype *home = nullptr;
+      for (const WorldArchetype *archetype : matched)
+        if (ArchetypeOp(archetype->op).getSymNameAttr() ==
+            spawn.getArchetypeAttr().getAttr())
+          home = archetype;
+      if (!home)
+        continue;
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointAfter(spawn);
+      Type type = home->find(byComponent, byField)->type;
+      auto lookup = LookupOp::create(rewriter, loc, type,
+                                     rewriter.getI1Type(), spawn.getEntity(),
+                                     query.getByComponent(), byField);
+      callOrderedInsert(rewriter, loc, module, keys, ids, cells,
+                        keyOf(world.toStorage(loc, lookup.getValue()), type),
+                        world.toStorage(loc, spawn.getEntity()),
+                        /*spawned=*/true);
+    }
+  }
+
+  SmallVector<ConnectOp> connects;
+  query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
+  llvm::SetVector<Attribute> changedRelations;
+  noteOrderWrites(rewriter, query, layout, world, changedRelations);
+  for (ConnectOp connect : connects)
+    changedRelations.insert(connect.getRelationAttr().getAttr());
+  query.getBody().walk([&](DisconnectOp disconnect) {
+    changedRelations.insert(
+        disconnect->getParentOfType<EdgesOp>().getRelationAttr().getAttr());
+  });
+  query.getBody().walk([&](SpawnOp spawn) {
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (archetype.isSorted() &&
+          ArchetypeOp(archetype.op).getSymNameAttr() ==
+              spawn.getArchetypeAttr().getAttr())
+        changedRelations.insert(archetype.sortedBy);
+  });
+  // One query: what changes which entities there are is marked by row,
+  // as a query along a tree marks it, and applied when all have run.
+  SmallVector<const WorldArchetype *> changing;
+  for (const WorldArchetype *archetype : matched)
+    if (archetype->hasPending() && isStructuralFor(query, archetype->op))
+      changing.push_back(archetype);
+  if (!turn)
+    for (const WorldArchetype *archetype : changing) {
+      auto clear = scf::ForOp::create(rewriter, loc, zero,
+                                      startCounts.lookup(archetype), one);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(clear.getBody());
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 32),
+          world.pendingList(*archetype), ValueRange{clear.getInductionVar()});
+    }
+
+  auto visit = scf::WhileOp::create(
+      rewriter, loc, TypeRange{}, ValueRange{},
+      [&](OpBuilder &, Location, ValueRange) {
+        Value more = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::slt,
+            memref::LoadOp::create(rewriter, loc, cells, ValueRange{one}),
+            memref::LoadOp::create(rewriter, loc, cells, ValueRange{zero}));
+        scf::ConditionOp::create(rewriter, loc, more, ValueRange{});
+      },
+      [&](OpBuilder &, Location, ValueRange) {
+        scf::YieldOp::create(rewriter, loc, ValueRange{});
+      });
+  // (The body is written once the loop is in the module: what it is made
+  // of is looked up from where it stands.)
+  {
+        OpBuilder::InsertionGuard inLoop(rewriter);
+        rewriter.setInsertionPoint(visit.getAfterBody()->getTerminator());
+        Value at = memref::LoadOp::create(rewriter, loc, cells,
+                                          ValueRange{one});
+        Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{at});
+        emitLocate(
+            rewriter, loc, layout, world, id,
+            [&](const WorldArchetype &archetype) {
+              return llvm::is_contained(matched, &archetype);
+            },
+            FlatSymbolRefAttr(), TypeRange{},
+            [&](const WorldArchetype &archetype, Value row,
+                Value) -> SmallVector<Value> {
+              OpBuilder::InsertionGuard guard(rewriter);
+              Operation *end = rewriter.getInsertionBlock()->getTerminator();
+              rewriter.setInsertionPoint(end);
+              emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                            layout, row, world.count(loc, archetype), tick,
+                            Value(), /*parallel=*/false,
+                            /*directApplies=*/true, KnownParent(),
+                            /*marksPending=*/!turn);
+              if (!turn)
+                return {};
+              // Its own query's end: it is gone, or elsewhere, and the
+              // edges are as it left them, for the next.
+              rewriter.setInsertionPoint(end);
+              SmallVector<const WorldArchetype *> changed;
+              if (llvm::is_contained(changing, &archetype))
+                changed.push_back(&archetype);
+              llvm::SetVector<Attribute> relations = changedRelations;
+              commitStructure(rewriter, loc, layout, world, changed,
+                              relations, tick);
+              return {};
+            },
+            []() -> SmallVector<Value> { return {}; });
+        // (The place is read again: a spawn may have moved the list.)
+        memref::StoreOp::create(
+            rewriter, loc,
+            arith::AddIOp::create(
+                rewriter, loc,
+                memref::LoadOp::create(rewriter, loc, cells, ValueRange{one}),
+                one),
+            cells, ValueRange{one});
+  }
+  // One query reads a unique as it was when it started.
+  if (!turn)
+    hoistResourceReads(rewriter, visit, world);
+
+  rewriter.setInsertionPoint(query);
+  memref::DeallocOp::create(rewriter, loc, keys);
+  memref::DeallocOp::create(rewriter, loc, ids);
+  memref::DeallocOp::create(rewriter, loc, cells);
+  if (!turn) {
+    // The marked rows, in order, are the pending list (see lowerCascade).
+    for (const WorldArchetype *archetype : changing) {
+      Value list = world.pendingList(*archetype);
+      auto gather = scf::ForOp::create(rewriter, loc, zero,
+                                       startCounts.lookup(archetype), one,
+                                       ValueRange{zero});
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(gather.getBody());
+        Value row = gather.getInductionVar();
+        Value at = gather.getRegionIterArg(0);
+        Value marked = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne,
+            memref::LoadOp::create(rewriter, loc, list, ValueRange{row}),
+            arith::ConstantIntOp::create(rewriter, loc, 0, 32));
+        auto ifMarked = scf::IfOp::create(rewriter, loc, marked);
+        rewriter.setInsertionPointToStart(ifMarked.thenBlock());
+        memref::StoreOp::create(
+            rewriter, loc,
+            arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(),
+                                       row),
+            list, ValueRange{at});
+        SmallVector<Value> carried;
+        if (archetype->pendingActionOffset)
+          carried.push_back(world.pendingActions(*archetype));
+        for (const WorldMove &move : archetype->moves)
+          for (const WorldColumn &column : move.values)
+            carried.push_back(world.moveValues(*archetype, column));
+        for (Value column : carried)
+          memref::StoreOp::create(
+              rewriter, loc,
+              memref::LoadOp::create(rewriter, loc, column, ValueRange{row}),
+              column, ValueRange{at});
+        rewriter.setInsertionPointAfter(ifMarked);
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::SelectOp::create(
+                rewriter, loc, marked,
+                arith::AddIOp::create(rewriter, loc, at, one), at)});
+      }
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::IndexCastOp::create(rewriter, loc, i64, gather.getResult(0)),
+          world.pendingCount(*archetype), ValueRange{zero});
+    }
+    for (ConnectOp connect : connects)
+      for (const WorldArchetype *archetype : matched)
+        appendConnected(rewriter, connect, layout, *archetype, world,
+                        startCounts.lookup(archetype));
+    commitStructure(rewriter, loc, layout, world, changing, changedRelations,
+                    tick);
+  }
+  rewriter.eraseOp(query);
+}
+
 /// Replace a query by one loop per matching archetype. The body is cloned
 /// into each loop, and every ref access becomes a load or store at the
 /// loop's index in the column of the ref's component and field.
@@ -11262,6 +11664,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   }
   if (query.getCascade())
     return lowerCascade(rewriter, query, layout, world, given);
+  if (query.hasBy())
+    return lowerOrdered(rewriter, query, layout, world);
   Location loc = query.getLoc();
   bool entityLocal = isEntityLocal(query);
   bool matched = false;
@@ -11604,6 +12008,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
         // A ref to an ancestor reads another entity, like a lookup, and a
         // cascading query has an order of its own.
         writesResource |= query.hasUpRefs() || query.getCascade();
+        // So has one that goes by a field.
+        writesResource |= query.hasBy();
       }
       if (!conditional && !writesResource &&
           !computeAccess(system, archetypes).isOpaque()) {
@@ -12912,7 +13318,9 @@ struct EntLowerToLoops
     module.walk([&](Operation *op) {
       if (!isa<ApplyOp, AccumulateOp>(op))
         return;
-      if (op->getParentOfType<QueryOp>().getCascade())
+      // (And one that goes by a field, in that order.)
+      auto query = op->getParentOfType<QueryOp>();
+      if (query.getCascade() || query.hasBy())
         op->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
     });
     // Lookups and applies through a trusted end of an edge.

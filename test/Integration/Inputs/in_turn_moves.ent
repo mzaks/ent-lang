@@ -1,0 +1,62 @@
+// What changes which entities there are, in a `for` that goes by a field
+// and in one whose entities take turns (in_turn.test).
+import console
+component Thing { at: i32, n: i32 }
+component Tired { since: i32 }
+component Key { k: u8 }
+tag Odd
+default_capacity 8
+unique Count: i32
+unique Frame: i32
+buffer Log { at: i32, n: i32 } capacity 64
+
+world {
+  spawn { Thing { at: -2, n: 0 }, Key { k: 200 } }
+  spawn { Thing { at: 5, n: 0 }, Key { k: 3 } }
+  spawn { Thing { at: -7, n: 0 }, Key { k: 255 } }
+  spawn { Thing { at: 5, n: 1 }, Key { k: 0 } }
+  spawn { Thing { at: 0, n: 0 }, Key { k: 100 } }
+}
+
+system go() {
+  Frame += 1
+  // Below nought first; those alike as they are stored.
+  Log = []
+  for t: Thing by t.at { Log += { at: t.at, n: t.n } }
+  for i in 0..len(Log) { put("{Frame}: at {Log[i].at} n {Log[i].n}") }
+  // Without a sign: 255 is the largest.
+  Log = []
+  for t: Thing with Key by Key.k where t.at != 5 { Log += { at: t.at, n: 0 } }
+  for i in 0..len(Log) { put("{Frame}: key order {Log[i].at}") }
+
+  // One `for`: who goes, goes when all have run, and is counted by all.
+  Count = 0
+  for e, t: Thing by t.at {
+    var others = 0
+    for other: Thing { others += 1 }
+    Count += others
+    if t.at == -7 && Frame == 1 { e.destroy() }
+  }
+  put("{Frame}: by counted {Count}")
+
+  // Turn by turn: who is given a component moves when its turn ends and
+  // is found with it by those after; who goes is counted no more.
+  Count = 0
+  Log = []
+  for e, t: mut Thing in turn by t.at {
+    var tired = 0
+    for other: Thing with Tired { tired += 1 }
+    var all = 0
+    for other: Thing { all += 1 }
+    Log += { at: t.at, n: tired * 100 + all }
+    if Frame == 1 && t.at <= 0 { e.add(Tired { since: Frame }) }
+    if Frame == 2 && t.at == 0 { e.destroy() }
+    if Frame == 2 && t.at == -2 { e.remove(Tired) }
+    t.n += 10
+  }
+  for i in 0..len(Log) { put("{Frame}: turn at {Log[i].at}: {Log[i].n}") }
+  for t: Thing, s: Tired by t.at { put("{Frame}: tired {t.at} n {t.n}") }
+}
+
+schedule frame() { go() }
+main { frame() frame() }

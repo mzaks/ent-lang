@@ -496,6 +496,12 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       // ancestor, which is the nearest one that has the component.
       if (FlatSymbolRefAttr cascade = query.getCascade())
         followTree(query, cascade);
+      // One that goes by a field reads it, of every entity it visits.
+      if (query.hasBy())
+        for (ArchetypeOp archetype : matchedArchetypes(query))
+          access.reads.insert({archetype.getSymNameAttr(),
+                               query.getByComponent().getAttr(),
+                               query.getByField()});
       for (Type type : query.getBody().getArgumentTypes()) {
         auto refType = cast<RefType>(type);
         if (!refType.isUp())

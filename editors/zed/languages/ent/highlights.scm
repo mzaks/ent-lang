@@ -102,7 +102,7 @@
   "sorted" "ordered" "by"
   "reads" "writes" "let" "var" "mut" "old" "spawn" "as"
   "with" "without" "any" "where" "on" "changed" "added" "removed" "log"
-  "top" "down" "bottom" "up" "bfs" "dfs" "connect"
+  "top" "down" "bottom" "up" "bfs" "dfs" "turn" "connect"
   "run_if"
 ] @keyword
 

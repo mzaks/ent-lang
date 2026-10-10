@@ -1,0 +1,65 @@
+// More of what a `for` whose entities take turns may do (in_turn.test):
+// connect, a buffer emptied and filled in a `for` inside, an entity and
+// an enum set in another, and more spawned than the world holds at once.
+import console
+enum Mood { Calm, Angry }
+component Unit { n: i32, kids: i32, mood: Mood }
+component Aim { at: entity }
+component Shot { n: i32, left: i32 }
+relation (Unit)-[Under]->(Unit) tree capacity 16
+default_capacity 4
+capacity Unit 8
+unique Round: i32
+unique Made: i32
+buffer Near { n: i32 } capacity 16
+
+world {
+  for i in 0..5 {
+    spawn { Unit { n: i + 1, kids: 0, mood: Mood.Calm }, Aim { at: none } }
+  }
+  spawn { Shot { n: 1, left: 9 } }
+}
+
+system chain() {
+  Round += 1
+  // Each goes under the one before it, and counts those under that one:
+  // the edge the one before connected is there.
+  for e, u: mut Unit, a: mut Aim in turn by u.n {
+    Near = []
+    var before = e
+    var found = false
+    for o, other: Unit where other.n + 1 == u.n {
+      before = o
+      found = true
+      Near += { n: other.n }
+    }
+    for o, other: Unit where other.n > u.n { Near += { n: other.n } }
+    u.kids = len(Near)
+    if found && Round == 1 {
+      connect (e)-[Under]->(before)
+      Aim(before).at = e
+      Unit(before).mood = Mood.Angry
+    }
+    for (child: Unit)-[Under]->(u) { u.kids += 100 }
+  }
+  for u: Unit, a: Aim by u.n {
+    var aimed = 0
+    if let n = Unit(a.at).n { aimed = n }
+    put("{Round}: unit {u.n}: {u.kids} aims at {aimed} angry {u.mood == Mood.Angry}")
+  }
+}
+
+system shots() {
+  // Each shot makes the next and goes: four at most are there at once,
+  // nine come and go in one `for`.
+  Made = 0
+  for e, s: Shot in turn by s.n {
+    Made += 1
+    if s.left > 0 { spawn { Shot { n: s.n + 1, left: s.left - 1 } } }
+    if s.left > 0 || Round == 2 { e.destroy() }
+  }
+  put("{Round}: shots {Made}")
+}
+
+schedule frame() { chain() shots() }
+main { frame() frame() }

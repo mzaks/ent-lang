@@ -1,0 +1,58 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+component Thing { born: i32, speed: f32 }
+system s() {
+  // expected-error @+1 {{'in turn' needs an order: 'in turn by name.field', a whole number the entities have}}
+  for t: Thing in turn {
+  }
+}
+
+// -----
+
+component Thing { born: i32, speed: f32 }
+system s() {
+  // expected-error @+1 {{the order is by a whole number; 'speed' is}}
+  for t: Thing by t.speed {
+  }
+}
+
+// -----
+
+component Thing { born: i32 }
+component Other { n: i32 }
+system s() {
+  // expected-error @+1 {{the order is by a field every entity of the 'for' has: bind 'Other' or name it after 'with'}}
+  for t: Thing by Other.n {
+  }
+}
+
+// -----
+
+component Thing { born: i32 }
+unique Total: i32
+system s() {
+  for t: Thing by t.born {
+    // expected-error @+1 {{inside a 'for', a unique can only be set or accumulated into}}
+    Total |= 1
+  }
+}
+
+// -----
+
+component Thing { born: i32 }
+buffer Rows { n: i32 } capacity 4
+system s() {
+  for t: Thing by t.born {
+    // expected-error @+1 {{a row of a buffer is changed outside a 'for' over entities}}
+    Rows[0].n = 1
+  }
+}
+
+// -----
+
+component Thing { born: i32 }
+system s() {
+  // expected-error @+1 {{a 'for' that goes by a field does not react ('on') yet}}
+  for t: Thing in turn by t.born on changed t.born {
+  }
+}

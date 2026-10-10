@@ -274,6 +274,9 @@ for with Enemy { Count += 1 }     // nor the entity
   | `bottom up dfs R` | all that is below an entity, then the entity |
 
   See Trees below.
+- `by name.field`, in that place, visits the entities in the order of a
+  whole number they have, and `in turn by name.field` has each of them
+  see what those before it did. See "In order, and in turn" below.
 - `where cond` runs the body only where `cond` holds.
 - `on changed C.f, changed C, added C, removed C` makes the query reactive.
   A component can be named by its binding (`changed b.w`), and another
@@ -381,6 +384,77 @@ connected). `s.disconnect()` removes the edge when the outer `for` ends.
 Edge loops do not nest, and a `for` may not visit a relation both ways if
 either loop writes the edges. A `+=` into another entity's field inside an
 edge loop runs once per edge.
+
+### In order, and in turn
+
+```
+for t: Thing by t.born { Seen += { born: t.born } }
+
+for e, m: mut Mobj in turn by m.id {
+  let roll = Random.index            // as the one before left it
+  Random.index = (roll + 1) & 0xff
+  if let health = Mobj(m.target).health {
+    if health > 0 {
+      Mobj(m.target).health -= roll  // there before the next one looks
+    }
+  }
+  if m.health <= 0 { e.destroy() }
+}
+```
+
+A `for` visits its entities in an order that is the storage's, and its
+bodies do not see one another: that is what lets them run on all cores.
+Where the order is the program's business (who moves first, who gets the
+last one, whose draw from a stream of numbers comes when), it is said
+after the filters, where `top down` stands for a tree:
+
+- `by name.field` visits the entities one after another by a field they
+  all have, the smallest value first: a whole number, of a component the
+  `for` binds (`t.born`) or names after `with` (`Thing.born`). Entities
+  with the same value come in the storage's order. The values are those
+  the field had when the `for` started.
+- It is one `for` still, with one end. What shows of the order is what
+  shows of any order: a buffer's rows lie in it, a proc is called in it,
+  and what is sent to other entities and added into uniques is combined
+  in it. Those land as the `for` goes, so it does not read or set a field
+  it sends to, read a unique it adds into, or read a buffer it gives rows
+  to (as a `for` along a tree does not). Who is destroyed, or moved by
+  `add` and `remove`, is so when the `for` ends, and what is spawned is
+  not visited.
+- `in turn by name.field` makes each entity a `for` of its own, one
+  after another in that order. Whatever the body does is done when the
+  next entity's turn comes, and whatever it reads is as it is then:
+  - another entity's field, by its id (`Mobj(id).health`) or in a `for`
+    inside (no `old` to say: there is no before), also one this `for`
+    sets;
+  - a field of another entity is set like one of its own, with any
+    assignment (`Mobj(id).flags |= HIT`, `Mobj(id).target = e`), and is
+    there at once;
+  - a unique is read and assigned like outside a `for` (`Random.index =
+    ...`, `|=` and the rest), and so is a buffer: a row more (also in a
+    `for` inside, once for each of its entities), a row changed
+    (`Near[i].gone = true`), emptied, its length read as it is; and a
+    proc may be given a buffer `mut`.
+  - `e.destroy()`, `e.add(C)` and `e.remove(C)` take effect when the
+    entity's own turn ends, and so does a `connect`: those after it find
+    it gone, or with the component, and the tree as it is then.
+    `e.has(C)` is as it was when the turn started.
+  - An entity that is spawned in a turn has its own turn in the same
+    `for`, where its number says, if that is not below the number of the
+    entity that spawned it. (With a counter for a number, what is
+    spawned comes last, in the order it was spawned in.)
+- Such a `for` runs on one core, and a system with one is not run
+  together with its neighbours. It costs putting the entities in order
+  each time it runs, which is little where the storage's order is
+  nearly the one asked for (a counter given at spawning) and much where
+  it is far from it (so many steps as entities, for each of them); and,
+  for each entity, finding it by its id. With 20,000 entities and a body
+  of one addition, a `for` by a counter takes 0.05 ms where the plain one
+  takes 0.005, and 63 ms where the storage's order is the one asked for
+  backwards (this machine, built for it).
+- A `var` from outside is still not assigned in it: a unique does that.
+  It does not react (`on`) or go along a tree, and binds what its own
+  entities have, no arrows.
 
 ### Trees
 
@@ -1469,7 +1543,9 @@ to a device at once (all there is to draw), in place of a call for each.
   `n` is below nought; more than it holds stops the program).
 - `Name[i].field = value` gives a row it has another value in a field,
   and so `+=`, `|=` and the other assignments; where it has no row `i`,
-  nothing happens. Outside a `for` over entities.
+  nothing happens. Outside a `for` over entities, or in one whose
+  entities take turns (`in turn by`), where a buffer is changed and read
+  as outside one.
 - `len(Name)` is how many rows it has and `Name[i].field` a row's field
   (nought where it has no row `i`); in a `for` that gives it rows, as it
   was before the `for`.

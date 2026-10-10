@@ -2974,6 +2974,36 @@
     }
   },
   {
+    "type": "order",
+    "named": true,
+    "fields": {
+      "field": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "of": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "parameter",
     "named": true,
     "fields": {
@@ -3270,6 +3300,10 @@
         },
         {
           "type": "on",
+          "named": true
+        },
+        {
+          "type": "order",
           "named": true
         },
         {
@@ -5437,6 +5471,10 @@
   },
   {
     "type": "true",
+    "named": false
+  },
+  {
+    "type": "turn",
     "named": false
   },
   {

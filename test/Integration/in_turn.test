@@ -1,0 +1,93 @@
+// A `for` that goes by a field visits its entities in that order, and one
+// whose entities take turns ('in turn by') is a `for` for each of them:
+// what one does the next finds done. The same built with threads.
+// RUN: %ent run %S/Inputs/in_turn.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/in_turn.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: %ent run %S/Inputs/in_turn_moves.ent 2>/dev/null > %t.moves
+// RUN: %ent run --parallel %S/Inputs/in_turn_moves.ent 2>/dev/null \
+// RUN:   | cmp - %t.moves
+// RUN: FileCheck %s --check-prefix=MOVES --input-file=%t.moves
+// RUN: %ent run %S/Inputs/in_turn_more.ent 2>/dev/null > %t.more
+// RUN: %ent run --parallel %S/Inputs/in_turn_more.ent 2>/dev/null \
+// RUN:   | cmp - %t.more
+// RUN: FileCheck %s --check-prefix=MORE --input-file=%t.more
+
+// By their numbers, though stored otherwise and in two archetypes.
+// CHECK:      1: by: 1 hp 10
+// CHECK-NEXT: 1: by: 2 hp 10
+// CHECK-NEXT: 1: by: 3 hp 10
+// CHECK-NEXT: 1: by: 4 hp 10
+// Turn by turn. The first row's `hp` was set to the buffer's length by
+// each in turn: five, with the one the second spawned, which had its turn
+// in the same `for`. The others saw the one before them not hit yet.
+// CHECK-NEXT: 1: turn: 1 saw hp 5
+// CHECK-NEXT: 1: turn: 2 saw hp 10
+// CHECK-NEXT: 1: turn: 3 saw hp 10
+// CHECK-NEXT: 1: turn: 4 saw hp 10
+// CHECK-NEXT: 1: turn: 5 saw hp 10
+// Each drew from the stream after the one before it (101, 103, 106, 110,
+// 115), and was then hit and marked (0x1000) by the one after it.
+// CHECK-NEXT: 1: thing 1: hp 9 hits 4197
+// CHECK-NEXT: 1: thing 2: hp 9 hits 4199
+// CHECK-NEXT: 1: thing 3: hp 9 hits 4202
+// CHECK-NEXT: 1: thing 4: hp 9 hits 4206
+// CHECK-NEXT: 1: thing 5: hp 7 hits 115
+// CHECK-NEXT: 1: stream 115
+// The next time the third goes in its turn: the fourth finds the second
+// before it, as the third has just hit it, and hits it again.
+// CHECK:      2: by: 5 hp 7
+// CHECK-NEXT: 2: turn: 1 saw hp 5
+// CHECK-NEXT: 2: turn: 2 saw hp 9
+// CHECK-NEXT: 2: turn: 3 saw hp 9
+// CHECK-NEXT: 2: turn: 4 saw hp 8
+// CHECK-NEXT: 2: turn: 5 saw hp 9
+// CHECK-NEXT: 2: thing 1: hp 8 hits 4197
+// CHECK-NEXT: 2: thing 2: hp 7 hits 4199
+// CHECK-NEXT: 2: thing 4: hp 8 hits 4206
+// CHECK-NEXT: 2: thing 5: hp 7 hits 115
+// CHECK-NEXT: 2: stream 115
+
+// Below nought first; those alike as they are stored.
+// MOVES:      1: at -7 n 0
+// MOVES-NEXT: 1: at -2 n 0
+// MOVES-NEXT: 1: at 0 n 0
+// MOVES-NEXT: 1: at 5 n 0
+// MOVES-NEXT: 1: at 5 n 1
+// A number without a sign: 100, 200, 255.
+// MOVES-NEXT: 1: key order 0
+// MOVES-NEXT: 1: key order -2
+// MOVES-NEXT: 1: key order -7
+// One `for`: the one that goes is there for all of them, five times five.
+// MOVES-NEXT: 1: by counted 25
+// Turn by turn: tired ones (hundreds) are found by those after them.
+// MOVES-NEXT: 1: turn at -2: 4
+// MOVES-NEXT: 1: turn at 0: 104
+// MOVES-NEXT: 1: turn at 5: 204
+// MOVES-NEXT: 1: turn at 5: 204
+// MOVES-NEXT: 1: tired -2 n 10
+// MOVES-NEXT: 1: tired 0 n 10
+// MOVES:      2: by counted 16
+// The first is rid of it and the second goes, each when its turn ends:
+// the last two find none tired, and three things.
+// MOVES-NEXT: 2: turn at -2: 204
+// MOVES-NEXT: 2: turn at 0: 104
+// MOVES-NEXT: 2: turn at 5: 3
+// MOVES-NEXT: 2: turn at 5: 3
+// MOVES-NOT:  tired
+
+// A buffer emptied and filled in each turn, by a `for` inside: the one
+// before and those after. Each sets an entity and an enum in the one
+// before it, and goes under it; the edges are there the next time (a
+// hundred for a child).
+// MORE:      1: unit 1: 4 aims at 2 angry true
+// MORE-NEXT: 1: unit 2: 4 aims at 3 angry true
+// MORE-NEXT: 1: unit 3: 3 aims at 4 angry true
+// MORE-NEXT: 1: unit 4: 2 aims at 5 angry true
+// MORE-NEXT: 1: unit 5: 1 aims at 0 angry false
+// Ten shots, each spawned by the one before it, which then goes, had
+// their turns in one `for`, in an archetype that holds four.
+// MORE-NEXT: 1: shots 10
+// MORE-NEXT: 2: unit 1: 104 aims at 2 angry true
+// MORE:      2: unit 5: 1 aims at 0 angry false
+// MORE-NEXT: 2: shots 1
