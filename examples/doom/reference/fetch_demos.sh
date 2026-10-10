@@ -9,7 +9,7 @@ root=$(cd "$here/../../.." && pwd)
 into=$root/build/doom/demos
 mkdir -p "$into"
 for map in 1 2 3 4 5 6 7 8 9; do
-  for category in "UV Speed" "UV Max" "UV Tyson" "Pacifist"; do
+  for category in "UV Speed" "UV Max" "UV Tyson" "Pacifist" "NoMo" "NoMo 100S" "Stroller"; do
     name=e1m${map}_$(echo "$category" | tr 'A-Z ' 'a-z_')
     [ -f "$into/$name.lmp" ] && continue
     url=$(curl -s -m 30 -G "https://dsdarchive.com/api/demos/records" \

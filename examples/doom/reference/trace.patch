@@ -36,10 +36,10 @@ index fbb1a18..c2ea4e0 100644
  
  
 diff --git i/src/doom/p_tick.c w/src/doom/p_tick.c
-index 5a93b80..ca01c78 100644
+index 5a93b80..e84c27e 100644
 --- i/src/doom/p_tick.c
 +++ w/src/doom/p_tick.c
-@@ -23,6 +23,171 @@
+@@ -23,6 +23,187 @@
  
  #include "doomstat.h"
  
@@ -174,10 +174,26 @@ index 5a93b80..ca01c78 100644
 +
 +		if (thinker->function.acp1 != (actionf_p1) P_MobjThinker)
 +		    continue;
-+		fprintf (dumpfile, "%d %d %d %d %u %d %d %d\n", mobj->type,
++		fprintf (dumpfile, "%d %d %d %d %u %d %d %d", mobj->type,
 +			 mobj->x, mobj->y, mobj->z, (unsigned int) mobj->angle,
 +			 mobj->health, (int) (mobj->state - states), mobj->tics);
++		// (And what the hash leaves out, where DOOM_DUMPALL is set.)
++		if (getenv ("DOOM_DUMPALL") && getenv ("DOOM_DUMPALL")[0])
++		    fprintf (dumpfile, " %d %d %d %d %d %d %d %d %d %d",
++			     mobj->flags, mobj->movedir, mobj->movecount,
++			     mobj->reactiontime, mobj->threshold, mobj->momx,
++			     mobj->momy, mobj->momz, mobj->floorz, mobj->ceilingz);
++		fprintf (dumpfile, "\n");
 +	    }
++	    // (And the player's weapon, which no thing shows.)
++	    if (getenv ("DOOM_DUMPALL") && getenv ("DOOM_DUMPALL")[0])
++		fprintf (dumpfile, "weapon %d %d %d %d %d %d %d %d %d %d\n",
++			 player->readyweapon, player->pendingweapon,
++			 player->psprites[0].state ? (int) (player->psprites[0].state - states) : 0,
++			 player->psprites[0].tics,
++			 player->psprites[1].state ? (int) (player->psprites[1].state - states) : 0,
++			 player->psprites[1].tics, player->ammo[0], player->ammo[1],
++			 player->attackdown, player->refire);
 +	    fflush (dumpfile);
 +	}
 +    }
@@ -211,7 +227,7 @@ index 5a93b80..ca01c78 100644
  
  int	leveltime;
  
-@@ -126,6 +291,12 @@ void P_Ticker (void)
+@@ -126,6 +307,12 @@ void P_Ticker (void)
  {
      int		i;
      
@@ -224,7 +240,7 @@ index 5a93b80..ca01c78 100644
      // run the tic
      if (paused)
  	return;
-@@ -148,6 +319,8 @@ void P_Ticker (void)
+@@ -148,6 +335,8 @@ void P_Ticker (void)
      P_UpdateSpecials ();
      P_RespawnSpecials ();
  

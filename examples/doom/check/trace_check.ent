@@ -16,6 +16,7 @@ import render
 import things
 import demo
 import specials
+import items
 import play
 import enemy
 import weapon
@@ -29,6 +30,7 @@ unique Tics: i32
 // The demo is played without its monsters, whatever it says.
 unique Without: bool
 unique Dump: i32
+unique Dumpall: bool
 
 world {
   Wad.file = "doom1.wad"
@@ -36,6 +38,7 @@ world {
   Tics = 300
   Without = false
   Dump = -5
+  Dumpall = false
 }
 
 // The things: how many, and their hashes added up.
@@ -76,6 +79,18 @@ system trace() {
   // the reference writes them with DOOM_DUMP, for finding what differs.)
   for m: Mobj by m.id where Clock.leveltime == Dump {
     put("thing {m.type} {m.x} {m.y} {m.z} {m.angle} {m.health} {m.state} {m.tics}")
+  }
+  // (With `Dumpall`, what the hash leaves out too, as DOOM_DUMPALL has
+  // the reference write it.)
+  for m: Mobj by m.id where Clock.leveltime == Dump && Dumpall {
+    // (In two lines, which check/demos.sh joins: one text of all
+    // eighteen takes the compiler for ever.)
+    put("more {m.type} {m.x} {m.y} {m.z} {m.angle} {m.health} {m.state} {m.tics} {m.flags}")
+    put("also {m.movedir} {m.movecount} {m.reactiontime} {m.threshold} {m.momx} {m.momy} {m.momz} {m.floorz} {m.ceilingz}")
+  }
+  if Clock.leveltime == Dump && Dumpall {
+    let down = if Pl[0].attackdown { 1 } else { 0 }
+    put("last weapon {Inv[0].readyweapon} {Inv[0].pendingweapon} {Psp[0].state} {Psp[0].tics} {Psp[1].state} {Psp[1].tics} {Ammo[0].count} {Ammo[1].count} {down} {Pl[0].refire}")
   }
 }
 

@@ -16,8 +16,8 @@
 // two pictures of it in front of the eye, the weapon and its flash, go
 // through states as things do, and what the states do is that it comes
 // up and goes down, is ready, and shoots; a shot makes a noise that the
-// monsters hear (P_NoiseAlert). (Not yet: the rocket launcher, and the
-// weapons that are not in the first episode.)
+// monsters hear (P_NoiseAlert). (Not yet: the weapons that are not in
+// the first episode.)
 import files
 import wad
 import fixed
@@ -294,6 +294,32 @@ proc weapon_action(lines: mut Lines, sectors: mut Sectors, subsectors:
       things[player].angle = point_to_angle(things[hit].x - things[player].x,
                                             things[hit].y - things[player].y)
     }
+  } else if action == A_Saw {
+    // The saw: it cuts what is right in front, pulls the player round to
+    // it, and on (A_Saw).
+    let damage = 2 * (p_random(rnd) % 10 + 1)
+    let angle = things[player].angle + (sub_random(rnd) << 18) as u32
+    let (slope, hit) = aim_line_attack(things, player, lines, sectors, bytes,
+                                       bmap, tm, intercepts, angle,
+                                       MELEERANGE + 1)
+    line_attack(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, things, player, player, angle, MELEERANGE + 1, slope, damage)
+    if hit != none {
+      let to = point_to_angle(things[hit].x - things[player].x,
+                              things[hit].y - things[player].y)
+      let off = to - things[player].angle
+      if off > ANG180 {
+        if (off as i32) < -((ANG90 / 20) as i32) {
+          things[player].angle = to + ANG90 / 21
+        } else {
+          things[player].angle -= ANG90 / 20
+        }
+      } else if off > ANG90 / 20 {
+        things[player].angle = to - ANG90 / 21
+      } else {
+        things[player].angle += ANG90 / 20
+      }
+      things[player].flags |= MF_JUSTATTACKED
+    }
   } else if action == A_FireMissile {
     // A rocket, at what is in front or a little to either side, or
     // straight on (P_SpawnPlayerMissile).
@@ -531,4 +557,6 @@ system think_weapon() {
                 Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
                 Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player, Pl, Psp, Ammo)
   Random.play = Rnd[0].play
+  // The powers the player has last a tic less.
+  if !Pl[0].dead { count_powers(Mobj, Spawned.player, Powers) }
 }

@@ -63,7 +63,8 @@ system think_things(late: bool) {
               Rnd, Inv, Powers, Env, Blast, Mobj, Spawned.player, e, Pl)
     // (The lines it set off, at once.)
     if len(Triggered) != 0 {
-      let out = work_lines(Triggered, Lines, Sectors, Movers, Inv, Tm, Rnd)
+      let out = work_lines(Triggered, Lines, Sectors, Movers, Lights, Inv, Tm,
+                           Rnd)
       if out != 0 {
         Level.exited = true
         Level.secret = out == 2
@@ -72,7 +73,6 @@ system think_things(late: bool) {
     Random.play = Rnd[0].play
     if m.type == MT_PLAYER {
       pick_up(Mobj, e, Touched, Inv, Ammo, Powers, Level.skill)
-      count_powers(Mobj, e, Powers)
     }
   }
   for e, m: Mobj where m.gone { e.destroy() }
