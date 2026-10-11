@@ -211,7 +211,8 @@ table quit_sounds: i32 = [57, 26, 27, 31, 35, 36, 38, 52]
 // the skull is at, which of the skull's two pictures is shown and for
 // how long still; what is asked in the middle of the screen (`prompt`,
 // 0: nothing) and whether only y, n, the space bar and Esc answer it
-// (`answer`); how fast the mouse turns (`mouse`, 0 to 9); and for how
+// (`answer`), and whether the menu was open when it was asked and is
+// gone back to after (`under`); how fast the mouse turns (`mouse`, 0 to 9); and for how
 // many tics still the game waits before it ends (`leaving`).
 // How far the mouse has moved in the menu (`mx`, `my`) and where it was
 // when it last moved the skull (`lastx`, `lasty`); the tic until which
@@ -219,7 +220,7 @@ table quit_sounds: i32 = [57, 26, 27, 31, 35, 36, 38, 52]
 transient unique Menu {
   on: bool, which: i32, item: i32, skull: i32, count: i32, prompt: i32,
   answer: bool, mouse: i32, leaving: i32, tic: i32, mx: i32, my: i32,
-  lastx: i32, lasty: i32, wait: i32, held: i32
+  lastx: i32, lasty: i32, wait: i32, held: i32, under: bool
 }
 // The line the skull was at when each menu was left, and which keys
 // were down the tic before: the eleven of `menu_keys`, the eleven from
@@ -448,7 +449,8 @@ system menu_keys() {
     if any && (!Menu.answer || space || esc || yes || no) {
       let asked = Menu.prompt
       Menu.prompt = 0
-      Menu.on = false
+      // (Back to the menu it was asked from, if any; a yes shuts it.)
+      Menu.on = Menu.under && !(yes && Menu.answer)
       if yes && asked >= PROMPT_QUIT && asked < PROMPT_ENDGAME {
         // (M_QuitResponse: a last sound, and three seconds for it.)
         sound(Sounds, Rnd, quit_sounds[(Menu.tic >> 2) & 7], 0)
@@ -516,6 +518,7 @@ system menu_keys() {
           read_names(Bytes, Slotnames, Slot.room)
           Slot.quick = -2
         } else {
+          Menu.under = Menu.on
           Menu.prompt = PROMPT_QUICKSAVE
           Menu.answer = true
           Menu.on = true
@@ -530,6 +533,7 @@ system menu_keys() {
     } else if fkey == 9 {
       // Loading in a hurry (M_QuickLoad).
       sound(Sounds, Rnd, SFX_SWTCHN, 0)
+      Menu.under = Menu.on
       Menu.prompt = if Slot.quick < 0 { PROMPT_NOSPOT } else { PROMPT_QUICKLOAD }
       Menu.answer = Slot.quick >= 0
       Menu.on = true
@@ -635,6 +639,7 @@ system menu_keys() {
   } else if chosen == MENU_MAIN * 16 + 3 {
     // (M_SaveGame: only a game of the player's, and only in a level.)
     if !Shell.game {
+      Menu.under = Menu.on
       Menu.prompt = PROMPT_SAVEDEAD
       Menu.answer = false
     } else if !Wi.on && !Fin.on {
@@ -647,6 +652,7 @@ system menu_keys() {
     Menu.item = Laston[MENU_READ1].item
   } else if chosen == MENU_MAIN * 16 + 5 {
     // (M_QuitDOOM.)
+    Menu.under = Menu.on
     Menu.prompt = PROMPT_QUIT + Menu.tic % 8
     Menu.answer = true
     Menu.on = true
@@ -655,6 +661,7 @@ system menu_keys() {
     Menu.item = Laston[MENU_SKILL].item
   } else if chosen > MENU_EPISODE * 16 && chosen < MENU_SKILL * 16 {
     // (The other episodes are not in this WAD: how to get them.)
+    Menu.under = Menu.on
     Menu.prompt = PROMPT_SHAREWARE
     Menu.answer = false
     Menu.which = MENU_READ1
@@ -665,6 +672,7 @@ system menu_keys() {
     Menu.on = false
   } else if chosen == MENU_SKILL * 16 + 4 {
     // (The fifth skill is asked about first: M_VerifyNightmare.)
+    Menu.under = Menu.on
     Menu.prompt = PROMPT_NIGHTMARE
     Menu.answer = true
   } else if chosen == MENU_OPTIONS * 16 {
@@ -672,6 +680,7 @@ system menu_keys() {
     if !Shell.game {
       sound(Sounds, Rnd, SFX_OOF, 0)
     } else {
+      Menu.under = Menu.on
       Menu.prompt = PROMPT_ENDGAME
       Menu.answer = true
       Menu.on = true
