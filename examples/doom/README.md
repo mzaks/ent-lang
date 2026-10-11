@@ -83,8 +83,9 @@ them as systems. It is being built; what is here so far:
   the menu, the view's size and detail, how loud it is, the music's
   player. A file is some 700 kilobytes, where the original's is some
   tens: it holds the level as it is, not only what changed in it. It is
-  not the original's format, and a file is read only by the program as
-  it was built when it wrote it.
+  not the original's format, and a file is read only by a program
+  whose game is laid out as it was in the one that wrote it (what is
+  transient may differ); of a file that is not, the player is told.
 - The fifth skill, Nightmare: the monsters wait for nothing, the pink
   demon and three kinds of shots are faster, there is twice the
   ammunition, and a dead monster comes back where the level put it

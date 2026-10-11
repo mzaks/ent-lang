@@ -143,6 +143,7 @@ const PROMPT_NOSPOT = 12
 const PROMPT_QUICKSAVE = 13
 const PROMPT_QUICKLOAD = 14
 const PROMPT_NIGHTMARE = 15
+const PROMPT_NOLOAD = 16
 table prompt_lines { prompt: i32, line: text[48] } = [
   { prompt: 1, line: "are you sure you want to" },
   { prompt: 1, line: "quit this great game?" },
@@ -202,7 +203,12 @@ table prompt_lines { prompt: i32, line: text[48] } = [
   { prompt: 15, line: "are you sure? this skill level" },
   { prompt: 15, line: "isn't even remotely fair." },
   { prompt: 15, line: "" },
-  { prompt: 15, line: "press y or n." }
+  { prompt: 15, line: "press y or n." },
+  { prompt: 16, line: "that game cannot be loaded:" },
+  { prompt: 16, line: "it was saved by another" },
+  { prompt: 16, line: "build of the program." },
+  { prompt: 16, line: "" },
+  { prompt: 16, line: "press a key." }
 ]
 // The sound the game leaves with, by the tic (quitsounds).
 table quit_sounds: i32 = [57, 26, 27, 31, 35, 36, 38, 52]
@@ -1001,5 +1007,13 @@ system loaded() {
     Shown.map = false
     Pause.on = false
     Sounds = []
+  } else {
+    // (A file that is not there or not of this program's game: said,
+    // which the game has no words for, as its own files are always
+    // read.)
+    Menu.prompt = PROMPT_NOLOAD
+    Menu.answer = false
+    Menu.under = false
+    Menu.on = true
   }
 }
