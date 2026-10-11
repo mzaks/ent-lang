@@ -33,8 +33,9 @@ and what moves them as systems. It is being built; what is here so far:
   the ant with the domino it carries. `pictures.ent` is the game's own
   tables of where each picture is, written by `reference/make_tables.py`.
   A theme's list of blocks is read from its file.
-- `sets.ent`: the sets of levels, each a folder of the game's `levels`:
-  a set and a level of one are entities, read when the program starts.
+- `sets.ent`: the sets of levels, each a folder of the game's `levels`
+  and a list of its files (an `asset` with a `*`): a set and a level of
+  one are entities, read when the program starts.
   Which levels were solved is kept in a file (`pushover.solved`, where
   the program is started).
 - `menu.ent`: the windows over the game: the main menu, the choice of a
@@ -61,14 +62,24 @@ the game keeps it.
 
     examples/pushover/reference/build.sh        # fetches the game
     examples/pushover/reference/pictures.sh     # draws the dominoes
-    cd build/pushover/upstream
-    ent run ../../../examples/pushover/pushover.ent
+    examples/pushover/reference/assets.sh       # puts its files here
+    ent run examples/pushover/pushover.ent
 
 The game does not keep the pictures of its dominoes: they are drawn by
 POV-Ray from a scene it has, when it is built. `pictures.sh` does that
-(it says how to get POV-Ray without installing it for the machine). The
-program is started where the game is, since it reads the game's `data`,
-`themes` and `levels`.
+(it says how to get POV-Ray without installing it for the machine).
+
+The game's files are the program's assets: `assets.sh` copies them next
+to the port's sources (`data`, `themes`, `levels`; not committed), and
+the modules that use them declare them (`asset "themes/*.png"`, `asset
+original = "levels/original/*.level"`). So the program is started from
+anywhere, `ent build` writes them next to the program, and
+
+    ent build --embed examples/pushover/pushover.ent -o pushover
+
+puts them into it: one file of some 33 MB that needs nothing beside it
+(but a font of the machine). The levels of a set are the files that are
+there when the program is built.
 
 In a menu the arrow keys choose and Enter takes; Escape goes back. In a
 level the arrow keys walk and climb. The space bar takes the domino the
@@ -106,6 +117,8 @@ lists.
 
 This is a port of Pushover's source and so, like it, under the GNU
 General Public License, version 2 or later. Nothing of the game itself
-is in this repository: its levels, pictures and sounds are read from
-where `reference/build.sh` puts them. (The original levels and some of
+is in this repository: its levels, pictures and sounds are fetched by
+`reference/build.sh` and put next to the port by `reference/assets.sh`.
+A program built with `--embed` holds them, and is the game's to pass on
+under that licence. (The original levels and some of
 the pictures are those of Ocean's game.)

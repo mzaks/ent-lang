@@ -131,6 +131,7 @@ proc read_theme(bytes: Bytes, fore: mut Fore, tiles: mut Tiles) -> bool {
 }
 
 // Reads the theme the level names (after `load_level`).
+asset "themes/*.lua"
 system load_theme() {
   let size = read_file("themes/" + Level.theme + ".lua", Bytes)
   let read = read_theme(Bytes, Fore, Tiles)

@@ -45,23 +45,40 @@ component Named { set: i32, number: i32, name: text[62] } capacity 1024
 // How many sets there are, and whether what was solved is to be written.
 unique Sets { count: i32, save: bool }
 
-// The folders of `levels`.
+// The game's levels: the files of each set, which are the program's
+// (`ent build` takes them along, or into the program with `--embed`).
+// (A set more is a list more here, and a line more in `list_sets`.)
+asset av = "levels/av/*.level"
+asset original = "levels/original/*.level"
+
+// The folders of `levels`, and the file of each level in them.
 system list_sets() {
-  let found = list_files("levels", Bytes)
-  var at = 0
-  var number = 0
-  while at < len(Bytes) {
-    let end = line_end(Bytes, at)
-    if end > at {
-      spawn { Folder { number: number, name: text_of(Bytes, at, end) } }
-      number += 1
+  spawn { Folder { number: 0, name: "av" } }
+  spawn { Folder { number: 1, name: "original" } }
+  var order = 0
+  for file in av {
+    if file != "levels/av/index.level" {
+      spawn {
+        Entry { set: 0, number: -1, solved: 0, order: order, name: "",
+                path: file }
+      }
+      order += 1
     }
-    at = end + 1
+  }
+  order = 1000
+  for file in original {
+    if file != "levels/original/index.level" {
+      spawn {
+        Entry { set: 1, number: -1, solved: 0, order: order, name: "",
+                path: file }
+      }
+      order += 1
+    }
   }
 }
 
 // Each folder's set (its `index.level`: the name, what it is, where it
-// comes among the sets, and the names of its levels), and its files.
+// comes among the sets, and the names of its levels).
 system read_sets() {
   for f: Folder in turn by f.number {
     let size = read_file("levels/" + f.name + "/index.level", Bytes)
@@ -91,22 +108,6 @@ system read_sets() {
               description: if about >= 0 { text_of(Bytes, about + 2, line_end(Bytes, about)) }
                            else { "" },
               folder: f.name }
-      }
-      let files = list_files("levels/" + f.name, Bytes)
-      var at = 0
-      var order = 0
-      while at < len(Bytes) {
-        let end = line_end(Bytes, at)
-        let file = text_of(Bytes, at, end)
-        if end > at && file != "index.level" {
-          spawn {
-            Entry { set: f.number, number: -1, solved: 0,
-                    order: f.number * 1000 + order, name: "",
-                    path: "levels/" + f.name + "/" + file }
-          }
-          order += 1
-        }
-        at = end + 1
       }
     }
   }

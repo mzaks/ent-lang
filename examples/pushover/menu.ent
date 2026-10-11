@@ -105,6 +105,10 @@ table faces: text[126] = [
   "/Library/Fonts/Arial.ttf"
 ]
 
+asset "data/dominos.png"
+asset "data/ant.png"
+asset "data/box.png"
+
 system open_art() {
   Art.dominoes = picture_load("data/dominos.png")
   Art.ant = picture_load("data/ant.png")

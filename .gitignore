@@ -1,3 +1,6 @@
 /build/
 /.venv/
 /.cache/
+/examples/pushover/data/
+/examples/pushover/themes/
+/examples/pushover/levels/
