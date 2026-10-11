@@ -34,6 +34,8 @@ import movers
 import tick
 import sounds
 import audio
+import music
+import chip
 import screen
 import between
 import shell
@@ -148,6 +150,9 @@ schedule setup() {
   init_status()
   init_messages()
   init_audio()
+  init_music()
+  init_chip()
+  init_tunes()
   load_level()
   spawn_things()
   spawn_specials()

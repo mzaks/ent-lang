@@ -50,8 +50,17 @@ them as systems. It is being built; what is here so far:
   screen after it, that into the next level, a demo into a picture.
 - `sounds.ent`, `audio.ent`: the sounds of a tic, each with how loud it
   is heard and from which side; and what plays them from the WAD's
-  lumps, eight at a time (the sound device's `voice`). The music is not
-  played: the WAD has it as notes for a synthesizer.
+  lumps, eight at a time (the sound device's `voice`).
+- `music.ent`, `chip.ent`: the music. The WAD has a tune as notes and
+  says how the chip of a sound card of the time is to be set for each
+  instrument. `music.ent` reads the notes as their time comes and turns
+  them into what is written to that chip, as the game's own driver did:
+  the same values at the same times as the reference's, for every tune.
+  `chip.ent` is the chip: nine voices of two waves each, written from
+  what its registers mean. It is a simple one that does not make the
+  same samples as the reference's exact one, but its sound is near it
+  in every measure tried. `audio.ent` hands its samples to the sound
+  device as they are made (`stream`).
 - Pictures that move, walls that slide and switches that show they were
   used are in `specials.ent`; the palettes the screen is shown in (red
   when hurt, yellow for something picked up, green in the suit) and the
@@ -62,7 +71,7 @@ them as systems. It is being built; what is here so far:
   demos played one after another with a picture between them, and the
   menu over any of it, from which a new game is started in one of four
   skills.
-- Not yet: the music, the game's settings (but the view's size),
+- Not yet: the game's settings (but the view's size),
   the view in half as many columns, saving and loading, the
   fifth skill; the monsters and weapons that are not in the first
   episode. Ceilings that move and the donut are written but were
@@ -99,6 +108,8 @@ examples/doom/check/shots.sh e1m5_uv_max 1700,3700   # of a fetched demo
 examples/doom/check/shots.sh ep1_nomo 300,330,400    # between two levels too
 BLOCKS=6 examples/doom/check/shots.sh 3 0,50,100     # with a smaller view
 MELTS=1 examples/doom/check/shots.sh ep1_nomo 100    # and every screen of the melts
+examples/doom/check/music.sh                         # what each tune writes to the chip
+SOUND=1 examples/doom/check/music.sh D_E1M1 60       # and how near the chip's sound is
 cd build/doom/wad &&                                 # where doom1.wad is
   ../../../tools/ent run -I ../../../examples/doom ../../../examples/doom/doom.ent
 ```

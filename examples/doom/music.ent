@@ -1,0 +1,641 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+//
+// The music (mus2mid.c, i_oplmusic.c): a tune is a lump of notes ("MUS"),
+// and what plays them is the chip of a sound card of the time, which has
+// nine voices of two waves each, one bending the other. The WAD says how
+// to set a voice for each of 175 instruments ("GENMIDI"). Here the notes
+// are read as their time comes and turned into what is written to the
+// chip (`Writes`): which voice plays which note, how loud, and as what.
+// What the chip makes of that is in chip.ent.
+//
+// Time is counted in samples, 44100 a second: a tic of a tune, of which
+// there are 140 a second, is 315 of them.
+import files
+import wad
+
+const MUSIC_RATE = 44100
+const MUSIC_TIC = 315
+// (The reference starts a tune again 5000 microseconds after its end.)
+const MUSIC_AGAIN = 220
+const OPL_VOICES = 9
+const PERCUSSION = 15
+const GENMIDI_FIXED = 1
+const GENMIDI_DOUBLE = 4
+
+// What is written to the chip: a value to one of its registers, in the
+// order they are written.
+buffer Writes { reg: i32, value: i32 } capacity 4096
+
+// The tune: where its notes start in the file (`score`) and which is
+// next (`pos`), whether it is played (`on`) and from its start again at
+// its end (`looping`; `again`: that is due), and in how many samples
+// the next notes are due. How loud music is, 0 to 127 (`volume`), and
+// was when the tune started (`start`). How many of the chip's voices
+// are free and how many taken (the lists are in `Vlist`), and where the
+// instruments are in the file.
+buffer Mus {
+  score: i32, pos: i32, on: bool, looping: bool, again: bool, due: i32,
+  volume: i32, start: i32, free: i32, used: i32, instrs: i32
+} capacity 1
+
+// A channel of the tune (sixteen: the last is the drums): its
+// instrument, how loud it is and was asked to be, and how far its notes
+// are bent.
+buffer Mchan { instr: i32, volume: i32, base: i32, bend: i32 } capacity 16
+// Which channel each of the tune's own channels is played on, in the
+// order they first have something to say (-1: not yet); and how hard
+// the keys of each are hit: at the tune's start, now, and at its end
+// (which is how the next tune starts: the reference never sets them
+// back).
+buffer Mmap { channel: i32 } capacity 16
+buffer Velocity { start: i32, now: i32, end: i32 } capacity 16
+
+// A voice of the chip: the instrument it is set for (-1: none yet) and
+// which of its two settings, the channel that plays on it (-1: none),
+// the key that was pressed and the note that is heard, what is written
+// for its pitch, how loud the note is, what is written for the loudness
+// of its two waves, and how much it matters.
+buffer Ovoice {
+  instr: i32, second: i32, channel: i32, key: i32, note: i32, freq: i32,
+  volume: i32, car: i32, mod: i32, priority: i32
+} capacity 9
+// The voices that are free, and those that are taken, each in the order
+// they came to be so.
+buffer Vlist { free: i32, used: i32 } capacity 9
+
+// The two waves of each voice, as the chip numbers them.
+table voice_op1: i32 = [0x00, 0x01, 0x02, 0x08, 0x09, 0x0a, 0x10, 0x11, 0x12]
+table voice_op2: i32 = [0x03, 0x04, 0x05, 0x0b, 0x0c, 0x0d, 0x13, 0x14, 0x15]
+
+// What is written for a pitch: 32 steps to a note.
+table frequency_curve: i32 = [
+  0x133, 0x133, 0x134, 0x134, 0x135, 0x136, 0x136, 0x137,
+  0x137, 0x138, 0x138, 0x139, 0x139, 0x13a, 0x13b, 0x13b,
+  0x13c, 0x13c, 0x13d, 0x13d, 0x13e, 0x13f, 0x13f, 0x140,
+  0x140, 0x141, 0x142, 0x142, 0x143, 0x143, 0x144, 0x144,
+  0x145, 0x146, 0x146, 0x147, 0x147, 0x148, 0x149, 0x149,
+  0x14a, 0x14a, 0x14b, 0x14c, 0x14c, 0x14d, 0x14d, 0x14e,
+  0x14f, 0x14f, 0x150, 0x150, 0x151, 0x152, 0x152, 0x153,
+  0x153, 0x154, 0x155, 0x155, 0x156, 0x157, 0x157, 0x158,
+  0x158, 0x159, 0x15a, 0x15a, 0x15b, 0x15b, 0x15c, 0x15d,
+  0x15d, 0x15e, 0x15f, 0x15f, 0x160, 0x161, 0x161, 0x162,
+  0x162, 0x163, 0x164, 0x164, 0x165, 0x166, 0x166, 0x167,
+  0x168, 0x168, 0x169, 0x16a, 0x16a, 0x16b, 0x16c, 0x16c,
+  0x16d, 0x16e, 0x16e, 0x16f, 0x170, 0x170, 0x171, 0x172,
+  0x172, 0x173, 0x174, 0x174, 0x175, 0x176, 0x176, 0x177,
+  0x178, 0x178, 0x179, 0x17a, 0x17a, 0x17b, 0x17c, 0x17c,
+  0x17d, 0x17e, 0x17e, 0x17f, 0x180, 0x181, 0x181, 0x182,
+  0x183, 0x183, 0x184, 0x185, 0x185, 0x186, 0x187, 0x188,
+  0x188, 0x189, 0x18a, 0x18a, 0x18b, 0x18c, 0x18d, 0x18d,
+  0x18e, 0x18f, 0x18f, 0x190, 0x191, 0x192, 0x192, 0x193,
+  0x194, 0x194, 0x195, 0x196, 0x197, 0x197, 0x198, 0x199,
+  0x19a, 0x19a, 0x19b, 0x19c, 0x19d, 0x19d, 0x19e, 0x19f,
+  0x1a0, 0x1a0, 0x1a1, 0x1a2, 0x1a3, 0x1a3, 0x1a4, 0x1a5,
+  0x1a6, 0x1a6, 0x1a7, 0x1a8, 0x1a9, 0x1a9, 0x1aa, 0x1ab,
+  0x1ac, 0x1ad, 0x1ad, 0x1ae, 0x1af, 0x1b0, 0x1b0, 0x1b1,
+  0x1b2, 0x1b3, 0x1b4, 0x1b4, 0x1b5, 0x1b6, 0x1b7, 0x1b8,
+  0x1b8, 0x1b9, 0x1ba, 0x1bb, 0x1bc, 0x1bc, 0x1bd, 0x1be,
+  0x1bf, 0x1c0, 0x1c0, 0x1c1, 0x1c2, 0x1c3, 0x1c4, 0x1c4,
+  0x1c5, 0x1c6, 0x1c7, 0x1c8, 0x1c9, 0x1c9, 0x1ca, 0x1cb,
+  0x1cc, 0x1cd, 0x1ce, 0x1ce, 0x1cf, 0x1d0, 0x1d1, 0x1d2,
+  0x1d3, 0x1d3, 0x1d4, 0x1d5, 0x1d6, 0x1d7, 0x1d8, 0x1d8,
+  0x1d9, 0x1da, 0x1db, 0x1dc, 0x1dd, 0x1de, 0x1de, 0x1df,
+  0x1e0, 0x1e1, 0x1e2, 0x1e3, 0x1e4, 0x1e5, 0x1e5, 0x1e6,
+  0x1e7, 0x1e8, 0x1e9, 0x1ea, 0x1eb, 0x1ec, 0x1ed, 0x1ed,
+  0x1ee, 0x1ef, 0x1f0, 0x1f1, 0x1f2, 0x1f3, 0x1f4, 0x1f5,
+  0x1f6, 0x1f6, 0x1f7, 0x1f8, 0x1f9, 0x1fa, 0x1fb, 0x1fc,
+  0x1fd, 0x1fe, 0x1ff, 0x200, 0x201, 0x201, 0x202, 0x203,
+  0x204, 0x205, 0x206, 0x207, 0x208, 0x209, 0x20a, 0x20b,
+  0x20c, 0x20d, 0x20e, 0x20f, 0x210, 0x210, 0x211, 0x212,
+  0x213, 0x214, 0x215, 0x216, 0x217, 0x218, 0x219, 0x21a,
+  0x21b, 0x21c, 0x21d, 0x21e, 0x21f, 0x220, 0x221, 0x222,
+  0x223, 0x224, 0x225, 0x226, 0x227, 0x228, 0x229, 0x22a,
+  0x22b, 0x22c, 0x22d, 0x22e, 0x22f, 0x230, 0x231, 0x232,
+  0x233, 0x234, 0x235, 0x236, 0x237, 0x238, 0x239, 0x23a,
+  0x23b, 0x23c, 0x23d, 0x23e, 0x23f, 0x240, 0x241, 0x242,
+  0x244, 0x245, 0x246, 0x247, 0x248, 0x249, 0x24a, 0x24b,
+  0x24c, 0x24d, 0x24e, 0x24f, 0x250, 0x251, 0x252, 0x253,
+  0x254, 0x256, 0x257, 0x258, 0x259, 0x25a, 0x25b, 0x25c,
+  0x25d, 0x25e, 0x25f, 0x260, 0x262, 0x263, 0x264, 0x265,
+  0x266, 0x267, 0x268, 0x269, 0x26a, 0x26c, 0x26d, 0x26e,
+  0x26f, 0x270, 0x271, 0x272, 0x273, 0x275, 0x276, 0x277,
+  0x278, 0x279, 0x27a, 0x27b, 0x27d, 0x27e, 0x27f, 0x280,
+  0x281, 0x282, 0x284, 0x285, 0x286, 0x287, 0x288, 0x289,
+  0x28b, 0x28c, 0x28d, 0x28e, 0x28f, 0x290, 0x292, 0x293,
+  0x294, 0x295, 0x296, 0x298, 0x299, 0x29a, 0x29b, 0x29c,
+  0x29e, 0x29f, 0x2a0, 0x2a1, 0x2a2, 0x2a4, 0x2a5, 0x2a6,
+  0x2a7, 0x2a9, 0x2aa, 0x2ab, 0x2ac, 0x2ae, 0x2af, 0x2b0,
+  0x2b1, 0x2b2, 0x2b4, 0x2b5, 0x2b6, 0x2b7, 0x2b9, 0x2ba,
+  0x2bb, 0x2bd, 0x2be, 0x2bf, 0x2c0, 0x2c2, 0x2c3, 0x2c4,
+  0x2c5, 0x2c7, 0x2c8, 0x2c9, 0x2cb, 0x2cc, 0x2cd, 0x2ce,
+  0x2d0, 0x2d1, 0x2d2, 0x2d4, 0x2d5, 0x2d6, 0x2d8, 0x2d9,
+  0x2da, 0x2dc, 0x2dd, 0x2de, 0x2e0, 0x2e1, 0x2e2, 0x2e4,
+  0x2e5, 0x2e6, 0x2e8, 0x2e9, 0x2ea, 0x2ec, 0x2ed, 0x2ee,
+  0x2f0, 0x2f1, 0x2f2, 0x2f4, 0x2f5, 0x2f6, 0x2f8, 0x2f9,
+  0x2fb, 0x2fc, 0x2fd, 0x2ff, 0x300, 0x302, 0x303, 0x304,
+  0x306, 0x307, 0x309, 0x30a, 0x30b, 0x30d, 0x30e, 0x310,
+  0x311, 0x312, 0x314, 0x315, 0x317, 0x318, 0x31a, 0x31b,
+  0x31c, 0x31e, 0x31f, 0x321, 0x322, 0x324, 0x325, 0x327,
+  0x328, 0x329, 0x32b, 0x32c, 0x32e, 0x32f, 0x331, 0x332,
+  0x334, 0x335, 0x337, 0x338, 0x33a, 0x33b, 0x33d, 0x33e,
+  0x340, 0x341, 0x343, 0x344, 0x346, 0x347, 0x349, 0x34a,
+  0x34c, 0x34d, 0x34f, 0x350, 0x352, 0x353, 0x355, 0x357,
+  0x358, 0x35a, 0x35b, 0x35d, 0x35e, 0x360, 0x361, 0x363,
+  0x365, 0x366, 0x368, 0x369, 0x36b, 0x36c, 0x36e, 0x370,
+  0x371, 0x373, 0x374, 0x376, 0x378, 0x379, 0x37b, 0x37c,
+  0x37e, 0x380, 0x381, 0x383, 0x384, 0x386, 0x388, 0x389,
+  0x38b, 0x38d, 0x38e, 0x390, 0x392, 0x393, 0x395, 0x397,
+  0x398, 0x39a, 0x39c, 0x39d, 0x39f, 0x3a1, 0x3a2, 0x3a4,
+  0x3a6, 0x3a7, 0x3a9, 0x3ab, 0x3ac, 0x3ae, 0x3b0, 0x3b1,
+  0x3b3, 0x3b5, 0x3b7, 0x3b8, 0x3ba, 0x3bc, 0x3bd, 0x3bf,
+  0x3c1, 0x3c3, 0x3c4, 0x3c6, 0x3c8, 0x3ca, 0x3cb, 0x3cd,
+  0x3cf, 0x3d1, 0x3d2, 0x3d4, 0x3d6, 0x3d8, 0x3da, 0x3db,
+  0x3dd, 0x3df, 0x3e1, 0x3e3, 0x3e4, 0x3e6, 0x3e8, 0x3ea,
+  0x3ec, 0x3ed, 0x3ef, 0x3f1, 0x3f3, 0x3f5, 0x3f6, 0x3f8,
+  0x3fa, 0x3fc, 0x3fe, 0x36c
+]
+
+// How loud the chip is to be for a loudness of 0 to 127.
+table volume_mapping: i32 = [
+  0, 1, 3, 5, 6, 8, 10, 11,
+  13, 14, 16, 17, 19, 20, 22, 23,
+  25, 26, 27, 29, 30, 32, 33, 34,
+  36, 37, 39, 41, 43, 45, 47, 49,
+  50, 52, 54, 55, 57, 59, 60, 61,
+  63, 64, 66, 67, 68, 69, 71, 72,
+  73, 74, 75, 76, 77, 79, 80, 81,
+  82, 83, 84, 84, 85, 86, 87, 88,
+  89, 90, 91, 92, 92, 93, 94, 95,
+  96, 96, 97, 98, 99, 99, 100, 101,
+  101, 102, 103, 103, 104, 105, 105, 106,
+  107, 107, 108, 109, 109, 110, 110, 111,
+  112, 112, 113, 113, 114, 114, 115, 115,
+  116, 117, 117, 118, 118, 119, 119, 120,
+  120, 121, 121, 122, 122, 123, 123, 123,
+  124, 124, 125, 125, 126, 126, 127, 127
+]
+
+proc opl(writes: mut Writes, reg: i32, value: i32) {
+  writes += { reg: reg, value: value }
+}
+
+// Where an instrument is in the file, and one of its two settings: the
+// wave that bends (six bytes), how it is fed back, the wave that is
+// heard (six bytes), and how far off the note it is played.
+fn instr_at(mus: Mus, instr: i32) -> i32 { mus[0].instrs + instr * 36 }
+fn setting_at(mus: Mus, instr: i32, second: i32) -> i32 {
+  mus[0].instrs + instr * 36 + 4 + second * 16
+}
+
+// A voice is turned off: its pitch is written without the bit that
+// sounds it (VoiceKeyOff).
+proc voice_key_off(voices: Ovoice, writes: mut Writes, v: i32) {
+  opl(writes, 0xb0 + v, voices[v].freq >> 8)
+}
+
+// A voice that is taken becomes free, the last of the free ones
+// (ReleaseVoice). (Asked for one that is not there, the reference loses
+// all its voices.)
+proc release_voice(mus: mut Mus, voices: mut Ovoice, lists: mut Vlist,
+                   writes: mut Writes, index: i32) {
+  if index >= mus[0].used {
+    mus[0].used = 0
+    mus[0].free = 0
+  } else {
+    let v = lists[index].used
+    voice_key_off(voices, writes, v)
+    voices[v].channel = -1
+    voices[v].note = 0
+    mus[0].used -= 1
+    for i in index..mus[0].used { lists[i].used = lists[i + 1].used }
+    lists[mus[0].free].free = v
+    mus[0].free += 1
+  }
+}
+
+// One wave's settings are written (LoadOperatorData): what is written
+// for its loudness.
+proc load_operator(bytes: Bytes, writes: mut Writes, op: i32, data: i32,
+                   loudest: bool) -> i32 {
+  let level = byte_at(bytes, data + 4) | if loudest { 0x3f } else { byte_at(bytes, data + 5) }
+  opl(writes, 0x40 + op, level)
+  opl(writes, 0x20 + op, byte_at(bytes, data))
+  opl(writes, 0x60 + op, byte_at(bytes, data + 1))
+  opl(writes, 0x80 + op, byte_at(bytes, data + 2))
+  opl(writes, 0xe0 + op, byte_at(bytes, data + 3))
+  level
+}
+
+// A voice is set for an instrument, if it is not already
+// (SetVoiceInstrument): the wave that is heard first, as quiet as can
+// be until the note's loudness is set.
+proc set_voice_instrument(bytes: Bytes, mus: Mus, voices: mut Ovoice,
+                          writes: mut Writes, v: i32, instr: i32, second: i32) {
+  if voices[v].instr != instr || voices[v].second != second {
+    voices[v].instr = instr
+    voices[v].second = second
+    let data = setting_at(mus, instr, second)
+    let feedback = byte_at(bytes, data + 6)
+    let bending = feedback & 1 == 0
+    voices[v].car = load_operator(bytes, writes, voice_op2[v], data + 7, true)
+    voices[v].mod = load_operator(bytes, writes, voice_op1[v], data, !bending)
+    opl(writes, 0xc0 + v, feedback | 0x30)
+    voices[v].priority = 0x0f - (byte_at(bytes, data + 8) >> 4) + 0x0f -
+                         (byte_at(bytes, data + 9) & 0x0f)
+  }
+}
+
+// How loud a voice is: the note's loudness times its channel's
+// (SetVoiceVolume).
+proc set_voice_volume(bytes: Bytes, mus: Mus, chans: Mchan, voices: mut Ovoice,
+                      writes: mut Writes, v: i32, volume: i32) {
+  voices[v].volume = volume
+  let data = setting_at(mus, voices[v].instr, voices[v].second)
+  let channel = 2 * (volume_mapping[chans[voices[v].channel].volume] + 1)
+  let full = (volume_mapping[volume] * channel) >> 9
+  let car = 0x3f - full
+  if car != voices[v].car & 0x3f {
+    voices[v].car = car | (voices[v].car & 0xc0)
+    opl(writes, 0x40 + voice_op2[v], voices[v].car)
+    // (Where the two waves are heard side by side, both are as loud.)
+    let level = byte_at(bytes, data + 5)
+    if byte_at(bytes, data + 6) & 1 != 0 && level != 0x3f {
+      let mod = max(level, car) | (voices[v].mod & 0xc0)
+      if mod != voices[v].mod {
+        voices[v].mod = mod
+        opl(writes, 0x40 + voice_op1[v], mod | (byte_at(bytes, data + 4) & 0xc0))
+      }
+    }
+  }
+}
+
+// What is written for the pitch of a voice's note (FrequencyForVoice).
+proc voice_frequency(bytes: Bytes, mus: Mus, chans: Mchan, voices: Ovoice,
+                     v: i32) -> i32 {
+  let instr = instr_at(mus, voices[v].instr)
+  var note = voices[v].note
+  if ushort_at(bytes, instr) & GENMIDI_FIXED == 0 {
+    note += short_at(bytes, setting_at(mus, voices[v].instr, voices[v].second) + 14)
+  }
+  while note < 0 { note += 12 }
+  while note > 95 { note -= 12 }
+  var index = 64 + 32 * note + chans[voices[v].channel].bend
+  // (The second setting of an instrument may be a little out of tune.)
+  if voices[v].second != 0 { index += byte_at(bytes, instr + 2) / 2 - 64 }
+  if index < 0 { index = 0 }
+  if index < 284 {
+    frequency_curve[index]
+  } else {
+    let octave = min((index - 284) / (12 * 32), 7)
+    frequency_curve[(index - 284) % (12 * 32) + 284] | octave << 10
+  }
+}
+
+// The pitch is written if it is another, with the bit that sounds the
+// voice (UpdateVoiceFrequency).
+proc update_voice_frequency(bytes: Bytes, mus: Mus, chans: Mchan,
+                            voices: mut Ovoice, writes: mut Writes, v: i32) {
+  let freq = voice_frequency(bytes, mus, chans, voices, v)
+  if voices[v].freq != freq {
+    opl(writes, 0xa0 + v, freq & 0xff)
+    opl(writes, 0xb0 + v, freq >> 8 | 0x20)
+    voices[v].freq = freq
+  }
+}
+
+// A free voice plays a note of an instrument, if there is one
+// (GetFreeVoice, VoiceKeyOn).
+proc voice_key_on(bytes: Bytes, mus: mut Mus, chans: Mchan, voices: mut Ovoice,
+                  lists: mut Vlist, writes: mut Writes, channel: i32, instr: i32,
+                  second: i32, note: i32, key: i32, volume: i32) {
+  if mus[0].free > 0 {
+    let v = lists[0].free
+    mus[0].free -= 1
+    for i in 0..mus[0].free { lists[i].free = lists[i + 1].free }
+    lists[mus[0].used].used = v
+    mus[0].used += 1
+    voices[v].channel = channel
+    voices[v].key = key
+    let at = instr_at(mus, instr)
+    voices[v].note = if ushort_at(bytes, at) & GENMIDI_FIXED != 0 {
+      byte_at(bytes, at + 3)
+    } else {
+      note
+    }
+    set_voice_instrument(bytes, mus, voices, writes, v, instr, second)
+    set_voice_volume(bytes, mus, chans, voices, writes, v, volume)
+    voices[v].freq = 0
+    update_voice_frequency(bytes, mus, chans, voices, writes, v)
+  }
+}
+
+// A key is let go: the voices that play it are free (KeyOffEvent).
+proc key_off(mus: mut Mus, voices: mut Ovoice, lists: mut Vlist,
+             writes: mut Writes, channel: i32, key: i32) {
+  var i = 0
+  while i < mus[0].used {
+    let v = lists[i].used
+    if voices[v].channel == channel && voices[v].key == key {
+      release_voice(mus, voices, lists, writes, i)
+    } else {
+      i += 1
+    }
+  }
+}
+
+// All of a channel's notes end (AllNotesOff).
+proc all_notes_off(mus: mut Mus, voices: mut Ovoice, lists: mut Vlist,
+                   writes: mut Writes, channel: i32) {
+  var i = 0
+  while i < mus[0].used {
+    if voices[lists[i].used].channel == channel {
+      release_voice(mus, voices, lists, writes, i)
+    } else {
+      i += 1
+    }
+  }
+}
+
+// A key is pressed (KeyOnEvent): a drum is an instrument of its own for
+// each key. Where no voice is free one is taken away: one that plays an
+// instrument's second setting, or else of the last channel.
+proc key_on(bytes: Bytes, mus: mut Mus, chans: Mchan, voices: mut Ovoice,
+            lists: mut Vlist, writes: mut Writes, channel: i32, key: i32,
+            volume: i32) {
+  if volume <= 0 {
+    key_off(mus, voices, lists, writes, channel, key)
+  } else if channel != PERCUSSION || (key >= 35 && key <= 81) {
+    let instr = if channel == PERCUSSION { 128 + key - 35 } else { chans[channel].instr }
+    let note = if channel == PERCUSSION { 60 } else { key }
+    if mus[0].free == 0 {
+      var found = 0
+      for i in 0..mus[0].used {
+        if voices[lists[i].used].second != 0 ||
+           voices[lists[i].used].channel >= voices[lists[found].used].channel {
+          found = i
+        }
+      }
+      release_voice(mus, voices, lists, writes, found)
+    }
+    voice_key_on(bytes, mus, chans, voices, lists, writes, channel, instr, 0, note,
+                 key, volume)
+    if ushort_at(bytes, instr_at(mus, instr)) & GENMIDI_DOUBLE != 0 {
+      voice_key_on(bytes, mus, chans, voices, lists, writes, channel, instr, 1, note,
+                   key, volume)
+    }
+  }
+}
+
+// A channel is to be so loud: no louder than music is, nor than it was
+// when the tune started (SetChannelVolume).
+proc set_channel_volume(bytes: Bytes, mus: Mus, chans: mut Mchan,
+                        voices: mut Ovoice, writes: mut Writes, channel: i32,
+                        volume: i32) {
+  chans[channel].base = volume
+  chans[channel].volume = min(min(volume, mus[0].volume), mus[0].start)
+  for v in 0..OPL_VOICES {
+    if voices[v].channel == channel {
+      set_voice_volume(bytes, mus, chans, voices, writes, v, voices[v].volume)
+    }
+  }
+}
+
+// A channel's notes are bent (PitchBendEvent): its voices get their new
+// pitch, and become the last of those that are taken.
+proc pitch_bend(bytes: Bytes, mus: Mus, chans: mut Mchan, voices: mut Ovoice,
+                lists: mut Vlist, writes: mut Writes, channel: i32, bend: i32) {
+  chans[channel].bend = bend
+  // (The free list's rows that are not in use hold the others meanwhile.)
+  var kept = 0
+  var moved = 0
+  for i in 0..mus[0].used {
+    let v = lists[i].used
+    if voices[v].channel == channel {
+      update_voice_frequency(bytes, mus, chans, voices, writes, v)
+      lists[mus[0].free + moved].free = v
+      moved += 1
+    } else {
+      lists[kept].used = v
+      kept += 1
+    }
+  }
+  for i in 0..moved { lists[kept + i].used = lists[mus[0].free + i].free }
+}
+
+// The channel one of the tune's own is played on (mus2mid.c,
+// GetMIDIChannel, and TrackChannelForEvent): the drums on the last, the
+// others in the order they come. `fresh` where it comes now.
+proc tune_channel(map: mut Mmap, own: i32) -> i32 {
+  if own != PERCUSSION && map[own].channel == -1 {
+    var most = -1
+    for i in 0..16 { most = max(most, map[i].channel) }
+    // (The tenth is left out: that is where the drums are counted.)
+    map[own].channel = if most + 1 == 9 { 10 } else { most + 1 }
+  }
+  if own == PERCUSSION {
+    PERCUSSION
+  } else if map[own].channel == 15 {
+    9
+  } else {
+    map[own].channel
+  }
+}
+
+// Which of the sixteen key-hardnesses a channel has (the reference
+// keeps them by its own numbering, in which the drums are the tenth).
+fn hardness(channel: i32) -> i32 {
+  if channel == PERCUSSION {
+    9
+  } else if channel == 9 {
+    15
+  } else {
+    channel
+  }
+}
+
+// A number in a tune: seven bits a byte, the high bit says another
+// follows. How many bytes it has.
+fn delay_bytes(bytes: Bytes, at: i32) -> i32 {
+  var n = 1
+  while byte_at(bytes, at + n - 1) & 0x80 != 0 { n += 1 }
+  n
+}
+fn delay_at(bytes: Bytes, at: i32) -> i32 {
+  var value = 0
+  for i in 0..delay_bytes(bytes, at) { value = value * 128 + (byte_at(bytes, at + i) & 0x7f) }
+  value
+}
+
+// How many bytes an event of a tune has after its first, by its kind.
+fn event_bytes(bytes: Bytes, at: i32) -> i32 {
+  let kind = byte_at(bytes, at) & 0x70
+  if kind == 0x10 {
+    if byte_at(bytes, at + 1) & 0x80 != 0 { 2 } else { 1 }
+  } else if kind == 0x40 {
+    2
+  } else if kind == 0x60 || kind == 0x50 || kind == 0x70 {
+    0
+  } else {
+    1
+  }
+}
+
+// The channels start a tune as they always do (InitChannel), none of
+// the tune's own has had its say, and the keys are hit as hard as they
+// were when the tune was first started.
+proc tune_begin(mus: mut Mus, chans: mut Mchan, map: mut Mmap, vel: mut Velocity) {
+  mus[0].pos = mus[0].score
+  mus[0].start = mus[0].volume
+  mus[0].due = 0
+  mus[0].again = false
+  for i in 0..16 {
+    chans[i].instr = 0
+    chans[i].volume = min(mus[0].volume, 100)
+    chans[i].base = 100
+    chans[i].bend = 0
+    map[i].channel = -1
+    vel[i].now = vel[i].start
+  }
+}
+
+// A tune is started (I_OPL_RegisterSong, I_OPL_PlaySong): the lump at
+// `at`. How hard the keys are hit at its end is found by reading it
+// through, for the tune after it.
+proc tune_start(bytes: Bytes, mus: mut Mus, chans: mut Mchan, map: mut Mmap,
+                vel: mut Velocity, at: i32, looping: bool) {
+  mus[0].score = at + ushort_at(bytes, at + 6)
+  mus[0].on = true
+  mus[0].looping = looping
+  for i in 0..16 { vel[i].start = vel[i].end }
+  tune_begin(mus, chans, map, vel)
+  var pos = mus[0].score
+  var going = true
+  while going {
+    let first = byte_at(bytes, pos)
+    let channel = hardness(tune_channel(map, first & 0x0f))
+    let kind = first & 0x70
+    if kind == 0x10 && byte_at(bytes, pos + 1) & 0x80 != 0 {
+      vel[channel].end = byte_at(bytes, pos + 2) & 0x7f
+    }
+    if kind == 0x60 || kind == 0x50 || kind == 0x70 { going = false }
+    pos += 1 + event_bytes(bytes, pos)
+    if going && first & 0x80 != 0 { pos += delay_bytes(bytes, pos) }
+  }
+  for i in 0..16 { map[i].channel = -1 }
+}
+
+// The tune ends: all notes do (I_OPL_StopSong).
+proc tune_stop(mus: mut Mus, voices: mut Ovoice, lists: mut Vlist,
+               writes: mut Writes) {
+  if mus[0].on {
+    for channel in 0..16 { all_notes_off(mus, voices, lists, writes, channel) }
+  }
+  mus[0].on = false
+}
+
+// The notes that are due now are played (mus2mid, ProcessEvent): one
+// after another until one says how long to wait. At the tune's end it
+// starts again a moment later, if it is to. Call it while `due` is
+// nought and the tune is on.
+proc tune_events(bytes: Bytes, mus: mut Mus, chans: mut Mchan, map: mut Mmap,
+                 vel: mut Velocity, voices: mut Ovoice, lists: mut Vlist,
+                 writes: mut Writes) {
+  if mus[0].again { tune_begin(mus, chans, map, vel) }
+  var going = true
+  while going {
+    let pos = mus[0].pos
+    let first = byte_at(bytes, pos)
+    let own = first & 0x0f
+    // (A channel that has its say for the first time has all its notes
+    // ended before: there may be some left from the time before.)
+    let fresh = own != PERCUSSION && map[own].channel == -1
+    let channel = tune_channel(map, own)
+    if fresh { all_notes_off(mus, voices, lists, writes, channel) }
+    let kind = first & 0x70
+    let a = byte_at(bytes, pos + 1)
+    let b = byte_at(bytes, pos + 2)
+    if kind == 0x00 {
+      key_off(mus, voices, lists, writes, channel, a & 0x7f)
+    } else if kind == 0x10 {
+      if a & 0x80 != 0 { vel[hardness(channel)].now = b & 0x7f }
+      key_on(bytes, mus, chans, voices, lists, writes, channel, a & 0x7f,
+             vel[hardness(channel)].now)
+    } else if kind == 0x20 {
+      pitch_bend(bytes, mus, chans, voices, lists, writes, channel, a / 2 - 64)
+    } else if kind == 0x30 {
+      if a == 11 { all_notes_off(mus, voices, lists, writes, channel) }
+    } else if kind == 0x40 {
+      if a == 0 {
+        chans[channel].instr = b & 0x7f
+      } else if a == 3 {
+        set_channel_volume(bytes, mus, chans, voices, writes, channel,
+                           if b & 0x80 != 0 { 127 } else { b })
+      }
+    } else {
+      // The end.
+      going = false
+      if mus[0].looping {
+        mus[0].again = true
+        mus[0].due = MUSIC_AGAIN
+      } else {
+        mus[0].on = false
+      }
+    }
+    if going {
+      mus[0].pos = pos + 1 + event_bytes(bytes, pos)
+      if first & 0x80 != 0 {
+        let delay = delay_at(bytes, mus[0].pos)
+        mus[0].pos += delay_bytes(bytes, mus[0].pos)
+        if delay > 0 {
+          mus[0].due = delay * MUSIC_TIC
+          going = false
+        }
+      }
+    }
+  }
+}
+
+// The voices are all free and set for nothing, the keys are hit as hard
+// as can be, and music is as loud as the game starts with (InitVoices;
+// eight of fifteen in the menu, times eight). After `load_wad`; what it
+// leaves in `Writes` is for the chip.
+system init_music() {
+  Mus = [{
+    score: 0, pos: 0, on: false, looping: false, again: false, due: 0,
+    volume: 64, start: 64, free: OPL_VOICES, used: 0,
+    instrs: Lumps[lump_number(Lumps, lump_name("GENMIDI"))].at + 8
+  }; 1]
+  Mchan = [{ instr: 0, volume: 64, base: 100, bend: 0 }; 16]
+  Mmap = [{ channel: -1 }; 16]
+  Velocity = [{ start: 127, now: 127, end: 127 }; 16]
+  Ovoice = [{
+    instr: -1, second: 0, channel: -1, key: 0, note: 0, freq: 0, volume: 0,
+    car: 0, mod: 0, priority: 0
+  }; OPL_VOICES]
+  Vlist = [{ free: 0, used: 0 }; OPL_VOICES]
+  for i in 0..OPL_VOICES { Vlist[i].free = i }
+  // What the chip is first told (OPL_InitRegisters): every wave as
+  // quiet as can be and everything else nought (also in registers the
+  // chip has not), then that waves may have other shapes than the plain
+  // one, and which bit of a pitch hurries a note's loudness along.
+  Writes = []
+  for reg in 0x40..0x56 { opl(Writes, reg, 0x3f) }
+  for reg in 0x60..0xf6 { opl(Writes, reg, 0) }
+  for reg in 1..0x40 { opl(Writes, reg, 0) }
+  opl(Writes, 0x04, 0x60)
+  opl(Writes, 0x04, 0x80)
+  opl(Writes, 0x01, 0x20)
+  opl(Writes, 0x08, 0x40)
+}

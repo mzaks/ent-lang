@@ -210,6 +210,9 @@ system turn_page() {
   Shell.page = (Shell.page + 1) % 6
   if Shell.page == 0 {
     Shell.pagetic = 170
+    // (The title's tune, once: the one written for this chip.)
+    Tune.name = lump_name("D_INTROA")
+    Tune.looping = false
   } else if Shell.page == 2 || Shell.page == 4 {
     Shell.pagetic = 200
   } else {

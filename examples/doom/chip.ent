@@ -1,0 +1,294 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+//
+// The chip the music is played on (the YM3812 of a sound card of the
+// time), as far as the game's music needs it: nine voices, each of two
+// waves. One wave bends the other, or the two are heard side by side;
+// each has its own pitch (a multiple of the voice's), its own shape, and
+// its own loudness, which rises when the voice is turned on, falls to a
+// level it holds, and dies away when the voice is turned off.
+//
+// This is a simple one, written from what the chip's registers mean: it
+// counts in fractions where the chip counts in whole steps, so it sounds
+// like the chip without making the same samples. (The reference has an
+// exact one, of some two thousand lines. Not here: the chip's own drums
+// and its timers, which the game does not use.)
+import math
+import files
+import music
+
+// A wave: its five registers; where in its cycle it is (0 to 1); how
+// much quieter than full it is now, in steps of 3/16 of a decibel (0 to
+// 511), and where its loudness is going (`state`); and what it gave for
+// the last sample and the one before.
+buffer Oper {
+  tremolo: i32, level: i32, attack: i32, sustain: i32, wave: i32, phase: f32,
+  env: f32, state: i32, out: f32, before: f32
+} capacity 18
+const EG_OFF = 0
+const EG_ATTACK = 1
+const EG_DECAY = 2
+const EG_SUSTAIN = 3
+const EG_RELEASE = 4
+
+// A voice: its pitch (`fnum` in the octave `block`), whether it is
+// turned on, and how its first wave is fed back into itself and whether
+// the two are heard side by side (the register).
+buffer Ochan { fnum: i32, block: i32, on: bool, feedback: i32 } capacity 9
+
+// The chip as a whole: whether waves may have other shapes than the
+// plain one, the register that says which bit of the pitch hurries the
+// loudness along, and where the slow waver of loudness and the one of
+// pitch are in their cycles.
+buffer Chip { shapes: bool, split: i32, trem: f32, vib: f32 } capacity 1
+
+// What it makes: samples of sixteen bits, MUSIC_RATE a second.
+buffer Pcm { value: i16 } capacity 65536
+
+// How many times quieter each step of 3/16 of a decibel is, and how
+// many steps a sample the loudness moves at each of the 64 rates.
+buffer Gain { gain: f32 } capacity 1024
+buffer Rates { steps: f32 } capacity 64
+
+// A wave's pitch is the voice's times this.
+table multiple: f32 = [
+  0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 10.0, 12.0, 12.0,
+  15.0, 15.0
+]
+// How much quieter high notes are, where a wave asks for it.
+table ksl_rom: i32 = [0, 32, 40, 45, 48, 51, 53, 55, 56, 58, 59, 60, 61, 62, 63, 64]
+table ksl_shift: i32 = [8, 1, 2, 0]
+
+// The chip's own clock is 49716 samples a second, and a pitch of one in
+// the lowest octave is a cycle in 2^20 of them: so many cycles a sample
+// here.
+const PITCH_STEP = 0.0000010751
+
+// Everything silent. Before any `chip_write`.
+system init_chip() {
+  Oper = [{
+    tremolo: 0, level: 0x3f, attack: 0, sustain: 0, wave: 0, phase: 0.0,
+    env: 511.0, state: EG_OFF, out: 0.0, before: 0.0
+  }; 18]
+  Ochan = [{ fnum: 0, block: 0, on: false, feedback: 0 }; 9]
+  Chip = [{ shapes: false, split: 0, trem: 0.0, vib: 0.0 }; 1]
+  Pcm = []
+  Gain = [{ gain: 0.0 }; 1024]
+  for i in 0..1023 { Gain[i].gain = pow(10.0, -(i as f32) * 0.1875 / 20.0) }
+  // (At the slowest rate that moves at all the loudness goes a step in
+  // 4096 of the chip's samples; four rates on, twice as fast.)
+  Rates = [{ steps: 0.0 }; 64]
+  for rate in 4..64 {
+    Rates[rate].steps = 49716.0 / 4096.0 / (MUSIC_RATE as f32) *
+                        pow(2.0, ((rate >> 2) - 1) as f32) * ((4 + (rate & 3)) as f32) / 4.0
+  }
+}
+
+// Which wave a register is for, by its low five bits (-1: none).
+fn wave_of(low: i32) -> i32 {
+  if low < 0x16 && low % 8 < 6 { low / 8 * 6 + low % 8 } else { -1 }
+}
+
+// A value is written to a register.
+proc chip_write(opers: mut Oper, chans: mut Ochan, chip: mut Chip, reg: i32,
+                value: i32) {
+  let wave = wave_of(reg & 0x1f)
+  let voice = reg & 0x0f
+  if reg == 0x01 {
+    chip[0].shapes = value & 0x20 != 0
+  } else if reg == 0x08 {
+    chip[0].split = value
+  } else if reg >= 0x20 && reg < 0xa0 && wave >= 0 {
+    if reg < 0x40 {
+      opers[wave].tremolo = value
+    } else if reg < 0x60 {
+      opers[wave].level = value
+    } else if reg < 0x80 {
+      opers[wave].attack = value
+    } else {
+      opers[wave].sustain = value
+    }
+  } else if reg >= 0xe0 && reg < 0x100 && wave >= 0 {
+    opers[wave].wave = value & 3
+  } else if reg >= 0xa0 && reg < 0xa9 {
+    chans[voice].fnum = (chans[voice].fnum & 0x300) | value
+  } else if reg >= 0xb0 && reg < 0xb9 {
+    chans[voice].fnum = (chans[voice].fnum & 0xff) | (value & 3) << 8
+    chans[voice].block = (value >> 2) & 7
+    let on = value & 0x20 != 0
+    let first = voice / 3 * 6 + voice % 3
+    if on && !chans[voice].on {
+      // Turned on: both waves from the start of their cycles, getting
+      // louder.
+      opers[first].state = EG_ATTACK
+      opers[first].phase = 0.0
+      opers[first + 3].state = EG_ATTACK
+      opers[first + 3].phase = 0.0
+    } else if !on && chans[voice].on {
+      if opers[first].state != EG_OFF { opers[first].state = EG_RELEASE }
+      if opers[first + 3].state != EG_OFF { opers[first + 3].state = EG_RELEASE }
+    }
+    chans[voice].on = on
+  } else if reg >= 0xc0 && reg < 0xc9 {
+    chans[voice].feedback = value
+  }
+}
+
+// One wave's next sample, -1 to 1: its loudness moves on, and so does
+// its place in its cycle, which `bend` shifts for this sample (in
+// cycles). `waver` is how much quieter the slow waver makes it now,
+// `sway` how much the pitch is off by it.
+proc wave_sample(opers: mut Oper, gain: Gain, rates: Rates, chip: Chip, w: i32,
+                 fnum: i32, block: i32, bend: f32, waver: f32, sway: f32) -> f32 {
+  let flags = opers[w].tremolo
+  // (High notes may move faster.)
+  let key = block * 2 + if chip[0].split & 0x40 != 0 { (fnum >> 8) & 1 } else { (fnum >> 9) & 1 }
+  let hurry = if flags & 0x10 != 0 { key } else { key >> 2 }
+  var state = opers[w].state
+  let asked = if state == EG_ATTACK {
+    opers[w].attack >> 4
+  } else if state == EG_DECAY {
+    opers[w].attack & 15
+  } else if state == EG_RELEASE || (state == EG_SUSTAIN && flags & 0x20 == 0) {
+    opers[w].sustain & 15
+  } else {
+    0
+  }
+  let rate = if asked == 0 { 0 } else { min(asked * 4 + hurry, 63) }
+  var env = opers[w].env
+  if state == EG_ATTACK {
+    // (Louder by a part of what is missing, so fast first.)
+    if rate >= 60 {
+      env = 0.0
+    } else {
+      env -= (env + 1.0) * 0.1335 * rates[rate].steps
+    }
+    if env < 0.5 {
+      env = 0.0
+      state = EG_DECAY
+    }
+  } else if state == EG_DECAY {
+    let level = opers[w].sustain >> 4
+    let held = if level == 15 { 496.0 } else { (level * 16) as f32 }
+    env += rates[rate].steps
+    if env >= held {
+      env = held
+      state = EG_SUSTAIN
+    }
+  } else if state != EG_OFF {
+    env += rates[rate].steps
+    if env >= 511.0 {
+      env = 511.0
+      state = EG_OFF
+    }
+  }
+  opers[w].env = env
+  opers[w].state = state
+  opers[w].before = opers[w].out
+  var out = 0.0
+  if state != EG_OFF {
+    let rom = ksl_rom[fnum >> 6] * 4 - (8 - block) * 32
+    let high = max(rom, 0) >> ksl_shift[opers[w].level >> 6]
+    let quiet = env + ((opers[w].level & 0x3f) * 4 + high) as f32 +
+                if flags & 0x80 != 0 { waver } else { 0.0 }
+    let step = (fnum << block) as f32 * PITCH_STEP * multiple[flags & 15] *
+               if flags & 0x40 != 0 { sway } else { 1.0 }
+    let phase = opers[w].phase
+    let shifted = phase + bend
+    let at = shifted - floor(shifted)
+    let shape = if chip[0].shapes { opers[w].wave } else { 0 }
+    let sine = sin(at * 6.2831853)
+    // The plain wave; its upper half only; both halves upward; or the
+    // rising quarters only.
+    let height = if shape == 0 {
+      sine
+    } else if shape == 1 {
+      max(sine, 0.0)
+    } else if shape == 2 {
+      max(sine, -sine)
+    } else if at < 0.25 || (at >= 0.5 && at < 0.75) {
+      max(sine, -sine)
+    } else {
+      0.0
+    }
+    if quiet < 1023.0 { out = height * gain[quiet as i32].gain }
+    let next = phase + step
+    opers[w].phase = next - floor(next)
+  }
+  opers[w].out = out
+  out
+}
+
+// The chip's next `count` samples, after those `pcm` has.
+proc chip_samples(opers: mut Oper, chans: Ochan, chip: mut Chip, gain: Gain,
+                  rates: Rates, pcm: mut Pcm, count: i32) {
+  for i in 0..count {
+    // (The loudness wavers 3.7 times a second by half a decibel, the pitch
+    // 6.1 times by a fourteenth of a half tone.)
+    let trem = chip[0].trem + 3.7 / (MUSIC_RATE as f32)
+    chip[0].trem = trem - floor(trem)
+    let vib = chip[0].vib + 6.1 / (MUSIC_RATE as f32)
+    chip[0].vib = vib - floor(vib)
+    let waver = 3.0 * if chip[0].trem < 0.5 { chip[0].trem * 2.0 } else { 2.0 - chip[0].trem * 2.0 }
+    let sway = 1.0 + 0.00405 * sin(chip[0].vib * 6.2831853)
+    var sum = 0.0
+    for voice in 0..9 {
+      let first = voice / 3 * 6 + voice % 3
+      if opers[first].state != EG_OFF || opers[first + 3].state != EG_OFF {
+        let fnum = chans[voice].fnum
+        let block = chans[voice].block
+        // (The first wave bent by what it gave itself before: up to two
+        // cycles; and the second by the first: up to four.)
+        let back = (chans[voice].feedback >> 1) & 7
+        let parts = 1 << (9 - back)
+        let own = if back == 0 {
+          0.0
+        } else {
+          (opers[first].out + opers[first].before) * 3.988 / parts as f32
+        }
+        let a = wave_sample(opers, gain, rates, chip, first, fnum, block, own, waver, sway)
+        if chans[voice].feedback & 1 != 0 {
+          sum += a + wave_sample(opers, gain, rates, chip, first + 3, fnum, block, 0.0,
+                                 waver, sway)
+        } else {
+          sum += wave_sample(opers, gain, rates, chip, first + 3, fnum, block, a * 3.988,
+                             waver, sway)
+        }
+      }
+    }
+    // (A voice at its loudest is an eighth of what sixteen bits hold.)
+    pcm += { value: min(max(sum * 4084.0, -32767.0), 32767.0) as i16 }
+  }
+}
+
+// The next `count` samples of the tune that is played, after those
+// `pcm` has: the notes that come due are played on the way.
+proc music_samples(bytes: Bytes, mus: mut Mus, tunes: mut Mchan, map: mut Mmap,
+                   vel: mut Velocity, voices: mut Ovoice, lists: mut Vlist,
+                   writes: mut Writes, opers: mut Oper, chans: mut Ochan,
+                   chip: mut Chip, gain: Gain, rates: Rates, pcm: mut Pcm,
+                   count: i32) {
+  var left = count
+  while left > 0 {
+    if mus[0].on && mus[0].due == 0 {
+      tune_events(bytes, mus, tunes, map, vel, voices, lists, writes)
+    }
+    for i in 0..len(writes) { chip_write(opers, chans, chip, writes[i].reg, writes[i].value) }
+    writes = []
+    let n = if mus[0].on { min(left, mus[0].due) } else { left }
+    chip_samples(opers, chans, chip, gain, rates, pcm, n)
+    mus[0].due -= n
+    left -= n
+  }
+}

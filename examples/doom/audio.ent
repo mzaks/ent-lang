@@ -19,7 +19,9 @@
 // follows what makes it: louder as that comes nearer, and from the side
 // it is on then.
 //
-// (Not here: the music, which the WAD has as notes for a synthesizer.)
+// The tune that is asked for (`Tune`) is played with them: its notes by
+// music.ent on the chip of chip.ent, whose samples go to the device as
+// they are made, as many each tic as it wants.
 import files
 import sound
 import wad
@@ -29,6 +31,8 @@ import things
 import play
 import enemy
 import sounds
+import music
+import chip
 
 // The sounds by their numbers: the lump each is in, and how much it
 // matters, the less the more (S_sfx).
@@ -262,9 +266,35 @@ proc start_channels(sounds: Sounds, data: Sfxdata, bytes: Bytes,
   }
 }
 
-// What is heard of a tic: after everything that starts a sound.
+// The tune that is heard now, by its lump's name.
+unique Playing: u64
+
+// The chip is told what it is first told. After `init_music` and
+// `init_chip`.
+system init_tunes() {
+  for i in 0..len(Writes) { chip_write(Oper, Ochan, Chip, Writes[i].reg, Writes[i].value) }
+  Writes = []
+}
+
+// What is heard of a tic: after everything that starts a sound. The
+// music goes on, with another tune if another is asked for
+// (S_ChangeMusic): as many samples as the device wants now.
 system hear() {
   let loud = if Sound.off { 0.0 } else { Sound.volume }
   update_channels(Mobj, Spawned.player, Sectors, Channels, Level.map, loud)
   start_channels(Sounds, Sfxdata, Bytes, Channels, loud)
+  if Tune.name != Playing {
+    Playing = Tune.name
+    tune_stop(Mus, Ovoice, Vlist, Writes)
+    let lump = lump_number(Lumps, Tune.name)
+    if lump >= 0 {
+      tune_start(Bytes, Mus, Mchan, Mmap, Velocity, Lumps[lump].at, Tune.looping)
+    }
+  }
+  Pcm = []
+  music_samples(Bytes, Mus, Mchan, Mmap, Velocity, Ovoice, Vlist, Writes, Oper, Ochan,
+                Chip, Gain, Rates, Pcm, min(stream_wants(MUSIC_RATE), 16384))
+  Heights = []
+  for i in 0..len(Pcm) { Heights += { value: Pcm[i].value } }
+  stream(Heights, len(Heights), MUSIC_RATE, loud)
 }

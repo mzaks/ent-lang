@@ -1,0 +1,58 @@
+// A tune of the WAD played for some seconds through the port's chip:
+// its samples (sixteen bits, one channel, 44100 a second) into
+// music.port.raw, to listen to beside the reference's (check/music.sh).
+import console
+import files
+import wad
+import music
+import chip
+
+capacity Bytes 16777216
+
+unique Left: i32
+unique Room: i32
+unique Written: bool
+
+world {
+  Wad.file = "doom1.wad"
+  Left = 60 * MUSIC_RATE
+}
+
+system start() {
+  for i in 0..len(Writes) { chip_write(Oper, Ochan, Chip, Writes[i].reg, Writes[i].value) }
+  Writes = []
+  tune_start(Bytes, Mus, Mchan, Mmap, Velocity,
+             Lumps[lump_number(Lumps, lump_name("D_E1M1"))].at, true)
+  Room = len(Bytes)
+  for i in 0..32768 { Bytes += { value: 0 } }
+}
+
+// The next samples: at most 16384 at once.
+system step() {
+  let n = min(Left, 16384)
+  Pcm = []
+  music_samples(Bytes, Mus, Mchan, Mmap, Velocity, Ovoice, Vlist, Writes, Oper, Ochan,
+                Chip, Gain, Rates, Pcm, n)
+  for i in 0..n {
+    let value = Pcm[i].value as i32
+    Bytes[Room + i * 2].value = (value & 0xff) as u8
+    Bytes[Room + i * 2 + 1].value = ((value >> 8) & 0xff) as u8
+  }
+  if n > 0 && !write_bytes("music.port.raw", Bytes, Room, n * 2, Written) {
+    put("could not write music.port.raw")
+  }
+  Written = true
+  Left -= n
+}
+
+schedule setup() {
+  load_wad()
+  init_music()
+  init_chip()
+  start()
+}
+schedule play() { step() }
+main {
+  setup()
+  loop { play() } until Left <= 0
+}

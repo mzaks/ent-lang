@@ -1,0 +1,46 @@
+// A tune of the WAD played for some seconds: every value the port
+// writes to the chip, with the time in samples, to hold against the
+// reference's (check/music.sh).
+import console
+import files
+import wad
+import music
+
+capacity Bytes 16777216
+
+unique Left: i32
+unique Time: i32
+
+world {
+  Wad.file = "doom1.wad"
+  Left = 60 * MUSIC_RATE
+}
+
+system start() {
+  tune_start(Bytes, Mus, Mchan, Mmap, Velocity,
+             Lumps[lump_number(Lumps, lump_name("D_E1M1"))].at, true)
+}
+
+// What is due now, and on to when the next is.
+system step() {
+  Writes = []
+  if Mus[0].on && Mus[0].due == 0 {
+    tune_events(Bytes, Mus, Mchan, Mmap, Velocity, Ovoice, Vlist, Writes)
+  }
+  for i in 0..len(Writes) { put("{Time} {Writes[i].reg} {Writes[i].value}") }
+  let n = if Mus[0].on { min(Left, Mus[0].due) } else { Left }
+  Mus[0].due -= n
+  Time += n
+  Left -= n
+}
+
+schedule setup() {
+  load_wad()
+  init_music()
+  start()
+}
+schedule play() { step() }
+main {
+  setup()
+  loop { play() } until Left <= 0
+}

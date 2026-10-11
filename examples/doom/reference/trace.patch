@@ -1,5 +1,194 @@
+diff --git i/opl/opl.c w/opl/opl.c
+index e99821c..c6f312a 100644
+--- i/opl/opl.c
++++ w/opl/opl.c
+@@ -33,6 +33,169 @@
+ #endif
+ 
+ 
++// ent-lang: a driver without a sound card or its clock, for a tune
++// played by DOOM_MUSIC (d_main.c): OPL_Offline_Run goes through its time
++// as fast as it can. Every value written to the chip goes to the file
++// DOOM_OPL names with the time in microseconds, and what the chip makes
++// of them to the one DOOM_OPL_SAMPLES names (16 bits, two channels).
++#include "opl3.h"
++#include "opl_queue.h"
++
++#define OFFLINE_RATE 44100
++
++static opl_callback_queue_t *offline_queue;
++static uint64_t offline_time;
++static opl3_chip offline_chip;
++static int offline_register;
++static FILE *offline_log;
++static FILE *offline_samples;
++static int16_t offline_buffer[OFFLINE_RATE];
++
++static int OPL_Offline_Init(unsigned int port_base)
++{
++    offline_queue = OPL_Queue_Create();
++    offline_time = 0;
++    OPL3_Reset(&offline_chip, OFFLINE_RATE);
++    return 1;
++}
++
++static void OPL_Offline_Shutdown(void)
++{
++}
++
++static unsigned int OPL_Offline_PortRead(opl_port_t port)
++{
++    return 0;
++}
++
++static void OPL_Offline_PortWrite(opl_port_t port, unsigned int value)
++{
++    if (port == OPL_REGISTER_PORT)
++    {
++        offline_register = value;
++    }
++    else if (port == OPL_REGISTER_PORT_OPL3)
++    {
++        offline_register = value | 0x100;
++    }
++    else if (port == OPL_DATA_PORT)
++    {
++        if (offline_log)
++        {
++            fprintf(offline_log, "%llu %x %x\n",
++                    (unsigned long long) offline_time, offline_register, value);
++        }
++        OPL3_WriteRegBuffered(&offline_chip, offline_register, value);
++    }
++}
++
++static void OPL_Offline_SetCallback(uint64_t us, opl_callback_t callback,
++                                    void *data)
++{
++    OPL_Queue_Push(offline_queue, callback, data, offline_time + us);
++}
++
++static void OPL_Offline_ClearCallbacks(void)
++{
++    OPL_Queue_Clear(offline_queue);
++}
++
++static void OPL_Offline_Nothing(void)
++{
++}
++
++static void OPL_Offline_SetPaused(int paused)
++{
++}
++
++static void OPL_Offline_AdjustCallbacks(float factor)
++{
++    OPL_Queue_AdjustCallbacks(offline_queue, offline_time, factor);
++}
++
++static opl_driver_t opl_offline_driver =
++{
++    "offline",
++    OPL_Offline_Init,
++    OPL_Offline_Shutdown,
++    OPL_Offline_PortRead,
++    OPL_Offline_PortWrite,
++    OPL_Offline_SetCallback,
++    OPL_Offline_ClearCallbacks,
++    OPL_Offline_Nothing,
++    OPL_Offline_Nothing,
++    OPL_Offline_SetPaused,
++    OPL_Offline_AdjustCallbacks,
++};
++
++// As the sound card's driver goes through its time (opl_sdl.c,
++// OPL_Mix_Callback), for so many samples.
++void OPL_Offline_Run(unsigned int samples)
++{
++    unsigned int filled = 0;
++    const char *name;
++
++    name = getenv("DOOM_OPL");
++    if (name)
++    {
++        offline_log = fopen(name, "w");
++    }
++    name = getenv("DOOM_OPL_SAMPLES");
++    if (name)
++    {
++        offline_samples = fopen(name, "wb");
++    }
++    while (filled < samples)
++    {
++        uint64_t nsamples;
++        opl_callback_t callback;
++        void *callback_data;
++
++        if (OPL_Queue_IsEmpty(offline_queue))
++        {
++            nsamples = samples - filled;
++        }
++        else
++        {
++            nsamples = (OPL_Queue_Peek(offline_queue) - offline_time)
++                     * OFFLINE_RATE;
++            nsamples = (nsamples + OPL_SECOND - 1) / OPL_SECOND;
++            if (nsamples > samples - filled)
++            {
++                nsamples = samples - filled;
++            }
++        }
++        if (nsamples > OFFLINE_RATE / 2)
++        {
++            nsamples = OFFLINE_RATE / 2;
++        }
++        if (offline_samples && nsamples > 0)
++        {
++            OPL3_GenerateStream(&offline_chip, offline_buffer, nsamples);
++            fwrite(offline_buffer, 4, nsamples, offline_samples);
++        }
++        filled += nsamples;
++        offline_time += (nsamples * OPL_SECOND) / OFFLINE_RATE;
++        while (!OPL_Queue_IsEmpty(offline_queue)
++            && offline_time >= OPL_Queue_Peek(offline_queue))
++        {
++            if (!OPL_Queue_Pop(offline_queue, &callback, &callback_data))
++            {
++                break;
++            }
++            callback(callback_data);
++        }
++    }
++    if (offline_log)
++    {
++        fclose(offline_log);
++    }
++    if (offline_samples)
++    {
++        fclose(offline_samples);
++    }
++}
++
+ static opl_driver_t *drivers[] =
+ {
+ #if (defined(__i386__) || defined(__x86_64__)) && defined(HAVE_IOPERM)
+@@ -129,6 +292,14 @@ opl_init_result_t OPL_Init(unsigned int port_base)
+     int i;
+     int result;
+ 
++    if (getenv("DOOM_MUSIC"))
++    {
++        driver = &opl_offline_driver;
++        driver->init_func(port_base);
++        init_stage_reg_writes = 0;
++        return OPL_INIT_OPL3;
++    }
++
+     driver_name = getenv("OPL_DRIVER");
+ 
+     if (driver_name != NULL)
 diff --git i/src/doom/d_main.c w/src/doom/d_main.c
-index 06aa0ff..e57451e 100644
+index 06aa0ff..d05ac72 100644
 --- i/src/doom/d_main.c
 +++ w/src/doom/d_main.c
 @@ -402,6 +402,94 @@ boolean D_GrabMouseCallback(void)
@@ -116,7 +305,7 @@ index 06aa0ff..e57451e 100644
          {
              // start wipe on this frame
              wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
-@@ -1960,6 +2051,12 @@ void D_DoomMain (void)
+@@ -1960,10 +2051,34 @@ void D_DoomMain (void)
  
      DEH_printf("\nP_Init: Init Playloop state.\n");
      P_Init ();
@@ -129,6 +318,28 @@ index 06aa0ff..e57451e 100644
  
      DEH_printf("S_Init: Setting up sound.\n");
      S_Init (sfxVolume * 8, musicVolume * 8);
+ 
++    // ent-lang: where DOOM_MUSIC names a tune's lump, it is played for
++    // DOOM_MUSIC_SECONDS without a sound card, and that is all: what is
++    // written to the chip and what the chip makes of it go to files
++    // (opl.c; check/music.sh).
++    if (getenv ("DOOM_MUSIC"))
++    {
++	extern void OPL_Offline_Run (unsigned int samples);
++	int lump = W_GetNumForName (getenv ("DOOM_MUSIC"));
++	const char *seconds = getenv ("DOOM_MUSIC_SECONDS");
++	void *handle;
++
++	handle = I_RegisterSong (W_CacheLumpNum (lump, PU_STATIC),
++				 W_LumpLength (lump));
++	I_PlaySong (handle, true);
++	OPL_Offline_Run ((seconds ? atoi (seconds) : 60) * 44100);
++	exit (0);
++    }
++
+     DEH_printf("D_CheckNetGame: Checking network game status.\n");
+     D_CheckNetGame ();
+ 
 diff --git i/src/doom/f_wipe.c w/src/doom/f_wipe.c
 index 0fa7754..655d84e 100644
 --- i/src/doom/f_wipe.c

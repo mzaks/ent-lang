@@ -124,6 +124,9 @@ system arrive() {
   Level.secret = false
   Level.reborn = false
   Clock.leveltime = 0
+  // (The level's tune, which goes on if it is the same level again.)
+  Tune.name = lump_name("D_E{Level.episode}M{Level.map}")
+  Tune.looping = true
 }
 
 // Between two levels (wi_stuff.c): what the player did in the level that
@@ -195,11 +198,15 @@ system complete_level() {
     Fin.on = true
     Fin.count = 0
     Fin.stage = 0
+    Tune.name = lump_name("D_VICTOR")
+    Tune.looping = true
   }
   if Level.exited && !Wi.on && Level.map != 8 {
     if Level.map == 9 { Wi.didsecret = true }
     Wi.on = true
     Wi.over = false
+    Tune.name = lump_name("D_INTER")
+    Tune.looping = true
     Wi.last = Level.map
     Wi.next = if Level.secret { 9 } else if Level.map == 9 { 4 } else { Level.map + 1 }
     Wi.allkills = Inv[0].killcount * 100 / max(Spawned.kills, 1)

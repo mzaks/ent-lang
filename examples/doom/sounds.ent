@@ -150,6 +150,10 @@ const S_STEREO_SWING = 96 * FRACUNIT
 const NORM_SEP = 128
 const NORM_PITCH = 127
 
+// The tune that is to be heard, by its lump's name (nought: none), and
+// whether it starts again at its end (S_ChangeMusic).
+unique Tune { name: u64, looping: bool }
+
 // The next of the numbers for what is seen and heard (M_Random).
 proc m_random(rnd: mut Rnd) -> i32 {
   rnd[0].other = random_after(rnd[0].other)
