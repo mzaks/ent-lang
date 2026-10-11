@@ -1,0 +1,230 @@
+// Pushover
+//
+// Pushover is the legal property of its developers (Andreas Röver,
+// Volker Grabsch and the others its AUTHORS file names). This is a port
+// of it to ent-lang.
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The game: the original levels one after another, played with the
+// keyboard in a window. Started where the game is (its `data`, `themes`
+// and `levels`: build/pushover/upstream after reference/build.sh and
+// reference/pictures.sh):
+//
+//   cd build/pushover/upstream && ent run ../../../examples/pushover/pushover.ent
+//
+// The arrow keys walk and climb, the space bar takes a domino and puts
+// it down, and with up held among the dominoes it pushes. R starts the
+// level again, N and P go to the next level and the one before, Esc
+// leaves.
+import window
+import sound
+import files
+import level
+import dominoes
+import ant
+import pictures
+import draw
+
+// The sheets of pictures as the window has them.
+unique Art { dominoes: i32, ant: i32, theme: i32 }
+
+// The sheet of a theme that was read (one for each theme met so far).
+component Sheet { name: text[30], picture: i32 } capacity 32
+
+// Which level is played (the original ones by their numbers), whether
+// it is to be read, how long since the last tick, whether one is due in
+// this frame, and for how many ticks the level has been over.
+unique Play {
+  number: i32, load: bool, since: f32, due: bool, over: i32, n_held: bool,
+  p_held: bool, r_held: bool
+}
+
+world {
+  Window.width = 800
+  Window.height = 600
+  Window.title = "Pushover"
+  Window.fps = 60
+  Window.background = 0x000000
+  Play.number = 1
+  Play.load = true
+}
+
+// The files of the sounds, by their numbers (soundsys.cpp).
+table sound_files: text[40] = [
+  "data/01_StandardFalling.ogg", "data/02_StopperHit.ogg",
+  "data/03_Splitter.ogg", "data/04_Exploder.ogg", "data/05_Delay.ogg",
+  "data/06_TumblerFalling.ogg", "data/07_BridgerFalling.ogg",
+  "data/06_TumblerFalling.ogg", "data/09_TriggerFalling.ogg",
+  "data/0A_Ascender.ogg", "data/0B_Falling.ogg", "data/0C_Landing.ogg",
+  "data/0D_PickUpDomino.ogg", "data/0E_Tapping.ogg",
+  "data/0F_Schrugging.ogg", "data/10_DoorClose.ogg", "data/11_DoorOpen.ogg",
+  "data/13_Victory.ogg"
+]
+
+system open_art() {
+  Art.dominoes = picture_load("data/dominos.png")
+  Art.ant = picture_load("data/ant.png")
+}
+
+// Which file the level of that number is.
+system choose() {
+  let number = Play.number
+  Level.file = if number < 10 { "levels/original/00{number}.level" }
+               else if number < 100 { "levels/original/0{number}.level" }
+               else { "levels/original/{number}.level" }
+}
+
+// After the level was read: one that is not there is the first again;
+// the theme's sheet is found, or read; its music is played.
+system open_level() {
+  if !Level.ok && Play.number != 1 {
+    Play.number = 1
+  } else {
+    Play.load = false
+    Play.over = 0
+    Play.since = 0.0
+    Art.theme = 0
+    for s: Sheet where s.name == Level.theme { Art.theme = s.picture }
+    if Art.theme == 0 {
+      Art.theme = picture_load("themes/" + Level.theme + ".png")
+      spawn { Sheet { name: Level.theme, picture: Art.theme } }
+    }
+    Music.file = "themes/" + Level.theme + ".ogg"
+    Music.volume = 0.5
+  }
+}
+
+// The keys of this frame, and whether a tick is due (18 a second).
+system input() {
+  var keys = 0
+  if Keys.left { keys |= KEY_LEFT }
+  if Keys.up { keys |= KEY_UP }
+  if Keys.right { keys |= KEY_RIGHT }
+  if Keys.down { keys |= KEY_DOWN }
+  if Keys.space { keys |= KEY_ACTION }
+  Game.keys = keys
+  Play.since += Window.dt
+  Play.due = Play.since >= 1.0 / 18.0
+  if Play.due {
+    Play.since -= 1.0 / 18.0
+    // (After a long frame the game does not hurry to catch up.)
+    if Play.since > 1.0 / 18.0 { Play.since = 0.0 }
+  }
+  let next = key_down('N' as i32)
+  let before = key_down('P' as i32)
+  let again = key_down('R' as i32)
+  if next && !Play.n_held {
+    Play.number += 1
+    Play.load = true
+  }
+  if before && !Play.p_held && Play.number > 1 {
+    Play.number -= 1
+    Play.load = true
+  }
+  if again && !Play.r_held { Play.load = true }
+  Play.n_held = next
+  Play.p_held = before
+  Play.r_held = again
+}
+
+// After a tick: its sounds are heard; a level that is solved is followed
+// by the next, one that is lost is started again, each after a moment.
+system follow() {
+  for i in 0..len(Sounds) {
+    spawn { Sample { file: sound_files[Sounds[i].id], volume: 1.0 } }
+  }
+  if Game.result != UNDECIDED {
+    Play.over += 1
+    if Play.over > 36 {
+      if Game.result == SOLVED || Game.result == SOLVED_LATE {
+        Play.number += 1
+      }
+      Play.load = true
+    }
+  }
+}
+
+// What the level came to, in words.
+fn outcome(result: i32) -> text[62] {
+  if result == SOLVED { "Solved!" }
+  else if result == SOLVED_LATE { "Solved, but not in time" }
+  else if result == DIED { "You died" }
+  else if result == CRASHES { "Some dominoes crashed" }
+  else if result == TRIGGER_NOT_FLAT { "The trigger is not lying flat" }
+  else if result == TRIGGER_NOT_LAST { "The trigger was not the last to fall" }
+  else if result == SOME_LEFT { "Some dominoes are left standing" }
+  else if result == CARRYING { "You are still holding a domino" }
+  else { "" }
+}
+
+fn two(number: i32) -> text[8] {
+  if number < 10 { "0{number}" } else { "{number}" }
+}
+
+// The level as `picture_level` listed it, the time left and what the
+// level came to.
+system paint() {
+  for i in 0..len(Blits) {
+    let sheet = Blits[i].sheet
+    let image = if sheet == SHEET_DOMINOES { Art.dominoes }
+                else if sheet == SHEET_ANT { Art.ant } else { Art.theme }
+    picture_part(image, Blits[i].from_x as f32, Blits[i].from_y as f32,
+                 Blits[i].w as f32, Blits[i].h as f32, Blits[i].x as f32,
+                 Blits[i].y as f32, Blits[i].w as f32, Blits[i].h as f32,
+                 0xffffff)
+  }
+  // (The time that is over is counted up, in red.)
+  let late = Level.time < 0
+  let seconds = if late { -(Level.time / 18) + 1 } else { Level.time / 18 }
+  let time = two(seconds / 60) + ":" + two(seconds % 60)
+  label(time, 21.0, 561.0, 30.0, 0x000000)
+  label(time, 20.0, 560.0, 30.0, if late { 0xff0000 } else { 0xddb300 })
+  let level = "Level {Play.number}"
+  label(level, 800.0 - text_width(level, 18.0) - 10.0, 572.0, 18.0, 0xddb300)
+  if Game.result != UNDECIDED {
+    let said = outcome(Game.result)
+    let wide = text_width(said, 30.0)
+    rect(390.0 - wide / 2.0, 270.0, wide + 20.0, 50.0, 0xc0000000)
+    label(said, 400.0 - wide / 2.0, 280.0, 30.0, 0xddb300)
+  }
+}
+
+schedule setup() {
+  open_art()
+}
+
+schedule frame() {
+  begin()
+  input()
+  choose() run_if Play.load
+  load_level() run_if Play.load
+  load_theme() run_if Play.load
+  enter() run_if Play.load
+  open_level() run_if Play.load
+  // (A tick, as ant.ent's `tick` has it: a schedule run in another takes
+  // no condition, so its steps are given theirs.)
+  hush() run_if Play.due
+  doors() run_if Play.due
+  act_ant() run_if Play.due
+  topple() run_if Play.due
+  decide_level() run_if Play.due
+  follow() run_if Play.due
+  picture_level()
+  paint()
+  play()
+  present()
+}
+
+main {
+  setup()
+  loop { frame() } until Window.closed
+}

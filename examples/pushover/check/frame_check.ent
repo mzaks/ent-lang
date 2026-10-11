@@ -1,0 +1,58 @@
+// A level as it is drawn after so many ticks of a recording: the parts
+// of the sheets of pictures, in the order they are drawn in, a line
+// each: the sheet, where the part is in it and how big, and where it
+// goes (check/frame.sh puts a picture together of them). The level is
+// the file "level.level" and the recording "record.rec", where the
+// program is started, which is where the game is (for the theme).
+import console
+import files
+import level
+import dominoes
+import ant
+import pictures
+import draw
+
+unique Played { tick: i32, ticks: i32 }
+
+world {
+  Level.file = "level.level"
+  Recording.file = "record.rec"
+  Played.ticks = 100
+}
+
+system keys() {
+  Game.keys = if Played.tick < len(Record) { Record[Played.tick].keys as i32 }
+              else { 0 }
+  Played.tick += 1
+}
+
+system show() {
+  put("theme {Level.theme} {Theme.ok} blocks {len(Fore)} {len(Tiles)}")
+  for i in 0..len(Blits) {
+    put("{Blits[i].sheet} {Blits[i].from_x} {Blits[i].from_y} {Blits[i].w} {Blits[i].h} {Blits[i].x} {Blits[i].y}")
+  }
+  flush()
+}
+
+schedule start() {
+  load_level()
+  load_theme()
+  load_record()
+  enter()
+}
+
+schedule step() {
+  keys()
+  tick()
+}
+
+schedule end() {
+  picture_level()
+  show()
+}
+
+main {
+  start()
+  loop { step() } until Played.tick >= Played.ticks
+  end()
+}

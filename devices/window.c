@@ -815,8 +815,16 @@ void ent_window_edges(float x, float y, float w, float h, float left,
 
 // Pictures read from files: read at once, and given to the screen when
 // first drawn, so a program can ask for one in `world`, before the
-// window is open.
-static Texture2D ent_window_pictures[64];
+// window is open. One that is higher than a graphics card takes (a sheet
+// of many little pictures, one under the other) is given to it in strips
+// of so many rows, and what is drawn of it is put together of them.
+#define ENT_WINDOW_STRIP 4096
+#define ENT_WINDOW_STRIPS 32
+struct ent_window_sheet {
+  Texture2D strip[ENT_WINDOW_STRIPS];
+  int strips, width, height;
+};
+static struct ent_window_sheet ent_window_pictures[64];
 static Image ent_window_images[64];
 static int ent_window_picture_count = 1;
 
@@ -834,29 +842,73 @@ int32_t ent_window_picture_load(const ent_text126 *file) {
   return ent_window_picture_count++;
 }
 
-void ent_window_picture(int32_t image, float x, float y, float w, float h,
-                        int32_t tint) {
+// The picture as the screen has it: given to it now, if it was not.
+static struct ent_window_sheet *ent_window_sheet_of(int32_t image) {
   if (image <= 0 || image >= ent_window_picture_count)
-    return;
-  if (ent_window_images[image].data) {
-    ent_window_pictures[image] = LoadTextureFromImage(ent_window_images[image]);
-    UnloadImage(ent_window_images[image]);
-    ent_window_images[image].data = 0;
+    return 0;
+  struct ent_window_sheet *sheet = &ent_window_pictures[image];
+  Image *read = &ent_window_images[image];
+  if (read->data) {
+    sheet->width = read->width;
+    sheet->height = read->height;
+    sheet->strips = 0;
+    for (int top = 0;
+         top < read->height && sheet->strips < ENT_WINDOW_STRIPS;
+         top += ENT_WINDOW_STRIP) {
+      int rows = read->height - top;
+      if (rows > ENT_WINDOW_STRIP)
+        rows = ENT_WINDOW_STRIP;
+      if (rows == read->height) {
+        sheet->strip[sheet->strips++] = LoadTextureFromImage(*read);
+      } else {
+        Image cut = ImageFromImage(
+            *read, (Rectangle){0, (float)top, (float)read->width, (float)rows});
+        sheet->strip[sheet->strips++] = LoadTextureFromImage(cut);
+        UnloadImage(cut);
+      }
+    }
+    UnloadImage(*read);
+    read->data = 0;
   }
-  Texture2D texture = ent_window_pictures[image];
-  if (texture.id == 0)
+  return sheet->strips > 0 && sheet->strip[0].id != 0 ? sheet : 0;
+}
+
+void ent_window_picture_part(int32_t image, float from_x, float from_y,
+                             float from_w, float from_h, float x, float y,
+                             float w, float h, int32_t tint) {
+  struct ent_window_sheet *sheet = ent_window_sheet_of(image);
+  if (!sheet || from_h <= 0 || from_w <= 0)
     return;
-  DrawTexturePro(texture,
-                 (Rectangle){0, 0, (float)texture.width, (float)texture.height},
-                 (Rectangle){x, y, w, h}, (Vector2){0, 0}, 0,
-                 (Color){(unsigned char)(tint >> 16), (unsigned char)(tint >> 8),
-                         (unsigned char)tint, 255});
+  Color color = {(unsigned char)(tint >> 16), (unsigned char)(tint >> 8),
+                 (unsigned char)tint, 255};
+  for (int i = 0; i < sheet->strips; i++) {
+    float top = (float)(i * ENT_WINDOW_STRIP);
+    float first = from_y > top ? from_y : top;
+    float end = top + (float)sheet->strip[i].height;
+    if (from_y + from_h < end)
+      end = from_y + from_h;
+    if (end <= first)
+      continue;
+    DrawTexturePro(sheet->strip[i],
+                   (Rectangle){from_x, first - top, from_w, end - first},
+                   (Rectangle){x, y + (first - from_y) * h / from_h, w,
+                               (end - first) * h / from_h},
+                   (Vector2){0, 0}, 0, color);
+  }
   // (What `shade` lays on everything, over the picture.)
   if (ent_window_shading_part > 0) {
     Color over = ent_window_shading;
     over.a = (unsigned char)((float)over.a * ent_window_shading_part);
     DrawRectangleRec((Rectangle){x, y, w, h}, over);
   }
+}
+
+void ent_window_picture(int32_t image, float x, float y, float w, float h,
+                        int32_t tint) {
+  struct ent_window_sheet *sheet = ent_window_sheet_of(image);
+  if (sheet)
+    ent_window_picture_part(image, 0, 0, (float)sheet->width,
+                            (float)sheet->height, x, y, w, h, tint);
 }
 
 // The program's own picture: its pixels go to the graphics card as they

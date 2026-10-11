@@ -1,0 +1,341 @@
+// Pushover
+//
+// Pushover is the legal property of its developers (Andreas Röver,
+// Volker Grabsch and the others its AUTHORS file names). This is a port
+// of it to ent-lang.
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// A level drawn (graphicsn.cpp): the background, layer over layer, the
+// doors and the platforms; the dominoes; the ladders and the ant. All of
+// it is parts of sheets of pictures: `picture_level` says which part of
+// which sheet goes where, in the order they are drawn in, and a program
+// draws them (pushover.ent: with the window's `picture_part`).
+import files
+import level
+import dominoes
+import ant
+import pictures
+
+// A part of a sheet (`from_x`, `from_y`, `w` wide and `h` high) to be
+// drawn with its top left corner at (x, y) of a picture 800 by 600.
+buffer Blits {
+  sheet: i32, from_x: i32, from_y: i32, w: i32, h: i32, x: i32, y: i32
+} capacity 16384
+
+// The sheets: the dominoes, the ant, and the level's theme.
+const SHEET_DOMINOES = 0
+const SHEET_ANT = 1
+const SHEET_THEME = 2
+
+// A place is so big in the picture; a theme's sheet is blocks of 40 by
+// 48, of which a place shows half.
+const PLACE_W = 40
+const PLACE_H = 24
+
+// A theme (themes/NAME.lua): where in its sheet the blocks are that the
+// level is made of (four of platforms, the ladder, the door in four
+// steps from shut to open), and those the backgrounds are made of, by
+// their numbers.
+buffer Fore { x: i32, y: i32 } capacity 16
+buffer Tiles { x: i32, y: i32 } capacity 4096
+unique Theme { ok: bool }
+
+const FORE_LADDER = 4
+const FORE_DOOR = 5
+
+proc blit(blits: mut Blits, sheet: i32, from_x: i32, from_y: i32, w: i32,
+          h: i32, x: i32, y: i32) {
+  blits += { sheet: sheet, from_x: from_x, from_y: from_y, w: w, h: h, x: x,
+             y: y }
+}
+
+// Where the list of that name starts in a theme's file: after the "{"
+// of a line "NAME = {"; -1 if there is none.
+fn list_start(bytes: Bytes, name: text[30]) -> i32 {
+  var found = -1
+  var at = 0
+  while at < len(bytes) && found < 0 {
+    var same = true
+    for i in 0..len(name) {
+      if byte_at(bytes, at + i) != name[i] { same = false }
+    }
+    let after = byte_at(bytes, at + len(name))
+    if same && (after == ' ' || after == '=') {
+      var brace = at
+      while brace < len(bytes) && byte_at(bytes, brace) != '{' { brace += 1 }
+      found = brace + 1
+    }
+    at = line_end(bytes, at) + 1
+  }
+  found
+}
+
+// The next number of a list from `at` on, and where what follows it
+// starts: over spaces, commas, line ends and what a "--" says to the end
+// of its line. (-1, at) at the list's end.
+fn list_number(bytes: Bytes, at: i32) -> (i32, i32) {
+  var from = at
+  var looking = from >= 0
+  while looking && from < len(bytes) {
+    let character = byte_at(bytes, from)
+    if character == '-' && byte_at(bytes, from + 1) == '-' {
+      from = line_end(bytes, from)
+    } else if character >= '0' && character <= '9' {
+      looking = false
+    } else if character == '}' {
+      looking = false
+    } else {
+      from += 1
+    }
+  }
+  if from >= 0 && byte_at(bytes, from) >= '0' && byte_at(bytes, from) <= '9' {
+    number_at(bytes, from)
+  } else {
+    (-1, at)
+  }
+}
+
+// A theme out of its file: the list `foreground` and the list
+// `background`, each a block's column and row after another.
+proc read_theme(bytes: Bytes, fore: mut Fore, tiles: mut Tiles) -> bool {
+  fore = []
+  tiles = []
+  var at = list_start(bytes, "foreground")
+  var more = at >= 0
+  while more {
+    let (x, after) = list_number(bytes, at)
+    let (y, next) = list_number(bytes, after)
+    if x >= 0 && y >= 0 && len(fore) < 16 { fore += { x: x, y: y } }
+    else { more = false }
+    at = next
+  }
+  at = list_start(bytes, "background")
+  more = at >= 0
+  while more {
+    let (x, after) = list_number(bytes, at)
+    let (y, next) = list_number(bytes, after)
+    if x >= 0 && y >= 0 && len(tiles) < 4096 { tiles += { x: x, y: y } }
+    else { more = false }
+    at = next
+  }
+  len(fore) >= 9 && len(tiles) > 0
+}
+
+// Reads the theme the level names (after `load_level`).
+system load_theme() {
+  let size = read_file("themes/" + Level.theme + ".lua", Bytes)
+  let read = read_theme(Bytes, Fore, Tiles)
+  Theme.ok = size > 0 && read
+}
+
+// Which quarters of the platforms' blocks make the picture of a place
+// (getPlatformImage): two for its left half, one over the other, and two
+// for its right half; 99 for none. A platform is drawn in the place it
+// is in (its front) and in the place above (its top), and by what is
+// next to it.
+fn platform_parts(cells: Cells, x: i32, y: i32) -> (i32, i32, i32, i32) {
+  let here = platform(cells, x, y)
+  let left = x > 0 && platform(cells, x - 1, y)
+  if y + 1 < HIGH && platform(cells, x, y + 1) {
+    (if x > 0 && platform(cells, x - 1, y + 1) { 4 }
+     else if platform(cells, x - 1, y) && here { 10 } else { 0 },
+     if !here { 99 } else if left { 12 } else { 8 },
+     if x + 1 < WIDE && platform(cells, x + 1, y + 1) { 1 } else { 5 },
+     if !here { 99 }
+     else if x + 1 >= WIDE || !platform(cells, x + 1, y) { 13 }
+     else if platform(cells, x + 1, y + 1) { 9 } else { 11 })
+  } else if here {
+    (if left { 6 } else { 2 }, 99,
+     if x + 1 < WIDE && platform(cells, x + 1, y) { 3 } else { 7 }, 99)
+  } else {
+    (99, 99, 99, 99)
+  }
+}
+
+// A quarter of a platform's block, at (x, y).
+proc blit_quarter(blits: mut Blits, fore: Fore, quarter: i32, x: i32, y: i32) {
+  if quarter < 16 {
+    let block = quarter / 4
+    let part = quarter % 4
+    blit(blits, SHEET_THEME, fore[block].x * 40 + (part % 2) * 20,
+         fore[block].y * 48 + (part / 2) * 24, 20, 24, x, y)
+  }
+}
+
+// What is behind everything: for each place the tiles of the
+// background, the doors and the platforms.
+proc picture_back(cells: Cells, back: Back, doors: Doors, fore: Fore,
+                  tiles: Tiles, blits: mut Blits, layers: i32) {
+  for y in 0..HIGH {
+    for x in 0..WIDE {
+      let at_x = x * PLACE_W
+      let at_y = y * PLACE_H
+      for layer in 0..layers {
+        let tile = back[(layer * HIGH + y) * WIDE + x].tile as i32
+        let block = tile / 2
+        if block < len(tiles) {
+          blit(blits, SHEET_THEME, tiles[block].x * 40,
+               tiles[block].y * 48 + (tile % 2) * 24, 40, 24, at_x, at_y)
+        }
+      }
+      // A door is two places high, over the place a domino in front of
+      // it would stand on.
+      if x == doors[0].entry_x && (y + 2 == doors[0].entry_y ||
+                                   y + 1 == doors[0].entry_y) {
+        let block = FORE_DOOR + doors[0].entry
+        blit(blits, SHEET_THEME, fore[block].x * 40,
+             fore[block].y * 48 + (y + 2 - doors[0].entry_y) * 24, 40, 24,
+             at_x, at_y)
+      }
+      if x == doors[0].exit_x && (y + 2 == doors[0].exit_y ||
+                                  y + 1 == doors[0].exit_y) {
+        let block = FORE_DOOR + doors[0].exit
+        blit(blits, SHEET_THEME, fore[block].x * 40,
+             fore[block].y * 48 + (y + 2 - doors[0].exit_y) * 24, 40, 24,
+             at_x, at_y)
+      }
+      let (left, left_over, right, right_over) = platform_parts(cells, x, y)
+      blit_quarter(blits, fore, left, at_x, at_y)
+      blit_quarter(blits, fore, left_over, at_x, at_y)
+      blit_quarter(blits, fore, right, at_x + 20, at_y)
+      blit_quarter(blits, fore, right_over, at_x + 20, at_y)
+    }
+  }
+}
+
+// One picture of a domino of a kind, with its bottom left corner at
+// (x, y); what of it would be above the row `top` is left out.
+proc blit_domino(blits: mut Blits, kind: i32, picture: i32, x: i32, y: i32,
+                 top: i32) {
+  let row = domino_rows[kind * DOMINO_PICTURES + picture] as i32
+  let cut = max(0, top - (y - 58))
+  if row >= 0 && cut < 58 {
+    blit(blits, SHEET_DOMINOES, 0, row * 60 + cut, 200, 58 - cut, x,
+         y - 58 + cut)
+  }
+}
+
+// How far to the side and up an ascender at the ceiling is drawn in each
+// of its fifteen states there, with the picture of a domino fallen the
+// other way round.
+table ceiling_x: i32 = [-40, -40, -31, -23, -10, -4, -2, 0, 2, 5, 10, 23, 31, 40, 40]
+table ceiling_y: i32 = [-30, -21, -9, -4, 0, 0, 0, 0, 0, 0, 0, -4, -9, -21, -30]
+
+// The dominoes, place by place (drawDomino).
+proc picture_dominoes(cells: Cells, dominoes: Domino, blits: mut Blits) {
+  for cell in 0..500 {
+    let it = cells[cell].who
+    let kind = dominoes[it].kind
+    if kind != Kind.Empty {
+      let x = cell % WIDE
+      let y = cell / WIDE
+      let state = dominoes[it].state
+      let extra = dominoes[it].extra
+      let at_x = (x - 2) * PLACE_W
+      let at_y = 12 + y * PLACE_H
+      let lower = 3 * dominoes[it].drop
+      if state >= ST_LEFT_AS && state <= ST_RIGHT_AS {
+        // At the ceiling: what would be in the platform above is not
+        // seen.
+        let turn = state - ST_LEFT_AS
+        var top = 0
+        if platform(cells, x, y - 3) { top = (y - 2) * PLACE_H - 10 }
+        if (state == ST_LEFT_AS || state == ST_RIGHT_AS) &&
+           platform(cells, x, y - 1) {
+          top = y * PLACE_H - 10
+        }
+        blit_domino(blits, kind as i32, ST_RIGHT - turn,
+                    at_x + ceiling_x[turn], at_y + ceiling_y[turn] + lower,
+                    top)
+      } else {
+        // A splitter that has just opened: what fell into it, above it.
+        if state == ST_SPLIT + 1 && extra != 0 {
+          blit_domino(blits, extra,
+                      if extra >= K_CRASH0 { ST_CRASH } else { ST_UPRIGHT },
+                      at_x, at_y - 34, 0)
+        }
+        blit_domino(blits, kind as i32, state, at_x, at_y + lower, 0)
+      }
+    }
+  }
+}
+
+// The ladders (drawLadders): a ladder's block is its top, its middle
+// and its bottom, 12, 24 and 12 rows.
+proc picture_ladders(cells: Cells, fore: Fore, blits: mut Blits) {
+  let from_x = fore[FORE_LADDER].x * 40
+  let from_y = fore[FORE_LADDER].y * 48
+  for y in 0..HIGH {
+    for x in 0..WIDE {
+      if ladder(cells, x, y) {
+        blit(blits, SHEET_THEME, from_x, from_y + 12, 40, 24, x * PLACE_W,
+             y * PLACE_H)
+      } else {
+        if ladder(cells, x, y - 1) {
+          blit(blits, SHEET_THEME, from_x, from_y + 36, 40, 12, x * PLACE_W,
+               y * PLACE_H)
+        }
+        if ladder(cells, x, y + 1) {
+          blit(blits, SHEET_THEME, from_x, from_y, 40, 12, x * PLACE_W,
+               y * PLACE_H + 12)
+        }
+      }
+    }
+  }
+}
+
+// The ant, and the domino it carries (drawAnt).
+proc picture_ant(a: Ant, me: entity, blits: mut Blits) {
+  let x = a[me].x
+  let y = a[me].y
+  let animation = a[me].animation
+  let picture = a[me].picture
+  if x >= 0 && x < WIDE && y >= 0 && y < HIGH && animation < NOTHING {
+    let frame = ant_frames[ant_first[animation] + picture]
+    let foot = y * PLACE_H + frame.below as i32 + 18
+    let carried = a[me].carried as i32
+    if carried != 0 && animation >= CARRY_LEFT && animation <= LOSING_DOMINO_LEFT {
+      let held = carried_at[(animation - CARRY_LEFT) * 16 + picture]
+      blit_domino(blits, carried, held.picture as i32,
+                  (x - 2) * PLACE_W + held.x as i32, foot + held.y as i32, 0)
+    }
+    // (The first column of the ant's pictures is not part of them.)
+    blit(blits, SHEET_ANT, 1, frame.row as i32 * 75, 129, 75,
+         x * PLACE_W - 44, foot + 3 - 75)
+  }
+}
+
+fn on_ladder(animation: i32) -> bool {
+  (animation >= LADDER1 && animation <= LADDER4) ||
+  (animation >= CARRY_LADDER1 && animation <= CARRY_LADDER4) ||
+  (animation >= ONTO_LADDER_RIGHT && animation <= OFF_LADDER_LEFT)
+}
+
+proc picture_front(a: Ant, me: entity, cells: Cells, fore: Fore,
+                   blits: mut Blits) {
+  // On a ladder the ant is in front of it, and else behind.
+  if on_ladder(a[me].animation) {
+    picture_ladders(cells, fore, blits)
+    picture_ant(a, me, blits)
+  } else {
+    picture_ant(a, me, blits)
+    picture_ladders(cells, fore, blits)
+  }
+}
+
+// All of a level as it is, into `Blits` (drawLevel).
+system picture_level() {
+  Blits = []
+  picture_back(Cells, Back, Doors, Fore, Tiles, Blits, Level.layers)
+  picture_dominoes(Cells, Domino, Blits)
+  picture_front(Ant, Game.ant, Cells, Fore, Blits)
+}

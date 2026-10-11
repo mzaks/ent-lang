@@ -1,0 +1,230 @@
+// Pushover
+//
+// Pushover is the legal property of its developers (Andreas Röver,
+// Volker Grabsch and the others its AUTHORS file names). This is a port
+// of it to ent-lang.
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// Where in the game's sheets of pictures each picture is (graphicsn.cpp).
+// Written by reference/make_tables.py from the game's source: not to be
+// changed by hand.
+
+// Which row of the sheet of dominoes (data/dominos.png: a picture every
+// 60 rows, 58 high) is a domino of a kind as it stands in a state: at
+// `kind * 64 + state`. The states as the dominoes have them, and from 57
+// on seven ways a domino is carried in. -1: there is no such picture.
+const DOMINO_PICTURES = 64
+const CARRIED_START = 57
+table domino_rows: i16 = [
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 15, 16, 17, 18, 19, 20, 21,
+  -1, -1, -1, -1, -1, -1, 22, -1, 23, -1, 24, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 25, 26, 27, 28, 29, 30, 31,
+  -1, -1, -1, -1, -1, -1, 32, -1, 33, -1, 34, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 41, 40, 39, 38, 37, 36, 35, 42, 43, 44, 45, 46, 47, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 48, 49, 50, 51, 52, 53, 54,
+  -1, -1, -1, -1, -1, -1, 55, -1, 56, -1, 57, -1, -1, -1, -1, -1, 58, 59, 60, 61, 62, 63, 64, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 65, 66, 67, 68, 69, 70, 71,
+  -1, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 87, 88, 89, 90, 91, 92, 93,
+  -1, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 109, 110, 111, 112, 113, 114, 115,
+  -1, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 131, 132, 133, 134, 135, 136, 137,
+  -1, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 153, 154, 155, 156, 157, 158, 159,
+  -1, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 190, 191, 192, 193, 194, 195, 196,
+  -1, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 212, 213, 214, 215, 216, 217, 218,
+  -1, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 234, 235, 236, 237, 238, 239, 240,
+  -1, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 256, 257, 258, 259, 260, 261, 262,
+  -1, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 278, 279, 280, 281, 282, 283, 284,
+  -1, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 300, 301, 302, 303, 304, 305, 306,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 307, 308, 309, 310, 311, 312, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 313, 314, 315, 316, 317, 318, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 319, 320, 321, 322, 323, 324, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 325, 326, 327, 328, 329, 330, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 331, 332, 333, 334, 335, 336, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 337, 338, 339, 340, 341, 342, -1, -1, -1, -1, -1, -1, -1
+]
+
+// The ant's pictures (data/ant.png: one every 75 rows): `ant_first` is
+// where in `ant_frames` each animation's pictures start, and a row of
+// `ant_frames` says which picture of the sheet it is and how far below
+// the ant's place it is drawn.
+table ant_first: i32 = [
+  0, 6, 12, 18, 24, 28, 32, 40, 48, 56, 64, 70, 76, 82, 88, 94, 100, 108, 116, 124, 132, 133, 134, 149, 164, 180, 196, 198, 200, 202, 204, 217, 234, 234, 235, 237, 243, 250, 257, 269, 281, 289, 297, 301, 305, 313, 321, 327, 333, 335, 338, 339, 354, 356, 360, 367, 370, 377, 381, 392, 403, 411, 419, 427, 428, 429
+]
+table ant_frames { row: i16, below: i16 } = [
+  { row: 0, below: 0 }, { row: 1, below: 0 }, { row: 2, below: 0 }, { row: 3, below: 0 }, { row: 4, below: 0 }, { row: 5, below: 0 },
+  { row: 6, below: 0 }, { row: 7, below: 0 }, { row: 8, below: 0 }, { row: 9, below: 0 }, { row: 10, below: 0 }, { row: 11, below: 0 },
+  { row: 12, below: 0 }, { row: 13, below: 0 }, { row: 14, below: -9 }, { row: 15, below: -30 }, { row: 16, below: -24 }, { row: 17, below: -24 },
+  { row: 18, below: 0 }, { row: 19, below: 0 }, { row: 20, below: -9 }, { row: 21, below: -27 }, { row: 22, below: -24 }, { row: 23, below: -24 },
+  { row: 24, below: 3 }, { row: 25, below: 18 }, { row: 26, below: 24 }, { row: 27, below: 24 }, { row: 28, below: 3 }, { row: 29, below: 18 },
+  { row: 30, below: 24 }, { row: 31, below: 24 }, { row: 32, below: 0 }, { row: 33, below: -12 }, { row: 34, below: -12 }, { row: 35, below: -24 },
+  { row: 36, below: -24 }, { row: 37, below: -36 }, { row: 38, below: -36 }, { row: 39, below: -48 }, { row: 40, below: 0 }, { row: 41, below: -12 },
+  { row: 42, below: -12 }, { row: 43, below: -24 }, { row: 44, below: -24 }, { row: 45, below: -36 }, { row: 46, below: -36 }, { row: 47, below: -48 },
+  { row: 48, below: 0 }, { row: 49, below: 12 }, { row: 50, below: 12 }, { row: 51, below: 24 }, { row: 52, below: 24 }, { row: 53, below: 36 },
+  { row: 54, below: 36 }, { row: 55, below: 48 }, { row: 56, below: 0 }, { row: 57, below: 12 }, { row: 58, below: 12 }, { row: 59, below: 24 },
+  { row: 60, below: 24 }, { row: 61, below: 36 }, { row: 62, below: 36 }, { row: 63, below: 48 }, { row: 64, below: 0 }, { row: 65, below: 0 },
+  { row: 66, below: 0 }, { row: 67, below: 0 }, { row: 68, below: 0 }, { row: 69, below: 0 }, { row: 70, below: 0 }, { row: 71, below: 0 },
+  { row: 72, below: 0 }, { row: 73, below: 0 }, { row: 74, below: 0 }, { row: 75, below: 0 }, { row: 76, below: 0 }, { row: 77, below: 0 },
+  { row: 78, below: 0 }, { row: 79, below: -12 }, { row: 80, below: -24 }, { row: 81, below: -24 }, { row: 82, below: 0 }, { row: 83, below: 0 },
+  { row: 84, below: 0 }, { row: 85, below: -12 }, { row: 86, below: -24 }, { row: 87, below: -24 }, { row: 88, below: 6 }, { row: 89, below: 15 },
+  { row: 90, below: 24 }, { row: 91, below: 24 }, { row: 92, below: 24 }, { row: 93, below: 24 }, { row: 94, below: 6 }, { row: 95, below: 15 },
+  { row: 96, below: 24 }, { row: 97, below: 24 }, { row: 98, below: 24 }, { row: 99, below: 24 }, { row: 100, below: 0 }, { row: 101, below: -12 },
+  { row: 102, below: -12 }, { row: 103, below: -24 }, { row: 104, below: -24 }, { row: 105, below: -36 }, { row: 106, below: -36 }, { row: 107, below: -48 },
+  { row: 108, below: 0 }, { row: 109, below: -12 }, { row: 110, below: -12 }, { row: 111, below: -24 }, { row: 112, below: -24 }, { row: 113, below: -36 },
+  { row: 114, below: -36 }, { row: 115, below: -48 }, { row: 116, below: 0 }, { row: 117, below: 12 }, { row: 118, below: 12 }, { row: 119, below: 24 },
+  { row: 120, below: 24 }, { row: 121, below: 36 }, { row: 122, below: 36 }, { row: 123, below: 48 }, { row: 124, below: 0 }, { row: 125, below: 12 },
+  { row: 126, below: 12 }, { row: 127, below: 24 }, { row: 128, below: 24 }, { row: 129, below: 36 }, { row: 130, below: 36 }, { row: 131, below: 48 },
+  { row: 132, below: 0 }, { row: 133, below: 0 }, { row: 134, below: 0 }, { row: 135, below: 0 }, { row: 136, below: 0 }, { row: 137, below: 0 },
+  { row: 138, below: 0 }, { row: 139, below: 0 }, { row: 140, below: 0 }, { row: 141, below: 0 }, { row: 142, below: 0 }, { row: 143, below: 0 },
+  { row: 144, below: 0 }, { row: 145, below: 0 }, { row: 146, below: 0 }, { row: 147, below: 0 }, { row: 148, below: 0 }, { row: 149, below: 0 },
+  { row: 150, below: 0 }, { row: 151, below: 0 }, { row: 152, below: 0 }, { row: 153, below: 0 }, { row: 154, below: 0 }, { row: 155, below: 0 },
+  { row: 156, below: 0 }, { row: 157, below: 0 }, { row: 158, below: 0 }, { row: 159, below: 0 }, { row: 160, below: 0 }, { row: 161, below: 0 },
+  { row: 162, below: 0 }, { row: 163, below: 0 }, { row: 164, below: 0 }, { row: 165, below: 0 }, { row: 166, below: 0 }, { row: 167, below: 0 },
+  { row: 168, below: 0 }, { row: 169, below: 0 }, { row: 170, below: 0 }, { row: 171, below: 0 }, { row: 172, below: 0 }, { row: 173, below: 0 },
+  { row: 174, below: 0 }, { row: 175, below: 0 }, { row: 176, below: 0 }, { row: 177, below: 0 }, { row: 178, below: 0 }, { row: 179, below: 0 },
+  { row: 180, below: 0 }, { row: 181, below: 0 }, { row: 182, below: 0 }, { row: 183, below: 0 }, { row: 184, below: 0 }, { row: 185, below: 0 },
+  { row: 186, below: 0 }, { row: 187, below: 0 }, { row: 188, below: 0 }, { row: 189, below: 0 }, { row: 190, below: 0 }, { row: 191, below: 0 },
+  { row: 192, below: 0 }, { row: 193, below: 0 }, { row: 194, below: 0 }, { row: 195, below: 0 }, { row: 196, below: 0 }, { row: 197, below: 0 },
+  { row: 198, below: 0 }, { row: 199, below: 0 }, { row: 197, below: 0 }, { row: 196, below: 0 }, { row: 199, below: 0 }, { row: 198, below: 0 },
+  { row: 200, below: 0 }, { row: 201, below: 0 }, { row: 202, below: 0 }, { row: 203, below: 0 }, { row: 204, below: 0 }, { row: 205, below: 0 },
+  { row: 206, below: 0 }, { row: 207, below: 0 }, { row: 208, below: 0 }, { row: 209, below: 0 }, { row: 210, below: 18 }, { row: 211, below: 24 },
+  { row: 212, below: 33 }, { row: 213, below: 0 }, { row: 214, below: 0 }, { row: 215, below: 0 }, { row: 216, below: 0 }, { row: 217, below: 0 },
+  { row: 218, below: 0 }, { row: 219, below: 0 }, { row: 220, below: 0 }, { row: 221, below: 0 }, { row: 222, below: 0 }, { row: 223, below: 0 },
+  { row: 224, below: 0 }, { row: 225, below: 0 }, { row: 226, below: 0 }, { row: 227, below: 18 }, { row: 228, below: 24 }, { row: 229, below: 33 },
+  { row: 230, below: 0 }, { row: 231, below: 0 }, { row: 232, below: 0 }, { row: 233, below: 0 }, { row: 234, below: 0 }, { row: 235, below: 0 },
+  { row: 236, below: 0 }, { row: 237, below: 0 }, { row: 238, below: 0 }, { row: 239, below: 0 }, { row: 240, below: 0 }, { row: 241, below: 0 },
+  { row: 242, below: 0 }, { row: 243, below: 0 }, { row: 244, below: 0 }, { row: 245, below: -6 }, { row: 246, below: 0 }, { row: 247, below: 0 },
+  { row: 248, below: 0 }, { row: 249, below: 0 }, { row: 250, below: 0 }, { row: 251, below: 0 }, { row: 252, below: -6 }, { row: 253, below: -6 },
+  { row: 254, below: -6 }, { row: 255, below: -6 }, { row: 256, below: -6 }, { row: 257, below: -6 }, { row: 258, below: -6 }, { row: 259, below: -6 },
+  { row: 260, below: -6 }, { row: 261, below: -6 }, { row: 262, below: -6 }, { row: 263, below: 0 }, { row: 264, below: 0 }, { row: 265, below: -6 },
+  { row: 266, below: -6 }, { row: 267, below: -6 }, { row: 268, below: -6 }, { row: 269, below: -6 }, { row: 270, below: -6 }, { row: 271, below: -6 },
+  { row: 272, below: -6 }, { row: 273, below: -6 }, { row: 274, below: -6 }, { row: 275, below: 0 }, { row: 276, below: 0 }, { row: 277, below: -6 },
+  { row: 278, below: -6 }, { row: 279, below: -6 }, { row: 280, below: -6 }, { row: 281, below: -6 }, { row: 282, below: -6 }, { row: 283, below: -6 },
+  { row: 284, below: -6 }, { row: 285, below: -6 }, { row: 286, below: -6 }, { row: 287, below: -6 }, { row: 288, below: -6 }, { row: 289, below: -6 },
+  { row: 290, below: -6 }, { row: 291, below: -6 }, { row: 292, below: -6 }, { row: 293, below: -6 }, { row: 294, below: -6 }, { row: 295, below: -6 },
+  { row: 296, below: -6 }, { row: 297, below: -6 }, { row: 298, below: -6 }, { row: 299, below: -6 }, { row: 300, below: -6 }, { row: 277, below: -6 },
+  { row: 278, below: -6 }, { row: 279, below: -6 }, { row: 280, below: -6 }, { row: 281, below: -6 }, { row: 282, below: -6 }, { row: 283, below: -6 },
+  { row: 284, below: -6 }, { row: 285, below: -6 }, { row: 286, below: -6 }, { row: 287, below: -6 }, { row: 288, below: -6 }, { row: 289, below: -6 },
+  { row: 290, below: -6 }, { row: 291, below: -6 }, { row: 292, below: -6 }, { row: 301, below: 0 }, { row: 302, below: 0 }, { row: 303, below: 0 },
+  { row: 304, below: 9 }, { row: 305, below: 18 }, { row: 306, below: 27 }, { row: 307, below: 0 }, { row: 308, below: 0 }, { row: 309, below: 0 },
+  { row: 310, below: 9 }, { row: 311, below: 18 }, { row: 312, below: 27 }, { row: 313, below: 0 }, { row: 314, below: 12 }, { row: 317, below: 0 },
+  { row: 318, below: 0 }, { row: 319, below: 0 }, { row: 319, below: 0 }, { row: 320, below: 0 }, { row: 321, below: 0 }, { row: 322, below: 0 },
+  { row: 323, below: 0 }, { row: 324, below: 0 }, { row: 325, below: 0 }, { row: 326, below: 0 }, { row: 327, below: 0 }, { row: 328, below: 0 },
+  { row: 329, below: 0 }, { row: 330, below: 0 }, { row: 331, below: 0 }, { row: 332, below: 0 }, { row: 333, below: 0 }, { row: 334, below: 0 },
+  { row: 335, below: -6 }, { row: 336, below: -6 }, { row: 337, below: 0 }, { row: 338, below: -12 }, { row: 339, below: -24 }, { row: 340, below: -36 },
+  { row: 341, below: -18 }, { row: 342, below: -15 }, { row: 343, below: -15 }, { row: 344, below: -6 }, { row: 345, below: -6 }, { row: 346, below: 0 },
+  { row: 347, below: 0 }, { row: 348, below: 0 }, { row: 349, below: 0 }, { row: 350, below: 0 }, { row: 351, below: 0 }, { row: 352, below: 0 },
+  { row: 353, below: -6 }, { row: 354, below: -6 }, { row: 355, below: -12 }, { row: 356, below: -12 }, { row: 357, below: -18 }, { row: 358, below: 0 },
+  { row: 359, below: 0 }, { row: 360, below: 0 }, { row: 361, below: 0 }, { row: 362, below: 0 }, { row: 363, below: 0 }, { row: 364, below: 0 },
+  { row: 365, below: 0 }, { row: 366, below: 0 }, { row: 367, below: 0 }, { row: 368, below: 0 }, { row: 369, below: 0 }, { row: 370, below: 0 },
+  { row: 371, below: 0 }, { row: 372, below: 0 }, { row: 373, below: 0 }, { row: 374, below: 0 }, { row: 375, below: 0 }, { row: 376, below: 0 },
+  { row: 377, below: 0 }, { row: 378, below: 0 }, { row: 379, below: 0 }, { row: 380, below: 0 }, { row: 381, below: 0 }, { row: 382, below: 0 },
+  { row: 383, below: 0 }, { row: 384, below: 0 }, { row: 385, below: 0 }, { row: 386, below: 0 }, { row: 387, below: 0 }, { row: 388, below: 0 },
+  { row: 389, below: 0 }, { row: 390, below: 0 }, { row: 391, below: 0 }, { row: 392, below: 0 }, { row: 393, below: 0 }, { row: 394, below: 0 },
+  { row: 395, below: 0 }, { row: 396, below: 0 }, { row: 397, below: 0 }, { row: 398, below: 0 }, { row: 399, below: 0 }, { row: 400, below: 0 },
+  { row: 401, below: 0 }, { row: 402, below: 0 }, { row: 403, below: 0 }, { row: 404, below: 0 }, { row: 405, below: 0 }, { row: 406, below: 0 },
+  { row: 407, below: 0 }, { row: 408, below: 0 }, { row: 409, below: 0 }, { row: 410, below: -24 }, { row: 411, below: -12 }, { row: 412, below: 0 },
+  { row: 413, below: 0 }, { row: 414, below: 0 }, { row: 415, below: 0 }, { row: 416, below: 0 }, { row: 417, below: 0 }, { row: 418, below: 0 },
+  { row: 419, below: 0 }, { row: 420, below: 0 }, { row: 421, below: 0 }, { row: 422, below: 0 }
+]
+
+// The domino the ant carries: for each of the 22 animations from "carry
+// left" on, and each of up to 16 pictures of it, how far from the ant
+// the domino is drawn and which of the domino's pictures (a state, or
+// 57 and more for a way it is carried in): at `(animation - 10) * 16 +
+// picture`.
+table carried_at { x: i16, y: i16, picture: i16 } = [
+  { x: -18, y: -6, picture: 57 }, { x: -20, y: -6, picture: 57 }, { x: -28, y: -6, picture: 57 }, { x: -35, y: -6, picture: 57 },
+  { x: -40, y: -6, picture: 57 }, { x: -50, y: -6, picture: 57 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 13, y: -6, picture: 58 }, { x: 15, y: -6, picture: 58 }, { x: 23, y: -6, picture: 58 }, { x: 30, y: -6, picture: 58 },
+  { x: 35, y: -6, picture: 58 }, { x: 45, y: -6, picture: 58 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -10, y: -6, picture: 57 }, { x: -15, y: -12, picture: 57 }, { x: -18, y: -18, picture: 57 }, { x: -28, y: -12, picture: 57 },
+  { x: -40, y: -9, picture: 57 }, { x: -50, y: -6, picture: 57 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 5, y: -6, picture: 58 }, { x: 10, y: -12, picture: 58 }, { x: 13, y: -18, picture: 58 }, { x: 23, y: -12, picture: 58 },
+  { x: 35, y: -9, picture: 58 }, { x: 45, y: -6, picture: 58 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -30, y: -6, picture: 57 }, { x: -40, y: -9, picture: 57 }, { x: -48, y: 0, picture: 57 }, { x: -48, y: 3, picture: 57 },
+  { x: -48, y: 3, picture: 57 }, { x: -50, y: 0, picture: 57 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 23, y: -6, picture: 58 }, { x: 33, y: -9, picture: 58 }, { x: 40, y: 0, picture: 58 }, { x: 40, y: 3, picture: 58 },
+  { x: 40, y: 3, picture: 58 }, { x: 43, y: 0, picture: 58 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -20, y: -6, picture: 59 }, { x: -20, y: -3, picture: 59 }, { x: -18, y: -6, picture: 59 }, { x: -18, y: -3, picture: 59 },
+  { x: -20, y: -6, picture: 59 }, { x: -20, y: -3, picture: 59 }, { x: -18, y: -6, picture: 59 }, { x: -18, y: -3, picture: 59 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -20, y: -6, picture: 59 }, { x: -20, y: -3, picture: 59 }, { x: -18, y: -6, picture: 59 }, { x: -18, y: -3, picture: 59 },
+  { x: -20, y: -6, picture: 59 }, { x: -20, y: -3, picture: 59 }, { x: -18, y: -6, picture: 59 }, { x: -18, y: -3, picture: 59 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -18, y: -3, picture: 59 }, { x: -18, y: -6, picture: 59 }, { x: -20, y: -3, picture: 59 }, { x: -20, y: -6, picture: 59 },
+  { x: -18, y: -3, picture: 59 }, { x: -18, y: -6, picture: 59 }, { x: -20, y: -3, picture: 59 }, { x: -20, y: -6, picture: 59 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -18, y: -3, picture: 59 }, { x: -18, y: -6, picture: 59 }, { x: -20, y: -3, picture: 59 }, { x: -20, y: -6, picture: 59 },
+  { x: -18, y: -3, picture: 59 }, { x: -18, y: -6, picture: 59 }, { x: -20, y: -3, picture: 59 }, { x: -20, y: -6, picture: 59 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -13, y: -6, picture: 57 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 13, y: -6, picture: 58 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: -6, picture: 8 }, { x: 0, y: -6, picture: 8 }, { x: 0, y: -6, picture: 8 }, { x: -3, y: -3, picture: 8 },
+  { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 },
+  { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 }, { x: -5, y: -3, picture: 10 },
+  { x: 0, y: -6, picture: 57 }, { x: -3, y: -6, picture: 57 }, { x: -10, y: -6, picture: 57 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: -6, picture: 8 }, { x: 0, y: -6, picture: 8 }, { x: 0, y: -6, picture: 8 }, { x: -3, y: -3, picture: 8 },
+  { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 },
+  { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 }, { x: -5, y: 0, picture: 8 }, { x: -5, y: -3, picture: 6 },
+  { x: -8, y: -6, picture: 58 }, { x: -5, y: -6, picture: 58 }, { x: -3, y: -6, picture: 58 }, { x: 0, y: 0, picture: 0 },
+  { x: -18, y: -6, picture: 57 }, { x: -20, y: -6, picture: 57 }, { x: -28, y: -6, picture: 57 }, { x: -35, y: -6, picture: 57 },
+  { x: -43, y: -6, picture: 57 }, { x: -43, y: 0, picture: 57 }, { x: -45, y: 0, picture: 10 }, { x: -45, y: 0, picture: 8 },
+  { x: -45, y: 0, picture: 8 }, { x: -45, y: 0, picture: 8 }, { x: -45, y: 0, picture: 8 }, { x: -45, y: 0, picture: 8 },
+  { x: -43, y: -3, picture: 8 }, { x: -40, y: -6, picture: 8 }, { x: -40, y: -6, picture: 8 }, { x: -40, y: -6, picture: 8 },
+  { x: 13, y: -6, picture: 58 }, { x: 15, y: -6, picture: 58 }, { x: 25, y: -3, picture: 58 }, { x: 28, y: -6, picture: 58 },
+  { x: 35, y: -6, picture: 58 }, { x: 35, y: 0, picture: 58 }, { x: 35, y: 0, picture: 6 }, { x: 35, y: 0, picture: 8 },
+  { x: 35, y: 0, picture: 8 }, { x: 35, y: 0, picture: 8 }, { x: 35, y: 0, picture: 8 }, { x: 35, y: 0, picture: 8 },
+  { x: 38, y: -3, picture: 8 }, { x: 40, y: -6, picture: 8 }, { x: 40, y: -6, picture: 8 }, { x: 40, y: -6, picture: 8 },
+  { x: 0, y: -6, picture: 60 }, { x: 0, y: -6, picture: 61 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -8, y: -6, picture: 62 }, { x: -8, y: -6, picture: 63 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: -6, picture: 61 }, { x: 0, y: -6, picture: 60 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -8, y: -6, picture: 63 }, { x: -8, y: -6, picture: 62 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 40, y: -9, picture: 8 }, { x: 40, y: -9, picture: 8 }, { x: 40, y: -9, picture: 8 }, { x: 40, y: -9, picture: 8 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: -18, y: -6, picture: 57 }, { x: -20, y: -6, picture: 57 }, { x: -28, y: -6, picture: 57 }, { x: -35, y: -6, picture: 57 },
+  { x: 0, y: -9, picture: 8 }, { x: 0, y: -9, picture: 8 }, { x: 0, y: -9, picture: 8 }, { x: 0, y: -9, picture: 8 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 },
+  { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }, { x: 0, y: 0, picture: 0 }
+]

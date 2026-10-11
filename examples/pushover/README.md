@@ -25,9 +25,42 @@ and what moves them as systems. It is being built; what is here so far:
   what is around it, animation by animation; and a tick of the whole
   level (`tick`: the doors, the ant, the dominoes, what it came to).
 
-Not here yet: anything seen or heard (the level drawn, the sounds and
-the music), the menus, the choice of a level, and the second version of
-the level files (all of the game's own levels are of the first).
+- `pictures.ent`, `draw.ent`: a level drawn. The game's pictures are
+  sheets (every domino in every state, the ant's animations, a theme's
+  blocks), and `picture_level` lists which part of which sheet goes
+  where, in the order they are drawn in (`Blits`): the layers of the
+  background, the doors and the platforms, the dominoes, the ladders and
+  the ant with the domino it carries. `pictures.ent` is the game's own
+  tables of where each picture is, written by `reference/make_tables.py`.
+  A theme's list of blocks is read from its file.
+- `pushover.ent`: the game in a window: the original levels one after
+  another, the keys, 18 ticks a second, the sounds and each theme's
+  music.
+
+Not here yet: the menus, the choice of a set of levels and of a level
+(and with it the list of what was solved), the help and the hints, the
+game's own font, the light that the game lays over a background, and the
+second version of the level files (all of the game's own levels are of
+the first).
+
+## Playing it
+
+    examples/pushover/reference/build.sh        # fetches the game
+    examples/pushover/reference/pictures.sh     # draws the dominoes
+    cd build/pushover/upstream
+    ent run ../../../examples/pushover/pushover.ent
+
+The game does not keep the pictures of its dominoes: they are drawn by
+POV-Ray from a scene it has, when it is built. `pictures.sh` does that
+(it says how to get POV-Ray without installing it for the machine). The
+program is started where the game is, since it reads the game's `data`,
+`themes` and `levels`.
+
+The arrow keys walk and climb. The space bar takes the domino the ant
+stands in front of, and puts it down again. With up held the ant goes in
+among the dominoes, and there space with left or right pushes. R starts
+the level again, N and P go to the next level and the one before, Esc
+leaves.
 
 ## Checked against the game
 
@@ -44,6 +77,11 @@ tick.
     examples/pushover/reference/build.sh
     examples/pushover/check/trace.sh            # all of them
     examples/pushover/check/trace.sh 010_a      # one, saying what differs
+
+What is drawn is checked by eye, and without a window:
+`check/frame.sh finish/original/010_a 215 out.png` plays so many ticks
+of a recording and puts the picture together of what `picture_level`
+lists.
 
 ## Licence
 
