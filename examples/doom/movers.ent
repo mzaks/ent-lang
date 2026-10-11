@@ -250,7 +250,8 @@ table triggers {
 // once for each time it goes down). After `think_player`.
 system use_lines() {
   let down = Pl[0].buttons & BT_USE != 0 && Pl[0].buttons & BT_SPECIAL == 0
-  if down && !Pl[0].usedown {
+  // (Dead, the player uses nothing.)
+  if down && !Pl[0].usedown && !Pl[0].dead {
     Rnd = [{ play: Random.play, other: Random.other }; 1]
     let used = use_line(Lines, Sectors, Bytes, Bmap, Tm, Intercepts, Mobj,
                         Spawned.player, Sounds, Rnd)
@@ -261,7 +262,7 @@ system use_lines() {
                      langle: 0 }
     }
   }
-  Pl[0].usedown = down
+  if !Pl[0].dead { Pl[0].usedown = down }
 }
 
 // The lines that were set off do what they do, in their order

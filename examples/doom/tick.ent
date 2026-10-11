@@ -50,7 +50,8 @@ system think_things(late: bool) {
   for e, m: mut Mobj in turn by m.id
       where !m.gone && (m.id > Spawned.links) == late &&
             (m.tics != -1 || m.momx != 0 || m.momy != 0 || m.momz != 0 ||
-             m.z != m.floorz) {
+             m.z != m.floorz ||
+             (Level.skill == 4 && m.flags & MF_COUNTKILL != 0)) {
     Touched = []
     Rnd = [{ play: Random.play, other: Random.other }; 1]
     // (What moves a sector and was made before this thing, first.)
@@ -79,7 +80,7 @@ system think_things(late: bool) {
     Random.play = Rnd[0].play
     Random.other = Rnd[0].other
   }
-  for e, m: Mobj where m.gone { e.destroy() }
+  for e, m: Mobj where m.gone && !m.kept { e.destroy() }
 }
 
 // What moves sectors and has not had its tic among the things has it
@@ -92,7 +93,7 @@ system run_movers() {
                 0x7fffffff)
   Random.play = Rnd[0].play
   Random.other = Rnd[0].other
-  for e, m: Mobj where m.gone { e.destroy() }
+  for e, m: Mobj where m.gone && !m.kept { e.destroy() }
 }
 
 // The level is left, by a way out or because the player, dead, wants it

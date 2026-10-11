@@ -8,7 +8,9 @@
 # what the trace's hash leaves out as well (flags, the way a monster
 # walks, how fast a thing moves, its floor and ceiling). TICS=n: no
 # more than n tics of the port. The sounds that are heard are compared
-# as well.
+# as well. SKILL=n: the demo as if it were played in that skill (0 to 4;
+# its keys are then no good for the level, but they are the same for
+# both), as the fifth is found in none of the fetched ones.
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 doom=$root/build/doom
@@ -23,10 +25,13 @@ lines=thing
 for name in $names; do
   mkdir -p "$run/$name"
   cp "$doom/demos/$name.lmp" "$run/$name/$name.lmp"
-  python3 -I - "$doom/wad/doom1.wad" "$run/$name/$name.lmp" "$run/$name/doom1.wad" <<'END'
+  python3 -I - "$doom/wad/doom1.wad" "$run/$name/$name.lmp" "$run/$name/doom1.wad" "$SKILL" <<'END'
 import struct, sys
 wad = bytearray(open(sys.argv[1], "rb").read())
-demo = open(sys.argv[2], "rb").read()
+demo = bytearray(open(sys.argv[2], "rb").read())
+if sys.argv[4]:
+    demo[1] = int(sys.argv[4])
+    open(sys.argv[2], "wb").write(demo)
 count, table = struct.unpack_from("<ii", wad, 4)
 for lump in range(count):
     entry = table + lump * 16

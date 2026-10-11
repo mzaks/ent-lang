@@ -319,6 +319,25 @@ proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
                powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds, things: mut Mobj, player: entity, me:
                entity, first: i32)
 
+// In the fifth skill (G_InitNew) the pink demon's states of running,
+// biting and being hurt last half as long, and three kinds of shots fly
+// faster.
+fn state_tics(state: i32, skill: i32) -> i32 {
+  if skill == 4 && state >= S_SARG_RUN1 && state <= S_SARG_PAIN2 {
+    states[state].tics >> 1
+  } else {
+    states[state].tics
+  }
+}
+fn missile_speed(type: i32, skill: i32) -> i32 {
+  if skill == 4 &&
+     (type == MT_BRUISERSHOT || type == MT_HEADSHOT || type == MT_TROOPSHOT) {
+    20 * FRACUNIT
+  } else {
+    mobjinfo[type].speed
+  }
+}
+
 // A thing is made (P_SpawnMobj): of that kind, there, in the first state
 // of its kind. It comes last of the things, and has its turn in the tic
 // it was made in.
@@ -351,12 +370,13 @@ proc spawn_mobj(things: mut Mobj, sectors: Sectors, subsectors: Subsectors,
       lastlook: lastlook, subsector: subsector, floorz: floorz,
       ceilingz: ceilingz, linked: tm[0].links, id: tm[0].links, momx: 0,
       momy: 0, momz: 0, movedir: DI_EAST, movecount: 0, threshold: 0,
-      target: none, gone: false,
+      target: none, gone: false, kept: false,
       block: if mobjinfo[type].flags & MF_NOBLOCKMAP != 0 {
         -1
       } else {
         block_at(bmap, x, y)
-      }
+      },
+      spawnx: 0, spawny: 0, spawnangle: 0, spawnoptions: 0
     }
   }
 }
@@ -900,7 +920,7 @@ proc spawn_missile(lines: mut Lines, sectors: mut Sectors, subsectors:
   if things[dest].flags & MF_SHADOW != 0 { an += (sub_random(rnd) << 20) as u32 }
   things[th].angle = an
   let fine = (an >> ANGLETOFINESHIFT) as i32
-  let speed = mobjinfo[type].speed
+  let speed = missile_speed(type, env[0].skill)
   things[th].momx = fixed_mul(speed, finecosine(fine))
   things[th].momy = fixed_mul(speed, finesine[fine])
   let dist = max(aprox_distance(things[dest].x - things[source].x,
@@ -1511,7 +1531,8 @@ proc a_chase(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
   } else if things[me].flags & MF_JUSTATTACKED != 0 {
     // (Not twice in a row.)
     things[me].flags &= ~MF_JUSTATTACKED
-    new_chase_dir(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me)
+    // (In the fifth skill it does not turn another way first.)
+    if env[0].skill != 4 { new_chase_dir(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me) }
   } else {
     // Near enough to hit.
     if mobjinfo[type].meleestate != 0 &&
@@ -1522,7 +1543,9 @@ proc a_chase(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
     }
     // Or to shoot, which it does the sooner the nearer it is
     // (P_CheckMissileRange).
-    if next < 0 && mobjinfo[type].missilestate != 0 && things[me].movecount == 0 {
+    // (In the fifth skill without walking its steps out first.)
+    if next < 0 && mobjinfo[type].missilestate != 0 &&
+       (things[me].movecount == 0 || env[0].skill == 4) {
       var shoots = false
       if sees(lines, sectors, subsectors, segs, nodes, bytes, tm, sight, env,
               things, me, target) {
@@ -1589,7 +1612,7 @@ proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
       going = false
     } else {
       things[me].state = state
-      things[me].tics = states[state].tics
+      things[me].tics = state_tics(state, env[0].skill)
       things[me].sprite = states[state].sprite
       things[me].frame = states[state].frame
       let action = states[state].action
@@ -1691,6 +1714,67 @@ proc set_state(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
   }
 }
 
+// Whether a thing is still meant by another that is there, as the one
+// it is after or that shot it, or by the player as the one that hurt it.
+fn held(things: Mobj, inv: Inv, who: entity) -> bool {
+  var found = inv[0].attacker == things[who].id
+  for o, other in things where !other.gone && other.target == who { found = true }
+  found
+}
+
+// A dead monster is alive again where the level put it
+// (P_NightmareRespawn), if nothing is in the way there: a flash where it
+// lay and one where it comes back, and what is left of it is no more.
+proc respawn(lines: mut Lines, sectors: Sectors, subsectors: Subsectors,
+             nodes: Nodes, bytes: Bytes, bmap: Bmap, near: mut Near,
+             order: mut Nearorder, tm: mut Tm, spechit: mut Spechit,
+             touched: mut Touched, rnd: mut Rnd, inv: mut Inv, env: Env,
+             sounds: mut Sounds, things: mut Mobj, player: entity, me: entity) {
+  let x = things[me].spawnx << FRACBITS
+  let y = things[me].spawny << FRACBITS
+  let type = things[me].type
+  gather_near_at(things, me, x, y, bmap, near, order)
+  if check_position(lines, sectors, subsectors, nodes, bytes, bmap, near, order,
+                    tm, spechit, touched, x, y, things[me].z, things[me].radius,
+                    things[me].flags, false, things[me].height, -1, 0) {
+    let here = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env,
+                          things[me].x, things[me].y,
+                          sectors[subsectors[things[me].subsector].sector].floorheight,
+                          MT_TFOG)
+    sound_of(things, player, env, sounds, rnd, here, SFX_TELEPT)
+    let sector = subsectors[point_in_subsector(nodes, x, y)].sector
+    let there = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env,
+                           x, y, sectors[sector].floorheight, MT_TFOG)
+    sound_of(things, player, env, sounds, rnd, there, SFX_TELEPT)
+    let again = spawn_mobj(things, sectors, subsectors, nodes, bmap, tm, rnd, env,
+                           x, y,
+                           if mobjinfo[type].flags & MF_SPAWNCEILING != 0 {
+                             ONCEILINGZ
+                           } else {
+                             ONFLOORZ
+                           }, type)
+    things[again].spawnx = things[me].spawnx
+    things[again].spawny = things[me].spawny
+    things[again].spawnangle = things[me].spawnangle
+    things[again].spawnoptions = things[me].spawnoptions
+    things[again].angle = ANG45 * ((things[me].spawnangle / 45) as u32)
+    if things[me].spawnoptions & MTF_AMBUSH != 0 {
+      things[again].flags |= MF_AMBUSH
+    }
+    things[again].reactiontime = 18
+    // What is left of it is no more. But the reference goes on reading
+    // what it frees: a barrel still knows as who set it off a monster
+    // that has come back as another since, and the player it kills
+    // turns to where that one lay. So one that something still means
+    // is kept, gone for all else, for as long as it is meant.
+    for o, other in things where other.gone && other.kept {
+      if !held(things, inv, o) { things[o].kept = false }
+    }
+    things[me].gone = true
+    things[me].kept = held(things, inv, me)
+  }
+}
+
 // A tic of a thing (P_MobjThinker): it moves as fast as it goes, comes
 // to the floor, and its state lasts a tic less.
 proc thing_tic(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
@@ -1710,6 +1794,16 @@ proc thing_tic(lines: mut Lines, sectors: mut Sectors, subsectors: Subsectors,
     things[me].tics -= 1
     if things[me].tics == 0 {
       set_state(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, me, states[things[me].state].nextstate)
+    }
+  } else if !things[me].gone && env[0].skill == 4 &&
+            things[me].flags & MF_COUNTKILL != 0 {
+    // In the fifth skill a monster that lies dead comes back after
+    // twelve seconds or more, by a draw now and then.
+    things[me].movecount += 1
+    if things[me].movecount >= 12 * 35 && env[0].leveltime & 31 == 0 {
+      if p_random(rnd) <= 4 {
+        respawn(lines, sectors, subsectors, nodes, bytes, bmap, near, order, tm, spechit, touched, rnd, inv, env, sounds, things, player, me)
+      }
     }
   }
 }

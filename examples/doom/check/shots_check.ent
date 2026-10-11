@@ -157,6 +157,7 @@ schedule tic() run_if !Wi.on && !Fin.on {
   run_lights()
   think_things(true)
   run_movers()
+  drop_weapon()
   update_specials()
   update_buttons()
   tick_status()

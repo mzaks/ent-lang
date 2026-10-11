@@ -31,16 +31,20 @@ import render
 // How fast it moves; which of eight ways it walks (`movedir`) and for how
 // many steps more; the thing it is after (`target`) and for how long it will not look for another; and `gone`, when
 // it is no more but its entity has yet to go, which it does when the tic
-// is over; `block`, the square of the blockmap it was put in (-1: none).
+// is over (unless `kept`: see `respawn`); `block`, the square of the blockmap it was put in (-1: none).
 // `id` is the number it was made with, one more for each thing:
 // they take their turns in that order (the order of P_RunThinkers).
+// `spawnx`, `spawny`, `spawnangle`, `spawnoptions`: where and how the
+// level put it (in map units and degrees), for a monster that comes back
+// there in the fifth skill.
 component Mobj {
   x: i32, y: i32, z: i32, angle: u32, type: i32, state: i32, tics: i32,
   sprite: i32, frame: i32, flags: i32, health: i32, radius: i32,
   height: i32, reactiontime: i32, lastlook: i32, subsector: i32,
   floorz: i32, ceilingz: i32, linked: i32, id: i32, momx: i32, momy: i32,
   momz: i32, movedir: i32, movecount: i32, threshold: i32, target: entity,
-  gone: bool, block: i32
+  gone: bool, kept: bool, block: i32, spawnx: i32, spawny: i32, spawnangle: i32,
+  spawnoptions: i32
 } capacity 2048
 
 // The eight ways a thing walks, and none (dirtype_t).
@@ -157,8 +161,10 @@ system spawn_things() {
           subsector: subsector, floorz: floorz, ceilingz: ceilingz,
           linked: links, id: links, momx: 0, momy: 0, momz: 0,
           movedir: DI_EAST, movecount: 0, threshold: 0, target: none,
-          gone: false,
-          block: if flags & MF_NOBLOCKMAP != 0 { -1 } else { block_at(Bmap, x, y) }
+          gone: false, kept: false,
+          block: if flags & MF_NOBLOCKMAP != 0 { -1 } else { block_at(Bmap, x, y) },
+          spawnx: Mapthings[i].x, spawny: Mapthings[i].y,
+          spawnangle: Mapthings[i].angle, spawnoptions: options
         }
       }
       if player { Spawned.player = made }

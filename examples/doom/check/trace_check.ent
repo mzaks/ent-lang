@@ -75,7 +75,7 @@ system say_sounds() {
 system trace() {
   Count = 0
   Hash = 0
-  for m: Mobj {
+  for m: Mobj where !m.gone {
     Count += 1
     Hash += mixed(mixed(mixed(mixed(mixed(mixed(mixed(mixed(
         2166136261, m.type), m.x), m.y), m.z), m.angle as i32), m.health),
@@ -86,12 +86,12 @@ system trace() {
   }
   // (With `Dump` a tic: every thing of that tic as well, a line each, as
   // the reference writes them with DOOM_DUMP, for finding what differs.)
-  for m: Mobj by m.id where Clock.leveltime == Dump {
+  for m: Mobj by m.id where Clock.leveltime == Dump && !m.gone {
     put("thing {m.type} {m.x} {m.y} {m.z} {m.angle} {m.health} {m.state} {m.tics}")
   }
   // (With `Dumpall`, what the hash leaves out too, as DOOM_DUMPALL has
   // the reference write it.)
-  for m: Mobj by m.id where Clock.leveltime == Dump && Dumpall {
+  for m: Mobj by m.id where Clock.leveltime == Dump && Dumpall && !m.gone {
     // (In two lines, which check/demos.sh joins: one text of all
     // eighteen takes the compiler for ever.)
     put("more {m.type} {m.x} {m.y} {m.z} {m.angle} {m.health} {m.state} {m.tics} {m.flags}")
@@ -131,6 +131,7 @@ schedule tic() run_if !Wi.on {
   run_lights()
   think_things(true)
   run_movers()
+  drop_weapon()
   update_specials()
   update_buttons()
   say_sounds()

@@ -47,11 +47,13 @@ const MAXSTEP = 24 * FRACUNIT
 // What of the player is not its thing, one row: where the eye is and
 // how it bobs, whether the use key was down, and the tic's keys; whether
 // the fire key was down, how many shots in a row, how much lighter a
-// shot makes everything, and whether the player is dead.
+// shot makes everything, whether the player is dead, and whether the
+// weapon was let go of at that (`dropped`).
 buffer Pl {
   viewz: i32, viewheight: i32, deltaviewheight: i32, bob: i32, usedown: bool,
   forwardmove: i32, sidemove: i32, angleturn: i32, buttons: i32,
-  attackdown: bool, refire: i32, extralight: i32, dead: bool
+  attackdown: bool, refire: i32, extralight: i32, dead: bool,
+  dropped: bool
 } capacity 1
 
 // What checking a place leaves behind, one row (the tm.. of p_map.c):
@@ -229,15 +231,14 @@ fn heights_at(lines: Lines, sectors: Sectors, subsectors: Subsectors,
   (floorz, ceilingz)
 }
 
-// The things near enough to one to be in its way, into `Near`, and
+// The things near enough to a place to be in the way of one that is or
+// would be there, into `Near`, and
 // `Nearorder`: their rows in the order the blockmap has them in, square
 // by square, in a square the one put there last first.
-proc gather_near(things: Mobj, me: entity, bmap: Bmap, near: mut Near,
-                 order: mut Nearorder) {
+proc gather_near_at(things: Mobj, me: entity, x: i32, y: i32, bmap: Bmap,
+                    near: mut Near, order: mut Nearorder) {
   near = []
   order = []
-  let x = things[me].x
-  let y = things[me].y
   let xl = (x - NEARREACH - bmap[0].orgx) >> MAPBLOCKSHIFT
   let xh = (x + NEARREACH - bmap[0].orgx) >> MAPBLOCKSHIFT
   let yl = (y - NEARREACH - bmap[0].orgy) >> MAPBLOCKSHIFT
@@ -273,6 +274,11 @@ proc gather_near(things: Mobj, me: entity, bmap: Bmap, near: mut Near,
     }
     order[at].index = i
   }
+}
+// (Near to where it is.)
+proc gather_near(things: Mobj, me: entity, bmap: Bmap, near: mut Near,
+                 order: mut Nearorder) {
+  gather_near_at(things, me, things[me].x, things[me].y, bmap, near, order)
 }
 
 // Whether the player's thing can be at (x, y): no wall and no solid
@@ -647,7 +653,7 @@ system start_player(fresh: bool) {
     // once.)
     deltaviewheight: 0, bob: 0, usedown: usedown, forwardmove: 0, sidemove: 0,
     angleturn: 0, buttons: 0, attackdown: attackdown, refire: 0, extralight: 0,
-    dead: false
+    dead: false, dropped: false
   }; 1]
   Tm = [{
     floorz: 0, ceilingz: 0, dropoffz: 0, ceilingline: -1, validcount: 1,

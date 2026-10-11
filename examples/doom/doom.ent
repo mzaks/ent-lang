@@ -2,7 +2,9 @@
 // the demos, and plays the episode from the menu: the arrow keys walk
 // and turn (A and D step aside, Shift runs), Space opens doors and works
 // switches, the left Ctrl key shoots, 1 to 7 choose a weapon, Tab shows
-// the map, - and = make the view smaller and bigger, Esc is the menu
+// the map, - and = make the view smaller and bigger; the mouse turns
+// and walks, its left button shoots, the right one held steps aside;
+// Esc is the menu
 // (F1 to F10 as in the game: F2 saves, F3 loads, F4 how loud, F5 the
 // detail, F6 and F9 save and load in a hurry, F7 ends the game, F8 the
 // messages, F10 leaves).
@@ -62,21 +64,39 @@ world {
   View.blocks = 9
 }
 
-// The keys of this tic as a demo has them (of G_BuildTiccmd): the one
-// row for the player to be moved by. So what is played is a demo of one
-// tic, made anew each tic: the tics before are not kept, and a game can
-// go on as long as it likes.
+// The mouse's buttons pressed twice in a row are the use key
+// (G_BuildTiccmd's dclick): for the middle button and for the right one,
+// whether it was down, how often it went down, and for how many tics it
+// has been as it is.
+transient unique Clicks {
+  down: bool, count: i32, time: i32, down2: bool, count2: i32, time2: i32
+}
+
+// The keys and the mouse of this tic as a demo has them (of
+// G_BuildTiccmd): the one row for the player to be moved by. So what is
+// played is a demo of one tic, made anew each tic: the tics before are
+// not kept, and a game can go on as long as it likes.
+// The mouse turns the player, and moves it forward and back; with the
+// right button (or the left Alt key) held, to the sides, as the arrow
+// keys then do too. Its left button shoots, the middle one walks.
 system read_keys() {
   let run = key_down(340) || key_down(344)
+  let strafe = key_down(342) || Mouse.right
   var forward = 0
   var side = 0
   var turn = 0
+  var buttons = 0
   if Keys.up { forward += if run { 50 } else { 25 } }
   if Keys.down { forward -= if run { 50 } else { 25 } }
   if key_down('D' as i32) { side += if run { 40 } else { 24 } }
   if key_down('A' as i32) { side -= if run { 40 } else { 24 } }
-  if Keys.left { turn += if run { 1280 } else { 640 } }
-  if Keys.right { turn -= if run { 1280 } else { 640 } }
+  if strafe {
+    if Keys.right { side += if run { 40 } else { 24 } }
+    if Keys.left { side -= if run { 40 } else { 24 } }
+  } else {
+    if Keys.left { turn += if run { 1280 } else { 640 } }
+    if Keys.right { turn -= if run { 1280 } else { 640 } }
+  }
   // (The keys 1 to 7 ask for a weapon: the first of them that is down.)
   var change = 0
   for i in 0..7 {
@@ -84,13 +104,59 @@ system read_keys() {
       change = BT_CHANGE | i << BT_WEAPONSHIFT
     }
   }
+  // (The left Ctrl key shoots.)
+  if key_down(341) || Mouse.left { buttons |= BT_ATTACK }
+  if Keys.space {
+    buttons |= BT_USE
+    Clicks.count = 0
+  }
+  if Mouse.middle { forward += if run { 50 } else { 25 } }
+  if Mouse.middle != Clicks.down && Clicks.time > 1 {
+    Clicks.down = Mouse.middle
+    if Clicks.down { Clicks.count += 1 }
+    if Clicks.count == 2 {
+      buttons |= BT_USE
+      Clicks.count = 0
+    } else {
+      Clicks.time = 0
+    }
+  } else {
+    Clicks.time += 1
+    if Clicks.time > 20 {
+      Clicks.count = 0
+      Clicks.down = false
+    }
+  }
+  if Mouse.right != Clicks.down2 && Clicks.time2 > 1 {
+    Clicks.down2 = Mouse.right
+    if Clicks.down2 { Clicks.count2 += 1 }
+    if Clicks.count2 == 2 {
+      buttons |= BT_USE
+      Clicks.count2 = 0
+    } else {
+      Clicks.time2 = 0
+    }
+  } else {
+    Clicks.time2 += 1
+    if Clicks.time2 > 20 {
+      Clicks.count2 = 0
+      Clicks.down2 = false
+    }
+  }
+  // (How far the mouse moved, by how fast the menu has it set.)
+  let mousex = mouse_step(Mouse.dx) * (Menu.mouse + 5) / 10
+  let mousey = (0 - mouse_step(Mouse.dy)) * (Menu.mouse + 5) / 10
+  forward += mousey
+  if strafe {
+    side += mousex * 2
+  } else {
+    turn -= mousex * 8
+  }
   Ticcmds = []
   Demo.tic = 0
   Ticcmds += {
-    forwardmove: forward, sidemove: side, angleturn: turn,
-    // (The left Ctrl key shoots.)
-    buttons: (if Keys.space { BT_USE } else { 0 }) |
-             (if key_down(341) { BT_ATTACK } else { 0 }) | change
+    forwardmove: min(max(forward, -50), 50), sidemove: min(max(side, -50), 50),
+    angleturn: turn, buttons: buttons | change
   }
   let tab = key_down(258)
   if tab && !Shown.tab { Shown.map = !Shown.map }
@@ -231,6 +297,7 @@ schedule frame() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on &&
   run_lights()
   think_things(true)
   run_movers()
+  drop_weapon()
   update_specials()
   update_buttons()
   hear()

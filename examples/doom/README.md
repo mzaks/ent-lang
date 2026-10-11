@@ -69,7 +69,8 @@ them as systems. It is being built; what is here so far:
   shown (`tick_finale`, `draw_finale`).
 - `shell.ent`: what is around the game: the title, the WAD's three
   demos played one after another with a picture between them, and the
-  menus over any of it (m_menu.c): a new game in one of four skills;
+  menus over any of it (m_menu.c): a new game in one of five skills
+  (the fifth asks first);
   the options (ending the game, whether anything is said at the top,
   the view in half as many columns, the view's size, how loud the
   sounds and the music are); saving and loading; what to read; and
@@ -84,10 +85,19 @@ them as systems. It is being built; what is here so far:
   tens: it holds the level as it is, not only what changed in it. It is
   not the original's format, and a file is read only by the program as
   it was built when it wrote it.
-- Not yet: the fifth skill, the mouse (its setting
-  is in the menu and does nothing), making the picture lighter (F11);
-  the monsters and weapons that are not in the first
-  episode. Ceilings that move and the donut are written but were
+- The fifth skill, Nightmare: the monsters wait for nothing, the pink
+  demon and three kinds of shots are faster, there is twice the
+  ammunition, and a dead monster comes back where the level put it
+  after twelve seconds or more (`respawn` in `enemy.ent`; each thing
+  keeps where it was put). No demo here was played in it, so
+  `SKILL=4 check/demos.sh` plays the 56 as if they were: the keys are
+  then no good for the level, but the same for the port and the
+  reference, which agree in every tic and sound. What is left of a
+  monster that came back is kept while something still means it
+  (`kept`): the reference goes on reading what it has freed, and a
+  player killed by a barrel turns to where the one that set it off lay.
+- Not yet: making the picture lighter (F11); the monsters and weapons
+  that are not in the first episode. Ceilings that move and the donut are written but were
   never set off: the shareware levels have no such ceiling, and no demo
   here uses the donut.
 - `doom.ent`: the program. It starts with the title and the demos; any
@@ -95,7 +105,13 @@ them as systems. It is being built; what is here so far:
   line's first letter), and a new game plays the episode from E1M1 with
   the keyboard (the arrow keys, A and D to step aside, Shift to run, the
   space bar to use, the left Ctrl key to shoot, 1 to 7 for a weapon; Tab
-  shows the map; - and = make the view smaller and bigger).
+  shows the map; - and = make the view smaller and bigger) and the
+  mouse as the game has it: it turns the player, and walks it forward
+  and back; the left button shoots, the middle one walks, and with the
+  right one (or the left Alt key) held the mouse and the arrow keys
+  step aside; the middle or the right button twice in a row is the use
+  key. How fast it turns is set in the options. In the menu it moves
+  the skull, the left button chooses and the right one goes back.
   Esc opens and shuts the menu at any time; the game stands still
   while it is open. The F keys are the game's: F1 what to read, F2
   saves, F3 loads, F4 how loud, F5 the detail, F6 saves in a hurry and
@@ -119,6 +135,7 @@ examples/doom/check/trace.sh                         # the demos, tic by tic
 examples/doom/reference/fetch_demos.sh               # 56 more demos: of all nine levels, and through the episode
 examples/doom/check/demos.sh                         # each of them, tic by tic, and its sounds
 DUMP=205 examples/doom/check/demos.sh e1m5_uv_max    # what differs at a tic
+SKILL=4 examples/doom/check/demos.sh                 # the same demos as if played in the fifth skill
 examples/doom/check/shots.sh 3 0,50,100,300,600      # whole screens, and their palettes
 examples/doom/check/shots.sh e1m5_uv_max 1700,3700   # of a fetched demo
 examples/doom/check/shots.sh ep1_nomo 300,330,400    # between two levels too

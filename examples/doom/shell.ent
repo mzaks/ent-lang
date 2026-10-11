@@ -18,9 +18,11 @@
 // A game is saved as the world it is (the module `world`), in one of six
 // places that the player names; the names are in a file of their own.
 //
-// Not here: the fifth skill (its monsters are faster and come back,
-// which is not there), the mouse (its setting is shown and can be
-// changed, to no end), and making the picture lighter (F11).
+// The mouse moves the skull too, as it does in the game: far enough up
+// or down is a line up or down, to a side sets a line lower or higher,
+// the left button chooses and the right one goes back.
+//
+// Not here: making the picture lighter (F11).
 // The menu opens by any key while no game of the player's is going on,
 // and by the Esc key always, which shuts it too; the player's own game
 // stands still while it is open.
@@ -138,6 +140,7 @@ const PROMPT_SAVEDEAD = 11
 const PROMPT_NOSPOT = 12
 const PROMPT_QUICKSAVE = 13
 const PROMPT_QUICKLOAD = 14
+const PROMPT_NIGHTMARE = 15
 table prompt_lines { prompt: i32, line: text[48] } = [
   { prompt: 1, line: "are you sure you want to" },
   { prompt: 1, line: "quit this great game?" },
@@ -193,7 +196,11 @@ table prompt_lines { prompt: i32, line: text[48] } = [
   { prompt: 14, line: "" },
   { prompt: 14, line: "%" },
   { prompt: 14, line: "" },
-  { prompt: 14, line: "press y or n." }
+  { prompt: 14, line: "press y or n." },
+  { prompt: 15, line: "are you sure? this skill level" },
+  { prompt: 15, line: "isn't even remotely fair." },
+  { prompt: 15, line: "" },
+  { prompt: 15, line: "press y or n." }
 ]
 // The sound the game leaves with, by the tic (quitsounds).
 table quit_sounds: i32 = [57, 26, 27, 31, 35, 36, 38, 52]
@@ -202,11 +209,15 @@ table quit_sounds: i32 = [57, 26, 27, 31, 35, 36, 38, 52]
 // the skull is at, which of the skull's two pictures is shown and for
 // how long still; what is asked in the middle of the screen (`prompt`,
 // 0: nothing) and whether only y, n, the space bar and Esc answer it
-// (`answer`); how fast the mouse turns, which nothing here uses; and
-// for how many tics still the game waits before it ends (`leaving`).
+// (`answer`); how fast the mouse turns (`mouse`, 0 to 9); and for how
+// many tics still the game waits before it ends (`leaving`).
+// How far the mouse has moved in the menu (`mx`, `my`) and where it was
+// when it last moved the skull (`lastx`, `lasty`); the tic until which
+// it does nothing (`wait`), and its buttons the tic before (`held`).
 transient unique Menu {
   on: bool, which: i32, item: i32, skull: i32, count: i32, prompt: i32,
-  answer: bool, mouse: i32, leaving: i32, tic: i32
+  answer: bool, mouse: i32, leaving: i32, tic: i32, mx: i32, my: i32,
+  lastx: i32, lasty: i32, wait: i32, held: i32
 }
 // The line the skull was at when each menu was left, and which keys
 // were down the tic before: the eleven of `menu_keys`, the eleven from
@@ -287,6 +298,15 @@ proc write_names(bytes: mut Bytes, names: Slotnames, room: i32) {
   let written = write_bytes("doomsav.txt", bytes, room, SLOTS * SLOTNAME, false)
 }
 
+// How far the mouse moved, as the game counts it (I_ReadMouse): what is
+// over ten counts twice.
+fn mouse_step(moved: f32) -> i32 {
+  let by = moved as i32
+  let far = max(by, 0 - by)
+  let counted = if far > 10 { (far - 10) * 2 + 10 } else { far }
+  if by < 0 { 0 - counted } else { counted }
+}
+
 // The keys and what they do to the menu (M_Responder, M_Ticker). Once a
 // tic, before everything else.
 system menu_keys() {
@@ -299,19 +319,62 @@ system menu_keys() {
     for i in 0..SLOTS * SLOTNAME { Bytes += { value: 0 } }
   }
   Menu.tic += 1
+  // (The mouse is the game's while the player's own goes on.)
+  Window.grab = Shell.game && !Menu.on
   Shell.resize = false
   Slot.save = false
   Slot.load = false
   Slot.loaded = false
   let was = Menu.on
   // The key of this tic, if one went down: the first of these.
+  // The mouse in the menu (of M_Responder): a key of its own making,
+  // the last of these that it comes to, and then a wait.
+  let stepx = mouse_step(Mouse.dx)
+  let stepy = 0 - mouse_step(Mouse.dy)
+  let buttons = (if Mouse.left { 1 } else { 0 }) | (if Mouse.right { 2 } else { 0 })
+  var moused = 0
+  if Menu.on && Menu.tic > Menu.wait &&
+     (stepx != 0 || stepy != 0 || buttons != Menu.held) {
+    Menu.my += stepy
+    if Menu.my < Menu.lasty - 30 {
+      moused = 1
+      Menu.lasty -= 30
+      Menu.my = Menu.lasty
+    } else if Menu.my > Menu.lasty + 30 {
+      moused = 2
+      Menu.lasty += 30
+      Menu.my = Menu.lasty
+    }
+    Menu.mx += stepx
+    if Menu.mx < Menu.lastx - 30 {
+      moused = 3
+      Menu.lastx -= 30
+      Menu.mx = Menu.lastx
+    } else if Menu.mx > Menu.lastx + 30 {
+      moused = 4
+      Menu.lastx += 30
+      Menu.mx = Menu.lastx
+    }
+    if moused != 0 { Menu.wait = Menu.tic + 5 }
+    if buttons & 1 != 0 {
+      moused = 5
+      Menu.wait = Menu.tic + 15
+    }
+    if buttons & 2 != 0 {
+      moused = 6
+      Menu.wait = Menu.tic + 15
+    }
+  }
+  // (A button that goes down opens the menu over a demo or a picture.)
+  let click = buttons != 0 && Menu.held == 0
+  Menu.held = buttons
   let esc = struck(Keyheld, 0, key_down(256))
-  let enter = struck(Keyheld, 1, Keys.enter)
-  let back = struck(Keyheld, 2, key_down(259))
-  let up = struck(Keyheld, 3, Keys.up)
-  let down = struck(Keyheld, 4, Keys.down)
-  let left = struck(Keyheld, 5, Keys.left)
-  let right = struck(Keyheld, 6, Keys.right)
+  let enter = struck(Keyheld, 1, Keys.enter) || moused == 5
+  let back = struck(Keyheld, 2, key_down(259)) || moused == 6
+  let up = struck(Keyheld, 3, Keys.up) || moused == 2
+  let down = struck(Keyheld, 4, Keys.down) || moused == 1
+  let left = struck(Keyheld, 5, Keys.left) || moused == 3
+  let right = struck(Keyheld, 6, Keys.right) || moused == 4
   let yes = struck(Keyheld, 7, key_down('Y' as i32))
   let no = struck(Keyheld, 8, key_down('N' as i32))
   let space = struck(Keyheld, 9, Keys.space)
@@ -330,7 +393,7 @@ system menu_keys() {
     if struck(Keyheld, 50 + i, key_down('0' as i32 + i)) && letter == 0 { letter = '0' as i32 + i }
   }
   let any = esc || enter || back || up || down || left || right || space || fire ||
-            fkey != 0 || less || more || letter != 0
+            fkey != 0 || less || more || letter != 0 || click
   // (What a line that is set lower or higher is set to: -1, 1, or 0.)
   var set = 0
   // (What a line that is chosen does: the menu and the line.)
@@ -393,6 +456,10 @@ system menu_keys() {
         Laston[Menu.which].item = Menu.item
         Shell.page = -1
         Shell.turn = true
+      } else if yes && asked == PROMPT_NIGHTMARE {
+        Shell.start = true
+        Shell.skill = 4
+        Menu.on = false
       } else if yes && asked == PROMPT_QUICKSAVE {
         Slot.which = Slot.quick
         Slot.save = true
@@ -513,7 +580,7 @@ system menu_keys() {
         if kind == 2 {
           set = 1
           sound(Sounds, Rnd, SFX_STNMOV, 0)
-        } else if chosen != MENU_SKILL * 16 + 4 {
+        } else {
           sound(Sounds, Rnd, SFX_PISTOL, 0)
         }
       }
@@ -586,8 +653,9 @@ system menu_keys() {
     Shell.skill = chosen - MENU_SKILL * 16
     Menu.on = false
   } else if chosen == MENU_SKILL * 16 + 4 {
-    // (The fifth skill: not there.)
-    sound(Sounds, Rnd, SFX_OOF, 0)
+    // (The fifth skill is asked about first: M_VerifyNightmare.)
+    Menu.prompt = PROMPT_NIGHTMARE
+    Menu.answer = true
   } else if chosen == MENU_OPTIONS * 16 {
     // (M_EndGame.)
     if !Shell.game {

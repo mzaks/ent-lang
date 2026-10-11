@@ -264,7 +264,7 @@ proc weapon_action(lines: mut Lines, sectors: mut Sectors, subsectors:
   } else if action == A_Lower {
     psp[position].sy += LOWERSPEED
     if psp[position].sy >= WEAPONBOTTOM {
-      if pl[0].dead {
+      if pl[0].dead || pl[0].dropped {
         psp[position].sy = WEAPONBOTTOM
       } else if things[player].health <= 0 {
         set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, pl, psp, ammo, PS_WEAPON, S_NULL)
@@ -456,6 +456,22 @@ proc move_psprites(lines: mut Lines, sectors: mut Sectors, subsectors:
   psp[PS_FLASH].sy = psp[PS_WEAPON].sy
 }
 
+// A player who was killed lets go of the weapon at once (P_KillMobj's
+// P_DropWeapon): it goes down from whatever it was doing, so a shot that
+// was on its way is not made.
+proc let_go(lines: mut Lines, sectors: mut Sectors, subsectors:
+                   Subsectors, segs: Segs, nodes: Nodes, bytes: Bytes, bmap: mut Bmap, near: mut Near, order: mut Nearorder, tm: mut Tm,
+                   spechit: mut Spechit, touched: mut Touched, triggered: mut
+                   Triggered, intercepts: mut Intercepts, sight: mut Sight,
+                   rnd: mut Rnd, inv: mut Inv, powers: Powers, env: Env, blast: mut Blast, sounds: mut Sounds,
+                   things: mut Mobj, player: entity, pl: mut Pl, psp: mut Psp,
+                   ammo: mut Ammo) {
+  if things[player].health <= 0 && !pl[0].dropped {
+    pl[0].dropped = true
+    set_psprite(lines, sectors, subsectors, segs, nodes, bytes, bmap, near, order, tm, spechit, touched, triggered, intercepts, sight, rnd, inv, powers, env, blast, sounds, things, player, pl, psp, ammo, PS_WEAPON, weaponinfo[inv[0].readyweapon].down)
+  }
+}
+
 // The weapon the player starts with comes up (P_SetupPsprites). After
 // `start_player`.
 system start_weapon() {
@@ -578,6 +594,13 @@ system think_weapon() {
     sky: Data.skyflatnum, leveltime: Clock.leveltime, map: Level.map
   }; 1]
   if Pl[0].buttons & BT_SPECIAL != 0 { Pl[0].buttons = 0 }
+  // (Killed by the floor in this tic: the weapon goes down first.)
+  Rnd = [{ play: Random.play, other: Random.other }; 1]
+  let_go(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
+         Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
+         Rnd, Inv, Powers, Env, Blast, Sounds, Mobj, Spawned.player, Pl, Psp, Ammo)
+  Random.play = Rnd[0].play
+  Random.other = Rnd[0].other
   if Pl[0].buttons & BT_CHANGE != 0 && !Pl[0].dead {
     var newweapon = (Pl[0].buttons & BT_WEAPONMASK) >> BT_WEAPONSHIFT
     // (The saw for the fist, unless the fist is the stronger.)
@@ -605,4 +628,19 @@ system think_weapon() {
     if Inv[0].bonuscount != 0 { Inv[0].bonuscount -= 1 }
     if Inv[0].damagecount != 0 { Inv[0].damagecount -= 1 }
   }
+}
+
+// The same for a player killed later in the tic, by a thing or a ceiling.
+// After `run_movers`.
+system drop_weapon() {
+  Env = [{
+    reject: Lumps[Level.lump + ML_REJECT].at, skill: Level.skill,
+    sky: Data.skyflatnum, leveltime: Clock.leveltime, map: Level.map
+  }; 1]
+  Rnd = [{ play: Random.play, other: Random.other }; 1]
+  let_go(Lines, Sectors, Subsectors, Segs, Nodes, Bytes, Bmap, Near,
+         Nearorder, Tm, Spechit, Touched, Triggered, Intercepts, Sight,
+         Rnd, Inv, Powers, Env, Blast, Sounds, Mobj, Spawned.player, Pl, Psp, Ammo)
+  Random.play = Rnd[0].play
+  Random.other = Rnd[0].other
 }

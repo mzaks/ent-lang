@@ -279,7 +279,7 @@ system draw_masked() {
   // Each thing in such a sector: where it is seen, if it is in front of
   // the eye and in the view.
   Vissprites = []
-  for m: Mobj where m.flags & MF_NOSECTOR == 0 {
+  for m: Mobj where m.flags & MF_NOSECTOR == 0 && !m.gone {
     let sector = Subsectors[m.subsector].sector
     let tr_x = m.x - vx
     let tr_y = m.y - vy
