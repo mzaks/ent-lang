@@ -1,0 +1,20 @@
+// The names of what is in a folder (devices/files.ent: `list_files`).
+import console
+import files
+
+fn byte_at(bytes: Bytes, at: i32) -> i8 { bytes[at].value as i8 }
+
+system look() {
+  let found = list_files("listed", Bytes)
+  put("{found} names in {len(Bytes)} bytes")
+  var lines = 0
+  for at in 0..len(Bytes) {
+    if byte_at(Bytes, at) == '\n' { lines += 1 }
+  }
+  put("{lines} lines, the first starts with {Bytes[0].value as i32}, the last with {Bytes[12].value as i32}")
+  let none = list_files("not_there", Bytes)
+  put("no such folder: {none}, {len(Bytes)} bytes")
+}
+
+schedule go() { look() }
+main { go() }

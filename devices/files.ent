@@ -43,3 +43,9 @@ extern proc write_bytes(name: text[126], from: Bytes, first: i32, count: i32,
 // file (where the program was started, or where a whole path says: as
 // `write_bytes` writes it), or `into` has not so many rows.
 extern proc read_bytes(name: text[126], into: mut Bytes, first: i32, count: i32) -> i32
+// The names of what is in a folder, into `into` in place of what that
+// had: each followed by "\n", in the order of their bytes; names that
+// start with a "." are left out. How many there are (those that did not
+// fit are not in `into`); -1 where there is no such folder (where the
+// program was started, or where a whole path says).
+extern proc list_files(folder: text[126], into: mut Bytes) -> i32

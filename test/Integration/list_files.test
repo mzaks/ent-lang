@@ -1,0 +1,10 @@
+// A folder's names (devices/files.ent: `list_files`): each followed by a
+// line end, in the order of their bytes, a folder in it among them; -1
+// and nothing for a folder that is not there. From where the program is
+// started.
+// RUN: cd %S/Inputs && %ent run %S/Inputs/list_files.ent | FileCheck %s
+
+// ("a.txt", "b.txt", "sub": 97 is an a, 115 an s.)
+// CHECK:      3 names in 16 bytes
+// CHECK-NEXT: 3 lines, the first starts with 97, the last with 115
+// CHECK-NEXT: no such folder: -1, 0 bytes

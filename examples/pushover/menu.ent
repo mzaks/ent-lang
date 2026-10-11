@@ -1,0 +1,619 @@
+// Pushover
+//
+// Pushover is the legal property of its developers (Andreas Röver,
+// Volker Grabsch and the others its AUTHORS file names). This is a port
+// of it to ent-lang.
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The windows over the game (window.cpp, main.cpp): the main menu, the
+// choice of a set of levels and of a level, what is set, what to do
+// when a level is left, solved or lost, the help and who made the game.
+// A window is a box with a title and lines, of which one is chosen with
+// the arrow keys and taken with Enter; its lines are entities.
+import window
+import sound
+import files
+import level
+import dominoes
+import ant
+import pictures
+import draw
+import sets
+
+// What the program is at: a window that is open, or the game played
+// (`FailDelay`: for two seconds more after a level was lost).
+enum Mode {
+  Main, Config, LevelConfig, Sets, Levels, Play, FailDelay, Solved, Timeout,
+  Failed, Help, Quit, About, Exit
+}
+
+// A line of the window that is open: its place, what colour it has (0
+// plain, 1 half done, 2 done), a domino's kind for a line of the help,
+// what it says, and what is said under it while it is the chosen one.
+component Line {
+  at: i32, kind: i32, domino: i32, last: i32, text: text[126],
+  details: text[254]
+} capacity 1024
+
+// The window: where it is and how big, in blocks of 40 by 48; whether
+// it is to be made anew; whether it is a list, which line is chosen and
+// how many there are; whether Enter was pressed, or Escape (where that
+// shuts it); which line is to be the chosen one of the next window (-1:
+// the first that is not done); and the set that was chosen.
+unique Menu {
+  mode: Mode, fresh: bool, list: bool, current: i32, count: i32, done: bool,
+  escaped: bool, escapes: bool, x: i32, y: i32, w: i32, h: i32, wanted: i32,
+  set: i32, room: f32, pick: i32, title: text[126]
+}
+
+// The level that is played (an `Entry`), its place in its set, whether
+// it is to be read, how long since the last tick and whether one is due
+// in this frame, the ticks left of the two seconds after a level was
+// lost, and whether a level is there to be drawn.
+unique Play {
+  entry: entity, number: i32, load: bool, since: f32, due: bool, delay: i32,
+  level: bool
+}
+
+// What is set: the whole screen, the sounds, the music.
+unique Config { fullscreen: bool, sounds: bool, music: bool }
+
+// The sheets of pictures as the window has them, and the fonts.
+unique Art { dominoes: i32, ant: i32, theme: i32, box: i32 }
+unique Fonts { small: i32, normal: i32, big: i32 }
+
+// The keys a window listens to: pressed in this frame (a key that is
+// held counts again and again after a moment), and down in the last.
+unique Pressed {
+  up: bool, down: bool, enter: bool, escape: bool, page_up: bool,
+  page_down: bool, home: bool, end: bool, help: bool
+}
+unique Held {
+  up: bool, down: bool, enter: bool, escape: bool, page_up: bool,
+  page_down: bool, home: bool, end: bool, help: bool, since: f32
+}
+
+const COLOUR_TEXT = 0x702700
+const COLOUR_CHOSEN = 0xffffff
+const COLOUR_HALF = 0xddb300
+const COLOUR_DONE = 0x5b7723
+const COLOUR_HELP = 0xddb300
+
+// Where a font the game could be set in may be on a machine (the game's
+// own is FreeSans, which it does not bring along); the window's own
+// where none of them is.
+table faces: text[126] = [
+  "data/FreeSans.ttf",
+  "/usr/share/fonts/gnu-free/FreeSans.otf",
+  "/usr/share/fonts/gnu-free/FreeSans.ttf",
+  "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+  "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+  "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+  "/usr/share/fonts/TTF/DejaVuSans.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+  "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+  "/System/Library/Fonts/Supplemental/Arial.ttf",
+  "/Library/Fonts/Arial.ttf"
+]
+
+system open_art() {
+  Art.dominoes = picture_load("data/dominos.png")
+  Art.ant = picture_load("data/ant.png")
+  Art.box = picture_load("data/box.png")
+  for i in 0..len(faces) {
+    if Fonts.small == 0 {
+      Fonts.small = font(faces[i], 18)
+      if Fonts.small != 0 {
+        Fonts.normal = font(faces[i], 26)
+        Fonts.big = font(faces[i], 32)
+      }
+    }
+  }
+}
+
+// What the dominoes are, for the help: the kinds a line is of (from one
+// to another), and what is said of them.
+table explained { first: i32, last: i32, says: text[126] } = [
+  { first: 1, last: 1, says: "Standard: nothing special about this stone, it simply falls" },
+  { first: 2, last: 2, says: "Blocker: can not fall, only stone allowed to stand at level end" },
+  { first: 3, last: 3, says: "Splitter: when something falls on its top it will split in two" },
+  { first: 4, last: 4, says: "Exploder: will blast a hole into the platform below it" },
+  { first: 5, last: 5, says: "Delay: falls not immediately but a while after being pushed" },
+  { first: 6, last: 6, says: "Tumbler: will continue rolling until it hits an obstacle" },
+  { first: 7, last: 7, says: "Bridger: will connect the platform if there is a gap of one unit" },
+  { first: 8, last: 8, says: "Vanish: pushes next block but then vanishes, only stone you may place in front of doors" },
+  { first: 9, last: 9, says: "Trigger: the last domino that must fall and it must lie flat, can not be moved" },
+  { first: 10, last: 10, says: "Ascender: will raise to ceiling when pushed and then flip up there" },
+  { first: 11, last: 12, says: "Entangled: all stones of this type will fall together as if quantum entangled" },
+  { first: 13, last: 15, says: "Semiblocker: these behave like blocker as long as there is a stone still standing that has more lines" }
+]
+
+// Who made the game.
+table makers { of: text[40], names: text[80] } = [
+  { of: "Original Concept:", names: "Chas Partington" },
+  { of: "Original Programming:", names: "Dave Elcock, Helen Elcock, Keith Watterson" },
+  { of: "Original Graphics:", names: "Bryan King, Barry Armstrong" },
+  { of: "Original Music & SFX:", names: "Keith Tinman, Dean Evans, Johnathan Dunn" },
+  { of: "New Programming:", names: "Andreas Roever, Volker Grabsch" },
+  { of: "New Music:", names: "Roberto Lorenz" },
+  { of: "New Graphics:", names: "Harald Radke" },
+  { of: "This port to ent-lang:", names: "examples/pushover" }
+]
+
+prefab plain(at: i32, says: text[126]) {
+  Line { at: at, kind: 0, domino: 0, last: 0, text: says, details: "" }
+}
+
+fn on_off(on: bool) -> text[8] { if on { "yes" } else { "no" } }
+
+// What a level that was lost is told (getFailedWindow).
+fn failure(result: i32) -> text[126] {
+  if result == CRASHES { "You failed: Some dominoes crashed" }
+  else if result == SOME_LEFT { "You failed: Not all dominoes fell" }
+  else if result == DIED { "You failed: You died" }
+  else if result == TRIGGER_NOT_LAST { "You failed: Trigger was not last to fall" }
+  else if result == TRIGGER_NOT_FLAT { "You failed: Trigger not flat on the ground" }
+  else if result == SOLVED_LATE { "Not quite, you were not fast enough, but you may continue if you want" }
+  else { "You failed... but I don't know why ...?" }
+}
+
+// The keys of this frame, for a window.
+system window_keys() {
+  let up = key_down(265)
+  let down = key_down(264)
+  let enter = key_down(257)
+  let escape = key_down(256)
+  let page_up = key_down(266)
+  let page_down = key_down(267)
+  let home = key_down(268)
+  let end = key_down(269)
+  let help = key_down(290)
+  // (Up and down again and again while held: after a moment, twelve
+  // times a second.)
+  var again = false
+  if up || down {
+    Held.since += Window.dt
+    if Held.since > 0.4 {
+      again = true
+      Held.since -= 0.08
+    }
+  } else {
+    Held.since = 0.0
+  }
+  Pressed.up = up && (!Held.up || again)
+  Pressed.down = down && (!Held.down || again)
+  Pressed.enter = enter && !Held.enter
+  Pressed.escape = escape && !Held.escape
+  Pressed.page_up = page_up && !Held.page_up
+  Pressed.page_down = page_down && !Held.page_down
+  Pressed.home = home && !Held.home
+  Pressed.end = end && !Held.end
+  Pressed.help = help && !Held.help
+  Held.up = up
+  Held.down = down
+  Held.enter = enter
+  Held.escape = escape
+  Held.page_up = page_up
+  Held.page_down = page_down
+  Held.home = home
+  Held.end = end
+  Held.help = help
+}
+
+// What the keys do to the window that is open (listWindow_c::handleEvent),
+// and in the game: Escape asks what now, F1 helps.
+system use_keys() {
+  let mode = Menu.mode
+  if mode == Mode.Play {
+    if Pressed.escape {
+      Menu.mode = Mode.Quit
+      Menu.fresh = true
+    } else if Pressed.help {
+      Menu.mode = Mode.Help
+      Menu.fresh = true
+    }
+  } else if mode == Mode.Help || mode == Mode.About {
+    if Pressed.escape || Pressed.enter { Menu.done = true }
+  } else if mode != Mode.FailDelay && mode != Mode.Exit && !Menu.fresh {
+    let last = Menu.count - 1
+    if Pressed.escape && Menu.escapes {
+      Menu.escaped = true
+      Menu.done = true
+    } else if Pressed.enter {
+      Menu.done = true
+    } else if Pressed.up {
+      Menu.current = max(0, Menu.current - 1)
+    } else if Pressed.down {
+      Menu.current = min(last, Menu.current + 1)
+    } else if Pressed.page_up {
+      Menu.current = max(0, Menu.current - 10)
+    } else if Pressed.page_down {
+      Menu.current = min(last, Menu.current + 10)
+    } else if Pressed.home {
+      Menu.current = 0
+    } else if Pressed.end {
+      Menu.current = last
+    }
+  }
+}
+
+// What follows from the line that was taken (the states of main.cpp).
+system take_line() {
+  let mode = Menu.mode
+  let chosen = Menu.current
+  let escaped = Menu.escaped
+  Menu.done = false
+  Menu.escaped = false
+  Menu.fresh = true
+  Menu.wanted = 0
+  if mode == Mode.Main {
+    Menu.mode = if chosen == 0 { Mode.Sets } else if chosen == 1 { Mode.Config }
+                else if chosen == 2 { Mode.About } else { Mode.Exit }
+    Menu.wanted = -1
+  } else if mode == Mode.Config || mode == Mode.LevelConfig {
+    if escaped {
+      Menu.mode = if mode == Mode.Config { Mode.Main } else { Mode.Quit }
+    } else {
+      if chosen == 0 { Config.fullscreen = !Config.fullscreen }
+      else if chosen == 1 { Config.sounds = !Config.sounds }
+      else {
+        Config.music = !Config.music
+        if !Config.music { Music.file = "" }
+        else if Play.level { Music.file = "themes/" + Level.theme + ".ogg" }
+      }
+      Menu.wanted = chosen
+    }
+  } else if mode == Mode.Sets {
+    if escaped {
+      Menu.mode = Mode.Main
+    } else {
+      for s: Set where s.rank == chosen { Menu.set = s.number }
+      Menu.mode = Mode.Levels
+      Menu.wanted = -1
+    }
+  } else if mode == Mode.Levels {
+    if escaped {
+      Menu.mode = Mode.Sets
+      Menu.wanted = -1
+    } else {
+      for e, level: Entry where level.set == Menu.set && level.number == chosen {
+        Play.entry = e
+      }
+      Play.number = chosen
+      Play.load = true
+      Menu.mode = Mode.Play
+    }
+  } else if mode == Mode.Quit {
+    if escaped || chosen == 0 {
+      Menu.mode = Mode.Play
+    } else if chosen == 1 {
+      Play.load = true
+      Menu.mode = Mode.Play
+    } else if chosen == 2 {
+      Menu.mode = Mode.LevelConfig
+    } else {
+      Menu.mode = Mode.Levels
+      Menu.wanted = Play.number
+      Music.file = ""
+    }
+  } else if mode == Mode.Solved {
+    Menu.mode = Mode.Levels
+    Menu.wanted = -1
+  } else if mode == Mode.Failed || mode == Mode.Timeout {
+    if chosen == 0 {
+      Play.load = true
+      Menu.mode = Mode.Play
+    } else {
+      Menu.mode = Mode.Levels
+      Menu.wanted = if mode == Mode.Failed { Play.number } else { -1 }
+      if mode == Mode.Failed { Music.file = "" }
+    }
+  } else if mode == Mode.Help {
+    Menu.mode = Mode.Play
+  } else if mode == Mode.About {
+    Menu.mode = Mode.Main
+  }
+}
+
+// The window of what the program is at now, made anew: its place, its
+// title and its lines (getMainWindow and the others of window.cpp).
+system make_window() {
+  for e with Line { e.destroy() }
+  let mode = Menu.mode
+  let wanted = Menu.wanted
+  Menu.fresh = false
+  Menu.list = true
+  Menu.escapes = true
+  Menu.room = 0.0
+  Menu.current = max(0, wanted)
+  if mode == Mode.Main {
+    Menu.x = 4
+    Menu.y = 2
+    Menu.w = 12
+    Menu.h = 8
+    Menu.title = "Main menu"
+    Menu.escapes = false
+    spawn { plain(0, "Play Levelset") }
+    spawn { plain(1, "Configuration") }
+    spawn { plain(2, "About") }
+    spawn { plain(3, "Quit") }
+    Menu.count = 4
+    Menu.current = 0
+  } else if mode == Mode.Config || mode == Mode.LevelConfig {
+    Menu.x = 3
+    Menu.y = 2
+    Menu.w = 14
+    Menu.h = 9
+    Menu.title = "Configuration"
+    spawn { plain(0, "Use Fullscreen: " + on_off(Config.fullscreen)) }
+    spawn { plain(1, "Play Sound Effects: " + on_off(Config.sounds)) }
+    spawn { plain(2, "Play Background Music: " + on_off(Config.music)) }
+    Menu.count = 3
+  } else if mode == Mode.Sets {
+    Menu.x = 3
+    Menu.y = 1
+    Menu.w = 14
+    Menu.h = 11
+    Menu.title = "Select Levelset"
+    Menu.room = 60.0
+    for s: Set {
+      spawn {
+        Line { at: s.rank, kind: s.state, domino: 0, last: 0, text: s.name,
+               details: "Description: " + s.description }
+      }
+    }
+    Menu.count = Sets.count
+    // The set that was chosen before, or the first that is not done.
+    Menu.pick = 9999
+    for s: Set where s.state != 2 { Menu.pick min= s.rank }
+    for s: Set where s.number == Menu.set && wanted >= 0 { Menu.pick = s.rank }
+    Menu.current = if Menu.pick < 9999 { Menu.pick } else { 0 }
+  } else if mode == Mode.Levels {
+    Menu.x = 4
+    Menu.y = 0
+    Menu.w = 12
+    Menu.h = 12
+    Menu.title = "Select Level"
+    Menu.count = for level: Entry
+        where level.set == Menu.set && level.number >= 0 {
+      spawn {
+        Line { at: level.number, kind: level.solved, domino: 0, last: 0,
+               text: level.name, details: "" }
+      }
+    }
+    // The level that is asked for, or the first that is not solved.
+    Menu.pick = 9999
+    for level: Entry
+        where level.set == Menu.set && level.number >= 0 && level.solved == 0 {
+      Menu.pick min= level.number
+    }
+    Menu.current = if wanted >= 0 { wanted }
+                   else if Menu.pick < 9999 { Menu.pick } else { 0 }
+  } else if mode == Mode.Quit {
+    Menu.x = 4
+    Menu.y = 3
+    Menu.w = 12
+    Menu.h = 7
+    Menu.title = "And now?"
+    spawn { plain(0, "Return to level") }
+    spawn { plain(1, "Restart level") }
+    spawn { plain(2, "Configuration") }
+    spawn { plain(3, "Return to menu") }
+    Menu.count = 4
+    Menu.current = 0
+  } else if mode == Mode.Solved {
+    Menu.x = 2
+    Menu.y = 3
+    Menu.w = 16
+    Menu.h = 6
+    Menu.title = "Congratulations! You did it."
+    Menu.escapes = false
+    spawn { plain(0, "Continue") }
+    Menu.count = 1
+    Menu.current = 0
+  } else if mode == Mode.Failed || mode == Mode.Timeout {
+    Menu.title = failure(if mode == Mode.Failed { Game.result } else { SOLVED_LATE })
+    // As wide as the title wants, of 14 to 18 blocks and the frame.
+    var wide = (text_extent(Menu.title, Fonts.big, 32.0, 0.0, 2) as i32 + 39) / 40
+    wide = max(14, min(18, wide))
+    if wide % 2 == 1 { wide += 1 }
+    wide += 2
+    Menu.x = (20 - wide) / 2
+    Menu.y = 3
+    Menu.w = wide
+    Menu.h = 6
+    Menu.escapes = false
+    spawn { plain(0, "Retry the level") }
+    if mode == Mode.Failed { spawn { plain(1, "Return to menu") } }
+    else { spawn { plain(1, "Select next level") } }
+    Menu.count = 2
+    Menu.current = 0
+  } else if mode == Mode.Help {
+    Menu.x = 1
+    Menu.y = 1
+    Menu.w = 18
+    Menu.h = 11
+    Menu.list = false
+    Menu.title = ""
+    // A line for each kind of domino the level has.
+    var at = 0
+    for i in 0..len(explained) {
+      let first = explained[i].first
+      let last = explained[i].last
+      let there = for d: Domino
+          where d.kind as i32 >= first && d.kind as i32 <= last { }
+      if there > 0 {
+        spawn {
+          Line { at: at, kind: 0, domino: first, last: last,
+                 text: explained[i].says, details: "" }
+        }
+        at += 1
+      }
+    }
+    Menu.count = at
+  } else if mode == Mode.About {
+    Menu.x = 2
+    Menu.y = 0
+    Menu.w = 16
+    Menu.h = 12
+    Menu.list = false
+    Menu.title = "Pushover - 0.0.5 - About"
+    Menu.count = 0
+  }
+}
+
+proc say(words: text[254], x: f32, y: f32, width: f32, face: i32, size: f32,
+         align: i32, colour: i32) {
+  write(words, x, y, width, face, size, 0.0, 0.0, 0, align, colour)
+}
+
+proc say_dark(words: text[254], x: f32, y: f32, width: f32, face: i32,
+              size: f32, align: i32, colour: i32) {
+  write(words, x + 2.0, y + 2.0, width, face, size, 0.0, 0.0, 0, align, 0x000000)
+  write(words, x, y, width, face, size, 0.0, 0.0, 0, align, colour)
+}
+
+// How high a text is set in that width.
+fn tall(words: text[254], width: f32, face: i32, size: f32) -> f32 {
+  text_lines(words, width, face, size, 0.0, 0) as f32 * size
+}
+
+// What the colours of a list's lines say, under the list.
+fn legend(sets: bool, kind: i32) -> text[30] {
+  if sets {
+    if kind == 0 { "not started" } else if kind == 1 { "partially done" }
+    else { "done" }
+  } else {
+    if kind == 0 { "unsolved" } else if kind == 1 { "solved but not in time" }
+    else { "solved" }
+  }
+}
+
+// What is to be done, for the help: the level's hint, once its time is
+// up.
+fn advice(time: i32, hint: text[254]) -> text[254] {
+  if time > 0 { "Arrange dominos in a run so that trigger falls last. You have 1 push." }
+  else { hint }
+}
+
+fn line_colour(kind: i32, chosen: bool) -> i32 {
+  if chosen { COLOUR_CHOSEN } else if kind == 2 { COLOUR_DONE }
+  else if kind == 1 { COLOUR_HALF } else { COLOUR_TEXT }
+}
+
+// The window that is open, over the level (listWindow_c::redraw and the
+// windows of the help and of who made the game).
+system paint_window() {
+  let mode = Menu.mode
+  if mode != Mode.Play && mode != Mode.FailDelay && mode != Mode.Exit {
+    // The box: its corners, its edges and what fills it.
+    for j in 0..Menu.h {
+      for i in 0..Menu.w {
+        let column = if i == 0 { 0 } else if i + 1 == Menu.w { 2 } else { 1 }
+        let row = if j == 0 { 0 } else if j + 1 == Menu.h { 2 } else { 1 }
+        picture_part(Art.box, (column * 40) as f32, (row * 48) as f32, 40.0,
+                     48.0, ((Menu.x + i) * 40) as f32,
+                     ((Menu.y + j) * 48) as f32, 40.0, 48.0, 0xffffff)
+      }
+    }
+    let left = ((Menu.x + 1) * 40) as f32
+    let wide = ((Menu.w - 2) * 40) as f32
+    let end = ((Menu.y + Menu.h - 1) * 48) as f32
+    var at = ((Menu.y + 1) * 48) as f32
+    if Menu.title != "" {
+      say_dark(Menu.title, left, at, wide, Fonts.big, 32.0, 1, COLOUR_TEXT)
+      at += tall(Menu.title, wide, Fonts.big, 32.0) + 4.0
+      rect(left + 1.0, at + 1.0, wide, 2.0, 0x000000)
+      rect(left, at, wide, 2.0, 0x702727)
+      at += 20.0
+    }
+    if Menu.list {
+      // So many lines as there is room for, the chosen one in their
+      // middle where the list is longer.
+      let high = 32.0
+      let fit = max(1, ((end - at - Menu.room) / high) as i32)
+      let first = max(0, min(Menu.current - fit / 2, Menu.count - fit))
+      for l: Line by l.at where l.at >= first && l.at < first + fit {
+        let chosen = l.at == Menu.current
+        let y = at + (l.at - first) as f32 * high +
+                (if l.at > Menu.current { Menu.room } else { 0.0 })
+        say(l.text, left, y, wide, Fonts.normal, 26.0, 1,
+            line_colour(l.kind, chosen))
+        if chosen && l.details != "" {
+          say(l.details, left, y + high, wide, Fonts.small, 16.0, 1,
+              COLOUR_CHOSEN)
+        }
+      }
+      // What the colours say.
+      if mode == Mode.Sets || mode == Mode.Levels {
+        let plain = legend(mode == Mode.Sets, 0)
+        let half = legend(mode == Mode.Sets, 1)
+        let done = legend(mode == Mode.Sets, 2)
+        let first_wide = text_extent(plain, Fonts.small, 16.0, 0.0, 2)
+        let second_wide = text_extent(half, Fonts.small, 16.0, 0.0, 2)
+        let third_wide = text_extent(done, Fonts.small, 16.0, 0.0, 2)
+        var x = left + (wide - first_wide - second_wide - third_wide - 30.0) / 2.0
+        say(plain, x, end + 4.0, 400.0, Fonts.small, 16.0, 0, COLOUR_TEXT)
+        x += first_wide + 15.0
+        say(half, x, end + 4.0, 400.0, Fonts.small, 16.0, 0, COLOUR_HALF)
+        x += second_wide + 15.0
+        say(done, x, end + 4.0, 400.0, Fonts.small, 16.0, 0, COLOUR_DONE)
+      }
+    } else if mode == Mode.Help {
+      // What is to be done (the level's hint, once its time is up), what
+      // level this is, and the dominoes it has.
+      let hint = advice(Level.time, Level.hint)
+      say(hint, 80.0, at, 640.0, Fonts.normal, 26.0, 1, COLOUR_HELP)
+      at += tall(hint, 640.0, Fonts.normal, 26.0) + 10.0
+      rect(80.0, at, 640.0, 2.0, COLOUR_TEXT)
+      at += 12.0
+      say("Level information", 80.0, at, 640.0, Fonts.small, 16.0, 0, COLOUR_TEXT)
+      at += 20.0
+      say("Level name: " + Level.name, 90.0, at, 620.0, Fonts.small, 16.0, 0,
+          COLOUR_TEXT)
+      at += 30.0
+      rect(80.0, at, 640.0, 2.0, COLOUR_TEXT)
+      at += 12.0
+      for l: Line by l.at where at + (l.at / 2 * 85 + 75) as f32 <= end {
+        let x = (100 + 310 * (l.at % 2)) as f32
+        let y = at + (l.at / 2 * 85) as f32
+        let count = l.last - l.domino + 1
+        let room = if count == 3 { 60.0 } else { 50.0 }
+        let apart = if count == 3 { 15.0 } else if count == 2 { 18.0 } else { 0.0 }
+        rect(x, y, room, 75.0, 0x000000)
+        rect(x + 2.0, y + 2.0, room - 4.0, 71.0, COLOUR_TEXT)
+        for kind in l.domino..l.last + 1 {
+          let row = domino_rows[kind * DOMINO_PICTURES + ST_UPRIGHT] as i32
+          picture_part(Art.dominoes, 0.0, (row * 60) as f32, 200.0, 58.0,
+                       x - 105.0 + room / 2.0 +
+                       apart * ((kind - l.domino) as f32 - (count - 1) as f32 * 0.5),
+                       y + 4.0, 200.0, 58.0, 0xffffff)
+        }
+        say(l.text, x + room + 5.0, y, 295.0 - room, Fonts.small, 16.0, 0,
+            COLOUR_TEXT)
+      }
+    } else if mode == Mode.About {
+      for i in 0..len(makers) {
+        say_dark(makers[i].of, left, at, wide, Fonts.small, 16.0, 0, COLOUR_TEXT)
+        at += 20.0
+        say(makers[i].names, left + 30.0, at, wide - 30.0, Fonts.small, 16.0, 0,
+            COLOUR_TEXT)
+        at += 20.0
+      }
+      say_dark("Levels:", left, at + 5.0, wide, Fonts.small, 16.0, 0, COLOUR_TEXT)
+      for s: Set by s.rank {
+        say(s.name, left + 30.0, at + 25.0 + s.rank as f32 * 20.0, wide - 30.0,
+            Fonts.small, 16.0, 0, COLOUR_TEXT)
+      }
+    }
+  }
+}

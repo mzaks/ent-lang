@@ -14,17 +14,16 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
 //
-// The game: the original levels one after another, played with the
-// keyboard in a window. Started where the game is (its `data`, `themes`
-// and `levels`: build/pushover/upstream after reference/build.sh and
-// reference/pictures.sh):
+// The game: in a window, with its menus. Started where the game is (its
+// `data`, `themes` and `levels`: build/pushover/upstream after
+// reference/build.sh and reference/pictures.sh):
 //
 //   cd build/pushover/upstream && ent run ../../../examples/pushover/pushover.ent
 //
-// The arrow keys walk and climb, the space bar takes a domino and puts
-// it down, and with up held among the dominoes it pushes. R starts the
-// level again, N and P go to the next level and the one before, Esc
-// leaves.
+// In a menu the arrow keys choose and Enter takes; Escape goes back. In
+// a level the arrow keys walk and climb, the space bar takes a domino
+// and puts it down, and with up held among the dominoes it pushes;
+// Escape asks what now, F1 helps.
 import window
 import sound
 import files
@@ -33,20 +32,11 @@ import dominoes
 import ant
 import pictures
 import draw
-
-// The sheets of pictures as the window has them.
-unique Art { dominoes: i32, ant: i32, theme: i32 }
+import sets
+import menu
 
 // The sheet of a theme that was read (one for each theme met so far).
 component Sheet { name: text[30], picture: i32 } capacity 32
-
-// Which level is played (the original ones by their numbers), whether
-// it is to be read, how long since the last tick, whether one is due in
-// this frame, and for how many ticks the level has been over.
-unique Play {
-  number: i32, load: bool, since: f32, due: bool, over: i32, n_held: bool,
-  p_held: bool, r_held: bool
-}
 
 world {
   Window.width = 800
@@ -54,8 +44,14 @@ world {
   Window.title = "Pushover"
   Window.fps = 60
   Window.background = 0x000000
-  Play.number = 1
-  Play.load = true
+  Window.resizable = true
+  Window.escape = true
+  Config.sounds = true
+  Config.music = true
+  Menu.mode = Mode.Main
+  Menu.fresh = true
+  Menu.set = -1
+  Play.entry = none
 }
 
 // The files of the sounds, by their numbers (soundsys.cpp).
@@ -70,108 +66,100 @@ table sound_files: text[40] = [
   "data/13_Victory.ogg"
 ]
 
-system open_art() {
-  Art.dominoes = picture_load("data/dominos.png")
-  Art.ant = picture_load("data/ant.png")
-}
-
-// Which file the level of that number is.
-system choose() {
-  let number = Play.number
-  Level.file = if number < 10 { "levels/original/00{number}.level" }
-               else if number < 100 { "levels/original/0{number}.level" }
-               else { "levels/original/{number}.level" }
-}
-
-// After the level was read: one that is not there is the first again;
-// the theme's sheet is found, or read; its music is played.
-system open_level() {
-  if !Level.ok && Play.number != 1 {
-    Play.number = 1
-  } else {
-    Play.load = false
-    Play.over = 0
-    Play.since = 0.0
-    Art.theme = 0
-    for s: Sheet where s.name == Level.theme { Art.theme = s.picture }
-    if Art.theme == 0 {
-      Art.theme = picture_load("themes/" + Level.theme + ".png")
-      spawn { Sheet { name: Level.theme, picture: Art.theme } }
-    }
-    Music.file = "themes/" + Level.theme + ".ogg"
-    Music.volume = 0.5
-  }
-}
-
-// The keys of this frame, and whether a tick is due (18 a second).
+// The picture is 800 by 600 whatever the window is: as big as fits, in
+// its middle. And the keys of the game, and whether a tick is due (18 a
+// second, while a level is played).
 system input() {
+  Window.fullscreen = Config.fullscreen
+  let zoom = if Window.zoom > 0.0 { Window.zoom } else { 1.0 }
+  let wide = Window.width as f32 * zoom
+  let high = Window.height as f32 * zoom
+  let fits = max(0.25, min(wide / 800.0, high / 600.0))
+  Window.zoom = fits
+  shift((wide / fits - 800.0) / 2.0, (high / fits - 600.0) / 2.0)
   var keys = 0
-  if Keys.left { keys |= KEY_LEFT }
-  if Keys.up { keys |= KEY_UP }
-  if Keys.right { keys |= KEY_RIGHT }
-  if Keys.down { keys |= KEY_DOWN }
-  if Keys.space { keys |= KEY_ACTION }
+  if Menu.mode == Mode.Play {
+    if Keys.left { keys |= KEY_LEFT }
+    if Keys.up { keys |= KEY_UP }
+    if Keys.right { keys |= KEY_RIGHT }
+    if Keys.down { keys |= KEY_DOWN }
+    if Keys.space { keys |= KEY_ACTION }
+  }
   Game.keys = keys
-  Play.since += Window.dt
-  Play.due = Play.since >= 1.0 / 18.0
+  let playing = (Menu.mode == Mode.Play || Menu.mode == Mode.FailDelay) &&
+                Play.level && !Play.load
+  if playing { Play.since += Window.dt }
+  Play.due = playing && Play.since >= 1.0 / 18.0
   if Play.due {
     Play.since -= 1.0 / 18.0
     // (After a long frame the game does not hurry to catch up.)
     if Play.since > 1.0 / 18.0 { Play.since = 0.0 }
   }
-  let next = key_down('N' as i32)
-  let before = key_down('P' as i32)
-  let again = key_down('R' as i32)
-  if next && !Play.n_held {
-    Play.number += 1
-    Play.load = true
-  }
-  if before && !Play.p_held && Play.number > 1 {
-    Play.number -= 1
-    Play.load = true
-  }
-  if again && !Play.r_held { Play.load = true }
-  Play.n_held = next
-  Play.p_held = before
-  Play.r_held = again
 }
 
-// After a tick: its sounds are heard; a level that is solved is followed
-// by the next, one that is lost is started again, each after a moment.
-system follow() {
-  for i in 0..len(Sounds) {
-    spawn { Sample { file: sound_files[Sounds[i].id], volume: 1.0 } }
+// Which file the level is that was chosen.
+system choose() {
+  if let path = Entry(Play.entry).path { Level.file = path }
+}
+
+// After the level was read: the theme's sheet is found, or read; its
+// music is played.
+system open_level() {
+  Play.load = false
+  Play.level = Level.ok
+  Play.since = 0.0
+  Play.delay = 0
+  Art.theme = 0
+  for s: Sheet where s.name == Level.theme { Art.theme = s.picture }
+  if Art.theme == 0 {
+    Art.theme = picture_load("themes/" + Level.theme + ".png")
+    spawn { Sheet { name: Level.theme, picture: Art.theme } }
   }
-  if Game.result != UNDECIDED {
-    Play.over += 1
-    if Play.over > 36 {
-      if Game.result == SOLVED || Game.result == SOLVED_LATE {
-        Play.number += 1
-      }
-      Play.load = true
+  Music.file = ""
+  if Config.music { Music.file = "themes/" + Level.theme + ".ogg" }
+  Music.volume = 0.5
+  if !Level.ok {
+    Menu.mode = Mode.Levels
+    Menu.fresh = true
+  }
+}
+
+// After a tick: its sounds are heard, and once nothing moves any more
+// what the level came to is taken up (the end of main.cpp's loop): one
+// that is solved is marked so; one that is lost goes on for two seconds.
+system follow() {
+  if Config.sounds {
+    for i in 0..len(Sounds) {
+      spawn { Sample { file: sound_files[Sounds[i].id], volume: 1.0 } }
     }
   }
-}
-
-// What the level came to, in words.
-fn outcome(result: i32) -> text[62] {
-  if result == SOLVED { "Solved!" }
-  else if result == SOLVED_LATE { "Solved, but not in time" }
-  else if result == DIED { "You died" }
-  else if result == CRASHES { "Some dominoes crashed" }
-  else if result == TRIGGER_NOT_FLAT { "The trigger is not lying flat" }
-  else if result == TRIGGER_NOT_LAST { "The trigger was not the last to fall" }
-  else if result == SOME_LEFT { "Some dominoes are left standing" }
-  else if result == CARRYING { "You are still holding a domino" }
-  else { "" }
+  let result = Game.result
+  if Menu.mode == Mode.FailDelay {
+    if Play.delay > 0 {
+      Play.delay -= 1
+    } else {
+      Menu.mode = Mode.Failed
+      Menu.fresh = true
+    }
+  } else if Level.idle > 3 && result != UNDECIDED {
+    if result == SOLVED || result == SOLVED_LATE {
+      let mark = if result == SOLVED { 2 } else { 1 }
+      for e, level: mut Entry where e == Play.entry { level.solved max= mark }
+      Sets.save = true
+      Menu.mode = if result == SOLVED { Mode.Solved } else { Mode.Timeout }
+      Menu.fresh = true
+    } else {
+      Play.delay = 36
+      Menu.mode = Mode.FailDelay
+    }
+  }
 }
 
 fn two(number: i32) -> text[8] {
   if number < 10 { "0{number}" } else { "{number}" }
 }
 
-// The level as `picture_level` listed it, the time left and what the
-// level came to.
+// The level as `picture_level` listed it, and the time left.
 system paint() {
   for i in 0..len(Blits) {
     let sheet = Blits[i].sheet
@@ -186,25 +174,28 @@ system paint() {
   let late = Level.time < 0
   let seconds = if late { -(Level.time / 18) + 1 } else { Level.time / 18 }
   let time = two(seconds / 60) + ":" + two(seconds % 60)
-  label(time, 21.0, 561.0, 30.0, 0x000000)
-  label(time, 20.0, 560.0, 30.0, if late { 0xff0000 } else { 0xddb300 })
-  let level = "Level {Play.number}"
-  label(level, 800.0 - text_width(level, 18.0) - 10.0, 572.0, 18.0, 0xddb300)
-  if Game.result != UNDECIDED {
-    let said = outcome(Game.result)
-    let wide = text_width(said, 30.0)
-    rect(390.0 - wide / 2.0, 270.0, wide + 20.0, 50.0, 0xc0000000)
-    label(said, 400.0 - wide / 2.0, 280.0, 30.0, 0xddb300)
-  }
+  write(time, 22.0, 562.0, 100.0, Fonts.big, 32.0, 0.0, 0.0, 2, 0, 0x000000)
+  write(time, 20.0, 560.0, 100.0, Fonts.big, 32.0, 0.0, 0.0, 2, 0,
+        if late { 0xff0000 } else { COLOUR_HELP })
+  let help = "F1: Help"
+  let wide = text_extent(help, Fonts.small, 18.0, 0.0, 2)
+  write(help, 791.0 - wide, 573.0, 200.0, Fonts.small, 18.0, 0.0, 0.0, 2, 0,
+        0x000000)
+  write(help, 790.0 - wide, 572.0, 200.0, Fonts.small, 18.0, 0.0, 0.0, 2, 0,
+        COLOUR_HELP)
 }
 
 schedule setup() {
   open_art()
+  load_sets()
 }
 
 schedule frame() {
   begin()
   input()
+  window_keys()
+  use_keys()
+  take_line() run_if Menu.done
   choose() run_if Play.load
   load_level() run_if Play.load
   load_theme() run_if Play.load
@@ -218,13 +209,17 @@ schedule frame() {
   topple() run_if Play.due
   decide_level() run_if Play.due
   follow() run_if Play.due
-  picture_level()
-  paint()
+  tally() run_if Sets.save
+  write_solved() run_if Sets.save
+  make_window() run_if Menu.fresh
+  picture_level() run_if Play.level
+  paint() run_if Play.level
+  paint_window()
   play()
   present()
 }
 
 main {
   setup()
-  loop { frame() } until Window.closed
+  loop { frame() } until Window.closed || Menu.mode == Mode.Exit
 }

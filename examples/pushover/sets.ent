@@ -1,0 +1,179 @@
+// Pushover
+//
+// Pushover is the legal property of its developers (Andreas Röver,
+// Volker Grabsch and the others its AUTHORS file names). This is a port
+// of it to ent-lang.
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The sets of levels (levelset.cpp): each a folder of the game's
+// `levels`, with a file that names the set and lists its levels by their
+// names, and a file for each level. A set and a level of one are
+// entities; which levels were solved is kept in a file.
+import files
+import level
+
+// A set: its number (the place of its folder among them), its place in
+// the list they are shown in (by `priority`), how many levels it lists,
+// and how far it is solved (0 none of it, 1 some, 2 all).
+component Set {
+  number: i32, rank: i32, priority: i32, levels: i32, state: i32,
+  name: text[62], description: text[254], folder: text[62]
+} capacity 16
+
+// A level of a set: its place in the set's list (-1 for a file the list
+// does not name), whether it was solved (1: but not in time, 2: in
+// time), a number of its own among all the files, its name and its file.
+component Entry {
+  set: i32, number: i32, solved: i32, order: i32, name: text[62],
+  path: text[126]
+} capacity 1024
+
+// (While the sets are read: a folder of `levels`, and a name a set's
+// list has.)
+component Folder { number: i32, name: text[62] } capacity 16
+component Named { set: i32, number: i32, name: text[62] } capacity 1024
+
+// How many sets there are, and whether what was solved is to be written.
+unique Sets { count: i32, save: bool }
+
+// The folders of `levels`.
+system list_sets() {
+  let found = list_files("levels", Bytes)
+  var at = 0
+  var number = 0
+  while at < len(Bytes) {
+    let end = line_end(Bytes, at)
+    if end > at {
+      spawn { Folder { number: number, name: text_of(Bytes, at, end) } }
+      number += 1
+    }
+    at = end + 1
+  }
+}
+
+// Each folder's set (its `index.level`: the name, what it is, where it
+// comes among the sets, and the names of its levels), and its files.
+system read_sets() {
+  for f: Folder in turn by f.number {
+    let size = read_file("levels/" + f.name + "/index.level", Bytes)
+    let levels = section(Bytes, "Levels", 0)
+    if size > 0 && levels >= 0 {
+      var count = 0
+      var more = true
+      while more {
+        let line = section_line(Bytes, levels, count)
+        if line < 0 {
+          more = false
+        } else {
+          spawn {
+            Named { set: f.number, number: count,
+                    name: text_of(Bytes, line + 2, line_end(Bytes, line)) }
+          }
+          count += 1
+        }
+      }
+      let name = section_line(Bytes, section(Bytes, "Name", 0), 0)
+      let about = section_line(Bytes, section(Bytes, "Description", 0), 0)
+      let (priority, after) =
+        number_at(Bytes, section_line(Bytes, section(Bytes, "Priority", 0), 0) + 2)
+      spawn {
+        Set { number: f.number, rank: 0, priority: priority, levels: count,
+              state: 0, name: text_of(Bytes, name + 2, line_end(Bytes, name)),
+              description: if about >= 0 { text_of(Bytes, about + 2, line_end(Bytes, about)) }
+                           else { "" },
+              folder: f.name }
+      }
+      let files = list_files("levels/" + f.name, Bytes)
+      var at = 0
+      var order = 0
+      while at < len(Bytes) {
+        let end = line_end(Bytes, at)
+        let file = text_of(Bytes, at, end)
+        if end > at && file != "index.level" {
+          spawn {
+            Entry { set: f.number, number: -1, solved: 0,
+                    order: f.number * 1000 + order, name: "",
+                    path: "levels/" + f.name + "/" + file }
+          }
+          order += 1
+        }
+        at = end + 1
+      }
+    }
+  }
+  for e with Folder { e.destroy() }
+}
+
+// Each file's level by its name, and with that its place in its set's
+// list.
+system name_entries() {
+  for e: mut Entry in turn by e.order {
+    let size = read_file(e.path, Bytes)
+    let line = section_line(Bytes, section(Bytes, "Name", 0), 0)
+    e.name = text_of(Bytes, line + 2, line_end(Bytes, line))
+    var number = -1
+    for o, other: Named where other.set == e.set && other.name == e.name {
+      number = other.number
+    }
+    e.number = number
+  }
+  for x with Named { x.destroy() }
+}
+
+// The sets in the order they are shown in: by `priority`, then as their
+// folders come.
+system rank_sets() {
+  for s: mut Set {
+    var rank = 0
+    for o, other: Set
+        where other.priority < s.priority ||
+              (other.priority == s.priority && other.number < s.number) {
+      rank += 1
+    }
+    s.rank = rank
+  }
+  Sets.count = for with Set { }
+}
+
+// What was solved, out of its file: a byte for each level's file.
+system read_solved() {
+  let size = read_file("pushover.solved", Bytes)
+  for e: mut Entry { e.solved = Bytes[e.order].value as i32 }
+}
+
+// How far each set is solved.
+system tally() {
+  for s: mut Set {
+    var all = true
+    var any = false
+    for o, other: Entry where other.set == s.number && other.number >= 0 {
+      if other.solved != 0 { any = true } else { all = false }
+    }
+    s.state = if !any { 0 } else if all { 2 } else { 1 }
+  }
+}
+
+system write_solved() {
+  Bytes = [{ value: 0 }; 16000]
+  for e: Entry in turn by e.order { Bytes[e.order].value = e.solved as u8 }
+  let written = write_file("pushover.solved", Bytes)
+  Sets.save = false
+}
+
+schedule load_sets() {
+  list_sets()
+  read_sets()
+  name_entries()
+  rank_sets()
+  read_solved()
+  tally()
+}

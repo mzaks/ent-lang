@@ -81,11 +81,11 @@ buffer Doors {
 
 // The level: the ticks left to solve it in (18 a second), for how many
 // ticks nothing moved, how many layers its background has, and whether
-// its file was read; and the name of its theme (which pictures it is
-// drawn with).
+// its file was read; the name of its theme (which pictures it is drawn
+// with), its own name, and the hint that is given when the time is up.
 unique Level {
   time: i32, idle: i32, layers: i32, ok: bool, file: text[126],
-  theme: text[30]
+  theme: text[30], name: text[62], hint: text[254]
 }
 
 // A recording of a game: the keys of each tick.
@@ -208,8 +208,8 @@ table one_byte: text[1] = [
 ]
 
 // The bytes from `from` up to `to` as a text (as many as fit).
-fn text_of(bytes: Bytes, from: i32, to: i32) -> text[126] {
-  var all: text[126] = ""
+fn text_of(bytes: Bytes, from: i32, to: i32) -> text[254] {
+  var all: text[254] = ""
   for at in from..to { all += one_byte[bytes[at].value] }
   all
 }
@@ -440,6 +440,10 @@ system load_level() {
   Level.layers = read_background(Bytes, Back)
   let theme = section_line(Bytes, section(Bytes, "Theme", 0), 0)
   Level.theme = text_of(Bytes, theme + 2, line_end(Bytes, theme))
+  let name = section_line(Bytes, section(Bytes, "Name", 0), 0)
+  Level.name = text_of(Bytes, name + 2, line_end(Bytes, name))
+  let hint = section_line(Bytes, section(Bytes, "Hint", 0), 0)
+  Level.hint = text_of(Bytes, hint + 2, line_end(Bytes, hint))
   Level.ok = size > 0 && Level.time >= 0
   Level.idle = 0
 }

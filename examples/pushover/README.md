@@ -33,15 +33,29 @@ and what moves them as systems. It is being built; what is here so far:
   the ant with the domino it carries. `pictures.ent` is the game's own
   tables of where each picture is, written by `reference/make_tables.py`.
   A theme's list of blocks is read from its file.
-- `pushover.ent`: the game in a window: the original levels one after
-  another, the keys, 18 ticks a second, the sounds and each theme's
-  music.
+- `sets.ent`: the sets of levels, each a folder of the game's `levels`:
+  a set and a level of one are entities, read when the program starts.
+  Which levels were solved is kept in a file (`pushover.solved`, where
+  the program is started).
+- `menu.ent`: the windows over the game: the main menu, the choice of a
+  set and of a level (with what is solved in its colour), what is set
+  (the whole screen, the sounds, the music), what to do when a level is
+  left, solved, solved too late or lost, the help (what is to be done
+  or, once the time is up, the level's hint; the dominoes the level
+  has), and who made the game. A window's lines are entities, made when
+  it is opened.
+- `pushover.ent`: the game in a window: the menus, a level played with
+  the keys at 18 ticks a second, the sounds and each theme's music.
 
-Not here yet: the menus, the choice of a set of levels and of a level
-(and with it the list of what was solved), the help and the hints, the
-game's own font, the light that the game lays over a background, and the
-second version of the level files (all of the game's own levels are of
-the first).
+Not here yet: the players' profiles and the level editor (the main menu
+has neither), recordings written of what is played, the pages of the
+help where a level has more kinds of dominoes than fit, a set's authors
+in its description, the light that the game lays over a background, and
+the second version of the level files (all of the game's own levels are
+of the first). The game's font is FreeSans, which it does not bring
+along: a font of the machine is taken, or else the window's own. What
+was solved is kept by a level's file, not by a sum over the level as
+the game keeps it.
 
 ## Playing it
 
@@ -56,11 +70,12 @@ POV-Ray from a scene it has, when it is built. `pictures.sh` does that
 program is started where the game is, since it reads the game's `data`,
 `themes` and `levels`.
 
-The arrow keys walk and climb. The space bar takes the domino the ant
-stands in front of, and puts it down again. With up held the ant goes in
-among the dominoes, and there space with left or right pushes. R starts
-the level again, N and P go to the next level and the one before, Esc
-leaves.
+In a menu the arrow keys choose and Enter takes; Escape goes back. In a
+level the arrow keys walk and climb. The space bar takes the domino the
+ant stands in front of, and puts it down again. With up held the ant
+goes in among the dominoes, and there space with left or right pushes.
+Escape asks what now (go on, start again, what is set, back to the
+levels), F1 helps.
 
 ## Checked against the game
 
@@ -77,6 +92,10 @@ tick.
     examples/pushover/reference/build.sh
     examples/pushover/check/trace.sh            # all of them
     examples/pushover/check/trace.sh 010_a      # one, saying what differs
+
+The menus are gone through without a window by `check/menu.sh`: keys
+from a list, a level played by its recording to its end, and what each
+window holds written out.
 
 What is drawn is checked by eye, and without a window:
 `check/frame.sh finish/original/010_a 215 out.png` plays so many ticks

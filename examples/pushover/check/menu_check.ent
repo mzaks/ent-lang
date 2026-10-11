@@ -1,0 +1,165 @@
+// The menus gone through without a window, by keys from a list: after
+// each the window that is open is written (what the program is at, the
+// title, which line is chosen of how many, and the lines). A level that
+// is chosen is played by the recording "record.rec" to its end. Started
+// where the game is. See check/menu.sh.
+import console
+import window
+import sound
+import files
+import level
+import dominoes
+import ant
+import pictures
+import draw
+import sets
+import menu
+
+// A key (1 up, 2 down, 3 Enter, 4 Escape, 5 F1, 0 none), and how many
+// ticks of the recording are played after it.
+table script { key: i32, ticks: i32 } = [
+  { key: 0, ticks: 0 },      // the main menu
+  { key: 2, ticks: 0 },
+  { key: 3, ticks: 0 },      // what is set
+  { key: 2, ticks: 0 },
+  { key: 3, ticks: 0 },      // no sounds
+  { key: 4, ticks: 0 },      // back
+  { key: 1, ticks: 0 },
+  { key: 3, ticks: 0 },      // the sets
+  { key: 3, ticks: 0 },      // the levels of the first
+  { key: 3, ticks: 30 },     // the first level, played a little
+  { key: 5, ticks: 0 },      // help
+  { key: 4, ticks: 0 },
+  { key: 4, ticks: 0 },      // what now?
+  { key: 3, ticks: 600 },    // on, to the level's end
+  { key: 3, ticks: 0 },      // solved: the levels again
+  { key: 4, ticks: 0 },      // the sets
+  { key: 4, ticks: 0 },      // the main menu
+  { key: 1, ticks: 0 }
+]
+
+unique Step { at: i32, ticks: i32, tick: i32, over: bool }
+
+world {
+  Config.sounds = true
+  Config.music = true
+  Menu.mode = Mode.Main
+  Menu.fresh = true
+  Menu.set = -1
+  Play.entry = none
+  Recording.file = "record.rec"
+}
+
+system press() {
+  let key = script[Step.at].key
+  Pressed.up = key == 1
+  Pressed.down = key == 2
+  Pressed.enter = key == 3
+  Pressed.escape = key == 4
+  Pressed.help = key == 5
+  Step.ticks = script[Step.at].ticks
+  Play.due = false
+}
+
+system choose() {
+  if let path = Entry(Play.entry).path { Level.file = path }
+}
+
+system open_level() {
+  Play.load = false
+  Play.level = Level.ok
+}
+
+// A tick is due while a level is played and the step has ticks left.
+system pace() {
+  Pressed.up = false
+  Pressed.down = false
+  Pressed.enter = false
+  Pressed.escape = false
+  Pressed.help = false
+  let playing = Menu.mode == Mode.Play || Menu.mode == Mode.FailDelay
+  Play.due = playing && Step.ticks > 0
+  Game.keys = if Menu.mode == Mode.Play && Step.tick < len(Record) { Record[Step.tick].keys as i32 }
+              else { 0 }
+  if Play.due {
+    Step.ticks -= 1
+    Step.tick += 1
+  } else {
+    Step.ticks = 0
+  }
+}
+
+system follow() {
+  let result = Game.result
+  if Menu.mode == Mode.FailDelay {
+    if Play.delay > 0 { Play.delay -= 1 }
+    else {
+      Menu.mode = Mode.Failed
+      Menu.fresh = true
+    }
+  } else if Level.idle > 3 && result != UNDECIDED {
+    if result == SOLVED || result == SOLVED_LATE {
+      let mark = if result == SOLVED { 2 } else { 1 }
+      for e, level: mut Entry where e == Play.entry { level.solved max= mark }
+      Sets.save = true
+      Menu.mode = if result == SOLVED { Mode.Solved } else { Mode.Timeout }
+      Menu.fresh = true
+    } else {
+      Play.delay = 36
+      Menu.mode = Mode.FailDelay
+    }
+  }
+}
+
+system show() {
+  put("{Step.at}: {Menu.mode} \"{Menu.title}\" at {Menu.x},{Menu.y} {Menu.w}x{Menu.h} line {Menu.current} of {Menu.count}; tick {Step.tick} result {Game.result} sounds {Config.sounds}")
+  for l: Line by l.at where l.at < 4 || l.at == Menu.current {
+    put("   {l.at} [{l.kind}] {l.text as text[60]} {l.details as text[40]}")
+  }
+  Step.at += 1
+  Step.over = Step.at >= len(script)
+}
+
+system last() { flush() }
+
+schedule setup() {
+  load_sets()
+  load_record()
+}
+
+schedule key() {
+  press()
+  use_keys()
+  take_line() run_if Menu.done
+  choose() run_if Play.load
+  load_level() run_if Play.load
+  enter() run_if Play.load
+  open_level() run_if Play.load
+  make_window() run_if Menu.fresh
+}
+
+schedule played() {
+  pace()
+  hush() run_if Play.due
+  doors() run_if Play.due
+  act_ant() run_if Play.due
+  topple() run_if Play.due
+  decide_level() run_if Play.due
+  follow() run_if Play.due
+  tally() run_if Sets.save
+  write_solved() run_if Sets.save
+  make_window() run_if Menu.fresh
+}
+
+schedule said() { show() }
+schedule end() { last() }
+
+main {
+  setup()
+  loop {
+    key()
+    loop { played() } until Step.ticks == 0
+    said()
+  } until Step.over
+  end()
+}
