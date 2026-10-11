@@ -61,6 +61,7 @@ module.exports = grammar({
         $.main,
         $.default_capacity,
         $.capacity_of,
+        $.transient_of,
         $.asset,
       ),
 
@@ -75,6 +76,8 @@ module.exports = grammar({
 
     default_capacity: ($) => seq('default_capacity', $.integer),
     capacity_of: ($) => seq('capacity', field('of', $._name), $.integer),
+    // transient Name: not part of a saved world
+    transient_of: ($) => seq('transient', field('of', $._name)),
 
     capacity: ($) => seq('capacity', $.integer),
 
@@ -91,10 +94,11 @@ module.exports = grammar({
 
     // buffer Name { field: type, .. } capacity N
     buffer: ($) =>
-      seq('buffer', field('name', $.identifier), $.fields, $.capacity),
+      seq(optional('transient'), 'buffer', field('name', $.identifier),
+          $.fields, $.capacity),
 
     unique: ($) =>
-      seq('unique', field('name', $.identifier),
+      seq(optional('transient'), 'unique', field('name', $.identifier),
           choice($.fields, seq(':', field('type', $._type)))),
 
     enum: ($) =>

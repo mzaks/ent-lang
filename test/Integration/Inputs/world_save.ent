@@ -1,0 +1,54 @@
+// A world that is saved in its third frame and loaded in its seventh
+// (test/Integration/world_save.test).
+import world
+import console
+component Position { x: i32, y: i32 } capacity 16
+component Name { name: text[8] }
+buffer Trail { x: i32 } capacity 100
+transient buffer Scratch { v: i32 } capacity 100
+unique Step: i32
+unique Sum { x: i32, names: i32 }
+unique Score { points: i32 }
+transient unique Machine { frames: i32 }
+world { Saved.file = "w.sav" }
+system start() {
+  for i in 0..3 { spawn { Position { x: i, y: 0 }, Name { name: "e{i}" } } }
+}
+system move() {
+  Step += 1
+  Machine.frames += 1
+  Score.points += 10
+  for p: mut Position { p.x += 1 }
+  for e, p: Position where p.x == 5 { e.destroy() }
+  Trail += { x: Step }
+  Scratch += { v: Step }
+  if Step == 4 { spawn { Position { x: 100, y: 0 }, Name { name: "late" } } }
+}
+system report() {
+  Sum.x = 0
+  Sum.names = 0
+  for p: Position { Sum.x += p.x }
+  for n: Name { Sum.names += len(n.name) }
+  put("step {Step} machine {Machine.frames} score {Score.points} trail {len(Trail)} scratch {len(Scratch)} sum {Sum.x} names {Sum.names} ok {Saved.ok}")
+}
+unique Do { save: bool, load: bool }
+system plan() {
+  Do.save = Machine.frames == 3
+  Do.load = Machine.frames == 7
+}
+system missing() { Saved.file = "none.sav" }
+system back() { Saved.file = "w.sav" }
+schedule setup() { start() }
+schedule frame() {
+  move()
+  plan()
+  save_world() run_if Do.save
+  load_world() run_if Do.load
+  report()
+}
+schedule bad() { missing() load_world() report() back() }
+main {
+  setup()
+  loop { frame() } until Machine.frames >= 10
+  bad()
+}

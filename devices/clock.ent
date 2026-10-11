@@ -8,15 +8,16 @@
 // `wait_until` is implemented in devices/clock.c.
 
 // Seconds since the first tick, seconds since the previous one (0 in the
-// first frame), and the number of ticks so far.
-unique Time { now: f64, dt: f32, frame: i64 }
+// first frame), and the number of ticks so far. (The machine's, so
+// `transient`: a world that is loaded keeps the time it has.)
+transient unique Time { now: f64, dt: f32, frame: i64 }
 
 // Frames per second to hold: `tick` waits until the next frame is due.
 // 0 (the start) does not wait.
 unique FrameRate: f32
 
 // The machine's time at the first tick; the clock's own.
-unique Epoch: f64
+transient unique Epoch: f64
 
 // Waits until the machine's clock (seconds, from some moment in the past,
 // never going back) shows `due`, not at all if it already does, and gives

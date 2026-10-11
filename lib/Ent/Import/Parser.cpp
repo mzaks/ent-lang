@@ -12,6 +12,7 @@
 
 #include "Ent/EntDialect.h"
 #include "Ent/EntOps.h"
+#include "Ent/World.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -894,6 +895,8 @@ private:
   /// directory and before those of `-I`.
   SmallVector<std::string> directories;
   Lexer lexer;
+  /// Whether the declaration that is read now is marked `transient`.
+  bool transientNext = false;
   Token token;
   OpBuilder builder;
   ModuleOp module;
@@ -1043,6 +1046,30 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
 LogicalResult Parser::parseDeclarations() {
   while (!token.is(Token::Eof)) {
     LogicalResult result = success();
+    // `transient unique`, `transient buffer`: not part of a saved world.
+    transientNext = false;
+    if (token.isKeyword("transient") &&
+        (peek().isKeyword("unique") || peek().isKeyword("buffer"))) {
+      advance();
+      transientNext = true;
+    } else if (token.isKeyword("transient") && peek().is(Token::Identifier)) {
+      // transient Name: a unique or a buffer declared before, here or in
+      // an imported module, is not part of a saved world either.
+      advance();
+      llvm::SMLoc nameAt = token.loc;
+      FailureOr<std::string> name = identifier("a unique or a buffer");
+      if (failed(name))
+        return failure();
+      Operation *declared =
+          SymbolTable::lookupSymbolIn(module, symbol(*name).getAttr());
+      if (!declared || !isa<ResourceOp, BufferOp>(declared))
+        return error(nameAt, "'" + *name + "' is not a unique or a buffer "
+                             "declared before: only those can be "
+                             "'transient'");
+      declared->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
+      consumeIf(Token::Semicolon);
+      continue;
+    }
     if (consumeKeyword("component"))
       result = parseComponent(/*tag=*/false);
     else if (consumeKeyword("tag"))
@@ -2857,9 +2884,11 @@ LogicalResult Parser::parseBuffer() {
     names.push_back(builder.getStringAttr(field));
     types.push_back(TypeAttr::get(type));
   }
-  BufferOp::create(builder, loc(at), declareSymbol(at, *name),
-                   builder.getArrayAttr(names), builder.getArrayAttr(types),
-                   builder.getI64IntegerAttr(*capacity));
+  BufferOp declared = BufferOp::create(
+      builder, loc(at), declareSymbol(at, *name), builder.getArrayAttr(names),
+      builder.getArrayAttr(types), builder.getI64IntegerAttr(*capacity));
+  if (transientNext)
+    declared->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
   buffers[*name] = std::move(record);
   return success();
 }
@@ -3193,8 +3222,12 @@ LogicalResult Parser::parseUnique() {
     names.push_back(builder.getStringAttr(field));
     types.push_back(TypeAttr::get(type));
   }
-  ResourceOp::create(builder, loc(at), declareSymbol(at, *name),
-                     builder.getArrayAttr(names), builder.getArrayAttr(types));
+  ResourceOp declared =
+      ResourceOp::create(builder, loc(at), declareSymbol(at, *name),
+                         builder.getArrayAttr(names),
+                         builder.getArrayAttr(types));
+  if (transientNext)
+    declared->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
   uniques[*name] = std::move(record);
   return success();
 }

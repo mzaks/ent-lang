@@ -3904,6 +3904,10 @@
           "named": true
         },
         {
+          "type": "transient_of",
+          "named": true
+        },
+        {
           "type": "unique",
           "named": true
         },
@@ -4314,6 +4318,26 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "transient_of",
+    "named": true,
+    "fields": {
+      "of": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "qualified_name",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -5473,6 +5497,10 @@
   },
   {
     "type": "top",
+    "named": false
+  },
+  {
+    "type": "transient",
     "named": false
   },
   {

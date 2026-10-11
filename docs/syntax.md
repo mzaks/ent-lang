@@ -55,8 +55,8 @@ there (`Position`, `tick()`); there is no access control yet.
 A module with an implementation next to its `m.ent` is a device: that
 defines its extern procs and fns (and extern systems), and `tools/ent`
 builds and links it with the program. The compiler's own are in `devices/`
-(`console`, `clock`, `window`, `sound`, `files`, and `math`, see Math
-below), found
+(`console`, `clock`, `window`, `sound`, `files`, `world` (see Saving a
+world below), and `math`, see Math below), found
 without `-I` by `tools/ent`; each says in its `.ent` file how it is used. The
 implementation is any of:
 
@@ -1867,6 +1867,53 @@ modules it imports. A C host runs them with `ent_world_init(world)` after
 creating the world (and `ent_clock_world_init(world)` for a module
 `clock`). (It is a system `world_setup` run by a schedule `world_init`,
 which are therefore taken names.) A file has at most one `world`.
+
+## Saving a world
+
+```
+import world
+
+transient unique Menu { open: bool, line: i32 }
+transient buffer Screen { pixel: u8 } capacity 64000
+transient Bytes
+
+system choose() { Saved.file = "game.sav" }
+schedule slots() {
+  choose()
+  save_world() run_if Slot.save
+  load_world() run_if Slot.load
+}
+```
+
+- The module `world` (devices/world.ent) writes the world to the file
+  `Saved.file` names and reads it back: every entity with all it has,
+  the relations, the buffers and the uniques, as they are. A program
+  goes on from a loaded world exactly as it would have from the one that
+  was saved. `save_world` and `load_world` are steps of a schedule (extern
+  systems): between two systems the world is whole. `Saved.ok` says
+  whether the last one went well; a world that could not be read (no
+  such file, a file that ends early, another program's) is left as it
+  was.
+- `transient` before `unique` or `buffer` says that it is not part of a
+  saved world: it is not written, and a world that is loaded into keeps
+  it as it has it. For what belongs to the machine and not to the game
+  (the window device's `Window`, `Keys`, `Mouse`, the clock's `Time`),
+  what is read from files anyway, what is only for a frame, and what is
+  around the game (a menu). `transient Name` marks a unique or a buffer
+  declared before, here or in an imported module (`transient Bytes`).
+  Entities and relations are always saved, so every entity a saved field
+  names is there.
+- Of a column and of a buffer the rows in use are written; the rest of
+  the world as it is. The file starts with a number made of the layout of
+  what is saved (the names, the types, the capacities): after a change
+  to what the program declares its old files are refused. There is no
+  carrying a file over to a new layout yet.
+- A text of any length (`text`, see above) in a component or in a unique
+  that is not transient cannot be saved yet: such a text is kept apart
+  from the world. A program that imports `world` and has one is told so
+  when it is built. Texts of a given length are saved like any field.
+- For a C host the generated header has `ent_world_save(world, path)` and
+  `ent_world_load(world, path)`, which give a bool.
 
 ## The entry point
 

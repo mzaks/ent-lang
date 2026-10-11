@@ -3,6 +3,7 @@
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
 using namespace mlir::ent;
@@ -1118,4 +1119,144 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   }
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;
+}
+
+//===----------------------------------------------------------------------===//
+// Saving a world
+//===----------------------------------------------------------------------===//
+
+SmallVector<WorldPart, 0> WorldLayout::savedParts(std::string &why) const {
+  // What is not written whole: columns and buffers (their rows in use
+  // only), and what is transient (nothing of it; `each` 0 and no bytes
+  // kept marks those here).
+  struct Special {
+    uint64_t offset, bytes, countOffset, each;
+    bool skip;
+  };
+  SmallVector<Special, 0> special;
+  auto transient = [](Operation *op) {
+    return op->hasAttr(kTransientAttr);
+  };
+  auto bytesOf = [&](Type type) -> uint64_t {
+    if (isa<EntityType>(type))
+      return entities.idBits / 8;
+    return getStorageBytes(type);
+  };
+  for (const WorldArchetype &archetype : archetypes) {
+    uint64_t count = 8 * archetype.index;
+    for (const WorldColumn &column : archetype.columns) {
+      if (isa<StringType>(column.type)) {
+        why = ("'" + column.component.getValue() + "." +
+               column.field.getValue() + "' is a text of any length")
+                  .str();
+        return {};
+      }
+      uint64_t each = bytesOf(column.type);
+      special.push_back(
+          {column.offset, each * archetype.capacity, count, each, false});
+    }
+    if (entities.hasIds() && archetype.idOffset)
+      special.push_back({archetype.idOffset,
+                         uint64_t(entities.idBits / 8) * archetype.capacity,
+                         count, entities.idBits / 8, false});
+  }
+  for (const WorldResource &resource : resources)
+    for (const WorldResourceField &field : resource.fields) {
+      if (transient(resource.op)) {
+        special.push_back({field.offset, bytesOf(field.type), 0, 0, true});
+      } else if (isa<StringType>(field.type)) {
+        why = ("'" + ResourceOp(resource.op).getSymName() + "." +
+               field.field.getValue() + "' is a text of any length")
+                  .str();
+        return {};
+      }
+    }
+  for (const WorldBuffer &buffer : buffers) {
+    bool skip = transient(buffer.op);
+    if (skip)
+      special.push_back({buffer.countOffset, 8, 0, 0, true});
+    for (const WorldColumn &column : buffer.fields) {
+      uint64_t each = bytesOf(column.type);
+      special.push_back({column.offset, each * buffer.capacity,
+                         buffer.countOffset, each, skip});
+    }
+  }
+  // (The entity table: the slots that were ever used.)
+  if (entities.hasGenerations() && generationOffset)
+    special.push_back(
+        {generationOffset,
+         uint64_t(entities.generationStorageBits / 8) * entityCapacity,
+         nextSlotOffset, entities.generationStorageBits / 8, false});
+  if (entities.hasIds() && locationOffset)
+    special.push_back({locationOffset,
+                       uint64_t(entities.locationBits / 8) * entityCapacity,
+                       nextSlotOffset, entities.locationBits / 8, false});
+  llvm::sort(special, [](const Special &a, const Special &b) {
+    return a.offset < b.offset;
+  });
+
+  SmallVector<WorldPart, 0> parts;
+  uint64_t at = 0;
+  auto whole = [&](uint64_t to) {
+    if (to > at)
+      parts.push_back({at, to - at});
+    at = std::max(at, to);
+  };
+  for (const Special &entry : special) {
+    if (entry.bytes == 0)
+      continue;
+    // (Before a column is room that nothing is in: columns are set apart
+    // by it. It is left out where nothing else was put there.)
+    uint64_t before = entry.offset >= kStagger ? entry.offset - kStagger : 0;
+    whole(entry.each && before >= at ? before : entry.offset);
+    at = std::max(at, entry.offset);
+    if (!entry.skip)
+      parts.push_back(
+          {entry.offset, entry.bytes, entry.countOffset, entry.each});
+    at = std::max(at, entry.offset + entry.bytes);
+  }
+  whole(totalBytes);
+  return parts;
+}
+
+uint64_t WorldLayout::savedFingerprint() const {
+  std::string text;
+  llvm::raw_string_ostream os(text);
+  os << totalBytes << ";";
+  for (const WorldArchetype &archetype : archetypes) {
+    os << ArchetypeOp(archetype.op).getSymName() << ":" << archetype.capacity;
+    for (const WorldColumn &column : archetype.columns)
+      os << "," << column.component.getValue() << "."
+         << column.field.getValue() << ":" << column.type << "@"
+         << column.offset;
+    os << ";";
+  }
+  for (const WorldResource &resource : resources) {
+    os << ResourceOp(resource.op).getSymName();
+    for (const WorldResourceField &field : resource.fields)
+      os << "," << field.field.getValue() << ":" << field.type << "@"
+         << field.offset;
+    os << ";";
+  }
+  for (const WorldBuffer &buffer : buffers) {
+    os << cast<BufferOp>(buffer.op).getSymName() << ":" << buffer.capacity;
+    for (const WorldColumn &column : buffer.fields)
+      os << "," << column.field.getValue() << ":" << column.type << "@"
+         << column.offset;
+    os << ";";
+  }
+  for (const WorldRelation &relation : relations)
+    os << RelationOp(relation.op).getSymName() << ":" << relation.capacity
+       << ";";
+  std::string why;
+  for (const WorldPart &part : savedParts(why))
+    os << part.offset << "+" << part.bytes << "/" << part.each << "#"
+       << part.countOffset << ";";
+  // (FNV-1a.)
+  uint64_t hash = 0xcbf29ce484222325ull;
+  for (char c : os.str()) {
+    hash ^= uint8_t(c);
+    hash *= 0x100000001b3ull;
+  }
+  return hash;
 }

@@ -265,8 +265,8 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "// schedules on it.\n\n"
         "#ifndef ENT_GENERATED_WORLD_H\n"
         "#define ENT_GENERATED_WORLD_H\n\n"
-        "#include <stdbool.h>\n#include <stdint.h>\n#include <stdlib.h>\n"
-        "#include <string.h>\n";
+        "#include <stdbool.h>\n#include <stdint.h>\n#include <stdio.h>\n"
+        "#include <stdlib.h>\n#include <string.h>\n";
   emitLanguageOpen(os);
   os << "\ntypedef struct ent_world ent_world;\n\n";
   os << llvm::formatv("#define ENT_WORLD_BYTES {0}ull\n", layout->totalBytes);
@@ -313,6 +313,88 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
   os << "static inline void ent_world_destroy(ent_world *world) {\n"
         "  if (!world)\n    return;\n"
      << drops << "  free(world);\n}\n";
+
+  // A world written to a file and read back: the parts of the arena that
+  // are in use, in its order, after a number that says whose they are.
+  {
+    std::string why;
+    SmallVector<WorldPart, 0> parts = layout->savedParts(why);
+    if (parts.empty()) {
+      os << "\n// This world cannot be saved: " << why << ".\n"
+         << "#define ENT_WORLD_CANNOT_SAVE \"" << why << "\"\n";
+    } else {
+      os << "\n// A world is saved to a file and read back from one "
+            "(ent_world_save,\n// ent_world_load): all of it but what is "
+            "declared `transient`, which a\n// world that is loaded into "
+            "keeps as it has it. Of columns and buffers\n// the rows in "
+            "use are written. A file is read only by the program that\n"
+            "// wrote it, as it was built then: the number at its start "
+            "is another\n// for any other layout. A world that could not "
+            "be read whole is left as\n// it was.\n";
+      os << llvm::formatv("#define ENT_WORLD_FINGERPRINT {0:x}ull\n",
+                          layout->savedFingerprint());
+      os << "static const struct {\n  uint64_t offset, bytes, count, each;\n"
+            "} ent__world_parts[] = {\n";
+      for (const WorldPart &part : parts)
+        os << llvm::formatv("    {{{0}, {1}, {2}, {3}},\n", part.offset,
+                            part.bytes, part.countOffset, part.each);
+      os << "};\n"
+            "// (`how`: 0 writes the parts of `arena`, 1 reads them into "
+            "it, 2 copies\n// them into it from `from`.)\n"
+            "static inline bool ent__world_parts_pass(char *arena, const "
+            "char *from,\n                                         FILE "
+            "*file, int how) {\n"
+            "  const char *counts = how == 2 ? from : arena;\n"
+            "  size_t parts = sizeof ent__world_parts / sizeof "
+            "ent__world_parts[0];\n"
+            "  for (size_t part = 0; part < parts; ++part) {\n"
+            "    uint64_t offset = ent__world_parts[part].offset;\n"
+            "    uint64_t bytes = ent__world_parts[part].bytes;\n"
+            "    uint64_t each = ent__world_parts[part].each;\n"
+            "    if (each) {\n"
+            "      int64_t rows;\n"
+            "      memcpy(&rows, counts + ent__world_parts[part].count, 8);\n"
+            "      if (rows < 0 || (uint64_t)rows > bytes / each)\n"
+            "        return false;\n"
+            "      bytes = (uint64_t)rows * each;\n"
+            "    }\n"
+            "    if (bytes == 0)\n      continue;\n"
+            "    if (how == 2)\n"
+            "      memcpy(arena + offset, from + offset, bytes);\n"
+            "    else if ((how == 0 ? fwrite(arena + offset, 1, bytes, file)\n"
+            "                       : fread(arena + offset, 1, bytes, file)) "
+            "!= bytes)\n"
+            "      return false;\n"
+            "  }\n  return true;\n}\n"
+            "static inline bool ent_world_save(const ent_world *world, const "
+            "char *path) {\n"
+            "  FILE *file = fopen(path, \"wb\");\n"
+            "  if (!file)\n    return false;\n"
+            "  uint64_t head[2] = {0x646c726f77746e65ull, "
+            "ENT_WORLD_FINGERPRINT};\n"
+            "  bool written = fwrite(head, 8, 2, file) == 2 &&\n"
+            "                 ent__world_parts_pass((char *)world, NULL, "
+            "file, 0);\n"
+            "  return fclose(file) == 0 && written;\n}\n"
+            "static inline bool ent_world_load(ent_world *world, const char "
+            "*path) {\n"
+            "  FILE *file = fopen(path, \"rb\");\n"
+            "  if (!file)\n    return false;\n"
+            "  uint64_t head[2];\n"
+            "  bool read = fread(head, 8, 2, file) == 2 &&\n"
+            "              head[0] == 0x646c726f77746e65ull &&\n"
+            "              head[1] == ENT_WORLD_FINGERPRINT;\n"
+            "  // (Into memory of its own first, and from there only if all "
+            "of it came.)\n"
+            "  char *held = read ? (char *)malloc(ENT_WORLD_BYTES) : NULL;\n"
+            "  read = held && ent__world_parts_pass(held, NULL, file, 1) &&\n"
+            "         fgetc(file) == EOF;\n"
+            "  fclose(file);\n"
+            "  if (read)\n"
+            "    ent__world_parts_pass((char *)world, held, NULL, 2);\n"
+            "  free(held);\n  return read;\n}\n";
+    }
+  }
 
   // Texts: one struct per capacity some field has, laid out as the program
   // stores them.

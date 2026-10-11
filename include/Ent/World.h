@@ -514,6 +514,17 @@ struct EntityScheme {
   bool hasGenerations() const { return kind == Generational; }
 };
 
+/// A run of bytes of the arena that a saved world holds (see
+/// WorldLayout::savedParts): all `bytes` of it, or, where `each` is not
+/// zero, only its first rows: as many as the i64 at `countOffset` says,
+/// of `each` bytes.
+struct WorldPart {
+  uint64_t offset;
+  uint64_t bytes;
+  uint64_t countOffset = 0;
+  uint64_t each = 0;
+};
+
 /// Static layout of the whole world in one arena, computed from the
 /// archetypes' components and capacities and from the resources.
 ///
@@ -643,6 +654,19 @@ struct WorldLayout {
   SmallVector<std::pair<uint64_t, uint64_t>, 0> zeroed;
   /// Total size of the arena.
   uint64_t totalBytes = 0;
+
+  /// What a declaration is marked with that is not part of a saved world
+  /// (`transient unique`, `transient buffer`).
+  static constexpr llvm::StringLiteral kTransientAttr = "ent.transient";
+  /// What of the arena a saved world holds, in the arena's order:
+  /// everything, but the rows of columns and buffers beyond those in use,
+  /// and what is declared transient. Where the world holds something a
+  /// file cannot (a text of any length, which is an address), nothing,
+  /// and `why` says what.
+  SmallVector<WorldPart, 0> savedParts(std::string &why) const;
+  /// A number that is another for another layout of what is saved: a
+  /// file is read only by the program whose number it has.
+  uint64_t savedFingerprint() const;
 
   /// Computes the layout, or emits an error on `module` and fails if a
   /// field has a type the world cannot store.

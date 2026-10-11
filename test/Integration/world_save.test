@@ -1,0 +1,47 @@
+// A world is saved to a file and read back (devices/world.ent): the
+// entities, the buffers and the uniques are as they were when it was
+// saved, and the program goes on from there as it did the first time.
+// What is `transient` (here how many frames the machine ran, and a
+// buffer) is kept as the loading world has it.
+// RUN: rm -rf %t && mkdir -p %t && cd %t
+// RUN: %ent run %S/Inputs/world_save.ent | FileCheck %s
+
+// CHECK:      step 3 machine 3 score 30 trail 3 scratch 3 sum 7 names 4 ok true
+// CHECK-NEXT: step 4 machine 4 score 40 trail 4 scratch 4 sum 104 names 6 ok true
+// CHECK-NEXT: step 5 machine 5 score 50 trail 5 scratch 5 sum 101 names 4 ok true
+// CHECK-NEXT: step 6 machine 6 score 60 trail 6 scratch 6 sum 102 names 4 ok true
+// (Loaded: the third step again, an entity that was destroyed since is
+// back and one that was spawned since is gone, and the same follows.)
+// CHECK-NEXT: step 3 machine 7 score 30 trail 3 scratch 7 sum 7 names 4 ok true
+// CHECK-NEXT: step 4 machine 8 score 40 trail 4 scratch 8 sum 104 names 6 ok true
+// CHECK-NEXT: step 5 machine 9 score 50 trail 5 scratch 9 sum 101 names 4 ok true
+// CHECK-NEXT: step 6 machine 10 score 60 trail 6 scratch 10 sum 102 names 4 ok true
+// (A file that is not there: the world is as it was.)
+// CHECK-NEXT: step 6 machine 10 score 60 trail 6 scratch 10 sum 102 names 4 ok false
+
+// A file of the program as it was built with another layout is refused,
+// and the world left as it is: this one never saves, and finds the
+// first one's file.
+// RUN: sed 's/capacity 16/capacity 32/; s/Machine.frames == 3/false/' %S/Inputs/world_save.ent > %t/other.ent
+// RUN: %ent run %t/other.ent | FileCheck %s --check-prefix=OTHER
+// OTHER:      step 6 machine 6 score 60 {{.*}} ok false
+// OTHER-NEXT: step 7 machine 7 score 70 {{.*}} ok false
+
+// A text of any length is kept apart from the world: a program that has
+// one in what would be saved is told so when it is built.
+// RUN: sed 's/^import console/import console  import text/; s/unique Step: i32/unique Step: i32  unique Note { words: text }/' %S/Inputs/world_save.ent > %t/note.ent
+// RUN: not %ent build %t/note.ent -o %t/note 2>&1 | FileCheck %s --check-prefix=NOTE
+// NOTE: this program's world cannot be saved yet
+// (Transient, it is no trouble.)
+// RUN: sed 's/^import console/import console  import text/; s/unique Step: i32/unique Step: i32  transient unique Note { words: text }/' %S/Inputs/world_save.ent > %t/kept.ent
+// RUN: %ent build %t/kept.ent -o %t/kept
+
+// In the IR the mark is an attribute, and C gets the two functions.
+// RUN: ent-translate --import-ent %S/Inputs/world_save.ent -I %S/../../devices -o %t/w.mlir
+// RUN: FileCheck %s --check-prefix=IR < %t/w.mlir
+// IR-DAG: ent.resource @Machine (frames: i32) {ent.transient}
+// IR-DAG: ent.buffer @Scratch (v: i32) capacity 100 {ent.transient}
+// RUN: ent-translate --ent-to-c-header %t/w.mlir | FileCheck %s --check-prefix=HEADER
+// HEADER: #define ENT_WORLD_FINGERPRINT
+// HEADER: static inline bool ent_world_save(const ent_world *world, const char *path)
+// HEADER: static inline bool ent_world_load(ent_world *world, const char *path)

@@ -84,7 +84,7 @@ extern proc voice_on(voice: i32) -> bool
 //   let wanted = stream_wants(44100)
 //   .. Heights += { value: .. }, `wanted` times ..
 //   stream(Heights, wanted, 44100, 0.8)
-buffer Heights { value: i16 } capacity 16384
+transient buffer Heights { value: i16 } capacity 16384
 extern proc stream(from: Heights, count: i32, rate: i32, volume: f32)
 extern proc stream_wants(rate: i32) -> i32
 

@@ -111,6 +111,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "transient_of"
+        },
+        {
+          "type": "SYMBOL",
           "name": "asset"
         }
       ]
@@ -205,6 +209,23 @@
         {
           "type": "SYMBOL",
           "name": "integer"
+        }
+      ]
+    },
+    "transient_of": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "transient"
+        },
+        {
+          "type": "FIELD",
+          "name": "of",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_name"
+          }
         }
       ]
     },
@@ -394,6 +415,18 @@
       "type": "SEQ",
       "members": [
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "transient"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "STRING",
           "value": "buffer"
         },
@@ -418,6 +451,18 @@
     "unique": {
       "type": "SEQ",
       "members": [
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "transient"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
         {
           "type": "STRING",
           "value": "unique"

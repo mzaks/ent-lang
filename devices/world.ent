@@ -1,0 +1,41 @@
+// A world saved to a file and read back: all the program's entities,
+// buffers and uniques as they are, so that it goes on from a loaded
+// world exactly as it would have from the one that was saved.
+//
+//   import world
+//   system choose() { Saved.file = "game.sav" }
+//   schedule slots() {
+//     choose()
+//     save_world() run_if Slot.save
+//     load_world() run_if Slot.load
+//   }
+//
+// `save_world` and `load_world` are steps of a schedule: between two
+// systems the world is whole. `Saved.ok` says whether it went well; a
+// world that could not be read is left as it was.
+//
+// What is declared `transient` is not saved, and a world that is loaded
+// into keeps it as it has it: what belongs to the machine and not to
+// the game (a window, the keys that are down), what is read from files
+// anyway, what is only for a frame.
+//
+//   transient unique Window { .. }
+//   transient buffer Pixels { color: i32 } capacity 64000
+//
+// Of columns and buffers only the rows in use are written. A file is
+// read only by the program that wrote it, as it was built then: after a
+// change to what the program declares, its old files are refused.
+//
+// A program with a text of any length in a component or a unique that is
+// not transient cannot be saved yet (such a text is kept apart from the
+// world); texts of a given length (`text[32]`) can.
+//
+// Implemented in devices/world.c, with what the compiler writes into the
+// world's header for C (ent_world_save, ent_world_load).
+
+// The file to write or read (where the program was started, or a path),
+// and how the last `save_world` or `load_world` went.
+transient unique Saved { file: text[126], ok: bool }
+
+extern system save_world()
+extern system load_world()
