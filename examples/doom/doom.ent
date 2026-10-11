@@ -62,8 +62,10 @@ world {
   View.blocks = 9
 }
 
-// The keys of this tic as a demo has them (of G_BuildTiccmd): one row
-// more for the player to be moved by. So what is played is a demo too.
+// The keys of this tic as a demo has them (of G_BuildTiccmd): the one
+// row for the player to be moved by. So what is played is a demo of one
+// tic, made anew each tic: the tics before are not kept, and a game can
+// go on as long as it likes.
 system read_keys() {
   let run = key_down(340) || key_down(344)
   var forward = 0
@@ -82,6 +84,8 @@ system read_keys() {
       change = BT_CHANGE | i << BT_WEAPONSHIFT
     }
   }
+  Ticcmds = []
+  Demo.tic = 0
   Ticcmds += {
     forwardmove: forward, sidemove: side, angleturn: turn,
     // (The left Ctrl key shoots.)
