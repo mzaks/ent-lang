@@ -1906,8 +1906,11 @@ schedule slots() {
 - Of a column and of a buffer the rows in use are written; the rest of
   the world as it is. The file starts with a number made of the layout of
   what is saved (the names, the types, the capacities): after a change
-  to what the program declares its old files are refused. There is no
-  carrying a file over to a new layout yet.
+  to what the program declares of that, its old files are refused.
+  What is transient is no part of it: transient uniques and buffers are
+  kept after all that is saved, and can be changed, added and taken
+  away with the old files still read. There is no carrying a file over
+  to a new layout yet.
 - A text of any length (`text`, see above) in a component or in a unique
   that is not transient cannot be saved yet: such a text is kept apart
   from the world. A program that imports `world` and has one is told so

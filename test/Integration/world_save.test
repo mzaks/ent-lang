@@ -27,6 +27,15 @@
 // OTHER:      step 6 machine 6 score 60 {{.*}} ok false
 // OTHER-NEXT: step 7 machine 7 score 70 {{.*}} ok false
 
+// What is transient is no part of the layout that a file is of: with
+// another transient buffer and unique, and one of them bigger, the
+// program still reads the first one's file.
+// RUN: sed 's/Machine.frames == 3/false/; s/^transient buffer Scratch { v: i32 } capacity 100/transient buffer Scratch { v: i32 } capacity 200  transient unique Extra { a: i64, b: bool }  transient buffer More { z: u8 } capacity 5000/; s/^transient unique Machine { frames: i32 }/transient unique Machine { frames: i32, more: i64 }/' %S/Inputs/world_save.ent > %t/grown.ent
+// RUN: %ent run %t/grown.ent | FileCheck %s --check-prefix=GROWN
+// GROWN:      step 6 machine 6 score 60 trail 6 scratch 6 sum 102 names 4 ok false
+// GROWN-NEXT: step 3 machine 7 score 30 trail 3 scratch 7 sum 7 names 4 ok true
+// GROWN-NEXT: step 4 machine 8 score 40 trail 4 scratch 8 sum 104 names 6 ok true
+
 // A text of any length is kept apart from the world: a program that has
 // one in what would be saved is told so when it is built.
 // RUN: sed 's/^import console/import console  import text/; s/unique Step: i32/unique Step: i32  unique Note { words: text }/' %S/Inputs/world_save.ent > %t/note.ent

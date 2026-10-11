@@ -654,6 +654,10 @@ struct WorldLayout {
   SmallVector<std::pair<uint64_t, uint64_t>, 0> zeroed;
   /// Total size of the arena.
   uint64_t totalBytes = 0;
+  /// Where what a saved world holds ends: the uniques and buffers that
+  /// are transient are all after it, so that they can be changed, added
+  /// and taken away and a world saved before is still read.
+  uint64_t savedBytes = 0;
 
   /// What a declaration is marked with that is not part of a saved world
   /// (`transient unique`, `transient buffer`).

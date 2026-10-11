@@ -364,9 +364,13 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     return getStorageBytes(type);
   };
 
-  for (ResourceOp resource : module.getOps<ResourceOp>()) {
-    WorldResource entry;
-    entry.op = resource;
+  // What is transient is put after all that a saved world holds (see
+  // `savedBytes`), so that it can change and a file saved before is still
+  // read: the uniques and buffers marked so are passed over here and
+  // placed last.
+  auto transient = [](Operation *op) { return op->hasAttr(kTransientAttr); };
+  auto placeResource = [&](WorldResource &entry) -> LogicalResult {
+    ResourceOp resource(entry.op);
     end = llvm::alignTo(end, kColumnAlignment);
     for (auto [name, typeAttr] :
          llvm::zip(resource.getFieldNames(), resource.getFieldTypes())) {
@@ -380,6 +384,13 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       entry.fields.push_back({cast<StringAttr>(name), type, offset});
       end = offset + bytes;
     }
+    return success();
+  };
+  for (ResourceOp resource : module.getOps<ResourceOp>()) {
+    WorldResource entry;
+    entry.op = resource;
+    if (!transient(resource) && failed(placeResource(entry)))
+      return failure();
     layout.resources.push_back(std::move(entry));
   }
   auto needsPending = [&](const WorldArchetype &archetype) {
@@ -440,9 +451,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     WorldBuffer entry;
     entry.op = buffer;
     entry.capacity = buffer.getCapacity();
-    end = llvm::alignTo(end, 8);
-    entry.countOffset = end;
-    end += 8;
+    if (!transient(buffer)) {
+      end = llvm::alignTo(end, 8);
+      entry.countOffset = end;
+      end += 8;
+    }
     layout.buffers.push_back(std::move(entry));
   }
   end = llvm::alignTo(end, 8);
@@ -1012,7 +1025,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   // Buffers: a column per field. And the rows appended inside queries:
   // per row whether it added one, and the values, for each archetype the
   // query matches.
-  for (WorldBuffer &buffer : layout.buffers) {
+  auto placeBuffer = [&](WorldBuffer &buffer) {
     BufferOp op(buffer.op);
     for (auto [fieldName, typeAttr] :
          llvm::zip(op.getFieldNames(), op.getFieldTypes())) {
@@ -1022,7 +1035,10 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       buffer.fields.push_back(
           {op.getSymNameAttr(), cast<StringAttr>(fieldName), type, offset});
     }
-  }
+  };
+  for (WorldBuffer &buffer : layout.buffers)
+    if (!transient(buffer.op))
+      placeBuffer(buffer);
   module.walk([&](AppendOp append) {
     auto query = append->getParentOfType<QueryOp>();
     if (!query)
@@ -1117,6 +1133,21 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     layout.zeroed.push_back({end, WorldLayout::kNothingBytes});
     end += WorldLayout::kNothingBytes;
   }
+  // Here ends what a saved world holds; the rest is transient.
+  layout.savedBytes = llvm::alignTo(end, kArenaAlignment);
+  end = layout.savedBytes;
+  for (WorldResource &resource : layout.resources)
+    if (transient(resource.op) && failed(placeResource(resource)))
+      return failure();
+  for (WorldBuffer &buffer : layout.buffers)
+    if (transient(buffer.op)) {
+      end = llvm::alignTo(end, 8);
+      buffer.countOffset = end;
+      end += 8;
+    }
+  for (WorldBuffer &buffer : layout.buffers)
+    if (transient(buffer.op))
+      placeBuffer(buffer);
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;
 }
@@ -1127,8 +1158,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
 
 SmallVector<WorldPart, 0> WorldLayout::savedParts(std::string &why) const {
   // What is not written whole: columns and buffers (their rows in use
-  // only), and what is transient (nothing of it; `each` 0 and no bytes
-  // kept marks those here).
+  // only). What is transient is after `savedBytes`, and nothing of it is
+  // written.
   struct Special {
     uint64_t offset, bytes, countOffset, each;
     bool skip;
@@ -1163,7 +1194,7 @@ SmallVector<WorldPart, 0> WorldLayout::savedParts(std::string &why) const {
   for (const WorldResource &resource : resources)
     for (const WorldResourceField &field : resource.fields) {
       if (transient(resource.op)) {
-        special.push_back({field.offset, bytesOf(field.type), 0, 0, true});
+        // (After `savedBytes`: no part of what is saved.)
       } else if (isa<StringType>(field.type)) {
         why = ("'" + ResourceOp(resource.op).getSymName() + "." +
                field.field.getValue() + "' is a text of any length")
@@ -1172,13 +1203,12 @@ SmallVector<WorldPart, 0> WorldLayout::savedParts(std::string &why) const {
       }
     }
   for (const WorldBuffer &buffer : buffers) {
-    bool skip = transient(buffer.op);
-    if (skip)
-      special.push_back({buffer.countOffset, 8, 0, 0, true});
+    if (transient(buffer.op))
+      continue;
     for (const WorldColumn &column : buffer.fields) {
       uint64_t each = bytesOf(column.type);
       special.push_back({column.offset, each * buffer.capacity,
-                         buffer.countOffset, each, skip});
+                         buffer.countOffset, each, false});
     }
   }
   // (The entity table: the slots that were ever used.)
@@ -1215,14 +1245,16 @@ SmallVector<WorldPart, 0> WorldLayout::savedParts(std::string &why) const {
           {entry.offset, entry.bytes, entry.countOffset, entry.each});
     at = std::max(at, entry.offset + entry.bytes);
   }
-  whole(totalBytes);
+  whole(savedBytes);
   return parts;
 }
 
 uint64_t WorldLayout::savedFingerprint() const {
   std::string text;
   llvm::raw_string_ostream os(text);
-  os << totalBytes << ";";
+  // (Of what is saved only: what is transient is neither named here nor
+  // in the way of anything that is, so it changes nothing.)
+  os << savedBytes << ";";
   for (const WorldArchetype &archetype : archetypes) {
     os << ArchetypeOp(archetype.op).getSymName() << ":" << archetype.capacity;
     for (const WorldColumn &column : archetype.columns)
@@ -1232,6 +1264,8 @@ uint64_t WorldLayout::savedFingerprint() const {
     os << ";";
   }
   for (const WorldResource &resource : resources) {
+    if (resource.op->hasAttr(kTransientAttr))
+      continue;
     os << ResourceOp(resource.op).getSymName();
     for (const WorldResourceField &field : resource.fields)
       os << "," << field.field.getValue() << ":" << field.type << "@"
@@ -1239,6 +1273,8 @@ uint64_t WorldLayout::savedFingerprint() const {
     os << ";";
   }
   for (const WorldBuffer &buffer : buffers) {
+    if (buffer.op->hasAttr(kTransientAttr))
+      continue;
     os << cast<BufferOp>(buffer.op).getSymName() << ":" << buffer.capacity;
     for (const WorldColumn &column : buffer.fields)
       os << "," << column.field.getValue() << ":" << column.type << "@"
