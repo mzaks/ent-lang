@@ -1,0 +1,27 @@
+// A buffer's field may be an entity (Inputs/buffer_entities.ent): a grid
+// of who stands where, which a fn or proc reads to find the entity it
+// then reads or changes. A row the buffer has not, and one that was
+// given `none`, are nobody. The ids are saved with a world like any
+// field's.
+// RUN: rm -rf %t && mkdir -p %t && cd %t
+// RUN: %ent run %S/Inputs/buffer_entities.ent | FileCheck %s
+
+// CHECK:      no row: none
+// CHECK-NEXT: empty row: none
+// CHECK-NEXT: seen 0 is at 0
+// CHECK-NEXT: seen 1 is at 2
+// CHECK-NEXT: seen 2 is at 4
+// CHECK-NEXT: a stone knows its place 0
+// CHECK-NEXT: a stone knows its place 2
+// CHECK-NEXT: a stone knows its place 4
+// CHECK-NEXT: 0: kind 1
+// CHECK-NEXT: 2: kind 12
+// CHECK-NEXT: 4: kind 13
+// CHECK-NEXT: 2 was destroyed: its id finds nothing
+// CHECK-NEXT: loaded: 4 has kind 13, ok true
+// CHECK-NOT:  {{.}}
+
+// Such a buffer is the program's own: it is not handed to C.
+// RUN: sed 's/^fn who_at/extern proc show(them: Grid)\nfn who_at/' %S/Inputs/buffer_entities.ent > %t/handed.ent
+// RUN: not %ent run %t/handed.ent 2>&1 | FileCheck %s --check-prefix=HANDED
+// HANDED: 'who' is an entity: a buffer that says which entities is the program's own, and is not handed to C

@@ -1553,7 +1553,8 @@ A buffer is a list of rows that the program fills: where many things go
 to a device at once (all there is to draw), in place of a call for each.
 
 - `buffer Name { field: type, ... } capacity N`, at the top level. A
-  field is a number, a bool or an enum. It holds at most `N` rows; a row
+  field is a number, a bool, an enum or an entity. It holds at most `N`
+  rows; a row
   more stops the program, which says so. `capacity Name N` gives a
   buffer that was declared before, a module's too, another capacity.
 - `Name += { field: value, ... }` gives it a row after those it has:
@@ -1698,6 +1699,27 @@ name, and the argument is the component, by its name.
 Not yet: a text of such an entity read or set; `e.destroy()`, `add` and
 `remove` of an entity that is not the one a `for` visits; `with` and
 `without` on the `for`; an arrow or an edge in a fn or proc.
+
+A buffer's field may say which entity (`who: entity`), as a field of a
+component may: a grid of who stands where, a list of who was hit.
+
+```
+buffer Grid { who: entity } capacity 500
+component Stone { cell: i32, kind: i32 }
+
+proc push(grid: Grid, stones: mut Stone, cell: i32) {
+  let next = grid[cell + 1].who            // `none` where nobody stands
+  stones[next].kind += 1                   // which changes nothing
+}
+```
+
+- It is given an entity like any field (`Grid[cell].who = e`, `who:
+  none`), and is `none` in a row the buffer has not.
+- What it holds is an id, which says nothing of whether the entity is
+  still there: one that was destroyed is found no more
+  (`if let`, or nought through a component a fn or proc was given).
+- Such a buffer is the program's own, and is not handed to an `extern
+  proc`: C is given values, not entities.
 
 The window (`devices/window.ent`) has one, `Shapes`, and a system
 `shapes` that draws its rows with one call: `examples/swarm` draws all

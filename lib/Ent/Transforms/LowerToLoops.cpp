@@ -12448,8 +12448,10 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
             rewriter, loc,
             rewriter.getFloatAttr(stored.getType(), 0.0));
       else
-        nought = arith::ConstantIntOp::create(rewriter, loc,
-                                              stored.getType(), 0);
+        // (Of an entity: nobody, whose id is all ones.)
+        nought = arith::ConstantIntOp::create(
+            rewriter, loc, stored.getType(),
+            isa<EntityType>(at.getResult().getType()) ? -1 : 0);
       rewriter.replaceOp(
           op, world.fromStorage(
                   loc,

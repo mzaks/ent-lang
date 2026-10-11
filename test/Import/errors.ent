@@ -1303,7 +1303,7 @@ buffer Marks { at: f32 }
 
 // -----
 
-// expected-error @+1 {{'name': a buffer's fields are numbers, bools and enums}}
+// expected-error @+1 {{'name': a buffer's fields are numbers, bools, enums and entities}}
 buffer Marks { name: text[8] } capacity 8
 
 // -----

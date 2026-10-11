@@ -367,10 +367,10 @@ LogicalResult BufferOp::verify() {
   for (auto [name, type] :
        llvm::zip(getFieldNames().getAsValueRange<StringAttr>(),
                  getFieldTypes().getAsValueRange<TypeAttr>()))
-    if (!isa<IntegerType, FloatType, EnumType>(type))
+    if (!isa<IntegerType, FloatType, EnumType, EntityType>(type))
       return emitOpError("field '")
              << name << "' has type " << type
-             << "; a buffer's fields are numbers, bools and enums";
+             << "; a buffer's fields are numbers, bools, enums and entities";
   return success();
 }
 Type BufferOp::getFieldType(StringRef name) {

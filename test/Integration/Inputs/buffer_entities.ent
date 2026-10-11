@@ -1,0 +1,63 @@
+// A buffer whose rows say which entity: a grid of who stands where.
+import console
+import world
+
+component Stone { cell: i32, kind: i32 } capacity 16
+buffer Grid { who: entity, n: i32 } capacity 16
+buffer Seen { who: entity } capacity 16
+
+fn who_at(grid: Grid, cell: i32) -> entity { grid[cell].who }
+
+proc place(grid: mut Grid, stones: mut Stone, cell: i32, kind: i32) {
+  let e = spawn { Stone { cell: cell, kind: kind } }
+  grid[cell].who = e
+}
+
+proc bump(grid: Grid, stones: mut Stone, cell: i32) {
+  let e = who_at(grid, cell)
+  stones[e].kind += 10
+}
+
+system setup() {
+  Grid = [{ who: none, n: 0 }; 8]
+  place(Grid, Stone, 0, 1)
+  place(Grid, Stone, 2, 2)
+  place(Grid, Stone, 4, 3)
+}
+
+system look() {
+  if Grid[99].who == none { put("no row: none") }
+  if Grid[1].who == none { put("empty row: none") }
+  for e, s: Stone { Seen += { who: e } }
+  for i in 0..len(Seen) {
+    if Seen[i].who == who_at(Grid, i * 2) { put("seen {i} is at {i * 2}") }
+  }
+  for e, s: Stone where Grid[s.cell].who == e { put("a stone knows its place {s.cell}") }
+}
+
+// Each in its turn changes the one two cells on, found by the grid.
+system turns() {
+  for e, s: mut Stone in turn by s.cell {
+    bump(Grid, Stone, s.cell + 2)
+    put("{s.cell}: kind {s.kind}")
+  }
+  for e, s: Stone where s.cell == 2 { e.destroy() }
+}
+
+system after() {
+  let gone = Grid[2].who
+  if let cell = Stone(gone).cell { put("still there {cell}") }
+  else { put("2 was destroyed: its id finds nothing") }
+  Saved.file = "grid.sav"
+}
+
+system wipe() { Grid = [{ who: none, n: 0 }; 8] }
+
+system back() {
+  let e = Grid[4].who
+  if let kind = Stone(e).kind { put("loaded: 4 has kind {kind}, ok {Saved.ok}") }
+  else { put("loaded: nothing") }
+}
+
+schedule go() { setup() look() turns() after() save_world() wipe() load_world() back() }
+main { go() }

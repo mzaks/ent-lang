@@ -2866,9 +2866,9 @@ LogicalResult Parser::parseBuffer() {
   if (record.fields.empty())
     return error(fieldsAt, "a buffer's rows have fields");
   for (auto &[field, type] : record.fields)
-    if (!isa<IntegerType, FloatType, EnumType>(type))
+    if (!isa<IntegerType, FloatType, EnumType, EntityType>(type))
       return error(fieldsAt, "'" + field + "': a buffer's fields are "
-                             "numbers, bools and enums");
+                             "numbers, bools, enums and entities");
   if (!token.isKeyword("capacity"))
     return error(at, "a buffer says how many rows it holds at most: 'capacity "
                  "N' (a program gives a module's another with 'capacity " +
@@ -3398,6 +3398,13 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
       if (changed && !proc)
         return error(typeAt, "a fn only computes: it reads a buffer it is "
                              "given, and a proc may change one ('mut')");
+      if (isExtern)
+        for (auto &[field, fieldType] :
+             buffers.ofSymbol(handed.getName().getValue()).fields)
+          if (isa<EntityType>(fieldType))
+            return error(typeAt, "'" + field + "' is an entity: a buffer "
+                                 "that says which entities is the "
+                                 "program's own, and is not handed to C");
       *type = BufferType::get(context, handed.getName(), changed);
     } else if (changed) {
       return error(typeAt, "'mut' is of a buffer a proc is given to "

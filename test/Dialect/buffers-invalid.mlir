@@ -1,6 +1,6 @@
 // RUN: ent-opt %s -split-input-file -verify-diagnostics
 
-// expected-error @+1 {{field 'name' has type '!ent.text<8>'; a buffer's fields are numbers, bools and enums}}
+// expected-error @+1 {{field 'name' has type '!ent.text<8>'; a buffer's fields are numbers, bools, enums and entities}}
 ent.buffer @B (name: !ent.text<8>) capacity 4
 
 // -----
