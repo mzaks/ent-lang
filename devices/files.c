@@ -45,3 +45,22 @@ bool ent_files_write_bytes(const ent_text126 *name, int32_t count,
   bool written = fwrite(value + first, 1, (size_t)wanted, to) == (size_t)wanted;
   return fclose(to) == 0 && written;
 }
+
+int32_t ent_files_read_bytes(const ent_text126 *name, int32_t *count,
+                             int32_t capacity, uint8_t *value, int32_t first,
+                             int32_t wanted) {
+  char path[127];
+  (void)capacity;
+  if (first < 0 || wanted < 0 || (int64_t)first + wanted > *count)
+    return -1;
+  memcpy(path, name->bytes, name->length);
+  path[name->length] = 0;
+  // (As `write_bytes` writes it: where the program was started, or where
+  // a whole path says; not looked for elsewhere.)
+  FILE *from = fopen(path, "rb");
+  if (!from)
+    return -1;
+  size_t got = fread(value + first, 1, (size_t)wanted, from);
+  fclose(from);
+  return (int32_t)got;
+}
