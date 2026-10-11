@@ -935,6 +935,14 @@ int32_t ent_window_blend(int32_t from, int32_t to, float part) {
 
 float ent_window_mouse_wheel_x(void) { return GetMouseWheelMoveV().x; }
 float ent_window_mouse_wheel_y(void) { return GetMouseWheelMoveV().y; }
+float ent_window_mouse_dx(void) { return GetMouseDelta().x; }
+float ent_window_mouse_dy(void) { return GetMouseDelta().y; }
+void ent_window_grab_mouse(bool grab) {
+  if (grab)
+    DisableCursor();
+  else
+    EnableCursor();
+}
 
 // The rectangle drawing is clipped to, if any: set again only where it
 // is another, since setting it sends what was drawn so far on its way.

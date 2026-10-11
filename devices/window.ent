@@ -45,14 +45,20 @@ transient unique Window {
   width: i32, height: i32, title: text[62], background: i32, fps: i32,
   open: bool, closed: bool, dt: f32, frame: i64, resizable: bool,
   fullscreen: bool, min_width: i32, min_height: i32, scale: f32, zoom: f32,
-  escape: bool
+  escape: bool, grab: bool
 }
 
 // Where the mouse is, and which of its buttons are down.
 // (`wheel_x`, `wheel_y`: how far the wheel was turned since the frame
 // before, in notches; up and to the left are positive.)
+// `dx`, `dy`: how far the mouse moved since the frame before, to the
+// right and down. With `Window.grab` set the pointer is not shown and
+// stays in the window however far the mouse moves, so that `dx` and `dy`
+// can turn a view around; `grabbed` is whether it is so now (in the
+// frame it changes, `dx` and `dy` are 0).
 transient unique Mouse {
-  x: f32, y: f32, left: bool, right: bool, wheel_x: f32, wheel_y: f32
+  x: f32, y: f32, left: bool, right: bool, wheel_x: f32, wheel_y: f32,
+  middle: bool, dx: f32, dy: f32, grabbed: bool
 }
 
 // The keys most programs ask for: down or not.
@@ -207,6 +213,10 @@ extern proc mouse_y() -> f32
 extern proc mouse_down(button: i32) -> bool
 extern proc mouse_wheel_x() -> f32
 extern proc mouse_wheel_y() -> f32
+extern proc mouse_dx() -> f32
+extern proc mouse_dy() -> f32
+// The pointer hidden and held in the window, or as it is again.
+extern proc grab_mouse(grab: bool)
 
 system begin() {
   if !Window.open {
@@ -235,6 +245,16 @@ system begin() {
   Mouse.right = mouse_down(1)
   Mouse.wheel_x = mouse_wheel_x()
   Mouse.wheel_y = mouse_wheel_y()
+  Mouse.middle = mouse_down(2)
+  if Window.grab != Mouse.grabbed {
+    grab_mouse(Window.grab)
+    Mouse.grabbed = Window.grab
+    Mouse.dx = 0.0
+    Mouse.dy = 0.0
+  } else {
+    Mouse.dx = mouse_dx()
+    Mouse.dy = mouse_dy()
+  }
   Keys.right = key_down(262)
   Keys.left = key_down(263)
   Keys.down = key_down(264)
