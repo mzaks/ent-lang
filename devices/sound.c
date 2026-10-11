@@ -7,6 +7,7 @@
 
 #include <math.h>
 #include <raylib.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -153,6 +154,66 @@ void ent_sound_voice(int32_t place, int32_t count, const uint8_t *value,
   ent_sound_placed[place] = true;
   ent_sound_voice_set(place, volume, side);
   PlaySound(ent_sound_places[place]);
+}
+
+// The sound a program makes as it goes: what it hands on waits in a ring
+// until the machine asks for it. (Raylib asks from a thread of its own:
+// the program only moves `ent_stream_in`, that thread only
+// `ent_stream_out`.)
+enum { ENT_STREAM_RING = 65536 };
+static AudioStream ent_stream;
+static bool ent_stream_open;
+static int16_t ent_stream_ring[ENT_STREAM_RING];
+static atomic_uint ent_stream_in, ent_stream_out;
+
+static void ent_stream_fill(void *buffer, unsigned int frames) {
+  int16_t *to = buffer;
+  unsigned out = atomic_load(&ent_stream_out);
+  unsigned in = atomic_load(&ent_stream_in);
+  for (unsigned i = 0; i < frames; ++i)
+    // (Run dry: silence, until there is more.)
+    to[i] = out != in ? ent_stream_ring[out++ % ENT_STREAM_RING] : 0;
+  atomic_store(&ent_stream_out, out);
+}
+
+static bool ent_stream_ready(int32_t rate) {
+  if (!ent_sound_ready() || rate < 1000 || rate > 192000)
+    return false;
+  if (!ent_stream_open) {
+    ent_stream = LoadAudioStream((unsigned)rate, 16, 1);
+    if (!IsAudioStreamValid(ent_stream))
+      return false;
+    SetAudioStreamCallback(ent_stream, ent_stream_fill);
+    PlayAudioStream(ent_stream);
+    ent_stream_open = true;
+  }
+  return true;
+}
+
+int32_t ent_sound_stream_wants(int32_t rate) {
+  if (!ent_stream_ready(rate))
+    return 0;
+  // (A fifth of a second ahead: more than a slow frame and what the
+  // machine takes at once.)
+  int32_t ahead = rate / 5;
+  int32_t waiting =
+      (int32_t)(atomic_load(&ent_stream_in) - atomic_load(&ent_stream_out));
+  return waiting < ahead ? ahead - waiting : 0;
+}
+
+void ent_sound_stream(int32_t count, const int16_t *value, int32_t wanted,
+                      int32_t rate, float volume) {
+  if (!ent_stream_ready(rate))
+    return;
+  SetAudioStreamVolume(ent_stream, fminf(fmaxf(volume, 0), 1));
+  if (wanted > count)
+    wanted = count;
+  unsigned in = atomic_load(&ent_stream_in);
+  unsigned room = ENT_STREAM_RING - (in - atomic_load(&ent_stream_out));
+  // (More than fits is left out.)
+  for (int32_t i = 0; i < wanted && (unsigned)i < room; ++i)
+    ent_stream_ring[in++ % ENT_STREAM_RING] = value[i];
+  atomic_store(&ent_stream_in, in);
 }
 
 void ent_sound_sample(const ent_text126 *file, float volume) {

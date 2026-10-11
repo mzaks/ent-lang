@@ -14,7 +14,8 @@
 // Tones sound together; a tune is tones with different `after`. A long
 // piece from a file is `Music.file`, read as it plays.
 //
-// A sound a program has as bytes is `voice`.
+// A sound a program has as bytes is `voice`; one it makes itself as it
+// goes is `stream`.
 //
 // Implemented with raylib (devices/sound.c, devices/sound.link). Where the
 // machine has nothing to play on, nothing is heard and nothing fails.
@@ -70,6 +71,22 @@ extern proc voice_set(voice: i32, volume: f32, side: f32)
 extern proc voice_stop(voice: i32)
 // Whether something is still heard there.
 extern proc voice_on(voice: i32) -> bool
+
+// A sound the program makes itself as it goes (a synthesizer's): the
+// heights of its wave, each from -32768 to 32767, `rate` of them a
+// second. `stream` hands the first `count` of `from` on to be heard
+// after what was handed on before; `stream_wants` says how many more
+// are to be made now so that it does not run dry before the program
+// comes back, a frame later (nought where there is nothing to play on:
+// then none need be made). There is one such sound at a time, and its
+// `rate` stays what it was first. `volume` from 0 to 1.
+//
+//   let wanted = stream_wants(44100)
+//   .. Heights += { value: .. }, `wanted` times ..
+//   stream(Heights, wanted, 44100, 0.8)
+buffer Heights { value: i16 } capacity 16384
+extern proc stream(from: Heights, count: i32, rate: i32, volume: f32)
+extern proc stream_wants(rate: i32) -> i32
 
 // The shapes `play` looks for, whether or not the program makes any.
 archetype Tones { Tone } capacity 64
