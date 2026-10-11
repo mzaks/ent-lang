@@ -1,8 +1,8 @@
 diff --git i/src/doom/d_main.c w/src/doom/d_main.c
-index 06aa0ff..9869a79 100644
+index 06aa0ff..e57451e 100644
 --- i/src/doom/d_main.c
 +++ w/src/doom/d_main.c
-@@ -402,6 +402,63 @@ boolean D_GrabMouseCallback(void)
+@@ -402,6 +402,94 @@ boolean D_GrabMouseCallback(void)
  //
  //  D_RunFrame
  //
@@ -63,10 +63,49 @@ index 06aa0ff..9869a79 100644
 +	next++;
 +}
 +
++// ent-lang: where DOOM_MELTS names a file, every screen of the melts
++// from one kind of screen into another is written to it, but those of
++// the first DOOM_MELT_SKIP melts; how many steps each screen was melted
++// on by is said on stdout (check/shots.sh).
++static void D_MeltShot (int tics)
++{
++    static FILE *file;
++    static int skip = -1;
++    static int melts;
++    static boolean within;
++
++    if (skip < 0)
++    {
++	const char *name = getenv ("DOOM_MELTS");
++	const char *first = getenv ("DOOM_MELT_SKIP");
++
++	skip = first ? atoi (first) : 0;
++	if (name)
++	    file = fopen (name, "wb");
++    }
++    if (!within)
++	melts++;
++    within = wipe_Going ();
++    if (!file || melts <= skip)
++	return;
++    fwrite (I_VideoBuffer, 1, SCREENWIDTH * SCREENHEIGHT, file);
++    fflush (file);
++    printf ("melt %d %d\n", melts - 1, tics);
++    fflush (stdout);
++}
++
  void D_RunFrame()
  {
      int nowtime;
-@@ -437,7 +494,9 @@ void D_RunFrame()
+@@ -421,6 +509,7 @@ void D_RunFrame()
+         wipestart = nowtime;
+         wipe = !wipe_ScreenWipe(wipe_Melt
+                                , 0, 0, SCREENWIDTH, SCREENHEIGHT, tics);
++        D_MeltShot (tics);
+         I_UpdateNoBlit ();
+         M_Drawer ();                            // menu is drawn even on top of wipes
+         I_FinishUpdate ();                      // page flip or blit buffer
+@@ -437,7 +526,9 @@ void D_RunFrame()
      // Update display, next frame, with current state if no profiling is on
      if (screenvisible && !nodrawers)
      {
@@ -77,7 +116,7 @@ index 06aa0ff..9869a79 100644
          {
              // start wipe on this frame
              wipe_EndScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
-@@ -1960,6 +2019,12 @@ void D_DoomMain (void)
+@@ -1960,6 +2051,12 @@ void D_DoomMain (void)
  
      DEH_printf("\nP_Init: Init Playloop state.\n");
      P_Init ();
@@ -90,6 +129,34 @@ index 06aa0ff..9869a79 100644
  
      DEH_printf("S_Init: Setting up sound.\n");
      S_Init (sfxVolume * 8, musicVolume * 8);
+diff --git i/src/doom/f_wipe.c w/src/doom/f_wipe.c
+index 0fa7754..655d84e 100644
+--- i/src/doom/f_wipe.c
++++ w/src/doom/f_wipe.c
+@@ -227,6 +227,12 @@ wipe_exitMelt
+     return 0;
+ }
+ 
++// ent-lang: whether a wipe is going on.
++int wipe_Going (void)
++{
++    return go;
++}
++
+ int
+ wipe_StartScreen
+ ( int	x,
+diff --git i/src/doom/f_wipe.h w/src/doom/f_wipe.h
+index f48a9ca..3c8a0cb 100644
+--- i/src/doom/f_wipe.h
++++ w/src/doom/f_wipe.h
+@@ -60,4 +60,6 @@ wipe_ScreenWipe
+   int		height,
+   int		ticks );
+ 
++int wipe_Going (void);
++
+ #endif
 diff --git i/src/doom/p_setup.c w/src/doom/p_setup.c
 index fbb1a18..c2ea4e0 100644
 --- i/src/doom/p_setup.c

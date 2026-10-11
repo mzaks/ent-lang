@@ -92,6 +92,7 @@ system menu_keys() {
   let back = key_down(259)
   let esc = key_down(256)
   let pressed_esc = esc && !Menu.esc
+  let was = Menu.which != MENU_NONE
   Menu.esc = esc
   let any = up || down || enter || back || Keys.space || Keys.left || Keys.right ||
             key_down(341)
@@ -188,6 +189,9 @@ system menu_keys() {
       }
     }
   }
+  // (What is around a smaller view is drawn anew while the menu is
+  // over it, and once more after.)
+  if was || Menu.which != MENU_NONE { Border.count = 3 }
   // The skull blinks.
   Menu.count -= 1
   if Menu.count <= 0 {

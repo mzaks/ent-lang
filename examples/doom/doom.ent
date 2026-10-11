@@ -1,7 +1,9 @@
-// Doom in ent-lang, as far as it is: reads the WAD and plays a level of
-// it, without its monsters and without weapons: the arrow keys walk and
-// turn (A and D step aside, Shift runs), Space opens doors and works
-// switches, Tab shows the map. Start it where `doom1.wad` is
+// Doom in ent-lang, as far as it is: reads the WAD, shows the title and
+// the demos, and plays the episode from the menu: the arrow keys walk
+// and turn (A and D step aside, Shift runs), Space opens doors and works
+// switches, the left Ctrl key shoots, 1 to 7 choose a weapon, Tab shows
+// the map, - and = make the view smaller and bigger, Esc is the menu.
+// Start it where `doom1.wad` is
 // (examples/doom/reference/fetch.sh puts the shareware one in
 // build/doom/wad):
 //
@@ -35,6 +37,7 @@ import audio
 import screen
 import between
 import shell
+import melt
 
 // As many bytes as the biggest WAD.
 capacity Bytes 16777216
@@ -48,6 +51,9 @@ world {
   Level.episode = 1
   Level.map = 1
   Level.skill = 2
+  // (The view as big as the game starts with: a little smaller than the
+  // screen is wide.)
+  View.blocks = 9
 }
 
 // Whether the map is shown, and whether Tab was down the frame before.
@@ -98,8 +104,40 @@ system look() {
   Clock.leveltime += 1
 }
 
-// The view is all of the screen above the status bar.
-system whole_view() { View.blocks = 10 }
+// The view smaller or bigger by a step (M_SizeDisplay), by the keys -
+// and =, while neither the menu nor the map is shown: from a small one
+// in the middle to all of the screen, without the status bar. `less`,
+// `more`: whether the keys were down the tic before; `changed`: the
+// view is of another size now.
+unique Size { less: bool, more: bool, changed: bool }
+system size_keys() {
+  let less = key_down('-' as i32)
+  let more = key_down('=' as i32)
+  Size.changed = false
+  if !Shown.map && Menu.which == MENU_NONE {
+    let smaller = less && !Size.less
+    let bigger = more && !Size.more
+    if smaller && View.blocks > 3 {
+      View.blocks -= 1
+      Size.changed = true
+    } else if bigger && View.blocks < 11 {
+      View.blocks += 1
+      Size.changed = true
+    }
+    if smaller || bigger {
+      Rnd = [{ play: Random.play, other: Random.other }; 1]
+      sound(Sounds, Rnd, SFX_STNMOV, 0)
+      Random.other = Rnd[0].other
+    }
+  }
+  Size.less = less
+  Size.more = more
+  if Size.changed { Border.count = 3 }
+}
+// (With all of the screen for the view there is no status bar, but
+// under the map.)
+unique Bar: bool
+system whether_bar() { Bar = View.blocks != 11 || Shown.map }
 
 schedule setup() {
   load_wad()
@@ -119,7 +157,6 @@ schedule setup() {
   start_messages()
   start_screen()
   fit_automap()
-  whole_view()
   set_view_size()
   init_view_tables()
 }
@@ -133,6 +170,9 @@ schedule shell() {
   begin()
   begin_sounds()
   menu_keys()
+  size_keys()
+  set_view_size() run_if Size.changed
+  init_view_tables() run_if Size.changed
   turn_page() run_if Shell.turn
   read_demo() run_if Shell.wanted
   enter_game() run_if Shell.start || Shell.wanted
@@ -147,6 +187,8 @@ schedule shell() {
   start_messages() run_if Shell.fresh
   fit_automap() run_if Shell.fresh
   arrive() run_if Shell.fresh
+  border_anew() run_if Shell.fresh
+  melt_anew() run_if Shell.fresh
   entered() run_if Shell.fresh
 }
 
@@ -155,9 +197,11 @@ schedule page() run_if !Shell.game && !Shell.demo {
   page_tick()
   hear()
   plain()
+  melt_from(MELT_PAGE)
   clear_screen()
   draw_page()
   draw_menu()
+  melt_to()
   show_screen()
   present()
 }
@@ -167,14 +211,17 @@ schedule page() run_if !Shell.game && !Shell.demo {
 // drawn as it is, with the menu over it.
 schedule held() run_if Shell.game && Menu.which != MENU_NONE && !Wi.on && !Fin.on {
   hear()
+  whether_bar()
   clear_screen()
+  draw_border() run_if !Shown.map
   render_view() run_if !Shown.map
   draw_walls() run_if !Shown.map
   draw_planes() run_if !Shown.map
   draw_masked() run_if !Shown.map
   draw_weapon() run_if !Shown.map
-  draw_status()
+  draw_status() run_if Bar
   draw_messages()
+  draw_border_over() run_if !Shown.map
   draw_automap() run_if Shown.map
   draw_menu()
   show_screen()
@@ -199,16 +246,21 @@ schedule frame() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on &&
   tick_status()
   tick_messages()
   look()
+  whether_bar()
+  melt_from(MELT_LEVEL)
   clear_screen()
+  draw_border() run_if !Shown.map
   render_view() run_if !Shown.map
   draw_walls() run_if !Shown.map
   draw_planes() run_if !Shown.map
   draw_masked() run_if !Shown.map
   draw_weapon() run_if !Shown.map
-  draw_status()
+  draw_status() run_if Bar
   draw_messages()
+  draw_border_over() run_if !Shown.map
   draw_automap() run_if Shown.map
   draw_menu()
+  melt_to()
   show_screen()
   present()
   complete_level()
@@ -222,9 +274,11 @@ schedule ending() run_if (Shell.game || Shell.demo) && Fin.on {
   tick_finale()
   hear()
   plain()
+  melt_from(MELT_FINALE)
   clear_screen()
   draw_finale()
   draw_menu()
+  melt_to()
   show_screen()
   present()
 }
@@ -235,9 +289,11 @@ schedule between() run_if (Shell.game || Shell.demo) && Wi.on {
   tick_between()
   hear()
   plain()
+  melt_from(MELT_BETWEEN)
   clear_screen()
   draw_between()
   draw_menu()
+  melt_to()
   show_screen()
   present()
 }
@@ -254,6 +310,7 @@ schedule onward() run_if Wi.over {
   start_messages()
   fit_automap()
   arrive()
+  border_anew()
 }
 
 // The same level again after the player's death.
@@ -269,11 +326,25 @@ schedule again() run_if Level.reborn {
   start_messages()
   fit_automap()
   arrive()
+  melt_anew()
+}
+
+// One kind of screen melts into another: nothing else goes on while it
+// does, and the menu is over it if it is open.
+schedule melting() run_if Melt.on {
+  begin()
+  begin_sounds()
+  melt_step()
+  hear()
+  draw_menu()
+  show_screen()
+  present()
 }
 
 main {
   setup()
   loop {
+    loop { melting() } until !Melt.on || Window.closed
     shell()
     ending()
     onward()

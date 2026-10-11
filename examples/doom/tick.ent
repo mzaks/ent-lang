@@ -34,6 +34,7 @@ import enemy
 import weapon
 import movers
 import sounds
+import melt
 
 // A tic of every thing, in the order they were made in (P_RunThinkers).
 // What is no more (picked up, or at the end of its states) is gone for
@@ -196,7 +197,7 @@ system complete_level() {
     Fin.stage = 0
   }
   if Level.exited && !Wi.on && Level.map != 8 {
-    if Level.map == 9 || Level.secret { Wi.didsecret = true }
+    if Level.map == 9 { Wi.didsecret = true }
     Wi.on = true
     Wi.over = false
     Wi.last = Level.map
@@ -350,5 +351,7 @@ system tick_finale() {
   if Fin.stage == 0 && Fin.count > letters * TEXTSPEED + TEXTWAIT {
     Fin.count = 0
     Fin.stage = 1
+    // (The picture melts in.)
+    Melt.kind = -1
   }
 }

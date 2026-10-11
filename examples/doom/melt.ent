@@ -1,0 +1,119 @@
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+//
+// One kind of screen melts into another (f_wipe.c): the old one slides
+// down off the new, in columns two pixels wide that start one after
+// another. While it goes on nothing else does.
+import video
+import random
+import sounds
+
+// What kind of screen was drawn last (`kind`: one of these; -1 for none,
+// so that the next melts in whatever it is), whether the one drawn now
+// is of another (`start`), and whether a melt is going on (`on`).
+const MELT_PAGE = 0
+const MELT_LEVEL = 1
+const MELT_BETWEEN = 2
+const MELT_FINALE = 3
+unique Melt { on: bool, kind: i32, start: bool }
+
+// The screen that goes and the one that comes, and how far down each
+// column of the old one has slid (less than nought: how long until it
+// starts).
+buffer Before { pixel: u8 } capacity 64000
+buffer After { pixel: u8 } capacity 64000
+buffer Drops { y: i32 } capacity 320
+
+// Before a screen is drawn: if it is of another kind than the last, the
+// last is kept to melt from (D_Display, wipe_StartScreen).
+system melt_from(kind: i32) {
+  Melt.start = Melt.kind != kind
+  Melt.kind = kind
+  if Melt.start {
+    Before = [{ pixel: 0 }; SCREENWIDTH * SCREENHEIGHT]
+    for i in 0..len(Screen) { Before[i].pixel = Screen[i].pixel }
+  }
+}
+
+// The next screen melts in, whatever it is (G_DoLoadLevel: a level does,
+// also after another).
+system melt_anew() { Melt.kind = -1 }
+
+// After a screen is drawn: if it is to melt in, it is kept, the old one
+// is put back, and when each column starts is drawn from the random
+// numbers: each a step sooner or later than the one beside it, or with
+// it (wipe_EndScreen, wipe_initMelt).
+system melt_to() {
+  if Melt.start {
+    Melt.start = false
+    Melt.on = true
+    After = [{ pixel: 0 }; SCREENWIDTH * SCREENHEIGHT]
+    for i in 0..len(Screen) {
+      After[i].pixel = Screen[i].pixel
+      Screen[i].pixel = Before[i].pixel
+    }
+    Rnd = [{ play: Random.play, other: Random.other }; 1]
+    // (As many numbers as the screen is wide, though the columns are
+    // half as many.)
+    Drops = [{ y: 0 }; SCREENWIDTH]
+    Drops[0].y = -(m_random(Rnd) % 16)
+    for i in 1..SCREENWIDTH {
+      let y = Drops[i - 1].y + m_random(Rnd) % 3 - 1
+      Drops[i].y = if y > 0 {
+        0
+      } else if y == -16 {
+        -15
+      } else {
+        y
+      }
+    }
+    Random.other = Rnd[0].other
+  }
+}
+
+// A step of the melt on the screen (wipe_doMelt): a column that has
+// started slides further, slowly first and then by eight rows a step,
+// and shows the new screen above it. Whether all of them are at the
+// bottom.
+proc melt_on(screen: mut Screen, before: Before, after: After, drops: mut Drops) -> bool {
+  var done = true
+  for i in 0..SCREENWIDTH / 2 {
+    let y = drops[i].y
+    if y < 0 {
+      drops[i].y = y + 1
+      done = false
+    } else if y < SCREENHEIGHT {
+      let dy = min(if y < 16 { y + 1 } else { 8 }, SCREENHEIGHT - y)
+      for row in y..y + dy {
+        let at = row * SCREENWIDTH + i * 2
+        screen[at].pixel = after[at].pixel
+        screen[at + 1].pixel = after[at + 1].pixel
+      }
+      for row in y + dy..SCREENHEIGHT {
+        let at = row * SCREENWIDTH + i * 2
+        let from = (row - y - dy) * SCREENWIDTH + i * 2
+        screen[at].pixel = before[from].pixel
+        screen[at + 1].pixel = before[from + 1].pixel
+      }
+      drops[i].y = y + dy
+      done = false
+    }
+  }
+  done
+}
+
+// A tic of the melt.
+system melt_step() {
+  if melt_on(Screen, Before, After, Drops) { Melt.on = false }
+}

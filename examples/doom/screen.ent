@@ -358,6 +358,60 @@ system tick_status() {
   Face[0].arms = Inv[0].weapons
 }
 
+// What is around a view that is smaller than the screen above the
+// status bar (R_FillBackScreen, R_DrawViewBorder): a floor's picture
+// over and over, and an edge about the view.
+//
+// `count`: for how many screens still it is drawn once more after what
+// the player is told, of which only what is over the view is seen then:
+// three, from when a level is first shown, the view's size changes, or
+// the menu is open.
+unique Border { count: i32 }
+
+proc border(screen: mut Screen, bytes: Bytes, lumps: Lumps, left: i32, top: i32,
+            width: i32, height: i32) {
+  let flat = pic(lumps, "FLOOR7_2")
+  let right = left + width
+  let bottom = top + height
+  for y in 0..SCREENHEIGHT - SBARHEIGHT {
+    for x in 0..SCREENWIDTH {
+      if y < top || y >= bottom || x < left || x >= right {
+        screen[y * SCREENWIDTH + x].pixel = bytes[flat + ((y & 63) << 6) + (x & 63)].value
+      }
+    }
+  }
+  for i in 0..width / 8 {
+    draw_patch(screen, bytes, pic(lumps, "BRDR_T"), left + i * 8, top - 8)
+    draw_patch(screen, bytes, pic(lumps, "BRDR_B"), left + i * 8, bottom)
+  }
+  for i in 0..height / 8 {
+    draw_patch(screen, bytes, pic(lumps, "BRDR_L"), left - 8, top + i * 8)
+    draw_patch(screen, bytes, pic(lumps, "BRDR_R"), right, top + i * 8)
+  }
+  draw_patch(screen, bytes, pic(lumps, "BRDR_TL"), left - 8, top - 8)
+  draw_patch(screen, bytes, pic(lumps, "BRDR_TR"), right, top - 8)
+  draw_patch(screen, bytes, pic(lumps, "BRDR_BL"), left - 8, bottom)
+  draw_patch(screen, bytes, pic(lumps, "BRDR_BR"), right, bottom)
+}
+
+// Before the view is drawn.
+system draw_border() {
+  if View.width != SCREENWIDTH {
+    border(Screen, Bytes, Lumps, View.x, View.y, View.width, View.height)
+  }
+}
+
+// After what the player is told is drawn (`draw_messages`).
+system draw_border_over() {
+  if View.width != SCREENWIDTH && Border.count > 0 {
+    border(Screen, Bytes, Lumps, View.x, View.y, View.width, View.height)
+    Border.count -= 1
+  }
+}
+
+// A level is shown that was not before.
+system border_anew() { Border.count = 3 }
+
 // The status bar (ST_Drawer, all of it anew): the bar, how much there is
 // to shoot with, health, the weapons the player has, the face, armour,
 // the keys, and of each kind of ammunition how much there is and can

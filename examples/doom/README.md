@@ -44,7 +44,10 @@ them as systems. It is being built; what is here so far:
   was done in it is counted up. `between.ent` draws those: the map of
   the episode, the numbers, and where it goes on.
 - `screen.ent`: the player's weapon over the view, the status bar with
-  its numbers and its face, and what the player is told at the top.
+  its numbers and its face, what the player is told at the top, and
+  what is around a view that is smaller than the screen.
+- `melt.ent`: one kind of screen melts into another: a level into the
+  screen after it, that into the next level, a demo into a picture.
 - `sounds.ent`, `audio.ent`: the sounds of a tic, each with how loud it
   is heard and from which side; and what plays them from the WAD's
   lumps, eight at a time (the sound device's `voice`). The music is not
@@ -59,8 +62,8 @@ them as systems. It is being built; what is here so far:
   demos played one after another with a picture between them, and the
   menu over any of it, from which a new game is started in one of four
   skills.
-- Not yet: the border of a smaller view, the melt from one screen to
-  the next, the music, the game's settings, saving and loading, the
+- Not yet: the music, the game's settings (but the view's size),
+  the view in half as many columns, saving and loading, the
   fifth skill; the monsters and weapons that are not in the first
   episode. Ceilings that move and the donut are written but were
   never set off: the shareware levels have no such ceiling, and no demo
@@ -69,7 +72,8 @@ them as systems. It is being built; what is here so far:
   key brings the menu (the arrow keys, Enter, Backspace to go back),
   and a new game plays the episode from E1M1 with the keyboard (the
   arrow keys, A and D to step aside, Shift to run, the space bar to use,
-  the left Ctrl key to shoot, 1 to 7 for a weapon; Tab shows the map).
+  the left Ctrl key to shoot, 1 to 7 for a weapon; Tab shows the map;
+  - and = make the view smaller and bigger).
   Esc opens and shuts the menu at any time; the game stands still
   while it is open, and Quit Game ends the program.
 - `check/`: programs that print what the port computes, to hold against
@@ -93,6 +97,8 @@ DUMP=205 examples/doom/check/demos.sh e1m5_uv_max    # what differs at a tic
 examples/doom/check/shots.sh 3 0,50,100,300,600      # whole screens, and their palettes
 examples/doom/check/shots.sh e1m5_uv_max 1700,3700   # of a fetched demo
 examples/doom/check/shots.sh ep1_nomo 300,330,400    # between two levels too
+BLOCKS=6 examples/doom/check/shots.sh 3 0,50,100     # with a smaller view
+MELTS=1 examples/doom/check/shots.sh ep1_nomo 100    # and every screen of the melts
 cd build/doom/wad &&                                 # where doom1.wad is
   ../../../tools/ent run -I ../../../examples/doom ../../../examples/doom/doom.ent
 ```

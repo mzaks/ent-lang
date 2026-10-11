@@ -1,7 +1,9 @@
 // A demo played, and the screen as it is drawn after each of the tics
 // that `shots` lists (check/shots.sh writes the table from what the
 // reference says it drew), into shots.port: 320 by 200 bytes each, to
-// hold against the reference's.
+// hold against the reference's. And the screens of the melts from one
+// kind of screen into another, into shots.melt, where `melts` has by
+// how many steps each goes on.
 import console
 import files
 import wad
@@ -25,6 +27,7 @@ import tick
 import sounds
 import screen
 import between
+import melt
 import shots
 
 capacity Bytes 16777216
@@ -34,11 +37,20 @@ unique Room: i32
 unique Now: bool
 unique Drawn: bool
 unique Again: bool
+// How many melts there were, which of `melts` is next, and where in
+// Bytes a screen of a melt is put to be written.
+unique Melted: i32
+unique Step: i32
+unique Meltroom: i32
+unique Full: bool
+// All that was asked for is written.
+unique Done: bool
 
 world {
   Wad.file = "doom1.wad"
   Demo.lump = "DEMO1"
   View.blocks = 10
+  Border.count = 3
 }
 
 system begin_level() {
@@ -51,6 +63,9 @@ system begin_level() {
   Clock.leveltime = 0
   Room = len(Bytes)
   for i in 0..SCREENWIDTH * SCREENHEIGHT { Bytes += { value: 0 } }
+  Meltroom = len(Bytes)
+  for i in 0..SCREENWIDTH * SCREENHEIGHT { Bytes += { value: 0 } }
+  Full = View.blocks == 11
 }
 
 // Whether this tic's screen is one that is asked for.
@@ -85,16 +100,27 @@ system keep() {
   // (And which of the palettes it is shown in.)
   put("shot {Demo.tic - 1} {Shade.palette}")
   Next += 1
+  Done = Next == len(shots) && melts[Step] == 0
 }
 
-// (The reference melts the first screen of a level in, by 320 random
-// numbers, which the face then goes on from. Its first screen is the
-// one after the second tic, see `ask`; of a level that is started
-// again, the one after the first.)
-system melt() {
-  if Clock.leveltime == if Again { 0 } else { 1 } {
-    Random.other = (Random.other + 320) & 0xff
+// A screen of a melt: on by as many steps as the reference's went, and
+// written if it is one that is asked for.
+system melt_shot() {
+  let asked = Melted >= MELT_SKIP && melts[Step] != 0
+  for i in 0..if asked { melts[Step] } else { 1 } {
+    if melt_on(Screen, Before, After, Drops) { Melt.on = false }
   }
+  if asked {
+    for i in 0..len(Screen) { Bytes[Meltroom + i].value = Screen[i].pixel }
+    if !write_bytes("shots.melt", Bytes, Meltroom, SCREENWIDTH * SCREENHEIGHT,
+                    Step > 0) {
+      put("could not write shots.melt")
+    }
+    put("melt {Melted} {melts[Step]}")
+    Step += 1
+  }
+  if !Melt.on { Melted += 1 }
+  Done = Next == len(shots) && melts[Step] == 0
 }
 
 system next() { Clock.leveltime += 1 }
@@ -134,52 +160,50 @@ schedule tic() run_if !Wi.on && !Fin.on {
   update_buttons()
   tick_status()
   tick_messages()
-  melt()
   ask()
   // (Every tic but the first is drawn, as the reference draws them.)
   look() run_if Drawn
+  melt_from(MELT_LEVEL) run_if Drawn
   clear_screen() run_if Drawn
+  draw_border() run_if Drawn
   render_view() run_if Drawn
   draw_walls() run_if Drawn
   draw_planes() run_if Drawn
   draw_masked() run_if Drawn
   draw_weapon() run_if Drawn
-  draw_status() run_if Drawn
+  draw_status() run_if Drawn && !Full
   draw_messages() run_if Drawn
+  draw_border_over() run_if Drawn
   keep() run_if Now
+  melt_to() run_if Drawn
   next()
   complete_level()
 }
 // (A level that is not the demo's first has its first tic drawn.)
 system once_more() { Again = true }
-// (What is between two levels is melted in as a level is, and shown in
-// the colours as they are.)
-system melt_between() {
-  if Wi.tics == 1 { Random.other = (Random.other + 320) & 0xff }
-  Shade.palette = 0
-}
-// (What comes after the last level is melted in too.)
-system melt_finale() {
-  if Fin.count == 1 && Fin.stage == 0 { Random.other = (Random.other + 320) & 0xff }
-  Shade.palette = 0
-}
+// (What is not a level is shown in the colours as they are.)
+system plain() { Shade.palette = 0 }
 schedule ending() run_if Fin.on {
   begin_sounds()
   tick_finale()
-  melt_finale()
+  plain()
   ask()
+  melt_from(MELT_FINALE)
   clear_screen()
   draw_finale()
   keep() run_if Now
+  melt_to()
 }
 schedule between() run_if Wi.on {
   begin_sounds()
   tick_between()
-  melt_between()
+  plain()
   ask()
+  melt_from(MELT_BETWEEN)
   clear_screen()
   draw_between()
   keep() run_if Now
+  melt_to()
 }
 schedule onward() run_if Wi.over {
   leave_level()
@@ -193,6 +217,8 @@ schedule onward() run_if Wi.over {
   start_messages()
   arrive()
   once_more()
+  melt_anew()
+  border_anew()
 }
 // The level again, after the player's death.
 schedule again() run_if Level.reborn {
@@ -206,14 +232,20 @@ schedule again() run_if Level.reborn {
   start_messages()
   arrive()
   once_more()
+  melt_anew()
+}
+// (While one kind of screen melts into another, nothing else goes on.)
+schedule melting() run_if Melt.on {
+  melt_shot()
 }
 main {
   setup()
   loop {
+    loop { melting() } until !Melt.on
     ending()
     onward()
     between()
     tic()
     again()
-  } until Next == len(shots) || Demo.over
+  } until Done || Demo.over
 }
