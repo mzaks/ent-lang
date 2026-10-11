@@ -398,13 +398,14 @@ proc key_on(bytes: Bytes, mus: mut Mus, chans: Mchan, voices: mut Ovoice,
   }
 }
 
-// A channel is to be so loud: no louder than music is, nor than it was
-// when the tune started (SetChannelVolume).
+// A channel is to be so loud: no louder than music is, nor (`clip`)
+// than it was when the tune started (SetChannelVolume).
 proc set_channel_volume(bytes: Bytes, mus: Mus, chans: mut Mchan,
                         voices: mut Ovoice, writes: mut Writes, channel: i32,
-                        volume: i32) {
+                        volume: i32, clip: bool) {
   chans[channel].base = volume
-  chans[channel].volume = min(min(volume, mus[0].volume), mus[0].start)
+  chans[channel].volume = min(min(volume, mus[0].volume),
+                              if clip { mus[0].start } else { volume })
   for v in 0..OPL_VOICES {
     if voices[v].channel == channel {
       set_voice_volume(bytes, mus, chans, voices, writes, v, voices[v].volume)
@@ -432,6 +433,21 @@ proc pitch_bend(bytes: Bytes, mus: Mus, chans: mut Mchan, voices: mut Ovoice,
     }
   }
   for i in 0..moved { lists[kept + i].used = lists[mus[0].free + i].free }
+}
+
+// Music is to be so loud, 0 to 127 (I_OPL_SetMusicVolume): each channel
+// as loud as it was asked to be or as music is, whichever is less. (The
+// drums are asked to be as loud as music is.)
+proc music_volume(bytes: Bytes, mus: mut Mus, chans: mut Mchan, voices: mut Ovoice,
+                  writes: mut Writes, volume: i32) {
+  if mus[0].volume != volume {
+    mus[0].volume = volume
+    for channel in 0..16 {
+      set_channel_volume(bytes, mus, chans, voices, writes, channel,
+                         if channel == PERCUSSION { volume } else { chans[channel].base },
+                         false)
+    }
+  }
 }
 
 // The channel one of the tune's own is played on (mus2mid.c,
@@ -581,7 +597,7 @@ proc tune_events(bytes: Bytes, mus: mut Mus, chans: mut Mchan, map: mut Mmap,
         chans[channel].instr = b & 0x7f
       } else if a == 3 {
         set_channel_volume(bytes, mus, chans, voices, writes, channel,
-                           if b & 0x80 != 0 { 127 } else { b })
+                           if b & 0x80 != 0 { 127 } else { b }, true)
       }
     } else {
       // The end.

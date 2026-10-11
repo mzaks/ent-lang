@@ -2,7 +2,9 @@
 // the demos, and plays the episode from the menu: the arrow keys walk
 // and turn (A and D step aside, Shift runs), Space opens doors and works
 // switches, the left Ctrl key shoots, 1 to 7 choose a weapon, Tab shows
-// the map, - and = make the view smaller and bigger, Esc is the menu.
+// the map, - and = make the view smaller and bigger, Esc is the menu
+// (F1 to F10 as in the game: F4 how loud, F5 the detail, F7 ends the
+// game, F8 the messages, F10 leaves).
 // Start it where `doom1.wad` is
 // (examples/doom/reference/fetch.sh puts the shareware one in
 // build/doom/wad):
@@ -58,9 +60,6 @@ world {
   View.blocks = 9
 }
 
-// Whether the map is shown, and whether Tab was down the frame before.
-unique Shown { map: bool, tab: bool }
-
 // The keys of this tic as a demo has them (of G_BuildTiccmd): one row
 // more for the player to be moved by. So what is played is a demo too.
 system read_keys() {
@@ -106,36 +105,6 @@ system look() {
   Clock.leveltime += 1
 }
 
-// The view smaller or bigger by a step (M_SizeDisplay), by the keys -
-// and =, while neither the menu nor the map is shown: from a small one
-// in the middle to all of the screen, without the status bar. `less`,
-// `more`: whether the keys were down the tic before; `changed`: the
-// view is of another size now.
-unique Size { less: bool, more: bool, changed: bool }
-system size_keys() {
-  let less = key_down('-' as i32)
-  let more = key_down('=' as i32)
-  Size.changed = false
-  if !Shown.map && Menu.which == MENU_NONE {
-    let smaller = less && !Size.less
-    let bigger = more && !Size.more
-    if smaller && View.blocks > 3 {
-      View.blocks -= 1
-      Size.changed = true
-    } else if bigger && View.blocks < 11 {
-      View.blocks += 1
-      Size.changed = true
-    }
-    if smaller || bigger {
-      Rnd = [{ play: Random.play, other: Random.other }; 1]
-      sound(Sounds, Rnd, SFX_STNMOV, 0)
-      Random.other = Rnd[0].other
-    }
-  }
-  Size.less = less
-  Size.more = more
-  if Size.changed { Border.count = 3 }
-}
 // (With all of the screen for the view there is no status bar, but
 // under the map.)
 unique Bar: bool
@@ -175,9 +144,8 @@ schedule shell() {
   begin()
   begin_sounds()
   menu_keys()
-  size_keys()
-  set_view_size() run_if Size.changed
-  init_view_tables() run_if Size.changed
+  set_view_size() run_if Shell.resize
+  init_view_tables() run_if Shell.resize
   turn_page() run_if Shell.turn
   read_demo() run_if Shell.wanted
   enter_game() run_if Shell.start || Shell.wanted
@@ -213,8 +181,11 @@ schedule page() run_if !Shell.game && !Shell.demo {
 
 // A tic of a level: the player's game by the keys, a demo by its own.
 // The player's own game stands still while the menu is open: it is
-// drawn as it is, with the menu over it.
-schedule held() run_if Shell.game && Menu.which != MENU_NONE && !Wi.on && !Fin.on {
+// drawn as it is, with the menu over it. (The face and what the player
+// is told go on, as they do in the game.)
+schedule held() run_if Shell.game && Menu.on && !Wi.on && !Fin.on {
+  tick_status()
+  tick_messages()
   hear()
   whether_bar()
   clear_screen()
@@ -234,7 +205,7 @@ schedule held() run_if Shell.game && Menu.which != MENU_NONE && !Wi.on && !Fin.o
 }
 
 schedule frame() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on &&
-                        !(Shell.game && Menu.which != MENU_NONE) {
+                        !(Shell.game && Menu.on) {
   read_keys() run_if Shell.game
   think_player()
   player_sector()

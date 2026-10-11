@@ -270,6 +270,10 @@ const MSG_GOTSHOTGUN2 = 37
 const MSG_PD_BLUEK = 38
 const MSG_PD_REDK = 39
 const MSG_PD_YELLOWK = 40
+const MSG_MSGOFF = 41
+const MSG_MSGON = 42
+const MSG_DETAILHI = 43
+const MSG_DETAILLO = 44
 table messages: text[48] = [
   "",
   "Picked up the armor.",
@@ -311,7 +315,11 @@ table messages: text[48] = [
   "You got the super shotgun!",
   "You need a blue key to open this door",
   "You need a red key to open this door",
-  "You need a yellow key to open this door"
+  "You need a yellow key to open this door",
+  "Messages OFF",
+  "Messages ON",
+  "High detail",
+  "Low detail"
 ]
 
 // What picking a thing up says, by the thing's sprite (the keys say

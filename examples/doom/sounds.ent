@@ -154,6 +154,10 @@ const NORM_PITCH = 127
 // whether it starts again at its end (S_ChangeMusic).
 unique Tune { name: u64, looping: bool }
 
+// How loud the sounds and the music are to be, each 0 to 15, as the
+// menu sets them.
+unique Volume { sfx: i32, music: i32 }
+
 // The next of the numbers for what is seen and heard (M_Random).
 proc m_random(rnd: mut Rnd) -> i32 {
   rnd[0].other = random_after(rnd[0].other)

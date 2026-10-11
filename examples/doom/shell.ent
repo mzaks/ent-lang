@@ -15,8 +15,10 @@
 // WAD's three demos played one after another with a picture between
 // them, and over any of it the menu, from which a new game is started.
 //
-// Not here: the game's settings, saving and loading, and the fifth
-// skill (its monsters are faster and come back, which is not there).
+// Not here: saving and loading, the fifth skill (its monsters are
+// faster and come back, which is not there), the mouse (its setting is
+// shown and can be changed, to no end), and making the picture lighter
+// (F11).
 // The menu opens by any key while no game of the player's is going on,
 // and by the Esc key always, which shuts it too; the player's own game
 // stands still while it is open.
@@ -32,6 +34,8 @@ import play
 import tick
 import sounds
 import screen
+import render
+import items
 
 // `game`: the player's own game is going on; `demo`: a demo is played.
 // `page`: where the round of title, demos and pictures is (0 the title,
@@ -39,26 +43,145 @@ import screen
 // third demo), `pagetic`: how long the picture stays. `turn`: the next
 // page is due. `start`: a new game was asked for, of `skill`; `wanted`:
 // a demo is to be started; `fresh`: one of the two, now. `quit`: the
-// program is to end.
+// program is to end. `resize`: the view is of another size or detail
+// now.
 unique Shell {
   game: bool, demo: bool, page: i32, pagetic: i32, turn: bool, start: bool,
-  skill: i32, wanted: bool, fresh: bool, quit: bool
+  skill: i32, wanted: bool, fresh: bool, quit: bool, resize: bool
 }
 
-// The menu: which one is shown (0 none, 1 the main one, 2 the episodes,
-// 3 the skills, 4 and 5 the two pages to read), which of its lines the
-// skull is at, which of the skull's two pictures is shown and for how
-// long still; and which keys were down the tic before.
-const MENU_NONE = 0
+// Whether the map is shown, and whether Tab was down the tic before.
+unique Shown { map: bool, tab: bool }
+
+// The menus (m_menu.c): how many lines each has, which one Backspace
+// goes back to (0: none), where its first line is drawn, and where its
+// lines start in `menu_lines`. The first is no menu.
 const MENU_MAIN = 1
 const MENU_EPISODE = 2
 const MENU_SKILL = 3
-const MENU_READ1 = 4
-const MENU_READ2 = 5
+const MENU_OPTIONS = 4
+const MENU_READ1 = 5
+const MENU_READ2 = 6
+const MENU_SOUND = 7
+table menus { lines: i32, back: i32, x: i32, y: i32, first: i32 } = [
+  { lines: 0, back: 0, x: 0, y: 0, first: 0 },
+  { lines: 6, back: 0, x: 97, y: 64, first: 0 },
+  { lines: 3, back: 1, x: 48, y: 63, first: 6 },
+  { lines: 5, back: 2, x: 48, y: 63, first: 9 },
+  { lines: 8, back: 1, x: 60, y: 37, first: 14 },
+  { lines: 1, back: 1, x: 280, y: 185, first: 22 },
+  { lines: 1, back: 5, x: 330, y: 175, first: 23 },
+  { lines: 4, back: 4, x: 80, y: 64, first: 24 }
+]
+// A line of a menu: what it is (1: something to choose, 2: something to
+// set lower or higher with the left and right keys, -1: nothing, the
+// room under such a one), its picture's lump, and the letter that
+// brings the skull to it.
+table menu_lines { kind: i32, name: text[8], letter: i32 } = [
+  { kind: 1, name: "M_NGAME", letter: 78 },
+  { kind: 1, name: "M_OPTION", letter: 79 },
+  { kind: 1, name: "M_LOADG", letter: 76 },
+  { kind: 1, name: "M_SAVEG", letter: 83 },
+  { kind: 1, name: "M_RDTHIS", letter: 82 },
+  { kind: 1, name: "M_QUITG", letter: 81 },
+  { kind: 1, name: "M_EPI1", letter: 75 },
+  { kind: 1, name: "M_EPI2", letter: 84 },
+  { kind: 1, name: "M_EPI3", letter: 73 },
+  { kind: 1, name: "M_JKILL", letter: 73 },
+  { kind: 1, name: "M_ROUGH", letter: 72 },
+  { kind: 1, name: "M_HURT", letter: 72 },
+  { kind: 1, name: "M_ULTRA", letter: 85 },
+  { kind: 1, name: "M_NMARE", letter: 78 },
+  { kind: 1, name: "M_ENDGAM", letter: 69 },
+  { kind: 1, name: "M_MESSG", letter: 77 },
+  { kind: 1, name: "M_DETAIL", letter: 71 },
+  { kind: 2, name: "M_SCRNSZ", letter: 83 },
+  { kind: -1, name: "", letter: 0 },
+  { kind: 2, name: "M_MSENS", letter: 77 },
+  { kind: -1, name: "", letter: 0 },
+  { kind: 1, name: "M_SVOL", letter: 83 },
+  { kind: 1, name: "", letter: 0 },
+  { kind: 1, name: "", letter: 0 },
+  { kind: 2, name: "M_SFXVOL", letter: 83 },
+  { kind: -1, name: "", letter: 0 },
+  { kind: 2, name: "M_MUSVOL", letter: 77 },
+  { kind: -1, name: "", letter: 0 }
+]
+
+// What the player is asked or told in the middle of the screen
+// (M_StartMessage), line under line: the eight ways of asking whether
+// to leave, of which the tic decides one; whether to end the game; and
+// what cannot be done.
+const PROMPT_QUIT = 1
+const PROMPT_ENDGAME = 9
+const PROMPT_SHAREWARE = 10
+const PROMPT_SAVEDEAD = 11
+const PROMPT_NOSPOT = 12
+table prompt_lines { prompt: i32, line: text[48] } = [
+  { prompt: 1, line: "are you sure you want to" },
+  { prompt: 1, line: "quit this great game?" },
+  { prompt: 1, line: "" },
+  { prompt: 1, line: "(press y to quit to dos.)" },
+  { prompt: 2, line: "please don't leave, there's more" },
+  { prompt: 2, line: "demons to toast!" },
+  { prompt: 2, line: "" },
+  { prompt: 2, line: "(press y to quit to dos.)" },
+  { prompt: 3, line: "let's beat it -- this is turning" },
+  { prompt: 3, line: "into a bloodbath!" },
+  { prompt: 3, line: "" },
+  { prompt: 3, line: "(press y to quit to dos.)" },
+  { prompt: 4, line: "i wouldn't leave if i were you." },
+  { prompt: 4, line: "dos is much worse." },
+  { prompt: 4, line: "" },
+  { prompt: 4, line: "(press y to quit to dos.)" },
+  { prompt: 5, line: "you're trying to say you like dos" },
+  { prompt: 5, line: "better than me, right?" },
+  { prompt: 5, line: "" },
+  { prompt: 5, line: "(press y to quit to dos.)" },
+  { prompt: 6, line: "don't leave yet -- there's a" },
+  { prompt: 6, line: "demon around that corner!" },
+  { prompt: 6, line: "" },
+  { prompt: 6, line: "(press y to quit to dos.)" },
+  { prompt: 7, line: "ya know, next time you come in here" },
+  { prompt: 7, line: "i'm gonna toast ya." },
+  { prompt: 7, line: "" },
+  { prompt: 7, line: "(press y to quit to dos.)" },
+  { prompt: 8, line: "go ahead and leave. see if i care." },
+  { prompt: 8, line: "" },
+  { prompt: 8, line: "(press y to quit to dos.)" },
+  { prompt: 9, line: "are you sure you want to end the game?" },
+  { prompt: 9, line: "" },
+  { prompt: 9, line: "press y or n." },
+  { prompt: 10, line: "this is the shareware version of doom." },
+  { prompt: 10, line: "" },
+  { prompt: 10, line: "you need to order the entire trilogy." },
+  { prompt: 10, line: "" },
+  { prompt: 10, line: "press a key." },
+  { prompt: 11, line: "you can't save if you aren't playing!" },
+  { prompt: 11, line: "" },
+  { prompt: 11, line: "press a key." },
+  { prompt: 12, line: "you haven't picked a quicksave slot yet!" },
+  { prompt: 12, line: "" },
+  { prompt: 12, line: "press a key." }
+]
+// The sound the game leaves with, by the tic (quitsounds).
+table quit_sounds: i32 = [57, 26, 27, 31, 35, 36, 38, 52]
+
+// The menu: whether it is open (`on`), which one and which of its lines
+// the skull is at, which of the skull's two pictures is shown and for
+// how long still; what is asked in the middle of the screen (`prompt`,
+// 0: nothing) and whether only y, n, the space bar and Esc answer it
+// (`answer`); how fast the mouse turns, which nothing here uses; and
+// for how many tics still the game waits before it ends (`leaving`).
 unique Menu {
-  which: i32, item: i32, skull: i32, count: i32, any: bool, up: bool,
-  down: bool, enter: bool, back: bool, esc: bool
+  on: bool, which: i32, item: i32, skull: i32, count: i32, prompt: i32,
+  answer: bool, mouse: i32, leaving: i32, tic: i32
 }
+// The line the skull was at when each menu was left, and which keys
+// were down the tic before: the eleven of `menu_keys`, the eleven from
+// F1 on, and the letters.
+buffer Laston { item: i32 } capacity 8
+buffer Keyheld { down: bool } capacity 64
 const LINEHEIGHT = 16
 const SKULLXOFF = -32
 
@@ -66,132 +189,290 @@ world {
   Shell.page = -1
   Shell.turn = true
   Menu.count = 10
+  Menu.which = MENU_MAIN
+  Menu.mouse = 5
+  Volume.sfx = 8
+  Volume.music = 8
   // (The Esc key is the menu's.)
   Window.escape = true
 }
 
-// How many lines a menu has.
-fn menu_lines(which: i32) -> i32 {
-  if which == MENU_MAIN {
-    6
-  } else if which == MENU_EPISODE {
-    3
-  } else if which == MENU_SKILL {
-    5
-  } else {
-    1
-  }
+// Whether a key went down this tic.
+proc struck(held: mut Keyheld, slot: i32, down: bool) -> bool {
+  let was = held[slot].down
+  held[slot].down = down
+  down && !was
 }
 
 // The keys and what they do to the menu (M_Responder, M_Ticker). Once a
 // tic, before everything else.
 system menu_keys() {
-  let up = Keys.up
-  let down = Keys.down
-  let enter = Keys.enter
-  let back = key_down(259)
-  let esc = key_down(256)
-  let pressed_esc = esc && !Menu.esc
-  let was = Menu.which != MENU_NONE
-  Menu.esc = esc
-  let any = up || down || enter || back || Keys.space || Keys.left || Keys.right ||
-            key_down(341)
-  let pressed_up = up && !Menu.up
-  let pressed_down = down && !Menu.down
-  let pressed_enter = enter && !Menu.enter
-  let pressed_back = back && !Menu.back
-  let pressed_any = any && !Menu.any
-  Menu.up = up
-  Menu.down = down
-  Menu.enter = enter
-  Menu.back = back
-  Menu.any = any
+  if len(Laston) == 0 {
+    Laston = [{ item: 0 }; 8]
+    Laston[MENU_SKILL].item = 2
+    Keyheld = [{ down: false }; 64]
+  }
+  Menu.tic += 1
+  Shell.resize = false
+  let was = Menu.on
+  // The key of this tic, if one went down: the first of these.
+  let esc = struck(Keyheld, 0, key_down(256))
+  let enter = struck(Keyheld, 1, Keys.enter)
+  let back = struck(Keyheld, 2, key_down(259))
+  let up = struck(Keyheld, 3, Keys.up)
+  let down = struck(Keyheld, 4, Keys.down)
+  let left = struck(Keyheld, 5, Keys.left)
+  let right = struck(Keyheld, 6, Keys.right)
+  let yes = struck(Keyheld, 7, key_down('Y' as i32))
+  let no = struck(Keyheld, 8, key_down('N' as i32))
+  let space = struck(Keyheld, 9, Keys.space)
+  let fire = struck(Keyheld, 10, key_down(341))
+  var fkey = 0
+  for i in 0..11 {
+    if struck(Keyheld, 11 + i, key_down(290 + i)) && fkey == 0 { fkey = i + 1 }
+  }
+  let less = struck(Keyheld, 22, key_down('-' as i32))
+  let more = struck(Keyheld, 23, key_down('=' as i32))
+  var letter = 0
+  for i in 0..26 {
+    if struck(Keyheld, 24 + i, key_down('A' as i32 + i)) && letter == 0 { letter = 'A' as i32 + i }
+  }
+  let any = esc || enter || back || up || down || left || right || space || fire ||
+            fkey != 0 || less || more || letter != 0
+  // (What a line that is set lower or higher is set to: -1, 1, or 0.)
+  var set = 0
+  // (What a line that is chosen does: the menu and the line.)
+  var chosen = -1
   Rnd = [{ play: Random.play, other: Random.other }; 1]
-  if pressed_esc {
-    // The menu, or out of it.
-    if Menu.which == MENU_NONE {
-      Menu.which = MENU_MAIN
-      Menu.item = 0
-      sound(Sounds, Rnd, SFX_SWTCHN, 0)
-    } else {
-      Menu.which = MENU_NONE
-      sound(Sounds, Rnd, SFX_SWTCHX, 0)
+  if Menu.leaving > 0 {
+    // (Leaving: nothing else, until the sound is over.)
+    Menu.leaving -= 1
+    if Menu.leaving == 0 { Shell.quit = true }
+  } else if Menu.prompt != 0 {
+    if any && (!Menu.answer || space || esc || yes || no) {
+      let asked = Menu.prompt
+      Menu.prompt = 0
+      Menu.on = false
+      if yes && asked >= PROMPT_QUIT && asked < PROMPT_ENDGAME {
+        // (M_QuitResponse: a last sound, and three seconds for it.)
+        sound(Sounds, Rnd, quit_sounds[(Menu.tic >> 2) & 7], 0)
+        Menu.leaving = 105
+        Menu.prompt = asked
+        Menu.on = true
+      } else if yes && asked == PROMPT_ENDGAME {
+        // (M_EndGameResponse, D_StartTitle: back to the title.)
+        Laston[Menu.which].item = Menu.item
+        Shell.page = -1
+        Shell.turn = true
+      }
+      if Menu.leaving == 0 { sound(Sounds, Rnd, SFX_SWTCHX, 0) }
     }
-  } else if Menu.which == MENU_NONE {
-    // (Any key, while a demo or a picture is shown.)
-    if pressed_any && !Shell.game {
-      Menu.which = MENU_MAIN
+  } else if !Menu.on {
+    if (less || more) && !Shown.map {
+      set = if less { -1 } else { 1 }
+      chosen = MENU_OPTIONS * 16 + 3
+      sound(Sounds, Rnd, SFX_STNMOV, 0)
+    } else if fkey == 1 {
+      // Help.
+      Menu.on = true
+      Menu.which = MENU_READ1
       Menu.item = 0
       sound(Sounds, Rnd, SFX_SWTCHN, 0)
+    } else if fkey == 2 || fkey == 3 {
+      // Save, load: from the first menu.
+      Menu.on = true
+      Menu.which = MENU_MAIN
+      Menu.item = Laston[MENU_MAIN].item
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+      chosen = MENU_MAIN * 16 + if fkey == 2 { 3 } else { 2 }
+    } else if fkey == 4 {
+      // How loud.
+      Menu.on = true
+      Menu.which = MENU_SOUND
+      Menu.item = 0
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+    } else if fkey == 5 {
+      chosen = MENU_OPTIONS * 16 + 2
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+    } else if fkey == 6 {
+      // (Saving in a hurry: not there.)
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+      sound(Sounds, Rnd, SFX_OOF, 0)
+    } else if fkey == 7 {
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+      chosen = MENU_OPTIONS * 16
+    } else if fkey == 8 {
+      chosen = MENU_OPTIONS * 16 + 1
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+    } else if fkey == 9 {
+      // (Loading in a hurry: nothing was saved so.)
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+      Menu.prompt = PROMPT_NOSPOT
+      Menu.answer = false
+      Menu.on = true
+    } else if fkey == 10 {
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+      chosen = MENU_MAIN * 16 + 5
+    } else if esc {
+      Menu.on = true
+      Menu.which = MENU_MAIN
+      Menu.item = Laston[MENU_MAIN].item
+      sound(Sounds, Rnd, SFX_SWTCHN, 0)
+    } else if any && !Shell.game {
+      // (Any key, while a demo or a picture is shown: G_Responder.)
+      Menu.on = true
+      Menu.which = MENU_MAIN
+      Menu.item = Laston[MENU_MAIN].item
     }
   } else {
-    let lines = menu_lines(Menu.which)
-    if pressed_down {
-      Menu.item = (Menu.item + 1) % lines
-      sound(Sounds, Rnd, SFX_PSTOP, 0)
-    } else if pressed_up {
-      Menu.item = (Menu.item + lines - 1) % lines
-      sound(Sounds, Rnd, SFX_PSTOP, 0)
-    } else if pressed_back {
-      // Back to the menu before, or out of the first.
-      Menu.which = if Menu.which == MENU_SKILL {
-        MENU_EPISODE
-      } else if Menu.which == MENU_MAIN {
-        MENU_NONE
-      } else {
-        MENU_MAIN
+    let lines = menus[Menu.which].lines
+    let first = menus[Menu.which].first
+    let kind = menu_lines[first + Menu.item].kind
+    if down {
+      // (Over the lines that are nothing, with a sound for each.)
+      var going = true
+      while going {
+        Menu.item = (Menu.item + 1) % lines
+        sound(Sounds, Rnd, SFX_PSTOP, 0)
+        going = menu_lines[first + Menu.item].kind == -1
       }
-      Menu.item = 0
-      sound(Sounds, Rnd, SFX_SWTCHN, 0)
-    } else if pressed_enter {
-      if Menu.which == MENU_MAIN {
-        if Menu.item == 0 {
-          Menu.which = MENU_EPISODE
-          Menu.item = 0
+    } else if up {
+      var going = true
+      while going {
+        Menu.item = (Menu.item + lines - 1) % lines
+        sound(Sounds, Rnd, SFX_PSTOP, 0)
+        going = menu_lines[first + Menu.item].kind == -1
+      }
+    } else if left || right {
+      if kind == 2 {
+        sound(Sounds, Rnd, SFX_STNMOV, 0)
+        set = if left { -1 } else { 1 }
+        chosen = Menu.which * 16 + Menu.item
+      }
+    } else if enter {
+      if kind != 0 {
+        Laston[Menu.which].item = Menu.item
+        chosen = Menu.which * 16 + Menu.item
+        if kind == 2 {
+          set = 1
+          sound(Sounds, Rnd, SFX_STNMOV, 0)
+        } else if chosen != MENU_SKILL * 16 + 4 {
           sound(Sounds, Rnd, SFX_PISTOL, 0)
-        } else if Menu.item == 4 {
-          Menu.which = MENU_READ1
-          Menu.item = 0
-          sound(Sounds, Rnd, SFX_PISTOL, 0)
-        } else if Menu.item == 5 {
-          Shell.quit = true
-        } else {
-          // (Not there.)
-          sound(Sounds, Rnd, SFX_OOF, 0)
         }
-      } else if Menu.which == MENU_EPISODE {
-        if Menu.item == 0 {
-          // (The skill that is asked for first: the middle one.)
-          Menu.which = MENU_SKILL
-          Menu.item = 2
-        } else {
-          // (The other episodes are not in this WAD: how to get them.)
-          Menu.which = MENU_READ1
-          Menu.item = 0
-        }
-        sound(Sounds, Rnd, SFX_PISTOL, 0)
-      } else if Menu.which == MENU_SKILL {
-        if Menu.item < 4 {
-          Shell.start = true
-          Shell.skill = Menu.item
-          Menu.which = MENU_NONE
-          sound(Sounds, Rnd, SFX_PISTOL, 0)
-        } else {
-          sound(Sounds, Rnd, SFX_OOF, 0)
-        }
-      } else if Menu.which == MENU_READ1 {
-        Menu.which = MENU_READ2
-        sound(Sounds, Rnd, SFX_PISTOL, 0)
-      } else {
-        Menu.which = MENU_MAIN
-        Menu.item = 0
-        sound(Sounds, Rnd, SFX_PISTOL, 0)
+      }
+    } else if esc {
+      Laston[Menu.which].item = Menu.item
+      Menu.on = false
+      sound(Sounds, Rnd, SFX_SWTCHX, 0)
+    } else if back {
+      Laston[Menu.which].item = Menu.item
+      if menus[Menu.which].back != 0 {
+        Menu.which = menus[Menu.which].back
+        Menu.item = Laston[Menu.which].item
+        sound(Sounds, Rnd, SFX_SWTCHN, 0)
+      }
+    } else if letter != 0 {
+      // The next line with that letter, from the one after the skull
+      // round to the skull.
+      var found = -1
+      for step in 1..lines + 1 {
+        let line = (Menu.item + step) % lines
+        if found < 0 && menu_lines[first + line].letter == letter { found = line }
+      }
+      if found >= 0 {
+        Menu.item = found
+        sound(Sounds, Rnd, SFX_PSTOP, 0)
       }
     }
   }
+  // What the line that was chosen does.
+  if chosen == MENU_MAIN * 16 {
+    Menu.which = MENU_EPISODE
+    Menu.item = Laston[MENU_EPISODE].item
+  } else if chosen == MENU_MAIN * 16 + 1 {
+    Menu.which = MENU_OPTIONS
+    Menu.item = Laston[MENU_OPTIONS].item
+  } else if chosen == MENU_MAIN * 16 + 2 {
+    // (Loading: not there.)
+    sound(Sounds, Rnd, SFX_OOF, 0)
+  } else if chosen == MENU_MAIN * 16 + 3 {
+    if !Shell.game {
+      Menu.prompt = PROMPT_SAVEDEAD
+      Menu.answer = false
+    } else {
+      // (Saving: not there.)
+      sound(Sounds, Rnd, SFX_OOF, 0)
+    }
+  } else if chosen == MENU_MAIN * 16 + 4 {
+    Menu.which = MENU_READ1
+    Menu.item = Laston[MENU_READ1].item
+  } else if chosen == MENU_MAIN * 16 + 5 {
+    // (M_QuitDOOM.)
+    Menu.prompt = PROMPT_QUIT + Menu.tic % 8
+    Menu.answer = true
+    Menu.on = true
+  } else if chosen == MENU_EPISODE * 16 {
+    Menu.which = MENU_SKILL
+    Menu.item = Laston[MENU_SKILL].item
+  } else if chosen > MENU_EPISODE * 16 && chosen < MENU_SKILL * 16 {
+    // (The other episodes are not in this WAD: how to get them.)
+    Menu.prompt = PROMPT_SHAREWARE
+    Menu.answer = false
+    Menu.which = MENU_READ1
+    Menu.item = Laston[MENU_READ1].item
+  } else if chosen >= MENU_SKILL * 16 && chosen < MENU_SKILL * 16 + 4 {
+    Shell.start = true
+    Shell.skill = chosen - MENU_SKILL * 16
+    Menu.on = false
+  } else if chosen == MENU_SKILL * 16 + 4 {
+    // (The fifth skill: not there.)
+    sound(Sounds, Rnd, SFX_OOF, 0)
+  } else if chosen == MENU_OPTIONS * 16 {
+    // (M_EndGame.)
+    if !Shell.game {
+      sound(Sounds, Rnd, SFX_OOF, 0)
+    } else {
+      Menu.prompt = PROMPT_ENDGAME
+      Menu.answer = true
+      Menu.on = true
+    }
+  } else if chosen == MENU_OPTIONS * 16 + 1 {
+    // (M_ChangeMessages: said even where nothing is said.)
+    Hud.off = !Hud.off
+    Inv[0].message = if Hud.off { MSG_MSGOFF } else { MSG_MSGON }
+    Hud.must = true
+  } else if chosen == MENU_OPTIONS * 16 + 2 {
+    // (M_ChangeDetail.)
+    View.detail = 1 - View.detail
+    Shell.resize = true
+    Inv[0].message = if View.detail == 0 { MSG_DETAILHI } else { MSG_DETAILLO }
+  } else if chosen == MENU_OPTIONS * 16 + 3 {
+    // (M_SizeDisplay.)
+    if set < 0 && View.blocks > 3 {
+      View.blocks -= 1
+    } else if set > 0 && View.blocks < 11 {
+      View.blocks += 1
+    }
+    Shell.resize = true
+  } else if chosen == MENU_OPTIONS * 16 + 5 {
+    Menu.mouse = min(max(Menu.mouse + set, 0), 9)
+  } else if chosen == MENU_OPTIONS * 16 + 7 {
+    Menu.which = MENU_SOUND
+    Menu.item = Laston[MENU_SOUND].item
+  } else if chosen == MENU_READ1 * 16 {
+    Menu.which = MENU_READ2
+    Menu.item = Laston[MENU_READ2].item
+  } else if chosen == MENU_READ2 * 16 {
+    Menu.which = MENU_MAIN
+    Menu.item = Laston[MENU_MAIN].item
+  } else if chosen == MENU_SOUND * 16 {
+    Volume.sfx = min(max(Volume.sfx + set, 0), 15)
+  } else if chosen == MENU_SOUND * 16 + 2 {
+    Volume.music = min(max(Volume.music + set, 0), 15)
+  }
   // (What is around a smaller view is drawn anew while the menu is
-  // over it, and once more after.)
-  if was || Menu.which != MENU_NONE { Border.count = 3 }
+  // over it, when the view's size changes, and once more after.)
+  if was || Menu.on || Shell.resize { Border.count = 3 }
   // The skull blinks.
   Menu.count -= 1
   if Menu.count <= 0 {
@@ -291,49 +572,85 @@ system draw_page() {
   draw_patch(Screen, Bytes, name, 0, 0)
 }
 
-// The lines of a menu, one under the other, and the skull at one of
-// them.
-proc menu_skull(screen: mut Screen, bytes: Bytes, lumps: Lumps, x: i32, y: i32,
-                skull: i32) {
-  draw_patch(screen, bytes,
-             if skull == 0 { pic(lumps, "M_SKULL1") } else { pic(lumps, "M_SKULL2") },
-             x, y)
+// How wide a line of text is in the game's letters (M_StringWidth).
+fn text_width(bytes: Bytes, font: Hufont, words: text[48]) -> i32 {
+  var width = 0
+  for i in 0..len(words) {
+    var c = words[i] as u8 as i32
+    if c >= 97 && c <= 122 { c -= 32 }
+    width += if c >= HU_FONTSTART && c <= HU_FONTEND {
+      short_at(bytes, font[c - HU_FONTSTART].at)
+    } else {
+      4
+    }
+  }
+  width
 }
 
-// The menu over whatever else is on the screen (M_Drawer).
+// Something that is set lower or higher: a bar of `width` parts, and
+// where on it it is set (M_DrawThermo).
+proc draw_thermo(screen: mut Screen, bytes: Bytes, lumps: Lumps, x: i32, y: i32,
+                 width: i32, at: i32) {
+  draw_patch(screen, bytes, pic(lumps, "M_THERML"), x, y)
+  for i in 0..width { draw_patch(screen, bytes, pic(lumps, "M_THERMM"), x + 8 + i * 8, y) }
+  draw_patch(screen, bytes, pic(lumps, "M_THERMR"), x + 8 + width * 8, y)
+  draw_patch(screen, bytes, pic(lumps, "M_THERMO"), x + 8 + at * 8, y)
+}
+
+// The menu over whatever else is on the screen (M_Drawer): what is
+// asked in the middle of the screen, or else the menu's own pictures,
+// its lines one under the other, and the skull at one of them.
 system draw_menu() {
-  if Menu.which == MENU_MAIN {
-    draw_patch(Screen, Bytes, pic(Lumps, "M_DOOM"), 94, 2)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_NGAME"), 97, 64)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_OPTION"), 97, 64 + LINEHEIGHT)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_LOADG"), 97, 64 + 2 * LINEHEIGHT)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_SAVEG"), 97, 64 + 3 * LINEHEIGHT)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_RDTHIS"), 97, 64 + 4 * LINEHEIGHT)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_QUITG"), 97, 64 + 5 * LINEHEIGHT)
-    menu_skull(Screen, Bytes, Lumps, 97 + SKULLXOFF, 64 - 5 + Menu.item * LINEHEIGHT,
-               Menu.skull)
-  } else if Menu.which == MENU_EPISODE {
-    draw_patch(Screen, Bytes, pic(Lumps, "M_EPISOD"), 54, 38)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_EPI1"), 48, 63)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_EPI2"), 48, 63 + LINEHEIGHT)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_EPI3"), 48, 63 + 2 * LINEHEIGHT)
-    menu_skull(Screen, Bytes, Lumps, 48 + SKULLXOFF, 63 - 5 + Menu.item * LINEHEIGHT,
-               Menu.skull)
-  } else if Menu.which == MENU_SKILL {
-    draw_patch(Screen, Bytes, pic(Lumps, "M_NEWG"), 96, 14)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_SKILL"), 54, 38)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_JKILL"), 48, 63)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_ROUGH"), 48, 63 + LINEHEIGHT)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_HURT"), 48, 63 + 2 * LINEHEIGHT)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_ULTRA"), 48, 63 + 3 * LINEHEIGHT)
-    draw_patch(Screen, Bytes, pic(Lumps, "M_NMARE"), 48, 63 + 4 * LINEHEIGHT)
-    menu_skull(Screen, Bytes, Lumps, 48 + SKULLXOFF, 63 - 5 + Menu.item * LINEHEIGHT,
-               Menu.skull)
-  } else if Menu.which == MENU_READ1 {
-    // (What to read: how to get the other episodes, then the keys.)
-    draw_patch(Screen, Bytes, pic(Lumps, "HELP2"), 0, 0)
-    menu_skull(Screen, Bytes, Lumps, 280 + SKULLXOFF, 185 - 5, Menu.skull)
-  } else if Menu.which == MENU_READ2 {
-    draw_patch(Screen, Bytes, pic(Lumps, "HELP1"), 0, 0)
+  if Menu.prompt != 0 {
+    var lines = 0
+    for i in 0..len(prompt_lines) {
+      if prompt_lines[i].prompt == Menu.prompt { lines += 1 }
+    }
+    let height = short_at(Bytes, Hufont[0].at + 2)
+    var y = SCREENHEIGHT / 2 - height * lines / 2
+    for i in 0..len(prompt_lines) {
+      if prompt_lines[i].prompt == Menu.prompt {
+        draw_text(Screen, Bytes, Hufont, prompt_lines[i].line,
+                  SCREENWIDTH / 2 - text_width(Bytes, Hufont, prompt_lines[i].line) / 2, y)
+        y += height
+      }
+    }
+  } else if Menu.on {
+    let x = menus[Menu.which].x
+    let y = menus[Menu.which].y
+    if Menu.which == MENU_MAIN {
+      draw_patch(Screen, Bytes, pic(Lumps, "M_DOOM"), 94, 2)
+    } else if Menu.which == MENU_EPISODE {
+      draw_patch(Screen, Bytes, pic(Lumps, "M_EPISOD"), 54, 38)
+    } else if Menu.which == MENU_SKILL {
+      draw_patch(Screen, Bytes, pic(Lumps, "M_NEWG"), 96, 14)
+      draw_patch(Screen, Bytes, pic(Lumps, "M_SKILL"), 54, 38)
+    } else if Menu.which == MENU_OPTIONS {
+      draw_patch(Screen, Bytes, pic(Lumps, "M_OPTTTL"), 108, 15)
+      draw_patch(Screen, Bytes,
+                 if View.detail == 0 { pic(Lumps, "M_GDHIGH") } else { pic(Lumps, "M_GDLOW") },
+                 x + 175, y + LINEHEIGHT * 2)
+      draw_patch(Screen, Bytes,
+                 if Hud.off { pic(Lumps, "M_MSGOFF") } else { pic(Lumps, "M_MSGON") },
+                 x + 120, y + LINEHEIGHT)
+      draw_thermo(Screen, Bytes, Lumps, x, y + LINEHEIGHT * 6, 10, Menu.mouse)
+      draw_thermo(Screen, Bytes, Lumps, x, y + LINEHEIGHT * 4, 9, View.blocks - 3)
+    } else if Menu.which == MENU_READ1 {
+      // (What to read: how to get the other episodes, then the keys.)
+      draw_patch(Screen, Bytes, pic(Lumps, "HELP2"), 0, 0)
+    } else if Menu.which == MENU_READ2 {
+      draw_patch(Screen, Bytes, pic(Lumps, "HELP1"), 0, 0)
+    } else if Menu.which == MENU_SOUND {
+      draw_patch(Screen, Bytes, pic(Lumps, "M_SVOL"), 60, 38)
+      draw_thermo(Screen, Bytes, Lumps, x, y + LINEHEIGHT, 16, Volume.sfx)
+      draw_thermo(Screen, Bytes, Lumps, x, y + LINEHEIGHT * 3, 16, Volume.music)
+    }
+    for i in 0..menus[Menu.which].lines {
+      let name = menu_lines[menus[Menu.which].first + i].name
+      if len(name) > 0 { draw_patch(Screen, Bytes, pic(Lumps, name), x, y + i * LINEHEIGHT) }
+    }
+    draw_patch(Screen, Bytes,
+               if Menu.skull == 0 { pic(Lumps, "M_SKULL1") } else { pic(Lumps, "M_SKULL2") },
+               x + SKULLXOFF, y - 5 + Menu.item * LINEHEIGHT)
   }
 }

@@ -69,22 +69,27 @@ them as systems. It is being built; what is here so far:
   shown (`tick_finale`, `draw_finale`).
 - `shell.ent`: what is around the game: the title, the WAD's three
   demos played one after another with a picture between them, and the
-  menu over any of it, from which a new game is started in one of four
-  skills.
-- Not yet: the game's settings (but the view's size),
-  the view in half as many columns, saving and loading, the
-  fifth skill; the monsters and weapons that are not in the first
+  menus over any of it (m_menu.c): a new game in one of four skills;
+  the options (ending the game, whether anything is said at the top,
+  the view in half as many columns, the view's size, how loud the
+  sounds and the music are); what to read; and leaving, which asks
+  first. What is asked is answered with y or n.
+- Not yet: saving and loading, the fifth skill, the mouse (its setting
+  is in the menu and does nothing), making the picture lighter (F11);
+  the monsters and weapons that are not in the first
   episode. Ceilings that move and the donut are written but were
   never set off: the shareware levels have no such ceiling, and no demo
-  here uses the donut. The sounds were never heard by anyone yet.
+  here uses the donut.
 - `doom.ent`: the program. It starts with the title and the demos; any
-  key brings the menu (the arrow keys, Enter, Backspace to go back),
-  and a new game plays the episode from E1M1 with the keyboard (the
-  arrow keys, A and D to step aside, Shift to run, the space bar to use,
-  the left Ctrl key to shoot, 1 to 7 for a weapon; Tab shows the map;
-  - and = make the view smaller and bigger).
+  key brings the menu (the arrow keys, Enter, Backspace to go back, a
+  line's first letter), and a new game plays the episode from E1M1 with
+  the keyboard (the arrow keys, A and D to step aside, Shift to run, the
+  space bar to use, the left Ctrl key to shoot, 1 to 7 for a weapon; Tab
+  shows the map; - and = make the view smaller and bigger).
   Esc opens and shuts the menu at any time; the game stands still
-  while it is open, and Quit Game ends the program.
+  while it is open. The F keys are the game's: F1 what to read, F4 how
+  loud, F5 the detail, F7 ends the game, F8 whether anything is said,
+  F10 leaves.
 - `check/`: programs that print what the port computes, to hold against
   the reference.
 - `reference/`: what the port is compared against. `fetch.sh` fetches
@@ -107,6 +112,7 @@ examples/doom/check/shots.sh 3 0,50,100,300,600      # whole screens, and their 
 examples/doom/check/shots.sh e1m5_uv_max 1700,3700   # of a fetched demo
 examples/doom/check/shots.sh ep1_nomo 300,330,400    # between two levels too
 BLOCKS=6 examples/doom/check/shots.sh 3 0,50,100     # with a smaller view
+DETAIL=1 examples/doom/check/shots.sh 3 0,50,100     # in half as many columns
 MELTS=1 examples/doom/check/shots.sh ep1_nomo 100    # and every screen of the melts
 examples/doom/check/music.sh                         # what each tune writes to the chip
 SOUND=1 examples/doom/check/music.sh D_E1M1 60       # and how near the chip's sound is

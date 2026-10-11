@@ -280,9 +280,13 @@ system init_tunes() {
 // music goes on, with another tune if another is asked for
 // (S_ChangeMusic): as many samples as the device wants now.
 system hear() {
-  let loud = if Sound.off { 0.0 } else { Sound.volume }
+  // (The sounds are worked out as loud as the game starts with, eight
+  // of fifteen, and made louder or quieter here.)
+  let all = if Sound.off { 0.0 } else { Sound.volume }
+  let loud = all * (Volume.sfx as f32) / 8.0
   update_channels(Mobj, Spawned.player, Sectors, Channels, Level.map, loud)
   start_channels(Sounds, Sfxdata, Bytes, Channels, loud)
+  music_volume(Bytes, Mus, Mchan, Ovoice, Writes, Volume.music * 8)
   if Tune.name != Playing {
     Playing = Tune.name
     tune_stop(Mus, Ovoice, Vlist, Writes)
@@ -296,5 +300,5 @@ system hear() {
                 Chip, Gain, Rates, Pcm, min(stream_wants(MUSIC_RATE), 16384))
   Heights = []
   for i in 0..len(Pcm) { Heights += { value: Pcm[i].value } }
-  stream(Heights, len(Heights), MUSIC_RATE, loud)
+  stream(Heights, len(Heights), MUSIC_RATE, all)
 }

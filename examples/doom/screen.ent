@@ -466,8 +466,10 @@ system draw_status() {
 
 // What the player is told, at the top of the screen for four seconds
 // (hu_stuff.c): the message that is shown, by its number, and how long
-// still.
-unique Hud { shown: i32, counter: i32, on: bool }
+// still. `off`: the player wants nothing said; `must`: what is to be
+// said now is said all the same, and (`kept`) stays its time whatever
+// else there is to say.
+unique Hud { shown: i32, counter: i32, on: bool, off: bool, must: bool, kept: bool }
 // The pictures of the letters, from '!' to '_', by where their lumps
 // are.
 buffer Hufont { at: i32 } capacity 64
@@ -492,13 +494,18 @@ system start_messages() {
 system tick_messages() {
   if Hud.counter != 0 {
     Hud.counter -= 1
-    if Hud.counter == 0 { Hud.on = false }
+    if Hud.counter == 0 {
+      Hud.on = false
+      Hud.kept = false
+    }
   }
-  if Inv[0].message != 0 {
+  if (!Hud.off || Hud.must) && Inv[0].message != 0 && (!Hud.kept || Hud.must) {
     Hud.shown = Inv[0].message
     Inv[0].message = 0
     Hud.on = true
     Hud.counter = HU_MSGTIMEOUT
+    Hud.kept = Hud.must
+    Hud.must = false
   }
 }
 
