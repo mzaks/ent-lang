@@ -5,6 +5,7 @@
 #   check/shots.sh e1m5_uv_max 1600,3700   a demo of reference/fetch_demos.sh
 # Which of the palettes each screen is shown in is compared as well.
 # BLOCKS=7 for a view of another size (3 to 11; 10 if not said).
+# DETAIL=1 for the view in half as many columns, each twice as wide.
 # MELTS=2 for the screens of the melts as well, from the third melt on
 # (the first melts from a screen that is not the port's).
 # The screens are in build/doom/run as shots.reference.raw and
@@ -42,7 +43,7 @@ fi
 # (The whole view above the status bar.)
 blocks=${BLOCKS:-10}
 printf "screenblocks $blocks\n" > "$run/shots.cfg"
-printf 'show_messages 1\ndetaillevel 0\n' >> "$run/shots.cfg"
+printf "show_messages 1\ndetaillevel ${DETAIL:-0}\n" >> "$run/shots.cfg"
 (cd "$run" && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
   DOOM_SHOTS="$run/shots.reference.raw" DOOM_SHOT_TICS=$tics \
   DOOM_MELTS=${MELTS:+$run/melts.reference.raw} DOOM_MELT_SKIP=${MELTS:-0} \
@@ -62,7 +63,7 @@ grep '^melt ' "$run/shots.both" > "$run/shots.melts"
   echo "]"
 } > "$run/shots.ent"
 rm -f "$run/shots.port" "$run/shots.melt"
-sed "s/DEMO1/$lump/; s/View.blocks = 10/View.blocks = $blocks/" "$here/shots_check.ent" > "$run/shots_check.ent"
+sed "s/DEMO1/$lump/; s/View.blocks = 10/View.blocks = $blocks/; s/View.detail = 0/View.detail = ${DETAIL:-0}/" "$here/shots_check.ent" > "$run/shots_check.ent"
 (cd "$run" && ENT_BIN=${ENT_BIN:-$root/build/bin} python3 "$root/tools/ent" \
   run -I "$here/.." -I "$run" "$run/shots_check.ent") > "$run/shots.out"
 grep -v '^shot \|^melt ' "$run/shots.out"

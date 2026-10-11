@@ -153,13 +153,16 @@ buffer Fuzz { pos: i32 } capacity 1
 // above or below (R_DrawFuzzColumn). `map`: the colours for that.
 proc draw_fuzz_column(screen: mut Screen, bytes: Bytes, fuzz: mut Fuzz, x: i32,
                       top: i32, bottom: i32, map: i32, viewheight: i32,
-                      left: i32, up: i32) {
+                      left: i32, up: i32, wide: i32) {
   let yl = if top == 0 { 1 } else { top }
   let yh = if bottom == viewheight - 1 { viewheight - 2 } else { bottom }
-  var dest = (yl + up) * SCREENWIDTH + left + x
+  var dest = (yl + up) * SCREENWIDTH + left + (x << wide)
   for y in yl..yh + 1 {
-    screen[dest].pixel =
-        bytes[map + screen[dest + fuzzoffset[fuzz[0].pos] * SCREENWIDTH].pixel as i32].value
+    let from = fuzzoffset[fuzz[0].pos] * SCREENWIDTH
+    screen[dest].pixel = bytes[map + screen[dest + from].pixel as i32].value
+    if wide != 0 {
+      screen[dest + 1].pixel = bytes[map + screen[dest + 1 + from].pixel as i32].value
+    }
     fuzz[0].pos = (fuzz[0].pos + 1) % 50
     dest += SCREENWIDTH
   }
@@ -172,7 +175,7 @@ proc draw_masked_column(screen: mut Screen, bytes: Bytes, openings: Openings,
                         column: i32, x: i32, spryscale: i32,
                         sprtopscreen: i32, texturemid: i32, iscale: i32,
                         colormap: i32, ceilings: i32, floors: i32,
-                        centery: i32, left: i32, top: i32) {
+                        centery: i32, left: i32, top: i32, wide: i32) {
   var post = column
   while bytes[post].value != 255 {
     let topdelta = bytes[post].value as i32
@@ -185,11 +188,11 @@ proc draw_masked_column(screen: mut Screen, bytes: Bytes, openings: Openings,
     if yl <= yh {
       if colormap < 0 {
         draw_fuzz_column(screen, bytes, fuzz, x, yl, yh, -colormap, viewheight,
-                         left, top)
+                         left, top, wide)
       } else {
         draw_column(screen, bytes, x, yl, yh, iscale,
                     texturemid - (topdelta << FRACBITS), post + 3, colormap,
-                    centery, left, top)
+                    centery, left, top, wide)
       }
     }
     post += length + 4
@@ -207,7 +210,7 @@ proc render_masked_seg_range(screen: mut Screen, bytes: Bytes, fuzz: mut Fuzz,
                              columns: TextureColumns, textrans: Textrans,
                              lights: Scalelight, ds: i32, x1: i32, x2: i32, viewz: i32,
                              centery: i32, centeryfrac: i32, left: i32,
-                             top: i32, extralight: i32, fixedmap: i32) {
+                             top: i32, extralight: i32, fixedmap: i32, wide: i32) {
   let seg = drawsegs[ds].seg
   let front = segs[seg].front
   let back = segs[seg].back
@@ -245,7 +248,7 @@ proc render_masked_seg_range(screen: mut Screen, bytes: Bytes, fuzz: mut Fuzz,
                                     MAXLIGHTSCALE - 1)].map
           },
           drawsegs[ds].sprtopclip, drawsegs[ds].sprbottomclip, centery, left,
-          top)
+          top, wide)
       openings[maskedtexturecol + x].value = 0x7fff
     }
     spryscale += scalestep
@@ -312,7 +315,7 @@ system draw_masked() {
         gzt: gzt,
         startfrac: if flip { Spritelumps[lump].width - 1 } else { 0 } +
                    xiscale * (first - x1),
-        scale: xscale, xiscale: xiscale, texturemid: gzt - vz, patch: lump,
+        scale: xscale << View.detail, xiscale: xiscale, texturemid: gzt - vz, patch: lump,
         colormap: if m.flags & MF_SHADOW != 0 {
           -(Data.colormaps + 6 * 256)
         } else if View.fixed != 0 {
@@ -321,7 +324,8 @@ system draw_masked() {
           Data.colormaps
         } else {
           Scalelight[lightnum * MAXLIGHTSCALE +
-                     min(xscale >> LIGHTSCALESHIFT, MAXLIGHTSCALE - 1)].map
+                     min(xscale >> (LIGHTSCALESHIFT - View.detail),
+                         MAXLIGHTSCALE - 1)].map
         },
         rank: Sectorrank[sector].rank, linked: m.linked
       }
@@ -403,7 +407,8 @@ system draw_masked() {
                                     TextureColumns, Textrans, Scalelight, ds, r1, r2, vz,
                                     View.centery, View.centeryfrac, View.x,
                                     View.y, View.extralight,
-                              if View.fixed != 0 { Data.colormaps + View.fixed * 256 } else { 0 })
+                              if View.fixed != 0 { Data.colormaps + View.fixed * 256 } else { 0 },
+                              View.detail)
           }
         } else {
           var silhouette = Drawsegs[ds].silhouette
@@ -450,8 +455,8 @@ system draw_masked() {
           Screen, Bytes, Openings, Fuzz, View.height,
           patch + long_at(Bytes, patch + 8 + (frac >> FRACBITS) * 4), x, scale,
           View.centeryfrac - fixed_mul(texturemid, scale), texturemid,
-          abs(xiscale), colormap, CLIPTOP, CLIPBOTTOM, View.centery, View.x,
-          View.y)
+          abs(xiscale) >> View.detail, colormap, CLIPTOP, CLIPBOTTOM, View.centery,
+          View.x, View.y, View.detail)
       frac += xiscale
     }
   }
@@ -465,7 +470,8 @@ system draw_masked() {
                               Scalelight, ds, Drawsegs[ds].x1, Drawsegs[ds].x2,
                               vz, View.centery, View.centeryfrac, View.x,
                               View.y, View.extralight,
-                              if View.fixed != 0 { Data.colormaps + View.fixed * 256 } else { 0 })
+                              if View.fixed != 0 { Data.colormaps + View.fixed * 256 } else { 0 },
+                              View.detail)
     }
   }
 }

@@ -50,6 +50,7 @@ world {
   Wad.file = "doom1.wad"
   Demo.lump = "DEMO1"
   View.blocks = 10
+  View.detail = 0
   Border.count = 3
 }
 

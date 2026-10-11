@@ -35,6 +35,9 @@ const MAXSEGS = 32
 // How big the view is in the picture (R_ExecuteSetViewSize): `blocks` is
 // the size the player chose, 3 to 11 (nought: 9, as it starts; 10 is as
 // wide as the picture, 11 the whole of it).
+// (`detail`: 1 where the view is drawn in half as many columns, each
+// twice as wide; `width` is how many columns there are, `scaled` how
+// wide the view is in the picture.)
 // (`extralight`: how much lighter everything is, for the flash of a
 // shot. `fixed`: the one colour map everything is drawn with, by its
 // number, while the player sees in the dark or cannot be hurt; 0 for
@@ -42,7 +45,7 @@ const MAXSEGS = 32
 unique View {
   blocks: i32, width: i32, height: i32, x: i32, y: i32, centerx: i32,
   centery: i32, centerxfrac: i32, centeryfrac: i32, projection: i32,
-  clipangle: u32, extralight: i32, fixed: i32
+  clipangle: u32, extralight: i32, fixed: i32, detail: i32, scaled: i32
 }
 
 // Where the level is seen from: until there is a player, where one
@@ -407,7 +410,8 @@ proc render_bsp_node(nodes: Nodes, boxes: Boxes, subsectors: Subsectors,
 // (R_ExecuteSetViewSize, R_InitTextureMapping).
 system set_view_size() {
   let blocks = if View.blocks == 0 { 9 } else { View.blocks }
-  let width = if blocks == 11 { SCREENWIDTH } else { blocks * 32 }
+  let scaled = if blocks == 11 { SCREENWIDTH } else { blocks * 32 }
+  let width = scaled >> View.detail
   let height = if blocks == 11 {
     SCREENHEIGHT
   } else {
@@ -415,14 +419,15 @@ system set_view_size() {
   }
   let centerxfrac = (width / 2) << FRACBITS
   View.width = width
+  View.scaled = scaled
   View.height = height
   View.centerx = width / 2
   View.centery = height / 2
   View.centerxfrac = centerxfrac
   View.centeryfrac = (height / 2) << FRACBITS
   View.projection = centerxfrac
-  View.x = (SCREENWIDTH - width) >> 1
-  View.y = if width == SCREENWIDTH {
+  View.x = (SCREENWIDTH - scaled) >> 1
+  View.y = if scaled == SCREENWIDTH {
     0
   } else {
     (SCREENHEIGHT - SBARHEIGHT - height) >> 1
@@ -593,10 +598,10 @@ buffer Stored {
 // its texture), for one whose normal is at `normal` and that is
 // `distance` away along it (R_ScaleFromGlobalAngle).
 fn scale_from_global_angle(visangle: u32, viewangle: u32, normal: u32,
-                           distance: i32, projection: i32) -> i32 {
+                           distance: i32, projection: i32, detail: i32) -> i32 {
   let sinea = finesine[(ANG90 + (visangle - viewangle)) >> ANGLETOFINESHIFT]
   let sineb = finesine[(ANG90 + (visangle - normal)) >> ANGLETOFINESHIFT]
-  let num = fixed_mul(projection, sineb)
+  let num = fixed_mul(projection, sineb) << detail
   let den = fixed_mul(distance, sinea)
   if den > num >> FRACBITS {
     let scale = fixed_div(num, den)
@@ -671,12 +676,14 @@ proc check_plane(planes: mut Visplanes, tops: mut Planetops, pl: i32,
 // row, made darker by the colour map at `colormap` (R_DrawColumn).
 proc draw_column(screen: mut Screen, bytes: Bytes, x: i32, yl: i32, yh: i32,
                  iscale: i32, texturemid: i32, source: i32, colormap: i32,
-                 centery: i32, left: i32, top: i32) {
-  var dest = (yl + top) * SCREENWIDTH + left + x
+                 centery: i32, left: i32, top: i32, wide: i32) {
+  var dest = (yl + top) * SCREENWIDTH + left + (x << wide)
   var frac = texturemid + (yl - centery) * iscale
   for y in yl..yh + 1 {
-    screen[dest].pixel =
-        bytes[colormap + bytes[source + ((frac >> FRACBITS) & 127)].value as i32].value
+    let pixel = bytes[colormap + bytes[source + ((frac >> FRACBITS) & 127)].value as i32].value
+    screen[dest].pixel = pixel
+    // (Twice as wide: R_DrawColumnLow.)
+    if wide != 0 { screen[dest + 1].pixel = pixel }
     dest += SCREENWIDTH
     frac += iscale
   }
@@ -687,17 +694,21 @@ proc draw_column(screen: mut Screen, bytes: Bytes, x: i32, yl: i32, yh: i32,
 // it and each next one (xstep, ystep) on (R_DrawSpan).
 proc draw_span(screen: mut Screen, bytes: Bytes, y: i32, x1: i32, x2: i32,
                xfrac: i32, yfrac: i32, xstep: i32, ystep: i32, source: i32,
-               colormap: i32, left: i32, top: i32) {
+               colormap: i32, left: i32, top: i32, wide: i32) {
   // Both in one number: 16 bits each, of which 6 say the pixel.
   var position = (((xfrac as u32) << 10) & 0xffff0000) |
                  (((yfrac >> 6) as u32) & 0x0000ffff)
   let step = (((xstep as u32) << 10) & 0xffff0000) |
              (((ystep >> 6) as u32) & 0x0000ffff)
-  var dest = (y + top) * SCREENWIDTH + left + x1
+  var dest = (y + top) * SCREENWIDTH + left + (x1 << wide)
   for x in x1..x2 + 1 {
     let spot = (position >> 26) | ((position >> 4) & 0x0fc0)
-    screen[dest].pixel =
-        bytes[colormap + bytes[source + spot as i32].value as i32].value
+    let pixel = bytes[colormap + bytes[source + spot as i32].value as i32].value
+    screen[dest].pixel = pixel
+    if wide != 0 {
+      dest += 1
+      screen[dest].pixel = pixel
+    }
     dest += 1
     position += step
   }
@@ -713,7 +724,7 @@ system init_view_tables() {
   for y in 0..View.height {
     let dy = abs(((y - View.height / 2) << FRACBITS) + FRACUNIT / 2)
     Spans += {
-      yslope: fixed_div(View.width / 2 * FRACUNIT, dy), cachedheight: 0,
+      yslope: fixed_div(View.scaled / 2 * FRACUNIT, dy), cachedheight: 0,
       cacheddistance: 0, cachedxstep: 0, cachedystep: 0, spanstart: 0
     }
   }
@@ -728,7 +739,7 @@ system init_view_tables() {
   for i in 0..LIGHTLEVELS {
     let startmap = ((LIGHTLEVELS - 1 - i) * 2) * NUMCOLORMAPS / LIGHTLEVELS
     for j in 0..MAXLIGHTSCALE {
-      let level = startmap - j * SCREENWIDTH / View.width / DISTMAP
+      let level = startmap - j * SCREENWIDTH / View.scaled / DISTMAP
       Scalelight += {
         map: Data.colormaps + min(max(level, 0), NUMCOLORMAPS - 1) * 256
       }
@@ -806,11 +817,11 @@ system draw_walls() {
       // Its scale at both ends, and the step between two columns.
       let scale1 = scale_from_global_angle(
           viewangle + Xtoviewangle[start].angle, viewangle, rw_normalangle,
-          rw_distance, View.projection)
+          rw_distance, View.projection, View.detail)
       let scale2 = if stop > start {
         scale_from_global_angle(viewangle + Xtoviewangle[stop].angle,
                                 viewangle, rw_normalangle, rw_distance,
-                                View.projection)
+                                View.projection, View.detail)
       } else {
         scale1
       }
@@ -1051,7 +1062,7 @@ system draw_walls() {
           draw_column(Screen, Bytes, x, yl, yh, iscale, rw_midtexturemid,
                       get_column(Textures, TextureColumns, midtexture,
                                  texturecolumn),
-                      colormap, View.centery, View.x, View.y)
+                      colormap, View.centery, View.x, View.y, View.detail)
           Clips[x].ceiling = View.height
           Clips[x].floor = -1
         } else {
@@ -1062,7 +1073,7 @@ system draw_walls() {
               draw_column(Screen, Bytes, x, yl, mid, iscale, rw_toptexturemid,
                           get_column(Textures, TextureColumns, toptexture,
                                      texturecolumn),
-                          colormap, View.centery, View.x, View.y)
+                          colormap, View.centery, View.x, View.y, View.detail)
               Clips[x].ceiling = mid
             } else {
               Clips[x].ceiling = yl - 1
@@ -1078,7 +1089,7 @@ system draw_walls() {
               draw_column(Screen, Bytes, x, mid, yh, iscale, rw_bottomtexturemid,
                           get_column(Textures, TextureColumns, bottomtexture,
                                      texturecolumn),
-                          colormap, View.centery, View.x, View.y)
+                          colormap, View.centery, View.x, View.y, View.detail)
               Clips[x].floor = mid
             } else {
               Clips[x].floor = yh + 1
@@ -1153,11 +1164,11 @@ system draw_planes() {
         if yl <= yh {
           let angle = ((viewangle + Xtoviewangle[x].angle) >> ANGLETOSKYSHIFT) as i32
           draw_column(Screen, Bytes, x, yl, yh,
-                      FRACUNIT * SCREENWIDTH / View.width,
+                      (FRACUNIT * SCREENWIDTH / View.width) >> View.detail,
                       SCREENHEIGHT / 2 * FRACUNIT,
                       get_column(Textures, TextureColumns, Data.skytexture,
                                  angle),
-                      Data.colormaps, View.centery, View.x, View.y)
+                      Data.colormaps, View.centery, View.x, View.y, View.detail)
         }
       }
     } else {
@@ -1201,7 +1212,7 @@ system draw_planes() {
                       } else {
                         Zlight[light + min(distance >> LIGHTZSHIFT, MAXLIGHTZ - 1)].map
                       },
-                      View.x, View.y)
+                      View.x, View.y, View.detail)
             if part == 0 { t1 += 1 } else { b1 -= 1 }
             more = if part == 0 { t1 < t2 && t1 <= b1 } else { b1 > b2 && b1 >= t1 }
           }

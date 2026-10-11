@@ -84,10 +84,10 @@ system draw_weapon() {
           draw_masked_column(
               Screen, Bytes, Openings, Fuzz, View.height,
               patch + long_at(Bytes, patch + 8 + (frac >> FRACBITS) * 4), x,
-              pspritescale,
-              View.centeryfrac - fixed_mul(texturemid, pspritescale),
-              texturemid, abs(xiscale), colormap, CLIPTOP, CLIPBOTTOM,
-              View.centery, View.x, View.y)
+              pspritescale << View.detail,
+              View.centeryfrac - fixed_mul(texturemid, pspritescale << View.detail),
+              texturemid, abs(xiscale) >> View.detail, colormap, CLIPTOP, CLIPBOTTOM,
+              View.centery, View.x, View.y, View.detail)
           frac += xiscale
         }
       }
@@ -396,15 +396,15 @@ proc border(screen: mut Screen, bytes: Bytes, lumps: Lumps, left: i32, top: i32,
 
 // Before the view is drawn.
 system draw_border() {
-  if View.width != SCREENWIDTH {
-    border(Screen, Bytes, Lumps, View.x, View.y, View.width, View.height)
+  if View.scaled != SCREENWIDTH {
+    border(Screen, Bytes, Lumps, View.x, View.y, View.scaled, View.height)
   }
 }
 
 // After what the player is told is drawn (`draw_messages`).
 system draw_border_over() {
-  if View.width != SCREENWIDTH && Border.count > 0 {
-    border(Screen, Bytes, Lumps, View.x, View.y, View.width, View.height)
+  if View.scaled != SCREENWIDTH && Border.count > 0 {
+    border(Screen, Bytes, Lumps, View.x, View.y, View.scaled, View.height)
     Border.count -= 1
   }
 }
