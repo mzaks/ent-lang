@@ -51,7 +51,9 @@ ln -s "$PWD" ~/.vscode/extensions/ent-lang     # then restart VS Code
 The extension starts `build/bin/ent-lsp` of a folder that is open, else
 `ent-lsp` from the `PATH`; `ent.server.path` and `ent.server.arguments` in
 the settings say otherwise. "ent-lang: Restart the language server" is in
-the command palette.
+the command palette. A `.ent` file has the language's icon in the file
+tree and on its tab (`icons/ent-light.svg`, `ent-dark.svg`), and the
+extension the big one (`ent-lang.png`, drawn from `ent-lang.svg`).
 
 ## Zed
 
@@ -71,3 +73,11 @@ The extension starts the server the settings name, else `ent-lsp` from the
 
 The queries in `editors/zed/languages/ent` are copies of those in
 `editors/tree-sitter-ent/queries`; a test keeps them the same.
+
+Zed shows a file's icon by its icon theme, and takes one theme at a time:
+the extension brings "ent-lang Dark" and "ent-lang Light"
+(`icon_themes/ent-lang.json`), which have the icon for `.ent` files and
+Zed's own for everything else. Choose one with "icon theme selector:
+toggle". The icons in `editors/zed/icons` are copies of those of the VS
+Code extension, and `docs/ent-lang.svg` of its big one; the test keeps
+these the same too.

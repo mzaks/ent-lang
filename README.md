@@ -1,4 +1,4 @@
-# ent-lang
+# <img src="docs/ent-lang.svg" alt="" width="48" align="top"> ent-lang
 
 A research language built on the Entity Component System pattern; the name
 reads as *Ent*-ity plus *lang*, and as German "entlang" ("along"): systems

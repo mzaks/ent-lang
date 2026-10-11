@@ -11,3 +11,7 @@
 // And the grammar Zed builds is the one these are queries of: the commit
 // that its extension.toml names has the grammar as it is here.
 // RUN: sh %S/Inputs/check_rev.sh %S/../../editors
+// The icons are kept as copies too: each extension takes its own files.
+// RUN: cmp %S/../../editors/vscode/icons/ent-light.svg %S/../../editors/zed/icons/ent-light.svg
+// RUN: cmp %S/../../editors/vscode/icons/ent-dark.svg %S/../../editors/zed/icons/ent-dark.svg
+// RUN: cmp %S/../../editors/vscode/icons/ent-lang.svg %S/../../docs/ent-lang.svg

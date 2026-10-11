@@ -5,6 +5,7 @@
   "version": "0.1.0",
   "publisher": "ent-lang",
   "license": "MIT",
+  "icon": "icons/ent-lang.png",
   "repository": { "type": "git", "url": "https://github.com/mzaks/ent-lang" },
   "engines": { "vscode": "^1.82.0" },
   "categories": ["Programming Languages"],
@@ -15,7 +16,8 @@
         "id": "ent",
         "aliases": ["ent-lang", "ent"],
         "extensions": [".ent"],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": { "light": "./icons/ent-light.svg", "dark": "./icons/ent-dark.svg" }
       }
     ],
     "grammars": [
