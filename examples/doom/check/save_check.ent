@@ -1,0 +1,200 @@
+// A demo played as check/trace_check.ent plays it, with the world saved
+// on the way and read back (the module `world`): with `Load` false the
+// demo is played from its start, and before the tic `SaveAt` the world
+// is written to check.sav; with `Load` true nothing of the level is set
+// up, the world is read from that file, and the demo is played on from
+// there. Both must write the lines the reference writes: the first all
+// of them, the second those from `SaveAt` on. See check/save.sh.
+import console
+import files
+import wad
+import fixed
+import random
+import data
+import level
+import info
+import render
+import things
+import demo
+import specials
+import items
+import play
+import enemy
+import weapon
+import movers
+import tick
+import sounds
+import world
+
+capacity Bytes 16777216
+
+
+unique Tics: i32
+unique Load: bool
+unique SaveAt: i32
+unique Do { save: bool }
+// The demo is played without its monsters, whatever it says.
+unique Without: bool
+unique Dump: i32
+unique Dumpall: bool
+
+world {
+  Wad.file = "doom1.wad"
+  Demo.lump = "DEMO1"
+  Tics = 300
+  Load = false
+  SaveAt = 500
+  Saved.file = "check.sav"
+  Without = false
+  Dump = -5
+  Dumpall = false
+}
+
+// The things: how many, and their hashes added up.
+unique Count: i32
+unique Hash: u32
+
+fn mixed(hash: u32, value: i32) -> u32 {
+  var all = hash
+  for i in 0..4 {
+    all = (all ^ ((value >> (i * 8)) & 0xff) as u32) * 16777619
+  }
+  all
+}
+
+system begin_level() {
+  Level.episode = Demo.episode
+  Level.map = Demo.map
+  Level.skill = Demo.skill
+  Level.nomonsters = Demo.nomonsters || Without
+  Random.play = 0
+  Random.other = 0
+  Clock.leveltime = -1
+}
+
+// The sounds of the tic that are heard, a line each, as the reference
+// writes them with DOOM_SOUNDS.
+system say_sounds() {
+  for i in 0..len(Sounds) {
+    put("sound {Clock.leveltime} {Sounds[i].sfx} {Sounds[i].volume} {Sounds[i].sep}")
+  }
+}
+
+system trace() {
+  Count = 0
+  Hash = 0
+  for m: Mobj {
+    Count += 1
+    Hash += mixed(mixed(mixed(mixed(mixed(mixed(mixed(mixed(
+        2166136261, m.type), m.x), m.y), m.z), m.angle as i32), m.health),
+        m.state), m.tics)
+  }
+  for m: Mobj where m.type == MT_PLAYER {
+    put("{Level.episode} {Level.map} {Clock.leveltime} {Random.play} {m.x} {m.y} {m.z} {m.angle} {max(m.health, 0)} {Count} {Hash}")
+  }
+  // (With `Dump` a tic: every thing of that tic as well, a line each, as
+  // the reference writes them with DOOM_DUMP, for finding what differs.)
+  for m: Mobj by m.id where Clock.leveltime == Dump {
+    put("thing {m.type} {m.x} {m.y} {m.z} {m.angle} {m.health} {m.state} {m.tics}")
+  }
+  // (With `Dumpall`, what the hash leaves out too, as DOOM_DUMPALL has
+  // the reference write it.)
+  for m: Mobj by m.id where Clock.leveltime == Dump && Dumpall {
+    // (In two lines, which check/demos.sh joins: one text of all
+    // eighteen takes the compiler for ever.)
+    put("more {m.type} {m.x} {m.y} {m.z} {m.angle} {m.health} {m.state} {m.tics} {m.flags}")
+    put("also {m.movedir} {m.movecount} {m.reactiontime} {m.threshold} {m.momx} {m.momy} {m.momz} {m.floorz} {m.ceilingz}")
+  }
+  if Clock.leveltime == Dump && Dumpall {
+    let down = if Pl[0].attackdown { 1 } else { 0 }
+    put("last weapon {Inv[0].readyweapon} {Inv[0].pendingweapon} {Psp[0].state} {Psp[0].tics} {Psp[1].state} {Psp[1].tics} {Ammo[0].count} {Ammo[1].count} {down} {Pl[0].refire}")
+  }
+}
+
+// (Before the tic `SaveAt`, the world is saved.)
+system plan() { Do.save = !Load && Clock.leveltime == SaveAt }
+system said() { put("saved {Saved.ok}") }
+system first() { Clock.leveltime = 0 }
+system next() { Clock.leveltime += 1 }
+
+schedule setup() run_if !Load {
+  load_wad()
+  init_data()
+  init_specials()
+  read_demo()
+  begin_level()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  start_player(true)
+  start_weapon()
+  trace()
+  first()
+}
+// (What is read from the WAD once is not in the file; the level and all
+// that is in it is.)
+schedule restore() run_if Load {
+  load_wad()
+  init_data()
+  init_specials()
+  load_world()
+  said()
+}
+schedule tic() run_if !Wi.on {
+  begin_sounds()
+  think_player()
+  player_sector()
+  use_lines()
+  trigger_lines()
+  think_weapon()
+  think_things(false)
+  run_lights()
+  think_things(true)
+  run_movers()
+  update_specials()
+  update_buttons()
+  say_sounds()
+  trace()
+  next()
+  complete_level()
+  plan()
+  save_world() run_if Do.save
+  said() run_if Do.save
+}
+// A tic between two levels, and the next level after the last of them.
+schedule between() run_if Wi.on {
+  begin_sounds()
+  tick_between()
+}
+schedule onward() run_if Wi.over {
+  leave_level()
+  leave_between()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  start_player(false)
+  start_weapon()
+  trace()
+  arrive()
+}
+// The level again, after the player's death.
+schedule again() run_if Level.reborn {
+  leave_level()
+  load_level()
+  spawn_things()
+  spawn_specials()
+  start_player(true)
+  start_weapon()
+  trace()
+  arrive()
+}
+main {
+  setup()
+  restore()
+  loop {
+    onward()
+    between()
+    tic()
+    again()
+  } until Clock.leveltime == Tics || Demo.over || (Level.exited && Level.map == 8)
+}

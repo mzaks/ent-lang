@@ -26,14 +26,14 @@ const MELT_PAGE = 0
 const MELT_LEVEL = 1
 const MELT_BETWEEN = 2
 const MELT_FINALE = 3
-unique Melt { on: bool, kind: i32, start: bool }
+transient unique Melt { on: bool, kind: i32, start: bool }
 
 // The screen that goes and the one that comes, and how far down each
 // column of the old one has slid (less than nought: how long until it
 // starts).
-buffer Before { pixel: u8 } capacity 64000
-buffer After { pixel: u8 } capacity 64000
-buffer Drops { y: i32 } capacity 320
+transient buffer Before { pixel: u8 } capacity 64000
+transient buffer After { pixel: u8 } capacity 64000
+transient buffer Drops { y: i32 } capacity 320
 
 // Before a screen is drawn: if it is of another kind than the last, the
 // last is kept to melt from (D_Display, wipe_StartScreen).

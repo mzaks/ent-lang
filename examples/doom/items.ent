@@ -274,6 +274,7 @@ const MSG_MSGOFF = 41
 const MSG_MSGON = 42
 const MSG_DETAILHI = 43
 const MSG_DETAILLO = 44
+const MSG_GGSAVED = 45
 table messages: text[48] = [
   "",
   "Picked up the armor.",
@@ -319,7 +320,8 @@ table messages: text[48] = [
   "Messages OFF",
   "Messages ON",
   "High detail",
-  "Low detail"
+  "Low detail",
+  "game saved."
 ]
 
 // What picking a thing up says, by the thing's sprite (the keys say

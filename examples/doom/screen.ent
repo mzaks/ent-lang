@@ -366,7 +366,7 @@ system tick_status() {
 // the player is told, of which only what is over the view is seen then:
 // three, from when a level is first shown, the view's size changes, or
 // the menu is open.
-unique Border { count: i32 }
+transient unique Border { count: i32 }
 
 proc border(screen: mut Screen, bytes: Bytes, lumps: Lumps, left: i32, top: i32,
             width: i32, height: i32) {
@@ -469,7 +469,7 @@ system draw_status() {
 // still. `off`: the player wants nothing said; `must`: what is to be
 // said now is said all the same, and (`kept`) stays its time whatever
 // else there is to say.
-unique Hud { shown: i32, counter: i32, on: bool, off: bool, must: bool, kept: bool }
+transient unique Hud { shown: i32, counter: i32, on: bool, off: bool, must: bool, kept: bool }
 // The pictures of the letters, from '!' to '_', by where their lumps
 // are.
 buffer Hufont { at: i32 } capacity 64

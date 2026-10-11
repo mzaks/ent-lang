@@ -18,12 +18,16 @@ import files
 
 // The file to read: set it before `load_wad` runs. `lumps` is how many
 // lumps it has, nought where it could not be read.
-unique Wad { file: text[126], lumps: i32 }
+transient unique Wad { file: text[126], lumps: i32 }
+
+// (What is read from the file is no part of a saved game: a game that is
+// loaded finds the file's bytes where the one that was saved had them.)
+transient Bytes
 
 // A lump: where its bytes start in the file, how many they are, and its
 // name: the eight bytes as one number, the first the lowest (those after
 // the name's end are nought).
-buffer Lumps { at: i32, size: i32, name: u64 } capacity 4096
+transient buffer Lumps { at: i32, size: i32, name: u64 } capacity 4096
 
 // Numbers in the file: the low byte first.
 fn byte_at(wad: Bytes, at: i32) -> i32 { wad[at].value as i32 }

@@ -156,7 +156,7 @@ unique Tune { name: u64, looping: bool }
 
 // How loud the sounds and the music are to be, each 0 to 15, as the
 // menu sets them.
-unique Volume { sfx: i32, music: i32 }
+transient unique Volume { sfx: i32, music: i32 }
 
 // The next of the numbers for what is seen and heard (M_Random).
 proc m_random(rnd: mut Rnd) -> i32 {

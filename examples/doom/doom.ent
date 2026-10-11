@@ -3,8 +3,9 @@
 // and turn (A and D step aside, Shift runs), Space opens doors and works
 // switches, the left Ctrl key shoots, 1 to 7 choose a weapon, Tab shows
 // the map, - and = make the view smaller and bigger, Esc is the menu
-// (F1 to F10 as in the game: F4 how loud, F5 the detail, F7 ends the
-// game, F8 the messages, F10 leaves).
+// (F1 to F10 as in the game: F2 saves, F3 loads, F4 how loud, F5 the
+// detail, F6 and F9 save and load in a hurry, F7 ends the game, F8 the
+// messages, F10 leaves).
 // Start it where `doom1.wad` is
 // (examples/doom/reference/fetch.sh puts the shareware one in
 // build/doom/wad):
@@ -42,6 +43,7 @@ import screen
 import between
 import shell
 import melt
+import world
 
 // As many bytes as the biggest WAD.
 capacity Bytes 16777216
@@ -107,7 +109,7 @@ system look() {
 
 // (With all of the screen for the view there is no status bar, but
 // under the map.)
-unique Bar: bool
+transient unique Bar: bool
 system whether_bar() { Bar = View.blocks != 11 || Shown.map }
 
 schedule setup() {
@@ -144,6 +146,15 @@ schedule shell() {
   begin()
   begin_sounds()
   menu_keys()
+  // (A game saved or loaded from the menu: the world as it is between
+  // two tics.)
+  save_world() run_if Slot.save
+  saved() run_if Slot.save
+  load_world() run_if Slot.load
+  loaded() run_if Slot.load
+  quiet() run_if Slot.loaded
+  melt_anew() run_if Slot.loaded
+  border_anew() run_if Slot.loaded
   set_view_size() run_if Shell.resize
   init_view_tables() run_if Shell.resize
   turn_page() run_if Shell.turn

@@ -72,9 +72,19 @@ them as systems. It is being built; what is here so far:
   menus over any of it (m_menu.c): a new game in one of four skills;
   the options (ending the game, whether anything is said at the top,
   the view in half as many columns, the view's size, how loud the
-  sounds and the music are); what to read; and leaving, which asks
-  first. What is asked is answered with y or n.
-- Not yet: saving and loading, the fifth skill, the mouse (its setting
+  sounds and the music are); saving and loading; what to read; and
+  leaving, which asks first. What is asked is answered with y or n.
+- A game is saved as the world it is (the language's `save_world`, see
+  docs/syntax.md), in one of six places the player names: the files
+  `doomsav0.sav` to `doomsav5.sav` where the game was started, and
+  their names in `doomsav.txt`. What is not the game's is `transient`
+  and stays as it is when a game is loaded: the WAD's bytes, the screen,
+  the menu, the view's size and detail, how loud it is, the music's
+  player. A file is some 700 kilobytes, where the original's is some
+  tens: it holds the level as it is, not only what changed in it. It is
+  not the original's format, and a file is read only by the program as
+  it was built when it wrote it.
+- Not yet: the fifth skill, the mouse (its setting
   is in the menu and does nothing), making the picture lighter (F11);
   the monsters and weapons that are not in the first
   episode. Ceilings that move and the donut are written but were
@@ -87,9 +97,10 @@ them as systems. It is being built; what is here so far:
   space bar to use, the left Ctrl key to shoot, 1 to 7 for a weapon; Tab
   shows the map; - and = make the view smaller and bigger).
   Esc opens and shuts the menu at any time; the game stands still
-  while it is open. The F keys are the game's: F1 what to read, F4 how
-  loud, F5 the detail, F7 ends the game, F8 whether anything is said,
-  F10 leaves.
+  while it is open. The F keys are the game's: F1 what to read, F2
+  saves, F3 loads, F4 how loud, F5 the detail, F6 saves in a hurry and
+  F9 loads that, F7 ends the game, F8 whether anything is said, F10
+  leaves.
 - `check/`: programs that print what the port computes, to hold against
   the reference.
 - `reference/`: what the port is compared against. `fetch.sh` fetches
@@ -116,6 +127,7 @@ DETAIL=1 examples/doom/check/shots.sh 3 0,50,100     # in half as many columns
 MELTS=1 examples/doom/check/shots.sh ep1_nomo 100    # and every screen of the melts
 examples/doom/check/music.sh                         # what each tune writes to the chip
 SOUND=1 examples/doom/check/music.sh D_E1M1 60       # and how near the chip's sound is
+examples/doom/check/save.sh 3 500                    # a world saved, loaded, and played on
 cd build/doom/wad &&                                 # where doom1.wad is
   ../../../tools/ent run -I ../../../examples/doom ../../../examples/doom/doom.ent
 ```

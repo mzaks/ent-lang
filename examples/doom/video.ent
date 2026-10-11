@@ -21,14 +21,14 @@ const SCREENWIDTH = 320
 const SCREENHEIGHT = 200
 
 // The picture: row under row, from the top.
-buffer Screen { pixel: u8 } capacity 64000
+transient buffer Screen { pixel: u8 } capacity 64000
 
 // The colours a pixel may be: 256 of them, fourteen times over, from
 // the WAD ("PLAYPAL").
-buffer Palette { rgb: i32 } capacity 3584
+transient buffer Palette { rgb: i32 } capacity 3584
 // Which of them the screen is shown in: 0 as it is; the others are for
 // when the whole screen is to look redder, yellower or green.
-unique Shade { palette: i32 }
+transient unique Shade { palette: i32 }
 
 // One pixel, if it is in the picture.
 proc plot(screen: mut Screen, x: i32, y: i32, color: u8) {

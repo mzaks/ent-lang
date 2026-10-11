@@ -56,7 +56,7 @@ buffer Sectorrank { rank: i32 } capacity 4096
 // column and the step to the next, its scale, the lump of its picture
 // and the colour map (-1: a shadow), and where it comes among the things
 // as the original finds them.
-buffer Vissprites {
+transient buffer Vissprites {
   x1: i32, x2: i32, gx: i32, gy: i32, gz: i32, gzt: i32, startfrac: i32,
   scale: i32, xiscale: i32, texturemid: i32, patch: i32, colormap: i32,
   rank: i32, linked: i32
@@ -64,8 +64,8 @@ buffer Vissprites {
 
 // The things that are seen, as the original finds them (`Found`) and as
 // they are drawn, the smallest first (`Sorted`): rows of `Vissprites`.
-buffer Found { index: i32 } capacity 2048
-buffer Sorted { index: i32, used: bool } capacity 2048
+transient buffer Found { index: i32 } capacity 2048
+transient buffer Sorted { index: i32, used: bool } capacity 2048
 
 // Reads what the sprites' lumps are, and which lump is which picture of
 // which sprite, by their names: four letters of the sprite, a letter for

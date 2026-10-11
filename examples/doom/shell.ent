@@ -15,10 +15,12 @@
 // WAD's three demos played one after another with a picture between
 // them, and over any of it the menu, from which a new game is started.
 //
-// Not here: saving and loading, the fifth skill (its monsters are
-// faster and come back, which is not there), the mouse (its setting is
-// shown and can be changed, to no end), and making the picture lighter
-// (F11).
+// A game is saved as the world it is (the module `world`), in one of six
+// places that the player names; the names are in a file of their own.
+//
+// Not here: the fifth skill (its monsters are faster and come back,
+// which is not there), the mouse (its setting is shown and can be
+// changed, to no end), and making the picture lighter (F11).
 // The menu opens by any key while no game of the player's is going on,
 // and by the Esc key always, which shuts it too; the player's own game
 // stands still while it is open.
@@ -36,6 +38,7 @@ import sounds
 import screen
 import render
 import items
+import world
 
 // `game`: the player's own game is going on; `demo`: a demo is played.
 // `page`: where the round of title, demos and pictures is (0 the title,
@@ -45,13 +48,13 @@ import items
 // a demo is to be started; `fresh`: one of the two, now. `quit`: the
 // program is to end. `resize`: the view is of another size or detail
 // now.
-unique Shell {
+transient unique Shell {
   game: bool, demo: bool, page: i32, pagetic: i32, turn: bool, start: bool,
   skill: i32, wanted: bool, fresh: bool, quit: bool, resize: bool
 }
 
 // Whether the map is shown, and whether Tab was down the tic before.
-unique Shown { map: bool, tab: bool }
+transient unique Shown { map: bool, tab: bool }
 
 // The menus (m_menu.c): how many lines each has, which one Backspace
 // goes back to (0: none), where its first line is drawn, and where its
@@ -63,6 +66,8 @@ const MENU_OPTIONS = 4
 const MENU_READ1 = 5
 const MENU_READ2 = 6
 const MENU_SOUND = 7
+const MENU_LOAD = 8
+const MENU_SAVE = 9
 table menus { lines: i32, back: i32, x: i32, y: i32, first: i32 } = [
   { lines: 0, back: 0, x: 0, y: 0, first: 0 },
   { lines: 6, back: 0, x: 97, y: 64, first: 0 },
@@ -71,7 +76,9 @@ table menus { lines: i32, back: i32, x: i32, y: i32, first: i32 } = [
   { lines: 8, back: 1, x: 60, y: 37, first: 14 },
   { lines: 1, back: 1, x: 280, y: 185, first: 22 },
   { lines: 1, back: 5, x: 330, y: 175, first: 23 },
-  { lines: 4, back: 4, x: 80, y: 64, first: 24 }
+  { lines: 4, back: 4, x: 80, y: 64, first: 24 },
+  { lines: 6, back: 1, x: 80, y: 54, first: 28 },
+  { lines: 6, back: 1, x: 80, y: 54, first: 34 }
 ]
 // A line of a menu: what it is (1: something to choose, 2: something to
 // set lower or higher with the left and right keys, -1: nothing, the
@@ -105,7 +112,19 @@ table menu_lines { kind: i32, name: text[8], letter: i32 } = [
   { kind: 2, name: "M_SFXVOL", letter: 83 },
   { kind: -1, name: "", letter: 0 },
   { kind: 2, name: "M_MUSVOL", letter: 77 },
-  { kind: -1, name: "", letter: 0 }
+  { kind: -1, name: "", letter: 0 },
+  { kind: 1, name: "", letter: 49 },
+  { kind: 1, name: "", letter: 50 },
+  { kind: 1, name: "", letter: 51 },
+  { kind: 1, name: "", letter: 52 },
+  { kind: 1, name: "", letter: 53 },
+  { kind: 1, name: "", letter: 54 },
+  { kind: 1, name: "", letter: 49 },
+  { kind: 1, name: "", letter: 50 },
+  { kind: 1, name: "", letter: 51 },
+  { kind: 1, name: "", letter: 52 },
+  { kind: 1, name: "", letter: 53 },
+  { kind: 1, name: "", letter: 54 }
 ]
 
 // What the player is asked or told in the middle of the screen
@@ -117,6 +136,8 @@ const PROMPT_ENDGAME = 9
 const PROMPT_SHAREWARE = 10
 const PROMPT_SAVEDEAD = 11
 const PROMPT_NOSPOT = 12
+const PROMPT_QUICKSAVE = 13
+const PROMPT_QUICKLOAD = 14
 table prompt_lines { prompt: i32, line: text[48] } = [
   { prompt: 1, line: "are you sure you want to" },
   { prompt: 1, line: "quit this great game?" },
@@ -162,7 +183,17 @@ table prompt_lines { prompt: i32, line: text[48] } = [
   { prompt: 11, line: "press a key." },
   { prompt: 12, line: "you haven't picked a quicksave slot yet!" },
   { prompt: 12, line: "" },
-  { prompt: 12, line: "press a key." }
+  { prompt: 12, line: "press a key." },
+  { prompt: 13, line: "quicksave over your game named" },
+  { prompt: 13, line: "" },
+  { prompt: 13, line: "%" },
+  { prompt: 13, line: "" },
+  { prompt: 13, line: "press y or n." },
+  { prompt: 14, line: "do you want to quickload the game named" },
+  { prompt: 14, line: "" },
+  { prompt: 14, line: "%" },
+  { prompt: 14, line: "" },
+  { prompt: 14, line: "press y or n." }
 ]
 // The sound the game leaves with, by the tic (quitsounds).
 table quit_sounds: i32 = [57, 26, 27, 31, 35, 36, 38, 52]
@@ -173,15 +204,31 @@ table quit_sounds: i32 = [57, 26, 27, 31, 35, 36, 38, 52]
 // 0: nothing) and whether only y, n, the space bar and Esc answer it
 // (`answer`); how fast the mouse turns, which nothing here uses; and
 // for how many tics still the game waits before it ends (`leaving`).
-unique Menu {
+transient unique Menu {
   on: bool, which: i32, item: i32, skull: i32, count: i32, prompt: i32,
   answer: bool, mouse: i32, leaving: i32, tic: i32
 }
 // The line the skull was at when each menu was left, and which keys
 // were down the tic before: the eleven of `menu_keys`, the eleven from
 // F1 on, and the letters.
-buffer Laston { item: i32 } capacity 8
-buffer Keyheld { down: bool } capacity 64
+transient buffer Laston { item: i32 } capacity 10
+transient buffer Keyheld { down: bool } capacity 64
+
+// Saving and loading (M_SaveGame, M_LoadGame, G_DoSaveGame): `save`,
+// `load`: the world is to be written or read this tic, in the place
+// `which`; `loaded`: it was read. `room`: where in `Bytes` the names'
+// file is read and written. `quick`: the place for saving in a hurry
+// (-1: none yet, -2: the next one that is saved in). `typing`: a name is
+// being typed for the place `which`, and has `at` letters.
+transient unique Slot {
+  save: bool, load: bool, which: i32, loaded: bool, room: i32, quick: i32,
+  typing: bool, at: i32
+}
+// The names of the six places, 24 bytes each (the first nought: nothing
+// is saved there), and after them the name that is typed over.
+const SLOTS = 6
+const SLOTNAME = 24
+transient buffer Slotnames { c: u8 } capacity 168
 const LINEHEIGHT = 16
 const SKULLXOFF = -32
 
@@ -191,6 +238,7 @@ world {
   Menu.count = 10
   Menu.which = MENU_MAIN
   Menu.mouse = 5
+  Slot.quick = -1
   Volume.sfx = 8
   Volume.music = 8
   // (The Esc key is the menu's.)
@@ -204,16 +252,57 @@ proc struck(held: mut Keyheld, slot: i32, down: bool) -> bool {
   down && !was
 }
 
+// How many letters the name of a place has.
+fn name_length(names: Slotnames, slot: i32) -> i32 {
+  var n = 0
+  while n < SLOTNAME && names[slot * SLOTNAME + n].c != 0 { n += 1 }
+  n
+}
+
+// How wide a place's name is in the game's letters.
+fn name_width(bytes: Bytes, font: Hufont, names: Slotnames, slot: i32) -> i32 {
+  var width = 0
+  for i in 0..name_length(names, slot) {
+    let c = names[slot * SLOTNAME + i].c as i32
+    width += if c >= HU_FONTSTART && c <= HU_FONTEND {
+      short_at(bytes, font[c - HU_FONTSTART].at)
+    } else {
+      4
+    }
+  }
+  width
+}
+
+// The names of the places are read from their file (M_ReadSaveStrings).
+proc read_names(bytes: mut Bytes, names: mut Slotnames, room: i32) {
+  let got = read_bytes("doomsav.txt", bytes, room, SLOTS * SLOTNAME)
+  for i in 0..SLOTS * SLOTNAME {
+    names[i].c = if i < got { bytes[room + i].value } else { 0 }
+  }
+}
+
+// And written.
+proc write_names(bytes: mut Bytes, names: Slotnames, room: i32) {
+  for i in 0..SLOTS * SLOTNAME { bytes[room + i].value = names[i].c }
+  let written = write_bytes("doomsav.txt", bytes, room, SLOTS * SLOTNAME, false)
+}
+
 // The keys and what they do to the menu (M_Responder, M_Ticker). Once a
 // tic, before everything else.
 system menu_keys() {
   if len(Laston) == 0 {
-    Laston = [{ item: 0 }; 8]
+    Laston = [{ item: 0 }; 10]
     Laston[MENU_SKILL].item = 2
     Keyheld = [{ down: false }; 64]
+    Slotnames = [{ c: 0 }; 168]
+    Slot.room = len(Bytes)
+    for i in 0..SLOTS * SLOTNAME { Bytes += { value: 0 } }
   }
   Menu.tic += 1
   Shell.resize = false
+  Slot.save = false
+  Slot.load = false
+  Slot.loaded = false
   let was = Menu.on
   // The key of this tic, if one went down: the first of these.
   let esc = struck(Keyheld, 0, key_down(256))
@@ -237,6 +326,9 @@ system menu_keys() {
   for i in 0..26 {
     if struck(Keyheld, 24 + i, key_down('A' as i32 + i)) && letter == 0 { letter = 'A' as i32 + i }
   }
+  for i in 0..10 {
+    if struck(Keyheld, 50 + i, key_down('0' as i32 + i)) && letter == 0 { letter = '0' as i32 + i }
+  }
   let any = esc || enter || back || up || down || left || right || space || fire ||
             fkey != 0 || less || more || letter != 0
   // (What a line that is set lower or higher is set to: -1, 1, or 0.)
@@ -248,6 +340,43 @@ system menu_keys() {
     // (Leaving: nothing else, until the sound is over.)
     Menu.leaving -= 1
     if Menu.leaving == 0 { Shell.quit = true }
+  } else if Slot.typing {
+    // A name for a saved game is typed (saveStringEnter).
+    let first = Slot.which * SLOTNAME
+    if back {
+      if Slot.at > 0 {
+        Slot.at -= 1
+        Slotnames[first + Slot.at].c = 0
+      }
+    } else if esc {
+      // (Not after all: the name as it was.)
+      Slot.typing = false
+      for i in 0..SLOTNAME { Slotnames[first + i].c = Slotnames[SLOTS * SLOTNAME + i].c }
+    } else if enter {
+      Slot.typing = false
+      if Slotnames[first].c != 0 {
+        // (M_DoSave.)
+        Slot.save = true
+        Menu.on = false
+        if Slot.quick == -2 { Slot.quick = Slot.which }
+        write_names(Bytes, Slotnames, Slot.room)
+      }
+    } else {
+      let typed = if letter != 0 {
+        letter
+      } else if space {
+        32
+      } else if less {
+        45
+      } else {
+        0
+      }
+      if typed != 0 && Slot.at < SLOTNAME - 1 &&
+         name_width(Bytes, Hufont, Slotnames, Slot.which) < (SLOTNAME - 2) * 8 {
+        Slotnames[first + Slot.at].c = typed as u8
+        Slot.at += 1
+      }
+    }
   } else if Menu.prompt != 0 {
     if any && (!Menu.answer || space || esc || yes || no) {
       let asked = Menu.prompt
@@ -264,6 +393,14 @@ system menu_keys() {
         Laston[Menu.which].item = Menu.item
         Shell.page = -1
         Shell.turn = true
+      } else if yes && asked == PROMPT_QUICKSAVE {
+        Slot.which = Slot.quick
+        Slot.save = true
+        sound(Sounds, Rnd, SFX_SWTCHX, 0)
+      } else if yes && asked == PROMPT_QUICKLOAD {
+        Slot.which = Slot.quick
+        Slot.load = true
+        sound(Sounds, Rnd, SFX_SWTCHX, 0)
       }
       if Menu.leaving == 0 { sound(Sounds, Rnd, SFX_SWTCHX, 0) }
     }
@@ -295,9 +432,24 @@ system menu_keys() {
       chosen = MENU_OPTIONS * 16 + 2
       sound(Sounds, Rnd, SFX_SWTCHN, 0)
     } else if fkey == 6 {
-      // (Saving in a hurry: not there.)
+      // Saving in a hurry (M_QuickSave): the first time the place is
+      // chosen, from then on it is only asked.
       sound(Sounds, Rnd, SFX_SWTCHN, 0)
-      sound(Sounds, Rnd, SFX_OOF, 0)
+      if !Shell.game {
+        sound(Sounds, Rnd, SFX_OOF, 0)
+      } else if !Wi.on && !Fin.on {
+        if Slot.quick < 0 {
+          Menu.on = true
+          Menu.which = MENU_SAVE
+          Menu.item = Laston[MENU_SAVE].item
+          read_names(Bytes, Slotnames, Slot.room)
+          Slot.quick = -2
+        } else {
+          Menu.prompt = PROMPT_QUICKSAVE
+          Menu.answer = true
+          Menu.on = true
+        }
+      }
     } else if fkey == 7 {
       sound(Sounds, Rnd, SFX_SWTCHN, 0)
       chosen = MENU_OPTIONS * 16
@@ -305,10 +457,10 @@ system menu_keys() {
       chosen = MENU_OPTIONS * 16 + 1
       sound(Sounds, Rnd, SFX_SWTCHN, 0)
     } else if fkey == 9 {
-      // (Loading in a hurry: nothing was saved so.)
+      // Loading in a hurry (M_QuickLoad).
       sound(Sounds, Rnd, SFX_SWTCHN, 0)
-      Menu.prompt = PROMPT_NOSPOT
-      Menu.answer = false
+      Menu.prompt = if Slot.quick < 0 { PROMPT_NOSPOT } else { PROMPT_QUICKLOAD }
+      Menu.answer = Slot.quick >= 0
       Menu.on = true
     } else if fkey == 10 {
       sound(Sounds, Rnd, SFX_SWTCHN, 0)
@@ -327,7 +479,12 @@ system menu_keys() {
   } else {
     let lines = menus[Menu.which].lines
     let first = menus[Menu.which].first
-    let kind = menu_lines[first + Menu.item].kind
+    // (A place nothing is saved in cannot be loaded from.)
+    let kind = if Menu.which == MENU_LOAD && Slotnames[Menu.item * SLOTNAME].c == 0 {
+      0
+    } else {
+      menu_lines[first + Menu.item].kind
+    }
     if down {
       // (Over the lines that are nothing, with a sound for each.)
       var going = true
@@ -393,15 +550,19 @@ system menu_keys() {
     Menu.which = MENU_OPTIONS
     Menu.item = Laston[MENU_OPTIONS].item
   } else if chosen == MENU_MAIN * 16 + 2 {
-    // (Loading: not there.)
-    sound(Sounds, Rnd, SFX_OOF, 0)
+    // (M_LoadGame.)
+    Menu.which = MENU_LOAD
+    Menu.item = Laston[MENU_LOAD].item
+    read_names(Bytes, Slotnames, Slot.room)
   } else if chosen == MENU_MAIN * 16 + 3 {
+    // (M_SaveGame: only a game of the player's, and only in a level.)
     if !Shell.game {
       Menu.prompt = PROMPT_SAVEDEAD
       Menu.answer = false
-    } else {
-      // (Saving: not there.)
-      sound(Sounds, Rnd, SFX_OOF, 0)
+    } else if !Wi.on && !Fin.on {
+      Menu.which = MENU_SAVE
+      Menu.item = Laston[MENU_SAVE].item
+      read_names(Bytes, Slotnames, Slot.room)
     }
   } else if chosen == MENU_MAIN * 16 + 4 {
     Menu.which = MENU_READ1
@@ -465,11 +626,28 @@ system menu_keys() {
   } else if chosen == MENU_READ2 * 16 {
     Menu.which = MENU_MAIN
     Menu.item = Laston[MENU_MAIN].item
+  } else if chosen >= MENU_LOAD * 16 && chosen < MENU_LOAD * 16 + SLOTS {
+    // (M_LoadSelect.)
+    Slot.which = chosen - MENU_LOAD * 16
+    Slot.load = true
+    Menu.on = false
+  } else if chosen >= MENU_SAVE * 16 && chosen < MENU_SAVE * 16 + SLOTS {
+    // (M_SaveSelect: its name is typed first, over the one it has, which
+    // is kept for the case that it is not saved after all.)
+    Slot.which = chosen - MENU_SAVE * 16
+    Slot.typing = true
+    Slot.at = name_length(Slotnames, Slot.which)
+    for i in 0..SLOTNAME {
+      Slotnames[SLOTS * SLOTNAME + i].c = Slotnames[Slot.which * SLOTNAME + i].c
+    }
   } else if chosen == MENU_SOUND * 16 {
     Volume.sfx = min(max(Volume.sfx + set, 0), 15)
   } else if chosen == MENU_SOUND * 16 + 2 {
     Volume.music = min(max(Volume.music + set, 0), 15)
   }
+  // (The file of the place: the step that writes or reads it comes
+  // after this one.)
+  if Slot.save || Slot.load { Saved.file = "doomsav{Slot.which}.sav" }
   // (What is around a smaller view is drawn anew while the menu is
   // over it, when the view's size changes, and once more after.)
   if was || Menu.on || Shell.resize { Border.count = 3 }
@@ -587,6 +765,24 @@ fn text_width(bytes: Bytes, font: Hufont, words: text[48]) -> i32 {
   width
 }
 
+// The name of a place for a saved game, in the game's letters: where it
+// ends.
+proc draw_name(screen: mut Screen, bytes: Bytes, font: Hufont, names: Slotnames,
+               slot: i32, atx: i32, y: i32) -> i32 {
+  var x = atx
+  for i in 0..name_length(names, slot) {
+    let c = names[slot * SLOTNAME + i].c as i32
+    if c >= HU_FONTSTART && c <= HU_FONTEND {
+      let patch = font[c - HU_FONTSTART].at
+      if x + short_at(bytes, patch) <= SCREENWIDTH { draw_patch(screen, bytes, patch, x, y) }
+      x += short_at(bytes, patch)
+    } else {
+      x += 4
+    }
+  }
+  x
+}
+
 // Something that is set lower or higher: a bar of `width` parts, and
 // where on it it is set (M_DrawThermo).
 proc draw_thermo(screen: mut Screen, bytes: Bytes, lumps: Lumps, x: i32, y: i32,
@@ -610,8 +806,19 @@ system draw_menu() {
     var y = SCREENHEIGHT / 2 - height * lines / 2
     for i in 0..len(prompt_lines) {
       if prompt_lines[i].prompt == Menu.prompt {
-        draw_text(Screen, Bytes, Hufont, prompt_lines[i].line,
-                  SCREENWIDTH / 2 - text_width(Bytes, Hufont, prompt_lines[i].line) / 2, y)
+        if prompt_lines[i].line == "%" {
+          // (The name of the place for saving in a hurry, in quotes.)
+          let quote = text_width(Bytes, Hufont, "'")
+          let width = quote + name_width(Bytes, Hufont, Slotnames, Slot.quick) +
+                      text_width(Bytes, Hufont, "'?")
+          let x = SCREENWIDTH / 2 - width / 2
+          draw_text(Screen, Bytes, Hufont, "'", x, y)
+          draw_text(Screen, Bytes, Hufont, "'?",
+                    draw_name(Screen, Bytes, Hufont, Slotnames, Slot.quick, x + quote, y), y)
+        } else {
+          draw_text(Screen, Bytes, Hufont, prompt_lines[i].line,
+                    SCREENWIDTH / 2 - text_width(Bytes, Hufont, prompt_lines[i].line) / 2, y)
+        }
         y += height
       }
     }
@@ -645,6 +852,27 @@ system draw_menu() {
       draw_thermo(Screen, Bytes, Lumps, x, y + LINEHEIGHT, 16, Volume.sfx)
       draw_thermo(Screen, Bytes, Lumps, x, y + LINEHEIGHT * 3, 16, Volume.music)
     }
+    if Menu.which == MENU_LOAD || Menu.which == MENU_SAVE {
+      // (M_DrawLoad, M_DrawSave: the six places, each its name in a
+      // frame; and after the name that is typed, where the next letter
+      // goes.)
+      draw_patch(Screen, Bytes,
+                 if Menu.which == MENU_LOAD { pic(Lumps, "M_LOADG") } else { pic(Lumps, "M_SAVEG") },
+                 72, 28)
+      for i in 0..SLOTS {
+        let top = y + LINEHEIGHT * i
+        draw_patch(Screen, Bytes, pic(Lumps, "M_LSLEFT"), x - 8, top + 7)
+        for k in 0..24 { draw_patch(Screen, Bytes, pic(Lumps, "M_LSCNTR"), x + k * 8, top + 7) }
+        draw_patch(Screen, Bytes, pic(Lumps, "M_LSRGHT"), x + 24 * 8, top + 7)
+        let typed = Slot.typing && Slot.which == i
+        if Slotnames[i * SLOTNAME].c == 0 && !typed {
+          draw_text(Screen, Bytes, Hufont, "empty slot", x, top)
+        } else {
+          let end = draw_name(Screen, Bytes, Hufont, Slotnames, i, x, top)
+          if typed { draw_text(Screen, Bytes, Hufont, "_", end, top) }
+        }
+      }
+    }
     for i in 0..menus[Menu.which].lines {
       let name = menu_lines[menus[Menu.which].first + i].name
       if len(name) > 0 { draw_patch(Screen, Bytes, pic(Lumps, name), x, y + i * LINEHEIGHT) }
@@ -652,5 +880,27 @@ system draw_menu() {
     draw_patch(Screen, Bytes,
                if Menu.skull == 0 { pic(Lumps, "M_SKULL1") } else { pic(Lumps, "M_SKULL2") },
                x + SKULLXOFF, y - 5 + Menu.item * LINEHEIGHT)
+  }
+}
+
+// After the world was written (G_DoSaveGame): the player is told.
+system saved() {
+  if Saved.ok { Inv[0].message = MSG_GGSAVED }
+}
+
+// After the world was read (G_DoLoadGame): the game that was saved goes
+// on, whatever was going on before. (What the menu, the screen and the
+// machine are at is not the file's: `transient`.)
+system loaded() {
+  if Saved.ok {
+    Slot.loaded = true
+    Shell.game = true
+    Shell.demo = false
+    Shell.turn = false
+    Shell.start = false
+    Shell.wanted = false
+    Shell.fresh = false
+    Shown.map = false
+    Sounds = []
   }
 }

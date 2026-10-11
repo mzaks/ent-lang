@@ -42,7 +42,7 @@ const MAXSEGS = 32
 // shot. `fixed`: the one colour map everything is drawn with, by its
 // number, while the player sees in the dark or cannot be hurt; 0 for
 // none.)
-unique View {
+transient unique View {
   blocks: i32, width: i32, height: i32, x: i32, y: i32, centerx: i32,
   centery: i32, centerxfrac: i32, centeryfrac: i32, projection: i32,
   clipangle: u32, extralight: i32, fixed: i32, detail: i32, scaled: i32
@@ -50,31 +50,31 @@ unique View {
 
 // Where the level is seen from: until there is a player, where one
 // starts.
-unique Viewpoint { x: i32, y: i32, z: i32, angle: u32 }
+transient unique Viewpoint { x: i32, y: i32, z: i32, angle: u32 }
 
 // The column of the view an angle from straight on is seen in, for the
 // fine angles of the half turn in front; and the angle a column is
 // seen at (R_InitTextureMapping).
-buffer Viewangletox { x: i32 } capacity 4096
-buffer Xtoviewangle { angle: u32 } capacity 321
+transient buffer Viewangletox { x: i32 } capacity 4096
+transient buffer Xtoviewangle { angle: u32 } capacity 321
 
 // What a frame is drawn with, one row (R_SetupFrame): the eye, the
 // sine and cosine of where it looks, and how far the walk has got in
 // `Solidsegs`.
-buffer Frame {
+transient buffer Frame {
   x: i32, y: i32, z: i32, angle: u32, sin: i32, cos: i32, clipangle: u32,
   newend: i32
 } capacity 1
 
 // The ranges of columns that walls have filled, from the left to the
 // right, with one before the view and one after it (solidsegs).
-buffer Solidsegs { first: i32, last: i32 } capacity 33
+transient buffer Solidsegs { first: i32, last: i32 } capacity 33
 
 // What the walk finds, in its order: a subsector it comes to (`seg` is
 // -1, `first` the subsector), and the pieces of its walls that are seen,
 // the columns from `first` to `last` of a seg, whose first end is seen at
 // the angle `angle1`. The nearest come first.
-buffer Walls { first: i32, last: i32, seg: i32, angle1: u32 } capacity 8192
+transient buffer Walls { first: i32, last: i32, seg: i32, angle1: u32 } capacity 8192
 
 // Which corners of a box are its ends as seen from each of the nine
 // places around and in it (checkcoord).
@@ -530,8 +530,8 @@ const NUMCOLORMAPS = 32
 const DISTMAP = 2
 // Where the colour map is in `Bytes`, for a light level l and a scale s
 // (row l * 48 + s) or a distance z (row l * 128 + z).
-buffer Scalelight { map: i32 } capacity 768
-buffer Zlight { map: i32 } capacity 2048
+transient buffer Scalelight { map: i32 } capacity 768
+transient buffer Zlight { map: i32 } capacity 2048
 
 const ANGLETOSKYSHIFT = 22
 
@@ -539,13 +539,13 @@ const ANGLETOSKYSHIFT = 22
 // those between `ceiling` and `floor` (ceilingclip, floorclip); and how
 // much farther a point is that is seen in the column than straight on
 // (distscale).
-buffer Clips { ceiling: i32, floor: i32 } capacity 320
-buffer Distscale { scale: i32 } capacity 320
+transient buffer Clips { ceiling: i32, floor: i32 } capacity 320
+transient buffer Distscale { scale: i32 } capacity 320
 
 // For each row: how far a floor one unit below the eye is seen there
 // (yslope); what was worked out for the height that was last drawn there
 // (cached..); and the column a span that is open there started in.
-buffer Spans {
+transient buffer Spans {
   yslope: i32, cachedheight: i32, cacheddistance: i32, cachedxstep: i32,
   cachedystep: i32, spanstart: i32
 } capacity 200
@@ -554,10 +554,10 @@ buffer Spans {
 // columns it is seen in. The rows of each column are in `Planetops`:
 // for plane p and column x, row p * 322 + x + 1 (one more column before
 // and after, which are empty). A column with nothing has 255 for `top`.
-buffer Visplanes {
+transient buffer Visplanes {
   height: i32, picnum: i32, lightlevel: i32, minx: i32, maxx: i32
 } capacity 128
-buffer Planetops { top: u8, bottom: u8 } capacity 41216
+transient buffer Planetops { top: u8, bottom: u8 } capacity 41216
 
 // A piece of a wall that was stored, for what is drawn after the walls
 // (the things, and textures in openings) to be cut by: its columns and
@@ -566,7 +566,7 @@ buffer Planetops { top: u8, bottom: u8 } capacity 41216
 // `Openings` its rows are, by column: those a thing behind it is cut to
 // at the top and at the bottom, and the columns of a texture in its
 // opening (-1: none). A row of column x is at the number + x.
-buffer Drawsegs {
+transient buffer Drawsegs {
   seg: i32, x1: i32, x2: i32, scale1: i32, scale2: i32, scalestep: i32,
   silhouette: i32, bsilheight: i32, tsilheight: i32, sprtopclip: i32,
   sprbottomclip: i32, maskedtexturecol: i32
@@ -579,7 +579,7 @@ const SIL_BOTH = 3
 // for a thing's top and 320 for its bottom (worked out for each thing),
 // then 320 that are the view's height and 320 that are -1 (what cuts
 // nothing, below and above), then those of the pieces of walls.
-buffer Openings { value: i32 } capacity 21760
+transient buffer Openings { value: i32 } capacity 21760
 const CLIPTOP = 0
 const CLIPBOTTOM = 320
 const SCREENHEIGHTARRAY = 640
@@ -587,7 +587,7 @@ const NEGONEARRAY = 960
 
 // What was worked out for each piece of a wall that was stored, for
 // holding it against the reference's (check/view.sh).
-buffer Stored {
+transient buffer Stored {
   seg: i32, distance: i32, scale: i32, scalestep: i32, offset: i32,
   centerangle: u32, midtexturemid: i32, topfrac: i32, bottomfrac: i32,
   midtexture: i32, toptexture: i32, bottomtexture: i32, masked: bool,

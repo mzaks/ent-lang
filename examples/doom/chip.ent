@@ -32,7 +32,7 @@ import music
 // much quieter than full it is now, in steps of 3/16 of a decibel (0 to
 // 511), and where its loudness is going (`state`); and what it gave for
 // the last sample and the one before.
-buffer Oper {
+transient buffer Oper {
   tremolo: i32, level: i32, attack: i32, sustain: i32, wave: i32, phase: f32,
   env: f32, state: i32, out: f32, before: f32
 } capacity 18
@@ -45,21 +45,21 @@ const EG_RELEASE = 4
 // A voice: its pitch (`fnum` in the octave `block`), whether it is
 // turned on, and how its first wave is fed back into itself and whether
 // the two are heard side by side (the register).
-buffer Ochan { fnum: i32, block: i32, on: bool, feedback: i32 } capacity 9
+transient buffer Ochan { fnum: i32, block: i32, on: bool, feedback: i32 } capacity 9
 
 // The chip as a whole: whether waves may have other shapes than the
 // plain one, the register that says which bit of the pitch hurries the
 // loudness along, and where the slow waver of loudness and the one of
 // pitch are in their cycles.
-buffer Chip { shapes: bool, split: i32, trem: f32, vib: f32 } capacity 1
+transient buffer Chip { shapes: bool, split: i32, trem: f32, vib: f32 } capacity 1
 
 // What it makes: samples of sixteen bits, MUSIC_RATE a second.
-buffer Pcm { value: i16 } capacity 65536
+transient buffer Pcm { value: i16 } capacity 65536
 
 // How many times quieter each step of 3/16 of a decibel is, and how
 // many steps a sample the loudness moves at each of the 64 rates.
-buffer Gain { gain: f32 } capacity 1024
-buffer Rates { steps: f32 } capacity 64
+transient buffer Gain { gain: f32 } capacity 1024
+transient buffer Rates { steps: f32 } capacity 64
 
 // A wave's pitch is the voice's times this.
 table multiple: f32 = [

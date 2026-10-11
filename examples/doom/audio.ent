@@ -150,11 +150,11 @@ table sfxinfo { name: text[8], priority: i32 } = [
 
 // Where each sound's samples are in the WAD, how many, and how many of
 // them a second; no samples where the WAD has no such lump.
-buffer Sfxdata { at: i32, count: i32, rate: i32 } capacity 128
+transient buffer Sfxdata { at: i32, count: i32, rate: i32 } capacity 128
 
 // The eight places a sound is heard in: which sound (0: none), and what
 // makes it (as in `Sounds`).
-buffer Channels { sfx: i32, origin: i32 } capacity 8
+transient buffer Channels { sfx: i32, origin: i32 } capacity 8
 const NUMCHANNELS = 8
 
 // The lumps of the sounds are found: after the header of eight bytes,
@@ -267,7 +267,7 @@ proc start_channels(sounds: Sounds, data: Sfxdata, bytes: Bytes,
 }
 
 // The tune that is heard now, by its lump's name.
-unique Playing: u64
+transient unique Playing: u64
 
 // The chip is told what it is first told. After `init_music` and
 // `init_chip`.

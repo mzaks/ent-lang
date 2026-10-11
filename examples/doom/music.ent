@@ -36,7 +36,7 @@ const GENMIDI_DOUBLE = 4
 
 // What is written to the chip: a value to one of its registers, in the
 // order they are written.
-buffer Writes { reg: i32, value: i32 } capacity 4096
+transient buffer Writes { reg: i32, value: i32 } capacity 4096
 
 // The tune: where its notes start in the file (`score`) and which is
 // next (`pos`), whether it is played (`on`) and from its start again at
@@ -45,7 +45,7 @@ buffer Writes { reg: i32, value: i32 } capacity 4096
 // was when the tune started (`start`). How many of the chip's voices
 // are free and how many taken (the lists are in `Vlist`), and where the
 // instruments are in the file.
-buffer Mus {
+transient buffer Mus {
   score: i32, pos: i32, on: bool, looping: bool, again: bool, due: i32,
   volume: i32, start: i32, free: i32, used: i32, instrs: i32
 } capacity 1
@@ -53,27 +53,27 @@ buffer Mus {
 // A channel of the tune (sixteen: the last is the drums): its
 // instrument, how loud it is and was asked to be, and how far its notes
 // are bent.
-buffer Mchan { instr: i32, volume: i32, base: i32, bend: i32 } capacity 16
+transient buffer Mchan { instr: i32, volume: i32, base: i32, bend: i32 } capacity 16
 // Which channel each of the tune's own channels is played on, in the
 // order they first have something to say (-1: not yet); and how hard
 // the keys of each are hit: at the tune's start, now, and at its end
 // (which is how the next tune starts: the reference never sets them
 // back).
-buffer Mmap { channel: i32 } capacity 16
-buffer Velocity { start: i32, now: i32, end: i32 } capacity 16
+transient buffer Mmap { channel: i32 } capacity 16
+transient buffer Velocity { start: i32, now: i32, end: i32 } capacity 16
 
 // A voice of the chip: the instrument it is set for (-1: none yet) and
 // which of its two settings, the channel that plays on it (-1: none),
 // the key that was pressed and the note that is heard, what is written
 // for its pitch, how loud the note is, what is written for the loudness
 // of its two waves, and how much it matters.
-buffer Ovoice {
+transient buffer Ovoice {
   instr: i32, second: i32, channel: i32, key: i32, note: i32, freq: i32,
   volume: i32, car: i32, mod: i32, priority: i32
 } capacity 9
 // The voices that are free, and those that are taken, each in the order
 // they came to be so.
-buffer Vlist { free: i32, used: i32 } capacity 9
+transient buffer Vlist { free: i32, used: i32 } capacity 9
 
 // The two waves of each voice, as the chip numbers them.
 table voice_op1: i32 = [0x00, 0x01, 0x02, 0x08, 0x09, 0x0a, 0x10, 0x11, 0x12]
