@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes examples/doom/tables.ent and random.ent from the reference's C.
+"""Writes examples/doom/tables.ent, gamma.ent and random.ent from the reference's C.
 
   examples/doom/reference/make_tables.py
 
@@ -35,6 +35,16 @@ def numbers(text, name, count):
     """The values of the array `name` in C source."""
     match = re.search(re.escape(name) + r"\[\d+\]\s*=\s*\{(.*?)\};", text,
                       re.S)
+    values = [int(word) for word in re.findall(r"-?\d+", match.group(1))]
+    assert len(values) == count, (name, len(values))
+    return values
+
+
+def rows(text, name, count):
+    """The values of the array of arrays `name` in C source, one after
+    another."""
+    match = re.search(re.escape(name) + r"\[\d+\]\[\d+\]\s*=\s*\{(.*?)\};",
+                      text, re.S)
     values = [int(word) for word in re.findall(r"-?\d+", match.group(1))]
     assert len(values) == count, (name, len(values))
     return values
@@ -84,6 +94,17 @@ def main():
         file.write(table("tantoangle", "u32",
                          numbers(tables, "tantoangle", 2049)))
 
+    with open(os.path.join(DOOM, "gamma.ent"), "w") as file:
+        file.write(LICENCE)
+        file.write("""\
+//
+// How light each of a colour's three parts is shown (gammatable of
+// tables.c), written by reference/make_tables.py: five rows of 256, the
+// first as it is and each of the others lighter than the one before.
+// What uses it is `load_palette` in video.ent.
+""")
+        file.write(table("gammatable", "u8", rows(tables, "gammatable", 1280),
+                         each=14))
     with open(os.path.join(DOOM, "random.ent"), "w") as file:
         file.write(LICENCE)
         file.write("""\
@@ -110,6 +131,16 @@ fn random_after(index: i32) -> i32 { (index + 1) & 0xff }
 
 // The number at a place, 0 to 255.
 fn random_at(index: i32) -> i32 { rndtable[index] as i32 }
+
+// Where the game is in them while a proc draws, which is given no unique:
+// one row, made of `Random` before and read back into it after.
+buffer Rnd { play: i32, other: i32 } capacity 1
+
+// The next number, 0 to 255 (P_Random).
+proc p_random(rnd: mut Rnd) -> i32 {
+  rnd[0].play = random_after(rnd[0].play)
+  random_at(rnd[0].play)
+}
 """)
 
 

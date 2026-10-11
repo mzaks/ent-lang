@@ -36,6 +36,10 @@ const BT_CHANGE = 4
 const BT_WEAPONMASK = 8 + 16 + 32
 const BT_WEAPONSHIFT = 3
 const BT_SPECIAL = 128
+// (With BT_SPECIAL the low bits say what is asked of the game itself:
+// 1 is that it stops, or goes on.)
+const BT_SPECIALMASK = 3
+const BTS_PAUSE = 1
 
 // Reads the demo (G_DoPlayDemo, G_ReadDemoTiccmd): thirteen bytes about
 // the game, then four for each tic of the one player; 128 ends them.

@@ -96,8 +96,14 @@ them as systems. It is being built; what is here so far:
   monster that came back is kept while something still means it
   (`kept`): the reference goes on reading what it has freed, and a
   player killed by a barrel turns to where the one that set it off lay.
-- Not yet: making the picture lighter (F11); the monsters and weapons
-  that are not in the first episode. Ceilings that move and the donut are written but were
+- The game is stopped and let go on by a button of a tic, as the
+  original has it (`pause_tic` in `play.ent`): a demo that was stopped
+  while it was made stops when it is played, and two of the fetched
+  ones were. A level that is stopped is drawn as it is with PAUSE over
+  it, and the music waits.
+- F11 shows the picture lighter in four steps and then as it is again
+  (`Gamma` in `video.ent`, by the reference's table in `gamma.ent`).
+- Not yet: the monsters and weapons that are not in the first episode. Ceilings that move and the donut are written but were
   never set off: the shareware levels have no such ceiling, and no demo
   here uses the donut.
 - `doom.ent`: the program. It starts with the title and the demos; any
@@ -116,15 +122,16 @@ them as systems. It is being built; what is here so far:
   while it is open. The F keys are the game's: F1 what to read, F2
   saves, F3 loads, F4 how loud, F5 the detail, F6 saves in a hurry and
   F9 loads that, F7 ends the game, F8 whether anything is said, F10
-  leaves.
+  leaves, F11 shows the picture lighter. The Pause key, or P, stops
+  the game and lets it go on.
 - `check/`: programs that print what the port computes, to hold against
   the reference.
 - `reference/`: what the port is compared against. `fetch.sh` fetches
   Chocolate Doom and the shareware WAD into `build/doom` and builds the
   first with `trace.patch`, which makes it write a line for each tic of a
   level; `compare.py` finds the first tic at which two such traces
-  differ. `make_tables.py` wrote `tables.ent` and `random.ent` from the
-  reference's C, `make_info.py` wrote `info.ent`.
+  differ. `make_tables.py` wrote `tables.ent`, `gamma.ent` and `random.ent`
+  from the reference's C, `make_info.py` wrote `info.ent`.
 
 ```sh
 examples/doom/reference/fetch.sh demo1 demo2 demo3   # the traces to match

@@ -120,7 +120,15 @@ schedule setup() {
   trace()
   first()
 }
-schedule tic() run_if !Wi.on {
+// (A demo may ask the game to stop, and then nothing is played or
+// written until it asks again.)
+schedule keys() run_if !Wi.on {
+  pause_tic()
+}
+schedule stopped() run_if !Wi.on && Pause.on {
+  skip_tic()
+}
+schedule tic() run_if !Wi.on && !Pause.on {
   begin_sounds()
   think_player()
   player_sector()
@@ -142,6 +150,7 @@ schedule tic() run_if !Wi.on {
 // A tic between two levels, and the next level after the last of them.
 schedule between() run_if Wi.on {
   begin_sounds()
+  pause_tic()
   tick_between()
 }
 schedule onward() run_if Wi.over {
@@ -171,7 +180,9 @@ main {
   loop {
     onward()
     between()
+    keys()
     tic()
+    stopped()
     again()
   } until Clock.leveltime == Tics || Demo.over || (Level.exited && Level.map == 8)
 }

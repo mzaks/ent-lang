@@ -690,6 +690,31 @@ system start_player(fresh: bool) {
   Powers = [{ tics: 0 }; 6]
 }
 
+// The game stopped by the player (`on`): a level stands still until it
+// is asked again. `send`: the key for it went down, and the next tic of
+// the player's own says so.
+// (As the game has it the asking is a button of a tic, so a demo that
+// was stopped while it was made stops when it is played. G_Ticker.)
+transient unique Pause { on: bool, send: bool }
+
+// Whether the tic that is next asks the game to stop or go on. Before
+// what plays the tic.
+system pause_tic() {
+  if Demo.tic < len(Ticcmds) {
+    let buttons = Ticcmds[Demo.tic].buttons
+    if buttons & BT_SPECIAL != 0 && buttons & BT_SPECIALMASK == BTS_PAUSE {
+      Pause.on = !Pause.on
+    }
+  }
+}
+
+// A tic of a level that stands still: its keys are passed over
+// (P_Ticker does nothing).
+system skip_tic() {
+  Demo.tic += 1
+  Demo.over = Demo.tic >= len(Ticcmds)
+}
+
 // The player's tic starts: the demo's keys for it, and what the player
 // does before anything moves (P_PlayerThink).
 system think_player() {

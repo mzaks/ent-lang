@@ -5,9 +5,10 @@
 // the map, - and = make the view smaller and bigger; the mouse turns
 // and walks, its left button shoots, the right one held steps aside;
 // Esc is the menu
-// (F1 to F10 as in the game: F2 saves, F3 loads, F4 how loud, F5 the
+// (F1 to F11 as in the game: F2 saves, F3 loads, F4 how loud, F5 the
 // detail, F6 and F9 save and load in a hurry, F7 ends the game, F8 the
-// messages, F10 leaves).
+// messages, F10 leaves, F11 shows the picture lighter); the Pause key
+// or P stops the game and lets it go on.
 // Start it where `doom1.wad` is
 // (examples/doom/reference/fetch.sh puts the shareware one in
 // build/doom/wad):
@@ -156,8 +157,12 @@ system read_keys() {
   Demo.tic = 0
   Ticcmds += {
     forwardmove: min(max(forward, -50), 50), sidemove: min(max(side, -50), 50),
-    angleturn: turn, buttons: buttons | change
+    angleturn: turn,
+    // (The key that stops the game, or lets it go on, is all the tic's
+    // buttons say: `pause_tic`.)
+    buttons: if Pause.send { BT_SPECIAL | BTS_PAUSE } else { buttons | change }
   }
+  Pause.send = false
   let tab = key_down(258)
   if tab && !Shown.tab { Shown.map = !Shown.map }
   Shown.tab = tab
@@ -227,6 +232,7 @@ schedule shell() {
   border_anew() run_if Slot.loaded
   set_view_size() run_if Shell.resize
   init_view_tables() run_if Shell.resize
+  load_palette() run_if Shell.lighter
   turn_page() run_if Shell.turn
   read_demo() run_if Shell.wanted
   enter_game() run_if Shell.start || Shell.wanted
@@ -280,14 +286,21 @@ schedule held() run_if Shell.game && Menu.on && !Wi.on && !Fin.on {
   draw_messages()
   draw_border_over() run_if !Shown.map
   draw_automap() run_if Shown.map
+  draw_pause() run_if Pause.on
   draw_menu()
   show_screen()
   present()
 }
 
-schedule frame() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on &&
-                        !(Shell.game && Menu.on) {
+// (First the keys of the tic, which may ask the game to stop or to go
+// on; then the tic, or what there is of one while the game is stopped.)
+schedule keys() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on &&
+                       !(Shell.game && Menu.on) {
   read_keys() run_if Shell.game
+  pause_tic()
+}
+schedule frame() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on &&
+                        !(Shell.game && Menu.on) && !Pause.on {
   think_player()
   player_sector()
   use_lines()
@@ -325,16 +338,46 @@ schedule frame() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on &&
   demo_end()
 }
 
+// A level that is stopped: nothing in it moves, and it is drawn as it
+// is with that written over it. (The face and what the player is told
+// go on, as they do in the game.)
+schedule paused() run_if (Shell.game || Shell.demo) && !Wi.on && !Fin.on &&
+                         !(Shell.game && Menu.on) && Pause.on {
+  skip_tic()
+  tick_status()
+  tick_messages()
+  hear()
+  whether_bar()
+  clear_screen()
+  draw_border() run_if !Shown.map
+  render_view() run_if !Shown.map
+  draw_walls() run_if !Shown.map
+  draw_planes() run_if !Shown.map
+  draw_masked() run_if !Shown.map
+  draw_weapon() run_if !Shown.map
+  draw_status() run_if Bar
+  draw_messages()
+  draw_border_over() run_if !Shown.map
+  draw_automap() run_if Shown.map
+  draw_pause()
+  draw_menu()
+  show_screen()
+  present()
+  demo_end()
+}
+
 // After the last level: the text, and then the picture, for as long as
 // the window is open.
 schedule ending() run_if (Shell.game || Shell.demo) && Fin.on {
   read_keys() run_if Shell.game
+  pause_tic()
   tick_finale()
   hear()
   plain()
   melt_from(MELT_FINALE)
   clear_screen()
   draw_finale()
+  draw_pause() run_if Pause.on
   draw_menu()
   melt_to()
   show_screen()
@@ -344,12 +387,14 @@ schedule ending() run_if (Shell.game || Shell.demo) && Fin.on {
 // way to the other shown, in the colours as they are.
 schedule between() run_if (Shell.game || Shell.demo) && Wi.on {
   read_keys() run_if Shell.game
+  pause_tic()
   tick_between()
   hear()
   plain()
   melt_from(MELT_BETWEEN)
   clear_screen()
   draw_between()
+  draw_pause() run_if Pause.on
   draw_menu()
   melt_to()
   show_screen()
@@ -408,7 +453,9 @@ main {
     onward()
     between()
     held()
+    keys()
     frame()
+    paused()
     again()
     page()
   } until Window.closed || Shell.quit

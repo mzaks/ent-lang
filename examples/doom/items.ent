@@ -275,6 +275,7 @@ const MSG_MSGON = 42
 const MSG_DETAILHI = 43
 const MSG_DETAILLO = 44
 const MSG_GGSAVED = 45
+const MSG_GAMMA = 46
 table messages: text[48] = [
   "",
   "Picked up the armor.",
@@ -321,7 +322,12 @@ table messages: text[48] = [
   "Messages ON",
   "High detail",
   "Low detail",
-  "game saved."
+  "game saved.",
+  "Gamma correction OFF",
+  "Gamma correction level 1",
+  "Gamma correction level 2",
+  "Gamma correction level 3",
+  "Gamma correction level 4"
 ]
 
 // What picking a thing up says, by the thing's sprite (the keys say

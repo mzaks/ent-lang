@@ -295,10 +295,13 @@ system hear() {
       tune_start(Bytes, Mus, Mchan, Mmap, Velocity, Lumps[lump].at, Tune.looping)
     }
   }
-  Pcm = []
-  music_samples(Bytes, Mus, Mchan, Mmap, Velocity, Ovoice, Vlist, Writes, Oper, Ochan,
-                Chip, Gain, Rates, Pcm, min(stream_wants(MUSIC_RATE), 16384))
-  Heights = []
-  for i in 0..len(Pcm) { Heights += { value: Pcm[i].value } }
-  stream(Heights, len(Heights), MUSIC_RATE, all)
+  // (While the game is stopped the music waits: S_PauseSound.)
+  if !Pause.on {
+    Pcm = []
+    music_samples(Bytes, Mus, Mchan, Mmap, Velocity, Ovoice, Vlist, Writes, Oper, Ochan,
+                  Chip, Gain, Rates, Pcm, min(stream_wants(MUSIC_RATE), 16384))
+    Heights = []
+    for i in 0..len(Pcm) { Heights += { value: Pcm[i].value } }
+    stream(Heights, len(Heights), MUSIC_RATE, all)
+  }
 }

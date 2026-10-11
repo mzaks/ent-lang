@@ -16,6 +16,7 @@
 import files
 import wad
 import window
+import gamma
 
 const SCREENWIDTH = 320
 const SCREENHEIGHT = 200
@@ -42,17 +43,23 @@ system clear_screen() {
   Screen = [{ pixel: 0 }; SCREENWIDTH * SCREENHEIGHT]
 }
 
-// Reads the first of the WAD's palettes: three bytes for each colour.
+// How much lighter than it is the picture is shown: 0 (as it is) to 4
+// (the F11 key, `usegamma`).
+transient unique Gamma: i32
+
+// Reads the WAD's palettes: three bytes for each colour, each made as
+// light as `Gamma` says (I_SetPalette). Again when `Gamma` changes.
 system load_palette() {
   Palette = []
   let lump = lump_number(Lumps, lump_name("PLAYPAL"))
   if lump >= 0 {
     let at = Lumps[lump].at
+    let row = Gamma * 256
     for i in 0..256 * min(Lumps[lump].size / 768, 14) {
-      Palette += {
-        rgb: byte_at(Bytes, at + i * 3) << 16 |
-             byte_at(Bytes, at + i * 3 + 1) << 8 | byte_at(Bytes, at + i * 3 + 2)
-      }
+      let red = gammatable[row + byte_at(Bytes, at + i * 3)] as i32
+      let green = gammatable[row + byte_at(Bytes, at + i * 3 + 1)] as i32
+      let blue = gammatable[row + byte_at(Bytes, at + i * 3 + 2)] as i32
+      Palette += { rgb: red << 16 | green << 8 | blue }
     }
   }
 }

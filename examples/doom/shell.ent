@@ -22,7 +22,8 @@
 // or down is a line up or down, to a side sets a line lower or higher,
 // the left button chooses and the right one goes back.
 //
-// Not here: making the picture lighter (F11).
+// The Pause key (or P) stops the player's game and lets it go on; F11
+// shows the picture lighter, in four steps and then as it is again.
 // The menu opens by any key while no game of the player's is going on,
 // and by the Esc key always, which shuts it too; the player's own game
 // stands still while it is open.
@@ -49,10 +50,11 @@ import world
 // page is due. `start`: a new game was asked for, of `skill`; `wanted`:
 // a demo is to be started; `fresh`: one of the two, now. `quit`: the
 // program is to end. `resize`: the view is of another size or detail
-// now.
+// now. `lighter`: the picture is to be shown lighter or darker now.
 transient unique Shell {
   game: bool, demo: bool, page: i32, pagetic: i32, turn: bool, start: bool,
-  skill: i32, wanted: bool, fresh: bool, quit: bool, resize: bool
+  skill: i32, wanted: bool, fresh: bool, quit: bool, resize: bool,
+  lighter: bool
 }
 
 // Whether the map is shown, and whether Tab was down the tic before.
@@ -320,8 +322,9 @@ system menu_keys() {
   }
   Menu.tic += 1
   // (The mouse is the game's while the player's own goes on.)
-  Window.grab = Shell.game && !Menu.on
+  Window.grab = Shell.game && !Menu.on && !Pause.on
   Shell.resize = false
+  Shell.lighter = false
   Slot.save = false
   Slot.load = false
   Slot.loaded = false
@@ -365,6 +368,7 @@ system menu_keys() {
       Menu.wait = Menu.tic + 15
     }
   }
+  let pausekey = struck(Keyheld, 60, key_down(284)) || struck(Keyheld, 61, key_down('P' as i32))
   // (A button that goes down opens the menu over a demo or a picture.)
   let click = buttons != 0 && Menu.held == 0
   Menu.held = buttons
@@ -532,6 +536,13 @@ system menu_keys() {
     } else if fkey == 10 {
       sound(Sounds, Rnd, SFX_SWTCHN, 0)
       chosen = MENU_MAIN * 16 + 5
+    } else if fkey == 11 {
+      // The picture lighter by a step, and after the fourth as it is.
+      Gamma = (Gamma + 1) % 5
+      Inv[0].message = MSG_GAMMA + Gamma
+      Shell.lighter = true
+    } else if pausekey && Shell.game {
+      Pause.send = true
     } else if esc {
       Menu.on = true
       Menu.which = MENU_MAIN
@@ -759,6 +770,8 @@ system turn_page() {
 // After `read_demo` for a demo; before the level is loaded.
 system enter_game() {
   Shell.fresh = true
+  Pause.on = false
+  Pause.send = false
   if Shell.start {
     Level.episode = 1
     Level.map = 1
@@ -859,6 +872,14 @@ proc draw_thermo(screen: mut Screen, bytes: Bytes, lumps: Lumps, x: i32, y: i32,
   for i in 0..width { draw_patch(screen, bytes, pic(lumps, "M_THERMM"), x + 8 + i * 8, y) }
   draw_patch(screen, bytes, pic(lumps, "M_THERMR"), x + 8 + width * 8, y)
   draw_patch(screen, bytes, pic(lumps, "M_THERMO"), x + 8 + at * 8, y)
+}
+
+// While the game is stopped that is written over the view, or at the top
+// where there is none (of D_Display).
+system draw_pause() {
+  draw_patch(Screen, Bytes, pic(Lumps, "M_PAUSE"),
+             View.x + (View.scaled - 68) / 2,
+             if Shown.map { 4 } else { View.y + 4 })
 }
 
 // The menu over whatever else is on the screen (M_Drawer): what is
@@ -969,6 +990,7 @@ system loaded() {
     Shell.wanted = false
     Shell.fresh = false
     Shown.map = false
+    Pause.on = false
     Sounds = []
   }
 }
