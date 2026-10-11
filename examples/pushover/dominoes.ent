@@ -1,0 +1,885 @@
+// Pushover
+//
+// Pushover is the legal property of its developers (Andreas Röver,
+// Volker Grabsch and the others its AUTHORS file names). This is a port
+// of it to ent-lang.
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The dominoes (levelplayer.cpp): what each does in a tick by how it
+// stands, to itself and to those next to it. They take their turns place
+// by place, row by row, and what one does the next finds done. A domino
+// that goes to another place is another entity there: where that place
+// comes later in the tick, it has a turn there too, as it has in the
+// game.
+import files
+import level
+
+// The sounds a tick starts.
+buffer Sounds { id: i32 } capacity 64
+
+const SE_STANDARD = 0
+const SE_STOPPER = 1
+const SE_SPLITTER = 2
+const SE_EXPLODER = 3
+const SE_DELAY = 4
+const SE_TUMBLER = 5
+const SE_BRIDGER = 6
+const SE_VANISH = 7
+const SE_TRIGGER = 8
+const SE_ASCENDER = 9
+const SE_ANT_FALLING = 10
+const SE_ANT_LANDING = 11
+const SE_PICK_UP_DOMINO = 12
+const SE_NU_WHAT = 13
+const SE_SHRUGGING = 14
+const SE_DOOR_CLOSE = 15
+const SE_DOOR_OPEN = 16
+const SE_VICTORY = 17
+
+const K_COUNTER3 = 15
+const K_CRASH0 = 16
+
+proc sound(sounds: mut Sounds, id: i32) { sounds += { id: id } }
+
+// Whether a counter of a higher number than `kind` still stands and was
+// not pushed: then this one waits (CounterStopper).
+fn counter_stopper(dominoes: Domino, kind: Kind) -> bool {
+  var stops = false
+  for e, other in dominoes
+      where other.kind as i32 > kind as i32 &&
+            other.kind as i32 <= K_COUNTER3 && other.state == ST_UPRIGHT &&
+            other.dir == 0 {
+    stops = true
+  }
+  stops
+}
+
+// Something of the kind `mover` comes down on the place, or is put into
+// it: what is there and it become a pile (DominoCrash).
+//
+//   standard and standard: a little yellow pile, and with one more a big
+//   one; stopper and stopper: a little red one, then a big one; anything
+//   else: a mixed one, little of two dominoes, big of more.
+proc crash(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+           y: i32, mover: i32, extra: i32) {
+  let next = kind_at(cells, dominoes, x, y)
+  let standard = Kind.Standard as i32
+  let stopper = Kind.Stopper as i32
+  let yellow = mover == standard || mover == Kind.Crash0 as i32 ||
+               mover == Kind.Crash3 as i32
+  let red = mover == stopper || mover == Kind.Crash2 as i32 ||
+            mover == Kind.Crash5 as i32
+  var pile = Kind.Crash1
+  if next == Kind.Standard {
+    if mover == standard { pile = Kind.Crash3 }
+    else if yellow { pile = Kind.Crash0 }
+    else if mover < K_CRASH0 { pile = Kind.Crash4 }
+  } else if next == Kind.Crash3 || next == Kind.Crash0 {
+    if yellow { pile = Kind.Crash0 }
+  } else if next == Kind.Stopper {
+    if mover == stopper { pile = Kind.Crash5 }
+    else if red { pile = Kind.Crash2 }
+    else if mover < K_CRASH0 { pile = Kind.Crash4 }
+  } else if next == Kind.Crash5 || next == Kind.Crash2 {
+    if red { pile = Kind.Crash2 }
+  } else if (next as i32) < K_CRASH0 {
+    if mover < K_CRASH0 { pile = Kind.Crash4 }
+  }
+  let had = extra_at(cells, dominoes, x, y)
+  let drop = drop_at(cells, dominoes, x, y)
+  if had == FALLING || extra == FALLING || had == RISING || extra == RISING {
+    put_domino(cells, dominoes, x, y, pile, ST_CRASH, 1,
+               ((drop & 0xfc) as i8) as i32, FALLING)
+  } else {
+    put_domino(cells, dominoes, x, y, pile, ST_CRASH, 1, drop, 0)
+  }
+  sound(sounds, SE_EXPLODER)
+}
+
+// The domino of a place is pushed to the left (-1) or the right (1), by
+// the ant or by its neighbour. Whether that one may fall on: not while
+// what it pushed still stands in its way (pushDomino).
+proc push_domino(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds,
+                 x: i32, y: i32, dir: i32) -> bool {
+  let it = who(cells, x, y)
+  let kind = dominoes[it].kind
+  let state = dominoes[it].state
+  let way = dominoes[it].dir
+  let extra = dominoes[it].extra
+  let upright = state == ST_UPRIGHT
+  var gives = true
+  if extra == FALLING {
+    // (What falls is not pushed.)
+  } else if kind == Kind.Splitter && way != 0 {
+    // A splitter that is at work already.
+    crash(cells, dominoes, sounds, x, y, drop_at(cells, dominoes, x + dir, y),
+          extra_at(cells, dominoes, x + dir, y))
+    gives = false
+  } else if way == -dir &&
+            (kind == Kind.Tumbler || kind == Kind.Bridger ||
+             kind == Kind.Trigger || kind == Kind.Empty ||
+             kind == Kind.Standard || kind == Kind.Stopper ||
+             kind == Kind.ConnectedA || kind == Kind.ConnectedB) {
+    // One that falls the other way.
+    crash(cells, dominoes, sounds, x, y, drop_at(cells, dominoes, x + dir, y),
+          extra_at(cells, dominoes, x + dir, y))
+    gives = false
+  } else if kind == Kind.Standard || kind == Kind.Tumbler ||
+            kind == Kind.Bridger || kind == Kind.Vanish ||
+            kind == Kind.Trigger {
+    if upright {
+      sound(sounds, kind as i32 - 1)
+      dominoes[it].dir = dir
+      dominoes[it].state = state + dir
+    }
+  } else if kind == Kind.Splitter {
+    if upright {
+      sound(sounds, SE_SPLITTER)
+      dominoes[it].dir = -1
+      dominoes[it].state = ST_SPLIT
+    }
+  } else if kind == Kind.Exploder {
+    // It goes off, and what pushed it waits.
+    if upright {
+      sound(sounds, SE_EXPLODER)
+      dominoes[it].dir = -1
+      dominoes[it].state = ST_EXPLODE_E
+      gives = false
+    } else if way != 0 {
+      gives = false
+    }
+  } else if kind == Kind.Delay {
+    // It starts to count, if it does not already.
+    if upright {
+      if extra == 0 {
+        sound(sounds, SE_DELAY)
+        dominoes[it].dir = dir
+        dominoes[it].extra = 20
+      }
+      gives = false
+    }
+  } else if kind == Kind.Ascender {
+    // It rises, and what pushed it waits.
+    if state == ST_DOWNRIGHT {
+      dominoes[it].dir = dir
+    } else if upright && dominoes[it].drop > -6 {
+      if extra != RISING { sound(sounds, SE_ASCENDER) }
+      dominoes[it].dir = dir
+      dominoes[it].extra = RISING
+      gives = false
+    }
+  } else if kind == Kind.ConnectedA || kind == Kind.ConnectedB {
+    // All of its kind in the level fall its way, and all of the other
+    // kind the other way.
+    var any = false
+    for cell in 0..500 {
+      let other = cells[cell].who
+      let of = dominoes[other].kind
+      if (of == Kind.ConnectedA || of == Kind.ConnectedB) &&
+         dominoes[other].state == ST_UPRIGHT {
+        any = true
+        let to = if of == kind { dir } else { -dir }
+        dominoes[other].dir = to
+        dominoes[other].state = ST_UPRIGHT + to
+      }
+    }
+    if any { sound(sounds, kind as i32 - 1) }
+  } else if kind == Kind.Counter1 || kind == Kind.Counter2 ||
+            kind == Kind.Counter3 {
+    if upright {
+      dominoes[it].dir = dir
+      if counter_stopper(dominoes, kind) {
+        gives = false
+      } else {
+        dominoes[it].state = state + dir
+        sound(sounds, kind as i32 - 1)
+      }
+    }
+  } else if kind == Kind.Stopper || kind as i32 >= K_CRASH0 {
+    gives = false
+  }
+  gives
+}
+
+// A step on in falling (DTA_4): over, and for one that goes over an
+// edge, down as well; one that rises, up. A domino that stands upright
+// again with nothing under it is in the place below from then on.
+proc fall(cells: mut Cells, dominoes: mut Domino, x: i32, y: i32) {
+  let me = who(cells, x, y)
+  let extra = dominoes[me].extra
+  if extra == TURNING + 1 || extra == FALLING + 1 {
+    // (It waits a tick, having come to this place in this one: see
+    // below.)
+    dominoes[me].extra = extra - 1
+  } else {
+    let dir = dominoes[me].dir
+    if extra == TURNING || extra == FALLING {
+      dominoes[me].drop += 2
+      dominoes[me].state += dir
+    } else if extra == RISING {
+      dominoes[me].drop -= 2
+      dominoes[me].state += dir
+    }
+    dominoes[me].state += dir
+    if dominoes[me].kind == Kind.Ascender &&
+       dominoes[me].state == ST_UPRIGHT && dominoes[me].drop == -10 {
+      dominoes[me].state = ST_DOWNRIGHT
+    }
+    if dominoes[me].state == ST_UPRIGHT && !platform(cells, x, y + 1) &&
+       (extra == TURNING || extra == FALLING) {
+      // (It has its turn there in this tick too, which would make it
+      // faster than it was in the game this one follows: so it is told to
+      // wait once.)
+      if y + 1 < HIGH {
+        put_domino(cells, dominoes, x, y + 1, dominoes[me].kind, ST_UPRIGHT,
+                   dir, 0, extra + 1)
+      }
+      remove_domino(cells, dominoes, x, y)
+    }
+  }
+}
+
+// An upright domino (DTA_E): one that was pushed starts to fall over;
+// one that falls goes down, until it stands on a platform, comes down on
+// a domino, or is out of the level.
+proc stand(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+           y: i32) {
+  let me = who(cells, x, y)
+  if dominoes[me].extra == TURNING { dominoes[me].extra = 0 }
+  let extra = dominoes[me].extra
+  let kind = dominoes[me].kind
+  let state = dominoes[me].state
+  let dir = dominoes[me].dir
+  let drop = dominoes[me].drop
+  if extra != FALLING {
+    if dir != 0 { fall(cells, dominoes, x, y) }
+  } else if drop != 0 {
+    if drop != 4 {
+      dominoes[me].drop = drop + 4
+    } else {
+      // Into the place below.
+      if y + 1 < HIGH {
+        if empty(cells, dominoes, x, y + 1) {
+          // (It has its turn there in this tick too; with half as high
+          // places that is twice as often as in the game this one
+          // follows, so every other time it is put back a step.)
+          let back = if y % 2 == 0 && !platform(cells, x, y + 2) { -4 }
+                     else { 0 }
+          put_domino(cells, dominoes, x, y + 1, kind, state, dir, back,
+                     FALLING)
+        } else {
+          crash(cells, dominoes, sounds, x, y + 1, kind as i32, extra)
+          dominoes[who(cells, x, y + 1)].drop = 0
+        }
+      }
+      remove_domino(cells, dominoes, x, y)
+    }
+  } else if platform(cells, x, y + 1) {
+    // On the ground: but on a domino that stands under the platform it
+    // still comes down.
+    let below = kind_at(cells, dominoes, x, y + 2)
+    if below != Kind.Empty && below != Kind.Ascender {
+      crash(cells, dominoes, sounds, x, y + 2, kind as i32, extra)
+    }
+    // An ascender that lies at the ceiling there turns over again.
+    if kind_at(cells, dominoes, x, y + 2) == Kind.Ascender {
+      if state_at(cells, dominoes, x, y + 2) == ST_LEFT_AS {
+        put_domino(cells, dominoes, x - 1, y + 4, Kind.Ascender,
+                   ST_RIGHT_AS - 1, -1,
+                   drop_at(cells, dominoes, x, y + 2) - 16, 0)
+        remove_domino(cells, dominoes, x, y + 2)
+      }
+      if state_at(cells, dominoes, x, y + 2) == ST_RIGHT_AS {
+        put_domino(cells, dominoes, x + 1, y + 4, Kind.Ascender,
+                   ST_LEFT_AS + 1, 1, drop_at(cells, dominoes, x, y + 2) - 16,
+                   0)
+        remove_domino(cells, dominoes, x, y + 2)
+      }
+    }
+    dominoes[me].extra = 0
+  } else if empty(cells, dominoes, x, y + 2) ||
+            drop_at(cells, dominoes, x, y + 2) != 0 {
+    // Nothing under it: on down.
+    dominoes[me].drop = drop + 4
+  } else if kind_at(cells, dominoes, x, y + 2) != Kind.Splitter {
+    crash(cells, dominoes, sounds, x, y + 2, kind as i32, extra)
+    remove_domino(cells, dominoes, x, y)
+  } else {
+    // Into a splitter, which it splits.
+    let pushed = push_domino(cells, dominoes, sounds, x, y + 2, -1)
+    dominoes[who(cells, x, y + 2)].extra = kind as i32
+    remove_domino(cells, dominoes, x, y)
+  }
+}
+
+// Nearly down to the left (DTA_2): not further while a domino is in the
+// way.
+proc nearly_left(cells: mut Cells, dominoes: mut Domino, x: i32, y: i32) {
+  let me = who(cells, x, y)
+  let extra = dominoes[me].extra
+  let far = state_at(cells, dominoes, x - 2, y)
+  if extra == TURNING || extra == FALLING || dominoes[me].dir == 1 {
+    fall(cells, dominoes, x, y)
+  } else if !empty(cells, dominoes, x - 1, y) {
+    // (The one next to it.)
+  } else if !empty(cells, dominoes, x - 2, y) &&
+            ((far > ST_UPRIGHT + 5 && far <= ST_RIGHT) ||
+             (far > ST_DOWNRIGHT + 5 && far <= ST_RIGHT_AS)) {
+    // (The one after that, fallen this way.)
+  } else if x < 2 || kind_at(cells, dominoes, x - 2, y) != Kind.Splitter ||
+            (far != ST_SPLIT + 5 && far != ST_SPLIT + 6 &&
+             far != ST_SPLIT + 7 && far != ST_SPLIT + 8 &&
+             far != ST_SPLIT + 10 && far != ST_SPLIT + 11) {
+    // (Nor a splitter's half.)
+    fall(cells, dominoes, x, y)
+  }
+}
+
+// Nearly down to the right (DTA_J).
+proc nearly_right(cells: mut Cells, dominoes: mut Domino, x: i32, y: i32) {
+  let me = who(cells, x, y)
+  let extra = dominoes[me].extra
+  let far = state_at(cells, dominoes, x + 2, y)
+  if extra == TURNING || extra == FALLING || dominoes[me].dir == -1 {
+    fall(cells, dominoes, x, y)
+  } else if !empty(cells, dominoes, x + 1, y) {
+  } else if !empty(cells, dominoes, x + 2, y) && far < ST_UPRIGHT - 5 {
+  } else if x + 2 >= WIDE ||
+            kind_at(cells, dominoes, x + 2, y) != Kind.Splitter ||
+            (far != ST_SPLIT + 5 && far != ST_SPLIT + 6 &&
+             far != ST_SPLIT + 7 && far != ST_SPLIT + 8 &&
+             far != ST_SPLIT + 9 && far != ST_SPLIT + 12) {
+    fall(cells, dominoes, x, y)
+  }
+}
+
+// An exploder has gone off (DTA_5): it and the platform under it are no
+// more.
+proc explode(cells: mut Cells, dominoes: mut Domino, x: i32, y: i32) {
+  remove_domino(cells, dominoes, x, y)
+  cells[cell_of(x, y + 1)].platform = false
+  cells[cell_of(x, y)].ladder = false
+  cells[cell_of(x, y + 1)].ladder = false
+}
+
+// Fallen so far as to meet what is next to it, to the left (-1, DTA_3)
+// or the right (1, DTA_I): a step stops it, a domino it pushes; from
+// one that does not give it falls back, unless something leans on it
+// from behind.
+proc meet(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+          y: i32, dir: i32) {
+  let me = who(cells, x, y)
+  let next = kind_at(cells, dominoes, x + dir, y)
+  // (To the left the third counter is pushed like any domino: the game
+  // names the second twice.)
+  let waits = next == Kind.Stopper || next == Kind.Delay ||
+              next == Kind.Counter1 || next == Kind.Counter2 ||
+              (next == Kind.Counter3 && dir == 1)
+  if platform(cells, x + dir, y) {
+    // (A step.)
+  } else if next == Kind.Empty {
+    fall(cells, dominoes, x, y)
+  } else if !waits {
+    if push_domino(cells, dominoes, sounds, x + dir, y, dir) {
+      fall(cells, dominoes, x, y)
+    }
+  } else {
+    var done = false
+    // A delay that has started to fall is in nobody's way.
+    if next == Kind.Delay &&
+       state_at(cells, dominoes, x + dir, y) != ST_UPRIGHT {
+      fall(cells, dominoes, x, y)
+      done = true
+    }
+    if !done && (next == Kind.Counter1 || next == Kind.Counter2 ||
+                 next == Kind.Counter3) {
+      if !counter_stopper(dominoes, next) {
+        if push_domino(cells, dominoes, sounds, x + dir, y, dir) {
+          fall(cells, dominoes, x, y)
+          done = true
+        }
+      }
+    }
+    if !done {
+      let behind = state_at(cells, dominoes, x - dir, y)
+      let leans = if dir == -1 { behind < ST_UPRIGHT }
+                  else { behind > ST_UPRIGHT && behind <= ST_RIGHT }
+      if (kind_at(cells, dominoes, x - dir, y) == Kind.Splitter &&
+          behind != ST_UPRIGHT) ||
+         (!empty(cells, dominoes, x - dir, y) && leans) {
+        if push_domino(cells, dominoes, sounds, x + dir, y, dir) {
+          fall(cells, dominoes, x, y)
+        }
+      } else {
+        // Back the other way.
+        dominoes[me].dir = -dir
+        let pushed = push_domino(cells, dominoes, sounds, x + dir, y, dir)
+        sound(sounds, SE_STOPPER)
+        fall(cells, dominoes, x, y)
+      }
+    }
+  }
+}
+
+// How far down the two halves of a splitter are in each of its states,
+// the right one's and the left one's (7 upright, 1 flat).
+table halves: i32 = [
+  7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 2, 1, 1, 2, 3, 1, 1, 3, 2, 3, 3, 2
+]
+
+// A splitter's halves fall on (DTA_C), each as far as what is next to it
+// lets it.
+proc split(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+           y: i32) {
+  let me = who(cells, x, y)
+  let now = 2 * (dominoes[me].state - ST_SPLIT)
+  var left = halves[now + 1]
+  var right = halves[now]
+  if left == 3 {
+    if !platform(cells, x - 1, y) {
+      if empty(cells, dominoes, x - 1, y) {
+        left -= 1
+      } else if push_domino(cells, dominoes, sounds, x - 1, y, -1) {
+        left -= 1
+      }
+    }
+  } else if left == 2 && empty(cells, dominoes, x - 1, y) {
+    left -= 1
+  } else if left > 3 {
+    left -= 1
+  }
+  if right == 3 {
+    if !platform(cells, x + 1, y) {
+      if empty(cells, dominoes, x + 1, y) {
+        right -= 1
+      } else if push_domino(cells, dominoes, sounds, x + 1, y, 1) {
+        right -= 1
+      }
+    }
+  } else if right == 2 && empty(cells, dominoes, x + 1, y) {
+    right -= 1
+  } else if right > 3 {
+    right -= 1
+  }
+  var found = false
+  for i in 0..13 {
+    if !found && halves[2 * i + 1] == left && halves[2 * i] == right {
+      dominoes[me].state = i + ST_SPLIT
+      found = true
+    }
+  }
+}
+
+// Flat to the left (-1, DTA_1) or the right (1, DTA_K) at the end of a
+// platform: over the edge it goes, on down or onto what is below.
+proc flat(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+          y: i32, dir: i32) {
+  let me = who(cells, x, y)
+  let kind = dominoes[me].kind
+  let extra = dominoes[me].extra
+  if !platform(cells, x + dir, y + 1) {
+    if !empty(cells, dominoes, x + dir, y + 1) {
+      // (To the left the game takes the place under that one.)
+      crash(cells, dominoes, sounds, x + dir, if dir == -1 { y + 2 }
+            else { y + 1 }, kind as i32, extra)
+    } else if x + dir >= 0 && x + dir < WIDE {
+      put_domino(cells, dominoes, x + dir, y, kind,
+                 if dir == -1 { ST_RIGHT - 1 } else { ST_LEFT + 1 },
+                 dominoes[me].dir, 2,
+                 if platform(cells, x + dir, y + 2) { TURNING }
+                 else { FALLING })
+      sound(sounds, SE_ASCENDER)
+    }
+    remove_domino(cells, dominoes, x, y)
+  } else if dir == 1 {
+    dominoes[me].dir = 0
+  }
+}
+
+// A tumbler flat to the left (-1, DTA_6) or the right (1, DTA_L): it
+// stands up again in the next place and falls on, or goes over the edge.
+proc tumble(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+            y: i32, dir: i32) {
+  let me = who(cells, x, y)
+  let kind = dominoes[me].kind
+  let extra = dominoes[me].extra
+  let way = dominoes[me].dir
+  let inside = x + dir >= 0 && x + dir < WIDE
+  if !platform(cells, x + dir, y + 1) {
+    if !empty(cells, dominoes, x + dir, y + 1) {
+      crash(cells, dominoes, sounds, x + dir, if dir == -1 { y + 2 }
+            else { y + 1 }, kind as i32, extra)
+    } else {
+      if inside {
+        put_domino(cells, dominoes, x + dir, y, kind,
+                   if dir == -1 { ST_RIGHT - 1 } else { ST_LEFT + 1 }, way, 2,
+                   if platform(cells, x + dir, y + 2) { TURNING }
+                   else { FALLING })
+      }
+      sound(sounds, SE_ASCENDER)
+    }
+  } else if inside {
+    if !empty(cells, dominoes, x + dir, y) {
+      crash(cells, dominoes, sounds, x + dir, y, kind as i32, extra)
+    } else {
+      put_domino(cells, dominoes, x + dir, y, Kind.Tumbler,
+                 if dir == -1 { ST_RIGHT - 1 } else { ST_LEFT + 1 }, way, 0, 0)
+    }
+  }
+  remove_domino(cells, dominoes, x, y)
+}
+
+// A bridger flat to the left (-1, DTA_7) or the right (1, DTA_M): where
+// one place is missing between two platforms it becomes the platform.
+proc bridge(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+            y: i32, dir: i32) {
+  if platform(cells, x + 2 * dir, y + 1) && !platform(cells, x + dir, y + 1) {
+    cells[cell_of(x + dir, y + 1)].platform = true
+    remove_domino(cells, dominoes, x, y)
+  } else {
+    flat(cells, dominoes, sounds, x, y, dir)
+  }
+}
+
+// An ascender flat at the ceiling, to the left (-1, DTA_A) or the right
+// (1, DTA_O): at the ceiling's end it goes round it and on up.
+proc ceiling(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds,
+             x: i32, y: i32, dir: i32) {
+  let me = who(cells, x, y)
+  let kind = dominoes[me].kind
+  let state = dominoes[me].state
+  let way = dominoes[me].dir
+  let drop = dominoes[me].drop
+  let extra = dominoes[me].extra
+  let clings = extra == CLINGING
+  let a = if clings { 2 } else { 4 }
+  let turned = if dir == -1 { ST_RIGHT_AS - 1 } else { ST_LEFT_AS + 1 }
+  if !platform(cells, x + dir, y - a + 1) &&
+     !platform(cells, x + dir, y - a - 1) {
+    if clings {
+      if empty(cells, dominoes, x + dir, y) {
+        put_domino(cells, dominoes, x + dir, y, Kind.Ascender, turned, dir,
+                   drop - 2, RISING)
+      } else {
+        crash(cells, dominoes, sounds, x + dir, y, kind as i32, extra)
+      }
+    } else if y > 0 {
+      if empty(cells, dominoes, x + dir, y - 2) {
+        put_domino(cells, dominoes, x + dir, y - 2, Kind.Ascender, turned, dir,
+                   drop + 14, RISING)
+      } else {
+        crash(cells, dominoes, sounds, x + dir, y - 2, kind as i32, extra)
+      }
+    }
+    remove_domino(cells, dominoes, x, y)
+  } else if !platform(cells, x, y - a + 1) {
+    remove_domino(cells, dominoes, x, y)
+    if empty(cells, dominoes, x, y + 2 - a) {
+      put_domino(cells, dominoes, x, y + 2 - a, Kind.Ascender, ST_DOWNRIGHT,
+                 dir, 0, RISING)
+    } else {
+      // (The game asks what it is after it took it away: nothing.)
+      crash(cells, dominoes, sounds, x, y + 2 - a, 0, 0)
+    }
+  } else if !clings {
+    if empty(cells, dominoes, x, y - 2) {
+      put_domino(cells, dominoes, x, y - 2, kind, state, way, drop + 16,
+                 CLINGING)
+    } else {
+      crash(cells, dominoes, sounds, x, y - 2, kind as i32, extra)
+    }
+    remove_domino(cells, dominoes, x, y)
+  }
+}
+
+// An ascender upright (DTA_H): it rises until it is under a platform,
+// and there falls over the way it was pushed.
+proc rise(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+          y: i32) {
+  let me = who(cells, x, y)
+  let dir = dominoes[me].dir
+  let drop = dominoes[me].drop
+  let extra = dominoes[me].extra
+  if extra == RISING {
+    let roof = y > 2 && platform(cells, x, y - 3)
+    if drop == 4 && roof && platform(cells, x, y - 1) {
+      dominoes[me].extra = CLINGING
+    } else if drop == -6 && roof && platform(cells, x, y - 2) {
+      dominoes[me].extra = CLINGING
+    } else if drop == -10 {
+      if roof {
+        dominoes[me].extra = 0
+      } else {
+        // Into the place above.
+        if y > 1 {
+          if empty(cells, dominoes, x, y - 1) {
+            put_domino(cells, dominoes, x, y - 1, Kind.Ascender, ST_DOWNRIGHT,
+                       dir, -4, RISING)
+          } else {
+            crash(cells, dominoes, sounds, x, y - 1,
+                  dominoes[me].kind as i32, extra)
+          }
+        }
+        remove_domino(cells, dominoes, x, y)
+      }
+    } else {
+      dominoes[me].drop = drop - 2
+    }
+  } else if dir != 0 {
+    dominoes[me].state = ST_DOWNRIGHT
+    fall(cells, dominoes, x, y)
+  }
+}
+
+// A counter upright (DTA_P): pushed, it waits while one of a higher
+// number stands.
+proc count(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+           y: i32) {
+  let me = who(cells, x, y)
+  let dir = dominoes[me].dir
+  if dir != 0 && counter_stopper(dominoes, dominoes[me].kind) {
+    dominoes[me].dir = 0
+  }
+  stand(cells, dominoes, sounds, x, y)
+  dominoes[me].dir = dir
+}
+
+// What a domino does in a tick, by how it stands (the rows) and its kind
+// (the columns, as `Kind` has them): the numbers are those the game
+// gives its functions (DTA_1, DTA_2 ...), 0 nothing, 99 a state that
+// kind is never in.
+table actions: i8 = [
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99,  1, 99, 99, 99,  1,  6,  7,  8,  1, 99,  1,  1,  1,  1,  1, 99, 99, 99, 99, 99, 99,
+  99,  2, 99, 99, 99,  2,  2,  2,  4,  2, 99,  2,  2,  2,  2,  2, 99, 99, 99, 99, 99, 99,
+  99,  3, 99, 99, 99,  3,  3,  3,  3,  3, 99,  3,  3,  3,  3,  3, 99, 99, 99, 99, 99, 99,
+  99,  4, 99, 99, 99,  4,  4,  4,  4,  4, 99,  4,  4,  4,  4,  4, 99, 99, 99, 99, 99, 99,
+  99,  4, 99, 99, 99,  4,  4,  4,  4,  4, 99,  4,  4,  4,  4,  4, 99, 99, 99, 99, 99, 99,
+  99,  4, 99, 99, 99,  4,  4,  4,  4,  4, 99,  4,  4,  4,  4,  4, 99, 99, 99, 99, 99, 99,
+  99,  4, 99, 99, 99,  4,  4,  4,  4,  4, 99,  4,  4,  4,  4,  4, 99, 99, 99, 99, 99, 99,
+  99, 14, 15, 15, 15, 16, 14, 14, 14, 14, 17, 14, 14, 25, 25, 25, 99, 99, 99, 99, 99, 99,
+  99,  4, 99, 99, 99,  4,  4,  4,  4,  4, 99,  4,  4,  4,  4,  4, 99, 99, 99, 99, 99, 99,
+  99,  4, 99, 99, 99,  4,  4,  4,  4,  4, 99,  4,  4,  4,  4,  4, 99, 99, 99, 99, 99, 99,
+  99,  4, 99, 99, 99,  4,  4,  4,  4,  4, 99,  4,  4,  4,  4,  4, 99, 99, 99, 99, 99, 99,
+  99,  4, 99, 99, 99,  4,  4,  4,  4,  4, 99,  4,  4,  4,  4,  4, 99, 99, 99, 99, 99, 99,
+  99, 18, 99, 99, 99, 18, 18, 18, 18, 18, 99, 18, 18, 18, 18, 18, 99, 99, 99, 99, 99, 99,
+  99, 19, 99, 99, 99, 19, 19, 19,  4, 19, 99, 19, 19, 19, 19, 19, 99, 99, 99, 99, 99, 99,
+  99, 20, 99, 99, 99, 20, 21, 22,  8, 20, 99, 20, 20, 20, 20, 20, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99,  5, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 12, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 10, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  3, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 17, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 18, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 24, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 14, 14, 14, 14, 14, 14,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 14, 14, 14, 14, 14, 14,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 14, 14, 14, 14, 14, 14,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 14, 14, 14, 14, 14, 14,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 14, 14, 14, 14, 14, 14,
+  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,  0,  0,  0,  0,  0,  0
+]
+
+// The turn of the domino of a place (callStateFunction).
+proc act(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+         y: i32) {
+  let me = who(cells, x, y)
+  let extra = dominoes[me].extra
+  let action = actions[dominoes[me].state * 22 + dominoes[me].kind as i32]
+  if action == 1 { flat(cells, dominoes, sounds, x, y, -1) }
+  else if action == 2 { nearly_left(cells, dominoes, x, y) }
+  else if action == 3 { meet(cells, dominoes, sounds, x, y, -1) }
+  else if action == 4 { fall(cells, dominoes, x, y) }
+  else if action == 5 { explode(cells, dominoes, x, y) }
+  else if action == 6 { tumble(cells, dominoes, sounds, x, y, -1) }
+  else if action == 7 { bridge(cells, dominoes, sounds, x, y, -1) }
+  else if action == 8 { remove_domino(cells, dominoes, x, y) }
+  else if action == 10 { ceiling(cells, dominoes, sounds, x, y, -1) }
+  else if action == 12 { split(cells, dominoes, sounds, x, y) }
+  else if action == 14 { stand(cells, dominoes, sounds, x, y) }
+  else if action == 15 {
+    // A stopper, splitter or exploder: it stands, unless it falls
+    // (DTA_F).
+    if extra == FALLING { stand(cells, dominoes, sounds, x, y) }
+  } else if action == 16 {
+    // A delay counts down (DTA_G).
+    if extra <= 1 || extra == FALLING { stand(cells, dominoes, sounds, x, y) }
+    else { dominoes[me].extra = extra - 1 }
+  } else if action == 17 { rise(cells, dominoes, sounds, x, y) }
+  else if action == 18 { meet(cells, dominoes, sounds, x, y, 1) }
+  else if action == 19 { nearly_right(cells, dominoes, x, y) }
+  else if action == 20 { flat(cells, dominoes, sounds, x, y, 1) }
+  else if action == 21 { tumble(cells, dominoes, sounds, x, y, 1) }
+  else if action == 22 { bridge(cells, dominoes, sounds, x, y, 1) }
+  else if action == 24 { ceiling(cells, dominoes, sounds, x, y, 1) }
+  else if action == 25 { count(cells, dominoes, sounds, x, y) }
+}
+
+// Whether every trigger lies flat (true where there is none).
+fn trigger_fallen(dominoes: Domino) -> bool {
+  var fallen = true
+  for e, other in dominoes
+      where other.kind == Kind.Trigger && other.state != ST_LEFT &&
+            other.state != ST_RIGHT {
+    fallen = false
+  }
+  fallen
+}
+
+// Whether a trigger was toppled and does not lie flat.
+fn trigger_not_flat(dominoes: Domino) -> bool {
+  var askew = false
+  for e, other in dominoes
+      where other.kind == Kind.Trigger && other.state != ST_UPRIGHT &&
+            other.state != ST_LEFT && other.state != ST_RIGHT {
+    askew = true
+  }
+  askew
+}
+
+// Whether there is a pile.
+fn rubble(dominoes: Domino) -> bool {
+  var any = false
+  for e, other in dominoes where other.kind as i32 >= K_CRASH0 { any = true }
+  any
+}
+
+// Whether a domino that is to fall still stands upright.
+fn some_standing(dominoes: Domino) -> bool {
+  var any = false
+  for e, other in dominoes
+      where other.kind != Kind.Empty && other.kind != Kind.Stopper &&
+            other.state == ST_UPRIGHT {
+    any = true
+  }
+  any
+}
+
+// Whether a domino has fallen far enough to count as fallen
+// (dominosFalln, of one domino): a tumbler lies on something or leans
+// against it; any other lies, or leans on a stopper with something
+// holding it there.
+fn fallen(cells: Cells, dominoes: Domino, cell: i32, trigger: bool) -> bool {
+  let x = cell % WIDE
+  let y = cell / WIDE
+  let it = cells[cell].who
+  let kind = dominoes[it].kind
+  let state = dominoes[it].state
+  if kind == Kind.Empty || kind == Kind.Stopper { true }
+  else if kind == Kind.Splitter { !(state > ST_LEFT + 1 && state <= ST_UPRIGHT) }
+  else if kind == Kind.Trigger { !(state == ST_UPRIGHT && !trigger) }
+  else if kind == Kind.Tumbler {
+    !(state >= ST_LEFT + 2 && state <= ST_RIGHT - 2) &&
+    !(state <= ST_LEFT + 1 && empty(cells, dominoes, x - 1, y) &&
+      (empty(cells, dominoes, x - 2, y) ||
+       state_at(cells, dominoes, x - 2, y) < ST_RIGHT - 1)) &&
+    !(state >= ST_RIGHT - 1 && empty(cells, dominoes, x + 1, y) &&
+      (empty(cells, dominoes, x + 2, y) ||
+       state_at(cells, dominoes, x + 2, y) > ST_LEFT + 1))
+  } else {
+    state != ST_UPRIGHT && !(state > ST_LEFT + 2 && state < ST_RIGHT - 2) &&
+    !(state == ST_LEFT + 2 &&
+      (kind_at(cells, dominoes, x - 1, y) != Kind.Stopper ||
+       empty(cells, dominoes, x + 1, y) ||
+       (dir_at(cells, dominoes, x + 1, y) != -1 &&
+        kind_at(cells, dominoes, x + 1, y) != Kind.Splitter))) &&
+    !(state == ST_RIGHT - 2 &&
+      (kind_at(cells, dominoes, x + 1, y) != Kind.Stopper ||
+       empty(cells, dominoes, x - 1, y) ||
+       (dir_at(cells, dominoes, x - 1, y) != 1 &&
+        kind_at(cells, dominoes, x - 1, y) != Kind.Splitter)))
+  }
+}
+
+// Whether all the dominoes have fallen far enough (dominosFalln).
+fn all_fallen(cells: Cells, dominoes: Domino) -> bool {
+  let trigger = trigger_fallen(dominoes)
+  var all = true
+  for cell in 0..500 {
+    if !fallen(cells, dominoes, cell, trigger) { all = false }
+  }
+  all
+}
+
+// The doors open and shut, a step a tick (performDoors).
+system doors() {
+  if Doors[0].open_entry {
+    if Doors[0].entry == 0 { sound(Sounds, SE_DOOR_OPEN) }
+    if Doors[0].entry != 3 { Doors[0].entry += 1 }
+  } else {
+    if Doors[0].entry == 3 { sound(Sounds, SE_DOOR_CLOSE) }
+    if Doors[0].entry != 0 { Doors[0].entry -= 1 }
+  }
+  if Doors[0].open_exit {
+    if Doors[0].exit == 0 { sound(Sounds, SE_DOOR_OPEN) }
+    if Doors[0].exit != 3 { Doors[0].exit += 1 }
+  } else {
+    if Doors[0].exit == 3 { sound(Sounds, SE_DOOR_CLOSE) }
+    if Doors[0].exit != 0 { Doors[0].exit -= 1 }
+  }
+}
+
+// Whether every trigger lay flat before the dominoes took their turns.
+unique Before: bool
+
+// A tick of the dominoes (performDominos): each in its turn, place by
+// place. One that is no more is taken away when its turn comes.
+system topple() {
+  Before = trigger_fallen(Domino)
+  Level.idle += 1
+  for e, d: mut Domino in turn by d.cell {
+    if d.kind != Kind.Empty && d.state != 0 {
+      let state = d.state
+      let extra = d.extra
+      let drop = d.drop
+      act(Cells, Domino, Sounds, d.cell % WIDE, d.cell / WIDE)
+      // (A tumbler that goes to and fro is not something going on.)
+      if (state != d.state || extra != d.extra || drop != d.drop) &&
+         d.kind != Kind.Tumbler {
+        Level.idle = 0
+      }
+    }
+    if d.kind == Kind.Empty {
+      if Cells[d.cell].who == e { Cells[d.cell].who = none }
+      e.destroy()
+    }
+  }
+  Level.time -= 1
+}

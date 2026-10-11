@@ -1,0 +1,405 @@
+// Pushover
+//
+// Pushover is the legal property of its developers (Andreas Röver,
+// Volker Grabsch and the others its AUTHORS file names). This is a port
+// of it to ent-lang.
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// A level (leveldata.cpp): 20 places wide and 25 high, each half as high
+// as a domino. A place may have a platform and a ladder; a domino stands
+// in a place and on the platform of the place below. The dominoes are
+// entities, and `Cells` says who stands where. And the files a level and
+// a recording of a game are read from.
+import files
+
+// The dominoes, and what is left where two met (the piles: yellow, mixed
+// and red, big and little).
+enum Kind {
+  Empty, Standard, Stopper, Splitter, Exploder, Delay, Tumbler, Bridger,
+  Vanish, Trigger, Ascender, ConnectedA, ConnectedB, Counter1, Counter2,
+  Counter3, Crash0, Crash1, Crash2, Crash3, Crash4, Crash5
+}
+
+const WIDE = 20
+const HIGH = 25
+
+// How a domino stands (`state`): fallen to the left, upright, fallen to
+// the right and what is between; an exploder going off; the two halves
+// of a splitter; a domino at the ceiling (an ascender's states, as those
+// on the ground); a pile settling.
+const ST_LEFT = 1
+const ST_UPRIGHT = 8
+const ST_RIGHT = 15
+const ST_EXPLODE = 16
+const ST_EXPLODE_E = 22
+const ST_SPLIT = 23
+const ST_SPLIT_E = 35
+const ST_LEFT_AS = 36
+const ST_DOWNRIGHT = 43
+const ST_RIGHT_AS = 50
+const ST_CRASH = 51
+const ST_CRASH_E = 56
+
+// What `extra` says of a domino besides a number of its own (a delay's
+// ticks, what fell into a splitter): it goes over an edge and still
+// turns; it clings to the ceiling; it rises; it falls.
+const TURNING = 0x40
+const CLINGING = 0x50
+const RISING = 0x60
+const FALLING = 0x70
+
+// A domino: the place it stands in (which it keeps: one that goes to
+// another place is another entity there), its kind, how it stands, which
+// way it falls (-1 left, 1 right), how far below its place it is (`drop`),
+// and `extra`. One of the kind `Empty` is no more, and is taken away
+// when its turn comes.
+component Domino {
+  cell: i32, kind: Kind, state: i32, dir: i32, drop: i32, extra: i32
+} capacity 512
+
+// The places, row under row: who stands there, and what is there.
+buffer Cells { who: entity, platform: bool, ladder: bool } capacity 500
+
+// The pictures behind the level: a tile for each place, layer over layer.
+buffer Back { tile: u16 } capacity 6000
+
+// The two doors (one row): where they are (the place a domino in front
+// would stand in), how far open (0 to 3), and whether they are to be.
+buffer Doors {
+  entry_x: i32, entry_y: i32, exit_x: i32, exit_y: i32, entry: i32,
+  exit: i32, open_entry: bool, open_exit: bool
+} capacity 1
+
+// The level: the ticks left to solve it in (18 a second), for how many
+// ticks nothing moved, how many layers its background has, and whether
+// its file was read.
+unique Level { time: i32, idle: i32, layers: i32, ok: bool, file: text[126] }
+
+// A recording of a game: the keys of each tick.
+buffer Record { keys: u8 } capacity 65536
+unique Recording { file: text[126], ok: bool }
+
+// The number of a place, -1 for one outside the level.
+fn cell_of(x: i32, y: i32) -> i32 {
+  if x >= 0 && x < WIDE && y >= 0 && y < HIGH { y * WIDE + x } else { -1 }
+}
+
+fn platform(cells: Cells, x: i32, y: i32) -> bool {
+  cells[cell_of(x, y)].platform
+}
+
+fn ladder(cells: Cells, x: i32, y: i32) -> bool {
+  cells[cell_of(x, y)].ladder
+}
+
+// Who stands in a place: nobody outside the level. (One that is no more
+// may still be named, until its turn comes: its kind is `Empty`.)
+fn who(cells: Cells, x: i32, y: i32) -> entity {
+  cells[cell_of(x, y)].who
+}
+
+// What the domino of a place is and how it stands: `Empty` and nought
+// where there is none.
+fn kind_at(cells: Cells, dominoes: Domino, x: i32, y: i32) -> Kind {
+  dominoes[who(cells, x, y)].kind
+}
+
+fn state_at(cells: Cells, dominoes: Domino, x: i32, y: i32) -> i32 {
+  dominoes[who(cells, x, y)].state
+}
+
+fn dir_at(cells: Cells, dominoes: Domino, x: i32, y: i32) -> i32 {
+  dominoes[who(cells, x, y)].dir
+}
+
+fn drop_at(cells: Cells, dominoes: Domino, x: i32, y: i32) -> i32 {
+  dominoes[who(cells, x, y)].drop
+}
+
+fn extra_at(cells: Cells, dominoes: Domino, x: i32, y: i32) -> i32 {
+  dominoes[who(cells, x, y)].extra
+}
+
+fn empty(cells: Cells, dominoes: Domino, x: i32, y: i32) -> bool {
+  dominoes[who(cells, x, y)].kind == Kind.Empty
+}
+
+// A domino in a place, as it is to be from now on: the one that stands
+// there (or stood there until just now) becomes it, and where nobody
+// does a new one is made. Nothing outside the level.
+proc put_domino(cells: mut Cells, dominoes: mut Domino, x: i32, y: i32,
+                kind: Kind, state: i32, dir: i32, drop: i32, extra: i32) {
+  let cell = cell_of(x, y)
+  if cell >= 0 {
+    let there = cells[cell].who
+    if there == none {
+      let made = spawn {
+        Domino { cell: cell, kind: kind, state: state, dir: dir, drop: drop,
+                 extra: extra }
+      }
+      cells[cell].who = made
+    } else {
+      dominoes[there].kind = kind
+      dominoes[there].state = state
+      dominoes[there].dir = dir
+      dominoes[there].drop = drop
+      dominoes[there].extra = extra
+    }
+  }
+}
+
+// The domino of a place is no more (removeDomino).
+proc remove_domino(cells: Cells, dominoes: mut Domino, x: i32, y: i32) {
+  let there = who(cells, x, y)
+  dominoes[there].kind = Kind.Empty
+  dominoes[there].state = 0
+  dominoes[there].dir = 0
+  dominoes[there].drop = 0
+  dominoes[there].extra = 0
+}
+
+fn byte_at(bytes: Bytes, at: i32) -> i8 { bytes[at].value as i8 }
+
+// Where the line that starts at `at` ends: at its "\n", or the file's end.
+fn line_end(bytes: Bytes, at: i32) -> i32 {
+  var end = at
+  while end < len(bytes) && byte_at(bytes, end) != '\n' { end += 1 }
+  end
+}
+
+// Whether the line that starts at `at` is that word and nothing more.
+fn line_is(bytes: Bytes, at: i32, word: text[30]) -> bool {
+  var same = line_end(bytes, at) - at == len(word)
+  if same {
+    for i in 0..len(word) {
+      if byte_at(bytes, at + i) != word[i] { same = false }
+    }
+  }
+  same
+}
+
+// A level's file is sections (textsections.cpp): a line that names one,
+// and under it its lines, each after "| ". Lines that are empty or start
+// with a "+" say nothing. Where the lines of the section of that name
+// start (of the first such section, with 0 for `which`, the second with
+// 1 ...); -1 if there is none.
+fn section(bytes: Bytes, name: text[30], which: i32) -> i32 {
+  var found = -1
+  var left = which
+  // (The first line says what kind of file this is.)
+  var at = line_end(bytes, 0) + 1
+  while at < len(bytes) && found < 0 {
+    let end = line_end(bytes, at)
+    if line_is(bytes, at, name) {
+      if left == 0 { found = end + 1 }
+      left -= 1
+    }
+    at = end + 1
+  }
+  found
+}
+
+// Where line `number` of a section starts whose lines start at `from`
+// (at its "|"); -1 if it has not so many.
+fn section_line(bytes: Bytes, from: i32, number: i32) -> i32 {
+  var found = -1
+  var left = number
+  var at = from
+  var more = from >= 0
+  while more && at < len(bytes) {
+    let end = line_end(bytes, at)
+    let first = byte_at(bytes, at)
+    if end == at || first == '+' {
+      // (Says nothing.)
+    } else if first == '|' {
+      if left == 0 {
+        found = at
+        more = false
+      }
+      left -= 1
+    } else {
+      more = false
+    }
+    at = end + 1
+  }
+  found
+}
+
+// The character at `x` of a section's line that starts at `line`, a
+// space past its end.
+fn char_of(bytes: Bytes, line: i32, x: i32) -> i8 {
+  let at = line + 2 + x
+  if line >= 0 && x >= 0 && at < line_end(bytes, line) { byte_at(bytes, at) }
+  else { ' ' }
+}
+
+// The whole number that starts at `at` or after spaces there, and where
+// what follows it starts; (-1, at) where there is none.
+fn number_at(bytes: Bytes, at: i32) -> (i32, i32) {
+  var from = at
+  while byte_at(bytes, from) == ' ' { from += 1 }
+  var value = -1
+  var digit = byte_at(bytes, from)
+  while from < len(bytes) && digit >= '0' && digit <= '9' {
+    if value < 0 { value = 0 }
+    value = value * 10 + (digit - '0') as i32
+    from += 1
+    digit = byte_at(bytes, from)
+  }
+  (value, from)
+}
+
+// Which domino a character of a level's rows is: -1 for none.
+fn domino_of(character: i8) -> i32 {
+  let characters = "_I#Y*?O=:!AXxabc"
+  var kind = -1
+  for i in 0..len(characters) {
+    if characters[i] == character { kind = i }
+  }
+  kind
+}
+
+// A level out of its file (levelData_c::load, the first version of the
+// files: 13 rows, each a domino high, which become 25 of half the
+// height). Gives the time to solve it in, in ticks; -1 for a file that is
+// no such level.
+proc read_level(bytes: Bytes, cells: mut Cells, dominoes: mut Domino,
+                back: mut Back, doors: mut Doors) -> i32 {
+  cells = [{ who: none, platform: false, ladder: false }; 500]
+  back = [{ tile: 0 }; 6000]
+  doors = [{ entry_x: 0, entry_y: 0, exit_x: 0, exit_y: 0, entry: 0, exit: 0,
+             open_entry: false, open_exit: false }; 1]
+  var time = -1
+  let rows = section(bytes, "Level", 0)
+  let (version, after) = number_at(bytes, section_line(bytes, section(bytes, "Version", 0), 0) + 2)
+  if rows >= 0 && version == 1 {
+    for row in 0..13 {
+      let line = section_line(bytes, rows, row)
+      let above = section_line(bytes, rows, row - 1)
+      let below = section_line(bytes, rows, row + 1)
+      let y = row * 2
+      for x in 0..WIDE {
+        let character = char_of(bytes, line, x)
+        if character == '1' {
+          doors[0].entry_x = x
+          doors[0].entry_y = y + 2
+        } else if character == '2' {
+          doors[0].exit_x = x
+          doors[0].exit_y = y + 2
+        } else if character == ' ' || character == '^' {
+          if char_of(bytes, line, x - 1) == '/' {
+            cells[cell_of(x, y)].platform = true
+          }
+        } else if character == '$' {
+          put_domino(cells, dominoes, x, y, Kind.Standard, ST_UPRIGHT, 0, 0, FALLING)
+        } else if character == '\\' {
+          cells[cell_of(x - 1, y - 1)].platform = true
+          cells[cell_of(x - 1, y)].platform = true
+          cells[cell_of(x, y)].platform = true
+          cells[cell_of(x, y + 1)].platform = true
+        } else if character == '/' {
+          cells[cell_of(x + 1, y - 1)].platform = true
+          cells[cell_of(x, y)].platform = true
+          cells[cell_of(x, y + 1)].platform = true
+        } else if character == 'H' || character == 'V' {
+          cells[cell_of(x, y)].ladder = true
+          cells[cell_of(x, y + 1)].ladder = true
+        } else if character == '.' {
+          cells[cell_of(x, y + 1)].platform = true
+        } else {
+          let kind = domino_of(character)
+          if kind > 0 {
+            put_domino(cells, dominoes, x, y, kind as Kind, ST_UPRIGHT, 0, 0, 0)
+          }
+          let up = char_of(bytes, above, x)
+          let down = char_of(bytes, below, x)
+          if row < 12 && (down == 'H' || down == 'V' || down == '^') {
+            cells[cell_of(x, y)].ladder = true
+            cells[cell_of(x, y + 1)].ladder = true
+          } else if row > 0 && up == 'H' {
+            cells[cell_of(x, y)].ladder = true
+          }
+          if row < 12 { cells[cell_of(x, y + 1)].platform = true }
+        }
+      }
+    }
+    // The time, "M:SS".
+    let (minutes, colon) = number_at(bytes, section_line(bytes, section(bytes, "Time", 0), 0) + 2)
+    let (seconds, rest) = number_at(bytes, colon + 1)
+    time = (minutes * 60 + seconds) * 18 + 17
+  }
+  time
+}
+
+// The background of a level out of its file: a section for each layer,
+// 13 rows of 20 tiles, each of which is two tiles here, one above the
+// other. Gives how many layers there are.
+proc read_background(bytes: Bytes, back: mut Back) -> i32 {
+  var layers = 0
+  var rows = section(bytes, "Background", 0)
+  while rows >= 0 && layers < 12 {
+    for row in 0..13 {
+      var at = section_line(bytes, rows, row) + 1
+      for x in 0..WIDE {
+        let (tile, after) = number_at(bytes, at)
+        at = after
+        let place = (layers * HIGH + row * 2) * WIDE + x
+        back[place].tile = (tile * 2) as u16
+        if row < 12 { back[place + WIDE].tile = (tile * 2 + 1) as u16 }
+      }
+    }
+    layers += 1
+    rows = section(bytes, "Background", layers)
+  }
+  layers
+}
+
+// A recording out of its file (recorder_c::load): the names of the
+// level's set and of the level, then lines of how many ticks and which
+// keys. (The last line counts twice: the game reads it so.)
+proc read_record(bytes: Bytes, record: mut Record) {
+  record = []
+  var at = line_end(bytes, line_end(bytes, 0) + 1) + 1
+  var count = 0
+  var keys = 0
+  var more = true
+  while more {
+    let (ticks, after) = number_at(bytes, at)
+    let (held, end) = number_at(bytes, after)
+    if ticks >= 0 && held >= 0 {
+      count = ticks
+      keys = held
+      at = line_end(bytes, end) + 1
+    } else {
+      more = false
+    }
+    for i in 0..count { record += { keys: keys as u8 } }
+  }
+}
+
+// Reads the level `Level.file` names: the dominoes there were are no
+// more.
+system load_level() {
+  for e with Domino { e.destroy() }
+  let size = read_file(Level.file, Bytes)
+  Level.time = read_level(Bytes, Cells, Domino, Back, Doors)
+  Level.layers = read_background(Bytes, Back)
+  Level.ok = size > 0 && Level.time >= 0
+  Level.idle = 0
+}
+
+// Reads the recording `Recording.file` names.
+system load_record() {
+  let size = read_file(Recording.file, Bytes)
+  read_record(Bytes, Record)
+  Recording.ok = size > 0
+}

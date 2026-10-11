@@ -1,0 +1,32 @@
+// Pushover's game in ent-lang (examples/pushover): recordings of solved
+// levels played to their ends. The last tick of each is the reference's
+// (the ant gone by the exit, every domino as it lies), and so is every
+// tick before it, which examples/pushover/check/trace.sh compares for
+// all the recordings. Runs where the game's levels and recordings are
+// (examples/pushover/reference/build.sh fetches them).
+// REQUIRES: pushover
+// RUN: rm -rf %t && mkdir -p %t && cd %t
+// RUN: %ent build -I %S/../../examples/pushover %S/../../examples/pushover/check/trace_check.ent -o %t/trace_check
+
+// The first level: ten dominoes in a row and the trigger.
+// RUN: cp %pushover/levels/original/001.level level.level
+// RUN: cp %pushover/recordings/finish/original/001_a.rec record.rec
+// RUN: ./trace_check | grep -A1 -e '^433 ' -e '^end' | FileCheck %s --check-prefix=FIRST
+// FIRST:      433 keys 0 result 1 time 123
+// FIRST-NEXT:  ant 56 56 3 0 at 200 200 carries 0 way -1
+// FIRST:      end visible 0 fallen 1 rubble 0
+// RUN: ./trace_check | grep -c '^[0-9]' | FileCheck %s --check-prefix=TICKS
+// TICKS: 434
+
+// One with a splitter, an exploder, tumblers and an ascender (the last
+// of the original levels).
+// RUN: cp %pushover/levels/original/100.level level.level
+// RUN: cp %pushover/recordings/finish/original/100_a.rec record.rec
+// RUN: ./trace_check | tail -1 | FileCheck %s --check-prefix=LAST
+// LAST: end visible 0 fallen 1 rubble 0
+
+// One that is not solved: a pile is left.
+// RUN: cp %pushover/levels/original/060.level level.level
+// RUN: cp %pushover/recordings/crash/TwoRisersClash.rec record.rec
+// RUN: ./trace_check | tail -1 | FileCheck %s --check-prefix=CRASH
+// CRASH: end visible 1 fallen 0 rubble 1

@@ -39,6 +39,14 @@ doom_wad = os.path.join(os.path.dirname(config.test_source_root), "build",
 if os.path.exists(doom_wad):
     config.available_features.add("doom-wad")
 config.substitutions.append(("%doom-wad", doom_wad))
+
+# Pushover's levels and recordings, where
+# examples/pushover/reference/build.sh has put them:
+pushover = os.path.join(os.path.dirname(config.test_source_root), "build",
+                        "pushover", "upstream")
+if os.path.exists(os.path.join(pushover, "recordings")):
+    config.available_features.add("pushover")
+config.substitutions.append(("%pushover", pushover))
 config.substitutions.append(("%cached-ent", ent_driver))
 config.substitutions.append(("%ent", ent_driver + " --no-cache"))
 # Link flags for the OpenMP runtime that ships with the same LLVM.

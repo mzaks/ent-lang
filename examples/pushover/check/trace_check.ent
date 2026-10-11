@@ -1,0 +1,97 @@
+// A recording played in its level, a line for each tick as the
+// reference writes them (reference/stubs/trace.cpp): the keys, what the
+// tick came to, the time left, the ant, the doors, the platforms and
+// ladders as one number, every domino and the sounds. (A line here is
+// short, so each tick is several: those that start with a space go on
+// from the one before, and check/trace.sh joins them.) The level is the
+// file "level.level" and the recording "record.rec", where the program
+// is started. See check/trace.sh.
+import console
+import files
+import level
+import dominoes
+import ant
+
+// Which tick is next, how many follow the recording without keys, and
+// whether all are played.
+unique Played { tick: i32, more: i32, over: bool }
+
+world {
+  Level.file = "level.level"
+  Recording.file = "record.rec"
+  Played.more = 100
+}
+
+fn bit(flag: bool) -> i32 { if flag { 1 } else { 0 } }
+
+proc show_ant(a: Ant, me: entity, tick: i32, keys: i32, result: i32,
+              time: i32) {
+  put("{tick} keys {keys} result {result} time {time}")
+  put(" ant {a[me].state} {a[me].animation} {a[me].picture} {a[me].timer} at {a[me].x} {a[me].y} carries {a[me].carried as i32} way {a[me].direction}")
+  let pushing = if a[me].push_delay != 0 { a[me].push_animation } else { 0 }
+  put(" push {a[me].push_delay} {pushing} idle {a[me].idle} fell {a[me].fell} left {a[me].pushes}")
+  put(" flags {bit(a[me].final_played)}{bit(a[me].down_held)}{bit(a[me].up_held)}{bit(a[me].failed)}{bit(a[me].solved)}{bit(a[me].not_last)}")
+}
+
+proc show_level(cells: Cells, dominoes: Domino, doors: Doors, sounds: Sounds,
+                idle: i32) {
+  var ground = 0 as u32
+  for cell in 0..500 {
+    var here = 0 as u32
+    if cells[cell].platform { here += 1 }
+    if cells[cell].ladder { here += 2 }
+    ground = ground * 31 + here
+  }
+  put(" doors {doors[0].entry} {doors[0].exit} {bit(doors[0].open_entry)} {bit(doors[0].open_exit)} idle {idle} ground {ground} dominoes")
+  for cell in 0..500 {
+    let it = cells[cell].who
+    if dominoes[it].kind != Kind.Empty {
+      put(" {cell}:{dominoes[it].kind as i32},{dominoes[it].state},{dominoes[it].dir},{dominoes[it].drop},{dominoes[it].extra}")
+    }
+  }
+  put(" sounds")
+  for i in 0..len(sounds) { put(" {sounds[i].id}") }
+}
+
+system keys() {
+  Game.keys = if Played.tick < len(Record) { Record[Played.tick].keys as i32 }
+              else { 0 }
+}
+
+system show() {
+  show_ant(Ant, Game.ant, Played.tick, Game.keys, Game.result, Level.time)
+  show_level(Cells, Domino, Doors, Sounds, Level.idle)
+  Played.tick += 1
+  Played.over = Played.tick >= len(Record) + Played.more
+}
+
+proc show_end(a: Ant, me: entity, cells: Cells, dominoes: Domino) {
+  let visible = a[me].x >= 0 && a[me].x < WIDE && a[me].y >= 0 &&
+                a[me].y < HIGH
+  put("end visible {bit(visible)} fallen {bit(all_fallen(cells, dominoes))} rubble {bit(rubble(dominoes))}")
+}
+
+system finish() {
+  show_end(Ant, Game.ant, Cells, Domino)
+  flush()
+}
+
+schedule start() {
+  load_level()
+  load_record()
+  enter()
+}
+
+schedule step() {
+  keys()
+  tick()
+  show()
+}
+
+schedule end() { finish() }
+
+main {
+  start()
+  loop { step() } until Played.over
+  end()
+}

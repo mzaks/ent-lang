@@ -1,0 +1,995 @@
+// Pushover
+//
+// Pushover is the legal property of its developers (Andreas Röver,
+// Volker Grabsch and the others its AUTHORS file names). This is a port
+// of it to ent-lang.
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// The ant (ant.cpp): what it does next by the keys and by what is around
+// it, an animation at a time: it walks, climbs, takes a domino out of
+// its row and carries it, puts it back, pushes one over, falls, and
+// leaves by the door when all have fallen. And what a tick of the whole
+// level is, and what it comes to.
+import files
+import level
+import dominoes
+
+// The keys (a recording's numbers are these added up).
+const KEY_LEFT = 1
+const KEY_UP = 2
+const KEY_RIGHT = 4
+const KEY_DOWN = 8
+const KEY_ACTION = 16
+
+// The ant's animations, which are also what it is doing.
+const WALK_LEFT = 0
+const WALK_RIGHT = 1
+const JUMP_UP_LEFT = 2
+const JUMP_UP_RIGHT = 3
+const JUMP_DOWN_LEFT = 4
+const JUMP_DOWN_RIGHT = 5
+const LADDER1 = 6
+const LADDER2 = 7
+const LADDER3 = 8
+const LADDER4 = 9
+const CARRY_LEFT = 10
+const CARRY_RIGHT = 11
+const CARRY_UP_LEFT = 12
+const CARRY_UP_RIGHT = 13
+const CARRY_DOWN_LEFT = 14
+const CARRY_DOWN_RIGHT = 15
+const CARRY_LADDER1 = 16
+const CARRY_LADDER2 = 17
+const CARRY_LADDER3 = 18
+const CARRY_LADDER4 = 19
+const CARRY_STOP_LEFT = 20
+const CARRY_STOP_RIGHT = 21
+const PULL_OUT_LEFT = 22
+const PULL_OUT_RIGHT = 23
+const PUSH_IN_LEFT = 24
+const PUSH_IN_RIGHT = 25
+// (Onto a ladder with a domino, from the right and from the left; and
+// off it, to the right and to the left.)
+const ONTO_LADDER_RIGHT = 26
+const ONTO_LADDER_LEFT = 27
+const OFF_LADDER_RIGHT = 28
+const OFF_LADDER_LEFT = 29
+const LOSING_DOMINO_RIGHT = 30
+const LOSING_DOMINO_LEFT = 31
+const STEP_OUT_FOR_LOSING = 32
+const STOP = 33
+const TAPPING = 34
+const YAWNING = 35
+const ENTER_LEFT = 36
+const ENTER_RIGHT = 37
+const PUSH_LEFT = 38
+const PUSH_RIGHT = 39
+const PUSH_STOPPER_LEFT = 40
+const PUSH_STOPPER_RIGHT = 41
+const PUSH_RISER_LEFT = 42
+const PUSH_RISER_RIGHT = 43
+const PUSH_DELAY_LEFT = 44
+const PUSH_DELAY_RIGHT = 45
+const SUDDEN_FALL_RIGHT = 46
+const SUDDEN_FALL_LEFT = 47
+const FALLING_DOWN = 48
+const BEFORE_EXPLODER = 49
+const BEFORE_EXPLODER_WAIT = 50
+const LANDING = 51
+const GHOST1 = 52
+const GHOST2 = 53
+const LEAVE_DOOR = 54
+const STEP_ASIDE = 55
+const ENTER_DOOR = 56
+const STEP_BACK_FOR_DOOR = 57
+const STRUGGLE_LEFT = 58
+const STRUGGLE_RIGHT = 59
+const VICTORY = 60
+const SHRUGGING = 61
+const NO_NO = 62
+const DECIDE = 63
+const DOMINO_DYING = 64
+const LAND_DYING = 65
+const NOTHING = 66
+
+// How many pictures each animation has.
+table pictures: i32 = [
+  6, 6, 6, 6, 4, 4, 8, 8, 8, 8, 6, 6, 6, 6, 6, 6, 8, 8, 8, 8, 1, 1, 15, 15,
+  16, 16, 2, 2, 2, 2, 13, 17, 0, 1, 2, 6, 7, 7, 12, 12, 8, 8, 4, 4, 8, 8, 6,
+  6, 2, 3, 1, 15, 2, 4, 7, 3, 7, 4, 11, 11, 8, 8, 8, 1, 1, 13
+]
+
+// What a tick came to (ant_c::performAnimation gives these).
+const UNDECIDED = 0
+const SOLVED = 1
+const SOLVED_LATE = 2
+const DIED = 3
+const CRASHES = 4
+const TRIGGER_NOT_FLAT = 5
+const TRIGGER_NOT_LAST = 6
+const SOME_LEFT = 7
+const CARRYING = 8
+
+// The ant: what it is doing (`state`: an animation, or NOTHING when the
+// next is to be chosen) and the animation that is shown, which picture
+// of it and for how many ticks more; the domino it carries; the place it
+// is in (200, 200 while it is not in the level); for how long it did
+// nothing; how far it fell; which way it looks (-1 left, 1 right, -20 up
+// a ladder, 20 down one); the pushing that waits and what follows it;
+// whether its last animation was played; whether up and down were held
+// since they last did something; how many pushes it has left; and what
+// became of the level.
+component Ant {
+  state: i32, animation: i32, picture: i32, timer: i32, carried: Kind,
+  x: i32, y: i32, idle: i32, fell: i32, direction: i32, push_delay: i32,
+  push_animation: i32, final_played: bool, down_held: bool, up_held: bool,
+  pushes: i32, failed: bool, solved: bool, not_last: bool
+} capacity 4
+
+// The ant of the level, the keys of the tick, and what the tick came to.
+unique Game { ant: entity, keys: i32, result: i32 }
+
+// The animation goes on by a picture, each shown `delay` ticks longer
+// than one: true when it is through (animateAnt).
+proc animate(a: mut Ant, me: entity, delay: i32) -> bool {
+  var through = false
+  if a[me].timer > 0 {
+    a[me].timer -= 1
+  } else {
+    a[me].picture += 1
+    if a[me].picture >= pictures[a[me].animation] {
+      a[me].picture = 0
+      a[me].timer = 0
+      through = true
+    } else {
+      a[me].timer = delay
+    }
+  }
+  through
+}
+
+// The domino the ant carries is put into a place (putDownDomino): onto
+// what is there, or under what falls towards it, it becomes a pile.
+proc put_down(cells: mut Cells, dominoes: mut Domino, sounds: mut Sounds,
+              x: i32, y: i32, kind: Kind, pushed_in: bool) {
+  let left = state_at(cells, dominoes, x - 1, y)
+  if !empty(cells, dominoes, x, y) {
+    crash(cells, dominoes, sounds, x, y, kind as i32,
+          if pushed_in { 0 } else { FALLING })
+  } else if !empty(cells, dominoes, x - 1, y) && left >= ST_UPRIGHT + 4 &&
+            left <= ST_RIGHT {
+    crash(cells, dominoes, sounds, x, y, kind as i32, 0)
+  } else if !empty(cells, dominoes, x + 1, y) &&
+            state_at(cells, dominoes, x + 1, y) <= ST_UPRIGHT - 4 {
+    crash(cells, dominoes, sounds, x, y, kind as i32, 0)
+  } else {
+    put_domino(cells, dominoes, x, y, kind, ST_UPRIGHT, 0, 0, 0)
+  }
+}
+
+// The domino of a place was let go over nothing (fallingDomino).
+proc let_fall(cells: Cells, dominoes: mut Domino, sounds: mut Sounds, x: i32,
+              y: i32) {
+  let it = who(cells, x, y)
+  if dominoes[it].kind == Kind.Ascender {
+    dominoes[it].extra = RISING
+    dominoes[it].state = ST_DOWNRIGHT
+  } else {
+    dominoes[it].extra = FALLING
+  }
+  sound(sounds, SE_ASCENDER)
+}
+
+// Whether the ant can put its domino down in the place `aside` of (x, y)
+// (CanPlaceDomino): an empty one with a platform under it, not in front
+// of a door (but a vanisher may), and not under a domino that falls
+// towards it.
+fn can_place(a: Ant, me: entity, cells: Cells, dominoes: Domino, doors: Doors,
+             x: i32, y: i32, aside: i32) -> bool {
+  let at = x + aside
+  let left = state_at(cells, dominoes, at - 1, y)
+  aside >= -1 && aside <= 1 && at >= 0 && at < WIDE &&
+  empty(cells, dominoes, at, y) && platform(cells, at, y + 1) &&
+  !(a[me].carried != Kind.Vanish &&
+    ((at == doors[0].entry_x && y == doors[0].entry_y) ||
+     (at == doors[0].exit_x && y == doors[0].exit_y))) &&
+  !(!empty(cells, dominoes, at + 1, y) &&
+    state_at(cells, dominoes, at + 1, y) < ST_UPRIGHT) &&
+  !(!empty(cells, dominoes, at - 1, y) && left > ST_UPRIGHT &&
+    left <= ST_RIGHT)
+}
+
+// Whether the ant, standing at (x, y), can push the domino `aside` of it
+// (PushableDomino): one that stands upright on a platform, no splitter,
+// with nothing leaning over where the ant is.
+fn pushable(a: Ant, me: entity, cells: Cells, dominoes: Domino, x: i32, y: i32,
+            aside: i32) -> bool {
+  let here = state_at(cells, dominoes, x, y)
+  a[me].carried == Kind.Empty && !empty(cells, dominoes, x + aside, y) &&
+  platform(cells, x + aside, y + 1) &&
+  kind_at(cells, dominoes, x + aside, y) != Kind.Splitter &&
+  state_at(cells, dominoes, x + aside, y) == ST_UPRIGHT &&
+  (empty(cells, dominoes, x, y) ||
+   (if aside == -1 { here >= ST_UPRIGHT } else { here <= ST_UPRIGHT }))
+}
+
+// What the ant does when no key says anything
+// (checkForNoKeyActions): it gets off a ladder, puts a domino down that
+// it held too long, holds its ears before an exploder, taps a foot,
+// yawns.
+proc left_alone(a: mut Ant, me: entity, cells: Cells, dominoes: Domino,
+                doors: Doors, sounds: mut Sounds) -> i32 {
+  var next = STOP
+  let x = a[me].x
+  let y = a[me].y
+  let idle = a[me].idle
+  let carries = a[me].carried != Kind.Empty
+  let direction = a[me].direction
+  if a[me].animation == PUSH_RIGHT || a[me].animation == PUSH_LEFT {
+    // (It stands ready to push.)
+    next = NOTHING
+  } else if direction == -20 || direction == 20 {
+    if idle <= 40 {
+    } else if ladder(cells, x, y) {
+      if platform(cells, x - 1, y + 1) {
+        next = if carries { OFF_LADDER_LEFT } else { WALK_LEFT }
+        a[me].animation = next
+        a[me].direction = -1
+      } else if !platform(cells, x + 1, y + 1) || ladder(cells, x + 1, y + 1) {
+        a[me].direction = -1
+      } else {
+        next = if carries { OFF_LADDER_RIGHT } else { WALK_RIGHT }
+        a[me].animation = next
+        a[me].direction = 1
+      }
+    } else if ladder(cells, x, y - 1) && idle > 160 {
+      next = LADDER1
+      a[me].animation = next
+    } else if ladder(cells, x, y + 2) && ladder(cells, x, y + 1) {
+      next = LADDER3
+      a[me].animation = next
+    }
+  } else if carries {
+    if idle == 1 {
+      next = if direction == -1 { CARRY_STOP_LEFT } else { CARRY_STOP_RIGHT }
+      a[me].animation = next
+    } else if idle > 40 && can_place(a, me, cells, dominoes, doors, x, y, 0) {
+      a[me].x = x + 1
+      a[me].picture = 4
+      next = PUSH_IN_LEFT
+      a[me].animation = next
+    } else if idle > 40 && can_place(a, me, cells, dominoes, doors, x, y, -1) {
+      next = PUSH_IN_LEFT
+      a[me].animation = next
+    } else if idle > 40 && can_place(a, me, cells, dominoes, doors, x, y, 1) {
+      next = PUSH_IN_RIGHT
+      a[me].animation = next
+    }
+  } else if kind_at(cells, dominoes, x, y) == Kind.Exploder {
+    if a[me].animation != BEFORE_EXPLODER_WAIT {
+      next = BEFORE_EXPLODER
+      a[me].animation = next
+    }
+  } else if idle & 0x20 == 0x20 && idle & 0x1f == 0 {
+    sound(sounds, SE_NU_WHAT)
+    next = TAPPING
+    a[me].animation = next
+  } else if idle & 0x20 == 0x20 && idle & 0x1f < 5 {
+    next = TAPPING
+    a[me].animation = next
+  } else if idle == 204 {
+    next = YAWNING
+    a[me].animation = next
+  } else if idle == 220 {
+    a[me].idle = 0
+  } else if idle > 4 {
+    a[me].animation = STOP
+  }
+  next
+}
+
+// What the ant does next, by the keys and by what is around it
+// (SFNextAction).
+proc decide(a: mut Ant, me: entity, cells: mut Cells, dominoes: mut Domino,
+            doors: Doors, sounds: mut Sounds, keys: i32) -> i32 {
+  a[me].picture = 0
+  var next = STOP
+  let was = a[me].animation
+  let x = a[me].x
+  let y = a[me].y
+  let carries = a[me].carried != Kind.Empty
+  let direction = a[me].direction
+  let on_ladder = (was >= LADDER1 && was <= LADDER4) ||
+                  (was >= CARRY_LADDER1 && was <= CARRY_LADDER4)
+  let here = state_at(cells, dominoes, x, y)
+  let occupied = !empty(cells, dominoes, x, y)
+  let action = keys & KEY_ACTION != 0
+  let up = keys & KEY_UP != 0
+  if !platform(cells, x, y + 1) && (!on_ladder || !ladder(cells, x, y)) {
+    // Nothing under it.
+    a[me].fell += 1
+    if y >= HIGH + 1 {
+      next = LAND_DYING
+      a[me].animation = next
+      a[me].picture = 12
+    } else {
+      next = FALLING_DOWN
+      a[me].animation = next
+      if a[me].fell == 1 { sound(sounds, SE_ANT_FALLING) }
+    }
+  } else if was == PUSH_LEFT &&
+            ((occupied && here < ST_UPRIGHT) ||
+             (!empty(cells, dominoes, x - 1, y) &&
+              state_at(cells, dominoes, x - 1, y) > ST_UPRIGHT)) {
+    // Among the dominoes, and one falls on it.
+    next = DOMINO_DYING
+    a[me].animation = next
+  } else if was == PUSH_RIGHT &&
+            ((occupied && here > ST_UPRIGHT) ||
+             (!empty(cells, dominoes, x + 1, y) &&
+              state_at(cells, dominoes, x + 1, y) < ST_UPRIGHT)) {
+    if x + 1 < WIDE { a[me].x = x + 1 }
+    next = DOMINO_DYING
+    a[me].animation = next
+  } else {
+    if keys & KEY_DOWN == 0 { a[me].down_held = false }
+    if !up { a[me].up_held = false }
+    if a[me].fell != 0 {
+      next = if a[me].fell > 6 { LAND_DYING } else { LANDING }
+      a[me].animation = next
+    } else if keys & KEY_LEFT != 0 {
+      if x <= 0 {
+        a[me].direction = 1
+      } else if was == PUSH_LEFT {
+        a[me].down_held = true
+        if a[me].pushes > 0 && action {
+          a[me].pushes -= 1
+          next = PUSH_LEFT
+          a[me].direction = -1
+        }
+      } else if was == PUSH_RIGHT {
+        // It turns round among the dominoes.
+        a[me].down_held = true
+        if a[me].pushes != 0 && action {
+          a[me].x = x + 1
+          next = PUSH_LEFT
+          a[me].animation = next
+          if !pushable(a, me, cells, dominoes, x + 1, y, -1) {
+            a[me].picture = 9
+          } else {
+            a[me].pushes -= 1
+          }
+          a[me].direction = -1
+        } else if pushable(a, me, cells, dominoes, x + 1, y, -1) {
+          a[me].x = x + 1
+          a[me].animation = PUSH_LEFT
+          a[me].direction = -1
+        }
+      } else if platform(cells, x - 1, y) {
+        next = JUMP_UP_LEFT
+        a[me].animation = next
+        a[me].direction = -1
+      } else if !platform(cells, x - 1, y + 1) && platform(cells, x - 1, y + 2) {
+        next = JUMP_DOWN_LEFT
+        a[me].animation = next
+        a[me].direction = -1
+      } else if !platform(cells, x, y + 1) && ladder(cells, x, y) {
+        // (On a ladder.)
+      } else if !platform(cells, x - 1, y + 1) {
+        // The platform's end.
+        next = if carries { LOSING_DOMINO_LEFT }
+               else if was == STRUGGLE_LEFT { SUDDEN_FALL_LEFT }
+               else { STRUGGLE_LEFT }
+        a[me].animation = next
+        a[me].direction = -1
+      } else if carries && (direction == 20 || direction == -20) {
+        next = OFF_LADDER_LEFT
+        a[me].animation = next
+        a[me].direction = -1
+      } else if up && pushable(a, me, cells, dominoes, x, y, -1) {
+        next = ENTER_LEFT
+        a[me].animation = next
+        a[me].direction = -1
+      } else {
+        next = WALK_LEFT
+        a[me].animation = next
+        a[me].direction = -1
+      }
+    } else if keys & KEY_RIGHT != 0 {
+      if x + 1 >= WIDE {
+        a[me].direction = -1
+      } else if was == PUSH_RIGHT {
+        a[me].down_held = true
+        if a[me].pushes > 0 && action {
+          a[me].pushes -= 1
+          next = PUSH_RIGHT
+          a[me].direction = 1
+        }
+      } else if was == PUSH_LEFT {
+        a[me].down_held = true
+        if a[me].pushes != 0 && action {
+          a[me].x = x - 1
+          next = PUSH_RIGHT
+          a[me].animation = next
+          if !pushable(a, me, cells, dominoes, x - 1, y, 1) {
+            a[me].picture = 9
+          } else {
+            a[me].pushes -= 1
+          }
+          a[me].direction = 1
+        } else if pushable(a, me, cells, dominoes, x - 1, y, 1) {
+          a[me].x = x - 1
+          a[me].animation = PUSH_RIGHT
+          a[me].direction = 1
+        }
+      } else if !platform(cells, x + 1, y + 1) && platform(cells, x + 1, y + 2) {
+        next = JUMP_DOWN_RIGHT
+        a[me].animation = next
+        a[me].direction = 1
+      } else if platform(cells, x + 1, y) {
+        next = JUMP_UP_RIGHT
+        a[me].animation = next
+        a[me].direction = 1
+      } else if !platform(cells, x, y + 1) && ladder(cells, x, y) {
+      } else if !platform(cells, x + 1, y + 1) {
+        if carries {
+          // (It steps out first, with the picture of carrying.)
+          next = STEP_OUT_FOR_LOSING
+          a[me].animation = CARRY_RIGHT
+        } else {
+          next = if was == STRUGGLE_RIGHT { SUDDEN_FALL_RIGHT }
+                 else { STRUGGLE_RIGHT }
+          a[me].animation = next
+        }
+        a[me].direction = 1
+      } else if carries && (direction == 20 || direction == -20) {
+        next = OFF_LADDER_RIGHT
+        a[me].animation = next
+        a[me].direction = 1
+      } else if up && pushable(a, me, cells, dominoes, x, y, 1) {
+        next = ENTER_RIGHT
+        a[me].animation = next
+        a[me].direction = 1
+      } else {
+        next = WALK_RIGHT
+        a[me].animation = next
+        a[me].direction = 1
+      }
+    } else if up {
+      if doors[0].exit_x == x && doors[0].exit_y == y && doors[0].exit == 3 &&
+         (!occupied || here > ST_UPRIGHT) &&
+         (empty(cells, dominoes, x - 1, y) ||
+          state_at(cells, dominoes, x - 1, y) <= ST_UPRIGHT) {
+        // Out by the door.
+        if direction == -1 {
+          next = ENTER_DOOR
+          a[me].x = x - 1
+        } else {
+          next = STEP_BACK_FOR_DOOR
+        }
+        a[me].animation = next
+        a[me].up_held = true
+      } else if ladder(cells, x, y) && !ladder(cells, x, y + 1) {
+        next = if !carries { LADDER1 }
+               else if direction == -1 { ONTO_LADDER_LEFT }
+               else { ONTO_LADDER_RIGHT }
+        a[me].animation = next
+        a[me].direction = -20
+        a[me].up_held = true
+      } else if ladder(cells, x, y - 1) {
+        next = if platform(cells, x, y - 1) { LADDER2 } else { LADDER1 }
+        a[me].animation = next
+        a[me].direction = -20
+        a[me].up_held = true
+      } else if was == PUSH_LEFT || was == PUSH_RIGHT {
+        next = NOTHING
+        a[me].up_held = true
+      } else if carries {
+        a[me].up_held = true
+      } else if direction == -1 && pushable(a, me, cells, dominoes, x, y, -1) {
+        next = ENTER_LEFT
+        a[me].animation = next
+        a[me].up_held = true
+      } else if direction == 1 && pushable(a, me, cells, dominoes, x, y, 1) {
+        next = ENTER_RIGHT
+        a[me].animation = next
+        a[me].up_held = true
+      } else if !a[me].up_held {
+        if pushable(a, me, cells, dominoes, x, y, -1) {
+          next = ENTER_LEFT
+          a[me].animation = next
+        } else if pushable(a, me, cells, dominoes, x, y, 1) {
+          next = ENTER_RIGHT
+          a[me].animation = next
+        }
+        a[me].up_held = true
+      }
+    } else if keys & KEY_DOWN != 0 {
+      if was == PUSH_LEFT || was == PUSH_RIGHT {
+        // Out from among the dominoes.
+        next = was
+        a[me].picture = 9
+        a[me].down_held = true
+      } else if platform(cells, x, y + 1) && ladder(cells, x, y + 1) {
+        if carries {
+          next = if direction == -1 { ONTO_LADDER_LEFT }
+                 else { ONTO_LADDER_RIGHT }
+          a[me].animation = next
+          a[me].direction = 20
+        } else if !a[me].down_held {
+          next = LADDER4
+          a[me].animation = next
+          a[me].direction = 20
+        }
+      } else if ladder(cells, x, y + 2) {
+        next = LADDER3
+        a[me].animation = next
+        a[me].direction = 20
+      }
+    } else if action {
+      if was != PUSH_RIGHT && was != PUSH_LEFT && !carries && occupied &&
+         here == ST_UPRIGHT &&
+         (kind_at(cells, dominoes, x, y) != Kind.Ascender ||
+          extra_at(cells, dominoes, x, y) != RISING) &&
+         platform(cells, x, y + 1) {
+        if kind_at(cells, dominoes, x, y) == Kind.Trigger {
+          next = NO_NO
+        } else {
+          // It takes the domino.
+          a[me].carried = kind_at(cells, dominoes, x, y)
+          remove_domino(cells, dominoes, x, y)
+          next = if direction == -1 { PULL_OUT_LEFT } else { PULL_OUT_RIGHT }
+        }
+        a[me].animation = next
+      } else if carries {
+        if can_place(a, me, cells, dominoes, doors, x, y, 0) {
+          // It puts the domino down where it stands, stepping aside.
+          if direction == -1 {
+            a[me].x = x + 1
+            next = PUSH_IN_LEFT
+          } else {
+            a[me].x = x - 1
+            next = PUSH_IN_RIGHT
+          }
+          a[me].animation = next
+          a[me].picture = 4
+        } else if can_place(a, me, cells, dominoes, doors, x, y, direction) {
+          if direction == -1 {
+            next = PUSH_IN_LEFT
+            a[me].animation = next
+          } else if direction == 1 {
+            next = PUSH_IN_RIGHT
+            a[me].animation = next
+          }
+        }
+      }
+    } else if direction == -20 {
+      // On up the ladder.
+      if ladder(cells, x, y - 1) && !platform(cells, x, y - 1) {
+        next = LADDER1
+        a[me].animation = next
+      } else if !ladder(cells, x, y - 1) || !platform(cells, x, y - 1) {
+        a[me].direction = -1
+      } else {
+        next = LADDER2
+        a[me].animation = next
+        a[me].direction = -1
+      }
+    } else if direction == 20 {
+      // On down it.
+      if ladder(cells, x, y + 2) && !platform(cells, x, y + 2) &&
+         !(ladder(cells, x, y + 1) && platform(cells, x, y + 1)) {
+        next = LADDER3
+        a[me].animation = next
+      }
+    }
+
+    if next != STOP {
+      a[me].idle = 0
+    } else if a[me].carried != Kind.Empty ||
+              (ladder(cells, a[me].x, y + 1) &&
+               !platform(cells, a[me].x, y + 1)) ||
+              a[me].final_played {
+      a[me].idle += 1
+      next = left_alone(a, me, cells, dominoes, doors, sounds)
+    } else if a[me].solved {
+      next = VICTORY
+      a[me].animation = next
+      a[me].final_played = true
+    } else if a[me].failed {
+      next = SHRUGGING
+      a[me].animation = next
+      a[me].final_played = true
+    } else {
+      a[me].idle += 1
+      next = left_alone(a, me, cells, dominoes, doors, sounds)
+    }
+    // With a domino, the animations of carrying one.
+    if a[me].carried != Kind.Empty && a[me].animation < CARRY_LEFT {
+      a[me].animation += 10
+    }
+    a[me].fell = 0
+  }
+  next
+}
+
+// The ant pushes, to the left (-1) or the right (1): the push itself,
+// and what follows where the domino does not just fall (SFPushLeft,
+// SFPushRight).
+proc pushing(a: mut Ant, me: entity, cells: mut Cells, dominoes: mut Domino,
+             sounds: mut Sounds, dir: i32) -> i32 {
+  var next = NOTHING
+  let x = a[me].x
+  let y = a[me].y
+  let right = if dir == 1 { 1 } else { 0 }
+  if a[me].picture == 1 {
+    if !push_domino(cells, dominoes, sounds, x + dir, y, dir) {
+      if a[me].push_delay == 0 {
+        let kind = kind_at(cells, dominoes, x + dir, y)
+        if kind == Kind.Stopper || kind == Kind.Counter1 ||
+           kind == Kind.Counter2 || kind == Kind.Counter3 {
+          a[me].push_delay = 5
+          a[me].push_animation = PUSH_STOPPER_LEFT + right
+        } else if kind == Kind.Exploder {
+          a[me].picture = 9
+        } else if kind == Kind.Delay {
+          a[me].push_delay = 5
+          a[me].push_animation = PUSH_DELAY_LEFT + right
+        } else if kind == Kind.Ascender {
+          a[me].push_delay = 2
+          a[me].push_animation = PUSH_RISER_LEFT + right
+        }
+      }
+    }
+  }
+  if a[me].push_delay != 0 {
+    a[me].push_delay -= 1
+    if a[me].push_delay == 0 { a[me].animation = a[me].push_animation }
+    next = a[me].animation
+  } else if animate(a, me, 0) {
+    a[me].x = x + dir
+    a[me].animation = STOP
+  } else {
+    next = a[me].animation
+  }
+  next
+}
+
+// The ant goes on with what it is doing (callStateFunction and the
+// functions it calls): `state` is that, and what it does from now on is
+// given.
+proc go_on(a: mut Ant, me: entity, cells: mut Cells, dominoes: mut Domino,
+           doors: mut Doors, sounds: mut Sounds, state: i32, keys: i32) -> i32 {
+  var next = NOTHING
+  let x = a[me].x
+  let y = a[me].y
+  let carries = a[me].carried != Kind.Empty
+  let picture = a[me].picture
+  if state == WALK_LEFT || state == CARRY_LEFT {
+    if animate(a, me, 0) { a[me].x = x - 1 } else { next = a[me].animation }
+  } else if state == WALK_RIGHT || state == CARRY_RIGHT {
+    if animate(a, me, 0) { a[me].x = x + 1 } else { next = a[me].animation }
+  } else if (state >= JUMP_UP_LEFT && state <= JUMP_DOWN_RIGHT) ||
+            (state >= CARRY_UP_LEFT && state <= CARRY_DOWN_RIGHT) {
+    // Up or down a step, to the left or the right.
+    if animate(a, me, 0) {
+      let right = state % 2 == 1
+      let down = state == JUMP_DOWN_LEFT || state == JUMP_DOWN_RIGHT ||
+                 state == CARRY_DOWN_LEFT || state == CARRY_DOWN_RIGHT
+      a[me].animation = if carries { if right { CARRY_STOP_RIGHT } else { CARRY_STOP_LEFT } }
+                        else if right { WALK_RIGHT } else { WALK_LEFT }
+      a[me].x = if right { x + 1 } else { x - 1 }
+      a[me].y = if down { y + 1 } else { y - 1 }
+    } else {
+      next = a[me].animation
+    }
+  } else if state == LADDER1 || state == CARRY_LADDER1 {
+    if animate(a, me, 0) { a[me].y = y - 2 } else { next = a[me].animation }
+  } else if state == LADDER2 || state == CARRY_LADDER2 {
+    if animate(a, me, 0) {
+      a[me].animation = if carries { CARRY_LADDER4 } else { LADDER4 }
+      a[me].y = y - 2
+    } else {
+      next = a[me].animation
+    }
+  } else if state == LADDER3 || state == LADDER4 || state == CARRY_LADDER3 ||
+            state == CARRY_LADDER4 {
+    if animate(a, me, 0) { a[me].y = y + 2 } else { next = a[me].animation }
+  } else if state == PULL_OUT_LEFT || state == PULL_OUT_RIGHT {
+    if picture == 3 { sound(sounds, SE_PICK_UP_DOMINO) }
+    if animate(a, me, 0) {
+      a[me].animation = if state == PULL_OUT_LEFT { CARRY_LEFT }
+                        else { CARRY_RIGHT }
+    } else {
+      next = a[me].animation
+    }
+  } else if state == PUSH_IN_LEFT || state == PUSH_IN_RIGHT {
+    if animate(a, me, 0) {
+      let to = if state == PUSH_IN_LEFT { x - 1 } else { x + 1 }
+      a[me].x = to
+      a[me].animation = if state == PUSH_IN_LEFT { WALK_LEFT }
+                        else { WALK_RIGHT }
+      put_down(cells, dominoes, sounds, to, y, a[me].carried, true)
+      a[me].carried = Kind.Empty
+    } else {
+      next = a[me].animation
+    }
+  } else if state == ONTO_LADDER_RIGHT || state == ONTO_LADDER_LEFT {
+    if animate(a, me, 0) {
+      a[me].animation = if a[me].direction == -20 { CARRY_LADDER1 }
+                        else { CARRY_LADDER4 }
+    }
+    next = a[me].animation
+  } else if state == OFF_LADDER_RIGHT || state == OFF_LADDER_LEFT {
+    if animate(a, me, 0) {
+      a[me].animation = if state == OFF_LADDER_RIGHT { CARRY_RIGHT }
+                        else { CARRY_LEFT }
+    }
+    next = a[me].animation
+  } else if state == LOSING_DOMINO_RIGHT || state == LOSING_DOMINO_LEFT {
+    // Over the platform's end with a domino: the domino goes first.
+    if animate(a, me, 0) {
+      // (Two places down at once: were there a platform a step below,
+      // it would have jumped.)
+      a[me].animation = FALLING_DOWN
+      a[me].y = if y + 3 > HIGH { HIGH - 1 } else { y + 2 }
+      a[me].fell += 1
+    } else {
+      let now = a[me].picture
+      if state == LOSING_DOMINO_RIGHT {
+        if now == 4 {
+          put_down(cells, dominoes, sounds, x + 1, y, a[me].carried, false)
+          let_fall(cells, dominoes, sounds, x + 1, y)
+          a[me].carried = Kind.Empty
+        } else if now == 6 {
+          a[me].x = x + 1
+        } else if now == 10 {
+          sound(sounds, SE_ANT_FALLING)
+        }
+      } else {
+        if now == 4 {
+          a[me].x = x - 1
+        } else if now == 8 {
+          put_down(cells, dominoes, sounds, x, y, a[me].carried, false)
+          let_fall(cells, dominoes, sounds, x, y)
+          a[me].carried = Kind.Empty
+        } else if now == 14 {
+          sound(sounds, SE_ANT_FALLING)
+        }
+      }
+      next = a[me].animation
+    }
+  } else if state == STEP_OUT_FOR_LOSING {
+    if animate(a, me, 0) {
+      a[me].animation = LOSING_DOMINO_RIGHT
+      next = LOSING_DOMINO_RIGHT
+    } else {
+      next = STEP_OUT_FOR_LOSING
+    }
+  } else if state == TAPPING || state == YAWNING || state == NO_NO {
+    if !animate(a, me, 3) { next = a[me].animation }
+  } else if state == ENTER_LEFT || state == ENTER_RIGHT {
+    // In among the dominoes, ready to push.
+    if animate(a, me, 0) {
+      a[me].animation = if state == ENTER_LEFT { PUSH_LEFT } else { PUSH_RIGHT }
+    } else {
+      next = a[me].animation
+    }
+  } else if state == PUSH_LEFT {
+    next = pushing(a, me, cells, dominoes, sounds, -1)
+  } else if state == PUSH_RIGHT {
+    next = pushing(a, me, cells, dominoes, sounds, 1)
+  } else if state >= PUSH_STOPPER_LEFT && state <= PUSH_DELAY_RIGHT {
+    // It pushes at something that does not fall, for a while; at a delay
+    // until that does fall.
+    let right = state % 2 == 1
+    var over = animate(a, me, 5)
+    if !over && state >= PUSH_DELAY_LEFT {
+      // (To the right too it is pushed leftwards: the game has it so.)
+      over = push_domino(cells, dominoes, sounds, if right { x + 1 }
+                         else { x - 1 }, y, -1)
+    }
+    if over {
+      a[me].picture = 9
+      a[me].animation = if right { PUSH_RIGHT } else { PUSH_LEFT }
+    }
+    next = a[me].animation
+  } else if state == SUDDEN_FALL_RIGHT || state == SUDDEN_FALL_LEFT {
+    if picture == 2 { sound(sounds, SE_ANT_FALLING) }
+    if animate(a, me, 0) {
+      a[me].x = if state == SUDDEN_FALL_RIGHT { x + 1 } else { x - 1 }
+      a[me].animation = FALLING_DOWN
+      a[me].y = if y + 2 < HIGH { y + 2 } else { HIGH }
+      a[me].fell += 1
+    } else {
+      next = a[me].animation
+    }
+  } else if state == FALLING_DOWN {
+    if animate(a, me, 0) {
+      if a[me].fell == 1 && carries {
+        put_down(cells, dominoes, sounds, x, y, a[me].carried, false)
+        let_fall(cells, dominoes, sounds, x, y)
+        a[me].carried = Kind.Empty
+      }
+      if y + 1 < HIGH {
+        a[me].animation = FALLING_DOWN
+        a[me].y = y + 1
+      } else {
+        // Out of the level.
+        a[me].animation = GHOST1
+        next = GHOST1
+      }
+    } else {
+      next = a[me].animation
+    }
+  } else if state == BEFORE_EXPLODER {
+    if animate(a, me, 3) { a[me].animation = BEFORE_EXPLODER_WAIT }
+    next = a[me].animation
+  } else if state == LANDING {
+    if picture == 2 { sound(sounds, SE_ANT_LANDING) }
+    if animate(a, me, 0) { a[me].animation = STOP }
+    else { next = a[me].animation }
+  } else if state == GHOST1 {
+    if animate(a, me, 0) { a[me].animation = GHOST2 }
+    next = a[me].animation
+  } else if state == GHOST2 {
+    if animate(a, me, 2) {
+      a[me].picture = pictures[GHOST2] - 1
+      a[me].timer = 2
+    }
+    next = a[me].animation
+  } else if state == LEAVE_DOOR {
+    // It waits for the door to be open, and comes in.
+    doors[0].open_entry = true
+    if doors[0].entry != 3 {
+      next = state
+    } else {
+      if picture == 0 {
+        a[me].x = doors[0].entry_x
+        a[me].y = doors[0].entry_y
+      }
+      if animate(a, me, 0) { a[me].animation = STEP_ASIDE }
+      next = a[me].animation
+    }
+  } else if state == STEP_ASIDE {
+    if animate(a, me, 0) {
+      a[me].animation = STOP
+      doors[0].open_entry = false
+    } else {
+      next = a[me].animation
+    }
+  } else if state == ENTER_DOOR {
+    if animate(a, me, 0) {
+      // Gone.
+      a[me].x = 200
+      a[me].y = 200
+      doors[0].open_exit = false
+    }
+    next = a[me].animation
+  } else if state == STEP_BACK_FOR_DOOR {
+    if animate(a, me, 0) {
+      a[me].animation = ENTER_DOOR
+      a[me].x = x - 1
+    }
+    next = a[me].animation
+  } else if state == STRUGGLE_LEFT || state == STRUGGLE_RIGHT {
+    if !animate(a, me, 0) { next = a[me].animation }
+  } else if state == VICTORY || state == SHRUGGING {
+    if picture == 1 {
+      sound(sounds, if state == VICTORY { SE_VICTORY } else { SE_SHRUGGING })
+    }
+    if !animate(a, me, 3) { next = a[me].animation }
+  } else if state == DOMINO_DYING {
+    let through = animate(a, me, 2)
+    next = a[me].animation
+  } else if state == LAND_DYING {
+    if picture == 3 { sound(sounds, SE_ANT_LANDING) }
+    if animate(a, me, 2) { a[me].picture = 12 }
+    next = a[me].animation
+  } else if state == DECIDE || state == NOTHING {
+    next = decide(a, me, cells, dominoes, doors, sounds, keys)
+  }
+  // (Standing, with or without a domino, and waiting before an exploder
+  // are done with at once.)
+  next
+}
+
+// What a tick came to, after the ant and the dominoes had their turns
+// (the rest of ant_c::performAnimation): the exit opens when the trigger
+// fell last of all, and the level is solved when the ant is out by it.
+proc judge(a: mut Ant, me: entity, cells: Cells, dominoes: Domino,
+           doors: mut Doors, before: bool, time: i32, idle: i32) -> i32 {
+  let trigger = before && trigger_fallen(dominoes)
+  let all = all_fallen(cells, dominoes)
+  let piles = rubble(dominoes)
+  let standing = some_standing(dominoes)
+  let visible = a[me].x >= 0 && a[me].x < WIDE && a[me].y >= 0 &&
+                a[me].y < HIGH
+  let state = a[me].state
+  let living = state != DOMINO_DYING && state != LAND_DYING && state != GHOST2
+  let carries = a[me].carried != Kind.Empty
+  if trigger && !all { a[me].not_last = true }
+  doors[0].open_exit = trigger && !piles && !standing && visible &&
+                       !a[me].not_last
+  if trigger {
+    if !piles && all && !carries && living && !a[me].not_last {
+      a[me].solved = true
+    } else {
+      a[me].failed = true
+    }
+  }
+  var result = UNDECIDED
+  if a[me].pushes == 0 && idle > 36 {
+    if trigger_not_flat(dominoes) { result = TRIGGER_NOT_FLAT }
+    else if piles { result = CRASHES }
+    else if trigger {
+      if carries { result = CARRYING }
+      else if standing { result = SOME_LEFT }
+      else if a[me].not_last { result = TRIGGER_NOT_LAST }
+    }
+  }
+  if result == UNDECIDED {
+    if !living { result = DIED }
+    else if trigger && !visible && doors[0].exit == 0 {
+      result = if time > 0 { SOLVED } else { SOLVED_LATE }
+    }
+  }
+  result
+}
+
+// A level is started: the ant is behind the entry door.
+system enter() {
+  for e with Ant { e.destroy() }
+  Game.ant = spawn {
+    Ant { state: LEAVE_DOOR, animation: LEAVE_DOOR, picture: 0, timer: 0,
+          carried: Kind.Empty, x: 200, y: 200, idle: 0, fell: 0, direction: 1,
+          push_delay: 0, push_animation: 0, final_played: false,
+          down_held: false, up_held: false, pushes: 1, failed: false,
+          solved: false, not_last: false }
+  }
+  Game.result = UNDECIDED
+  Sounds = []
+}
+
+// The ant's turn in a tick: where it has nothing to go on with, it
+// decides what it does next and starts on that.
+proc ant_turn(a: mut Ant, me: entity, cells: mut Cells, dominoes: mut Domino,
+              doors: mut Doors, sounds: mut Sounds, keys: i32) {
+  if a[me].state == NOTHING {
+    a[me].state = go_on(a, me, cells, dominoes, doors, sounds, NOTHING, keys)
+  }
+  if a[me].state != NOTHING {
+    a[me].state = go_on(a, me, cells, dominoes, doors, sounds, a[me].state,
+                        keys)
+  }
+}
+
+system act_ant() {
+  ant_turn(Ant, Game.ant, Cells, Domino, Doors, Sounds, Game.keys)
+}
+
+system decide_level() {
+  Game.result = judge(Ant, Game.ant, Cells, Domino, Doors, Before, Level.time,
+                      Level.idle)
+}
+
+system hush() { Sounds = [] }
+
+// A tick of a level (ant_c::performAnimation): the doors, the ant, the
+// dominoes, and what it came to. `Game.keys` are the keys held.
+schedule tick() {
+  hush()
+  doors()
+  act_ant()
+  topple()
+  decide_level()
+}
