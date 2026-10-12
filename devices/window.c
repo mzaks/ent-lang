@@ -419,8 +419,10 @@ static int ent_window_font_count = 1;
 // A font from a file is drawn from letters made as big as they are to
 // show: read again at that size where the window's zoom, or a screen
 // with small pixels, has them more pixels high than the size they were
-// read at. (A few sizes of each are kept.)
-#define ENT_WINDOW_SIZES 4
+// read at. (A few sizes of each are kept, and a size is the next four
+// pixels up: text that grows as a view is zoomed is then not read anew
+// at every step.)
+#define ENT_WINDOW_SIZES 8
 static struct {
   // (The file's bytes, kept: letters of another size are made of them.)
   struct ent_file file;
@@ -463,6 +465,9 @@ static Font ent_window_font_shown(int32_t font, float size) {
   int pixels = (int)(size * ent_window_zoom * GetWindowScaleDPI().y + 0.5f);
   if (pixels <= ent_window_fonts[font].baseSize)
     return ent_window_fonts[font];
+  pixels = (pixels + 3) / 4 * 4;
+  if (pixels > 512)
+    pixels = 512;
   for (int i = 0; i < ENT_WINDOW_SIZES; ++i)
     if (ent_window_faces[font].pixels[i] == pixels)
       return ent_window_faces[font].at[i];
@@ -475,8 +480,12 @@ static Font ent_window_font_shown(int32_t font, float size) {
   SetTextureFilter(made.texture, TEXTURE_FILTER_BILINEAR);
   int slot = ent_window_faces[font].next;
   ent_window_faces[font].next = (slot + 1) % ENT_WINDOW_SIZES;
-  if (ent_window_faces[font].pixels[slot])
+  if (ent_window_faces[font].pixels[slot]) {
+    // (What was written with the letters given up may not be on the
+    // screen yet: it is put there first, while they are still there.)
+    rlDrawRenderBatchActive();
     UnloadFont(ent_window_faces[font].at[slot]);
+  }
   ent_window_faces[font].at[slot] = made;
   ent_window_faces[font].pixels[slot] = pixels;
   return made;
