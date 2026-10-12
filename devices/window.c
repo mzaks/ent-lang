@@ -824,15 +824,18 @@ struct ent_window_sheet {
   Texture2D strip[ENT_WINDOW_STRIPS];
   int strips, width, height;
 };
-static struct ent_window_sheet ent_window_pictures[64];
-static Image ent_window_images[64];
+// (As many pictures as a game with a picture for every thing reads.)
+#define ENT_WINDOW_PICTURES 2048
+static struct ent_window_sheet ent_window_pictures[ENT_WINDOW_PICTURES];
+static Image ent_window_images[ENT_WINDOW_PICTURES];
 static int ent_window_picture_count = 1;
 
 int32_t ent_window_picture_load(const ent_text126 *file) {
   ENT_WINDOW_TEXT(named, file);
   const char *kind = GetFileExtension(named);
   struct ent_file held;
-  if (ent_window_picture_count >= 64 || !kind || !ent_file_open(named, &held))
+  if (ent_window_picture_count >= ENT_WINDOW_PICTURES || !kind ||
+      !ent_file_open(named, &held))
     return 0;
   Image image = LoadImageFromMemory(kind, held.bytes, (int)held.size);
   ent_file_close(&held);
@@ -879,8 +882,11 @@ void ent_window_picture_part(int32_t image, float from_x, float from_y,
   struct ent_window_sheet *sheet = ent_window_sheet_of(image);
   if (!sheet || from_h <= 0 || from_w <= 0)
     return;
+  // (A tint may let what is under the picture show through, as any
+  // colour: 0xAARRGGBB.)
+  unsigned char alpha = (unsigned char)((uint32_t)tint >> 24);
   Color color = {(unsigned char)(tint >> 16), (unsigned char)(tint >> 8),
-                 (unsigned char)tint, 255};
+                 (unsigned char)tint, alpha ? alpha : 255};
   for (int i = 0; i < sheet->strips; i++) {
     float top = (float)(i * ENT_WINDOW_STRIP);
     float first = from_y > top ? from_y : top;
