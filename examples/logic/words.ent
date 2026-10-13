@@ -1,0 +1,46 @@
+// What a circuit written out word by word needs (examples/logic/words.py
+// makes the module `netcode` from a circuit's Verilog): a signal of up
+// to 64 bits is one u64 with nothing above its width, and these are the
+// operations of a hardware description that are no operator here.
+
+// A value of so many bits with its top bit drawn out over the rest.
+fn sext(a: u64, width: u64) -> i64 {
+  if width >= 64 { a as i64 } else { ((a << (64 - width)) as i64) >> (64 - width) as i64 }
+}
+
+// The lowest so many bits.
+fn low(a: u64, width: u64) -> u64 {
+  if width >= 64 { a } else { a & ((1 as u64 << width) - 1) }
+}
+
+// Shifts by any distance: past the width nothing is left.
+fn shl(a: u64, by: u64) -> u64 { if by >= 64 { 0 } else { a << by } }
+fn shr(a: u64, by: u64) -> u64 { if by >= 64 { 0 } else { a >> by } }
+fn sar(a: i64, by: u64) -> u64 { (a >> (if by >= 63 { 63 } else { by }) as i64) as u64 }
+
+// Down by a distance that may be negative, which is up.
+fn shift(a: u64, by: i64) -> u64 {
+  if by >= 0 { shr(a, by as u64) } else { shl(a, (0 - by) as u64) }
+}
+
+// Whether an odd number of bits is set.
+fn odd(a: u64) -> u64 {
+  let b = a ^ (a >> 32)
+  let c = b ^ (b >> 16)
+  let d = c ^ (c >> 8)
+  let e = d ^ (d >> 4)
+  let f = e ^ (e >> 2)
+  (f ^ (f >> 1)) & 1
+}
+
+fn bit(is: bool) -> u64 { if is { 1 } else { 0 } }
+
+// Division as hardware has it: by 0 gives 0.
+fn udiv(a: u64, b: u64) -> u64 { if b == 0 { 0 } else { a / b } }
+fn umod(a: u64, b: u64) -> u64 { if b == 0 { 0 } else { a % b } }
+fn sdiv(a: i64, b: i64) -> u64 {
+  if b == 0 { 0 } else if b == -1 { (0 - a) as u64 } else { (a / b) as u64 }
+}
+fn smod(a: i64, b: i64) -> u64 {
+  if b == 0 || b == -1 { 0 } else { (a % b) as u64 }
+}

@@ -1,0 +1,69 @@
+// The processor of cpu.ent written out word by word
+// (examples/logic/words.py cpu), with its memory answering in words
+// too: what the processor is told and what it asks for are the fields
+// of the circuit's `Port`, a whole address and a whole word each, where
+// cpu_coded.ent with the same circuit carries them bit by bit through
+// `Stim` and `Seen`. That is how a testbench drives Verilator's model of
+// the processor's Verilog, and this is what is timed against it
+// (bench/logic/cpu.py). No outputs are written: `Run.sum` is made of the
+// address and the word of every cycle, which the testbench makes alike.
+//
+//   examples/logic/prepare.py cpu && examples/logic/words.py cpu
+//   ../../../tools/ent run -I ../words/cpu ../../../examples/logic/cpu_words.ent
+import files
+import console
+import circuit
+import logic
+import bus
+import words
+import netcode
+
+capacity Bytes 67108864
+// (No circuit is read here: circuit.ent's entities are not made.)
+capacity Signal 16
+
+system told() {
+  Port.resetn = bit(Bus.resetn)
+  Port.mem_ready = bit(Bus.ready)
+  Port.mem_rdata = Bus.rdata as u64
+}
+
+system asked() {
+  let answered = Bus.ready
+  Bus.ready = false
+  if Port.mem_valid == 1 && !answered {
+    Bus.ready = true
+    let address = Port.mem_addr as u32
+    let at = (address / 4) as i32
+    if Port.mem_wstrb == 0 {
+      Bus.rdata = if address / 4 < WORDS as u32 { Memory[at].word } else { 0 }
+    } else if address == CONSOLE as u32 {
+      Said += { value: Port.mem_wdata as u8 }
+    } else if address / 4 < WORDS as u32 {
+      var mask = 0 as u32
+      for k in 0..4 {
+        if (Port.mem_wstrb >> k as u64) & 1 == 1 { mask = mask | (0xff as u32 << (8 * k) as u32) }
+      }
+      Memory[at].word = (Memory[at].word & ~mask) | (Port.mem_wdata as u32 & mask)
+    }
+  }
+  if Bus.resetn && Port.trap == 1 { Bus.trapped = true }
+  Bus.resetn = Run.cycle + 1 >= RESET
+  Run.sum = mix(mix(Run.sum ^ Port.mem_addr ^ (Port.mem_wdata << 32)) ^
+                (Port.mem_wstrb << 3 | Port.mem_valid << 2 | Port.mem_instr << 1 | Port.trap))
+}
+
+schedule setup() { plan() sized() loaded() }
+schedule before() { told() }
+schedule after() { asked() tick() }
+schedule done() { finish() said() }
+
+main {
+  setup()
+  loop {
+    before()
+    core()
+    after()
+  } until Run.cycle >= Run.cycles || Bus.trapped
+  done()
+}

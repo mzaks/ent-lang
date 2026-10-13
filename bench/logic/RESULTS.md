@@ -138,3 +138,55 @@ runs and the model's (and they are Icarus Verilog's: `check/cpu.py`).
 - Before the compiler followed the log for a `for` that sends whole
   numbers (it went through every entity each round), the processor's
   cycle took 363 us this way.
+
+## 2026-10-13, last: the processor word by word
+
+The same processor and program, with a way more: the processor's
+Verilog written out as ent-lang word by word (`examples/logic/words.py`:
+Yosys leaves an addition an addition and a memory a memory, 611
+operations, 131 flip-flop words and the 32 registers as a buffer, where
+the gates are 30,383 ANDs and 1,943 flip-flops). `python3
+bench/logic/cpu.py` again, the machine idle. Every output of every
+cycle is the gates' (and so Icarus Verilog's) before anything is timed.
+
+| | the run | a cycle | cycles a second | built in |
+|---|---|---|---|---|
+| Verilator, the Verilog as written, driven in words | 0.041 s | 0.071 us | 14,080,000 | 5 s |
+| the model, word by word, driven in words | 0.051 s | 0.087 us | 11,520,000 | 1 s |
+| Verilator, the Verilog as written | 0.16 s | 0.27 us | 3,681,000 | 5 s |
+| the model, word by word | 0.22 s | 0.38 us | 2,633,000 | 1 s |
+| the model, the gates as code | 2.49 s | 4.28 us | 234,000 | 8 s |
+| Verilator, the gates | 4.75 s | 8.15 us | 123,000 | 17 s |
+| the model, as entities, those whose inputs changed | 19.77 s | 33.90 us | 29,500 | |
+| the model, as rows | 28.66 s | 49.16 us | 20,300 | |
+| the model, as entities, all | 46.55 s | 79.84 us | 12,500 | |
+
+(The first two: the least of fifteen runs, less the 1 ms a run of a
+thousand cycles takes; the rest the least of three, with their start.)
+
+- **Driven in words** is how a testbench drives Verilator: the memory
+  around the processor gives it a whole word and reads a whole address
+  (`cpu_words.ent`, and the harness's like), and one sum a cycle is made
+  of the address and the word; both sums are the same. Word by word the
+  model takes 0.087 us a cycle and Verilator 0.071: Verilator is 1.2
+  times as fast, where it was 16 times as fast as the model's gates.
+  The model builds in a second.
+- The two rows under them carry every input and output bit by bit
+  through `Stim` and `Seen` and fold each of the 71 output bits into the
+  sum, as all the rows below do. Three quarters of the 0.27 us that was
+  written down for Verilator on the Verilog as written, above, is that
+  sum and not the processor; so is most of the model's 0.38 us.
+- From the gates to the words the model's cycle is 49 times shorter
+  (4.28 us to 0.087): it was the gates that cost, not the language.
+- An `-O3` build of the model is no faster than its `-O2`.
+- A value is one run here, not 64 side by side.
+- Writing a circuit out word by word says nothing new about a circuit
+  that is gates to begin with: the ISCAS and EPFL circuits come out as
+  one operation a gate or more (hyp: 420,512 operations for 238,658
+  ANDs). They were run for the check only (`check/words.py`: all 49
+  the same as Icarus Verilog, and `ops`, a circuit of every operation
+  of Verilog).
+- On the way the compiler's reading of a long line was mended: it asked
+  for the type of each side of an operator three times, and each asking
+  asked the same of what is inside, so a line 32 operators deep (the
+  bits of a word put together) did not end.

@@ -9,14 +9,20 @@ PicoRV32 runs Dhrystone to its end (583,031 clock cycles) with its
 memory outside the circuit, which answers the bus a cycle after it is
 asked: in the model that is examples/logic/bus.ent, for Verilator a
 harness in C++ made here that answers alike. Verilator runs twice: the
-gates Yosys made of the processor, which are what the model runs, and
-the processor's Verilog as it was written (examples/logic/cpu.v around
-picorv32.v), which is what somebody with that Verilog would give it.
+gates Yosys made of the processor, which are what the model's tables
+and its gates as code run, and the processor's Verilog as it was
+written (examples/logic/cpu.v around picorv32.v), which is what
+somebody with that Verilog would give it. The model has that too: the
+processor word by word (examples/logic/words.py).
 
 First every output of every cycle and what the program says are held
 against the model's (the gates written out as code). Then each runs
 without writing its outputs: one core (CPU 2), native builds, the whole
-run with its start, the least of three.
+run with its start, the least of three. All fold every output bit of
+every cycle into a sum; the two that have the Verilog's words run once
+more as a testbench would drive them, the memory answering in whole
+words and one sum of the address and the word a cycle
+(cpu_words.ent), and their sums are to be the same.
 """
 
 import os
@@ -50,7 +56,7 @@ static uint64_t mix(uint64_t x) {
 
 int main(int argc, char **argv) {
   long cycles = atol(argv[1]);
-  bool shown = argc > 3;
+  bool shown = argc > 3 && argv[3][0] == 's', words = argc > 3 && argv[3][0] == 'w';
   std::vector<uint32_t> memory(65536, 0);
   FILE *image = fopen(argv[2], "rb");
   int byte;
@@ -71,14 +77,21 @@ int main(int argc, char **argv) {
     top->mem_ready = ready;
     top->mem_rdata = rdata;
     top->eval();
-    bool outputs[] = {OUTPUTS};
-    for (bool bit : outputs) {
-      sum = mix(sum ^ (bit ? ~0ull : 0ull));
+    if (words) {
+      // (As examples/logic/cpu_words.ent makes its sum: of whole words.)
+      sum = mix(mix(sum ^ top->mem_addr ^ ((uint64_t)top->mem_wdata << 32)) ^
+                ((uint64_t)top->mem_wstrb << 3 | (uint64_t)top->mem_valid << 2 |
+                 (uint64_t)top->mem_instr << 1 | (uint64_t)top->trap));
+    } else {
+      bool outputs[] = {OUTPUTS};
+      for (bool bit : outputs) {
+        sum = mix(sum ^ (bit ? ~0ull : 0ull));
+        if (shown)
+          putchar('0' + bit);
+      }
       if (shown)
-        putchar('0' + bit);
+        putchar('\n');
     }
-    if (shown)
-      putchar('\n');
     bool answered = ready;
     ready = false;
     if (top->mem_valid && !answered) {
@@ -155,7 +168,7 @@ def least(command, folder):
         said = subprocess.run(["taskset", "-c", "2"] + command, check=True, cwd=folder,
                               capture_output=True, text=True).stdout
         times.append(time.time() - started)
-    return min(times), said.strip().split("\n")[-1]
+    return min(times), next(line for line in said.split("\n") if line.startswith("cycles"))
 
 
 def main():
@@ -167,6 +180,11 @@ def main():
     coded, coded_build = model("cpu_coded.ent", os.path.join(BENCH, "cpu_coded"),
                                ["-I", os.path.join(ROOT, "build", "logic", "code", "cpu")])
     tables, _ = model("cpu.ent", os.path.join(BENCH, "cpu"))
+    subprocess.run([sys.executable, os.path.join(LOGIC, "words.py"), "cpu"], check=True,
+                   stdout=subprocess.DEVNULL)
+    in_words = ["-I", os.path.join(ROOT, "build", "logic", "words", "cpu")]
+    worded, worded_build = model("cpu_coded.ent", os.path.join(BENCH, "cpu_worded"), in_words)
+    words, words_build = model("cpu_words.ent", os.path.join(BENCH, "cpu_words"), in_words)
     gates, gates_build = verilator("verilator_gates", [os.path.join(CIRCUITS, "cpu.v")])
     written, written_build = verilator(
         "verilator_written",
@@ -176,6 +194,11 @@ def main():
     # What the model gives, cycle by cycle, and what each Verilator gives.
     lines, console, said = check.model(coded, image, 5000000, 0, "coded")
     cycles = len(lines)
+    same = check.model(worded, image, 5000000, 0, "worded")[:2] == (lines, console)
+    print(f"the model, word by word: {'the same' if same else 'NOT the same'} "
+          f"{cycles} cycles as the gates")
+    if not same:
+        return 1
     for name, program in (("the gates", gates), ("the Verilog as written", written)):
         folder = os.path.dirname(os.path.dirname(program))
         out = subprocess.run([program, "5000000", image, "show"], check=True,
@@ -189,13 +212,25 @@ def main():
             return 1
 
     rows = []
+    folder = os.path.dirname(os.path.dirname(written))
+    rows.append(("Verilator, the Verilog as written, driven in words", ) +
+                least([written, "5000000", image, "words"], folder) + (written_build, ))
+    check.model(words, image, 2000, 0, "words")
+    with open(os.path.join(BENCH, "words", "run.txt"), "w") as file:
+        file.write("5000000 1 0 0\n")
+    rows.append(("the model, word by word, driven in words", ) +
+                least([words], os.path.join(BENCH, "words")) + (words_build, ))
+    if rows[0][2] != rows[1][2]:
+        print(f"driven in words, NOT the same: Verilator {rows[0][2]}, the model {rows[1][2]}")
+        return 1
     for name, program, build in (("Verilator, the Verilog as written", written, written_build),
                                  ("Verilator, the gates", gates, gates_build)):
         folder = os.path.dirname(os.path.dirname(program))
         seconds, last = least([program, "5000000", image], folder)
-        rows.append((name, seconds, build, last))
+        rows.append((name, seconds, last, build))
     for name, program, way, folder, build in (
-            ("the model, as code", coded, 0, "coded", coded_build),
+            ("the model, word by word", worded, 0, "worded", worded_build),
+            ("the model, the gates as code", coded, 0, "coded", coded_build),
             ("the model, as entities, those whose inputs changed", tables, 2, "events", None),
             ("the model, as rows", tables, 1, "rows", None),
             ("the model, as entities, all", tables, 0, "entities", None)):
@@ -203,10 +238,10 @@ def main():
         with open(os.path.join(BENCH, folder, "run.txt"), "w") as file:
             file.write(f"5000000 1 0 {way}\n")
         seconds, last = least([program], os.path.join(BENCH, folder))
-        rows.append((name, seconds, build, last))
+        rows.append((name, seconds, last, build))
     print("| | the run | a cycle | cycles a second | built in |")
     print("|---|---|---|---|---|")
-    for name, seconds, build, last in rows:
+    for name, seconds, last, build in rows:
         print(f"| {name} | {seconds:.2f} s | {1e6 * seconds / cycles:.2f} us | "
               f"{cycles / seconds:,.0f} | {'%.0f s' % build if build else ''} |")
     return 0

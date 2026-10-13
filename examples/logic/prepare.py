@@ -44,6 +44,8 @@ def found():
         circuits = {name: file for name, file in circuits.items()
                     if os.sep + "picorv32" + os.sep not in file}
         circuits["cpu"] = os.path.join(HERE, "cpu.v") + " " + core
+    # The operations of Verilog, for checking the circuit word by word.
+    circuits["ops"] = os.path.join(HERE, "ops.v")
     return circuits
 
 

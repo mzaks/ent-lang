@@ -9,11 +9,12 @@ fourth check).
 The circuit is PicoRV32 (examples/logic/cpu.v), 30,000 ANDs and 1,900
 flip-flops; its memory is outside the circuit, and the program in it is
 PicoRV32's Dhrystone, built here with clang for RISC-V (the compiler's
-own LLVM, or the one on the PATH). The model runs it four ways (gates as
-entities, all of them or only those whose inputs changed; as rows; and
-the circuit written out as code), and Icarus
+own LLVM, or the one on the PATH). The model runs it five ways (gates as
+entities, all of them or only those whose inputs changed; as rows; the
+gates written out as code; and the processor's Verilog written out
+word by word, examples/logic/words.py), and Icarus
 runs the same gates with a memory that answers alike, in a testbench
-made here. Every output of every cycle is to be the same in all five,
+made here. Every output of every cycle is to be the same in all six,
 up to the cycle the processor stops in, and so is what the program
 says; that is shown. With a number, no more than so many cycles.
 """
@@ -179,7 +180,12 @@ def main():
                    stdout=subprocess.DEVNULL)
     coded = build("cpu_coded.ent", os.path.join(RUN, "cpu_coded"),
                   ["-I", os.path.join(ROOT, "build", "logic", "code", "cpu")])
+    subprocess.run([sys.executable, os.path.join(LOGIC, "words.py"), "cpu"], check=True,
+                   stdout=subprocess.DEVNULL)
+    worded = build("cpu_coded.ent", os.path.join(RUN, "cpu_worded"),
+                   ["-I", os.path.join(ROOT, "build", "logic", "words", "cpu")])
     runs = [("as code", model(coded, image, cycles, 0, "coded")),
+            ("word by word", model(worded, image, cycles, 0, "worded")),
             ("as rows", model(program, image, cycles, 1, "rows")),
             ("as entities", model(program, image, cycles, 0, "entities")),
             ("as entities, by what changed", model(program, image, cycles, 2, "events"))]
