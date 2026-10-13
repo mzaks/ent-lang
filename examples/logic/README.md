@@ -69,10 +69,15 @@ all simulate the identical gates. Needs yosys, iverilog and verilator.
   be. As code that takes 3 seconds (196,000 cycles a second), as rows
   28, as entities 47, and 20 going through only the ANDs whose inputs
   changed: one in sixteen a cycle.
+- `bench/logic/cpu.py` holds Verilator's outputs for the processor
+  against the model's, cycle by cycle, for the gates and for the
+  processor's Verilog as written, before it times them: on the same
+  gates the model as code is 1.8 times as fast as Verilator; given the
+  Verilog as written, Verilator is 16 times as fast as that.
 - `bench/logic/run.py --check` holds Verilator's outputs against the
   model's before it times either.
 
 ## Still to come
 
-Going through the gates level by level on all the cores; the processor
-against Verilator; the timings written up.
+Going through the gates level by level on all the cores, and the
+timings of all of it in one place.

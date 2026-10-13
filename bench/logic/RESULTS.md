@@ -70,26 +70,36 @@ field of a unique is at a place the compiler knows, as a member of
 Verilator's struct is; and what is read only nearby need not be kept at
 all (1,977 of the 8,594 ANDs are fields).
 
-## 2026-10-13, later: a processor, and only the gates whose inputs changed
+## 2026-10-13, later: a processor, against Verilator
 
 PicoRV32 (`examples/logic/cpu.v`, 30,383 ANDs and 1,943 flip-flops)
 running Dhrystone to its end, 583,031 clock cycles, with its memory
-outside the circuit; one core (CPU 2), a native build, the whole run
-timed with its start (which is a few hundredths of a second). All ways
-give the same outputs in every cycle, which are Icarus Verilog's
-(`check/cpu.py`).
+outside the circuit. `python3 bench/logic/cpu.py`: one core (CPU 2),
+native builds, nothing written but a sum of the outputs, the whole run
+with its start, the least of three. Verilator has the same memory
+around the processor, in C++, and runs twice: the gates Yosys made of
+the processor, which are what the model runs, and the processor's
+Verilog as it was written. Before the timing, every output of every
+cycle and what the program says were the same in both of Verilator's
+runs and the model's (and they are Icarus Verilog's: `check/cpu.py`).
 
-| the gates | the run | a cycle | cycles a second |
-|---|---|---|---|
-| as code | 3.0 s | 5.1 us | 196,000 |
-| as entities, those whose inputs changed | 19.8 s | 33.9 us | 29,500 |
-| as rows | 28.3 s | 48.5 us | 20,600 |
-| as entities, all | 46.8 s | 80.3 us | 12,500 |
+| | the run | a cycle | cycles a second | built in |
+|---|---|---|---|---|
+| Verilator, the Verilog as written | 0.17 s | 0.29 us | 3,428,000 | 5 s |
+| the model, the gates as code | 2.63 s | 4.52 us | 221,000 | 8 s |
+| Verilator, the gates | 4.65 s | 7.98 us | 125,000 | 14 s |
+| the model, as entities, those whose inputs changed | 19.76 s | 33.90 us | 29,500 | |
+| the model, as rows | 28.63 s | 49.11 us | 20,400 | |
+| the model, as entities, all | 46.53 s | 79.81 us | 12,500 | |
 
-(As code and as rows were timed with the ordinary build of the check,
-not a native one, and the second line while writing the outputs to a
-file, 42 MB: each is a little worse than it would be.)
-
+- On the same gates the model as code is 1.8 times as fast as
+  Verilator, and builds in less time.
+- Given the Verilog as it was written, Verilator is 16 times as fast as
+  that again: it adds two 32-bit numbers with one instruction where the
+  gates take a few hundred ANDs, and it leaves out what a cycle does not
+  need. That is the number for somebody who has the Verilog; the gates
+  are what is left when all one has is a netlist, and what this model
+  is about.
 - Going through only the ANDs whose inputs changed (`events.ent`), an
   AND works itself out 1,935 times a cycle on average, of 30,383 ANDs:
   one in sixteen, in 17 rounds a cycle. That is 2.4 times faster than
@@ -105,5 +115,3 @@ file, 42 MB: each is a little worse than it would be.)
 - Before the compiler followed the log for a `for` that sends whole
   numbers (it went through every entity each round), the processor's
   cycle took 363 us this way.
-- Verilator has not been run on the processor yet: it needs the same
-  memory around it in C++.
