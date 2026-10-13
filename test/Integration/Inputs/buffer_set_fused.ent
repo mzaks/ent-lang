@@ -1,0 +1,27 @@
+import console
+
+// A system that only sets a row of a buffer, between systems that have
+// `for`s over entities: built for all the cores, the systems of a
+// schedule are put together where they can be, and this one cannot.
+component Thing { n: i32 } capacity 16
+buffer Kept { value: i32 } capacity 4
+unique Sum { all: i32 }
+
+system make() {
+  Kept = [{ value: 0 }; 4]
+  for i in 0..8 { spawn { Thing { n: i } } }
+}
+system grow() {
+  for t: mut Thing { t.n += 1 }
+}
+system keep() {
+  Kept[2].value = 7
+}
+system add() {
+  for t: Thing { Sum.all += t.n }
+}
+system say() {
+  put("{Sum.all} {Kept[2].value}")
+}
+schedule all() { make() grow() keep() add() say() }
+main { all() }

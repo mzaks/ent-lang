@@ -1,0 +1,8 @@
+// A system that sets a row of a buffer outside any `for`
+// (Inputs/buffer_set_fused.ent) is not put together with the systems
+// around it when a program is built for all the cores: it was, and what
+// it sets was then left as it stood in the program, which did not build.
+// RUN: %ent run %S/Inputs/buffer_set_fused.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/buffer_set_fused.ent 2>/dev/null | FileCheck %s
+
+// CHECK: 36 7

@@ -12461,7 +12461,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
               .walk([](Operation *op) {
                 return isa<WriteOp, SpawnOp, DespawnOp, LookupOp, ApplyOp,
                            AccumulateOp, EdgesOp, ConnectOp, AppendOp,
-                           ClearOp, BufferLenOp, BufferAtOp, BufferOfOp>(op)
+                           ClearOp, BufferLenOp, BufferAtOp, BufferOfOp,
+                           BufferSetOp, BufferFillOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
