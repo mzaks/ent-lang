@@ -143,16 +143,22 @@ fn open(networks: Networks, network: u8, daily: f32, lockdown: bool) -> f32 {
 }
 
 // At work and at school: along each tie that is met today, from either
-// end. (Both ends of a tie are of one network.)
+// end. (Both ends of a tie are of one network.) Nobody who is kept at
+// home goes there.
 system workplace() {
   let today = key(Run.seed, 0, Clock.day, MEETS)
-  for p: Person, i: Infectious, n: Work with Ill where i.rate > 0.0 {
+  for p: Person, i: Infectious, n: Work, q: Quarantine with Ill
+      where i.rate > 0.0 && q.until < Clock.day {
     let daily = open(Networks, n.network, Model.daily, Policy.lockdown)
-    for (p)-[w: WorksWith]->(o: mut Hazard) {
-      if met(today, w.key, daily) { o.left -= i.rate * Model.at_work }
+    for (p)-[w: WorksWith]->(o: mut Hazard, home: Quarantine) {
+      if home.until < Clock.day && met(today, w.key, daily) {
+        o.left -= i.rate * Model.at_work
+      }
     }
-    for (o: mut Hazard)-[w: WorksWith]->(p) {
-      if met(today, w.key, daily) { o.left -= i.rate * Model.at_work }
+    for (o: mut Hazard, home: Quarantine)-[w: WorksWith]->(p) {
+      if home.until < Clock.day && met(today, w.key, daily) {
+        o.left -= i.rate * Model.at_work
+      }
     }
   }
 }
@@ -170,8 +176,9 @@ fn locked(meets: i32, left: f32, seed: i64, id: i32, since: i32) -> i32 {
 // Where everybody's stubs start, in the order of the people, and how
 // many stubs there are: those of everybody who is up. (One after
 // another: where one's stubs start is how many those before have.)
-proc lay(chances: mut Chance, diseases: Disease, people: Person, order: mut Order,
-         index: mut Index, lockdown: bool, left: f32, seed: i64, since: i32) -> i32 {
+proc lay(chances: mut Chance, diseases: Disease, people: Person, homes: Quarantine,
+         order: mut Order, index: mut Index, lockdown: bool, left: f32, seed: i64,
+         since: i32, day: i32) -> i32 {
   order = []
   index = []
   var stubs = 0
@@ -181,7 +188,8 @@ proc lay(chances: mut Chance, diseases: Disease, people: Person, order: mut Orde
     let stage = diseases[e].stage
     var meets = 0
     if stage != Stage.Dead && stage != Stage.Hospitalised &&
-       stage != Stage.Critical && stage != Stage.Recovering {
+       stage != Stage.Critical && stage != Stage.Recovering &&
+       homes[e].until < day {
       meets = if lockdown { locked(c.meets, left, seed, people[e].id, since) }
               else { c.meets }
     }
@@ -200,8 +208,8 @@ proc lay(chances: mut Chance, diseases: Disease, people: Person, order: mut Orde
 
 // Today's stubs, and the order that pairs them.
 system pair() {
-  let stubs = lay(Chance, Disease, Person, Order, Index, Policy.lockdown,
-                  Model.lockdown_chance, Run.seed, Model.lockdown_from)
+  let stubs = lay(Chance, Disease, Person, Quarantine, Order, Index, Policy.lockdown,
+                  Model.lockdown_chance, Run.seed, Model.lockdown_from, Clock.day)
   let order = key(Run.seed, 0, Clock.day, PAIRS)
   Pairing.stubs = stubs
   Pairing.bits = bits_for(stubs)

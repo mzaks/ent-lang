@@ -50,6 +50,11 @@ SCENARIOS = {
     "chance-only": {"relative_transmission_household": "0",
                     "relative_transmission_occupation": "0"},
     "slow": {"infectious_rate": "3.5"},
+    # What is done besides (interventions.ent). Four in five of those
+    # with symptoms stay at home.
+    "isolation": {"self_quarantine_fraction": "0.8"},
+    # And they are tested.
+    "testing": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1"},
 }
 
 
@@ -97,7 +102,10 @@ def series(text):
     """Day by day, everybody infected so far and the dead."""
     lines = [line for line in text.split("\n") if line and not line.startswith("#")]
     rows = list(csv.DictReader(lines))
-    days = {int(row["time"]): (int(row["total_infected"]), int(row["n_death"]))
+    days = {int(row["time"]): (int(row["total_infected"]), int(row["n_death"]),
+                               int(row.get("n_quarantine", 0)),
+                               int(row.get("total_case", 0)),
+                               int(row.get("n_tests", 0)))
             for row in rows}
     return days
 
@@ -152,7 +160,20 @@ def daily(days, last, seeded):
                  round(10 * (reached(10000) - reached(1000))) / 10,
                  "peak day": peak + 1, "peak height": new[peak],
                  "infected in all": total(last),
-                 "dead": days[max(days)][1]}
+                 "dead": days[max(days)][1],
+                 "most kept at home on a day": max(row[2] for row in days.values()),
+                 # (To day 100: a run of the model ends with the epidemic,
+                 # and the reference goes on keeping those at home who
+                 # have symptoms of something else.)
+                 "days kept at home, to day 100":
+                 sum(row[2] for day, row in days.items() if day <= 100),
+                 # (For each who was infected by then: not moved by when
+                 # the epidemic took off.)
+                 "days kept at home for one infected, to day 100":
+                 round(sum(row[2] for day, row in days.items() if day <= 100) /
+                       max(1, total(100)), 3),
+                 "found by a test": days[max(days)][3],
+                 "tests": sum(row[4] for day, row in days.items() if day <= 100)}
 
 
 def percentile(values, part):
@@ -206,7 +227,9 @@ def main():
         print(f"  day {day}: {median:.0f}, reference {low:.0f} to {high:.0f}")
     failed += 1 if outside else 0
     for what in ("days from 1000 infected to 10000", "peak day", "peak height",
-                 "infected in all", "dead"):
+                 "infected in all", "dead", "most kept at home on a day",
+                 "days kept at home, to day 100",
+                 "days kept at home for one infected, to day 100", "found by a test", "tests"):
         a = [numbers[what] for _, numbers in reference_runs]
         b = [numbers[what] for _, numbers in model_runs]
         distance, allowed = kolmogorov_smirnov(a, b)

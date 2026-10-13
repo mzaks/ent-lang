@@ -20,6 +20,7 @@ import parameters
 import disease
 import city
 import transmission
+import interventions
 
 capacity Person 100000
 capacity Household 100000
@@ -36,18 +37,21 @@ world {
 }
 
 // The reference's names for its own columns of these, and its counts:
-// everybody infected so far, and those with symptoms mild or severe as
-// one. (A line the console takes has 126 bytes: those names just fit.)
+// everybody infected so far, those a test found, those kept at home, the
+// day's results of tests, and those with symptoms mild or severe as one. (A line the console takes has 126 bytes: those
+// names just fit, with those in intensive care and those getting better
+// in hospital left out.)
 system heading() {
-  put("time,total_infected,n_presymptom,n_asymptom,n_symptoms,n_hospital,n_critical,n_hospitalised_recovering,n_death,n_recovered")
+  put("time,total_infected,total_case,n_presymptom,n_asymptom,n_quarantine,n_tests,n_symptoms,n_hospital,n_death,n_recovered")
 }
 
 system report() {
-  put("{Clock.day},{Run.people - Tally.susceptible},{Tally.presymptomatic},{Tally.asymptomatic},{Tally.mild + Tally.severe},{Tally.hospitalised},{Tally.critical},{Tally.recovering},{Tally.dead},{Tally.recovered}")
+  put("{Clock.day},{Run.people - Tally.susceptible},{Kept.found},{Tally.presymptomatic},{Tally.asymptomatic},{Kept.home},{Kept.results},{Tally.mild + Tally.severe},{Tally.hospitalised},{Tally.dead},{Tally.recovered}")
 }
 
 schedule setup() {
   parameters()
+  measures()
   panel()
   households()
   settle()
@@ -73,7 +77,10 @@ schedule day() {
   chance()
   infect()
   progress()
+  symptoms()
+  tests()
   tally()
+  counts()
   report()
 }
 

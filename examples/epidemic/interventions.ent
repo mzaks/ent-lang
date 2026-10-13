@@ -1,0 +1,246 @@
+// What is done about the illness beyond a lockdown, as OpenABM-Covid19
+// does it: who has symptoms stays at home and is tested.
+//
+//   schedule setup() { .. parameters() .. measures() }
+//   schedule day() { .. infect()  progress()  symptoms()  tests()  tally()  counts() }
+//
+// Whoever gets symptoms, of this illness or of another (so many of
+// everybody a day, `Measures.others`), stays at home if they are of the
+// part that does (`Measures.stays`, by their `Conduct`) or are kept
+// there already: for `Measures.home_days` days, or fewer, since each day
+// some give up (`Measures.gives_up`). At home they meet their household
+// and nobody else (transmission.ent). They are then somebody others are
+// told about (`Source`) for `Measures.told_days` days, and nothing more
+// happens for their symptoms in that time. Who goes to hospital is not
+// kept at home any more.
+//
+// Where those with symptoms are tested (`Measures.tested`, or from a day
+// to a day), a part of them asks for a test (`Measures.takers`), takes it
+// some days later and has the result some days after that. A test finds
+// most who were infected long enough ago and not too long
+// (`Measures.sensitivity`), and by mistake a few of everybody else. Whom
+// it finds stays at home for longer, counted from when they were first
+// one that others are told about; whom it does not find is no such one
+// any more and need not stay. Whoever goes to hospital is tested that
+// day, and is taken for found ill at once.
+import files
+import math
+import random
+import parameters
+import disease
+import city
+
+const OTHER = 16
+const HOME = 17
+const TEST = 18
+const FOUND = 19
+
+// `from`: the first day anything is done. `stays`: the part of those
+//   with symptoms that stays at home; `home_days`, `gives_up`: for how
+//   long at most, and the part that gives up each day.
+// `others`: the part of everybody that has symptoms of something else on
+//   a day. `told_days`: for how long somebody with symptoms is one that
+//   others are told about.
+// `tested`: whether those with symptoms are tested, or from `tests_from`
+//   to before `tests_to`; `takers`: the part of them that asks for it;
+//   `order_wait`, `result_wait`: the days to the test and from it to the
+//   result.
+// `too_early`, `too_late`: a test finds who was infected at least so
+//   many days ago (or has symptoms) and fewer than so many, a part
+//   `sensitivity` of them; of the others it leaves out `specificity`.
+// `lets_go`: whether who is not found need not stay at home.
+// `at_hospital`: whether who goes to hospital is taken for found.
+// `found_stays`, `found_days`, `found_gives_up`: staying at home for who
+//   is found; `found_told_days`: for how long they are one that others
+//   are told about.
+unique Measures {
+  from: i32, stays: f32, home_days: i32, gives_up: f32, others: f32,
+  told_days: i32,
+  tested: bool, tests_from: i32, tests_to: i32, takers: f32,
+  order_wait: i32, result_wait: i32, too_early: i32, too_late: i32,
+  sensitivity: f32, specificity: f32, lets_go: bool, at_hospital: bool,
+  found_stays: f32, found_days: i32, found_gives_up: f32, found_told_days: i32
+}
+
+// How many are kept at home when the day is over, how many results of
+// tests came today, and how many were found ill by one so far.
+unique Kept { home: i32, results: i32, found: i32 }
+
+world {
+  Measures.from = 0
+  Measures.stays = 0.0
+  Measures.home_days = 7
+  Measures.gives_up = 0.02
+  Measures.others = 0.002
+  Measures.told_days = 14
+  Measures.tested = false
+  Measures.tests_from = 10000
+  Measures.tests_to = 10000
+  Measures.takers = 0.8
+  Measures.order_wait = 1
+  Measures.result_wait = 1
+  Measures.too_early = 3
+  Measures.too_late = 14
+  Measures.sensitivity = 0.8
+  Measures.specificity = 0.999
+  Measures.lets_go = true
+  Measures.at_hospital = true
+  Measures.found_stays = 1.0
+  Measures.found_days = 14
+  Measures.found_gives_up = 0.01
+  Measures.found_told_days = 14
+}
+
+// The reference's numbers for these, from its file if there is one
+// (after `parameters`, which says so).
+system measures() {
+  if Model.read {
+    read_file(Model.file, Bytes)
+    let line = max(1, Model.line)
+    Measures.from = number(Bytes, "intervention_start_time", line,
+                           Measures.from as f64) as i32
+    Measures.stays = number(Bytes, "self_quarantine_fraction", line,
+                            Measures.stays as f64) as f32
+    Measures.home_days = number(Bytes, "quarantine_length_self", line,
+                                Measures.home_days as f64) as i32
+    Measures.gives_up = number(Bytes, "quarantine_dropout_self", line,
+                               Measures.gives_up as f64) as f32
+    Measures.others = number(Bytes, "daily_non_cov_symptoms_rate", line,
+                             Measures.others as f64) as f32
+    Measures.told_days = number(Bytes, "quarantine_length_traced_symptoms", line,
+                                Measures.told_days as f64) as i32
+    Measures.tested = number(Bytes, "test_on_symptoms", line, 0.0) != 0.0
+    Measures.tests_from = number(Bytes, "testing_symptoms_time_on", line,
+                                 Measures.tests_from as f64) as i32
+    Measures.tests_to = number(Bytes, "testing_symptoms_time_off", line,
+                               Measures.tests_to as f64) as i32
+    Measures.takers = number(Bytes, "test_on_symptoms_compliance", line,
+                             Measures.takers as f64) as f32
+    Measures.order_wait = number(Bytes, "test_order_wait", line,
+                                 Measures.order_wait as f64) as i32
+    Measures.result_wait = number(Bytes, "test_result_wait", line,
+                                  Measures.result_wait as f64) as i32
+    Measures.too_early = number(Bytes, "test_insensitive_period", line,
+                                Measures.too_early as f64) as i32
+    Measures.too_late = number(Bytes, "test_sensitive_period", line,
+                               Measures.too_late as f64) as i32
+    Measures.sensitivity = number(Bytes, "test_sensitivity", line,
+                                  Measures.sensitivity as f64) as f32
+    Measures.specificity = number(Bytes, "test_specificity", line,
+                                  Measures.specificity as f64) as f32
+    Measures.lets_go = number(Bytes, "test_release_on_negative", line, 1.0) != 0.0
+    Measures.at_hospital = number(Bytes, "allow_clinical_diagnosis", line, 1.0) != 0.0
+    Measures.found_stays = number(Bytes, "quarantine_compliance_positive", line,
+                                  Measures.found_stays as f64) as f32
+    Measures.found_days = number(Bytes, "quarantine_length_positive", line,
+                                 Measures.found_days as f64) as i32
+    Measures.found_gives_up = number(Bytes, "quarantine_dropout_positive", line,
+                                     Measures.found_gives_up as f64) as f32
+    Measures.found_told_days = number(Bytes, "quarantine_length_traced_positive", line,
+                                      Measures.found_told_days as f64) as i32
+    Bytes = []
+  }
+}
+
+// For how many days somebody stays at home who gives up with this
+// chance each day, the first included, and stays `most` at most.
+fn stay(key: u64, gives_up: f64, most: i32) -> i32 {
+  if gives_up <= 0.0 { most }
+  else {
+    let days = floor64(log64(uniform(key, 0)) / log64(1.0 - gives_up))
+    if days < most as f64 { days as i32 } else { most }
+  }
+}
+
+fn in_hospital(stage: Stage) -> bool {
+  stage == Stage.Hospitalised || stage == Stage.Critical || stage == Stage.Recovering
+}
+
+// Who has symptoms today: those whose illness shows from today on, and
+// some of everybody else who is up. And who goes to hospital today.
+system symptoms() {
+  let tested = Measures.tested ||
+               (Clock.day >= Measures.tests_from && Clock.day < Measures.tests_to)
+  for p: Person, d: Disease, c: Conduct, q: mut Quarantine, s: mut Source, t: mut Test
+      where Clock.day >= Measures.from {
+    let fresh = d.since == Clock.day &&
+                (d.stage == Stage.Mild || d.stage == Stage.Severe)
+    if fresh { t.symptoms = Clock.day }
+    let up = d.stage != Stage.Dead && !in_hospital(d.stage)
+    let other = up && uniform(key(Run.seed, p.id, Clock.day, OTHER), 0) <
+                      1.0 - exp64(0.0 - Measures.others as f64)
+    if (fresh || other) && s.until < Clock.day {
+      if q.until >= Clock.day || c.compliance < Measures.stays {
+        s.since = Clock.day
+        s.until = Clock.day + Measures.told_days
+        s.positive = false
+        let until = Clock.day + stay(key(Run.seed, p.id, Clock.day, HOME),
+                                     Measures.gives_up as f64, Measures.home_days)
+        if until > q.until { q.until = until }
+      }
+      if tested && c.compliance < Measures.takers &&
+         t.take == 0 && t.result == 0 && !t.found {
+        t.take = Clock.day + Measures.order_wait
+      }
+    }
+    if d.stage == Stage.Hospitalised && d.since == Clock.day {
+      q.until = 0
+      if t.take == 0 && t.result == 0 && !t.found {
+        t.take = Clock.day
+        if Measures.at_hospital {
+          if s.until < Clock.day { s.since = Clock.day }
+          s.positive = true
+          s.until = s.since + Measures.found_told_days
+        }
+      }
+    }
+  }
+}
+
+// The tests taken today, and the results that come today.
+system tests() {
+  Kept.results = 0
+  for p: Person, d: Disease, c: Conduct, q: mut Quarantine, s: mut Source, t: mut Test
+      where t.take == Clock.day || t.result == Clock.day {
+    if t.take == Clock.day {
+      let k = key(Run.seed, p.id, Clock.day, TEST)
+      let since = Clock.day - d.infected
+      let shows = t.symptoms > 0 && t.symptoms >= Clock.day - Measures.too_late
+      let findable = d.path != Path.None && (shows || since >= Measures.too_early) &&
+                     since < Measures.too_late
+      t.positive = uniform(k, 0) < if findable { Measures.sensitivity as f64 }
+                                   else { 1.0 - Measures.specificity as f64 }
+      t.take = 0
+      t.result = Clock.day + Measures.result_wait
+    }
+    if t.result == Clock.day {
+      Kept.results += 1
+      t.result = 0
+      if t.positive {
+        if !t.found {
+          t.found = true
+          Kept.found += 1
+        }
+        if !in_hospital(d.stage) || !Measures.at_hospital {
+          if s.until < Clock.day { s.since = Clock.day }
+          s.positive = true
+          s.until = s.since + Measures.found_told_days
+          if c.compliance < Measures.found_stays {
+            let until = s.since + stay(key(Run.seed, p.id, Clock.day, FOUND),
+                                       Measures.found_gives_up as f64,
+                                       Measures.found_days)
+            if until > Clock.day && until > q.until { q.until = until }
+          }
+        }
+      } else if Measures.lets_go && s.until >= Clock.day {
+        s.until = 0
+        q.until = 0
+      }
+    }
+  }
+}
+
+system counts() {
+  Kept.home = 0
+  for q: Quarantine where q.until > Clock.day { Kept.home += 1 }
+}
