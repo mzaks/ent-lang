@@ -3,8 +3,8 @@
 // the order of their levels by a proc. What a program in C would do:
 // held beside the model to say what the entities cost.
 //
-//   schedule setup() { netlist()  levels()  build()  plan()  rows() }
-//   schedule cycle() { set()  settle()  shown()  noted()  stepped()  tick() }
+//   schedule setup() { netlist()  levels()  plan()  pins()  rows() }
+//   schedule cycle() { draw()  set()  settle()  shown()  noted()  stepped()  note()  tick() }
 import files
 import circuit
 import logic
@@ -34,7 +34,7 @@ fn taken(wires: Wires, name: i32) -> u64 {
 }
 
 system set() {
-  for i in 0..len(Ins) { Wires[Ins[i].number].bits = drawn(Run.seed, i, Run.cycle) }
+  for i in 0..len(Ins) { Wires[Ins[i].number].bits = Stim[i].bits }
 }
 
 proc and_all(steps: Steps, wires: mut Wires) {
@@ -48,19 +48,7 @@ system settle() {
 }
 
 system shown() {
-  for i in 0..len(Outs) {
-    let bits = taken(Wires, Outs[i].shown)
-    Run.sum = mix(Run.sum ^ bits)
-    if Run.shown { Bytes += { value: (48 + (bits & 1)) as u8 } }
-  }
-  if Run.shown {
-    Bytes += { value: 10 }
-    if len(Bytes) + len(Outs) + 1 > 1000000 {
-      write_bytes("outputs.txt", Bytes, 0, len(Bytes), Run.written)
-      Run.written = true
-      Bytes = []
-    }
-  }
+  for i in 0..len(Outs) { Seen[i].bits = taken(Wires, Outs[i].shown) }
 }
 
 system noted() {

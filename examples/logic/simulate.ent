@@ -27,6 +27,8 @@ capacity Starts 100000
 capacity Wires 1000001
 capacity Steps 1000000
 capacity Kept 1000000
+capacity Stim 100000
+capacity Seen 100000
 
 world {
   Circuit.file = "circuit.aag"
@@ -40,9 +42,10 @@ system said() {
   }
 }
 
-schedule setup() { netlist() levels() build() said() plan() rows() }
+schedule setup() { netlist() levels() build() said() plan() pins() rows() }
 // (A cycle the way `Run.way` says: the gates as entities, or as rows.)
 schedule cycle() {
+  draw()
   stimulus() run_if Run.way == 0
   gates() run_if Run.way == 0
   show() run_if Run.way == 0
@@ -53,6 +56,7 @@ schedule cycle() {
   shown() run_if Run.way == 1
   noted() run_if Run.way == 1
   stepped() run_if Run.way == 1
+  note()
   tick()
 }
 schedule done() { finish() }

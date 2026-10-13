@@ -13,8 +13,11 @@ as many, and a cycle's time is what the longer run took more, shared
 among the cycles it had more: reading the circuit and starting up are
 not in it. One core, CPU 2 (a fast one), native builds of both.
 
-The model is timed both ways it can go through the gates: as entities
-by their level, and as rows of buffers (examples/logic/plain.ent).
+The model is timed three ways: the gates as entities gone through by
+their level, as rows of buffers (examples/logic/plain.ent), and written
+out as ent-lang code that is compiled with the program
+(examples/logic/compile.py, coded.ent), which is what Verilator does with
+a circuit; how long each of the two took to build is said too.
 Verilator simulates one run of the circuit, the model 64 side by side:
 said are a cycle's time for each, and how many gates a second that is
 (for the model with its 64 runs counted, too).
@@ -101,6 +104,8 @@ def verilator(name):
     declared, clock = equal.ports(name)
     folder = os.path.join(BENCH, "verilator_" + name)
     built = os.path.join(folder, "obj_dir", "Vwrap")
+    # (Built anew each time, so that how long it takes can be said.)
+    shutil.rmtree(os.path.join(folder, "obj_dir"), ignore_errors=True)
     os.makedirs(folder, exist_ok=True)
     quoted = lambda p: p if re.fullmatch(r"\w+", p) else "\\" + p + " "
     widths = {}
@@ -152,6 +157,28 @@ def model():
     return built
 
 
+def code(name):
+    """The circuit written out as ent-lang code and built
+    (examples/logic/compile.py, coded.ent); and how long the build took."""
+    subprocess.run([sys.executable, os.path.join(ROOT, "examples", "logic", "compile.py"),
+                    name], check=True, stdout=subprocess.DEVNULL)
+    built = os.path.join(BENCH, "coded_" + name)
+    environment = dict(os.environ)
+    environment.setdefault("ENT_BIN", os.path.join(ROOT, "build", "bin"))
+    environment.setdefault("ENT_CFLAGS", "-march=native")
+    # (Not taken from the cache of builds: the time is the build's.)
+    environment["ENT_CACHE"] = os.path.join(BENCH, "no_cache_" + name)
+    shutil.rmtree(environment["ENT_CACHE"], ignore_errors=True)
+    started = time.time()
+    subprocess.run(
+        [sys.executable, os.path.join(ROOT, "tools", "ent"), "build",
+         "-I", os.path.join(ROOT, "examples", "logic"),
+         "-I", os.path.join(ROOT, "build", "logic", "code", name),
+         os.path.join(ROOT, "examples", "logic", "coded.ent"), "-o", built],
+        check=True, env=environment)
+    return built, time.time() - started
+
+
 def seconds(command, folder):
     started = time.time()
     subprocess.run(["taskset", "-c", "2"] + command, check=True, cwd=folder,
@@ -177,22 +204,25 @@ def main():
         ["c6288", "s38584", "hyp", "mem_ctrl"]
     os.makedirs(BENCH, exist_ok=True)
     simulate = model()
-    print("| circuit | ANDs | Verilator, a cycle | as entities | as rows | "
-          "gates a second: Verilator | as entities | as rows | "
-          "with 64 runs: as entities | as rows |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("| circuit | ANDs | Verilator, a cycle | as code | as rows | as entities | "
+          "gates a second: Verilator | as code | as code, 64 runs | "
+          "built: Verilator | as code |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     for name in names:
         folder = os.path.join(BENCH, "model_" + name)
         os.makedirs(folder, exist_ok=True)
         shutil.copy(os.path.join(CIRCUITS, name + ".aag"), os.path.join(folder, "circuit.aag"))
         with open(os.path.join(folder, "circuit.aag")) as file:
             gates = int(file.readline().split()[5])
+        started = time.time()
         reference = verilator(name)
+        their_build = time.time() - started
+        fast, my_build = code(name)
 
-        def ours(cycles, shown=0, way=0):
+        def ours(cycles, shown=0, way=0, program=None):
             with open(os.path.join(folder, "run.txt"), "w") as file:
                 file.write(f"{cycles} 1 {shown} {way}\n")
-            return seconds([simulate], folder)
+            return seconds([program or simulate], folder)
 
         if "--check" in arguments:
             ours(1000, 1)
@@ -201,13 +231,17 @@ def main():
                                  capture_output=True, text=True).stdout
             if wanted != got:
                 sys.exit(f"{name}: Verilator's outputs are not the model's")
+            ours(1000, 1, 0, fast)
+            if wanted != open(os.path.join(folder, "outputs.txt")).read():
+                sys.exit(f"{name}: as code, the outputs are not the model's")
         theirs = a_cycle(lambda cycles: seconds([reference, str(cycles)], folder))
         mine = a_cycle(ours)
         plain = a_cycle(lambda cycles: ours(cycles, 0, 1))
-        print(f"| {name} | {gates} | {1e6 * theirs:.2f} us | {1e6 * mine:.2f} us | "
-              f"{1e6 * plain:.2f} us | {gates / theirs / 1e6:.0f} M | "
-              f"{gates / mine / 1e6:.0f} M | {gates / plain / 1e6:.0f} M | "
-              f"{64 * gates / mine / 1e6:.0f} M | {64 * gates / plain / 1e6:.0f} M |",
+        coded = a_cycle(lambda cycles: ours(cycles, 0, 0, fast))
+        print(f"| {name} | {gates} | {1e6 * theirs:.2f} us | {1e6 * coded:.2f} us | "
+              f"{1e6 * plain:.2f} us | {1e6 * mine:.2f} us | "
+              f"{gates / theirs / 1e6:.0f} M | {gates / coded / 1e6:.0f} M | "
+              f"{64 * gates / coded / 1e6:.0f} M | {their_build:.0f} s | {my_build:.0f} s |",
               flush=True)
     return 0
 

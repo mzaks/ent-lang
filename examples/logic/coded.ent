@@ -1,0 +1,37 @@
+// Runs a circuit that was written out as code (examples/logic/compile.py
+// makes the module `netcode` of a prepared circuit): the ANDs are lines
+// of a program and no rows of a table, so the compiler has the whole
+// circuit before it, as Verilator has. The circuit's part of a clock
+// cycle is that module's `net()`, and nothing of the circuit is read
+// when the program runs. "run.txt" where it is started says the cycles and the
+// seed, and whether the outputs are written.
+//
+//   examples/logic/prepare.py c6288 && examples/logic/compile.py c6288
+//   cd build/logic/run
+//   ../../../tools/ent run -I ../code/c6288 ../../../examples/logic/coded.ent
+import files
+import console
+import circuit
+import logic
+import netcode
+
+capacity Bytes 1100000
+capacity Stim 100000
+capacity Seen 100000
+// (No circuit is read here: circuit.ent's entities are not made.)
+capacity Signal 16
+
+schedule setup() { plan() sized() pins() }
+schedule before() { draw() }
+schedule after() { note() tick() }
+schedule done() { finish() }
+
+main {
+  setup()
+  loop {
+    before()
+    net()
+    after()
+  } until Run.cycle >= Run.cycles
+  done()
+}

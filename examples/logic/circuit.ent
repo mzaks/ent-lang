@@ -64,6 +64,13 @@ fn number(bytes: Bytes, at: i32) -> (i32, i32) {
   (value, from)
 }
 
+// Whether there is another number at or after `at`.
+fn more(bytes: Bytes, at: i32) -> bool {
+  var from = at
+  while from < len(bytes) && !digit(bytes[from].value) { from += 1 }
+  from < len(bytes)
+}
+
 system netlist() {
   Ins = []
   Flops = []

@@ -5,8 +5,9 @@ clock cycle by clock cycle, and gives the bits that
 [Icarus Verilog](https://github.com/steveicarus/iverilog) gives for the
 same gates and inputs; its speed is held against
 [Verilator](https://www.veripool.org/verilator/). It is being built in
-steps; what is here reads a circuit, runs it two ways, and is checked on
-49 circuits.
+steps; what is here reads a circuit, runs it three ways, and is checked
+on 49 circuits. Written out as code and compiled, a circuit runs faster
+than under Verilator on three of four (`bench/logic/RESULTS.md`).
 
 - `circuit.ent`: the circuit from its file, an and-inverter graph in the
   ASCII AIGER form (two-input ANDs, inverters on the wires, flip-flops on
@@ -19,7 +20,11 @@ steps; what is here reads a circuit, runs it two ways, and is checked on
   which are worked out from the seed, the input and the cycle.
 - `plain.ent`: the same circuit without entities, as rows of buffers
   gone through by a proc: what the entities cost is the difference.
-- `simulate.ent`: the program. It reads "circuit.aag" and "run.txt"
+- `compile.py` and `coded.ent`: the circuit written out as ent-lang
+  code, every AND a line (a field of one unique where it is read far
+  off, else a `let`), and compiled with the program: what Verilator does
+  with a circuit.
+- `simulate.ent`: the program for the first two ways. It reads "circuit.aag" and "run.txt"
   (cycles, seed, whether to write outputs, which way) where it is
   started, and writes "outputs.txt", a line of 0s and 1s a cycle.
 
@@ -45,6 +50,8 @@ all simulate the identical gates. Needs yosys, iverilog and verilator.
   for the first of the 64 runs, whose inputs a testbench made by the
   script gives to Icarus: over 10,000 cycles for 43 circuits, and over
   200 for the six deep arithmetic ones, where Icarus takes minutes.
+- `check/agree.py`: the three ways give the same outputs, and the same
+  number made of all outputs of all 64 runs, on every circuit.
 - `bench/logic/run.py --check` holds Verilator's outputs against the
   model's before it times either.
 

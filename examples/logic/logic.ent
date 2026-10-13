@@ -1,7 +1,9 @@
 // A circuit run clock cycle by clock cycle (circuit.ent has the circuit).
 //
-//   schedule setup() { netlist()  levels()  build()  plan() }
-//   schedule cycle() { stimulus()  gates()  show()  latch()  edge()  tick() }
+//   schedule setup() { netlist()  levels()  build()  plan()  pins() }
+//   schedule cycle() {
+//     draw()  stimulus()  gates()  show()  latch()  edge()  note()  tick()
+//   }
 //   schedule done()  { finish() }
 //
 // In a cycle the inputs get their values, the ANDs are worked out so
@@ -12,14 +14,19 @@
 //
 // A value is 64 bits: 64 runs of the circuit side by side, each with
 // inputs of its own, and an AND of two values is the AND of all 64 at
-// once. What an input is in a cycle is worked out from the seed, which
-// input it is and the cycle (`drawn`), so nothing of it is kept and the
-// same can be written down for another simulator (check/equal.py).
+// once.
 //
-// The outputs of the first of the 64 runs are written to the file
+// What the inputs are in a cycle stands in the buffer `Stim`, a row an
+// input, and what the outputs are is put into `Seen`, a row an output:
+// whoever is around the circuit fills the one and reads the other. Here
+// `draw` fills `Stim` with what is worked out from the seed, which input
+// it is and the cycle (`drawn`), so nothing of it is kept and the same
+// can be written down for another simulator (check/equal.py); and `note`
+// writes the outputs of the first of the 64 runs to the file
 // "outputs.txt", a line of 0s and 1s for each cycle, where `Run.shown`
-// says so; a number made of all outputs of all runs and cycles is kept
-// in `Run.sum` either way.
+// says so, and keeps a number made of all outputs of all runs and cycles
+// in `Run.sum` either way. (bus.ent is another around a circuit: a
+// processor's memory.)
 //
 // A file "run.txt" where the program is started says how many cycles and
 // the seed, two whole numbers, and with a third, 0, that no outputs are
@@ -35,6 +42,10 @@ import circuit
 unique Run {
   cycles: i32, seed: i64, shown: bool, cycle: i32, sum: u64, written: bool, way: i32
 }
+
+// The inputs' values of the cycle, and the outputs'.
+buffer Stim { bits: u64 } capacity 16
+buffer Seen { bits: u64 } capacity 16
 
 world {
   Run.cycles = 1000
@@ -65,10 +76,10 @@ system plan() {
     Run.seed = seed as i64
     // (A third number, 0, for a run that writes no outputs.)
     let (shown, last) = number(Bytes, after)
-    if last > after { Run.shown = shown != 0 }
+    if more(Bytes, after) { Run.shown = shown != 0 }
     // (And a fourth: which way the gates are gone through.)
     let (way, end) = number(Bytes, last)
-    if end > last { Run.way = way }
+    if more(Bytes, last) { Run.way = way }
   }
   Bytes = []
   Run.cycle = 0
@@ -76,9 +87,21 @@ system plan() {
   Run.written = false
 }
 
+// A row for each input and each output.
+system pins() {
+  Stim = []
+  Seen = []
+  for i in 0..Circuit.inputs { Stim += { bits: 0 } }
+  for i in 0..Circuit.outputs { Seen += { bits: 0 } }
+}
+
+system draw() {
+  for i in 0..len(Stim) { Stim[i].bits = drawn(Run.seed, i, Run.cycle) }
+}
+
 system stimulus() {
   for i: Input, v: mut Value where i.index >= 0 {
-    v.bits = drawn(Run.seed, i.index, Run.cycle)
+    v.bits = Stim[i.index].bits
   }
 }
 
@@ -94,19 +117,25 @@ system gates() {
   }
 }
 
-// The outputs as they stand: into the sum, and the first run's as a line.
+// The outputs as they stand.
 system show() {
   for i in 0..len(Outs) {
     if let bits = Value(Outs[i].who).bits {
-      let shown = side(bits, Outs[i].shown % 2 == 1)
-      Run.sum = mix(Run.sum ^ shown)
-      if Run.shown { Bytes += { value: (48 + (shown & 1)) as u8 } }
+      Seen[i].bits = side(bits, Outs[i].shown % 2 == 1)
     }
+  }
+}
+
+// The outputs into the sum, and the first run's as a line.
+system note() {
+  for i in 0..len(Seen) {
+    Run.sum = mix(Run.sum ^ Seen[i].bits)
+    if Run.shown { Bytes += { value: (48 + (Seen[i].bits & 1)) as u8 } }
   }
   if Run.shown {
     Bytes += { value: 10 }
     // (Written out before there is no more room for a cycle's line.)
-    if len(Bytes) + len(Outs) + 1 > 1000000 {
+    if len(Bytes) + len(Seen) + 1 > 1000000 {
       write_bytes("outputs.txt", Bytes, 0, len(Bytes), Run.written)
       Run.written = true
       Bytes = []

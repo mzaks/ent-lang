@@ -5,7 +5,8 @@
   examples/logic/prepare.py c17 s27 hyp ...    or: prepare.py all
 
 For each circuit named (a file of Verilog among those fetched: ISCAS-85,
-ISCAS-89, the EPFL suite) Yosys reads it, makes it flat, turns it into
+ISCAS-89, the EPFL suite; and `cpu`, the PicoRV32 processor inside
+examples/logic/cpu.v) Yosys reads it, makes it flat, turns it into
 two-input ANDs and inverters with its flip-flops, all starting at 0, and
 writes into build/logic/circuits:
 
@@ -37,15 +38,22 @@ def found():
         for file in files:
             if file.endswith(".v"):
                 circuits.setdefault(file[:-2], os.path.join(folder, file))
+    # The processor: PicoRV32 inside the module that brings out its bus.
+    core = os.path.join(SOURCES, "picorv32", "picorv32.v")
+    if os.path.isfile(core):
+        circuits = {name: file for name, file in circuits.items()
+                    if os.sep + "picorv32" + os.sep not in file}
+        circuits["cpu"] = os.path.join(HERE, "cpu.v") + " " + core
     return circuits
 
 
 def prepare(name, source):
     aag = os.path.join(OUT, name + ".aag")
     verilog = os.path.join(OUT, name + ".v")
+    top = "-top cpu" if name == "cpu" else "-auto-top"
     script = f"""
         read_verilog {source}
-        hierarchy -auto-top
+        hierarchy {top}
         proc; flatten; memory_map; opt -full
         techmap; opt -full
         async2sync; dffunmap
