@@ -168,8 +168,9 @@ fn locked(meets: i32, left: f32, seed: i64, id: i32, since: i32) -> i32 {
 }
 
 // Where everybody's stubs start, in the order of the people, and how
-// many stubs there are: those of everybody who is up.
-proc lay(chances: Chance, diseases: Disease, people: Person, order: mut Order,
+// many stubs there are: those of everybody who is up. (One after
+// another: where one's stubs start is how many those before have.)
+proc lay(chances: mut Chance, diseases: Disease, people: Person, order: mut Order,
          index: mut Index, lockdown: bool, left: f32, seed: i64, since: i32) -> i32 {
   order = []
   index = []
@@ -185,6 +186,8 @@ proc lay(chances: Chance, diseases: Disease, people: Person, order: mut Order,
               else { c.meets }
     }
     order += { who: e, first: stubs }
+    chances[e].first = stubs
+    chances[e].today = meets
     stubs += meets
     while next < stubs {
       index += { row: row }
@@ -226,29 +229,22 @@ fn owner(order: Order, index: Index, at: i32) -> i32 {
 // stub next to it in today's order (the one before it if it comes at an
 // odd place of the order, else the one after), and whose that is. (Two
 // stubs of one person are no meeting, and the last of an odd number of
-// stubs has none.)
-proc meet(order: Order, index: Index, rates: Infectious, hazards: mut Hazard, counts: f32,
-          stubs: i32, bits: i32, a: u64, b: u64, c: u64, d: u64, back_a: u64,
-          back_b: u64, back_c: u64) {
-  for row in 0..len(order) {
-    let rate = rates[order[row].who].rate
-    if rate > 0.0 {
-      let end = if row + 1 < len(order) { order[row + 1].first } else { stubs }
-      for stub in order[row].first..end {
-        let other = found(stub, stubs, bits, back_a, back_b, back_c, d) ^ 1
-        if other < stubs {
-          let whose = owner(order, index, place(other, stubs, bits, a, b, c, d))
-          if whose != row { hazards[order[whose].who].left -= rate * counts }
-        }
+// stubs has none.) What is sent from the loop over one's stubs lands
+// when everybody has sent, in the order of the people and of their
+// stubs, on however many threads.
+system chance() {
+  for me, i: Infectious, c: Chance with Ill where i.rate > 0.0 {
+    for stub in c.first..c.first + c.today {
+      let other = found(stub, Pairing.stubs, Pairing.bits, Pairing.back_a,
+                        Pairing.back_b, Pairing.back_c, Pairing.d) ^ 1
+      if other < Pairing.stubs {
+        let who = Order[owner(Order, Index,
+                              place(other, Pairing.stubs, Pairing.bits, Pairing.a,
+                                    Pairing.b, Pairing.c, Pairing.d))].who
+        if who != me { Hazard(who).left -= i.rate * Model.by_chance }
       }
     }
   }
-}
-
-system chance() {
-  meet(Order, Index, Infectious, Hazard, Model.by_chance, Pairing.stubs, Pairing.bits,
-       Pairing.a, Pairing.b, Pairing.c, Pairing.d, Pairing.back_a, Pairing.back_b,
-       Pairing.back_c)
 }
 
 // Whoever has no hazard left falls ill today.

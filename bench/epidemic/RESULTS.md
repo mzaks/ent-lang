@@ -3,6 +3,56 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-13, later: sums each thread for itself, and the meetings by chance on all the cores
+
+The same machine, runs and builds as below, after two changes to the
+compiler that the timings below asked for (their last two points): whole
+numbers added into a unique are a parallel loop's reductions, and a
+`for` may send to another entity from a loop of its body, so the
+meetings by chance are a system like the others and no proc
+(`python3 bench/epidemic/run.py 100000 1000000 10000000`).
+
+| people | | set-up | a day | before | memory | before | infected by day 100 |
+|---|---|---|---|---|---|---|---|
+| 100,000 | model, one core | 0.14 s | 6.3 ms | 6.3 | 103 MB | 97 | 85,813 |
+| | model, 4 threads | 0.17 s | 4.7 ms | 5.1 | 108 MB | 124 | 85,813 |
+| | model, all | 0.21 s | 4.0 ms | 5.0 | 104 MB | 125 | 85,813 |
+| 1,000,000 | model, one core | 1.66 s | 90.4 ms | 89.8 | 671 MB | 665 | 857,656 |
+| | model, 4 threads | 1.58 s | 43.9 ms | 59.9 | 727 MB | 850 | 857,656 |
+| | model, all | 1.59 s | 31.6 ms | 53.1 | 725 MB | 851 | 857,656 |
+| 10,000,000 | model, one core | 23.2 s | 1,653 ms | 1,609 | 6,755 MB | 6,680 | 8,520,877 |
+| | model, 4 threads | 19.9 s | 662 ms | 1,251 | 7,227 MB | 8,178 | 8,520,877 |
+| | model, all | 20.4 s | 422 ms | 1,192 | 7,263 MB | 8,176 | 8,520,877 |
+
+| people | | infectiousness | pair | household | workplace | chance | infect | progress | tally |
+|---|---|---|---|---|---|---|---|---|---|
+| 100,000 | one core | 0.20 | 0.14 | 0.22 | 3.44 | 2.01 | 0.19 | 0.11 | 0.02 |
+| | all | 0.05 | 0.83 | 0.29 | 1.78 | 0.84 | 0.06 | 0.09 | 0.07 |
+| 1,000,000 | one core | 1.97 | 1.33 | 2.36 | 56.9 | 24.7 | 1.74 | 1.22 | 0.23 |
+| | 4 threads | 0.64 | 1.35 | 1.54 | 27.5 | 11.2 | 0.89 | 0.66 | 0.12 |
+| | all | 0.37 | 2.70 | 1.38 | 18.6 | 7.1 | 0.57 | 0.69 | 0.14 |
+| 10,000,000 | one core | 19.4 | 13.0 | 21.4 | 655 | 912 | 16.3 | 12.7 | 2.3 |
+| | 4 threads | 6.1 | 14.7 | 12.1 | 295 | 323 | 4.9 | 5.2 | 1.4 |
+| | all | 4.1 | 17.1 | 10.5 | 201 | 179 | 3.3 | 5.2 | 1.5 |
+
+- Every run is the one it was: the same people infected, on one core
+  and on any number of threads (`check/same.py`).
+- On all the cores a day at a million takes 31.6 ms where it took 53.1,
+  and at ten million 422 ms where it took 1,192: 2.9 and 3.9 times less
+  than one core, where it was 1.7 and 1.35. Against the reference at a
+  million (590 ms on one core) that is a nineteenth.
+- The meetings by chance take 7.1 ms at a million on all cores (24.6
+  before) and 179 ms at ten million (905). What is found for each stub
+  is found on every thread; what is sent is then taken off the lists by
+  one, a write somewhere in the city for each, which is what is left of
+  it. One core is as it was: there each value lands where it is sent.
+- `tally` takes on all cores what it takes on one or less (0.14 ms at a
+  million where it took 6.1; 1.5 at ten million where it took 57.8), and
+  the twelve places for each person that it filled are not touched: a
+  seventh less memory at a million, 900 MB less at ten million.
+- The largest part of a day on all cores is now the ties of work at
+  every size (18.6 of 31.6 ms at a million).
+
 ## 2026-10-13: 100,000 to ten million people
 
 AMD Ryzen AI 9 HX 370 (4 Zen 5 cores at 5.16 GHz and 8 Zen 5c at 3.29,

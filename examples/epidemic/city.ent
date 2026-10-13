@@ -46,8 +46,9 @@ component Work { network: u8, ties: i32 }
 // What they give off today along one tie.
 component Infectious { rate: f32 }
 // How many people they meet by chance on a day, anywhere: drawn once,
-// some many and most few.
-component Chance { meets: i32 }
+// some many and most few. And today's stubs of theirs, among everybody's
+// (transmission.ent): the first, and how many.
+component Chance { meets: i32, first: i32, today: i32 }
 
 relation (Person)-[LivesIn]->(Household) tree capacity 16
 // A tie in a network. It is one edge, met along from either end; `key`
@@ -228,7 +229,8 @@ system settle() {
               Infectious { rate: 0.0 },
               Chance { meets: negative_binomial(key(Run.seed, id, 0, CHANCE),
                                                 Ages[age].chance as f64,
-                                                Ages[age].chance_deviation as f64) }
+                                                Ages[age].chance_deviation as f64),
+                       first: 0, today: 0 }
             }
             connect (who)-[LivesIn]->(home)
             id += 1

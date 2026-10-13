@@ -41,8 +41,9 @@ large sizes, and testing and tracing.
   people (a running sum over them, on one core), and an order of all the
   stubs that the day says pairs them. That order is worked out, each way
   (where a stub comes in it, and which stub comes at a place), so nothing
-  of a day's meetings is made or kept: a proc finds, for each stub of
-  everybody ill, the stub next to it and whose that is. In a lockdown fewer ties are met along, fewer people are met by
+  of a day's meetings is made or kept: for each stub of everybody ill,
+  the stub next to it and whose that is are found, in a loop over their
+  stubs that sends to whomever it finds, on all the cores. In a lockdown fewer ties are met along, fewer people are met by
   chance, and a meeting at home counts for more.
 - `epidemic.ent`: a run on the console, a line of counts for each day.
 - `view.ent`: 10,000 people in a window, a dot each.
