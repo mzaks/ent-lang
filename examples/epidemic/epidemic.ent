@@ -47,6 +47,15 @@ system heading() {
   put("time,total_infected,total_case,n_presymptom,n_asymptom,n_quarantine,n_tests,n_symptoms,n_hospital,n_death,n_recovered")
 }
 
+// Without the panel of households there is nobody: said, where a run of
+// nobody would follow.
+system housed() {
+  if len(Panel) == 0 {
+    put("# no households: the file {City.panel} is not where the program was started.")
+    put("# examples/epidemic/reference/fetch.sh fetches it into build/epidemic/run: start the program there.")
+  }
+}
+
 system report() {
   put("{Clock.day},{Run.people - Tally.susceptible},{Kept.found},{Tally.presymptomatic},{Tally.asymptomatic},{Kept.home},{Kept.results},{Tally.mild + Tally.severe},{Tally.hospitalised},{Tally.dead},{Tally.recovered}")
 }
@@ -57,6 +66,7 @@ schedule setup() {
   panel()
   households()
   settle()
+  housed()
   apps()
   census()
   employ()

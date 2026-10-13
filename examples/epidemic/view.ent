@@ -121,6 +121,15 @@ proc count(stage: Stage, n: i32, x: f32, line: i32) {
 system numbers() {
   let x = 50.0 + side_of(Run.people) *
                  cell_of(Run.people, Window.width, Window.height)
+  // (Without the panel of households there is nobody: said, not shown
+  // as a city of none.)
+  if len(Panel) == 0 {
+    label("No households: the file {City.panel}", 40.0, 120.0, 22.0, 0xff7b72)
+    label("is not where the program was started.", 40.0, 150.0, 22.0, 0xff7b72)
+    label("examples/epidemic/reference/fetch.sh fetches it into", 40.0, 200.0, 18.0,
+          0x9fb0c3)
+    label("build/epidemic/run: start the program there.", 40.0, 226.0, 18.0, 0x9fb0c3)
+  }
   label("day {Clock.day}", x, 20.0, 34.0, 0xe6edf3)
   label("{Tally.infected} ill of {Run.people}", x, 62.0, 18.0, 0x9fb0c3)
   count(Stage.Susceptible, Tally.susceptible, x, 0)
