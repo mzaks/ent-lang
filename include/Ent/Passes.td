@@ -25,7 +25,11 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
       `--convert-scf-to-openmp`. An archetype whose capacity is below
       `parallel-min-entities` always gets a sequential loop; otherwise the
       count is checked at run time and the parallel loop runs only from
-      that many entities on.
+      that many entities on. Whole numbers accumulated into a resource
+      that the query reads nowhere are the parallel loop's reductions. A
+      query that sends from a loop of its body gets a parallel loop over
+      256 slices of its rows, each one after another, and calls of
+      `ent_sends_put` (devices/sends.c) for what it sends.
     - With `fuse-systems`, every maximal sequence of runs of systems
       without other effects is inlined into the schedule as one loop per
       archetype, holding every matching query body in program order.

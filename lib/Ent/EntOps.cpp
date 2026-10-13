@@ -2688,9 +2688,8 @@ LogicalResult CombineOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
-/// Checks shared by ent.apply and ent.accumulate: inside a query, at most
-/// once per entity (not inside a loop there: the buffer has one slot per
-/// row), and a known rule.
+/// Checks shared by ent.apply and ent.accumulate: inside a query, and a
+/// known rule.
 static LogicalResult verifyCombining(Operation *op, StringRef rule) {
   auto query = op->getParentOfType<QueryOp>();
   // (In a function that was given the component: where it stands.)
@@ -2711,11 +2710,16 @@ static LogicalResult verifyCombining(Operation *op, StringRef rule) {
              << rule << "'; expected 'set', 'add', 'min' or 'max'";
     return success();
   }
+  // (In a loop of the body it runs once for each turn of that, and what
+  // it sends lands in the order of the turns: the lowering says where
+  // that cannot be. Not in a loop inside ent.edges, whose buffer has one
+  // slot per edge.)
   for (Operation *parent = op->getParentOp(); parent != query;
        parent = parent->getParentOp())
-    if (isa<LoopLikeOpInterface>(parent))
+    if (isa<LoopLikeOpInterface>(parent) && op->getParentOfType<EdgesOp>())
       return op->emitOpError("must not be inside a loop ('")
-             << parent->getName() << "'): it may run at most once per entity";
+             << parent->getName()
+             << "') in 'ent.edges': it may run at most once per edge";
   // An apply in ent.edges runs once per edge, into a slot per edge; an
   // accumulate there has no such buffer yet.
   if (isa<AccumulateOp>(op) && op->getParentOfType<EdgesOp>())

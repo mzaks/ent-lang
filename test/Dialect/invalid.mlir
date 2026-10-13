@@ -526,23 +526,6 @@ ent.archetype @A (@H) capacity 10
 ent.system @s(%d: f32) writes [@H] {
   ent.query (%h: !ent.ref<@H>) {
     %id = ent.entity
-    %c0 = arith.constant 0 : index
-    %c1 = arith.constant 1 : index
-    %c3 = arith.constant 3 : index
-    scf.for %i = %c0 to %c3 step %c1 {
-      // expected-error @+1 {{must not be inside a loop ('scf.for'): it may run at most once per entity}}
-      ent.apply %id @H "hp" add %d : f32
-    }
-  }
-}
-
-// -----
-
-ent.component @H (hp: f32)
-ent.archetype @A (@H) capacity 10
-ent.system @s(%d: f32) writes [@H] {
-  ent.query (%h: !ent.ref<@H>) {
-    %id = ent.entity
     // expected-error @+1 {{combines @H "hp" with 'add', but the query also combines it with 'min'; the result would depend on the order}}
     ent.apply %id @H "hp" add %d : f32
     // expected-note @+1 {{other rule here}}
@@ -642,22 +625,6 @@ ent.system @s(%v: i32) reads [@P] writes [@Score] {
   ent.query (%p: !ent.ref<@P>) {
     // expected-error @+1 {{value type 'i32' does not match field 'points' of type 'i64'}}
     ent.accumulate @Score "points" add %v : i32
-  }
-}
-
-// -----
-
-ent.component @P (x: f32)
-ent.archetype @A (@P) capacity 10
-ent.resource @Score (points: i64)
-ent.system @s(%v: i64) reads [@P] writes [@Score] {
-  ent.query (%p: !ent.ref<@P>) {
-    %c0 = arith.constant 0 : index
-    %c1 = arith.constant 1 : index
-    scf.for %i = %c0 to %c1 step %c1 {
-      // expected-error @+1 {{must not be inside a loop ('scf.for'): it may run at most once per entity}}
-      ent.accumulate @Score "points" add %v : i64
-    }
   }
 }
 

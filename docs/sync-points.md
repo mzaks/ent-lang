@@ -173,12 +173,19 @@ When a query has run for every entity it visits, in this order:
 
 1. **Applies** are combined into their targets, by apply op (in program
    order), then source archetype, then source row (and for an apply in an
-   edge loop, then the edge's position in the loop's order); then
+   edge loop, then the edge's position in the loop's order; for one in a
+   loop of the body, `scf.for` or `scf.while`, then the loop's turns); then
    **accumulates** into their resources, in the same order; then edges
    **connected** in the query are added, by connect op, archetype and row. The order is fixed, so the result
    does not depend on how the query's loop ran, in parallel or not, even for
    floating-point `add`. Applies land before structural changes, while every
-   id still leads to where its entity was.
+   id still leads to where its entity was. (An accumulate of whole numbers
+   that the query reads nowhere is not kept for each row: the order does
+   not show, so a parallel loop reduces it. What is sent from a loop of
+   the body has no place for each row either: a loop on one thread
+   combines it where it is sent, which the query may not see, and a
+   parallel loop visits the rows in slices, each with a list of what it
+   sends, that are read in order here.)
 2. **Structural changes** are applied per archetype: despawns free their ids,
    moves append their entities to the target archetype, and the rows they
    leave are filled by swap-remove. Within one query the last structural

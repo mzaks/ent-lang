@@ -1,0 +1,52 @@
+import console
+
+component Thing { n: i32, got: f32, least: i32 } capacity 300000
+component Friend { who: entity }
+unique Sum { all: f32, turns: i64, most: i32 }
+unique Got { sum: f32, least: i64 }
+buffer Who { thing: entity } capacity 300000
+
+system fill() {
+  for i in 0..300000 {
+    let e = spawn { Thing { n: i, got: 0.0, least: 1000000 } }
+    Who += { thing: e }
+  }
+}
+
+fn other(who: Who, n: i32, k: i32) -> entity {
+  who[((n as i64 * 7919 + k as i64 * 104729) % 300000) as i32].thing
+}
+
+// Every thing sends to up to six others, more than once to some: floats
+// of very different sizes, whose sum depends on the order.
+system send() {
+  for t: Thing {
+    var k = 0
+    while k < t.n % 7 {
+      let to = other(Who, t.n, k)
+      if (t.n + k) % 3 != 0 {
+        Thing(to).got += 1.0 / (1 + (t.n % 1000) * (k + 1)) as f32
+        Sum.turns += 1
+      }
+      k += 1
+    }
+    for j in 0..t.n % 3 {
+      Thing(other(Who, t.n, j + 9)).least min= t.n - j
+      Sum.all += 0.001 * (t.n % 977) as f32
+      Sum.most max= t.n % 1009 + j
+    }
+  }
+}
+
+system report() {
+  for t: Thing {
+    Got.sum += t.got
+    Got.least += t.least as i64
+  }
+  put("{Got.sum} {Got.least} {Sum.all} {Sum.turns} {Sum.most}")
+  for t: Thing where t.n == 12345 || t.n == 299999 || t.n == 7 {
+    put("{t.n}: {t.got} {t.least}")
+  }
+}
+schedule all() { fill() send() report() }
+main { all() }

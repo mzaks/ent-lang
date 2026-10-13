@@ -1100,6 +1100,12 @@ static bool neverParallel(const WorldArchetype &archetype,
          most < options.parallelMinEntities;
 }
 
+/// Into how many slices of its rows a parallel loop visits the entities
+/// of a query that sends from a loop of its body (see kLoopedAttr); and
+/// the slice the body being lowered runs for (an index), in such a loop.
+static constexpr int64_t kSendSegments = 256;
+static Value sendSegment;
+
 /// Emit the loop over the entities of `archetype` at the insertion point
 /// and call `emitBody` with the entity index, positioned inside the loop,
 /// the number of entities the loop runs over, and whether it runs its
@@ -1118,7 +1124,7 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
                 const LoopOptions &options, bool entityLocal,
                 function_ref<void(Value entity, Value rows, bool parallel)>
                     emitBody,
-                Value rows = Value()) {
+                Value rows = Value(), bool sliced = false) {
   // The entities to visit: `rows` if given (counted when the query
   // started), or as many as the archetype holds now.
   Value count = rows ? rows : world.count(loc, archetype);
@@ -1141,6 +1147,29 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
     return loop;
   };
   auto emitParallel = [&]() -> Operation * {
+    // (For a body that sends from a loop: over the slices of the rows,
+    // each one after another on a thread, see kLoopedAttr.)
+    if (sliced) {
+      Value slices = arith::ConstantIndexOp::create(rewriter, loc,
+                                                    kSendSegments);
+      auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                          ValueRange{slices}, ValueRange{one});
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      Value slice = loop.getInductionVars().front();
+      auto startOf = [&](Value slice) {
+        return arith::DivUIOp::create(
+                   rewriter, loc,
+                   arith::MulIOp::create(rewriter, loc, slice, count), slices)
+            .getResult();
+      };
+      auto rowsOf = scf::ForOp::create(
+          rewriter, loc, startOf(slice),
+          startOf(arith::AddIOp::create(rewriter, loc, slice, one)), one);
+      rewriter.setInsertionPoint(rowsOf.getBody()->getTerminator());
+      llvm::SaveAndRestore current(sendSegment, slice);
+      emitBody(rowsOf.getInductionVar(), count, /*parallel=*/true);
+      return loop;
+    }
     auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                         ValueRange{count}, ValueRange{one});
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
@@ -1467,6 +1496,8 @@ static void combineDirectly(IRRewriter &rewriter, ApplyOp apply,
                             Value id, Value value, Value tick);
 static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
                      Value a, Value b, bool noSign);
+static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
+                    const WorldArchetype &archetype, Value id, Value value);
 
 /// Marks an `ent.apply` whose field nothing else in its query touches (no
 /// get, set or lookup of the field, no other apply to it, no add or remove
@@ -1575,10 +1606,33 @@ static constexpr llvm::StringLiteral kInEachAttr = "ent.in_each";
 /// effect where it stands, as one outside a query does.
 static constexpr llvm::StringLiteral kAtOnceAttr = "ent.at_once";
 
+/// Marks an `ent.accumulate` of whole numbers that nothing else in its
+/// query sees (see kUnobservedAttr), in a query whose loops may be
+/// parallel ones: such numbers come to the same in whatever order they
+/// are combined, so each thread combines its own and the loop's end
+/// those (see reduceCells), and a loop on one thread combines them as it
+/// goes; no buffer of one for each row is filled and read again.
+static constexpr llvm::StringLiteral kReducedAttr = "ent.reduced";
+
+/// Marks an `ent.apply` or `ent.accumulate` in a loop of its query's
+/// body (`for k in a..b`, `while`): it runs once for each turn of that
+/// loop, so its values have no place in a buffer of one for each row.
+/// Nothing else in the query touches the field (see kUnobservedAttr), so
+/// a loop that visits the entities one after another combines each value
+/// where it is sent. A parallel loop visits them in kSendSegments slices
+/// of rows, each on one thread and in order, and a value goes to its
+/// slice's list (devices/sends.c), which grows as it must; the query's
+/// end combines the lists, slice after slice: the order of the rows, and
+/// for one row of the turns, however many threads there were.
+static constexpr llvm::StringLiteral kLoopedAttr = "ent.looped";
+/// The lists' numbers: one for each such op and archetype it sends from.
+static llvm::DenseMap<std::pair<int64_t, unsigned>, int64_t> sendLists;
+
 static bool appliesDirectly(Operation *apply, bool directApplies) {
   if (!isa<ApplyOp, AccumulateOp>(apply))
     return false;
-  return apply->hasAttr(kInEachAttr) ||
+  return apply->hasAttr(kInEachAttr) || apply->hasAttr(kReducedAttr) ||
+         apply->hasAttr(kLoopedAttr) ||
          (directApplies && apply->hasAttr(kUnobservedAttr));
 }
 
@@ -1828,6 +1882,19 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       case ComponentChange::NoTarget:
         break;
       }
+      rewriter.eraseOp(op);
+    } else if (isa<ApplyOp, AccumulateOp>(op) && op->hasAttr(kLoopedAttr) &&
+               sendSegment) {
+      // From a loop of the body, in a parallel loop: to its slice's list.
+      auto apply = dyn_cast<ApplyOp>(op);
+      Value id = apply ? world.toStorage(loc, apply.getEntity()) : Value();
+      Value value = world.toStorage(
+          loc, apply ? apply.getValue() : cast<AccumulateOp>(op).getValue());
+      if (mask) {
+        auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
+        rewriter.setInsertionPointToStart(ifApplies.thenBlock());
+      }
+      putSend(rewriter, loc, op, archetype, id, value);
       rewriter.eraseOp(op);
     } else if (auto apply = dyn_cast<ApplyOp>(op);
                apply && appliesDirectly(apply, directApplies)) {
@@ -5516,6 +5583,102 @@ static scf::ForOp carryCells(IRRewriter &rewriter, scf::ForOp loop,
   return carrying;
 }
 
+/// A resource cell that a parallel loop combines whole numbers into, and
+/// how (see kReducedAttr).
+namespace {
+struct ReducedCell {
+  Value cell;
+  StringRef rule;
+  bool noSign;
+};
+} // namespace
+
+/// The number that changes nothing when it is combined by `rule` with
+/// one of `type`: what each thread starts from.
+static Value neutralOf(IRRewriter &rewriter, Location loc, StringRef rule,
+                       Type type, bool noSign) {
+  unsigned width = cast<IntegerType>(type).getWidth();
+  APInt value = APInt::getZero(width);
+  if (rule == "min")
+    value = noSign ? APInt::getAllOnes(width) : APInt::getSignedMaxValue(width);
+  else if (rule == "max" && !noSign)
+    value = APInt::getSignedMinValue(width);
+  return arith::ConstantOp::create(rewriter, loc, type,
+                                   rewriter.getIntegerAttr(type, value));
+}
+
+/// Make the parallel entity loop `loop` reduce into `reduced`, the cells
+/// its body combines into where it stands: every iteration starts from
+/// the number that changes nothing, what it comes to is the loop's to
+/// combine with the others' (each thread its own, then the threads'), and
+/// the cell is read once before the loop and written once after it. Only
+/// the accumulate reaches the cell inside the loop, in the body itself or
+/// in an `if` of it.
+static void reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
+                        ArrayRef<ReducedCell> reduced) {
+  if (reduced.empty())
+    return;
+  Location loc = loop.getLoc();
+  rewriter.setInsertionPoint(loop);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  SmallVector<Value> cells, inits;
+  for (const ReducedCell &one : reduced) {
+    cells.push_back(one.cell);
+    inits.push_back(
+        memref::LoadOp::create(rewriter, loc, one.cell, ValueRange{zero}));
+  }
+  auto reducing = scf::ParallelOp::create(rewriter, loc, loop.getLowerBound(),
+                                          loop.getUpperBound(), loop.getStep(),
+                                          inits);
+  Block *body = reducing.getBody();
+  while (!body->empty())
+    rewriter.eraseOp(&body->back());
+  rewriter.eraseOp(loop.getBody()->getTerminator());
+  body->getOperations().splice(body->end(), loop.getBody()->getOperations());
+  for (auto [old, now] :
+       llvm::zip(loop.getInductionVars(), reducing.getInductionVars()))
+    rewriter.replaceAllUsesWith(old, now);
+  CarriedState state;
+  rewriter.setInsertionPointToStart(body);
+  Value unused = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+  for (const ReducedCell &one : reduced) {
+    state.values.push_back(neutralOf(
+        rewriter, loc, one.rule,
+        cast<MemRefType>(one.cell.getType()).getElementType(), one.noSign));
+    state.written.push_back(unused);
+  }
+  carryCellsThrough(rewriter, *body, cells, state);
+  rewriter.setInsertionPointToEnd(body);
+  auto reduce = scf::ReduceOp::create(rewriter, loc, state.values);
+  for (auto [one, region] : llvm::zip(reduced, reduce.getReductions())) {
+    Block &block = region.front();
+    rewriter.setInsertionPointToStart(&block);
+    Value a = block.getArgument(0), b = block.getArgument(1);
+    // (The lesser or the greater as a comparison and a choice: the form
+    // the conversion to OpenMP knows a minimum and a maximum by.)
+    Value both;
+    if (one.rule == "add") {
+      both = combine(rewriter, loc, one.rule, a, b, one.noSign);
+    } else {
+      bool least = one.rule == "min";
+      arith::CmpIPredicate lesser =
+          one.noSign ? (least ? arith::CmpIPredicate::ult
+                              : arith::CmpIPredicate::ugt)
+                     : (least ? arith::CmpIPredicate::slt
+                              : arith::CmpIPredicate::sgt);
+      both = arith::SelectOp::create(
+          rewriter, loc, arith::CmpIOp::create(rewriter, loc, lesser, a, b), a,
+          b);
+    }
+    scf::ReduceReturnOp::create(rewriter, loc, both);
+  }
+  rewriter.setInsertionPointAfter(reducing);
+  for (auto [i, cell] : llvm::enumerate(cells))
+    memref::StoreOp::create(rewriter, loc, reducing.getResult(i), cell,
+                            ValueRange{zero});
+  rewriter.eraseOp(loop);
+}
+
 /// Append the edge (`source`, `target`, `values`, all stored forms) to
 /// `relation` at the insertion point, after checking its capacity, and
 /// mark it unclean.
@@ -8737,6 +8900,129 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
   }
 }
 
+/// A call of `name`, one of the functions that keep what is sent from a
+/// loop (devices/sends.c), at the insertion point; all they take and give
+/// is 64 bits wide.
+static Value callSends(IRRewriter &rewriter, Location loc, StringRef name,
+                       ArrayRef<Value> args, bool gives) {
+  Type i64 = rewriter.getI64Type();
+  auto module =
+      rewriter.getInsertionBlock()->getParentOp()->getParentOfType<ModuleOp>();
+  if (!SymbolTable::lookupSymbolIn(module, name)) {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(module.getBody());
+    SmallVector<Type> inputs(args.size(), i64);
+    auto func = func::FuncOp::create(
+        rewriter, module.getLoc(), name,
+        rewriter.getFunctionType(inputs, gives ? TypeRange{i64} : TypeRange{}));
+    func.setPrivate();
+  }
+  auto call = func::CallOp::create(rewriter, loc, name,
+                                   gives ? TypeRange{i64} : TypeRange{}, args);
+  return gives ? call.getResult(0) : Value();
+}
+
+/// The number of the list `op` sends to from `archetype`, as an i64.
+static Value sendList(IRRewriter &rewriter, Location loc, Operation *op,
+                      const WorldArchetype &archetype) {
+  auto index = op->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
+  auto [entry, added] = sendLists.try_emplace(
+      {index.getInt(), archetype.index}, int64_t(sendLists.size()));
+  return arith::ConstantIntOp::create(rewriter, loc, entry->second, 64);
+}
+
+/// A stored value as 64 bits, and back.
+static Value toSendBits(IRRewriter &rewriter, Location loc, Value stored) {
+  Type type = stored.getType();
+  if (isa<FloatType>(type))
+    stored = arith::BitcastOp::create(
+        rewriter, loc, rewriter.getIntegerType(type.getIntOrFloatBitWidth()),
+        stored);
+  if (stored.getType().getIntOrFloatBitWidth() == 64)
+    return stored;
+  return arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(), stored);
+}
+static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
+                          Type type) {
+  unsigned width = type.getIntOrFloatBitWidth();
+  if (width != 64)
+    bits = arith::TruncIOp::create(rewriter, loc,
+                                   rewriter.getIntegerType(width), bits);
+  if (isa<FloatType>(type))
+    bits = arith::BitcastOp::create(rewriter, loc, type, bits);
+  return bits;
+}
+
+/// Put what `op` (an apply or an accumulate in a loop of the body) sends
+/// on its list, at the insertion point: `id` (stored form; nothing for an
+/// accumulate) and `value`.
+static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
+                    const WorldArchetype &archetype, Value id, Value value) {
+  assert(sendSegment && "a send from a loop outside a parallel loop's slice");
+  Type i64 = rewriter.getI64Type();
+  Value target = id ? toSendBits(rewriter, loc, id)
+                    : arith::ConstantIntOp::create(rewriter, loc, 0, 64)
+                          .getResult();
+  callSends(rewriter, loc, "ent_sends_put",
+            {sendList(rewriter, loc, op, archetype),
+             arith::IndexCastOp::create(rewriter, loc, i64, sendSegment),
+             target, toSendBits(rewriter, loc, value)},
+            /*gives=*/false);
+}
+
+/// Combine what `op` sent from loops of the body for the entities of
+/// `archetype`, at the insertion point: its list from the first to the
+/// last, which is then empty. (Nothing if the loop ran on one thread and
+/// combined each value where it was sent.)
+static void combineLooped(IRRewriter &rewriter, Operation *op,
+                          const WorldLayout &layout,
+                          const WorldArchetype &archetype, WorldAccess &world,
+                          Value tick) {
+  Location loc = op->getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  Value list = sendList(rewriter, loc, op, archetype);
+  Value sent = world.toIndex(
+      loc, callSends(rewriter, loc, "ent_sends_count", {list}, true));
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Type stored = cast<MemRefType>(
+                    world.applyBuffer(op, archetype).second.getType())
+                    .getElementType();
+  if (auto apply = dyn_cast<ApplyOp>(op)) {
+    LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
+    auto loop = scf::ForOp::create(rewriter, loc, zero, sent, one);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    Value id = callSends(rewriter, loc, "ent_sends_id", {list}, true);
+    if (world.idType() != rewriter.getI64Type())
+      id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
+    Value value = fromSendBits(
+        rewriter, loc, callSends(rewriter, loc, "ent_sends_value", {list}, true),
+        stored);
+    combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
+    rewriter.setInsertionPointAfter(loop);
+  } else {
+    auto accumulate = cast<AccumulateOp>(op);
+    Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
+                                      accumulate.getFieldAttr());
+    Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
+    auto loop = scf::ForOp::create(rewriter, loc, zero, sent, one,
+                                   ValueRange{start});
+    rewriter.setInsertionPointToStart(loop.getBody());
+    Value value = fromSendBits(
+        rewriter, loc, callSends(rewriter, loc, "ent_sends_value", {list}, true),
+        stored);
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{combine(rewriter, loc, accumulate.getRule(),
+                           loop.getRegionIterArg(0), value,
+                           hasNoSign(accumulate.getValue().getType()))});
+    rewriter.setInsertionPointAfter(loop);
+    memref::StoreOp::create(rewriter, loc, loop.getResult(0), field,
+                            ValueRange{zero});
+  }
+  callSends(rewriter, loc, "ent_sends_clear", {list}, false);
+}
+
 /// Fold the values `accumulate` sent from the first `count` rows of
 /// `archetype` into its resource field, at the insertion point, one row
 /// after another (rows that sent nothing are skipped), so the result does
@@ -11738,6 +12024,30 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   SmallVector<AccumulateOp> accumulates;
   query.getBody().walk(
       [&](AccumulateOp accumulate) { accumulates.push_back(accumulate); });
+  // Whole numbers that nothing else here sees, in a query that may run
+  // in parallel, are reduced (see kReducedAttr). Not what a reactive
+  // query sends, whose walk of its logs is another loop; and only what
+  // is sent from the body itself or from an `if` of it.
+  // (Not in one that sends from a loop of its body: its parallel loop
+  // has a loop in it, which the cells are not carried through.)
+  bool sendsLooped =
+      llvm::any_of(applies,
+                   [](ApplyOp op) { return op->hasAttr(kLoopedAttr); }) ||
+      llvm::any_of(accumulates,
+                   [](AccumulateOp op) { return op->hasAttr(kLoopedAttr); });
+  if (options.directApplies && options.parallelEntities && entityLocal &&
+      triggers.empty() && !sendsLooped)
+    for (AccumulateOp accumulate : accumulates) {
+      bool plain = accumulate->hasAttr(kUnobservedAttr) &&
+                   !accumulate->hasAttr(kInEachAttr) &&
+                   accumulate.getRule() != "set" &&
+                   isa<IntegerType>(accumulate.getValue().getType());
+      for (Operation *parent = accumulate->getParentOp();
+           plain && parent != query; parent = parent->getParentOp())
+        plain = isa<scf::IfOp>(parent);
+      if (plain)
+        accumulate->setAttr(kReducedAttr, rewriter.getUnitAttr());
+    }
   SmallVector<ConnectOp> connects;
   query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
   SmallVector<AppendOp> appends;
@@ -11813,10 +12123,13 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                           sequentialOnly);
           });
         },
-        rows);
+        rows, sendsLooped);
     // Directly combined accumulates: their resource cells in registers.
-    if (auto loop = dyn_cast<scf::ForOp>(loops); loop && sequentialOnly) {
+    // (And the reduced ones, which a parallel loop reduces into; where the
+    // number of entities says at run time which loop it is, in both.)
+    {
       SmallVector<Value> cells;
+      SmallVector<ReducedCell> reduced;
       // (Not one that a loop in the body accumulates into: that is not
       // followed through the loop.)
       llvm::DenseSet<std::pair<Attribute, Attribute>> looped;
@@ -11824,15 +12137,43 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
         if (accumulate->hasAttr(kInEachAttr))
           looped.insert({accumulate.getResourceAttr(),
                          accumulate.getFieldAttr()});
-      for (AccumulateOp accumulate : accumulates)
-        if (appliesDirectly(accumulate, true) &&
-            !looped.contains({accumulate.getResourceAttr(),
-                              accumulate.getFieldAttr()}))
-          cells.push_back(
-              world.resourceField(accumulate.getResourceAttr().getAttr(),
-                                  accumulate.getFieldAttr()));
+      for (AccumulateOp accumulate : accumulates) {
+        if (!appliesDirectly(accumulate, sequentialOnly) ||
+            looped.contains({accumulate.getResourceAttr(),
+                             accumulate.getFieldAttr()}))
+          continue;
+        Value cell =
+            world.resourceField(accumulate.getResourceAttr().getAttr(),
+                                accumulate.getFieldAttr());
+        cells.push_back(cell);
+        if (accumulate->hasAttr(kReducedAttr))
+          reduced.push_back({cell, accumulate.getRule(),
+                             hasNoSign(accumulate.getValue().getType())});
+      }
+      SmallVector<scf::ForOp> sequential;
+      SmallVector<scf::ParallelOp> parallel;
+      if (auto loop = dyn_cast<scf::ForOp>(loops)) {
+        sequential.push_back(loop);
+      } else if (auto loop = dyn_cast<scf::ParallelOp>(loops)) {
+        parallel.push_back(loop);
+      } else if (auto branch = dyn_cast<scf::IfOp>(loops);
+                 branch && archetype.capacity != 1) {
+        for (Operation &op : *branch.thenBlock())
+          if (auto loop = dyn_cast<scf::ParallelOp>(op))
+            parallel.push_back(loop);
+        for (Operation &op : *branch.elseBlock())
+          if (auto loop = dyn_cast<scf::ForOp>(op))
+            sequential.push_back(loop);
+      }
+      for (scf::ParallelOp loop : parallel)
+        reduceCells(rewriter, loop, reduced);
       if (!cells.empty())
-        loops = carryCells(rewriter, loop, cells);
+        for (scf::ForOp loop : sequential) {
+          bool whole = loops == loop;
+          scf::ForOp carrying = carryCells(rewriter, loop, cells);
+          if (whole)
+            loops = carrying;
+        }
     }
     hoistResourceReads(rewriter, loops, world);
     if (archetype.hasPending() && isStructuralFor(query, archetype.op))
@@ -11865,9 +12206,17 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // Applies are combined when the whole query has run, in a fixed order:
   // by apply, then archetype, then row. They land before despawns and
   // moves, while every id still leads to where its entity was.
+  // (What a parallel loop sent from a loop of the body, from its lists.)
+  auto looped = [&](Operation *op, const WorldArchetype *archetype) {
+    if (op->hasAttr(kLoopedAttr) &&
+        !neverParallel(*archetype, options, entityLocal) &&
+        archetype->capacity != 1)
+      combineLooped(rewriter, op, layout, *archetype, world, tick);
+  };
   rewriter.setInsertionPoint(query);
   for (ApplyOp apply : applies)
     for (auto [archetype, count] : visited) {
+      looped(apply, archetype);
       if (appliesDirectly(apply, direct.contains(archetype)))
         continue;
       if (apply->getParentOfType<EdgesOp>())
@@ -11878,9 +12227,11 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        tick);
     }
   for (AccumulateOp accumulate : accumulates)
-    for (auto [archetype, count] : visited)
+    for (auto [archetype, count] : visited) {
+      looped(accumulate, archetype);
       if (!appliesDirectly(accumulate, direct.contains(archetype)))
         combineAccumulated(rewriter, accumulate, *archetype, world, count);
+    }
   // Connected edges are appended while the buffers' rows still are the
   // rows that filled them, before despawns and moves.
   for (ConnectOp connect : connects)
@@ -13283,6 +13634,7 @@ struct EntLowerToLoops
   void runOnOperation() override {
     ModuleOp module = getOperation();
     IRRewriter rewriter(module.getContext());
+    sendLists.clear();
     if (failed(inferArchetypes(module)))
       return signalPassFailure();
     FailureOr<WorldLayout> layout = WorldLayout::compute(module);
@@ -13361,6 +13713,37 @@ struct EntLowerToLoops
       if (query && (query.getCascade() || query.hasBy()))
         op->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
     });
+    // What is sent from a loop of a query's body (see kLoopedAttr).
+    bool refused = false;
+    module.walk([&](Operation *op) {
+      if (!isa<ApplyOp, AccumulateOp>(op))
+        return;
+      auto query = op->getParentOfType<QueryOp>();
+      if (!query || query.isTurn() || op->hasAttr(kAtOnceAttr))
+        return;
+      bool inLoop = false;
+      for (Operation *parent = op->getParentOp(); parent != query;
+           parent = parent->getParentOp()) {
+        if (isa<EachOp, EdgesOp>(parent))
+          return;
+        inLoop |= isa<LoopLikeOpInterface>(parent);
+      }
+      if (!inLoop)
+        return;
+      if (query.getCascade() || !getTriggers(query).empty()) {
+        op->emitError("is in a loop of the body of a 'for' that goes along a "
+                      "tree or waits for changes: it may run at most once "
+                      "per entity there");
+        refused = true;
+      } else if (!op->hasAttr(kUnobservedAttr)) {
+        op->emitError("is in a loop of a 'for's body, so nothing else in the "
+                      "'for' may read, set or send to the field it sends to");
+        refused = true;
+      }
+      op->setAttr(kLoopedAttr, rewriter.getUnitAttr());
+    });
+    if (refused)
+      return signalPassFailure();
     // Lookups and applies through a trusted end of an edge.
     module.walk([&](Operation *op) {
       if (!isa<LookupOp, ApplyOp>(op))

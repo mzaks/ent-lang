@@ -828,7 +828,8 @@ of a depth.
 - Uniques: `Clock.frame += 1`, `Score += 10` (the shorthand's value).
   Outside a `for` this reads and writes; inside one `+=`, `-=`, `min=`
   and `max=` accumulate (combined when the query ends, in a fixed
-  order), and `=` sets it to what the last entity that sets it gives, in
+  order; whole numbers, which come to the same in any order, each thread
+  for itself where there are many, and those at the end), and `=` sets it to what the last entity that sets it gives, in
   the order of the `for`, when the `for` ends: a number, a bool, an enum
   or an entity (`for b: Box with Main { View.h = b.h }`). Read in the
   same `for`, it is as it was before.
@@ -885,6 +886,28 @@ of a depth.
   run there for the entity it is at (`for i in 0..c.n { c.sum += i }`).
   Such a body runs only for the entities that have what the `for`
   binds, where otherwise it may run for all with its writes left out.
+- What such a loop sends to another entity or adds into a unique is sent
+  once for each of its turns, and lands when the `for` over the entities
+  ends: in the order of the entities, and for one entity in the order of
+  the turns.
+
+  ```
+  for me, i: Infectious, c: Chance {
+    for stub in c.first..c.first + c.today {
+      let who = whose(stub)
+      if who != me { Hazard(who).left -= i.rate }
+    }
+  }
+  ```
+
+  Nothing else in the `for` reads, sets or sends to that field, or reads
+  that unique. Then on one thread each value lands where it is sent,
+  which comes to the same; on many (`--parallel`) every slice of the
+  entities keeps a list of what it sends, as long as it must be, and the
+  lists are combined one after another when the `for` ends: the same
+  sums to the last bit, on any number of threads. Not in a `for` that
+  goes along a tree or waits for changes, and not in a loop inside a
+  `for` over edges (a `for` over edges sends once for each edge).
 - A `for` over entities gives a number where the value of a statement
   is worked out (of a `let`, a `var`, an assignment, the condition of a
   `loop` or a `while`): how many entities its body ran for (an `i32`;

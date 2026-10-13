@@ -1,0 +1,11 @@
+// What a `for` adds into a unique, and the least and the greatest it
+// keeps there, built for all the cores (Inputs/parallel_sums.ent, 200,000
+// entities): whole numbers come to the same in any order, so every thread
+// keeps its own and the loop's end puts those together; the float is
+// still added row after row. Either way it is what one core comes to,
+// with any number of threads.
+// RUN: %ent run %S/Inputs/parallel_sums.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/parallel_sums.ent 2>/dev/null | FileCheck %s
+// RUN: env OMP_NUM_THREADS=3 %ent run --parallel %S/Inputs/parallel_sums.ent 2>/dev/null | FileCheck %s
+
+// CHECK: 12960 99999 -49998 49995 530884497764239 7 66.288933

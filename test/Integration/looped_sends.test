@@ -1,0 +1,19 @@
+// What a `for` sends from a loop of its body, to other entities and into
+// a unique (Inputs/looped_sends.ent, 300,000 entities that each send to
+// up to eight others from a `while` and a `for k in a..b`): floats of
+// very different sizes, whose sums depend on the order they are added
+// in. The order is that of the rows, and for one row that of the loop's
+// turns: on one core each value lands where it is sent, on many each
+// slice of the rows keeps a list and the lists are combined in order.
+// The same either way, with any number of threads.
+// RUN: %ent run %S/Inputs/looped_sends.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/looped_sends.ent 2>/dev/null > %t.all
+// RUN: env OMP_NUM_THREADS=3 %ent run --parallel %S/Inputs/looped_sends.ent 2>/dev/null > %t.three
+// RUN: FileCheck %s < %t.one
+// RUN: cmp %t.one %t.all
+// RUN: cmp %t.one %t.three
+
+// CHECK:      2740.354004 44999950000 146372.140625 599998 1009
+// CHECK-NEXT: 7: 0.0019 287834
+// CHECK-NEXT: 12345: 0.0 107344
+// CHECK-NEXT: 299999: 0.004806 46402

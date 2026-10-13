@@ -1,0 +1,41 @@
+import console
+
+component Thing { n: i32, big: u64 } capacity 200000
+
+unique Sum { all: i64, odd: i32, least: i32, most: i32, top: u64, low: u64, part: f32 }
+
+fn one(is: bool) -> i32 { if is { 1 } else { 0 } }
+
+system fill() {
+  for i in 0..200000 {
+    spawn { Thing { n: (i * 7919) % 100003 - 50000, big: (i as u64) * 2654435761 } }
+  }
+}
+
+system add() {
+  Sum.all = 5
+  Sum.odd = 0
+  Sum.least = 0
+  Sum.most = 0
+  Sum.top = 3
+  Sum.low = 1000000000000
+  Sum.part = 0.0
+  for t: Thing {
+    Sum.all += t.n as i64
+    Sum.odd += one(t.n % 2 != 0)
+    if t.n % 3 == 0 {
+      Sum.least min= t.n
+      if t.n % 5 == 0 { Sum.most max= t.n } else { Sum.all -= 1 }
+    }
+    Sum.top max= t.big
+    Sum.low min= t.big + 7
+    Sum.part += t.n as f32 * 0.001
+  }
+}
+
+system report() {
+  put("{Sum.all} {Sum.odd} {Sum.least} {Sum.most} {Sum.top} {Sum.low} {Sum.part}")
+}
+
+schedule all() { fill() add() report() }
+main { all() }
