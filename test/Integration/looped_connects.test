@@ -1,0 +1,12 @@
+// Edges connected from a loop over edges and from a counted loop of a
+// `for`'s body (Inputs/looped_connects.ent): every tenth of a thousand
+// things connects an edge from the one next to it, and three more from
+// others it works out, each with its fields' values. They are there when
+// the `for` ends, in the order they were connected in; a second `for`
+// reads them, sets a field of theirs and takes half of them away. The
+// same on one core and on all.
+// RUN: %ent run %S/Inputs/looped_connects.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/looped_connects.ent 2>/dev/null | FileCheck %s
+
+// CHECK:      400 100
+// CHECK-NEXT: 200 200

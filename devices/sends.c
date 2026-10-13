@@ -1,14 +1,16 @@
 // What a `for` sends from a loop of its body (`Hull(foe).hp -= 1.0` in a
-// `for k in 0..n`), where it runs on many threads: what the compiler
-// calls for a program built with --parallel that has such a `for`.
+// `for k in 0..n`) and the edges it connects there or in a `for` over
+// edges: what the compiler calls for a program that has such a `for`.
 //
-// Such a `for` visits its entities in slices of rows, 256 of them, each
-// on one thread and in order. What a slice sends is put on the slice's
-// own list, a target's id and a value, 64 bits each; when the `for` ends
-// the lists are read from the first slice's to the last's, which is the
-// order of the rows, and for one row the order of the loop's turns,
-// however many threads there were. A list is blocks that are taken as
-// they are needed and kept for the next time.
+// On many threads such a `for` visits its entities in slices of rows,
+// 256 of them, each on one thread and in order; on one thread all are
+// the first slice. What a slice sends is put on the slice's own list, a
+// target's id and a value, 64 bits each (an edge: its two ends, then its
+// fields' values two by two); when the `for` ends the lists are read
+// from the first slice's to the last's, which is the order of the rows,
+// and for one row the order it was sent in, however many threads there
+// were. A list is blocks that are taken as they are needed and kept for
+// the next time.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

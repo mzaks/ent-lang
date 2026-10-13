@@ -1,0 +1,48 @@
+import console
+
+component Thing { n: i32 } capacity 1000
+component Heard { edges: i32, red: i32 }
+relation (Thing)-[Near]->(Thing) capacity 4000
+relation (Thing)-[Told { met: i32, red: bool }]->(Thing) capacity 8000
+buffer Who { thing: entity } capacity 1000
+unique Sum { edges: i32, red: i32 }
+
+system fill() {
+  for i in 0..1000 {
+    let e = spawn { Thing { n: i }, Heard { edges: 0, red: 0 } }
+    Who += { thing: e }
+  }
+  for i in 0..999 { connect (Who[i].thing)-[Near]->(Who[i + 1].thing) }
+}
+
+system tell() {
+  for me, t: Thing where t.n % 10 == 0 {
+    for (me)-[Near]->(o: Thing) {
+      connect (o)-[Told { met: t.n, red: false }]->(me)
+    }
+    for k in 0..3 {
+      connect (Who[(t.n + 7 * k + 3) % 1000].thing)-[Told { met: k, red: k == 1 }]->(me)
+    }
+  }
+}
+
+system hear() {
+  for me, t: Thing, h: mut Heard {
+    h.edges = 0
+    h.red = 0
+    for (me)-[mut told: Told]->(src: Thing) {
+      h.edges += 1
+      if told.red { h.red += 1 }
+      if src.n % 20 == 0 { told.disconnect() } else { told.red = true }
+    }
+    Sum.edges += h.edges
+    Sum.red += h.red
+  }
+}
+system count() {
+  put("{Sum.edges} {Sum.red}")
+  Sum.edges = 0
+  Sum.red = 0
+}
+schedule all() { fill() tell() hear() count() hear() count() }
+main { all() }

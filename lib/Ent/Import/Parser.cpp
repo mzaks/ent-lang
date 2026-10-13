@@ -4561,8 +4561,6 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
 LogicalResult Parser::parseConnect(llvm::SMLoc at) {
   if (inFunction)
     return error(at, "a fn only computes; a system connects");
-  if (inEdges)
-    return error(at, "'connect' inside an edge loop is not supported yet");
   auto parseNode = [&]() -> FailureOr<mlir::Value> {
     if (!token.is(Token::LParen))
       return error("an edge is connected with an arrow: 'connect "

@@ -193,9 +193,8 @@ def cache_key(arguments):
          os.environ.get("ENT_PIECES", ""), os.environ.get("ENT_SPLIT", ""),
          os.cpu_count())
 
-    # (The C that keeps what a `for` on many threads sends from a loop.)
-    if arguments.parallel:
-        note_file(os.path.join(ROOT, "devices", "sends.c"))
+    # (The C that keeps what a `for` sends from a loop.)
+    note_file(os.path.join(ROOT, "devices", "sends.c"))
 
     include_directories = arguments.I + [os.path.join(ROOT, "devices")]
     files, assets = made_of(arguments)
@@ -326,10 +325,10 @@ def build(arguments, output, directory):
     given = [os.path.splitext(path)[0] + extension for path in files
              for extension in IMPLEMENTATIONS
              if os.path.isfile(os.path.splitext(path)[0] + extension)]
-    # What a `for` on many threads sends from a loop of its body is kept
-    # by C that comes with the compiler.
-    if arguments.parallel:
-        given.append(os.path.join(ROOT, "devices", "sends.c"))
+    # What a `for` sends from a loop of its body (on many threads) and
+    # the edges it connects there are kept by C that comes with the
+    # compiler.
+    given.append(os.path.join(ROOT, "devices", "sends.c"))
     for path in arguments.sources:
         if os.path.splitext(path)[1] not in (".c", ".cpp", ".o", ".a"):
             sys.exit(f"ent: do not know how to build '{path}' (expected "

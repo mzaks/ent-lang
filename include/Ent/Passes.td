@@ -29,7 +29,9 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
       that the query reads nowhere are the parallel loop's reductions. A
       query that sends from a loop of its body gets a parallel loop over
       256 slices of its rows, each one after another, and calls of
-      `ent_sends_put` (devices/sends.c) for what it sends.
+      `ent_sends_put` (devices/sends.c) for what it sends. Edges
+      connected in a loop of the body or in `ent.edges` go the same way,
+      in any loop.
     - With `fuse-systems`, every maximal sequence of runs of systems
       without other effects is inlined into the schedule as one loop per
       archetype, holding every matching query body in program order.

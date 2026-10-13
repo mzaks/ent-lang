@@ -1617,9 +1617,11 @@ static constexpr llvm::StringLiteral kReducedAttr = "ent.reduced";
 /// Marks an `ent.apply` or `ent.accumulate` in a loop of its query's
 /// body (`for k in a..b`, `while`): it runs once for each turn of that
 /// loop, so its values have no place in a buffer of one for each row.
-/// Nothing else in the query touches the field (see kUnobservedAttr), so
-/// a loop that visits the entities one after another combines each value
-/// where it is sent. A parallel loop visits them in kSendSegments slices
+/// Where nothing else in the query touches the field (see
+/// kUnobservedAttr), a loop that visits the entities one after another
+/// combines each value where it is sent; where something does, the
+/// values go on a list there too. A parallel loop visits them in
+/// kSendSegments slices
 /// of rows, each on one thread and in order, and a value goes to its
 /// slice's list (devices/sends.c), which grows as it must; the query's
 /// end combines the lists, slice after slice: the order of the rows, and
@@ -1884,8 +1886,10 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       }
       rewriter.eraseOp(op);
     } else if (isa<ApplyOp, AccumulateOp>(op) && op->hasAttr(kLoopedAttr) &&
-               sendSegment) {
+               (sendSegment || !op->hasAttr(kUnobservedAttr))) {
       // From a loop of the body, in a parallel loop: to its slice's list.
+      // (And in any loop where the query sees the field: it lands when
+      // the query ends.)
       auto apply = dyn_cast<ApplyOp>(op);
       Value id = apply ? world.toStorage(loc, apply.getEntity()) : Value();
       Value value = world.toStorage(
@@ -1952,6 +1956,24 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       memref::StoreOp::create(rewriter, loc, sent, ids, ValueRange{entity});
       memref::StoreOp::create(rewriter, loc, accumulate.getValue(), values,
                               ValueRange{entity});
+      rewriter.eraseOp(op);
+    } else if (auto connect = dyn_cast<ConnectOp>(op);
+               connect && connect->hasAttr(kLoopedAttr)) {
+      // From a loop of the body or a loop over edges: on its list, the
+      // two ends and then the values, two by two.
+      Value source = world.toStorage(loc, connect.getSource());
+      Value target = world.toStorage(loc, connect.getTarget());
+      SmallVector<Value> values;
+      for (Value value : connect.getValues())
+        values.push_back(world.toStorage(loc, value));
+      if (mask) {
+        auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
+        rewriter.setInsertionPointToStart(ifApplies.thenBlock());
+      }
+      putSend(rewriter, loc, op, archetype, source, target);
+      for (unsigned i = 0; i < values.size(); i += 2)
+        putSend(rewriter, loc, op, archetype, values[i],
+                i + 1 < values.size() ? values[i + 1] : Value());
       rewriter.eraseOp(op);
     } else if (auto connect = dyn_cast<ConnectOp>(op)) {
       // Fill this entity's slot; the query's end appends the edge.
@@ -8925,9 +8947,13 @@ static Value callSends(IRRewriter &rewriter, Location loc, StringRef name,
 /// The number of the list `op` sends to from `archetype`, as an i64.
 static Value sendList(IRRewriter &rewriter, Location loc, Operation *op,
                       const WorldArchetype &archetype) {
-  auto index = op->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
+  // (Connects are numbered apart from applies and accumulates.)
+  bool connects = isa<ConnectOp>(op);
+  auto index = op->getAttrOfType<IntegerAttr>(
+      connects ? WorldLayout::kConnectIndexAttr : WorldLayout::kApplyIndexAttr);
   auto [entry, added] = sendLists.try_emplace(
-      {index.getInt(), archetype.index}, int64_t(sendLists.size()));
+      {index.getInt() * 2 + (connects ? 1 : 0), archetype.index},
+      int64_t(sendLists.size()));
   return arith::ConstantIntOp::create(rewriter, loc, entry->second, 64);
 }
 
@@ -8958,16 +8984,64 @@ static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
 /// accumulate) and `value`.
 static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
                     const WorldArchetype &archetype, Value id, Value value) {
-  assert(sendSegment && "a send from a loop outside a parallel loop's slice");
   Type i64 = rewriter.getI64Type();
-  Value target = id ? toSendBits(rewriter, loc, id)
-                    : arith::ConstantIntOp::create(rewriter, loc, 0, 64)
-                          .getResult();
+  Value nothing = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+  // (A loop on one thread is one slice, the first.)
+  Value slice = sendSegment ? arith::IndexCastOp::create(rewriter, loc, i64,
+                                                         sendSegment)
+                                  .getResult()
+                            : nothing;
   callSends(rewriter, loc, "ent_sends_put",
-            {sendList(rewriter, loc, op, archetype),
-             arith::IndexCastOp::create(rewriter, loc, i64, sendSegment),
-             target, toSendBits(rewriter, loc, value)},
+            {sendList(rewriter, loc, op, archetype), slice,
+             id ? toSendBits(rewriter, loc, id) : nothing,
+             value ? toSendBits(rewriter, loc, value) : nothing},
             /*gives=*/false);
+}
+
+/// Add the edges `connect` (in a loop of its query's body, or in a loop
+/// over edges there) noted for the entities of `archetype`, at the
+/// insertion point: from its list, where each edge is its two ends and
+/// then its fields' values, two by two; the list is then empty.
+static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
+                         const WorldLayout &layout,
+                         const WorldArchetype &archetype, WorldAccess &world) {
+  Location loc = connect.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  const WorldRelation &relation =
+      layout.getRelation(connect.getRelationAttr().getAttr());
+  Value list = sendList(rewriter, loc, connect, archetype);
+  int64_t each = 1 + (relation.fields.size() + 1) / 2;
+  Value edges = arith::DivUIOp::create(
+      rewriter, loc,
+      world.toIndex(loc,
+                    callSends(rewriter, loc, "ent_sends_count", {list}, true)),
+      arith::ConstantIndexOp::create(rewriter, loc, each));
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto loop = scf::ForOp::create(rewriter, loc, zero, edges, one);
+  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+  auto next = [&](bool second) {
+    return callSends(rewriter, loc,
+                     second ? "ent_sends_value" : "ent_sends_id", {list}, true);
+  };
+  auto asId = [&](Value bits) {
+    return world.idType() == rewriter.getI64Type()
+               ? bits
+               : arith::TruncIOp::create(rewriter, loc, world.idType(), bits)
+                     .getResult();
+  };
+  Value source = asId(next(false));
+  Value target = asId(next(true));
+  SmallVector<Value> values;
+  for (auto [index, field] : llvm::enumerate(relation.fields))
+    values.push_back(fromSendBits(rewriter, loc, next(index % 2 == 1),
+                                  world.storageType(field.type)));
+  // (A last value without another after it: on to the next one.)
+  if (relation.fields.size() % 2 == 1)
+    next(true);
+  appendEdge(rewriter, loc, layout, world, relation, source, target, values);
+  rewriter.setInsertionPointAfter(loop);
+  callSends(rewriter, loc, "ent_sends_clear", {list}, false);
 }
 
 /// Combine what `op` sent from loops of the body for the entities of
@@ -12034,7 +12108,14 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       llvm::any_of(applies,
                    [](ApplyOp op) { return op->hasAttr(kLoopedAttr); }) ||
       llvm::any_of(accumulates,
-                   [](AccumulateOp op) { return op->hasAttr(kLoopedAttr); });
+                   [](AccumulateOp op) { return op->hasAttr(kLoopedAttr); }) ||
+      // (Found again here: the list of them is made below.)
+      query.getBody()
+          .walk([](ConnectOp op) {
+            return op->hasAttr(kLoopedAttr) ? WalkResult::interrupt()
+                                            : WalkResult::advance();
+          })
+          .wasInterrupted();
   if (options.directApplies && options.parallelEntities && entityLocal &&
       triggers.empty() && !sendsLooped)
     for (AccumulateOp accumulate : accumulates) {
@@ -12209,8 +12290,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // (What a parallel loop sent from a loop of the body, from its lists.)
   auto looped = [&](Operation *op, const WorldArchetype *archetype) {
     if (op->hasAttr(kLoopedAttr) &&
-        !neverParallel(*archetype, options, entityLocal) &&
-        archetype->capacity != 1)
+        (!op->hasAttr(kUnobservedAttr) ||
+         (!neverParallel(*archetype, options, entityLocal) &&
+          archetype->capacity != 1)))
       combineLooped(rewriter, op, layout, *archetype, world, tick);
   };
   rewriter.setInsertionPoint(query);
@@ -12235,8 +12317,12 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // Connected edges are appended while the buffers' rows still are the
   // rows that filled them, before despawns and moves.
   for (ConnectOp connect : connects)
-    for (auto [archetype, count] : visited)
-      appendConnected(rewriter, connect, layout, *archetype, world, count);
+    for (auto [archetype, count] : visited) {
+      if (connect->hasAttr(kLoopedAttr))
+        appendLooped(rewriter, connect, layout, *archetype, world);
+      else
+        appendConnected(rewriter, connect, layout, *archetype, world, count);
+    }
   // And the rows appended to buffers, in the same order.
   for (AppendOp append : appends)
     for (auto [archetype, count] : visited)
@@ -13735,12 +13821,27 @@ struct EntLowerToLoops
                       "tree or waits for changes: it may run at most once "
                       "per entity there");
         refused = true;
-      } else if (!op->hasAttr(kUnobservedAttr)) {
-        op->emitError("is in a loop of a 'for's body, so nothing else in the "
-                      "'for' may read, set or send to the field it sends to");
-        refused = true;
       }
       op->setAttr(kLoopedAttr, rewriter.getUnitAttr());
+    });
+    // And an edge connected there, or in a loop over edges.
+    module.walk([&](ConnectOp connect) {
+      auto query = connect->getParentOfType<QueryOp>();
+      if (!query || query.isTurn() || connect->hasAttr(kAtOnceAttr))
+        return;
+      bool inLoop = false;
+      for (Operation *parent = connect->getParentOp(); parent != query;
+           parent = parent->getParentOp())
+        inLoop |= isa<LoopLikeOpInterface, EdgesOp>(parent);
+      if (!inLoop)
+        return;
+      if (query.getCascade() || query.hasBy() || !getTriggers(query).empty()) {
+        connect->emitError("is in a loop of the body of a 'for' that goes "
+                           "along a tree, by a field or waits for changes: "
+                           "it may run at most once per entity there");
+        refused = true;
+      }
+      connect->setAttr(kLoopedAttr, rewriter.getUnitAttr());
     });
     if (refused)
       return signalPassFailure();

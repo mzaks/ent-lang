@@ -2905,18 +2905,12 @@ LogicalResult EdgesOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 }
 
 LogicalResult ConnectOp::verify() {
-  if (auto query = (*this)->getParentOfType<QueryOp>()) {
-    if ((*this)->getParentOfType<EdgesOp>())
-      return emitOpError("inside 'ent.edges' is not supported yet");
-    for (Operation *parent = (*this)->getParentOp(); parent != query;
-         parent = parent->getParentOp())
-      if (isa<LoopLikeOpInterface>(parent))
-        return emitOpError("must not be inside a loop ('")
-               << parent->getName()
-               << "') in a query: it may run at most once per entity";
-  } else if (!(*this)->getParentOfType<SystemOp>()) {
+  // (In a query it may stand in a loop of the body and in ent.edges: its
+  // edges are added when the query ends, in the order they were
+  // connected in.)
+  if (!(*this)->getParentOfType<QueryOp>() &&
+      !(*this)->getParentOfType<SystemOp>())
     return emitOpError("must be inside an 'ent.system'");
-  }
   return success();
 }
 

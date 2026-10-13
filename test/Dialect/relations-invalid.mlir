@@ -126,22 +126,6 @@ ent.system @s(%a: !ent.entity) {
 
 // -----
 
-ent.component @N (v: f32)
-ent.relation @R () capacity 4
-ent.system @s() {
-  ent.query (%n: !ent.ref<@N>) {
-    %self = ent.entity
-    %c = arith.constant 0 : index
-    %one = arith.constant 1 : index
-    scf.for %i = %c to %one step %one {
-      // expected-error @+1 {{must not be inside a loop ('scf.for') in a query}}
-      ent.connect @R %self, %self ()
-    }
-  }
-}
-
-// -----
-
 ent.relation @R () capacity 4
 ent.system @s(%a: !ent.entity) reads [@R] {
   // expected-error @+1 {{connects @R but system @s does not declare it in 'writes'}}

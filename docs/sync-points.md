@@ -183,9 +183,10 @@ When a query has run for every entity it visits, in this order:
    that the query reads nowhere is not kept for each row: the order does
    not show, so a parallel loop reduces it. What is sent from a loop of
    the body has no place for each row either: a loop on one thread
-   combines it where it is sent, which the query may not see, and a
-   parallel loop visits the rows in slices, each with a list of what it
-   sends, that are read in order here.)
+   combines it where it is sent if the query sees the field nowhere;
+   otherwise, and in a parallel loop, which visits the rows in slices, it
+   goes on a list (a slice's own) that is read in order here. So do the
+   edges connected in a loop of the body or in `ent.edges`.)
 2. **Structural changes** are applied per archetype: despawns free their ids,
    moves append their entities to the target archetype, and the rows they
    leave are filled by swap-remove. Within one query the last structural

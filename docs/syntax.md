@@ -889,7 +889,9 @@ of a depth.
 - What such a loop sends to another entity or adds into a unique is sent
   once for each of its turns, and lands when the `for` over the entities
   ends: in the order of the entities, and for one entity in the order of
-  the turns.
+  the turns. An edge may be connected there too, and in a `for` over
+  edges: the edges are there when the `for` over the entities ends, in
+  the same order.
 
   ```
   for me, i: Infectious, c: Chance {
@@ -897,17 +899,21 @@ of a depth.
       let who = whose(stub)
       if who != me { Hazard(who).left -= i.rate }
     }
+    for (me)-[Housemate]->(m: Person) {
+      connect (m)-[ToldBy { met: Clock.day }]->(me)
+    }
   }
   ```
 
-  Nothing else in the `for` reads, sets or sends to that field, or reads
-  that unique. Then on one thread each value lands where it is sent,
-  which comes to the same; on many (`--parallel`) every slice of the
-  entities keeps a list of what it sends, as long as it must be, and the
-  lists are combined one after another when the `for` ends: the same
-  sums to the last bit, on any number of threads. Not in a `for` that
-  goes along a tree or waits for changes, and not in a loop inside a
-  `for` over edges (a `for` over edges sends once for each edge).
+  Where nothing else in the `for` reads, sets or sends to that field (or
+  reads that unique), each value lands where it is sent on one thread,
+  which comes to the same. Otherwise, and on many threads
+  (`--parallel`), what is sent is kept on lists that are as long as they
+  must be (every slice of the entities has its own) and combined one
+  after another when the `for` ends: the same sums to the last bit, on
+  any number of threads. Not in a `for` that goes along a tree or waits
+  for changes; and a value is not sent from a loop inside a `for` over
+  edges (a `for` over edges sends once for each edge).
 - A `for` over entities gives a number where the value of a statement
   is worked out (of a `let`, a `var`, an assignment, the condition of a
   `loop` or a `while`): how many entities its body ran for (an `i32`;
