@@ -1,0 +1,45 @@
+import console
+
+// A line of things, each told by the one before it: whoever's number
+// changes tells the next, which takes the greater of the two. Reactive
+// `for`s that send whole numbers, in rounds until nothing is told.
+component Thing { at: i32, n: i32, heard: i32 } capacity 100000
+component Next { who: entity }
+unique Rounds { count: i32, told: i64 }
+buffer Who { thing: entity } capacity 100000
+
+system line() {
+  for i in 0..100000 {
+    let e = spawn { Thing { at: i, n: 0, heard: 0 }, Next { who: none } }
+    Who += { thing: e }
+  }
+  for t: Thing, x: mut Next where t.at < 99999 { x.who = Who[t.at + 1].thing }
+}
+
+system start() {
+  for t: mut Thing where t.at == 0 || t.at == 70000 { t.n = 5 }
+  for t: mut Thing where t.at == 40000 { t.n = 9 }
+}
+
+system spread() {
+  loop {
+    let told = for t: Thing, x: Next on changed t.n {
+      Thing(x.who).heard max= t.n
+    }
+    Rounds.told += told as i64
+    for t: mut Thing on changed t.heard {
+      if t.heard > t.n { t.n = t.heard }
+    }
+    Rounds.count += 1
+  } until told == 0 || Rounds.count >= 40
+}
+
+system report() {
+  for t: Thing where t.at == 1 || t.at == 30 || t.at == 40020 || t.at == 70039 ||
+                     t.at == 99999 {
+    put("{t.n}")
+  }
+  put("{Rounds.count} rounds")
+}
+schedule all() { line() start() spread() report() }
+main { all() }

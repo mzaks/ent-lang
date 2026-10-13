@@ -283,6 +283,15 @@ for with Enemy { Count += 1 }     // nor the entity
   entity's event is asked that way (`changed outer.x`, in a `for` that
   goes along a tree: see Trees below);
   `log N` after a trigger sets its event log's capacity (`log 0`: none).
+  Such a `for` goes through the log of what happened, not through every
+  entity, so it costs by how much changed. It goes through all of them,
+  running its body only where a trigger fired, on its first run, where a
+  log has lost events, and where what it does must land in the order of
+  the rows: it destroys or moves entities, connects, gives rows to a
+  buffer, or sends values other than whole numbers (or to a field it
+  also reads). Whole numbers sent with `+=`, `-=`, `min=` or `max=`, and
+  how many entities it ran for, come to the same in any order: those
+  are combined as it goes, on one thread.
 
 Inside a `for`, another `for` over entities runs its body for every
 entity of a kind, for the entity the outer one visits:

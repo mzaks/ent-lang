@@ -1,0 +1,15 @@
+// A reactive `for` that sends whole numbers to other entities, in rounds
+// (Inputs/reactive_sends.ent): 100,000 things in a line, each telling
+// the next when its number changes, which takes the greater. The sends
+// come to the same in any order, so the `for` goes through the log of
+// what changed and not through every thing; after 40 rounds a change has
+// gone 40 places down the line. The same on one core and on all.
+// RUN: %ent run %S/Inputs/reactive_sends.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/reactive_sends.ent 2>/dev/null | FileCheck %s
+
+// CHECK:      5
+// CHECK-NEXT: 5
+// CHECK-NEXT: 9
+// CHECK-NEXT: 5
+// CHECK-NEXT: 0
+// CHECK-NEXT: 40 rounds

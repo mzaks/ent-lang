@@ -1051,6 +1051,9 @@ static bool isEntityLocal(QueryOp query) {
     if (isStructuralFor(query, archetype))
       return false;
   WalkResult result = query.getBody().walk([](Operation *op) {
+    // (What is combined where it is sent, whatever the order: one thread.)
+    if (op->hasAttr("ent.order_free"))
+      return WalkResult::interrupt();
     // What a `for` inside the body became (see lowerEach): it reads the
     // columns of other entities, which the query does not write (what it
     // sets of its own is not read there, or read from a copy); but what
@@ -1614,6 +1617,15 @@ static constexpr llvm::StringLiteral kAtOnceAttr = "ent.at_once";
 /// goes; no buffer of one for each row is filled and read again.
 static constexpr llvm::StringLiteral kReducedAttr = "ent.reduced";
 
+/// Marks an `ent.apply` or `ent.accumulate` of a reactive query that
+/// sends a whole number (added, or the least or the greatest kept) to a
+/// field, or into a resource, that nothing else in the query sees: whatever order such values are combined in, the field
+/// comes to the same. So they need not wait for the query's end to be
+/// combined in the order of rows; they are combined where they are sent,
+/// on one thread, and the query can go through the log of what happened
+/// in place of every entity (see whyScans).
+static constexpr llvm::StringLiteral kOrderFreeAttr = "ent.order_free";
+
 /// Marks an `ent.apply` or `ent.accumulate` in a loop of its query's
 /// body (`for k in a..b`, `while`): it runs once for each turn of that
 /// loop, so its values have no place in a buffer of one for each row.
@@ -1634,7 +1646,7 @@ static bool appliesDirectly(Operation *apply, bool directApplies) {
   if (!isa<ApplyOp, AccumulateOp>(apply))
     return false;
   return apply->hasAttr(kInEachAttr) || apply->hasAttr(kReducedAttr) ||
-         apply->hasAttr(kLoopedAttr) ||
+         apply->hasAttr(kLoopedAttr) || apply->hasAttr(kOrderFreeAttr) ||
          (directApplies && apply->hasAttr(kUnobservedAttr));
 }
 
@@ -7901,7 +7913,9 @@ static std::optional<std::string> whyScans(QueryOp query,
   }
   bool applies = false, spawns = false;
   query.getBody().walk([&](Operation *op) {
-    applies |= isa<ApplyOp, AccumulateOp, ConnectOp, AppendOp>(op);
+    // (Not what comes to the same in any order: kOrderFreeAttr.)
+    applies |= isa<ApplyOp, AccumulateOp, ConnectOp, AppendOp>(op) &&
+               !op->hasAttr(kOrderFreeAttr);
     spawns |= isa<SpawnOp>(op);
   });
   if (applies)
@@ -13823,6 +13837,54 @@ struct EntLowerToLoops
         refused = true;
       }
       op->setAttr(kLoopedAttr, rewriter.getUnitAttr());
+    });
+    // Whole numbers a reactive query sends or adds up, where the order
+    // does not show (see kOrderFreeAttr): nothing else in the query reads
+    // or sets the field, or sends to it by another rule. (Looking whether
+    // the entity has the component at all reads nothing of the field.)
+    module.walk([&](Operation *op) {
+      if (!isa<ApplyOp, AccumulateOp>(op))
+        return;
+      auto query = op->getParentOfType<QueryOp>();
+      if (!query || query.isTurn() || query.getCascade() || query.hasBy() ||
+          getTriggers(query).empty() || op->hasAttr(kLoopedAttr) ||
+          op->getParentOfType<EachOp>())
+        return;
+      auto apply = dyn_cast<ApplyOp>(op);
+      StringRef rule = apply ? apply.getRule() : cast<AccumulateOp>(op).getRule();
+      Value sent = apply ? apply.getValue() : cast<AccumulateOp>(op).getValue();
+      if (rule == "set" || !isa<IntegerType>(sent.getType()))
+        return;
+      if (!apply) {
+        if (op->hasAttr(kUnobservedAttr))
+          op->setAttr(kOrderFreeAttr, rewriter.getUnitAttr());
+        return;
+      }
+      FlatSymbolRefAttr component = apply.getComponentAttr();
+      StringAttr field = apply.getFieldAttr();
+      auto refTo = [&](Value ref) {
+        auto type = dyn_cast<RefType>(ref.getType());
+        return type && type.getComponent() == component;
+      };
+      WalkResult seen = query.walk([&](Operation *other) {
+        bool touches = false;
+        if (auto get = dyn_cast<GetOp>(other))
+          touches = refTo(get.getRef()) && get.getFieldAttr() == field;
+        else if (auto set = dyn_cast<SetOp>(other))
+          touches = refTo(set.getRef()) && set.getFieldAttr() == field;
+        else if (auto lookup = dyn_cast<LookupOp>(other))
+          touches = lookup.getComponentAttr() == component &&
+                    lookup.getFieldAttr() == field &&
+                    !lookup->getResult(0).use_empty();
+        else if (auto another = dyn_cast<ApplyOp>(other))
+          touches = another.getComponentAttr() == component &&
+                    another.getFieldAttr() == field && another.getRule() != rule;
+        else if (isa<AddOp, RemoveOp>(other))
+          touches = other->getAttr("component") == component;
+        return touches ? WalkResult::interrupt() : WalkResult::advance();
+      });
+      if (!seen.wasInterrupted())
+        op->setAttr(kOrderFreeAttr, rewriter.getUnitAttr());
     });
     // And an edge connected there, or in a loop over edges.
     module.walk([&](ConnectOp connect) {
