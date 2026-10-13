@@ -6,8 +6,10 @@ clock cycle by clock cycle, and gives the bits that
 same gates and inputs; its speed is held against
 [Verilator](https://www.veripool.org/verilator/). It is being built in
 steps; what is here reads a circuit, runs it four ways, is checked on
-49 circuits, and runs a processor through a program. Written out as code and compiled, a circuit runs faster
-than under Verilator on three of four (`bench/logic/RESULTS.md`).
+49 circuits, and runs a processor through a program. Written out as code
+and compiled, a circuit runs as fast as under Verilator or faster on
+three of four, and the processor 1.8 times as fast
+(`bench/logic/RESULTS.md`).
 
 - `circuit.ent`: the circuit from its file, an and-inverter graph in the
   ASCII AIGER form (two-input ANDs, inverters on the wires, flip-flops on
@@ -69,6 +71,8 @@ all simulate the identical gates. Needs yosys, iverilog and verilator.
   be. As code that takes 3 seconds (196,000 cycles a second), as rows
   28, as entities 47, and 20 going through only the ANDs whose inputs
   changed: one in sixteen a cycle.
+- `check/same.py`: a build for one core and a build for all of them, on
+  1, 4, 16 and all threads, give the same outputs every way.
 - `bench/logic/cpu.py` holds Verilator's outputs for the processor
   against the model's, cycle by cycle, for the gates and for the
   processor's Verilog as written, before it times them: on the same
@@ -77,7 +81,14 @@ all simulate the identical gates. Needs yosys, iverilog and verilator.
 - `bench/logic/run.py --check` holds Verilator's outputs against the
   model's before it times either.
 
-## Still to come
+## Not here
 
-Going through the gates level by level on all the cores, and the
-timings of all of it in one place.
+- Going through the ANDs of a level on several cores: a `for` would have
+  to read, of another entity, a field it sets itself, where the order
+  makes that safe.
+- The circuit kept as whole numbers that are added and compared, as the
+  Verilog has them, and not as single wires: given the Verilog as
+  written, Verilator runs the processor 16 times as fast as the model
+  runs its gates.
+- Values a wire can have besides 0 and 1, delays, and more than one
+  clock.

@@ -4,57 +4,80 @@
 and-inverter graph, which Yosys 0.66 wrote both as the netlist the model
 reads and as Verilog) and the same inputs.
 
-## 2026-10-13: three ways, one core
+## 2026-10-13: four circuits, every way
 
-AMD Ryzen AI 9 HX 370, Arch Linux, LLVM 22.1.8. `python3
-bench/logic/run.py c6288 s38584 mem_ctrl hyp --check`: one core (CPU 2,
-a Zen 5 core), native builds of both (`-O3 -march=native` for
+AMD Ryzen AI 9 HX 370 (4 Zen 5 cores, 8 Zen 5c, 24 threads), Arch
+Linux, LLVM 22.1.8. `python3 bench/logic/run.py --check`: one core (CPU
+2, a Zen 5 core), native builds of all (`-O3 -march=native` for
 Verilator's C++, `-O2 -march=native` for the model). A cycle's time is
 what a run of three times as many cycles took more than a shorter one,
 shared among the cycles it had more, so reading the circuit is not in
-it; both work the inputs out by the same rule each cycle and fold every
-output into a sum, and write nothing. One run each; the machine was
-otherwise idle.
+it; all work the inputs out by the same rule each cycle and fold every
+output into a sum, and write nothing. The machine was otherwise idle;
+one run each, but for Verilator built for four threads (on the four
+Zen 5 cores, the median of three). Before the timing, Verilator's
+outputs and the code's were the model's for 1,000 cycles; all of the
+model's are Icarus Verilog's (`examples/logic/check/equal.py`).
 
-| circuit | ANDs | Verilator | as code | as rows | as entities |
-|---|---|---|---|---|---|
-| c6288 (a multiplier, 89 levels) | 1,870 | 1.31 us | 0.17 us | 2.89 us | 4.85 us |
-| s38584 (1,274 flip-flops, 23 levels) | 8,594 | 3.09 us | 3.53 us | 15.63 us | 23.80 us |
-| mem_ctrl | 40,863 | 14.47 us | 10.85 us | 69.66 us | 112.80 us |
-| hyp (24,730 levels) | 238,658 | 115.82 us | 77.25 us | 393.53 us | 615.51 us |
+A clock cycle:
 
-The same as gates worked out a second, in millions. Verilator simulates
-one run of the circuit; the model's values are 64 bits wide, 64 runs
-side by side, which the last column counts:
+| circuit | ANDs | Verilator | Verilator, 4 threads | as code | as rows | as entities | by what changed | Icarus Verilog |
+|---|---|---|---|---|---|---|---|---|
+| c6288 (a multiplier, 89 levels) | 1,870 | 1.34 us | 1.32 us | 0.22 us | 2.90 us | 4.95 us | 403 us | 1,085 us |
+| s38584 (1,274 flip-flops, 23 levels) | 8,594 | 3.05 us | 4.65 us | 3.70 us | 15.98 us | 25.07 us | 239 us | 635 us |
+| mem_ctrl | 40,863 | 14.16 us | 14.08 us | 13.50 us | 70.78 us | 114.27 us | 3,351 us | 4,947 us |
+| hyp (24,730 levels) | 238,658 | 114.29 us | 119.96 us | 79.21 us | 389.82 us | 609.22 us | 1.2 s | 9.5 s |
 
-| circuit | Verilator | as code | as rows | as entities | as code, 64 runs |
-|---|---|---|---|---|---|
-| c6288 | 1,423 | 11,006 | 647 | 386 | 704,386 |
-| s38584 | 2,777 | 2,434 | 550 | 361 | 155,767 |
-| mem_ctrl | 2,823 | 3,766 | 587 | 362 | 241,047 |
-| hyp | 2,061 | 3,089 | 606 | 388 | 197,718 |
+The same as gates worked out a second, in millions (Verilator and
+Icarus simulate one run of the circuit; the model's values are 64 bits
+wide, 64 runs side by side, which the sixth column counts), how long
+Verilator and the code take to build, and the most memory each has:
 
-- **As entities** (`logic.ent`): every signal an entity, the ANDs gone
-  through one after another by their level (`in turn by`), each looking
-  its two inputs up. 2.6 ns an AND, the same for every circuit.
-- **As rows** (`plain.ent`): no entities; the ANDs are rows of a buffer
-  that a proc goes through. 1.6 ns an AND. The entities cost 1 ns an
-  AND over this: the order worked out each cycle, and the look-ups.
+| circuit | Verilator | as code | as rows | as entities | as code, 64 runs | built: Verilator | as code | memory: Verilator | as code | the tables |
+|---|---|---|---|---|---|---|---|---|---|---|
+| c6288 | 1,398 | 8,319 | 645 | 377 | 532,392 | 5 s | 1 s | 4 MB | 4 MB | 92 MB |
+| s38584 | 2,818 | 2,320 | 538 | 343 | 148,480 | 8 s | 4 s | 4 MB | 4 MB | 116 MB |
+| mem_ctrl | 2,885 | 3,027 | 577 | 358 | 193,757 | 24 s | 11 s | 5 MB | 4 MB | 98 MB |
+| hyp | 2,088 | 3,013 | 612 | 392 | 192,821 | 255 s | 102 s | 7 MB | 6 MB | 118 MB |
+
 - **As code** (`compile.py`, `coded.ent`): the netlist written out as
   ent-lang, an AND a line, and compiled with the program. This is what
-  Verilator does, and it is the like-for-like comparison: 7.7 times
-  faster than Verilator on c6288, 1.3 and 1.5 times on mem_ctrl and hyp,
-  and 0.88 of its speed on s38584.
-- Going through a table of gates is 4 to 8 times slower than Verilator
-  for one run, and cannot be otherwise: each AND's value goes through
-  memory to the next. With the 64 runs counted, the table as entities
-  works out 8 to 17 times the gates Verilator does, and the code 50 to
-  490 times.
-
-How long the builds take, for the largest (hyp, 238,658 ANDs): the model
-as code 111 s (written as 120 systems of 2,000 ANDs each), Verilator 262
-s on all the cores. The table-driven forms are built once, in a second,
-for any circuit.
+  Verilator does, and the like-for-like comparison: 6 times as fast as
+  Verilator on c6288, 1.4 times on hyp, the same on mem_ctrl, and 0.8 of
+  its speed on s38584. It builds in less than half of Verilator's time.
+- **As rows** (`plain.ent`): no entities; the ANDs are rows of a buffer
+  that a proc goes through. 1.6 to 1.9 ns an AND, 2 to 5 times
+  Verilator's time: each AND's value goes through memory to the next.
+- **As entities** (`logic.ent`): every signal an entity, the ANDs gone
+  through one after another by their level (`in turn by`), each looking
+  its two inputs up. 2.6 to 2.9 ns an AND: the entities cost 1 ns an AND
+  over the rows (the order worked out each cycle, and the look-ups).
+- **By what changed** (`events.ent`): with inputs drawn anew each cycle
+  nearly every AND changes, and settles more than once, round after
+  round: 10 to 2,000 times the time of going through all of them, most
+  where the circuit is deep (hyp has a round for each of its 24,730
+  levels). It is for a circuit in which little changes: see the
+  processor, below.
+- **Verilator built for four threads** is no faster on any of these
+  than on one, and slower on s38584: gates this small are not worth
+  handing to another thread.
+- **Icarus Verilog**, which goes by events too, takes 200 to 80,000
+  times Verilator's time; it is what the outputs are held against, not
+  what the speed is.
+- Counting the 64 runs, the code works out 50 to 380 times the gates a
+  second that Verilator does, for whoever needs many runs at once.
+- The tables' memory is the room the program has for a circuit of a
+  million signals, not this circuit's: a program is built once for any
+  circuit. The code is built for one, and has what that one needs.
+- The model's ways run on one thread each. One core and all the cores
+  give the same outputs (`check/same.py`), and no faster: nothing here
+  is shared out among threads. Going through a level's ANDs on several
+  would need a `for` to read, of another entity, a field that it sets
+  itself where the order makes that safe, which the language does not
+  have; and the deep circuits have ten ANDs a level.
+- The circuits of five to eight million six-input LUTs that the EPFL
+  suite has besides were not run: turning one into ANDs and compiling it
+  takes hours.
 
 ### How the code got there (s38584, a cycle)
 

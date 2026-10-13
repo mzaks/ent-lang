@@ -5,25 +5,29 @@
   examples/logic/prepare.py all
   python3 bench/logic/run.py [circuits] [--check]
 
-For each circuit (c6288 s38584 hyp mem_ctrl by default) both simulate
-the same gates with the same inputs, worked out by the same rule from
-the seed, the input and the cycle, and write nothing: each keeps a sum
-of its outputs. Each runs twice, for so many cycles and for three times
-as many, and a cycle's time is what the longer run took more, shared
-among the cycles it had more: reading the circuit and starting up are
-not in it. One core, CPU 2 (a fast one), native builds of both.
+For each circuit (c6288 s38584 mem_ctrl hyp by default) every simulator
+runs the same gates with the same inputs, worked out by the same rule
+from the seed, the input and the cycle, and writes nothing: each keeps a
+sum of its outputs. Each runs twice, for so many cycles and for three
+times as many, and a cycle's time is what the longer run took more,
+shared among the cycles it had more: reading the circuit and starting up
+are not in it. One core, CPU 2 (a fast one), native builds.
 
-The model is timed three ways: the gates as entities gone through by
-their level, as rows of buffers (examples/logic/plain.ent), and written
-out as ent-lang code that is compiled with the program
-(examples/logic/compile.py, coded.ent), which is what Verilator does with
-a circuit; how long each of the two took to build is said too.
-Verilator simulates one run of the circuit, the model 64 side by side:
-said are a cycle's time for each, and how many gates a second that is
-(for the model with its 64 runs counted, too).
+The model is timed four ways: the gates as entities gone through by
+their level, as entities of which only those are gone through whose
+inputs changed (examples/logic/events.ent), as rows of buffers
+(plain.ent), and written out as ent-lang code that is compiled with the
+program (compile.py, coded.ent), which is what Verilator does with a
+circuit. Verilator is timed on one thread and built for four (on the
+four fast cores, the median of three); Icarus Verilog, which the
+outputs are held against (check/equal.py), is timed for the scale of it.
+Verilator and Icarus simulate one run of the circuit, the model 64 side
+by side: said are a cycle's time for each, how many gates a second that
+is (for the code with its 64 runs counted, too), how long Verilator and
+the code took to build, and the most memory each had.
 
-With --check Verilator's outputs are first held against the model's own
-first run, cycle by cycle, for 1,000 cycles.
+With --check Verilator's outputs and the code's are first held against
+the model's own first run, cycle by cycle, for 1,000 cycles.
 """
 
 import os
@@ -97,12 +101,13 @@ int main(int argc, char **argv) {
 """
 
 
-def verilator(name):
+def verilator(name, threads=0):
     """Verilator's program for a circuit: its gates, with the inputs and
-    the outputs each as one port of so many bits."""
+    the outputs each as one port of so many bits. (With `threads`, built
+    to run on so many.)"""
     inputs, outputs = equal.netlist(name)
     declared, clock = equal.ports(name)
-    folder = os.path.join(BENCH, "verilator_" + name)
+    folder = os.path.join(BENCH, f"verilator_{name}" + (f"_{threads}" if threads else ""))
     built = os.path.join(folder, "obj_dir", "Vwrap")
     # (Built anew each time, so that how long it takes can be said.)
     shutil.rmtree(os.path.join(folder, "obj_dir"), ignore_errors=True)
@@ -138,6 +143,7 @@ endmodule
     subprocess.run(
         ["verilator", "--cc", "--exe", "--build", "-j", "0", "-O3", "--x-assign", "fast",
          "--x-initial", "fast", "--noassert", "-Wno-fatal", "--top-module", "wrap",
+         *(["--threads", str(threads)] if threads else []),
          "-CFLAGS", "-O3 -march=native", "wrap.v", os.path.join(CIRCUITS, name + ".v"),
          "harness.cpp"],
         check=True, cwd=folder, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -179,17 +185,39 @@ def code(name):
     return built, time.time() - started
 
 
-def seconds(command, folder):
+PEAK = {}
+
+
+def seconds(command, folder, cpus="2", what=None):
+    """How long a run took; the most memory it had is noted under `what`.
+    (Read from the process while it runs: what the system says at its end
+    is no less than this script's own memory, which every process it
+    starts begins with.)"""
     started = time.time()
-    subprocess.run(["taskset", "-c", "2"] + command, check=True, cwd=folder,
-                   stdout=subprocess.DEVNULL)
+    process = subprocess.Popen(["taskset", "-c", cpus] + command, cwd=folder,
+                               stdout=subprocess.DEVNULL)
+    most = 0
+    while process.poll() is None:
+        if what:
+            try:
+                with open(f"/proc/{process.pid}/status") as status:
+                    for line in status:
+                        if line.startswith("VmHWM:"):
+                            most = max(most, int(line.split()[1]) / 1024)
+            except OSError:
+                pass
+        time.sleep(0.002)
+    if process.returncode:
+        sys.exit(f"{' '.join(command)} failed")
+    if what:
+        PEAK[what] = max(PEAK.get(what, 0), most)
     return time.time() - started
 
 
-def a_cycle(run):
+def a_cycle(run, first=100):
     """A cycle's seconds: `run(cycles)` times a run of so many. The number
     of cycles is raised until the shorter run takes a quarter of a second."""
-    cycles = 100
+    cycles = first
     while True:
         short = run(cycles)
         if short >= 0.25 or cycles >= 100000000:
@@ -198,16 +226,24 @@ def a_cycle(run):
     return (run(3 * cycles) - short) / (2 * cycles)
 
 
+def icarus(name):
+    """A cycle's seconds under Icarus Verilog, by check/equal.py's
+    testbench: two runs, as above (it reads the circuit anew each time,
+    which the difference leaves out)."""
+    def run(cycles):
+        started = time.time()
+        equal.reference(name, cycles)
+        return time.time() - started
+    return a_cycle(run, 20)
+
+
 def main():
     arguments = sys.argv[1:]
     names = [a for a in arguments if not a.startswith("--")] or \
-        ["c6288", "s38584", "hyp", "mem_ctrl"]
+        ["c6288", "s38584", "mem_ctrl", "hyp"]
     os.makedirs(BENCH, exist_ok=True)
     simulate = model()
-    print("| circuit | ANDs | Verilator, a cycle | as code | as rows | as entities | "
-          "gates a second: Verilator | as code | as code, 64 runs | "
-          "built: Verilator | as code |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    rows = []
     for name in names:
         folder = os.path.join(BENCH, "model_" + name)
         os.makedirs(folder, exist_ok=True)
@@ -217,32 +253,61 @@ def main():
         started = time.time()
         reference = verilator(name)
         their_build = time.time() - started
+        threaded = verilator(name, 4)
         fast, my_build = code(name)
 
-        def ours(cycles, shown=0, way=0, program=None):
+        def ours(cycles, shown=0, way=0, program=None, what=None):
             with open(os.path.join(folder, "run.txt"), "w") as file:
                 file.write(f"{cycles} 1 {shown} {way}\n")
-            return seconds([program or simulate], folder)
+            return seconds([program or simulate], folder, "2", what)
 
         if "--check" in arguments:
             ours(1000, 1)
             wanted = open(os.path.join(folder, "outputs.txt")).read()
-            got = subprocess.run([reference, "1000", "show"], check=True,
-                                 capture_output=True, text=True).stdout
-            if wanted != got:
-                sys.exit(f"{name}: Verilator's outputs are not the model's")
+            for program in (reference, threaded):
+                got = subprocess.run([program, "1000", "show"], check=True,
+                                     capture_output=True, text=True).stdout
+                if wanted != got:
+                    sys.exit(f"{name}: Verilator's outputs are not the model's")
             ours(1000, 1, 0, fast)
             if wanted != open(os.path.join(folder, "outputs.txt")).read():
                 sys.exit(f"{name}: as code, the outputs are not the model's")
-        theirs = a_cycle(lambda cycles: seconds([reference, str(cycles)], folder))
-        mine = a_cycle(ours)
-        plain = a_cycle(lambda cycles: ours(cycles, 0, 1))
-        coded = a_cycle(lambda cycles: ours(cycles, 0, 0, fast))
-        print(f"| {name} | {gates} | {1e6 * theirs:.2f} us | {1e6 * coded:.2f} us | "
-              f"{1e6 * plain:.2f} us | {1e6 * mine:.2f} us | "
-              f"{gates / theirs / 1e6:.0f} M | {gates / coded / 1e6:.0f} M | "
-              f"{64 * gates / coded / 1e6:.0f} M | {their_build:.0f} s | {my_build:.0f} s |",
-              flush=True)
+        row = {"name": name, "gates": gates, "their build": their_build, "my build": my_build}
+        row["verilator"] = a_cycle(lambda c: seconds([reference, str(c)], folder, "2",
+                                                     name + " verilator"))
+        # (On the four fast cores, the median of three.)
+        row["verilator 4"] = sorted(
+            a_cycle(lambda c: seconds([threaded, str(c)], folder, "0-3"))
+            for _ in range(3))[1]
+        row["code"] = a_cycle(lambda c: ours(c, 0, 0, fast, name + " code"))
+        row["rows"] = a_cycle(lambda c: ours(c, 0, 1, None, name + " tables"))
+        row["entities"] = a_cycle(lambda c: ours(c, 0, 0))
+        row["events"] = a_cycle(lambda c: ours(c, 0, 2), 10)
+        row["icarus"] = icarus(name)
+        rows.append(row)
+        print(f"{name} done", file=sys.stderr, flush=True)
+
+    us = lambda value: f"{1e6 * value:.2f} us"
+    print("A clock cycle:\n")
+    print("| circuit | ANDs | Verilator | Verilator, 4 threads | as code | as rows | "
+          "as entities | by what changed | Icarus Verilog |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    for row in rows:
+        print(f"| {row['name']} | {row['gates']:,} | {us(row['verilator'])} | "
+              f"{us(row['verilator 4'])} | {us(row['code'])} | {us(row['rows'])} | "
+              f"{us(row['entities'])} | {us(row['events'])} | {us(row['icarus'])} |")
+    print("\nGates a second, in millions (the last with the 64 runs counted), "
+          "the builds, and the most memory:\n")
+    print("| circuit | Verilator | as code | as rows | as entities | as code, 64 runs | "
+          "built: Verilator | as code | memory: Verilator | as code | the tables |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for row in rows:
+        g, n = row["gates"] / 1e6, row["name"]
+        print(f"| {n} | {g / row['verilator']:,.0f} | {g / row['code']:,.0f} | "
+              f"{g / row['rows']:,.0f} | {g / row['entities']:,.0f} | "
+              f"{64 * g / row['code']:,.0f} | {row['their build']:.0f} s | "
+              f"{row['my build']:.0f} s | {PEAK.get(n + ' verilator', 0):.0f} MB | "
+              f"{PEAK.get(n + ' code', 0):.0f} MB | {PEAK.get(n + ' tables', 0):.0f} MB |")
     return 0
 
 
