@@ -1,0 +1,325 @@
+// A small circuit in a window: its gates column by column, each as far
+// right as its level, and its wires lit where they carry a 1. It steps
+// slowly, a level at a time, so a cycle's new inputs are seen going
+// through the circuit from the left to the outputs on the right; then
+// the flip-flops (squares with a violet rim, under the inputs) take
+// what stands at their inputs, and the next cycle begins.
+//
+//   examples/logic/fetch.sh
+//   examples/logic/prepare.py s27          (or c17, c432, s298, ...)
+//   cd build/logic/run && cp ../circuits/s27.aag circuit.aag
+//   ../../../tools/ent run ../../../examples/logic/view.ent
+//
+// Space holds it and lets it go on, the right arrow takes one step
+// while it is held, up and down make it faster and slower. The inputs
+// are drawn anew each cycle as logic.ent draws them; of the 64 runs
+// that a value holds the first is shown. A dot on a wire where it comes
+// into a gate says that the gate takes it inverted.
+//
+// (The circuit is the file "circuit.aag" where the program is started.
+// It is for circuits of some hundred gates: a bigger one is drawn too,
+// and nothing can be made out in it.)
+import files
+import console
+import window
+import circuit
+import logic
+
+capacity Bytes 4000000
+capacity Signal 20000
+capacity Ins 2000
+capacity Flops 20000
+capacity Outs 2000
+capacity Gates 20000
+capacity Numbers 20001
+capacity Sorted 20000
+capacity Starts 20001
+capacity Stim 2000
+capacity Seen 2000
+
+// Where a signal is drawn, by its number: its level, and how far down
+// its column, from 0 at the top to 1.
+buffer Spots { level: i32, part: f32 } capacity 20001
+// How many signals a level has, and how many of them have a place yet.
+buffer Rows { many: i32, next: i32 } capacity 20001
+// For each AND, by its row: how far down its two inputs are, between them.
+buffer Middle { of: f32 } capacity 20000
+
+// `frames`: how many a step takes. `at`: which step of the cycle is
+// next: 0 the inputs, then a level of ANDs each, then the outputs, then
+// the clock's edge. What this frame's step is, if there is one, the
+// four flags say.
+unique Pace {
+  frames: i32, at: i32, held: bool, due: bool, space: bool, right: bool, up: bool, down: bool,
+  inputs: bool, level: bool, outputs: bool, clock: bool
+}
+
+world {
+  Window.width = 1200
+  Window.height = 720
+  Window.min_width = 800
+  Window.min_height = 480
+  Window.title = "ent-lang: a circuit of gates"
+  Window.background = 0x0d1117
+  Window.fps = 60
+  Window.resizable = true
+  Circuit.file = "circuit.aag"
+  Run.seed = 1
+  Pace.frames = 24
+}
+
+// Every signal's place: the inputs and the flip-flops in the first
+// column, an AND in its level's, and in a column each AND as near as
+// may be to where its two inputs are, so the wires cross less.
+system layout() {
+  Spots = []
+  Rows = []
+  Middle = []
+  for i in 0..Circuit.most + 1 { Spots += { level: 0, part: 0.5 } }
+  for i in 0..Circuit.levels + 1 { Rows += { many: 0, next: 0 } }
+  for i in 0..len(Gates) { Middle += { of: 0.0 } }
+  if Circuit.read && Circuit.ordered {
+    Rows[0].many = len(Ins) + len(Flops)
+    for i in 0..len(Gates) { Rows[Gates[i].level].many += 1 }
+    for i in 0..len(Ins) {
+      Spots[Ins[i].number].part = (Rows[0].next as f32 + 0.5) / Rows[0].many as f32
+      Rows[0].next += 1
+    }
+    for i in 0..len(Flops) {
+      Spots[Flops[i].number].part = (Rows[0].next as f32 + 0.5) / Rows[0].many as f32
+      Rows[0].next += 1
+    }
+    for level in 1..Circuit.levels + 1 {
+      let from = Starts[level - 1].at
+      let to = Starts[level].at
+      for i in from..to {
+        let row = Sorted[i].row
+        Middle[row].of = (Spots[Gates[row].a / 2].part + Spots[Gates[row].b / 2].part) / 2.0
+      }
+      // (Put in order one after another: a level has few.)
+      for i in from + 1..to {
+        let row = Sorted[i].row
+        var j = i
+        while j > from && Middle[Sorted[j - 1].row].of > Middle[row].of {
+          Sorted[j].row = Sorted[j - 1].row
+          j -= 1
+        }
+        Sorted[j].row = row
+      }
+      for i in from..to {
+        let row = Sorted[i].row
+        Spots[Gates[row].number].level = level
+        Spots[Gates[row].number].part = ((i - from) as f32 + 0.5) / Rows[level].many as f32
+      }
+    }
+  }
+}
+
+system pace() {
+  let space = Keys.space && !Pace.space
+  let right = Keys.right && !Pace.right
+  if space { Pace.held = !Pace.held }
+  if Keys.up && !Pace.up { Pace.frames = max(2, Pace.frames / 2) }
+  if Keys.down && !Pace.down { Pace.frames = min(192, Pace.frames * 2) }
+  Pace.space = Keys.space
+  Pace.right = Keys.right
+  Pace.up = Keys.up
+  Pace.down = Keys.down
+  let ready = Circuit.read && Circuit.ordered
+  Pace.due = ready && ((Pace.held && right) ||
+                       (!Pace.held && Window.frame % Pace.frames as i64 == 0))
+  Pace.inputs = Pace.due && Pace.at == 0
+  Pace.level = Pace.due && Pace.at >= 1 && Pace.at <= Circuit.levels
+  Pace.outputs = Pace.due && Pace.at == Circuit.levels + 1
+  Pace.clock = Pace.due && Pace.at == Circuit.levels + 2
+}
+
+// The ANDs of the level the step is at.
+system front() {
+  for g: And, v: mut Value in turn by g.level {
+    if g.level == Pace.at {
+      if let a = Value(g.a).bits {
+        if let b = Value(g.b).bits {
+          v.bits = side(a, g.not_a) & side(b, g.not_b)
+        }
+      }
+    }
+  }
+}
+
+system advance() {
+  if Pace.due {
+    Pace.at = if Pace.at >= Circuit.levels + 2 { 0 } else { Pace.at + 1 }
+  }
+}
+
+// How far apart the columns are, and where a signal is in a window so
+// wide and high: the circuit has the window but for 280 points on the
+// right.
+fn column(levels: i32, width: i32) -> f32 {
+  (width as f32 - 280.0 - 150.0) / max(levels, 1) as f32
+}
+fn across(level: i32, levels: i32, width: i32) -> f32 {
+  60.0 + level as f32 * column(levels, width)
+}
+fn down(part: f32, height: i32) -> f32 { 30.0 + part * (height as f32 - 60.0) }
+
+// How big a gate is drawn where the fullest column has so many.
+fn size(most: i32, height: i32, between: f32) -> f32 {
+  let room = (height as f32 - 60.0) / max(most, 1) as f32
+  max(1.5, min(min(room * 0.36, between * 0.3), 13.0))
+}
+
+fn lit(on: bool) -> i32 { if on { 0xffd23f } else { 0x2c3644 } }
+fn wire(on: bool) -> i32 { if on { 0xd0ffd23f } else { 0xff46546a } }
+
+// A wire, a little thicker than a line is.
+proc run(x0: f32, y0: f32, x1: f32, y1: f32, color: i32) {
+  line(x0, y0, x1, y1, color)
+  line(x0, y0 + 0.5, x1, y1 + 0.5, color)
+  line(x0 + 0.5, y0, x1 + 0.5, y1, color)
+}
+
+// The wires: from each of an AND's two inputs to it, lit by what the
+// input is now; and from what a flip-flop takes back to it.
+system wires() {
+  var most = 1
+  for i in 0..len(Rows) { most = max(most, Rows[i].many) }
+  let between = column(Circuit.levels, Window.width)
+  let r = size(most, Window.height, between)
+  for g: And, s: Signal {
+    let x = across(g.level, Circuit.levels, Window.width) - r
+    let y = down(Spots[s.id].part, Window.height)
+    if let a = Signal(g.a).id {
+      if let bits = Value(g.a).bits {
+        let on = bits & 1 == 1
+        run(across(Spots[a].level, Circuit.levels, Window.width) + r,
+             down(Spots[a].part, Window.height), x, y - r * 0.45, wire(on))
+        if g.not_a { circle(x - r * 0.3, y - r * 0.45, max(1.0, r * 0.28), lit(!on)) }
+      }
+    }
+    if let b = Signal(g.b).id {
+      if let bits = Value(g.b).bits {
+        let on = bits & 1 == 1
+        run(across(Spots[b].level, Circuit.levels, Window.width) + r,
+             down(Spots[b].part, Window.height), x, y + r * 0.45, wire(on))
+        if g.not_b { circle(x - r * 0.3, y + r * 0.45, max(1.0, r * 0.28), lit(!on)) }
+      }
+    }
+  }
+  for f: Flop, s: Signal {
+    if let from = Signal(f.from).id {
+      if let bits = Value(f.from).bits {
+        let on = side(bits, f.inverted) & 1 == 1
+        run(across(Spots[from].level, Circuit.levels, Window.width),
+             down(Spots[from].part, Window.height) + r,
+             across(0, Circuit.levels, Window.width), down(Spots[s.id].part, Window.height),
+             if on { 0xa0b48cff } else { 0x80554a80 })
+      }
+    }
+  }
+}
+
+// The signals over the wires: an input a square, a flip-flop a square
+// with a rim, an AND a disc; and the outputs in a column of their own
+// on the right, each joined to the signal it shows.
+system nodes() {
+  var most = 1
+  for i in 0..len(Rows) { most = max(most, Rows[i].many) }
+  let between = column(Circuit.levels, Window.width)
+  let r = size(most, Window.height, between)
+  // (Which column the step is at.)
+  if Pace.at >= 1 && Pace.at <= Circuit.levels + 1 {
+    let x = across(Pace.at - 1, Circuit.levels, Window.width)
+    rect(x - between * 0.5, 0.0, between, Window.height as f32, 0x18ffffff)
+  }
+  for i: Input, s: Signal, v: Value where i.index >= 0 {
+    let x = across(0, Circuit.levels, Window.width)
+    let y = down(Spots[s.id].part, Window.height)
+    rect(x - r, y - r, 2.0 * r, 2.0 * r, lit(v.bits & 1 == 1))
+    if r >= 7.0 { label("{i.index}", x - r - 30.0, y - 8.0, 14.0, 0x6b7888) }
+  }
+  for f: Flop, s: Signal, v: Value {
+    let x = across(0, Circuit.levels, Window.width)
+    let y = down(Spots[s.id].part, Window.height)
+    rect(x - r - 2.0, y - r - 2.0, 2.0 * r + 4.0, 2.0 * r + 4.0, 0x9d7bff)
+    rect(x - r, y - r, 2.0 * r, 2.0 * r, lit(v.bits & 1 == 1))
+  }
+  for g: And, s: Signal, v: Value {
+    circle(across(g.level, Circuit.levels, Window.width),
+           down(Spots[s.id].part, Window.height), r, lit(v.bits & 1 == 1))
+  }
+  let x = across(Circuit.levels, Circuit.levels, Window.width) + 70.0
+  for i in 0..len(Outs) {
+    let y = down((i as f32 + 0.5) / len(Outs) as f32, Window.height)
+    let on = Seen[i].bits & 1 == 1
+    if let from = Signal(Outs[i].who).id {
+      run(across(Spots[from].level, Circuit.levels, Window.width) + r,
+           down(Spots[from].part, Window.height), x - r, y, wire(on))
+    }
+    rect(x - r, y - r, 2.0 * r, 2.0 * r, if on { 0x3fd0ff } else { 0x243447 })
+    if r >= 7.0 { label("{i}", x + r + 8.0, y - 8.0, 14.0, 0x6b7888) }
+  }
+}
+
+system words() {
+  let x = Window.width as f32 - 250.0
+  if !Circuit.read {
+    label("No circuit: the file {Circuit.file}", 40.0, 120.0, 22.0, 0xff7b72)
+    label("is not where the program was started.", 40.0, 150.0, 22.0, 0xff7b72)
+    label("examples/logic/prepare.py s27 makes one in", 40.0, 200.0, 18.0, 0x9fb0c3)
+    label("build/logic/circuits: copy it to circuit.aag here.", 40.0, 226.0, 18.0, 0x9fb0c3)
+  } else if !Circuit.ordered {
+    label("The circuit's ANDs do not come after their inputs.", 40.0, 120.0, 22.0, 0xff7b72)
+  }
+  label("cycle {Run.cycle}", x, 24.0, 34.0, 0xe6edf3)
+  if Pace.at == 0 { label("next: new inputs", x, 68.0, 18.0, 0x9fb0c3) }
+  else if Pace.at <= Circuit.levels {
+    label("next: level {Pace.at} of {Circuit.levels}", x, 68.0, 18.0, 0x9fb0c3)
+  }
+  else if Pace.at == Circuit.levels + 1 { label("next: the outputs", x, 68.0, 18.0, 0x9fb0c3) }
+  else { label("next: the clock's edge", x, 68.0, 18.0, 0xb48cff) }
+  label("{Circuit.gates} ANDs", x, 120.0, 18.0, 0xe6edf3)
+  label("{Circuit.inputs} inputs", x, 146.0, 18.0, 0xe6edf3)
+  label("{Circuit.flops} flip-flops", x, 172.0, 18.0, 0xe6edf3)
+  label("{Circuit.outputs} outputs", x, 198.0, 18.0, 0xe6edf3)
+  rect(x, 250.0, 14.0, 14.0, lit(true))
+  label("1", x + 24.0, 247.0, 18.0, 0x9fb0c3)
+  rect(x + 60.0, 250.0, 14.0, 14.0, lit(false))
+  label("0", x + 84.0, 247.0, 18.0, 0x9fb0c3)
+  rect(x, 278.0, 14.0, 14.0, 0x9d7bff)
+  label("a flip-flop", x + 24.0, 275.0, 18.0, 0x9fb0c3)
+  rect(x, 306.0, 14.0, 14.0, 0x3fd0ff)
+  label("an output that is 1", x + 24.0, 303.0, 18.0, 0x9fb0c3)
+  circle(x + 7.0, 341.0, 4.0, lit(true))
+  label("taken inverted", x + 24.0, 331.0, 18.0, 0x9fb0c3)
+  let y = max(Window.height as f32, 480.0)
+  if Pace.held { label("held", x, y - 112.0, 18.0, 0xffd23f) }
+  label("Space: hold, go on", x, y - 84.0, 14.0, 0x6b7888)
+  label("Right: a step while held", x, y - 62.0, 14.0, 0x6b7888)
+  label("Up, Down: faster, slower", x, y - 40.0, 14.0, 0x6b7888)
+}
+
+schedule setup() { netlist() levels() build() pins() layout() }
+
+schedule frame() {
+  begin()
+  pace()
+  draw() run_if Pace.inputs
+  stimulus() run_if Pace.inputs
+  front() run_if Pace.level
+  show() run_if Pace.outputs
+  latch() run_if Pace.outputs
+  edge() run_if Pace.clock
+  tick() run_if Pace.clock
+  advance()
+  wires()
+  nodes()
+  words()
+  present()
+}
+
+main {
+  setup()
+  loop { frame() } until Window.closed
+}
