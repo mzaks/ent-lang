@@ -28,9 +28,8 @@
 import files
 import math
 import random
+import parameters
 import disease
-
-capacity Bytes 262144
 
 // A household: its number, how many live in it, and what its ill
 // members give off in a day (transmission.ent).
@@ -53,36 +52,6 @@ relation (Person)-[LivesIn]->(Household) tree capacity 16
 // A tie in a network. It is one edge, met along from either end; `key`
 // numbers the ties, for the draw of the days it is met on.
 relation (Person)-[WorksWith { key: i32 }]->(Person) capacity 16
-
-// The five networks: how many each member meets in them on a day, and
-// whether its own people are of the working age.
-table networks { meets: f32, adult: bool } = [
-  { meets: 10.0, adult: false },     // 0 to 9: primary school
-  { meets: 10.0, adult: false },     // 10 to 19: secondary school
-  { meets: 7.0,  adult: true },      // 20 to 69: work
-  { meets: 3.0,  adult: false },     // 70 to 79: the retired
-  { meets: 3.0,  adult: false }      // 80 and more: the elderly
-]
-// The people met by chance on a day, by age: the young, those of working
-// age and the old; on average, and how far from it.
-table chances { mean: f32, deviation: f32 } = [
-  { mean: 2.0, deviation: 2.0 }, { mean: 2.0, deviation: 2.0 },
-  { mean: 4.0, deviation: 4.0 }, { mean: 4.0, deviation: 4.0 },
-  { mean: 4.0, deviation: 4.0 }, { mean: 4.0, deviation: 4.0 },
-  { mean: 4.0, deviation: 4.0 },
-  { mean: 3.0, deviation: 3.0 }, { mean: 3.0, deviation: 3.0 }
-]
-// The network of each age.
-table own_network: i32 = [0, 1, 2, 2, 2, 2, 2, 3, 4]
-// How many households are of one person, of two, and so on to six.
-table household_sizes: f32 = [7452.0, 9936.0, 4416.0, 4140.0, 1104.0, 552.0]
-
-// Of a network of the young or the old: a member of working age for
-// every so many of its own. The part of a network's ties met on a day,
-// and the part of its ties that leave an end.
-const STAFF = 0.2
-const DAILY = 0.5
-const REWIRE = 0.1
 
 const HOUSES = 5
 const HAZARD = 6
@@ -151,7 +120,7 @@ fn members(panel: Panel, row: i32) -> i32 {
 
 // How far the shares of the sums from `from` on (nine of ages, six of
 // sizes) are from the country's.
-fn misfit(sums: Sums, from: i32) -> f64 {
+fn misfit(sums: Sums, ages: Ages, sizes: Sizes, from: i32) -> f64 {
   var people = 0.0 as f64
   var houses = 0.0 as f64
   var all_ages = 0.0 as f64
@@ -162,7 +131,7 @@ fn misfit(sums: Sums, from: i32) -> f64 {
   }
   for size in 0..6 {
     houses += sums[from + 9 + size].value
-    all_sizes += household_sizes[size] as f64
+    all_sizes += sizes[size].share as f64
   }
   var error = 0.0 as f64
   for age in 0..9 {
@@ -171,7 +140,7 @@ fn misfit(sums: Sums, from: i32) -> f64 {
   }
   for size in 0..6 {
     let d = sums[from + 9 + size].value / houses -
-            household_sizes[size] as f64 / all_sizes
+            sizes[size].share as f64 / all_sizes
     error += d * d
   }
   error
@@ -179,8 +148,8 @@ fn misfit(sums: Sums, from: i32) -> f64 {
 
 // Households for so many people, and how far they are from the
 // country's in the end.
-proc take(panel: Panel, taken: mut Taken, sums: mut Sums, seed: i64,
-          people: i32) -> f64 {
+proc take(panel: Panel, taken: mut Taken, sums: mut Sums, ages: Ages,
+          sizes: Sizes, seed: i64, people: i32) -> f64 {
   let count = len(panel) / 9
   let k = key(seed, 0, 0, HOUSES)
   taken = []
@@ -196,7 +165,7 @@ proc take(panel: Panel, taken: mut Taken, sums: mut Sums, seed: i64,
     sums[9 + members(panel, row) - 1].value += 1.0
     housed += members(panel, row)
   }
-  var last = misfit(sums, 0)
+  var last = misfit(sums, ages, sizes, 0)
   var acceptance = last * 0.00001
   while housed < people && count > 0 {
     for i in 0..15 { sums[15 + i].value = sums[i].value }
@@ -207,7 +176,7 @@ proc take(panel: Panel, taken: mut Taken, sums: mut Sums, seed: i64,
       sums[24 + members(panel, row) - 1].value += 1.0
     }
     draws += 4
-    let error = misfit(sums, 15)
+    let error = misfit(sums, ages, sizes, 15)
     // Kept where they are no worse than the best so far by more than is
     // let pass, which then becomes less; else more is let pass.
     if error < last + acceptance {
@@ -223,11 +192,11 @@ proc take(panel: Panel, taken: mut Taken, sums: mut Sums, seed: i64,
       acceptance = acceptance * 1.0001
     }
   }
-  misfit(sums, 0)
+  misfit(sums, ages, sizes, 0)
 }
 
 system households() {
-  City.fit = take(Panel, Taken, Sums, Run.seed, Run.people)
+  City.fit = take(Panel, Taken, Sums, Ages, Sizes, Run.seed, Run.people)
 }
 
 // The people of the households taken, the oldest of each first, until
@@ -251,13 +220,14 @@ system settle() {
               Disease { stage: Stage.Susceptible, since: 0,
                         next: Stage.Susceptible, at: -1, path: Path.None,
                         infected: 0 },
-              Hazard { left: (-log64(draw) / ages[age].susceptible as f64) as f32 },
-              Spread { multiplier: gamma(key(Run.seed, id, 0, SPREAD), 1.0, 1.4) as f32 },
+              Hazard { left: (-log64(draw) / Ages[age].susceptible as f64) as f32 },
+              Spread { multiplier: gamma(key(Run.seed, id, 0, SPREAD), 1.0,
+                                         Model.spread as f64) as f32 },
               Work { network: own_network[age] as u8, ties: 0 },
               Infectious { rate: 0.0 },
               Chance { meets: negative_binomial(key(Run.seed, id, 0, CHANCE),
-                                                chances[age].mean as f64,
-                                                chances[age].deviation as f64) }
+                                                Ages[age].chance as f64,
+                                                Ages[age].chance_deviation as f64) }
             }
             connect (who)-[LivesIn]->(home)
             id += 1
@@ -294,27 +264,27 @@ system census() {
 // The network of somebody of working age, by a number between 0 and 1:
 // one of the young or the old as often as it needs staff, else work.
 fn staffed(u: f64, primary: i32, secondary: i32, working: i32, retired: i32,
-           elderly: i32) -> u8 {
-  let each = STAFF as f64 / working as f64
-  let a = primary as f64 * each
-  let b = a + secondary as f64 * each
-  let c = b + retired as f64 * each
-  let d = c + elderly as f64 * each
+           elderly: i32, young: f32, old: f32) -> u8 {
+  let a = primary as f64 * young as f64 / working as f64
+  let b = a + secondary as f64 * young as f64 / working as f64
+  let c = b + retired as f64 * old as f64 / working as f64
+  let d = c + elderly as f64 * old as f64 / working as f64
   if u < a { 0 } else if u < b { 1 } else if u < c { 3 } else if u < d { 4 } else { 2 }
 }
 
 system employ() {
-  for p: Person, a: Age, w: mut Work where networks[own_network[a.group]].adult {
+  for p: Person, a: Age, w: mut Work where age_kind[a.group] == 1 {
     w.network = staffed(uniform(key(Run.seed, p.id, 0, NETWORK), 0), City.primary,
-                        City.secondary, City.working, City.retired, City.elderly)
+                        City.secondary, City.working, City.retired, City.elderly,
+                        Model.staff_young, Model.staff_old)
   }
 }
 
 // To how many after it on the ring each member of a network of so many
 // is tied: half of twice what is met in a day (of which half are met),
 // and no more than the ring allows.
-fn reach(network: i32, members: i32) -> i32 {
-  let half = (networks[network].meets as f64 / DAILY as f64 / 2.0) as i32
+fn reach(meets: f32, daily: f32, members: i32) -> i32 {
+  let half = (meets as f64 / daily as f64 / 2.0) as i32
   if 2 * half >= members - 1 { max(0, (members - 1) / 2) } else { half }
 }
 
@@ -329,7 +299,8 @@ fn elsewhere(k: u64, n: i32, from: i32, members: i32, reach: i32) -> i32 {
 // the tie then leads from it to a place anywhere else. So a tie has two
 // turns, its lower place's first; and one that was moved to a place
 // that is yet to come has a turn there too, and so on.
-fn tie(k: u64, i: i32, step: i32, members: i32, reach: i32) -> (i32, i32) {
+fn tie(k: u64, i: i32, step: i32, members: i32, reach: i32, rewire: f32)
+    -> (i32, i32) {
   let other = (i + step) % members
   let first = min(i, other)
   let second = max(i, other)
@@ -337,17 +308,17 @@ fn tie(k: u64, i: i32, step: i32, members: i32, reach: i32) -> (i32, i32) {
   var to = second
   if members > 2 * reach + 1 {
     var moved = false
-    if uniform(k, 0) < REWIRE as f64 {
+    if uniform(k, 0) < rewire as f64 {
       to = elsewhere(k, 1, first, members, reach)
       moved = true
-    } else if uniform(k, 2) < REWIRE as f64 {
+    } else if uniform(k, 2) < rewire as f64 {
       kept = second
       to = elsewhere(k, 1, second, members, reach)
       moved = true
     }
     var n = 3
     while moved && to > kept {
-      moved = uniform(k, n) < REWIRE as f64
+      moved = uniform(k, n) < rewire as f64
       if moved {
         kept = to
         to = elsewhere(k, n + 1, kept, members, reach)
@@ -365,11 +336,12 @@ system wire() {
     Ring = []
     for e, w: Work where w.network as i32 == network { Ring += { who: e } }
     let members = len(Ring)
-    let far = reach(network, members)
+    let far = reach(Networks[network].meets, Model.daily, members)
     let order = key(Run.seed, network, 0, RING)
     for i in 0..members {
       for step in 1..far + 1 {
-        let (from, to) = tie(key(Run.seed, ties, 0, TIES), i, step, members, far)
+        let (from, to) = tie(key(Run.seed, ties, 0, TIES), i, step, members, far,
+                             Model.rewire)
         connect (Ring[permute(order, from, members)].who)-[WorksWith { key: ties }]->
                 (Ring[permute(order, to, members)].who)
         ties += 1

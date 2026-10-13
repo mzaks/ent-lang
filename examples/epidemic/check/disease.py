@@ -5,7 +5,7 @@
 
 Builds check/disease_check.ent, which infects 100,000 people at once
 and writes every step of every illness, and holds what comes out against
-the numbers in disease.ent:
+the numbers in parameters.ent:
 
 - how many people are of each age;
 - by age, how many of the infected show nothing or little, how many of
@@ -53,8 +53,8 @@ WAITS = {
 
 
 def tables():
-    """The tables `delays` and `ages` of disease.ent, as it has them."""
-    source = open(os.path.join(HERE, "..", "disease.ent")).read()
+    """The tables `delays` and `ages` of parameters.ent, as it has them."""
+    source = open(os.path.join(HERE, "..", "parameters.ent")).read()
     number = r"(-?[0-9.]+)"
     delays = {
         name: (float(mean), float(deviation))

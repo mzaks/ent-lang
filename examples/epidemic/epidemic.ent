@@ -1,6 +1,6 @@
-// A city's epidemic, a line for each day: the day, who became infected
-// on it, and how many people are in each stage of the illness (the
-// first line names them).
+// A city's epidemic, a line for each day: the day, how many were
+// infected so far, and how many people are in each stage of the illness
+// (the first line names them, as the reference names its own).
 //
 //   examples/epidemic/reference/fetch.sh        once: the reference's files
 //   cd build/epidemic/run
@@ -11,8 +11,12 @@
 // they meet by chance (transmission.ent): 200 days, or until nobody is
 // ill. The households
 // are taken from the reference's panel, a file that is looked for where
-// the program is started.
+// the program is started. The numbers are the reference's baseline, or
+// what a file "parameters.csv" there says, as the reference reads them:
+// the seed, how many people (up to 100,000), how many days, and the rest
+// (parameters.ent).
 import console
+import parameters
 import disease
 import city
 import transmission
@@ -26,24 +30,24 @@ capacity Ring 100000
 capacity Stubs 500000
 capacity Met 250000
 
-unique Days: i32
-
 world {
-  Run.seed = 1
   Run.people = 100000
-  Run.seeded = 10
-  Days = 200
+  Model.file = "parameters.csv"
 }
 
+// The reference's names for its own columns of these, and its counts:
+// everybody infected so far, and those with symptoms mild or severe as
+// one. (A line the console takes has 126 bytes: those names just fit.)
 system heading() {
-  put("day,new_infections,susceptible,presymptomatic,asymptomatic,mild,severe,hospitalised,critical,recovering,recovered,dead")
+  put("time,total_infected,n_presymptom,n_asymptom,n_symptoms,n_hospital,n_critical,n_hospitalised_recovering,n_death,n_recovered")
 }
 
 system report() {
-  put("{Clock.day},{Tally.new_infections},{Tally.susceptible},{Tally.presymptomatic},{Tally.asymptomatic},{Tally.mild},{Tally.severe},{Tally.hospitalised},{Tally.critical},{Tally.recovering},{Tally.recovered},{Tally.dead}")
+  put("{Clock.day},{Run.people - Tally.susceptible},{Tally.presymptomatic},{Tally.asymptomatic},{Tally.mild + Tally.severe},{Tally.hospitalised},{Tally.critical},{Tally.recovering},{Tally.dead},{Tally.recovered}")
 }
 
 schedule setup() {
+  parameters()
   panel()
   households()
   settle()
@@ -61,6 +65,7 @@ schedule setup() {
 
 schedule day() {
   tick()
+  policy()
   infectiousness()
   pair()
   household()
@@ -74,5 +79,5 @@ schedule day() {
 
 main {
   setup()
-  loop { day() } until Clock.day == Days || Tally.infected == 0
+  loop { day() } until Clock.day == Run.days || Tally.infected == 0
 }

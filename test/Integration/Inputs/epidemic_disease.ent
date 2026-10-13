@@ -2,6 +2,7 @@
 // 2,000 are infected on day 0: a line of counts for each day until none
 // of them is ill.
 import console
+import parameters
 import disease
 
 capacity Person 20000

@@ -1,0 +1,360 @@
+// The model's numbers: OpenABM-Covid19's baseline, and as a file of its
+// says otherwise.
+//
+//   import parameters
+//   world { Model.file = "parameters.csv" }       // or none: the baseline
+//   schedule setup() { parameters()  .. }
+//
+// The numbers by age, by wait and by network are rows of buffers, which
+// a `fn` is given to read (`Ages`, `Delays`, `Networks`, `Sizes`), and
+// the rest fields of `Model`; `Run` says what one run is. This module's
+// `world` fills them with the baseline, from the tables below.
+// `parameters` then reads the file `Model.file` names, if it names one:
+// a file as the reference reads it, a line of names and a line of
+// numbers for each set (the one `Model.line` says, the first if it says
+// none), of which the numbers this model knows by name are taken and the
+// others left.
+import files
+import math
+
+capacity Bytes 262144
+
+// What a wait is for.
+enum Delay {
+  Symptoms, AsymptomaticRecovery, Recovery, Hospital, Critical,
+  HospitalRecovery, Death, IcuLeave
+}
+
+// The days of each wait, of a gamma distribution with this mean and
+// deviation; without a deviation, the whole number of days below the
+// mean or the one above, so often that the mean is this one.
+table delays[Delay] { mean: f32, deviation: f32 } = [
+  Symptoms:             { mean: 5.42,  deviation: 2.7 },
+  AsymptomaticRecovery: { mean: 15.0,  deviation: 5.0 },
+  Recovery:             { mean: 12.0,  deviation: 5.0 },
+  Hospital:             { mean: 5.14,  deviation: 0.0 },
+  Critical:             { mean: 2.27,  deviation: 2.27 },
+  HospitalRecovery:     { mean: 8.75,  deviation: 8.75 },
+  Death:                { mean: 11.74, deviation: 8.79 },
+  IcuLeave:             { mean: 18.8,  deviation: 12.21 }
+]
+
+// By age, a row for every ten years and the last for 80 and more:
+// `share`: how many of the people are so old (the United Kingdom's, in
+//   thousands);
+// `susceptible`: how easily they are infected, against the others;
+// `asymptomatic`, `mild`: how many of the infected show nothing, or
+//   little (the rest are severe);
+// `hospital`: how many of the severe go to hospital;
+// `critical`: how many of those in hospital become critical;
+// `icu`: how many of the critical are taken into intensive care (the
+//   others die);
+// `die`: how many die in intensive care.
+table ages {
+  share: f32, susceptible: f32, asymptomatic: f32, mild: f32, hospital: f32,
+  critical: f32, icu: f32, die: f32
+} = [
+  { share: 8054.0, susceptible: 0.35, asymptomatic: 0.456, mild: 0.533,
+    hospital: 0.001, critical: 0.05,  icu: 1.0,  die: 0.33 },
+  { share: 7528.0, susceptible: 0.69, asymptomatic: 0.412, mild: 0.569,
+    hospital: 0.006, critical: 0.05,  icu: 1.0,  die: 0.25 },
+  { share: 8712.0, susceptible: 1.03, asymptomatic: 0.370, mild: 0.597,
+    hospital: 0.015, critical: 0.05,  icu: 0.9,  die: 0.5 },
+  { share: 8835.0, susceptible: 1.03, asymptomatic: 0.332, mild: 0.614,
+    hospital: 0.069, critical: 0.05,  icu: 0.9,  die: 0.5 },
+  { share: 8500.0, susceptible: 1.03, asymptomatic: 0.296, mild: 0.616,
+    hospital: 0.219, critical: 0.063, icu: 0.8,  die: 0.5 },
+  { share: 8968.0, susceptible: 1.03, asymptomatic: 0.265, mild: 0.602,
+    hospital: 0.279, critical: 0.122, icu: 0.8,  die: 0.69 },
+  { share: 7069.0, susceptible: 1.27, asymptomatic: 0.238, mild: 0.571,
+    hospital: 0.370, critical: 0.274, icu: 0.4,  die: 0.65 },
+  { share: 5488.0, susceptible: 1.52, asymptomatic: 0.214, mild: 0.523,
+    hospital: 0.391, critical: 0.432, icu: 0.4,  die: 0.88 },
+  { share: 3281.0, susceptible: 1.52, asymptomatic: 0.192, mild: 0.461,
+    hospital: 0.379, critical: 0.709, icu: 0.05, die: 1.0 }
+]
+
+// The three kinds of age the reference has numbers for: the young (to
+// 19), those of working age (to 69) and the old. How many people each
+// meets by chance on a day, on average and how far from it, and how
+// many at work or at school; and how the reference's file names them.
+table kinds { chance: f32, deviation: f32, meets: f32, name: text[8] } = [
+  { chance: 2.0, deviation: 2.0, meets: 10.0, name: "child" },
+  { chance: 4.0, deviation: 4.0, meets: 7.0,  name: "adult" },
+  { chance: 3.0, deviation: 3.0, meets: 3.0,  name: "elderly" }
+]
+// The kind of each age, its network, and the end of its names in the
+// reference's file.
+table age_kind: i32 = [0, 0, 1, 1, 1, 1, 1, 2, 2]
+table own_network: i32 = [0, 1, 2, 2, 2, 2, 2, 3, 4]
+table age_names: text[8] = [
+  "_0_9", "_10_19", "_20_29", "_30_39", "_40_49", "_50_59", "_60_69",
+  "_70_79", "_80"
+]
+// The five networks: the kind of their own people, and their names.
+table network_kind: i32 = [0, 0, 1, 2, 2]
+table network_names: text[12] = [
+  "primary", "secondary", "working", "retired", "elderly"
+]
+// How many households are of one person, of two, and so on to six.
+table household_sizes: f32 = [7452.0, 9936.0, 4416.0, 4140.0, 1104.0, 552.0]
+
+// The numbers by age: those of `ages`, and how many people are met by
+// chance on a day.
+buffer Ages {
+  share: f32, susceptible: f32, asymptomatic: f32, mild: f32, hospital: f32,
+  critical: f32, icu: f32, die: f32, chance: f32, chance_deviation: f32
+} capacity 9
+// The waits, a row for each `Delay` in their order.
+buffer Delays { mean: f32, deviation: f32 } capacity 8
+// The five networks: how many each member meets in them on a day,
+// whether their own people are of working age, and what is left of the
+// meetings in a lockdown.
+buffer Networks { meets: f32, adult: bool, lockdown: f32 } capacity 5
+// The shares of the households by their size.
+buffer Sizes { share: f32 } capacity 6
+
+// The run: its seed, how many people there are, how many of them are
+// infected when it starts (as many as there are people, or more: all of
+// them), how many days it is at most, and whether every step of every
+// illness is written to `Moves`.
+unique Run { seed: i64, people: i32, seeded: i32, days: i32, log: bool }
+
+// `file`, `line`: the file of numbers and which of its sets (`read`:
+//   whether it was there).
+// `rate`: what an ill person gives off in all, to everybody they meet
+//   over the whole illness, were all of those to take it; `peak`,
+//   `width`: the day that is most of it and how wide it is spread;
+//   `mild`, `asymptomatic`: how much less with mild symptoms and with
+//   none; `spread`: how far people are from one another in what they
+//   give off.
+// `at_home`, `at_work`, `by_chance`: what a meeting counts where.
+// `daily`: the part of a network's ties met on a day; `rewire`: the
+//   chance that an end lets go of a tie; `staff_young`, `staff_old`: of
+//   a network of the young or the old, a member of working age for
+//   every so many of its own.
+// `lockdown_from`, `lockdown_to`: the first day of a lockdown and the
+//   first after it; `lockdown_chance`, `lockdown_home`: what is left of
+//   the meetings by chance in it, and how much more a meeting at home
+//   counts.
+unique Model {
+  file: text[126], line: i32, read: bool,
+  rate: f32, peak: f32, width: f32, mild: f32, asymptomatic: f32, spread: f32,
+  at_home: f32, at_work: f32, by_chance: f32,
+  daily: f32, rewire: f32, staff_young: f32, staff_old: f32,
+  lockdown_from: i32, lockdown_to: i32, lockdown_chance: f32,
+  lockdown_home: f32
+}
+
+world {
+  Run.seed = 1
+  Run.seeded = 10
+  Run.days = 200
+  Model.rate = 5.8
+  Model.peak = 5.5
+  Model.width = 2.14
+  Model.mild = 0.72
+  Model.asymptomatic = 0.33
+  Model.spread = 1.4
+  Model.at_home = 2.0
+  Model.at_work = 1.0
+  Model.by_chance = 1.0
+  Model.daily = 0.5
+  Model.rewire = 0.1
+  Model.staff_young = 0.2
+  Model.staff_old = 0.2
+  Model.lockdown_from = 10000
+  Model.lockdown_to = 10000
+  Model.lockdown_chance = 0.33
+  Model.lockdown_home = 1.5
+  for age in 0..9 {
+    Ages += { share: ages[age].share, susceptible: ages[age].susceptible,
+              asymptomatic: ages[age].asymptomatic, mild: ages[age].mild,
+              hospital: ages[age].hospital, critical: ages[age].critical,
+              icu: ages[age].icu, die: ages[age].die,
+              chance: kinds[age_kind[age]].chance,
+              chance_deviation: kinds[age_kind[age]].deviation }
+  }
+  for delay in Delay {
+    Delays += { mean: delays[delay].mean, deviation: delays[delay].deviation }
+  }
+  for network in 0..5 {
+    Networks += { meets: kinds[network_kind[network]].meets,
+                  adult: network_kind[network] == 1, lockdown: 0.33 }
+  }
+  for size in 0..6 { Sizes += { share: household_sizes[size] } }
+}
+
+// Where line `line` starts (0: the names), or where the bytes end.
+fn line_at(bytes: Bytes, line: i32) -> i32 {
+  var at = 0
+  var seen = 0
+  while seen < line && at < len(bytes) {
+    if bytes[at].value == 10 { seen += 1 }
+    at += 1
+  }
+  at
+}
+
+// Which of the names in the first line this one is, from 0 on: -1 if
+// none.
+fn column(bytes: Bytes, name: text[62]) -> i32 {
+  var found = -1
+  var column = 0
+  var at = 0
+  var matched = 0
+  var same = true
+  var more = len(bytes) > 0
+  while more {
+    let byte = if at < len(bytes) { bytes[at].value as i32 } else { 10 }
+    if byte == 44 || byte == 10 || byte == 13 {
+      if same && matched == len(name) && found < 0 { found = column }
+      column += 1
+      matched = 0
+      same = true
+      more = byte == 44
+    } else if byte != 32 {
+      if matched >= len(name) || name[matched] as i32 != byte { same = false }
+      matched += 1
+    }
+    at += 1
+  }
+  found
+}
+
+// The number in a column of a line, 0 where there is none.
+fn number_at(bytes: Bytes, line: i32, column: i32) -> f64 {
+  var at = line_at(bytes, line)
+  var passed = 0
+  while passed < column && at < len(bytes) && bytes[at].value != 10 {
+    if bytes[at].value == 44 { passed += 1 }
+    at += 1
+  }
+  var value = 0.0 as f64
+  var scale = 0.0 as f64
+  var negative = false
+  var power = 0
+  var power_negative = false
+  var in_power = false
+  var more = at < len(bytes)
+  while more {
+    let byte = bytes[at].value as i32
+    if byte >= 48 && byte <= 57 {
+      if in_power { power = power * 10 + byte - 48 }
+      else {
+        value = value * 10.0 + (byte - 48) as f64
+        scale = scale * 10.0
+      }
+    } else if byte == 46 { scale = 1.0 }
+    else if byte == 45 { if in_power { power_negative = true } else { negative = true } }
+    else if byte == 101 || byte == 69 { in_power = true }
+    else if byte != 32 && byte != 43 { more = false }
+    at += 1
+    if at >= len(bytes) { more = false }
+  }
+  if scale > 1.0 { value = value / scale }
+  for i in 0..power {
+    value = if power_negative { value / 10.0 } else { value * 10.0 }
+  }
+  if negative { -value } else { value }
+}
+
+// The number of this name in a line, or `otherwise` where the file has
+// no such name.
+fn number(bytes: Bytes, name: text[62], line: i32, otherwise: f64) -> f64 {
+  let found = column(bytes, name)
+  if found < 0 { otherwise } else { number_at(bytes, line, found) }
+}
+
+system parameters() {
+  Model.read = false
+  if Model.file != "" {
+    let size = read_file(Model.file, Bytes)
+    Model.read = size > 0
+  }
+  if Model.read {
+    let line = max(1, Model.line)
+    Run.seed = number(Bytes, "rng_seed", line, Run.seed as f64) as i64
+    Run.people = number(Bytes, "n_total", line, Run.people as f64) as i32
+    Run.seeded = number(Bytes, "n_seed_infection", line, Run.seeded as f64) as i32
+    Run.days = number(Bytes, "end_time", line, Run.days as f64) as i32
+    Model.rate = number(Bytes, "infectious_rate", line, Model.rate as f64) as f32
+    Model.peak = number(Bytes, "mean_infectious_period", line, Model.peak as f64) as f32
+    Model.width = number(Bytes, "sd_infectious_period", line, Model.width as f64) as f32
+    Model.mild = number(Bytes, "mild_infectious_factor", line, Model.mild as f64) as f32
+    Model.asymptomatic = number(Bytes, "asymptomatic_infectious_factor", line,
+                                Model.asymptomatic as f64) as f32
+    Model.spread = number(Bytes, "sd_infectiousness_multiplier", line,
+                          Model.spread as f64) as f32
+    Model.at_home = number(Bytes, "relative_transmission_household", line,
+                           Model.at_home as f64) as f32
+    Model.at_work = number(Bytes, "relative_transmission_occupation", line,
+                           Model.at_work as f64) as f32
+    Model.by_chance = number(Bytes, "relative_transmission_random", line,
+                             Model.by_chance as f64) as f32
+    Model.daily = number(Bytes, "daily_fraction_work", line, Model.daily as f64) as f32
+    Model.rewire = number(Bytes, "work_network_rewire", line, Model.rewire as f64) as f32
+    Model.staff_young = number(Bytes, "child_network_adults", line,
+                               Model.staff_young as f64) as f32
+    Model.staff_old = number(Bytes, "elderly_network_adults", line,
+                             Model.staff_old as f64) as f32
+    Model.lockdown_from = number(Bytes, "lockdown_time_on", line,
+                                 Model.lockdown_from as f64) as i32
+    Model.lockdown_to = number(Bytes, "lockdown_time_off", line,
+                               Model.lockdown_to as f64) as i32
+    Model.lockdown_chance = number(Bytes, "lockdown_random_network_multiplier", line,
+                                   Model.lockdown_chance as f64) as f32
+    Model.lockdown_home = number(Bytes, "lockdown_house_interaction_multiplier", line,
+                                 Model.lockdown_home as f64) as f32
+    for age in 0..9 {
+      let end = age_names[age]
+      let kind = kinds[age_kind[age]].name
+      Ages[age].share = number(Bytes, "population" + end, line, Ages[age].share as f64) as f32
+      Ages[age].susceptible = number(Bytes, "relative_susceptibility" + end, line,
+                                     Ages[age].susceptible as f64) as f32
+      Ages[age].asymptomatic = number(Bytes, "fraction_asymptomatic" + end, line,
+                                      Ages[age].asymptomatic as f64) as f32
+      Ages[age].mild = number(Bytes, "mild_fraction" + end, line, Ages[age].mild as f64) as f32
+      Ages[age].hospital = number(Bytes, "hospitalised_fraction" + end, line,
+                                  Ages[age].hospital as f64) as f32
+      Ages[age].critical = number(Bytes, "critical_fraction" + end, line,
+                                  Ages[age].critical as f64) as f32
+      Ages[age].icu = number(Bytes, "location_death_icu" + end, line,
+                             Ages[age].icu as f64) as f32
+      Ages[age].die = number(Bytes, "fatality_fraction" + end, line,
+                             Ages[age].die as f64) as f32
+      Ages[age].chance = number(Bytes, "mean_random_interactions_" + kind, line,
+                                Ages[age].chance as f64) as f32
+      Ages[age].chance_deviation = number(Bytes, "sd_random_interactions_" + kind, line,
+                                          Ages[age].chance_deviation as f64) as f32
+    }
+    for network in 0..5 {
+      Networks[network].meets =
+          number(Bytes, "mean_work_interactions_" + kinds[network_kind[network]].name,
+                 line, Networks[network].meets as f64) as f32
+      Networks[network].lockdown =
+          number(Bytes, "lockdown_occupation_multiplier_" + network_names[network] +
+                 "_network", line, Networks[network].lockdown as f64) as f32
+    }
+    for size in 0..6 {
+      Sizes[size].share = number(Bytes, "household_size_{size + 1}", line,
+                                 Sizes[size].share as f64) as f32
+    }
+    Delays[0].mean = number(Bytes, "mean_time_to_symptoms", line, Delays[0].mean as f64) as f32
+    Delays[0].deviation = number(Bytes, "sd_time_to_symptoms", line, Delays[0].deviation as f64) as f32
+    Delays[1].mean = number(Bytes, "mean_asymptomatic_to_recovery", line, Delays[1].mean as f64) as f32
+    Delays[1].deviation = number(Bytes, "sd_asymptomatic_to_recovery", line, Delays[1].deviation as f64) as f32
+    Delays[2].mean = number(Bytes, "mean_time_to_recover", line, Delays[2].mean as f64) as f32
+    Delays[2].deviation = number(Bytes, "sd_time_to_recover", line, Delays[2].deviation as f64) as f32
+    Delays[3].mean = number(Bytes, "mean_time_to_hospital", line, Delays[3].mean as f64) as f32
+    Delays[4].mean = number(Bytes, "mean_time_to_critical", line, Delays[4].mean as f64) as f32
+    Delays[4].deviation = number(Bytes, "sd_time_to_critical", line, Delays[4].deviation as f64) as f32
+    Delays[5].mean = number(Bytes, "mean_time_hospitalised_recovery", line, Delays[5].mean as f64) as f32
+    Delays[5].deviation = number(Bytes, "sd_time_hospitalised_recovery", line, Delays[5].deviation as f64) as f32
+    Delays[6].mean = number(Bytes, "mean_time_to_death", line, Delays[6].mean as f64) as f32
+    Delays[6].deviation = number(Bytes, "sd_time_to_death", line, Delays[6].deviation as f64) as f32
+    Delays[7].mean = number(Bytes, "mean_time_critical_survive", line, Delays[7].mean as f64) as f32
+    Delays[7].deviation = number(Bytes, "sd_time_critical_survive", line, Delays[7].deviation as f64) as f32
+  }
+  Bytes = []
+}

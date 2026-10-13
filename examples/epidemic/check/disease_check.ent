@@ -2,8 +2,9 @@
 // illness as a line, `person,age,from,to,days` (the stages by their
 // numbers, the days spent in the one left), until nobody is ill.
 // check/disease.py holds what comes out against the tables of
-// disease.ent.
+// parameters.ent.
 import console
+import parameters
 import disease
 
 capacity Person 100000

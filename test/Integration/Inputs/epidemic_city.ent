@@ -5,6 +5,7 @@
 // chance. A line for the city, and
 // one of counts for every tenth day and the last.
 import console
+import parameters
 import disease
 import city
 import transmission
@@ -53,6 +54,7 @@ schedule setup() {
 
 schedule day() {
   tick()
+  policy()
   infectiousness()
   pair()
   household()

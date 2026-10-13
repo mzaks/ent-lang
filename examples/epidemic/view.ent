@@ -16,6 +16,7 @@
 import math
 import random
 import window
+import parameters
 import disease
 import city
 import transmission
@@ -75,7 +76,7 @@ system again() {
   Clock.day = 0
   for p: Person, a: Age, z: mut Hazard {
     z.left = (-log64(uniform(key(Run.seed, p.id, 0, HAZARD), 0)) /
-              ages[a.group].susceptible as f64) as f32
+              Ages[a.group].susceptible as f64) as f32
   }
   for e, d: mut Disease {
     d.stage = Stage.Susceptible
@@ -135,6 +136,7 @@ system numbers() {
 }
 
 schedule setup() {
+  parameters()
   panel()
   households()
   settle()
@@ -154,6 +156,7 @@ schedule frame() {
   again() run_if Pace.again
   seed() run_if Pace.again
   tick() run_if Pace.due
+  policy() run_if Pace.due
   infectiousness() run_if Pace.due
   pair() run_if Pace.due
   household() run_if Pace.due

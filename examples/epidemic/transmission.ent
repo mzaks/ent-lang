@@ -5,8 +5,8 @@
 //
 //   schedule setup() { .. the city ..  curve()  rate()  share() }
 //   schedule day() {
-//     tick()  infectiousness()  pair()  household()  workplace()  chance()
-//     infect()  progress()  tally()
+//     tick()  policy()  infectiousness()  pair()  household()  workplace()
+//     chance()  infect()  progress()  tally()
 //   }
 //
 // What an ill person gives off along one meeting depends on how many
@@ -18,28 +18,27 @@
 // many stubs as they meet people (`Chance`), the stubs are put in an
 // order that the day says, and each two that come to lie next to each
 // other are a meeting, an edge of `Met` for that day.
+//
+// In a lockdown (`Policy`, from `Model.lockdown_from` to before
+// `Model.lockdown_to`) fewer ties are met along at work and at school,
+// people meet fewer by chance, and a meeting at home counts for more.
+import math
 import random
+import parameters
 import disease
 import city
 
-// The reference's numbers: what an ill person gives off in all, to
-// everybody they meet over the whole illness (were all of those to take
-// it); the day that is most of it and how wide it is spread; how much
-// less with mild symptoms and with none; and how much more at home.
-const RATE = 5.8
-const PEAK = 5.5
-const WIDTH = 2.14
-const MILD = 0.72
-const ASYMPTOMATIC = 0.33
-const AT_HOME = 2.0
-
 const MEETS = 11
 const PAIRS = 13
+const LOCKED = 14
 
 // A meeting by chance, today's.
 relation (Person)-[Met]->(Person) capacity 16
 // A row for each person each time they meet somebody by chance today.
 buffer Stubs { who: entity } capacity 16
+
+// Whether there is a lockdown today.
+unique Policy { lockdown: bool }
 
 // For each day after the infection, the part of it all that is given
 // off on that day (200 days, which come to 1).
@@ -47,7 +46,7 @@ buffer Curve { part: f32 } capacity 200
 
 // How many a person meets on a day, by what a meeting counts (at home
 // twice), on average over everybody; and what is given off along one
-// meeting in all: `RATE` shared among them. (`homes`, `chances`: the
+// meeting in all: `Model.rate` shared among them. (`homes`, `chances`: the
 // meetings at home alone and those by chance, of everybody together.)
 unique Rate { homes: f64, chances: f64, meetings: f32, each: f32 }
 
@@ -55,7 +54,7 @@ system curve() {
   Curve = []
   var below = 0.0 as f64
   for day in 0..200 {
-    let now = gamma_below((day + 1) as f64, PEAK as f64, WIDTH as f64)
+    let now = gamma_below((day + 1) as f64, Model.peak as f64, Model.width as f64)
     Curve += { part: (now - below) as f32 }
     below = now
   }
@@ -67,24 +66,25 @@ system curve() {
 system rate() {
   Rate.homes = 0.0
   for h: Household {
-    Rate.homes += (h.members * (h.members - 1)) as f64 * AT_HOME as f64
+    Rate.homes += (h.members * (h.members - 1)) as f64
   }
   Rate.chances = 0.0
   for c: Chance { Rate.chances += c.meets as f64 }
 }
 system share() {
-  let work = 2.0 * City.ties as f64 * DAILY as f64
-  Rate.meetings = ((Rate.homes + work + Rate.chances) / Run.people as f64) as f32
-  Rate.each = RATE / Rate.meetings
+  let work = 2.0 * City.ties as f64 * Model.daily as f64
+  Rate.meetings = ((Rate.homes * Model.at_home as f64 + work * Model.at_work as f64 +
+                    Rate.chances * Model.by_chance as f64) / Run.people as f64) as f32
+  Rate.each = Model.rate / Rate.meetings
 }
 
 // How much of what the severely ill give off somebody in this stage
 // does; nothing from a hospital, and nothing before or after the illness.
-fn strength(stage: Stage, path: Path) -> f32 {
-  if stage == Stage.Asymptomatic { ASYMPTOMATIC }
-  else if stage == Stage.Mild { MILD }
+fn strength(stage: Stage, path: Path, mild: f32, asymptomatic: f32) -> f32 {
+  if stage == Stage.Asymptomatic { asymptomatic }
+  else if stage == Stage.Mild { mild }
   else if stage == Stage.Presymptomatic {
-    if path == Path.Mild { MILD } else { 1.0 }
+    if path == Path.Mild { mild } else { 1.0 }
   }
   else if stage == Stage.Severe { 1.0 }
   else { 0.0 }
@@ -92,10 +92,14 @@ fn strength(stage: Stage, path: Path) -> f32 {
 
 fn part(curve: Curve, days: i32) -> f32 { curve[days - 1].part }
 
+system policy() {
+  Policy.lockdown = Clock.day >= Model.lockdown_from && Clock.day < Model.lockdown_to
+}
+
 system infectiousness() {
   for d: Disease, s: Spread, i: mut Infectious {
-    i.rate = strength(d.stage, d.path) * part(Curve, Clock.day - d.infected) *
-             s.multiplier * Rate.each
+    i.rate = strength(d.stage, d.path, Model.mild, Model.asymptomatic) *
+             part(Curve, Clock.day - d.infected) * s.multiplier * Rate.each
   }
 }
 
@@ -108,39 +112,59 @@ system household() {
   for (i: Infectious)-[LivesIn]->(h: mut Household) bottom up LivesIn {
     h.pressure += i.rate
   }
+  let counts = Model.at_home * if Policy.lockdown { Model.lockdown_home } else { 1.0 }
   for (z: mut Hazard, d: Disease)-[LivesIn]->(h: Household)
       where d.stage == Stage.Susceptible && h.pressure > 0.0 {
-    z.left -= h.pressure * AT_HOME
+    z.left -= h.pressure * counts
   }
 }
 
 // Whether the tie with this number is met along today.
-fn met(seed: i64, tie: i32, day: i32) -> bool {
-  uniform(key(seed, tie, day, MEETS), 0) < DAILY as f64
+fn met(seed: i64, tie: i32, day: i32, daily: f32) -> bool {
+  uniform(key(seed, tie, day, MEETS), 0) < daily as f64
+}
+
+// The part of a network's ties that is met along today.
+fn open(networks: Networks, network: u8, daily: f32, lockdown: bool) -> f32 {
+  if lockdown { daily * networks[network].lockdown } else { daily }
 }
 
 // At work and at school: along each tie that is met today, from either
-// end.
+// end. (Both ends of a tie are of one network.)
 system workplace() {
-  for p: Person, i: Infectious where i.rate > 0.0 {
+  for p: Person, i: Infectious, n: Work where i.rate > 0.0 {
+    let daily = open(Networks, n.network, Model.daily, Policy.lockdown)
     for (p)-[w: WorksWith]->(o: mut Hazard) {
-      if met(Run.seed, w.key, Clock.day) { o.left -= i.rate }
+      if met(Run.seed, w.key, Clock.day, daily) { o.left -= i.rate * Model.at_work }
     }
     for (o: mut Hazard)-[w: WorksWith]->(p) {
-      if met(Run.seed, w.key, Clock.day) { o.left -= i.rate }
+      if met(Run.seed, w.key, Clock.day, daily) { o.left -= i.rate * Model.at_work }
     }
   }
 }
 
+// How many a person meets by chance on a day of a lockdown that leaves
+// such a part of the meetings: the whole number below that part of
+// their own number or the one above, the same for all of the lockdown
+// (which `since` says).
+fn locked(meets: i32, left: f32, seed: i64, id: i32, since: i32) -> i32 {
+  let part = meets as f64 * left as f64
+  let whole = floor64(part)
+  whole as i32 + if uniform(key(seed, id, since, LOCKED), 0) < part - whole { 1 } else { 0 }
+}
+
 // The stubs of everybody who is up, one after another in the order of
 // the people.
-proc lay(chances: Chance, diseases: Disease, stubs: mut Stubs) {
+proc lay(chances: Chance, diseases: Disease, people: Person, stubs: mut Stubs,
+         lockdown: bool, left: f32, seed: i64, since: i32) {
   stubs = []
   for e, c in chances {
     let stage = diseases[e].stage
     if stage != Stage.Dead && stage != Stage.Hospitalised &&
        stage != Stage.Critical && stage != Stage.Recovering {
-      for i in 0..c.meets { stubs += { who: e } }
+      let meets = if lockdown { locked(c.meets, left, seed, people[e].id, since) }
+                  else { c.meets }
+      for i in 0..meets { stubs += { who: e } }
     }
   }
 }
@@ -152,7 +176,8 @@ system pair() {
   for p: Person {
     for (p)-[mut m: Met]->() { m.disconnect() }
   }
-  lay(Chance, Disease, Stubs)
+  lay(Chance, Disease, Person, Stubs, Policy.lockdown, Model.lockdown_chance,
+      Run.seed, Model.lockdown_from)
   let stubs = len(Stubs)
   let bits = bits_for(stubs)
   let order = key(Run.seed, 0, Clock.day, PAIRS)
@@ -166,8 +191,8 @@ system pair() {
 // By chance: along each of today's meetings, from either end.
 system chance() {
   for p: Person, i: Infectious where i.rate > 0.0 {
-    for (p)-[Met]->(o: mut Hazard) { o.left -= i.rate }
-    for (o: mut Hazard)-[Met]->(p) { o.left -= i.rate }
+    for (p)-[Met]->(o: mut Hazard) { o.left -= i.rate * Model.by_chance }
+    for (o: mut Hazard)-[Met]->(p) { o.left -= i.rate * Model.by_chance }
   }
 }
 
@@ -175,7 +200,7 @@ system chance() {
 system infect() {
   for p: Person, a: Age, z: Hazard, d: mut Disease
       where d.stage == Stage.Susceptible && z.left < 0.0 {
-    let (path, stage, next, at) = fall_ill(Run.seed, p.id, a.group, Clock.day)
+    let (path, stage, next, at) = fall_ill(Ages, Delays, Run.seed, p.id, a.group, Clock.day)
     d.path = path
     d.stage = stage
     d.since = Clock.day

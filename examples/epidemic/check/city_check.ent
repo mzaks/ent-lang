@@ -7,6 +7,7 @@
 // which count twice. check/city.py holds what comes out against the
 // reference's targets. The panel's file is where the program is started.
 import console
+import parameters
 import disease
 import city
 import transmission
