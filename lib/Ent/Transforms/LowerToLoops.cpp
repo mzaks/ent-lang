@@ -1072,6 +1072,16 @@ static bool isEntityLocal(QueryOp query) {
             AppendOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
+    // A buffer is read like a resource: no query changes one while it
+    // runs (the rows it gives one are there when it ends), so its rows
+    // and its length are read by every entity alike, also through a fn
+    // that is given it to read (a fn does nothing else to the world).
+    if (isa<BufferLenOp, BufferAtOp>(op))
+      return WalkResult::advance();
+    if (auto of = dyn_cast<BufferOfOp>(op); of && !of.getResult().getType().getMut())
+      return WalkResult::advance();
+    if (auto invoke = dyn_cast<InvokeOp>(op); invoke && !invoke.getProc())
+      return WalkResult::advance();
     return WalkResult::interrupt();
   });
   return !result.wasInterrupted();
