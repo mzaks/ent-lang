@@ -1,0 +1,44 @@
+// What check/parse.py holds against a circuit's file: how many signals
+// of each kind the model has made of it, how many levels, and how many
+// ANDs do not come after both their inputs.
+import console
+import files
+import circuit
+
+capacity Bytes 268435456
+capacity Signal 12000000
+capacity Ins 100000
+capacity Flops 2000000
+capacity Outs 100000
+capacity Gates 12000000
+capacity Numbers 12000001
+capacity Sorted 12000000
+capacity Starts 100000
+
+unique Seen { inputs: i32, flops: i32, gates: i32, early: i32, unset: i32 }
+
+world {
+  Circuit.file = "circuit.aag"
+}
+
+system count() {
+  for i: Input where i.index >= 0 { Seen.inputs += 1 }
+  for f: Flop {
+    Seen.flops += 1
+    if f.from == none { Seen.unset += 1 }
+  }
+  for g: And {
+    Seen.gates += 1
+    if g.a == none || g.b == none { Seen.unset += 1 }
+  }
+  for i in 0..len(Gates) {
+    if Numbers[Gates[i].a / 2].level >= Gates[i].level ||
+       Numbers[Gates[i].b / 2].level >= Gates[i].level { Seen.early += 1 }
+  }
+  put("read {Circuit.read} ordered {Circuit.ordered}")
+  put("inputs {Seen.inputs} flops {Seen.flops} outputs {len(Outs)} gates {Seen.gates}")
+  put("levels {Circuit.levels} early {Seen.early} unset {Seen.unset}")
+}
+
+schedule setup() { netlist() levels() build() count() }
+main { setup() }

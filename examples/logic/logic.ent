@@ -1,0 +1,125 @@
+// A circuit run clock cycle by clock cycle (circuit.ent has the circuit).
+//
+//   schedule setup() { netlist()  levels()  build()  plan() }
+//   schedule cycle() { stimulus()  gates()  show()  latch()  edge()  tick() }
+//   schedule done()  { finish() }
+//
+// In a cycle the inputs get their values, the ANDs are worked out so
+// that each comes after its inputs, the outputs are noted, and the
+// flip-flops take what stands at their inputs: first all of them note it
+// (`latch`), then all of them show it (`edge`), so that none sees
+// another's new value.
+//
+// A value is 64 bits: 64 runs of the circuit side by side, each with
+// inputs of its own, and an AND of two values is the AND of all 64 at
+// once. What an input is in a cycle is worked out from the seed, which
+// input it is and the cycle (`drawn`), so nothing of it is kept and the
+// same can be written down for another simulator (check/equal.py).
+//
+// The outputs of the first of the 64 runs are written to the file
+// "outputs.txt", a line of 0s and 1s for each cycle, where `Run.shown`
+// says so; a number made of all outputs of all runs and cycles is kept
+// in `Run.sum` either way.
+//
+// A file "run.txt" where the program is started says how many cycles and
+// the seed, two whole numbers; without one it is 1000 cycles, seed 1.
+import files
+import console
+import circuit
+
+// (`written`: whether some of the outputs' lines are in their file yet.)
+unique Run { cycles: i32, seed: i64, shown: bool, cycle: i32, sum: u64, written: bool }
+
+world {
+  Run.cycles = 1000
+  Run.seed = 1
+  Run.shown = true
+}
+
+fn mix(x: u64) -> u64 {
+  let a = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+  let b = (a ^ (a >> 27)) * 0x94d049bb133111eb
+  b ^ (b >> 31)
+}
+
+// The 64 values of an input in a cycle, one for each run.
+fn drawn(seed: i64, index: i32, cycle: i32) -> u64 {
+  mix(mix(seed as u64 + 0x9e3779b97f4a7c15 * (index as i64 as u64 + 1)) ^
+      (cycle as i64 as u64 * 0xd1342543de82ef95 + 1))
+}
+
+fn side(bits: u64, inverted: bool) -> u64 { if inverted { ~bits } else { bits } }
+
+system plan() {
+  let size = read_file("run.txt", Bytes)
+  if size > 0 {
+    let (cycles, next) = number(Bytes, 0)
+    let (seed, after) = number(Bytes, next)
+    Run.cycles = cycles
+    Run.seed = seed as i64
+  }
+  Bytes = []
+  Run.cycle = 0
+  Run.sum = 0
+  Run.written = false
+}
+
+system stimulus() {
+  for i: Input, v: mut Value where i.index >= 0 {
+    v.bits = drawn(Run.seed, i.index, Run.cycle)
+  }
+}
+
+// The ANDs, one after another by their level: each finds its inputs
+// worked out.
+system gates() {
+  for g: And, v: mut Value in turn by g.level {
+    if let a = Value(g.a).bits {
+      if let b = Value(g.b).bits {
+        v.bits = side(a, g.not_a) & side(b, g.not_b)
+      }
+    }
+  }
+}
+
+// The outputs as they stand: into the sum, and the first run's as a line.
+system show() {
+  for i in 0..len(Outs) {
+    if let bits = Value(Outs[i].who).bits {
+      let shown = side(bits, Outs[i].shown % 2 == 1)
+      Run.sum = mix(Run.sum ^ shown)
+      if Run.shown { Bytes += { value: (48 + (shown & 1)) as u8 } }
+    }
+  }
+  if Run.shown {
+    Bytes += { value: 10 }
+    // (Written out before there is no more room for a cycle's line.)
+    if len(Bytes) + len(Outs) + 1 > 1000000 {
+      write_bytes("outputs.txt", Bytes, 0, len(Bytes), Run.written)
+      Run.written = true
+      Bytes = []
+    }
+  }
+}
+
+system latch() {
+  for f: mut Flop {
+    if let bits = Value(f.from).bits { f.next = side(bits, f.inverted) }
+  }
+}
+
+system edge() {
+  for f: Flop, v: mut Value { v.bits = f.next }
+}
+
+system tick() {
+  Run.cycle += 1
+}
+
+system finish() {
+  if Run.shown {
+    write_bytes("outputs.txt", Bytes, 0, len(Bytes), Run.written)
+    Bytes = []
+  }
+  put("cycles {Run.cycle} sum {Run.sum}")
+}

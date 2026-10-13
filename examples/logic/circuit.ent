@@ -1,0 +1,178 @@
+// A circuit of gates, read from a file: two-input ANDs, inverters on the
+// wires, and flip-flops that all step with one clock (an and-inverter
+// graph in the ASCII AIGER form, which examples/logic/prepare.py writes).
+//
+//   schedule setup() { netlist()  levels()  build() }
+//
+// Every signal is an entity: an input, a flip-flop or an AND. A signal's
+// `Value` is 64 bits, one for each of 64 runs that go on side by side.
+// An AND has its two inputs as entities and whether each is taken
+// inverted; its `level` is one more than the higher of its inputs'
+// (inputs and flip-flops are at 0), so that going through the ANDs by
+// level finds every input worked out before it is read. They are spawned
+// in that order.
+//
+// The file's lines are whole numbers. A signal is named by its number
+// times two, plus one where it is taken inverted; 0 is false and 1 true.
+// First `aag M I L O A`: the highest number, and how many inputs,
+// flip-flops, outputs and ANDs follow, in that order: an input by its
+// name, a flip-flop by its name and what it takes at the clock's edge, an
+// output by what it shows, an AND by its name and its two inputs.
+import files
+
+component Signal { id: i32 }
+component Value { bits: u64 }
+// (`index`: which of the circuit's inputs, from 0; -1 for the signal
+// that is always false.)
+component Input { index: i32 }
+component And { a: entity, b: entity, not_a: bool, not_b: bool, level: i32 }
+// What it takes at the clock's edge (`taken`: as the file names it), and
+// that value kept from when the gates have settled until the edge.
+component Flop { from: entity, inverted: bool, next: u64, taken: i32 }
+
+// The file's rows as read: the inputs' numbers, the flip-flops, the
+// outputs, the ANDs.
+buffer Ins { number: i32 } capacity 16
+buffer Flops { number: i32, taken: i32 } capacity 16
+buffer Outs { shown: i32, who: entity } capacity 16
+buffer Gates { number: i32, a: i32, b: i32, level: i32 } capacity 16
+// For each number a signal can have: its level (-1: no such signal yet)
+// and its entity.
+buffer Numbers { level: i32, who: entity } capacity 16
+// The ANDs in the order of their levels, and where each level's start.
+buffer Sorted { row: i32 } capacity 16
+buffer Starts { at: i32 } capacity 16
+
+// `read`: whether the file was there and whole. `ordered`: whether every
+// AND comes after its inputs in the file, as its levels need.
+unique Circuit {
+  file: text[126], read: bool, ordered: bool, most: i32, inputs: i32, flops: i32,
+  outputs: i32, gates: i32, levels: i32
+}
+
+fn digit(byte: u8) -> bool { byte >= 48 && byte <= 57 }
+
+// The whole number at or after `at`, and where the bytes go on after it.
+fn number(bytes: Bytes, at: i32) -> (i32, i32) {
+  var from = at
+  while from < len(bytes) && !digit(bytes[from].value) { from += 1 }
+  var value = 0
+  while from < len(bytes) && digit(bytes[from].value) {
+    value = value * 10 + (bytes[from].value as i32 - 48)
+    from += 1
+  }
+  (value, from)
+}
+
+system netlist() {
+  Ins = []
+  Flops = []
+  Outs = []
+  Gates = []
+  let size = read_file(Circuit.file, Bytes)
+  Circuit.read = size > 5 && size <= len(Bytes) && Bytes[0].value == 97 &&
+                 Bytes[1].value == 97 && Bytes[2].value == 103
+  if Circuit.read {
+    var at = 3
+    let (most, a0) = number(Bytes, at)
+    let (inputs, a1) = number(Bytes, a0)
+    let (flops, a2) = number(Bytes, a1)
+    let (outputs, a3) = number(Bytes, a2)
+    let (gates, a4) = number(Bytes, a3)
+    at = a4
+    Circuit.most = most
+    Circuit.inputs = inputs
+    Circuit.flops = flops
+    Circuit.outputs = outputs
+    Circuit.gates = gates
+    for i in 0..inputs {
+      let (name, next) = number(Bytes, at)
+      at = next
+      Ins += { number: name / 2 }
+    }
+    for i in 0..flops {
+      let (name, next) = number(Bytes, at)
+      let (taken, after) = number(Bytes, next)
+      at = after
+      Flops += { number: name / 2, taken: taken }
+    }
+    for i in 0..outputs {
+      let (shown, next) = number(Bytes, at)
+      at = next
+      Outs += { shown: shown, who: none }
+    }
+    for i in 0..gates {
+      let (name, next) = number(Bytes, at)
+      let (a, after_a) = number(Bytes, next)
+      let (b, after_b) = number(Bytes, after_a)
+      at = after_b
+      Gates += { number: name / 2, a: a, b: b, level: 0 }
+    }
+  }
+  Bytes = []
+}
+
+// Every AND's level, and the ANDs put in the order of their levels.
+system levels() {
+  Numbers = []
+  Sorted = []
+  Starts = []
+  Circuit.ordered = Circuit.read
+  Circuit.levels = 0
+  for i in 0..Circuit.most + 1 { Numbers += { level: -1, who: none } }
+  if Circuit.read {
+    Numbers[0].level = 0
+    for i in 0..len(Ins) { Numbers[Ins[i].number].level = 0 }
+    for i in 0..len(Flops) { Numbers[Flops[i].number].level = 0 }
+    for i in 0..len(Gates) {
+      let a = Numbers[Gates[i].a / 2].level
+      let b = Numbers[Gates[i].b / 2].level
+      if a < 0 || b < 0 || Numbers[Gates[i].number].level >= 0 { Circuit.ordered = false }
+      let level = 1 + max(max(a, b), 0)
+      Gates[i].level = level
+      Numbers[Gates[i].number].level = level
+      Circuit.levels = max(Circuit.levels, level)
+    }
+    // (How many of each level, then where each starts, then each AND to
+    // the next place of its level.)
+    for i in 0..Circuit.levels + 2 { Starts += { at: 0 } }
+    for i in 0..len(Gates) { Starts[Gates[i].level + 1].at += 1 }
+    for i in 1..Circuit.levels + 2 { Starts[i].at += Starts[i - 1].at }
+    for i in 0..len(Gates) { Sorted += { row: 0 } }
+    for i in 0..len(Gates) {
+      Sorted[Starts[Gates[i].level].at].row = i
+      Starts[Gates[i].level].at += 1
+    }
+  }
+}
+
+// The signals as entities: the one that is always false, the inputs, the
+// flip-flops, and the ANDs level after level.
+system build() {
+  if Circuit.read && Circuit.ordered {
+    Numbers[0].who = spawn { Signal { id: 0 }, Value { bits: 0 }, Input { index: -1 } }
+    for i in 0..len(Ins) {
+      Numbers[Ins[i].number].who = spawn {
+        Signal { id: Ins[i].number }, Value { bits: 0 }, Input { index: i }
+      }
+    }
+    for i in 0..len(Flops) {
+      Numbers[Flops[i].number].who = spawn {
+        Signal { id: Flops[i].number }, Value { bits: 0 },
+        Flop { from: none, inverted: Flops[i].taken % 2 == 1, next: 0,
+               taken: Flops[i].taken }
+      }
+    }
+    for i in 0..len(Sorted) {
+      let row = Sorted[i].row
+      Numbers[Gates[row].number].who = spawn {
+        Signal { id: Gates[row].number }, Value { bits: 0 },
+        And { a: Numbers[Gates[row].a / 2].who, b: Numbers[Gates[row].b / 2].who,
+              not_a: Gates[row].a % 2 == 1, not_b: Gates[row].b % 2 == 1,
+              level: Gates[row].level }
+      }
+    }
+    for i in 0..len(Outs) { Outs[i].who = Numbers[Outs[i].shown / 2].who }
+    for f: mut Flop { f.from = Numbers[f.taken / 2].who }
+  }
+}

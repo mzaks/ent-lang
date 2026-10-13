@@ -1,0 +1,47 @@
+// Runs the circuit in the file "circuit.aag" where the program is
+// started (examples/logic/prepare.py makes one of a circuit's Verilog),
+// for as many clock cycles as "run.txt" says, and writes the outputs of
+// each cycle to "outputs.txt".
+//
+//   examples/logic/fetch.sh
+//   examples/logic/prepare.py c6288
+//   cd build/logic/run && cp ../circuits/c6288.aag circuit.aag
+//   ../../../tools/ent run ../../../examples/logic/simulate.ent
+//
+// (Room for a circuit of up to a million signals.)
+import files
+import console
+import circuit
+import logic
+
+capacity Bytes 67108864
+capacity Signal 1000000
+capacity Ins 100000
+capacity Flops 1000000
+capacity Outs 100000
+capacity Gates 1000000
+capacity Numbers 1000001
+capacity Sorted 1000000
+capacity Starts 100000
+
+world {
+  Circuit.file = "circuit.aag"
+}
+
+system said() {
+  if !Circuit.read {
+    put("no circuit: the file {Circuit.file} is not where the program was started, or is no netlist")
+  } else if !Circuit.ordered {
+    put("the circuit's ANDs do not come after their inputs")
+  }
+}
+
+schedule setup() { netlist() levels() build() said() plan() }
+schedule cycle() { stimulus() gates() show() latch() edge() tick() }
+schedule done() { finish() }
+
+main {
+  setup()
+  loop { cycle() } until Run.cycle >= Run.cycles || !Circuit.read || !Circuit.ordered
+  done()
+}
