@@ -32,7 +32,10 @@ import text
 // Sizes and places are in points, which are as big on every screen: on
 // one with small pixels a point is several of them (`scale` says how
 // many across), and what is drawn is as big and as sharp as the screen
-// can show it. `zoom` makes everything so many times as big again (0 or
+// can show it. (A window that is not told of its screen's small pixels,
+// as an X window on a Wayland desktop may not be, takes the desktop's
+// scale from GDK_SCALE or QT_SCALE_FACTOR; ENT_WINDOW_SCALE says
+// another, 1 for none.) `zoom` makes everything so many times as big again (0 or
 // 1: as it is): the window then has fewer points to draw in, which
 // `width` and `height` say, and the mouse is where it points in those.
 // `closed` says that the user closed the window or pressed Escape; with
@@ -107,6 +110,12 @@ extern proc draw_pixels(them: Pixels, width: i32, height: i32, x: f32,
 extern proc sector(x: f32, y: f32, radius: f32, from: f32, to: f32, color: i32)
 extern proc line(x0: f32, y0: f32, x1: f32, y1: f32, color: i32)
 // A line of text `size` pixels high, by its top left corner.
+// (In a font of the machine's own, the first there is of a few that most
+// machines have, so the letters differ from machine to machine and
+// `text_width` says how wide they are here. ENT_WINDOW_FONT names
+// another file; "none", or no such font, gives the window library's own
+// letters of a few pixels. A text that is to look the same everywhere is
+// written with `write` in a font the program brings.)
 extern proc label(text: text[126], x: f32, y: f32, size: f32, color: i32)
 // How wide `label` draws a text of that size, in pixels. The window must
 // be open (after the first `begin`).

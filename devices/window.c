@@ -63,6 +63,28 @@ void ent_window_shift(float dx, float dy) {
   memcpy(name, (text)->bytes, (text)->length);                               \
   name[(text)->length] = 0
 
+// How many pixels a point is across beyond what the window says itself
+// (1: no more). A window that is shown through another kind of screen
+// (an X window on a Wayland desktop that leaves such windows their own
+// pixels) is told that a point is a pixel, on a screen where the desktop
+// draws everything else twice as big: all of it would be half as big as
+// meant, and its text too small to read. What the desktop says its
+// scale is, is then taken for the window's: ENT_WINDOW_SCALE where that
+// is set (1 leaves the window as it is told), else GDK_SCALE or
+// QT_SCALE_FACTOR, which such desktops set for programs like this one.
+static float ent_window_more = 1;
+
+static float ent_window_asked_scale(void) {
+  const char *names[] = {"ENT_WINDOW_SCALE", "GDK_SCALE", "QT_SCALE_FACTOR"};
+  for (int i = 0; i < 3; ++i) {
+    const char *said = getenv(names[i]);
+    float scale = said ? (float)atof(said) : 0;
+    if (scale >= 0.5f && scale <= 8)
+      return scale;
+  }
+  return 1;
+}
+
 void ent_window_open_window(int32_t width, int32_t height,
                             const ent_text62 *title, bool resizable) {
   ENT_WINDOW_TEXT(name, title);
@@ -71,27 +93,37 @@ void ent_window_open_window(int32_t width, int32_t height,
   // them, and everything is as big as on any other.)
   SetConfigFlags(FLAG_WINDOW_HIGHDPI | (resizable ? FLAG_WINDOW_RESIZABLE : 0));
   InitWindow(width, height, name);
+  // (Only where the window is told nothing of small pixels itself.)
+  float asked = ent_window_asked_scale();
+  if (GetWindowScaleDPI().x <= 1.01f && asked > 1.01f) {
+    ent_window_more = asked;
+    SetWindowSize((int)(width * asked + 0.5f), (int)(height * asked + 0.5f));
+  }
 }
 
 void ent_window_window_limits(int32_t min_width, int32_t min_height) {
-  SetWindowMinSize(min_width, min_height);
+  SetWindowMinSize((int)(min_width * ent_window_more + 0.5f),
+                   (int)(min_height * ent_window_more + 0.5f));
 }
 
-float ent_window_window_scale(void) { return GetWindowScaleDPI().x; }
+float ent_window_window_scale(void) {
+  return GetWindowScaleDPI().x * ent_window_more;
+}
 
 void ent_window_resize_window(int32_t width, int32_t height) {
-  SetWindowSize(width, height);
+  SetWindowSize((int)(width * ent_window_more + 0.5f),
+                (int)(height * ent_window_more + 0.5f));
 }
 
 // How big the window is, in points: by the picture that is drawn into,
 // which is as big as the window really is (one that the program asked
 // another size for may not have got it).
 int32_t ent_window_window_width(void) {
-  float scale = GetWindowScaleDPI().x;
+  float scale = GetWindowScaleDPI().x * ent_window_more;
   return (int32_t)((float)GetRenderWidth() / (scale > 0 ? scale : 1) + 0.5f);
 }
 int32_t ent_window_window_height(void) {
-  float scale = GetWindowScaleDPI().y;
+  float scale = GetWindowScaleDPI().y * ent_window_more;
   return (int32_t)((float)GetRenderHeight() / (scale > 0 ? scale : 1) + 0.5f);
 }
 
@@ -111,6 +143,7 @@ float ent_window_frame_seconds(void) { return GetFrameTime(); }
 
 // Everything is drawn so many times as big as it says (`Window.zoom`).
 static float ent_window_zoom = 1;
+static float ent_window_zoom_now(void) { return ent_window_zoom; }
 
 void ent_window_begin_frame(int32_t background, int32_t fps, float zoom) {
   static int32_t held = -1;
@@ -121,7 +154,8 @@ void ent_window_begin_frame(int32_t background, int32_t fps, float zoom) {
   BeginDrawing();
   ent_window_shading_part = 0;
   ClearBackground(ent_window_color(background));
-  ent_window_zoom = zoom > 0 ? zoom : 1;
+  // (With what a point is across beyond what the window says.)
+  ent_window_zoom = (zoom > 0 ? zoom : 1) * ent_window_more;
   rlPushMatrix();
   rlScalef(ent_window_zoom, ent_window_zoom, 1);
 }
@@ -133,8 +167,8 @@ void ent_window_end_frame(void) {
   EndDrawing();
 }
 
-float ent_window_mouse_x(void) { return (float)GetMouseX(); }
-float ent_window_mouse_y(void) { return (float)GetMouseY(); }
+float ent_window_mouse_x(void) { return (float)GetMouseX() / ent_window_more; }
+float ent_window_mouse_y(void) { return (float)GetMouseY() / ent_window_more; }
 bool ent_window_mouse_down(int32_t button) { return IsMouseButtonDown(button); }
 bool ent_window_key_down(int32_t key) { return IsKeyDown(key); }
 
@@ -326,15 +360,112 @@ void ent_window_line(float x0, float y0, float x1, float y1, int32_t color) {
   DrawLineV((Vector2){x0, y0}, (Vector2){x1, y1}, ent_window_color(color));
 }
 
+// The font of `label` and `paragraph`: one of the machine's own, the
+// first there is of those most machines have (ENT_WINDOW_FONT names
+// another file, or "none" for the window library's own letters of a few
+// pixels, which is also what is drawn where none of them is there). Read
+// at the size it is shown at, so that it is sharp at any: a few sizes
+// are kept.
+#define ENT_WINDOW_PLAIN_SIZES 8
+static struct {
+  int looked;
+  const char *file;
+  int pixels[ENT_WINDOW_PLAIN_SIZES];
+  Font at[ENT_WINDOW_PLAIN_SIZES];
+  int next;
+} ent_window_plain_font;
+
+static const char *ent_window_plain_file(void) {
+  if (ent_window_plain_font.looked)
+    return ent_window_plain_font.file;
+  ent_window_plain_font.looked = 1;
+  const char *asked = getenv("ENT_WINDOW_FONT");
+  if (asked && *asked) {
+    if (strcmp(asked, "none") != 0 && FileExists(asked))
+      ent_window_plain_font.file = asked;
+    return ent_window_plain_font.file;
+  }
+  static const char *known[] = {
+      "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+      "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+      "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+      "/usr/share/fonts/TTF/DejaVuSans.ttf",
+      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+      "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+      "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+      "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+      "/System/Library/Fonts/Supplemental/Arial.ttf",
+      "/Library/Fonts/Arial.ttf",
+      "C:/Windows/Fonts/segoeui.ttf",
+      "C:/Windows/Fonts/arial.ttf",
+  };
+  for (unsigned i = 0; i < sizeof(known) / sizeof(known[0]); ++i)
+    if (FileExists(known[i])) {
+      ent_window_plain_font.file = known[i];
+      break;
+    }
+  return ent_window_plain_font.file;
+}
+
+static float ent_window_zoom_now(void);
+
+static Font ent_window_plain(float size) {
+  const char *file = ent_window_plain_file();
+  if (!file || !IsWindowReady())
+    return GetFontDefault();
+  int pixels = (int)(size * ent_window_zoom_now() * GetWindowScaleDPI().y + 0.5f);
+  if (pixels < 8)
+    pixels = 8;
+  for (int i = 0; i < ENT_WINDOW_PLAIN_SIZES; ++i)
+    if (ent_window_plain_font.pixels[i] == pixels)
+      return ent_window_plain_font.at[i];
+  // (The letters of Latin-1, as the library's own font has them.)
+  int letters[191];
+  for (int i = 0; i < 191; ++i)
+    letters[i] = i < 95 ? 32 + i : 160 + (i - 95);
+  Font made = LoadFontEx(file, pixels, letters, 191);
+  if (!made.texture.id || !made.glyphCount) {
+    ent_window_plain_font.file = 0;
+    return GetFontDefault();
+  }
+  SetTextureFilter(made.texture, TEXTURE_FILTER_BILINEAR);
+  int slot = ent_window_plain_font.next;
+  ent_window_plain_font.next = (slot + 1) % ENT_WINDOW_PLAIN_SIZES;
+  if (ent_window_plain_font.pixels[slot])
+    UnloadFont(ent_window_plain_font.at[slot]);
+  ent_window_plain_font.at[slot] = made;
+  ent_window_plain_font.pixels[slot] = pixels;
+  return made;
+}
+
+// (The library's own letters stand a tenth of their size apart; a font
+// of the machine's has its own distances.)
+static float ent_window_plain_apart(float size) {
+  return ent_window_plain_file() && IsWindowReady() ? 0 : (float)((int)size / 10);
+}
+static void ent_window_plain_draw(const char *line, float x, float y, float size,
+                                  Color color) {
+  size = (float)(int)size;
+  DrawTextEx(ent_window_plain(size), line, (Vector2){(float)(int)x, (float)(int)y},
+             size, ent_window_plain_apart(size), color);
+}
+static float ent_window_plain_width(const char *line, float size) {
+  size = (float)(int)size;
+  if (!*line)
+    return 0;
+  return MeasureTextEx(ent_window_plain(size), line, size,
+                       ent_window_plain_apart(size)).x;
+}
+
 void ent_window_label(const ent_text126 *text, float x, float y, float size,
                       int32_t color) {
   ENT_WINDOW_TEXT(line, text);
-  DrawText(line, (int)x, (int)y, (int)size, ent_window_color(color));
+  ent_window_plain_draw(line, x, y, size, ent_window_color(color));
 }
 
 float ent_window_text_width(const ent_text126 *text, float size) {
   ENT_WINDOW_TEXT(line, text);
-  return (float)MeasureText(line, (int)size);
+  return (float)ent_window_plain_width(line, size);
 }
 
 // Breaks a text into lines no wider than `width`, at its spaces (a word
@@ -359,9 +490,9 @@ static int ent_window_wrap(const char *text, float size, float width,
     int both = length ? snprintf(trial, sizeof trial, "%.*s %.*s", length,
                                  line, word, at)
                       : snprintf(trial, sizeof trial, "%.*s", word, at);
-    if (length && MeasureText(trial, (int)size) > width) {
+    if (length && ent_window_plain_width(trial, size) > width) {
       if (draw)
-        DrawText(line, (int)x, (int)(y + lines * step), (int)size, color);
+        ent_window_plain_draw(line, x, (y + lines * step), size, color);
       lines++;
       length = snprintf(line, sizeof line, "%.*s", word, at);
     } else {
@@ -372,7 +503,7 @@ static int ent_window_wrap(const char *text, float size, float width,
   }
   if (length) {
     if (draw)
-      DrawText(line, (int)x, (int)(y + lines * step), (int)size, color);
+      ent_window_plain_draw(line, x, (y + lines * step), size, color);
     lines++;
   }
   return lines;
@@ -392,7 +523,7 @@ float ent_window_text_min_width(const ent_text126 *text, float size) {
     if (end == at)
       break;
     snprintf(word, sizeof word, "%.*s", (int)(end - at), at);
-    int width = MeasureText(word, (int)size);
+    int width = ent_window_plain_width(word, size);
     if (width > widest)
       widest = width;
     at = end;
@@ -1002,8 +1133,8 @@ int32_t ent_window_blend(int32_t from, int32_t to, float part) {
 
 float ent_window_mouse_wheel_x(void) { return GetMouseWheelMoveV().x; }
 float ent_window_mouse_wheel_y(void) { return GetMouseWheelMoveV().y; }
-float ent_window_mouse_dx(void) { return GetMouseDelta().x; }
-float ent_window_mouse_dy(void) { return GetMouseDelta().y; }
+float ent_window_mouse_dx(void) { return GetMouseDelta().x / ent_window_more; }
+float ent_window_mouse_dy(void) { return GetMouseDelta().y / ent_window_more; }
 void ent_window_grab_mouse(bool grab) {
   if (grab)
     DisableCursor();
