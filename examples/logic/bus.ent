@@ -1,0 +1,126 @@
+// A processor's memory, around the circuit of the processor
+// (examples/logic/cpu.v: PicoRV32 with its memory bus brought out).
+//
+//   schedule setup()  { .. pins()  wired()  loaded() }
+//   schedule before() { drive() }
+//   schedule after()  { respond()  note()  tick() }
+//
+// The circuit asks for a word of memory, or gives one to keep, by its
+// outputs (`mem_valid`, an address, a word, which of its bytes to
+// write); a cycle later it is told that this is done (`mem_ready`) and
+// given the word it asked for. `drive` puts what the processor is told
+// into the cycle's inputs, and `respond` reads the outputs and works out
+// what it is told next. A byte written to 0x10000000 is a character the
+// program says; they are written to "console.txt" at the end. The
+// processor is held in reset for the first cycles, and the run is over
+// when it stops (`trap`).
+//
+// The memory is 256 KB of words, all 0 but for the program, the file
+// "memory.bin", which lies from 0x10000 on. The file "pins.txt" says
+// which input and which output of the netlist is which wire of the bus,
+// a number each: resetn, mem_ready, the 32 bits of mem_rdata; then trap,
+// mem_valid, mem_instr, the 32 bits of mem_addr, the 32 of mem_wdata,
+// the 4 of mem_wstrb (check/cpu.py writes it, from the netlist's names).
+import files
+import console
+import circuit
+import logic
+
+const WORDS = 65536
+const PROGRAM = 0x10000
+const CONSOLE = 0x10000000
+const RESET = 10
+
+buffer Memory { word: u32 } capacity 65536
+buffer Pins { at: i32 } capacity 128
+buffer Said { value: u8 } capacity 65536
+
+// What the processor is told this cycle, and whether it has stopped.
+unique Bus { resetn: bool, ready: bool, rdata: u32, trapped: bool, wired: bool }
+
+fn all(is: bool) -> u64 { if is { ~(0 as u64) } else { 0 } }
+
+system wired() {
+  Pins = []
+  let size = read_file("pins.txt", Bytes)
+  var at = 0
+  for i in 0..105 {
+    if size > 0 && more(Bytes, at) {
+      let (pin, next) = number(Bytes, at)
+      at = next
+      Pins += { at: pin }
+    }
+  }
+  Bus.wired = len(Pins) == 105
+  Bytes = []
+}
+
+system loaded() {
+  Memory = []
+  Said = []
+  for i in 0..WORDS { Memory += { word: 0 } }
+  let size = read_file("memory.bin", Bytes)
+  for i in 0..max(size, 0) {
+    let at = (PROGRAM + i) / 4
+    if at < WORDS {
+      Memory[at].word = Memory[at].word | (Bytes[i].value as u32 << ((i % 4) * 8) as u32)
+    }
+  }
+  Bytes = []
+  Bus.resetn = false
+  Bus.ready = false
+  Bus.rdata = 0
+  Bus.trapped = false
+}
+
+system drive() {
+  Stim[Pins[0].at].bits = all(Bus.resetn)
+  Stim[Pins[1].at].bits = all(Bus.ready)
+  for k in 0..32 { Stim[Pins[2 + k].at].bits = all((Bus.rdata >> k as u32) & 1 == 1) }
+}
+
+// So many of the outputs from the pin `from` on, as the bits of a word.
+fn word(seen: Seen, pins: Pins, from: i32, count: i32) -> u32 {
+  var value = 0 as u32
+  for k in 0..count {
+    if seen[pins[from + k].at].bits & 1 == 1 { value = value | (1 as u32 << k as u32) }
+  }
+  value
+}
+
+system respond() {
+  let trap = word(Seen, Pins, 34, 1) == 1
+  let valid = word(Seen, Pins, 35, 1) == 1
+  let address = word(Seen, Pins, 37, 32)
+  let given = word(Seen, Pins, 69, 32)
+  let bytes = word(Seen, Pins, 101, 4)
+  let answered = Bus.ready
+  Bus.ready = false
+  if valid && !answered {
+    Bus.ready = true
+    let at = (address / 4) as i32
+    if bytes == 0 {
+      Bus.rdata = if address / 4 < WORDS as u32 { Memory[at].word } else { 0 }
+    } else if address == CONSOLE as u32 {
+      Said += { value: given as u8 }
+    } else if address / 4 < WORDS as u32 {
+      var mask = 0 as u32
+      for k in 0..4 {
+        if (bytes >> k as u32) & 1 == 1 { mask = mask | (0xff as u32 << (8 * k) as u32) }
+      }
+      Memory[at].word = (Memory[at].word & ~mask) | (given & mask)
+    }
+  }
+  if Bus.resetn && trap { Bus.trapped = true }
+  Bus.resetn = Run.cycle + 1 >= RESET
+}
+
+// What the program said, as a file.
+system said() {
+  Bytes = []
+  for i in 0..len(Said) { Bytes += { value: Said[i].value } }
+  write_file("console.txt", Bytes)
+  Bytes = []
+  if Bus.trapped { put("the processor stopped after {Run.cycle} cycles") }
+  else { put("the processor is still running after {Run.cycle} cycles") }
+}

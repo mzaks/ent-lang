@@ -1,0 +1,57 @@
+// A processor running a program: the circuit in "circuit.aag" is
+// PicoRV32 (examples/logic/prepare.py cpu), its memory is bus.ent's, and
+// the program in it is "memory.bin" (check/cpu.py builds Dhrystone for
+// it). Runs until the processor stops, or for the cycles "run.txt" says;
+// what the program says goes to "console.txt".
+//
+//   examples/logic/check/cpu.py          builds everything and runs it
+import files
+import console
+import circuit
+import logic
+import plain
+import bus
+
+capacity Bytes 67108864
+capacity Signal 1000000
+capacity Ins 100000
+capacity Flops 1000000
+capacity Outs 100000
+capacity Gates 1000000
+capacity Numbers 1000001
+capacity Sorted 1000000
+capacity Starts 100000
+capacity Wires 1000001
+capacity Steps 1000000
+capacity Kept 1000000
+capacity Stim 100000
+capacity Seen 100000
+
+world {
+  Circuit.file = "circuit.aag"
+}
+
+schedule setup() { netlist() levels() build() plan() pins() rows() wired() loaded() }
+schedule cycle() {
+  drive()
+  stimulus() run_if Run.way == 0
+  gates() run_if Run.way == 0
+  show() run_if Run.way == 0
+  set() run_if Run.way == 1
+  settle() run_if Run.way == 1
+  shown() run_if Run.way == 1
+  respond()
+  latch() run_if Run.way == 0
+  edge() run_if Run.way == 0
+  noted() run_if Run.way == 1
+  stepped() run_if Run.way == 1
+  note()
+  tick()
+}
+schedule done() { finish() said() }
+
+main {
+  setup()
+  loop { cycle() } until Run.cycle >= Run.cycles || Bus.trapped || !Circuit.read || !Bus.wired
+  done()
+}

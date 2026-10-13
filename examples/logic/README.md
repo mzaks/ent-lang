@@ -5,8 +5,8 @@ clock cycle by clock cycle, and gives the bits that
 [Icarus Verilog](https://github.com/steveicarus/iverilog) gives for the
 same gates and inputs; its speed is held against
 [Verilator](https://www.veripool.org/verilator/). It is being built in
-steps; what is here reads a circuit, runs it three ways, and is checked
-on 49 circuits. Written out as code and compiled, a circuit runs faster
+steps; what is here reads a circuit, runs it three ways, is checked on
+49 circuits, and runs a processor through a program. Written out as code and compiled, a circuit runs faster
 than under Verilator on three of four (`bench/logic/RESULTS.md`).
 
 - `circuit.ent`: the circuit from its file, an and-inverter graph in the
@@ -24,6 +24,11 @@ than under Verilator on three of four (`bench/logic/RESULTS.md`).
   code, every AND a line (a field of one unique where it is read far
   off, else a `let`), and compiled with the program: what Verilator does
   with a circuit.
+- `bus.ent`, `cpu.ent`, `cpu_coded.ent`: a processor running a program.
+  The circuit is PicoRV32 (`cpu.v`: 30,383 ANDs, 1,943 flip-flops) and
+  its memory is outside the circuit: a buffer of words that answers the
+  processor's bus, a cycle after it is asked. The program is PicoRV32's
+  Dhrystone, built with clang for RISC-V.
 - `simulate.ent`: the program for the first two ways. It reads "circuit.aag" and "run.txt"
   (cycles, seed, whether to write outputs, which way) where it is
   started, and writes "outputs.txt", a line of 0s and 1s a cycle.
@@ -52,10 +57,17 @@ all simulate the identical gates. Needs yosys, iverilog and verilator.
   200 for the six deep arithmetic ones, where Icarus takes minutes.
 - `check/agree.py`: the three ways give the same outputs, and the same
   number made of all outputs of all 64 runs, on every circuit.
+- `check/cpu.py`: the processor runs Dhrystone to its end, 583,031
+  clock cycles, with the same outputs in every cycle the three ways and
+  under Icarus Verilog (which is given a memory that answers alike), and
+  the program says the same, with every value it checks as it should
+  be. As code that takes 3 seconds (196,000 cycles a second), as rows 28
+  and as entities 48.
 - `bench/logic/run.py --check` holds Verilator's outputs against the
   model's before it times either.
 
 ## Still to come
 
 Going through the gates level by level on all the cores, and only
-through those whose inputs changed; a processor; the timings written up.
+through those whose inputs changed; the processor against Verilator; the
+timings written up.

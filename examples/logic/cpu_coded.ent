@@ -1,0 +1,30 @@
+// The processor of cpu.ent with its circuit written out as code
+// (examples/logic/compile.py cpu, as coded.ent runs any circuit): the
+// memory around it is the same.
+import files
+import console
+import circuit
+import logic
+import bus
+import netcode
+
+capacity Bytes 67108864
+// (No circuit is read here: circuit.ent's entities are not made.)
+capacity Signal 16
+capacity Stim 100000
+capacity Seen 100000
+
+schedule setup() { plan() sized() pins() wired() loaded() }
+schedule before() { drive() }
+schedule after() { respond() note() tick() }
+schedule done() { finish() said() }
+
+main {
+  setup()
+  loop {
+    before()
+    net()
+    after()
+  } until Run.cycle >= Run.cycles || Bus.trapped || !Bus.wired
+  done()
+}
