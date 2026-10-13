@@ -10,6 +10,7 @@ import console
 import circuit
 import logic
 import plain
+import events
 import bus
 
 capacity Bytes 67108864
@@ -26,29 +27,36 @@ capacity Steps 1000000
 capacity Kept 1000000
 capacity Stim 100000
 capacity Seen 100000
+capacity Feeds 2000000
 
 world {
   Circuit.file = "circuit.aag"
 }
 
-schedule setup() { netlist() levels() build() plan() pins() rows() wired() loaded() }
+// (The wires are edges only for the way that goes along them.)
+system wires() {
+  Circuit.wired = Run.way == 2
+}
+
+schedule setup() { plan() wires() netlist() levels() build() pins() rows() wired() loaded() }
 schedule cycle() {
   drive()
-  stimulus() run_if Run.way == 0
+  stimulus() run_if Run.way != 1
   gates() run_if Run.way == 0
-  show() run_if Run.way == 0
+  waves() run_if Run.way == 2
+  show() run_if Run.way != 1
   set() run_if Run.way == 1
   settle() run_if Run.way == 1
   shown() run_if Run.way == 1
   respond()
-  latch() run_if Run.way == 0
-  edge() run_if Run.way == 0
+  latch() run_if Run.way != 1
+  edge() run_if Run.way != 1
   noted() run_if Run.way == 1
   stepped() run_if Run.way == 1
   note()
   tick()
 }
-schedule done() { finish() said() }
+schedule done() { waved() finish() said() }
 
 main {
   setup()

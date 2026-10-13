@@ -5,7 +5,7 @@ clock cycle by clock cycle, and gives the bits that
 [Icarus Verilog](https://github.com/steveicarus/iverilog) gives for the
 same gates and inputs; its speed is held against
 [Verilator](https://www.veripool.org/verilator/). It is being built in
-steps; what is here reads a circuit, runs it three ways, is checked on
+steps; what is here reads a circuit, runs it four ways, is checked on
 49 circuits, and runs a processor through a program. Written out as code and compiled, a circuit runs faster
 than under Verilator on three of four (`bench/logic/RESULTS.md`).
 
@@ -18,6 +18,11 @@ than under Verilator on three of four (`bench/logic/RESULTS.md`).
   outputs are noted, the flip-flops take what stands at their inputs. A
   value is 64 bits: 64 runs side by side, each with inputs of its own,
   which are worked out from the seed, the input and the cycle.
+- `events.ent`: going through only the ANDs whose inputs changed. A
+  signal that got another value tells the ANDs that read it, along the
+  wires (edges of `Feeds`); an AND that was told works itself out again
+  and, where it comes to another value, tells its own readers: reactive
+  `for`s, in rounds until nothing is told.
 - `plain.ent`: the same circuit without entities, as rows of buffers
   gone through by a proc: what the entities cost is the difference.
 - `compile.py` and `coded.ent`: the circuit written out as ent-lang
@@ -55,19 +60,19 @@ all simulate the identical gates. Needs yosys, iverilog and verilator.
   for the first of the 64 runs, whose inputs a testbench made by the
   script gives to Icarus: over 10,000 cycles for 43 circuits, and over
   200 for the six deep arithmetic ones, where Icarus takes minutes.
-- `check/agree.py`: the three ways give the same outputs, and the same
+- `check/agree.py`: the four ways give the same outputs, and the same
   number made of all outputs of all 64 runs, on every circuit.
 - `check/cpu.py`: the processor runs Dhrystone to its end, 583,031
-  clock cycles, with the same outputs in every cycle the three ways and
+  clock cycles, with the same outputs in every cycle the four ways and
   under Icarus Verilog (which is given a memory that answers alike), and
   the program says the same, with every value it checks as it should
-  be. As code that takes 3 seconds (196,000 cycles a second), as rows 28
-  and as entities 48.
+  be. As code that takes 3 seconds (196,000 cycles a second), as rows
+  28, as entities 47, and 20 going through only the ANDs whose inputs
+  changed: one in sixteen a cycle.
 - `bench/logic/run.py --check` holds Verilator's outputs against the
   model's before it times either.
 
 ## Still to come
 
-Going through the gates level by level on all the cores, and only
-through those whose inputs changed; the processor against Verilator; the
-timings written up.
+Going through the gates level by level on all the cores; the processor
+against Verilator; the timings written up.

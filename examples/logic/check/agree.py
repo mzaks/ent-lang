@@ -6,9 +6,10 @@ fifth check).
   examples/logic/check/agree.py [cycles] [circuits]
 
 For each prepared circuit (all, or those named) the outputs of so many
-cycles (1,000) are written three times: by the model with its gates as
-entities, with them as rows of buffers, and by the circuit written out
-as code and compiled (compile.py, coded.ent). The three files are to be
+cycles (1,000) are written four times: by the model with its gates as
+entities, all of them gone through or only those whose inputs changed,
+with them as rows of buffers, and by the circuit written out as code and
+compiled (compile.py, coded.ent). The four files are to be
 the same byte for byte, and so is the number each makes of all outputs
 of all 64 runs. check/equal.py holds the first against Icarus Verilog.
 """
@@ -51,17 +52,17 @@ def main():
         coded = build("coded.ent", os.path.join(folder, "coded"),
                       ["-I", os.path.join(ROOT, "build", "logic", "code", name)])
         seen = []
-        for program, way in ((simulate, 0), (simulate, 1), (coded, 0)):
+        for program, way in ((simulate, 0), (simulate, 1), (simulate, 2), (coded, 0)):
             with open(os.path.join(folder, "run.txt"), "w") as file:
                 file.write(f"{cycles} 1 1 {way}\n")
             said = subprocess.run([program], check=True, capture_output=True, text=True,
-                                  cwd=folder).stdout.strip()
+                                  cwd=folder).stdout.strip().split("\n")[-1]
             with open(os.path.join(folder, "outputs.txt")) as file:
                 seen.append((said, file.read()))
         shutil.rmtree(folder)
-        same = seen[0] == seen[1] == seen[2]
+        same = seen[0] == seen[1] == seen[2] == seen[3]
         failed += 0 if same else 1
-        print(f"{name}: {'the same three ways' if same else 'NOT the same'} ({seen[0][0]})",
+        print(f"{name}: {'the same four ways' if same else 'NOT the same'} ({seen[0][0]})",
               flush=True)
     print(f"{len(names)} circuits, {failed} not the same")
     return 1 if failed else 0

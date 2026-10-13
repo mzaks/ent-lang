@@ -38,7 +38,8 @@ import circuit
 
 // (`written`: whether some of the outputs' lines are in their file yet.)
 // `way`: how the gates are gone through (0: as entities by their level;
-// 1: as rows of buffers, plain.ent).
+// 1: as rows of buffers, plain.ent; 2: as entities, only those whose
+// inputs changed, events.ent).
 unique Run {
   cycles: i32, seed: i64, shown: bool, cycle: i32, sum: u64, written: bool, way: i32
 }

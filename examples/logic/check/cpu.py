@@ -9,10 +9,11 @@ fourth check).
 The circuit is PicoRV32 (examples/logic/cpu.v), 30,000 ANDs and 1,900
 flip-flops; its memory is outside the circuit, and the program in it is
 PicoRV32's Dhrystone, built here with clang for RISC-V (the compiler's
-own LLVM, or the one on the PATH). The model runs it three ways (gates
-as entities, as rows, and the circuit written out as code), and Icarus
+own LLVM, or the one on the PATH). The model runs it four ways (gates as
+entities, all of them or only those whose inputs changed; as rows; and
+the circuit written out as code), and Icarus
 runs the same gates with a memory that answers alike, in a testbench
-made here. Every output of every cycle is to be the same in all four,
+made here. Every output of every cycle is to be the same in all five,
 up to the cycle the processor stops in, and so is what the program
 says; that is shown. With a number, no more than so many cycles.
 """
@@ -180,7 +181,8 @@ def main():
                   ["-I", os.path.join(ROOT, "build", "logic", "code", "cpu")])
     runs = [("as code", model(coded, image, cycles, 0, "coded")),
             ("as rows", model(program, image, cycles, 1, "rows")),
-            ("as entities", model(program, image, cycles, 0, "entities"))]
+            ("as entities", model(program, image, cycles, 0, "entities")),
+            ("as entities, by what changed", model(program, image, cycles, 2, "events"))]
     lines, console, said = runs[0][1]
     print(console.rstrip())
     print(f"({said})")

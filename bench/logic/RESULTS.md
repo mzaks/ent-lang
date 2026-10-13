@@ -69,3 +69,41 @@ time, and of two thousand `let`s in a proc most live on the stack. A
 field of a unique is at a place the compiler knows, as a member of
 Verilator's struct is; and what is read only nearby need not be kept at
 all (1,977 of the 8,594 ANDs are fields).
+
+## 2026-10-13, later: a processor, and only the gates whose inputs changed
+
+PicoRV32 (`examples/logic/cpu.v`, 30,383 ANDs and 1,943 flip-flops)
+running Dhrystone to its end, 583,031 clock cycles, with its memory
+outside the circuit; one core (CPU 2), a native build, the whole run
+timed with its start (which is a few hundredths of a second). All ways
+give the same outputs in every cycle, which are Icarus Verilog's
+(`check/cpu.py`).
+
+| the gates | the run | a cycle | cycles a second |
+|---|---|---|---|
+| as code | 3.0 s | 5.1 us | 196,000 |
+| as entities, those whose inputs changed | 19.8 s | 33.9 us | 29,500 |
+| as rows | 28.3 s | 48.5 us | 20,600 |
+| as entities, all | 46.8 s | 80.3 us | 12,500 |
+
+(As code and as rows were timed with the ordinary build of the check,
+not a native one, and the second line while writing the outputs to a
+file, 42 MB: each is a little worse than it would be.)
+
+- Going through only the ANDs whose inputs changed (`events.ent`), an
+  AND works itself out 1,935 times a cycle on average, of 30,383 ANDs:
+  one in sixteen, in 17 rounds a cycle. That is 2.4 times faster than
+  going through all of them as entities, and faster than the rows.
+  What it costs is 17 ns for each time an AND works itself out, where
+  the pass through all takes 2.6 ns an AND: the log of what changed, the
+  wires as edges, and what is sent along them.
+- It pays only where little changes. With inputs drawn anew every
+  cycle, and 64 runs in each value, nearly every AND changes every
+  cycle and settles more than once: s38584 takes 239 us a cycle this way
+  (17,950 times an AND works itself out, twice as many as there are)
+  where the pass through all takes 26.
+- Before the compiler followed the log for a `for` that sends whole
+  numbers (it went through every entity each round), the processor's
+  cycle took 363 us this way.
+- Verilator has not been run on the processor yet: it needs the same
+  memory around it in C++.

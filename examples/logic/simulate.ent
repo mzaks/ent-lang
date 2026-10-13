@@ -14,6 +14,7 @@ import console
 import circuit
 import logic
 import plain
+import events
 
 capacity Bytes 67108864
 capacity Signal 1000000
@@ -29,9 +30,15 @@ capacity Steps 1000000
 capacity Kept 1000000
 capacity Stim 100000
 capacity Seen 100000
+capacity Feeds 2000000
 
 world {
   Circuit.file = "circuit.aag"
+}
+
+// (The wires are edges only for the way that goes along them.)
+system wires() {
+  Circuit.wired = Run.way == 2
 }
 
 system said() {
@@ -42,15 +49,17 @@ system said() {
   }
 }
 
-schedule setup() { netlist() levels() build() said() plan() pins() rows() }
-// (A cycle the way `Run.way` says: the gates as entities, or as rows.)
+schedule setup() { plan() wires() netlist() levels() build() said() pins() rows() }
+// (A cycle the way `Run.way` says: the gates as entities gone through
+// all of them (0) or only those whose inputs changed (2), or as rows (1).)
 schedule cycle() {
   draw()
-  stimulus() run_if Run.way == 0
+  stimulus() run_if Run.way != 1
   gates() run_if Run.way == 0
-  show() run_if Run.way == 0
-  latch() run_if Run.way == 0
-  edge() run_if Run.way == 0
+  waves() run_if Run.way == 2
+  show() run_if Run.way != 1
+  latch() run_if Run.way != 1
+  edge() run_if Run.way != 1
   set() run_if Run.way == 1
   settle() run_if Run.way == 1
   shown() run_if Run.way == 1
@@ -59,7 +68,7 @@ schedule cycle() {
   note()
   tick()
 }
-schedule done() { finish() }
+schedule done() { waved() finish() }
 
 main {
   setup()

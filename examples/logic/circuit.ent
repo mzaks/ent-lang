@@ -26,6 +26,14 @@ component Value { bits: u64 }
 // that is always false.)
 component Input { index: i32 }
 component And { a: entity, b: entity, not_a: bool, not_b: bool, level: i32 }
+// For going through only the ANDs whose inputs changed (events.ent):
+// what an AND comes to, before it shows it; the round in which one of
+// its inputs last changed; and every wire, from a signal to an AND that
+// reads it.
+component Out { bits: u64 }
+component Mark { round: i32 }
+relation (Signal)-[Feeds]->(And) capacity 16
+
 // What it takes at the clock's edge (`taken`: as the file names it), and
 // that value kept from when the gates have settled until the edge.
 component Flop { from: entity, inverted: bool, next: u64, taken: i32 }
@@ -45,9 +53,11 @@ buffer Starts { at: i32 } capacity 16
 
 // `read`: whether the file was there and whole. `ordered`: whether every
 // AND comes after its inputs in the file, as its levels need.
+// `wired`: whether the wires are to be made edges (`Feeds`), which only
+// events.ent needs: two for every AND.
 unique Circuit {
   file: text[126], read: bool, ordered: bool, most: i32, inputs: i32, flops: i32,
-  outputs: i32, gates: i32, levels: i32
+  outputs: i32, gates: i32, levels: i32, wired: bool
 }
 
 fn digit(byte: u8) -> bool { byte >= 48 && byte <= 57 }
@@ -172,11 +182,17 @@ system build() {
     }
     for i in 0..len(Sorted) {
       let row = Sorted[i].row
-      Numbers[Gates[row].number].who = spawn {
+      let gate = spawn {
         Signal { id: Gates[row].number }, Value { bits: 0 },
         And { a: Numbers[Gates[row].a / 2].who, b: Numbers[Gates[row].b / 2].who,
               not_a: Gates[row].a % 2 == 1, not_b: Gates[row].b % 2 == 1,
-              level: Gates[row].level }
+              level: Gates[row].level },
+        Out { bits: 0 }, Mark { round: 0 }
+      }
+      Numbers[Gates[row].number].who = gate
+      if Circuit.wired {
+        connect (Numbers[Gates[row].a / 2].who)-[Feeds]->(gate)
+        connect (Numbers[Gates[row].b / 2].who)-[Feeds]->(gate)
       }
     }
     for i in 0..len(Outs) { Outs[i].who = Numbers[Outs[i].shown / 2].who }

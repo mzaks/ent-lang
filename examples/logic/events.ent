@@ -1,0 +1,55 @@
+// Going through only the ANDs whose inputs changed, in place of all of
+// them (logic.ent's `gates`):
+//
+//   schedule cycle() { draw()  stimulus()  waves()  show()  latch()  edge()  note()  tick() }
+//
+// Whatever signal got another value says so to the ANDs that read it,
+// along the wires (`Feeds`): it gives them the number of the round. An
+// AND that was told works itself out again from its inputs as they
+// stand, into `Out`; and where that is another value than it showed, it
+// shows it and tells its own readers. Round after round, until nothing
+// is told any more: as many rounds as the change reaches levels deep.
+// The `for`s are reactive, so a round costs by how many are told, not by
+// how big the circuit is; in the first cycle everything is new.
+//
+// An AND may work itself out more than once in a cycle, where its
+// inputs settle at different times; what it shows at the end is what it
+// would show going through all of them in order.
+import console
+import circuit
+import logic
+
+// (`worked`, `rounds`: how many times an AND worked itself out, and how
+// many rounds there were, in all the cycles so far.)
+unique Wave { round: i32, worked: i64, rounds: i64 }
+
+system waves() {
+  Wave.round += 1
+  // The inputs and flip-flops that changed since the cycle before.
+  for me, v: Value without And on changed v.bits {
+    for (me)-[Feeds]->(g: mut Mark) { g.round max= Wave.round }
+  }
+  loop {
+    let worked = for g: And, m: Mark, o: mut Out on changed m.round {
+      if let a = Value(g.a).bits {
+        if let b = Value(g.b).bits {
+          o.bits = side(a, g.not_a) & side(b, g.not_b)
+        }
+      }
+    }
+    Wave.worked += worked as i64
+    Wave.rounds += 1
+    Wave.round += 1
+    let told = for me, o: Out, v: mut Value on changed o.bits {
+      v.bits = o.bits
+      for (me)-[Feeds]->(g: mut Mark) { g.round max= Wave.round }
+    }
+  } until told == 0
+}
+
+// How much there was to do: said where this way was gone.
+system waved() {
+  if Wave.rounds > 0 {
+    put("ANDs worked out {Wave.worked} times in {Wave.rounds} rounds")
+  }
+}
