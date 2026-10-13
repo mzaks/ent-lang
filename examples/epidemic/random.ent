@@ -1,0 +1,161 @@
+// Numbers at random that are the same however the program runs: each is
+// worked out from what it is for (the run's seed, who draws, on which
+// day, for what), and nothing is kept between two draws. So a `for` that
+// draws runs on all the cores and gives what it gives on one.
+//
+//   let k = key(Run.seed, p.id, Clock.day, BRANCH)
+//   if uniform(k, 0) < 0.3 { .. }
+//   let wait = days(k, 5.42, 2.7)
+//
+// A key names one occasion; `uniform(k, n)` is its n-th number.
+import math
+
+// A whole number's bits stirred (SplitMix64's last step).
+fn mix(x: u64) -> u64 {
+  var z = x + 0x9e3779b97f4a7c15
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+  z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+  z ^ (z >> 31)
+}
+
+// The occasion: a seed, a person (or what else draws), a day and what
+// the draw is for.
+fn key(seed: i64, who: i32, day: i32, stream: i32) -> u64 {
+  let a = mix(seed as u64)
+  let b = mix(a ^ (who as i64 as u64))
+  let c = mix(b ^ (day as i64 as u64))
+  mix(c ^ (stream as i64 as u64))
+}
+
+// The n-th number of an occasion: above 0 and below 1.
+fn uniform(key: u64, n: i32) -> f64 {
+  let bits = mix(key + (n as i64 as u64) * 0xd1342543de82ef95)
+  ((bits >> 11) as f64 + 0.5) / 9007199254740992.0
+}
+
+// The n-th whole number of an occasion, from 0 to below `count`.
+fn below(key: u64, n: i32, count: i32) -> i32 {
+  (uniform(key, n) * count as f64) as i32
+}
+
+// A normal number, mean 0 and deviation 1, of the numbers n and n + 1
+// (Box and Muller).
+fn normal(key: u64, n: i32) -> f64 {
+  sqrt64(-2.0 * log64(uniform(key, n))) * cos64(tau64() * uniform(key, n + 1))
+}
+
+// A number of the gamma distribution with this shape and a scale of 1,
+// for a shape of 1 or more (Marsaglia and Tsang: a normal number tried
+// until one fits, 1.04 tries on average). It takes its numbers from
+// `from` on, three a try.
+fn gamma_shape(key: u64, shape: f64, from: i32) -> f64 {
+  let d = shape - 1.0 / 3.0
+  let c = 1.0 / sqrt64(9.0 * d)
+  var n = from
+  var found = -1.0 as f64
+  while found < 0.0 {
+    let x = normal(key, n)
+    let t = 1.0 + c * x
+    let v = t * t * t
+    if v > 0.0 {
+      if log64(uniform(key, n + 2)) < 0.5 * x * x + d - d * v + d * log64(v) {
+        found = d * v
+      }
+    }
+    n += 3
+  }
+  found
+}
+
+// A number of the gamma distribution with this mean and deviation. (A
+// shape below 1 is that of the shape one more, times a root of a number
+// below 1.)
+fn gamma(key: u64, mean: f64, deviation: f64) -> f64 {
+  let shape = (mean / deviation) * (mean / deviation)
+  let scale = deviation * deviation / mean
+  if shape >= 1.0 { gamma_shape(key, shape, 1) * scale }
+  else {
+    gamma_shape(key, shape + 1.0, 1) * pow64(uniform(key, 0), 1.0 / shape) * scale
+  }
+}
+
+// So many days, of a gamma distribution: the nearest whole number, and
+// one at least.
+fn days(key: u64, mean: f64, deviation: f64) -> i32 {
+  max(1, round64(gamma(key, mean, deviation)) as i32)
+}
+
+// The numbers from 0 to below `count` in another order, which the key
+// says: where number `i` comes in it. Every number comes once, so the
+// first so many of the order are that many different ones picked at
+// random, and each is found without the others. (A Feistel network over
+// the next power of four, gone round again while it leads outside.)
+fn permute(key: u64, i: i32, count: i32) -> i32 {
+  var half = 1
+  while ((1 as i64) << (2 * half)) < count as i64 { half += 1 }
+  let mask = ((1 as u64) << half) - 1
+  var x = i as i64 as u64
+  var outside = true
+  while outside {
+    var left = x >> half
+    var right = x & mask
+    for round in 0..4 {
+      let turned = left ^ (mix(mix(key + (round as i64 as u64)) ^ right) & mask)
+      left = right
+      right = turned
+    }
+    x = (left << half) | right
+    outside = x >= count as i64 as u64
+  }
+  x as i64 as i32
+}
+
+// The logarithm of the gamma function, for x above 0 (Lanczos).
+fn log_gamma(x: f64) -> f64 {
+  let y = x - 1.0
+  let t = y + 7.5
+  let series = 0.99999999999980993 + 676.5203681218851 / (y + 1.0) -
+               1259.1392167224028 / (y + 2.0) + 771.32342877765313 / (y + 3.0) -
+               176.61502916214059 / (y + 4.0) + 12.507343278686905 / (y + 5.0) -
+               0.13857109526572012 / (y + 6.0) + 0.0000099843695780195716 / (y + 7.0) +
+               0.00000015056327351493116 / (y + 8.0)
+  0.91893853320467274 + (y + 0.5) * log64(t) - t + log64(series)
+}
+
+// How much of a gamma distribution with this mean and deviation lies
+// below x (by its series where x is small against the shape, else by its
+// continued fraction).
+fn gamma_below(x: f64, mean: f64, deviation: f64) -> f64 {
+  let shape = (mean / deviation) * (mean / deviation)
+  let z = x * mean / (deviation * deviation)
+  let front = exp64(shape * log64(max(z, 1.0e-300)) - z - log_gamma(shape))
+  var below = 0.0 as f64
+  if z > 0.0 && z < shape + 1.0 {
+    var term = 1.0 / shape
+    var sum = term
+    var n = shape
+    for i in 0..500 {
+      n += 1.0
+      term = term * z / n
+      sum += term
+    }
+    below = front * sum
+  } else if z > 0.0 {
+    var b = z + 1.0 - shape
+    var c = 1.0e300 as f64
+    var d = 1.0 / b
+    var h = d
+    for i in 1..500 {
+      let an = -(i as f64) * (i as f64 - shape)
+      b += 2.0
+      d = an * d + b
+      if d < 1.0e-300 && d > -1.0e-300 { d = 1.0e-300 }
+      c = b + an / c
+      if c < 1.0e-300 && c > -1.0e-300 { c = 1.0e-300 }
+      d = 1.0 / d
+      h = h * d * c
+    }
+    below = 1.0 - front * h
+  }
+  below
+}

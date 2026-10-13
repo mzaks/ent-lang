@@ -1,0 +1,43 @@
+// The illness of examples/epidemic (disease.ent) in 20,000 people of whom
+// 2,000 are infected on day 0: a line of counts for each day until none
+// of them is ill.
+import console
+import disease
+
+capacity Person 20000
+
+world {
+  Run.seed = 7
+  Run.people = 20000
+  Run.seeded = 2000
+}
+
+system report() {
+  put("day {Clock.day}: new {Tally.new_infections} well {Tally.susceptible} before {Tally.presymptomatic} without {Tally.asymptomatic} mild {Tally.mild} severe {Tally.severe} hospital {Tally.hospitalised} critical {Tally.critical} after {Tally.recovering} recovered {Tally.recovered} dead {Tally.dead}")
+}
+
+system beds() {
+  var beds = 0
+  beds += for e with Hospitalised { }
+  put("in hospital {beds}")
+}
+
+schedule setup() {
+  populate()
+  seed()
+  tally()
+  report()
+}
+
+schedule day() {
+  tick()
+  progress()
+  tally()
+  report()
+  beds() run_if Clock.day == 12
+}
+
+main {
+  setup()
+  loop { day() } until Tally.infected == 0
+}

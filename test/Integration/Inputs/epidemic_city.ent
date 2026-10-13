@@ -1,0 +1,64 @@
+// The city epidemic of examples/epidemic in 5,000 people: households
+// taken from a panel of 80 (epidemic_panel.csv, made up for this test),
+// the five networks of work and school, and 5 people infected on day 0
+// who pass the illness on at home and at work. A line for the city, and
+// one of counts for every tenth day and the last.
+import console
+import disease
+import city
+import transmission
+
+capacity Person 5000
+capacity Household 5000
+capacity LivesIn 5000
+capacity WorksWith 60000
+capacity Taken 5000
+capacity Ring 5000
+
+world {
+  Run.seed = 3
+  Run.people = 5000
+  Run.seeded = 5
+  City.panel = "epidemic_panel.csv"
+}
+
+system city_out() {
+  put("panel {len(Panel) / 9} households {City.households} ties {City.ties}")
+  put("networks {City.primary} {City.secondary} {City.working} {City.retired} {City.elderly}")
+}
+
+system report() {
+  put("day {Clock.day}: new {Tally.new_infections} well {Tally.susceptible} ill {Tally.infected} recovered {Tally.recovered} dead {Tally.dead}")
+}
+
+schedule setup() {
+  panel()
+  households()
+  settle()
+  census()
+  employ()
+  wire()
+  curve()
+  rate()
+  share()
+  seed()
+  tally()
+  city_out()
+  report()
+}
+
+schedule day() {
+  tick()
+  infectiousness()
+  household()
+  workplace()
+  infect()
+  progress()
+  tally()
+  report() run_if Clock.day % 10 == 0 || Tally.infected == 0
+}
+
+main {
+  setup()
+  loop { day() } until Tally.infected == 0
+}

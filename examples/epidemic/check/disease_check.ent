@@ -1,0 +1,47 @@
+// Everybody infected on day 0 and nobody after: every step of every
+// illness as a line, `person,age,from,to,days` (the stages by their
+// numbers, the days spent in the one left), until nobody is ill.
+// check/disease.py holds what comes out against the tables of
+// disease.ent.
+import console
+import disease
+
+capacity Person 100000
+capacity Moves 100000
+
+world {
+  Run.seed = 1
+  Run.people = 100000
+  Run.seeded = 100000
+  Run.log = true
+}
+
+system ages_out() {
+  for p: Person, a: Age { put("{p.id},{a.group}") }
+  put("moves")
+}
+
+system moves_out() {
+  for i in 0..len(Moves) {
+    put("{Moves[i].id},{Moves[i].age},{Moves[i].from as i32},{Moves[i].to as i32},{Moves[i].days}")
+  }
+}
+
+schedule setup() {
+  populate()
+  seed()
+  tally()
+  ages_out()
+}
+
+schedule day() {
+  tick()
+  progress()
+  moves_out()
+  tally()
+}
+
+main {
+  setup()
+  loop { day() } until Tally.infected == 0
+}

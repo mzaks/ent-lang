@@ -1,0 +1,22 @@
+// The illness of the city epidemic model (examples/epidemic/disease.ent)
+// without anybody passing it on: 2,000 of 20,000 people are infected on
+// day 0 and go through its stages, each by draws that are worked out
+// from the seed, the person and the day (examples/epidemic/random.ent).
+// So the run is the same on one core and on all of them, to the byte.
+// (examples/epidemic/check/disease.py holds the stages' shares and the
+// waits against the model's tables, with 100,000 people.)
+// RUN: %ent run -I %S/../../examples/epidemic %S/Inputs/epidemic_disease.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel -I %S/../../examples/epidemic %S/Inputs/epidemic_disease.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// Just the 2,000, picked without one twice; a third of them show nothing.
+// CHECK:      day 0: new 2000 well 18000 before 1338 without 662 mild 0 severe 0 hospital 0 critical 0 after 0 recovered 0 dead 0
+// CHECK-NEXT: day 1: new 0 well 18000 before 1304 without 662 mild 29 severe 5
+// Whoever is in hospital, in intensive care or out of it again, has the
+// tag `Hospitalised`, and nobody else.
+// CHECK:      day 12: new 0 well 18000 before 24 without 438 mild 892 severe 127 hospital 17 critical 2 after 0 recovered 490 dead 10
+// CHECK-NEXT: in hospital 19
+// It ends when nobody is ill: everybody recovered or dead.
+// CHECK:      day 47: new 0 well 18000 before 0 without 0 mild 0 severe 0 hospital 0 critical 0 after 0 recovered 1978 dead 22
+// CHECK-NOT:  day

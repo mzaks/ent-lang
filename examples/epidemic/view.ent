@@ -1,0 +1,169 @@
+// The epidemic in a window: 10,000 people, a dot each in the colour of
+// their stage, household by household, and the day's numbers beside
+// them. Ten are infected on day 0 and pass it on at home and at work;
+// ten days pass in a second, and Space starts it over with another
+// seed.
+//
+//   examples/epidemic/reference/fetch.sh        once: the reference's files
+//   cd build/epidemic/run
+//   ../../../tools/ent run --parallel ../../../examples/epidemic/view.ent
+//
+// (The households are taken from the reference's panel, a file that is
+// looked for where the program is started. People are numbered
+// household by household, so the members of one are next to each
+// other in a row.)
+import math
+import random
+import window
+import disease
+import city
+import transmission
+
+capacity Person 10000
+capacity Household 10000
+capacity LivesIn 10000
+capacity WorksWith 110000
+capacity Taken 10000
+capacity Ring 10000
+
+// A dot's colour by the person's stage.
+table colours[Stage]: i32 = [
+  Susceptible:    0x2b3440,
+  Presymptomatic: 0xe8c547,
+  Asymptomatic:   0x9bbf5c,
+  Mild:           0xf0913a,
+  Severe:         0xe4572e,
+  Hospitalised:   0xd1345b,
+  Critical:       0xff2e88,
+  Recovering:     0x7a6ff0,
+  Recovered:      0x3a86c8,
+  Dead:           0x8a8f98
+]
+
+// How many frames a day takes, whether one passes in this frame, and
+// whether Space was down in the frame before.
+unique Pace { frames: i32, due: bool, again: bool, held: bool }
+
+world {
+  Window.width = 980
+  Window.height = 700
+  Window.min_width = 700
+  Window.min_height = 480
+  Window.title = "ent-lang: a city's epidemic"
+  Window.background = 0x0d1117
+  Window.fps = 60
+  Window.resizable = true
+  Run.seed = 1
+  Run.people = 10000
+  Run.seeded = 10
+  Pace.frames = 6
+}
+
+system pace() {
+  Pace.due = Window.frame % Pace.frames as i64 == 0 && Tally.infected > 0
+  Pace.again = Keys.space && !Pace.held
+  Pace.held = Keys.space
+}
+
+// Everybody well again, with the hazard they started with: the same
+// city, and other draws from here on.
+system again() {
+  Run.seed += 1
+  Clock.day = 0
+  for p: Person, a: Age, z: mut Hazard {
+    z.left = (-log64(uniform(key(Run.seed, p.id, 0, HAZARD), 0)) /
+              ages[a.group].susceptible as f64) as f32
+  }
+  for e, d: mut Disease {
+    d.stage = Stage.Susceptible
+    d.since = 0
+    d.next = Stage.Susceptible
+    d.at = -1
+    d.infected = 0
+    d.path = Path.None
+    if e.has(Hospitalised) { e.remove(Hospitalised) }
+  }
+}
+
+// How many people a side of their square holds, and how big a dot's
+// place is in a window so wide and high.
+fn side_of(people: i32) -> f32 { ceil(sqrt(people as f32)) }
+fn cell_of(people: i32, width: i32, height: i32) -> f32 {
+  let room = min(width as f32 - 300.0, height as f32 - 40.0)
+  max(2.0, floor(room / side_of(people)))
+}
+
+// The people in a square, row under row in the order of their numbers.
+system dots() {
+  let side = side_of(Run.people)
+  let cell = cell_of(Run.people, Window.width, Window.height)
+  for p: Person, d: Disease {
+    Shapes += { x: 20.0 + (p.id % side as i32) as f32 * cell,
+                y: 20.0 + (p.id / side as i32) as f32 * cell,
+                w: cell - 1.0, h: cell - 1.0, color: colours[d.stage],
+                round: false }
+  }
+}
+
+proc count(stage: Stage, n: i32, x: f32, line: i32) {
+  let y = 96.0 + line as f32 * 26.0
+  rect(x, y + 3.0, 14.0, 14.0, colours[stage])
+  label("{stage}", x + 24.0, y, 18.0, 0x9fb0c3)
+  label("{n}", x + 180.0, y, 18.0, 0xe6edf3)
+}
+
+system numbers() {
+  let x = 50.0 + side_of(Run.people) *
+                 cell_of(Run.people, Window.width, Window.height)
+  label("day {Clock.day}", x, 20.0, 34.0, 0xe6edf3)
+  label("{Tally.infected} ill of {Run.people}", x, 62.0, 18.0, 0x9fb0c3)
+  count(Stage.Susceptible, Tally.susceptible, x, 0)
+  count(Stage.Presymptomatic, Tally.presymptomatic, x, 1)
+  count(Stage.Asymptomatic, Tally.asymptomatic, x, 2)
+  count(Stage.Mild, Tally.mild, x, 3)
+  count(Stage.Severe, Tally.severe, x, 4)
+  count(Stage.Hospitalised, Tally.hospitalised, x, 5)
+  count(Stage.Critical, Tally.critical, x, 6)
+  count(Stage.Recovering, Tally.recovering, x, 7)
+  count(Stage.Recovered, Tally.recovered, x, 8)
+  count(Stage.Dead, Tally.dead, x, 9)
+  label("Space: again, with another seed", x, Window.height as f32 - 40.0, 14.0,
+        0x6b7888)
+}
+
+schedule setup() {
+  panel()
+  households()
+  settle()
+  census()
+  employ()
+  wire()
+  curve()
+  rate()
+  share()
+  seed()
+  tally()
+}
+
+schedule frame() {
+  begin()
+  pace()
+  again() run_if Pace.again
+  seed() run_if Pace.again
+  tick() run_if Pace.due
+  infectiousness() run_if Pace.due
+  household() run_if Pace.due
+  workplace() run_if Pace.due
+  infect() run_if Pace.due
+  progress() run_if Pace.due
+  tally() run_if Pace.due || Pace.again
+  dots()
+  shapes()
+  numbers()
+  present()
+}
+
+main {
+  setup()
+  loop { frame() } until Window.closed
+}

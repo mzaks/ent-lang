@@ -1,0 +1,134 @@
+// How the illness is passed on, as OpenABM-Covid19 does it: everybody
+// has an amount of infection they can take (`Hazard`), everyone they
+// meet who is ill takes some of it away, and who has none left is
+// infected.
+//
+//   schedule setup() { .. the city ..  curve()  rate()  share() }
+//   schedule day() {
+//     tick()  infectiousness()  household()  workplace()  infect()
+//     progress()  tally()
+//   }
+//
+// What an ill person gives off along one meeting depends on how many
+// days ago they were infected (`Curve`), on how their illness shows, on
+// themselves (`Spread`) and on where the two meet: at home it counts
+// twice. Nobody in hospital meets anybody, and neither do the dead.
+import random
+import disease
+import city
+
+// The reference's numbers: what an ill person gives off in all, to
+// everybody they meet over the whole illness (were all of those to take
+// it); the day that is most of it and how wide it is spread; how much
+// less with mild symptoms and with none; and how much more at home.
+const RATE = 5.8
+const PEAK = 5.5
+const WIDTH = 2.14
+const MILD = 0.72
+const ASYMPTOMATIC = 0.33
+const AT_HOME = 2.0
+
+const MEETS = 11
+
+// For each day after the infection, the part of it all that is given
+// off on that day (200 days, which come to 1).
+buffer Curve { part: f32 } capacity 200
+
+// How many a person meets on a day, by what a meeting counts (at home
+// twice), on average over everybody; and what is given off along one
+// meeting in all: `RATE` shared among them. (`homes`: the meetings at
+// home alone, of everybody together.)
+unique Rate { homes: f64, meetings: f32, each: f32 }
+
+system curve() {
+  Curve = []
+  var below = 0.0 as f64
+  for day in 0..200 {
+    let now = gamma_below((day + 1) as f64, PEAK as f64, WIDTH as f64)
+    Curve += { part: (now - below) as f32 }
+    below = now
+  }
+  for day in 0..200 { Curve[day].part = (Curve[day].part as f64 / below) as f32 }
+}
+
+// A household of n has n - 1 meetings for each of its members, a tie at
+// work is met along on half the days, by both its ends.
+system rate() {
+  Rate.homes = 0.0
+  for h: Household {
+    Rate.homes += (h.members * (h.members - 1)) as f64 * AT_HOME as f64
+  }
+}
+system share() {
+  let work = 2.0 * City.ties as f64 * DAILY as f64
+  Rate.meetings = ((Rate.homes + work) / Run.people as f64) as f32
+  Rate.each = RATE / Rate.meetings
+}
+
+// How much of what the severely ill give off somebody in this stage
+// does; nothing from a hospital, and nothing before or after the illness.
+fn strength(stage: Stage, path: Path) -> f32 {
+  if stage == Stage.Asymptomatic { ASYMPTOMATIC }
+  else if stage == Stage.Mild { MILD }
+  else if stage == Stage.Presymptomatic {
+    if path == Path.Mild { MILD } else { 1.0 }
+  }
+  else if stage == Stage.Severe { 1.0 }
+  else { 0.0 }
+}
+
+fn part(curve: Curve, days: i32) -> f32 { curve[days - 1].part }
+
+system infectiousness() {
+  for d: Disease, s: Spread, i: mut Infectious {
+    i.rate = strength(d.stage, d.path) * part(Curve, Clock.day - d.infected) *
+             s.multiplier * Rate.each
+  }
+}
+
+// At home everybody meets everybody: what the ill of a household give
+// off is added up, and each of the others loses that. (Whoever is ill
+// already has no use for their hazard, so their own share does not
+// matter.)
+system household() {
+  for h: mut Household { h.pressure = 0.0 }
+  for (i: Infectious)-[LivesIn]->(h: mut Household) bottom up LivesIn {
+    h.pressure += i.rate
+  }
+  for (z: mut Hazard, d: Disease)-[LivesIn]->(h: Household)
+      where d.stage == Stage.Susceptible && h.pressure > 0.0 {
+    z.left -= h.pressure * AT_HOME
+  }
+}
+
+// Whether the tie with this number is met along today.
+fn met(seed: i64, tie: i32, day: i32) -> bool {
+  uniform(key(seed, tie, day, MEETS), 0) < DAILY as f64
+}
+
+// At work and at school: along each tie that is met today, from either
+// end.
+system workplace() {
+  for p: Person, i: Infectious where i.rate > 0.0 {
+    for (p)-[w: WorksWith]->(o: mut Hazard) {
+      if met(Run.seed, w.key, Clock.day) { o.left -= i.rate }
+    }
+    for (o: mut Hazard)-[w: WorksWith]->(p) {
+      if met(Run.seed, w.key, Clock.day) { o.left -= i.rate }
+    }
+  }
+}
+
+// Whoever has no hazard left falls ill today.
+system infect() {
+  for p: Person, a: Age, z: Hazard, d: mut Disease
+      where d.stage == Stage.Susceptible && z.left < 0.0 {
+    let (path, stage, next, at) = fall_ill(Run.seed, p.id, a.group, Clock.day)
+    d.path = path
+    d.stage = stage
+    d.since = Clock.day
+    d.infected = Clock.day
+    d.next = next
+    d.at = at
+  }
+}

@@ -1,0 +1,305 @@
+// The people of a city and the illness one of them goes through, as
+// OpenABM-Covid19 has it: from infection without symptoms or to mild or
+// severe ones, from severe ones to hospital, from there to intensive
+// care, and to recovery or death. Which way a person goes is drawn by
+// their age where the ways part, and how long each step takes when it
+// starts.
+//
+//   import disease
+//   capacity Person 100000
+//   world { Run.seed = 1  Run.people = 100000  Run.seeded = 10 }
+//   schedule setup() { populate()  seed() }
+//   schedule day() { tick()  progress()  tally() }
+//
+// Nobody infects anybody yet: those `seed` infects are all there are.
+import math
+import random
+
+// Where a person is. `Recovering` is in hospital still, out of intensive
+// care.
+enum Stage {
+  Susceptible, Presymptomatic, Asymptomatic, Mild, Severe, Hospitalised,
+  Critical, Recovering, Recovered, Dead
+}
+
+// How the illness shows, drawn when it starts.
+enum Path { None, Asymptomatic, Mild, Severe }
+
+// What a wait is for.
+enum Delay {
+  Symptoms, AsymptomaticRecovery, Recovery, Hospital, Critical,
+  HospitalRecovery, Death, IcuLeave
+}
+
+// The days of each wait, of a gamma distribution with this mean and
+// deviation; without a deviation, the whole number of days below the
+// mean or the one above, so often that the mean is this one.
+table delays[Delay] { mean: f32, deviation: f32 } = [
+  Symptoms:             { mean: 5.42,  deviation: 2.7 },
+  AsymptomaticRecovery: { mean: 15.0,  deviation: 5.0 },
+  Recovery:             { mean: 12.0,  deviation: 5.0 },
+  Hospital:             { mean: 5.14,  deviation: 0.0 },
+  Critical:             { mean: 2.27,  deviation: 2.27 },
+  HospitalRecovery:     { mean: 8.75,  deviation: 8.75 },
+  Death:                { mean: 11.74, deviation: 8.79 },
+  IcuLeave:             { mean: 18.8,  deviation: 12.21 }
+]
+
+// By age, a row for every ten years and the last for 80 and more:
+// `share`: how many of the people are so old (the United Kingdom's, in
+//   thousands);
+// `susceptible`: how easily they are infected, against the others;
+// `asymptomatic`, `mild`: how many of the infected show nothing, or
+//   little (the rest are severe);
+// `hospital`: how many of the severe go to hospital;
+// `critical`: how many of those in hospital become critical;
+// `icu`: how many of the critical are taken into intensive care (the
+//   others die);
+// `die`: how many die in intensive care.
+table ages {
+  share: f32, susceptible: f32, asymptomatic: f32, mild: f32, hospital: f32,
+  critical: f32, icu: f32, die: f32
+} = [
+  { share: 8054.0, susceptible: 0.35, asymptomatic: 0.456, mild: 0.533,
+    hospital: 0.001, critical: 0.05,  icu: 1.0,  die: 0.33 },
+  { share: 7528.0, susceptible: 0.69, asymptomatic: 0.412, mild: 0.569,
+    hospital: 0.006, critical: 0.05,  icu: 1.0,  die: 0.25 },
+  { share: 8712.0, susceptible: 1.03, asymptomatic: 0.370, mild: 0.597,
+    hospital: 0.015, critical: 0.05,  icu: 0.9,  die: 0.5 },
+  { share: 8835.0, susceptible: 1.03, asymptomatic: 0.332, mild: 0.614,
+    hospital: 0.069, critical: 0.05,  icu: 0.9,  die: 0.5 },
+  { share: 8500.0, susceptible: 1.03, asymptomatic: 0.296, mild: 0.616,
+    hospital: 0.219, critical: 0.063, icu: 0.8,  die: 0.5 },
+  { share: 8968.0, susceptible: 1.03, asymptomatic: 0.265, mild: 0.602,
+    hospital: 0.279, critical: 0.122, icu: 0.8,  die: 0.69 },
+  { share: 7069.0, susceptible: 1.27, asymptomatic: 0.238, mild: 0.571,
+    hospital: 0.370, critical: 0.274, icu: 0.4,  die: 0.65 },
+  { share: 5488.0, susceptible: 1.52, asymptomatic: 0.214, mild: 0.523,
+    hospital: 0.391, critical: 0.432, icu: 0.4,  die: 0.88 },
+  { share: 3281.0, susceptible: 1.52, asymptomatic: 0.192, mild: 0.461,
+    hospital: 0.379, critical: 0.709, icu: 0.05, die: 1.0 }
+]
+
+// What a draw is for (see random.ent).
+const AGE = 1
+const SEED = 2
+const START = 3
+const STEP = 4
+
+// A person: which one (from 0 on, in the order they were made), how old,
+// and where their illness is. `since` is the day the stage began, `next`
+// the stage that follows and `at` the day it does (-1: none follows),
+// `infected` the day they were infected; for the susceptible all of that
+// is nought.
+component Person { id: i32 }
+component Age { group: u8 }
+component Disease {
+  stage: Stage, since: i32, next: Stage, at: i32, path: Path, infected: i32
+}
+// In hospital: from the day they are taken in to the day they leave it,
+// recovered or dead.
+tag Hospitalised
+
+// The run: its seed, how many people there are, how many of them are
+// infected when it starts (as many as there are people, or more: all of
+// them), and whether every step of every illness is written to `Moves`.
+unique Run { seed: i64, people: i32, seeded: i32, log: bool }
+unique Clock { day: i32 }
+
+// The day's numbers: who became infected on it, and how many are in each
+// stage; `infected` is those who are neither susceptible, recovered nor
+// dead.
+unique Tally {
+  new_infections: i32, infected: i32, susceptible: i32, presymptomatic: i32,
+  asymptomatic: i32, mild: i32, severe: i32, hospitalised: i32, critical: i32,
+  recovering: i32, recovered: i32, dead: i32
+}
+
+// With `Run.log`, the steps taken on a day: who of which age left which
+// stage for which, after how many days in it. `progress` empties it
+// before it gives it the day's.
+buffer Moves { id: i32, age: u8, from: Stage, to: Stage, days: i32 } capacity 16
+
+// The age of a person by a number between 0 and 1.
+fn age_of(u: f64) -> u8 {
+  var all = 0.0 as f64
+  for row in ages { all += row.share as f64 }
+  var group = 0
+  var below = 0.0 as f64
+  for i in 0..len(ages) {
+    below += ages[i].share as f64
+    if u * all >= below && i < len(ages) - 1 { group = i + 1 }
+  }
+  group as u8
+}
+
+// How an illness shows, by the person's age and a number between 0 and 1.
+fn path_of(age: u8, u: f64) -> Path {
+  let row = ages[age]
+  if u < row.asymptomatic as f64 { Path.Asymptomatic }
+  else if u < (row.asymptomatic + row.mild) as f64 { Path.Mild }
+  else { Path.Severe }
+}
+
+// The stage an illness starts in.
+fn first_stage(path: Path) -> Stage {
+  if path == Path.Asymptomatic { Stage.Asymptomatic } else { Stage.Presymptomatic }
+}
+
+// The stage after this one, by the person's age and a number between 0
+// and 1 (the stage itself where none follows).
+fn next_stage(stage: Stage, path: Path, age: u8, u: f64) -> Stage {
+  let row = ages[age]
+  if stage == Stage.Presymptomatic {
+    if path == Path.Mild { Stage.Mild } else { Stage.Severe }
+  }
+  else if stage == Stage.Asymptomatic || stage == Stage.Mild { Stage.Recovered }
+  else if stage == Stage.Severe {
+    if u < row.hospital as f64 { Stage.Hospitalised } else { Stage.Recovered }
+  }
+  else if stage == Stage.Hospitalised {
+    if u < (row.critical * row.icu) as f64 { Stage.Critical }
+    else if u < row.critical as f64 { Stage.Dead }
+    else { Stage.Recovered }
+  }
+  else if stage == Stage.Critical {
+    if u < row.die as f64 { Stage.Dead } else { Stage.Recovering }
+  }
+  else if stage == Stage.Recovering { Stage.Recovered }
+  else { stage }
+}
+
+// What the wait from one stage to the next is for.
+fn between(from: Stage, to: Stage) -> Delay {
+  if from == Stage.Presymptomatic { Delay.Symptoms }
+  else if from == Stage.Asymptomatic { Delay.AsymptomaticRecovery }
+  else if from == Stage.Mild { Delay.Recovery }
+  else if from == Stage.Severe {
+    if to == Stage.Hospitalised { Delay.Hospital } else { Delay.Recovery }
+  }
+  else if from == Stage.Hospitalised {
+    if to == Stage.Recovered { Delay.HospitalRecovery } else { Delay.Critical }
+  }
+  else if from == Stage.Critical {
+    if to == Stage.Dead { Delay.Death } else { Delay.IcuLeave }
+  }
+  else { Delay.HospitalRecovery }
+}
+
+// The days from one stage to the next (the occasion's number 0 is taken:
+// see `next_stage`'s).
+fn wait(from: Stage, to: Stage, key: u64) -> i32 {
+  let row = delays[between(from, to)]
+  if row.deviation > 0.0 { days(key, row.mean as f64, row.deviation as f64) }
+  else {
+    let whole = floor64(row.mean as f64)
+    let more = if uniform(key, 1) < row.mean as f64 - whole { 1 } else { 0 }
+    whole as i32 + more
+  }
+}
+
+// The day a stage that began on `day` ends: -1 where nothing follows it.
+fn due(stage: Stage, next: Stage, day: i32, key: u64) -> i32 {
+  if next == stage { -1 } else { day + wait(stage, next, key) }
+}
+
+// An illness that starts on `day`: how it shows, the stage it starts in,
+// the one that follows and the day it does.
+fn fall_ill(seed: i64, id: i32, age: u8, day: i32) -> (Path, Stage, Stage, i32) {
+  let k = key(seed, id, day, START)
+  let path = path_of(age, uniform(k, 0))
+  let stage = first_stage(path)
+  let next = next_stage(stage, path, age, 0.0)
+  (path, stage, next, due(stage, next, day, k))
+}
+
+// The people, each of an age drawn by the country's shares.
+system populate() {
+  for id in 0..Run.people {
+    let k = key(Run.seed, id, 0, AGE)
+    spawn {
+      Person { id: id },
+      Age { group: age_of(uniform(k, 0)) },
+      Disease { stage: Stage.Susceptible, since: 0, next: Stage.Susceptible,
+                at: -1, path: Path.None, infected: 0 }
+    }
+  }
+}
+
+// Infects `Run.seeded` people, picked at random, on the day it is: those
+// who come first in an order of all of them that the seed says.
+system seed() {
+  let order = key(Run.seed, 0, 0, SEED)
+  for p: Person, a: Age, d: mut Disease
+      where d.stage == Stage.Susceptible &&
+            permute(order, p.id, Run.people) < Run.seeded {
+    let (path, stage, next, at) = fall_ill(Run.seed, p.id, a.group, Clock.day)
+    d.path = path
+    d.stage = stage
+    d.since = Clock.day
+    d.infected = Clock.day
+    d.next = next
+    d.at = at
+  }
+}
+
+system tick() {
+  Clock.day += 1
+}
+
+// Everybody whose stage ends today goes on to the next, and draws what
+// follows that and when.
+system progress() {
+  Moves = []
+  for e, p: Person, a: Age, d: mut Disease where d.at == Clock.day {
+    let from = d.stage
+    let stage = d.next
+    let k = key(Run.seed, p.id, Clock.day, STEP)
+    let next = next_stage(stage, d.path, a.group, uniform(k, 0))
+    if Run.log {
+      Moves += { id: p.id, age: a.group, from: from, to: stage,
+                 days: Clock.day - d.since }
+    }
+    d.stage = stage
+    d.since = Clock.day
+    d.next = next
+    d.at = due(stage, next, Clock.day, k)
+    if stage == Stage.Hospitalised { e.add(Hospitalised) }
+    if (stage == Stage.Recovered || stage == Stage.Dead) && e.has(Hospitalised) {
+      e.remove(Hospitalised)
+    }
+  }
+}
+
+fn one(is: bool) -> i32 { if is { 1 } else { 0 } }
+
+system tally() {
+  Tally.new_infections = 0
+  Tally.infected = 0
+  Tally.susceptible = 0
+  Tally.presymptomatic = 0
+  Tally.asymptomatic = 0
+  Tally.mild = 0
+  Tally.severe = 0
+  Tally.hospitalised = 0
+  Tally.critical = 0
+  Tally.recovering = 0
+  Tally.recovered = 0
+  Tally.dead = 0
+  for d: Disease {
+    let s = d.stage
+    let ill = s != Stage.Susceptible && s != Stage.Recovered && s != Stage.Dead
+    Tally.new_infections += one(d.path != Path.None && d.infected == Clock.day)
+    Tally.infected += one(ill)
+    Tally.susceptible += one(s == Stage.Susceptible)
+    Tally.presymptomatic += one(s == Stage.Presymptomatic)
+    Tally.asymptomatic += one(s == Stage.Asymptomatic)
+    Tally.mild += one(s == Stage.Mild)
+    Tally.severe += one(s == Stage.Severe)
+    Tally.hospitalised += one(s == Stage.Hospitalised)
+    Tally.critical += one(s == Stage.Critical)
+    Tally.recovering += one(s == Stage.Recovering)
+    Tally.recovered += one(s == Stage.Recovered)
+    Tally.dead += one(s == Stage.Dead)
+  }
+}

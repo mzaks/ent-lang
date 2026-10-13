@@ -1,0 +1,27 @@
+// The city epidemic model (examples/epidemic) with the illness passed
+// on: 5,000 people in households taken from a panel (city.ent: a file
+// read and parsed, households kept where they fit the country's ages and
+// sizes), five networks of work and school on rewired rings, and each
+// day what the ill give off taken from the hazard of whom they meet
+// (transmission.ent): at home through the household, up a tree and back
+// down; at work along the ties that are met that day, each tie one edge
+// met from either end. Every draw is worked out from the seed and what
+// it is for, so one core and all of them give the same run to the byte.
+// (examples/epidemic/check/city.py holds a city of 100,000 against the
+// reference's targets.)
+// RUN: %ent run -I %S/../../examples/epidemic %S/Inputs/epidemic_city.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel -I %S/../../examples/epidemic %S/Inputs/epidemic_city.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// The people by the network of their age come to 5,000; a tie for every
+// member and every place within reach on its ring.
+// CHECK:      panel 80 households 2149 ties 36099
+// CHECK-NEXT: networks 607 565 3169 412 247
+// Five are infected at the start, and it spreads.
+// CHECK-NEXT: day 0: new 5 well 4995 ill 5 recovered 0 dead 0
+// CHECK-NEXT: day 10: new 5 well 4976 ill 22 recovered 2 dead 0
+// CHECK:      day 50: new 106 well 2401 ill 1747 recovered 850 dead 2
+// It ends with nobody ill: who was never infected, recovered or dead.
+// CHECK:      day 135: new 0 well 1035 ill 0 recovered 3945 dead 20
+// CHECK-NOT:  day

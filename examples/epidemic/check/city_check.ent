@@ -1,0 +1,69 @@
+// The city of 100,000 as it is built: a line for each person,
+// `person,age,household,network,ties`, after a line of the city's own
+// numbers. Then what a day's meetings come to, with everybody giving
+// off 1 along each: after "work" a line `person,met` for the ties met
+// along on day 1, after "home" one for the meetings at home, which
+// count twice. check/city.py holds what comes out against the
+// reference's targets. The panel's file is where the program is started.
+import console
+import disease
+import city
+import transmission
+
+capacity Person 100000
+capacity Household 100000
+capacity LivesIn 100000
+capacity WorksWith 1100000
+capacity Taken 100000
+capacity Ring 100000
+
+world {
+  Run.seed = 1
+  Run.people = 100000
+}
+
+system city_out() {
+  put("fit {City.fit} households {City.households} ties {City.ties} panel {len(Panel) / 9}")
+  for (p: Person, a: Age, w: Work)-[LivesIn]->(h: Household) {
+    put("{p.id},{a.group},{h.id},{w.network},{w.ties}")
+  }
+}
+
+// Everybody gives off 1, and has taken nothing yet.
+system prime() {
+  Clock.day = 1
+  for i: mut Infectious, z: mut Hazard {
+    i.rate = 1.0
+    z.left = 0.0
+  }
+}
+
+system work_out() {
+  put("work")
+  for p: Person, z: mut Hazard {
+    put("{p.id},{-z.left}")
+    z.left = 0.0
+  }
+}
+
+system home_out() {
+  put("home")
+  for p: Person, z: Hazard { put("{p.id},{-z.left}") }
+}
+
+schedule setup() {
+  panel()
+  households()
+  settle()
+  census()
+  employ()
+  wire()
+  city_out()
+  prime()
+  workplace()
+  work_out()
+  household()
+  home_out()
+}
+
+main { setup() }
