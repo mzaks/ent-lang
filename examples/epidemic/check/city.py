@@ -17,8 +17,12 @@ it, and holds what comes out against the reference:
   average, exactly, and spread about that as the reference's own way of
   rewiring a ring spreads them (which is done here as the reference's C
   does it, on a ring of 4,000);
-- a day's meetings: at work half of a person's ties on average, at home
-  everybody of the household.
+- how many people each meets by chance on a day: the mean and the
+  deviation by age (a negative binomial number);
+- a day's meetings: at work half of a person's ties on average, by
+  chance as many as the person's number says (but for two stubs of one
+  person that fall together, and one stub left over), at home everybody
+  of the household.
 
 Says what fails, and at the end how many numbers were held. Needs the
 compiler built (build/bin) and its LLVM (LLVM_PREFIX, as for tools/ent).
@@ -42,6 +46,9 @@ MEETS = [10, 10, 7, 3, 3]
 STAFF = 0.2
 DAILY = 0.5
 REWIRE = 0.1
+# By chance on a day: the young, those of working age, the old.
+CHANCES = {"young": (2, 2), "working": (4, 4), "old": (3, 3)}
+AGE_KIND = ["young"] * 2 + ["working"] * 5 + ["old"] * 2
 
 
 def reference_ring(n, k, generator):
@@ -102,10 +109,15 @@ def main():
     words = lines[0].split()
     fit, ties = float(words[1]), int(words[5])
     work = lines.index("work")
+    chance = lines.index("chance")
     home = lines.index("home")
-    people = [tuple(map(int, line.split(","))) for line in lines[1:work]]
+    listed = [tuple(map(int, line.split(","))) for line in lines[1:work]]
+    people = [p[:5] for p in listed]
+    by_chance = {p[0]: p[5] for p in listed}
     met = {int(a): float(b) for a, b in
-           (line.split(",") for line in lines[work + 1:home])}
+           (line.split(",") for line in lines[work + 1:chance])}
+    met_by_chance = {int(a): float(b) for a, b in
+                     (line.split(",") for line in lines[chance + 1:home])}
     at_home = {int(a): float(b) for a, b in
                (line.split(",") for line in lines[home + 1:] if line)}
     n = len(people)
@@ -155,6 +167,27 @@ def main():
         print(f"  network {network}: {len(members)} members, {staff} staff, "
               f"ties {mean:.2f} spread {spread:.3f} ({expected:.3f}), "
               f"met {mean_met:.3f}")
+
+    for kind, (mean, deviation) in CHANCES.items():
+        numbers = [by_chance[p[0]] for p in people if AGE_KIND[p[1]] == kind]
+        found, spread = moments(numbers)
+        count = len(numbers)
+        report.hold(f"the {kind}: met by chance, mean", found, mean,
+                    4 * deviation / math.sqrt(count))
+        # (The fourth moment of this distribution is some 12 times the
+        # square of its variance.)
+        report.hold(f"the {kind}: met by chance, deviation", math.sqrt(spread),
+                    deviation, 4 * deviation * math.sqrt(12 / (4 * count)))
+        print(f"  the {kind}: {count}, by chance {found:.3f} +- {math.sqrt(spread):.3f}")
+    stubs = sum(by_chance.values())
+    lost = sum(by_chance[i] - met_by_chance[i] for i in by_chance)
+    report.hold("people who met more by chance than their number",
+                sum(1 for i in by_chance if met_by_chance[i] > by_chance[i]), 0, 0)
+    # Two stubs of one person fall together about once for every person's
+    # share of the stubs; allow ten times that.
+    report.hold("stubs that came to no meeting", lost, 0,
+                1 + 20 * sum(c * c for c in by_chance.values()) / stubs)
+    print(f"  {stubs} stubs, {int(lost)} without a meeting")
 
     wrong = sum(1 for p in people if at_home[p[0]] != 2 * size_of[p[2]])
     report.hold("people whose meetings at home are not their household", wrong, 0, 0)

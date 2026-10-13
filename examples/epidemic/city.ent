@@ -8,6 +8,9 @@
 //   capacity WorksWith 1100000
 //   schedule setup() { panel()  households()  settle()  census()  employ()  wire() }
 //
+// (And `capacity Stubs` and `capacity Met` for transmission.ent, which
+// pairs people who meet by chance anew each day.)
+//
 // - Households are taken from a panel of 10,000 that were asked (the
 //   reference's file, `City.panel`), four at a time, and kept where they
 //   bring the city's ages and the sizes of its households nearer to the
@@ -20,6 +23,8 @@
 //   its ends for somebody anywhere on the ring (Watts and Strogatz, with
 //   the turns the reference's code gives each tie: see `tie`). On a day,
 //   half of the ties are met along (transmission.ent).
+// - Everybody also meets a number of people by chance each day, a number
+//   of their own (`Chance`): few for most, many for some.
 import files
 import math
 import random
@@ -40,6 +45,9 @@ component Spread { multiplier: f32 }
 component Work { network: u8, ties: i32 }
 // What they give off today along one tie.
 component Infectious { rate: f32 }
+// How many people they meet by chance on a day, anywhere: drawn once,
+// some many and most few.
+component Chance { meets: i32 }
 
 relation (Person)-[LivesIn]->(Household) tree capacity 16
 // A tie in a network. It is one edge, met along from either end; `key`
@@ -54,6 +62,15 @@ table networks { meets: f32, adult: bool } = [
   { meets: 7.0,  adult: true },      // 20 to 69: work
   { meets: 3.0,  adult: false },     // 70 to 79: the retired
   { meets: 3.0,  adult: false }      // 80 and more: the elderly
+]
+// The people met by chance on a day, by age: the young, those of working
+// age and the old; on average, and how far from it.
+table chances { mean: f32, deviation: f32 } = [
+  { mean: 2.0, deviation: 2.0 }, { mean: 2.0, deviation: 2.0 },
+  { mean: 4.0, deviation: 4.0 }, { mean: 4.0, deviation: 4.0 },
+  { mean: 4.0, deviation: 4.0 }, { mean: 4.0, deviation: 4.0 },
+  { mean: 4.0, deviation: 4.0 },
+  { mean: 3.0, deviation: 3.0 }, { mean: 3.0, deviation: 3.0 }
 ]
 // The network of each age.
 table own_network: i32 = [0, 1, 2, 2, 2, 2, 2, 3, 4]
@@ -73,6 +90,7 @@ const SPREAD = 7
 const NETWORK = 8
 const RING = 9
 const TIES = 10
+const CHANCE = 12
 
 // The panel's file, how far the households taken from it are from the
 // country's (the squares of the differences of the shares, added up:
@@ -236,7 +254,10 @@ system settle() {
               Hazard { left: (-log64(draw) / ages[age].susceptible as f64) as f32 },
               Spread { multiplier: gamma(key(Run.seed, id, 0, SPREAD), 1.0, 1.4) as f32 },
               Work { network: own_network[age] as u8, ties: 0 },
-              Infectious { rate: 0.0 }
+              Infectious { rate: 0.0 },
+              Chance { meets: negative_binomial(key(Run.seed, id, 0, CHANCE),
+                                                chances[age].mean as f64,
+                                                chances[age].deviation as f64) }
             }
             connect (who)-[LivesIn]->(home)
             id += 1

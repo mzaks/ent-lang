@@ -1,9 +1,10 @@
 // The city of 100,000 as it is built: a line for each person,
-// `person,age,household,network,ties`, after a line of the city's own
-// numbers. Then what a day's meetings come to, with everybody giving
-// off 1 along each: after "work" a line `person,met` for the ties met
-// along on day 1, after "home" one for the meetings at home, which
-// count twice. check/city.py holds what comes out against the
+// `person,age,household,network,ties,chance`, after a line of the
+// city's own numbers. Then what a day's meetings come to, with
+// everybody giving off 1 along each: after "work" a line `person,met`
+// for the ties met along on day 1, after "chance" one for the meetings
+// by chance of that day, after "home" one for the meetings at home,
+// which count twice. check/city.py holds what comes out against the
 // reference's targets. The panel's file is where the program is started.
 import console
 import disease
@@ -16,6 +17,8 @@ capacity LivesIn 100000
 capacity WorksWith 1100000
 capacity Taken 100000
 capacity Ring 100000
+capacity Stubs 500000
+capacity Met 250000
 
 world {
   Run.seed = 1
@@ -24,8 +27,8 @@ world {
 
 system city_out() {
   put("fit {City.fit} households {City.households} ties {City.ties} panel {len(Panel) / 9}")
-  for (p: Person, a: Age, w: Work)-[LivesIn]->(h: Household) {
-    put("{p.id},{a.group},{h.id},{w.network},{w.ties}")
+  for (p: Person, a: Age, w: Work, c: Chance)-[LivesIn]->(h: Household) {
+    put("{p.id},{a.group},{h.id},{w.network},{w.ties},{c.meets}")
   }
 }
 
@@ -40,6 +43,14 @@ system prime() {
 
 system work_out() {
   put("work")
+  for p: Person, z: mut Hazard {
+    put("{p.id},{-z.left}")
+    z.left = 0.0
+  }
+}
+
+system chance_out() {
+  put("chance")
   for p: Person, z: mut Hazard {
     put("{p.id},{-z.left}")
     z.left = 0.0
@@ -62,6 +73,9 @@ schedule setup() {
   prime()
   workplace()
   work_out()
+  pair()
+  chance()
+  chance_out()
   household()
   home_out()
 }

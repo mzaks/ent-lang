@@ -1,6 +1,7 @@
 // The epidemic in a window: 10,000 people, a dot each in the colour of
 // their stage, household by household, and the day's numbers beside
-// them. Ten are infected on day 0 and pass it on at home and at work;
+// them. Ten are infected on day 0 and pass it on at home, at work and
+// to whom they meet by chance;
 // ten days pass in a second, and Space starts it over with another
 // seed.
 //
@@ -25,6 +26,8 @@ capacity LivesIn 10000
 capacity WorksWith 110000
 capacity Taken 10000
 capacity Ring 10000
+capacity Stubs 50000
+capacity Met 25000
 
 // A dot's colour by the person's stage.
 table colours[Stage]: i32 = [
@@ -152,8 +155,10 @@ schedule frame() {
   seed() run_if Pace.again
   tick() run_if Pace.due
   infectiousness() run_if Pace.due
+  pair() run_if Pace.due
   household() run_if Pace.due
   workplace() run_if Pace.due
+  chance() run_if Pace.due
   infect() run_if Pace.due
   progress() run_if Pace.due
   tally() run_if Pace.due || Pace.again

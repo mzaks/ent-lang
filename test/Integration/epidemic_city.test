@@ -5,8 +5,11 @@
 // day what the ill give off taken from the hazard of whom they meet
 // (transmission.ent): at home through the household, up a tree and back
 // down; at work along the ties that are met that day, each tie one edge
-// met from either end. Every draw is worked out from the seed and what
-// it is for, so one core and all of them give the same run to the byte.
+// met from either end; and by chance, along the edges of a relation
+// that is emptied and filled anew every day, from stubs laid out by a
+// proc and paired in an order the day says. Every draw is worked out
+// from the seed and what it is for, so one core and all of them give
+// the same run to the byte.
 // (examples/epidemic/check/city.py holds a city of 100,000 against the
 // reference's targets.)
 // RUN: %ent run -I %S/../../examples/epidemic %S/Inputs/epidemic_city.ent 2>/dev/null > %t.one
@@ -18,10 +21,11 @@
 // member and every place within reach on its ring.
 // CHECK:      panel 80 households 2149 ties 36099
 // CHECK-NEXT: networks 607 565 3169 412 247
+// CHECK-NEXT: met by chance 17455.0 a day
 // Five are infected at the start, and it spreads.
 // CHECK-NEXT: day 0: new 5 well 4995 ill 5 recovered 0 dead 0
-// CHECK-NEXT: day 10: new 5 well 4976 ill 22 recovered 2 dead 0
-// CHECK:      day 50: new 106 well 2401 ill 1747 recovered 850 dead 2
+// CHECK-NEXT: day 10: new 9 well 4965 ill 34 recovered 1 dead 0
+// CHECK:      day 40: new 106 well 1365 ill 2779 recovered 849 dead 7
 // It ends with nobody ill: who was never infected, recovered or dead.
-// CHECK:      day 135: new 0 well 1035 ill 0 recovered 3945 dead 20
+// CHECK:      day 102: new 0 well 740 ill 0 recovered 4230 dead 30
 // CHECK-NOT:  day

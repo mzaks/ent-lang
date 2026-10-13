@@ -1,7 +1,8 @@
 // The city epidemic of examples/epidemic in 5,000 people: households
 // taken from a panel of 80 (epidemic_panel.csv, made up for this test),
 // the five networks of work and school, and 5 people infected on day 0
-// who pass the illness on at home and at work. A line for the city, and
+// who pass the illness on at home, at work and to whom they meet by
+// chance. A line for the city, and
 // one of counts for every tenth day and the last.
 import console
 import disease
@@ -14,6 +15,8 @@ capacity LivesIn 5000
 capacity WorksWith 60000
 capacity Taken 5000
 capacity Ring 5000
+capacity Stubs 40000
+capacity Met 20000
 
 world {
   Run.seed = 3
@@ -25,6 +28,7 @@ world {
 system city_out() {
   put("panel {len(Panel) / 9} households {City.households} ties {City.ties}")
   put("networks {City.primary} {City.secondary} {City.working} {City.retired} {City.elderly}")
+  put("met by chance {Rate.chances} a day")
 }
 
 system report() {
@@ -50,8 +54,10 @@ schedule setup() {
 schedule day() {
   tick()
   infectiousness()
+  pair()
   household()
   workplace()
+  chance()
   infect()
   progress()
   tally()

@@ -5,14 +5,19 @@
 //
 //   schedule setup() { .. the city ..  curve()  rate()  share() }
 //   schedule day() {
-//     tick()  infectiousness()  household()  workplace()  infect()
-//     progress()  tally()
+//     tick()  infectiousness()  pair()  household()  workplace()  chance()
+//     infect()  progress()  tally()
 //   }
 //
 // What an ill person gives off along one meeting depends on how many
 // days ago they were infected (`Curve`), on how their illness shows, on
 // themselves (`Spread`) and on where the two meet: at home it counts
 // twice. Nobody in hospital meets anybody, and neither do the dead.
+//
+// Who meets whom by chance is new each day: everybody who is up has as
+// many stubs as they meet people (`Chance`), the stubs are put in an
+// order that the day says, and each two that come to lie next to each
+// other are a meeting, an edge of `Met` for that day.
 import random
 import disease
 import city
@@ -29,6 +34,12 @@ const ASYMPTOMATIC = 0.33
 const AT_HOME = 2.0
 
 const MEETS = 11
+const PAIRS = 13
+
+// A meeting by chance, today's.
+relation (Person)-[Met]->(Person) capacity 16
+// A row for each person each time they meet somebody by chance today.
+buffer Stubs { who: entity } capacity 16
 
 // For each day after the infection, the part of it all that is given
 // off on that day (200 days, which come to 1).
@@ -36,9 +47,9 @@ buffer Curve { part: f32 } capacity 200
 
 // How many a person meets on a day, by what a meeting counts (at home
 // twice), on average over everybody; and what is given off along one
-// meeting in all: `RATE` shared among them. (`homes`: the meetings at
-// home alone, of everybody together.)
-unique Rate { homes: f64, meetings: f32, each: f32 }
+// meeting in all: `RATE` shared among them. (`homes`, `chances`: the
+// meetings at home alone and those by chance, of everybody together.)
+unique Rate { homes: f64, chances: f64, meetings: f32, each: f32 }
 
 system curve() {
   Curve = []
@@ -58,10 +69,12 @@ system rate() {
   for h: Household {
     Rate.homes += (h.members * (h.members - 1)) as f64 * AT_HOME as f64
   }
+  Rate.chances = 0.0
+  for c: Chance { Rate.chances += c.meets as f64 }
 }
 system share() {
   let work = 2.0 * City.ties as f64 * DAILY as f64
-  Rate.meetings = ((Rate.homes + work) / Run.people as f64) as f32
+  Rate.meetings = ((Rate.homes + work + Rate.chances) / Run.people as f64) as f32
   Rate.each = RATE / Rate.meetings
 }
 
@@ -116,6 +129,45 @@ system workplace() {
     for (o: mut Hazard)-[w: WorksWith]->(p) {
       if met(Run.seed, w.key, Clock.day) { o.left -= i.rate }
     }
+  }
+}
+
+// The stubs of everybody who is up, one after another in the order of
+// the people.
+proc lay(chances: Chance, diseases: Disease, stubs: mut Stubs) {
+  stubs = []
+  for e, c in chances {
+    let stage = diseases[e].stage
+    if stage != Stage.Dead && stage != Stage.Hospitalised &&
+       stage != Stage.Critical && stage != Stage.Recovering {
+      for i in 0..c.meets { stubs += { who: e } }
+    }
+  }
+}
+
+// Yesterday's meetings by chance are over, and today's are drawn: the
+// stubs in an order of the day's, two and two. (Two stubs of one person
+// are no meeting.)
+system pair() {
+  for p: Person {
+    for (p)-[mut m: Met]->() { m.disconnect() }
+  }
+  lay(Chance, Disease, Stubs)
+  let stubs = len(Stubs)
+  let bits = bits_for(stubs)
+  let order = key(Run.seed, 0, Clock.day, PAIRS)
+  for i in 0..stubs / 2 {
+    let one = Stubs[permute_in(order, 2 * i, stubs, bits)].who
+    let other = Stubs[permute_in(order, 2 * i + 1, stubs, bits)].who
+    if one != other { connect (one)-[Met]->(other) }
+  }
+}
+
+// By chance: along each of today's meetings, from either end.
+system chance() {
+  for p: Person, i: Infectious where i.rate > 0.0 {
+    for (p)-[Met]->(o: mut Hazard) { o.left -= i.rate }
+    for (o: mut Hazard)-[Met]->(p) { o.left -= i.rate }
   }
 }
 

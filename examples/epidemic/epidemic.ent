@@ -7,8 +7,9 @@
 //   ../../../tools/ent run --parallel ../../../examples/epidemic/epidemic.ent
 //
 // 100,000 people in households and at work or at school (city.ent), ten
-// of them infected on day 0, who pass it on at home and at work
-// (transmission.ent): 200 days, or until nobody is ill. The households
+// of them infected on day 0, who pass it on at home, at work and to whom
+// they meet by chance (transmission.ent): 200 days, or until nobody is
+// ill. The households
 // are taken from the reference's panel, a file that is looked for where
 // the program is started.
 import console
@@ -22,6 +23,8 @@ capacity LivesIn 100000
 capacity WorksWith 1100000
 capacity Taken 100000
 capacity Ring 100000
+capacity Stubs 500000
+capacity Met 250000
 
 unique Days: i32
 
@@ -59,8 +62,10 @@ schedule setup() {
 schedule day() {
   tick()
   infectiousness()
+  pair()
   household()
   workplace()
+  chance()
   infect()
   progress()
   tally()

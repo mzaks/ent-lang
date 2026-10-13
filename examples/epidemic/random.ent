@@ -85,29 +85,47 @@ fn days(key: u64, mean: f64, deviation: f64) -> i32 {
   max(1, round64(gamma(key, mean, deviation)) as i32)
 }
 
+// How many bits say every number below `count`.
+fn bits_for(count: i32) -> i32 {
+  var bits = 1
+  while ((1 as i64) << bits) < count as i64 { bits += 1 }
+  bits
+}
+
 // The numbers from 0 to below `count` in another order, which the key
 // says: where number `i` comes in it. Every number comes once, so the
 // first so many of the order are that many different ones picked at
-// random, and each is found without the others. (A Feistel network over
-// the next power of four, gone round again while it leads outside.)
-fn permute(key: u64, i: i32, count: i32) -> i32 {
-  var half = 1
-  while ((1 as i64) << (2 * half)) < count as i64 { half += 1 }
-  let mask = ((1 as u64) << half) - 1
+// random, and each is found without the others. `bits` is `bits_for(
+// count)`, worked out once by who asks for many.
+//
+// (The numbers of so many bits are stirred in ways that can each be
+// undone, a multiplication by an odd number and a fold of the high bits
+// into the low ones, so no two come to the same; and gone round again
+// while they lead outside the count, which is less than once on
+// average.)
+fn permute_in(key: u64, i: i32, count: i32, bits: i32) -> i32 {
+  let mask = ((1 as u64) << bits) - 1
+  let fold = max(1, bits / 2)
+  let a = mix(key) | 1
+  let b = mix(key + 1) | 1
+  let c = mix(key + 2) | 1
+  let d = mix(key + 3)
   var x = i as i64 as u64
   var outside = true
   while outside {
-    var left = x >> half
-    var right = x & mask
-    for round in 0..4 {
-      let turned = left ^ (mix(mix(key + (round as i64 as u64)) ^ right) & mask)
-      left = right
-      right = turned
-    }
-    x = (left << half) | right
+    x = ((x ^ d) * a) & mask
+    x = x ^ (x >> fold)
+    x = (x * b) & mask
+    x = x ^ (x >> fold)
+    x = (x * c) & mask
+    x = x ^ (x >> fold)
     outside = x >= count as i64 as u64
   }
   x as i64 as i32
+}
+
+fn permute(key: u64, i: i32, count: i32) -> i32 {
+  permute_in(key, i, count, bits_for(count))
 }
 
 // The logarithm of the gamma function, for x above 0 (Lanczos).
@@ -158,4 +176,29 @@ fn gamma_below(x: f64, mean: f64, deviation: f64) -> f64 {
     below = 1.0 - front * h
   }
   below
+}
+
+// A whole number of the Poisson distribution with this mean, of the
+// occasion's number n (counted up until the chance of so few is used
+// up).
+fn poisson(key: u64, n: i32, mean: f64) -> i32 {
+  let u = uniform(key, n)
+  var count = 0
+  var chance = exp64(-mean)
+  var below = chance
+  while below < u && count < 10000 {
+    count += 1
+    chance = chance * mean / count as f64
+    below += chance
+  }
+  count
+}
+
+// A whole number of the negative binomial distribution with this mean
+// and deviation (whose square is more than the mean): a Poisson number
+// whose own mean is a gamma number (the Poisson one by an occasion of its
+// own, made of this one).
+fn negative_binomial(key: u64, mean: f64, deviation: f64) -> i32 {
+  let shape = mean * mean / (deviation * deviation - mean)
+  poisson(mix(key), 0, gamma(key, mean, mean / sqrt64(shape)))
 }

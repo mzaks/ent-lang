@@ -11,12 +11,12 @@
 // RUN: FileCheck %s --input-file=%t.one
 
 // Just the 2,000, picked without one twice; a third of them show nothing.
-// CHECK:      day 0: new 2000 well 18000 before 1338 without 662 mild 0 severe 0 hospital 0 critical 0 after 0 recovered 0 dead 0
-// CHECK-NEXT: day 1: new 0 well 18000 before 1304 without 662 mild 29 severe 5
+// CHECK:      day 0: new 2000 well 18000 before 1328 without 672 mild 0 severe 0 hospital 0 critical 0 after 0 recovered 0 dead 0
+// CHECK-NEXT: day 1: new 0 well 18000 before 1290 without 672 mild 34 severe 4
 // Whoever is in hospital, in intensive care or out of it again, has the
 // tag `Hospitalised`, and nobody else.
-// CHECK:      day 12: new 0 well 18000 before 24 without 438 mild 892 severe 127 hospital 17 critical 2 after 0 recovered 490 dead 10
-// CHECK-NEXT: in hospital 19
+// CHECK:      day 12: new 0 well 18000 before 18 without 452 mild 899 severe 125 hospital 29 critical 3 after 0 recovered 464 dead 10
+// CHECK-NEXT: in hospital 32
 // It ends when nobody is ill: everybody recovered or dead.
-// CHECK:      day 47: new 0 well 18000 before 0 without 0 mild 0 severe 0 hospital 0 critical 0 after 0 recovered 1978 dead 22
+// CHECK:      day 42: new 0 well 18000 before 0 without 0 mild 0 severe 0 hospital 0 critical 0 after 0 recovered 1972 dead 28
 // CHECK-NOT:  day
