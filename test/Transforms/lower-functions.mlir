@@ -107,23 +107,27 @@ ent.system @scramble() {
   }
 }
 
+// The text's place on the stack is the function's, taken once before the
+// loop: not one more for every entity, and in no scope of its own in the
+// loop (which the canonicalizer of a parallel build would take it out
+// of, into the loop's body).
 // CHECK-LABEL: func.func private @print
+// CHECK-NEXT:  %[[SLOT:.*]] = memref.alloca() {alignment = 16 : i64} : memref<i256>
 // CHECK:       %[[T:.*]] = call @ent_m_seconds() : () -> f64
 // CHECK:       scf.for
-// CHECK:         memref.alloca_scope
-// CHECK:           %[[SLOT:.*]] = memref.alloca() {alignment = 16 : i64} : memref<i256>
-// CHECK:           memref.store %{{.*}}, %[[SLOT]][] : memref<i256>
-// CHECK:           %[[P:.*]] = llvm.inttoptr %{{.*}} : i64 to !llvm.ptr
-// CHECK:           %[[O:.*]] = arith.extui %{{.*}} : i1 to i8
-// CHECK:           {{.*}}call @ent_put(%[[P]], %[[O]]) : (!llvm.ptr, i8) -> ()
+// CHECK-NOT:     memref.alloca
+// CHECK:         memref.store %{{.*}}, %[[SLOT]][] : memref<i256>
+// CHECK:         %[[P:.*]] = llvm.inttoptr %{{.*}} : i64 to !llvm.ptr
+// CHECK:         %[[O:.*]] = arith.extui %{{.*}} : i1 to i8
+// CHECK:         {{.*}}call @ent_put(%[[P]], %[[O]]) : (!llvm.ptr, i8) -> ()
 // PARALLEL-LABEL: func.func private @print
 // PARALLEL-NOT:   scf.parallel
 // PARALLEL:       scf.for
 // PARALLEL:         call @ent_put
 // LLVM-LABEL: define {{.*}}void @print
-// LLVM: call ptr @llvm.stacksave
+// LLVM: alloca i256
+// LLVM-NOT:  alloca
 // LLVM: call void @ent_put(ptr %{{.*}}, i8 %{{.*}})
-// LLVM: call void @llvm.stackrestore
 ent.system @print() {
   %t = ent.invoke proc @m.seconds() : () -> f64
   ent.write @Clock "now", %t : f64

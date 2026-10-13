@@ -1,0 +1,29 @@
+// 100,000 entities and two `for`s whose bodies call a function: one that
+// adds what a fn gives into a unique, and one that hands a proc a text.
+import console
+
+component Person { id: i32 } capacity 100000
+unique Thirds: i32
+
+fn one(is: bool) -> i32 { if is { 1 } else { 0 } }
+
+system populate() {
+  for id in 0..100000 { spawn { Person { id: id } } }
+}
+
+system count() {
+  for p: Person { Thirds += one(p.id % 3 == 0) }
+}
+
+system list() {
+  put("thirds {Thirds}")
+  for p: Person { put("person {p.id}") }
+}
+
+schedule all() {
+  populate()
+  count()
+  list()
+}
+
+main { all() }

@@ -1,0 +1,20 @@
+// Two things a `for` over many entities got wrong when it was built for
+// all the cores (Inputs/parallel_calls.ent, 100,000 entities):
+//
+// - A body that calls a function is run in parallel from fewer entities
+//   on than one that only computes. What it added into a unique was then
+//   added where it stood, by every thread at once, and some of it was
+//   lost: a third of the entities came to fewer than 33,334.
+// - A text handed to a proc took a place on the stack for every entity
+//   and gave none back until the system was done: after 65,000 lines the
+//   stack was full.
+// RUN: %ent run %S/Inputs/parallel_calls.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/parallel_calls.ent 2>/dev/null > %t.all
+// RUN: head -1 %t.one | FileCheck %s --check-prefix=SUM
+// RUN: head -1 %t.all | FileCheck %s --check-prefix=SUM
+// RUN: tail -1 %t.one | FileCheck %s --check-prefix=LAST
+// RUN: tail -1 %t.all | FileCheck %s --check-prefix=LAST
+// RUN: cmp %t.one %t.all
+
+// SUM: thirds 33334
+// LAST: person 99999

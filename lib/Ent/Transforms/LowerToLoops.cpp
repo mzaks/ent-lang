@@ -1077,6 +1077,19 @@ static bool isEntityLocal(QueryOp query) {
   return !result.wasInterrupted();
 }
 
+/// Whether the loop over the entities of `archetype` is never a parallel
+/// one, however many there are: the most work it can be (with a `for`
+/// over other entities in the body, the two numbers multiplied; with
+/// calls out of it, so many times more) is below what a fork pays for.
+static bool neverParallel(const WorldArchetype &archetype,
+                          const LoopOptions &options, bool entityLocal) {
+  int64_t most = int64_t(archetype.capacity) *
+                 std::max<int64_t>(1, options.innerCapacity) *
+                 options.bodyWeight;
+  return !options.parallelEntities || !entityLocal ||
+         most < options.parallelMinEntities;
+}
+
 /// Emit the loop over the entities of `archetype` at the insertion point
 /// and call `emitBody` with the entity index, positioned inside the loop,
 /// the number of entities the loop runs over, and whether it runs its
@@ -1125,13 +1138,7 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
     return loop;
   };
 
-  // (With a `for` over other entities in the body, the work is the two
-  // numbers multiplied.)
-  int64_t most = int64_t(archetype.capacity) *
-                 std::max<int64_t>(1, options.innerCapacity) *
-                 options.bodyWeight;
-  if (!options.parallelEntities || !entityLocal ||
-      most < options.parallelMinEntities)
+  if (neverParallel(archetype, options, entityLocal))
     return emitSequential();
   if (options.parallelMinEntities <= 1)
     return emitParallel();
@@ -11775,9 +11782,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       visited.push_back({&archetype, rows});
     // A loop that never runs in parallel visits the entities in the order
     // applies are combined in, so it may combine unobserved ones directly.
+    // (By the measure the loop itself is made by: one whose body calls
+    // out runs in parallel from fewer entities on.)
     bool sequentialOnly = options.directApplies &&
-                          (!options.parallelEntities || !entityLocal ||
-                           archetype.capacity < options.parallelMinEntities);
+                          neverParallel(archetype, options, entityLocal);
     if (sequentialOnly)
       direct.insert(&archetype);
     // (A reactive query's body is a part: the same for every archetype
@@ -12165,10 +12173,32 @@ declareFunction(IRRewriter &rewriter, FunctionOp function,
   return success();
 }
 
+/// The start of what `op` is in that has a stack of its own (its
+/// function, or the turn of a parallel loop that a thread runs): what is
+/// put on the stack there is not put there again each time a loop comes
+/// round. None where `op` is not in a function yet.
+///
+/// (An `scf.for` is no such place, though its body is a scope for what it
+/// allocates: it becomes blocks, and what one of them puts on the stack
+/// stays there until the function returns.)
+static Block *stackOf(Operation *op) {
+  Region *inside = op->getParentRegion();
+  for (Operation *scope = op->getParentOp(); scope;
+       inside = scope->getParentRegion(), scope = scope->getParentOp())
+    if (isa<func::FuncOp, scf::ParallelOp>(scope))
+      return &inside->front();
+  return nullptr;
+}
+
 /// Replace `invoke` by a call of the function. One with a body (`defined`)
 /// takes the values as they are. For a C function a text argument is put
-/// on the stack for the call, which gets its address; the stack is given
-/// back right after, since the call may sit in a loop.
+/// on the stack for the call, which gets its address: in a place that is
+/// there once for the function (or for a turn of a parallel loop), since
+/// the call may sit in a loop, which must not take more stack each time
+/// it comes round. (Not in a scope of its own around the call, which
+/// gives the stack back as well: the canonicalizer takes what such a
+/// scope in a loop allocates out of it, into the loop's body.) Where the
+/// call is not in a function yet, it is such a scope still.
 ///
 /// A buffer it is handed (`world` is then the system's): how many rows it
 /// has, and where each field's values are.
@@ -12199,11 +12229,19 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     resultTypes.push_back(invoke.getResult().getType());
 
   rewriter.setInsertionPoint(invoke);
+  Block *stack = hasText ? stackOf(invoke) : nullptr;
   memref::AllocaScopeOp scope;
-  if (hasText) {
+  if (hasText && !stack) {
     scope = memref::AllocaScopeOp::create(rewriter, loc, resultTypes);
     rewriter.createBlock(&scope.getBodyRegion());
   }
+  auto slotOf = [&](Type type, IntegerAttr alignment) -> Value {
+    OpBuilder::InsertionGuard guard(rewriter);
+    if (stack)
+      rewriter.setInsertionPointToStart(stack);
+    return memref::AllocaOp::create(rewriter, loc, MemRefType::get({}, type),
+                                    ValueRange{}, alignment);
+  };
   // (A buffer by what the function says it takes: one that was given to
   // a function is the world's memory by now.)
   SmallVector<Type> params(function.getParams().getAsValueRange<TypeAttr>());
@@ -12220,9 +12258,7 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
           memref::LoadOp::create(rewriter, loc, world->bufferCount(buffer),
                                  ValueRange{zero}));
       if (handed.getMut()) {
-        Value slot = memref::AllocaOp::create(
-            rewriter, loc, MemRefType::get({}, rewriter.getI32Type()),
-            ValueRange{});
+        Value slot = slotOf(rewriter.getI32Type(), IntegerAttr());
         memref::StoreOp::create(rewriter, loc, count, slot, ValueRange{});
         args.push_back(worldPointer(rewriter, loc, slot));
         args.push_back(arith::ConstantIntOp::create(rewriter, loc,
@@ -12238,9 +12274,7 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     }
     if (auto text = dyn_cast<TextType>(arg.getType())) {
       IntegerType storage = text.getStorageType();
-      Value slot = memref::AllocaOp::create(
-          rewriter, loc, MemRefType::get({}, storage), ValueRange{},
-          rewriter.getI64IntegerAttr(16));
+      Value slot = slotOf(storage, rewriter.getI64IntegerAttr(16));
       Value bits =
           UnrealizedConversionCastOp::create(rewriter, loc, storage, arg)
               .getResult(0);
@@ -12496,19 +12530,6 @@ static void declareTextRuntime(IRRewriter &rewriter, ModuleOp module,
   declare("ent_text_join_own", {i64, i64}, {i64});
   declare("ent_text_keep", {i64}, {i64});
   declare("ent_text_release", {}, {});
-}
-
-/// The start of what `op` is in that has a stack of its own (its
-/// function, or the part of it a thread runs): what is put on the stack
-/// there is not put there again each time a loop comes round.
-static Block *stackOf(Operation *op) {
-  Operation *scope = op;
-  Region *inside = nullptr;
-  do {
-    inside = scope->getParentRegion();
-    scope = scope->getParentOp();
-  } while (!scope->hasTrait<OpTrait::AutomaticAllocationScope>());
-  return &inside->front();
 }
 
 /// Lower the ops on texts of any length: to their blocks, and to calls
