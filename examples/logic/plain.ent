@@ -1,0 +1,72 @@
+// The same circuit run without entities: the signals' values as the rows
+// of a buffer, by their numbers, and the ANDs as rows gone through in
+// the order of their levels by a proc. What a program in C would do:
+// held beside the model to say what the entities cost.
+//
+//   schedule setup() { netlist()  levels()  build()  plan()  rows() }
+//   schedule cycle() { set()  settle()  shown()  noted()  stepped()  tick() }
+import files
+import circuit
+import logic
+
+// A signal's value, by its number; an AND by its name and its inputs as
+// the file names them, in the order of the levels; a flip-flop's value
+// kept until the clock's edge.
+buffer Wires { bits: u64 } capacity 16
+buffer Steps { out: i32, a: i32, b: i32 } capacity 16
+buffer Kept { bits: u64 } capacity 16
+
+system rows() {
+  Wires = []
+  Steps = []
+  Kept = []
+  for i in 0..Circuit.most + 1 { Wires += { bits: 0 } }
+  for i in 0..len(Sorted) {
+    let row = Sorted[i].row
+    Steps += { out: Gates[row].number, a: Gates[row].a, b: Gates[row].b }
+  }
+  for i in 0..len(Flops) { Kept += { bits: 0 } }
+}
+
+// What a signal is as the file names it: inverted where the name is odd.
+fn taken(wires: Wires, name: i32) -> u64 {
+  wires[name / 2].bits ^ (0 - (name & 1) as u64)
+}
+
+system set() {
+  for i in 0..len(Ins) { Wires[Ins[i].number].bits = drawn(Run.seed, i, Run.cycle) }
+}
+
+proc and_all(steps: Steps, wires: mut Wires) {
+  for i in 0..len(steps) {
+    wires[steps[i].out].bits = taken(wires, steps[i].a) & taken(wires, steps[i].b)
+  }
+}
+
+system settle() {
+  and_all(Steps, Wires)
+}
+
+system shown() {
+  for i in 0..len(Outs) {
+    let bits = taken(Wires, Outs[i].shown)
+    Run.sum = mix(Run.sum ^ bits)
+    if Run.shown { Bytes += { value: (48 + (bits & 1)) as u8 } }
+  }
+  if Run.shown {
+    Bytes += { value: 10 }
+    if len(Bytes) + len(Outs) + 1 > 1000000 {
+      write_bytes("outputs.txt", Bytes, 0, len(Bytes), Run.written)
+      Run.written = true
+      Bytes = []
+    }
+  }
+}
+
+system noted() {
+  for i in 0..len(Flops) { Kept[i].bits = taken(Wires, Flops[i].taken) }
+}
+
+system stepped() {
+  for i in 0..len(Flops) { Wires[Flops[i].number].bits = Kept[i].bits }
+}

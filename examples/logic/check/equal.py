@@ -143,7 +143,7 @@ endmodule
 """
     with open(os.path.join(folder, "bench.v"), "w") as file:
         file.write(bench)
-    subprocess.run(["iverilog", "-g2012", "-o", "bench.vvp", "bench.v",
+    subprocess.run(["iverilog", "-g2005", "-o", "bench.vvp", "bench.v",
                     os.path.join(CIRCUITS, name + ".v")], check=True, cwd=folder)
     said = subprocess.run(["vvp", "-n", "bench.vvp"], check=True, capture_output=True,
                           text=True, cwd=folder).stdout

@@ -22,13 +22,19 @@
 // in `Run.sum` either way.
 //
 // A file "run.txt" where the program is started says how many cycles and
-// the seed, two whole numbers; without one it is 1000 cycles, seed 1.
+// the seed, two whole numbers, and with a third, 0, that no outputs are
+// to be written, and with a fourth which way the gates are gone through
+// (`Run.way`); without one it is 1000 cycles, seed 1.
 import files
 import console
 import circuit
 
 // (`written`: whether some of the outputs' lines are in their file yet.)
-unique Run { cycles: i32, seed: i64, shown: bool, cycle: i32, sum: u64, written: bool }
+// `way`: how the gates are gone through (0: as entities by their level;
+// 1: as rows of buffers, plain.ent).
+unique Run {
+  cycles: i32, seed: i64, shown: bool, cycle: i32, sum: u64, written: bool, way: i32
+}
 
 world {
   Run.cycles = 1000
@@ -57,6 +63,12 @@ system plan() {
     let (seed, after) = number(Bytes, next)
     Run.cycles = cycles
     Run.seed = seed as i64
+    // (A third number, 0, for a run that writes no outputs.)
+    let (shown, last) = number(Bytes, after)
+    if last > after { Run.shown = shown != 0 }
+    // (And a fourth: which way the gates are gone through.)
+    let (way, end) = number(Bytes, last)
+    if end > last { Run.way = way }
   }
   Bytes = []
   Run.cycle = 0
