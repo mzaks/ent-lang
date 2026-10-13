@@ -27,8 +27,8 @@ capacity LivesIn 10000
 capacity WorksWith 110000
 capacity Taken 10000
 capacity Ring 10000
-capacity Stubs 50000
-capacity Met 25000
+capacity Order 10000
+capacity Index 1250
 
 // A dot's colour by the person's stage.
 table colours[Stage]: i32 = [
@@ -86,6 +86,7 @@ system again() {
     d.infected = 0
     d.path = Path.None
     if e.has(Hospitalised) { e.remove(Hospitalised) }
+    if e.has(Ill) { e.remove(Ill) }
   }
 }
 

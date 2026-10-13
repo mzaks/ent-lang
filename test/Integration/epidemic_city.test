@@ -5,9 +5,11 @@
 // day what the ill give off taken from the hazard of whom they meet
 // (transmission.ent): at home through the household, up a tree and back
 // down; at work along the ties that are met that day, each tie one edge
-// met from either end; and by chance, along the edges of a relation
-// that is emptied and filled anew every day, from stubs laid out by a
-// proc and paired in an order the day says. Every draw is worked out
+// met from either end; and by chance, to whom a proc finds for each stub
+// of everybody ill in an order of all the stubs that the day says (a
+// running sum over the people, an order that is worked out both ways,
+// and what each of the ill gives off sent to whom they meet). Every
+// draw is worked out
 // from the seed and what it is for, so one core and all of them give
 // the same run to the byte.
 // (examples/epidemic/check/city.py holds a city of 100,000 against the
@@ -24,8 +26,8 @@
 // CHECK-NEXT: met by chance 17455.0 a day
 // Five are infected at the start, and it spreads.
 // CHECK-NEXT: day 0: new 5 well 4995 ill 5 recovered 0 dead 0
-// CHECK-NEXT: day 10: new 9 well 4965 ill 34 recovered 1 dead 0
-// CHECK:      day 40: new 106 well 1365 ill 2779 recovered 849 dead 7
+// CHECK-NEXT: day 10: new 7 well 4961 ill 38 recovered 1 dead 0
+// CHECK:      day 40: new 108 well 1325 ill 2800 recovered 867 dead 8
 // It ends with nobody ill: who was never infected, recovered or dead.
-// CHECK:      day 102: new 0 well 740 ill 0 recovered 4230 dead 30
+// CHECK:      day 106: new 0 well 742 ill 0 recovered 4221 dead 37
 // CHECK-NOT:  day

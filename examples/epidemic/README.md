@@ -36,11 +36,13 @@ large sizes, and testing and tracing.
   give off (up the tree) and every member loses it (back down), in place
   of everybody meeting everybody; at work it goes along the ties that
   are met that day, which a number worked out from the tie and the day
-  says. Whom one meets by chance is new each day: a proc lays out a stub
-  for each meeting of each person who is up (a running sum over the
-  people, on one core), an order that the day says pairs the stubs, and
-  the pairs are the edges of `Met`, which is emptied and filled each
-  day. In a lockdown fewer ties are met along, fewer people are met by
+  says. Whom one meets by chance is new each day: everybody who is up
+  has a stub for each meeting, one after another in the order of the
+  people (a running sum over them, on one core), and an order of all the
+  stubs that the day says pairs them. That order is worked out, each way
+  (where a stub comes in it, and which stub comes at a place), so nothing
+  of a day's meetings is made or kept: a proc finds, for each stub of
+  everybody ill, the stub next to it and whose that is. In a lockdown fewer ties are met along, fewer people are met by
   chance, and a meeting at home counts for more.
 - `epidemic.ent`: a run on the console, a line of counts for each day.
 - `view.ent`: 10,000 people in a window, a dot each.
@@ -54,10 +56,10 @@ cd build/epidemic/run                    # where its household panel is
 
 The reference's files are under the GPL and are not in this repository:
 `reference/fetch.sh` fetches them at the commit the model was held
-against. 100,000 people and 136 days take 1.8 seconds on one core, 13
-milliseconds a day: 4 without the meetings by chance, 7 to lay and pair
-their stubs, 2 to empty and fill the relation. (The reference, built
-here with -O3, takes 45 a day, with the files it writes at its end.)
+against. A day of 100,000 people takes 6 milliseconds on one core where
+the reference takes 44, and one of a million 90 (53 on all the cores)
+where it takes 590, in a sixth of its memory: `bench/epidemic/RESULTS.md`
+has the numbers, up to ten million people, and what they are made of.
 A file "parameters.csv" where the program is started gives it other
 numbers: the seed, how many days, a lockdown, any of the reference's
 that the model has.
@@ -88,7 +90,9 @@ that the model has.
   fails one time in twenty by itself.
 - `check/same.py` runs the model built for one core and built for all
   of them (on 1, 4, 16 and all threads), each writing for every day a
-  number made of everything about every person: the same line for line.
+  number made of everything about every person: the same line for line,
+  with 100,000 people and with a million (`same.py 1000000`: only from
+  a million on are the loops shared out among the threads).
 - So is every run of the tests (`test/Integration/epidemic_disease.test`,
   `epidemic_city.test`).
 
@@ -112,9 +116,11 @@ that the model has.
 - What is given off along one meeting is the reference's rate shared
   among the meetings a person has on a day, on average over everybody.
 - The stubs of the meetings by chance are paired in an order worked out
-  from the day, where the reference shuffles them. Two stubs of one
-  person that come together are no meeting; the reference looks for
-  another stub to put there (9 of 341,000 stubs on a day).
+  from the day, where the reference shuffles them, and the meetings of a
+  day are not kept: who met whom on any day can be worked out again from
+  the seed (which is what tracing will need of the days before). Two
+  stubs of one person that come together are no meeting; the reference
+  looks for another stub to put there (9 of 341,000 stubs on a day).
 - A lockdown is the reference's, by its days in the parameter file:
   less of each network's ties met, fewer met by chance (each person's
   number for the lockdown drawn once), more at home. The reference's
@@ -125,5 +131,4 @@ that the model has.
 
 ## Still to come
 
-The large sizes with their timings, isolation on symptoms, and then
-testing and tracing.
+Isolation on symptoms, and then testing and tracing.

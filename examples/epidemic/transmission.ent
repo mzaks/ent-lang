@@ -15,9 +15,13 @@
 // twice. Nobody in hospital meets anybody, and neither do the dead.
 //
 // Who meets whom by chance is new each day: everybody who is up has as
-// many stubs as they meet people (`Chance`), the stubs are put in an
-// order that the day says, and each two that come to lie next to each
-// other are a meeting, an edge of `Met` for that day.
+// many stubs as they meet people (`Chance`), one after another in the
+// order of the people; the stubs are put in another order that the day
+// says, and each two that come to lie next to each other in it are a
+// meeting. Nothing of that is kept or even made: where a stub comes in
+// the day's order, and which stub lies at a place of it, is worked out
+// (random.ent), so whom an ill person meets is found from their stubs
+// alone, and a day costs by how many are ill.
 //
 // In a lockdown (`Policy`, from `Model.lockdown_from` to before
 // `Model.lockdown_to`) fewer ties are met along at work and at school,
@@ -32,10 +36,18 @@ const MEETS = 11
 const PAIRS = 13
 const LOCKED = 14
 
-// A meeting by chance, today's.
-relation (Person)-[Met]->(Person) capacity 16
-// A row for each person each time they meet somebody by chance today.
-buffer Stubs { who: entity } capacity 16
+// Where each person's stubs start today, in the order of the people:
+// whose a stub is, is found by it.
+buffer Order { who: entity, first: i32 } capacity 16
+// The row of `Order` that has every 64th stub: where to start looking
+// for the row of a stub, which is then at most 63 stubs further.
+buffer Index { row: i32 } capacity 16
+// Today's order of the stubs: how many there are, and the numbers it is
+// worked out by, each way.
+unique Pairing {
+  stubs: i32, bits: i32, a: u64, b: u64, c: u64, d: u64,
+  back_a: u64, back_b: u64, back_c: u64
+}
 
 // Whether there is a lockdown today.
 unique Policy { lockdown: bool }
@@ -119,9 +131,10 @@ system household() {
   }
 }
 
-// Whether the tie with this number is met along today.
-fn met(seed: i64, tie: i32, day: i32, daily: f32) -> bool {
-  uniform(key(seed, tie, day, MEETS), 0) < daily as f64
+// Whether the tie with this number is met along today (`today`: the
+// day's own number, `key` of the seed and the day).
+fn met(today: u64, tie: i32, daily: f32) -> bool {
+  uniform(today, tie) < daily as f64
 }
 
 // The part of a network's ties that is met along today.
@@ -132,13 +145,14 @@ fn open(networks: Networks, network: u8, daily: f32, lockdown: bool) -> f32 {
 // At work and at school: along each tie that is met today, from either
 // end. (Both ends of a tie are of one network.)
 system workplace() {
-  for p: Person, i: Infectious, n: Work where i.rate > 0.0 {
+  let today = key(Run.seed, 0, Clock.day, MEETS)
+  for p: Person, i: Infectious, n: Work with Ill where i.rate > 0.0 {
     let daily = open(Networks, n.network, Model.daily, Policy.lockdown)
     for (p)-[w: WorksWith]->(o: mut Hazard) {
-      if met(Run.seed, w.key, Clock.day, daily) { o.left -= i.rate * Model.at_work }
+      if met(today, w.key, daily) { o.left -= i.rate * Model.at_work }
     }
     for (o: mut Hazard)-[w: WorksWith]->(p) {
-      if met(Run.seed, w.key, Clock.day, daily) { o.left -= i.rate * Model.at_work }
+      if met(today, w.key, daily) { o.left -= i.rate * Model.at_work }
     }
   }
 }
@@ -153,53 +167,95 @@ fn locked(meets: i32, left: f32, seed: i64, id: i32, since: i32) -> i32 {
   whole as i32 + if uniform(key(seed, id, since, LOCKED), 0) < part - whole { 1 } else { 0 }
 }
 
-// The stubs of everybody who is up, one after another in the order of
-// the people.
-proc lay(chances: Chance, diseases: Disease, people: Person, stubs: mut Stubs,
-         lockdown: bool, left: f32, seed: i64, since: i32) {
-  stubs = []
+// Where everybody's stubs start, in the order of the people, and how
+// many stubs there are: those of everybody who is up.
+proc lay(chances: Chance, diseases: Disease, people: Person, order: mut Order,
+         index: mut Index, lockdown: bool, left: f32, seed: i64, since: i32) -> i32 {
+  order = []
+  index = []
+  var stubs = 0
+  var row = 0
+  var next = 0
   for e, c in chances {
     let stage = diseases[e].stage
+    var meets = 0
     if stage != Stage.Dead && stage != Stage.Hospitalised &&
        stage != Stage.Critical && stage != Stage.Recovering {
-      let meets = if lockdown { locked(c.meets, left, seed, people[e].id, since) }
-                  else { c.meets }
-      for i in 0..meets { stubs += { who: e } }
+      meets = if lockdown { locked(c.meets, left, seed, people[e].id, since) }
+              else { c.meets }
+    }
+    order += { who: e, first: stubs }
+    stubs += meets
+    while next < stubs {
+      index += { row: row }
+      next += 64
+    }
+    row += 1
+  }
+  stubs
+}
+
+// Today's stubs, and the order that pairs them.
+system pair() {
+  let stubs = lay(Chance, Disease, Person, Order, Index, Policy.lockdown,
+                  Model.lockdown_chance, Run.seed, Model.lockdown_from)
+  let order = key(Run.seed, 0, Clock.day, PAIRS)
+  Pairing.stubs = stubs
+  Pairing.bits = bits_for(stubs)
+  Pairing.a = odd(order)
+  Pairing.b = odd(order + 1)
+  Pairing.c = odd(order + 2)
+  Pairing.d = mix(order + 3)
+  Pairing.back_a = inverse(odd(order))
+  Pairing.back_b = inverse(odd(order + 1))
+  Pairing.back_c = inverse(odd(order + 2))
+}
+
+// The row of `order` whose stubs the stub `at` is one of: the last that
+// starts at it or before, looked for from the row of the 64th stub at or
+// before it. (So a stub's row costs one read of the index, which is
+// small, and one of a few rows next to each other: with ten million
+// people most of the time goes to reading what is far apart.)
+fn owner(order: Order, index: Index, at: i32) -> i32 {
+  var row = index[at / 64].row
+  while row + 1 < len(order) && order[row + 1].first <= at { row += 1 }
+  row
+}
+
+// By chance: for each stub of everybody who gives something off, the
+// stub next to it in today's order (the one before it if it comes at an
+// odd place of the order, else the one after), and whose that is. (Two
+// stubs of one person are no meeting, and the last of an odd number of
+// stubs has none.)
+proc meet(order: Order, index: Index, rates: Infectious, hazards: mut Hazard, counts: f32,
+          stubs: i32, bits: i32, a: u64, b: u64, c: u64, d: u64, back_a: u64,
+          back_b: u64, back_c: u64) {
+  for row in 0..len(order) {
+    let rate = rates[order[row].who].rate
+    if rate > 0.0 {
+      let end = if row + 1 < len(order) { order[row + 1].first } else { stubs }
+      for stub in order[row].first..end {
+        let other = found(stub, stubs, bits, back_a, back_b, back_c, d) ^ 1
+        if other < stubs {
+          let whose = owner(order, index, place(other, stubs, bits, a, b, c, d))
+          if whose != row { hazards[order[whose].who].left -= rate * counts }
+        }
+      }
     }
   }
 }
 
-// Yesterday's meetings by chance are over, and today's are drawn: the
-// stubs in an order of the day's, two and two. (Two stubs of one person
-// are no meeting.)
-system pair() {
-  for p: Person {
-    for (p)-[mut m: Met]->() { m.disconnect() }
-  }
-  lay(Chance, Disease, Person, Stubs, Policy.lockdown, Model.lockdown_chance,
-      Run.seed, Model.lockdown_from)
-  let stubs = len(Stubs)
-  let bits = bits_for(stubs)
-  let order = key(Run.seed, 0, Clock.day, PAIRS)
-  for i in 0..stubs / 2 {
-    let one = Stubs[permute_in(order, 2 * i, stubs, bits)].who
-    let other = Stubs[permute_in(order, 2 * i + 1, stubs, bits)].who
-    if one != other { connect (one)-[Met]->(other) }
-  }
-}
-
-// By chance: along each of today's meetings, from either end.
 system chance() {
-  for p: Person, i: Infectious where i.rate > 0.0 {
-    for (p)-[Met]->(o: mut Hazard) { o.left -= i.rate * Model.by_chance }
-    for (o: mut Hazard)-[Met]->(p) { o.left -= i.rate * Model.by_chance }
-  }
+  meet(Order, Index, Infectious, Hazard, Model.by_chance, Pairing.stubs, Pairing.bits,
+       Pairing.a, Pairing.b, Pairing.c, Pairing.d, Pairing.back_a, Pairing.back_b,
+       Pairing.back_c)
 }
 
 // Whoever has no hazard left falls ill today.
 system infect() {
-  for p: Person, a: Age, z: Hazard, d: mut Disease
+  for e, p: Person, a: Age, z: Hazard, d: mut Disease
       where d.stage == Stage.Susceptible && z.left < 0.0 {
+    e.add(Ill)
     let (path, stage, next, at) = fall_ill(Ages, Delays, Run.seed, p.id, a.group, Clock.day)
     d.path = path
     d.stage = stage

@@ -3152,3 +3152,6 @@ texts at the top (`hud`: unchanged), 0.3 ms `present`.
 - The order of what is drawn is that of the `for`s and, in each, of the
   entities: the same on one core and on all.
 
+
+See also `bench/epidemic/RESULTS.md`: the city's epidemic of
+`examples/epidemic` against its reference, up to ten million people.

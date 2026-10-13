@@ -16,8 +16,8 @@ capacity LivesIn 100000
 capacity WorksWith 1100000
 capacity Taken 100000
 capacity Ring 100000
-capacity Stubs 500000
-capacity Met 250000
+capacity Order 100000
+capacity Index 12500
 
 unique Sum: i64
 

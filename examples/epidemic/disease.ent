@@ -45,6 +45,11 @@ component Disease {
 // In hospital: from the day they are taken in to the day they leave it,
 // recovered or dead.
 tag Hospitalised
+// Ill and among people: from the day they are infected to the day they
+// recover, die or are taken to hospital. Only these pass the illness on.
+// (With `apart` after it, they are stored in an archetype of their own,
+// and a `for` over them goes over just these: bench/epidemic.)
+tag Ill
 
 unique Clock { day: i32 }
 
@@ -172,9 +177,10 @@ system populate() {
 // who come first in an order of all of them that the seed says.
 system seed() {
   let order = key(Run.seed, 0, 0, SEED)
-  for p: Person, a: Age, d: mut Disease
+  for e, p: Person, a: Age, d: mut Disease
       where d.stage == Stage.Susceptible &&
             permute(order, p.id, Run.people) < Run.seeded {
+    e.add(Ill)
     let (path, stage, next, at) = fall_ill(Ages, Delays, Run.seed, p.id, a.group, Clock.day)
     d.path = path
     d.stage = stage
@@ -209,6 +215,10 @@ system progress() {
     if stage == Stage.Hospitalised { e.add(Hospitalised) }
     if (stage == Stage.Recovered || stage == Stage.Dead) && e.has(Hospitalised) {
       e.remove(Hospitalised)
+    }
+    if (stage == Stage.Recovered || stage == Stage.Dead ||
+        stage == Stage.Hospitalised) && e.has(Ill) {
+      e.remove(Ill)
     }
   }
 }

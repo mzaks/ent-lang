@@ -16,8 +16,8 @@ capacity LivesIn 5000
 capacity WorksWith 60000
 capacity Taken 5000
 capacity Ring 5000
-capacity Stubs 40000
-capacity Met 20000
+capacity Order 5000
+capacity Index 1000
 
 world {
   Run.seed = 3

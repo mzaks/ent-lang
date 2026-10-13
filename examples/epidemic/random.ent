@@ -92,24 +92,49 @@ fn bits_for(count: i32) -> i32 {
   bits
 }
 
-// The numbers from 0 to below `count` in another order, which the key
-// says: where number `i` comes in it. Every number comes once, so the
-// first so many of the order are that many different ones picked at
-// random, and each is found without the others. `bits` is `bits_for(
-// count)`, worked out once by who asks for many.
+// The numbers from 0 to below `count` in another order, which a key
+// says: every number comes once, so the first so many of the order are
+// that many different ones picked at random, and each is found without
+// the others; and two that lie next to each other in it are a pair
+// drawn at random.
 //
-// (The numbers of so many bits are stirred in ways that can each be
-// undone, a multiplication by an odd number and a fold of the high bits
-// into the low ones, so no two come to the same; and gone round again
-// while they lead outside the count, which is less than once on
-// average.)
-fn permute_in(key: u64, i: i32, count: i32, bits: i32) -> i32 {
+// The numbers of so many bits are stirred in ways that can each be
+// undone: a multiplication by an odd number (undone by the number that
+// multiplied with it gives 1), and a fold of the high bits into the low
+// ones. So no two come to the same, and the way back is as short as the
+// way there. A number that is led outside the count goes round again,
+// which is less than once on average.
+//
+// Who asks for many works the odd numbers out once (`odd`, of the key
+// and the key with 1 and 2 added, and `mix` of the key with 3 added for
+// the number that is mixed in first) and gives them: `place` is where a
+// number comes, `found` which number comes at a place.
+
+fn odd(key: u64) -> u64 { mix(key) | 1 }
+
+// The number that multiplied with an odd one gives 1 (in 64 bits, and so
+// in any fewer).
+fn inverse(a: u64) -> u64 {
+  var x = a
+  for i in 0..6 { x = x * (2 - a * x) }
+  x
+}
+
+// The fold undone: the bits `fold` places down, and again, as far as
+// there are bits.
+fn unfold(y: u64, fold: i32, bits: i32) -> u64 {
+  var x = y
+  var shift = fold
+  while shift < bits {
+    x = x ^ (y >> shift)
+    shift += fold
+  }
+  x
+}
+
+fn place(i: i32, count: i32, bits: i32, a: u64, b: u64, c: u64, d: u64) -> i32 {
   let mask = ((1 as u64) << bits) - 1
   let fold = max(1, bits / 2)
-  let a = mix(key) | 1
-  let b = mix(key + 1) | 1
-  let c = mix(key + 2) | 1
-  let d = mix(key + 3)
   var x = i as i64 as u64
   var outside = true
   while outside {
@@ -122,6 +147,25 @@ fn permute_in(key: u64, i: i32, count: i32, bits: i32) -> i32 {
     outside = x >= count as i64 as u64
   }
   x as i64 as i32
+}
+
+// `a`, `b`, `c` here are the inverses of those `place` is given.
+fn found(at: i32, count: i32, bits: i32, a: u64, b: u64, c: u64, d: u64) -> i32 {
+  let mask = ((1 as u64) << bits) - 1
+  let fold = max(1, bits / 2)
+  var x = at as i64 as u64
+  var outside = true
+  while outside {
+    x = (unfold(x, fold, bits) * c) & mask
+    x = (unfold(x, fold, bits) * b) & mask
+    x = ((unfold(x, fold, bits) * a) ^ d) & mask
+    outside = x >= count as i64 as u64
+  }
+  x as i64 as i32
+}
+
+fn permute_in(key: u64, i: i32, count: i32, bits: i32) -> i32 {
+  place(i, count, bits, odd(key), odd(key + 1), odd(key + 2), mix(key + 3))
 }
 
 fn permute(key: u64, i: i32, count: i32) -> i32 {

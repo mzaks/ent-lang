@@ -8,8 +8,9 @@
 //   capacity WorksWith 1100000
 //   schedule setup() { panel()  households()  settle()  census()  employ()  wire() }
 //
-// (And `capacity Stubs` and `capacity Met` for transmission.ent, which
-// pairs people who meet by chance anew each day.)
+// (And `capacity Order`, as many as there are people, and `capacity
+// Index`, an eighth of that, for transmission.ent, which pairs those who
+// meet by chance anew each day.)
 //
 // - Households are taken from a panel of 10,000 that were asked (the
 //   reference's file, `City.panel`), four at a time, and kept where they
