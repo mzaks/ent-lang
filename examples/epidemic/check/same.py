@@ -3,7 +3,7 @@
 check).
 
   examples/epidemic/reference/fetch.sh      once
-  examples/epidemic/check/same.py [people]
+  examples/epidemic/check/same.py [people] [scenario]
 
 Builds check/same_check.ent twice, for one core and for all of them
 (where its systems are also fused), and runs it: the build for one
@@ -13,6 +13,9 @@ every one of 100,000 people; the runs are to be the same line for line.
 With a million people or more (`same.py 1000000`) the loops over them
 are shared out among the threads, which below that they are not: that is
 the run that holds the threads against one another.
+With a scenario of check/curves.py (`same.py 100000 tracing`) the runs
+are of that: with those who stay at home, are tested and are told about
+whom they met, which is then part of the number.
 Says the first day on which one is not. Needs the compiler built
 (build/bin) and its LLVM (LLVM_PREFIX, as for tools/ent).
 """
@@ -23,6 +26,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 RUN = os.path.join(ROOT, "build", "epidemic", "run")
 
@@ -62,6 +66,13 @@ def main():
     if os.path.isfile(parameters):
         os.remove(parameters)
     people = int(sys.argv[1]) if len(sys.argv) > 1 else 100000
+    if len(sys.argv) > 2:
+        import csv
+        sys.dont_write_bytecode = True
+        import curves
+        curves.PEOPLE = people
+        with open(parameters, "w", newline="") as file:
+            csv.writer(file).writerows(curves.parameters(sys.argv[2], 1))
     one = run(build("same_one", [], people), None)
     all_cores = build("same_all", ["--parallel"], people)
     failed = 0

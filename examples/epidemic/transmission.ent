@@ -3,7 +3,7 @@
 // meet who is ill takes some of it away, and who has none left is
 // infected.
 //
-//   schedule setup() { .. the city ..  curve()  rate()  share() }
+//   schedule setup() { .. the city ..  rows()  curve()  rate()  share() }
 //   schedule day() {
 //     tick()  policy()  infectiousness()  pair()  household()  workplace()
 //     chance()  infect()  progress()  tally()
@@ -36,17 +36,32 @@ const MEETS = 11
 const PAIRS = 13
 const LOCKED = 14
 
-// Where each person's stubs start today, in the order of the people:
-// whose a stub is, is found by it.
+// How many days' stubs can be kept; `Pairing.kept` are (who met whom by
+// chance is worked out again from them, for those who are told about
+// somebody they met: interventions.ent says how many it needs).
+const KEPT = 8
+
+// Where each person's stubs start, in the order of the people, for each
+// of the last days: the day's rows are those from `Laid[day % kept].order`
+// on, a person's row their number, and one more after the last person
+// with the number of all the stubs. Whose a stub is, is found by it.
 buffer Order { who: entity, first: i32 } capacity 16
-// The row of `Order` that has every 64th stub: where to start looking
-// for the row of a stub, which is then at most 63 stubs further.
+// The row of a day's `Order` that has every 64th stub: where to start
+// looking for the row of a stub, which is then at most 63 stubs further.
+// (A day's rows start at `Laid[day % kept].index`.)
 buffer Index { row: i32 } capacity 16
-// Today's order of the stubs: how many there are, and the numbers it is
-// worked out by, each way.
+// Each of the last days: where its rows are, how many stubs it has and
+// how many bits their order goes by.
+buffer Laid { day: i32, order: i32, index: i32, stubs: i32, bits: i32 } capacity 8
+// Today's order of the stubs: how many there are, where today's rows
+// are, and the numbers the order is worked out by, each way.
 unique Pairing {
-  stubs: i32, bits: i32, a: u64, b: u64, c: u64, d: u64,
-  back_a: u64, back_b: u64, back_c: u64
+  kept: i32, stubs: i32, bits: i32, order: i32, index: i32, a: u64, b: u64, c: u64,
+  d: u64, back_a: u64, back_b: u64, back_c: u64
+}
+
+world {
+  Pairing.kept = 1
 }
 
 // Whether there is a lockdown today.
@@ -173,17 +188,33 @@ fn locked(meets: i32, left: f32, seed: i64, id: i32, since: i32) -> i32 {
   whole as i32 + if uniform(key(seed, id, since, LOCKED), 0) < part - whole { 1 } else { 0 }
 }
 
+// The rows for the days' stubs, once: for each day kept, a row for each
+// person and one more, and a row for every 64th stub.
+system rows() {
+  Order = []
+  Index = []
+  Laid = []
+  let kept = min(KEPT, max(1, Pairing.kept))
+  Pairing.kept = kept
+  for slot in 0..kept {
+    Laid += { day: -1, order: slot * (Run.people + 1), index: slot * (Run.people / 8),
+              stubs: 0, bits: 0 }
+  }
+  for i in 0..kept * (Run.people + 1) { Order += { who: none, first: 0 } }
+  for i in 0..kept * (Run.people / 8) { Index += { row: 0 } }
+}
+
 // Where everybody's stubs start, in the order of the people, and how
-// many stubs there are: those of everybody who is up. (One after
-// another: where one's stubs start is how many those before have.)
+// many stubs there are: those of everybody who is up and not kept at
+// home. (One after another: where one's stubs start is how many those
+// before have. The people come in the order of their numbers.)
 proc lay(chances: mut Chance, diseases: Disease, people: Person, homes: Quarantine,
-         order: mut Order, index: mut Index, lockdown: bool, left: f32, seed: i64,
-         since: i32, day: i32) -> i32 {
-  order = []
-  index = []
+         order: mut Order, index: mut Index, order_at: i32, index_at: i32,
+         lockdown: bool, left: f32, seed: i64, since: i32, day: i32) -> i32 {
   var stubs = 0
   var row = 0
   var next = 0
+  var slot = 0
   for e, c in chances {
     let stage = diseases[e].stage
     var meets = 0
@@ -193,26 +224,36 @@ proc lay(chances: mut Chance, diseases: Disease, people: Person, homes: Quaranti
       meets = if lockdown { locked(c.meets, left, seed, people[e].id, since) }
               else { c.meets }
     }
-    order += { who: e, first: stubs }
+    order[order_at + row].who = e
+    order[order_at + row].first = stubs
     chances[e].first = stubs
     chances[e].today = meets
     stubs += meets
     while next < stubs {
-      index += { row: row }
+      index[index_at + slot].row = row
+      slot += 1
       next += 64
     }
     row += 1
   }
+  order[order_at + row].first = stubs
   stubs
 }
 
 // Today's stubs, and the order that pairs them.
 system pair() {
-  let stubs = lay(Chance, Disease, Person, Quarantine, Order, Index, Policy.lockdown,
-                  Model.lockdown_chance, Run.seed, Model.lockdown_from, Clock.day)
+  let slot = Clock.day % Pairing.kept
+  let stubs = lay(Chance, Disease, Person, Quarantine, Order, Index, Laid[slot].order,
+                  Laid[slot].index, Policy.lockdown, Model.lockdown_chance, Run.seed,
+                  Model.lockdown_from, Clock.day)
   let order = key(Run.seed, 0, Clock.day, PAIRS)
+  Laid[slot].day = Clock.day
+  Laid[slot].stubs = stubs
+  Laid[slot].bits = bits_for(stubs)
   Pairing.stubs = stubs
   Pairing.bits = bits_for(stubs)
+  Pairing.order = Laid[slot].order
+  Pairing.index = Laid[slot].index
   Pairing.a = odd(order)
   Pairing.b = odd(order + 1)
   Pairing.c = odd(order + 2)
@@ -222,15 +263,28 @@ system pair() {
   Pairing.back_c = inverse(odd(order + 2))
 }
 
-// The row of `order` whose stubs the stub `at` is one of: the last that
-// starts at it or before, looked for from the row of the 64th stub at or
-// before it. (So a stub's row costs one read of the index, which is
-// small, and one of a few rows next to each other: with ten million
-// people most of the time goes to reading what is far apart.)
-fn owner(order: Order, index: Index, at: i32) -> i32 {
-  var row = index[at / 64].row
-  while row + 1 < len(order) && order[row + 1].first <= at { row += 1 }
+// The row of a day's `order` whose stubs the stub `at` is one of: the
+// last that starts at it or before, looked for from the row of the 64th
+// stub at or before it. (So a stub's row costs one read of the index,
+// which is small, and one of a few rows next to each other: with ten
+// million people most of the time goes to reading what is far apart.
+// The row after the last person starts where the stubs end.)
+fn owner(order: Order, index: Index, order_at: i32, index_at: i32, at: i32) -> i32 {
+  var row = index[index_at + at / 64].row
+  while order[order_at + row + 1].first <= at { row += 1 }
   row
+}
+
+// Whom the stub `stub` of a day's meets, by the numbers of that day's
+// order: none if it comes to lie alone.
+fn met_by(order: Order, index: Index, order_at: i32, index_at: i32, stub: i32,
+          stubs: i32, bits: i32, a: u64, b: u64, c: u64, d: u64, back_a: u64,
+          back_b: u64, back_c: u64) -> entity {
+  let other = found(stub, stubs, bits, back_a, back_b, back_c, d) ^ 1
+  if other < stubs {
+    order[order_at + owner(order, index, order_at, index_at,
+                           place(other, stubs, bits, a, b, c, d))].who
+  } else { none }
 }
 
 // By chance: for each stub of everybody who gives something off, the
@@ -243,14 +297,10 @@ fn owner(order: Order, index: Index, at: i32) -> i32 {
 system chance() {
   for me, i: Infectious, c: Chance with Ill where i.rate > 0.0 {
     for stub in c.first..c.first + c.today {
-      let other = found(stub, Pairing.stubs, Pairing.bits, Pairing.back_a,
-                        Pairing.back_b, Pairing.back_c, Pairing.d) ^ 1
-      if other < Pairing.stubs {
-        let who = Order[owner(Order, Index,
-                              place(other, Pairing.stubs, Pairing.bits, Pairing.a,
-                                    Pairing.b, Pairing.c, Pairing.d))].who
-        if who != me { Hazard(who).left -= i.rate * Model.by_chance }
-      }
+      let who = met_by(Order, Index, Pairing.order, Pairing.index, stub, Pairing.stubs,
+                       Pairing.bits, Pairing.a, Pairing.b, Pairing.c, Pairing.d,
+                       Pairing.back_a, Pairing.back_b, Pairing.back_c)
+      if who != none && who != me { Hazard(who).left -= i.rate * Model.by_chance }
     }
   }
 }

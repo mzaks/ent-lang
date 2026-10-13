@@ -27,7 +27,8 @@ capacity LivesIn 10000
 capacity WorksWith 110000
 capacity Taken 10000
 capacity Ring 10000
-capacity Order 10000
+capacity Order 10001
+capacity Housemate 20000
 capacity Index 1250
 
 // A dot's colour by the person's stage.
@@ -144,6 +145,7 @@ schedule setup() {
   census()
   employ()
   wire()
+  rows()
   curve()
   rate()
   share()

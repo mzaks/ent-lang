@@ -55,6 +55,40 @@ SCENARIOS = {
     "isolation": {"self_quarantine_fraction": "0.8"},
     # And they are tested.
     "testing": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1"},
+    # And their households stay at home with them.
+    "household": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1",
+                  "quarantine_household_on_symptoms": "1",
+                  "quarantine_household_on_positive": "1"},
+    # And whom their app saw them meet is told, stays at home and is
+    # tested, from the first day on.
+    "tracing": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1",
+                "quarantine_household_on_symptoms": "1",
+                "quarantine_household_on_positive": "1",
+                "app_turn_on_time": "1", "trace_on_symptoms": "1",
+                "trace_on_positive": "1", "quarantine_on_traced": "1",
+                "test_on_traced": "1"},
+    # (Parts of that, to find where the two differ.)
+    "trace-symptoms": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1",
+                       "app_turn_on_time": "1", "trace_on_symptoms": "1",
+                       "quarantine_on_traced": "1"},
+    "trace-both": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1",
+                   "app_turn_on_time": "1", "trace_on_symptoms": "1",
+                   "trace_on_positive": "1", "quarantine_on_traced": "1"},
+    "trace-both-tests": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1",
+                         "app_turn_on_time": "1", "trace_on_symptoms": "1",
+                         "trace_on_positive": "1", "quarantine_on_traced": "1",
+                         "test_on_traced": "1"},
+    "trace-house": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1",
+                    "quarantine_household_on_symptoms": "1",
+                    "quarantine_household_on_positive": "1",
+                    "app_turn_on_time": "1", "trace_on_symptoms": "1",
+                    "trace_on_positive": "1", "quarantine_on_traced": "1"},
+    "trace-tests": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1",
+                    "app_turn_on_time": "1", "trace_on_positive": "1",
+                    "quarantine_on_traced": "1", "test_on_traced": "1"},
+    "trace-found": {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1",
+                    "app_turn_on_time": "1", "trace_on_positive": "1",
+                    "quarantine_on_traced": "1"},
 }
 
 
@@ -173,7 +207,10 @@ def daily(days, last, seeded):
                  round(sum(row[2] for day, row in days.items() if day <= 100) /
                        max(1, total(100)), 3),
                  "found by a test": days[max(days)][3],
-                 "tests": sum(row[4] for day, row in days.items() if day <= 100)}
+                 "tests": sum(row[4] for day, row in days.items() if day <= 100),
+                 "tests for one infected, to day 100":
+                 round(sum(row[4] for day, row in days.items() if day <= 100) /
+                       max(1, total(100)), 3)}
 
 
 def percentile(values, part):
@@ -229,7 +266,8 @@ def main():
     for what in ("days from 1000 infected to 10000", "peak day", "peak height",
                  "infected in all", "dead", "most kept at home on a day",
                  "days kept at home, to day 100",
-                 "days kept at home for one infected, to day 100", "found by a test", "tests"):
+                 "days kept at home for one infected, to day 100", "found by a test", "tests",
+                 "tests for one infected, to day 100"):
         a = [numbers[what] for _, numbers in reference_runs]
         b = [numbers[what] for _, numbers in model_runs]
         distance, allowed = kolmogorov_smirnov(a, b)

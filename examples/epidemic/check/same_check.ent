@@ -9,6 +9,7 @@ import parameters
 import disease
 import city
 import transmission
+import interventions
 
 capacity Person 100000
 capacity Household 100000
@@ -16,8 +17,10 @@ capacity LivesIn 100000
 capacity WorksWith 1100000
 capacity Taken 100000
 capacity Ring 100000
-capacity Order 100000
-capacity Index 12500
+capacity Order 800008
+capacity Index 100000
+capacity Housemate 200000
+capacity ToldBy 800000
 
 unique Sum: i64
 
@@ -42,11 +45,26 @@ fn state(id: i32, stage: Stage, path: Path, since: i32, at: i32, infected: i32,
   h as i64
 }
 
+// What is done about a person, as one number.
+fn measures_of(id: i32, home: i32, since: i32, until: i32, positive: bool, take: i32,
+               result: i32, found: bool) -> i64 {
+  var h = mix((id as i64 as u64) ^ 0x9e3779b97f4a7c15)
+  h = mix(h ^ (home as i64 as u64) ^ ((since as i64 as u64) << 20) ^
+          ((until as i64 as u64) << 40))
+  h = mix(h ^ (take as i64 as u64) ^ ((result as i64 as u64) << 20))
+  if positive { h = mix(h + 1) }
+  if found { h = mix(h + 2) }
+  h as i64
+}
+
 system sum() {
   Sum = 0
-  for e, p: Person, d: Disease, z: Hazard, i: Infectious {
+  for e, p: Person, d: Disease, z: Hazard, i: Infectious, q: Quarantine, s: Source,
+      t: Test {
     Sum += state(p.id, d.stage, d.path, d.since, d.at, d.infected, d.next, z.left,
-                 i.rate, e.has(Hospitalised))
+                 i.rate, e.has(Hospitalised)) +
+           measures_of(p.id, q.until, s.since, s.until, s.positive, t.take, t.result,
+                       t.found)
   }
 }
 
@@ -56,12 +74,15 @@ system line() {
 
 schedule setup() {
   parameters()
+  measures()
   panel()
   households()
   settle()
+  apps()
   census()
   employ()
   wire()
+  rows()
   curve()
   rate()
   share()
@@ -74,6 +95,7 @@ schedule setup() {
 schedule day() {
   tick()
   policy()
+  remember()
   infectiousness()
   pair()
   household()
@@ -81,6 +103,10 @@ schedule day() {
   chance()
   infect()
   progress()
+  symptoms()
+  tests()
+  trace()
+  told()
   tally()
   sum()
   line()

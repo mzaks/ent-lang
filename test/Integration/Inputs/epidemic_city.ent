@@ -16,7 +16,8 @@ capacity LivesIn 5000
 capacity WorksWith 60000
 capacity Taken 5000
 capacity Ring 5000
-capacity Order 5000
+capacity Order 5001
+capacity Housemate 10000
 capacity Index 1000
 
 world {
@@ -43,6 +44,7 @@ schedule setup() {
   census()
   employ()
   wire()
+  rows()
   curve()
   rate()
   share()

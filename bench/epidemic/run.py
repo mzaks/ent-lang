@@ -2,7 +2,8 @@
 """Measures the city's epidemic (examples/epidemic) and its reference.
 
   examples/epidemic/reference/fetch.sh               once
-  python3 bench/epidemic/run.py [sizes] [--reference] [--apart] [--days n]
+  python3 bench/epidemic/run.py [sizes] [--reference] [--apart] [--tracing]
+                                [--days n]
 
 For each size (people: 100000 1000000 by default) a copy of the model is
 made that holds so many and notes the time after every system: built for
@@ -12,7 +13,9 @@ said: how long the city took to build, how long a day took on average
 and of that each system, and the most memory the program had. The build
 for one core runs on a fast core (CPU 2); the one for all on the four
 fast cores (4 threads) and on all (BENCH_CPUS and BENCH_THREADS say
-otherwise).
+otherwise). On all the cores it runs three times and the median of
+each time is said: nothing holds a thread to a core there, and what one
+thread does lands on a fast core or a slow one.
 
 With --reference the reference (built from its C, -O3 and native) runs
 the same days from the same numbers on the same fast core. It says a
@@ -20,6 +23,10 @@ line after each day: its set-up is the time to the first, a day the time
 from there to the last shared among the days between, so the files it
 writes at its end are not counted. Its memory is said twice: as it is, and with the people
 met kept for one day in place of ten, which the model does not keep.
+
+With --tracing both run the reference's measures: who has symptoms stays
+at home with their household and is tested, and whom their app saw them
+meet is told (500 are infected at the start).
 
 With --apart the model's tag for who is ill is stored apart (`tag Ill
 apart`): the ill in an archetype of their own.
@@ -41,10 +48,26 @@ OUT = os.path.join(ROOT, "build", "epidemic")
 BENCH = os.path.join(OUT, "bench")
 PANEL = os.path.join(OUT, "run", "baseline_household_demographics.csv")
 
-SETUP = ["parameters", "panel", "households", "settle", "census", "employ",
-         "wire", "curve", "rate", "share", "seed", "tally"]
-DAY = ["tick", "policy", "infectiousness", "pair", "household", "workplace",
-       "chance", "infect", "progress", "tally"]
+SETUP = ["parameters", "measures", "panel", "households", "settle", "apps",
+         "census", "employ", "wire", "rows", "curve", "rate", "share", "seed",
+         "tally"]
+DAY = ["tick", "policy", "remember", "infectiousness", "pair", "household",
+       "workplace", "chance", "infect", "progress", "symptoms", "tests", "trace",
+       "told", "tally"]
+
+
+# What is done about the epidemic besides, with --tracing: those with
+# symptoms and their households stay at home and are tested, and whom
+# their app saw them meet is told, stays at home and is tested
+# (examples/epidemic/check/curves.py's `tracing`, with 500 infected at
+# the start so that the epidemic is under way at once).
+MEASURES = {}
+TRACING = {"self_quarantine_fraction": "0.8", "test_on_symptoms": "1",
+           "quarantine_household_on_symptoms": "1",
+           "quarantine_household_on_positive": "1", "app_turn_on_time": "1",
+           "trace_on_symptoms": "1", "trace_on_positive": "1",
+           "quarantine_on_traced": "1", "test_on_traced": "1",
+           "n_seed_infection": "500"}
 
 
 def program(people):
@@ -58,6 +81,7 @@ import parameters
 import disease
 import city
 import transmission
+import interventions
 
 capacity Person {people}
 capacity Household {people}
@@ -65,8 +89,10 @@ capacity LivesIn {people}
 capacity WorksWith {people * 11}
 capacity Taken {people}
 capacity Ring {people}
-capacity Order {people}
-capacity Index {people // 8}
+capacity Order {8 * (people + 1)}
+capacity Index {people}
+capacity Housemate {2 * people}
+capacity ToldBy {8 * people}
 
 unique Laps {{ last: f64, days: i32, {fields} }}
 
@@ -115,6 +141,7 @@ def parameters(people, days, more=None):
     names = [name.strip() for name in names]
     values = [value.strip() for value in values]
     changes = {"n_total": str(people), "end_time": str(days), "rng_seed": "1"}
+    changes.update(MEASURES)
     changes.update(more or {})
     for name, value in changes.items():
         values[names.index(name)] = value
@@ -230,6 +257,24 @@ def run_reference(people, days, cpus):
             "infected": infected}
 
 
+def middle(runs):
+    """Of several runs of one program the median of each time (of the
+    set-up's and the day's systems each by itself, and of a day as a
+    whole: `all`) and of the memory. On all the cores the parts of a day
+    that one thread does run on whichever core it gets, a fast one or
+    not, and a single run says little."""
+    def median(values):
+        return sorted(values)[len(values) // 2]
+    first = runs[0]
+    return dict(first,
+                setup={name: median([run["setup"][name] for run in runs])
+                       for name in first["setup"]},
+                day={name: median([run["day"][name] for run in runs])
+                     for name in first["day"]},
+                all=median([sum(run["day"].values()) for run in runs]),
+                memory=median([run["memory"] for run in runs]))
+
+
 def main():
     arguments = sys.argv[1:]
     days = 100
@@ -238,24 +283,30 @@ def main():
         del arguments[arguments.index("--days"):arguments.index("--days") + 2]
     sizes = [int(a) for a in arguments if a.isdigit()] or [100000, 1000000]
     apart = "--apart" in arguments
+    if "--tracing" in arguments:
+        MEASURES.update(TRACING)
     if not os.path.isfile(PANEL):
         sys.exit("no household panel: run examples/epidemic/reference/fetch.sh")
     os.makedirs(BENCH, exist_ok=True)
     fast = os.environ.get("BENCH_CPUS", "0-3")
     threads = os.environ.get("BENCH_THREADS", "4")
     for people in sizes:
-        print(f"{people} people, {days} days{', the ill apart' if apart else ''}")
+        print(f"{people} people, {days} days{', the ill apart' if apart else ''}"
+              f"{', with tracing' if MEASURES else ''}")
         runs = [("one core", run_model(people, days, False, apart, "2", None)),
                 (f"{threads} threads on the fast cores",
                  run_model(people, days, True, apart, fast, threads)),
-                ("all the cores", run_model(people, days, True, apart, None, None))]
+                ("all the cores, the median of three",
+                 middle([run_model(people, days, True, apart, None, None)
+                         for _ in range(3)]))]
         names = [name for name in DAY]
         print("  | | set-up s | a day ms | " + " | ".join(names) + " | memory MB | infected |")
         print("  |---|---|---|" + "---|" * len(names) + "---|---|")
         for name, run in runs:
             count = max(1, run["days"])
             per = [1000 * run["day"][n] / count for n in names]
-            print(f"  | {name} | {sum(run['setup'].values()):.2f} | {sum(per):.1f} | " +
+            whole = 1000 * run["all"] / count if "all" in run else sum(per)
+            print(f"  | {name} | {sum(run['setup'].values()):.2f} | {whole:.1f} | " +
                   " | ".join(f"{p:.2f}" for p in per) +
                   f" | {run['memory']:.0f} | {run['infected']} |")
         first = runs[0][1]

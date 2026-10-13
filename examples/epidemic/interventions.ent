@@ -1,8 +1,11 @@
 // What is done about the illness beyond a lockdown, as OpenABM-Covid19
 // does it: who has symptoms stays at home and is tested.
 //
-//   schedule setup() { .. parameters() .. measures() }
-//   schedule day() { .. infect()  progress()  symptoms()  tests()  tally()  counts() }
+//   schedule setup() { .. parameters()  measures() .. settle()  apps() .. rows() .. }
+//   schedule day() {
+//     tick()  policy()  remember() ..
+//     infect()  progress()  symptoms()  tests()  trace()  told()  tally()  counts()
+//   }
 //
 // Whoever gets symptoms, of this illness or of another (so many of
 // everybody a day, `Measures.others`), stays at home if they are of the
@@ -23,17 +26,38 @@
 // one that others are told about; whom it does not find is no such one
 // any more and need not stay. Whoever goes to hospital is tested that
 // day, and is taken for found ill at once.
+//
+// Who has the app (a part of each age, `Apps`) and becomes one that
+// others are told about has those told whom the app saw them meet in
+// the last days and who have it too, most of the meetings
+// (`Measures.seen`): at home, along the ties of work that were met, and
+// by chance, which is worked out again from the stubs of those days
+// (transmission.ent keeps where they were). Each of them is from then on
+// told about that one (an edge `ToldBy`), stays at home if they are of
+// the part that does, counted from the day they met, and may be asked to
+// take a test. With `Measures.house_symptoms` or `house_found` the whole
+// household stays, app or no app. Being told ends when the one it is
+// about is no such one any more: after their days, or when a test does
+// not find them; who is then told about nobody else need not stay. When
+// a test finds the one it is about after all, those told are told so,
+// and more of them stay.
 import files
 import math
 import random
 import parameters
 import disease
 import city
+import transmission
 
 const OTHER = 16
 const HOME = 17
 const TEST = 18
 const FOUND = 19
+const APP = 20
+const SEEN = 21
+const TOLD = 22
+const MEMBERS = 23
+const MEETS = 11
 
 // `from`: the first day anything is done. `stays`: the part of those
 //   with symptoms that stays at home; `home_days`, `gives_up`: for how
@@ -53,14 +77,33 @@ const FOUND = 19
 // `found_stays`, `found_days`, `found_gives_up`: staying at home for who
 //   is found; `found_told_days`: for how long they are one that others
 //   are told about.
+// `app_from`: the day the app starts telling. `trace_symptoms`,
+//   `trace_found`: whether those are told whom one with symptoms met, or
+//   one a test found (`again`: also if they were told for the symptoms).
+//   `told_stay`, `told_test`: whether who is told stays at home, or is
+//   asked to take a test. `seen`: the part of the meetings the app sees;
+//   `back`: how many days back, today included.
+// `told_stays`, `told_gives_up`, `told_takers`: the part of those told
+//   about one with symptoms that stays at home, gives up each day, takes
+//   the test; `found_told_..`: of those told about one a test found.
+// `house_symptoms`, `house_found`: whether the household of one with
+//   symptoms, or of one a test found, stays at home.
 unique Measures {
   from: i32, stays: f32, home_days: i32, gives_up: f32, others: f32,
   told_days: i32,
   tested: bool, tests_from: i32, tests_to: i32, takers: f32,
   order_wait: i32, result_wait: i32, too_early: i32, too_late: i32,
   sensitivity: f32, specificity: f32, lets_go: bool, at_hospital: bool,
-  found_stays: f32, found_days: i32, found_gives_up: f32, found_told_days: i32
+  found_stays: f32, found_days: i32, found_gives_up: f32, found_told_days: i32,
+  app_from: i32, trace_symptoms: bool, trace_found: bool, again: bool,
+  told_stay: bool, told_test: bool, seen: f32, back: i32,
+  told_stays: f32, told_gives_up: f32, found_told_stays: f32,
+  found_told_gives_up: f32, told_takers: f32, found_told_takers: f32,
+  house_symptoms: bool, house_found: bool
 }
+
+// The part of each age that has the app.
+buffer Apps { share: f32 } capacity 9
 
 // How many are kept at home when the day is over, how many results of
 // tests came today, and how many were found ill by one so far.
@@ -89,6 +132,32 @@ world {
   Measures.found_days = 14
   Measures.found_gives_up = 0.01
   Measures.found_told_days = 14
+  Measures.app_from = 10000
+  Measures.trace_symptoms = false
+  Measures.trace_found = false
+  Measures.again = false
+  Measures.told_stay = false
+  Measures.told_test = false
+  Measures.seen = 0.8
+  Measures.back = 7
+  Measures.told_stays = 0.5
+  Measures.told_gives_up = 0.04
+  Measures.found_told_stays = 0.9
+  Measures.found_told_gives_up = 0.03
+  Measures.told_takers = 0.0
+  Measures.found_told_takers = 0.8
+  Measures.house_symptoms = false
+  Measures.house_found = false
+  Apps = [{ share: 0.0 }; 9]
+  Apps[0].share = 0.09
+  Apps[1].share = 0.8
+  Apps[2].share = 0.97
+  Apps[3].share = 0.96
+  Apps[4].share = 0.94
+  Apps[5].share = 0.86
+  Apps[6].share = 0.7
+  Apps[7].share = 0.48
+  Apps[8].share = 0.32
 }
 
 // The reference's numbers for these, from its file if there is one
@@ -138,7 +207,64 @@ system measures() {
                                      Measures.found_gives_up as f64) as f32
     Measures.found_told_days = number(Bytes, "quarantine_length_traced_positive", line,
                                       Measures.found_told_days as f64) as i32
+    Measures.app_from = number(Bytes, "app_turn_on_time", line,
+                               Measures.app_from as f64) as i32
+    Measures.trace_symptoms = number(Bytes, "trace_on_symptoms", line, 0.0) != 0.0
+    Measures.trace_found = number(Bytes, "trace_on_positive", line, 0.0) != 0.0
+    Measures.again = number(Bytes, "retrace_on_positive", line, 0.0) != 0.0
+    Measures.told_stay = number(Bytes, "quarantine_on_traced", line, 0.0) != 0.0
+    Measures.told_test = number(Bytes, "test_on_traced", line, 0.0) != 0.0
+    Measures.seen = number(Bytes, "traceable_interaction_fraction", line,
+                           Measures.seen as f64) as f32
+    Measures.back = number(Bytes, "quarantine_days", line, Measures.back as f64) as i32
+    Measures.told_stays = number(Bytes, "quarantine_compliance_traced_symptoms", line,
+                                 Measures.told_stays as f64) as f32
+    Measures.told_gives_up = number(Bytes, "quarantine_dropout_traced_symptoms", line,
+                                    Measures.told_gives_up as f64) as f32
+    Measures.found_told_stays =
+        number(Bytes, "quarantine_compliance_traced_positive", line,
+               Measures.found_told_stays as f64) as f32
+    Measures.found_told_gives_up =
+        number(Bytes, "quarantine_dropout_traced_positive", line,
+               Measures.found_told_gives_up as f64) as f32
+    Measures.told_takers = number(Bytes, "test_on_traced_symptoms_compliance", line,
+                                  Measures.told_takers as f64) as f32
+    Measures.found_told_takers =
+        number(Bytes, "test_on_traced_positive_compliance", line,
+               Measures.found_told_takers as f64) as f32
+    Measures.house_symptoms =
+        number(Bytes, "quarantine_household_on_symptoms", line, 0.0) != 0.0
+    Measures.house_found =
+        number(Bytes, "quarantine_household_on_positive", line, 0.0) != 0.0
+    for age in 0..9 {
+      Apps[age].share = number(Bytes, "app_users_fraction_" + age_names[age], line,
+                               Apps[age].share as f64) as f32
+    }
     Bytes = []
+  }
+  // (The days whose meetings by chance are worked out again.)
+  if Measures.app_from < 10000 && (Measures.trace_symptoms || Measures.trace_found) {
+    Pairing.kept = Measures.back + 1
+  }
+}
+
+fn in_hospital(stage: Stage) -> bool {
+  stage == Stage.Hospitalised || stage == Stage.Critical || stage == Stage.Recovering
+}
+
+// Who has the app.
+system apps() {
+  for p: Person, a: Age, c: mut Conduct {
+    c.app = uniform(key(Run.seed, p.id, 0, APP), 0) < Apps[a.group].share as f64
+  }
+}
+
+// Where everybody is today, for those who ask later whom they met.
+system remember() {
+  for d: Disease, q: Quarantine, past: mut Past {
+    let here = d.stage != Stage.Dead && !in_hospital(d.stage)
+    past.out = (past.out << 1) | if here && q.until < Clock.day { 1 } else { 0 }
+    past.home = (past.home << 1) | if here { 1 } else { 0 }
   }
 }
 
@@ -152,28 +278,32 @@ fn stay(key: u64, gives_up: f64, most: i32) -> i32 {
   }
 }
 
-fn in_hospital(stage: Stage) -> bool {
-  stage == Stage.Hospitalised || stage == Stage.Critical || stage == Stage.Recovering
-}
-
 // Who has symptoms today: those whose illness shows from today on, and
 // some of everybody else who is up. And who goes to hospital today.
 system symptoms() {
   let tested = Measures.tested ||
                (Clock.day >= Measures.tests_from && Clock.day < Measures.tests_to)
+  let others = 1.0 - exp64(0.0 - Measures.others as f64)
   for p: Person, d: Disease, c: Conduct, q: mut Quarantine, s: mut Source, t: mut Test
       where Clock.day >= Measures.from {
     let fresh = d.since == Clock.day &&
                 (d.stage == Stage.Mild || d.stage == Stage.Severe)
     if fresh { t.symptoms = Clock.day }
+    // (Symptoms of something else are drawn only for those who would
+    // do something about them: a draw for everybody costs a day more
+    // than all the rest of this.)
     let up = d.stage != Stage.Dead && !in_hospital(d.stage)
-    let other = up && uniform(key(Run.seed, p.id, Clock.day, OTHER), 0) <
-                      1.0 - exp64(0.0 - Measures.others as f64)
+    let heeds = s.until < Clock.day &&
+                (q.until >= Clock.day || c.compliance < Measures.stays ||
+                 (tested && c.compliance < Measures.takers))
+    let other = up && heeds && !fresh &&
+                uniform(key(Run.seed, p.id, Clock.day, OTHER), 0) < others
     if (fresh || other) && s.until < Clock.day {
       if q.until >= Clock.day || c.compliance < Measures.stays {
         s.since = Clock.day
         s.until = Clock.day + Measures.told_days
         s.positive = false
+        s.traces = 1
         let until = Clock.day + stay(key(Run.seed, p.id, Clock.day, HOME),
                                      Measures.gives_up as f64, Measures.home_days)
         if until > q.until { q.until = until }
@@ -188,6 +318,7 @@ system symptoms() {
       if t.take == 0 && t.result == 0 && !t.found {
         t.take = Clock.day
         if Measures.at_hospital {
+          s.traces = if s.until < Clock.day { 2 } else { 3 }
           if s.until < Clock.day { s.since = Clock.day }
           s.positive = true
           s.until = s.since + Measures.found_told_days
@@ -200,6 +331,8 @@ system symptoms() {
 // The tests taken today, and the results that come today.
 system tests() {
   Kept.results = 0
+  let telling = Measures.told_stay || Measures.told_test || Measures.house_symptoms ||
+                Measures.house_found
   for p: Person, d: Disease, c: Conduct, q: mut Quarantine, s: mut Source, t: mut Test
       where t.take == Clock.day || t.result == Clock.day {
     if t.take == Clock.day {
@@ -222,6 +355,9 @@ system tests() {
           Kept.found += 1
         }
         if !in_hospital(d.stage) || !Measures.at_hospital {
+          // (4: they became one for their symptoms today too, and whom
+          // they met has not been told yet.)
+          s.traces = if s.traces == 1 { 4 } else if s.until < Clock.day { 2 } else { 3 }
           if s.until < Clock.day { s.since = Clock.day }
           s.positive = true
           s.until = s.since + Measures.found_told_days
@@ -232,11 +368,310 @@ system tests() {
             if until > Clock.day && until > q.until { q.until = until }
           }
         }
-      } else if Measures.lets_go && s.until >= Clock.day {
-        s.until = 0
-        q.until = 0
+      } else if Measures.lets_go {
+        // (Whether they need not stay is seen when they are told: `told`.)
+        t.cleared = Clock.day
+        t.was_source = s.until >= Clock.day
+        if t.was_source {
+          s.until = 0
+          s.traces = 0
+          // (Where nobody is told about anybody, nobody looks: `told`.)
+          if !telling { q.until = 0 }
+        }
       }
     }
+  }
+}
+
+fn bit(days: u16, ago: i32) -> bool { (days >> ago as u16) & 1 == 1 }
+
+// Whether the app of the one with this number saw them meet that one on
+// that day.
+fn saw(seed: i64, id: i32, other: i32, day: i32, part: f32) -> bool {
+  uniform(key(seed, id, day, SEEN), other) < part as f64
+}
+
+// Until when somebody stays at home who is told on `day` about the one
+// with the number `about`, whom they met on `met`: by their own number,
+// the day and that one's.
+fn told_until(seed: i64, id: i32, about: i32, day: i32, met: i32, gives_up: f32,
+              days: i32) -> i32 {
+  met + stay(mix(key(seed, id, day, TOLD) + about as u64), gives_up as f64, days)
+}
+
+// The day somebody takes a test who is asked to on `day`, having met
+// the one it is about on `met`.
+fn test_day(day: i32, met: i32, order_wait: i32, too_early: i32) -> i32 {
+  max(day + order_wait, met + too_early)
+}
+
+// Those who became today somebody others are told about: their
+// household, and whom their app saw them meet.
+system trace() {
+  let app_on = Clock.day >= Measures.app_from
+  let does = Measures.told_stay || Measures.told_test
+  let telling = does || Measures.house_symptoms || Measures.house_found
+  // (Not gone through at all where nobody is told about anybody.)
+  if telling {
+    for me, p: Person, d: Disease, c: Conduct, q: Quarantine, s: Source, n: Work,
+        past: Past, h: Home where s.traces != 0 {
+      let found = s.traces >= 2
+      let day = Clock.day
+      let stays = if found { Measures.found_told_stays } else { Measures.told_stays }
+      let gives_up = if found { Measures.found_told_gives_up } else { Measures.told_gives_up }
+      let days = if found { Measures.found_told_days } else { Measures.told_days }
+      let takers = if found { Measures.found_told_takers } else { Measures.told_takers }
+      // The household: until the day they stay to themselves, or days of
+      // its own where they do not.
+      let house = (s.traces != 1 && Measures.house_found &&
+                   (q.until >= day || in_hospital(d.stage))) ||
+                  ((s.traces == 1 || s.traces == 4) && Measures.house_symptoms)
+      let own = if found {
+        if !in_hospital(d.stage) && c.compliance < Measures.found_stays {
+          s.since + stay(key(Run.seed, p.id, day, FOUND), Measures.found_gives_up as f64,
+                         Measures.found_days)
+        } else {
+          day + stay(key(Run.seed, p.id, day, MEMBERS), Measures.told_gives_up as f64,
+                     Measures.told_days)
+        }
+      } else {
+        day + stay(key(Run.seed, p.id, day, HOME), Measures.gives_up as f64,
+                   Measures.home_days)
+      }
+      let tells = app_on && c.app && does &&
+                  if s.traces == 1 { Measures.trace_symptoms }
+                  else if s.traces == 2 { Measures.trace_found }
+                  else if s.traces == 4 { Measures.trace_symptoms || Measures.trace_found }
+                  else { Measures.trace_found && (!Measures.trace_symptoms || Measures.again) }
+      if house || tells {
+        for (me)-[Housemate]->(m: Disease, mp: Person, mc: Conduct, mpast: Past,
+                               mt: mut Test, mq: mut Quarantine) {
+          if m.stage != Stage.Dead && !in_hospital(m.stage) && !mt.found {
+            if house {
+              connect (m)-[ToldBy { met: day, red: found }]->(me)
+              if own > day { mq.until max= own }
+              if Measures.told_test && found {
+                mt.asked max= test_day(day, day, Measures.order_wait, Measures.too_early)
+              }
+            }
+            if tells && mc.app {
+              var met = -1
+              for ago in 0..Measures.back {
+                if met < 0 && bit(past.home, ago) && bit(mpast.home, ago) &&
+                   saw(Run.seed, p.id, mp.id, day - ago, Measures.seen) { met = day - ago }
+              }
+              if met >= 0 {
+                if Measures.told_stay && !house {
+                  connect (m)-[ToldBy { met: met, red: found }]->(me)
+                  if mc.compliance < stays {
+                    let until = told_until(Run.seed, mp.id, p.id, day, met, gives_up, days)
+                    if until > day { mq.until max= until }
+                  }
+                }
+                if Measures.told_test && mc.compliance < takers {
+                  mt.asked max= test_day(day, met, Measures.order_wait, Measures.too_early)
+                }
+              }
+            }
+          }
+        }
+        for (m: Disease, mp: Person, mc: Conduct, mpast: Past, mt: mut Test,
+             mq: mut Quarantine)-[Housemate]->(me) {
+          if m.stage != Stage.Dead && !in_hospital(m.stage) && !mt.found {
+            if house {
+              connect (m)-[ToldBy { met: day, red: found }]->(me)
+              if own > day { mq.until max= own }
+              if Measures.told_test && found {
+                mt.asked max= test_day(day, day, Measures.order_wait, Measures.too_early)
+              }
+            }
+            if tells && mc.app {
+              var met = -1
+              for ago in 0..Measures.back {
+                if met < 0 && bit(past.home, ago) && bit(mpast.home, ago) &&
+                   saw(Run.seed, p.id, mp.id, day - ago, Measures.seen) { met = day - ago }
+              }
+              if met >= 0 {
+                if Measures.told_stay && !house {
+                  connect (m)-[ToldBy { met: met, red: found }]->(me)
+                  if mc.compliance < stays {
+                    let until = told_until(Run.seed, mp.id, p.id, day, met, gives_up, days)
+                    if until > day { mq.until max= until }
+                  }
+                }
+                if Measures.told_test && mc.compliance < takers {
+                  mt.asked max= test_day(day, met, Measures.order_wait, Measures.too_early)
+                }
+              }
+            }
+          }
+        }
+      }
+      // Whose household is told again, now for a test: those of it who were
+      // told before are told this way and not also as whoever was (`told`).
+      if house && s.traces == 3 {
+        for (m: Home)-[mut before: ToldBy]->(me) {
+          if m.house == h.house { before.red = true }
+        }
+      }
+      if tells {
+        // At work and at school: the ties that were met on a day both were
+        // out.
+        for (me)-[w: WorksWith]->(m: Disease, mp: Person, mc: Conduct, mpast: Past,
+                                 mt: mut Test, mq: mut Quarantine) {
+          if mc.app && m.stage != Stage.Dead && !in_hospital(m.stage) && !mt.found {
+            var met = -1
+            for ago in 0..Measures.back {
+              let then = day - ago
+              let locked = then >= Model.lockdown_from && then < Model.lockdown_to
+              if met < 0 && bit(past.out, ago) && bit(mpast.out, ago) &&
+                 met(key(Run.seed, 0, then, MEETS), w.key,
+                     open(Networks, n.network, Model.daily, locked)) &&
+                 saw(Run.seed, p.id, mp.id, then, Measures.seen) { met = then }
+            }
+            if met >= 0 {
+              if Measures.told_stay {
+                connect (m)-[ToldBy { met: met, red: found }]->(me)
+                if mc.compliance < stays {
+                  let until = told_until(Run.seed, mp.id, p.id, day, met, gives_up, days)
+                  if until > day { mq.until max= until }
+                }
+              }
+              if Measures.told_test && mc.compliance < takers {
+                mt.asked max= test_day(day, met, Measures.order_wait, Measures.too_early)
+              }
+            }
+          }
+        }
+        for (m: Disease, mp: Person, mc: Conduct, mpast: Past, mt: mut Test,
+             mq: mut Quarantine)-[w: WorksWith]->(me) {
+          if mc.app && m.stage != Stage.Dead && !in_hospital(m.stage) && !mt.found {
+            var met = -1
+            for ago in 0..Measures.back {
+              let then = day - ago
+              let locked = then >= Model.lockdown_from && then < Model.lockdown_to
+              if met < 0 && bit(past.out, ago) && bit(mpast.out, ago) &&
+                 met(key(Run.seed, 0, then, MEETS), w.key,
+                     open(Networks, n.network, Model.daily, locked)) &&
+                 saw(Run.seed, p.id, mp.id, then, Measures.seen) { met = then }
+            }
+            if met >= 0 {
+              if Measures.told_stay {
+                connect (m)-[ToldBy { met: met, red: found }]->(me)
+                if mc.compliance < stays {
+                  let until = told_until(Run.seed, mp.id, p.id, day, met, gives_up, days)
+                  if until > day { mq.until max= until }
+                }
+              }
+              if Measures.told_test && mc.compliance < takers {
+                mt.asked max= test_day(day, met, Measures.order_wait, Measures.too_early)
+              }
+            }
+          }
+        }
+        // By chance: each day's stubs of theirs, and whom those met.
+        for ago in 0..min(Measures.back, Pairing.kept) {
+          let then = day - ago
+          let slot = then % Pairing.kept
+          if then >= 1 && Laid[slot].day == then {
+            let order = key(Run.seed, 0, then, 13)
+            let from = Order[Laid[slot].order + p.id].first
+            let to = Order[Laid[slot].order + p.id + 1].first
+            for stub in from..to {
+              let who = met_by(Order, Index, Laid[slot].order, Laid[slot].index, stub,
+                               Laid[slot].stubs, Laid[slot].bits, odd(order),
+                               odd(order + 1), odd(order + 2), mix(order + 3),
+                               inverse(odd(order)), inverse(odd(order + 1)),
+                               inverse(odd(order + 2)))
+              if who != none && who != me {
+                if let other = Person(who).id {
+                  if let theirs = Conduct(who).app {
+                    if let stage = Disease(who).stage {
+                      if let known = Test(who).found {
+                        if let goes = Conduct(who).compliance {
+                          if theirs && stage != Stage.Dead && !in_hospital(stage) && !known &&
+                             saw(Run.seed, p.id, other, then, Measures.seen) {
+                            if Measures.told_stay {
+                              connect (who)-[ToldBy { met: then, red: found }]->(me)
+                              if goes < stays {
+                                let until = told_until(Run.seed, other, p.id, day, then, gives_up, days)
+                                if until > day { Quarantine(who).until max= until }
+                              }
+                            }
+                            if Measures.told_test && goes < takers {
+                              Test(who).asked max=
+                                  test_day(day, then, Measures.order_wait, Measures.too_early)
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// What everybody is told today: about whom they still are told, who of
+// those was found by a test since, and whether they need stay at home.
+system told() {
+  let telling = Measures.told_stay || Measures.told_test || Measures.house_symptoms ||
+                Measures.house_found
+  for me, p: Person, d: Disease, c: Conduct, h: Home, q: mut Quarantine, s: mut Source,
+      t: mut Test, n: mut Heard where telling {
+    n.had = 0
+    n.left = 0
+    n.freed = 0
+    for (me)-[mut told: ToldBy]->(src: Source, sh: Home, about: Person) {
+      n.had += 1
+      // (Their last day as one, or a test did not find them.)
+      if src.until <= Clock.day {
+        n.freed += 1
+        told.disconnect()
+      } else if t.cleared == Clock.day && sh.house != h.house {
+        told.disconnect()
+      } else {
+        n.left += 1
+        if src.positive && !told.red {
+          told.red = true
+          if d.stage != Stage.Dead && !in_hospital(d.stage) && !t.found {
+            if c.compliance < Measures.found_told_stays {
+              let until = told_until(Run.seed, p.id, about.id, Clock.day, told.met,
+                                     Measures.found_told_gives_up,
+                                     Measures.found_told_days)
+              if until > Clock.day && until > q.until { q.until = until }
+            }
+            if Measures.told_test && q.until >= Clock.day {
+              let asked = test_day(Clock.day, told.met, Measures.order_wait,
+                                         Measures.too_early)
+              if asked > t.asked { t.asked = asked }
+            }
+          }
+        }
+      }
+    }
+    // Told about nobody any more, they need not stay: where the one they
+    // were told about let them go, where their own days as such a one end,
+    // or their own test did not find them. (Where their own test took
+    // them off the lists on the day one of those let its people go, it
+    // is which came first, as in the reference: either as likely.)
+    if n.left == 0 {
+      let first = t.cleared != Clock.day ||
+                  uniform(key(Run.seed, p.id, Clock.day, TOLD), 1) < 0.5
+      if (n.freed > 0 && s.until <= Clock.day && first) ||
+         (s.until == Clock.day) ||
+         (t.cleared == Clock.day && t.was_source) { q.until = 0 }
+    }
+    if t.asked > 0 {
+      if t.take == 0 && t.result == 0 && !t.found { t.take = t.asked }
+      t.asked = 0
+    }
+    s.traces = 0
   }
 }
 

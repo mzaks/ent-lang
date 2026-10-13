@@ -3,6 +3,85 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-13, last: with what is done about it (staying at home, tests, tracing)
+
+The same machine and builds as below, with `interventions.ent` in every
+run: `python3 bench/epidemic/run.py 100000 1000000 10000000` for the
+baseline, where none of the measures is on, and `... --tracing` with all
+of them (who has symptoms stays at home with their household and is
+tested; whom their app saw them meet in the last week is told, stays at
+home and is tested; 500 infected at the start). The row for all the
+cores is now the median of three runs, each time by itself: nothing
+holds a thread to a core there, so what one thread does lands on a fast
+core or a slow one, and single runs were apart by a third. One core
+(CPU 2) and 4 threads (the four fast cores) are one run each.
+
+| people | | set-up | a day | memory | infected by day 100 |
+|---|---|---|---|---|---|
+| 100,000, baseline | model, one core | 0.14 s | 7.5 ms | 135 MB | 85,658 |
+| | model, 4 threads | 0.14 s | 4.1 ms | 140 MB | 85,658 |
+| | model, all | 0.17 s | 4.3 ms | 138 MB | 85,658 |
+| 1,000,000, baseline | model, one core | 1.76 s | 106.7 ms | 859 MB | 857,886 |
+| | model, 4 threads | 1.74 s | 46.5 ms | 915 MB | 857,886 |
+| | model, all | 1.76 s | 31.9 ms | 913 MB | 857,886 |
+| 10,000,000, baseline | model, one core | 21.2 s | 1,890 ms | 8,755 MB | 8,519,012 |
+| | model, 4 threads | 20.0 s | 692 ms | 9,239 MB | 8,519,012 |
+| | model, all | 20.0 s | 445 ms | 9,238 MB | 8,519,012 |
+| 100,000, tracing | reference, one core | 0.23 s | 35.8 ms | 382 MB | 31,587 |
+| | model, one core | 0.14 s | 9.4 ms | 211 MB | 32,718 |
+| | model, 4 threads | 0.14 s | 5.1 ms | 222 MB | 32,718 |
+| | model, all | 0.17 s | 5.6 ms | 221 MB | 32,718 |
+| 1,000,000, tracing | reference, one core | 2.50 s | 470 ms | 3,700 MB | 256,958 |
+| | model, one core | 1.77 s | 107.5 ms | 1,376 MB | 266,034 |
+| | model, 4 threads | 1.68 s | 54.9 ms | 1,412 MB | 266,034 |
+| | model, all | 1.68 s | 43.6 ms | 1,411 MB | 266,034 |
+| 10,000,000, tracing | model, one core | 21.2 s | 991 ms | 12,948 MB | 1,430,174 |
+| | model, 4 threads | 20.0 s | 499 ms | 13,136 MB | 1,430,174 |
+| | model, all | 20.3 s | 405 ms | 13,165 MB | 1,430,174 |
+
+(The reference's two rows are from a run of the script before the last
+changes to the model, which it is not part of; a check program of mine
+was then busy on another core.)
+
+What a day is made of, in milliseconds (`remember`, `symptoms`, `tests`,
+`trace` and `told` are the measures' systems):
+
+| people | | remember | infectiousness | pair | household | workplace | chance | infect | progress | symptoms | tests | trace | told | tally |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1,000,000, baseline | one core | 0.26 | 2.07 | 1.54 | 2.26 | 63.7 | 26.9 | 1.72 | 1.27 | 6.10 | 0.41 | 0 | 0.20 | 0.23 |
+| | 4 threads | 0.14 | 0.58 | 1.78 | 1.48 | 28.1 | 11.0 | 0.81 | 0.56 | 1.71 | 0.20 | 0 | 0.08 | 0.09 |
+| | all | 0.12 | 0.32 | 2.81 | 1.21 | 19.2 | 6.1 | 0.49 | 0.51 | 0.98 | 0.20 | 0 | 0.06 | 0.14 |
+| 1,000,000, tracing | one core | 0.27 | 1.02 | 2.31 | 1.84 | 16.9 | 8.7 | 1.37 | 1.18 | 6.16 | 2.16 | 48.9 | 16.4 | 0.24 |
+| | 4 threads | 0.18 | 0.64 | 2.67 | 1.43 | 9.3 | 3.6 | 0.69 | 0.51 | 1.67 | 0.77 | 24.6 | 8.7 | 0.20 |
+| | all | 0.16 | 0.26 | 2.98 | 1.28 | 7.4 | 2.4 | 0.42 | 0.45 | 0.90 | 0.38 | 19.4 | 7.0 | 0.52 |
+| 10,000,000, baseline | one core | 3.1 | 19.7 | 18.1 | 21.2 | 771 | 961 | 15.7 | 12.0 | 60.1 | 4.2 | 0 | 2.0 | 2.2 |
+| | all | 1.9 | 3.7 | 19.8 | 10.2 | 209 | 182 | 2.9 | 4.7 | 8.3 | 1.4 | 0 | 0.3 | 0.9 |
+| 10,000,000, tracing | one core | 2.9 | 8.2 | 23.6 | 15.4 | 106 | 86.9 | 7.5 | 8.8 | 60.4 | 17.1 | 473 | 179 | 2.3 |
+| | all | 2.0 | 3.2 | 24.0 | 9.9 | 42.4 | 15.6 | 1.5 | 3.7 | 8.1 | 3.2 | 210 | 79.9 | 1.4 |
+
+- With every measure on, a day of a million people takes the model 44
+  ms on all the cores and 108 on one, where the reference takes 470 on
+  one: an eleventh and a quarter. It has 1.4 GB where the reference has
+  3.7. Both end with a quarter of the people infected where the baseline
+  has six in seven (the two counts differ as two seeds of either do).
+- Telling those one met is half of such a day (`trace`), and looking
+  along one's edges whether one is still told a sixth (`told`). `trace`
+  gains least from the cores (2.5 times on 24 threads): what it sends
+  and the edges it connects are put on lists by all the threads and
+  taken off by one. Fewer are ill, so the rest of the day costs a third
+  of the baseline's.
+- The baseline pays for the measures being there: on one core 107 ms
+  for a day of a million where it took 90, since everybody has their
+  state for them, and the pairs of each household are edges (913 MB
+  where it had 725), and `workplace` reads of
+  both ends of a tie whether they are kept at home. On all the cores it
+  takes what it took (31.9 ms; 31.6 before). Where nobody is told about
+  anybody, `trace` is not gone through at all.
+- Ten million people with every measure on: 405 ms a day on all the
+  cores, in 13 GB. The eight days of where everybody's stubs were are 640
+  MB of that; the edges of who is told about whom, and what is sent
+  along them, most of the rest.
+
 ## 2026-10-13, later: sums each thread for itself, and the meetings by chance on all the cores
 
 The same machine, runs and builds as below, after two changes to the

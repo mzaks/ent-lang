@@ -52,21 +52,44 @@ component Chance { meets: i32, first: i32, today: i32 }
 
 // What they do when they are asked to stay at home or to be tested
 // (interventions.ent): a number between 0 and 1, drawn once; whoever's is
-// below the part that goes along with something does.
-component Conduct { compliance: f32 }
+// below the part that goes along with something does. And whether they
+// have the app that notes whom they meet.
+component Conduct { compliance: f32, app: bool }
+// The number of their household.
+component Home { house: i32 }
+// The last days, today the lowest bit: on which they were out (up, and
+// not kept at home), and on which they were at home and not in hospital.
+component Past { out: u16, home: u16 }
 // At home up to and with this day, meeting nobody but their household
 // (0: not).
 component Quarantine { until: i32 }
 // Somebody others are told about, for having symptoms or a test that
 // found them ill (`positive`): since which day, and up to and with which
 // (0: not).
-component Source { since: i32, until: i32, positive: bool }
+// (`traces`: today they became one, 1 for symptoms, 2 for a test, 3 for
+// a test after symptoms, 4 for both today: whom they met is told today.)
+component Source { since: i32, until: i32, positive: bool, traces: u8 }
 // A test: the day it is taken and the day its result comes (0: none),
 // what the result will be, whether a test ever found them ill, and the
 // day their symptoms began (0: never).
-component Test { take: i32, result: i32, positive: bool, found: bool, symptoms: i32 }
+// `asked`: the day somebody they were told about asks them to take one
+// (0: nobody; the latest, where several ask). `cleared`: the day a test did not find them; `was_source`:
+// whether others were told about them then.
+component Test {
+  take: i32, result: i32, positive: bool, found: bool, symptoms: i32,
+  asked: i32, cleared: i32, was_source: bool
+}
+// What they are told today (interventions.ent): how many they were told
+// about, of how many they still are, and how many of those were let go
+// by the one they were about.
+component Heard { had: i32, left: i32, freed: i32 }
 
 relation (Person)-[LivesIn]->(Household) tree capacity 16
+// Each two of a household, once.
+relation (Person)-[Housemate]->(Person) capacity 16
+// Whom somebody was told about (a `Source`), having met them on the day
+// `met`; `red`: as one a test found.
+relation (Person)-[ToldBy { met: i32, red: bool }]->(Person) capacity 16
 // A tie in a network. It is one edge, met along from either end; `key`
 // numbers the ties, for the draw of the days it is met on.
 relation (Person)-[WorksWith { key: i32 }]->(Person) capacity 16
@@ -98,6 +121,8 @@ buffer Taken { row: i32 } capacity 16
 buffer Sums { value: f64 } capacity 30
 // The members of one network, in the order of their numbers.
 buffer Ring { who: entity } capacity 16
+// The members of the household that is being settled.
+buffer Members { who: entity } capacity 64
 
 world {
   City.panel = "baseline_household_demographics.csv"
@@ -227,7 +252,7 @@ system settle() {
     if id < Run.people {
       let row = Taken[h].row
       let home = spawn { Household { id: house, members: 0, pressure: 0.0 } }
-      house += 1
+      Members = []
       for back in 0..9 {
         let age = 8 - back
         for i in 0..Panel[row * 9 + age].count as i32 {
@@ -248,16 +273,24 @@ system settle() {
                                                 Ages[age].chance as f64,
                                                 Ages[age].chance_deviation as f64),
                        first: 0, today: 0 },
-              Conduct { compliance: uniform(key(Run.seed, id, 0, COMPLY), 0) as f32 },
+              Conduct { compliance: uniform(key(Run.seed, id, 0, COMPLY), 0) as f32,
+                        app: false },
+              Home { house: house },
+              Past { out: 0, home: 0 },
               Quarantine { until: 0 },
-              Source { since: 0, until: 0, positive: false },
-              Test { take: 0, result: 0, positive: false, found: false, symptoms: 0 }
+              Source { since: 0, until: 0, positive: false, traces: 0 },
+              Test { take: 0, result: 0, positive: false, found: false, symptoms: 0,
+                     asked: 0, cleared: 0, was_source: false },
+              Heard { had: 0, left: 0, freed: 0 }
             }
             connect (who)-[LivesIn]->(home)
+            for m in 0..len(Members) { connect (Members[m].who)-[Housemate]->(who) }
+            Members += { who: who }
             id += 1
           }
         }
       }
+      house += 1
     }
   }
   City.households = house
