@@ -1,0 +1,15 @@
+// A line of many operators, one inside another: the bits of a word
+// the other way round.
+import console
+
+unique Word { a: u64, b: u64 }
+
+system turned() {
+  Word.a = 0x80000001
+  Word.b = ((Word.a >> 0) & 1) << 31 | ((Word.a >> 1) & 1) << 30 | ((Word.a >> 2) & 1) << 29 | ((Word.a >> 3) & 1) << 28 | ((Word.a >> 4) & 1) << 27 | ((Word.a >> 5) & 1) << 26 | ((Word.a >> 6) & 1) << 25 | ((Word.a >> 7) & 1) << 24 | ((Word.a >> 8) & 1) << 23 | ((Word.a >> 9) & 1) << 22 | ((Word.a >> 10) & 1) << 21 | ((Word.a >> 11) & 1) << 20 | ((Word.a >> 12) & 1) << 19 | ((Word.a >> 13) & 1) << 18 | ((Word.a >> 14) & 1) << 17 | ((Word.a >> 15) & 1) << 16 | ((Word.a >> 16) & 1) << 15 | ((Word.a >> 17) & 1) << 14 | ((Word.a >> 18) & 1) << 13 | ((Word.a >> 19) & 1) << 12 | ((Word.a >> 20) & 1) << 11 | ((Word.a >> 21) & 1) << 10 | ((Word.a >> 22) & 1) << 9 | ((Word.a >> 23) & 1) << 8 | ((Word.a >> 24) & 1) << 7 | ((Word.a >> 25) & 1) << 6 | ((Word.a >> 26) & 1) << 5 | ((Word.a >> 27) & 1) << 4 | ((Word.a >> 28) & 1) << 3 | ((Word.a >> 29) & 1) << 2 | ((Word.a >> 30) & 1) << 1 | ((Word.a >> 31) & 1) << 0
+  put("{Word.b}")
+}
+
+schedule all() { turned() }
+
+main { all() }

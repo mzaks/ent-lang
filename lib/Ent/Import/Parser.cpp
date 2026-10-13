@@ -7350,9 +7350,19 @@ Type Parser::typeOf(const Expr &expr) {
     default: {
       // Joining texts gives a text that holds both: one of any length
       // where one of them is.
-      Type a = textTypeOf(*expr.operands[0]), b = textTypeOf(*expr.operands[1]);
-      bool anyA = isAnyText(*expr.operands[0]);
-      bool anyB = isAnyText(*expr.operands[1]);
+      // (Each side's type is asked for once: asking again for every use
+      // takes three times as long with every operator a line is deep.)
+      const Expr &left = *expr.operands[0], &right = *expr.operands[1];
+      Type type = typeOf(left), other = typeOf(right);
+      auto text = [&](const Expr &side, Type its) {
+        return side.kind == Expr::String ? textTypeOf(side)
+               : its && isa<TextType>(its) ? its : Type();
+      };
+      auto any = [](const Expr &side, Type its) {
+        return side.kind != Expr::String && its && isa<StringType>(its);
+      };
+      Type a = text(left, type), b = text(right, other);
+      bool anyA = any(left, type), anyB = any(right, other);
       if (expr.op == Token::Plus && (anyA || anyB) && (a || anyA) &&
           (b || anyB))
         return StringType::get(context);
@@ -7361,13 +7371,13 @@ Type Parser::typeOf(const Expr &expr) {
             context, std::min<unsigned>(cast<TextType>(a).getCapacity() +
                                             cast<TextType>(b).getCapacity(),
                                         TextType::kMaxCapacity));
-      if (Type type = typeOf(*expr.operands[0])) {
-        if (Type other = typeOf(*expr.operands[1]))
+      if (type) {
+        if (other)
           if (Type wider = widerInteger(type, other))
             return wider;
         return type;
       }
-      return typeOf(*expr.operands[1]);
+      return other;
     }
     }
   case Expr::Call:

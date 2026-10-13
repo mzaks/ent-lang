@@ -1,0 +1,8 @@
+// A line with many operators one inside another
+// (Inputs/deep_line.ent: 32 terms joined by `|`) takes no longer to
+// read than its length: asking for a side's type was done three times
+// for every operator, each asking the same of what is inside, so 32
+// deep it did not end.
+// RUN: %ent run %S/Inputs/deep_line.ent 2>/dev/null | FileCheck %s
+
+// CHECK: 2147483649
