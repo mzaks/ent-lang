@@ -67,6 +67,13 @@ years, ending where it dies out). `default`, `seasonal` and `lean` also
 agree over 400 seeds; on `lean` 21 of 400 colonies die out in beecs and
 18 in the model.
 
+## Timings
+
+`bench/beecs/run.py`, in `bench/beecs/RESULTS.md`: a year of the defaults
+takes 23 ms for both; with every forager an entity of its own (squadrons
+of one bee, 10,000 to 20,000 entities) 1.41 s where beecs takes 1.55,
+on one core.
+
 ## What follows beecs, and what does not
 
 The systems run in beecs's order (`model/default.go`), with its numbers,
