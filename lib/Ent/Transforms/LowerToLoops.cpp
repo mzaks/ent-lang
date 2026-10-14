@@ -4882,7 +4882,8 @@ static Ancestor emitSibling(IRRewriter &rewriter, Location loc,
 /// and leaves the insertion point in the loop's body, after the slot.
 static std::pair<scf::ForOp, Value>
 emitLinkedEdges(IRRewriter &rewriter, Location loc, WorldAccess &world,
-                const WorldRelation &relation, bool in, Value key, Value id) {
+                const WorldRelation &relation, bool in, Value key, Value id,
+                ValueRange carried = {}) {
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   if (!in) {
@@ -4894,7 +4895,12 @@ emitLinkedEdges(IRRewriter &rewriter, Location loc, WorldAccess &world,
         world.slotOwner(loc, id));
     auto loop = scf::ForOp::create(
         rewriter, loc, zero,
-        arith::SelectOp::create(rewriter, loc, mine, one, zero), one);
+        arith::SelectOp::create(rewriter, loc, mine, one, zero), one, carried);
+    // (The values that go round, as they came, until the body yields.)
+    if (!carried.empty()) {
+      rewriter.setInsertionPointToEnd(loop.getBody());
+      scf::YieldOp::create(rewriter, loc, loop.getRegionIterArgs());
+    }
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     return {loop, key};
   }
@@ -4908,8 +4914,9 @@ emitLinkedEdges(IRRewriter &rewriter, Location loc, WorldAccess &world,
                rewriter, loc,
                world.treeLinks(relation, relation.firstChildOffset),
                ValueRange{key}));
-  auto loop = scf::ForOp::create(rewriter, loc, zero, number, one,
-                                 ValueRange{first});
+  SmallVector<Value> inits{first};
+  llvm::append_range(inits, carried);
+  auto loop = scf::ForOp::create(rewriter, loc, zero, number, one, inits);
   rewriter.setInsertionPointToStart(loop.getBody());
   Value slot =
       arith::SubIOp::create(rewriter, loc, loop.getRegionIterArg(0), one);
@@ -4918,7 +4925,9 @@ emitLinkedEdges(IRRewriter &rewriter, Location loc, WorldAccess &world,
                rewriter, loc,
                world.treeLinks(relation, relation.nextSiblingOffset),
                ValueRange{slot}));
-  auto yield = scf::YieldOp::create(rewriter, loc, ValueRange{next});
+  SmallVector<Value> ends{next};
+  llvm::append_range(ends, loop.getRegionIterArgs().drop_front());
+  auto yield = scf::YieldOp::create(rewriter, loc, ends);
   rewriter.setInsertionPoint(yield);
   return {loop, slot};
 }
@@ -5007,17 +5016,23 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
         world.applyBuffer(apply, archetype).first, ValueRange{row});
   scf::ForOp loop;
   Value position, edge;
+  // The values that go round (see EdgesOp): the loop's last ones.
+  ValueRange inits = edges.getInits();
   if (relation.linked) {
     // Its slot, or the slots of the edges to it; a slot is also the
     // edge's place in an apply's buffers.
-    std::tie(loop, edge) =
-        emitLinkedEdges(rewriter, loc, world, relation, !out, key, id);
+    std::tie(loop, edge) = emitLinkedEdges(rewriter, loc, world, relation,
+                                           !out, key, id, inits);
     position = edge;
   } else {
     auto [begin, end] =
         emitEdgeRange(rewriter, loc, world, relation, !out, key);
     Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-    loop = scf::ForOp::create(rewriter, loc, begin, end, one);
+    loop = scf::ForOp::create(rewriter, loc, begin, end, one, inits);
+    if (!inits.empty()) {
+      rewriter.setInsertionPointToEnd(loop.getBody());
+      scf::YieldOp::create(rewriter, loc, loop.getRegionIterArgs());
+    }
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     position = loop.getInductionVar();
     edge = relation.isSorted(!out)
@@ -5032,6 +5047,10 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                             world.edgeApplyBuffer(apply).first,
                             ValueRange{position});
   Operation *insertBefore = loop.getBody()->getTerminator();
+  // (The values that go round in this turn, and where the body's last
+  // ones are yielded: after it.)
+  auto carried = loop.getRegionIterArgs().take_back(inits.size());
+  unsigned firstCarried = loop.getNumRegionIterArgs() - inits.size();
   // A visited entity whose end is trusted never dies, so its slot is never
   // reused and its range holds only its own edges.
   bool ownEndTrusted =
@@ -5044,8 +5063,22 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
         ValueRange{edge});
     Value mine = arith::CmpIOp::create(rewriter, loc,
                                        arith::CmpIPredicate::eq, own, id);
-    auto ifMine = scf::IfOp::create(rewriter, loc, mine);
-    insertBefore = ifMine.thenBlock()->getTerminator();
+    if (inits.empty()) {
+      auto ifMine = scf::IfOp::create(rewriter, loc, mine);
+      insertBefore = ifMine.thenBlock()->getTerminator();
+    } else {
+      // (Another's edge leaves the values as they were.)
+      auto ifMine = scf::IfOp::create(rewriter, loc, inits.getTypes(), mine,
+                                      /*withElseRegion=*/true);
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToEnd(ifMine.thenBlock());
+      insertBefore = scf::YieldOp::create(rewriter, loc, carried);
+      rewriter.setInsertionPointToEnd(ifMine.elseBlock());
+      scf::YieldOp::create(rewriter, loc, carried);
+      Operation *loopYield = loop.getBody()->getTerminator();
+      for (auto [k, result] : llvm::enumerate(ifMine.getResults()))
+        loopYield->setOperand(firstCarried + k, result);
+    }
   }
   rewriter.setInsertionPoint(insertBefore);
   Value otherId = memref::LoadOp::create(
@@ -5122,10 +5155,27 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                             world.edgesClean(relation), ValueRange{zero});
     rewriter.eraseOp(disconnect);
   }
+  SmallVector<Value> arguments{other};
+  llvm::append_range(arguments, carried);
+  // (A value the body leaves as it came is the block's own argument,
+  // which goes with the block: the loop's in its place.)
+  SmallVector<Value> ends;
+  for (Value end : body.getTerminator()->getOperands()) {
+    auto arg = dyn_cast<BlockArgument>(end);
+    ends.push_back(arg && arg.getOwner() == &body
+                       ? arguments[arg.getArgNumber() - 1]
+                       : end);
+  }
   rewriter.eraseOp(body.getTerminator());
   body.eraseArgument(0);
-  rewriter.inlineBlockBefore(&body, insertBefore, ValueRange{other});
-  rewriter.eraseOp(edges);
+  rewriter.inlineBlockBefore(&body, insertBefore, arguments);
+  // (What the body leaves goes round, and out of the loop at the end.)
+  for (auto [k, end] : llvm::enumerate(ends))
+    insertBefore->setOperand(insertBefore == loop.getBody()->getTerminator()
+                                 ? firstCarried + k
+                                 : k,
+                             end);
+  rewriter.replaceOp(edges, loop.getResults().take_back(inits.size()));
   return loop;
 }
 
@@ -14443,9 +14493,11 @@ struct EntLowerToLoops
       bool inLoop = false;
       for (Operation *parent = op->getParentOp(); parent != query;
            parent = parent->getParentOp()) {
-        if (isa<EachOp, EdgesOp>(parent))
+        // (An apply in a loop over edges has a place for each edge; an
+        // accumulate there is one from a loop.)
+        if (isa<EachOp>(parent) || (isa<EdgesOp>(parent) && isa<ApplyOp>(op)))
           return;
-        inLoop |= isa<LoopLikeOpInterface>(parent);
+        inLoop |= isa<LoopLikeOpInterface, EdgesOp>(parent);
       }
       if (!inLoop)
         return;

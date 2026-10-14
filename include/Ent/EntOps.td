@@ -1184,8 +1184,16 @@ def Ent_EdgesOp : Ent_Op<"edges", [
     relation both ways if either loop writes the edges, and loops do not
     nest. A system that declares its access must list the relation in
     `reads` or `writes` (`writes` for `mut`).
+
+    Values may go round, as in `ent.each`: the block's arguments after the
+    two are values that start as the op's operands (`iter`), are in every
+    run what the run before yielded, and what the last run yields is the
+    op's result: the visited entity's own, so an edge loop adds into a
+    `var` of the body around it, and into a resource by way of one.
   }];
-  let arguments = (ins FlatSymbolRefAttr:$relation, StrAttr:$direction);
+  let arguments = (ins FlatSymbolRefAttr:$relation, StrAttr:$direction,
+                       Variadic<AnyType>:$inits);
+  let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;

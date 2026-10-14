@@ -103,21 +103,6 @@ ent.system @s() {
 
 // -----
 
-ent.component @N (v: f32)
-ent.resource @Sum (s: f32)
-ent.relation @R (w: f32) capacity 4
-ent.system @s() {
-  ent.query (%n: !ent.ref<@N>) {
-    ent.edges @R out (%e: !ent.ref<@R>, %t: !ent.entity) {
-      %w = ent.get %e "w" : !ent.ref<@R> -> f32
-      // expected-error @+1 {{inside 'ent.edges' is not supported yet}}
-      ent.accumulate @Sum "s" add %w : f32
-    }
-  }
-}
-
-// -----
-
 ent.relation @R (w: f32) capacity 4
 ent.system @s(%a: !ent.entity) {
   // expected-error @+1 {{initialises 0 fields, but @R has 1}}

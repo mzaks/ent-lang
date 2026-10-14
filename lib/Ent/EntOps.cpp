@@ -2729,16 +2729,15 @@ static LogicalResult verifyCombining(Operation *op, StringRef rule) {
   // it sends lands in the order of the turns: the lowering says where
   // that cannot be. Not in a loop inside ent.edges, whose buffer has one
   // slot per edge.)
+  // (An accumulate in ent.edges is one from a loop of the body: it goes
+  // where those go, in the order of the rows and their edges.)
   for (Operation *parent = op->getParentOp(); parent != query;
        parent = parent->getParentOp())
-    if (isa<LoopLikeOpInterface>(parent) && op->getParentOfType<EdgesOp>())
+    if (isa<LoopLikeOpInterface>(parent) && isa<ApplyOp>(op) &&
+        op->getParentOfType<EdgesOp>())
       return op->emitOpError("must not be inside a loop ('")
              << parent->getName()
              << "') in 'ent.edges': it may run at most once per edge";
-  // An apply in ent.edges runs once per edge, into a slot per edge; an
-  // accumulate there has no such buffer yet.
-  if (isa<AccumulateOp>(op) && op->getParentOfType<EdgesOp>())
-    return op->emitOpError("inside 'ent.edges' is not supported yet");
   // (The last value sent, for a resource only: an entity's field is set
   // by the entity itself.)
   if (rule == "set" && isa<AccumulateOp>(op))
@@ -2820,7 +2819,8 @@ LogicalResult ApplyOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 // EdgesOp / ConnectOp / DisconnectOp
 //===----------------------------------------------------------------------===//
 
-// ent.edges @R out|in (%e: !ent.ref<@R[, mut]>, %other: !ent.entity) { }
+// ent.edges @R out|in (%e: !ent.ref<@R[, mut]>, %other: !ent.entity
+//                      [, %carried: T ...]) [iter(%init : T, ...)] { }
 ParseResult EdgesOp::parse(OpAsmParser &parser, OperationState &result) {
   FlatSymbolRefAttr relation;
   StringRef direction;
@@ -2830,15 +2830,40 @@ ParseResult EdgesOp::parse(OpAsmParser &parser, OperationState &result) {
   result.addAttribute(getRelationAttrName(result.name), relation);
   result.addAttribute(getDirectionAttrName(result.name),
                       b.getStringAttr(direction));
-  return parseArgsAndBody<EdgesOp>(parser, result);
+  // (The values that go round, after the block's arguments.)
+  auto parseInits = [&]() -> ParseResult {
+    if (failed(parser.parseOptionalKeyword("iter")))
+      return success();
+    SmallVector<OpAsmParser::UnresolvedOperand> inits;
+    SmallVector<Type> types;
+    if (parser.parseLParen() || parser.parseOperandList(inits) ||
+        parser.parseColonTypeList(types) || parser.parseRParen() ||
+        parser.resolveOperands(inits, types, parser.getCurrentLocation(),
+                               result.operands))
+      return failure();
+    result.addTypes(types);
+    return success();
+  };
+  return parseArgsAndBody<EdgesOp>(parser, result, parseInits);
 }
 
 void EdgesOp::print(OpAsmPrinter &p) {
   p << " " << getRelationAttr() << " " << getDirection() << " ";
   printArgs(p, getBody());
+  if (!getInits().empty()) {
+    p << " iter(" << getInits() << " : ";
+    llvm::interleaveComma(getInits().getTypes(), p);
+    p << ")";
+  }
   p.printOptionalAttrDictWithKeyword(
       (*this)->getAttrs(), {getRelationAttrName(), getDirectionAttrName()});
-  printBody(p, getBody());
+  if (getInits().empty()) {
+    printBody(p, getBody());
+  } else {
+    p << " ";
+    p.printRegion(getBody(), /*printEntryBlockArgs=*/false,
+                  /*printBlockTerminators=*/true);
+  }
 }
 
 LogicalResult EdgesOp::verify() {
@@ -2864,12 +2889,24 @@ LogicalResult EdgesOp::verify() {
       return emitOpError("must not be inside a loop ('")
              << parent->getName() << "')";
   Block &body = getBody().front();
-  auto ref = body.getNumArguments() == 2
+  auto ref = body.getNumArguments() == 2 + getInits().size()
                  ? dyn_cast<RefType>(body.getArgument(0).getType())
                  : RefType();
   if (!ref || !isa<EntityType>(body.getArgument(1).getType()))
     return emitOpError("must take an !ent.ref to the relation and the "
-                       "!ent.entity at the other end");
+                       "!ent.entity at the other end, then a value for "
+                       "each that goes round");
+  for (auto [init, arg, result] :
+       llvm::zip(getInits(), body.getArguments().drop_front(2), getResults()))
+    if (init.getType() != arg.getType() || init.getType() != result.getType())
+      return emitOpError("a value that goes round has one type: ")
+             << init.getType() << ", " << arg.getType() << ", "
+             << result.getType();
+  if (getResults().size() != getInits().size())
+    return emitOpError("gives as many values as go round");
+  auto yield = cast<YieldOp>(body.getTerminator());
+  if (yield.getResults().getTypes() != getResults().getTypes())
+    return emitOpError("yields the values that go round");
   if (ref.getComponent() != getRelationAttr())
     return emitOpError("ref names ")
            << ref.getComponent() << ", but the loop visits "

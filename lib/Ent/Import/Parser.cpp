@@ -4528,14 +4528,23 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
   // Out of the visited entity if the arrow starts at it.
   StringRef direction = leftIsOwn != arrow->reversed ? "out" : "in";
 
+  // Every var goes round: what one edge leaves in it the next starts
+  // with, and the loop gives what the last one left.
+  SmallVector<VarState> vars = captureVars();
   OperationState state(loc(at), EdgesOp::getOperationName());
   state.addAttribute("relation", symbol(*relation));
   state.addAttribute("direction", builder.getStringAttr(direction));
+  for (const VarState &var : vars) {
+    state.addOperands(var.value);
+    state.addTypes(var.value.getType());
+  }
   Region *body = state.addRegion();
   auto *block = new Block();
   body->push_back(block);
   block->addArgument(RefType::get(context, symbol(*relation), mut), loc(at));
   block->addArgument(EntityType::get(context), loc(at));
+  for (const VarState &var : vars)
+    block->addArgument(var.value.getType(), loc(at));
   Operation *edges = builder.create(state);
 
   OpBuilder::InsertionGuard guard(builder);
@@ -4546,6 +4555,10 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
     bind(edge, {Variable::Ref, block->getArgument(0), *relation, mut});
   if (!other.name.empty())
     bind(other.name, Variable::ofValue(block->getArgument(1)));
+  SmallVector<VarState> round = vars;
+  for (auto [var, arg] : llvm::zip(round, block->getArguments().drop_front(2)))
+    var.value = arg;
+  restoreVars(round);
   // What is bound of the other entity: the body runs where it has all of
   // it, and a field is looked up where it is read.
   mlir::Value has;
@@ -4561,15 +4574,36 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
               : lookup.getFound();
     bind(name, {Variable::Other, block->getArgument(1), component, mutOther});
   }
-  if (has) {
-    auto branch = scf::IfOp::create(builder, loc(other.loc), has);
-    builder.setInsertionPoint(branch.thenBlock()->getTerminator());
-  }
   inEdges = true;
   llvm::scope_exit leave([&] { inEdges = false; });
-  if (failed(parseBlock()))
+  if (has) {
+    // (What the body leaves in a var where the other end has it all, or
+    // the var as it was.)
+    auto branch = scf::IfOp::create(builder, loc(other.loc), has,
+                                    /*withElseRegion=*/true);
+    SmallVector<VarState> before = captureVars();
+    {
+      OpBuilder::InsertionGuard inner(builder);
+      builder.setInsertionPoint(branch.thenBlock()->getTerminator());
+      if (failed(parseBlock()))
+        return failure();
+    }
+    SmallVector<VarState> thenVars = captureVars();
+    restoreVars(before);
+    branch.getElseRegion().getBlocks().clear();
+    mergeBranches(branch, before, thenVars, before);
+  } else if (failed(parseBlock())) {
     return failure();
-  EdgesOp::ensureTerminator(edges->getRegion(0), builder, loc(at));
+  }
+  SmallVector<mlir::Value> ends;
+  for (const VarState &var : captureVars())
+    if (ends.size() < vars.size())
+      ends.push_back(var.value);
+  YieldOp::create(builder, loc(at), ends);
+  builder.setInsertionPointAfter(edges);
+  for (auto [var, result] : llvm::zip(vars, edges->getResults()))
+    var.value = result;
+  restoreVars(vars);
   return success();
 }
 
@@ -6439,9 +6473,6 @@ LogicalResult Parser::parseNameStatement() {
       return error(at, "'" + name + "' is a var from outside the 'for': "
                        "every entity would assign it. Accumulate into a "
                        "unique ('+=', '-=', 'min=', 'max=') instead");
-    if (inEdges && scope < edgesScopes)
-      return error(at, "assigning a var from outside an edge loop is not "
-                       "supported yet");
     auto op = parseAssignOp();
     if (failed(op))
       return failure();

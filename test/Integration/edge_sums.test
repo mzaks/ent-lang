@@ -1,0 +1,21 @@
+// An edge loop adds into a var of the body around it, and into a unique
+// (Inputs/edge_sums.ent): out of each node, into it with the other end's
+// components read, and along a tree both ways; one core and all alike.
+// Both were refused: a var from outside could not be assigned in the
+// loop, and a unique not added into.
+// RUN: %ent run %S/Inputs/edge_sums.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/edge_sums.ent 2>/dev/null | FileCheck %s
+
+// CHECK: 0 from 0 ids 0 children 1 up -1
+// CHECK-NEXT: 1 from 1 ids 0 children 5 up 0
+// CHECK-NEXT: 2 from 2 ids 1 children 9 up 1
+// CHECK-NEXT: 3 from 3 ids 3 children 0 up 1
+// CHECK-NEXT: 4 from 4 ids 6 children 0 up 2
+// CHECK-NEXT: 5 from 5 ids 10 children 0 up 2
+// CHECK-NEXT: 0 1.875 0.625
+// CHECK-NEXT: 1 6.75 1.875
+// CHECK-NEXT: 2 9.0 3.125
+// CHECK-NEXT: 3 8.625 4.375
+// CHECK-NEXT: 4 5.625 5.625
+// CHECK-NEXT: 5 0.0 0.0
+// CHECK-NEXT: edges 15 weight 31.875 far 2

@@ -1,0 +1,71 @@
+// An edge loop that adds into a var of the body around it, keeps the
+// largest in another, and adds into a unique: each node's weights out,
+// and all of them.
+import console
+
+component Node { id: i32, total: f64, most: f64 } capacity 8
+buffer Made { who: entity } capacity 8
+relation (Node)-[Link { w: f64 }]->(Node) capacity 64
+relation (Node)-[Under]->(Node) tree capacity 16
+unique Count { edges: i32, weight: f64, far: i32 }
+
+system build() {
+  for i in 0..6 { Made += { who: spawn { Node { id: i, total: 0.0, most: 0.0 } } } }
+}
+
+system wire() {
+  for i in 0..6 {
+    for j in i + 1..6 {
+      connect (Made[i].who)-[Link { w: (i * 10 + j) as f64 / 8.0 }]->(Made[j].who)
+    }
+  }
+}
+
+// A tree too: node i under node i / 2.
+system plant() {
+  for i in 1..6 { connect (Made[i].who)-[Under]->(Made[i / 2].who) }
+}
+
+system sums() {
+  for e, n: mut Node {
+    var total = 0.0 as f64
+    var most = 0.0 as f64
+    var count = 0
+    for (e)-[l: Link]->(o) {
+      total += l.w
+      most = max(most, l.w)
+      count += 1
+      Count.edges += 1
+      Count.weight += l.w
+    }
+    n.total = total
+    n.most = most
+    if count > 3 { Count.far += 1 }
+  }
+}
+
+// Into each node: how many, and the ids of where they come from, read
+// of the other end.
+system into() {
+  for e, n: Node {
+    var ids = 0
+    var count = 0
+    for (o, m: Node)-[Link]->(e) {
+      ids += m.id
+      count += 1
+    }
+    var children = 0
+    for (c, k: Node)-[Under]->(e) { children += k.id }
+    var up = -1
+    for (e)-[Under]->(p, q: Node) { up = q.id }
+    put("{n.id} from {count} ids {ids} children {children} up {up}")
+  }
+}
+
+system show() {
+  for n: Node { put("{n.id} {n.total} {n.most}") }
+  put("edges {Count.edges} weight {Count.weight} far {Count.far}")
+}
+
+schedule all() { build() wire() plant() sums() into() show() }
+main { all() }

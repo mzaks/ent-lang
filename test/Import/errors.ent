@@ -690,21 +690,6 @@ system s() {
 
 // -----
 
-component Node { v: i32 }
-relation Link { w: i32 } capacity 8
-system s() {
-  for e, n: mut Node {
-    var sum = 0
-    for (e)-[l: Link]->(other) {
-      // expected-error @+1 {{assigning a var from outside an edge loop is not supported yet}}
-      sum += l.w
-    }
-    n.v = sum
-  }
-}
-
-// -----
-
 system s() {
   var n = 0
   // expected-error @+1 {{value has a different type than the target}}
