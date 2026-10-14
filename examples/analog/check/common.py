@@ -31,10 +31,11 @@ def build(more=()):
 
 
 def run(program, name, way, at=0.0, most=100000, environment=None, step=0.0, folder=None,
-        operating=False, reltol=0.001):
+        operating=False, reltol=0.001, method=0):
     """The model's waves for a circuit, the way given, and what it said:
     a list of lines, each a list of floats (the time, then the probes).
-    `step`: the time step (0: the circuit's). `operating`: the circuit
+    `step`: a fixed time step (0: steps chosen by their error), `method`
+    its rule (0 backward Euler, 1 trapezoidal). `operating`: the circuit
     without its `tran`, so only its operating point at `at`."""
     folder = folder or os.path.join(RUN, f"{name}_way{way}_{os.getpid()}")
     os.makedirs(folder, exist_ok=True)
@@ -47,7 +48,7 @@ def run(program, name, way, at=0.0, most=100000, environment=None, step=0.0, fol
     if os.path.exists(os.path.join(folder, "waves.txt")):
         os.remove(os.path.join(folder, "waves.txt"))
     with open(os.path.join(folder, "run.txt"), "w") as file:
-        file.write(f"{way} 1 1 {reltol!r} 0.000001 1e-12 {most} {at!r} {step!r}\n")
+        file.write(f"{way} 1 1 {reltol!r} 0.000001 1e-12 {most} {at!r} {step!r} {method}\n")
     said = subprocess.run([program], capture_output=True, text=True, cwd=folder,
                           env=environment).stdout.strip()
     waves = []

@@ -54,8 +54,10 @@ component Companion { g: f64, i0: f64 }
 // of the device last moved, and the current it last gave its nodes.
 component Told { round: i32 }
 component Gave { i: f64 }
-// (`v0`: the voltage across it at the start, as the file gives it.)
-component Capacitor { c: f64, q_prev: f64, i_prev: f64, v0: f64 }
+// (`v0`: the voltage across it at the start, as the file gives it; `q_prev`
+// and `i_prev`: its charge and current at the last time point; `v2`, `v3`:
+// the voltages across it at the two before, for the step's error.)
+component Capacitor { c: f64, q_prev: f64, i_prev: f64, v0: f64, v2: f64, v3: f64 }
 enum Wave { Dc, Sin, Pulse, Pwl }
 // A source's wave and its numbers, in the order the file has them; a
 // piecewise-linear one's points are rows of `Points` from `first`, so
@@ -71,8 +73,12 @@ component Source {
 // current, how that grows with the voltage (`g`) and the state (`gw`), and
 // backward Euler's equation for the state: how far it is from holding
 // (`f`), and how that grows with the state (`jw`) and the voltage (`jv`).
+// (`rate`: how fast the state moves at the last solve, `rate_prev` at the
+// last time point, for the trapezoidal rule; `w2`, `w3`: the states of the
+// two time points before the last, for the step's error.)
 component Memristor {
-  w: f64, w_prev: f64, index: i32, i: f64, g: f64, gw: f64, f: f64, jw: f64, jv: f64
+  w: f64, w_prev: f64, index: i32, i: f64, g: f64, gw: f64, f: f64, jw: f64, jv: f64,
+  rate: f64, rate_prev: f64, w2: f64, w3: f64
 }
 // The models, each with its parameters in the order of its .va file in
 // models/: the HP memristor with Biolek's window, VTEAM, Yakopcic's.
@@ -224,7 +230,7 @@ system netlist() {
         Circuit.tran = true
         Circuit.step = step
         Circuit.stop = finish
-        Circuit.most = finish
+        Circuit.most = 0.0
         rest = a1
         if next(Bytes, a1) < len(Bytes) && Bytes[next(Bytes, a1)].value != 10 {
           let (most, a2) = real(Bytes, a1)
@@ -349,7 +355,8 @@ system build() {
         let v0 = number(Lines, Numbers, i, 1)
         let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
                            Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
-                           Capacitor { c: c, q_prev: c * v0, i_prev: 0.0, v0: v0 } }
+                           Capacitor { c: c, q_prev: c * v0, i_prev: 0.0, v0: v0, v2: v0,
+                                       v3: v0 } }
         connect (made)-[Touches]->(a)
         connect (made)-[Touches]->(b)
         Devices += { who: made }
@@ -359,7 +366,8 @@ system build() {
           let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
                              Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                              Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
-                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0 },
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0 },
                              Biolek { ron: number(Lines, Numbers, i, 0),
                                       roff: number(Lines, Numbers, i, 1),
                                       d: number(Lines, Numbers, i, 2),
@@ -373,7 +381,8 @@ system build() {
           let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
                              Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                              Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
-                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0 },
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0 },
                              Vteam { ron: number(Lines, Numbers, i, 0),
                                      roff: number(Lines, Numbers, i, 1),
                                      k_off: number(Lines, Numbers, i, 2),
@@ -395,7 +404,8 @@ system build() {
           let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
                              Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                              Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
-                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0 },
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0 },
                              Yakopcic { a1: number(Lines, Numbers, i, 0),
                                         a2: number(Lines, Numbers, i, 1),
                                         b: number(Lines, Numbers, i, 2),

@@ -1,0 +1,226 @@
+// How time goes on (spec section 7.2, milestone M4): which time point
+// comes next, and whether the one just solved is taken.
+//
+// A step is taken by the trapezoidal rule; by backward Euler the first two
+// after the operating point and after a corner of a source, where the
+// waves bend at once and the trapezoidal rule would ring, and where the
+// trapezoidal rule's error could not be worked out yet (it takes three
+// time points, backward Euler's two; a step with no error to hold it is
+// small, the first after the operating point or a corner). How
+// far a step goes is chosen as SPICE chooses it, by the error the rule
+// leaves in each capacitor's voltage and each memristor's state (its
+// local truncation error): the trapezoidal rule's is h^3/12 times the
+// third derivative, backward Euler's h^2/2 times the second, each worked
+// out from the last time points (divided differences). Where that is
+// more than TRTOL times the tolerance (reltol of the value and vntol),
+// the time point is not taken and tried again with a shorter step;
+// else the next step is as long as keeps it under, but no more than twice
+// the last, the circuit's largest step (`tran`'s fourth number; else the
+// least of its step and a fiftieth of its stop), and the way to the next
+// corner of a source: a PULSE's edges, a PWL's points, a SIN's delay. The
+// first step from the operating point or a corner is small: a tenth of
+// the least of the circuit's step and a hundredth of its stop, and no more
+// than a tenth of the way to the next corner. A
+// time point that does not settle is tried again with an eighth of the
+// step; below HMIN of the circuit's step the run ends, said.
+//
+// Where "run.txt" gives a step, every step is that long, by backward
+// Euler or the trapezoidal rule as it says, with nothing of this
+// (milestone M2, and the checks of a rule's order).
+import console
+import circuit
+import sources
+import devices
+import math
+
+const TRTOL: f64 = 7.0
+const HMIN: f64 = 1e-9
+
+// `adaptive`: steps chosen here (else fixed). `trap`: the fixed steps'
+// rule. `h`: the step to be tried; `first`: the first (the fixed one,
+// where they are fixed); `most`: the largest; `t1`, `t2`, `t3`:
+// the last three time points taken; `history`: how many of those the
+// error may be worked out from (the time points since the operating point
+// or the last corner, that one too). `worst`: the largest share of its
+// tolerance that a device's error took at this time point. `corner`: the
+// next corner after the last time point taken. `settled`: the time point
+// settled. `taken`: it is taken. `points`, `rejected`: time points taken,
+// and tried and not taken. `done`: the stop is reached.
+unique Step {
+  adaptive: bool, trap: bool, h: f64, first: f64, most: f64, t1: f64, t2: f64, t3: f64,
+  history: i32, worst: f64, corner: f64, settled: bool, taken: bool, points: i32,
+  rejected: i32, done: bool, cornered: bool
+}
+
+// The first corner of a source after the time t (1e300 where none).
+fn corner_after(wave: Wave, p2: f64, p3: f64, p4: f64, p5: f64, p6: f64, first: i32,
+                count: i32, points: Points, t: f64, eps: f64) -> f64 {
+  var next = 1e300 as f64
+  if wave == Wave.Sin {
+    if p3 > t + eps { next = p3 }
+  } else if wave == Wave.Pulse {
+    // (delay, rise, fall, width, period: the corners of a period are its
+    // start, the top reached, the fall begun, the bottom reached.)
+    let delay = p2
+    let rise = p3
+    let fall = p4
+    let width = p5
+    let period = p6
+    var start = delay
+    if period > 0.0 && t > delay {
+      start = delay + floor64((t - delay) / period) * period
+    }
+    for k in 0..2 {
+      let base = start + k as f64 * (if period > 0.0 { period } else { 0.0 })
+      if k == 0 || period > 0.0 {
+        if base > t + eps { next = min(next, base) }
+        if base + rise > t + eps { next = min(next, base + rise) }
+        if base + rise + width > t + eps { next = min(next, base + rise + width) }
+        if base + rise + width + fall > t + eps { next = min(next, base + rise + width + fall) }
+      }
+    }
+  } else if wave == Wave.Pwl {
+    for k in 0..count {
+      if points[first + k].t > t + eps { next = min(next, points[first + k].t) }
+    }
+  }
+  next
+}
+
+// What share of its tolerance the error of the last step left in a value
+// x0 at t0, whose last values were x1, x2, x3 at t1, t2, t3 (`history` of
+// them to be used).
+fn error_share(x0: f64, x1: f64, x2: f64, x3: f64, t0: f64, t1: f64, t2: f64, t3: f64,
+               history: i32, trap: bool, reltol: f64, vntol: f64) -> f64 {
+  let tolerance = TRTOL * (reltol * max(abs64(x0), abs64(x1)) + vntol)
+  let h = t0 - t1
+  let d01 = (x0 - x1) / (t0 - t1)
+  if trap && history >= 3 {
+    let d12 = (x1 - x2) / (t1 - t2)
+    let d23 = (x2 - x3) / (t2 - t3)
+    let d012 = (d01 - d12) / (t0 - t2)
+    let d123 = (d12 - d23) / (t1 - t3)
+    let d0123 = (d012 - d123) / (t0 - t3)
+    h * h * h / 2.0 * abs64(d0123) / tolerance
+  } else if !trap && history >= 2 {
+    let d12 = (x1 - x2) / (t1 - t2)
+    h * h * abs64((d01 - d12) / (t0 - t2)) / tolerance
+  } else { 0.0 }
+}
+
+// Before the operating point: where time is to go, and the first step.
+system planned_steps() {
+  Step.points = 0
+  Step.rejected = 0
+  Step.history = 0
+  Step.done = !Circuit.tran
+  Step.t1 = 0.0
+  Step.t2 = 0.0
+  Step.t3 = 0.0
+  Step.most = if Circuit.most > 0.0 { Circuit.most }
+              else { min(Circuit.step, Circuit.stop / 50.0) }
+  Step.first = min(Circuit.stop / 100.0, Circuit.step) / 10.0
+  Step.h = Step.first
+  Time.trap = false
+}
+
+// After a time point is solved: the error its step left, of every
+// capacitor's voltage and every memristor's state.
+system judged_step() {
+  Step.worst = 0.0
+  if Step.adaptive && Time.h > 0.0 {
+    for t: Two, k: Capacitor {
+      if let va = Node(t.a).v {
+        if let vb = Node(t.b).v {
+          Step.worst max= error_share(va - vb, k.q_prev / k.c, k.v2, k.v3, Time.t, Step.t1,
+                                      Step.t2, Step.t3, Step.history, Time.trap, Time.reltol,
+                                      Time.vntol)
+        }
+      }
+    }
+    for m: Memristor {
+      Step.worst max= error_share(m.w, m.w_prev, m.w2, m.w3, Time.t, Step.t1, Step.t2,
+                                  Step.t3, Step.history, Time.trap, Time.reltol, Time.vntol)
+    }
+  }
+}
+
+// Whether it is taken, and how long the next step is to be.
+system decided() {
+  let order = if Time.trap { 3.0 as f64 } else { 2.0 as f64 }
+  if Time.h <= 0.0 {
+    // (An operating point is solved once: where it does not settle, the
+    // run ends.)
+    Step.taken = Step.settled
+    if !Step.settled { Step.done = true }
+  } else if !Step.settled {
+    Step.taken = false
+    Step.h = Time.h / 8.0
+  } else if Step.adaptive && Step.worst > 1.0 {
+    Step.taken = false
+    Step.h = Time.h * max(0.9 * pow64(Step.worst, -1.0 / order), 0.125)
+  } else {
+    Step.taken = true
+    Step.h = if Step.worst > 0.0 {
+      Time.h * min(0.9 * pow64(Step.worst, -1.0 / order), 2.0)
+    } else { Time.h * 2.0 }
+  }
+  // (A fixed step stays as it is.)
+  if !Step.adaptive { Step.h = Step.first }
+  if !Step.taken { Step.rejected += 1 }
+}
+
+// The next corner of a source after the last time point taken.
+system cornered() {
+  Step.corner = Circuit.stop
+  let eps = 1e-9 * Circuit.step
+  for s: Source {
+    Step.corner min= corner_after(s.wave, s.p2, s.p3, s.p4, s.p5, s.p6, s.first, s.count,
+                                  Points, Step.t1, eps)
+  }
+}
+
+// On to the next time point: from the one taken, or again from the last
+// one taken.
+system stepped_on() {
+  let eps = 1e-9 * Circuit.step
+  if Step.taken {
+    Step.points += 1
+    Step.t3 = Step.t2
+    Step.t2 = Step.t1
+    Step.t1 = Time.t
+    Step.history += 1
+    // (A corner reached: the waves bend here, and the error is worked
+    // out anew from it.)
+    Step.cornered = Time.h > 0.0 && abs64(Time.t - Step.corner) <= eps
+    if Step.cornered { Step.history = 1 }
+    Step.done = !Circuit.tran || Step.t1 >= Circuit.stop - eps
+  }
+}
+
+// The next step's length and rule (after `cornered`).
+system next_step() {
+  let eps = 1e-9 * Circuit.step
+  if Step.adaptive {
+    var h = min(Step.h, Step.most)
+    // (From the operating point or a corner: small, and no more than a
+    // tenth of the way to the next corner, as SPICE starts.)
+    if Step.cornered || Step.points <= 1 {
+      h = min(min(h, Step.first), 0.1 * (Step.corner - Step.t1))
+    }
+    // (Onto the corner, not just past it, nor just short of it.)
+    if Step.t1 + h > Step.corner - 0.1 * h { h = Step.corner - Step.t1 }
+    Time.h = h
+    // (The trapezoidal rule once its error can be worked out, from three
+    // time points; till then backward Euler, whose error can from two.)
+    Time.trap = Step.history >= 3
+  } else {
+    Time.h = Step.h
+    Time.trap = Step.trap && Step.points >= 2
+  }
+  Time.t = Step.t1 + Time.h
+  if Step.adaptive && Time.h < HMIN * Circuit.step && !Step.done {
+    Step.done = true
+    put("a time step of {Time.h} s, at {Step.t1} s: below the least, the run ends")
+  }
+}

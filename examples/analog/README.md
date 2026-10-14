@@ -6,10 +6,11 @@ time, node voltage by node voltage, to give the waveforms that
 then to be faster than ngspice and Xyce on large memristor crossbars by
 relaxation, every node solving for its own voltage. `analog-SPEC.md`
 says what it is to be and in which milestones. It is being built in
-steps; what is here is milestones M0 to M3: a circuit is read, and its
-operating point and its waves in time (backward Euler, a fixed step) are
-solved three ways, with memristors of three models whose states move,
-and the three ways agree with each other and with ngspice.
+steps; what is here is milestones M0 to M4: a circuit is read, and its
+operating point and its waves in time (the trapezoidal rule, steps
+chosen by their error) are solved three ways, with memristors of three
+models whose states move, and the three ways agree with each other and
+with ngspice.
 
 - `prepare.py`: a SPICE netlist made flat into `circuit.net`, the form
   the model reads (spec section 4), and the same flat circuit as a deck
@@ -31,12 +32,15 @@ and the three ways agree with each other and with ngspice.
   memristor under a sine at 1, 10 and 100 Hz, and a memristor in series
   with a resistor, set and reset by pulses; and for the operating point
   an R-2R ladder, a bridge with a current source, and a voltage source
-  between two nodes that are not ground.
+  between two nodes that are not ground; and the two RC low-passes with
+  no largest step but the run's (`rc_step_free`, `rc_sine_free`), whose
+  steps only their error holds back.
 - `devices.ent`: what each kind of device does at a time point, the same
   for every way: each that is no source makes itself straight, its
   `Companion` (the current through it is g * (va - vb) + i0). At the
-  operating point a capacitor is open; at a time point h on it is
-  backward Euler's companion, C/h and -q_prev/h. A memristor, of each
+  operating point a capacitor is open; at a time point h on it is the
+  trapezoidal rule's companion, 2C/h and -2q_prev/h - i_prev (backward
+  Euler's, C/h and -q_prev/h, on a step that goes by that). A memristor, of each
   model, is made straight at its voltage and state: its current, how
   that grows with the voltage and with the state, and backward Euler's
   equation for the state and how that grows with each. `GMIN` (1e-12 S)
@@ -63,13 +67,24 @@ and the three ways agree with each other and with ngspice.
   go by the voltages they were told, and its sum says what it took away
   itself (in a transient, steps too small to tell add up over the time
   points, the same way each, and would leave the waves 1% off).
+- `steps.ent`: how time goes on (spec 7.2). A step goes by the
+  trapezoidal rule, but the first two after the operating point and after
+  a corner of a source by backward Euler. Its length is chosen as SPICE
+  chooses it: by the error the rule leaves in each capacitor's voltage
+  and each memristor's state (h^3/12 times the third derivative, h^2/2
+  times the second for backward Euler, from divided differences of the
+  last time points), held to TRTOL (7) times the tolerance; no more than
+  twice the last step, the circuit's largest step, or the way to the next
+  corner (a PULSE's edges, a PWL's points, a SIN's delay), onto which a
+  time point is put. A time point whose error is too big is tried again
+  shorter, one that does not settle with an eighth of the step.
 - `simulate.ent`: the program. It reads "circuit.net" and "run.txt"
   (the way, a seed, whether to write the waves, reltol, vntol, abstol,
-  the most rounds, the time of an operating point without `tran`, the
-  step) where it is started; solves the operating point and then, for a
-  `tran`, a time point every step to the stop; writes "waves.txt" (the
-  time, then each probe, as `%.17g`, a line a time point) and says how
-  it went. A time point that does not settle ends the run, said.
+  the most rounds, the time of an operating point without `tran`, a
+  fixed step and its rule) where it is started; solves the operating
+  point and then, for a `tran`, time points to the stop; writes
+  "waves.txt" (the time, then each probe, as `%.17g`, a line a time point
+  taken) and says how it went: time points taken and tried again.
 - `models/`: the memristor models in Verilog-A, the single source of
   each: the HP memristor with Biolek's window (`biolek.va`), VTEAM
   (`vteam.va`, numbers chosen to switch at 1.2 V and not at 0.1 V in the
@@ -116,26 +131,32 @@ echo 1 > run.txt
   crossbar whose wires have 0.1 ohm: to 1e-11, since wires of 10 S beside
   memristors of 1e-4 S leave the sense voltages a few parts in 10^12 off
   in f64 (a step of refinement does not help). Then the two RC
-  low-passes against their closed forms: backward Euler's error is
-  1.7e-3 and 3.4e-3 of the range at the circuits' steps, and 3.35 and
-  3.99 times smaller at a quarter of the step (first order; rc_step's
-  edge of 1 us falls in another place between time points at each step,
-  which is why the ratio is taken over two halvings).
-- `check/spice.py` (check 3): ngspice with tight tolerances and its own
-  steps against the model at a fiftieth of the circuit's step (at most
-  200,000 time points), every probe at every time point within 1e-3 of
-  its range: 29 circuits, the memristors of all three models among them
+  low-passes against their closed forms, at fixed steps: backward
+  Euler's error is 1.7e-3 and 3.4e-3 of the range at the circuits'
+  steps, and 3.35 and 3.99 times smaller at a quarter of the step (first
+  order; rc_step's edge of 1 us falls in another place between time
+  points at each step, which is why the ratio is taken over two
+  halvings); the trapezoidal rule's on rc_sine 1.3e-4, and 15.6 times
+  smaller at a quarter (second order; not on rc_step, whose edge inside
+  a step no rule takes to the second order). And with the steps chosen:
+  rc_step 9.6e-6 of the range off, rc_sine 1.4e-5.
+- `check/spice.py` (check 3): ngspice with tight tolerances, its steps
+  no longer than the circuit's, against the model with its steps chosen
+  at reltol 1e-5, every probe at every time point within 1e-3 of its
+  range: 31 circuits, the memristors of all three models among them
   (compiled from models/ by OpenVAF), crossbars up to 16 by 16 with
-  wires and 64 by 64 without. Way 0 on all; ways 1 and 2 at reltol 1e-5
-  on those of up to 100 nodes without resistance in the wires. The
-  largest: 5.6e-4 (Yakopcic's 16 by 16 crossbar, whose devices switch
-  within a tenth of a millisecond: backward Euler's error there halves
-  with the step, 2.3e-3 at 50,000 time points); most crossbars 1e-6 to
-  1.6e-4. The divider is 3e-9 below ngspice's: GMIN, see below. And a
-  memristor under a sine: its current crosses 0 where its voltage does,
-  and the loop's area shrinks from 2.3e-5 V A at 1 Hz to 7.7e-7 at 10 Hz
-  and 6.8e-8 at 100 Hz. (ngspice takes 20 ms a step with 256 compiled
-  memristors, so the 64 by 64 crossbars with wires are left out.)
+  wires and 64 by 64 without. Way 0 on all; ways 1 and 2 on those of up
+  to 100 nodes without resistance in the wires. The largest: 5.1e-4 (the
+  4 by 4 crossbar of Yakopcic's devices, written); most crossbars 1e-7
+  to 2e-4, the single memristors 2e-6 to 2e-5, the RC circuits 2e-5 to
+  2.4e-4. (At SPICE's reltol of 1e-3 the error each step may leave adds
+  up to more than 1e-3 of a range on some: the Yakopcic crossbar 4.9e-3,
+  2.1e-3 at 1e-4.) The divider is 3e-9 below ngspice's: GMIN, see below.
+  And a memristor under a sine: its current crosses 0 where its voltage
+  does, and the loop's area shrinks from 2.3e-5 V A at 1 Hz to 7.7e-7 at
+  10 Hz and 6.7e-8 at 100 Hz. (ngspice takes 20 ms a step with 256
+  compiled memristors, so the 64 by 64 crossbars with wires are left
+  out.)
 - `check/agree.py` (check 4): ways 1 and 2 give way 0's waves to within
   ten times the tolerance at every time point (in fact within a tenth of
   it), on every circuit but the one way 0 alone does: 24 circuits,
@@ -188,11 +209,6 @@ relaxing between lines, is what it suggests next.
 
 ## Not here yet
 
-- Step control: the trapezoidal rule, steps by the error, breakpoints at
-  sources' corners, halving a step that does not settle (M4). Without
-  it, a crossbar of Yakopcic's devices, which switch within a tenth of a
-  millisecond, fails at a step of 1 ms (its Newton step finds the matrix
-  singular), so `crossbar.py` gives it a step of 20 us.
 - Way 0's floating sources are done; the relaxation ways refuse them.
 - The deck for Xyce, and `fetch.sh` for the IBM power grids: with M5,
   when Xyce is installed.
@@ -201,6 +217,19 @@ relaxing between lines, is what it suggests next.
 - `v(a,b)` probes; a probe is a node's voltage or a device's current.
 
 ## Where it goes beyond the spec
+
+- Step control is SPICE's, with one difference that shows: the error is
+  worked out from the time points since the last corner of a source only,
+  so a step across a corner is not taken as a large error. At SPICE's
+  tolerances (reltol 1e-3, trtol 7) the waves of the RC low-passes, with
+  nothing but the error to hold the steps back (a largest step of the
+  whole run), are 3.2e-3 and 3.3e-3 of the range off their closed forms
+  in 35 and 70 time points; ngspice at its own tolerances is 1.1e-2 and
+  3.5e-2 off in 38 and 41. The trapezoidal rule waits for three time
+  points after a corner, so that its error can be worked out: a step
+  taken by it on two lets a memristor's switching through unchecked (the
+  4 by 4 crossbar of Yakopcic's devices was 3.6e-3 off ngspice at any
+  tolerance).
 
 - When a round of relaxation has settled: SPICE's test (no node steps by
   more than the tolerance, none has more current left) is made for

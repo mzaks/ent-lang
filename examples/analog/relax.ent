@@ -239,14 +239,14 @@ system states_told() {
   for t: Two, m: mut Memristor, k: Biolek, c: mut Companion {
     if let va = Node(t.a).told {
       if let vb = Node(t.b).told {
-        let (i, g, gw, f, jw, jv) = biolek_equation(k.ron, k.roff, k.d, k.uv, k.p, m.w, m.w_prev,
-                                                    va - vb, Time.h)
+        let (i, g, gw, f, jw, jv, rate) = biolek_equation(k.ron, k.roff, k.d, k.uv, k.p, m.w, m.w_prev,
+                                                    va - vb, Time.h, Time.trap, m.rate_prev)
         let w = m.w - f / jw
         if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
           Relax.unsettled += 1
         }
-        let (i2, g2, gw2, f2, jw2, jv2) = biolek_equation(k.ron, k.roff, k.d, k.uv, k.p, w, m.w_prev,
-                                                    va - vb, Time.h)
+        let (i2, g2, gw2, f2, jw2, jv2, rate2) = biolek_equation(k.ron, k.roff, k.d, k.uv, k.p, w, m.w_prev,
+                                                    va - vb, Time.h, Time.trap, m.rate_prev)
         m.w = w
         m.i = i2
         c.g = g2
@@ -257,18 +257,18 @@ system states_told() {
   for t: Two, m: mut Memristor, k: Vteam, c: mut Companion {
     if let va = Node(t.a).told {
       if let vb = Node(t.b).told {
-        let (i, g, gw, f, jw, jv) = vteam_equation(k.ron, k.roff, k.k_off, k.k_on, k.alpha_off,
+        let (i, g, gw, f, jw, jv, rate) = vteam_equation(k.ron, k.roff, k.k_off, k.k_on, k.alpha_off,
                                                    k.alpha_on, k.v_off, k.v_on, k.w_on, k.w_off,
                                                    k.a_on, k.a_off, k.w_c, m.w, m.w_prev,
-                                                   va - vb, Time.h)
+                                                   va - vb, Time.h, Time.trap, m.rate_prev)
         let w = m.w - f / jw
         if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
           Relax.unsettled += 1
         }
-        let (i2, g2, gw2, f2, jw2, jv2) = vteam_equation(k.ron, k.roff, k.k_off, k.k_on, k.alpha_off,
+        let (i2, g2, gw2, f2, jw2, jv2, rate2) = vteam_equation(k.ron, k.roff, k.k_off, k.k_on, k.alpha_off,
                                                    k.alpha_on, k.v_off, k.v_on, k.w_on, k.w_off,
                                                    k.a_on, k.a_off, k.w_c, w, m.w_prev,
-                                                   va - vb, Time.h)
+                                                   va - vb, Time.h, Time.trap, m.rate_prev)
         m.w = w
         m.i = i2
         c.g = g2
@@ -279,16 +279,16 @@ system states_told() {
   for t: Two, m: mut Memristor, k: Yakopcic, c: mut Companion {
     if let va = Node(t.a).told {
       if let vb = Node(t.b).told {
-        let (i, g, gw, f, jw, jv) = yakopcic_equation(k.a1, k.a2, k.b, k.ap, k.an, k.vp, k.vn,
+        let (i, g, gw, f, jw, jv, rate) = yakopcic_equation(k.a1, k.a2, k.b, k.ap, k.an, k.vp, k.vn,
                                                       k.xp, k.xn, k.alphap, k.alphan, k.eta, m.w,
-                                                      m.w_prev, va - vb, Time.h)
+                                                      m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
         let w = m.w - f / jw
         if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
           Relax.unsettled += 1
         }
-        let (i2, g2, gw2, f2, jw2, jv2) = yakopcic_equation(k.a1, k.a2, k.b, k.ap, k.an, k.vp, k.vn,
+        let (i2, g2, gw2, f2, jw2, jv2, rate2) = yakopcic_equation(k.a1, k.a2, k.b, k.ap, k.an, k.vp, k.vn,
                                                       k.xp, k.xn, k.alphap, k.alphan, k.eta, w,
-                                                      m.w_prev, va - vb, Time.h)
+                                                      m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
         m.w = w
         m.i = i2
         c.g = g2

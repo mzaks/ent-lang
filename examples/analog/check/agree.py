@@ -8,8 +8,9 @@ For each prepared circuit (all of build/analog/circuits but the slowest
 crossbars, or those named)
 the model runs three ways, the operating point and every time point
 after: 0 direct, 1 relaxation by Gauss–Jacobi, 2 relaxation by events.
-Every probe of ways 1 and 2 at every time point is to be way 0's to
-within ten times the tolerance a node settles to
+Every probe of ways 1 and 2 at every time point is to be way 0's (in a
+straight line between way 0's time points, since each way chooses its
+own steps) to within ten times the tolerance a node settles to
 (reltol of the value and vntol, 1e-3 and 1e-6; for a current reltol of
 the value and 1e-9 A), where the way settled; a way that did not settle in
 so many rounds (1,000,000) is said, and a circuit with a voltage source
@@ -18,6 +19,7 @@ how many rounds and node steps it took, and how far off it is, in those
 tolerances.
 """
 
+import bisect
 import os
 import sys
 
@@ -65,11 +67,20 @@ def main():
                 line.append(f"way {way} NOT settled ({said})")
                 continue
             worst, at = 0.0, None
-            if len(waves) != len(base):
-                failed += 1
-                line.append(f"way {way} NOT as many time points: {len(waves)}, way 0 {len(base)}")
-                continue
-            for got, wanted in zip(waves, base):
+            times = [w[0] for w in base]
+            for got in waves:
+                # (Way 0's waves at this way's time point, in a straight
+                # line between its own: the steps each way chooses may
+                # differ.)
+                j = min(max(bisect.bisect_left(times, got[0]), 1), len(times) - 1) \
+                    if len(times) > 1 else 0
+                if len(times) > 1:
+                    t0, t1 = times[j - 1], times[j]
+                    share = 0.0 if t1 == t0 else (got[0] - t0) / (t1 - t0)
+                    wanted = [got[0]] + [a + (b - a) * share
+                                         for a, b in zip(base[j - 1][1:], base[j][1:])]
+                else:
+                    wanted = base[0]
                 for k, ((kind, _), a, b) in enumerate(zip(net.probes, got[1:], wanted[1:])):
                     floor = 1e-6 if kind == "v" else 1e-9
                     share = abs(a - b) / (10 * (1e-3 * abs(b) + floor))

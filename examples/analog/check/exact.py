@@ -25,13 +25,22 @@ memristors in their first states); every other circuit's at 0. Says the first pr
 
 Then the transients of the two RC low-passes, whose waves have closed
 forms: rc_step (a step, with its rise of 1 us, into 1k and 1 uF) and
-rc_sine (a sine at the corner frequency). Way 0 runs each at the
-circuit's step, half of it and a quarter; backward Euler's error, the
-largest over the run and all probes as a share of the probe's range, is
-to be a quarter at a quarter of the step (3 to 5 times smaller), and
-below 1% at the circuit's step. (Over two halvings, not each: the step's
-edge, 1 us, falls between two time points at another place for every
-step, which moves the error of each halving up or down.)
+rc_sine (a sine at the corner frequency). Way 0 runs each at a fixed
+step, the circuit's, half of it and a quarter, by backward Euler, and
+rc_sine by the trapezoidal rule too. The error, the largest over the run
+and all probes as a share of the probe's range, is to be a quarter at a
+quarter of the step by backward Euler (3 to 5 times smaller) and a
+sixteenth by the trapezoidal rule (12 to 20 times), and below 1% at the
+circuit's step. (Not rc_step by the trapezoidal rule at a fixed step:
+its edge falls inside a step, where no rule is of the second order, and
+the trapezoidal rule rings there; a corner of a source is a time point
+when the steps are chosen, below.)
+(Over two halvings, not each: rc_step's edge, 1 us, falls between two
+time points at another place for every step, which moves the error of
+each halving up or down. The trapezoidal rule takes its first step by
+backward Euler, as SPICE does, whose error is of the second order then.)
+Then the same two by the steps chosen by their error (milestone M4),
+within 1e-3 of the range.
 """
 
 import math
@@ -160,29 +169,40 @@ def rc_sine(t):
     return [u, v]
 
 
+def error(waves, exact):
+    """The largest error over the run and all probes, as a share of the
+    probe's range."""
+    wanted = [exact(line[0]) for line in waves]
+    worst = 0.0
+    for k in range(len(wanted[0])):
+        column = [w[k] for w in wanted]
+        range_ = max(column) - min(column)
+        worst = max(worst, max(abs(line[1 + k] - w[k]) for line, w in zip(waves, wanted)) / range_)
+    return worst
+
+
 def transients(program):
     failed = 0
     for name, exact in (("rc_step", rc_step), ("rc_sine", rc_sine)):
         if not os.path.isdir(os.path.join(common.CIRCUITS, name)):
             continue
         net = common.Netlist(name)
-        errors = []
-        for share in (1, 2, 4):
-            waves, said = common.run(program, name, 0, step=net.tran[0] / share)
-            wanted = [exact(line[0]) for line in waves]
-            worst = 0.0
-            for k in range(len(wanted[0])):
-                column = [w[k] for w in wanted]
-                range_ = max(column) - min(column)
-                worst = max(worst, max(abs(line[1 + k] - w[k])
-                                       for line, w in zip(waves, wanted)) / range_)
-            errors.append(worst)
-        ratios = [a / b for a, b in zip(errors, errors[1:])]
-        good = errors[0] < 0.01 and 3 <= errors[0] / errors[2] <= 5
+        rules = [(0, "backward Euler", 3, 5)] + \
+            ([(1, "trapezoidal", 12, 20)] if name == "rc_sine" else [])
+        for method, rule, low, high in rules:
+            errors = [error(common.run(program, name, 0, step=net.tran[0] / share,
+                                       method=method)[0], exact) for share in (1, 2, 4)]
+            ratios = [a / b for a, b in zip(errors, errors[1:])]
+            good = errors[0] < 0.01 and low <= errors[0] / errors[2] <= high
+            failed += 0 if good else 1
+            print(f"{name}, {rule}: error {', '.join(f'{e:.2e}' for e in errors)} of the range "
+                  f"at steps h, h/2, h/4 (ratios {', '.join(f'{r:.2f}' for r in ratios)}; over "
+                  f"both {errors[0] / errors[2]:.2f})" + ("" if good else ": NOT as it should be"))
+        waves, said = common.run(program, name, 0)
+        chosen = error(waves, exact)
+        good = chosen <= 1e-3
         failed += 0 if good else 1
-        print(f"{name}: backward Euler's error {', '.join(f'{e:.2e}' for e in errors)} "
-              f"of the range at steps h, h/2, h/4 (ratios "
-              f"{', '.join(f'{r:.2f}' for r in ratios)}; over both {errors[0] / errors[2]:.2f})" +
+        print(f"{name}, steps chosen: {len(waves)} time points, error {chosen:.2e} of the range" +
               ("" if good else ": NOT as it should be"))
     return failed
 

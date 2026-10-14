@@ -8,19 +8,22 @@ For each prepared circuit (all of build/analog/circuits, or those named)
 ngspice runs the deck prepare.py wrote for it, with its tolerances made
 tight (reltol 1e-6, vntol 1e-12, abstol 1e-15; its steps its own, by its
 error, and breakpoints at the sources' corners), so that it stands for
-the circuit's own waves. (It is not held to small steps: with 256
-memristors it takes 20 ms a step, and a crossbar would take hours.)
+the circuit's own waves. Its steps are no longer than the circuit's step,
+since its values are taken in a straight line between them (with no
+step but its error's, the sine of rc_sine_free is 2.3e-3 of the range
+off between ngspice's time points, and 1.4e-4 at them); no shorter, since
+with 256 memristors it takes 20 ms a step.
 
-The model runs the circuit at a fiftieth of its step, but no more than
-200,000 time points, where backward Euler's error is small enough: at a
-twentieth the ladder's first rise, 1 us, is 1.2e-3 off; the 16 by 16
-crossbar of Yakopcic's devices, written, is 2.3e-3 of a range off at
-50,000 time points, 1.2e-3 at 100,000 and 5.7e-4 at 200,000 (first
-order, where its devices switch). Way 0 runs every circuit; ways 1 and 2
-those of up to 100 nodes but crossbars with resistance in their wires
-(check 4 holds them against way 0 on those, where they take thousands
-of rounds a time point), with reltol 1e-5 and up to a million rounds a
-time point. (At SPICE's reltol of 1e-3 a time point of relaxation is
+The model runs the circuit with its steps chosen by their error, at
+reltol 1e-5: at SPICE's 1e-3, with trtol 7, the error each step may
+leave adds up to more than 1e-3 of a range (an RC low-pass with no
+largest step but the run's comes out 3e-3 off, ngspice at its own
+tolerances 1e-2; the 4 by 4 crossbar of Yakopcic's devices, written,
+4.9e-3 at 1e-3, 2.1e-3 at 1e-4 and 5.4e-4 at 1e-5). Way 0 runs every
+circuit; ways 1 and 2 those of up to 100 nodes but crossbars with
+resistance in their wires (check 4 holds them against way 0 on those,
+where they take thousands of rounds a time point), with up to a million
+rounds a time point. (At SPICE's reltol of 1e-3 a time point of relaxation is
 solved to 1e-3 of its values, and a memristor's state carries what is
 off on: the 4 by 4 crossbar with 10 ohm wires, written, comes out 2e-3
 of the range off ngspice by way 1, which check 4 holds to way 0 within
@@ -72,6 +75,13 @@ def spice(name, net):
     with open(os.path.join(common.CIRCUITS, name, "circuit.cir")) as file:
         deck = file.read()
     options = ".options reltol=1e-6 vntol=1e-12 abstol=1e-15 chgtol=1e-18 itl4=100\n"
+    # (No step longer than the circuit's: ngspice's values are taken in a
+    # straight line between its time points, which with steps as long as
+    # its error lets them be would be 2e-3 of the range off on a sine.)
+    if net.tran:
+        step, stop = net.tran[0], net.tran[1]
+        most = min(net.tran[2], step) if len(net.tran) > 2 else step
+        deck = re.sub(r"^\.tran .*$", f".tran {step!r} {stop!r} 0 {most!r}", deck, flags=re.M)
     deck = deck.replace("\n.control", "\n" + options + ".control", 1)
     for model in re.findall(r"^pre_osdi (\S+)", deck, re.M):
         shutil.copy(os.path.join(MODELS, model), folder)
@@ -132,10 +142,8 @@ def main():
         wire = name.split("_")[2] if name.startswith("crossbar_") else ""
         slow = bool(wire) and float(wire) > 0
         for way in ((0, 1, 2) if net.nodes <= 100 and not slow else (0,)):
-            # (No more than 200,000 time points.)
-            step = max(net.tran[0] / SHARE, net.tran[1] / 200000) if net.tran else 0.0
-            waves, said = common.run(program, name, way, step=step, most=1000000,
-                                     reltol=0.001 if way == 0 else 1e-5)
+            waves, said = common.run(program, name, way, most=1000000,
+                                     reltol=1e-5)
             if "does not do" in said:
                 continue
             points = max(points, len(waves))

@@ -32,8 +32,9 @@ Yakopcic's a1 and a2) is its default times 1 + variation*(2*u(k) - 1),
 k = 1, 2.
 
 The probes are the sense nodes, and the first row's driver current. The
-run is 400 ms, a time point every millisecond; for Yakopcic's model,
-whose device switches within a tenth of one, every 20 microseconds.
+run is 400 ms, with a step of a millisecond (the steps are chosen by
+their error: shorter where Yakopcic's devices switch, within a tenth of
+one).
 """
 
 import os
@@ -94,8 +95,7 @@ def write(n, wire, model, variation, seed, scenario):
             for i in range(1, n):
                 lines.append(f"Rc{j}_{i} c{j}_{i - 1} c{j}_{i} {prepare.text(wire)}")
             lines.append(f"Rc{j}_{n} c{j}_{n - 1} s{j} {prepare.text(wire)}")
-    # (Yakopcic's fitted device switches within a tenth of a millisecond.)
-    lines.append(".tran 20u 400m" if model == "yakopcic" else ".tran 1m 400m")
+    lines.append(".tran 1m 400m")
     lines.append(".print tran " + " ".join(f"v(s{j})" for j in range(n)) + " i(V0)")
     lines.append(".end")
     os.makedirs(SOURCES, exist_ok=True)
