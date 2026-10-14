@@ -1,6 +1,7 @@
 """What the checks of examples/analog share: the model built and run on a
 prepared circuit, its waves read, and the circuit read here too."""
 
+import atexit
 import os
 import shutil
 import subprocess
@@ -16,26 +17,37 @@ RUN = os.path.join(ROOT, "build", "analog", "run")
 def build(more=()):
     """The model (simulate.ent), built where the checks run it."""
     os.makedirs(RUN, exist_ok=True)
-    program = os.path.join(RUN, "simulate" + ("_parallel" if "--parallel" in more else ""))
+    # (A program of its own for each run of a check: another check may be
+    # running the one built before.)
+    program = os.path.join(RUN, "simulate" + ("_parallel" if "--parallel" in more else "") +
+                           f"_{os.getpid()}")
     environment = dict(os.environ)
     environment.setdefault("ENT_BIN", os.path.join(ROOT, "build", "bin"))
     subprocess.run([sys.executable, os.path.join(ROOT, "tools", "ent"), "build", *more,
                     "-I", ANALOG, os.path.join(ANALOG, "simulate.ent"), "-o", program],
                    check=True, env=environment)
+    atexit.register(lambda: os.path.exists(program) and os.remove(program))
     return program
 
 
-def run(program, name, way, at=0.0, most=100000, environment=None, step=0.0, folder=None):
+def run(program, name, way, at=0.0, most=100000, environment=None, step=0.0, folder=None,
+        operating=False, reltol=0.001):
     """The model's waves for a circuit, the way given, and what it said:
     a list of lines, each a list of floats (the time, then the probes).
-    `step`: the time step (0: the circuit's)."""
-    folder = folder or os.path.join(RUN, f"{name}_way{way}")
+    `step`: the time step (0: the circuit's). `operating`: the circuit
+    without its `tran`, so only its operating point at `at`."""
+    folder = folder or os.path.join(RUN, f"{name}_way{way}_{os.getpid()}")
     os.makedirs(folder, exist_ok=True)
-    shutil.copy(os.path.join(CIRCUITS, name, "circuit.net"), folder)
+    with open(os.path.join(CIRCUITS, name, "circuit.net")) as file:
+        text = file.read()
+    if operating:
+        text = "".join(line for line in text.splitlines(True) if not line.startswith("tran"))
+    with open(os.path.join(folder, "circuit.net"), "w") as file:
+        file.write(text)
     if os.path.exists(os.path.join(folder, "waves.txt")):
         os.remove(os.path.join(folder, "waves.txt"))
     with open(os.path.join(folder, "run.txt"), "w") as file:
-        file.write(f"{way} 1 1 0.001 0.000001 1e-12 {most} {at!r} {step!r}\n")
+        file.write(f"{way} 1 1 {reltol!r} 0.000001 1e-12 {most} {at!r} {step!r}\n")
     said = subprocess.run([program], capture_output=True, text=True, cwd=folder,
                           env=environment).stdout.strip()
     waves = []

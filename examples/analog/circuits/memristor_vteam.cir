@@ -1,0 +1,6 @@
+A VTEAM memristor under a 1 V sine at 2 Hz: it moves only past its thresholds of +-0.5 V
+V1 in 0 SIN(0 1 2)
+X1 in 0 vteam w0=1.5
+.tran 0.5m 1
+.print tran v(in) i(V1)
+.end

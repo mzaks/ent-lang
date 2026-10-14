@@ -1,0 +1,71 @@
+// The Yakopcic memristor model (C. Yakopcic, T. M. Taha, G. Subramanyam,
+// R. E. Pino and S. Rogers, "A memristor device model", IEEE Electron
+// Device Letters 32(10), 2011), with that paper's fit of a device: the
+// single source of this model for examples/analog. ngspice runs it
+// compiled by OpenVAF; devices.ent has it by hand, with the parameters in
+// this order (prepare.py reads the order from here), w0 last.
+//
+// The current is a1 * x * sinh(b * v) where v is not below 0, and
+// a2 * x * sinh(b * v) where it is; the state x, from 0 to 1, moves by
+//
+//   dx/dt = eta * g(v) * f(x)
+//   g(v) = Ap * (exp(v) - exp(Vp))      v > Vp
+//        = -An * (exp(-v) - exp(Vn))    v < -Vn
+//        = 0                            between
+//   f(x) = exp(-alphap * (x - xp)) * ((xp - x) / (1 - xp) + 1)   x >= xp, going up
+//        = exp(alphan * (x + xn - 1)) * x / (1 - xn)             x <= 1 - xn, going down
+//        = 1                                                     else
+//
+// going up where eta * v > 0. (Its ports are `plus` and `minus`: `b` is a
+// parameter here.) The state is the voltage of the internal
+// node `x`, held at w0 in the operating point.
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module yakopcic(plus, minus);
+  inout plus, minus;
+  electrical plus, minus, x;
+
+  parameter real a1 = 0.17 from (0:inf);
+  parameter real a2 = 0.17 from (0:inf);
+  parameter real b = 0.05 from (0:inf);
+  parameter real Ap = 4000 from [0:inf);
+  parameter real An = 4000 from [0:inf);
+  parameter real Vp = 0.16 from [0:inf);
+  parameter real Vn = 0.15 from [0:inf);
+  parameter real xp = 0.3 from [0:1);
+  parameter real xn = 0.5 from [0:1);
+  parameter real alphap = 1 from [0:inf);
+  parameter real alphan = 5 from [0:inf);
+  parameter real eta = 1;
+  parameter real w0 = 0.11 from [0:1];
+
+  real state, voltage, drive, window, up;
+
+  analog begin
+    state = V(x);
+    voltage = V(plus, minus);
+    if (voltage >= 0)
+      I(plus, minus) <+ a1 * state * sinh(b * voltage);
+    else
+      I(plus, minus) <+ a2 * state * sinh(b * voltage);
+    if (voltage > Vp)
+      drive = Ap * (exp(voltage) - exp(Vp));
+    else if (voltage < -Vn)
+      drive = -An * (exp(-voltage) - exp(Vn));
+    else
+      drive = 0;
+    up = (eta * voltage > 0) ? 1 : 0;
+    if (up > 0 && state >= xp)
+      window = exp(-alphap * (state - xp)) * ((xp - state) / (1 - xp) + 1);
+    else if (up == 0 && state <= 1 - xn)
+      window = exp(alphan * (state + xn - 1)) * state / (1 - xn);
+    else
+      window = 1;
+    if ($abstime <= 0)
+      V(x) <+ w0;
+    else
+      I(x) <+ ddt(V(x)) - eta * drive * window;
+  end
+endmodule

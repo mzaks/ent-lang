@@ -10,7 +10,8 @@
 // current, dx/dt = uv*Ron/D^2 * i * f(x, i), where Biolek's window
 // f = 1 - (x - stp(-i))^(2p) stops it at either end without holding it
 // there when the current turns. x is the voltage of the internal node
-// `x`, held at w0 in the operating point.
+// `x`, held at w0 in the operating point (at time 0: OpenVAF's model in
+// ngspice is not told that the operating point is `static`).
 //
 // (First checked against the hand translation in milestone M3.)
 
@@ -36,7 +37,7 @@ module biolek(a, b);
     I(a, b) <+ current;
     back = (current < 0) ? 1 : 0;
     window = 1 - pow(state - back, 2 * p);
-    if (analysis("static"))
+    if ($abstime <= 0)
       V(x) <+ w0;
     else
       I(x) <+ ddt(V(x)) - uv * Ron / (D * D) * current * window;

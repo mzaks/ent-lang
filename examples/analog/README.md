@@ -6,9 +6,10 @@ time, node voltage by node voltage, to give the waveforms that
 then to be faster than ngspice and Xyce on large memristor crossbars by
 relaxation, every node solving for its own voltage. `analog-SPEC.md`
 says what it is to be and in which milestones. It is being built in
-steps; what is here is milestones M0 to M2: a circuit is read, and its
+steps; what is here is milestones M0 to M3: a circuit is read, and its
 operating point and its waves in time (backward Euler, a fixed step) are
-solved three ways, which agree with each other and with ngspice.
+solved three ways, with memristors of three models whose states move,
+and the three ways agree with each other and with ngspice.
 
 - `prepare.py`: a SPICE netlist made flat into `circuit.net`, the form
   the model reads (spec section 4), and the same flat circuit as a deck
@@ -35,9 +36,11 @@ solved three ways, which agree with each other and with ngspice.
   for every way: each that is no source makes itself straight, its
   `Companion` (the current through it is g * (va - vb) + i0). At the
   operating point a capacitor is open; at a time point h on it is
-  backward Euler's companion, C/h and -q_prev/h. A memristor is the
-  resistor its state makes it (its state is held until M3). `GMIN`
-  (1e-12 S) from every node to ground.
+  backward Euler's companion, C/h and -q_prev/h. A memristor, of each
+  model, is made straight at its voltage and state: its current, how
+  that grows with the voltage and with the state, and backward Euler's
+  equation for the state and how that grows with each. `GMIN` (1e-12 S)
+  from every node to ground.
 - `sources.ent`: a source's value at a time: DC, SIN, PULSE and PWL as
   SPICE has them.
 - `direct.ent`, `direct.c`: way 0. Newton on the whole circuit: the
@@ -67,9 +70,17 @@ solved three ways, which agree with each other and with ngspice.
   `tran`, a time point every step to the stop; writes "waves.txt" (the
   time, then each probe, as `%.17g`, a line a time point) and says how
   it went. A time point that does not settle ends the run, said.
-- `models/biolek.va`: the HP memristor with Biolek's window in
-  Verilog-A, which says the order of its parameters. It is first held
-  against anything in milestone M3.
+- `models/`: the memristor models in Verilog-A, the single source of
+  each: the HP memristor with Biolek's window (`biolek.va`), VTEAM
+  (`vteam.va`, numbers chosen to switch at 1.2 V and not at 0.1 V in the
+  crossbars, not a device's fit) and Yakopcic's (`yakopcic.va`, that
+  paper's fit of a device). ngspice runs them compiled by OpenVAF
+  (`openvaf-r`); `devices.ent` has each by hand, its parameters in the
+  order of the file. A state is held at w0 in the operating point; in
+  time, way 0 solves for the states with the voltages in each Newton
+  step (an unknown each, as ngspice has a model's internal node), and in
+  ways 1 and 2 every memristor takes a Newton step of its own on its
+  state's equation in each round, beside the nodes (spec 7.3).
 
 ```sh
 examples/analog/prepare.py all            # the circuits, into build/analog/circuits
@@ -98,8 +109,10 @@ echo 1 > run.txt
   size from 1e-300 to 1e300 are each read as the f64 Python reads.
 - `check/exact.py` (check 2): for every circuit of up to 80 unknowns,
   the equations of its operating point are solved exactly, in fractions,
-  by Python; every probe of way 0 is that to 1e-12 (20 circuits; a
-  crossbar's at 50 ms, since each of its time points is one). But a
+  by Python; every probe of way 0 is that to 1e-12 (22 circuits; a
+  crossbar's at 50 ms, as its operating point; memristors of Biolek's and
+  VTEAM's model, which are resistors at a held state, not Yakopcic's,
+  whose current is a sinh). But a
   crossbar whose wires have 0.1 ohm: to 1e-11, since wires of 10 S beside
   memristors of 1e-4 S leave the sense voltages a few parts in 10^12 off
   in f64 (a step of refinement does not help). Then the two RC
@@ -108,21 +121,34 @@ echo 1 > run.txt
   3.99 times smaller at a quarter of the step (first order; rc_step's
   edge of 1 us falls in another place between time points at each step,
   which is why the ratio is taken over two halvings).
-- `check/spice.py` (check 3): ngspice with tight tolerances against all
-  three ways, at a fiftieth of the circuit's step, every probe at every
-  time point within 1e-3 of its range: the divider, the R-2R ladder, the
-  bridge, the floating source (way 0), the RC ladder, rc_step and rc_sine
-  (largest 9.4e-4, the R-2R ladder by way 2; the transients 1e-4 to
-  5e-4). The divider is 3e-9 below ngspice's: GMIN, see below. Circuits
-  with memristors wait for OpenVAF.
+- `check/spice.py` (check 3): ngspice with tight tolerances and its own
+  steps against the model at a fiftieth of the circuit's step (at most
+  200,000 time points), every probe at every time point within 1e-3 of
+  its range: 29 circuits, the memristors of all three models among them
+  (compiled from models/ by OpenVAF), crossbars up to 16 by 16 with
+  wires and 64 by 64 without. Way 0 on all; ways 1 and 2 at reltol 1e-5
+  on those of up to 100 nodes without resistance in the wires. The
+  largest: 5.6e-4 (Yakopcic's 16 by 16 crossbar, whose devices switch
+  within a tenth of a millisecond: backward Euler's error there halves
+  with the step, 2.3e-3 at 50,000 time points); most crossbars 1e-6 to
+  1.6e-4. The divider is 3e-9 below ngspice's: GMIN, see below. And a
+  memristor under a sine: its current crosses 0 where its voltage does,
+  and the loop's area shrinks from 2.3e-5 V A at 1 Hz to 7.7e-7 at 10 Hz
+  and 6.8e-8 at 100 Hz. (ngspice takes 20 ms a step with 256 compiled
+  memristors, so the 64 by 64 crossbars with wires are left out.)
 - `check/agree.py` (check 4): ways 1 and 2 give way 0's waves to within
-  a tenth of the tolerance at every time point, on every circuit but the
-  one way 0 alone does (20 circuits, crossbars of 4 and 16 by 16 among
-  them; of 64 by hand, below). A time point may take up to a million rounds here: a crossbar
+  ten times the tolerance at every time point (in fact within a tenth of
+  it), on every circuit but the one way 0 alone does: 24 circuits,
+  memristors of all three models and crossbars of 4 and 16 by 16 among
+  them. Left out unless named, as hours long by relaxation: crossbars of
+  64 by 64 (by hand, below), of 16 by 16 with wires whose states move,
+  and with wires under 1 ohm, where a pulse's edge takes more than a
+  million rounds. A time point may take up to a million rounds here: a crossbar
   with 1 ohm wires takes 130,000 at a pulse's edge.
 - `check/same.py` (check 6): the build for one core and the build for
   all of them, on 1, 4, 16 and 24 threads, give the same waves, every
-  way, on six circuits through time.
+  way, on nine circuits through time, memristors of three models and
+  crossbars among them.
 
 ### How relaxation goes on crossbars
 
@@ -162,14 +188,14 @@ relaxing between lines, is what it suggests next.
 
 ## Not here yet
 
-- The memristors' states moving (M3), and step control: the
-  trapezoidal rule, steps by the error, breakpoints at sources' corners,
-  halving a step that does not settle (M4).
+- Step control: the trapezoidal rule, steps by the error, breakpoints at
+  sources' corners, halving a step that does not settle (M4). Without
+  it, a crossbar of Yakopcic's devices, which switch within a tenth of a
+  millisecond, fails at a step of 1 ms (its Newton step finds the matrix
+  singular), so `crossbar.py` gives it a step of 20 us.
 - Way 0's floating sources are done; the relaxation ways refuse them.
 - The deck for Xyce, and `fetch.sh` for the IBM power grids: with M5,
   when Xyce is installed.
-- Memristors in ngspice's deck are written as OpenVAF devices, untried
-  until OpenVAF is there.
 - A capacitor's `IC=` is kept, and how it is used (ngspice uses it only
   with `.tran ... uic`) is settled in M2.
 - `v(a,b)` probes; a probe is a node's voltage or a device's current.
@@ -194,6 +220,9 @@ relaxing between lines, is what it suggests next.
 - A memristor at the operating point is the resistor its first state
   makes it; "run.txt" says at which time the operating point is taken,
   since a crossbar's pulses are 0 at the start.
+- The models hold their state at w0 where `$abstime <= 0`, not where
+  `analysis("static")`: OpenVAF's model in ngspice is not told that the
+  operating point is static, and started at w = 0.
 
 - `circuit.net` has a line `op` where the netlist asks for the
   operating point (section 4 has only `tran`).

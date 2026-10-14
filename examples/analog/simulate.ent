@@ -55,7 +55,7 @@ capacity Solution 2300000
 // the most rounds at one point.
 unique Run {
   way: i32, shown: bool, most: i32, step: f64, refused: bool, point: i32, points: i32,
-  failed: bool, written: bool, rounds: i64, most_rounds: i32, updates: i64, memristors: i32
+  failed: bool, written: bool, rounds: i64, most_rounds: i32, updates: i64
 }
 
 world {
@@ -105,7 +105,6 @@ system said() {
   } else {
     Run.refused = false
   }
-  for m: Memristor { Run.memristors += 1 }
   // (The time points: the operating point, and one a step up to the stop.)
   Run.point = 0
   Run.points = 1
@@ -169,9 +168,7 @@ system advanced() {
 system told_how() {
   if !Run.refused {
     put("way {Run.way}: {Run.point} time points, settled {!Run.failed}, {Run.rounds} rounds, at most {Run.most_rounds} at one, {Run.updates} node steps")
-    if Run.memristors > 0 && Circuit.tran {
-      put("(the states of its {Run.memristors} memristors are held as they start: they move from milestone M3 on)")
-    }
+
   }
 }
 
@@ -187,14 +184,18 @@ schedule begun() {
   started_events() run_if Run.way == 2
 }
 schedule rounded() {
+  companions() run_if Run.way != 2
   stamp() run_if Run.way == 0
   solved() run_if Run.way == 0
   taken() run_if Run.way == 0
   gathered() run_if Run.way == 1
   told() run_if Run.way == 1
   stepped() run_if Run.way == 1
+  states() run_if Run.way == 1
   moved() run_if Run.way == 2
   retold() run_if Run.way == 2
+  states_told() run_if Run.way == 2
+  told_states() run_if Run.way == 2
   judged() run_if Run.way != 0
 }
 schedule ended() {
@@ -203,6 +204,7 @@ schedule ended() {
   gathered() run_if Run.way != 0
   told() run_if Run.way != 0
   relaxed_currents() run_if Run.way != 0
+  memristor_currents()
   written()
   accepted()
   advanced()

@@ -11,16 +11,17 @@ For each prepared circuit small enough (up to 80 unknowns) the equations
 of its operating point are solved here exactly, in fractions: Kirchhoff's
 current law at every node but ground, with GMIN to ground from each, and
 a voltage source's two nodes as far apart as it says; a capacitor open, a
-memristor the resistor its first state makes it. Every probe of way 0
+memristor the resistor its first state makes it (Biolek's and VTEAM's;
+one of Yakopcic's, whose current is a sinh, leaves its circuit out). Every probe of way 0
 (direct) is to be that, rounded, to within 1e-12 of it (and of 1e-15 V
 or A, for a value of 0). But for a crossbar whose wires have less than
 1 ohm: to 1e-11. Wires of 10 siemens beside memristors of 1e-4 make the
 equations hard to solve in f64, and the sense resistors' voltages come
 out a few parts in 10^12 off (a step of refinement with the same
 factors does not change that). Ways 1 and 2 are held against way 0 by
-check/agree.py. A crossbar has no capacitors, so each of its time points is
-an operating point: the one at 50 ms is taken, where its pulses are
-high; every other circuit's at 0. Says the first probe that is not.
+check/agree.py. The circuit runs without its `tran` here, so only its
+operating point: a crossbar's at 50 ms, where its pulses are high (its
+memristors in their first states); every other circuit's at 0. Says the first probe that is not.
 
 Then the transients of the two RC low-passes, whose waves have closed
 forms: rc_step (a step, with its rise of 1 us, into 1k and 1 uF) and
@@ -50,6 +51,19 @@ def when(name):
     return 0.05 if name.startswith("crossbar") else 0.0
 
 
+def resistance(model, numbers):
+    """A memristor's resistance in its first state, exactly, or None for a
+    model whose current is no straight line (Yakopcic's)."""
+    x = [Fraction(n) for n in numbers]
+    if model == "biolek":
+        ron, roff, w = x[0], x[1], x[5]
+        return ron * w + roff * (1 - w)
+    if model == "vteam":
+        ron, roff, w_on, w_off, w = x[0], x[1], x[8], x[9], x[13]
+        return ron + (roff - ron) * (w - w_on) / (w_off - w_on)
+    return None
+
+
 def solve(net, t):
     """The exact unknowns: the nodes' voltages but ground's, then the
     voltage sources' currents from a to b."""
@@ -68,8 +82,7 @@ def solve(net, t):
             if kind == "R":
                 g = 1 / Fraction(numbers[0])
             else:
-                ron, roff, w = (Fraction(x) for x in (numbers[0], numbers[1], numbers[5]))
-                g = 1 / (ron * w + roff * (1 - w))
+                g = 1 / resistance(wave, numbers)
             add(a - 1, a - 1, g)
             add(b - 1, b - 1, g)
             add(a - 1, b - 1, -g)
@@ -112,8 +125,7 @@ def probes(net, x, branches, t):
         if device == "R":
             values.append((v(a) - v(b)) / Fraction(numbers[0]))
         elif device == "M":
-            ron, roff, w = (Fraction(y) for y in (numbers[0], numbers[1], numbers[5]))
-            values.append((v(a) - v(b)) / (ron * w + roff * (1 - w)))
+            values.append((v(a) - v(b)) / resistance(wave, numbers))
         elif device == "C":
             values.append(Fraction(0))
         elif device == "V":
@@ -182,15 +194,16 @@ def main():
     for name in names:
         net = common.Netlist(name)
         size = net.nodes - 1 + sum(1 for d in net.devices if d[0] == "V")
-        if size > 80:
+        if size > 80 or any(d[0] == "M" and resistance(d[3], d[4]) is None
+                             for d in net.devices):
             continue
         checked += 1
-        waves, said = common.run(program, name, 0, when(name))
+        waves, said = common.run(program, name, 0, when(name), operating=True)
         if not waves:
             failed += 1
             print(f"{name}: no waves ({said})")
             continue
-        line = min(waves, key=lambda line: abs(line[0] - when(name)))
+        line = waves[0]
         t = line[0]
         x, branches = solve(net, t)
         wanted = probes(net, x, branches, t)

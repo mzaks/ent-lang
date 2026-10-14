@@ -201,7 +201,9 @@ system moved() {
 // Way 2: the devices that were told give their nodes the difference, at
 // the voltages they were told.
 system retold() {
-  for me, t: Two, c: Companion, k: Told, g: mut Gave on changed k.round {
+  // (A memristor's current is no straight line: it gives its own, at the
+  // voltages it was told, in `states_told`.)
+  for me, t: Two, c: Companion, k: Told, g: mut Gave without Memristor on changed k.round {
     if let va = Node(t.a).told {
       if let vb = Node(t.b).told {
         let i = current(c.g, c.i0, va, vb)
@@ -213,6 +215,97 @@ system retold() {
         g.i = i
       }
     }
+  }
+}
+
+// Way 1: every memristor takes a Newton step on its state's equation,
+// made straight by `companions()` at the round's start (spec 7.3: the
+// states go with the voltages, round by round).
+system states() {
+  for m: mut Memristor {
+    let w = m.w - m.f / m.jw
+    if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+      Relax.unsettled += 1
+    }
+    m.w = w
+  }
+}
+
+// Way 2: the same, at the voltages the memristor was told; and its
+// current there, at its state now (`Memristor.i`), whose difference from
+// what it gave its nodes it gives them (`told_states`): a memristor's
+// current is no straight line, so it is not left to `retold`.
+system states_told() {
+  for t: Two, m: mut Memristor, k: Biolek, c: mut Companion {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        let (i, g, gw, f, jw, jv) = biolek_equation(k.ron, k.roff, k.d, k.uv, k.p, m.w, m.w_prev,
+                                                    va - vb, Time.h)
+        let w = m.w - f / jw
+        if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+          Relax.unsettled += 1
+        }
+        let (i2, g2, gw2, f2, jw2, jv2) = biolek_equation(k.ron, k.roff, k.d, k.uv, k.p, w, m.w_prev,
+                                                    va - vb, Time.h)
+        m.w = w
+        m.i = i2
+        c.g = g2
+        c.i0 = i2 - g2 * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Vteam, c: mut Companion {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        let (i, g, gw, f, jw, jv) = vteam_equation(k.ron, k.roff, k.k_off, k.k_on, k.alpha_off,
+                                                   k.alpha_on, k.v_off, k.v_on, k.w_on, k.w_off,
+                                                   k.a_on, k.a_off, k.w_c, m.w, m.w_prev,
+                                                   va - vb, Time.h)
+        let w = m.w - f / jw
+        if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+          Relax.unsettled += 1
+        }
+        let (i2, g2, gw2, f2, jw2, jv2) = vteam_equation(k.ron, k.roff, k.k_off, k.k_on, k.alpha_off,
+                                                   k.alpha_on, k.v_off, k.v_on, k.w_on, k.w_off,
+                                                   k.a_on, k.a_off, k.w_c, w, m.w_prev,
+                                                   va - vb, Time.h)
+        m.w = w
+        m.i = i2
+        c.g = g2
+        c.i0 = i2 - g2 * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Yakopcic, c: mut Companion {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        let (i, g, gw, f, jw, jv) = yakopcic_equation(k.a1, k.a2, k.b, k.ap, k.an, k.vp, k.vn,
+                                                      k.xp, k.xn, k.alphap, k.alphan, k.eta, m.w,
+                                                      m.w_prev, va - vb, Time.h)
+        let w = m.w - f / jw
+        if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+          Relax.unsettled += 1
+        }
+        let (i2, g2, gw2, f2, jw2, jv2) = yakopcic_equation(k.a1, k.a2, k.b, k.ap, k.an, k.vp, k.vn,
+                                                      k.xp, k.xn, k.alphap, k.alphan, k.eta, w,
+                                                      m.w_prev, va - vb, Time.h)
+        m.w = w
+        m.i = i2
+        c.g = g2
+        c.i0 = i2 - g2 * (va - vb)
+      }
+    }
+  }
+}
+
+system told_states() {
+  for me, t: Two, m: Memristor, g: mut Gave where m.i != g.i {
+    let more = m.i - g.i
+    for (me)-[Touches]->(x, s: mut Sum) {
+      s.i += if x == t.a { -more } else { more }
+      s.most max= abs64(m.i)
+    }
+    g.i = m.i
   }
 }
 

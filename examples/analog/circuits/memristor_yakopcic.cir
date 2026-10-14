@@ -1,0 +1,7 @@
+A Yakopcic memristor under a 0.5 V sine at 100 Hz, in series with 1k
+V1 in 0 SIN(0 0.5 100)
+R1 in mid 1k
+X1 mid 0 yakopcic
+.tran 10u 30m
+.print tran v(mid) i(V1)
+.end

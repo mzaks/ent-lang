@@ -1,0 +1,67 @@
+// VTEAM, the voltage threshold adaptive memristor model (S. Kvatinsky,
+// M. Ramadan, E. G. Friedman and A. Kolodny, "VTEAM: a general model for
+// voltage-controlled memristors", IEEE Transactions on Circuits and
+// Systems II 62(8), 2015), with its linear current and Kvatinsky's
+// window: the single source of this model for examples/analog. ngspice
+// runs it compiled by OpenVAF; devices.ent has it by hand, with the
+// parameters in this order (prepare.py reads the order from here), w0
+// last.
+//
+// The state w, in nanometres from w_on to w_off, moves only where the
+// voltage is past a threshold:
+//
+//   dw/dt = k_off * (v/v_off - 1)^alpha_off * f_off(w)   v > v_off > 0
+//         = k_on  * (v/v_on  - 1)^alpha_on  * f_on(w)    v < v_on  < 0
+//         = 0                                            between
+//
+// with f_off(w) = exp(-exp((w - a_off)/w_c)) and f_on(w) =
+// exp(-exp(-(w - a_on)/w_c)), which stop it near the ends; and the
+// resistance goes in a straight line from R_on at w_on to R_off at
+// w_off. The state is the voltage of the internal node `x`, held at w0 in
+// the operating point.
+//
+// (The numbers here are chosen to switch in the crossbars of crossbar.py:
+// 1.2 V moves the state across in about a tenth of a second, 0.1 V does
+// not move it. They are not a fit to a device.)
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module vteam(a, b);
+  inout a, b;
+  electrical a, b, x;
+
+  parameter real Ron = 100 from (0:inf);
+  parameter real Roff = 16e3 from (0:inf);
+  parameter real k_off = 5 from (0:inf);
+  parameter real k_on = -5 from (-inf:0);
+  parameter real alpha_off = 3 from (0:inf);
+  parameter real alpha_on = 3 from (0:inf);
+  parameter real v_off = 0.5 from (0:inf);
+  parameter real v_on = -0.5 from (-inf:0);
+  parameter real w_on = 0;
+  parameter real w_off = 3;
+  parameter real a_on = 0;
+  parameter real a_off = 3;
+  parameter real w_c = 0.1 from (0:inf);
+  parameter real w0 = 1.5;
+
+  real state, voltage, resistance, rate;
+
+  analog begin
+    state = V(x);
+    voltage = V(a, b);
+    resistance = Ron + (Roff - Ron) * (state - w_on) / (w_off - w_on);
+    I(a, b) <+ voltage / resistance;
+    if (voltage > v_off)
+      rate = k_off * pow(voltage / v_off - 1, alpha_off) * exp(-exp((state - a_off) / w_c));
+    else if (voltage < v_on)
+      rate = k_on * pow(voltage / v_on - 1, alpha_on) * exp(-exp(-(state - a_on) / w_c));
+    else
+      rate = 0;
+    if ($abstime <= 0)
+      V(x) <+ w0;
+    else
+      I(x) <+ ddt(V(x)) - rate;
+  end
+endmodule

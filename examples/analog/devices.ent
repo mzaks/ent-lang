@@ -10,8 +10,9 @@
 // so that each has a conductance to something. At the operating point a
 // capacitor is open (a conductance of 0); at a time point h after the
 // last it is backward Euler's companion: i = C/h * (v - v_prev), a
-// conductance C/h and a current -q_prev/h (milestone M2). A memristor is
-// the resistor its state makes it (the state moves from milestone M3 on).
+// conductance C/h and a current -q_prev/h (milestone M2). A memristor,
+// of whichever model, is made straight at its voltage and state, and its
+// state's equation beside (milestone M3).
 //
 //   accepted()   after a time point: what the capacitors and nodes had
 import circuit
@@ -26,9 +27,107 @@ const GMIN: f64 = 1e-12
 // more than reltol of the largest of its devices' and abstol.
 unique Time { t: f64, h: f64, reltol: f64, vntol: f64, abstol: f64 }
 
+// What a memristor of each model does at the voltage v across it and the
+// state w, made straight for a Newton step (spec 7.3), from its model's
+// .va file in models/: its current i from a to b, how that grows with v
+// (`g`) and with w (`gw`); and backward Euler's equation for its state over
+// a step h, w - w_prev - h * rate(v, w) = 0: what that comes to (`f`) and
+// how it grows with w (`jw`) and with v (`jv`). At the operating point
+// (h = 0) the state is held: f = w - w_prev.
+fn held_state(w: f64, w_prev: f64, h: f64, rate: f64, rate_w: f64, rate_v: f64)
+    -> (f64, f64, f64) {
+  if h > 0.0 { (w - w_prev - h * rate, 1.0 - h * rate_w, -h * rate_v) }
+  else { (w - w_prev, 1.0 as f64, 0.0 as f64) }
+}
+
+fn sinh64(x: f64) -> f64 { (exp64(x) - exp64(-x)) / 2.0 }
+fn cosh64(x: f64) -> f64 { (exp64(x) + exp64(-x)) / 2.0 }
+
 // The resistance of a Biolek memristor in the state w (0: all Roff, 1:
 // all Ron).
 fn biolek_resistance(ron: f64, roff: f64, w: f64) -> f64 { ron * w + roff * (1.0 - w) }
+
+// Biolek (models/biolek.va): rate = uv * Ron / D^2 * i * (1 - (w - s)^(2p)),
+// s 1 where the current is below 0, else 0; the window's step at i = 0 is
+// taken as not growing with v.
+fn biolek_equation(ron: f64, roff: f64, d: f64, uv: f64, p: f64, w: f64, w_prev: f64,
+                   v: f64, h: f64) -> (f64, f64, f64, f64, f64, f64) {
+  let r = biolek_resistance(ron, roff, w)
+  let i = v / r
+  let gw = -v * (ron - roff) / (r * r)
+  let s = if i < 0.0 { 1.0 as f64 } else { 0.0 as f64 }
+  let window = 1.0 - pow64(w - s, 2.0 * p)
+  let slope = -2.0 * p * pow64(w - s, 2.0 * p - 1.0)
+  let k = uv * ron / (d * d)
+  let (f, jw, jv) = held_state(w, w_prev, h, k * i * window, k * (gw * window + i * slope),
+                               k * window / r)
+  (i, 1.0 / r, gw, f, jw, jv)
+}
+
+// VTEAM (models/vteam.va): a straight resistance from Ron at w_on to Roff
+// at w_off; the state moves only past the thresholds.
+fn vteam_equation(ron: f64, roff: f64, k_off: f64, k_on: f64, alpha_off: f64, alpha_on: f64,
+                  v_off: f64, v_on: f64, w_on: f64, w_off: f64, a_on: f64, a_off: f64,
+                  w_c: f64, w: f64, w_prev: f64, v: f64, h: f64)
+    -> (f64, f64, f64, f64, f64, f64) {
+  let r = ron + (roff - ron) * (w - w_on) / (w_off - w_on)
+  let i = v / r
+  let gw = -v / (r * r) * (roff - ron) / (w_off - w_on)
+  var rate = 0.0 as f64
+  var rate_v = 0.0 as f64
+  var rate_w = 0.0 as f64
+  if v > v_off {
+    let base = v / v_off - 1.0
+    let near = exp64((w - a_off) / w_c)
+    let window = exp64(-near)
+    rate = k_off * pow64(base, alpha_off) * window
+    rate_v = k_off * alpha_off * pow64(base, alpha_off - 1.0) / v_off * window
+    rate_w = rate * (-near / w_c)
+  } else if v < v_on {
+    let base = v / v_on - 1.0
+    let near = exp64(-(w - a_on) / w_c)
+    let window = exp64(-near)
+    rate = k_on * pow64(base, alpha_on) * window
+    rate_v = k_on * alpha_on * pow64(base, alpha_on - 1.0) / v_on * window
+    rate_w = rate * (near / w_c)
+  }
+  let (f, jw, jv) = held_state(w, w_prev, h, rate, rate_w, rate_v)
+  (i, 1.0 / r, gw, f, jw, jv)
+}
+
+// Yakopcic (models/yakopcic.va): a current of sinh, a drive past the
+// thresholds and a window that slows the state near its ends.
+fn yakopcic_equation(a1: f64, a2: f64, b: f64, ap: f64, an: f64, vp: f64, vn: f64, xp: f64,
+                     xn: f64, alphap: f64, alphan: f64, eta: f64, w: f64, w_prev: f64, v: f64,
+                     h: f64) -> (f64, f64, f64, f64, f64, f64) {
+  let a = if v >= 0.0 { a1 } else { a2 }
+  let i = a * w * sinh64(b * v)
+  let g = a * w * b * cosh64(b * v)
+  let gw = a * sinh64(b * v)
+  var drive = 0.0 as f64
+  var drive_v = 0.0 as f64
+  if v > vp {
+    drive = ap * (exp64(v) - exp64(vp))
+    drive_v = ap * exp64(v)
+  } else if v < -vn {
+    drive = -an * (exp64(-v) - exp64(vn))
+    drive_v = an * exp64(-v)
+  }
+  var window = 1.0 as f64
+  var window_w = 0.0 as f64
+  if eta * v > 0.0 && w >= xp {
+    let fall = exp64(-alphap * (w - xp))
+    window = fall * ((xp - w) / (1.0 - xp) + 1.0)
+    window_w = -alphap * window - fall / (1.0 - xp)
+  } else if eta * v <= 0.0 && w <= 1.0 - xn {
+    let rise = exp64(alphan * (w + xn - 1.0))
+    window = rise * w / (1.0 - xn)
+    window_w = alphan * window + rise / (1.0 - xn)
+  }
+  let (f, jw, jv) = held_state(w, w_prev, h, eta * drive * window, eta * drive * window_w,
+                               eta * drive_v * window)
+  (i, g, gw, f, jw, jv)
+}
 
 // The current from a to b through a device so made, and through a source
 // of `level` that is no voltage source.
@@ -43,16 +142,101 @@ system companions() {
     c.g = if Time.h > 0.0 { k.c / Time.h } else { 0.0 }
     c.i0 = if Time.h > 0.0 { -k.q_prev / Time.h } else { 0.0 }
   }
-  for m: Memristor, b: Biolek, c: mut Companion {
-    c.g = 1.0 / biolek_resistance(b.ron, b.roff, m.w)
-    c.i0 = 0.0
+  // A memristor, of each model: made straight at the voltage across it
+  // and its state.
+  for t: Two, m: mut Memristor, k: Biolek, c: mut Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv) = biolek_equation(k.ron, k.roff, k.d, k.uv, k.p, m.w, m.w_prev, va - vb,
+                                                    Time.h)
+        m.i = i
+        m.g = g
+        m.gw = gw
+        m.f = f
+        m.jw = jw
+        m.jv = jv
+        c.g = g
+        c.i0 = i - g * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Vteam, c: mut Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv) = vteam_equation(k.ron, k.roff, k.k_off, k.k_on, k.alpha_off,
+                                                   k.alpha_on, k.v_off, k.v_on, k.w_on, k.w_off,
+                                                   k.a_on, k.a_off, k.w_c, m.w, m.w_prev, va - vb,
+                                                   Time.h)
+        m.i = i
+        m.g = g
+        m.gw = gw
+        m.f = f
+        m.jw = jw
+        m.jv = jv
+        c.g = g
+        c.i0 = i - g * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Yakopcic, c: mut Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv) = yakopcic_equation(k.a1, k.a2, k.b, k.ap, k.an, k.vp, k.vn, k.xp,
+                                                      k.xn, k.alphap, k.alphan, k.eta, m.w, m.w_prev,
+                                                      va - vb, Time.h)
+        m.i = i
+        m.g = g
+        m.gw = gw
+        m.f = f
+        m.jw = jw
+        m.jv = jv
+        c.g = g
+        c.i0 = i - g * (va - vb)
+      }
+    }
   }
 }
 
-// A time point is taken: its voltages and charges are the ones the next
-// step starts from.
+// The current through every memristor from a to b, at its nodes' voltages
+// and its state now, for the probes.
+system memristor_currents() {
+  for t: Two, m: Memristor, k: Biolek, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv) = biolek_equation(k.ron, k.roff, k.d, k.uv, k.p, m.w,
+                                                    m.w_prev, va - vb, 0.0)
+        d.i = i
+      }
+    }
+  }
+  for t: Two, m: Memristor, k: Vteam, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv) = vteam_equation(k.ron, k.roff, k.k_off, k.k_on, k.alpha_off,
+                                                   k.alpha_on, k.v_off, k.v_on, k.w_on, k.w_off,
+                                                   k.a_on, k.a_off, k.w_c, m.w, m.w_prev, va - vb,
+                                                   0.0)
+        d.i = i
+      }
+    }
+  }
+  for t: Two, m: Memristor, k: Yakopcic, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv) = yakopcic_equation(k.a1, k.a2, k.b, k.ap, k.an, k.vp, k.vn, k.xp,
+                                                      k.xn, k.alphap, k.alphan, k.eta, m.w, m.w_prev,
+                                                      va - vb, 0.0)
+        d.i = i
+      }
+    }
+  }
+}
+
+// A time point is taken: its voltages, charges and states are the ones
+// the next step starts from.
 system accepted() {
   for n: mut Node { n.v_prev = n.v }
+  for m: mut Memristor { m.w_prev = m.w }
   for t: Two, k: mut Capacitor {
     if let va = Node(t.a).v {
       if let vb = Node(t.b).v { k.q_prev = k.c * (va - vb) }

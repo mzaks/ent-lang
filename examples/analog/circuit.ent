@@ -65,10 +65,26 @@ component Source {
   voltage: bool, wave: Wave, p0: f64, p1: f64, p2: f64, p3: f64, p4: f64, p5: f64, p6: f64,
   first: i32, count: i32, branch: i32
 }
-// A memristor's state, from 0 to 1, now and at the last time point.
-component Memristor { w: f64, w_prev: f64 }
-// The HP memristor with Biolek's window (models/biolek.va).
+// A memristor's state now and at the last time point (in its model's
+// units); its number among the memristors (way 0's unknown for the
+// state); and what it was last made straight for (devices.ent): its
+// current, how that grows with the voltage (`g`) and the state (`gw`), and
+// backward Euler's equation for the state: how far it is from holding
+// (`f`), and how that grows with the state (`jw`) and the voltage (`jv`).
+component Memristor {
+  w: f64, w_prev: f64, index: i32, i: f64, g: f64, gw: f64, f: f64, jw: f64, jv: f64
+}
+// The models, each with its parameters in the order of its .va file in
+// models/: the HP memristor with Biolek's window, VTEAM, Yakopcic's.
 component Biolek { ron: f64, roff: f64, d: f64, uv: f64, p: f64 }
+component Vteam {
+  ron: f64, roff: f64, k_off: f64, k_on: f64, alpha_off: f64, alpha_on: f64, v_off: f64,
+  v_on: f64, w_on: f64, w_off: f64, a_on: f64, a_off: f64, w_c: f64
+}
+component Yakopcic {
+  a1: f64, a2: f64, b: f64, ap: f64, an: f64, vp: f64, vn: f64, xp: f64, xn: f64,
+  alphap: f64, alphan: f64, eta: f64
+}
 
 relation (Two)-[Touches]->(Node) capacity 16
 
@@ -92,7 +108,7 @@ buffer Devices { who: entity } capacity 16
 unique Circuit {
   file: text[126], read: bool, wrong: i32, nodes: i32, devices: i32, probes: i32,
   op: bool, tran: bool, step: f64, stop: f64, most: f64, floating: i32, clashing: i32,
-  branches: i32
+  branches: i32, memristors: i32
 }
 
 // --- reading words ------------------------------------------------------
@@ -231,6 +247,8 @@ system netlist() {
           let to = end(Bytes, kind)
           if first == 77 {
             if is(Bytes, kind, to, "biolek") { model = 1 }
+            else if is(Bytes, kind, to, "vteam") { model = 2 }
+            else if is(Bytes, kind, to, "yakopcic") { model = 3 }
             else { Circuit.wrong = wrong(line, Circuit.wrong) }
           } else if is(Bytes, kind, to, "dc") { model = 0 }
           else if is(Bytes, kind, to, "sin") { model = 1 }
@@ -272,7 +290,7 @@ system netlist() {
 fn wanted(kind: u8, model: i32, given: i32, first: f64) -> bool {
   if kind == 82 { given == 1 }
   else if kind == 67 { given == 2 }
-  else if kind == 77 { given == 6 }
+  else if kind == 77 { given == if model == 1 { 6 } else if model == 2 { 14 } else { 13 } }
   else if model == 0 { given == 1 }
   else if model == 1 { given == 6 }
   else if model == 2 { given == 7 }
@@ -306,6 +324,7 @@ system build() {
     }
   }
   Circuit.branches = 0
+  Circuit.memristors = 0
   if Circuit.read && Circuit.wrong == 0 {
     Devices = []
     for i in 0..len(Nodes) {
@@ -335,18 +354,65 @@ system build() {
         connect (made)-[Touches]->(b)
         Devices += { who: made }
       } else if Lines[i].kind == 77 {
-        let w0 = number(Lines, Numbers, i, 5)
-        let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
-                           Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
-                           Memristor { w: w0, w_prev: w0 },
-                           Biolek { ron: number(Lines, Numbers, i, 0),
-                                    roff: number(Lines, Numbers, i, 1),
-                                    d: number(Lines, Numbers, i, 2),
-                                    uv: number(Lines, Numbers, i, 3),
-                                    p: number(Lines, Numbers, i, 4) } }
-        connect (made)-[Touches]->(a)
-        connect (made)-[Touches]->(b)
-        Devices += { who: made }
+        let w0 = number(Lines, Numbers, i, Lines[i].count - 1)
+        if Lines[i].model == 1 {
+          let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                             Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
+                             Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0 },
+                             Biolek { ron: number(Lines, Numbers, i, 0),
+                                      roff: number(Lines, Numbers, i, 1),
+                                      d: number(Lines, Numbers, i, 2),
+                                      uv: number(Lines, Numbers, i, 3),
+                                      p: number(Lines, Numbers, i, 4) } }
+          connect (made)-[Touches]->(a)
+          connect (made)-[Touches]->(b)
+          Devices += { who: made }
+        }
+        if Lines[i].model == 2 {
+          let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                             Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
+                             Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0 },
+                             Vteam { ron: number(Lines, Numbers, i, 0),
+                                     roff: number(Lines, Numbers, i, 1),
+                                     k_off: number(Lines, Numbers, i, 2),
+                                     k_on: number(Lines, Numbers, i, 3),
+                                     alpha_off: number(Lines, Numbers, i, 4),
+                                     alpha_on: number(Lines, Numbers, i, 5),
+                                     v_off: number(Lines, Numbers, i, 6),
+                                     v_on: number(Lines, Numbers, i, 7),
+                                     w_on: number(Lines, Numbers, i, 8),
+                                     w_off: number(Lines, Numbers, i, 9),
+                                     a_on: number(Lines, Numbers, i, 10),
+                                     a_off: number(Lines, Numbers, i, 11),
+                                     w_c: number(Lines, Numbers, i, 12) } }
+          connect (made)-[Touches]->(a)
+          connect (made)-[Touches]->(b)
+          Devices += { who: made }
+        }
+        if Lines[i].model == 3 {
+          let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                             Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
+                             Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0 },
+                             Yakopcic { a1: number(Lines, Numbers, i, 0),
+                                        a2: number(Lines, Numbers, i, 1),
+                                        b: number(Lines, Numbers, i, 2),
+                                        ap: number(Lines, Numbers, i, 3),
+                                        an: number(Lines, Numbers, i, 4),
+                                        vp: number(Lines, Numbers, i, 5),
+                                        vn: number(Lines, Numbers, i, 6),
+                                        xp: number(Lines, Numbers, i, 7),
+                                        xn: number(Lines, Numbers, i, 8),
+                                        alphap: number(Lines, Numbers, i, 9),
+                                        alphan: number(Lines, Numbers, i, 10),
+                                        eta: number(Lines, Numbers, i, 11) } }
+          connect (made)-[Touches]->(a)
+          connect (made)-[Touches]->(b)
+          Devices += { who: made }
+        }
+        Circuit.memristors += 1
       } else {
         let wave = if Lines[i].model == 0 { Wave.Dc } else if Lines[i].model == 1 { Wave.Sin }
                    else if Lines[i].model == 2 { Wave.Pulse } else { Wave.Pwl }

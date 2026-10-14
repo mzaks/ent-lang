@@ -26,10 +26,14 @@ seed, the row and the column, by this rule (which check scripts that
 need it repeat): u(k) = the k-th draw, mix(mix(seed + G*(i*N + j + 1))
 ^ (k*H + 1)) / 2^64, with logic.ent's `mix` (splitmix64's finaliser),
 G = 0x9e3779b97f4a7c15 and H = 0xd1342543de82ef95. Then w0 = 0.1 +
-0.8*u(0), and each resistance of the model (Ron, Roff) is its default
-times 1 + variation*(2*u(k) - 1), k = 1, 2.
+0.8*u(0) of the way from the state's least to its most (0 to 1, or for
+VTEAM w_on to w_off), and each resistance of the model (Ron, Roff; for
+Yakopcic's a1 and a2) is its default times 1 + variation*(2*u(k) - 1),
+k = 1, 2.
 
-The probes are the sense nodes, and the first row's driver current.
+The probes are the sense nodes, and the first row's driver current. The
+run is 400 ms, a time point every millisecond; for Yakopcic's model,
+whose device switches within a tenth of one, every 20 microseconds.
 """
 
 import os
@@ -58,7 +62,9 @@ def drawn(seed, n, i, j, k):
 
 def write(n, wire, model, variation, seed, scenario):
     defaults = dict(prepare.parameters(model))
-    varied = [name for name in ("Ron", "Roff") if name in defaults]
+    varied = [name for name in ("Ron", "Roff") if name in defaults] or \
+        [name for name in ("a1", "a2") if name in defaults]
+    least, most = (defaults["w_on"], defaults["w_off"]) if "w_off" in defaults else (0.0, 1.0)
     name = f"crossbar_{n}_{prepare.text(wire)}_{model}_{scenario}"
     lines = [f"A {n} by {n} crossbar of {model} memristors, wires of {prepare.text(wire)} ohm, "
              f"{scenario}, variation {variation}, seed {seed}"]
@@ -73,7 +79,8 @@ def write(n, wire, model, variation, seed, scenario):
         for j in range(n):
             row = f"r{i}_{j}" if wire else f"d{i}"
             column = f"c{j}_{i}" if wire else f"s{j}"
-            settings = [f"w0={0.1 + 0.8 * drawn(seed, n, i, j, 0)!r}"]
+            share = 0.1 + 0.8 * drawn(seed, n, i, j, 0)
+            settings = [f"w0={least + (most - least) * share!r}"]
             for k, parameter in enumerate(varied, 1):
                 scale = 1 + variation * (2 * drawn(seed, n, i, j, k) - 1)
                 settings.append(f"{parameter}={defaults[parameter] * scale!r}")
@@ -87,7 +94,8 @@ def write(n, wire, model, variation, seed, scenario):
             for i in range(1, n):
                 lines.append(f"Rc{j}_{i} c{j}_{i - 1} c{j}_{i} {prepare.text(wire)}")
             lines.append(f"Rc{j}_{n} c{j}_{n - 1} s{j} {prepare.text(wire)}")
-    lines.append(".tran 1m 400m")
+    # (Yakopcic's fitted device switches within a tenth of a millisecond.)
+    lines.append(".tran 20u 400m" if model == "yakopcic" else ".tran 1m 400m")
     lines.append(".print tran " + " ".join(f"v(s{j})" for j in range(n)) + " i(V0)")
     lines.append(".end")
     os.makedirs(SOURCES, exist_ok=True)

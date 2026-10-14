@@ -6,7 +6,7 @@ spec's check 6).
 
 The model is built for one core and for all of them (--parallel); every
 circuit named (by default a few: RC circuits, a ladder, two DC circuits,
-crossbars with wires) runs every way it can, on the one-core build and on
+memristors of two models, crossbars with wires) runs every way it can, on the one-core build and on
 the all-cores build with 1, 4, 16 and all threads (OMP_NUM_THREADS), and
 every "waves.txt" is to be the one-core build's, byte for byte.
 """
@@ -18,7 +18,8 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
 
-CIRCUITS = ["rc_step", "ladder", "r2r", "bridge", "crossbar_4_10_biolek_write",
+CIRCUITS = ["rc_step", "ladder", "r2r", "bridge", "memristor_series", "memristor_yakopcic",
+            "crossbar_4_10_biolek_write", "crossbar_4_10_vteam_write",
             "crossbar_16_10_biolek_read"]
 
 

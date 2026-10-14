@@ -4,9 +4,11 @@
 // a column and a value, with a column of -1 for the right-hand side. The
 // C side (direct.c) adds them up and solves them with KLU, SuiteSparse's
 // sparse LU. The unknowns are the voltages of the nodes but ground, by
-// their numbers less one, and then the currents through the voltage
-// sources from a to b, by their branches: so a voltage source between two
-// nodes that are not ground is no trouble here.
+// their numbers less one, then the currents through the voltage sources
+// from a to b, by their branches (so a voltage source between two nodes
+// that are not ground is no trouble here), and then the memristors'
+// states, by their numbers: each Newton step solves for all at once, as
+// ngspice does with a model's internal node (spec 7.3).
 //
 //   schedule step() { companions()  stamp()  solved()  taken() }
 //   (from `started()`, until Direct.settled or Direct.failed)
@@ -26,7 +28,7 @@ unique Direct { size: i32, status: i32, rounds: i32, settled: bool, failed: bool
 extern proc solve_entries(entries: Entries, size: i32, into: mut Solution) -> i32
 
 system started() {
-  Direct.size = Circuit.nodes - 1 + Circuit.branches
+  Direct.size = Circuit.nodes - 1 + Circuit.branches + Circuit.memristors
   Direct.rounds = 0
   Direct.settled = false
   Direct.failed = false
@@ -53,6 +55,31 @@ system stamp() {
         if a > 0 && b > 0 {
           Entries += { row: a - 1, col: b - 1, value: -c.g }
           Entries += { row: b - 1, col: a - 1, value: -c.g }
+        }
+      }
+    }
+  }
+  // A memristor's current also grows with its state (gw), and its state's
+  // equation, made straight, is a row of its own.
+  for t: Two, m: Memristor {
+    if let a = Place(t.a).index {
+      if let b = Place(t.b).index {
+        if let va = Node(t.a).v {
+          if let vb = Node(t.b).v {
+            let x = Circuit.nodes - 1 + Circuit.branches + m.index
+            if a > 0 {
+              Entries += { row: a - 1, col: x, value: m.gw }
+              Entries += { row: a - 1, col: -1, value: m.gw * m.w }
+              Entries += { row: x, col: a - 1, value: m.jv }
+            }
+            if b > 0 {
+              Entries += { row: b - 1, col: x, value: -m.gw }
+              Entries += { row: b - 1, col: -1, value: -m.gw * m.w }
+              Entries += { row: x, col: b - 1, value: -m.jv }
+            }
+            Entries += { row: x, col: x, value: m.jw }
+            Entries += { row: x, col: -1, value: -m.f + m.jv * (va - vb) + m.jw * m.w }
+          }
         }
       }
     }
@@ -90,8 +117,9 @@ system solved() {
   Direct.rounds += 1
 }
 
-// The nodes take their voltages, and whether one moved by more than the
-// tolerance says whether Newton goes on.
+// The nodes take their voltages and the memristors their states, and
+// whether one moved by more than the tolerance says whether Newton goes
+// on.
 unique Moved { nodes: i32 }
 
 system taken() {
@@ -102,6 +130,13 @@ system taken() {
       Moved.nodes += 1
     }
     n.v = v
+  }
+  for m: mut Memristor where !Direct.failed {
+    let w = Solution[Circuit.nodes - 1 + Circuit.branches + m.index].value
+    if abs64(w - m.w) > Time.reltol * max(abs64(w), abs64(m.w)) + Time.vntol {
+      Moved.nodes += 1
+    }
+    m.w = w
   }
   Direct.settled = !Direct.failed && Moved.nodes == 0
 }
