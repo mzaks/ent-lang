@@ -1,0 +1,7 @@
+A Biolek memristor in series with a 1k resistor, set by a positive pulse and reset by a negative one
+V1 in 0 PWL(0 0 10m 0 11m 1.5 300m 1.5 301m 0 400m 0 401m -1.5 700m -1.5 701m 0 800m 0)
+R1 in mid 1k
+X1 mid 0 biolek Ron=100 Roff=16k D=10n uv=10f p=2 w0=0.05
+.tran 1m 800m
+.print tran v(mid) i(V1)
+.end

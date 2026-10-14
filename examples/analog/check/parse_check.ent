@@ -1,0 +1,83 @@
+// What check/parse.py holds against a circuit's file (check 1): how many
+// nodes, devices and probes the model has made of it, of each kind, and
+// whether every device's two edges go to its two nodes; or, where
+// "numbers.txt" is, whether every number in it is read as the f64 it
+// is (each line: the number as text, then the same as its sign (0 or 1),
+// a whole number in two parts, high and low 26 bits, and a power of two,
+// which ent-lang puts together exactly).
+import console
+import files
+import circuit
+
+capacity Bytes 268435456
+capacity Node 2200000
+capacity Two 3300000
+capacity Touches 6600000
+capacity Lines 3300000
+capacity Numbers 12000000
+capacity Nodes 2200000
+capacity Points 1000000
+capacity Probes 100000
+
+unique Seen {
+  nodes: i32, fixed: i32, devices: i32, r: i32, c: i32, v: i32, i: i32, m: i32,
+  edges: i32, astray: i32, numbers: i32, differ: i32
+}
+
+world {
+  Circuit.file = "circuit.net"
+}
+
+system count() {
+  for n: Node { Seen.nodes += 1 }
+  for n: Node with Fixed { Seen.fixed += 1 }
+  for e, t: Two, d: Device {
+    Seen.devices += 1
+    // (An edge loop cannot add into a unique: what it counts goes to
+    // the node at the other end, into the `Sum` that nothing uses yet.)
+    for (e)-[Touches]->(n) {
+      Sum(n).g += 1.0
+      if n != t.a && n != t.b { Sum(n).i += 1.0 }
+    }
+  }
+  for s: Sum {
+    Seen.edges += s.g as i32
+    Seen.astray += s.i as i32
+  }
+  for r: Resistor { Seen.r += 1 }
+  for c: Capacitor { Seen.c += 1 }
+  for s: Source where s.voltage { Seen.v += 1 }
+  for s: Source where !s.voltage { Seen.i += 1 }
+  for m: Memristor { Seen.m += 1 }
+  put("read {Circuit.read} wrong {Circuit.wrong}")
+  put("said nodes {Circuit.nodes} devices {Circuit.devices} probes {Circuit.probes}")
+  put("made nodes {Seen.nodes} devices {Seen.devices} probes {len(Probes)}")
+  put("kinds R {Seen.r} C {Seen.c} V {Seen.v} I {Seen.i} M {Seen.m}")
+  put("fixed {Seen.fixed} floating {Circuit.floating} clashing {Circuit.clashing}")
+  put("edges {Seen.edges} astray {Seen.astray}")
+}
+
+system numbers() {
+  let size = read_file("numbers.txt", Bytes)
+  var at = 0
+  while size > 0 && at < len(Bytes) {
+    let (value, a0) = real(Bytes, at)
+    let (sign, a1) = whole(Bytes, a0)
+    let (high, a2) = whole(Bytes, a1)
+    let (low, a3) = whole(Bytes, a2)
+    let (power, a4) = whole(Bytes, a3)
+    let exact = (high as f64 * 67108864.0 + low as f64) * two(power)
+    Seen.numbers += 1
+    if value != (if sign == 1 { -exact } else { exact }) {
+      Seen.differ += 1
+      // (The first few, by their line, for whoever looks into it.)
+      if Seen.differ <= 40 { put("differs in line {Seen.numbers}") }
+    }
+    at = after(Bytes, a4)
+  }
+  if size > 0 { put("numbers {Seen.numbers} differ {Seen.differ}") }
+  Bytes = []
+}
+
+schedule setup() { numbers() netlist() build() count() }
+main { setup() }

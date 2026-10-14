@@ -1,0 +1,7 @@
+An RC low-pass under a sine at its corner frequency (159 Hz)
+V1 in 0 SIN(0 1 159.155 0 0 0)
+R1 in out 1k
+C1 out 0 1u
+.tran 20u 20m
+.print tran v(in) v(out)
+.end

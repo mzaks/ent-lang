@@ -1,0 +1,6 @@
+A Biolek memristor under a 1 V sine at 100 Hz: the pinched loop, which closes up as the frequency rises
+V1 in 0 SIN(0 1 100)
+X1 in 0 biolek Ron=100 Roff=16k D=10n uv=10f p=1 w0=0.1
+.tran 10u 20m
+.print tran v(in) i(V1)
+.end

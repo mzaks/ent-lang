@@ -1,0 +1,7 @@
+An RC low-pass under a step: 1 V from 1 ms on, tau = 1 ms
+V1 in 0 PULSE(0 1 1m 1u 1u 100m 200m)
+R1 in out 1k
+C1 out 0 1u IC=0
+.tran 10u 6m
+.print tran v(out) i(V1)
+.end

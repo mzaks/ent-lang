@@ -1,0 +1,25 @@
+An RC ladder of 10 stages: 1k and 100n each, under a step
+V1 n0 0 PULSE(0 1 0 1u 1u 1 2)
+R1 n0 n1 1k
+C1 n1 0 100n
+R2 n1 n2 1k
+C2 n2 0 100n
+R3 n2 n3 1k
+C3 n3 0 100n
+R4 n3 n4 1k
+C4 n4 0 100n
+R5 n4 n5 1k
+C5 n5 0 100n
+R6 n5 n6 1k
+C6 n6 0 100n
+R7 n6 n7 1k
+C7 n7 0 100n
+R8 n7 n8 1k
+C8 n8 0 100n
+R9 n8 n9 1k
+C9 n9 0 100n
+R10 n9 n10 1k
+C10 n10 0 100n
+.tran 5u 5m
+.print tran v(n1) v(n5) v(n10)
+.end

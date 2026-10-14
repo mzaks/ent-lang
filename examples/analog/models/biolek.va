@@ -1,0 +1,44 @@
+// The HP memristor with Biolek's window (Z. Biolek, D. Biolek and
+// V. Biolkova, "SPICE model of memristor with nonlinear dopant drift",
+// Radioengineering 18(2), 2009): the single source of this model for
+// examples/analog. ngspice runs it compiled by OpenVAF; memristor.ent
+// has it by hand, with the parameters in this order (prepare.py reads
+// the order from here), w0 last.
+//
+// The state x = w/D, from 0 to 1, is the share of the device that is
+// doped: the resistance is Ron*x + Roff*(1 - x), and x drifts with the
+// current, dx/dt = uv*Ron/D^2 * i * f(x, i), where Biolek's window
+// f = 1 - (x - stp(-i))^(2p) stops it at either end without holding it
+// there when the current turns. x is the voltage of the internal node
+// `x`, held at w0 in the operating point.
+//
+// (First checked against the hand translation in milestone M3.)
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module biolek(a, b);
+  inout a, b;
+  electrical a, b, x;
+
+  parameter real Ron = 100 from (0:inf);
+  parameter real Roff = 16e3 from (0:inf);
+  parameter real D = 10e-9 from (0:inf);
+  parameter real uv = 1e-14 from (0:inf);
+  parameter integer p = 1 from [1:inf);
+  parameter real w0 = 0.1 from [0:1];
+
+  real state, current, back, window;
+
+  analog begin
+    state = V(x);
+    current = V(a, b) / (Ron * state + Roff * (1 - state));
+    I(a, b) <+ current;
+    back = (current < 0) ? 1 : 0;
+    window = 1 - pow(state - back, 2 * p);
+    if (analysis("static"))
+      V(x) <+ w0;
+    else
+      I(x) <+ ddt(V(x)) - uv * Ron / (D * D) * current * window;
+  end
+endmodule

@@ -1,0 +1,498 @@
+// An analog circuit, read from its flat netlist (examples/analog/
+// prepare.py writes one, "circuit.net", from a SPICE netlist).
+//
+//   schedule setup() { netlist()  build() }
+//
+// Every node is an entity with its voltage (`Node`) and what the devices
+// at it add up to in a round (`Sum`); ground, and a node whose voltage a
+// source to ground sets, are `Fixed` and never solved for. Every device
+// is an entity too, its two terminals the nodes `a` and `b` (`Two`, the
+// current goes from a to b through it), with a component for its kind,
+// and joined to its two nodes by edges of `Touches`.
+//
+// The file's lines, each a word and then numbers:
+//
+//   analog 1                            the form, and its version
+//   nodes <n> devices <d> probes <p>    how many of each follow
+//   node <index> <name>                 0 is ground
+//   R <a> <b> <ohms>
+//   C <a> <b> <farads> <volts at the start>
+//   V <a> <b> <wave> <numbers>          a voltage source; I: a current source
+//   M <a> <b> <model> <numbers>         a memristor: its model's parameters, then w0
+//   probe v <node>  |  probe i <device>  what goes into the waves
+//   op  |  tran <step> <stop> [<largest step>]
+//
+// A wave is `dc <volts>`, `sin <offset> <amplitude> <hertz> <delay>
+// <damping> <phase in degrees>`, `pulse <low> <high> <delay> <rise>
+// <fall> <width> <period>`, or `pwl <points> <time> <value> ...`.
+// Nodes and devices are numbered from 0 in the order of the file.
+import files
+
+component Node { v: f64, v_prev: f64 }
+component Sum { i: f64, g: f64 }
+tag Fixed
+// (`index`: the node's number in the file.)
+component Place { index: i32 }
+
+component Two { a: entity, b: entity }
+// (`index`: the device's number in the file, which a probe names.)
+component Device { index: i32 }
+component Resistor { g: f64 }
+// (`v0`: the voltage across it at the start, as the file gives it.)
+component Capacitor { c: f64, q_prev: f64, i_prev: f64, v0: f64 }
+enum Wave { Dc, Sin, Pulse, Pwl }
+// A source's wave and its numbers, in the order the file has them; a
+// piecewise-linear one's points are rows of `Points` from `first`, so
+// many (`count`).
+component Source {
+  voltage: bool, wave: Wave, p0: f64, p1: f64, p2: f64, p3: f64, p4: f64, p5: f64, p6: f64,
+  first: i32, count: i32
+}
+// A memristor's state, from 0 to 1, now and at the last time point.
+component Memristor { w: f64, w_prev: f64 }
+// The HP memristor with Biolek's window (models/biolek.va).
+component Biolek { ron: f64, roff: f64, d: f64, uv: f64, p: f64 }
+
+relation (Two)-[Touches]->(Node) capacity 16
+
+buffer Points { t: f64, value: f64 } capacity 16
+// What a probe shows: a node's voltage, or the current through a device.
+buffer Probes { voltage: bool, index: i32 } capacity 16
+
+// The file's devices as read: the line's first letter, the nodes, and
+// where its numbers start in `Numbers` and how many.
+buffer Lines { kind: u8, a: i32, b: i32, first: i32, count: i32, model: i32 } capacity 16
+buffer Numbers { value: f64 } capacity 16
+// Each node's entity by its number, and whether a source sets it.
+buffer Nodes { who: entity, fixed: bool } capacity 16
+
+// `read`: the file was there and its every line made sense; where one
+// did not, `wrong` is its number (from 1). `nodes`, `devices`, `probes`:
+// as its second line says. `floating`: sources between two nodes that
+// are not ground, and `clashing`: nodes that two sources set.
+unique Circuit {
+  file: text[126], read: bool, wrong: i32, nodes: i32, devices: i32, probes: i32,
+  op: bool, tran: bool, step: f64, stop: f64, most: f64, floating: i32, clashing: i32
+}
+
+// --- reading numbers and words ------------------------------------------
+
+fn digit(byte: u8) -> bool { byte >= 48 && byte <= 57 }
+fn blank(byte: u8) -> bool { byte == 32 || byte == 9 || byte == 13 }
+
+// Where the next word starts, at `at` or after the blanks there.
+fn next(bytes: Bytes, at: i32) -> i32 {
+  var from = at
+  while from < len(bytes) && blank(bytes[from].value) { from += 1 }
+  from
+}
+
+// Where the word that starts at `at` ends.
+fn end(bytes: Bytes, at: i32) -> i32 {
+  var to = at
+  while to < len(bytes) && !blank(bytes[to].value) && bytes[to].value != 10 { to += 1 }
+  to
+}
+
+// Where the line after the one `at` is in starts.
+fn after(bytes: Bytes, at: i32) -> i32 {
+  var to = at
+  while to < len(bytes) && bytes[to].value != 10 { to += 1 }
+  min(to + 1, len(bytes))
+}
+
+// Whether the word from `at` to `to` is `word`.
+fn is(bytes: Bytes, at: i32, to: i32, word: text[30]) -> bool {
+  var same = to - at == len(word)
+  for k in 0..min(to - at, len(word)) {
+    if bytes[at + k].value as i32 != word[k] as i32 { same = false }
+  }
+  same
+}
+
+// Numbers of twice an f64's precision, as the sum of two that do not
+// overlap (hi, lo): a number of up to 19 digits is one exactly, and a
+// power of ten is one to within a few parts in 2^106, so that the f64
+// nearest a product or a quotient of the two comes out (but a hair from
+// halfway between two f64s).
+fn split(a: f64) -> (f64, f64) {
+  if a > 1e290 || a < -1e290 { (a, 0.0) } else {
+    let t = 134217729.0 * a
+    let hi = t - (t - a)
+    (hi, a - hi)
+  }
+}
+
+// a times b, and what that leaves out.
+fn product(a: f64, b: f64) -> (f64, f64) {
+  let p = a * b
+  let (ah, al) = split(a)
+  let (bh, bl) = split(b)
+  (p, ((ah * bh - p) + ah * bl + al * bh) + al * bl)
+}
+
+// a + b as a pair that does not overlap, where |a| >= |b|.
+fn joined(a: f64, b: f64) -> (f64, f64) {
+  // (In brackets: a line that ended in a name would make the next one,
+  // which starts with a bracket, a call.)
+  let s = (a + b)
+  (s, b - (s - a))
+}
+
+fn times(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64) {
+  let (p, e) = product(ah, bh)
+  joined(p, e + (ah * bl + al * bh))
+}
+
+fn over(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64) {
+  let q = ah / bh
+  let (ph, pl) = times(q, 0.0, bh, bl)
+  let r = ((ah - ph) - pl) + al
+  joined(q, r / bh)
+}
+
+// 2 to the power `k`, exactly.
+fn two(k: i32) -> f64 {
+  var x = 1.0 as f64
+  for i in 0..max(k, -k) { x = if k > 0 { x * 2.0 } else { x * 0.5 } }
+  x
+}
+
+// Ten to the power `k`, from 0 to 200, as such a pair.
+fn ten(k: i32) -> (f64, f64) {
+  var rh = 1.0 as f64
+  var rl = 0.0 as f64
+  var bh = 10.0 as f64
+  var bl = 0.0 as f64
+  var left = k
+  while left > 0 {
+    if left % 2 == 1 {
+      let (h, l) = times(rh, rl, bh, bl)
+      rh = h
+      rl = l
+    }
+    left = left / 2
+    if left > 0 {
+      let (h, l) = times(bh, bl, bh, bl)
+      bh = h
+      bl = l
+    }
+  }
+  (rh, rl)
+}
+
+// The whole number at or after `at`, and where the line goes on after it.
+fn whole(bytes: Bytes, at: i32) -> (i32, i32) {
+  var from = next(bytes, at)
+  var negative = false
+  if from < len(bytes) && bytes[from].value == 45 {
+    negative = true
+    from += 1
+  }
+  var value = 0
+  while from < len(bytes) && digit(bytes[from].value) {
+    value = value * 10 + (bytes[from].value as i32 - 48)
+    from += 1
+  }
+  (if negative { -value } else { value }, from)
+}
+
+// The number at or after `at` (12, -0.5, 1e-14, 2.5E+3), and where the
+// line goes on after it. Up to 19 digits are taken as a whole number and
+// scaled by a power of ten once, so a number with no more digits than an
+// f64 holds and a power of ten up to 22 is read exactly.
+fn real(bytes: Bytes, at: i32) -> (f64, i32) {
+  var from = next(bytes, at)
+  var negative = false
+  if from < len(bytes) && (bytes[from].value == 45 || bytes[from].value == 43) {
+    negative = bytes[from].value == 45
+    from += 1
+  }
+  var digits = 0 as u64
+  var taken = 0
+  var power = 0
+  var point = false
+  var going = true
+  while going && from < len(bytes) {
+    let byte = bytes[from].value
+    if digit(byte) {
+      if taken < 19 {
+        digits = digits * 10 + (byte - 48) as u64
+        if digits > 0 { taken += 1 }
+        if point { power -= 1 }
+      } else if !point { power += 1 }
+      from += 1
+    } else if byte == 46 && !point {
+      point = true
+      from += 1
+    } else { going = false }
+  }
+  if from < len(bytes) && (bytes[from].value == 101 || bytes[from].value == 69) {
+    var down = false
+    from += 1
+    if from < len(bytes) && (bytes[from].value == 45 || bytes[from].value == 43) {
+      down = bytes[from].value == 45
+      from += 1
+    }
+    var e = 0
+    while from < len(bytes) && digit(bytes[from].value) {
+      e = min(e * 10 + (bytes[from].value as i32 - 48), 400)
+      from += 1
+    }
+    power += if down { -e } else { e }
+  }
+  // (The digits as a pair: the f64 nearest them, and what is left over.)
+  let near = digits as f64
+  let back = near as u64
+  let rest = if digits >= back { (digits - back) as f64 } else { -((back - digits) as f64) }
+  // (Far from 1 the number is first moved by 2^400 the other way, which
+  // is exact, so that nothing on the way leaves the f64s' range; and the
+  // power of ten is taken in steps of no more than 10^200.)
+  let far = power > 200 || power < -200
+  let shift = if far { two(if power > 0 { -400 } else { 400 }) } else { 1.0 }
+  var vh = near * shift
+  var vl = rest * shift
+  var left = power
+  while left != 0 {
+    let step = max(min(left, 200), -200)
+    let (th, tl) = ten(if step > 0 { step } else { -step })
+    let (h, l) = if step > 0 { times(vh, vl, th, tl) } else { over(vh, vl, th, tl) }
+    vh = h
+    vl = l
+    left -= step
+  }
+  // (Back by 2^400: exact, but where the number is smaller than an f64
+  // holds whole, below 2.2e-308.)
+  vh = vh / shift
+  vl = vl / shift
+  let value = (vh + vl)
+  (if negative { -value } else { value }, from)
+}
+
+// --- the file -------------------------------------------------------------
+
+// A line that does not make sense: the first is kept.
+fn wrong(line: i32, before: i32) -> i32 { if before > 0 { before } else { line } }
+
+system netlist() {
+  Lines = []
+  Numbers = []
+  Points = []
+  Probes = []
+  Circuit.wrong = 0
+  Circuit.op = false
+  Circuit.tran = false
+  Circuit.floating = 0
+  Circuit.clashing = 0
+  let size = read_file(Circuit.file, Bytes)
+  Circuit.read = size > 0 && size <= len(Bytes)
+  var at = 0
+  var line = 1
+  var counted = 0
+  // (The first line: the form and its version.)
+  if Circuit.read {
+    let word = next(Bytes, at)
+    let (version, rest) = whole(Bytes, end(Bytes, word))
+    if !is(Bytes, word, end(Bytes, word), "analog") || version != 1 {
+      Circuit.wrong = 1
+    }
+    at = after(Bytes, rest)
+    line = 2
+  }
+  // (The second: how many of each.)
+  if Circuit.read && Circuit.wrong == 0 {
+    let word = next(Bytes, at)
+    let (nodes, a0) = whole(Bytes, end(Bytes, word))
+    let (devices, a1) = whole(Bytes, end(Bytes, next(Bytes, a0)))
+    let (probes, a2) = whole(Bytes, end(Bytes, next(Bytes, a1)))
+    Circuit.nodes = nodes
+    Circuit.devices = devices
+    Circuit.probes = probes
+    if !is(Bytes, word, end(Bytes, word), "nodes") || nodes < 1 { Circuit.wrong = 2 }
+    at = after(Bytes, a2)
+    line = 3
+  }
+  Nodes = []
+  for i in 0..max(Circuit.nodes, 0) { Nodes += { who: none, fixed: i == 0 } }
+  while Circuit.read && Circuit.wrong == 0 && at < len(Bytes) {
+    let word = next(Bytes, at)
+    let stop = end(Bytes, word)
+    var rest = stop
+    if stop > word {
+      let first = Bytes[word].value
+      if is(Bytes, word, stop, "node") {
+        let (index, a0) = whole(Bytes, stop)
+        if index != counted || index >= Circuit.nodes { Circuit.wrong = wrong(line, Circuit.wrong) }
+        counted += 1
+        rest = a0
+      } else if is(Bytes, word, stop, "probe") {
+        let kind = next(Bytes, stop)
+        let (index, a0) = whole(Bytes, end(Bytes, kind))
+        Probes += { voltage: Bytes[kind].value == 118, index: index }
+        rest = a0
+      } else if is(Bytes, word, stop, "op") {
+        Circuit.op = true
+      } else if is(Bytes, word, stop, "tran") {
+        let (step, a0) = real(Bytes, stop)
+        let (finish, a1) = real(Bytes, a0)
+        Circuit.tran = true
+        Circuit.step = step
+        Circuit.stop = finish
+        Circuit.most = finish
+        rest = a1
+        if next(Bytes, a1) < len(Bytes) && Bytes[next(Bytes, a1)].value != 10 {
+          let (most, a2) = real(Bytes, a1)
+          Circuit.most = most
+          rest = a2
+        }
+      } else if stop - word == 1 && (first == 82 || first == 67 || first == 86 || first == 73 ||
+                                     first == 77) {
+        // A device: R, C, V, I or M, its two nodes, and its numbers.
+        let (a, a0) = whole(Bytes, stop)
+        let (b, a1) = whole(Bytes, a0)
+        if a < 0 || b < 0 || a >= Circuit.nodes || b >= Circuit.nodes {
+          Circuit.wrong = wrong(line, Circuit.wrong)
+        }
+        var from = a1
+        var model = 0
+        // (A source's wave, or a memristor's model, is a word.)
+        if first == 86 || first == 73 || first == 77 {
+          let kind = next(Bytes, a1)
+          let to = end(Bytes, kind)
+          if first == 77 {
+            if is(Bytes, kind, to, "biolek") { model = 1 }
+            else { Circuit.wrong = wrong(line, Circuit.wrong) }
+          } else if is(Bytes, kind, to, "dc") { model = 0 }
+          else if is(Bytes, kind, to, "sin") { model = 1 }
+          else if is(Bytes, kind, to, "pulse") { model = 2 }
+          else if is(Bytes, kind, to, "pwl") { model = 3 }
+          else { Circuit.wrong = wrong(line, Circuit.wrong) }
+          from = to
+        }
+        let start = len(Numbers)
+        var more = true
+        while more {
+          let place = next(Bytes, from)
+          if place < len(Bytes) && Bytes[place].value != 10 {
+            let (value, a2) = real(Bytes, place)
+            if a2 == place {
+              Circuit.wrong = wrong(line, Circuit.wrong)
+              more = false
+            } else {
+              Numbers += { value: value }
+              from = a2
+            }
+          } else { more = false }
+        }
+        Lines += { kind: first, a: a, b: b, first: start, count: len(Numbers) - start,
+                   model: model }
+        rest = from
+      } else {
+        Circuit.wrong = wrong(line, Circuit.wrong)
+      }
+    }
+    at = after(Bytes, rest)
+    line += 1
+  }
+  if counted != Circuit.nodes { Circuit.wrong = wrong(line, Circuit.wrong) }
+  Bytes = []
+}
+
+// How many numbers a device's line is to have.
+fn wanted(kind: u8, model: i32, given: i32, first: f64) -> bool {
+  if kind == 82 { given == 1 }
+  else if kind == 67 { given == 2 }
+  else if kind == 77 { given == 6 }
+  else if model == 0 { given == 1 }
+  else if model == 1 { given == 6 }
+  else if model == 2 { given == 7 }
+  else { given >= 1 && given == 1 + 2 * (first as i32) }
+}
+
+// The k-th number of the device in line `i` of `Lines`, 0 where it has
+// fewer.
+fn number(lines: Lines, numbers: Numbers, i: i32, k: i32) -> f64 {
+  if k < lines[i].count { numbers[lines[i].first + k].value } else { 0.0 }
+}
+
+// The nodes, then the devices, each with its two edges.
+system build() {
+  if Circuit.read && Circuit.wrong == 0 {
+    // (Which nodes a source to ground sets.)
+    for i in 0..len(Lines) {
+            if !wanted(Lines[i].kind, Lines[i].model, Lines[i].count, number(Lines, Numbers, i, 0)) {
+        Circuit.wrong = wrong(i + 1, Circuit.wrong)
+      }
+      if Lines[i].kind == 86 {
+        if Lines[i].a != 0 && Lines[i].b != 0 { Circuit.floating += 1 }
+        else {
+          let set = if Lines[i].a == 0 { Lines[i].b } else { Lines[i].a }
+          if set != 0 {
+            if Nodes[set].fixed { Circuit.clashing += 1 }
+            Nodes[set].fixed = true
+          }
+        }
+      }
+    }
+  }
+  if Circuit.read && Circuit.wrong == 0 {
+    for i in 0..len(Nodes) {
+      Nodes[i].who = if Nodes[i].fixed {
+        spawn { Node { v: 0.0, v_prev: 0.0 }, Sum { i: 0.0, g: 0.0 }, Place { index: i }, Fixed }
+      } else {
+        spawn { Node { v: 0.0, v_prev: 0.0 }, Sum { i: 0.0, g: 0.0 }, Place { index: i } }
+      }
+    }
+    for i in 0..len(Lines) {
+      let a = Nodes[Lines[i].a].who
+      let b = Nodes[Lines[i].b].who
+      if Lines[i].kind == 82 {
+        let made = spawn { Two { a: a, b: b }, Device { index: i },
+                           Resistor { g: 1.0 / number(Lines, Numbers, i, 0) } }
+        connect (made)-[Touches]->(a)
+        connect (made)-[Touches]->(b)
+      } else if Lines[i].kind == 67 {
+        let c = number(Lines, Numbers, i, 0)
+        let v0 = number(Lines, Numbers, i, 1)
+        let made = spawn { Two { a: a, b: b }, Device { index: i },
+                           Capacitor { c: c, q_prev: c * v0, i_prev: 0.0, v0: v0 } }
+        connect (made)-[Touches]->(a)
+        connect (made)-[Touches]->(b)
+      } else if Lines[i].kind == 77 {
+        let w0 = number(Lines, Numbers, i, 5)
+        let made = spawn { Two { a: a, b: b }, Device { index: i },
+                           Memristor { w: w0, w_prev: w0 },
+                           Biolek { ron: number(Lines, Numbers, i, 0),
+                                    roff: number(Lines, Numbers, i, 1),
+                                    d: number(Lines, Numbers, i, 2),
+                                    uv: number(Lines, Numbers, i, 3),
+                                    p: number(Lines, Numbers, i, 4) } }
+        connect (made)-[Touches]->(a)
+        connect (made)-[Touches]->(b)
+      } else {
+        let wave = if Lines[i].model == 0 { Wave.Dc } else if Lines[i].model == 1 { Wave.Sin }
+                   else if Lines[i].model == 2 { Wave.Pulse } else { Wave.Pwl }
+        let first = len(Points)
+        var count = 0
+        if Lines[i].model == 3 {
+          count = number(Lines, Numbers, i, 0) as i32
+          for k in 0..count {
+            Points += { t: number(Lines, Numbers, i, 1 + 2 * k),
+                        value: number(Lines, Numbers, i, 2 + 2 * k) }
+          }
+        }
+        let made = spawn { Two { a: a, b: b }, Device { index: i },
+                           Source { voltage: Lines[i].kind == 86, wave: wave,
+                                    p0: number(Lines, Numbers, i, 0),
+                                    p1: number(Lines, Numbers, i, 1),
+                                    p2: number(Lines, Numbers, i, 2),
+                                    p3: number(Lines, Numbers, i, 3),
+                                    p4: number(Lines, Numbers, i, 4),
+                                    p5: number(Lines, Numbers, i, 5),
+                                    p6: number(Lines, Numbers, i, 6), first: first, count: count } }
+        connect (made)-[Touches]->(a)
+        connect (made)-[Touches]->(b)
+      }
+    }
+  }
+}
