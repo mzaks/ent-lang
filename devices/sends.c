@@ -155,3 +155,47 @@ void ent_sends_clear(int64_t number) {
     list->last = 0;
   }
 }
+
+// The rows a reactive `for` visits where what it sends is combined as it
+// goes and the order shows (fractions, which come out other where added
+// in another order): gathered from its logs, one thread, then put in the
+// order of the rows, which is the order a `for` through all of them has.
+// A list for each such `for` and archetype; its room is kept.
+typedef struct {
+  int64_t *rows;
+  int64_t count, room;
+} ent_rows_list;
+
+static ent_rows_list ent_rows[ENT_SEND_LISTS];
+
+void ent_rows_put(int64_t number, int64_t row) {
+  ent_rows_list *list = &ent_rows[number];
+  if (list->count == list->room) {
+    int64_t room = list->room ? 2 * list->room : 1024;
+    int64_t *rows = realloc(list->rows, (size_t)room * sizeof(int64_t));
+    if (!rows) {
+      fprintf(stderr, "ent: no memory for the rows a 'for' visits\n");
+      abort();
+    }
+    list->rows = rows;
+    list->room = room;
+  }
+  list->rows[list->count++] = row;
+}
+
+static int ent_rows_compare(const void *a, const void *b) {
+  int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+  return (x > y) - (x < y);
+}
+
+// How many rows were put, now in order; the list is empty for the next
+// time, and its rows can be read until then.
+int64_t ent_rows_sort(int64_t number) {
+  ent_rows_list *list = &ent_rows[number];
+  int64_t count = list->count;
+  qsort(list->rows, (size_t)count, sizeof(int64_t), ent_rows_compare);
+  list->count = 0;
+  return count;
+}
+
+int64_t ent_rows_at(int64_t number, int64_t k) { return ent_rows[number].rows[k]; }

@@ -39,11 +39,21 @@ ent.system @read() reads [@T, @H] writes [@N] {
   }
 }
 
-// And a float, whose sum depends on the order.
+// And a float, whose sum depends on the order: the rows from the logs
+// are put in order and visited then (kRowOrderedAttr), one op sending.
 ent.system @pass(%d: f32) reads [@T, @N] writes [@H] {
+  ent.query (%t: !ent.ref<@T>) on [changed @N "n"] {
+    %id = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
+    ent.apply %id @H "hp" add %d : f32
+  }
+}
+
+// Two ops sending floats to one field would be combined op after op.
+ent.system @twice(%d: f32) reads [@T, @N] writes [@H] {
   // expected-remark @+1 {{scans every entity on each run: it applies or accumulates values, connects edges or appends rows, which are combined in row order}}
   ent.query (%t: !ent.ref<@T>) on [changed @N "n"] {
     %id = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
+    ent.apply %id @H "hp" add %d : f32
     ent.apply %id @H "hp" add %d : f32
   }
 }

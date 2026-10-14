@@ -1,0 +1,17 @@
+// A reactive `for` that sends fractions follows its log: it gathers the
+// rows it is to visit, puts them in order and then visits them, so what
+// it sends is added in the order of the rows, as a `for` through every
+// entity adds it (Inputs/reactive_fractions.ent holds the two against
+// each other, bit for bit), on one core and on all. It went through every
+// entity each time.
+// RUN: rm -rf %t && mkdir -p %t && cd %t
+// RUN: %ent run %S/Inputs/reactive_fractions.ent | FileCheck %s
+// RUN: FileCheck %s --check-prefix=BITS < %t/fractions.txt
+// RUN: %ent run --parallel %S/Inputs/reactive_fractions.ent | FileCheck %s
+// RUN: FileCheck %s --check-prefix=BITS < %t/fractions.txt
+// RUN: ent-translate --import-ent %S/Inputs/reactive_fractions.ent -I %S/../../devices -o %t/r.mlir
+// RUN: ent-opt %t/r.mlir --ent-lower-to-loops | FileCheck %s --check-prefix=WALK
+
+// CHECK: rounds 43 43 differ 0
+// BITS: 0.010253731301881406 0.010254810806510039 0.010253933058976135 0.010254094876757989
+// WALK: ent_rows_sort

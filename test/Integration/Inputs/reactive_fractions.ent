@@ -1,0 +1,90 @@
+// A reactive `for` that sends fractions along edges, in rounds until
+// nothing is told: a cell whose value changed gives half of it to the
+// cells it points at, which take what they were given as their value
+// where that is more than a little. The same done by a flag (`fresh`)
+// and a `for` through every cell gives the same bits: the fractions are
+// added in the order of the rows either way.
+import console
+import files
+import decimal
+
+capacity Bytes 4096
+component Cell { id: i32, v: f64, inbox: f64, fresh: bool } capacity 64
+component Twin { id: i32, v: f64, inbox: f64, fresh: bool } capacity 64
+relation (Cell)-[Next]->(Cell) capacity 256
+relation (Twin)-[Pair]->(Twin) capacity 256
+buffer Made { cell: entity, twin: entity } capacity 64
+buffer Shown { v: f64 } capacity 64
+unique Rounds { reactive: i32, flagged: i32, differ: i32 }
+
+system build() {
+  for i in 0..40 {
+    Made += { cell: spawn { Cell { id: i, v: 0.0, inbox: 0.0, fresh: false } },
+              twin: spawn { Twin { id: i, v: 0.0, inbox: 0.0, fresh: false } } }
+  }
+  // (Each points at three others, some of them more than once.)
+  for i in 0..40 {
+    for k in 1..4 {
+      let j = (i * 7 + k * 13) % 40
+      connect (Made[i].cell)-[Next]->(Made[j].cell)
+      connect (Made[i].twin)-[Pair]->(Made[j].twin)
+    }
+  }
+}
+
+system start() {
+  for c: mut Cell where c.id % 9 == 0 { c.v = 1.0 + c.id as f64 / 3.0 }
+  for t: mut Twin where t.id % 9 == 0 {
+    t.v = 1.0 + t.id as f64 / 3.0
+    t.fresh = true
+  }
+}
+
+system reactive() {
+  loop {
+    for me, c: Cell on changed c.v {
+      for (me)-[Next]->(o: mut Cell) { o.inbox += c.v * 0.3 }
+    }
+    let changed = for c: mut Cell where c.inbox > 0.01 {
+      c.v = c.inbox
+      c.inbox = 0.0
+    }
+    for c: mut Cell where c.inbox <= 0.01 { c.inbox = 0.0 }
+    Rounds.reactive += 1
+  } until changed == 0
+}
+
+system flagged() {
+  loop {
+    for me, t: mut Twin where t.fresh {
+      for (me)-[Pair]->(o: mut Twin) { o.inbox += t.v * 0.3 }
+      t.fresh = false
+    }
+    // (`on changed` is for a value that is another: so is `fresh`.)
+    let changed = for t: mut Twin where t.inbox > 0.01 {
+      t.fresh = t.inbox != t.v
+      t.v = t.inbox
+      t.inbox = 0.0
+    }
+    for t: mut Twin where t.inbox <= 0.01 { t.inbox = 0.0 }
+    Rounds.flagged += 1
+  } until changed == 0
+}
+
+system show() {
+  Bytes = []
+  for c: Cell {
+    for t: Twin where t.id == c.id { if t.v != c.v { Rounds.differ += 1 } }
+  }
+  Shown = []
+  for c: Cell where c.id < 4 { Shown += { v: c.v } }
+  for i in 0..len(Shown) {
+    write_real(Bytes, Shown[i].v)
+    Bytes += { value: 32 }
+  }
+  write_file("fractions.txt", Bytes)
+  put("rounds {Rounds.reactive} {Rounds.flagged} differ {Rounds.differ}")
+}
+
+schedule all() { build() start() reactive() flagged() show() }
+main { all() }

@@ -1626,6 +1626,13 @@ static constexpr llvm::StringLiteral kReducedAttr = "ent.reduced";
 /// in place of every entity (see whyScans).
 static constexpr llvm::StringLiteral kOrderFreeAttr = "ent.order_free";
 
+/// Marks a reactive query some of whose kOrderFreeAttr sends are not
+/// whole numbers: the order of the rows shows in what they come to, so
+/// its walk of the logs gathers the rows it is to visit, puts them in
+/// order (devices/sends.c), and then visits them; one sending op for a
+/// field, so that sending row after row is combining op after op.
+static constexpr llvm::StringLiteral kRowOrderedAttr = "ent.row_ordered";
+
 /// Marks an `ent.apply` or `ent.accumulate` in a loop of its query's
 /// body (`for k in a..b`, `while`): it runs once for each turn of that
 /// loop, so its values have no place in a buffer of one for each row.
@@ -8887,6 +8894,21 @@ static Value openLogsToFollow(IRRewriter &rewriter, QueryOp query,
 /// fired for it too, so each entity runs once. With `parallel`, the
 /// segments are walked in parallel: an entity's latest entry is in one
 /// segment only, so no two iterations run the body for the same entity.
+static Value callSends(IRRewriter &rewriter, Location loc, StringRef name,
+                       ArrayRef<Value> args, bool gives);
+
+/// The number of the list of rows a row-ordered query (kRowOrderedAttr)
+/// gathers for `archetype`, as an i64.
+static llvm::DenseMap<std::pair<int64_t, unsigned>, int64_t> rowLists;
+static Value rowList(IRRewriter &rewriter, Location loc, QueryOp query,
+                     const WorldArchetype &archetype) {
+  auto index =
+      query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
+  auto [entry, added] = rowLists.try_emplace(
+      {index.getInt(), archetype.index}, int64_t(rowLists.size()));
+  return arith::ConstantIntOp::create(rewriter, loc, entry->second, 64);
+}
+
 static void walkLogs(IRRewriter &rewriter, QueryOp query,
                      const WorldLayout &layout, WorldAccess &world, Value tick,
                      Value seen, bool parallel) {
@@ -8896,6 +8918,9 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
       query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  // (Where the order of the rows shows: the rows first, then the bodies.)
+  bool ordered = query->hasAttr(kRowOrderedAttr);
+  assert(!(ordered && parallel) && "a row-ordered walk on several threads");
   for (unsigned k = 0; k < triggers.size(); ++k) {
     Stamp stamp = getStamp(triggers[k]);
     const WorldLog &log = *layout.findLog(stamp);
@@ -8969,6 +8994,14 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
           }
           auto branch = scf::IfOp::create(rewriter, loc, runs);
           rewriter.setInsertionPointToStart(branch.thenBlock());
+          if (ordered) {
+            callSends(rewriter, loc, "ent_rows_put",
+                      {rowList(rewriter, loc, query, archetype),
+                       arith::IndexCastOp::create(
+                           rewriter, loc, rewriter.getI64Type(), row)},
+                      /*gives=*/false);
+            return {};
+          }
           bool sends = false;
           query.getBody().walk([&](Operation *op) {
             sends |= isa<ApplyOp, AccumulateOp, ConnectOp, AppendOp>(op);
@@ -8983,6 +9016,33 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
         []() -> SmallVector<Value> { return {}; });
     rewriter.setInsertionPointAfter(segments);
     hoistResourceReads(rewriter, segments, world);
+  }
+  if (!ordered)
+    return;
+  // The rows gathered, in order, and the body for each.
+  for (const WorldArchetype &archetype : layout.archetypes) {
+    if (!matches(archetype, query) ||
+        llvm::none_of(triggers, [&](const Trigger &trigger) {
+          return archetype.findStamp(getStamp(trigger));
+        }))
+      continue;
+    Value list = rowList(rewriter, loc, query, archetype);
+    Value count = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(),
+        callSends(rewriter, loc, "ent_rows_sort", {list}, /*gives=*/true));
+    auto rows = scf::ForOp::create(rewriter, loc, zero, count, one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(rows.getBody()->getTerminator());
+    Value row = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(),
+        callSends(rewriter, loc, "ent_rows_at",
+                  {list, arith::IndexCastOp::create(rewriter, loc,
+                                                    rewriter.getI64Type(),
+                                                    rows.getInductionVar())},
+                  /*gives=*/true));
+    emitQueryBody(rewriter, query, IRMapping(), archetype, world, layout, row,
+                  world.count(loc, archetype), tick, Value(),
+                  /*parallel=*/false);
   }
 }
 
@@ -14524,11 +14584,43 @@ struct EntLowerToLoops
       auto apply = dyn_cast<ApplyOp>(op);
       StringRef rule = apply ? apply.getRule() : cast<AccumulateOp>(op).getRule();
       Value sent = apply ? apply.getValue() : cast<AccumulateOp>(op).getValue();
-      if (rule == "set" || !isa<IntegerType>(sent.getType()))
+      if (rule == "set")
         return;
+      // (Fractions come out other in another order: combined as they are
+      // sent where the rows are visited in order, by the one op that
+      // sends to the field, see kRowOrderedAttr.)
+      bool whole = isa<IntegerType>(sent.getType());
+      auto alone = [&]() {
+        return !query
+                    .walk([&](Operation *other) {
+                      if (other == op)
+                        return WalkResult::advance();
+                      if (auto another = dyn_cast<ApplyOp>(other);
+                          another && apply &&
+                          another.getComponentAttr() == apply.getComponentAttr() &&
+                          another.getFieldAttr() == apply.getFieldAttr())
+                        return WalkResult::interrupt();
+                      if (auto another = dyn_cast<AccumulateOp>(other);
+                          another && !apply &&
+                          another.getResourceAttr() ==
+                              cast<AccumulateOp>(op).getResourceAttr() &&
+                          another.getFieldAttr() ==
+                              cast<AccumulateOp>(op).getFieldAttr())
+                        return WalkResult::interrupt();
+                      return WalkResult::advance();
+                    })
+                    .wasInterrupted();
+      };
+      if (!whole && (!isa<FloatType>(sent.getType()) || !alone()))
+        return;
+      auto mark = [&]() {
+        op->setAttr(kOrderFreeAttr, rewriter.getUnitAttr());
+        if (!whole)
+          query->setAttr(kRowOrderedAttr, rewriter.getUnitAttr());
+      };
       if (!apply) {
         if (op->hasAttr(kUnobservedAttr))
-          op->setAttr(kOrderFreeAttr, rewriter.getUnitAttr());
+          mark();
         return;
       }
       FlatSymbolRefAttr component = apply.getComponentAttr();
@@ -14555,7 +14647,7 @@ struct EntLowerToLoops
         return touches ? WalkResult::interrupt() : WalkResult::advance();
       });
       if (!seen.wasInterrupted())
-        op->setAttr(kOrderFreeAttr, rewriter.getUnitAttr());
+        mark();
     });
     // And an edge connected there, or in a loop over edges.
     module.walk([&](ConnectOp connect) {
