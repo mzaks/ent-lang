@@ -11577,6 +11577,220 @@ static void callOrderedInsert(IRRewriter &rewriter, Location loc,
   store(arith::AddIOp::create(rewriter, loc, count, one), cells, zero);
 }
 
+/// The function that puts the list a query that goes by a field visits
+/// (see lowerOrdered) in the order of its keys, made when first asked for:
+/// `(keys, ids, cells)`, the first `cells[0]` of them. Those alike stay
+/// in the order they came. A list in order already is gone over once;
+/// any other is sorted by its keys' bytes (a radix sort: at most eight
+/// passes over it, one for each byte in which the keys differ), where
+/// putting one entity after another where it goes would take as many
+/// steps as entities for each of them.
+static const char kOrderedSort[] = "ent.ordered.sort";
+static void callOrderedSort(IRRewriter &rewriter, Location loc,
+                            Operation *module, Value keys, Value ids,
+                            Value cells) {
+  Type i64 = rewriter.getI64Type();
+  Type index = rewriter.getIndexType();
+  Type idType = cast<MemRefType>(ids.getType()).getElementType();
+  MemRefType keysType = MemRefType::get({ShapedType::kDynamic}, i64);
+  MemRefType idsType = MemRefType::get({ShapedType::kDynamic}, idType);
+  MemRefType cellsType = MemRefType::get({2}, index);
+  func::CallOp::create(rewriter, loc, kOrderedSort, TypeRange{},
+                       ValueRange{keys, ids, cells});
+  if (SymbolTable::lookupSymbolIn(module, kOrderedSort))
+    return;
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(cast<ModuleOp>(module).getBody());
+  auto func = func::FuncOp::create(
+      rewriter, loc, kOrderedSort,
+      rewriter.getFunctionType({keysType, idsType, cellsType}, {}));
+  func.setPrivate();
+  Block *entry = func.addEntryBlock();
+  rewriter.setInsertionPointToStart(entry);
+  keys = entry->getArgument(0);
+  ids = entry->getArgument(1);
+  cells = entry->getArgument(2);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto load = [&](Value from, Value at) -> Value {
+    return memref::LoadOp::create(rewriter, loc, from, ValueRange{at});
+  };
+  auto store = [&](Value value, Value to, Value at) {
+    memref::StoreOp::create(rewriter, loc, value, to, ValueRange{at});
+  };
+  auto less = [&](arith::CmpIPredicate predicate, Value a, Value b) {
+    return arith::CmpIOp::create(rewriter, loc, predicate, a, b).getResult();
+  };
+  Value count = load(cells, zero);
+
+  // How far the keys are in order from the start: all of them, or the
+  // list is to be sorted.
+  auto ordered = scf::WhileOp::create(
+      rewriter, loc, TypeRange{index}, ValueRange{one},
+      [&](OpBuilder &, Location, ValueRange state) {
+        Value at = state[0];
+        Value inside = less(arith::CmpIPredicate::ult, at, count);
+        auto ifInside = scf::IfOp::create(rewriter, loc,
+                                          TypeRange{rewriter.getI1Type()},
+                                          inside, /*withElseRegion=*/true);
+        {
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPointToStart(ifInside.thenBlock());
+          Value before =
+              load(keys, arith::SubIOp::create(rewriter, loc, at, one));
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{less(arith::CmpIPredicate::sle, before,
+                              load(keys, at))});
+          rewriter.setInsertionPointToStart(ifInside.elseBlock());
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 1)});
+        }
+        scf::ConditionOp::create(rewriter, loc, ifInside.getResult(0), state);
+      },
+      [&](OpBuilder &, Location, ValueRange state) {
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::AddIOp::create(rewriter, loc, state[0], one)});
+      });
+  Value unsorted =
+      less(arith::CmpIPredicate::ult, ordered.getResult(0), count);
+  auto ifUnsorted = scf::IfOp::create(rewriter, loc, unsorted);
+  func::ReturnOp::create(rewriter, loc);
+  rewriter.setInsertionPointToStart(ifUnsorted.thenBlock());
+
+  // Sorted by the keys' bytes, the lowest first, each pass keeping the
+  // order of the one before among keys with the same byte (a radix sort,
+  // with the sign's bit turned over so that the numbers below nought come
+  // first). Every byte's counts are taken in one pass; a byte that all
+  // keys have alike is no pass. Each pass goes from one pair of lists to
+  // the other.
+  Type i1 = rewriter.getI1Type();
+  Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+  Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+  Value bytes = arith::ConstantIndexOp::create(rewriter, loc, 8);
+  Value radix = arith::ConstantIndexOp::create(rewriter, loc, 256);
+  Value all = arith::ConstantIndexOp::create(rewriter, loc, 8 * 256);
+  Value sign = arith::ConstantIntOp::create(rewriter, loc, INT64_MIN, 64);
+  Value low = arith::ConstantIntOp::create(rewriter, loc, 255, 64);
+  Value eight = arith::ConstantIntOp::create(rewriter, loc, 8, 64);
+  auto digit = [&](Value key, Value shift) -> Value {
+    Value flipped = arith::XOrIOp::create(rewriter, loc, key, sign);
+    Value moved = arith::ShRUIOp::create(rewriter, loc, flipped, shift);
+    return arith::IndexCastUIOp::create(
+        rewriter, loc, index, arith::AndIOp::create(rewriter, loc, moved, low));
+  };
+  Value spareKeys =
+      memref::AllocOp::create(rewriter, loc, keysType, ValueRange{count});
+  Value spareIds =
+      memref::AllocOp::create(rewriter, loc, idsType, ValueRange{count});
+  Value counts = memref::AllocOp::create(
+      rewriter, loc, MemRefType::get({8 * 256}, index));
+  {
+    auto clear = scf::ForOp::create(rewriter, loc, zero, all, one);
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(clear.getBody());
+    store(zero, counts, clear.getInductionVar());
+  }
+  {
+    auto tally = scf::ForOp::create(rewriter, loc, zero, count, one);
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(tally.getBody());
+    Value key = load(keys, tally.getInductionVar());
+    auto each = scf::ForOp::create(rewriter, loc, zero, bytes, one);
+    rewriter.setInsertionPointToStart(each.getBody());
+    Value b = each.getInductionVar();
+    Value shift = arith::MulIOp::create(
+        rewriter, loc, arith::IndexCastUIOp::create(rewriter, loc, i64, b),
+        eight);
+    Value cell = arith::AddIOp::create(
+        rewriter, loc, arith::MulIOp::create(rewriter, loc, b, radix),
+        digit(key, shift));
+    store(arith::AddIOp::create(rewriter, loc, load(counts, cell), one),
+          counts, cell);
+  }
+  Value firstKey = load(keys, zero);
+  auto passes = scf::ForOp::create(
+      rewriter, loc, zero, bytes, one,
+      ValueRange{keys, ids, spareKeys, spareIds, no});
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(passes.getBody());
+    Value b = passes.getInductionVar();
+    Value fromKeys = passes.getRegionIterArgs()[0];
+    Value fromIds = passes.getRegionIterArgs()[1];
+    Value toKeys = passes.getRegionIterArgs()[2];
+    Value toIds = passes.getRegionIterArgs()[3];
+    Value spare = passes.getRegionIterArgs()[4];
+    Value shift = arith::MulIOp::create(
+        rewriter, loc, arith::IndexCastUIOp::create(rewriter, loc, i64, b),
+        eight);
+    Value base = arith::MulIOp::create(rewriter, loc, b, radix);
+    // All alike in this byte: as they are.
+    Value alike = less(
+        arith::CmpIPredicate::eq,
+        load(counts, arith::AddIOp::create(rewriter, loc, base,
+                                           digit(firstKey, shift))),
+        count);
+    auto ifPass = scf::IfOp::create(
+        rewriter, loc,
+        TypeRange{keysType, idsType, keysType, idsType, i1},
+        alike, /*withElseRegion=*/true);
+    rewriter.setInsertionPointToStart(ifPass.thenBlock());
+    scf::YieldOp::create(rewriter, loc,
+                         ValueRange{fromKeys, fromIds, toKeys, toIds, spare});
+    rewriter.setInsertionPointToStart(ifPass.elseBlock());
+    // Where each byte's keys start.
+    auto starts = scf::ForOp::create(rewriter, loc, zero, radix, one,
+                                     ValueRange{zero});
+    {
+      OpBuilder::InsertionGuard deeper(rewriter);
+      rewriter.setInsertionPointToStart(starts.getBody());
+      Value cell =
+          arith::AddIOp::create(rewriter, loc, base, starts.getInductionVar());
+      Value here = load(counts, cell);
+      Value start = starts.getRegionIterArgs()[0];
+      store(start, counts, cell);
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{arith::AddIOp::create(rewriter, loc, start, here)});
+    }
+    auto scatter = scf::ForOp::create(rewriter, loc, zero, count, one);
+    {
+      OpBuilder::InsertionGuard deeper(rewriter);
+      rewriter.setInsertionPointToStart(scatter.getBody());
+      Value at = scatter.getInductionVar();
+      Value key = load(fromKeys, at);
+      Value cell = arith::AddIOp::create(rewriter, loc, base, digit(key, shift));
+      Value to = load(counts, cell);
+      store(arith::AddIOp::create(rewriter, loc, to, one), counts, cell);
+      store(key, toKeys, to);
+      store(load(fromIds, at), toIds, to);
+    }
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{toKeys, toIds, fromKeys, fromIds,
+                   arith::XOrIOp::create(rewriter, loc, spare, yes)});
+    rewriter.setInsertionPointAfter(ifPass);
+    scf::YieldOp::create(rewriter, loc, ifPass.getResults());
+  }
+  // Where the last pass left them in the spare lists, back.
+  auto ifBack = scf::IfOp::create(rewriter, loc, passes.getResult(4));
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(ifBack.thenBlock());
+    auto back = scf::ForOp::create(rewriter, loc, zero, count, one);
+    rewriter.setInsertionPointToStart(back.getBody());
+    Value at = back.getInductionVar();
+    store(load(spareKeys, at), keys, at);
+    store(load(spareIds, at), ids, at);
+  }
+  memref::DeallocOp::create(rewriter, loc, counts);
+  memref::DeallocOp::create(rewriter, loc, spareKeys);
+  memref::DeallocOp::create(rewriter, loc, spareIds);
+}
+
 /// Replace a query that goes by a field (`by @C "f"`) by a loop over its
 /// entities in that order: they are listed with the field's values, the
 /// smallest first, and each is then found by its id, since rows may move
@@ -11636,7 +11850,8 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
                      .getResult();
   };
 
-  // The entities there are now, by their keys.
+  // The entities there are now, listed as they are stored and then put in
+  // the order of their keys.
   llvm::DenseMap<const WorldArchetype *, Value> startCounts;
   for (const WorldArchetype *archetype : matched) {
     Value rows = world.count(loc, *archetype);
@@ -11648,11 +11863,20 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
     Value stored = memref::LoadOp::create(
         rewriter, loc, world.column(*archetype, byComponent, byField),
         ValueRange{row});
-    callOrderedInsert(rewriter, loc, module, keys, ids, cells,
-                      keyOf(stored, archetype->find(byComponent, byField)->type),
-                      world.entityId(loc, *archetype, row),
-                      /*spawned=*/false);
+    Value listed =
+        memref::LoadOp::create(rewriter, loc, cells, ValueRange{zero});
+    memref::StoreOp::create(
+        rewriter, loc,
+        keyOf(stored, archetype->find(byComponent, byField)->type), keys,
+        ValueRange{listed});
+    memref::StoreOp::create(rewriter, loc,
+                            world.entityId(loc, *archetype, row), ids,
+                            ValueRange{listed});
+    memref::StoreOp::create(rewriter, loc,
+                            arith::AddIOp::create(rewriter, loc, listed, one),
+                            cells, ValueRange{zero});
   }
+  callOrderedSort(rewriter, loc, module, keys, ids, cells);
 
   // What is done where it stands: a row given to a buffer and, turn by
   // turn, an edge connected.

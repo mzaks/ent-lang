@@ -1,0 +1,10 @@
+// A `for` that goes by a field over many entities whose values come in no
+// order, with many alike: the order is right, and those alike keep the
+// order they are stored in. The same built with threads.
+// RUN: %ent run %S/Inputs/in_turn_scrambled.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/in_turn_scrambled.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK:      turns: 9000 visited, 0 out of order
+// CHECK-NEXT: rows: 9000 rows, 0 out of order, 0 alike swapped
+// CHECK-NEXT: first: 0 0, last: 89

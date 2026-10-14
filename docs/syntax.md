@@ -454,13 +454,15 @@ after the filters, where `top down` stands for a tree:
     spawned comes last, in the order it was spawned in.)
 - Such a `for` runs on one core, and a system with one is not run
   together with its neighbours. It costs putting the entities in order
-  each time it runs, which is little where the storage's order is
-  nearly the one asked for (a counter given at spawning) and much where
-  it is far from it (so many steps as entities, for each of them); and,
-  for each entity, finding it by its id. With 20,000 entities and a body
-  of one addition, a `for` by a counter takes 0.05 ms where the plain one
-  takes 0.005, and 63 ms where the storage's order is the one asked for
-  backwards (this machine, built for it).
+  each time it runs: one look over them where the storage's order is
+  the one asked for (a counter given at spawning, with nothing
+  destroyed), else a sort by the bytes of the numbers (a pass for each
+  byte in which they differ, eight at most); and, for each entity,
+  finding it by its id. With 20,000 entities and a body of one addition,
+  a `for` by a counter takes 0.025 ms where the plain one takes 0.0014,
+  0.24 ms where the storage's order is the one asked for backwards, and
+  0.18 ms by numbers at random (this machine, built for it). So an order
+  at random is a number at random for each entity to go by.
 - A `var` from outside is still not assigned in it: a unique does that.
   It does not react (`on`) or go along a tree, and binds what its own
   entities have, no arrows.

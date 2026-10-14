@@ -1,0 +1,62 @@
+// A `for` that goes by a field whose values come in no order, many of
+// them alike, over many entities in two archetypes (in_turn_scrambled.test).
+import console
+component Thing { key: i32, made: i32 }
+component Other { x: i32 }
+default_capacity 10000
+unique Last { key: i32, made: i32, wrong: i32, visits: i32 }
+buffer Seen { key: i32, made: i32 } capacity 10000
+
+world {
+  // Keys scrambled, a hundred of each; every third in another archetype.
+  for i in 0..9000 {
+    let key = (i * 7919) % 90
+    if i % 3 == 0 { spawn { Thing { key: key, made: i }, Other { x: 0 } } }
+    else { spawn { Thing { key: key, made: i } } }
+  }
+}
+
+// Taking turns, each sees the one before it: smaller keys first, and of
+// those alike the one stored first (here: the one made first, of its
+// archetype).
+system turns() {
+  Last.key = -1
+  Last.made = -1
+  for t: Thing in turn by t.key {
+    if t.key < Last.key { Last.wrong += 1 }
+    Last.key = t.key
+    Last.made = t.made
+    Last.visits += 1
+  }
+  put("turns: {Last.visits} visited, {Last.wrong} out of order")
+}
+
+// One `for` by the key: its rows lie in that order.
+system rows() {
+  Seen = []
+  for t: Thing by t.key { Seen += { key: t.key, made: t.made } }
+  var wrong = 0
+  var unstable = 0
+  for i in 1..len(Seen) {
+    if Seen[i].key < Seen[i - 1].key { wrong += 1 }
+  }
+  // Of the plain archetype, those alike keep the order they were made in.
+  var previous = -1
+  var key = -1
+  for i in 0..len(Seen) {
+    if Seen[i].made % 3 != 0 {
+      if Seen[i].key == key && Seen[i].made < previous { unstable += 1 }
+      key = Seen[i].key
+      previous = Seen[i].made
+    }
+  }
+  put("rows: {len(Seen)} rows, {wrong} out of order, {unstable} alike swapped")
+  put("first: {Seen[0].key} {Seen[0].made}, last: {Seen[len(Seen) - 1].key}")
+}
+
+schedule run() {
+  turns()
+  rows()
+}
+
+main { run() }
