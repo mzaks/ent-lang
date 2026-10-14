@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""The operating point is the circuit's own, to 1e-12 (the spec's check
-2, its DC part).
+"""The operating point is the circuit's own, to 1e-12, and the
+transients are what backward Euler makes of the circuit's own (the
+spec's check 2).
 
   examples/analog/prepare.py all
   examples/analog/crossbar.py 4 1 biolek 0.1 1 write   (and others)
@@ -17,9 +18,22 @@ or A, for a value of 0). But for a crossbar whose wires have less than
 equations hard to solve in f64, and the sense resistors' voltages come
 out a few parts in 10^12 off (a step of refinement with the same
 factors does not change that). Ways 1 and 2 are held against way 0 by
-check/agree.py. A crossbar's operating point is taken at 50 ms, where its
-pulses are high; every other's at 0. Says the first probe that is not.
+check/agree.py. A crossbar has no capacitors, so each of its time points is
+an operating point: the one at 50 ms is taken, where its pulses are
+high; every other circuit's at 0. Says the first probe that is not.
+
+Then the transients of the two RC low-passes, whose waves have closed
+forms: rc_step (a step, with its rise of 1 us, into 1k and 1 uF) and
+rc_sine (a sine at the corner frequency). Way 0 runs each at the
+circuit's step, half of it and a quarter; backward Euler's error, the
+largest over the run and all probes as a share of the probe's range, is
+to be a quarter at a quarter of the step (3 to 5 times smaller), and
+below 1% at the circuit's step. (Over two halvings, not each: the step's
+edge, 1 us, falls between two time points at another place for every
+step, which moves the error of each halving up or down.)
 """
+
+import math
 
 import os
 import sys
@@ -109,6 +123,58 @@ def probes(net, x, branches, t):
     return values
 
 
+def rc_step(t):
+    """v(out) and i(V1) of rc_step: the step rises from 1 ms over 1 us."""
+    tau, delay, rise, r = 1e-3, 1e-3, 1e-6, 1e3
+    if t <= delay:
+        u = v = 0.0
+    elif t <= delay + rise:
+        s = t - delay
+        u = s / rise
+        v = (s - tau * (1 - math.exp(-s / tau))) / rise
+    else:
+        top = (rise - tau * (1 - math.exp(-rise / tau))) / rise
+        u = 1.0
+        v = 1 - (1 - top) * math.exp(-(t - delay - rise) / tau)
+    return [v, (v - u) / r]
+
+
+def rc_sine(t):
+    """v(in) and v(out) of rc_sine."""
+    tau, w = 1e-3, 2 * math.pi * 159.155
+    u = math.sin(w * t)
+    v = (math.sin(w * t) - w * tau * math.cos(w * t) + w * tau * math.exp(-t / tau)) / \
+        (1 + (w * tau) ** 2)
+    return [u, v]
+
+
+def transients(program):
+    failed = 0
+    for name, exact in (("rc_step", rc_step), ("rc_sine", rc_sine)):
+        if not os.path.isdir(os.path.join(common.CIRCUITS, name)):
+            continue
+        net = common.Netlist(name)
+        errors = []
+        for share in (1, 2, 4):
+            waves, said = common.run(program, name, 0, step=net.tran[0] / share)
+            wanted = [exact(line[0]) for line in waves]
+            worst = 0.0
+            for k in range(len(wanted[0])):
+                column = [w[k] for w in wanted]
+                range_ = max(column) - min(column)
+                worst = max(worst, max(abs(line[1 + k] - w[k])
+                                       for line, w in zip(waves, wanted)) / range_)
+            errors.append(worst)
+        ratios = [a / b for a, b in zip(errors, errors[1:])]
+        good = errors[0] < 0.01 and 3 <= errors[0] / errors[2] <= 5
+        failed += 0 if good else 1
+        print(f"{name}: backward Euler's error {', '.join(f'{e:.2e}' for e in errors)} "
+              f"of the range at steps h, h/2, h/4 (ratios "
+              f"{', '.join(f'{r:.2f}' for r in ratios)}; over both {errors[0] / errors[2]:.2f})" +
+              ("" if good else ": NOT as it should be"))
+    return failed
+
+
 def main():
     names = sys.argv[1:] or sorted(os.listdir(common.CIRCUITS))
     program = common.build()
@@ -119,15 +185,16 @@ def main():
         if size > 80:
             continue
         checked += 1
-        t = when(name)
-        x, branches = solve(net, t)
-        wanted = probes(net, x, branches, t)
-        waves, said = common.run(program, name, 0, t)
+        waves, said = common.run(program, name, 0, when(name))
         if not waves:
             failed += 1
             print(f"{name}: no waves ({said})")
             continue
-        got = waves[0][1:]
+        line = min(waves, key=lambda line: abs(line[0] - when(name)))
+        t = line[0]
+        x, branches = solve(net, t)
+        wanted = probes(net, x, branches, t)
+        got = line[1:]
         wire = name.split("_")[2] if name.startswith("crossbar_") else ""
         relative = Fraction(1, 10 ** 11) if wire and 0 < float(wire) < 1 else \
             Fraction(1, 10 ** 12)
@@ -147,6 +214,8 @@ def main():
             print(f"{name}: {len(got)} probes exact to {float(relative):g} "
                   f"(the worst at {worst:.3f} of that), at {t} s")
     print(f"{checked} circuits, {failed} not exact")
+    if not sys.argv[1:]:
+        failed += transients(program)
     return 1 if failed else 0
 
 

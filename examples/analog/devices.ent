@@ -8,18 +8,23 @@
 //
 // Every node also has `GMIN` to ground, as SPICE gives it, in every way,
 // so that each has a conductance to something. At the operating point a
-// capacitor is open (a conductance of 0), and a memristor is the resistor
-// its state makes it (the state moves from milestone M3 on).
+// capacitor is open (a conductance of 0); at a time point h after the
+// last it is backward Euler's companion: i = C/h * (v - v_prev), a
+// conductance C/h and a current -q_prev/h (milestone M2). A memristor is
+// the resistor its state makes it (the state moves from milestone M3 on).
+//
+//   accepted()   after a time point: what the capacitors and nodes had
 import circuit
 import math
 
 const GMIN: f64 = 1e-12
 
-// The time the sources are taken at, and the tolerances a time point is
-// solved to (spec 7.1): a node has settled where it moves by no more than
-// reltol of its voltage and vntol, and the current into it is no more
-// than reltol of the largest of its devices' and abstol.
-unique Time { t: f64, reltol: f64, vntol: f64, abstol: f64 }
+// The time the sources are taken at, and the step to it from the last
+// time point (0 at the operating point); and the tolerances a time point
+// is solved to (spec 7.1): a node has settled where it moves by no more
+// than reltol of its voltage and vntol, and the current into it is no
+// more than reltol of the largest of its devices' and abstol.
+unique Time { t: f64, h: f64, reltol: f64, vntol: f64, abstol: f64 }
 
 // The resistance of a Biolek memristor in the state w (0: all Roff, 1:
 // all Ron).
@@ -35,11 +40,22 @@ system companions() {
     c.i0 = 0.0
   }
   for k: Capacitor, c: mut Companion {
-    c.g = 0.0
-    c.i0 = 0.0
+    c.g = if Time.h > 0.0 { k.c / Time.h } else { 0.0 }
+    c.i0 = if Time.h > 0.0 { -k.q_prev / Time.h } else { 0.0 }
   }
   for m: Memristor, b: Biolek, c: mut Companion {
     c.g = 1.0 / biolek_resistance(b.ron, b.roff, m.w)
     c.i0 = 0.0
+  }
+}
+
+// A time point is taken: its voltages and charges are the ones the next
+// step starts from.
+system accepted() {
+  for n: mut Node { n.v_prev = n.v }
+  for t: Two, k: mut Capacitor {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v { k.q_prev = k.c * (va - vb) }
+    }
   }
 }

@@ -30,7 +30,9 @@
 import files
 import decimal
 
-component Node { v: f64, v_prev: f64 }
+// A node's voltage now and at the last time point; and, for the way that
+// goes by events (relax.ent), the voltage its devices were last told.
+component Node { v: f64, v_prev: f64, told: f64 }
 // What the devices at a node add up to in a round: the current into it,
 // its conductance (how much that current falls as the node's voltage
 // rises), and the largest current of one of them (spec 7.1).
@@ -308,9 +310,9 @@ system build() {
     Devices = []
     for i in 0..len(Nodes) {
       Nodes[i].who = if Nodes[i].fixed {
-        spawn { Node { v: 0.0, v_prev: 0.0 }, Sum { i: 0.0, g: 0.0, most: 0.0 }, Place { index: i }, Fixed }
+        spawn { Node { v: 0.0, v_prev: 0.0, told: 0.0 }, Sum { i: 0.0, g: 0.0, most: 0.0 }, Place { index: i }, Fixed }
       } else {
-        spawn { Node { v: 0.0, v_prev: 0.0 }, Sum { i: 0.0, g: 0.0, most: 0.0 }, Place { index: i } }
+        spawn { Node { v: 0.0, v_prev: 0.0, told: 0.0 }, Sum { i: 0.0, g: 0.0, most: 0.0 }, Place { index: i } }
       }
     }
     for i in 0..len(Lines) {

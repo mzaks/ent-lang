@@ -2,21 +2,28 @@
 // started (examples/analog/prepare.py makes one of a SPICE netlist) and
 // writes what its probes show to "waves.txt": a line for each time point,
 // the time and then each probe's value, as printf("%.17g") writes them.
-// Milestone M1: the operating point, one line at time 0.
 //
-//   examples/analog/prepare.py divider
-//   cd build/analog/circuits/divider
+//   examples/analog/prepare.py rc_step
+//   cd build/analog/circuits/rc_step
 //   ../../../../tools/ent run -I ../../../../examples/analog ../../../../examples/analog/simulate.ent
+//
+// The operating point first, at time 0 (capacitors open, as SPICE does
+// it: a capacitor's IC= is not used); then, where the circuit has a
+// `tran`, a time point every step up to its stop, by backward Euler
+// (milestone M2: the step stays the same). A time point that does not
+// settle ends the run, said: nothing is taken that was not solved.
 //
 // "run.txt", where there is one, says which way (0: direct, 1: relaxation
 // by Gauss–Jacobi, 2: relaxation by events), then a seed, whether the
-// waves are written (1) or not (0), reltol, vntol, abstol and the most
-// rounds a time point may take, and the time the operating point is
-// taken at; what it leaves out stays as SPICE has it (way 0, 1e-3,
-// 1e-6 V, 1e-12 A; 100,000 rounds; time 0).
+// waves are written (1) or not (0), reltol, vntol, abstol, the most
+// rounds a time point may take, the time the operating point is taken at
+// where there is no `tran`, and the step (0: the circuit's own); what it
+// leaves out stays as SPICE has it (way 0, 1e-3, 1e-6 V, 1e-12 A; 100,000
+// rounds; time 0; the circuit's step).
 //
-// What it did goes to the console: the way, whether it settled, in how
-// many rounds, and how many steps the nodes took.
+// What it did goes to the console: the way, the time points, whether all
+// settled, the rounds in all and the most at one point, and how many steps
+// the nodes took.
 import files
 import console
 import decimal
@@ -40,9 +47,16 @@ capacity Probes 100000
 capacity Entries 24000000
 capacity Solution 2300000
 
-// `way`, `shown` and `most` as "run.txt" says; `refused`: what keeps the
-// way from this circuit, said and nothing solved.
-unique Run { way: i32, shown: bool, most: i32, refused: bool }
+// `way`, `shown` and `most` as "run.txt" says, and the step it gives (0:
+// the circuit's). `refused`: what keeps the way from this circuit, said
+// and nothing solved. `point`: the time point now, from 0; `points`: how
+// many there are. `failed`: a time point did not settle. `written`: some
+// of the waves are in their file. The rounds and node steps in all, and
+// the most rounds at one point.
+unique Run {
+  way: i32, shown: bool, most: i32, step: f64, refused: bool, point: i32, points: i32,
+  failed: bool, written: bool, rounds: i64, most_rounds: i32, updates: i64, memristors: i32
+}
 
 world {
   Circuit.file = "circuit.net"
@@ -59,7 +73,7 @@ system plan() {
   if size > 0 {
     var at = 0
     var k = 0
-    while k < 8 && at < len(Bytes) {
+    while k < 9 && at < len(Bytes) {
       let (value, next) = read_real(Bytes, at)
       if next > at {
         if k == 0 { Run.way = value as i32 }
@@ -69,6 +83,7 @@ system plan() {
         if k == 5 { Time.abstol = value }
         if k == 6 { Run.most = value as i32 }
         if k == 7 { Time.t = value }
+        if k == 8 { Run.step = value }
         at = next
       } else { at = len(Bytes) }
       k += 1
@@ -90,12 +105,23 @@ system said() {
   } else {
     Run.refused = false
   }
+  for m: Memristor { Run.memristors += 1 }
+  // (The time points: the operating point, and one a step up to the stop.)
+  Run.point = 0
+  Run.points = 1
+  Time.h = 0.0
+  if Circuit.tran {
+    Time.t = 0.0
+    if Run.step <= 0.0 { Run.step = Circuit.step }
+    Run.points = 1 + (Circuit.stop / Run.step + 0.5) as i32
+  }
+  Bytes = []
 }
 
-// The time point's line: the time, then the probes.
+// The time point's line: the time, then the probes; written out when
+// there are many.
 system written() {
-  if Run.shown && !Run.refused {
-    Bytes = []
+  if Run.shown && !Run.refused && !Run.failed {
     write_real(Bytes, Time.t)
     for k in 0..len(Probes) {
       Bytes += { value: 32 }
@@ -108,24 +134,49 @@ system written() {
       write_real(Bytes, value)
     }
     Bytes += { value: 10 }
-    write_file("waves.txt", Bytes)
+    if len(Bytes) > 16000000 || Run.point + 1 >= Run.points {
+      write_bytes("waves.txt", Bytes, 0, len(Bytes), Run.written)
+      Run.written = true
+      Bytes = []
+    }
   }
+}
+
+// Whether the time point settled, and the counts.
+system counted() {
+  let rounds = if Run.way == 0 { Direct.rounds } else { Relax.round }
+  Run.rounds += rounds as i64
+  Run.most_rounds = max(Run.most_rounds, rounds)
+  if Run.way != 0 { Run.updates += Relax.updates }
+  let settled = if Run.way == 0 { Direct.settled } else { Relax.unsettled == 0 }
+  if !settled && !Run.refused {
+    Run.failed = true
+    if Run.way == 0 && Direct.failed {
+      put("way 0: the solve failed ({Direct.status}) at time point {Run.point}")
+    } else {
+      put("way {Run.way}: time point {Run.point} did not settle in {rounds} rounds")
+    }
+  }
+}
+
+// On to the next time point.
+system advanced() {
+  Run.point += 1
+  Time.t = Run.point as f64 * Run.step
+  Time.h = Run.step
 }
 
 system told_how() {
   if !Run.refused {
-    if Run.way == 0 {
-      if Direct.failed { put("way 0: the solve failed ({Direct.status})") }
-      else {
-        put("way 0: settled {Direct.settled} in {Direct.rounds} rounds, {Direct.size} unknowns")
-      }
-    } else {
-      put("way {Run.way}: settled {Relax.unsettled == 0} in {Relax.round} rounds, {Relax.updates} node steps")
+    put("way {Run.way}: {Run.point} time points, settled {!Run.failed}, {Run.rounds} rounds, at most {Run.most_rounds} at one, {Run.updates} node steps")
+    if Run.memristors > 0 && Circuit.tran {
+      put("(the states of its {Run.memristors} memristors are held as they start: they move from milestone M3 on)")
     }
   }
 }
 
 schedule setup() { plan() netlist() build() said() }
+// A time point: begun, rounds until settled, ended.
 schedule begun() {
   started() run_if Run.way == 0
   relax_started() run_if Run.way != 0
@@ -147,19 +198,25 @@ schedule rounded() {
   judged() run_if Run.way != 0
 }
 schedule ended() {
+  counted()
   direct_currents() run_if Run.way == 0
   gathered() run_if Run.way != 0
   told() run_if Run.way != 0
   relaxed_currents() run_if Run.way != 0
   written()
-  told_how()
+  accepted()
+  advanced()
 }
+schedule done() { told_how() }
 
 main {
   setup()
-  begun()
-  loop { rounded() } until Run.refused ||
-    (Run.way == 0 && (Direct.settled || Direct.failed || Direct.rounds >= 50)) ||
-    (Run.way != 0 && (Relax.unsettled == 0 || Relax.round >= Run.most))
-  ended()
+  loop {
+    begun()
+    loop { rounded() } until Run.refused ||
+      (Run.way == 0 && (Direct.settled || Direct.failed || Direct.rounds >= 50)) ||
+      (Run.way != 0 && (Relax.unsettled == 0 || Relax.round >= Run.most))
+    ended()
+  } until Run.refused || Run.failed || Run.point >= Run.points
+  done()
 }

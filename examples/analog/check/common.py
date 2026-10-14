@@ -25,16 +25,17 @@ def build(more=()):
     return program
 
 
-def run(program, name, way, at=0.0, most=100000, environment=None):
+def run(program, name, way, at=0.0, most=100000, environment=None, step=0.0, folder=None):
     """The model's waves for a circuit, the way given, and what it said:
-    a list of lines, each a list of floats (the time, then the probes)."""
-    folder = os.path.join(RUN, f"{name}_way{way}")
+    a list of lines, each a list of floats (the time, then the probes).
+    `step`: the time step (0: the circuit's)."""
+    folder = folder or os.path.join(RUN, f"{name}_way{way}")
     os.makedirs(folder, exist_ok=True)
     shutil.copy(os.path.join(CIRCUITS, name, "circuit.net"), folder)
     if os.path.exists(os.path.join(folder, "waves.txt")):
         os.remove(os.path.join(folder, "waves.txt"))
     with open(os.path.join(folder, "run.txt"), "w") as file:
-        file.write(f"{way} 1 1 0.001 0.000001 1e-12 {most} {at!r}\n")
+        file.write(f"{way} 1 1 0.001 0.000001 1e-12 {most} {at!r} {step!r}\n")
     said = subprocess.run([program], capture_output=True, text=True, cwd=folder,
                           env=environment).stdout.strip()
     waves = []

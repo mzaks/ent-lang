@@ -6,8 +6,9 @@ time, node voltage by node voltage, to give the waveforms that
 then to be faster than ngspice and Xyce on large memristor crossbars by
 relaxation, every node solving for its own voltage. `analog-SPEC.md`
 says what it is to be and in which milestones. It is being built in
-steps; what is here is milestones M0 and M1: a circuit is read, and its
-operating point is solved three ways, which agree.
+steps; what is here is milestones M0 to M2: a circuit is read, and its
+operating point and its waves in time (backward Euler, a fixed step) are
+solved three ways, which agree with each other and with ngspice.
 
 - `prepare.py`: a SPICE netlist made flat into `circuit.net`, the form
   the model reads (spec section 4), and the same flat circuit as a deck
@@ -33,8 +34,10 @@ operating point is solved three ways, which agree.
 - `devices.ent`: what each kind of device does at a time point, the same
   for every way: each that is no source makes itself straight, its
   `Companion` (the current through it is g * (va - vb) + i0). At the
-  operating point a capacitor is open and a memristor the resistor its
-  state makes it. `GMIN` (1e-12 S) from every node to ground.
+  operating point a capacitor is open; at a time point h on it is
+  backward Euler's companion, C/h and -q_prev/h. A memristor is the
+  resistor its state makes it (its state is held until M3). `GMIN`
+  (1e-12 S) from every node to ground.
 - `sources.ent`: a source's value at a time: DC, SIN, PULSE and PWL as
   SPICE has them.
 - `direct.ent`, `direct.c`: way 0. Newton on the whole circuit: the
@@ -52,12 +55,18 @@ operating point is solved three ways, which agree.
   where its sum changed, moves only where the step is more than the
   tolerance and then marks its devices, which give their nodes the
   difference in what they give (reactive `for`s, rounds until no node
-  moved).
+  told). A node takes even a step smaller than the tolerance, but tells
+  only when it has moved more than that since it last told; its devices
+  go by the voltages they were told, and its sum says what it took away
+  itself (in a transient, steps too small to tell add up over the time
+  points, the same way each, and would leave the waves 1% off).
 - `simulate.ent`: the program. It reads "circuit.net" and "run.txt"
   (the way, a seed, whether to write the waves, reltol, vntol, abstol,
-  the most rounds, the time of the operating point) where it is started,
-  writes "waves.txt" (the time, then each probe, as `%.17g`) and says how
-  it went.
+  the most rounds, the time of an operating point without `tran`, the
+  step) where it is started; solves the operating point and then, for a
+  `tran`, a time point every step to the stop; writes "waves.txt" (the
+  time, then each probe, as `%.17g`, a line a time point) and says how
+  it went. A time point that does not settle ends the run, said.
 - `models/biolek.va`: the HP memristor with Biolek's window in
   Verilog-A, which says the order of its parameters. It is first held
   against anything in milestone M3.
@@ -69,6 +78,8 @@ examples/analog/prepare.py crossbar_64_1_biolek_write
 examples/analog/check/parse.py
 examples/analog/check/exact.py
 examples/analog/check/agree.py
+examples/analog/check/spice.py
+examples/analog/check/same.py
 
 cd build/analog/circuits/divider          # one, by hand: way 1
 echo 1 > run.txt
@@ -85,19 +96,33 @@ echo 1 > run.txt
   crossbars of 4 by 4 and 1024 by 1024 (2,099,201 nodes and 3,147,776
   devices, read in 0.7 s with 813 MB). First, 20,000 numbers of every
   size from 1e-300 to 1e300 are each read as the f64 Python reads.
-- `check/exact.py` (check 2, its DC part): for every circuit of up to
-  80 unknowns, the equations of its operating point are solved exactly,
-  in fractions, by Python; every probe of way 0 is that to 1e-12 (19
-  circuits). But a crossbar whose wires have 0.1 ohm: to 1e-11, since
-  wires of 10 S beside memristors of 1e-4 S leave the sense voltages a
-  few parts in 10^12 off in f64 (a step of refinement does not help).
-- `check/agree.py` (check 4): ways 1 and 2 give way 0's operating point
-  to within a tenth of the tolerance, on every circuit but the one way 0
-  alone does (19 circuits, and crossbars of 16 and 64 by hand, below).
-- One core and all of them give the same bits, every way, on 1, 4, 16
-  and 24 threads (four circuits; check 6 proper is M2's).
-- ngspice runs the decks `prepare.py` writes for the circuits without
-  memristors (check 3 is M2's).
+- `check/exact.py` (check 2): for every circuit of up to 80 unknowns,
+  the equations of its operating point are solved exactly, in fractions,
+  by Python; every probe of way 0 is that to 1e-12 (20 circuits; a
+  crossbar's at 50 ms, since each of its time points is one). But a
+  crossbar whose wires have 0.1 ohm: to 1e-11, since wires of 10 S beside
+  memristors of 1e-4 S leave the sense voltages a few parts in 10^12 off
+  in f64 (a step of refinement does not help). Then the two RC
+  low-passes against their closed forms: backward Euler's error is
+  1.7e-3 and 3.4e-3 of the range at the circuits' steps, and 3.35 and
+  3.99 times smaller at a quarter of the step (first order; rc_step's
+  edge of 1 us falls in another place between time points at each step,
+  which is why the ratio is taken over two halvings).
+- `check/spice.py` (check 3): ngspice with tight tolerances against all
+  three ways, at a fiftieth of the circuit's step, every probe at every
+  time point within 1e-3 of its range: the divider, the R-2R ladder, the
+  bridge, the floating source (way 0), the RC ladder, rc_step and rc_sine
+  (largest 9.4e-4, the R-2R ladder by way 2; the transients 1e-4 to
+  5e-4). The divider is 3e-9 below ngspice's: GMIN, see below. Circuits
+  with memristors wait for OpenVAF.
+- `check/agree.py` (check 4): ways 1 and 2 give way 0's waves to within
+  a tenth of the tolerance at every time point, on every circuit but the
+  one way 0 alone does (20 circuits, crossbars of 4 and 16 by 16 among
+  them; of 64 by hand, below). A time point may take up to a million rounds here: a crossbar
+  with 1 ohm wires takes 130,000 at a pulse's edge.
+- `check/same.py` (check 6): the build for one core and the build for
+  all of them, on 1, 4, 16 and 24 threads, give the same waves, every
+  way, on six circuits through time.
 
 ### How relaxation goes on crossbars
 
@@ -137,8 +162,9 @@ relaxing between lines, is what it suggests next.
 
 ## Not here yet
 
-- Time: transients (M2), the memristors' states moving (M3), step
-  control (M4).
+- The memristors' states moving (M3), and step control: the
+  trapezoidal rule, steps by the error, breakpoints at sources' corners,
+  halving a step that does not settle (M4).
 - Way 0's floating sources are done; the relaxation ways refuse them.
 - The deck for Xyce, and `fetch.sh` for the IBM power grids: with M5,
   when Xyce is installed.

@@ -15,9 +15,9 @@
 //
 // Way 2, by events: the sums are made once (`gathered()  started_events()`),
 // and after that a node takes its step only where its sum changed, and
-// moves only where the step is more than the tolerance; then it marks its
-// devices (`Told`), which give their nodes the difference in what they
-// give (`Gave`): reactive `for`s, in rounds until no node moved.
+// tells its devices only where it moved more than the tolerance (`Told`);
+// they give their nodes the difference in what they give (`Gave`):
+// reactive `for`s, in rounds until no node told.
 //
 //   loop { moved()  retold() } until settled
 //
@@ -44,8 +44,11 @@ import math
 // settle in the last; `updates`: nodes' steps in all, at this point;
 // `largest`: the largest step of this round, `before`: of the round
 // before; `scale`: the share of the tolerance a step is held to.
+// `mark`: the rounds of all time points, which marks a device that is
+// told (it only grows: at the next time point a round's number starts
+// again, and would leave a mark as it was).
 unique Relax {
-  round: i32, unsettled: i32, updates: i64, largest: f64, before: f64, scale: f64
+  round: i32, unsettled: i32, updates: i64, largest: f64, before: f64, scale: f64, mark: i32
 }
 
 system relax_started() {
@@ -60,7 +63,9 @@ system relax_started() {
 // After a round: how much the largest step shrank, and so the tolerance's
 // share for the next.
 system judged() {
-  if Relax.before > 0.0 {
+  // (Not from steps of the size of what rounding leaves: those say
+  // nothing of how fast the rounds come closer.)
+  if Relax.before > 1e-6 * Time.vntol && Relax.largest > 1e-6 * Time.vntol {
     let ratio = Relax.largest / Relax.before
     // (Never looser again at this time point: in way 2 a round's largest
     // step is of the nodes that were told, which goes up and down.)
@@ -146,8 +151,10 @@ system stepped() {
   Relax.round += 1
 }
 
-// Way 2: what every device gives, kept, after a `gathered()  told()`.
+// Way 2: every node's voltage is what its devices were told, and what
+// every device gives is kept, after a `gathered()  told()`.
 system started_events() {
+  for n: mut Node { n.told = n.v }
   for t: Two, c: Companion, g: mut Gave {
     if let va = Node(t.a).v {
       if let vb = Node(t.b).v { g.i = current(c.g, c.i0, va, vb) }
@@ -155,30 +162,48 @@ system started_events() {
   }
 }
 
-// Way 2: the nodes whose sums changed take their step, where it is more
-// than the tolerance, and tell their devices.
+// Way 2: the nodes whose sums changed take their step. A node tells its
+// devices only where it moved by more than the tolerance since it last
+// told them; a smaller step it takes all the same (else small steps at
+// many time points would add up to what is never taken). What its sum
+// says is what the devices give at the voltages they were told, and GMIN's
+// current at the voltage of the last time point; so the current into it
+// now is that less what its own steps since took away:
+//
+//   Sum.i - GMIN * (v - v_prev) - (Sum.g - GMIN) * (v - told)
+//
+// The devices that are told send what changed from their told voltages
+// (`retold`), which makes that last part good.
+fn into(i: f64, g: f64, v: f64, v_prev: f64, told: f64) -> f64 {
+  i - GMIN * (v - v_prev) - (g - GMIN) * (v - told)
+}
+
 system moved() {
   Relax.unsettled = 0
   Relax.round += 1
+  Relax.mark += 1
   for me, n: mut Node, s: Sum without Fixed on changed s.i {
-    let step = s.i / s.g
+    let i = into(s.i, s.g, n.v, n.v_prev, n.told)
+    let step = i / s.g
     let v = n.v + step
     Relax.updates += 1
     Relax.largest max= abs64(step)
-    if far(step, v, n.v, Time.reltol * Relax.scale, Time.vntol * Relax.scale) ||
-       left(s.i, s.most, Time.reltol * Relax.scale, Time.abstol) {
-      n.v = v
+    if far(v - n.told, v, n.told, Time.reltol * Relax.scale, Time.vntol * Relax.scale) ||
+       left(i, s.most, Time.reltol * Relax.scale, Time.abstol) {
+      n.told = v
       Relax.unsettled += 1
-      for (d, k: mut Told)-[Touches]->(me) { k.round max= Relax.round }
+      for (d, k: mut Told)-[Touches]->(me) { k.round max= Relax.mark }
     }
+    n.v = v
   }
 }
 
-// Way 2: the devices that were told give their nodes the difference.
+// Way 2: the devices that were told give their nodes the difference, at
+// the voltages they were told.
 system retold() {
   for me, t: Two, c: Companion, k: Told, g: mut Gave on changed k.round {
-    if let va = Node(t.a).v {
-      if let vb = Node(t.b).v {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
         let i = current(c.g, c.i0, va, vb)
         let more = i - g.i
         for (me)-[Touches]->(x, s: mut Sum) {

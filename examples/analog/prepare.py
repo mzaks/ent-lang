@@ -360,8 +360,14 @@ class Circuit:
         if self.tran:
             step, stop, most = self.tran
             lines.append(f".tran {text(step)} {text(stop)}" + (f" 0 {text(most)}" if most else ""))
+        # (A source's current is i(V3); any other device's ngspice keeps only
+        # with savecurrents, as @r5[i], from a to b.)
         shown = [f"v({which})" if kind == "v" else
-                 f"i({self.devices[which][0]}{which})" for kind, which in self.settled]
+                 f"i({self.devices[which][0]}{which})" if self.devices[which][0] in "VI" else
+                 f"@{self.devices[which][0].lower()}{which}[i]"
+                 for kind, which in self.settled]
+        if any(name.startswith("@") for name in shown):
+            lines.append(".options savecurrents")
         lines.append(".control")
         if models:
             for model in sorted({model for model, _ in models}):
