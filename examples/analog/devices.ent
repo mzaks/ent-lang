@@ -1,0 +1,45 @@
+// What each kind of device does at a time point, shared by every way of
+// solving one (spec section 6.1): each device that is no source makes
+// itself straight for the voltages its nodes have now, its `Companion`:
+// the current through it from a to b is g * (va - vb) + i0 near them.
+// Way 0 puts that into its matrix, ways 1 and 2 add it up at the nodes.
+//
+//   schedule ... { companions() ... }
+//
+// Every node also has `GMIN` to ground, as SPICE gives it, in every way,
+// so that each has a conductance to something. At the operating point a
+// capacitor is open (a conductance of 0), and a memristor is the resistor
+// its state makes it (the state moves from milestone M3 on).
+import circuit
+import math
+
+const GMIN: f64 = 1e-12
+
+// The time the sources are taken at, and the tolerances a time point is
+// solved to (spec 7.1): a node has settled where it moves by no more than
+// reltol of its voltage and vntol, and the current into it is no more
+// than reltol of the largest of its devices' and abstol.
+unique Time { t: f64, reltol: f64, vntol: f64, abstol: f64 }
+
+// The resistance of a Biolek memristor in the state w (0: all Roff, 1:
+// all Ron).
+fn biolek_resistance(ron: f64, roff: f64, w: f64) -> f64 { ron * w + roff * (1.0 - w) }
+
+// The current from a to b through a device so made, and through a source
+// of `level` that is no voltage source.
+fn current(g: f64, i0: f64, va: f64, vb: f64) -> f64 { g * (va - vb) + i0 }
+
+system companions() {
+  for r: Resistor, c: mut Companion {
+    c.g = r.g
+    c.i0 = 0.0
+  }
+  for k: Capacitor, c: mut Companion {
+    c.g = 0.0
+    c.i0 = 0.0
+  }
+  for m: Memristor, b: Biolek, c: mut Companion {
+    c.g = 1.0 / biolek_resistance(b.ron, b.roff, m.w)
+    c.i0 = 0.0
+  }
+}

@@ -25,28 +25,43 @@
 // A wave is `dc <volts>`, `sin <offset> <amplitude> <hertz> <delay>
 // <damping> <phase in degrees>`, `pulse <low> <high> <delay> <rise>
 // <fall> <width> <period>`, or `pwl <points> <time> <value> ...`.
+// Numbers are read as the f64 nearest them (devices/decimal.ent).
 // Nodes and devices are numbered from 0 in the order of the file.
 import files
+import decimal
 
 component Node { v: f64, v_prev: f64 }
-component Sum { i: f64, g: f64 }
+// What the devices at a node add up to in a round: the current into it,
+// its conductance (how much that current falls as the node's voltage
+// rises), and the largest current of one of them (spec 7.1).
+component Sum { i: f64, g: f64, most: f64 }
 tag Fixed
 // (`index`: the node's number in the file.)
 component Place { index: i32 }
 
 component Two { a: entity, b: entity }
-// (`index`: the device's number in the file, which a probe names.)
-component Device { index: i32 }
+// (`index`: the device's number in the file, which a probe names; `i`:
+// the current through it from a to b, as the last solve left it.)
+component Device { index: i32, i: f64 }
 component Resistor { g: f64 }
+// What a device that is no source does at a time point, made straight
+// (devices.ent fills it in): the current through it from a to b is
+// g * (va - vb) + i0 for voltages near the ones it was made for.
+component Companion { g: f64, i0: f64 }
+// For the way that goes by events (relax.ent): the round in which a node
+// of the device last moved, and the current it last gave its nodes.
+component Told { round: i32 }
+component Gave { i: f64 }
 // (`v0`: the voltage across it at the start, as the file gives it.)
 component Capacitor { c: f64, q_prev: f64, i_prev: f64, v0: f64 }
 enum Wave { Dc, Sin, Pulse, Pwl }
 // A source's wave and its numbers, in the order the file has them; a
 // piecewise-linear one's points are rows of `Points` from `first`, so
-// many (`count`).
+// many (`count`). A voltage source's `branch`: its number among them,
+// from 0 (-1 for a current source).
 component Source {
   voltage: bool, wave: Wave, p0: f64, p1: f64, p2: f64, p3: f64, p4: f64, p5: f64, p6: f64,
-  first: i32, count: i32
+  first: i32, count: i32, branch: i32
 }
 // A memristor's state, from 0 to 1, now and at the last time point.
 component Memristor { w: f64, w_prev: f64 }
@@ -63,8 +78,10 @@ buffer Probes { voltage: bool, index: i32 } capacity 16
 // where its numbers start in `Numbers` and how many.
 buffer Lines { kind: u8, a: i32, b: i32, first: i32, count: i32, model: i32 } capacity 16
 buffer Numbers { value: f64 } capacity 16
-// Each node's entity by its number, and whether a source sets it.
+// Each node's entity by its number, and whether a source sets it; each
+// device's by its number.
 buffer Nodes { who: entity, fixed: bool } capacity 16
+buffer Devices { who: entity } capacity 16
 
 // `read`: the file was there and its every line made sense; where one
 // did not, `wrong` is its number (from 1). `nodes`, `devices`, `probes`:
@@ -72,12 +89,12 @@ buffer Nodes { who: entity, fixed: bool } capacity 16
 // are not ground, and `clashing`: nodes that two sources set.
 unique Circuit {
   file: text[126], read: bool, wrong: i32, nodes: i32, devices: i32, probes: i32,
-  op: bool, tran: bool, step: f64, stop: f64, most: f64, floating: i32, clashing: i32
+  op: bool, tran: bool, step: f64, stop: f64, most: f64, floating: i32, clashing: i32,
+  branches: i32
 }
 
-// --- reading numbers and words ------------------------------------------
+// --- reading words ------------------------------------------------------
 
-fn digit(byte: u8) -> bool { byte >= 48 && byte <= 57 }
 fn blank(byte: u8) -> bool { byte == 32 || byte == 9 || byte == 13 }
 
 // Where the next word starts, at `at` or after the blanks there.
@@ -110,164 +127,15 @@ fn is(bytes: Bytes, at: i32, to: i32, word: text[30]) -> bool {
   same
 }
 
-// Numbers of twice an f64's precision, as the sum of two that do not
-// overlap (hi, lo): a number of up to 19 digits is one exactly, and a
-// power of ten is one to within a few parts in 2^106, so that the f64
-// nearest a product or a quotient of the two comes out (but a hair from
-// halfway between two f64s).
-fn split(a: f64) -> (f64, f64) {
-  if a > 1e290 || a < -1e290 { (a, 0.0) } else {
-    let t = 134217729.0 * a
-    let hi = t - (t - a)
-    (hi, a - hi)
-  }
-}
-
-// a times b, and what that leaves out.
-fn product(a: f64, b: f64) -> (f64, f64) {
-  let p = a * b
-  let (ah, al) = split(a)
-  let (bh, bl) = split(b)
-  (p, ((ah * bh - p) + ah * bl + al * bh) + al * bl)
-}
-
-// a + b as a pair that does not overlap, where |a| >= |b|.
-fn joined(a: f64, b: f64) -> (f64, f64) {
-  // (In brackets: a line that ended in a name would make the next one,
-  // which starts with a bracket, a call.)
-  let s = (a + b)
-  (s, b - (s - a))
-}
-
-fn times(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64) {
-  let (p, e) = product(ah, bh)
-  joined(p, e + (ah * bl + al * bh))
-}
-
-fn over(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64) {
-  let q = ah / bh
-  let (ph, pl) = times(q, 0.0, bh, bl)
-  let r = ((ah - ph) - pl) + al
-  joined(q, r / bh)
-}
-
-// 2 to the power `k`, exactly.
-fn two(k: i32) -> f64 {
-  var x = 1.0 as f64
-  for i in 0..max(k, -k) { x = if k > 0 { x * 2.0 } else { x * 0.5 } }
-  x
-}
-
-// Ten to the power `k`, from 0 to 200, as such a pair.
-fn ten(k: i32) -> (f64, f64) {
-  var rh = 1.0 as f64
-  var rl = 0.0 as f64
-  var bh = 10.0 as f64
-  var bl = 0.0 as f64
-  var left = k
-  while left > 0 {
-    if left % 2 == 1 {
-      let (h, l) = times(rh, rl, bh, bl)
-      rh = h
-      rl = l
-    }
-    left = left / 2
-    if left > 0 {
-      let (h, l) = times(bh, bl, bh, bl)
-      bh = h
-      bl = l
-    }
-  }
-  (rh, rl)
-}
-
-// The whole number at or after `at`, and where the line goes on after it.
+// The whole number at or after `at`, as an i32, and where the line goes on.
 fn whole(bytes: Bytes, at: i32) -> (i32, i32) {
-  var from = next(bytes, at)
-  var negative = false
-  if from < len(bytes) && bytes[from].value == 45 {
-    negative = true
-    from += 1
-  }
-  var value = 0
-  while from < len(bytes) && digit(bytes[from].value) {
-    value = value * 10 + (bytes[from].value as i32 - 48)
-    from += 1
-  }
-  (if negative { -value } else { value }, from)
+  let (value, next) = read_whole(bytes, at)
+  (value as i32, next)
 }
 
-// The number at or after `at` (12, -0.5, 1e-14, 2.5E+3), and where the
-// line goes on after it. Up to 19 digits are taken as a whole number and
-// scaled by a power of ten once, so a number with no more digits than an
-// f64 holds and a power of ten up to 22 is read exactly.
-fn real(bytes: Bytes, at: i32) -> (f64, i32) {
-  var from = next(bytes, at)
-  var negative = false
-  if from < len(bytes) && (bytes[from].value == 45 || bytes[from].value == 43) {
-    negative = bytes[from].value == 45
-    from += 1
-  }
-  var digits = 0 as u64
-  var taken = 0
-  var power = 0
-  var point = false
-  var going = true
-  while going && from < len(bytes) {
-    let byte = bytes[from].value
-    if digit(byte) {
-      if taken < 19 {
-        digits = digits * 10 + (byte - 48) as u64
-        if digits > 0 { taken += 1 }
-        if point { power -= 1 }
-      } else if !point { power += 1 }
-      from += 1
-    } else if byte == 46 && !point {
-      point = true
-      from += 1
-    } else { going = false }
-  }
-  if from < len(bytes) && (bytes[from].value == 101 || bytes[from].value == 69) {
-    var down = false
-    from += 1
-    if from < len(bytes) && (bytes[from].value == 45 || bytes[from].value == 43) {
-      down = bytes[from].value == 45
-      from += 1
-    }
-    var e = 0
-    while from < len(bytes) && digit(bytes[from].value) {
-      e = min(e * 10 + (bytes[from].value as i32 - 48), 400)
-      from += 1
-    }
-    power += if down { -e } else { e }
-  }
-  // (The digits as a pair: the f64 nearest them, and what is left over.)
-  let near = digits as f64
-  let back = near as u64
-  let rest = if digits >= back { (digits - back) as f64 } else { -((back - digits) as f64) }
-  // (Far from 1 the number is first moved by 2^400 the other way, which
-  // is exact, so that nothing on the way leaves the f64s' range; and the
-  // power of ten is taken in steps of no more than 10^200.)
-  let far = power > 200 || power < -200
-  let shift = if far { two(if power > 0 { -400 } else { 400 }) } else { 1.0 }
-  var vh = near * shift
-  var vl = rest * shift
-  var left = power
-  while left != 0 {
-    let step = max(min(left, 200), -200)
-    let (th, tl) = ten(if step > 0 { step } else { -step })
-    let (h, l) = if step > 0 { times(vh, vl, th, tl) } else { over(vh, vl, th, tl) }
-    vh = h
-    vl = l
-    left -= step
-  }
-  // (Back by 2^400: exact, but where the number is smaller than an f64
-  // holds whole, below 2.2e-308.)
-  vh = vh / shift
-  vl = vl / shift
-  let value = (vh + vl)
-  (if negative { -value } else { value }, from)
-}
+// The number at or after `at`, and where the line goes on after it
+// (devices/decimal.ent: the f64 nearest to it).
+fn real(bytes: Bytes, at: i32) -> (f64, i32) { read_real(bytes, at) }
 
 // --- the file -------------------------------------------------------------
 
@@ -435,32 +303,39 @@ system build() {
       }
     }
   }
+  Circuit.branches = 0
   if Circuit.read && Circuit.wrong == 0 {
+    Devices = []
     for i in 0..len(Nodes) {
       Nodes[i].who = if Nodes[i].fixed {
-        spawn { Node { v: 0.0, v_prev: 0.0 }, Sum { i: 0.0, g: 0.0 }, Place { index: i }, Fixed }
+        spawn { Node { v: 0.0, v_prev: 0.0 }, Sum { i: 0.0, g: 0.0, most: 0.0 }, Place { index: i }, Fixed }
       } else {
-        spawn { Node { v: 0.0, v_prev: 0.0 }, Sum { i: 0.0, g: 0.0 }, Place { index: i } }
+        spawn { Node { v: 0.0, v_prev: 0.0 }, Sum { i: 0.0, g: 0.0, most: 0.0 }, Place { index: i } }
       }
     }
     for i in 0..len(Lines) {
       let a = Nodes[Lines[i].a].who
       let b = Nodes[Lines[i].b].who
       if Lines[i].kind == 82 {
-        let made = spawn { Two { a: a, b: b }, Device { index: i },
+        let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                           Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                            Resistor { g: 1.0 / number(Lines, Numbers, i, 0) } }
         connect (made)-[Touches]->(a)
         connect (made)-[Touches]->(b)
+        Devices += { who: made }
       } else if Lines[i].kind == 67 {
         let c = number(Lines, Numbers, i, 0)
         let v0 = number(Lines, Numbers, i, 1)
-        let made = spawn { Two { a: a, b: b }, Device { index: i },
+        let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                           Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                            Capacitor { c: c, q_prev: c * v0, i_prev: 0.0, v0: v0 } }
         connect (made)-[Touches]->(a)
         connect (made)-[Touches]->(b)
+        Devices += { who: made }
       } else if Lines[i].kind == 77 {
         let w0 = number(Lines, Numbers, i, 5)
-        let made = spawn { Two { a: a, b: b }, Device { index: i },
+        let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                           Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                            Memristor { w: w0, w_prev: w0 },
                            Biolek { ron: number(Lines, Numbers, i, 0),
                                     roff: number(Lines, Numbers, i, 1),
@@ -469,6 +344,7 @@ system build() {
                                     p: number(Lines, Numbers, i, 4) } }
         connect (made)-[Touches]->(a)
         connect (made)-[Touches]->(b)
+        Devices += { who: made }
       } else {
         let wave = if Lines[i].model == 0 { Wave.Dc } else if Lines[i].model == 1 { Wave.Sin }
                    else if Lines[i].model == 2 { Wave.Pulse } else { Wave.Pwl }
@@ -481,7 +357,7 @@ system build() {
                         value: number(Lines, Numbers, i, 2 + 2 * k) }
           }
         }
-        let made = spawn { Two { a: a, b: b }, Device { index: i },
+        let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
                            Source { voltage: Lines[i].kind == 86, wave: wave,
                                     p0: number(Lines, Numbers, i, 0),
                                     p1: number(Lines, Numbers, i, 1),
@@ -489,9 +365,12 @@ system build() {
                                     p3: number(Lines, Numbers, i, 3),
                                     p4: number(Lines, Numbers, i, 4),
                                     p5: number(Lines, Numbers, i, 5),
-                                    p6: number(Lines, Numbers, i, 6), first: first, count: count } }
+                                    p6: number(Lines, Numbers, i, 6), first: first, count: count,
+                                    branch: if Lines[i].kind == 86 { Circuit.branches } else { -1 } } }
+        if Lines[i].kind == 86 { Circuit.branches += 1 }
         connect (made)-[Touches]->(a)
         connect (made)-[Touches]->(b)
+        Devices += { who: made }
       }
     }
   }

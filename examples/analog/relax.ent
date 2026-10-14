@@ -1,0 +1,217 @@
+// Ways 1 and 2, relaxation (spec section 6.3): every node that no source
+// holds takes a Newton step of its own in each round, with its
+// neighbours as they stood after the round before:
+//
+//   v = v + Sum.i / Sum.g
+//
+// where Sum.i is the current the node's devices give into it and Sum.g
+// how much that falls as v rises. A device's current comes from its
+// companion (devices.ent), and goes to its two nodes along its edges of
+// `Touches`.
+//
+// Way 1, Gauss–Jacobi: every node, every round; the sums are made anew.
+//
+//   loop { held()  companions()  gathered()  told()  stepped() } until settled
+//
+// Way 2, by events: the sums are made once (`gathered()  started_events()`),
+// and after that a node takes its step only where its sum changed, and
+// moves only where the step is more than the tolerance; then it marks its
+// devices (`Told`), which give their nodes the difference in what they
+// give (`Gave`): reactive `for`s, in rounds until no node moved.
+//
+//   loop { moved()  retold() } until settled
+//
+// When a round has settled: SPICE's test (spec 7.1), that no node steps by
+// more than the tolerance and no node's current is more, is made for
+// Newton's steps, which come closer fast. Relaxation comes closer by a
+// share of what is left each round, which with resistance in a
+// crossbar's wires is 0.9997 and more: a step of a thousandth of the
+// tolerance can leave three times the tolerance to go. So the tolerance
+// a step is held to here is made smaller by what is not left over, 1 - r,
+// where r is how much the largest step shrank from the round before to
+// this one (`scale`, from 1e-9 to 1, and only ever smaller at a time
+// point): then what is left is within it.
+//
+// A node held by a source to ground takes the source's value (`held`); a
+// voltage source between two nodes that are not ground is not done here
+// (simulate.ent says so; way 0 does it).
+import circuit
+import sources
+import devices
+import math
+
+// `round`: rounds at this time point; `unsettled`: nodes that did not
+// settle in the last; `updates`: nodes' steps in all, at this point;
+// `largest`: the largest step of this round, `before`: of the round
+// before; `scale`: the share of the tolerance a step is held to.
+unique Relax {
+  round: i32, unsettled: i32, updates: i64, largest: f64, before: f64, scale: f64
+}
+
+system relax_started() {
+  Relax.round = 0
+  Relax.unsettled = 1
+  Relax.updates = 0
+  Relax.largest = 0.0
+  Relax.before = 0.0
+  Relax.scale = 1.0
+}
+
+// After a round: how much the largest step shrank, and so the tolerance's
+// share for the next.
+system judged() {
+  if Relax.before > 0.0 {
+    let ratio = Relax.largest / Relax.before
+    // (Never looser again at this time point: in way 2 a round's largest
+    // step is of the nodes that were told, which goes up and down.)
+    Relax.scale = max(min(1.0 - ratio, Relax.scale), 1e-9)
+  }
+  Relax.before = Relax.largest
+  Relax.largest = 0.0
+}
+
+// The nodes that sources to ground hold, at their values.
+system held() {
+  for me, n: mut Node, p: Place with Fixed where p.index > 0 {
+    var v = n.v
+    for (d, s: Source, t: Two)-[Touches]->(me) {
+      if s.voltage {
+        let value = level(s.wave, s.p0, s.p1, s.p2, s.p3, s.p4, s.p5, s.p6, s.first, s.count,
+                          Points, Time.t)
+        if let ia = Place(t.a).index {
+          if let ib = Place(t.b).index {
+            if ib == 0 && t.a == me { v = value }
+            if ia == 0 && t.b == me { v = -value }
+          }
+        }
+      }
+    }
+    n.v = v
+  }
+}
+
+// Every node's sum anew: GMIN to ground first.
+system gathered() {
+  for n: Node, s: mut Sum {
+    s.i = -GMIN * n.v
+    s.g = GMIN
+    s.most = abs64(GMIN * n.v)
+  }
+}
+
+// Every device's current, into its two nodes; and a current source's.
+system told() {
+  for me, t: Two, c: Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let i = current(c.g, c.i0, va, vb)
+        for (me)-[Touches]->(x, s: mut Sum) {
+          s.i += if x == t.a { -i } else { i }
+          s.g += c.g
+          s.most max= abs64(i)
+        }
+      }
+    }
+  }
+  for me, t: Two, k: Source where !k.voltage {
+    let i = level(k.wave, k.p0, k.p1, k.p2, k.p3, k.p4, k.p5, k.p6, k.first, k.count,
+                  Points, Time.t)
+    for (me)-[Touches]->(x, s: mut Sum) {
+      s.i += if x == t.a { -i } else { i }
+      s.most max= abs64(i)
+    }
+  }
+}
+
+// Whether a node with this sum and voltage has settled.
+fn far(step: f64, v: f64, before: f64, reltol: f64, vntol: f64) -> bool {
+  abs64(step) > reltol * max(abs64(v), abs64(before)) + vntol
+}
+fn left(i: f64, most: f64, reltol: f64, abstol: f64) -> bool {
+  abs64(i) > reltol * most + abstol
+}
+
+// Way 1: every node's step.
+system stepped() {
+  Relax.unsettled = 0
+  for n: mut Node, s: Sum without Fixed {
+    let step = s.i / s.g
+    let v = n.v + step
+    Relax.largest max= abs64(step)
+    if far(step, v, n.v, Time.reltol * Relax.scale, Time.vntol * Relax.scale) ||
+       left(s.i, s.most, Time.reltol * Relax.scale, Time.abstol) { Relax.unsettled += 1 }
+    n.v = v
+    Relax.updates += 1
+  }
+  Relax.round += 1
+}
+
+// Way 2: what every device gives, kept, after a `gathered()  told()`.
+system started_events() {
+  for t: Two, c: Companion, g: mut Gave {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v { g.i = current(c.g, c.i0, va, vb) }
+    }
+  }
+}
+
+// Way 2: the nodes whose sums changed take their step, where it is more
+// than the tolerance, and tell their devices.
+system moved() {
+  Relax.unsettled = 0
+  Relax.round += 1
+  for me, n: mut Node, s: Sum without Fixed on changed s.i {
+    let step = s.i / s.g
+    let v = n.v + step
+    Relax.updates += 1
+    Relax.largest max= abs64(step)
+    if far(step, v, n.v, Time.reltol * Relax.scale, Time.vntol * Relax.scale) ||
+       left(s.i, s.most, Time.reltol * Relax.scale, Time.abstol) {
+      n.v = v
+      Relax.unsettled += 1
+      for (d, k: mut Told)-[Touches]->(me) { k.round max= Relax.round }
+    }
+  }
+}
+
+// Way 2: the devices that were told give their nodes the difference.
+system retold() {
+  for me, t: Two, c: Companion, k: Told, g: mut Gave on changed k.round {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let i = current(c.g, c.i0, va, vb)
+        let more = i - g.i
+        for (me)-[Touches]->(x, s: mut Sum) {
+          s.i += if x == t.a { -more } else { more }
+          s.most max= abs64(i)
+        }
+        g.i = i
+      }
+    }
+  }
+}
+
+// The currents through the devices from a to b, for the probes; through
+// a voltage source, what its node's devices give into the node (a fresh
+// `gathered()  told()` before).
+system relaxed_currents() {
+  for t: Two, c: Companion, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v { d.i = current(c.g, c.i0, va, vb) }
+    }
+  }
+  for t: Two, k: Source, d: mut Device {
+    if k.voltage {
+      if let ia = Place(t.a).index {
+        if ia != 0 {
+          if let i = Sum(t.a).i { d.i = i }
+        } else {
+          if let i = Sum(t.b).i { d.i = -i }
+        }
+      }
+    } else {
+      d.i = level(k.wave, k.p0, k.p1, k.p2, k.p3, k.p4, k.p5, k.p6, k.first, k.count,
+                  Points, Time.t)
+    }
+  }
+}

@@ -1,0 +1,165 @@
+// Solves the circuit in the file "circuit.net" where the program is
+// started (examples/analog/prepare.py makes one of a SPICE netlist) and
+// writes what its probes show to "waves.txt": a line for each time point,
+// the time and then each probe's value, as printf("%.17g") writes them.
+// Milestone M1: the operating point, one line at time 0.
+//
+//   examples/analog/prepare.py divider
+//   cd build/analog/circuits/divider
+//   ../../../../tools/ent run -I ../../../../examples/analog ../../../../examples/analog/simulate.ent
+//
+// "run.txt", where there is one, says which way (0: direct, 1: relaxation
+// by Gauss–Jacobi, 2: relaxation by events), then a seed, whether the
+// waves are written (1) or not (0), reltol, vntol, abstol and the most
+// rounds a time point may take, and the time the operating point is
+// taken at; what it leaves out stays as SPICE has it (way 0, 1e-3,
+// 1e-6 V, 1e-12 A; 100,000 rounds; time 0).
+//
+// What it did goes to the console: the way, whether it settled, in how
+// many rounds, and how many steps the nodes took.
+import files
+import console
+import decimal
+import math
+import circuit
+import sources
+import devices
+import direct
+import relax
+
+capacity Bytes 268435456
+capacity Node 2200000
+capacity Two 3300000
+capacity Touches 6600000
+capacity Lines 3300000
+capacity Numbers 12000000
+capacity Nodes 2200000
+capacity Devices 3300000
+capacity Points 1000000
+capacity Probes 100000
+capacity Entries 24000000
+capacity Solution 2300000
+
+// `way`, `shown` and `most` as "run.txt" says; `refused`: what keeps the
+// way from this circuit, said and nothing solved.
+unique Run { way: i32, shown: bool, most: i32, refused: bool }
+
+world {
+  Circuit.file = "circuit.net"
+  Time.reltol = 0.001
+  Time.vntol = 0.000001
+  Time.abstol = 1e-12
+  Run.most = 100000
+  Run.shown = true
+  Time.t = 0.0
+}
+
+system plan() {
+  let size = read_file("run.txt", Bytes)
+  if size > 0 {
+    var at = 0
+    var k = 0
+    while k < 8 && at < len(Bytes) {
+      let (value, next) = read_real(Bytes, at)
+      if next > at {
+        if k == 0 { Run.way = value as i32 }
+        if k == 2 { Run.shown = value != 0.0 }
+        if k == 3 { Time.reltol = value }
+        if k == 4 { Time.vntol = value }
+        if k == 5 { Time.abstol = value }
+        if k == 6 { Run.most = value as i32 }
+        if k == 7 { Time.t = value }
+        at = next
+      } else { at = len(Bytes) }
+      k += 1
+    }
+  }
+  Bytes = []
+}
+
+system said() {
+  Run.refused = true
+  if !Circuit.read {
+    put("no circuit: the file {Circuit.file} is not where the program was started")
+  } else if Circuit.wrong > 0 {
+    put("the circuit's line {Circuit.wrong} makes no sense")
+  } else if Circuit.clashing > 0 {
+    put("{Circuit.clashing} nodes are held by two sources at once")
+  } else if Run.way != 0 && Circuit.floating > 0 {
+    put("way {Run.way} does not do a voltage source between two nodes that are not ground ({Circuit.floating} of them): way 0 does")
+  } else {
+    Run.refused = false
+  }
+}
+
+// The time point's line: the time, then the probes.
+system written() {
+  if Run.shown && !Run.refused {
+    Bytes = []
+    write_real(Bytes, Time.t)
+    for k in 0..len(Probes) {
+      Bytes += { value: 32 }
+      var value = 0.0 as f64
+      if Probes[k].voltage {
+        if let v = Node(Nodes[Probes[k].index].who).v { value = v }
+      } else {
+        if let i = Device(Devices[Probes[k].index].who).i { value = i }
+      }
+      write_real(Bytes, value)
+    }
+    Bytes += { value: 10 }
+    write_file("waves.txt", Bytes)
+  }
+}
+
+system told_how() {
+  if !Run.refused {
+    if Run.way == 0 {
+      if Direct.failed { put("way 0: the solve failed ({Direct.status})") }
+      else {
+        put("way 0: settled {Direct.settled} in {Direct.rounds} rounds, {Direct.size} unknowns")
+      }
+    } else {
+      put("way {Run.way}: settled {Relax.unsettled == 0} in {Relax.round} rounds, {Relax.updates} node steps")
+    }
+  }
+}
+
+schedule setup() { plan() netlist() build() said() }
+schedule begun() {
+  started() run_if Run.way == 0
+  relax_started() run_if Run.way != 0
+  held() run_if Run.way != 0
+  companions()
+  gathered() run_if Run.way == 2
+  told() run_if Run.way == 2
+  started_events() run_if Run.way == 2
+}
+schedule rounded() {
+  stamp() run_if Run.way == 0
+  solved() run_if Run.way == 0
+  taken() run_if Run.way == 0
+  gathered() run_if Run.way == 1
+  told() run_if Run.way == 1
+  stepped() run_if Run.way == 1
+  moved() run_if Run.way == 2
+  retold() run_if Run.way == 2
+  judged() run_if Run.way != 0
+}
+schedule ended() {
+  direct_currents() run_if Run.way == 0
+  gathered() run_if Run.way != 0
+  told() run_if Run.way != 0
+  relaxed_currents() run_if Run.way != 0
+  written()
+  told_how()
+}
+
+main {
+  setup()
+  begun()
+  loop { rounded() } until Run.refused ||
+    (Run.way == 0 && (Direct.settled || Direct.failed || Direct.rounds >= 50)) ||
+    (Run.way != 0 && (Relax.unsettled == 0 || Relax.round >= Run.most))
+  ended()
+}

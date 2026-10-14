@@ -1,0 +1,56 @@
+// What a source gives at a time: its wave as SPICE has it (circuit.ent
+// says the numbers' order).
+//
+//   sin    offset, amplitude, hertz, delay, damping, phase in degrees: the
+//          offset and the phase's share of the amplitude before the delay,
+//          then a sine that dies away by the damping
+//   pulse  low, high, delay, rise, fall, width, period: low until the
+//          delay, then up in the rise, high for the width, down in the
+//          fall, low again, and again after each period
+//   pwl    points of time and value, a straight line between two, the
+//          first's value before them and the last's after
+import circuit
+import math
+
+fn sine(offset: f64, amplitude: f64, hertz: f64, delay: f64, damping: f64, phase: f64,
+        t: f64) -> f64 {
+  let turn = phase / 360.0
+  if t < delay { offset + amplitude * sin64(tau64() * turn) } else {
+    offset + amplitude * exp64(-(t - delay) * damping) *
+             sin64(tau64() * (hertz * (t - delay) + turn))
+  }
+}
+
+fn pulse(low: f64, high: f64, delay: f64, rise: f64, fall: f64, width: f64, period: f64,
+         t: f64) -> f64 {
+  if t < delay { low } else {
+    let at = if period > 0.0 { fmod64(t - delay, period) } else { t - delay }
+    if at < rise { low + (high - low) * at / rise }
+    else if at < rise + width { high }
+    else if at < rise + width + fall { high + (low - high) * (at - rise - width) / fall }
+    else { low }
+  }
+}
+
+fn piecewise(points: Points, first: i32, count: i32, t: f64) -> f64 {
+  var value = if count > 0 { points[first].value } else { 0.0 }
+  for k in 1..count {
+    if t >= points[first + k - 1].t && t < points[first + k].t {
+      let t0 = points[first + k - 1].t
+      let t1 = points[first + k].t
+      value = points[first + k - 1].value +
+              (points[first + k].value - points[first + k - 1].value) * (t - t0) / (t1 - t0)
+    }
+  }
+  if count > 0 && t >= points[first + count - 1].t { value = points[first + count - 1].value }
+  value
+}
+
+// A source's value at time `t`.
+fn level(wave: Wave, p0: f64, p1: f64, p2: f64, p3: f64, p4: f64, p5: f64, p6: f64,
+         first: i32, count: i32, points: Points, t: f64) -> f64 {
+  if wave == Wave.Dc { p0 }
+  else if wave == Wave.Sin { sine(p0, p1, p2, p3, p4, p5, t) }
+  else if wave == Wave.Pulse { pulse(p0, p1, p2, p3, p4, p5, p6, t) }
+  else { piecewise(points, first, count, t) }
+}

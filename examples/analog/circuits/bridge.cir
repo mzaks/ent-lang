@@ -1,0 +1,11 @@
+A Wheatstone bridge, out of balance, with a current source into one side
+V1 top 0 DC 5
+R1 top left 1k
+R2 top right 2.2k
+R3 left 0 3.3k
+R4 right 0 4.7k
+R5 left right 10k
+I1 0 left DC 1m
+.op
+.print v(left) v(right) i(V1) i(R5)
+.end

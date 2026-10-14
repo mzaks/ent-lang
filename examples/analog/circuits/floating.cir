@@ -1,0 +1,9 @@
+A voltage source between two nodes that are not ground: way 0 only
+V1 a 0 DC 3
+V2 b a DC 2
+R1 b c 1k
+R2 c 0 1k
+R3 a c 4.7k
+.op
+.print v(b) v(c) i(V2)
+.end

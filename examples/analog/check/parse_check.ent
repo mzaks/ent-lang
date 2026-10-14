@@ -7,6 +7,7 @@
 // which ent-lang puts together exactly).
 import console
 import files
+import decimal
 import circuit
 
 capacity Bytes 268435456
@@ -16,6 +17,7 @@ capacity Touches 6600000
 capacity Lines 3300000
 capacity Numbers 12000000
 capacity Nodes 2200000
+capacity Devices 3300000
 capacity Points 1000000
 capacity Probes 100000
 
@@ -33,16 +35,10 @@ system count() {
   for n: Node with Fixed { Seen.fixed += 1 }
   for e, t: Two, d: Device {
     Seen.devices += 1
-    // (An edge loop cannot add into a unique: what it counts goes to
-    // the node at the other end, into the `Sum` that nothing uses yet.)
     for (e)-[Touches]->(n) {
-      Sum(n).g += 1.0
-      if n != t.a && n != t.b { Sum(n).i += 1.0 }
+      Seen.edges += 1
+      if n != t.a && n != t.b { Seen.astray += 1 }
     }
-  }
-  for s: Sum {
-    Seen.edges += s.g as i32
-    Seen.astray += s.i as i32
   }
   for r: Resistor { Seen.r += 1 }
   for c: Capacitor { Seen.c += 1 }
@@ -66,7 +62,7 @@ system numbers() {
     let (high, a2) = whole(Bytes, a1)
     let (low, a3) = whole(Bytes, a2)
     let (power, a4) = whole(Bytes, a3)
-    let exact = (high as f64 * 67108864.0 + low as f64) * two(power)
+    let exact = (high as f64 * 67108864.0 + low as f64) * power_of_two(power)
     Seen.numbers += 1
     if value != (if sign == 1 { -exact } else { exact }) {
       Seen.differ += 1

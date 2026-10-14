@@ -1,0 +1,2 @@
+# Way 0 solves with KLU, of SuiteSparse.
+-lklu -lamd -lcolamd -lbtf -lsuitesparseconfig

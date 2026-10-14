@@ -1,0 +1,20 @@
+An R-2R ladder of eight steps: 8 V in at the top, each node down the ladder half the one before
+V1 n8 0 DC 8
+R8 n8 n7 1k
+R7 n7 n6 1k
+R6 n6 n5 1k
+R5 n5 n4 1k
+R4 n4 n3 1k
+R3 n3 n2 1k
+R2 n2 n1 1k
+RG8 n8 0 2k
+RG7 n7 0 2k
+RG6 n6 0 2k
+RG5 n5 0 2k
+RG4 n4 0 2k
+RG3 n3 0 2k
+RG2 n2 0 2k
+RG1 n1 0 2k
+.op
+.print v(n8) v(n7) v(n4) v(n1) i(V1)
+.end
