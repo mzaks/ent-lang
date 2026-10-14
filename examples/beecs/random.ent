@@ -1,0 +1,81 @@
+// Numbers at random that are the same however the program runs, as in
+// examples/epidemic/random.ent (where they are explained): each is worked
+// out from what it is for (the run's seed, who draws, on which day, for
+// what), and nothing is kept between two draws.
+//
+//   let occasion = key(RandomSeed.seed, 0, Clock.tick, STOP)
+//   for s: Squadron {
+//     let k = key_of(occasion, s.number)
+//     if uniform(k, 0) < 0.3 { .. }
+//   }
+//
+// beecs draws from one stream, one number after another, and shuffles
+// lists with it; here an order at random is a number at random for each
+// entity, which a `for ... in turn by` goes by.
+import math
+
+// A whole number's bits stirred (SplitMix64's last step).
+fn mix(x: u64) -> u64 {
+  var z = x + 0x9e3779b97f4a7c15
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+  z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+  z ^ (z >> 31)
+}
+
+// The occasion: a seed, who draws, a day and what the draw is for.
+fn key(seed: i64, who: i32, day: i32, stream: i32) -> u64 {
+  let a = mix(seed as u64)
+  let b = mix(a ^ (who as i64 as u64))
+  let c = mix(b ^ (day as i64 as u64))
+  mix(c ^ (stream as i64 as u64))
+}
+
+// The key of one of many who draw on an occasion: the occasion's key
+// worked out once (`key(seed, 0, day, stream)`), and each one's of it
+// with one more stir.
+fn key_of(occasion: u64, who: i32) -> u64 { mix(occasion ^ (who as i64 as u64)) }
+
+// The n-th number of an occasion: from 0 to below 1, as Go's Float64.
+fn uniform(key: u64, n: i32) -> f64 {
+  let bits = mix(key + (n as i64 as u64) * 0xd1342543de82ef95)
+  (bits >> 11) as f64 / 9007199254740992.0
+}
+
+// The n-th whole number of an occasion, from 0 to below `count`.
+fn below(key: u64, n: i32, count: i32) -> i32 {
+  min((uniform(key, n) * count as f64) as i32, count - 1)
+}
+
+// The n-th number of an occasion as a place in an order at random: 32
+// bits, which a `for ... by` sorts in four passes (of 20,000 that go by
+// such numbers, two have the same about once in 20 orders, and go in
+// the order they are stored in).
+fn order(key: u64, n: i32) -> i64 {
+  (mix(key + (n as i64 as u64) * 0xd1342543de82ef95) >> 32) as i64
+}
+
+// A whole number of the Poisson distribution with this mean, of the
+// occasion's numbers from n on: counted up until the chance of so few is
+// used up, a part of the mean of at most 500 at a time (whose chance of
+// none, e^-500, is still an f64), the parts added.
+fn poisson(key: u64, n: i32, mean: f64) -> i32 {
+  var left = mean
+  var count = 0
+  var draw = n
+  while left > 0.0 {
+    let part = min(left, 500.0)
+    left -= part
+    let u = uniform(key, draw)
+    draw += 1
+    var k = 0
+    var chance = exp64(-part)
+    var below = chance
+    while below < u && k < 100000 {
+      k += 1
+      chance = chance * part / k as f64
+      below += chance
+    }
+    count += k
+  }
+  count
+}

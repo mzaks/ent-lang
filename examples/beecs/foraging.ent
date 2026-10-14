@@ -1,0 +1,682 @@
+// Foraging: flower patches and the squadrons of foragers that fly to
+// them, as entities (beecs's comp package), and a day's foraging in
+// rounds (sys/foraging.go), each round a schedule of systems:
+//
+//   schedule round() run_if Day.forage { .. }
+//   main { .. loop { morning() loop { round() } until Day.done  evening() } .. }
+//
+// beecs goes through its lists in an order its random stream shuffles;
+// here every squadron draws a number for its place (`Squadron.order`) and
+// a `for ... in turn by` visits them in that order, each seeing what
+// those before did: where a patch has nectar left for the next one, and
+// who is left resting to follow a dance.
+import math
+import parameters
+import random
+import colony
+
+// --- patches -----------------------------------------------------------------
+
+// Distance to the colony [m].
+component Patch { distance: f64 }
+// What the patch has today (beecs's PatchProperties): nectar [L], its
+// sucrose [mol/L], pollen [kg], and the chance a scout finds it.
+component Flowers { max_nectar: f64, concentration: f64, max_pollen: f64, detection: f64 }
+// A patch whose flowers are the same every day, or follow the season.
+component Constant { nectar: f64, pollen: f64, concentration: f64, detection: f64 }
+component Seasonal {
+  shift: i32, max_nectar: f64, max_pollen: f64, concentration: f64, detection: f64
+}
+// What is left today: nectar [muL], pollen [g], of what there was, and
+// what a nectar trip gains for what it costs.
+component Resource {
+  nectar: f64, max_nectar: f64, pollen: f64, max_pollen: f64, efficiency: f64
+}
+component Handling { nectar: f64, pollen: f64 }          // [s] on the flowers
+component Trip {                                         // [s], [kJ]
+  duration_nectar: f64, duration_pollen: f64, cost_nectar: f64, cost_pollen: f64
+}
+component Risk { nectar: f64, pollen: f64 }              // of dying on a trip
+component Advert { circuits: f64 }                       // of a dance for it
+component Visits { nectar: i32, pollen: i32 }            // today's foragers
+
+// --- squadrons ---------------------------------------------------------------
+
+enum Doing { Lazy, Resting, Searching, Recruited, Experienced, BringNectar, BringPollen }
+
+// What a squadron does, and whether it forages for pollen.
+component Activity { now: Doing, pollen: bool }
+// The patches it knows of, `none` where it knows none.
+component Known { nectar: entity, pollen: entity }
+component Age { born: i32 }                              // the day it was born
+component Milage { today: f32, total: f32 }              // [km]
+component NectarLoad { energy: f64 }                     // [kJ] a bee
+// Its number, for its random numbers, and its place in an order at random.
+component Squadron { number: i32, order: i64 }
+
+// Who rests, in an order at random, to follow dances; `Taken` of them
+// from the end have followed one.
+buffer Resting { who: entity } capacity 100000
+unique Taken: i32
+
+// The patches a scout may find this round, in their order, with the sums
+// of their chances to be found.
+buffer Candidates { patch: entity, upto: f64, nectar: bool, pollen: bool } capacity 1024
+unique Scouting { found: f64, all: f64 }
+
+// The day's foraging: the seconds there are for it, whether there is
+// any, the round, how long the rounds took (the mean trip of each), and
+// whether that is all for today. And the chance to start and to go for
+// pollen.
+unique Day {
+  seconds: i32, year: i32, forage: bool, round: i32, duration: f64, done: bool,
+  probability: f64, pollen_share: f64
+}
+// What a round's trips took and how many flew.
+unique Flights { duration: f64, foragers: i32 }
+// What a round's foragers bring home.
+unique Unloaded { energy: f64, pollen: f64 }
+// How many squadrons there have been.
+unique Counter: i32
+
+// The streams of numbers, per squadron and round.
+const DECIDE = 1
+const SEARCH = 2
+const RECRUIT = 3
+const DIE = 4
+const DANCE = 5
+const SHUFFLE_RECRUITS = 6
+const SHUFFLE_DANCE = 7
+const SQUADRON_MORTALITY = 8
+const BIRTH = 9
+const YEARS = 10
+
+// After every order at random.
+const LAST: i64 = 0x100000000
+
+fn stream(round: i32, purpose: i32) -> i32 { round * 16 + purpose }
+
+// The first candidate whose sum of chances reaches `p`.
+fn pick(candidates: Candidates, p: f64) -> i32 {
+  var found = -1
+  var i = 0
+  while found < 0 && i < len(candidates) {
+    if candidates[i].upto >= p { found = i }
+    i += 1
+  }
+  found
+}
+
+// --- setting up --------------------------------------------------------------
+
+// The patches (InitPatchesList) and the first squadrons
+// (InitPopulation), born from MaxAge to MinAge days before the first,
+// with up to MaxMilage flown.
+system hive() {
+  for i in 0..len(InitialPatches) {
+    if InitialPatches[i].seasonal {
+      spawn { Patch { distance: InitialPatches[i].distance },
+              Seasonal { shift: InitialPatches[i].shift, max_nectar: InitialPatches[i].nectar, max_pollen: InitialPatches[i].pollen,
+                         concentration: InitialPatches[i].concentration, detection: InitialPatches[i].detection },
+              Flowers { max_nectar: 0.0, concentration: 0.0, max_pollen: 0.0, detection: 0.0 },
+              Resource { nectar: 0.0, max_nectar: 0.0, pollen: 0.0, max_pollen: 0.0,
+                         efficiency: 0.0 },
+              Handling { nectar: 0.0, pollen: 0.0 },
+              Trip { duration_nectar: 0.0, duration_pollen: 0.0, cost_nectar: 0.0,
+                     cost_pollen: 0.0 },
+              Risk { nectar: 0.0, pollen: 0.0 }, Advert { circuits: 0.0 },
+              Visits { nectar: 0, pollen: 0 } }
+    } else {
+      spawn { Patch { distance: InitialPatches[i].distance },
+              Constant { nectar: InitialPatches[i].nectar, pollen: InitialPatches[i].pollen,
+                         concentration: InitialPatches[i].concentration, detection: InitialPatches[i].detection },
+              Flowers { max_nectar: 0.0, concentration: 0.0, max_pollen: 0.0, detection: 0.0 },
+              Resource { nectar: 0.0, max_nectar: 0.0, pollen: 0.0, max_pollen: 0.0,
+                         efficiency: 0.0 },
+              Handling { nectar: 0.0, pollen: 0.0 },
+              Trip { duration_nectar: 0.0, duration_pollen: 0.0, cost_nectar: 0.0,
+                     cost_pollen: 0.0 },
+              Risk { nectar: 0.0, pollen: 0.0 }, Advert { circuits: 0.0 },
+              Visits { nectar: 0, pollen: 0 } }
+    }
+  }
+  let squadrons = InitialPopulation.count / Foragers.squadron_size
+  let oldest = -InitialPopulation.max_age
+  let span = InitialPopulation.max_age - InitialPopulation.min_age
+  for i in 0..squadrons {
+    let k = key(RandomSeed.seed, i, -1, BIRTH)
+    let milage = uniform(k, 1) as f32 *
+                 (InitialPopulation.max_milage - InitialPopulation.min_milage) +
+                 InitialPopulation.min_milage
+    spawn { Activity { now: Doing.Resting, pollen: false },
+            Known { nectar: none, pollen: none },
+            Age { born: below(k, 0, span) + oldest },
+            Milage { today: 0.0, total: milage },
+            NectarLoad { energy: 0.0 },
+            Squadron { number: i, order: 0 } }
+  }
+  Counter = squadrons
+  Day.year = 0
+}
+
+// --- a day -------------------------------------------------------------------
+
+// The seconds for foraging today, from the hours of the year in turn, or
+// of one at random each new year (CalcForagingPeriod).
+system foraging_period() {
+  let years = len(Hours) / 365
+  let day = Clock.tick % 365
+  if day == 0 && years > 0 {
+    if ForagingPeriod.random_years {
+      Day.year = below(key(RandomSeed.seed, 0, Clock.tick, YEARS), 0, years)
+    } else {
+      Day.year = (Clock.tick / 365) % years
+    }
+  }
+  Day.seconds = (Hours[Day.year * 365 + day].hours * 3600.0) as i32
+}
+
+// The flowers of today, and every patch full again (ReplenishPatches).
+system replenish() {
+  for f: mut Flowers, c: Constant {
+    f.max_nectar = c.nectar
+    f.max_pollen = c.pollen
+    f.detection = c.detection
+    f.concentration = c.concentration
+  }
+  for f: mut Flowers, s: Seasonal {
+    let now = season(Clock.tick + s.shift)
+    f.max_nectar = s.max_nectar * now
+    f.max_pollen = s.max_pollen * now
+    f.detection = s.detection
+    f.concentration = s.concentration
+  }
+  for f: Flowers, r: mut Resource, v: mut Visits {
+    r.max_nectar = f.max_nectar * 1000.0 * 1000.0
+    r.max_pollen = f.max_pollen * 1000.0
+    r.nectar = r.max_nectar
+    r.pollen = r.max_pollen
+    v.nectar = 0
+    v.pollen = 0
+  }
+}
+
+// The count of foragers, after those of the cohorts (CountPopulation).
+system count_foragers() {
+  Population.workers_foragers = 0
+  for with Squadron { Population.workers_foragers += Foragers.squadron_size }
+}
+
+// The new squadrons of the day, born the age of first foraging ago.
+system new_foragers() {
+  for i in 0..Emerging.squadrons {
+    spawn { Activity { now: Doing.Resting, pollen: false },
+            Known { nectar: none, pollen: none },
+            Age { born: Clock.tick - Aff.days },
+            Milage { today: 0.0, total: 0.0 },
+            NectarLoad { energy: 0.0 },
+            Squadron { number: Counter + i, order: 0 } }
+  }
+  Counter += Emerging.squadrons
+  Emerging.squadrons = 0
+}
+
+// Before the rounds: the chance to start foraging, by how the stores
+// are, what is decent honey for the colony now, and whether there is
+// foraging today at all (the start of Foraging.Update).
+system morning() {
+  for m: mut Milage { m.today = 0.0 }
+  let pollen = Hive.pollen / Hive.ideal_pollen
+  let honey = Hive.honey / Hive.decent_honey
+  Day.probability =
+    if pollen > 0.5 && honey > 1.0 { 0.0 }
+    else if honey < 0.2 { Foraging.prob_emergency }
+    else if pollen < 0.2 || honey < 0.5 { Foraging.prob_high }
+    else { Foraging.prob_base }
+  Hive.decent_honey = max((Population.workers_in_hive + Population.workers_foragers) as f64,
+                          1.0) * Stores.decent_honey_per_worker * EnergyContent.honey
+  let most_honey = Stores.max_honey_store_kg * 1000.0 * EnergyContent.honey
+  Day.forage = !(Day.seconds <= 0 ||
+                 (Hive.honey >= 0.95 * most_honey && Hive.pollen >= Hive.ideal_pollen))
+  Day.done = !Day.forage
+  Day.round = 0
+  Day.duration = 0.0
+}
+
+// After the rounds, everybody rests.
+system evening() {
+  if Day.forage {
+    for a: mut Activity { a.now = Doing.Resting }
+  }
+}
+
+// --- a round -----------------------------------------------------------------
+
+// The share that goes for pollen this round, and the patches' trips as
+// they are now (updatePatches).
+system patches() {
+  var share = (1.0 - Hive.pollen / Hive.ideal_pollen) * Dance.max_proportion_pollen_foragers
+  if Hive.honey / Hive.decent_honey < 0.5 { share *= Hive.honey / Hive.decent_honey }
+  Day.pollen_share = share
+  for p: Patch, f: Flowers, r: mut Resource, h: mut Handling, t: mut Trip, k: mut Risk,
+      d: mut Advert {
+    if HandlingTime.constant_handling_time {
+      h.pollen = HandlingTime.pollen_gathering
+      h.nectar = HandlingTime.nectar_gathering
+    } else {
+      h.pollen = HandlingTime.pollen_gathering * r.max_pollen / r.pollen
+      h.nectar = HandlingTime.nectar_gathering * r.max_nectar / r.nectar
+    }
+    let cost = Foragers.flight_cost_per_m
+    let there_and_back = 2.0 * p.distance * cost
+    t.cost_nectar = there_and_back +
+                    cost * h.nectar * Foragers.flight_velocity * Foraging.energy_on_flower
+    t.cost_pollen = there_and_back +
+                    cost * h.pollen * Foragers.flight_velocity * Foraging.energy_on_flower
+    r.efficiency = (f.concentration * Foragers.nectar_load * EnergyContent.sucrose -
+                    t.cost_nectar) / t.cost_nectar
+    t.duration_nectar = 2.0 * p.distance / Foragers.flight_velocity + h.nectar
+    t.duration_pollen = 2.0 * p.distance / Foragers.flight_velocity + h.pollen
+    k.nectar = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, t.duration_nectar)
+    k.pollen = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, t.duration_pollen)
+    d.circuits = max(0.0, min(r.efficiency * Dance.slope + Dance.intercept,
+                              Dance.max_circuits as f64))
+  }
+}
+
+// Every squadron decides: nectar or pollen, to stop, to give up a patch
+// that is not worth it, to start (decisions).
+system decide() {
+  let honey = Hive.honey / Hive.decent_honey
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DECIDE))
+  for a: mut Activity, k: mut Known, m: Milage, s: Squadron {
+    let draw = key_of(occasion, s.number)
+    if a.now != Doing.Recruited { a.pollen = uniform(draw, 0) < Day.pollen_share }
+    if a.now != Doing.Recruited && a.now != Doing.Resting && a.now != Doing.Lazy {
+      if uniform(draw, 1) < Foraging.stop_probability { a.now = Doing.Resting }
+    }
+    if !a.pollen && k.nectar != none {
+      if let efficiency = Resource(k.nectar).efficiency {
+        if uniform(draw, 2) < 1.0 / efficiency && uniform(draw, 3) < honey {
+          k.nectar = none
+          if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
+        }
+      }
+    }
+    // As beecs has it: a squadron that gives up its pollen patch forgets
+    // its nectar patch.
+    if k.pollen != none && a.pollen {
+      if let duration = Trip(k.pollen).duration_pollen {
+        if uniform(draw, 4) < 1.0 - pow64(1.0 - Foraging.abandon_pollen_per_sec, duration) {
+          k.nectar = none
+          if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
+        }
+      }
+    }
+    if a.now == Doing.Resting && uniform(draw, 5) < Day.probability {
+      let known = if a.pollen { k.pollen } else { k.nectar }
+      a.now = if known == none { Doing.Searching } else { Doing.Experienced }
+    }
+    if m.today > Foragers.max_km_per_day as f32 { a.now = Doing.Resting }
+  }
+}
+
+// The patches a scout may find: those with a load left for a squadron.
+system candidates() {
+  let size = Foragers.squadron_size as f64
+  Candidates = []
+  Scouting.all = 0.0
+  var none_found = 1.0 as f64
+  for e, r: Resource, f: Flowers {
+    let nectar = r.nectar >= Foragers.nectar_load * size
+    let pollen = r.pollen >= Foragers.pollen_load * size
+    if nectar || pollen {
+      Candidates += { patch: e, upto: 0.0, nectar: nectar, pollen: pollen }
+    }
+  }
+  for i in 0..len(Candidates) {
+    if let detection = Flowers(Candidates[i].patch).detection {
+      Scouting.all = Scouting.all + detection
+      Candidates[i].upto = Scouting.all
+      none_found = none_found * (1.0 - detection)
+    }
+  }
+  Scouting.found = 1.0 - none_found
+}
+
+// Scouts find a patch, by the patches' chances, or none; one with what
+// the scout wants is its own from now on, and it brings a load from it
+// (the searchers of `searching`).
+system search() {
+  let size = Foragers.squadron_size
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, SEARCH))
+  for a: mut Activity, k: mut Known, s: Squadron where a.now == Doing.Searching {
+    let draw = key_of(occasion, s.number)
+    if uniform(draw, 0) < Scouting.found {
+      let i = pick(Candidates, uniform(draw, 1) * Scouting.all)
+      let patch = Candidates[i].patch
+      if a.pollen {
+        if Candidates[i].pollen {
+          k.pollen = patch
+          a.now = Doing.BringPollen
+          Resource(patch).pollen -= Foragers.pollen_load * size as f64
+          Visits(patch).pollen += size
+        } else {
+          k.pollen = none
+        }
+      } else {
+        if Candidates[i].nectar {
+          k.nectar = patch
+          a.now = Doing.BringNectar
+          Resource(patch).nectar -= Foragers.nectar_load * size as f64
+          Visits(patch).nectar += size
+        } else {
+          k.nectar = none
+        }
+      }
+    }
+  }
+}
+
+// The recruits' places in an order at random (the others go last).
+system shuffle_recruits() {
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, SHUFFLE_RECRUITS))
+  for a: Activity, s: mut Squadron {
+    s.order = if a.now == Doing.Recruited { order(key_of(occasion, s.number), 0) } else { LAST }
+  }
+}
+
+// Recruits look for the patch a dance told them of, one after another in
+// an order at random: found, and with a load left, they bring one; else
+// they search (the recruits of `searching`).
+system recruits() {
+  let size = Foragers.squadron_size
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, RECRUIT))
+  for a: mut Activity, k: mut Known, s: Squadron in turn by s.order
+      where a.now == Doing.Recruited {
+    let draw = key_of(occasion, s.number)
+    if !a.pollen && k.nectar != none {
+      var success = false
+      if uniform(draw, 0) < Dance.find_probability {
+        if let nectar = Resource(k.nectar).nectar {
+          if nectar >= Foragers.nectar_load * size as f64 {
+            Resource(k.nectar).nectar = nectar - Foragers.nectar_load * size as f64
+            if let visits = Visits(k.nectar).nectar { Visits(k.nectar).nectar = visits + size }
+            a.now = Doing.BringNectar
+            success = true
+          }
+        }
+      }
+      if !success {
+        a.now = Doing.Searching
+        k.nectar = none
+      }
+    }
+    if a.pollen && k.pollen != none {
+      var success = false
+      if uniform(draw, 1) < Dance.find_probability {
+        if let pollen = Resource(k.pollen).pollen {
+          if pollen >= Foragers.pollen_load * size as f64 {
+            Resource(k.pollen).pollen = pollen - Foragers.pollen_load * size as f64
+            if let visits = Visits(k.pollen).pollen { Visits(k.pollen).pollen = visits + size }
+            a.now = Doing.BringPollen
+            success = true
+          }
+        }
+      }
+      if !success {
+        a.now = Doing.Searching
+        k.pollen = none
+      }
+    }
+  }
+}
+
+// Experienced squadrons go to their patch, one after another as they
+// came: with a load left they bring one, else they search. Who brings
+// one has flown there and back (collecting).
+system collect() {
+  let size = Foragers.squadron_size
+  for a: mut Activity, k: mut Known, m: mut Milage, n: mut NectarLoad, s: Squadron
+      in turn by s.number {
+    if a.now == Doing.Experienced {
+      if a.pollen {
+        if k.pollen == none { a.now = Doing.Resting } else {
+          if let pollen = Resource(k.pollen).pollen {
+            if pollen >= Foragers.pollen_load * size as f64 {
+              a.now = Doing.BringPollen
+              Resource(k.pollen).pollen = pollen - Foragers.pollen_load * size as f64
+              if let visits = Visits(k.pollen).pollen { Visits(k.pollen).pollen = visits + size }
+            } else {
+              a.now = Doing.Searching
+              k.pollen = none
+            }
+          }
+        }
+      } else {
+        if k.nectar == none { a.now = Doing.Resting } else {
+          if let nectar = Resource(k.nectar).nectar {
+            if nectar >= Foragers.nectar_load * size as f64 {
+              a.now = Doing.BringNectar
+              Resource(k.nectar).nectar = nectar - Foragers.nectar_load * size as f64
+              if let visits = Visits(k.nectar).nectar { Visits(k.nectar).nectar = visits + size }
+            } else {
+              a.now = Doing.Searching
+              k.nectar = none
+            }
+          }
+        }
+      }
+    }
+    if a.now == Doing.BringNectar {
+      if let concentration = Flowers(k.nectar).concentration, let cost = Trip(k.nectar).cost_nectar {
+        n.energy = concentration * Foragers.nectar_load * EnergyContent.sucrose
+        let km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+        m.today += km
+        m.total += km
+      }
+    }
+    if a.now == Doing.BringPollen {
+      if let cost = Trip(k.pollen).cost_pollen {
+        let km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+        m.today += km
+        m.total += km
+      }
+    }
+  }
+}
+
+// What the flights cost in honey, how long they took and how many flew
+// (flightCost).
+system flight_cost() {
+  let size = Foragers.squadron_size as f64
+  Flights.duration = 0.0
+  Flights.foragers = 0
+  let search_km = (Foraging.search_length / 1000.0) as f32
+  let search_energy = Foraging.search_length * Foragers.flight_cost_per_m * size
+  let search_seconds = Foraging.search_length / Foragers.flight_velocity
+  var spent = 0.0 as f64
+  for a: Activity, k: Known, m: mut Milage {
+    if a.now == Doing.Searching {
+      m.today += search_km
+      m.total += search_km
+      Hive.honey -= search_energy
+      Flights.duration += search_seconds
+      Flights.foragers += 1
+    } else if a.now == Doing.BringNectar || a.now == Doing.BringPollen {
+      if a.pollen {
+        if let duration = Trip(k.pollen).duration_pollen, let cost = Trip(k.pollen).cost_pollen {
+          Flights.duration += duration + HandlingTime.pollen_unloading
+          Hive.honey -= cost * size
+        }
+      } else {
+        if let duration = Trip(k.nectar).duration_nectar, let cost = Trip(k.nectar).cost_nectar {
+          Flights.duration += duration + HandlingTime.nectar_unloading
+          Hive.honey -= cost * size
+        }
+      }
+      Flights.foragers += 1
+    }
+  }
+}
+
+// Some die on their way (mortality).
+system flight_mortality() {
+  let search_seconds = Foraging.search_length / Foragers.flight_velocity
+  let search_risk = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, search_seconds)
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DIE))
+  for e, a: Activity, k: Known, s: Squadron {
+    let draw = key_of(occasion, s.number)
+    let u = uniform(draw, 0)
+    if a.now == Doing.Searching {
+      if u < search_risk { e.destroy() }
+    } else if a.now == Doing.BringNectar {
+      if let risk = Risk(k.nectar).nectar { if u < risk { e.destroy() } }
+    } else if a.now == Doing.BringPollen {
+      if let risk = Risk(k.pollen).pollen { if u < risk { e.destroy() } }
+    }
+  }
+}
+
+// The resting, in an order at random, for the dancers to take from, and
+// the dancers in another. (Those who do neither go last, as they are
+// stored.)
+system rest_in_line() {
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, SHUFFLE_DANCE))
+  for a: Activity, s: mut Squadron {
+    let busy = a.now == Doing.Resting || a.now == Doing.BringNectar ||
+               a.now == Doing.BringPollen
+    s.order = if busy { order(key_of(occasion, s.number), 0) } else { LAST }
+  }
+}
+
+system line_up() {
+  Resting = []
+  Taken = 0
+  for e, a: Activity, s: Squadron by s.order where a.now == Doing.Resting {
+    Resting += { who: e }
+  }
+}
+
+// Who brings a load dances for its patch, one after another in an order
+// at random: for nectar, so many circuits that a Poisson number of
+// resting squadrons follow it (none, if not so many are left), for
+// pollen a fixed number. A follower that knows no patch, or a worse one,
+// is recruited to the dancer's; else it goes back to its own (dancing).
+system dance() {
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DANCE))
+  for a: Activity, k: Known, s: Squadron in turn by s.order
+      where a.now == Doing.BringNectar || a.now == Doing.BringPollen {
+    if a.now == Doing.BringNectar {
+      if let efficiency = Resource(k.nectar).efficiency, let circuits = Advert(k.nectar).circuits {
+        let draw = key_of(occasion, s.number)
+        let followers = poisson(draw, 0, circuits * 0.05)
+        if followers > 0 && len(Resting) - Taken >= followers {
+          for i in 0..followers {
+            let follower = Resting[len(Resting) - 1 - Taken].who
+            Taken = Taken + 1
+            if let known = Known(follower).nectar {
+              var recruited = known == none
+              if !recruited {
+                if let theirs = Resource(known).efficiency { recruited = efficiency > theirs }
+              }
+              if recruited {
+                Known(follower).nectar = k.nectar
+                Activity(follower).now = Doing.Recruited
+                Activity(follower).pollen = false
+              } else {
+                Activity(follower).now = Doing.Experienced
+              }
+            }
+          }
+        }
+      }
+    }
+    if a.now == Doing.BringPollen {
+      if let duration = Trip(k.pollen).duration_pollen {
+        let followers = Dance.pollen_dance_followers
+        if len(Resting) - Taken >= followers {
+          for i in 0..followers {
+            let follower = Resting[len(Resting) - 1 - Taken].who
+            Taken = Taken + 1
+            if let known = Known(follower).pollen {
+              var recruited = known == none
+              if !recruited {
+                if let theirs = Trip(known).duration_pollen { recruited = duration < theirs }
+              }
+              if recruited {
+                Known(follower).pollen = k.pollen
+                Activity(follower).now = Doing.Recruited
+                Activity(follower).pollen = true
+              } else {
+                Activity(follower).now = Doing.Experienced
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// The loads into the stores, up to the most honey the hive holds
+// (unloading: one squadron's load after another's, each up to the most,
+// comes to all of them up to the most).
+system unload() {
+  let size = Foragers.squadron_size as f64
+  Unloaded.energy = 0.0
+  Unloaded.pollen = 0.0
+  for a: mut Activity, n: mut NectarLoad {
+    if a.now == Doing.BringNectar {
+      Unloaded.energy += n.energy * size
+      n.energy = 0.0
+      a.now = Doing.Experienced
+    } else if a.now == Doing.BringPollen {
+      Unloaded.pollen += Foragers.pollen_load * size
+      a.now = Doing.Experienced
+    }
+  }
+  let most_honey = Stores.max_honey_store_kg * 1000.0 * EnergyContent.honey
+  if Unloaded.energy > 0.0 { Hive.honey = min(Hive.honey + Unloaded.energy, most_honey) }
+  Hive.pollen += Unloaded.pollen
+}
+
+// The round's mean trip, added to the day's: the rounds go on while
+// there is time left.
+system round_end() {
+  let mean = if Flights.foragers > 0 { Flights.duration / Flights.foragers as f64 }
+             else { Foraging.search_length / Foragers.flight_velocity }
+  Day.duration += mean
+  Day.done = Day.duration > Day.seconds as f64
+  Day.round += 1
+}
+
+// The squadrons that die of age, of their milage, or of the in-hive
+// bees' mortality (MortalityForagers).
+system squadron_mortality() {
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, SQUADRON_MORTALITY)
+  for e, g: Age, m: Milage, s: Squadron {
+    let u = uniform(key_of(occasion, s.number), 0)
+    if Clock.tick - g.born >= WorkerDevelopment.max_lifespan ||
+       m.total >= WorkerMortality.max_milage || u < WorkerMortality.in_hive {
+      e.destroy()
+    }
+  }
+}
+
+schedule round() run_if Day.forage {
+  patches()
+  decide()
+  candidates()
+  search()
+  shuffle_recruits()
+  recruits()
+  collect()
+  flight_cost()
+  flight_mortality()
+  rest_in_line()
+  line_up()
+  dance()
+  unload()
+  round_end()
+}

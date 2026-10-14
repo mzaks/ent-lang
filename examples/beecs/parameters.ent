@@ -1,0 +1,467 @@
+// The model's numbers: beecs's defaults (BEEHAVE's), and what a file
+// says otherwise.
+//
+//   import parameters
+//   world { Run.file = "parameters.txt" }      // or none: the defaults
+//   schedule setup() { parameters()  weather()  .. }
+//
+// Each group of beecs's parameters is a unique of the same name, with
+// its fields in snake case (`Foragers.SquadronSize` is
+// `Foragers.squadron_size`), filled with the defaults by this module's
+// `world`. `parameters` then reads the file `Run.file` names, if there is
+// one: a line for each number that is to be another, its name as beecs's
+// JSON has it and the number after it,
+//
+//   RandomSeed.Seed 7
+//   Termination.MaxTicks 730
+//   ForagingPeriod.Files foraging-period/berlin2001.txt foraging-period/berlin2002.txt
+//   Patch.Constant 1500 20 1 1.5 0.2
+//   Patch.Seasonal 800 30 40 2 1.5 0.2
+//
+// with `#` before what is not read. The flower patches are lines of
+// their own, as many as there are: `Patch.Constant` with the distance
+// [m], nectar [L], pollen [kg], the nectar's concentration [mol/L] and
+// the chance to be found; `Patch.Seasonal` with the distance, the shift
+// of the season [d], the most nectar and pollen, the concentration and
+// the chance. A file with any replaces the default two.
+//
+// `weather` reads the hours there are for foraging on each day of a year
+// from the files `ForagingPeriod.Files` names (365 numbers a year, any
+// number of years in a file), as beecs does: those of Berlin are fetched
+// by reference/fetch.sh into build/beecs/run, where the program is
+// started.
+import files
+import decimal
+
+capacity Bytes 262144
+
+unique Run { file: text[126], read: bool, weather: bool }
+unique RandomSeed { seed: i64 }
+unique Termination { max_ticks: i32, on_extinction: bool }
+unique WorkerDevelopment { egg_time: i32, larvae_time: i32, pupae_time: i32, max_lifespan: i32 }
+unique DroneDevelopment { egg_time: i32, larvae_time: i32, pupae_time: i32, max_lifespan: i32 }
+unique WorkerMortality { eggs: f64, larvae: f64, pupae: f64, in_hive: f64, max_milage: f32 }
+unique DroneMortality { eggs: f64, larvae: f64, pupae: f64, in_hive: f64 }
+unique AgeFirstForaging { base: i32, min: i32, max: i32 }
+unique Foragers {
+  flight_velocity: f64,    // [m/s]
+  flight_cost_per_m: f64,  // [kJ/m]
+  max_km_per_day: f64,     // [km]
+  nectar_load: f64,        // [muL]
+  pollen_load: f64,        // [g]
+  squadron_size: i32
+}
+unique Foraging {
+  prob_base: f64, prob_high: f64, prob_emergency: f64,
+  search_length: f64,          // [m]
+  energy_on_flower: f64,       // share of the flight's energy used on a flower
+  mortality_per_sec: f64,
+  stop_probability: f64,
+  abandon_pollen_per_sec: f64
+}
+unique ForagingPeriod { files: text[254], random_years: bool }
+unique HandlingTime {
+  nectar_gathering: f64, pollen_gathering: f64,   // [s]
+  nectar_unloading: f64, pollen_unloading: f64,   // [s]
+  constant_handling_time: bool
+}
+unique Dance {
+  slope: f64, intercept: f64, max_circuits: i32, find_probability: f64,
+  pollen_dance_followers: i32, max_proportion_pollen_foragers: f64
+}
+unique EnergyContent { honey: f64, sucrose: f64 }   // [kJ/g], [kJ/micromol]
+unique Stores {
+  ideal_pollen_store_days: i32,
+  min_ideal_pollen_store: f64,     // [g]
+  max_honey_store_kg: f64,         // [kg]
+  decent_honey_per_worker: f64,    // [g]
+  protein_store_nurse: f64         // [d]
+}
+unique HoneyNeeds {   // [mg/d], the total of a larva's development [mg]
+  worker_resting: f64, worker_nurse: f64, worker_larva_total: f64,
+  drone_larva: f64, drone: f64
+}
+unique PollenNeeds { worker_larva_total: f64, drone_larva: f64, worker: f64, drone: f64 }
+unique Nursing {
+  max_brood_nurse_ratio: f64, forager_nursing_contribution: f64,
+  max_eggs_per_day: i32, drone_eggs_proportion: f64, egg_nursing_limit: bool,
+  max_brood_cells: i32,
+  drone_egg_laying_season_start: i32, drone_egg_laying_season_end: i32
+}
+unique InitialPopulation { count: i32, min_age: i32, max_age: i32, min_milage: f32, max_milage: f32 }
+unique InitialStores { honey: f64, pollen: f64 }   // [kg], [g]
+
+// The flower patches there are at the start.
+buffer InitialPatches {
+  seasonal: bool, distance: f64, shift: i32, nectar: f64, pollen: f64,
+  concentration: f64, detection: f64
+} capacity 1024
+
+// The hours for foraging, a row for each day of every year read.
+buffer Hours { hours: f64 } capacity 36500
+
+world {
+  Run.file = "parameters.txt"
+  RandomSeed.seed = 1
+  Termination.max_ticks = 365
+  Termination.on_extinction = false
+  WorkerDevelopment.egg_time = 3
+  WorkerDevelopment.larvae_time = 6
+  WorkerDevelopment.pupae_time = 12
+  WorkerDevelopment.max_lifespan = 290
+  DroneDevelopment.egg_time = 3
+  DroneDevelopment.larvae_time = 7
+  DroneDevelopment.pupae_time = 14
+  DroneDevelopment.max_lifespan = 37
+  WorkerMortality.eggs = 0.03
+  WorkerMortality.larvae = 0.01
+  WorkerMortality.pupae = 0.001
+  WorkerMortality.in_hive = 0.004
+  WorkerMortality.max_milage = 800.0
+  DroneMortality.eggs = 0.064
+  DroneMortality.larvae = 0.044
+  DroneMortality.pupae = 0.005
+  DroneMortality.in_hive = 0.05
+  AgeFirstForaging.base = 21
+  AgeFirstForaging.min = 7
+  AgeFirstForaging.max = 50
+  Foragers.flight_velocity = 6.5
+  Foragers.flight_cost_per_m = 0.000006
+  Foragers.nectar_load = 50.0
+  Foragers.pollen_load = 0.015
+  Foragers.max_km_per_day = 7299.0
+  Foragers.squadron_size = 100
+  Foraging.prob_base = 0.01
+  Foraging.prob_high = 0.05
+  Foraging.prob_emergency = 0.2
+  Foraging.search_length = 6.5 * 60.0 * 17.0
+  Foraging.energy_on_flower = 0.2
+  Foraging.mortality_per_sec = 0.00001
+  Foraging.stop_probability = 0.3
+  Foraging.abandon_pollen_per_sec = 0.00002
+  ForagingPeriod.files = "foraging-period/berlin2000.txt"
+  ForagingPeriod.random_years = false
+  HandlingTime.nectar_gathering = 1200.0
+  HandlingTime.pollen_gathering = 600.0
+  HandlingTime.nectar_unloading = 116.0
+  HandlingTime.pollen_unloading = 210.0
+  HandlingTime.constant_handling_time = false
+  Dance.slope = 1.16
+  Dance.intercept = 0.0
+  Dance.max_circuits = 117
+  Dance.find_probability = 0.5
+  Dance.pollen_dance_followers = 2
+  Dance.max_proportion_pollen_foragers = 0.8
+  EnergyContent.honey = 12.78
+  EnergyContent.sucrose = 0.00582
+  Stores.ideal_pollen_store_days = 7
+  Stores.min_ideal_pollen_store = 250.0
+  Stores.max_honey_store_kg = 50.0
+  Stores.decent_honey_per_worker = 1.5
+  Stores.protein_store_nurse = 7.0
+  HoneyNeeds.worker_resting = 11.0
+  HoneyNeeds.worker_nurse = 53.42
+  HoneyNeeds.worker_larva_total = 65.4
+  HoneyNeeds.drone_larva = 19.2
+  HoneyNeeds.drone = 10.0
+  PollenNeeds.worker_larva_total = 142.0
+  PollenNeeds.drone_larva = 50.0
+  PollenNeeds.worker = 1.5
+  PollenNeeds.drone = 2.0
+  Nursing.max_brood_nurse_ratio = 3.0
+  Nursing.forager_nursing_contribution = 0.2
+  Nursing.max_eggs_per_day = 1600
+  Nursing.drone_eggs_proportion = 0.04
+  Nursing.egg_nursing_limit = true
+  Nursing.max_brood_cells = 200000
+  Nursing.drone_egg_laying_season_start = 115
+  Nursing.drone_egg_laying_season_end = 240
+  InitialPopulation.count = 10000
+  InitialPopulation.min_age = 100
+  InitialPopulation.max_age = 160
+  InitialPopulation.min_milage = 0.0
+  InitialPopulation.max_milage = 200.0
+  InitialStores.honey = 25.0
+  InitialStores.pollen = 100.0
+  InitialPatches += { seasonal: false, distance: 1500.0, shift: 0, nectar: 20.0,
+                      pollen: 1.0, concentration: 1.5, detection: 0.2 }
+  InitialPatches += { seasonal: false, distance: 500.0, shift: 0, nectar: 20.0,
+                      pollen: 1.0, concentration: 1.5, detection: 0.2 }
+}
+
+// --- the file -----------------------------------------------------------------
+
+const NEWLINE = 10
+const SPACE = 32
+const TAB = 9
+const RETURN = 13
+const HASH = 35
+
+fn blank(byte: i32) -> bool { byte == SPACE || byte == TAB || byte == RETURN }
+
+// Where the line after the one at `at` starts (the end, after the last).
+fn next_line(bytes: Bytes, at: i32) -> i32 {
+  var i = at
+  while i < len(bytes) && bytes[i].value as i32 != NEWLINE { i += 1 }
+  min(i + 1, len(bytes))
+}
+
+// Where the word at or after `at` in its line starts.
+fn word_start(bytes: Bytes, at: i32) -> i32 {
+  var i = at
+  while i < len(bytes) && blank(bytes[i].value as i32) { i += 1 }
+  i
+}
+
+// Where the word that starts at `at` ends.
+fn word_end(bytes: Bytes, at: i32) -> i32 {
+  var i = at
+  while i < len(bytes) && !blank(bytes[i].value as i32) &&
+        bytes[i].value as i32 != NEWLINE && bytes[i].value as i32 != HASH { i += 1 }
+  i
+}
+
+// Whether the word from `from` to `to` is `name`.
+fn is_word(bytes: Bytes, from: i32, to: i32, name: text[62]) -> bool {
+  var same = to - from == len(name)
+  var i = 0
+  while same && i < len(name) {
+    same = bytes[from + i].value as i8 == name[i]
+    i += 1
+  }
+  same
+}
+
+// Where what follows the name of the first line with that name starts,
+// -1 where no line has it.
+fn after_name(bytes: Bytes, name: text[62]) -> i32 {
+  var found = -1
+  var line = 0
+  while found < 0 && line < len(bytes) {
+    let from = word_start(bytes, line)
+    let to = word_end(bytes, from)
+    if is_word(bytes, from, to, name) { found = to }
+    line = next_line(bytes, line)
+  }
+  found
+}
+
+fn number(bytes: Bytes, name: text[62], otherwise: f64) -> f64 {
+  let at = after_name(bytes, name)
+  if at < 0 { otherwise } else {
+    let (value, next) = read_real(bytes, at)
+    if next == at { otherwise } else { value }
+  }
+}
+
+fn whole(bytes: Bytes, name: text[62], otherwise: i32) -> i32 {
+  number(bytes, name, otherwise as f64) as i32
+}
+
+// `true` or `false`, or 1 or 0.
+fn truth(bytes: Bytes, name: text[62], otherwise: bool) -> bool {
+  let at = after_name(bytes, name)
+  if at < 0 { otherwise } else {
+    let from = word_start(bytes, at)
+    let to = word_end(bytes, from)
+    if is_word(bytes, from, to, "true") || is_word(bytes, from, to, "1") { true }
+    else if is_word(bytes, from, to, "false") || is_word(bytes, from, to, "0") { false }
+    else { otherwise }
+  }
+}
+
+// The printable bytes, each as a text, to put a file's name together from
+// the bytes of the file (a byte that is not printable comes out as "?").
+table printable: text[1] = [
+  " ", "!", "\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/",
+  "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=", ">", "?",
+  "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
+  "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "\\", "]", "^", "_",
+  "`", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o",
+  "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "\{", "|", "\}", "~"
+]
+
+// What follows the name of the first line with that name, to its end or
+// a `#`, without the blanks at either end; `otherwise` where no line has
+// the name.
+fn words(bytes: Bytes, name: text[62], otherwise: text[254]) -> text[254] {
+  let at = after_name(bytes, name)
+  var all: text[254] = ""
+  if at < 0 { all = otherwise } else {
+    let from = word_start(bytes, at)
+    var to = from
+    while to < len(bytes) && bytes[to].value as i32 != NEWLINE &&
+          bytes[to].value as i32 != HASH { to += 1 }
+    while to > from && blank(bytes[to - 1].value as i32) { to -= 1 }
+    for i in from..to {
+      let byte = bytes[i].value as i32
+      all += if byte >= 32 && byte < 127 { printable[byte - 32] } else { "?" }
+    }
+  }
+  all
+}
+
+system parameters() {
+  Run.read = false
+  if Run.file != "" { Run.read = read_file(Run.file, Bytes) > 0 }
+  if Run.read {
+    RandomSeed.seed = number(Bytes, "RandomSeed.Seed", RandomSeed.seed as f64) as i64
+    Termination.max_ticks = whole(Bytes, "Termination.MaxTicks", Termination.max_ticks)
+    Termination.on_extinction = truth(Bytes, "Termination.OnExtinction", Termination.on_extinction)
+    WorkerDevelopment.egg_time = whole(Bytes, "WorkerDevelopment.EggTime", WorkerDevelopment.egg_time)
+    WorkerDevelopment.larvae_time = whole(Bytes, "WorkerDevelopment.LarvaeTime", WorkerDevelopment.larvae_time)
+    WorkerDevelopment.pupae_time = whole(Bytes, "WorkerDevelopment.PupaeTime", WorkerDevelopment.pupae_time)
+    WorkerDevelopment.max_lifespan = whole(Bytes, "WorkerDevelopment.MaxLifespan", WorkerDevelopment.max_lifespan)
+    DroneDevelopment.egg_time = whole(Bytes, "DroneDevelopment.EggTime", DroneDevelopment.egg_time)
+    DroneDevelopment.larvae_time = whole(Bytes, "DroneDevelopment.LarvaeTime", DroneDevelopment.larvae_time)
+    DroneDevelopment.pupae_time = whole(Bytes, "DroneDevelopment.PupaeTime", DroneDevelopment.pupae_time)
+    DroneDevelopment.max_lifespan = whole(Bytes, "DroneDevelopment.MaxLifespan", DroneDevelopment.max_lifespan)
+    WorkerMortality.eggs = number(Bytes, "WorkerMortality.Eggs", WorkerMortality.eggs)
+    WorkerMortality.larvae = number(Bytes, "WorkerMortality.Larvae", WorkerMortality.larvae)
+    WorkerMortality.pupae = number(Bytes, "WorkerMortality.Pupae", WorkerMortality.pupae)
+    WorkerMortality.in_hive = number(Bytes, "WorkerMortality.InHive", WorkerMortality.in_hive)
+    WorkerMortality.max_milage = number(Bytes, "WorkerMortality.MaxMilage", WorkerMortality.max_milage as f64) as f32
+    DroneMortality.eggs = number(Bytes, "DroneMortality.Eggs", DroneMortality.eggs)
+    DroneMortality.larvae = number(Bytes, "DroneMortality.Larvae", DroneMortality.larvae)
+    DroneMortality.pupae = number(Bytes, "DroneMortality.Pupae", DroneMortality.pupae)
+    DroneMortality.in_hive = number(Bytes, "DroneMortality.InHive", DroneMortality.in_hive)
+    AgeFirstForaging.base = whole(Bytes, "AgeFirstForaging.Base", AgeFirstForaging.base)
+    AgeFirstForaging.min = whole(Bytes, "AgeFirstForaging.Min", AgeFirstForaging.min)
+    AgeFirstForaging.max = whole(Bytes, "AgeFirstForaging.Max", AgeFirstForaging.max)
+    Foragers.flight_velocity = number(Bytes, "Foragers.FlightVelocity", Foragers.flight_velocity)
+    Foragers.flight_cost_per_m = number(Bytes, "Foragers.FlightCostPerM", Foragers.flight_cost_per_m)
+    Foragers.max_km_per_day = number(Bytes, "Foragers.MaxKmPerDay", Foragers.max_km_per_day)
+    Foragers.nectar_load = number(Bytes, "Foragers.NectarLoad", Foragers.nectar_load)
+    Foragers.pollen_load = number(Bytes, "Foragers.PollenLoad", Foragers.pollen_load)
+    Foragers.squadron_size = whole(Bytes, "Foragers.SquadronSize", Foragers.squadron_size)
+    Foraging.prob_base = number(Bytes, "Foraging.ProbBase", Foraging.prob_base)
+    Foraging.prob_high = number(Bytes, "Foraging.ProbHigh", Foraging.prob_high)
+    Foraging.prob_emergency = number(Bytes, "Foraging.ProbEmergency", Foraging.prob_emergency)
+    Foraging.search_length = number(Bytes, "Foraging.SearchLength", Foraging.search_length)
+    Foraging.energy_on_flower = number(Bytes, "Foraging.EnergyOnFlower", Foraging.energy_on_flower)
+    Foraging.mortality_per_sec = number(Bytes, "Foraging.MortalityPerSec", Foraging.mortality_per_sec)
+    Foraging.stop_probability = number(Bytes, "Foraging.StopProbability", Foraging.stop_probability)
+    Foraging.abandon_pollen_per_sec = number(Bytes, "Foraging.AbandonPollenPerSec", Foraging.abandon_pollen_per_sec)
+    ForagingPeriod.files = words(Bytes, "ForagingPeriod.Files", ForagingPeriod.files)
+    ForagingPeriod.random_years = truth(Bytes, "ForagingPeriod.RandomYears", ForagingPeriod.random_years)
+    HandlingTime.nectar_gathering = number(Bytes, "HandlingTime.NectarGathering", HandlingTime.nectar_gathering)
+    HandlingTime.pollen_gathering = number(Bytes, "HandlingTime.PollenGathering", HandlingTime.pollen_gathering)
+    HandlingTime.nectar_unloading = number(Bytes, "HandlingTime.NectarUnloading", HandlingTime.nectar_unloading)
+    HandlingTime.pollen_unloading = number(Bytes, "HandlingTime.PollenUnloading", HandlingTime.pollen_unloading)
+    HandlingTime.constant_handling_time = truth(Bytes, "HandlingTime.ConstantHandlingTime",
+                                                HandlingTime.constant_handling_time)
+    Dance.slope = number(Bytes, "Dance.Slope", Dance.slope)
+    Dance.intercept = number(Bytes, "Dance.Intercept", Dance.intercept)
+    Dance.max_circuits = whole(Bytes, "Dance.MaxCircuits", Dance.max_circuits)
+    Dance.find_probability = number(Bytes, "Dance.FindProbability", Dance.find_probability)
+    Dance.pollen_dance_followers = whole(Bytes, "Dance.PollenDanceFollowers", Dance.pollen_dance_followers)
+    Dance.max_proportion_pollen_foragers = number(Bytes, "Dance.MaxProportionPollenForagers",
+                                                  Dance.max_proportion_pollen_foragers)
+    EnergyContent.honey = number(Bytes, "EnergyContent.Honey", EnergyContent.honey)
+    EnergyContent.sucrose = number(Bytes, "EnergyContent.Sucrose", EnergyContent.sucrose)
+    Stores.ideal_pollen_store_days = whole(Bytes, "Stores.IdealPollenStoreDays", Stores.ideal_pollen_store_days)
+    Stores.min_ideal_pollen_store = number(Bytes, "Stores.MinIdealPollenStore", Stores.min_ideal_pollen_store)
+    Stores.max_honey_store_kg = number(Bytes, "Stores.MaxHoneyStoreKg", Stores.max_honey_store_kg)
+    Stores.decent_honey_per_worker = number(Bytes, "Stores.DecentHoneyPerWorker", Stores.decent_honey_per_worker)
+    Stores.protein_store_nurse = number(Bytes, "Stores.ProteinStoreNurse", Stores.protein_store_nurse)
+    HoneyNeeds.worker_resting = number(Bytes, "HoneyNeeds.WorkerResting", HoneyNeeds.worker_resting)
+    HoneyNeeds.worker_nurse = number(Bytes, "HoneyNeeds.WorkerNurse", HoneyNeeds.worker_nurse)
+    HoneyNeeds.worker_larva_total = number(Bytes, "HoneyNeeds.WorkerLarvaTotal", HoneyNeeds.worker_larva_total)
+    HoneyNeeds.drone_larva = number(Bytes, "HoneyNeeds.DroneLarva", HoneyNeeds.drone_larva)
+    HoneyNeeds.drone = number(Bytes, "HoneyNeeds.Drone", HoneyNeeds.drone)
+    PollenNeeds.worker_larva_total = number(Bytes, "PollenNeeds.WorkerLarvaTotal", PollenNeeds.worker_larva_total)
+    PollenNeeds.drone_larva = number(Bytes, "PollenNeeds.DroneLarva", PollenNeeds.drone_larva)
+    PollenNeeds.worker = number(Bytes, "PollenNeeds.Worker", PollenNeeds.worker)
+    PollenNeeds.drone = number(Bytes, "PollenNeeds.Drone", PollenNeeds.drone)
+    Nursing.max_brood_nurse_ratio = number(Bytes, "Nursing.MaxBroodNurseRatio", Nursing.max_brood_nurse_ratio)
+    Nursing.forager_nursing_contribution = number(Bytes, "Nursing.ForagerNursingContribution",
+                                                  Nursing.forager_nursing_contribution)
+    Nursing.max_eggs_per_day = whole(Bytes, "Nursing.MaxEggsPerDay", Nursing.max_eggs_per_day)
+    Nursing.drone_eggs_proportion = number(Bytes, "Nursing.DroneEggsProportion", Nursing.drone_eggs_proportion)
+    Nursing.egg_nursing_limit = truth(Bytes, "Nursing.EggNursingLimit", Nursing.egg_nursing_limit)
+    Nursing.max_brood_cells = whole(Bytes, "Nursing.MaxBroodCells", Nursing.max_brood_cells)
+    Nursing.drone_egg_laying_season_start = whole(Bytes, "Nursing.DroneEggLayingSeasonStart",
+                                                  Nursing.drone_egg_laying_season_start)
+    Nursing.drone_egg_laying_season_end = whole(Bytes, "Nursing.DroneEggLayingSeasonEnd",
+                                                Nursing.drone_egg_laying_season_end)
+    InitialPopulation.count = whole(Bytes, "InitialPopulation.Count", InitialPopulation.count)
+    InitialPopulation.min_age = whole(Bytes, "InitialPopulation.MinAge", InitialPopulation.min_age)
+    InitialPopulation.max_age = whole(Bytes, "InitialPopulation.MaxAge", InitialPopulation.max_age)
+    InitialPopulation.min_milage = number(Bytes, "InitialPopulation.MinMilage",
+                                          InitialPopulation.min_milage as f64) as f32
+    InitialPopulation.max_milage = number(Bytes, "InitialPopulation.MaxMilage",
+                                          InitialPopulation.max_milage as f64) as f32
+    InitialStores.honey = number(Bytes, "InitialStores.Honey", InitialStores.honey)
+    InitialStores.pollen = number(Bytes, "InitialStores.Pollen", InitialStores.pollen)
+
+    // The patches, where the file has any.
+    var patches = false
+    var line = 0
+    while line < len(Bytes) {
+      let from = word_start(Bytes, line)
+      let to = word_end(Bytes, from)
+      let seasonal = is_word(Bytes, from, to, "Patch.Seasonal")
+      if seasonal || is_word(Bytes, from, to, "Patch.Constant") {
+        if !patches { InitialPatches = [] }
+        patches = true
+        let (distance, a) = read_real(Bytes, to)
+        var shift = 0
+        var b = a
+        if seasonal {
+          let (days, after) = read_whole(Bytes, a)
+          shift = days as i32
+          b = after
+        }
+        let (nectar, c) = read_real(Bytes, b)
+        let (pollen, d) = read_real(Bytes, c)
+        let (concentration, e) = read_real(Bytes, d)
+        let (detection, f) = read_real(Bytes, e)
+        InitialPatches += { seasonal: seasonal, distance: distance, shift: shift,
+                            nectar: nectar, pollen: pollen, concentration: concentration,
+                            detection: detection }
+      }
+      line = next_line(Bytes, line)
+    }
+  }
+  Bytes = []
+}
+
+// The file names of `ForagingPeriod.files`, one after another, read into
+// `Hours`. A file that is not there, or whose numbers are not whole
+// years, is said on the console's error side and leaves no hours.
+proc read_years(names: text[254], bytes: mut Bytes, hours: mut Hours) -> bool {
+  var good = true
+  var from = 0
+  while from < len(names) {
+    var to = from
+    while to < len(names) && names[to] != ' ' { to += 1 }
+    var name: text[126] = ""
+    for i in from..to { name += printable[names[i] as i32 - 32] }
+    if to > from {
+      let size = read_file(name, bytes)
+      if size < 0 { good = false }
+      let first = len(hours)
+      var at = 0
+      while at < len(bytes) {
+        let byte = bytes[at].value as i32
+        if blank(byte) || byte == NEWLINE { at += 1 } else {
+          let (value, next) = read_real(bytes, at)
+          if next == at { at += 1 } else {
+            hours += { hours: value }
+            at = next
+          }
+        }
+      }
+      if (len(hours) - first) % 365 != 0 { good = false }
+    }
+    from = to + 1
+  }
+  if !good { hours = [] }
+  good
+}
+
+system weather() {
+  Hours = []
+  Run.weather = read_years(ForagingPeriod.files, Bytes, Hours)
+  Bytes = []
+}

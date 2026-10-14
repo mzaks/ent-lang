@@ -1,0 +1,94 @@
+// A honeybee colony through the year: beecs (github.com/mlange-42/beecs),
+// BEEHAVE's colony and foraging model in Go, in ent-lang. A line for each
+// day: how many bees there are of each stage, the honey [kg] and pollen
+// [g] in store, the age of first foraging and the day's foraging rounds.
+//
+//   examples/beecs/reference/fetch.sh     once: beecs and its weather, into build/
+//   cd build/beecs/run
+//   ../../../tools/ent run ../../../examples/beecs/beecs.ent > days.csv
+//
+// The numbers are beecs's defaults, or what a file "parameters.txt"
+// where the program is started says (parameters.ent). The weather, the
+// hours for foraging on each day, is read from beecs's files.
+import console
+import parameters
+import colony
+import foraging
+
+capacity Activity 100000
+capacity Patch 1024
+
+system heading() {
+  put("seed,tick,w_eggs,w_larvae,w_pupae,w_in_hive,foragers,d_eggs,d_larvae,d_pupae,d_in_hive,honey_kg,pollen_g,aff,rounds")
+}
+
+system no_weather() {
+  if !Run.weather {
+    put("# no weather: the files {ForagingPeriod.files} are not where the program was started,")
+    put("# or not whole years. examples/beecs/reference/fetch.sh puts beecs's into build/beecs/run.")
+  }
+}
+
+system report() {
+  put("{RandomSeed.seed},{Clock.tick},{Population.worker_eggs},{Population.worker_larvae},{Population.worker_pupae},{Population.workers_in_hive},{Population.workers_foragers},{Population.drone_eggs},{Population.drone_larvae},{Population.drone_pupae},{Population.drones_in_hive},{0.001 * Hive.honey / EnergyContent.honey},{Hive.pollen},{Aff.days},{Day.round}")
+}
+
+system tick() {
+  Clock.tick += 1
+}
+
+schedule setup() {
+  parameters()
+  weather()
+  no_weather()
+  colony()
+  hive()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  heading()
+}
+
+// The day until foraging, as model/default.go has it.
+schedule dawn() {
+  aff()
+  foraging_period()
+  replenish()
+  cohort_mortality()
+  age_cohorts()
+  lay_eggs()
+  to_foragers()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  brood_care()
+  new_cohorts()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  new_foragers()
+  morning()
+}
+
+// And after it.
+schedule dusk() {
+  evening()
+  squadron_mortality()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  eat_honey()
+  eat_pollen()
+  report()
+  tick()
+}
+
+main {
+  setup()
+  loop {
+    dawn()
+    loop { round() } until Day.done
+    dusk()
+  } until (Termination.max_ticks > 0 && Clock.tick >= Termination.max_ticks) || !Run.weather ||
+          (Termination.on_extinction && Population.total_population == 0)
+}
