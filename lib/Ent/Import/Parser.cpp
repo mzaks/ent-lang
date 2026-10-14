@@ -415,7 +415,20 @@ private:
   // Tokens and diagnostics
   //===--------------------------------------------------------------===//
 
-  void advance() { token = lexer.next(); }
+  void advance() {
+    previousEnd = token.spelling.end();
+    token = lexer.next();
+  }
+  /// Whether the current token is the first of its line: a bracket there
+  /// starts something new, and is no call of what ends the line before.
+  bool onNewLine() const {
+    if (!previousEnd || !lexer.holds(previousEnd))
+      return false;
+    for (const char *at = previousEnd; at < token.loc.getPointer(); ++at)
+      if (*at == '\n')
+        return true;
+    return false;
+  }
   /// The token after the current one.
   Token peek() {
     Lexer ahead = lexer;
@@ -898,6 +911,8 @@ private:
   /// Whether the declaration that is read now is marked `transient`.
   bool transientNext = false;
   Token token;
+  /// Where the token before the current one ends.
+  const char *previousEnd = nullptr;
   OpBuilder builder;
   ModuleOp module;
 
@@ -1415,6 +1430,7 @@ LogicalResult Parser::parseImport() {
   // Parse the file where the import stands, then go on with this one.
   Lexer savedLexer = lexer;
   Token savedToken = token;
+  const char *savedEnd = previousEnd;
   SourceModule *importing = current;
   lexer = Lexer(text);
   current = imported;
@@ -1422,6 +1438,7 @@ LogicalResult Parser::parseImport() {
   LogicalResult result = parseDeclarations();
   lexer = savedLexer;
   token = savedToken;
+  previousEnd = savedEnd;
   current = importing;
   if (failed(result))
     return failure();
@@ -7161,7 +7178,9 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
 
   std::string name = token.spelling.str();
   advance();
-  if (token.is(Token::LParen)) {
+  // (`(` on the next line is not a call: `let s = a + b` and then a line
+  // `(s, r)` is a sum and then a pair.)
+  if (token.is(Token::LParen) && !onNewLine()) {
     if (components.count(name))
       return error(node->loc,
                    "reading another entity's field may find nothing: use "
@@ -7200,7 +7219,8 @@ FailureOr<ExprPtr> Parser::parsePrimary() {
       node->field = *component;
       if (failed(expect(Token::RParen, "')'")))
         return failure();
-    } else if (consumeIf(Token::LParen)) {
+    } else if (token.is(Token::LParen) && !onNewLine() &&
+               consumeIf(Token::LParen)) {
       // binding.field(args): a call of the fn or proc the field holds.
       node->kind = Expr::Call;
       while (!token.is(Token::RParen)) {
@@ -8747,12 +8767,14 @@ FailureOr<ExprPtr> Parser::parseString() {
       // The expression between the braces, parsed where it stands.
       Lexer savedLexer = lexer;
       Token savedToken = token;
+      const char *savedEnd = previousEnd;
       lexer = Lexer(rest.take_front(close));
       advance();
       FailureOr<ExprPtr> value = parseExpr();
       bool whole = token.is(Token::Eof);
       lexer = savedLexer;
       token = savedToken;
+      previousEnd = savedEnd;
       if (failed(value))
         return failure();
       if (!whole)

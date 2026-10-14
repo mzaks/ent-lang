@@ -81,6 +81,10 @@ public:
       : buffer(buffer), current(buffer.begin()) {}
 
   Token next();
+  /// Whether `at` is in the source this lexer reads.
+  bool holds(const char *at) const {
+    return at >= buffer.begin() && at <= buffer.end();
+  }
 
 private:
   Token make(Token::Kind kind, const char *start) {

@@ -1,0 +1,5 @@
+// A line that ends in a name, and a next one that starts with a bracket,
+// are two: the bracket is no call of the name (Inputs/newline_bracket.ent).
+// RUN: %ent run %S/Inputs/newline_bracket.ent 2>/dev/null | FileCheck %s
+
+// CHECK: 7 3

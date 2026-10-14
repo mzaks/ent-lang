@@ -1,0 +1,20 @@
+// The sum and the difference: the pair on its own line is what the fn
+// gives, not a call of `b`.
+import console
+
+fn both(a: i32, b: i32) -> (i32, i32) {
+  let s = a + b
+  (s, a - b)
+}
+
+unique Out { s: i32, d: i32 }
+
+system run() {
+  let (s, d) = both(5, 2)
+  Out.s = s
+  Out.d = d
+  put("{Out.s} {Out.d}")
+}
+
+schedule all() { run() }
+main { all() }
