@@ -1,0 +1,30 @@
+// Numbers read from text and written back (devices/decimal.ent): each
+// line of "decimal_in.txt" as printf("%.17g") writes the f64 it is, into
+// "decimal_out.txt" where the program is started; and a whole number.
+import files
+import decimal
+
+capacity Bytes 4096
+buffer Read { x: f64 } capacity 64
+
+system run() {
+  read_file("decimal_in.txt", Bytes)
+  Read = []
+  var at = 0
+  while at < len(Bytes) {
+    let (x, next) = read_real(Bytes, at)
+    Read += { x: x }
+    at = next + 1
+  }
+  Bytes = []
+  for i in 0..len(Read) {
+    write_real(Bytes, Read[i].x)
+    Bytes += { value: 10 }
+  }
+  write_whole(Bytes, -9223372036854775807)
+  Bytes += { value: 10 }
+  write_file("decimal_out.txt", Bytes)
+}
+
+schedule all() { run() }
+main { all() }

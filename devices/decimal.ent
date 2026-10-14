@@ -1,0 +1,288 @@
+// Numbers as text, to and from bytes, nothing lost: `import decimal`.
+//
+//   import files
+import math
+//   import decimal
+//   system load() {
+//     read_file("numbers.txt", Bytes)
+//     let (x, next) = read_real(Bytes, 0)       // 12, -0.5, 1e-14, 2.5E+3
+//     let (n, after) = read_whole(Bytes, next)  // 42, -7
+//   }
+//   system save() {
+//     Bytes = []
+//     write_real(Bytes, 1.0 / 3.0)              // 0.33333333333333331
+//     write_whole(Bytes, -7)
+//     write_file("out.txt", Bytes)
+//   }
+//
+// `read_real` gives the f64 nearest the number written, as the C library
+// and Python do; `write_real` writes what C's `printf("%.17g")` does, which
+// reads back as the same f64. (A number in text in a string, "{x}", has
+// six digits after the point: for people. These are for files.)
+//
+// Both work with numbers of twice an f64's precision, as the sum of two
+// f64s that do not overlap (hi, lo). Only a number a hair from halfway
+// between two that are written or read may come out on the other side.
+import files
+
+// --- twice an f64's precision ---------------------------------------------
+
+// 2 to the power `k`, exactly.
+fn power_of_two(k: i32) -> f64 {
+  var x = 1.0 as f64
+  for i in 0..max(k, -k) { x = if k > 0 { x * 2.0 } else { x * 0.5 } }
+  x
+}
+
+// a as two halves of 26 bits each, whose products are exact.
+fn split_real(a: f64) -> (f64, f64) {
+  if a > 1e290 || a < -1e290 { (a, 0.0) } else {
+    let t = 134217729.0 * a
+    let hi = t - (t - a)
+    (hi, a - hi)
+  }
+}
+
+// a times b, and what that leaves out.
+fn exact_product(a: f64, b: f64) -> (f64, f64) {
+  let p = a * b
+  let (ah, al) = split_real(a)
+  let (bh, bl) = split_real(b)
+  (p, ((ah * bh - p) + ah * bl + al * bh) + al * bl)
+}
+
+// a + b as a pair that does not overlap, where |a| >= |b|.
+fn exact_sum(a: f64, b: f64) -> (f64, f64) {
+  let s = a + b
+  (s, b - (s - a))
+}
+
+fn times_pair(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64) {
+  let (p, e) = exact_product(ah, bh)
+  exact_sum(p, e + (ah * bl + al * bh))
+}
+
+fn over_pair(ah: f64, al: f64, bh: f64, bl: f64) -> (f64, f64) {
+  let q = ah / bh
+  let (ph, pl) = times_pair(q, 0.0, bh, bl)
+  let r = ((ah - ph) - pl) + al
+  exact_sum(q, r / bh)
+}
+
+// Ten to the power `k`, from 0 to 200, as such a pair.
+fn ten_pair(k: i32) -> (f64, f64) {
+  var rh = 1.0 as f64
+  var rl = 0.0 as f64
+  var bh = 10.0 as f64
+  var bl = 0.0 as f64
+  var left = k
+  while left > 0 {
+    if left % 2 == 1 {
+      let (h, l) = times_pair(rh, rl, bh, bl)
+      rh = h
+      rl = l
+    }
+    left = left / 2
+    if left > 0 {
+      let (h, l) = times_pair(bh, bl, bh, bl)
+      bh = h
+      bl = l
+    }
+  }
+  (rh, rl)
+}
+
+// (hi, lo) times ten to the power `k`, which may be negative. Far from 1
+// the pair is first moved by 2^400 the other way, which is exact, so that
+// nothing on the way leaves the f64s' range; and the power of ten is
+// taken in steps of no more than 10^200.
+fn scaled(hi: f64, lo: f64, k: i32, far: i32) -> (f64, f64) {
+  let shift = power_of_two(far)
+  var vh = hi * shift
+  var vl = lo * shift
+  var left = k
+  while left != 0 {
+    let step = max(min(left, 200), -200)
+    let (th, tl) = ten_pair(if step > 0 { step } else { -step })
+    let (h, l) = if step > 0 { times_pair(vh, vl, th, tl) } else { over_pair(vh, vl, th, tl) }
+    vh = h
+    vl = l
+    left -= step
+  }
+  (vh / shift, vl / shift)
+}
+
+// --- reading ----------------------------------------------------------------
+
+fn is_digit(byte: u8) -> bool { byte >= 48 && byte <= 57 }
+fn is_blank(byte: u8) -> bool { byte == 32 || byte == 9 || byte == 13 }
+
+// Where the next word starts: at `at`, or after the blanks there (not
+// after the end of the line).
+fn skip_blanks(bytes: Bytes, at: i32) -> i32 {
+  var from = at
+  while from < len(bytes) && is_blank(bytes[from].value) { from += 1 }
+  from
+}
+
+// The whole number at or after `at` (42, -7), and where the line goes on
+// after it; where there is none, 0 and `at`.
+fn read_whole(bytes: Bytes, at: i32) -> (i64, i32) {
+  var from = skip_blanks(bytes, at)
+  var negative = false
+  if from < len(bytes) && (bytes[from].value == 45 || bytes[from].value == 43) {
+    negative = bytes[from].value == 45
+    from += 1
+  }
+  var value = 0 as i64
+  var any = false
+  while from < len(bytes) && is_digit(bytes[from].value) {
+    value = value * 10 + (bytes[from].value - 48) as i64
+    from += 1
+    any = true
+  }
+  if any { (if negative { -value } else { value }, from) } else { (0 as i64, at) }
+}
+
+// The number at or after `at` (12, -0.5, 1e-14, 2.5E+3, .5), and where the
+// line goes on after it: the f64 nearest to it. Where there is none, 0
+// and `at`. Up to 19 digits are taken as a whole number (the rest count
+// only for the power of ten), which is scaled by the power of ten with
+// twice an f64's precision.
+fn read_real(bytes: Bytes, at: i32) -> (f64, i32) {
+  var from = skip_blanks(bytes, at)
+  var negative = false
+  if from < len(bytes) && (bytes[from].value == 45 || bytes[from].value == 43) {
+    negative = bytes[from].value == 45
+    from += 1
+  }
+  var digits = 0 as u64
+  var taken = 0
+  var power = 0
+  var point = false
+  var any = false
+  var going = true
+  while going && from < len(bytes) {
+    let byte = bytes[from].value
+    if is_digit(byte) {
+      any = true
+      if taken < 19 {
+        digits = digits * 10 + (byte - 48) as u64
+        if digits > 0 { taken += 1 }
+        if point { power -= 1 }
+      } else if !point { power += 1 }
+      from += 1
+    } else if byte == 46 && !point {
+      point = true
+      from += 1
+    } else { going = false }
+  }
+  if any && from < len(bytes) && (bytes[from].value == 101 || bytes[from].value == 69) {
+    let (e, after) = read_whole(bytes, from + 1)
+    if after > from + 1 {
+      power += max(min(e, 10000 as i64), -10000 as i64) as i32
+      from = after
+    }
+  }
+  // (The digits as a pair: the f64 nearest them, and what is left over.)
+  let near = digits as f64
+  let back = near as u64
+  let rest = if digits >= back { (digits - back) as f64 } else { -((back - digits) as f64) }
+  let far = if power > 200 { -400 } else if power < -200 { 400 } else { 0 }
+  let (hi, lo) = scaled(near, rest, max(min(power, 400), -400), far)
+  let value = (hi + lo)
+  if any { (if negative { -value } else { value }, from) } else { (0.0 as f64, at) }
+}
+
+// --- writing ----------------------------------------------------------------
+
+// Ten to the power `k`, from 0 to 19, as a whole number.
+fn ten_whole(k: i32) -> u64 {
+  var x = 1 as u64
+  for i in 0..k { x = x * 10 }
+  x
+}
+
+proc write_text(into: mut Bytes, word: text[16]) {
+  for k in 0..len(word) { into += { value: word[k] as u8 } }
+}
+
+// A whole number's digits, `-` before where it is below 0.
+proc write_whole(into: mut Bytes, n: i64) {
+  if n < 0 { into += { value: 45 } }
+  let size = if n < 0 { (0 - (n + 1)) as u64 + 1 } else { n as u64 }
+  var width = 1
+  while width < 20 && size >= ten_whole(width) { width += 1 }
+  for k in 0..width { into += { value: (48 + (size / ten_whole(width - 1 - k)) % 10) as u8 } }
+}
+
+// The 17 digits of `a` (above 0) and the power of ten of the first:
+// a = 0.d1d2...d17 * 10 times 10^e, rounded to the nearest.
+fn seventeen(a: f64, guess: i32) -> (u64, i32) {
+  var e = guess
+  var digits = 0 as u64
+  var tries = 0
+  var done = false
+  while !done && tries < 4 {
+    let far = if a > 1e250 { -400 } else if a < 1e-250 { 400 } else { 0 }
+    let (hi, lo) = scaled(a, 0.0, 16 - e, far)
+    // (hi from 10^16 on is a whole number; lo says which way it rounds.)
+    // (Halfway, to the even one, as C does.)
+    let whole = hi as u64
+    let left = (hi - whole as f64) + lo
+    let down = floor64(left)
+    let odd = (whole + (if down < 0.0 { 0 - (-down) as u64 } else { down as u64 })) % 2 == 1
+    let up = left - down > 0.5 || (left - down == 0.5 && odd)
+    let rounded = if up { down + 1.0 } else { down }
+    digits = if rounded < 0.0 { whole - (-rounded) as u64 } else { whole + rounded as u64 }
+    if digits >= 100000000000000000 { e += 1 }
+    else if digits < 10000000000000000 { e -= 1 }
+    else { done = true }
+    tries += 1
+  }
+  (digits, e)
+}
+
+// What `printf("%.17g", x)` writes: 17 significant digits, as a plain
+// number where the power of ten is from -4 to 16, else with `e` and the
+// power (at least two digits); zeros at the end of the fraction left out.
+proc write_real(into: mut Bytes, x: f64) {
+  if x != x {
+    write_text(into, "nan")
+  } else if x > 1.7976931348623157e308 {
+    write_text(into, "inf")
+  } else if x < -1.7976931348623157e308 {
+    write_text(into, "-inf")
+  } else if x == 0.0 {
+    write_text(into, if 1.0 / x < 0.0 { "-0" } else { "0" })
+  } else {
+    if x < 0.0 { into += { value: 45 } }
+    let a = if x < 0.0 { -x } else { x }
+    let (digits, e) = seventeen(a, floor64(log64(a) / 2.302585092994046) as i32)
+    // (How many of the 17 count: those before the zeros at the end.)
+    var count = 17
+    while count > 1 && (digits / ten_whole(17 - count)) % 10 == 0 { count -= 1 }
+    if e >= -4 && e < 17 {
+      if e < 0 {
+        write_text(into, "0.")
+        for k in 0..(-e - 1) { into += { value: 48 } }
+        for k in 0..count { into += { value: (48 + (digits / ten_whole(16 - k)) % 10) as u8 } }
+      } else {
+        for k in 0..max(count, e + 1) {
+          if k == e + 1 { into += { value: 46 } }
+          into += { value: (48 + (digits / ten_whole(16 - k)) % 10) as u8 }
+        }
+      }
+    } else {
+      into += { value: (48 + digits / ten_whole(16)) as u8 }
+      if count > 1 {
+        into += { value: 46 }
+        for k in 1..count { into += { value: (48 + (digits / ten_whole(16 - k)) % 10) as u8 } }
+      }
+      into += { value: 101 }
+      into += { value: if e < 0 { 45 } else { 43 } }
+      if e > -10 && e < 10 { into += { value: 48 } }
+      write_whole(into, if e < 0 { (0 - e) as i64 } else { e as i64 })
+    }
+  }
+}

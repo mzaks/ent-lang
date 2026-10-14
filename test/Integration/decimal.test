@@ -1,0 +1,22 @@
+// Numbers to and from text with nothing lost (devices/decimal.ent): read
+// as the nearest f64 and written as printf("%.17g") does, also the
+// smallest and largest, and a tie that goes to the even digit.
+// RUN: rm -rf %t && mkdir -p %t && cd %t
+// RUN: %ent run %S/Inputs/numbers_text.ent
+// RUN: FileCheck %s < %t/decimal_out.txt
+
+// CHECK: 0.10000000000000001
+// CHECK-NEXT: -2.4999999999999999e-07
+// CHECK-NEXT: 1e-14
+// CHECK-NEXT: 16000
+// CHECK-NEXT: 0.5
+// CHECK-NEXT: 1.2345678901234568e+17
+// CHECK-NEXT: 4.9406564584124654e-324
+// CHECK-NEXT: 1.7976931348623157e+308
+// CHECK-NEXT: 2.2250738585072014e-308
+// CHECK-NEXT: 1138929488291113.8
+// CHECK-NEXT: -0
+// CHECK-NEXT: 100
+// CHECK-NEXT: 1e+21
+// CHECK-NEXT: 0.00012300000000000001
+// CHECK-NEXT: -9223372036854775807
