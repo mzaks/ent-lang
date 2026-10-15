@@ -3,6 +3,7 @@
 
   examples/beecs/reference/fetch.sh               once
   python3 bench/beecs/run.py [squadron sizes] [--seeds n] [--parallel] [--claims]
+                             [--pgo]
 
 For each squadron size (100, beecs's default, 10 and 1 by default: a
 squadron of one is a forager by itself, some 10,000 to 20,000 entities)
@@ -13,10 +14,14 @@ weather and writing its days, beecs's setting up), and the most memory.
 The model is built native (ENT_CFLAGS says otherwise), and with
 --parallel also for all the cores, which run on all of them. With --claims
 the model also forages without turns (claims.ent), each way it is built.
+With --pgo each way is also built by its profile (tools/ent --instrument,
+then --profile): the instrumented build runs a year of each squadron size
+and each way of foraging for seeds that are not timed (101 and 102).
 """
 
 import argparse
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -43,12 +48,20 @@ def timed(command, cwd, cpus):
     return seconds, usage.ru_maxrss / 1024.0
 
 
+def write_parameters(work, seed, size, claims):
+    with open(os.path.join(work, "parameters.txt"), "w") as f:
+        f.write(f"RandomSeed.Seed {seed}\nForagers.SquadronSize {size}\n")
+        if claims:
+            f.write("Variant.Claims true\n")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("sizes", nargs="*", type=int, default=[100, 10, 1])
     parser.add_argument("--seeds", type=int, default=5)
     parser.add_argument("--parallel", action="store_true")
     parser.add_argument("--claims", action="store_true")
+    parser.add_argument("--pgo", action="store_true")
     args = parser.parse_args()
     if not os.path.exists(REFERENCE):
         sys.exit("no reference: run examples/beecs/reference/fetch.sh first")
@@ -59,17 +72,39 @@ def main():
         if args.parallel:
             builds.append(("model, all cores", ["--parallel"],
                            f"0-{os.cpu_count() - 1}"))
-        programs = []
-        for name, extra, cpus in builds:
-            program = os.path.join(work, "model" + str(len(programs)))
-            subprocess.run([sys.executable, os.path.join(ROOT, "tools", "ent"), "build",
-                            *extra, PROGRAM, "-o", program], check=True,
+        os.symlink(WEATHER, os.path.join(work, "foraging-period"))
+
+        def build(extra, program):
+            # (From the work folder: an instrumented build counts into
+            # beecs.profile there.)
+            subprocess.run([sys.executable, os.path.join(ROOT, "tools", "ent"),
+                            "build", *extra, PROGRAM, "-o", program],
+                           check=True, cwd=work,
                            env=dict(os.environ, ENT_CFLAGS=flags),
                            stdout=subprocess.DEVNULL)
-            programs.append((name, program, cpus, False))
+
+        programs = []
+        for index, (name, extra, cpus) in enumerate(builds):
+            ways = [(name, False)]
             if args.claims:
-                programs.append((name.replace("model", "without turns"), program, cpus, True))
-        os.symlink(WEATHER, os.path.join(work, "foraging-period"))
+                ways.append((name.replace("model", "without turns"), True))
+            program = os.path.join(work, f"model{index}")
+            build(extra, program)
+            for label, claims in ways:
+                programs.append((label, program, cpus, claims))
+            if not args.pgo:
+                continue
+            counts = os.path.join(work, "beecs.profile")
+            shutil.rmtree(counts, ignore_errors=True)
+            build(extra + ["--instrument"], program + "_counting")
+            for size in args.sizes:
+                for _, claims in ways:
+                    for seed in (101, 102):
+                        write_parameters(work, seed, size, claims)
+                        timed([program + "_counting"], work, cpus)
+            build(extra + ["--profile", counts], program + "_pgo")
+            for label, claims in ways:
+                programs.append((label + ", PGO", program + "_pgo", cpus, claims))
         print("| squadron size | | a year | memory |")
         print("|---|---|---|---|")
         for size in args.sizes:
@@ -86,10 +121,7 @@ def main():
             for name, program, cpus, claims in programs:
                 times, memory = [], 0.0
                 for seed in range(1, args.seeds + 1):
-                    with open(os.path.join(work, "parameters.txt"), "w") as f:
-                        f.write(f"RandomSeed.Seed {seed}\nForagers.SquadronSize {size}\n")
-                        if claims:
-                            f.write("Variant.Claims true\n")
+                    write_parameters(work, seed, size, claims)
                     t, m = timed([program], work, cpus)
                     times.append(t)
                     memory = max(memory, m)

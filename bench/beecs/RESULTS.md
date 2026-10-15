@@ -156,3 +156,58 @@ What the compiler could do better, seen here:
   --parallel, and does not take systems that send or give rows; by hand it
   was the largest step here. (Built on one core too since; it still does
   not take such systems.)
+
+## 2026-10-15, by profile
+
+`python3 bench/beecs/run.py --seeds 9 --parallel --claims --pgo`: as
+before, and each build also built by its profile (`tools/ent --instrument`,
+a year of each squadron size and each way of foraging for seeds 101 and
+102, then `--profile`). The compiler as of then: systems fused on one
+core too (also those that send, look up or write uniques) and the
+program's functions internal.
+
+| squadron size | | a year | memory |
+|---|---|---|---|
+| 100 | beecs (Go), one core | 23.5 ms | 17 MB |
+|  | model, one core | 19.6 ms | 19 MB |
+|  | without turns, one core | 10.7 ms | 21 MB |
+|  | model, one core, PGO | 19.8 ms | 19 MB |
+|  | without turns, one core, PGO | 10.4 ms | 21 MB |
+|  | model, all cores | 23.1 ms | 23 MB |
+|  | without turns, all cores | 15.1 ms | 25 MB |
+|  | model, all cores, PGO | 26.5 ms | 23 MB |
+|  | without turns, all cores, PGO | 15.7 ms | 25 MB |
+| 10 | beecs (Go), one core | 162.9 ms | 17 MB |
+|  | model, one core | 117.0 ms | 19 MB |
+|  | without turns, one core | 68.6 ms | 21 MB |
+|  | model, one core, PGO | 114.9 ms | 19 MB |
+|  | without turns, one core, PGO | 69.7 ms | 21 MB |
+|  | model, all cores | 124.7 ms | 23 MB |
+|  | without turns, all cores | 80.9 ms | 25 MB |
+|  | model, all cores, PGO | 125.1 ms | 23 MB |
+|  | without turns, all cores, PGO | 77.9 ms | 25 MB |
+| 1 | beecs (Go), one core | 1,523.9 ms | 17 MB |
+|  | model, one core | 1,092.3 ms | 19 MB |
+|  | without turns, one core | 636.1 ms | 21 MB |
+|  | model, one core, PGO | 1,081.0 ms | 19 MB |
+|  | without turns, one core, PGO | 639.1 ms | 21 MB |
+|  | model, all cores | 1,259.9 ms | 25 MB |
+|  | without turns, all cores | 713.5 ms | 27 MB |
+|  | model, all cores, PGO | 1,234.8 ms | 25 MB |
+|  | without turns, all cores, PGO | 670.3 ms | 26 MB |
+
+The profile changes little here: between 2% faster and 1% slower on one
+core, within what runs differ by; on all cores from as fast to 6% faster
+with squadrons of 1 and 10, 4 to 15% slower with 100, where a year takes
+15 to 26 ms.
+What it gains elsewhere (the epidemic and Doom some 17%, see
+bench/RESULTS.md) it gains by inlining what is called often from more
+than one place; here the time is in loops over the squadrons, in the sort
+of `in turn` and in drawing numbers, which are inlined already.
+
+Against the earlier entry, with squadrons of 100 the model takes 19.6 ms
+where 24.4 (one core), without turns 10.7 where 11.3: since then systems
+are fused on one core and functions are internal, which weigh most where
+systems do little (which of the two gave how much was not measured). With
+squadrons of 1 it is as it was: 1,092 ms with turns, 636 without, where
+beecs takes 1,524.

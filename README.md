@@ -144,9 +144,9 @@ into `program.profile` in the folder it was built from; built again with
 `--profile program.profile` LLVM inlines and lays out its code by those
 counts. Trained on runs like the ones that matter, the city's epidemic
 at a million people takes 1.68 s where it took 2.03 (1.94 without the
-counts), a demo of Doom drawn
-tic by tic 289 ms where 354, beecs's colony 410 ms where 424 (see
-`bench/RESULTS.md`).
+counts), a demo of Doom drawn tic by tic 289 ms where 354 (see
+`bench/RESULTS.md`); beecs's colony, whose time is in loops already
+inlined, as it did (`bench/beecs/RESULTS.md`).
 
 A big program is optimised whole and then made into machine code in
 pieces, each on a core of its own (`ENT_PIECES=1`: in one piece;
