@@ -102,17 +102,23 @@ ent.system @aim(%n: i32, %c: i1) reads [@T, @On] writes [@H] {
 // PAR:       scf.for
 // PAR:         arith.maxsi
 
-// A system with applies is not fused with its neighbours: the reader of
-// "lvl" must see the combined values.
+// A system with applies is fused, but not with a system after it that
+// reads what it sends: the reader of "lvl" must see the combined values.
+// So the sequence ends after `aim`, whose loop fills the buffers and whose
+// applies land, in their own loops, before `read` runs.
 ent.system @read() reads [@H] {
   ent.query (%h: !ent.ref<@H>) {
     %l = ent.get %h "lvl" : !ent.ref<@H> -> i32
   }
 }
 // FUSED-LABEL: func.func @frame(
-// FUSED:       call @aim(
-// FUSED-NOT:   call @read(
+// FUSED-NOT:   call @aim(
 // FUSED:       scf.for
+// FUSED:       scf.for
+// FUSED:         arith.maxsi
+// FUSED:       scf.for
+// FUSED:         arith.maxsi
+// FUSED-NOT:   call @read(
 // FUSED:       return
 ent.schedule @frame(%n: i32, %c: i1) {
   ent.run @aim(%n, %c) : i32, i1

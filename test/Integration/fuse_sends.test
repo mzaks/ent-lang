@@ -1,0 +1,10 @@
+// Systems that send are fused with their neighbours, and what they send
+// lands before a system that reads it. The same on all cores.
+// RUN: %ent run %S/Inputs/fuse_sends.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/fuse_sends.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// Guns 1, 3, 5 at the first hull (9 a round), 2, 4 at the second (6).
+// CHECK:      hp 82 age 2 seen 82
+// CHECK-NEXT: hp 38 age 2 seen 38
+// CHECK-NEXT: shots 10

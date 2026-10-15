@@ -903,8 +903,15 @@ different archetypes share no columns. Two consequences the lowering uses:
   ids are checked against are loaded once, before the loop, since
   combining cannot change them); this happens before the
   query's despawns and moves, while every id still leads to its entity. A
-  system with applies ends a fused sequence: a later system reading the
-  field must see the combined values.
+  system with applies or accumulates is fused with its neighbours where
+  nothing else in the sequence touches the fields it sends to (reads,
+  writes or sends to them too), and no code of a system outside its
+  queries reads a resource it accumulates into: then what it sends lands
+  after the fused loop as it did after its own, and an apply nothing else
+  sees is still combined as the loop goes. A system after it that reads
+  the field ends the sequence and starts the next, so it sees the combined
+  values. (Not one that sends from a loop of a body, an inner `for` or an
+  edge loop.)
 - Reactive queries find their entities by version stamps: an i64 tick per
   row for each event some reactive query observes, stored only in the
   archetypes whose entities such a query can see (directly, or after

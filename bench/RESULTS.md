@@ -3179,3 +3179,21 @@ with `--parallel`. Ryzen AI 9 HX 370, one core (CPU 2), native.
   what was fused: where the code lies, not what it does.
 - Every example that builds builds as before (29 of 39 here; the others
   need files made elsewhere), and the tests pass.
+
+## 2026-10-15: fusing systems that send
+
+Systems with applies and accumulates are fused where nothing else in the
+sequence touches what they send to (see README, Fusion). Every fused build
+gives the days of the unfused one to the bit, on one core and on all
+(examples/beecs both ways, examples/epidemic at a million people).
+
+- Fusing two systems whose sends touch the same field (one zeroes a
+  patch's counts, the next sends to them) made beecs 9% slower: the sends
+  then went to buffers, where alone each is combined as its loop goes. So
+  such systems are not fused; with that, beecs takes 622 ms fused where
+  it takes 618 unfused (the layout noise seen before).
+- Over the examples few more systems fuse (beecs's `claims`): sends were
+  rarely all that kept a system apart. Of 230 runs of systems with a query,
+  31 fuse; the others write a unique outside their queries (96), cannot
+  be analysed (98), use a buffer (77), run under a condition (49), spawn
+  or destroy (47) or look up other entities (40), many several of these.

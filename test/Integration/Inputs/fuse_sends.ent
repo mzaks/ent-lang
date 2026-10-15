@@ -1,0 +1,56 @@
+// Systems that send, fused with their neighbours where that changes
+// nothing: guns send damage to their ships (and count themselves into a
+// unique), ships age in a system of their own between them, and a system
+// that reads the hit points comes after: it sees what was sent.
+import console
+
+default_capacity 64
+
+component Hull { hp: i32, age: i32, seen: i32 }
+component Gun { target: entity, power: i32 }
+unique Shots: i32
+
+system setup() {
+  let a = spawn { Hull { hp: 100, age: 0, seen: 0 } }
+  let b = spawn { Hull { hp: 50, age: 0, seen: 0 } }
+  for i in 0..5 {
+    spawn { Gun { target: if i % 2 == 0 { a } else { b }, power: i + 1 } }
+  }
+}
+
+// Sends: fused with `age`, which touches nothing it sends to.
+system fire() {
+  for g: Gun {
+    Hull(g.target).hp -= g.power
+    Shots += 1
+  }
+}
+
+system age() {
+  for h: mut Hull { h.age += 1 }
+}
+
+// Reads what `fire` sends: the sequence ends before it.
+system look() {
+  for h: mut Hull { h.seen = h.hp }
+}
+
+system show() {
+  for h: Hull { put("hp {h.hp} age {h.age} seen {h.seen}") }
+  put("shots {Shots}")
+}
+
+schedule start() { setup() }
+schedule round() {
+  fire()
+  age()
+  look()
+}
+schedule end() { show() }
+
+main {
+  start()
+  round()
+  round()
+  end()
+}

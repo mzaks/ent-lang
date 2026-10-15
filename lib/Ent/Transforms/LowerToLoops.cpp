@@ -12245,6 +12245,85 @@ static void lowerEach(IRRewriter &rewriter, EachOp each,
   rewriter.replaceOp(each, carried);
 }
 
+/// Mark the accumulates of `query` that a parallel loop may reduce (see
+/// kReducedAttr): whole numbers nothing else sees, sent from the body
+/// itself or an `if` of it, in a query that can run in parallel.
+static void markReduced(IRRewriter &rewriter, QueryOp query,
+                        const LoopOptions &options, bool entityLocal,
+                        bool sendsLooped) {
+  if (!options.directApplies || !options.parallelEntities || !entityLocal ||
+      !getTriggers(query).empty() || sendsLooped)
+    return;
+  query.getBody().walk([&](AccumulateOp accumulate) {
+    bool plain = accumulate->hasAttr(kUnobservedAttr) &&
+                 !accumulate->hasAttr(kInEachAttr) &&
+                 accumulate.getRule() != "set" &&
+                 isa<IntegerType>(accumulate.getValue().getType());
+    for (Operation *parent = accumulate->getParentOp();
+         plain && parent != query; parent = parent->getParentOp())
+      plain = isa<scf::IfOp>(parent);
+    if (plain)
+      accumulate->setAttr(kReducedAttr, rewriter.getUnitAttr());
+  });
+}
+
+/// After the entity loops `loops` of an archetype were made: the resource
+/// cells that `accumulates` combine where they are sent kept in registers
+/// through a loop that visits the entities one after another, and the
+/// reduced ones reduced by a parallel loop (where the number of entities
+/// says at run time which loop it is, in both). Gives the loops, which a
+/// whole loop that carries cells replaces.
+static Operation *keepCells(IRRewriter &rewriter, Operation *loops,
+                            ArrayRef<AccumulateOp> accumulates,
+                            const WorldArchetype &archetype,
+                            WorldAccess &world, bool sequentialOnly) {
+  SmallVector<Value> cells;
+  SmallVector<ReducedCell> reduced;
+  // (Not one that a loop in the body accumulates into: that is not
+  // followed through the loop.)
+  llvm::DenseSet<std::pair<Attribute, Attribute>> looped;
+  for (AccumulateOp accumulate : accumulates)
+    if (accumulate->hasAttr(kInEachAttr))
+      looped.insert({accumulate.getResourceAttr(), accumulate.getFieldAttr()});
+  for (AccumulateOp accumulate : accumulates) {
+    if (!appliesDirectly(accumulate, sequentialOnly) ||
+        looped.contains(
+            {accumulate.getResourceAttr(), accumulate.getFieldAttr()}))
+      continue;
+    Value cell = world.resourceField(accumulate.getResourceAttr().getAttr(),
+                                     accumulate.getFieldAttr());
+    cells.push_back(cell);
+    if (accumulate->hasAttr(kReducedAttr))
+      reduced.push_back({cell, accumulate.getRule(),
+                         hasNoSign(accumulate.getValue().getType())});
+  }
+  SmallVector<scf::ForOp> sequential;
+  SmallVector<scf::ParallelOp> parallel;
+  if (auto loop = dyn_cast<scf::ForOp>(loops)) {
+    sequential.push_back(loop);
+  } else if (auto loop = dyn_cast<scf::ParallelOp>(loops)) {
+    parallel.push_back(loop);
+  } else if (auto branch = dyn_cast<scf::IfOp>(loops);
+             branch && archetype.capacity != 1) {
+    for (Operation &op : *branch.thenBlock())
+      if (auto loop = dyn_cast<scf::ParallelOp>(op))
+        parallel.push_back(loop);
+    for (Operation &op : *branch.elseBlock())
+      if (auto loop = dyn_cast<scf::ForOp>(op))
+        sequential.push_back(loop);
+  }
+  for (scf::ParallelOp loop : parallel)
+    reduceCells(rewriter, loop, reduced);
+  if (!cells.empty())
+    for (scf::ForOp loop : sequential) {
+      bool whole = loops == loop;
+      scf::ForOp carrying = carryCells(rewriter, loop, cells);
+      if (whole)
+        loops = carrying;
+    }
+  return loops;
+}
+
 static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const WorldLayout &layout, WorldAccess &world,
                        const LoopOptions &given) {
@@ -12354,19 +12433,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                                             : WalkResult::advance();
           })
           .wasInterrupted();
-  if (options.directApplies && options.parallelEntities && entityLocal &&
-      triggers.empty() && !sendsLooped)
-    for (AccumulateOp accumulate : accumulates) {
-      bool plain = accumulate->hasAttr(kUnobservedAttr) &&
-                   !accumulate->hasAttr(kInEachAttr) &&
-                   accumulate.getRule() != "set" &&
-                   isa<IntegerType>(accumulate.getValue().getType());
-      for (Operation *parent = accumulate->getParentOp();
-           plain && parent != query; parent = parent->getParentOp())
-        plain = isa<scf::IfOp>(parent);
-      if (plain)
-        accumulate->setAttr(kReducedAttr, rewriter.getUnitAttr());
-    }
+  markReduced(rewriter, query, options, entityLocal, sendsLooped);
   SmallVector<ConnectOp> connects;
   query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
   SmallVector<AppendOp> appends;
@@ -12443,57 +12510,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
           });
         },
         rows, sendsLooped);
-    // Directly combined accumulates: their resource cells in registers.
-    // (And the reduced ones, which a parallel loop reduces into; where the
-    // number of entities says at run time which loop it is, in both.)
-    {
-      SmallVector<Value> cells;
-      SmallVector<ReducedCell> reduced;
-      // (Not one that a loop in the body accumulates into: that is not
-      // followed through the loop.)
-      llvm::DenseSet<std::pair<Attribute, Attribute>> looped;
-      for (AccumulateOp accumulate : accumulates)
-        if (accumulate->hasAttr(kInEachAttr))
-          looped.insert({accumulate.getResourceAttr(),
-                         accumulate.getFieldAttr()});
-      for (AccumulateOp accumulate : accumulates) {
-        if (!appliesDirectly(accumulate, sequentialOnly) ||
-            looped.contains({accumulate.getResourceAttr(),
-                             accumulate.getFieldAttr()}))
-          continue;
-        Value cell =
-            world.resourceField(accumulate.getResourceAttr().getAttr(),
-                                accumulate.getFieldAttr());
-        cells.push_back(cell);
-        if (accumulate->hasAttr(kReducedAttr))
-          reduced.push_back({cell, accumulate.getRule(),
-                             hasNoSign(accumulate.getValue().getType())});
-      }
-      SmallVector<scf::ForOp> sequential;
-      SmallVector<scf::ParallelOp> parallel;
-      if (auto loop = dyn_cast<scf::ForOp>(loops)) {
-        sequential.push_back(loop);
-      } else if (auto loop = dyn_cast<scf::ParallelOp>(loops)) {
-        parallel.push_back(loop);
-      } else if (auto branch = dyn_cast<scf::IfOp>(loops);
-                 branch && archetype.capacity != 1) {
-        for (Operation &op : *branch.thenBlock())
-          if (auto loop = dyn_cast<scf::ParallelOp>(op))
-            parallel.push_back(loop);
-        for (Operation &op : *branch.elseBlock())
-          if (auto loop = dyn_cast<scf::ForOp>(op))
-            sequential.push_back(loop);
-      }
-      for (scf::ParallelOp loop : parallel)
-        reduceCells(rewriter, loop, reduced);
-      if (!cells.empty())
-        for (scf::ForOp loop : sequential) {
-          bool whole = loops == loop;
-          scf::ForOp carrying = carryCells(rewriter, loop, cells);
-          if (whole)
-            loops = carrying;
-        }
-    }
+    // Directly combined accumulates: their resource cells in registers,
+    // and the reduced ones reduced.
+    loops = keepCells(rewriter, loops, accumulates, archetype, world,
+                      sequentialOnly);
     hoistResourceReads(rewriter, loops, world);
     if (archetype.hasPending() && isStructuralFor(query, archetype.op))
       changed.push_back(&archetype);
@@ -12592,6 +12612,133 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
 /// different archetypes share no columns, so running all bodies for one
 /// entity before moving on gives the same result as running each query to
 /// completion in turn.
+/// What a send lands in: a component's field (of whichever entity it is
+/// sent to) or a resource's field.
+struct SendTarget {
+  Attribute owner;
+  StringAttr field;
+  bool operator==(const SendTarget &other) const {
+    return owner == other.owner && field == other.field;
+  }
+};
+
+/// Where `op` sends to, if it is an apply or an accumulate.
+static std::optional<SendTarget> sendTargetOf(Operation *op) {
+  if (auto apply = dyn_cast<ApplyOp>(op))
+    return SendTarget{apply.getComponentAttr().getAttr(),
+                      apply.getFieldAttr()};
+  if (auto accumulate = dyn_cast<AccumulateOp>(op))
+    return SendTarget{accumulate.getResourceAttr().getAttr(),
+                      accumulate.getFieldAttr()};
+  return std::nullopt;
+}
+
+/// Whether `op` reads or writes `target` other than by sending to it: a
+/// get or a set of the field, a read of the resource's field, or an add
+/// or a remove of the component.
+static bool readsOrWrites(Operation *op, const SendTarget &target) {
+  auto refTo = [&](Value ref) {
+    auto type = dyn_cast<RefType>(ref.getType());
+    return type && type.getComponent().getAttr() == target.owner;
+  };
+  if (auto get = dyn_cast<GetOp>(op))
+    return refTo(get.getRef()) && get.getFieldAttr() == target.field;
+  if (auto set = dyn_cast<SetOp>(op))
+    return refTo(set.getRef()) && set.getFieldAttr() == target.field;
+  if (auto read = dyn_cast<ReadOp>(op))
+    return read.getResourceAttr().getAttr() == target.owner &&
+           read.getFieldAttr() == target.field;
+  if (isa<AddOp, RemoveOp>(op))
+    if (auto component = op->getAttrOfType<FlatSymbolRefAttr>("component"))
+      return component.getAttr() == target.owner;
+  return false;
+}
+
+/// Whether the sends of `system`'s queries can be fused with other
+/// systems: each lands once for an entity, from the body itself or an
+/// `if` of it (not from a loop of the body, an inner `for` or an edge),
+/// and is combined after the loop in the order of rows.
+static bool fusableSends(SystemOp system) {
+  return !system
+              .walk([](Operation *op) {
+                if (!sendTargetOf(op))
+                  return WalkResult::advance();
+                if (op->hasAttr(kLoopedAttr) || op->hasAttr(kInEachAttr) ||
+                    op->getParentOfType<EachOp>() ||
+                    op->getParentOfType<EdgesOp>())
+                  return WalkResult::interrupt();
+                return WalkResult::advance();
+              })
+              .wasInterrupted();
+}
+
+/// Whether `system` can join a fused sequence of `queries`, and if so, add
+/// its own. Fused, what a query sends lands after the loop of all of
+/// them, not when the query ends: so no query after it may read or write
+/// a field it sends to (it would see the field as it was), nor may code of
+/// a system outside its queries read a resource field one sends to
+/// (fusion moves that code ahead of every query). And a field one sends to
+/// is touched by no other query of the sequence, sending too: alone, a
+/// send that nothing else in its query sees is combined as the loop goes,
+/// with no buffer (see kUnobservedAttr), and fused it would have to go to
+/// its buffer, which costs more than the passes fusion saves.
+static bool joinsSends(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
+  SmallVector<QueryOp> joined(queries.begin(), queries.end());
+  auto sendsOf = [](QueryOp query) {
+    SmallVector<SendTarget> targets;
+    query.walk([&](Operation *op) {
+      if (std::optional<SendTarget> target = sendTargetOf(op))
+        if (!llvm::is_contained(targets, *target))
+          targets.push_back(*target);
+    });
+    return targets;
+  };
+  auto touches = [](QueryOp query, const SendTarget &target) {
+    return query
+        .walk([&](Operation *op) {
+          std::optional<SendTarget> sent = sendTargetOf(op);
+          return readsOrWrites(op, target) || (sent && *sent == target)
+                     ? WalkResult::interrupt()
+                     : WalkResult::advance();
+        })
+        .wasInterrupted();
+  };
+  for (QueryOp query : system.getBody().getOps<QueryOp>()) {
+    for (QueryOp before : joined) {
+      // What it sends, nothing else touches; what one before sends, it
+      // does not touch.
+      for (const SendTarget &target : sendsOf(query))
+        if (touches(before, target))
+          return false;
+      for (const SendTarget &target : sendsOf(before))
+        if (touches(query, target))
+          return false;
+    }
+    joined.push_back(query);
+  }
+  SmallVector<SendTarget> sent;
+  for (QueryOp query : joined)
+    for (const SendTarget &target : sendsOf(query))
+      sent.push_back(target);
+  for (Operation &op : system.getBody().front().without_terminator()) {
+    if (isa<QueryOp>(op))
+      continue;
+    bool reads = op.walk([&](ReadOp read) {
+                     return llvm::any_of(sent,
+                                         [&](const SendTarget &target) {
+                                           return readsOrWrites(read, target);
+                                         })
+                                ? WalkResult::interrupt()
+                                : WalkResult::advance();
+                   })
+                     .wasInterrupted();
+    if (reads)
+      return false;
+  }
+  queries.assign(joined.begin(), joined.end());
+  return true;
+}
+
 static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
                      Operation *insertionPoint, SymbolTable &symbols,
                      const WorldLayout &layout, WorldAccess &world,
@@ -12618,6 +12765,30 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   // fused loops run.
   rewriter.setInsertionPoint(insertionPoint);
   Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
+
+  // The queries in their order. A send that nothing else in its query
+  // sees (kUnobservedAttr) is combined where it is sent, in a loop that
+  // visits the entities one after another, as alone: nothing else in the
+  // fused loops touches its field either (see joinsSends).
+  SmallVector<QueryOp> queries;
+  for (SystemOp system : systems)
+    for (QueryOp query : system.getBody().getOps<QueryOp>())
+      queries.push_back(query);
+  // Whole numbers a parallel loop may reduce (the queries' bodies are
+  // their own, with nothing sent from loops of them: see fusableSends).
+  SmallVector<Operation *> reduced;
+  for (QueryOp query : queries) {
+    markReduced(rewriter, query, options, /*entityLocal=*/true,
+                /*sendsLooped=*/false);
+    query.walk([&](AccumulateOp accumulate) {
+      if (accumulate->hasAttr(kReducedAttr))
+        reduced.push_back(accumulate);
+    });
+  }
+
+  // The rows each archetype has, for its loop and the sends' buffers.
+  SmallVector<std::pair<const WorldArchetype *, Value>> visited;
+  llvm::SmallPtrSet<const WorldArchetype *, 4> direct;
   for (const WorldArchetype &archetype : layout.archetypes) {
     SmallVector<std::pair<QueryOp, unsigned>> bodies;
     for (auto [index, system] : llvm::enumerate(systems))
@@ -12628,15 +12799,57 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
       continue;
 
     rewriter.setInsertionPoint(insertionPoint);
+    Value rows = world.count(loc, archetype);
+    visited.push_back({&archetype, rows});
+    // A loop that never runs in parallel visits the entities in the order
+    // sends are combined in (see lowerQuery).
+    bool sequentialOnly = options.directApplies &&
+                          neverParallel(archetype, options, /*entityLocal=*/true);
+    if (sequentialOnly)
+      direct.insert(&archetype);
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, /*entityLocal=*/true,
         [&](Value entity, Value rows, bool parallel) {
           for (auto [query, index] : bodies)
             emitQueryBody(rewriter, query, mappings[index], archetype, world,
-                          layout, entity, rows, tick, Value(), parallel);
-        });
+                          layout, entity, rows, tick, Value(), parallel,
+                          sequentialOnly);
+        },
+        rows);
+    // The resource cells of directly combined accumulates in registers
+    // through the loop, and the reduced ones reduced.
+    SmallVector<AccumulateOp> accumulates;
+    for (auto [query, index] : bodies)
+      query.getBody().walk(
+          [&](AccumulateOp accumulate) { accumulates.push_back(accumulate); });
+    loops = keepCells(rewriter, loops, accumulates, archetype, world,
+                      sequentialOnly);
     hoistResourceReads(rewriter, loops, world);
   }
+
+  // What was sent to buffers lands now, as when each query ended: by
+  // query, then send, then archetype, then row.
+  rewriter.setInsertionPoint(insertionPoint);
+  for (QueryOp query : queries) {
+    SmallVector<ApplyOp> applies;
+    query.getBody().walk([&](ApplyOp apply) { applies.push_back(apply); });
+    SmallVector<AccumulateOp> accumulates;
+    query.getBody().walk(
+        [&](AccumulateOp accumulate) { accumulates.push_back(accumulate); });
+    for (ApplyOp apply : applies)
+      for (auto [archetype, count] : visited)
+        if (matches(*archetype, query) &&
+            !appliesDirectly(apply, direct.contains(archetype)))
+          combineApplied(rewriter, apply, layout, *archetype, world, count,
+                         tick);
+    for (AccumulateOp accumulate : accumulates)
+      for (auto [archetype, count] : visited)
+        if (matches(*archetype, query) &&
+            !appliesDirectly(accumulate, direct.contains(archetype)))
+          combineAccumulated(rewriter, accumulate, *archetype, world, count);
+  }
+  for (Operation *op : reduced)
+    op->removeAttr(kReducedAttr);
 
   for (RunOp run : runs)
     rewriter.eraseOp(run);
@@ -12647,7 +12860,9 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
 /// opaque system, a run under a condition, or an op with effects in the
 /// schedule body, ends a sequence and stays where it is. So does a run of a system that writes a
 /// resource: fusion moves system-level code ahead of every query of the
-/// sequence, which would let queries see a write that follows them.
+/// sequence, which would let queries see a write that follows them. A
+/// system that sends joins one where nothing else in it touches what is
+/// sent (see joinsSends); else it starts the next.
 static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                          SymbolTable &symbols, const WorldLayout &layout,
                          WorldAccess &world, const LoopOptions &options) {
@@ -12663,6 +12878,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
     archetypes.push_back(archetype.op);
 
   SmallVector<RunOp> sequence;
+  // The sequence's queries.
+  SmallVector<QueryOp> fused;
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     if (auto run = dyn_cast<RunOp>(op)) {
       // An extern system has no body to fuse; it ends a sequence too.
@@ -12670,6 +12887,7 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       if (!system) {
         fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
         sequence.clear();
+        fused.clear();
         continue;
       }
       // A run under a condition runs as a whole or not at all; it is not
@@ -12680,17 +12898,20 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       // would then see some entities' updates from other systems and not
       // others', as would a later system reading what an apply combines;
       // edge loops reach other entities too, and connects sort the edges.
+      // Applies and accumulates do not end it where they can be combined
+      // after the fused loop (see joinsSends).
       bool writesResource =
           system
               .walk([](Operation *op) {
-                return isa<WriteOp, SpawnOp, DespawnOp, LookupOp, ApplyOp,
-                           AccumulateOp, EdgesOp, ConnectOp, AppendOp,
-                           ClearOp, BufferLenOp, BufferAtOp, BufferOfOp,
-                           BufferSetOp, BufferFillOp>(op)
+                return isa<WriteOp, SpawnOp, DespawnOp, LookupOp, EdgesOp,
+                           ConnectOp, AppendOp, ClearOp, BufferLenOp,
+                           BufferAtOp, BufferOfOp, BufferSetOp, BufferFillOp>(
+                           op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
               .wasInterrupted();
+      writesResource |= !fusableSends(system);
       // A query in a counted loop runs so many times, in its place.
       system.walk([&](QueryOp query) {
         writesResource |= query->getParentOp() != system.getOperation();
@@ -12709,7 +12930,20 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       }
       if (!conditional && !writesResource &&
           !computeAccess(system, archetypes).isOpaque()) {
-        sequence.push_back(run);
+        if (joinsSends(system, fused)) {
+          sequence.push_back(run);
+          continue;
+        }
+        // It touches what the sequence sends, or the sequence what it
+        // sends: the sequence ends before it, and it starts the next one,
+        // if its own queries allow.
+        fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
+        sequence.clear();
+        fused.clear();
+        if (joinsSends(system, fused))
+          sequence.push_back(run);
+        else
+          fused.clear();
         continue;
       }
     } else if (!op.hasTrait<OpTrait::IsTerminator>() &&
@@ -12718,6 +12952,7 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
     }
     fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
     sequence.clear();
+    fused.clear();
   }
 }
 
