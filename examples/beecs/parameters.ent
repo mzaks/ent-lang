@@ -30,6 +30,9 @@
 // number of years in a file), as beecs does: those of Berlin are fetched
 // by reference/fetch.sh into build/beecs/run, where the program is
 // started.
+//
+// One line is not beecs's: `Variant.Claims true` forages without turns
+// (claims.ent).
 import files
 import decimal
 
@@ -38,6 +41,8 @@ capacity Bytes 262144
 unique Run { file: text[126], read: bool, weather: bool }
 unique RandomSeed { seed: i64 }
 unique Termination { max_ticks: i32, on_extinction: bool }
+// Not beecs's: whether the squadrons forage without turns (claims.ent).
+unique Variant { claims: bool }
 unique WorkerDevelopment { egg_time: i32, larvae_time: i32, pupae_time: i32, max_lifespan: i32 }
 unique DroneDevelopment { egg_time: i32, larvae_time: i32, pupae_time: i32, max_lifespan: i32 }
 unique WorkerMortality { eggs: f64, larvae: f64, pupae: f64, in_hive: f64, max_milage: f32 }
@@ -105,6 +110,7 @@ world {
   RandomSeed.seed = 1
   Termination.max_ticks = 365
   Termination.on_extinction = false
+  Variant.claims = false
   WorkerDevelopment.egg_time = 3
   WorkerDevelopment.larvae_time = 6
   WorkerDevelopment.pupae_time = 12
@@ -308,6 +314,7 @@ system parameters() {
     RandomSeed.seed = number(Bytes, "RandomSeed.Seed", RandomSeed.seed as f64) as i64
     Termination.max_ticks = whole(Bytes, "Termination.MaxTicks", Termination.max_ticks)
     Termination.on_extinction = truth(Bytes, "Termination.OnExtinction", Termination.on_extinction)
+    Variant.claims = truth(Bytes, "Variant.Claims", Variant.claims)
     WorkerDevelopment.egg_time = whole(Bytes, "WorkerDevelopment.EggTime", WorkerDevelopment.egg_time)
     WorkerDevelopment.larvae_time = whole(Bytes, "WorkerDevelopment.LarvaeTime", WorkerDevelopment.larvae_time)
     WorkerDevelopment.pupae_time = whole(Bytes, "WorkerDevelopment.PupaeTime", WorkerDevelopment.pupae_time)

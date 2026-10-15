@@ -2,7 +2,7 @@
 // them, as entities (beecs's comp package), and a day's foraging in
 // rounds (sys/foraging.go), each round a schedule of systems:
 //
-//   schedule round() run_if Day.forage { .. }
+//   schedule round() run_if Day.forage && !Variant.claims { .. }
 //   main { .. loop { morning() loop { round() } until Day.done  evening() } .. }
 //
 // beecs goes through its lists in an order its random stream shuffles;
@@ -39,6 +39,17 @@ component Trip {                                         // [s], [kJ]
 component Risk { nectar: f64, pollen: f64 }              // of dying on a trip
 component Advert { circuits: f64 }                       // of a dance for it
 component Visits { nectar: i32, pollen: i32 }            // today's foragers
+// Without turns (claims.ent): the loads a round's squadrons ask for, the
+// recruits' and the experienced's, of nectar and of pollen (then, where
+// not all get one, those still to draw a lot); how many get one (then,
+// those still to give); a bit for each of the four that not all get; and
+// the followers led to it by dances.
+component Asked {
+  recruit_nectar: i32, recruit_pollen: i32, known_nectar: i32, known_pollen: i32,
+  give_recruit_nectar: i32, give_recruit_pollen: i32,
+  give_known_nectar: i32, give_known_pollen: i32,
+  short: i32, led_nectar: i32, led_pollen: i32
+}
 
 // --- squadrons ---------------------------------------------------------------
 
@@ -53,6 +64,9 @@ component Milage { today: f32, total: f32 }              // [km]
 component NectarLoad { energy: f64 }                     // [kJ] a bee
 // Its number, for its random numbers, and its place in an order at random.
 component Squadron { number: i32, order: i64 }
+// Without turns: whether it got a load of a patch that had too few for
+// all who asked (1), or not (0).
+component Lot { won: i32 }
 
 // Who rests, in an order at random, to follow dances; `Taken` of them
 // from the end have followed one.
@@ -125,7 +139,11 @@ system hive() {
               Trip { duration_nectar: 0.0, duration_pollen: 0.0, cost_nectar: 0.0,
                      cost_pollen: 0.0 },
               Risk { nectar: 0.0, pollen: 0.0 }, Advert { circuits: 0.0 },
-              Visits { nectar: 0, pollen: 0 } }
+              Visits { nectar: 0, pollen: 0 },
+              Asked { recruit_nectar: 0, recruit_pollen: 0, known_nectar: 0, known_pollen: 0,
+                      give_recruit_nectar: 0, give_recruit_pollen: 0,
+                      give_known_nectar: 0, give_known_pollen: 0,
+                      short: 0, led_nectar: 0, led_pollen: 0 } }
     } else {
       spawn { Patch { distance: InitialPatches[i].distance },
               Constant { nectar: InitialPatches[i].nectar, pollen: InitialPatches[i].pollen,
@@ -137,7 +155,11 @@ system hive() {
               Trip { duration_nectar: 0.0, duration_pollen: 0.0, cost_nectar: 0.0,
                      cost_pollen: 0.0 },
               Risk { nectar: 0.0, pollen: 0.0 }, Advert { circuits: 0.0 },
-              Visits { nectar: 0, pollen: 0 } }
+              Visits { nectar: 0, pollen: 0 },
+              Asked { recruit_nectar: 0, recruit_pollen: 0, known_nectar: 0, known_pollen: 0,
+                      give_recruit_nectar: 0, give_recruit_pollen: 0,
+                      give_known_nectar: 0, give_known_pollen: 0,
+                      short: 0, led_nectar: 0, led_pollen: 0 } }
     }
   }
   let squadrons = InitialPopulation.count / Foragers.squadron_size
@@ -153,7 +175,7 @@ system hive() {
             Age { born: below(k, 0, span) + oldest },
             Milage { today: 0.0, total: milage },
             NectarLoad { energy: 0.0 },
-            Squadron { number: i, order: 0 } }
+            Squadron { number: i, order: 0 }, Lot { won: 0 } }
   }
   Counter = squadrons
   Day.year = 0
@@ -215,7 +237,7 @@ system new_foragers() {
             Age { born: Clock.tick - Aff.days },
             Milage { today: 0.0, total: 0.0 },
             NectarLoad { energy: 0.0 },
-            Squadron { number: Counter + i, order: 0 } }
+            Squadron { number: Counter + i, order: 0 }, Lot { won: 0 } }
   }
   Counter += Emerging.squadrons
   Emerging.squadrons = 0
@@ -664,7 +686,7 @@ system squadron_mortality() {
   }
 }
 
-schedule round() run_if Day.forage {
+schedule round() run_if Day.forage && !Variant.claims {
   patches()
   decide()
   candidates()

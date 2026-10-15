@@ -34,6 +34,10 @@ days spread as beecs's do.
   here an order at random is a random number for each squadron, which a
   `for ... in turn by` goes by. So a run is the same on one core and on
   all of them, to the bit.
+- `claims.ent`: a round without turns (`Variant.Claims true` in
+  parameters.txt): where beecs has the squadrons go one after another
+  (taking loads from a patch, following dances), here they ask all at
+  once and the patch shares what it has; see below.
 - `beecs.ent`: a run, a line for each day.
 - `reference/`: `fetch.sh` fetches beecs (GPL-3.0, so none of its files
   are in this repository) at the commit the model was held against into
@@ -55,15 +59,17 @@ day's foraging rounds.
 ## What is checked
 
 `check/curves.py [scenario] [--seeds N]` runs beecs and the model for
-seeds 1 to N (100) from the same parameters and holds the model's days
+seeds 1 to N (100) from the same parameters (`--claims`: the model
+without turns) and holds the model's days
 against beecs's spread from seed to seed: for every column, the model's
 median of each day within beecs's 5% to 95%, and each run's mean and
 peak spread alike (Kolmogorov-Smirnov at 1%); where colonies may die
-out, as many lost (Fisher at 1%). Four scenarios agree in all of it:
-`default` (a year of beecs's defaults), `years` (three years, the
-weather of 2000 to 2002), `seasonal` (two patches whose flowers follow
-the season) and `lean` (a small, poor colony with one far patch, two
-years, ending where it dies out). `default`, `seasonal` and `lean` also
+out, as many lost (Fisher at 1%). Six scenarios agree in all of it:
+`default` (a year of beecs's defaults), `small` (squadrons of 10 bees),
+`years` (three years, the weather of 2000 to 2002), `seasonal` (two
+patches whose flowers follow the season), `scarce` (two small patches
+that run out within a day) and `lean` (a small, poor colony with one far
+patch, two years, ending where it dies out). `default`, `seasonal` and `lean` also
 agree over 400 seeds; on `lean` 21 of 400 colonies die out in beecs and
 18 in the model.
 
@@ -72,7 +78,40 @@ agree over 400 seeds; on `lean` 21 of 400 colonies die out in beecs and
 `bench/beecs/run.py`, in `bench/beecs/RESULTS.md`: a year of the defaults
 takes 23 ms for both; with every forager an entity of its own (squadrons
 of one bee, 10,000 to 20,000 entities) 1.41 s where beecs takes 1.55,
-on one core.
+on one core. Without turns (below) 17 ms and 1.17 s.
+
+## Without turns
+
+Four steps of a round go through the squadrons one after another, in an
+order at random: recruits and experienced squadrons taking loads from a
+patch, which may run out, and dancers taking followers from the resting,
+each of whom follows one. Such a `for` runs on one core, and is half of
+the time where every forager is an entity of its own. `claims.ent` does
+these steps without turns:
+
+- Every squadron going to a patch asks it for a load, and the patch
+  counts what it is asked. Where it has enough, all get one; where not,
+  the recruits first, as in beecs, and of those that cannot all have one,
+  as many as there are loads at random. That is what beecs's order at
+  random comes to; only its experienced squadrons go in the order they
+  are stored, and here they are drawn too.
+- Each dancer says how many it would lead, and the resting line up. As in
+  beecs, the dancers in an order at random lead theirs while so many of
+  the resting are left, and so many of the resting at random follow each
+  dance; what a follower does then depends only on the dance's patch,
+  and all decide at once. This is one after another too, but over short
+  lists (the dancers, the resting) of a few numbers each, with no sort.
+  (A first try, each resting squadron following by a chance of its own,
+  as many as are led on average, was a little off over 800 seeds: more
+  are led than rest in a third of the rounds, and there beecs's rule
+  counts, and so do the exact numbers.)
+
+It agrees with beecs as the model with turns does (`check/curves.py
+--claims`: `years` over 100 seeds, the others over 400, `seasonal` and
+`scarce` also over 800), and is faster on one core: a year of the defaults takes 17 ms,
+with squadrons of one bee 1.17 s (with turns 1.39). On all cores it
+gains nothing at these sizes: a round's loops over some 8,500 squadrons
+are too little work to share out.
 
 ## What follows beecs, and what does not
 

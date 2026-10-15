@@ -1,0 +1,364 @@
+// Foraging without turns: a round as foraging.ent's, but where beecs has
+// the squadrons go one after another (recruits and experienced ones taking
+// loads from a patch, dancers taking followers from the resting), here
+// they ask all at once, and what is asked is shared.
+//
+//   Variant.Claims true                          (in parameters.txt)
+//
+// - A load of a patch: every squadron that goes to its patch asks it for
+//   one, and the patch counts what it is asked. Where it has enough, all
+//   get one, as in beecs. Where not, the recruits get theirs first, as in
+//   beecs, and of those of a kind that cannot all have one, as many as
+//   there are loads at random (selection sampling, one after another but
+//   only over who asked such a patch). beecs's order at random gives the
+//   same; its experienced squadrons go as stored, here they are drawn too.
+// - Followers of a dance: each dancer says how many it would lead (a
+//   Poisson number for nectar, a fixed one for pollen), and the resting
+//   line up. Then, as in beecs, the dancers in an order at random lead
+//   theirs while so many of the resting are left, and so many of the
+//   resting at random follow each dance: one after another, but over
+//   short lists of a few numbers, not over the squadrons. What a follower
+//   does then depends only on the dance's patch, as in beecs, and all
+//   decide at once.
+import math
+import parameters
+import random
+import colony
+import foraging
+
+const PICK = 11
+const FOLLOW = 12
+const DANCE_ORDER = 13
+
+// Who asked a patch that has too few loads for all of them: the squadron,
+// its number, the patch and what it asked for (0 recruit for nectar, 1
+// for pollen, 2 experienced for nectar, 3 for pollen).
+buffer Asking { who: entity, number: i32, patch: entity, kind: i32 } capacity 100000
+// Whether any patch has too few this round.
+unique Short: bool
+
+// The dancers of a round: the patch, whether for pollen, and how many
+// followers each would lead.
+buffer Dancers { patch: entity, pollen: bool, followers: i32 } capacity 100000
+// The dances of a round: a row for each patch and what it is danced for,
+// with how many follow (then, how many are still to be drawn).
+buffer Dances { patch: entity, pollen: bool, followers: i32 } capacity 2048
+// The resting of a round, and the dance each follows (-1: none).
+buffer Line { who: entity, dance: i32 } capacity 100000
+
+// Recruits look for the danced patch: found, they ask it for a load, else
+// they search. Experienced squadrons ask theirs, or rest if they know none.
+system claims() {
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, RECRUIT))
+  for a: mut Activity, k: mut Known, l: mut Lot, s: Squadron {
+    l.won = 0
+    if a.now == Doing.Recruited {
+      let draw = key_of(occasion, s.number)
+      if !a.pollen && k.nectar != none {
+        if uniform(draw, 0) < Dance.find_probability { Asked(k.nectar).recruit_nectar += 1 }
+        else {
+          a.now = Doing.Searching
+          k.nectar = none
+        }
+      }
+      if a.pollen && k.pollen != none {
+        if uniform(draw, 1) < Dance.find_probability { Asked(k.pollen).recruit_pollen += 1 }
+        else {
+          a.now = Doing.Searching
+          k.pollen = none
+        }
+      }
+    } else if a.now == Doing.Experienced {
+      if a.pollen {
+        if k.pollen == none { a.now = Doing.Resting } else { Asked(k.pollen).known_pollen += 1 }
+      } else {
+        if k.nectar == none { a.now = Doing.Resting } else { Asked(k.nectar).known_nectar += 1 }
+      }
+    }
+  }
+}
+
+// How many loads a patch has for what it is asked: the recruits first,
+// then the experienced, and what they take.
+system share() {
+  let size = Foragers.squadron_size
+  let nectar_load = Foragers.nectar_load * size as f64
+  let pollen_load = Foragers.pollen_load * size as f64
+  Short = false
+  for r: mut Resource, q: mut Asked, v: mut Visits {
+    let nectar = max((r.nectar / nectar_load) as i32, 0)
+    let pollen = max((r.pollen / pollen_load) as i32, 0)
+    q.give_recruit_nectar = min(q.recruit_nectar, nectar)
+    q.give_known_nectar = min(q.known_nectar, nectar - q.give_recruit_nectar)
+    q.give_recruit_pollen = min(q.recruit_pollen, pollen)
+    q.give_known_pollen = min(q.known_pollen, pollen - q.give_recruit_pollen)
+    let nectar_given = q.give_recruit_nectar + q.give_known_nectar
+    let pollen_given = q.give_recruit_pollen + q.give_known_pollen
+    r.nectar -= nectar_given as f64 * nectar_load
+    r.pollen -= pollen_given as f64 * pollen_load
+    v.nectar += nectar_given * size
+    v.pollen += pollen_given * size
+    q.short = (if q.give_recruit_nectar < q.recruit_nectar { 1 } else { 0 }) |
+              (if q.give_recruit_pollen < q.recruit_pollen { 2 } else { 0 }) |
+              (if q.give_known_nectar < q.known_nectar { 4 } else { 0 }) |
+              (if q.give_known_pollen < q.known_pollen { 8 } else { 0 })
+    if q.short != 0 { Short = true }
+  }
+}
+
+// Whether a patch whose `short` that is gives loads to all who ask it
+// for `kind`.
+fn enough(short: i32, kind: i32) -> bool { (short >> kind) & 1 == 0 }
+
+// What a squadron asked for, or -1.
+fn asked_for(now: Doing, pollen: bool, knows_nectar: bool, knows_pollen: bool) -> i32 {
+  if now == Doing.Recruited {
+    if pollen { if knows_pollen { 1 } else { -1 } }
+    else { if knows_nectar { 0 } else { -1 } }
+  } else if now == Doing.Experienced {
+    if pollen { 3 } else { 2 }
+  } else { -1 }
+}
+
+// Who asked a patch that has too few for them.
+system short_lines() {
+  Asking = []
+  for e, a: Activity, k: Known, s: Squadron {
+    let kind = asked_for(a.now, a.pollen, k.nectar != none, k.pollen != none)
+    if kind >= 0 {
+      let patch = if kind == 1 || kind == 3 { k.pollen } else { k.nectar }
+      if let short = Asked(patch).short {
+        if !enough(short, kind) {
+          Asking += { who: e, number: s.number, patch: patch, kind: kind }
+        }
+      }
+    }
+  }
+}
+
+// Of each such line, as many as there are loads, at random: each patch
+// goes through who asked it, and each gets one with the chance of the
+// loads left among those left to draw (selection sampling).
+system draw_lots() {
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, PICK))
+  for e, q: mut Asked where q.short != 0 {
+    for i in 0..len(Asking) {
+      if Asking[i].patch == e {
+        let u = uniform(key_of(occasion, Asking[i].number), 0)
+        let kind = Asking[i].kind
+        var won = false
+        if kind == 0 {
+          won = u * q.recruit_nectar as f64 < q.give_recruit_nectar as f64
+          q.recruit_nectar -= 1
+          if won { q.give_recruit_nectar -= 1 }
+        } else if kind == 1 {
+          won = u * q.recruit_pollen as f64 < q.give_recruit_pollen as f64
+          q.recruit_pollen -= 1
+          if won { q.give_recruit_pollen -= 1 }
+        } else if kind == 2 {
+          won = u * q.known_nectar as f64 < q.give_known_nectar as f64
+          q.known_nectar -= 1
+          if won { q.give_known_nectar -= 1 }
+        } else {
+          won = u * q.known_pollen as f64 < q.give_known_pollen as f64
+          q.known_pollen -= 1
+          if won { q.give_known_pollen -= 1 }
+        }
+        if won { Lot(Asking[i].who).won += 1 }
+      }
+    }
+  }
+}
+
+// Who asked gets a load, where the patch had enough or the lot says so,
+// and flies there and back; else searches.
+system settle() {
+  for a: mut Activity, k: mut Known, l: Lot {
+    let kind = asked_for(a.now, a.pollen, k.nectar != none, k.pollen != none)
+    if kind >= 0 {
+      let patch = if kind == 1 || kind == 3 { k.pollen } else { k.nectar }
+      var got = l.won > 0
+      if let short = Asked(patch).short { got = got || enough(short, kind) }
+      if got {
+        a.now = if kind == 1 || kind == 3 { Doing.BringPollen } else { Doing.BringNectar }
+      } else {
+        a.now = Doing.Searching
+        if kind == 1 || kind == 3 { k.pollen = none } else { k.nectar = none }
+      }
+    }
+  }
+}
+
+// The loads brought, and the kilometres flown for them (collecting).
+system loads() {
+  for a: Activity, k: Known, m: mut Milage, n: mut NectarLoad {
+    if a.now == Doing.BringNectar {
+      if let concentration = Flowers(k.nectar).concentration, let cost = Trip(k.nectar).cost_nectar {
+        n.energy = concentration * Foragers.nectar_load * EnergyContent.sucrose
+        let km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+        m.today += km
+        m.total += km
+      }
+    }
+    if a.now == Doing.BringPollen {
+      if let cost = Trip(k.pollen).cost_pollen {
+        let km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+        m.today += km
+        m.total += km
+      }
+    }
+  }
+}
+
+// The asking of a round starts from nought.
+system asked_again() {
+  for q: mut Asked {
+    q.recruit_nectar = 0
+    q.recruit_pollen = 0
+    q.known_nectar = 0
+    q.known_pollen = 0
+    q.short = 0
+    q.led_nectar = 0
+    q.led_pollen = 0
+  }
+}
+
+// Dancers say how many they would lead, to which patch; the resting line
+// up (as they are stored).
+system lead() {
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DANCE))
+  Dancers = []
+  Line = []
+  for e, a: Activity, k: Known, l: mut Lot, s: Squadron {
+    l.won = 0
+    if a.now == Doing.BringNectar {
+      if let circuits = Advert(k.nectar).circuits {
+        let followers = poisson(key_of(occasion, s.number), 0, circuits * 0.05)
+        if followers > 0 { Dancers += { patch: k.nectar, pollen: false, followers: followers } }
+      }
+    } else if a.now == Doing.BringPollen {
+      Dancers += { patch: k.pollen, pollen: true, followers: Dance.pollen_dance_followers }
+    } else if a.now == Doing.Resting {
+      Line += { who: e, dance: -1 }
+    }
+  }
+}
+
+// The dancers in an order at random, each leading its followers where so
+// many of the resting are left, as in beecs; what they lead added up by
+// patch; and of the resting, so many for each dance at random (selection
+// sampling): one after another, but over the dancers and the resting
+// only, a few numbers each, not over the squadrons.
+system dances() {
+  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DANCE_ORDER))
+  Dances = []
+  var left = len(Line)
+  let n = len(Dancers)
+  for i in 0..n {
+    let j = i + below(key_of(occasion, i), 0, n - i)
+    let patch = Dancers[j].patch
+    let pollen = Dancers[j].pollen
+    let followers = Dancers[j].followers
+    Dancers[j].patch = Dancers[i].patch
+    Dancers[j].pollen = Dancers[i].pollen
+    Dancers[j].followers = Dancers[i].followers
+    if followers <= left {
+      left -= followers
+      var found = -1
+      for d in 0..len(Dances) {
+        if Dances[d].patch == patch && Dances[d].pollen == pollen { found = d }
+      }
+      if found < 0 {
+        Dances += { patch: patch, pollen: pollen, followers: 0 }
+        found = len(Dances) - 1
+      }
+      Dances[found].followers = Dances[found].followers + followers
+    }
+  }
+  let follow = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, FOLLOW))
+  let resting = len(Line)
+  for r in 0..resting {
+    var x = (uniform(key_of(follow, r), 0) * (resting - r) as f64) as i32
+    var d = 0
+    while d < len(Dances) && Line[r].dance < 0 {
+      if x < Dances[d].followers {
+        Line[r].dance = d
+        Dances[d].followers = Dances[d].followers - 1
+      } else {
+        x -= Dances[d].followers
+      }
+      d += 1
+    }
+  }
+}
+
+// Each patch tells the resting who follow a dance for it which one.
+system tell() {
+  for e, q: Asked {
+    for r in 0..len(Line) {
+      let d = Line[r].dance
+      if d >= 0 {
+        if Dances[d].patch == e { Lot(Line[r].who).won += d + 1 }
+      }
+    }
+  }
+}
+
+// The followers go to the dance's patch, if it is better than the one
+// they know, as recruits, else back to their own (dancing).
+system follow() {
+  for a: mut Activity, k: mut Known, l: Lot where a.now == Doing.Resting && l.won > 0 {
+    let patch = Dances[l.won - 1].patch
+    if !Dances[l.won - 1].pollen {
+      var recruited = k.nectar == none
+      if !recruited {
+        if let efficiency = Resource(patch).efficiency, let theirs = Resource(k.nectar).efficiency {
+          recruited = efficiency > theirs
+        }
+      }
+      if recruited {
+        k.nectar = patch
+        a.now = Doing.Recruited
+        a.pollen = false
+      } else {
+        a.now = Doing.Experienced
+      }
+    } else {
+      var recruited = k.pollen == none
+      if !recruited {
+        if let duration = Trip(patch).duration_pollen, let theirs = Trip(k.pollen).duration_pollen {
+          recruited = duration < theirs
+        }
+      }
+      if recruited {
+        k.pollen = patch
+        a.now = Doing.Recruited
+        a.pollen = true
+      } else {
+        a.now = Doing.Experienced
+      }
+    }
+  }
+}
+
+schedule round_claims() run_if Day.forage && Variant.claims {
+  patches()
+  decide()
+  candidates()
+  search()
+  asked_again()
+  claims()
+  share()
+  short_lines() run_if Short
+  draw_lots() run_if Short
+  settle()
+  loads()
+  flight_cost()
+  flight_mortality()
+  lead()
+  dances()
+  tell()
+  follow()
+  unload()
+  round_end()
+}

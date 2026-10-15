@@ -2,7 +2,7 @@
 """Holds the ent-lang model's days against beecs's, over many seeds.
 
   examples/beecs/reference/fetch.sh        once: beecs, built, and its weather
-  python3 examples/beecs/check/curves.py [scenario] [--seeds N]
+  python3 examples/beecs/check/curves.py [scenario] [--seeds N] [--claims]
 
 Both are run for seeds 1 to N (100 by default) with the same parameters
 (the scenario's, written as beecs's JSON for the reference and as a
@@ -18,10 +18,15 @@ the same spread:
 - for every column, the year's mean of each run, and its peak, spread
   alike over the seeds (a two-sample Kolmogorov-Smirnov test at 1%).
 
-Scenarios: default (beecs's defaults, a year), years (three years of
-Berlin's weather, 2000 to 2002), seasonal (two patches whose flowers follow
-the season, a year), lean (a smaller, poorer colony, of which some are lost,
-with OnExtinction; two years).
+Scenarios: default (beecs's defaults, a year), small (squadrons of 10
+bees, ten times as many), years (three years of Berlin's weather, 2000 to
+2002), seasonal (two patches whose flowers follow the season, a year),
+scarce (two small patches that run out within a day, squadrons of 10),
+lean (a smaller, poorer colony, of which some are lost, with
+OnExtinction; two years).
+
+With --claims the model forages without turns (claims.ent), held against
+the same beecs.
 """
 
 import argparse
@@ -48,6 +53,9 @@ COLUMNS = ["w_eggs", "w_larvae", "w_pupae", "w_in_hive", "foragers",
 
 SCENARIOS = {
     "default": {},
+    "small": {
+        "Foragers.SquadronSize": 10,
+    },
     "years": {
         "Termination.MaxTicks": 3 * 365,
         "ForagingPeriod.Files": ["foraging-period/berlin2000.txt",
@@ -62,6 +70,17 @@ SCENARIOS = {
             {"DistToColony": 2000, "SeasonalPatch": {
                 "SeasonShift": -30, "MaxNectar": 60, "MaxPollen": 1,
                 "NectarConcentration": 1.0, "DetectionProbability": 0.15}},
+        ],
+    },
+    "scarce": {
+        "Foragers.SquadronSize": 10,
+        "Patches": [
+            {"DistToColony": 400, "ConstantPatch": {
+                "Nectar": 2, "Pollen": 0.2, "NectarConcentration": 1.5,
+                "DetectionProbability": 0.5}},
+            {"DistToColony": 900, "ConstantPatch": {
+                "Nectar": 1, "Pollen": 0.1, "NectarConcentration": 1.2,
+                "DetectionProbability": 0.3}},
         ],
     },
     "lean": {
@@ -92,9 +111,11 @@ def beecs_json(parameters):
     return groups
 
 
-def model_text(parameters, seed):
+def model_text(parameters, seed, claims):
     """The scenario as the model's parameters.txt."""
     lines = [f"RandomSeed.Seed {seed}"]
+    if claims:
+        lines.append("Variant.Claims true")
     for name, value in parameters.items():
         if name == "Patches":
             for patch in value:
@@ -144,7 +165,7 @@ def run_reference(parameters, seeds, work):
     return parse(out.stdout)
 
 
-def run_model(parameters, seeds, work):
+def run_model(parameters, seeds, work, claims):
     program = os.path.join(work, "model")
     subprocess.run([sys.executable, os.path.join(ROOT, "tools", "ent"), "build", PROGRAM,
                     "-o", program], check=True, env=dict(os.environ,
@@ -157,7 +178,7 @@ def run_model(parameters, seeds, work):
         if not os.path.exists(link):
             os.symlink(WEATHER, link)
         with open(os.path.join(place, "parameters.txt"), "w") as f:
-            f.write(model_text(parameters, seed))
+            f.write(model_text(parameters, seed, claims))
         out = subprocess.run([program], cwd=place, capture_output=True, text=True,
                              check=True)
         return parse(out.stdout)
@@ -184,6 +205,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", nargs="?", default="default", choices=SCENARIOS)
     parser.add_argument("--seeds", type=int, default=100)
+    parser.add_argument("--claims", action="store_true")
     args = parser.parse_args()
     if not os.path.exists(REFERENCE):
         sys.exit("no reference: run examples/beecs/reference/fetch.sh first")
@@ -191,14 +213,15 @@ def main():
 
     with tempfile.TemporaryDirectory(dir=BUILD) as work:
         reference = run_reference(parameters, args.seeds, work)
-        model = run_model(parameters, args.seeds, work)
+        model = run_model(parameters, args.seeds, work, args.claims)
     days = max(max(len(r) for r in reference.values()), max(len(r) for r in model.values()))
     ref = stack(reference, days)
     mod = stack(model, days)
     ref_days = [len(r) for r in reference.values()]
     mod_days = [len(r) for r in model.values()]
 
-    print(f"scenario {args.scenario}, {args.seeds} seeds each, {days} days")
+    print(f"scenario {args.scenario}{', without turns' if args.claims else ''}, "
+          f"{args.seeds} seeds each, {days} days")
     lost_ref = sum(1 for d in ref_days if d < days)
     lost_mod = sum(1 for d in mod_days if d < days)
     if lost_ref + lost_mod > 0:

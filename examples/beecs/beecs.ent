@@ -14,6 +14,7 @@ import console
 import parameters
 import colony
 import foraging
+import claims
 
 capacity Activity 100000
 capacity Patch 1024
@@ -87,7 +88,7 @@ main {
   setup()
   loop {
     dawn()
-    loop { round() } until Day.done
+    loop { round() round_claims() } until Day.done
     dusk()
   } until (Termination.max_ticks > 0 && Clock.tick >= Termination.max_ticks) || !Run.weather ||
           (Termination.on_extinction && Population.total_population == 0)
