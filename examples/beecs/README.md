@@ -47,8 +47,9 @@ days spread as beecs's do.
   lie a golden angle apart), each a ring of the nectar and pollen it has
   left today, and the squadrons as dots by what they do: resting in the
   hive, scouting, flying to their patch and back. On the right the year
-  so far: the workers by stage, the honey and the pollen in store. Space
-  stops and goes on, Up and Down change the speed.
+  so far: the workers by stage, the honey and the pollen in store (the
+  mouse over them shows a day's numbers). Space stops and goes on, Up
+  and Down change the speed, R starts over with the next seed.
 - `reference/`: `fetch.sh` fetches beecs (GPL-3.0, so none of its files
   are in this repository) at the commit the model was held against into
   `build/beecs/reference`, builds `runner/` against it (a Go program

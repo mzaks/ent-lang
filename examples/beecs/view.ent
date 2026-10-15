@@ -9,7 +9,8 @@
 //   cd build/beecs/run
 //   ../../../tools/ent run ../../../examples/beecs/view.ent
 //
-// Space stops and goes on, Up and Down make it faster and slower. The
+// Space stops and goes on, Up and Down make it faster and slower, R
+// starts it over with the next seed. The
 // model is beecs.ent's, a step at a time (the day until foraging, each
 // round of it, the rest of the day), and reads parameters.txt as it does.
 // beecs's patches have a distance and no direction: here they lie around
@@ -34,8 +35,11 @@ capacity Shapes 65536
 // the keys as they were in the frame before.
 unique Pace {
   level: i32, left: i32, t: f32, paused: bool, ended: bool,
-  space: bool, up: bool, down: bool
+  space: bool, up: bool, down: bool, r: bool
 }
+
+// R: the run again from its first day, with the next seed.
+unique Restart { asked: bool, seed: i64 }
 
 // Where the day is: before foraging (0), in its rounds (1), after (2).
 unique Phase { now: i32 }
@@ -59,6 +63,9 @@ system pace() {
   Pace.space = Keys.space
   Pace.up = Keys.up
   Pace.down = Keys.down
+  let r = key_down('R' as i32)
+  if r && !Pace.r { Restart.asked = true }
+  Pace.r = r
   if Pace.level < 4 {
     let frames = 1 << (4 - Pace.level)
     let at = (Window.frame % frames as i64) as i32
@@ -68,7 +75,7 @@ system pace() {
     Pace.left = 1 << (Pace.level - 4)
     Pace.t = fract(Window.frame as f32 * 0.03)
   }
-  if Pace.paused || Pace.ended { Pace.left = 0 }
+  if Pace.paused || Pace.ended || Restart.asked { Pace.left = 0 }
 }
 
 // --- the model's day, as beecs.ent has it --------------------------------
@@ -479,7 +486,34 @@ system legend() {
   key_of_dot("pollen (inner)", 0xd9702a, 20.0, 238.0)
   label("Space: stop/go", 20.0, Window.height as f32 - 48.0, 14.0, DIM)
   label("Up/Down: speed {Pace.level}", 20.0, Window.height as f32 - 28.0, 14.0, DIM)
+  label("R: again, next seed", 20.0, Window.height as f32 - 68.0, 14.0, DIM)
 }
+
+// The run as it was before its first day: no patches, no squadrons, and
+// what the days have left in uniques that setting up does not set; the
+// view's year so far forgotten. The seed is the next one.
+system wipe() {
+  for e with Squadron { e.destroy() }
+  for e with Patch { e.destroy() }
+  Restart.seed = RandomSeed.seed + 1
+  Consumed.honey = 0.0
+  Emerging.workers = 0
+  Emerging.drones = 0
+  Emerging.squadrons = 0
+  History = []
+  Most.workers = 0
+  Most.honey = 0.0
+  Most.pollen = 0.0
+  Map.patches = 0
+  Map.metres = 0.0
+  Phase.now = 0
+  Pace.ended = false
+  Pace.left = 0
+}
+
+// (parameters.txt has said its seed again.)
+system reseed() { RandomSeed.seed = Restart.seed }
+system restarted() { Restart.asked = false }
 
 schedule setup() {
   parameters()
@@ -493,7 +527,22 @@ schedule setup() {
   number_patches()
 }
 
-schedule dawn() {
+schedule restart() run_if Restart.asked {
+  wipe()
+  parameters()
+  reseed()
+  weather()
+  colony()
+  hive()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  place_patches()
+  number_patches()
+  restarted()
+}
+
+schedule dawn() run_if !Restart.asked {
   aff()
   foraging_period()
   replenish()
@@ -514,10 +563,10 @@ schedule dawn() {
   foraging_now()
 }
 
-schedule after() { after_foraging() }
+schedule after() run_if !Restart.asked { after_foraging() }
 schedule spent() { spend() }
 
-schedule dusk() {
+schedule dusk() run_if !Restart.asked {
   evening()
   squadron_mortality()
   count_cohorts()
@@ -551,19 +600,24 @@ schedule frame() run_if Pace.left <= 0 && !Window.closed {
 main {
   setup()
   loop {
-    dawn()
-    spent()
-    loop { frame() } until Pace.left > 0 || Window.closed
     loop {
-      foraging::round()
-      round_claims()
+      dawn()
       spent()
-      loop { frame() } until Pace.left > 0 || Window.closed
-    } until Day.done || Window.closed
-    after()
-    dusk()
-    spent()
-    loop { frame() } until Pace.left > 0 || Window.closed
-  } until Pace.ended || Window.closed
-  loop { frame() } until Window.closed
+      loop { frame() } until Pace.left > 0 || Window.closed || Restart.asked
+      loop {
+        foraging::round()
+        round_claims()
+        spent()
+        loop { frame() } until Pace.left > 0 || Window.closed || Restart.asked
+      } until Day.done || Window.closed || Restart.asked
+      after()
+      dusk()
+      spent()
+      loop { frame() } until Pace.left > 0 || Window.closed || Restart.asked
+    } until Pace.ended || Window.closed || Restart.asked
+    // After the end: frames until R. (After R, what still runs of a
+    // day until here, a round at most, is wiped.)
+    loop { frame() } until Window.closed || Restart.asked
+    restart()
+  } until Window.closed
 }
