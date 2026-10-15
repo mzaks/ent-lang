@@ -42,6 +42,13 @@ days spread as beecs's do.
   (taking loads from a patch, following dances), here they ask all at
   once and the patch shares what it has; see below.
 - `beecs.ent`: a run, a line for each day.
+- `view.ent`: the same run in a window. On the left the hive and its
+  patches (beecs's patches have a distance and no direction: here they
+  lie a golden angle apart), each a ring of the nectar and pollen it has
+  left today, and the squadrons as dots by what they do: resting in the
+  hive, scouting, flying to their patch and back. On the right the year
+  so far: the workers by stage, the honey and the pollen in store. Space
+  stops and goes on, Up and Down change the speed.
 - `reference/`: `fetch.sh` fetches beecs (GPL-3.0, so none of its files
   are in this repository) at the commit the model was held against into
   `build/beecs/reference`, builds `runner/` against it (a Go program
@@ -52,6 +59,7 @@ days spread as beecs's do.
 examples/beecs/reference/fetch.sh        # once: beecs, built, and its weather
 cd build/beecs/run
 ../../../tools/ent run ../../../examples/beecs/beecs.ent > days.csv
+../../../tools/ent run ../../../examples/beecs/view.ent             # in a window
 ```
 
 The columns: the seed, the day, the worker eggs, larvae, pupae, in-hive

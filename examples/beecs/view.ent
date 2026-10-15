@@ -1,0 +1,564 @@
+// The honeybee colony in a window: on the left the hive and its flower
+// patches, the squadrons of foragers as dots by what they do (resting in
+// the hive, scouting the field, flying to a patch and back with nectar
+// or pollen), each patch a ring of what it has left today; on the right
+// the year so far, the workers by stage, the honey and the pollen in
+// store.
+//
+//   examples/beecs/reference/fetch.sh     once: beecs's weather, into build/
+//   cd build/beecs/run
+//   ../../../tools/ent run ../../../examples/beecs/view.ent
+//
+// Space stops and goes on, Up and Down make it faster and slower. The
+// model is beecs.ent's, a step at a time (the day until foraging, each
+// round of it, the rest of the day), and reads parameters.txt as it does.
+// beecs's patches have a distance and no direction: here they lie around
+// the hive a golden angle apart.
+import math
+import random
+import window
+import parameters
+import colony
+import foraging
+import claims
+
+capacity Activity 100000
+capacity Patch 1024
+capacity Shapes 65536
+
+// --- stepping ------------------------------------------------------------
+
+// How fast (a step every 2^(4 - level) frames below 4, 2^(level - 4)
+// steps a frame from 4 on), how many steps are left in this frame, how
+// far the frame is into a slow step (0 to below 1, for the flights), and
+// the keys as they were in the frame before.
+unique Pace {
+  level: i32, left: i32, t: f32, paused: bool, ended: bool,
+  space: bool, up: bool, down: bool
+}
+
+// Where the day is: before foraging (0), in its rounds (1), after (2).
+unique Phase { now: i32 }
+
+world {
+  Window.width = 1180
+  Window.height = 720
+  Window.min_width = 900
+  Window.min_height = 560
+  Window.title = "ent-lang: a honeybee colony"
+  Window.background = 0x10141a
+  Window.fps = 60
+  Window.resizable = true
+  Pace.level = 4
+}
+
+system pace() {
+  if Keys.space && !Pace.space { Pace.paused = !Pace.paused }
+  if Keys.up && !Pace.up { Pace.level = min(Pace.level + 1, 10) }
+  if Keys.down && !Pace.down { Pace.level = max(Pace.level - 1, 0) }
+  Pace.space = Keys.space
+  Pace.up = Keys.up
+  Pace.down = Keys.down
+  if Pace.level < 4 {
+    let frames = 1 << (4 - Pace.level)
+    let at = (Window.frame % frames as i64) as i32
+    Pace.left = if at == 0 { 1 } else { 0 }
+    Pace.t = at as f32 / frames as f32
+  } else {
+    Pace.left = 1 << (Pace.level - 4)
+    Pace.t = fract(Window.frame as f32 * 0.03)
+  }
+  if Pace.paused || Pace.ended { Pace.left = 0 }
+}
+
+// --- the model's day, as beecs.ent has it --------------------------------
+
+system tick() {
+  Clock.tick += 1
+}
+
+// After a step: one fewer left in this frame.
+system spend() {
+  Pace.left = max(Pace.left - 1, 0)
+}
+
+system foraging_now() { Phase.now = 1 }
+system after_foraging() { Phase.now = 2 }
+
+// Whether the run is at its end, as beecs.ent's `main` ends it.
+system ended() {
+  Phase.now = 0
+  Pace.ended = (Termination.max_ticks > 0 && Clock.tick >= Termination.max_ticks) ||
+               !Run.weather ||
+               (Termination.on_extinction && Population.total_population == 0)
+}
+
+// --- the year so far -----------------------------------------------------
+
+// A day's numbers: workers by stage, honey [kg] and pollen [g].
+buffer History {
+  eggs: i32, larvae: i32, pupae: i32, in_hive: i32, foragers: i32,
+  honey: f32, pollen: f32
+} capacity 8192
+// The most of each so far, for the charts' scales.
+unique Most { workers: i32, honey: f32, pollen: f32 }
+
+system record() {
+  let honey = (0.001 * Hive.honey / EnergyContent.honey) as f32
+  let pollen = Hive.pollen as f32
+  History += { eggs: Population.worker_eggs, larvae: Population.worker_larvae,
+               pupae: Population.worker_pupae, in_hive: Population.workers_in_hive,
+               foragers: Population.workers_foragers, honey: honey, pollen: pollen }
+  let workers = Population.worker_eggs + Population.worker_larvae +
+                Population.worker_pupae + Population.workers_in_hive +
+                Population.workers_foragers
+  Most.workers = max(Most.workers, workers)
+  Most.honey = max(Most.honey, honey)
+  Most.pollen = max(Most.pollen, pollen)
+}
+
+// --- the map -------------------------------------------------------------
+
+// Where a patch lies: its place in the order of distance, then its point
+// on the map (worked out each frame, the window may change its size).
+// And the bees on their way to it or back, for nectar and for pollen.
+component Spot { metres: i64, index: i32, x: f32, y: f32, nectar: i32, pollen: i32 }
+// The map: its middle, how many points to a metre, how big the hive is,
+// and the patches; and how wide the panel of charts is.
+unique Map {
+  cx: f32, cy: f32, scale: f32, room: f32, hive: f32, patch: f32, metres: f32, patches: i32,
+  panel: f32
+}
+
+system place_patches() {
+  for e, p: Patch {
+    e.add(Spot { metres: p.distance as i64, index: 0, x: 0.0, y: 0.0, nectar: 0,
+                 pollen: 0 })
+  }
+}
+
+system number_patches() {
+  for s: mut Spot in turn by s.metres {
+    s.index = Map.patches
+    Map.patches += 1
+    Map.metres = max(Map.metres, s.metres as f32)
+  }
+}
+
+const GOLDEN = 2.39996323
+
+system layout() {
+  Map.panel = min(max(Window.width as f32 * 0.36, 320.0), 460.0)
+  // (Room on the right of the map for the patches' labels, on the left
+  // for the dots' colours.)
+  let width = Window.width as f32 - Map.panel - 130.0
+  let height = Window.height as f32
+  Map.cx = 110.0 + width * 0.5
+  Map.cy = height * 0.5
+  let room = max(min(width - 150.0, height - 60.0) * 0.5, 60.0)
+  Map.scale = room / max(Map.metres * 1.05, 500.0)
+  Map.room = room
+  Map.hive = min(max(room * 0.08, 8.0), 26.0)
+  Map.patch = min(max(room * 0.09, 8.0), 22.0)
+  for s: mut Spot, p: Patch {
+    let angle = -1.0 + s.index as f32 * GOLDEN
+    let r = p.distance as f32 * Map.scale
+    s.x = Map.cx + cos(angle) * r
+    s.y = Map.cy + sin(angle) * r
+    s.nectar = 0
+    s.pollen = 0
+  }
+}
+
+// A number from 0 to below 1 of a squadron and what it is for: where its
+// dot lies, the same from frame to frame.
+fn spread(number: i32, salt: i32) -> f32 {
+  (mix((number as i64 as u64) ^ ((salt as i64 as u64) << 32)) >> 40) as f32 / 16777216.0
+}
+
+table colours[Doing]: i32 = [
+  Lazy:        0x5a6270,
+  Resting:     0xb9c2cf,
+  Searching:   0x5fd3e8,
+  Recruited:   0xb48cff,
+  Experienced: 0xf2f4f7,
+  BringNectar: 0xffd23f,
+  BringPollen: 0xff8c42
+]
+
+// Rings every kilometre, as dots.
+system rings() {
+  let step = 1000.0 * Map.scale
+  var r = step
+  while r <= Map.room * 1.02 {
+    let count = max(24, (r * 0.25) as i32)
+    for i in 0..count {
+      let a = i as f32 * tau() / count as f32
+      Shapes += { x: Map.cx + cos(a) * r - 1.0, y: Map.cy + sin(a) * r - 1.0,
+                  w: 2.0, h: 2.0, color: 0x3a4454, round: true }
+    }
+    let km = (r / step + 0.5) as i32
+    label("{km} km", Map.cx + r + 4.0, Map.cy - 8.0, 12.0, 0x4a5466)
+    r += step
+  }
+}
+
+// The paths to the patches, the patches, and the hive.
+system patches_drawn() {
+  for s: Spot, r: Resource {
+    line(Map.cx, Map.cy, s.x, s.y, 0x2a3240)
+    let nectar = if r.max_nectar > 0.0 { (r.nectar / r.max_nectar) as f32 } else { 0.0 }
+    let pollen = if r.max_pollen > 0.0 { (r.pollen / r.max_pollen) as f32 } else { 0.0 }
+    let r0 = Map.patch
+    circle(s.x, s.y, r0, 0x1b212b)
+    sector(s.x, s.y, r0, -90.0, -90.0 + 360.0 * nectar, 0xc9a227)
+    circle(s.x, s.y, r0 * 0.73, 0x1b212b)
+    sector(s.x, s.y, r0 * 0.73, -90.0, -90.0 + 360.0 * pollen, 0xd9702a)
+    circle(s.x, s.y, r0 * 0.45, 0x10141a)
+    let km = (s.metres + 50) / 100
+    label("{km / 10}.{km % 10} km", s.x + r0 + 6.0, s.y - 24.0, 15.0, 0x9fb0c3)
+    label("{s.nectar} bees for nectar", s.x + r0 + 6.0, s.y - 4.0, 13.0, 0xc9a227)
+    label("{s.pollen} for pollen", s.x + r0 + 6.0, s.y + 12.0, 13.0, 0xd9702a)
+  }
+  circle(Map.cx, Map.cy, Map.hive + 6.0, 0x3a2f12)
+  circle(Map.cx, Map.cy, Map.hive, 0x8a6a1c)
+  label("hive", Map.cx - 14.0, Map.cy + Map.hive + 8.0, 14.0, 0x9fb0c3)
+}
+
+// A squadron's dot: in the hive, in the field, or on the way between
+// the hive and its patch (there and back again as the step goes on).
+system squadrons() {
+  let t = Pace.t
+  let field = Map.metres * 0.6 * Map.scale
+  for a: Activity, k: Known, s: Squadron {
+    let u = spread(s.number, 1)
+    let w = spread(s.number, 2)
+    var x = Map.cx
+    var y = Map.cy
+    if a.now == Doing.Lazy || a.now == Doing.Resting {
+      let angle = u * tau()
+      let r = sqrt(w) * (Map.hive - 4.0)
+      x = Map.cx + cos(angle) * r
+      y = Map.cy + sin(angle) * r
+    } else if a.now == Doing.Searching {
+      let angle = u * tau() + t * 0.6
+      let r = (0.25 + 0.75 * w) * field
+      x = Map.cx + cos(angle) * r
+      y = Map.cy + sin(angle) * r
+    } else {
+      let patch = if a.pollen { k.pollen } else { k.nectar }
+      if a.pollen { Spot(patch).pollen += Foragers.squadron_size }
+      else { Spot(patch).nectar += Foragers.squadron_size }
+      if let px = Spot(patch).x {
+        if let py = Spot(patch).y {
+          let f = fract(u + t)
+          let along = if a.now == Doing.BringNectar || a.now == Doing.BringPollen {
+            1.0 - f
+          } else {
+            f
+          }
+          let side = (w - 0.5) * 14.0
+          let dx = px - Map.cx
+          let dy = py - Map.cy
+          let length = max(sqrt(dx * dx + dy * dy), 1.0)
+          x = Map.cx + dx * along - dy / length * side
+          y = Map.cy + dy * along + dx / length * side
+        }
+      }
+    }
+    Shapes += { x: x - 2.0, y: y - 2.0, w: 4.0, h: 4.0, color: colours[a.now],
+                round: true }
+  }
+}
+
+// --- the charts ----------------------------------------------------------
+
+const EGGS = 0xf4eccd
+const LARVAE = 0xe9c46a
+const PUPAE = 0xc08a3e
+const IN_HIVE = 0x6c8ebf
+const FORAGERS = 0x7fc8a9
+const HONEY = 0xffc23d
+const POLLEN = 0xff8c42
+const DIM = 0x6b7888
+
+// Where the charts are: their left side and width, a day's column, the
+// top and height of the bees' and of honey's and pollen's, and where
+// they end (for what comes under them, and for the mouse).
+unique Charts {
+  x0: f32, w: f32, column: f32, y0: f32, h: f32, y1: f32, y2: f32, h1: f32,
+  bottom: f32
+}
+const SOFT = 0x9fb0c3
+const BRIGHT = 0xe6edf3
+
+// A number with one decimal.
+proc tenths(x: f32, at_x: f32, at_y: f32, size: f32, color: i32) {
+  let n = (x * 10.0 + 0.5) as i32
+  label("{n / 10}.{n % 10}", at_x, at_y, size, color)
+}
+
+// The workers stacked by stage, a column a day; honey and pollen as
+// lines below. The x axis is the run's days (a year unless said else).
+system charts() {
+  let x0 = Window.width as f32 - Map.panel + 20.0
+  let w = Map.panel - 40.0
+  let days = max(max(Termination.max_ticks, len(History)), 1)
+  let column = w / days as f32
+  // Bees, then honey and pollen, then today's numbers (some 170
+  // points) and the keys: as high as the window lets them be.
+  let room = max(Window.height as f32 - 130.0 - 88.0 - 175.0, 90.0)
+  let y0 = 130.0
+  let h = room * 0.5
+  rect(x0, y0, w, h, 0x161b23)
+  let scale = h / max(Most.workers, 1) as f32
+  for i in 0..len(History) {
+    let x = x0 + i as f32 * column
+    var y = y0 + h
+    let eggs = History[i].eggs as f32 * scale
+    let larvae = History[i].larvae as f32 * scale
+    let pupae = History[i].pupae as f32 * scale
+    let in_hive = History[i].in_hive as f32 * scale
+    let foragers = History[i].foragers as f32 * scale
+    y -= foragers
+    Shapes += { x: x, y: y, w: column + 0.6, h: foragers, color: FORAGERS, round: false }
+    y -= in_hive
+    Shapes += { x: x, y: y, w: column + 0.6, h: in_hive, color: IN_HIVE, round: false }
+    y -= pupae
+    Shapes += { x: x, y: y, w: column + 0.6, h: pupae, color: PUPAE, round: false }
+    y -= larvae
+    Shapes += { x: x, y: y, w: column + 0.6, h: larvae, color: LARVAE, round: false }
+    y -= eggs
+    Shapes += { x: x, y: y, w: column + 0.6, h: eggs, color: EGGS, round: false }
+  }
+  label("workers, most {Most.workers}", x0, y0 - 22.0, 15.0, SOFT)
+  // Honey and pollen.
+  let y1 = y0 + h + 44.0
+  let h1 = room * 0.25
+  rect(x0, y1, w, h1, 0x161b23)
+  let y2 = y1 + h1 + 44.0
+  rect(x0, y2, w, h1, 0x161b23)
+  let honey_scale = h1 / max(Most.honey, 1.0)
+  let pollen_scale = h1 / max(Most.pollen, 1.0)
+  for i in 1..len(History) {
+    let xa = x0 + (i - 1) as f32 * column
+    let xb = x0 + i as f32 * column
+    line(xa, y1 + h1 - History[i - 1].honey * honey_scale,
+         xb, y1 + h1 - History[i].honey * honey_scale, HONEY)
+    line(xa, y2 + h1 - History[i - 1].pollen * pollen_scale,
+         xb, y2 + h1 - History[i].pollen * pollen_scale, POLLEN)
+  }
+  label("honey [kg]", x0, y1 - 22.0, 15.0, SOFT)
+  tenths(Most.honey, x0 + w - 60.0, y1 - 22.0, 15.0, DIM)
+  label("pollen [g]", x0, y2 - 22.0, 15.0, SOFT)
+  tenths(Most.pollen, x0 + w - 60.0, y2 - 22.0, 15.0, DIM)
+  Charts.x0 = x0
+  Charts.w = w
+  Charts.column = column
+  Charts.y0 = y0
+  Charts.h = h
+  Charts.y1 = y1
+  Charts.y2 = y2
+  Charts.h1 = h1
+  Charts.bottom = y2 + h1
+}
+
+proc count(name: text[30], n: i32, color: i32, x: f32, y: f32) {
+  rect(x, y + 3.0, 12.0, 12.0, color)
+  label(name, x + 20.0, y, 15.0, SOFT)
+  label("{n}", x + 120.0, y, 15.0, BRIGHT)
+}
+
+system numbers() {
+  let x0 = Window.width as f32 - Map.panel + 20.0
+  if !Run.weather {
+    label("No weather: beecs's files are not where the program was", 30.0, 30.0, 18.0,
+          0xff7b72)
+    label("started. examples/beecs/reference/fetch.sh puts them into", 30.0, 54.0,
+          18.0, 0xff7b72)
+    label("build/beecs/run: start the program there.", 30.0, 78.0, 18.0, 0xff7b72)
+  }
+  label("day {Clock.tick + 1}", x0, 18.0, 30.0, BRIGHT)
+  let what = if Phase.now == 1 { "foraging, round {Day.round + 1}" }
+             else if Day.forage || Phase.now == 0 { "in the hive" }
+             else { "no foraging today" }
+  label(what, x0 + 130.0, 30.0, 16.0, SOFT)
+  label("seed {RandomSeed.seed}, squadrons of {Foragers.squadron_size}",
+        x0, 62.0, 14.0, DIM)
+  if Pace.ended { label("the end", x0 + 280.0, 62.0, 14.0, 0xff7b72) }
+  else if Pace.paused { label("stopped", x0 + 280.0, 62.0, 14.0, 0xff7b72) }
+  // Today's numbers.
+  let y = Charts.bottom + 30.0
+  count("eggs", Population.worker_eggs, EGGS, x0, y)
+  count("larvae", Population.worker_larvae, LARVAE, x0, y + 22.0)
+  count("pupae", Population.worker_pupae, PUPAE, x0, y + 44.0)
+  count("in the hive", Population.workers_in_hive, IN_HIVE, x0, y + 66.0)
+  count("foragers", Population.workers_foragers, FORAGERS, x0, y + 88.0)
+  count("drones", Population.drones_in_hive, 0x8a8f98, x0, y + 110.0)
+  let x1 = x0 + 200.0
+  rect(x1, y + 3.0, 12.0, 12.0, HONEY)
+  label("honey", x1 + 20.0, y, 15.0, SOFT)
+  tenths((0.001 * Hive.honey / EnergyContent.honey) as f32, x1 + 90.0, y, 15.0, BRIGHT)
+  rect(x1, y + 25.0, 12.0, 12.0, POLLEN)
+  label("pollen", x1 + 20.0, y + 22.0, 15.0, SOFT)
+  tenths(Hive.pollen as f32, x1 + 90.0, y + 22.0, 15.0, BRIGHT)
+  label("first forages at {Aff.days} d", x1, y + 44.0, 15.0, SOFT)
+
+}
+
+// The day under the mouse, where it is over the charts: a line through
+// them, the day's honey and pollen marked, and its numbers in a box by
+// the mouse.
+proc row(name: text[30], n: i32, color: i32, x: f32, y: f32) {
+  rect(x, y + 4.0, 10.0, 10.0, color)
+  label(name, x + 16.0, y, 14.0, SOFT)
+  label("{n}", x + 106.0, y, 14.0, BRIGHT)
+}
+
+system hover() {
+  let over = Mouse.x >= Charts.x0 && Mouse.x < Charts.x0 + Charts.w &&
+             Mouse.y >= Charts.y0 && Mouse.y < Charts.bottom
+  let day = if Charts.column > 0.0 { ((Mouse.x - Charts.x0) / Charts.column) as i32 } else { -1 }
+  if over && day >= 0 && day < len(History) {
+    let x = Charts.x0 + (day as f32 + 0.5) * Charts.column
+    line(x, Charts.y0, x, Charts.y0 + Charts.h, 0xc0e6edf3)
+    line(x, Charts.y1, x, Charts.y1 + Charts.h1, 0xc0e6edf3)
+    line(x, Charts.y2, x, Charts.y2 + Charts.h1, 0xc0e6edf3)
+    let honey = History[day].honey
+    let pollen = History[day].pollen
+    circle(x, Charts.y1 + Charts.h1 - honey * Charts.h1 / max(Most.honey, 1.0), 3.5, HONEY)
+    circle(x, Charts.y2 + Charts.h1 - pollen * Charts.h1 / max(Most.pollen, 1.0), 3.5,
+           POLLEN)
+    let workers = History[day].eggs + History[day].larvae + History[day].pupae +
+                  History[day].in_hive + History[day].foragers
+    // The box: right of the mouse, or left of it near the window's edge.
+    let bw = 190.0
+    let bh = 214.0
+    let bx = max(if Mouse.x + 16.0 + bw > Window.width as f32 { Mouse.x - 16.0 - bw }
+                 else { Mouse.x + 16.0 }, 8.0)
+    let by = min(max(Mouse.y - bh * 0.5, 8.0), Window.height as f32 - bh - 8.0)
+    rect(bx, by, bw, bh, 0xf0202734)
+    label("day {day + 1}", bx + 12.0, by + 10.0, 18.0, BRIGHT)
+    row("workers", workers, 0x2b3440, bx + 12.0, by + 38.0)
+    row("eggs", History[day].eggs, EGGS, bx + 12.0, by + 58.0)
+    row("larvae", History[day].larvae, LARVAE, bx + 12.0, by + 78.0)
+    row("pupae", History[day].pupae, PUPAE, bx + 12.0, by + 98.0)
+    row("in the hive", History[day].in_hive, IN_HIVE, bx + 12.0, by + 118.0)
+    row("foragers", History[day].foragers, FORAGERS, bx + 12.0, by + 138.0)
+    rect(bx + 12.0, by + 162.0, 10.0, 10.0, HONEY)
+    label("honey [kg]", bx + 28.0, by + 158.0, 14.0, SOFT)
+    tenths(honey, bx + 118.0, by + 158.0, 14.0, BRIGHT)
+    rect(bx + 12.0, by + 182.0, 10.0, 10.0, POLLEN)
+    label("pollen [g]", bx + 28.0, by + 178.0, 14.0, SOFT)
+    tenths(pollen, bx + 118.0, by + 178.0, 14.0, BRIGHT)
+  }
+}
+
+// The squadrons' colours, under the map.
+proc key_of_dot(name: text[30], color: i32, x: f32, y: f32) {
+  circle(x + 5.0, y + 9.0, 4.0, color)
+  label(name, x + 14.0, y, 14.0, SOFT)
+}
+
+system legend() {
+  label("squadrons", 20.0, 20.0, 14.0, DIM)
+  key_of_dot("lazy", colours[Doing.Lazy], 20.0, 42.0)
+  key_of_dot("resting", colours[Doing.Resting], 20.0, 62.0)
+  key_of_dot("scouting", colours[Doing.Searching], 20.0, 82.0)
+  key_of_dot("recruited", colours[Doing.Recruited], 20.0, 102.0)
+  key_of_dot("experienced", colours[Doing.Experienced], 20.0, 122.0)
+  key_of_dot("nectar", colours[Doing.BringNectar], 20.0, 142.0)
+  key_of_dot("pollen", colours[Doing.BringPollen], 20.0, 162.0)
+  label("patches: what is left", 20.0, 196.0, 14.0, DIM)
+  key_of_dot("nectar (outer)", 0xc9a227, 20.0, 218.0)
+  key_of_dot("pollen (inner)", 0xd9702a, 20.0, 238.0)
+  label("Space: stop/go", 20.0, Window.height as f32 - 48.0, 14.0, DIM)
+  label("Up/Down: speed {Pace.level}", 20.0, Window.height as f32 - 28.0, 14.0, DIM)
+}
+
+schedule setup() {
+  parameters()
+  weather()
+  colony()
+  hive()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  place_patches()
+  number_patches()
+}
+
+schedule dawn() {
+  aff()
+  foraging_period()
+  replenish()
+  cohort_mortality()
+  age_cohorts()
+  lay_eggs()
+  to_foragers()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  brood_care()
+  new_cohorts()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  new_foragers()
+  morning()
+  foraging_now()
+}
+
+schedule after() { after_foraging() }
+schedule spent() { spend() }
+
+schedule dusk() {
+  evening()
+  squadron_mortality()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  eat_honey()
+  eat_pollen()
+  record()
+  tick()
+  ended()
+}
+
+// A frame, drawn when this frame's steps are taken.
+schedule frame() run_if Pace.left <= 0 && !Window.closed {
+  begin()
+  pace()
+  layout()
+  rings()
+  squadrons()
+  patches_drawn()
+  charts()
+  shapes()
+  numbers()
+  legend()
+  hover()
+  present()
+}
+
+// beecs.ent's run, with frames between the steps (as many as there are
+// while it stands still).
+main {
+  setup()
+  loop {
+    dawn()
+    spent()
+    loop { frame() } until Pace.left > 0 || Window.closed
+    loop {
+      foraging::round()
+      round_claims()
+      spent()
+      loop { frame() } until Pace.left > 0 || Window.closed
+    } until Day.done || Window.closed
+    after()
+    dusk()
+    spent()
+    loop { frame() } until Pace.left > 0 || Window.closed
+  } until Pace.ended || Window.closed
+  loop { frame() } until Window.closed
+}
