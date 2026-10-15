@@ -1,0 +1,14 @@
+// A program to count where it goes: a fn with a branch taken mostly one
+// way, called from a system's loop.
+import console
+component N { v: i32 } capacity 64
+unique Sum { all: i32 }
+fn step(x: i32) -> i32 { if x % 7 == 0 { x / 7 } else { 3 * x + 1 } }
+system setup() { for i in 0..50 { spawn { N { v: i + 1 } } } }
+system run() { for n: mut N { for i in 0..100 { n.v = step(n.v) % 1000 } } }
+system add() { for n: N { Sum.all += n.v } }
+system show() { put("{Sum.all}") }
+schedule s() { setup() }
+schedule f() { run() }
+schedule e() { add() show() }
+main { s() f() e() }

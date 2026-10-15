@@ -1,0 +1,21 @@
+// Built with --instrument, a program counts where it goes into
+// program.profile, where it was built from; built with --profile, it is
+// optimised by those counts and does what it did.
+// RUN: rm -rf %t && mkdir -p %t/runs && cd %t
+// RUN: %ent run %S/Inputs/profile.ent > plain.out
+// RUN: %ent build --instrument %S/Inputs/profile.ent -o counting
+// RUN: cd runs && ../counting | cmp - ../plain.out && cd ..
+// RUN: llvm-profdata show profile.profile/*.profraw | FileCheck %s --check-prefix=COUNTS
+// RUN: %ent run --profile profile.profile %S/Inputs/profile.ent | cmp - plain.out
+// RUN: llvm-profdata merge -o merged.profdata profile.profile
+// RUN: %ent run --parallel --profile merged.profdata %S/Inputs/profile.ent | cmp - plain.out
+// RUN: FileCheck %s --input-file=plain.out
+
+// COUNTS: Total functions: {{[1-9]}}
+// CHECK: {{[0-9]+}}
+
+// Counts that are not there are told.
+// RUN: mkdir -p empty && not %ent build --profile empty %S/Inputs/profile.ent 2>&1 | FileCheck %s --check-prefix=NONE
+// NONE: ent: there are no counts in 'empty'
+// RUN: not %ent build --instrument --profile empty %S/Inputs/profile.ent 2>&1 | FileCheck %s --check-prefix=BOTH
+// BOTH: --instrument and --profile are for two builds

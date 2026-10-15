@@ -45,6 +45,15 @@ otherwise.
 
 Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 
+A program can be built for what it does when it runs (profile-guided):
+built with --instrument, it counts where it goes each time it runs, into
+the folder `program.profile` where it was built from (LLVM_PROFILE_FILE,
+where it runs, says another file). Built with --profile program.profile
+(that folder, or a file of LLVM's .profraw or .profdata) it is optimised
+by those counts: what runs often inlined and laid out to run straight
+through. Runs of the instrumented program that do what the program is
+for are the ones to count; the C next to modules is not counted.
+
 A module that needs libraries says so in `m.link`: the linker's arguments
 for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
 
@@ -194,6 +203,10 @@ def cache_key(arguments):
         note_tool(shutil.which(compiler) or compiler)
     note_tool(os.path.abspath(__file__))
     note("embed", arguments.embed)
+    note("instrument", arguments.instrument and instrumented(arguments))
+    if arguments.profile:
+        for path in profiles(arguments.profile):
+            note_file(path)
     note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
          os.environ.get("ENT_PIECES", ""), os.environ.get("ENT_SPLIT", ""),
          os.cpu_count())
@@ -258,6 +271,44 @@ def keep_in_cache(executable, key, stem, limit=64):
     except OSError:
         # (A cache that cannot be written is no reason not to run.)
         return executable
+
+
+def instrumented(arguments):
+    """The folder an instrumented program counts into: `program.profile`
+    in the folder it is built from."""
+    stem = os.path.splitext(os.path.basename(arguments.program))[0]
+    return os.path.abspath(stem + ".profile")
+
+
+def profiles(path):
+    """The counts --profile names: a file, or those in a folder."""
+    if os.path.isdir(path):
+        found = sorted(os.path.join(path, name) for name in os.listdir(path)
+                       if name.endswith((".profraw", ".profdata")))
+        if not found:
+            sys.exit(f"ent: there are no counts in '{path}' (.profraw or "
+                     ".profdata): run the program built with --instrument")
+        return found
+    if not os.path.isfile(path):
+        sys.exit(f"ent: there is no profile '{path}'")
+    return [path]
+
+
+def profile_runtime(clang):
+    """LLVM's library that writes an instrumented program's counts (next to
+    its builtins, by the name it has on this kind of machine)."""
+    builtins = subprocess.run(
+        [clang, "--rtlib=compiler-rt", "-print-libgcc-file-name"],
+        stdout=subprocess.PIPE, text=True).stdout.strip()
+    folder, name = os.path.split(builtins)
+    if "builtins" in name:
+        name = name.replace("builtins", "profile")
+    else:
+        name = name.replace("libclang_rt.", "libclang_rt.profile_")
+    path = os.path.join(folder, name)
+    if not os.path.isfile(path):
+        sys.exit(f"ent: cannot find LLVM's profile library ('{path}')")
+    return path
 
 
 def piece_count(llvm):
@@ -360,6 +411,18 @@ def build(arguments, output, directory):
             if os.path.realpath(path) not in toolchain)
     flags = ["-O2", *shlex.split(os.environ.get("ENT_CFLAGS", "")),
              "-Wno-override-module", "-c"]
+    if arguments.instrument:
+        flags.append("-fprofile-generate=" + instrumented(arguments))
+        # Its library, linked by the machine's compiler: kept in by the
+        # symbol that LLVM's own driver would ask for, which starts it.
+        apple = sys.platform == "darwin"
+        link += [profile_runtime(clang),
+                 "-Wl,-u," + ("_" if apple else "") + "__llvm_profile_runtime"]
+    if arguments.profile:
+        merged = os.path.join(directory, stem + ".profdata")
+        run([find_tool("llvm-profdata", llvm_directories()), "merge",
+             "-o", merged] + profiles(arguments.profile))
+        flags.append("-fprofile-use=" + merged)
     pieces = piece_count(llvm)
     split = shutil.which("llvm-split", path=os.path.dirname(clang))
     if pieces > 1 and split:
@@ -494,6 +557,13 @@ def main():
     parser.add_argument("--embed", action="store_true",
                         help="put the files the program declares (`asset`) "
                         "into the program itself, not next to it")
+    parser.add_argument("--instrument", action="store_true",
+                        help="count where the program goes when it runs, "
+                        "into program.profile (for --profile)")
+    parser.add_argument("--profile", metavar="path",
+                        help="optimise by the counts of runs of the program "
+                        "built with --instrument: their folder or a "
+                        ".profraw or .profdata file")
     parser.add_argument("--keep", metavar="dir", help="keep the generated "
                         "files (IR, header) in this directory")
     parser.add_argument("--no-cache", action="store_true",
@@ -504,6 +574,8 @@ def main():
         rest = own[own.index("--") + 1:]
         own = own[:own.index("--")]
     arguments = parser.parse_args(own)
+    if arguments.instrument and arguments.profile:
+        parser.error("--instrument and --profile are for two builds")
 
     stem = os.path.splitext(os.path.basename(arguments.program))[0]
     # A program that is run from here is told where its source is, and

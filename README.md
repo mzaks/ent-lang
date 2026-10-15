@@ -138,6 +138,15 @@ and not built again while its files, its modules', what implements them,
 the compiler and the flags are the same: running it again starts at once.
 `--no-cache` builds anew and keeps nothing.
 
+A program can be optimised by what it does when it runs (profile-guided):
+built with `--instrument` it counts where it goes, every time it runs,
+into `program.profile` in the folder it was built from; built again with
+`--profile program.profile` LLVM inlines and lays out its code by those
+counts. Trained on runs like the ones that matter, the city's epidemic
+at a million people takes 1.68 s where it took 2.03, a demo of Doom drawn
+tic by tic 289 ms where 354, beecs's colony 410 ms where 424 (see
+`bench/RESULTS.md`).
+
 A big program is optimised whole and then made into machine code in
 pieces, each on a core of its own (`ENT_PIECES=1`: in one piece;
 `ENT_SPLIT=first`: shared out before it is optimised, which builds a big

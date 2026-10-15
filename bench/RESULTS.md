@@ -3248,3 +3248,34 @@ What still keeps systems with a query apart (230 runs over the examples, a
 run may have several): they cannot be analysed (98; on their own: 16),
 read a buffer (67; 3), run under a condition (49; 14), spawn or destroy
 (47; 1), move entities between archetypes (39), write a buffer (37).
+
+## 2026-10-15: profile-guided builds
+
+`tools/ent build --instrument` builds a program that counts where it goes
+into `program.profile`; `--profile program.profile` builds it optimised by
+those counts (LLVM's PGO: clang's -fprofile-generate and -fprofile-use on
+the program's IR). Each was trained on another run than the one timed (another
+seed, another demo); native builds, CPU 2, median of seven. The programs
+give the same output to the bit.
+
+| program | as built | by its profile | |
+|---|---|---|---|
+| examples/epidemic, 10^6 people, 30 days, one core | 2.03 s | 1.68 s | 17% |
+| the same on all cores | 1.94 s | 1.61 s | 17% |
+| examples/doom, demo3 (2,133 tics) drawn each tic, no window | 354 ms | 289 ms | 18% |
+| examples/beecs without turns, squadrons of 1 | 424 ms | 410 ms | 3% |
+| examples/beecs with turns, squadrons of 1 | 690 ms | 682 ms | 1% |
+
+- The epidemic gains in both its parts: building the city 1.75 s to 1.42
+  (`households` 0.88 to 0.61, `wire` 0.68 to 0.62), the days 260 ms to
+  226 together (`pair` 53 to 41, `workplace` 49 to 33). Doom's run (trained
+  on demo1) includes a checksum of each screen, a fifth of its time and
+  the same in both: of the game alone a fourth is gone.
+- What it does is mostly inlining: `misfit` into the loop of `take`, where
+  its sums over the shares of ages and sizes, which do not change, leave
+  the loop; `tie` and `permute_in` into `wire`. Without counts LLVM does
+  not: -O3 is as fast as -O2 (Doom 356 ms, the epidemic 1.99 s), and
+  every fn of a program is exported from it, so none is called from one
+  place only; made internal by hand, the epidemic takes 1.94 s.
+- beecs's loops are short and its time in the sort of `in turn` and in
+  drawing numbers, which the counts do not change.
