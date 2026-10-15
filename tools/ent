@@ -33,6 +33,10 @@ entities they go through are made into one loop over each kind of entity,
 on one core as on all: each entity goes through all of them before the
 next (fewer passes over the entities, the same result).
 
+The program's own fns, systems and schedules are internal to it (LLVM
+inlines them more readily): all but `main` and what the C linked with it
+names, which keep their names.
+
 A big program is optimised whole and then made into machine code in pieces,
 on a core each: one piece for every two megabytes of its LLVM IR, up to
 sixteen. ENT_PIECES says how many instead (1: all in one).
@@ -365,17 +369,6 @@ def build(arguments, output, directory):
         library = os.path.join(os.path.dirname(os.path.dirname(clang)), "lib")
         runtime = "libomp.dylib" if sys.platform == "darwin" else "libomp.so"
         link = [os.path.join(library, runtime), "-Wl,-rpath," + library]
-    # To LLVM bitcode in the same run: not written out as text for another
-    # tool to read again.
-    llvm = os.path.join(directory, stem + ".bc")
-    run([optimise, module] + passes +
-        # (What the lowering wrote more than once, once, and the columns
-        # read and written by their addresses: less to turn into LLVM's
-        # IR, and for LLVM to read.)
-        ["--cse", "--ent-lower-views"] +
-        ["--convert-scf-to-cf", "--convert-to-llvm",
-         "--reconcile-unrealized-casts", "--ent-emit-llvm=output=" + llvm,
-         "-o", os.devnull])
 
     files, assets = made_of(arguments)
     given = [os.path.splitext(path)[0] + extension for path in files
@@ -409,6 +402,64 @@ def build(arguments, output, directory):
         host["PATH"] = os.pathsep.join(
             path for path in os.environ.get("PATH", "").split(os.pathsep)
             if os.path.realpath(path) not in toolchain)
+    others = []
+    for index, path in enumerate(given):
+        name, extension = os.path.splitext(os.path.basename(path))
+        built = os.path.join(directory, f"{name}.{index}.o")
+        if extension in (".o", ".a"):
+            others.append(path)
+            continue
+        if extension == ".c":
+            run([cc, "-O2", "-I", directory, "-c", path, "-o", built],
+                env=host)
+        elif extension == ".cpp":
+            run([cxx, "-O2", "-I", directory, "-c", path, "-o", built],
+                env=host)
+        else:
+            with open(path) as source:
+                command = source.read().strip()
+            environment = dict(host, ENT_OUTPUT=built,
+                               ENT_INCLUDE=os.path.abspath(directory),
+                               ENT_CC=cc, ENT_CXX=cxx)
+            if os.path.exists(built):
+                os.remove(built)
+            run(command, shell=True, env=environment,
+                cwd=os.path.dirname(os.path.abspath(path)))
+            if not os.path.isfile(built):
+                sys.exit(f"ent: '{path}' did not write $ENT_OUTPUT")
+        others.append(built)
+    # What of the program that C calls, which keeps its name; the rest
+    # of it is the program's own (internal), which LLVM inlines where it
+    # is called from one place, or where that pays, and drops where it is
+    # not called at all.
+    keep = os.path.join(directory, stem + ".keep")
+    used = set()
+    if others:
+        names = find_tool("llvm-nm", llvm_directories())
+        listed = run([names, "--undefined-only", "--just-symbol-name"] + others,
+                     stdout=subprocess.PIPE, text=True).stdout
+        for name in listed.split():
+            if name.endswith(":"):
+                continue  # (the file the names after it are of)
+            if sys.platform == "darwin" and name.startswith("_"):
+                name = name[1:]
+            used.add(name)
+    with open(keep, "w") as names:
+        names.write("".join(name + "\n" for name in sorted(used)))
+
+    # To LLVM bitcode in the same run: not written out as text for another
+    # tool to read again.
+    llvm = os.path.join(directory, stem + ".bc")
+    run([optimise, module] + passes +
+        # (What the lowering wrote more than once, once, and the columns
+        # read and written by their addresses: less to turn into LLVM's
+        # IR, and for LLVM to read.)
+        ["--cse", "--ent-lower-views"] +
+        ["--convert-scf-to-cf", "--convert-to-llvm",
+         "--reconcile-unrealized-casts",
+         "--ent-emit-llvm=output=" + llvm + " keep=" + keep,
+         "-o", os.devnull])
+
     flags = ["-O2", *shlex.split(os.environ.get("ENT_CFLAGS", "")),
              "-Wno-override-module", "-c"]
     if arguments.instrument:
@@ -452,31 +503,7 @@ def build(arguments, output, directory):
     else:
         objects = [os.path.join(directory, stem + ".o")]
         run([clang, *flags, llvm, "-o", objects[0]])
-    for index, path in enumerate(given):
-        name, extension = os.path.splitext(os.path.basename(path))
-        built = os.path.join(directory, f"{name}.{index}.o")
-        if extension in (".o", ".a"):
-            objects.append(path)
-            continue
-        if extension == ".c":
-            run([cc, "-O2", "-I", directory, "-c", path, "-o", built],
-                env=host)
-        elif extension == ".cpp":
-            run([cxx, "-O2", "-I", directory, "-c", path, "-o", built],
-                env=host)
-        else:
-            with open(path) as source:
-                command = source.read().strip()
-            environment = dict(host, ENT_OUTPUT=built,
-                               ENT_INCLUDE=os.path.abspath(directory),
-                               ENT_CC=cc, ENT_CXX=cxx)
-            if os.path.exists(built):
-                os.remove(built)
-            run(command, shell=True, env=environment,
-                cwd=os.path.dirname(os.path.abspath(path)))
-            if not os.path.isfile(built):
-                sys.exit(f"ent: '{path}' did not write $ENT_OUTPUT")
-        objects.append(built)
+    objects += others
     # Where the program's source and its modules' are, written into it:
     # the files they name are looked for there last (devices/ent_files.h).
     folders = []

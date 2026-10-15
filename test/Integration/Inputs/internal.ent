@@ -1,0 +1,8 @@
+// Two fns of the program: one that C names (internal_c.c), one that only
+// the program calls.
+import console
+fn step(x: i32) -> i32 { if x % 7 == 0 { x / 7 } else { 3 * x + 1 } }
+fn twice(x: i32) -> i32 { 2 * x }
+system show() { put("{twice(step(5))}") }
+schedule s() { show() }
+main { s() }

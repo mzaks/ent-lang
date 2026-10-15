@@ -143,7 +143,8 @@ built with `--instrument` it counts where it goes, every time it runs,
 into `program.profile` in the folder it was built from; built again with
 `--profile program.profile` LLVM inlines and lays out its code by those
 counts. Trained on runs like the ones that matter, the city's epidemic
-at a million people takes 1.68 s where it took 2.03, a demo of Doom drawn
+at a million people takes 1.68 s where it took 2.03 (1.94 without the
+counts), a demo of Doom drawn
 tic by tic 289 ms where 354, beecs's colony 410 ms where 424 (see
 `bench/RESULTS.md`).
 
@@ -156,6 +157,13 @@ turned into LLVM's IR, what the lowering wrote more than once is written
 once (`--cse`) and the world's columns are read and written by their
 addresses (`--ent-lower-views`), which halves what LLVM gets for a
 program with many archetypes.
+
+The program's fns, systems and schedules are its own: internal to its
+object, all but `main` and what the C linked with it names (the C is
+built first, and what it leaves undefined is kept by its name). LLVM
+then inlines a fn called from one place and weighs the others knowing
+no copy need be kept: the epidemic at a million people takes 1.94 s
+where it took 2.03, Doom's demo 349 ms where 361.
 
 A program with a `main` needs no C host: the compiler emits C's `main`,
 which creates the world and runs the schedules as `main` says, after the

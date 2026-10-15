@@ -1,0 +1,16 @@
+// A program's fns are its own: not exported from it (LLVM inlines them
+// more readily), but for those that C next to it names.
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: %ent build %S/Inputs/internal.ent -o %t/alone
+// RUN: %t/alone | FileCheck %s
+// RUN: llvm-nm --defined-only --extern-only %t/alone | FileCheck %s --check-prefix=ALONE
+// RUN: %ent build %S/Inputs/internal.ent %S/Inputs/internal_c.c -o %t/named
+// RUN: %t/named | FileCheck %s
+// RUN: llvm-nm --defined-only --extern-only %t/named | FileCheck %s --check-prefix=NAMED
+
+// CHECK: 32
+// ALONE-NOT: {{ ent_(step|twice)$}}
+// ALONE: T main
+// ALONE-NOT: {{ ent_(step|twice)$}}
+// NAMED: T ent_step
+// NAMED-NOT: {{ ent_twice$}}

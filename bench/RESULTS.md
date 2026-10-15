@@ -3279,3 +3279,26 @@ give the same output to the bit.
   place only; made internal by hand, the epidemic takes 1.94 s.
 - beecs's loops are short and its time in the sort of `in turn` and in
   drawing numbers, which the counts do not change.
+
+## 2026-10-15: the program's own functions internal
+
+Every fn, system and schedule of a program was exported from its object,
+so LLVM kept a copy of each for others to call and inlined less. Now all
+but `main`, and what C linked with the program names, are internal
+(tools/ent builds the C first and keeps what it leaves undefined).
+Native, CPU 2, median of seven; the same output to the bit.
+
+| program | exported | internal |
+|---|---|---|
+| examples/epidemic, 10^6 people, 30 days, one core | 2.03 s | 1.94 s |
+| examples/doom, demo3 drawn each tic, no window | 361 ms | 349 ms |
+| examples/beecs without turns, squadrons of 1 | 425 ms | 430 ms |
+| examples/beecs with turns, squadrons of 1 | 690 ms | 692 ms |
+
+- In the epidemic `take`, `households` and `wire` are now inlined into
+  the schedule that builds the city, each called from one place;
+  `misfit`, called from three places in `take`, still is not: the
+  profile-guided build (1.68 s, the same with internal functions) is
+  what inlines it.
+- On all cores the epidemic is within the runs' spread (1.90 to 2.10 s
+  either way). Building Doom takes some 4.4 s where 3.8 to 4.2.
