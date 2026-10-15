@@ -1,0 +1,63 @@
+// `&&` and `||` work out their right side only where the left does not
+// decide: a division by nought on the right (which stops the program
+// where it is worked out) is not reached where the left says no, in a
+// fn, in a `for`'s filter and body, in a system and in a schedule's
+// `run_if`.
+import console
+
+default_capacity 64
+
+component Item { d: i32, n: i32 }
+buffer Rows { v: i32 } capacity 8
+unique Count: i32
+unique Zero: i32
+
+fn safe(d: i32) -> bool { d != 0 && 100 / d > 10 }
+fn either(d: i32) -> bool { d == 0 || 100 / d > 10 }
+// A row is read only where there is one.
+fn positive_at(rows: Rows, i: i32) -> bool { i < len(rows) && rows[i].v > 0 }
+
+system setup() {
+  for i in 0..6 { spawn { Item { d: i - 2, n: 0 } } }
+  Rows = [{ v: 5 }; 3]
+  Zero = 0
+}
+
+system filtered() {
+  for t: Item where t.d != 0 && 100 / t.d > 40 { Count += 1 }
+}
+
+system body() {
+  for t: mut Item {
+    t.n = if t.d == 0 || 100 / t.d < 0 { 1 } else { 0 }
+    if safe(t.d) { t.n += 10 }
+    if either(t.d) { t.n += 100 }
+  }
+}
+
+system plain() {
+  var i = 0
+  while i < 10 && positive_at(Rows, i) { i += 1 }
+  put("rows: {i}")
+  put("safe(0): {safe(0)}, safe(5): {safe(5)}, either(0): {either(0)}, either(50): {either(50)}")
+}
+
+system never() { put("never") }
+system once() { put("once") }
+
+system show() {
+  for t: Item { put("d {t.d}: {t.n}") }
+  put("count: {Count}")
+}
+
+schedule start() { setup() }
+schedule run() {
+  filtered()
+  body()
+  plain()
+  never() run_if Zero != 0 && 1 / Zero > 0
+  once() run_if Zero == 0 || 1 / Zero > 0
+  show()
+}
+
+main { start() run() }

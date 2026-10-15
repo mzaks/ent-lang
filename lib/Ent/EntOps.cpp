@@ -752,6 +752,25 @@ bool ArchetypeOp::isOptional(FlatSymbolRefAttr component) {
   return optional && llvm::is_contained(optional, component);
 }
 
+/// The first op in `op` (or `op` itself) that a condition may not hold:
+/// it holds resource reads, ops free of side effects, and ops whose
+/// effects are those of what they hold (an `scf.if`, which `&&` and `||`
+/// make of a right side that is worked out only where it counts).
+static Operation *notInCondition(Operation &op) {
+  if (isa<ReadOp>(op))
+    return nullptr;
+  if (op.getNumRegions() == 0)
+    return isMemoryEffectFree(&op) ? nullptr : &op;
+  if (!op.hasTrait<OpTrait::HasRecursiveMemoryEffects>())
+    return &op;
+  for (Region &region : op.getRegions())
+    for (Block &block : region)
+      for (Operation &nested : block)
+        if (Operation *bad = notInCondition(nested))
+          return bad;
+  return nullptr;
+}
+
 /// A run or schedule condition: empty, or one block of resource reads and
 /// ops free of side effects, ending in `ent.yield` of an i1.
 static LogicalResult verifyCondition(Operation *op, Region &condition) {
@@ -761,15 +780,11 @@ static LogicalResult verifyCondition(Operation *op, Region &condition) {
   if (!yield || yield.getResults().size() != 1 ||
       !yield.getResults()[0].getType().isInteger(1))
     return op->emitOpError("condition must end in 'ent.yield' of an i1");
-  for (Operation &nested : condition.front().without_terminator()) {
-    if (isa<ReadOp>(nested))
-      continue;
-    if (nested.getNumRegions() == 0 && isMemoryEffectFree(&nested))
-      continue;
-    return nested.emitOpError("is not allowed in a condition; a condition "
+  for (Operation &nested : condition.front().without_terminator())
+    if (Operation *bad = notInCondition(nested))
+      return bad->emitOpError("is not allowed in a condition; a condition "
                               "reads resources and computes with ops free "
                               "of side effects");
-  }
   return success();
 }
 
@@ -3026,7 +3041,12 @@ static FailureOr<Type> resolveResourceField(SymbolTableCollection &symbolTable,
 }
 
 LogicalResult ReadOp::verify() {
+  // (The region of the schedule it is in, also from inside an `scf.if` in
+  // a schedule's condition.)
   Region *region = (*this)->getParentRegion();
+  while (region->getParentOp() && !isa<ScheduleOp>(region->getParentOp()) &&
+         region->getParentOp()->getParentRegion())
+    region = region->getParentOp()->getParentRegion();
   auto schedule = dyn_cast<ScheduleOp>(region->getParentOp());
   if (!(*this)->getParentOfType<SystemOp>() &&
       !(*this)->getParentOfType<RunOp>() &&

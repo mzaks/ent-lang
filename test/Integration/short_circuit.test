@@ -1,0 +1,18 @@
+// `&&` and `||` do not work out their right side where the left decides:
+// a division by nought there would stop the program. The same built with
+// threads.
+// RUN: %ent run %S/Inputs/short_circuit.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/short_circuit.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK:      rows: 3
+// CHECK-NEXT: safe(0): false, safe(5): true, either(0): true, either(50): false
+// CHECK-NEXT: once
+// CHECK-NOT:  never
+// CHECK:      d -2: 1
+// CHECK-NEXT: d -1: 1
+// CHECK-NEXT: d 0: 101
+// CHECK-NEXT: d 1: 110
+// CHECK-NEXT: d 2: 110
+// CHECK-NEXT: d 3: 110
+// CHECK-NEXT: count: 2

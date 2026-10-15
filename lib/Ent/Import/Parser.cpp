@@ -8488,19 +8488,78 @@ mlir::Value Parser::combine(Location at, StringRef rule, mlir::Value a,
   return fromBits(at, result, type);
 }
 
+/// Whether `expr` is worked out with a few instructions that cannot fail:
+/// numbers, names, fields of what is bound and of uniques, and what is
+/// made of them without a call, an index, a lookup or a division. The
+/// right side of `&&` and `||` is worked out in any case then, which costs
+/// less than a branch; else only where it counts.
+static bool cheapAndSafe(const Expr &expr) {
+  switch (expr.kind) {
+  case Expr::Int:
+  case Expr::Float:
+  case Expr::Bool:
+  case Expr::Name:
+  case Expr::Const:
+  case Expr::Given:
+    return true;
+  case Expr::Field:
+    return expr.operands.empty();
+  case Expr::Unary:
+  case Expr::Cast:
+    return cheapAndSafe(*expr.operands[0]);
+  case Expr::Binary:
+    if (expr.op == Token::Slash || expr.op == Token::Percent)
+      return false;
+    return llvm::all_of(expr.operands, [](const ExprPtr &operand) {
+      return cheapAndSafe(*operand);
+    });
+  default:
+    return false;
+  }
+}
+
 FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
   Location at = loc(expr.loc);
   const Expr &lhs = *expr.operands[0], &rhs = *expr.operands[1];
   if (expr.op == Token::AndAnd || expr.op == Token::OrOr) {
+    bool isAnd = expr.op == Token::AndAnd;
     FailureOr<mlir::Value> a = emit(lhs, builder.getI1Type());
-    FailureOr<mlir::Value> b = emit(rhs, builder.getI1Type());
-    if (failed(a) || failed(b))
+    if (failed(a))
       return failure();
-    if (!a->getType().isInteger(1) || !b->getType().isInteger(1))
+    if (!a->getType().isInteger(1))
       return error(expr.loc, "'&&' and '||' need bools");
-    return expr.op == Token::AndAnd
-               ? arith::AndIOp::create(builder, at, *a, *b).getResult()
-               : arith::OrIOp::create(builder, at, *a, *b).getResult();
+    if (cheapAndSafe(rhs)) {
+      FailureOr<mlir::Value> b = emit(rhs, builder.getI1Type());
+      if (failed(b))
+        return failure();
+      if (!b->getType().isInteger(1))
+        return error(expr.loc, "'&&' and '||' need bools");
+      return isAnd ? arith::AndIOp::create(builder, at, *a, *b).getResult()
+                   : arith::OrIOp::create(builder, at, *a, *b).getResult();
+    }
+    // The right side only where the left does not decide: `a && b` is
+    // `if a { b } else { false }`, `a || b` is `if a { true } else { b }`.
+    auto branch = scf::IfOp::create(builder, at, TypeRange{builder.getI1Type()},
+                                    *a, /*withElseRegion=*/true);
+    {
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToStart(isAnd ? branch.thenBlock()
+                                             : branch.elseBlock());
+      ScopeGuard scope(*this);
+      FailureOr<mlir::Value> b = emit(rhs, builder.getI1Type());
+      if (failed(b))
+        return failure();
+      if (!b->getType().isInteger(1))
+        return error(expr.loc, "'&&' and '||' need bools");
+      scf::YieldOp::create(builder, at, ValueRange{*b});
+      builder.setInsertionPointToStart(isAnd ? branch.elseBlock()
+                                             : branch.thenBlock());
+      scf::YieldOp::create(
+          builder, at,
+          ValueRange{arith::ConstantIntOp::create(builder, at, !isAnd, 1)
+                         .getResult()});
+    }
+    return branch.getResult(0);
   }
   bool comparison = precedenceOf(expr.op) == 3 || precedenceOf(expr.op) == 4;
   Type leftText = textTypeOf(lhs), rightText = textTypeOf(rhs);

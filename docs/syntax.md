@@ -993,6 +993,15 @@ left-associative),
 operand it meets (`x * 2` is an f32 if `x` is); on its own an integer is an
 i32 and a float an f32. There are no implicit conversions.
 
+`a && b` works out `b` only where `a` is true, and `a || b` only where `a`
+is false, as `if a { b } else { false }` and `if a { true } else { b }`:
+so `d != 0 && n / d > 2` does not divide by nought, `i < len(rows) &&
+rows[i].x > 0` reads only a row there is, and a number at random on the
+right (a call of a fn) is drawn only where it counts. (A right side of
+numbers, names and fields, without a call, an index or a division, is
+worked out in any case: that costs less than a branch, and comes to the
+same.)
+
 An integer may be written in hex (`0xff8800`): the bits of the type it
 takes, so `0xff` is an i8 (all its bits, the number -1) and a ninth bit
 does not fit one. It is never a float.
