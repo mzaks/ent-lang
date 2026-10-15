@@ -154,4 +154,5 @@ What the compiler could do better, seen here:
   in the order of the entities as docs/syntax.md says.
 - `fuse-systems` (one loop for several systems) is only built with
   --parallel, and does not take systems that send or give rows; by hand it
-  was the largest step here.
+  was the largest step here. (Built on one core too since; it still does
+  not take such systems.)

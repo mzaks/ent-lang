@@ -28,6 +28,11 @@ knows where the machine's libraries are: `cc` and `c++`, or what ENT_CC and
 ENT_CXX name. ENT_CFLAGS has more flags for compiling the program itself
 (-march=native, say).
 
+Systems that run one after another in a schedule and only work on the
+entities they go through are made into one loop over each kind of entity,
+on one core as on all: each entity goes through all of them before the
+next (fewer passes over the entities, the same result).
+
 A big program is optimised whole and then made into machine code in pieces,
 on a core each: one piece for every two megabytes of its LLVM IR, up to
 sixteen. ENT_PIECES says how many instead (1: all in one).
@@ -296,7 +301,7 @@ def build(arguments, output, directory):
     shutil.copyfile(header, os.path.join(directory, stem + "_world.h"))
 
     lowering = "--ent-lower-to-loops"
-    passes = [lowering]
+    passes = [lowering + "=fuse-systems=1", "--symbol-dce"]
     link = []
     if arguments.parallel:
         passes = ["--ent-schedule",

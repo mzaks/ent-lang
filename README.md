@@ -129,8 +129,9 @@ tools/ent run examples/hello.ent       # or: tools/ent build ... -o hello
 ```
 
 `tools/ent` runs the steps below for a program and the modules it imports
-(`--parallel` stages and fuses the systems and runs them on all cores,
-`--keep dir` keeps the IR and the header). It finds the compiler in
+(it fuses the systems of a schedule that can be, on one core as on all;
+`--parallel` also stages them and runs them on all cores, `--keep dir`
+keeps the IR and the header). It finds the compiler in
 `build/bin` and LLVM under `$LLVM_PREFIX`, `build/toolchain` or Homebrew.
 A program that was built is kept (in `$ENT_CACHE`, else `~/.cache/ent`)
 and not built again while its files, its modules', what implements them,

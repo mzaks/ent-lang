@@ -3155,3 +3155,27 @@ texts at the top (`hud`: unchanged), 0.3 ms `present`.
 
 See also `bench/epidemic/RESULTS.md`: the city's epidemic of
 `examples/epidemic` against its reference, up to ten million people.
+
+## 2026-10-15: fusion on one core
+
+`tools/ent build` fuses systems (`fuse-systems=1`) on one core too, not only
+with `--parallel`. Ryzen AI 9 HX 370, one core (CPU 2), native.
+
+`python3 bench/run.py --variants loops,fused` (ns per frame, median of 5):
+
+| variant | n=1e+03 | n=1e+04 | n=1e+05 | n=1e+06 | n=1e+07 |
+|---|---|---|---|---|---|
+| loops | 143 (11%) | 2,006 (3%) | 32,646 (2%) | 862,103 (2%) | 12,561,050 (3%) |
+| fused | 117 (1%) | 1,631 (3%) | 28,435 (2%) | 869,892 (4%) | 12,296,314 (1%) |
+
+- Fused is 18-19% faster at 1e3 and 1e4 and 13% at 1e5; from 1e6 on the
+  frame is memory's and the two are the same.
+- examples/epidemic, a million people for 30 days (the model without the
+  benchmark's laps between systems, which end every fused sequence): 6 of
+  46 systems fused, 2.00 s either way, the same days.
+- examples/beecs, a year of squadrons of one without turns: 4 of 55
+  systems fused (small ones), the same days; 632 ms where it was 615, with
+  0.7% fewer instructions and 3.4% more branches missed all over, not in
+  what was fused: where the code lies, not what it does.
+- Every example that builds builds as before (29 of 39 here; the others
+  need files made elsewhere), and the tests pass.
