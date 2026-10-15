@@ -1,0 +1,19 @@
+// A system whose `for` has a `for` over other entities in it, between
+// systems that could be fused: it is not fused (its inner loop is lowered
+// with the query), and what it counts is what it was.
+import console
+component P { x: f32, near: i32 } capacity 16
+system setup() { for i in 0..5 { spawn { P { x: i as f32, near: 0 } } } }
+system count() {
+  for p: mut P {
+    var n = 0
+    for q: P { if q.x < p.x { n += 1 } }
+    p.near = n
+  }
+}
+system grow() { for p: mut P { p.x = p.x * 2.0 } }
+system show() { for p: P { put("{p.x} {p.near}") } }
+schedule s() { setup() }
+schedule frame() { count() grow() }
+schedule e() { show() }
+main { s() frame() e() }

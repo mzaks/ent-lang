@@ -1,0 +1,11 @@
+// A `for` with a `for` over other entities inside is not fused, and is
+// built and runs as it does alone, on one core and on all.
+// RUN: %ent run %S/Inputs/fuse_inner_for.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/fuse_inner_for.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK:      0.0 0
+// CHECK-NEXT: 2.0 1
+// CHECK-NEXT: 4.0 2
+// CHECK-NEXT: 6.0 3
+// CHECK-NEXT: 8.0 4

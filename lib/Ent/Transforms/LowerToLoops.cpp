@@ -9283,14 +9283,16 @@ static void commitStructure(IRRewriter &rewriter, Location loc,
 /// join `changedRelations`: they are looked over when the query ends. A
 /// set marks its tree unclean where it runs (see lowerAccesses), and a
 /// value applied or combined into the field where it lands
-/// (combineAtRow); an add of the component does here, at the insertion
-/// point, whether it runs for any entity or not.
+/// (combineAtRow); an add of the component does here, before `at` (the
+/// query, or the loops it is fused into), whether it runs for any entity
+/// or not.
 static void noteOrderWrites(IRRewriter &rewriter, QueryOp query,
                             const WorldLayout &layout, WorldAccess &world,
-                            llvm::SetVector<Attribute> &changedRelations) {
+                            llvm::SetVector<Attribute> &changedRelations,
+                            Operation *at = nullptr) {
   Location loc = query.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPoint(query);
+  rewriter.setInsertionPoint(at ? at : query.getOperation());
   for (const WorldRelation &relation : layout.relations) {
     if (!relation.isOrdered())
       continue;
@@ -12774,6 +12776,13 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   for (SystemOp system : systems)
     for (QueryOp query : system.getBody().getOps<QueryOp>())
       queries.push_back(query);
+  // Trees whose children are ordered by a field a query may write: looked
+  // over when the fused loops have run, as when each query ended.
+  llvm::SetVector<Attribute> changedRelations;
+  for (QueryOp query : queries)
+    noteOrderWrites(rewriter, query, layout, world, changedRelations,
+                    insertionPoint);
+
   // Whole numbers a parallel loop may reduce (the queries' bodies are
   // their own, with nothing sent from loops of them: see fusableSends).
   SmallVector<Operation *> reduced;
@@ -12848,6 +12857,10 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
             !appliesDirectly(accumulate, direct.contains(archetype)))
           combineAccumulated(rewriter, accumulate, *archetype, world, count);
   }
+  rewriter.setInsertionPoint(insertionPoint);
+  for (Attribute relation : changedRelations)
+    callSort(rewriter, loc, layout.getRelation(cast<StringAttr>(relation)),
+             world.getArena());
   for (Operation *op : reduced)
     op->removeAttr(kReducedAttr);
 
@@ -12899,11 +12912,13 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       // others', as would a later system reading what an apply combines;
       // edge loops reach other entities too, and connects sort the edges.
       // Applies and accumulates do not end it where they can be combined
-      // after the fused loop (see joinsSends).
+      // after the fused loop (see joinsSends). So does a `for` over other
+      // entities in a body (an ent.each, which lowerQuery lowers before the
+      // body).
       bool writesResource =
           system
               .walk([](Operation *op) {
-                return isa<WriteOp, SpawnOp, DespawnOp, LookupOp, EdgesOp,
+                return isa<WriteOp, SpawnOp, DespawnOp, EachOp, LookupOp, EdgesOp,
                            ConnectOp, AppendOp, ClearOp, BufferLenOp,
                            BufferAtOp, BufferOfOp, BufferSetOp, BufferFillOp>(
                            op)
