@@ -83,3 +83,75 @@ weighed by its calls out). Built with that threshold at 2,048 to 32,768
 A colony ten times as large (100,000 bees, squadrons of one, 180 days,
 some 46,000 squadrons): one core 0.70 s, all cores 0.75 to 0.81; with the
 threshold at 4,096 and 8 threads 0.56 to 0.68, the machine not quiet.
+
+## 2026-10-15, profiled
+
+`python3 bench/beecs/run.py --seeds 9 --parallel --claims` after the
+changes below.
+
+| squadron size | | a year | memory |
+|---|---|---|---|
+| 100 | beecs (Go), one core | 23.8 ms | 17 MB |
+|  | model, one core | 24.4 ms | 19 MB |
+|  | without turns, one core | 11.3 ms | 21 MB |
+|  | model, all cores | 25.4 ms | 23 MB |
+|  | without turns, all cores | 21.3 ms | 29 MB |
+| 10 | beecs (Go), one core | 159.2 ms | 17 MB |
+|  | model, one core | 115.8 ms | 19 MB |
+|  | without turns, one core | 68.7 ms | 21 MB |
+|  | model, all cores | 132.1 ms | 23 MB |
+|  | without turns, all cores | 89.2 ms | 29 MB |
+| 1 | beecs (Go), one core | 1,497.6 ms | 17 MB |
+|  | model, one core | 1,082.9 ms | 19 MB |
+|  | without turns, one core | 635.7 ms | 21 MB |
+|  | model, all cores | 1,322.2 ms | 25 MB |
+|  | without turns, all cores | 886.3 ms | 30 MB |
+
+Profiled with squadrons of one, without turns: the time of each step (the
+machine's clock between steps), the processor's counters (cycles,
+instructions, branches missed) and samples of where it is (perf_event_open,
+by hand: there is no perf here). A year is some 3,700 rounds over 8,500
+squadrons on average, 72% of them resting; their columns are a few hundred
+kilobytes, so what costs is the instructions for each squadron and the
+branches on its state and on numbers at random, about a fifth of the
+cycles missed. Step by step, from 1,157 ms:
+
+- 1,086: numbers at random drawn only where asked for (`decide` drew one
+  for starting for every squadron, and both sides of `&&`; the flight's
+  mortality one for every squadron, also those that rest); the chance to
+  give up a pollen patch (a `pow`) and a dance's chance to lead none (an
+  `exp`) once for each patch. The same numbers: the days to the bit.
+- 922: `flight_cost` sent the honey and the time from two places each.
+  Values sent to a field from more than one place are kept for every row
+  (eight marks cleared for every squadron) and added up after the `for`
+  in a second pass, one after another; from one place they are added as
+  the `for` goes.
+- 875: the numbers every squadron draws in `decide`, for pollen and for
+  starting, in a loop of their own, which the compiler does eight at a
+  time (AVX-512); the same numbers.
+- 859: the dancers given rows from one place, not two.
+- 795: the followers drawn by a shuffle that stops when they are all
+  drawn, not a number for every one resting.
+- 636: what follows the flights in two passes over the squadrons, not
+  seven (`fly`: getting a load, its cost, dying on the way, the dancers
+  and the resting; `come_home`: following and unloading).
+
+Then 5.7 billion instructions where there were 9.9, at 2.15 an instruction
+a cycle, 4.5% of the branches missed. `decide` 35%, `fly` 33%, `come_home`
+12%, `claims` 9%, `dances` 6%.
+
+What the compiler could do better, seen here:
+
+- `&&` and `||` work out both sides: a draw on the right is drawn for every
+  entity. Going to the right only where it counts, as C does, would let
+  these be written as they read.
+- A `for` that gives a buffer rows marks every row, and puts them together
+  after the `for` with a branch on each mark: with 72% of the squadrons
+  resting that branch is missed often (the most missed in `fly`).
+- Values sent from more than one place in a `for` are kept for every row
+  and added after it in a second pass.
+- The rows of a buffer given from two places come grouped by place, not
+  in the order of the entities as docs/syntax.md says.
+- `fuse-systems` (one loop for several systems) is only built with
+  --parallel, and does not take systems that send or give rows; by hand it
+  was the largest step here.
