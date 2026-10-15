@@ -2,7 +2,7 @@
 """Measures the honeybee colony (examples/beecs) and its reference, beecs.
 
   examples/beecs/reference/fetch.sh               once
-  python3 bench/beecs/run.py [squadron sizes] [--seeds n] [--parallel]
+  python3 bench/beecs/run.py [squadron sizes] [--seeds n] [--parallel] [--claims]
 
 For each squadron size (100, beecs's default, 10 and 1 by default: a
 squadron of one is a forager by itself, some 10,000 to 20,000 entities)
@@ -11,7 +11,8 @@ run a process, on a fast core (CPU 2; BENCH_CPU says another). Said: the
 median of the runs' times, the whole process each (the model's reading its
 weather and writing its days, beecs's setting up), and the most memory.
 The model is built native (ENT_CFLAGS says otherwise), and with
---parallel also for all the cores, which run on all of them.
+--parallel also for all the cores, which run on all of them. With --claims
+the model also forages without turns (claims.ent), each way it is built.
 """
 
 import argparse
@@ -47,6 +48,7 @@ def main():
     parser.add_argument("sizes", nargs="*", type=int, default=[100, 10, 1])
     parser.add_argument("--seeds", type=int, default=5)
     parser.add_argument("--parallel", action="store_true")
+    parser.add_argument("--claims", action="store_true")
     args = parser.parse_args()
     if not os.path.exists(REFERENCE):
         sys.exit("no reference: run examples/beecs/reference/fetch.sh first")
@@ -64,7 +66,9 @@ def main():
                             *extra, PROGRAM, "-o", program], check=True,
                            env=dict(os.environ, ENT_CFLAGS=flags),
                            stdout=subprocess.DEVNULL)
-            programs.append((name, program, cpus))
+            programs.append((name, program, cpus, False))
+            if args.claims:
+                programs.append((name.replace("model", "without turns"), program, cpus, True))
         os.symlink(WEATHER, os.path.join(work, "foraging-period"))
         print("| squadron size | | a year | memory |")
         print("|---|---|---|---|")
@@ -79,11 +83,13 @@ def main():
                 times.append(t)
                 memory = max(memory, m)
             rows.append(("beecs (Go), one core", statistics.median(times), memory))
-            for name, program, cpus in programs:
+            for name, program, cpus, claims in programs:
                 times, memory = [], 0.0
                 for seed in range(1, args.seeds + 1):
                     with open(os.path.join(work, "parameters.txt"), "w") as f:
                         f.write(f"RandomSeed.Seed {seed}\nForagers.SquadronSize {size}\n")
+                        if claims:
+                            f.write("Variant.Claims true\n")
                     t, m = timed([program], work, cpus)
                     times.append(t)
                     memory = max(memory, m)
