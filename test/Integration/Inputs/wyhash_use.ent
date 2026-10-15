@@ -1,0 +1,32 @@
+// The wyhash module's values beside those of wyhash.h (final version 4.2),
+// and draws in a `for`, the same on one core and on all.
+import console
+import wyhash
+
+component Die { number: i64, face: u64 } capacity 1000
+unique Faces { sum: i64 }
+
+system spawn_dice() {
+  for i in 0..1000 { spawn { Die { number: i as i64, face: 0 } } }
+}
+
+system roll() {
+  for d: mut Die { d.face = wyrand_below(wyhash64(7, 0), d.number, 6) }
+}
+
+system show() {
+  let (hi, lo) = mul_wide(0xfedcba9876543210, 0x0123456789abcdef)
+  put("mul_wide {hi} {lo}")
+  put("wymix {wymix(0xfedcba9876543210, 0x0123456789abcdef)}")
+  put("wyhash64 {wyhash64(1, 2)} {wyhash64(0, 0)}")
+  put("wyrand {wyrand(42, 0)} {wyrand(42, 1)} {wyrand(42, 2)}")
+  put("unit {wyrand_unit(42, 1)} below {wyrand_below(42, 4, 6)}")
+  Faces.sum = 0
+  for d: Die { Faces.sum += d.face as i64 }
+  put("faces {Faces.sum}")
+  flush()
+}
+
+schedule setup() { spawn_dice() }
+schedule frame() { roll() show() }
+main { setup() frame() }

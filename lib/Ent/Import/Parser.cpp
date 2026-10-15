@@ -7646,6 +7646,27 @@ Parser::emitSeveral(const Expr &expr, ArrayRef<Type> expected) {
     return values;
   }
   case Expr::Call: {
+    // `mul_wide(a, b)`: the 128 bits of a u64 times a u64, as its high
+    // and its low 64 (Go's bits.Mul64): one instruction on most machines.
+    if (expr.field.empty() && expr.name == "mul_wide" &&
+        !functions.count(expr.name)) {
+      if (expr.operands.size() != 2)
+        return error(expr.loc, "'mul_wide' takes two arguments");
+      Type word = builder.getIntegerType(64, /*isSigned=*/false);
+      FailureOr<mlir::Value> a = emit(*expr.operands[0], word);
+      FailureOr<mlir::Value> b = emit(*expr.operands[1], word);
+      if (failed(a) || failed(b))
+        return failure();
+      if (a->getType() != word || b->getType() != word)
+        return error(expr.loc, "'mul_wide' multiplies two u64");
+      auto product = arith::MulUIExtendedOp::create(
+          builder, at, bits(at, *a), bits(at, *b));
+      SmallVector<mlir::Value> values = {fromBits(at, product.getHigh(), word),
+                                         fromBits(at, product.getLow(), word)};
+      if (failed(check(values, {})))
+        return failure();
+      return values;
+    }
     if (!expr.field.empty() || !functions.count(expr.name) ||
         functions[expr.name].results.size() < 2)
       break;
@@ -8228,12 +8249,16 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return error(expr.loc, "'" + expr.name + "' gives no value");
       return emitInvoke(expr);
     }
+    if (expr.name == "mul_wide")
+      return error(expr.loc, "'mul_wide' gives 2 values, the high and the "
+                             "low bits; take them with 'let (hi, lo) = "
+                             "mul_wide(a, b)'");
     if (expr.name != "min" && expr.name != "max")
       return error(expr.loc, "unknown function '" + expr.name +
                                  "'; declare it before with 'fn', or one "
                                  "implemented in C with 'extern fn' or "
-                                 "'extern proc' (min, max and len are "
-                                 "built in)");
+                                 "'extern proc' (min, max, len and "
+                                 "mul_wide are built in)");
     if (expr.operands.size() != 2)
       return error(expr.loc, "'" + expr.name + "' takes two arguments");
     Type type = typeOf(expr);

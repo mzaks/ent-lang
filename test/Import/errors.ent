@@ -236,7 +236,7 @@ main {
 // -----
 
 system s() {
-  // expected-error @+1 {{unknown function 'nearest'; declare it before with 'fn', or one implemented in C with 'extern fn' or 'extern proc' (min, max and len are built in)}}
+  // expected-error @+1 {{unknown function 'nearest'; declare it before with 'fn', or one implemented in C with 'extern fn' or 'extern proc' (min, max, len and mul_wide are built in)}}
   let x = nearest(1)
 }
 
@@ -641,7 +641,7 @@ fn ratio(a: i32, b: i32) -> f32 {
 // -----
 
 fn first(x: i32) -> i32 {
-  // expected-error @+1 {{unknown function 'second'; declare it before with 'fn', or one implemented in C with 'extern fn' or 'extern proc' (min, max and len are built in)}}
+  // expected-error @+1 {{unknown function 'second'; declare it before with 'fn', or one implemented in C with 'extern fn' or 'extern proc' (min, max, len and mul_wide are built in)}}
   second(x)
 }
 fn second(x: i32) -> i32 { x }
@@ -1331,4 +1331,19 @@ buffer Marks { at: f32 } capacity 8
 fn first() -> f32 {
   // expected-error @+1 {{'Marks' is a buffer, which a system reads: a fn or proc reads one it is given ('name: Marks')}}
   Marks[0].at
+}
+
+// -----
+
+system s() {
+  // expected-error @+1 {{'mul_wide' gives 2 values, the high and the low bits; take them with 'let (hi, lo) = mul_wide(a, b)'}}
+  let x = mul_wide(2 as u64, 3 as u64)
+}
+
+// -----
+
+system s() {
+  let n = 3 as i64
+  // expected-error @+1 {{'mul_wide' multiplies two u64}}
+  let (hi, lo) = mul_wide(2, n)
 }

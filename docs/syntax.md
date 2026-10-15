@@ -1050,6 +1050,10 @@ for t: mut Thing {
 - A literal takes a type without a sign like any other (`let top =
   4000000000 as u32`, `shade: 255`), and is an error where it is more
   than the type holds. One above 2^63 - 1 is written in hex.
+- `let (hi, lo) = mul_wide(a, b)` multiplies two `u64` to all 128 bits
+  of what they come to: the high 64 and the low 64 (`lo` is `a * b`).
+  It is built in, and gives two values, as a fn may; one instruction on
+  most machines, but not one a loop over many runs on several at once.
 - A number without a sign may say which row of a table or a buffer, and
   which byte of a text.
 - For C a `u32` is a `uint32_t`, and so the others.
@@ -1874,6 +1878,13 @@ on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
   `iclamp`), `fract`, `length(x, y)`, `distance(ax, ay, bx, by)`,
   `ipow(x, n)`.
 - `min` and `max` are built in and need no import.
+- The module `wyhash` (devices/wyhash.ent, written in ent-lang on
+  `mul_wide`) has wyhash's mix and wyrand's numbers at random, as Wang
+  Yi's wyhash.h (final version 4.2) gives them: `wymix(a, b)`,
+  `wyhash64(a, b)`, and the n-th number of a key, `wyrand(key, n)` (all
+  64 bits), `wyrand_unit(key, n)` (from 0 to below 1) and
+  `wyrand_below(key, n, count)`. Each is worked out from the key and `n`
+  alone, so it is the same however many cores draw, in whatever order.
 - A program's own fn of the same name comes before the module's; the
   module's is then `math::abs`.
 

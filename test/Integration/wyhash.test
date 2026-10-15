@@ -1,0 +1,15 @@
+// The wyhash module (devices/wyhash.ent), written in ent-lang on the
+// built-in `mul_wide`: its values are those of wyhash.h (final version
+// 4.2), whose `wyrand` from the state 42 gives the three numbers below one
+// after another.
+// RUN: %ent run %S/Inputs/wyhash_use.ent | FileCheck %s
+// Drawn from the key and the number alone: the same on all cores.
+// RUN: %ent run --parallel %S/Inputs/wyhash_use.ent | FileCheck %s
+
+// CHECK:      mul_wide 81621149086635842 2465395958572223728
+// CHECK-NEXT: wymix 2528527714576915378
+// CHECK-NEXT: wyhash64 5942532942210584115 18027973888215709232
+// CHECK-NEXT: wyrand 14587678697106979209 9105053682160394182 14839644324764355487
+// CHECK-NEXT: unit 0.493586 below 3
+// CHECK-NEXT: faces 2466
+// CHECK-NOT:  {{.}}

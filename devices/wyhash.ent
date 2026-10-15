@@ -1,0 +1,57 @@
+// wyhash's mixing and wyrand's numbers at random: `import wyhash`.
+//
+//   import wyhash
+//   system scatter() {
+//     let occasion = wyhash64(Seed.seed as u64, Clock.tick as u64)
+//     for p: mut Position, d: Drifter {
+//       let key = wyhash64(occasion, d.number as u64)
+//       p.x += wyrand_unit(key, 0) - 0.5
+//       p.y += wyrand_unit(key, 1) - 0.5
+//     }
+//   }
+//
+// After Wang Yi's wyhash (final version 4.2, released into the public
+// domain), with its constants: each step is one 64 by 64 bit multiply to
+// 128 bits (`mul_wide`), its two halves xored.
+//
+// wyrand keeps a state that moves on by a constant for each number; here
+// the n-th number is worked out from the key and n alone, so a draw does
+// not depend on the ones before it, nor on the order entities are visited
+// in or on how many cores run them. `wyrand(key, 0)`, `wyrand(key, 1)`, ..
+// are what wyrand gives from the state `key`, one after another.
+//
+// A loop the compiler runs on several entities at once (with no branch,
+// lookup or call that stays a call in it) does not do so with these: the
+// machine has no instruction that multiplies several 64-bit numbers to
+// their high bits at once. Such a loop draws faster with a mix of 64-bit
+// multiplies that keep the low bits, as SplitMix64's.
+
+// a times b to 128 bits, the high 64 xored with the low.
+fn wymix(a: u64, b: u64) -> u64 {
+  let (hi, lo) = mul_wide(a, b)
+  hi ^ lo
+}
+
+// Two numbers hashed to one (wyhash's `wyhash64`).
+fn wyhash64(a: u64, b: u64) -> u64 {
+  let (hi, lo) = mul_wide(a ^ 0x2d358dccaa6c78a5, b ^ 0x8bb84b93962eacc9)
+  wymix(lo ^ 0x2d358dccaa6c78a5, hi ^ 0x8bb84b93962eacc9)
+}
+
+// The n-th number at random of a key: all 64 bits of it.
+fn wyrand(key: u64, n: i64) -> u64 {
+  let s = key + (n as u64 + 1) * 0x2d358dccaa6c78a5
+  wymix(s, s ^ 0x8bb84b93962eacc9)
+}
+
+// The n-th number of a key from 0 to below 1, in steps of 2^-53.
+fn wyrand_unit(key: u64, n: i64) -> f64 {
+  (wyrand(key, n) >> 11) as f64 / 9007199254740992.0
+}
+
+// The n-th number of a key from 0 to below `count` (which is above 0),
+// each as likely as the next but for a bias of at most count / 2^64.
+fn wyrand_below(key: u64, n: i64, count: u64) -> u64 {
+  let (hi, lo) = mul_wide(wyrand(key, n), count)
+  hi
+}
