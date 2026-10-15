@@ -75,10 +75,26 @@ agree over 400 seeds; on `lean` 21 of 400 colonies die out in beecs and
 
 ## Timings
 
-`bench/beecs/run.py`, in `bench/beecs/RESULTS.md`: a year of the defaults
-takes 23 ms for both; with every forager an entity of its own (squadrons
-of one bee, 10,000 to 20,000 entities) 1.41 s where beecs takes 1.55,
-on one core. Without turns (below) 17 ms and 1.17 s.
+`bench/beecs/run.py`, in `bench/beecs/RESULTS.md`, on one core: a year of
+the defaults takes 24 ms for both; with every forager an entity of its own
+(squadrons of one bee, 10,000 to 20,000 entities) 1.08 s where beecs takes
+1.50. Without turns (below) 11 ms and 0.64 s.
+
+What a round costs is the work for each squadron (numbers at random,
+which of its states it is in), not memory: the squadrons are some
+hundred kilobytes. So it costs what is done for each, and how often a
+loop goes through all of them:
+
+- A number at random is drawn where it is asked for, not before (`&&`
+  works out both its sides), and those every squadron draws, in a loop
+  of their own, which goes eight at a time (`Draws`).
+- What is the same for all who go to a patch is worked out once for the
+  patch (the chance to give it up, a dance's chance to lead none).
+- A value is sent to a field, or rows given to a buffer, from one place
+  in a `for`: from more than one, each is kept for every row and put
+  together after the `for`, in a fixed order.
+- Without turns, what follows a round's flights is two passes over the
+  squadrons, not seven (`fly`, `come_home`).
 
 ## Without turns
 
@@ -108,8 +124,9 @@ these steps without turns:
 
 It agrees with beecs as the model with turns does (`check/curves.py
 --claims`: `years` over 100 seeds, the others over 400, `seasonal` and
-`scarce` also over 800), and is faster on one core: a year of the defaults takes 17 ms,
-with squadrons of one bee 1.17 s (with turns 1.39). On all cores it
+`scarce` also over 800), and is faster on one core: a year of the
+defaults takes 11 ms, with squadrons of one bee 0.64 s (with turns 1.08).
+On all cores it
 gains nothing at these sizes: a round's loops over some 8,500 squadrons
 are too little work to share out.
 

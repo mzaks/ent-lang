@@ -36,8 +36,12 @@ component Handling { nectar: f64, pollen: f64 }          // [s] on the flowers
 component Trip {                                         // [s], [kJ]
   duration_nectar: f64, duration_pollen: f64, cost_nectar: f64, cost_pollen: f64
 }
-component Risk { nectar: f64, pollen: f64 }              // of dying on a trip
-component Advert { circuits: f64 }                       // of a dance for it
+// The chance of dying on a trip, and of giving up the patch for pollen
+// after one.
+component Risk { nectar: f64, pollen: f64, abandon_pollen: f64 }
+// The circuits of a dance for it, and the chance that it leads none
+// (e^-mean of the followers' Poisson numbers).
+component Advert { circuits: f64, none: f64 }
 component Visits { nectar: i32, pollen: i32 }            // today's foragers
 // Without turns (claims.ent): the loads a round's squadrons ask for, the
 // recruits' and the experienced's, of nectar and of pollen (then, where
@@ -67,6 +71,10 @@ component Squadron { number: i32, order: i64 }
 // Without turns: whether it got a load of a patch that had too few for
 // all who asked (1), or not (0).
 component Lot { won: i32 }
+// The numbers at random every squadron draws in a round's decisions: for
+// going for pollen, and for starting. (Drawn for all of them in a loop of
+// its own, which goes eight squadrons at a time.)
+component Draws { pollen: f64, start: f64 }
 
 // Who rests, in an order at random, to follow dances; `Taken` of them
 // from the end have followed one.
@@ -138,7 +146,8 @@ system hive() {
               Handling { nectar: 0.0, pollen: 0.0 },
               Trip { duration_nectar: 0.0, duration_pollen: 0.0, cost_nectar: 0.0,
                      cost_pollen: 0.0 },
-              Risk { nectar: 0.0, pollen: 0.0 }, Advert { circuits: 0.0 },
+              Risk { nectar: 0.0, pollen: 0.0, abandon_pollen: 0.0 },
+              Advert { circuits: 0.0, none: 1.0 },
               Visits { nectar: 0, pollen: 0 },
               Asked { recruit_nectar: 0, recruit_pollen: 0, known_nectar: 0, known_pollen: 0,
                       give_recruit_nectar: 0, give_recruit_pollen: 0,
@@ -154,7 +163,8 @@ system hive() {
               Handling { nectar: 0.0, pollen: 0.0 },
               Trip { duration_nectar: 0.0, duration_pollen: 0.0, cost_nectar: 0.0,
                      cost_pollen: 0.0 },
-              Risk { nectar: 0.0, pollen: 0.0 }, Advert { circuits: 0.0 },
+              Risk { nectar: 0.0, pollen: 0.0, abandon_pollen: 0.0 },
+              Advert { circuits: 0.0, none: 1.0 },
               Visits { nectar: 0, pollen: 0 },
               Asked { recruit_nectar: 0, recruit_pollen: 0, known_nectar: 0, known_pollen: 0,
                       give_recruit_nectar: 0, give_recruit_pollen: 0,
@@ -175,7 +185,8 @@ system hive() {
             Age { born: below(k, 0, span) + oldest },
             Milage { today: 0.0, total: milage },
             NectarLoad { energy: 0.0 },
-            Squadron { number: i, order: 0 }, Lot { won: 0 } }
+            Squadron { number: i, order: 0 }, Lot { won: 0 },
+            Draws { pollen: 0.0, start: 0.0 } }
   }
   Counter = squadrons
   Day.year = 0
@@ -237,7 +248,8 @@ system new_foragers() {
             Age { born: Clock.tick - Aff.days },
             Milage { today: 0.0, total: 0.0 },
             NectarLoad { energy: 0.0 },
-            Squadron { number: Counter + i, order: 0 }, Lot { won: 0 } }
+            Squadron { number: Counter + i, order: 0 }, Lot { won: 0 },
+            Draws { pollen: 0.0, start: 0.0 } }
   }
   Counter += Emerging.squadrons
   Emerging.squadrons = 0
@@ -301,8 +313,10 @@ system patches() {
     t.duration_pollen = 2.0 * p.distance / Foragers.flight_velocity + h.pollen
     k.nectar = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, t.duration_nectar)
     k.pollen = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, t.duration_pollen)
+    k.abandon_pollen = 1.0 - pow64(1.0 - Foraging.abandon_pollen_per_sec, t.duration_pollen)
     d.circuits = max(0.0, min(r.efficiency * Dance.slope + Dance.intercept,
                               Dance.max_circuits as f64))
+    d.none = exp64(-(d.circuits * 0.05))
   }
 }
 
@@ -311,33 +325,44 @@ system patches() {
 system decide() {
   let honey = Hive.honey / Hive.decent_honey
   let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DECIDE))
-  for a: mut Activity, k: mut Known, m: Milage, s: Squadron {
+  for d: mut Draws, s: Squadron {
     let draw = key_of(occasion, s.number)
-    if a.now != Doing.Recruited { a.pollen = uniform(draw, 0) < Day.pollen_share }
+    d.pollen = uniform(draw, 0)
+    d.start = uniform(draw, 5)
+  }
+  for a: mut Activity, k: mut Known, m: Milage, d: Draws, s: Squadron {
+    let draw = key_of(occasion, s.number)
+    if a.now != Doing.Recruited { a.pollen = d.pollen < Day.pollen_share }
     if a.now != Doing.Recruited && a.now != Doing.Resting && a.now != Doing.Lazy {
       if uniform(draw, 1) < Foraging.stop_probability { a.now = Doing.Resting }
     }
+    // (Each number drawn only where it is asked for: `&&` works out both
+    // sides.)
     if !a.pollen && k.nectar != none {
       if let efficiency = Resource(k.nectar).efficiency {
-        if uniform(draw, 2) < 1.0 / efficiency && uniform(draw, 3) < honey {
-          k.nectar = none
-          if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
+        if uniform(draw, 2) < 1.0 / efficiency {
+          if uniform(draw, 3) < honey {
+            k.nectar = none
+            if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
+          }
         }
       }
     }
     // As beecs has it: a squadron that gives up its pollen patch forgets
     // its nectar patch.
     if k.pollen != none && a.pollen {
-      if let duration = Trip(k.pollen).duration_pollen {
-        if uniform(draw, 4) < 1.0 - pow64(1.0 - Foraging.abandon_pollen_per_sec, duration) {
+      if let abandon = Risk(k.pollen).abandon_pollen {
+        if uniform(draw, 4) < abandon {
           k.nectar = none
           if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
         }
       }
     }
-    if a.now == Doing.Resting && uniform(draw, 5) < Day.probability {
-      let known = if a.pollen { k.pollen } else { k.nectar }
-      a.now = if known == none { Doing.Searching } else { Doing.Experienced }
+    if a.now == Doing.Resting {
+      if d.start < Day.probability {
+        let known = if a.pollen { k.pollen } else { k.nectar }
+        a.now = if known == none { Doing.Searching } else { Doing.Experienced }
+      }
     }
     if m.today > Foragers.max_km_per_day as f32 { a.now = Doing.Resting }
   }
@@ -517,28 +542,32 @@ system flight_cost() {
   let search_km = (Foraging.search_length / 1000.0) as f32
   let search_energy = Foraging.search_length * Foragers.flight_cost_per_m * size
   let search_seconds = Foraging.search_length / Foragers.flight_velocity
-  var spent = 0.0 as f64
-  for a: Activity, k: Known, m: mut Milage {
+  // (One send for each: values sent from more than one place are kept
+  // for every row and added up after the `for`, in a fixed order.)
+  for a: Activity, k: Known, m: mut Milage
+      where a.now == Doing.Searching || a.now == Doing.BringNectar ||
+            a.now == Doing.BringPollen {
+    var honey = 0.0 as f64
+    var seconds = 0.0 as f64
     if a.now == Doing.Searching {
       m.today += search_km
       m.total += search_km
-      Hive.honey -= search_energy
-      Flights.duration += search_seconds
-      Flights.foragers += 1
-    } else if a.now == Doing.BringNectar || a.now == Doing.BringPollen {
-      if a.pollen {
-        if let duration = Trip(k.pollen).duration_pollen, let cost = Trip(k.pollen).cost_pollen {
-          Flights.duration += duration + HandlingTime.pollen_unloading
-          Hive.honey -= cost * size
-        }
-      } else {
-        if let duration = Trip(k.nectar).duration_nectar, let cost = Trip(k.nectar).cost_nectar {
-          Flights.duration += duration + HandlingTime.nectar_unloading
-          Hive.honey -= cost * size
-        }
+      honey = search_energy
+      seconds = search_seconds
+    } else if a.pollen {
+      if let duration = Trip(k.pollen).duration_pollen, let cost = Trip(k.pollen).cost_pollen {
+        seconds = duration + HandlingTime.pollen_unloading
+        honey = cost * size
       }
-      Flights.foragers += 1
+    } else {
+      if let duration = Trip(k.nectar).duration_nectar, let cost = Trip(k.nectar).cost_nectar {
+        seconds = duration + HandlingTime.nectar_unloading
+        honey = cost * size
+      }
     }
+    Hive.honey -= honey
+    Flights.duration += seconds
+    Flights.foragers += 1
   }
 }
 
@@ -547,14 +576,15 @@ system flight_mortality() {
   let search_seconds = Foraging.search_length / Foragers.flight_velocity
   let search_risk = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, search_seconds)
   let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DIE))
-  for e, a: Activity, k: Known, s: Squadron {
-    let draw = key_of(occasion, s.number)
-    let u = uniform(draw, 0)
+  for e, a: Activity, k: Known, s: Squadron
+      where a.now == Doing.Searching || a.now == Doing.BringNectar ||
+            a.now == Doing.BringPollen {
+    let u = uniform(key_of(occasion, s.number), 0)
     if a.now == Doing.Searching {
       if u < search_risk { e.destroy() }
     } else if a.now == Doing.BringNectar {
       if let risk = Risk(k.nectar).nectar { if u < risk { e.destroy() } }
-    } else if a.now == Doing.BringPollen {
+    } else {
       if let risk = Risk(k.pollen).pollen { if u < risk { e.destroy() } }
     }
   }
@@ -590,9 +620,10 @@ system dance() {
   for a: Activity, k: Known, s: Squadron in turn by s.order
       where a.now == Doing.BringNectar || a.now == Doing.BringPollen {
     if a.now == Doing.BringNectar {
-      if let efficiency = Resource(k.nectar).efficiency, let circuits = Advert(k.nectar).circuits {
+      if let efficiency = Resource(k.nectar).efficiency, let circuits = Advert(k.nectar).circuits,
+         let zero = Advert(k.nectar).none {
         let draw = key_of(occasion, s.number)
-        let followers = poisson(draw, 0, circuits * 0.05)
+        let followers = poisson_of(draw, 0, circuits * 0.05, zero)
         if followers > 0 && len(Resting) - Taken >= followers {
           for i in 0..followers {
             let follower = Resting[len(Resting) - 1 - Taken].who

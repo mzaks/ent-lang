@@ -79,3 +79,20 @@ fn poisson(key: u64, n: i32, mean: f64) -> i32 {
   }
   count
 }
+
+// The same, for a mean of at most 500 whose chance of none, e^-mean, is
+// worked out once for many (a patch's dances): as `poisson` gives it.
+fn poisson_of(key: u64, n: i32, mean: f64, none: f64) -> i32 {
+  var k = 0
+  if mean > 0.0 {
+    let u = uniform(key, n)
+    var chance = none
+    var below = chance
+    while below < u && k < 100000 {
+      k += 1
+      chance = chance * mean / k as f64
+      below += chance
+    }
+  }
+  k
+}

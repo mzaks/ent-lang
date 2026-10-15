@@ -43,8 +43,10 @@ buffer Dancers { patch: entity, pollen: bool, followers: i32 } capacity 100000
 // The dances of a round: a row for each patch and what it is danced for,
 // with how many follow (then, how many are still to be drawn).
 buffer Dances { patch: entity, pollen: bool, followers: i32 } capacity 2048
-// The resting of a round, and the dance each follows (-1: none).
+// The resting of a round, and the dance each follows: the first
+// `Followers` of them, after the dances are drawn.
 buffer Line { who: entity, dance: i32 } capacity 100000
+unique Followers: i32
 
 // Recruits look for the danced patch: found, they ask it for a load, else
 // they search. Experienced squadrons ask theirs, or rest if they know none.
@@ -170,46 +172,6 @@ system draw_lots() {
   }
 }
 
-// Who asked gets a load, where the patch had enough or the lot says so,
-// and flies there and back; else searches.
-system settle() {
-  for a: mut Activity, k: mut Known, l: Lot {
-    let kind = asked_for(a.now, a.pollen, k.nectar != none, k.pollen != none)
-    if kind >= 0 {
-      let patch = if kind == 1 || kind == 3 { k.pollen } else { k.nectar }
-      var got = l.won > 0
-      if let short = Asked(patch).short { got = got || enough(short, kind) }
-      if got {
-        a.now = if kind == 1 || kind == 3 { Doing.BringPollen } else { Doing.BringNectar }
-      } else {
-        a.now = Doing.Searching
-        if kind == 1 || kind == 3 { k.pollen = none } else { k.nectar = none }
-      }
-    }
-  }
-}
-
-// The loads brought, and the kilometres flown for them (collecting).
-system loads() {
-  for a: Activity, k: Known, m: mut Milage, n: mut NectarLoad {
-    if a.now == Doing.BringNectar {
-      if let concentration = Flowers(k.nectar).concentration, let cost = Trip(k.nectar).cost_nectar {
-        n.energy = concentration * Foragers.nectar_load * EnergyContent.sucrose
-        let km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
-        m.today += km
-        m.total += km
-      }
-    }
-    if a.now == Doing.BringPollen {
-      if let cost = Trip(k.pollen).cost_pollen {
-        let km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
-        m.today += km
-        m.total += km
-      }
-    }
-  }
-}
-
 // The asking of a round starts from nought.
 system asked_again() {
   for q: mut Asked {
@@ -223,32 +185,11 @@ system asked_again() {
   }
 }
 
-// Dancers say how many they would lead, to which patch; the resting line
-// up (as they are stored).
-system lead() {
-  let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DANCE))
-  Dancers = []
-  Line = []
-  for e, a: Activity, k: Known, l: mut Lot, s: Squadron {
-    l.won = 0
-    if a.now == Doing.BringNectar {
-      if let circuits = Advert(k.nectar).circuits {
-        let followers = poisson(key_of(occasion, s.number), 0, circuits * 0.05)
-        if followers > 0 { Dancers += { patch: k.nectar, pollen: false, followers: followers } }
-      }
-    } else if a.now == Doing.BringPollen {
-      Dancers += { patch: k.pollen, pollen: true, followers: Dance.pollen_dance_followers }
-    } else if a.now == Doing.Resting {
-      Line += { who: e, dance: -1 }
-    }
-  }
-}
-
 // The dancers in an order at random, each leading its followers where so
 // many of the resting are left, as in beecs; what they lead added up by
-// patch; and of the resting, so many for each dance at random (selection
-// sampling): one after another, but over the dancers and the resting
-// only, a few numbers each, not over the squadrons.
+// patch; and of the resting, so many for each dance at random: one after
+// another, but over the dancers and the followers only, a few numbers
+// each, not over the squadrons.
 system dances() {
   let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DANCE_ORDER))
   Dances = []
@@ -275,19 +216,21 @@ system dances() {
       Dances[found].followers = Dances[found].followers + followers
     }
   }
+  // The followers: as many of the resting at random as are led, to the
+  // front of the line (a shuffle that stops there), the first of them for
+  // the first dance, and so on.
   let follow = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, FOLLOW))
   let resting = len(Line)
-  for r in 0..resting {
-    var x = (uniform(key_of(follow, r), 0) * (resting - r) as f64) as i32
-    var d = 0
-    while d < len(Dances) && Line[r].dance < 0 {
-      if x < Dances[d].followers {
-        Line[r].dance = d
-        Dances[d].followers = Dances[d].followers - 1
-      } else {
-        x -= Dances[d].followers
-      }
-      d += 1
+  Followers = resting - left
+  var r = 0
+  for d in 0..len(Dances) {
+    for f in 0..Dances[d].followers {
+      let j = r + below(key_of(follow, r), 0, resting - r)
+      let who = Line[j].who
+      Line[j].who = Line[r].who
+      Line[r].who = who
+      Line[r].dance = d
+      r += 1
     }
   }
 }
@@ -295,50 +238,164 @@ system dances() {
 // Each patch tells the resting who follow a dance for it which one.
 system tell() {
   for e, q: Asked {
-    for r in 0..len(Line) {
+    for r in 0..Followers {
       let d = Line[r].dance
-      if d >= 0 {
-        if Dances[d].patch == e { Lot(Line[r].who).won += d + 1 }
+      if Dances[d].patch == e { Lot(Line[r].who).won += d + 1 }
+    }
+  }
+}
+
+// After the lots, one pass over the squadrons for what beecs does in
+// five steps (each pass costs, and most squadrons rest): who asked gets a
+// load, where the patch had enough or the lot says so, and flies there
+// and back, else searches; the flights' honey, time and kilometres
+// (collecting, flightCost); some die on the way (mortality); and who
+// comes back says how many it would lead in a dance, to which patch,
+// while the resting line up (as they are stored).
+system fly() {
+  let size = Foragers.squadron_size as f64
+  let search_km = (Foraging.search_length / 1000.0) as f32
+  let search_energy = Foraging.search_length * Foragers.flight_cost_per_m * size
+  let search_seconds = Foraging.search_length / Foragers.flight_velocity
+  let search_risk = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, search_seconds)
+  let die = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DIE))
+  let dance = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DANCE))
+  Flights.duration = 0.0
+  Flights.foragers = 0
+  Dancers = []
+  Line = []
+  for e, a: mut Activity, k: mut Known, l: mut Lot, m: mut Milage, n: mut NectarLoad,
+      s: Squadron {
+    let kind = asked_for(a.now, a.pollen, k.nectar != none, k.pollen != none)
+    if kind >= 0 {
+      let patch = if kind == 1 || kind == 3 { k.pollen } else { k.nectar }
+      var got = l.won > 0
+      if let short = Asked(patch).short { got = got || enough(short, kind) }
+      if got {
+        a.now = if kind == 1 || kind == 3 { Doing.BringPollen } else { Doing.BringNectar }
+      } else {
+        a.now = Doing.Searching
+        if kind == 1 || kind == 3 { k.pollen = none } else { k.nectar = none }
       }
+    }
+    l.won = 0
+    var died = false
+    if a.now == Doing.Searching || a.now == Doing.BringNectar || a.now == Doing.BringPollen {
+      var honey = 0.0 as f64
+      var seconds = 0.0 as f64
+      var km = 0.0 as f32
+      var risk = 0.0 as f64
+      if a.now == Doing.Searching {
+        km = search_km
+        honey = search_energy
+        seconds = search_seconds
+        risk = search_risk
+      } else if a.now == Doing.BringNectar {
+        if let concentration = Flowers(k.nectar).concentration,
+           let cost = Trip(k.nectar).cost_nectar, let duration = Trip(k.nectar).duration_nectar,
+           let r = Risk(k.nectar).nectar {
+          n.energy = concentration * Foragers.nectar_load * EnergyContent.sucrose
+          km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+          seconds = duration + HandlingTime.nectar_unloading
+          honey = cost * size
+          risk = r
+        }
+      } else {
+        if let cost = Trip(k.pollen).cost_pollen, let duration = Trip(k.pollen).duration_pollen,
+           let r = Risk(k.pollen).pollen {
+          km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+          seconds = duration + HandlingTime.pollen_unloading
+          honey = cost * size
+          risk = r
+        }
+      }
+      m.today += km
+      m.total += km
+      Hive.honey -= honey
+      Flights.duration += seconds
+      Flights.foragers += 1
+      if uniform(key_of(die, s.number), 0) < risk {
+        e.destroy()
+        died = true
+      }
+    }
+    var followers = 0
+    if !died {
+      if a.now == Doing.BringNectar {
+        if let circuits = Advert(k.nectar).circuits, let zero = Advert(k.nectar).none {
+          followers = poisson_of(key_of(dance, s.number), 0, circuits * 0.05, zero)
+        }
+      } else if a.now == Doing.BringPollen {
+        followers = Dance.pollen_dance_followers
+      }
+    }
+    if followers > 0 {
+      let pollen = a.now == Doing.BringPollen
+      Dancers += { patch: if pollen { k.pollen } else { k.nectar }, pollen: pollen,
+                   followers: followers }
+    } else if a.now == Doing.Resting {
+      Line += { who: e, dance: -1 }
     }
   }
 }
 
 // The followers go to the dance's patch, if it is better than the one
-// they know, as recruits, else back to their own (dancing).
-system follow() {
-  for a: mut Activity, k: mut Known, l: Lot where a.now == Doing.Resting && l.won > 0 {
-    let patch = Dances[l.won - 1].patch
-    if !Dances[l.won - 1].pollen {
-      var recruited = k.nectar == none
-      if !recruited {
-        if let efficiency = Resource(patch).efficiency, let theirs = Resource(k.nectar).efficiency {
-          recruited = efficiency > theirs
+// they know, as recruits, else back to their own (dancing); and those
+// back with a load unload it, up to the most honey the hive holds
+// (unloading). One pass for both.
+system come_home() {
+  let size = Foragers.squadron_size as f64
+  Unloaded.energy = 0.0
+  Unloaded.pollen = 0.0
+  for a: mut Activity, k: mut Known, l: Lot, n: mut NectarLoad {
+    if a.now == Doing.Resting && l.won > 0 {
+      let patch = Dances[l.won - 1].patch
+      if !Dances[l.won - 1].pollen {
+        var recruited = k.nectar == none
+        if !recruited {
+          if let efficiency = Resource(patch).efficiency, let theirs = Resource(k.nectar).efficiency {
+            recruited = efficiency > theirs
+          }
+        }
+        if recruited {
+          k.nectar = patch
+          a.now = Doing.Recruited
+          a.pollen = false
+        } else {
+          a.now = Doing.Experienced
+        }
+      } else {
+        var recruited = k.pollen == none
+        if !recruited {
+          if let duration = Trip(patch).duration_pollen, let theirs = Trip(k.pollen).duration_pollen {
+            recruited = duration < theirs
+          }
+        }
+        if recruited {
+          k.pollen = patch
+          a.now = Doing.Recruited
+          a.pollen = true
+        } else {
+          a.now = Doing.Experienced
         }
       }
-      if recruited {
-        k.nectar = patch
-        a.now = Doing.Recruited
-        a.pollen = false
+    } else if a.now == Doing.BringNectar || a.now == Doing.BringPollen {
+      var energy = 0.0 as f64
+      var pollen = 0.0 as f64
+      if a.now == Doing.BringNectar {
+        energy = n.energy * size
+        n.energy = 0.0
       } else {
-        a.now = Doing.Experienced
+        pollen = Foragers.pollen_load * size
       }
-    } else {
-      var recruited = k.pollen == none
-      if !recruited {
-        if let duration = Trip(patch).duration_pollen, let theirs = Trip(k.pollen).duration_pollen {
-          recruited = duration < theirs
-        }
-      }
-      if recruited {
-        k.pollen = patch
-        a.now = Doing.Recruited
-        a.pollen = true
-      } else {
-        a.now = Doing.Experienced
-      }
+      Unloaded.energy += energy
+      Unloaded.pollen += pollen
+      a.now = Doing.Experienced
     }
   }
+  let most_honey = Stores.max_honey_store_kg * 1000.0 * EnergyContent.honey
+  if Unloaded.energy > 0.0 { Hive.honey = min(Hive.honey + Unloaded.energy, most_honey) }
+  Hive.pollen += Unloaded.pollen
 }
 
 schedule round_claims() run_if Day.forage && Variant.claims {
@@ -351,14 +408,9 @@ schedule round_claims() run_if Day.forage && Variant.claims {
   share()
   short_lines() run_if Short
   draw_lots() run_if Short
-  settle()
-  loads()
-  flight_cost()
-  flight_mortality()
-  lead()
+  fly()
   dances()
   tell()
-  follow()
-  unload()
+  come_home()
   round_end()
 }
