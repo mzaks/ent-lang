@@ -3197,3 +3197,23 @@ gives the days of the unfused one to the bit, on one core and on all
   31 fuse; the others write a unique outside their queries (96), cannot
   be analysed (98), use a buffer (77), run under a condition (49), spawn
   or destroy (47) or look up other entities (40), many several of these.
+
+## 2026-10-15: fusing systems with lookups
+
+Systems with lookups are fused where nothing else in the sequence changes
+what they look up. Fused builds again give the unfused builds' output to the
+bit (examples/beecs both ways, examples/epidemic, on one core and on all),
+and the integrate frame keeps its gain (fused 117 ns where unfused 143 at
+1e3, 1,628 where 1,965 at 1e4).
+
+- Fusing beecs's `decide`, whose two queries are a loop that draws numbers
+  eight squadrons at a time and one with lookups, made the year 11% slower
+  (616 to 687 ms): fused, the first loop went one squadron at a time too.
+  So where two queries go through the same archetype, a body without a
+  loop, lookup, send or call out is fused only with its kind. With that,
+  622 to 626 ms where unfused 617.
+- Over the examples nothing more fuses (135 systems before, 134 now:
+  beecs's `replenish`, two loops over two patches once a day, by the new
+  rule). Systems that look up are kept apart by more than their lookups:
+  writes of uniques, buffers, conditions, or a neighbour that changes what
+  they look up.

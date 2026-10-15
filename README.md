@@ -881,7 +881,14 @@ different archetypes share no columns. Two consequences the lowering uses:
   result as running each query to completion. A system that writes a
   resource ends a fused sequence, because fusion moves system-level code
   ahead of the queries. So does a run under a condition, which runs as a
-  whole or not at all, and a system with edge loops or connects.
+  whole or not at all, and a system with edge loops or connects. A system
+  with lookups is fused where nothing else in the sequence changes what it
+  looks up (sets the field, adds or removes the component, sends to it):
+  else a lookup would find some entities changed and others not. And where
+  two queries go through the same archetype, one whose body a loop does
+  several entities at a time (no loop, lookup, send or call out in it) is
+  fused only with its kind: fused with one that goes an entity at a time,
+  its loop would too, which costs more than the pass fusion saves.
 - Since no query writes a resource, a resource read inside a query is
   loaded once before the loop.
 - A spawn checks the capacity, writes row `count`, allocates an id (the

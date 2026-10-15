@@ -61,16 +61,67 @@ ent.system @shift(%d: f32) writes [@P] {
 }
 
 // Fused per entity, a lookup would see the shift of some targets and not
-// others; a system with lookups stays a call between fused sequences.
+// others: `shift` changes what `chase` looks up, so each is a sequence of
+// its own, with its loops (`chase` alone fused: inlined, its lookup in its
+// loop), in their order.
 // FUSED-LABEL: func.func @frame(
+// FUSED-NOT:   call
 // FUSED:       scf.for
+// FUSED:         arith.addf
 // FUSED:       scf.for
-// FUSED:       call @chase(
-// FUSED-NEXT:  arith.constant
+// FUSED:         arith.addf
 // FUSED:       scf.for
+// FUSED:         arith.shrui
+// FUSED:       scf.for
+// FUSED:         arith.addf
+// FUSED:       scf.for
+// FUSED:         arith.addf
+// FUSED-NOT:   call
 // FUSED:       return
 ent.schedule @frame(%d: f32) {
   ent.run @shift(%d) : f32
   ent.run @chase()
   ent.run @shift(%d) : f32
+}
+
+// A system that changes nothing `chase` looks up, and looks up itself, is
+// fused with it: one loop over the tagged entities, both lookups in it.
+ent.system @peek() reads [@P, @T] writes [@S] {
+  ent.query (%t: !ent.ref<@T>, %s: !ent.ref<@S, mut>) {
+    %target = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
+    %x, %found = ent.lookup %target @P "x" : f32
+    %v = ent.get %s "s" : !ent.ref<@S, mut> -> f32
+    %n = arith.mulf %v, %x : f32
+    ent.set %s "s", %n : !ent.ref<@S, mut>, f32
+  }
+}
+// FUSED-LABEL: func.func @together(
+// FUSED:       scf.for
+// FUSED:         arith.shrui
+// FUSED:         arith.mulf
+// FUSED-NOT:   scf.for
+// FUSED:       return
+ent.schedule @together() {
+  ent.run @chase()
+  ent.run @peek()
+}
+
+// One whose loop goes several entities at a time (no lookup in it) is
+// not: fused with a lookup, it would go one at a time. Two loops.
+ent.system @fade() writes [@S] {
+  ent.query (%s: !ent.ref<@S, mut>) {
+    %v = ent.get %s "s" : !ent.ref<@S, mut> -> f32
+    %n = arith.mulf %v, %v : f32
+    ent.set %s "s", %n : !ent.ref<@S, mut>, f32
+  }
+}
+// FUSED-LABEL: func.func @apart(
+// FUSED:       scf.for
+// FUSED:         arith.shrui
+// FUSED:       scf.for
+// FUSED:         arith.mulf
+// FUSED:       return
+ent.schedule @apart() {
+  ent.run @chase()
+  ent.run @fade()
 }

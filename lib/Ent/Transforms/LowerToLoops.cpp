@@ -12636,8 +12636,8 @@ static std::optional<SendTarget> sendTargetOf(Operation *op) {
 }
 
 /// Whether `op` reads or writes `target` other than by sending to it: a
-/// get or a set of the field, a read of the resource's field, or an add
-/// or a remove of the component.
+/// get or a set of the field, a lookup of it (of another entity), a read
+/// of the resource's field, or an add or a remove of the component.
 static bool readsOrWrites(Operation *op, const SendTarget &target) {
   auto refTo = [&](Value ref) {
     auto type = dyn_cast<RefType>(ref.getType());
@@ -12650,10 +12650,72 @@ static bool readsOrWrites(Operation *op, const SendTarget &target) {
   if (auto read = dyn_cast<ReadOp>(op))
     return read.getResourceAttr().getAttr() == target.owner &&
            read.getFieldAttr() == target.field;
+  if (auto lookup = dyn_cast<LookupOp>(op))
+    return lookup.getComponentAttr().getAttr() == target.owner &&
+           lookup.getFieldAttr() == target.field;
   if (isa<AddOp, RemoveOp>(op))
     if (auto component = op->getAttrOfType<FlatSymbolRefAttr>("component"))
       return component.getAttr() == target.owner;
   return false;
+}
+
+/// Whether `op` changes `target`, a component's field, for whichever
+/// entity it visits: a set of the field, or an add or a remove of the
+/// component (which a lookup of the field finds or does not).
+static bool writes(Operation *op, const SendTarget &target) {
+  if (auto set = dyn_cast<SetOp>(op)) {
+    auto type = dyn_cast<RefType>(set.getRef().getType());
+    return type && type.getComponent().getAttr() == target.owner &&
+           set.getFieldAttr() == target.field;
+  }
+  if (isa<AddOp, RemoveOp>(op))
+    if (auto component = op->getAttrOfType<FlatSymbolRefAttr>("component"))
+      return component.getAttr() == target.owner;
+  return false;
+}
+
+/// Whether `region` is work a loop can do several entities at a time: no
+/// loop, lookup, send or call out (an extern fn) in it, and only calls of
+/// fns that are such work too. (An `if` is: its stores are masked, see
+/// emitQueryBody, and LLVM makes selects of what is left.)
+static bool straightLine(Region &region,
+                         llvm::SmallPtrSetImpl<Operation *> &seen) {
+  return !region
+              .walk([&](Operation *op) {
+                if (isa<scf::ForOp, scf::WhileOp, scf::ParallelOp, EachOp,
+                        EdgesOp, LookupOp, ApplyOp, AccumulateOp>(op))
+                  return WalkResult::interrupt();
+                if (auto invoke = dyn_cast<InvokeOp>(op)) {
+                  // (The fn's body, or the function it went to already:
+                  // see declareFunction.)
+                  auto function = SymbolTable::lookupNearestSymbolFrom<FunctionOp>(
+                      invoke, invoke.getCalleeAttr());
+                  Operation *callee = function;
+                  Region *body = nullptr;
+                  if (function && !function.getBody().empty()) {
+                    body = &function.getBody();
+                  } else if (function) {
+                    auto func = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+                        invoke,
+                        StringAttr::get(invoke.getContext(), function.getCName()));
+                    if (func && !func.isExternal()) {
+                      body = &func.getBody();
+                      callee = func;
+                    }
+                  }
+                  if (!body)
+                    return WalkResult::interrupt();
+                  if (seen.insert(callee).second && !straightLine(*body, seen))
+                    return WalkResult::interrupt();
+                }
+                return WalkResult::advance();
+              })
+              .wasInterrupted();
+}
+
+static bool straightLine(QueryOp query) {
+  llvm::SmallPtrSet<Operation *, 8> seen;
+  return straightLine(query.getBody(), seen);
 }
 
 /// Whether the sends of `system`'s queries can be fused with other
@@ -12684,7 +12746,18 @@ static bool fusableSends(SystemOp system) {
 /// send that nothing else in its query sees is combined as the loop goes,
 /// with no buffer (see kUnobservedAttr), and fused it would have to go to
 /// its buffer, which costs more than the passes fusion saves.
-static bool joinsSends(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
+///
+/// And a field one looks up (of another entity) no other query of the
+/// sequence changes (sets it, adds or removes the component, or sends to
+/// it): fused, the lookup would find some entities as that query left them
+/// and others as they were, where alone it found all of them one way. (A
+/// query's own lookups and writes the verifier keeps apart.)
+///
+/// And the bodies are all straight-line or none (see straightLine).
+///
+/// And what its code outside the queries writes, or looks up, nothing
+/// before it in the sequence sees or changes (see below).
+static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
   SmallVector<QueryOp> joined(queries.begin(), queries.end());
   auto sendsOf = [](QueryOp query) {
     SmallVector<SendTarget> targets;
@@ -12705,6 +12778,26 @@ static bool joinsSends(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
         })
         .wasInterrupted();
   };
+  auto lookupsOf = [](QueryOp query) {
+    SmallVector<SendTarget> targets;
+    query.walk([&](LookupOp lookup) {
+      SendTarget target{lookup.getComponentAttr().getAttr(),
+                        lookup.getFieldAttr()};
+      if (!llvm::is_contained(targets, target))
+        targets.push_back(target);
+    });
+    return targets;
+  };
+  auto changes = [](QueryOp query, const SendTarget &target) {
+    return query
+        .walk([&](Operation *op) {
+          std::optional<SendTarget> sent = sendTargetOf(op);
+          return writes(op, target) || (sent && *sent == target)
+                     ? WalkResult::interrupt()
+                     : WalkResult::advance();
+        })
+        .wasInterrupted();
+  };
   for (QueryOp query : system.getBody().getOps<QueryOp>()) {
     for (QueryOp before : joined) {
       // What it sends, nothing else touches; what one before sends, it
@@ -12715,6 +12808,21 @@ static bool joinsSends(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
       for (const SendTarget &target : sendsOf(before))
         if (touches(query, target))
           return false;
+      for (const SendTarget &target : lookupsOf(query))
+        if (changes(before, target))
+          return false;
+      for (const SendTarget &target : lookupsOf(before))
+        if (changes(query, target))
+          return false;
+      // A loop of straight-line bodies goes several entities at a time; one
+      // with a branch in it does not, and fused with it, neither would
+      // they. So where two go through the same archetype (one loop), a
+      // straight-line body is fused with its kind only.
+      if (straightLine(query) != straightLine(before) &&
+          llvm::any_of(getMatchedArchetypes(query), [&](ArchetypeOp archetype) {
+            return llvm::is_contained(getMatchedArchetypes(before), archetype);
+          }))
+        return false;
     }
     joined.push_back(query);
   }
@@ -12737,6 +12845,42 @@ static bool joinsSends(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
     if (reads)
       return false;
   }
+  // Its code outside its queries runs ahead of every query of the
+  // sequence (see fuseRuns), and in its place among the code of the
+  // others. So what of it writes a resource or looks up another entity
+  // comes before its own queries, as it did; and no query before it in the
+  // sequence reads or accumulates into a resource it writes (that query
+  // would see the write, or its accumulate land on it), nor changes a
+  // field it looks up.
+  bool afterQuery = false;
+  for (Operation &op : system.getBody().front().without_terminator()) {
+    if (isa<QueryOp>(op)) {
+      afterQuery = true;
+      continue;
+    }
+    WalkResult result = op.walk([&](Operation *inner) {
+      if (auto write = dyn_cast<WriteOp>(inner)) {
+        if (afterQuery)
+          return WalkResult::interrupt();
+        SendTarget target{write.getResourceAttr().getAttr(),
+                          write.getFieldAttr()};
+        for (QueryOp before : queries)
+          if (touches(before, target))
+            return WalkResult::interrupt();
+      } else if (auto lookup = dyn_cast<LookupOp>(inner)) {
+        if (afterQuery)
+          return WalkResult::interrupt();
+        SendTarget target{lookup.getComponentAttr().getAttr(),
+                          lookup.getFieldAttr()};
+        for (QueryOp before : queries)
+          if (changes(before, target))
+            return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (result.wasInterrupted())
+      return false;
+  }
   queries.assign(joined.begin(), joined.end());
   return true;
 }
@@ -12751,7 +12895,8 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   rewriter.setInsertionPoint(insertionPoint);
 
   // Per run: map the system's parameters to the run's arguments and clone
-  // the system's ops outside queries, which are free of effects.
+  // the system's ops outside queries (what of them writes or looks up
+  // comes before the system's own queries: see joins).
   SmallVector<SystemOp> systems;
   SmallVector<IRMapping> mappings(runs.size());
   for (auto [run, mapping] : llvm::zip(runs, mappings)) {
@@ -12771,18 +12916,11 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   // The queries in their order. A send that nothing else in its query
   // sees (kUnobservedAttr) is combined where it is sent, in a loop that
   // visits the entities one after another, as alone: nothing else in the
-  // fused loops touches its field either (see joinsSends).
+  // fused loops touches its field either (see joins).
   SmallVector<QueryOp> queries;
   for (SystemOp system : systems)
     for (QueryOp query : system.getBody().getOps<QueryOp>())
       queries.push_back(query);
-  // Trees whose children are ordered by a field a query may write: looked
-  // over when the fused loops have run, as when each query ended.
-  llvm::SetVector<Attribute> changedRelations;
-  for (QueryOp query : queries)
-    noteOrderWrites(rewriter, query, layout, world, changedRelations,
-                    insertionPoint);
-
   // Whole numbers a parallel loop may reduce (the queries' bodies are
   // their own, with nothing sent from loops of them: see fusableSends).
   SmallVector<Operation *> reduced;
@@ -12794,6 +12932,13 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
         reduced.push_back(accumulate);
     });
   }
+
+  // Trees whose children are ordered by a field a query may write: looked
+  // over when the fused loops have run, as when each query ended.
+  llvm::SetVector<Attribute> changedRelations;
+  for (QueryOp query : queries)
+    noteOrderWrites(rewriter, query, layout, world, changedRelations,
+                    insertionPoint);
 
   // The rows each archetype has, for its loop and the sends' buffers.
   SmallVector<std::pair<const WorldArchetype *, Value>> visited;
@@ -12857,12 +13002,12 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
             !appliesDirectly(accumulate, direct.contains(archetype)))
           combineAccumulated(rewriter, accumulate, *archetype, world, count);
   }
+  for (Operation *op : reduced)
+    op->removeAttr(kReducedAttr);
   rewriter.setInsertionPoint(insertionPoint);
   for (Attribute relation : changedRelations)
     callSort(rewriter, loc, layout.getRelation(cast<StringAttr>(relation)),
              world.getArena());
-  for (Operation *op : reduced)
-    op->removeAttr(kReducedAttr);
 
   for (RunOp run : runs)
     rewriter.eraseOp(run);
@@ -12871,11 +13016,12 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
 /// Fuse every maximal sequence of runs of entity-local systems in a
 /// schedule. Stages are dissolved first: fusion subsumes them. A run of an
 /// opaque system, a run under a condition, or an op with effects in the
-/// schedule body, ends a sequence and stays where it is. So does a run of a system that writes a
-/// resource: fusion moves system-level code ahead of every query of the
-/// sequence, which would let queries see a write that follows them. A
-/// system that sends joins one where nothing else in it touches what is
-/// sent (see joinsSends); else it starts the next.
+/// schedule body, ends a sequence and stays where it is. So does a run of a
+/// system that writes a resource: fusion moves system-level code ahead of
+/// every query of the sequence, which would let queries see a write that
+/// follows them. A system that sends or looks up joins one where nothing
+/// else in it touches what is sent or changes what is looked up (see
+/// joins); else it starts the next.
 static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                          SymbolTable &symbols, const WorldLayout &layout,
                          WorldAccess &world, const LoopOptions &options) {
@@ -12911,17 +13057,16 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       // would then see some entities' updates from other systems and not
       // others', as would a later system reading what an apply combines;
       // edge loops reach other entities too, and connects sort the edges.
-      // Applies and accumulates do not end it where they can be combined
-      // after the fused loop (see joinsSends). So does a `for` over other
-      // entities in a body (an ent.each, which lowerQuery lowers before the
-      // body).
+      // So does a `for` over other entities in a body (an ent.each, which
+      // lowerQuery lowers before the body).
+      // Applies, accumulates and lookups do not end it where nothing else
+      // in the sequence touches what they send to or look up (see joins).
       bool writesResource =
           system
               .walk([](Operation *op) {
-                return isa<WriteOp, SpawnOp, DespawnOp, EachOp, LookupOp, EdgesOp,
-                           ConnectOp, AppendOp, ClearOp, BufferLenOp,
-                           BufferAtOp, BufferOfOp, BufferSetOp, BufferFillOp>(
-                           op)
+                return isa<WriteOp, SpawnOp, DespawnOp, EachOp, EdgesOp, ConnectOp,
+                           AppendOp, ClearOp, BufferLenOp, BufferAtOp,
+                           BufferOfOp, BufferSetOp, BufferFillOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -12945,17 +13090,17 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       }
       if (!conditional && !writesResource &&
           !computeAccess(system, archetypes).isOpaque()) {
-        if (joinsSends(system, fused)) {
+        if (joins(system, fused)) {
           sequence.push_back(run);
           continue;
         }
-        // It touches what the sequence sends, or the sequence what it
-        // sends: the sequence ends before it, and it starts the next one,
-        // if its own queries allow.
+        // It touches what the sequence sends or looks up, or the sequence
+        // what it does: the sequence ends before it, and it starts the
+        // next one, if its own queries allow.
         fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
         sequence.clear();
         fused.clear();
-        if (joinsSends(system, fused))
+        if (joins(system, fused))
           sequence.push_back(run);
         else
           fused.clear();
@@ -14498,6 +14643,9 @@ struct EntLowerToLoops
       for (const WorldRelation &relation : layout->relations)
         callSort(rewriter, func.getLoc(), relation, arena);
       guardSchedule(rewriter, func, condition);
+      // (What the fused loops look up.)
+      if (fuseSystems)
+        lowerLookups(rewriter, func, *layout, world);
       lowerResourceAccesses(rewriter, func, world);
     }
 
