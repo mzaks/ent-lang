@@ -326,9 +326,9 @@ system decide() {
   let honey = Hive.honey / Hive.decent_honey
   let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, DECIDE))
   for d: mut Draws, s: Squadron {
-    let draw = key_of(occasion, s.number)
-    d.pollen = uniform(draw, 0)
-    d.start = uniform(draw, 5)
+    let draw = key_of_lanes(occasion, s.number)
+    d.pollen = uniform_lanes(draw, 0)
+    d.start = uniform_lanes(draw, 5)
   }
   for a: mut Activity, k: mut Known, m: Milage, d: Draws, s: Squadron {
     let draw = key_of(occasion, s.number)
@@ -423,7 +423,7 @@ system search() {
 system shuffle_recruits() {
   let occasion = key(RandomSeed.seed, 0, Clock.tick, stream(Day.round, SHUFFLE_RECRUITS))
   for a: Activity, s: mut Squadron {
-    s.order = if a.now == Doing.Recruited { order(key_of(occasion, s.number), 0) } else { LAST }
+    s.order = if a.now == Doing.Recruited { order_lanes(key_of_lanes(occasion, s.number), 0) } else { LAST }
   }
 }
 
@@ -592,7 +592,7 @@ system rest_in_line() {
   for a: Activity, s: mut Squadron {
     let busy = a.now == Doing.Resting || a.now == Doing.BringNectar ||
                a.now == Doing.BringPollen
-    s.order = if busy { order(key_of(occasion, s.number), 0) } else { LAST }
+    s.order = if busy { order_lanes(key_of_lanes(occasion, s.number), 0) } else { LAST }
   }
 }
 

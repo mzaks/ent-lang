@@ -12,7 +12,15 @@
 // beecs draws from one stream, one number after another, and shuffles
 // lists with it; here an order at random is a number at random for each
 // entity, which a `for ... in turn by` goes by.
+//
+// The numbers are wyrand's (devices/wyhash.ent): one multiply to 128
+// bits each. A loop that runs on eight squadrons at a time (no branch in
+// it) draws with SplitMix64's mix instead (`key_of_lanes`,
+// `uniform_lanes`, `order_lanes`), whose multiplies keep the low 64 bits
+// and so are done eight at once; wyrand's are not, and would make it a
+// loop of one.
 import math
+import wyhash
 
 // A whole number's bits stirred (SplitMix64's last step).
 fn mix(x: u64) -> u64 {
@@ -31,12 +39,20 @@ fn key(seed: i64, who: i32, day: i32, stream: i32) -> u64 {
 }
 
 // The key of one of many who draw on an occasion: the occasion's key
-// worked out once (`key(seed, 0, day, stream)`), and each one's of it
-// with one more stir.
-fn key_of(occasion: u64, who: i32) -> u64 { mix(occasion ^ (who as i64 as u64)) }
+// worked out once (`key(seed, 0, day, stream)`), and each one's the
+// who-th number of it stirred (not the occasion's own who-th number).
+fn key_of(occasion: u64, who: i32) -> u64 {
+  wyrand(occasion ^ 0x4b33a62ed433d4a3, who as i64)
+}
 
 // The n-th number of an occasion: from 0 to below 1, as Go's Float64.
-fn uniform(key: u64, n: i32) -> f64 {
+fn uniform(key: u64, n: i32) -> f64 { wyrand_unit(key, n as i64) }
+
+// The same two for a loop that runs on eight at a time, by SplitMix64.
+fn key_of_lanes(occasion: u64, who: i32) -> u64 {
+  mix(occasion ^ (who as i64 as u64))
+}
+fn uniform_lanes(key: u64, n: i32) -> f64 {
   let bits = mix(key + (n as i64 as u64) * 0xd1342543de82ef95)
   (bits >> 11) as f64 / 9007199254740992.0
 }
@@ -51,6 +67,12 @@ fn below(key: u64, n: i32, count: i32) -> i32 {
 // such numbers, two have the same about once in 20 orders, and go in
 // the order they are stored in).
 fn order(key: u64, n: i32) -> i64 {
+  (wyrand(key, n as i64) >> 32) as i64
+}
+
+// The same for a loop that runs on eight at a time (of a key of
+// `key_of_lanes`), by SplitMix64.
+fn order_lanes(key: u64, n: i32) -> i64 {
   (mix(key + (n as i64 as u64) * 0xd1342543de82ef95) >> 32) as i64
 }
 

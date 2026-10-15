@@ -33,7 +33,10 @@ days spread as beecs's do.
   the purpose. beecs draws from one stream and shuffles lists with it;
   here an order at random is a random number for each squadron, which a
   `for ... in turn by` goes by. So a run is the same on one core and on
-  all of them, to the bit.
+  all of them, to the bit. The numbers are wyrand's (`import wyhash`, one
+  multiply to 128 bits each), but in the loops that run on eight
+  squadrons at a time SplitMix64's, whose multiplies are done eight at
+  once.
 - `claims.ent`: a round without turns (`Variant.Claims true` in
   parameters.txt): where beecs has the squadrons go one after another
   (taking loads from a patch, following dances), here they ask all at
@@ -69,16 +72,17 @@ out, as many lost (Fisher at 1%). Six scenarios agree in all of it:
 `years` (three years, the weather of 2000 to 2002), `seasonal` (two
 patches whose flowers follow the season), `scarce` (two small patches
 that run out within a day) and `lean` (a small, poor colony with one far
-patch, two years, ending where it dies out). `default`, `seasonal` and `lean` also
-agree over 400 seeds; on `lean` 21 of 400 colonies die out in beecs and
-18 in the model.
+patch, two years, ending where it dies out). All six also agree over 400
+seeds (where a test or two at 1% is off in one of them, it agrees over
+another 800, `--first 1001`); on `lean` 21 of 400 colonies die out in
+beecs and 17 in the model.
 
 ## Timings
 
 `bench/beecs/run.py`, in `bench/beecs/RESULTS.md`, on one core: a year of
-the defaults takes 24 ms for both; with every forager an entity of its own
-(squadrons of one bee, 10,000 to 20,000 entities) 1.08 s where beecs takes
-1.50. Without turns (below) 11 ms and 0.64 s.
+the defaults takes 20 ms where beecs takes 23; with every forager an
+entity of its own (squadrons of one bee, 10,000 to 20,000 entities) 1.06 s
+where beecs takes 1.51. Without turns (below) 10 ms and 0.60 s.
 
 What a round costs is the work for each squadron (numbers at random,
 which of its states it is in), not memory: the squadrons are some
@@ -87,7 +91,8 @@ loop goes through all of them:
 
 - A number at random is drawn where it is asked for, not before, and
   those every squadron draws, in a loop of their own, which goes eight at
-  a time (`Draws`).
+  a time (`Draws`). wyrand's numbers (one multiply each) everywhere but
+  in such loops, where SplitMix64's multiplies are done eight at once.
 - What is the same for all who go to a patch is worked out once for the
   patch (the chance to give it up, a dance's chance to lead none).
 - A value is sent to a field, or rows given to a buffer, from one place
@@ -125,7 +130,7 @@ these steps without turns:
 It agrees with beecs as the model with turns does (`check/curves.py
 --claims`: `years` over 100 seeds, the others over 400, `seasonal` and
 `scarce` also over 800), and is faster on one core: a year of the
-defaults takes 11 ms, with squadrons of one bee 0.64 s (with turns 1.08).
+defaults takes 10 ms, with squadrons of one bee 0.60 s (with turns 1.06).
 On all cores it
 gains nothing at these sizes: a round's loops over some 8,500 squadrons
 are too little work to share out.

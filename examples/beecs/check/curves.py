@@ -2,9 +2,10 @@
 """Holds the ent-lang model's days against beecs's, over many seeds.
 
   examples/beecs/reference/fetch.sh        once: beecs, built, and its weather
-  python3 examples/beecs/check/curves.py [scenario] [--seeds N] [--claims]
+  python3 examples/beecs/check/curves.py [scenario] [--seeds N] [--first S] [--claims]
 
-Both are run for seeds 1 to N (100 by default) with the same parameters
+Both are run for seeds S to S + N - 1 (1 to 100 by default; another S
+for a sample of its own) with the same parameters
 (the scenario's, written as beecs's JSON for the reference and as a
 parameters.txt for the model). The two cannot give the same numbers for a
 seed, since they draw theirs differently; what is held is that they give
@@ -155,17 +156,17 @@ def parse(text):
     return {seed: np.array(rows) for seed, rows in runs.items()}
 
 
-def run_reference(parameters, seeds, work):
+def run_reference(parameters, seeds, first, work):
     path = os.path.join(work, "reference.json")
     with open(path, "w") as f:
         json.dump(beecs_json(parameters), f)
-    out = subprocess.run([REFERENCE, "-params", path, "-from", "1", "-to", str(seeds)],
+    out = subprocess.run([REFERENCE, "-params", path, "-from", str(first), "-to", str(first + seeds - 1)],
                          cwd=os.path.dirname(WEATHER), capture_output=True, text=True,
                          check=True)
     return parse(out.stdout)
 
 
-def run_model(parameters, seeds, work, claims):
+def run_model(parameters, seeds, first, work, claims):
     program = os.path.join(work, "model")
     subprocess.run([sys.executable, os.path.join(ROOT, "tools", "ent"), "build", PROGRAM,
                     "-o", program], check=True, env=dict(os.environ,
@@ -185,7 +186,7 @@ def run_model(parameters, seeds, work, claims):
 
     runs = {}
     with ThreadPoolExecutor(os.cpu_count()) as pool:
-        for result in pool.map(one, range(1, seeds + 1)):
+        for result in pool.map(one, range(first, first + seeds)):
             runs.update(result)
     return runs
 
@@ -205,6 +206,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", nargs="?", default="default", choices=SCENARIOS)
     parser.add_argument("--seeds", type=int, default=100)
+    parser.add_argument("--first", type=int, default=1)
     parser.add_argument("--claims", action="store_true")
     args = parser.parse_args()
     if not os.path.exists(REFERENCE):
@@ -212,8 +214,8 @@ def main():
     parameters = SCENARIOS[args.scenario]
 
     with tempfile.TemporaryDirectory(dir=BUILD) as work:
-        reference = run_reference(parameters, args.seeds, work)
-        model = run_model(parameters, args.seeds, work, args.claims)
+        reference = run_reference(parameters, args.seeds, args.first, work)
+        model = run_model(parameters, args.seeds, args.first, work, args.claims)
     days = max(max(len(r) for r in reference.values()), max(len(r) for r in model.values()))
     ref = stack(reference, days)
     mod = stack(model, days)
@@ -221,7 +223,8 @@ def main():
     mod_days = [len(r) for r in model.values()]
 
     print(f"scenario {args.scenario}{', without turns' if args.claims else ''}, "
-          f"{args.seeds} seeds each, {days} days")
+          f"{args.seeds} seeds each"
+          f"{f' from {args.first}' if args.first != 1 else ''}, {days} days")
     lost_ref = sum(1 for d in ref_days if d < days)
     lost_mod = sum(1 for d in mod_days if d < days)
     if lost_ref + lost_mod > 0:

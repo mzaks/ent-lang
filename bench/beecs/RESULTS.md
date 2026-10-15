@@ -211,3 +211,53 @@ are fused on one core and functions are internal, which weigh most where
 systems do little (which of the two gave how much was not measured). With
 squadrons of 1 it is as it was: 1,092 ms with turns, 636 without, where
 beecs takes 1,524.
+
+## 2026-10-15, wyrand
+
+`python3 bench/beecs/run.py --seeds 9 --claims`: as before, one core,
+with the numbers at random of wyrand (`import wyhash`, one multiply to
+128 bits, `mul_wide`) where SplitMix64's mix was (two multiplies, three
+shifts), but in the loops that run on eight squadrons at a time.
+
+| squadron size | | a year | memory |
+|---|---|---|---|
+| 100 | beecs (Go), one core | 23.0 ms | 17 MB |
+|  | model, one core | 19.5 ms | 19 MB |
+|  | without turns, one core | 10.1 ms | 21 MB |
+| 10 | beecs (Go), one core | 158.8 ms | 17 MB |
+|  | model, one core | 113.5 ms | 19 MB |
+|  | without turns, one core | 65.2 ms | 21 MB |
+| 1 | beecs (Go), one core | 1,510.2 ms | 17 MB |
+|  | model, one core | 1,061.4 ms | 19 MB |
+|  | without turns, one core | 603.7 ms | 21 MB |
+
+With squadrons of 1, 1,061 ms where 1,092 with turns, 604 where 636
+without (beecs 1,510 where 1,524). Each a whole year of one seed, the
+median of 7 on CPU 2, seed 2:
+
+| numbers at random | without turns | with turns |
+|---|---|---|
+| SplitMix64 | 630 ms | 1,086 ms |
+| SplitMix64, each mixed twice | 755 | 1,201 |
+| wyrand everywhere | 647 | |
+| wyrand, SplitMix64 in `Draws` (`decide`) | 598 | 1,077 |
+| ... and in the two shuffles of the turns | 601 | 1,053 |
+| ... and lowbias32 (32 bits) in `Draws` | 602 | 1,078 |
+
+- Mixing a second time costs some 125 ms: drawing is a fifth of the year
+  without turns.
+- wyrand everywhere is slower: the loop that draws for every squadron
+  (`Draws`), which ran on eight at once with SplitMix64's multiplies to
+  the low 64 bits (`vpmullq`), runs on one at a time, there being no
+  vector multiply to the high 64 bits; `decide` took some 240 ms where
+  215. Elsewhere wyrand gains.
+- The shuffles of the turns (`shuffle_recruits`, `rest_in_line`) are
+  such loops too. Without turns they do not run, and the 3 ms there come
+  from where the code lies.
+- A mix of 32 bits (lowbias32) in `Draws`, on sixteen at once, gains
+  nothing more: that loop is not held up by its multiplies.
+
+The model holds against beecs as before (check/curves.py, 400 seeds each,
+both ways, all six scenarios); two tests that were off at 1% there
+(`small` without turns, in-hive workers; `scarce` with turns, honey) agree
+over seeds 1001 to 1800 and over 800 seeds.
