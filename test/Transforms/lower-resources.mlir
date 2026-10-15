@@ -56,21 +56,47 @@ ent.system @drift() reads [@Clock] writes [@P] {
   }
 }
 
-// A system that writes a resource ends a fused sequence: the two drifts
-// are lowered on either side of it, advance stays a call, and dt is loaded
-// again after the call rather than reused.
+// A system that writes a resource before its query is fused where no
+// query before it reads what it writes: the drifts read dt, advance writes
+// frame. Its write moves ahead of the loop, and each entity drifts,
+// advances and drifts in one pass.
 // FUSED-LABEL: func.func @frame(
-// FUSED:       memref.load {{.*}} : memref<1xf32>
-// FUSED-NEXT:  scf.for
-// FUSED:       scf.if
-// FUSED:       call @advance(
-// FUSED-NOT:   scf.
-// FUSED:       memref.load {{.*}} : memref<1xf32>
-// FUSED-NEXT:  scf.for
+// FUSED-NOT:   call @advance(
+// FUSED:       arith.addi
+// FUSED:       memref.store {{.*}} : memref<1xi64>
+// FUSED:       scf.for
+// FUSED:         arith.subf
+// FUSED:         arith.addf
+// FUSED:         arith.subf
 // FUSED:       scf.if
 // FUSED:       return
 ent.schedule @frame() {
   ent.run @drift()
   ent.run @advance()
   ent.run @drift()
+}
+
+// One that reads what a later system writes, before its loop, ends the
+// sequence there: `tick` reads frame, which `advance` writes, so advance
+// starts the next sequence, after tick's loop.
+ent.system @tick() reads [@Clock] writes [@P] {
+  ent.query (%p: !ent.ref<@P, mut>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
+    %f = ent.read @Clock "frame" : i64
+    %ff = arith.sitofp %f : i64 to f32
+    %n = arith.mulf %x, %ff : f32
+    ent.set %p "x", %n : !ent.ref<@P, mut>, f32
+  }
+}
+// FUSED-LABEL: func.func @counted(
+// FUSED:       scf.for
+// FUSED:         arith.mulf
+// FUSED:       arith.addi
+// FUSED:       memref.store {{.*}} : memref<1xi64>
+// FUSED:       scf.for
+// FUSED:         arith.addf
+// FUSED:       return
+ent.schedule @counted() {
+  ent.run @tick()
+  ent.run @advance()
 }

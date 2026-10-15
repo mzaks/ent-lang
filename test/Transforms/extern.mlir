@@ -89,10 +89,14 @@ ent.extern @beep()
 // CHECK:      call @ent_beep(
 // CHECK-NEXT: call @ent_sort_Follows(%[[ARENA]])
 
-// An extern system has no body to fuse; the systems around it still are.
+// An extern system has no body to fuse; the systems around it still are:
+// move, and tick, which only writes the clock (ahead of move's loop, which
+// does not read it).
 // FUSED-LABEL: func.func @frame(
+// FUSED-NOT:  call @tick(
+// FUSED:      memref.store {{.*}} : memref<1xi64>
 // FUSED:      scf.for
-// FUSED:      call @tick(
+// FUSED-NOT:  call @tick(
 // FUSED:      call @ent_draw(
 
 // With stages in parallel a run stays one op of its section.

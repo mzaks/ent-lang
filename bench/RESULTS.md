@@ -3217,3 +3217,34 @@ and the integrate frame keeps its gain (fused 117 ns where unfused 143 at
   rule). Systems that look up are kept apart by more than their lookups:
   writes of uniques, buffers, conditions, or a neighbour that changes what
   they look up.
+
+## 2026-10-15: fusing systems that write resources
+
+A system that writes resources outside its queries is fused where that code
+comes before its queries and nothing before it in the sequence reads or
+accumulates into what it writes (or changes what it looks up there). Over
+the examples 191 systems fuse where 134 did: the epidemic 15 of 46 (6),
+Doom 8 of 93 (3), beecs 15 of 55 (6). Fused builds give the unfused
+builds' output to the bit: beecs both ways and the epidemic on one core and
+on all, and every program of test/Integration/Inputs that runs by itself
+(85; `window_resize` differs from run to run unfused too).
+
+It is not faster: the epidemic at a million people takes 2.01 s fused
+where 1.99 unfused (all cores 1.92 where 1.89), beecs 624 ms where 617.
+What fuses now are mostly systems with no `for` or a cheap one.
+
+Two faults of fusion turned up on the way, both since fusion was built
+(with --parallel; on one core since e9b86a5), and fixed:
+
+- A query that writes the field a tree's children are ordered by
+  (`Slot.at` in examples/layout.ent) marks the tree to be sorted when it
+  ends; fused, nothing sorted it. layout.test found it once `change`, which
+  writes a resource, could be fused.
+- A `for` with a `for` over other entities in its body was fused without
+  its inner loop lowered, and the compiler failed. Such a system is not
+  fused now (fuse_inner_for.test).
+
+What still keeps systems with a query apart (230 runs over the examples, a
+run may have several): they cannot be analysed (98; on their own: 16),
+read a buffer (67; 3), run under a condition (49; 14), spawn or destroy
+(47; 1), move entities between archetypes (39), write a buffer (37).

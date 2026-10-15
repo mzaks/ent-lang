@@ -13016,12 +13016,10 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
 /// Fuse every maximal sequence of runs of entity-local systems in a
 /// schedule. Stages are dissolved first: fusion subsumes them. A run of an
 /// opaque system, a run under a condition, or an op with effects in the
-/// schedule body, ends a sequence and stays where it is. So does a run of a
-/// system that writes a resource: fusion moves system-level code ahead of
-/// every query of the sequence, which would let queries see a write that
-/// follows them. A system that sends or looks up joins one where nothing
-/// else in it touches what is sent or changes what is looked up (see
-/// joins); else it starts the next.
+/// schedule body, ends a sequence and stays where it is. A system that
+/// sends, looks up, or writes a resource outside its queries joins one
+/// where that changes nothing (see joins: fusion moves system-level code
+/// ahead of every query of the sequence); else it starts the next.
 static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                          SymbolTable &symbols, const WorldLayout &layout,
                          WorldAccess &world, const LoopOptions &options) {
@@ -13060,11 +13058,12 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       // So does a `for` over other entities in a body (an ent.each, which
       // lowerQuery lowers before the body).
       // Applies, accumulates and lookups do not end it where nothing else
-      // in the sequence touches what they send to or look up (see joins).
+      // in the sequence touches what they send to or look up, nor resource
+      // writes where nothing before them sees what they write (see joins).
       bool writesResource =
           system
               .walk([](Operation *op) {
-                return isa<WriteOp, SpawnOp, DespawnOp, EachOp, EdgesOp, ConnectOp,
+                return isa<SpawnOp, DespawnOp, EachOp, EdgesOp, ConnectOp,
                            AppendOp, ClearOp, BufferLenOp, BufferAtOp,
                            BufferOfOp, BufferSetOp, BufferFillOp>(op)
                            ? WalkResult::interrupt()

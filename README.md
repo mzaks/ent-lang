@@ -878,10 +878,16 @@ different archetypes share no columns. Two consequences the lowering uses:
   archetype holding every matching query body in program order. This is
   legal for any sequence of systems without other effects, conflicting or
   not: running all bodies for one entity before the next gives the same
-  result as running each query to completion. A system that writes a
-  resource ends a fused sequence, because fusion moves system-level code
-  ahead of the queries. So does a run under a condition, which runs as a
-  whole or not at all, and a system with edge loops or connects. A system
+  result as running each query to completion. Fusion moves system-level
+  code ahead of the queries: a system that writes a resource, or looks up
+  an entity, outside its queries joins a sequence where that code comes
+  before its own queries and no query before it in the sequence reads or
+  accumulates into what it writes, or changes what it looks up; else it
+  starts the next. A run under a condition, which runs as a whole or not
+  at all, ends a sequence, and so does a system with edge loops, connects
+  or a `for` over other entities in a body. A tree whose children are
+  ordered by a field a fused query writes is sorted after the fused loops,
+  as after the query. A system
   with lookups is fused where nothing else in the sequence changes what it
   looks up (sets the field, adds or removes the component, sends to it):
   else a lookup would find some entities changed and others not. And where
