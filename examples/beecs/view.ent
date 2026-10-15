@@ -91,6 +91,9 @@ system ended() {
   Pace.ended = (Termination.max_ticks > 0 && Clock.tick >= Termination.max_ticks) ||
                !Run.weather ||
                (Termination.on_extinction && Population.total_population == 0)
+  // (Steps this frame would still have taken are not: else the frames
+  // after the end, which wait for none to be left, never come.)
+  if Pace.ended { Pace.left = 0 }
 }
 
 // --- the year so far -----------------------------------------------------
@@ -378,15 +381,17 @@ system numbers() {
           18.0, 0xff7b72)
     label("build/beecs/run: start the program there.", 30.0, 78.0, 18.0, 0xff7b72)
   }
-  label("day {Clock.tick + 1}", x0, 18.0, 30.0, BRIGHT)
-  let what = if Phase.now == 1 { "foraging, round {Day.round + 1}" }
+  // (After the last day the clock has gone on to the next.)
+  let day = if Pace.ended { Clock.tick } else { Clock.tick + 1 }
+  label("day {day}", x0, 18.0, 30.0, BRIGHT)
+  let what = if Pace.ended { "the end of the run" }
+             else if Pace.paused { "stopped" }
+             else if Phase.now == 1 { "foraging, round {Day.round + 1}" }
              else if Day.forage || Phase.now == 0 { "in the hive" }
              else { "no foraging today" }
-  label(what, x0 + 130.0, 30.0, 16.0, SOFT)
+  label(what, x0 + 130.0, 30.0, 16.0, if Pace.ended || Pace.paused { 0xff7b72 } else { SOFT })
   label("seed {RandomSeed.seed}, squadrons of {Foragers.squadron_size}",
         x0, 62.0, 14.0, DIM)
-  if Pace.ended { label("the end", x0 + 280.0, 62.0, 14.0, 0xff7b72) }
-  else if Pace.paused { label("stopped", x0 + 280.0, 62.0, 14.0, 0xff7b72) }
   // Today's numbers.
   let y = Charts.bottom + 30.0
   count("eggs", Population.worker_eggs, EGGS, x0, y)
