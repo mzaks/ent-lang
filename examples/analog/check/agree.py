@@ -33,7 +33,10 @@ def slow(name):
     """A crossbar left out unless named: by relaxation hours long (of 64 by
     64 and up, or of 16 by 16 with resistance in its wires whose states
     move: written, or of Yakopcic's, at 20,000 time points), or not
-    settling in a million rounds at a pulse's edge (wires under 1 ohm)."""
+    settling in a million rounds at a pulse's edge (wires under 1 ohm)); and
+    the IBM power grids, check 7's."""
+    if name.startswith("ibmpg"):
+        return True
     if not name.startswith("crossbar_"):
         return False
     size, wire, model, scenario = name.split("_")[1:5]

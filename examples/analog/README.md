@@ -6,16 +6,25 @@ time, node voltage by node voltage, to give the waveforms that
 then to be faster than ngspice and Xyce on large memristor crossbars by
 relaxation, every node solving for its own voltage. `analog-SPEC.md`
 says what it is to be and in which milestones. It is being built in
-steps; what is here is milestones M0 to M4: a circuit is read, and its
+steps, and still in progress: M5 is not finished (see "Not here yet").
+What is here is milestones M0 to M5: a circuit is read, and its
 operating point and its waves in time (the trapezoidal rule, steps
 chosen by their error) are solved three ways, with memristors of three
-models whose states move, and the three ways agree with each other and
-with ngspice.
+models whose states move, and the three ways agree with each other, with
+ngspice and with Xyce; the IBM power grids come out as published; and
+`bench/analog` times it all against ngspice and Xyce.
 
 - `prepare.py`: a SPICE netlist made flat into `circuit.net`, the form
   the model reads (spec section 4), and the same flat circuit as a deck
-  for ngspice, so both simulate the same elements with the same
-  numbers. SPICE's suffixes are worked out as powers of ten (10u is the
+  for ngspice and one for Xyce (`circuit.xyce`, where Xyce has the
+  memristors' model built in: Yakopcic's), so all simulate the same
+  elements with the same numbers. A voltage source of 0 V DC whose
+  current is not probed (a via of a power grid, a crossbar's row held at
+  0) makes its two nodes one (`merged.txt` says which names went where),
+  but for ngspice, which is given the sources back (at tight tolerances
+  its steps shrink to nothing where a device switches in a crossbar
+  whose rows are made ground: 600 s where with them it takes 2);
+  a circuit with no probes and no `tran` shows every node. SPICE's suffixes are worked out as powers of ten (10u is the
   f64 nearest 1e-5), and every number is written with as few digits as
   give the same f64.
 - `circuit.ent`: the flat netlist read. Every node is an entity with its
@@ -24,6 +33,9 @@ with ngspice.
   and two edges of `Touches`. Numbers are read as the f64 nearest them:
   up to 19 digits as a whole number, scaled by the power of ten with
   twice an f64's precision.
+- `fetch.sh`: the IBM power grids ibmpg1 to ibmpg6 (Nassif 2008) and
+  their published solutions, from the mirror at UC Santa Barbara, into
+  `build/analog`.
 - `crossbar.py`: an N by N crossbar of memristors, with or without
   resistance in its wires, its memristors' first states and parameters
   drawn from a seed (spec section 9.2).
@@ -106,6 +118,10 @@ examples/analog/check/exact.py
 examples/analog/check/agree.py
 examples/analog/check/spice.py
 examples/analog/check/same.py
+examples/analog/check/xyce.py             # crossbars of Yakopcic's devices
+examples/analog/fetch.sh && examples/analog/prepare.py ibmpg1 ibmpg2 ibmpg3 ibmpg4 ibmpg5 ibmpg6
+examples/analog/check/grid.py ways=0
+python3 bench/analog/run.py               # bench/analog/RESULTS.md
 
 cd build/analog/circuits/divider          # one, by hand: way 1
 echo 1 > run.txt
@@ -209,9 +225,21 @@ relaxing between lines, is what it suggests next.
 
 ## Not here yet
 
+- M5 is not finished. The spice check (check 3) was last run in full
+  before ngspice was given the 0 V sources back; since then 25 circuits
+  agreed with it and it was stopped. Three crossbars written, of
+  Yakopcic's devices, that M4 did not have (16 by 16 with 0 and 10 ohm
+  wires, 256 by 256 with none) ngspice does not finish in 600 s at its
+  tight tolerances, even with the sources; check 3 says so and leaves
+  them out. The written crossbars do not hold to 1e-2 of a range in the
+  benchmarks, Xyce included (bench/analog/RESULTS.md), and the 256 ones
+  with wires are past 600 s for all.
 - Way 0's floating sources are done; the relaxation ways refuse them.
-- The deck for Xyce, and `fetch.sh` for the IBM power grids: with M5,
-  when Xyce is installed.
+- Xyce has no Biolek and no VTEAM built in, and its Verilog-A plugins
+  need ADMS, which the package installed has not: check 5 and the
+  benchmarks are of Yakopcic's devices only. Xyce in parallel needs a
+  build with MPI.
+- The transient IBM grids (ibmpg1t to ibmpg6t).
 - A capacitor's `IC=` is kept, and how it is used (ngspice uses it only
   with `.tran ... uic`) is settled in M2.
 - `v(a,b)` probes; a probe is a node's voltage or a device's current.

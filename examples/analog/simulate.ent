@@ -42,11 +42,11 @@ capacity Node 2200000
 capacity Two 3300000
 capacity Touches 6600000
 capacity Lines 3300000
-capacity Numbers 12000000
+capacity Numbers 16000000
 capacity Nodes 2200000
 capacity Devices 3300000
 capacity Points 1000000
-capacity Probes 100000
+capacity Probes 2200000
 capacity Entries 24000000
 capacity Solution 2300000
 

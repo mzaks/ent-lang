@@ -53,6 +53,7 @@ import common
 
 SHARE = 50
 MODELS = os.path.join(common.ROOT, "build", "analog", "models")
+TIMEOUT = 600
 
 
 def models():
@@ -87,8 +88,15 @@ def spice(name, net):
         shutil.copy(os.path.join(MODELS, model), folder)
     with open(os.path.join(folder, "circuit.cir"), "w") as file:
         file.write(deck)
-    said = subprocess.run(["ngspice", "-b", "circuit.cir"], capture_output=True, text=True,
-                          cwd=folder, timeout=600)
+    try:
+        said = subprocess.run(["ngspice", "-b", "circuit.cir"], capture_output=True, text=True,
+                              cwd=folder, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # (At these tolerances ngspice's steps can shrink to nothing where a
+        # device switches: the 16 by 16 crossbar of Yakopcic's, written
+        # with no resistance in its wires. Such a circuit is said and left
+        # out, as check 5 leaves out what Xyce does not finish.)
+        return None, None
     path = os.path.join(folder, "spice.txt")
     if not os.path.exists(path):
         return None, said.stdout[-500:] + said.stderr[-500:]
@@ -107,12 +115,16 @@ def main():
     names = sys.argv[1:] or sorted(os.listdir(common.CIRCUITS))
     program = common.build()
     models()
-    failed = checked = 0
+    failed = checked = left = 0
     for name in names:
         net = common.Netlist(name)
         if net.nodes > 600:
             continue
         theirs, why = spice(name, net)
+        if theirs is None and why is None:
+            left += 1
+            print(f"{name}: ngspice not done in {TIMEOUT} s, left out")
+            continue
         if theirs is None:
             failed += 1
             print(f"{name}: ngspice gave nothing: {why}")
@@ -165,7 +177,7 @@ def main():
             else:
                 report.append(f"way {way} within {worst:.1e} of the range")
         print(f"{name}: {points} time points; " + "; ".join(report))
-    print(f"{checked} circuits held against ngspice, {failed} not as it")
+    print(f"{checked} circuits held against ngspice, {failed} not as it, {left} left out")
     failed += pinched(program)
     return 1 if failed else 0
 

@@ -138,7 +138,10 @@ system taken() {
     }
     m.w = w
   }
-  Direct.settled = !Direct.failed && Moved.nodes == 0
+  // (With no memristor the circuit is linear: the matrix does not hang on
+  // the voltages, a second step would solve the same again, and on a
+  // power grid of 850,000 nodes it takes half a minute.)
+  Direct.settled = !Direct.failed && (Moved.nodes == 0 || Circuit.memristors == 0)
 }
 
 // The currents through the devices from a to b, for the probes.

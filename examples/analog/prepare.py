@@ -264,9 +264,67 @@ class Circuit:
         else:
             raise Wrong(f"{first}, which is not done")
 
+    def shorted(self):
+        """Every source of 0 V DC whose current is not probed made one node
+        of its two (a via of a power grid): the node it holds is the other.
+        Ground stays ground; the nodes are numbered anew in their order,
+        and `self.merged` says, of each name that is gone, its node."""
+        probed = {what.lower() for kind, what in self.probes if kind == "i"}
+        root = list(range(len(self.names)))
+
+        def find(k):
+            while root[k] != k:
+                root[k] = root[root[k]]
+                k = root[k]
+            return k
+        kept, dropped = [], []
+        for device in self.devices:
+            kind, name, a, b, numbers = device
+            if kind == "V" and numbers == ["dc", 0.0] and name.lower() not in probed:
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    root[max(ra, rb)] = min(ra, rb)
+                    dropped.append((a, b))
+                    continue
+            kept.append(device)
+        self.merged = {}
+        self.whole = self.restored = None
+        if len(kept) == len(self.devices):
+            return
+        number = {}
+        names = []
+        for k, name in enumerate(self.names):
+            if find(k) == k:
+                number[k] = len(names)
+                names.append(name)
+        for k, name in enumerate(self.names):
+            if find(k) != k:
+                self.merged[name] = number[find(k)]
+        # (ngspice is given the circuit as it was: at tight tolerances its
+        # steps shrink to nothing where a device switches in a crossbar
+        # whose rows held at 0 V are made ground, 600 s where with the
+        # sources it takes 2. A node that is gone is numbered after the
+        # others, and its source is put back.)
+        whole = dict(number)
+        for k in range(len(self.names)):
+            if find(k) != k:
+                whole[k] = len(whole)
+        self.whole = [(whole[a], whole[b]) for _, _, a, b, _ in kept]
+        self.restored = [(whole[a], whole[b]) for a, b in dropped]
+        self.nodes = {name: number[find(k)] for k, name in enumerate(self.names)}
+        self.names = names
+        self.devices = [(kind, name, number[find(a)], number[find(b)], numbers)
+                        for kind, name, a, b, numbers in kept]
+        self.named = {name.lower(): k for k, (_, name, _, _, _) in enumerate(self.devices)}
+
     def settle(self):
         """What can only be worked out with the whole circuit: the probes,
         and the waveforms' defaults that SPICE takes from the .tran."""
+        self.shorted()
+        # (A circuit with nothing to print and no time, a power grid, shows
+        # every node: its operating point is what it is for.)
+        if not self.probes and not self.tran:
+            self.probes = [("v", name) for name in self.names[1:]]
         probes = []
         for kind, what in self.probes:
             what = what.lower()
@@ -338,6 +396,8 @@ class Circuit:
         lines = [title]
         models = {}
         for index, (kind, name, a, b, numbers) in enumerate(self.devices):
+            if self.whole:
+                a, b = self.whole[index]
             if kind in "RC":
                 lines.append(f"{kind}{index} {a} {b} {text(numbers[0])}" +
                              (f" IC={text(numbers[1])}" if kind == "C" else ""))
@@ -355,6 +415,8 @@ class Circuit:
                     lines.append(f".model {models[key]} {model} " +
                                  " ".join(f"{n}={text(v)}" for n, v in zip(names, given)))
                 lines.append(f"N{index} {a} {b} {models[key]}")
+        for index, (a, b) in enumerate(self.restored or []):
+            lines.append(f"VS{index} {a} {b} DC 0")
         if self.op:
             lines.append(".op")
         if self.tran:
@@ -383,6 +445,73 @@ class Circuit:
         return "\n".join(lines) + "\n"
 
 
+    def xyce(self, title):
+        """The flat circuit for Xyce, where it can run it: every memristor
+        of a model Xyce has built in (XYCE_MODELS: of ours, Yakopcic's, its
+        level 3; it has no Biolek and no VTEAM), with the same numbers; and
+        either a `tran`, or a voltage source of DC whose sweep over its one
+        value is the operating point (Xyce writes an `.op` to its log only).
+        None where it cannot. The waves go to xyce.txt: a line for each
+        time point, the time (at an operating point nothing) and the probes."""
+        if any(kind == "M" and numbers[0] not in XYCE_MODELS
+               for kind, _, _, _, numbers in self.devices):
+            return None
+        lines = [title]
+        models = {}
+        swept = None
+        for index, (kind, name, a, b, numbers) in enumerate(self.devices):
+            if kind in "RC":
+                # (A capacitor's IC= is not used, here as in the model.)
+                lines.append(f"{kind}{index} {a} {b} {text(numbers[0])}")
+            elif kind in "VI":
+                shape, given = numbers
+                body = f"DC {text(given)}" if shape == "dc" else \
+                    shape.upper() + "(" + " ".join(text(n) for n in given) + ")"
+                lines.append(f"{kind}{index} {a} {b} {body}")
+                if swept is None and kind == "V" and shape == "dc":
+                    swept = (index, given)
+            else:
+                model, given = numbers
+                level, names, state = XYCE_MODELS[model]
+                values = dict(zip([n for n, _ in parameters(model)], given))
+                key = (model, tuple(given[:-1]))
+                if key not in models:
+                    models[key] = f"{model}_{len(models)}"
+                    lines.append(f".model {models[key]} memristor level={level} " +
+                                 " ".join(f"{n}={text(values[n])}" for n in names))
+                lines.append(f"YMEMRISTOR N{index} {a} {b} {models[key]} "
+                             f"{state}={text(values['w0'])}")
+        if self.tran:
+            step, stop, most = self.tran
+            lines.append(f".tran {text(step)} {text(stop)}" + (f" 0 {text(most)}" if most else ""))
+            analysis = "tran"
+        elif swept is not None:
+            index, level_ = swept
+            lines.append(f".dc V{index} {text(level_)} {text(level_)} 1")
+            analysis = "dc"
+        else:
+            return None
+        shown = [f"v({which})" if kind == "v" else
+                 f"i(ymemristor!n{which})" if self.devices[which][0] == "M" else
+                 f"i({self.devices[which][0]}{which})"
+                 for kind, which in self.settled]
+        lines.append(f".print {analysis} format=noindex precision=17 file=xyce.txt " +
+                     " ".join(shown))
+        lines.append(".end")
+        return "\n".join(lines) + "\n"
+
+
+# Of our models, those Xyce has built in: its memristor level, the
+# parameters it is given (its names are ours, case aside), and the
+# instance parameter that is our w0. (Xyce's Yakopcic is ours, its
+# thresholds Vp and Vn both above 0 as ours: the 100 Hz circuit
+# memristor_yakopcic comes out 1.4e-5 of the range off ngspice's.)
+XYCE_MODELS = {
+    "yakopcic": (3, ["a1", "a2", "b", "Ap", "An", "Vp", "Vn", "xp", "xn", "alphap", "alphan",
+                     "eta"], "xo"),
+}
+
+
 def found():
     """Every circuit there is: its name and its file."""
     circuits = {}
@@ -405,8 +534,22 @@ def prepare(name, path):
         file.write(circuit.flat())
     with open(os.path.join(folder, "circuit.cir"), "w") as file:
         file.write(circuit.spice(title))
+    deck = circuit.xyce(title)
+    xyce = os.path.join(folder, "circuit.xyce")
+    if deck:
+        with open(xyce, "w") as file:
+            file.write(deck)
+    elif os.path.exists(xyce):
+        os.remove(xyce)
+    merged = os.path.join(folder, "merged.txt")
+    if circuit.merged:
+        with open(merged, "w") as file:
+            file.writelines(f"{name} {node}\n" for name, node in circuit.merged.items())
+    elif os.path.exists(merged):
+        os.remove(merged)
     print(f"{name}: {len(circuit.names)} nodes, {len(circuit.devices)} devices, "
-          f"{len(circuit.settled)} probes")
+          f"{len(circuit.settled)} probes" +
+          (f" ({len(circuit.merged)} nodes merged by sources of 0 V)" if circuit.merged else ""))
 
 
 def main():
