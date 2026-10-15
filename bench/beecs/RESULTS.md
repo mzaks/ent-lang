@@ -144,7 +144,7 @@ What the compiler could do better, seen here:
 
 - `&&` and `||` work out both sides: a draw on the right is drawn for every
   entity. Going to the right only where it counts, as C does, would let
-  these be written as they read.
+  these be written as they read. (Done since: see docs/syntax.md.)
 - A `for` that gives a buffer rows marks every row, and puts them together
   after the `for` with a branch on each mark: with 72% of the squadrons
   resting that branch is missed often (the most missed in `fly`).

@@ -85,9 +85,9 @@ which of its states it is in), not memory: the squadrons are some
 hundred kilobytes. So it costs what is done for each, and how often a
 loop goes through all of them:
 
-- A number at random is drawn where it is asked for, not before (`&&`
-  works out both its sides), and those every squadron draws, in a loop
-  of their own, which goes eight at a time (`Draws`).
+- A number at random is drawn where it is asked for, not before, and
+  those every squadron draws, in a loop of their own, which goes eight at
+  a time (`Draws`).
 - What is the same for all who go to a patch is worked out once for the
   patch (the chance to give it up, a dance's chance to lead none).
 - A value is sent to a field, or rows given to a buffer, from one place

@@ -336,15 +336,11 @@ system decide() {
     if a.now != Doing.Recruited && a.now != Doing.Resting && a.now != Doing.Lazy {
       if uniform(draw, 1) < Foraging.stop_probability { a.now = Doing.Resting }
     }
-    // (Each number drawn only where it is asked for: `&&` works out both
-    // sides.)
     if !a.pollen && k.nectar != none {
       if let efficiency = Resource(k.nectar).efficiency {
-        if uniform(draw, 2) < 1.0 / efficiency {
-          if uniform(draw, 3) < honey {
-            k.nectar = none
-            if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
-          }
+        if uniform(draw, 2) < 1.0 / efficiency && uniform(draw, 3) < honey {
+          k.nectar = none
+          if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
         }
       }
     }
@@ -358,11 +354,9 @@ system decide() {
         }
       }
     }
-    if a.now == Doing.Resting {
-      if d.start < Day.probability {
-        let known = if a.pollen { k.pollen } else { k.nectar }
-        a.now = if known == none { Doing.Searching } else { Doing.Experienced }
-      }
+    if a.now == Doing.Resting && d.start < Day.probability {
+      let known = if a.pollen { k.pollen } else { k.nectar }
+      a.now = if known == none { Doing.Searching } else { Doing.Experienced }
     }
     if m.today > Foragers.max_km_per_day as f32 { a.now = Doing.Resting }
   }
