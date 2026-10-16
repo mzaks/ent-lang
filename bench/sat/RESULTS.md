@@ -71,3 +71,32 @@ looks along the list of its least frequent literal, both ways.
 PAR-2 0.93 times MiniSat's. The problems that changed are near the limit
 both ways: PRP_30_41 and ContextModel_6_4_6 are solved now (229 s, 118 s),
 ContextModel_6_3_8 is not (260 s before).
+
+## 2026-10-16: binary clauses, the trail kept, unused variables
+
+Three changes. A clause of two literals is watched with its other
+literal as the blocker, and propagated without looking at the clause. A
+restart keeps the levels whose decisions come before the next one (as
+CaDiCaL reuses the trail). A variable in no clause, as read or after the
+elimination, is false at level 0 and no longer decided: in asconhash H6,
+80,000 of 127,069 variables, which the search decided over and over
+(43 decisions a conflict where MiniSat makes 4).
+
+Two of them were run side by side, four problems at a time each.
+"Median" is the median of entsat's time over MiniSat's on the problems
+both solve (24 for each build).
+
+| solver | solved | SAT | UNSAT | PAR-2 | median |
+|---|---|---|---|---|---|
+| MiniSat 2.2 | 28 | 11 | 17 | 45,148 | 1 |
+| entsat, before | 34 | 17 | 17 | 41,912 | 1.55 |
+| unused variables, trail kept | 34 | 16 | 18 | 42,420 | 1.44 |
+| and binary clauses, trail not kept | 34 | 16 | 18 | 42,546 | 1.29 |
+| entsat (all three) | 35 | 18 | 17 | 41,875 | 1.15 |
+
+PAR-2 0.93 times MiniSat's. More conflicts a second are not a faster
+search: asconhash H6 has nine times as many in 300 s and is not solved
+(216 s before). Between runs of one build a problem can take two or
+three times as long (qwh: 7.5 s and 26.8 s), so a few percent are not
+told apart. MiniSat is still ahead on most of the long problems both
+solve: grs, PRP, asconhash, shuffling-2.

@@ -27,7 +27,8 @@ BUILD = os.path.join(ROOT, "build", "sat")
 CNF = os.path.join(BUILD, "comp", "cnf")
 SOLVERS = {
     "entsat": [os.path.join(BUILD, "entsat-bench")],
-    # (A build being tried, beside the one timed last.)
+    # (A build being tried, beside the one timed last; any other
+    # build/sat/entsat-<name> is timed as entsat-<name>.)
     "entsat-dev": [os.path.join(BUILD, "entsat-dev")],
     "minisat": [os.path.join(BUILD, "tools", "minisat", "build", "release", "bin", "minisat"),
                 "-verb=0"],
@@ -52,7 +53,7 @@ def run(solver, hash_, limit):
             os.symlink(path, os.path.join(where, "problem.cnf"))
             with open(os.path.join(where, "limit.txt"), "w") as f:
                 f.write(f"{max(int(limit) - 1, 1)}\n")
-            command = SOLVERS[solver]
+            command = SOLVERS.get(solver, [os.path.join(BUILD, solver)])
         else:
             command = SOLVERS[solver] + [path]
         start = time.monotonic()

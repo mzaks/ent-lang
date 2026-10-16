@@ -24,7 +24,8 @@ core, and making it fast.
   one unique, `Search`; a round of the search is a schedule of systems,
   run by `main` until there is an answer:
   - `propagate`: unit propagation over two watched literals per clause,
-    each watch with a blocker literal, as MiniSat has them;
+    each watch with a blocker literal, as MiniSat has them; a clause of
+    two is propagated by its watch alone;
   - `learn`: the first-UIP clause of a conflict, minimized as MiniSat
     minimizes it, the jump back, and the clause into the arena and the
     proof;
@@ -41,7 +42,8 @@ core, and making it fast.
   recent LBDs are 10% above the long-run ones); and stable, with VSIDS
   scores in a heap and restarts after 1,024 times the Luby sequence. The
   first 1,000 conflicts are focused, and each mode then lasts twice as
-  long as the one before.
+  long as the one before. A restart keeps the levels it would decide
+  again, and a variable in no clause is not decided.
 - `entsat.ent`: the program; `room.ent` gives it room for 4 million
   variables and a file of 256 MB.
 - `fetch.sh`: SATLIB's random 3-SAT sets (uf/uuf 50 to 250 variables,

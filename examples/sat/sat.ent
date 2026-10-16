@@ -94,11 +94,13 @@ buffer Counts { n: i32 } capacity 256
 // as above, and stable, which decides by VSIDS scores (`decay` a
 // conflict) and restarts after `stable_unit` times the Luby sequence;
 // the first `first_mode` conflicts focused, each mode then twice as long
-// as the one before.
+// as the one before. With `reuse` a restart keeps the levels it would
+// decide again in the same order.
 unique Options {
   proof: bool, proof_file: text[126], restarts: Restarts, restart_unit: i64,
   margin: f64, fast: f64, slow: f64, reduce_interval: i64, reduce_percent: i32,
-  seconds: f64, modes: bool, first_mode: i64, decay: f64, stable_unit: i64
+  seconds: f64, modes: bool, first_mode: i64, decay: f64, stable_unit: i64, reuse: bool,
+  target: bool
 }
 
 // `conflict`: the clause propagation falsified, -1 for none. `trail`:
@@ -114,7 +116,7 @@ unique Search {
   luby: i64, since: i64, started: f64, written: bool,
   fast: f64, fast_left: f64, slow: f64, slow_left: f64,
   stable: bool, switch: i64, mode: i64, heap: i32, inc: f64, stable_luby: i64, target: i32,
-  glued: i64
+  glued: i64, reused: i64
 }
 
 world {
@@ -131,6 +133,8 @@ world {
   Options.first_mode = 1000
   Options.decay = 0.95
   Options.stable_unit = 1024
+  Options.reuse = true
+  Options.target = true
 }
 
 // The Luby sequence, from 0: 1 1 2 1 1 2 4 1 1 2 1 1 2 4 8 ...
@@ -222,6 +226,19 @@ fn root(n: i64) -> i64 {
 // Whether a reduction may delete the clause with this meta word: a
 // learned one that is no reason, of LBD 3 or more, and not of LBD 6 or
 // less where it was used since the last reduction.
+// The literal clause `c` is the reason for, -1 where it is none's: its
+// first, or for a clause of two either (their order is not kept).
+proc reason_lit(arena: Arena, vars: Vars, values: Values, c: i32) -> i32 {
+  var lit = -1
+  let first = arena[c + 2].w
+  if vars[first >> 1].reason == c && values[first].v == 1 { lit = first }
+  if arena[c].w == 2 {
+    let second = arena[c + 3].w
+    if vars[second >> 1].reason == c && values[second].v == 1 { lit = second }
+  }
+  lit
+}
+
 fn droppable(meta: i32, locked: bool) -> bool {
   let lbd = meta >> 2 & 0x3fff
   meta & 1 != 0 && !locked && lbd > 2 && !(lbd <= 6 && meta & 0x10000 != 0)
@@ -334,6 +351,16 @@ system setup() {
       }
     }
   }
+  // (A variable that no clause has, as read or as left by the
+  // preprocessing, is false at level 0: it is not decided.)
+  for v in 0..if unsat { 0 } else { n } {
+    if Seen[2 * v].clause < 0 && Seen[2 * v + 1].clause < 0 && Values[2 * v].v == 0 {
+      Values[2 * v + 1].v = 1
+      Values[2 * v].v = -1
+      Trail[trail].lit = 2 * v + 1
+      trail += 1
+    }
+  }
   Search.trail = trail
   Search.rewatch = true
   Search.status = if !Problem.read { Status.Unknown }
@@ -348,7 +375,10 @@ system setup() {
 // gets that for its blocker; else it finds another literal to watch that
 // is not false, or is unit, and its first literal is assigned, or is
 // falsified: the conflict. (After a conflict the rest of the list stays
-// as it is.)
+// as it is.) A clause of two literals is watched as `~c`, the other
+// literal its blocker: it is decided by the blocker alone, and its
+// literals in the arena stay in their order (analysis puts the implied
+// one first where it needs the clause).
 system propagate() {
   var qhead = Search.qhead
   var trail = Search.trail
@@ -368,7 +398,20 @@ system propagate() {
       var blocker = Watch[i].blocker
       i += 1
       var keep = true
-      if conflict < 0 && Values[blocker].v != 1 {
+      if conflict < 0 && Values[blocker].v != 1 && c < 0 {
+        // (A clause of two: its other literal is the blocker, and the
+        // clause is not looked at.)
+        if Values[blocker].v == -1 {
+          conflict = ~c
+        } else {
+          Values[blocker].v = 1
+          Values[blocker ^ 1].v = -1
+          Vars[blocker >> 1].level = level
+          Vars[blocker >> 1].reason = ~c
+          Trail[trail].lit = blocker
+          trail += 1
+        }
+      } else if conflict < 0 && Values[blocker].v != 1 {
         // (The false literal to the second place.)
         if Arena[c + 2].w == f {
           Arena[c + 2].w = Arena[c + 3].w
@@ -472,6 +515,11 @@ system learn() {
         if glue < meta >> 2 & 0x3fff { Arena[c + 1].w = meta & ~(0x3fff << 2) | glue << 2 }
       }
       Arena[c + 1].w |= 0x10000
+      // (A reason of two literals, the one it implies to the front.)
+      if p >= 0 && size == 2 && Arena[c + 2].w != p {
+        Arena[c + 3].w = Arena[c + 2].w
+        Arena[c + 2].w = p
+      }
       let from = if p < 0 { 0 } else { 1 }
       for j in from..size {
         let q = Arena[c + 2 + j].w
@@ -520,8 +568,13 @@ system learn() {
         var implied = true
         while top > 0 && implied {
           top -= 1
-          let r = Vars[Stack[top].lit >> 1].reason
+          let implied_lit = Stack[top].lit ^ 1
+          let r = Vars[implied_lit >> 1].reason
           let size = Arena[r].w
+          if size == 2 && Arena[r + 2].w != implied_lit {
+            Arena[r + 3].w = Arena[r + 2].w
+            Arena[r + 2].w = implied_lit
+          }
           var j = 1
           while j < size && implied {
             let q = Arena[r + 2 + j].w
@@ -691,7 +744,48 @@ system learn() {
       Search.target = held
     }
     if restart { Search.target = 0 }
-    let to = if restart { 0 } else { back }
+    var to = if restart { 0 } else { back }
+    var cursor = Search.cursor
+    if restart && !switching && Options.reuse && back > 0 {
+      // (The trail is kept where it would be made again: up to the first
+      // level whose decision the next one, after the jump back, comes
+      // before (as CaDiCaL reuses the trail). The next one is the
+      // highest in the queue or the heap that is not assigned below the
+      // jump; those that are come out of the heap, as decide takes them
+      // out.)
+      let undone = Levels[back + 1].start
+      if Search.stable {
+        var heap = Search.heap
+        var going = heap > 0
+        while going {
+          let top = Heap[0].var
+          if Values[2 * top].v != 0 && Vars[top].level <= back {
+            heap -= 1
+            Heap[top].pos = -1
+            if heap > 0 {
+              Heap[0].var = Heap[heap].var
+              Heap[Heap[0].var].pos = 0
+              heap_down(Heap, 0, heap)
+            }
+            going = heap > 0
+          } else {
+            going = false
+          }
+        }
+        Search.heap = heap
+        var next = if heap > 0 { Heap[Heap[0].var].score } else { -1.0 }
+        for i in undone..Search.trail { next = max(next, Heap[Trail[i].lit >> 1].score) }
+        while to < back && Heap[Trail[Levels[to + 1].start].lit >> 1].score > next { to += 1 }
+      } else {
+        while cursor >= 0 && Values[2 * cursor].v != 0 && Vars[cursor].level <= back {
+          cursor = Vars[cursor].prev
+        }
+        var next: i64 = if cursor >= 0 { Vars[cursor].stamp } else { -1 }
+        for i in undone..Search.trail { next = max(next, Vars[Trail[i].lit >> 1].stamp) }
+        while to < back && Vars[Trail[Levels[to + 1].start].lit >> 1].stamp > next { to += 1 }
+      }
+      Search.reused += to as i64
+    }
     if restart {
       since = 0
       if Search.stable { Search.stable_luby += 1 } else { Search.luby += 1 }
@@ -703,7 +797,6 @@ system learn() {
       Search.switch = conflicts + Search.mode
     }
     let start = Levels[to + 1].start
-    var cursor = Search.cursor
     var heap = Search.heap
     for i in start..Search.trail {
       let l = Trail[i].lit
@@ -747,7 +840,7 @@ system learn() {
           Lists[l].cap = 2 * n + 4
           at = moved
         }
-        Watch[at + n].clause = reason
+        Watch[at + n].clause = if k == 2 { ~reason } else { reason }
         Watch[at + n].blocker = Learnt[1 - side].lit
         Lists[l].size = n + 1
       }
@@ -793,8 +886,8 @@ system reduce() {
   while c < top {
     let size = Arena[c].w
     let meta = Arena[c + 1].w
-    let first = Arena[c + 2].w
-    let locked = Vars[first >> 1].reason == c && Values[first].v == 1
+    let first = reason_lit(Arena, Vars, Values, c)
+    let locked = first >= 0
     let lbd = min(meta >> 2 & 0x3fff, 255)
     if droppable(meta, locked) {
       Counts[lbd].n += 1
@@ -815,8 +908,8 @@ system reduce() {
   while c < top {
     let size = Arena[c].w
     let meta = Arena[c + 1].w
-    let first = Arena[c + 2].w
-    let locked = Vars[first >> 1].reason == c && Values[first].v == 1
+    let first = reason_lit(Arena, Vars, Values, c)
+    let locked = first >= 0
     let lbd = min(meta >> 2 & 0x3fff, 255)
     var keep = true
     if droppable(meta, locked) {
@@ -878,12 +971,13 @@ system watch() {
   while c < top {
     let l0 = Arena[c + 2].w
     let l1 = Arena[c + 3].w
+    let tag = if Arena[c].w == 2 { ~c } else { c }
     let at0 = Lists[l0].start + Lists[l0].size
-    Watch[at0].clause = c
+    Watch[at0].clause = tag
     Watch[at0].blocker = l1
     Lists[l0].size += 1
     let at1 = Lists[l1].start + Lists[l1].size
-    Watch[at1].clause = c
+    Watch[at1].clause = tag
     Watch[at1].blocker = l0
     Lists[l1].size += 1
     c += 2 + Arena[c].w
@@ -927,7 +1021,7 @@ system decide() {
   } else {
     let level = Search.level + 1
     let trail = Search.trail
-    let positive = if Search.stable { Vars[v].target } else { Vars[v].phase }
+    let positive = if Search.stable && Options.target { Vars[v].target } else { Vars[v].phase }
     let l = if positive { 2 * v } else { 2 * v + 1 }
     Levels[level].start = trail
     Values[l].v = 1
@@ -955,7 +1049,7 @@ system finish() {
   let seconds = wait_until(0.0) - Search.started
   put("c {Problem.vars} variables, {Problem.clauses} clauses")
   put("c {Search.conflicts} conflicts, {Search.decisions} decisions, {Search.propagations} propagations")
-  put("c {Search.restarts} restarts, {Search.reductions} reductions, {Search.deleted} clauses deleted")
+  put("c {Search.restarts} restarts ({Search.reused} levels kept), {Search.reductions} reductions, {Search.deleted} clauses deleted")
   put("c {seconds} seconds")
   if Search.status == Status.Sat {
     var at = 0
