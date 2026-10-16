@@ -3026,8 +3026,35 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
         **value);
   }
   if (consumeIf(Token::Assign)) {
+    // Name = Name[..n]: its first n rows, and none after them.
+    if (token.is(Token::Identifier)) {
+      llvm::SMLoc keptAt = token.loc;
+      if (token.spelling != name)
+        return error(keptAt, "a buffer keeps its own first rows, '" + name +
+                                 " = " + name + "[..n]': it is not "
+                                 "assigned another's");
+      advance();
+      if (failed(expect(Token::LBracket, "'[..n]': the rows it keeps")) ||
+          failed(expect(Token::DotDot, "'..': '" + name + "[..n]' keeps "
+                                       "the first n rows")))
+        return failure();
+      FailureOr<ExprPtr> count = parseExpr();
+      if (failed(count) || failed(expect(Token::RBracket, "']'")))
+        return failure();
+      if (inQuery && !inTurn)
+        return error(at, "a buffer is shortened outside a 'for': every "
+                         "entity would shorten it");
+      FailureOr<mlir::Value> rows = emit(**count, builder.getI32Type());
+      if (failed(rows))
+        return failure();
+      if (!rows->getType().isInteger(32))
+        return error((*count)->loc, "how many rows is an i32");
+      BufferKeepOp::create(builder, loc(at), target, *rows);
+      return success();
+    }
     if (failed(expect(Token::LBracket, "'[]': a buffer is assigned no rows, "
-                                       "or '[{ .. }; n]', n rows alike")))
+                                       "'[{ .. }; n]', n rows alike, or '" +
+                                       name + "[..n]', its first n")))
       return failure();
     if (inQuery && !inTurn)
       return error(at, "a buffer is emptied outside a 'for': every entity "

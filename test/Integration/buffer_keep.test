@@ -1,0 +1,16 @@
+// A buffer keeps its first n rows (Inputs/buffer_keep.ent): those it had,
+// and none after them; all of them where it has no more than n, none
+// where n is below nought. Rows given after that come after the kept
+// ones, and a row past the end reads as nought, as before.
+// RUN: %ent run %S/Inputs/buffer_keep.ent | FileCheck %s
+
+// CHECK:      filled: 8 rows 0 1 2 3 4 5 6 7, row 5 reads 5 5.0
+// CHECK-NEXT: kept 6: 6 rows 0 1 2 3 4 5, row 5 reads 5 5.0
+// CHECK-NEXT: kept 10: 6 rows 0 1 2 3 4 5, row 5 reads 5 5.0
+// CHECK-NEXT: halved: 3 rows 0 1 2, row 5 reads 0 0.0
+// CHECK-NEXT: appended: 6 rows 0 1 2 30 40 50, row 5 reads 50 50.0
+// CHECK-NEXT: kept -1: 0 rows, row 5 reads 0 0.0
+
+// Only the buffer itself is kept, and not from every entity of a `for`.
+// RUN: not %ent run %S/Inputs/buffer_keep_errors.ent 2>&1 | FileCheck %s --check-prefix=OTHER
+// OTHER: error: a buffer keeps its own first rows, 'Rows = Rows[..n]': it is not assigned another's

@@ -187,6 +187,21 @@ def Ent_BufferFillOp : Ent_Op<"buffer.fill", [
   }];
 }
 
+def Ent_BufferKeepOp : Ent_Op<"buffer.keep", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Keep the first rows of a buffer";
+  let description = [{
+    ```mlir
+    ent.buffer.keep @Arena %n
+    ```
+    The buffer has its first `%n` rows after it, as they were, and none
+    after them: all it has where it has no more than `%n`, none where
+    `%n` is below nought. Outside queries, like `ent.buffer.set`.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, I32:$count);
+  let assemblyFormat = "$buffer $count attr-dict";
+}
+
 def Ent_BufferOfOp : Ent_Op<"buffer.of", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "A buffer, to hand to a function in C";

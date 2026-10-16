@@ -1,0 +1,9 @@
+buffer Rows { x: i32 } capacity 8
+buffer Others { x: i32 } capacity 8
+
+system run() {
+  Rows = Others[..2]
+}
+
+schedule once() { run() }
+main { once() }
