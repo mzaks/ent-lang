@@ -9,8 +9,8 @@
 // RUN: llvm-nm --defined-only --extern-only %t/named | FileCheck %s --check-prefix=NAMED
 
 // CHECK: 32
-// ALONE-NOT: {{ ent_(step|twice)$}}
-// ALONE: T main
-// ALONE-NOT: {{ ent_(step|twice)$}}
-// NAMED: T ent_step
-// NAMED-NOT: {{ ent_twice$}}
+// ALONE-NOT: {{ _?ent_(step|twice)$}}
+// ALONE: {{T _?main$}}
+// ALONE-NOT: {{ _?ent_(step|twice)$}}
+// NAMED: {{T _?ent_step$}}
+// NAMED-NOT: {{ _?ent_twice$}}
