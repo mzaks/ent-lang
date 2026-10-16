@@ -47,9 +47,18 @@ days spread as beecs's do.
   lie a golden angle apart), each a ring of the nectar and pollen it has
   left today, and the squadrons as dots by what they do: resting in the
   hive, scouting, flying to their patch and back. On the right the year
-  so far: the workers by stage, the honey and the pollen in store (the
-  mouse over them shows a day's numbers). Space stops and goes on, Up
-  and Down change the speed, R starts over with the next seed.
+  so far: the workers by stage, the honey and the pollen in store over
+  bars of what came in each day, and under them the weather (each day's
+  hours for foraging) and the months. The mouse over them shows a day's
+  numbers, with what was brought in and eaten and the workers that
+  died; a click goes to that day (on fast, or from the first day again
+  with the same seed) and stops there. A click on a patch shows its year:
+  what was taken each day, and what there was. Space stops and goes on,
+  Up and Down change the speed, R starts over with the next seed. M runs
+  20 other seeds and shows the middle 80 % of them and their median
+  behind this run. P opens knobs (how far the patches are, how much their
+  flowers give, the bees and the honey at the start) for the next R. S
+  saves a picture of the window.
 - `reference/`: `fetch.sh` fetches beecs (GPL-3.0, so none of its files
   are in this repository) at the commit the model was held against into
   `build/beecs/reference`, builds `runner/` against it (a Go program

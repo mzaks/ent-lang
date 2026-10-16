@@ -10,7 +10,10 @@
 //   ../../../tools/ent run ../../../examples/beecs/view.ent
 //
 // Space stops and goes on, Up and Down make it faster and slower, R
-// starts it over with the next seed. The
+// starts it over with the next seed. A click on the charts goes to that
+// day (fast, there, and stops); on a patch, shows its year. M runs 20
+// other seeds and shows where they went, around this one; P opens the
+// knobs, which the next R uses; S saves a picture of the window. The
 // model is beecs.ent's, a step at a time (the day until foraging, each
 // round of it, the rest of the day), and reads parameters.txt as it does.
 // beecs's patches have a distance and no direction: here they lie around
@@ -35,11 +38,54 @@ capacity Shapes 65536
 // the keys as they were in the frame before.
 unique Pace {
   level: i32, left: i32, t: f32, paused: bool, ended: bool,
-  space: bool, up: bool, down: bool, r: bool
+  space: bool, up: bool, down: bool, r: bool, m: bool, p: bool, s: bool, click: bool
 }
 
-// R: the run again from its first day, with the next seed.
-unique Restart { asked: bool, seed: i64 }
+// The run again from its first day, with this seed: R's (the next one),
+// or the same one again to go back to a day, or the seeds' of M; with
+// the knobs as they are set (R) or as the run had them (the others).
+unique Restart { asked: bool, seed: i64, keep: bool }
+
+// Fast to the end of this day (the clock's tick), -1 for none, and
+// whether to stop there.
+unique Jump { to: i32, pause: bool }
+
+// M: the run with each of 20 other seeds, the seeds' numbers from
+// `next` on, how many days of each are kept (`Runs`), and where this
+// run was, to go back to it after; whether there are bands of them to
+// show, and the most of them, for the charts' scales.
+unique Seeds {
+  running: bool, left: i32, next: i64, days: i32, home_seed: i64, home_tick: i32,
+  home_paused: bool, shown: bool, sort: bool, workers: f32, honey: f32, pollen: f32
+}
+const SEEDS = 20
+// Each run's days, a run after the other: workers, honey [kg], pollen [g].
+buffer Runs { workers: f32, honey: f32, pollen: f32 } capacity 163840
+// For each day, of workers, honey and pollen in turn: the runs' lowest
+// tenth's top, middle, and highest tenth's bottom.
+buffer Band { lo: f32, mid: f32, hi: f32 } capacity 24576
+// The values of a day being put in order.
+buffer Values { v: f32 } capacity 32
+
+// P: knobs on the run, each a row of `factors` (3 is 1): how far the
+// patches are, how much their flowers give, the bees and the honey at
+// the start; as set, and as the run has them (`u...`, from R on). And
+// where their box is (when open).
+unique Knobs {
+  open: bool, x: f32, y: f32,
+  distance: i32, flowers: i32, bees: i32, honey: i32,
+  udistance: i32, uflowers: i32, ubees: i32, uhoney: i32
+}
+table factors: f32 = [0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0]
+// The file's bees and honey at the start, while the knobs' are used.
+unique Base { bees: i32, honey: f64 }
+
+// S: a picture of the window, and what was said about it, until when.
+unique Note { snap: bool, text: text[62], until: i64 }
+
+// The patch whose year is shown (-1: none), how far it is, and the one
+// near the mouse.
+unique Chosen { patch: i32, metres: i64, near: i32 }
 
 // Where the day is: before foraging (0), in its rounds (1), after (2).
 unique Phase { now: i32 }
@@ -54,6 +100,16 @@ world {
   Window.fps = 60
   Window.resizable = true
   Pace.level = 4
+  Jump.to = -1
+  Knobs.distance = 3
+  Knobs.flowers = 3
+  Knobs.bees = 3
+  Knobs.honey = 3
+  Knobs.udistance = 3
+  Knobs.uflowers = 3
+  Knobs.ubees = 3
+  Knobs.uhoney = 3
+  Chosen.patch = -1
 }
 
 system pace() {
@@ -63,9 +119,38 @@ system pace() {
   Pace.space = Keys.space
   Pace.up = Keys.up
   Pace.down = Keys.down
+  let busy = Seeds.running || Restart.asked
   let r = key_down('R' as i32)
-  if r && !Pace.r { Restart.asked = true }
+  if r && !Pace.r && !busy {
+    Restart.asked = true
+    Restart.seed = RandomSeed.seed + 1
+    Restart.keep = false
+    Jump.to = -1
+  }
   Pace.r = r
+  let m = key_down('M' as i32)
+  if m && !Pace.m && !busy {
+    Seeds.running = true
+    Seeds.left = SEEDS
+    Seeds.next = 1001
+    Seeds.days = min(if Termination.max_ticks > 0 { Termination.max_ticks } else { 365 }, 8192)
+    Seeds.home_seed = RandomSeed.seed
+    Seeds.home_tick = Clock.tick
+    Seeds.home_paused = Pace.paused || Jump.to >= 0 && Jump.pause
+    Runs = []
+    Restart.asked = true
+    Restart.seed = Seeds.next
+    Restart.keep = true
+    Seeds.next += 1
+    Jump.to = -1
+  }
+  Pace.m = m
+  let p = key_down('P' as i32)
+  if p && !Pace.p { Knobs.open = !Knobs.open }
+  Pace.p = p
+  let s = key_down('S' as i32)
+  if s && !Pace.s { Note.snap = true }
+  Pace.s = s
   if Pace.level < 4 {
     let frames = 1 << (4 - Pace.level)
     let at = (Window.frame % frames as i64) as i32
@@ -75,13 +160,24 @@ system pace() {
     Pace.left = 1 << (Pace.level - 4)
     Pace.t = fract(Window.frame as f32 * 0.03)
   }
-  if Pace.paused || Pace.ended || Restart.asked { Pace.left = 0 }
+  // Going to a day, or running the seeds: as fast as it goes, with a
+  // frame now and then.
+  // (Not before a run starts again: its clock is the old run's.)
+  if Jump.to >= 0 && Clock.tick >= Jump.to && !Restart.asked {
+    Jump.to = -1
+    Pace.paused = Jump.pause
+  }
+  if Jump.to >= 0 || Seeds.running { Pace.left = 1 << 30 }
+  else if Pace.paused { Pace.left = 0 }
+  if Pace.ended || Restart.asked { Pace.left = 0 }
 }
 
 // --- the model's day, as beecs.ent has it --------------------------------
 
 system tick() {
   Clock.tick += 1
+  if Seeds.running && Clock.tick % 120 == 0 { Pace.left = 0 }
+  if Jump.to >= 0 && Clock.tick % 30 == 0 { Pace.left = 0 }
 }
 
 // After a step: one fewer left in this frame.
@@ -98,6 +194,11 @@ system ended() {
   Pace.ended = (Termination.max_ticks > 0 && Clock.tick >= Termination.max_ticks) ||
                !Run.weather ||
                (Termination.on_extinction && Population.total_population == 0)
+  if Jump.to >= 0 && Clock.tick >= Jump.to {
+    Jump.to = -1
+    Pace.paused = Jump.pause
+    Pace.left = 0
+  }
   // (Steps this frame would still have taken are not: else the frames
   // after the end, which wait for none to be left, never come.)
   if Pace.ended { Pace.left = 0 }
@@ -105,27 +206,141 @@ system ended() {
 
 // --- the year so far -----------------------------------------------------
 
-// A day's numbers: workers by stage, honey [kg] and pollen [g].
+// A day's numbers: workers by stage, honey [kg] and pollen [g]; the
+// hours there were for foraging; honey [kg] and pollen [g] brought in
+// and eaten, and the adult workers that died.
 buffer History {
   eggs: i32, larvae: i32, pupae: i32, in_hive: i32, foragers: i32,
-  honey: f32, pollen: f32
+  honey: f32, pollen: f32, hours: f32,
+  honey_in: f32, honey_eaten: f32, pollen_in: f32, pollen_eaten: f32, died: i32
 } capacity 8192
 // The most of each so far, for the charts' scales.
-unique Most { workers: i32, honey: f32, pollen: f32 }
+unique Most { workers: i32, honey: f32, pollen: f32, honey_in: f32, pollen_in: f32 }
+
+// Today so far: honey [kJ] and pollen [g] brought in, the pollen before
+// the bees ate, the adult workers in the morning and those that came out
+// of their pupae.
+unique Today { honey_in: f64, pollen_in: f64, pollen_before: f64, adults: i32, emerged: i32 }
+
+system day_begins() {
+  Today.honey_in = 0.0
+  Today.pollen_in = 0.0
+  Today.adults = Population.workers_in_hive + Population.workers_foragers
+}
+
+system emerged() { Today.emerged = Emerging.workers }
+
+// What a round brought in (where there was one).
+system brought() {
+  if Day.forage {
+    Today.honey_in += Unloaded.energy
+    Today.pollen_in += Unloaded.pollen
+  }
+}
+
+system before_eating() { Today.pollen_before = Hive.pollen }
+
+// Each patch's day, a row for each patch in the order of distance:
+// nectar [l] and pollen [g] there were, and what was taken of them.
+buffer PatchDays {
+  nectar: f32, nectar_taken: f32, pollen: f32, pollen_taken: f32
+} capacity 262144
 
 system record() {
   let honey = (0.001 * Hive.honey / EnergyContent.honey) as f32
   let pollen = Hive.pollen as f32
+  let honey_in = (0.001 * Today.honey_in / EnergyContent.honey) as f32
+  let pollen_in = Today.pollen_in as f32
+  let died = Today.adults + Today.emerged - Population.workers_in_hive -
+             Population.workers_foragers
   History += { eggs: Population.worker_eggs, larvae: Population.worker_larvae,
                pupae: Population.worker_pupae, in_hive: Population.workers_in_hive,
-               foragers: Population.workers_foragers, honey: honey, pollen: pollen }
+               foragers: Population.workers_foragers, honey: honey, pollen: pollen,
+               hours: Day.seconds as f32 / 3600.0, honey_in: honey_in,
+               honey_eaten: (0.000001 * Consumed.honey) as f32, pollen_in: pollen_in,
+               pollen_eaten: (Today.pollen_before - Hive.pollen) as f32,
+               died: max(died, 0) }
   let workers = Population.worker_eggs + Population.worker_larvae +
                 Population.worker_pupae + Population.workers_in_hive +
                 Population.workers_foragers
   Most.workers = max(Most.workers, workers)
   Most.honey = max(Most.honey, honey)
   Most.pollen = max(Most.pollen, pollen)
+  Most.honey_in = max(Most.honey_in, honey_in)
+  Most.pollen_in = max(Most.pollen_in, pollen_in)
 }
+
+// After the seeds' runs, for each day, their values of workers, honey
+// and pollen in order: a tenth from the bottom, the middle, a tenth from
+// the top.
+system bands() {
+  if Seeds.sort {
+    Seeds.sort = false
+    let runs = len(Runs) / max(Seeds.days, 1)
+    Band = []
+    Seeds.workers = 0.0
+    Seeds.honey = 0.0
+    Seeds.pollen = 0.0
+    for d in 0..Seeds.days {
+      for q in 0..3 {
+        Values = []
+        for r in 0..runs {
+          let at = r * Seeds.days + d
+          Values += { v: if q == 0 { Runs[at].workers } else if q == 1 { Runs[at].honey }
+                         else { Runs[at].pollen } }
+        }
+        for i in 1..runs {
+          var j = i
+          while j > 0 && Values[j - 1].v > Values[j].v {
+            let v = Values[j].v
+            Values[j].v = Values[j - 1].v
+            Values[j - 1].v = v
+            j -= 1
+          }
+        }
+        let lo = Values[runs / 10].v
+        let mid = (Values[(runs - 1) / 2].v + Values[runs / 2].v) * 0.5
+        let hi = Values[runs - 1 - runs / 10].v
+        Band += { lo: lo, mid: mid, hi: hi }
+        if q == 0 { Seeds.workers = max(Seeds.workers, hi) }
+        else if q == 1 { Seeds.honey = max(Seeds.honey, hi) }
+        else { Seeds.pollen = max(Seeds.pollen, hi) }
+      }
+    }
+    Seeds.shown = runs > 0
+  }
+}
+
+// A seed's run at its end: its days kept, and the next seed's run, or,
+// after the last, the bands, and back to the run there was before.
+system seed_done() {
+  if Seeds.running && (Pace.ended || Clock.tick >= Seeds.days) {
+    for d in 0..Seeds.days {
+      if d < len(History) {
+        Runs += { workers: (History[d].eggs + History[d].larvae + History[d].pupae +
+                            History[d].in_hive + History[d].foragers) as f32,
+                  honey: History[d].honey, pollen: History[d].pollen }
+      } else {
+        Runs += { workers: 0.0, honey: 0.0, pollen: 0.0 }
+      }
+    }
+    Seeds.left -= 1
+    Restart.asked = true
+    Restart.keep = true
+    Pace.left = 0
+    if Seeds.left > 0 {
+      Restart.seed = Seeds.next
+      Seeds.next += 1
+    } else {
+      Seeds.running = false
+      Restart.seed = Seeds.home_seed
+      Jump.to = Seeds.home_tick
+      Jump.pause = Seeds.home_paused
+      Seeds.sort = true
+    }
+  }
+}
+
 
 // --- the map -------------------------------------------------------------
 
@@ -152,6 +367,18 @@ system number_patches() {
     s.index = Map.patches
     Map.patches += 1
     Map.metres = max(Map.metres, s.metres as f32)
+  }
+}
+
+// The patches' day.
+system record_patches() {
+  if len(PatchDays) + Map.patches <= 262144 {
+    for s: Spot, r: Resource in turn by s.index {
+      PatchDays += { nectar: (r.max_nectar * 0.000001) as f32,
+                     nectar_taken: ((r.max_nectar - r.nectar) * 0.000001) as f32,
+                     pollen: r.max_pollen as f32,
+                     pollen_taken: (r.max_pollen - r.pollen) as f32 }
+    }
   }
 }
 
@@ -220,6 +447,7 @@ system patches_drawn() {
     let nectar = if r.max_nectar > 0.0 { (r.nectar / r.max_nectar) as f32 } else { 0.0 }
     let pollen = if r.max_pollen > 0.0 { (r.pollen / r.max_pollen) as f32 } else { 0.0 }
     let r0 = Map.patch
+    if s.index == Chosen.patch { circle(s.x, s.y, r0 + 5.0, 0x80e6edf3) }
     circle(s.x, s.y, r0, 0x1b212b)
     sector(s.x, s.y, r0, -90.0, -90.0 + 360.0 * nectar, 0xc9a227)
     circle(s.x, s.y, r0 * 0.73, 0x1b212b)
@@ -294,15 +522,18 @@ const DIM = 0x6b7888
 
 // Where the charts are: their left side and width, a day's column, the
 // top and height of the bees' and of honey's and pollen's, and where
-// they end (for what comes under them, and for the mouse); whether the
-// panel is too narrow or too short for today's numbers as they are in a
-// big window, and they are small and in two columns instead.
+// they end (for the mouse), and where all under them ends, the weather
+// and the months (for today's numbers); whether the panel is too narrow
+// or too short for today's numbers as they are in a big window, and they
+// are small and in two columns instead. And the charts' scales' tops.
 unique Charts {
   x0: f32, w: f32, column: f32, y0: f32, h: f32, y1: f32, y2: f32, h1: f32,
-  bottom: f32, compact: bool
+  bottom: f32, end: f32, compact: bool, days: i32,
+  workers: f32, honey: f32, pollen: f32
 }
 const SOFT = 0x9fb0c3
 const BRIGHT = 0xe6edf3
+const GRID = 0x232b36
 
 // A number with one decimal.
 proc tenths(x: f32, at_x: f32, at_y: f32, size: f32, color: i32) {
@@ -310,23 +541,67 @@ proc tenths(x: f32, at_x: f32, at_y: f32, size: f32, color: i32) {
   label("{n / 10}.{n % 10}", at_x, at_y, size, color)
 }
 
+// The first day of each month, in a year of 365 (beecs's day 0 is the
+// first of January).
+table month_starts: i32 = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+table months: text[1] = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
+
+// The hours for foraging on a day ahead, where the weather's years come
+// in turn (where they come at random, which is unknown: -1).
+fn hours_ahead(day: i32, hours: Hours, random: bool) -> f32 {
+  let years = len(hours) / 365
+  if years == 0 || random { -1.0 }
+  else { hours[((day / 365) % years) * 365 + day % 365].hours as f32 }
+}
+
 // The workers stacked by stage, a column a day; honey and pollen as
-// lines below. The x axis is the run's days (a year unless said else).
+// lines below, over bars of what was brought in each day; then the
+// weather, a day's hours for foraging from none (dark) to 12 or more,
+// and the months. The x axis is the run's days (a year unless said
+// else).
 system charts() {
   let x0 = Window.width as f32 - Map.panel + 20.0
   let w = Map.panel - 40.0
   let days = max(max(Termination.max_ticks, len(History)), 1)
   let column = w / days as f32
-  // Bees, then honey and pollen, then today's numbers (some 170
-  // points, or 125 small ones): as high as the window lets them be.
+  // Bees, then honey and pollen, the weather and the months, then
+  // today's numbers (some 200 points, or 145 small ones): as high as the
+  // window lets them be.
   let compact = w < 330.0 || Window.height < 500
   let y0 = if compact { 112.0 } else { 130.0 }
   let gap = if compact { 38.0 } else { 44.0 }
-  let under = if compact { 125.0 } else { 175.0 }
+  let under = if compact { 147.0 } else { 203.0 }
   let room = max(Window.height as f32 - y0 - 2.0 * gap - under, 60.0)
   let h = room * 0.5
+  let h1 = room * 0.25
+  let y1 = y0 + h + gap
+  let y2 = y1 + h1 + gap
+  let workers_top = max(max(Most.workers as f32, if Seeds.shown { Seeds.workers } else { 0.0 }), 1.0)
+  let honey_top = max(max(Most.honey, if Seeds.shown { Seeds.honey } else { 0.0 }), 1.0)
+  let pollen_top = max(max(Most.pollen, if Seeds.shown { Seeds.pollen } else { 0.0 }), 1.0)
   rect(x0, y0, w, h, 0x161b23)
-  let scale = h / max(Most.workers, 1) as f32
+  rect(x0, y1, w, h1, 0x161b23)
+  rect(x0, y2, w, h1, 0x161b23)
+  // The months, through the charts.
+  let strip = if compact { 8.0 } else { 10.0 }
+  let y3 = y2 + h1 + 6.0
+  for year in 0..(days + 364) / 365 {
+    for m in 0..12 {
+      let d = year * 365 + month_starts[m]
+      if d < days {
+        let x = x0 + d as f32 * column
+        if d > 0 {
+          line(x, y0, x, y0 + h, GRID)
+          line(x, y1, x, y1 + h1, GRID)
+          line(x, y2, x, y2 + h1, GRID)
+        }
+        if column * 30.0 >= 13.0 {
+          label(months[m], x + 2.0, y3 + strip + 3.0, if compact { 11.0 } else { 12.0 }, DIM)
+        }
+      }
+    }
+  }
+  let scale = h / workers_top
   for i in 0..len(History) {
     let x = x0 + i as f32 * column
     var y = y0 + h
@@ -347,14 +622,20 @@ system charts() {
     Shapes += { x: x, y: y, w: column + 0.6, h: eggs, color: EGGS, round: false }
   }
   label("workers, most {Most.workers}", x0, y0 - 22.0, 15.0, SOFT)
-  // Honey and pollen.
-  let y1 = y0 + h + gap
-  let h1 = room * 0.25
-  rect(x0, y1, w, h1, 0x161b23)
-  let y2 = y1 + h1 + gap
-  rect(x0, y2, w, h1, 0x161b23)
-  let honey_scale = h1 / max(Most.honey, 1.0)
-  let pollen_scale = h1 / max(Most.pollen, 1.0)
+  if Seeds.shown { label("{SEEDS} seeds", x0 + w - 60.0, y0 - 20.0, 13.0, DIM) }
+  // What came in each day, as bars on a scale of their own.
+  let honey_in_scale = h1 / max(Most.honey_in, 0.1)
+  let pollen_in_scale = h1 / max(Most.pollen_in, 1.0)
+  for i in 0..len(History) {
+    let x = x0 + i as f32 * column
+    let a = History[i].honey_in * honey_in_scale
+    let b = History[i].pollen_in * pollen_in_scale
+    if a > 0.0 { rect(x, y1 + h1 - a, column + 0.6, a, 0x4cffc23d) }
+    if b > 0.0 { rect(x, y2 + h1 - b, column + 0.6, b, 0x4cff8c42) }
+  }
+  // Honey and pollen in store.
+  let honey_scale = h1 / honey_top
+  let pollen_scale = h1 / pollen_top
   for i in 1..len(History) {
     let xa = x0 + (i - 1) as f32 * column
     let xb = x0 + i as f32 * column
@@ -365,8 +646,23 @@ system charts() {
   }
   label("honey [kg]", x0, y1 - 22.0, 15.0, SOFT)
   tenths(Most.honey, x0 + w - 60.0, y1 - 22.0, 15.0, DIM)
+  label("bars: in, most", x0 + w * 0.36, y1 - 19.0, 12.0, 0x8a7a4a)
+  tenths(Most.honey_in, x0 + w * 0.36 + 84.0, y1 - 19.0, 12.0, 0x8a7a4a)
   label("pollen [g]", x0, y2 - 22.0, 15.0, SOFT)
   tenths(Most.pollen, x0 + w - 60.0, y2 - 22.0, 15.0, DIM)
+  label("bars: in, most", x0 + w * 0.36, y2 - 19.0, 12.0, 0x8a5a3a)
+  tenths(Most.pollen_in, x0 + w * 0.36 + 84.0, y2 - 19.0, 12.0, 0x8a5a3a)
+  // The weather: the days run, and those ahead where they are known.
+  for d in 0..days {
+    let x = x0 + d as f32 * column
+    let hours = if d < len(History) { History[d].hours } else { hours_ahead(d, Hours, ForagingPeriod.random_years) }
+    if hours >= 0.0 {
+      let part = min(hours / 12.0, 1.0)
+      let color = if d < len(History) { blend(0x1a2029, 0xf2d06b, part) }
+                  else { blend(0x161b23, 0x5e5333, part) }
+      rect(x, y3, column + 0.6, strip, color)
+    }
+  }
   Charts.x0 = x0
   Charts.w = w
   Charts.column = column
@@ -376,7 +672,41 @@ system charts() {
   Charts.y2 = y2
   Charts.h1 = h1
   Charts.bottom = y2 + h1
+  Charts.end = y3 + strip + (if compact { 14.0 } else { 18.0 })
   Charts.compact = compact
+  Charts.days = days
+  Charts.workers = workers_top
+  Charts.honey = honey_top
+  Charts.pollen = pollen_top
+}
+
+// M's runs: of workers, honey and pollen, the middle 80 % of them
+// between two faint lines, and their middle one.
+system bands_drawn() {
+  if Seeds.shown {
+    let days = min(Seeds.days, len(Band) / 3)
+    for d in 1..days {
+      let xa = Charts.x0 + (d as f32 - 0.5) * Charts.column
+      let xb = Charts.x0 + (d as f32 + 0.5) * Charts.column
+      let a = (d - 1) * 3
+      let b = d * 3
+      let ws = Charts.h / Charts.workers
+      let wy = Charts.y0 + Charts.h
+      line(xa, wy - Band[a].lo * ws, xb, wy - Band[b].lo * ws, 0x90e6edf3)
+      line(xa, wy - Band[a].hi * ws, xb, wy - Band[b].hi * ws, 0x90e6edf3)
+      line(xa, wy - Band[a].mid * ws, xb, wy - Band[b].mid * ws, 0xffe6edf3)
+      let hs = Charts.h1 / Charts.honey
+      let hy = Charts.y1 + Charts.h1
+      let ps = Charts.h1 / Charts.pollen
+      let py = Charts.y2 + Charts.h1
+      line(xa, hy - Band[a + 1].lo * hs, xb, hy - Band[b + 1].lo * hs, 0x70e6edf3)
+      line(xa, hy - Band[a + 1].hi * hs, xb, hy - Band[b + 1].hi * hs, 0x70e6edf3)
+      line(xa, hy - Band[a + 1].mid * hs, xb, hy - Band[b + 1].mid * hs, 0xd0e6edf3)
+      line(xa, py - Band[a + 2].lo * ps, xb, py - Band[b + 2].lo * ps, 0x70e6edf3)
+      line(xa, py - Band[a + 2].hi * ps, xb, py - Band[b + 2].hi * ps, 0x70e6edf3)
+      line(xa, py - Band[a + 2].mid * ps, xb, py - Band[b + 2].mid * ps, 0xd0e6edf3)
+    }
+  }
 }
 
 // A number of bees, its name and its colour; the number so far right
@@ -403,10 +733,13 @@ system numbers() {
           18.0, 0xff7b72)
     label("build/beecs/run: start the program there.", 30.0, 78.0, 18.0, 0xff7b72)
   }
-  // (After the last day the clock has gone on to the next.)
-  let day = if Pace.ended { Clock.tick } else { Clock.tick + 1 }
+  // (Between days, and after the last, the clock has gone on to the
+  // next: the day shown is the one done.)
+  let day = if Phase.now == 0 && Clock.tick > 0 { Clock.tick } else { Clock.tick + 1 }
   label("day {day}", x0, 18.0, 30.0, BRIGHT)
-  let what = if Pace.ended { "the end of the run" }
+  let what = if Seeds.running { "seed {SEEDS - Seeds.left + 1} of {SEEDS}" }
+             else if Jump.to >= 0 { "on to day {Jump.to}" }
+             else if Pace.ended { "the end of the run" }
              else if Pace.paused { "stopped" }
              else if Phase.now == 1 { "foraging, round {Day.round + 1}" }
              else if Day.forage || Phase.now == 0 { "in the hive" }
@@ -419,7 +752,7 @@ system numbers() {
   let honey = (0.001 * Hive.honey / EnergyContent.honey) as f32
   let pollen = Hive.pollen as f32
   if Charts.compact {
-    let y = Charts.bottom + 22.0
+    let y = Charts.end + 8.0
     let x1 = x0 + Charts.w * 0.5
     count("eggs", Population.worker_eggs, EGGS, x0, y, 80.0, 13.0)
     count("larvae", Population.worker_larvae, LARVAE, x0, y + 18.0, 80.0, 13.0)
@@ -431,7 +764,7 @@ system numbers() {
     store("pollen", pollen, POLLEN, x1, y + 54.0, 70.0, 13.0)
     label("first forages at {Aff.days} d", x1, y + 72.0, 13.0, SOFT)
   } else {
-    let y = Charts.bottom + 30.0
+    let y = Charts.end + 12.0
     count("eggs", Population.worker_eggs, EGGS, x0, y, 120.0, 15.0)
     count("larvae", Population.worker_larvae, LARVAE, x0, y + 22.0, 120.0, 15.0)
     count("pupae", Population.worker_pupae, PUPAE, x0, y + 44.0, 120.0, 15.0)
@@ -454,9 +787,16 @@ proc row(name: text[30], n: i32, color: i32, x: f32, y: f32) {
   label("{n}", x + 106.0, y, 14.0, BRIGHT)
 }
 
+// A store's row: its name and amount, in tenths.
+proc amount(name: text[30], x: f32, color: i32, at_x: f32, at_y: f32) {
+  rect(at_x, at_y + 4.0, 10.0, 10.0, color)
+  label(name, at_x + 16.0, at_y, 14.0, SOFT)
+  tenths(x, at_x + 106.0, at_y, 14.0, BRIGHT)
+}
+
 system hover() {
   let over = Mouse.x >= Charts.x0 && Mouse.x < Charts.x0 + Charts.w &&
-             Mouse.y >= Charts.y0 && Mouse.y < Charts.bottom
+             Mouse.y >= Charts.y0 && Mouse.y < Charts.end && !Knobs.open
   let day = if Charts.column > 0.0 { ((Mouse.x - Charts.x0) / Charts.column) as i32 } else { -1 }
   if over && day >= 0 && day < len(History) {
     let x = Charts.x0 + (day as f32 + 0.5) * Charts.column
@@ -465,31 +805,50 @@ system hover() {
     line(x, Charts.y2, x, Charts.y2 + Charts.h1, 0xc0e6edf3)
     let honey = History[day].honey
     let pollen = History[day].pollen
-    circle(x, Charts.y1 + Charts.h1 - honey * Charts.h1 / max(Most.honey, 1.0), 3.5, HONEY)
-    circle(x, Charts.y2 + Charts.h1 - pollen * Charts.h1 / max(Most.pollen, 1.0), 3.5,
-           POLLEN)
+    circle(x, Charts.y1 + Charts.h1 - honey * Charts.h1 / Charts.honey, 3.5, HONEY)
+    circle(x, Charts.y2 + Charts.h1 - pollen * Charts.h1 / Charts.pollen, 3.5, POLLEN)
     let workers = History[day].eggs + History[day].larvae + History[day].pupae +
                   History[day].in_hive + History[day].foragers
-    // The box: right of the mouse, or left of it near the window's edge.
-    let bw = 190.0
-    let bh = 214.0
+    // The box: right of the mouse, or left of it near the window's edge;
+    // its rows closer in a low window.
+    let step = if Window.height < 600 { 17.0 } else { 20.0 }
+    let bw = 196.0
+    let bh = 44.0 + step * 14.0
     let bx = max(if Mouse.x + 16.0 + bw > Window.width as f32 { Mouse.x - 16.0 - bw }
                  else { Mouse.x + 16.0 }, 8.0)
     let by = min(max(Mouse.y - bh * 0.5, 8.0), Window.height as f32 - bh - 8.0)
     rect(bx, by, bw, bh, 0xf0202734)
     label("day {day + 1}", bx + 12.0, by + 10.0, 18.0, BRIGHT)
-    row("workers", workers, 0x2b3440, bx + 12.0, by + 38.0)
-    row("eggs", History[day].eggs, EGGS, bx + 12.0, by + 58.0)
-    row("larvae", History[day].larvae, LARVAE, bx + 12.0, by + 78.0)
-    row("pupae", History[day].pupae, PUPAE, bx + 12.0, by + 98.0)
-    row("in the hive", History[day].in_hive, IN_HIVE, bx + 12.0, by + 118.0)
-    row("foragers", History[day].foragers, FORAGERS, bx + 12.0, by + 138.0)
-    rect(bx + 12.0, by + 162.0, 10.0, 10.0, HONEY)
-    label("honey [kg]", bx + 28.0, by + 158.0, 14.0, SOFT)
-    tenths(honey, bx + 118.0, by + 158.0, 14.0, BRIGHT)
-    rect(bx + 12.0, by + 182.0, 10.0, 10.0, POLLEN)
-    label("pollen [g]", bx + 28.0, by + 178.0, 14.0, SOFT)
-    tenths(pollen, bx + 118.0, by + 178.0, 14.0, BRIGHT)
+    let left = bx + 12.0
+    var y = by + 38.0
+    row("workers", workers, 0x2b3440, left, y)
+    y += step
+    row("eggs", History[day].eggs, EGGS, left, y)
+    y += step
+    row("larvae", History[day].larvae, LARVAE, left, y)
+    y += step
+    row("pupae", History[day].pupae, PUPAE, left, y)
+    y += step
+    row("in the hive", History[day].in_hive, IN_HIVE, left, y)
+    y += step
+    row("foragers", History[day].foragers, FORAGERS, left, y)
+    y += step
+    row("died", History[day].died, 0x2b3440, left, y)
+    y += step
+    amount("honey [kg]", honey, HONEY, left, y)
+    y += step
+    amount("  in", History[day].honey_in, 0x4cffc23d, left, y)
+    y += step
+    amount("  eaten", History[day].honey_eaten, 0x2b3440, left, y)
+    y += step
+    amount("pollen [g]", pollen, POLLEN, left, y)
+    y += step
+    amount("  in", History[day].pollen_in, 0x4cff8c42, left, y)
+    y += step
+    amount("  eaten", History[day].pollen_eaten, 0x2b3440, left, y)
+    y += step
+    amount("foraging [h]", History[day].hours,
+           blend(0x1a2029, 0xf2d06b, min(History[day].hours / 12.0, 1.0)), left, y)
   }
 }
 
@@ -511,9 +870,187 @@ system legend() {
   label("patches: what is left", 20.0, 196.0, 14.0, DIM)
   key_of_dot("nectar (outer)", 0xc9a227, 20.0, 218.0)
   key_of_dot("pollen (inner)", 0xd9702a, 20.0, 238.0)
-  label("Space: stop/go", 20.0, Window.height as f32 - 48.0, 14.0, DIM)
-  label("Up/Down: speed {Pace.level}", 20.0, Window.height as f32 - 28.0, 14.0, DIM)
-  label("R: again, next seed", 20.0, Window.height as f32 - 68.0, 14.0, DIM)
+  let bottom = Window.height as f32
+  label("Space: stop/go   Up/Down: speed {Pace.level}", 20.0, bottom - 88.0, 14.0, DIM)
+  label("R: again, next seed   M: {SEEDS} seeds", 20.0, bottom - 68.0, 14.0, DIM)
+  label("P: knobs   S: picture", 20.0, bottom - 48.0, 14.0, DIM)
+  label("click: a day, a patch", 20.0, bottom - 28.0, 14.0, DIM)
+  if Window.frame < Note.until {
+    label(Note.text, 20.0, bottom - 112.0, 14.0, SOFT)
+  }
+}
+
+// Clicks: on the knobs' buttons, while they are open; on the charts, to
+// go to that day (on, or from the first day again with the same seed);
+// on a patch, for its year (or off again).
+system clicks() {
+  let click = Mouse.left && !Pace.click
+  Pace.click = Mouse.left
+  if click && !Seeds.running && !Restart.asked {
+    let on_charts = Mouse.x >= Charts.x0 && Mouse.x < Charts.x0 + Charts.w &&
+                    Mouse.y >= Charts.y0 && Mouse.y < Charts.end
+    if Knobs.open {
+      for i in 0..4 {
+        let y = Knobs.y + 52.0 + i as f32 * 34.0
+        if Mouse.y >= y && Mouse.y < y + 24.0 {
+          let change = if Mouse.x >= Knobs.x + 170.0 && Mouse.x < Knobs.x + 194.0 { -1 }
+                       else if Mouse.x >= Knobs.x + 286.0 && Mouse.x < Knobs.x + 310.0 { 1 }
+                       else { 0 }
+          if i == 0 { Knobs.distance = max(0, min(Knobs.distance + change, 6)) }
+          else if i == 1 { Knobs.flowers = max(0, min(Knobs.flowers + change, 6)) }
+          else if i == 2 { Knobs.bees = max(0, min(Knobs.bees + change, 6)) }
+          else { Knobs.honey = max(0, min(Knobs.honey + change, 6)) }
+        }
+      }
+    } else if on_charts && Charts.column > 0.0 {
+      let day = ((Mouse.x - Charts.x0) / Charts.column) as i32 + 1
+      if day > Clock.tick && !Pace.ended && day <= Charts.days {
+        Jump.to = day
+        Jump.pause = true
+        Pace.paused = false
+      } else if day < Clock.tick || day == Clock.tick && Phase.now != 0 {
+        Restart.asked = true
+        Restart.seed = RandomSeed.seed
+        Restart.keep = true
+        Jump.to = day
+        Jump.pause = true
+      }
+    } else if Mouse.x < Window.width as f32 - Map.panel {
+      Chosen.near = -1
+      for sp: Spot {
+        let dx = sp.x - Mouse.x
+        let dy = sp.y - Mouse.y
+        if dx * dx + dy * dy <= (Map.patch + 6.0) * (Map.patch + 6.0) {
+          Chosen.near = sp.index
+          Chosen.metres = sp.metres
+        }
+      }
+      Chosen.patch = if Chosen.near == Chosen.patch { -1 } else { Chosen.near }
+    }
+  }
+}
+
+// The chosen patch's year: what was taken each day, of nectar [l] and
+// pollen [g], as bars, and what there was, as a line (each on a scale
+// of its own); and what was taken in all.
+proc taken(name: text[30], most: f32, all: f32, x: f32, y: f32, w: f32) {
+  label(name, x, y, 13.0, SOFT)
+  let at = x + text_width(name, 13.0) + 6.0
+  tenths(most, at, y, 13.0, BRIGHT)
+  label("in all", x + w - 92.0, y, 13.0, DIM)
+  tenths(all, x + w - 50.0, y, 13.0, BRIGHT)
+}
+
+system patch_year() {
+  let n = Map.patches
+  let i = Chosen.patch
+  if i >= 0 && i < n {
+    let room = Window.width as f32 - Map.panel
+    let w = max(min(room - 32.0, 440.0), 220.0)
+    let h = 196.0
+    let x = max(room - w - 16.0, 8.0)
+    let y = Window.height as f32 - h - 16.0
+    rect(x, y, w, h, 0xf4181e27)
+    let km = (Chosen.metres + 50) / 100
+    label("the patch at {km / 10}.{km % 10} km", x + 12.0, y + 8.0, 15.0, BRIGHT)
+    label("bars: taken, line: there was", x + w - 12.0 - text_width("bars: taken, line: there was", 12.0),
+          y + 11.0, 12.0, DIM)
+    let days = len(PatchDays) / n
+    let cw = w - 24.0
+    let column = cw / Charts.days as f32
+    var most_nectar: f32 = 0.0
+    var most_pollen: f32 = 0.0
+    var most_nectar_taken: f32 = 0.0
+    var most_pollen_taken: f32 = 0.0
+    var nectar_taken: f32 = 0.0
+    var pollen_taken: f32 = 0.0
+    for d in 0..days {
+      let at = d * n + i
+      most_nectar = max(most_nectar, PatchDays[at].nectar)
+      most_pollen = max(most_pollen, PatchDays[at].pollen)
+      most_nectar_taken = max(most_nectar_taken, PatchDays[at].nectar_taken)
+      most_pollen_taken = max(most_pollen_taken, PatchDays[at].pollen_taken)
+      nectar_taken += PatchDays[at].nectar_taken
+      pollen_taken += PatchDays[at].pollen_taken
+    }
+    let ch = 50.0
+    let ya = y + 58.0
+    let yb = y + 134.0
+    rect(x + 12.0, ya, cw, ch, 0x10141a)
+    rect(x + 12.0, yb, cw, ch, 0x10141a)
+    let nt = ch / max(most_nectar_taken, 0.001)
+    let pt = ch / max(most_pollen_taken, 0.001)
+    let ns = (ch - 2.0) / max(most_nectar, 0.001)
+    let ps = (ch - 2.0) / max(most_pollen, 0.001)
+    for d in 0..days {
+      let at = d * n + i
+      let cx = x + 12.0 + d as f32 * column
+      let a = PatchDays[at].nectar_taken * nt
+      let b = PatchDays[at].pollen_taken * pt
+      if a > 0.0 { rect(cx, ya + ch - a, column + 0.6, a, 0xc9a227) }
+      if b > 0.0 { rect(cx, yb + ch - b, column + 0.6, b, 0xd9702a) }
+      if d > 0 {
+        let before = at - n
+        line(cx - column, ya + ch - PatchDays[before].nectar * ns, cx, ya + ch - PatchDays[at].nectar * ns,
+             0x90e6edf3)
+        line(cx - column, yb + ch - PatchDays[before].pollen * ps, cx, yb + ch - PatchDays[at].pollen * ps,
+             0x90e6edf3)
+      }
+    }
+    taken("nectar [l] a day, most", most_nectar_taken, nectar_taken, x + 12.0, ya - 18.0, cw)
+    taken("pollen [g] a day, most", most_pollen_taken, pollen_taken, x + 12.0, yb - 18.0, cw)
+  }
+}
+
+// P: the knobs, a row each, with - and + to click; what they make of the
+// file's values; and whether R is yet to use them.
+proc knob(name: text[30], value: text[30], at: i32, x: f32, y: f32) {
+  label(name, x + 16.0, y + 3.0, 15.0, SOFT)
+  rect(x + 170.0, y, 24.0, 24.0, 0x2b3440)
+  label("-", x + 178.0, y + 2.0, 18.0, BRIGHT)
+  label(value, x + 204.0, y + 3.0, 15.0, BRIGHT)
+  rect(x + 286.0, y, 24.0, 24.0, 0x2b3440)
+  label("+", x + 292.0, y + 2.0, 18.0, BRIGHT)
+}
+
+system knobs_drawn() {
+  if Knobs.open {
+    let room = Window.width as f32 - Map.panel
+    let w = 330.0
+    let h = 228.0
+    Knobs.x = max((room - w) * 0.5, 8.0)
+    Knobs.y = max((Window.height as f32 - h) * 0.5, 8.0)
+    let x = Knobs.x
+    let y = Knobs.y
+    rect(x, y, w, h, 0xf4181e27)
+    label("knobs, for the next run (R)", x + 16.0, y + 14.0, 16.0, BRIGHT)
+    let distance = factors[Knobs.distance]
+    let flowers = factors[Knobs.flowers]
+    let bees = (Base.bees as f32 * factors[Knobs.bees] + 0.5) as i32
+    let honey = (Base.honey as f32 * factors[Knobs.honey] * 10.0 + 0.5) as i32
+    let d = (distance * 10.0 + 0.5) as i32
+    let f = (flowers * 10.0 + 0.5) as i32
+    knob("patches as far", "x {d / 10}.{d % 10}", Knobs.distance, x, y + 52.0)
+    knob("flowers give", "x {f / 10}.{f % 10}", Knobs.flowers, x, y + 86.0)
+    knob("bees at start", "{bees}", Knobs.bees, x, y + 120.0)
+    knob("honey at start", "{honey / 10}.{honey % 10} kg", Knobs.honey, x, y + 154.0)
+    let pending = Knobs.udistance != Knobs.distance || Knobs.uflowers != Knobs.flowers ||
+                  Knobs.ubees != Knobs.bees || Knobs.uhoney != Knobs.honey
+    label(if pending { "R starts a run with them" } else { "this run has them" },
+          x + 16.0, y + 194.0, 14.0, if pending { 0xff7b72 } else { DIM })
+  }
+}
+
+// S: the window as it is now, into a file where the program was started.
+system snap() {
+  if Note.snap {
+    let day = if Phase.now == 0 && Clock.tick > 0 { Clock.tick } else { Clock.tick + 1 }
+    let file = "beecs-seed-{RandomSeed.seed}-day-{day}.png"
+    screenshot(file)
+    Note.text = "saved {file}"
+    Note.until = Window.frame + 180
+    Note.snap = false
+  }
 }
 
 // The run as it was before its first day: no patches, no squadrons, and
@@ -522,15 +1059,17 @@ system legend() {
 system wipe() {
   for e with Squadron { e.destroy() }
   for e with Patch { e.destroy() }
-  Restart.seed = RandomSeed.seed + 1
   Consumed.honey = 0.0
   Emerging.workers = 0
   Emerging.drones = 0
   Emerging.squadrons = 0
   History = []
+  PatchDays = []
   Most.workers = 0
   Most.honey = 0.0
   Most.pollen = 0.0
+  Most.honey_in = 0.0
+  Most.pollen_in = 0.0
   Map.patches = 0
   Map.metres = 0.0
   Phase.now = 0
@@ -540,13 +1079,56 @@ system wipe() {
 
 // (parameters.txt has said its seed again.)
 system reseed() { RandomSeed.seed = Restart.seed }
+
+// R: the knobs as set from now on; other runs than this one's are not
+// comparable to it any more.
+system turn_knobs() {
+  if !Restart.keep {
+    if Knobs.udistance != Knobs.distance || Knobs.uflowers != Knobs.flowers ||
+       Knobs.ubees != Knobs.bees || Knobs.uhoney != Knobs.honey {
+      Seeds.shown = false
+    }
+    Knobs.udistance = Knobs.distance
+    Knobs.uflowers = Knobs.flowers
+    Knobs.ubees = Knobs.bees
+    Knobs.uhoney = Knobs.honey
+  }
+}
+
+// The bees and the honey at the start by the knobs, while the colony is
+// set up (parameters.txt's are not changed: it may not say them again).
+system knobs_on() {
+  Base.bees = InitialPopulation.count
+  Base.honey = InitialStores.honey
+  InitialPopulation.count = (Base.bees as f32 * factors[Knobs.ubees] + 0.5) as i32
+  InitialStores.honey = Base.honey * factors[Knobs.uhoney] as f64
+}
+
+// And the patches: as far, and their flowers.
+system knobs_off() {
+  InitialPopulation.count = Base.bees
+  InitialStores.honey = Base.honey
+  let distance = factors[Knobs.udistance] as f64
+  let flowers = factors[Knobs.uflowers] as f64
+  for p: mut Patch { p.distance *= distance }
+  for c: mut Constant {
+    c.nectar *= flowers
+    c.pollen *= flowers
+  }
+  for s: mut Seasonal {
+    s.max_nectar *= flowers
+    s.max_pollen *= flowers
+  }
+}
 system restarted() { Restart.asked = false }
 
 schedule setup() {
   parameters()
   weather()
+  knobs_on()
   colony()
   hive()
+  knobs_off()
   count_cohorts()
   count_foragers()
   count_totals()
@@ -558,9 +1140,12 @@ schedule restart() run_if Restart.asked {
   wipe()
   parameters()
   reseed()
+  turn_knobs()
   weather()
+  knobs_on()
   colony()
   hive()
+  knobs_off()
   count_cohorts()
   count_foragers()
   count_totals()
@@ -570,11 +1155,13 @@ schedule restart() run_if Restart.asked {
 }
 
 schedule dawn() run_if !Restart.asked {
+  day_begins()
   aff()
   foraging_period()
   replenish()
   cohort_mortality()
   age_cohorts()
+  emerged()
   lay_eggs()
   to_foragers()
   count_cohorts()
@@ -592,6 +1179,7 @@ schedule dawn() run_if !Restart.asked {
 
 schedule after() run_if !Restart.asked { after_foraging() }
 schedule spent() { spend() }
+schedule gathered() { brought() }
 
 schedule dusk() run_if !Restart.asked {
   evening()
@@ -599,11 +1187,15 @@ schedule dusk() run_if !Restart.asked {
   count_cohorts()
   count_foragers()
   count_totals()
+  before_eating()
   eat_honey()
   eat_pollen()
   record()
+  record_patches()
   tick()
   ended()
+  seed_done()
+  bands()
 }
 
 // A frame, drawn when this frame's steps are taken.
@@ -611,14 +1203,19 @@ schedule frame() run_if Pace.left <= 0 && !Window.closed {
   begin()
   pace()
   layout()
+  clicks()
   rings()
   squadrons()
   patches_drawn()
   charts()
   shapes()
+  bands_drawn()
   numbers()
   legend()
+  patch_year()
+  knobs_drawn()
   hover()
+  snap()
   present()
 }
 
@@ -634,6 +1231,7 @@ main {
       loop {
         foraging::round()
         round_claims()
+        gathered()
         spent()
         loop { frame() } until Pace.left > 0 || Window.closed || Restart.asked
       } until Day.done || Window.closed || Restart.asked
