@@ -18,7 +18,9 @@
 // RUN: cd %t/missing && %t/entsat | FileCheck %s --check-prefix=MISSING
 
 // Literals a clause has twice are taken once, a clause with a literal
-// and its negation is left out, and a unit is assigned before the search.
+// and its negation is left out; variables are eliminated, and the model
+// is extended to them and held against the clauses as read.
+// SMALL:      c eliminated
 // SMALL:      c 5 variables, 7 clauses
 // SMALL:      s SATISFIABLE
 // SMALL-NEXT: v -1 -2 -3 -4 5 0
@@ -30,9 +32,11 @@
 // PIGEONS-NOT:  v
 // PROOF: b'a' b'a\x00' True
 
-// Units that contradict each other through a clause: a conflict at
-// level 0, before any decision.
-// UNITS:      c 0 conflicts, 0 decisions, 1 propagations
+// Units that contradict each other through a clause: strengthening the
+// clauses by the units comes to the empty clause, before the search.
+// UNITS:      c subsumed 0 clauses, strengthened 2
+// UNITS-NEXT: c eliminated 2 variables: 2 clauses out, 0 resolvents in, 1 clauses left
+// UNITS:      c 0 conflicts, 0 decisions, 0 propagations
 // UNITS:      s UNSATISFIABLE
 
 // A file that is not a problem is said so, and has no answer.

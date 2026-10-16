@@ -21,7 +21,8 @@
 //
 // A clause at `c` in the arena is two words and its literals:
 //   c + 0  how many literals
-//   c + 1  bit 0 learned, bits 2-15 its LBD
+//   c + 1  bit 0 learned, bits 2-15 its LBD, bit 16 used since the last
+//          reduction (in conflict analysis)
 //   c + 2  the literals; the two watched ones first
 // A literal's watches lie in `Watch`, at `Lists[l].start` and after:
 // each a clause that watches it and another literal of that clause, the
@@ -35,6 +36,7 @@ import clock
 import dimacs
 
 enum Status { Running, Sat, Unsat, Unknown }
+enum Restarts { Glucose, Luby }
 
 // Per literal: 1 true, -1 false, 0 not assigned; where its watches are;
 // the last clause read in which it was seen (for taking out literals a
@@ -46,19 +48,28 @@ buffer Seen { clause: i32 } capacity 16
 buffer Watch { clause: i32, blocker: i32 } capacity 16
 
 // Per variable: the level it was assigned at, the clause that forced it
-// (-1 for a decision or a unit), the value it last had, a mark for
+// (-1 for a decision or a unit), the value it last had and the one it
+// had in the longest assignment without a conflict since the last
+// restart (the stable mode decides with that), a mark for
 // conflict analysis, and its place in the decision queue (VMTF: a list
 // in the order the variables were last bumped, `stamp` growing along it).
 buffer Vars {
-  level: i32, reason: i32, phase: bool, mark: bool, prev: i32, next: i32, stamp: i64
+  level: i32, reason: i32, phase: bool, target: bool, mark: bool, prev: i32, next: i32,
+  stamp: i64
 } capacity 16
+
+// For the stable mode's decisions (VSIDS): a heap of the variables by
+// their scores, the highest first. Row i is the heap's place i (`var`,
+// the variable there) and variable i (`pos`, its place, -1 where it is
+// not in the heap; `score`), so that one buffer holds it all.
+buffer Heap { var: i32, pos: i32, score: f64 } capacity 16
 
 buffer Arena { w: i32 } capacity 16
 
 // The assigned literals in the order they were assigned, and where each
 // decision level starts among them (with a stamp for counting levels).
 buffer Trail { lit: i32 } capacity 16
-buffer Levels { start: i32, stamp: i64 } capacity 16
+buffer Levels { start: i32, stamp: i64, glued: i64 } capacity 16
 
 // Room for conflict analysis: the clause being learned, the variables
 // whose marks are to be cleared, a stack for minimizing, the variables
@@ -67,12 +78,28 @@ buffer Learnt { lit: i32 } capacity 16
 buffer Clear { v: i32 } capacity 16
 buffer Stack { lit: i32 } capacity 16
 buffer Bumped { v: i32 } capacity 16
-// How many learned clauses of each LBD might be deleted.
+buffer Spare { v: i32 } capacity 16
+// How many learned clauses of each LBD might be deleted; how many of the
+// bumped variables have each byte of a stamp, sorting them.
 buffer Counts { n: i32 } capacity 256
 
-// `proof`: whether to write a DRAT proof to `proof_file`. Restarts come
-// after `restart_unit` times the Luby sequence in conflicts.
-unique Options { proof: bool, proof_file: text[126], restart_unit: i64 }
+// `proof`: whether to write a DRAT proof to `proof_file`. Restarts are
+// Glucose's: where the LBDs of the last clauses learned (an average
+// that forgets fast) are `margin` times those of all of them (one that
+// forgets slowly), no sooner than 2 conflicts after the last; or Luby's,
+// `restart_unit` times the Luby sequence in conflicts. `seconds`, where
+// it is more than 0, is how long the search may take before it gives up
+// (looked at every 256 conflicts): the answer is then UNKNOWN.
+// With `modes` the search goes between two (as CaDiCaL does): focused,
+// as above, and stable, which decides by VSIDS scores (`decay` a
+// conflict) and restarts after `stable_unit` times the Luby sequence;
+// the first `first_mode` conflicts focused, each mode then twice as long
+// as the one before.
+unique Options {
+  proof: bool, proof_file: text[126], restarts: Restarts, restart_unit: i64,
+  margin: f64, fast: f64, slow: f64, reduce_interval: i64, reduce_percent: i32,
+  seconds: f64, modes: bool, first_mode: i64, decay: f64, stable_unit: i64
+}
 
 // `conflict`: the clause propagation falsified, -1 for none. `trail`:
 // how many literals are assigned; `qhead`: how many of them are
@@ -84,13 +111,26 @@ unique Search {
   conflicts: i64, decisions: i64, propagations: i64, restarts: i64,
   reductions: i64, deleted: i64, reduce: i64, rewatch: bool,
   first: i32, last: i32, cursor: i32, stamp: i64,
-  luby: i64, since: i64, started: f64, written: bool
+  luby: i64, since: i64, started: f64, written: bool,
+  fast: f64, fast_left: f64, slow: f64, slow_left: f64,
+  stable: bool, switch: i64, mode: i64, heap: i32, inc: f64, stable_luby: i64, target: i32,
+  glued: i64
 }
 
 world {
   Options.proof = true
   Options.proof_file = "proof.drat"
+  Options.restarts = Restarts.Glucose
   Options.restart_unit = 100
+  Options.margin = 1.1
+  Options.fast = 0.03
+  Options.slow = 0.00001
+  Options.reduce_interval = 300
+  Options.reduce_percent = 75
+  Options.modes = true
+  Options.first_mode = 1000
+  Options.decay = 0.95
+  Options.stable_unit = 1024
 }
 
 // The Luby sequence, from 0: 1 1 2 1 1 2 4 1 1 2 1 1 2 4 8 ...
@@ -111,6 +151,82 @@ fn luby(x: i64) -> i64 {
   one << seq
 }
 
+// The heap's variable at `at` up, while its parent has a lower score.
+proc heap_up(heap: mut Heap, from: i32) {
+  let v = heap[from].var
+  let score = heap[v].score
+  var at = from
+  var going = true
+  while at > 0 && going {
+    let parent = (at - 1) / 2
+    let above = heap[parent].var
+    if heap[above].score < score {
+      heap[at].var = above
+      heap[above].pos = at
+      at = parent
+    } else {
+      going = false
+    }
+  }
+  heap[at].var = v
+  heap[v].pos = at
+}
+
+// The heap's variable at `at` down, while a child has a higher score.
+proc heap_down(heap: mut Heap, from: i32, size: i32) {
+  let v = heap[from].var
+  let score = heap[v].score
+  var at = from
+  var going = true
+  while 2 * at + 1 < size && going {
+    var child = 2 * at + 1
+    if child + 1 < size && heap[heap[child + 1].var].score > heap[heap[child].var].score {
+      child += 1
+    }
+    let below = heap[child].var
+    if heap[below].score > score {
+      heap[at].var = below
+      heap[below].pos = at
+      at = child
+    } else {
+      going = false
+    }
+  }
+  heap[at].var = v
+  heap[v].pos = at
+}
+
+// `v` into the heap of `size`, where it is not; the size after.
+proc heap_insert(heap: mut Heap, v: i32, size: i32) -> i32 {
+  var after = size
+  if heap[v].pos < 0 {
+    heap[size].var = v
+    heap[v].pos = size
+    heap_up(heap, size)
+    after = size + 1
+  }
+  after
+}
+
+// The whole square root of `n`, rounded down.
+fn root(n: i64) -> i64 {
+  var x = n
+  var y = (x + 1) / 2
+  while y < x {
+    x = y
+    y = (x + n / x) / 2
+  }
+  x
+}
+
+// Whether a reduction may delete the clause with this meta word: a
+// learned one that is no reason, of LBD 3 or more, and not of LBD 6 or
+// less where it was used since the last reduction.
+fn droppable(meta: i32, locked: bool) -> bool {
+  let lbd = meta >> 2 & 0x3fff
+  meta & 1 != 0 && !locked && lbd > 2 && !(lbd <= 6 && meta & 0x10000 != 0)
+}
+
 // A literal as binary DRAT writes it: 2 * its DIMACS variable, plus one
 // where negated, seven bits a byte, the lowest first.
 proc proof_lit(bytes: mut Bytes, lit: i32) {
@@ -129,16 +245,29 @@ system setup() {
   Values = [{ v: 0 }; 2 * n]
   Lists = [{ start: 0, size: 0, cap: 0 }; 2 * n]
   Seen = [{ clause: -1 }; 2 * n]
-  Vars = [{ level: 0, reason: -1, phase: false, mark: false, prev: -1, next: -1, stamp: 0 }; n]
+  Vars = [{ level: 0, reason: -1, phase: false, target: false, mark: false, prev: -1, next: -1,
+             stamp: 0 }; n]
   Trail = [{ lit: 0 }; n]
-  Levels = [{ start: 0, stamp: 0 }; n + 1]
+  Levels = [{ start: 0, stamp: 0, glued: 0 }; n + 1]
   Learnt = [{ lit: 0 }; n + 1]
   Clear = [{ v: 0 }; n + 1]
   Stack = [{ lit: 0 }; n + 1]
   Bumped = [{ v: 0 }; n + 1]
+  Spare = [{ v: 0 }; n + 1]
+  Heap = [{ var: 0, pos: -1, score: 0.0 }; n]
+  for v in 0..n {
+    Heap[v].var = v
+    Heap[v].pos = v
+  }
+  Search.heap = n
+  Search.inc = 1.0
+  Search.stable = false
+  Search.switch = Options.first_mode
+  Search.mode = Options.first_mode
+  Search.stable_luby = 0
+  Search.target = 0
   Counts = [{ n: 0 }; 256]
   Arena = []
-  Bytes = []
   // (The queue starts as the variables in their order.)
   for v in 0..n {
     Vars[v].prev = v - 1
@@ -153,11 +282,14 @@ system setup() {
   Search.qhead = 0
   Search.level = 0
   Search.luby = 0
+  Search.fast = 0.0
+  Search.fast_left = 1.0
+  Search.slow = 0.0
+  Search.slow_left = 1.0
   Search.since = 0
-  Search.written = false
   Search.reductions = 0
   Search.deleted = 0
-  Search.reduce = 2000
+  Search.reduce = Options.reduce_interval
   var trail = 0
   var unsat = false
   var at = 0
@@ -207,7 +339,7 @@ system setup() {
   Search.status = if !Problem.read { Status.Unknown }
                   else if unsat { Status.Unsat }
                   else { Status.Running }
-  Search.started = wait_until(0.0)
+  if Search.started == 0.0 { Search.started = wait_until(0.0) }
 }
 
 // Unit propagation: the literals on the trail that are not propagated
@@ -323,6 +455,23 @@ system learn() {
     var going = true
     while going {
       let size = Arena[c].w
+      // (A learned clause that is used: its LBD again, as the levels are
+      // now, kept where it is less.)
+      let meta = Arena[c + 1].w
+      if meta & 1 != 0 && meta >> 2 & 0x3fff > 2 {
+        Search.glued += 1
+        let stamp = Search.glued
+        var glue = 0
+        for j in 0..size {
+          let at = Vars[Arena[c + 2 + j].w >> 1].level
+          if Levels[at].glued != stamp {
+            Levels[at].glued = stamp
+            glue += 1
+          }
+        }
+        if glue < meta >> 2 & 0x3fff { Arena[c + 1].w = meta & ~(0x3fff << 2) | glue << 2 }
+      }
+      Arena[c + 1].w |= 0x10000
       let from = if p < 0 { 0 } else { 1 }
       for j in from..size {
         let q = Arena[c + 2 + j].w
@@ -426,22 +575,68 @@ system learn() {
       }
     }
 
-    // (The variables met to the front of the queue, in the order they
-    // had in it.)
-    for b in 1..bumped {
-      let v = Bumped[b].v
-      let s = Vars[v].stamp
-      var j = b
-      while j > 0 && Vars[Bumped[j - 1].v].stamp > s {
-        Bumped[j].v = Bumped[j - 1].v
-        j -= 1
+    // (Stable: the variables met get more score, and the next conflict's
+    // gets more again; where scores grow too large all are made smaller.)
+    if Search.stable {
+      var inc = Search.inc
+      for b in 0..bumped {
+        let v = Bumped[b].v
+        Heap[v].score += inc
+        if Heap[v].score > 1e150 {
+          for u in 0..len(Heap) { Heap[u].score *= 1e-150 }
+          inc *= 1e-150
+        }
+        if Heap[v].pos >= 0 { heap_up(Heap, Heap[v].pos) }
       }
-      Bumped[j].v = v
+      Search.inc = inc / Options.decay
+    }
+    // (Focused: the variables met to the front of the queue, in the order
+    // they had in it: a few by insertion, more by their stamps' bytes, a
+    // pass for each byte in which they differ.)
+    if Search.stable {
+    } else if bumped <= 32 {
+      for b in 1..bumped {
+        let v = Bumped[b].v
+        let s = Vars[v].stamp
+        var j = b
+        while j > 0 && Vars[Bumped[j - 1].v].stamp > s {
+          Bumped[j].v = Bumped[j - 1].v
+          j -= 1
+        }
+        Bumped[j].v = v
+      }
+    } else {
+      let one = Vars[Bumped[0].v].stamp
+      var differ: i64 = 0
+      for b in 1..bumped { differ |= Vars[Bumped[b].v].stamp ^ one }
+      var shift = 0
+      while shift < 64 {
+        if (differ >> shift) & 255 != 0 {
+          Counts = [{ n: 0 }; 256]
+          for b in 0..bumped {
+            Counts[((Vars[Bumped[b].v].stamp >> shift) & 255) as i32].n += 1
+          }
+          var at = 0
+          for d in 0..256 {
+            let here = Counts[d].n
+            Counts[d].n = at
+            at += here
+          }
+          for b in 0..bumped {
+            let v = Bumped[b].v
+            let d = ((Vars[v].stamp >> shift) & 255) as i32
+            Spare[Counts[d].n].v = v
+            Counts[d].n += 1
+          }
+          for b in 0..bumped { Bumped[b].v = Spare[b].v }
+        }
+        shift += 8
+      }
     }
     var first = Search.first
     var last = Search.last
     var stamp = Search.stamp
-    for b in 0..bumped {
+    for b in 0..if Search.stable { 0 } else { bumped } {
       let v = Bumped[b].v
       if v != last {
         let before = Vars[v].prev
@@ -464,15 +659,52 @@ system learn() {
     // its value as its phase, and the queue's cursor goes to the
     // variable that is latest in it.)
     var since = Search.since + 1
-    let restart = since >= Options.restart_unit * luby(Search.luby)
+    let glue = lbd as f64
+    let fast_left = Search.fast_left * (1.0 - Options.fast)
+    let slow_left = Search.slow_left * (1.0 - Options.slow)
+    let fast = Search.fast + Options.fast * (glue - Search.fast)
+    let slow = Search.slow + Options.slow * (glue - Search.slow)
+    Search.fast = fast
+    Search.fast_left = fast_left
+    Search.slow = slow
+    Search.slow_left = slow_left
+    // (And the other mode where this one's conflicts are done, after a
+    // restart.)
+    let switching = Options.modes && conflicts >= Search.switch
+    let restart = if switching {
+                    true
+                  } else if Search.stable {
+                    since >= Options.stable_unit * luby(Search.stable_luby)
+                  } else if Options.restarts == Restarts.Luby {
+                    since >= Options.restart_unit * luby(Search.luby)
+                  } else {
+                    since >= 2 && fast / (1.0 - fast_left) > Options.margin * (slow / (1.0 - slow_left))
+                  }
+    // (What was assigned before this level holds together: where it is
+    // more than ever since the last restart, it is the target.)
+    let held = Levels[level].start
+    if held > Search.target {
+      for i in 0..held {
+        let l = Trail[i].lit
+        Vars[l >> 1].target = l & 1 == 0
+      }
+      Search.target = held
+    }
+    if restart { Search.target = 0 }
     let to = if restart { 0 } else { back }
     if restart {
       since = 0
-      Search.luby += 1
+      if Search.stable { Search.stable_luby += 1 } else { Search.luby += 1 }
       Search.restarts += 1
+    }
+    if switching {
+      Search.stable = !Search.stable
+      if !Search.stable { Search.mode *= 2 }
+      Search.switch = conflicts + Search.mode
     }
     let start = Levels[to + 1].start
     var cursor = Search.cursor
+    var heap = Search.heap
     for i in start..Search.trail {
       let l = Trail[i].lit
       let v = l >> 1
@@ -480,7 +712,9 @@ system learn() {
       Values[l ^ 1].v = 0
       Vars[v].phase = l & 1 == 0
       if cursor < 0 || Vars[v].stamp > Vars[cursor].stamp { cursor = v }
+      heap = heap_insert(Heap, v, heap)
     }
+    Search.heap = heap
     var trail = start
     Search.cursor = cursor
     Search.qhead = start
@@ -527,6 +761,10 @@ system learn() {
       trail += 1
     }
     Search.trail = trail
+    if Options.seconds > 0.0 && conflicts % 256 == 0 &&
+       wait_until(0.0) - Search.started > Options.seconds {
+      Search.status = Status.Unknown
+    }
 
     if Options.proof {
       Bytes += { value: 97 }
@@ -541,12 +779,12 @@ system learn() {
   }
 }
 
-// Every so many conflicts (2,000 more each time) half of the learned
-// clauses go: those of the highest LBD, of an LBD where the half is
-// reached the oldest; never one of LBD 2 or less, nor one that is the
-// reason of an assignment. The clauses that stay are moved down in the
-// arena and the reasons that move with them told; `watch` then makes the
-// watch lists again.
+// Every `reduce_interval` times the square root of the reductions so far
+// conflicts, `reduce_percent` of the learned clauses that may go go
+// (see `droppable`): those of the highest LBD, of an LBD where the share
+// is reached the oldest. The clauses that stay are moved down in the
+// arena, no longer used, and the reasons that move with them told;
+// `watch` then makes the watch lists again.
 system reduce() {
   let top = len(Arena)
   Counts = [{ n: 0 }; 256]
@@ -558,14 +796,14 @@ system reduce() {
     let first = Arena[c + 2].w
     let locked = Vars[first >> 1].reason == c && Values[first].v == 1
     let lbd = min(meta >> 2 & 0x3fff, 255)
-    if meta & 1 != 0 && !locked && lbd > 2 {
+    if droppable(meta, locked) {
       Counts[lbd].n += 1
       candidates += 1
     }
     c += 2 + size
   }
   // (All of an LBD above `cut` go, and the first `left` of those at it.)
-  var left = candidates / 2
+  var left = candidates * Options.reduce_percent / 100
   var cut = 255
   while cut > 2 && Counts[cut].n <= left {
     left -= Counts[cut].n
@@ -581,7 +819,7 @@ system reduce() {
     let locked = Vars[first >> 1].reason == c && Values[first].v == 1
     let lbd = min(meta >> 2 & 0x3fff, 255)
     var keep = true
-    if meta & 1 != 0 && !locked && lbd > 2 {
+    if droppable(meta, locked) {
       if lbd > cut {
         keep = false
       } else if lbd == cut && left > 0 {
@@ -592,6 +830,7 @@ system reduce() {
     if keep {
       if locked { Vars[first >> 1].reason = w }
       for i in 0..2 + size { Arena[w + i].w = Arena[c + i].w }
+      Arena[w + 1].w = meta & ~0x10000
       w += 2 + size
     } else {
       deleted += 1
@@ -607,7 +846,7 @@ system reduce() {
   Search.rewatch = true
   Search.reductions += 1
   Search.deleted += deleted
-  Search.reduce = Search.conflicts + 2000 + 300 * Search.reductions
+  Search.reduce = Search.conflicts + Options.reduce_interval * root(Search.reductions + 1)
   if Options.proof && len(Bytes) > 1048576 {
     write_bytes(Options.proof_file, Bytes, 0, len(Bytes), Search.written)
     Search.written = true
@@ -656,15 +895,40 @@ system watch() {
 // decided, with the value it had last; where there is none, every
 // variable has a value and no clause is false.
 system decide() {
-  var v = Search.cursor
-  while v >= 0 && Values[2 * v].v != 0 { v = Vars[v].prev }
-  Search.cursor = v
+  var v = -1
+  if Search.stable {
+    // (The heap's first that is not assigned; those that are, out.)
+    var heap = Search.heap
+    var going = heap > 0
+    while going {
+      let top = Heap[0].var
+      heap -= 1
+      Heap[top].pos = -1
+      if heap > 0 {
+        Heap[0].var = Heap[heap].var
+        Heap[Heap[0].var].pos = 0
+        heap_down(Heap, 0, heap)
+      }
+      if Values[2 * top].v == 0 {
+        v = top
+        going = false
+      } else {
+        going = heap > 0
+      }
+    }
+    Search.heap = heap
+  } else {
+    v = Search.cursor
+    while v >= 0 && Values[2 * v].v != 0 { v = Vars[v].prev }
+    Search.cursor = v
+  }
   if v < 0 {
     Search.status = Status.Sat
   } else {
     let level = Search.level + 1
     let trail = Search.trail
-    let l = if Vars[v].phase { 2 * v } else { 2 * v + 1 }
+    let positive = if Search.stable { Vars[v].target } else { Vars[v].phase }
+    let l = if positive { 2 * v } else { 2 * v + 1 }
     Levels[level].start = trail
     Values[l].v = 1
     Values[l ^ 1].v = -1

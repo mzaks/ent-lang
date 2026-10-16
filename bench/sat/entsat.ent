@@ -1,0 +1,32 @@
+// entsat as bench/sat/run.py times it: examples/sat/entsat.ent without
+// the proof, which for some problems is gigabytes, and giving up after
+// as many seconds as "limit.txt" says where it is started (if it is).
+//
+//   ENT_CFLAGS=-march=native tools/ent build -I examples/sat bench/sat/entsat.ent -o build/sat/entsat-bench
+import files
+import dimacs
+import sat
+import satprep
+import room
+
+world {
+  Options.proof = false
+}
+
+system limit() {
+  let size = read_file("limit.txt", Bytes)
+  if size > 0 {
+    let (seconds, after) = number(Bytes, skip(Bytes, 0))
+    if after > 0 { Options.seconds = seconds as f64 }
+  }
+  Bytes = []
+}
+
+schedule start() { limit() read() prepare() setup() watch() }
+schedule done() { extend() finish() }
+
+main {
+  start()
+  loop { round() } until Search.status != Status.Running
+  done()
+}

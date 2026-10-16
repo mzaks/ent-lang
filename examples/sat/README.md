@@ -4,30 +4,46 @@ Solves a problem in conjunctive normal form, read from a DIMACS file, by
 conflict-driven clause learning, and prints the answer as SAT
 competitions print it. Every model is held against the clauses read
 before it is printed, and every unsatisfiable answer comes with a DRAT
-proof, which drat-trim checks. This is phase 1 of the plan in the design
-doc ("entsat: SAT and SMT solving in ent-lang"): the SAT core alone.
+proof, which drat-trim checks. These are phases 1 and 2 of the plan in
+the design doc ("entsat: SAT and SMT solving in ent-lang"): the SAT
+core, and making it fast.
 
 - `dimacs.ent`: the file into a buffer of literals, each clause ended by
   -1. A literal is its variable's number from 0 times two, plus one
   where negated.
+- `satprep.ent`: subsumption, strengthening and bounded variable
+  elimination before the search, as MiniSat's SimpSolver does them. Every variable is an entity with what
+  eliminating it would cost, worked out on all cores; then the variables
+  are taken in turn (`in turn by`), the cheapest first, and one goes
+  where its resolvents are no more than the clauses they replace. The
+  resolvents go into the proof; the removed clauses are kept, and a model
+  is extended to the eliminated variables and held against the clauses
+  as read.
 - `sat.ent`: the solver. Its state is buffers sized from the problem
   (the arena of clauses, the watch lists, the trail, the variables) and
-  one unique, `Search`; a round of the search is three systems, run by
-  `main` until there is an answer:
+  one unique, `Search`; a round of the search is a schedule of systems,
+  run by `main` until there is an answer:
   - `propagate`: unit propagation over two watched literals per clause,
     each watch with a blocker literal, as MiniSat has them;
   - `learn`: the first-UIP clause of a conflict, minimized as MiniSat
-    minimizes it, its variables moved to the front of the decision
-    queue (VMTF, in the order they had in it), the jump back, and the
-    clause into the arena and the proof;
-  - `decide`: the latest unassigned variable of the queue, with the
-    value it last had.
-  
-  Restarts follow the Luby sequence (100 conflicts a unit). Every 2,000
-  conflicts and 300 more each time, `reduce` deletes half of the learned
-  clauses, those of the highest LBD, and moves the rest down the arena;
-  `watch` then lays the watch lists out again.
-- `entsat.ent`: the program, with room for 4 million variables.
+    minimizes it, the jump back, and the clause into the arena and the
+    proof;
+  - `reduce` and `watch`: every 300 times the square root of the
+    reductions so far conflicts, three quarters of the learned clauses
+    that may go go (LBD 3 or more, and not those of LBD 6 or less that
+    conflicts used since); the arena is moved down and made shorter, and
+    the watch lists are laid out again;
+  - `decide`: the next variable, with the value it last had.
+
+  The search goes between two modes, as CaDiCaL does: focused, with
+  decisions in a VMTF queue (the variables of a conflict moved to its
+  front, in the order they had in it) and Glucose's restarts (where the
+  recent LBDs are 10% above the long-run ones); and stable, with VSIDS
+  scores in a heap and restarts after 1,024 times the Luby sequence. The
+  first 1,000 conflicts are focused, and each mode then lasts twice as
+  long as the one before.
+- `entsat.ent`: the program; `room.ent` gives it room for 4 million
+  variables and a file of 256 MB.
 - `fetch.sh`: SATLIB's random 3-SAT sets (uf/uuf 50 to 250 variables,
   4,999 problems) and drat-trim, into `build/sat`.
 - `check/satlib.py`: runs entsat on those sets, checks each model again
@@ -41,5 +57,8 @@ cd somewhere && cp problem.cnf . && .../build/sat/entsat
 ```
 
 The program reads "problem.cnf" where it is started and writes
-"proof.drat" there (binary DRAT). `Options` in `sat.ent` turns the proof
-off and sets the restart unit.
+"proof.drat" there (binary DRAT). `Options` in `sat.ent` and `Prep` in
+`satprep.ent` hold the settings: the proof, the restarts and modes, the
+reductions, a time limit (`Options.seconds`), the elimination's bounds.
+`bench/sat` times it against MiniSat and CaDiCaL on SAT Competition
+problems.

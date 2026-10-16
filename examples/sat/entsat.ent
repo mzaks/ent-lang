@@ -5,30 +5,14 @@
 //   tools/ent build examples/sat/entsat.ent -o build/sat/entsat
 //   cd somewhere && cp problem.cnf . && .../build/sat/entsat
 //
-// (Room for 4 million variables, 32 million literals read and a quarter
-// of a billion words of clauses.)
-import console
-import files
+// (Room as room.ent says.)
 import dimacs
 import sat
+import satprep
+import room
 
-capacity Bytes 268435456
-capacity Clauses 33554432
-capacity Values 8388608
-capacity Lists 8388608
-capacity Watch 134217728
-capacity Seen 8388608
-capacity Vars 4194304
-capacity Trail 4194304
-capacity Levels 4194305
-capacity Learnt 4194305
-capacity Clear 4194305
-capacity Stack 4194305
-capacity Bumped 4194305
-capacity Arena 268435456
-
-schedule start() { read() setup() watch() }
-schedule done() { finish() }
+schedule start() { read() prepare() setup() watch() }
+schedule done() { extend() finish() }
 
 main {
   start()
