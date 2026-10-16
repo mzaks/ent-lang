@@ -25,8 +25,9 @@ of these, which are built and linked with the program:
 The program itself is compiled by the LLVM its IR was made with. The C and
 C++ next to modules, and the link, go to the machine's own compiler, which
 knows where the machine's libraries are: `cc` and `c++`, or what ENT_CC and
-ENT_CXX name. ENT_CFLAGS has more flags for compiling the program itself
-(-march=native, say).
+ENT_CXX name; on a Mac, Homebrew's include and lib are added to where
+they look (after CPATH and LIBRARY_PATH). ENT_CFLAGS has more flags for
+compiling the program itself (-march=native, say).
 
 Systems that run one after another in a schedule and only work on the
 entities they go through are made into one loop over each kind of entity,
@@ -107,6 +108,14 @@ def llvm_directories():
                 os.path.join(ROOT, "build/toolchain/.pixi/envs/default"),
                 "/opt/homebrew/opt/llvm"]
     return [os.path.join(prefix, "bin") for prefix in prefixes if prefix]
+
+
+def homebrew():
+    """Where Homebrew is: $HOMEBREW_PREFIX, else where it installs to on
+    Apple's chips and on Intel."""
+    prefixes = [os.environ.get("HOMEBREW_PREFIX"), "/opt/homebrew",
+                "/usr/local"]
+    return list(dict.fromkeys(prefix for prefix in prefixes if prefix))
 
 
 def host_compiler(variable, names, fallback):
@@ -402,6 +411,17 @@ def build(arguments, output, directory):
         host["PATH"] = os.pathsep.join(
             path for path in os.environ.get("PATH", "").split(os.pathsep)
             if os.path.realpath(path) not in toolchain)
+    # On a Mac the machine's compiler does not know Homebrew's libraries
+    # (raylib, say), as one on Linux knows those in /usr: they are looked
+    # for there after where the environment says.
+    if sys.platform == "darwin":
+        for variable, folder in (("CPATH", "include"),
+                                 ("LIBRARY_PATH", "lib")):
+            more = [os.path.join(prefix, folder) for prefix in homebrew()]
+            more = [path for path in more if os.path.isdir(path)]
+            host[variable] = os.pathsep.join(
+                [path for path in host.get(variable, "").split(os.pathsep)
+                 if path] + more)
     others = []
     for index, path in enumerate(given):
         name, extension = os.path.splitext(os.path.basename(path))
