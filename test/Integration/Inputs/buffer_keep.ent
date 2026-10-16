@@ -1,0 +1,36 @@
+// A buffer that keeps its first rows (`Name = Name[..n]`), in a system
+// and in a proc that was given it `mut`.
+import console
+
+buffer Rows { x: i32, y: f32 } capacity 8
+
+proc halve(rows: mut Rows) {
+  rows = rows[..len(rows) / 2]
+}
+
+proc show(rows: Rows, what: text[30]) {
+  var line: text[126] = "{what}: {len(rows)} rows"
+  for i in 0..len(rows) { line += " {rows[i].x}" }
+  put(line + ", row 5 reads {rows[5].x} {rows[5].y}")
+}
+
+system run() {
+  for i in 0..8 { Rows += { x: i, y: i as f32 } }
+  show(Rows, "filled")
+  Rows = Rows[..6]
+  show(Rows, "kept 6")
+  Rows = Rows[..10]
+  show(Rows, "kept 10")
+  halve(Rows)
+  show(Rows, "halved")
+  Rows += { x: 30, y: 30.0 }
+  Rows += { x: 40, y: 40.0 }
+  Rows += { x: 50, y: 50.0 }
+  show(Rows, "appended")
+  Rows = Rows[..-1]
+  show(Rows, "kept -1")
+  flush()
+}
+
+schedule once() { run() }
+main { once() }

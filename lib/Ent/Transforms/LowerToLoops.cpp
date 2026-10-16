@@ -13175,7 +13175,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
               .walk([](Operation *op) {
                 return isa<SpawnOp, DespawnOp, EachOp, EdgesOp, ConnectOp,
                            AppendOp, ClearOp, BufferLenOp, BufferAtOp,
-                           BufferOfOp, BufferSetOp, BufferFillOp>(op)
+                           BufferOfOp, BufferSetOp, BufferFillOp,
+                           BufferKeepOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -13549,7 +13550,7 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
   SmallVector<Operation *> uses;
   func.walk([&](Operation *op) {
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferSetOp,
-            BufferFillOp>(op))
+            BufferFillOp, BufferKeepOp>(op))
       uses.push_back(op);
     else if (auto invoke = dyn_cast<InvokeOp>(op);
              invoke && takesBuffer(invoke))
@@ -13618,6 +13619,18 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       memref::StoreOp::create(rewriter, loc, stored,
                               world.bufferField(buffer, *field),
                               ValueRange{world.toIndex(loc, index)});
+      rewriter.eraseOp(op);
+    } else if (auto keep = dyn_cast<BufferKeepOp>(op)) {
+      // (Fewer rows, those it had; the rest of the column is not read
+      // again before a row is given there anew.)
+      Value rows = arith::MaxSIOp::create(
+          rewriter, loc, keep.getCount(),
+          arith::ConstantIntOp::create(rewriter, loc, 0, 32));
+      rows = arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(),
+                                    rows);
+      memref::StoreOp::create(
+          rewriter, loc, arith::MinUIOp::create(rewriter, loc, rows, count),
+          counter, ValueRange{zero});
       rewriter.eraseOp(op);
     } else if (auto fill = dyn_cast<BufferFillOp>(op)) {
       Value rows = arith::MaxSIOp::create(

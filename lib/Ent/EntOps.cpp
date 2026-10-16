@@ -557,6 +557,14 @@ BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 }
 
 LogicalResult
+BufferKeepOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifyBufferUse(symbolTable, *this, getBufferAttr(), /*writes=*/true,
+                         /*outside=*/true, "shortens ")
+             ? success()
+             : failure();
+}
+
+LogicalResult
 BufferFillOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   BufferOp buffer = verifyBufferUse(symbolTable, *this, getBufferAttr(),
                                     /*writes=*/true, /*outside=*/true,
@@ -1175,8 +1183,8 @@ LogicalResult FunctionOp::verifyRegions() {
       return;
     // (A buffer it was given: each of these says for itself whether it
     // was, and given to be changed.)
-    if (isa<BufferAtOp, BufferLenOp, BufferSetOp, BufferFillOp, AppendOp,
-            ClearOp>(op))
+    if (isa<BufferAtOp, BufferLenOp, BufferSetOp, BufferFillOp,
+            BufferKeepOp, AppendOp, ClearOp>(op))
       return;
     // (And the entities of a component it was given: read, gone through,
     // set and spawned, each of which says for itself whether it may.)

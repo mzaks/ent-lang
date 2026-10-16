@@ -1620,6 +1620,10 @@ to a device at once (all there is to draw), in place of a call for each.
 - `Name = []` empties it, outside a `for`. `Name = [{ field: value, .. };
   n]` gives it `n` rows, all alike, in place of those it had (none where
   `n` is below nought; more than it holds stops the program).
+  `Name = Name[..n]` keeps its first `n` rows as they are, and none after
+  them: all it has where it has no more, none where `n` is below nought.
+  Rows given after that come after those, as after `Name = []`. Only the
+  buffer's own name stands on the right; there are no slices besides.
 - `Name[i].field = value` gives a row it has another value in a field,
   and so `+=`, `|=` and the other assignments; where it has no row `i`,
   nothing happens. Outside a `for` over entities, or in one whose
@@ -1673,7 +1677,7 @@ system load() {
   the cores if it could without.
 - A proc may be given one `mut`, and changes it as a system does: a
   row's field, a row more (`screen += { .. }`), none (`screen = []`), so
-  many alike. It is given it outside a `for` over entities, and the
+  many alike, its first rows (`screen = screen[..n]`). It is given it outside a `for` over entities, and the
   system that gives it writes the buffer. What was given `mut` may be
   passed on to read; what was given to read is not passed on `mut`.
 - An `extern proc` that is handed a buffer `mut` fills or changes it. In
