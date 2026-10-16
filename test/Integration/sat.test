@@ -1,0 +1,42 @@
+// entsat (examples/sat): a CDCL SAT solver, the problem read from
+// "problem.cnf" where it is started. A model is printed after it is held
+// against every clause read; an unsatisfiable problem writes its proof
+// to "proof.drat" (binary DRAT: 'a', each literal seven bits a byte, 0).
+// (examples/sat/check/satlib.py runs it on SATLIB's random 3-SAT and
+// has drat-trim check every proof.)
+// RUN: rm -rf %t && mkdir -p %t/small %t/pigeons %t/units %t/broken %t/missing
+// RUN: %ent build %S/../../examples/sat/entsat.ent -o %t/entsat
+// RUN: cp %S/Inputs/sat/small.cnf %t/small/problem.cnf
+// RUN: cd %t/small && %t/entsat | FileCheck %s --check-prefix=SMALL
+// RUN: cp %S/Inputs/sat/pigeons.cnf %t/pigeons/problem.cnf
+// RUN: cd %t/pigeons && %t/entsat | FileCheck %s --check-prefix=PIGEONS
+// RUN: %python -c "import sys; d = open(sys.argv[1], 'rb').read(); print(d[:1], d[-2:], len(d) > 2)" %t/pigeons/proof.drat | FileCheck %s --check-prefix=PROOF
+// RUN: cp %S/Inputs/sat/units.cnf %t/units/problem.cnf
+// RUN: cd %t/units && %t/entsat | FileCheck %s --check-prefix=UNITS
+// RUN: cp %S/Inputs/sat/broken.cnf %t/broken/problem.cnf
+// RUN: cd %t/broken && %t/entsat | FileCheck %s --check-prefix=BROKEN
+// RUN: cd %t/missing && %t/entsat | FileCheck %s --check-prefix=MISSING
+
+// Literals a clause has twice are taken once, a clause with a literal
+// and its negation is left out, and a unit is assigned before the search.
+// SMALL:      c 5 variables, 7 clauses
+// SMALL:      s SATISFIABLE
+// SMALL-NEXT: v -1 -2 -3 -4 5 0
+
+// Four pigeons do not fit into three holes: learned clauses, written
+// to the proof, the empty clause last.
+// PIGEONS:      c 12 variables, 22 clauses
+// PIGEONS:      s UNSATISFIABLE
+// PIGEONS-NOT:  v
+// PROOF: b'a' b'a\x00' True
+
+// Units that contradict each other through a clause: a conflict at
+// level 0, before any decision.
+// UNITS:      c 0 conflicts, 0 decisions, 1 propagations
+// UNITS:      s UNSATISFIABLE
+
+// A file that is not a problem is said so, and has no answer.
+// BROKEN:      c a clause before the header
+// BROKEN-NEXT: s UNKNOWN
+// MISSING:      c no file problem.cnf where the program was started
+// MISSING-NEXT: s UNKNOWN

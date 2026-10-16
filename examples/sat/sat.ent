@@ -1,0 +1,741 @@
+// entsat's SAT core: conflict-driven clause learning over clauses that
+// lie one after another in one buffer, the arena.
+//
+//   schedule start() { read()  setup()  watch() }   // read: dimacs.ent
+//   main {
+//     start()
+//     loop { round() } until Search.status != Status.Running
+//     done()                                    // schedule done() { finish() }
+//   }
+//
+// A round propagates what is assigned; where that falsifies a clause it
+// learns a clause from the conflict and jumps back, and where it does
+// not it decides the next variable. The answer is printed as SAT
+// competitions print it (`s SATISFIABLE` and the `v` lines, or `s
+// UNSATISFIABLE`); a model is checked against every clause that was read
+// before it is printed, and the clauses learned on the way are written as
+// a DRAT proof (binary), which drat-trim checks.
+//
+// A literal is as dimacs.ent has it: variable times two, plus one where
+// negated, so `l ^ 1` is its negation and `l >> 1` its variable.
+//
+// A clause at `c` in the arena is two words and its literals:
+//   c + 0  how many literals
+//   c + 1  bit 0 learned, bits 2-15 its LBD
+//   c + 2  the literals; the two watched ones first
+// A literal's watches lie in `Watch`, at `Lists[l].start` and after:
+// each a clause that watches it and another literal of that clause, the
+// blocker, which where it is true says the clause is satisfied without
+// the clause being read (as MiniSat has them). A list that is full moves
+// to the end of `Watch` with twice the room; after a reduction the lists
+// are laid out again, with room to grow.
+import files
+import console
+import clock
+import dimacs
+
+enum Status { Running, Sat, Unsat, Unknown }
+
+// Per literal: 1 true, -1 false, 0 not assigned; where its watches are;
+// the last clause read in which it was seen (for taking out literals a
+// clause has twice).
+buffer Values { v: i8 } capacity 16
+buffer Lists { start: i32, size: i32, cap: i32 } capacity 16
+buffer Seen { clause: i32 } capacity 16
+
+buffer Watch { clause: i32, blocker: i32 } capacity 16
+
+// Per variable: the level it was assigned at, the clause that forced it
+// (-1 for a decision or a unit), the value it last had, a mark for
+// conflict analysis, and its place in the decision queue (VMTF: a list
+// in the order the variables were last bumped, `stamp` growing along it).
+buffer Vars {
+  level: i32, reason: i32, phase: bool, mark: bool, prev: i32, next: i32, stamp: i64
+} capacity 16
+
+buffer Arena { w: i32 } capacity 16
+
+// The assigned literals in the order they were assigned, and where each
+// decision level starts among them (with a stamp for counting levels).
+buffer Trail { lit: i32 } capacity 16
+buffer Levels { start: i32, stamp: i64 } capacity 16
+
+// Room for conflict analysis: the clause being learned, the variables
+// whose marks are to be cleared, a stack for minimizing, the variables
+// to move to the front of the queue.
+buffer Learnt { lit: i32 } capacity 16
+buffer Clear { v: i32 } capacity 16
+buffer Stack { lit: i32 } capacity 16
+buffer Bumped { v: i32 } capacity 16
+// How many learned clauses of each LBD might be deleted.
+buffer Counts { n: i32 } capacity 256
+
+// `proof`: whether to write a DRAT proof to `proof_file`. Restarts come
+// after `restart_unit` times the Luby sequence in conflicts.
+unique Options { proof: bool, proof_file: text[126], restart_unit: i64 }
+
+// `conflict`: the clause propagation falsified, -1 for none. `trail`:
+// how many literals are assigned; `qhead`: how many of them are
+// propagated. `first`, `last`: the ends of the decision queue;
+// `cursor`: a variable with no unassigned one after it in the queue.
+// `reduce`: the conflict at which learned clauses are next deleted.
+unique Search {
+  status: Status, conflict: i32, qhead: i32, trail: i32, level: i32,
+  conflicts: i64, decisions: i64, propagations: i64, restarts: i64,
+  reductions: i64, deleted: i64, reduce: i64, rewatch: bool,
+  first: i32, last: i32, cursor: i32, stamp: i64,
+  luby: i64, since: i64, started: f64, written: bool
+}
+
+world {
+  Options.proof = true
+  Options.proof_file = "proof.drat"
+  Options.restart_unit = 100
+}
+
+// The Luby sequence, from 0: 1 1 2 1 1 2 4 1 1 2 1 1 2 4 8 ...
+fn luby(x: i64) -> i64 {
+  var size: i64 = 1
+  var seq = 0
+  while size < x + 1 {
+    seq += 1
+    size = 2 * size + 1
+  }
+  var i = x
+  while size - 1 != i {
+    size = (size - 1) >> 1
+    seq -= 1
+    i = i % size
+  }
+  var one: i64 = 1
+  one << seq
+}
+
+// A literal as binary DRAT writes it: 2 * its DIMACS variable, plus one
+// where negated, seven bits a byte, the lowest first.
+proc proof_lit(bytes: mut Bytes, lit: i32) {
+  var u = (lit + 2) as u32
+  while u > 127 {
+    bytes += { value: (u & 127 | 128) as u8 }
+    u = u >> 7
+  }
+  bytes += { value: u as u8 }
+}
+
+// The solver's buffers, sized for the problem, and the clauses read put
+// into the arena; a unit is assigned at once, at level 0.
+system setup() {
+  let n = Problem.vars
+  Values = [{ v: 0 }; 2 * n]
+  Lists = [{ start: 0, size: 0, cap: 0 }; 2 * n]
+  Seen = [{ clause: -1 }; 2 * n]
+  Vars = [{ level: 0, reason: -1, phase: false, mark: false, prev: -1, next: -1, stamp: 0 }; n]
+  Trail = [{ lit: 0 }; n]
+  Levels = [{ start: 0, stamp: 0 }; n + 1]
+  Learnt = [{ lit: 0 }; n + 1]
+  Clear = [{ v: 0 }; n + 1]
+  Stack = [{ lit: 0 }; n + 1]
+  Bumped = [{ v: 0 }; n + 1]
+  Counts = [{ n: 0 }; 256]
+  Arena = []
+  Bytes = []
+  // (The queue starts as the variables in their order.)
+  for v in 0..n {
+    Vars[v].prev = v - 1
+    Vars[v].next = if v + 1 < n { v + 1 } else { -1 }
+    Vars[v].stamp = v as i64
+  }
+  Search.first = if n > 0 { 0 } else { -1 }
+  Search.last = n - 1
+  Search.cursor = n - 1
+  Search.stamp = n as i64
+  Search.conflict = -1
+  Search.qhead = 0
+  Search.level = 0
+  Search.luby = 0
+  Search.since = 0
+  Search.written = false
+  Search.reductions = 0
+  Search.deleted = 0
+  Search.reduce = 2000
+  var trail = 0
+  var unsat = false
+  var at = 0
+  var number = 0
+  while Problem.read && at < len(Clauses) && !unsat {
+    // (The clause's literals into Learnt, each once; `always` where it
+    // has a literal and its negation.)
+    var k = 0
+    var always = false
+    while Clauses[at].lit >= 0 {
+      let l = Clauses[at].lit
+      if Seen[l ^ 1].clause == number {
+        always = true
+      } else if Seen[l].clause != number {
+        Seen[l].clause = number
+        Learnt[k].lit = l
+        k += 1
+      }
+      at += 1
+    }
+    at += 1
+    number += 1
+    if !always {
+      if k == 0 {
+        unsat = true
+      } else if k == 1 {
+        let l = Learnt[0].lit
+        if Values[l].v == -1 {
+          unsat = true
+        } else if Values[l].v == 0 {
+          Values[l].v = 1
+          Values[l ^ 1].v = -1
+          Vars[l >> 1].level = 0
+          Vars[l >> 1].reason = -1
+          Trail[trail].lit = l
+          trail += 1
+        }
+      } else {
+        Arena += { w: k }
+        Arena += { w: 0 }
+        for i in 0..k { Arena += { w: Learnt[i].lit } }
+      }
+    }
+  }
+  Search.trail = trail
+  Search.rewatch = true
+  Search.status = if !Problem.read { Status.Unknown }
+                  else if unsat { Status.Unsat }
+                  else { Status.Running }
+  Search.started = wait_until(0.0)
+}
+
+// Unit propagation: the literals on the trail that are not propagated
+// yet, each made false in the clauses that watch it. A clause whose
+// blocker is true is passed by; one whose other watched literal is true
+// gets that for its blocker; else it finds another literal to watch that
+// is not false, or is unit, and its first literal is assigned, or is
+// falsified: the conflict. (After a conflict the rest of the list stays
+// as it is.)
+system propagate() {
+  var qhead = Search.qhead
+  var trail = Search.trail
+  var conflict = -1
+  let level = Search.level
+  var visits: i64 = 0
+  while qhead < trail && conflict < 0 {
+    let f = Trail[qhead].lit ^ 1
+    qhead += 1
+    visits += 1
+    let start = Lists[f].start
+    let end = start + Lists[f].size
+    var i = start
+    var j = start
+    while i < end {
+      let c = Watch[i].clause
+      var blocker = Watch[i].blocker
+      i += 1
+      var keep = true
+      if conflict < 0 && Values[blocker].v != 1 {
+        // (The false literal to the second place.)
+        if Arena[c + 2].w == f {
+          Arena[c + 2].w = Arena[c + 3].w
+          Arena[c + 3].w = f
+        }
+        let first = Arena[c + 2].w
+        blocker = first
+        if Values[first].v != 1 {
+          let size = Arena[c].w
+          var k = 2
+          while k < size && keep {
+            let l = Arena[c + 2 + k].w
+            if Values[l].v != -1 {
+              Arena[c + 2 + k].w = f
+              Arena[c + 3].w = l
+              // (To the watches of l, which move where they are full.)
+              var at = Lists[l].start
+              let n = Lists[l].size
+              if n == Lists[l].cap {
+                let moved = len(Watch)
+                for x in 0..n {
+                  Watch += { clause: Watch[at + x].clause, blocker: Watch[at + x].blocker }
+                }
+                for x in n..2 * n + 4 { Watch += { clause: 0, blocker: 0 } }
+                Lists[l].start = moved
+                Lists[l].cap = 2 * n + 4
+                at = moved
+              }
+              Watch[at + n].clause = c
+              Watch[at + n].blocker = first
+              Lists[l].size = n + 1
+              keep = false
+            }
+            k += 1
+          }
+          if keep {
+            if Values[first].v == -1 {
+              conflict = c
+            } else {
+              Values[first].v = 1
+              Values[first ^ 1].v = -1
+              Vars[first >> 1].level = level
+              Vars[first >> 1].reason = c
+              Trail[trail].lit = first
+              trail += 1
+            }
+          }
+        }
+      }
+      if keep {
+        Watch[j].clause = c
+        Watch[j].blocker = blocker
+        j += 1
+      }
+    }
+    Lists[f].size = j - start
+  }
+  Search.qhead = qhead
+  Search.trail = trail
+  Search.conflict = conflict
+  Search.propagations += visits
+}
+
+// A conflict: at level 0 the problem is unsatisfiable. Otherwise the
+// first-UIP clause is learned from it (MiniSat's analysis), made smaller
+// by taking out the literals the others imply, and its variables moved
+// to the front of the queue; the search jumps back to the clause's
+// second highest level (to 0 where a restart is due), the clause goes
+// into the arena and its first literal is assigned.
+system learn() {
+  let level = Search.level
+  if level == 0 {
+    Search.status = Status.Unsat
+  } else {
+    // (Back along the trail from the conflict, resolving on the
+    // literals of this level until one is left, the UIP; those of lower
+    // levels go into the clause.)
+    var c = Search.conflict
+    var path = 0
+    var k = 1
+    var bumped = 0
+    var index = Search.trail - 1
+    var p = -1
+    var going = true
+    while going {
+      let size = Arena[c].w
+      let from = if p < 0 { 0 } else { 1 }
+      for j in from..size {
+        let q = Arena[c + 2 + j].w
+        let v = q >> 1
+        if !Vars[v].mark && Vars[v].level > 0 {
+          Vars[v].mark = true
+          Bumped[bumped].v = v
+          bumped += 1
+          if Vars[v].level >= level {
+            path += 1
+          } else {
+            Learnt[k].lit = q
+            k += 1
+          }
+        }
+      }
+      while !Vars[Trail[index].lit >> 1].mark { index -= 1 }
+      p = Trail[index].lit
+      index -= 1
+      c = Vars[p >> 1].reason
+      Vars[p >> 1].mark = false
+      path -= 1
+      going = path > 0
+    }
+    Learnt[0].lit = p ^ 1
+
+    // (Minimizing: a literal goes where the clause's other literals
+    // imply it, followed back along the reasons. MiniSat's recursive
+    // minimization, with a stack; a variable that is marked is in the
+    // clause or found to be implied.)
+    var levels = 0
+    for i in 1..k { levels |= 1 << (Vars[Learnt[i].lit >> 1].level & 31) }
+    var clear = 0
+    for i in 1..k {
+      Clear[clear].v = Learnt[i].lit >> 1
+      clear += 1
+    }
+    var kept = 1
+    for i in 1..k {
+      let l = Learnt[i].lit
+      var keep = Vars[l >> 1].reason < 0
+      if !keep {
+        var top = 1
+        Stack[0].lit = l
+        let undo = clear
+        var implied = true
+        while top > 0 && implied {
+          top -= 1
+          let r = Vars[Stack[top].lit >> 1].reason
+          let size = Arena[r].w
+          var j = 1
+          while j < size && implied {
+            let q = Arena[r + 2 + j].w
+            let u = q >> 1
+            if !Vars[u].mark && Vars[u].level > 0 {
+              if Vars[u].reason >= 0 && levels & (1 << (Vars[u].level & 31)) != 0 {
+                Vars[u].mark = true
+                Stack[top].lit = q
+                top += 1
+                Clear[clear].v = u
+                clear += 1
+              } else {
+                for x in undo..clear { Vars[Clear[x].v].mark = false }
+                clear = undo
+                implied = false
+              }
+            }
+            j += 1
+          }
+        }
+        keep = !implied
+      }
+      if keep {
+        Learnt[kept].lit = l
+        kept += 1
+      }
+    }
+    for x in 0..clear { Vars[Clear[x].v].mark = false }
+    k = kept
+
+    // (The level to jump back to, its literal to the second place; and
+    // how many levels the clause has, its LBD.)
+    var back = 0
+    if k > 1 {
+      var most = 1
+      for i in 2..k {
+        if Vars[Learnt[i].lit >> 1].level > Vars[Learnt[most].lit >> 1].level { most = i }
+      }
+      let l = Learnt[most].lit
+      Learnt[most].lit = Learnt[1].lit
+      Learnt[1].lit = l
+      back = Vars[l >> 1].level
+    }
+    let conflicts = Search.conflicts + 1
+    var lbd = 0
+    for i in 0..k {
+      let at = Vars[Learnt[i].lit >> 1].level
+      if Levels[at].stamp != conflicts {
+        Levels[at].stamp = conflicts
+        lbd += 1
+      }
+    }
+
+    // (The variables met to the front of the queue, in the order they
+    // had in it.)
+    for b in 1..bumped {
+      let v = Bumped[b].v
+      let s = Vars[v].stamp
+      var j = b
+      while j > 0 && Vars[Bumped[j - 1].v].stamp > s {
+        Bumped[j].v = Bumped[j - 1].v
+        j -= 1
+      }
+      Bumped[j].v = v
+    }
+    var first = Search.first
+    var last = Search.last
+    var stamp = Search.stamp
+    for b in 0..bumped {
+      let v = Bumped[b].v
+      if v != last {
+        let before = Vars[v].prev
+        let after = Vars[v].next
+        if before >= 0 { Vars[before].next = after } else { first = after }
+        Vars[after].prev = before
+        Vars[v].prev = last
+        Vars[v].next = -1
+        Vars[last].next = v
+        last = v
+      }
+      stamp += 1
+      Vars[v].stamp = stamp
+    }
+    Search.first = first
+    Search.last = last
+    Search.stamp = stamp
+
+    // (Back to that level, or to 0 for a restart; what is undone keeps
+    // its value as its phase, and the queue's cursor goes to the
+    // variable that is latest in it.)
+    var since = Search.since + 1
+    let restart = since >= Options.restart_unit * luby(Search.luby)
+    let to = if restart { 0 } else { back }
+    if restart {
+      since = 0
+      Search.luby += 1
+      Search.restarts += 1
+    }
+    let start = Levels[to + 1].start
+    var cursor = Search.cursor
+    for i in start..Search.trail {
+      let l = Trail[i].lit
+      let v = l >> 1
+      Values[l].v = 0
+      Values[l ^ 1].v = 0
+      Vars[v].phase = l & 1 == 0
+      if cursor < 0 || Vars[v].stamp > Vars[cursor].stamp { cursor = v }
+    }
+    var trail = start
+    Search.cursor = cursor
+    Search.qhead = start
+    Search.level = to
+    Search.since = since
+    Search.conflicts = conflicts
+
+    // (The clause: a unit is assigned at level 0; a longer one goes
+    // into the arena, watched by its first two literals, each the
+    // other's blocker, and its first is assigned where the search is at
+    // its level.)
+    let l0 = Learnt[0].lit
+    var reason = -1
+    if k > 1 {
+      reason = len(Arena)
+      Arena += { w: k }
+      Arena += { w: 1 | min(lbd, 0x3fff) << 2 }
+      for i in 0..k { Arena += { w: Learnt[i].lit } }
+      for side in 0..2 {
+        let l = Learnt[side].lit
+        var at = Lists[l].start
+        let n = Lists[l].size
+        if n == Lists[l].cap {
+          let moved = len(Watch)
+          for x in 0..n {
+            Watch += { clause: Watch[at + x].clause, blocker: Watch[at + x].blocker }
+          }
+          for x in n..2 * n + 4 { Watch += { clause: 0, blocker: 0 } }
+          Lists[l].start = moved
+          Lists[l].cap = 2 * n + 4
+          at = moved
+        }
+        Watch[at + n].clause = reason
+        Watch[at + n].blocker = Learnt[1 - side].lit
+        Lists[l].size = n + 1
+      }
+    }
+    if to == back {
+      Values[l0].v = 1
+      Values[l0 ^ 1].v = -1
+      Vars[l0 >> 1].level = to
+      Vars[l0 >> 1].reason = reason
+      Trail[trail].lit = l0
+      trail += 1
+    }
+    Search.trail = trail
+
+    if Options.proof {
+      Bytes += { value: 97 }
+      for i in 0..k { proof_lit(Bytes, Learnt[i].lit) }
+      Bytes += { value: 0 }
+      if len(Bytes) > 1048576 {
+        write_bytes(Options.proof_file, Bytes, 0, len(Bytes), Search.written)
+        Search.written = true
+        Bytes = []
+      }
+    }
+  }
+}
+
+// Every so many conflicts (2,000 more each time) half of the learned
+// clauses go: those of the highest LBD, of an LBD where the half is
+// reached the oldest; never one of LBD 2 or less, nor one that is the
+// reason of an assignment. The clauses that stay are moved down in the
+// arena and the reasons that move with them told; `watch` then makes the
+// watch lists again.
+system reduce() {
+  let top = len(Arena)
+  Counts = [{ n: 0 }; 256]
+  var candidates = 0
+  var c = 0
+  while c < top {
+    let size = Arena[c].w
+    let meta = Arena[c + 1].w
+    let first = Arena[c + 2].w
+    let locked = Vars[first >> 1].reason == c && Values[first].v == 1
+    let lbd = min(meta >> 2 & 0x3fff, 255)
+    if meta & 1 != 0 && !locked && lbd > 2 {
+      Counts[lbd].n += 1
+      candidates += 1
+    }
+    c += 2 + size
+  }
+  // (All of an LBD above `cut` go, and the first `left` of those at it.)
+  var left = candidates / 2
+  var cut = 255
+  while cut > 2 && Counts[cut].n <= left {
+    left -= Counts[cut].n
+    cut -= 1
+  }
+  var w = 0
+  var deleted: i64 = 0
+  c = 0
+  while c < top {
+    let size = Arena[c].w
+    let meta = Arena[c + 1].w
+    let first = Arena[c + 2].w
+    let locked = Vars[first >> 1].reason == c && Values[first].v == 1
+    let lbd = min(meta >> 2 & 0x3fff, 255)
+    var keep = true
+    if meta & 1 != 0 && !locked && lbd > 2 {
+      if lbd > cut {
+        keep = false
+      } else if lbd == cut && left > 0 {
+        keep = false
+        left -= 1
+      }
+    }
+    if keep {
+      if locked { Vars[first >> 1].reason = w }
+      for i in 0..2 + size { Arena[w + i].w = Arena[c + i].w }
+      w += 2 + size
+    } else {
+      deleted += 1
+      if Options.proof {
+        Bytes += { value: 100 }
+        for i in 0..size { proof_lit(Bytes, Arena[c + 2 + i].w) }
+        Bytes += { value: 0 }
+      }
+    }
+    c += 2 + size
+  }
+  Arena = Arena[..w]
+  Search.rewatch = true
+  Search.reductions += 1
+  Search.deleted += deleted
+  Search.reduce = Search.conflicts + 2000 + 300 * Search.reductions
+  if Options.proof && len(Bytes) > 1048576 {
+    write_bytes(Options.proof_file, Bytes, 0, len(Bytes), Search.written)
+    Search.written = true
+    Bytes = []
+  }
+}
+
+// The watch lists, made from the clauses in the arena: each literal's
+// together, with room for as many again and four more.
+system watch() {
+  let top = len(Arena)
+  Lists = [{ start: 0, size: 0, cap: 0 }; len(Lists)]
+  var c = 0
+  while c < top {
+    Lists[Arena[c + 2].w].size += 1
+    Lists[Arena[c + 3].w].size += 1
+    c += 2 + Arena[c].w
+  }
+  var at = 0
+  for l in 0..len(Lists) {
+    let cap = 2 * Lists[l].size + 4
+    Lists[l].start = at
+    Lists[l].cap = cap
+    Lists[l].size = 0
+    at += cap
+  }
+  Watch = [{ clause: 0, blocker: 0 }; at]
+  c = 0
+  while c < top {
+    let l0 = Arena[c + 2].w
+    let l1 = Arena[c + 3].w
+    let at0 = Lists[l0].start + Lists[l0].size
+    Watch[at0].clause = c
+    Watch[at0].blocker = l1
+    Lists[l0].size += 1
+    let at1 = Lists[l1].start + Lists[l1].size
+    Watch[at1].clause = c
+    Watch[at1].blocker = l0
+    Lists[l1].size += 1
+    c += 2 + Arena[c].w
+  }
+  Search.rewatch = false
+}
+
+// No conflict: the next variable of the queue that is not assigned is
+// decided, with the value it had last; where there is none, every
+// variable has a value and no clause is false.
+system decide() {
+  var v = Search.cursor
+  while v >= 0 && Values[2 * v].v != 0 { v = Vars[v].prev }
+  Search.cursor = v
+  if v < 0 {
+    Search.status = Status.Sat
+  } else {
+    let level = Search.level + 1
+    let trail = Search.trail
+    let l = if Vars[v].phase { 2 * v } else { 2 * v + 1 }
+    Levels[level].start = trail
+    Values[l].v = 1
+    Values[l ^ 1].v = -1
+    Vars[v].level = level
+    Vars[v].reason = -1
+    Trail[trail].lit = l
+    Search.trail = trail + 1
+    Search.level = level
+    Search.decisions += 1
+  }
+}
+
+schedule round() run_if Search.status == Status.Running {
+  propagate()
+  learn() run_if Search.conflict >= 0
+  reduce() run_if Search.conflicts >= Search.reduce && Search.status == Status.Running
+  watch() run_if Search.rewatch
+  decide() run_if Search.conflict < 0
+}
+
+// The answer. A model is held against every clause read; one that does
+// not satisfy them all is no answer (and a fault of the solver's).
+system finish() {
+  let seconds = wait_until(0.0) - Search.started
+  put("c {Problem.vars} variables, {Problem.clauses} clauses")
+  put("c {Search.conflicts} conflicts, {Search.decisions} decisions, {Search.propagations} propagations")
+  put("c {Search.restarts} restarts, {Search.reductions} reductions, {Search.deleted} clauses deleted")
+  put("c {seconds} seconds")
+  if Search.status == Status.Sat {
+    var at = 0
+    var bad = -1
+    var number = 0
+    while at < len(Clauses) {
+      var satisfied = false
+      while Clauses[at].lit >= 0 {
+        if Values[Clauses[at].lit].v == 1 { satisfied = true }
+        at += 1
+      }
+      at += 1
+      if !satisfied && bad < 0 { bad = number }
+      number += 1
+    }
+    if bad >= 0 {
+      put("c the model leaves clause {bad} false")
+      put("s UNKNOWN")
+    } else {
+      put("s SATISFIABLE")
+      var line: text[126] = "v"
+      for v in 0..Problem.vars {
+        let d = if Values[2 * v].v == 1 { v + 1 } else { -(v + 1) }
+        line += " {d}"
+        if len(line) > 100 {
+          put(line)
+          line = "v"
+        }
+      }
+      put(line + " 0")
+    }
+  } else if Search.status == Status.Unsat {
+    put("s UNSATISFIABLE")
+  } else {
+    if !Problem.read { put("c {Problem.error}") }
+    put("s UNKNOWN")
+  }
+  if Options.proof {
+    if Search.status == Status.Unsat {
+      Bytes += { value: 97 }
+      Bytes += { value: 0 }
+    }
+    write_bytes(Options.proof_file, Bytes, 0, len(Bytes), Search.written)
+    Bytes = []
+  }
+  flush()
+}

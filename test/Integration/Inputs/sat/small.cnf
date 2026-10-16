@@ -1,0 +1,9 @@
+c A small satisfiable problem: duplicates, a tautology and a unit.
+p cnf 5 7
+1 2 -3 0
+-1 2 2 0
+-2 3 0
+3 -3 4 0
+-4 -5 0
+5 0
+-1 -2 4 1 0
