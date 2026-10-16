@@ -5704,11 +5704,11 @@ static Value neutralOf(IRRewriter &rewriter, Location loc, StringRef rule,
 /// combine with the others' (each thread its own, then the threads'), and
 /// the cell is read once before the loop and written once after it. Only
 /// the accumulate reaches the cell inside the loop, in the body itself or
-/// in an `if` of it.
-static void reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
-                        ArrayRef<ReducedCell> reduced) {
+/// in an `if` of it. Gives the loop that replaces `loop` (or `loop`).
+static scf::ParallelOp reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
+                                   ArrayRef<ReducedCell> reduced) {
   if (reduced.empty())
-    return;
+    return loop;
   Location loc = loop.getLoc();
   rewriter.setInsertionPoint(loop);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -5768,6 +5768,7 @@ static void reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
     memref::StoreOp::create(rewriter, loc, reducing.getResult(i), cell,
                             ValueRange{zero});
   rewriter.eraseOp(loop);
+  return reducing;
 }
 
 /// Append the edge (`source`, `target`, `values`, all stored forms) to
@@ -12424,8 +12425,12 @@ static Operation *keepCells(IRRewriter &rewriter, Operation *loops,
       if (auto loop = dyn_cast<scf::ForOp>(op))
         sequential.push_back(loop);
   }
-  for (scf::ParallelOp loop : parallel)
-    reduceCells(rewriter, loop, reduced);
+  for (scf::ParallelOp loop : parallel) {
+    bool whole = loops == loop;
+    scf::ParallelOp reducing = reduceCells(rewriter, loop, reduced);
+    if (whole)
+      loops = reducing;
+  }
   if (!cells.empty())
     for (scf::ForOp loop : sequential) {
       bool whole = loops == loop;
