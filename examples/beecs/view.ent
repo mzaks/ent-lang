@@ -294,10 +294,12 @@ const DIM = 0x6b7888
 
 // Where the charts are: their left side and width, a day's column, the
 // top and height of the bees' and of honey's and pollen's, and where
-// they end (for what comes under them, and for the mouse).
+// they end (for what comes under them, and for the mouse); whether the
+// panel is too narrow or too short for today's numbers as they are in a
+// big window, and they are small and in two columns instead.
 unique Charts {
   x0: f32, w: f32, column: f32, y0: f32, h: f32, y1: f32, y2: f32, h1: f32,
-  bottom: f32
+  bottom: f32, compact: bool
 }
 const SOFT = 0x9fb0c3
 const BRIGHT = 0xe6edf3
@@ -316,9 +318,12 @@ system charts() {
   let days = max(max(Termination.max_ticks, len(History)), 1)
   let column = w / days as f32
   // Bees, then honey and pollen, then today's numbers (some 170
-  // points) and the keys: as high as the window lets them be.
-  let room = max(Window.height as f32 - 130.0 - 88.0 - 175.0, 90.0)
-  let y0 = 130.0
+  // points, or 125 small ones): as high as the window lets them be.
+  let compact = w < 330.0 || Window.height < 500
+  let y0 = if compact { 112.0 } else { 130.0 }
+  let gap = if compact { 38.0 } else { 44.0 }
+  let under = if compact { 125.0 } else { 175.0 }
+  let room = max(Window.height as f32 - y0 - 2.0 * gap - under, 60.0)
   let h = room * 0.5
   rect(x0, y0, w, h, 0x161b23)
   let scale = h / max(Most.workers, 1) as f32
@@ -343,10 +348,10 @@ system charts() {
   }
   label("workers, most {Most.workers}", x0, y0 - 22.0, 15.0, SOFT)
   // Honey and pollen.
-  let y1 = y0 + h + 44.0
+  let y1 = y0 + h + gap
   let h1 = room * 0.25
   rect(x0, y1, w, h1, 0x161b23)
-  let y2 = y1 + h1 + 44.0
+  let y2 = y1 + h1 + gap
   rect(x0, y2, w, h1, 0x161b23)
   let honey_scale = h1 / max(Most.honey, 1.0)
   let pollen_scale = h1 / max(Most.pollen, 1.0)
@@ -371,12 +376,22 @@ system charts() {
   Charts.y2 = y2
   Charts.h1 = h1
   Charts.bottom = y2 + h1
+  Charts.compact = compact
 }
 
-proc count(name: text[30], n: i32, color: i32, x: f32, y: f32) {
-  rect(x, y + 3.0, 12.0, 12.0, color)
-  label(name, x + 20.0, y, 15.0, SOFT)
-  label("{n}", x + 120.0, y, 15.0, BRIGHT)
+// A number of bees, its name and its colour; the number so far right
+// (`at`), in letters so big.
+proc count(name: text[30], n: i32, color: i32, x: f32, y: f32, at: f32, size: f32) {
+  rect(x, y + size * 0.2, size - 3.0, size - 3.0, color)
+  label(name, x + size + 5.0, y, size, SOFT)
+  label("{n}", x + at, y, size, BRIGHT)
+}
+
+// The same for a store, in tenths.
+proc store(name: text[30], amount: f32, color: i32, x: f32, y: f32, at: f32, size: f32) {
+  rect(x, y + size * 0.2, size - 3.0, size - 3.0, color)
+  label(name, x + size + 5.0, y, size, SOFT)
+  tenths(amount, x + at, y, size, BRIGHT)
 }
 
 system numbers() {
@@ -399,23 +414,35 @@ system numbers() {
   label(what, x0 + 130.0, 30.0, 16.0, if Pace.ended || Pace.paused { 0xff7b72 } else { SOFT })
   label("seed {RandomSeed.seed}, squadrons of {Foragers.squadron_size}",
         x0, 62.0, 14.0, DIM)
-  // Today's numbers.
-  let y = Charts.bottom + 30.0
-  count("eggs", Population.worker_eggs, EGGS, x0, y)
-  count("larvae", Population.worker_larvae, LARVAE, x0, y + 22.0)
-  count("pupae", Population.worker_pupae, PUPAE, x0, y + 44.0)
-  count("in the hive", Population.workers_in_hive, IN_HIVE, x0, y + 66.0)
-  count("foragers", Population.workers_foragers, FORAGERS, x0, y + 88.0)
-  count("drones", Population.drones_in_hive, 0x8a8f98, x0, y + 110.0)
-  let x1 = x0 + 200.0
-  rect(x1, y + 3.0, 12.0, 12.0, HONEY)
-  label("honey", x1 + 20.0, y, 15.0, SOFT)
-  tenths((0.001 * Hive.honey / EnergyContent.honey) as f32, x1 + 90.0, y, 15.0, BRIGHT)
-  rect(x1, y + 25.0, 12.0, 12.0, POLLEN)
-  label("pollen", x1 + 20.0, y + 22.0, 15.0, SOFT)
-  tenths(Hive.pollen as f32, x1 + 90.0, y + 22.0, 15.0, BRIGHT)
-  label("first forages at {Aff.days} d", x1, y + 44.0, 15.0, SOFT)
-
+  // Today's numbers: the bees in a column and the stores by them, or,
+  // small, four and five in two columns.
+  let honey = (0.001 * Hive.honey / EnergyContent.honey) as f32
+  let pollen = Hive.pollen as f32
+  if Charts.compact {
+    let y = Charts.bottom + 22.0
+    let x1 = x0 + Charts.w * 0.5
+    count("eggs", Population.worker_eggs, EGGS, x0, y, 80.0, 13.0)
+    count("larvae", Population.worker_larvae, LARVAE, x0, y + 18.0, 80.0, 13.0)
+    count("pupae", Population.worker_pupae, PUPAE, x0, y + 36.0, 80.0, 13.0)
+    count("in the hive", Population.workers_in_hive, IN_HIVE, x0, y + 54.0, 80.0, 13.0)
+    count("foragers", Population.workers_foragers, FORAGERS, x1, y, 70.0, 13.0)
+    count("drones", Population.drones_in_hive, 0x8a8f98, x1, y + 18.0, 70.0, 13.0)
+    store("honey", honey, HONEY, x1, y + 36.0, 70.0, 13.0)
+    store("pollen", pollen, POLLEN, x1, y + 54.0, 70.0, 13.0)
+    label("first forages at {Aff.days} d", x1, y + 72.0, 13.0, SOFT)
+  } else {
+    let y = Charts.bottom + 30.0
+    count("eggs", Population.worker_eggs, EGGS, x0, y, 120.0, 15.0)
+    count("larvae", Population.worker_larvae, LARVAE, x0, y + 22.0, 120.0, 15.0)
+    count("pupae", Population.worker_pupae, PUPAE, x0, y + 44.0, 120.0, 15.0)
+    count("in the hive", Population.workers_in_hive, IN_HIVE, x0, y + 66.0, 120.0, 15.0)
+    count("foragers", Population.workers_foragers, FORAGERS, x0, y + 88.0, 120.0, 15.0)
+    count("drones", Population.drones_in_hive, 0x8a8f98, x0, y + 110.0, 120.0, 15.0)
+    let x1 = x0 + 200.0
+    store("honey", honey, HONEY, x1, y, 90.0, 15.0)
+    store("pollen", pollen, POLLEN, x1, y + 22.0, 90.0, 15.0)
+    label("first forages at {Aff.days} d", x1, y + 44.0, 15.0, SOFT)
+  }
 }
 
 // The day under the mouse, where it is over the charts: a line through
