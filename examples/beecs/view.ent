@@ -3,7 +3,8 @@
 // the hive, scouting the field, flying to a patch and back with nectar
 // or pollen), each patch a ring of what it has left today; on the right
 // the year so far, the workers by stage, the honey and the pollen in
-// store.
+// store, and the weather; over the map, why the bees forage as they do
+// today.
 //
 //   examples/beecs/reference/fetch.sh     once: beecs's weather, into build/
 //   cd build/beecs/run
@@ -208,19 +209,53 @@ system ended() {
 
 // A day's numbers: workers by stage, honey [kg] and pollen [g]; the
 // hours there were for foraging; honey [kg] and pollen [g] brought in
-// and eaten, and the adult workers that died.
+// and eaten, and the adult workers that died (of them, the foragers that
+// died flying). The drones in the hive, and the age of first foraging.
+// And what the morning made of the day: whether there was foraging, the
+// honey in store against what is decent for the colony and the pollen
+// against what is ideal, the chance for a forager to start, and the
+// share that goes for pollen.
 buffer History {
   eggs: i32, larvae: i32, pupae: i32, in_hive: i32, foragers: i32,
   honey: f32, pollen: f32, hours: f32,
-  honey_in: f32, honey_eaten: f32, pollen_in: f32, pollen_eaten: f32, died: i32
+  honey_in: f32, honey_eaten: f32, pollen_in: f32, pollen_eaten: f32, died: i32,
+  lost: i32, drones: i32, aff: i32,
+  forage: bool, honey_part: f32, pollen_part: f32, chance: f32, pollen_share: f32
 } capacity 8192
 // The most of each so far, for the charts' scales.
-unique Most { workers: i32, honey: f32, pollen: f32, honey_in: f32, pollen_in: f32 }
+unique Most {
+  workers: i32, honey: f32, pollen: f32, honey_in: f32, pollen_in: f32, drones: i32
+}
 
 // Today so far: honey [kJ] and pollen [g] brought in, the pollen before
 // the bees ate, the adult workers in the morning and those that came out
-// of their pupae.
-unique Today { honey_in: f64, pollen_in: f64, pollen_before: f64, adults: i32, emerged: i32 }
+// of their pupae, the foragers before and after the rounds; and the
+// morning's view of the day (as in History).
+unique Today {
+  honey_in: f64, pollen_in: f64, pollen_before: f64, adults: i32, emerged: i32,
+  flying: i32, landed: i32, now: i32,
+  forage: bool, honey_part: f32, pollen_part: f32, chance: f32, pollen_share: f32
+}
+
+// The morning: the foragers there are, and what made the day's foraging
+// (beecs's morning, and its updatePatches' share for pollen).
+system morning_seen() {
+  Today.flying = 0
+  for with Squadron { Today.flying += Foragers.squadron_size }
+  Today.forage = Day.forage
+  Today.honey_part = (Hive.honey / max(Hive.decent_honey, 1.0)) as f32
+  Today.pollen_part = (Hive.pollen / max(Hive.ideal_pollen, 1.0)) as f32
+  Today.chance = Day.probability as f32
+  var share = (1.0 - Hive.pollen / Hive.ideal_pollen) * Dance.max_proportion_pollen_foragers
+  if Hive.honey / Hive.decent_honey < 0.5 { share *= Hive.honey / Hive.decent_honey }
+  Today.pollen_share = max(share as f32, 0.0)
+}
+
+// The evening, before the old die: those still flying.
+system evening_seen() {
+  Today.landed = 0
+  for with Squadron { Today.landed += Foragers.squadron_size }
+}
 
 system day_begins() {
   Today.honey_in = 0.0
@@ -241,9 +276,12 @@ system brought() {
 system before_eating() { Today.pollen_before = Hive.pollen }
 
 // Each patch's day, a row for each patch in the order of distance:
-// nectar [l] and pollen [g] there were, and what was taken of them.
+// nectar [l] and pollen [g] there were, and what was taken of them; the
+// bees that flew there, and how many of them would die on the way (by
+// the patch's risks: the model does not say which patch a bee died
+// flying to).
 buffer PatchDays {
-  nectar: f32, nectar_taken: f32, pollen: f32, pollen_taken: f32
+  nectar: f32, nectar_taken: f32, pollen: f32, pollen_taken: f32, visits: i32, lost: f32
 } capacity 262144
 
 system record() {
@@ -259,7 +297,11 @@ system record() {
                hours: Day.seconds as f32 / 3600.0, honey_in: honey_in,
                honey_eaten: (0.000001 * Consumed.honey) as f32, pollen_in: pollen_in,
                pollen_eaten: (Today.pollen_before - Hive.pollen) as f32,
-               died: max(died, 0) }
+               died: max(died, 0), lost: max(Today.flying - Today.landed, 0),
+               drones: Population.drones_in_hive, aff: Aff.days,
+               forage: Today.forage, honey_part: Today.honey_part,
+               pollen_part: Today.pollen_part, chance: Today.chance,
+               pollen_share: Today.pollen_share }
   let workers = Population.worker_eggs + Population.worker_larvae +
                 Population.worker_pupae + Population.workers_in_hive +
                 Population.workers_foragers
@@ -268,6 +310,7 @@ system record() {
   Most.pollen = max(Most.pollen, pollen)
   Most.honey_in = max(Most.honey_in, honey_in)
   Most.pollen_in = max(Most.pollen_in, pollen_in)
+  Most.drones = max(Most.drones, Population.drones_in_hive)
 }
 
 // After the seeds' runs, for each day, their values of workers, honey
@@ -373,11 +416,13 @@ system number_patches() {
 // The patches' day.
 system record_patches() {
   if len(PatchDays) + Map.patches <= 262144 {
-    for s: Spot, r: Resource in turn by s.index {
+    for s: Spot, r: Resource, v: Visits, k: Risk in turn by s.index {
       PatchDays += { nectar: (r.max_nectar * 0.000001) as f32,
                      nectar_taken: ((r.max_nectar - r.nectar) * 0.000001) as f32,
                      pollen: r.max_pollen as f32,
-                     pollen_taken: (r.max_pollen - r.pollen) as f32 }
+                     pollen_taken: (r.max_pollen - r.pollen) as f32,
+                     visits: v.nectar + v.pollen,
+                     lost: (v.nectar as f64 * k.nectar + v.pollen as f64 * k.pollen) as f32 }
     }
   }
 }
@@ -526,11 +571,21 @@ const DIM = 0x6b7888
 // and the months (for today's numbers); whether the panel is too narrow
 // or too short for today's numbers as they are in a big window, and they
 // are small and in two columns instead. And the charts' scales' tops.
+// In a run of more than a year the charts show a year: `base` is its
+// first day, `span` its days (365, or the run's where it is shorter),
+// `years` how many there are, and `tabs` where their numbers are to
+// click.
 unique Charts {
   x0: f32, w: f32, column: f32, y0: f32, h: f32, y1: f32, y2: f32, h1: f32,
   bottom: f32, end: f32, compact: bool, days: i32,
-  workers: f32, honey: f32, pollen: f32
+  workers: f32, honey: f32, pollen: f32,
+  base: i32, span: i32, years: i32, tabs: f32
 }
+// The year chosen to show, from 1 (0: the one the run is in); the day
+// the mouse is over on the charts (-1: none).
+unique Shown { year: i32, day: i32 }
+const DRONES = 0xf28fb8
+const AFF = 0xc9a7ff
 const SOFT = 0x9fb0c3
 const BRIGHT = 0xe6edf3
 const GRID = 0x232b36
@@ -554,16 +609,24 @@ fn hours_ahead(day: i32, hours: Hours, random: bool) -> f32 {
   else { hours[((day / 365) % years) * 365 + day % 365].hours as f32 }
 }
 
-// The workers stacked by stage, a column a day; honey and pollen as
-// lines below, over bars of what was brought in each day; then the
-// weather, a day's hours for foraging from none (dark) to 12 or more,
-// and the months. The x axis is the run's days (a year unless said
-// else).
+// The workers stacked by stage, a column a day, with the drones (a line
+// on a scale of its own) and the age of first foraging (another, from
+// none to its most); honey and pollen as lines below, over bars of what
+// was brought in each day; then the weather, a day's hours for foraging
+// from none (dark) to 12 or more, and the months. The x axis is the
+// run's days, or a year of them: the other years are faint lines behind
+// it.
 system charts() {
   let x0 = Window.width as f32 - Map.panel + 20.0
   let w = Map.panel - 40.0
   let days = max(max(Termination.max_ticks, len(History)), 1)
-  let column = w / days as f32
+  let span = min(days, 365)
+  let years = (days + 364) / 365
+  let done = if Phase.now == 0 && Clock.tick > 0 { Clock.tick - 1 } else { Clock.tick }
+  let year = if Shown.year > 0 && Shown.year <= years { Shown.year - 1 }
+             else { min(done / 365, years - 1) }
+  let base = year * 365
+  let column = w / span as f32
   // Bees, then honey and pollen, the weather and the months, then
   // today's numbers (some 200 points, or 145 small ones): as high as the
   // window lets them be.
@@ -585,31 +648,55 @@ system charts() {
   // The months, through the charts.
   let strip = if compact { 8.0 } else { 10.0 }
   let y3 = y2 + h1 + 6.0
-  for year in 0..(days + 364) / 365 {
-    for m in 0..12 {
-      let d = year * 365 + month_starts[m]
-      if d < days {
-        let x = x0 + d as f32 * column
-        if d > 0 {
-          line(x, y0, x, y0 + h, GRID)
-          line(x, y1, x, y1 + h1, GRID)
-          line(x, y2, x, y2 + h1, GRID)
-        }
-        if column * 30.0 >= 13.0 {
-          label(months[m], x + 2.0, y3 + strip + 3.0, if compact { 11.0 } else { 12.0 }, DIM)
-        }
+  for m in 0..12 {
+    let d = month_starts[m]
+    if d < span {
+      let x = x0 + d as f32 * column
+      if d > 0 {
+        line(x, y0, x, y0 + h, GRID)
+        line(x, y1, x, y1 + h1, GRID)
+        line(x, y2, x, y2 + h1, GRID)
+      }
+      if column * 30.0 >= 13.0 {
+        label(months[m], x + 2.0, y3 + strip + 3.0, if compact { 11.0 } else { 12.0 }, DIM)
       }
     }
   }
   let scale = h / workers_top
-  for i in 0..len(History) {
+  let honey_scale = h1 / honey_top
+  let pollen_scale = h1 / pollen_top
+  // The other years, faint.
+  for other in 0..years {
+    if other != year {
+      let from = other * 365
+      for i in 1..365 {
+        let at = from + i
+        if at < len(History) {
+          let xa = x0 + (i - 1) as f32 * column
+          let xb = x0 + i as f32 * column
+          let a = History[at - 1].eggs + History[at - 1].larvae + History[at - 1].pupae +
+                  History[at - 1].in_hive + History[at - 1].foragers
+          let b = History[at].eggs + History[at].larvae + History[at].pupae +
+                  History[at].in_hive + History[at].foragers
+          line(xa, y0 + h - a as f32 * scale, xb, y0 + h - b as f32 * scale, 0x60e6edf3)
+          line(xa, y1 + h1 - History[at - 1].honey * honey_scale,
+               xb, y1 + h1 - History[at].honey * honey_scale, 0x60ffc23d)
+          line(xa, y2 + h1 - History[at - 1].pollen * pollen_scale,
+               xb, y2 + h1 - History[at].pollen * pollen_scale, 0x60ff8c42)
+        }
+      }
+    }
+  }
+  let shown = max(min(span, len(History) - base), 0)
+  for i in 0..shown {
+    let at = base + i
     let x = x0 + i as f32 * column
     var y = y0 + h
-    let eggs = History[i].eggs as f32 * scale
-    let larvae = History[i].larvae as f32 * scale
-    let pupae = History[i].pupae as f32 * scale
-    let in_hive = History[i].in_hive as f32 * scale
-    let foragers = History[i].foragers as f32 * scale
+    let eggs = History[at].eggs as f32 * scale
+    let larvae = History[at].larvae as f32 * scale
+    let pupae = History[at].pupae as f32 * scale
+    let in_hive = History[at].in_hive as f32 * scale
+    let foragers = History[at].foragers as f32 * scale
     y -= foragers
     Shapes += { x: x, y: y, w: column + 0.6, h: foragers, color: FORAGERS, round: false }
     y -= in_hive
@@ -626,23 +713,22 @@ system charts() {
   // What came in each day, as bars on a scale of their own.
   let honey_in_scale = h1 / max(Most.honey_in, 0.1)
   let pollen_in_scale = h1 / max(Most.pollen_in, 1.0)
-  for i in 0..len(History) {
+  for i in 0..shown {
     let x = x0 + i as f32 * column
-    let a = History[i].honey_in * honey_in_scale
-    let b = History[i].pollen_in * pollen_in_scale
+    let a = History[base + i].honey_in * honey_in_scale
+    let b = History[base + i].pollen_in * pollen_in_scale
     if a > 0.0 { rect(x, y1 + h1 - a, column + 0.6, a, 0x4cffc23d) }
     if b > 0.0 { rect(x, y2 + h1 - b, column + 0.6, b, 0x4cff8c42) }
   }
   // Honey and pollen in store.
-  let honey_scale = h1 / honey_top
-  let pollen_scale = h1 / pollen_top
-  for i in 1..len(History) {
+  for i in 1..shown {
     let xa = x0 + (i - 1) as f32 * column
     let xb = x0 + i as f32 * column
-    line(xa, y1 + h1 - History[i - 1].honey * honey_scale,
-         xb, y1 + h1 - History[i].honey * honey_scale, HONEY)
-    line(xa, y2 + h1 - History[i - 1].pollen * pollen_scale,
-         xb, y2 + h1 - History[i].pollen * pollen_scale, POLLEN)
+    let at = base + i
+    line(xa, y1 + h1 - History[at - 1].honey * honey_scale,
+         xb, y1 + h1 - History[at].honey * honey_scale, HONEY)
+    line(xa, y2 + h1 - History[at - 1].pollen * pollen_scale,
+         xb, y2 + h1 - History[at].pollen * pollen_scale, POLLEN)
   }
   label("honey [kg]", x0, y1 - 22.0, 15.0, SOFT)
   tenths(Most.honey, x0 + w - 60.0, y1 - 22.0, 15.0, DIM)
@@ -653,14 +739,18 @@ system charts() {
   label("bars: in, most", x0 + w * 0.36, y2 - 19.0, 12.0, 0x8a5a3a)
   tenths(Most.pollen_in, x0 + w * 0.36 + 84.0, y2 - 19.0, 12.0, 0x8a5a3a)
   // The weather: the days run, and those ahead where they are known.
-  for d in 0..days {
-    let x = x0 + d as f32 * column
-    let hours = if d < len(History) { History[d].hours } else { hours_ahead(d, Hours, ForagingPeriod.random_years) }
-    if hours >= 0.0 {
-      let part = min(hours / 12.0, 1.0)
-      let color = if d < len(History) { blend(0x1a2029, 0xf2d06b, part) }
-                  else { blend(0x161b23, 0x5e5333, part) }
-      rect(x, y3, column + 0.6, strip, color)
+  for d in 0..span {
+    let at = base + d
+    if at < days {
+      let x = x0 + d as f32 * column
+      let hours = if at < len(History) { History[at].hours }
+                  else { hours_ahead(at, Hours, ForagingPeriod.random_years) }
+      if hours >= 0.0 {
+        let part = min(hours / 12.0, 1.0)
+        let color = if at < len(History) { blend(0x1a2029, 0xf2d06b, part) }
+                    else { blend(0x161b23, 0x5e5333, part) }
+        rect(x, y3, column + 0.6, strip, color)
+      }
     }
   }
   Charts.x0 = x0
@@ -678,16 +768,47 @@ system charts() {
   Charts.workers = workers_top
   Charts.honey = honey_top
   Charts.pollen = pollen_top
+  Charts.base = base
+  Charts.span = span
+  Charts.years = years
+}
+
+// Over the workers: the drones in the hive, and the age of first
+// foraging, each on a scale of its own (drawn after the workers' bars).
+system lines_drawn() {
+  let shown = max(min(Charts.span, len(History) - Charts.base), 0)
+  let bottom = Charts.y0 + Charts.h
+  let ds = (Charts.h - 4.0) / max(Most.drones, 1) as f32
+  let fs = (Charts.h - 4.0) / max(AgeFirstForaging.max, 1) as f32
+  for i in 1..shown {
+    let at = Charts.base + i
+    let xa = Charts.x0 + (i as f32 - 0.5) * Charts.column
+    let xb = Charts.x0 + (i as f32 + 0.5) * Charts.column
+    line(xa, bottom - History[at - 1].drones as f32 * ds, xb, bottom - History[at].drones as f32 * ds,
+         DRONES)
+    line(xa, bottom - History[at - 1].aff as f32 * fs, xb, bottom - History[at].aff as f32 * fs, AFF)
+  }
+  let size = if Charts.compact { 11.0 } else { 12.0 }
+  let x = Charts.x0 + 4.0
+  let keys = 50.0 + text_width("drones, most {Most.drones}", size) +
+             text_width("first forages, up to {AgeFirstForaging.max} d", size)
+  rect(Charts.x0 + 1.0, Charts.y0 + 1.0, min(keys, Charts.w - 2.0), size + 5.0, 0xc0161b23)
+  line(x, Charts.y0 + 9.0, x + 12.0, Charts.y0 + 9.0, DRONES)
+  label("drones, most {Most.drones}", x + 16.0, Charts.y0 + 2.0, size, DRONES)
+  let x1 = x + 26.0 + text_width("drones, most {Most.drones}", size)
+  line(x1, Charts.y0 + 9.0, x1 + 12.0, Charts.y0 + 9.0, AFF)
+  label("first forages, up to {AgeFirstForaging.max} d", x1 + 16.0, Charts.y0 + 2.0, size, AFF)
 }
 
 // M's runs: of workers, honey and pollen, the middle 80 % of them
 // between two faint lines, and their middle one.
 system bands_drawn() {
   if Seeds.shown {
-    let days = min(Seeds.days, len(Band) / 3)
-    for d in 1..days {
-      let xa = Charts.x0 + (d as f32 - 0.5) * Charts.column
-      let xb = Charts.x0 + (d as f32 + 0.5) * Charts.column
+    let days = min(min(Seeds.days, len(Band) / 3) - Charts.base, Charts.span)
+    for i in 1..days {
+      let d = Charts.base + i
+      let xa = Charts.x0 + (i as f32 - 0.5) * Charts.column
+      let xb = Charts.x0 + (i as f32 + 0.5) * Charts.column
       let a = (d - 1) * 3
       let b = d * 3
       let ws = Charts.h / Charts.workers
@@ -747,6 +868,17 @@ system numbers() {
   label(what, x0 + 130.0, 30.0, 16.0, if Pace.ended || Pace.paused { 0xff7b72 } else { SOFT })
   label("seed {RandomSeed.seed}, squadrons of {Foragers.squadron_size}",
         x0, 62.0, 14.0, DIM)
+  // The years, to click (the one shown bright, the one chosen framed).
+  if Charts.years > 1 {
+    Charts.tabs = x0 + Charts.w - Charts.years as f32 * 24.0
+    let shown = Charts.base / 365
+    label("year", Charts.tabs - 36.0, 62.0, 14.0, DIM)
+    for i in 0..Charts.years {
+      let x = Charts.tabs + i as f32 * 24.0
+      if i + 1 == Shown.year { rect(x, 58.0, 20.0, 22.0, 0x2b3440) }
+      label("{i + 1}", x + 6.0, 61.0, 15.0, if i == shown { BRIGHT } else { DIM })
+    }
+  }
   // Today's numbers: the bees in a column and the stores by them, or,
   // small, four and five in two columns.
   let honey = (0.001 * Hive.honey / EnergyContent.honey) as f32
@@ -759,7 +891,7 @@ system numbers() {
     count("pupae", Population.worker_pupae, PUPAE, x0, y + 36.0, 80.0, 13.0)
     count("in the hive", Population.workers_in_hive, IN_HIVE, x0, y + 54.0, 80.0, 13.0)
     count("foragers", Population.workers_foragers, FORAGERS, x1, y, 70.0, 13.0)
-    count("drones", Population.drones_in_hive, 0x8a8f98, x1, y + 18.0, 70.0, 13.0)
+    count("drones", Population.drones_in_hive, DRONES, x1, y + 18.0, 70.0, 13.0)
     store("honey", honey, HONEY, x1, y + 36.0, 70.0, 13.0)
     store("pollen", pollen, POLLEN, x1, y + 54.0, 70.0, 13.0)
     label("first forages at {Aff.days} d", x1, y + 72.0, 13.0, SOFT)
@@ -770,7 +902,7 @@ system numbers() {
     count("pupae", Population.worker_pupae, PUPAE, x0, y + 44.0, 120.0, 15.0)
     count("in the hive", Population.workers_in_hive, IN_HIVE, x0, y + 66.0, 120.0, 15.0)
     count("foragers", Population.workers_foragers, FORAGERS, x0, y + 88.0, 120.0, 15.0)
-    count("drones", Population.drones_in_hive, 0x8a8f98, x0, y + 110.0, 120.0, 15.0)
+    count("drones", Population.drones_in_hive, DRONES, x0, y + 110.0, 120.0, 15.0)
     let x1 = x0 + 200.0
     store("honey", honey, HONEY, x1, y, 90.0, 15.0)
     store("pollen", pollen, POLLEN, x1, y + 22.0, 90.0, 15.0)
@@ -794,12 +926,20 @@ proc amount(name: text[30], x: f32, color: i32, at_x: f32, at_y: f32) {
   tenths(x, at_x + 106.0, at_y, 14.0, BRIGHT)
 }
 
-system hover() {
+// The day under the mouse, of those run.
+system pointed() {
   let over = Mouse.x >= Charts.x0 && Mouse.x < Charts.x0 + Charts.w &&
              Mouse.y >= Charts.y0 && Mouse.y < Charts.end && !Knobs.open
-  let day = if Charts.column > 0.0 { ((Mouse.x - Charts.x0) / Charts.column) as i32 } else { -1 }
-  if over && day >= 0 && day < len(History) {
-    let x = Charts.x0 + (day as f32 + 0.5) * Charts.column
+  let column = if Charts.column > 0.0 { ((Mouse.x - Charts.x0) / Charts.column) as i32 } else { -1 }
+  let day = Charts.base + column
+  Shown.day = if over && column >= 0 && column < Charts.span && day < len(History) { day }
+              else { -1 }
+}
+
+system hover() {
+  let day = Shown.day
+  if day >= 0 {
+    let x = Charts.x0 + ((day - Charts.base) as f32 + 0.5) * Charts.column
     line(x, Charts.y0, x, Charts.y0 + Charts.h, 0xc0e6edf3)
     line(x, Charts.y1, x, Charts.y1 + Charts.h1, 0xc0e6edf3)
     line(x, Charts.y2, x, Charts.y2 + Charts.h1, 0xc0e6edf3)
@@ -813,7 +953,7 @@ system hover() {
     // its rows closer in a low window.
     let step = if Window.height < 600 { 17.0 } else { 20.0 }
     let bw = 196.0
-    let bh = 44.0 + step * 14.0
+    let bh = 44.0 + step * 17.0
     let bx = max(if Mouse.x + 16.0 + bw > Window.width as f32 { Mouse.x - 16.0 - bw }
                  else { Mouse.x + 16.0 }, 8.0)
     let by = min(max(Mouse.y - bh * 0.5, 8.0), Window.height as f32 - bh - 8.0)
@@ -833,7 +973,13 @@ system hover() {
     y += step
     row("foragers", History[day].foragers, FORAGERS, left, y)
     y += step
+    row("drones", History[day].drones, DRONES, left, y)
+    y += step
     row("died", History[day].died, 0x2b3440, left, y)
+    y += step
+    row("  flying", History[day].lost, 0x2b3440, left, y)
+    y += step
+    row("first forages [d]", History[day].aff, AFF, left, y)
     y += step
     amount("honey [kg]", honey, HONEY, left, y)
     y += step
@@ -902,8 +1048,14 @@ system clicks() {
           else { Knobs.honey = max(0, min(Knobs.honey + change, 6)) }
         }
       }
+    } else if Charts.years > 1 && Mouse.x >= Charts.tabs &&
+              Mouse.x < Charts.tabs + Charts.years as f32 * 24.0 && Mouse.y >= 56.0 &&
+              Mouse.y < 80.0 {
+      let year = ((Mouse.x - Charts.tabs) / 24.0) as i32 + 1
+      Shown.year = if Shown.year == year { 0 } else { year }
     } else if on_charts && Charts.column > 0.0 {
-      let day = ((Mouse.x - Charts.x0) / Charts.column) as i32 + 1
+      let column = ((Mouse.x - Charts.x0) / Charts.column) as i32
+      let day = Charts.base + min(column, Charts.span - 1) + 1
       if day > Clock.tick && !Pace.ended && day <= Charts.days {
         Jump.to = day
         Jump.pause = true
@@ -932,7 +1084,9 @@ system clicks() {
 
 // The chosen patch's year: what was taken each day, of nectar [l] and
 // pollen [g], as bars, and what there was, as a line (each on a scale
-// of its own); and what was taken in all.
+// of its own), and what was taken in all; the bees that flew there each
+// day, and about how many died on the way; and its trips as they are
+// now, how long they take and how many die.
 proc taken(name: text[30], most: f32, all: f32, x: f32, y: f32, w: f32) {
   label(name, x, y, 13.0, SOFT)
   let at = x + text_width(name, 13.0) + 6.0
@@ -941,55 +1095,75 @@ proc taken(name: text[30], most: f32, all: f32, x: f32, y: f32, w: f32) {
   tenths(all, x + w - 50.0, y, 13.0, BRIGHT)
 }
 
+// (A share as a percentage with a tenth.)
+fn percent(x: f64) -> text[30] {
+  let n = (x * 1000.0 + 0.5) as i32
+  "{n / 10}.{n % 10} %"
+}
+
+// The chosen patch's trips now: [s] and the chance to die on one.
+unique Trips { nectar: f64, pollen: f64, nectar_risk: f64, pollen_risk: f64 }
+
 system patch_year() {
   let n = Map.patches
   let i = Chosen.patch
   if i >= 0 && i < n {
     let room = Window.width as f32 - Map.panel
     let w = max(min(room - 32.0, 440.0), 220.0)
-    let h = 196.0
+    let h = 310.0
     let x = max(room - w - 16.0, 8.0)
-    let y = Window.height as f32 - h - 16.0
+    let y = max(Window.height as f32 - h - 16.0, 8.0)
     rect(x, y, w, h, 0xf4181e27)
     let km = (Chosen.metres + 50) / 100
     label("the patch at {km / 10}.{km % 10} km", x + 12.0, y + 8.0, 15.0, BRIGHT)
     label("bars: taken, line: there was", x + w - 12.0 - text_width("bars: taken, line: there was", 12.0),
           y + 11.0, 12.0, DIM)
-    let days = len(PatchDays) / n
+    let last = min(len(PatchDays) / n, Charts.base + Charts.span)
     let cw = w - 24.0
-    let column = cw / Charts.days as f32
+    let column = cw / Charts.span as f32
     var most_nectar: f32 = 0.0
     var most_pollen: f32 = 0.0
     var most_nectar_taken: f32 = 0.0
     var most_pollen_taken: f32 = 0.0
+    var most_visits = 0
     var nectar_taken: f32 = 0.0
     var pollen_taken: f32 = 0.0
-    for d in 0..days {
+    var visits = 0
+    var lost: f32 = 0.0
+    for d in Charts.base..last {
       let at = d * n + i
       most_nectar = max(most_nectar, PatchDays[at].nectar)
       most_pollen = max(most_pollen, PatchDays[at].pollen)
       most_nectar_taken = max(most_nectar_taken, PatchDays[at].nectar_taken)
       most_pollen_taken = max(most_pollen_taken, PatchDays[at].pollen_taken)
+      most_visits = max(most_visits, PatchDays[at].visits)
       nectar_taken += PatchDays[at].nectar_taken
       pollen_taken += PatchDays[at].pollen_taken
+      visits += PatchDays[at].visits
+      lost += PatchDays[at].lost
     }
-    let ch = 50.0
-    let ya = y + 58.0
-    let yb = y + 134.0
+    let ch = 44.0
+    let ya = y + 54.0
+    let yb = y + 124.0
+    let yc = y + 194.0
     rect(x + 12.0, ya, cw, ch, 0x10141a)
     rect(x + 12.0, yb, cw, ch, 0x10141a)
+    rect(x + 12.0, yc, cw, ch, 0x10141a)
     let nt = ch / max(most_nectar_taken, 0.001)
     let pt = ch / max(most_pollen_taken, 0.001)
+    let vs = ch / max(most_visits, 1) as f32
     let ns = (ch - 2.0) / max(most_nectar, 0.001)
     let ps = (ch - 2.0) / max(most_pollen, 0.001)
-    for d in 0..days {
+    for d in Charts.base..last {
       let at = d * n + i
-      let cx = x + 12.0 + d as f32 * column
+      let cx = x + 12.0 + (d - Charts.base) as f32 * column
       let a = PatchDays[at].nectar_taken * nt
       let b = PatchDays[at].pollen_taken * pt
+      let c = PatchDays[at].visits as f32 * vs
       if a > 0.0 { rect(cx, ya + ch - a, column + 0.6, a, 0xc9a227) }
       if b > 0.0 { rect(cx, yb + ch - b, column + 0.6, b, 0xd9702a) }
-      if d > 0 {
+      if c > 0.0 { rect(cx, yc + ch - c, column + 0.6, c, FORAGERS) }
+      if d > Charts.base {
         let before = at - n
         line(cx - column, ya + ch - PatchDays[before].nectar * ns, cx, ya + ch - PatchDays[at].nectar * ns,
              0x90e6edf3)
@@ -999,7 +1173,86 @@ system patch_year() {
     }
     taken("nectar [l] a day, most", most_nectar_taken, nectar_taken, x + 12.0, ya - 18.0, cw)
     taken("pollen [g] a day, most", most_pollen_taken, pollen_taken, x + 12.0, yb - 18.0, cw)
+    label("bees flown there a day, most {most_visits}", x + 12.0, yc - 18.0, 13.0, SOFT)
+    let died = (lost + 0.5) as i32
+    for sp: Spot, t: Trip, k: Risk {
+      if sp.index == i {
+        Trips.nectar = t.duration_nectar
+        Trips.pollen = t.duration_pollen
+        Trips.nectar_risk = k.nectar
+        Trips.pollen_risk = k.pollen
+      }
+    }
+    let tn = (Trips.nectar / 60.0 + 0.5) as i32
+    let tp = (Trips.pollen / 60.0 + 0.5) as i32
+    label("died on the way, about {died} (by the risks)", x + 12.0, y + h - 58.0, 13.0, SOFT)
+    label("a trip now: for nectar {tn} min, {percent(Trips.nectar_risk)} die;",
+          x + 12.0, y + h - 40.0, 13.0, SOFT)
+    label("for pollen {tp} min, {percent(Trips.pollen_risk)} die", x + 12.0, y + h - 22.0, 13.0,
+          SOFT)
   }
+}
+
+// Why the bees forage as they do on a day (today, or the day under the
+// mouse): the stores against what the colony wants of them, the chance
+// that a forager starts, the share that goes for pollen, the age of
+// first foraging, and the foragers that died flying.
+proc why_row(name: text[30], value: text[30], x: f32, y: f32, w: f32, color: i32) {
+  label(name, x + 12.0, y, 14.0, SOFT)
+  label(value, x + w - 12.0 - text_width(value, 14.0), y, 14.0, color)
+}
+
+fn times(x: f32) -> text[30] {
+  let n = (x * 10.0 + 0.5) as i32
+  "{n / 10}.{n % 10} x"
+}
+
+system why() {
+  let room = Window.width as f32 - Map.panel
+  var w = 236.0
+  var x = room - w - 16.0
+  if x < 220.0 {
+    x = 220.0
+    w = max(room - 236.0, 160.0)
+  }
+  let y = 16.0
+  let step = 19.0
+  let h = 34.0 + step * 6.0
+  let past = Shown.day >= 0
+  let day = if past { Shown.day + 1 } else if Phase.now == 0 && Clock.tick > 0 { Clock.tick }
+            else { Clock.tick + 1 }
+  let at = Shown.day
+  let forage = if past { History[at].forage } else { Today.forage }
+  let hours = if past { History[at].hours } else { Day.seconds as f32 / 3600.0 }
+  Today.now = 0
+  if !past && Phase.now != 0 {
+    for with Squadron { Today.now += Foragers.squadron_size }
+  }
+  let lost = if past { History[at].lost }
+             else if Phase.now == 0 { if len(History) > 0 { History[len(History) - 1].lost } else { 0 } }
+             else { max(Today.flying - Today.now, 0) }
+  rect(x, y, w, h, 0xe0181e27)
+  let title = if forage { "day {day}: foraging" }
+              else if hours <= 0.0 { "day {day}: no time for it" }
+              else { "day {day}: stores full" }
+  label(title, x + 12.0, y + 8.0, 15.0, if past { BRIGHT } else { SOFT })
+  let honey = if past { History[at].honey_part } else { Today.honey_part }
+  let pollen = if past { History[at].pollen_part } else { Today.pollen_part }
+  let chance = if past { History[at].chance } else { Today.chance }
+  let share = if past { History[at].pollen_share } else { Today.pollen_share }
+  let aff = if past { History[at].aff } else { Aff.days }
+  var row_y = y + 34.0
+  why_row("honey / decent", times(honey), x, row_y, w, if honey < 0.5 { 0xff7b72 } else { BRIGHT })
+  row_y += step
+  why_row("pollen / ideal", times(pollen), x, row_y, w, if pollen < 0.2 { 0xff7b72 } else { BRIGHT })
+  row_y += step
+  why_row("a forager starts", percent(chance as f64), x, row_y, w, BRIGHT)
+  row_y += step
+  why_row("for pollen", percent(share as f64), x, row_y, w, BRIGHT)
+  row_y += step
+  why_row("first forages at", "{aff} d", x, row_y, w, AFF)
+  row_y += step
+  why_row("died flying", "{lost}", x, row_y, w, BRIGHT)
 }
 
 // P: the knobs, a row each, with - and + to click; what they make of the
@@ -1070,6 +1323,7 @@ system wipe() {
   Most.pollen = 0.0
   Most.honey_in = 0.0
   Most.pollen_in = 0.0
+  Most.drones = 0
   Map.patches = 0
   Map.metres = 0.0
   Phase.now = 0
@@ -1174,6 +1428,7 @@ schedule dawn() run_if !Restart.asked {
   count_totals()
   new_foragers()
   morning()
+  morning_seen()
   foraging_now()
 }
 
@@ -1182,6 +1437,7 @@ schedule spent() { spend() }
 schedule gathered() { brought() }
 
 schedule dusk() run_if !Restart.asked {
+  evening_seen()
   evening()
   squadron_mortality()
   count_cohorts()
@@ -1203,15 +1459,18 @@ schedule frame() run_if Pace.left <= 0 && !Window.closed {
   begin()
   pace()
   layout()
+  pointed()
   clicks()
   rings()
   squadrons()
   patches_drawn()
   charts()
   shapes()
+  lines_drawn()
   bands_drawn()
   numbers()
   legend()
+  why()
   patch_year()
   knobs_drawn()
   hover()

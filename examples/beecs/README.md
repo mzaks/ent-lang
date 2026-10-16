@@ -49,11 +49,17 @@ days spread as beecs's do.
   hive, scouting, flying to their patch and back. On the right the year
   so far: the workers by stage, the honey and the pollen in store over
   bars of what came in each day, and under them the weather (each day's
-  hours for foraging) and the months. The mouse over them shows a day's
-  numbers, with what was brought in and eaten and the workers that
-  died; a click goes to that day (on fast, or from the first day again
+  hours for foraging) and the months; over the workers, the drones and
+  the age of first foraging. A run of more than a year shows a year at a
+  time (its number to click), the other years faint behind it. A box
+  over the map says why the bees forage as they do today: the stores
+  against what the colony wants, the chance that a forager starts, the
+  share for pollen, the foragers that died flying. The mouse over the
+  charts shows a day's numbers, with what was brought in and eaten and
+  the workers that died, and that day in the box; a click goes to that day (on fast, or from the first day again
   with the same seed) and stops there. A click on a patch shows its year:
-  what was taken each day, and what there was. Space stops and goes on,
+  what was taken each day, and what there was, the bees that flew there
+  and about how many died on the way, and how long a trip there takes. Space stops and goes on,
   Up and Down change the speed, R starts over with the next seed. M runs
   20 other seeds and shows the middle 80 % of them and their median
   behind this run. P opens knobs (how far the patches are, how much their
