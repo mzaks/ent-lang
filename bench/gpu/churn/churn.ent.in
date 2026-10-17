@@ -1,0 +1,49 @@
+// What it costs when the CPU touches what the GPU goes through every
+// frame (bench/gpu/run_churn.py makes the variants of @SPAWN@ and @READ@):
+// `move` is a `gpu` system over a million entities; `births` spawns
+// @SPAWN@ entities a frame into its archetype, on the CPU; with @READ@
+// the CPU also adds up a column the GPU writes, every frame.
+import clock
+import console
+
+component Position { x: f32, y: f32 } capacity 2000000
+component Velocity { dx: f32, dy: f32 } capacity 2000000
+unique Sum: f64
+const SPAWN = @SPAWN@
+const READ = @READ@
+const FRAMES = 300
+
+gpu system move(dt: f32) {
+  for p: mut Position, v: Velocity {
+    p.x += v.dx * dt
+    p.y += v.dy * dt
+  }
+}
+system births() {
+  for i in 0..SPAWN {
+    spawn { Position { x: i as f32, y: 0.0 }, Velocity { dx: 1.0, dy: 0.5 } }
+  }
+}
+system look() {
+  for p: Position { Sum += p.x as f64 }
+}
+system report() {
+  spawn { Print { line: "ms_per_frame={Time.now * 1000.0 / ((Time.frame - 1) as f64)} sum={Sum}" } }
+}
+schedule frame() {
+  tick()
+  move(0.01)
+  births()
+  look() run_if READ
+}
+schedule finish() { tick()  report()  write()  clear() }
+world {
+  for i in 0..1000000 {
+    spawn { Position { x: (i % 1000) as f32, y: 0.0 },
+            Velocity { dx: (i % 7) as f32, dy: 1.0 } }
+  }
+}
+main {
+  loop { frame() } until Time.frame == FRAMES
+  finish()
+}

@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""G0: the integrate benchmark's frame on the GPU, against the CPU.
+"""The integrate benchmark's frame on the GPU, against the CPU.
 
   python3 bench/gpu/run.py [--rounds 3] [--threads 8] [--sizes 10000,...]
 
-A prototype with no change to the language or the compiler: ent-opt lowers
-examples/integrate.mlir with fused, entity-parallel loops, and upstream
-MLIR passes make kernels of the parallel loops (blocks of 256 threads),
-lower them to NVVM and embed their PTX in the program, which the CUDA
-driver compiles when the program starts. gpu_runtime.c has the mgpu*
-functions the lowering calls, over the driver API, and the world's arena:
-bench_main.c is built with posix_memalign renamed to ent_gpu_memalign.
+Variants, every one of which must give the same checksum:
 
-Variants: fused (one core), fused-omp (OpenMP, --threads), gpu-managed
-(the arena in unified memory: it moves to the GPU and stays there while
-only the GPU touches it) and gpu-host (the arena in pinned host memory,
-which the GPU reads and writes over PCIe each frame). Every variant must
-give the same checksum.
+  fused      examples/integrate.mlir, fused, on one core
+  fused-omp  the same with parallel entity loops (OpenMP, --threads)
+  g0         G0's prototype: integrate.mlir's fused entity-parallel loops
+             made kernels by upstream passes alone (every parallel loop
+             mapped), on gpu_runtime.c here, which creates a stream and
+             waits for it around every launch; the world in managed memory
+             (bench_main.c built with posix_memalign renamed)
+  gpu        G1 (docs/gpu.md): examples/integrate.ent, whose systems are
+             `gpu`, built as `ent build --gpu` builds a program: one stream,
+             the CPU waiting where the compiler says (here: when the frame
+             ends), columns at 64 KB boundaries; devices/gpu.c, the host
+             built with ENT_GPU
+  gpu-host   gpu with the world in pinned host memory (ENT_GPU_MEM=host),
+             which the GPU reads and writes over PCIe every frame
 
 Needs an NVIDIA GPU, the CUDA toolkit (CUDA_PATH, else /opt/cuda) and LLVM
 with MLIR (LLVM_PREFIX, else build/toolchain's environment). Binaries are
@@ -42,8 +45,10 @@ ENT_OPT = os.path.join(ROOT, "build", "bin", "ent-opt")
 ENT_TRANSLATE = os.path.join(ROOT, "build", "bin", "ent-translate")
 OUT = os.path.join(ROOT, "build", "bench", "gpu")
 EXAMPLE = os.path.join(ROOT, "examples", "integrate.mlir")
+SOURCE = os.path.join(ROOT, "examples", "integrate.ent")
 HOST = os.path.join(ROOT, "bench", "bench_main.c")
 RUNTIME = os.path.join(HERE, "gpu_runtime.c")
+DEVICE = os.path.join(ROOT, "devices", "gpu.c")
 
 TO_LLVM = ["--symbol-dce", "--convert-scf-to-openmp", "--canonicalize",
            "--ent-omp-nowait", "--convert-scf-to-cf", "--convert-to-llvm",
@@ -55,7 +60,7 @@ TO_GPU = ["--scf-parallel-loop-tiling=parallel-loop-tile-sizes=256 "
           "--gpu-map-parallel-loops", "--convert-parallel-loops-to-gpu",
           "--gpu-kernel-outlining", "--convert-scf-to-cf"]
 OPENMP = [f"-L{LLVM}/lib", "-lomp", f"-Wl,-rpath,{LLVM}/lib"]
-VARIANTS = ["fused", "fused-omp", "gpu-managed", "gpu-host"]
+VARIANTS = ["fused", "fused-omp", "g0", "gpu", "gpu-host"]
 
 
 def run(cmd, **kwargs):
@@ -80,7 +85,7 @@ def build(chip):
         lower([f"--ent-lower-to-loops={passes}", *TO_LLVM], ll)
         run([CC, *cflags, ll, HOST, *OPENMP, "-o", os.path.join(OUT, name)])
 
-    # Every entity loop on the GPU, however few entities it has.
+    # G0: every entity loop on the GPU, however few entities it has.
     loops = run([ENT_OPT, EXAMPLE, "--ent-lower-to-loops=fuse-systems=1 "
                  "parallel-entities=1 parallel-min-entities=1",
                  "--symbol-dce"], capture_output=True, text=True).stdout
@@ -93,11 +98,38 @@ def build(chip):
         input=mlir, text=True)
     run([CC, *cflags, f"-I{CUDA}/include",
          "-Dposix_memalign=ent_gpu_memalign", ll, HOST, RUNTIME, "-lcuda",
-         "-o", os.path.join(OUT, "gpu")])
+         "-o", os.path.join(OUT, "g0")])
+
+    # G1: the `gpu` systems of integrate.ent, by the passes of
+    # `ent build --gpu` (tools/ent, gpu_passes), with its own header.
+    g1 = os.path.join(OUT, "g1")
+    os.makedirs(g1, exist_ok=True)
+    module = os.path.join(g1, "integrate.mlir")
+    run([ENT_TRANSLATE, "--import-ent", SOURCE, "-o", module])
+    run([ENT_TRANSLATE, "--ent-to-c-header", module, "-o",
+         os.path.join(g1, "integrate_world.h")])
+    ll = os.path.join(OUT, "g1.ll")
+    lowered = run([ENT_OPT, module,
+                   "--ent-lower-to-loops=fuse-systems=1 gpu=1",
+                   "--symbol-dce", "--cse", "--ent-lower-views",
+                   "--convert-parallel-loops-to-gpu", "--gpu-kernel-outlining",
+                   "--lower-affine", "--convert-scf-to-cf",
+                   f"--nvvm-attach-target=chip={chip} features=+ptx80",
+                   "--convert-gpu-to-nvvm", "--reconcile-unrealized-casts",
+                   "--finalize-memref-to-llvm=use-generic-functions=1",
+                   "--convert-to-llvm", "--gpu-to-llvm",
+                   "--reconcile-unrealized-casts",
+                   "--gpu-module-to-binary=format=isa"],
+                  capture_output=True, text=True).stdout
+    run([f"{LLVM}/bin/mlir-translate", "--mlir-to-llvmir", "-o", ll],
+        input=lowered, text=True)
+    run([CC, *CFLAGS, f"-I{g1}", f"-I{CUDA}/include", "-DENT_GPU", ll, HOST,
+         DEVICE, "-lcuda", "-o", os.path.join(OUT, "gpu")])
 
 
 def measure(variant, n, threads, target_ms):
     exe = os.path.join(OUT, "gpu" if variant.startswith("gpu") else variant)
+    # (g0's runtime takes ENT_GPU_MEM too; it is not set for it.)
     env = dict(os.environ, OMP_NUM_THREADS=str(threads))
     if variant == "gpu-host":
         env["ENT_GPU_MEM"] = "host"

@@ -70,6 +70,19 @@ static void *allocate(size_t alignment, size_t bytes) {
       check(cuMemAllocManaged(&managed, bytes, CU_MEM_ATTACH_GLOBAL),
             "cuMemAllocManaged");
       memory = (void *)(uintptr_t)managed;
+      // (Experiment, step 4: ENT_GPU_ADVISE=device keeps the pages on the
+      // GPU, the CPU reaching them where they are.)
+      const char *advise = getenv("ENT_GPU_ADVISE");
+      if (advise && !strcmp(advise, "device")) {
+        CUdevice device;
+        check(cuCtxGetDevice(&device), "cuCtxGetDevice");
+        CUmemLocation gpu = {CU_MEM_LOCATION_TYPE_DEVICE, device};
+        CUmemLocation cpu = {CU_MEM_LOCATION_TYPE_HOST, 0};
+        check(cuMemAdvise(managed, bytes, CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
+                          gpu), "cuMemAdvise");
+        check(cuMemAdvise(managed, bytes, CU_MEM_ADVISE_SET_ACCESSED_BY, cpu),
+              "cuMemAdvise");
+      }
     }
     for (int i = 0; i < kMostBig; ++i)
       if (!big[i]) {

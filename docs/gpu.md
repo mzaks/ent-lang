@@ -1,7 +1,8 @@
 # Systems on the GPU: design of G1
 
-Status: steps 1 to 3 built (the marker and its checks; the lowering,
-without the hints; the runtime and `tools/ent --gpu`); step 4 to do. G0 (`bench/gpu/`, results in
+Status: steps 1 to 4 done (the marker and its checks; the lowering,
+without the hints; the runtime and `tools/ent --gpu`; measured). What the
+measurements say is next is in "After step 4" at the end. G0 (`bench/gpu/`, results in
 `bench/gpu/RESULTS.md`) showed that ent-opt's entity-parallel loops become
 correct kernels through upstream MLIR passes alone, that a frame of 1e7
 entities takes 3.75 ms with the world on the GPU against 14.5 ms on one
@@ -271,3 +272,35 @@ header's `ent_world_create` calls `ent_gpu_alloc` instead of
   machine's library's.
 - Whether a `gpu system` built without `--gpu` should say so (a remark),
   or stay silent as `--parallel`'s absence does.
+
+## After step 4
+
+Measured 2026-10-17 (`bench/gpu/RESULTS.md`):
+
+- Where the CPU stays off what the GPU goes through, G1 is what G0
+  promised: integrate at 1e7 in 3.7 ms (one core 12.4, OpenMP 10.5), the
+  floor 11 us a frame, of which 10 are the driver's three launches and
+  one synchronize.
+- The 64 KB layout measured nothing; it can go again.
+- Where the CPU spawns into or reads a column the GPU writes every
+  frame, managed memory is slower than the CPU alone (1.2 to 15.5 ms a
+  frame against 0.27 to 0.96), and neither the driver's advice nor
+  prefetches fix it; explicit copies are about 3x better than the best
+  prefetches.
+
+So the hints are not worth building. Instead, in order:
+
+1. **Copies the compiler places** (instead of managed memory): the
+   columns `gpu` systems touch get a second home on the GPU, and the
+   waits of step 2 become "copy what the CPU needs, of the rows in use,
+   to the CPU" and "copy what the CPU wrote back before the next GPU
+   run". The compiler knows both from the runs' access, as it knows the
+   waits; a column the CPU only reads is not copied back, and rows the
+   CPU spawned are copied as rows. The C host and extern systems then
+   need a copy at the schedule's end (or a call to ask for one), which
+   the header can do.
+2. **Fewer launches a frame**: the loops of one fused sequence over
+   several archetypes as one kernel (blocks for each archetype's rows),
+   or a CUDA graph per schedule; 2.5 us a launch is most of the floor.
+3. Then G2 as planned (ordered reductions, lookups, `math`).
+
