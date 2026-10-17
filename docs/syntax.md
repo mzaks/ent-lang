@@ -2014,9 +2014,9 @@ on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
   y)`, `exp`, `log`, `log2`, `sin`, `cos`, `tan`, `atan`, `atan2(y, x)`,
   `floor`, `ceil`, `round` (halves away from 0), `trunc`, `fmod(x, y)`,
   and `sqrt64` (`sqrt` itself is built in). They follow Sun's fdlibm and
-  are within an ulp of the true value, `fmod` exact; `pow` follows Arm's
-  optimized-routines, as glibc's does (`pow64` within 0.52 ulp, `pow`
-  0.82). The f32 ones have shorter polynomials of their own (FreeBSD's),
+  are within an ulp of the true value, `fmod` exact; `pow`, `log64` and
+  `log264` follow Arm's optimized-routines, as glibc's do (`pow64` and
+  `log64` within 0.52 ulp, `log264` 0.55, `pow` 0.82). The f32 ones have shorter polynomials of their own (FreeBSD's),
   worked out in f64 and rounded once: within an ulp, and as often rounded
   right as glibc's.
   Where they give not a number its bits are `0x7ff8000000000000`, of

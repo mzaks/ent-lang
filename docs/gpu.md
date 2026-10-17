@@ -495,8 +495,8 @@ How fast they are, ns a call over a million entities on one core
 | `sin64` | 15.8 | 19.4 | `sin` | 11.9 | 10.8 |
 | `sin64` of 1e10 | 17.5 | 107.5 | `sin` of 1e10 | 18.9 | 11.7 |
 | `exp64` | 1.8 | 3.6 | `exp` | 2.3 | 2.2 |
-| `log64` | 9.0 | 3.2 | `log` | 1.4 | 2.8 |
-| `log264` | 11.6 | 3.5 | `log2` | 1.4 | 2.8 |
+| `log64` | 3.3 | 3.2 | `log` | 1.4 | 2.8 |
+| `log264` | 3.7 | 3.5 | `log2` | 1.4 | 2.8 |
 | `pow64` | 12.4 | 9.9 | `pow` | 6.8 | 4.8 |
 | `fmod64` | 8.7 | 6.7 | | | |
 | `fmod64` of 1e300 | 255 | 626 | | | |
@@ -537,6 +537,14 @@ one of 1,296 pairs of ends). `pow` (f32) has its own (16 rows of log2,
 32 of exp2, in f64; within 0.82 ulp): glibc's `powf` to the bit; it was
 39.5 ns as `exp64(y * log64(x))`, correctly rounded, and 14.5 as `pow64`
 rounded.
+
+`log64` and `log264` are Arm's too (log.c and log2.c): near 1 a
+polynomial of x - 1 (there log(x) is too small for the table's c to
+leave its last bits), else as `pow`'s logarithm, with 128 rows (64 for
+`log2`) of 1/c and log(c) and r = z/c - 1 by `fma`. They were fdlibm's,
+9.0 and 11.6 ns, each with a division; now 3.3 and 3.7, and glibc's to
+the bit on 99.996 % and 99.94 % of 242,000 inputs (within an ulp on the
+rest, exact at every power of 2).
 
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of

@@ -75,7 +75,7 @@
 // RUN: diff %t.math.cpu %t.math.gpu
 // RUN: diff %t.math.cpu %t.math.gpupar
 // RUN: FileCheck %s --check-prefix=MATH --input-file=%t.math.gpu
-// MATH:      exp/log 2730369242159563463
+// MATH:      exp/log 2730369242159562985
 // MATH-NEXT: pow 7739633407689454243
 // MATH-NEXT: sin/cos 8859017031914014129
 // MATH-NEXT: whole/root 11526708017173365729
