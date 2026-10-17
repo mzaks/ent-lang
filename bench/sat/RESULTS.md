@@ -182,3 +182,45 @@ neither MiniSat nor entsat before). Five are lost, all of them long
 searches whose times swing with any change (see above): asconhash H4 and
 H6, ContextModel 6_3_8 and 6_4_6, mchess18 45%. mchess18 35% takes 285 s
 (184 s).
+
+## 2026-10-17: reason bumping, rephasing, vivification
+
+Three things Kissat and CaDiCaL do, aimed at the long searches lost
+above, each behind an option and tried on the dev set first:
+
+| build (dev set) | solved | PAR-2 | median against MiniSat |
+|---|---|---|---|
+| entsat | 34 | 4,600 | 1.14 |
+| reasons bumped, clauses of 10 literals or less | 36 | 3,796 | 0.96 |
+| the same, 30 literals or less | 34 | 4,762 | 0.69 |
+| 10, and rephasing (best, false, best, true) | 35 | 4,587 | 1.07 |
+| 10, and vivification (LBD 6 or less) | 32 | 6,228 | 1.07 |
+
+Reason bumping (`Options.reasons`): where the learned clause is short,
+the variables of its literals' reasons are bumped too. Rephasing
+(`Options.rephase`) sets every phase again at growing intervals, as
+Kissat does without its walk. Vivification (`Options.vivify`) runs after
+each reduction at level 0: each learned clause of LBD 6 or less has its
+literals made false one by one and propagated without it, and is made
+shorter where that falsifies a clause or makes another of its literals
+true. It is right on SATLIB and drat-trim checks its proofs of 7 UNSAT
+problems, and it is not slow in itself: on Timetable_481 it runs at
+28,700 conflicts a second (5,900 without), but needs 1.55 million
+conflicts where entsat needs 27,723, 54 s against 4.7 s. Something it
+does to the search state costs that, perhaps the return to level 0
+after each reduction, or the used bit the shorter clauses lose; not
+looked into yet. Both stay in, off.
+
+| solver (all 100) | solved | SAT | UNSAT | PAR-2 | median | geometric mean |
+|---|---|---|---|---|---|---|
+| MiniSat 2.2 | 29 | 12 | 17 | 44,462 | 1 | 1 |
+| entsat | 37 | 19 | 18 | 40,131 | 1.14 | 0.64 |
+| entsat, reasons bumped (10) | 37 | 18 | 19 | 40,042 | 0.86 | 0.59 |
+
+Bumping reasons wins back asconhash H4 (184 s) and H6 (166 s), and
+mchess18 45% (272 s); H7 takes 137 s (196 s), grs 36 s (95 s), qwh.40
+6.5 s (16 s). It loses REGRandom (188 s before), 6g_6color_366 (209 s)
+and mchess18 35% (285 s), and the Timetables go from 7-32 s to 24-59 s,
+shuffling-2 from 31 s to 50 s. The same count, then, with the gains on
+the dev set it was chosen by and two of the losses off it: a small win,
+kept as the default.

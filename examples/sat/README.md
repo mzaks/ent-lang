@@ -64,6 +64,8 @@ cd somewhere && cp problem.cnf . && .../build/sat/entsat
 The program reads "problem.cnf" where it is started and writes
 "proof.drat" there (binary DRAT). `Options` in `sat.ent` and `Prep` in
 `satprep.ent` hold the settings: the proof, the restarts and modes, the
-reductions, a time limit (`Options.seconds`), the elimination's bounds.
+reductions, a time limit (`Options.seconds`), the elimination's bounds,
+and two that are off: rephasing (`Options.rephase`) and vivification
+(`Options.vivify`), each slower on the bench so far.
 `bench/sat` times it against MiniSat and CaDiCaL on SAT Competition
 problems.

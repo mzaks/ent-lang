@@ -56,8 +56,8 @@ buffer Seen { clause: i32 } capacity 16
 // conflict analysis, and its place in the decision queue (VMTF: a list
 // in the order the variables were last bumped, `stamp` growing along it).
 buffer Vars {
-  level: i32, reason: index of Arena, phase: bool, target: bool, mark: bool, prev: i32, next: i32,
-  stamp: i64
+  level: i32, reason: index of Arena, phase: bool, target: bool, best: bool, mark: bool, prev: i32,
+  next: i32, stamp: i64
 } capacity 16
 
 // For the stable mode's decisions (VSIDS): a heap of the variables by
@@ -100,12 +100,17 @@ buffer Modes { seconds: f64, conflicts: i64, decisions: i64, propagations: i64, 
 // conflict) and restarts after `stable_unit` times the Luby sequence;
 // the first `first_mode` conflicts focused, each mode then twice as long
 // as the one before. With `reuse` a restart keeps the levels it would
-// decide again in the same order.
+// decide again in the same order. `reasons`: see learn. With `rephase`
+// more than 0, every phase is set again after `rephase` conflicts, then
+// twice as many, three times...: to the best (the longest assignment
+// without a conflict since the last time), all false, the best, all
+// true, and so on (as Kissat does without its walk). `vivify`,
+// `vivify_lbd`: see vivify.
 unique Options {
   proof: bool, proof_file: text[126], restarts: Restarts, restart_unit: i64,
   margin: f64, fast: f64, slow: f64, reduce_interval: i64, reduce_percent: i32,
   seconds: f64, modes: bool, first_mode: i64, decay: f64, stable_unit: i64, reuse: bool,
-  target: bool
+  target: bool, reasons: i32, rephase: i64, vivify: i64, vivify_lbd: i32
 }
 
 // `conflict`: the clause propagation falsified, -1 for none. `trail`:
@@ -121,7 +126,8 @@ unique Search {
   luby: i64, since: i64, started: f64, written: bool,
   fast: f64, fast_left: f64, slow: f64, slow_left: f64,
   stable: bool, switch: i64, mode: i64, heap: i32, inc: f64, stable_luby: i64, target: i32,
-  glued: i64, reused: i64
+  glued: i64, reused: i64, best: i32, rephase: i64, rephases: i64,
+  vivify: bool, vivified: i64, viv_tried: i64, viv_removed: i64, viv_since: i64
 }
 
 world {
@@ -140,6 +146,10 @@ world {
   Options.stable_unit = 1024
   Options.reuse = true
   Options.target = true
+  Options.reasons = 10
+  Options.rephase = 0
+  Options.vivify = 0
+  Options.vivify_lbd = 6
 }
 
 // The Luby sequence, from 0: 1 1 2 1 1 2 4 1 1 2 1 1 2 4 8 ...
@@ -292,8 +302,8 @@ system setup() {
   Values = [{ v: 0 }; 2 * n]
   Lists = [{ start: 0, size: 0, cap: 0 }; 2 * n]
   Seen = [{ clause: -1 }; 2 * n]
-  Vars = [{ level: 0, reason: -1, phase: false, target: false, mark: false, prev: -1, next: -1,
-             stamp: 0 }; n]
+  Vars = [{ level: 0, reason: -1, phase: false, target: false, best: false, mark: false,
+             prev: -1, next: -1, stamp: 0 }; n]
   Trail = [{ lit: 0 }; n]
   Levels = [{ start: 0, stamp: 0, glued: 0 }; n + 1]
   Learnt = [{ lit: 0 }; n + 1]
@@ -313,6 +323,10 @@ system setup() {
   Search.mode = Options.first_mode
   Search.stable_luby = 0
   Search.target = 0
+  Search.best = 0
+  Search.rephase = Options.rephase
+  Search.rephases = 0
+  Search.vivify = false
   Counts = [{ n: 0 }; 256]
   Modes = [{ seconds: 0.0, conflicts: 0, decisions: 0, propagations: 0, restarts: 0 }; 3]
   Modes[2].seconds = wait_until(0.0)
@@ -508,6 +522,106 @@ system propagate() {
   Search.propagations += visits
 }
 
+// propagate's work as a proc, for vivify: the trail's literals from
+// `from` to `to` propagated at `level`, the clause `ignore` (a longer
+// one) passed by as if satisfied. What comes back is how far the trail is
+// propagated and how long it is, the conflict and the literals visited.
+// (A copy: propagate as a call of it is 3% slower.)
+proc propagate_on(values: mut Values, vars: mut Vars, lits: mut Trail, watch: mut Watch,
+                  lists: mut Lists, arena: mut Arena, from: i32, to: i32, level: i32,
+                  ignore: index of Arena) -> (i32, i32, index of Arena, i64) {
+  var qhead = from
+  var trail = to
+  var conflict: index of Arena = none
+  var visits: i64 = 0
+  while qhead < trail && conflict < 0 {
+    let f = lits[qhead].lit ^ 1
+    qhead += 1
+    visits += 1
+    let start = lists[list_of(f)].start
+    let end = start + lists[list_of(f)].size
+    var i = start
+    var j = start
+    while i < end {
+      let c = watch[i].clause
+      var blocker = watch[i].blocker
+      i += 1
+      var keep = true
+      if conflict < 0 && values[blocker].v != 1 && c < 0 {
+        // (A clause of two: its other literal is the blocker, and the
+        // clause is not looked at.)
+        if values[blocker].v == -1 {
+          conflict = ~c
+        } else {
+          values[blocker].v = 1
+          values[blocker ^ 1].v = -1
+          vars[var_of(blocker)].level = level
+          vars[var_of(blocker)].reason = ~c
+          lits[trail].lit = blocker
+          trail += 1
+        }
+      } else if conflict < 0 && values[blocker].v != 1 && c != ignore {
+        // (The false literal to the second place.)
+        if lit_at(arena, c + 2) == f {
+          arena[c + 2].w = arena[c + 3].w
+          arena[c + 3].w = f as i32
+        }
+        let first = lit_at(arena, c + 2)
+        blocker = first
+        if values[first].v != 1 {
+          let size = arena[c].w
+          var k = 2
+          while k < size && keep {
+            let l = lit_at(arena, c + 2 + k)
+            if values[l].v != -1 {
+              arena[c + 2 + k].w = f as i32
+              arena[c + 3].w = l as i32
+              // (To the watches of l, which move where they are full.)
+              let list = list_of(l)
+              var at = lists[list].start
+              let n = lists[list].size
+              if n == lists[list].cap {
+                let moved = len(watch) as index of Watch
+                for x in 0..n {
+                  watch += { clause: watch[at + x].clause, blocker: watch[at + x].blocker }
+                }
+                for x in n..2 * n + 4 { watch += { clause: 0, blocker: 0 } }
+                lists[list].start = moved
+                lists[list].cap = 2 * n + 4
+                at = moved
+              }
+              watch[at + n].clause = c
+              watch[at + n].blocker = first
+              lists[list].size = n + 1
+              keep = false
+            }
+            k += 1
+          }
+          if keep {
+            if values[first].v == -1 {
+              conflict = c
+            } else {
+              values[first].v = 1
+              values[first ^ 1].v = -1
+              vars[var_of(first)].level = level
+              vars[var_of(first)].reason = c
+              lits[trail].lit = first
+              trail += 1
+            }
+          }
+        }
+      }
+      if keep {
+        watch[j].clause = c
+        watch[j].blocker = blocker
+        j += 1
+      }
+    }
+    lists[list_of(f)].size = j - start
+  }
+  (qhead, trail, conflict, visits)
+}
+
 // A conflict: at level 0 the problem is unsatisfiable. Otherwise the
 // first-UIP clause is learned from it (MiniSat's analysis), made smaller
 // by taking out the literals the others imply, and its variables moved
@@ -637,6 +751,28 @@ system learn() {
     }
     for x in 0..clear { Vars[Clear[x].v].mark = false }
     k = kept
+
+    // (Where the clause has no more than `reasons` literals, the
+    // variables of their reasons are bumped too, as Kissat bumps them.)
+    if k <= Options.reasons {
+      for b in 0..bumped { Vars[Bumped[b].v].mark = true }
+      for i in 1..k {
+        let u = var_of(Learnt[i].lit)
+        let r = Vars[u].reason
+        if r >= 0 {
+          let size = Arena[r].w
+          for j in 0..size {
+            let w = var_of(lit_at(Arena, r + 2 + j))
+            if w != u && !Vars[w].mark && Vars[w].level > 0 {
+              Vars[w].mark = true
+              Bumped[bumped].v = w as i32
+              bumped += 1
+            }
+          }
+        }
+      }
+      for b in 0..bumped { Vars[Bumped[b].v].mark = false }
+    }
 
     // (The level to jump back to, its literal to the second place; and
     // how many levels the clause has, its LBD.)
@@ -776,6 +912,13 @@ system learn() {
       }
       Search.target = held
     }
+    if Options.rephase > 0 && held > Search.best {
+      for i in 0..held {
+        let l = Trail[i].lit
+        Vars[var_of(l)].best = l & 1 == 0
+      }
+      Search.best = held
+    }
     if restart { Search.target = 0 }
     var to = if restart { 0 } else { back }
     var cursor = Search.cursor
@@ -845,6 +988,19 @@ system learn() {
       heap = heap_insert(Heap, v as i32, heap)
     }
     Search.heap = heap
+    // (Rephasing, at a restart once its conflicts are done: each
+    // variable's phase and target to the best, false, best, true.)
+    if restart && Options.rephase > 0 && conflicts >= Search.rephase {
+      let kind = Search.rephases % 4
+      for v in 0..len(Vars) {
+        let phase = if kind == 1 { false } else if kind == 3 { true } else { Vars[v].best }
+        Vars[v].phase = phase
+        Vars[v].target = phase
+      }
+      Search.rephases += 1
+      Search.best = 0
+      Search.rephase = conflicts + Options.rephase * (Search.rephases + 1)
+    }
     var trail = start
     Search.cursor = cursor
     Search.qhead = start
@@ -977,6 +1133,7 @@ system reduce() {
   Search.reductions += 1
   Search.deleted += deleted
   Search.reduce = Search.conflicts + Options.reduce_interval * root(Search.reductions + 1)
+  Search.vivify = Options.vivify > 0
   if Options.proof && len(Bytes) > 1048576 {
     write_bytes(Options.proof_file, Bytes, 0, len(Bytes), Search.written)
     Search.written = true
@@ -1072,10 +1229,194 @@ system decide() {
   }
 }
 
+// The trail undone back to level `to`, the values cleared (nothing else:
+// for what vivify assigns, which was not assigned before it).
+proc undo(values: mut Values, lits: Trail, levels: Levels, to: i32, trail: i32) -> i32 {
+  let start = levels[to + 1].start
+  for i in start..trail {
+    let l = lits[i].lit
+    values[l].v = 0
+    values[l ^ 1].v = 0
+  }
+  start
+}
+
+// Vivification (as CaDiCaL and Kissat do it), after a reduction: at
+// level 0, each learned clause of LBD `vivify_lbd` or less not tried
+// before (bit 17) has its literals made false one by one, each
+// propagated without the clause. Where that falsifies a clause, the
+// literals made false so far are a clause; where it makes one of the
+// clause's literals true, those and that literal are; a literal it makes
+// false is left out. A clause so made smaller goes into the arena and
+// the proof, and the old one (marked by bit 18) out. It works as long as its propagations are no more than `vivify`
+// per mille of the search's since the last time.
+system vivify() {
+  Search.vivify = false
+  // (Back to level 0, as a restart goes.)
+  var trail = Search.trail
+  if Search.level > 0 {
+    let start = Levels[1].start
+    var heap = Search.heap
+    var cursor = Search.cursor
+    for i in start..trail {
+      let l = Trail[i].lit
+      let v = var_of(l)
+      Values[l].v = 0
+      Values[l ^ 1].v = 0
+      Vars[v].phase = l & 1 == 0
+      if cursor < 0 || Vars[v].stamp > Vars[cursor].stamp { cursor = v as i32 }
+      heap = heap_insert(Heap, v as i32, heap)
+    }
+    Search.heap = heap
+    Search.cursor = cursor
+    trail = start
+    Search.qhead = min(Search.qhead, start)
+    Search.level = 0
+  }
+  var budget = (Search.propagations - Search.viv_since) * Options.vivify / 1000
+  let (qhead, after, conflict, visits) = propagate_on(Values, Vars, Trail, Watch, Lists, Arena,
+                                                     Search.qhead, trail, 0, none)
+  trail = after
+  budget -= visits
+  var spent = visits
+  var unsat = conflict >= 0
+  var changed = false
+  let top = len(Arena)
+  var c: index of Arena = 0
+  while c < top && budget > 0 && !unsat {
+    let size = Arena[c].w
+    let meta = Arena[c + 1].w
+    if meta & 1 != 0 && meta & (3 << 17) == 0 && size > 2 && meta >> 2 & 0x3fff <= Options.vivify_lbd {
+      Arena[c + 1].w = meta | 1 << 17
+      Search.viv_tried += 1
+      // (The literals kept go to Learnt; `satisfied` where one is true at
+      // level 0, `done` where the rest are not needed.)
+      var k = 0
+      var level = 0
+      var satisfied = false
+      var done = false
+      for j in 0..size {
+        let l = lit_at(Arena, c + 2 + j)
+        if !done && !satisfied {
+          if Values[l].v == 1 {
+            if Vars[var_of(l)].level == 0 {
+              satisfied = true
+            } else {
+              Learnt[k].lit = l
+              k += 1
+              done = true
+            }
+          } else if Values[l].v == 0 {
+            Learnt[k].lit = l
+            k += 1
+            if j + 1 < size {
+              level += 1
+              Levels[level].start = trail
+              let f = l ^ 1
+              Values[f].v = 1
+              Values[l].v = -1
+              Vars[var_of(l)].level = level
+              Vars[var_of(l)].reason = none
+              Trail[trail].lit = f
+              trail += 1
+              let (q, t, x, seen) = propagate_on(Values, Vars, Trail, Watch, Lists, Arena,
+                                                 trail - 1, trail, level, c)
+              trail = t
+              budget -= seen
+              spent += seen
+              if x >= 0 { done = true }
+            }
+          }
+        }
+      }
+      if level > 0 { trail = undo(Values, Trail, Levels, 0, trail) }
+      if satisfied {
+        Arena[c + 1].w |= 1 << 18
+        changed = true
+        if Options.proof {
+          Bytes += { value: 100 }
+          for j in 0..size { proof_lit(Bytes, Arena[c + 2 + j].w) }
+          Bytes += { value: 0 }
+        }
+      } else if k < size {
+        Search.vivified += 1
+        Search.viv_removed += (size - k) as i64
+        changed = true
+        if Options.proof {
+          Bytes += { value: 97 }
+          for i in 0..k { proof_lit(Bytes, Learnt[i].lit as i32) }
+          Bytes += { value: 0 }
+          Bytes += { value: 100 }
+          for j in 0..size { proof_lit(Bytes, Arena[c + 2 + j].w) }
+          Bytes += { value: 0 }
+        }
+        if k == 0 {
+          unsat = true
+        } else if k == 1 {
+          // (A unit: assigned at level 0, and propagated.)
+          let l = Learnt[0].lit
+          Arena[c + 1].w |= 1 << 18
+          if Values[l].v == -1 {
+            unsat = true
+          } else if Values[l].v == 0 {
+            Values[l].v = 1
+            Values[l ^ 1].v = -1
+            Vars[var_of(l)].level = 0
+            Vars[var_of(l)].reason = none
+            Trail[trail].lit = l
+            trail += 1
+            let (q, t, x, seen) = propagate_on(Values, Vars, Trail, Watch, Lists, Arena,
+                                               trail - 1, trail, 0, none)
+            trail = t
+            budget -= seen
+            spent += seen
+            if x >= 0 { unsat = true }
+          }
+        } else {
+          // (At the end of the arena, watched once the arena is laid out
+          // again; the old one stays watched till then, which the new
+          // one subsumes.)
+          Arena[c + 1].w |= 1 << 18
+          let lbd = min(meta >> 2 & 0x3fff, k - 1)
+          Arena += { w: k }
+          Arena += { w: 1 | lbd << 2 | 1 << 17 }
+          for i in 0..k { Arena += { w: Learnt[i].lit as i32 } }
+        }
+      }
+    }
+    c += 2 + size
+  }
+  // (The old clauses out, the arena laid out again, and watched again.)
+  if changed {
+    let end = len(Arena)
+    var w: index of Arena = 0
+    c = 0
+    while c < end {
+      let size = Arena[c].w
+      if Arena[c + 1].w & 1 << 18 == 0 {
+        for i in 0..2 + size { Arena[w + i].w = Arena[c + i].w }
+        w += 2 + size
+      }
+      c += 2 + size
+    }
+    Arena = Arena[..w as i32]
+    for i in 0..trail { Vars[var_of(Trail[i].lit)].reason = none }
+    Search.rewatch = true
+  }
+  if unsat { Search.status = Status.Unsat }
+  Search.trail = trail
+  Search.qhead = trail
+  Search.propagations += spent
+  Search.viv_since = Search.propagations
+}
+
+
 schedule round() run_if Search.status == Status.Running {
   propagate()
   learn() run_if Search.conflict >= 0
   reduce() run_if Search.conflicts >= Search.reduce && Search.status == Status.Running
+  watch() run_if Search.rewatch
+  vivify() run_if Search.vivify && Search.status == Status.Running
   watch() run_if Search.rewatch
   decide() run_if Search.conflict < 0
 }
@@ -1087,6 +1428,7 @@ system finish() {
   put("c {Problem.vars} variables, {Problem.clauses} clauses")
   put("c {Search.conflicts} conflicts, {Search.decisions} decisions, {Search.propagations} propagations")
   put("c {Search.restarts} restarts ({Search.reused} levels kept), {Search.reductions} reductions, {Search.deleted} clauses deleted")
+  put("c vivified {Search.vivified} of {Search.viv_tried} clauses tried, {Search.viv_removed} literals out")
   put("c {seconds} seconds")
   tally(Modes, if Search.stable { 1 } else { 0 }, wait_until(0.0), Search.conflicts,
         Search.decisions, Search.propagations, Search.restarts)
