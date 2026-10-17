@@ -12,8 +12,8 @@ one core and for all of them (native: ENT_CFLAGS says otherwise), run for
 said: how long the city took to build, how long a day took on average
 and of that each system, and the most memory the program had. The build
 for one core runs on a fast core (CPU 2); the one for all on the four
-fast cores (4 threads) and on all (BENCH_CPUS and BENCH_THREADS say
-otherwise). On all the cores it runs three times and the median of
+fast cores (4 threads) and on all (BENCH_ONE_CPU, BENCH_CPUS and
+BENCH_THREADS say otherwise). On all the cores it runs three times and the median of
 each time is said: nothing holds a thread to a core there, and what one
 thread does lands on a fast core or a slow one.
 
@@ -288,12 +288,13 @@ def main():
     if not os.path.isfile(PANEL):
         sys.exit("no household panel: run examples/epidemic/reference/fetch.sh")
     os.makedirs(BENCH, exist_ok=True)
+    one = os.environ.get("BENCH_ONE_CPU", "2")
     fast = os.environ.get("BENCH_CPUS", "0-3")
     threads = os.environ.get("BENCH_THREADS", "4")
     for people in sizes:
         print(f"{people} people, {days} days{', the ill apart' if apart else ''}"
               f"{', with tracing' if MEASURES else ''}")
-        runs = [("one core", run_model(people, days, False, apart, "2", None)),
+        runs = [("one core", run_model(people, days, False, apart, one, None)),
                 (f"{threads} threads on the fast cores",
                  run_model(people, days, True, apart, fast, threads)),
                 ("all the cores, the median of three",
@@ -314,7 +315,7 @@ def main():
             f"{name} {seconds:.2f}" for name, seconds in first["setup"].items()
             if seconds >= 0.005))
         if "--reference" in arguments:
-            reference = run_reference(people, days, "2")
+            reference = run_reference(people, days, one)
             print(f"  reference, one core: set-up {reference['setup']:.2f} s, "
                   f"a day {1000 * reference['day']:.1f} ms, memory "
                   f"{reference['memory']:.0f} MB ({reference['without']:.0f} MB "

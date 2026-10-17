@@ -31,15 +31,15 @@ world {
 
 // A person's state as one number. (Floats by their millionths: what
 // differs in a float's last bits also shows a day or two on, as who is
-// infected when.)
+// infected when. The hazard left is a whole number, as it is.)
 fn state(id: i32, stage: Stage, path: Path, since: i32, at: i32, infected: i32,
-         next: Stage, left: f32, rate: f32, in_hospital: bool) -> i64 {
+         next: Stage, left: i64, rate: f32, in_hospital: bool) -> i64 {
   var h = mix(id as i64 as u64)
   h = mix(h ^ (stage as i32 as i64 as u64) ^ ((path as i32 as i64 as u64) << 8) ^
           ((next as i32 as i64 as u64) << 16))
   h = mix(h ^ (since as i64 as u64) ^ ((at as i64 as u64) << 20) ^
           ((infected as i64 as u64) << 40))
-  h = mix(h ^ ((left as f64 * 1000000.0) as i64 as u64))
+  h = mix(h ^ (left as u64))
   h = mix(h ^ ((rate as f64 * 1000000000.0) as i64 as u64))
   if in_hospital { h = mix(h + 1) }
   h as i64

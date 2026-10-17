@@ -34,11 +34,17 @@ import disease
 
 // A household: its number, how many live in it, and what its ill
 // members give off in a day (transmission.ent).
-component Household { id: i32, members: i32, pressure: f32 }
+component Household { id: i32, members: i32, pressure: i64 }
 
 // How much infection a person can still take before they are infected:
-// drawn once, and less for those whose age takes it easily.
-component Hazard { left: f32 }
+// drawn once, and less for those whose age takes it easily. Counted in
+// 2^-32ths (`hazard`): what is taken off it is a whole number, so what
+// many take off on a day adds up to the same in any order, on one core,
+// on all of them or on a GPU. (Finer than an f32 is about 1.)
+component Hazard { left: i64 }
+
+// An amount of hazard, in 2^-32ths, cut towards nought.
+fn hazard(amount: f64) -> i64 { (amount * 4294967296.0) as i64 }
 // How much a person gives off, against others: drawn once.
 component Spread { multiplier: f32 }
 // Which network they are in, and how many they are tied to in it.
@@ -251,7 +257,7 @@ system settle() {
   for h in 0..len(Taken) {
     if id < Run.people {
       let row = Taken[h].row
-      let home = spawn { Household { id: house, members: 0, pressure: 0.0 } }
+      let home = spawn { Household { id: house, members: 0, pressure: 0 } }
       Members = []
       for back in 0..9 {
         let age = 8 - back
@@ -264,7 +270,7 @@ system settle() {
               Disease { stage: Stage.Susceptible, since: 0,
                         next: Stage.Susceptible, at: -1, path: Path.None,
                         infected: 0 },
-              Hazard { left: (-log64(draw) / Ages[age].susceptible as f64) as f32 },
+              Hazard { left: hazard(-log64(draw) / Ages[age].susceptible as f64) },
               Spread { multiplier: gamma(key(Run.seed, id, 0, SPREAD), 1.0,
                                          Model.spread as f64) as f32 },
               Work { network: own_network[age] as u8, ties: 0 },

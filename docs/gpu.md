@@ -328,3 +328,58 @@ So the hints are not worth building. Instead, in order:
    archetype its query visits.
 3. Then G2 as planned (ordered reductions, lookups, `math`).
 
+
+## Audit: the epidemic (2026-10-17)
+
+What keeps `examples/epidemic` off the GPU, found by marking each of its
+38 systems `gpu` alone and building it (the verifier, then
+`--ent-lower-to-loops=gpu=1`), against what a day costs on the CPU
+(`bench/epidemic/RESULTS.md`, a million people on all cores):
+
+| system | of a day | what keeps it off the GPU |
+|---|---|---|
+| `workplace` | 19.2 ms, about 60% | edge loops (`WorksWith`, from both ends); fractions sent (`o.left -= ...`) |
+| `chance` | 6.1 ms, about 20% | fractions sent to `Hazard.left`; sent from a loop of the body (`for stub in ...`) |
+| `pair` | 2.8 ms | a buffer filled outside its `for` (`lay` gives `Order` and `Index` rows) |
+| `household` | 1.2 ms | `bottom up` along a tree (a sum per household) |
+| `symptoms`, `infect` | 1.5 ms | `math` (`log64`, and `sqrt64` through the gamma draws) |
+| `trace`, `told` (with tracing: 19.4 and 7.0 ms) | most of a day with tracing | edge loops (`Housemate`, `ToldBy`), `connect` and `disconnect` in them, `math` (`log64` in `stay`) |
+
+What is on the GPU already (`infectiousness`, `tally`, `counts`,
+`remember`, `apps`) is 3 to 5% of a day, and `infectiousness` writes what
+`workplace` and `chance` read on the CPU: marking it would cost a copy a
+day as big as the system. The systems of the set-up (tables, buffers) run
+once.
+
+So, by how much of a day each would bring to the GPU:
+
+1. **Edge loops on the GPU**: `workplace`, `trace`, `told`, `household`.
+   The edge tables as pieces; loops that read the edges and send to their
+   other ends, which is what a GPU does well. `connect` and `disconnect`
+   stay the CPU's.
+2. **Fractions sent**: `workplace`, `chance`, `household`. Done in the
+   model instead (below): the hazard in 2^-32ths, so what is sent is a
+   whole number.
+3. **Sends from a loop of the body**, for whole numbers sent atomically:
+   `chance`. Only the CPU's lists keep it off.
+4. **`math` alike on both sides**: the tracing's systems and the drawing
+   of who falls ill how.
+
+With 1 to 3, some 90% of a baseline day could be on the GPU. They are
+also what a world in pieces over several GPUs or machines needs (edges
+between the pieces, sends from many places combined in one order).
+
+**The hazard in whole numbers.** `Hazard.left` and `Household.pressure`
+are `i64`s counting 2^-32ths (`fn hazard` in `city.ent`): each amount is
+made a whole number where it is sent (times a power of two, then cut
+towards nought: the same on every machine), and the sum of a day's is the
+same in any order. Checked: the curves against the reference agree for
+the baseline and a lockdown; with tracing one measure (days at home for
+one infected) is 0.45 apart for seeds 1 to 20 where 0.43 is allowed, as
+it is with the hazard as an `f32` to the digit (it was so before), and
+within for seeds 21 to 40 and 41 to 60; one core and all give the same
+days; the city's and the illness's numbers hold; the integration tests'
+days are the same. A hundred days of a million people infect 857,886
+both ways. On the CPU it costs 3% a day on one core and 11% on four
+threads (178.7 against 172.9 ms, 68.1 against 61.2, on the slow cores:
+`chance` sends 8 bytes where it sent 4), and 60 MB.

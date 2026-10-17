@@ -76,8 +76,8 @@ system again() {
   Run.seed += 1
   Clock.day = 0
   for p: Person, a: Age, z: mut Hazard {
-    z.left = (-log64(uniform(key(Run.seed, p.id, 0, HAZARD), 0)) /
-              Ages[a.group].susceptible as f64) as f32
+    z.left = hazard(-log64(uniform(key(Run.seed, p.id, 0, HAZARD), 0)) /
+                    Ages[a.group].susceptible as f64)
   }
   for e, d: mut Disease {
     d.stage = Stage.Susceptible

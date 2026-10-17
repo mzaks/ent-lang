@@ -135,14 +135,14 @@ system infectiousness() {
 // already has no use for their hazard, so their own share does not
 // matter.)
 system household() {
-  for h: mut Household { h.pressure = 0.0 }
+  for h: mut Household { h.pressure = 0 }
   for (i: Infectious)-[LivesIn]->(h: mut Household) bottom up LivesIn {
-    h.pressure += i.rate
+    h.pressure += hazard(i.rate as f64)
   }
   let counts = Model.at_home * if Policy.lockdown { Model.lockdown_home } else { 1.0 }
   for (z: mut Hazard, d: Disease)-[LivesIn]->(h: Household)
-      where d.stage == Stage.Susceptible && h.pressure > 0.0 {
-    z.left -= h.pressure * counts
+      where d.stage == Stage.Susceptible && h.pressure > 0 {
+    z.left -= (h.pressure as f64 * counts as f64) as i64
   }
 }
 
@@ -167,12 +167,12 @@ system workplace() {
     let daily = open(Networks, n.network, Model.daily, Policy.lockdown)
     for (p)-[w: WorksWith]->(o: mut Hazard, home: Quarantine) {
       if home.until < Clock.day && met(today, w.key, daily) {
-        o.left -= i.rate * Model.at_work
+        o.left -= hazard((i.rate * Model.at_work) as f64)
       }
     }
     for (o: mut Hazard, home: Quarantine)-[w: WorksWith]->(p) {
       if home.until < Clock.day && met(today, w.key, daily) {
-        o.left -= i.rate * Model.at_work
+        o.left -= hazard((i.rate * Model.at_work) as f64)
       }
     }
   }
@@ -300,7 +300,9 @@ system chance() {
       let who = met_by(Order, Index, Pairing.order, Pairing.index, stub, Pairing.stubs,
                        Pairing.bits, Pairing.a, Pairing.b, Pairing.c, Pairing.d,
                        Pairing.back_a, Pairing.back_b, Pairing.back_c)
-      if who != none && who != me { Hazard(who).left -= i.rate * Model.by_chance }
+      if who != none && who != me {
+        Hazard(who).left -= hazard((i.rate * Model.by_chance) as f64)
+      }
     }
   }
 }
@@ -308,7 +310,7 @@ system chance() {
 // Whoever has no hazard left falls ill today.
 system infect() {
   for e, p: Person, a: Age, z: Hazard, d: mut Disease
-      where d.stage == Stage.Susceptible && z.left < 0.0 {
+      where d.stage == Stage.Susceptible && z.left < 0 {
     e.add(Ill)
     let (path, stage, next, at) = fall_ill(Ages, Delays, Run.seed, p.id, a.group, Clock.day)
     d.path = path

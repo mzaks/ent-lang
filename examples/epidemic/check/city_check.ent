@@ -40,29 +40,29 @@ system prime() {
   for e, i: mut Infectious, z: mut Hazard {
     e.add(Ill)
     i.rate = 1.0
-    z.left = 0.0
+    z.left = 0
   }
 }
 
 system work_out() {
   put("work")
   for p: Person, z: mut Hazard {
-    put("{p.id},{-z.left}")
-    z.left = 0.0
+    put("{p.id},{-(z.left as f64) / 4294967296.0}")
+    z.left = 0
   }
 }
 
 system chance_out() {
   put("chance")
   for p: Person, z: mut Hazard {
-    put("{p.id},{-z.left}")
-    z.left = 0.0
+    put("{p.id},{-(z.left as f64) / 4294967296.0}")
+    z.left = 0
   }
 }
 
 system home_out() {
   put("home")
-  for p: Person, z: Hazard { put("{p.id},{-z.left}") }
+  for p: Person, z: Hazard { put("{p.id},{-(z.left as f64) / 4294967296.0}") }
 }
 
 schedule setup() {
