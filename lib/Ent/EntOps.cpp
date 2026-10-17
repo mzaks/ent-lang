@@ -932,13 +932,31 @@ static bool isText(Type type) { return isa<TextType, StringType>(type); }
 /// what every entity reads alike (docs/gpu.md).
 static std::optional<std::string>
 notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
-  if (isa<ApplyOp, CombineOp>(op))
-    return std::string("sends a value to another entity, which is "
-                       "combined in order when the query ends: not on "
-                       "the GPU yet");
-  if (isa<AccumulateOp>(op))
-    return std::string("accumulates into a unique, which is combined in "
-                       "order when the query ends: not on the GPU yet");
+  // What is sent to another entity or accumulated into a unique: whole
+  // numbers by `+=`, `-=`, `min=`, `max=`, which give the same in any
+  // order, so the GPU combines them as they are sent (atomically).
+  if (isa<CombineOp>(op))
+    return std::string("combines into an ancestor along a tree");
+  if (isa<ApplyOp, AccumulateOp>(op)) {
+    auto apply = dyn_cast<ApplyOp>(op);
+    Value value = apply ? apply.getValue() : cast<AccumulateOp>(op).getValue();
+    StringRef rule = apply ? apply.getRule() : cast<AccumulateOp>(op).getRule();
+    auto whole = dyn_cast<IntegerType>(value.getType());
+    if (!whole || whole.getWidth() == 1)
+      return std::string("sends or accumulates a value that is not a whole "
+                         "number: the CPU combines those in the order of the "
+                         "rows, which the GPU does not keep (keep this "
+                         "system on the CPU)");
+    if (rule == "set")
+      return std::string("sends with '=', where the last one sent wins: "
+                         "which is last is the order of the rows, which the "
+                         "GPU does not keep");
+    for (Operation *parent = op->getParentOp(); !isa<QueryOp>(parent);
+         parent = parent->getParentOp())
+      if (isa<LoopLikeOpInterface>(parent))
+        return std::string("sends or accumulates in a loop of its body: not "
+                           "on the GPU yet");
+  }
   if (isa<AppendOp>(op))
     return std::string("gives a buffer rows, in the order of the "
                        "entities: not on the GPU yet");

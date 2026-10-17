@@ -4,7 +4,7 @@ Status: steps 1 to 4 done (the marker and its checks; the lowering; the
 runtime and `tools/ent --gpu`; measured), and after them the world kept
 on the GPU by copies the compiler places instead of managed memory (see
 Residency, and "After step 4" at the end for why), and one kernel for a
-fused sequence. G2 under way: lookups built. G0 (`bench/gpu/`, results in
+fused sequence. G2 under way: lookups and whole-number sends built. G0 (`bench/gpu/`, results in
 `bench/gpu/RESULTS.md`) showed that ent-opt's entity-parallel loops become
 correct kernels through upstream MLIR passes alone, that a frame of 1e7
 entities takes 3.75 ms with the world on the GPU against 14.5 ms on one
@@ -83,6 +83,13 @@ entity and values every entity reads alike:
 - looking up another entity's fields (`if let x = C(other).f`), which
   the query does not write (G2: the entity table, the slots handed out
   and their generations and locations, is kept on the GPU as pieces);
+- sending whole numbers to other entities and accumulating them into
+  uniques with `+=`, `-=`, `min=`, `max=` (`Health(foe).hp -= 3`,
+  `Hits += 1`): the same in any order, so combined where they are sent,
+  by atomic operations (G2). A unique's cell is the GPU's copy's: the CPU
+  sets it to where the rule starts before the loop, and combines what the
+  loop made of it into the unique after (`ent_gpu_cell_set`,
+  `ent_gpu_cell_get`, one wait for the GPU);
 - calling `fn`s of the program: compiled for the GPU like the body;
 - arithmetic on every number type. `f64` is allowed; on consumer cards
   it runs at 1/32 to 1/64 of `f32`, which `--explain` says.
@@ -91,7 +98,9 @@ Errors, each naming the construct and what it waits for:
 
 | In a `for` of a `gpu system` | Why not yet | When |
 |---|---|---|
-| `Health(e).hp -= ...`, `inner.w += ...` (applies), `Hits += 1` (accumulates) | combined at the commit point in a fixed order: needs ordered reductions on the GPU | G2 |
+| sending or accumulating a fraction (`f32`, `f64`), or sending with `=` | combined at the commit point in the order of the rows, which the GPU does not keep: needs the sends sorted by target and combined in that order on the GPU (keep such a system on the CPU) | later |
+| sending or accumulating in a loop of the body | sent from loops goes on lists the CPU keeps | later |
+| sending to a field the query also reads or writes | what is sent lands when the query ends; on the GPU it lands as it is sent | never |
 | `Marks += { ... }` (rows given to a buffer) | rows in the order of the entities: needs an ordered compaction | G2 |
 | `extern fn`, including `math`'s `sin`, `sqrt` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |
@@ -102,7 +111,7 @@ Errors, each naming the construct and what it waits for:
 | a table (`table`), a text (`text[N]`, `text`) | not on the GPU yet | later |
 | a fn given the entities of a component | it reads other entities through a function of the CPU's, given the world | later |
 | `extern proc` | the outside world | never |
-| writing a component a reactive query reacts to | its events (stamps) are kept on the CPU | later |
+| writing or sending to a component a reactive query reacts to, or to the field a tree is ordered by | its events (stamps), and the tree's order, are kept on the CPU | later |
 
 An extern system cannot be `gpu`. The code of a `gpu system` around its
 `for`s reads and writes uniques and computes; what it would do to

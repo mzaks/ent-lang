@@ -2,11 +2,22 @@
 
 // What keeps a `for` of a `gpu system` off the GPU (docs/gpu.md).
 
-component Hp { hp: i32, foe: entity }
-gpu system hurt() {
-  for h: Hp {
-    // expected-error @+1 {{cannot run on the GPU, as its system is 'gpu': sends a value to another entity}}
-    Hp(h.foe).hp -= 1
+component Spot { x: f32, foe: entity }
+gpu system push() {
+  for s: Spot {
+    // expected-error @+1 {{sends or accumulates a value that is not a whole number}}
+    Spot(s.foe).x += 1.0
+  }
+}
+
+// -----
+
+component Spot { x: f32 }
+unique Sum: f64
+gpu system add() {
+  for s: Spot {
+    // expected-error @+1 {{sends or accumulates a value that is not a whole number}}
+    Sum += s.x as f64
   }
 }
 
@@ -16,8 +27,10 @@ component Hp { hp: i32 }
 unique Hits: i32
 gpu system count() {
   for h: Hp {
-    // expected-error @+1 {{accumulates into a unique}}
-    Hits += h.hp
+    for i in 0..3 {
+      // expected-error @+1 {{sends or accumulates in a loop of its body}}
+      Hits += h.hp
+    }
   }
 }
 

@@ -1,0 +1,54 @@
+// Whole numbers sent to other entities and accumulated into uniques by
+// `gpu` systems (docs/gpu.md): built with and without --gpu it prints the
+// same. Many attackers hit the same few targets at once.
+import console
+
+component Attack { power: i32, target: entity } capacity 100000
+component Life { hp: i32, worst: i64 } capacity 100
+unique Clock { frame: i64 }
+unique Hits: i64
+unique Strongest: i32
+unique Weakest: u32
+unique Total: i64
+
+gpu system strike() {
+  for a: Attack where a.power % 3 != 0 {
+    Life(a.target).hp -= a.power
+    Life(a.target).worst max= (a.power * 7 % 1000) as i64
+    Hits += 1
+    Strongest max= a.power
+    Weakest min= a.power as u32
+  }
+}
+gpu system grow() {
+  for a: mut Attack { a.power = (a.power * 13 + 7) % 997 }
+}
+system tick() { Clock.frame += 1 }
+system total() {
+  Total = 0
+  for l: Life { Total += l.hp as i64 * 3 + l.worst }
+  spawn { Print { line: "frame {Clock.frame} hits {Hits} strongest {Strongest} weakest {Weakest} total {Total}" } }
+}
+schedule frame() { strike()  grow()  tick() }
+schedule report() run_if Clock.frame % 5 == 0 { total()  write()  clear() }
+
+world {
+  Weakest = 4000000000
+  Strongest = -1
+  let first = spawn { Life { hp: 1000000, worst: 0 } }
+  var target = first
+  for i in 0..50 {
+    let t = spawn { Life { hp: 1000000, worst: 0 } }
+    if i == 25 { target = t }
+  }
+  for i in 0..50000 {
+    spawn { Attack { power: i % 991, target: if i % 2 == 0 { first } else { target } } }
+  }
+}
+
+main {
+  loop {
+    frame()
+    report()
+  } until Clock.frame == 20
+}

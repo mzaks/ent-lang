@@ -34,6 +34,23 @@ gpu system steer() {
   }
 }
 
+// Whole numbers sent to another entity and accumulated into uniques:
+// combined as they are sent, atomically.
+component Hp { hp: i32, foe: entity }
+unique Hits: i64
+unique Most: u32
+// CHECK-LABEL: ent.system @hurt() gpu {
+// CHECK: ent.apply
+// CHECK: ent.accumulate
+// CHECK: ent.accumulate
+gpu system hurt() {
+  for h: Hp {
+    Hp(h.foe).hp -= 3
+    Hits += 1
+    Most max= h.hp as u32
+  }
+}
+
 // With a contract as well.
 // CHECK-LABEL: ent.system @fall(%{{.*}}: f32) gpu reads [@Position] writes [@Velocity] {
 gpu system fall(dt: f32) reads Position writes Velocity {

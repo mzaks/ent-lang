@@ -11,6 +11,16 @@
 // MIX: frame 20 moved 20 total 1281302.013828 hot 1512
 // MIX: frame 30 moved 30 total 1226484.675752 hot 2592
 
+// Whole numbers sent to other entities and accumulated into uniques, many
+// at once into the same few: combined atomically on the GPU, the same.
+// RUN: %ent run %S/Inputs/gpu_sends.ent > %t.sends.cpu
+// RUN: %ent run %S/Inputs/gpu_sends.ent --gpu > %t.sends.gpu
+// RUN: %ent run %S/Inputs/gpu_sends.ent --gpu --parallel > %t.sends.gpupar
+// RUN: diff %t.sends.cpu %t.sends.gpu
+// RUN: diff %t.sends.cpu %t.sends.gpupar
+// RUN: FileCheck %s --check-prefix=SENDS --input-file=%t.sends.gpu
+// SENDS: frame 20 hits 665841 strongest 995 weakest 1 total -840697920
+
 // examples/integrate.ent with its C host (examples/host/integrate_main.c,
 // as in integrate.test), the host built with ENT_GPU: it asks for the
 // world back from the GPU before it reads it.

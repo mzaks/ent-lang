@@ -63,6 +63,8 @@ public:
   /// For the GPU's copy of the world (see deviceWorld): the CPU's, whose
   /// counts and uniques it keeps, not the GPU.
   void setHost(WorldAccess *world) { host = world; }
+  /// The CPU's copy of the world: this one, or the one it is the GPU's of.
+  WorldAccess &cpu() { return host ? *host : *this; }
   /// How many entities each archetype has, by its index.
   Value counts() { return host ? host->counts() : getCounts(); }
   bool hasIds() const { return layout.entities.hasIds(); }
@@ -489,6 +491,13 @@ public:
   }
 
   /// A one-element view of a resource field.
+  /// The field of a unique in this copy of the world, also in the GPU's,
+  /// where it is the cell a loop for the GPU accumulates into.
+  Value ownResourceField(StringAttr resource, StringAttr field) {
+    const WorldResourceField *entry =
+        layout.getResource(resource).find(field);
+    return view(entry->offset, 1, storageType(entry->type));
+  }
   Value resourceField(StringAttr resource, StringAttr field) {
     if (host)
       return host->resourceField(resource, field);
@@ -1691,10 +1700,25 @@ static constexpr llvm::StringLiteral kLoopedAttr = "ent.looped";
 /// The lists' numbers: one for each such op and archetype it sends from.
 static llvm::DenseMap<std::pair<int64_t, unsigned>, int64_t> sendLists;
 
+/// A whole number sent or accumulated in a loop for the GPU, combined
+/// where it is sent by an atomic operation: the same in any order (see
+/// markGpuSends).
+static constexpr llvm::StringLiteral kAtomicAttr = "ent.atomic";
+
+/// The atomic operation of a rule, for whole numbers.
+static arith::AtomicRMWKind atomicKind(StringRef rule, bool noSign) {
+  if (rule == "min")
+    return noSign ? arith::AtomicRMWKind::minu : arith::AtomicRMWKind::mins;
+  if (rule == "max")
+    return noSign ? arith::AtomicRMWKind::maxu : arith::AtomicRMWKind::maxs;
+  return arith::AtomicRMWKind::addi;
+}
+
 static bool appliesDirectly(Operation *apply, bool directApplies) {
   if (!isa<ApplyOp, AccumulateOp>(apply))
     return false;
-  return apply->hasAttr(kInEachAttr) || apply->hasAttr(kReducedAttr) ||
+  return apply->hasAttr(kAtomicAttr) ||
+         apply->hasAttr(kInEachAttr) || apply->hasAttr(kReducedAttr) ||
          apply->hasAttr(kLoopedAttr) || apply->hasAttr(kOrderFreeAttr) ||
          (directApplies && apply->hasAttr(kUnobservedAttr));
 }
@@ -1993,9 +2017,23 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
         rewriter.setInsertionPointToStart(ifApplies.thenBlock());
       }
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      // (On the GPU: into the cell of the GPU's copy, see
+      // gpuAccumulateCells.)
+      if (accumulate->hasAttr(kAtomicAttr)) {
+        memref::AtomicRMWOp::create(
+            rewriter, loc,
+            atomicKind(accumulate.getRule(),
+                       hasNoSign(accumulate.getValue().getType())),
+            world.toStorage(loc, accumulate.getValue()),
+            world.ownResourceField(accumulate.getResourceAttr().getAttr(),
+                                   accumulate.getFieldAttr()),
+            ValueRange{zero});
+        rewriter.eraseOp(op);
+        continue;
+      }
       Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
                                         accumulate.getFieldAttr());
-      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
       Value old = memref::LoadOp::create(rewriter, loc, field,
                                          ValueRange{zero});
       memref::StoreOp::create(
@@ -2263,7 +2301,8 @@ static void combineAtRow(IRRewriter &rewriter, Location loc,
                          const WorldLayout &layout, WorldAccess &world,
                          const WorldArchetype &target, Value row,
                          StringAttr component, StringAttr field,
-                         StringRef rule, Value value, Value id, Value tick);
+                         StringRef rule, Value value, Value id, Value tick,
+                         bool atomic = false);
 
 /// Emit the body of `query` for `entity` of `archetype` at the insertion
 /// point, with the query's parameters and outer values mapped by
@@ -4571,7 +4610,8 @@ static void combineInto(IRRewriter &rewriter, ApplyOp apply,
         }
         combineAtRow(rewriter, loc, layout, world, target, targetRow,
                      component.getAttr(), apply.getFieldAttr(),
-                     apply.getRule(), value, id, tick);
+                     apply.getRule(), value, id, tick,
+                     apply->hasAttr(kAtomicAttr));
         return {};
       },
       []() -> SmallVector<Value> { return {}; }, bounds,
@@ -4582,8 +4622,18 @@ static void combineAtRow(IRRewriter &rewriter, Location loc,
                          const WorldLayout &layout, WorldAccess &world,
                          const WorldArchetype &target, Value row,
                          StringAttr component, StringAttr fieldName,
-                         StringRef rule, Value value, Value id, Value tick) {
+                         StringRef rule, Value value, Value id, Value tick,
+                         bool atomic) {
   Value field = world.column(target, component, fieldName);
+  // (On the GPU, where many send at once: no events, no tree ordered by
+  // it, see checkGpuStamps.)
+  if (atomic) {
+    memref::AtomicRMWOp::create(
+        rewriter, loc,
+        atomicKind(rule, hasNoSign(target.find(component, fieldName)->type)),
+        value, field, ValueRange{row});
+    return;
+  }
   Value old = memref::LoadOp::create(rewriter, loc, field, ValueRange{row});
   Value combined =
       combine(rewriter, loc, rule, old, value,
@@ -12431,7 +12481,9 @@ static void markReduced(IRRewriter &rewriter, QueryOp query,
       !getTriggers(query).empty() || sendsLooped)
     return;
   query.getBody().walk([&](AccumulateOp accumulate) {
+    // (On the GPU it is combined atomically instead.)
     bool plain = accumulate->hasAttr(kUnobservedAttr) &&
+                 !accumulate->hasAttr(kAtomicAttr) &&
                  !accumulate->hasAttr(kInEachAttr) &&
                  accumulate.getRule() != "set" &&
                  isa<IntegerType>(accumulate.getValue().getType());
@@ -12463,6 +12515,7 @@ static Operation *keepCells(IRRewriter &rewriter, Operation *loops,
       looped.insert({accumulate.getResourceAttr(), accumulate.getFieldAttr()});
   for (AccumulateOp accumulate : accumulates) {
     if (!appliesDirectly(accumulate, sequentialOnly) ||
+        accumulate->hasAttr(kAtomicAttr) ||
         looped.contains(
             {accumulate.getResourceAttr(), accumulate.getFieldAttr()}))
       continue;
@@ -13059,6 +13112,90 @@ static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
   return true;
 }
 
+static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
+                            ModuleOp module, StringRef name, ValueRange args,
+                            TypeRange results = {});
+
+/// The uniques that the loops for the GPU of `queries` accumulate into:
+/// each the cell of the GPU's copy at the unique's place, which starts
+/// where its rule does (0, or the most or least a number of its type can
+/// be) and after the loops is combined into the CPU's unique by the rule
+/// (devices/gpu.c: ent_gpu_cell_set, ent_gpu_cell_get).
+struct GpuCells {
+  struct Cell {
+    const WorldResourceField *field;
+    StringAttr resource;
+    StringRef rule;
+  };
+  SmallVector<Cell> cells;
+
+  GpuCells(ArrayRef<QueryOp> queries, const WorldLayout &layout) {
+    for (QueryOp query : queries)
+      query.walk([&](AccumulateOp accumulate) {
+        if (!accumulate->hasAttr(kAtomicAttr))
+          return;
+        const WorldResourceField *field =
+            layout.getResource(accumulate.getResourceAttr().getAttr())
+                .find(accumulate.getFieldAttr());
+        if (llvm::none_of(cells, [&](const Cell &cell) {
+              return cell.field == field;
+            }))
+          cells.push_back({field, accumulate.getResourceAttr().getAttr(),
+                           accumulate.getRule()});
+      });
+  }
+
+  void start(IRRewriter &rewriter, Location loc, ModuleOp module) {
+    for (const Cell &cell : cells) {
+      auto type = cast<IntegerType>(cell.field->type);
+      unsigned bits = type.getWidth();
+      APInt from = APInt::getZero(bits);
+      if (cell.rule == "min")
+        from = type.isUnsigned() ? APInt::getMaxValue(bits)
+                                 : APInt::getSignedMaxValue(bits);
+      else if (cell.rule == "max")
+        from = type.isUnsigned() ? APInt::getMinValue(bits)
+                                 : APInt::getSignedMinValue(bits);
+      auto constant = [&](int64_t value) -> Value {
+        return arith::ConstantIntOp::create(rewriter, loc, value, 64);
+      };
+      callGpu(rewriter, loc, module, "ent_gpu_cell_set",
+              ValueRange{constant(cell.field->offset),
+                         constant(from.getZExtValue()),
+                         constant((bits + 7) / 8)});
+    }
+  }
+
+  void finish(IRRewriter &rewriter, Location loc, ModuleOp module,
+              WorldAccess &cpu) {
+    for (const Cell &cell : cells) {
+      auto type = cast<IntegerType>(cell.field->type);
+      unsigned bits = type.getWidth();
+      Value got =
+          callGpu(rewriter, loc, module, "ent_gpu_cell_get",
+                  ValueRange{arith::ConstantIntOp::create(
+                                 rewriter, loc, cell.field->offset, 64),
+                             arith::ConstantIntOp::create(rewriter, loc,
+                                                          (bits + 7) / 8, 64)},
+                  TypeRange{rewriter.getI64Type()})
+              .getResult(0);
+      Type stored = cpu.storageType(type);
+      if (bits < 64)
+        got = arith::TruncIOp::create(rewriter, loc, stored, got);
+      Value unique = cpu.resourceField(cell.resource,
+                                       StringAttr::get(rewriter.getContext(),
+                                                       cell.field->field.getValue()));
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value old = memref::LoadOp::create(rewriter, loc, unique,
+                                         ValueRange{zero});
+      memref::StoreOp::create(
+          rewriter, loc,
+          combine(rewriter, loc, cell.rule, old, got, type.isUnsigned()),
+          unique, ValueRange{zero});
+    }
+  }
+};
+
 static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
                      Operation *insertionPoint, SymbolTable &symbols,
                      const WorldLayout &layout, WorldAccess &world,
@@ -13146,6 +13283,13 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
         total = arith::AddIOp::create(rewriter, loc, total, rows);
         ends.push_back(total);
       }
+      SmallVector<QueryOp> accumulating;
+      for (auto &[archetype, bodies] : parts)
+        for (auto [query, index] : bodies)
+          accumulating.push_back(query);
+      GpuCells cells(accumulating, layout);
+      auto module = insertionPoint->getParentOfType<ModuleOp>();
+      cells.start(rewriter, loc, module);
       auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                           ValueRange{total}, ValueRange{one});
       loop->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
@@ -13175,6 +13319,8 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
       };
       emitFrom(0, zero);
       hoistResourceReads(rewriter, loop, world);
+      rewriter.setInsertionPointAfter(loop);
+      cells.finish(rewriter, loc, module, world.cpu());
     }
   }
   for (const WorldArchetype &archetype : layout.archetypes) {
@@ -14610,7 +14756,7 @@ static constexpr int64_t kGpuBlockRows = 256;
 /// Call `name` of devices/gpu.c, declaring it where it is not yet.
 static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
                             ModuleOp module, StringRef name, ValueRange args,
-                            TypeRange results = {}) {
+                            TypeRange results) {
   if (!SymbolTable::lookupSymbolIn(module, name)) {
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(module.getBody());
@@ -14677,12 +14823,29 @@ static LogicalResult checkGpuStamps(ModuleOp module,
       return WalkResult::advance();
     return system.walk([&](Operation *op) {
       FlatSymbolRefAttr component;
-      if (auto set = dyn_cast<SetOp>(op))
+      StringAttr field;
+      if (auto set = dyn_cast<SetOp>(op)) {
         component = cast<RefType>(set.getRef().getType()).getComponent();
-      else if (isa<AddOp, RemoveOp>(op))
+        field = set.getFieldAttr();
+      } else if (auto apply = dyn_cast<ApplyOp>(op)) {
+        component = apply.getComponentAttr();
+        field = apply.getFieldAttr();
+      } else if (isa<AddOp, RemoveOp>(op)) {
         component = cast<FlatSymbolRefAttr>(op->getAttr("component"));
+      }
       if (!component)
         return WalkResult::advance();
+      // (Nor what a tree's children are ordered by: the tree is looked
+      // over on the CPU.)
+      for (const WorldRelation &relation : layout.relations)
+        if (field && relation.orderComponent == component.getAttr() &&
+            relation.orderField == field) {
+          op->emitOpError("cannot run on the GPU, as its system is 'gpu': "
+                          "a tree's children are ordered by ")
+              << component << " \"" << field.getValue()
+              << "\", which is looked over on the CPU: not on the GPU yet";
+          return WalkResult::interrupt();
+        }
       for (const WorldArchetype &archetype : layout.archetypes)
         for (const WorldColumn &column : archetype.columns)
           if (column.isStamp() &&
@@ -15118,6 +15281,32 @@ struct EntLowerToLoops
       if (!seen.wasInterrupted())
         accumulate->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
     });
+    // Whole numbers a `gpu` system sends or accumulates are combined where
+    // they are sent (atomically, on the GPU): an apply only where nothing
+    // else in its query touches the field, or the query would see some of
+    // it before its end. (The verifier saw to the rest.)
+    bool unseen = true;
+    module.walk([&](SystemOp system) {
+      if (!system.getGpu())
+        return;
+      system.walk([&](ApplyOp apply) {
+        if (!apply->getParentOfType<QueryOp>() ||
+            apply->hasAttr(kUnobservedAttr))
+          return;
+        apply.emitOpError("cannot run on the GPU, as its system is 'gpu': "
+                          "it sends to a field its query also reads or "
+                          "writes, where what is sent lands when the query "
+                          "ends");
+        unseen = false;
+      });
+      if (gpu)
+        system.walk([&](Operation *op) {
+          if (isa<ApplyOp, AccumulateOp>(op) && op->getParentOfType<QueryOp>())
+            op->setAttr(kAtomicAttr, rewriter.getUnitAttr());
+        });
+    });
+    if (!unseen)
+      return signalPassFailure();
     // A cascading query combines what it sends as it visits: its order is
     // the order of its depths' ends, and it reads none of those fields.
     module.walk([&](Operation *op) {
@@ -15453,8 +15642,22 @@ struct EntLowerToLoops
         Block *block = query->getBlock();
         Operation *before = query->getPrevNode();
         Operation *after = query->getNextNode();
+        // (What it accumulates on the GPU: its cells around it.)
+        std::optional<GpuCells> cells;
+        if (systemOnGpu) {
+          cells.emplace(ArrayRef<QueryOp>{query}, *layout);
+          rewriter.setInsertionPoint(query);
+          cells->start(rewriter, query.getLoc(), module);
+        }
         lowerQuery(rewriter, query, *layout, systemOnGpu ? *device : world,
                    systemOnGpu ? forGpu(options) : options);
+        if (cells) {
+          if (after)
+            rewriter.setInsertionPoint(after);
+          else
+            rewriter.setInsertionPoint(block->getTerminator());
+          cells->finish(rewriter, query.getLoc(), module, world);
+        }
         ++scope;
         for (Operation *op = before ? before->getNextNode() : &block->front();
              op && op != after; op = op->getNextNode())

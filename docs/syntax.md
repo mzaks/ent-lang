@@ -1241,9 +1241,11 @@ A `for` of a `gpu system` may read and write the components of the
 entity it visits, its id and whether it has a component (filters,
 `has`, `where`, `optional`), give it or take a component kept in place
 (not `apart`), and read uniques, consts and buffers and call the
-program's own fns, which do the same, and look up other entities' fields.
-Not yet: sending to other entities or accumulating into a unique, giving
-a buffer rows,
+program's own fns, which do the same, look up other entities' fields,
+and send whole numbers to other entities or accumulate them into uniques
+(`+=`, `-=`, `min=`, `max=`: the same in any order, so combined as they
+are sent). Not yet: sending fractions or with `=`, sending from a loop of
+the body, giving a buffer rows,
 a `for` over other entities inside it, extern fns (so `math`'s), tables
 and texts. Later, or never: relations and trees, `on` (reactive), `by`, spawning,
 destroying and `apart` components, procs, writing a component a reactive

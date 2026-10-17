@@ -189,6 +189,27 @@ void ent_gpu_wrote(int64_t id, int64_t onGpu, int64_t offset, int64_t from,
     without(&held->gpuFrom, &held->gpuTo, from, to);
 }
 
+// A unique that a loop for the GPU accumulates into: its cell in the GPU's
+// copy starts where the rule does, and what the loop made of it comes
+// back to the CPU, which combines it into the unique (`bytes` of it).
+void ent_gpu_cell_set(int64_t offset, int64_t bits, int64_t bytes) {
+  // (From the CPU's memory as it is: the call returns when it has it.)
+  check(cuMemcpyHtoDAsync(device + (CUdeviceptr)offset, &bits, (size_t)bytes,
+                          stream),
+        "a unique's cell to the GPU");
+  pending = true;
+}
+
+int64_t ent_gpu_cell_get(int64_t offset, int64_t bytes) {
+  int64_t bits = 0;
+  check(cuMemcpyDtoHAsync(&bits, device + (CUdeviceptr)offset, (size_t)bytes,
+                          stream),
+        "a unique's cell from the GPU");
+  pending = true;
+  ent_gpu_wait();
+  return bits;
+}
+
 // For a C host, between schedule calls: everything the GPU has newer to
 // the CPU, and from then on the CPU's (the host may write any of it).
 void ent_gpu_world_to_host(void) {
