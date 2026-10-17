@@ -6,6 +6,27 @@ with OpenMP, and on the GPU. `python3 bench/gpu/run_churn.py`: what it
 costs when the CPU touches what the GPU goes through. `probe_launch.c` and
 `probe_readback.c`: the driver alone.
 
+## 2026-10-17, later still: one kernel a fused sequence
+
+A fused sequence of `gpu` systems is one kernel over the rows of all its
+archetypes (integrate: bodies, particles and the player), instead of one
+a archetype. The machine was busy: another experiment had the four fast
+cores (CPUs 0 to 3) and so their second threads (12 to 15) to itself;
+this ran on the others (`taskset -c 4-11,16-23`, 3.3 GHz cores), so the
+CPU columns are slower than above and not for comparing with them.
+
+| entities | fused | fused-omp | g0 | gpu |
+|---|---|---|---|---|
+| 10,000 | 2.5 | 2.5 | 15.4 | 6.3 |
+| 100,000 | 46.2 | 44.8 | 18.3 | 10.2 |
+| 1,000,000 | 1,135.6 | 1,031.7 | 386.7 | 374.3 |
+| 10,000,000 | 13,790.2 | 12,333.0 | 3,749.1 | 3,657.2 |
+
+The same checksum everywhere. The floor is 6.3 us (8.0 with three
+kernels); `probe_launch.c` has one launch and one synchronize at about 5.
+Where the data decides, the same as with three kernels: finding a row's
+archetype costs nothing that shows.
+
 ## 2026-10-17, later: the world kept on the GPU by copies
 
 Instead of managed memory, the GPU's own copy of the world, with copies

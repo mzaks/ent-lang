@@ -13095,7 +13095,69 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   // The rows each archetype has, for its loop and the sends' buffers.
   SmallVector<std::pair<const WorldArchetype *, Value>> visited;
   llvm::SmallPtrSet<const WorldArchetype *, 4> direct;
+  // For the GPU, one loop over the rows of all the archetypes, one after
+  // another: one kernel, one launch (most of what a small frame costs).
+  // A row finds its archetype by where it is among them.
+  if (options.gpu) {
+    SmallVector<std::pair<const WorldArchetype *,
+                          SmallVector<std::pair<QueryOp, unsigned>>>>
+        parts;
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      SmallVector<std::pair<QueryOp, unsigned>> bodies;
+      for (auto [index, system] : llvm::enumerate(systems))
+        for (QueryOp query : system.getBody().getOps<QueryOp>())
+          if (matches(archetype, query))
+            bodies.push_back({query, index});
+      if (!bodies.empty())
+        parts.push_back({&archetype, std::move(bodies)});
+    }
+    if (!parts.empty()) {
+      rewriter.setInsertionPoint(insertionPoint);
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+      SmallVector<Value> counts, ends;
+      Value total = zero;
+      for (auto &[archetype, bodies] : parts) {
+        Value rows = world.count(loc, *archetype);
+        visited.push_back({archetype, rows});
+        counts.push_back(rows);
+        total = arith::AddIOp::create(rewriter, loc, total, rows);
+        ends.push_back(total);
+      }
+      auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                          ValueRange{total}, ValueRange{one});
+      loop->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      Value at = loop.getInductionVars().front();
+      std::function<void(unsigned, Value)> emitFrom = [&](unsigned part,
+                                                          Value start) {
+        auto body = [&] {
+          Value row = arith::SubIOp::create(rewriter, loc, at, start);
+          for (auto [query, index] : parts[part].second)
+            emitQueryBody(rewriter, query, mappings[index],
+                          *parts[part].first, world, layout, row,
+                          counts[part], tick, Value(), /*parallel=*/true,
+                          /*sequentialOnly=*/false);
+        };
+        if (part + 1 == parts.size())
+          return body();
+        Value inside = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ult, at, ends[part]);
+        auto branch = scf::IfOp::create(rewriter, loc, inside,
+                                        /*withElseRegion=*/true);
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPoint(branch.thenBlock()->getTerminator());
+        body();
+        rewriter.setInsertionPoint(branch.elseBlock()->getTerminator());
+        emitFrom(part + 1, ends[part]);
+      };
+      emitFrom(0, zero);
+      hoistResourceReads(rewriter, loop, world);
+    }
+  }
   for (const WorldArchetype &archetype : layout.archetypes) {
+    if (options.gpu)
+      break;
     SmallVector<std::pair<QueryOp, unsigned>> bodies;
     for (auto [index, system] : llvm::enumerate(systems))
       for (QueryOp query : system.getBody().getOps<QueryOp>())

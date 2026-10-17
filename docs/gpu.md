@@ -3,7 +3,8 @@
 Status: steps 1 to 4 done (the marker and its checks; the lowering; the
 runtime and `tools/ent --gpu`; measured), and after them the world kept
 on the GPU by copies the compiler places instead of managed memory (see
-Residency, and "After step 4" at the end for why). G0 (`bench/gpu/`, results in
+Residency, and "After step 4" at the end for why), and one kernel for a
+fused sequence. G2 is next. G0 (`bench/gpu/`, results in
 `bench/gpu/RESULTS.md`) showed that ent-opt's entity-parallel loops become
 correct kernels through upstream MLIR passes alone, that a frame of 1e7
 entities takes 3.75 ms with the world on the GPU against 14.5 ms on one
@@ -305,5 +306,12 @@ So the hints are not worth building. Instead, in order:
 2. **Fewer launches a frame**: the loops of one fused sequence over
    several archetypes as one kernel (blocks for each archetype's rows),
    or a CUDA graph per schedule; 2.5 us a launch is most of the floor.
+   Built, the first way (`fuseRuns`): one loop over the rows of all the
+   archetypes one after another, a row finding its archetype by where it
+   is among them. Integrate's frame is one kernel instead of three, its
+   floor 6.3 us instead of 8 (one launch and one synchronize alone take
+   about 5); at 1e6 and 1e7 the same as before. A `gpu` system that is
+   not fused (a buffer read, a condition) still has a kernel for each
+   archetype its query visits.
 3. Then G2 as planned (ordered reductions, lookups, `math`).
 

@@ -230,3 +230,38 @@ ent.schedule @frame() {
 // CHECK-NEXT: arith.constant
 // CHECK: func.call @ent_gpu_to_host
 // CHECK: call @ent_gpu_wait()
+
+// -----
+
+// A fused sequence for the GPU is one loop over the rows of all the
+// archetypes it visits, one after another: one kernel. A row finds its
+// archetype by where it is among them.
+
+ent.component @P (x: f32)
+ent.component @V (dx: f32)
+ent.archetype @A (@P, @V) capacity 1000
+ent.archetype @B (@P) capacity 1000
+
+ent.system @grow() gpu {
+  ent.query (%p: !ent.ref<@P, mut>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
+    %n = arith.addf %x, %x : f32
+    ent.set %p "x", %n : !ent.ref<@P, mut>, f32
+  }
+}
+ent.schedule @frame() {
+  ent.run @grow()
+}
+
+// CHECK-LABEL: func.func @frame
+// CHECK: %[[END:.*]] = arith.addi %c0{{[_0-9]*}}, %{{.*}} : index
+// CHECK: %[[TOTAL:.*]] = arith.addi %[[END]], %{{.*}} : index
+// CHECK: scf.parallel ({{.*}}) = ({{.*}}) to (%[[TOTAL]])
+// CHECK: arith.cmpi ult, %{{.*}}, %[[END]]
+// CHECK: arith.addf
+// CHECK: } else {
+// CHECK: arith.subi %{{.*}}, %[[END]]
+// CHECK: arith.addf
+// CHECK: processor = block_x
+// CHECK-NOT: scf.parallel
+// CHECK: return
