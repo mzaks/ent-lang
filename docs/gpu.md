@@ -429,9 +429,30 @@ every build gives what one after another does (`test/Integration/
 running.test`, `gpu.test`). A query with one is not fused with others:
 its first pass would read what an earlier body had not written yet.
 
-Still to do for `pair`: writing `Order` and `Index` rows at the rows a
-running sum gives, from a `for` (a buffer's rows are written only
-outside one, or in one that takes turns).
+**Rows of buffers written from a `for` (2026-10-17).** The other thing
+`pair` needed: `Order[Pairing.order + row].who = e` in a `for`, the row
+from a running sum, and every 64th stub's row in `Index` from a loop of
+the body. A row is written where it stands; each is the row of one
+entity of the run, and two that write one stop the program. Who wrote
+a row is kept beside the buffer (8 bytes a row of its room, the run's
+number above 32 bits and the entity's id below, outside what a saved
+world holds): a write puts its own there and looks at what it found. On
+the GPU by an atomic exchange; on the CPU by a load and a store, also
+on many threads, where a locked exchange of every row cost more than
+the loop (`lay` 4.9 ms at four threads, 1.85 with plain ones): there a
+clash that two threads make at the same moment may go unseen, one core
+sees every one. A row written twice by the same entity in a row (two
+fields) is looked at once. The GPU's copy of the world now starts as
+nought, as the CPU's does: who wrote its rows is never copied over.
+
+With it `pair` is `today()` (where today's rows are), `lay()` (a `for`
+over the people: their stubs, running sums of them and of the rows, and
+the rows of `Order` and `Index`) and `pair()` (the order of the stubs);
+`lay` runs on the GPU, and `chance` reads `Order` and `Index` where
+`lay` left them. A running sum that adds the same number for every
+entity from the body itself (`Laying.rows += 1`) is the row's place
+times it: no pass of its own. Measured in `bench/epidemic/RESULTS.md`
+(2026-10-17, later still).
 
 **The hazard in whole numbers.** `Hazard.left` and `Household.pressure`
 are `i64`s counting 2^-32ths (`fn hazard` in `city.ent`): each amount is

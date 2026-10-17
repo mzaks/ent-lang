@@ -1,0 +1,56 @@
+// Rows of buffers written from a `for` (docs/syntax.md), in the shape of
+// the epidemic's `lay`: each entity writes its own row of `Order`, at
+// the place a running sum gives it, and the row of every 64th stub in
+// `Index` from a loop of its body. Built for one core, for all of them
+// and with `lay` on the GPU (gpu.test), it prints the same; on the third
+// day an entity also writes another's row, and the program stops.
+import console
+
+component Stubs { meets: i32 } capacity 100000
+buffer Order { who: entity, first: i32 } capacity 100000
+buffer Index { row: i32 } capacity 100000
+unique Laying { stubs: i32, rows: i32, clash: bool }
+unique Check: i64
+unique Days: i32
+
+system lay() {
+  Laying.stubs = 0
+  Laying.rows = 0
+  for e, s: Stubs {
+    let row = Laying.rows += 1
+    let first = Laying.stubs += s.meets
+    Order[row].who = e
+    Order[row].first = first
+    var next = (first + 63) / 64 * 64
+    while next < first + s.meets {
+      Index[next / 64].row = row
+      next += 64
+    }
+    if Laying.clash && row == 7 { Order[3].first = 0 }
+  }
+}
+system finish() { Order[Laying.rows].first = Laying.stubs }
+system check() {
+  Check = 0
+  for i in 0..Laying.rows + 1 { Check += Order[i].first as i64 * (i % 97 + 1) as i64 }
+  for i in 0..(Laying.stubs + 63) / 64 { Check += Index[i].row as i64 * (i % 89 + 1) as i64 }
+  spawn { Print { line: "day {Days}: stubs {Laying.stubs} rows {Laying.rows} check {Check}" } }
+}
+system grow() {
+  for s: mut Stubs { s.meets = (s.meets * 13 + 7) % 23 }
+}
+system count() {
+  Days += 1
+  Laying.clash = Days == 3
+}
+schedule day() { count()  lay()  finish()  check()  write()  clear()  grow() }
+
+world {
+  for i in 0..80001 { Order += { who: none, first: 0 } }
+  for i in 0..20000 { Index += { row: 0 } }
+  for i in 0..80000 { spawn { Stubs { meets: i % 17 } } }
+}
+
+main {
+  loop { day() } until Days == 3
+}

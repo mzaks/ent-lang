@@ -52,6 +52,21 @@
 // RUN: grep -c "^gpu system lay" %t.running.ent | FileCheck %s --check-prefix=RUNNING
 // RUNNING: 2
 
+// Rows of buffers written from a `for`, on the GPU: the same, and two
+// entities that write one row stop the program there too.
+// RUN: sed -e 's/^system lay()/gpu system lay()/' %S/Inputs/buffer_rows.ent > %t.rows.ent
+// RUN: %ent build %t.rows.ent --gpu -o %t.rows.gpu
+// RUN: %ent build %t.rows.ent --gpu --parallel -o %t.rows.gpupar
+// RUN: not --crash %t.rows.gpu > %t.rows.gpu.out
+// RUN: not --crash %t.rows.gpupar > %t.rows.gpupar.out
+// RUN: FileCheck %s --check-prefix=ROWS --input-file=%t.rows.gpu.out
+// RUN: FileCheck %s --check-prefix=ROWS --input-file=%t.rows.gpupar.out
+// ROWS: day 1: stubs 639985 rows 80000 check 1272241970273
+// ROWS: day 2: stubs 870584 rows 80000 check 1730780109152
+// ROWS-NOT: day 3
+// RUN: grep -c "^gpu system lay" %t.rows.ent | FileCheck %s --check-prefix=ROWSGPU
+// ROWSGPU: 1
+
 // A `gpu system` of an imported module: its kernel's name has no `.`.
 // RUN: %ent run %S/Inputs/gpu_module.ent --gpu | FileCheck %s --check-prefix=MODULE
 // MODULE: frame 10 sum 529470

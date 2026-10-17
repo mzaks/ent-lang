@@ -58,6 +58,8 @@ schedule day() {
   tick()
   policy()
   infectiousness()
+  today()
+  lay()
   pair()
   household()
   workplace()

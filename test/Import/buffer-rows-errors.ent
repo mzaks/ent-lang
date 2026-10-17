@@ -1,0 +1,36 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+// Rows of buffers written in a `for` over entities: what cannot be.
+
+component Hp { hp: i32 }
+buffer Marks { hp: i32 } capacity 8
+system mark() {
+  for h: Hp {
+    // expected-error @+1 {{in a 'for' over entities a row of a buffer is given a value with '='}}
+    Marks[0].hp += h.hp
+  }
+}
+
+// -----
+
+component Hp { hp: i32 }
+buffer Marks { hp: i32 } capacity 8
+system mark() {
+  for h: Hp {
+    // expected-error @+1 {{which its query also reads or gives rows}}
+    Marks[h.hp].hp = h.hp
+    // expected-note @+1 {{it does here}}
+    let seen = Marks[0].hp
+  }
+}
+
+// -----
+
+component Hp { hp: i32 }
+buffer Marks { hp: i32 } capacity 8
+system mark() {
+  for h: Hp {
+    // expected-error @+1 {{in a 'for' inside a 'for': not yet}}
+    for o: Hp { Marks[o.hp].hp = h.hp }
+  }
+}

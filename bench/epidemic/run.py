@@ -58,9 +58,9 @@ PANEL = os.path.join(OUT, "run", "baseline_household_demographics.csv")
 SETUP = ["parameters", "measures", "panel", "households", "settle", "apps",
          "census", "employ", "wire", "rows", "curve", "rate", "share", "seed",
          "tally"]
-DAY = ["tick", "policy", "remember", "infectiousness", "pair", "household",
-       "workplace", "chance", "infect", "progress", "symptoms", "tests", "trace",
-       "told", "tally"]
+DAY = ["tick", "policy", "remember", "infectiousness", "today", "lay", "pair",
+       "household", "workplace", "chance", "infect", "progress", "symptoms",
+       "tests", "trace", "told", "tally"]
 
 
 # What is done about the epidemic besides, with --tracing: those with

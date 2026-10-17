@@ -170,6 +170,8 @@ schedule frame() {
   tick() run_if Pace.due
   policy() run_if Pace.due
   infectiousness() run_if Pace.due
+  today() run_if Pace.due
+  lay() run_if Pace.due
   pair() run_if Pace.due
   household() run_if Pace.due
   workplace() run_if Pace.due

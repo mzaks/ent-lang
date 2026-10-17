@@ -547,10 +547,43 @@ BufferAtOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 LogicalResult
 BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   BufferOp buffer = verifyBufferUse(symbolTable, *this, getBufferAttr(),
-                                    /*writes=*/true, /*outside=*/true,
+                                    /*writes=*/true, /*outside=*/false,
                                     "changes ");
   if (!buffer)
     return failure();
+  // In a query (not one whose entities take turns): written where it
+  // stands, each row by one entity of the query (two that write one row
+  // stop the program, see lowerBuffers), which reads nothing else of the
+  // buffer: what it read would depend on which entities wrote before.
+  if (auto query = (*this)->getParentOfType<QueryOp>();
+      query && !isInTurn(*this)) {
+    if (query.getCascade() || query.hasBy() ||
+        query->hasAttr(QueryOp::kTriggersAttr))
+      return emitOpError("writes a row of ")
+             << getBufferAttr()
+             << " in a query that goes along a tree, by a field or reacts "
+                "to changes: not yet";
+    if ((*this)->getParentOfType<EachOp>())
+      return emitOpError("writes a row of ")
+             << getBufferAttr() << " in a 'for' inside a 'for': not yet";
+    Operation *reader = nullptr;
+    query.walk([&](Operation *op) {
+      if (reader || !isa<BufferAtOp, BufferOfOp, AppendOp, BufferFillOp,
+                         BufferKeepOp, ClearOp>(op))
+        return;
+      if (cast<FlatSymbolRefAttr>(op->getAttr("buffer")) == getBufferAttr())
+        reader = op;
+    });
+    if (reader) {
+      InFlightDiagnostic diag =
+          emitOpError("writes a row of ")
+          << getBufferAttr()
+          << ", which its query also reads or gives rows: in a query a "
+             "buffer that is written is not read (but for its length)";
+      diag.attachNote(reader->getLoc()) << "it does here";
+      return diag;
+    }
+  }
   Type type = buffer.getFieldType(getField());
   if (!type)
     return emitOpError("sets '")

@@ -1263,7 +1263,7 @@ other entities or accumulate them into uniques
 (`+=`, `-=`, `min=`, `max=`: the same in any order, so combined as they
 are sent), from the body or from loops in it, and keep running sums
 (`let first = Laying.stubs += s.meets`). Not yet: sending fractions
-or with `=`, giving a buffer rows,
+or with `=`, giving a buffer rows (writing a row it has is fine),
 a `for` over other entities inside it, extern fns (so `math`'s), tables
 and texts. Later, or never: `connect`, `disconnect` and trees, `on` (reactive), `by`, spawning,
 destroying and `apart` components, procs, writing a component a reactive
@@ -1681,6 +1681,19 @@ to a device at once (all there is to draw), in place of a call for each.
   nothing happens. Outside a `for` over entities, or in one whose
   entities take turns (`in turn by`), where a buffer is changed and read
   as outside one.
+- In a `for` over entities, `Name[i].field = value` (with `=`) gives the
+  row its value where it stands, also from a loop of the body; each row
+  is written by one entity of the `for` (two fields of it, or one again,
+  by the same one), so that what it holds after does not depend on the
+  order the entities ran in. Two entities of one run of the `for` that
+  write the same row stop the program, after the `for`: on one core
+  always, on the GPU always, on many cores of the CPU but where the two
+  write at the same moment (a locked write of every row would cost more
+  than the loop). The `for` reads nothing else of the buffer (its
+  `len` it may) and gives it no rows. With a running sum each entity
+  finds a row of its own: `let row = Laying.rows += 1` then
+  `Order[row].who = e`. Not yet in a `for` inside a `for`, nor in one
+  that goes along a tree, by a field or reacts to changes.
 - `len(Name)` is how many rows it has and `Name[i].field` a row's field
   (nought where it has no row `i`); in a `for` that gives it rows, as it
   was before the `for`.

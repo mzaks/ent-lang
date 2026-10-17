@@ -61,17 +61,6 @@ system s() {
 // -----
 
 buffer Screen { pixel: u8 } capacity 8
-component Dot { at: i32 } capacity 4
-system s() {
-  for d: Dot {
-    // expected-error @+1 {{a row of a buffer is changed outside a 'for' over entities: what it kept would depend on their order}}
-    Screen[d.at].pixel = 1
-  }
-}
-
-// -----
-
-buffer Screen { pixel: u8 } capacity 8
 system s() {
   // expected-error @+1 {{buffer 'Screen' has no field 'shade'}}
   Screen[1].shade = 1

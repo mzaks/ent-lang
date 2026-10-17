@@ -97,6 +97,8 @@ schedule day() {
   policy()
   remember()
   infectiousness()
+  today()
+  lay()
   pair()
   household()
   workplace()

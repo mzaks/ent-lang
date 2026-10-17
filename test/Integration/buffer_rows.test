@@ -1,0 +1,11 @@
+// Rows of buffers written from a `for`: for one core and for all of
+// them, the same; two entities that write one row stop the program.
+// RUN: %ent build %S/Inputs/buffer_rows.ent -o %t.one
+// RUN: %ent build %S/Inputs/buffer_rows.ent --parallel -o %t.all
+// RUN: not --crash %t.one > %t.one.out
+// RUN: not --crash %t.all > %t.all.out
+// RUN: diff %t.one.out %t.all.out
+// RUN: FileCheck %s --input-file=%t.one.out
+// CHECK: day 1: stubs 639985 rows 80000 check 1272241970273
+// CHECK: day 2: stubs 870584 rows 80000 check 1730780109152
+// CHECK-NOT: day 3

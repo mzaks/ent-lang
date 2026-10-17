@@ -43,7 +43,7 @@ component Thing { born: i32 }
 buffer Rows { n: i32 } capacity 4
 system s() {
   for t: Thing by t.born {
-    // expected-error @+1 {{a row of a buffer is changed outside a 'for' over entities}}
+    // expected-error @+1 {{writes a row of @Rows in a query that goes along a tree, by a field or reacts to changes: not yet}}
     Rows[0].n = 1
   }
 }

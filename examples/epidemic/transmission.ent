@@ -5,7 +5,8 @@
 //
 //   schedule setup() { .. the city ..  rows()  curve()  rate()  share() }
 //   schedule day() {
-//     tick()  policy()  infectiousness()  pair()  household()  workplace()
+//     tick()  policy()  infectiousness()  today()  lay()  pair()  household()
+//     workplace()
 //     chance()  infect()  progress()  tally()
 //   }
 //
@@ -184,7 +185,8 @@ system workplace() {
 // (which `since` says).
 fn locked(meets: i32, left: f32, seed: i64, id: i32, since: i32) -> i32 {
   let part = meets as f64 * left as f64
-  let whole = floor64(part)
+  // (`floor64` of what is not below nought, here also on the GPU.)
+  let whole = (part as i64) as f64
   whole as i32 + if uniform(key(seed, id, since, LOCKED), 0) < part - whole { 1 } else { 0 }
 }
 
@@ -204,56 +206,60 @@ system rows() {
   for i in 0..kept * (Run.people / 8) { Index += { row: 0 } }
 }
 
-// Where everybody's stubs start, in the order of the people, and how
-// many stubs there are: those of everybody who is up and not kept at
-// home. (One after another: where one's stubs start is how many those
-// before have. The people come in the order of their numbers.)
-proc lay(chances: mut Chance, diseases: Disease, people: Person, homes: Quarantine,
-         order: mut Order, index: mut Index, order_at: i32, index_at: i32,
-         lockdown: bool, left: f32, seed: i64, since: i32, day: i32) -> i32 {
-  var stubs = 0
-  var row = 0
-  var next = 0
-  var slot = 0
-  for e, c in chances {
-    let stage = diseases[e].stage
-    var meets = 0
-    if stage != Stage.Dead && stage != Stage.Hospitalised &&
-       stage != Stage.Critical && stage != Stage.Recovering &&
-       homes[e].until < day {
-      meets = if lockdown { locked(c.meets, left, seed, people[e].id, since) }
-              else { c.meets }
-    }
-    order[order_at + row].who = e
-    order[order_at + row].first = stubs
-    chances[e].first = stubs
-    chances[e].today = meets
-    stubs += meets
-    while next < stubs {
-      index[index_at + slot].row = row
-      slot += 1
-      next += 64
-    }
-    row += 1
-  }
-  order[order_at + row].first = stubs
-  stubs
+// Where today's rows are (`Pairing.order`, `Pairing.index`), before the
+// people lay their stubs there; and none laid yet (`Laying`).
+unique Laying { rows: i32, stubs: i32 }
+
+system today() {
+  let slot = Clock.day % Pairing.kept
+  Pairing.order = Laid[slot].order
+  Pairing.index = Laid[slot].index
+  Laying.rows = 0
+  Laying.stubs = 0
 }
 
-// Today's stubs, and the order that pairs them.
+// Where everybody's stubs start, in the order of the people, and how
+// many stubs there are: those of everybody who is up and not kept at
+// home. Where one's stubs start is how many those before have (a
+// running sum, `Laying.stubs`), and their row their place among the
+// people (`Laying.rows`), which is their number; every 64th stub's row
+// is in `Index`.
+system lay() {
+  for e, c: mut Chance, d: Disease, p: Person, h: Quarantine {
+    var meets = 0
+    if d.stage != Stage.Dead && d.stage != Stage.Hospitalised &&
+       d.stage != Stage.Critical && d.stage != Stage.Recovering &&
+       h.until < Clock.day {
+      meets = if Policy.lockdown {
+                locked(c.meets, Model.lockdown_chance, Run.seed, p.id, Model.lockdown_from)
+              } else { c.meets }
+    }
+    let row = Laying.rows += 1
+    let first = Laying.stubs += meets
+    Order[Pairing.order + row].who = e
+    Order[Pairing.order + row].first = first
+    c.first = first
+    c.today = meets
+    var next = (first + 63) / 64 * 64
+    while next < first + meets {
+      Index[Pairing.index + next / 64].row = row
+      next += 64
+    }
+  }
+}
+
+// Today's stubs, and the order that pairs them. (The row after the last
+// person starts where the stubs end.)
 system pair() {
   let slot = Clock.day % Pairing.kept
-  let stubs = lay(Chance, Disease, Person, Quarantine, Order, Index, Laid[slot].order,
-                  Laid[slot].index, Policy.lockdown, Model.lockdown_chance, Run.seed,
-                  Model.lockdown_from, Clock.day)
+  let stubs = Laying.stubs
+  Order[Pairing.order + Laying.rows].first = stubs
   let order = key(Run.seed, 0, Clock.day, PAIRS)
   Laid[slot].day = Clock.day
   Laid[slot].stubs = stubs
   Laid[slot].bits = bits_for(stubs)
   Pairing.stubs = stubs
   Pairing.bits = bits_for(stubs)
-  Pairing.order = Laid[slot].order
-  Pairing.index = Laid[slot].index
   Pairing.a = odd(order)
   Pairing.b = odd(order + 1)
   Pairing.c = odd(order + 2)

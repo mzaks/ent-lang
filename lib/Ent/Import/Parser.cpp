@@ -3046,11 +3046,13 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
     FailureOr<ExprPtr> value = parseExpr();
     if (failed(value))
       return failure();
-    if (inQuery && !inTurn)
-      return error(at, "a row of a buffer is changed outside a 'for' over "
-                       "entities: what it kept would depend on their order "
-                       "(not of one whose entities take turns: 'in turn by "
-                       "name.field')");
+    // (In a `for` a row is given its value as it is: another value made
+    // of the row would read the buffer, which the `for` does not.)
+    if (inQuery && !inTurn && (op->first != Token::Assign || op->second))
+      return error(at, "in a 'for' over entities a row of a buffer is given "
+                       "a value with '=': each row is written by one entity "
+                       "of the 'for', which reads nothing of the buffer (or "
+                       "take turns: 'in turn by name.field')");
     FailureOr<mlir::Value> index = emitRowNumber(**number, target, name);
     if (failed(index))
       return failure();

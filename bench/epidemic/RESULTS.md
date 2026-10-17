@@ -3,6 +3,26 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-17, later still: `pair` as a `for`, and on the GPU
+
+`pair` is `today()`, `lay()` and `pair()` (docs/gpu.md): `lay` a `for`
+over the people with running sums and rows of `Order` and `Index`
+written from it. The same machine, cores and caveat as below:
+`BENCH_ONE_CPU=4 BENCH_CPUS=4-7 BENCH_ALL=0 python3 bench/epidemic/run.py
+1000000 --gpu workplace,infectiousness,chance,lay`.
+
+| a million people, a day in ms | one core | 4 threads | memory MB |
+|---|---|---|---|
+| the CPU alone | 176.5 | 65.7 | 883 |
+| `workplace`, `infectiousness`, `chance` and `lay` on the GPU | 19.4 | 12.6 | 831 |
+
+857,886 infected in every run (with tracing, 100,000 people: 32,718 in
+all four builds, as the model with `pair` a proc gave). `lay` takes 3.79
+ms on one core where `pair` took 2.85 (who wrote each row is kept and
+looked at), 1.83 on four threads where `pair` could use one (2.89), and
+2.10 on the GPU; `chance` 4.4 where it took 5.2, as `Order` and `Index`
+are no longer copied to the GPU each day.
+
 ## 2026-10-17, later: `chance` on the GPU too
 
 Sends from loops of a `gpu system`'s body (docs/gpu.md). The same

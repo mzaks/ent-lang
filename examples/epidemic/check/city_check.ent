@@ -77,6 +77,8 @@ schedule setup() {
   prime()
   workplace()
   work_out()
+  today()
+  lay()
   pair()
   chance()
   chance_out()
