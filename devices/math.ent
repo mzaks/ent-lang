@@ -1261,11 +1261,13 @@ fn trunc(x: f32) -> f32 { trunc64(x as f64) as f32 }
 fn fmod(x: f32, y: f32) -> f32 { to32(fmod64(x as f64, y as f64)) }
 
 
-fn pi() -> f32 { 3.14159265358979 }
-fn pi64() -> f64 { 3.14159265358979 }
+// (The floats nearest pi and tau, each written with as many digits as
+// it takes.)
+fn pi() -> f32 { 3.141592653589793 }
+fn pi64() -> f64 { 3.141592653589793 }
 // A whole turn.
-fn tau() -> f32 { 6.28318530717959 }
-fn tau64() -> f64 { 6.28318530717959 }
+fn tau() -> f32 { 6.283185307179586 }
+fn tau64() -> f64 { 6.283185307179586 }
 fn radians(degrees: f32) -> f32 { degrees * 0.0174532925199433 }
 fn degrees(radians: f32) -> f32 { radians * 57.2957795130823 }
 
