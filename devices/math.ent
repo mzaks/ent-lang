@@ -692,7 +692,7 @@ fn odd64(y: f64) -> bool {
 // number, x below 0): else e to the power of y * log(|x|), the logarithm
 // and the product in two floats (Arm's pow.c, optimized-routines; within
 // 0.52 ulp).
-fn pow64(x: f64, y: f64) -> f64 {
+fn pow64_ends(x: f64, y: f64) -> f64 {
   let inf = infinity64()
   let nan = nan64()
   let ax = abs64(x)
@@ -724,6 +724,17 @@ fn pow64(x: f64, y: f64) -> f64 {
     let p = pow_exp(ehi, y * lo + fma(y, hi, -ehi))
     if x < 0.0 && odd64(y) { -p } else { p }
   }
+}
+fn pow64(x: f64, y: f64) -> f64 {
+  let topx = bits_of(x) >> 52
+  let topy = (bits_of(y) >> 52) & 0x7ff
+  // (x above 0, normal and finite, and |y| from 2^-65 up to 2^63: no end
+  // to mind, so straight to the logarithm and back.)
+  if topx - 1 < 0x7fe && topy - 0x3be < 0x80 {
+    let (hi, lo) = pow_log(bits_of(x))
+    let ehi = y * hi
+    pow_exp(ehi, y * lo + fma(y, hi, -ehi))
+  } else { pow64_ends(x, y) }
 }
 
 // The words of 2/pi's fraction, 64 bits each, from its point (0 before

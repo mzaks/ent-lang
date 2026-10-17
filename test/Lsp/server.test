@@ -73,7 +73,7 @@
 {"jsonrpc": "2.0", "id": 5, "method": "textDocument/hover", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 17, "character": 11}}}
 // A module's declaration: read from the module's file.
 // CHECK:      "id": 5
-// CHECK:      "value": "```ent\ncomponent Print { line: text[126] } capacity 1024\n```\nFrom the module `console`.\n\nAt most this many lines of one shape between two `write`s.\n\n"
+// CHECK:      "value": "```ent\ncomponent Print { line: text } capacity 1024\n```\nFrom the module `console`.\n\nAt most this many lines of one shape between two `write`s.\n\n"
 // -----
 {"jsonrpc": "2.0", "id": 6, "method": "textDocument/definition", "params": {"textDocument": {"uri": "test:///game.ent"}, "position": {"line": 23, "character": 3}}}
 // Where a name is declared, also in another file.

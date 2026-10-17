@@ -10,13 +10,15 @@
 // may carry more than its `Print`; such lines follow the plain ones, each
 // shape's together.
 //
-// `put` and `flush` are implemented in devices/console.c.
+// A line is as long as it is (a `text`, devices/text.ent: nothing is cut
+// off). `put` and `flush` are implemented in devices/console.c.
+import text
 
 // At most this many lines of one shape between two `write`s.
-component Print { line: text[126] } capacity 1024
+component Print { line: text } capacity 1024
 
 // Writes one line to standard output.
-extern proc put(line: text[126])
+extern proc put(line: text)
 // Hands what was written on to whoever reads it.
 extern proc flush()
 

@@ -6,7 +6,7 @@
 
 #include <stdio.h>
 
-void ent_console_put(const ent_text126 *line) {
+void ent_console_put(const ent_text *line) {
   fwrite(line->bytes, 1, line->length, stdout);
   fputc('\n', stdout);
 }

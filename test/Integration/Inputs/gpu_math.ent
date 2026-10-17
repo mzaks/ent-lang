@@ -49,7 +49,6 @@ system sum() {
     Sums.e += o.e
     Sums.f += o.f
   }
-  // (One a line: a Print holds 126 bytes.)
   spawn { Print { line: "exp/log {Sums.a}" } }
   spawn { Print { line: "pow {Sums.b}" } }
   spawn { Print { line: "sin/cos {Sums.c}" } }

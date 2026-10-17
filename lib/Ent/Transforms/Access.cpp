@@ -47,6 +47,11 @@ StringAttr mlir::ent::getStampColumnField(MLIRContext *context,
 bool mlir::ent::hasOwnEffects(Operation *op) {
   if (op->hasTrait<OpTrait::HasRecursiveMemoryEffects>())
     return false;
+  // (A text field's block, made or given back: its effects keep the ops
+  // where they are, but they touch nothing another system or entity
+  // sees, and devices/text.c may run them on any thread at once.)
+  if (isa<TextOwnOp, TextDropOp>(op))
+    return false;
   if (auto effects = dyn_cast<MemoryEffectOpInterface>(op))
     return !effects.hasNoEffect();
   return true;

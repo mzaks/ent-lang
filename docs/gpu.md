@@ -497,7 +497,7 @@ How fast they are, ns a call over a million entities on one core
 | `exp64` | 1.8 | 3.6 | `exp` | 2.3 | 2.2 |
 | `log64` | 3.3 | 3.2 | `log` | 1.4 | 2.8 |
 | `log264` | 3.7 | 3.5 | `log2` | 1.4 | 2.8 |
-| `pow64` | 12.4 | 9.9 | `pow` | 6.8 | 4.8 |
+| `pow64` | 10.9 | 9.9 | `pow` | 6.8 | 4.8 |
 | `asin64` | 7.9 | 17.9 | `asin` | 1.9 | 6.4 |
 | `acos64` | 9.3 | 17.5 | `acos` | 1.9 | 6.4 |
 | `fmod64` | 8.7 | 6.7 | | | |
@@ -533,12 +533,13 @@ reads them): log(x) from the row of the c near x's fraction (128 rows,
 1/c and log(c) in two floats) and a polynomial of z/c - 1, exact by
 `fma`; e^x from 2^(k/128) (a table of their bits) and a polynomial of
 what is left. No division. `pow64` was 45.5 ns, within 14 ulp near the
-ends of the range; now within 0.52 (agreeing with glibc's to the bit on
-99.95 % of 240,000 inputs and within an ulp on the rest, and on every
-one of 1,296 pairs of ends). `pow` (f32) has its own (16 rows of log2,
-32 of exp2, in f64; within 0.82 ulp): glibc's `powf` to the bit; it was
-39.5 ns as `exp64(y * log64(x))`, correctly rounded, and 14.5 as `pow64`
-rounded.
+ends of the range; now 10.9 (12.4 until x above 0 and y of no end went
+there by one test of their exponents, as in Arm's), within 0.52
+(agreeing with glibc's to the bit on 99.95 % of 240,000 inputs and
+within an ulp on the rest, and on every one of 1,296 pairs of ends).
+`pow` (f32) has its own (16 rows of log2, 32 of exp2, in f64; within
+0.82 ulp): glibc's `powf` to the bit; it was 39.5 ns as `exp64(y *
+log64(x))`, correctly rounded, and 14.5 as `pow64` rounded.
 
 `log64` and `log264` are Arm's too (log.c and log2.c): near 1 a
 polynomial of x - 1 (there log(x) is too small for the table's c to
@@ -557,7 +558,12 @@ one costs half a ns more.
 
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of
-the f32 sum was its first ten digits. It is a line for each now.
+the f32 sum was its first ten digits. It is a line for each now, and a
+`Print`'s line is a `text` (of any length, devices/text.ent): nothing is
+cut off. Giving a text field its block (`ent.text.own`, and
+`ent.text.drop` giving one back) no longer counts as an effect outside
+component access, which made every system that printed keep its place
+among all others: devices/text.c may run them on any thread at once.
 
 With it `pair` is `today()` (where today's rows are), `lay()` (a `for`
 over the people: their stubs, running sums of them and of the rows, and
