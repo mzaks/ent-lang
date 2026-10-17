@@ -1,6 +1,6 @@
 // RUN: ent-opt %s -split-input-file -verify-diagnostics
 
-// expected-error @+1 {{field 'name' has type '!ent.text<8>'; a buffer's fields are numbers, bools, enums and entities}}
+// expected-error @+1 {{field 'name' has type '!ent.text<8>'; a buffer's fields are numbers, bools, enums, entities and row numbers}}
 ent.buffer @B (name: !ent.text<8>) capacity 4
 
 // -----
@@ -94,4 +94,13 @@ ent.system @s(%c: i1) {
   scf.if %c {
     ent.invoke proc @draw(%b) : (!ent.buffer<@B>) -> ()
   }
+}
+
+// -----
+
+ent.buffer @A (w: i32) capacity 4
+ent.buffer @B (v: i32) capacity 4
+ent.system @s(%c: !ent.index_of<@A>) reads [@B] {
+  // expected-error @+1 {{reads @B by a row number of @A}}
+  %v = ent.buffer.at @B "v"[%c : !ent.index_of<@A>] : i32
 }

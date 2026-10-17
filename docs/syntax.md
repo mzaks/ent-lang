@@ -105,7 +105,8 @@ capacity Inside 4096                        // another capacity for one declared
 
 - Types: `f32`, `f64`, `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`,
   `u32`, `u64`, `index`, `entity`, `text[N]` and `text` (see Text below),
-  and the enums the program declares (see Enums below).
+  the enums the program declares (see Enums below), and the row numbers
+  of its buffers, `index of Name` (see Row numbers below).
 - A whole number goes where one of more bits is expected as it is (an
   `i32` where an `i64` is, as a value, an argument or one side of `+`
   or `<`: two of different sizes are computed with as the bigger). The
@@ -1687,6 +1688,59 @@ system load() {
   values are, not `const`: `void ent_read_file(const ent_text126 *name,
   int32_t *count, int32_t capacity, uint8_t *value)`. A count it leaves
   below nought is nought, and one above what the buffer holds is that.
+
+### Row numbers
+
+```
+buffer Arena { w: i32 } capacity 268435456
+buffer Watch { clause: index of Arena, blocker: i32 } capacity 134217728
+unique Search { conflict: index of Arena }
+
+fn size(arena: Arena, c: index of Arena) -> i32 { arena[c].w }
+
+system scan() {
+  var c: index of Arena = 0
+  while c < len(Arena) {
+    Search.conflict = c
+    c += 2 + size(Arena, c)
+  }
+  Search.conflict = none
+}
+```
+
+`index of Name` is the type of a row number of the buffer `Name`, which
+is declared before: a value of its own, which reads and writes the rows
+of that buffer and of no other.
+
+- `Name[c].field` and `Name[c].field = value`, where `c` is one, read and
+  write the row without asking whether the buffer has it: the row in the
+  buffer's room. Past the rows it has, a row reads as it was left (a row
+  that `Name = Name[..n]` or `Name = []` let go, or one never written),
+  and not nought; a write there is kept for the row that is given there
+  next. Where it is no row of the room at all (below nought, or past
+  it), it is one of the room's rows all the same. A number that is not a
+  row number reads and writes as before, nought where there is no row.
+  (Reading past the end so is allowed for now; it may become an error
+  later.)
+- A row number with an `i32` is a row number of the same buffer: `c +
+  2`, `c - 1`, `l ^ 1`, `-c`, `~c`, `c += k`. Two of the same buffer are
+  taken one from the other (`b - a`), which is how many rows apart they
+  are, an `i32`; nothing else is computed with two.
+- It is compared with one of the same buffer and with an `i32`: `c <
+  len(Arena)`, `c == none`.
+- A number written out is one where a row number is expected (`var c:
+  index of Arena = 0`), and `none` is -1, no row.
+- `as` makes it an `i32` (or another whole number) and makes a whole
+  number one, also one of another buffer: `c as i32`, `n as index of
+  Arena`, `(l >> 1) as index of Vars`.
+- A field of a buffer, a component or a unique may hold one, and a fn or
+  proc be given one and give one back; not an edge, and not C (an
+  `i32`).
+- It is stored in as few bits as its buffer's room needs (8 up to 128
+  rows, 16 up to 32,768, else 32), and a buffer that is read by row
+  numbers has room for a power of two of rows, at least its capacity:
+  the room is what the number is masked to, and is reserved, not used,
+  until it is written.
 
 ### Entities given to a fn or proc
 

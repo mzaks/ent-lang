@@ -40,12 +40,14 @@ enum Restarts { Glucose, Luby }
 
 // Per literal: 1 true, -1 false, 0 not assigned; where its watches are;
 // the last clause read in which it was seen (for taking out literals a
-// clause has twice).
+// clause has twice). Where a clause is, a literal and a watch are held
+// and passed as row numbers (`index of Arena`, `index of Values`, `index
+// of Watch`), which read and write their rows without a check.
 buffer Values { v: i8 } capacity 16
-buffer Lists { start: i32, size: i32, cap: i32 } capacity 16
+buffer Arena { w: i32 } capacity 16
+buffer Watch { clause: index of Arena, blocker: index of Values } capacity 16
+buffer Lists { start: index of Watch, size: i32, cap: i32 } capacity 16
 buffer Seen { clause: i32 } capacity 16
-
-buffer Watch { clause: i32, blocker: i32 } capacity 16
 
 // Per variable: the level it was assigned at, the clause that forced it
 // (-1 for a decision or a unit), the value it last had and the one it
@@ -54,7 +56,7 @@ buffer Watch { clause: i32, blocker: i32 } capacity 16
 // conflict analysis, and its place in the decision queue (VMTF: a list
 // in the order the variables were last bumped, `stamp` growing along it).
 buffer Vars {
-  level: i32, reason: i32, phase: bool, target: bool, mark: bool, prev: i32, next: i32,
+  level: i32, reason: index of Arena, phase: bool, target: bool, mark: bool, prev: i32, next: i32,
   stamp: i64
 } capacity 16
 
@@ -64,19 +66,17 @@ buffer Vars {
 // not in the heap; `score`), so that one buffer holds it all.
 buffer Heap { var: i32, pos: i32, score: f64 } capacity 16
 
-buffer Arena { w: i32 } capacity 16
-
 // The assigned literals in the order they were assigned, and where each
 // decision level starts among them (with a stamp for counting levels).
-buffer Trail { lit: i32 } capacity 16
+buffer Trail { lit: index of Values } capacity 16
 buffer Levels { start: i32, stamp: i64, glued: i64 } capacity 16
 
 // Room for conflict analysis: the clause being learned, the variables
 // whose marks are to be cleared, a stack for minimizing, the variables
 // to move to the front of the queue.
-buffer Learnt { lit: i32 } capacity 16
+buffer Learnt { lit: index of Values } capacity 16
 buffer Clear { v: i32 } capacity 16
-buffer Stack { lit: i32 } capacity 16
+buffer Stack { lit: index of Values } capacity 16
 buffer Bumped { v: i32 } capacity 16
 buffer Spare { v: i32 } capacity 16
 // How many learned clauses of each LBD might be deleted; how many of the
@@ -109,7 +109,7 @@ unique Options {
 // `cursor`: a variable with no unassigned one after it in the queue.
 // `reduce`: the conflict at which learned clauses are next deleted.
 unique Search {
-  status: Status, conflict: i32, qhead: i32, trail: i32, level: i32,
+  status: Status, conflict: index of Arena, qhead: i32, trail: i32, level: i32,
   conflicts: i64, decisions: i64, propagations: i64, restarts: i64,
   reductions: i64, deleted: i64, reduce: i64, rewatch: bool,
   first: i32, last: i32, cursor: i32, stamp: i64,
@@ -223,22 +223,31 @@ fn root(n: i64) -> i64 {
   x
 }
 
-// Whether a reduction may delete the clause with this meta word: a
-// learned one that is no reason, of LBD 3 or more, and not of LBD 6 or
-// less where it was used since the last reduction.
-// The literal clause `c` is the reason for, -1 where it is none's: its
+// A literal's variable, the row of its watch list, and the literal at
+// `at` in the arena: row numbers, which read their rows unchecked.
+fn var_of(l: index of Values) -> index of Vars { (l >> 1) as index of Vars }
+fn list_of(l: index of Values) -> index of Lists { l as index of Lists }
+fn lit_at(arena: Arena, at: index of Arena) -> index of Values {
+  arena[at].w as index of Values
+}
+
+// The literal clause `c` is the reason for, none where it is none's: its
 // first, or for a clause of two either (their order is not kept).
-proc reason_lit(arena: Arena, vars: Vars, values: Values, c: i32) -> i32 {
-  var lit = -1
-  let first = arena[c + 2].w
-  if vars[first >> 1].reason == c && values[first].v == 1 { lit = first }
+proc reason_lit(arena: Arena, vars: Vars, values: Values, c: index of Arena)
+    -> index of Values {
+  var lit: index of Values = none
+  let first = lit_at(arena, c + 2)
+  if vars[var_of(first)].reason == c && values[first].v == 1 { lit = first }
   if arena[c].w == 2 {
-    let second = arena[c + 3].w
-    if vars[second >> 1].reason == c && values[second].v == 1 { lit = second }
+    let second = lit_at(arena, c + 3)
+    if vars[var_of(second)].reason == c && values[second].v == 1 { lit = second }
   }
   lit
 }
 
+// Whether a reduction may delete the clause with this meta word: a
+// learned one that is no reason, of LBD 3 or more, and not of LBD 6 or
+// less where it was used since the last reduction.
 fn droppable(meta: i32, locked: bool) -> bool {
   let lbd = meta >> 2 & 0x3fff
   meta & 1 != 0 && !locked && lbd > 2 && !(lbd <= 6 && meta & 0x10000 != 0)
@@ -322,7 +331,7 @@ system setup() {
         always = true
       } else if Seen[l].clause != number {
         Seen[l].clause = number
-        Learnt[k].lit = l
+        Learnt[k].lit = l as index of Values
         k += 1
       }
       at += 1
@@ -339,15 +348,15 @@ system setup() {
         } else if Values[l].v == 0 {
           Values[l].v = 1
           Values[l ^ 1].v = -1
-          Vars[l >> 1].level = 0
-          Vars[l >> 1].reason = -1
+          Vars[var_of(l)].level = 0
+          Vars[var_of(l)].reason = none
           Trail[trail].lit = l
           trail += 1
         }
       } else {
         Arena += { w: k }
         Arena += { w: 0 }
-        for i in 0..k { Arena += { w: Learnt[i].lit } }
+        for i in 0..k { Arena += { w: Learnt[i].lit as i32 } }
       }
     }
   }
@@ -357,7 +366,7 @@ system setup() {
     if Seen[2 * v].clause < 0 && Seen[2 * v + 1].clause < 0 && Values[2 * v].v == 0 {
       Values[2 * v + 1].v = 1
       Values[2 * v].v = -1
-      Trail[trail].lit = 2 * v + 1
+      Trail[trail].lit = (2 * v + 1) as index of Values
       trail += 1
     }
   }
@@ -382,15 +391,15 @@ system setup() {
 system propagate() {
   var qhead = Search.qhead
   var trail = Search.trail
-  var conflict = -1
+  var conflict: index of Arena = none
   let level = Search.level
   var visits: i64 = 0
   while qhead < trail && conflict < 0 {
     let f = Trail[qhead].lit ^ 1
     qhead += 1
     visits += 1
-    let start = Lists[f].start
-    let end = start + Lists[f].size
+    let start = Lists[list_of(f)].start
+    let end = start + Lists[list_of(f)].size
     var i = start
     var j = start
     while i < end {
@@ -406,43 +415,44 @@ system propagate() {
         } else {
           Values[blocker].v = 1
           Values[blocker ^ 1].v = -1
-          Vars[blocker >> 1].level = level
-          Vars[blocker >> 1].reason = ~c
+          Vars[var_of(blocker)].level = level
+          Vars[var_of(blocker)].reason = ~c
           Trail[trail].lit = blocker
           trail += 1
         }
       } else if conflict < 0 && Values[blocker].v != 1 {
         // (The false literal to the second place.)
-        if Arena[c + 2].w == f {
+        if lit_at(Arena, c + 2) == f {
           Arena[c + 2].w = Arena[c + 3].w
-          Arena[c + 3].w = f
+          Arena[c + 3].w = f as i32
         }
-        let first = Arena[c + 2].w
+        let first = lit_at(Arena, c + 2)
         blocker = first
         if Values[first].v != 1 {
           let size = Arena[c].w
           var k = 2
           while k < size && keep {
-            let l = Arena[c + 2 + k].w
+            let l = lit_at(Arena, c + 2 + k)
             if Values[l].v != -1 {
-              Arena[c + 2 + k].w = f
-              Arena[c + 3].w = l
+              Arena[c + 2 + k].w = f as i32
+              Arena[c + 3].w = l as i32
               // (To the watches of l, which move where they are full.)
-              var at = Lists[l].start
-              let n = Lists[l].size
-              if n == Lists[l].cap {
-                let moved = len(Watch)
+              let list = list_of(l)
+              var at = Lists[list].start
+              let n = Lists[list].size
+              if n == Lists[list].cap {
+                let moved = len(Watch) as index of Watch
                 for x in 0..n {
                   Watch += { clause: Watch[at + x].clause, blocker: Watch[at + x].blocker }
                 }
                 for x in n..2 * n + 4 { Watch += { clause: 0, blocker: 0 } }
-                Lists[l].start = moved
-                Lists[l].cap = 2 * n + 4
+                Lists[list].start = moved
+                Lists[list].cap = 2 * n + 4
                 at = moved
               }
               Watch[at + n].clause = c
               Watch[at + n].blocker = first
-              Lists[l].size = n + 1
+              Lists[list].size = n + 1
               keep = false
             }
             k += 1
@@ -453,8 +463,8 @@ system propagate() {
             } else {
               Values[first].v = 1
               Values[first ^ 1].v = -1
-              Vars[first >> 1].level = level
-              Vars[first >> 1].reason = c
+              Vars[var_of(first)].level = level
+              Vars[var_of(first)].reason = c
               Trail[trail].lit = first
               trail += 1
             }
@@ -467,7 +477,7 @@ system propagate() {
         j += 1
       }
     }
-    Lists[f].size = j - start
+    Lists[list_of(f)].size = j - start
   }
   Search.qhead = qhead
   Search.trail = trail
@@ -494,7 +504,7 @@ system learn() {
     var k = 1
     var bumped = 0
     var index = Search.trail - 1
-    var p = -1
+    var p: index of Values = none
     var going = true
     while going {
       let size = Arena[c].w
@@ -506,7 +516,7 @@ system learn() {
         let stamp = Search.glued
         var glue = 0
         for j in 0..size {
-          let at = Vars[Arena[c + 2 + j].w >> 1].level
+          let at = Vars[var_of(lit_at(Arena, c + 2 + j))].level
           if Levels[at].glued != stamp {
             Levels[at].glued = stamp
             glue += 1
@@ -516,17 +526,17 @@ system learn() {
       }
       Arena[c + 1].w |= 0x10000
       // (A reason of two literals, the one it implies to the front.)
-      if p >= 0 && size == 2 && Arena[c + 2].w != p {
+      if p >= 0 && size == 2 && lit_at(Arena, c + 2) != p {
         Arena[c + 3].w = Arena[c + 2].w
-        Arena[c + 2].w = p
+        Arena[c + 2].w = p as i32
       }
       let from = if p < 0 { 0 } else { 1 }
       for j in from..size {
-        let q = Arena[c + 2 + j].w
-        let v = q >> 1
+        let q = lit_at(Arena, c + 2 + j)
+        let v = var_of(q)
         if !Vars[v].mark && Vars[v].level > 0 {
           Vars[v].mark = true
-          Bumped[bumped].v = v
+          Bumped[bumped].v = v as i32
           bumped += 1
           if Vars[v].level >= level {
             path += 1
@@ -536,11 +546,11 @@ system learn() {
           }
         }
       }
-      while !Vars[Trail[index].lit >> 1].mark { index -= 1 }
+      while !Vars[var_of(Trail[index].lit)].mark { index -= 1 }
       p = Trail[index].lit
       index -= 1
-      c = Vars[p >> 1].reason
-      Vars[p >> 1].mark = false
+      c = Vars[var_of(p)].reason
+      Vars[var_of(p)].mark = false
       path -= 1
       going = path > 0
     }
@@ -551,16 +561,16 @@ system learn() {
     // minimization, with a stack; a variable that is marked is in the
     // clause or found to be implied.)
     var levels = 0
-    for i in 1..k { levels |= 1 << (Vars[Learnt[i].lit >> 1].level & 31) }
+    for i in 1..k { levels |= 1 << (Vars[var_of(Learnt[i].lit)].level & 31) }
     var clear = 0
     for i in 1..k {
-      Clear[clear].v = Learnt[i].lit >> 1
+      Clear[clear].v = var_of(Learnt[i].lit) as i32
       clear += 1
     }
     var kept = 1
     for i in 1..k {
       let l = Learnt[i].lit
-      var keep = Vars[l >> 1].reason < 0
+      var keep = Vars[var_of(l)].reason < 0
       if !keep {
         var top = 1
         Stack[0].lit = l
@@ -569,22 +579,22 @@ system learn() {
         while top > 0 && implied {
           top -= 1
           let implied_lit = Stack[top].lit ^ 1
-          let r = Vars[implied_lit >> 1].reason
+          let r = Vars[var_of(implied_lit)].reason
           let size = Arena[r].w
-          if size == 2 && Arena[r + 2].w != implied_lit {
+          if size == 2 && lit_at(Arena, r + 2) != implied_lit {
             Arena[r + 3].w = Arena[r + 2].w
-            Arena[r + 2].w = implied_lit
+            Arena[r + 2].w = implied_lit as i32
           }
           var j = 1
           while j < size && implied {
-            let q = Arena[r + 2 + j].w
-            let u = q >> 1
+            let q = lit_at(Arena, r + 2 + j)
+            let u = var_of(q)
             if !Vars[u].mark && Vars[u].level > 0 {
               if Vars[u].reason >= 0 && levels & (1 << (Vars[u].level & 31)) != 0 {
                 Vars[u].mark = true
                 Stack[top].lit = q
                 top += 1
-                Clear[clear].v = u
+                Clear[clear].v = u as i32
                 clear += 1
               } else {
                 for x in undo..clear { Vars[Clear[x].v].mark = false }
@@ -611,17 +621,17 @@ system learn() {
     if k > 1 {
       var most = 1
       for i in 2..k {
-        if Vars[Learnt[i].lit >> 1].level > Vars[Learnt[most].lit >> 1].level { most = i }
+        if Vars[var_of(Learnt[i].lit)].level > Vars[var_of(Learnt[most].lit)].level { most = i }
       }
       let l = Learnt[most].lit
       Learnt[most].lit = Learnt[1].lit
       Learnt[1].lit = l
-      back = Vars[l >> 1].level
+      back = Vars[var_of(l)].level
     }
     let conflicts = Search.conflicts + 1
     var lbd = 0
     for i in 0..k {
-      let at = Vars[Learnt[i].lit >> 1].level
+      let at = Vars[var_of(Learnt[i].lit)].level
       if Levels[at].stamp != conflicts {
         Levels[at].stamp = conflicts
         lbd += 1
@@ -739,7 +749,7 @@ system learn() {
     if held > Search.target {
       for i in 0..held {
         let l = Trail[i].lit
-        Vars[l >> 1].target = l & 1 == 0
+        Vars[var_of(l)].target = l & 1 == 0
       }
       Search.target = held
     }
@@ -774,15 +784,17 @@ system learn() {
         }
         Search.heap = heap
         var next = if heap > 0 { Heap[Heap[0].var].score } else { -1.0 }
-        for i in undone..Search.trail { next = max(next, Heap[Trail[i].lit >> 1].score) }
-        while to < back && Heap[Trail[Levels[to + 1].start].lit >> 1].score > next { to += 1 }
+        for i in undone..Search.trail { next = max(next, Heap[(Trail[i].lit >> 1) as i32].score) }
+        while to < back && Heap[(Trail[Levels[to + 1].start].lit >> 1) as i32].score > next {
+          to += 1
+        }
       } else {
         while cursor >= 0 && Values[2 * cursor].v != 0 && Vars[cursor].level <= back {
           cursor = Vars[cursor].prev
         }
         var next: i64 = if cursor >= 0 { Vars[cursor].stamp } else { -1 }
-        for i in undone..Search.trail { next = max(next, Vars[Trail[i].lit >> 1].stamp) }
-        while to < back && Vars[Trail[Levels[to + 1].start].lit >> 1].stamp > next { to += 1 }
+        for i in undone..Search.trail { next = max(next, Vars[var_of(Trail[i].lit)].stamp) }
+        while to < back && Vars[var_of(Trail[Levels[to + 1].start].lit)].stamp > next { to += 1 }
       }
       Search.reused += to as i64
     }
@@ -800,12 +812,12 @@ system learn() {
     var heap = Search.heap
     for i in start..Search.trail {
       let l = Trail[i].lit
-      let v = l >> 1
+      let v = var_of(l)
       Values[l].v = 0
       Values[l ^ 1].v = 0
       Vars[v].phase = l & 1 == 0
-      if cursor < 0 || Vars[v].stamp > Vars[cursor].stamp { cursor = v }
-      heap = heap_insert(Heap, v, heap)
+      if cursor < 0 || Vars[v].stamp > Vars[cursor].stamp { cursor = v as i32 }
+      heap = heap_insert(Heap, v as i32, heap)
     }
     Search.heap = heap
     var trail = start
@@ -820,36 +832,36 @@ system learn() {
     // other's blocker, and its first is assigned where the search is at
     // its level.)
     let l0 = Learnt[0].lit
-    var reason = -1
+    var reason: index of Arena = none
     if k > 1 {
-      reason = len(Arena)
+      reason = len(Arena) as index of Arena
       Arena += { w: k }
       Arena += { w: 1 | min(lbd, 0x3fff) << 2 }
-      for i in 0..k { Arena += { w: Learnt[i].lit } }
+      for i in 0..k { Arena += { w: Learnt[i].lit as i32 } }
       for side in 0..2 {
-        let l = Learnt[side].lit
-        var at = Lists[l].start
-        let n = Lists[l].size
-        if n == Lists[l].cap {
-          let moved = len(Watch)
+        let list = list_of(Learnt[side].lit)
+        var at = Lists[list].start
+        let n = Lists[list].size
+        if n == Lists[list].cap {
+          let moved = len(Watch) as index of Watch
           for x in 0..n {
             Watch += { clause: Watch[at + x].clause, blocker: Watch[at + x].blocker }
           }
           for x in n..2 * n + 4 { Watch += { clause: 0, blocker: 0 } }
-          Lists[l].start = moved
-          Lists[l].cap = 2 * n + 4
+          Lists[list].start = moved
+          Lists[list].cap = 2 * n + 4
           at = moved
         }
         Watch[at + n].clause = if k == 2 { ~reason } else { reason }
         Watch[at + n].blocker = Learnt[1 - side].lit
-        Lists[l].size = n + 1
+        Lists[list].size = n + 1
       }
     }
     if to == back {
       Values[l0].v = 1
       Values[l0 ^ 1].v = -1
-      Vars[l0 >> 1].level = to
-      Vars[l0 >> 1].reason = reason
+      Vars[var_of(l0)].level = to
+      Vars[var_of(l0)].reason = reason
       Trail[trail].lit = l0
       trail += 1
     }
@@ -861,7 +873,7 @@ system learn() {
 
     if Options.proof {
       Bytes += { value: 97 }
-      for i in 0..k { proof_lit(Bytes, Learnt[i].lit) }
+      for i in 0..k { proof_lit(Bytes, Learnt[i].lit as i32) }
       Bytes += { value: 0 }
       if len(Bytes) > 1048576 {
         write_bytes(Options.proof_file, Bytes, 0, len(Bytes), Search.written)
@@ -882,7 +894,7 @@ system reduce() {
   let top = len(Arena)
   Counts = [{ n: 0 }; 256]
   var candidates = 0
-  var c = 0
+  var c: index of Arena = 0
   while c < top {
     let size = Arena[c].w
     let meta = Arena[c + 1].w
@@ -902,7 +914,7 @@ system reduce() {
     left -= Counts[cut].n
     cut -= 1
   }
-  var w = 0
+  var w: index of Arena = 0
   var deleted: i64 = 0
   c = 0
   while c < top {
@@ -921,7 +933,7 @@ system reduce() {
       }
     }
     if keep {
-      if locked { Vars[first >> 1].reason = w }
+      if locked { Vars[var_of(first)].reason = w }
       for i in 0..2 + size { Arena[w + i].w = Arena[c + i].w }
       Arena[w + 1].w = meta & ~0x10000
       w += 2 + size
@@ -935,7 +947,7 @@ system reduce() {
     }
     c += 2 + size
   }
-  Arena = Arena[..w]
+  Arena = Arena[..w as i32]
   Search.rewatch = true
   Search.reductions += 1
   Search.deleted += deleted
@@ -952,7 +964,7 @@ system reduce() {
 system watch() {
   let top = len(Arena)
   Lists = [{ start: 0, size: 0, cap: 0 }; len(Lists)]
-  var c = 0
+  var c: index of Arena = 0
   while c < top {
     Lists[Arena[c + 2].w].size += 1
     Lists[Arena[c + 3].w].size += 1
@@ -961,7 +973,7 @@ system watch() {
   var at = 0
   for l in 0..len(Lists) {
     let cap = 2 * Lists[l].size + 4
-    Lists[l].start = at
+    Lists[l].start = at as index of Watch
     Lists[l].cap = cap
     Lists[l].size = 0
     at += cap
@@ -969,17 +981,17 @@ system watch() {
   Watch = [{ clause: 0, blocker: 0 }; at]
   c = 0
   while c < top {
-    let l0 = Arena[c + 2].w
-    let l1 = Arena[c + 3].w
+    let l0 = lit_at(Arena, c + 2)
+    let l1 = lit_at(Arena, c + 3)
     let tag = if Arena[c].w == 2 { ~c } else { c }
-    let at0 = Lists[l0].start + Lists[l0].size
+    let at0 = Lists[list_of(l0)].start + Lists[list_of(l0)].size
     Watch[at0].clause = tag
     Watch[at0].blocker = l1
-    Lists[l0].size += 1
-    let at1 = Lists[l1].start + Lists[l1].size
+    Lists[list_of(l0)].size += 1
+    let at1 = Lists[list_of(l1)].start + Lists[list_of(l1)].size
     Watch[at1].clause = tag
     Watch[at1].blocker = l0
-    Lists[l1].size += 1
+    Lists[list_of(l1)].size += 1
     c += 2 + Arena[c].w
   }
   Search.rewatch = false
@@ -1027,8 +1039,8 @@ system decide() {
     Values[l].v = 1
     Values[l ^ 1].v = -1
     Vars[v].level = level
-    Vars[v].reason = -1
-    Trail[trail].lit = l
+    Vars[v].reason = none
+    Trail[trail].lit = l as index of Values
     Search.trail = trail + 1
     Search.level = level
     Search.decisions += 1

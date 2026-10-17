@@ -932,7 +932,7 @@ enum Nothing { }
 
 // -----
 
-// expected-error @+1 {{unknown type 'Way'; expected f32, f64, bool, i8, i16, i32, i64, u8, u16, u32, u64, index, entity, text, text[N] or an enum}}
+// expected-error @+1 {{unknown type 'Way'; expected f32, f64, bool, i8, i16, i32, i64, u8, u16, u32, u64, index, entity, text, text[N], an enum or 'index of Buffer'}}
 component Ghost { way: Way }
 enum Way { Left, Right }
 
@@ -1288,7 +1288,7 @@ buffer Marks { at: f32 }
 
 // -----
 
-// expected-error @+1 {{'name': a buffer's fields are numbers, bools, enums and entities}}
+// expected-error @+1 {{'name': a buffer's fields are numbers, bools, enums, entities and row numbers ('index of Name')}}
 buffer Marks { name: text[8] } capacity 8
 
 // -----
@@ -1346,4 +1346,72 @@ system s() {
   let n = 3 as i64
   // expected-error @+1 {{'mul_wide' multiplies two u64}}
   let (hi, lo) = mul_wide(2, n)
+}
+
+// -----
+
+// expected-error @+1 {{'index of' names a buffer declared before; 'Arena' is none}}
+buffer Watch { clause: index of Arena } capacity 8
+buffer Arena { w: i32 } capacity 8
+
+// -----
+
+buffer Arena { w: i32 } capacity 8
+buffer Values { v: i8 } capacity 8
+system s() {
+  var c: index of Arena = 0
+  // expected-error @+1 {{this is a row number of 'Arena', not of 'Values': 'as index of Values' makes it one}}
+  let v = Values[c].v
+}
+
+// -----
+
+buffer Arena { w: i32 } capacity 8
+system s() {
+  var c: index of Arena = 0
+  // expected-error @+1 {{two row numbers are taken one from the other ('-'), which gives how many rows apart they are; nothing else}}
+  let d = c + c
+}
+
+// -----
+
+buffer Arena { w: i32 } capacity 8
+buffer Values { v: i8 } capacity 8
+system s() {
+  var c: index of Arena = 0
+  var l: index of Values = 0
+  // expected-error @+1 {{these are row numbers of different buffers}}
+  if c == l { Arena = [] }
+}
+
+// -----
+
+buffer Arena { w: i32 } capacity 8
+system s() {
+  var c: index of Arena = 0
+  var k: i64 = 1
+  // expected-error @+1 {{a row number is computed with an i32}}
+  let d = c + k
+}
+
+// -----
+
+buffer Arena { w: i32 } capacity 8
+// expected-error @+1 {{C is given numbers: an i32 for a row number ('as i32')}}
+extern proc show(c: index of Arena)
+
+// -----
+
+buffer Arena { w: i32 } capacity 8
+// expected-error @+1 {{an edge does not hold a row number of a buffer yet ('at'): an i32 does}}
+relation Points { at: index of Arena } capacity 8
+
+// -----
+
+buffer Arena { w: i32 } capacity 8
+unique Top { c: index of Arena }
+system s() {
+  let n = 3
+  // expected-error @+1 {{value has a different type than the target: it is an i32, and the target holds a row number of 'Arena' (as i32 is a number)}}
+  Top.c = n
 }

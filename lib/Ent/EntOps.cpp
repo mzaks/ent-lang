@@ -321,11 +321,11 @@ static LogicalResult verifyRecord(Operation *op, ArrayAttr names,
     // is one too (a relation).
     Type type = cast<TypeAttr>(typeAttr).getValue();
     if (!isa<IntegerType, FloatType, IndexType, EntityType, TextType,
-             StringType, EnumType>(type))
+             StringType, EnumType, IndexOfType>(type))
       return op->emitOpError("field '")
              << name << "' has type " << type
-             << "; only integer, float, index, entity, text and enum fields "
-                "are supported";
+             << "; only integer, float, index, entity, text, enum and "
+                "row-number fields are supported";
     if (auto text = dyn_cast<TextType>(type))
       if (text.getCapacity() == 0 || text.getCapacity() > TextType::kMaxCapacity)
         return op->emitOpError("field '")
@@ -367,10 +367,11 @@ LogicalResult BufferOp::verify() {
   for (auto [name, type] :
        llvm::zip(getFieldNames().getAsValueRange<StringAttr>(),
                  getFieldTypes().getAsValueRange<TypeAttr>()))
-    if (!isa<IntegerType, FloatType, EnumType, EntityType>(type))
+    if (!isa<IntegerType, FloatType, EnumType, EntityType, IndexOfType>(type))
       return emitOpError("field '")
              << name << "' has type " << type
-             << "; a buffer's fields are numbers, bools, enums and entities";
+             << "; a buffer's fields are numbers, bools, enums, entities "
+                "and row numbers";
   return success();
 }
 Type BufferOp::getFieldType(StringRef name) {
@@ -536,6 +537,10 @@ BufferAtOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   if (type != getResult().getType())
     return emitOpError("gives ")
            << getResult().getType() << ", but the field is " << type;
+  if (auto index = dyn_cast<IndexOfType>(getIndex().getType());
+      index && index.getBuffer() != getBufferAttr())
+    return emitOpError("reads ") << getBufferAttr() << " by a row number of "
+                                 << index.getBuffer();
   return success();
 }
 
@@ -553,6 +558,10 @@ BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   if (type != getValue().getType())
     return emitOpError("gives ")
            << getValue().getType() << ", but the field is " << type;
+  if (auto index = dyn_cast<IndexOfType>(getIndex().getType());
+      index && index.getBuffer() != getBufferAttr())
+    return emitOpError("sets ") << getBufferAttr() << " by a row number of "
+                                << index.getBuffer();
   return success();
 }
 

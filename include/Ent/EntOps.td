@@ -139,10 +139,12 @@ def Ent_BufferAtOp : Ent_Op<"buffer.at", [
     %x = ent.buffer.at @Shapes "x"[%i : i32] : f32
     ```
     What row `%i` has in that field; nought (the first case of an enum)
-    where the buffer has no such row.
+    where the buffer has no such row. By an `!ent.index_of` of the
+    buffer, the row as it is in the buffer's room, which it is masked
+    to, whether the buffer has it or not.
   }];
   let arguments = (ins FlatSymbolRefAttr:$buffer, StrAttr:$field,
-                       AnySignlessInteger:$index);
+                       AnyTypeOf<[AnySignlessInteger, Ent_IndexOfType]>:$index);
   let results = (outs AnyType:$result);
   let assemblyFormat = [{
     $buffer $field `[` $index `:` type($index) `]` attr-dict `:` type($result)
@@ -157,11 +159,14 @@ def Ent_BufferSetOp : Ent_Op<"buffer.set", [
     ent.buffer.set @Shapes "x"[%i : i32] = %x : f32
     ```
     Row `%i` has `%x` in that field after it; nothing happens where the
-    buffer has no such row. Outside queries, in a system that may write
-    the buffer or in a proc that was given it `mut`.
+    buffer has no such row (by an `!ent.index_of` of the buffer, the row
+    in its room is set, as `ent.buffer.at` reads it). Outside queries, in
+    a system that may write the buffer or in a proc that was given it
+    `mut`.
   }];
   let arguments = (ins FlatSymbolRefAttr:$buffer, StrAttr:$field,
-                       AnySignlessInteger:$index, AnyType:$value);
+                       AnyTypeOf<[AnySignlessInteger, Ent_IndexOfType]>:$index,
+                       AnyType:$value);
   let assemblyFormat = [{
     $buffer $field `[` $index `:` type($index) `]` `=` $value attr-dict
     `:` type($value)

@@ -1,0 +1,21 @@
+// Row numbers of a buffer (Inputs/index_of.ent): arithmetic with i32s,
+// comparisons, casts, `none`, fields of buffers and uniques, fn and proc
+// parameters and results, a buffer whose numbers take 16 bits, and a row
+// read by one past the rows the buffer has (as it was left, not nought).
+// RUN: %ent run %S/Inputs/index_of.ent | FileCheck %s
+
+// CHECK:      c 10 back 9 apart 7 w 27
+// CHECK-NEXT: marks 9 -1 none true
+// CHECK-NEXT: placed 3 w 77 twice 18
+// CHECK-NEXT: ~ -10 ^ 8 >> 4 > true == false
+// CHECK-NEXT: big 29999 7 0
+// CHECK-NEXT: kept 3: by row number 27, by number 0
+
+// As imported, the buffers read by row number have the mark that gives them
+// room for a power of two of rows, and the numbers their bits.
+// RUN: ent-translate --import-ent %S/Inputs/index_of.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+// IR-DAG: ent.buffer @Arena (w: i32) capacity 100 {ent.indexed}
+// IR-DAG: ent.buffer @Marks (at: !ent.index_of<@Arena, 8>, n: i32) capacity 10
+// IR-DAG: ent.buffer @Big (v: i8) capacity 30000 {ent.indexed}
+// IR-DAG: ent.buffer.at @Big "v"[%{{.*}} : !ent.index_of<@Big, 16>] : i8

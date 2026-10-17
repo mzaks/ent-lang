@@ -16,6 +16,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
 #include "llvm/ADT/ScopeExit.h"
@@ -746,6 +747,11 @@ private:
   /// A number without a sign where one says which row or byte: the same
   /// number as one with a sign.
   mlir::Value countable(Location at, mlir::Value value);
+  mlir::Value indexNumber(Location at, mlir::Value index);
+  mlir::Value asIndex(Location at, mlir::Value number, IndexOfType type);
+  FailureOr<mlir::Value> emitRowNumber(const Expr &number,
+                                       FlatSymbolRefAttr buffer,
+                                       StringRef name);
   mlir::Value textBits(Location at, mlir::Value text);
   mlir::Value textFromBits(Location at, mlir::Value bits, TextType type);
   mlir::Value textConstant(Location at, StringRef bytes, TextType type);
@@ -768,6 +774,7 @@ private:
   FailureOr<SmallVector<mlir::Value>> emitCallThrough(const Expr &expr,
                                                       Callable &callable);
   LogicalResult finishCallables();
+  void finishIndexes();
   FailureOr<Type> parseRowsType();
   RowsShape *rowsOf(Type type);
   FailureOr<mlir::Value> emitTableValue(const Expr &expr, RowsShape &shape);
@@ -1040,6 +1047,7 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
   if (failed(finishRowKinds()) || failed(finishRows()) ||
       failed(finishCallables()))
     return nullptr;
+  finishIndexes();
 
   // Every module's world is set up before `main` does anything else, a
   // module's after those it imports, wherever they were declared.
@@ -1055,6 +1063,31 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
   if (failed(verify(module)))
     return nullptr;
   return owned;
+}
+
+// The row numbers of buffers, now that every capacity is known: each
+// stored in the bits its buffer's room needs, and the buffers they read
+// marked to have room for a power of two of rows.
+void Parser::finishIndexes() {
+  llvm::DenseMap<Attribute, BufferOp> byName;
+  for (BufferOp buffer : module.getOps<BufferOp>())
+    byName[buffer.getSymNameAttr()] = buffer;
+  llvm::SetVector<BufferOp> indexed;
+  AttrTypeReplacer replacer;
+  replacer.addReplacement([&](IndexOfType index) -> Type {
+    BufferOp buffer = byName.lookup(index.getBuffer().getAttr());
+    if (!buffer)
+      return index;
+    indexed.insert(buffer);
+    return IndexOfType::get(
+        context, index.getBuffer(),
+        IndexOfType::bitsFor(llvm::PowerOf2Ceil(buffer.getCapacity())));
+  });
+  replacer.recursivelyReplaceElementsIn(module, /*replaceAttrs=*/true,
+                                        /*replaceLocs=*/false,
+                                        /*replaceTypes=*/true);
+  for (BufferOp buffer : indexed)
+    buffer->setAttr(WorldLayout::kIndexedAttr, builder.getUnitAttr());
 }
 
 // The declarations of one file, up to its end.
@@ -1471,6 +1504,19 @@ FailureOr<Type> Parser::parseType() {
     advance();
     return parseRowType();
   }
+  // index of Name: a row number of that buffer.
+  if (token.isKeyword("index") && peek().isKeyword("of")) {
+    advance();
+    advance();
+    llvm::SMLoc bufferAt = token.loc;
+    FailureOr<std::string> buffer = identifier("a buffer");
+    if (failed(buffer))
+      return failure();
+    if (!buffers.count(*buffer))
+      return error(bufferAt, "'index of' names a buffer declared before; '" +
+                                 *buffer + "' is none");
+    return Type(IndexOfType::get(context, symbol(*buffer)));
+  }
   FailureOr<std::string> name = identifier("a type");
   if (failed(name))
     return failure();
@@ -1531,8 +1577,8 @@ FailureOr<Type> Parser::parseType() {
   if (!type)
     return error(at, "unknown type '" + *name +
                          "'; expected f32, f64, bool, i8, i16, i32, i64, "
-                         "u8, u16, u32, u64, index, entity, text, text[N] "
-                         "or an enum");
+                         "u8, u16, u32, u64, index, entity, text, text[N], "
+                         "an enum or 'index of Buffer'");
   return type;
 }
 
@@ -1550,6 +1596,8 @@ static std::string shapeWord(Type type) {
   llvm::raw_string_ostream os(word);
   if (auto named = dyn_cast<EnumType>(type))
     os << named.getName().getValue();
+  else if (auto index = dyn_cast<IndexOfType>(type))
+    os << "index_of_" << index.getBuffer().getValue();
   else
     os << type;
   for (char &c : word)
@@ -2883,9 +2931,10 @@ LogicalResult Parser::parseBuffer() {
   if (record.fields.empty())
     return error(fieldsAt, "a buffer's rows have fields");
   for (auto &[field, type] : record.fields)
-    if (!isa<IntegerType, FloatType, EnumType, EntityType>(type))
+    if (!isa<IntegerType, FloatType, EnumType, EntityType, IndexOfType>(type))
       return error(fieldsAt, "'" + field + "': a buffer's fields are "
-                             "numbers, bools, enums and entities");
+                             "numbers, bools, enums, entities and row "
+                             "numbers ('index of Name')");
   if (!token.isKeyword("capacity"))
     return error(at, "a buffer says how many rows it holds at most: 'capacity "
                  "N' (a program gives a module's another with 'capacity " +
@@ -2993,14 +3042,9 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
                        "entities: what it kept would depend on their order "
                        "(not of one whose entities take turns: 'in turn by "
                        "name.field')");
-    Type indexType = typeOf(**number);
-    FailureOr<mlir::Value> index =
-        emit(**number, indexType ? indexType : builder.getI32Type());
+    FailureOr<mlir::Value> index = emitRowNumber(**number, target, name);
     if (failed(index))
       return failure();
-    *index = countable(loc(at), *index);
-    if (!index->getType().isSignlessInteger() || index->getType().isInteger(1))
-      return error((*number)->loc, "a row's number is an integer");
     StringAttr fieldName = builder.getStringAttr(*field);
     return emitAssignment(
         at, op->first, op->second, [&] { return type; },
@@ -3163,11 +3207,15 @@ LogicalResult Parser::parseRelation() {
     return failure();
   // (An edge's fields are moved as plain values wherever edges are put
   // in order or taken away: nothing there gives a text's block back.)
-  for (auto &[field, type] : record.fields)
+  for (auto &[field, type] : record.fields) {
     if (isa<StringType>(type))
       return error(fieldsAt, "an edge does not hold a text of any length "
                              "yet ('" + field + "'): give it a capacity "
                              "('text[N]')");
+    if (isa<IndexOfType>(type))
+      return error(fieldsAt, "an edge does not hold a row number of a "
+                             "buffer yet ('" + field + "'): an i32 does");
+  }
   if (hasEnds && (failed(parseArrowEnd(arrow)) || failed(parseEnd(1))))
     return failure();
   if (token.isKeyword("from") || token.isKeyword("to"))
@@ -3338,9 +3386,12 @@ LogicalResult Parser::parseSystem(bool isExtern) {
     FailureOr<std::string> param = identifier("a parameter name");
     if (failed(param) || failed(expect(Token::Colon, "':'")))
       return failure();
+    llvm::SMLoc typeAt = token.loc;
     FailureOr<Type> type = parseType();
     if (failed(type))
       return failure();
+    if (isExtern && isa<IndexOfType>(*type))
+      return error(typeAt, "C is given numbers: an i32 for a row number");
     params.push_back({*param, *type});
     if (!consumeIf(Token::Comma))
       break;
@@ -3453,6 +3504,9 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     } else if (changed) {
       return error(typeAt, "'mut' is of a buffer a proc is given to "
                            "change; a value is its own");
+    } else if (isExtern && isa<IndexOfType>(*type)) {
+      return error(typeAt, "C is given numbers: an i32 for a row number "
+                           "('as i32')");
     }
     names.push_back(*param);
     function.params.push_back(*type);
@@ -3483,6 +3537,8 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
                              "give several");
     if (isExtern && isa<TextType, StringType>(function.results.front()))
       return error(resultAt, "C cannot give a text back yet");
+    if (isExtern && isa<IndexOfType>(function.results.front()))
+      return error(resultAt, "C gives numbers back: an i32 for a row number");
     if (!several)
       function.result = function.results.front();
   } else if (!proc) {
@@ -6093,6 +6149,10 @@ std::string Parser::typeWords(Type type) {
     return "a text";
   if (isa<EntityType>(type))
     return "an entity";
+  if (auto index = dyn_cast<IndexOfType>(type))
+    return ("a row number of '" + index.getBuffer().getValue() +
+            "' (as i32 is a number)")
+        .str();
   if (type.isInteger(1))
     return "a bool";
   if (isUnsigned(type))
@@ -6114,11 +6174,21 @@ LogicalResult Parser::emitAssignment(
     function_ref<Type()> targetType, function_ref<mlir::Value()> load,
     function_ref<LogicalResult(mlir::Value)> store, const Expr &value) {
   Type type = targetType();
-  FailureOr<mlir::Value> rhs = emit(value, type);
+  // (A row number is moved on by an i32: `c += 2`.)
+  Type valueType = type;
+  if (isa<IndexOfType>(type) && rule)
+    return error(at, "a row number is assigned and moved on ('+=', '-='); "
+                     "it is combined as an i32 ('as i32')");
+  if (isa<IndexOfType>(type) && op != Token::Assign) {
+    valueType = typeOf(value);
+    if (!valueType)
+      valueType = builder.getI32Type();
+  }
+  FailureOr<mlir::Value> rhs = emit(value, valueType);
   if (failed(rhs))
     return failure();
-  if (rhs->getType() != type)
-    return mismatch(value.loc, rhs->getType(), type);
+  if (rhs->getType() != valueType)
+    return mismatch(value.loc, rhs->getType(), valueType);
   if (isa<StringType>(type)) {
     // What it holds is its own: a copy of the value, and what it held
     // before is given back (after: the value may be a view of that).
@@ -6150,6 +6220,8 @@ LogicalResult Parser::emitAssignment(
       arithmetic(loc(at), computedBy(op), old, *rhs);
   if (failed(result))
     return failure();
+  if (result->getType() != type)
+    return mismatch(value.loc, result->getType(), type);
   return store(*result);
 }
 
@@ -7432,6 +7504,15 @@ Type Parser::typeOf(const Expr &expr) {
       // takes three times as long with every operator a line is deep.)
       const Expr &left = *expr.operands[0], &right = *expr.operands[1];
       Type type = typeOf(left), other = typeOf(right);
+      // A row number and an i32: a row number of the same buffer; two
+      // apart: how many rows.
+      auto li = dyn_cast_or_null<IndexOfType>(type);
+      auto ri = dyn_cast_or_null<IndexOfType>(other);
+      if (li || ri) {
+        if (li && ri && expr.op == Token::Minus)
+          return builder.getI32Type();
+        return li ? Type(li) : Type(ri);
+      }
       auto text = [&](const Expr &side, Type its) {
         return side.kind == Expr::String ? textTypeOf(side)
                : its && isa<TextType>(its) ? its : Type();
@@ -7784,6 +7865,21 @@ FailureOr<mlir::Value> Parser::emit(const Expr &expr, Type expected) {
 
 FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   Location at = loc(expr.loc);
+  // A number written out where a row number is expected is one (`-1`,
+  // `0`), and `none` is -1: no row.
+  if (auto index = dyn_cast_or_null<IndexOfType>(expected)) {
+    if (expr.kind == Expr::Name && expr.name == "none" && !lookup(expr.name))
+      return asIndex(at, integer(at, builder.getI32Type(), -1), index);
+    if (!typeOf(expr) && (expr.kind == Expr::Int || expr.kind == Expr::Unary ||
+                          expr.kind == Expr::Binary)) {
+      FailureOr<mlir::Value> number = emit(expr, builder.getI32Type());
+      if (failed(number))
+        return failure();
+      if (!number->getType().isInteger(32))
+        return error(expr.loc, "a row number is made of an i32");
+      return asIndex(at, *number, index);
+    }
+  }
   // A row of a table, where one is expected as a value.
   if (RowKind *kind = rowOf(expected))
     if (isRowSource(expr))
@@ -7858,15 +7954,12 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return error(expr.loc, "'" + expr.name + "' is a buffer, which a "
                                "system reads: a fn or proc reads one it is "
                                "given ('name: " + expr.name + "')");
-      Type indexType = typeOf(*expr.operands[0]);
-      FailureOr<mlir::Value> index = emit(
-          *expr.operands[0], indexType ? indexType : builder.getI32Type());
+      FailureOr<mlir::Value> index =
+          emitRowNumber(*expr.operands[0],
+                        FlatSymbolRefAttr::get(context, held->symbol),
+                        expr.name);
       if (failed(index))
         return failure();
-      *index = countable(at, *index);
-      if (!index->getType().isSignlessInteger() ||
-          index->getType().isInteger(1))
-        return error(expr.operands[0]->loc, "a row's number is an integer");
       return BufferAtOp::create(builder, at, type,
                                 FlatSymbolRefAttr::get(context, held->symbol),
                                 builder.getStringAttr(expr.field), *index)
@@ -8179,6 +8272,14 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     FailureOr<mlir::Value> operand = emit(*expr.operands[0], type);
     if (failed(operand))
       return failure();
+    // (A row number: computed with as its i32.)
+    if (isa<IndexOfType>(operand->getType())) {
+      mlir::Value i32 = integer(at, builder.getI32Type(),
+                                expr.op == Token::Tilde ? -1 : 0);
+      return expr.op == Token::Tilde
+                 ? arithmetic(at, Token::Caret, *operand, i32)
+                 : arithmetic(at, Token::Minus, i32, *operand);
+    }
     if (expr.op == Token::Tilde) {
       // Every bit turned over.
       if (!isWhole(operand->getType()) && !operand->getType().isIndex())
@@ -8324,6 +8425,54 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return textResize(at, *value, text);
     }
     Type from = typeOf(*expr.operands[0]);
+    // A row number is an i32: `c as i32`, `n as index of Arena`, and of
+    // one buffer as one of another (`l as index of Lists`).
+    auto toIndex = dyn_cast<IndexOfType>(expr.castType);
+    auto fromIndex = dyn_cast_or_null<IndexOfType>(from);
+    if (toIndex || fromIndex) {
+      if (from == expr.castType)
+        return emit(*expr.operands[0], from);
+      Type i32 = builder.getI32Type();
+      // (Cast in two steps, by way of the i32: the one between numbers
+      // is the cast of a value that is there already.)
+      auto castOf = [&](mlir::Value value, Type to) {
+        Expr given{Expr::Given, expr.loc};
+        given.given = value;
+        Expr cast{Expr::Cast, expr.loc};
+        cast.castType = to;
+        cast.operands.push_back(std::make_unique<Expr>(std::move(given)));
+        return emitRaw(cast, to);
+      };
+      mlir::Value number;
+      if (fromIndex) {
+        FailureOr<mlir::Value> value = emit(*expr.operands[0], from);
+        if (failed(value))
+          return failure();
+        number = indexNumber(at, *value);
+      } else {
+        if (!from)
+          from = defaultType(*expr.operands[0]);
+        if (!isWhole(from))
+          return error(expr.loc, "a row number is made of a whole number");
+        FailureOr<mlir::Value> value = emit(*expr.operands[0], from);
+        if (failed(value))
+          return failure();
+        if (from != i32) {
+          FailureOr<mlir::Value> cast = castOf(*value, i32);
+          if (failed(cast))
+            return failure();
+          *value = *cast;
+        }
+        number = *value;
+      }
+      if (toIndex)
+        return asIndex(at, number, toIndex);
+      if (expr.castType == i32)
+        return number;
+      if (!isWhole(expr.castType))
+        return error(expr.loc, "a row number is cast to a whole number");
+      return castOf(number, expr.castType);
+    }
     // An enum is the number of its case: `way as i32`, `2 as Way`.
     auto toEnum = dyn_cast<EnumType>(expr.castType);
     auto fromEnum = dyn_cast_or_null<EnumType>(from);
@@ -8469,6 +8618,33 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
 
 FailureOr<mlir::Value> Parser::arithmetic(Location at, Token::Kind op,
                                           mlir::Value a, mlir::Value b) {
+  // A row number with an i32: a row number of the same buffer. Two of the
+  // same buffer: how many rows apart (`-`).
+  auto ia = dyn_cast<IndexOfType>(a.getType());
+  auto ib = dyn_cast<IndexOfType>(b.getType());
+  if (ia || ib) {
+    if (ia && ib) {
+      if (ia != ib)
+        return emitError(at, "these are row numbers of different buffers"),
+               failure();
+      if (op != Token::Minus)
+        return emitError(at, "two row numbers are taken one from the other "
+                             "('-'), which gives how many rows apart they "
+                             "are; nothing else"),
+               failure();
+      return arithmetic(at, op, indexNumber(at, a), indexNumber(at, b));
+    }
+    mlir::Value other = ia ? b : a;
+    if (!other.getType().isInteger(32))
+      return emitError(at, "a row number is computed with an i32"),
+             failure();
+    FailureOr<mlir::Value> number =
+        arithmetic(at, op, ia ? indexNumber(at, a) : a,
+                   ib ? indexNumber(at, b) : b);
+    if (failed(number))
+      return failure();
+    return asIndex(at, *number, ia ? ia : ib);
+  }
   Type type = a.getType();
   bool isFloat = isa<FloatType>(type);
   if (!isFloat && (!type.isIntOrIndex() || type.isInteger(1)))
@@ -8645,6 +8821,60 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
     return branch.getResult(0);
   }
   bool comparison = precedenceOf(expr.op) == 3 || precedenceOf(expr.op) == 4;
+  // A row number of a buffer: with an i32, or with one of the same buffer.
+  {
+    auto li = dyn_cast_or_null<IndexOfType>(typeOf(lhs));
+    auto ri = dyn_cast_or_null<IndexOfType>(typeOf(rhs));
+    if (li || ri) {
+      // (A literal on the other side is an i32; `none`, no row.)
+      auto side = [&](const Expr &e) {
+        Type its = typeOf(e);
+        if (!its && e.kind == Expr::Name && e.name == "none" &&
+            !lookup(e.name))
+          its = li ? li : ri;
+        return emit(e, its ? its : Type(builder.getI32Type()));
+      };
+      FailureOr<mlir::Value> a = side(lhs);
+      if (failed(a))
+        return failure();
+      FailureOr<mlir::Value> b = side(rhs);
+      if (failed(b))
+        return failure();
+      if (!comparison)
+        return arithmetic(at, expr.op, *a, *b);
+      auto ia = dyn_cast<IndexOfType>(a->getType());
+      auto ib = dyn_cast<IndexOfType>(b->getType());
+      if (ia && ib && ia != ib)
+        return error(expr.loc, "these are row numbers of different buffers");
+      mlir::Value x = ia ? indexNumber(at, *a) : *a;
+      mlir::Value y = ib ? indexNumber(at, *b) : *b;
+      if (!x.getType().isInteger(32) || !y.getType().isInteger(32))
+        return error(expr.loc, "a row number is compared with a row number "
+                               "of its buffer, or with an i32");
+      arith::CmpIPredicate predicate;
+      switch (expr.op) {
+      case Token::Equal:
+        predicate = arith::CmpIPredicate::eq;
+        break;
+      case Token::NotEqual:
+        predicate = arith::CmpIPredicate::ne;
+        break;
+      case Token::Less:
+        predicate = arith::CmpIPredicate::slt;
+        break;
+      case Token::LessEqual:
+        predicate = arith::CmpIPredicate::sle;
+        break;
+      case Token::Greater:
+        predicate = arith::CmpIPredicate::sgt;
+        break;
+      default:
+        predicate = arith::CmpIPredicate::sge;
+        break;
+      }
+      return arith::CmpIOp::create(builder, at, predicate, x, y).getResult();
+    }
+  }
   Type leftText = textTypeOf(lhs), rightText = textTypeOf(rhs);
   if (isAnyText(lhs) || isAnyText(rhs)) {
     // One of any length: compared byte for byte, with one of either kind.
@@ -9024,6 +9254,43 @@ mlir::Value Parser::bits(Location at, mlir::Value value) {
       .getResult(0);
 }
 
+/// A row number as the i32 it is computed with, and back.
+mlir::Value Parser::indexNumber(Location at, mlir::Value index) {
+  return UnrealizedConversionCastOp::create(builder, at, builder.getI32Type(),
+                                            index)
+      .getResult(0);
+}
+mlir::Value Parser::asIndex(Location at, mlir::Value number,
+                            IndexOfType type) {
+  return UnrealizedConversionCastOp::create(builder, at, type, number)
+      .getResult(0);
+}
+
+/// The number of a row of the buffer `buffer` (`name` as the program
+/// says it): a row number of that buffer, or an integer.
+FailureOr<mlir::Value> Parser::emitRowNumber(const Expr &number,
+                                             FlatSymbolRefAttr buffer,
+                                             StringRef name) {
+  Location at = loc(number.loc);
+  Type indexType = typeOf(number);
+  if (auto index = dyn_cast_or_null<IndexOfType>(indexType)) {
+    if (index.getBuffer() != buffer)
+      return error(number.loc,
+                   "this is a row number of '" +
+                       index.getBuffer().getValue() + "', not of '" + name +
+                       "': 'as index of " + name + "' makes it one");
+    return emit(number, index);
+  }
+  FailureOr<mlir::Value> value =
+      emit(number, indexType ? indexType : builder.getI32Type());
+  if (failed(value))
+    return failure();
+  *value = countable(at, *value);
+  if (!value->getType().isSignlessInteger() || value->getType().isInteger(1))
+    return error(number.loc, "a row's number is an integer");
+  return value;
+}
+
 mlir::Value Parser::countable(Location at, mlir::Value value) {
   if (!isUnsigned(value.getType()))
     return value;
@@ -9233,6 +9500,9 @@ FailureOr<mlir::Value> Parser::formatValue(llvm::SMLoc where,
   Type i64 = builder.getI64Type();
   if (isa<TextType>(type))
     return value;
+  // (A row number: its number.)
+  if (isa<IndexOfType>(type))
+    return formatValue(where, indexNumber(at, value));
   auto choose = [&](mlir::Value condition, mlir::Value a, mlir::Value b) {
     auto text = cast<TextType>(a.getType());
     return textFromBits(at,
