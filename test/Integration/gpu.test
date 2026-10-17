@@ -89,6 +89,16 @@
 // RUN: FileCheck %s --check-prefix=TABLE --input-file=%t.table.gpu
 // TABLE: x 3787.75 p 5863 n 9987287989808968184
 
+// A few rows of big columns written on the GPU come back as the words
+// that changed, the same as whole and as on the CPU.
+// RUN: %ent run %S/Inputs/gpu_rows.ent > %t.cells.cpu
+// RUN: env ENT_GPU_REPORT=1 %ent run %S/Inputs/gpu_rows.ent --gpu > %t.cells.gpu 2> %t.cells.report
+// RUN: env ENT_GPU_WHOLE=1 %ent run %S/Inputs/gpu_rows.ent --gpu > %t.cells.whole
+// RUN: diff %t.cells.cpu %t.cells.gpu
+// RUN: diff %t.cells.cpu %t.cells.whole
+// RUN: FileCheck %s --check-prefix=PACKED --input-file=%t.cells.report
+// PACKED: gpu to host: 3200000 bytes whole, 117782 words packed of 29200000
+
 // A `gpu system` of an imported module: its kernel's name has no `.`.
 // RUN: %ent run %S/Inputs/gpu_module.ent --gpu | FileCheck %s --check-prefix=MODULE
 // MODULE: frame 10 sum 529470

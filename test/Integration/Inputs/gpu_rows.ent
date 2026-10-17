@@ -1,0 +1,50 @@
+// What the GPU writes of a few rows of big columns comes back as the
+// words that changed (devices/gpu.c: a shadow of what the CPU holds, and
+// the words that differ from it packed on the GPU), with the CPU writing
+// rows of the same columns in between, which the GPU gets and the shadow
+// takes. Built with and without --gpu (and with ENT_GPU_WHOLE, the whole
+// rows in use), it prints the same.
+import console
+
+component Cell { v: i32, w: i64, f: f32 } capacity 200000
+unique Frame: i32
+unique Sums { v: i64, w: i64, f: f64, n: i32 }
+
+// A few rows, a different few each frame; some of them back to what they
+// were the frame before.
+gpu system bump() {
+  for c: mut Cell where (c.v & 127) == (Frame & 127) {
+    c.v += 1
+    c.w = c.w * 3 + (c.v as i64)
+    c.f = if (c.v & 1) == 0 { c.f * 0.5 } else { c.f + 1.0 }
+  }
+}
+gpu system back() {
+  for c: mut Cell where (c.v & 127) == ((Frame + 1) & 127) && (c.w & 3) == 1 {
+    c.v -= 1
+  }
+}
+// The CPU's own few.
+system touch() {
+  for c: mut Cell where (c.v % 1009) == (Frame % 1009) { c.v += 7  c.w -= 1 }
+}
+system sum() {
+  Sums.v = 0
+  Sums.w = 0
+  Sums.f = 0.0
+  for c: Cell {
+    Sums.v += c.v as i64
+    Sums.w += c.w
+    Sums.f += c.f as f64
+  }
+  Frame += 1
+  if Frame % 10 == 0 { spawn { Print { line: "frame {Frame} v {Sums.v} w {Sums.w} f {Sums.f}" } } }
+}
+schedule step() { bump()  sum()  touch()  back()  sum()  write()  clear() }
+
+world {
+  for i in 0..200000 {
+    spawn { Cell { v: (i * 7919) % 100003, w: i as i64, f: (i % 13) as f32 } }
+  }
+}
+main { loop { step() } until Frame >= 60 }

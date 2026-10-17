@@ -3,6 +3,39 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-17, at the end: `math` on the GPU, and what comes back as the words that changed
+
+`math` is written in ent (docs/gpu.md), so `infect`, `progress`,
+`symptoms` and `tests` build as `gpu system`s (`progress` once the log
+of its moves is a system of its own, `moves`). Marked so, they first
+made a day slower on four threads (14.9 ms where it was 12.3): each
+writes a few people's rows, and each column it wrote came back to the
+CPU whole for the next system there (`Disease`, some 24 MB a day). What
+the GPU has newer now comes back as the words that changed (a shadow of
+what the CPU holds, compared on the GPU; docs/gpu.md). Building that
+found two pieces the GPU and the CPU kept at the world's offset 0 (the
+dead marks of relations whose edges never die, and the ids of an
+archetype whose ids are its rows: neither is kept), which aliased the
+uniques; one run in thirty ended after a day with nobody ill. Gone, and
+the same 857,886 infected in a hundred runs since.
+
+`BENCH_ONE_CPU=4 BENCH_CPUS=4-7 BENCH_ALL=0 python3 bench/epidemic/run.py
+1000000 --gpu ...`, the slow cores again:
+
+| a million people, a day in ms | one core | 4 threads | memory MB |
+|---|---|---|---|
+| the CPU alone | 177.8 | 65.3 | 958 |
+| `workplace`, `infectiousness`, `chance`, `lay` on the GPU | 18.7 | 11.6 | 853 |
+| ... and `infect`, `progress` | 15.6 | 11.5 | 854 |
+| ... and `infect`, `progress`, `symptoms`, `tests` | 13.6 | 11.8 | 855 |
+
+857,886 infected in every run; with tracing, 100,000 people, 32,718 in
+all four builds with the last set (a day 9.7 ms on one core and the
+GPU, 6.9 on four threads and the GPU, against 12.7 and 7.1 on the CPU).
+On four threads what is left is `chance` (2.9), `lay` (2.1),
+`household` (2.0, a sum along a tree: the CPU's) and `infect` (1.8, its
+`Disease` rows back to the CPU for `tally`).
+
 ## 2026-10-17, after that: what a sum added, read back
 
 After its scan, what a whole-number sum of the body adds is read back

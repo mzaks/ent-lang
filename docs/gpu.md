@@ -197,6 +197,22 @@ everything the GPU has newer comes back, and from then on all of it is
 the CPU's, copied to the GPU again where a GPU run needs it. (So H1
 holds with that call.)
 
+What the GPU has newer comes back as the words that changed, where
+there is a lot of it (256 KB or more of a piece): the runtime keeps a
+**shadow** of such a piece in the GPU's memory, what the CPU holds of
+it (but for bytes the CPU wrote and has not given the GPU yet: giving
+them makes the shadow theirs too). A kernel of the runtime's
+(`ent_gpu_diff`) compares the range with the shadow word by word, makes
+each word that differs the shadow's and packs it with its index; the
+CPU gets the pairs in one copy and puts the words in place. One in
+eight words or more, and the range comes whole after all (the kernel has
+made the shadow the GPU's anyway). So a `for` that changes a few
+entities of a million, wherever they are, sends back those: rows of a
+block would not do, since the few are spread over all the blocks.
+`ENT_GPU_WHOLE` turns it off; `ENT_GPU_REPORT`, `ENT_GPU_CHECK` and
+`ENT_GPU_LOG` say what came back, check each packed copy against the
+whole range, and log the first copies.
+
 Where the CPU waits: only where it copies from the GPU, and when a
 schedule ends. A copy to the GPU is from the CPU's memory as it is
 (pageable): the driver has taken the bytes when the call returns, so the
