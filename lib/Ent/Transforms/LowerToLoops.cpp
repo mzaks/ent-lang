@@ -15711,6 +15711,9 @@ struct GpuPieces {
       return (world.storageType(type).getIntOrFloatBitWidth() + 7) / 8;
     };
     auto piece = [&](GpuPiece piece) {
+      // (Nothing is laid out at the world's start: an offset of 0 is of
+      // something the world does not keep.)
+      assert(piece.offset != 0 && "a piece of the world that is not kept");
       made.push_back(pieces.size());
       pieces.push_back(piece);
     };
@@ -15761,7 +15764,10 @@ struct GpuPieces {
         piece({relation.countOffset, 8, nullptr, nullptr, /*counter=*/true});
         edges(relation.sourceOffset, idBytes);
         edges(relation.targetOffset, idBytes);
-        edges(relation.deadOffset, 1);
+        // (A relation whose edges never die keeps no marks: an offset of 0
+        // would be the world's first bytes, uniques and all.)
+        if (relation.deadOffset)
+          edges(relation.deadOffset, 1);
         whole(relation.sortedOffset, offsetBytes, layout.entityKeys + 1);
         if (relation.indexOffset) {
           whole(relation.indexOffset, offsetBytes, layout.entityKeys + 1);
@@ -15786,8 +15792,9 @@ struct GpuPieces {
       if (ArchetypeOp(archetype.op).getSymNameAttr() != archetypeName)
         continue;
       if (component.getValue().empty()) {
-        // Its ids; its count is the CPU's.
-        if (field.getValue() == "id")
+        // Its ids (none kept where an id is the row); its count is the
+        // CPU's.
+        if (field.getValue() == "id" && archetype.idOffset)
           piece({archetype.idOffset, layout.entities.idBits / 8, &archetype});
         return made;
       }
