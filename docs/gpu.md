@@ -4,7 +4,7 @@ Status: steps 1 to 4 done (the marker and its checks; the lowering; the
 runtime and `tools/ent --gpu`; measured), and after them the world kept
 on the GPU by copies the compiler places instead of managed memory (see
 Residency, and "After step 4" at the end for why), and one kernel for a
-fused sequence. G2 is next. G0 (`bench/gpu/`, results in
+fused sequence. G2 under way: lookups built. G0 (`bench/gpu/`, results in
 `bench/gpu/RESULTS.md`) showed that ent-opt's entity-parallel loops become
 correct kernels through upstream MLIR passes alone, that a frame of 1e7
 entities takes 3.75 ms with the world on the GPU against 14.5 ms on one
@@ -80,6 +80,9 @@ entity and values every entity reads alike:
   CPU loop already reads them once before it;
 - reading a buffer (`len`, `Name[i].field`), also through a fn it is
   given: a buffer is treated as a column (see Residency);
+- looking up another entity's fields (`if let x = C(other).f`), which
+  the query does not write (G2: the entity table, the slots handed out
+  and their generations and locations, is kept on the GPU as pieces);
 - calling `fn`s of the program: compiled for the GPU like the body;
 - arithmetic on every number type. `f64` is allowed; on consumer cards
   it runs at 1/32 to 1/64 of `f32`, which `--explain` says.
@@ -90,7 +93,6 @@ Errors, each naming the construct and what it waits for:
 |---|---|---|
 | `Health(e).hp -= ...`, `inner.w += ...` (applies), `Hits += 1` (accumulates) | combined at the commit point in a fixed order: needs ordered reductions on the GPU | G2 |
 | `Marks += { ... }` (rows given to a buffer) | rows in the order of the entities: needs an ordered compaction | G2 |
-| `C(other).f` (lookups) | needs the table from id to row on the GPU | G2 |
 | `extern fn`, including `math`'s `sin`, `sqrt` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |
 | arrows, edges, `top down`, `bottom up` | edges and trees are kept in tables the GPU does not have | later |
@@ -98,7 +100,7 @@ Errors, each naming the construct and what it waits for:
 | `spawn`, `destroy`, `add`/`remove` of an `apart` component | change which rows an archetype holds; the compaction runs on the CPU | later |
 | `by`, `in turn by` | one entity after another: no parallel form | never |
 | a table (`table`), a text (`text[N]`, `text`) | not on the GPU yet | later |
-| a fn given the entities of a component | it reads other entities | G2, with lookups |
+| a fn given the entities of a component | it reads other entities through a function of the CPU's, given the world | later |
 | `extern proc` | the outside world | never |
 | writing a component a reactive query reacts to | its events (stamps) are kept on the CPU | later |
 

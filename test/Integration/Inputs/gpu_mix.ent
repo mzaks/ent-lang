@@ -3,12 +3,13 @@
 // from what the GPU goes through every frame, reads what it wrote, and
 // writes what it reads; a `gpu` system has code after its `for`, reads a
 // buffer, gives and takes a tag, and runs under a condition; an
-// archetype holds one entity.
+// archetype holds one entity; one looks up the entity another follows.
 import console
 
 component Position { x: f32, y: f32 } capacity 100000
 component Velocity { dx: f32, dy: f32 } capacity 100000
 component Sun { pull: f32 }
+component Leader { who: entity } capacity 100000
 tag Hot
 archetype Star { Position, Sun } capacity 1
 unique Clock { frame: i64 }
@@ -28,6 +29,11 @@ gpu system fly(dt: f32) {
 }
 gpu system cool() {
   for v: mut Velocity with Hot where v.dy > 0.0 { v.dy = v.dy * 0.5 }
+}
+gpu system follow() {
+  for v: mut Velocity, l: Leader {
+    if let x = Position(l.who).x { v.dx += (x - 10.0) * 0.01 }
+  }
 }
 gpu system shine() {
   for p: mut Position, s: Sun { p.x += s.pull }
@@ -53,6 +59,7 @@ system total() {
 schedule frame(dt: f32) {
   fly(dt)
   cool() run_if Clock.frame % 2 == 0
+  follow()
   shine()
   births()
   tick()
@@ -63,10 +70,11 @@ world {
   Gusts = [{ dx: 0.0 }; 8]
   Gusts[3].dx = 1.0
   Gusts[5].dx = -2.0
-  spawn { Position { x: 0.0, y: 0.0 }, Sun { pull: 0.25 } }
+  let star = spawn { Position { x: 0.0, y: 0.0 }, Sun { pull: 0.25 } }
   for i in 0..20000 {
     spawn { Position { x: (i % 100) as f32 * 0.3, y: (i % 37) as f32 },
-            Velocity { dx: (i % 11) as f32 * 0.1, dy: (i % 5) as f32 } }
+            Velocity { dx: (i % 11) as f32 * 0.1, dy: (i % 5) as f32 },
+            Leader { who: star } }
   }
 }
 

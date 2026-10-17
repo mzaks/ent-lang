@@ -4342,15 +4342,38 @@ emitReadStamp(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
       .getResult();
 }
 
+/// Whether `op` is in a loop for the GPU (until mapGpuLoops).
+static bool inGpuLoop(Operation *op) {
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp())
+    if (parent->hasAttr(kGpuLoopAttr))
+      return true;
+  return false;
+}
+
+static void lowerLookupsOf(IRRewriter &rewriter, func::FuncOp func,
+                           const WorldLayout &layout, WorldAccess &world,
+                           bool mayMerge, ArrayRef<LookupOp> lookups);
+
+/// Lower the lookups of `func`: those in a loop for the GPU from its copy
+/// of the world (`gpu`), the others from the CPU's.
 static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
                          const WorldLayout &layout, WorldAccess &world,
-                         bool mayMerge = true) {
-  SmallVector<LookupOp> lookups;
-  func.walk([&](LookupOp lookup) { lookups.push_back(lookup); });
-  if (lookups.empty()) {
-    func.walk([](Operation *op) { op->removeAttr(kScopeAttr); });
-    return;
-  }
+                         bool mayMerge = true, WorldAccess *gpu = nullptr) {
+  SmallVector<LookupOp> lookups[2];
+  func.walk([&](LookupOp lookup) {
+    lookups[gpu && inGpuLoop(lookup)].push_back(lookup);
+  });
+  if (!lookups[0].empty())
+    lowerLookupsOf(rewriter, func, layout, world, mayMerge, lookups[0]);
+  if (!lookups[1].empty())
+    lowerLookupsOf(rewriter, func, layout, *gpu, mayMerge, lookups[1]);
+  func.walk([](Operation *op) { op->removeAttr(kScopeAttr); });
+}
+
+static void lowerLookupsOf(IRRewriter &rewriter, func::FuncOp func,
+                           const WorldLayout &layout, WorldAccess &world,
+                           bool mayMerge, ArrayRef<LookupOp> lookups) {
   // Lookups of several fields of one component of one entity find the
   // entity once, where the first of them stands, and read all the fields
   // there: finding it is most of what a lookup costs, in time and in
@@ -4479,7 +4502,6 @@ static void lowerLookups(IRRewriter &rewriter, func::FuncOp func,
     for (auto [lookup, value] : llvm::zip(group, converted))
       rewriter.replaceOp(lookup, {value, results.back()});
   }
-  func.walk([](Operation *op) { op->removeAttr(kScopeAttr); });
 }
 
 /// `a ⊕ b` under an apply's rule, of two values as they are stored; min
@@ -14688,6 +14710,8 @@ struct GpuPiece {
   const WorldBuffer *buffer = nullptr;
   /// The buffer's count itself.
   bool counter = false;
+  /// Of the entity table: as many elements as slots were handed out.
+  bool bySlots = false;
 };
 
 /// The pieces of the world `gpu` systems touch, and which of them stand
@@ -14713,6 +14737,23 @@ struct GpuPieces {
       pieces.push_back(piece);
     };
     if (!archetypeName) {
+      // The entity table, which lookups read: the slots handed out, and
+      // their generations and locations. (With ids that are rows, there
+      // is none.)
+      if (component && component.getValue().empty() && field &&
+          field.getValue().empty()) {
+        const EntityScheme &scheme = layout.entities;
+        if (scheme.kind == EntityScheme::Rows)
+          return made;
+        piece({layout.nextSlotOffset, 8, nullptr, nullptr, /*counter=*/true});
+        if (scheme.hasGenerations())
+          piece({layout.generationOffset,
+                 uint64_t(scheme.generationStorageBits + 7) / 8, nullptr,
+                 nullptr, false, /*bySlots=*/true});
+        piece({layout.locationOffset, uint64_t(scheme.locationBits + 7) / 8,
+               nullptr, nullptr, false, /*bySlots=*/true});
+        return made;
+      }
       // A buffer; a unique and the tick counter are the CPU's.
       if (!component || !field || field.getValue() != "rows")
         return made;
@@ -14809,7 +14850,11 @@ static void placeGpuCopies(IRRewriter &rewriter, func::FuncOp func,
     if (piece.counter)
       return constant(loc, 8);
     Value rows;
-    if (piece.archetype)
+    if (piece.bySlots)
+      rows = memref::LoadOp::create(
+          rewriter, loc, world.scalar(layout.nextSlotOffset),
+          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
+    else if (piece.archetype)
       rows = arith::IndexCastOp::create(rewriter, loc, i64,
                                         world.count(loc, *piece.archetype));
     else
@@ -15354,7 +15399,8 @@ struct EntLowerToLoops
       guardSchedule(rewriter, func, condition);
       // (What the fused loops look up.)
       if (fuseSystems)
-        lowerLookups(rewriter, func, *layout, world);
+        lowerLookups(rewriter, func, *layout, world, /*mayMerge=*/true,
+                     device ? &*device : nullptr);
       lowerResourceAccesses(rewriter, func, world);
     }
 
@@ -15424,7 +15470,8 @@ struct EntLowerToLoops
           [&](scf::IfOp branch) { branches.push_back(branch); });
       for (scf::IfOp branch : branches)
         mergeBranchStores(rewriter, branch);
-      lowerLookups(rewriter, func, *layout, world);
+      lowerLookups(rewriter, func, *layout, world, /*mayMerge=*/true,
+                   device ? &*device : nullptr);
       lowerResourceAccesses(rewriter, func, world);
       shareParts(rewriter, func);
     }

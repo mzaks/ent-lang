@@ -34,16 +34,6 @@ gpu system mark() {
 
 // -----
 
-component Hp { hp: i32, foe: entity }
-gpu system look() {
-  for h: mut Hp {
-    // expected-error @+1 {{looks up another entity}}
-    if let other = Hp(h.foe).hp { h.hp = other }
-  }
-}
-
-// -----
-
 component Spot { x: f32 }
 gpu system near() {
   for s: mut Spot {

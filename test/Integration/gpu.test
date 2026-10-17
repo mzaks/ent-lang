@@ -7,9 +7,9 @@
 // RUN: diff %t.cpu %t.gpu
 // RUN: diff %t.cpu %t.gpupar
 // RUN: FileCheck %s --check-prefix=MIX --input-file=%t.gpu
-// MIX: frame 10 moved 10 total 1318885.503874 hot 540
-// MIX: frame 20 moved 20 total 1378202.08553 hot 1512
-// MIX: frame 30 moved 30 total 1426584.71898 hot 2592
+// MIX: frame 10 moved 10 total 1293685.463344 hot 540
+// MIX: frame 20 moved 20 total 1281302.013828 hot 1512
+// MIX: frame 30 moved 30 total 1226484.675752 hot 2592
 
 // examples/integrate.ent with its C host (examples/host/integrate_main.c,
 // as in integrate.test), the host built with ENT_GPU: it asks for the

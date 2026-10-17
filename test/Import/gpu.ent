@@ -24,6 +24,16 @@ gpu system move(dt: f32) {
   Wind.strength = 0.0
 }
 
+// Another entity's fields, looked up (the GPU has the entity table too).
+component Aim { at: entity, dx: f32 }
+// CHECK-LABEL: ent.system @steer() gpu {
+// CHECK: ent.lookup
+gpu system steer() {
+  for a: mut Aim {
+    if let x = Position(a.at).x { a.dx = x }
+  }
+}
+
 // With a contract as well.
 // CHECK-LABEL: ent.system @fall(%{{.*}}: f32) gpu reads [@Position] writes [@Velocity] {
 gpu system fall(dt: f32) reads Position writes Velocity {

@@ -942,8 +942,6 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
   if (isa<AppendOp>(op))
     return std::string("gives a buffer rows, in the order of the "
                        "entities: not on the GPU yet");
-  if (isa<LookupOp>(op))
-    return std::string("looks up another entity: not on the GPU yet");
   if (isa<EachOp>(op))
     return std::string("has a 'for' over other entities in its body: not "
                        "on the GPU yet");
