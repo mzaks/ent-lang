@@ -1245,8 +1245,10 @@ program's own fns, which do the same. Not yet: sending to other
 entities or accumulating into a unique, giving a buffer rows, lookups,
 a `for` over other entities inside it, extern fns (so `math`'s), tables
 and texts. Later, or never: relations and trees, `on` (reactive), `by`, spawning,
-destroying and `apart` components, procs. `docs/gpu.md` has the design
-and what comes when.
+destroying and `apart` components, procs, writing a component a reactive
+query reacts to. Around its `for`s the system reads and writes uniques;
+what it does to entities or buffers goes in a system of its own.
+`docs/gpu.md` has the design and what comes when.
 
 ## Extern systems
 

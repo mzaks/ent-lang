@@ -2,7 +2,8 @@
 // RUN: ent-translate --import-ent %s | ent-opt | FileCheck %s
 
 // What a `for` of a `gpu system` may do (docs/gpu.md): its own entity, and
-// what every entity reads alike. The code around it runs on the CPU.
+// what every entity reads alike. The code around it runs on the CPU, and
+// reads and writes uniques.
 
 component Position { x: f32, y: f32 }
 component Velocity { dx: f32, dy: f32 }
@@ -21,7 +22,6 @@ gpu system move(dt: f32) {
     if p.x > 50.0 { e.add(Stunned) }
   }
   Wind.strength = 0.0
-  spawn { Position { x: 0.0, y: 0.0 }, Velocity { dx: 1.0, dy: 1.0 } }
 }
 
 // With a contract as well.

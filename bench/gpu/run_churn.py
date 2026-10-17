@@ -6,9 +6,7 @@
 churn/churn.ent.in has a `gpu` system move a million entities every
 frame; the CPU spawns SPAWN of them a frame into its archetype, and with
 READ adds up a column it writes. Each variant is built by tools/ent,
-native, without and with --gpu, and with --gpu run once more with
-ENT_GPU_ADVISE=device (devices/gpu.c: the pages kept on the GPU, the CPU
-reaching them there). Prints ms per frame; the sums must agree.
+native, without and with --gpu. Prints ms per frame; the sums must agree.
 """
 
 import os
@@ -28,8 +26,8 @@ def main():
     with open(os.path.join(HERE, "churn", "churn.ent.in")) as source:
         template = source.read()
     env = dict(os.environ, ENT_CFLAGS="-march=native")
-    print("| spawn a frame | CPU reads a column | cpu | gpu | gpu, advised |")
-    print("|---|---|---|---|---|")
+    print("| spawn a frame | CPU reads a column | cpu | gpu |")
+    print("|---|---|---|---|")
     bad = False
     with tempfile.TemporaryDirectory() as directory:
         for spawn, read in VARIANTS:
@@ -38,8 +36,7 @@ def main():
                 out.write(template.replace("@SPAWN@", spawn)
                           .replace("@READ@", read))
             cells, sums = [], set()
-            for flags, extra in (([], {}), (["--gpu"], {}),
-                                 (["--gpu"], {"ENT_GPU_ADVISE": "device"})):
+            for flags, extra in (([], {}), (["--gpu"], {})):
                 exe = os.path.join(directory, "churn")
                 subprocess.run([sys.executable, ENT, "build", program,
                                 *flags, "-o", exe], check=True, env=env)

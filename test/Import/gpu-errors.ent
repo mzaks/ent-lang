@@ -175,5 +175,24 @@ gpu system sizes() {
 
 // -----
 
+component Spot { x: f32 }
+gpu system grow() {
+  for s: mut Spot { s.x += 1.0 }
+  // expected-error @+1 {{is in a 'gpu' system, outside its 'for's, where its code only reads and writes uniques}}
+  spawn { Spot { x: 0.0 } }
+}
+
+// -----
+
+component Spot { x: f32 }
+buffer Marks { x: f32 } capacity 4
+gpu system mark() {
+  for s: mut Spot { s.x += 1.0 }
+  // expected-error @+1 {{goes in a system of its own}}
+  Marks = []
+}
+
+// -----
+
 // expected-error @+1 {{only a system with a body can be 'gpu'}}
 gpu extern system report()

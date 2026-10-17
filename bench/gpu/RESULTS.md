@@ -6,6 +6,45 @@ with OpenMP, and on the GPU. `python3 bench/gpu/run_churn.py`: what it
 costs when the CPU touches what the GPU goes through. `probe_launch.c` and
 `probe_readback.c`: the driver alone.
 
+## 2026-10-17, later: the world kept on the GPU by copies
+
+Instead of managed memory, the GPU's own copy of the world, with copies
+the compiler places from the runs' access (docs/gpu.md, Residency). Same
+machine, idle; same settings. (`gpu-host` is gone: there is no managed
+memory left to put elsewhere.)
+
+| entities | fused | fused-omp | g0 | gpu |
+|---|---|---|---|---|
+| 10,000 | 1.7 | 1.8 | 14.5 | 8.0 |
+| 100,000 | 28.5 | 29.2 | 16.7 | 12.6 |
+| 1,000,000 | 874.3 | 317.1 | 386.0 | 373.4 |
+| 10,000,000 | 12,357.3 | 10,393.9 | 3,765.6 | 3,650.4 |
+
+`run_churn.py`, ms per frame:
+
+| spawn a frame | CPU reads a column | cpu | gpu |
+|---|---|---|---|
+| 0 | no | 0.155 | 0.026 |
+| 1,000 | no | 0.285 | 0.042 |
+| 0 | yes | 0.777 | 0.976 |
+| 1,000 | yes | 0.938 | 1.498 |
+
+The checksums and sums agree.
+
+- The floor is 8 us a frame (11 with managed memory): the launches on
+  memory of the GPU's own cost less.
+- A thousand spawns a frame cost the GPU 0.016 ms more: only the new
+  rows are copied (managed memory: 1.2 ms).
+- Reading back a column the GPU writes every frame costs the copy of its
+  4 MB, about 0.2 ms over what the CPU alone takes (whose adding up is
+  the rest); with managed memory it was 2.8 ms. With the CPU's world
+  pinned (`cuMemHostRegister`, tried by hand) 0.99 instead of 1.27 ms in
+  one run; not done, since it locks all of the world in memory.
+- The first build of this copied every column every frame, because a
+  system of the clock device calls a proc, which stages count as opaque,
+  and a system that may spawn (none this frame) counted as writing every
+  column: 1.9 ms where it is 0.026 now.
+
 ## 2026-10-17: G1 (docs/gpu.md), steps 1 to 3 built
 
 The machine of the entry below, idle this time (load average 0.5 to 2).

@@ -60,8 +60,11 @@ public:
       : rewriter(rewriter), layout(layout), arena(arena) {}
 
   Value getArena() const { return arena; }
+  /// For the GPU's copy of the world (see deviceWorld): the CPU's, whose
+  /// counts and uniques it keeps, not the GPU.
+  void setHost(WorldAccess *world) { host = world; }
   /// How many entities each archetype has, by its index.
-  Value counts() { return getCounts(); }
+  Value counts() { return host ? host->counts() : getCounts(); }
   bool hasIds() const { return layout.entities.hasIds(); }
 
   /// The type a value of `type` is stored as: entity ids become integers
@@ -99,6 +102,8 @@ public:
   /// The number of entities in `archetype`, as an index, loaded at the
   /// insertion point: spawns and despawns change it, so it is not cached.
   Value count(Location loc, const WorldArchetype &archetype) {
+    if (host)
+      return host->count(loc, archetype);
     Value position =
         arith::ConstantIndexOp::create(rewriter, loc, archetype.index);
     Value count = memref::LoadOp::create(rewriter, loc, getCounts(),
@@ -109,6 +114,8 @@ public:
 
   /// Store `count` (an index) as the number of entities in `archetype`.
   void setCount(Location loc, const WorldArchetype &archetype, Value count) {
+    if (host)
+      return host->setCount(loc, archetype, count);
     Value position =
         arith::ConstantIndexOp::create(rewriter, loc, archetype.index);
     Value value = arith::IndexCastOp::create(
@@ -483,6 +490,8 @@ public:
 
   /// A one-element view of a resource field.
   Value resourceField(StringAttr resource, StringAttr field) {
+    if (host)
+      return host->resourceField(resource, field);
     const WorldResourceField *entry =
         layout.getResource(resource).find(field);
     Value &value = columns[{~0u, entry->offset}];
@@ -954,6 +963,8 @@ private:
     OpBuilder::InsertionGuard guard(rewriter);
     if (lastCreated)
       rewriter.setInsertionPointAfter(lastCreated);
+    else if (Operation *made = arena.getDefiningOp())
+      rewriter.setInsertionPointAfter(made);
     else
       rewriter.setInsertionPointToStart(arena.getParentBlock());
     Value value = build(arena.getLoc());
@@ -964,6 +975,7 @@ private:
   IRRewriter &rewriter;
   const WorldLayout &layout;
   Value arena;
+  WorldAccess *host = nullptr;
   Operation *lastCreated = nullptr;
   Value countsView;
   llvm::DenseMap<std::pair<unsigned, uint64_t>, Value> columns;
@@ -13162,7 +13174,8 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
 /// ahead of every query of the sequence); else it starts the next.
 static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                          SymbolTable &symbols, const WorldLayout &layout,
-                         WorldAccess &world, const LoopOptions &options) {
+                         WorldAccess &world, const LoopOptions &options,
+                         WorldAccess *device = nullptr) {
   for (StageOp stage : llvm::make_early_inc_range(func.getOps<StageOp>())) {
     for (Operation &op : llvm::make_early_inc_range(
              stage.getBody().front().without_terminator()))
@@ -13181,7 +13194,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   // with each other.
   bool sequenceOnGpu = false;
   auto flush = [&](Operation *at) {
-    fuseRuns(rewriter, sequence, at, symbols, layout, world,
+    fuseRuns(rewriter, sequence, at, symbols, layout,
+             sequenceOnGpu ? *device : world,
              sequenceOnGpu ? forGpu(options) : options);
   };
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
@@ -13582,9 +13596,10 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
 /// row appended is there at once, as is none after a clear; reads; and
 /// the calls of C functions that are handed one.
 static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
-                         const WorldLayout &layout, WorldAccess &world,
+                         const WorldLayout &layout, WorldAccess &cpu,
                          SymbolTable &symbols,
-                         const SmallPtrSetImpl<Operation *> &defined) {
+                         const SmallPtrSetImpl<Operation *> &defined,
+                         WorldAccess *gpu = nullptr) {
   auto takesBuffer = [&](InvokeOp invoke) {
     auto function = symbols.lookup<FunctionOp>(invoke.getCallee());
     return llvm::any_of(function.getParams().getAsValueRange<TypeAttr>(),
@@ -13602,6 +13617,12 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
   for (Operation *op : uses) {
     Location loc = op->getLoc();
     rewriter.setInsertionPoint(op);
+    // (In a loop for the GPU, from the GPU's copy of the world.)
+    bool onGpu = false;
+    for (Operation *parent = op->getParentOp(); parent && gpu;
+         parent = parent->getParentOp())
+      onGpu |= parent->hasAttr(kGpuLoopAttr);
+    WorldAccess &world = onGpu ? *gpu : cpu;
     Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
     if (auto invoke = dyn_cast<InvokeOp>(op)) {
       auto function = symbols.lookup<FunctionOp>(invoke.getCallee());
@@ -14502,18 +14523,35 @@ static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
 /// Threads a block of a GPU loop has: the rows one block visits.
 static constexpr int64_t kGpuBlockRows = 256;
 
-/// Call `ent_gpu_wait` (devices/gpu.c), declaring it where it is not yet:
-/// the CPU waits for what the GPU was given to do.
-static void callGpuWait(IRRewriter &rewriter, Location loc, ModuleOp module) {
-  if (!SymbolTable::lookupSymbolIn(module, "ent_gpu_wait")) {
+/// Call `name` of devices/gpu.c, declaring it where it is not yet.
+static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
+                            ModuleOp module, StringRef name, ValueRange args,
+                            TypeRange results = {}) {
+  if (!SymbolTable::lookupSymbolIn(module, name)) {
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(module.getBody());
-    auto wait = func::FuncOp::create(rewriter, loc, "ent_gpu_wait",
-                                     rewriter.getFunctionType({}, {}));
-    wait.setPrivate();
+    auto declared = func::FuncOp::create(
+        rewriter, loc, name,
+        rewriter.getFunctionType(TypeRange(args.getTypes()), results));
+    declared.setPrivate();
+    // (A memref crosses to C as a pointer to its descriptor.)
+    if (llvm::any_of(results, [](Type type) { return isa<MemRefType>(type); }))
+      declared->setAttr("llvm.emit_c_interface", rewriter.getUnitAttr());
   }
-  func::CallOp::create(rewriter, loc, "ent_gpu_wait", TypeRange{},
-                       ValueRange{});
+  return func::CallOp::create(rewriter, loc, name, results, args);
+}
+
+/// The GPU's copy of the world, for the GPU's loops in `func`: the same
+/// layout at another address (`ent_gpu_arena`), whose counts and uniques
+/// are the CPU's (a kernel is given those).
+static Value deviceArena(IRRewriter &rewriter, func::FuncOp func,
+                         Value arena) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(&func.getBody().front());
+  return callGpu(rewriter, func.getLoc(), func->getParentOfType<ModuleOp>(),
+                 "ent_gpu_arena", ValueRange{arena},
+                 TypeRange{arena.getType()})
+      .getResult(0);
 }
 
 /// A `gpu` system's queries are entity-local (the verifier sees to most
@@ -14546,84 +14584,326 @@ static LogicalResult checkGpuSystems(ModuleOp module) {
   return failure(result.wasInterrupted());
 }
 
-/// Whether `system` does something outside its queries, which runs on the
-/// CPU while what the GPU was given before may still be running.
-static bool hasCpuPart(Operation *system) {
-  auto ours = dyn_cast_or_null<SystemOp>(system);
-  if (!ours)
-    return true;
-  for (Operation &op : ours.getBody().front())
-    if (!isa<QueryOp>(op) && !op.hasTrait<OpTrait::IsTerminator>() &&
-        !isMemoryEffectFree(&op))
-      return true;
-  return false;
+/// What a `gpu` system writes is for the GPU alone: a field that a
+/// reactive query reacts to has its events (stamps) kept on the CPU.
+static LogicalResult checkGpuStamps(ModuleOp module,
+                                    const WorldLayout &layout) {
+  WalkResult result = module.walk([&](SystemOp system) {
+    if (!system.getGpu())
+      return WalkResult::advance();
+    return system.walk([&](Operation *op) {
+      FlatSymbolRefAttr component;
+      if (auto set = dyn_cast<SetOp>(op))
+        component = cast<RefType>(set.getRef().getType()).getComponent();
+      else if (isa<AddOp, RemoveOp>(op))
+        component = cast<FlatSymbolRefAttr>(op->getAttr("component"));
+      if (!component)
+        return WalkResult::advance();
+      for (const WorldArchetype &archetype : layout.archetypes)
+        for (const WorldColumn &column : archetype.columns)
+          if (column.isStamp() &&
+              column.stamp->component == component.getAttr()) {
+            op->emitOpError("cannot run on the GPU, as its system is "
+                            "'gpu': a reactive query reacts to ")
+                << component
+                << ", whose events are kept on the CPU: not on the GPU yet";
+            return WalkResult::interrupt();
+          }
+      return WalkResult::advance();
+    });
+  });
+  return failure(result.wasInterrupted());
 }
 
-/// In a schedule built with `gpu`: the CPU waits for the GPU before a run
-/// (or a stage) that reads a column a GPU run since the last wait writes,
-/// or writes one it reads or writes (the relation stages are formed by);
-/// a `gpu` run waits as well where it has code of its own around its
-/// queries. And the schedule waits when it ends, for the host (H1).
-static void placeGpuWaits(IRRewriter &rewriter, func::FuncOp func,
-                          SymbolTable &symbols, const WorldLayout &layout,
-                          const LoopOptions &options) {
+/// A piece of the world that the CPU and the GPU both keep, at the same
+/// offset of their copies; devices/gpu.c knows which has it newer. A
+/// column of an archetype (as many elements as it has entities), a
+/// buffer's field (as many as it has rows) or a buffer's count.
+struct GpuPiece {
+  uint64_t offset;
+  uint64_t elementBytes;
+  const WorldArchetype *archetype = nullptr;
+  const WorldBuffer *buffer = nullptr;
+  /// The buffer's count itself.
+  bool counter = false;
+};
+
+/// The pieces of the world `gpu` systems touch, and which of them stand
+/// for each column of an access (see Column in Access.h).
+struct GpuPieces {
+  SmallVector<GpuPiece> pieces;
+  llvm::DenseMap<Column, SmallVector<unsigned>> ofColumn;
+
+  /// The pieces of `column`, made where `add` is set and it has none yet.
+  ArrayRef<unsigned> of(const Column &column, const WorldLayout &layout,
+                        WorldAccess &world, bool add) {
+    auto found = ofColumn.find(column);
+    if (found != ofColumn.end() || !add)
+      return found == ofColumn.end() ? ArrayRef<unsigned>()
+                                     : ArrayRef<unsigned>(found->second);
+    SmallVector<unsigned> &made = ofColumn[column];
+    auto [archetypeName, component, field] = column;
+    auto bytesOf = [&](Type type) {
+      return (world.storageType(type).getIntOrFloatBitWidth() + 7) / 8;
+    };
+    auto piece = [&](GpuPiece piece) {
+      made.push_back(pieces.size());
+      pieces.push_back(piece);
+    };
+    if (!archetypeName) {
+      // A buffer; a unique and the tick counter are the CPU's.
+      if (!component || !field || field.getValue() != "rows")
+        return made;
+      for (const WorldBuffer &buffer : layout.buffers) {
+        if (cast<BufferOp>(buffer.op).getSymNameAttr() != component)
+          continue;
+        piece({buffer.countOffset, 8, nullptr, &buffer, /*counter=*/true});
+        for (const WorldColumn &column : buffer.fields)
+          piece({column.offset, uint64_t(bytesOf(column.type)), nullptr,
+                 &buffer});
+      }
+      return made;
+    }
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (ArchetypeOp(archetype.op).getSymNameAttr() != archetypeName)
+        continue;
+      if (component.getValue().empty()) {
+        // Its ids; its count is the CPU's.
+        if (field.getValue() == "id")
+          piece({archetype.idOffset, layout.entities.idBits / 8, &archetype});
+        return made;
+      }
+      if (const WorldColumn *held = archetype.find(component, field))
+        piece({held->offset, uint64_t(bytesOf(held->type)), &archetype});
+    }
+    return made;
+  }
+};
+
+/// The pieces of the world the `gpu` systems of `module` touch.
+static void collectGpuPieces(ModuleOp module, const WorldLayout &layout,
+                             WorldAccess &world, GpuPieces &shared) {
+  SmallVector<ArchetypeOp> archetypes;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    archetypes.push_back(archetype.op);
+  for (SystemOp system : module.getOps<SystemOp>()) {
+    if (!system.getGpu())
+      continue;
+    SystemAccess access = computeAccess(system, archetypes);
+    for (const auto *columns : {&access.reads, &access.writes})
+      for (const Column &column : *columns)
+        (void)shared.of(column, layout, world, /*add=*/true);
+  }
+}
+
+/// Whether `system` changes the rows of `archetype` only by giving it
+/// rows (spawning), so that only those are newer on the CPU after it.
+static bool onlyAppendsTo(SystemOp system, ArchetypeOp archetype) {
+  bool spawns = false, other = false;
+  system.walk([&](Operation *op) {
+    if (auto spawn = dyn_cast<SpawnOp>(op)) {
+      FlatSymbolRefAttr into = spawn.getArchetypeAttr();
+      spawns |= into && into.getAttr() == archetype.getSymNameAttr();
+      return;
+    }
+    // (What is sent may land anywhere; destroying and moving entities
+    // moves rows.)
+    if (isa<ApplyOp, CombineOp, DespawnOp, ConnectOp, DisconnectOp>(op))
+      other = true;
+    if (auto query = op->getParentOfType<QueryOp>();
+        isa<SetOp, AddOp, RemoveOp>(op) &&
+        (!query || matches(query, archetype)))
+      other = true;
+    if (auto handed = dyn_cast<BufferOfOp>(op);
+        handed && handed.getResult().getType().getMut())
+      other = true;
+  });
+  return spawns && !other;
+}
+
+/// In a schedule built with `gpu`: the pieces a run touches are where it
+/// runs before it (`ent_gpu_to_device`, `ent_gpu_to_host`: copied where
+/// the other side has them newer), and those it writes are newer there
+/// after it (`ent_gpu_wrote`: their bytes in use, or for a run that only
+/// gives an archetype rows, the new rows'). Runs of one kind one after
+/// another do that once, so that fusion still sees them together; a stage
+/// of both kinds does both. A run under a condition copies only where it
+/// holds, as does one that gives rows. The CPU waits for the GPU only
+/// where it copies from it, and when the schedule ends (H1).
+static void placeGpuCopies(IRRewriter &rewriter, func::FuncOp func,
+                           SymbolTable &symbols, const WorldLayout &layout,
+                           WorldAccess &world, GpuPieces &shared,
+                           const LoopOptions &options) {
   SmallVector<ArchetypeOp> archetypes;
   for (const WorldArchetype &archetype : layout.archetypes)
     archetypes.push_back(archetype.op);
   auto module = func->getParentOfType<ModuleOp>();
-  SmallVector<SystemAccess> pending;
-  for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
-    if (op.hasTrait<OpTrait::IsTerminator>()) {
-      if (!pending.empty()) {
-        rewriter.setInsertionPoint(&op);
-        callGpuWait(rewriter, op.getLoc(), module);
-      }
-      break;
+  Type i64 = rewriter.getI64Type();
+  auto constant = [&](Location loc, int64_t value) -> Value {
+    return arith::ConstantIntOp::create(rewriter, loc, value, 64);
+  };
+  // What a piece holds now, in bytes.
+  auto bytesOf = [&](Location loc, const GpuPiece &piece) -> Value {
+    if (piece.counter)
+      return constant(loc, 8);
+    Value rows;
+    if (piece.archetype)
+      rows = arith::IndexCastOp::create(rewriter, loc, i64,
+                                        world.count(loc, *piece.archetype));
+    else
+      rows = memref::LoadOp::create(
+          rewriter, loc, world.bufferCount(*piece.buffer),
+          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
+    return arith::MulIOp::create(rewriter, loc, rows,
+                                 constant(loc, piece.elementBytes));
+  };
+  struct Sides {
+    llvm::SetVector<unsigned> touched[2], written[2];
+    // Of the CPU's: pieces it only gives rows (spawns).
+    llvm::SetVector<unsigned> appended;
+    bool any[2] = {false, false};
+    bool alone = false;
+    RunOp conditional;
+  };
+  auto sidesOf = [&](RunOp run, Sides &sides) {
+    Operation *system = symbols.lookup(run.getSystem());
+    SystemAccess access = computeAccess(system, archetypes);
+    bool gpu = onGpu(system, options);
+    sides.any[gpu] = true;
+    if (!run.getCondition().empty()) {
+      sides.alone = true;
+      sides.conditional = run;
     }
+    // (An extern system that declares nothing may touch all of it; a
+    // system of the program's own is opaque to stages where it calls a
+    // proc, which never gets the world.)
+    if (!gpu && access.isOpaque() && isa<ExternOp>(system)) {
+      for (unsigned piece = 0; piece < shared.pieces.size(); ++piece) {
+        sides.touched[0].insert(piece);
+        sides.written[0].insert(piece);
+      }
+      return;
+    }
+    auto ours = dyn_cast<SystemOp>(system);
+    for (const Column &column : access.reads)
+      for (unsigned piece : shared.of(column, layout, world, false))
+        sides.touched[gpu].insert(piece);
+    for (const Column &column : access.writes)
+      for (unsigned piece : shared.of(column, layout, world, false)) {
+        const WorldArchetype *archetype = shared.pieces[piece].archetype;
+        if (!gpu && ours && archetype &&
+            onlyAppendsTo(ours, ArchetypeOp(archetype->op))) {
+          sides.appended.insert(piece);
+          sides.alone = true;
+          continue;
+        }
+        sides.touched[gpu].insert(piece);
+        sides.written[gpu].insert(piece);
+      }
+  };
+
+  bool anyGpu = false;
+  SmallVector<Operation *> group;
+  Sides sides;
+  // Inside `if (cond)` where the group is a run under a condition.
+  auto guarded = [&](Location loc, function_ref<void()> emit) {
+    if (!sides.conditional) {
+      emit();
+      return;
+    }
+    IRMapping mapping;
+    Block &condition = sides.conditional.getCondition().front();
+    for (Operation &op : condition.without_terminator())
+      rewriter.clone(op, mapping);
+    Value holds = mapping.lookupOrDefault(
+        cast<YieldOp>(condition.getTerminator()).getResults()[0]);
+    auto branch = scf::IfOp::create(rewriter, loc, holds);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(branch.thenBlock()->getTerminator());
+    emit();
+  };
+  auto flush = [&]() {
+    if (group.empty())
+      return;
+    Location loc = group.front()->getLoc();
+    rewriter.setInsertionPoint(group.front());
+    // (The bytes the pieces given rows had before.)
+    SmallVector<Value> before;
+    for (unsigned piece : sides.appended)
+      before.push_back(bytesOf(loc, shared.pieces[piece]));
+    guarded(loc, [&] {
+      for (bool gpu : {true, false})
+        for (unsigned piece : sides.touched[gpu]) {
+          const GpuPiece &held = shared.pieces[piece];
+          callGpu(rewriter, loc, module,
+                  gpu ? "ent_gpu_to_device" : "ent_gpu_to_host",
+                  ValueRange{constant(loc, piece), constant(loc, held.offset),
+                             bytesOf(loc, held)});
+        }
+    });
+    rewriter.setInsertionPointAfter(group.back());
+    guarded(loc, [&] {
+      for (bool gpu : {true, false})
+        for (unsigned piece : sides.written[gpu]) {
+          const GpuPiece &held = shared.pieces[piece];
+          callGpu(rewriter, loc, module, "ent_gpu_wrote",
+                  ValueRange{constant(loc, piece), constant(loc, gpu),
+                             constant(loc, held.offset), constant(loc, 0),
+                             bytesOf(loc, held)});
+        }
+      for (auto [piece, from] : llvm::zip(sides.appended, before)) {
+        const GpuPiece &held = shared.pieces[piece];
+        callGpu(rewriter, loc, module, "ent_gpu_wrote",
+                ValueRange{constant(loc, piece), constant(loc, 0),
+                           constant(loc, held.offset), from,
+                           bytesOf(loc, held)});
+      }
+    });
+    anyGpu |= sides.any[1];
+    group.clear();
+    sides = Sides();
+  };
+  for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     SmallVector<RunOp> runs;
     if (auto run = dyn_cast<RunOp>(op))
       runs.push_back(run);
     else if (auto stage = dyn_cast<StageOp>(op))
       stage.walk([&](RunOp run) { runs.push_back(run); });
-    bool wait = false;
-    SmallVector<SystemAccess> launched;
-    for (RunOp run : runs) {
-      Operation *system = symbols.lookup(run.getSystem());
-      SystemAccess access = computeAccess(system, archetypes);
-      addConditionReads(run.getCondition(), access);
-      bool gpu = onGpu(system, options);
-      if (!gpu || hasCpuPart(system))
-        wait |= llvm::any_of(pending, [&](const SystemAccess &earlier) {
-          return access.conflictWith(earlier, "").has_value();
-        });
-      if (gpu)
-        launched.push_back(std::move(access));
-    }
-    if (wait) {
-      rewriter.setInsertionPoint(&op);
-      callGpuWait(rewriter, op.getLoc(), module);
-      pending.clear();
-    }
-    pending.append(launched.begin(), launched.end());
-  }
-}
-
-/// In a `gpu` system: the CPU waits after a query where the system's code
-/// goes on after it (its kernels may still be running), or where the
-/// query is in a loop or a branch of the system.
-static void placeGpuWaits(IRRewriter &rewriter, ArrayRef<QueryOp> queries,
-                          Operation *system) {
-  auto module = system->getParentOfType<ModuleOp>();
-  for (QueryOp query : queries) {
-    bool wait = query->getParentOp() != system;
-    for (Operation *next = query->getNextNode(); next && !wait;
-         next = next->getNextNode())
-      wait = !isa<QueryOp>(next) && !next->hasTrait<OpTrait::IsTerminator>() &&
-             !isMemoryEffectFree(next);
-    if (!wait)
+    if (runs.empty()) {
+      if (op.hasTrait<OpTrait::IsTerminator>()) {
+        flush();
+        if (anyGpu) {
+          rewriter.setInsertionPoint(&op);
+          callGpu(rewriter, op.getLoc(), module, "ent_gpu_wait", {});
+        }
+      } else if (!isMemoryEffectFree(&op)) {
+        flush();
+      }
       continue;
-    rewriter.setInsertionPointAfter(query);
-    callGpuWait(rewriter, query.getLoc(), module);
+    }
+    Sides here;
+    for (RunOp run : runs)
+      sidesOf(run, here);
+    // (A group is of one kind; a stage of both is one of its own, and so
+    // is a run under a condition or one that gives rows.)
+    bool both = here.any[0] && here.any[1];
+    bool alone = both || here.alone || (runs.size() > 1 && here.conditional);
+    if (alone || here.any[1] != sides.any[1])
+      flush();
+    if (runs.size() > 1)
+      here.conditional = RunOp();
+    group.push_back(&op);
+    for (unsigned side : {0, 1}) {
+      sides.touched[side].insert(here.touched[side].begin(),
+                                 here.touched[side].end());
+      sides.written[side].insert(here.written[side].begin(),
+                                 here.written[side].end());
+      sides.any[side] |= here.any[side];
+    }
+    sides.appended = here.appended;
+    sides.conditional = here.conditional;
+    if (alone)
+      flush();
   }
 }
 
@@ -14665,6 +14945,8 @@ struct EntLowerToLoops
       return signalPassFailure();
     FailureOr<WorldLayout> layout = WorldLayout::compute(module);
     if (failed(layout))
+      return signalPassFailure();
+    if (failed(checkGpuStamps(module, *layout)))
       return signalPassFailure();
     // Tag every apply with its buffers' index in the layout, which lists
     // them in the same walk order; clones keep the tag.
@@ -14921,6 +15203,13 @@ struct EntLowerToLoops
         return signalPassFailure();
     }
 
+    // The pieces of the world the CPU and the GPU both keep.
+    GpuPieces gpuPieces;
+    if (gpu) {
+      WorldAccess types(rewriter, *layout, Value());
+      collectGpuPieces(module, *layout, types, gpuPieces);
+    }
+
     // Schedules first: fusion reads the systems' bodies before they are
     // lowered themselves.
     SmallVector<func::FuncOp> scheduleFuncs;
@@ -14970,10 +15259,25 @@ struct EntLowerToLoops
         func::ReturnOp::create(rewriter, loc);
       }
       WorldAccess world(rewriter, *layout, arena);
+      // (The GPU's copy of the world, for the fused loops of `gpu`
+      // systems.)
+      std::optional<WorldAccess> device;
+      if (gpu && fuseSystems &&
+          func.walk([&](RunOp run) {
+                return onGpu(symbols.lookup(run.getSystem()), options)
+                           ? WalkResult::interrupt()
+                           : WalkResult::advance();
+              })
+              .wasInterrupted()) {
+        device.emplace(rewriter, *layout, deviceArena(rewriter, func, arena));
+        device->setHost(&world);
+      }
       if (gpu)
-        placeGpuWaits(rewriter, func, symbols, *layout, options);
+        placeGpuCopies(rewriter, func, symbols, *layout, world, gpuPieces,
+                       options);
       if (fuseSystems)
-        fuseSchedule(rewriter, func, symbols, *layout, world, options);
+        fuseSchedule(rewriter, func, symbols, *layout, world, options,
+                     device ? &*device : nullptr);
       SmallVector<RunOp> runs;
       func.walk([&](RunOp run) { runs.push_back(run); });
       for (RunOp run : runs)
@@ -14994,15 +15298,16 @@ struct EntLowerToLoops
 
     for (auto system : llvm::make_early_inc_range(module.getOps<SystemOp>())) {
       bool systemOnGpu = onGpu(system, options);
-      if (systemOnGpu) {
-        SmallVector<QueryOp> queries;
-        system.walk([&](QueryOp query) { queries.push_back(query); });
-        placeGpuWaits(rewriter, queries, system);
-      }
       auto [func, arena] = convertToFunc(
           rewriter, system, system.getSymName(), system.getBody(), arenaType);
       func.setPrivate();
       WorldAccess world(rewriter, *layout, arena);
+      // (Its queries' loops address the GPU's copy of the world.)
+      std::optional<WorldAccess> device;
+      if (systemOnGpu) {
+        device.emplace(rewriter, *layout, deviceArena(rewriter, func, arena));
+        device->setHost(&world);
+      }
       SmallVector<QueryOp> queries;
       func.walk([&](QueryOp query) { queries.push_back(query); });
       // A relation the system connects outside its queries, and an
@@ -15040,7 +15345,7 @@ struct EntLowerToLoops
         Block *block = query->getBlock();
         Operation *before = query->getPrevNode();
         Operation *after = query->getNextNode();
-        lowerQuery(rewriter, query, *layout, world,
+        lowerQuery(rewriter, query, *layout, systemOnGpu ? *device : world,
                    systemOnGpu ? forGpu(options) : options);
         ++scope;
         for (Operation *op = before ? before->getNextNode() : &block->front();
@@ -15049,7 +15354,8 @@ struct EntLowerToLoops
       }
       lowerSpawns(rewriter, func, *layout, world);
       lowerConnects(rewriter, func, *layout, world);
-      lowerBuffers(rewriter, func, *layout, world, symbols, defined);
+      lowerBuffers(rewriter, func, *layout, world, symbols, defined,
+                   device ? &*device : nullptr);
       // Innermost first, so an outer `if` sees merged inner ones.
       SmallVector<scf::IfOp> branches;
       func.walk<WalkOrder::PostOrder>(

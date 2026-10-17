@@ -12,8 +12,8 @@
 // MIX: frame 30 moved 30 total 1426584.71898 hot 2592
 
 // examples/integrate.ent with its C host (examples/host/integrate_main.c,
-// as in integrate.test), the host built with ENT_GPU: the world is then
-// from devices/gpu.c, where the GPU reaches it.
+// as in integrate.test), the host built with ENT_GPU: it asks for the
+// world back from the GPU before it reads it.
 // RUN: mkdir -p %t.dir
 // RUN: ent-translate --import-ent %S/../../examples/integrate.ent -o %t.mlir
 // RUN: ent-translate --ent-to-c-header %t.mlir -o %t.dir/integrate_world.h
@@ -23,7 +23,6 @@
 // RUN:     --lower-affine --convert-scf-to-cf \
 // RUN:     "--nvvm-attach-target=chip=%gpu-chip features=+ptx80" \
 // RUN:     --convert-gpu-to-nvvm --reconcile-unrealized-casts \
-// RUN:     --finalize-memref-to-llvm=use-generic-functions=1 \
 // RUN:     --convert-to-llvm --gpu-to-llvm --reconcile-unrealized-casts \
 // RUN:     --gpu-module-to-binary=format=isa \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll

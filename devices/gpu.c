@@ -1,16 +1,19 @@
 // What a program built for a GPU (`ent build --gpu`, docs/gpu.md) runs
 // on, over NVIDIA's driver (libcuda): the functions MLIR's lowering of
-// kernel launches calls (mgpu*), the world's memory, and the CPU's waits.
+// kernel launches calls (mgpu*), the GPU's copy of the world, and the
+// copies between the two that the compiler asks for.
 //
-// The world is in managed memory: one address on the CPU and the GPU, its
-// pages moved by the driver to whichever touches them. Kernels are given
-// one after another to one stream and not waited for: the compiler calls
-// ent_gpu_wait where the CPU needs what they touch (and when a schedule
-// ends), so the launch's own synchronize does nothing.
+// The GPU's copy has the CPU's layout, at another address: a kernel
+// addresses its columns as the CPU does. Of what both keep (a piece: a
+// column, a buffer's field or count) this knows which has it newer; the
+// compiler says before a run on either side what it touches
+// (ent_gpu_to_device, ent_gpu_to_host: copied where the other side has it
+// newer) and after it what it wrote (ent_gpu_wrote). Kernels are given one
+// after another to one stream and not waited for: the CPU waits where it
+// copies from the GPU, and when a schedule ends (ent_gpu_wait).
 //
-// ENT_GPU_MEM=host, where the program runs, puts the world in pinned host
-// memory instead, which the GPU reads over PCIe every time (to measure
-// what keeping it on the GPU is worth).
+// A C host that reads or writes the world between schedule calls calls
+// ent_gpu_world_to_host first (declared by the header with ENT_GPU).
 
 #include <cuda.h>
 #include <stdbool.h>
@@ -21,7 +24,7 @@
 
 static CUcontext context;
 static CUstream stream;
-// Whether kernels were given to the stream since the last wait.
+// Whether kernels or copies were given to the stream since the last wait.
 static bool pending;
 
 static void check(CUresult result, const char *what) {
@@ -52,85 +55,152 @@ void ent_gpu_wait(void) {
   pending = false;
 }
 
-// The world and what else is big: in memory the GPU reaches. What is
-// small (a sort's scratch) is the CPU's alone.
-enum { kBig = 1 << 20, kMostBig = 64 };
-static void *big[kMostBig];
+// The world, as the program hands memrefs over (llvm.emit_c_interface):
+// a byte array of one dimension.
+typedef struct {
+  char *allocated;
+  char *aligned;
+  int64_t offset;
+  int64_t size;
+  int64_t stride;
+} ent_gpu_memref;
 
-static void *allocate(size_t alignment, size_t bytes) {
-  if (bytes >= kBig) {
+static char *host;
+static CUdeviceptr device;
+static int64_t bytes;
+
+// The GPU's copy of the world: made when the program first asks for it.
+void _mlir_ciface_ent_gpu_arena(ent_gpu_memref *copy, ent_gpu_memref *world) {
+  if (!device) {
     start();
-    void *memory = NULL;
-    const char *kind = getenv("ENT_GPU_MEM");
-    if (kind && !strcmp(kind, "host")) {
-      check(cuMemHostAlloc(&memory, bytes, CU_MEMHOSTALLOC_DEVICEMAP),
-            "cuMemHostAlloc");
-    } else {
-      CUdeviceptr managed;
-      check(cuMemAllocManaged(&managed, bytes, CU_MEM_ATTACH_GLOBAL),
-            "cuMemAllocManaged");
-      memory = (void *)(uintptr_t)managed;
-      // (Experiment, step 4: ENT_GPU_ADVISE=device keeps the pages on the
-      // GPU, the CPU reaching them where they are.)
-      const char *advise = getenv("ENT_GPU_ADVISE");
-      if (advise && !strcmp(advise, "device")) {
-        CUdevice device;
-        check(cuCtxGetDevice(&device), "cuCtxGetDevice");
-        CUmemLocation gpu = {CU_MEM_LOCATION_TYPE_DEVICE, device};
-        CUmemLocation cpu = {CU_MEM_LOCATION_TYPE_HOST, 0};
-        check(cuMemAdvise(managed, bytes, CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
-                          gpu), "cuMemAdvise");
-        check(cuMemAdvise(managed, bytes, CU_MEM_ADVISE_SET_ACCESSED_BY, cpu),
-              "cuMemAdvise");
-      }
-    }
-    for (int i = 0; i < kMostBig; ++i)
-      if (!big[i]) {
-        big[i] = memory;
-        return memory;
-      }
-    fprintf(stderr, "ent: the GPU: more than %d big blocks\n", kMostBig);
+    host = world->aligned;
+    bytes = world->size;
+    check(cuMemAlloc(&device, (size_t)bytes), "cuMemAlloc (the world)");
+  } else if (world->aligned != host) {
+    fprintf(stderr, "ent: the GPU: a second world (one is all it keeps)\n");
     exit(3);
   }
-  void *memory = NULL;
-  if (posix_memalign(&memory, alignment < sizeof(void *) ? sizeof(void *)
-                                                         : alignment,
-                     bytes))
-    return NULL;
-  return memory;
+  *copy = *world;
+  copy->allocated = copy->aligned = (char *)(uintptr_t)device;
 }
 
-static void release(void *memory) {
-  if (!memory)
-    return;
-  for (int i = 0; i < kMostBig; ++i)
-    if (big[i] == memory) {
-      ent_gpu_wait();
-      big[i] = NULL;
-      const char *kind = getenv("ENT_GPU_MEM");
-      if (kind && !strcmp(kind, "host"))
-        cuMemFreeHost(memory);
-      else
-        cuMemFree((CUdeviceptr)(uintptr_t)memory);
-      return;
+// Of each piece, the bytes (from its start) that the CPU has newer, and
+// those the GPU has: at most one range each, never overlapping. A piece
+// not seen yet is the CPU's, all of it: what makes the world runs there.
+typedef struct {
+  bool seen;
+  int64_t offset;
+  int64_t bytes;
+  int64_t cpuFrom, cpuTo;
+  int64_t gpuFrom, gpuTo;
+} ent_gpu_piece;
+static ent_gpu_piece *pieces;
+static int64_t pieceCount;
+
+static ent_gpu_piece *piece(int64_t id, int64_t offset) {
+  if (id >= pieceCount) {
+    int64_t count = id + 16;
+    pieces = realloc(pieces, (size_t)count * sizeof *pieces);
+    if (!pieces) {
+      fprintf(stderr, "ent: the GPU: out of memory\n");
+      exit(3);
     }
-  free(memory);
+    memset(pieces + pieceCount, 0,
+           (size_t)(count - pieceCount) * sizeof *pieces);
+    pieceCount = count;
+  }
+  ent_gpu_piece *held = &pieces[id];
+  if (!held->seen) {
+    held->seen = true;
+    held->cpuFrom = 0;
+    held->cpuTo = INT64_MAX;
+  }
+  held->offset = offset;
+  return held;
 }
 
-// The world of a C host (ent_world_create with ENT_GPU defined).
-int ent_gpu_memalign(void **out, size_t alignment, size_t bytes) {
-  *out = allocate(alignment, bytes);
-  return *out ? 0 : 1;
-}
-void ent_gpu_free(void *memory) { release(memory); }
+static int64_t least(int64_t a, int64_t b) { return a < b ? a : b; }
+static int64_t most(int64_t a, int64_t b) { return a > b ? a : b; }
 
-// What the program's own memory comes from (finalize-memref-to-llvm with
-// use-generic-functions): `main`'s world among it.
-void *_mlir_memref_to_llvm_alloc(size_t bytes) { return allocate(16, bytes); }
-void *_mlir_memref_to_llvm_aligned_alloc(size_t alignment, size_t bytes) {
-  return allocate(alignment, bytes);
+// [from, to) less [cut, end), where that leaves one range.
+static void without(int64_t *from, int64_t *to, int64_t cut, int64_t end) {
+  if (end <= *from || *to <= cut)
+    return;
+  if (cut <= *from)
+    *from = least(end, *to);
+  else
+    *to = cut;
+  if (*from >= *to)
+    *from = *to = 0;
 }
-void _mlir_memref_to_llvm_free(void *memory) { release(memory); }
+
+void ent_gpu_to_device(int64_t id, int64_t offset, int64_t size) {
+  ent_gpu_piece *held = piece(id, offset);
+  held->bytes = size;
+  int64_t from = held->cpuFrom, to = least(held->cpuTo, size);
+  held->cpuFrom = held->cpuTo = 0;
+  if (from >= to)
+    return;
+  // (From the CPU's memory as it is: the call returns when it has it.)
+  check(cuMemcpyHtoDAsync(device + (CUdeviceptr)(offset + from),
+                          host + offset + from, (size_t)(to - from), stream),
+        "a copy to the GPU");
+  pending = true;
+}
+
+static void toHost(ent_gpu_piece *held, int64_t size) {
+  int64_t from = held->gpuFrom, to = least(held->gpuTo, size);
+  held->gpuFrom = held->gpuTo = 0;
+  if (from >= to)
+    return;
+  check(cuMemcpyDtoHAsync(host + held->offset + from,
+                          device + (CUdeviceptr)(held->offset + from),
+                          (size_t)(to - from), stream),
+        "a copy from the GPU");
+  pending = true;
+  ent_gpu_wait();
+}
+
+void ent_gpu_to_host(int64_t id, int64_t offset, int64_t size) {
+  ent_gpu_piece *held = piece(id, offset);
+  held->bytes = size;
+  toHost(held, size);
+}
+
+// After a run: the bytes [from, to) of the piece are newer where it ran.
+void ent_gpu_wrote(int64_t id, int64_t onGpu, int64_t offset, int64_t from,
+                   int64_t to) {
+  ent_gpu_piece *held = piece(id, offset);
+  if (from >= to)
+    return;
+  held->bytes = most(held->bytes, to);
+  int64_t *mine = onGpu ? &held->gpuFrom : &held->cpuFrom;
+  int64_t *mineTo = onGpu ? &held->gpuTo : &held->cpuTo;
+  if (*mine >= *mineTo) {
+    *mine = from;
+    *mineTo = to;
+  } else {
+    *mine = least(*mine, from);
+    *mineTo = most(*mineTo, to);
+  }
+  if (onGpu)
+    without(&held->cpuFrom, &held->cpuTo, from, to);
+  else
+    without(&held->gpuFrom, &held->gpuTo, from, to);
+}
+
+// For a C host, between schedule calls: everything the GPU has newer to
+// the CPU, and from then on the CPU's (the host may write any of it).
+void ent_gpu_world_to_host(void) {
+  for (int64_t id = 0; id < pieceCount; ++id) {
+    if (!pieces[id].seen)
+      continue;
+    toHost(&pieces[id], pieces[id].bytes);
+    pieces[id].cpuFrom = 0;
+    pieces[id].cpuTo = INT64_MAX;
+  }
+  ent_gpu_wait();
+}
 
 // MLIR's launches. The kernels are PTX, compiled by the driver when the
 // program loads them.

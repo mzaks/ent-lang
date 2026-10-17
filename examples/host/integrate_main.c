@@ -44,6 +44,10 @@ int main(void) {
 
   for (int frame = 0; frame < FRAMES; ++frame)
     ent_frame(w, 0.5f);
+#ifdef ENT_GPU
+  // (Built for a GPU: what it has newer, here, before it is read.)
+  ent_gpu_world_to_host();
+#endif
 
   for (int i = 0; i < BODIES; ++i)
     printf("body %d: pos (%.4f, %.4f) vel (%.4f, %.4f)\n", i,

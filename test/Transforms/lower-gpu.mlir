@@ -2,10 +2,14 @@
 // RUN: ent-opt %s -split-input-file --ent-lower-to-loops="fuse-systems=1" --symbol-dce | FileCheck %s --check-prefix=CPU
 
 // With `gpu`, the queries of `gpu` systems are loops for the GPU: tiled by
-// 256 rows and mapped to blocks and threads. The CPU waits for them before
-// a run that reads what they write, and when the schedule ends; a run
-// that touches nothing of theirs (`tick`) does not wait.
-// Without `gpu` they are loops like any other, and nothing waits.
+// 256 rows and mapped to blocks and threads, over the GPU's copy of the
+// world (ent_gpu_arena). What a run touches of what the GPU keeps is
+// where it runs before it (ent_gpu_to_device, ent_gpu_to_host), and what
+// it writes is newer there after it (ent_gpu_wrote): here @fall's V.dx,
+// which @copy reads on the CPU. Runs of one kind one after another
+// (`tick` and @copy) do that once, so that fusion still sees them
+// together. The schedule waits for the GPU when it ends.
+// Without `gpu` they are loops like any other, and nothing is copied.
 
 ent.component @P (x: f32)
 ent.component @V (dx: f32)
@@ -39,22 +43,30 @@ ent.schedule @frame(%dt: f32) {
   ent.run @fall(%dt) : f32
 }
 
-// CHECK: func.func private @ent_gpu_wait()
 // CHECK-LABEL: func.func @frame
+// CHECK: %[[GPU:.*]] = call @ent_gpu_arena(%arg1)
+// CHECK: %[[DX:.*]] = memref.view %[[GPU]][%c6336{{.*}}][]
+// CHECK: call @ent_gpu_to_device(%c0_i64, %c6336_i64,
 // CHECK: %[[TILE:.*]] = arith.muli %{{.*}}, %c256
 // CHECK: scf.parallel (%{{.*}}) = (%{{.*}}) to (%{{.*}}) step (%[[TILE]])
 // CHECK: scf.parallel
+// CHECK: memref.load %[[DX]]
 // CHECK: arith.subf
 // CHECK: mapping = [#gpu.loop_dim_map<processor = thread_x
 // CHECK: mapping = [#gpu.loop_dim_map<processor = block_x
-// CHECK-NOT: ent_gpu_wait
+// CHECK: call @ent_gpu_wrote
+// CHECK: call @ent_gpu_to_host(%c0_i64{{.*}}, %c6336_i64
+// CHECK-NOT: call @ent_gpu
 // CHECK: arith.addi %{{.*}}, %c1_i64
 // CHECK: memref.store
-// CHECK-NEXT: call @ent_gpu_wait()
+// CHECK-NOT: call @ent_gpu
 // CHECK: scf.for
+// CHECK-NOT: call @ent_gpu_wrote
+// CHECK: call @ent_gpu_to_device
 // CHECK: scf.parallel
 // CHECK: arith.subf
-// CHECK: call @ent_gpu_wait()
+// CHECK: call @ent_gpu_wrote
+// CHECK-NEXT: call @ent_gpu_wait()
 // CHECK-NEXT: return
 
 // CPU-NOT: ent_gpu_wait
@@ -65,9 +77,10 @@ ent.schedule @frame(%dt: f32) {
 
 // -----
 
-// A `gpu` system whose code goes on after a query waits for it there; an
-// archetype of one entity gets a loop for the GPU too (on the CPU: a
-// guard), so that its columns stay where the GPU has them.
+// A `gpu` system that is not fused: its function has the GPU's copy of
+// the world for its loop, and the code around its `for` (uniques) needs
+// no copy. An archetype of one entity gets a loop for the GPU too (a
+// guard on the CPU), so that its columns stay where the GPU has them.
 
 ent.component @P (x: f32)
 ent.resource @Clock (frame: i64)
@@ -89,14 +102,19 @@ ent.schedule @frame() {
 }
 
 // CHECK-LABEL: func.func private @move
+// CHECK: %[[GPU:.*]] = call @ent_gpu_arena(%arg0)
+// CHECK: memref.view %[[GPU]]
 // CHECK: scf.parallel
 // CHECK: scf.parallel
 // CHECK: arith.addf
 // CHECK: processor = block_x
-// CHECK-NEXT: call @ent_gpu_wait()
+// CHECK-NOT: call @ent_gpu
 // CHECK: memref.store
+// CHECK: return
 // CHECK-LABEL: func.func @frame
+// CHECK: call @ent_gpu_to_device
 // CHECK-NEXT: call @move
+// CHECK: call @ent_gpu_wrote
 // CHECK-NEXT: call @ent_gpu_wait()
 // CHECK-NEXT: return
 
@@ -140,6 +158,7 @@ ent.schedule @frame() {
 }
 
 // CHECK-LABEL: func.func @frame
+// CHECK: call @ent_gpu_to_device
 // CHECK: scf.parallel
 // CHECK: scf.parallel
 // CHECK: arith.addf
@@ -147,11 +166,13 @@ ent.schedule @frame() {
 // CHECK-NEXT: memref.load
 // CHECK-NEXT: arith.mulf
 // CHECK: processor = block_x
-// CHECK-NEXT: call @ent_gpu_wait()
+// CHECK: call @ent_gpu_wrote
+// CHECK: call @ent_gpu_to_host
 // CHECK: scf.for
 // CHECK: arith.subf
-// CHECK-NOT: ent_gpu_wait
-// CHECK: return
+// CHECK: call @ent_gpu_wrote
+// CHECK-NEXT: call @ent_gpu_wait()
+// CHECK-NEXT: return
 
 // One loop for all three on the CPU.
 // CPU-LABEL: func.func @frame
@@ -161,3 +182,51 @@ ent.schedule @frame() {
 // CPU: arith.subf
 // CPU-NOT: scf.for
 // CPU: return
+
+// -----
+
+// A CPU run that only gives the archetype rows marks only the new rows
+// newer on the CPU (the bytes before and after it), and copies nothing
+// before it; one under a condition copies only where it holds.
+
+ent.component @P (x: f32)
+ent.resource @Show (on: i1)
+ent.archetype @A (@P) capacity 1000
+
+ent.system @move() gpu {
+  ent.query (%p: !ent.ref<@P, mut>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
+    %n = arith.addf %x, %x : f32
+    ent.set %p "x", %n : !ent.ref<@P, mut>, f32
+  }
+}
+ent.system @born() {
+  %zero = arith.constant 0.0 : f32
+  ent.spawn @A(%zero) : f32
+}
+ent.system @look() {
+  ent.query (%p: !ent.ref<@P>) {
+    %x = ent.get %p "x" : !ent.ref<@P> -> f32
+  }
+}
+ent.schedule @frame() {
+  ent.run @move()
+  ent.run @born()
+  ent.run @look() if {
+    %c = ent.read @Show "on" : i1
+    ent.yield %c : i1
+  }
+}
+
+// CHECK-LABEL: func.func @frame
+// CHECK: scf.parallel
+// CHECK: call @ent_gpu_wrote
+// CHECK: %[[BEFORE:.*]] = arith.muli
+// CHECK-NOT: call @ent_gpu_to_host
+// CHECK: call @born
+// CHECK: %[[AFTER:.*]] = arith.muli
+// CHECK-NEXT: call @ent_gpu_wrote(%c0_i64{{.*}}, %c0_i64{{.*}}, %{{.*}}, %[[BEFORE]], %[[AFTER]])
+// CHECK: scf.if
+// CHECK-NEXT: arith.constant
+// CHECK: func.call @ent_gpu_to_host
+// CHECK: call @ent_gpu_wait()

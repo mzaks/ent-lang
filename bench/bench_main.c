@@ -83,6 +83,10 @@ int main(int argc, char **argv) {
 
   for (int f = 0; f < VALIDATION_FRAMES; ++f)
     FRAME();
+#ifdef ENT_GPU
+  // (Built for a GPU: what it has newer, here, before it is read.)
+  ent_gpu_world_to_host();
+#endif
   double checksum = 0;
   for (int k = 0; k < NUM_COLUMNS; ++k)
     for (int64_t i = 0; i < n; ++i)

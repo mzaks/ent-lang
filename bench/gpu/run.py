@@ -13,17 +13,10 @@ Variants, every one of which must give the same checksum:
              waits for it around every launch; the world in managed memory
              (bench_main.c built with posix_memalign renamed)
   gpu        G1 (docs/gpu.md): examples/integrate.ent, whose systems are
-             `gpu`, built as `ent build --gpu` builds a program: one stream,
-             the CPU waiting where the compiler says (here: when the frame
-             ends); devices/gpu.c, the host
-             built with ENT_GPU
-  gpu-host   gpu with the world in pinned host memory (ENT_GPU_MEM=host),
-             which the GPU reads and writes over PCIe every frame
-
-Needs an NVIDIA GPU, the CUDA toolkit (CUDA_PATH, else /opt/cuda) and LLVM
-with MLIR (LLVM_PREFIX, else build/toolchain's environment). Binaries are
-linked by the system's clang (ENT_GPU_CC): the environment's own sysroot
-has an older C library than the system's libcuda needs.
+             `gpu`, built as `ent build --gpu` builds a program: the world
+             copied to the GPU once and kept there (the CPU touches none of
+             what the frame's kernels do), one stream, the CPU waiting when
+             the frame ends; devices/gpu.c, the host built with ENT_GPU
 """
 
 import argparse
@@ -60,7 +53,7 @@ TO_GPU = ["--scf-parallel-loop-tiling=parallel-loop-tile-sizes=256 "
           "--gpu-map-parallel-loops", "--convert-parallel-loops-to-gpu",
           "--gpu-kernel-outlining", "--convert-scf-to-cf"]
 OPENMP = [f"-L{LLVM}/lib", "-lomp", f"-Wl,-rpath,{LLVM}/lib"]
-VARIANTS = ["fused", "fused-omp", "g0", "gpu", "gpu-host"]
+VARIANTS = ["fused", "fused-omp", "g0", "gpu"]
 
 
 def run(cmd, **kwargs):
@@ -116,7 +109,6 @@ def build(chip):
                    "--lower-affine", "--convert-scf-to-cf",
                    f"--nvvm-attach-target=chip={chip} features=+ptx80",
                    "--convert-gpu-to-nvvm", "--reconcile-unrealized-casts",
-                   "--finalize-memref-to-llvm=use-generic-functions=1",
                    "--convert-to-llvm", "--gpu-to-llvm",
                    "--reconcile-unrealized-casts",
                    "--gpu-module-to-binary=format=isa"],
@@ -129,10 +121,7 @@ def build(chip):
 
 def measure(variant, n, threads, target_ms):
     exe = os.path.join(OUT, "gpu" if variant.startswith("gpu") else variant)
-    # (g0's runtime takes ENT_GPU_MEM too; it is not set for it.)
     env = dict(os.environ, OMP_NUM_THREADS=str(threads))
-    if variant == "gpu-host":
-        env["ENT_GPU_MEM"] = "host"
     out = run([exe, str(n), "3", str(target_ms)], env=env,
               capture_output=True, text=True).stdout
     m = re.search(r"ns_per_frame=([\d.]+) checksum=(\S+)", out)

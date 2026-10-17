@@ -45,11 +45,12 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
     - With `gpu`, the queries of `gpu` systems are for the GPU
       (docs/gpu.md): each becomes an `scf.parallel` whatever its count,
       tiled by 256 and mapped to blocks and threads, for
-      `--convert-parallel-loops-to-gpu`; fusion keeps them apart from
-      the CPU's loops. The CPU waits for them (a call of `ent_gpu_wait`)
-      before a run that reads what they write or writes what they read or
-      write, after one in a system whose code goes on after it, and when
-      a schedule ends.
+      `--convert-parallel-loops-to-gpu`, over the GPU's copy of the
+      world (`ent_gpu_arena`); fusion keeps them apart from the CPU's
+      loops. What a run touches of the pieces both keep is copied to
+      where it runs before it (`ent_gpu_to_device`, `ent_gpu_to_host`),
+      what it writes is newer there after it (`ent_gpu_wrote`), and a
+      schedule waits for the GPU when it ends (devices/gpu.c).
     - Components and archetypes are erased.
   }];
   let options = [

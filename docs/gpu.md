@@ -1,8 +1,9 @@
 # Systems on the GPU: design of G1
 
-Status: steps 1 to 4 done (the marker and its checks; the lowering,
-without the hints; the runtime and `tools/ent --gpu`; measured). What the
-measurements say is next is in "After step 4" at the end. G0 (`bench/gpu/`, results in
+Status: steps 1 to 4 done (the marker and its checks; the lowering; the
+runtime and `tools/ent --gpu`; measured), and after them the world kept
+on the GPU by copies the compiler places instead of managed memory (see
+Residency, and "After step 4" at the end for why). G0 (`bench/gpu/`, results in
 `bench/gpu/RESULTS.md`) showed that ent-opt's entity-parallel loops become
 correct kernels through upstream MLIR passes alone, that a frame of 1e7
 entities takes 3.75 ms with the world on the GPU against 14.5 ms on one
@@ -98,8 +99,12 @@ Errors, each naming the construct and what it waits for:
 | a table (`table`), a text (`text[N]`, `text`) | not on the GPU yet | later |
 | a fn given the entities of a component | it reads other entities | G2, with lookups |
 | `extern proc` | the outside world | never |
+| writing a component a reactive query reacts to | its events (stamps) are kept on the CPU | later |
 
-An extern system cannot be `gpu`.
+An extern system cannot be `gpu`. The code of a `gpu system` around its
+`for`s reads and writes uniques and computes; what it would do to
+entities or buffers (spawn, `Marks = []`, a lookup) goes in a system of
+its own, so that every run touches the world's columns from one side.
 
 ## Lowering
 
@@ -128,73 +133,64 @@ apart (G0's checksums agree). The GPU test mode (below) keeps it so.
 
 ## Residency
 
-The world's arena is allocated as managed memory (`cuMemAllocManaged`)
-in a `--gpu` build: one address for the CPU and the GPU, the same offsets,
-so kernels use the views the lowering already makes, and the C host,
-extern systems, saving and loading read and write the world as they do
-now. The driver moves pages to whichever side touches them. That makes
-correctness depend on one thing only, waiting; where the pages are is
-then a matter of speed, which the compiler helps with hints.
+The GPU keeps a copy of the world: the CPU's layout, the same offsets, at
+another address (`ent_gpu_arena`, one allocation of the world's size).
+The GPU's loops address that copy; counts and uniques stay the CPU's,
+which a kernel is given as its loop's bounds and arguments.
 
-**Waiting.** Kernels are launched without waiting, one after another on
-one stream that belongs to the world. The CPU waits for the stream
-(`ent_gpu_wait`) before a run that conflicts with a GPU run since the
-last wait: it reads a column a kernel writes, or writes one a kernel reads
-or writes. "Conflicts" is the relation `--ent-schedule` already uses to
-form stages (`SystemAccess::conflictWith`, `include/Ent/Access.h`), so a
-CPU run that touches nothing the GPU touches (`tick`, writing `Clock`)
-runs while the kernels do. Also:
+A **piece** is what both keep of the world: a column of an archetype that
+a `gpu` system touches (a field, a presence byte, the ids), a buffer's
+field or its count. Of each piece the runtime keeps which bytes the CPU
+has newer and which the GPU does (one range each). In a schedule the
+compiler places, from each run's access (the reads and writes
+`--ent-schedule` forms stages by):
 
-- an extern system that declares nothing conflicts with everything, as it
-  does for stages: it waits, which covers `save_world` and `load_world`;
-- a run's `run_if` reads only uniques, which no kernel writes in G1;
-- a schedule waits before it returns where a GPU run since the last wait
-  may still be running (H1: a C host may read the world between calls).
-  One called by `main` would not need to, since `main` reads only
-  uniques, and frames would follow each other on the stream; built: it
-  waits too, which costs one wait a frame;
-- in a `gpu` system, the CPU waits after a query where the system's own
-  code goes on after it, or where the query is in a loop or a branch of
-  the system (its code before a query runs before the kernel starts).
+- before a run, for the pieces it touches, `ent_gpu_to_device` (a GPU
+  run) or `ent_gpu_to_host` (a CPU run): copied where the other side has
+  them newer, as many bytes as are in use (rows times the element);
+- after it, `ent_gpu_wrote` for the pieces it writes: newer where it ran.
+  A CPU run that only gives an archetype rows (spawns, and does nothing
+  else to its rows) marks only the new rows, so the GPU gets those and
+  not the column;
+- runs of one kind one after another do that once, around all of them,
+  so that fusion still sees them together; a stage of both kinds does
+  both; a run under a condition copies only where the condition holds;
+- an extern system that declares nothing touches and writes everything;
+  a proc never gets the world, so a system that calls one is not opaque
+  here as it is to stages;
+- when the schedule ends the CPU waits for the GPU (`ent_gpu_wait`), so
+  that a frame is done when it returns.
 
-Whether there is anything to wait for is a flag in the world's host part,
-so a wait the compiler cannot rule out costs a branch when there is none.
+A piece the CPU only reads is copied to it once and not back; a piece the
+GPU alone goes through is never copied after the first frame. A C host
+that reads or writes the world between schedule calls calls
+`ent_gpu_world_to_host()` first (declared by the header with `ENT_GPU`):
+everything the GPU has newer comes back, and from then on all of it is
+the CPU's, copied to the GPU again where a GPU run needs it. (So H1
+holds with that call.)
 
-**Hints.** Before a GPU run, the columns it touches are prefetched to the
-GPU (`cuMemPrefetchAsync`, the rows in use); before a CPU run touching a
-column a GPU run touched, to the CPU. A byte per column in the world's
-host part says where it was last sent, so a column already there is not
-sent again. A spawn on the CPU then costs the pages of the new rows, not
-the column.
+Where the CPU waits: only where it copies from the GPU, and when a
+schedule ends. A copy to the GPU is from the CPU's memory as it is
+(pageable): the driver has taken the bytes when the call returns, so the
+CPU may write them right after.
 
-**Layout.** Built in step 2 and taken out again after step 4: the
-columns of archetypes a `gpu` system visits started at 64 KB boundaries,
-so that no piece the driver moves held both a column's first rows and
-what the CPU writes every frame (counts, uniques). It measured nothing
-(`bench/gpu/RESULTS.md`, 2026-10-17); the layout is the CPU's again.
-
-A buffer a GPU system reads is a column like any other: its rows in use
-are prefetched and its writes on the CPU send it back, by the same bytes.
-
-Later, where managed memory is slow or missing (Windows, some AMD
-parts), the same waits and hints can drive a second arena on the GPU with
-explicit copies instead; G1 does not need it.
+Before this the world was in managed memory and the driver moved pages
+to whichever side touched them; that was right only while the CPU kept
+off what the GPU goes through (see "After step 4").
 
 ## Runtime: `devices/gpu.c`
 
 The functions MLIR's lowering calls (`mgpuModuleLoadJIT`,
-`mgpuModuleGetFunction`, `mgpuLaunchKernel`, `mgpuStream*`, unload), as
-in G0's `bench/gpu/gpu_runtime.c`, and ent's own: `ent_gpu_alloc` (the
-arena), `ent_gpu_wait`, `ent_gpu_prefetch`. One stream per world:
-`mgpuStreamCreate` gives the world's, and destroy and synchronize after
-a launch are dropped (`gpu-async-region`, or ent's own launch op if that
-is simpler), since waiting is the compiler's (above). MLIR's ROCm
-wrappers have the same `mgpu*` names, so another vendor is another file.
+`mgpuModuleGetFunction`, `mgpuLaunchKernel`, `mgpuStream*`, unload), and
+ent's own: `ent_gpu_arena`, `ent_gpu_to_device`, `ent_gpu_to_host`,
+`ent_gpu_wrote`, `ent_gpu_wait`, `ent_gpu_world_to_host`. One stream:
+`mgpuStreamCreate` gives it to every launch, and the synchronize and
+destroy the lowering calls after a launch do nothing, since waiting is the
+compiler's (above). One world. MLIR's ROCm wrappers have the same `mgpu*`
+names, so another vendor is another file.
 
 It is a device in the sense of `devices/`: C, linked by `tools/ent` with
-`-lcuda` in a `--gpu` build, not imported by programs. The generated
-header's `ent_world_create` calls `ent_gpu_alloc` instead of
-`posix_memalign` when the world is built for a GPU.
+`-lcuda` in a `--gpu` build, not imported by programs.
 
 ## Tools and tests
 
@@ -241,7 +237,8 @@ header's `ent_world_create` calls `ent_gpu_alloc` instead of
      program's own memory comes from it through MLIR's generic
      allocation functions (`finalize-memref-to-llvm` with
      `use-generic-functions`), a C host's world through the header with
-     `ENT_GPU` defined.
+     `ENT_GPU` defined. (All of that went with managed memory, after step
+     4: see Residency.)
    - `ent-opt` registers every translation to LLVM IR, so it makes the
      kernels into PTX itself (`gpu-module-to-binary`); `tools/ent --gpu`
      runs the passes of `gpu_passes` around the CPU's, the columns
@@ -289,7 +286,14 @@ Measured 2026-10-17 (`bench/gpu/RESULTS.md`):
 
 So the hints are not worth building. Instead, in order:
 
-1. **Copies the compiler places** (instead of managed memory): the
+1. **Copies the compiler places** (instead of managed memory), built
+   (see Residency): integrate's floor 8 us a frame (11 with managed
+   memory), 3.65 ms at 1e7; the CPU spawning a thousand a frame into a
+   million the GPU moves 0.04 ms a frame (managed 1.2, the CPU alone
+   0.29), reading a column the GPU writes 0.98 ms (managed 2.8, the CPU
+   alone 0.78, its adding up included). The CPU's world pinned made the
+   last 0.99 instead of 1.27 in one run, at the price of locking all of
+   it in memory: not done. As planned: the
    columns `gpu` systems touch get a second home on the GPU, and the
    waits of step 2 become "copy what the CPU needs, of the rows in use,
    to the CPU" and "copy what the CPU wrote back before the next GPU

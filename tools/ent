@@ -50,7 +50,8 @@ otherwise.
 With --gpu the `for`s of `gpu system`s run on the machine's NVIDIA GPU
 (docs/gpu.md): made into kernels for it (its kind from nvidia-smi, or
 ENT_GPU_CHIP, `sm_89` say), which its driver compiles when the program
-starts, with the world where both the CPU and the GPU reach it. It needs
+starts, with a copy of the world on the GPU, the copies between the two
+placed by the compiler where a run needs what the other side wrote. It needs
 the CUDA driver (libcuda) where the program is built and where it runs,
 and cuda.h (CUDA_PATH, else /opt/cuda) where it is built. Without --gpu
 those systems run on the CPU, with the same results.
@@ -365,10 +366,7 @@ def gpu_passes(chip):
     before = ["--convert-parallel-loops-to-gpu", "--gpu-kernel-outlining"]
     after = ["--lower-affine", "--convert-scf-to-cf",
              f"--nvvm-attach-target=chip={chip} features={features}",
-             "--convert-gpu-to-nvvm", "--reconcile-unrealized-casts",
-             # (The program's memory, the world's with it, from
-             # devices/gpu.c: see _mlir_memref_to_llvm_alloc there.)
-             "--finalize-memref-to-llvm=use-generic-functions=1"]
+             "--convert-gpu-to-nvvm", "--reconcile-unrealized-casts"]
     finish = ["--gpu-to-llvm", "--reconcile-unrealized-casts",
               "--gpu-module-to-binary=format=isa"]
     return before, after, finish

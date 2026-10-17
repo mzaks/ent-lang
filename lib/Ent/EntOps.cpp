@@ -983,9 +983,29 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
   return std::nullopt;
 }
 
-/// A `gpu` system's queries: each must be one the GPU can run.
+/// A `gpu` system's queries: each must be one the GPU can run. Its code
+/// outside them reads and writes uniques and computes: what it does to
+/// entities and buffers is for a system of its own, so that every run
+/// touches the columns from one place, the CPU or the GPU.
 static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
                                       SystemOp system) {
+  WalkResult around = system.getBody().walk<WalkOrder::PreOrder>(
+      [&](Operation *op) {
+        if (isa<QueryOp>(op))
+          return WalkResult::skip();
+        if (isa<SpawnOp, DespawnOp, LookupOp, ApplyOp, ConnectOp,
+                DisconnectOp, AppendOp, ClearOp, BufferSetOp, BufferFillOp,
+                BufferAtOp, BufferLenOp, BufferOfOp, TableAtOp>(op)) {
+          op->emitOpError("is in a 'gpu' system, outside its 'for's, where "
+                          "its code only reads and writes uniques: what it "
+                          "does to entities and buffers goes in a system of "
+                          "its own");
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+  if (around.wasInterrupted())
+    return failure();
   WalkResult result = system.getBody().walk([&](QueryOp query) {
     auto fail = [&](Operation *at, const Twine &why) {
       at->emitOpError("cannot run on the GPU, as its system is 'gpu': ")
