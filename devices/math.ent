@@ -19,9 +19,9 @@
 // bits of floats (`bits_of`, `float_of`): every machine, and the GPU
 // (docs/gpu.md), gives the same results to the bit. They follow Sun's
 // fdlibm (by way of FreeBSD's msun and Mojo's standard library), within
-// an ulp of the true value; `pow64` within a few where the result is near
-// the ends of the range. The f32 ones have shorter polynomials of their
-// own, worked out in f64 and rounded once. What is left of the machine's
+// an ulp of the true value; `pow` and `pow64` Arm's optimized-routines
+// (MIT), with tables. The f32 ones have shorter polynomials of their own,
+// worked out in f64 and rounded once. What is left of the machine's
 // math library (asin, acos) is implemented in devices/math.c, and runs on
 // the CPU only.
 
@@ -216,17 +216,218 @@ fn log264(x: f64) -> f64 {
   }
 }
 
-// The natural logarithm of x above 0 and finite, as hi + lo: log(1 + f)
-// is 2s + s * R(s * s), with s carried in two floats.
-fn log64_two(x: f64) -> (f64, f64) {
-  let (k, f) = log64_parts(x)
-  let (dh, dl) = two_sum64(2.0, f)
-  let sh = f / dh
-  let (p, pe) = two_prod64(sh, dh)
-  let sl = (((f - p) - pe) - sh * dl) / dh
-  let (a, ae) = two_sum64(k * 6.93147180369123816490e-01, 2.0 * sh)
-  let lo = ae + (k * 1.90821492927058770002e-10 + (2.0 * sl + sh * log64_kernel(sh)))
-  two_sum64(a, lo)
+
+// log(c) for the 128 c near which a fraction from 0x1.69555p-1 to
+// 0x1.69555p0 falls: 1/c, and log(c) as hi + lo (Arm's pow_log_data.c,
+// optimized-routines, MIT).
+table pow_log_rows { invc: f64, logc: f64, logctail: f64 } = [
+  { invc: 1.4140625, logc: -0.3464667673462145, logctail: 5.929407345889625e-15 },
+  { invc: 1.40625, logc: -0.34092658697056777, logctail: -2.544157440035963e-14 },
+  { invc: 1.3984375, logc: -0.3353555419211034, logctail: -3.443525940775045e-14 },
+  { invc: 1.390625, logc: -0.3297532863724655, logctail: -2.500123826022799e-15 },
+  { invc: 1.3828125, logc: -0.32411946865420305, logctail: -8.929337133850617e-15 },
+  { invc: 1.375, logc: -0.31845373111855224, logctail: 1.7625431312172662e-14 },
+  { invc: 1.3671875, logc: -0.31275571000389846, logctail: 1.5688303180062087e-15 },
+  { invc: 1.359375, logc: -0.3070250352949415, logctail: 2.9655274673691784e-14 },
+  { invc: 1.3515625, logc: -0.3012613305781997, logctail: 3.7923164802093147e-14 },
+  { invc: 1.34375, logc: -0.2954642128938758, logctail: 3.993416384387844e-14 },
+  { invc: 1.3359375, logc: -0.28963329258306203, logctail: 1.9352855826489123e-14 },
+  { invc: 1.3359375, logc: -0.28963329258306203, logctail: 1.9352855826489123e-14 },
+  { invc: 1.328125, logc: -0.28376817313062475, logctail: -1.9852665484979036e-14 },
+  { invc: 1.3203125, logc: -0.27786845100342816, logctail: -2.814323765595281e-14 },
+  { invc: 1.3125, logc: -0.2719337154836694, logctail: 2.7643769993528702e-14 },
+  { invc: 1.3046875, logc: -0.2659635484970977, logctail: -4.025092402293806e-14 },
+  { invc: 1.296875, logc: -0.25995752443691345, logctail: -1.2621729398885316e-14 },
+  { invc: 1.2890625, logc: -0.25391520998095984, logctail: -3.600176732637335e-15 },
+  { invc: 1.2890625, logc: -0.25391520998095984, logctail: -3.600176732637335e-15 },
+  { invc: 1.28125, logc: -0.2478361639045943, logctail: 1.3029797173308663e-14 },
+  { invc: 1.2734375, logc: -0.2417199368871934, logctail: 4.8230289429940886e-14 },
+  { invc: 1.265625, logc: -0.23556607131274632, logctail: -2.0592242769647135e-14 },
+  { invc: 1.2578125, logc: -0.22937410106487732, logctail: 3.149265065191484e-14 },
+  { invc: 1.25, logc: -0.22314355131425145, logctail: 4.169796584527195e-14 },
+  { invc: 1.25, logc: -0.22314355131425145, logctail: 4.169796584527195e-14 },
+  { invc: 1.2421875, logc: -0.21687393830063684, logctail: 2.2477465222466186e-14 },
+  { invc: 1.234375, logc: -0.21056476910735, logctail: 3.6507188831790577e-16 },
+  { invc: 1.2265625, logc: -0.2042155414286526, logctail: -3.827767260205414e-14 },
+  { invc: 1.2265625, logc: -0.2042155414286526, logctail: -3.827767260205414e-14 },
+  { invc: 1.21875, logc: -0.19782574332987224, logctail: -4.7641388950792196e-14 },
+  { invc: 1.2109375, logc: -0.19139485299967873, logctail: 4.9278276214647115e-14 },
+  { invc: 1.203125, logc: -0.18492233849406148, logctail: 4.9485167661250996e-14 },
+  { invc: 1.203125, logc: -0.18492233849406148, logctail: 4.9485167661250996e-14 },
+  { invc: 1.1953125, logc: -0.1784076574728033, logctail: -1.5003333854266542e-14 },
+  { invc: 1.1875, logc: -0.17185025692663203, logctail: -2.7194441649495324e-14 },
+  { invc: 1.1875, logc: -0.17185025692663203, logctail: -2.7194441649495324e-14 },
+  { invc: 1.1796875, logc: -0.1652495728952772, logctail: -2.99659267292569e-14 },
+  { invc: 1.171875, logc: -0.15860503017665906, logctail: 2.0472357800461955e-14 },
+  { invc: 1.171875, logc: -0.15860503017665906, logctail: 2.0472357800461955e-14 },
+  { invc: 1.1640625, logc: -0.15191604202584585, logctail: 3.879296723063646e-15 },
+  { invc: 1.15625, logc: -0.1451820098444614, logctail: -3.6506824353335045e-14 },
+  { invc: 1.1484375, logc: -0.13840232285906495, logctail: -5.4183331379008994e-14 },
+  { invc: 1.1484375, logc: -0.13840232285906495, logctail: -5.4183331379008994e-14 },
+  { invc: 1.140625, logc: -0.131576357788731, logctail: 1.1729485484531301e-14 },
+  { invc: 1.140625, logc: -0.131576357788731, logctail: 1.1729485484531301e-14 },
+  { invc: 1.1328125, logc: -0.12470347850091912, logctail: -3.811763084710266e-14 },
+  { invc: 1.125, logc: -0.11778303565643, logctail: 4.654729747598445e-14 },
+  { invc: 1.125, logc: -0.11778303565643, logctail: 4.654729747598445e-14 },
+  { invc: 1.1171875, logc: -0.11081436634026431, logctail: -2.5799991283069902e-14 },
+  { invc: 1.109375, logc: -0.10379679368168127, logctail: 3.7700471749674615e-14 },
+  { invc: 1.109375, logc: -0.10379679368168127, logctail: 3.7700471749674615e-14 },
+  { invc: 1.1015625, logc: -0.09672962645856842, logctail: 1.7306161136093256e-14 },
+  { invc: 1.1015625, logc: -0.09672962645856842, logctail: 1.7306161136093256e-14 },
+  { invc: 1.09375, logc: -0.089612158689647, logctail: -4.012913552726574e-14 },
+  { invc: 1.0859375, logc: -0.08244366921110213, logctail: 2.7541708360737882e-14 },
+  { invc: 1.0859375, logc: -0.08244366921110213, logctail: 2.7541708360737882e-14 },
+  { invc: 1.078125, logc: -0.07522342123763792, logctail: 5.0396178134370583e-14 },
+  { invc: 1.078125, logc: -0.07522342123763792, logctail: 5.0396178134370583e-14 },
+  { invc: 1.0703125, logc: -0.06795066190852594, logctail: 1.8195060030168815e-14 },
+  { invc: 1.0625, logc: -0.06062462181648698, logctail: 5.213620639136504e-14 },
+  { invc: 1.0625, logc: -0.06062462181648698, logctail: 5.213620639136504e-14 },
+  { invc: 1.0546875, logc: -0.053244514518837605, logctail: 2.532168943117445e-14 },
+  { invc: 1.0546875, logc: -0.053244514518837605, logctail: 2.532168943117445e-14 },
+  { invc: 1.046875, logc: -0.045809536031242715, logctail: -5.148849572685811e-14 },
+  { invc: 1.046875, logc: -0.045809536031242715, logctail: -5.148849572685811e-14 },
+  { invc: 1.0390625, logc: -0.038318864302141264, logctail: 4.6652946995830086e-15 },
+  { invc: 1.0390625, logc: -0.038318864302141264, logctail: 4.6652946995830086e-15 },
+  { invc: 1.03125, logc: -0.03077165866670839, logctail: -4.529814257790929e-14 },
+  { invc: 1.03125, logc: -0.03077165866670839, logctail: -4.529814257790929e-14 },
+  { invc: 1.0234375, logc: -0.023167059281490765, logctail: -4.361324067851568e-14 },
+  { invc: 1.015625, logc: -0.015504186535963527, logctail: -1.7274567499706107e-15 },
+  { invc: 1.015625, logc: -0.015504186535963527, logctail: -1.7274567499706107e-15 },
+  { invc: 1.0078125, logc: -0.0077821404420319595, logctail: -2.298941004620351e-14 },
+  { invc: 1.0078125, logc: -0.0077821404420319595, logctail: -2.298941004620351e-14 },
+  { invc: 1.0, logc: 0.0, logctail: 0.0 },
+  { invc: 1.0, logc: 0.0, logctail: 0.0 },
+  { invc: 0.9921875, logc: 0.007843177461040796, logctail: -1.4902732911301337e-14 },
+  { invc: 0.984375, logc: 0.01574835696817445, logctail: -3.527980389655325e-14 },
+  { invc: 0.9765625, logc: 0.023716526617363343, logctail: -4.730054772033249e-14 },
+  { invc: 0.96875, logc: 0.03174869831457272, logctail: 7.580310369375161e-15 },
+  { invc: 0.9609375, logc: 0.039845908547249564, logctail: -4.9893776716773285e-14 },
+  { invc: 0.953125, logc: 0.048009219186383234, logctail: -2.262629393030674e-14 },
+  { invc: 0.9453125, logc: 0.056239718322899535, logctail: -2.345674491018699e-14 },
+  { invc: 0.94140625, logc: 0.06038051098892083, logctail: -1.3352588834854848e-14 },
+  { invc: 0.93359375, logc: 0.06871389254808946, logctail: -3.765296820388875e-14 },
+  { invc: 0.92578125, logc: 0.07711730334438016, logctail: 5.1128335719851986e-14 },
+  { invc: 0.91796875, logc: 0.08559193033545398, logctail: -5.046674438470119e-14 },
+  { invc: 0.9140625, logc: 0.08985632912185793, logctail: 3.1218748807418837e-15 },
+  { invc: 0.90625, logc: 0.09844007281321865, logctail: 3.3871241029241416e-14 },
+  { invc: 0.8984375, logc: 0.10709813555638448, logctail: -1.7376727386423858e-14 },
+  { invc: 0.89453125, logc: 0.11145544092528326, logctail: 3.957125899799804e-14 },
+  { invc: 0.88671875, logc: 0.12022742699821265, logctail: -5.2849453521890294e-14 },
+  { invc: 0.8828125, logc: 0.12464244520731427, logctail: -3.767012502308738e-14 },
+  { invc: 0.875, logc: 0.13353139262449076, logctail: 3.1859736349078334e-14 },
+  { invc: 0.87109375, logc: 0.13800567301939282, logctail: 5.0900642926060466e-14 },
+  { invc: 0.86328125, logc: 0.14701474296180095, logctail: 8.710783796122478e-15 },
+  { invc: 0.859375, logc: 0.15154989812720032, logctail: 6.157896229122976e-16 },
+  { invc: 0.8515625, logc: 0.16068238169043525, logctail: 3.821577743916796e-14 },
+  { invc: 0.84765625, logc: 0.16528009093906348, logctail: 3.9440046718453496e-14 },
+  { invc: 0.83984375, logc: 0.17453941635187675, logctail: 2.2924522154618074e-14 },
+  { invc: 0.8359375, logc: 0.17920142945774842, logctail: -3.742530094732263e-14 },
+  { invc: 0.83203125, logc: 0.18388527877016259, logctail: -2.5223102140407338e-14 },
+  { invc: 0.82421875, logc: 0.1933193110035063, logctail: -1.0320443688698849e-14 },
+  { invc: 0.8203125, logc: 0.19806991376208316, logctail: 1.0634128304268335e-14 },
+  { invc: 0.8125, logc: 0.20763936477828793, logctail: -4.3425422595242564e-14 },
+  { invc: 0.80859375, logc: 0.21245865121420593, logctail: -1.2527395755711364e-14 },
+  { invc: 0.8046875, logc: 0.21730127569003344, logctail: -5.204008743405884e-14 },
+  { invc: 0.80078125, logc: 0.22216746534115828, logctail: -3.979844515951702e-15 },
+  { invc: 0.79296875, logc: 0.2319714654378231, logctail: -4.7955860343296286e-14 },
+  { invc: 0.7890625, logc: 0.2369097470783572, logctail: 5.015686013791602e-16 },
+  { invc: 0.78515625, logc: 0.24187253642048745, logctail: -7.252318953240293e-16 },
+  { invc: 0.78125, logc: 0.2468600779315011, logctail: 2.4688324156011588e-14 },
+  { invc: 0.7734375, logc: 0.2569104137850218, logctail: 5.465121253624792e-15 },
+  { invc: 0.76953125, logc: 0.26197371574153294, logctail: 4.102651071698446e-14 },
+  { invc: 0.765625, logc: 0.2670627852490952, logctail: -4.996736502345936e-14 },
+  { invc: 0.76171875, logc: 0.27217788591576664, logctail: 4.903580708156347e-14 },
+  { invc: 0.7578125, logc: 0.27731928541618345, logctail: 5.089628039500759e-14 },
+  { invc: 0.75390625, logc: 0.28248725557466514, logctail: 1.1782016386565151e-14 },
+  { invc: 0.74609375, logc: 0.29290401643288533, logctail: 4.727452940514406e-14 },
+  { invc: 0.7421875, logc: 0.29815337231912054, logctail: -4.4204083338755686e-14 },
+  { invc: 0.73828125, logc: 0.3034304294199046, logctail: 1.548345993498083e-14 },
+  { invc: 0.734375, logc: 0.30873548164959175, logctail: 2.1522127491642888e-14 },
+  { invc: 0.73046875, logc: 0.3140688276249648, logctail: 1.1054030169005386e-14 },
+  { invc: 0.7265625, logc: 0.31943077076641657, logctail: -5.534326352070679e-14 },
+  { invc: 0.72265625, logc: 0.3248216194012912, logctail: -5.351646604259541e-14 },
+  { invc: 0.71875, logc: 0.33024168687052224, logctail: 5.4612144489920215e-14 },
+  { invc: 0.71484375, logc: 0.3356912916381134, logctail: 2.8136969901227338e-14 },
+  { invc: 0.7109375, logc: 0.3411707574027787, logctail: -1.156568624616423e-14 }
+]
+// 2^(k/128) as its bits less k/128 in the exponent and a tail (Arm's
+// exp_data.c).
+table exp_tail: u64 = [0x0, 0x3c9b3b4f1a88bf6e, 0xbc7160139cd8dc5d, 0xbc905e7a108766d1, 0x3c8cd2523567f613, 0xbc8bce8023f98efa, 0x3c60f74e61e6c861, 0x3c90a3e45b33d399, 0x3c979aa65d837b6d, 0x3c8eb51a92fdeffc, 0x3c3ebe3d702f9cd1, 0xbc6a033489906e0b, 0xbc9556522a2fbd0e, 0xbc5080ef8c4eea55, 0xbc91c923b9d5f416, 0x3c80d3e3e95c55af, 0xbc801b15eaa59348, 0xbc8f1ff055de323d, 0x3c8b898c3f1353bf, 0xbc96d99c7611eb26, 0x3c9aecf73e3a2f60, 0xbc8fe782cb86389d, 0x3c8a6f4144a6c38d, 0x3c807a05b0e4047d, 0x3c968efde3a8a894, 0x3c875e18f274487d, 0x3c80472b981fe7f2, 0xbc96b87b3f71085e, 0x3c82f7e16d09ab31, 0xbc3d219b1a6fbffa, 0x3c8b3782720c0ab4, 0x3c6e149289cecb8f, 0x3c834d754db0abb6, 0x3c864201e2ac744c, 0x3c8fdd395dd3f84a, 0xbc86a3803b8e5b04, 0xbc924aedcc4b5068, 0xbc9907f81b512d8e, 0xbc71d1e83e9436d2, 0xbc991919b3ce1b15, 0x3c859f48a72a4c6d, 0xbc9312607a28698a, 0xbc58a78f4817895b, 0xbc7c2c9b67499a1b, 0x3c4363ed60c2ac11, 0x3c9666093b0664ef, 0x3c6ecce1daa10379, 0x3c93ff8e3f0f1230, 0x3c7690cebb7aafb0, 0x3c931dbdeb54e077, 0xbc8f94340071a38e, 0xbc87deccdc93a349, 0xbc78dec6bd0f385f, 0xbc861246ec7b5cf6, 0x3c93350518fdd78e, 0x3c7b98b72f8a9b05, 0x3c9063e1e21c5409, 0x3c34c7855019c6ea, 0x3c9432e62b64c035, 0xbc8ce44a6199769f, 0xbc8c33c53bef4da8, 0xbc845378892be9ae, 0xbc93cedd78565858, 0x3c5710aa807e1964, 0xbc93b3efbf5e2228, 0xbc6a12ad8734b982, 0xbc6367efb86da9ee, 0xbc80dc3d54e08851, 0xbc781f647e5a3ecf, 0xbc86ee4ac08b7db0, 0xbc8619321e55e68a, 0x3c909ccb5e09d4d3, 0xbc7b32dcb94da51d, 0x3c94ecfd5467c06b, 0x3c65ebe1abd66c55, 0xbc88a1c52fb3cf42, 0xbc9369b6f13b3734, 0xbc805e843a19ff1e, 0xbc94d450d872576e, 0x3c90ad675b0e8a00, 0x3c8db72fc1f0eab4, 0xbc65b6609cc5e7ff, 0x3c7bf68359f35f44, 0xbc93091fa71e3d83, 0xbc5da9b88b6c1e29, 0xbc6c23f97c90b959, 0xbc92434322f4f9aa, 0xbc85ca6cd7668e4b, 0x3c71affc2b91ce27, 0x3c6dd235e10a73bb, 0xbc87c50422622263, 0x3c8b1c86e3e231d5, 0xbc91bbd1d3bcbb15, 0x3c90cc319cee31d2, 0x3c8469846e735ab3, 0xbc82dfcd978e9db4, 0x3c8c1a7792cb3387, 0xbc907b8f4ad1d9fa, 0xbc55c3d956dcaeba, 0xbc90a40e3da6f640, 0xbc68d6f438ad9334, 0xbc91eee26b588a35, 0x3c74ffd70a5fddcd, 0xbc91bdfbfa9298ac, 0x3c736eae30af0cb3, 0x3c8ee3325c9ffd94, 0x3c84e08fd10959ac, 0x3c63cdaf384e1a67, 0x3c676b2c6c921968, 0xbc808a1883ccb5d2, 0xbc8fad5d3ffffa6f, 0xbc900dae3875a949, 0x3c74a385a63d07a7, 0xbc82919e2040220f, 0x3c8e5a50d5c192ac, 0x3c843a59ac016b4b, 0xbc82d52107b43e1f, 0xbc892ab93b470dc9, 0x3c74b604603a88d3, 0x3c83c5ec519d7271, 0xbc8ff7128fd391f0, 0xbc8dae98e223747d, 0x3c8ec3bc41aa2008, 0x3c842b94c3a9eb32, 0x3c8a64a931d185ee, 0xbc8e37bae43be3ed, 0x3c77893b4d91cd9d, 0x3c5305c14160cc89]
+table exp_bits: u64 = [0x3ff0000000000000, 0x3feff63da9fb3335, 0x3fefec9a3e778061, 0x3fefe315e86e7f85, 0x3fefd9b0d3158574, 0x3fefd06b29ddf6de, 0x3fefc74518759bc8, 0x3fefbe3ecac6f383, 0x3fefb5586cf9890f, 0x3fefac922b7247f7, 0x3fefa3ec32d3d1a2, 0x3fef9b66affed31b, 0x3fef9301d0125b51, 0x3fef8abdc06c31cc, 0x3fef829aaea92de0, 0x3fef7a98c8a58e51, 0x3fef72b83c7d517b, 0x3fef6af9388c8dea, 0x3fef635beb6fcb75, 0x3fef5be084045cd4, 0x3fef54873168b9aa, 0x3fef4d5022fcd91d, 0x3fef463b88628cd6, 0x3fef3f49917ddc96, 0x3fef387a6e756238, 0x3fef31ce4fb2a63f, 0x3fef2b4565e27cdd, 0x3fef24dfe1f56381, 0x3fef1e9df51fdee1, 0x3fef187fd0dad990, 0x3fef1285a6e4030b, 0x3fef0cafa93e2f56, 0x3fef06fe0a31b715, 0x3fef0170fc4cd831, 0x3feefc08b26416ff, 0x3feef6c55f929ff1, 0x3feef1a7373aa9cb, 0x3feeecae6d05d866, 0x3feee7db34e59ff7, 0x3feee32dc313a8e5, 0x3feedea64c123422, 0x3feeda4504ac801c, 0x3feed60a21f72e2a, 0x3feed1f5d950a897, 0x3feece086061892d, 0x3feeca41ed1d0057, 0x3feec6a2b5c13cd0, 0x3feec32af0d7d3de, 0x3feebfdad5362a27, 0x3feebcb299fddd0d, 0x3feeb9b2769d2ca7, 0x3feeb6daa2cf6642, 0x3feeb42b569d4f82, 0x3feeb1a4ca5d920f, 0x3feeaf4736b527da, 0x3feead12d497c7fd, 0x3feeab07dd485429, 0x3feea9268a5946b7, 0x3feea76f15ad2148, 0x3feea5e1b976dc09, 0x3feea47eb03a5585, 0x3feea34634ccc320, 0x3feea23882552225, 0x3feea155d44ca973, 0x3feea09e667f3bcd, 0x3feea012750bdabf, 0x3fee9fb23c651a2f, 0x3fee9f7df9519484, 0x3fee9f75e8ec5f74, 0x3fee9f9a48a58174, 0x3fee9feb564267c9, 0x3feea0694fde5d3f, 0x3feea11473eb0187, 0x3feea1ed0130c132, 0x3feea2f336cf4e62, 0x3feea427543e1a12, 0x3feea589994cce13, 0x3feea71a4623c7ad, 0x3feea8d99b4492ed, 0x3feeaac7d98a6699, 0x3feeace5422aa0db, 0x3feeaf3216b5448c, 0x3feeb1ae99157736, 0x3feeb45b0b91ffc6, 0x3feeb737b0cdc5e5, 0x3feeba44cbc8520f, 0x3feebd829fde4e50, 0x3feec0f170ca07ba, 0x3feec49182a3f090, 0x3feec86319e32323, 0x3feecc667b5de565, 0x3feed09bec4a2d33, 0x3feed503b23e255d, 0x3feed99e1330b358, 0x3feede6b5579fdbf, 0x3feee36bbfd3f37a, 0x3feee89f995ad3ad, 0x3feeee07298db666, 0x3feef3a2b84f15fb, 0x3feef9728de5593a, 0x3feeff76f2fb5e47, 0x3fef05b030a1064a, 0x3fef0c1e904bc1d2, 0x3fef12c25bd71e09, 0x3fef199bdd85529c, 0x3fef20ab5fffd07a, 0x3fef27f12e57d14b, 0x3fef2f6d9406e7b5, 0x3fef3720dcef9069, 0x3fef3f0b555dc3fa, 0x3fef472d4a07897c, 0x3fef4f87080d89f2, 0x3fef5818dcfba487, 0x3fef60e316c98398, 0x3fef69e603db3285, 0x3fef7321f301b460, 0x3fef7c97337b9b5f, 0x3fef864614f5a129, 0x3fef902ee78b3ff6, 0x3fef9a51fbc74c83, 0x3fefa4afa2a490da, 0x3fefaf482d8e67f1, 0x3fefba1bee615a27, 0x3fefc52b376bba97, 0x3fefd0765b6e4540, 0x3fefdbfdad9cbe14, 0x3fefe7c1819e90d8, 0x3feff3c22b8f71f1]
+
+// log(x) as hi + lo, of the bits of x above 0, normal (Arm's log_inline,
+// pow.c): x is 2^k z, z from 0x1.69555p-1 to 0x1.69555p0, near the c of
+// its row i, and log(x) = k ln2 + log(c) + log(1 + r), r = z/c - 1 exact
+// (by fma: 1/c has few bits), |r| below 1/128; ln2 and log(c) in two
+// floats, and log(1 + r) - r + r * r / 2 a polynomial. Within 2^-68.
+fn pow_log(ix: u64) -> (f64, f64) {
+  let tmp = ix - 0x3fe6955500000000
+  let i = ((tmp >> 45) & 127) as i32
+  let k = (tmp as i64) >> 52
+  let z = float_of(ix - (tmp & 0xfff0000000000000))
+  let kd = k as f64
+  let c = pow_log_rows[i]
+  let r = fma(z, c.invc, -1.0)
+  let t1 = kd * 0.6931471805598903 + c.logc
+  let t2 = t1 + r
+  let lo1 = kd * 5.497923018708371e-14 + c.logctail
+  let lo2 = t1 - t2 + r
+  let ar = -0.5 * r
+  let ar2 = r * ar
+  let ar3 = r * ar2
+  let hi = t2 + ar2
+  let lo3 = fma(ar, r, -ar2)
+  let lo4 = t2 - hi + ar2
+  let p = ar3 * (-0.6666666666666679 + r * 0.5000000000000007 +
+                 ar2 * (0.7999999995323976 + r * -0.6666666663487739 +
+                        ar2 * (-1.142909628459501 + r * 1.0000415263675542)))
+  let lo = lo1 + lo2 + lo3 + lo4 + p
+  let y = hi + lo
+  (y, hi - y + lo)
+}
+
+// e to the power of x + xtail, |xtail| far below |x| (Arm's exp_inline):
+// x is k ln2/128 + r, |r| at most ln2/256, and e^x = 2^(k/128) e^r, the
+// first from the tables (as its bits, the k/128 a whole number of them
+// added to the exponent, and a tail), the second a polynomial. Where
+// 2^(k/128) is no float the exponent is shifted there and back.
+fn pow_exp(x: f64, xtail: f64) -> f64 {
+  let abstop = (bits_of(x) >> 52) & 0x7ff
+  if abstop < 0x3c9 { 1.0 + x }
+  else if abstop >= 0x409 { if x < 0.0 { 0.0 } else { infinity64() } }
+  else {
+    let z = 184.6649652337873 * x
+    let shifted = z + 6755399441055744.0
+    let ki = bits_of(shifted)
+    let kd = shifted - 6755399441055744.0
+    let r = x + kd * -0.005415212348111709 + kd * -1.2864023111638346e-14 + xtail
+    let idx = (ki & 127) as i32
+    let tail = float_of(exp_tail[idx])
+    let sbits = exp_bits[idx] + (ki << 45)
+    let r2 = r * r
+    let tmp = tail + r + r2 * (0.49999999999996786 + r * 0.16666666666665886) +
+              r2 * r2 * (0.0416666808410674 + r * 0.008333335853059549)
+    if abstop < 0x408 { float_of(sbits) + float_of(sbits) * tmp }
+    else if (ki & 0x80000000) == 0 {
+      // (Above the largest float's half: 2^1009 later.)
+      let scale = float_of(sbits - 0x3f10000000000000)
+      (scale + scale * tmp) * float_of(0x7f00000000000000)
+    } else {
+      // (Below the least normal float: rounded to its last bit before
+      // 2^-1022 makes it a subnormal one, so as not to round twice.)
+      let below = sbits + 0x3fe0000000000000
+      let scale = float_of(below)
+      let y = scale + scale * tmp
+      if abs64(y) < 1.0 {
+        let one = if y < 0.0 { -1.0 as f64 } else { 1.0 }
+        let lo = scale - y + scale * tmp
+        let hi = one + y
+        let rounded = (hi + ((one - hi + y) + lo)) - one
+        (if rounded == 0.0 { float_of(below & 0x8000000000000000) } else { rounded }) *
+          float_of(0x0010000000000000)
+      } else { y * float_of(0x0010000000000000) }
+    }
+  }
 }
 
 // Whether a finite y is a whole number, and an odd one.
@@ -236,8 +437,9 @@ fn odd64(y: f64) -> bool {
 }
 
 // x to the power of y, as C's pow says for the ends (0, infinities, not a
-// number, x below 0): else e to the power of y * log(x), that product in
-// two floats.
+// number, x below 0): else e to the power of y * log(|x|), the logarithm
+// and the product in two floats (Arm's pow.c, optimized-routines; within
+// 0.52 ulp).
 fn pow64(x: f64, y: f64) -> f64 {
   let inf = infinity64()
   let nan = nan64()
@@ -262,15 +464,12 @@ fn pow64(x: f64, y: f64) -> f64 {
   }
   else if x < 0.0 && !whole64(y) { nan }
   else {
-    let (lh, ll) = log64_two(ax)
-    let rough = y * lh
-    let p = if rough > 710.0 { inf }
-            else if rough < -746.0 { 0.0 }
-            else {
-              let (ph, pe) = two_prod64(y, lh)
-              let (eh, el) = two_sum64(ph, pe + y * ll)
-              exp64_of(eh, el)
-            }
+    // (A subnormal x as a normal one, its exponent below the least.)
+    let ix = if exponent64(ax) == -1023 { bits_of(ax * 4503599627370496.0) - 0x0340000000000000 }
+             else { bits_of(ax) }
+    let (hi, lo) = pow_log(ix)
+    let ehi = y * hi
+    let p = pow_exp(ehi, y * lo + fma(y, hi, -ehi))
     if x < 0.0 && odd64(y) { -p } else { p }
   }
 }
@@ -533,6 +732,58 @@ fn atan2_of(y: f64, x: f64, short: bool) -> f64 {
 }
 fn atan264(y: f64, x: f64) -> f64 { atan2_of(y, x, false) }
 
+// log2(c) for the 16 c near which a fraction from 0x1.66p-1 to 0x1.66p0
+// falls, and 1/c (Arm's powf_log2_data.c).
+table powf_log2_rows { invc: f64, logc: f64 } = [
+  { invc: 1.398907162146528, logc: -0.48430022186289673 },
+  { invc: 1.3403141896637998, logc: -0.42257122959194704 },
+  { invc: 1.286432210124115, logc: -0.3633754347673556 },
+  { invc: 1.2367150214269895, logc: -0.30651309567405577 },
+  { invc: 1.1906977166711752, logc: -0.25180720160537634 },
+  { invc: 1.1479821020556429, logc: -0.19910014943794563 },
+  { invc: 1.1082251448272158, logc: -0.14825100623281615 },
+  { invc: 1.0711297413057381, logc: -0.09913323807318392 },
+  { invc: 1.036437278977283, logc: -0.051632812977629436 },
+  { invc: 1.0, logc: 0.0 },
+  { invc: 0.9492859795739057, logc: 0.07508531937943004 },
+  { invc: 0.8951049428609004, logc: 0.15987125980713107 },
+  { invc: 0.8476821620351103, logc: 0.2384046664317681 },
+  { invc: 0.8050314851692001, logc: 0.31288288605863257 },
+  { invc: 0.7664671008843108, logc: 0.38370422656453185 },
+  { invc: 0.731428603316328, logc: 0.451211048935815 }
+]
+// 2^(i/32) as its bits less i/32 in the exponent (Arm's exp2f_data.c).
+table exp2f_bits: u64 = [0x3ff0000000000000, 0x3fefd9b0d3158574, 0x3fefb5586cf9890f, 0x3fef9301d0125b51, 0x3fef72b83c7d517b, 0x3fef54873168b9aa, 0x3fef387a6e756238, 0x3fef1e9df51fdee1, 0x3fef06fe0a31b715, 0x3feef1a7373aa9cb, 0x3feedea64c123422, 0x3feece086061892d, 0x3feebfdad5362a27, 0x3feeb42b569d4f82, 0x3feeab07dd485429, 0x3feea47eb03a5585, 0x3feea09e667f3bcd, 0x3fee9f75e8ec5f74, 0x3feea11473eb0187, 0x3feea589994cce13, 0x3feeace5422aa0db, 0x3feeb737b0cdc5e5, 0x3feec49182a3f090, 0x3feed503b23e255d, 0x3feee89f995ad3ad, 0x3feeff76f2fb5e47, 0x3fef199bdd85529c, 0x3fef3720dcef9069, 0x3fef5818dcfba487, 0x3fef7c97337b9b5f, 0x3fefa4afa2a490da, 0x3fefd0765b6e4540]
+
+// log2 of the bits of an f32 above 0 (a subnormal's with its exponent
+// below the least; Arm's powf.c): x is 2^k z, z near the c of its row,
+// and log2(x) = k + log2(c) + log2(1 + r), r = z/c - 1, a polynomial.
+// Within 2^-32.
+fn powf_log2(ix: u32) -> f64 {
+  let tmp = ix - 0x3f330000
+  let i = ((tmp >> 19) & 15) as i32
+  let top = tmp & 0xff800000
+  let k = ((top as i32) >> 23) as f64
+  let c = powf_log2_rows[i]
+  let r = (float_of(ix - top) as f64) * c.invc - 1.0
+  let r2 = r * r
+  let y = 0.288457581109214 * r + -0.36092606229713164
+  let p = 0.480898481472577 * r + -0.7213474675006291
+  let q = p * r2 + (1.4426950408774342 * r + (c.logc + k))
+  y * (r2 * r2) + q
+}
+// 2 to the power of x, |x| below 126: 2^(k/32) from the table, the k/32
+// a whole number of them added to the exponent, times 2^r, |r| at most
+// 1/64, a polynomial. Within 2^-33.
+fn powf_exp2(x: f64) -> f64 {
+  let shifted = x + 211106232532992.0
+  let ki = bits_of(shifted)
+  let r = x - (shifted - 211106232532992.0)
+  let s = float_of(exp2f_bits[(ki & 31) as i32] + (ki << 47))
+  let z = 0.05550361559341535 * r + 0.2402284522445722
+  ((z * (r * r)) + (0.6931471806916203 * r + 1.0)) * s
+}
+
 // The f32 ones: worked out in f64 with polynomials as short as an f32
 // needs, error below 2^-34 (FreeBSD's msun: k_sinf.c, k_cosf.c,
 // e_rem_pio2f.c, s_atanf.c, k_logf.h), and rounded once. Not a number
@@ -586,14 +837,18 @@ fn log32_1p(f: f64) -> f64 {
 // Square root, powers and logarithms. `pow(x, y)` is x to the power of y,
 // `exp(x)` e to the power of x, `log` the natural logarithm. (`sqrt` of
 // an f32 or an f64 is built in.)
-// (pow of x above 0 and a finite y: e to the power of y * log(x), both
-// to an f64's last bits, so that y * log(x) is near enough to round
-// right; the rest as pow64 says.)
+// (pow of x above the least normal f32 and finite, and a y neither 0
+// nor infinite, where |y * log2(x)| is below 126: 2 to the power of that,
+// in f64 (Arm's powf.c, within 0.82 ulp); the rest as pow64 says.)
 fn pow(x: f32, y: f32) -> f32 {
-  let yd = y as f64
-  if x > 0.0 && x < infinity32() && yd - yd == 0.0 {
-    exp64(yd * log64(x as f64)) as f32
-  } else { to32(pow64(x as f64, yd)) }
+  let ix = bits_of(x)
+  if ix - 0x00800000 >= 0x7f000000 || (bits_of(y) << 1) - 1 >= 0xfeffffff {
+    to32(pow64(x as f64, y as f64))
+  } else {
+    let ylogx = (y as f64) * powf_log2(ix)
+    if abs64(ylogx) >= 126.0 { to32(pow64(x as f64, y as f64)) }
+    else { powf_exp2(ylogx) as f32 }
+  }
 }
 fn exp(x: f32) -> f32 { to32(exp64(x as f64)) }
 fn log(x: f32) -> f32 {

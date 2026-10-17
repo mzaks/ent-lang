@@ -1203,8 +1203,6 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
   if (isa<SpawnOp, DespawnOp>(op))
     return std::string("changes which entities there are: that is done "
                        "on the CPU");
-  if (isa<TableAtOp>(op))
-    return std::string("reads a table: not on the GPU yet");
   FlatSymbolRefAttr changed;
   if (auto add = dyn_cast<AddOp>(op))
     changed = add.getComponentAttr();

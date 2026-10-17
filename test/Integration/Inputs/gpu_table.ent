@@ -1,0 +1,30 @@
+// Tables in a `gpu system` (docs/gpu.md): a plain list, rows of fields
+// (of f64, f32 and u64), read in the body and in a fn it calls, as on
+// the CPU.
+import console
+table primes: i32 = [2, 3, 5, 7, 11, 13]
+table big: u64 = [0x3ff0000000000000, 0xbc7160139cd8dc5d, 7]
+table rows { a: f64, b: f32, n: u64 } = [
+  { a: 1.5, b: -2.0, n: 0x8000000000000001 },
+  { a: 0.25, b: 3.0, n: 9 }
+]
+fn pick(i: i32) -> f64 { rows[i % 2].a * (rows[i % 3].b as f64) + (big[i % 4] >> 60) as f64 }
+component In { i: i32 } capacity 1000
+component Out { x: f64, p: i32, n: u64 } capacity 1000
+unique Sum { x: f64, p: i64, n: u64 }
+unique Done: i32
+gpu system work() {
+  for e: In, o: mut Out {
+    o.x = pick(e.i)
+    o.p = primes[e.i % 7]
+    o.n = rows[e.i % 2].n ^ big[e.i % 3]
+  }
+}
+system sum() {
+  for o: Out { Sum.x += o.x  Sum.p += o.p as i64  Sum.n += o.n }
+  spawn { Print { line: "x {Sum.x} p {Sum.p} n {Sum.n}" } }
+  Done = 1
+}
+schedule step() { work() sum() write() clear() }
+world { for i in 0..1000 { spawn { In { i: i }, Out { x: 0.0, p: 0, n: 0 } } } }
+main { loop { step() } until Done == 1 }

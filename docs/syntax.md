@@ -1267,8 +1267,8 @@ other entities or accumulate them into uniques
 are sent), from the body or from loops in it, and keep running sums
 (`let first = Laying.stubs += s.meets`). Not yet: sending fractions
 or with `=`, giving a buffer rows (writing a row it has is fine),
-a `for` over other entities inside it, extern fns (so `math`'s), tables
-and texts. Later, or never: `connect`, `disconnect` and trees, `on` (reactive), `by`, spawning,
+a `for` over other entities inside it, extern fns (`math`'s `asin` and
+`acos`) and texts (a table's numbers are fine). Later, or never: `connect`, `disconnect` and trees, `on` (reactive), `by`, spawning,
 destroying and `apart` components, procs, writing a component a reactive
 query reacts to. Around its `for`s the system reads and writes uniques;
 what it does to entities or buffers goes in a system of its own.
@@ -2014,10 +2014,11 @@ on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
   y)`, `exp`, `log`, `log2`, `sin`, `cos`, `tan`, `atan`, `atan2(y, x)`,
   `floor`, `ceil`, `round` (halves away from 0), `trunc`, `fmod(x, y)`,
   and `sqrt64` (`sqrt` itself is built in). They follow Sun's fdlibm and
-  are within an ulp of the true value, `pow` within a few where it comes
-  near the largest or least float, `fmod` exact. The f32 ones have
-  shorter polynomials of their own (FreeBSD's), worked out in f64 and
-  rounded once: within an ulp, and as often rounded right as glibc's.
+  are within an ulp of the true value, `fmod` exact; `pow` follows Arm's
+  optimized-routines, as glibc's does (`pow64` within 0.52 ulp, `pow`
+  0.82). The f32 ones have shorter polynomials of their own (FreeBSD's),
+  worked out in f64 and rounded once: within an ulp, and as often rounded
+  right as glibc's.
   Where they give not a number its bits are `0x7ff8000000000000`, of
   the f32 ones `0x7fc00000`.
 - From the machine's math library (devices/math.c), on the CPU only,

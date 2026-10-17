@@ -104,6 +104,9 @@ entity and values every entity reads alike:
 - running sums (`let first = Laying.stubs += s.meets`, docs/syntax.md):
   in two passes, with a scan of the values between them (below);
 - calling `fn`s of the program: compiled for the GPU like the body;
+- reading tables (`table`), but for their texts: each field a constant
+  array the kernels read, copied into the GPU's module with the code
+  that reads it;
 - arithmetic on every number type. `f64` is allowed; on consumer cards
   it runs at 1/32 to 1/64 of `f32`, which `--explain` says.
 
@@ -121,7 +124,7 @@ Errors, each naming the construct and what it waits for:
 | `on changed ...` (reactive) | event logs and stamps | later |
 | `spawn`, `destroy`, `add`/`remove` of an `apart` component | change which rows an archetype holds; the compaction runs on the CPU | later |
 | `by`, `in turn by` | one entity after another: no parallel form | never |
-| a table (`table`), a text (`text[N]`, `text`) | not on the GPU yet | later |
+| a text (`text[N]`, `text`), a table's too | not on the GPU yet | later |
 | a fn given the entities of a component | it reads other entities through a function of the CPU's, given the world | later |
 | `extern proc` | the outside world | never |
 | writing or sending to a component a reactive query reacts to, or to the field a tree is ordered by | its events (stamps), and the tree's order, are kept on the CPU | later |
@@ -494,7 +497,7 @@ How fast they are, ns a call over a million entities on one core
 | `exp64` | 1.8 | 3.6 | `exp` | 2.3 | 2.2 |
 | `log64` | 9.0 | 3.2 | `log` | 1.4 | 2.8 |
 | `log264` | 11.6 | 3.5 | `log2` | 1.4 | 2.8 |
-| `pow64` | 45.5 | 9.9 | `pow` | 39.5 | 4.7 |
+| `pow64` | 12.4 | 9.9 | `pow` | 6.8 | 4.8 |
 | `fmod64` | 8.7 | 6.7 | | | |
 | `fmod64` of 1e300 | 255 | 626 | | | |
 
@@ -521,6 +524,19 @@ gone wrong costs more than working out both): `sin64` was 19.2 and
 `atan2` (f32) 21.3, while `atan64` of numbers to 100 (nearly all in its
 last range, which a branch guesses right) was 6.3. `pow` (f32) is e to
 the power of y * log(x), both to the last bits of an f64.
+
+`pow64` and `pow` are Arm's (optimized-routines' pow.c and powf.c, as
+glibc has them), from tables (`table`, read by the kernels as the CPU
+reads them): log(x) from the row of the c near x's fraction (128 rows,
+1/c and log(c) in two floats) and a polynomial of z/c - 1, exact by
+`fma`; e^x from 2^(k/128) (a table of their bits) and a polynomial of
+what is left. No division. `pow64` was 45.5 ns, within 14 ulp near the
+ends of the range; now within 0.52 (agreeing with glibc's to the bit on
+99.95 % of 240,000 inputs and within an ulp on the rest, and on every
+one of 1,296 pairs of ends). `pow` (f32) has its own (16 rows of log2,
+32 of exp2, in f64; within 0.82 ulp): glibc's `powf` to the bit; it was
+39.5 ns as `exp64(y * log64(x))`, correctly rounded, and 14.5 as `pow64`
+rounded.
 
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of
