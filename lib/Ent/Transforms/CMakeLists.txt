@@ -20,6 +20,7 @@ add_mlir_library(MLIREntTransforms
   MLIRGPUDialect
   MLIRGPUTransforms
   MLIRLLVMDialect
+  MLIRMathDialect
   MLIRMemRefDialect
   MLIROpenMPDialect
   MLIRSCFDialect

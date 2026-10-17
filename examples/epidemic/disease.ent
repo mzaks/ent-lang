@@ -191,14 +191,16 @@ system seed() {
   }
 }
 
+// A new day, with none of its moves yet (`progress` writes them: it may
+// run on the GPU, whose systems leave buffers to their `for`s).
 system tick() {
   Clock.day += 1
+  Moves = []
 }
 
 // Everybody whose stage ends today goes on to the next, and draws what
 // follows that and when.
 system progress() {
-  Moves = []
   for e, p: Person, a: Age, d: mut Disease where d.at == Clock.day {
     let from = d.stage
     let stage = d.next

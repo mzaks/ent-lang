@@ -114,7 +114,7 @@ Errors, each naming the construct and what it waits for:
 | sending or accumulating a fraction (`f32`, `f64`), or sending with `=` | combined at the commit point in the order of the rows, which the GPU does not keep: needs the sends sorted by target and combined in that order on the GPU (keep such a system on the CPU) | later |
 | sending to a field the query also reads or writes | what is sent lands when the query ends; on the GPU it lands as it is sent | never |
 | `Marks += { ... }` (rows given to a buffer) | rows in the order of the entities: needs an ordered compaction | G2 |
-| `extern fn`, including `math`'s `sin`, `sqrt` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule | G2 |
+| `extern fn`, including what `math` still takes from C (`tan`, `atan2`, `log2`, `fmod`, ...) | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule (`math`'s `exp`, `log`, `pow`, `sin`, `cos`, `floor` ... are written in ent and run on both, see below) | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |
 | arrows up a tree, a tree's edges, `top down`, `bottom up` | trees are kept in tables the GPU does not have | later |
 | `connect`, `disconnect` | the relation is sorted again on the CPU | later |
@@ -286,10 +286,9 @@ It is a device in the sense of `devices/`: C, linked by `tools/ent` with
 - Where the waits go when `main` loops: if a CPU system in the loop reads
   a column a GPU system writes, every frame waits; worth an `--explain`
   remark so the program can be split differently.
-- `math` on the GPU (G2): the same results on both sides need the same
-  implementation on both. Candidates: correctly rounded functions (LLVM's
-  libc has them and builds for NVPTX), or ent-lang implementations in
-  `math.ent` used on both sides. Either changes the CPU's results from the
+- `math` on the GPU (G2): settled, ent-lang implementations in
+  `math.ent` used on both sides (below, "`math` alike on both sides").
+  `tan`, `asin`, `acos`, `atan`, `atan2`, `log2` and `fmod` are still the
   machine's library's.
 - Whether a `gpu system` built without `--gpu` should say so (a remark),
   or stay silent as `--parallel`'s absence does.
@@ -454,6 +453,24 @@ back, its row's place less the next (`ent.running_added`; the scan
 leaves the whole sum after the rows): the passes after it, and the
 query, do not work out `meets` again, which made the second pass cost
 nearly what the first does (`lay` on four threads 3.27 ms with it).
+
+**`math` alike on both sides (2026-10-17).** `exp`, `log`, `pow`, `sin`,
+`cos`, `floor`, `ceil`, `round` and `trunc` (f64, and f32 by way of them)
+are written in `devices/math.ent` from `+ - * /`, the built-in `sqrt` and
+the bits of floats (`bits_of`, `float_of`), all of which IEEE 754 rounds
+exactly: fdlibm's algorithms as FreeBSD's msun and Mojo's standard
+library have them (Mojo's comments and constants, checked against π and
+ln 2 worked out to 450 digits), `pow` from a logarithm in two floats.
+Against glibc, on 120,000 inputs each over the whole range (angles to
+2^1023 by the bits of 2/π), every result is within an ulp. On the GPU a
+multiply and an add are never made one fma (the PTX has `mul.rn` and
+`add.rn`, which `ptxas` keeps apart), and `math.sqrt` in a kernel becomes
+`llvm.nvvm.sqrt.rn.f`/`.d` (`ent-gpu-kernel-names`): libdevice's f32 root,
+which the lowering to NVVM calls, is an approximate one unless the module
+asks otherwise. `test/Integration/Inputs/gpu_math.ent` gives the same
+bits with and without `--gpu`. What the functions make not a number is
+`0x7ff8000000000000` on both sides; that of an operation (`0.0 / 0.0`)
+is the machine's, as IEEE 754 leaves it.
 
 With it `pair` is `today()` (where today's rows are), `lay()` (a `for`
 over the people: their stubs, running sums of them and of the rows, and

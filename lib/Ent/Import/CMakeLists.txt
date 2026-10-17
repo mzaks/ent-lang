@@ -5,6 +5,7 @@ add_mlir_library(MLIREntImport
   LINK_LIBS PUBLIC
   MLIREnt
   MLIRArithDialect
+  MLIRMathDialect
   MLIRSCFDialect
   MLIRIR
 )

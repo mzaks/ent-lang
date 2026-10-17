@@ -15,6 +15,7 @@
 #include "Ent/World.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/Builders.h"
@@ -7647,6 +7648,17 @@ Type Parser::typeOf(const Expr &expr) {
       return builder.getI32Type();
     if (functions.count(expr.name))
       return functions[expr.name].result;
+    // (The bits of a float, and the float of bits: of as many bits.)
+    if ((expr.name == "bits_of" || expr.name == "float_of") &&
+        expr.operands.size() == 1)
+      if (Type type = typeOf(*expr.operands[0]))
+        if (type.isF32() || type.isF64() || isUnsigned(type)) {
+          unsigned width = type.getIntOrFloatBitWidth();
+          if (expr.name == "bits_of")
+            return builder.getIntegerType(width, /*isSigned=*/false);
+          return width == 64 ? Type(builder.getF64Type())
+                             : Type(builder.getF32Type());
+        }
     for (const ExprPtr &operand : expr.operands)
       if (Type type = typeOf(*operand))
         return type;
@@ -8480,12 +8492,55 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return error(expr.loc, "'mul_wide' gives 2 values, the high and the "
                              "low bits; take them with 'let (hi, lo) = "
                              "mul_wide(a, b)'");
+    // `sqrt(x)` of a float: rounded as IEEE 754 says, the same on every
+    // machine and on the GPU (as `/` is). `bits_of(x)` the bits of a
+    // float as a whole number without a sign of as many, and
+    // `float_of(b)` the float of such bits: what math.ent builds on.
+    if (expr.name == "sqrt" || expr.name == "bits_of" ||
+        expr.name == "float_of") {
+      if (expr.operands.size() != 1)
+        return error(expr.loc, "'" + expr.name + "' takes one argument");
+      bool toFloat = expr.name == "float_of";
+      Type type = typeOf(*expr.operands[0]);
+      // (Of literals: as many bits as the float the context expects, or
+      // the type literals take.)
+      if (!type && toFloat)
+        type = builder.getIntegerType(
+            expected && expected.isF32() ? 32 : 64, /*isSigned=*/false);
+      else if (!type)
+        type = expected && (expected.isF32() || expected.isF64())
+                   ? expected
+                   : defaultType(*expr.operands[0]);
+      FailureOr<mlir::Value> value = emit(*expr.operands[0], type);
+      if (failed(value))
+        return failure();
+      Type given = value->getType();
+      if (toFloat) {
+        if (!isUnsigned(given) || (given.getIntOrFloatBitWidth() != 32 &&
+                                   given.getIntOrFloatBitWidth() != 64))
+          return error(expr.loc, "'float_of' takes a u32 or a u64");
+        Type to = given.getIntOrFloatBitWidth() == 64
+                      ? Type(builder.getF64Type())
+                      : Type(builder.getF32Type());
+        return arith::BitcastOp::create(builder, at, to, bits(at, *value))
+            .getResult();
+      }
+      if (!given.isF32() && !given.isF64())
+        return error(expr.loc, "'" + expr.name + "' takes an f32 or an f64");
+      if (expr.name == "sqrt")
+        return math::SqrtOp::create(builder, at, *value).getResult();
+      unsigned width = given.getIntOrFloatBitWidth();
+      mlir::Value word = arith::BitcastOp::create(
+          builder, at, builder.getIntegerType(width), *value);
+      return fromBits(at, word, builder.getIntegerType(width, false));
+    }
     if (expr.name != "min" && expr.name != "max")
       return error(expr.loc, "unknown function '" + expr.name +
                                  "'; declare it before with 'fn', or one "
                                  "implemented in C with 'extern fn' or "
-                                 "'extern proc' (min, max, len and "
-                                 "mul_wide are built in)");
+                                 "'extern proc' (min, max, len, mul_wide, "
+                                 "sqrt, bits_of and float_of are built "
+                                 "in)");
     if (expr.operands.size() != 2)
       return error(expr.loc, "'" + expr.name + "' takes two arguments");
     Type type = typeOf(expr);
@@ -9984,7 +10039,8 @@ FailureOr<mlir::Value> Parser::emitSpawn(const Expr &expr) {
 OwningOpRef<ModuleOp>
 mlir::ent::importEnt(llvm::SourceMgr &sourceMgr, MLIRContext *context,
                      ArrayRef<std::string> directories, ImportedFiles *files) {
-  context->loadDialect<EntDialect, arith::ArithDialect, scf::SCFDialect>();
+  context->loadDialect<EntDialect, arith::ArithDialect, math::MathDialect,
+                       scf::SCFDialect>();
   Parser parser(sourceMgr, context, directories);
   parser.files = files;
   return parser.parseModule();

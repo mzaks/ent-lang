@@ -1,6 +1,8 @@
 #include "Ent/Passes.h"
 
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/SymbolTable.h"
 
 namespace mlir::ent {
@@ -41,6 +43,24 @@ struct EntGpuKernelNames
           launch.setKernelAttr(to);
       });
       SymbolTable::setSymbolName(kernel, name);
+    }
+    // (Roots rounded to the nearest, as IEEE 754 and the CPU have them.)
+    SmallVector<math::SqrtOp> roots;
+    module.walk([&](gpu::GPUModuleOp container) {
+      container.walk([&](math::SqrtOp root) { roots.push_back(root); });
+    });
+    for (math::SqrtOp root : roots) {
+      Type type = root.getType();
+      if (!type.isF32() && !type.isF64())
+        continue;
+      OpBuilder builder(root);
+      auto exact = LLVM::CallIntrinsicOp::create(
+          builder, root.getLoc(), type,
+          builder.getStringAttr(type.isF32() ? "llvm.nvvm.sqrt.rn.f"
+                                             : "llvm.nvvm.sqrt.rn.d"),
+          ValueRange{root.getOperand()});
+      root.replaceAllUsesWith(exact.getResult(0));
+      root.erase();
     }
   }
 };

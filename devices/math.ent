@@ -13,52 +13,373 @@
 // f32, the language's everyday float; with `64` for f64 (`sin64`), with an
 // `i` in front for i32 (`iabs`). Angles are radians.
 //
-// What the machine's math library does is implemented in devices/math.c;
-// the rest is written here.
+// Roots, powers, logarithms, sines and cosines and the whole numbers of
+// a float are written here, from the operations IEEE 754 rounds exactly
+// (`+ - * /`, the built-in `sqrt`) and the bits of floats (`bits_of`,
+// `float_of`): every machine, and the GPU (docs/gpu.md), gives the same
+// results to the bit. They follow Sun's fdlibm (by way of FreeBSD's msun
+// and Mojo's standard library), within an ulp of the true value; `pow64`
+// within a few where the result is near the ends of the range. The f32
+// ones are the f64 ones, rounded once. What is left of the machine's math
+// library is implemented in devices/math.c, and runs on the CPU only.
+
+// Without its sign.
+fn abs(x: f32) -> f32 { max(x, -x) }
+fn abs64(x: f64) -> f64 { max(x, -x) }
+fn iabs(x: i32) -> i32 { max(x, -x) }
+
+// What a float is made of: its exponent field, and its fraction bits.
+fn exponent64(x: f64) -> i32 { ((bits_of(x) >> 52) & 0x7ff) as i32 - 1023 }
+fn infinity64() -> f64 { float_of(0x7ff0000000000000) }
+// Not a number, with the same bits wherever it comes from here (IEEE 754
+// leaves those of `0.0 / 0.0` to the machine).
+fn nan64() -> f64 { float_of(0x7ff8000000000000) }
+
+// To a whole number, still a float: towards 0, down, up, and to the
+// nearest (halves away from 0). `x as i32` then makes it an integer.
+fn trunc64(x: f64) -> f64 {
+  let b = bits_of(x)
+  let e = exponent64(x)
+  if e >= 52 { x }
+  else if e < 0 { float_of(b & 0x8000000000000000) }
+  else { float_of(b & ~(0x000fffffffffffff >> (e as u64))) }
+}
+fn floor64(x: f64) -> f64 {
+  let t = trunc64(x)
+  if t > x { t - 1.0 } else { t }
+}
+fn ceil64(x: f64) -> f64 {
+  let t = trunc64(x)
+  if t < x { t + 1.0 } else { t }
+}
+fn round64(x: f64) -> f64 {
+  let b = bits_of(x)
+  let e = exponent64(x)
+  let sign = b & 0x8000000000000000
+  if e >= 52 { x }
+  else if e == -1 { float_of(sign | 0x3ff0000000000000) }
+  else if e < 0 { float_of(sign) }
+  else {
+    let half = 0x0008000000000000 as u64 >> (e as u64)
+    let below = 0x000fffffffffffff as u64 >> (e as u64)
+    float_of((b + half) & ~below)
+  }
+}
+
+fn sqrt64(x: f64) -> f64 { if x < 0.0 { nan64() } else { sqrt(x) } }
+
+// x times 2 to the power of k, for k from -2044 to 2046: in two steps of
+// which only the second rounds.
+fn scale64(x: f64, k: i32) -> f64 {
+  let k1 = k >> 1
+  x * float_of(((k1 + 1023) as u64) << 52) *
+    float_of(((k - k1 + 1023) as u64) << 52)
+}
+
+// a + b as the float nearest and what that leaves out, exactly; a * b
+// likewise (Veltkamp's split: the halves multiply exactly), for products
+// far from overflowing.
+fn two_sum64(a: f64, b: f64) -> (f64, f64) {
+  let s = a + b
+  let bb = s - a
+  (s, (a - (s - bb)) + (b - bb))
+}
+fn split64(a: f64) -> (f64, f64) {
+  let c = 134217729.0 * a
+  let hi = c - (c - a)
+  (hi, a - hi)
+}
+fn two_prod64(a: f64, b: f64) -> (f64, f64) {
+  let p = a * b
+  let (ah, al) = split64(a)
+  let (bh, bl) = split64(b)
+  (p, ((ah * bh - p) + ah * bl + al * bh) + al * bl)
+}
+
+// e to the power of hi - lo, for |hi - lo| at most ln 2 / 2 (fdlibm's
+// e_exp.c).
+fn exp64_near(hi: f64, lo: f64) -> f64 {
+  let r = hi - lo
+  let t = r * r
+  let c = r - t * (1.66666666666666019037e-01 + t * (-2.77777777770155933842e-03 +
+          t * (6.61375632143793436117e-05 + t * (-1.65339022054652515390e-06 +
+          t * 4.13813679705723846039e-08))))
+  1.0 - ((lo - (r * c) / (2.0 - c)) - hi)
+}
+
+// e to the power of hi + lo: hi less k times ln 2 (k * ln2's high part is
+// exact, and so the difference), then the rest by exp64_near.
+fn exp64_of(hi: f64, lo: f64) -> f64 {
+  if hi != hi { hi }
+  else if hi > 709.782712893383973096 { infinity64() }
+  else if hi < -745.13321910194110842 { 0.0 }
+  else {
+    let k = floor64(hi * 1.4426950408889634 + 0.5)
+    let r = hi - k * 6.93147180369123816490e-01
+    scale64(exp64_near(r, k * 1.90821492927058770002e-10 - lo), k as i32)
+  }
+}
+fn exp64(x: f64) -> f64 { exp64_of(x, 0.0) }
+
+// x as 2 to the power of k times 1 + f, with 1 + f from sqrt(2)/2 to
+// sqrt(2), for x above 0 (below the least normal float, too).
+fn log64_parts(x: f64) -> (f64, f64) {
+  let tiny = exponent64(x) == -1023
+  let y = if tiny { x * 18014398509481984.0 } else { x }
+  let b = bits_of(y)
+  var k = exponent64(y) - (if tiny { 54 } else { 0 })
+  var m = float_of((b & 0x000fffffffffffff) | 0x3ff0000000000000)
+  if m > 1.4142135623730951 {
+    m = m * 0.5
+    k += 1
+  }
+  (k as f64, m - 1.0)
+}
+
+// log(1 + f) - f + f * f / 2, for 1 + f from sqrt(2)/2 to sqrt(2): of
+// s = f / (2 + f), by a polynomial in s * s (fdlibm's k_log.h).
+fn log64_kernel(s: f64) -> f64 {
+  let z = s * s
+  let w = z * z
+  w * (3.999999999940941908e-01 + w * (2.222219843214978396e-01 +
+       w * 1.531383769920937332e-01)) +
+    z * (6.666666666666735130e-01 + w * (2.857142874366239149e-01 +
+         w * (1.818357216161805012e-01 + w * 1.479819860511658591e-01)))
+}
+
+// The natural logarithm (fdlibm's e_log.c).
+fn log64(x: f64) -> f64 {
+  if x != x { x }
+  else if x < 0.0 { nan64() }
+  else if x == 0.0 { -infinity64() }
+  else if x == infinity64() { x }
+  else {
+    let (k, f) = log64_parts(x)
+    let s = f / (2.0 + f)
+    let hfsq = 0.5 * f * f
+    k * 6.93147180369123816490e-01 -
+      ((hfsq - (s * (hfsq + log64_kernel(s)) + k * 1.90821492927058770002e-10)) - f)
+  }
+}
+
+// The natural logarithm of x above 0 and finite, as hi + lo: log(1 + f)
+// is 2s + s * R(s * s), with s carried in two floats.
+fn log64_two(x: f64) -> (f64, f64) {
+  let (k, f) = log64_parts(x)
+  let (dh, dl) = two_sum64(2.0, f)
+  let sh = f / dh
+  let (p, pe) = two_prod64(sh, dh)
+  let sl = (((f - p) - pe) - sh * dl) / dh
+  let (a, ae) = two_sum64(k * 6.93147180369123816490e-01, 2.0 * sh)
+  let lo = ae + (k * 1.90821492927058770002e-10 + (2.0 * sl + sh * log64_kernel(sh)))
+  two_sum64(a, lo)
+}
+
+// Whether a finite y is a whole number, and an odd one.
+fn whole64(y: f64) -> bool { trunc64(y) == y }
+fn odd64(y: f64) -> bool {
+  whole64(y) && exponent64(y) < 53 && ((trunc64(y) as i64) & 1) == 1
+}
+
+// x to the power of y, as C's pow says for the ends (0, infinities, not a
+// number, x below 0): else e to the power of y * log(x), that product in
+// two floats.
+fn pow64(x: f64, y: f64) -> f64 {
+  let inf = infinity64()
+  let nan = nan64()
+  let ax = abs64(x)
+  let ay = abs64(y)
+  if y == 0.0 || x == 1.0 { 1.0 }
+  else if x != x || y != y { nan }
+  else if ay == inf {
+    if ax == 1.0 { 1.0 }
+    else if (ax < 1.0) == (y > 0.0) { 0.0 }
+    else { inf }
+  }
+  else if x == 0.0 {
+    let odd = odd64(y)
+    if y < 0.0 { if odd { 1.0 / x } else { inf } }
+    else { if odd { x } else { 0.0 } }
+  }
+  else if ax == inf {
+    let odd = odd64(y)
+    if y < 0.0 { if odd && x < 0.0 { -0.0 } else { 0.0 } }
+    else { if odd && x < 0.0 { -inf } else { inf } }
+  }
+  else if x < 0.0 && !whole64(y) { nan }
+  else {
+    let (lh, ll) = log64_two(ax)
+    let rough = y * lh
+    let p = if rough > 710.0 { inf }
+            else if rough < -746.0 { 0.0 }
+            else {
+              let (ph, pe) = two_prod64(y, lh)
+              let (eh, el) = two_sum64(ph, pe + y * ll)
+              exp64_of(eh, el)
+            }
+    if x < 0.0 && odd64(y) { -p } else { p }
+  }
+}
+
+// The words of 2/pi's fraction, 64 bits each, from its point (0 before
+// it): for the reduction of large angles.
+fn two_over_pi_word(i: u64) -> u64 {
+  if i == 0 { 0 }
+  else if i == 1 { 0xa2f9836e4e441529 }
+  else if i == 2 { 0xfc2757d1f534ddc0 }
+  else if i == 3 { 0xdb6295993c439041 }
+  else if i == 4 { 0xfe5163abdebbc561 }
+  else if i == 5 { 0xb7246e3a424dd2e0 }
+  else if i == 6 { 0x06492eea09d1921c }
+  else if i == 7 { 0xfe1deb1cb129a73e }
+  else if i == 8 { 0xe88235f52ebb4484 }
+  else if i == 9 { 0xe99c7026b45f7e41 }
+  else if i == 10 { 0x3991d639835339f4 }
+  else if i == 11 { 0x9c845f8bbdf9283b }
+  else if i == 12 { 0x1ff897ffde05980f }
+  else if i == 13 { 0xef2f118b5a0a6d1f }
+  else if i == 14 { 0x6d367ecf27cb09b7 }
+  else if i == 15 { 0x4f463f669e5fea2d }
+  else if i == 16 { 0x7527bac7ebe5f17b }
+  else if i == 17 { 0x3d0739f78a5292ea }
+  else if i == 18 { 0x6bfb5fb11f8d5d08 }
+  else { 0x56033046fc7b6bab }
+}
+
+// A large finite angle ax (above 2^19 * pi/2) as n quarter turns and
+// hi + lo, from -pi/4 to pi/4: ax * 2/pi in whole numbers, from the 192
+// bits of 2/pi that count for its exponent (Payne and Hanek, as Mojo's
+// standard library does it).
+fn quarters64_far(ax: f64) -> (i32, f64, f64) {
+  let b = bits_of(ax)
+  let m = (b & 0x000fffffffffffff) | 0x0010000000000000
+  let at = (b >> 52) - 1013
+  let q = at >> 6
+  let r = at & 63
+  let w0 = two_over_pi_word(q)
+  let w1 = two_over_pi_word(q + 1)
+  let w2 = two_over_pi_word(q + 2)
+  let w3 = two_over_pi_word(q + 3)
+  // (In two steps, so that r of 0 never shifts by 64.)
+  let v0 = (w0 << r) | ((w1 >> 1) >> (63 - r))
+  let v1 = (w1 << r) | ((w2 >> 1) >> (63 - r))
+  let v2 = (w2 << r) | ((w3 >> 1) >> (63 - r))
+  let (p2h, p2l) = mul_wide(m, v2)
+  let (p1h, p1l) = mul_wide(m, v1)
+  let r1 = p2h + p1l
+  let r0 = p1h + m * v0 + (if r1 < p1l { 1 } else { 0 })
+  let h = (r0 << 2) | (r1 >> 62)
+  let l = (r1 << 2) | (p2l >> 62)
+  // (The nearest quarter, and what is left of it, from -1/2 to 1/2, in
+  // pieces of 53 bits that are floats exactly.)
+  let n = (((r0 >> 62) + (h >> 63)) & 3) as i32
+  let c0 = (h as i64) >> 11
+  let c1 = (((h << 53) | (l >> 11)) >> 11) as i64
+  let c2 = ((l << 42) >> 11) as i64
+  let unit = 1.1102230246251565e-16 as f64
+  let (f, fe) = two_sum64(c0 as f64 * unit, c1 as f64 * (unit * unit))
+  let f_lo = fe + c2 as f64 * (unit * unit * unit)
+  // (f + f_lo) * pi/2, as hi + lo.
+  let (ph, pe) = two_prod64(f, 1.5707963267948966)
+  let t = pe + (f * 6.123233995736766e-17 + f_lo * 1.5707963267948966)
+  let hi = ph + t
+  (n, hi, t - (hi - ph))
+}
+
+// A finite angle as n quarter turns and hi + lo, from about -pi/4 to
+// pi/4: below 2^19 * pi/2 less n times pi/2 in three parts of 33 bits,
+// each product exact and what each step leaves out kept (fdlibm's
+// e_rem_pio2.c, with no step left out), else quarters64_far.
+fn quarters64(x: f64) -> (i32, f64, f64) {
+  if abs64(x) > 823549.6653973004 {
+    let (n, hi, lo) = quarters64_far(abs64(x))
+    if x < 0.0 { ((4 - n) & 3, -hi, -lo) } else { (n, hi, lo) }
+  } else {
+    let k = floor64(x * 0.6366197723675814 + 0.5)
+    let (r1, e1) = two_sum64(x - k * 1.5707963267341256, -(k * 6.077100506303966e-11))
+    let (r2, e2) = two_sum64(r1, -(k * 2.0222662487111665e-21))
+    let rest = (e1 + e2) - k * 8.4784276603689e-32
+    let hi = r2 + rest
+    (((k as i64) & 3) as i32, hi, rest - (hi - r2))
+  }
+}
+
+// sin and cos of hi + lo, from -pi/4 to pi/4 (fdlibm's k_sin.c and
+// k_cos.c).
+fn sin64_near(x: f64, y: f64) -> f64 {
+  let z = x * x
+  let w = z * z
+  let r = 8.33333333332248946124e-03 + z * (-1.98412698298579493134e-04 +
+          z * 2.75573137070700676789e-06) +
+          z * w * (-2.50507602534068634195e-08 + z * 1.58969099521155010221e-10)
+  let v = z * x
+  x - ((z * (0.5 * y - v * r) - y) - v * -1.66666666666666324348e-01)
+}
+fn cos64_near(x: f64, y: f64) -> f64 {
+  let z = x * x
+  let w = z * z
+  let r = z * (4.16666666666666019037e-02 + z * (-1.38888888888741095749e-03 +
+          z * 2.48015872894767294178e-05)) +
+          w * w * (-2.75573143513906633035e-07 + z * (2.08757232129817482790e-09 +
+          z * -1.13596475577881948265e-11))
+  let hz = 0.5 * z
+  let one = 1.0 - hz
+  one + (((1.0 - one) - hz) + (z * r - x * y))
+}
+
+// Of an angle in radians: not a number for an infinity.
+fn sin64(x: f64) -> f64 {
+  if x - x != 0.0 { nan64() }
+  else {
+    let (n, hi, lo) = quarters64(x)
+    if n == 0 { sin64_near(hi, lo) }
+    else if n == 1 { cos64_near(hi, lo) }
+    else if n == 2 { -sin64_near(hi, lo) }
+    else { -cos64_near(hi, lo) }
+  }
+}
+fn cos64(x: f64) -> f64 {
+  if x - x != 0.0 { nan64() }
+  else {
+    let (n, hi, lo) = quarters64(x)
+    if n == 0 { cos64_near(hi, lo) }
+    else if n == 1 { -sin64_near(hi, lo) }
+    else if n == 2 { -cos64_near(hi, lo) }
+    else { sin64_near(hi, lo) }
+  }
+}
 
 // Square root, powers and logarithms. `pow(x, y)` is x to the power of y,
-// `exp(x)` e to the power of x, `log` the natural logarithm.
-extern fn sqrt(x: f32) -> f32
-extern fn pow(x: f32, y: f32) -> f32
-extern fn exp(x: f32) -> f32
-extern fn log(x: f32) -> f32
+// `exp(x)` e to the power of x, `log` the natural logarithm. (`sqrt` of
+// an f32 or an f64 is built in.)
+fn pow(x: f32, y: f32) -> f32 { pow64(x as f64, y as f64) as f32 }
+fn exp(x: f32) -> f32 { exp64(x as f64) as f32 }
+fn log(x: f32) -> f32 { log64(x as f64) as f32 }
 extern fn log2(x: f32) -> f32
 
 // Angles. `atan2(y, x)` is the angle of the point (x, y), from -pi to pi.
-extern fn sin(x: f32) -> f32
-extern fn cos(x: f32) -> f32
+fn sin(x: f32) -> f32 { sin64(x as f64) as f32 }
+fn cos(x: f32) -> f32 { cos64(x as f64) as f32 }
 extern fn tan(x: f32) -> f32
 extern fn asin(x: f32) -> f32
 extern fn acos(x: f32) -> f32
 extern fn atan(x: f32) -> f32
 extern fn atan2(y: f32, x: f32) -> f32
 
-// To a whole number, still a float: down, up, to the nearest (halves away
-// from 0), and towards 0. `x as i32` then makes it an integer.
-extern fn floor(x: f32) -> f32
-extern fn ceil(x: f32) -> f32
-extern fn round(x: f32) -> f32
-extern fn trunc(x: f32) -> f32
+fn floor(x: f32) -> f32 { floor64(x as f64) as f32 }
+fn ceil(x: f32) -> f32 { ceil64(x as f64) as f32 }
+fn round(x: f32) -> f32 { round64(x as f64) as f32 }
+fn trunc(x: f32) -> f32 { trunc64(x as f64) as f32 }
 // What is left of x after taking y away as often as it fits, with x's
 // sign (`%` does the same).
 extern fn fmod(x: f32, y: f32) -> f32
 
-extern fn sqrt64(x: f64) -> f64
-extern fn pow64(x: f64, y: f64) -> f64
-extern fn exp64(x: f64) -> f64
-extern fn log64(x: f64) -> f64
 extern fn log264(x: f64) -> f64
-extern fn sin64(x: f64) -> f64
-extern fn cos64(x: f64) -> f64
 extern fn tan64(x: f64) -> f64
 extern fn asin64(x: f64) -> f64
 extern fn acos64(x: f64) -> f64
 extern fn atan64(x: f64) -> f64
 extern fn atan264(y: f64, x: f64) -> f64
-extern fn floor64(x: f64) -> f64
-extern fn ceil64(x: f64) -> f64
-extern fn round64(x: f64) -> f64
-extern fn trunc64(x: f64) -> f64
 extern fn fmod64(x: f64, y: f64) -> f64
 
 fn pi() -> f32 { 3.14159265358979 }
@@ -68,11 +389,6 @@ fn tau() -> f32 { 6.28318530717959 }
 fn tau64() -> f64 { 6.28318530717959 }
 fn radians(degrees: f32) -> f32 { degrees * 0.0174532925199433 }
 fn degrees(radians: f32) -> f32 { radians * 57.2957795130823 }
-
-// Without its sign.
-fn abs(x: f32) -> f32 { max(x, -x) }
-fn abs64(x: f64) -> f64 { max(x, -x) }
-fn iabs(x: i32) -> i32 { max(x, -x) }
 
 // -1, 0 or 1, as x is below, at or above 0.
 fn sign(x: f32) -> f32 { if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 } }

@@ -2007,16 +2007,27 @@ they compute, and may be called wherever a fn may. A name as it is works
 on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
 `i32`. Angles are radians.
 
-- From the machine's math library (devices/math.c), each also with `64`:
-  `sqrt`, `pow(x, y)`, `exp`, `log`, `log2`, `sin`, `cos`, `tan`, `asin`,
-  `acos`, `atan`, `atan2(y, x)`, `floor`, `ceil`, `round`, `trunc`,
-  `fmod(x, y)`.
-- Written in ent-lang: `pi()`, `tau()` (and `pi64()`, `tau64()`),
+- Written in ent-lang from what IEEE 754 rounds exactly, so the same to
+  the bit on every machine and on the GPU, each also with `64`: `pow(x,
+  y)`, `exp`, `log`, `sin`, `cos`, `floor`, `ceil`, `round` (halves away
+  from 0), `trunc`, and `sqrt64` (`sqrt` itself is built in). They follow
+  Sun's fdlibm and are within an ulp of the true value, `pow` within a
+  few where it comes near the largest or least float; the f32 ones are
+  the f64 ones rounded once. Where they give not a number its bits are
+  `0x7ff8000000000000`.
+- From the machine's math library (devices/math.c), on the CPU only,
+  each also with `64`: `log2`, `tan`, `asin`, `acos`, `atan`, `atan2(y,
+  x)`, `fmod(x, y)`.
+- Also written in ent-lang: `pi()`, `tau()` (and `pi64()`, `tau64()`),
   `radians(degrees)`, `degrees(radians)`, `abs`, `sign`, `clamp(x, low,
   high)`, `lerp(a, b, t)` (each also with `64`, and `iabs`, `isign`,
   `iclamp`), `fract`, `length(x, y)`, `distance(ax, ay, bx, by)`,
   `ipow(x, n)`.
-- `min` and `max` are built in and need no import.
+- `min` and `max` are built in and need no import; so are `sqrt(x)` of
+  an `f32` or `f64`, rounded as IEEE 754 says (as `/` is), `bits_of(x)`,
+  the bits of a float as a `u32` or `u64`, and `float_of(b)`, the float
+  of such bits (`float_of(0x7ff0000000000000)` is the infinity of `f64`):
+  what the module is written with.
 - The module `wyhash` (devices/wyhash.ent, written in ent-lang on
   `mul_wide`) has wyhash's mix and wyrand's numbers at random, as Wang
   Yi's wyhash.h (final version 4.2) gives them: `wymix(a, b)`,

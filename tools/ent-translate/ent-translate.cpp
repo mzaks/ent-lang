@@ -6,6 +6,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Tools/mlir-translate/MlirTranslateMain.h"
@@ -1011,7 +1012,8 @@ int main(int argc, char **argv) {
         return importEnt(sourceMgr, context);
       },
       [](DialectRegistry &registry) {
-        registry.insert<EntDialect, arith::ArithDialect, scf::SCFDialect>();
+        registry.insert<EntDialect, arith::ArithDialect, math::MathDialect,
+                        scf::SCFDialect>();
       });
   // What a program is made of, for what builds it: one line for each
   // source (`source`, a tab, its path) and each file it declares
@@ -1040,7 +1042,7 @@ int main(int argc, char **argv) {
       },
       [](DialectRegistry &registry) {
         registry.insert<EntDialect, arith::ArithDialect, func::FuncDialect,
-                        scf::SCFDialect>();
+                        math::MathDialect, scf::SCFDialect>();
       });
   TranslateFromMLIRRegistration externHeader(
       "ent-to-c-extern-header",
@@ -1053,7 +1055,7 @@ int main(int argc, char **argv) {
       },
       [](DialectRegistry &registry) {
         registry.insert<EntDialect, arith::ArithDialect, func::FuncDialect,
-                        scf::SCFDialect>();
+                        math::MathDialect, scf::SCFDialect>();
       });
   return failed(mlirTranslateMain(argc, argv, "ent-lang translation tool"));
 }

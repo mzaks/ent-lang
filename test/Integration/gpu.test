@@ -67,6 +67,16 @@
 // RUN: grep -c "^gpu system lay" %t.rows.ent | FileCheck %s --check-prefix=ROWSGPU
 // ROWSGPU: 1
 
+// `math`'s fns on the GPU: written in ent from what IEEE 754 rounds
+// exactly, the same bits as on the CPU.
+// RUN: %ent run %S/Inputs/gpu_math.ent > %t.math.cpu
+// RUN: %ent run %S/Inputs/gpu_math.ent --gpu > %t.math.gpu
+// RUN: %ent run %S/Inputs/gpu_math.ent --gpu --parallel > %t.math.gpupar
+// RUN: diff %t.math.cpu %t.math.gpu
+// RUN: diff %t.math.cpu %t.math.gpupar
+// RUN: FileCheck %s --check-prefix=MATH --input-file=%t.math.gpu
+// MATH: exp/log 2730369242159563463 pow 7739633407689454209 sin/cos 8859017031914014129 whole/root 11526708017173365729 f32 2146980889
+
 // A `gpu system` of an imported module: its kernel's name has no `.`.
 // RUN: %ent run %S/Inputs/gpu_module.ent --gpu | FileCheck %s --check-prefix=MODULE
 // MODULE: frame 10 sum 529470

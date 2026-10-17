@@ -1,0 +1,55 @@
+// `math` on the GPU (docs/gpu.md): its fns are written in ent from what
+// IEEE 754 rounds exactly, so a `gpu system` computes them to the same
+// bits as the CPU. Built with and without --gpu, it prints the same: the
+// sum of the bits of every result, over angles far beyond 2^19 pi/2 too
+// (the reduction by the bits of 2/pi), powers near the ends of the range,
+// and logarithms of numbers below the least normal one. (Not a number is
+// left out: IEEE 754 leaves its bits to the machine, where an operation
+// makes one.)
+import console
+import math
+
+component Input { x: f64, y: f64 } capacity 100000
+component Output { a: u64, b: u64, c: u64, d: u64, e: u64 } capacity 100000
+unique Sums { a: u64, b: u64, c: u64, d: u64, e: u64 }
+unique Done: i32
+
+gpu system work() {
+  for i: Input, o: mut Output {
+    let x = i.x
+    o.a = bits_of(exp64(x * 0.001 - 1.0)) ^ bits_of(log64(abs64(x) + 1.0e-310))
+    o.b = bits_of(pow64(abs64(x) * 0.01 + 0.5, i.y)) ^ bits_of(pow64(-2.0, trunc64(i.y)))
+    o.c = bits_of(sin64(x)) ^ bits_of(cos64(x * 1.0e290)) ^ bits_of(cos64(x * 1000.0))
+    o.d = bits_of(floor64(x * 0.37)) ^ bits_of(round64(x * 0.5)) ^ bits_of(ceil64(-x * 0.37)) ^
+          bits_of(sqrt64(abs64(x)))
+    o.e = (bits_of(sin(x as f32)) ^ bits_of(exp((x * 0.01) as f32)) ^ bits_of(log(abs(x as f32) + 0.5)) ^
+           bits_of(pow(abs(x as f32) * 0.01 + 0.5, (i.y * 0.25) as f32)) ^ bits_of(sqrt(x as f32 + 1100.0))) as u64
+  }
+}
+system sum() {
+  Sums.a = 0
+  Sums.b = 0
+  Sums.c = 0
+  Sums.d = 0
+  Sums.e = 0
+  for o: Output {
+    Sums.a += o.a
+    Sums.b += o.b
+    Sums.c += o.c
+    Sums.d += o.d
+    Sums.e += o.e
+  }
+  spawn { Print { line: "exp/log {Sums.a} pow {Sums.b} sin/cos {Sums.c} whole/root {Sums.d} f32 {Sums.e}" } }
+  Done = 1
+}
+schedule step() { work()  sum()  write()  clear() }
+
+world {
+  for n in 0..100000 {
+    let x = (n as f64 - 50000.0) * 0.0213 + (n % 7) as f64 * 0.125
+    spawn { Input { x: x, y: ((n * 37) % 1401) as f64 * 0.5 - 350.0 },
+            Output { a: 0, b: 0, c: 0, d: 0, e: 0 } }
+  }
+}
+
+main { loop { step() } until Done == 1 }

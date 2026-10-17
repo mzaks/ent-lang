@@ -23,7 +23,7 @@
 // A way is a byte, a tile two results.
 // LLVM-DAG: define {{.*}}i8 @ent_choose(i7040 %{{.*}}, i32 %{{.*}}, i32 %{{.*}}, i8 %{{.*}}, i32 %{{.*}}, i32 %{{.*}})
 // LLVM-DAG: define {{.*}}{ i32, i32 } @ent_step(i32 %{{.*}}, i32 %{{.*}}, i8 %{{.*}})
-// LLVM-DAG: declare float @ent_math_floor(float)
+// LLVM-DAG: define float @ent_math_floor(float %{{.*}})
 // LLVM-DAG: declare void @ent_window_sector(float, float, float, float, float, i32)
 
 // ACCESS:     remark: reads Tick.dt, Power.value

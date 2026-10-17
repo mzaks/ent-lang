@@ -122,8 +122,14 @@ def EntGpuKernelNames : Pass<"ent-gpu-kernel-names", "ModuleOp"> {
     `.` in a name, so the driver refuses the kernels. This replaces each
     `.` of a kernel's name by `_`, in the kernel and its launches. Run it
     after the outlining.
+
+    It also makes each `math.sqrt` of a kernel NVVM's own root rounded to
+    the nearest (`llvm.nvvm.sqrt.rn.f` and `.d`): the lowering to NVVM
+    would call libdevice, whose f32 root is an approximate one unless the
+    module asks otherwise. So a root rounds as on the CPU.
   }];
-  let dependentDialects = ["::mlir::gpu::GPUDialect"];
+  let dependentDialects = ["::mlir::gpu::GPUDialect",
+                           "::mlir::LLVM::LLVMDialect"];
 }
 
 def EntOmpNowait : Pass<"ent-omp-nowait"> {
