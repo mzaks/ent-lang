@@ -844,6 +844,20 @@ of a depth.
   the order of the `for`, when the `for` ends: a number, a bool, an enum
   or an entity (`for b: Box with Main { View.h = b.h }`). Read in the
   same `for`, it is as it was before.
+- A running sum: `let first = Laying.stubs += s.meets` in a `for`
+  accumulates as above, and `first` is what the field had come to before
+  this entity's value: what it held when the `for` started, with the
+  values of the entities before this one, in the `for`'s order
+  (archetype after archetype, then row). So where each entity's stubs
+  start among everybody's, or its place among those that have something
+  (`let place = Kept.count += 1` under an `if`). Also `-=`, `min=` and
+  `max=`; of whole numbers, in the body of the `for` or an `if` of it (not
+  a loop of it, nor a `for` inside it), and nothing else in the `for`
+  reads that field or accumulates into it. One entity after another the
+  field is summed into as it goes; on many cores and on the GPU in two
+  passes, the values first, then a scan of them, then the body, with the
+  same result. Not in a `for` that takes turns, where the unique is read
+  and written as it is.
 - Another entity: `Hull(target).hp -= damage` (also `+=`, `min=`, `max=`)
   combines into its field when the query ends; reading one may find nothing,
   so it is `if let hp = Hull(target).hp { ... } else { ... }`. So is a
@@ -1246,7 +1260,8 @@ go along a relation's edges (not a tree's) from either end, reading and
 writing the edges' fields and the other end's, and send whole numbers to
 other entities or accumulate them into uniques
 (`+=`, `-=`, `min=`, `max=`: the same in any order, so combined as they
-are sent), from the body or from loops in it. Not yet: sending fractions
+are sent), from the body or from loops in it, and keep running sums
+(`let first = Laying.stubs += s.meets`). Not yet: sending fractions
 or with `=`, giving a buffer rows,
 a `for` over other entities inside it, extern fns (so `math`'s), tables
 and texts. Later, or never: `connect`, `disconnect` and trees, `on` (reactive), `by`, spawning,

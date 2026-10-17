@@ -3356,6 +3356,80 @@ AccumulateOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+LogicalResult RunningOp::verify() {
+  auto query = (*this)->getParentOfType<QueryOp>();
+  if (!query)
+    return emitOpError("must be inside an 'ent.query': it gives what the "
+                       "entities before this one sent");
+  if (query.isTurn())
+    return emitOpError("is in a query whose entities take turns, where a "
+                       "unique is read and written as it is: no running sum "
+                       "is needed");
+  if (query.getCascade() || query.hasBy() ||
+      query->hasAttr(QueryOp::kTriggersAttr))
+    return emitOpError("is in a query that goes along a tree, by a field or "
+                       "reacts to changes: a running sum goes by the order "
+                       "of the archetypes and their rows");
+  for (Operation *parent = (*this)->getParentOp(); parent != query;
+       parent = parent->getParentOp())
+    if (isa<LoopLikeOpInterface, EachOp, EdgesOp>(parent))
+      return emitOpError("must not be inside a loop of the query's body "
+                         "('")
+             << parent->getName()
+             << "'): it is one value for each entity, in their order";
+  StringRef rule = getRule();
+  if (rule != "add" && rule != "min" && rule != "max")
+    return emitOpError("has unknown rule '")
+           << rule << "'; expected 'add', 'min' or 'max'";
+  auto whole = dyn_cast<IntegerType>(getValue().getType());
+  if (!whole || whole.getWidth() == 1)
+    return emitOpError("sums ")
+           << getValue().getType()
+           << ": a running sum is of whole numbers, which come to the same "
+              "however they are grouped (in parallel, in slices)";
+  return success();
+}
+
+LogicalResult RunningOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  FailureOr<Type> fieldType =
+      resolveResourceField(symbolTable, *this, getResourceAttr(), getField(),
+                           /*write=*/true);
+  if (failed(fieldType))
+    return failure();
+  if (*fieldType != getValue().getType())
+    return emitOpError("value type ")
+           << getValue().getType() << " does not match field '" << getField()
+           << "' of type " << *fieldType;
+  // What the field comes to is said by this op alone, in the query.
+  Operation *other = nullptr;
+  (*this)->getParentOfType<QueryOp>().walk([&](Operation *op) {
+    if (op == getOperation() || other)
+      return;
+    if (auto read = dyn_cast<ReadOp>(op);
+        read && read.getResourceAttr() == getResourceAttr() &&
+        read.getField() == getField())
+      other = op;
+    if (auto accumulate = dyn_cast<AccumulateOp>(op);
+        accumulate && accumulate.getResourceAttr() == getResourceAttr() &&
+        accumulate.getField() == getField())
+      other = op;
+    if (auto running = dyn_cast<RunningOp>(op);
+        running && running.getResourceAttr() == getResourceAttr() &&
+        running.getField() == getField())
+      other = op;
+  });
+  if (other) {
+    InFlightDiagnostic diag =
+        emitOpError("sums into ")
+        << getResourceAttr() << " \"" << getField()
+        << "\", which the query also reads or accumulates into: the running "
+           "sum is the one thing that sees it, and says what it comes to";
+    diag.attachNote(other->getLoc()) << "also here";
+    return diag;
+  }
+  return success();
+}
+
 LogicalResult RunOp::verify() {
   Region &condition = getCondition();
   if (!condition.empty() && condition.front().getNumArguments() != 0)

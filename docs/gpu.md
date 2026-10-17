@@ -101,6 +101,8 @@ entity and values every entity reads alike:
   in a..b`, `while`): combined atomically where they are sent, as from
   the body itself (on the CPU they go on lists, combined in the order
   of the rows and turns);
+- running sums (`let first = Laying.stubs += s.meets`, docs/syntax.md):
+  in two passes, with a scan of the values between them (below);
 - calling `fn`s of the program: compiled for the GPU like the body;
 - arithmetic on every number type. `f64` is allowed; on consumer cards
   it runs at 1/32 to 1/64 of `f32`, which `--explain` says.
@@ -405,6 +407,31 @@ the GPU for `chance`, where before it went back to the CPU between them.
 What is left of a day is mostly `chance` (5 ms, of which most is the CPU
 waiting for the GPU and taking the hazard back for `infect`), `pair`,
 `household`, `infect`, `progress`, `symptoms`: each 2 to 3.5 ms.
+
+**Running sums (2026-10-17).** What keeps `pair` on one thread, on the
+CPU too, is that where a person's stubs start is a running sum of the
+stubs of those before them. The language has it now: `let first =
+Laying.stubs += meets` in a `for` gives what the entities before this
+one sent, in the `for`'s order, and the unique all of it. One entity
+after another (a build for one core) the field is summed into as the
+loop goes. Where the loop may be parallel or the GPU's, `lowerRunning`
+makes two passes of it: a copy of the query that keeps only what the
+values summed are made of (and the `if`s and loops around them) leaves
+each row's value in a scratch array (a place for each of the query's
+rows, in their order; on the GPU in its memory, `ent_gpu_scratch`); a
+scan makes each place what came before it; then the query runs, each
+running sum read from its row's place. The scan is parallel loops like
+any other, so the GPU's path takes them as they are: chunks of 64
+combined, one by each turn, level after level until one chunk is left,
+which one turn scans, and back down each chunk scanned from where its
+sum says it starts. Whole numbers come to the same in any grouping, so
+every build gives what one after another does (`test/Integration/
+running.test`, `gpu.test`). A query with one is not fused with others:
+its first pass would read what an earlier body had not written yet.
+
+Still to do for `pair`: writing `Order` and `Index` rows at the rows a
+running sum gives, from a `for` (a buffer's rows are written only
+outside one, or in one that takes turns).
 
 **The hazard in whole numbers.** `Hazard.left` and `Household.pressure`
 are `i64`s counting 2^-32ths (`fn hazard` in `city.ent`): each amount is

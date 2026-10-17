@@ -1449,6 +1449,38 @@ def Ent_AccumulateOp : Ent_Op<"accumulate", [
   let hasVerifier = 1;
 }
 
+def Ent_RunningOp : Ent_Op<"running", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>,
+    AllTypesMatch<["value", "before"]>]> {
+  let summary = "Accumulate into a resource field, and give what it came to "
+                "before";
+  let description = [{
+    ```mlir
+    %first = ent.running @Laying "stubs" add %meets : i32
+    ```
+    Like `ent.accumulate` (`add`, `min` or `max`, of whole numbers), and
+    gives what the field had come to before this entity's value: the
+    field's value when the query started combined with the values of the
+    entities before this one, in the query's order (by archetype, then
+    row). So `%first` is a running sum, the same however the query ran:
+    one after another, or in parallel in two passes (the values first,
+    then their running sums, then the body). The field ends with all of
+    them combined.
+
+    In the body of a query (not a loop of it, nor a `for` over other
+    entities or edges, nor one that goes by a field, along a tree or
+    reacts to events); nothing else in the query reads the field or
+    accumulates into it.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$resource, StrAttr:$field,
+                       StrAttr:$rule, AnyType:$value);
+  let results = (outs AnyType:$before);
+  let assemblyFormat = [{
+    $resource $field custom<Rule>($rule) $value attr-dict `:` type($value)
+  }];
+  let hasVerifier = 1;
+}
+
 def Ent_DespawnOp : Ent_Op<"despawn", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Remove the visited entity from the world";

@@ -1116,9 +1116,11 @@ static bool isEntityLocal(QueryOp query) {
     // Applies write the entity's own slot of their buffer.
     // Edge loops visit the entity's own edges (each edge belongs to one
     // entity's range); connects fill the entity's own slot of a buffer.
+    // A running sum is one value for each entity, and the sums of those
+    // before it (two passes, see lowerRunning).
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
-            ApplyOp, AccumulateOp, YieldOp, EdgesOp, ConnectOp, DisconnectOp,
-            AppendOp>(op) ||
+            ApplyOp, AccumulateOp, RunningOp, YieldOp, EdgesOp, ConnectOp,
+            DisconnectOp, AppendOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
     // A buffer is read like a resource: no query changes one while it
@@ -1770,6 +1772,37 @@ static Value emitDiffers(IRRewriter &rewriter, Location loc, Value old,
 /// loads and stores at `entity` in the columns of `archetype`. With a
 /// `mask`, every store keeps the old value where the mask is false: the
 /// body ran for an entity it does not apply to.
+/// Marks an `ent.running` lowered in two passes (see lowerRunning): its
+/// place among the scratch arrays of the query being lowered, which hold
+/// a value for each of the query's rows (in their order: archetype after
+/// archetype, then row); with kRunningValuesAttr, in the first pass, which
+/// leaves the row's value there; else in the second, which reads what
+/// came before it.
+static constexpr llvm::StringLiteral kRunningSlotAttr = "ent.running_slot";
+static constexpr llvm::StringLiteral kRunningValuesAttr = "ent.running_values";
+/// The scratch arrays, and where the rows of the archetype whose loop is
+/// being made start in them.
+static SmallVector<Value> runningScratch;
+static llvm::DenseMap<const WorldArchetype *, Value> runningBases;
+static Value runningBase;
+
+/// What a rule starts from: what combined with any value gives that value.
+static Value runningIdentity(OpBuilder &builder, Location loc, Type type,
+                             StringRef rule) {
+  auto whole = cast<IntegerType>(type);
+  unsigned bits = whole.getWidth();
+  APInt from = APInt::getZero(bits);
+  if (rule == "min")
+    from = whole.isUnsigned() ? APInt::getMaxValue(bits)
+                              : APInt::getSignedMaxValue(bits);
+  else if (rule == "max")
+    from = whole.isUnsigned() ? APInt::getZero(bits)
+                              : APInt::getSignedMinValue(bits);
+  return arith::ConstantOp::create(
+      builder, loc, IntegerAttr::get(IntegerType::get(type.getContext(), bits),
+                                     from));
+}
+
 static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                           const WorldArchetype &archetype, WorldAccess &world,
                           const WorldLayout &layout, Value entity,
@@ -1837,13 +1870,54 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
     root->walk([&](Operation *op) {
       // (What is done at once stays, for what lowers it outside queries.)
       if (isa<GetOp, SetOp, AddOp, RemoveOp, DespawnOp, EntityOp, ApplyOp,
-              AccumulateOp, ConnectOp, AppendOp>(op) &&
+              AccumulateOp, RunningOp, ConnectOp, AppendOp>(op) &&
           !op->hasAttr(kAtOnceAttr))
         accesses.push_back(op);
     });
   for (Operation *op : accesses) {
     rewriter.setInsertionPoint(op);
     Location loc = op->getLoc();
+    if (auto running = dyn_cast<RunningOp>(op)) {
+      Value value = world.toStorage(loc, running.getValue());
+      bool noSign = hasNoSign(running.getValue().getType());
+      Value before;
+      if (auto slot = running->getAttrOfType<IntegerAttr>(kRunningSlotAttr)) {
+        // In two passes (see lowerRunning): the entity's place in all of
+        // the query's rows, where the first pass leaves its value and the
+        // scan between them what came before it.
+        Value scratch = runningScratch[slot.getInt()];
+
+        Value at = arith::AddIOp::create(rewriter, loc, runningBase, entity);
+        if (running->hasAttr(kRunningValuesAttr)) {
+          if (mask)
+            value = arith::SelectOp::create(
+                rewriter, loc, mask, value,
+                runningIdentity(rewriter, loc, running.getValue().getType(),
+                                running.getRule()));
+          memref::StoreOp::create(rewriter, loc, value, scratch,
+                                  ValueRange{at});
+          before = value;
+        } else {
+          before = memref::LoadOp::create(rewriter, loc, scratch,
+                                          ValueRange{at});
+        }
+      } else {
+        // One entity after another: the field itself, which nothing else
+        // of the query sees.
+        Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        Value field = world.resourceField(
+            running.getResourceAttr().getAttr(), running.getFieldAttr());
+        before = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
+        Value next = combine(rewriter, loc, running.getRule(), before, value,
+                             noSign);
+        if (mask)
+          next = arith::SelectOp::create(rewriter, loc, mask, next, before);
+        memref::StoreOp::create(rewriter, loc, next, field, ValueRange{zero});
+      }
+      rewriter.replaceOp(running, world.fromStorage(loc, before,
+                                                    running.getType()));
+      continue;
+    }
     if (auto get = dyn_cast<GetOp>(op)) {
       FlatSymbolRefAttr component =
           cast<RefType>(get.getRef().getType()).getComponent();
@@ -12555,6 +12629,363 @@ static Operation *keepCells(IRRewriter &rewriter, Operation *loops,
 
 static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const WorldLayout &layout, WorldAccess &world,
+                       const LoopOptions &given);
+
+static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
+                            ModuleOp module, StringRef name, ValueRange args,
+                            TypeRange results = {});
+
+/// How many rows of a running sum's scan one turn of a loop combines (see
+/// emitRunningScan).
+static constexpr int64_t kRunningChunk = 64;
+
+/// A loop over [0, count) whose turns are independent: for the GPU when
+/// `gpu`. Gives its index, inside it.
+static Value parallelTurns(IRRewriter &rewriter, Location loc, Value count,
+                           bool gpu) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                      ValueRange{count}, ValueRange{one});
+  if (gpu)
+    loop->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
+  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+  return loop.getInductionVars().front();
+}
+
+/// A loop over [from, to) carrying one value from `init`: `step` makes the
+/// next one of the index and the one carried, inside it. Gives what it
+/// comes to.
+static Value carryingLoop(IRRewriter &rewriter, Location loc, Value from,
+                          Value to, Value init,
+                          function_ref<Value(Value index, Value carried)> step) {
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto loop = scf::ForOp::create(
+      rewriter, loc, from, to, one, ValueRange{init},
+      [&](OpBuilder &, Location, Value index, ValueRange carried) {
+        Value next = step(index, carried.front());
+        scf::YieldOp::create(rewriter, loc, ValueRange{next});
+      });
+  return loop.getResult(0);
+}
+
+/// The scan of a running sum: `scratch` holds a value for each of `count`
+/// rows (and room after them, see lowerRunning); after it each row holds
+/// `start` combined with the values of the rows before it, by `rule`.
+/// Gives `start` combined with all of them, at the insertion point (on the
+/// CPU: for the GPU it is read back from the scratch, by `total`).
+///
+/// In levels: chunks of kRunningChunk rows combined, each by a turn of a
+/// parallel loop, their sums after the rows, and so on until a level has
+/// one chunk; that level is scanned by one turn, and going back down each
+/// chunk is scanned from where its sum now says it starts. Whole numbers
+/// come to the same in any grouping, so the rows' sums are what one after
+/// another would give.
+static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
+                             Value count, Value start, StringRef rule,
+                             Type valueType, bool gpu,
+                             function_ref<Value(Value at)> total) {
+  bool noSign = hasNoSign(valueType);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value chunk = arith::ConstantIndexOp::create(rewriter, loc, kRunningChunk);
+  Value identity = runningIdentity(rewriter, loc, valueType, rule);
+  // The levels' sizes and where they start, on the CPU.
+  auto levelsType = MemRefType::get({32}, rewriter.getIndexType());
+  Value sizes = memref::AllocaOp::create(rewriter, loc, levelsType);
+  Value starts = memref::AllocaOp::create(rewriter, loc, levelsType);
+  memref::StoreOp::create(rewriter, loc, count, sizes, ValueRange{zero});
+  memref::StoreOp::create(rewriter, loc, zero, starts, ValueRange{zero});
+  // (A chunk's rows: from `c * chunk` to the next or the level's end.)
+  auto chunkRows = [&](Value c, Value size) {
+    Value from = arith::MulIOp::create(rewriter, loc, c, chunk);
+    Value to = arith::MinUIOp::create(
+        rewriter, loc, arith::AddIOp::create(rewriter, loc, from, chunk), size);
+    return std::make_pair(from, to);
+  };
+  auto chunksOf = [&](Value size) {
+    return arith::CeilDivUIOp::create(rewriter, loc, size, chunk).getResult();
+  };
+  // Rows [first, last) of a level at `from`, each made what came before
+  // it, from `begin`; gives what all of them come to.
+  auto scanRows = [&](Value first, Value last, Value from, Value begin) {
+    return carryingLoop(
+        rewriter, loc, first, last, begin, [&](Value row, Value running) {
+          Value at = arith::AddIOp::create(rewriter, loc, from, row);
+          Value value = memref::LoadOp::create(rewriter, loc, scratch,
+                                               ValueRange{at});
+          memref::StoreOp::create(rewriter, loc, running, scratch,
+                                  ValueRange{at});
+          return combine(rewriter, loc, rule, running, value, noSign);
+        });
+  };
+
+  // Up: while a level has more than one chunk, its chunks' sums.
+  Type index = rewriter.getIndexType();
+  auto up = scf::WhileOp::create(rewriter, loc, TypeRange{index, index, index},
+                                 ValueRange{zero, count, zero});
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    Block *before = rewriter.createBlock(&up.getBefore(), {},
+                                         {index, index, index},
+                                         {loc, loc, loc});
+    Value more = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ugt,
+                                       before->getArgument(1), chunk);
+    scf::ConditionOp::create(rewriter, loc, more, before->getArguments());
+    Block *after = rewriter.createBlock(&up.getAfter(), {},
+                                        {index, index, index}, {loc, loc, loc});
+    Value level = after->getArgument(0), size = after->getArgument(1),
+          from = after->getArgument(2);
+    Value sums = arith::AddIOp::create(rewriter, loc, from, size);
+    Value chunks = chunksOf(size);
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      Value c = parallelTurns(rewriter, loc, chunks, gpu);
+      auto [first, last] = chunkRows(c, size);
+      Value sum = carryingLoop(
+          rewriter, loc, first, last, identity, [&](Value row, Value sum) {
+            Value at = arith::AddIOp::create(rewriter, loc, from, row);
+            Value value = memref::LoadOp::create(rewriter, loc, scratch,
+                                                 ValueRange{at});
+            return combine(rewriter, loc, rule, sum, value, noSign);
+          });
+      memref::StoreOp::create(
+          rewriter, loc, sum, scratch,
+          ValueRange{arith::AddIOp::create(rewriter, loc, sums, c)});
+    }
+    Value next = arith::AddIOp::create(rewriter, loc, level, one);
+    memref::StoreOp::create(rewriter, loc, chunks, sizes, ValueRange{next});
+    memref::StoreOp::create(rewriter, loc, sums, starts, ValueRange{next});
+    scf::YieldOp::create(rewriter, loc, ValueRange{next, chunks, sums});
+  }
+  Value levels = up.getResult(0), topSize = up.getResult(1),
+        topFrom = up.getResult(2);
+  // The top level, by one turn; the sum of all after it.
+  Value totalAt = arith::AddIOp::create(rewriter, loc, topFrom, topSize);
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    (void)parallelTurns(rewriter, loc, one, gpu);
+    Value sum = scanRows(zero, topSize, topFrom, start);
+    memref::StoreOp::create(rewriter, loc, sum, scratch, ValueRange{totalAt});
+  }
+  // Down: each level's chunks from where their sums say they start.
+  auto down = scf::ForOp::create(rewriter, loc, zero, levels, one);
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(down.getBody()->getTerminator());
+    Value level = arith::SubIOp::create(
+        rewriter, loc, arith::SubIOp::create(rewriter, loc, levels, one),
+        down.getInductionVar());
+    Value above = arith::AddIOp::create(rewriter, loc, level, one);
+    Value size = memref::LoadOp::create(rewriter, loc, sizes, ValueRange{level});
+    Value from = memref::LoadOp::create(rewriter, loc, starts, ValueRange{level});
+    Value chunks = memref::LoadOp::create(rewriter, loc, sizes, ValueRange{above});
+    Value sums = memref::LoadOp::create(rewriter, loc, starts, ValueRange{above});
+    Value c = parallelTurns(rewriter, loc, chunks, gpu);
+    Value begin = memref::LoadOp::create(
+        rewriter, loc, scratch,
+        ValueRange{arith::AddIOp::create(rewriter, loc, sums, c)});
+    auto [first, last] = chunkRows(c, size);
+    (void)scanRows(first, last, from, begin);
+  }
+  return total(totalAt);
+}
+
+/// A query with running sums (`ent.running`) where its loops may be
+/// parallel ones or the GPU's, in two passes: a copy of the query that
+/// only works out the values summed leaves each row's in a scratch array
+/// (one for each sum, a place for each of the query's rows, in their
+/// order); the scan of each makes it what came before the row
+/// (emitRunningScan), and the unique gets the whole sum; then the query
+/// itself runs, each running sum read from its row's place. (One entity
+/// after another, the sum is the unique's field as it goes: see
+/// lowerAccesses.) Gives false where the query has none to do so.
+static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
+                         const WorldLayout &layout, WorldAccess &world,
+                         const LoopOptions &options) {
+  SmallVector<RunningOp> runnings;
+  query.walk([&](RunningOp running) {
+    if (!running->hasAttr(kRunningSlotAttr))
+      runnings.push_back(running);
+  });
+  if (runnings.empty() || (!options.parallelEntities && !options.gpu))
+    return false;
+  Location loc = query.getLoc();
+  ModuleOp module = query->getParentOfType<ModuleOp>();
+  rewriter.setInsertionPoint(query);
+  // Where each archetype's rows start among the query's.
+  llvm::DenseMap<const WorldArchetype *, Value> bases;
+  Value count = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  for (const WorldArchetype &archetype : layout.archetypes)
+    if (matches(archetype, query)) {
+      bases[&archetype] = count;
+      count = arith::AddIOp::create(rewriter, loc, count,
+                                    world.count(loc, archetype));
+    }
+  // The values summed must not be running sums themselves: a pass for
+  // each of those, not done.
+  for (RunningOp running : runnings) {
+    SmallVector<Value> pending{running.getValue()};
+    llvm::SmallPtrSet<Operation *, 16> seen;
+    while (!pending.empty()) {
+      Operation *def = pending.pop_back_val().getDefiningOp();
+      if (!def || !seen.insert(def).second)
+        continue;
+      if (isa<RunningOp>(def)) {
+        running.emitError("sums a value made of another running sum of "
+                          "its 'for': not yet");
+        return true;
+      }
+      llvm::append_range(pending, def->getOperands());
+    }
+  }
+  // The scratch arrays: the rows, then room for the scan's levels (each
+  // at most a chunk's part of the one below) and the whole sum.
+  Value room = arith::AddIOp::create(
+      rewriter, loc, count,
+      arith::AddIOp::create(
+          rewriter, loc,
+          arith::DivUIOp::create(
+              rewriter, loc, count,
+              arith::ConstantIndexOp::create(rewriter, loc,
+                                             kRunningChunk - 1)),
+          arith::ConstantIndexOp::create(rewriter, loc, 64)));
+  SmallVector<Value> scratches;
+  for (auto [slot, running] : llvm::enumerate(runnings)) {
+    Type type = world.storageType(running.getValue().getType());
+    auto memrefType = MemRefType::get({ShapedType::kDynamic}, type);
+    Value scratch;
+    if (options.gpu) {
+      // (In the GPU's memory, kept by devices/gpu.c from run to run.)
+      Value bytes = arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getI64Type(),
+          arith::MulIOp::create(
+              rewriter, loc, room,
+              arith::ConstantIndexOp::create(rewriter, loc,
+                                             type.getIntOrFloatBitWidth() / 8)));
+      Value raw =
+          callGpu(rewriter, loc, module, "ent_gpu_scratch",
+                  ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                          slot, 64),
+                             bytes},
+                  TypeRange{MemRefType::get({ShapedType::kDynamic},
+                                            rewriter.getI8Type())})
+              .getResult(0);
+      scratch = memref::ViewOp::create(
+          rewriter, loc, memrefType, raw,
+          arith::ConstantIndexOp::create(rewriter, loc, 0), ValueRange{room});
+    } else {
+      scratch = memref::AllocOp::create(rewriter, loc, memrefType,
+                                        ValueRange{room});
+    }
+    scratches.push_back(scratch);
+    // (A row that sends nothing, or that the query passes over, adds
+    // nothing.)
+    OpBuilder::InsertionGuard guard(rewriter);
+    Value row = parallelTurns(rewriter, loc, count, options.gpu);
+    memref::StoreOp::create(
+        rewriter, loc,
+        runningIdentity(rewriter, loc, running.getValue().getType(),
+                        running.getRule()),
+        scratch, ValueRange{row});
+  }
+  llvm::SaveAndRestore keepScratch(runningScratch, scratches);
+  llvm::SaveAndRestore keepBases(runningBases, bases);
+
+  // The first pass: what the values summed are made of, and the ifs and
+  // loops around them; nothing of what the query does.
+  rewriter.setInsertionPoint(query);
+  auto values = cast<QueryOp>(rewriter.clone(*query));
+  SmallVector<RunningOp> copies;
+  values.walk([&](RunningOp running) { copies.push_back(running); });
+  llvm::SetVector<Operation *> needed;
+  SmallVector<Operation *> pending(copies.begin(), copies.end());
+  while (!pending.empty()) {
+    Operation *op = pending.pop_back_val();
+    if (op == values.getOperation() || !needed.insert(op))
+      continue;
+    for (Value operand : op->getOperands())
+      if (Operation *def = operand.getDefiningOp();
+          def && values->isProperAncestor(def))
+        pending.push_back(def);
+    if (Operation *parent = op->getParentOp(); parent != values.getOperation())
+      pending.push_back(parent);
+    for (Region &region : op->getRegions())
+      for (Block &block : region)
+        if (!block.empty() && block.back().hasTrait<OpTrait::IsTerminator>())
+          pending.push_back(&block.back());
+  }
+  SmallVector<Operation *> unneeded;
+  values.getBody().walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (!needed.contains(op) &&
+        op != values.getBody().front().getTerminator())
+      unneeded.push_back(op);
+  });
+  // (Users before what they use, what is in an op before it: what uses
+  // an op that goes, goes too.)
+  for (Operation *op : llvm::reverse(unneeded)) {
+    op->dropAllUses();
+    op->erase();
+  }
+  for (auto [slot, running] : llvm::enumerate(copies)) {
+    running->setAttr(kRunningSlotAttr, rewriter.getI64IntegerAttr(slot));
+    running->setAttr(kRunningValuesAttr, rewriter.getUnitAttr());
+  }
+  for (auto [slot, running] : llvm::enumerate(runnings))
+    running->setAttr(kRunningSlotAttr, rewriter.getI64IntegerAttr(slot));
+  lowerQuery(rewriter, values, layout, world, options);
+
+  // The scans, and the uniques' sums.
+  rewriter.setInsertionPoint(query);
+  for (auto [index, running] : llvm::enumerate(runnings)) {
+    int64_t slot = index;
+    Value field = world.resourceField(running.getResourceAttr().getAttr(),
+                                      running.getFieldAttr());
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
+    Type type = start.getType();
+    int64_t bytes = type.getIntOrFloatBitWidth() / 8;
+    Value sum = emitRunningScan(
+        rewriter, loc, scratches[slot], count, start, running.getRule(),
+        running.getValue().getType(), options.gpu,
+        [&](Value at) -> Value {
+          if (!options.gpu)
+            return memref::LoadOp::create(rewriter, loc, scratches[slot],
+                                          ValueRange{at});
+          Value offset = arith::IndexCastOp::create(
+              rewriter, loc, rewriter.getI64Type(),
+              arith::MulIOp::create(
+                  rewriter, loc, at,
+                  arith::ConstantIndexOp::create(rewriter, loc, bytes)));
+          Value bits =
+              callGpu(rewriter, loc, module, "ent_gpu_scratch_get",
+                      ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                              slot, 64),
+                                 offset,
+                                 arith::ConstantIntOp::create(rewriter, loc,
+                                                              bytes, 64)},
+                      TypeRange{rewriter.getI64Type()})
+                  .getResult(0);
+          return bytes == 8 ? bits
+                            : arith::TruncIOp::create(rewriter, loc, type, bits)
+                                  .getResult();
+        });
+    memref::StoreOp::create(rewriter, loc, sum, field, ValueRange{zero});
+  }
+
+  // The second pass: the query, each running sum from its row's place.
+  // (What the query becomes goes before it, the scratch's end after.)
+  if (!options.gpu) {
+    rewriter.setInsertionPointAfter(query);
+    for (Value scratch : scratches)
+      memref::DeallocOp::create(rewriter, loc, scratch);
+  }
+  lowerQuery(rewriter, query, layout, world, options);
+  return true;
+}
+
+static void lowerQuery(IRRewriter &rewriter, QueryOp query,
+                       const WorldLayout &layout, WorldAccess &world,
                        const LoopOptions &given) {
   // The `for`s over other entities in its body, first: what is left of
   // each is loops that read columns. (How many those entities are says
@@ -12591,6 +13022,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     return lowerCascade(rewriter, query, layout, world, given);
   if (query.hasBy())
     return lowerOrdered(rewriter, query, layout, world);
+  if (lowerRunning(rewriter, query, layout, world, options))
+    return;
   Location loc = query.getLoc();
   bool entityLocal = isEntityLocal(query);
   bool matched = false;
@@ -12731,6 +13164,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, options, entityLocal,
         [&](Value entity, Value rows, bool parallel) {
+          llvm::SaveAndRestore base(runningBase,
+                                    runningBases.lookup(&archetype));
           emitPart(rewriter, loc, asPart && !parallel ? "body" : "", [&] {
             llvm::SaveAndRestore uniform(uniformBodies, asPart && !parallel);
             emitQueryBody(rewriter, query, IRMapping(), archetype, world,
@@ -13112,10 +13547,6 @@ static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
   return true;
 }
 
-static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
-                            ModuleOp module, StringRef name, ValueRange args,
-                            TypeRange results = {});
-
 /// The uniques that the loops for the GPU of `queries` accumulate into:
 /// each the cell of the GPU's copy at the unique's place, which starts
 /// where its rule does (0, or the most or least a number of its type can
@@ -13454,9 +13885,11 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       bool writesResource =
           system
               .walk([](Operation *op) {
+                // (A running sum has passes of its own.)
                 return isa<SpawnOp, DespawnOp, EachOp, EdgesOp, ConnectOp,
                            AppendOp, ClearOp, BufferLenOp, BufferAtOp,
-                           BufferOfOp, BufferSetOp, BufferFillOp>(op)
+                           BufferOfOp, BufferSetOp, BufferFillOp,
+                           RunningOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })

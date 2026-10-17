@@ -210,6 +210,46 @@ int64_t ent_gpu_cell_get(int64_t offset, int64_t bytes) {
   return bits;
 }
 
+// The scratch arrays of running sums (see lowerRunning): one for each
+// running sum of a query, in the GPU's memory, kept from run to run and
+// made bigger where a run needs more. (Queries run one after another on
+// the stream: one's kernels are done with them before the next's start.)
+static CUdeviceptr scratches[16];
+static int64_t scratchBytes[16];
+
+void _mlir_ciface_ent_gpu_scratch(ent_gpu_memref *scratch, int64_t slot,
+                                  int64_t size) {
+  if (slot < 0 || slot >= 16) {
+    fprintf(stderr, "ent: the GPU: more than 16 running sums in a 'for'\n");
+    exit(3);
+  }
+  if (size > scratchBytes[slot]) {
+    start();
+    if (scratches[slot])
+      check(cuMemFreeAsync(scratches[slot], stream), "cuMemFreeAsync");
+    int64_t bytes = size + size / 4;
+    check(cuMemAllocAsync(&scratches[slot], (size_t)bytes, stream),
+          "cuMemAllocAsync (a running sum)");
+    scratchBytes[slot] = bytes;
+    pending = true;
+  }
+  scratch->allocated = scratch->aligned = (char *)(uintptr_t)scratches[slot];
+  scratch->offset = 0;
+  scratch->size = size;
+  scratch->stride = 1;
+}
+
+// What a scan left at `offset` of a scratch array: the whole sum.
+int64_t ent_gpu_scratch_get(int64_t slot, int64_t offset, int64_t bytes) {
+  int64_t bits = 0;
+  check(cuMemcpyDtoHAsync(&bits, scratches[slot] + (CUdeviceptr)offset,
+                          (size_t)bytes, stream),
+        "a running sum from the GPU");
+  pending = true;
+  ent_gpu_wait();
+  return bits;
+}
+
 // For a C host, between schedule calls: everything the GPU has newer to
 // the CPU, and from then on the CPU's (the host may write any of it).
 void ent_gpu_world_to_host(void) {

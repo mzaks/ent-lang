@@ -352,6 +352,14 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       return (void)access.writes.insert({StringAttr(),
                                          accumulate.getResourceAttr().getAttr(),
                                          accumulate.getFieldAttr()});
+    // (A running sum starts from what the field holds.)
+    if (auto running = dyn_cast<RunningOp>(op)) {
+      access.reads.insert({StringAttr(), running.getResourceAttr().getAttr(),
+                           running.getFieldAttr()});
+      return (void)access.writes.insert({StringAttr(),
+                                         running.getResourceAttr().getAttr(),
+                                         running.getFieldAttr()});
+    }
     if (auto write = dyn_cast<WriteOp>(op))
       return (void)access.writes.insert({StringAttr(),
                                          write.getResourceAttr().getAttr(),

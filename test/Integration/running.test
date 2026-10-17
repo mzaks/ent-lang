@@ -1,0 +1,11 @@
+// Running sums in a `for` (docs/syntax.md): for one core, one entity
+// after another, and for all of them, in two passes with a scan between
+// them; the same either way. (On the GPU too: gpu.test.)
+// RUN: %ent run %S/Inputs/running.ent > %t.one
+// RUN: %ent run %S/Inputs/running.ent --parallel > %t.all
+// RUN: diff %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+// `stubs` is what a plain accumulate (`sent`) gives too.
+// CHECK: day 1: stubs 374684 sent 374684 rows 70010 least 5 most 4278201045 check 738505140676
+// CHECK: day 2: stubs 502381 sent 502381 rows 70010 least 5 most 4227880276 check 1303275569781
+// CHECK: day 3: stubs 522944 sent 522944 rows 70010 least 9 most 4076873937 check 1452515131019

@@ -1,0 +1,60 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+// Where a running sum (`let first = Unique.field += value`) cannot be.
+
+unique Laying { stubs: i32 }
+system lay() {
+  // expected-error @+1 {{a running sum ('let first = Laying.stubs += ..') is for the body of a 'for' over entities}}
+  let first = Laying.stubs += 1
+}
+
+// -----
+
+component Stubs { meets: i32, first: i32 }
+unique Laying { stubs: i32 }
+system lay() {
+  for s: mut Stubs {
+    for k in 0..3 {
+      // expected-error @+1 {{must not be inside a loop of the query's body}}
+      let first = Laying.stubs += s.meets
+      s.first = first
+    }
+  }
+}
+
+// -----
+
+component Stubs { meets: f32, first: f32 }
+unique Laying { stubs: f32 }
+system lay() {
+  for s: mut Stubs {
+    // expected-error @+1 {{a running sum is of whole numbers}}
+    let first = Laying.stubs += s.meets
+    s.first = first
+  }
+}
+
+// -----
+
+component Stubs { meets: i32, first: i32 }
+unique Laying { stubs: i32 }
+system lay() {
+  for s: mut Stubs {
+    // expected-error @+1 {{which the query also reads or accumulates into}}
+    let first = Laying.stubs += s.meets
+    // expected-note @+1 {{also here}}
+    s.first = first + Laying.stubs
+  }
+}
+
+// -----
+
+component Stubs { meets: i32, first: i32 }
+unique Laying { stubs: i32 }
+system lay() {
+  for s: mut Stubs in turn by s.meets {
+    // expected-error @+1 {{a running sum ('let first = Laying.stubs += ..') is for the body of a 'for' over entities}}
+    let first = Laying.stubs += s.meets
+    s.first = first
+  }
+}

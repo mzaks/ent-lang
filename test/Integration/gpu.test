@@ -41,6 +41,17 @@
 // RUN: FileCheck %s --check-prefix=CHANCE --input-file=%t.chance.gpu
 // CHANCE: frame 20 hits 2255790 longest 4 total 1459851081
 
+// Running sums, with the systems that have them on the GPU: two passes and
+// the scan between them there, the same.
+// RUN: sed -e 's/^system lay/gpu system lay/' %S/Inputs/running.ent > %t.running.ent
+// RUN: %ent run %S/Inputs/running.ent > %t.running.cpu
+// RUN: %ent run %t.running.ent --gpu > %t.running.gpu
+// RUN: %ent run %t.running.ent --gpu --parallel > %t.running.gpupar
+// RUN: diff %t.running.cpu %t.running.gpu
+// RUN: diff %t.running.cpu %t.running.gpupar
+// RUN: grep -c "^gpu system lay" %t.running.ent | FileCheck %s --check-prefix=RUNNING
+// RUNNING: 2
+
 // A `gpu system` of an imported module: its kernel's name has no `.`.
 // RUN: %ent run %S/Inputs/gpu_module.ent --gpu | FileCheck %s --check-prefix=MODULE
 // MODULE: frame 10 sum 529470

@@ -430,6 +430,8 @@ private:
     return false;
   }
   /// The token after the current one.
+  bool atRunning();
+  LogicalResult parseRunning(llvm::SMLoc at);
   Token peek() {
     Lexer ahead = lexer;
     return ahead.next();
@@ -3982,9 +3984,95 @@ LogicalResult Parser::parseBlock(bool ownScope) {
   return success();
 }
 
+/// Whether `name = Unique[.field] op` follows a `let`, with `op` one of
+/// `+=`, `-=`, `min=`, `max=`: a running sum (see parseRunning).
+bool Parser::atRunning() {
+  if (!token.is(Token::Identifier))
+    return false;
+  Lexer ahead = lexer;
+  if (!ahead.next().is(Token::Assign))
+    return false;
+  Token unique = ahead.next();
+  if (!unique.is(Token::Identifier) || lookup(unique.spelling) ||
+      !uniques.count(unique.spelling))
+    return false;
+  Token next = ahead.next();
+  if (next.is(Token::Dot)) {
+    if (!ahead.next().is(Token::Identifier))
+      return false;
+    next = ahead.next();
+  }
+  if (next.is(Token::PlusAssign) || next.is(Token::MinusAssign))
+    return true;
+  return (next.isKeyword("min") || next.isKeyword("max")) &&
+         ahead.next().is(Token::Assign);
+}
+
+// let first = Unique.field += value: accumulated into the unique as in a
+// `for`, and `first` what it had come to before this entity's value (by
+// the entities before it, in the `for`'s order).
+LogicalResult Parser::parseRunning(llvm::SMLoc at) {
+  FailureOr<std::string> name = identifier("a name");
+  if (failed(name) || failed(expect(Token::Assign, "'='")))
+    return failure();
+  llvm::SMLoc uniqueAt = token.loc;
+  std::string unique = token.spelling.str();
+  advance();
+  auto record = uniques.find(unique);
+  std::string field = "value";
+  if (consumeIf(Token::Dot)) {
+    llvm::SMLoc fieldAt = token.loc;
+    FailureOr<std::string> named = identifier("a field");
+    if (failed(named))
+      return failure();
+    field = *named;
+    if (!record->second.fieldType(field))
+      return error(fieldAt,
+                   "unique '" + unique + "' has no field '" + field + "'");
+  } else if (!record->second.shorthand) {
+    return error(uniqueAt, "unique '" + unique + "' has fields; sum into one "
+                           "with '" + unique + ".field'");
+  }
+  if (!inQuery || inTurn || inFunction)
+    return error(at, "a running sum ('let " + *name + " = " + unique +
+                         (field == "value" ? "" : "." + field) +
+                         " += ..') is for the body of a 'for' over entities, "
+                         "where each entity gets what those before it sent; "
+                         "elsewhere read and write the unique");
+  Type type = record->second.fieldType(field);
+  auto op = parseAssignOp();
+  if (failed(op))
+    return failure();
+  StringRef rule = op->second ? *op->second : StringRef("add");
+  bool negate = op->first == Token::MinusAssign;
+  FailureOr<ExprPtr> value = parseStatementValue();
+  if (failed(value))
+    return failure();
+  FailureOr<mlir::Value> rhs = emit(**value, type);
+  if (failed(rhs))
+    return failure();
+  if (rhs->getType() != type)
+    return mismatch((*value)->loc, rhs->getType(), type);
+  mlir::Value v = *rhs;
+  if (negate) {
+    FailureOr<mlir::Value> negated =
+        arithmetic(loc(at), Token::Minus, noughtOf(loc(at), type), v);
+    if (failed(negated))
+      return failure();
+    v = *negated;
+  }
+  auto running = RunningOp::create(builder, loc(at), type, symbol(unique),
+                                   builder.getStringAttr(field),
+                                   builder.getStringAttr(rule), v);
+  bind(*name, Variable::ofValue(running.getBefore()));
+  return success();
+}
+
 LogicalResult Parser::parseStatement() {
   llvm::SMLoc at = token.loc;
   if (consumeKeyword("let")) {
+    if (atRunning())
+      return parseRunning(at);
     FailureOr<Let> let = parseLet(/*statement=*/true);
     if (failed(let))
       return failure();

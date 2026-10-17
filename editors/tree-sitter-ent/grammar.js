@@ -251,7 +251,17 @@ module.exports = grammar({
     // (The value may be a `for` over entities: how many its body ran
     // for.)
     let: ($) =>
-      seq('let', $._pattern, '=', field('value', $._expression)),
+      seq('let', $._pattern, '=',
+          field('value', choice($._expression, $.running))),
+
+    // let first = Unique.field += value: in a `for`, what the entities
+    // before this one sent.
+    running: ($) =>
+      prec.right(seq(field('target', $._expression),
+                     field('operator',
+                           choice('+=', '-=', seq('min', '='),
+                                  seq('max', '='))),
+                     field('value', $._expression))),
 
     var: ($) =>
       seq('var', $._pattern, optional(seq(':', field('type', $._type))), '=',
