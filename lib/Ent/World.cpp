@@ -15,6 +15,8 @@ uint64_t mlir::ent::getStorageBytes(Type type) {
     return text.getStorageBytes();
   if (auto named = dyn_cast<EnumType>(type))
     return named.getBits() / 8;
+  if (auto index = dyn_cast<IndexOfType>(type))
+    return index.getBits() / 8;
   if (auto integer = dyn_cast<IntegerType>(type)) {
     switch (integer.getWidth()) {
     case 1:
@@ -451,6 +453,9 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     WorldBuffer entry;
     entry.op = buffer;
     entry.capacity = buffer.getCapacity();
+    entry.rows = buffer->hasAttr(kIndexedAttr)
+                     ? int64_t(llvm::PowerOf2Ceil(entry.capacity))
+                     : entry.capacity;
     if (!transient(buffer)) {
       end = llvm::alignTo(end, 8);
       entry.countOffset = end;
@@ -1031,7 +1036,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
          llvm::zip(op.getFieldNames(), op.getFieldTypes())) {
       Type type = cast<TypeAttr>(typeAttr).getValue();
       uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
-      end = offset + storageBytes(type) * buffer.capacity;
+      end = offset + storageBytes(type) * buffer.rows;
       buffer.fields.push_back(
           {op.getSymNameAttr(), cast<StringAttr>(fieldName), type, offset});
     }
@@ -1207,7 +1212,7 @@ SmallVector<WorldPart, 0> WorldLayout::savedParts(std::string &why) const {
       continue;
     for (const WorldColumn &column : buffer.fields) {
       uint64_t each = bytesOf(column.type);
-      special.push_back({column.offset, each * buffer.capacity,
+      special.push_back({column.offset, each * buffer.rows,
                          buffer.countOffset, each, false});
     }
   }

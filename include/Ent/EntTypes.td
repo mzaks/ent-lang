@@ -171,6 +171,40 @@ def Ent_EnumType : Ent_Type<"Enum", "enum"> {
   }];
 }
 
+def Ent_IndexOfType : Ent_Type<"IndexOf", "index_of"> {
+  let summary = "The number of a row of one buffer";
+  let description = [{
+    `!ent.index_of<@Arena>` is a row number of the buffer `@Arena`, a type
+    of its own: it reads and writes rows of `@Arena` and of no other
+    buffer, without a check against how many rows there are. It is
+    computed with as an `i32` (`builtin.unrealized_conversion_cast` takes
+    a value to and from one) and stored as an integer of `bits` bits
+    (`!ent.index_of<@Arena, 16>`), which the buffer's capacity decides.
+
+    A buffer whose rows are read so has room for a power of two of them,
+    and the number is masked with that less one: a row past those it has
+    is read as it was left (or as it was never written), within the
+    buffer's own room.
+  }];
+  let parameters = (ins "FlatSymbolRefAttr":$buffer, "unsigned":$bits);
+  let builders = [
+    TypeBuilder<(ins "::mlir::FlatSymbolRefAttr":$buffer), [{
+      return $_get($_ctxt, buffer, 32u);
+    }]>
+  ];
+  let hasCustomAssemblyFormat = 1;
+  let extraClassDeclaration = [{
+    ::mlir::IntegerType getStorageType() const {
+      return ::mlir::IntegerType::get(getContext(), getBits());
+    }
+    /// The bits a buffer of `rows` rows (a power of two) has its numbers
+    /// stored in: as many as hold `rows - 1` and -1 (`none`).
+    static unsigned bitsFor(uint64_t rows) {
+      return rows <= 128 ? 8 : rows <= 32768 ? 16 : 32;
+    }
+  }];
+}
+
 def Ent_BufferType : Ent_Type<"Buffer", "buffer"> {
   let summary = "The rows an `ent.buffer` holds, as a function takes them";
   let description = [{

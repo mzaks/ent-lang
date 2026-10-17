@@ -30,6 +30,9 @@ static StringRef getCType(Type type) {
       name += llvm::isAlnum(c) ? c : '_';
     return names.insert(name).first->getKey();
   }
+  // A row number of a buffer: the integer it is stored as.
+  if (auto index = dyn_cast<IndexOfType>(type))
+    return getCType(index.getStorageType());
   if (auto text = dyn_cast<TextType>(type)) {
     static llvm::StringSet<> names;
     return names.insert(llvm::formatv("ent_text{0}", text.getCapacity()).str())

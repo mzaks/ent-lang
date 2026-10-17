@@ -32,3 +32,20 @@ ent.system @fill(%dx: f32) reads [@At] writes [@Shapes] {
   // CHECK: ent.invoke proc @draw(%[[S]], %{{.*}}) : (!ent.buffer<@Shapes>, f32) -> ()
   ent.invoke proc @draw(%s, %v) : (!ent.buffer<@Shapes>, f32) -> ()
 }
+
+// A buffer read and written by its own row numbers, which another
+// buffer's field holds.
+// CHECK: ent.buffer @Words (w: i32) capacity 64 {ent.indexed}
+ent.buffer @Words (w: i32) capacity 64 {ent.indexed}
+// CHECK: ent.buffer @Refs (at: !ent.index_of<@Words, 8>) capacity 4
+ent.buffer @Refs (at: !ent.index_of<@Words, 8>) capacity 4
+// CHECK-LABEL: ent.system @follow() reads [@Refs] writes [@Words]
+ent.system @follow() reads [@Refs] writes [@Words] {
+  %i = arith.constant 0 : i32
+  // CHECK: %[[C:.*]] = ent.buffer.at @Refs "at"{{\[}}%{{.*}} : i32] : !ent.index_of<@Words, 8>
+  %c = ent.buffer.at @Refs "at"[%i : i32] : !ent.index_of<@Words, 8>
+  // CHECK: ent.buffer.at @Words "w"{{\[}}%[[C]] : !ent.index_of<@Words, 8>] : i32
+  %w = ent.buffer.at @Words "w"[%c : !ent.index_of<@Words, 8>] : i32
+  // CHECK: ent.buffer.set @Words "w"{{\[}}%[[C]] : !ent.index_of<@Words, 8>] = %{{.*}} : i32
+  ent.buffer.set @Words "w"[%c : !ent.index_of<@Words, 8>] = %w : i32
+}

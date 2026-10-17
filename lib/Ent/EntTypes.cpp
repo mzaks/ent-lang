@@ -32,6 +32,26 @@ void EnumType::print(AsmPrinter &printer) const {
   printer << ">";
 }
 
+// !ent.index_of<@Buffer> or !ent.index_of<@Buffer, bits>
+Type IndexOfType::parse(AsmParser &parser) {
+  FlatSymbolRefAttr buffer;
+  unsigned bits = 32;
+  if (parser.parseLess() || parser.parseAttribute(buffer))
+    return {};
+  if (succeeded(parser.parseOptionalComma()) && parser.parseInteger(bits))
+    return {};
+  if (parser.parseGreater())
+    return {};
+  return IndexOfType::get(parser.getContext(), buffer, bits);
+}
+
+void IndexOfType::print(AsmPrinter &printer) const {
+  printer << "<" << getBuffer();
+  if (getBits() != 32)
+    printer << ", " << getBits();
+  printer << ">";
+}
+
 // !ent.buffer<@Buffer> or !ent.buffer<@Buffer, mut>
 Type BufferType::parse(AsmParser &parser) {
   FlatSymbolRefAttr name;

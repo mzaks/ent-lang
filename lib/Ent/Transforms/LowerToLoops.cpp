@@ -81,22 +81,41 @@ public:
       return text.getStorageType();
     if (auto named = dyn_cast<EnumType>(type))
       return named.getStorageType();
+    if (auto index = dyn_cast<IndexOfType>(type))
+      return index.getStorageType();
     if (auto held = dyn_cast<StringType>(type))
       return held.getStorageType();
     return type;
   }
   /// Convert a value to and from its stored form. Entity ids cross with a
   /// cast that the final type conversion removes.
+  /// A row number of a buffer is computed with as an i32, and stored in
+  /// fewer bits where the buffer's room is small.
   Value toStorage(Location loc, Value value) {
     Type type = storageType(value.getType());
     if (type == value.getType())
       return value;
+    if (auto index = dyn_cast<IndexOfType>(value.getType())) {
+      Value number = UnrealizedConversionCastOp::create(
+                         rewriter, loc, rewriter.getI32Type(), value)
+                         .getResult(0);
+      if (index.getBits() == 32)
+        return number;
+      return arith::TruncIOp::create(rewriter, loc, type, number);
+    }
     return UnrealizedConversionCastOp::create(rewriter, loc, type, value)
         .getResult(0);
   }
   Value fromStorage(Location loc, Value stored, Type type) {
     if (stored.getType() == type)
       return stored;
+    if (auto index = dyn_cast<IndexOfType>(type)) {
+      if (index.getBits() != 32)
+        stored = arith::ExtSIOp::create(rewriter, loc, rewriter.getI32Type(),
+                                        stored);
+      return UnrealizedConversionCastOp::create(rewriter, loc, type, stored)
+          .getResult(0);
+    }
     return UnrealizedConversionCastOp::create(rewriter, loc, type, stored)
         .getResult(0);
   }
@@ -628,7 +647,7 @@ public:
     return scalar(buffer.countOffset);
   }
   Value bufferField(const WorldBuffer &buffer, const WorldColumn &field) {
-    return view(field.offset, buffer.capacity, storageType(field.type));
+    return view(field.offset, buffer.rows, storageType(field.type));
   }
   /// The places of an append inside a query, for the rows of `archetype`:
   /// whether the row added one (a byte), and a column per field.
@@ -14255,6 +14274,21 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
   rewriter.replaceOp(invoke, results);
 }
 
+/// Where a row number of `buffer` (an `!ent.index_of`) is in its room:
+/// the number masked with the room (a power of two) less one, so that it
+/// is one of the rows the buffer has room for, whatever it was.
+static Value inRoom(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                    const WorldBuffer &buffer, Value number) {
+  Value index = UnrealizedConversionCastOp::create(
+                    rewriter, loc, rewriter.getI32Type(), number)
+                    .getResult(0);
+  index = arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(), index);
+  index = arith::AndIOp::create(
+      rewriter, loc, index,
+      arith::ConstantIntOp::create(rewriter, loc, buffer.rows - 1, 64));
+  return world.toIndex(loc, index);
+}
+
 /// Lower what `func`, a system, does with buffers outside its queries: a
 /// row appended is there at once, as is none after a clear; reads; and
 /// the calls of C functions that are handed one.
@@ -14332,6 +14366,15 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
     } else if (auto set = dyn_cast<BufferSetOp>(op)) {
       // Where the buffer has the row; else nothing.
       const WorldColumn *field = buffer.find(set.getField());
+      Value stored = world.toStorage(loc, set.getValue());
+      if (auto number = dyn_cast<IndexOfType>(set.getIndex().getType())) {
+        // (By a row number of the buffer: the row in its room.)
+        memref::StoreOp::create(
+            rewriter, loc, stored, world.bufferField(buffer, *field),
+            ValueRange{inRoom(rewriter, loc, world, buffer, set.getIndex())});
+        rewriter.eraseOp(op);
+        continue;
+      }
       Value index = set.getIndex();
       if (index.getType() != rewriter.getI64Type())
         index = arith::ExtSIOp::create(rewriter, loc, rewriter.getI64Type(),
@@ -14339,7 +14382,6 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       Value there = arith::CmpIOp::create(rewriter, loc,
                                           arith::CmpIPredicate::ult, index,
                                           count);
-      Value stored = world.toStorage(loc, set.getValue());
       auto branch = scf::IfOp::create(rewriter, loc, there,
                                       /*withElseRegion=*/false);
       rewriter.setInsertionPointToStart(branch.thenBlock());
@@ -14395,6 +14437,15 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       // room for whatever it holds, and nought is given.
       auto at = cast<BufferAtOp>(op);
       const WorldColumn *field = buffer.find(at.getField());
+      if (isa<IndexOfType>(at.getIndex().getType())) {
+        // (By a row number of the buffer: the row in its room, as it is.)
+        Value stored = memref::LoadOp::create(
+            rewriter, loc, world.bufferField(buffer, *field),
+            ValueRange{inRoom(rewriter, loc, world, buffer, at.getIndex())});
+        rewriter.replaceOp(op, world.fromStorage(loc, stored,
+                                                 at.getResult().getType()));
+        continue;
+      }
       Value index = at.getIndex();
       if (index.getType() != rewriter.getI64Type())
         index = arith::ExtSIOp::create(rewriter, loc, rewriter.getI64Type(),
@@ -15134,7 +15185,7 @@ static void warnAboutReactiveQueries(ModuleOp module) {
 static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
   MLIRContext *context = module.getContext();
   auto isEntity = [](Type type) {
-    return isa<EntityType, TextType, EnumType, StringType>(type) ||
+    return isa<EntityType, TextType, EnumType, IndexOfType, StringType>(type) ||
            hasNoSign(type);
   };
   bool used = module
@@ -15161,6 +15212,9 @@ static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
       [](TextType text) -> Type { return text.getStorageType(); });
   converter.addConversion(
       [](EnumType named) -> Type { return named.getStorageType(); });
+  converter.addConversion([](IndexOfType index) -> Type {
+    return IntegerType::get(index.getContext(), 32);
+  });
   converter.addConversion(
       [](StringType held) -> Type { return held.getStorageType(); });
   converter.addConversion([](IntegerType whole) -> Type {

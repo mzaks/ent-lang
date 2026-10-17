@@ -1,0 +1,48 @@
+// Row numbers of a buffer (`index of Arena`): moved on by i32s, compared,
+// cast, stored in other buffers, uniques and fn results; `none` is -1. A
+// row is read and written by one without a check: past the rows the
+// buffer has it is as it was left.
+import console
+
+buffer Arena { w: i32 } capacity 100
+buffer Marks { at: index of Arena, n: i32 } capacity 10
+buffer Big { v: i8 } capacity 30000
+unique Top { c: index of Arena, gone: index of Arena }
+
+proc place(arena: mut Arena, c: index of Arena, v: i32) -> index of Arena {
+  arena[c].w = v
+  c + 1
+}
+
+fn twice(arena: Arena, c: index of Arena) -> i32 { arena[c].w * 2 }
+
+system run() {
+  Arena = [{ w: 0 }; 10]
+  var c: index of Arena = 0
+  while c < 10 {
+    Arena[c].w = c as i32 * 3
+    c += 1
+  }
+  let back = c - 1
+  let apart = back - (2 as index of Arena)
+  Marks += { at: back, n: apart }
+  Marks += { at: none, n: 0 }
+  put("c {c} back {back} apart {apart} w {Arena[back].w}")
+  put("marks {Marks[0].at} {Marks[1].at} none {Marks[1].at == none}")
+  Top.c = place(Arena, 2 as index of Arena, 77)
+  Top.gone = none
+  put("placed {Top.c} w {Arena[2 as index of Arena].w} twice {twice(Arena, Top.c)}")
+  let l = (back ^ 1) as index of Arena
+  put("~ {~back} ^ {l} >> {(back >> 1) as i64} > {back > 3} == {back == c}")
+  // (Stored in 16 bits: 30000 rows have room for 32768.)
+  Big = [{ v: 0 }; 30000]
+  var far: index of Big = 29999
+  Big[far].v = 7
+  put("big {far} {Big[far].v} {Big[far - 29999].v}")
+  // Past the rows it has: as it was left, where a number reads nought.
+  Arena = Arena[..3]
+  put("kept {len(Arena)}: by row number {Arena[back].w}, by number {Arena[9].w}")
+}
+
+schedule go() { run() }
+main { go() }

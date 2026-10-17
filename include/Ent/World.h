@@ -401,10 +401,12 @@ struct WorldConnect {
 };
 
 /// A buffer's storage: how many rows it has (an i64 in the header) and a
-/// column per field, `capacity` values each.
+/// column per field, `rows` values each: its capacity, or the power of two
+/// at or above it where an `!ent.index_of` reads it (`kIndexedAttr`).
 struct WorldBuffer {
   Operation *op;
   int64_t capacity;
+  int64_t rows;
   uint64_t countOffset = 0;
   /// One column per field; `component` is the buffer's name.
   SmallVector<WorldColumn> fields;
@@ -662,6 +664,9 @@ struct WorldLayout {
   /// What a declaration is marked with that is not part of a saved world
   /// (`transient unique`, `transient buffer`).
   static constexpr llvm::StringLiteral kTransientAttr = "ent.transient";
+  /// On a buffer that an `!ent.index_of` reads: room for a power of two of
+  /// rows, which such a row number is masked to.
+  static constexpr llvm::StringLiteral kIndexedAttr = "ent.indexed";
   /// What of the arena a saved world holds, in the arena's order:
   /// everything, but the rows of columns and buffers beyond those in use,
   /// and what is declared transient. Where the world holds something a
