@@ -59,7 +59,7 @@ SETUP = ["parameters", "measures", "panel", "households", "settle", "apps",
          "census", "employ", "wire", "rows", "curve", "rate", "share", "seed",
          "tally"]
 DAY = ["tick", "policy", "remember", "infectiousness", "today", "lay", "pair",
-       "household", "workplace", "chance", "infect", "progress", "symptoms",
+       "household", "workplace", "chance", "infect", "moves", "progress", "symptoms",
        "tests", "trace", "told", "tally"]
 
 

@@ -7,7 +7,7 @@
 //   schedule day() {
 //     tick()  policy()  infectiousness()  today()  lay()  pair()  household()
 //     workplace()
-//     chance()  infect()  progress()  tally()
+//     chance()  infect()  moves()  progress()  tally()
 //   }
 //
 // What an ill person gives off along one meeting depends on how many

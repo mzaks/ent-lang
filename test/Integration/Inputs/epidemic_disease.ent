@@ -32,6 +32,7 @@ schedule setup() {
 
 schedule day() {
   tick()
+  moves()
   progress()
   tally()
   report()

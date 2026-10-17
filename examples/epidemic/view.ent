@@ -177,6 +177,7 @@ schedule frame() {
   workplace() run_if Pace.due
   chance() run_if Pace.due
   infect() run_if Pace.due
+  moves() run_if Pace.due
   progress() run_if Pace.due
   tally() run_if Pace.due || Pace.again
   dots()

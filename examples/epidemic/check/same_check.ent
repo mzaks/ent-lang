@@ -104,6 +104,7 @@ schedule day() {
   workplace()
   chance()
   infect()
+  moves()
   progress()
   symptoms()
   tests()

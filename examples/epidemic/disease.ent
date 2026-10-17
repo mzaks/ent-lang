@@ -9,7 +9,7 @@
 //   capacity Person 100000
 //   world { Run.seed = 1  Run.people = 100000  Run.seeded = 10 }
 //   schedule setup() { populate()  seed() }
-//   schedule day() { tick()  progress()  tally() }
+//   schedule day() { tick()  moves()  progress()  tally() }
 //
 // Nobody infects anybody yet: those `seed` infects are all there are.
 import math
@@ -191,25 +191,31 @@ system seed() {
   }
 }
 
-// A new day, with none of its moves yet (`progress` writes them: it may
-// run on the GPU, whose systems leave buffers to their `for`s).
+// A new day, with none of its moves yet (`moves` writes them).
 system tick() {
   Clock.day += 1
   Moves = []
+}
+
+// The steps `progress` is about to take, written to `Moves` where the
+// run asks for them (`Run.log`): apart from it, so that `progress` may
+// run on the GPU, whose systems give a buffer no rows.
+system moves() {
+  if Run.log {
+    for p: Person, a: Age, d: Disease where d.at == Clock.day {
+      Moves += { id: p.id, age: a.group, from: d.stage, to: d.next,
+                 days: Clock.day - d.since }
+    }
+  }
 }
 
 // Everybody whose stage ends today goes on to the next, and draws what
 // follows that and when.
 system progress() {
   for e, p: Person, a: Age, d: mut Disease where d.at == Clock.day {
-    let from = d.stage
     let stage = d.next
     let k = key(Run.seed, p.id, Clock.day, STEP)
     let next = next_stage(Ages, stage, d.path, a.group, uniform(k, 0))
-    if Run.log {
-      Moves += { id: p.id, age: a.group, from: from, to: stage,
-                 days: Clock.day - d.since }
-    }
     d.stage = stage
     d.since = Clock.day
     d.next = next

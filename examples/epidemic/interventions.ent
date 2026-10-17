@@ -4,7 +4,7 @@
 //   schedule setup() { .. parameters()  measures() .. settle()  apps() .. rows() .. }
 //   schedule day() {
 //     tick()  policy()  remember() ..
-//     infect()  progress()  symptoms()  tests()  trace()  told()  tally()  counts()
+//     infect()  moves()  progress()  symptoms()  tests()  trace()  told()  tally()  counts()
 //   }
 //
 // Whoever gets symptoms, of this illness or of another (so many of
