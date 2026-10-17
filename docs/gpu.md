@@ -481,6 +481,30 @@ ordered comparison, false where one side is not a number: `x != x`,
 which the module asks of every argument, never held, and `sin` of an
 infinity was a number. It is now IEEE 754's (`cmpf une`).
 
+How fast they are, ns a call over a million entities on one core
+(a Zen 5c core, CPU 6, `-march=native`), against glibc's:
+
+| | ent | glibc | | ent | glibc |
+|---|---|---|---|---|---|
+| `tan64` | 22.4 | 20.4 | `exp64` | 1.8 | 3.7 |
+| `atan64` | 6.3 | 13.3 | `log64` | 9.0 | 3.5 |
+| `atan264` | 21.9 | 24.2 | `log264` | 11.6 | 3.5 |
+| `sin64` | 19.2 | 19.9 | `pow64` | 45.4 | 9.9 |
+| `sin64` of 1e10 | 19.1 | 107.5 | `sin` (f32) | 20.8 | 10.6 |
+| `fmod64` | 8.7 | 6.7 | `tan` (f32) | 24.2 | 5.7 |
+| `fmod64` of 1e300 | 255 | 625 | `atan2` (f32) | 23.6 | 9.6 |
+
+`fmod` divides the fractions 11 bits at a time with `%` (a bit at a
+time it was 20.3 and 1208). `fma(a, b, c)` is built in (`math.fma`,
+made LLVM's own by `ent-gpu-kernel-names`, `fma.rn` in the PTX, where
+the lowering to NVVM would call libdevice's, which a build without
+`CUDA_PATH` does not link): IEEE 754 rounds it once, so it is the same on both
+sides, and `two_prod64` is one (`pow64` 53.0 before). What is left of
+`pow`, `log` and `log2` is their chain of operations, three divisions
+in `pow`'s, and none of them vectorized: glibc's take theirs from
+tables, with no division. The f32 ones are the f64 ones rounded, where
+glibc has shorter polynomials of their own.
+
 With it `pair` is `today()` (where today's rows are), `lay()` (a `for`
 over the people: their stubs, running sums of them and of the rows, and
 the rows of `Order` and `Index`) and `pair()` (the order of the stubs);

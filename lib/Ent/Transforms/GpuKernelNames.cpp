@@ -62,6 +62,22 @@ struct EntGpuKernelNames
       root.replaceAllUsesWith(exact.getResult(0));
       root.erase();
     }
+    // (fma as LLVM's own, `fma.rn` in the PTX: the lowering to NVVM would
+    // call libdevice's, which only a build that finds CUDA links.)
+    SmallVector<math::FmaOp> fmas;
+    module.walk([&](gpu::GPUModuleOp container) {
+      container.walk([&](math::FmaOp fma) { fmas.push_back(fma); });
+    });
+    for (math::FmaOp fma : fmas) {
+      Type type = fma.getType();
+      if (!type.isF32() && !type.isF64())
+        continue;
+      OpBuilder builder(fma);
+      auto fused = LLVM::FMAOp::create(builder, fma.getLoc(), fma.getA(),
+                                       fma.getB(), fma.getC());
+      fma.replaceAllUsesWith(fused.getResult());
+      fma.erase();
+    }
   }
 };
 

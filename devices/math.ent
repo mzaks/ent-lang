@@ -14,12 +14,13 @@
 // `i` in front for i32 (`iabs`). Angles are radians.
 //
 // Roots, powers, logarithms, angles, the whole numbers of a float and
-// what is left of a division are written here, from the operations IEEE 754 rounds exactly
-// (`+ - * /`, the built-in `sqrt`) and the bits of floats (`bits_of`,
-// `float_of`): every machine, and the GPU (docs/gpu.md), gives the same
-// results to the bit. They follow Sun's fdlibm (by way of FreeBSD's msun
-// and Mojo's standard library), within an ulp of the true value; `pow64`
-// within a few where the result is near the ends of the range. The f32
+// what is left of a division are written here, from the operations IEEE
+// 754 rounds exactly (`+ - * /`, the built-ins `sqrt` and `fma`) and the
+// bits of floats (`bits_of`, `float_of`): every machine, and the GPU
+// (docs/gpu.md), gives the same results to the bit. They follow Sun's
+// fdlibm (by way of FreeBSD's msun and Mojo's standard library), within
+// an ulp of the true value; `pow64` within a few where the result is near
+// the ends of the range. The f32
 // ones are the f64 ones, rounded once. What is left of the machine's math
 // library (asin, acos) is implemented in devices/math.c, and runs on the
 // CPU only.
@@ -87,20 +88,21 @@ fn fraction64(x: f64) -> (u64, i32) {
 }
 
 // What is left of m times 2 to the power of `shift` after taking n away
-// as often as it fits, m and n of 53 bits: long division, a bit at a
-// time.
+// as often as it fits, m and n of 53 bits: long division, 11 bits at a
+// time (what fits beside 53 in 64).
 fn remainder_bits(m: u64, n: u64, shift: i32) -> u64 {
-  var r = m
-  for i in 0..shift {
-    if r >= n { r = r - n }
-    r = r << 1
+  var r = m % n
+  var left = shift
+  while left > 0 {
+    let k = min(left, 11)
+    r = (r << (k as u64)) % n
+    left -= k
   }
-  if r >= n { r - n } else { r }
+  r
 }
 
 // What is left of x after taking y away as often as it fits, with x's
-// sign: exactly, from the whole numbers of their fractions (as musl does
-// it).
+// sign: exactly, from the whole numbers of their fractions.
 fn fmod64(x: f64, y: f64) -> f64 {
   let ax = abs64(x)
   let ay = abs64(y)
@@ -115,23 +117,15 @@ fn fmod64(x: f64, y: f64) -> f64 {
 }
 
 // a + b as the float nearest and what that leaves out, exactly; a * b
-// likewise (Veltkamp's split: the halves multiply exactly), for products
-// far from overflowing.
+// likewise (by fma, for products far from the least float).
 fn two_sum64(a: f64, b: f64) -> (f64, f64) {
   let s = a + b
   let bb = s - a
   (s, (a - (s - bb)) + (b - bb))
 }
-fn split64(a: f64) -> (f64, f64) {
-  let c = 134217729.0 * a
-  let hi = c - (c - a)
-  (hi, a - hi)
-}
 fn two_prod64(a: f64, b: f64) -> (f64, f64) {
   let p = a * b
-  let (ah, al) = split64(a)
-  let (bh, bl) = split64(b)
-  (p, ((ah * bh - p) + ah * bl + al * bh) + al * bl)
+  (p, fma(a, b, -p))
 }
 
 // e to the power of hi - lo, for |hi - lo| at most ln 2 / 2 (fdlibm's

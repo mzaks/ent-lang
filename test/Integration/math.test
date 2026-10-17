@@ -16,4 +16,5 @@
 // CHECK-NEXT: 64: 1.414214 1.0 3.141593 1.25 2.0 1.414214
 // CHECK-NEXT: tan 0.546302 atan 3.141593 asin 3.141593 nan true false false false
 // CHECK-NEXT: ends true 9223372036854775808 3.141593 true -2.0
+// CHECK-NEXT: fma 5.551115 0.0
 // CHECK-NOT:  {{.}}

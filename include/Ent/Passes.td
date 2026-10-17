@@ -126,7 +126,8 @@ def EntGpuKernelNames : Pass<"ent-gpu-kernel-names", "ModuleOp"> {
     It also makes each `math.sqrt` of a kernel NVVM's own root rounded to
     the nearest (`llvm.nvvm.sqrt.rn.f` and `.d`): the lowering to NVVM
     would call libdevice, whose f32 root is an approximate one unless the
-    module asks otherwise. So a root rounds as on the CPU.
+    module asks otherwise. So a root rounds as on the CPU. Each
+    `math.fma` becomes LLVM's own (`fma.rn`), not a call of libdevice's.
   }];
   let dependentDialects = ["::mlir::gpu::GPUDialect",
                            "::mlir::LLVM::LLVMDialect"];

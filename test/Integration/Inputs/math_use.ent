@@ -13,6 +13,7 @@ system turn() {
     s.y = round(sin(s.angle) * 100.0)
   }
 }
+fn fma64_of(x: f64) -> f64 { fma(x, 10.0, -1.0) * 1.0e17 }
 system show() {
   for s: Spot { spawn { Print { line: "{s.x} {s.y} at {round(degrees(atan2(s.y, s.x)))}" } } }
   spawn { Print { line: "sqrt {sqrt(2.0)} pow {pow(2.0, 10.0)} exp {exp(1.0)} log {log(exp(2.0))} log2 {log2(8.0)}" } }
@@ -24,6 +25,8 @@ system show() {
   let nan = nan64()
   spawn { Print { line: "tan {tan(0.5)} atan {atan(1.0) * 4.0} asin {asin(1.0) * 2.0} nan {nan != nan} {nan == nan} {nan < 1.0} {nan >= 1.0}" } }
   spawn { Print { line: "ends {tan64(infinity64()) != 0.0} {bits_of(sin64(-0.0))} {atan264(0.0, -1.0)} {fmod64(1.0, 0.0) != 0.0} {log264(0.25)}" } }
+  // (fma rounds once: 0.1 is not a tenth, and a * b + c shows by how much.)
+  spawn { Print { line: "fma {fma64_of(0.1)} {(0.1 * 10.0 - 1.0) as f64}" } }
 }
 schedule frame() { turn() show() write() clear() }
 main { loop { frame() } until N == 1 }

@@ -8492,6 +8492,30 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return error(expr.loc, "'mul_wide' gives 2 values, the high and the "
                              "low bits; take them with 'let (hi, lo) = "
                              "mul_wide(a, b)'");
+    // `fma(a, b, c)` of floats: a * b + c rounded once, as IEEE 754 says
+    // (an instruction where the machine has one, else C's fma).
+    if (expr.name == "fma") {
+      if (expr.operands.size() != 3)
+        return error(expr.loc, "'fma' takes three arguments");
+      Type type = typeOf(expr);
+      if (!type)
+        type = expected && (expected.isF32() || expected.isF64())
+                   ? expected
+                   : defaultType(*expr.operands[0]);
+      if (!type.isF32() && !type.isF64())
+        return error(expr.loc, "'fma' takes an f32 or an f64");
+      SmallVector<mlir::Value, 3> values;
+      for (const ExprPtr &operand : expr.operands) {
+        FailureOr<mlir::Value> value = emit(*operand, type);
+        if (failed(value))
+          return failure();
+        if (value->getType() != type)
+          return error(operand->loc, "'fma' takes three of the same float");
+        values.push_back(*value);
+      }
+      return math::FmaOp::create(builder, at, values[0], values[1], values[2])
+          .getResult();
+    }
     // `sqrt(x)` of a float: rounded as IEEE 754 says, the same on every
     // machine and on the GPU (as `/` is). `bits_of(x)` the bits of a
     // float as a whole number without a sign of as many, and
@@ -8539,8 +8563,8 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                                  "'; declare it before with 'fn', or one "
                                  "implemented in C with 'extern fn' or "
                                  "'extern proc' (min, max, len, mul_wide, "
-                                 "sqrt, bits_of and float_of are built "
-                                 "in)");
+                                 "sqrt, fma, bits_of and float_of are "
+                                 "built in)");
     if (expr.operands.size() != 2)
       return error(expr.loc, "'" + expr.name + "' takes two arguments");
     Type type = typeOf(expr);

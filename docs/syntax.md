@@ -2026,7 +2026,9 @@ on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
   `iclamp`), `fract`, `length(x, y)`, `distance(ax, ay, bx, by)`,
   `ipow(x, n)`.
 - `min` and `max` are built in and need no import; so are `sqrt(x)` of
-  an `f32` or `f64`, rounded as IEEE 754 says (as `/` is), `bits_of(x)`,
+  an `f32` or `f64`, rounded as IEEE 754 says (as `/` is), `fma(a, b,
+  c)`, a * b + c of three of the same float rounded once (an instruction
+  where the machine has one, else C's `fma`), `bits_of(x)`,
   the bits of a float as a `u32` or `u64`, and `float_of(b)`, the float
   of such bits (`float_of(0x7ff0000000000000)` is the infinity of `f64`):
   what the module is written with.
