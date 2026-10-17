@@ -4,7 +4,9 @@ Status: steps 1 to 4 done (the marker and its checks; the lowering; the
 runtime and `tools/ent --gpu`; measured), and after them the world kept
 on the GPU by copies the compiler places instead of managed memory (see
 Residency, and "After step 4" at the end for why), and one kernel for a
-fused sequence. G2 under way: lookups and whole-number sends built. G0 (`bench/gpu/`, results in
+fused sequence. Of G2, lookups and whole-number sends are built; the rest
+(fractions sent in the CPU's order, `math` rounding alike on both sides)
+waits for a program that needs it (2026-10-17). G0 (`bench/gpu/`, results in
 `bench/gpu/RESULTS.md`) showed that ent-opt's entity-parallel loops become
 correct kernels through upstream MLIR passes alone, that a frame of 1e7
 entities takes 3.75 ms with the world on the GPU against 14.5 ms on one
