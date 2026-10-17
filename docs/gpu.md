@@ -117,7 +117,7 @@ Errors, each naming the construct and what it waits for:
 | sending or accumulating a fraction (`f32`, `f64`), or sending with `=` | combined at the commit point in the order of the rows, which the GPU does not keep: needs the sends sorted by target and combined in that order on the GPU (keep such a system on the CPU) | later |
 | sending to a field the query also reads or writes | what is sent lands when the query ends; on the GPU it lands as it is sent | never |
 | `Marks += { ... }` (rows given to a buffer) | rows in the order of the entities: needs an ordered compaction | G2 |
-| `extern fn`, including what `math` still takes from C (`asin`, `acos`) | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule (`math`'s `exp`, `log`, `pow`, `sin`, `tan`, `atan2`, `fmod` ... are written in ent and run on both, see below) | G2 |
+| `extern fn` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule (`math` is written in ent and runs on both, see below) | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |
 | arrows up a tree, a tree's edges, `top down`, `bottom up` | trees are kept in tables the GPU does not have | later |
 | `connect`, `disconnect` | the relation is sorted again on the CPU | later |
@@ -291,7 +291,7 @@ It is a device in the sense of `devices/`: C, linked by `tools/ent` with
   remark so the program can be split differently.
 - `math` on the GPU (G2): settled, ent-lang implementations in
   `math.ent` used on both sides (below, "`math` alike on both sides").
-  `asin` and `acos` are still the machine's library's.
+  All of it now, `asin` and `acos` last.
 - Whether a `gpu system` built without `--gpu` should say so (a remark),
   or stay silent as `--parallel`'s absence does.
 
@@ -498,6 +498,8 @@ How fast they are, ns a call over a million entities on one core
 | `log64` | 3.3 | 3.2 | `log` | 1.4 | 2.8 |
 | `log264` | 3.7 | 3.5 | `log2` | 1.4 | 2.8 |
 | `pow64` | 12.4 | 9.9 | `pow` | 6.8 | 4.8 |
+| `asin64` | 7.9 | 17.9 | `asin` | 1.9 | 6.4 |
+| `acos64` | 9.3 | 17.5 | `acos` | 1.9 | 6.4 |
 | `fmod64` | 8.7 | 6.7 | | | |
 | `fmod64` of 1e300 | 255 | 626 | | | |
 
@@ -545,6 +547,13 @@ leave its last bits), else as `pow`'s logarithm, with 128 rows (64 for
 9.0 and 11.6 ns, each with a division; now 3.3 and 3.7, and glibc's to
 the bit on 99.996 % and 99.94 % of 242,000 inputs (within an ulp on the
 rest, exact at every power of 2).
+
+`asin` and `acos` are fdlibm's (e_asin.c, e_acos.c), and `math` takes
+nothing of C any more (devices/math.c is gone). Within an ulp, glibc's
+(correctly rounded) to the bit on 95.5 and 96.8 % of 180,000 inputs.
+The f32 ones round rightly on all 180,000: e_asinf.c's shorter rational
+function, worked out in f64, missed one in 600 (at 1.4 ns), and the f64
+one costs half a ns more.
 
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of

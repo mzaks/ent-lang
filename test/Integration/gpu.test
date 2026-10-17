@@ -80,7 +80,7 @@
 // MATH-NEXT: sin/cos 8859017031914014129
 // MATH-NEXT: whole/root 11526708017173365729
 // MATH-NEXT: f32 214698088967999
-// MATH-NEXT: tan/atan/log2/fmod 8782455673137470426
+// MATH-NEXT: tan/atan/asin/log2/fmod 9233774169533248285
 
 // Tables read in a `gpu system`, and in a fn it calls: the same rows.
 // RUN: %ent run %S/Inputs/gpu_table.ent > %t.table.cpu

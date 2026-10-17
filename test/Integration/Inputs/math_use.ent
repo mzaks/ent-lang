@@ -1,5 +1,4 @@
-// The math module (devices/math.ent): written in ent-lang, but for what
-// the machine's math library does (asin, acos).
+// The math module (devices/math.ent), written in ent-lang.
 import console
 import math
 component Spot { angle: f32, x: f32, y: f32 }

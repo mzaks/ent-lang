@@ -20,10 +20,8 @@
 // (docs/gpu.md), gives the same results to the bit. They follow Sun's
 // fdlibm (by way of FreeBSD's msun and Mojo's standard library), within
 // an ulp of the true value; `pow`, `log` and `log2` (f64) Arm's
-// optimized-routines (MIT), with tables. The f32 ones have shorter polynomials of their own,
-// worked out in f64 and rounded once. What is left of the machine's
-// math library (asin, acos) is implemented in devices/math.c, and runs on
-// the CPU only.
+// optimized-routines (MIT), with tables. The f32 ones have shorter
+// polynomials of their own, worked out in f64 and rounded once.
 
 // Without its sign.
 fn abs(x: f32) -> f32 { max(x, -x) }
@@ -986,6 +984,72 @@ fn atan2_of(y: f64, x: f64, short: bool) -> f64 {
 }
 fn atan264(y: f64, x: f64) -> f64 { atan2_of(y, x, false) }
 
+// asin(sqrt(t))/sqrt(t) - 1, as a rational function of t from 0 to 1/4
+// (fdlibm's e_asin.c).
+fn asin_ratio(t: f64) -> f64 {
+  t * (1.66666666666666657415e-01 + t * (-3.25565818622400915405e-01 +
+       t * (2.01212532134862925881e-01 + t * (-4.00555345006794114027e-02 +
+       t * (7.91534994289814532176e-04 + t * 3.47933107596021167570e-05))))) /
+    (1.0 + t * (-2.40339491173441421878e+00 + t * (2.02094576023350569471e+00 +
+     t * (-6.88283971605453293030e-01 + t * 7.70381505559019352791e-02))))
+}
+
+// The angle whose sin x is, from -pi/2 to pi/2 (fdlibm's e_asin.c): below
+// 1/2 of x, else pi/2 - 2 asin(sqrt((1 - |x|) / 2)), that root in two
+// parts where it is not near 1.
+fn asin64(x: f64) -> f64 {
+  let ax = abs64(x)
+  let b = bits_of(ax)
+  if b >= 0x3ff0000000000000 {
+    if ax == 1.0 { x * 1.57079632679489655800e+00 + x * 6.12323399573676603587e-17 }
+    else { nan64() }
+  }
+  else if b < 0x3e50000000000000 { x }
+  else if b < 0x3fe0000000000000 { x + x * asin_ratio(x * x) }
+  else {
+    let t = (1.0 - ax) * 0.5
+    let s = sqrt(t)
+    let r = asin_ratio(t)
+    let a = if b >= 0x3fef333300000000 {
+              1.57079632679489655800e+00 - (2.0 * (s + s * r) - 6.12323399573676603587e-17)
+            } else {
+              let w = float_of(bits_of(s) & 0xffffffff00000000)
+              let c = (t - w * w) / (s + w)
+              let p = 2.0 * s * r - (6.12323399573676603587e-17 - 2.0 * c)
+              7.85398163397448278999e-01 - (p - (7.85398163397448278999e-01 - 2.0 * w))
+            }
+    if x < 0.0 { -a } else { a }
+  }
+}
+
+// The angle whose cos x is, from 0 to pi (fdlibm's e_acos.c): below 1/2
+// pi/2 - asin(x), else 2 asin(sqrt((1 - |x|) / 2)) (from pi where x is
+// below 0), that root in two parts where x is above 0.
+fn acos64(x: f64) -> f64 {
+  let ax = abs64(x)
+  let b = bits_of(ax)
+  let pio2_hi = 1.57079632679489655800e+00 as f64
+  let pio2_lo = 6.12323399573676603587e-17 as f64
+  if b >= 0x3ff0000000000000 {
+    if x == 1.0 { 0.0 }
+    else if x == -1.0 { 3.14159265358979311600e+00 + 2.0 * pio2_lo }
+    else { nan64() }
+  }
+  else if b < 0x3c60000100000000 { pio2_hi + pio2_lo }
+  else if b < 0x3fe0000000000000 { pio2_hi - (x - (pio2_lo - x * asin_ratio(x * x))) }
+  else if x < 0.0 {
+    let z = (1.0 + x) * 0.5
+    let s = sqrt(z)
+    3.14159265358979311600e+00 - 2.0 * (s + (asin_ratio(z) * s - pio2_lo))
+  } else {
+    let z = (1.0 - x) * 0.5
+    let s = sqrt(z)
+    let df = float_of(bits_of(s) & 0xffffffff00000000)
+    let c = (z - df * df) / (s + df)
+    2.0 * (df + (asin_ratio(z) * s + c))
+  }
+}
+
 // log2(c) for the 16 c near which a fraction from 0x1.66p-1 to 0x1.66p0
 // falls, and 1/c (Arm's powf_log2_data.c).
 table powf_log2_rows { invc: f64, logc: f64 } = [
@@ -1157,8 +1221,34 @@ fn tan(x: f32) -> f32 {
     ((if odd { -cy } else { sy }) / (if odd { sy } else { cy })) as f32
   }
 }
-extern fn asin(x: f32) -> f32
-extern fn acos(x: f32) -> f32
+// (asin and acos: as asin64 and acos64, but for the root's second part,
+// which an f32 needs not; the polynomial is the f64 one, as a shorter
+// one, e_asinf.c's, leaves one in 600 a bit off.)
+fn asin(x: f32) -> f32 {
+  let d = x as f64
+  let ad = abs64(d)
+  if !(ad <= 1.0) { nan32() }
+  else if bits_of(abs(x)) < 0x39800000 { x }
+  else if ad < 0.5 { (d + d * asin_ratio(d * d)) as f32 }
+  else {
+    let t = (1.0 - ad) * 0.5
+    let s = sqrt(t)
+    let a = 1.5707963267948966 - 2.0 * (s + s * asin_ratio(t))
+    (if x < 0.0 { -a } else { a }) as f32
+  }
+}
+fn acos(x: f32) -> f32 {
+  let d = x as f64
+  let ad = abs64(d)
+  if !(ad <= 1.0) { nan32() }
+  else if ad < 0.5 { (1.5707963267948966 - (d + d * asin_ratio(d * d))) as f32 }
+  else {
+    let z = (1.0 - ad) * 0.5
+    let s = sqrt(z)
+    let a = 2.0 * (s + s * asin_ratio(z))
+    (if x < 0.0 { 3.141592653589793 - a } else { a }) as f32
+  }
+}
 fn atan(x: f32) -> f32 { to32(atan_of(x as f64, true)) }
 fn atan2(y: f32, x: f32) -> f32 { to32(atan2_of(y as f64, x as f64, true)) }
 
@@ -1170,8 +1260,6 @@ fn trunc(x: f32) -> f32 { trunc64(x as f64) as f32 }
 // sign (`%` does the same).
 fn fmod(x: f32, y: f32) -> f32 { to32(fmod64(x as f64, y as f64)) }
 
-extern fn asin64(x: f64) -> f64
-extern fn acos64(x: f64) -> f64
 
 fn pi() -> f32 { 3.14159265358979 }
 fn pi64() -> f64 { 3.14159265358979 }

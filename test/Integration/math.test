@@ -1,7 +1,6 @@
 // The math module (devices/math.ent) through the build driver: `import
-// math` brings fns for f32 (`sin`), f64 (`sin64`) and i32 (`iabs`), in
-// ent-lang but for asin and acos, C of the machine's math library
-// (devices/math.c).
+// math` brings fns for f32 (`sin`), f64 (`sin64`) and i32 (`iabs`), all
+// in ent-lang.
 // RUN: %ent run %S/Inputs/math_use.ent | FileCheck %s
 // They are fns: a `for` that calls them may run on all cores.
 // RUN: %ent run --parallel %S/Inputs/math_use.ent | FileCheck %s

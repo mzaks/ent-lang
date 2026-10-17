@@ -1267,8 +1267,8 @@ other entities or accumulate them into uniques
 are sent), from the body or from loops in it, and keep running sums
 (`let first = Laying.stubs += s.meets`). Not yet: sending fractions
 or with `=`, giving a buffer rows (writing a row it has is fine),
-a `for` over other entities inside it, extern fns (`math`'s `asin` and
-`acos`) and texts (a table's numbers are fine). Later, or never: `connect`, `disconnect` and trees, `on` (reactive), `by`, spawning,
+a `for` over other entities inside it, extern fns and texts (a table's
+numbers are fine). Later, or never: `connect`, `disconnect` and trees, `on` (reactive), `by`, spawning,
 destroying and `apart` components, procs, writing a component a reactive
 query reacts to. Around its `for`s the system reads and writes uniques;
 what it does to entities or buffers goes in a system of its own.
@@ -2011,7 +2011,8 @@ on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
 
 - Written in ent-lang from what IEEE 754 rounds exactly, so the same to
   the bit on every machine and on the GPU, each also with `64`: `pow(x,
-  y)`, `exp`, `log`, `log2`, `sin`, `cos`, `tan`, `atan`, `atan2(y, x)`,
+  y)`, `exp`, `log`, `log2`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
+  `atan2(y, x)`,
   `floor`, `ceil`, `round` (halves away from 0), `trunc`, `fmod(x, y)`,
   and `sqrt64` (`sqrt` itself is built in). They follow Sun's fdlibm and
   are within an ulp of the true value, `fmod` exact; `pow`, `log64` and
@@ -2021,8 +2022,6 @@ on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
   right as glibc's.
   Where they give not a number its bits are `0x7ff8000000000000`, of
   the f32 ones `0x7fc00000`.
-- From the machine's math library (devices/math.c), on the CPU only,
-  each also with `64`: `asin`, `acos`.
 - Also written in ent-lang: `pi()`, `tau()` (and `pi64()`, `tau64()`),
   `radians(degrees)`, `degrees(radians)`, `abs`, `sign`, `clamp(x, low,
   high)`, `lerp(a, b, t)` (each also with `64`, and `iabs`, `isign`,
