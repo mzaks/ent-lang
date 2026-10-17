@@ -549,6 +549,11 @@ struct WorldLayout {
   static constexpr uint64_t kArenaAlignment = 16384;
   static constexpr uint64_t kColumnAlignment = 64;
   static constexpr uint64_t kStagger = 17 * 64;
+  /// Where the columns of an archetype a `gpu` system visits start: the
+  /// pieces a GPU's driver moves memory between the CPU and the GPU in,
+  /// so that no such piece holds both a column's first rows and what the
+  /// CPU writes every frame (counts, uniques). See docs/gpu.md.
+  static constexpr uint64_t kGpuColumnAlignment = 65536;
 
   SmallVector<WorldArchetype, 1> archetypes;
   SmallVector<WorldResource> resources;

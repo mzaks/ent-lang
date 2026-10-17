@@ -42,6 +42,14 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
     - `ent.stage` is dissolved into its calls, or, with
       `parallel-stages`, a stage of two or more runs becomes an
       `omp.parallel` region with one `omp.section` per run.
+    - With `gpu`, the queries of `gpu` systems are for the GPU
+      (docs/gpu.md): each becomes an `scf.parallel` whatever its count,
+      tiled by 256 and mapped to blocks and threads, for
+      `--convert-parallel-loops-to-gpu`; fusion keeps them apart from
+      the CPU's loops. The CPU waits for them (a call of `ent_gpu_wait`)
+      before a run that reads what they write or writes what they read or
+      write, after one in a system whose code goes on after it, and when
+      a schedule ends.
     - Components and archetypes are erased.
   }];
   let options = [
@@ -71,6 +79,10 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
            "as the loop visits the entities, where the loop never runs in "
            "parallel, instead of buffering it until the query ends (same "
            "result)">,
+    Option<"gpu", "gpu", "bool", /*default=*/"false",
+           "Run the queries of `gpu` systems on the GPU: as mapped "
+           "scf.parallel loops, with the CPU waiting for them where it "
+           "needs what they touch">,
     Option<"explain", "explain", "bool", /*default=*/"false",
            "Emit remarks on lowering decisions, such as reactive queries "
            "that scan every entity instead of walking event logs">,
@@ -79,6 +91,7 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
     "::mlir::arith::ArithDialect",
     "::mlir::cf::ControlFlowDialect",
     "::mlir::func::FuncDialect",
+    "::mlir::gpu::GPUDialect",
     "::mlir::LLVM::LLVMDialect",
     "::mlir::memref::MemRefDialect",
     "::mlir::omp::OpenMPDialect",

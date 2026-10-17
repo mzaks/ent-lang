@@ -543,7 +543,20 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   });
   layout.headerBytes = end;
 
+  // The archetypes `gpu` systems visit.
+  llvm::SmallPtrSet<Operation *, 4> onGpu;
+  module.walk([&](SystemOp system) {
+    if (system.getGpu())
+      system.walk([&](QueryOp query) {
+        for (ArchetypeOp archetype : getMatchedArchetypes(query))
+          onGpu.insert(archetype);
+      });
+  });
+
   for (WorldArchetype &archetype : layout.archetypes) {
+    uint64_t columnAlignment = onGpu.contains(archetype.op)
+                                   ? kGpuColumnAlignment
+                                   : kColumnAlignment;
     for (Attribute attr : archetype.op.getComponents()) {
       auto componentName = cast<FlatSymbolRefAttr>(attr).getAttr();
       auto component = symbols.lookup<ComponentOp>(componentName);
@@ -555,7 +568,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
           return component.emitOpError("field ")
                  << name << " has type " << type
                  << ", which world storage does not support";
-        uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+        uint64_t offset = llvm::alignTo(end, columnAlignment) + kStagger;
         archetype.columns.push_back(
             {componentName, cast<StringAttr>(name), type, offset});
         end = offset + bytes * archetype.capacity;
@@ -563,7 +576,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       // An optional component also gets a presence byte per entity, as a
       // column with an empty field name.
       if (archetype.op.isOptional(cast<FlatSymbolRefAttr>(attr))) {
-        uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+        uint64_t offset = llvm::alignTo(end, columnAlignment) + kStagger;
         archetype.columns.push_back(
             {componentName, StringAttr::get(module.getContext(), ""),
              IntegerType::get(module.getContext(), 8), offset});
@@ -571,7 +584,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       }
     }
     auto place = [&](uint64_t bytes) {
-      uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+      uint64_t offset = llvm::alignTo(end, columnAlignment) + kStagger;
       end = offset + bytes * archetype.capacity;
       return offset;
     };
@@ -626,7 +639,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
             archetype.childRangeOffsets.push_back({begin, place(4)});
           }
         if (followed) {
-          archetype.marksOffset = llvm::alignTo(end, kColumnAlignment);
+          archetype.marksOffset = llvm::alignTo(end, columnAlignment);
           end = archetype.marksOffset + 8 * archetype.markWords();
           layout.zeroed.push_back(
               {archetype.marksOffset, uint64_t(8 * archetype.markWords())});
@@ -634,7 +647,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       }
       // A depth for every entity that can have a parent, and two more.
       archetype.levelCapacity = sources + 2;
-      uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+      uint64_t offset = llvm::alignTo(end, columnAlignment) + kStagger;
       archetype.levelStartOffset = offset;
       end = offset + 4 * archetype.levelCapacity;
       archetype.newRowOffset = place(4);

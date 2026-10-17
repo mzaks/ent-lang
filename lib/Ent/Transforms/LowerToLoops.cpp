@@ -8,8 +8,10 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
+#include "mlir/Dialect/GPU/Transforms/ParallelLoopMapper.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/Dialect/SCF/Transforms/Transforms.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/PatternMatch.h"
@@ -993,9 +995,32 @@ struct LoopOptions {
   /// sine, a root) is not done sixteen entities at a time, and is worth
   /// sharing out from far fewer entities on.
   int64_t bodyWeight = 1;
+  /// The loops being emitted are for the GPU (a `gpu` system's, built
+  /// with `gpu`): parallel whatever their count, and marked kGpuLoopAttr.
+  bool gpu = false;
+  /// The program is built with `gpu`: `gpu` systems go to the GPU.
+  bool gpuSystems = false;
 };
 
 } // namespace
+
+/// An entity loop for the GPU, until it is tiled and mapped (see
+/// mapGpuLoops).
+static constexpr llvm::StringLiteral kGpuLoopAttr = "ent.gpu_loop";
+
+/// Whether the queries of `system` go to the GPU.
+static bool onGpu(Operation *system, const LoopOptions &options) {
+  auto ours = dyn_cast_or_null<SystemOp>(system);
+  return options.gpuSystems && ours && ours.getGpu();
+}
+
+/// The options for the loops of a `gpu` system.
+static LoopOptions forGpu(LoopOptions options) {
+  options.gpu = true;
+  options.parallelEntities = true;
+  options.parallelMinEntities = 1;
+  return options;
+}
 
 /// Replace `op` (a system or schedule) by a function whose entry block is
 /// `op`'s body, extended by the world arena. Returns the function and the
@@ -1133,7 +1158,7 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
   Value count = rows ? rows : world.count(loc, archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
 
-  if (archetype.capacity == 1) {
+  if (archetype.capacity == 1 && !options.gpu) {
     Value present = arith::CmpIOp::create(
         rewriter, loc, arith::CmpIPredicate::sgt, count, zero);
     auto guard = scf::IfOp::create(rewriter, loc, present);
@@ -1175,11 +1200,16 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
     }
     auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                         ValueRange{count}, ValueRange{one});
+    if (options.gpu)
+      loop->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     emitBody(loop.getInductionVars().front(), count, /*parallel=*/true);
     return loop;
   };
 
+  // (A `gpu` system's queries are entity-local: see checkGpuSystems.)
+  if (options.gpu)
+    return emitParallel();
   if (neverParallel(archetype, options, entityLocal))
     return emitSequential();
   if (options.parallelMinEntities <= 1)
@@ -13147,12 +13177,19 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   SmallVector<RunOp> sequence;
   // The sequence's queries.
   SmallVector<QueryOp> fused;
+  // Whether the sequence's systems go to the GPU: those are fused only
+  // with each other.
+  bool sequenceOnGpu = false;
+  auto flush = [&](Operation *at) {
+    fuseRuns(rewriter, sequence, at, symbols, layout, world,
+             sequenceOnGpu ? forGpu(options) : options);
+  };
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     if (auto run = dyn_cast<RunOp>(op)) {
       // An extern system has no body to fuse; it ends a sequence too.
       auto system = symbols.lookup<SystemOp>(run.getSystem());
       if (!system) {
-        fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
+        flush(&op);
         sequence.clear();
         fused.clear();
         continue;
@@ -13199,6 +13236,13 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       }
       if (!conditional && !writesResource &&
           !computeAccess(system, archetypes).isOpaque()) {
+        bool gpu = onGpu(system, options);
+        if (!sequence.empty() && gpu != sequenceOnGpu) {
+          flush(&op);
+          sequence.clear();
+          fused.clear();
+        }
+        sequenceOnGpu = gpu;
         if (joins(system, fused)) {
           sequence.push_back(run);
           continue;
@@ -13206,7 +13250,7 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
         // It touches what the sequence sends or looks up, or the sequence
         // what it does: the sequence ends before it, and it starts the
         // next one, if its own queries allow.
-        fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
+        flush(&op);
         sequence.clear();
         fused.clear();
         if (joins(system, fused))
@@ -13219,7 +13263,7 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                isMemoryEffectFree(&op)) {
       continue;
     }
-    fuseRuns(rewriter, sequence, &op, symbols, layout, world, options);
+    flush(&op);
     sequence.clear();
     fused.clear();
   }
@@ -14455,6 +14499,157 @@ static LogicalResult convertEntityTypes(ModuleOp module, unsigned idBits) {
   return success();
 }
 
+/// Threads a block of a GPU loop has: the rows one block visits.
+static constexpr int64_t kGpuBlockRows = 256;
+
+/// Call `ent_gpu_wait` (devices/gpu.c), declaring it where it is not yet:
+/// the CPU waits for what the GPU was given to do.
+static void callGpuWait(IRRewriter &rewriter, Location loc, ModuleOp module) {
+  if (!SymbolTable::lookupSymbolIn(module, "ent_gpu_wait")) {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(module.getBody());
+    auto wait = func::FuncOp::create(rewriter, loc, "ent_gpu_wait",
+                                     rewriter.getFunctionType({}, {}));
+    wait.setPrivate();
+  }
+  func::CallOp::create(rewriter, loc, "ent_gpu_wait", TypeRange{},
+                       ValueRange{});
+}
+
+/// A `gpu` system's queries are entity-local (the verifier sees to most
+/// of it); what it cannot see before the archetypes are inferred is an
+/// `ent.add` or `ent.remove` that moves the entity, which is for the CPU.
+static LogicalResult checkGpuSystems(ModuleOp module) {
+  WalkResult result = module.walk([](SystemOp system) {
+    if (!system.getGpu())
+      return WalkResult::advance();
+    WalkResult inner = system.walk([](QueryOp query) {
+      for (ArchetypeOp archetype : getMatchedArchetypes(query))
+        if (isStructuralFor(query, archetype)) {
+          query.emitOpError("cannot run on the GPU, as its system is "
+                            "'gpu': it moves entities of ")
+              << FlatSymbolRefAttr::get(archetype.getSymNameAttr())
+              << " to another archetype, which is done on the CPU (that "
+                 "archetype does not hold optionally what it adds or "
+                 "removes)";
+          return WalkResult::interrupt();
+        }
+      if (!isEntityLocal(query)) {
+        query.emitOpError("cannot run on the GPU, as its system is 'gpu': "
+                          "it touches more than its own entity");
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    return inner;
+  });
+  return failure(result.wasInterrupted());
+}
+
+/// Whether `system` does something outside its queries, which runs on the
+/// CPU while what the GPU was given before may still be running.
+static bool hasCpuPart(Operation *system) {
+  auto ours = dyn_cast_or_null<SystemOp>(system);
+  if (!ours)
+    return true;
+  for (Operation &op : ours.getBody().front())
+    if (!isa<QueryOp>(op) && !op.hasTrait<OpTrait::IsTerminator>() &&
+        !isMemoryEffectFree(&op))
+      return true;
+  return false;
+}
+
+/// In a schedule built with `gpu`: the CPU waits for the GPU before a run
+/// (or a stage) that reads a column a GPU run since the last wait writes,
+/// or writes one it reads or writes (the relation stages are formed by);
+/// a `gpu` run waits as well where it has code of its own around its
+/// queries. And the schedule waits when it ends, for the host (H1).
+static void placeGpuWaits(IRRewriter &rewriter, func::FuncOp func,
+                          SymbolTable &symbols, const WorldLayout &layout,
+                          const LoopOptions &options) {
+  SmallVector<ArchetypeOp> archetypes;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    archetypes.push_back(archetype.op);
+  auto module = func->getParentOfType<ModuleOp>();
+  SmallVector<SystemAccess> pending;
+  for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
+    if (op.hasTrait<OpTrait::IsTerminator>()) {
+      if (!pending.empty()) {
+        rewriter.setInsertionPoint(&op);
+        callGpuWait(rewriter, op.getLoc(), module);
+      }
+      break;
+    }
+    SmallVector<RunOp> runs;
+    if (auto run = dyn_cast<RunOp>(op))
+      runs.push_back(run);
+    else if (auto stage = dyn_cast<StageOp>(op))
+      stage.walk([&](RunOp run) { runs.push_back(run); });
+    bool wait = false;
+    SmallVector<SystemAccess> launched;
+    for (RunOp run : runs) {
+      Operation *system = symbols.lookup(run.getSystem());
+      SystemAccess access = computeAccess(system, archetypes);
+      addConditionReads(run.getCondition(), access);
+      bool gpu = onGpu(system, options);
+      if (!gpu || hasCpuPart(system))
+        wait |= llvm::any_of(pending, [&](const SystemAccess &earlier) {
+          return access.conflictWith(earlier, "").has_value();
+        });
+      if (gpu)
+        launched.push_back(std::move(access));
+    }
+    if (wait) {
+      rewriter.setInsertionPoint(&op);
+      callGpuWait(rewriter, op.getLoc(), module);
+      pending.clear();
+    }
+    pending.append(launched.begin(), launched.end());
+  }
+}
+
+/// In a `gpu` system: the CPU waits after a query where the system's code
+/// goes on after it (its kernels may still be running), or where the
+/// query is in a loop or a branch of the system.
+static void placeGpuWaits(IRRewriter &rewriter, ArrayRef<QueryOp> queries,
+                          Operation *system) {
+  auto module = system->getParentOfType<ModuleOp>();
+  for (QueryOp query : queries) {
+    bool wait = query->getParentOp() != system;
+    for (Operation *next = query->getNextNode(); next && !wait;
+         next = next->getNextNode())
+      wait = !isa<QueryOp>(next) && !next->hasTrait<OpTrait::IsTerminator>() &&
+             !isMemoryEffectFree(next);
+    if (!wait)
+      continue;
+    rewriter.setInsertionPointAfter(query);
+    callGpuWait(rewriter, query.getLoc(), module);
+  }
+}
+
+/// Tile the GPU's entity loops into blocks of rows and map them to the
+/// GPU's blocks and threads, for `--convert-parallel-loops-to-gpu`.
+static void mapGpuLoops(ModuleOp module) {
+  SmallVector<scf::ParallelOp> loops;
+  module.walk([&](scf::ParallelOp loop) {
+    if (loop->hasAttr(kGpuLoopAttr))
+      loops.push_back(loop);
+  });
+  MLIRContext *context = module.getContext();
+  AffineMap identity = AffineMap::getMultiDimIdentityMap(1, context);
+  auto to = [&](gpu::Processor processor) {
+    return gpu::ParallelLoopDimMappingAttr::get(context, processor, identity,
+                                                identity);
+  };
+  for (scf::ParallelOp loop : loops) {
+    loop->removeAttr(kGpuLoopAttr);
+    auto [blocks, rows] = scf::tileParallelLoop(loop, {kGpuBlockRows},
+                                                /*noMinMaxBounds=*/true);
+    (void)gpu::setMappingAttr(blocks, {to(gpu::Processor::BlockX)});
+    (void)gpu::setMappingAttr(rows, {to(gpu::Processor::ThreadX)});
+  }
+}
+
 namespace {
 struct EntLowerToLoops
     : public mlir::ent::impl::EntLowerToLoopsBase<EntLowerToLoops> {
@@ -14465,6 +14660,8 @@ struct EntLowerToLoops
     IRRewriter rewriter(module.getContext());
     sendLists.clear();
     if (failed(inferArchetypes(module)))
+      return signalPassFailure();
+    if (failed(checkGpuSystems(module)))
       return signalPassFailure();
     FailureOr<WorldLayout> layout = WorldLayout::compute(module);
     if (failed(layout))
@@ -14705,6 +14902,7 @@ struct EntLowerToLoops
     LoopOptions options{parallelEntities, parallelMinEntities,
                         parallelMinEvents, parallelMinLevel, explain,
                         directApplies};
+    options.gpuSystems = gpu;
     SymbolTable symbols(module);
 
     for (ExternOp external : module.getOps<ExternOp>())
@@ -14772,6 +14970,8 @@ struct EntLowerToLoops
         func::ReturnOp::create(rewriter, loc);
       }
       WorldAccess world(rewriter, *layout, arena);
+      if (gpu)
+        placeGpuWaits(rewriter, func, symbols, *layout, options);
       if (fuseSystems)
         fuseSchedule(rewriter, func, symbols, *layout, world, options);
       SmallVector<RunOp> runs;
@@ -14793,6 +14993,12 @@ struct EntLowerToLoops
     }
 
     for (auto system : llvm::make_early_inc_range(module.getOps<SystemOp>())) {
+      bool systemOnGpu = onGpu(system, options);
+      if (systemOnGpu) {
+        SmallVector<QueryOp> queries;
+        system.walk([&](QueryOp query) { queries.push_back(query); });
+        placeGpuWaits(rewriter, queries, system);
+      }
       auto [func, arena] = convertToFunc(
           rewriter, system, system.getSymName(), system.getBody(), arenaType);
       func.setPrivate();
@@ -14834,7 +15040,8 @@ struct EntLowerToLoops
         Block *block = query->getBlock();
         Operation *before = query->getPrevNode();
         Operation *after = query->getNextNode();
-        lowerQuery(rewriter, query, *layout, world, options);
+        lowerQuery(rewriter, query, *layout, world,
+                   systemOnGpu ? forGpu(options) : options);
         ++scope;
         for (Operation *op = before ? before->getNextNode() : &block->front();
              op && op != after; op = op->getNextNode())
@@ -15052,6 +15259,7 @@ struct EntLowerToLoops
 
     if (failed(convertEntityTypes(module, layout->entities.idBits)))
       return signalPassFailure();
+    mapGpuLoops(module);
   }
 };
 } // namespace

@@ -1,6 +1,7 @@
 # Systems on the GPU: design of G1
 
-Status: step 1 (the marker and its checks) built; the rest is design. G0 (`bench/gpu/`, results in
+Status: steps 1 (the marker and its checks) and 2 (the lowering, without
+the hints) built; the rest is design. G0 (`bench/gpu/`, results in
 `bench/gpu/RESULTS.md`) showed that ent-opt's entity-parallel loops become
 correct kernels through upstream MLIR passes alone, that a frame of 1e7
 entities takes 3.75 ms with the world on the GPU against 14.5 ms on one
@@ -146,10 +147,14 @@ runs while the kernels do. Also:
 - an extern system that declares nothing conflicts with everything, as it
   does for stages: it waits, which covers `save_world` and `load_world`;
 - a run's `run_if` reads only uniques, which no kernel writes in G1;
-- a schedule called by a C host waits before it returns (H1: the host may
-  read the world between calls); one called by `main` does not, since
-  `main` reads only uniques. So frames of a `main` loop follow each other
-  on the stream and the CPU waits only where it needs a column.
+- a schedule waits before it returns where a GPU run since the last wait
+  may still be running (H1: a C host may read the world between calls).
+  One called by `main` would not need to, since `main` reads only
+  uniques, and frames would follow each other on the stream; built: it
+  waits too, which costs one wait a frame;
+- in a `gpu` system, the CPU waits after a query where the system's own
+  code goes on after it, or where the query is in a loop or a branch of
+  the system (its code before a query runs before the kernel starts).
 
 Whether there is anything to wait for is a flag in the world's host part,
 so a wait the compiler cannot rule out costs a branch when there is none.
@@ -161,8 +166,9 @@ host part says where it was last sent, so a column already there is not
 sent again. A spawn on the CPU then costs the pages of the new rows, not
 the column.
 
-**Layout.** In a `--gpu` build, the columns of archetypes a GPU system
-visits start at a 64 KB boundary (the driver moves managed memory in such
+**Layout.** The columns of archetypes a `gpu` system visits start at a
+64 KB boundary, in every build (the C header has the same layout as the
+program, and is made without knowing how the program is built) (the driver moves managed memory in such
 pieces), so a page the CPU writes every frame (counts, uniques) never
 holds a column's first rows. The arena grows by at most 64 KB a column.
 G0's 16 us floor may partly be this sharing; G1 measures it.
@@ -217,7 +223,13 @@ header's `ent_world_create` calls `ent_gpu_alloc` instead of
    known once the archetypes are inferred, so step 2 catches it.
 2. **Lowering.** `gpu=1`: unthresholded mapped loops, fusion by
    placement, waits from the conflict relation, hints, the 64 KB layout.
-   Checked as IR by lit tests.
+   Checked as IR by lit tests. Built but for the hints, which wait for
+   step 4 to show what they are worth: `test/Transforms/lower-gpu.mlir`
+   and `lower-gpu-invalid.mlir`. Through G0's runtime,
+   `examples/integrate.ent` gives the CPU's checksums at 1e4, 1e6 and
+   1e7 entities, 3.75 ms a frame at 1e7. The loops are tiled and mapped
+   at the end of `--ent-lower-to-loops` (`mapGpuLoops`), and its waits
+   are calls of `ent_gpu_wait`.
 3. **Runtime and tools.** `devices/gpu.c`, `tools/ent --gpu`, the GPU test
    mode; `bench/gpu/run.py` goes through `tools/ent` instead of its own
    pipeline.
