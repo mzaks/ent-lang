@@ -11,14 +11,17 @@ core, and making it fast.
 - `dimacs.ent`: the file into a buffer of literals, each clause ended by
   -1. A literal is its variable's number from 0 times two, plus one
   where negated.
-- `satprep.ent`: subsumption, strengthening and bounded variable
-  elimination before the search, as MiniSat's SimpSolver does them. Every variable is an entity with what
-  eliminating it would cost, worked out on all cores; then the variables
-  are taken in turn (`in turn by`), the cheapest first, and one goes
-  where its resolvents are no more than the clauses they replace. The
-  resolvents go into the proof; the removed clauses are kept, and a model
-  is extended to the eliminated variables and held against the clauses
-  as read.
+- `satprep.ent`: bounded variable elimination with subsumption and
+  strengthening before the search, as MiniSat's SimpSolver does them.
+  The variables come from a heap, the cheapest to eliminate first (of
+  two alike the lower first, which on a circuit is the order of its
+  gates), and go back in when their clauses change; one goes where its
+  resolvents are no more than the clauses they replace. Each resolvent
+  is held against the other clauses, and when the heap is empty the
+  clauses on the variables of the resolvents are held against the rest.
+  The resolvents go into the proof; the removed clauses are kept, and a
+  model is extended to the eliminated variables and held against the
+  clauses as read.
 - `sat.ent`: the solver. Its state is buffers sized from the problem
   (the arena of clauses, the watch lists, the trail, the variables) and
   one unique, `Search`; a round of the search is a schedule of systems,

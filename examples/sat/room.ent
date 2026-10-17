@@ -25,6 +25,9 @@ capacity Original 67108864
 capacity Pre 134217728
 capacity Occ 268435456
 capacity Elim 67108864
+capacity Queue 67108864
 capacity Gone 4194304
 capacity Mark 8388608
-capacity Candidate 4194304
+capacity Count 8388608
+capacity Touched 67108864
+capacity Fresh 4194304

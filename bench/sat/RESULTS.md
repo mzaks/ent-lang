@@ -126,3 +126,59 @@ faster with the same search, every problem of a second or more by 1 to
 
 On the 20 problems both solve, entsat takes 1,773 s, MiniSat 1,716 s.
 On SATLIB's uuf250, 24 at once: 3.7 s on average (MiniSat 4.1 s).
+
+## 2026-10-17: the modes, tried three ways
+
+Run in one mode only, the dev set says which problems need which: grs is
+solved focused (57 s, against 150 s switching) and asconhash stable,
+but focused alone solves 27, stable alone 32, and switching 37. Three
+changes to the modes were tried, each against entsat on the dev set:
+
+| build (dev set) | solved | PAR-2 | geometric mean against entsat |
+|---|---|---|---|
+| entsat | 37 | 3,770 | 1 |
+| modes as long in propagation work, not conflicts | 33 | 5,517 | |
+| a saved phase for each mode | 34 | 4,956 | 0.82 |
+| target phases from the stable mode only | 34 | 4,860 | 0.72 |
+| both of these | 35 | 4,776 | 1.07 |
+
+(The geometric mean is over the problems both solve.) The last two are
+faster where they solve, but each loses problems that entsat solves,
+and at 600 s these stay lost or come in late: ContextModel_6_4_6 takes
+188 s, and 524 s with stable-only targets, though 6.8 s in stable mode
+alone. One problem's time swings so with any change to the search. On
+the other 61 problems, stable-only targets solves one more
+(mchess18 35%, 208 s), 35 in all; entsat solves two of them (mchess18
+35% in 184 s, 6g_6color_366 in 223 s), 39 in all. None of the three is
+kept. MiniSat, pinned on all 100, solves the same 29 as on the dev set:
+PAR-2 44,462.
+
+## 2026-10-17: elimination as MiniSat orders it
+
+shift1add took entsat 215 s and MiniSat 8 s, all of it in what was
+left after preprocessing: MiniSat's elimination leaves 3 clauses of
+the 1.1 million, entsat's left 543k. Three things made the difference,
+each found by changing MiniSat until it left what entsat did:
+subsumption run backward from every clause added or strengthened
+(MiniSat with it off leaves 682k), variables taken cheapest first from
+a heap and put back when their counts change (with a fixed order, 435k),
+and ties taken by the lower variable. satprep now does all three, with
+live counts kept per literal, a signature per clause, and a round over
+the clauses on the variables of resolvents when the heap runs out. It
+leaves 1 clause on shift1add, and as few or fewer than MiniSat on grs,
+shuffling-2 and ContextModel. It is right on SATLIB, and drat-trim
+checks its proofs of 10 structured problems, shift1add's among them.
+
+| solver (all 100) | solved | SAT | UNSAT | PAR-2 | median | geometric mean |
+|---|---|---|---|---|---|---|
+| MiniSat 2.2 | 29 | 12 | 17 | 44,462 | 1 | 1 |
+| entsat | 39 | 19 | 20 | 39,578 | 1.18 | 0.96 |
+| entsat, elimination as MiniSat's | 37 | 19 | 18 | 40,131 | 1.14 | 0.64 |
+
+shift1add takes 1.3 s, shuffling-2 31 s (91 s), mod2c 85 s (130 s), grs
+95 s (121 s), Timetable_481 7.5 s (42 s), PRP 15% less. Three problems
+are new: REGRandom (188 s), DivS (140 s) and em_11_3_4 (238 s, solved by
+neither MiniSat nor entsat before). Five are lost, all of them long
+searches whose times swing with any change (see above): asconhash H4 and
+H6, ContextModel 6_3_8 and 6_4_6, mchess18 45%. mchess18 35% takes 285 s
+(184 s).
