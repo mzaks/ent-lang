@@ -156,7 +156,7 @@ module.exports = grammar({
       repeat1(choice(seq('reads', list($._name)), seq('writes', list($._name)))),
 
     system: ($) =>
-      seq('system', field('name', $.identifier), $.parameters,
+      seq(optional('gpu'), 'system', field('name', $.identifier), $.parameters,
           optional($.access), field('body', $.block)),
 
     extern_system: ($) =>

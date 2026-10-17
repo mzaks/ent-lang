@@ -640,7 +640,7 @@ private:
   std::string typedComponent;
   LogicalResult parseUnique();
   LogicalResult parseArchetype();
-  LogicalResult parseSystem(bool isExtern);
+  LogicalResult parseSystem(bool isExtern, bool gpu = false);
   LogicalResult parseFunction(bool proc, bool isExtern);
   LogicalResult parseEnum();
   LogicalResult parseTable();
@@ -1101,6 +1101,13 @@ LogicalResult Parser::parseDeclarations() {
       result = parseArchetype();
     else if (consumeKeyword("system"))
       result = parseSystem(/*isExtern=*/false);
+    else if (token.isKeyword("gpu") && peek().isKeyword("system")) {
+      advance();
+      advance();
+      result = parseSystem(/*isExtern=*/false, /*gpu=*/true);
+    } else if (token.isKeyword("gpu") && peek().isKeyword("extern"))
+      result = error("an extern system is implemented in C, on the CPU; "
+                     "only a system with a body can be 'gpu'");
     else if (consumeKeyword("extern")) {
       if (consumeKeyword("fn"))
         result = parseFunction(/*proc=*/false, /*isExtern=*/true);
@@ -3299,9 +3306,9 @@ FailureOr<ArrayAttr> Parser::parseNameList(StringRef what) {
   return builder.getArrayAttr(names);
 }
 
-// system name(params) [reads A, B] [writes C] { statements }
+// [gpu] system name(params) [reads A, B] [writes C] { statements }
 // extern system name(params) [reads A, B] [writes C]
-LogicalResult Parser::parseSystem(bool isExtern) {
+LogicalResult Parser::parseSystem(bool isExtern, bool gpu) {
   llvm::SMLoc at = token.loc;
   FailureOr<std::string> name = identifier("a system name");
   if (failed(name) || failed(expect(Token::LParen, "'('")))
@@ -3325,6 +3332,8 @@ LogicalResult Parser::parseSystem(bool isExtern) {
                                          : SystemOp::getOperationName());
   state.addAttribute(SymbolTable::getSymbolAttrName(),
                      declareSymbol(at, *name));
+  if (gpu)
+    state.addAttribute("gpu", builder.getUnitAttr());
   if (consumeKeyword("reads")) {
     FailureOr<ArrayAttr> reads = parseNameList("a component or unique");
     if (failed(reads))

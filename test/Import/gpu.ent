@@ -1,0 +1,38 @@
+// RUN: ent-translate --import-ent %s | FileCheck %s
+// RUN: ent-translate --import-ent %s | ent-opt | FileCheck %s
+
+// What a `for` of a `gpu system` may do (docs/gpu.md): its own entity, and
+// what every entity reads alike. The code around it runs on the CPU.
+
+component Position { x: f32, y: f32 }
+component Velocity { dx: f32, dy: f32 }
+tag Stunned
+unique Wind { strength: f32 }
+buffer Gusts { dx: f32 } capacity 16
+fn half(x: f32) -> f32 { x * 0.5 }
+fn gust(g: Gusts, i: i32) -> f32 { g[i].dx }
+
+// CHECK-LABEL: ent.system @move(%{{.*}}: f32) gpu {
+// CHECK: ent.query
+gpu system move(dt: f32) {
+  for e, p: mut Position, v: Velocity without Stunned where p.x < 100.0 {
+    p.x += half(v.dx) * dt + Wind.strength + gust(Gusts, 0) + Gusts[1].dx
+    p.y += v.dy * dt + len(Gusts) as f32
+    if p.x > 50.0 { e.add(Stunned) }
+  }
+  Wind.strength = 0.0
+  spawn { Position { x: 0.0, y: 0.0 }, Velocity { dx: 1.0, dy: 1.0 } }
+}
+
+// With a contract as well.
+// CHECK-LABEL: ent.system @fall(%{{.*}}: f32) gpu reads [@Position] writes [@Velocity] {
+gpu system fall(dt: f32) reads Position writes Velocity {
+  for p: Position, v: mut Velocity where p.y > 0.0 { v.dy -= 9.81 * dt }
+}
+
+// CHECK-LABEL: ent.system @plain()
+// CHECK-NOT: gpu
+// CHECK-SAME: {
+system plain() {
+  for p: mut Position { p.x = 0.0 }
+}

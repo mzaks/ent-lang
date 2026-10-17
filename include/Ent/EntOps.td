@@ -390,10 +390,23 @@ def Ent_SystemOp : Ent_Op<"system", [
     within both. `writes` implies read access, and may also name archetypes:
     the system changes their set of entities (`ent.spawn`, `ent.despawn`).
     Entry block arguments are the system's per-run parameters.
+
+    With `gpu` its queries run on the GPU where the program is built for
+    one, and on the CPU otherwise, with the same results:
+    ```mlir
+    ent.system @integrate(%dt: f32) gpu {
+    ```
+    That is a contract too: every query of the system only touches the
+    entity it visits (its components, its id, filters, in-place `ent.add`
+    and `ent.remove`) and reads what every entity reads alike (resources,
+    buffers, the program's own functions), and the verifier says which op
+    keeps one from running there. The system's code outside its queries
+    runs on the CPU.
   }];
   let arguments = (ins SymbolNameAttr:$sym_name,
                        OptionalAttr<SymbolRefArrayAttr>:$reads,
-                       OptionalAttr<SymbolRefArrayAttr>:$writes);
+                       OptionalAttr<SymbolRefArrayAttr>:$writes,
+                       UnitAttr:$gpu);
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;

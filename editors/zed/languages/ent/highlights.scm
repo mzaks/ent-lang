@@ -94,7 +94,7 @@
   (#any-of? @function.builtin "min" "max" "len"))
 
 [
-  "import" "asset" "component" "tag" "unique" "buffer" "transient" "enum" "table" "const" "prefab"
+  "import" "asset" "component" "tag" "unique" "buffer" "transient" "gpu" "enum" "table" "const" "prefab"
   "relation"
   "archetype"
   "system" "extern" "fn" "proc" "schedule" "world" "main"

@@ -298,6 +298,12 @@ where the result is the same:
   combine into their parents is then added per parent by one thread, in
   the order the rows have, so the result is the one a single pass gives.
 
+- **The GPU**: the queries of a `gpu` system, which only touch their own
+  entity and read what every entity reads alike, may run on a GPU. The
+  CPU waits for them before a run that reads what they write or writes
+  what they read or write (the relation stages are formed by), and a
+  schedule called by a C host before it returns (H1).
+
 A query that goes by a field has none of this freedom: it is its order.
 
 **Determinism.** Given the same world and arguments, a frame's result does

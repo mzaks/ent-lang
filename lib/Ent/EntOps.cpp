@@ -802,7 +802,9 @@ ParseResult SystemOp::parse(OpAsmParser &parser, OperationState &result) {
 
   // Declared access is optional; either list makes it a contract.
   ArrayAttr reads, writes;
+  bool gpu = false;
   auto parseAccess = [&]() -> ParseResult {
+    gpu = succeeded(parser.parseOptionalKeyword("gpu"));
     if (succeeded(parser.parseOptionalKeyword("reads")) &&
         parser.parseAttribute(reads))
       return failure();
@@ -817,6 +819,9 @@ ParseResult SystemOp::parse(OpAsmParser &parser, OperationState &result) {
     result.addAttribute(getReadsAttrName(result.name), reads);
   if (writes)
     result.addAttribute(getWritesAttrName(result.name), writes);
+  if (gpu)
+    result.addAttribute(getGpuAttrName(result.name),
+                        parser.getBuilder().getUnitAttr());
   return success();
 }
 
@@ -824,13 +829,16 @@ void SystemOp::print(OpAsmPrinter &p) {
   p << " ";
   p.printSymbolName(getSymName());
   printArgs(p, getBody());
+  if (getGpu())
+    p << " gpu";
   if (ArrayAttr reads = getReadsAttr())
     p << " reads " << reads;
   if (ArrayAttr writes = getWritesAttr())
     p << " writes " << writes;
   p.printOptionalAttrDictWithKeyword(
       (*this)->getAttrs(),
-      {getSymNameAttrName(), getReadsAttrName(), getWritesAttrName()});
+      {getSymNameAttrName(), getReadsAttrName(), getWritesAttrName(),
+       getGpuAttrName()});
   printBody(p, getBody());
 }
 
@@ -888,9 +896,136 @@ LogicalResult SystemOp::verify() {
   return verifyAccessLists(*this, getReadsAttr(), getWritesAttr());
 }
 
+/// Why the function `callee` (and what it calls) cannot run on the GPU,
+/// or nothing if it can.
+static std::optional<std::string>
+notForGpu(SymbolTableCollection &symbolTable, Operation *from,
+          FlatSymbolRefAttr callee, llvm::SmallPtrSetImpl<Operation *> &seen) {
+  auto function = symbolTable.lookupNearestSymbolFrom<FunctionOp>(from, callee);
+  if (!function || !seen.insert(function).second)
+    return std::nullopt;
+  if (function.getProc())
+    return "calls the proc '" + function.getSymName().str() +
+           "', which acts on the outside, from the CPU";
+  if (!function.isDefined())
+    return "calls '" + function.getSymName().str() +
+           "', an extern fn: its C runs on the CPU, and a GPU's own "
+           "functions would not round as the machine's library does";
+  std::optional<std::string> why;
+  function.getBody().walk([&](Operation *op) {
+    if (auto invoke = dyn_cast<InvokeOp>(op))
+      if (std::optional<std::string> inner = notForGpu(
+              symbolTable, function, invoke.getCalleeAttr(), seen)) {
+        why = "calls '" + function.getSymName().str() + "', which " + *inner;
+        return WalkResult::interrupt();
+      }
+    return WalkResult::advance();
+  });
+  return why;
+}
+
+/// Whether `type` is a text, of a given length or any.
+static bool isText(Type type) { return isa<TextType, StringType>(type); }
+
+/// What keeps an op of a query of a `gpu` system off the GPU, or nothing.
+/// G1 runs a query there where it only touches its own entity and reads
+/// what every entity reads alike (docs/gpu.md).
+static std::optional<std::string>
+notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
+  if (isa<ApplyOp, CombineOp>(op))
+    return std::string("sends a value to another entity, which is "
+                       "combined in order when the query ends: not on "
+                       "the GPU yet");
+  if (isa<AccumulateOp>(op))
+    return std::string("accumulates into a unique, which is combined in "
+                       "order when the query ends: not on the GPU yet");
+  if (isa<AppendOp>(op))
+    return std::string("gives a buffer rows, in the order of the "
+                       "entities: not on the GPU yet");
+  if (isa<LookupOp>(op))
+    return std::string("looks up another entity: not on the GPU yet");
+  if (isa<EachOp>(op))
+    return std::string("has a 'for' over other entities in its body: not "
+                       "on the GPU yet");
+  if (isa<EdgesOp, ConnectOp, DisconnectOp, OtherOp>(op))
+    return std::string("goes along a relation's edges, which are kept "
+                       "where the GPU does not reach them");
+  if (isa<SpawnOp, DespawnOp>(op))
+    return std::string("changes which entities there are: that is done "
+                       "on the CPU");
+  if (isa<TableAtOp>(op))
+    return std::string("reads a table: not on the GPU yet");
+  FlatSymbolRefAttr changed;
+  if (auto add = dyn_cast<AddOp>(op))
+    changed = add.getComponentAttr();
+  else if (auto remove = dyn_cast<RemoveOp>(op))
+    changed = remove.getComponentAttr();
+  if (changed)
+    if (auto declared =
+            symbolTable.lookupNearestSymbolFrom<ComponentOp>(op, changed);
+        declared && declared.getApart())
+      return "moves the entity to another archetype (" +
+             changed.getValue().str() +
+             " is stored 'apart'): that is done on the CPU";
+  if (auto of = dyn_cast<BufferOfOp>(op))
+    if (symbolTable.lookupNearestSymbolFrom<ComponentOp>(op, of.getBufferAttr()))
+      return std::string("gives a fn the entities of a component, which "
+                         "reads other entities: not on the GPU yet");
+  if (auto invoke = dyn_cast<InvokeOp>(op)) {
+    llvm::SmallPtrSet<Operation *, 4> seen;
+    if (std::optional<std::string> why =
+            notForGpu(symbolTable, op, invoke.getCalleeAttr(), seen))
+      return why;
+  }
+  if (llvm::any_of(op->getOperandTypes(), isText) ||
+      llvm::any_of(op->getResultTypes(), isText))
+    return std::string("works with a text: not on the GPU yet");
+  return std::nullopt;
+}
+
+/// A `gpu` system's queries: each must be one the GPU can run.
+static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
+                                      SystemOp system) {
+  WalkResult result = system.getBody().walk([&](QueryOp query) {
+    auto fail = [&](Operation *at, const Twine &why) {
+      at->emitOpError("cannot run on the GPU, as its system is 'gpu': ")
+          << why;
+      return WalkResult::interrupt();
+    };
+    if (query->hasAttr(QueryOp::kTriggersAttr))
+      return fail(query, "it reacts to events (`on`), which are kept "
+                         "where the GPU does not reach them");
+    if (query.getCascade())
+      return fail(query, "it goes along a tree in order (`top down`, "
+                         "`bottom up`)");
+    if (query.hasBy())
+      return fail(query, "it visits its entities one after another, in "
+                         "the order of a field");
+    for (Type type : query.getBody().getArgumentTypes())
+      if (auto ref = dyn_cast<RefType>(type);
+          ref && (ref.isUp() || ref.hasPath() || ref.getIsBefore() ||
+                  ref.getIsAfter()))
+        return fail(query, "it reads another entity along a tree");
+    std::optional<std::pair<Operation *, std::string>> bad;
+    query.getBody().walk([&](Operation *op) {
+      if (std::optional<std::string> why = notForGpu(symbolTable, op)) {
+        bad = {op, *why};
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (bad)
+      return fail(bad->first, bad->second);
+    return WalkResult::advance();
+  });
+  return failure(result.wasInterrupted());
+}
+
 LogicalResult SystemOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  return verifyAccessSymbols(symbolTable, *this, getReadsAttr(),
-                             getWritesAttr());
+  if (failed(verifyAccessSymbols(symbolTable, *this, getReadsAttr(),
+                                 getWritesAttr())))
+    return failure();
+  return getGpu() ? verifyGpuQueries(symbolTable, *this) : success();
 }
 
 bool SystemOp::hasContract() { return getReadsAttr() || getWritesAttr(); }

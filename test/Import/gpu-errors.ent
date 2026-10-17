@@ -1,0 +1,179 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+// What keeps a `for` of a `gpu system` off the GPU (docs/gpu.md).
+
+component Hp { hp: i32, foe: entity }
+gpu system hurt() {
+  for h: Hp {
+    // expected-error @+1 {{cannot run on the GPU, as its system is 'gpu': sends a value to another entity}}
+    Hp(h.foe).hp -= 1
+  }
+}
+
+// -----
+
+component Hp { hp: i32 }
+unique Hits: i32
+gpu system count() {
+  for h: Hp {
+    // expected-error @+1 {{accumulates into a unique}}
+    Hits += h.hp
+  }
+}
+
+// -----
+
+component Hp { hp: i32 }
+buffer Marks { hp: i32 } capacity 8
+gpu system mark() {
+  for h: Hp {
+    // expected-error @+1 {{gives a buffer rows, in the order of the entities}}
+    Marks += { hp: h.hp }
+  }
+}
+
+// -----
+
+component Hp { hp: i32, foe: entity }
+gpu system look() {
+  for h: mut Hp {
+    // expected-error @+1 {{looks up another entity}}
+    if let other = Hp(h.foe).hp { h.hp = other }
+  }
+}
+
+// -----
+
+component Spot { x: f32 }
+gpu system near() {
+  for s: mut Spot {
+    var sum = 0.0
+    // expected-error @+1 {{has a 'for' over other entities in its body}}
+    for o: old Spot { sum += o.x }
+    s.x = sum
+  }
+}
+
+// -----
+
+component Neuron { input: f32 }
+relation Synapse { weight: f32 } capacity 16
+gpu system fire() {
+  for e, n: mut Neuron {
+    // expected-error @+1 {{goes along a relation's edges}}
+    for (e)-[s: Synapse]->(post) { n.input += s.weight }
+  }
+}
+
+// -----
+
+component Hp { hp: i32 }
+gpu system die() {
+  for e, h: Hp {
+    // expected-error @+1 {{changes which entities there are}}
+    if h.hp < 0 { e.destroy() }
+  }
+}
+
+// -----
+
+component Hp { hp: i32 }
+tag Close apart capacity 8
+gpu system close() {
+  for e, h: Hp {
+    // expected-error @+1 {{moves the entity to another archetype (Close is stored 'apart')}}
+    if h.hp < 0 { e.add(Close) }
+  }
+}
+
+// -----
+
+component Spot { x: f32 }
+extern fn noise(x: f32) -> f32
+gpu system wobble() {
+  for s: mut Spot {
+    // expected-error @+1 {{calls 'noise', an extern fn: its C runs on the CPU}}
+    s.x = noise(s.x)
+  }
+}
+
+// -----
+
+component Spot { x: f32 }
+extern fn noise(x: f32) -> f32
+fn twice(x: f32) -> f32 { noise(x) * 2.0 }
+gpu system wobble() {
+  for s: mut Spot {
+    // expected-error @+1 {{calls 'twice', which calls 'noise', an extern fn}}
+    s.x = twice(s.x)
+  }
+}
+
+// -----
+
+component Spot { x: f32 }
+extern proc put(x: f32)
+gpu system say() {
+  for s: Spot {
+    // expected-error @+1 {{calls the proc 'put', which acts on the outside}}
+    put(s.x)
+  }
+}
+
+// -----
+
+component Label { name: text[8], n: i32 }
+gpu system name() {
+  for l: mut Label {
+    // expected-error @+1 {{works with a text}}
+    if l.name == "a" { l.n = 1 }
+  }
+}
+
+// -----
+
+component Spot { x: f32 }
+gpu system react() {
+  // expected-error @+1 {{it reacts to events (`on`)}}
+  for s: mut Spot on changed Spot.x {
+    s.x = 0.0
+  }
+}
+
+// -----
+
+component Thing { born: i32 }
+gpu system order() {
+  // expected-error @+1 {{it visits its entities one after another, in the order of a field}}
+  for t: mut Thing by t.born {
+    t.born = 0
+  }
+}
+
+// -----
+
+component Box { w: f32 }
+relation (Box)-[Inside]->(Box) tree capacity 8
+gpu system sizes() {
+  // expected-error @+1 {{it goes along a tree in order}}
+  for b: mut Box top down Inside {
+    b.w = 0.0
+  }
+}
+
+// -----
+
+component Box { w: f32 }
+component Size { h: f32 }
+relation (Box)-[Inside]->(Box) tree capacity 8
+gpu system sizes() {
+  // expected-error @+1 {{it reads another entity along a tree}}
+  for (b: Box, s: mut Size)-[Inside]->(outer: Box) {
+    s.h = outer.w
+  }
+}
+
+// -----
+
+// expected-error @+1 {{only a system with a body can be 'gpu'}}
+gpu extern system report()

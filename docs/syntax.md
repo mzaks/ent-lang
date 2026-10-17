@@ -1219,6 +1219,34 @@ is a bool over uniques and the schedule's parameters, evaluated when the run
 (or the schedule) would start; its reads count as the run's when the
 scheduler forms stages, and a conditional run is never fused with others.
 
+## Systems on the GPU
+
+```
+gpu system integrate(dt: f32) {
+  for p: mut Position, v: Velocity {
+    p.x += v.dx * dt
+    p.y += v.dy * dt
+  }
+}
+```
+
+A `gpu system` runs its `for`s on the GPU where the program is built for
+one, and on the CPU where it is not, with the same results. It is a
+contract like `reads` and `writes`: the compiler checks it either way,
+and says what in a `for` keeps it from the GPU. The system's code around
+its `for`s runs on the CPU.
+
+A `for` of a `gpu system` may read and write the components of the
+entity it visits, its id and whether it has a component (filters,
+`has`, `where`, `optional`), give it or take a component kept in place
+(not `apart`), and read uniques, consts and buffers and call the
+program's own fns, which do the same. Not yet: sending to other
+entities or accumulating into a unique, giving a buffer rows, lookups,
+a `for` over other entities inside it, extern fns (so `math`'s), tables
+and texts. Later, or never: relations and trees, `on` (reactive), `by`, spawning,
+destroying and `apart` components, procs. `docs/gpu.md` has the design
+and what comes when.
+
 ## Extern systems
 
 ```

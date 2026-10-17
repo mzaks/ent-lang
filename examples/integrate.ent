@@ -2,6 +2,8 @@
 // gravity pulls every body with mass down, wind pushes particles sideways
 // and their lifetime runs out, and a frame counter advances. Access is
 // inferred; archetypes are declared, since only the host spawns entities.
+// The four systems that only touch their own entity are `gpu`: built for a
+// GPU they run there, otherwise on the CPU (docs/gpu.md).
 
 component Position { x: f32, y: f32 }
 component Velocity { dx: f32, dy: f32 }
@@ -16,26 +18,26 @@ archetype Particle { Position, Velocity, Lifetime } capacity 10000000
 archetype Scenery { Position } capacity 10000000
 archetype Player { Position, Velocity } capacity 1
 
-system gravity(dt: f32, g: f32) {
+gpu system gravity(dt: f32, g: f32) {
   // Mass is bound only to select bodies.
   for v: mut Velocity with Mass {
     v.dy -= g * dt
   }
 }
 
-system wind(dt: f32) {
+gpu system wind(dt: f32) {
   for v: mut Velocity with Lifetime {
     v.dx += Wind.strength * dt
   }
 }
 
-system decay(dt: f32) {
+gpu system decay(dt: f32) {
   for l: mut Lifetime {
     l.seconds -= dt
   }
 }
 
-system integrate(dt: f32) {
+gpu system integrate(dt: f32) {
   for p: mut Position, v: Velocity {
     p.x += v.dx * dt
     p.y += v.dy * dt
