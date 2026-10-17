@@ -106,7 +106,7 @@ def build(chip):
                    "--ent-lower-to-loops=fuse-systems=1 gpu=1",
                    "--symbol-dce", "--cse", "--ent-lower-views",
                    "--convert-parallel-loops-to-gpu", "--gpu-kernel-outlining",
-                   "--lower-affine", "--convert-scf-to-cf",
+                   "--ent-gpu-kernel-names", "--lower-affine", "--convert-scf-to-cf",
                    f"--nvvm-attach-target=chip={chip} features=+ptx80",
                    "--convert-gpu-to-nvvm", "--reconcile-unrealized-casts",
                    "--convert-to-llvm", "--gpu-to-llvm",

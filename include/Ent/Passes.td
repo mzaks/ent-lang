@@ -114,6 +114,18 @@ def EntInferArchetypes : Pass<"ent-infer-archetypes", "ModuleOp"> {
   }];
 }
 
+def EntGpuKernelNames : Pass<"ent-gpu-kernel-names", "ModuleOp"> {
+  let summary = "Name kernels as PTX takes names";
+  let description = [{
+    `--gpu-kernel-outlining` names a kernel after the function it comes
+    from, which for a system of a module is `module.system`; PTX takes no
+    `.` in a name, so the driver refuses the kernels. This replaces each
+    `.` of a kernel's name by `_`, in the kernel and its launches. Run it
+    after the outlining.
+  }];
+  let dependentDialects = ["::mlir::gpu::GPUDialect"];
+}
+
 def EntOmpNowait : Pass<"ent-omp-nowait"> {
   let summary = "Drop the barrier after a parallel region's last loop";
   let description = [{

@@ -92,6 +92,11 @@ entity and values every entity reads alike:
   sets it to where the rule starts before the loop, and combines what the
   loop made of it into the unique after (`ent_gpu_cell_set`,
   `ent_gpu_cell_get`, one wait for the GPU);
+- going along a relation's edges from either end (`for (p)-[w: R]->(o:
+  mut C)`, `for (o)-[w: R]->(p)`): the edges' fields, written too
+  (`mut w`), the other end's components, and what is sent to it (G2: the
+  sorted table, the offsets of each entity's edges and the index by
+  target are pieces, copied as many edges as there are). Not a tree's;
 - calling `fn`s of the program: compiled for the GPU like the body;
 - arithmetic on every number type. `f64` is allowed; on consumer cards
   it runs at 1/32 to 1/64 of `f32`, which `--explain` says.
@@ -106,7 +111,8 @@ Errors, each naming the construct and what it waits for:
 | `Marks += { ... }` (rows given to a buffer) | rows in the order of the entities: needs an ordered compaction | G2 |
 | `extern fn`, including `math`'s `sin`, `sqrt` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |
-| arrows, edges, `top down`, `bottom up` | edges and trees are kept in tables the GPU does not have | later |
+| arrows up a tree, a tree's edges, `top down`, `bottom up` | trees are kept in tables the GPU does not have | later |
+| `connect`, `disconnect` | the relation is sorted again on the CPU | later |
 | `on changed ...` (reactive) | event logs and stamps | later |
 | `spawn`, `destroy`, `add`/`remove` of an `apart` component | change which rows an archetype holds; the compaction runs on the CPU | later |
 | `by`, `in turn by` | one entity after another: no parallel form | never |
@@ -365,7 +371,20 @@ So, by how much of a day each would bring to the GPU:
 4. **`math` alike on both sides**: the tracing's systems and the drawing
    of who falls ill how.
 
-With 1 to 3, some 90% of a baseline day could be on the GPU. They are
+With 1 to 3, some 90% of a baseline day could be on the GPU.
+
+**Edge loops, built (2026-10-17).** `workplace` now builds as a `gpu
+system`: with it and `infectiousness` on the GPU (`bench/epidemic/run.py
+1000000 --gpu workplace,infectiousness`, on the slow cores while another
+experiment had the fast ones) a day of a million people takes 92.6 ms on
+one core and 35.7 on four threads, against 180.9 and 67.8 on the CPU
+alone; `workplace` 4.8 ms where it took 89.2 and 37.9. The same 857,886
+are infected in a hundred days. Two things it took besides the edges'
+pieces: kernels named without the `.` of a module's systems
+(`--ent-gpu-kernel-names`), and sends by the same rule to one field from
+two edge loops counting as unseen (in whole numbers they add up the same;
+so does a lookup that only asks whether the other end has the
+component). `chance` (sends from a loop of the body) is next. They are
 also what a world in pieces over several GPUs or machines needs (edges
 between the pieces, sends from many places combined in one order).
 

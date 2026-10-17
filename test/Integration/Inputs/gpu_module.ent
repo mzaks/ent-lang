@@ -1,0 +1,22 @@
+// A program whose `gpu system` is in a module it imports (gpu.test).
+import console
+import gpu_movers
+
+unique Clock { frame: i64 }
+unique Sum: i64
+
+system tick() { Clock.frame += 1 }
+system total() {
+  Sum = 0
+  for s: Spot { Sum += s.x }
+  spawn { Print { line: "frame {Clock.frame} sum {Sum}" } }
+}
+schedule frame() { drift()  tick() }
+schedule report() { total()  write()  clear() }
+world {
+  for i in 0..1000 { spawn { Spot { x: i, step: i % 7 } } }
+}
+main {
+  loop { frame() } until Clock.frame == 10
+  report()
+}

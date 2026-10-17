@@ -30,6 +30,13 @@ meet is told (500 are infected at the start).
 
 With --apart the model's tag for who is ill is stored apart (`tag Ill
 apart`): the ill in an archetype of their own.
+
+With --gpu a,b the systems named are `gpu system`s and the model is built
+with `--gpu` (docs/gpu.md), on one core and on the fast cores as above
+(their times are said next to those without). A `gpu` system's own time
+is that of giving the GPU its work; what the GPU takes shows where the CPU
+next waits for it (at the latest when the day ends), so a day's time is
+what to compare. BENCH_ALL=0 leaves out the runs on all the cores.
 """
 
 import csv
@@ -164,8 +171,9 @@ def measure(command, folder, environment=None, cpus=None):
     return seconds, usage.ru_maxrss / 1024, said
 
 
-def build_model(people, parallel, apart):
-    folder = os.path.join(BENCH, f"model_{people}{'_apart' if apart else ''}")
+def build_model(people, parallel, apart, gpu=()):
+    folder = os.path.join(BENCH, f"model_{people}{'_apart' if apart else ''}"
+                                 f"{'_gpu' if gpu else ''}")
     os.makedirs(folder, exist_ok=True)
     for name in os.listdir(MODEL):
         if name.endswith(".ent"):
@@ -175,6 +183,9 @@ def build_model(people, parallel, apart):
                 if changed == text:
                     sys.exit("disease.ent has no `tag Ill` to store apart")
                 text = changed
+            for system in gpu:
+                text = re.sub(rf"^system {system}\(", f"gpu system {system}(",
+                              text, flags=re.M)
             with open(os.path.join(folder, name), "w") as file:
                 file.write(text)
     with open(os.path.join(folder, "bench.ent"), "w") as file:
@@ -186,14 +197,14 @@ def build_model(people, parallel, apart):
     environment.setdefault("ENT_CFLAGS", "-march=native")
     subprocess.run(
         [sys.executable, os.path.join(ROOT, "tools", "ent"), "build"] +
-        (["--parallel"] if parallel else []) +
+        (["--parallel"] if parallel else []) + (["--gpu"] if gpu else []) +
         [os.path.join(folder, "bench.ent"), "-o", built],
         check=True, env=environment)
     return folder, built
 
 
-def run_model(people, days, parallel, apart, cpus, threads):
-    folder, built = build_model(people, parallel, apart)
+def run_model(people, days, parallel, apart, cpus, threads, gpu=()):
+    folder, built = build_model(people, parallel, apart, gpu)
     with open(os.path.join(folder, "parameters.csv"), "w", newline="") as file:
         csv.writer(file).writerows(parameters(people, days))
     environment = dict(os.environ)
@@ -283,6 +294,10 @@ def main():
         del arguments[arguments.index("--days"):arguments.index("--days") + 2]
     sizes = [int(a) for a in arguments if a.isdigit()] or [100000, 1000000]
     apart = "--apart" in arguments
+    gpu = ()
+    if "--gpu" in arguments:
+        gpu = tuple(arguments[arguments.index("--gpu") + 1].split(","))
+        del arguments[arguments.index("--gpu"):arguments.index("--gpu") + 2]
     if "--tracing" in arguments:
         MEASURES.update(TRACING)
     if not os.path.isfile(PANEL):
@@ -296,10 +311,16 @@ def main():
               f"{', with tracing' if MEASURES else ''}")
         runs = [("one core", run_model(people, days, False, apart, one, None)),
                 (f"{threads} threads on the fast cores",
-                 run_model(people, days, True, apart, fast, threads)),
-                ("all the cores, the median of three",
-                 middle([run_model(people, days, True, apart, None, None)
-                         for _ in range(3)]))]
+                 run_model(people, days, True, apart, fast, threads))]
+        if gpu:
+            runs += [("one core and the GPU",
+                      run_model(people, days, False, apart, one, None, gpu)),
+                     (f"{threads} threads and the GPU",
+                      run_model(people, days, True, apart, fast, threads, gpu))]
+        if os.environ.get("BENCH_ALL", "1") != "0":
+            runs.append(("all the cores, the median of three",
+                         middle([run_model(people, days, True, apart, None, None)
+                                 for _ in range(3)])))
         names = [name for name in DAY]
         print("  | | set-up s | a day ms | " + " | ".join(names) + " | memory MB | infected |")
         print("  |---|---|---|" + "---|" * len(names) + "---|---|")

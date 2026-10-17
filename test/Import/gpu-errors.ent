@@ -61,10 +61,23 @@ gpu system near() {
 
 component Neuron { input: f32 }
 relation Synapse { weight: f32 } capacity 16
-gpu system fire() {
+gpu system prune() {
   for e, n: mut Neuron {
-    // expected-error @+1 {{goes along a relation's edges}}
-    for (e)-[s: Synapse]->(post) { n.input += s.weight }
+    for (e)-[s: Synapse]->(post) {
+      // expected-error @+1 {{connects or disconnects edges: the relation is sorted again on the CPU}}
+      if s.weight < 0.0 { s.disconnect() }
+    }
+  }
+}
+
+// -----
+
+component Box { w: f32 }
+relation (Box)-[Inside]->(Box) tree capacity 8
+gpu system weigh() {
+  for c: mut Box {
+    // expected-error @+1 {{goes along a tree's edges}}
+    for (inner: Box)-[Inside]->(c) { c.w += inner.w }
   }
 }
 

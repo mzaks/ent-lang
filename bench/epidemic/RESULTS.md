@@ -3,6 +3,28 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-17: the hazard in whole numbers, and `workplace` on the GPU
+
+`Hazard.left` and `Household.pressure` count 2^-32ths (docs/gpu.md, "Audit:
+the epidemic"). Measured on the slow cores, while another experiment had
+the four fast ones: `BENCH_ONE_CPU=4 BENCH_CPUS=4-7 BENCH_ALL=0 python3
+bench/epidemic/run.py 1000000 [--gpu workplace,infectiousness]`; an RTX
+4050 Laptop GPU. Not for comparing with the entries below, which ran on
+the fast cores.
+
+| a million people, a day in ms | one core | 4 threads | memory MB |
+|---|---|---|---|
+| the hazard an f32 | 172.9 | 61.2 | 859 |
+| in whole numbers | 178.7 | 68.1 | 919 |
+| in whole numbers, `workplace` and `infectiousness` on the GPU | 92.6 | 35.7 | 856 |
+
+857,886 infected in a hundred days in every run. `workplace` takes 4.8 ms
+on the GPU where it took 89.2 on one core and 37.9 on four threads (a
+`gpu` system's time is what it takes to start it and what the CPU waits
+for it after; the GPU's copies of the hazard back and forth are in it).
+In whole numbers `chance` sends 8 bytes where it sent 4: 21.4 ms on four
+threads where it took 16.2.
+
 ## 2026-10-13, last: with what is done about it (staying at home, tests, tracing)
 
 The same machine and builds as below, with `interventions.ent` in every

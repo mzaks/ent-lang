@@ -363,7 +363,8 @@ def gpu_passes(chip):
     # (PTX 8.0: what the RTX 40 series needs at the least, and every
     # driver of CUDA 12 reads.)
     features = os.environ.get("ENT_GPU_FEATURES", "+ptx80")
-    before = ["--convert-parallel-loops-to-gpu", "--gpu-kernel-outlining"]
+    before = ["--convert-parallel-loops-to-gpu", "--gpu-kernel-outlining",
+              "--ent-gpu-kernel-names"]
     after = ["--lower-affine", "--convert-scf-to-cf",
              f"--nvvm-attach-target=chip={chip} features={features}",
              "--convert-gpu-to-nvvm", "--reconcile-unrealized-casts"]

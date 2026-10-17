@@ -1,5 +1,6 @@
 add_mlir_library(MLIREntTransforms
   Access.cpp
+  GpuKernelNames.cpp
   InferArchetypes.cpp
   LowerToLoops.cpp
   LowerViews.cpp

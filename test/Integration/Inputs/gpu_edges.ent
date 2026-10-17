@@ -1,0 +1,77 @@
+// Edge loops in `gpu` systems (docs/gpu.md), in the shape of the
+// epidemic's `workplace`: along each tie from both ends, reading the tie's
+// field and the other end's, and sending whole numbers to the other end;
+// and a system that writes its ties' own field. Built with and without
+// --gpu it prints the same.
+import console
+
+component Worker { id: i32, rate: i32 } capacity 20000
+component Hazard { left: i64 } capacity 20000
+component Home { until: i32 } capacity 20000
+relation (Worker)-[WorksWith { key: i32, used: i32 }]->(Worker) capacity 200000
+unique Clock { day: i32 }
+unique Total: i64
+unique Used: i64
+transient buffer Ids { who: entity } capacity 10000
+
+gpu system work() {
+  for p: Worker {
+    for (p)-[w: WorksWith]->(o: mut Hazard, home: Home) {
+      if home.until < Clock.day && (w.key + Clock.day) % 3 != 0 {
+        o.left -= (p.rate * 1000 + w.key) as i64
+      }
+    }
+    for (o: mut Hazard, home: Home)-[w: WorksWith]->(p) {
+      if home.until < Clock.day && (w.key * 7 + Clock.day) % 5 != 0 {
+        o.left -= (p.rate * 10) as i64
+      }
+    }
+  }
+}
+gpu system wear() {
+  for p: Worker {
+    for (p)-[mut w: WorksWith]->(o) {
+      w.used += w.key % 4 + p.rate
+    }
+  }
+}
+gpu system shift() {
+  for p: mut Worker, h: mut Home {
+    p.rate = (p.rate * 31 + Clock.day) % 97
+    h.until = (p.id * 13 + Clock.day * 7) % 11
+  }
+}
+system tick() { Clock.day += 1 }
+system total() {
+  Total = 0
+  for z: Hazard { Total += z.left }
+  Used = 0
+  for p: Worker {
+    for (p)-[w: WorksWith]->(o) { Used += w.used as i64 }
+  }
+  spawn { Print { line: "day {Clock.day} total {Total} used {Used}" } }
+}
+schedule day() { work()  wear()  shift()  tick() }
+schedule report() run_if Clock.day % 5 == 0 { total()  write()  clear() }
+
+world {
+  for i in 0..10000 {
+    let e = spawn { Worker { id: i, rate: i % 97 }, Hazard { left: 0 },
+                    Home { until: i % 11 } }
+    Ids += { who: e }
+    if i > 0 {
+      // (Ties to some of those before, a few each.)
+      for k in 1..4 {
+        let j = (i * 7919 + k * 104729) % i
+        connect (e)-[WorksWith { key: (i * 31 + k) % 1009, used: 0 }]->(Ids[j].who)
+      }
+    }
+  }
+}
+
+main {
+  loop {
+    day()
+    report()
+  } until Clock.day == 20
+}

@@ -1242,7 +1242,9 @@ entity it visits, its id and whether it has a component (filters,
 `has`, `where`, `optional`), give it or take a component kept in place
 (not `apart`), and read uniques, consts and buffers and call the
 program's own fns, which do the same, look up other entities' fields,
-and send whole numbers to other entities or accumulate them into uniques
+go along a relation's edges (not a tree's) from either end, reading and
+writing the edges' fields and the other end's, and send whole numbers to
+other entities or accumulate them into uniques
 (`+=`, `-=`, `min=`, `max=`: the same in any order, so combined as they
 are sent). Not yet: sending fractions or with `=`, sending from a loop of
 the body, giving a buffer rows,

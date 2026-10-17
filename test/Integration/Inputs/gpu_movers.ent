@@ -1,0 +1,7 @@
+// A module with a `gpu system` (gpu.test): its kernel is named after
+// `gpu_movers.drift`, which PTX takes only without the `.`.
+component Spot { x: i64, step: i64 } capacity 1000
+
+gpu system drift() {
+  for s: mut Spot { s.x += s.step }
+}

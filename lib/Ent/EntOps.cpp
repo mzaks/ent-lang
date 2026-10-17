@@ -963,9 +963,17 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
   if (isa<EachOp>(op))
     return std::string("has a 'for' over other entities in its body: not "
                        "on the GPU yet");
-  if (isa<EdgesOp, ConnectOp, DisconnectOp, OtherOp>(op))
-    return std::string("goes along a relation's edges, which are kept "
-                       "where the GPU does not reach them");
+  // Edges are gone through on the GPU (their tables are kept there too);
+  // what changes them is the CPU's, and a tree's are kept otherwise.
+  if (isa<ConnectOp, DisconnectOp>(op))
+    return std::string("connects or disconnects edges: the relation is "
+                       "sorted again on the CPU");
+  if (auto edges = dyn_cast<EdgesOp>(op))
+    if (auto relation = symbolTable.lookupNearestSymbolFrom<RelationOp>(
+            op, edges.getRelationAttr());
+        relation && relation.getTree())
+      return std::string("goes along a tree's edges, which are kept where "
+                         "the GPU does not reach them");
   if (isa<SpawnOp, DespawnOp>(op))
     return std::string("changes which entities there are: that is done "
                        "on the CPU");

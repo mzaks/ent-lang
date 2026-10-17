@@ -21,6 +21,20 @@
 // RUN: FileCheck %s --check-prefix=SENDS --input-file=%t.sends.gpu
 // SENDS: frame 20 hits 665841 strongest 995 weakest 1 total -840697920
 
+// Along relations' edges from both ends, in the shape of the epidemic's
+// `workplace`, and writing the edges' own field: the same.
+// RUN: %ent run %S/Inputs/gpu_edges.ent > %t.edges.cpu
+// RUN: %ent run %S/Inputs/gpu_edges.ent --gpu > %t.edges.gpu
+// RUN: %ent run %S/Inputs/gpu_edges.ent --gpu --parallel > %t.edges.gpupar
+// RUN: diff %t.edges.cpu %t.edges.gpu
+// RUN: diff %t.edges.cpu %t.edges.gpupar
+// RUN: FileCheck %s --check-prefix=EDGES --input-file=%t.edges.gpu
+// EDGES: day 20 total -13746309414 used 29694911
+
+// A `gpu system` of an imported module: its kernel's name has no `.`.
+// RUN: %ent run %S/Inputs/gpu_module.ent --gpu | FileCheck %s --check-prefix=MODULE
+// MODULE: frame 10 sum 529470
+
 // examples/integrate.ent with its C host (examples/host/integrate_main.c,
 // as in integrate.test), the host built with ENT_GPU: it asks for the
 // world back from the GPU before it reads it.
@@ -30,6 +44,7 @@
 // RUN: ent-opt %t.mlir "--ent-lower-to-loops=fuse-systems=1 gpu=1" \
 // RUN:     --symbol-dce --cse --ent-lower-views \
 // RUN:     --convert-parallel-loops-to-gpu --gpu-kernel-outlining \
+// RUN:     --ent-gpu-kernel-names \
 // RUN:     --lower-affine --convert-scf-to-cf \
 // RUN:     "--nvvm-attach-target=chip=%gpu-chip features=+ptx80" \
 // RUN:     --convert-gpu-to-nvvm --reconcile-unrealized-casts \

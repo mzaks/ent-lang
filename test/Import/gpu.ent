@@ -51,6 +51,21 @@ gpu system hurt() {
   }
 }
 
+// Along a relation's edges, from either end: the edges' fields, the
+// other end's, and what is sent to it.
+component Neuron { input: f32 }
+component Pulse { fired: i32 }
+relation Synapse { weight: f32 } capacity 16
+// CHECK-LABEL: ent.system @fire() gpu {
+// CHECK: ent.edges @Synapse out
+// CHECK: ent.edges @Synapse in
+gpu system fire() {
+  for e, n: mut Neuron {
+    for (e)-[s: Synapse]->(post) { n.input += s.weight }
+    for (pre: mut Pulse)-[s: Synapse]->(e) { pre.fired += 1 }
+  }
+}
+
 // With a contract as well.
 // CHECK-LABEL: ent.system @fall(%{{.*}}: f32) gpu reads [@Position] writes [@Velocity] {
 gpu system fall(dt: f32) reads Position writes Velocity {

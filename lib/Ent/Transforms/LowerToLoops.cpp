@@ -14483,18 +14483,22 @@ static void guardSchedule(IRRewriter &rewriter, func::FuncOp func,
     return;
   Block &entry = func.getBody().front();
   Operation *terminator = entry.getTerminator();
+  // (What is pure stays before the condition, wherever it is, unless it
+  // uses what moves: the views of the world, which the condition may use
+  // too.)
   SmallVector<Operation *> body;
-  Operation *firstMoved = nullptr;
+  llvm::SmallPtrSet<Operation *, 16> moved;
   for (Operation &op : entry.without_terminator()) {
-    if (!firstMoved && op.getNumRegions() == 0 && isPure(&op))
+    bool usesMoved = llvm::any_of(op.getOperands(), [&](Value operand) {
+      return moved.contains(operand.getDefiningOp());
+    });
+    if (op.getNumRegions() == 0 && isPure(&op) && !usesMoved)
       continue;
-    firstMoved = firstMoved ? firstMoved : &op;
     body.push_back(&op);
+    moved.insert(&op);
   }
-  if (firstMoved)
-    rewriter.setInsertionPoint(firstMoved);
-  else
-    rewriter.setInsertionPoint(terminator);
+  // (At the end: what stays is before it, and what moves goes into it.)
+  rewriter.setInsertionPoint(terminator);
   IRMapping mapping;
   for (auto [from, to] : llvm::zip(condition.front().getArguments(),
                                    entry.getArguments()))
@@ -14875,6 +14879,10 @@ struct GpuPiece {
   bool counter = false;
   /// Of the entity table: as many elements as slots were handed out.
   bool bySlots = false;
+  /// Of a relation's edges: as many elements as it has edges.
+  const WorldRelation *edges = nullptr;
+  /// Otherwise so many elements, whatever the world holds.
+  int64_t fixed = 0;
 };
 
 /// The pieces of the world `gpu` systems touch, and which of them stand
@@ -14915,6 +14923,43 @@ struct GpuPieces {
                  nullptr, false, /*bySlots=*/true});
         piece({layout.locationOffset, uint64_t(scheme.locationBits + 7) / 8,
                nullptr, nullptr, false, /*bySlots=*/true});
+        return made;
+      }
+      // A relation's edges, which edge loops go through: its sorted table
+      // (sources, targets, dead marks; a field), the offsets of each
+      // entity's edges in it, and where they are visited from both ends,
+      // the index by target. (A tree's are kept otherwise: not on the GPU.)
+      for (const WorldRelation &relation : layout.relations) {
+        if (RelationOp(relation.op).getSymNameAttr() != component)
+          continue;
+        if (relation.linked)
+          return made;
+        uint64_t idBytes = layout.entities.idBits / 8;
+        uint64_t offsetBytes = relation.offsetBits / 8;
+        auto edges = [&](uint64_t offset, uint64_t bytes) {
+          GpuPiece held{offset, bytes};
+          held.edges = &relation;
+          piece(held);
+        };
+        auto whole = [&](uint64_t offset, uint64_t bytes, int64_t elements) {
+          GpuPiece held{offset, bytes};
+          held.fixed = elements;
+          piece(held);
+        };
+        if (field && !field.getValue().empty()) {
+          if (const WorldColumn *column = relation.find(field))
+            edges(column->offset, uint64_t(bytesOf(column->type)));
+          return made;
+        }
+        piece({relation.countOffset, 8, nullptr, nullptr, /*counter=*/true});
+        edges(relation.sourceOffset, idBytes);
+        edges(relation.targetOffset, idBytes);
+        edges(relation.deadOffset, 1);
+        whole(relation.sortedOffset, offsetBytes, layout.entityKeys + 1);
+        if (relation.indexOffset) {
+          whole(relation.indexOffset, offsetBytes, layout.entityKeys + 1);
+          edges(relation.indexEdgesOffset, offsetBytes);
+        }
         return made;
       }
       // A buffer; a unique and the tick counter are the CPU's.
@@ -15013,9 +15058,15 @@ static void placeGpuCopies(IRRewriter &rewriter, func::FuncOp func,
     if (piece.counter)
       return constant(loc, 8);
     Value rows;
+    if (piece.fixed)
+      return constant(loc, piece.fixed * piece.elementBytes);
     if (piece.bySlots)
       rows = memref::LoadOp::create(
           rewriter, loc, world.scalar(layout.nextSlotOffset),
+          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
+    else if (piece.edges)
+      rows = memref::LoadOp::create(
+          rewriter, loc, world.scalar(piece.edges->countOffset),
           ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
     else if (piece.archetype)
       rows = arith::IndexCastOp::create(rewriter, loc, i64,
@@ -15290,8 +15341,43 @@ struct EntLowerToLoops
       if (!system.getGpu())
         return;
       system.walk([&](ApplyOp apply) {
-        if (!apply->getParentOfType<QueryOp>() ||
-            apply->hasAttr(kUnobservedAttr))
+        auto query = apply->getParentOfType<QueryOp>();
+        if (!query)
+          return;
+        // (Other sends to the field by the same rule are no matter: in
+        // whole numbers they add up the same in any order.)
+        FlatSymbolRefAttr component = apply.getComponentAttr();
+        StringAttr field = apply.getFieldAttr();
+        auto refTo = [&](Value ref) {
+          auto type = dyn_cast<RefType>(ref.getType());
+          return type && type.getComponent() == component;
+        };
+        bool seen = query
+                        .walk([&](Operation *op) {
+                          bool touches = false;
+                          if (auto get = dyn_cast<GetOp>(op))
+                            touches = refTo(get.getRef()) &&
+                                      get.getFieldAttr() == field;
+                          else if (auto set = dyn_cast<SetOp>(op))
+                            touches = refTo(set.getRef()) &&
+                                      set.getFieldAttr() == field;
+                          // (A lookup that only asks whether the entity
+                          // has the component reads nothing of it.)
+                          else if (auto lookup = dyn_cast<LookupOp>(op))
+                            touches = lookup.getComponentAttr() == component &&
+                                      lookup.getFieldAttr() == field &&
+                                      !lookup->getResult(0).use_empty();
+                          else if (auto other = dyn_cast<ApplyOp>(op))
+                            touches = other.getComponentAttr() == component &&
+                                      other.getFieldAttr() == field &&
+                                      other.getRule() != apply.getRule();
+                          else if (isa<AddOp, RemoveOp>(op))
+                            touches = op->getAttr("component") == component;
+                          return touches ? WalkResult::interrupt()
+                                         : WalkResult::advance();
+                        })
+                        .wasInterrupted();
+        if (!seen)
           return;
         apply.emitOpError("cannot run on the GPU, as its system is 'gpu': "
                           "it sends to a field its query also reads or "
