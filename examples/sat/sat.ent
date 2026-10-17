@@ -83,6 +83,11 @@ buffer Spare { v: i32 } capacity 16
 // bumped variables have each byte of a stamp, sorting them.
 buffer Counts { n: i32 } capacity 256
 
+// What each mode did, focused (row 0) and stable (row 1), for the
+// statistics; row 2: the counts where the mode now going started.
+buffer Modes { seconds: f64, conflicts: i64, decisions: i64, propagations: i64, restarts: i64 }
+  capacity 3
+
 // `proof`: whether to write a DRAT proof to `proof_file`. Restarts are
 // Glucose's: where the LBDs of the last clauses learned (an average
 // that forgets fast) are `margin` times those of all of them (one that
@@ -245,6 +250,22 @@ proc reason_lit(arena: Arena, vars: Vars, values: Values, c: index of Arena)
   lit
 }
 
+// The counts since the mode started to its row, and the counts now as
+// where the next starts.
+proc tally(modes: mut Modes, row: i32, seconds: f64, conflicts: i64, decisions: i64,
+           propagations: i64, restarts: i64) {
+  modes[row].seconds += seconds - modes[2].seconds
+  modes[row].conflicts += conflicts - modes[2].conflicts
+  modes[row].decisions += decisions - modes[2].decisions
+  modes[row].propagations += propagations - modes[2].propagations
+  modes[row].restarts += restarts - modes[2].restarts
+  modes[2].seconds = seconds
+  modes[2].conflicts = conflicts
+  modes[2].decisions = decisions
+  modes[2].propagations = propagations
+  modes[2].restarts = restarts
+}
+
 // Whether a reduction may delete the clause with this meta word: a
 // learned one that is no reason, of LBD 3 or more, and not of LBD 6 or
 // less where it was used since the last reduction.
@@ -293,6 +314,8 @@ system setup() {
   Search.stable_luby = 0
   Search.target = 0
   Counts = [{ n: 0 }; 256]
+  Modes = [{ seconds: 0.0, conflicts: 0, decisions: 0, propagations: 0, restarts: 0 }; 3]
+  Modes[2].seconds = wait_until(0.0)
   Arena = []
   // (The queue starts as the variables in their order.)
   for v in 0..n {
@@ -804,6 +827,8 @@ system learn() {
       Search.restarts += 1
     }
     if switching {
+      tally(Modes, if Search.stable { 1 } else { 0 }, wait_until(0.0), conflicts,
+            Search.decisions, Search.propagations, Search.restarts)
       Search.stable = !Search.stable
       if !Search.stable { Search.mode *= 2 }
       Search.switch = conflicts + Search.mode
@@ -1063,6 +1088,13 @@ system finish() {
   put("c {Search.conflicts} conflicts, {Search.decisions} decisions, {Search.propagations} propagations")
   put("c {Search.restarts} restarts ({Search.reused} levels kept), {Search.reductions} reductions, {Search.deleted} clauses deleted")
   put("c {seconds} seconds")
+  tally(Modes, if Search.stable { 1 } else { 0 }, wait_until(0.0), Search.conflicts,
+        Search.decisions, Search.propagations, Search.restarts)
+  for row in 0..2 {
+    var name: text[8] = "focused"
+    if row == 1 { name = "stable" }
+    put("c {name}: {Modes[row].seconds} seconds, {Modes[row].conflicts} conflicts, {Modes[row].decisions} decisions, {Modes[row].propagations} propagations, {Modes[row].restarts} restarts")
+  }
   if Search.status == Status.Sat {
     var at = 0
     var bad = -1

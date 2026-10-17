@@ -96,7 +96,33 @@ both solve (24 for each build).
 
 PAR-2 0.93 times MiniSat's. More conflicts a second are not a faster
 search: asconhash H6 has nine times as many in 300 s and is not solved
-(216 s before). Between runs of one build a problem can take two or
-three times as long (qwh: 7.5 s and 26.8 s), so a few percent are not
-told apart. MiniSat is still ahead on most of the long problems both
+(216 s before). Builds that search differently take very different
+times on one problem (qwh: 7.5 s and 26.8 s); a build itself searches the
+same each time, but eight runs at once land on cores of 5.2 and of 3.3
+GHz, so a few percent are not told apart here (see below). MiniSat is still ahead on most of the long problems both
 solve: grs, PRP, asconhash, shuffling-2.
+
+## 2026-10-17: on like cores, and row numbers
+
+`run.py` now runs each problem on a core of its own, the four fast ones
+by default (`--cores 0-3`), four at a time. entsat searches the same
+each run; timed twice so, its times on the 30 problems both runs solve
+are within 4% of each other (the median 0.996), and every answer the
+same. For trying builds, `--set dev` is the 39 problems that any solver
+has solved (`dev.txt`); the other 61 cost 300 s each and tell nothing.
+The ratio to MiniSat is taken on the problems both solve where one takes
+a second or more.
+
+Row numbers (`index of Arena` and the like: rows read and written
+without a check, masked to a buffer's room) make entsat about 12%
+faster with the same search, every problem of a second or more by 1 to
+21%.
+
+| solver (dev set) | solved | SAT | UNSAT | PAR-2 | median | geometric mean |
+|---|---|---|---|---|---|---|
+| MiniSat 2.2 | 29 | 12 | 17 | 7,862 | 1 | 1 |
+| entsat, checked rows | 37 | 18 | 19 | 4,090 | 1.33 | 1.09 |
+| entsat, row numbers | 37 | 18 | 19 | 3,770 | 1.18 | 0.96 |
+
+On the 20 problems both solve, entsat takes 1,773 s, MiniSat 1,716 s.
+On SATLIB's uuf250, 24 at once: 3.7 s on average (MiniSat 4.1 s).
