@@ -75,8 +75,12 @@
 // RUN: diff %t.math.cpu %t.math.gpu
 // RUN: diff %t.math.cpu %t.math.gpupar
 // RUN: FileCheck %s --check-prefix=MATH --input-file=%t.math.gpu
-// MATH: exp/log 2730369242159563463 pow 7739633407689454209 sin/cos 8859017031914014129 whole/root 11526708017173365729 f32 2146980889
-// MATH: tan/atan/log2/fmod 8782456100262130766
+// MATH:      exp/log 2730369242159563463
+// MATH-NEXT: pow 7739633407689454209
+// MATH-NEXT: sin/cos 8859017031914014129
+// MATH-NEXT: whole/root 11526708017173365729
+// MATH-NEXT: f32 214698088967931
+// MATH-NEXT: tan/atan/log2/fmod 8782455673137470426
 
 // A `gpu system` of an imported module: its kernel's name has no `.`.
 // RUN: %ent run %S/Inputs/gpu_module.ent --gpu | FileCheck %s --check-prefix=MODULE

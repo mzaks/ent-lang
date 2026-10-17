@@ -20,10 +20,10 @@
 // (docs/gpu.md), gives the same results to the bit. They follow Sun's
 // fdlibm (by way of FreeBSD's msun and Mojo's standard library), within
 // an ulp of the true value; `pow64` within a few where the result is near
-// the ends of the range. The f32
-// ones are the f64 ones, rounded once. What is left of the machine's math
-// library (asin, acos) is implemented in devices/math.c, and runs on the
-// CPU only.
+// the ends of the range. The f32 ones have shorter polynomials of their
+// own, worked out in f64 and rounded once. What is left of the machine's
+// math library (asin, acos) is implemented in devices/math.c, and runs on
+// the CPU only.
 
 // Without its sign.
 fn abs(x: f32) -> f32 { max(x, -x) }
@@ -387,21 +387,18 @@ fn cos64_near(x: f64, y: f64) -> f64 {
 fn sin64(x: f64) -> f64 {
   if x - x != 0.0 { nan64() }
   else {
+    // (Both, and the one the quarter asks for chosen without a branch.)
     let (n, hi, lo) = quarters64(x)
-    if n == 0 { sin64_near(hi, lo) }
-    else if n == 1 { cos64_near(hi, lo) }
-    else if n == 2 { -sin64_near(hi, lo) }
-    else { -cos64_near(hi, lo) }
+    let r = if (n & 1) == 1 { cos64_near(hi, lo) } else { sin64_near(hi, lo) }
+    if (n & 2) == 2 { -r } else { r }
   }
 }
 fn cos64(x: f64) -> f64 {
   if x - x != 0.0 { nan64() }
   else {
     let (n, hi, lo) = quarters64(x)
-    if n == 0 { cos64_near(hi, lo) }
-    else if n == 1 { -sin64_near(hi, lo) }
-    else if n == 2 { -cos64_near(hi, lo) }
-    else { sin64_near(hi, lo) }
+    let r = if (n & 1) == 1 { sin64_near(hi, lo) } else { cos64_near(hi, lo) }
+    if ((n + 1) & 2) == 2 { -r } else { r }
   }
 }
 
@@ -450,10 +447,14 @@ fn tan64(x: f64) -> f64 {
 }
 
 // atan(x) - x, for x from -7/16 to 7/16, by a polynomial in x * x
-// (fdlibm's s_atan.c).
-fn atan64_rest(x: f64) -> f64 {
+// (fdlibm's s_atan.c), or a `short` one, as an f32 needs (s_atanf.c).
+fn atan_rest(x: f64, short: bool) -> f64 {
   let z = x * x
   let w = z * z
+  if short {
+    x * (z * (0.333333283662796 + w * (0.14253635704517365 + w * 0.06168760731816292)) +
+         w * (-0.19999158382415771 + w * -0.106480173766613))
+  } else {
   let s1 = z * (3.33333333333329318027e-01 + w * (1.42857142725034663711e-01 +
            w * (9.09088713343650656196e-02 + w * (6.66107313738753120669e-02 +
            w * (4.97687799461593236017e-02 + w * 1.62858201153657823623e-02)))))
@@ -461,43 +462,44 @@ fn atan64_rest(x: f64) -> f64 {
            w * (-7.69187620504482999495e-02 + w * (-5.83357013379057348645e-02 +
            w * -3.65315727442169155270e-02))))
   x * (s1 + s2)
+  }
 }
-// atan(c) + atan(t), atan(c) given as hi + lo.
-fn atan64_from(hi: f64, lo: f64, t: f64) -> f64 { hi - ((atan64_rest(t) - lo) - t) }
-
-// The angle whose tan x is, from -pi/2 to pi/2: of x, or of x near 1/2,
-// 1, 3/2 or infinity as the atan of that and of a t near 0.
-fn atan64(x: f64) -> f64 {
+// The angle whose tan x is, from -pi/2 to pi/2: atan(c) + atan(t), c
+// the nearest of 0, 1/2, 1, 3/2 and infinity to |x|, atan(c) as hi + lo,
+// and t = (|x| - c) / (1 + c * |x|) (-1 / |x| for infinity), near 0.
+// Which c is chosen without a branch: how large x is is anyone's guess.
+fn atan_of(x: f64, short: bool) -> f64 {
   let ax = abs64(x)
   let b = bits_of(ax)
   if x != x { nan64() }
   else if b < 0x3e40000000000000 { x }
-  else if b < 0x3fdc000000000000 { x - atan64_rest(x) }
   else {
-    let z = if b >= 0x4410000000000000 { 1.57079632679489655800e+00 as f64 }
-            else if b < 0x3fe6000000000000 {
-              atan64_from(4.63647609000806093515e-01, 2.26987774529616870924e-17,
-                          (2.0 * ax - 1.0) / (2.0 + ax))
-            }
-            else if b < 0x3ff3000000000000 {
-              atan64_from(7.85398163397448278999e-01, 3.06161699786838301793e-17,
-                          (ax - 1.0) / (ax + 1.0))
-            }
-            else if b < 0x4003800000000000 {
-              atan64_from(9.82793723247329054082e-01, 1.39033110312309984516e-17,
-                          (ax - 1.5) / (1.0 + 1.5 * ax))
-            }
-            else {
-              atan64_from(1.57079632679489655800e+00, 6.12323399573676603587e-17, -1.0 / ax)
-            }
+    let past = (if b >= 0x3fdc000000000000 { 1 } else { 0 }) +
+               (if b >= 0x3fe6000000000000 { 1 } else { 0 }) +
+               (if b >= 0x3ff3000000000000 { 1 } else { 0 })
+    let far = b >= 0x4003800000000000
+    let c = 0.5 * past as f64
+    let hi = if far { 1.57079632679489655800e+00 as f64 }
+             else if past == 3 { 9.82793723247329054082e-01 }
+             else if past == 2 { 7.85398163397448278999e-01 }
+             else if past == 1 { 4.63647609000806093515e-01 }
+             else { 0.0 }
+    let lo = if far { 6.12323399573676603587e-17 as f64 }
+             else if past == 3 { 1.39033110312309984516e-17 }
+             else if past == 2 { 3.06161699786838301793e-17 }
+             else if past == 1 { 2.26987774529616870924e-17 }
+             else { 0.0 }
+    let t = (if far { -1.0 as f64 } else { ax - c }) / (if far { ax } else { 1.0 + c * ax })
+    let z = hi - ((atan_rest(t, short) - lo) - t)
     if x < 0.0 { -z } else { z }
   }
 }
+fn atan64(x: f64) -> f64 { atan_of(x, false) }
 
 // The angle of the point (x, y), from -pi to pi, as C's atan2 says for
 // the ends (fdlibm's e_atan2.c): pi less the atan where x is below 0,
 // with pi's low part.
-fn atan264(y: f64, x: f64) -> f64 {
+fn atan2_of(y: f64, x: f64, short: bool) -> f64 {
   let pi = 3.1415926535897931160e+00 as f64
   let pi_lo = 1.2246467991473531772e-16 as f64
   let half = 1.5707963267948965580e+00 as f64
@@ -507,7 +509,7 @@ fn atan264(y: f64, x: f64) -> f64 {
   let xneg = (bits_of(x) >> 63) == 1
   let yneg = (bits_of(y) >> 63) == 1
   if x != x || y != y { nan64() }
-  else if x == 1.0 { atan64(y) }
+  else if x == 1.0 { atan_of(y, short) }
   else if y == 0.0 { if !xneg { y } else if yneg { -pi } else { pi } }
   else if x == 0.0 || ay == inf {
     if ax == inf {
@@ -524,28 +526,132 @@ fn atan264(y: f64, x: f64) -> f64 {
     let k = ((bits_of(ay) >> 52) as i32) - ((bits_of(ax) >> 52) as i32)
     let z = if k > 60 { half + 0.5 * pi_lo }
             else if xneg && k < -60 { 0.0 as f64 }
-            else { atan64(ay / ax) }
+            else { atan_of(ay / ax, short) }
     let w = if xneg && k <= 60 { pi - (z - pi_lo) } else { z }
     if yneg { -w } else { w }
   }
+}
+fn atan264(y: f64, x: f64) -> f64 { atan2_of(y, x, false) }
+
+// The f32 ones: worked out in f64 with polynomials as short as an f32
+// needs, error below 2^-34 (FreeBSD's msun: k_sinf.c, k_cosf.c,
+// e_rem_pio2f.c, s_atanf.c, k_logf.h), and rounded once. Not a number
+// of theirs has the bits 0x7fc00000.
+fn nan32() -> f32 { float_of(0x7fc00000 as u32) }
+fn infinity32() -> f32 { float_of(0x7f800000 as u32) }
+fn to32(x: f64) -> f32 { if x != x { nan32() } else { x as f32 } }
+
+// An f32 angle (in an f64) as n quarter turns and the rest, from about
+// -pi/4 to pi/4: below 2^28 * pi/2 less n times pi/2 in 25 bits (so n
+// times it is exact) and the next 53 (0 times, x as it is), else
+// quarters64_far.
+fn quarters32(x: f64) -> (i32, f64) {
+  let ax = abs64(x)
+  if ax < 421657440.0 {
+    // (To the nearest whole number: what adding 1.5 * 2^52 leaves.)
+    let k = (x * 0.6366197723675814 + 6755399441055744.0) - 6755399441055744.0
+    (((k as i64) & 3) as i32, (x - k * 1.5707963109016418) - k * 1.5893254773528196e-08)
+  } else {
+    let (n, hi, lo) = quarters64_far(ax)
+    if x < 0.0 { ((4 - n) & 3, -(hi + lo)) } else { (n, hi + lo) }
+  }
+}
+
+// sin and cos of x from -pi/4 to pi/4 (and tan their quotient).
+fn sin32_near(x: f64) -> f64 {
+  let z = x * x
+  let w = z * z
+  let r = -0.00019839334836096632 + z * 2.718311493989822e-06
+  let s = z * x
+  (x + s * (-0.16666666641626524 + z * 0.008333329385889463)) + s * w * r
+}
+fn cos32_near(x: f64) -> f64 {
+  let z = x * x
+  let w = z * z
+  let r = -0.001388676377460993 + z * 2.439044879627741e-05
+  ((1.0 + z * -0.499999997251031) + w * 0.04166662332373906) + (w * z) * r
+}
+
+// log(1 + f), for 1 + f from sqrt(2)/2 to sqrt(2), as an f32 needs.
+fn log32_1p(f: f64) -> f64 {
+  let s = f / (2.0 + f)
+  let z = s * s
+  let w = z * z
+  let r = z * (0.6666666269302368 + w * 0.2849878668785095) +
+          w * (0.40000972151756287 + w * 0.24279078841209412)
+  let hfsq = 0.5 * f * f
+  f - (hfsq - s * (hfsq + r))
 }
 
 // Square root, powers and logarithms. `pow(x, y)` is x to the power of y,
 // `exp(x)` e to the power of x, `log` the natural logarithm. (`sqrt` of
 // an f32 or an f64 is built in.)
-fn pow(x: f32, y: f32) -> f32 { pow64(x as f64, y as f64) as f32 }
-fn exp(x: f32) -> f32 { exp64(x as f64) as f32 }
-fn log(x: f32) -> f32 { log64(x as f64) as f32 }
-fn log2(x: f32) -> f32 { log264(x as f64) as f32 }
+// (pow of x above 0 and a finite y: e to the power of y * log(x), both
+// to an f64's last bits, so that y * log(x) is near enough to round
+// right; the rest as pow64 says.)
+fn pow(x: f32, y: f32) -> f32 {
+  let yd = y as f64
+  if x > 0.0 && x < infinity32() && yd - yd == 0.0 {
+    exp64(yd * log64(x as f64)) as f32
+  } else { to32(pow64(x as f64, yd)) }
+}
+fn exp(x: f32) -> f32 { to32(exp64(x as f64)) }
+fn log(x: f32) -> f32 {
+  if x != x || x < 0.0 { nan32() }
+  else if x == 0.0 { -infinity32() }
+  else if x == infinity32() { x }
+  else {
+    let (k, f) = log64_parts(x as f64)
+    (k * 0.6931471805599453 + log32_1p(f)) as f32
+  }
+}
+fn log2(x: f32) -> f32 {
+  if x != x || x < 0.0 { nan32() }
+  else if x == 0.0 { -infinity32() }
+  else if x == infinity32() { x }
+  else {
+    let (k, f) = log64_parts(x as f64)
+    (k + log32_1p(f) * 1.4426950408889634) as f32
+  }
+}
 
 // Angles. `atan2(y, x)` is the angle of the point (x, y), from -pi to pi.
-fn sin(x: f32) -> f32 { sin64(x as f64) as f32 }
-fn cos(x: f32) -> f32 { cos64(x as f64) as f32 }
-fn tan(x: f32) -> f32 { tan64(x as f64) as f32 }
+fn sin(x: f32) -> f32 {
+  let d = x as f64
+  if d - d != 0.0 { nan32() }
+  else if bits_of(abs(x)) < 0x39800000 { x }
+  else {
+    // (Both, and the one the quarter asks for chosen without a branch.)
+    let (n, y) = quarters32(d)
+    let r = if (n & 1) == 1 { cos32_near(y) } else { sin32_near(y) }
+    (if (n & 2) == 2 { -r } else { r }) as f32
+  }
+}
+fn cos(x: f32) -> f32 {
+  let d = x as f64
+  if d - d != 0.0 { nan32() }
+  else {
+    let (n, y) = quarters32(d)
+    let r = if (n & 1) == 1 { sin32_near(y) } else { cos32_near(y) }
+    (if ((n + 1) & 2) == 2 { -r } else { r }) as f32
+  }
+}
+fn tan(x: f32) -> f32 {
+  let d = x as f64
+  if d - d != 0.0 { nan32() }
+  else if bits_of(abs(x)) < 0x39800000 { x }
+  else {
+    let (n, y) = quarters32(d)
+    let sy = sin32_near(y)
+    let cy = cos32_near(y)
+    let odd = (n & 1) == 1
+    ((if odd { -cy } else { sy }) / (if odd { sy } else { cy })) as f32
+  }
+}
 extern fn asin(x: f32) -> f32
 extern fn acos(x: f32) -> f32
-fn atan(x: f32) -> f32 { atan64(x as f64) as f32 }
-fn atan2(y: f32, x: f32) -> f32 { atan264(y as f64, x as f64) as f32 }
+fn atan(x: f32) -> f32 { to32(atan_of(x as f64, true)) }
+fn atan2(y: f32, x: f32) -> f32 { to32(atan2_of(y as f64, x as f64, true)) }
 
 fn floor(x: f32) -> f32 { floor64(x as f64) as f32 }
 fn ceil(x: f32) -> f32 { ceil64(x as f64) as f32 }
@@ -553,7 +659,7 @@ fn round(x: f32) -> f32 { round64(x as f64) as f32 }
 fn trunc(x: f32) -> f32 { trunc64(x as f64) as f32 }
 // What is left of x after taking y away as often as it fits, with x's
 // sign (`%` does the same).
-fn fmod(x: f32, y: f32) -> f32 { fmod64(x as f64, y as f64) as f32 }
+fn fmod(x: f32, y: f32) -> f32 { to32(fmod64(x as f64, y as f64)) }
 
 extern fn asin64(x: f64) -> f64
 extern fn acos64(x: f64) -> f64

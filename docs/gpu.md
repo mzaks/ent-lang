@@ -484,26 +484,47 @@ infinity was a number. It is now IEEE 754's (`cmpf une`).
 How fast they are, ns a call over a million entities on one core
 (a Zen 5c core, CPU 6, `-march=native`), against glibc's:
 
-| | ent | glibc | | ent | glibc |
+| f64 | ent | glibc | f32 | ent | glibc |
 |---|---|---|---|---|---|
-| `tan64` | 22.4 | 20.4 | `exp64` | 1.8 | 3.7 |
-| `atan64` | 6.3 | 13.3 | `log64` | 9.0 | 3.5 |
-| `atan264` | 21.9 | 24.2 | `log264` | 11.6 | 3.5 |
-| `sin64` | 19.2 | 19.9 | `pow64` | 45.4 | 9.9 |
-| `sin64` of 1e10 | 19.1 | 107.5 | `sin` (f32) | 20.8 | 10.6 |
-| `fmod64` | 8.7 | 6.7 | `tan` (f32) | 24.2 | 5.7 |
-| `fmod64` of 1e300 | 255 | 625 | `atan2` (f32) | 23.6 | 9.6 |
+| `tan64` | 21.8 | 20.9 | `tan` | 6.6 | 5.7 |
+| `atan64` | 9.3 | 13.3 | `atan` | 2.0 | 6.7 |
+| `atan264` | 21.6 | 24.7 | `atan2` | 7.5 | 9.6 |
+| `sin64` | 15.8 | 19.4 | `sin` | 11.9 | 10.8 |
+| `sin64` of 1e10 | 17.5 | 107.5 | `sin` of 1e10 | 18.9 | 11.7 |
+| `exp64` | 1.8 | 3.6 | `exp` | 2.3 | 2.2 |
+| `log64` | 9.0 | 3.2 | `log` | 1.4 | 2.8 |
+| `log264` | 11.6 | 3.5 | `log2` | 1.4 | 2.8 |
+| `pow64` | 45.5 | 9.9 | `pow` | 39.5 | 4.7 |
+| `fmod64` | 8.7 | 6.7 | | | |
+| `fmod64` of 1e300 | 255 | 626 | | | |
 
 `fmod` divides the fractions 11 bits at a time with `%` (a bit at a
 time it was 20.3 and 1208). `fma(a, b, c)` is built in (`math.fma`,
 made LLVM's own by `ent-gpu-kernel-names`, `fma.rn` in the PTX, where
 the lowering to NVVM would call libdevice's, which a build without
-`CUDA_PATH` does not link): IEEE 754 rounds it once, so it is the same on both
-sides, and `two_prod64` is one (`pow64` 53.0 before). What is left of
-`pow`, `log` and `log2` is their chain of operations, three divisions
-in `pow`'s, and none of them vectorized: glibc's take theirs from
-tables, with no division. The f32 ones are the f64 ones rounded, where
-glibc has shorter polynomials of their own.
+`CUDA_PATH` does not link): IEEE 754 rounds it once, so it is the same
+on both sides, and `two_prod64` is one (`pow64` 53.0 before). What is
+left of `pow`, `log` and `log2` is their chain of operations, three
+divisions in `pow`'s, and none of them vectorized: glibc's take theirs
+from tables, with no division.
+
+The f32 ones have polynomials of their own, worked out in f64 and
+rounded once (FreeBSD's k_sinf.c, k_cosf.c, e_rem_pio2f.c, s_atanf.c,
+k_logf.h; `tan` the quotient of `sin` and `cos`, as k_tanf.c's was an
+ulp off one time in eight): on 100,000 inputs each, each is within an
+ulp of the rounded true value and rounds it right 99.94 % of the time
+or more, `exp` and `pow` always (glibc's `sinf`, `cosf`, `logf` 98.8 to
+99.1 %). Before they were the f64 ones rounded: `sin` 20.8, `tan` 24.2,
+`atan2` 23.6. A quarter turn, and which of `atan`'s ranges, are chosen
+without a branch (which of them it is is anyone's guess, and a guess
+gone wrong costs more than working out both): `sin64` was 19.2 and
+`atan2` (f32) 21.3, while `atan64` of numbers to 100 (nearly all in its
+last range, which a branch guesses right) was 6.3. `pow` (f32) is e to
+the power of y * log(x), both to the last bits of an f64.
+
+The output of `test/Integration/Inputs/gpu_math.ent` was one line of
+127 bytes, a byte more than a `Print` holds: what the test compared of
+the f32 sum was its first ten digits. It is a line for each now.
 
 With it `pair` is `today()` (where today's rows are), `lay()` (a `for`
 over the people: their stubs, running sums of them and of the rows, and
