@@ -15,7 +15,7 @@ Variants, every one of which must give the same checksum:
   gpu        G1 (docs/gpu.md): examples/integrate.ent, whose systems are
              `gpu`, built as `ent build --gpu` builds a program: one stream,
              the CPU waiting where the compiler says (here: when the frame
-             ends), columns at 64 KB boundaries; devices/gpu.c, the host
+             ends); devices/gpu.c, the host
              built with ENT_GPU
   gpu-host   gpu with the world in pinned host memory (ENT_GPU_MEM=host),
              which the GPU reads and writes over PCIe every frame

@@ -167,12 +167,11 @@ host part says where it was last sent, so a column already there is not
 sent again. A spawn on the CPU then costs the pages of the new rows, not
 the column.
 
-**Layout.** The columns of archetypes a `gpu` system visits start at a
-64 KB boundary, in every build (the C header has the same layout as the
-program, and is made without knowing how the program is built) (the driver moves managed memory in such
-pieces), so a page the CPU writes every frame (counts, uniques) never
-holds a column's first rows. The arena grows by at most 64 KB a column.
-G0's 16 us floor may partly be this sharing; G1 measures it.
+**Layout.** Built in step 2 and taken out again after step 4: the
+columns of archetypes a `gpu` system visits started at 64 KB boundaries,
+so that no piece the driver moves held both a column's first rows and
+what the CPU writes every frame (counts, uniques). It measured nothing
+(`bench/gpu/RESULTS.md`, 2026-10-17); the layout is the CPU's again.
 
 A buffer a GPU system reads is a column like any other: its rows in use
 are prefetched and its writes on the CPU send it back, by the same bytes.
@@ -281,7 +280,7 @@ Measured 2026-10-17 (`bench/gpu/RESULTS.md`):
   promised: integrate at 1e7 in 3.7 ms (one core 12.4, OpenMP 10.5), the
   floor 11 us a frame, of which 10 are the driver's three launches and
   one synchronize.
-- The 64 KB layout measured nothing; it can go again.
+- The 64 KB layout measured nothing; it is taken out again.
 - Where the CPU spawns into or reads a column the GPU writes every
   frame, managed memory is slower than the CPU alone (1.2 to 15.5 ms a
   frame against 0.27 to 0.96), and neither the driver's advice nor
