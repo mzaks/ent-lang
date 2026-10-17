@@ -16,8 +16,6 @@ target_link_libraries(ent-opt PRIVATE
   MLIRRegisterAllExtensions
   MLIRRegisterAllPasses
   MLIRTargetLLVMIRExport
-  MLIRBuiltinToLLVMIRTranslation
-  MLIRLLVMToLLVMIRTranslation
-  MLIROpenMPToLLVMIRTranslation
+  MLIRToLLVMIRTranslationRegistration
 )
 mlir_check_all_link_libraries(ent-opt)

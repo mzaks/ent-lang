@@ -53,3 +53,31 @@ config.substitutions.append(("%ent", ent_driver + " --no-cache"))
 config.substitutions.append(
     ("%openmp", f"-L{config.llvm_lib_dir} -lomp -Wl,-rpath,{config.llvm_lib_dir}")
 )
+
+# An NVIDIA GPU, its driver and CUDA's headers: the tests of systems on the
+# GPU (docs/gpu.md) run only then. Programs for it are linked by the
+# machine's compiler, which knows where the driver's library is.
+import shutil
+import subprocess
+
+cuda = os.environ.get("CUDA_PATH", "/opt/cuda")
+smi = shutil.which("nvidia-smi")
+if smi and os.path.exists(os.path.join(cuda, "include", "cuda.h")):
+    listed = subprocess.run([smi, "--query-gpu=compute_cap",
+                             "--format=csv,noheader"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True)
+    if listed.returncode == 0 and listed.stdout.split():
+        config.available_features.add("gpu")
+        config.substitutions.append(
+            ("%gpu-chip", "sm_" + listed.stdout.split()[0].replace(".", "")))
+config.substitutions.append(("%cuda-include", os.path.join(cuda, "include")))
+# (Without the LLVM the tests use on its PATH, as tools/ent runs it: that
+# would lend it its linker, and with that its idea of where libraries are.)
+toolchain = os.path.realpath(config.llvm_tools_dir)
+machine_path = os.pathsep.join(
+    path for path in os.environ.get("PATH", "").split(os.pathsep)
+    if path and os.path.realpath(path) != toolchain)
+host_cc = os.environ.get("ENT_CC") or shutil.which("cc", path=machine_path)
+config.substitutions.append(
+    ("%host-cc", "env PATH={} {}".format(machine_path, host_cc or "cc")))

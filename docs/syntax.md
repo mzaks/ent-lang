@@ -1231,7 +1231,8 @@ gpu system integrate(dt: f32) {
 ```
 
 A `gpu system` runs its `for`s on the GPU where the program is built for
-one, and on the CPU where it is not, with the same results. It is a
+one (`tools/ent build --gpu`: an NVIDIA GPU, with its driver), and on
+the CPU where it is not, with the same results. It is a
 contract like `reads` and `writes`: the compiler checks it either way,
 and says what in a `for` keeps it from the GPU. The system's code around
 its `for`s runs on the CPU.

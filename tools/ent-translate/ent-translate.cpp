@@ -273,13 +273,25 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
   os << llvm::formatv("#define ENT_WORLD_ALIGNMENT {0}\n\n",
                       WorldLayout::kArenaAlignment);
 
+  // (A host of a program built for a GPU defines ENT_GPU: the world is
+  // then where the GPU reaches it, from devices/gpu.c.)
+  os << "#ifdef ENT_GPU\n"
+        "int ent_gpu_memalign(void **memory, size_t alignment, size_t bytes);\n"
+        "void ent_gpu_free(void *memory);\n"
+        "#define ENT_WORLD_ALLOCATE ent_gpu_memalign\n"
+        "#define ENT_WORLD_FREE ent_gpu_free\n"
+        "#else\n"
+        "#define ENT_WORLD_ALLOCATE posix_memalign\n"
+        "#define ENT_WORLD_FREE free\n"
+        "#endif\n\n";
   os << "// Counts and resources start at zero, and so do the slots of "
         "trees, where\n// zero is no edge. Columns are left "
         "uninitialised:\n// nothing reads beyond an archetype's count, and "
         "untouched pages cost\n// no memory.\n"
         "static inline ent_world *ent_world_create(void) {\n"
         "  void *arena = NULL;\n"
-        "  if (posix_memalign(&arena, ENT_WORLD_ALIGNMENT, ENT_WORLD_BYTES))\n"
+        "  if (ENT_WORLD_ALLOCATE(&arena, ENT_WORLD_ALIGNMENT, "
+        "ENT_WORLD_BYTES))\n"
         "    return NULL;\n";
   os << llvm::formatv("  memset(arena, 0, {0});\n", layout->headerBytes);
   // The columns in which zero says "none" (a tree's slots and links).
@@ -312,7 +324,7 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     os << "void ent_text_drop(uint64_t held);\n";
   os << "static inline void ent_world_destroy(ent_world *world) {\n"
         "  if (!world)\n    return;\n"
-     << drops << "  free(world);\n}\n";
+     << drops << "  ENT_WORLD_FREE(world);\n}\n";
 
   // A world written to a file and read back: the parts of the arena that
   // are in use, in its order, after a number that says whose they are.

@@ -1,0 +1,78 @@
+// Systems on the GPU among systems on the CPU (docs/gpu.md): built with
+// and without --gpu, it prints the same. The CPU spawns into and destroys
+// from what the GPU goes through every frame, reads what it wrote, and
+// writes what it reads; a `gpu` system has code after its `for`, reads a
+// buffer, gives and takes a tag, and runs under a condition; an
+// archetype holds one entity.
+import console
+
+component Position { x: f32, y: f32 } capacity 100000
+component Velocity { dx: f32, dy: f32 } capacity 100000
+component Sun { pull: f32 }
+tag Hot
+archetype Star { Position, Sun } capacity 1
+unique Clock { frame: i64 }
+unique Moved: i64
+unique Total: f64
+unique Hots: i64
+buffer Gusts { dx: f32 } capacity 8
+
+gpu system fly(dt: f32) {
+  for e, p: mut Position, v: mut Velocity {
+    v.dx += Gusts[(Clock.frame % 8) as i32].dx * dt
+    p.x += v.dx * dt
+    p.y += v.dy * dt
+    if p.y > 38.0 { e.add(Hot) } else { e.remove(Hot) }
+  }
+  Moved += 1
+}
+gpu system cool() {
+  for v: mut Velocity with Hot where v.dy > 0.0 { v.dy = v.dy * 0.5 }
+}
+gpu system shine() {
+  for p: mut Position, s: Sun { p.x += s.pull }
+}
+// On the CPU: reads what the GPU wrote, and changes which entities there
+// are in what it goes through.
+system births() {
+  for i in 0..(Clock.frame % 5) {
+    spawn { Position { x: i as f32, y: 0.0 },
+            Velocity { dx: 0.5, dy: (Clock.frame % 3) as f32 } }
+  }
+  for e, p: Position with Velocity where p.x > 40.0 { e.destroy() }
+}
+system tick() { Clock.frame += 1 }
+system total() {
+  Total = 0.0
+  for p: Position { Total += (p.x * 3.0 + p.y) as f64 }
+  Hots = 0
+  for with Hot { Hots += 1 }
+  spawn { Print { line: "frame {Clock.frame} moved {Moved} total {Total} hot {Hots}" } }
+}
+
+schedule frame(dt: f32) {
+  fly(dt)
+  cool() run_if Clock.frame % 2 == 0
+  shine()
+  births()
+  tick()
+}
+schedule report() run_if Clock.frame % 10 == 0 { total()  write()  clear() }
+
+world {
+  Gusts = [{ dx: 0.0 }; 8]
+  Gusts[3].dx = 1.0
+  Gusts[5].dx = -2.0
+  spawn { Position { x: 0.0, y: 0.0 }, Sun { pull: 0.25 } }
+  for i in 0..20000 {
+    spawn { Position { x: (i % 100) as f32 * 0.3, y: (i % 37) as f32 },
+            Velocity { dx: (i % 11) as f32 * 0.1, dy: (i % 5) as f32 } }
+  }
+}
+
+main {
+  loop {
+    frame(0.1)
+    report()
+  } until Clock.frame == 30
+}

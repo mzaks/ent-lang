@@ -1,7 +1,7 @@
 # Systems on the GPU: design of G1
 
-Status: steps 1 (the marker and its checks) and 2 (the lowering, without
-the hints) built; the rest is design. G0 (`bench/gpu/`, results in
+Status: steps 1 to 3 built (the marker and its checks; the lowering,
+without the hints; the runtime and `tools/ent --gpu`); step 4 to do. G0 (`bench/gpu/`, results in
 `bench/gpu/RESULTS.md`) showed that ent-opt's entity-parallel loops become
 correct kernels through upstream MLIR passes alone, that a frame of 1e7
 entities takes 3.75 ms with the world on the GPU against 14.5 ms on one
@@ -232,7 +232,27 @@ header's `ent_world_create` calls `ent_gpu_alloc` instead of
    are calls of `ent_gpu_wait`.
 3. **Runtime and tools.** `devices/gpu.c`, `tools/ent --gpu`, the GPU test
    mode; `bench/gpu/run.py` goes through `tools/ent` instead of its own
-   pipeline.
+   pipeline. Built but for the last (step 4 does it, on the C host the
+   bench needs, which `tools/ent` does not build):
+   - `devices/gpu.c`: one stream for every launch, the launch's own
+     synchronize a no-op, `ent_gpu_wait` waits only where something was
+     launched since. Memory of a megabyte or more is managed (the world;
+     `ENT_GPU_MEM=host` puts it in pinned host memory to compare); a
+     program's own memory comes from it through MLIR's generic
+     allocation functions (`finalize-memref-to-llvm` with
+     `use-generic-functions`), a C host's world through the header with
+     `ENT_GPU` defined.
+   - `ent-opt` registers every translation to LLVM IR, so it makes the
+     kernels into PTX itself (`gpu-module-to-binary`); `tools/ent --gpu`
+     runs the passes of `gpu_passes` around the CPU's, the columns
+     already lowered to addresses (`--ent-lower-views`) so that a kernel
+     is given those. The chip is nvidia-smi's, or `ENT_GPU_CHIP`; PTX 8.0
+     (`ENT_GPU_FEATURES`).
+   - `test/Integration/gpu.test` (lit feature `gpu`: nvidia-smi and
+     `cuda.h`): `Inputs/gpu_mix.ent`, CPU and GPU systems that spawn,
+     destroy, read and write each other's columns, prints the same built
+     plain, `--gpu` and `--gpu --parallel`; integrate through its C host
+     gives integrate.test's output.
 4. **Measure.** `integrate` against G0's table (the floor with one stream
    and no wait per launch, with and without the 64 KB layout, with and
    without hints), and a program where the CPU spawns into an archetype a

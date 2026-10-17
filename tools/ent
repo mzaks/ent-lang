@@ -47,6 +47,14 @@ what the program does on one core (drawing, say) has the machine to
 itself; KMP_BLOCKTIME or OMP_WAIT_POLICY, where the program runs, say
 otherwise.
 
+With --gpu the `for`s of `gpu system`s run on the machine's NVIDIA GPU
+(docs/gpu.md): made into kernels for it (its kind from nvidia-smi, or
+ENT_GPU_CHIP, `sm_89` say), which its driver compiles when the program
+starts, with the world where both the CPU and the GPU reach it. It needs
+the CUDA driver (libcuda) where the program is built and where it runs,
+and cuda.h (CUDA_PATH, else /opt/cuda) where it is built. Without --gpu
+those systems run on the CPU, with the same results.
+
 Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 
 A program can be built for what it does when it runs (profile-guided):
@@ -211,6 +219,10 @@ def cache_key(arguments):
     if arguments.profile:
         for path in profiles(arguments.profile):
             note_file(path)
+    if arguments.gpu:
+        note("gpu", gpu_chip(), os.environ.get("ENT_GPU_FEATURES", ""),
+             os.environ.get("CUDA_PATH", ""))
+        note_file(os.path.join(ROOT, "devices", "gpu.c"))
     note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
          os.environ.get("ENT_PIECES", ""), os.environ.get("ENT_SPLIT", ""),
          os.cpu_count())
@@ -325,6 +337,43 @@ def piece_count(llvm):
     return min(os.path.getsize(llvm) // 160_000, os.cpu_count() or 1, 16)
 
 
+def gpu_chip():
+    """The kind of GPU the kernels are for: ENT_GPU_CHIP, else what
+    nvidia-smi says of the machine's first."""
+    chosen = os.environ.get("ENT_GPU_CHIP")
+    if chosen:
+        return chosen
+    smi = shutil.which("nvidia-smi")
+    if smi:
+        listed = subprocess.run([smi, "--query-gpu=compute_cap",
+                                 "--format=csv,noheader"],
+                                stdout=subprocess.PIPE, text=True)
+        first = listed.stdout.split()
+        if listed.returncode == 0 and first:
+            return "sm_" + first[0].replace(".", "")
+    sys.exit("ent: --gpu: cannot tell the machine's GPU (no nvidia-smi); "
+             "say which with ENT_GPU_CHIP (sm_89, say)")
+
+
+def gpu_passes(chip):
+    """From the lowered program (its GPU loops mapped) to kernels: those
+    passes that come before the CPU's loops are made OpenMP's, and those
+    after, which make the kernels into PTX, embedded in the program."""
+    # (PTX 8.0: what the RTX 40 series needs at the least, and every
+    # driver of CUDA 12 reads.)
+    features = os.environ.get("ENT_GPU_FEATURES", "+ptx80")
+    before = ["--convert-parallel-loops-to-gpu", "--gpu-kernel-outlining"]
+    after = ["--lower-affine", "--convert-scf-to-cf",
+             f"--nvvm-attach-target=chip={chip} features={features}",
+             "--convert-gpu-to-nvvm", "--reconcile-unrealized-casts",
+             # (The program's memory, the world's with it, from
+             # devices/gpu.c: see _mlir_memref_to_llvm_alloc there.)
+             "--finalize-memref-to-llvm=use-generic-functions=1"]
+    finish = ["--gpu-to-llvm", "--reconcile-unrealized-casts",
+              "--gpu-module-to-binary=format=isa"]
+    return before, after, finish
+
+
 def run(command, **options):
     result = subprocess.run(command, **options)
     if result.returncode != 0:
@@ -356,13 +405,22 @@ def build(arguments, output, directory):
     shutil.copyfile(header, os.path.join(directory, stem + "_world.h"))
 
     lowering = "--ent-lower-to-loops"
-    passes = [lowering + "=fuse-systems=1", "--symbol-dce"]
+    gpu = " gpu=1" if arguments.gpu else ""
+    passes = [lowering + "=fuse-systems=1" + gpu, "--symbol-dce"]
+    # (Kernels are made of the GPU's loops before what is left of them is
+    # the CPU's; and the columns are read by their addresses before, so
+    # that a kernel is given those.)
+    before, after, finish = gpu_passes(gpu_chip()) if gpu else ([], [], [])
+    views = ["--cse", "--ent-lower-views"]
+    if gpu:
+        passes += views + before
     link = []
     if arguments.parallel:
         passes = ["--ent-schedule",
                   lowering + "=fuse-systems=1 parallel-entities=1 "
-                  "parallel-stages=1",
-                  "--symbol-dce", "--convert-scf-to-openmp", "--canonicalize",
+                  "parallel-stages=1" + gpu,
+                  "--symbol-dce"] + (views + before if gpu else []) + [
+                  "--convert-scf-to-openmp", "--canonicalize",
                   "--ent-omp-nowait"]
         # The OpenMP runtime of the LLVM that compiled the program, by its
         # file: its directory is not one to look for other libraries in.
@@ -378,6 +436,9 @@ def build(arguments, output, directory):
     # the edges it connects there are kept by C that comes with the
     # compiler.
     given.append(os.path.join(ROOT, "devices", "sends.c"))
+    if gpu:
+        given.append(os.path.join(ROOT, "devices", "gpu.c"))
+        link.append("-lcuda")
     for path in arguments.sources:
         if os.path.splitext(path)[1] not in (".c", ".cpp", ".o", ".a"):
             sys.exit(f"ent: do not know how to build '{path}' (expected "
@@ -410,7 +471,11 @@ def build(arguments, output, directory):
             others.append(path)
             continue
         if extension == ".c":
-            run([cc, "-O2", "-I", directory, "-c", path, "-o", built],
+            cuda = []
+            if gpu:
+                cuda = ["-DENT_GPU", "-I", os.path.join(
+                    os.environ.get("CUDA_PATH", "/opt/cuda"), "include")]
+            run([cc, "-O2", "-I", directory, *cuda, "-c", path, "-o", built],
                 env=host)
         elif extension == ".cpp":
             run([cxx, "-O2", "-I", directory, "-c", path, "-o", built],
@@ -454,9 +519,9 @@ def build(arguments, output, directory):
         # (What the lowering wrote more than once, once, and the columns
         # read and written by their addresses: less to turn into LLVM's
         # IR, and for LLVM to read.)
-        ["--cse", "--ent-lower-views"] +
-        ["--convert-scf-to-cf", "--convert-to-llvm",
-         "--reconcile-unrealized-casts",
+        ([] if gpu else views) + after +
+        ["--convert-scf-to-cf", "--convert-to-llvm"] + finish +
+        ["--reconcile-unrealized-casts",
          "--ent-emit-llvm=output=" + llvm + " keep=" + keep,
          "-o", os.devnull])
 
@@ -581,6 +646,9 @@ def main():
     parser.add_argument("--parallel", action="store_true",
                         help="stage and fuse systems and run them on all "
                         "cores (OpenMP)")
+    parser.add_argument("--gpu", action="store_true",
+                        help="run the `for`s of `gpu system`s on the "
+                        "machine's NVIDIA GPU")
     parser.add_argument("--embed", action="store_true",
                         help="put the files the program declares (`asset`) "
                         "into the program itself, not next to it")

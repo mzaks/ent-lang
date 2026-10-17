@@ -7,9 +7,7 @@
 #include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Pass/Pass.h"
-#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
-#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
-#include "mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/All.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
@@ -131,9 +129,9 @@ int main(int argc, char **argv) {
   registry.insert<mlir::ent::EntDialect>();
   mlir::registerAllDialects(registry);
   mlir::registerAllExtensions(registry);
-  mlir::registerBuiltinDialectTranslation(registry);
-  mlir::registerLLVMDialectTranslation(registry);
-  mlir::registerOpenMPDialectTranslation(registry);
+  // (The GPU's and NVVM's too: a program built for a GPU has its kernels
+  // made into machine code for it here, see docs/gpu.md.)
+  mlir::registerAllToLLVMIRTranslations(registry);
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "ent-lang optimizer driver\n", registry));
