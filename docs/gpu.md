@@ -431,19 +431,24 @@ its first pass would read what an earlier body had not written yet.
 
 **Rows of buffers written from a `for` (2026-10-17).** The other thing
 `pair` needed: `Order[Pairing.order + row].who = e` in a `for`, the row
-from a running sum, and every 64th stub's row in `Index` from a loop of
-the body. A row is written where it stands; each is the row of one
-entity of the run, and two that write one stop the program. Who wrote
-a row is kept beside the buffer (8 bytes a row of its room, the run's
-number above 32 bits and the entity's id below, outside what a saved
-world holds): a write puts its own there and looks at what it found. On
-the GPU by an atomic exchange; on the CPU by a load and a store, also
-on many threads, where a locked exchange of every row cost more than
-the loop (`lay` 4.9 ms at four threads, 1.85 with plain ones): there a
-clash that two threads make at the same moment may go unseen, one core
-sees every one. A row written twice by the same entity in a row (two
-fields) is looked at once. The GPU's copy of the world now starts as
-nought, as the CPU's does: who wrote its rows is never copied over.
+from a running sum, and the rows of `Index` for the stubs at a multiple
+of 64. A row is written where it stands, and each entity writes rows of
+its own, which the compiler sees in the row (`ownRowOf`): a place the
+same for every entity, plus what a running sum gave the entity, plus an
+offset inside its interval (none for a sum that adds 1, `k` of `for k
+in 0..` the value added). Intervals do not overlap where no value added
+is below nought. What is not seen when compiling is asked where the
+entity runs, by a comparison or two (`ent.rows_check`): where it does
+not hold the write is not made and the program stops after the `for`,
+the same on every build, on the GPU too, with no atomics. (A first
+version kept who wrote each row beside the buffer, 8 bytes a row, and
+looked at it on every write: on many threads of the CPU a locked
+exchange cost more than the loop, and without one a clash could go
+unseen.) `lay` writes `Index` from a second running sum, how many of an
+entity's stubs fall on a multiple of 64; it is made of the first (the
+sum of those before telescopes to where the entity's first such stub's
+row is), so the lowering makes a pass for each: sums whose values are
+made of sums not worked out yet wait for the next.
 
 With it `pair` is `today()` (where today's rows are), `lay()` (a `for`
 over the people: their stubs, running sums of them and of the rows, and

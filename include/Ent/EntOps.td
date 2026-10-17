@@ -1501,6 +1501,23 @@ def Ent_RunningOp : Ent_Op<"running", [
   let hasVerifier = 1;
 }
 
+def Ent_RowsCheckOp : Ent_Op<"rows_check"> {
+  let summary = "Say where an entity of a query wrote outside its rows";
+  let description = [{
+    ```mlir
+    ent.rows_check %inside @Index
+    ```
+    In a query that writes rows of `@Index`: where `%inside` is false, the
+    entity would write a row that is not its own (outside the interval a
+    running sum gives it, or with a running sum that went down, which
+    makes those of others overlap); the query's end then stops the
+    program. Made by the lowering from what the verifier could not show
+    (see ownRowOf); the write itself is not made.
+  }];
+  let arguments = (ins I1:$inside, FlatSymbolRefAttr:$buffer);
+  let assemblyFormat = "$inside $buffer attr-dict";
+}
+
 def Ent_DespawnOp : Ent_Op<"despawn", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Remove the visited entity from the world";

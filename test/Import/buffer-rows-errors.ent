@@ -34,3 +34,43 @@ system mark() {
     for o: Hp { Marks[o.hp].hp = h.hp }
   }
 }
+
+// -----
+
+component Hp { hp: i32 }
+buffer Marks { hp: i32 } capacity 8
+system mark() {
+  for h: Hp {
+    // expected-error @+1 {{that is not shown to be its entity's own: no running sum}}
+    Marks[h.hp].hp = 1
+  }
+}
+
+// -----
+
+component Hp { hp: i32 }
+buffer Marks { hp: i32 } capacity 8
+unique Count { a: i32, b: i32 }
+system mark() {
+  for h: Hp {
+    let a = Count.a += 1
+    let b = Count.b += 1
+    // expected-error @+1 {{by another running sum, or from another place}}
+    Marks[a].hp = 1
+    // expected-note @+1 {{the other write}}
+    Marks[b].hp = 2
+  }
+}
+
+// -----
+
+component Hp { hp: i32 }
+buffer Marks { hp: i32 } capacity 8
+unique Count { a: i32 }
+system mark() {
+  for h: Hp {
+    let a = Count.a += 1
+    // expected-error @+1 {{it takes away what is not the same for every entity}}
+    Marks[a - h.hp].hp = 1
+  }
+}

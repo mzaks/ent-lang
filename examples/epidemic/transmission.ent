@@ -208,7 +208,7 @@ system rows() {
 
 // Where today's rows are (`Pairing.order`, `Pairing.index`), before the
 // people lay their stubs there; and none laid yet (`Laying`).
-unique Laying { rows: i32, stubs: i32 }
+unique Laying { rows: i32, stubs: i32, slots: i32 }
 
 system today() {
   let slot = Clock.day % Pairing.kept
@@ -216,14 +216,17 @@ system today() {
   Pairing.index = Laid[slot].index
   Laying.rows = 0
   Laying.stubs = 0
+  Laying.slots = 0
 }
 
 // Where everybody's stubs start, in the order of the people, and how
 // many stubs there are: those of everybody who is up and not kept at
 // home. Where one's stubs start is how many those before have (a
 // running sum, `Laying.stubs`), and their row their place among the
-// people (`Laying.rows`), which is their number; every 64th stub's row
-// is in `Index`.
+// people (`Laying.rows`), which is their number. Of their stubs, those
+// at a multiple of 64 give `Index` their row: how many those are before
+// theirs is a running sum too (`Laying.slots`), so each person writes
+// rows of its own.
 system lay() {
   for e, c: mut Chance, d: Disease, p: Person, h: Quarantine {
     var meets = 0
@@ -240,11 +243,9 @@ system lay() {
     Order[Pairing.order + row].first = first
     c.first = first
     c.today = meets
-    var next = (first + 63) / 64 * 64
-    while next < first + meets {
-      Index[Pairing.index + next / 64].row = row
-      next += 64
-    }
+    let many = (first + meets + 63) / 64 - (first + 63) / 64
+    let slot = Laying.slots += many
+    for k in 0..many { Index[Pairing.index + slot + k].row = row }
   }
 }
 

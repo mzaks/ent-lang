@@ -3,6 +3,23 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-17, last: rows of its own, seen when compiling
+
+`lay` writes the rows of `Index` from a second running sum, and nothing
+keeps who wrote each row (docs/gpu.md). The same command, machine and
+caveat as the entry below.
+
+| a million people, a day in ms | one core | 4 threads | memory MB |
+|---|---|---|---|
+| the CPU alone | 178.7 | 67.0 | 899 |
+| `workplace`, `infectiousness`, `chance` and `lay` on the GPU | 19.3 | 12.8 | 870 |
+
+857,886 infected in every run; with tracing, 100,000 people, 32,718 in
+all four builds. `lay` takes 3.32 ms on one core (3.79 with who wrote
+each row kept), 3.27 on four threads (1.83: the second running sum is
+made of the first, so the rows are gone through in three passes, with
+two scans between them) and 2.27 on the GPU (2.10).
+
 ## 2026-10-17, later still: `pair` as a `for`, and on the GPU
 
 `pair` is `today()`, `lay()` and `pair()` (docs/gpu.md): `lay` a `for`

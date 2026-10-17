@@ -649,17 +649,10 @@ public:
   Value bufferField(const WorldBuffer &buffer, const WorldColumn &field) {
     return view(field.offset, buffer.rows, storageType(field.type));
   }
-  /// Who wrote each row of a buffer a `for` writes, and whether two of a
-  /// run did, in this world (the GPU's has its own); the number of the
-  /// last run, the CPU's (see WorldBuffer).
-  Value bufferOwners(const WorldBuffer &buffer) {
-    return view(buffer.ownerOffset, buffer.rows, rewriter.getI64Type());
-  }
+  /// Whether an entity of the last run of a `for` that writes a buffer's
+  /// rows wrote outside its own, in this world (the GPU's has its own).
   Value bufferClash(const WorldBuffer &buffer) {
     return scalar(buffer.clashOffset);
-  }
-  Value bufferRun(const WorldBuffer &buffer) {
-    return host ? host->bufferRun(buffer) : scalar(buffer.runOffset);
   }
   /// The places of an append inside a query, for the rows of `archetype`:
   /// whether the row added one (a byte), and a column per field.
@@ -1152,7 +1145,7 @@ static bool isEntityLocal(QueryOp query) {
     // A row of a buffer is written by one entity (see lowerBuffers).
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
             ApplyOp, AccumulateOp, RunningOp, YieldOp, EdgesOp, ConnectOp,
-            DisconnectOp, AppendOp, BufferSetOp>(op) ||
+            DisconnectOp, AppendOp, BufferSetOp, RowsCheckOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
     // A buffer is read like a resource: no query changes one while it
@@ -1841,16 +1834,10 @@ static Value runningIdentity(OpBuilder &builder, Location loc, Type type,
                                      from));
 }
 
-/// Marks an `ent.buffer.set` in a query (not one that takes turns): the
-/// entity that writes the row owns it for the run of the query, and two
-/// that write one row stop the program (see lowerBuffers).
+/// Marks an `ent.buffer.set` in a query (not one that takes turns): it
+/// writes a row of its entity's own (see ownRowOf), and where that is
+/// not shown it is asked as it runs (`ent.rows_check`, see checkOwnRows).
 static constexpr llvm::StringLiteral kOwnedAttr = "ent.owned";
-/// For each run of a query being lowered that writes a buffer's rows, the
-/// run's number (above 32 bits, an i64), by the buffer's owner column;
-/// and for each such write lowered in its body, the owner it writes:
-/// that and the entity's id.
-static llvm::DenseMap<uint64_t, Value> ownerRuns;
-static llvm::DenseMap<Operation *, Value> ownerTags;
 
 static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                           const WorldArchetype &archetype, WorldAccess &world,
@@ -1914,41 +1901,6 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
     }
   };
 
-  // Rows of buffers written: who writes them (see lowerBuffers).
-  for (Operation *root : roots)
-    root->walk([&](BufferSetOp set) {
-      if (!set->hasAttr(kOwnedAttr))
-        return;
-      const WorldBuffer &buffer = layout.getBuffer(set.getBufferAttr().getAttr());
-      Value run = ownerRuns.lookup(buffer.ownerOffset);
-      if (!run)
-        return;
-      // (Where the entity wrote the row already, just before in the same
-      // block, it has it.)
-      for (Operation *before = set->getPrevNode(); before;
-           before = before->getPrevNode()) {
-        auto earlier = dyn_cast<BufferSetOp>(before);
-        if (earlier && earlier.getBufferAttr() == set.getBufferAttr() &&
-            earlier.getIndex() == set.getIndex() && ownerTags.count(earlier))
-          return;
-        if (!isPure(before) && !earlier)
-          break;
-      }
-      rewriter.setInsertionPoint(set);
-      Location loc = set.getLoc();
-      // (Ids of 64 bits by their low half, which tells live entities apart.)
-      Value id = world.entityId(loc, archetype, entity);
-      Value bits =
-          id.getType().getIntOrFloatBitWidth() < 64
-              ? arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(), id)
-                    .getResult()
-              : arith::AndIOp::create(
-                    rewriter, loc, id,
-                    arith::ConstantIntOp::create(rewriter, loc, 0xffffffffLL,
-                                                 64))
-                    .getResult();
-      ownerTags[set] = arith::OrIOp::create(rewriter, loc, run, bits);
-    });
   SmallVector<Operation *> accesses;
   for (Operation *root : roots)
     root->walk([&](Operation *op) {
@@ -12726,6 +12678,80 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const WorldLayout &layout, WorldAccess &world,
                        const LoopOptions &given);
 
+/// The rows `query` writes of buffers are its entities' own (ownRowOf);
+/// what the verifier could not show is asked where the entity runs: that
+/// the offset is inside the interval its running sum gives it, and that
+/// the sum does not go down. Where it is not, `ent.rows_check` says so
+/// (and the write is not made); the query's end stops the program.
+static void checkOwnRows(IRRewriter &rewriter, QueryOp query) {
+  SmallVector<BufferSetOp> sets;
+  query.walk([&](BufferSetOp set) {
+    if (set->hasAttr(kOwnedAttr) && !set->hasAttr("ent.rows_checked"))
+      sets.push_back(set);
+  });
+  llvm::DenseSet<std::pair<Operation *, Attribute>> notDown;
+  Type i64 = rewriter.getI64Type();
+  auto wide = [&](Location loc, Value value) -> Value {
+    if (value.getType().isIndex())
+      return arith::IndexCastOp::create(rewriter, loc, i64, value);
+    if (isa<IndexOfType>(value.getType()))
+      value = UnrealizedConversionCastOp::create(rewriter, loc,
+                                                 rewriter.getI32Type(), value)
+                  .getResult(0);
+    unsigned bits = value.getType().getIntOrFloatBitWidth();
+    if (bits == 64)
+      return value;
+    if (!hasNoSign(value.getType()))
+      return arith::ExtSIOp::create(rewriter, loc, i64, value);
+    // (Without a sign: as the integer of its bits, made wider by noughts.)
+    Value bitsOf = UnrealizedConversionCastOp::create(
+                       rewriter, loc, rewriter.getIntegerType(bits), value)
+                       .getResult(0);
+    return arith::ExtUIOp::create(rewriter, loc, i64, bitsOf);
+  };
+  for (BufferSetOp set : sets) {
+    set->setAttr("ent.rows_checked", rewriter.getUnitAttr());
+    std::string why;
+    FailureOr<OwnRow> row = ownRowOf(set, why);
+    if (failed(row))
+      continue;
+    Location loc = set.getLoc();
+    Value summed = row->running.getValue();
+    if (!row->valueShown &&
+        notDown.insert({row->running.getOperation(), set.getBufferAttr()})
+            .second) {
+      rewriter.setInsertionPointAfter(row->running);
+      Value up = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::sge, wide(loc, summed),
+          arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+      RowsCheckOp::create(rewriter, loc, up, set.getBufferAttr());
+    }
+    if (row->offsetShown)
+      continue;
+    rewriter.setInsertionPoint(set);
+    Value size = wide(loc, summed);
+    Value inside;
+    if (row->offset) {
+      Value offset = wide(loc, row->offset);
+      inside = arith::AndIOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
+                                offset,
+                                arith::ConstantIntOp::create(rewriter, loc, 0,
+                                                             64)),
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
+                                offset, size));
+    } else {
+      inside = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::sge, size,
+          arith::ConstantIntOp::create(rewriter, loc, 1, 64));
+    }
+    RowsCheckOp::create(rewriter, loc, inside, set.getBufferAttr());
+    auto branch = scf::IfOp::create(rewriter, loc, inside);
+    set->moveBefore(branch.thenBlock()->getTerminator());
+  }
+}
+
 static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
                             ModuleOp module, StringRef name, ValueRange args,
                             TypeRange results = {});
@@ -12951,28 +12977,42 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
                             arith::AddIOp::create(rewriter, loc, start, all),
                             field, ValueRange{zero});
   }
+  // Those whose values are made of running sums not worked out yet wait
+  // for a pass after theirs (the query lowered again, see the end).
+  auto ready = [&](RunningOp running) {
+    SmallVector<Value> pending{running.getValue()};
+    llvm::SmallPtrSet<Operation *, 16> seen;
+    while (!pending.empty()) {
+      Operation *def = pending.pop_back_val().getDefiningOp();
+      if (!def || !seen.insert(def).second || !query->isProperAncestor(def))
+        continue;
+      if (isa<RunningOp>(def) && !def->hasAttr(kRunningSlotAttr) &&
+          !def->hasAttr(kRunningCountAttr))
+        return false;
+      llvm::append_range(pending, def->getOperands());
+      // (And what decides whether it runs.)
+      for (Operation *parent = def->getParentOp(); parent != query;
+           parent = parent->getParentOp())
+        llvm::append_range(pending, parent->getOperands());
+    }
+    for (Operation *parent = running->getParentOp(); parent != query;
+         parent = parent->getParentOp())
+      for (Value operand : parent->getOperands())
+        if (auto other = operand.getDefiningOp<RunningOp>();
+            other && !other->hasAttr(kRunningSlotAttr) &&
+            !other->hasAttr(kRunningCountAttr))
+          return false;
+    return true;
+  };
+  llvm::erase_if(runnings, [&](RunningOp running) { return !ready(running); });
   if (runnings.empty()) {
     llvm::SaveAndRestore keepBases(runningBases, bases);
     lowerQuery(rewriter, query, layout, world, options);
     return true;
   }
-  // The values summed must not be running sums themselves: a pass for
-  // each of those, not done.
-  for (RunningOp running : runnings) {
-    SmallVector<Value> pending{running.getValue()};
-    llvm::SmallPtrSet<Operation *, 16> seen;
-    while (!pending.empty()) {
-      Operation *def = pending.pop_back_val().getDefiningOp();
-      if (!def || !seen.insert(def).second)
-        continue;
-      if (isa<RunningOp>(def)) {
-        running.emitError("sums a value made of another running sum of "
-                          "its 'for': not yet");
-        return true;
-      }
-      llvm::append_range(pending, def->getOperands());
-    }
-  }
+  // (Their places among the scratch arrays of the query: after those of
+  // the passes before.)
+  int64_t first = runningScratch.size();
   // The scratch arrays: the rows, then room for the scan's levels (each
   // at most a chunk's part of the one below) and the whole sum.
   Value room = arith::AddIOp::create(
@@ -13000,7 +13040,7 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
       Value raw =
           callGpu(rewriter, loc, module, "ent_gpu_scratch",
                   ValueRange{arith::ConstantIntOp::create(rewriter, loc,
-                                                          slot, 64),
+                                                          first + slot, 64),
                              bytes},
                   TypeRange{MemRefType::get({ShapedType::kDynamic},
                                             rewriter.getI8Type())})
@@ -13023,18 +13063,23 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
                         running.getRule()),
         scratch, ValueRange{row});
   }
-  llvm::SaveAndRestore keepScratch(runningScratch, scratches);
+  llvm::SaveAndRestore keepScratch(runningScratch);
+  runningScratch.append(scratches);
   llvm::SaveAndRestore keepBases(runningBases, bases);
 
   // The first pass: what the values summed are made of, and the ifs and
   // loops around them; nothing of what the query does.
   rewriter.setInsertionPoint(query);
+  for (RunningOp running : runnings)
+    running->setAttr("ent.running_now", rewriter.getUnitAttr());
   auto values = cast<QueryOp>(rewriter.clone(*query));
   SmallVector<RunningOp> copies;
   values.walk([&](RunningOp running) {
-    if (!running->hasAttr(kRunningCountAttr))
+    if (running->hasAttr("ent.running_now"))
       copies.push_back(running);
   });
+  for (RunningOp running : runnings)
+    running->removeAttr("ent.running_now");
   llvm::SetVector<Operation *> needed;
   SmallVector<Operation *> pending(copies.begin(), copies.end());
   while (!pending.empty()) {
@@ -13065,11 +13110,14 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
     op->erase();
   }
   for (auto [slot, running] : llvm::enumerate(copies)) {
-    running->setAttr(kRunningSlotAttr, rewriter.getI64IntegerAttr(slot));
+    running->removeAttr("ent.running_now");
+    running->setAttr(kRunningSlotAttr,
+                     rewriter.getI64IntegerAttr(first + slot));
     running->setAttr(kRunningValuesAttr, rewriter.getUnitAttr());
   }
   for (auto [slot, running] : llvm::enumerate(runnings))
-    running->setAttr(kRunningSlotAttr, rewriter.getI64IntegerAttr(slot));
+    running->setAttr(kRunningSlotAttr,
+                     rewriter.getI64IntegerAttr(first + slot));
   lowerQuery(rewriter, values, layout, world, options);
 
   // The scans, and the uniques' sums.
@@ -13097,7 +13145,8 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
           Value bits =
               callGpu(rewriter, loc, module, "ent_gpu_scratch_get",
                       ValueRange{arith::ConstantIntOp::create(rewriter, loc,
-                                                              slot, 64),
+                                                              first + slot,
+                                                              64),
                                  offset,
                                  arith::ConstantIntOp::create(rewriter, loc,
                                                               bytes, 64)},
@@ -13110,7 +13159,8 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
     memref::StoreOp::create(rewriter, loc, sum, field, ValueRange{zero});
   }
 
-  // The second pass: the query, each running sum from its row's place.
+  // The second pass: the query, each running sum from its row's place
+  // (or the next, where some wait for these).
   // (What the query becomes goes before it, the scratch's end after.)
   if (!options.gpu) {
     rewriter.setInsertionPointAfter(query);
@@ -13159,31 +13209,22 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     return lowerCascade(rewriter, query, layout, world, given);
   if (query.hasBy())
     return lowerOrdered(rewriter, query, layout, world);
+  checkOwnRows(rewriter, query);
   if (lowerRunning(rewriter, query, layout, world, options))
     return;
   Location loc = query.getLoc();
-  // Buffers whose rows the body writes: this run's number, by which each
-  // row says which entity of it wrote it (see lowerBuffers), and none of
-  // its entities has written a row another did, yet.
+  // Buffers whose rows the body writes: none of its entities has written
+  // outside its own, yet (see checkOwnRows).
   SmallVector<const WorldBuffer *> owned;
   query.getBody().walk([&](BufferSetOp set) {
     const WorldBuffer &buffer = layout.getBuffer(set.getBufferAttr().getAttr());
     if (set->hasAttr(kOwnedAttr) && !llvm::is_contained(owned, &buffer))
       owned.push_back(&buffer);
   });
-  llvm::SaveAndRestore keepRuns(ownerRuns);
   if (!owned.empty()) {
     rewriter.setInsertionPoint(query);
     Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
     for (const WorldBuffer *buffer : owned) {
-      Value counter = world.bufferRun(*buffer);
-      Value run = arith::AddIOp::create(
-          rewriter, loc,
-          memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}),
-          arith::ConstantIntOp::create(rewriter, loc, 1, 64));
-      memref::StoreOp::create(rewriter, loc, run, counter, ValueRange{zero});
-      ownerRuns[buffer->ownerOffset] = arith::ShLIOp::create(
-          rewriter, loc, run, arith::ConstantIntOp::create(rewriter, loc, 32, 64));
       Value none = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
       if (options.gpu)
         callGpu(rewriter, loc, query->getParentOfType<ModuleOp>(),
@@ -13433,7 +13474,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // can never run; that is almost certainly a mistake in the program.
   // (Not in a module it imports, which has queries for what a program
   // may not use.)
-  // Two entities of the run that wrote one row stop the program.
+  // An entity that wrote outside its rows stops the program.
   rewriter.setInsertionPoint(query);
   for (const WorldBuffer *buffer : owned) {
     Value clash;
@@ -13456,9 +13497,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                               arith::ConstantIntOp::create(rewriter, loc, 0,
                                                            64)),
         rewriter.getStringAttr(
-            "two entities of one 'for' wrote the same row of the buffer @" +
+            "an entity of a 'for' wrote a row of the buffer @" +
             BufferOp(buffer->op).getSymName() +
-            ": in a 'for' each row is written by one entity"));
+            " that is not its own: outside the rows its running sum gives "
+            "it, or with a running sum that went down"));
   }
 
   if (!matched && !ofModule(query))
@@ -14486,7 +14528,7 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
   SmallVector<Operation *> uses;
   func.walk([&](Operation *op) {
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferSetOp,
-            BufferFillOp, BufferKeepOp>(op))
+            BufferFillOp, BufferKeepOp, RowsCheckOp>(op))
       uses.push_back(op);
     else if (auto invoke = dyn_cast<InvokeOp>(op);
              invoke && takesBuffer(invoke))
@@ -14518,6 +14560,20 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
     }
     const WorldBuffer &buffer = layout.getBuffer(
         cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr());
+    if (auto check = dyn_cast<RowsCheckOp>(op)) {
+      // (Said for the query's end, which stops the program.)
+      auto said = scf::IfOp::create(
+          rewriter, loc,
+          arith::XOrIOp::create(
+              rewriter, loc, check.getInside(),
+              arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
+      rewriter.setInsertionPointToStart(said.thenBlock());
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+          world.bufferClash(buffer), ValueRange{zero});
+      rewriter.eraseOp(op);
+      continue;
+    }
     Value counter = world.bufferCount(buffer);
     if (isa<ClearOp>(op)) {
       memref::StoreOp::create(
@@ -14548,48 +14604,35 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       // Where the buffer has the row; else nothing.
       const WorldColumn *field = buffer.find(set.getField());
       Value stored = world.toStorage(loc, set.getValue());
-      // (In a `for`, the entity takes the row: where another of the same
-      // run of it had it, that is said, and the program stops after.)
-      Value tag = ownerTags.lookup(op);
-      ownerTags.erase(op);
-      auto own = [&](Value row) {
-        if (!tag)
-          return;
-        // (Atomically on the GPU, where that costs little. On the CPU a
-        // load and a store, also on many threads, where a locked exchange
-        // would cost more than the loop: one after another every clash is
-        // found, at once on threads one that two of them make at the same
-        // moment may not be.)
-        Value owners = world.bufferOwners(buffer);
-        Value before;
-        if (onGpu) {
-          before = memref::AtomicRMWOp::create(
-              rewriter, loc, arith::AtomicRMWKind::assign, tag, owners,
-              ValueRange{row});
-        } else {
-          before = memref::LoadOp::create(rewriter, loc, owners,
-                                          ValueRange{row});
-          memref::StoreOp::create(rewriter, loc, tag, owners, ValueRange{row});
-        }
-        Value thirtyTwo = arith::ConstantIntOp::create(rewriter, loc, 32, 64);
-        Value sameRun = arith::CmpIOp::create(
-            rewriter, loc, arith::CmpIPredicate::eq,
-            arith::ShRUIOp::create(rewriter, loc, before, thirtyTwo),
-            arith::ShRUIOp::create(rewriter, loc, tag, thirtyTwo));
-        Value other = arith::CmpIOp::create(
-            rewriter, loc, arith::CmpIPredicate::ne, before, tag);
-        auto clash = scf::IfOp::create(
-            rewriter, loc, arith::AndIOp::create(rewriter, loc, sameRun, other));
+      // (One of a `for`'s by a row number: not masked into another's
+      // row, but said and not made where it is past the room.)
+      auto inside = [&]() -> Value {
+        Value number = UnrealizedConversionCastOp::create(
+                           rewriter, loc, rewriter.getI32Type(),
+                           set.getIndex())
+                           .getResult(0);
+        Value fits = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ult, number,
+            arith::ConstantIntOp::create(rewriter, loc, buffer.rows, 32));
+        auto said = scf::IfOp::create(
+            rewriter, loc,
+            arith::XOrIOp::create(
+                rewriter, loc, fits,
+                arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
         OpBuilder::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPointToStart(clash.thenBlock());
+        rewriter.setInsertionPointToStart(said.thenBlock());
         memref::StoreOp::create(
             rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
             world.bufferClash(buffer), ValueRange{zero});
+        return fits;
       };
       if (auto number = dyn_cast<IndexOfType>(set.getIndex().getType())) {
         // (By a row number of the buffer: the row in its room.)
+        if (set->hasAttr(kOwnedAttr)) {
+          auto branch = scf::IfOp::create(rewriter, loc, inside());
+          rewriter.setInsertionPointToStart(branch.thenBlock());
+        }
         Value row = inRoom(rewriter, loc, world, buffer, set.getIndex());
-        own(row);
         memref::StoreOp::create(rewriter, loc, stored,
                                 world.bufferField(buffer, *field),
                                 ValueRange{row});
@@ -14606,7 +14649,6 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       auto branch = scf::IfOp::create(rewriter, loc, there,
                                       /*withElseRegion=*/false);
       rewriter.setInsertionPointToStart(branch.thenBlock());
-      own(world.toIndex(loc, index));
       memref::StoreOp::create(rewriter, loc, stored,
                               world.bufferField(buffer, *field),
                               ValueRange{world.toIndex(loc, index)});
@@ -15981,8 +16023,6 @@ struct EntLowerToLoops
     ModuleOp module = getOperation();
     IRRewriter rewriter(module.getContext());
     sendLists.clear();
-    ownerRuns.clear();
-    ownerTags.clear();
     runningStarts.clear();
     // Rows of buffers written in queries (not those that take turns).
     module.walk([&](BufferSetOp set) {

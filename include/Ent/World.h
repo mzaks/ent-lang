@@ -410,13 +410,8 @@ struct WorldBuffer {
   uint64_t countOffset = 0;
   /// One column per field; `component` is the buffer's name.
   SmallVector<WorldColumn> fields;
-  /// Of a buffer whose rows a `for` writes (0 where none does): for each
-  /// row of its room which entity of which run of such a `for` wrote it
-  /// last (the run's number above 32 bits, the entity's id below), the
-  /// number of the last run, and whether two entities of one run wrote
-  /// the same row. Not saved.
-  uint64_t ownerOffset = 0;
-  uint64_t runOffset = 0;
+  /// Of a buffer whose rows a `for` writes (0 where none does): whether
+  /// an entity of its last run wrote outside its own rows. Not saved.
   uint64_t clashOffset = 0;
 
   /// The column of `field`, or null.

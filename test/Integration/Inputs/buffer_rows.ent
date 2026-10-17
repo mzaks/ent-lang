@@ -1,32 +1,36 @@
 // Rows of buffers written from a `for` (docs/syntax.md), in the shape of
 // the epidemic's `lay`: each entity writes its own row of `Order`, at
-// the place a running sum gives it, and the row of every 64th stub in
-// `Index` from a loop of its body. Built for one core, for all of them
-// and with `lay` on the GPU (gpu.test), it prints the same; on the third
-// day an entity also writes another's row, and the program stops.
+// the place a running sum gives it, and the rows of `Index` for its
+// stubs at a multiple of 64, from a loop of its body, at the place a
+// running sum of how many those are gives it (one made of the first).
+// Built for one core, for all of them and with `lay` on the GPU
+// (gpu.test), it prints the same; on the third day some entities also
+// write the row after their own, and the program stops.
 import console
 
 component Stubs { meets: i32 } capacity 100000
 buffer Order { who: entity, first: i32 } capacity 100000
 buffer Index { row: i32 } capacity 100000
-unique Laying { stubs: i32, rows: i32, clash: bool }
+unique Laying { stubs: i32, rows: i32, slots: i32, clash: bool }
 unique Check: i64
 unique Days: i32
 
 system lay() {
   Laying.stubs = 0
   Laying.rows = 0
+  Laying.slots = 0
   for e, s: Stubs {
     let row = Laying.rows += 1
     let first = Laying.stubs += s.meets
     Order[row].who = e
     Order[row].first = first
-    var next = (first + 63) / 64 * 64
-    while next < first + s.meets {
-      Index[next / 64].row = row
-      next += 64
-    }
-    if Laying.clash && row == 7 { Order[3].first = 0 }
+    // (The stubs at a multiple of 64 among its own: their rows of Index
+    // are those before them, from the running sum of how many each has.)
+    let many = (first + s.meets + 63) / 64 - (first + 63) / 64
+    let slot = Laying.slots += many
+    for k in 0..many { Index[slot + k].row = row }
+    // (On the third day some write the row after their own.)
+    if Laying.clash && row % 1000 == 7 { Order[row + s.meets % 2].first = 0 }
   }
 }
 system finish() { Order[Laying.rows].first = Laying.stubs }

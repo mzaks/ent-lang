@@ -1153,7 +1153,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   for (WorldBuffer &buffer : layout.buffers)
     if (transient(buffer.op))
       placeBuffer(buffer);
-  // Who wrote each row of a buffer that a `for` writes (see WorldBuffer).
+  // Whether a `for` wrote rows of a buffer that were not its entities'
+  // own (see WorldBuffer).
   llvm::DenseSet<StringAttr> owned;
   module.walk([&](BufferSetOp set) {
     if (auto query = set->getParentOfType<QueryOp>(); query && !query.isTurn())
@@ -1163,11 +1164,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     if (!owned.contains(cast<BufferOp>(buffer.op).getSymNameAttr()))
       continue;
     end = llvm::alignTo(end, 8);
-    buffer.runOffset = end;
-    buffer.clashOffset = end + 8;
-    end += 16;
-    buffer.ownerOffset = llvm::alignTo(end, kColumnAlignment) + kStagger;
-    end = buffer.ownerOffset + 8 * buffer.rows;
+    buffer.clashOffset = end;
+    end += 8;
   }
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;

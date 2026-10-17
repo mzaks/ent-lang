@@ -2,6 +2,7 @@
 #include "Ent/Structure.h"
 
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -544,6 +545,148 @@ BufferAtOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+/// `value` through what only changes its type: a row number made of an
+/// integer and back, an integer made wider, an index.
+static Value throughCasts(Value value) {
+  while (Operation *def = value.getDefiningOp()) {
+    StringRef name = def->getName().getStringRef();
+    if (def->getNumOperands() != 1 ||
+        (name != "builtin.unrealized_conversion_cast" &&
+         name != "arith.extsi" && name != "arith.extui" &&
+         name != "arith.index_cast" && name != "arith.index_castui"))
+      break;
+    value = def->getOperand(0);
+  }
+  return value;
+}
+
+/// Whether `value` is the same for every entity of `query`: made outside
+/// it, or in it of constants, uniques, buffers and calls of fns with such
+/// values only.
+static bool sameForAll(Value value, QueryOp query, unsigned depth = 0) {
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return !query->isAncestor(value.getParentBlock()->getParentOp());
+  if (!query->isProperAncestor(def))
+    return true;
+  if (depth > 32 || def->getNumRegions() != 0 || def->getNumResults() != 1)
+    return false;
+  if (!isa<ReadOp, BufferAtOp, BufferLenOp, BufferOfOp, InvokeOp>(def) &&
+      !isPure(def))
+    return false;
+  if (auto invoke = dyn_cast<InvokeOp>(def); invoke && invoke.getProc())
+    return false;
+  return llvm::all_of(def->getOperands(), [&](Value operand) {
+    return sameForAll(operand, query, depth + 1);
+  });
+}
+
+bool mlir::ent::sameValue(Value a, Value b) {
+  if (a == b)
+    return true;
+  Operation *x = a.getDefiningOp(), *y = b.getDefiningOp();
+  if (!x || !y || x->getName() != y->getName() ||
+      x->getAttrDictionary() != y->getAttrDictionary() ||
+      x->getNumOperands() != y->getNumOperands() ||
+      x->getNumRegions() != 0 || y->getNumRegions() != 0 ||
+      x->getResultTypes() != y->getResultTypes())
+    return false;
+  for (auto [p, q] : llvm::zip(x->getOperands(), y->getOperands()))
+    if (!sameValue(p, q))
+      return false;
+  return true;
+}
+
+FailureOr<OwnRow> mlir::ent::ownRowOf(BufferSetOp set, std::string &why) {
+  auto query = set->getParentOfType<QueryOp>();
+  OwnRow row;
+  SmallVector<Value> own;
+  // The index as terms added (or taken away), through what only changes
+  // its type.
+  std::function<void(Value, bool)> terms = [&](Value value, bool away) {
+    value = throughCasts(value);
+    Operation *def = value.getDefiningOp();
+    StringRef name = def ? def->getName().getStringRef() : StringRef();
+    if (name == "arith.addi" || name == "arith.subi") {
+      terms(def->getOperand(0), away);
+      terms(def->getOperand(1), name == "arith.subi" ? !away : away);
+      return;
+    }
+    if (sameForAll(value, query)) {
+      row.base.push_back({value, away});
+      return;
+    }
+    if (away) {
+      own.push_back(Value());
+      return;
+    }
+    own.push_back(value);
+  };
+  terms(set.getIndex(), false);
+  for (Value term : own) {
+    if (!term) {
+      why = "it takes away what is not the same for every entity";
+      return failure();
+    }
+    if (auto running = term.getDefiningOp<RunningOp>();
+        running && !row.running && running.getRule() == "add") {
+      row.running = running;
+      continue;
+    }
+    if (row.offset) {
+      why = "it adds more than a running sum and one offset to what is the "
+            "same for every entity";
+      return failure();
+    }
+    row.offset = term;
+  }
+  if (!row.running) {
+    why = "no running sum ('let row = Count.n += 1', 'let first = Count.n "
+          "+= k') says which rows are the entity's";
+    return failure();
+  }
+  Value summed = row.running.getValue();
+  APInt step;
+  bool constant = matchPattern(summed, m_ConstantInt(&step));
+  auto type = cast<IntegerType>(summed.getType());
+  row.valueShown = type.isUnsigned() || (constant && !step.isNegative());
+  if (!row.offset) {
+    row.offsetShown = constant && step.sge(1);
+    return row;
+  }
+  // `for i in 0..k`, with k what the running sum adds: the offset is
+  // inside the interval.
+  Value offset = throughCasts(row.offset);
+  if (auto argument = dyn_cast<BlockArgument>(offset))
+    if (auto loop = dyn_cast<LoopLikeOpInterface>(
+            argument.getOwner()->getParentOp())) {
+      std::optional<Value> induction = loop.getSingleInductionVar();
+      std::optional<OpFoldResult> lower = loop.getSingleLowerBound();
+      std::optional<OpFoldResult> upper = loop.getSingleUpperBound();
+      std::optional<OpFoldResult> by = loop.getSingleStep();
+      auto constantOf = [](std::optional<OpFoldResult> bound)
+          -> std::optional<APInt> {
+        if (!bound)
+          return std::nullopt;
+        APInt number;
+        if (auto value = dyn_cast<Value>(*bound);
+            value && matchPattern(value, m_ConstantInt(&number)))
+          return number;
+        if (auto attr = dyn_cast<Attribute>(*bound))
+          if (auto integer = dyn_cast<IntegerAttr>(attr))
+            return integer.getValue();
+        return std::nullopt;
+      };
+      std::optional<APInt> from = constantOf(lower), stride = constantOf(by);
+      auto upperValue = upper ? dyn_cast<Value>(*upper) : Value();
+      row.offsetShown = induction && *induction == argument && from &&
+                        !from->isNegative() && stride && stride->sge(1) &&
+                        upperValue &&
+                        throughCasts(upperValue) == throughCasts(summed);
+    }
+  return row;
+}
+
 LogicalResult
 BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   BufferOp buffer = verifyBufferUse(symbolTable, *this, getBufferAttr(),
@@ -581,6 +724,42 @@ BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
           << ", which its query also reads or gives rows: in a query a "
              "buffer that is written is not read (but for its length)";
       diag.attachNote(reader->getLoc()) << "it does here";
+      return diag;
+    }
+    // The row is the entity's own: what a running sum gives it.
+    std::string why;
+    FailureOr<OwnRow> row = ownRowOf(*this, why);
+    if (failed(row))
+      return emitOpError("writes a row of ")
+             << getBufferAttr()
+             << " that is not shown to be its entity's own: " << why
+             << ". In a 'for' a row is written at a place the same for every "
+                "entity plus a running sum ('Order[at + row]' with 'let row = "
+                "Count.rows += 1', or 'Index[at + first + i]' with 'let first "
+                "= Count.n += k' and 'for i in 0..k')";
+    // And every write of the buffer in the query is of the same rows.
+    BufferSetOp other;
+    query.walk([&](BufferSetOp set) {
+      if (other || set == *this || set.getBufferAttr() != getBufferAttr())
+        return;
+      std::string ignored;
+      FailureOr<OwnRow> its = ownRowOf(set, ignored);
+      if (failed(its))
+        return;
+      bool same = its->running == row->running &&
+                  its->base.size() == row->base.size();
+      for (auto [a, b] : llvm::zip(its->base, row->base))
+        same = same && a.second == b.second && sameValue(a.first, b.first);
+      if (!same)
+        other = set;
+    });
+    if (other) {
+      InFlightDiagnostic diag =
+          emitOpError("writes rows of ")
+          << getBufferAttr()
+          << " by another running sum, or from another place, than a write "
+             "of it in the same query: the two could be the same rows";
+      diag.attachNote(other.getLoc()) << "the other write";
       return diag;
     }
   }

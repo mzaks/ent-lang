@@ -76,12 +76,6 @@ void _mlir_ciface_ent_gpu_arena(ent_gpu_memref *copy, ent_gpu_memref *world) {
     host = world->aligned;
     bytes = world->size;
     check(cuMemAlloc(&device, (size_t)bytes), "cuMemAlloc (the world)");
-    // (What the CPU's starts as: what the GPU keeps for itself, such as
-    // who wrote a buffer's rows, is never copied over.)
-    // (On the world's stream, before any copy to it.)
-    check(cuMemsetD8Async(device, 0, (size_t)bytes, stream),
-          "cuMemsetD8Async (the world)");
-    pending = true;
   } else if (world->aligned != host) {
     fprintf(stderr, "ent: the GPU: a second world (one is all it keeps)\n");
     exit(3);

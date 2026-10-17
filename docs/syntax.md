@@ -857,8 +857,9 @@ of a depth.
   reads that field or accumulates into it. One entity after another the
   field is summed into as it goes; on many cores and on the GPU in two
   passes, the values first, then a scan of them, then the body, with the
-  same result. Not in a `for` that takes turns, where the unique is read
-  and written as it is.
+  same result (a sum made of another, as `slot` of `first` above, takes
+  a pass after it). Not in a `for` that takes turns, where the unique is
+  read and written as it is.
 - Another entity: `Hull(target).hp -= damage` (also `+=`, `min=`, `max=`)
   combines into its field when the query ends; reading one may find nothing,
   so it is `if let hp = Hull(target).hp { ... } else { ... }`. So is a
@@ -1682,18 +1683,34 @@ to a device at once (all there is to draw), in place of a call for each.
   entities take turns (`in turn by`), where a buffer is changed and read
   as outside one.
 - In a `for` over entities, `Name[i].field = value` (with `=`) gives the
-  row its value where it stands, also from a loop of the body; each row
-  is written by one entity of the `for` (two fields of it, or one again,
-  by the same one), so that what it holds after does not depend on the
-  order the entities ran in. Two entities of one run of the `for` that
-  write the same row stop the program, after the `for`: on one core
-  always, on the GPU always, on many cores of the CPU but where the two
-  write at the same moment (a locked write of every row would cost more
-  than the loop). The `for` reads nothing else of the buffer (its
-  `len` it may) and gives it no rows. With a running sum each entity
-  finds a row of its own: `let row = Laying.rows += 1` then
-  `Order[row].who = e`. Not yet in a `for` inside a `for`, nor in one
-  that goes along a tree, by a field or reacts to changes.
+  row its value where it stands, also from a loop of the body. Each
+  entity writes rows of its own, which is what the compiler sees in the
+  row: a place the same for every entity (consts, uniques, what is read
+  of other buffers, and sums of them), plus what a running sum gave the
+  entity, plus at most an offset inside that sum's interval, the rows
+  from what it gave up to that plus the value the entity added:
+
+  ```
+  let row = Laying.rows += 1              // one row each: [row, row + 1)
+  Order[Pairing.order + row].who = e
+  let slot = Laying.slots += many         // `many` rows each
+  for k in 0..many { Index[Pairing.index + slot + k].row = row }
+  ```
+
+  The intervals of the entities do not overlap where no value added is
+  below nought, so no two write one row, and what the buffer holds after
+  does not depend on the order they ran in. Any other row is an error.
+  What is not seen where the program is compiled is asked where it runs,
+  for no more than a comparison: a value added that may be below nought,
+  an offset other than `k` of `for k in 0..` the value added, or none
+  where that may be nought. Where it does not hold the row is not
+  written, and the program stops after the `for`, on one core, on many
+  and on the GPU alike. All writes of one buffer in a `for` are by one
+  running sum, from one place. The `for` reads nothing else of the
+  buffer (its `len` it may) and gives it no rows. A row number (`index
+  of Name`) past the buffer's room is outside too. Not yet in a `for`
+  inside a `for`, nor in one that goes along a tree, by a field or
+  reacts to changes.
 - `len(Name)` is how many rows it has and `Name[i].field` a row's field
   (nought where it has no row `i`); in a `for` that gives it rows, as it
   was before the `for`.

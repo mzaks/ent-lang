@@ -610,12 +610,6 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
         for (ArchetypeOp archetype :
              matchedArchetypes(op->getParentOfType<QueryOp>()))
           access.reads.insert({archetype.getSymNameAttr(), empty, empty});
-      // (A row written in a `for` is owned by the entity that wrote it,
-      // whose id says so: see lowerBuffers.)
-      if (auto query = op->getParentOfType<QueryOp>();
-          query && isa<BufferSetOp>(op) && !query.isTurn())
-        for (ArchetypeOp archetype : matchedArchetypes(query))
-          access.reads.insert({archetype.getSymNameAttr(), empty, idField});
       return;
     }
     if (auto has = dyn_cast<HasOp>(op)) {
