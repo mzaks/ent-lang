@@ -31,6 +31,16 @@
 // RUN: FileCheck %s --check-prefix=EDGES --input-file=%t.edges.gpu
 // EDGES: day 20 total -13746309414 used 29694911
 
+// Sent and accumulated from loops of the body, to entities found in a
+// buffer by a fn, in the shape of the epidemic's `chance`: the same.
+// RUN: %ent run %S/Inputs/gpu_chance.ent > %t.chance.cpu
+// RUN: %ent run %S/Inputs/gpu_chance.ent --gpu > %t.chance.gpu
+// RUN: %ent run %S/Inputs/gpu_chance.ent --gpu --parallel > %t.chance.gpupar
+// RUN: diff %t.chance.cpu %t.chance.gpu
+// RUN: diff %t.chance.cpu %t.chance.gpupar
+// RUN: FileCheck %s --check-prefix=CHANCE --input-file=%t.chance.gpu
+// CHANCE: frame 20 hits 2255790 longest 4 total 1459851081
+
 // A `gpu system` of an imported module: its kernel's name has no `.`.
 // RUN: %ent run %S/Inputs/gpu_module.ent --gpu | FileCheck %s --check-prefix=MODULE
 // MODULE: frame 10 sum 529470

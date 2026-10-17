@@ -951,11 +951,8 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
       return std::string("sends with '=', where the last one sent wins: "
                          "which is last is the order of the rows, which the "
                          "GPU does not keep");
-    for (Operation *parent = op->getParentOp(); !isa<QueryOp>(parent);
-         parent = parent->getParentOp())
-      if (isa<LoopLikeOpInterface>(parent))
-        return std::string("sends or accumulates in a loop of its body: not "
-                           "on the GPU yet");
+    // (From a loop of the body too: combined where it is sent, a value
+    // needs no place of its own.)
   }
   if (isa<AppendOp>(op))
     return std::string("gives a buffer rows, in the order of the "

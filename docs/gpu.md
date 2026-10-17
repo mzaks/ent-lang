@@ -97,6 +97,10 @@ entity and values every entity reads alike:
   (`mut w`), the other end's components, and what is sent to it (G2: the
   sorted table, the offsets of each entity's edges and the index by
   target are pieces, copied as many edges as there are). Not a tree's;
+- sending and accumulating whole numbers from loops of the body (`for k
+  in a..b`, `while`): combined atomically where they are sent, as from
+  the body itself (on the CPU they go on lists, combined in the order
+  of the rows and turns);
 - calling `fn`s of the program: compiled for the GPU like the body;
 - arithmetic on every number type. `f64` is allowed; on consumer cards
   it runs at 1/32 to 1/64 of `f32`, which `--explain` says.
@@ -106,7 +110,6 @@ Errors, each naming the construct and what it waits for:
 | In a `for` of a `gpu system` | Why not yet | When |
 |---|---|---|
 | sending or accumulating a fraction (`f32`, `f64`), or sending with `=` | combined at the commit point in the order of the rows, which the GPU does not keep: needs the sends sorted by target and combined in that order on the GPU (keep such a system on the CPU) | later |
-| sending or accumulating in a loop of the body | sent from loops goes on lists the CPU keeps | later |
 | sending to a field the query also reads or writes | what is sent lands when the query ends; on the GPU it lands as it is sent | never |
 | `Marks += { ... }` (rows given to a buffer) | rows in the order of the entities: needs an ordered compaction | G2 |
 | `extern fn`, including `math`'s `sin`, `sqrt` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule | G2 |
@@ -384,9 +387,24 @@ pieces: kernels named without the `.` of a module's systems
 (`--ent-gpu-kernel-names`), and sends by the same rule to one field from
 two edge loops counting as unseen (in whole numbers they add up the same;
 so does a lookup that only asks whether the other end has the
-component). `chance` (sends from a loop of the body) is next. They are
+component). They are
 also what a world in pieces over several GPUs or machines needs (edges
 between the pieces, sends from many places combined in one order).
+
+**Sends from loops of the body, built (2026-10-17).** A whole number
+sent or accumulated in a loop of a `gpu system`'s body is combined
+atomically where it is sent, as one from the body is; the CPU's lists
+(`ent.looped`) are left out for it. `chance` builds as a `gpu system`
+with no change to it (its `met_by` reads `Order` and `Index`, buffers the
+GPU keeps). With `workplace`, `infectiousness` and `chance` on the GPU
+(`--gpu workplace,infectiousness,chance`, the slow cores again) a day of
+a million people takes 22.4 ms on one core and 15.7 on four threads,
+against 179.2 and 67.5 on the CPU alone; the same 857,886 infected.
+`workplace` is down to 1.75 ms as well: the hazard it sends to stays on
+the GPU for `chance`, where before it went back to the CPU between them.
+What is left of a day is mostly `chance` (5 ms, of which most is the CPU
+waiting for the GPU and taking the hazard back for `infect`), `pair`,
+`household`, `infect`, `progress`, `symptoms`: each 2 to 3.5 ms.
 
 **The hazard in whole numbers.** `Hazard.left` and `Household.pressure`
 are `i64`s counting 2^-32ths (`fn hazard` in `city.ent`): each amount is

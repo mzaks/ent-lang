@@ -15409,7 +15409,9 @@ struct EntLowerToLoops
       if (!isa<ApplyOp, AccumulateOp>(op))
         return;
       auto query = op->getParentOfType<QueryOp>();
-      if (!query || query.isTurn() || op->hasAttr(kAtOnceAttr))
+      // (One combined atomically, for the GPU, lands where it is sent.)
+      if (!query || query.isTurn() || op->hasAttr(kAtOnceAttr) ||
+          op->hasAttr(kAtomicAttr))
         return;
       bool inLoop = false;
       for (Operation *parent = op->getParentOp(); parent != query;

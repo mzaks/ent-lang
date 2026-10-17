@@ -1,0 +1,66 @@
+// Whole numbers sent and accumulated from loops of a `for`'s body by
+// `gpu` systems, in the shape of the epidemic's `chance` (docs/gpu.md):
+// whom each sends to is found in a buffer, by a fn given it. Built with
+// and without --gpu it prints the same.
+import console
+
+component Stubs { first: i32, count: i32 } capacity 100000
+component Life { hp: i32, worst: i64 } capacity 1000
+buffer Roster { who: entity } capacity 1000
+unique Clock { frame: i64 }
+unique Hits: i64
+unique Longest: i32
+unique Total: i64
+
+fn met(roster: Roster, stub: i32) -> entity {
+  let at = (stub * 7919 + 13) % len(roster)
+  if at % 17 == 0 { none } else { roster[at].who }
+}
+
+gpu system strike() {
+  for s: Stubs {
+    for stub in s.first..s.first + s.count {
+      let who = met(Roster, stub)
+      if who != none {
+        Life(who).hp -= stub % 11 + 1
+        Life(who).worst max= (stub % 977) as i64
+        Hits += 1
+      }
+    }
+    var steps = 0
+    var at = s.first
+    while at % 5 != 0 {
+      at += 1
+      steps += 1
+      Longest max= steps
+    }
+  }
+}
+gpu system grow() {
+  for s: mut Stubs { s.first = (s.first * 13 + 7) % 99991 }
+}
+system tick() { Clock.frame += 1 }
+system total() {
+  Total = 0
+  for l: Life { Total += l.hp as i64 * 3 + l.worst }
+  spawn { Print { line: "frame {Clock.frame} hits {Hits} longest {Longest} total {Total}" } }
+}
+schedule frame() { strike()  grow()  tick() }
+schedule report() run_if Clock.frame % 5 == 0 { total()  write()  clear() }
+
+world {
+  for i in 0..500 {
+    let t = spawn { Life { hp: 1000000, worst: 0 } }
+    Roster += { who: t }
+  }
+  for i in 0..30000 {
+    spawn { Stubs { first: i * 3, count: i % 9 } }
+  }
+}
+
+main {
+  loop {
+    frame()
+    report()
+  } until Clock.frame == 20
+}

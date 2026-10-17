@@ -1246,10 +1246,10 @@ go along a relation's edges (not a tree's) from either end, reading and
 writing the edges' fields and the other end's, and send whole numbers to
 other entities or accumulate them into uniques
 (`+=`, `-=`, `min=`, `max=`: the same in any order, so combined as they
-are sent). Not yet: sending fractions or with `=`, sending from a loop of
-the body, giving a buffer rows,
+are sent), from the body or from loops in it. Not yet: sending fractions
+or with `=`, giving a buffer rows,
 a `for` over other entities inside it, extern fns (so `math`'s), tables
-and texts. Later, or never: relations and trees, `on` (reactive), `by`, spawning,
+and texts. Later, or never: `connect`, `disconnect` and trees, `on` (reactive), `by`, spawning,
 destroying and `apart` components, procs, writing a component a reactive
 query reacts to. Around its `for`s the system reads and writes uniques;
 what it does to entities or buffers goes in a system of its own.

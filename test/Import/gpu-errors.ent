@@ -24,19 +24,6 @@ gpu system add() {
 // -----
 
 component Hp { hp: i32 }
-unique Hits: i32
-gpu system count() {
-  for h: Hp {
-    for i in 0..3 {
-      // expected-error @+1 {{sends or accumulates in a loop of its body}}
-      Hits += h.hp
-    }
-  }
-}
-
-// -----
-
-component Hp { hp: i32 }
 buffer Marks { hp: i32 } capacity 8
 gpu system mark() {
   for h: Hp {

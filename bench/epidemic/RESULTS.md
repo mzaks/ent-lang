@@ -3,6 +3,23 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-17, later: `chance` on the GPU too
+
+Sends from loops of a `gpu system`'s body (docs/gpu.md). The same
+machine, cores and caveat as the entry below: `BENCH_ONE_CPU=4
+BENCH_CPUS=4-7 BENCH_ALL=0 python3 bench/epidemic/run.py 1000000 --gpu
+workplace,infectiousness,chance`.
+
+| a million people, a day in ms | one core | 4 threads | memory MB |
+|---|---|---|---|
+| the CPU alone | 179.2 | 67.5 | 919 |
+| `workplace`, `infectiousness` and `chance` on the GPU | 22.4 | 15.7 | 851 |
+
+857,886 infected in every run. On the GPU `workplace` takes 1.75 ms and
+`chance` 5.2 (4.98 at 4 threads), where on the CPU they took 87.7 and
+73.8 on one core, 37.3 and 21.5 on four threads: the hazard stays on the
+GPU between them, and comes back to the CPU once a day, for `infect`.
+
 ## 2026-10-17: the hazard in whole numbers, and `workplace` on the GPU
 
 `Hazard.left` and `Household.pressure` count 2^-32ths (docs/gpu.md, "Audit:
