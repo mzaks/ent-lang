@@ -3,6 +3,24 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-17, after that: what a sum added, read back
+
+After its scan, what a whole-number sum of the body adds is read back
+from the scan (docs/gpu.md): `lay`'s second pass and the query no longer
+work out `meets` again. The same command, machine and caveat as below.
+
+| a million people, a day in ms | one core | 4 threads | memory MB |
+|---|---|---|---|
+| the CPU alone | 186.0 | 69.6 | 916 |
+| `workplace`, `infectiousness`, `chance` and `lay` on the GPU | 19.7 | 12.5 | 868 |
+
+857,886 infected in every run; with tracing, 100,000 people, 32,718 in
+all four builds. `lay` takes 2.47 ms on four threads where it took 3.27
+(1.83 with who wrote each row kept), 2.16 on the GPU (2.22), 3.32 on one
+core, which is lowered as before. The rest of the CPU's day is up from
+the entry below by as much in systems this does not touch (`workplace`
+92.4 where it was 87.0): the machine, not the change.
+
 ## 2026-10-17, last: rows of its own, seen when compiling
 
 `lay` writes the rows of `Index` from a second running sum, and nothing

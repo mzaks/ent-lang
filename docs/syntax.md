@@ -858,7 +858,7 @@ of a depth.
   field is summed into as it goes; on many cores and on the GPU in two
   passes, the values first, then a scan of them, then the body, with the
   same result (a sum made of another, as `slot` of `first` above, takes
-  a pass after it). Not in a `for` that takes turns, where the unique is
+  a pass after it, which reads what the first added from its scan). Not in a `for` that takes turns, where the unique is
   read and written as it is.
 - Another entity: `Hull(target).hp -= damage` (also `+=`, `min=`, `max=`)
   combines into its field when the query ends; reading one may find nothing,

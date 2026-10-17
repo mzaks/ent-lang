@@ -2,13 +2,15 @@
 // what those before it sent, in the order of the `for` (archetype after
 // archetype, then row). Built for one core, for all of them, and with
 // the systems that have them on the GPU (gpu.test), it prints the same.
+// (A value every entity adds, read again after its sum: in two passes,
+// what its row added, also at the last row of an archetype.)
 import console
 
-component Stubs { meets: i32, first: i32, row: i32 } capacity 100000
+component Stubs { meets: i32, first: i32, row: i32, last: i32 } capacity 100000
 component Other { meets: i32, low: i64, high: u32 } capacity 1000
 tag Odd
 tag Never
-unique Laying { stubs: i32, rows: i32, least: i64, most: u32 }
+unique Laying { stubs: i32, rows: i32, used: i32, least: i64, most: u32 }
 unique Sent: i64
 unique Check: i64
 unique Days: i32
@@ -18,9 +20,13 @@ unique Days: i32
 system lay() {
   Laying.stubs = 0
   Laying.rows = 10
+  Laying.used = 3
   for s: mut Stubs {
     let row = Laying.rows += 1
     s.row = row
+    let some = s.meets % 5 * (row % 3)
+    let used = Laying.used += some
+    s.last = used + some
     if s.meets % 3 != 0 {
       let first = Laying.stubs += s.meets
       s.first = first
@@ -45,9 +51,9 @@ system sent() {
 }
 system check() {
   Check = 0
-  for s: Stubs { Check += (s.first as i64 * 31 + s.row as i64) % 1000003 * s.meets as i64 }
+  for s: Stubs { Check += (s.first as i64 * 31 + s.row as i64) % 1000003 * s.meets as i64 + s.last as i64 }
   for o: Other { Check += o.low * 7 + o.high as i64 }
-  spawn { Print { line: "day {Days}: stubs {Laying.stubs} sent {Sent} rows {Laying.rows} least {Laying.least} most {Laying.most} check {Check}" } }
+  spawn { Print { line: "day {Days}: stubs {Laying.stubs} sent {Sent} rows {Laying.rows} used {Laying.used} least {Laying.least} most {Laying.most} check {Check}" } }
 }
 system grow() {
   for s: mut Stubs { s.meets = (s.meets * 13 + 7) % 23 }
@@ -56,14 +62,14 @@ system grow() {
 system count() { Days += 1 }
 // (An archetype that never has a row.)
 system never() {
-  if Days < 0 { spawn { Stubs { meets: 1, first: 0, row: 0 }, Never } }
+  if Days < 0 { spawn { Stubs { meets: 1, first: 0, row: 0, last: 0 }, Never } }
 }
 schedule day() { count()  never()  lay()  lay_more()  sent()  check()  write()  clear()  grow() }
 
 world {
   for i in 0..70000 {
-    if i % 7 == 0 { spawn { Stubs { meets: i % 17, first: 0, row: 0 }, Odd } }
-    else { spawn { Stubs { meets: i % 17, first: 0, row: 0 } } }
+    if i % 7 == 0 { spawn { Stubs { meets: i % 17, first: 0, row: 0, last: 0 }, Odd } }
+    else { spawn { Stubs { meets: i % 17, first: 0, row: 0, last: 0 } } }
   }
   for i in 0..300 { spawn { Other { meets: i, low: 0, high: 0 } } }
 }

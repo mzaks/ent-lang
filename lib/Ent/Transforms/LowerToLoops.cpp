@@ -1805,6 +1805,9 @@ static Value emitDiffers(IRRewriter &rewriter, Location loc, Value old,
 /// came before it.
 static constexpr llvm::StringLiteral kRunningSlotAttr = "ent.running_slot";
 static constexpr llvm::StringLiteral kRunningValuesAttr = "ent.running_values";
+/// With kRunningSlotAttr, after the scan: what the row added, its place's
+/// next less its own (the scan leaves the whole sum after the rows).
+static constexpr llvm::StringLiteral kRunningAddedAttr = "ent.running_added";
 /// The scratch arrays, and where the rows of the archetype whose loop is
 /// being made start in them.
 /// Marks an `ent.running` that adds a whole number for every entity, from
@@ -1944,6 +1947,14 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
           memref::StoreOp::create(rewriter, loc, value, scratch,
                                   ValueRange{at});
           before = value;
+        } else if (running->hasAttr(kRunningAddedAttr)) {
+          Value next = arith::AddIOp::create(
+              rewriter, loc, at,
+              arith::ConstantIndexOp::create(rewriter, loc, 1));
+          before = arith::SubIOp::create(
+              rewriter, loc,
+              memref::LoadOp::create(rewriter, loc, scratch, ValueRange{next}),
+              memref::LoadOp::create(rewriter, loc, scratch, ValueRange{at}));
         } else {
           before = memref::LoadOp::create(rewriter, loc, scratch,
                                           ValueRange{at});
@@ -12792,9 +12803,9 @@ static Value carryingLoop(IRRewriter &rewriter, Location loc, Value from,
 
 /// The scan of a running sum: `scratch` holds a value for each of `count`
 /// rows (and room after them, see lowerRunning); after it each row holds
-/// `start` combined with the values of the rows before it, by `rule`.
-/// Gives `start` combined with all of them, at the insertion point (on the
-/// CPU: for the GPU it is read back from the scratch, by `total`).
+/// `start` combined with the values of the rows before it, by `rule`, and
+/// the row after them all of them. Gives that, at the insertion point (on
+/// the CPU: for the GPU it is read back from the scratch, by `total`).
 ///
 /// In levels: chunks of kRunningChunk rows combined, each by a turn of a
 /// parallel loop, their sums after the rows, and so on until a level has
@@ -12857,7 +12868,9 @@ static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
                                         {index, index, index}, {loc, loc, loc});
     Value level = after->getArgument(0), size = after->getArgument(1),
           from = after->getArgument(2);
-    Value sums = arith::AddIOp::create(rewriter, loc, from, size);
+    // (After the level and a row: the rows' is the whole sum's.)
+    Value sums = arith::AddIOp::create(
+        rewriter, loc, arith::AddIOp::create(rewriter, loc, from, size), one);
     Value chunks = chunksOf(size);
     {
       OpBuilder::InsertionGuard inner(rewriter);
@@ -12888,6 +12901,7 @@ static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
     (void)parallelTurns(rewriter, loc, one, gpu);
     Value sum = scanRows(zero, topSize, topFrom, start);
     memref::StoreOp::create(rewriter, loc, sum, scratch, ValueRange{totalAt});
+    memref::StoreOp::create(rewriter, loc, sum, scratch, ValueRange{count});
   }
   // Down: each level's chunks from where their sums say they start.
   auto down = scf::ForOp::create(rewriter, loc, zero, levels, one);
@@ -13157,6 +13171,36 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
                                   .getResult();
         });
     memref::StoreOp::create(rewriter, loc, sum, field, ValueRange{zero});
+  }
+  // A whole number every entity adds is, from here on, what its row
+  // added (kRunningAddedAttr): what it is made of is not worked out
+  // again, in a pass after this one or in the query.
+  Block &body = query.getBody().front();
+  for (RunningOp running : runnings) {
+    Value value = running.getValue();
+    Operation *def = value.getDefiningOp();
+    auto whole = dyn_cast<IntegerType>(value.getType());
+    if (running->getParentOp() != query.getOperation() ||
+        running.getRule() != "add" || !whole || !def ||
+        !query->isProperAncestor(def))
+      continue;
+    rewriter.setInsertionPointAfter(running);
+    auto added = cast<RunningOp>(rewriter.clone(*running));
+    added->setAttr(kRunningAddedAttr, rewriter.getUnitAttr());
+    added.getValueMutable().assign(running.getBefore());
+    value.replaceUsesWithIf(added.getBefore(), [&](OpOperand &use) {
+      Operation *owner = body.findAncestorOpInBlock(*use.getOwner());
+      return owner && owner != added && added->isBeforeInBlock(owner);
+    });
+    // (Its own value is not read again.)
+    rewriter.setInsertionPoint(running);
+    Value nought = arith::ConstantIntOp::create(
+        rewriter, loc, IntegerType::get(rewriter.getContext(), whole.getWidth()),
+        0);
+    if (!whole.isSignless())
+      nought = UnrealizedConversionCastOp::create(rewriter, loc, whole, nought)
+                   .getResult(0);
+    running.getValueMutable().assign(nought);
   }
 
   // The second pass: the query, each running sum from its row's place

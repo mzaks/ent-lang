@@ -448,7 +448,12 @@ unseen.) `lay` writes `Index` from a second running sum, how many of an
 entity's stubs fall on a multiple of 64; it is made of the first (the
 sum of those before telescopes to where the entity's first such stub's
 row is), so the lowering makes a pass for each: sums whose values are
-made of sums not worked out yet wait for the next.
+made of sums not worked out yet wait for the next. After its scan, what
+a whole-number sum of the body itself (not an `if` of it) adds is read
+back, its row's place less the next (`ent.running_added`; the scan
+leaves the whole sum after the rows): the passes after it, and the
+query, do not work out `meets` again, which made the second pass cost
+nearly what the first does (`lay` on four threads 3.27 ms with it).
 
 With it `pair` is `today()` (where today's rows are), `lay()` (a `for`
 over the people: their stubs, running sums of them and of the rows, and

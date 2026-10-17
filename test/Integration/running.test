@@ -6,6 +6,6 @@
 // RUN: diff %t.one %t.all
 // RUN: FileCheck %s --input-file=%t.one
 // `stubs` is what a plain accumulate (`sent`) gives too.
-// CHECK: day 1: stubs 374684 sent 374684 rows 70010 least 5 most 4278201045 check 738505140676
-// CHECK: day 2: stubs 502381 sent 502381 rows 70010 least 5 most 4227880276 check 1303275569781
-// CHECK: day 3: stubs 522944 sent 522944 rows 70010 least 9 most 4076873937 check 1452515131019
+// CHECK: day 1: stubs 374684 sent 374684 rows 70010 used 127645 least 5 most 4278201045 check 742972860081
+// CHECK: day 2: stubs 502381 sent 502381 rows 70010 used 123536 least 5 most 4227880276 check 1307599649089
+// CHECK: day 3: stubs 522944 sent 522944 rows 70010 used 135876 least 9 most 4076873937 check 1457270760235
