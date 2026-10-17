@@ -1007,7 +1007,9 @@ left-associative),
 `if cond { let ...; value } else { value }` (also with `else if cond
 { value }` between). A literal takes the type of the
 operand it meets (`x * 2` is an f32 if `x` is); on its own an integer is an
-i32 and a float an f32. There are no implicit conversions.
+i32 and a float an f32. There are no implicit conversions. Floats compare
+as IEEE 754 says: not a number is unequal to everything, itself too (`x
+!= x` is true of it alone), and neither below nor above anything.
 
 `a && b` works out `b` only where `a` is true, and `a || b` only where `a`
 is false, as `if a { b } else { false }` and `if a { true } else { b }`:
@@ -2009,15 +2011,15 @@ on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
 
 - Written in ent-lang from what IEEE 754 rounds exactly, so the same to
   the bit on every machine and on the GPU, each also with `64`: `pow(x,
-  y)`, `exp`, `log`, `sin`, `cos`, `floor`, `ceil`, `round` (halves away
-  from 0), `trunc`, and `sqrt64` (`sqrt` itself is built in). They follow
-  Sun's fdlibm and are within an ulp of the true value, `pow` within a
-  few where it comes near the largest or least float; the f32 ones are
-  the f64 ones rounded once. Where they give not a number its bits are
+  y)`, `exp`, `log`, `log2`, `sin`, `cos`, `tan`, `atan`, `atan2(y, x)`,
+  `floor`, `ceil`, `round` (halves away from 0), `trunc`, `fmod(x, y)`,
+  and `sqrt64` (`sqrt` itself is built in). They follow Sun's fdlibm and
+  are within an ulp of the true value, `pow` within a few where it comes
+  near the largest or least float, `fmod` exact; the f32 ones are the f64
+  ones rounded once. Where they give not a number its bits are
   `0x7ff8000000000000`.
 - From the machine's math library (devices/math.c), on the CPU only,
-  each also with `64`: `log2`, `tan`, `asin`, `acos`, `atan`, `atan2(y,
-  x)`, `fmod(x, y)`.
+  each also with `64`: `asin`, `acos`.
 - Also written in ent-lang: `pi()`, `tau()` (and `pi64()`, `tau64()`),
   `radians(degrees)`, `degrees(radians)`, `abs`, `sign`, `clamp(x, low,
   high)`, `lerp(a, b, t)` (each also with `64`, and `iabs`, `isign`,

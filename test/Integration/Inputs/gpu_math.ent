@@ -3,15 +3,15 @@
 // bits as the CPU. Built with and without --gpu, it prints the same: the
 // sum of the bits of every result, over angles far beyond 2^19 pi/2 too
 // (the reduction by the bits of 2/pi), powers near the ends of the range,
-// and logarithms of numbers below the least normal one. (Not a number is
-// left out: IEEE 754 leaves its bits to the machine, where an operation
-// makes one.)
+// logarithms of numbers below the least normal one, tangents, angles and
+// what is left of a division. (Not a number is left out: IEEE 754 leaves
+// its bits to the machine, where an operation makes one.)
 import console
 import math
 
 component Input { x: f64, y: f64 } capacity 100000
-component Output { a: u64, b: u64, c: u64, d: u64, e: u64 } capacity 100000
-unique Sums { a: u64, b: u64, c: u64, d: u64, e: u64 }
+component Output { a: u64, b: u64, c: u64, d: u64, e: u64, f: u64 } capacity 100000
+unique Sums { a: u64, b: u64, c: u64, d: u64, e: u64, f: u64 }
 unique Done: i32
 
 gpu system work() {
@@ -24,6 +24,10 @@ gpu system work() {
           bits_of(sqrt64(abs64(x)))
     o.e = (bits_of(sin(x as f32)) ^ bits_of(exp((x * 0.01) as f32)) ^ bits_of(log(abs(x as f32) + 0.5)) ^
            bits_of(pow(abs(x as f32) * 0.01 + 0.5, (i.y * 0.25) as f32)) ^ bits_of(sqrt(x as f32 + 1100.0))) as u64
+    o.f = bits_of(tan64(x)) ^ bits_of(tan64(x * 1.0e200)) ^ bits_of(atan64(x * 0.01)) ^
+          bits_of(atan264(i.y, x)) ^ bits_of(log264(abs64(x) * 1.0e-300)) ^ bits_of(fmod64(x * 1.0e250, i.y + 0.375)) ^
+          (bits_of(tan(x as f32)) ^ bits_of(atan2(x as f32, i.y as f32)) ^ bits_of(log2(abs(x as f32) + 0.5)) ^
+           bits_of(fmod(x as f32, 0.7))) as u64
   }
 }
 system sum() {
@@ -32,14 +36,17 @@ system sum() {
   Sums.c = 0
   Sums.d = 0
   Sums.e = 0
+  Sums.f = 0
   for o: Output {
     Sums.a += o.a
     Sums.b += o.b
     Sums.c += o.c
     Sums.d += o.d
     Sums.e += o.e
+    Sums.f += o.f
   }
   spawn { Print { line: "exp/log {Sums.a} pow {Sums.b} sin/cos {Sums.c} whole/root {Sums.d} f32 {Sums.e}" } }
+  spawn { Print { line: "tan/atan/log2/fmod {Sums.f}" } }
   Done = 1
 }
 schedule step() { work()  sum()  write()  clear() }
@@ -48,7 +55,7 @@ world {
   for n in 0..100000 {
     let x = (n as f64 - 50000.0) * 0.0213 + (n % 7) as f64 * 0.125
     spawn { Input { x: x, y: ((n * 37) % 1401) as f64 * 0.5 - 350.0 },
-            Output { a: 0, b: 0, c: 0, d: 0, e: 0 } }
+            Output { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0 } }
   }
 }
 

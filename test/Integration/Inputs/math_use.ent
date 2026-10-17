@@ -1,5 +1,5 @@
-// The math module (devices/math.ent): what the machine's math library
-// does, and what is written in ent-lang on top.
+// The math module (devices/math.ent): written in ent-lang, but for what
+// the machine's math library does (asin, acos).
 import console
 import math
 component Spot { angle: f32, x: f32, y: f32 }
@@ -20,6 +20,10 @@ system show() {
   spawn { Print { line: "abs {abs(-2.5)} {iabs(-7)} sign {sign(-3.0)} {isign(9)} clamp {clamp(5.0, 0.0, 1.0)} {iclamp(-4, 0, 9)} lerp {lerp(10.0, 20.0, 0.25)}" } }
   spawn { Print { line: "length {length(3.0, 4.0)} distance {distance(1.0, 1.0, 4.0, 5.0)} ipow {ipow(3, 4)} pi {pi()} tau {tau()}" } }
   spawn { Print { line: "64: {sqrt64(2.0)} {sin64(pi64() / 2.0)} {atan264(1.0, 1.0) * 4.0} {abs64(-1.25)} {floor64(2.5)} {pow64(2.0, 0.5)}" } }
+  // (Not a number is unequal to everything, itself too, as IEEE 754 says.)
+  let nan = nan64()
+  spawn { Print { line: "tan {tan(0.5)} atan {atan(1.0) * 4.0} asin {asin(1.0) * 2.0} nan {nan != nan} {nan == nan} {nan < 1.0} {nan >= 1.0}" } }
+  spawn { Print { line: "ends {tan64(infinity64()) != 0.0} {bits_of(sin64(-0.0))} {atan264(0.0, -1.0)} {fmod64(1.0, 0.0) != 0.0} {log264(0.25)}" } }
 }
 schedule frame() { turn() show() write() clear() }
 main { loop { frame() } until N == 1 }

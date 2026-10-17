@@ -114,7 +114,7 @@ Errors, each naming the construct and what it waits for:
 | sending or accumulating a fraction (`f32`, `f64`), or sending with `=` | combined at the commit point in the order of the rows, which the GPU does not keep: needs the sends sorted by target and combined in that order on the GPU (keep such a system on the CPU) | later |
 | sending to a field the query also reads or writes | what is sent lands when the query ends; on the GPU it lands as it is sent | never |
 | `Marks += { ... }` (rows given to a buffer) | rows in the order of the entities: needs an ordered compaction | G2 |
-| `extern fn`, including what `math` still takes from C (`tan`, `atan2`, `log2`, `fmod`, ...) | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule (`math`'s `exp`, `log`, `pow`, `sin`, `cos`, `floor` ... are written in ent and run on both, see below) | G2 |
+| `extern fn`, including what `math` still takes from C (`asin`, `acos`) | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule (`math`'s `exp`, `log`, `pow`, `sin`, `tan`, `atan2`, `fmod` ... are written in ent and run on both, see below) | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |
 | arrows up a tree, a tree's edges, `top down`, `bottom up` | trees are kept in tables the GPU does not have | later |
 | `connect`, `disconnect` | the relation is sorted again on the CPU | later |
@@ -288,8 +288,7 @@ It is a device in the sense of `devices/`: C, linked by `tools/ent` with
   remark so the program can be split differently.
 - `math` on the GPU (G2): settled, ent-lang implementations in
   `math.ent` used on both sides (below, "`math` alike on both sides").
-  `tan`, `asin`, `acos`, `atan`, `atan2`, `log2` and `fmod` are still the
-  machine's library's.
+  `asin` and `acos` are still the machine's library's.
 - Whether a `gpu system` built without `--gpu` should say so (a remark),
   or stay silent as `--parallel`'s absence does.
 
@@ -471,6 +470,16 @@ asks otherwise. `test/Integration/Inputs/gpu_math.ent` gives the same
 bits with and without `--gpu`. What the functions make not a number is
 `0x7ff8000000000000` on both sides; that of an operation (`0.0 / 0.0`)
 is the machine's, as IEEE 754 leaves it.
+
+`tan`, `atan`, `atan2`, `log2` and `fmod` followed (2026-10-17), from
+fdlibm's k_tan.c, s_atan.c, e_atan2.c and e_log2.c, `fmod` by long
+division of the fractions a bit at a time (exact, as musl's): within an
+ulp of glibc on 120,000 inputs each, `fmod` and `log2` of every power of
+2 exact, glibc's results to the bit at zeros (their signs too),
+infinities and not a number. They found that `!=` of floats was the
+ordered comparison, false where one side is not a number: `x != x`,
+which the module asks of every argument, never held, and `sin` of an
+infinity was a number. It is now IEEE 754's (`cmpf une`).
 
 With it `pair` is `today()` (where today's rows are), `lay()` (a `for`
 over the people: their stubs, running sums of them and of the rows, and

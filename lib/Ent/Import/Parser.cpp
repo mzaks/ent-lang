@@ -9155,13 +9155,15 @@ FailureOr<mlir::Value> Parser::emitBinary(const Expr &expr, Type expected) {
   if (!comparison)
     return arithmetic(at, expr.op, *a, *b);
   if (isa<FloatType>(type)) {
+    // (As IEEE 754 says: not a number is unequal to everything, itself
+    // too, and neither below nor above anything.)
     arith::CmpFPredicate predicate;
     switch (expr.op) {
     case Token::Equal:
       predicate = arith::CmpFPredicate::OEQ;
       break;
     case Token::NotEqual:
-      predicate = arith::CmpFPredicate::ONE;
+      predicate = arith::CmpFPredicate::UNE;
       break;
     case Token::Less:
       predicate = arith::CmpFPredicate::OLT;
