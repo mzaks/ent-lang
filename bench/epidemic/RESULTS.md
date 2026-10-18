@@ -3,6 +3,31 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-18, later: `tally` on the GPU, and no row after the last
+
+`tally` sums into uniques, which the GPU does atomically (0.28 ms a day
+there). That alone gained little (8.8 and 8.5 ms): what still went to
+the CPU every day was `Order`, 8 MB, which `lay` writes on the GPU and
+`pair` wrote one row of on the CPU (the row after the last person, with
+the number of all the stubs), so all of it came back and went to the
+GPU again for `chance`. Where a row is the last is now said by how many
+rows a day has (`Laid[slot].rows`, `Pairing.rows`; `owner` stops there,
+tracing takes the day's `stubs` for the last person's end), and `pair`
+writes no row of `Order`. The same rows are found: 857,886 infected,
+32,718 with tracing.
+
+| a million people, a day in ms | one core | 4 threads | memory MB |
+|---|---|---|---|
+| the CPU alone | 183.4 | 68.9 | 938 |
+| on the GPU as below, `tally` too, no row after the last | 7.9 | 7.6 | 809 |
+
+With tracing (100,000 people), the committed model and this one one
+after the other, twice, four threads and the GPU: 9.0 and 6.7 ms a day
+against 6.0 and 6.0 (this machine's runs vary that much). On four
+threads with the GPU what is left of a day is `infect` (3.8 ms, which
+now waits for `chance` and `household` on the GPU), `tests` (1.4),
+`lay` (1.0), `symptoms` (0.7).
+
 ## 2026-10-18: `household` on the GPU
 
 `household` reads a person's household along `LivesIn` and sums into it

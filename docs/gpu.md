@@ -591,6 +591,15 @@ million people 9.2 ms on one core and the GPU, 8.5 on four threads
 on four threads and the GPU). `test/Integration/Inputs/gpu_tree.ent`
 moves people between houses on the CPU between frames.
 
+**`tally` on the GPU, and no row after the last (2026-10-18).** The
+model's `pair` wrote the row after the last person of `Order` (8 MB, the
+rows `lay` writes on the GPU), which the copies took for a write of all
+of it: back to the CPU and to the GPU again, every day. A write of a row
+of a buffer outside a `for` is still a write of the whole piece to the
+placement (what a range of the row would need: the row worked out where
+the copies are placed); the model does without the row instead. A day
+of a million people 7.9 ms on one core and the GPU, 7.6 on four threads.
+
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of
 the f32 sum was its first ten digits. It is a line for each now, and a

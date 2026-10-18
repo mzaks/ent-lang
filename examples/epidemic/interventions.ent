@@ -576,9 +576,11 @@ system trace() {
           if then >= 1 && Laid[slot].day == then {
             let order = key(Run.seed, 0, then, 13)
             let from = Order[Laid[slot].order + p.id].first
-            let to = Order[Laid[slot].order + p.id + 1].first
+            let to = if p.id + 1 < Laid[slot].rows { Order[Laid[slot].order + p.id + 1].first }
+                     else { Laid[slot].stubs }
             for stub in from..to {
               let who = met_by(Order, Index, Laid[slot].order, Laid[slot].index, stub,
+                               Laid[slot].rows,
                                Laid[slot].stubs, Laid[slot].bits, odd(order),
                                odd(order + 1), odd(order + 2), mix(order + 3),
                                inverse(odd(order)), inverse(odd(order + 1)),

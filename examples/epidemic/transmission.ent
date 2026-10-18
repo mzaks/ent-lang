@@ -44,8 +44,9 @@ const KEPT = 8
 
 // Where each person's stubs start, in the order of the people, for each
 // of the last days: the day's rows are those from `Laid[day % kept].order`
-// on, a person's row their number, and one more after the last person
-// with the number of all the stubs. Whose a stub is, is found by it.
+// on, as many as `Laid[day % kept].rows`, a person's row their number (the
+// last person's stubs go up to the day's `stubs`). Whose a stub is, is
+// found by it.
 buffer Order { who: entity, first: i32 } capacity 16
 // The row of a day's `Order` that has every 64th stub: where to start
 // looking for the row of a stub, which is then at most 63 stubs further.
@@ -53,11 +54,11 @@ buffer Order { who: entity, first: i32 } capacity 16
 buffer Index { row: i32 } capacity 16
 // Each of the last days: where its rows are, how many stubs it has and
 // how many bits their order goes by.
-buffer Laid { day: i32, order: i32, index: i32, stubs: i32, bits: i32 } capacity 8
+buffer Laid { day: i32, order: i32, index: i32, rows: i32, stubs: i32, bits: i32 } capacity 8
 // Today's order of the stubs: how many there are, where today's rows
 // are, and the numbers the order is worked out by, each way.
 unique Pairing {
-  kept: i32, stubs: i32, bits: i32, order: i32, index: i32, a: u64, b: u64, c: u64,
+  kept: i32, rows: i32, stubs: i32, bits: i32, order: i32, index: i32, a: u64, b: u64, c: u64,
   d: u64, back_a: u64, back_b: u64, back_c: u64
 }
 
@@ -199,10 +200,10 @@ system rows() {
   let kept = min(KEPT, max(1, Pairing.kept))
   Pairing.kept = kept
   for slot in 0..kept {
-    Laid += { day: -1, order: slot * (Run.people + 1), index: slot * (Run.people / 8),
-              stubs: 0, bits: 0 }
+    Laid += { day: -1, order: slot * Run.people, index: slot * (Run.people / 8),
+              rows: 0, stubs: 0, bits: 0 }
   }
-  for i in 0..kept * (Run.people + 1) { Order += { who: none, first: 0 } }
+  for i in 0..kept * Run.people { Order += { who: none, first: 0 } }
   for i in 0..kept * (Run.people / 8) { Index += { row: 0 } }
 }
 
@@ -254,11 +255,12 @@ system lay() {
 system pair() {
   let slot = Clock.day % Pairing.kept
   let stubs = Laying.stubs
-  Order[Pairing.order + Laying.rows].first = stubs
   let order = key(Run.seed, 0, Clock.day, PAIRS)
   Laid[slot].day = Clock.day
+  Laid[slot].rows = Laying.rows
   Laid[slot].stubs = stubs
   Laid[slot].bits = bits_for(stubs)
+  Pairing.rows = Laying.rows
   Pairing.stubs = stubs
   Pairing.bits = bits_for(stubs)
   Pairing.a = odd(order)
@@ -275,21 +277,22 @@ system pair() {
 // stub at or before it. (So a stub's row costs one read of the index,
 // which is small, and one of a few rows next to each other: with ten
 // million people most of the time goes to reading what is far apart.
-// The row after the last person starts where the stubs end.)
-fn owner(order: Order, index: Index, order_at: i32, index_at: i32, at: i32) -> i32 {
+// The last of the `rows` has the stubs up to the end.)
+fn owner(order: Order, index: Index, order_at: i32, index_at: i32, rows: i32,
+         at: i32) -> i32 {
   var row = index[index_at + at / 64].row
-  while order[order_at + row + 1].first <= at { row += 1 }
+  while row + 1 < rows && order[order_at + row + 1].first <= at { row += 1 }
   row
 }
 
 // Whom the stub `stub` of a day's meets, by the numbers of that day's
 // order: none if it comes to lie alone.
 fn met_by(order: Order, index: Index, order_at: i32, index_at: i32, stub: i32,
-          stubs: i32, bits: i32, a: u64, b: u64, c: u64, d: u64, back_a: u64,
-          back_b: u64, back_c: u64) -> entity {
+          rows: i32, stubs: i32, bits: i32, a: u64, b: u64, c: u64, d: u64,
+          back_a: u64, back_b: u64, back_c: u64) -> entity {
   let other = found(stub, stubs, bits, back_a, back_b, back_c, d) ^ 1
   if other < stubs {
-    order[order_at + owner(order, index, order_at, index_at,
+    order[order_at + owner(order, index, order_at, index_at, rows,
                            place(other, stubs, bits, a, b, c, d))].who
   } else { none }
 }
@@ -304,9 +307,9 @@ fn met_by(order: Order, index: Index, order_at: i32, index_at: i32, stub: i32,
 system chance() {
   for me, i: Infectious, c: Chance with Ill where i.rate > 0.0 {
     for stub in c.first..c.first + c.today {
-      let who = met_by(Order, Index, Pairing.order, Pairing.index, stub, Pairing.stubs,
-                       Pairing.bits, Pairing.a, Pairing.b, Pairing.c, Pairing.d,
-                       Pairing.back_a, Pairing.back_b, Pairing.back_c)
+      let who = met_by(Order, Index, Pairing.order, Pairing.index, stub, Pairing.rows,
+                       Pairing.stubs, Pairing.bits, Pairing.a, Pairing.b, Pairing.c,
+                       Pairing.d, Pairing.back_a, Pairing.back_b, Pairing.back_c)
       if who != none && who != me {
         Hazard(who).left -= hazard((i.rate * Model.by_chance) as f64)
       }
