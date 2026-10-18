@@ -85,3 +85,21 @@ ent.schedule @frame() {
   ent.run @hurt()
   ent.run @watch()
 }
+
+// -----
+
+// Along a tree in order where a parent may be a child too: the GPU keeps
+// no order of depths. (Of one level it is a `for` over the children.)
+
+ent.component @Box (w: f32)
+ent.archetype @A (@Box) capacity 16
+ent.relation @Inside () from @Box to @Box tree capacity 16
+
+ent.system @sizes() gpu {
+  // expected-error @+1 {{cannot run on the GPU, as its system is 'gpu': it goes along a tree in order (`top down`, `bottom up`) where a parent may be a child too}}
+  ent.query (%b: !ent.ref<@Box, mut>) cascade @Inside {
+  }
+}
+ent.schedule @frame() {
+  ent.run @sizes()
+}

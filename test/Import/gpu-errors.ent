@@ -156,23 +156,24 @@ gpu system order() {
 // -----
 
 component Box { w: f32 }
+component Size { h: f32 }
 relation (Box)-[Inside]->(Box) tree capacity 8
 gpu system sizes() {
-  // expected-error @+1 {{it goes along a tree in order}}
-  for b: mut Box top down Inside {
-    b.w = 0.0
+  // expected-error @+1 {{it reads another entity along a tree, further than its parent}}
+  for (b: Box, s: mut Size)-[Inside*]->(outer: Box) {
+    s.h = outer.w
   }
 }
 
 // -----
 
 component Box { w: f32 }
-component Size { h: f32 }
-relation (Box)-[Inside]->(Box) tree capacity 8
-gpu system sizes() {
-  // expected-error @+1 {{it reads another entity along a tree}}
-  for (b: Box, s: mut Size)-[Inside]->(outer: Box) {
-    s.h = outer.w
+component Room { n: i32, area: f32 }
+relation (Box)-[In]->(Room) tree capacity 8
+gpu system count() {
+  for (b: Box)-[In]->(r: mut Room) bottom up In {
+    // expected-error @+1 {{combines into a parent a value that is not a whole number}}
+    r.area += b.w
   }
 }
 

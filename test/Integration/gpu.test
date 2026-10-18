@@ -99,6 +99,16 @@
 // RUN: FileCheck %s --check-prefix=PACKED --input-file=%t.cells.report
 // PACKED: gpu to host: 3200000 bytes whole, 117782 words packed of 29200000
 
+// A tree of one level on the GPU: a sum into each parent (`bottom up`,
+// atomic), a read of it from each child; people move house on the CPU.
+// RUN: %ent run %S/Inputs/gpu_tree.ent > %t.tree.cpu
+// RUN: %ent run %S/Inputs/gpu_tree.ent --gpu > %t.tree.gpu
+// RUN: %ent run %S/Inputs/gpu_tree.ent --gpu --parallel > %t.tree.gpupar
+// RUN: diff %t.tree.cpu %t.tree.gpu
+// RUN: diff %t.tree.cpu %t.tree.gpupar
+// RUN: FileCheck %s --check-prefix=TREE --input-file=%t.tree.gpu
+// TREE: frame 30 got 3350402912 sum 9985890 most 363755
+
 // A `gpu system` of an imported module: its kernel's name has no `.`.
 // RUN: %ent run %S/Inputs/gpu_module.ent --gpu | FileCheck %s --check-prefix=MODULE
 // MODULE: frame 10 sum 529470

@@ -1154,6 +1154,10 @@ static bool isEntityLocal(QueryOp query) {
     // that is given it to read (a fn does nothing else to the world).
     if (isa<BufferLenOp, BufferAtOp>(op))
       return WalkResult::advance();
+    // What is combined into a parent atomically, in any order, from any
+    // thread (see flattenGpuCascades).
+    if (isa<CombineOp>(op) && op->hasAttr("ent.atomic"))
+      return WalkResult::advance();
     if (auto of = dyn_cast<BufferOfOp>(op); of && !of.getResult().getType().getMut())
       return WalkResult::advance();
     if (auto invoke = dyn_cast<InvokeOp>(op); invoke && !invoke.getProc())
@@ -3531,7 +3535,11 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
           combines.push_back(combine);
       });
     for (CombineOp combine : combines) {
-      assert(directApplies && "an ancestor is combined into in order");
+      // (Or, in a `gpu` system's query along a tree of one level, as it
+      // is sent, atomically: see flattenGpuCascades.)
+      bool atomic = combine->hasAttr(kAtomicAttr);
+      assert((directApplies || atomic) &&
+             "an ancestor is combined into in order");
       rewriter.setInsertionPoint(combine);
       Operation *op = combine;
       if (ancestor.row) {
@@ -3545,7 +3553,7 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
                              .getComponent()
                              .getAttr(),
                          combine.getFieldAttr(), combine.getRule(), value,
-                         Value(), tick);
+                         Value(), tick, atomic);
                      return {};
                    });
         llvm::erase(roots, op);
@@ -3559,6 +3567,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
           cast<RefType>(arg.getType()).getComponent(), combine.getFieldAttr(),
           combine.getRuleAttr(), combine.getValue());
       apply->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
+      if (atomic)
+        apply->setAttr(kAtomicAttr, rewriter.getUnitAttr());
       if (ancestor.trusted)
         apply->setAttr(kTrustedAttr, rewriter.getUnitAttr());
       auto *at = llvm::find(roots, op);
@@ -15595,6 +15605,64 @@ static Value deviceArena(IRRewriter &rewriter, func::FuncOp func,
       .getResult(0);
 }
 
+/// A `gpu` system's queries along a tree: through a ref to a parent, or
+/// in its order (`bottom up`, `top down`). The GPU has a tree's edge of
+/// each entity (its slot: see emitParent), not its links or its lists in
+/// order, so the tree is one kept by links (not `sorted`); and a `for` in
+/// order is one along a tree of one level, where no archetype holds both
+/// the component of the children's end and that of the parents': nobody
+/// is both, and every child combines into its parent as it is visited,
+/// whole numbers in any order the same. Such a `for` becomes one over the
+/// children, whose combines are atomic.
+static LogicalResult flattenGpuCascades(ModuleOp module) {
+  auto treeOf = [&](Operation *at, FlatSymbolRefAttr name) {
+    return SymbolTable::lookupNearestSymbolFrom<RelationOp>(at, name);
+  };
+  auto fail = [](Operation *at, const Twine &why) {
+    at->emitOpError("cannot run on the GPU, as its system is 'gpu': ")
+        << why;
+    return WalkResult::interrupt();
+  };
+  WalkResult result = module.walk([&](SystemOp system) {
+    if (!system.getGpu())
+      return WalkResult::advance();
+    return system.walk([&](QueryOp query) -> WalkResult {
+      for (Type type : query.getBody().getArgumentTypes()) {
+        auto ref = dyn_cast<RefType>(type);
+        if (!ref || !ref.isUp())
+          continue;
+        RelationOp tree = treeOf(query, ref.getVia());
+        if (tree && tree.getSorted())
+          return fail(query, "it reads a parent along a `sorted` tree, "
+                             "whose order the GPU does not keep");
+      }
+      FlatSymbolRefAttr cascade = query.getCascade();
+      if (!cascade)
+        return WalkResult::advance();
+      RelationOp tree = treeOf(query, cascade);
+      FlatSymbolRefAttr children = tree.getEndpoint(false);
+      FlatSymbolRefAttr parents = tree.getEndpoint(true);
+      bool level = children && parents && !tree.getSorted() &&
+                   query.getTraversal().empty();
+      for (ArchetypeOp archetype : module.getOps<ArchetypeOp>())
+        if (level && archetype.contains(children) &&
+            archetype.contains(parents))
+          level = false;
+      if (!level)
+        return fail(query, "it goes along a tree in order (`top down`, "
+                           "`bottom up`) where a parent may be a child "
+                           "too: the GPU keeps no order of depths yet");
+      query->removeAttr(QueryOp::kCascadeAttr);
+      query->removeAttr(QueryOp::kLeavesFirstAttr);
+      query.walk([](CombineOp combine) {
+        combine->setAttr("ent.atomic", UnitAttr::get(combine.getContext()));
+      });
+      return WalkResult::advance();
+    });
+  });
+  return failure(result.wasInterrupted());
+}
+
 /// A `gpu` system's queries are entity-local (the verifier sees to most
 /// of it); what it cannot see before the archetypes are inferred is an
 /// `ent.add` or `ent.remove` that moves the entity, which is for the CPU.
@@ -15742,10 +15810,28 @@ struct GpuPieces {
       for (const WorldRelation &relation : layout.relations) {
         if (RelationOp(relation.op).getSymNameAttr() != component)
           continue;
-        if (relation.linked)
-          return made;
         uint64_t idBytes = layout.entities.idBits / 8;
         uint64_t offsetBytes = relation.offsetBits / 8;
+        // A tree of links: what a parent ref reads of it, the edge in each
+        // entity's slot (its id + 1 where it has one, and its parent's;
+        // see emitParent), and its fields there. The links and the lists
+        // in order are the CPU's (a cascade on the GPU is of one level:
+        // see flattenGpuCascades).
+        if (relation.linked) {
+          auto slots = [&](uint64_t offset, uint64_t bytes) {
+            GpuPiece held{offset, bytes};
+            held.fixed = layout.entityKeys;
+            piece(held);
+          };
+          if (field && !field.getValue().empty()) {
+            if (const WorldColumn *column = relation.find(field))
+              slots(column->offset, uint64_t(bytesOf(column->type)));
+            return made;
+          }
+          slots(relation.sourceOffset, idBytes);
+          slots(relation.targetOffset, idBytes);
+          return made;
+        }
         auto edges = [&](uint64_t offset, uint64_t bytes) {
           GpuPiece held{offset, bytes};
           held.edges = &relation;
@@ -16083,7 +16169,7 @@ struct EntLowerToLoops
     });
     if (failed(inferArchetypes(module)))
       return signalPassFailure();
-    if (failed(checkGpuSystems(module)))
+    if (failed(flattenGpuCascades(module)) || failed(checkGpuSystems(module)))
       return signalPassFailure();
     FailureOr<WorldLayout> layout = WorldLayout::compute(module);
     if (failed(layout))

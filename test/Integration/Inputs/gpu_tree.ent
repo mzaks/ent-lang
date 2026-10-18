@@ -1,0 +1,59 @@
+// A tree of one level on the GPU (docs/gpu.md): people in households, a
+// sum of whole numbers into each household (`bottom up`, combined as it
+// is sent), and each person reading their household's (a ref to the
+// parent). People move house between frames, on the CPU. Built with and
+// without --gpu it prints the same.
+import console
+
+component Person { id: i32, gives: i64, got: i64 } capacity 20000
+component House { id: i32, sum: i64, most: i64 } capacity 2000
+// Another house, the one before: where a person moves.
+component Alt { house: entity } capacity 20000
+relation (Person)-[LivesIn]->(House) tree capacity 20000
+unique Frame: i32
+unique Sums { got: i64, sum: i64, most: i64 }
+
+gpu system pool() {
+  for h: mut House { h.sum = 0  h.most = 0 }
+  for (p: Person)-[LivesIn]->(h: mut House) bottom up LivesIn {
+    h.sum += p.gives
+    h.most max= p.gives * 3 - (p.id as i64)
+  }
+  for (p: mut Person)-[LivesIn]->(h: House) where h.sum > 100 {
+    p.got += h.sum - p.gives
+  }
+}
+
+// Some move: on the CPU, which keeps the tree's links.
+system move() {
+  for e, p: Person, a: Alt where (p.id + Frame) % 37 == 0 {
+    connect (e)-[LivesIn]->(a.house)
+  }
+  for p: mut Person { p.gives = (p.gives * 5 + (p.id as i64) + (Frame as i64)) % 1000 }
+}
+
+system sum() {
+  Sums.got = 0
+  Sums.sum = 0
+  Sums.most = 0
+  for p: Person { Sums.got += p.got }
+  for h: House { Sums.sum += h.sum  Sums.most += h.most }
+  Frame += 1
+  if Frame % 5 == 0 { spawn { Print { line: "frame {Frame} got {Sums.got} sum {Sums.sum} most {Sums.most}" } } }
+}
+schedule step() { pool()  sum()  move()  write()  clear() }
+
+world {
+  // (House 0 has nobody in it at first.)
+  var before = spawn { House { id: 0, sum: 0, most: 0 } }
+  for k in 1..2000 {
+    let h = spawn { House { id: k, sum: 0, most: 0 } }
+    for j in 0..10 {
+      let i = k * 10 + j - 10
+      let p = spawn { Person { id: i, gives: (i % 17) as i64, got: 0 }, Alt { house: before } }
+      connect (p)-[LivesIn]->(h)
+    }
+    before = h
+  }
+}
+main { loop { step() } until Frame >= 30 }

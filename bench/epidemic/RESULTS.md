@@ -3,6 +3,28 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-18: `household` on the GPU
+
+`household` reads a person's household along `LivesIn` and sums into it
+`bottom up`; a tree of one level is now the GPU's too (docs/gpu.md).
+`BENCH_ONE_CPU=4 BENCH_CPUS=4-7 BENCH_ALL=0 python3 bench/epidemic/run.py
+1000000 --gpu workplace,infectiousness,chance,lay,infect,progress,symptoms,tests,household`:
+
+| a million people, a day in ms | one core | 4 threads | memory MB |
+|---|---|---|---|
+| the CPU alone | 203.6 | 79.2 | 884 |
+| on the GPU as below, and `household` | 9.2 | 8.5 | 785 |
+
+(The CPU alone was slower than in the entry below throughout, 101 ms of
+`workplace` where it took 89: the machine, not the change, which leaves
+the CPU's code as it was.) `household` takes 0.04 ms where it took 2.0,
+`workplace` 0.12 (0.69) and `lay` 1.4 (2.1): what households hold stays
+on the GPU. 857,886 infected in every run; with tracing, 100,000 people,
+32,718 in all four builds, a day 9.9 ms on one core and the GPU and 6.6
+on four threads and the GPU (13.6 and 8.0 on the CPU). What is left on
+four threads is `chance` (2.8), `infect` (1.7), `lay` (1.4) and `tests`
+(1.1).
+
 ## 2026-10-17, at the end: `math` on the GPU, and what comes back as the words that changed
 
 `math` is written in ent (docs/gpu.md), so `infect`, `progress`,

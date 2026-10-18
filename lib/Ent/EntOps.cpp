@@ -1164,8 +1164,15 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
   // What is sent to another entity or accumulated into a unique: whole
   // numbers by `+=`, `-=`, `min=`, `max=`, which give the same in any
   // order, so the GPU combines them as they are sent (atomically).
-  if (isa<CombineOp>(op))
-    return std::string("combines into an ancestor along a tree");
+  // What is combined into a parent (along a tree of one level: the
+  // lowering sees to that) is combined so too.
+  if (auto combine = dyn_cast<CombineOp>(op)) {
+    auto whole = dyn_cast<IntegerType>(combine.getValue().getType());
+    if (!whole || whole.getWidth() == 1)
+      return std::string("combines into a parent a value that is not a "
+                         "whole number: combined in the order of the "
+                         "entities, which the GPU does not keep");
+  }
   if (isa<ApplyOp, AccumulateOp>(op)) {
     auto apply = dyn_cast<ApplyOp>(op);
     Value value = apply ? apply.getValue() : cast<AccumulateOp>(op).getValue();
@@ -1263,17 +1270,17 @@ static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
     if (query->hasAttr(QueryOp::kTriggersAttr))
       return fail(query, "it reacts to events (`on`), which are kept "
                          "where the GPU does not reach them");
-    if (query.getCascade())
-      return fail(query, "it goes along a tree in order (`top down`, "
-                         "`bottom up`)");
     if (query.hasBy())
       return fail(query, "it visits its entities one after another, in "
                          "the order of a field");
+    // (A parent is fine: its edge is the child's. Further up, siblings
+    // and paths are not on the GPU yet.)
     for (Type type : query.getBody().getArgumentTypes())
       if (auto ref = dyn_cast<RefType>(type);
-          ref && (ref.isUp() || ref.hasPath() || ref.getIsBefore() ||
-                  ref.getIsAfter()))
-        return fail(query, "it reads another entity along a tree");
+          ref && (ref.hasPath() || ref.getIsBefore() || ref.getIsAfter() ||
+                  (ref.isUp() && (!ref.getIsDirect() || ref.getHops() > 1))))
+        return fail(query, "it reads another entity along a tree, further "
+                           "than its parent");
     std::optional<std::pair<Operation *, std::string>> bad;
     query.getBody().walk([&](Operation *op) {
       if (std::optional<std::string> why = notForGpu(symbolTable, op)) {

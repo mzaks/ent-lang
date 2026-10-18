@@ -1268,7 +1268,9 @@ are sent), from the body or from loops in it, and keep running sums
 (`let first = Laying.stubs += s.meets`). Not yet: sending fractions
 or with `=`, giving a buffer rows (writing a row it has is fine),
 a `for` over other entities inside it, extern fns and texts (a table's
-numbers are fine). Later, or never: `connect`, `disconnect` and trees, `on` (reactive), `by`, spawning,
+numbers are fine), and of trees more than a parent and one level in
+order (`top down`, `bottom up` where nobody is a parent and a child,
+whole numbers combined). Later, or never: `connect`, `disconnect`, `on` (reactive), `by`, spawning,
 destroying and `apart` components, procs, writing a component a reactive
 query reacts to. Around its `for`s the system reads and writes uniques;
 what it does to entities or buffers goes in a system of its own.

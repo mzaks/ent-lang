@@ -104,6 +104,13 @@ entity and values every entity reads alike:
 - running sums (`let first = Laying.stubs += s.meets`, docs/syntax.md):
   in two passes, with a scan of the values between them (below);
 - calling `fn`s of the program: compiled for the GPU like the body;
+- a tree kept by links (not `sorted`): a ref to the parent
+  (`-[LivesIn]->(h: Household)`), read through the edge in the child's
+  slot, which the GPU keeps as a piece; and `top down` or `bottom up`
+  along a tree of one level (no archetype holds the components of both
+  ends, so nobody is a parent and a child), which is a `for` over the
+  children whose whole numbers combined into the parent (`+=`, `min=`,
+  `max=`) are combined atomically, as sends are (`flattenGpuCascades`);
 - reading tables (`table`), but for their texts: each field a constant
   array the kernels read, copied into the GPU's module with the code
   that reads it;
@@ -119,7 +126,8 @@ Errors, each naming the construct and what it waits for:
 | `Marks += { ... }` (rows given to a buffer) | rows in the order of the entities: needs an ordered compaction | G2 |
 | `extern fn` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule (`math` is written in ent and runs on both, see below) | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |
-| arrows up a tree, a tree's edges, `top down`, `bottom up` | trees are kept in tables the GPU does not have | later |
+| further up a tree than the parent (`*`, `hops`, siblings, paths), a tree's edges (`for` over them), a `sorted` tree | the links and the lists in order are the CPU's | later |
+| `top down`, `bottom up` where a parent may be a child too, or with a fraction combined | needs the depths one after another (a list of each) | later |
 | `connect`, `disconnect` | the relation is sorted again on the CPU | later |
 | `on changed ...` (reactive) | event logs and stamps | later |
 | `spawn`, `destroy`, `add`/`remove` of an `apart` component | change which rows an archetype holds; the compaction runs on the CPU | later |
@@ -571,6 +579,17 @@ nothing of C any more (devices/math.c is gone). Within an ulp, glibc's
 The f32 ones round rightly on all 180,000: e_asinf.c's shorter rational
 function, worked out in f64, missed one in 600 (at 1.4 ns), and the f64
 one costs half a ns more.
+
+**`household` on the GPU (2026-10-18).** `LivesIn` is a tree of one
+level, people in households: the GPU reads a person's household through
+the edge in their slot (`source`, `target` of the tree, pieces of
+`entityKeys` elements) and the sum of `bottom up` is a `for` over the
+people whose `+=` into `pressure` (an `i64`) is atomic. A day of a
+million people 9.2 ms on one core and the GPU, 8.5 on four threads
+(13.6 and 11.8 before), `household` 0.04 ms where it took 2.0; the same
+857,886 infected, and 32,718 with tracing (100,000 people, 6.6 ms a day
+on four threads and the GPU). `test/Integration/Inputs/gpu_tree.ent`
+moves people between houses on the CPU between frames.
 
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of
