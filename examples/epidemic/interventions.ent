@@ -88,6 +88,8 @@ const MEETS = 11
 //   the test; `found_told_..`: of those told about one a test found.
 // `house_symptoms`, `house_found`: whether the household of one with
 //   symptoms, or of one a test found, stays at home.
+// `telling`: whether anybody is told about anybody (any of the four
+//   above), worked out by `measures`.
 unique Measures {
   from: i32, stays: f32, home_days: i32, gives_up: f32, others: f32,
   told_days: i32,
@@ -99,7 +101,7 @@ unique Measures {
   told_stay: bool, told_test: bool, seen: f32, back: i32,
   told_stays: f32, told_gives_up: f32, found_told_stays: f32,
   found_told_gives_up: f32, told_takers: f32, found_told_takers: f32,
-  house_symptoms: bool, house_found: bool
+  house_symptoms: bool, house_found: bool, telling: bool
 }
 
 // The part of each age that has the app.
@@ -246,6 +248,10 @@ system measures() {
   if Measures.app_from < 10000 && (Measures.trace_symptoms || Measures.trace_found) {
     Pairing.kept = Measures.back + 1
   }
+  // (Whether anybody is told about anybody: where nobody is, `trace` and
+  // `told` need not run, `run_if Measures.telling`.)
+  Measures.telling = Measures.told_stay || Measures.told_test || Measures.house_symptoms ||
+                     Measures.house_found
 }
 
 fn in_hospital(stage: Stage) -> bool {

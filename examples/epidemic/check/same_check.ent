@@ -104,12 +104,12 @@ schedule day() {
   workplace()
   chance()
   infect()
-  moves()
+  moves() run_if Run.log
   progress()
   symptoms()
   tests()
-  trace()
-  told()
+  trace() run_if Measures.telling
+  told() run_if Measures.telling
   tally()
   sum()
   line()

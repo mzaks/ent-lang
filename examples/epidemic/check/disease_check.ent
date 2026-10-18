@@ -37,7 +37,7 @@ schedule setup() {
 
 schedule day() {
   tick()
-  moves()
+  moves() run_if Run.log
   progress()
   moves_out()
   tally()

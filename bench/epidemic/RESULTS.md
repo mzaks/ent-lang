@@ -3,6 +3,33 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-18, last: runs only where they do something, and the counts the GPU's
+
+`infect`'s 3.8 ms were not its own: right after it, `moves` (which writes
+nothing unless `Run.log`) had the CPU wait for the whole stream and take
+`Person`, `Age` and `Disease` back, every day; `trace` and `told` (nothing
+unless somebody is told about somebody) did the same with more. They are
+now `moves() run_if Run.log`, `trace() run_if Measures.telling` and
+`told() run_if Measures.telling` (`Measures.telling` worked out by
+`measures`), and a run under a condition copies only where it holds. That
+showed that one run in two on four threads and the GPU ended after a day
+with every unique 0: `workplace`'s kernel read the archetypes' counts
+from the CPU's world through HMM (docs/gpu.md, "What a kernel touches is
+the GPU's"). Fixed in the lowering, checked by it, and every copy goes
+through pinned staging memory now.
+
+| a million people, a day in ms | one core | 4 threads | memory MB |
+|---|---|---|---|
+| the CPU alone | 187.8 | 67.6 | 907 |
+| on the GPU as below, `moves`, `trace`, `told` only where they do something | 5.5 | 5.4 | 881 |
+
+857,886 infected in every run (none of 40 runs since went wrong; 11 of 20
+before the counts were the GPU's). With tracing, 100,000 people: 32,718
+in all four builds, a day 8.4 ms on one core and the GPU and 5.2 on four
+threads and the GPU (12.8 and 7.1 on the CPU). What is left of a day on
+the GPU is the GPU's own work, which the CPU waits for at `tests`
+(3.9 ms), and `lay` (0.7).
+
 ## 2026-10-18, later: `tally` on the GPU, and no row after the last
 
 `tally` sums into uniques, which the GPU does atomically (0.28 ms a day

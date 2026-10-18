@@ -65,7 +65,7 @@ schedule day() {
   workplace()
   chance()
   infect()
-  moves()
+  moves() run_if Run.log
   progress()
   tally()
   report() run_if Clock.day % 10 == 0 || Tally.infected == 0

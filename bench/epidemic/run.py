@@ -58,6 +58,8 @@ PANEL = os.path.join(OUT, "run", "baseline_household_demographics.csv")
 SETUP = ["parameters", "measures", "panel", "households", "settle", "apps",
          "census", "employ", "wire", "rows", "curve", "rate", "share", "seed",
          "tally"]
+# The runs of a day that are conditional, as in epidemic.ent.
+WHEN = {"moves": "Run.log", "trace": "Measures.telling", "told": "Measures.telling"}
 DAY = ["tick", "policy", "remember", "infectiousness", "today", "lay", "pair",
        "household", "workplace", "chance", "infect", "moves", "progress", "symptoms",
        "tests", "trace", "told", "tally"]
@@ -130,7 +132,8 @@ system start() {{ Laps.last = wait_until(0.0) }}
     for index, name in enumerate(DAY):
         # (The clock has a `tick` of its own.)
         call = "disease::tick" if name == "tick" else name
-        text += f"  {call}()\n  lap{len(SETUP) + index}()\n"
+        when = f" run_if {WHEN[name]}" if name in WHEN else ""
+        text += f"  {call}(){when}\n  lap{len(SETUP) + index}()\n"
     text += "  counted()\n}\nschedule end() { report() }\n"
     text += '''main {
   setup()

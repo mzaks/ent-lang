@@ -600,6 +600,41 @@ placement (what a range of the row would need: the row worked out where
 the copies are placed); the model does without the row instead. A day
 of a million people 7.9 ms on one core and the GPU, 7.6 on four threads.
 
+**What a kernel touches is the GPU's (2026-10-18).** With `moves`,
+`trace` and `told` run only where they do something (`run_if Run.log`,
+`run_if Measures.telling`), the epidemic on four threads and the GPU
+ended after a day with nobody ill in one run of two: every unique, the
+archetypes' counts with them, was 0. The page of the CPU's world that
+holds them had come back as the GPU's copy of it, while the CPU waited
+for the stream: `workplace`'s kernel checked the other end of a tie
+against its archetype's count, and read that count from the CPU's world
+through its address. This driver has `Addressing Mode: HMM`, under which
+a kernel reaches the CPU's memory and does not fault; and the page it
+reads may move to the GPU and back. Counts were the CPU's
+(`WorldAccess::count` of the GPU's copy gave the CPU's), loaded where the
+lookup stands, which is in the kernel. Now, in a loop for the GPU, the
+counts are the GPU's copy's, and they are a piece (the archetypes'
+counts at the world's start, with the entity table: what lookups read
+and spawns and destroys write), so they come to the GPU where the CPU
+changed them. Three things keep it so:
+
+- the lowering checks of itself that nothing in a loop for the GPU uses
+  the CPU's world, or a view of it (`checkGpuLoops`: an internal error);
+  `gpu.test` builds the epidemic with its systems on the GPU, which that
+  check failed before;
+- `ENT_GPU_PROTECT` runs every kernel with the CPU's world out of reach
+  (`mprotect`) and fails, saying which kernel, where one touches it;
+  `gpu.test` runs the GPU programs so;
+- every copy between the CPU's memory and the GPU's goes through pinned
+  staging memory of the runtime (`stage`, and what came back is put in
+  place once the stream is done): the driver never moves the world's
+  pages, and a copy to the GPU no longer waits for the stream.
+
+Found by keeping, for each call of devices/gpu.c, the value of one
+unique before and after it, in memory, said at the end (each probe that
+wrote or waited hid it); then by `mprotect`. Without the GPU's counts:
+11 of 20 runs; since, none of 40.
+
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of
 the f32 sum was its first ten digits. It is a line for each now, and a
