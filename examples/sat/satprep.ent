@@ -76,9 +76,12 @@ buffer Mark { stamp: i32 } capacity 16
 // Subsumption before the elimination looks at clauses of at most
 // `subsume_size` literals, and stops after `subsume_steps` literals looked
 // at; then each resolvent is held against the clauses as they are, those
-// of fewer than `sub_limit` literals (as MiniSat's -sub-lim).
+// of fewer than `sub_limit` literals (as MiniSat's -sub-lim), until
+// `drain_steps` literals are looked at in all (REGRandom-K4-L1-Seed5 looks
+// at 44 billion, no other problem of the dev set at more than 112 million).
 unique Prep {
   on: bool, limit: i32, clause_limit: i32, subsume_size: i32, subsume_steps: i64, sub_limit: i32,
+  drain_steps: i64,
   eliminated: i32, removed: i64, resolvents: i64, subsumed: i64, strengthened: i64,
   steps: i64, stamp: i32, seconds: f64
 }
@@ -90,6 +93,7 @@ world {
   Prep.subsume_size = 20
   Prep.subsume_steps = 200000000
   Prep.sub_limit = 1000
+  Prep.drain_steps = 1000000000
 }
 
 // `clause` onto the list of `lit`, which moves where it is full.
@@ -298,10 +302,11 @@ proc backward(pre: mut Pre, occ: mut Occ, count: mut Count, mark: mut Mark, byte
 }
 
 // Each clause on the queue against the others, those it strengthens put
-// on it too, until it is through; the stamps from `stamp` on. What it
-// gives: as `backward`, and the last stamp.
+// on it too, until it is through or `budget` literals are looked at; the
+// stamps from `stamp` on. What it gives: as `backward`, and the last stamp.
 proc drain(pre: mut Pre, occ: mut Occ, count: mut Count, mark: mut Mark, bytes: mut Bytes,
-           queue: mut Queue, touched: mut Touched, stamp: i32, limit: i32, proof: bool) -> (i32, i32, i64, i32) {
+           queue: mut Queue, touched: mut Touched, stamp: i32, limit: i32, budget: i64,
+           proof: bool) -> (i32, i32, i64, i32) {
   var subsumed = 0
   var strengthened = 0
   var steps: i64 = 0
@@ -310,7 +315,7 @@ proc drain(pre: mut Pre, occ: mut Occ, count: mut Count, mark: mut Mark, bytes: 
   while at < len(queue) {
     let c = queue[at].clause
     pre[c + 1].w &= -3
-    if pre[c + 1].w & 1 == 0 && pre[c].w > 0 {
+    if pre[c + 1].w & 1 == 0 && pre[c].w > 0 && steps < budget {
       last += 1
       let (gone, stronger, looked) = backward(pre, occ, count, mark, bytes, queue, touched, c, last, limit, proof)
       subsumed += gone
@@ -342,7 +347,7 @@ system subsume() {
     c = next(Pre, c)
   }
   let (gone, stronger, steps, stamp) = drain(Pre, Occ, Count, Mark, Bytes, Queue, Touched, Prep.stamp,
-                                             Prep.sub_limit, Options.proof)
+                                             Prep.sub_limit, Prep.drain_steps - Prep.steps, Options.proof)
   Prep.subsumed += gone as i64
   Prep.strengthened += stronger as i64
   Prep.steps += steps
@@ -388,7 +393,7 @@ system eliminate() {
       Fresh = []
       for i in 0..len(Queue) { Pre[Queue[i].clause + 1].w &= -3 }
       let (gone, stronger, steps, stamp) = drain(Pre, Occ, Count, Mark, Bytes, Queue, Touched, Prep.stamp,
-                                                 Prep.sub_limit, Options.proof)
+                                                 Prep.sub_limit, Prep.drain_steps - Prep.steps, Options.proof)
       Prep.subsumed += gone as i64
       Prep.strengthened += stronger as i64
       Prep.steps += steps
@@ -548,7 +553,7 @@ system eliminate() {
         // (The resolvents against the other clauses, and the clauses
         // they strengthen too.)
         let (gone, stronger, steps, stamp) = drain(Pre, Occ, Count, Mark, Bytes, Queue, Touched, Prep.stamp,
-                                                   Prep.sub_limit, Options.proof)
+                                                   Prep.sub_limit, Prep.drain_steps - Prep.steps, Options.proof)
         Prep.subsumed += gone as i64
         Prep.strengthened += stronger as i64
         Prep.steps += steps
