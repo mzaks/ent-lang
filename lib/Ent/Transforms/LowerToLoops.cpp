@@ -1835,6 +1835,10 @@ static constexpr llvm::StringLiteral kRunningAddedAttr = "ent.running_added";
 static constexpr llvm::StringLiteral kRunningCountAttr = "ent.running_count";
 static SmallVector<Value> runningStarts;
 static SmallVector<Value> runningScratch;
+/// For a running sum that counts (`+= 1`) on the GPU, by its place among
+/// the scratch arrays: a bit for each row, in words of 32, whose counts
+/// the scratch array holds and scans (see lowerRunning); else null.
+static SmallVector<Value> runningBits;
 static llvm::DenseMap<const WorldArchetype *, Value> runningBases;
 static Value runningBase;
 
@@ -1954,9 +1958,60 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         // the query's rows, where the first pass leaves its value and the
         // scan between them what came before it.
         Value scratch = runningScratch[slot.getInt()];
+        Value bits = runningBits[slot.getInt()];
 
         Value at = arith::AddIOp::create(rewriter, loc, runningBase, entity);
-        if (running->hasAttr(kRunningValuesAttr)) {
+        if (bits) {
+          // Counted by bits: the row's in its word, and what came before
+          // it the scan's of its word and the word's bits below its own.
+          Value thirtyTwo = arith::ConstantIndexOp::create(rewriter, loc, 32);
+          Value word = arith::DivUIOp::create(rewriter, loc, at, thirtyTwo);
+          Value bit = arith::IndexCastOp::create(
+              rewriter, loc, rewriter.getI32Type(),
+              arith::RemUIOp::create(rewriter, loc, at, thirtyTwo));
+          Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 32);
+          Value mine = arith::ShLIOp::create(rewriter, loc, one, bit);
+          Type type = value.getType();
+          if (running->hasAttr(kRunningValuesAttr)) {
+            if (mask)
+              mine = arith::SelectOp::create(
+                  rewriter, loc, mask, mine,
+                  arith::ConstantIntOp::create(rewriter, loc, 0, 32));
+            memref::AtomicRMWOp::create(rewriter, loc,
+                                        arith::AtomicRMWKind::ori, mine, bits,
+                                        ValueRange{word});
+            before = value;
+          } else {
+            Value held = memref::LoadOp::create(rewriter, loc, bits,
+                                                ValueRange{word});
+            auto widen = [&](Value count) -> Value {
+              return type.getIntOrFloatBitWidth() > 32
+                         ? arith::ExtUIOp::create(rewriter, loc, type, count)
+                               .getResult()
+                         : type.getIntOrFloatBitWidth() < 32
+                               ? arith::TruncIOp::create(rewriter, loc, type,
+                                                         count)
+                                     .getResult()
+                               : count;
+            };
+            if (running->hasAttr(kRunningAddedAttr)) {
+              before = widen(arith::AndIOp::create(
+                  rewriter, loc,
+                  arith::ShRUIOp::create(rewriter, loc, held, bit), one));
+            } else {
+              Value below = arith::AndIOp::create(
+                  rewriter, loc, held,
+                  arith::SubIOp::create(rewriter, loc, mine, one));
+              Value count = LLVM::CtPopOp::create(rewriter, loc,
+                                                  rewriter.getI32Type(), below);
+              before = arith::AddIOp::create(
+                  rewriter, loc,
+                  memref::LoadOp::create(rewriter, loc, scratch,
+                                         ValueRange{word}),
+                  widen(count));
+            }
+          }
+        } else if (running->hasAttr(kRunningValuesAttr)) {
           if (mask)
             value = arith::SelectOp::create(
                 rewriter, loc, mask, value,
@@ -13110,7 +13165,7 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
   int64_t first = runningScratch.size();
   // The scratch arrays: the rows, then room for the scan's levels (each
   // at most a chunk's part of the one below) and the whole sum.
-  Value room = arith::AddIOp::create(
+  Value rowRoom = arith::AddIOp::create(
       rewriter, loc, count,
       arith::AddIOp::create(
           rewriter, loc,
@@ -13119,11 +13174,29 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
               arith::ConstantIndexOp::create(rewriter, loc,
                                              runningChunk(options.gpu) - 1)),
           arith::ConstantIndexOp::create(rewriter, loc, 64)));
-  SmallVector<Value> scratches;
+  SmallVector<Value> scratches, bitArrays;
+  Value thirtyTwo = arith::ConstantIndexOp::create(rewriter, loc, 32);
+  Value words = arith::CeilDivUIOp::create(rewriter, loc, count, thirtyTwo);
+  Value wordRoom = arith::AddIOp::create(
+      rewriter, loc, words,
+      arith::AddIOp::create(
+          rewriter, loc,
+          arith::DivUIOp::create(
+              rewriter, loc, words,
+              arith::ConstantIndexOp::create(rewriter, loc,
+                                             runningChunk(options.gpu) - 1)),
+          arith::ConstantIndexOp::create(rewriter, loc, 64)));
   for (auto [slot, running] : llvm::enumerate(runnings)) {
     Type type = world.storageType(running.getValue().getType());
     auto memrefType = MemRefType::get({ShapedType::kDynamic}, type);
     Value scratch;
+    // On the GPU, a sum that counts (`+= 1`) is a bit for each row: a
+    // word of 32 rows, and the scan of the words' counts (a 32nd of the
+    // rows; see the lowering of `ent.running`).
+    bool counts = options.gpu && running.getRule() == "add" &&
+                  isa<IntegerType>(type) && type.getIntOrFloatBitWidth() <= 64 &&
+                  matchPattern(running.getValue(), m_One());
+    Value room = counts ? wordRoom : rowRoom;
     if (options.gpu) {
       // (In the GPU's memory, kept by devices/gpu.c from run to run.)
       Value bytes = arith::IndexCastOp::create(
@@ -13148,6 +13221,35 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
                                         ValueRange{room});
     }
     scratches.push_back(scratch);
+    if (counts) {
+      // (The bits, in a scratch array of their own, after the running
+      // sums' sixteen; every bit 0, the words' counts written whole.)
+      Value raw =
+          callGpu(rewriter, loc, module, "ent_gpu_scratch",
+                  ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                          16 + first + slot, 64),
+                             arith::IndexCastOp::create(
+                                 rewriter, loc, rewriter.getI64Type(),
+                                 arith::MulIOp::create(
+                                     rewriter, loc, words,
+                                     arith::ConstantIndexOp::create(rewriter,
+                                                                    loc, 4)))},
+                  TypeRange{MemRefType::get({ShapedType::kDynamic},
+                                            rewriter.getI8Type())})
+              .getResult(0);
+      Value bits = memref::ViewOp::create(
+          rewriter, loc,
+          MemRefType::get({ShapedType::kDynamic}, rewriter.getI32Type()), raw,
+          arith::ConstantIndexOp::create(rewriter, loc, 0), ValueRange{words});
+      bitArrays.push_back(bits);
+      OpBuilder::InsertionGuard guard(rewriter);
+      Value word = parallelTurns(rewriter, loc, words, options.gpu);
+      memref::StoreOp::create(rewriter, loc,
+                              arith::ConstantIntOp::create(rewriter, loc, 0, 32),
+                              bits, ValueRange{word});
+      continue;
+    }
+    bitArrays.push_back(Value());
     // (A row that sends nothing, or that the query passes over, adds
     // nothing.)
     OpBuilder::InsertionGuard guard(rewriter);
@@ -13160,6 +13262,8 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
   }
   llvm::SaveAndRestore keepScratch(runningScratch);
   runningScratch.append(scratches);
+  llvm::SaveAndRestore keepBits(runningBits);
+  runningBits.append(bitArrays);
   llvm::SaveAndRestore keepBases(runningBases, bases);
 
   // The first pass: what the values summed are made of, and the ifs and
@@ -13234,8 +13338,25 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
     Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
     Type type = start.getType();
     int64_t bytes = type.getIntOrFloatBitWidth() / 8;
+    // (Counted by bits: each word's count, and the words scanned.)
+    Value scanned = count;
+    if (Value bits = bitArrays[slot]) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      Value word = parallelTurns(rewriter, loc, words, options.gpu);
+      Value held = memref::LoadOp::create(rewriter, loc, bits, ValueRange{word});
+      Value many = LLVM::CtPopOp::create(rewriter, loc, rewriter.getI32Type(),
+                                         held);
+      if (type.getIntOrFloatBitWidth() > 32)
+        many = arith::ExtUIOp::create(rewriter, loc, type, many);
+      else if (type.getIntOrFloatBitWidth() < 32)
+        many = arith::TruncIOp::create(rewriter, loc, type, many);
+      memref::StoreOp::create(rewriter, loc, many, scratches[slot],
+                              ValueRange{word});
+    }
+    if (bitArrays[slot])
+      scanned = words;
     Value sum = emitRunningScan(
-        rewriter, loc, scratches[slot], count, start, running.getRule(),
+        rewriter, loc, scratches[slot], scanned, start, running.getRule(),
         running.getValue().getType(), options.gpu,
         [&](Value at) -> Value {
           if (!options.gpu)

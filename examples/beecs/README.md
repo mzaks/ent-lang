@@ -212,12 +212,11 @@ It agrees with beecs as `claims.ent` does (`check/curves.py --many
 [--gpu]`: all six scenarios over 100 seeds, `default` also over 400;
 over seeds 1 to 100 of `default` the in-hive workers' peaks are off at
 1%, and `claims.ent`'s are too). Where every forager is a squadron of its own, 100
-colonies take 11.5 s on the GPU (a laptop's RTX 4050), 186 s on one
+colonies take 8.9 s on the GPU (a laptop's RTX 4050), 186 s on one
 core and as much on four threads, where 100 runs of `beecs.ent` without
 turns take 90 s one after another and 23 s four at a time on four
 cores. A round is a few passes over all places, so it costs the memory
-they read: about 250 bytes a place, some 3 ms a round for 2.5 million
-places.
+they read: some 2 ms a round for 2.5 million places.
 
 ## What follows beecs, and what does not
 

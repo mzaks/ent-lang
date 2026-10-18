@@ -290,3 +290,13 @@ each, some 2.7 ms at the card's bandwidth. `ENT_GPU_TIMES`, a round:
 `fly` 0.52 ms, the colonies going through their dancers where fewer rest
 than would follow (`settle`) 0.41, `decide` 0.38, the lists' running
 sums 1.0 (two scans of 2.5 million rows), `come_home` 0.17.
+
+## 2026-10-18, later: sums that count, as bits
+
+The same 100 colonies. The lists' running sums (`+= 1` under an `if`)
+are a bit for each place on the GPU, a word of 32 places scanned where a
+place was (docs/gpu.md): the lists' passes 0.25 ms a round where they
+took 1.0. A year 8.9 s on the GPU (11.5), the lines the same to the
+byte as on the CPU. A round now: `fly` 0.53 ms, the colonies going
+through their dancers 0.40, `decide` 0.39 (with its list of who passes
+the filter), `come_home` 0.22, the lists 0.25.

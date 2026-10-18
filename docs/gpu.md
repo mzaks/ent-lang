@@ -720,6 +720,19 @@ found:
 A round is then memory: five passes over all places, about 250 bytes a
 place, some 2.7 ms a round for 2.5 million, at the card's 190 GB/s.
 
+**A running sum that counts is bits on the GPU (2026-10-18).** A sum of
+`+= 1` under an `if` (a place among those that have something) kept a
+value for every row of the `for`, 4 bytes, which the scan read and
+wrote again at every level: with two of them, `many.ent`'s lists cost
+some 40 bytes a place a round, dead places too, 1 ms of its 2.7. Now
+the first pass sets the row's bit in a word of 32 rows (an atomic `or`),
+a pass counts each word's bits, the scan goes over the words' counts (a
+32nd of the rows), and the body's place is its word's place and the
+bits below its own (`llvm.intr.ctpop`). The lists' passes 0.25 ms a
+round; 100 colonies a year 8.9 s where it was 11.5. In
+`test/Integration/Inputs/running.ent` such sums of a few rows and of
+70,000, the same on one core, on all and on the GPU.
+
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of
 the f32 sum was its first ten digits. It is a line for each now, and a
