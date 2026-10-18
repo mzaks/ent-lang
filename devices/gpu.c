@@ -18,12 +18,16 @@
 // For finding out how it goes, a program may be run with: ENT_GPU_WHOLE
 // (what comes back comes as whole ranges, no shadows), ENT_GPU_REPORT
 // (at its end, how much came back whole and how many words packed),
-// ENT_GPU_CHECK (each packed copy checked against the whole range) and
+// ENT_GPU_CHECK (each packed copy checked against the whole range),
 // ENT_GPU_LOG (the first copies, a line each; as many as it says, or
-// 3000).
+// 3000) and ENT_GPU_PROTECT (each kernel waited for with the CPU's world
+// out of reach: one that touches it fails, saying which).
 
 #include <cuda.h>
 #include <stdbool.h>
+#include <sys/mman.h>
+#include <time.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,12 +58,88 @@ static void start(void) {
   check(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate");
 }
 
+// (For ENT_GPU_LOG: microseconds since the first asked, and whether to
+// say.)
+static double logClock(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (double)now.tv_sec * 1e6 + (double)now.tv_nsec / 1e3;
+}
+static int logging(void) {
+  static int on = -1;
+  if (on < 0)
+    on = getenv("ENT_GPU_LOG") != NULL;
+  return on;
+}
+
+// Pinned memory that every copy between the CPU's memory and the GPU's
+// goes through, so that the GPU never reads or writes the CPU's pages
+// itself (with HMM, as the open kernel module has it, a copy of pageable
+// memory may), and a copy to the GPU does not wait for the stream. Free
+// again once the stream is done: then what came back goes where it is
+// for (`laters`).
+static char *staging;
+static size_t stagingBytes, stagingUsed;
+typedef struct {
+  void *to;
+  const void *from;
+  size_t bytes;
+} ent_gpu_later;
+static ent_gpu_later *laters;
+static size_t laterCount, laterRoom;
+
+static void settle(void) {
+  for (size_t k = 0; k < laterCount; ++k)
+    memcpy(laters[k].to, laters[k].from, laters[k].bytes);
+  laterCount = 0;
+  stagingUsed = 0;
+}
+
 void ent_gpu_wait(void) {
-  if (!pending)
+  if (!pending) {
+    settle();
     return;
+  }
+  double from = logging() ? logClock() : 0;
   // (An error of a kernel shows here, where the CPU first waits for it.)
   check(cuStreamSynchronize(stream), "a kernel");
   pending = false;
+  settle();
+  if (logging())
+    fprintf(stderr, "gpu wait %.0f us at %.0f\n", logClock() - from, from);
+}
+
+// Room for `size` bytes in the staging memory, waiting for the stream
+// (which frees it) where there is none.
+static char *stage(size_t size) {
+  size_t need = (size + 63) & ~(size_t)63;
+  if (stagingUsed + need > stagingBytes) {
+    ent_gpu_wait();
+    if (need > stagingBytes) {
+      if (staging)
+        check(cuMemFreeHost(staging), "cuMemFreeHost (staging)");
+      size_t more = stagingBytes * 2 > need ? stagingBytes * 2 : need;
+      stagingBytes = more > (size_t)64 << 20 ? more : (size_t)64 << 20;
+      check(cuMemAllocHost((void **)&staging, stagingBytes),
+            "cuMemAllocHost (staging)");
+    }
+  }
+  char *at = staging + stagingUsed;
+  stagingUsed += need;
+  return at;
+}
+
+// What comes back into staging memory goes `to` once the stream is done.
+static void later(void *to, const void *from, size_t size) {
+  if (laterCount == laterRoom) {
+    laterRoom = laterRoom ? laterRoom * 2 : 64;
+    laters = realloc(laters, laterRoom * sizeof *laters);
+    if (!laters) {
+      fprintf(stderr, "ent: the GPU: out of memory\n");
+      exit(3);
+    }
+  }
+  laters[laterCount++] = (ent_gpu_later){to, from, size};
 }
 
 // The world, as the program hands memrefs over (llvm.emit_c_interface):
@@ -178,9 +258,9 @@ static void logged(const char *what, int64_t id, int64_t offset, int64_t from,
   if (!on || lines >= most)
     return;
   ++lines;
-  fprintf(stderr, "gpu %s piece %lld at %lld [%lld, %lld) %lld\n", what,
+  fprintf(stderr, "gpu %s piece %lld at %lld [%lld, %lld) %lld t %.0f\n", what,
           (long long)id, (long long)offset, (long long)from, (long long)to,
-          (long long)more);
+          (long long)more, logClock());
 }
 
 // Where the shadow keeps byte `k` of the piece.
@@ -219,9 +299,15 @@ void ent_gpu_to_device(int64_t id, int64_t offset, int64_t size) {
   if (from >= to)
     return;
   // (From the CPU's memory as it is: the call returns when it has it.)
-  check(cuMemcpyHtoDAsync(device + (CUdeviceptr)(offset + from),
-                          host + offset + from, (size_t)(to - from), stream),
+  double started = logging() ? logClock() : 0;
+  char *at = stage((size_t)(to - from));
+  memcpy(at, host + offset + from, (size_t)(to - from));
+  check(cuMemcpyHtoDAsync(device + (CUdeviceptr)(offset + from), at,
+                          (size_t)(to - from), stream),
         "a copy to the GPU");
+  if (logging())
+    fprintf(stderr, "gpu upload %lld bytes took %.0f us\n",
+            (long long)(to - from), logClock() - started);
   pending = true;
   shadowCopies(held, from, to);
 }
@@ -237,10 +323,11 @@ static void plainToHost(ent_gpu_piece *held, int64_t from, int64_t to) {
       atexit(report);
   }
   wholeBytes += to - from;
-  check(cuMemcpyDtoHAsync(host + held->offset + from,
-                          device + (CUdeviceptr)(held->offset + from),
+  char *at = stage((size_t)(to - from));
+  check(cuMemcpyDtoHAsync(at, device + (CUdeviceptr)(held->offset + from),
                           (size_t)(to - from), stream),
         "a copy from the GPU");
+  later(host + held->offset + from, at, (size_t)(to - from));
   pending = true;
 }
 
@@ -459,7 +546,9 @@ void ent_gpu_wrote(int64_t id, int64_t onGpu, int64_t offset, int64_t from,
 // back to the CPU, which combines it into the unique (`bytes` of it).
 void ent_gpu_cell_set(int64_t offset, int64_t bits, int64_t bytes) {
   // (From the CPU's memory as it is: the call returns when it has it.)
-  check(cuMemcpyHtoDAsync(device + (CUdeviceptr)offset, &bits, (size_t)bytes,
+  char *at = stage((size_t)bytes);
+  memcpy(at, &bits, (size_t)bytes);
+  check(cuMemcpyHtoDAsync(device + (CUdeviceptr)offset, at, (size_t)bytes,
                           stream),
         "a unique's cell to the GPU");
   pending = true;
@@ -467,9 +556,11 @@ void ent_gpu_cell_set(int64_t offset, int64_t bits, int64_t bytes) {
 
 int64_t ent_gpu_cell_get(int64_t offset, int64_t bytes) {
   int64_t bits = 0;
-  check(cuMemcpyDtoHAsync(&bits, device + (CUdeviceptr)offset, (size_t)bytes,
+  char *at = stage((size_t)bytes);
+  check(cuMemcpyDtoHAsync(at, device + (CUdeviceptr)offset, (size_t)bytes,
                           stream),
         "a unique's cell from the GPU");
+  later(&bits, at, (size_t)bytes);
   pending = true;
   ent_gpu_wait();
   return bits;
@@ -507,9 +598,11 @@ void _mlir_ciface_ent_gpu_scratch(ent_gpu_memref *scratch, int64_t slot,
 // What a scan left at `offset` of a scratch array: the whole sum.
 int64_t ent_gpu_scratch_get(int64_t slot, int64_t offset, int64_t bytes) {
   int64_t bits = 0;
-  check(cuMemcpyDtoHAsync(&bits, scratches[slot] + (CUdeviceptr)offset,
+  char *at = stage((size_t)bytes);
+  check(cuMemcpyDtoHAsync(at, scratches[slot] + (CUdeviceptr)offset,
                           (size_t)bytes, stream),
         "a running sum from the GPU");
+  later(&bits, at, (size_t)bytes);
   pending = true;
   ent_gpu_wait();
   return bits;
@@ -530,6 +623,19 @@ void ent_gpu_world_to_host(void) {
 
 // MLIR's launches. The kernels are PTX, compiled by the driver when the
 // program loads them.
+// (For ENT_GPU_PROTECT: which kernel is which.)
+static struct {
+  CUfunction function;
+  const char *name;
+} kernels[256];
+static int kernelCount;
+static const char *kernelName(void *function) {
+  for (int k = 0; k < kernelCount; ++k)
+    if (kernels[k].function == (CUfunction)function)
+      return kernels[k].name;
+  return "?";
+}
+
 void *mgpuModuleLoadJIT(void *ptx, int level) {
   start();
   CUmodule module;
@@ -552,6 +658,11 @@ void mgpuModuleUnload(void *module) { cuModuleUnload((CUmodule)module); }
 void *mgpuModuleGetFunction(void *module, const char *name) {
   CUfunction function;
   check(cuModuleGetFunction(&function, (CUmodule)module, name), name);
+  if (kernelCount < 256) {
+    kernels[kernelCount].function = function;
+    kernels[kernelCount].name = name;
+    ++kernelCount;
+  }
   return function;
 }
 
@@ -576,4 +687,28 @@ void mgpuLaunchKernel(void *function, intptr_t gridX, intptr_t gridY,
                        blockY, blockZ, sharedBytes, stream, params, extra),
         "cuLaunchKernel");
   pending = true;
+  // (ENT_GPU_PROTECT: the CPU's world out of reach while the kernel runs.
+  // With HMM a kernel that reads or writes it through the CPU's address
+  // does so, not in its copy, which may come back as the GPU's, now and
+  // then: so it fails here, and says which kernel it was.)
+  static int protect = -1;
+  if (protect < 0)
+    protect = getenv("ENT_GPU_PROTECT") != NULL;
+  if (protect && host) {
+    long page = sysconf(_SC_PAGESIZE);
+    char *first = (char *)((uintptr_t)host & ~(uintptr_t)(page - 1));
+    size_t span = (size_t)(host + bytes - first);
+    mprotect(first, span, PROT_NONE);
+    CUresult done = cuStreamSynchronize(stream);
+    mprotect(first, span, PROT_READ | PROT_WRITE);
+    if (done != CUDA_SUCCESS) {
+      const char *name = "?";
+      cuGetErrorName(done, &name);
+      fprintf(stderr, "ent: the GPU: %s touched the CPU's world: %s\n",
+              kernelName(function), name);
+      exit(3);
+    }
+    pending = false;
+    settle();
+  }
 }
