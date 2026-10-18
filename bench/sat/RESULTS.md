@@ -206,10 +206,15 @@ shorter where that falsifies a clause or makes another of its literals
 true. It is right on SATLIB and drat-trim checks its proofs of 7 UNSAT
 problems, and it is not slow in itself: on Timetable_481 it runs at
 28,700 conflicts a second (5,900 without), but needs 1.55 million
-conflicts where entsat needs 27,723, 54 s against 4.7 s. Something it
-does to the search state costs that, perhaps the return to level 0
-after each reduction, or the used bit the shorter clauses lose; not
-looked into yet. Both stay in, off.
+conflicts where entsat needs 27,723, 54 s against 4.7 s. Not the return
+to level 0 nor the probing: with the clauses probed but left as they
+were it takes 8.1 s. The shorter clauses had the LBD k - 1 where that
+was less, and so more of them were kept by reduce, for good at 2 or
+less; with the old LBD kept Timetable_481 takes 10 s and mchess16 68 s
+(112 s, entsat 62 s). On the dev set that solves 35, PAR-2 4,612,
+against entsat with reasons bumped 36 and 3,813: the Timetables and
+PRP_20_40 faster, asconhash H4, mod2c (81 s to 299 s) and two PRPs
+slower. Both stay in, off.
 
 | solver (all 100) | solved | SAT | UNSAT | PAR-2 | median | geometric mean |
 |---|---|---|---|---|---|---|

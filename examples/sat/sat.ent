@@ -1375,11 +1375,11 @@ system vivify() {
         } else {
           // (At the end of the arena, watched once the arena is laid out
           // again; the old one stays watched till then, which the new
-          // one subsumes.)
+          // one subsumes. It keeps the old LBD: a lower one, k - 1, keeps
+          // too many from reduce, Timetable_481 77 s against 10 s.)
           Arena[c + 1].w |= 1 << 18
-          let lbd = min(meta >> 2 & 0x3fff, k - 1)
           Arena += { w: k }
-          Arena += { w: 1 | lbd << 2 | 1 << 17 }
+          Arena += { w: meta & ~(1 << 16) | 1 << 17 }
           for i in 0..k { Arena += { w: Learnt[i].lit as i32 } }
         }
       }
