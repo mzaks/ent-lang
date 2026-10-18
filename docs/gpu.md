@@ -733,6 +733,34 @@ round; 100 colonies a year 8.9 s where it was 11.5. In
 `test/Integration/Inputs/running.ent` such sums of a few rows and of
 70,000, the same on one core, on all and on the GPU.
 
+**beecs's `fly`, and which loops are compacted (2026-10-18).** What
+every flier worked out alike for its patch is the patch's, once a round
+(`round_start`): a trip's kilometres (an `f64` division a flier, a
+tenth of `fly`), the chance to give the patch up (1 / efficiency,
+`decide`), the colony's honey as a share of decent honey; and the table
+of the chances that a dance leads so many or fewer (`Chances`, made by
+the same steps as `poisson_of`, which a dancer only compares with its
+draw). The same lines to the byte. `fly` 525 to 400 us a round,
+`decide` 327 to 303. Gathering what `fly` looks up of a patch into one
+component (one lookup, not four) gained nothing, nor did reading the
+colony through a tree (`-[Of]->(d: Day)`) instead of `Day(s.home)`: the
+pass that lists who the filters let through then read the colony of
+every place.
+
+That pass was the other cost. A loop for the GPU was compacted where
+its guards wrote nothing; but where what decides them is a lookup
+(`if let done = Day(s.home).done`), the pass works it out for every row
+and the body again. Now only guards that read the row's own columns
+(`readsOwnRow`: loads at the row, and what is the same for all rows)
+are kept for the list: `chance` in the epidemic still is; `many.ent`'s
+loops are listed by their `where` alone, a cheap pass. 100 colonies a
+year 8.17 to 7.70 s (CPU 8, the others busy). Not compacting them at
+all would be 7.25: some 40% of the places pass, and the list costs its
+pass, about 40 us, more than going through all of them saves. (A count
+for each block of 256 rows instead of one for all made the pass three
+times slower: the GPU adds a warp's 32 to one address as one, which it
+cannot see for an address worked out from the row.)
+
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of
 the f32 sum was its first ten digits. It is a line for each now, and a

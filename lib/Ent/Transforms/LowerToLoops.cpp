@@ -16405,6 +16405,34 @@ static bool writesNothing(Operation *op) {
   return !result.wasInterrupted();
 }
 
+/// Whether `op` reads only the row `row` of the loop `loop` of what it
+/// reads (columns at the row, or plus what is the same for all rows, and
+/// uniques): a test before a guard that a pass of its own can make
+/// cheaply. A lookup reads another entity's row, by an id that is read
+/// first: that pass would cost what the body does.
+static bool readsOwnRow(Operation *op, scf::ParallelOp loop, Value row) {
+  std::function<bool(Value)> fromRow = [&](Value value) -> bool {
+    if (value == row ||
+        !loop->isAncestor(value.getParentRegion()->getParentOp()))
+      return true;
+    if (matchPattern(value, m_Constant()))
+      return true;
+    Operation *def = value.getDefiningOp();
+    if (!def || !isa<arith::AddIOp, arith::SubIOp, arith::MulIOp,
+                     arith::IndexCastOp, arith::IndexCastUIOp, arith::ExtSIOp,
+                     arith::ExtUIOp>(def))
+      return false;
+    return llvm::all_of(def->getOperands(), fromRow);
+  };
+  WalkResult result = op->walk([&](memref::LoadOp load) {
+    for (Value index : load.getIndices())
+      if (!fromRow(index))
+        return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  return !result.wasInterrupted();
+}
+
 /// The scratch array of devices/gpu.c a compacted loop lists its rows in
 /// (running sums take theirs from 0 up; one loop at a time uses it).
 static constexpr int64_t kCompactSlot = 15;
@@ -16435,9 +16463,13 @@ static void compactGpuLoop(IRRewriter &rewriter, ModuleOp module,
     auto last = dyn_cast<scf::IfOp>(&*std::prev(ops.end()));
     if (!last || last.getNumResults() || !last.getElseRegion().empty())
       break;
+    // (What decides it is worked out again in the pass that lists the
+    // rows: so only where it reads the row's own columns, cheaply.)
     bool clean = true;
+    Value row = loop.getInductionVars()[0];
     for (Operation &op : ops)
-      if (&op != last.getOperation() && !writesNothing(&op))
+      if (&op != last.getOperation() &&
+          (!writesNothing(&op) || !readsOwnRow(&op, loop, row)))
         clean = false;
     if (!clean)
       break;

@@ -64,10 +64,11 @@ component Census { live: i32 }
 // places, in their order (many_foraging.ent's `born`).
 component Births { first: i32, count: i32, number: i32, born: i32 }
 
-// The day's foraging, as foraging.ent's unique Day.
+// The day's foraging, as foraging.ent's unique Day; and the round's honey
+// as a share of decent honey.
 component Day {
   seconds: i32, year: i32, forage: bool, round: i32, duration: f64, done: bool,
-  probability: f64, pollen_share: f64
+  probability: f64, pollen_share: f64, honey: f64
 }
 
 // A round's keys of the numbers at random, one for each purpose.

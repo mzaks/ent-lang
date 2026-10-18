@@ -316,3 +316,38 @@ ent.schedule @frame() {
 // CHECK: processor = block_x
 // CHECK-NOT: scf.parallel
 // CHECK: return
+
+// -----
+
+// Not where what decides it reads another entity (a lookup): the pass
+// that lists the rows would read it too, and cost what the body does.
+ent.component @P (x: f32)
+ent.component @T (target: !ent.entity, n: i32)
+ent.archetype @A (@P, @T) capacity 1000
+
+ent.system @spin() gpu {
+  ent.query (%p: !ent.ref<@P, mut>, %t: !ent.ref<@T>) {
+    %target = ent.get %t "target" : !ent.ref<@T> -> !ent.entity
+    %n, %found = ent.lookup %target @T "n" : i32
+    scf.if %found {
+      %other = ent.get %p "x" : !ent.ref<@P, mut> -> f32
+      %end = arith.index_cast %n : i32 to index
+      %c0 = arith.constant 0 : index
+      %c1 = arith.constant 1 : index
+      %s = scf.for %i = %c0 to %end step %c1 iter_args(%a = %other) -> f32 {
+        %b = arith.addf %a, %a : f32
+        scf.yield %b : f32
+      }
+      ent.set %p "x", %s : !ent.ref<@P, mut>, f32
+    }
+  }
+}
+ent.schedule @frame() {
+  ent.run @spin()
+}
+
+// CHECK-LABEL: func.func @frame
+// CHECK-NOT: ent_gpu_scratch
+// CHECK: scf.for
+// CHECK-NOT: atomic_rmw
+// CHECK: return

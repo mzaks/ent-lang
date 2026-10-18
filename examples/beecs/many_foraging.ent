@@ -47,15 +47,18 @@ component Constant { nectar: f64, pollen: f64, concentration: f64, detection: f6
 component Seasonal {
   shift: i32, max_nectar: f64, max_pollen: f64, concentration: f64, detection: f64
 }
+// (`give_up`: 1 / efficiency, the chance a nectar forager gives it up.)
 component Resource {
-  nectar: f64, max_nectar: f64, pollen: f64, max_pollen: f64, efficiency: f64
+  nectar: f64, max_nectar: f64, pollen: f64, max_pollen: f64, efficiency: f64, give_up: f64
 }
 component Handling { nectar: f64, pollen: f64 }
+// (And the kilometres of a trip.)
 component Trip {
-  duration_nectar: f64, duration_pollen: f64, cost_nectar: f64, cost_pollen: f64
+  duration_nectar: f64, duration_pollen: f64, cost_nectar: f64, cost_pollen: f64,
+  km_nectar: f32, km_pollen: f32
 }
 component Risk { nectar: f64, pollen: f64, abandon_pollen: f64 }
-component Advert { circuits: f64, none: f64 }
+component Advert { circuits: f64, none: f64, chances: i32 }
 component Visits { nectar: i32, pollen: i32 }
 component Asked {
   recruit_nectar: i32, recruit_pollen: i32, known_nectar: i32, known_pollen: i32,
@@ -74,6 +77,14 @@ component Led { nectar: i32, pollen: i32 }
 
 // Every colony's patches, `Colonies.patches` from its `Colony.patches` on.
 buffer PatchOf { patch: entity } capacity 65536
+// The chances that a dance for a patch leads so many or fewer, from none
+// to TABLE (a patch's TABLE + 2 rows from its `Advert.chances` on, then
+// the chance of TABLE itself): what `poisson_of` adds up for each dancer
+// (random.ent), added up once a round, the same way.
+buffer Chances { below: f64 } capacity 2228224
+const TABLE = 32
+const TABLE_ROWS = 34
+
 // The patches a scout may find this round, each colony's from its
 // `Scouting.first` on, with the sums of their chances to be found.
 buffer Candidates { patch: entity, upto: f64, nectar: bool, pollen: bool } capacity 65536
@@ -103,7 +114,7 @@ buffer Dancers { patch: entity, pollen: bool, followers: i32 } capacity 4194304
 // them; the places, counted when setting up, and those not where they
 // should be.
 unique Rows {
-  candidates: i32, asking: i32, dancers: i32, resting: i32,
+  candidates: i32, chances: i32, asking: i32, dancers: i32, resting: i32,
   ask_first: i32, dance_first: i32, line_first: i32, free: i32,
   slots: i32, misplaced: i32
 }
@@ -189,6 +200,7 @@ system hive() {
   Candidates = [{ patch: none, upto: 0.0, nectar: false, pollen: false }; Colonies.count * patches]
   Asking = [{ who: none, number: 0, patch: none, kind: 0 }; places]
   Dancers = [{ patch: none, pollen: false, followers: 0 }; places]
+  Chances = [{ below: 0.0 }; Colonies.count * patches * TABLE_ROWS]
   for c in 0..Colonies.count {
     let seed = RandomSeed.seed + c as i64
     let home = spawn {
@@ -207,7 +219,7 @@ system hive() {
       Census { live: squadrons },
       Births { first: 0, count: 0, number: 0, born: 0 },
       Day { seconds: 0, year: 0, forage: false, round: 0, duration: 0.0, done: true,
-            probability: 0.0, pollen_share: 0.0 },
+            probability: 0.0, pollen_share: 0.0, honey: 0.0 },
       Keys { decide: 0, search: 0, recruit: 0, pick: 0, die: 0, dance: 0, follow: 0, order: 0 },
       Scouting { found: 0.0, all: 0.0, first: 0, count: 0 },
       Tally { searchers: 0, foragers: 0, asking: 0, dancers: 0, demand: 0, resting: 0,
@@ -229,11 +241,13 @@ system hive() {
                      detection: InitialPatches[i].detection }
         }
         Flowers { max_nectar: 0.0, concentration: 0.0, max_pollen: 0.0, detection: 0.0 },
-        Resource { nectar: 0.0, max_nectar: 0.0, pollen: 0.0, max_pollen: 0.0, efficiency: 0.0 },
+        Resource { nectar: 0.0, max_nectar: 0.0, pollen: 0.0, max_pollen: 0.0, efficiency: 0.0,
+                   give_up: 0.0 },
         Handling { nectar: 0.0, pollen: 0.0 },
-        Trip { duration_nectar: 0.0, duration_pollen: 0.0, cost_nectar: 0.0, cost_pollen: 0.0 },
+        Trip { duration_nectar: 0.0, duration_pollen: 0.0, cost_nectar: 0.0, cost_pollen: 0.0,
+               km_nectar: 0.0, km_pollen: 0.0 },
         Risk { nectar: 0.0, pollen: 0.0, abandon_pollen: 0.0 },
-        Advert { circuits: 0.0, none: 1.0 },
+        Advert { circuits: 0.0, none: 1.0, chances: 0 },
         Visits { nectar: 0, pollen: 0 },
         Asked { recruit_nectar: 0, recruit_pollen: 0, known_nectar: 0, known_pollen: 0,
                 give_recruit_nectar: 0, give_recruit_pollen: 0,
@@ -371,6 +385,7 @@ gpu system squadron_mortality() {
 gpu system round_start() {
   let size = Foragers.squadron_size as f64
   Rows.candidates = 0
+  Rows.chances = 0
   for c: Colony, h: Hive, d: mut Day, k: mut Keys, s: mut Scouting {
     let first = Rows.candidates += Colonies.patches
     s.first = first
@@ -379,6 +394,7 @@ gpu system round_start() {
       var share = (1.0 - h.pollen / h.ideal_pollen) * Dance.max_proportion_pollen_foragers
       if h.honey / h.decent_honey < 0.5 { share *= h.honey / h.decent_honey }
       d.pollen_share = share
+      d.honey = h.honey / h.decent_honey
       k.decide = key(c.seed, 0, Clock.tick, stream(d.round, DECIDE))
       k.search = key(c.seed, 0, Clock.tick, stream(d.round, SEARCH))
       k.recruit = key(c.seed, 0, Clock.tick, stream(d.round, RECRUIT))
@@ -430,6 +446,9 @@ gpu system round_start() {
                     cost * h.pollen * Foragers.flight_velocity * Foraging.energy_on_flower
     r.efficiency = (f.concentration * Foragers.nectar_load * EnergyContent.sucrose -
                     t.cost_nectar) / t.cost_nectar
+    r.give_up = 1.0 / r.efficiency
+    t.km_nectar = (t.cost_nectar / (Foragers.flight_cost_per_m * 1000.0)) as f32
+    t.km_pollen = (t.cost_pollen / (Foragers.flight_cost_per_m * 1000.0)) as f32
     t.duration_nectar = 2.0 * p.distance / Foragers.flight_velocity + h.nectar
     t.duration_pollen = 2.0 * p.distance / Foragers.flight_velocity + h.pollen
     k.nectar = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, t.duration_nectar)
@@ -438,6 +457,18 @@ gpu system round_start() {
     d.circuits = max(0.0, min(r.efficiency * Dance.slope + Dance.intercept,
                               Dance.max_circuits as f64))
     d.none = exp64(-(d.circuits * 0.05))
+    let first = Rows.chances += TABLE_ROWS
+    d.chances = first
+    let mean = d.circuits * 0.05
+    var chance = d.none
+    var below = chance
+    for n in 0..TABLE_ROWS {
+      if n > 0 && n <= TABLE {
+        chance = chance * mean / n as f64
+        below += chance
+      }
+      Chances[first + n].below = if n <= TABLE { below } else { chance }
+    }
     q.recruit_nectar = 0
     q.recruit_pollen = 0
     q.known_nectar = 0
@@ -469,19 +500,18 @@ gpu system decide() {
   for a: mut Activity, k: mut Known, l: mut Lot, m: Milage, s: Squadron
       where a.now != Doing.Dead {
     if let done = Day(s.home).done, let share = Day(s.home).pollen_share,
-       let probability = Day(s.home).probability, let stock = Hive(s.home).honey,
-       let decent = Hive(s.home).decent_honey, let decide = Keys(s.home).decide,
-       let search = Keys(s.home).search, let recruit = Keys(s.home).recruit {
+       let probability = Day(s.home).probability, let honey = Day(s.home).honey,
+       let decide = Keys(s.home).decide, let search = Keys(s.home).search,
+       let recruit = Keys(s.home).recruit {
       if !done {
-        let honey = stock / decent
         let draw = key_of(decide, s.number)
         if a.now != Doing.Recruited { a.pollen = uniform(draw, 0) < share }
         if a.now != Doing.Recruited && a.now != Doing.Resting && a.now != Doing.Lazy {
           if uniform(draw, 1) < Foraging.stop_probability { a.now = Doing.Resting }
         }
         if !a.pollen && k.nectar != none {
-          if let efficiency = Resource(k.nectar).efficiency {
-            if uniform(draw, 2) < 1.0 / efficiency && uniform(draw, 3) < honey {
+          if let give_up = Resource(k.nectar).give_up {
+            if uniform(draw, 2) < give_up && uniform(draw, 3) < honey {
               k.nectar = none
               if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
             }
@@ -706,14 +736,14 @@ gpu system fly() {
             risk = search_risk
             Tally(s.home).searchers += 1
           } else if a.now == Doing.BringNectar {
-            if let cost = Trip(k.nectar).cost_nectar, let r = Risk(k.nectar).nectar {
-              km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+            if let trip = Trip(k.nectar).km_nectar, let r = Risk(k.nectar).nectar {
+              km = trip
               risk = r
             }
             Flew(k.nectar).nectar += 1
           } else {
-            if let cost = Trip(k.pollen).cost_pollen, let r = Risk(k.pollen).pollen {
-              km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+            if let trip = Trip(k.pollen).km_pollen, let r = Risk(k.pollen).pollen {
+              km = trip
               risk = r
             }
             Flew(k.pollen).pollen += 1
@@ -729,8 +759,24 @@ gpu system fly() {
         var followers = 0
         if !died {
           if a.now == Doing.BringNectar {
-            if let circuits = Advert(k.nectar).circuits, let zero = Advert(k.nectar).none {
-              followers = poisson_of(key_of(dance, s.number), 0, circuits * 0.05, zero)
+            // (poisson_of, from the patch's table.)
+            if let circuits = Advert(k.nectar).circuits, let first = Advert(k.nectar).chances {
+              let mean = circuits * 0.05
+              if mean > 0.0 {
+                let u = uniform(key_of(dance, s.number), 0)
+                var n = 0
+                while n < TABLE && Chances[first + n].below < u { n += 1 }
+                if n == TABLE && Chances[first + TABLE].below < u {
+                  var chance = Chances[first + TABLE + 1].below
+                  var below = Chances[first + TABLE].below
+                  while below < u && n < 100000 {
+                    n += 1
+                    chance = chance * mean / n as f64
+                    below += chance
+                  }
+                }
+                followers = n
+              }
             }
           } else if a.now == Doing.BringPollen {
             followers = Dance.pollen_dance_followers

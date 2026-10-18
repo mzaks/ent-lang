@@ -300,3 +300,19 @@ took 1.0. A year 8.9 s on the GPU (11.5), the lines the same to the
 byte as on the CPU. A round now: `fly` 0.53 ms, the colonies going
 through their dancers 0.40, `decide` 0.39 (with its list of who passes
 the filter), `come_home` 0.22, the lists 0.25.
+
+## 2026-10-18, later still: `fly`
+
+What every flier worked out alike for its patch is worked out once for
+the patch a round (kilometres, the chance to give it up, a table of the
+dances' Poisson chances), and loops are compacted only where their
+guards read the row's own columns (docs/gpu.md). The same lines to the
+byte. On CPU 8 (CPUs 0 to 7 busy with another session), alternately:
+
+| | a year of 100 colonies, the GPU |
+|---|---|
+| before (d0cc498) | 8.17 s |
+| now | 7.70 s |
+| (not compacted at all) | (7.25 s) |
+
+`ENT_GPU_TIMES`, a round: `fly` 400 us (525), `decide` 303 (327).
