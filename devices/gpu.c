@@ -19,7 +19,8 @@
 // (what comes back comes as whole ranges, no shadows), ENT_GPU_REPORT
 // (at its end, how much came back whole and how many words packed),
 // ENT_GPU_CHECK (each packed copy checked against the whole range) and
-// ENT_GPU_LOG (the first copies, a line each).
+// ENT_GPU_LOG (the first copies, a line each; as many as it says, or
+// 3000).
 
 #include <cuda.h>
 #include <stdbool.h>
@@ -168,10 +169,13 @@ static void report(void) {
 // went where.)
 static void logged(const char *what, int64_t id, int64_t offset, int64_t from,
                    int64_t to, int64_t more) {
-  static int on = -1, lines;
-  if (on < 0)
-    on = getenv("ENT_GPU_LOG") != NULL;
-  if (!on || lines >= 3000)
+  static int on = -1, most, lines;
+  if (on < 0) {
+    const char *said = getenv("ENT_GPU_LOG");
+    on = said != NULL;
+    most = said && atoi(said) > 0 ? atoi(said) : 3000;
+  }
+  if (!on || lines >= most)
     return;
   ++lines;
   fprintf(stderr, "gpu %s piece %lld at %lld [%lld, %lld) %lld\n", what,
