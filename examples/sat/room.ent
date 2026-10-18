@@ -11,6 +11,9 @@ capacity Values 8388608
 capacity Lists 8388608
 capacity Watch 134217728
 capacity Seen 8388608
+capacity Occurs 8388608
+capacity Sched 67108864
+capacity Order 67108864
 capacity Vars 4194304
 capacity Trail 4194304
 capacity Levels 4194305

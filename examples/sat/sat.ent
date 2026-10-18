@@ -82,6 +82,11 @@ buffer Spare { v: i32 } capacity 16
 // How many learned clauses of each LBD might be deleted; how many of the
 // bumped variables have each byte of a stamp, sorting them.
 buffer Counts { n: i32 } capacity 256
+// For vivify: how many of the clauses it tries each literal is in; those
+// clauses, in the order it tries them, and room for sorting them.
+buffer Occurs { n: i32 } capacity 16
+buffer Sched { clause: index of Arena, key: i64 } capacity 16
+buffer Order { clause: index of Arena, key: i64 } capacity 16
 
 // What each mode did, focused (row 0) and stable (row 1), for the
 // statistics; row 2: the counts where the mode now going started.
@@ -127,7 +132,7 @@ unique Search {
   fast: f64, fast_left: f64, slow: f64, slow_left: f64,
   stable: bool, switch: i64, mode: i64, heap: i32, inc: f64, stable_luby: i64, target: i32,
   glued: i64, reused: i64, best: i32, rephase: i64, rephases: i64,
-  vivify: bool, vivified: i64, viv_tried: i64, viv_removed: i64, viv_since: i64
+  vivified: i64, viv_tried: i64, viv_removed: i64, viv_since: i64
 }
 
 world {
@@ -302,6 +307,7 @@ system setup() {
   Values = [{ v: 0 }; 2 * n]
   Lists = [{ start: 0, size: 0, cap: 0 }; 2 * n]
   Seen = [{ clause: -1 }; 2 * n]
+  Occurs = [{ n: 0 }; 2 * n]
   Vars = [{ level: 0, reason: -1, phase: false, target: false, best: false, mark: false,
              prev: -1, next: -1, stamp: 0 }; n]
   Trail = [{ lit: 0 }; n]
@@ -326,7 +332,6 @@ system setup() {
   Search.best = 0
   Search.rephase = Options.rephase
   Search.rephases = 0
-  Search.vivify = false
   Counts = [{ n: 0 }; 256]
   Modes = [{ seconds: 0.0, conflicts: 0, decisions: 0, propagations: 0, restarts: 0 }; 3]
   Modes[2].seconds = wait_until(0.0)
@@ -1133,7 +1138,6 @@ system reduce() {
   Search.reductions += 1
   Search.deleted += deleted
   Search.reduce = Search.conflicts + Options.reduce_interval * root(Search.reductions + 1)
-  Search.vivify = Options.vivify > 0
   if Options.proof && len(Bytes) > 1048576 {
     write_bytes(Options.proof_file, Bytes, 0, len(Bytes), Search.written)
     Search.written = true
@@ -1241,17 +1245,31 @@ proc undo(values: mut Values, lits: Trail, levels: Levels, to: i32, trail: i32) 
   start
 }
 
-// Vivification (as CaDiCaL and Kissat do it), after a reduction: at
-// level 0, each learned clause of LBD `vivify_lbd` or less not tried
-// before (bit 17) has its literals made false one by one, each
+// Whether literal `a` goes before `b` when vivify makes a clause's
+// literals false: the one in more of the clauses tried, the lower one
+// where they are in as many.
+fn sooner(occurs: Occurs, a: index of Values, b: index of Values) -> bool {
+  let x = occurs[a as index of Occurs].n
+  let y = occurs[b as index of Occurs].n
+  x > y || (x == y && a < b)
+}
+
+// Vivification (as Kissat does it), before a reduction: at level 0, each
+// learned clause of LBD `vivify_lbd` or less used since the last
+// reduction (bit 16) and not tried before (bit 17) has its literals made
+// false one by one, each
 // propagated without the clause. Where that falsifies a clause, the
 // literals made false so far are a clause; where it makes one of the
 // clause's literals true, those and that literal are; a literal it makes
 // false is left out. A clause so made smaller goes into the arena and
-// the proof, and the old one (marked by bit 18) out. It works as long as its propagations are no more than `vivify`
-// per mille of the search's since the last time.
+// the proof, and the old one (marked by bit 18) out. The literals go in
+// the order of `sooner`, the clauses in the order of their first two
+// literals: where a clause starts as the one before, the levels made
+// false for that one stay. (Tried again, clauses are seldom made shorter,
+// and the search is slower: qwh.40 15 s against 2.9 s.)
+// It works as long as its propagations are no more than `vivify` per
+// mille of the search's since the last time.
 system vivify() {
-  Search.vivify = false
   // (Back to level 0, as a restart goes.)
   var trail = Search.trail
   if Search.level > 0 {
@@ -1281,110 +1299,223 @@ system vivify() {
   var spent = visits
   var unsat = conflict >= 0
   var changed = false
+
+  // (The clauses to try, and how many of them each literal is in.)
+  Sched = []
   let top = len(Arena)
   var c: index of Arena = 0
-  while c < top && budget > 0 && !unsat {
+  while c < top {
     let size = Arena[c].w
     let meta = Arena[c + 1].w
-    if meta & 1 != 0 && meta & (3 << 17) == 0 && size > 2 && meta >> 2 & 0x3fff <= Options.vivify_lbd {
-      Arena[c + 1].w = meta | 1 << 17
-      Search.viv_tried += 1
-      // (The literals kept go to Learnt; `satisfied` where one is true at
-      // level 0, `done` where the rest are not needed.)
-      var k = 0
-      var level = 0
-      var satisfied = false
-      var done = false
-      for j in 0..size {
-        let l = lit_at(Arena, c + 2 + j)
-        if !done && !satisfied {
-          if Values[l].v == 1 {
-            if Vars[var_of(l)].level == 0 {
-              satisfied = true
-            } else {
-              Learnt[k].lit = l
-              k += 1
-              done = true
-            }
-          } else if Values[l].v == 0 {
+    if meta & 1 != 0 && meta & 1 << 16 != 0 && meta & 1 << 17 == 0 && size > 2 &&
+       meta >> 2 & 0x3fff <= Options.vivify_lbd {
+      for j in 0..size { Occurs[lit_at(Arena, c + 2 + j) as index of Occurs].n += 1 }
+      Sched += { clause: c, key: 0 }
+    }
+    c += 2 + size
+  }
+  // (Each one's key: its first literal and its second, 23 bits each;
+  // sorted by it, a byte at a time.)
+  let count = len(Sched)
+  for s in 0..count {
+    let at = Sched[s].clause
+    var a = lit_at(Arena, at + 2)
+    var b = lit_at(Arena, at + 3)
+    if sooner(Occurs, b, a) {
+      let t = a
+      a = b
+      b = t
+    }
+    for j in 2..Arena[at].w {
+      let l = lit_at(Arena, at + 2 + j)
+      if sooner(Occurs, l, a) {
+        b = a
+        a = l
+      } else if sooner(Occurs, l, b) {
+        b = l
+      }
+    }
+    Sched[s].key = (a as i64) << 23 | b as i64
+  }
+  Order = [{ clause: 0, key: 0 }; count]
+  var shift = 0
+  while shift < 48 {
+    Counts = [{ n: 0 }; 256]
+    for s in 0..count { Counts[((Sched[s].key >> shift) & 255) as i32].n += 1 }
+    var at = 0
+    for d in 0..256 {
+      let here = Counts[d].n
+      Counts[d].n = at
+      at += here
+    }
+    for s in 0..count {
+      let d = ((Sched[s].key >> shift) & 255) as i32
+      Order[Counts[d].n].clause = Sched[s].clause
+      Order[Counts[d].n].key = Sched[s].key
+      Counts[d].n += 1
+    }
+    for s in 0..count {
+      Sched[s].clause = Order[s].clause
+      Sched[s].key = Order[s].key
+    }
+    shift += 8
+  }
+
+  // (`level`: how many levels of the clause before are made.)
+  var level = 0
+  var s = 0
+  while s < count && budget > 0 && !unsat {
+    c = Sched[s].clause
+    s += 1
+    let size = Arena[c].w
+    let meta = Arena[c + 1].w
+    Arena[c + 1].w = meta | 1 << 17
+    Search.viv_tried += 1
+    // (Its literals to Stack, in order.)
+    for j in 0..size {
+      let l = lit_at(Arena, c + 2 + j)
+      var i = j
+      while i > 0 && sooner(Occurs, l, Stack[i - 1].lit) {
+        Stack[i].lit = Stack[i - 1].lit
+        i -= 1
+      }
+      Stack[i].lit = l
+    }
+    // (The levels it starts with stay, unless the clause implied
+    // something on them.)
+    var same = 0
+    while same < level && same + 1 < size &&
+          Trail[Levels[same + 1].start].lit == Stack[same].lit ^ 1 {
+      same += 1
+    }
+    if same < level {
+      trail = undo(Values, Trail, Levels, same, trail)
+      level = same
+    }
+    if level > 0 {
+      var implied = false
+      for i in Levels[1].start..trail {
+        if Vars[var_of(Trail[i].lit)].reason == c { implied = true }
+      }
+      if implied {
+        trail = undo(Values, Trail, Levels, 0, trail)
+        level = 0
+      }
+    }
+    // (The literals kept go to Learnt; `satisfied` where one is true at
+    // level 0, `done` where the rest are not needed.)
+    var k = 0
+    for j in 0..level {
+      Learnt[k].lit = Stack[j].lit
+      k += 1
+    }
+    var satisfied = false
+    var done = false
+    var clashed = false
+    for j in level..size {
+      let l = Stack[j].lit
+      if !done && !satisfied {
+        if Values[l].v == 1 {
+          if Vars[var_of(l)].level == 0 {
+            satisfied = true
+          } else {
             Learnt[k].lit = l
             k += 1
-            if j + 1 < size {
-              level += 1
-              Levels[level].start = trail
-              let f = l ^ 1
-              Values[f].v = 1
-              Values[l].v = -1
-              Vars[var_of(l)].level = level
-              Vars[var_of(l)].reason = none
-              Trail[trail].lit = f
-              trail += 1
-              let (q, t, x, seen) = propagate_on(Values, Vars, Trail, Watch, Lists, Arena,
-                                                 trail - 1, trail, level, c)
-              trail = t
-              budget -= seen
-              spent += seen
-              if x >= 0 { done = true }
-            }
+            done = true
           }
-        }
-      }
-      if level > 0 { trail = undo(Values, Trail, Levels, 0, trail) }
-      if satisfied {
-        Arena[c + 1].w |= 1 << 18
-        changed = true
-        if Options.proof {
-          Bytes += { value: 100 }
-          for j in 0..size { proof_lit(Bytes, Arena[c + 2 + j].w) }
-          Bytes += { value: 0 }
-        }
-      } else if k < size {
-        Search.vivified += 1
-        Search.viv_removed += (size - k) as i64
-        changed = true
-        if Options.proof {
-          Bytes += { value: 97 }
-          for i in 0..k { proof_lit(Bytes, Learnt[i].lit as i32) }
-          Bytes += { value: 0 }
-          Bytes += { value: 100 }
-          for j in 0..size { proof_lit(Bytes, Arena[c + 2 + j].w) }
-          Bytes += { value: 0 }
-        }
-        if k == 0 {
-          unsat = true
-        } else if k == 1 {
-          // (A unit: assigned at level 0, and propagated.)
-          let l = Learnt[0].lit
-          Arena[c + 1].w |= 1 << 18
-          if Values[l].v == -1 {
-            unsat = true
-          } else if Values[l].v == 0 {
-            Values[l].v = 1
-            Values[l ^ 1].v = -1
-            Vars[var_of(l)].level = 0
+        } else if Values[l].v == 0 {
+          Learnt[k].lit = l
+          k += 1
+          if j + 1 < size {
+            level += 1
+            Levels[level].start = trail
+            let f = l ^ 1
+            Values[f].v = 1
+            Values[l].v = -1
+            Vars[var_of(l)].level = level
             Vars[var_of(l)].reason = none
-            Trail[trail].lit = l
+            Trail[trail].lit = f
             trail += 1
             let (q, t, x, seen) = propagate_on(Values, Vars, Trail, Watch, Lists, Arena,
-                                               trail - 1, trail, 0, none)
+                                               trail - 1, trail, level, c)
             trail = t
             budget -= seen
             spent += seen
-            if x >= 0 { unsat = true }
+            if x >= 0 {
+              done = true
+              clashed = true
+            }
           }
-        } else {
-          // (At the end of the arena, watched once the arena is laid out
-          // again; the old one stays watched till then, which the new
-          // one subsumes. It keeps the old LBD: a lower one, k - 1, keeps
-          // too many from reduce, Timetable_481 77 s against 10 s.)
-          Arena[c + 1].w |= 1 << 18
-          Arena += { w: k }
-          Arena += { w: meta & ~(1 << 16) | 1 << 17 }
-          for i in 0..k { Arena += { w: Learnt[i].lit as i32 } }
         }
       }
     }
-    c += 2 + size
+    // (A level that ended in a conflict does not stay.)
+    if clashed {
+      trail = undo(Values, Trail, Levels, level - 1, trail)
+      level -= 1
+    }
+    if satisfied {
+      Arena[c + 1].w |= 1 << 18
+      changed = true
+      if Options.proof {
+        Bytes += { value: 100 }
+        for j in 0..size { proof_lit(Bytes, Arena[c + 2 + j].w) }
+        Bytes += { value: 0 }
+      }
+    } else if k < size {
+      Search.vivified += 1
+      Search.viv_removed += (size - k) as i64
+      changed = true
+      if Options.proof {
+        Bytes += { value: 97 }
+        for i in 0..k { proof_lit(Bytes, Learnt[i].lit as i32) }
+        Bytes += { value: 0 }
+        Bytes += { value: 100 }
+        for j in 0..size { proof_lit(Bytes, Arena[c + 2 + j].w) }
+        Bytes += { value: 0 }
+      }
+      if k == 0 {
+        unsat = true
+      } else if k == 1 {
+        // (A unit: assigned at level 0, and propagated.)
+        if level > 0 {
+          trail = undo(Values, Trail, Levels, 0, trail)
+          level = 0
+        }
+        let l = Learnt[0].lit
+        Arena[c + 1].w |= 1 << 18
+        if Values[l].v == -1 {
+          unsat = true
+        } else if Values[l].v == 0 {
+          Values[l].v = 1
+          Values[l ^ 1].v = -1
+          Vars[var_of(l)].level = 0
+          Vars[var_of(l)].reason = none
+          Trail[trail].lit = l
+          trail += 1
+          let (q, t, x, seen) = propagate_on(Values, Vars, Trail, Watch, Lists, Arena,
+                                             trail - 1, trail, 0, none)
+          trail = t
+          budget -= seen
+          spent += seen
+          if x >= 0 { unsat = true }
+        }
+      } else {
+        // (At the end of the arena, watched once the arena is laid out
+        // again; the old one stays watched till then, which the new
+        // one subsumes. It keeps the old LBD: a lower one, k - 1, keeps
+        // too many from reduce, Timetable_481 77 s against 10 s.)
+        Arena[c + 1].w |= 1 << 18
+        Arena += { w: k }
+        Arena += { w: meta | 1 << 17 }
+        for i in 0..k { Arena += { w: Learnt[i].lit as i32 } }
+      }
+    }
+  }
+  if level > 0 { trail = undo(Values, Trail, Levels, 0, trail) }
+  for s in 0..count {
+    let at = Sched[s].clause
+    for j in 0..Arena[at].w { Occurs[lit_at(Arena, at + 2 + j) as index of Occurs].n = 0 }
   }
   // (The old clauses out, the arena laid out again, and watched again.)
   if changed {
@@ -1414,9 +1545,10 @@ system vivify() {
 schedule round() run_if Search.status == Status.Running {
   propagate()
   learn() run_if Search.conflict >= 0
-  reduce() run_if Search.conflicts >= Search.reduce && Search.status == Status.Running
+  vivify() run_if Options.vivify > 0 && Search.conflicts >= Search.reduce &&
+                  Search.status == Status.Running
   watch() run_if Search.rewatch
-  vivify() run_if Search.vivify && Search.status == Status.Running
+  reduce() run_if Search.conflicts >= Search.reduce && Search.status == Status.Running
   watch() run_if Search.rewatch
   decide() run_if Search.conflict < 0
 }
