@@ -109,6 +109,32 @@
 // RUN: FileCheck %s --check-prefix=TREE --input-file=%t.tree.gpu
 // TREE: frame 30 got 3350402912 sum 9985890 most 363755
 
+// Edge loops on the GPU in a world of several archetypes.
+// RUN: %ent run %S/Inputs/gpu_lookup.ent > %t.lookup.cpu
+// RUN: %ent run %S/Inputs/gpu_lookup.ent --gpu --parallel > %t.lookup.gpupar
+// RUN: diff %t.lookup.cpu %t.lookup.gpupar
+
+// No kernel touches the CPU's world: with ENT_GPU_PROTECT it is out of
+// reach while each kernel runs (with HMM such a kernel would not fault).
+// RUN: env ENT_GPU_PROTECT=1 %ent run %S/Inputs/gpu_lookup.ent --gpu > %t.lookup.protected
+// RUN: diff %t.lookup.cpu %t.lookup.protected
+// RUN: env ENT_GPU_PROTECT=1 %ent run %S/Inputs/gpu_edges.ent --gpu > %t.edges.protected
+// RUN: diff %t.edges.cpu %t.edges.protected
+// RUN: env ENT_GPU_PROTECT=1 %ent run %S/Inputs/gpu_chance.ent --gpu > %t.chance.protected
+// RUN: diff %t.chance.cpu %t.chance.protected
+// RUN: env ENT_GPU_PROTECT=1 %ent run %S/Inputs/gpu_tree.ent --gpu > %t.tree.protected
+// RUN: diff %t.tree.cpu %t.tree.protected
+// RUN: env ENT_GPU_PROTECT=1 %ent run %S/Inputs/gpu_rows.ent --gpu > %t.cells.protected
+// RUN: diff %t.cells.cpu %t.cells.protected
+
+// The epidemic with its systems on the GPU builds: the lowering checks
+// that no loop for the GPU uses the CPU's world (`workplace`'s lookups
+// read the archetypes' counts from it).
+// RUN: rm -rf %t.epidemic && mkdir -p %t.epidemic
+// RUN: cp %S/../../examples/epidemic/city.ent %S/../../examples/epidemic/disease.ent %S/../../examples/epidemic/epidemic.ent %S/../../examples/epidemic/interventions.ent %S/../../examples/epidemic/parameters.ent %S/../../examples/epidemic/random.ent %t.epidemic/
+// RUN: sed -E 's/^system (workplace|chance|lay|infect|household)\(/gpu system \1(/' %S/../../examples/epidemic/transmission.ent > %t.epidemic/transmission.ent
+// RUN: %ent build --gpu %t.epidemic/epidemic.ent -o %t.epidemic/run
+
 // A `gpu system` of an imported module: its kernel's name has no `.`.
 // RUN: %ent run %S/Inputs/gpu_module.ent --gpu | FileCheck %s --check-prefix=MODULE
 // MODULE: frame 10 sum 529470

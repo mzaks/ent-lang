@@ -65,9 +65,23 @@ public:
   void setHost(WorldAccess *world) { host = world; }
   /// The CPU's copy of the world: this one, or the one it is the GPU's of.
   WorldAccess &cpu() { return host ? *host : *this; }
-  /// How many entities each archetype has, by its index.
-  Value counts() { return host ? host->counts() : getCounts(); }
+  /// How many entities each archetype has, by its index. (In a loop for
+  /// the GPU, its copy's: what runs there reads only the GPU's memory,
+  /// and the counts come to it as a piece, see GpuPieces.)
+  Value counts() {
+    return host && !insideGpuLoop() ? host->counts() : getCounts();
+  }
   bool hasIds() const { return layout.entities.hasIds(); }
+  /// Whether what is emitted now goes into a loop for the GPU (marked
+  /// `ent.gpu_loop`, see kGpuLoopAttr).
+  bool insideGpuLoop() {
+    Block *block = rewriter.getInsertionBlock();
+    for (Operation *op = block ? block->getParentOp() : nullptr; op;
+         op = op->getParentOp())
+      if (op->hasAttr("ent.gpu_loop"))
+        return true;
+    return false;
+  }
 
   /// The type a value of `type` is stored as: entity ids become integers
   /// of the width the layout chose; everything else is stored as is.
@@ -123,7 +137,7 @@ public:
   /// The number of entities in `archetype`, as an index, loaded at the
   /// insertion point: spawns and despawns change it, so it is not cached.
   Value count(Location loc, const WorldArchetype &archetype) {
-    if (host)
+    if (host && !insideGpuLoop())
       return host->count(loc, archetype);
     Value position =
         arith::ConstantIndexOp::create(rewriter, loc, archetype.index);
@@ -15758,6 +15772,8 @@ struct GpuPiece {
   const WorldRelation *edges = nullptr;
   /// Otherwise so many elements, whatever the world holds.
   int64_t fixed = 0;
+  /// The archetypes' counts, the one piece at the world's start.
+  bool counts = false;
 };
 
 /// The pieces of the world `gpu` systems touch, and which of them stand
@@ -15781,7 +15797,8 @@ struct GpuPieces {
     auto piece = [&](GpuPiece piece) {
       // (Nothing is laid out at the world's start: an offset of 0 is of
       // something the world does not keep.)
-      assert(piece.offset != 0 && "a piece of the world that is not kept");
+      assert((piece.offset != 0 || piece.counts) &&
+             "a piece of the world that is not kept");
       made.push_back(pieces.size());
       pieces.push_back(piece);
     };
@@ -15791,6 +15808,12 @@ struct GpuPieces {
       // is none.)
       if (component && component.getValue().empty() && field &&
           field.getValue().empty()) {
+        // How many entities each archetype has, at the world's start:
+        // what a lookup in a loop for the GPU checks a row against.
+        GpuPiece counts{0, 8};
+        counts.fixed = int64_t(layout.archetypes.size());
+        counts.counts = true;
+        piece(counts);
         const EntityScheme &scheme = layout.entities;
         if (scheme.kind == EntityScheme::Rows)
           return made;
@@ -16130,6 +16153,54 @@ static void placeGpuCopies(IRRewriter &rewriter, func::FuncOp func,
 
 /// Tile the GPU's entity loops into blocks of rows and map them to the
 /// GPU's blocks and threads, for `--convert-parallel-loops-to-gpu`.
+/// Whether `value` is the CPU's world (a function's arena, the argument it
+/// is given) or a view of it.
+static bool ofCpuWorld(Value value) {
+  while (true) {
+    if (auto argument = dyn_cast<BlockArgument>(value))
+      return isa<func::FuncOp>(argument.getOwner()->getParentOp()) &&
+             isa<MemRefType>(argument.getType());
+    Operation *op = value.getDefiningOp();
+    if (!op)
+      return false;
+    if (auto view = dyn_cast<memref::ViewOp>(op))
+      value = view.getSource();
+    else if (auto sub = dyn_cast<memref::SubViewOp>(op))
+      value = sub.getSource();
+    else if (auto cast = dyn_cast<memref::ReinterpretCastOp>(op))
+      value = cast.getSource();
+    else if (auto cast = dyn_cast<memref::CastOp>(op))
+      value = cast.getSource();
+    else
+      return false;
+  }
+}
+
+/// A loop for the GPU reads and writes the GPU's copy of the world only:
+/// what it touches of the CPU's through its address, the GPU reaches with
+/// HMM (`Addressing Mode: HMM`) and does not fault on, and the page it
+/// touches may come back to the CPU as the GPU had it. (A count of the
+/// CPU's, read in a lookup, zeroed the uniques now and then.) So the
+/// lowering checks it of itself.
+static LogicalResult checkGpuLoops(ModuleOp module) {
+  WalkResult result = module.walk([&](scf::ParallelOp loop) {
+    if (!loop->hasAttr(kGpuLoopAttr))
+      return WalkResult::advance();
+    WalkResult inner = loop.walk([&](Operation *op) {
+      for (Value operand : op->getOperands())
+        if (isa<MemRefType>(operand.getType()) && ofCpuWorld(operand)) {
+          op->emitError("internal: a loop for the GPU uses the CPU's world "
+                        "(only the GPU's copy of it is for the GPU)");
+          return WalkResult::interrupt();
+        }
+      return WalkResult::advance();
+    });
+    return inner.wasInterrupted() ? WalkResult::interrupt()
+                                  : WalkResult::skip();
+  });
+  return failure(result.wasInterrupted());
+}
+
 static void mapGpuLoops(ModuleOp module) {
   SmallVector<scf::ParallelOp> loops;
   module.walk([&](scf::ParallelOp loop) {
@@ -16871,6 +16942,8 @@ struct EntLowerToLoops
         rewriter.eraseOp(&op);
 
     if (failed(convertEntityTypes(module, layout->entities.idBits)))
+      return signalPassFailure();
+    if (failed(checkGpuLoops(module)))
       return signalPassFailure();
     mapGpuLoops(module);
   }

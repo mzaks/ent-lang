@@ -1,0 +1,56 @@
+// Edge loops in a `gpu system` where the world has several archetypes
+// that hold what a tie's other end is read for: finding it, and checking
+// it is there, in the loop for the GPU. Run with ENT_GPU_PROTECT too,
+// where a kernel that touches the CPU's world fails. (The epidemic's
+// `workplace` read the archetypes' counts from the CPU's world; gpu.test
+// builds it for the GPU, where the lowering's check says so.)
+import console
+
+component Worker { id: i32, rate: i32 } capacity 6000
+component Hazard { left: i64 } capacity 6000
+component Place { n: i32 } capacity 4000
+// (So that hazards are in several archetypes.)
+component Shift { early: i32 } capacity 6000
+component Union { dues: i32 } capacity 6000
+relation (Worker)-[WorksWith { key: i32 }]->(Worker) capacity 60000
+unique Frame: i32
+unique Total: i64
+
+gpu system work() {
+  for p: Worker {
+    for (p)-[w: WorksWith]->(o: mut Hazard) {
+      if (w.key + Frame) % 3 != 0 { o.left -= (p.rate * 1000 + w.key) as i64 }
+    }
+    for (o: mut Hazard)-[w: WorksWith]->(p) {
+      if (w.key * 7 + Frame) % 5 != 0 { o.left -= (p.rate * 10) as i64 }
+    }
+  }
+}
+system sum() {
+  Total = 0
+  for h: Hazard { Total += h.left }
+  Frame += 1
+  if Frame % 5 == 0 { spawn { Print { line: "frame {Frame} total {Total}" } } }
+}
+// More places on the CPU: another archetype's count changes.
+system build() {
+  for i in 0..5 { spawn { Place { n: Frame * 10 + i } } }
+}
+schedule step() { work()  sum()  build()  write()  clear() }
+
+world {
+  for i in 0..100 { spawn { Place { n: i } } }
+  var before = spawn { Worker { id: 0, rate: 1 }, Hazard { left: 0 } }
+  for i in 1..5000 {
+    // (Every fourth worker has no hazard: whether a tie's other end has
+    // one is asked of its archetype and its row, in the loop for the GPU.)
+    let p = if i % 4 == 0 { spawn { Worker { id: i, rate: i % 7 } } }
+            else if i % 4 == 1 { spawn { Worker { id: i, rate: i % 7 }, Hazard { left: 0 } } }
+            else if i % 4 == 2 { spawn { Worker { id: i, rate: i % 7 }, Hazard { left: 0 }, Shift { early: i } } }
+            else { spawn { Worker { id: i, rate: i % 7 }, Hazard { left: 0 }, Union { dues: i } } }
+    connect (p)-[WorksWith { key: i }]->(before)
+    if i % 3 == 0 { spawn { Place { n: i } } }
+    before = p
+  }
+}
+main { loop { step() } until Frame >= 20 }
