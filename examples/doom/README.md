@@ -133,6 +133,9 @@ them as systems. It is being built; what is here so far:
   level; `compare.py` finds the first tic at which two such traces
   differ. `make_tables.py` wrote `tables.ent`, `gamma.ent` and `random.ent`
   from the reference's C, `make_info.py` wrote `info.ent`.
+- `bundle.sh`: the game as one program for a Mac with Apple's chips,
+  from macOS 11 on, with nothing installed: the WAD in it and raylib
+  (built from its source) linked into it.
 
 ```sh
 examples/doom/reference/fetch.sh demo1 demo2 demo3   # the traces to match
@@ -153,6 +156,7 @@ MELTS=1 examples/doom/check/shots.sh ep1_nomo 100    # and every screen of the m
 examples/doom/check/music.sh                         # what each tune writes to the chip
 SOUND=1 examples/doom/check/music.sh D_E1M1 60       # and how near the chip's sound is
 examples/doom/check/save.sh 3 500                    # a world saved, loaded, and played on
+examples/doom/bundle.sh                              # build/doom/bundle/out/doom, to run on any such Mac
 cd build/doom/wad &&                                 # where doom1.wad is
   ../../../tools/ent run -I ../../../examples/doom ../../../examples/doom/doom.ent
 ```
