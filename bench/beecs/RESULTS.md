@@ -316,3 +316,25 @@ byte. On CPU 8 (CPUs 0 to 7 busy with another session), alternately:
 | (not compacted at all) | (7.25 s) |
 
 `ENT_GPU_TIMES`, a round: `fly` 400 us (525), `decide` 303 (327).
+
+## 2026-10-18, later still: `settle`
+
+Where fewer rest than the dancers would lead, each colony goes through
+its dancers in an order at random, one GPU thread a colony: 750 dancers
+on average where it does (up to 5,900), in about half of the colonies'
+rounds. That walk now only reads how many each dancer would lead and
+marks those that lead (`Leads`); a pass over the squadrons then adds the
+marked dancers' followers to their patches, which the walk did with a
+lookup and an atomic each, two waits for the memory a dancer. The
+order's stirs are in 32 bits (what is below 2^bits of a sum or a
+product comes from what is below 2^bits of its operands only, so they
+are the stirs they were) and the bits of the colony's dancers are worked
+out once, not at every dancer. `Dancers` keeps only the followers. The
+same lines to the byte, on the CPU and the GPU. Four dancers at a time
+are best: eight 148 us, sixteen 170, two 153, one 187.
+
+`ENT_GPU_TIMES`, a round: the walk 138 us (410), the new pass 48,
+`line_up` 53 (85, one column written where it was three). A year of 100
+colonies on CPU 8: 7.78 s before, 6.97 with eight dancers at a time,
+at a quieter time; then, with another session on the GPU and CPUs 0 to
+3, alternately, 8.4 to 8.7 s before and 7.65 now (four at a time).

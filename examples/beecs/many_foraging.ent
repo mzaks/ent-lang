@@ -102,13 +102,15 @@ component Milage { today: f32, total: f32 }
 component Squadron { number: i32, home: entity, slot: i32 }
 // Whether it got a load of a patch that had too few for all who asked;
 // how many it would lead in a dance; and its place among the resting of
-// all colonies (or -1).
+// all colonies, a dancer's row of `Dancers` (or -1).
 component Lot { won: i32, dance: i32, line: i32 }
 
 // Who asked a patch that has too few loads for all of them (claims.ent).
 buffer Asking { who: entity, number: i32, patch: entity, kind: i32 } capacity 4194304
-// Who dances, for which patch, and how many it would lead.
-buffer Dancers { patch: entity, pollen: bool, followers: i32 } capacity 4194304
+// How many a dancer would lead; and whether it leads them, where fewer
+// rest than all the dancers would lead.
+buffer Dancers { followers: i32 } capacity 4194304
+buffer Leads { leads: bool } capacity 4194304
 
 // The running sums of the lists' rows, and of the colonies' starts in
 // them; the places, counted when setting up, and those not where they
@@ -153,8 +155,10 @@ fn enough(short: i32, kind: i32) -> bool { (short >> kind) & 1 == 0 }
 
 // One stir of the numbers below 2^bits (`mask`), each to its own: an
 // addition, multiplies by odd numbers and the high half folded onto the
-// low, all of which can be undone.
-fn stir(x: u64, mask: u64, half: u64, a: u64, b: u64, c: u64) -> u64 {
+// low, all of which can be undone. (In 32 bits: what is below 2^bits of
+// a sum or a product is made of what is below 2^bits of its operands
+// only, so these are the stirs of the keys' 64 bits.)
+fn stir(x: u32, mask: u32, half: u32, a: u32, b: u32, c: u32) -> u32 {
   var y = (x + c) & mask
   y = (y * a) & mask
   y = y ^ (y >> half)
@@ -164,21 +168,29 @@ fn stir(x: u64, mask: u64, half: u64, a: u64, b: u64, c: u64) -> u64 {
   y ^ (y >> half)
 }
 
+// How many bits the places 0 to n - 1 take (one at least).
+fn bits_for(n: i32) -> i32 {
+  var bits = 1
+  while (1 << bits) < n { bits += 1 }
+  bits
+}
+
 // The place in an order at random of `place`, of places 0 to n - 1 that
 // the key puts in that order: a stir, again while it falls at n or
 // beyond (from a place below n that comes back below n, each to its own).
-fn shuffled(place: i32, n: i32, key: u64) -> i32 {
-  var bits = 1
-  while (1 << bits) < n { bits += 1 }
-  let mask = ((1 as u64) << (bits as u64)) - 1
-  let half = ((bits + 1) / 2) as u64
-  let a = key | 1
-  let b = (key >> 23) | 1
-  let c = key >> 41
-  var y = stir(place as u64, mask, half, a, b, c)
-  while y >= n as u64 { y = stir(y, mask, half, a, b, c) }
+// `bits` is `bits_for(n)`.
+fn shuffled_in(place: i32, n: i32, bits: i32, key: u64) -> i32 {
+  let mask = ((1 as u32) << (bits as u32)) - 1
+  let half = ((bits + 1) / 2) as u32
+  let a = (key | 1) as u32
+  let b = ((key >> 23) | 1) as u32
+  let c = (key >> 41) as u32
+  var y = stir(place as u32, mask, half, a, b, c)
+  while y >= n as u32 { y = stir(y, mask, half, a, b, c) }
   y as i32
 }
+
+fn shuffled(place: i32, n: i32, key: u64) -> i32 { shuffled_in(place, n, bits_for(n), key) }
 
 // --- setting up --------------------------------------------------------------
 
@@ -199,7 +211,8 @@ system hive() {
   let places = Colonies.count * Colonies.slots
   Candidates = [{ patch: none, upto: 0.0, nectar: false, pollen: false }; Colonies.count * patches]
   Asking = [{ who: none, number: 0, patch: none, kind: 0 }; places]
-  Dancers = [{ patch: none, pollen: false, followers: 0 }; places]
+  Dancers = [{ followers: 0 }; places]
+  Leads = [{ leads: false }; places]
   Chances = [{ below: 0.0 }; Colonies.count * patches * TABLE_ROWS]
   for c in 0..Colonies.count {
     let seed = RandomSeed.seed + c as i64
@@ -798,20 +811,19 @@ gpu system fly() {
   }
 }
 
-// The dancers' rows of `Dancers`, and the resting's places among the
-// resting of all colonies: each colony's in one piece. (Who dances and
-// who rests `fly` said, in the colonies that forage on; `come_home` makes
-// it nobody again.)
+// The dancers' rows of `Dancers` (each its row in `Lot.line`), and the
+// resting's places among the resting of all colonies: each colony's in
+// one piece. (Who dances and who rests `fly` said, in the colonies that
+// forage on; `come_home` makes it nobody again.)
 gpu system line_up() {
   Rows.dancers = 0
   Rows.resting = 0
-  for a: Activity, k: Known, l: mut Lot {
+  for l: mut Lot {
     if l.dance > 0 {
-      let pollen = a.now == Doing.BringPollen
       let at = Rows.dancers += 1
-      Dancers[at].patch = if pollen { k.pollen } else { k.nectar }
-      Dancers[at].pollen = pollen
       Dancers[at].followers = l.dance
+      Leads[at].leads = false
+      l.line = at
     } else if l.line >= 0 {
       let at = Rows.resting += 1
       l.line = at
@@ -824,7 +836,7 @@ gpu system line_up() {
 // its resting are among all; and how many of the resting follow a dance:
 // as many as the dancers would lead, where there are so many resting,
 // else those of each dancer in an order at random while so many are left
-// (claims.ent's dances).
+// (claims.ent's dances), and then for each patch those its dancers lead.
 gpu system settle() {
   let size = Foragers.squadron_size as f64
   let search_energy = Foraging.search_length * Foragers.flight_cost_per_m * size
@@ -870,37 +882,36 @@ gpu system settle() {
         l.all_lead = false
         // (A dancer leads one at least: none can once nobody is left.
         // Four rows at a time, read before any is looked at: one wait for
-        // the memory, not four.)
+        // the memory, not four (eight or more at a time are slower: the
+        // stirs, not the memory, then take the time). Who leads is marked,
+        // and the next loop adds up how many each patch's dancers lead.)
         let n = t.dancers
+        let bits = bits_for(n)
         var i = 0
         while i < n && left > 0 {
-          let r0 = dance_first + shuffled(i, n, k.order)
-          let r1 = if i + 1 < n { dance_first + shuffled(i + 1, n, k.order) } else { r0 }
-          let r2 = if i + 2 < n { dance_first + shuffled(i + 2, n, k.order) } else { r0 }
-          let r3 = if i + 3 < n { dance_first + shuffled(i + 3, n, k.order) } else { r0 }
-          let f0 = Dancers[r0].followers
-          let f1 = if i + 1 < n { Dancers[r1].followers } else { 0 }
-          let f2 = if i + 2 < n { Dancers[r2].followers } else { 0 }
-          let f3 = if i + 3 < n { Dancers[r3].followers } else { 0 }
+          let o0 = shuffled_in(i, n, bits, k.order)
+          let o1 = if i + 1 < n { shuffled_in(i + 1, n, bits, k.order) } else { o0 }
+          let o2 = if i + 2 < n { shuffled_in(i + 2, n, bits, k.order) } else { o0 }
+          let o3 = if i + 3 < n { shuffled_in(i + 3, n, bits, k.order) } else { o0 }
+          let f0 = Dancers[dance_first + o0].followers
+          let f1 = if i + 1 < n { Dancers[dance_first + o1].followers } else { 0 }
+          let f2 = if i + 2 < n { Dancers[dance_first + o2].followers } else { 0 }
+          let f3 = if i + 3 < n { Dancers[dance_first + o3].followers } else { 0 }
           if f0 <= left {
             left -= f0
-            if Dancers[r0].pollen { Led(Dancers[r0].patch).pollen += f0 }
-            else { Led(Dancers[r0].patch).nectar += f0 }
+            Leads[dance_first + o0].leads = true
           }
           if f1 > 0 && f1 <= left {
             left -= f1
-            if Dancers[r1].pollen { Led(Dancers[r1].patch).pollen += f1 }
-            else { Led(Dancers[r1].patch).nectar += f1 }
+            Leads[dance_first + o1].leads = true
           }
           if f2 > 0 && f2 <= left {
             left -= f2
-            if Dancers[r2].pollen { Led(Dancers[r2].patch).pollen += f2 }
-            else { Led(Dancers[r2].patch).nectar += f2 }
+            Leads[dance_first + o2].leads = true
           }
           if f3 > 0 && f3 <= left {
             left -= f3
-            if Dancers[r3].pollen { Led(Dancers[r3].patch).pollen += f3 }
-            else { Led(Dancers[r3].patch).nectar += f3 }
+            Leads[dance_first + o3].leads = true
           }
           i += 4
         }
@@ -912,6 +923,12 @@ gpu system settle() {
     t.dancers = 0
     t.demand = 0
     t.resting = 0
+  }
+  for a: Activity, k: Known, l: Lot where l.dance > 0 {
+    if Leads[l.line].leads {
+      if a.now == Doing.BringPollen { Led(k.pollen).pollen += l.dance }
+      else { Led(k.nectar).nectar += l.dance }
+    }
   }
 }
 
