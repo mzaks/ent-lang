@@ -31,6 +31,7 @@
 // to the end of `Watch` with twice the room; after a reduction the lists
 // are laid out again, with room to grow.
 import files
+import math
 import console
 import clock
 import dimacs
@@ -143,7 +144,7 @@ world {
   Options.margin = 1.1
   Options.fast = 0.03
   Options.slow = 0.00001
-  Options.reduce_interval = 300
+  Options.reduce_interval = 25
   Options.reduce_percent = 75
   Options.modes = true
   Options.first_mode = 1000
@@ -230,17 +231,6 @@ proc heap_insert(heap: mut Heap, v: i32, size: i32) -> i32 {
     after = size + 1
   }
   after
-}
-
-// The whole square root of `n`, rounded down.
-fn root(n: i64) -> i64 {
-  var x = n
-  var y = (x + 1) / 2
-  while y < x {
-    x = y
-    y = (x + n / x) / 2
-  }
-  x
 }
 
 // A literal's variable, the row of its watch list, and the literal at
@@ -1070,16 +1060,23 @@ system learn() {
   }
 }
 
-// Every `reduce_interval` times the square root of the reductions so far
-// conflicts, `reduce_percent` of the learned clauses that may go go
-// (see `droppable`): those of the highest LBD, of an LBD where the share
-// is reached the oldest. The clauses that stay are moved down in the
-// arena, no longer used, and the reasons that move with them told;
-// `watch` then makes the watch lists again.
+// After `reduce_interval` conflicts, and then after `reduce_interval`
+// times the square root of the conflicts so far, times the decimal
+// logarithm of the clauses not learned over 10,000 where they are more
+// than 100,000 (as CaDiCaL 3 does, though it waits 300 conflicts for the
+// first: on the dev set that solves 35 against 37; 300 times the square
+// root of the reductions so far reduced ten times as often, and
+// REGRandom-K4-L1-Seed5 was not solved in 300 s, now in 140 s),
+// `reduce_percent` of the learned clauses that may go go (see
+// `droppable`): those of the highest LBD, of an LBD where the share is
+// reached the oldest. The clauses that stay are moved down in the arena,
+// no longer used, and the reasons that move with them told; `watch` then
+// makes the watch lists again.
 system reduce() {
   let top = len(Arena)
   Counts = [{ n: 0 }; 256]
   var candidates = 0
+  var irredundant: i64 = 0
   var c: index of Arena = 0
   while c < top {
     let size = Arena[c].w
@@ -1087,6 +1084,7 @@ system reduce() {
     let first = reason_lit(Arena, Vars, Values, c)
     let locked = first >= 0
     let lbd = min(meta >> 2 & 0x3fff, 255)
+    if meta & 1 == 0 { irredundant += 1 }
     if droppable(meta, locked) {
       Counts[lbd].n += 1
       candidates += 1
@@ -1137,7 +1135,9 @@ system reduce() {
   Search.rewatch = true
   Search.reductions += 1
   Search.deleted += deleted
-  Search.reduce = Search.conflicts + Options.reduce_interval * root(Search.reductions + 1)
+  var delta = (Options.reduce_interval as f64) * sqrt64(Search.conflicts as f64)
+  if irredundant > 100000 { delta *= log64((irredundant as f64) / 10000.0) / log64(10.0) }
+  Search.reduce = Search.conflicts + max(delta as i64, 1)
   if Options.proof && len(Bytes) > 1048576 {
     write_bytes(Options.proof_file, Bytes, 0, len(Bytes), Search.written)
     Search.written = true

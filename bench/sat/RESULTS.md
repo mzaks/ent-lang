@@ -229,3 +229,55 @@ and mchess18 35% (285 s), and the Timetables go from 7-32 s to 24-59 s,
 shuffling-2 from 31 s to 50 s. The same count, then, with the gains on
 the dev set it was chosen by and two of the losses off it: a small win,
 kept as the default.
+
+## 2026-10-18: memory, a budget, and reducing as CaDiCaL 3
+
+REGRandom-K4-L1-Seed5 (1024 clauses of 514 literals) ran the machine
+out of memory with four problems at a time: preprocessing strengthened
+a clause by copying it, one literal at a time, and so took 3.45 GB.
+Strengthened in place (MiniSat's strengthenClause) it takes 214 MB.
+The subsumption after each resolvent then looked at 44 billion literals
+there, 62 s before the search; it stops at a billion now (no other
+problem of the dev set comes past 112 million), 1.6 s.
+
+The search still did not solve it in 300 s; MiniSat does in 45 s, with
+1.28 million conflicts. Nine variants of the search (one mode only,
+Luby restarts, no target phases, no reason bumping, no trail reuse, no
+preprocessing) did not either. Keeping more learned clauses did: a
+reduction every 300 times the square root of the reductions so far
+deletes about ten times as often as CaDiCaL 3.0.1, which waits 25 times
+the square root of the conflicts, times log10(clauses / 10,000) above
+100,000 clauses. CaDiCaL itself does not solve it in 300 s. On
+REGRandom:
+
+| reduce schedule | time | conflicts |
+|---|---|---|
+| 300 √reductions (before) | - | 26 million in 300 s |
+| 300 √reductions, every 10,000 | 113 s | 9.2 million |
+| 300 √reductions, every 30,000 | 40 s | 2.9 million |
+| 25 √conflicts (CaDiCaL 3) | 130 s | 10.5 million |
+| 100 √conflicts | 51 s | 3.1 million |
+
+On the dev set, each run three times (the problems are the same in
+each, the times near the limit not):
+
+| solver (dev, 39) | solved | PAR-2 | median against MiniSat |
+|---|---|---|---|
+| entsat, reasons bumped | 36 | 3,813 | 0.86 |
+| 25 √conflicts, the first after 25 | 37, 36, 37 | 3,054, 3,580, 3,197 | 0.41 |
+| 25 √conflicts, the first after 300 (as CaDiCaL) | 35, 35, 35 | 4,117, 4,170, 4,153 | 0.77 |
+| 50 √conflicts | 36 | 3,746 | 0.55 |
+| 100 √conflicts | 34 | 4,517 | 0.70 |
+| 300 √reductions, every 30,000 | 34 | 4,615 | 0.73 |
+
+25 √conflicts, the first after 25, is the default: PRP, the Timetables,
+shuffling-2 and bhaskara faster, asconhash H6 and H7 slower. SATLIB all
+correct; drat-trim checks the proofs of 11 dev problems, REGRandom's
+too. (A proof of a gigabyte or more fills /tmp, a tmpfs, where four are
+checked at a time; it is then cut short and does not verify.)
+
+Vivification as Kissat does it (before a reduction, on the clauses used
+since the last one, literals in the order of how many tried clauses
+have them, clauses sorted so that one keeps the levels of the one
+before) solves 35, PAR-2 4,193: better than before (32, 6,228), still
+off.
