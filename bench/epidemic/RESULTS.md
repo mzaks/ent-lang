@@ -3,6 +3,26 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-18, at the very end: where the GPU's time goes
+
+`ENT_GPU_TIMES=1` (devices/gpu.c: events around each kernel and copy on
+the stream), the build of the entry below, four threads and the GPU, a
+million people, 100 days: the GPU busy 508.5 ms, the CPU waiting for it
+492.3 ms (2,174 waits). So a day (5.4 ms) is the GPU's work. A day's:
+
+| on the GPU | ms a day | launches a day | each |
+|---|---|---|---|
+| `workplace` | 2.00 | 1 | 1995 us |
+| `chance` | 0.65 | 1 | 650 us |
+| `lay` | 0.61 | 19 | 32 us |
+| `infect` | 0.55 | 1 | 554 us |
+| `progress` | 0.40 | 1 | 400 us |
+| the day's fused loops (`day_kernel`) | 0.38 | 3 | 126 us |
+| copies to the GPU | 0.21 | 0.7 | 311 us |
+| `household` | 0.17 | 3 | 56 us |
+| packing what changed, and the packed copies back | 0.06 | 3.3 | |
+| `infectiousness` | 0.03 | 1 | 35 us |
+
 ## 2026-10-18, last: runs only where they do something, and the counts the GPU's
 
 `infect`'s 3.8 ms were not its own: right after it, `moves` (which writes

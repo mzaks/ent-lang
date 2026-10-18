@@ -20,7 +20,8 @@
 // (at its end, how much came back whole and how many words packed),
 // ENT_GPU_CHECK (each packed copy checked against the whole range),
 // ENT_GPU_LOG (the first copies, a line each; as many as it says, or
-// 3000) and ENT_GPU_PROTECT (each kernel waited for with the CPU's world
+// 3000), ENT_GPU_TIMES (how long each kernel and each kind of copy took
+// on the GPU, by events, and how long the CPU waited) and ENT_GPU_PROTECT (each kernel waited for with the CPU's world
 // out of reach: one that touches it fails, saying which).
 
 #include <cuda.h>
@@ -95,15 +96,116 @@ static void settle(void) {
   stagingUsed = 0;
 }
 
+// ENT_GPU_TIMES: how long each kernel ran on the GPU, and each kind of
+// copy, by a pair of events around it on the stream, summed by name and
+// said at the end; with how long the CPU waited for the stream.
+typedef struct {
+  const char *name;
+  double ms;
+  long count;
+} ent_gpu_time;
+static ent_gpu_time times[256];
+static int timeCount;
+typedef struct {
+  CUevent from, to;
+  int which;
+} ent_gpu_mark;
+static ent_gpu_mark marks[4096];
+static int markCount;
+static double waitedMs;
+static long waits;
+static int timing(void);
+
+// The marks of the work the stream is done with, into their sums.
+static void collect(void) {
+  for (int k = 0; k < markCount; ++k) {
+    float ms = 0;
+    check(cuEventElapsedTime(&ms, marks[k].from, marks[k].to),
+          "cuEventElapsedTime");
+    times[marks[k].which].ms += ms;
+    times[marks[k].which].count += 1;
+    cuEventDestroy(marks[k].from);
+    cuEventDestroy(marks[k].to);
+  }
+  markCount = 0;
+}
+
+static void sayTimes(void) {
+  check(cuStreamSynchronize(stream), "the stream");
+  collect();
+  // (Most first.)
+  for (int i = 0; i < timeCount; ++i)
+    for (int j = i + 1; j < timeCount; ++j)
+      if (times[j].ms > times[i].ms) {
+        ent_gpu_time swap = times[i];
+        times[i] = times[j];
+        times[j] = swap;
+      }
+  double all = 0;
+  for (int k = 0; k < timeCount; ++k)
+    all += times[k].ms;
+  fprintf(stderr, "gpu times: %.1f ms on the GPU, %.1f ms the CPU waited "
+                  "(%ld waits)\n", all, waitedMs, waits);
+  for (int k = 0; k < timeCount; ++k)
+    fprintf(stderr, "  %10.2f ms %8ld times %8.1f us each  %s\n",
+            times[k].ms, times[k].count,
+            times[k].ms * 1000 / (double)times[k].count, times[k].name);
+}
+
+static int timing(void) {
+  static int on = -1;
+  if (on < 0) {
+    on = getenv("ENT_GPU_TIMES") != NULL;
+    if (on)
+      atexit(sayTimes);
+  }
+  return on;
+}
+
+// The start of something on the stream to time under `name` (a mark to
+// end with timeEnd), or -1.
+static int timeStart(const char *name) {
+  if (!timing())
+    return -1;
+  if (markCount == 4096) {
+    check(cuStreamSynchronize(stream), "the stream");
+    collect();
+  }
+  int which = 0;
+  while (which < timeCount && strcmp(times[which].name, name) != 0)
+    ++which;
+  if (which == timeCount) {
+    if (timeCount == 256)
+      return -1;
+    times[timeCount++] = (ent_gpu_time){name, 0, 0};
+  }
+  ent_gpu_mark *mark = &marks[markCount];
+  check(cuEventCreate(&mark->from, CU_EVENT_DEFAULT), "cuEventCreate");
+  check(cuEventCreate(&mark->to, CU_EVENT_DEFAULT), "cuEventCreate");
+  mark->which = which;
+  check(cuEventRecord(mark->from, stream), "cuEventRecord");
+  return markCount++;
+}
+static void timeEnd(int mark) {
+  if (mark >= 0)
+    check(cuEventRecord(marks[mark].to, stream), "cuEventRecord");
+}
+
 void ent_gpu_wait(void) {
   if (!pending) {
     settle();
     return;
   }
+  double waitFrom = timing() ? logClock() : 0;
   double from = logging() ? logClock() : 0;
   // (An error of a kernel shows here, where the CPU first waits for it.)
   check(cuStreamSynchronize(stream), "a kernel");
   pending = false;
+  if (timing()) {
+    waitedMs += (logClock() - waitFrom) / 1000;
+    ++waits;
+    collect();
+  }
   settle();
   if (logging())
     fprintf(stderr, "gpu wait %.0f us at %.0f\n", logClock() - from, from);
@@ -283,10 +385,12 @@ static void shadowCopies(ent_gpu_piece *held, int64_t from, int64_t to) {
     ++outgrown;
     return;
   }
+  int timed = timeStart("shadow copies (on the GPU)");
   check(cuMemcpyDtoDAsync(shadowOf(held, from),
                           device + (CUdeviceptr)(held->offset + from),
                           (size_t)(to - from), stream),
         "a shadow's copy");
+  timeEnd(timed);
   pending = true;
 }
 
@@ -302,12 +406,14 @@ void ent_gpu_to_device(int64_t id, int64_t offset, int64_t size) {
   double started = logging() ? logClock() : 0;
   char *at = stage((size_t)(to - from));
   memcpy(at, host + offset + from, (size_t)(to - from));
+  int timed = timeStart("copies to the GPU");
   check(cuMemcpyHtoDAsync(device + (CUdeviceptr)(offset + from), at,
                           (size_t)(to - from), stream),
         "a copy to the GPU");
   if (logging())
     fprintf(stderr, "gpu upload %lld bytes took %.0f us\n",
             (long long)(to - from), logClock() - started);
+  timeEnd(timed);
   pending = true;
   shadowCopies(held, from, to);
 }
@@ -324,10 +430,12 @@ static void plainToHost(ent_gpu_piece *held, int64_t from, int64_t to) {
   }
   wholeBytes += to - from;
   char *at = stage((size_t)(to - from));
+  int timed = timeStart("copies back, whole");
   check(cuMemcpyDtoHAsync(at, device + (CUdeviceptr)(held->offset + from),
                           (size_t)(to - from), stream),
         "a copy from the GPU");
   later(host + held->offset + from, at, (size_t)(to - from));
+  timeEnd(timed);
   pending = true;
 }
 
@@ -465,9 +573,11 @@ static void toHost(ent_gpu_piece *held, int64_t size) {
   CUdeviceptr cur = device + (CUdeviceptr)first;
   CUdeviceptr shadow = shadowOf(held, first - held->offset);
   void *params[] = {&cur, &shadow, &words, &pack, &cap, &counter};
+  int timed = timeStart("packing what changed (ent_gpu_diff)");
   check(cuLaunchKernel(diff, (unsigned)((words + 255) / 256), 1, 1, 256, 1,
                        1, 0, stream, params, NULL),
         "ent_gpu_diff");
+  timeEnd(timed);
   check(cuMemcpyDtoHAsync(counted, counter, sizeof(uint64_t), stream),
         "a count from the GPU");
   pending = true;
@@ -481,8 +591,10 @@ static void toHost(ent_gpu_piece *held, int64_t size) {
     return;
   }
   if (count) {
+    int timedPack = timeStart("copies back, packed");
     check(cuMemcpyDtoHAsync(packed, pack, (size_t)(count * 8), stream),
           "packed words from the GPU");
+    timeEnd(timedPack);
     pending = true;
     ent_gpu_wait();
   }
@@ -683,9 +795,11 @@ void mgpuLaunchKernel(void *function, intptr_t gridX, intptr_t gridY,
   // (No blocks: a loop over no entities.)
   if (gridX == 0 || gridY == 0 || gridZ == 0)
     return;
+  int timed = timeStart(kernelName(function));
   check(cuLaunchKernel((CUfunction)function, gridX, gridY, gridZ, blockX,
                        blockY, blockZ, sharedBytes, stream, params, extra),
         "cuLaunchKernel");
+  timeEnd(timed);
   pending = true;
   // (ENT_GPU_PROTECT: the CPU's world out of reach while the kernel runs.
   // With HMM a kernel that reads or writes it through the CPU's address

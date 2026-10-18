@@ -244,6 +244,15 @@ names, so another vendor is another file.
 It is a device in the sense of `devices/`: C, linked by `tools/ent` with
 `-lcuda` in a `--gpu` build, not imported by programs.
 
+For finding out how a program goes there, environment variables:
+`ENT_GPU_TIMES` (at the end, how long each kernel ran on the GPU, by name,
+and each kind of copy, from a pair of events around it on the stream;
+and how long the CPU waited for the stream), `ENT_GPU_REPORT` (how much
+came back whole and packed), `ENT_GPU_LOG` (the copies, a line each),
+`ENT_GPU_CHECK` (each packed copy against the whole range),
+`ENT_GPU_PROTECT` (each kernel with the CPU's world out of reach) and
+`ENT_GPU_WHOLE` (no shadows).
+
 ## Tools and tests
 
 - `tools/ent build --gpu`: ent-opt with `gpu=1`, the GPU passes, the chip
