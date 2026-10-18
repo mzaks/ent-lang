@@ -680,6 +680,46 @@ A day of a million people 3.9 ms on one core and the GPU and on four
 threads and the GPU (5.1 and 4.9 before); the GPU busy 342 ms in all
 where it was 509. Measured in `bench/epidemic/RESULTS.md`.
 
+**beecs, many colonies at once (2026-10-18).** A honeybee colony
+(`examples/beecs`) is some 8,500 squadrons at most a round, a round a
+dozen loops: on the GPU each a launch of microseconds and the copies
+around it, slower than the CPU (two of its systems on the GPU made a
+year 1.34 s where it took 0.91). `examples/beecs/many.ent` runs many
+colonies side by side, each round's loops over the squadrons of all of
+them, with nothing in a round that the GPU cannot do: places for the
+squadrons that never move (a dead one's is taken by a new one), whole
+numbers counted where fractions were summed, lists as running sums.
+100 colonies of single-bee squadrons (2.5 million places) take 11.5 s
+a year on the GPU, 186 s on one core; the same to the bit. What it
+found:
+
+- *The first pass of a running sum read what the body had not set.*
+  On many cores and on the GPU a `for` with a running sum runs twice:
+  a copy that works out only the values summed, and the body. The copy
+  kept what the values are made of and dropped the rest, also the
+  body's sets of its own fields; so where the body set a field and then
+  read it to decide what it adds (`a.now = ..`, later `if a.now ==
+  ..`), the copy read the field as it was before the `for`. Now such a
+  field is a local of the copy (`localizeOwnFields`: an alloca that
+  starts as the field, which the copy's sets and reads go to). Found as
+  `fly` on the GPU giving 14 dancers where the CPU gave 38;
+  `test/Integration/Inputs/running.ent` has such a field now, which
+  gave `marks 0` on all cores and on the GPU without it.
+- *Scans in chunks of 16 on the GPU*, not 64 (`runningChunk`): a turn
+  of a level goes through its chunk's rows one after another, and the
+  turns next to it read the rows after its own, which the GPU reads
+  together where they are close. Two scans of 2.5 million rows a round
+  took a third less.
+- *Kernels of one name told apart.* Each kernel is a module of its own,
+  and those a schedule makes of fused systems are all `round_kernel`:
+  `ENT_GPU_TIMES` numbers them (`round_kernel#2`, ..) in the order they
+  are first launched; and the name table had filled with the first 256
+  launches (`mgpuModuleGetFunction` is asked at every launch), so later
+  kernels had no name.
+
+A round is then memory: five passes over all places, about 250 bytes a
+place, some 2.7 ms a round for 2.5 million, at the card's 190 GB/s.
+
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of
 the f32 sum was its first ten digits. It is a line for each now, and a

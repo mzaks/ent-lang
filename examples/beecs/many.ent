@@ -1,0 +1,161 @@
+// Many honeybee colonies through the year at once: beecs's model as
+// beecs.ent runs it without turns (claims.ent), for `Colonies.Count`
+// colonies side by side, colony c with the seed `RandomSeed.Seed` + c.
+// The lines are beecs.ent's, a line for each colony and day, so that the
+// lines of a run are those of as many runs of beecs.ent, one seed each
+// (but for which numbers each draws). What a round does goes through
+// the squadrons of all colonies together: on the GPU, in a `--gpu`
+// build.
+//
+//   examples/beecs/reference/fetch.sh     once: beecs and its weather, into build/
+//   cd build/beecs/run
+//   ../../../tools/ent run [--gpu] ../../../examples/beecs/many.ent > days.csv
+//
+// "parameters.txt" says beecs's numbers, as for beecs.ent, and these:
+//
+//   Colonies.Count 400       how many colonies (100)
+//   Colonies.Slots 25000     the places for squadrons each has (two and a half
+//                            times the first bees, in squadrons)
+//
+// A colony has as many squadrons as it has places at most; a squadron
+// that found none is counted, and said at the end.
+import console
+import files
+import parameters
+import many_colony
+import many_foraging
+
+capacity Colony 4096
+capacity Patch 65536
+capacity Activity 4194304
+
+system heading() {
+  put("seed,tick,w_eggs,w_larvae,w_pupae,w_in_hive,foragers,d_eggs,d_larvae,d_pupae,d_in_hive,honey_kg,pollen_g,aff,rounds")
+}
+
+system no_weather() {
+  if !Run.weather {
+    put("# no weather: the files {ForagingPeriod.files} are not where the program was started,")
+    put("# or not whole years. examples/beecs/reference/fetch.sh puts beecs's into build/beecs/run.")
+  }
+}
+
+// How many colonies, and the places each has for squadrons.
+system colonies() {
+  Colonies.count = 100
+  Colonies.slots = 0
+  if Run.file != "" {
+    if read_file(Run.file, Bytes) > 0 {
+      Colonies.count = whole(Bytes, "Colonies.Count", Colonies.count)
+      Colonies.slots = whole(Bytes, "Colonies.Slots", Colonies.slots)
+    }
+  }
+  Bytes = []
+  let size = Foragers.squadron_size
+  if Colonies.slots <= 0 {
+    Colonies.slots = (5 * InitialPopulation.count / 2 + size - 1) / size
+  }
+}
+
+system misplaced() {
+  if Rows.misplaced > 0 {
+    put("# {Rows.misplaced} squadrons' places are not where they were spawned: the lists are wrong")
+  }
+}
+
+system report() {
+  for c: Colony, h: Hive, s: Stock, p: Population, d: Day in turn by c.number {
+    if !c.ended {
+      put("{c.seed},{Clock.tick},{p.worker_eggs},{p.worker_larvae},{p.worker_pupae},{p.workers_in_hive},{p.workers_foragers},{p.drone_eggs},{p.drone_larvae},{p.drone_pupae},{p.drones_in_hive},{0.001 * h.honey / EnergyContent.honey},{h.pollen},{s.aff},{d.round}")
+    }
+  }
+}
+
+system homeless() {
+  if Colonies.homeless > 0 {
+    put("# {Colonies.homeless} squadrons found no place: more Colonies.Slots")
+  }
+}
+
+system tick() {
+  Clock.tick += 1
+}
+
+schedule setup() {
+  parameters()
+  weather()
+  no_weather()
+  colonies()
+  stages()
+  hive()
+  placed()
+  misplaced()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  heading()
+}
+
+schedule dawn() {
+  aff()
+  foraging_period()
+  replenish()
+  cohort_mortality()
+  age_cohorts()
+  lay_eggs()
+  to_foragers()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  brood_care()
+  new_cohorts()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  dawn_births()
+  born()
+  morning()
+  rested()
+  busy()
+}
+
+schedule round() run_if Busy > 0 {
+  round_start()
+  decide()
+  share()
+  short_lines() run_if Shorts > 0
+  ask_lines() run_if Shorts > 0
+  draw_lots() run_if Shorts > 0
+  fly()
+  line_up()
+  settle()
+  come_home()
+  round_end()
+}
+
+schedule dusk() {
+  evening()
+  squadron_mortality()
+  census()
+  count_cohorts()
+  count_foragers()
+  count_totals()
+  eat_honey()
+  eat_pollen()
+  report()
+  extinction()
+  tick()
+}
+
+schedule end() { homeless() }
+
+main {
+  setup()
+  loop {
+    dawn()
+    loop { round() } until Busy == 0
+    dusk()
+  } until (Termination.max_ticks > 0 && Clock.tick >= Termination.max_ticks) || !Run.weather ||
+          Colonies.alive == 0
+  end()
+}

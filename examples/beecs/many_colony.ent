@@ -1,0 +1,484 @@
+// Many colonies at once, each as colony.ent keeps one: brood and in-hive
+// bees by their age, the stores, and when the bees start to forage. A
+// colony is an entity here, and what colony.ent keeps in uniques are its
+// components; every colony draws from a seed of its own (`Colony.seed`),
+// so that colony c of a run is a run of the model by itself, but for
+// which numbers it draws.
+//
+// The cohorts of all colonies are rows of one buffer, `Cohorts`:
+// `Colonies.rows` for each, from its `Colony.cohorts` on, laid out within
+// as colony.ent lays out one colony's (`Stages`). What goes through the
+// cohorts goes one colony after another (`in turn by`): the rows are read
+// and written there as outside a `for`.
+//
+// What happens in a round of foraging is many_foraging.ent's, on the
+// components of the colony declared here.
+import math
+import parameters
+import random
+
+enum Stage {
+  WorkerEggs, WorkerLarvae, WorkerPupae, WorkersInHive,
+  DroneEggs, DroneLarvae, DronePupae, DronesInHive
+}
+
+buffer Cohorts { bees: i32 } capacity 1048576
+buffer Stages { first: i32, days: i32 } capacity 8
+
+// The day, from 0, the same for every colony.
+unique Clock { tick: i32 }
+
+// How many colonies there are, and what each has: places for squadrons
+// (`slots`), rows of cohorts and flower patches. How many are not lost
+// (with `Termination.on_extinction`), and how many new squadrons found no
+// place, all told (that should be none: `Colonies.Slots` too few).
+unique Colonies { count: i32, slots: i32, rows: i32, patches: i32, alive: i32, homeless: i32 }
+
+// A colony: its number, its seed, where its cohorts start, where its
+// patches are in `PatchOf` (many_foraging.ent), and whether it is lost.
+component Colony { number: i32, seed: i64, cohorts: i32, patches: i32, ended: bool }
+
+// What there is in the hive: honey [kJ], pollen [g], and how much of each
+// counts as decent or ideal, and the nurses' protein (colony.ent's Hive).
+component Hive { honey: f64, pollen: f64, decent_honey: f64, ideal_pollen: f64, protein_factor: f64 }
+
+// The day's honey eaten [mg], the age of first foraging [d] and the
+// number of the next squadron.
+component Stock { consumed: f64, aff: i32, next: i32 }
+
+component Population {
+  worker_eggs: i32, worker_larvae: i32, worker_pupae: i32, workers_in_hive: i32,
+  workers_foragers: i32,
+  drone_eggs: i32, drone_larvae: i32, drone_pupae: i32, drones_in_hive: i32,
+  total_brood: i32, total_adults: i32, total_population: i32
+}
+
+// The bees out of their pupae today, and the squadrons of new foragers.
+component Emerging { workers: i32, drones: i32, squadrons: i32 }
+
+// The colony's squadrons that are alive, counted by them.
+component Census { live: i32 }
+
+// Today's new squadrons: how many, from which number, born on which day;
+// and where the colony's free places start among all colonies' free
+// places, in their order (many_foraging.ent's `born`).
+component Births { first: i32, count: i32, number: i32, born: i32 }
+
+// The day's foraging, as foraging.ent's unique Day.
+component Day {
+  seconds: i32, year: i32, forage: bool, round: i32, duration: f64, done: bool,
+  probability: f64, pollen_share: f64
+}
+
+// A round's keys of the numbers at random, one for each purpose.
+component Keys {
+  decide: u64, search: u64, recruit: u64, pick: u64, die: u64, dance: u64,
+  follow: u64, order: u64
+}
+
+// The patches a scout may find this round: where they are in
+// `Candidates` (many_foraging.ent) and how many, the sum of their chances
+// to be found, and the chance to find one.
+component Scouting { found: f64, all: f64, first: i32, count: i32 }
+
+// What the squadrons of a round tell their colony, as whole numbers
+// sent: who searched, who flew, who asked a patch that was short, who
+// dances and how many they would lead, who rests, and the pollen loads
+// brought home.
+component Tally {
+  searchers: i32, foragers: i32, asking: i32, dancers: i32, demand: i32, resting: i32,
+  pollen: i32
+}
+
+// Where the colony's rows of a round's lists are, and how many: of
+// `Asking`, `Dancers` and the resting's places (many_foraging.ent); how
+// many of the resting follow a dance, and whether every dancer leads its
+// followers (there being resting enough).
+component Lines {
+  ask_first: i32, asking: i32, dance_first: i32, dancers: i32, line_first: i32,
+  resting: i32, followers: i32, all_lead: bool
+}
+
+// Where the next colony's free places start (in `dawn_births`).
+unique Free: i32
+
+const COHORT_MORTALITY = 1
+const YEARS = 10
+
+// --- cohorts -----------------------------------------------------------------
+
+fn first_row(stages: Stages, stage: Stage) -> i32 { stages[stage as i32].first }
+fn day_count(stages: Stages, stage: Stage) -> i32 { stages[stage as i32].days }
+
+// All the bees of a stage of the colony whose cohorts start at `base`.
+fn bees(cohorts: Cohorts, stages: Stages, base: i32, stage: Stage) -> i32 {
+  let from = base + first_row(stages, stage)
+  var sum = 0
+  for i in from..from + day_count(stages, stage) { sum += cohorts[i].bees }
+  sum
+}
+
+// The bees of the stage's last day.
+fn oldest(cohorts: Cohorts, stages: Stages, base: i32, stage: Stage) -> i32 {
+  cohorts[base + first_row(stages, stage) + day_count(stages, stage) - 1].bees
+}
+
+// Every bee of the stage a day older (the oldest leave it), and `add` the
+// youngest.
+proc shift(cohorts: mut Cohorts, stages: Stages, base: i32, stage: Stage, add: i32) {
+  let from = base + first_row(stages, stage)
+  var i = from + day_count(stages, stage) - 1
+  while i > from {
+    cohorts[i].bees = cohorts[i - 1].bees
+    i -= 1
+  }
+  cohorts[from].bees = add
+}
+
+// So many bees of the stage gone, the youngest first; how many are left
+// to go where the stage had not so many.
+proc reduce(cohorts: mut Cohorts, stages: Stages, base: i32, stage: Stage, excess: i32) -> i32 {
+  let from = base + first_row(stages, stage)
+  var left = excess
+  for i in from..from + day_count(stages, stage) {
+    if left > 0 {
+      let here = cohorts[i].bees
+      if here >= left {
+        cohorts[i].bees = here - left
+        left = 0
+      } else {
+        cohorts[i].bees = 0
+        left -= here
+      }
+    }
+  }
+  left
+}
+
+// HoPoMo's season, turned over (1 - x).
+fn season(tick: i32) -> f64 {
+  let d = (tick % 365) as f64
+  let s1 = 1.0 - 1.0 / (1.0 + 385.0 * exp64(-2.0 * d / 25.0))
+  let s2 = 1.0 / (1.0 + 36.0 * exp64(-2.0 * (d - 155.0) / 30.0))
+  1.0 - max(s1, s2)
+}
+
+// How much brood the nurses can care for.
+fn max_brood(in_hive: i32, foragers: i32, contribution: f64, ratio: f64) -> f64 {
+  (in_hive as f64 + foragers as f64 * contribution) * ratio
+}
+
+// --- setting up --------------------------------------------------------------
+
+// The rows of a colony's cohorts (InitCohorts), the same for all.
+system stages() {
+  Stages = []
+  Stages += { first: 0, days: WorkerDevelopment.egg_time }
+  Stages += { first: 0, days: WorkerDevelopment.larvae_time }
+  Stages += { first: 0, days: WorkerDevelopment.pupae_time }
+  Stages += { first: 0, days: AgeFirstForaging.max + 1 }
+  Stages += { first: 0, days: DroneDevelopment.egg_time }
+  Stages += { first: 0, days: DroneDevelopment.larvae_time }
+  Stages += { first: 0, days: DroneDevelopment.pupae_time }
+  Stages += { first: 0, days: DroneDevelopment.max_lifespan }
+  var rows = 0
+  for i in 0..8 {
+    Stages[i].first = rows
+    rows += Stages[i].days
+  }
+  Colonies.rows = rows
+  Cohorts = [{ bees: 0 }; rows * Colonies.count]
+  Clock.tick = 0
+}
+
+// --- a day -------------------------------------------------------------------
+
+// The age of first foraging (CalcAff).
+system aff() {
+  for c: Colony, h: Hive, s: mut Stock, p: Population where !c.ended {
+    let honey_threshold = 35.0 * (s.consumed / 1000.0) * EnergyContent.honey
+    var aff = s.aff
+    if h.pollen / h.ideal_pollen < 0.5 { aff -= 1 }
+    if h.protein_factor < 1.0 { aff -= 1 }
+    if h.honey < honey_threshold { aff -= 2 }
+    if p.workers_in_hive > 0 &&
+       p.workers_foragers as f64 / p.workers_in_hive as f64 < 0.3 {
+      aff -= 1
+    }
+    let brood = max_brood(p.workers_in_hive, p.workers_foragers,
+                          Nursing.forager_nursing_contribution, Nursing.max_brood_nurse_ratio)
+    if brood > 0.0 && p.total_brood as f64 / brood > 0.1 { aff += 2 }
+    if s.aff < AgeFirstForaging.base - 7 { aff += 1 }
+    else if s.aff > AgeFirstForaging.base + 7 { aff -= 1 }
+    if aff < s.aff { aff = s.aff - 1 } else if aff > s.aff { aff = s.aff + 1 }
+    s.aff = max(AgeFirstForaging.min, min(aff, AgeFirstForaging.max))
+  }
+}
+
+// The seconds for foraging today (CalcForagingPeriod).
+system foraging_period() {
+  let years = len(Hours) / 365
+  let day = Clock.tick % 365
+  for c: Colony, d: mut Day where !c.ended {
+    if day == 0 && years > 0 {
+      if ForagingPeriod.random_years {
+        d.year = below(key(c.seed, 0, Clock.tick, YEARS), 0, years)
+      } else {
+        d.year = (Clock.tick / 365) % years
+      }
+    }
+    d.seconds = (Hours[d.year * 365 + day].hours * 3600.0) as i32
+  }
+}
+
+// Of every cohort so many die (MortalityCohorts).
+system cohort_mortality() {
+  for c: Colony in turn by c.number {
+    if !c.ended {
+      for stage in Stage {
+        let rate =
+          if stage == Stage.WorkerEggs { WorkerMortality.eggs }
+          else if stage == Stage.WorkerLarvae { WorkerMortality.larvae }
+          else if stage == Stage.WorkerPupae { WorkerMortality.pupae }
+          else if stage == Stage.WorkersInHive { WorkerMortality.in_hive }
+          else if stage == Stage.DroneEggs { DroneMortality.eggs }
+          else if stage == Stage.DroneLarvae { DroneMortality.larvae }
+          else if stage == Stage.DronePupae { DroneMortality.pupae }
+          else { DroneMortality.in_hive }
+        let from = first_row(Stages, stage)
+        for i in from..from + day_count(Stages, stage) {
+          let here = Cohorts[c.cohorts + i].bees
+          if here > 0 {
+            let k = key(c.seed, i, Clock.tick, COHORT_MORTALITY)
+            Cohorts[c.cohorts + i].bees = max(0, here - poisson(k, 0, rate * here as f64))
+          }
+        }
+      }
+    }
+  }
+}
+
+// Every cohort a day older (AgeCohorts).
+system age_cohorts() {
+  for c: Colony, e: mut Emerging in turn by c.number {
+    if !c.ended {
+      let b = c.cohorts
+      e.workers = oldest(Cohorts, Stages, b, Stage.WorkerPupae)
+      e.drones = oldest(Cohorts, Stages, b, Stage.DronePupae)
+      shift(Cohorts, Stages, b, Stage.WorkersInHive, 0)
+      shift(Cohorts, Stages, b, Stage.DronesInHive, 0)
+      shift(Cohorts, Stages, b, Stage.WorkerPupae, oldest(Cohorts, Stages, b, Stage.WorkerLarvae))
+      shift(Cohorts, Stages, b, Stage.DronePupae, oldest(Cohorts, Stages, b, Stage.DroneLarvae))
+      shift(Cohorts, Stages, b, Stage.WorkerLarvae, oldest(Cohorts, Stages, b, Stage.WorkerEggs))
+      shift(Cohorts, Stages, b, Stage.DroneLarvae, oldest(Cohorts, Stages, b, Stage.DroneEggs))
+      shift(Cohorts, Stages, b, Stage.WorkerEggs, 0)
+      shift(Cohorts, Stages, b, Stage.DroneEggs, 0)
+    }
+  }
+}
+
+// The queen's eggs of the day (EggLaying).
+system lay_eggs() {
+  for c: Colony, p: Population in turn by c.number {
+    if !c.ended {
+      var rate = Nursing.max_eggs_per_day as f64 * season(Clock.tick)
+      if Nursing.egg_nursing_limit {
+        let emerging_age = (WorkerDevelopment.egg_time + WorkerDevelopment.larvae_time +
+                            WorkerDevelopment.pupae_time) as f64
+        let by_nurses = max_brood(p.workers_in_hive, p.workers_foragers,
+                                  Nursing.forager_nursing_contribution,
+                                  Nursing.max_brood_nurse_ratio) / emerging_age
+        rate = min(rate, by_nurses)
+      }
+      rate = min(rate, Nursing.max_eggs_per_day as f64)
+      var eggs = round64(rate) as i32
+      if p.total_brood + eggs > Nursing.max_brood_cells {
+        eggs = Nursing.max_brood_cells - p.total_brood
+      }
+      var drones = 0
+      let day = Clock.tick % 365
+      if day >= Nursing.drone_egg_laying_season_start &&
+         day <= Nursing.drone_egg_laying_season_end {
+        drones = max(Nursing.drone_eggs_proportion * eggs as f64, 0.0) as i32
+      }
+      Cohorts[c.cohorts + first_row(Stages, Stage.WorkerEggs)].bees = max(eggs - drones, 0)
+      Cohorts[c.cohorts + first_row(Stages, Stage.DroneEggs)].bees = drones
+    }
+  }
+}
+
+// The in-hive bees as old as the age of first foraging, or older, become
+// whole squadrons (TransitionForagers).
+system to_foragers() {
+  let size = Foragers.squadron_size
+  for c: Colony, s: Stock, e: mut Emerging in turn by c.number {
+    if !c.ended {
+      let from = c.cohorts + first_row(Stages, Stage.WorkersInHive)
+      var squadrons = 0
+      var remainder = 0
+      for i in from + s.aff..from + day_count(Stages, Stage.WorkersInHive) {
+        let bees = Cohorts[i].bees
+        Cohorts[i].bees = 0
+        squadrons += bees / size
+        remainder += bees % size
+      }
+      Cohorts[from + s.aff - 1].bees += remainder
+      e.squadrons = squadrons
+    }
+  }
+}
+
+system count_cohorts() {
+  for c: Colony, p: mut Population where !c.ended {
+    let b = c.cohorts
+    p.worker_eggs = bees(Cohorts, Stages, b, Stage.WorkerEggs)
+    p.worker_larvae = bees(Cohorts, Stages, b, Stage.WorkerLarvae)
+    p.worker_pupae = bees(Cohorts, Stages, b, Stage.WorkerPupae)
+    p.workers_in_hive = bees(Cohorts, Stages, b, Stage.WorkersInHive)
+    p.drone_eggs = bees(Cohorts, Stages, b, Stage.DroneEggs)
+    p.drone_larvae = bees(Cohorts, Stages, b, Stage.DroneLarvae)
+    p.drone_pupae = bees(Cohorts, Stages, b, Stage.DronePupae)
+    p.drones_in_hive = bees(Cohorts, Stages, b, Stage.DronesInHive)
+  }
+}
+
+// The foragers: the squadrons the colony's census counted.
+system count_foragers() {
+  for c: Colony, n: Census, p: mut Population where !c.ended {
+    p.workers_foragers = n.live * Foragers.squadron_size
+  }
+}
+
+system count_totals() {
+  for c: Colony, p: mut Population where !c.ended {
+    p.total_brood = p.worker_eggs + p.worker_larvae + p.worker_pupae +
+                    p.drone_eggs + p.drone_larvae + p.drone_pupae
+    p.total_adults = p.workers_in_hive + p.workers_foragers + p.drones_in_hive
+    p.total_population = p.total_brood + p.total_adults
+  }
+}
+
+// Brood dies where there are not nurses enough for it, or not protein
+// (BroodCare).
+system brood_care() {
+  for c: Colony, h: Hive, p: Population in turn by c.number {
+    if !c.ended {
+      let b = c.cohorts
+      let brood = max_brood(p.workers_in_hive, p.workers_foragers,
+                            Nursing.forager_nursing_contribution, Nursing.max_brood_nurse_ratio)
+      var excess = ceil64(p.total_brood as f64 - brood) as i32
+      let lacks_nurses = excess > 0
+      let starved = ceil64((p.worker_larvae + p.drone_larvae) as f64 *
+                           (1.0 - h.protein_factor)) as i32
+      excess = max(excess, starved)
+      if excess > 0 && lacks_nurses { excess = reduce(Cohorts, Stages, b, Stage.DroneEggs, excess) }
+      if excess > 0 { excess = reduce(Cohorts, Stages, b, Stage.DroneLarvae, excess) }
+      if excess > 0 && lacks_nurses { excess = reduce(Cohorts, Stages, b, Stage.WorkerEggs, excess) }
+      if excess > 0 { excess = reduce(Cohorts, Stages, b, Stage.WorkerLarvae, excess) }
+      if excess > 0 && lacks_nurses { excess = reduce(Cohorts, Stages, b, Stage.DronePupae, excess) }
+      if excess > 0 && lacks_nurses { excess = reduce(Cohorts, Stages, b, Stage.WorkerPupae, excess) }
+    }
+  }
+}
+
+// The bees that came out today join the in-hive bees (NewCohorts).
+system new_cohorts() {
+  for c: Colony, e: mut Emerging in turn by c.number {
+    if !c.ended {
+      Cohorts[c.cohorts + first_row(Stages, Stage.DronesInHive)].bees = e.drones
+      Cohorts[c.cohorts + first_row(Stages, Stage.WorkersInHive)].bees = e.workers
+      e.drones = 0
+      e.workers = 0
+    }
+  }
+}
+
+// Where each colony's new squadrons go: its free places, which follow
+// those of the colonies before it (the squadrons' places lie colony
+// after colony), and their numbers.
+system dawn_births() {
+  Free = 0
+  for c: Colony, s: mut Stock, e: mut Emerging, n: Census, b: mut Births in turn by c.number {
+    let free = Colonies.slots - n.live
+    b.first = Free
+    b.count = if c.ended { 0 } else { e.squadrons }
+    b.number = s.next
+    b.born = Clock.tick - s.aff
+    if b.count > free { Colonies.homeless += b.count - free }
+    s.next += b.count
+    e.squadrons = 0
+    Free += free
+  }
+}
+
+// Before the rounds: the chance to start foraging, decent honey, and
+// whether there is foraging today (the start of Foraging.Update).
+system morning() {
+  for c: Colony, h: mut Hive, p: Population, d: mut Day {
+    let pollen = h.pollen / h.ideal_pollen
+    let honey = h.honey / h.decent_honey
+    d.probability =
+      if pollen > 0.5 && honey > 1.0 { 0.0 }
+      else if honey < 0.2 { Foraging.prob_emergency }
+      else if pollen < 0.2 || honey < 0.5 { Foraging.prob_high }
+      else { Foraging.prob_base }
+    h.decent_honey = max((p.workers_in_hive + p.workers_foragers) as f64, 1.0) *
+                     Stores.decent_honey_per_worker * EnergyContent.honey
+    let most_honey = Stores.max_honey_store_kg * 1000.0 * EnergyContent.honey
+    d.forage = !c.ended &&
+               !(d.seconds <= 0 || (h.honey >= 0.95 * most_honey && h.pollen >= h.ideal_pollen))
+    d.done = !d.forage
+    d.round = 0
+    d.duration = 0.0
+  }
+}
+
+// The day's honey (HoneyConsumption).
+system eat_honey() {
+  let thermoregulation = (HoneyNeeds.worker_nurse - HoneyNeeds.worker_resting) /
+                         Nursing.max_brood_nurse_ratio
+  let per_larva = HoneyNeeds.worker_larva_total / WorkerDevelopment.larvae_time as f64
+  for c: Colony, h: mut Hive, s: mut Stock, p: Population where !c.ended {
+    let adults = (p.workers_in_hive + p.workers_foragers) as f64 * HoneyNeeds.worker_resting +
+                 p.drones_in_hive as f64 * HoneyNeeds.drone
+    let larvae = p.worker_larvae as f64 * per_larva +
+                 p.drone_larvae as f64 * HoneyNeeds.drone_larva
+    let consumption = adults + larvae + p.total_brood as f64 * thermoregulation
+    h.honey = max(h.honey - 0.001 * consumption * EnergyContent.honey, 0.0)
+    s.consumed = consumption
+  }
+}
+
+// The day's pollen, and the nurses' protein (PollenConsumption).
+system eat_pollen() {
+  let per_larva = PollenNeeds.worker_larva_total / WorkerDevelopment.larvae_time as f64
+  for c: Colony, h: mut Hive, p: Population where !c.ended {
+    let adults = (p.workers_in_hive + p.workers_foragers) as f64 * PollenNeeds.worker +
+                 p.drones_in_hive as f64 * PollenNeeds.drone
+    let larvae = p.worker_larvae as f64 * per_larva +
+                 p.drone_larvae as f64 * PollenNeeds.drone_larva
+    let consumption = (adults + larvae) / 1000.0
+    h.pollen = max(h.pollen - consumption, 0.0)
+    h.ideal_pollen = max(consumption * Stores.ideal_pollen_store_days as f64,
+                         Stores.min_ideal_pollen_store)
+    if h.pollen > 0.0 {
+      h.protein_factor = h.protein_factor + 1.0 / Stores.protein_store_nurse
+    } else {
+      let brood = max_brood(p.workers_in_hive, p.workers_foragers,
+                            Nursing.forager_nursing_contribution, Nursing.max_brood_nurse_ratio)
+      let work = if brood > 0.0 { p.total_brood as f64 / brood } else { 0.0 }
+      h.protein_factor = h.protein_factor - work / Stores.protein_store_nurse
+    }
+    h.protein_factor = max(0.0, min(h.protein_factor, 1.0))
+  }
+}
+
+// With `Termination.on_extinction`, a colony with nobody left is lost:
+// it is not said any more, and does nothing.
+system extinction() {
+  Colonies.alive = 0
+  for c: mut Colony, p: Population {
+    if Termination.on_extinction && p.total_population == 0 { c.ended = true }
+    if !c.ended { Colonies.alive += 1 }
+  }
+}

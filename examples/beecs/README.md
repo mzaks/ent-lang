@@ -42,6 +42,9 @@ days spread as beecs's do.
   (taking loads from a patch, following dances), here they ask all at
   once and the patch shares what it has; see below.
 - `beecs.ent`: a run, a line for each day.
+- `many.ent`, `many_colony.ent`, `many_foraging.ent`: many colonies at
+  once, a seed each, without turns, on the GPU where built with `--gpu`;
+  see below.
 - `view.ent`: the same run in a window. On the left the hive and its
   patches (beecs's patches have a distance and no direction: here they
   lie a golden angle apart), each a ring of the nectar and pollen it has
@@ -158,6 +161,63 @@ defaults takes 10 ms, with squadrons of one bee 0.60 s (with turns 1.06).
 On all cores it
 gains nothing at these sizes: a round's loops over some 8,500 squadrons
 are too little work to share out.
+
+## Many colonies at once
+
+A colony is a few thousand squadrons, too few to give a GPU work: a
+round of them on the GPU is a handful of launches of a few microseconds
+each, about what the whole round takes on one core. Many colonies side
+by side are not: `many.ent` runs `Colonies.Count` colonies (100 by
+default), colony c with the seed `RandomSeed.Seed` + c, each as
+`beecs.ent` runs one without turns, and says the same lines for each
+(so its lines are those of as many runs, one seed each, but for which
+numbers each draws). A round's systems go through the squadrons of all
+colonies together, and are `gpu system`s: on the GPU in a `--gpu`
+build, the same to the bit as on the CPU.
+
+```sh
+echo "Colonies.Count 100" >> parameters.txt
+../../../tools/ent run --gpu ../../../examples/beecs/many.ent > days.csv
+```
+
+What is a unique in `beecs.ent` is a component of the colony here
+(`many_colony.ent`): its stores, its counts, its day, and a seed of its
+own. The cohorts are a buffer, a colony's rows after another's, and go
+through one colony after another (`in turn by`), on the CPU, once a
+day. A round (`many_foraging.ent`) is so that nothing in it waits for
+the CPU, nor depends on the order the GPU goes in:
+
+- A colony's squadrons have places of their own (`Colonies.Slots`, two
+  and a half times its first bees by default), all spawned with it: a
+  squadron that dies is dead in its place, and a new one takes a free
+  place of its colony. Nothing is spawned or destroyed after setting
+  up, so the places lie colony after colony. (A squadron that finds no
+  place is counted and said at the end.)
+- What the squadrons add up for their colony or a patch is counted in
+  whole numbers: who flew where, who brought what home, who would lead
+  how many. A flight's honey and seconds are a patch's, so the colony
+  works them out from the counts.
+- The lists a round makes (who asked a patch that is short, who dances,
+  who rests) are running sums over the squadrons, so each colony's part
+  is in one piece, in the order of its places.
+- Who of the resting follows a dance: the places in the colony's line
+  stirred into an order at random that gives each its own place (a
+  bijection, so as many follow as are led, exactly), the first of them
+  the first dance's, and so on, each squadron for itself. Where fewer
+  rest than the dancers would lead, the colony goes through its dancers
+  in such an order and each leads where so many are left, as in
+  `claims.ent`.
+
+It agrees with beecs as `claims.ent` does (`check/curves.py --many
+[--gpu]`: all six scenarios over 100 seeds, `default` also over 400;
+over seeds 1 to 100 of `default` the in-hive workers' peaks are off at
+1%, and `claims.ent`'s are too). Where every forager is a squadron of its own, 100
+colonies take 11.5 s on the GPU (a laptop's RTX 4050), 186 s on one
+core and as much on four threads, where 100 runs of `beecs.ent` without
+turns take 90 s one after another and 23 s four at a time on four
+cores. A round is a few passes over all places, so it costs the memory
+they read: about 250 bytes a place, some 3 ms a round for 2.5 million
+places.
 
 ## What follows beecs, and what does not
 

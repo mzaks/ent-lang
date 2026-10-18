@@ -745,9 +745,11 @@ void ent_gpu_world_to_host(void) {
 // MLIR's launches. The kernels are PTX, compiled by the driver when the
 // program loads them.
 // (For ENT_GPU_PROTECT: which kernel is which.)
+// (Kernels of one name, from modules of their own, are numbered: the
+// name, then #2, #3, .. in the order they are first launched.)
 static struct {
   CUfunction function;
-  const char *name;
+  char name[96];
 } kernels[256];
 static int kernelCount;
 static const char *kernelName(void *function) {
@@ -779,9 +781,19 @@ void mgpuModuleUnload(void *module) { cuModuleUnload((CUmodule)module); }
 void *mgpuModuleGetFunction(void *module, const char *name) {
   CUfunction function;
   check(cuModuleGetFunction(&function, (CUmodule)module, name), name);
-  if (kernelCount < 256) {
+  // (Asked for at every launch: each kernel once.)
+  if (kernelCount < 256 && !strcmp(kernelName(function), "?")) {
+    int same = 0;
+    for (int k = 0; k < kernelCount; ++k)
+      if (!strncmp(kernels[k].name, name, strlen(name)) &&
+          (kernels[k].name[strlen(name)] == 0 || kernels[k].name[strlen(name)] == '#'))
+        ++same;
     kernels[kernelCount].function = function;
-    kernels[kernelCount].name = name;
+    if (same)
+      snprintf(kernels[kernelCount].name, sizeof kernels[kernelCount].name, "%s#%d",
+               name, same + 1);
+    else
+      snprintf(kernels[kernelCount].name, sizeof kernels[kernelCount].name, "%s", name);
     ++kernelCount;
   }
   return function;

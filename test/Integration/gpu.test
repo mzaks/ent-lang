@@ -50,7 +50,7 @@
 // RUN: diff %t.running.cpu %t.running.gpu
 // RUN: diff %t.running.cpu %t.running.gpupar
 // RUN: grep -c "^gpu system lay" %t.running.ent | FileCheck %s --check-prefix=RUNNING
-// RUNNING: 2
+// RUNNING: 3
 
 // Rows of buffers written from a `for`, on the GPU: the same, and two
 // entities that write one row stop the program there too.

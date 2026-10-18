@@ -261,3 +261,32 @@ The model holds against beecs as before (check/curves.py, 400 seeds each,
 both ways, all six scenarios); two tests that were off at 1% there
 (`small` without turns, in-hive workers; `scarce` with turns, honey) agree
 over seeds 1001 to 1800 and over 800 seeds.
+
+## 2026-10-18, many colonies at once, on the GPU
+
+`examples/beecs/many.ent`: 100 colonies side by side (seeds 1 to 100),
+every forager a squadron of its own (`Foragers.SquadronSize 1`, 25,000
+places a colony, 2.5 million in all), a year of the defaults, without
+turns. On CPU 4 (the others of 4 to 7 for four threads), the GPU an RTX
+4050 Laptop; the model built `-march=native`.
+
+| | a year of 100 colonies |
+|---|---|
+| `many.ent`, one core | 186.4 s |
+| `many.ent`, four threads (`--parallel`) | 184.2 s |
+| `many.ent`, `--gpu` | 11.5 s |
+| 100 runs of `beecs.ent` without turns, one after another | ~90 s (0.9 s each) |
+| the same, four at a time on four cores | 23.1 s |
+
+The three builds of `many.ent` say the same lines to the byte. With
+the GPU, at first 17.0 s; then 12.6 s with the lists of who asked a
+patch that is short made only in rounds where one is (in the defaults
+none is) and `fly` split from the running sums that list the dancers and
+the resting (whose first pass had worked out the whole flight again);
+11.5 s with scans in chunks of 16 on the GPU. Merging a round's first
+three passes into one, and the lists' pass reading two fields, gained
+nothing more: a round is five passes over all places, about 250 bytes
+each, some 2.7 ms at the card's bandwidth. `ENT_GPU_TIMES`, a round:
+`fly` 0.52 ms, the colonies going through their dancers where fewer rest
+than would follow (`settle`) 0.41, `decide` 0.38, the lists' running
+sums 1.0 (two scans of 2.5 million rows), `come_home` 0.17.

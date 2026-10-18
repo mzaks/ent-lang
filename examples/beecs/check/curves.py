@@ -3,6 +3,7 @@
 
   examples/beecs/reference/fetch.sh        once: beecs, built, and its weather
   python3 examples/beecs/check/curves.py [scenario] [--seeds N] [--first S] [--claims]
+                                         [--many [--gpu]]
 
 Both are run for seeds S to S + N - 1 (1 to 100 by default; another S
 for a sample of its own) with the same parameters
@@ -27,7 +28,8 @@ lean (a smaller, poorer colony, of which some are lost, with
 OnExtinction; two years).
 
 With --claims the model forages without turns (claims.ent), held against
-the same beecs.
+the same beecs. With --many it is many.ent, all the seeds' colonies in
+one run (built with --gpu, with --gpu).
 """
 
 import argparse
@@ -47,6 +49,7 @@ BUILD = os.path.join(ROOT, "build", "beecs")
 REFERENCE = os.path.join(BUILD, "ref_beecs")
 WEATHER = os.path.join(BUILD, "run", "foraging-period")
 PROGRAM = os.path.join(ROOT, "examples", "beecs", "beecs.ent")
+MANY = os.path.join(ROOT, "examples", "beecs", "many.ent")
 
 COLUMNS = ["w_eggs", "w_larvae", "w_pupae", "w_in_hive", "foragers",
            "d_eggs", "d_larvae", "d_pupae", "d_in_hive",
@@ -191,6 +194,21 @@ def run_model(parameters, seeds, first, work, claims):
     return runs
 
 
+def run_many(parameters, seeds, first, work, gpu):
+    program = os.path.join(work, "many")
+    subprocess.run([sys.executable, os.path.join(ROOT, "tools", "ent"), "build",
+                    *(["--gpu"] if gpu else []), MANY, "-o", program], check=True,
+                   env=dict(os.environ,
+                            ENT_CFLAGS=os.environ.get("ENT_CFLAGS", "-march=native")))
+    place = os.path.join(work, "many_run")
+    os.makedirs(place, exist_ok=True)
+    os.symlink(WEATHER, os.path.join(place, "foraging-period"))
+    with open(os.path.join(place, "parameters.txt"), "w") as f:
+        f.write(model_text(parameters, first, False) + f"Colonies.Count {seeds}\n")
+    out = subprocess.run([program], cwd=place, capture_output=True, text=True, check=True)
+    return parse(out.stdout)
+
+
 def stack(runs, days):
     """seeds x days x columns, a run that ended early (extinct) held at its
     last day."""
@@ -208,6 +226,8 @@ def main():
     parser.add_argument("--seeds", type=int, default=100)
     parser.add_argument("--first", type=int, default=1)
     parser.add_argument("--claims", action="store_true")
+    parser.add_argument("--many", action="store_true")
+    parser.add_argument("--gpu", action="store_true")
     args = parser.parse_args()
     if not os.path.exists(REFERENCE):
         sys.exit("no reference: run examples/beecs/reference/fetch.sh first")
@@ -215,14 +235,19 @@ def main():
 
     with tempfile.TemporaryDirectory(dir=BUILD) as work:
         reference = run_reference(parameters, args.seeds, args.first, work)
-        model = run_model(parameters, args.seeds, args.first, work, args.claims)
+        if args.many:
+            model = run_many(parameters, args.seeds, args.first, work, args.gpu)
+        else:
+            model = run_model(parameters, args.seeds, args.first, work, args.claims)
     days = max(max(len(r) for r in reference.values()), max(len(r) for r in model.values()))
     ref = stack(reference, days)
     mod = stack(model, days)
     ref_days = [len(r) for r in reference.values()]
     mod_days = [len(r) for r in model.values()]
 
-    print(f"scenario {args.scenario}{', without turns' if args.claims else ''}, "
+    way = (", many at once" + (" on the GPU" if args.gpu else "") if args.many else
+           ", without turns" if args.claims else "")
+    print(f"scenario {args.scenario}{way}, "
           f"{args.seeds} seeds each"
           f"{f' from {args.first}' if args.first != 1 else ''}, {days} days")
     lost_ref = sum(1 for d in ref_days if d < days)

@@ -12793,7 +12793,11 @@ static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
 
 /// How many rows of a running sum's scan one turn of a loop combines (see
 /// emitRunningScan).
+/// (On the GPU 16: a turn reads rows next to those of the turns beside
+/// it, which the GPU reads together; a scan of 2.5 million rows takes
+/// about a third less than in chunks of 64.)
 static constexpr int64_t kRunningChunk = 64;
+static int64_t runningChunk(bool gpu) { return gpu ? 16 : kRunningChunk; }
 
 /// A loop over [0, count) whose turns are independent: for the GPU when
 /// `gpu`. Gives its index, inside it.
@@ -12844,7 +12848,7 @@ static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
   bool noSign = hasNoSign(valueType);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  Value chunk = arith::ConstantIndexOp::create(rewriter, loc, kRunningChunk);
+  Value chunk = arith::ConstantIndexOp::create(rewriter, loc, runningChunk(gpu));
   Value identity = runningIdentity(rewriter, loc, valueType, rule);
   // The levels' sizes and where they start, on the CPU.
   auto levelsType = MemRefType::get({32}, rewriter.getIndexType());
@@ -12948,6 +12952,59 @@ static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
     (void)scanRows(first, last, from, begin);
   }
   return total(totalAt);
+}
+
+/// In the first pass of a query with running sums (a copy of it, see
+/// lowerRunning), a field of its own entity that the body sets and reads
+/// is a local of the pass: a slot (an alloca of one value) that starts as
+/// the field and that the body's sets and reads of it go to. The pass
+/// writes nothing of the world, and reads what the body reads, also what
+/// it set before (`a.now = ..`, then `if a.now == ..`). Gives the slots.
+static llvm::SmallPtrSet<Operation *, 4>
+localizeOwnFields(IRRewriter &rewriter, QueryOp values, WorldAccess &world) {
+  llvm::SetVector<std::pair<Value, Attribute>> written;
+  values.walk([&](SetOp set) {
+    written.insert({set.getRef(), set.getFieldAttr()});
+  });
+  llvm::SmallPtrSet<Operation *, 4> slots;
+  Block &body = values.getBody().front();
+  for (auto [ref, field] : written) {
+    SmallVector<GetOp> gets;
+    SmallVector<SetOp> sets;
+    values.walk([&](GetOp get) {
+      if (get.getRef() == ref && get.getFieldAttr() == field)
+        gets.push_back(get);
+    });
+    if (gets.empty())
+      continue;
+    values.walk([&](SetOp set) {
+      if (set.getRef() == ref && set.getFieldAttr() == field)
+        sets.push_back(set);
+    });
+    Location loc = gets.front().getLoc();
+    Type type = gets.front().getType();
+    rewriter.setInsertionPointToStart(&body);
+    auto slot = memref::AllocaOp::create(
+        rewriter, loc, MemRefType::get({}, world.storageType(type)));
+    slots.insert(slot);
+    auto start = cast<GetOp>(rewriter.clone(*gets.front()));
+    memref::StoreOp::create(rewriter, loc, world.toStorage(loc, start),
+                            slot, ValueRange{});
+    for (GetOp get : gets) {
+      rewriter.setInsertionPoint(get);
+      Value loaded = memref::LoadOp::create(rewriter, get.getLoc(), slot,
+                                            ValueRange{});
+      rewriter.replaceOp(get, world.fromStorage(get.getLoc(), loaded, type));
+    }
+    for (SetOp set : sets) {
+      rewriter.setInsertionPoint(set);
+      memref::StoreOp::create(rewriter, set.getLoc(),
+                              world.toStorage(set.getLoc(), set.getValue()),
+                              slot, ValueRange{});
+      rewriter.eraseOp(set);
+    }
+  }
+  return slots;
 }
 
 /// A query with running sums (`ent.running`) where its loops may be
@@ -13060,7 +13117,7 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
           arith::DivUIOp::create(
               rewriter, loc, count,
               arith::ConstantIndexOp::create(rewriter, loc,
-                                             kRunningChunk - 1)),
+                                             runningChunk(options.gpu) - 1)),
           arith::ConstantIndexOp::create(rewriter, loc, 64)));
   SmallVector<Value> scratches;
   for (auto [slot, running] : llvm::enumerate(runnings)) {
@@ -13118,12 +13175,21 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
   });
   for (RunningOp running : runnings)
     running->removeAttr("ent.running_now");
+  llvm::SmallPtrSet<Operation *, 4> slots =
+      localizeOwnFields(rewriter, values, world);
   llvm::SetVector<Operation *> needed;
   SmallVector<Operation *> pending(copies.begin(), copies.end());
   while (!pending.empty()) {
     Operation *op = pending.pop_back_val();
     if (op == values.getOperation() || !needed.insert(op))
       continue;
+    // (What a slot holds where it is read: every store to it.)
+    if (auto load = dyn_cast<memref::LoadOp>(op))
+      if (Operation *slot = load.getMemRef().getDefiningOp();
+          slot && slots.contains(slot))
+        for (Operation *user : slot->getUsers())
+          if (isa<memref::StoreOp>(user))
+            pending.push_back(user);
     for (Value operand : op->getOperands())
       if (Operation *def = operand.getDefiningOp();
           def && values->isProperAncestor(def))

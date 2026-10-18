@@ -1,0 +1,987 @@
+// Foraging of many colonies at once: claims.ent's rounds, without turns,
+// for every colony of many_colony.ent together, so that a round is a
+// handful of loops over the squadrons of all of them (`gpu system`s: on
+// the GPU in a `--gpu` build, as they are on the CPU otherwise, to the
+// same bits).
+//
+// What makes them so:
+//
+// - A colony's squadrons have places of their own, `Colonies.slots` of
+//   them, all spawned when the colonies are, colony after colony; a
+//   squadron that dies is `Doing.Dead` and its place is free, and a new
+//   one takes a free place of its colony (`born`). Nothing is spawned or
+//   destroyed after setting up, so the squadrons stay in their places:
+//   colony after colony, in the storage's order.
+// - What the squadrons of a round add up for their colony or a patch is
+//   counted, in whole numbers (`Tally`, `Took`, `Flew`, `Back`, `Want`):
+//   the same in any order. The honey a flight costs, its seconds, what a
+//   load brings home, are a patch's and its kind's, so the colony works
+//   them out from the counts.
+// - The lists a round makes (who asked a patch that is short of loads,
+//   who dances, who rests) are running sums over the squadrons, which
+//   puts each colony's part of the list in one piece, in the order of
+//   its squadrons; each colony's start there is a running sum of the
+//   colonies' counts.
+// - Who of the resting follows a dance: the resting's places in their
+//   colony's line put in an order at random by a stir of their numbers
+//   that gives each its own place (`shuffled`), and those placed first,
+//   as many as are led, follow, the first of them the first dance (in
+//   the order of the patches), and so on: what claims.ent's shuffle of
+//   the line does, each squadron for itself. Where there are fewer
+//   resting than the dancers would lead, the colony goes through its
+//   dancers in such an order, as claims.ent does in its shuffle.
+// - Who of those that ask a patch with too few loads gets one: the patch
+//   goes through its colony's part of `Asking` (selection sampling), as
+//   in claims.ent.
+import math
+import parameters
+import random
+import many_colony
+
+// --- patches -----------------------------------------------------------------
+
+// Distance to the colony [m], and whose patch it is.
+component Patch { distance: f64, home: entity }
+component Flowers { max_nectar: f64, concentration: f64, max_pollen: f64, detection: f64 }
+component Constant { nectar: f64, pollen: f64, concentration: f64, detection: f64 }
+component Seasonal {
+  shift: i32, max_nectar: f64, max_pollen: f64, concentration: f64, detection: f64
+}
+component Resource {
+  nectar: f64, max_nectar: f64, pollen: f64, max_pollen: f64, efficiency: f64
+}
+component Handling { nectar: f64, pollen: f64 }
+component Trip {
+  duration_nectar: f64, duration_pollen: f64, cost_nectar: f64, cost_pollen: f64
+}
+component Risk { nectar: f64, pollen: f64, abandon_pollen: f64 }
+component Advert { circuits: f64, none: f64 }
+component Visits { nectar: i32, pollen: i32 }
+component Asked {
+  recruit_nectar: i32, recruit_pollen: i32, known_nectar: i32, known_pollen: i32,
+  give_recruit_nectar: i32, give_recruit_pollen: i32,
+  give_known_nectar: i32, give_known_pollen: i32,
+  short: i32
+}
+// What a round's squadrons count at the patch: the loads scouts took,
+// the trips there, the nectar loads brought home, the followers its
+// dancers would lead, and (where not all dancers lead) those they lead.
+component Took { nectar: i32, pollen: i32 }
+component Flew { nectar: i32, pollen: i32 }
+component Back { nectar: i32 }
+component Want { nectar: i32, pollen: i32 }
+component Led { nectar: i32, pollen: i32 }
+
+// Every colony's patches, `Colonies.patches` from its `Colony.patches` on.
+buffer PatchOf { patch: entity } capacity 65536
+// The patches a scout may find this round, each colony's from its
+// `Scouting.first` on, with the sums of their chances to be found.
+buffer Candidates { patch: entity, upto: f64, nectar: bool, pollen: bool } capacity 65536
+
+// --- squadrons ---------------------------------------------------------------
+
+enum Doing { Lazy, Resting, Searching, Recruited, Experienced, BringNectar, BringPollen, Dead }
+
+component Activity { now: Doing, pollen: bool }
+component Known { nectar: entity, pollen: entity }
+component Age { born: i32 }
+component Milage { today: f32, total: f32 }
+// Its number among its colony's squadrons, for its numbers at random;
+// its colony; and its place among all places.
+component Squadron { number: i32, home: entity, slot: i32 }
+// Whether it got a load of a patch that had too few for all who asked;
+// how many it would lead in a dance; and its place among the resting of
+// all colonies (or -1).
+component Lot { won: i32, dance: i32, line: i32 }
+
+// Who asked a patch that has too few loads for all of them (claims.ent).
+buffer Asking { who: entity, number: i32, patch: entity, kind: i32 } capacity 4194304
+// Who dances, for which patch, and how many it would lead.
+buffer Dancers { patch: entity, pollen: bool, followers: i32 } capacity 4194304
+
+// The running sums of the lists' rows, and of the colonies' starts in
+// them; the places, counted when setting up, and those not where they
+// should be.
+unique Rows {
+  candidates: i32, asking: i32, dancers: i32, resting: i32,
+  ask_first: i32, dance_first: i32, line_first: i32, free: i32,
+  slots: i32, misplaced: i32
+}
+// How many colonies forage on: the rounds go on while there are any.
+unique Busy: i32
+// How many patches are short of loads this round: who asked them is
+// listed only where there are any.
+unique Shorts: i32
+
+const DECIDE = 1
+const SEARCH = 2
+const RECRUIT = 3
+const DIE = 4
+const DANCE = 5
+const SQUADRON_MORTALITY = 8
+const BIRTH = 9
+const PICK = 11
+const FOLLOW = 12
+const DANCE_ORDER = 13
+
+fn stream(round: i32, purpose: i32) -> i32 { round * 16 + purpose }
+
+// What a squadron asked for, or -1 (claims.ent).
+fn asked_for(now: Doing, pollen: bool, knows_nectar: bool, knows_pollen: bool) -> i32 {
+  if now == Doing.Recruited {
+    if pollen { if knows_pollen { 1 } else { -1 } }
+    else { if knows_nectar { 0 } else { -1 } }
+  } else if now == Doing.Experienced {
+    if pollen { 3 } else { 2 }
+  } else { -1 }
+}
+
+// Whether a patch whose `short` that is gives loads to all who ask it
+// for `kind`.
+fn enough(short: i32, kind: i32) -> bool { (short >> kind) & 1 == 0 }
+
+// One stir of the numbers below 2^bits (`mask`), each to its own: an
+// addition, multiplies by odd numbers and the high half folded onto the
+// low, all of which can be undone.
+fn stir(x: u64, mask: u64, half: u64, a: u64, b: u64, c: u64) -> u64 {
+  var y = (x + c) & mask
+  y = (y * a) & mask
+  y = y ^ (y >> half)
+  y = (y * b) & mask
+  y = y ^ (y >> half)
+  y = (y * a) & mask
+  y ^ (y >> half)
+}
+
+// The place in an order at random of `place`, of places 0 to n - 1 that
+// the key puts in that order: a stir, again while it falls at n or
+// beyond (from a place below n that comes back below n, each to its own).
+fn shuffled(place: i32, n: i32, key: u64) -> i32 {
+  var bits = 1
+  while (1 << bits) < n { bits += 1 }
+  let mask = ((1 as u64) << (bits as u64)) - 1
+  let half = ((bits + 1) / 2) as u64
+  let a = key | 1
+  let b = (key >> 23) | 1
+  let c = key >> 41
+  var y = stir(place as u64, mask, half, a, b, c)
+  while y >= n as u64 { y = stir(y, mask, half, a, b, c) }
+  y as i32
+}
+
+// --- setting up --------------------------------------------------------------
+
+// The colonies, their patches (InitPatchesList) and their squadrons'
+// places, the first of them taken (InitPopulation), colony after colony.
+system hive() {
+  let patches = len(InitialPatches)
+  Colonies.patches = patches
+  let size = Foragers.squadron_size
+  let squadrons = min(InitialPopulation.count / size, Colonies.slots)
+  Colonies.homeless = max(InitialPopulation.count / size - Colonies.slots, 0) * Colonies.count
+  let oldest = -InitialPopulation.max_age
+  let span = InitialPopulation.max_age - InitialPopulation.min_age
+  PatchOf = []
+  Colonies.alive = Colonies.count
+  // (The lists' rows, as many as there may be: a round writes them in
+  // place.)
+  let places = Colonies.count * Colonies.slots
+  Candidates = [{ patch: none, upto: 0.0, nectar: false, pollen: false }; Colonies.count * patches]
+  Asking = [{ who: none, number: 0, patch: none, kind: 0 }; places]
+  Dancers = [{ patch: none, pollen: false, followers: 0 }; places]
+  for c in 0..Colonies.count {
+    let seed = RandomSeed.seed + c as i64
+    let home = spawn {
+      Colony { number: c, seed: seed, cohorts: c * Colonies.rows, patches: c * patches,
+               ended: false },
+      Hive { honey: InitialStores.honey * 1000.0 * EnergyContent.honey,
+             pollen: InitialStores.pollen,
+             decent_honey: InitialPopulation.count as f64 * Stores.decent_honey_per_worker *
+                           EnergyContent.honey,
+             ideal_pollen: InitialStores.pollen, protein_factor: 1.0 },
+      Stock { consumed: 0.0, aff: AgeFirstForaging.base, next: InitialPopulation.count / size },
+      Population { worker_eggs: 0, worker_larvae: 0, worker_pupae: 0, workers_in_hive: 0,
+                   workers_foragers: 0, drone_eggs: 0, drone_larvae: 0, drone_pupae: 0,
+                   drones_in_hive: 0, total_brood: 0, total_adults: 0, total_population: 0 },
+      Emerging { workers: 0, drones: 0, squadrons: 0 },
+      Census { live: squadrons },
+      Births { first: 0, count: 0, number: 0, born: 0 },
+      Day { seconds: 0, year: 0, forage: false, round: 0, duration: 0.0, done: true,
+            probability: 0.0, pollen_share: 0.0 },
+      Keys { decide: 0, search: 0, recruit: 0, pick: 0, die: 0, dance: 0, follow: 0, order: 0 },
+      Scouting { found: 0.0, all: 0.0, first: 0, count: 0 },
+      Tally { searchers: 0, foragers: 0, asking: 0, dancers: 0, demand: 0, resting: 0,
+              pollen: 0 },
+      Lines { ask_first: 0, asking: 0, dance_first: 0, dancers: 0, line_first: 0, resting: 0,
+              followers: 0, all_lead: true }
+    }
+    for i in 0..patches {
+      let patch = spawn {
+        Patch { distance: InitialPatches[i].distance, home: home },
+        if InitialPatches[i].seasonal {
+          Seasonal { shift: InitialPatches[i].shift, max_nectar: InitialPatches[i].nectar,
+                     max_pollen: InitialPatches[i].pollen,
+                     concentration: InitialPatches[i].concentration,
+                     detection: InitialPatches[i].detection }
+        } else {
+          Constant { nectar: InitialPatches[i].nectar, pollen: InitialPatches[i].pollen,
+                     concentration: InitialPatches[i].concentration,
+                     detection: InitialPatches[i].detection }
+        }
+        Flowers { max_nectar: 0.0, concentration: 0.0, max_pollen: 0.0, detection: 0.0 },
+        Resource { nectar: 0.0, max_nectar: 0.0, pollen: 0.0, max_pollen: 0.0, efficiency: 0.0 },
+        Handling { nectar: 0.0, pollen: 0.0 },
+        Trip { duration_nectar: 0.0, duration_pollen: 0.0, cost_nectar: 0.0, cost_pollen: 0.0 },
+        Risk { nectar: 0.0, pollen: 0.0, abandon_pollen: 0.0 },
+        Advert { circuits: 0.0, none: 1.0 },
+        Visits { nectar: 0, pollen: 0 },
+        Asked { recruit_nectar: 0, recruit_pollen: 0, known_nectar: 0, known_pollen: 0,
+                give_recruit_nectar: 0, give_recruit_pollen: 0,
+                give_known_nectar: 0, give_known_pollen: 0, short: 0 },
+        Took { nectar: 0, pollen: 0 },
+        Flew { nectar: 0, pollen: 0 },
+        Back { nectar: 0 },
+        Want { nectar: 0, pollen: 0 },
+        Led { nectar: 0, pollen: 0 }
+      }
+      PatchOf += { patch: patch }
+    }
+    for j in 0..Colonies.slots {
+      let k = key(seed, j, -1, BIRTH)
+      let alive = j < squadrons
+      let milage = uniform(k, 1) as f32 *
+                   (InitialPopulation.max_milage - InitialPopulation.min_milage) +
+                   InitialPopulation.min_milage
+      spawn { Activity { now: if alive { Doing.Resting } else { Doing.Dead }, pollen: false },
+              Known { nectar: none, pollen: none },
+              Age { born: below(k, 0, span) + oldest },
+              Milage { today: 0.0, total: milage },
+              Squadron { number: j, home: home, slot: c * Colonies.slots + j },
+              Lot { won: 0, dance: 0, line: -1 } }
+    }
+  }
+}
+
+// Whether the squadrons' places lie in the storage as they were spawned,
+// colony after colony, as the lists of a round take them to.
+gpu system placed() {
+  Rows.slots = 0
+  Rows.misplaced = 0
+  for s: Squadron {
+    let at = Rows.slots += 1
+    if at != s.slot { Rows.misplaced += 1 }
+  }
+}
+
+// --- a day -------------------------------------------------------------------
+
+// The flowers of today, and every patch full again (ReplenishPatches).
+gpu system replenish() {
+  for f: mut Flowers, c: Constant {
+    f.max_nectar = c.nectar
+    f.max_pollen = c.pollen
+    f.detection = c.detection
+    f.concentration = c.concentration
+  }
+  for f: mut Flowers, s: Seasonal {
+    let now = season(Clock.tick + s.shift)
+    f.max_nectar = s.max_nectar * now
+    f.max_pollen = s.max_pollen * now
+    f.detection = s.detection
+    f.concentration = s.concentration
+  }
+  for f: Flowers, r: mut Resource, v: mut Visits {
+    r.max_nectar = f.max_nectar * 1000.0 * 1000.0
+    r.max_pollen = f.max_pollen * 1000.0
+    r.nectar = r.max_nectar
+    r.pollen = r.max_pollen
+    v.nectar = 0
+    v.pollen = 0
+  }
+}
+
+// Every colony's squadrons that are alive (CountPopulation's foragers).
+gpu system census() {
+  for n: mut Census { n.live = 0 }
+  for a: Activity, s: Squadron where a.now != Doing.Dead { Census(s.home).live += 1 }
+}
+
+// The new squadrons of the day, born the age of first foraging ago, each
+// in a free place of its colony: the free places are counted in their
+// order, and each colony's start among them (`Births.first`) says which
+// of them are its first.
+gpu system born() {
+  Rows.free = 0
+  for a: mut Activity, k: mut Known, g: mut Age, m: mut Milage, s: mut Squadron, l: mut Lot
+      where a.now == Doing.Dead {
+    let at = Rows.free += 1
+    if let first = Births(s.home).first, let count = Births(s.home).count,
+       let number = Births(s.home).number, let born = Births(s.home).born {
+      let rank = at - first
+      if rank < count {
+        a.now = Doing.Resting
+        a.pollen = false
+        k.nectar = none
+        k.pollen = none
+        g.born = born
+        m.today = 0.0
+        m.total = 0.0
+        s.number = number + rank
+        l.won = 0
+        l.dance = 0
+        l.line = -1
+      }
+    }
+  }
+}
+
+// The kilometres of the day start from nought.
+gpu system rested() {
+  for m: mut Milage { m.today = 0.0 }
+}
+
+// After the rounds, everybody rests.
+gpu system evening() {
+  for a: mut Activity, s: Squadron where a.now != Doing.Dead {
+    if let forage = Day(s.home).forage {
+      if forage { a.now = Doing.Resting }
+    }
+  }
+}
+
+// The squadrons that die of age, of their milage, or of the in-hive
+// bees' mortality (MortalityForagers).
+gpu system squadron_mortality() {
+  for a: mut Activity, g: Age, m: Milage, s: Squadron where a.now != Doing.Dead {
+    if let seed = Colony(s.home).seed {
+      let u = uniform(key_of(key(seed, 0, Clock.tick, SQUADRON_MORTALITY), s.number), 0)
+      if Clock.tick - g.born >= WorkerDevelopment.max_lifespan ||
+         m.total >= WorkerMortality.max_milage || u < WorkerMortality.in_hive {
+        a.now = Doing.Dead
+      }
+    }
+  }
+}
+
+// --- a round -----------------------------------------------------------------
+
+// For every colony that forages on: the share that goes for pollen, the
+// round's keys, and the patches a scout may find. Every patch's trips as
+// they are now (updatePatches), and the round's counts at nought.
+gpu system round_start() {
+  let size = Foragers.squadron_size as f64
+  Rows.candidates = 0
+  for c: Colony, h: Hive, d: mut Day, k: mut Keys, s: mut Scouting {
+    let first = Rows.candidates += Colonies.patches
+    s.first = first
+    s.count = 0
+    if !d.done {
+      var share = (1.0 - h.pollen / h.ideal_pollen) * Dance.max_proportion_pollen_foragers
+      if h.honey / h.decent_honey < 0.5 { share *= h.honey / h.decent_honey }
+      d.pollen_share = share
+      k.decide = key(c.seed, 0, Clock.tick, stream(d.round, DECIDE))
+      k.search = key(c.seed, 0, Clock.tick, stream(d.round, SEARCH))
+      k.recruit = key(c.seed, 0, Clock.tick, stream(d.round, RECRUIT))
+      k.pick = key(c.seed, 0, Clock.tick, stream(d.round, PICK))
+      k.die = key(c.seed, 0, Clock.tick, stream(d.round, DIE))
+      k.dance = key(c.seed, 0, Clock.tick, stream(d.round, DANCE))
+      k.follow = key(c.seed, 0, Clock.tick, stream(d.round, FOLLOW))
+      k.order = key(c.seed, 0, Clock.tick, stream(d.round, DANCE_ORDER))
+      var all = 0.0 as f64
+      var none_found = 1.0 as f64
+      var count = 0
+      for i in 0..Colonies.patches {
+        let patch = PatchOf[c.patches + i].patch
+        if let nectar_left = Resource(patch).nectar, let pollen_left = Resource(patch).pollen,
+           let detection = Flowers(patch).detection {
+          let nectar = nectar_left >= Foragers.nectar_load * size
+          let pollen = pollen_left >= Foragers.pollen_load * size
+          if nectar || pollen {
+            all = all + detection
+            none_found = none_found * (1.0 - detection)
+            Candidates[first + count].patch = patch
+            Candidates[first + count].upto = all
+            Candidates[first + count].nectar = nectar
+            Candidates[first + count].pollen = pollen
+            count += 1
+          }
+        }
+      }
+      s.all = all
+      s.found = 1.0 - none_found
+      s.count = count
+    }
+  }
+  for p: Patch, f: Flowers, r: mut Resource, h: mut Handling, t: mut Trip, k: mut Risk,
+      d: mut Advert, q: mut Asked, took: mut Took, flew: mut Flew, back: mut Back,
+      want: mut Want, led: mut Led {
+    if HandlingTime.constant_handling_time {
+      h.pollen = HandlingTime.pollen_gathering
+      h.nectar = HandlingTime.nectar_gathering
+    } else {
+      h.pollen = HandlingTime.pollen_gathering * r.max_pollen / r.pollen
+      h.nectar = HandlingTime.nectar_gathering * r.max_nectar / r.nectar
+    }
+    let cost = Foragers.flight_cost_per_m
+    let there_and_back = 2.0 * p.distance * cost
+    t.cost_nectar = there_and_back +
+                    cost * h.nectar * Foragers.flight_velocity * Foraging.energy_on_flower
+    t.cost_pollen = there_and_back +
+                    cost * h.pollen * Foragers.flight_velocity * Foraging.energy_on_flower
+    r.efficiency = (f.concentration * Foragers.nectar_load * EnergyContent.sucrose -
+                    t.cost_nectar) / t.cost_nectar
+    t.duration_nectar = 2.0 * p.distance / Foragers.flight_velocity + h.nectar
+    t.duration_pollen = 2.0 * p.distance / Foragers.flight_velocity + h.pollen
+    k.nectar = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, t.duration_nectar)
+    k.pollen = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, t.duration_pollen)
+    k.abandon_pollen = 1.0 - pow64(1.0 - Foraging.abandon_pollen_per_sec, t.duration_pollen)
+    d.circuits = max(0.0, min(r.efficiency * Dance.slope + Dance.intercept,
+                              Dance.max_circuits as f64))
+    d.none = exp64(-(d.circuits * 0.05))
+    q.recruit_nectar = 0
+    q.recruit_pollen = 0
+    q.known_nectar = 0
+    q.known_pollen = 0
+    q.short = 0
+    took.nectar = 0
+    took.pollen = 0
+    flew.nectar = 0
+    flew.pollen = 0
+    back.nectar = 0
+    want.nectar = 0
+    want.pollen = 0
+    led.nectar = 0
+    led.pollen = 0
+  }
+}
+
+// A squadron's round up to its flight, one pass (claims.ent's decide,
+// search and claims, each after the one before, which none reads of
+// another squadron): it decides, nectar or pollen, to stop, to give up a
+// patch that is not worth it, to start (decisions); as a scout it finds
+// a patch, by the patches' chances, or none, and one with what it wants
+// is its own from now on, and it brings a load from it; as a recruit it
+// looks for the danced patch, and found it asks it for a load, else it
+// searches next round; experienced, it asks its own, or rests if it
+// knows none.
+gpu system decide() {
+  let size = Foragers.squadron_size
+  for a: mut Activity, k: mut Known, l: mut Lot, m: Milage, s: Squadron
+      where a.now != Doing.Dead {
+    if let done = Day(s.home).done, let share = Day(s.home).pollen_share,
+       let probability = Day(s.home).probability, let stock = Hive(s.home).honey,
+       let decent = Hive(s.home).decent_honey, let decide = Keys(s.home).decide,
+       let search = Keys(s.home).search, let recruit = Keys(s.home).recruit {
+      if !done {
+        let honey = stock / decent
+        let draw = key_of(decide, s.number)
+        if a.now != Doing.Recruited { a.pollen = uniform(draw, 0) < share }
+        if a.now != Doing.Recruited && a.now != Doing.Resting && a.now != Doing.Lazy {
+          if uniform(draw, 1) < Foraging.stop_probability { a.now = Doing.Resting }
+        }
+        if !a.pollen && k.nectar != none {
+          if let efficiency = Resource(k.nectar).efficiency {
+            if uniform(draw, 2) < 1.0 / efficiency && uniform(draw, 3) < honey {
+              k.nectar = none
+              if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
+            }
+          }
+        }
+        if k.pollen != none && a.pollen {
+          if let abandon = Risk(k.pollen).abandon_pollen {
+            if uniform(draw, 4) < abandon {
+              k.nectar = none
+              if a.now != Doing.Resting && a.now != Doing.Lazy { a.now = Doing.Searching }
+            }
+          }
+        }
+        if a.now == Doing.Resting && uniform(draw, 5) < probability {
+          let known = if a.pollen { k.pollen } else { k.nectar }
+          a.now = if known == none { Doing.Searching } else { Doing.Experienced }
+        }
+        if m.today > Foragers.max_km_per_day as f32 { a.now = Doing.Resting }
+
+        // Searching.
+        if a.now == Doing.Searching {
+          if let found = Scouting(s.home).found, let all = Scouting(s.home).all,
+             let first = Scouting(s.home).first, let count = Scouting(s.home).count {
+            let scout = key_of(search, s.number)
+            if uniform(scout, 0) < found {
+              let p = uniform(scout, 1) * all
+              var i = -1
+              var j = 0
+              while i < 0 && j < count {
+                if Candidates[first + j].upto >= p { i = j }
+                j += 1
+              }
+              if i >= 0 {
+                let patch = Candidates[first + i].patch
+                if a.pollen {
+                  if Candidates[first + i].pollen {
+                    k.pollen = patch
+                    a.now = Doing.BringPollen
+                    Took(patch).pollen += 1
+                    Visits(patch).pollen += size
+                  } else {
+                    k.pollen = none
+                  }
+                } else {
+                  if Candidates[first + i].nectar {
+                    k.nectar = patch
+                    a.now = Doing.BringNectar
+                    Took(patch).nectar += 1
+                    Visits(patch).nectar += size
+                  } else {
+                    k.nectar = none
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Claims.
+        l.won = 0
+        if a.now == Doing.Recruited {
+          let find = key_of(recruit, s.number)
+          if !a.pollen && k.nectar != none {
+            if uniform(find, 0) < Dance.find_probability { Asked(k.nectar).recruit_nectar += 1 }
+            else {
+              a.now = Doing.Searching
+              k.nectar = none
+            }
+          }
+          if a.pollen && k.pollen != none {
+            if uniform(find, 1) < Dance.find_probability { Asked(k.pollen).recruit_pollen += 1 }
+            else {
+              a.now = Doing.Searching
+              k.pollen = none
+            }
+          }
+        } else if a.now == Doing.Experienced {
+          if a.pollen {
+            if k.pollen == none { a.now = Doing.Resting } else { Asked(k.pollen).known_pollen += 1 }
+          } else {
+            if k.nectar == none { a.now = Doing.Resting } else { Asked(k.nectar).known_nectar += 1 }
+          }
+        }
+      }
+    }
+  }
+}
+
+// What the scouts took, and how many loads a patch has for what it is
+// asked: the recruits first, then the experienced, and what they take.
+gpu system share() {
+  let size = Foragers.squadron_size
+  let nectar_load = Foragers.nectar_load * size as f64
+  let pollen_load = Foragers.pollen_load * size as f64
+  Shorts = 0
+  for r: mut Resource, q: mut Asked, v: mut Visits, t: mut Took {
+    r.nectar -= t.nectar as f64 * nectar_load
+    r.pollen -= t.pollen as f64 * pollen_load
+    t.nectar = 0
+    t.pollen = 0
+    let nectar = max((r.nectar / nectar_load) as i32, 0)
+    let pollen = max((r.pollen / pollen_load) as i32, 0)
+    q.give_recruit_nectar = min(q.recruit_nectar, nectar)
+    q.give_known_nectar = min(q.known_nectar, nectar - q.give_recruit_nectar)
+    q.give_recruit_pollen = min(q.recruit_pollen, pollen)
+    q.give_known_pollen = min(q.known_pollen, pollen - q.give_recruit_pollen)
+    let nectar_given = q.give_recruit_nectar + q.give_known_nectar
+    let pollen_given = q.give_recruit_pollen + q.give_known_pollen
+    r.nectar -= nectar_given as f64 * nectar_load
+    r.pollen -= pollen_given as f64 * pollen_load
+    v.nectar += nectar_given * size
+    v.pollen += pollen_given * size
+    q.short = (if q.give_recruit_nectar < q.recruit_nectar { 1 } else { 0 }) |
+              (if q.give_recruit_pollen < q.recruit_pollen { 2 } else { 0 }) |
+              (if q.give_known_nectar < q.known_nectar { 4 } else { 0 }) |
+              (if q.give_known_pollen < q.known_pollen { 8 } else { 0 })
+    if q.short != 0 { Shorts += 1 }
+  }
+}
+
+// Who asked a patch that has too few for them: rows of `Asking`, each
+// colony's in one piece.
+gpu system short_lines() {
+  Rows.asking = 0
+  for e, a: Activity, k: Known, s: Squadron where a.now != Doing.Dead {
+    let kind = asked_for(a.now, a.pollen, k.nectar != none, k.pollen != none)
+    if kind >= 0 {
+      let patch = if kind == 1 || kind == 3 { k.pollen } else { k.nectar }
+      if let short = Asked(patch).short {
+        if !enough(short, kind) {
+          let at = Rows.asking += 1
+          Asking[at].who = e
+          Asking[at].number = s.number
+          Asking[at].patch = patch
+          Asking[at].kind = kind
+          Tally(s.home).asking += 1
+        }
+      }
+    }
+  }
+}
+
+// Where each colony's piece of `Asking` starts.
+gpu system ask_lines() {
+  Rows.ask_first = 0
+  for t: mut Tally, l: mut Lines {
+    let first = Rows.ask_first += t.asking
+    l.ask_first = first
+    l.asking = t.asking
+    t.asking = 0
+  }
+}
+
+// Of each such line, as many as there are loads, at random: each patch
+// goes through who of its colony asked it, and each gets one with the
+// chance of the loads left among those left to draw (selection sampling).
+gpu system draw_lots() {
+  for e, p: Patch, q: mut Asked where q.short != 0 {
+    if let first = Lines(p.home).ask_first, let asking = Lines(p.home).asking,
+       let occasion = Keys(p.home).pick {
+      for i in first..first + asking {
+        if Asking[i].patch == e {
+          let u = uniform(key_of(occasion, Asking[i].number), 0)
+          let kind = Asking[i].kind
+          var won = false
+          if kind == 0 {
+            won = u * q.recruit_nectar as f64 < q.give_recruit_nectar as f64
+            q.recruit_nectar -= 1
+            if won { q.give_recruit_nectar -= 1 }
+          } else if kind == 1 {
+            won = u * q.recruit_pollen as f64 < q.give_recruit_pollen as f64
+            q.recruit_pollen -= 1
+            if won { q.give_recruit_pollen -= 1 }
+          } else if kind == 2 {
+            won = u * q.known_nectar as f64 < q.give_known_nectar as f64
+            q.known_nectar -= 1
+            if won { q.give_known_nectar -= 1 }
+          } else {
+            won = u * q.known_pollen as f64 < q.give_known_pollen as f64
+            q.known_pollen -= 1
+            if won { q.give_known_pollen -= 1 }
+          }
+          if won { Lot(Asking[i].who).won += 1 }
+        }
+      }
+    }
+  }
+}
+
+// One pass over the squadrons, as in claims.ent: who asked gets a load,
+// where the patch had enough or the lot says so, and flies there and
+// back, else searches; the kilometres, and the trips counted where they
+// went; some die on the way; and who comes back says how many it would
+// lead in a dance.
+gpu system fly() {
+  let search_km = (Foraging.search_length / 1000.0) as f32
+  let search_seconds = Foraging.search_length / Foragers.flight_velocity
+  let search_risk = 1.0 - pow64(1.0 - Foraging.mortality_per_sec, search_seconds)
+  for a: mut Activity, k: mut Known, l: mut Lot, m: mut Milage, s: Squadron
+      where a.now != Doing.Dead {
+    if let done = Day(s.home).done, let die = Keys(s.home).die, let dance = Keys(s.home).dance {
+      if !done {
+        let kind = asked_for(a.now, a.pollen, k.nectar != none, k.pollen != none)
+        if kind >= 0 {
+          let patch = if kind == 1 || kind == 3 { k.pollen } else { k.nectar }
+          var got = l.won > 0
+          if let short = Asked(patch).short { got = got || enough(short, kind) }
+          if got {
+            a.now = if kind == 1 || kind == 3 { Doing.BringPollen } else { Doing.BringNectar }
+          } else {
+            a.now = Doing.Searching
+            if kind == 1 || kind == 3 { k.pollen = none } else { k.nectar = none }
+          }
+        }
+        l.won = 0
+        var died = false
+        if a.now == Doing.Searching || a.now == Doing.BringNectar || a.now == Doing.BringPollen {
+          var km = 0.0 as f32
+          var risk = 0.0 as f64
+          if a.now == Doing.Searching {
+            km = search_km
+            risk = search_risk
+            Tally(s.home).searchers += 1
+          } else if a.now == Doing.BringNectar {
+            if let cost = Trip(k.nectar).cost_nectar, let r = Risk(k.nectar).nectar {
+              km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+              risk = r
+            }
+            Flew(k.nectar).nectar += 1
+          } else {
+            if let cost = Trip(k.pollen).cost_pollen, let r = Risk(k.pollen).pollen {
+              km = (cost / (Foragers.flight_cost_per_m * 1000.0)) as f32
+              risk = r
+            }
+            Flew(k.pollen).pollen += 1
+          }
+          m.today += km
+          m.total += km
+          Tally(s.home).foragers += 1
+          if uniform(key_of(die, s.number), 0) < risk {
+            a.now = Doing.Dead
+            died = true
+          }
+        }
+        var followers = 0
+        if !died {
+          if a.now == Doing.BringNectar {
+            if let circuits = Advert(k.nectar).circuits, let zero = Advert(k.nectar).none {
+              followers = poisson_of(key_of(dance, s.number), 0, circuits * 0.05, zero)
+            }
+          } else if a.now == Doing.BringPollen {
+            followers = Dance.pollen_dance_followers
+          }
+        }
+        l.dance = followers
+        l.line = if followers == 0 && a.now == Doing.Resting { 0 } else { -1 }
+        if followers > 0 {
+          let pollen = a.now == Doing.BringPollen
+          let to = if pollen { k.pollen } else { k.nectar }
+          Tally(s.home).dancers += 1
+          Tally(s.home).demand += followers
+          if pollen { Want(to).pollen += followers } else { Want(to).nectar += followers }
+        } else if a.now == Doing.Resting {
+          Tally(s.home).resting += 1
+        }
+      }
+    }
+  }
+}
+
+// The dancers' rows of `Dancers`, and the resting's places among the
+// resting of all colonies: each colony's in one piece. (Who dances and
+// who rests `fly` said, in the colonies that forage on; `come_home` makes
+// it nobody again.)
+gpu system line_up() {
+  Rows.dancers = 0
+  Rows.resting = 0
+  for a: Activity, k: Known, l: mut Lot {
+    if l.dance > 0 {
+      let pollen = a.now == Doing.BringPollen
+      let at = Rows.dancers += 1
+      Dancers[at].patch = if pollen { k.pollen } else { k.nectar }
+      Dancers[at].pollen = pollen
+      Dancers[at].followers = l.dance
+    } else if l.line >= 0 {
+      let at = Rows.resting += 1
+      l.line = at
+    }
+  }
+}
+
+// For every colony that forages on: what the round's flights cost in
+// honey, and took (their mean added to the day's); where its dancers and
+// its resting are among all; and how many of the resting follow a dance:
+// as many as the dancers would lead, where there are so many resting,
+// else those of each dancer in an order at random while so many are left
+// (claims.ent's dances).
+gpu system settle() {
+  let size = Foragers.squadron_size as f64
+  let search_energy = Foraging.search_length * Foragers.flight_cost_per_m * size
+  let search_seconds = Foraging.search_length / Foragers.flight_velocity
+  Rows.dance_first = 0
+  Rows.line_first = 0
+  for c: Colony, h: mut Hive, d: mut Day, k: Keys, t: mut Tally, l: mut Lines {
+    let dance_first = Rows.dance_first += t.dancers
+    let line_first = Rows.line_first += t.resting
+    l.dance_first = dance_first
+    l.dancers = t.dancers
+    l.line_first = line_first
+    l.resting = t.resting
+    l.followers = 0
+    l.all_lead = true
+    if !d.done {
+      var honey = t.searchers as f64 * search_energy
+      var seconds = t.searchers as f64 * search_seconds
+      for i in 0..Colonies.patches {
+        let patch = PatchOf[c.patches + i].patch
+        if let nectar = Flew(patch).nectar, let pollen = Flew(patch).pollen,
+           let cost_nectar = Trip(patch).cost_nectar, let cost_pollen = Trip(patch).cost_pollen,
+           let duration_nectar = Trip(patch).duration_nectar,
+           let duration_pollen = Trip(patch).duration_pollen {
+          // (Only where some flew: a patch with nothing left takes forever,
+          // and none times forever is not nought.)
+          if nectar > 0 {
+            honey += nectar as f64 * cost_nectar * size
+            seconds += nectar as f64 * (duration_nectar + HandlingTime.nectar_unloading)
+          }
+          if pollen > 0 {
+            honey += pollen as f64 * cost_pollen * size
+            seconds += pollen as f64 * (duration_pollen + HandlingTime.pollen_unloading)
+          }
+        }
+      }
+      h.honey -= honey
+      d.duration += if t.foragers > 0 { seconds / t.foragers as f64 } else { search_seconds }
+      var left = t.resting
+      if t.demand <= t.resting {
+        left = t.resting - t.demand
+      } else {
+        l.all_lead = false
+        // (A dancer leads one at least: none can once nobody is left.
+        // Four rows at a time, read before any is looked at: one wait for
+        // the memory, not four.)
+        let n = t.dancers
+        var i = 0
+        while i < n && left > 0 {
+          let r0 = dance_first + shuffled(i, n, k.order)
+          let r1 = if i + 1 < n { dance_first + shuffled(i + 1, n, k.order) } else { r0 }
+          let r2 = if i + 2 < n { dance_first + shuffled(i + 2, n, k.order) } else { r0 }
+          let r3 = if i + 3 < n { dance_first + shuffled(i + 3, n, k.order) } else { r0 }
+          let f0 = Dancers[r0].followers
+          let f1 = if i + 1 < n { Dancers[r1].followers } else { 0 }
+          let f2 = if i + 2 < n { Dancers[r2].followers } else { 0 }
+          let f3 = if i + 3 < n { Dancers[r3].followers } else { 0 }
+          if f0 <= left {
+            left -= f0
+            if Dancers[r0].pollen { Led(Dancers[r0].patch).pollen += f0 }
+            else { Led(Dancers[r0].patch).nectar += f0 }
+          }
+          if f1 > 0 && f1 <= left {
+            left -= f1
+            if Dancers[r1].pollen { Led(Dancers[r1].patch).pollen += f1 }
+            else { Led(Dancers[r1].patch).nectar += f1 }
+          }
+          if f2 > 0 && f2 <= left {
+            left -= f2
+            if Dancers[r2].pollen { Led(Dancers[r2].patch).pollen += f2 }
+            else { Led(Dancers[r2].patch).nectar += f2 }
+          }
+          if f3 > 0 && f3 <= left {
+            left -= f3
+            if Dancers[r3].pollen { Led(Dancers[r3].patch).pollen += f3 }
+            else { Led(Dancers[r3].patch).nectar += f3 }
+          }
+          i += 4
+        }
+      }
+      l.followers = t.resting - left
+    }
+    t.searchers = 0
+    t.foragers = 0
+    t.dancers = 0
+    t.demand = 0
+    t.resting = 0
+  }
+}
+
+// The resting placed first in their colony's line follow a dance: to its
+// patch, if it is better than the one they know, as recruits, else back
+// to their own; and those back with a load unload it, counted.
+gpu system come_home() {
+  for a: mut Activity, k: mut Known, l: mut Lot, s: Squadron where a.now != Doing.Dead {
+    if let done = Day(s.home).done {
+      if !done {
+        if a.now == Doing.Resting && l.line >= 0 {
+          if let first = Lines(s.home).line_first, let resting = Lines(s.home).resting,
+             let followers = Lines(s.home).followers, let all_lead = Lines(s.home).all_lead,
+             let key = Keys(s.home).follow, let patches = Colony(s.home).patches {
+            let place = shuffled(l.line - first, resting, key)
+            if place < followers {
+              var sum = 0
+              var found = false
+              var patch: entity = none
+              var pollen = false
+              for i in 0..Colonies.patches {
+                let at = PatchOf[patches + i].patch
+                if let want_nectar = Want(at).nectar, let want_pollen = Want(at).pollen,
+                   let led_nectar = Led(at).nectar, let led_pollen = Led(at).pollen {
+                  let nectar = if all_lead { want_nectar } else { led_nectar }
+                  if !found && place < sum + nectar {
+                    found = true
+                    patch = at
+                    pollen = false
+                  }
+                  sum += nectar
+                  let more = if all_lead { want_pollen } else { led_pollen }
+                  if !found && place < sum + more {
+                    found = true
+                    patch = at
+                    pollen = true
+                  }
+                  sum += more
+                }
+              }
+              if found {
+                if !pollen {
+                  var recruited = k.nectar == none
+                  if !recruited {
+                    if let efficiency = Resource(patch).efficiency,
+                       let theirs = Resource(k.nectar).efficiency {
+                      recruited = efficiency > theirs
+                    }
+                  }
+                  if recruited {
+                    k.nectar = patch
+                    a.now = Doing.Recruited
+                    a.pollen = false
+                  } else {
+                    a.now = Doing.Experienced
+                  }
+                } else {
+                  var recruited = k.pollen == none
+                  if !recruited {
+                    if let duration = Trip(patch).duration_pollen,
+                       let theirs = Trip(k.pollen).duration_pollen {
+                      recruited = duration < theirs
+                    }
+                  }
+                  if recruited {
+                    k.pollen = patch
+                    a.now = Doing.Recruited
+                    a.pollen = true
+                  } else {
+                    a.now = Doing.Experienced
+                  }
+                }
+              }
+            }
+          }
+        } else if a.now == Doing.BringNectar || a.now == Doing.BringPollen {
+          if a.now == Doing.BringNectar { Back(k.nectar).nectar += 1 }
+          else { Tally(s.home).pollen += 1 }
+          a.now = Doing.Experienced
+        }
+        l.dance = 0
+        l.line = -1
+      }
+    }
+  }
+}
+
+// What came home, up to the most honey the hive holds (unloading); and
+// whether the day's rounds are done (the rounds go on while there is
+// time left).
+gpu system round_end() {
+  let size = Foragers.squadron_size as f64
+  let most_honey = Stores.max_honey_store_kg * 1000.0 * EnergyContent.honey
+  Busy = 0
+  for c: Colony, h: mut Hive, d: mut Day, t: mut Tally {
+    if !d.done {
+      var energy = 0.0 as f64
+      for i in 0..Colonies.patches {
+        let patch = PatchOf[c.patches + i].patch
+        if let nectar = Back(patch).nectar, let concentration = Flowers(patch).concentration {
+          energy += nectar as f64 *
+                    (concentration * Foragers.nectar_load * EnergyContent.sucrose) * size
+        }
+      }
+      if energy > 0.0 { h.honey = min(h.honey + energy, most_honey) }
+      h.pollen += t.pollen as f64 * Foragers.pollen_load * size
+      d.done = d.duration > d.seconds as f64
+      d.round += 1
+      if !d.done { Busy += 1 }
+    }
+    t.pollen = 0
+  }
+}
+
+// How many colonies forage today.
+system busy() {
+  Busy = 0
+  for d: Day where !d.done { Busy += 1 }
+}
