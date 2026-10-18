@@ -1,0 +1,36 @@
+// The room entsat's programs have: 4 million variables, a file of 256 MB,
+// 64 million literals read and a quarter of a billion words of clauses.
+import files
+import dimacs
+import sat
+import satprep
+
+capacity Bytes 268435456
+capacity Clauses 67108864
+capacity Values 8388608
+capacity Lists 8388608
+capacity Watch 134217728
+capacity Seen 8388608
+capacity Occurs 8388608
+capacity Sched 67108864
+capacity Order 67108864
+capacity Vars 4194304
+capacity Trail 4194304
+capacity Levels 4194305
+capacity Learnt 4194305
+capacity Clear 4194305
+capacity Stack 4194305
+capacity Bumped 4194305
+capacity Spare 4194305
+capacity Heap 4194304
+capacity Arena 268435456
+capacity Original 67108864
+capacity Pre 134217728
+capacity Occ 268435456
+capacity Elim 67108864
+capacity Queue 67108864
+capacity Gone 4194304
+capacity Mark 8388608
+capacity Count 8388608
+capacity Touched 67108864
+capacity Fresh 4194304

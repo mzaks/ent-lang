@@ -1,0 +1,633 @@
+// entsat's preprocessing: bounded variable elimination with subsumption
+// (as MiniSat's SimpSolver and SatELite do them), between reading the
+// clauses and the search.
+//
+//   schedule start() { read()  prepare()  setup()  watch() }
+//   schedule done() { extend()  finish() }
+//   (prepare: schedule prepare() { copy()  occurrences()  subsume()  costs()  eliminate()  emit() })
+//
+// A variable goes where the resolvents of its clauses on it (each clause
+// with it against each with its negation, those with a literal and its
+// negation left out) are no more than those clauses, and none has more
+// than `clause_limit` literals: the resolvents take the clauses' place,
+// and the clauses are kept, in the order they went, to give the variable
+// a value after the search. The variables are taken from a heap by what
+// they would cost (how many clauses have it, times how many have its
+// negation), the cheapest first, and a variable goes back in where it is
+// when its clauses change. Each resolvent is held against the other
+// clauses: those it subsumes go, and those it strengthens (self-subsuming
+// resolution) lose a literal. A unit clause so strengthens every clause
+// with its negation, which is how the units are propagated. When the heap
+// is empty, the clauses on the variables of the resolvents are held
+// against the others in turn, and the heap goes on with what changed.
+//
+// The resolvents and strengthened clauses go into the proof as clauses
+// added, the clauses they replace as clauses deleted. A model is extended
+// to the eliminated variables, the last eliminated first, and held
+// against the clauses that were read.
+import files
+import console
+import clock
+import dimacs
+import sat
+
+// The clauses as read, kept to hold a model against.
+buffer Original { lit: i32 } capacity 16
+
+// The clauses while they are worked on: at `c` how many literals; at
+// c + 1 bit 0 deleted, bit 1 queued and the signature above them; then
+// the literals. A clause strengthened loses its literal in place, the
+// word it frees -1, which `next` steps over.
+buffer Pre { w: i32 } capacity 16
+
+// Where each literal occurs: rows below twice the variables hold, for
+// literal l, `start`, `size` and `cap` of its list among the `clause`
+// column's rows (one buffer, so that a proc changes it all). A list that
+// is full moves to the end with twice the room. Deleted clauses stay on
+// the lists until they are passed.
+buffer Occ { clause: i32, start: i32, size: i32, cap: i32 } capacity 16
+
+// Per literal how many clauses that are not deleted have it.
+buffer Count { live: i32 } capacity 16
+
+// The clauses of the eliminated variables, in the order they went: each
+// its literal of the variable first, then the others, then how many.
+buffer Elim { lit: i32 } capacity 16
+
+// The clauses still to be held against the others: the resolvents of a
+// variable eliminated, and the clauses they strengthen.
+buffer Queue { clause: i32 } capacity 16
+
+// The variables whose clauses changed, to be put where their cost now
+// puts them in the heap (sat.ent's `Heap`, before the search has it).
+buffer Touched { var: i32 } capacity 16
+
+// The variables of the resolvents since the clauses on them were last
+// held against the others (`Gone.fresh` where a variable is here).
+buffer Fresh { var: i32 } capacity 16
+
+// Per variable whether it was eliminated (and whether it is fresh); per literal a stamp, for
+// working out a resolvent.
+buffer Gone { yes: bool, fresh: bool } capacity 16
+buffer Mark { stamp: i32 } capacity 16
+
+// `on`: whether to eliminate at all. A variable with more than `limit`
+// clauses on it is left as it is.
+// Subsumption before the elimination looks at clauses of at most
+// `subsume_size` literals, and stops after `subsume_steps` literals looked
+// at; then each resolvent is held against the clauses as they are, those
+// of fewer than `sub_limit` literals (as MiniSat's -sub-lim), until
+// `drain_steps` literals are looked at in all (REGRandom-K4-L1-Seed5 looks
+// at 44 billion, no other problem of the dev set at more than 112 million).
+unique Prep {
+  on: bool, limit: i32, clause_limit: i32, subsume_size: i32, subsume_steps: i64, sub_limit: i32,
+  drain_steps: i64,
+  eliminated: i32, removed: i64, resolvents: i64, subsumed: i64, strengthened: i64,
+  steps: i64, stamp: i32, seconds: f64
+}
+
+world {
+  Prep.on = true
+  Prep.limit = 32
+  Prep.clause_limit = 20
+  Prep.subsume_size = 20
+  Prep.subsume_steps = 200000000
+  Prep.sub_limit = 1000
+  Prep.drain_steps = 1000000000
+}
+
+// `clause` onto the list of `lit`, which moves where it is full.
+proc occur(occ: mut Occ, count: mut Count, lit: i32, clause: i32) {
+  var at = occ[lit].start
+  let n = occ[lit].size
+  if n == occ[lit].cap {
+    let moved = len(occ)
+    for x in 0..n { occ += { clause: occ[at + x].clause, start: 0, size: 0, cap: 0 } }
+    for x in n..2 * n + 4 { occ += { clause: -1, start: 0, size: 0, cap: 0 } }
+    occ[lit].start = moved
+    occ[lit].cap = 2 * n + 4
+    at = moved
+  }
+  occ[at + n].clause = clause
+  occ[lit].size = n + 1
+  count[lit].live += 1
+}
+
+// A bit per variable of clause `c`, the variable's number mod 29, above
+// the two of the flags: a clause has all the variables of another only
+// where it has all its bits.
+fn signature(pre: Pre, c: i32) -> i32 {
+  var bits = 0
+  for k in 0..pre[c].w { bits |= 1 << (2 + (pre[c + 2 + k].w >> 1) % 29) }
+  bits
+}
+
+// The clause after clause `c`, past the words strengthening freed.
+fn next(pre: Pre, c: i32) -> i32 {
+  var at = c + 2 + pre[c].w
+  while at < len(pre) && pre[at].w < 0 { at += 1 }
+  at
+}
+
+// Clause `c` deleted.
+proc delete(pre: mut Pre, count: mut Count, c: i32) {
+  pre[c + 1].w |= 1
+  for k in 0..pre[c].w { count[pre[c + 2 + k].w].live -= 1 }
+}
+
+// The clauses as read into Pre (each literal once, those with a literal
+// and its negation left out), and a copy of them kept.
+system copy() {
+  Original = []
+  Pre = []
+  Gone = [{ yes: false, fresh: false }; Problem.vars]
+  Fresh = []
+  Mark = [{ stamp: 0 }; 2 * Problem.vars]
+  Elim = []
+  Prep.seconds = wait_until(0.0)
+  Search.started = Prep.seconds
+  Prep.stamp = 0
+  for i in 0..len(Clauses) { Original += { lit: Clauses[i].lit } }
+  var at = 0
+  var stamp = 0
+  while Prep.on && at < len(Clauses) {
+    stamp += 1
+    let c = len(Pre)
+    Pre += { w: 0 }
+    Pre += { w: 0 }
+    var always = false
+    while Clauses[at].lit >= 0 {
+      let l = Clauses[at].lit
+      if Mark[l ^ 1].stamp == stamp {
+        always = true
+      } else if Mark[l].stamp != stamp {
+        Mark[l].stamp = stamp
+        Pre += { w: l }
+      }
+      at += 1
+    }
+    at += 1
+    if always { Pre = Pre[..c] } else {
+      Pre[c].w = len(Pre) - c - 2
+      Pre[c + 1].w = signature(Pre, c)
+    }
+  }
+  Prep.stamp = stamp
+}
+
+// Each literal's list, with room for as many again and four more.
+system occurrences() {
+  let lits = 2 * Problem.vars
+  Occ = [{ clause: -1, start: 0, size: 0, cap: 0 }; lits]
+  Count = [{ live: 0 }; lits]
+  var c = 0
+  while c < len(Pre) {
+    for i in 0..Pre[c].w { Occ[Pre[c + 2 + i].w].size += 1 }
+    c = next(Pre, c)
+  }
+  var at = 0
+  for l in 0..lits {
+    let cap = 2 * Occ[l].size + 4
+    Occ[l].start = at
+    Occ[l].cap = cap
+    Occ[l].size = 0
+    at += cap
+  }
+  for i in lits..at { Occ += { clause: -1, start: 0, size: 0, cap: 0 } }
+  c = 0
+  while c < len(Pre) {
+    for i in 0..Pre[c].w {
+      let l = Pre[c + 2 + i].w
+      Occ[Occ[l].start + Occ[l].size].clause = c
+      Occ[l].size += 1
+      Count[l].live += 1
+    }
+    c = next(Pre, c)
+  }
+}
+
+// Subsumption and strengthening (self-subsuming resolution) by clause
+// `c`: a clause with all its literals goes; one with all of them but one,
+// which it has negated, loses that literal (in place, off that literal's
+// list, and onto `queue`; MiniSat's strengthenClause). `c` looks only
+// along the list of its literal that occurs least, both ways, at clauses
+// of fewer than `limit` literals. What it gives: how many clauses went,
+// how many were strengthened, and how many literals were looked at.
+proc backward(pre: mut Pre, occ: mut Occ, count: mut Count, mark: mut Mark, bytes: mut Bytes,
+              queue: mut Queue, touched: mut Touched, c: i32, stamp: i32, limit: i32, proof: bool) -> (i32, i32, i64) {
+  let size = pre[c].w
+  var subsumed = 0
+  var strengthened = 0
+  var steps: i64 = 0
+  var best = pre[c + 2].w
+  for k in 1..size {
+    let l = pre[c + 2 + k].w
+    if occ[l].size + occ[l ^ 1].size < occ[best].size + occ[best ^ 1].size { best = l }
+  }
+  for k in 0..size { mark[pre[c + 2 + k].w].stamp = stamp }
+  let bits = pre[c + 1].w & ~3
+  for side in 0..2 {
+    let q = best ^ side
+    var i = 0
+    while i < occ[q].size && pre[c + 1].w & 1 == 0 {
+      let d = occ[occ[q].start + i].clause
+      let dsize = pre[d].w
+      if pre[d + 1].w & 1 == 1 {
+        // (A deleted clause off the list, the last in its place.)
+        let last = occ[q].size - 1
+        occ[occ[q].start + i].clause = occ[occ[q].start + last].clause
+        occ[q].size = last
+      } else {
+        if d != c && dsize >= size && dsize < limit && bits & ~pre[d + 1].w == 0 {
+          var same = 0
+          var flips = 0
+          var flipped = -1
+          for k in 0..dsize {
+            let l = pre[d + 2 + k].w
+            if mark[l].stamp == stamp { same += 1 }
+            else if mark[l ^ 1].stamp == stamp {
+              flips += 1
+              flipped = l
+            }
+          }
+          steps += dsize as i64
+          if same == size {
+            delete(pre, count, d)
+            for k in 0..dsize { touched += { var: pre[d + 2 + k].w >> 1 } }
+            subsumed += 1
+            if proof {
+              bytes += { value: 100 }
+              for k in 0..dsize { proof_lit(bytes, pre[d + 2 + k].w) }
+              bytes += { value: 0 }
+            }
+          } else if same == size - 1 && flips == 1 {
+            if proof {
+              bytes += { value: 97 }
+              for k in 0..dsize {
+                if pre[d + 2 + k].w != flipped { proof_lit(bytes, pre[d + 2 + k].w) }
+              }
+              bytes += { value: 0 }
+              bytes += { value: 100 }
+              for k in 0..dsize { proof_lit(bytes, pre[d + 2 + k].w) }
+              bytes += { value: 0 }
+            }
+            // (The last literal in the place of the one that goes.)
+            var k = 0
+            while pre[d + 2 + k].w != flipped { k += 1 }
+            pre[d + 2 + k].w = pre[d + 2 + dsize - 1].w
+            pre[d + 2 + dsize - 1].w = -1
+            pre[d].w = dsize - 1
+            pre[d + 1].w = signature(pre, d) | (pre[d + 1].w & 3)
+            let fs = occ[flipped].start
+            var j = 0
+            while occ[fs + j].clause != d { j += 1 }
+            occ[fs + j].clause = occ[fs + occ[flipped].size - 1].clause
+            occ[flipped].size -= 1
+            count[flipped].live -= 1
+            touched += { var: flipped >> 1 }
+            if pre[d + 1].w & 2 == 0 {
+              pre[d + 1].w |= 2
+              queue += { clause: d }
+            }
+            strengthened += 1
+            // (Off the list being walked: what took its place is next.)
+            if flipped == q { i -= 1 }
+          }
+        }
+        i += 1
+      }
+    }
+  }
+  (subsumed, strengthened, steps)
+}
+
+// Each clause on the queue against the others, those it strengthens put
+// on it too, until it is through or `budget` literals are looked at; the
+// stamps from `stamp` on. What it gives: as `backward`, and the last stamp.
+proc drain(pre: mut Pre, occ: mut Occ, count: mut Count, mark: mut Mark, bytes: mut Bytes,
+           queue: mut Queue, touched: mut Touched, stamp: i32, limit: i32, budget: i64,
+           proof: bool) -> (i32, i32, i64, i32) {
+  var subsumed = 0
+  var strengthened = 0
+  var steps: i64 = 0
+  var last = stamp
+  var at = 0
+  while at < len(queue) {
+    let c = queue[at].clause
+    pre[c + 1].w &= -3
+    if pre[c + 1].w & 1 == 0 && pre[c].w > 0 && steps < budget {
+      last += 1
+      let (gone, stronger, looked) = backward(pre, occ, count, mark, bytes, queue, touched, c, last, limit, proof)
+      subsumed += gone
+      strengthened += stronger
+      steps += looked
+    }
+    at += 1
+  }
+  (subsumed, strengthened, steps, last)
+}
+
+// Before the elimination, each clause of at most `subsume_size`
+// literals against the others, until `subsume_steps` literals are looked
+// at.
+system subsume() {
+  Queue = []
+  let top = len(Pre)
+  var c = 0
+  while Prep.on && c < top && Prep.steps < Prep.subsume_steps {
+    let size = Pre[c].w
+    if Pre[c + 1].w & 1 == 0 && size > 0 && size <= Prep.subsume_size {
+      Prep.stamp += 1
+      let (gone, stronger, steps) = backward(Pre, Occ, Count, Mark, Bytes, Queue, Touched, c, Prep.stamp,
+                                             Prep.sub_limit, Options.proof)
+      Prep.subsumed += gone as i64
+      Prep.strengthened += stronger as i64
+      Prep.steps += steps
+    }
+    c = next(Pre, c)
+  }
+  let (gone, stronger, steps, stamp) = drain(Pre, Occ, Count, Mark, Bytes, Queue, Touched, Prep.stamp,
+                                             Prep.sub_limit, Prep.drain_steps - Prep.steps, Options.proof)
+  Prep.subsumed += gone as i64
+  Prep.strengthened += stronger as i64
+  Prep.steps += steps
+  Prep.stamp = stamp
+  Queue = []
+}
+
+// Every variable to be put in the heap.
+system costs() {
+  Heap = [{ var: 0, pos: -1, score: 0.0 }; Problem.vars]
+  Touched = []
+  for v in 0..if Prep.on { Problem.vars } else { 0 } { Touched += { var: v } }
+}
+
+// The variables from the heap, the cheapest first; those whose clauses
+// change go where their cost now puts them, and back in where they were
+// taken out but not eliminated. When it is empty, every clause on a
+// variable of the resolvents since is held against the others (so that
+// an older clause subsumes or strengthens a resolvent), as MiniSat's
+// gatherTouchedClauses, and the heap goes on with what that changed.
+system eliminate() {
+  var heap = 0
+  var going = Prep.on
+  while going {
+    if heap == 0 && len(Fresh) > 0 {
+      // (Each clause once: bit 1 is set on those queued.)
+      Queue = []
+      for f in 0..len(Fresh) {
+        let u = Fresh[f].var
+        Gone[u].fresh = false
+        for side in 0..2 {
+          let q = 2 * u + side
+          let qs = Occ[q].start
+          for i in qs..qs + Occ[q].size {
+            let c = Occ[i].clause
+            if Pre[c + 1].w & 3 == 0 {
+              Pre[c + 1].w |= 2
+              Queue += { clause: c }
+            }
+          }
+        }
+      }
+      Fresh = []
+      for i in 0..len(Queue) { Pre[Queue[i].clause + 1].w &= -3 }
+      let (gone, stronger, steps, stamp) = drain(Pre, Occ, Count, Mark, Bytes, Queue, Touched, Prep.stamp,
+                                                 Prep.sub_limit, Prep.drain_steps - Prep.steps, Options.proof)
+      Prep.subsumed += gone as i64
+      Prep.strengthened += stronger as i64
+      Prep.steps += steps
+      Prep.stamp = stamp
+      Queue = []
+    }
+    for t in 0..len(Touched) {
+      let v = Touched[t].var
+      if !Gone[v].yes {
+        // (Of two alike, the lower variable first: on a circuit, the
+        // order the file has them in, which MiniSat's heap only comes
+        // near to by chance; shift1add goes from 469,000 clauses to none.)
+        let score = -((Count[2 * v].live * Count[2 * v + 1].live) as f64)
+                    - (v as f64) / (Problem.vars as f64 + 1.0)
+        let was = Heap[v].score
+        Heap[v].score = score
+        if Heap[v].pos < 0 { heap = heap_insert(Heap, v, heap) }
+        else if score > was { heap_up(Heap, Heap[v].pos) }
+        else if score < was { heap_down(Heap, Heap[v].pos, heap) }
+      }
+    }
+    Touched = []
+    going = heap > 0
+    let v = if going { Heap[0].var } else { 0 }
+    if going {
+      Heap[v].pos = -1
+      heap -= 1
+      if heap > 0 {
+        Heap[0].var = Heap[heap].var
+        Heap[Heap[0].var].pos = 0
+        heap_down(Heap, 0, heap)
+      }
+    }
+    let p = 2 * v
+    let n = p + 1
+    let pos = if going { Count[p].live } else { 0 }
+    let neg = if going { Count[n].live } else { 0 }
+    if pos + neg > 0 && pos + neg <= Prep.limit {
+      // (How many resolvents there are, and whether each is short
+      // enough; given up on as soon as there are too many.)
+      var count = 0
+      var fits = true
+      let ps = Occ[p].start
+      let ns = Occ[n].start
+      for i in ps..ps + Occ[p].size {
+        let c = Occ[i].clause
+        if Pre[c + 1].w & 1 == 0 && fits {
+          for j in ns..ns + Occ[n].size {
+            let d = Occ[j].clause
+            if Pre[d + 1].w & 1 == 0 && fits {
+              Prep.stamp += 1
+              let stamp = Prep.stamp
+              for k in 0..Pre[c].w { Mark[Pre[c + 2 + k].w].stamp = stamp }
+              var size = Pre[c].w - 1
+              var always = false
+              for k in 0..Pre[d].w {
+                let l = Pre[d + 2 + k].w
+                if l != n {
+                  if Mark[l ^ 1].stamp == stamp { always = true }
+                  else if Mark[l].stamp != stamp { size += 1 }
+                }
+              }
+              if !always {
+                count += 1
+                if size > Prep.clause_limit || count > pos + neg { fits = false }
+              }
+            }
+          }
+        }
+      }
+      if fits {
+        Queue = []
+        // (The resolvents in, into the proof too.)
+        for i in ps..ps + Occ[p].size {
+          let c = Occ[i].clause
+          if Pre[c + 1].w & 1 == 0 {
+            for j in ns..ns + Occ[n].size {
+              let d = Occ[j].clause
+              if Pre[d + 1].w & 1 == 0 {
+                Prep.stamp += 1
+                let stamp = Prep.stamp
+                let r = len(Pre)
+                Pre += { w: 0 }
+                Pre += { w: 0 }
+                for k in 0..Pre[c].w {
+                  let l = Pre[c + 2 + k].w
+                  Mark[l].stamp = stamp
+                  if l != p { Pre += { w: l } }
+                }
+                var always = false
+                for k in 0..Pre[d].w {
+                  let l = Pre[d + 2 + k].w
+                  if l != n {
+                    if Mark[l ^ 1].stamp == stamp { always = true }
+                    else if Mark[l].stamp != stamp {
+                      Mark[l].stamp = stamp
+                      Pre += { w: l }
+                    }
+                  }
+                }
+                if always {
+                  Pre = Pre[..r]
+                } else {
+                  let size = len(Pre) - r - 2
+                  Pre[r].w = size
+                  Pre[r + 1].w = signature(Pre, r)
+                  for k in 0..size {
+                    let u = Pre[r + 2 + k].w >> 1
+                    occur(Occ, Count, Pre[r + 2 + k].w, r)
+                    Touched += { var: u }
+                    if !Gone[u].fresh {
+                      Gone[u].fresh = true
+                      Fresh += { var: u }
+                    }
+                  }
+                  Queue += { clause: r }
+                  Prep.resolvents += 1
+                  if Options.proof {
+                    Bytes += { value: 97 }
+                    for k in 0..size { proof_lit(Bytes, Pre[r + 2 + k].w) }
+                    Bytes += { value: 0 }
+                  }
+                }
+              }
+            }
+          }
+        }
+        // (The clauses on the variable out, kept for the model.)
+        for side in 0..2 {
+          let q = p + side
+          let qs = Occ[q].start
+          for i in qs..qs + Occ[q].size {
+            let c = Occ[i].clause
+            if Pre[c + 1].w & 1 == 0 {
+              delete(Pre, Count, c)
+              Prep.removed += 1
+              let size = Pre[c].w
+              Elim += { lit: q }
+              for k in 0..size {
+                let l = Pre[c + 2 + k].w
+                if l != q {
+                  Elim += { lit: l }
+                  Touched += { var: l >> 1 }
+                }
+              }
+              Elim += { lit: size }
+              if Options.proof {
+                Bytes += { value: 100 }
+                for k in 0..size { proof_lit(Bytes, Pre[c + 2 + k].w) }
+                Bytes += { value: 0 }
+              }
+            }
+          }
+        }
+        Gone[v].yes = true
+        Prep.eliminated += 1
+        // (The resolvents against the other clauses, and the clauses
+        // they strengthen too.)
+        let (gone, stronger, steps, stamp) = drain(Pre, Occ, Count, Mark, Bytes, Queue, Touched, Prep.stamp,
+                                                   Prep.sub_limit, Prep.drain_steps - Prep.steps, Options.proof)
+        Prep.subsumed += gone as i64
+        Prep.strengthened += stronger as i64
+        Prep.steps += steps
+        Prep.stamp = stamp
+        if Options.proof && len(Bytes) > 1048576 {
+          write_bytes(Options.proof_file, Bytes, 0, len(Bytes), Search.written)
+          Search.written = true
+          Bytes = []
+        }
+      }
+    }
+  }
+}
+
+// The clauses that are left, for the search.
+system emit() {
+  if Prep.on {
+    Clauses = []
+    var c = 0
+    var kept = 0
+    while c < len(Pre) {
+      if Pre[c + 1].w & 1 == 0 {
+        for k in 0..Pre[c].w { Clauses += { lit: Pre[c + 2 + k].w } }
+        Clauses += { lit: -1 }
+        kept += 1
+      }
+      c = next(Pre, c)
+    }
+    let seconds = wait_until(0.0) - Prep.seconds
+    put("c subsumed {Prep.subsumed} clauses, strengthened {Prep.strengthened}")
+    put("c eliminated {Prep.eliminated} variables: {Prep.removed} clauses out, {Prep.resolvents} resolvents in, {kept} clauses left, {seconds} seconds")
+  }
+  Pre = []
+}
+
+schedule prepare() { copy() occurrences() subsume() costs() eliminate() emit() }
+
+// A model extended to the eliminated variables: their clauses from the
+// last kept back, each that no literal satisfies satisfied by its first.
+// Then it is held against the clauses as read; one it does not satisfy
+// is no answer.
+system extend() {
+  if Search.status == Status.Sat && Prep.on {
+    var e = len(Elim)
+    while e > 0 {
+      let size = Elim[e - 1].lit
+      let from = e - 1 - size
+      var satisfied = false
+      for k in from..e - 1 {
+        if Values[Elim[k].lit].v == 1 { satisfied = true }
+      }
+      if !satisfied {
+        let q = Elim[from].lit
+        Values[q].v = 1
+        Values[q ^ 1].v = -1
+      }
+      e = from
+    }
+    var at = 0
+    var bad = -1
+    var number = 0
+    while at < len(Original) {
+      var holds = false
+      while Original[at].lit >= 0 {
+        if Values[Original[at].lit].v == 1 { holds = true }
+        at += 1
+      }
+      at += 1
+      if !holds && bad < 0 { bad = number }
+      number += 1
+    }
+    if bad >= 0 {
+      put("c the extended model leaves clause {bad} as read false")
+      Search.status = Status.Unknown
+    }
+  }
+}

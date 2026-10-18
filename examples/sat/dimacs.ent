@@ -1,0 +1,135 @@
+// A problem in the DIMACS CNF form, read from a file into the clauses
+// the solver takes (sat.ent).
+//
+//   schedule start() { read()  setup() }
+//
+// The file has comment lines (`c ...`), one header `p cnf V C` (V
+// variables, C clauses), and then the clauses: each a list of whole
+// numbers ended by 0, where 3 is variable 3 and -3 its negation. Lines
+// do not matter. SATLIB's files end with `%`, which ends the clauses.
+import files
+
+// The clauses as read, one after another: each one's literals and then
+// -1. A literal is its variable's number from 0, times two, plus one
+// where it is negated: DIMACS 3 is 4, -3 is 5.
+buffer Clauses { lit: i32 } capacity 16
+
+// `read`: whether the file was there and is a problem; `error` says what
+// was wrong where it is not.
+unique Problem { file: text[126], read: bool, vars: i32, clauses: i32, error: text[126] }
+
+world {
+  Problem.file = "problem.cnf"
+}
+
+fn space(byte: u8) -> bool { byte == 32 || byte == 9 || byte == 10 || byte == 13 }
+
+fn digit(byte: u8) -> bool { byte >= 48 && byte <= 57 }
+
+// Where the line `at` is in ends: the byte after its newline.
+fn line_end(bytes: Bytes, at: i32) -> i32 {
+  var from = at
+  while from < len(bytes) && bytes[from].value != 10 { from += 1 }
+  from + 1
+}
+
+// Where the next byte that is not a space is, at `at` or after it.
+fn skip(bytes: Bytes, at: i32) -> i32 {
+  var from = at
+  while from < len(bytes) && space(bytes[from].value) { from += 1 }
+  from
+}
+
+// The whole number at `at`, a `-` before it where it has one, and where
+// the bytes go on after it: `at` itself where no number is there.
+fn number(bytes: Bytes, at: i32) -> (i32, i32) {
+  var from = at
+  let negative = from < len(bytes) && bytes[from].value == 45
+  if negative { from += 1 }
+  let digits = from
+  var value = 0
+  while from < len(bytes) && digit(bytes[from].value) {
+    value = value * 10 + (bytes[from].value as i32 - 48)
+    from += 1
+  }
+  if from == digits { (0, at) } else if negative { (-value, from) } else { (value, from) }
+}
+
+system read() {
+  Clauses = []
+  Problem.read = false
+  Problem.vars = 0
+  Problem.clauses = 0
+  let size = read_file(Problem.file, Bytes)
+  if size < 0 {
+    Problem.error = "no file {Problem.file} where the program was started"
+  } else if size > len(Bytes) {
+    Problem.error = "{Problem.file} has {size} bytes, more than Bytes holds"
+  } else {
+    var at = 0
+    var header = false
+    var ok = true
+    var done = false
+    var vars = 0
+    var clauses = 0
+    var open = 0
+    while ok && !done && at < size {
+      let byte = Bytes[at].value
+      if space(byte) {
+        at += 1
+      } else if byte == 99 {
+        at = line_end(Bytes, at)
+      } else if byte == 37 {
+        done = true
+      } else if byte == 112 {
+        let c = skip(Bytes, at + 1)
+        let (v, after_v) = number(Bytes, skip(Bytes, c + 3))
+        let (n, after_n) = number(Bytes, skip(Bytes, after_v))
+        if header {
+          Problem.error = "a second header"
+          ok = false
+        } else if Bytes[c].value != 99 || Bytes[c + 1].value != 110 ||
+                  Bytes[c + 2].value != 102 || after_n == after_v || v < 0 || n < 0 {
+          Problem.error = "a header that is not `p cnf V C`"
+          ok = false
+        } else {
+          header = true
+          vars = v
+        }
+        at = line_end(Bytes, at)
+      } else if !header {
+        Problem.error = "a clause before the header"
+        ok = false
+      } else {
+        let (lit, next) = number(Bytes, at)
+        if next == at {
+          Problem.error = "a byte {byte} where a number belongs"
+          ok = false
+        } else if lit == 0 {
+          Clauses += { lit: -1 }
+          clauses += 1
+          open = 0
+        } else if lit > vars || -lit > vars {
+          Problem.error = "the literal {lit}, beyond the {vars} variables"
+          ok = false
+        } else {
+          Clauses += { lit: if lit > 0 { 2 * (lit - 1) } else { 2 * (-lit - 1) + 1 } }
+          open += 1
+        }
+        at = next
+      }
+    }
+    if ok && open > 0 {
+      Clauses += { lit: -1 }
+      clauses += 1
+    }
+    if ok && !header {
+      Problem.error = "no header `p cnf V C`"
+      ok = false
+    }
+    Problem.read = ok
+    Problem.vars = vars
+    Problem.clauses = clauses
+  }
+  Bytes = []
+}

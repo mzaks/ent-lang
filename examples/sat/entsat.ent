@@ -1,0 +1,21 @@
+// entsat: solves the problem in "problem.cnf" where it is started (DIMACS
+// CNF), prints the answer as SAT competitions do, and writes a DRAT
+// proof to "proof.drat" (binary; empty where the answer is SAT).
+//
+//   tools/ent build examples/sat/entsat.ent -o build/sat/entsat
+//   cd somewhere && cp problem.cnf . && .../build/sat/entsat
+//
+// (Room as room.ent says.)
+import dimacs
+import sat
+import satprep
+import room
+
+schedule start() { read() prepare() setup() watch() }
+schedule done() { extend() finish() }
+
+main {
+  start()
+  loop { round() } until Search.status != Status.Running
+  done()
+}
