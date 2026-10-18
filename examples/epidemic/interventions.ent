@@ -549,32 +549,6 @@ system trace() {
             }
           }
         }
-        for (m: Disease, mp: Person, mc: Conduct, mpast: Past, mt: mut Test,
-             mq: mut Quarantine)-[w: WorksWith]->(me) {
-          if mc.app && m.stage != Stage.Dead && !in_hospital(m.stage) && !mt.found {
-            var met = -1
-            for ago in 0..Measures.back {
-              let then = day - ago
-              let locked = then >= Model.lockdown_from && then < Model.lockdown_to
-              if met < 0 && bit(past.out, ago) && bit(mpast.out, ago) &&
-                 met(key(Run.seed, 0, then, MEETS), w.key,
-                     open(Networks, n.network, Model.daily, locked)) &&
-                 saw(Run.seed, p.id, mp.id, then, Measures.seen) { met = then }
-            }
-            if met >= 0 {
-              if Measures.told_stay {
-                connect (m)-[ToldBy { met: met, red: found }]->(me)
-                if mc.compliance < stays {
-                  let until = told_until(Run.seed, mp.id, p.id, day, met, gives_up, days)
-                  if until > day { mq.until max= until }
-                }
-              }
-              if Measures.told_test && mc.compliance < takers {
-                mt.asked max= test_day(day, met, Measures.order_wait, Measures.too_early)
-              }
-            }
-          }
-        }
         // By chance: each day's stubs of theirs, and whom those met.
         for ago in 0..min(Measures.back, Pairing.kept) {
           let then = day - ago

@@ -3,6 +3,35 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-18, after the end: `workplace`, a tie two edges
+
+The loops for the GPU that do a lot for few rows list those rows first
+(compacting), `workplace` draws whether a tie was met before it looks at
+the other end, and a tie is an edge from each end (`WorksWith` 22 a
+person), so that nothing goes along it backwards (docs/gpu.md).
+`BENCH_ONE_CPU=4 BENCH_CPUS=4-7 BENCH_ALL=0 bench/epidemic/run.py 1000000
+--gpu workplace,infectiousness,chance,lay,infect,progress,symptoms,tests,household,tally`:
+
+| a million people, 100 days | set-up s | a day ms | `workplace` ms | memory MB | infected |
+|---|---|---|---|---|---|
+| one core | 2.51 | 158.1 | 41.8 | 692 | 857,886 |
+| four threads | 2.70 | 60.5 | 26.1 | 1,003 | 857,886 |
+| one core and the GPU | 2.42 | 3.9 | 0.24 | 923 | 857,886 |
+| four threads and the GPU | 2.47 | 3.9 | 0.25 | 1,056 | 857,886 |
+
+Before (the entry below, these cores): 183.1, 66.4, 5.1 and 4.9 ms a
+day; `workplace` 93.3 and 38.9 on the CPU. On the CPU too a tie that is
+two edges is about half of `workplace` (`chance`, 98.5 on one core where
+it was 72.4, did not change: the machine). With tracing, 100,000
+people: 32,718 infected as before, `trace` 4.6 ms where it was 5.4 on
+one core.
+
+`ENT_GPU_TIMES=1`, one core and the GPU: busy 341.9 ms (508.5), the
+CPU waiting 325.1. A day's `workplace` 0.49 ms (three launches: the
+list's count set, the rows that pass listed, the body for them; 2.00
+before), `chance` 0.43 (0.65). Now first are `lay` (0.61, 19 launches),
+`infect` (0.56), `progress` (0.41) and the fused loops of the day (0.38).
+
 ## 2026-10-18, at the very end: where the GPU's time goes
 
 `ENT_GPU_TIMES=1` (devices/gpu.c: events around each kernel and copy on

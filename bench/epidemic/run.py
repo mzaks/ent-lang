@@ -95,7 +95,7 @@ import interventions
 capacity Person {people}
 capacity Household {people}
 capacity LivesIn {people}
-capacity WorksWith {people * 11}
+capacity WorksWith {people * 22}
 capacity Taken {people}
 capacity Ring {people}
 capacity Order {8 * (people + 1)}

@@ -21,8 +21,10 @@
 // ENT_GPU_CHECK (each packed copy checked against the whole range),
 // ENT_GPU_LOG (the first copies, a line each; as many as it says, or
 // 3000), ENT_GPU_TIMES (how long each kernel and each kind of copy took
-// on the GPU, by events, and how long the CPU waited) and ENT_GPU_PROTECT (each kernel waited for with the CPU's world
-// out of reach: one that touches it fails, saying which).
+// on the GPU, by events, and how long the CPU waited; ENT_GPU_TIMES_EACH
+// a kernel's name, too, each launch of it) and ENT_GPU_PROTECT (each
+// kernel waited for with the CPU's world out of reach: one that touches
+// it fails, saying which).
 
 #include <cuda.h>
 #include <stdbool.h>
@@ -124,6 +126,13 @@ static void collect(void) {
           "cuEventElapsedTime");
     times[marks[k].which].ms += ms;
     times[marks[k].which].count += 1;
+    // (ENT_GPU_TIMES_EACH=name: every launch of the kernels so named.)
+    static const char *each = (const char *)-1;
+    if (each == (const char *)-1)
+      each = getenv("ENT_GPU_TIMES_EACH");
+    if (each && strstr(times[marks[k].which].name, each))
+      fprintf(stderr, "gpu time %s %ld %.3f ms\n", times[marks[k].which].name,
+              times[marks[k].which].count, ms);
     cuEventDestroy(marks[k].from);
     cuEventDestroy(marks[k].to);
   }

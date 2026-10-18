@@ -25,7 +25,7 @@ import interventions
 capacity Person 100000
 capacity Household 100000
 capacity LivesIn 100000
-capacity WorksWith 1100000
+capacity WorksWith 2200000
 capacity Taken 100000
 capacity Ring 100000
 capacity Order 800008

@@ -30,8 +30,8 @@ measures.
   10,000 so that the city's ages and household sizes come to the
   country's; a person lives in one by an edge of the tree `LivesIn`. And
   the five networks, each a ring of its members rewired as the
-  reference rewires it: a tie is one edge of `WorksWith`, met along
-  from either end.
+  reference rewires it: a tie is two edges of `WorksWith`, one from
+  each end, with one key.
 - `transmission.ent`: what an ill person gives off on a day, and whose
   hazard it is taken from. At home the household adds up what its ill
   give off (up the tree) and every member loses it (back down), in place

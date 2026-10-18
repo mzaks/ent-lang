@@ -265,3 +265,54 @@ ent.schedule @frame() {
 // CHECK: processor = block_x
 // CHECK-NOT: scf.parallel
 // CHECK: return
+
+// -----
+
+// A loop for the GPU whose rows mostly pass by (a filter, then a loop of
+// their own for the few that pass) is two: the rows that pass are listed
+// first, by an atomic count at the front of a scratch array, and then
+// the body runs for those, one after another in a warp.
+ent.component @P (x: f32)
+ent.component @V (n: i32)
+ent.archetype @A (@P, @V) capacity 1000
+
+ent.system @spin() gpu {
+  ent.query (%p: !ent.ref<@P, mut>, %v: !ent.ref<@V>) {
+    %x = ent.get %p "x" : !ent.ref<@P, mut> -> f32
+    %zero = arith.constant 0.0 : f32
+    %up = arith.cmpf ogt, %x, %zero : f32
+    scf.if %up {
+      %n = ent.get %v "n" : !ent.ref<@V> -> i32
+      %end = arith.index_cast %n : i32 to index
+      %c0 = arith.constant 0 : index
+      %c1 = arith.constant 1 : index
+      %s = scf.for %i = %c0 to %end step %c1 iter_args(%a = %x) -> f32 {
+        %b = arith.addf %a, %a : f32
+        scf.yield %b : f32
+      }
+      ent.set %p "x", %s : !ent.ref<@P, mut>, f32
+    }
+  }
+}
+ent.schedule @frame() {
+  ent.run @spin()
+}
+
+// CHECK-LABEL: func.func @frame
+// CHECK: %[[LIST:.*]] = call @ent_gpu_scratch(%c15_i64, %{{.*}})
+// CHECK: %[[VIEW:.*]] = memref.view %[[LIST]]
+// CHECK: scf.parallel
+// CHECK: memref.store %c0_i32, %[[VIEW]]
+// CHECK: scf.parallel
+// CHECK: arith.cmpf ogt
+// CHECK: memref.atomic_rmw addi %{{.*}}, %[[VIEW]]
+// CHECK-NOT: scf.for
+// CHECK: memref.store %{{.*}}, %[[VIEW]]
+// CHECK: scf.parallel
+// CHECK: %[[COUNT:.*]] = memref.load %[[VIEW]]
+// CHECK: arith.cmpi ult, %{{.*}}, %{{.*}} : index
+// CHECK: memref.load %[[VIEW]]
+// CHECK: scf.for
+// CHECK: processor = block_x
+// CHECK-NOT: scf.parallel
+// CHECK: return

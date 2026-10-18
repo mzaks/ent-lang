@@ -5,7 +5,7 @@
 //   capacity Person 100000
 //   capacity Household 100000
 //   capacity LivesIn 100000
-//   capacity WorksWith 1100000
+//   capacity WorksWith 2200000
 //   schedule setup() { panel()  households()  settle()  census()  employ()  wire() }
 //
 // (And `capacity Order`, as many as there are people, and `capacity
@@ -96,8 +96,9 @@ relation (Person)-[Housemate]->(Person) capacity 16
 // Whom somebody was told about (a `Source`), having met them on the day
 // `met`; `red`: as one a test found.
 relation (Person)-[ToldBy { met: i32, red: bool }]->(Person) capacity 16
-// A tie in a network. It is one edge, met along from either end; `key`
-// numbers the ties, for the draw of the days it is met on.
+// A tie in a network. It is two edges, one from each end, so that each
+// end finds it among its own; `key` numbers the ties, for the draw of
+// the days it is met on, and the two edges of a tie share it.
 relation (Person)-[WorksWith { key: i32 }]->(Person) capacity 16
 
 const HOUSES = 5
@@ -405,8 +406,10 @@ system wire() {
       for step in 1..far + 1 {
         let (from, to) = tie(key(Run.seed, ties, 0, TIES), i, step, members, far,
                              Model.rewire)
-        connect (Ring[permute(order, from, members)].who)-[WorksWith { key: ties }]->
-                (Ring[permute(order, to, members)].who)
+        let a = Ring[permute(order, from, members)].who
+        let b = Ring[permute(order, to, members)].who
+        connect (a)-[WorksWith { key: ties }]->(b)
+        connect (b)-[WorksWith { key: ties }]->(a)
         ties += 1
       }
     }
@@ -416,6 +419,5 @@ system wire() {
   for p: Person, w: mut Work { w.ties = 0 }
   for p: Person {
     for (p)-[WorksWith]->(o: mut Work) { o.ties += 1 }
-    for (o: mut Work)-[WorksWith]->(p) { o.ties += 1 }
   }
 }

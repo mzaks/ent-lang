@@ -159,22 +159,21 @@ fn open(networks: Networks, network: u8, daily: f32, lockdown: bool) -> f32 {
   if lockdown { daily * networks[network].lockdown } else { daily }
 }
 
-// At work and at school: along each tie that is met today, from either
-// end. (Both ends of a tie are of one network.) Nobody who is kept at
-// home goes there.
+// At work and at school: along each tie that is met today. (A tie is an
+// edge from each of its ends, and both ends are of one network.) Nobody
+// who is kept at home goes there.
 system workplace() {
   let today = key(Run.seed, 0, Clock.day, MEETS)
   for p: Person, i: Infectious, n: Work, q: Quarantine with Ill
       where i.rate > 0.0 && q.until < Clock.day {
     let daily = open(Networks, n.network, Model.daily, Policy.lockdown)
-    for (p)-[w: WorksWith]->(o: mut Hazard, home: Quarantine) {
-      if home.until < Clock.day && met(today, w.key, daily) {
-        o.left -= hazard((i.rate * Model.at_work) as f64)
-      }
-    }
-    for (o: mut Hazard, home: Quarantine)-[w: WorksWith]->(p) {
-      if home.until < Clock.day && met(today, w.key, daily) {
-        o.left -= hazard((i.rate * Model.at_work) as f64)
+    // (Whether they met first, from the tie alone: the other end is
+    // looked at only for the ties met, half of them, and it is far.)
+    for (p)-[w: WorksWith]->(o) {
+      if met(today, w.key, daily) {
+        if let until = Quarantine(o).until {
+          if until < Clock.day { Hazard(o).left -= hazard((i.rate * Model.at_work) as f64) }
+        }
       }
     }
   }

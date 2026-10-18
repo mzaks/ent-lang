@@ -16201,6 +16201,160 @@ static LogicalResult checkGpuLoops(ModuleOp module) {
   return failure(result.wasInterrupted());
 }
 
+/// Whether `op`, and all in it, writes nothing (reads are fine).
+static bool writesNothing(Operation *op) {
+  WalkResult result = op->walk([](Operation *inner) {
+    if (inner->hasTrait<OpTrait::HasRecursiveMemoryEffects>())
+      return WalkResult::advance();
+    auto effects = dyn_cast<MemoryEffectOpInterface>(inner);
+    if (!effects)
+      return WalkResult::interrupt();
+    if (effects.hasEffect<MemoryEffects::Write>() ||
+        effects.hasEffect<MemoryEffects::Allocate>() ||
+        effects.hasEffect<MemoryEffects::Free>())
+      return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  return !result.wasInterrupted();
+}
+
+/// The scratch array of devices/gpu.c a compacted loop lists its rows in
+/// (running sums take theirs from 0 up; one loop at a time uses it).
+static constexpr int64_t kCompactSlot = 15;
+
+/// A loop for the GPU whose body does a lot for few of its rows: a `for`
+/// (over edges, or numbers) inside what the query's filters pass, the
+/// `scf.if`s that are all the body is, but for what they test (which
+/// writes nothing). In a warp of 32 rows a handful pass, and the warp
+/// goes through the longest of their loops: so the rows that pass are
+/// listed first (a loop that appends each to a list, by an atomic count),
+/// and the body runs for those, one after another in a warp. In any
+/// order: a loop for the GPU sends atomically and writes its own rows.
+static void compactGpuLoop(IRRewriter &rewriter, ModuleOp module,
+                           scf::ParallelOp loop) {
+  if (loop.getNumLoops() != 1 || !getConstantIntValue(loop.getLowerBound()[0]) ||
+      *getConstantIntValue(loop.getLowerBound()[0]) != 0 ||
+      !getConstantIntValue(loop.getStep()[0]) ||
+      *getConstantIntValue(loop.getStep()[0]) != 1 || loop.getNumResults())
+    return;
+  // The guards: an `scf.if` without results or else that a block ends in,
+  // after what writes nothing; the innermost one's `then` is the work.
+  scf::IfOp guard;
+  Block *block = loop.getBody();
+  while (true) {
+    auto ops = block->without_terminator();
+    if (ops.empty())
+      break;
+    auto last = dyn_cast<scf::IfOp>(&*std::prev(ops.end()));
+    if (!last || last.getNumResults() || !last.getElseRegion().empty())
+      break;
+    bool clean = true;
+    for (Operation &op : ops)
+      if (&op != last.getOperation() && !writesNothing(&op))
+        clean = false;
+    if (!clean)
+      break;
+    guard = last;
+    block = last.thenBlock();
+  }
+  if (!guard)
+    return;
+  bool heavy = false;
+  guard.thenBlock()->walk([&](Operation *op) {
+    if (isa<scf::ForOp, scf::WhileOp>(op))
+      heavy = true;
+  });
+  if (!heavy)
+    return;
+
+  Location loc = loop.getLoc();
+  Value count = loop.getUpperBound()[0];
+  rewriter.setInsertionPoint(loop);
+  Type i32 = rewriter.getI32Type();
+  Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  // The list: its length first, then the rows.
+  Value room = arith::AddIOp::create(rewriter, loc, count, c1);
+  Value bytes = arith::IndexCastOp::create(
+      rewriter, loc, rewriter.getI64Type(),
+      arith::MulIOp::create(rewriter, loc, room,
+                            arith::ConstantIndexOp::create(rewriter, loc, 4)));
+  Value raw =
+      callGpu(rewriter, loc, module, "ent_gpu_scratch",
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                      kCompactSlot, 64),
+                         bytes},
+              TypeRange{MemRefType::get({ShapedType::kDynamic},
+                                        rewriter.getI8Type())})
+          .getResult(0);
+  Value list = memref::ViewOp::create(
+      rewriter, loc, MemRefType::get({ShapedType::kDynamic}, i32), raw, c0,
+      ValueRange{room});
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    parallelTurns(rewriter, loc, c1, /*gpu=*/true);
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 32),
+                            list, ValueRange{c0});
+  }
+
+  // The body, for the listed rows.
+  rewriter.setInsertionPointAfter(loop);
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    Value at = parallelTurns(rewriter, loc, count, /*gpu=*/true);
+    Value listed = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(),
+        memref::LoadOp::create(rewriter, loc, list, ValueRange{c0}));
+    auto within = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, at,
+                              listed),
+        /*withElseRegion=*/false);
+    rewriter.setInsertionPoint(within.thenBlock()->getTerminator());
+    Value row = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(),
+        memref::LoadOp::create(
+            rewriter, loc, list,
+            ValueRange{arith::AddIOp::create(rewriter, loc, at, c1)}));
+    IRMapping mapping;
+    mapping.map(loop.getInductionVars()[0], row);
+    for (Operation &op : loop.getBody()->without_terminator())
+      rewriter.clone(op, mapping);
+  }
+
+  // The rows the filters pass, listed: in the guard, in place of the work.
+  Block *work = guard.thenBlock();
+  // (From the last, so that what uses a value goes before it.)
+  while (&work->front() != work->getTerminator())
+    rewriter.eraseOp(work->getTerminator()->getPrevNode());
+  rewriter.setInsertionPoint(work->getTerminator());
+  Value slot = memref::AtomicRMWOp::create(
+      rewriter, loc, arith::AtomicRMWKind::addi,
+      arith::ConstantIntOp::create(rewriter, loc, 1, 32), list,
+      ValueRange{c0});
+  Value place = arith::AddIOp::create(
+      rewriter, loc,
+      arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(), slot),
+      c1);
+  memref::StoreOp::create(
+      rewriter, loc,
+      arith::IndexCastOp::create(rewriter, loc, i32,
+                                 loop.getInductionVars()[0]),
+      list, ValueRange{place});
+}
+
+static void compactGpuLoops(ModuleOp module) {
+  IRRewriter rewriter(module.getContext());
+  SmallVector<scf::ParallelOp> loops;
+  module.walk([&](scf::ParallelOp loop) {
+    if (loop->hasAttr(kGpuLoopAttr))
+      loops.push_back(loop);
+  });
+  for (scf::ParallelOp loop : loops)
+    compactGpuLoop(rewriter, module, loop);
+}
+
 static void mapGpuLoops(ModuleOp module) {
   SmallVector<scf::ParallelOp> loops;
   module.walk([&](scf::ParallelOp loop) {
@@ -16945,6 +17099,7 @@ struct EntLowerToLoops
       return signalPassFailure();
     if (failed(checkGpuLoops(module)))
       return signalPassFailure();
+    compactGpuLoops(module);
     mapGpuLoops(module);
   }
 };

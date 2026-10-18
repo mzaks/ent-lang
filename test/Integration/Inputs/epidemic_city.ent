@@ -13,7 +13,7 @@ import transmission
 capacity Person 5000
 capacity Household 5000
 capacity LivesIn 5000
-capacity WorksWith 60000
+capacity WorksWith 80000
 capacity Taken 5000
 capacity Ring 5000
 capacity Order 5001

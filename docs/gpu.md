@@ -247,7 +247,9 @@ It is a device in the sense of `devices/`: C, linked by `tools/ent` with
 For finding out how a program goes there, environment variables:
 `ENT_GPU_TIMES` (at the end, how long each kernel ran on the GPU, by name,
 and each kind of copy, from a pair of events around it on the stream;
-and how long the CPU waited for the stream), `ENT_GPU_REPORT` (how much
+and how long the CPU waited for the stream; `ENT_GPU_TIMES_EACH=name`
+says each launch of the kernels whose name has that in it),
+`ENT_GPU_REPORT` (how much
 came back whole and packed), `ENT_GPU_LOG` (the copies, a line each),
 `ENT_GPU_CHECK` (each packed copy against the whole range),
 `ENT_GPU_PROTECT` (each kernel with the CPU's world out of reach) and
@@ -643,6 +645,40 @@ Found by keeping, for each call of devices/gpu.c, the value of one
 unique before and after it, in memory, said at the end (each probe that
 wrote or waited hid it); then by `mprotect`. Without the GPU's counts:
 11 of 20 runs; since, none of 40.
+
+**`workplace`: few rows, long loops (2026-10-18).** `ENT_GPU_TIMES` gave
+`workplace` 2.0 ms of a day's 5.1 on the GPU, from 0.03 ms on the first
+day to 7.1 at the peak: it goes with how many are infectious, and those
+are few among the rows its kernel goes through. A warp of 32 rows where
+a handful pass the filter goes through the longest of their loops over
+ties, the others idle. Three changes:
+
+- *Compacting* (`compactGpuLoops`, LowerToLoops.cpp): a loop for the GPU
+  whose body is `scf.if`s around a `for` or `while`, with nothing but
+  reads before each test, is a loop that lists the rows that pass (an
+  atomic count at the front of scratch array 15 of devices/gpu.c, and
+  each row after it), and a loop over that list with the body (as many
+  rows as the first, those after the count doing nothing). The rows
+  that do the work are next to one another in a warp. It writes nothing
+  but the list; the body sends atomically and writes its own row, so
+  the order of the list does not matter. `chance` 650 to 430 us;
+  `workplace` alone not, the next two are what it waited on.
+- *Whether a tie was met, first*: the draw needs only the tie's key, so
+  the other end's `Quarantine` is looked up only for the ties met that
+  day (about half): `workplace` 2.0 to 1.8 ms.
+- *A tie is two edges* (city.ent `wire`): one from each end, with one
+  key. Going along a relation backwards (`(o)-[w: R]->(p)`) reads the
+  index of the edges into `p` and then, for each, the edge and its
+  source: two reads to far places a tie. Now `workplace` and `trace` go
+  only forward, and the tie count of a person is their edges. The draws
+  are the tie's key's, as before, and the hazard is whole numbers: the
+  same 857,886 infected for a million people, and 32,718 with tracing
+  for 100,000. `WorksWith` needs twice the capacity (22 a person).
+  `workplace` 1.8 to 0.49 ms a day (three launches of 164 us).
+
+A day of a million people 3.9 ms on one core and the GPU and on four
+threads and the GPU (5.1 and 4.9 before); the GPU busy 342 ms in all
+where it was 509. Measured in `bench/epidemic/RESULTS.md`.
 
 The output of `test/Integration/Inputs/gpu_math.ent` was one line of
 127 bytes, a byte more than a `Print` holds: what the test compared of
