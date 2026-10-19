@@ -479,12 +479,21 @@ static BufferOp verifyBufferUse(SymbolTableCollection &symbolTable,
       return {};
     }
     bool given = false, changed = false;
-    for (Type type : function.getParams().getAsValueRange<TypeAttr>())
+    // (Rows it was given, `!ent.rows`: read and written by their number,
+    // or handed on.)
+    bool byRows = op->hasAttr(kWindowAttr) || isa<BufferRowsOp>(op);
+    for (Type type : function.getParams().getAsValueRange<TypeAttr>()) {
       if (auto handed = dyn_cast<BufferType>(type);
           handed && handed.getName() == name) {
         given = true;
         changed |= handed.getMut();
       }
+      if (auto rows = dyn_cast<RowsType>(type);
+          rows && byRows && rows.getName() == name) {
+        given = true;
+        changed |= rows.getMut();
+      }
+    }
     if (!given || (writes && !changed)) {
       op->emitOpError(what)
           << name << " but function @" << function.getSymName()
@@ -722,7 +731,7 @@ BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     Operation *reader = nullptr;
     query.walk([&](Operation *op) {
       if (reader || !isa<BufferAtOp, BufferOfOp, AppendOp, BufferFillOp,
-                         BufferKeepOp, ClearOp>(op))
+                         BufferKeepOp, ClearOp, BufferRowsOp>(op))
         return;
       if (cast<FlatSymbolRefAttr>(op->getAttr("buffer")) == getBufferAttr())
         reader = op;
@@ -787,6 +796,33 @@ BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+/// Rows of a buffer handed to a function: in a function, those it was
+/// given; in a query, its window (taken where they are to be changed);
+/// elsewhere in a system all the rows the buffer has.
+LogicalResult
+BufferRowsOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto type = cast<RowsType>(getResult().getType());
+  if (type.getName() != getBufferAttr())
+    return emitOpError("gives rows of ")
+           << type.getName() << " for " << getBufferAttr();
+  if (!verifyBufferUse(symbolTable, *this, getBufferAttr(),
+                       /*writes=*/type.getMut(), /*outside=*/false,
+                       "hands rows of "))
+    return failure();
+  auto query = (*this)->getParentOfType<QueryOp>();
+  if (query && !isInTurn(*this) && type.getMut()) {
+    bool claimed = false;
+    query.walk([&](BufferClaimOp claim) {
+      claimed |= claim.getBufferAttr() == getBufferAttr();
+    });
+    if (!claimed)
+      return emitOpError("hands rows of ")
+             << getBufferAttr()
+             << " to change in a query without a window of it taken";
+  }
+  return success();
+}
+
 /// A window of a buffer in a query: rows the visited entity takes as its
 /// own for the run (`w: mut Cohorts[start, count]`), read and written
 /// through `ent.buffer.at` and `ent.buffer.set` marked as the window's,
@@ -820,7 +856,7 @@ BufferClaimOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     if (!name || name != getBufferAttr())
       return;
     bool windowed = isa<BufferAtOp, BufferSetOp>(op) && op->hasAttr(kWindowAttr);
-    if (!windowed && !isa<BufferLenOp, RowsCheckOp>(op))
+    if (!windowed && !isa<BufferLenOp, RowsCheckOp, BufferRowsOp>(op))
       other = op;
   });
   if (other) {
@@ -1192,7 +1228,12 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *from,
   auto function = symbolTable.lookupNearestSymbolFrom<FunctionOp>(from, callee);
   if (!function || !seen.insert(function).second)
     return std::nullopt;
-  if (function.getProc())
+  // (A proc of the program that changes only rows it is given, a window
+  // of the entity's, acts on nothing else.)
+  if (function.getProc() &&
+      (!function.isDefined() ||
+       llvm::any_of(function.getParams().getAsValueRange<TypeAttr>(),
+                    llvm::IsaPred<BufferType>)))
     return "calls the proc '" + function.getSymName().str() +
            "', which acts on the outside, from the CPU";
   if (!function.isDefined())
@@ -1639,13 +1680,14 @@ LogicalResult FunctionOp::verifyRegions() {
     auto invoke = dyn_cast<InvokeOp>(op);
     if (isa<SameOp, NobodyOp, TableAtOp, TextConstantOp, TextOfOp, TextCutOp,
             TextLengthOp,
-            TextAtOp, TextEqualOp, TextJoinOp, TextKeepOp>(op) ||
+            TextAtOp, TextEqualOp, TextJoinOp, TextKeepOp, RowsStartOp,
+            RowsCountOp>(op) ||
         (invoke && (!invoke.getProc() || getProc())))
       return;
     // (A buffer it was given: each of these says for itself whether it
     // was, and given to be changed.)
     if (isa<BufferAtOp, BufferLenOp, BufferSetOp, BufferFillOp,
-            BufferKeepOp, AppendOp, ClearOp>(op))
+            BufferKeepOp, AppendOp, ClearOp, BufferRowsOp, RowsCheckOp>(op))
       return;
     // (And the entities of a component it was given: read, gone through,
     // set and spawned, each of which says for itself whether it may.)

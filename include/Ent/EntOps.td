@@ -226,6 +226,37 @@ def Ent_BufferClaimOp : Ent_Op<"buffer.claim", [
   let assemblyFormat = "$buffer $start `,` $count attr-dict";
 }
 
+def Ent_BufferRowsOp : Ent_Op<"buffer.rows", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Rows of a buffer, to hand to a function of the program";
+  let description = [{
+    ```mlir
+    %w = ent.buffer.rows @Cohorts %start, %count : !ent.rows<@Cohorts, mut>
+    ```
+    Rows `%start` to `%start + %count` of the buffer, for an `ent.invoke`
+    of a fn or proc with a body that takes `!ent.rows`: a window of the
+    query it is in (taken, where it is `mut`), or all the rows the buffer
+    has, outside queries (or, to read, in one).
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, I32:$start, I32:$count);
+  let results = (outs Ent_RowsType:$result);
+  let assemblyFormat = "$buffer $start `,` $count attr-dict `:` type($result)";
+}
+
+def Ent_RowsStartOp : Ent_Op<"rows.start", [Pure]> {
+  let summary = "Where rows a function was given start in their buffer";
+  let arguments = (ins Ent_RowsType:$rows);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$rows attr-dict `:` type($rows)";
+}
+
+def Ent_RowsCountOp : Ent_Op<"rows.count", [Pure]> {
+  let summary = "How many rows a function was given";
+  let arguments = (ins Ent_RowsType:$rows);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$rows attr-dict `:` type($rows)";
+}
+
 def Ent_BufferOfOp : Ent_Op<"buffer.of", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "A buffer, to hand to a function in C";

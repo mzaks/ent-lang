@@ -1,0 +1,9 @@
+// Rows of a buffer given to fns and procs: for one core and for all of
+// them, the same.
+// RUN: %ent run %S/Inputs/rows_param.ent > %t.one
+// RUN: %ent run %S/Inputs/rows_param.ent --parallel > %t.all
+// RUN: diff %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+// CHECK: day 1: 8658706275
+// CHECK: day 2: 27198004409
+// CHECK: day 3: 35233480806

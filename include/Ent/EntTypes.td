@@ -230,4 +230,19 @@ def Ent_BufferType : Ent_Type<"Buffer", "buffer"> {
   let hasCustomAssemblyFormat = 1;
 }
 
+def Ent_RowsType : Ent_Type<"Rows", "rows"> {
+  let summary = "Rows of a buffer, as a function of the program takes them";
+  let description = [{
+    `!ent.rows<@Cohorts>` is what a fn or proc with a body is given for a
+    parameter `cohorts: Cohorts[]`: rows of the buffer one after another,
+    a window of a `for` or all the buffer has, which it reads by their
+    number from 0 (`ent.rows.start`, `ent.rows.count`); `!ent.rows<@Cohorts,
+    mut>` to change them too. It has no rows to give or take. Made by
+    `ent.buffer.rows`; lowered to an i64, where the rows start above 32
+    bits and how many below.
+  }];
+  let parameters = (ins "FlatSymbolRefAttr":$name, "bool":$mut);
+  let hasCustomAssemblyFormat = 1;
+}
+
 #endif // ENT_TYPES

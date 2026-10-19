@@ -65,6 +65,17 @@
 // WINDOWS: day 2: bees 6024744 old 11995 check 295417618
 // WINDOWS-NOT: day 3
 
+// Rows of a buffer given to a proc from a window, in the GPU's loop: the
+// same.
+// RUN: sed -e 's/^system grow()/gpu system grow()/' %S/Inputs/rows_param.ent > %t.rowsparam.ent
+// RUN: %ent run %t.rowsparam.ent --gpu > %t.rowsparam.gpu
+// RUN: %ent run %t.rowsparam.ent --gpu --parallel > %t.rowsparam.gpupar
+// RUN: FileCheck %s --check-prefix=ROWSPARAM --input-file=%t.rowsparam.gpu
+// RUN: FileCheck %s --check-prefix=ROWSPARAM --input-file=%t.rowsparam.gpupar
+// ROWSPARAM: day 1: 8658706275
+// ROWSPARAM: day 2: 27198004409
+// ROWSPARAM: day 3: 35233480806
+
 // Rows of buffers written from a `for`, on the GPU: the same, and two
 // entities that write one row stop the program there too.
 // RUN: sed -e 's/^system lay()/gpu system lay()/' %S/Inputs/buffer_rows.ent > %t.rows.ent

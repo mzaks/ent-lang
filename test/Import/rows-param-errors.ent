@@ -1,0 +1,53 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+// Rows of a buffer given to a fn or proc (`cells: mut Cells[]`): what
+// cannot be.
+
+buffer Cells { bees: i32 } capacity 64
+// expected-error @+1 {{rows of a buffer are given to a fn or proc of the program}}
+extern proc show(cells: Cells[])
+
+// -----
+
+buffer Cells { bees: i32 } capacity 64
+// expected-error @+1 {{a fn only computes: it reads rows it is given}}
+fn grow(cells: mut Cells[]) -> i32 { 0 }
+
+// -----
+
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+proc grow(cells: mut Cells[]) { cells[0].bees = 1 }
+system s() {
+  // expected-error @+1 {{'w' is a window to read, and the rows are taken here to change}}
+  for h: Hive, w: Cells[h.start, h.size] { grow(w) }
+}
+
+// -----
+
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+proc grow(cells: mut Cells[]) { cells[0].bees = 1 }
+system s() {
+  // expected-error @+1 {{a 'for' changes rows of a buffer through windows of its entities}}
+  for h: Hive { grow(Cells) }
+}
+
+// -----
+
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+buffer Nests { eggs: i32 } capacity 64
+fn count(nests: Nests[]) -> i32 { len(nests) }
+system s() {
+  // expected-error @+1 {{'w' is a window of 'Cells', and rows of 'Nests' are taken here}}
+  for h: Hive, w: Cells[h.start, h.size] { let n = count(w) }
+}
+
+// -----
+
+buffer Cells { bees: i32 } capacity 64
+proc grow(cells: Cells[]) {
+  // expected-error @+1 {{'cells' is a window to read}}
+  cells[0].bees = 1
+}

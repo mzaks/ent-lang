@@ -75,6 +75,29 @@ void BufferType::print(AsmPrinter &printer) const {
   printer << ">";
 }
 
+// !ent.rows<@Cohorts> or !ent.rows<@Cohorts, mut>
+Type RowsType::parse(AsmParser &parser) {
+  FlatSymbolRefAttr name;
+  if (parser.parseLess() || parser.parseAttribute(name))
+    return {};
+  bool isMutable = false;
+  if (succeeded(parser.parseOptionalComma())) {
+    if (parser.parseKeyword("mut"))
+      return {};
+    isMutable = true;
+  }
+  if (parser.parseGreater())
+    return {};
+  return RowsType::get(parser.getContext(), name, isMutable);
+}
+
+void RowsType::print(AsmPrinter &printer) const {
+  printer << "<" << getName();
+  if (getMut())
+    printer << ", mut";
+  printer << ">";
+}
+
 void EntDialect::registerTypes() {
   addTypes<
 #define GET_TYPEDEF_LIST

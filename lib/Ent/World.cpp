@@ -1166,6 +1166,9 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       owned.insert(set.getBufferAttr().getAttr());
     if (auto at = dyn_cast<BufferAtOp>(op); at && at->hasAttr(kWindowAttr))
       owned.insert(at.getBufferAttr().getAttr());
+    // (Rows handed to a fn or proc, which says where it goes outside them.)
+    if (auto rows = dyn_cast<BufferRowsOp>(op))
+      owned.insert(rows.getBufferAttr().getAttr());
     if (auto claim = dyn_cast<BufferClaimOp>(op)) {
       owned.insert(claim.getBufferAttr().getAttr());
       claimed.insert(claim.getBufferAttr().getAttr());

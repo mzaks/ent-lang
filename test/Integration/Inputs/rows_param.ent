@@ -1,0 +1,43 @@
+// Rows of a buffer given to fns and procs (docs/syntax.md): each hive
+// hands its window to a proc that shifts its rows and to a fn that sums
+// them, numbered from 0 there; outside a `for`, all the buffer's rows.
+// Built for one core, for all of them and with `grow` on the GPU
+// (gpu.test), it prints what helpers given the buffer and where a hive's
+// rows start print, going through the hives in turn.
+import console
+component Hive { number: i32, start: i32, size: i32 } capacity 4000
+buffer Cells { bees: i32 } capacity 40000
+unique Days: i32
+unique All: i64
+fn total(cells: Cells[]) -> i64 {
+  var sum: i64 = 0
+  for i in 0..len(cells) { sum += cells[i].bees as i64 * (i + 1) as i64 }
+  sum
+}
+proc shift(cells: mut Cells[], add: i32) {
+  var i = len(cells) - 1
+  while i > 0 {
+    cells[i].bees = (cells[i - 1].bees * 7 + i) % 1000
+    i -= 1
+  }
+  cells[0].bees = (add + total(cells) as i32) % 1000
+}
+system grow() {
+  for h: Hive, w: mut Cells[h.start, h.size] { shift(w, h.number) }
+}
+system report() {
+  Days += 1
+  All = total(Cells)
+  spawn { Print { line: "day {Days}: {All}" } }
+}
+schedule day() { grow()  report()  write()  clear() }
+world {
+  var at = 0
+  for n in 0..2000 {
+    let size = n % 7 + 3
+    spawn { Hive { number: n, start: at, size: size } }
+    at += size
+  }
+  for i in 0..at { Cells += { bees: i % 13 } }
+}
+main { loop { day() } until Days == 3 }

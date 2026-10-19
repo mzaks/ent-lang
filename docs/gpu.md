@@ -105,7 +105,10 @@ entity and values every entity reads alike:
   docs/syntax.md), read and written: the rows are taken by an atomic
   exchange each (the run and the entity's id), the CPU's run counter
   given to the kernel; overlapping windows, and rows outside one, are
-  said in the buffer's flag the CPU reads when the `for` ends;
+  said in the buffer's flag the CPU reads when the `for` ends; and
+  handed to fns and procs of the program (`cohorts: mut Cohorts[]`, an
+  i64 there, start and count), a proc too where it changes only rows it
+  is given;
 - running sums (`let first = Laying.stubs += s.meets`, docs/syntax.md):
   in two passes, with a scan of the values between them (below);
 - calling `fn`s of the program: compiled for the GPU like the body;

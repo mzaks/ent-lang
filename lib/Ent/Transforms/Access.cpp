@@ -599,15 +599,18 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       return;
     }
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferOfOp,
-            BufferSetOp, BufferFillOp, BufferKeepOp, BufferClaimOp>(op)) {
+            BufferSetOp, BufferFillOp, BufferKeepOp, BufferClaimOp,
+            BufferRowsOp>(op)) {
       // A buffer is one thing: its rows and how many they are.
       Column buffer{StringAttr(),
                     cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr(),
                     StringAttr::get(context, "rows")};
       auto handed = dyn_cast<BufferOfOp>(op);
+      auto rows = dyn_cast<BufferRowsOp>(op);
       if (isa<AppendOp, ClearOp, BufferSetOp, BufferFillOp, BufferKeepOp,
               BufferClaimOp>(op) ||
-          (handed && handed.getResult().getType().getMut()))
+          (handed && handed.getResult().getType().getMut()) ||
+          (rows && cast<RowsType>(rows.getResult().getType()).getMut()))
         access.writes.insert(buffer);
       else
         access.reads.insert(buffer);

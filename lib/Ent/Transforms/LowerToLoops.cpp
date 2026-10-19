@@ -1139,6 +1139,26 @@ static bool isStructuralFor(QueryOp query, ArchetypeOp archetype) {
 
 /// True if the query body only computes and accesses its own entity's
 /// components, so its iterations are independent of each other.
+/// Whether the function `callee` (called from `from`) is a fn, or a proc
+/// of the program given no buffer but rows, and calls only such ones.
+static bool changesOnlyRows(Operation *from, FlatSymbolRefAttr callee,
+                            unsigned depth = 0) {
+  auto function = SymbolTable::lookupNearestSymbolFrom<FunctionOp>(from, callee);
+  if (!function || depth > 32)
+    return false;
+  if (!function.getProc())
+    return true;
+  if (!function.isDefined() ||
+      llvm::any_of(function.getParams().getAsValueRange<TypeAttr>(),
+                   llvm::IsaPred<BufferType>))
+    return false;
+  bool only = true;
+  function.getBody().walk([&](InvokeOp invoke) {
+    only = only && changesOnlyRows(function, invoke.getCalleeAttr(), depth + 1);
+  });
+  return only;
+}
+
 static bool isEntityLocal(QueryOp query) {
   for (ArchetypeOp archetype : getMatchedArchetypes(query))
     if (isStructuralFor(query, archetype))
@@ -1171,7 +1191,7 @@ static bool isEntityLocal(QueryOp query) {
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
             ApplyOp, AccumulateOp, RunningOp, YieldOp, EdgesOp, ConnectOp,
             DisconnectOp, AppendOp, BufferSetOp, RowsCheckOp,
-            BufferClaimOp>(op) ||
+            BufferClaimOp, BufferRowsOp>(op) ||
         !hasOwnEffects(op))
       return WalkResult::advance();
     // A buffer is read like a resource: no query changes one while it
@@ -1187,6 +1207,11 @@ static bool isEntityLocal(QueryOp query) {
     if (auto of = dyn_cast<BufferOfOp>(op); of && !of.getResult().getType().getMut())
       return WalkResult::advance();
     if (auto invoke = dyn_cast<InvokeOp>(op); invoke && !invoke.getProc())
+      return WalkResult::advance();
+    // A proc of the program that changes only rows it is given (the
+    // entity's window) and calls only such ones and fns.
+    if (auto invoke = dyn_cast<InvokeOp>(op);
+        invoke && changesOnlyRows(invoke, invoke.getCalleeAttr()))
       return WalkResult::advance();
     return WalkResult::interrupt();
   });
@@ -14627,12 +14652,21 @@ declareFunction(IRRewriter &rewriter, FunctionOp function,
   bool defined = function.isDefined();
   SmallVector<Type> inputs(function.getParams().getAsValueRange<TypeAttr>());
   SmallVector<Type> results;
+  // (Rows it is given are an i64, where they start above 32 bits and how
+  // many below; one given rows and no buffer is given the world's memory
+  // after its parameters, where they are.)
+  bool rowsOnly = defined && llvm::any_of(inputs, llvm::IsaPred<RowsType>) &&
+                  llvm::none_of(inputs, llvm::IsaPred<BufferType>);
   if (!defined)
     inputs = functionParamTypes(inputs, symbols);
   else
     for (Type &input : inputs)
       if (isa<BufferType>(input))
         input = arenaType;
+      else if (isa<RowsType>(input))
+        input = rewriter.getI64Type();
+  if (rowsOnly)
+    inputs.push_back(arenaType);
   for (Type result : function.getResultTypes())
     results.push_back(defined ? result : externParamType(result));
   rewriter.setInsertionPoint(function);
@@ -14647,6 +14681,20 @@ declareFunction(IRRewriter &rewriter, FunctionOp function,
   Value arena;
   for (unsigned i = 0; i < entry.getNumArguments(); ++i) {
     BlockArgument old = entry.getArgument(i);
+    if (isa<RowsType>(old.getType())) {
+      // (As the i64 it is, made the rows again for the ops that read
+      // them, which lowerBuffers lowers.)
+      Value bits =
+          entry.insertArgument(i, rewriter.getI64Type(), old.getLoc());
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(&entry);
+      Value rows = UnrealizedConversionCastOp::create(
+                       rewriter, old.getLoc(), old.getType(), bits)
+                       .getResult(0);
+      entry.getArgument(i + 1).replaceAllUsesWith(rows);
+      entry.eraseArgument(i + 1);
+      continue;
+    }
     if (!isa<BufferType>(old.getType()))
       continue;
     Value memory = entry.insertArgument(i, arenaType, old.getLoc());
@@ -14655,6 +14703,8 @@ declareFunction(IRRewriter &rewriter, FunctionOp function,
     if (!arena)
       arena = memory;
   }
+  if (rowsOnly)
+    arena = entry.addArgument(arenaType, function.getLoc());
   if (arena)
     given.push_back({func, arena});
   Operation *terminator = func.getBody().front().getTerminator();
@@ -14861,8 +14911,45 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
   auto takesBuffer = [&](InvokeOp invoke) {
     auto function = symbols.lookup<FunctionOp>(invoke.getCallee());
     return llvm::any_of(function.getParams().getAsValueRange<TypeAttr>(),
-                        [](Type type) { return isa<BufferType>(type); });
+                        [](Type type) {
+                          return isa<BufferType, RowsType>(type);
+                        });
   };
+  // Rows handed to a fn or proc, and read in one: an i64, where they
+  // start above 32 bits and how many below, made the rows again by a cast
+  // (see declareFunction), which a call hands on as the i64.
+  SmallVector<Operation *> rowsOps;
+  func.walk([&](Operation *op) {
+    if (isa<BufferRowsOp, RowsStartOp, RowsCountOp>(op))
+      rowsOps.push_back(op);
+  });
+  auto rowsBits = [](Value rows) -> Value {
+    auto made = rows.getDefiningOp<UnrealizedConversionCastOp>();
+    assert(made && made->getNumOperands() == 1 &&
+           "rows are made of their i64 (see declareFunction)");
+    return made->getOperand(0);
+  };
+  for (Operation *op : rowsOps) {
+    Location loc = op->getLoc();
+    rewriter.setInsertionPoint(op);
+    Type i64 = rewriter.getI64Type();
+    Value thirtyTwo = arith::ConstantIntOp::create(rewriter, loc, 32, 64);
+    if (auto made = dyn_cast<BufferRowsOp>(op)) {
+      Value start = arith::ExtUIOp::create(rewriter, loc, i64, made.getStart());
+      Value count = arith::ExtUIOp::create(rewriter, loc, i64, made.getCount());
+      Value bits = arith::OrIOp::create(
+          rewriter, loc, arith::ShLIOp::create(rewriter, loc, start, thirtyTwo),
+          count);
+      rewriter.replaceOpWithNewOp<UnrealizedConversionCastOp>(
+          op, made.getResult().getType(), bits);
+      continue;
+    }
+    Value bits = rowsBits(op->getOperand(0));
+    if (isa<RowsStartOp>(op))
+      bits = arith::ShRUIOp::create(rewriter, loc, bits, thirtyTwo);
+    rewriter.replaceOpWithNewOp<arith::TruncIOp>(op, rewriter.getI32Type(),
+                                                 bits);
+  }
   SmallVector<Operation *> uses;
   func.walk([&](Operation *op) {
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferSetOp,
@@ -14890,6 +14977,13 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         for (OpOperand &arg : invoke->getOpOperands())
           if (isa<BufferType>(arg.get().getType()))
             arg.set(world.getArena());
+          else if (isa<RowsType>(arg.get().getType()))
+            arg.set(rowsBits(arg.get()));
+        // (One given rows and no buffer takes the world's memory after.)
+        auto callee = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+            invoke, rewriter.getStringAttr(function.getCName()));
+        if (callee && callee.getNumArguments() == invoke->getNumOperands() + 1)
+          invoke->insertOperands(invoke->getNumOperands(), world.getArena());
         continue;
       }
       lowerInvoke(rewriter, invoke, function, /*defined=*/false, &layout,
@@ -14898,6 +14992,12 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
     }
     const WorldBuffer &buffer = layout.getBuffer(
         cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr());
+    if (auto check = dyn_cast<RowsCheckOp>(op); check && !buffer.clashOffset) {
+      // (In a function given rows of a buffer no `for` hands rows of, or
+      // reads through a window: as a row the buffer has not, nothing.)
+      rewriter.eraseOp(op);
+      continue;
+    }
     if (auto check = dyn_cast<RowsCheckOp>(op)) {
       // (Said for the query's end, which stops the program.)
       auto said = scf::IfOp::create(
@@ -15149,6 +15249,15 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
   func.walk([&](BufferOfOp of) { handed.push_back(of); });
   for (BufferOfOp of : handed)
     rewriter.eraseOp(of);
+  // (Rows made again of their i64, which the calls took as that.)
+  SmallVector<UnrealizedConversionCastOp> rowsCasts;
+  func.walk([&](UnrealizedConversionCastOp cast) {
+    if (cast->getNumResults() == 1 &&
+        isa<RowsType>(cast.getResult(0).getType()) && cast->use_empty())
+      rowsCasts.push_back(cast);
+  });
+  for (UnrealizedConversionCastOp cast : rowsCasts)
+    rewriter.eraseOp(cast);
 }
 
 /// The functions that keep texts of any length (devices/text.c, the C of

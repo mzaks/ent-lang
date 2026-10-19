@@ -1744,9 +1744,22 @@ to a device at once (all there is to draw), in place of a call for each.
   visited entity's own bindings (not in a pattern, nor in a `for` that
   takes turns, where the buffer is read and written as it is; not yet
   in one that goes along a tree, by a field or reacts to changes, nor in
-  a `for` inside a `for`). Taking
-  is a write for each row of each window every run, about what reading
-  them costs.
+  a `for` inside a `for`). Taking is a write for each row of each window
+  every run, about what reading them costs.
+- A fn or proc of the program may take **rows** of a buffer, a window or
+  all the buffer has, as a window of its own: `cohorts: Cohorts[]` to
+  read, `cohorts: mut Cohorts[]` (a proc's) to change too. It reads and
+  writes them by their number from 0 (`cohorts[i].bees`, `len(cohorts)`),
+  and gives no rows and takes none. It is given a window by its name
+  (`shift(w, Stage.Eggs, 0)`, a `mut` one where it changes them), or the
+  buffer by its name, all its rows (in a `for` only to read), and hands
+  them on as it was given them. A row outside them reads nought and is
+  not written; given a window of a `for`, the program stops after it, as
+  there. A proc that changes nothing else (it is given rows and values,
+  and calls only fns and such procs) leaves the entities of the `for` it
+  is called in apart, on many cores and on the GPU. So the same helpers
+  serve one colony that has the buffer to itself and many that each
+  have a window of it.
 - `len(Name)` is how many rows it has and `Name[i].field` a row's field
   (nought where it has no row `i`); in a `for` that gives it rows, as it
   was before the `for`.

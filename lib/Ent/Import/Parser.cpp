@@ -1585,6 +1585,12 @@ FailureOr<Type> Parser::parseType() {
     if (!handsBuffers)
       return error(at, "'" + *name + "' is a buffer: a parameter of a fn "
                        "or proc may be one, and nothing else");
+    // Buffer[]: rows of it, a window or all it has, by their number.
+    if (token.is(Token::LBracket) && peek().is(Token::RBracket)) {
+      advance();
+      advance();
+      return Type(RowsType::get(context, symbol(*name), false));
+    }
     return Type(BufferType::get(context, symbol(*name)));
   }
   // A component, where a fn or proc says it is given the entities that
@@ -3579,6 +3585,14 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
                                  "that says which entities is the "
                                  "program's own, and is not handed to C");
       *type = BufferType::get(context, handed.getName(), changed);
+    } else if (auto rows = dyn_cast<RowsType>(*type)) {
+      if (isExtern)
+        return error(typeAt, "rows of a buffer are given to a fn or proc of "
+                             "the program; C is handed a whole buffer");
+      if (changed && !proc)
+        return error(typeAt, "a fn only computes: it reads rows it is "
+                             "given, and a proc may change them ('mut')");
+      *type = RowsType::get(context, rows.getName(), changed);
     } else if (changed) {
       return error(typeAt, "'mut' is of a buffer a proc is given to "
                            "change; a value is its own");
@@ -3681,8 +3695,23 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToEnd(block);
   ScopeGuard scope(*this);
-  for (auto [param, type] : llvm::zip(names, params))
-    bind(param, Variable::ofValue(block->addArgument(type, loc(at))));
+  for (auto [param, type] : llvm::zip(names, params)) {
+    mlir::Value arg = block->addArgument(type, loc(at));
+    // (Rows it is given: a window of them, from 0.)
+    if (auto rows = dyn_cast<RowsType>(type)) {
+      Variable window{Variable::Window,
+                      RowsStartOp::create(builder, loc(at),
+                                          builder.getI32Type(), arg)
+                          .getResult(),
+                      rows.getName().getValue().str(), rows.getMut()};
+      window.which =
+          RowsCountOp::create(builder, loc(at), builder.getI32Type(), arg)
+              .getResult();
+      bind(param, window);
+      continue;
+    }
+    bind(param, Variable::ofValue(arg));
+  }
   givenComponents.clear();
   for (auto [param, component] : llvm::zip(names, given))
     if (!component.empty())
@@ -8404,6 +8433,43 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                                      builder.getBoolAttr(expr.boolValue))
         .getResult();
   case Expr::Name: {
+    // Rows of a buffer, where a fn or proc takes them: a window's, or all
+    // a buffer has.
+    if (auto rows = dyn_cast_or_null<RowsType>(expected)) {
+      auto target = rows.getName();
+      std::string wanted = target.getValue().str();
+      const Variable *window = lookup(expr.name);
+      if (window && window->kind == Variable::Window) {
+        if (window->component != wanted)
+          return error(expr.loc, "'" + expr.name + "' is a window of '" +
+                                     window->component + "', and rows of '" +
+                                     wanted + "' are taken here");
+        if (rows.getMut() && !window->mut)
+          return error(expr.loc, "'" + expr.name + "' is a window to read, "
+                                 "and the rows are taken here to change: "
+                                 "'name: mut " + wanted + "[start, count]'");
+        return BufferRowsOp::create(builder, at, rows, target, window->value,
+                                    window->which)
+            .getResult();
+      }
+      std::optional<BufferUse> held = bufferNamed(expr.name);
+      if (!held || held->symbol != wanted)
+        return error(expr.loc, "rows of '" + wanted + "' are taken here: a "
+                               "window of it, or the buffer itself");
+      if (rows.getMut() && !held->mut)
+        return error(expr.loc, "'" + expr.name + "' was given to read, and "
+                               "its rows are taken here to change");
+      if (rows.getMut() && inQuery && !inTurn)
+        return error(expr.loc, "a 'for' changes rows of a buffer through "
+                               "windows of its entities ('w: mut " + wanted +
+                                   "[start, count]'), not all of it");
+      mlir::Value count =
+          BufferLenOp::create(builder, at, builder.getI32Type(), target)
+              .getResult();
+      return BufferRowsOp::create(builder, at, rows, target,
+                                  integer(at, builder.getI32Type(), 0), count)
+          .getResult();
+    }
     if (const Variable *variable = lookup(expr.name)) {
       if (variable->kind == Variable::Ref)
         return error(expr.loc, "'" + expr.name +

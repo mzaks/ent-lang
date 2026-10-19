@@ -9,10 +9,9 @@
 // `Colonies.rows` for each, from its `Colony.cohorts` on, laid out within
 // as colony.ent lays out one colony's (`Stages`). A colony reads and
 // writes its rows through a window (`w: mut Cohorts[c.cohorts,
-// Colonies.rows]`), all colonies at once; where a fn or proc goes through
-// them (given the buffer and where the colony's rows start), one colony
-// after another (`in turn by`), the rows read and written there as
-// outside a `for`.
+// Colonies.rows]`), all colonies at once, and hands them to the fns and
+// procs that go through them (`cohorts: mut Cohorts[]`), which number
+// them from 0 as colony.ent's do.
 //
 // What happens in a round of foraging is many_foraging.ent's, on the
 // components of the colony declared here.
@@ -114,23 +113,23 @@ const YEARS = 10
 fn first_row(stages: Stages, stage: Stage) -> i32 { stages[stage as i32].first }
 fn day_count(stages: Stages, stage: Stage) -> i32 { stages[stage as i32].days }
 
-// All the bees of a stage of the colony whose cohorts start at `base`.
-fn bees(cohorts: Cohorts, stages: Stages, base: i32, stage: Stage) -> i32 {
-  let from = base + first_row(stages, stage)
+// All the bees of a stage of a colony, given its cohorts.
+fn bees(cohorts: Cohorts[], stages: Stages, stage: Stage) -> i32 {
+  let from = first_row(stages, stage)
   var sum = 0
   for i in from..from + day_count(stages, stage) { sum += cohorts[i].bees }
   sum
 }
 
 // The bees of the stage's last day.
-fn oldest(cohorts: Cohorts, stages: Stages, base: i32, stage: Stage) -> i32 {
-  cohorts[base + first_row(stages, stage) + day_count(stages, stage) - 1].bees
+fn oldest(cohorts: Cohorts[], stages: Stages, stage: Stage) -> i32 {
+  cohorts[first_row(stages, stage) + day_count(stages, stage) - 1].bees
 }
 
 // Every bee of the stage a day older (the oldest leave it), and `add` the
 // youngest.
-proc shift(cohorts: mut Cohorts, stages: Stages, base: i32, stage: Stage, add: i32) {
-  let from = base + first_row(stages, stage)
+proc shift(cohorts: mut Cohorts[], stages: Stages, stage: Stage, add: i32) {
+  let from = first_row(stages, stage)
   var i = from + day_count(stages, stage) - 1
   while i > from {
     cohorts[i].bees = cohorts[i - 1].bees
@@ -141,8 +140,8 @@ proc shift(cohorts: mut Cohorts, stages: Stages, base: i32, stage: Stage, add: i
 
 // So many bees of the stage gone, the youngest first; how many are left
 // to go where the stage had not so many.
-proc reduce(cohorts: mut Cohorts, stages: Stages, base: i32, stage: Stage, excess: i32) -> i32 {
-  let from = base + first_row(stages, stage)
+proc reduce(cohorts: mut Cohorts[], stages: Stages, stage: Stage, excess: i32) -> i32 {
+  let from = first_row(stages, stage)
   var left = excess
   for i in from..from + day_count(stages, stage) {
     if left > 0 {
@@ -264,19 +263,18 @@ system cohort_mortality() {
 
 // Every cohort a day older (AgeCohorts).
 system age_cohorts() {
-  for c: Colony, e: mut Emerging in turn by c.number {
+  for c: Colony, e: mut Emerging, w: mut Cohorts[c.cohorts, Colonies.rows] {
     if !c.ended {
-      let b = c.cohorts
-      e.workers = oldest(Cohorts, Stages, b, Stage.WorkerPupae)
-      e.drones = oldest(Cohorts, Stages, b, Stage.DronePupae)
-      shift(Cohorts, Stages, b, Stage.WorkersInHive, 0)
-      shift(Cohorts, Stages, b, Stage.DronesInHive, 0)
-      shift(Cohorts, Stages, b, Stage.WorkerPupae, oldest(Cohorts, Stages, b, Stage.WorkerLarvae))
-      shift(Cohorts, Stages, b, Stage.DronePupae, oldest(Cohorts, Stages, b, Stage.DroneLarvae))
-      shift(Cohorts, Stages, b, Stage.WorkerLarvae, oldest(Cohorts, Stages, b, Stage.WorkerEggs))
-      shift(Cohorts, Stages, b, Stage.DroneLarvae, oldest(Cohorts, Stages, b, Stage.DroneEggs))
-      shift(Cohorts, Stages, b, Stage.WorkerEggs, 0)
-      shift(Cohorts, Stages, b, Stage.DroneEggs, 0)
+      e.workers = oldest(w, Stages, Stage.WorkerPupae)
+      e.drones = oldest(w, Stages, Stage.DronePupae)
+      shift(w, Stages, Stage.WorkersInHive, 0)
+      shift(w, Stages, Stage.DronesInHive, 0)
+      shift(w, Stages, Stage.WorkerPupae, oldest(w, Stages, Stage.WorkerLarvae))
+      shift(w, Stages, Stage.DronePupae, oldest(w, Stages, Stage.DroneLarvae))
+      shift(w, Stages, Stage.WorkerLarvae, oldest(w, Stages, Stage.WorkerEggs))
+      shift(w, Stages, Stage.DroneLarvae, oldest(w, Stages, Stage.DroneEggs))
+      shift(w, Stages, Stage.WorkerEggs, 0)
+      shift(w, Stages, Stage.DroneEggs, 0)
     }
   }
 }
@@ -333,16 +331,15 @@ system to_foragers() {
 }
 
 system count_cohorts() {
-  for c: Colony, p: mut Population where !c.ended {
-    let b = c.cohorts
-    p.worker_eggs = bees(Cohorts, Stages, b, Stage.WorkerEggs)
-    p.worker_larvae = bees(Cohorts, Stages, b, Stage.WorkerLarvae)
-    p.worker_pupae = bees(Cohorts, Stages, b, Stage.WorkerPupae)
-    p.workers_in_hive = bees(Cohorts, Stages, b, Stage.WorkersInHive)
-    p.drone_eggs = bees(Cohorts, Stages, b, Stage.DroneEggs)
-    p.drone_larvae = bees(Cohorts, Stages, b, Stage.DroneLarvae)
-    p.drone_pupae = bees(Cohorts, Stages, b, Stage.DronePupae)
-    p.drones_in_hive = bees(Cohorts, Stages, b, Stage.DronesInHive)
+  for c: Colony, p: mut Population, w: Cohorts[c.cohorts, Colonies.rows] where !c.ended {
+    p.worker_eggs = bees(w, Stages, Stage.WorkerEggs)
+    p.worker_larvae = bees(w, Stages, Stage.WorkerLarvae)
+    p.worker_pupae = bees(w, Stages, Stage.WorkerPupae)
+    p.workers_in_hive = bees(w, Stages, Stage.WorkersInHive)
+    p.drone_eggs = bees(w, Stages, Stage.DroneEggs)
+    p.drone_larvae = bees(w, Stages, Stage.DroneLarvae)
+    p.drone_pupae = bees(w, Stages, Stage.DronePupae)
+    p.drones_in_hive = bees(w, Stages, Stage.DronesInHive)
   }
 }
 
@@ -365,9 +362,8 @@ system count_totals() {
 // Brood dies where there are not nurses enough for it, or not protein
 // (BroodCare).
 system brood_care() {
-  for c: Colony, h: Hive, p: Population in turn by c.number {
+  for c: Colony, h: Hive, p: Population, w: mut Cohorts[c.cohorts, Colonies.rows] {
     if !c.ended {
-      let b = c.cohorts
       let brood = max_brood(p.workers_in_hive, p.workers_foragers,
                             Nursing.forager_nursing_contribution, Nursing.max_brood_nurse_ratio)
       var excess = ceil64(p.total_brood as f64 - brood) as i32
@@ -375,12 +371,12 @@ system brood_care() {
       let starved = ceil64((p.worker_larvae + p.drone_larvae) as f64 *
                            (1.0 - h.protein_factor)) as i32
       excess = max(excess, starved)
-      if excess > 0 && lacks_nurses { excess = reduce(Cohorts, Stages, b, Stage.DroneEggs, excess) }
-      if excess > 0 { excess = reduce(Cohorts, Stages, b, Stage.DroneLarvae, excess) }
-      if excess > 0 && lacks_nurses { excess = reduce(Cohorts, Stages, b, Stage.WorkerEggs, excess) }
-      if excess > 0 { excess = reduce(Cohorts, Stages, b, Stage.WorkerLarvae, excess) }
-      if excess > 0 && lacks_nurses { excess = reduce(Cohorts, Stages, b, Stage.DronePupae, excess) }
-      if excess > 0 && lacks_nurses { excess = reduce(Cohorts, Stages, b, Stage.WorkerPupae, excess) }
+      if excess > 0 && lacks_nurses { excess = reduce(w, Stages, Stage.DroneEggs, excess) }
+      if excess > 0 { excess = reduce(w, Stages, Stage.DroneLarvae, excess) }
+      if excess > 0 && lacks_nurses { excess = reduce(w, Stages, Stage.WorkerEggs, excess) }
+      if excess > 0 { excess = reduce(w, Stages, Stage.WorkerLarvae, excess) }
+      if excess > 0 && lacks_nurses { excess = reduce(w, Stages, Stage.DronePupae, excess) }
+      if excess > 0 && lacks_nurses { excess = reduce(w, Stages, Stage.WorkerPupae, excess) }
     }
   }
 }
