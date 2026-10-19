@@ -305,3 +305,34 @@ keep up to 0.05% other clauses.
 DivS 132 s to 9 s, REGRandom 129 s to 54 s, ContextModel 6_3_8 solved
 (24 s); PRP_30_41, PRP_30_39, PRP_20_40 and mchess16 slower (twice). SATLIB
 all correct, 11 dev proofs verified.
+
+## 2026-10-19: local search before the search
+
+`satwalk.ent` is probSAT (Balint and Schoening) as Kissat's walker
+weights it: a false clause at random, one of its variables flipped with
+the weight cb to the power of minus its break, cb by the clauses' mean
+length. It walks the clauses the search starts with, from the phases;
+a model it finds is the answer, else its best values become the phases.
+The best values are kept as Kissat keeps them, by the variables flipped
+since: copied whole each time, a walk of 10 million flips managed 65,536
+on PRP in a second. It finds models of uf250 in 1 to 300 ms (7 to 11
+million flips a second; 1 to 2 million on a million clauses).
+
+It was tried for sgen3-n260 (260 variables, 624 clauses, SAT), which
+entsat, MiniSat and CaDiCaL do not solve in 300 s: in 300 s, 3.26
+billion flips, the fewest false 3; with cb from 2.0 to 6.5 for 60 s
+each, 2 or 3. On the dev set, alone it solves 3col120 and satsgi (which
+the search solves at once). Before the search, 10 million flips:
+
+| solver (dev, 39) | solved | PAR-2 | median against MiniSat |
+|---|---|---|---|
+| entsat | 38 | 2,425 | 0.55 |
+| walk first, best values copied whole (65,536 flips on PRP) | 37 | 3,379 | 1.07 |
+| walk first, from the phases, as Kissat keeps the best | 37 | 3,188 | 1.23 |
+
+mod2c 68 s to 12 s; the PRPs, Timetable_484 (7 s to 27 s), REGRandom
+and minxor slower, ContextModel 6_3_8 lost, and every small problem the
+walk's second or more. So it stays off (`Walk.limit = 0`, where the
+search is as before, conflict for conflict), and many walkers at once on
+the GPU are not worth the language they need (a `for` reading the rows
+of a buffer it writes) on these problems.

@@ -22,6 +22,9 @@ core, and making it fast.
   The resolvents go into the proof; the removed clauses are kept, and a
   model is extended to the eliminated variables and held against the
   clauses as read.
+- `satwalk.ent`: local search (probSAT) before the search, off unless
+  `Walk.limit` gives it flips: a model it finds is the answer, else its
+  best values become the phases the search starts with.
 - `sat.ent`: the solver. Its state is buffers sized from the problem
   (the arena of clauses, the watch lists, the trail, the variables) and
   one unique, `Search`; a round of the search is a schedule of systems,
@@ -65,7 +68,8 @@ The program reads "problem.cnf" where it is started and writes
 "proof.drat" there (binary DRAT). `Options` in `sat.ent` and `Prep` in
 `satprep.ent` hold the settings: the proof, the restarts and modes, the
 reductions, a time limit (`Options.seconds`), the elimination's bounds,
-and two that are off: rephasing (`Options.rephase`) and vivification
-(`Options.vivify`), each slower on the bench so far.
+and three that are off: rephasing (`Options.rephase`), vivification
+(`Options.vivify`) and the walk (`Walk.limit` in `satwalk.ent`), each
+slower on the bench so far.
 `bench/sat` times it against MiniSat and CaDiCaL on SAT Competition
 problems.

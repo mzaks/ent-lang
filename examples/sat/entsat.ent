@@ -9,9 +9,10 @@
 import dimacs
 import sat
 import satprep
+import satwalk
 import room
 
-schedule start() { read() prepare() setup() watch() }
+schedule start() { read() prepare() setup() watch() walk() }
 schedule done() { extend() finish() }
 
 main {

@@ -4,6 +4,7 @@ import files
 import dimacs
 import sat
 import satprep
+import satwalk
 
 capacity Bytes 268435456
 capacity Clauses 67108864
@@ -34,3 +35,11 @@ capacity Mark 8388608
 capacity Count 8388608
 capacity Touched 67108864
 capacity Fresh 4194304
+capacity Wclause 67108864
+capacity Wlit 268435456
+capacity Whead 8388608
+capacity Wocc 268435456
+capacity Wfalse 67108864
+capacity Wvar 4194304
+capacity Wflipped 4194304
+capacity Wpick 4194305

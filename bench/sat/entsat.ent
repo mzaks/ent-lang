@@ -7,6 +7,7 @@ import files
 import dimacs
 import sat
 import satprep
+import satwalk
 import room
 
 world {
@@ -22,7 +23,7 @@ system limit() {
   Bytes = []
 }
 
-schedule start() { limit() read() prepare() setup() watch() }
+schedule start() { limit() read() prepare() setup() watch() walk() }
 schedule done() { extend() finish() }
 
 main {
