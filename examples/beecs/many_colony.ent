@@ -395,19 +395,21 @@ system new_cohorts() {
 
 // Where each colony's new squadrons go: its free places, which follow
 // those of the colonies before it (the squadrons' places lie colony
-// after colony), and their numbers.
+// after colony), and their numbers. (A running sum, in the order of the
+// colonies' rows, which is that of their numbers: they are spawned so,
+// and none goes.)
 system dawn_births() {
   Free = 0
-  for c: Colony, s: mut Stock, e: mut Emerging, n: Census, b: mut Births in turn by c.number {
+  for c: Colony, s: mut Stock, e: mut Emerging, n: Census, b: mut Births {
     let free = Colonies.slots - n.live
-    b.first = Free
+    let first = Free += free
+    b.first = first
     b.count = if c.ended { 0 } else { e.squadrons }
     b.number = s.next
     b.born = Clock.tick - s.aff
     if b.count > free { Colonies.homeless += b.count - free }
     s.next += b.count
     e.squadrons = 0
-    Free += free
   }
 }
 

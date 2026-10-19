@@ -182,9 +182,12 @@ echo "Colonies.Count 100" >> parameters.txt
 
 What is a unique in `beecs.ent` is a component of the colony here
 (`many_colony.ent`): its stores, its counts, its day, and a seed of its
-own. The cohorts are a buffer, a colony's rows after another's, and go
-through one colony after another (`in turn by`), on the CPU, once a
-day. A round (`many_foraging.ent`) is so that nothing in it waits for
+own. The cohorts are a buffer, a colony's rows after another's, which
+each colony reads and writes through a window of its own (`w: mut
+Cohorts[c.cohorts, Colonies.rows]`) and hands to helpers that number
+them from 0, as `colony.ent`'s do: all colonies at once, on the CPU,
+once a day; where the new squadrons of a day go is a running sum of the
+colonies' free places. A round (`many_foraging.ent`) is so that nothing in it waits for
 the CPU, nor depends on the order the GPU goes in:
 
 - A colony's squadrons have places of their own (`Colonies.Slots`, two
