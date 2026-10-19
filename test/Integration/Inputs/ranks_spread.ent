@@ -1,0 +1,40 @@
+// On many ranks (docs/ranks.md): cells distributed by their numbers,
+// each rank going through its stretch of them; whole numbers added,
+// least and most into uniques from the cells, lines written from the
+// `for` over them, and notes every rank has. Prints the same on one
+// process and on several ranks (ranks.test).
+import console
+component Cell { number: i32, value: i64 } capacity 4000
+component Note { id: i32 } capacity 64
+distribute Cell by number
+unique Stats { sum: i64, least: i64, most: i64, odd: i32 }
+unique Days: i32
+system grow() {
+  for c: mut Cell {
+    c.value = (c.value * 7 + c.number as i64 + Days as i64) % 1009
+    Stats.sum += c.value
+    Stats.least min= c.value
+    Stats.most max= c.value
+    if c.value % 2 == 1 { Stats.odd += 1 }
+    if c.number % 250 == 0 { put("cell {c.number}: {c.value}") }
+  }
+}
+system notes() {
+  for n: Note { Stats.sum += n.id as i64 }
+}
+system report() {
+  Days += 1
+  put("day {Days}: sum {Stats.sum} least {Stats.least} most {Stats.most} odd {Stats.odd}")
+  Stats.sum = 0
+  Stats.least = 1000000
+  Stats.most = -1
+  Stats.odd = 0
+}
+schedule day() { grow()  notes()  report() }
+world {
+  for i in 0..1000 { spawn { Cell { number: i, value: (i * 31) as i64 % 97 } } }
+  for i in 0..5 { spawn { Note { id: i } } }
+  Stats.least = 1000000
+  Stats.most = -1
+}
+main { loop { day() } until Days == 3 }

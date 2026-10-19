@@ -1,0 +1,37 @@
+// On many ranks: running sums over distributed cells, of their sizes
+// and of one for each (`let place = Off.n += 1`): every cell's place is
+// the one it has on one process, whatever the ranks (ranks.test).
+import console
+component Cell { number: i32, size: i32, first: i64, place: i32 } capacity 4000
+distribute Cell by number
+unique Off { total: i64, n: i32, check: i64 }
+unique Days: i32
+system lay() {
+  Off.total = 1000
+  Off.n = 0
+  for c: mut Cell {
+    let first = Off.total += c.size as i64
+    let place = Off.n += 1
+    c.first = first
+    c.place = place
+  }
+}
+system grow() {
+  for c: mut Cell { c.size = (c.size * 5 + c.number + Days) % 17 }
+}
+system check() {
+  Off.check = 0
+  for c: Cell {
+    Off.check += c.first * (c.number % 13 + 1) as i64 + c.place as i64
+    if c.number % 300 == 7 { put("cell {c.number}: first {c.first} place {c.place}") }
+  }
+}
+system report() {
+  Days += 1
+  put("day {Days}: total {Off.total} n {Off.n} check {Off.check}")
+}
+schedule day() { lay()  check()  report()  grow() }
+world {
+  for i in 0..1000 { spawn { Cell { number: i, size: i % 11, first: 0, place: 0 } } }
+}
+main { loop { day() } until Days == 3 }

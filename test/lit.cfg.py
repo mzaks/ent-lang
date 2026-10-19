@@ -72,6 +72,10 @@ if smi and os.path.exists(os.path.join(cuda, "include", "cuda.h")):
         config.substitutions.append(
             ("%gpu-chip", "sm_" + listed.stdout.split()[0].replace(".", "")))
 config.substitutions.append(("%cuda-include", os.path.join(cuda, "include")))
+# MPI (mpicc, mpirun): the tests of programs on many ranks (docs/ranks.md)
+# run only then.
+if shutil.which("mpicc") and shutil.which("mpirun"):
+    config.available_features.add("mpi")
 # (Without the LLVM the tests use on its PATH, as tools/ent runs it: that
 # would lend it its linker, and with that its idea of where libraries are.)
 toolchain = os.path.realpath(config.llvm_tools_dir)

@@ -84,6 +84,11 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
            "Run the queries of `gpu` systems on the GPU: as mapped "
            "scf.parallel loops, with the CPU waiting for them where it "
            "needs what they touch">,
+    Option<"ranks", "ranks", "bool", /*default=*/"false",
+           "Build for many ranks (MPI processes, devices/ranks.c): MPI "
+           "started and ended around main, and what a device (an extern "
+           "proc) does done by rank 0, what it gives back given every "
+           "rank">,
     Option<"explain", "explain", "bool", /*default=*/"false",
            "Emit remarks on lowering decisions, such as reactive queries "
            "that scan every entity instead of walking event logs">,

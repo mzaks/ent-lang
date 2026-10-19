@@ -262,6 +262,23 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     entry.op = archetype;
     entry.capacity = archetype.getCapacity();
     entry.index = layout.archetypes.size();
+    // (On many ranks: by the component it has that is distributed. Two
+    // would place it two ways.)
+    for (Attribute held : archetype.getComponents()) {
+      auto name = cast<FlatSymbolRefAttr>(held);
+      auto component = symbols.lookup<ComponentOp>(name.getValue());
+      auto field = component ? component->getAttrOfType<StringAttr>(
+                                   WorldLayout::kDistributeAttr)
+                             : StringAttr();
+      if (!field)
+        continue;
+      if (entry.distributeField)
+        return archetype.emitError("holds two distributed components, ")
+               << entry.distributeComponent << " and " << name
+               << ": its entities would be placed two ways";
+      entry.distributeComponent = name.getAttr();
+      entry.distributeField = field;
+    }
     layout.archetypes.push_back(std::move(entry));
   }
   layout.countsBytes = 8 * layout.archetypes.size();
@@ -1174,6 +1191,15 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       claimed.insert(claim.getBufferAttr().getAttr());
     }
   });
+  // (Each rank's stretch of a distributed archetype's rows.)
+  for (WorldArchetype &archetype : layout.archetypes) {
+    if (!archetype.isDistributed())
+      continue;
+    end = llvm::alignTo(end, 8);
+    archetype.rankFirstOffset = end;
+    archetype.rankEndOffset = end + 8;
+    end += 16;
+  }
   for (WorldBuffer &buffer : layout.buffers) {
     StringAttr name = cast<BufferOp>(buffer.op).getSymNameAttr();
     if (!owned.contains(name))

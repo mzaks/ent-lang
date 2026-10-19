@@ -57,8 +57,19 @@ struct WorldArchetype {
   /// move's code), one i32 per slot.
   uint64_t pendingActionOffset = 0;
   SmallVector<WorldMove> moves;
+  /// On many ranks: the component and field its rows are placed by
+  /// (`distribute Colony by number`); null where it is copied on every
+  /// rank, as on one.
+  StringAttr distributeComponent, distributeField;
+  /// Of a distributed archetype: this rank's stretch of its rows, the
+  /// first and the one after the last (i64 each), from when its entities
+  /// are placed; before that the last is the largest i64, so that every
+  /// row is this rank's (see lowerMain). Not saved.
+  uint64_t rankFirstOffset = 0;
+  uint64_t rankEndOffset = 0;
 
   bool hasPending() const { return pendingOffset != 0; }
+  bool isDistributed() const { return bool(distributeField); }
 
   /// For an archetype holding entities of a tree declared `sorted` (its
   /// rows are kept with the entities without a parent first, then the
@@ -675,6 +686,10 @@ struct WorldLayout {
   /// What a declaration is marked with that is not part of a saved world
   /// (`transient unique`, `transient buffer`).
   static constexpr llvm::StringLiteral kTransientAttr = "ent.transient";
+  /// On a component: the field its entities are placed by on many ranks
+  /// (`distribute Colony by number`), a whole number (ranges of it) or an
+  /// entity (with that one). Its archetypes are distributed.
+  static constexpr llvm::StringLiteral kDistributeAttr = "ent.distribute";
   /// On a buffer that an `!ent.index_of` reads: room for a power of two of
   /// rows, which such a row number is masked to.
   static constexpr llvm::StringLiteral kIndexedAttr = "ent.indexed";

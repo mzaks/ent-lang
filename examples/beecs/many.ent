@@ -29,6 +29,12 @@ capacity Colony 4096
 capacity Patch 65536
 capacity Activity 4194304
 
+// On many ranks (tools/ent --ranks N, docs/ranks.md): the colonies split
+// by their numbers, each patch and squadron place with its colony.
+distribute Colony by number
+distribute Patch by home
+distribute Squadron by home
+
 system heading() {
   put("seed,tick,w_eggs,w_larvae,w_pupae,w_in_hive,foragers,d_eggs,d_larvae,d_pupae,d_in_hive,honey_kg,pollen_g,aff,rounds")
 }

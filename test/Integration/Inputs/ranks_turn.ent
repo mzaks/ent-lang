@@ -1,0 +1,38 @@
+// On many ranks: a `for` that takes turns over distributed colonies,
+// writing a line for some, in the order of their numbers (ranks.test).
+import console
+component Colony { number: i32, food: i64, bees: i32, next: entity } capacity 400
+component Bee { home: entity, energy: i32 } capacity 40000
+distribute Colony by number
+distribute Bee by home
+unique Days: i32
+unique All: i64
+system feed() {
+  for c: mut Colony { c.bees = 0 }
+  for b: mut Bee {
+    if let food = Colony(b.home).food {
+      b.energy = ((b.energy as i64 * 3 + food) % 101) as i32
+    }
+    Colony(b.home).bees += 1
+    Colony(b.home).food += b.energy as i64 % 7
+  }
+}
+system report() {
+  Days += 1
+  All = 0
+  for c: Colony {
+    All += c.food * c.number as i64
+  }
+  for c: Colony in turn by c.number {
+    if c.number % 10 == 3 { put("colony {c.number}: food {c.food} bees {c.bees}") }
+  }
+  put("day {Days}: all {All}")
+}
+schedule day() { feed()  report() }
+world {
+  for c in 0..40 {
+    let home = spawn { Colony { number: c, food: (c * 13) as i64, bees: 0, next: none } }
+    for i in 0..100 { spawn { Bee { home: home, energy: (c + i) % 17 } } }
+  }
+}
+main { loop { day() } until Days == 3 }

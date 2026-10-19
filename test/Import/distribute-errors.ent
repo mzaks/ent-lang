@@ -1,0 +1,32 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+// `distribute Component by field` (docs/ranks.md): what cannot be.
+
+component Colony { number: i32 }
+// expected-error @+1 {{unknown component 'Hive'}}
+distribute Hive by number
+
+// -----
+
+component Colony { number: i32 }
+// expected-error @+1 {{expected 'by' and a field: 'distribute Colony by field'}}
+distribute Colony number
+
+// -----
+
+component Colony { weight: f32 }
+// expected-error @+1 {{an entity is placed by a whole number}}
+distribute Colony by weight
+
+// -----
+
+component Colony { number: i32 }
+// expected-error @+1 {{component 'Colony' has no field 'id'}}
+distribute Colony by id
+
+// -----
+
+component Colony { number: i32 }
+distribute Colony by number
+// expected-error @+1 {{'Colony' is distributed already}}
+distribute Colony by number

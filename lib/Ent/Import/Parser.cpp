@@ -1130,6 +1130,42 @@ LogicalResult Parser::parseDeclarations() {
       consumeIf(Token::Semicolon);
       continue;
     }
+    // distribute Component by field: where its entities live on many
+    // ranks (docs/ranks.md).
+    if (token.isKeyword("distribute") && peek().is(Token::Identifier)) {
+      advance();
+      llvm::SMLoc nameAt = token.loc;
+      FailureOr<std::string> name = identifier("a component");
+      if (failed(name))
+        return failure();
+      if (!components.count(*name))
+        return error(nameAt, "unknown component '" + *name + "'");
+      if (!consumeKeyword("by"))
+        return error("expected 'by' and a field: 'distribute " + *name +
+                     " by field'");
+      llvm::SMLoc fieldAt = token.loc;
+      FailureOr<std::string> field = identifier("a field");
+      if (failed(field))
+        return failure();
+      Type type = components[*name].fieldType(*field);
+      if (!type)
+        return error(fieldAt, "component '" + *name + "' has no field '" +
+                                  *field + "'");
+      auto whole = dyn_cast<IntegerType>(type);
+      if (!isa<EntityType>(type) && (!whole || whole.getWidth() == 1))
+        return error(fieldAt, "an entity is placed by a whole number (its "
+                              "range of them on each rank) or by an entity "
+                              "(it lives where that one does); '" + *field +
+                                  "' is neither");
+      Operation *declared =
+          SymbolTable::lookupSymbolIn(module, symbol(*name).getAttr());
+      if (declared->hasAttr(WorldLayout::kDistributeAttr))
+        return error(nameAt, "'" + *name + "' is distributed already");
+      declared->setAttr(WorldLayout::kDistributeAttr,
+                        builder.getStringAttr(*field));
+      consumeIf(Token::Semicolon);
+      continue;
+    }
     if (consumeKeyword("component"))
       result = parseComponent(/*tag=*/false);
     else if (consumeKeyword("tag"))

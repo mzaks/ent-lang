@@ -1,0 +1,42 @@
+// REQUIRES: mpi
+// Programs on many ranks (docs/ranks.md): built with --ranks and run on
+// 3 and 4 ranks, each says what it says on one process.
+// RUN: %ent run %S/Inputs/ranks_spread.ent > %t.spread.one
+// RUN: %ent run %S/Inputs/ranks_spread.ent --ranks 3 > %t.spread.three
+// RUN: %ent run %S/Inputs/ranks_spread.ent --ranks 4 > %t.spread.four
+// RUN: diff %t.spread.one %t.spread.three
+// RUN: diff %t.spread.one %t.spread.four
+// RUN: FileCheck %s --check-prefix=SPREAD --input-file=%t.spread.four
+// SPREAD: cell 750: 210
+// SPREAD: day 1: sum 505686 least 0 most 1008 odd 500
+// SPREAD: day 3: sum 502882 least 1 most 1008 odd 500
+//
+// RUN: %ent run %S/Inputs/ranks_running.ent > %t.running.one
+// RUN: %ent run %S/Inputs/ranks_running.ent --ranks 3 > %t.running.three
+// RUN: %ent run %S/Inputs/ranks_running.ent --ranks 4 > %t.running.four
+// RUN: diff %t.running.one %t.running.three
+// RUN: diff %t.running.one %t.running.four
+// RUN: FileCheck %s --check-prefix=RUNNING --input-file=%t.running.three
+// RUNNING: cell 907: first 5520 place 907
+// RUNNING: day 3: total 9015 n 1000 check 35543760
+//
+// RUN: %ent run %S/Inputs/ranks_colocate.ent > %t.colocate.one
+// RUN: %ent run %S/Inputs/ranks_colocate.ent --ranks 3 > %t.colocate.three
+// RUN: diff %t.colocate.one %t.colocate.three
+// RUN: FileCheck %s --check-prefix=COLOCATE --input-file=%t.colocate.three
+// COLOCATE: day 3: all 947134
+//
+// RUN: %ent run %S/Inputs/ranks_turn.ent > %t.turn.one
+// RUN: %ent run %S/Inputs/ranks_turn.ent --ranks 4 > %t.turn.four
+// RUN: diff %t.turn.one %t.turn.four
+//
+// A colony on another rank is not read yet: the program stops.
+// RUN: %ent run %S/Inputs/ranks_cross.ent | FileCheck %s --check-prefix=CROSS-ONE
+// CROSS-ONE: day 3: all
+// RUN: not %ent run %S/Inputs/ranks_cross.ent --ranks 3 2>&1 | FileCheck %s --check-prefix=CROSS
+// CROSS: reads or sends to an entity that rank {{[0-9]}} has
+//
+// What a `for` over distributed entities cannot do yet is said when the
+// program is built.
+// RUN: not %ent build %S/Inputs/ranks_refused.ent --ranks 2 -o %t.refused 2>&1 | FileCheck %s --check-prefix=REFUSED
+// REFUSED: accumulates a value that is not a whole number

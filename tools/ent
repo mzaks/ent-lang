@@ -57,6 +57,13 @@ the CUDA driver (libcuda) where the program is built and where it runs,
 and cuda.h (CUDA_PATH, else /opt/cuda) where it is built. Without --gpu
 those systems run on the CPU, with the same results.
 
+With --ranks N the program is built for many ranks (docs/ranks.md): N
+processes started by MPI's mpirun (`run`), each with a world of its own,
+which say what one process says; what a device does (an extern proc)
+rank 0 does, and every rank is given what it gave back. It needs MPI
+(mpicc, mpirun on the PATH; Open MPI or MPICH) where it is built and run.
+A program built so is started as `mpirun -n N program`.
+
 Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 
 A program can be built for what it does when it runs (profile-guided):
@@ -233,6 +240,9 @@ def cache_key(arguments):
         note("gpu", gpu_chip(), os.environ.get("ENT_GPU_FEATURES", ""),
              os.environ.get("CUDA_PATH", ""))
         note_file(os.path.join(ROOT, "devices", "gpu.c"))
+    if arguments.ranks:
+        note("ranks", mpi_flags())
+        note_file(os.path.join(ROOT, "devices", "ranks.c"))
     note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
          os.environ.get("ENT_PIECES", ""), os.environ.get("ENT_SPLIT", ""),
          os.cpu_count())
@@ -347,6 +357,23 @@ def piece_count(llvm):
     return min(os.path.getsize(llvm) // 160_000, os.cpu_count() or 1, 16)
 
 
+def mpi_flags():
+    """MPI's flags to compile and to link with, as its mpicc says them."""
+    mpicc = shutil.which("mpicc")
+    if not mpicc:
+        sys.exit("ent: --ranks: no MPI (mpicc) on the PATH; install Open MPI "
+                 "or MPICH")
+    said = [subprocess.run([mpicc, "--showme:" + what], capture_output=True,
+                           text=True).stdout.split() for what in
+            ("compile", "link")]
+    if not said[1]:
+        # (MPICH says it otherwise.)
+        said = [subprocess.run([mpicc, what], capture_output=True,
+                               text=True).stdout.split()[1:]
+                for what in ("-compile_info", "-link_info")]
+    return said
+
+
 def gpu_chip():
     """The kind of GPU the kernels are for: ENT_GPU_CHIP, else what
     nvidia-smi says of the machine's first."""
@@ -414,7 +441,9 @@ def build(arguments, output, directory):
 
     lowering = "--ent-lower-to-loops"
     gpu = " gpu=1" if arguments.gpu else ""
-    passes = [lowering + "=fuse-systems=1" + gpu, "--symbol-dce"]
+    # (On many ranks: devices/ranks.c, and MPI's own flags.)
+    ranks = " ranks=1" if arguments.ranks else ""
+    passes = [lowering + "=fuse-systems=1" + gpu + ranks, "--symbol-dce"]
     # (Kernels are made of the GPU's loops before what is left of them is
     # the CPU's; and the columns are read by their addresses before, so
     # that a kernel is given those.)
@@ -426,7 +455,7 @@ def build(arguments, output, directory):
     if arguments.parallel:
         passes = ["--ent-schedule",
                   lowering + "=fuse-systems=1 parallel-entities=1 "
-                  "parallel-stages=1" + gpu,
+                  "parallel-stages=1" + gpu + ranks,
                   "--symbol-dce"] + (views + before if gpu else []) + [
                   "--convert-scf-to-openmp", "--canonicalize",
                   "--ent-omp-nowait"]
@@ -444,9 +473,12 @@ def build(arguments, output, directory):
     # the edges it connects there are kept by C that comes with the
     # compiler.
     given.append(os.path.join(ROOT, "devices", "sends.c"))
-    if gpu:
+    if arguments.gpu:
         given.append(os.path.join(ROOT, "devices", "gpu.c"))
         link.append("-lcuda")
+    if arguments.ranks:
+        given.append(os.path.join(ROOT, "devices", "ranks.c"))
+        link += mpi_flags()[1]
     for path in arguments.sources:
         if os.path.splitext(path)[1] not in (".c", ".cpp", ".o", ".a"):
             sys.exit(f"ent: do not know how to build '{path}' (expected "
@@ -494,8 +526,9 @@ def build(arguments, output, directory):
             if gpu:
                 cuda = ["-DENT_GPU", "-I", os.path.join(
                     os.environ.get("CUDA_PATH", "/opt/cuda"), "include")]
-            run([cc, "-O2", "-I", directory, *cuda, "-c", path, "-o", built],
-                env=host)
+            mpi = mpi_flags()[0] if arguments.ranks else []
+            run([cc, "-O2", "-I", directory, *cuda, *mpi, "-c", path, "-o",
+                 built], env=host)
         elif extension == ".cpp":
             run([cxx, "-O2", "-I", directory, "-c", path, "-o", built],
                 env=host)
@@ -649,6 +682,16 @@ def build(arguments, output, directory):
         env=host)
 
 
+def launch(arguments, executable):
+    """How to start the program: on N ranks through mpirun."""
+    if not arguments.ranks:
+        return [executable]
+    mpirun = shutil.which("mpirun")
+    if not mpirun:
+        sys.exit("ent: --ranks: no mpirun on the PATH")
+    return [mpirun, "-n", str(arguments.ranks), "--oversubscribe", executable]
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ent", description=__doc__,
@@ -668,6 +711,8 @@ def main():
     parser.add_argument("--gpu", action="store_true",
                         help="run the `for`s of `gpu system`s on the "
                         "machine's NVIDIA GPU")
+    parser.add_argument("--ranks", type=int, metavar="N",
+                        help="build for many ranks (MPI); `run` starts N")
     parser.add_argument("--embed", action="store_true",
                         help="put the files the program declares (`asset`) "
                         "into the program itself, not next to it")
@@ -718,7 +763,8 @@ def main():
                 shutil.copy2(kept, arguments.output or stem)
                 copy_assets(arguments, arguments.output or stem)
                 return 0
-            return subprocess.run([kept] + rest, env=where).returncode
+            return subprocess.run(launch(arguments, kept) + rest,
+                                  env=where).returncode
 
     with tempfile.TemporaryDirectory() as temporary:
         directory = temporary
@@ -736,7 +782,8 @@ def main():
         build(arguments, executable, directory)
         if key:
             executable = keep_in_cache(executable, key, stem)
-        return subprocess.run([executable] + rest, env=where).returncode
+        return subprocess.run(launch(arguments, executable) + rest,
+                              env=where).returncode
 
 
 if __name__ == "__main__":
