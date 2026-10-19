@@ -79,8 +79,8 @@ reaches rank 0, which writes it in their order.
 - A buffer row written by one rank and read by another is not given to
   it: the program must read only rows its own entities wrote (beecs
   does).
-- On many ranks the systems' loops are not fused, and `--gpu` is for one
-  process.
+- `--gpu` is for one process. Systems' loops are fused on many ranks as
+  on one, where all of them go over distributed entities or none.
 
 ## Running
 

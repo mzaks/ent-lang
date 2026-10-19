@@ -1976,6 +1976,69 @@ static Value wideForRanks(IRRewriter &rewriter, Location loc, Value value,
                 : arith::ExtSIOp::create(rewriter, loc, i64, bits).getResult();
 }
 static Value narrowFromRanks(IRRewriter &rewriter, Location loc, Value wide,
+                             Type type);
+
+/// A unique's field that a query over distributed archetypes accumulates
+/// into, and what it held before the query (see reduceOverRanks): the
+/// field, the value, the rule and the type of what is accumulated.
+using SpreadCell = std::tuple<Value, Value, StringRef, Type>;
+
+/// What the fields `queries` accumulate into hold now, before their loops,
+/// at the insertion point; each field once.
+static void noteSpreadCells(IRRewriter &rewriter, Location loc,
+                            WorldAccess &world, ArrayRef<QueryOp> queries,
+                            SmallVectorImpl<SpreadCell> &cells) {
+  llvm::DenseSet<std::pair<Attribute, Attribute>> seen;
+  for (QueryOp query : queries)
+    query.getBody().walk([&](AccumulateOp accumulate) {
+      if (!seen.insert({accumulate.getResourceAttr().getAttr(),
+                        accumulate.getFieldAttr()})
+               .second)
+        return;
+      Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
+                                        accumulate.getFieldAttr());
+      Value before = memref::LoadOp::create(
+          rewriter, loc, field,
+          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
+      cells.push_back({field, before, accumulate.getRule(),
+                       accumulate.getValue().getType()});
+    });
+}
+
+/// What each rank's rows accumulated into `cells`, combined over the ranks
+/// (devices/ranks.c): added (each rank's part, from where the field was),
+/// or the least or the most.
+static void reduceOverRanks(IRRewriter &rewriter, Location loc,
+                            ModuleOp module, ArrayRef<SpreadCell> cells) {
+  Type i64 = rewriter.getI64Type();
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  for (auto [field, before, rule, type] : cells) {
+    bool noSign = hasNoSign(type);
+    auto wide = [&](Value value) {
+      return wideForRanks(rewriter, loc, value, noSign);
+    };
+    Value after = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
+    Value all;
+    if (rule == "add") {
+      Value mine = arith::SubIOp::create(rewriter, loc, wide(after),
+                                         wide(before));
+      Value added = callGpu(rewriter, loc, module, "ent_ranks_sum",
+                            ValueRange{mine}, TypeRange{i64})
+                        .getResult(0);
+      all = arith::AddIOp::create(rewriter, loc, wide(before), added);
+    } else {
+      all = callGpu(rewriter, loc, module,
+                    rule == "min" ? "ent_ranks_min" : "ent_ranks_max",
+                    ValueRange{wide(after)}, TypeRange{i64})
+                .getResult(0);
+    }
+    memref::StoreOp::create(
+        rewriter, loc, narrowFromRanks(rewriter, loc, all, after.getType()),
+        field, ValueRange{zero});
+  }
+}
+
+static Value narrowFromRanks(IRRewriter &rewriter, Location loc, Value wide,
                              Type type) {
   unsigned bits = type.getIntOrFloatBitWidth();
   Value narrow = wide;
@@ -13451,8 +13514,39 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
   // archetypes before it, then the rows of this one on the ranks before
   // this rank, less where this rank's stretch starts. `spreadAll`: all of
   // the ranks' rows.)
-  Value spreadRows;
-  if (spread) {
+  Value spreadRows, spreadBefore;
+  unsigned spreadArchetypes = 0;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    spreadArchetypes += spread && matches(archetype, query);
+  if (spread && spreadArchetypes == 1) {
+    // (Of one archetype, the places are this rank's own: from its first
+    // row, and the scratch arrays as long as its stretch. What the ranks
+    // before it add is where its sums start (see below).)
+    emitPlacement(rewriter, loc, layout, world, module);
+    Type i64 = rewriter.getI64Type();
+    Value number = arith::ConstantIntOp::create(rewriter, loc, spread->index,
+                                                32);
+    Value first = callGpu(rewriter, loc, module, "ent_ranks_first",
+                          ValueRange{number}, TypeRange{i64})
+                      .getResult(0);
+    Value end = callGpu(rewriter, loc, module, "ent_ranks_end_row",
+                        ValueRange{number}, TypeRange{i64})
+                    .getResult(0);
+    Value mine = arith::SubIOp::create(rewriter, loc, end, first);
+    bases[spread] = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(),
+        arith::SubIOp::create(rewriter, loc,
+                              arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                              first));
+    count = arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                       mine);
+    spreadBefore = callGpu(rewriter, loc, module, "ent_ranks_before",
+                           ValueRange{mine}, TypeRange{i64})
+                       .getResult(0);
+    spreadRows = callGpu(rewriter, loc, module, "ent_ranks_sum",
+                         ValueRange{mine}, TypeRange{i64})
+                     .getResult(0);
+  } else if (spread) {
     emitPlacement(rewriter, loc, layout, world, module);
     Type i64 = rewriter.getI64Type();
     Value placed = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
@@ -13498,9 +13592,20 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
     APInt step;
     (void)matchPattern(running.getValue(), m_ConstantInt(&step));
     if (spread) {
-      // (The places are the ranks' (see the bases), and the field is all
-      // of the ranks' rows times the step.)
+      // (The places are the ranks' (see the bases), or this rank's from
+      // where the ranks' before end; and the field is all of the ranks'
+      // rows times the step.)
       bool noSign = hasNoSign(running.getValue().getType());
+      if (spreadBefore)
+        runningStarts.back() = narrowFromRanks(
+            rewriter, loc,
+            arith::AddIOp::create(
+                rewriter, loc, wideForRanks(rewriter, loc, start, noSign),
+                arith::MulIOp::create(
+                    rewriter, loc, spreadBefore,
+                    arith::ConstantIntOp::create(rewriter, loc,
+                                                 step.getSExtValue(), 64))),
+            type);
       Value all = arith::MulIOp::create(
           rewriter, loc, spreadRows,
           arith::ConstantIntOp::create(rewriter, loc, step.getSExtValue(), 64));
@@ -13968,7 +14073,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   llvm::SaveAndRestore keepFirstRows(rankFirstRows);
   bool captured = false;
   // (Each unique field accumulated into: what it held before.)
-  SmallVector<std::tuple<Value, Value, StringRef, Type>> spreadCells;
+  SmallVector<SpreadCell> spreadCells;
   if (spread) {
     rewriter.setInsertionPoint(query);
     emitPlacement(rewriter, loc, layout, world, module);
@@ -13980,21 +14085,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     });
     if (captured)
       callGpu(rewriter, loc, module, "ent_ranks_capture", ValueRange{});
-    llvm::DenseSet<std::pair<Attribute, Attribute>> seenCells;
-    query.getBody().walk([&](AccumulateOp accumulate) {
-      if (!seenCells
-               .insert({accumulate.getResourceAttr().getAttr(),
-                        accumulate.getFieldAttr()})
-               .second)
-        return;
-      Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
-                                        accumulate.getFieldAttr());
-      Value before = memref::LoadOp::create(
-          rewriter, loc, field,
-          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
-      spreadCells.push_back({field, before, accumulate.getRule(),
-                             accumulate.getValue().getType()});
-    });
+    noteSpreadCells(rewriter, loc, world, {query}, spreadCells);
     for (const WorldArchetype &archetype : layout.archetypes)
       if (archetype.isDistributed() && matches(archetype, query))
         rankFirstRows[&archetype] = arith::IndexCastOp::create(
@@ -14244,33 +14335,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // ranks, and what they wrote out written in order.)
   if (spread) {
     rewriter.setInsertionPoint(query);
-    Type i64 = rewriter.getI64Type();
-    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    for (auto [field, before, rule, type] : spreadCells) {
-      bool noSign = hasNoSign(type);
-      auto wide = [&](Value value) {
-        return wideForRanks(rewriter, loc, value, noSign);
-      };
-      Value after =
-          memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
-      Value all;
-      if (rule == "add") {
-        Value mine = arith::SubIOp::create(rewriter, loc, wide(after),
-                                           wide(before));
-        Value added = callGpu(rewriter, loc, module, "ent_ranks_sum",
-                              ValueRange{mine}, TypeRange{i64})
-                          .getResult(0);
-        all = arith::AddIOp::create(rewriter, loc, wide(before), added);
-      } else {
-        all = callGpu(rewriter, loc, module,
-                      rule == "min" ? "ent_ranks_min" : "ent_ranks_max",
-                      ValueRange{wide(after)}, TypeRange{i64})
-                  .getResult(0);
-      }
-      memref::StoreOp::create(
-          rewriter, loc, narrowFromRanks(rewriter, loc, all, after.getType()),
-          field, ValueRange{zero});
-    }
+    reduceOverRanks(rewriter, loc, module, spreadCells);
     if (captured)
       callGpu(rewriter, loc, module, "ent_ranks_release", ValueRange{});
   }
@@ -14716,6 +14781,38 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   rewriter.setInsertionPoint(insertionPoint);
   Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
 
+  // (On many ranks, systems over distributed entities: placed first, each
+  // rank's loops through its stretch of the rows, what they accumulate
+  // added up over the ranks when the loops are done; see lowerQuery.
+  // fuseSchedule keeps them apart from systems over copied entities.)
+  ModuleOp module = insertionPoint->getParentOfType<ModuleOp>();
+  bool spread = false;
+  SmallVector<QueryOp> spreadQueries;
+  if (ranksMode)
+    for (SystemOp system : systems)
+      for (QueryOp query : system.getBody().getOps<QueryOp>())
+        for (const WorldArchetype &archetype : layout.archetypes)
+          if (archetype.isDistributed() && matches(archetype, query)) {
+            spread = true;
+            spreadQueries.push_back(query);
+            break;
+          }
+  llvm::SaveAndRestore keepFirstRows(rankFirstRows);
+  SmallVector<SpreadCell> spreadCells;
+  if (spread) {
+    emitPlacement(rewriter, loc, layout, world, module);
+    noteSpreadCells(rewriter, loc, world, spreadQueries, spreadCells);
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (archetype.isDistributed())
+        rankFirstRows[&archetype] = arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getIndexType(),
+            callGpu(rewriter, loc, module, "ent_ranks_first",
+                    ValueRange{arith::ConstantIntOp::create(
+                        rewriter, loc, archetype.index, 32)},
+                    TypeRange{rewriter.getI64Type()})
+                .getResult(0));
+  }
+
   // The queries in their order. A send that nothing else in its query
   // sees (kUnobservedAttr) is combined where it is sent, in a loop that
   // visits the entities one after another, as alone: nothing else in the
@@ -14828,6 +14925,16 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
 
     rewriter.setInsertionPoint(insertionPoint);
     Value rows = world.count(loc, archetype);
+    // (A distributed archetype's: this rank's stretch of them.)
+    Value from = rankFirstRows.lookup(&archetype);
+    if (from)
+      rows = arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(),
+          callGpu(rewriter, loc, module, "ent_ranks_end_row",
+                  ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                          archetype.index, 32)},
+                  TypeRange{rewriter.getI64Type()})
+              .getResult(0));
     visited.push_back({&archetype, rows});
     // A loop that never runs in parallel visits the entities in the order
     // sends are combined in (see lowerQuery).
@@ -14843,7 +14950,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
                           layout, entity, rows, tick, Value(), parallel,
                           sequentialOnly);
         },
-        rows);
+        rows, /*sliced=*/false, from);
     // The resource cells of directly combined accumulates in registers
     // through the loop, and the reduced ones reduced.
     SmallVector<AccumulateOp> accumulates;
@@ -14875,6 +14982,10 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
         if (matches(*archetype, query) &&
             !appliesDirectly(accumulate, direct.contains(archetype)))
           combineAccumulated(rewriter, accumulate, *archetype, world, count);
+  }
+  if (spread) {
+    rewriter.setInsertionPoint(insertionPoint);
+    reduceOverRanks(rewriter, loc, module, spreadCells);
   }
   for (Operation *op : reduced)
     op->removeAttr(kReducedAttr);
@@ -14915,6 +15026,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   // Whether the sequence's systems go to the GPU: those are fused only
   // with each other.
   bool sequenceOnGpu = false;
+  // Whether its systems go over distributed entities (on many ranks).
+  bool sequenceSpread = false;
   auto flush = [&](Operation *at) {
     fuseRuns(rewriter, sequence, at, symbols, layout,
              sequenceOnGpu ? *device : world,
@@ -14972,15 +15085,28 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
         // So has one that goes by a field.
         writesResource |= query.hasBy();
       }
+      // (On many ranks: a sequence of systems over distributed entities,
+      // or over copied ones, not both, so that what is added up over the
+      // ranks is only what the ranks' own rows added (see fuseRuns); a
+      // system over both is not fused.)
+      bool spread = false, copied = false;
+      if (ranksMode)
+        for (QueryOp query : system.getBody().getOps<QueryOp>())
+          for (const WorldArchetype &archetype : layout.archetypes)
+            if (matches(archetype, query))
+              (archetype.isDistributed() ? spread : copied) = true;
+      writesResource |= spread && copied;
       if (!conditional && !writesResource &&
           !computeAccess(system, archetypes).isOpaque()) {
         bool gpu = onGpu(system, options);
-        if (!sequence.empty() && gpu != sequenceOnGpu) {
+        if (!sequence.empty() &&
+            (gpu != sequenceOnGpu || spread != sequenceSpread)) {
           flush(&op);
           sequence.clear();
           fused.clear();
         }
         sequenceOnGpu = gpu;
+        sequenceSpread = spread;
         if (joins(system, fused)) {
           sequence.push_back(run);
           continue;
@@ -17901,9 +18027,7 @@ struct EntLowerToLoops
       // (The GPU's copy of the world, for the fused loops of `gpu`
       // systems.)
       std::optional<WorldAccess> device;
-      // (On many ranks the systems' loops are not fused yet: a fused loop
-      // goes through all rows, not a rank's stretch of them.)
-      bool fuse = fuseSystems && !ranks;
+      bool fuse = fuseSystems;
       if (gpu && fuse &&
           func.walk([&](RunOp run) {
                 return onGpu(symbols.lookup(run.getSystem()), options)
