@@ -44,8 +44,12 @@ buffer Pre { w: i32 } capacity 16
 // literal l, `start`, `size` and `cap` of its list among the `clause`
 // column's rows (one buffer, so that a proc changes it all). A list that
 // is full moves to the end with twice the room. Deleted clauses stay on
-// the lists until they are passed.
-buffer Occ { clause: i32, start: i32, size: i32, cap: i32 } capacity 16
+// the lists until they are passed. Beside each clause on a list its
+// signature as it was put there (`bits`): a clause strengthened since has
+// fewer bits, so a clause that does not have all of another's bits has
+// not all of its variables, read along the list without going to `Pre`
+// (DivS_942_11, 936,584 clauses on 942 variables, 140 s before).
+buffer Occ { clause: i32, bits: i32, start: i32, size: i32, cap: i32 } capacity 16
 
 // Per literal how many clauses that are not deleted have it.
 buffer Count { live: i32 } capacity 16
@@ -96,19 +100,23 @@ world {
   Prep.drain_steps = 1000000000
 }
 
-// `clause` onto the list of `lit`, which moves where it is full.
-proc occur(occ: mut Occ, count: mut Count, lit: i32, clause: i32) {
+// `clause`, of signature `bits`, onto the list of `lit`, which moves where
+// it is full.
+proc occur(occ: mut Occ, count: mut Count, lit: i32, clause: i32, bits: i32) {
   var at = occ[lit].start
   let n = occ[lit].size
   if n == occ[lit].cap {
     let moved = len(occ)
-    for x in 0..n { occ += { clause: occ[at + x].clause, start: 0, size: 0, cap: 0 } }
-    for x in n..2 * n + 4 { occ += { clause: -1, start: 0, size: 0, cap: 0 } }
+    for x in 0..n {
+      occ += { clause: occ[at + x].clause, bits: occ[at + x].bits, start: 0, size: 0, cap: 0 }
+    }
+    for x in n..2 * n + 4 { occ += { clause: -1, bits: 0, start: 0, size: 0, cap: 0 } }
     occ[lit].start = moved
     occ[lit].cap = 2 * n + 4
     at = moved
   }
   occ[at + n].clause = clause
+  occ[at + n].bits = bits
   occ[lit].size = n + 1
   count[lit].live += 1
 }
@@ -178,7 +186,7 @@ system copy() {
 // Each literal's list, with room for as many again and four more.
 system occurrences() {
   let lits = 2 * Problem.vars
-  Occ = [{ clause: -1, start: 0, size: 0, cap: 0 }; lits]
+  Occ = [{ clause: -1, bits: 0, start: 0, size: 0, cap: 0 }; lits]
   Count = [{ live: 0 }; lits]
   var c = 0
   while c < len(Pre) {
@@ -193,12 +201,13 @@ system occurrences() {
     Occ[l].size = 0
     at += cap
   }
-  for i in lits..at { Occ += { clause: -1, start: 0, size: 0, cap: 0 } }
+  for i in lits..at { Occ += { clause: -1, bits: 0, start: 0, size: 0, cap: 0 } }
   c = 0
   while c < len(Pre) {
     for i in 0..Pre[c].w {
       let l = Pre[c + 2 + i].w
       Occ[Occ[l].start + Occ[l].size].clause = c
+      Occ[Occ[l].start + Occ[l].size].bits = Pre[c + 1].w & ~3
       Occ[l].size += 1
       Count[l].live += 1
     }
@@ -228,16 +237,24 @@ proc backward(pre: mut Pre, occ: mut Occ, count: mut Count, mark: mut Mark, byte
   let bits = pre[c + 1].w & ~3
   for side in 0..2 {
     let q = best ^ side
+    // (The list stays where it is, and `c` is not deleted, while it is
+    // walked; its length changes only here.)
+    let start = occ[q].start
+    var n = occ[q].size
     var i = 0
-    while i < occ[q].size && pre[c + 1].w & 1 == 0 {
-      let d = occ[occ[q].start + i].clause
-      let dsize = pre[d].w
-      if pre[d + 1].w & 1 == 1 {
+    while i < n {
+      let d = occ[start + i].clause
+      if bits & ~occ[start + i].bits != 0 {
+        // (Not all of `c`'s variables: passed without going to `Pre`.)
+        i += 1
+      } else if pre[d + 1].w & 1 == 1 {
         // (A deleted clause off the list, the last in its place.)
-        let last = occ[q].size - 1
-        occ[occ[q].start + i].clause = occ[occ[q].start + last].clause
-        occ[q].size = last
+        n -= 1
+        occ[start + i].clause = occ[start + n].clause
+        occ[start + i].bits = occ[start + n].bits
+        occ[q].size = n
       } else {
+        let dsize = pre[d].w
         if d != c && dsize >= size && dsize < limit && bits & ~pre[d + 1].w == 0 {
           var same = 0
           var flips = 0
@@ -282,6 +299,7 @@ proc backward(pre: mut Pre, occ: mut Occ, count: mut Count, mark: mut Mark, byte
             var j = 0
             while occ[fs + j].clause != d { j += 1 }
             occ[fs + j].clause = occ[fs + occ[flipped].size - 1].clause
+            occ[fs + j].bits = occ[fs + occ[flipped].size - 1].bits
             occ[flipped].size -= 1
             count[flipped].live -= 1
             touched += { var: flipped >> 1 }
@@ -291,7 +309,10 @@ proc backward(pre: mut Pre, occ: mut Occ, count: mut Count, mark: mut Mark, byte
             }
             strengthened += 1
             // (Off the list being walked: what took its place is next.)
-            if flipped == q { i -= 1 }
+            if flipped == q {
+              i -= 1
+              n -= 1
+            }
           }
         }
         i += 1
@@ -502,7 +523,7 @@ system eliminate() {
                   Pre[r + 1].w = signature(Pre, r)
                   for k in 0..size {
                     let u = Pre[r + 2 + k].w >> 1
-                    occur(Occ, Count, Pre[r + 2 + k].w, r)
+                    occur(Occ, Count, Pre[r + 2 + k].w, r, Pre[r + 1].w & ~3)
                     Touched += { var: u }
                     if !Gone[u].fresh {
                       Gone[u].fresh = true

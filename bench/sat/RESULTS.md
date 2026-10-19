@@ -281,3 +281,27 @@ since the last one, literals in the order of how many tried clauses
 have them, clauses sorted so that one keeps the levels of the one
 before) solves 35, PAR-2 4,193: better than before (32, 6,228), still
 off.
+
+## 2026-10-19: subsumption along the lists without going to the clauses
+
+DivS_942_11 (936,584 clauses of 11 literals on 942 variables) took 109 s
+to preprocess, more than MiniSat takes to solve it (98 s); preprocessing
+alone solves it. The lists of a literal are some 5,000 clauses long, and
+each clause on one cost two reads of `Pre` far apart, its flags and its
+signature, to be passed. Each clause on a list now has its signature
+beside it, as it was when it was put there: strengthened since, it has
+fewer bits, so one that has not all of the other's bits is passed
+without going to `Pre`. With the list's start and length kept while it
+is walked, DivS takes 8.8 s, all 100 problems 32 s instead of 132 s
+(battery numbers before were 200 s and 2x). Deleted clauses leave the
+lists later, so the clauses are visited in another order and 18 problems
+keep up to 0.05% other clauses.
+
+| solver (dev, 39, on mains) | solved | PAR-2 | median against MiniSat |
+|---|---|---|---|
+| entsat (reduced as CaDiCaL 3) | 37 | 3,037 | 0.41 |
+| signatures on the lists | 38 | 2,425 | 0.55 |
+
+DivS 132 s to 9 s, REGRandom 129 s to 54 s, ContextModel 6_3_8 solved
+(24 s); PRP_30_41, PRP_30_39, PRP_20_40 and mchess16 slower (twice). SATLIB
+all correct, 11 dev proofs verified.
