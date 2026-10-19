@@ -7,9 +7,12 @@
 //
 // The cohorts of all colonies are rows of one buffer, `Cohorts`:
 // `Colonies.rows` for each, from its `Colony.cohorts` on, laid out within
-// as colony.ent lays out one colony's (`Stages`). What goes through the
-// cohorts goes one colony after another (`in turn by`): the rows are read
-// and written there as outside a `for`.
+// as colony.ent lays out one colony's (`Stages`). A colony reads and
+// writes its rows through a window (`w: mut Cohorts[c.cohorts,
+// Colonies.rows]`), all colonies at once; where a fn or proc goes through
+// them (given the buffer and where the colony's rows start), one colony
+// after another (`in turn by`), the rows read and written there as
+// outside a `for`.
 //
 // What happens in a round of foraging is many_foraging.ent's, on the
 // components of the colony declared here.
@@ -234,7 +237,7 @@ system foraging_period() {
 
 // Of every cohort so many die (MortalityCohorts).
 system cohort_mortality() {
-  for c: Colony in turn by c.number {
+  for c: Colony, w: mut Cohorts[c.cohorts, Colonies.rows] {
     if !c.ended {
       for stage in Stage {
         let rate =
@@ -248,10 +251,10 @@ system cohort_mortality() {
           else { DroneMortality.in_hive }
         let from = first_row(Stages, stage)
         for i in from..from + day_count(Stages, stage) {
-          let here = Cohorts[c.cohorts + i].bees
+          let here = w[i].bees
           if here > 0 {
             let k = key(c.seed, i, Clock.tick, COHORT_MORTALITY)
-            Cohorts[c.cohorts + i].bees = max(0, here - poisson(k, 0, rate * here as f64))
+            w[i].bees = max(0, here - poisson(k, 0, rate * here as f64))
           }
         }
       }
@@ -280,7 +283,7 @@ system age_cohorts() {
 
 // The queen's eggs of the day (EggLaying).
 system lay_eggs() {
-  for c: Colony, p: Population in turn by c.number {
+  for c: Colony, p: Population, w: mut Cohorts[c.cohorts, Colonies.rows] {
     if !c.ended {
       var rate = Nursing.max_eggs_per_day as f64 * season(Clock.tick)
       if Nursing.egg_nursing_limit {
@@ -302,8 +305,8 @@ system lay_eggs() {
          day <= Nursing.drone_egg_laying_season_end {
         drones = max(Nursing.drone_eggs_proportion * eggs as f64, 0.0) as i32
       }
-      Cohorts[c.cohorts + first_row(Stages, Stage.WorkerEggs)].bees = max(eggs - drones, 0)
-      Cohorts[c.cohorts + first_row(Stages, Stage.DroneEggs)].bees = drones
+      w[first_row(Stages, Stage.WorkerEggs)].bees = max(eggs - drones, 0)
+      w[first_row(Stages, Stage.DroneEggs)].bees = drones
     }
   }
 }
@@ -312,18 +315,18 @@ system lay_eggs() {
 // whole squadrons (TransitionForagers).
 system to_foragers() {
   let size = Foragers.squadron_size
-  for c: Colony, s: Stock, e: mut Emerging in turn by c.number {
+  for c: Colony, s: Stock, e: mut Emerging, w: mut Cohorts[c.cohorts, Colonies.rows] {
     if !c.ended {
-      let from = c.cohorts + first_row(Stages, Stage.WorkersInHive)
+      let from = first_row(Stages, Stage.WorkersInHive)
       var squadrons = 0
       var remainder = 0
       for i in from + s.aff..from + day_count(Stages, Stage.WorkersInHive) {
-        let bees = Cohorts[i].bees
-        Cohorts[i].bees = 0
+        let bees = w[i].bees
+        w[i].bees = 0
         squadrons += bees / size
         remainder += bees % size
       }
-      Cohorts[from + s.aff - 1].bees += remainder
+      w[from + s.aff - 1].bees += remainder
       e.squadrons = squadrons
     }
   }
@@ -384,10 +387,10 @@ system brood_care() {
 
 // The bees that came out today join the in-hive bees (NewCohorts).
 system new_cohorts() {
-  for c: Colony, e: mut Emerging in turn by c.number {
+  for c: Colony, e: mut Emerging, w: mut Cohorts[c.cohorts, Colonies.rows] {
     if !c.ended {
-      Cohorts[c.cohorts + first_row(Stages, Stage.DronesInHive)].bees = e.drones
-      Cohorts[c.cohorts + first_row(Stages, Stage.WorkersInHive)].bees = e.workers
+      w[first_row(Stages, Stage.DronesInHive)].bees = e.drones
+      w[first_row(Stages, Stage.WorkersInHive)].bees = e.workers
       e.drones = 0
       e.workers = 0
     }

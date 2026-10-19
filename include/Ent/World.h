@@ -410,9 +410,17 @@ struct WorldBuffer {
   uint64_t countOffset = 0;
   /// One column per field; `component` is the buffer's name.
   SmallVector<WorldColumn> fields;
-  /// Of a buffer whose rows a `for` writes (0 where none does): whether
-  /// an entity of its last run wrote outside its own rows. Not saved.
+  /// Of a buffer whose rows a `for` writes, or reads through a window (0
+  /// where none does): whether an entity of its last run wrote outside its
+  /// own rows, or went outside its window. Not saved.
   uint64_t clashOffset = 0;
+  /// Of a buffer with windows that entities take (`ent.buffer.claim`, 0
+  /// where it has none): the number of the last run of such a `for`, the
+  /// CPU's; and for each row of its room which entity of which run took it
+  /// (the run above 32 bits, the entity's id below), in each world (the
+  /// GPU's has its own). Zero at first; not saved.
+  uint64_t runOffset = 0;
+  uint64_t ownerOffset = 0;
 
   /// The column of `field`, or null.
   const WorldColumn *find(StringRef field) const;

@@ -207,6 +207,25 @@ def Ent_BufferKeepOp : Ent_Op<"buffer.keep", [
   let assemblyFormat = "$buffer $count attr-dict";
 }
 
+def Ent_BufferClaimOp : Ent_Op<"buffer.claim", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Take rows of a buffer as the visited entity's own";
+  let description = [{
+    ```mlir
+    ent.buffer.claim @Cohorts %start, %count
+    ```
+    In a query (not one that takes turns), at the start of its body: rows
+    `%start` to `%start + %count` (but not that) are the visited entity's
+    for this run of the query, which reads and writes them through
+    `ent.buffer.at` and `ent.buffer.set` marked `ent.window` (a window,
+    `w: mut Cohorts[start, count]`), and no other access of the buffer.
+    Where another entity of the run took one of them too, or the rows are
+    not all rows the buffer has, the query's end stops the program.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, I32:$start, I32:$count);
+  let assemblyFormat = "$buffer $start `,` $count attr-dict";
+}
+
 def Ent_BufferOfOp : Ent_Op<"buffer.of", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "A buffer, to hand to a function in C";

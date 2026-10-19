@@ -1,0 +1,59 @@
+// Windows of a buffer in a `for` (docs/syntax.md): every hive has rows
+// of `Cells` of its own, one after another, and reads and writes them
+// through `w[i].field`, a row from the row before it too; another `for`
+// reads them through windows that are not taken, and sums them. Built
+// for one core, for all of them and with the systems on the GPU
+// (gpu.test), it prints the same. On the third day one hive's window
+// reaches into the next one's, and the program stops.
+import console
+
+component Hive { number: i32, start: i32, size: i32 } capacity 4000
+buffer Cells { bees: i32, age: i32 } capacity 40000
+unique Sum { bees: i64, old: i64 }
+unique Check: i64
+unique Days: i32
+
+system grow() {
+  for h: Hive, w: mut Cells[h.start, h.size] {
+    for i in 0..len(w) {
+      let b = w[i].bees
+      w[i].bees = (b * 3 + h.number + i) % 1000
+      w[i].age += 1
+    }
+    for i in 1..len(w) { w[i].bees += w[i - 1].bees % 7 }
+  }
+}
+system sum() {
+  Sum.bees = 0
+  Sum.old = 0
+  for h: Hive, w: Cells[h.start, h.size] {
+    for i in 0..len(w) {
+      Sum.bees += w[i].bees as i64
+      if w[i].age > 1 { Sum.old += 1 }
+    }
+  }
+}
+system check() {
+  Check = 0
+  for i in 0..len(Cells) { Check += Cells[i].bees as i64 * (i % 97 + 1) as i64 }
+  spawn { Print { line: "day {Days}: bees {Sum.bees} old {Sum.old} check {Check}" } }
+}
+system count() { Days += 1 }
+system overlap() {
+  for h: mut Hive { if Days == 3 && h.number == 5 { h.size += 1 } }
+}
+schedule day() { count()  overlap()  grow()  sum()  check()  write()  clear() }
+
+world {
+  var at = 0
+  for n in 0..2000 {
+    let size = n % 7 + 3
+    spawn { Hive { number: n, start: at, size: size } }
+    at += size
+  }
+  for i in 0..at { Cells += { bees: i % 13, age: 0 } }
+}
+
+main {
+  loop { day() } until Days == 3
+}

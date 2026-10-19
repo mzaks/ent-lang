@@ -351,7 +351,10 @@ struct Variable {
   /// (Row: a row of a table, read by its fields; `value` is what the
   /// table is read by, and the table is `component` by its name, or the
   /// one that `which` holds.)
-  enum Kind { Value, Ref, Entity, Other, Row };
+  /// (Window: rows of a buffer a `for`'s entity has, `w[i].field`; the
+  /// buffer is `component` by its symbol, `value` the row its window
+  /// starts at and `which` how many it has, both i32.)
+  enum Kind { Value, Ref, Entity, Other, Row, Window };
   Kind kind;
   mlir::Value value;
   std::string component; // for Ref; for a Row, the table
@@ -755,6 +758,12 @@ private:
   FailureOr<mlir::Value> emitRowNumber(const Expr &number,
                                        FlatSymbolRefAttr buffer,
                                        StringRef name);
+  /// The row of the buffer that row `number` of `window` is (an i32), or
+  /// -1, which the buffer has not, where the window has no such row: that
+  /// is said, and the query's end stops the program.
+  FailureOr<mlir::Value> windowRow(const Variable &window, const Expr &number);
+  LogicalResult parseWindowStatement(const std::string &name,
+                                     const Variable &window, llvm::SMLoc at);
   mlir::Value textBits(Location at, mlir::Value text);
   mlir::Value textFromBits(Location at, mlir::Value bits, TextType type);
   mlir::Value textConstant(Location at, StringRef bytes, TextType type);
@@ -3142,6 +3151,61 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
   return success();
 }
 
+// w[i].field op value: another value for a row of a window of a `for`,
+// which its entity took (`w: mut Buffer[start, count]`): read and written
+// as it likes, `+=` too.
+LogicalResult Parser::parseWindowStatement(const std::string &name,
+                                           const Variable &window,
+                                           llvm::SMLoc at) {
+  Variable held = window;
+  if (failed(expect(Token::LBracket, "'[': a row of window '" + name +
+                                         "' is changed, '" + name +
+                                         "[i].field = value'")))
+    return failure();
+  FailureOr<ExprPtr> number = parseExpr();
+  if (failed(number) || failed(expect(Token::RBracket, "']'")) ||
+      failed(expect(Token::Dot, "'.' and a field: a row is changed by its "
+                                "fields")))
+    return failure();
+  llvm::SMLoc fieldAt = token.loc;
+  FailureOr<std::string> field = identifier("a field");
+  if (failed(field))
+    return failure();
+  Type type = buffers.ofSymbol(held.component).fieldType(*field);
+  if (!type)
+    return error(fieldAt, "the buffer of window '" + name +
+                              "' has no field '" + *field + "'");
+  if (!held.mut)
+    return error(at, "'" + name + "' is a window to read: 'name: mut " +
+                         "Buffer[start, count]' takes rows to change");
+  auto op = parseAssignOp();
+  if (failed(op))
+    return failure();
+  FailureOr<ExprPtr> value = parseExpr();
+  if (failed(value))
+    return failure();
+  FailureOr<mlir::Value> row = windowRow(held, **number);
+  if (failed(row))
+    return failure();
+  auto target = FlatSymbolRefAttr::get(context, held.component);
+  StringAttr fieldName = builder.getStringAttr(*field);
+  return emitAssignment(
+      at, op->first, op->second, [&] { return type; },
+      [&] {
+        auto read = BufferAtOp::create(builder, loc(at), type, target,
+                                       fieldName, *row);
+        read->setAttr(kWindowAttr, builder.getUnitAttr());
+        return read.getResult();
+      },
+      [&](mlir::Value stored) {
+        auto set = BufferSetOp::create(builder, loc(at), target, fieldName,
+                                       *row, stored);
+        set->setAttr(kWindowAttr, builder.getUnitAttr());
+        return success();
+      },
+      **value);
+}
+
 // component Name { fields } [apart] [capacity N] / tag Name [apart]
 // [capacity N]
 LogicalResult Parser::parseComponent(bool tag) {
@@ -5410,13 +5474,26 @@ LogicalResult Parser::parseFor() {
   auto startsFilter = [&] {
     return token.isKeyword("with") || token.isKeyword("without");
   };
+  // Windows: `w: [mut] Buffer[start, count]`, rows of a buffer the
+  // visited entity has, read (and with `mut` taken and written) through
+  // `w[i].field`; start and count are emitted where the body starts.
+  struct Window {
+    std::string name, symbol;
+    bool mut;
+    ExprPtr start, count;
+    llvm::SMLoc loc;
+  };
+  SmallVector<Window> windows;
   // name: [mut] Component, one or more, into `into`; the first name was
   // read (`pending`).
   // `optional` before a name: the entity may be without the component,
-  // and the binding is read with `if let`.
+  // and the binding is read with `if let`. With `windowsHere` a name may
+  // be a window too (of the visited entity's own bindings, not in a
+  // pattern).
   auto parseBindings = [&](std::string pending,
                            SmallVectorImpl<Binding> &into,
-                           bool optional = false) -> LogicalResult {
+                           bool optional = false,
+                           bool windowsHere = false) -> LogicalResult {
     while (true) {
       if (failed(expect(Token::Colon, "':' and a component")))
         return failure();
@@ -5430,6 +5507,46 @@ LogicalResult Parser::parseFor() {
       FailureOr<std::string> component = identifier("a component");
       if (failed(component))
         return failure();
+      if (token.is(Token::LBracket)) {
+        // name: [mut] Buffer[start, count]: a window.
+        std::optional<BufferUse> held = bufferNamed(*component);
+        if (!held || held->given)
+          return error(componentAt, "'" + *component + "' is not a buffer "
+                                    "of the program: a window is 'name: mut "
+                                    "Buffer[start, count]'");
+        if (!windowsHere)
+          return error(componentAt, "a window is a binding of the entity "
+                                    "a 'for' visits, without a pattern: "
+                                    "'for c: Colony, w: mut " + *component +
+                                        "[start, count]'");
+        if (optional)
+          return error(componentAt, "a window is not optional: the entity "
+                                    "has its rows");
+        for (const Window &other : windows)
+          if (other.symbol == held->symbol)
+            return error(componentAt, "'" + *component + "' has a window "
+                                      "in this 'for' already: an entity has "
+                                      "one window of a buffer");
+        advance();
+        FailureOr<ExprPtr> start = parseExpr();
+        if (failed(start) ||
+            failed(expect(Token::Comma, "',' and how many rows: '[start, "
+                                        "count]'")))
+          return failure();
+        FailureOr<ExprPtr> count = parseExpr();
+        if (failed(count) || failed(expect(Token::RBracket, "']'")))
+          return failure();
+        windows.push_back({pending, held->symbol, mut, std::move(*start),
+                           std::move(*count), componentAt});
+        if (!consumeIf(Token::Comma))
+          return success();
+        optional = consumeKeyword("optional");
+        FailureOr<std::string> next = identifier("a binding");
+        if (failed(next))
+          return failure();
+        pending = *next;
+        continue;
+      }
       if (!components.count(*component))
         return error(componentAt, "unknown component '" + *component + "'");
       if (token.isKeyword("up") || token.isKeyword("before"))
@@ -5515,7 +5632,9 @@ LogicalResult Parser::parseFor() {
         return failure();
       pending = *next;
     }
-    if (hasBindings && failed(parseBindings(pending, bindings, firstOptional)))
+    if (hasBindings &&
+        failed(parseBindings(pending, bindings, firstOptional,
+                             /*windowsHere=*/true)))
       return failure();
   }
   // Patterns: the first node of the first is the entity the `for`
@@ -6044,6 +6163,32 @@ LogicalResult Parser::parseFor() {
     auto branch = scf::IfOp::create(builder, loc(where->loc), *condition);
     builder.setInsertionPoint(branch.thenBlock()->getTerminator());
   }
+  // (The windows: where each starts and how many rows it has; those to
+  // change are taken, see BufferClaimOp.)
+  for (Window &window : windows) {
+    if (turn)
+      return error(window.loc, "a window is of a 'for' whose entities run "
+                               "at once: taking turns, each reads and "
+                               "writes the buffer as it is ('" +
+                                   window.symbol + "[start + i].field')");
+    FailureOr<mlir::Value> start = emit(*window.start, builder.getI32Type());
+    if (failed(start))
+      return failure();
+    if (!start->getType().isInteger(32))
+      return error(window.start->loc, "where a window starts is an i32");
+    FailureOr<mlir::Value> count = emit(*window.count, builder.getI32Type());
+    if (failed(count))
+      return failure();
+    if (!count->getType().isInteger(32))
+      return error(window.count->loc, "how many rows a window has is an i32");
+    if (window.mut)
+      BufferClaimOp::create(builder, loc(window.loc),
+                            FlatSymbolRefAttr::get(context, window.symbol),
+                            *start, *count);
+    Variable bound{Variable::Window, *start, window.symbol, window.mut};
+    bound.which = *count;
+    bind(window.name, bound);
+  }
   FlatSymbolRefAttr counter = countsInto;
   countsInto = FlatSymbolRefAttr();
   if (failed(parseBlock()))
@@ -6334,6 +6479,9 @@ LogicalResult Parser::parseNameStatement() {
 
   // A buffer, also one a proc was given: a row more, none, or another
   // value for one.
+  if (const Variable *window = lookup(name);
+      window && window->kind == Variable::Window)
+    return parseWindowStatement(name, *window, at);
   if (bufferNamed(name) && !token.is(Token::LParen) && !token.is(Token::Dot))
     return parseBufferStatement(name, at);
   if (componentGiven(name) && token.is(Token::LBracket))
@@ -6859,10 +7007,14 @@ FailureOr<ExprPtr> Parser::parseUnary() {
     FailureOr<ExprPtr> index = parseExpr();
     if (failed(index) || failed(expect(Token::RBracket, "']'")))
       return failure();
+    const Variable *named = (*primary)->kind == Expr::Name
+                                ? lookup((*primary)->name)
+                                : nullptr;
     if ((*primary)->kind == Expr::Name &&
-        ((!lookup((*primary)->name) && tables.count((*primary)->name)) ||
+        ((!named && tables.count((*primary)->name)) ||
          bufferNamed((*primary)->name) ||
-         componentGiven((*primary)->name))) {
+         componentGiven((*primary)->name) ||
+         (named && named->kind == Variable::Window))) {
       auto node = std::make_unique<Expr>();
       node->kind = Expr::Row;
       node->loc = at;
@@ -7507,6 +7659,9 @@ Type Parser::typeOf(const Expr &expr) {
             return type;
       return {};
     }
+    if (const Variable *window = lookup(expr.name);
+        window && window->kind == Variable::Window)
+      return buffers.ofSymbol(window->component).fieldType(expr.field);
     if (std::optional<BufferUse> held = bufferNamed(expr.name))
       return buffers.ofSymbol(held->symbol).fieldType(expr.field);
     if (std::optional<ComponentUse> held = componentGiven(expr.name))
@@ -7541,7 +7696,7 @@ Type Parser::typeOf(const Expr &expr) {
         return {};
       if (variable->kind == Variable::Entity)
         return EntityType::get(context);
-      if (variable->kind == Variable::Row)
+      if (variable->kind == Variable::Row || variable->kind == Variable::Window)
         return {};
       return variable->value.getType();
     }
@@ -8024,6 +8179,28 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return emitRowThrough(expr, *shape, *expr.operands[1],
                             *expr.operands[0], expr.field);
     }
+    // w[i].field, of a window of a `for`: the row the entity took.
+    if (const Variable *window = lookup(expr.name);
+        window && window->kind == Variable::Window) {
+      Variable held = *window;
+      Type type = buffers.ofSymbol(held.component).fieldType(expr.field);
+      if (!type)
+        return error(expr.loc,
+                     expr.field.empty()
+                         ? "a row of window '" + expr.name +
+                               "' is read by its fields: '" + expr.name +
+                               "[i].field'"
+                         : "the buffer of window '" + expr.name +
+                               "' has no field '" + expr.field + "'");
+      FailureOr<mlir::Value> row = windowRow(held, *expr.operands[0]);
+      if (failed(row))
+        return failure();
+      auto read = BufferAtOp::create(
+          builder, at, type, FlatSymbolRefAttr::get(context, held.component),
+          builder.getStringAttr(expr.field), *row);
+      read->setAttr(kWindowAttr, builder.getUnitAttr());
+      return read.getResult();
+    }
     // name[entity].field, of a component that was given: the field of
     // the entity that has it, or nought where it has not.
     if (std::optional<ComponentUse> held = componentGiven(expr.name)) {
@@ -8239,6 +8416,10 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return error(expr.loc, "'" + expr.name + "' is a row of a table; "
                                "read a field of it: '" + expr.name +
                                    ".field'");
+      if (variable->kind == Variable::Window)
+        return error(expr.loc, "'" + expr.name + "' is a window of a "
+                               "buffer; read a row of it: '" + expr.name +
+                                   "[i].field'");
       return variable->value;
     }
     auto unique = uniques.find(expr.name);
@@ -8439,6 +8620,12 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                    ValueRange{*which}, UnitAttr())
             ->getResult(0);
       }
+    // (Of a window: how many rows it has.)
+    if (expr.name == "len" && expr.operands.size() == 1 &&
+        expr.operands[0]->kind == Expr::Name)
+      if (const Variable *window = lookup(expr.operands[0]->name);
+          window && window->kind == Variable::Window)
+        return window->which;
     // (Of a buffer: how many rows it has now.)
     if (expr.name == "len" && expr.operands.size() == 1 &&
         expr.operands[0]->kind == Expr::Name &&
@@ -9469,6 +9656,30 @@ FailureOr<mlir::Value> Parser::emitRowNumber(const Expr &number,
   if (!value->getType().isSignlessInteger() || value->getType().isInteger(1))
     return error(number.loc, "a row's number is an integer");
   return value;
+}
+
+FailureOr<mlir::Value> Parser::windowRow(const Variable &window,
+                                         const Expr &number) {
+  Location at = loc(number.loc);
+  FailureOr<mlir::Value> row = emit(number, builder.getI32Type());
+  if (failed(row))
+    return failure();
+  if (!row->getType().isInteger(32))
+    return error(number.loc, "a row of a window is an i32, from 0 to below "
+                             "its length");
+  mlir::Value inside = arith::AndIOp::create(
+      builder, at,
+      arith::CmpIOp::create(builder, at, arith::CmpIPredicate::sge, *row,
+                            integer(at, builder.getI32Type(), 0)),
+      arith::CmpIOp::create(builder, at, arith::CmpIPredicate::slt, *row,
+                            window.which));
+  RowsCheckOp::create(builder, at, inside,
+                      FlatSymbolRefAttr::get(context, window.component));
+  return arith::SelectOp::create(
+             builder, at, inside,
+             arith::AddIOp::create(builder, at, window.value, *row),
+             arith::ConstantIntOp::create(builder, at, -1, 32))
+      .getResult();
 }
 
 mlir::Value Parser::countable(Location at, mlir::Value value) {

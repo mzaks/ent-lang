@@ -1154,18 +1154,39 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     if (transient(buffer.op))
       placeBuffer(buffer);
   // Whether a `for` wrote rows of a buffer that were not its entities'
-  // own (see WorldBuffer).
-  llvm::DenseSet<StringAttr> owned;
-  module.walk([&](BufferSetOp set) {
-    if (auto query = set->getParentOfType<QueryOp>(); query && !query.isTurn())
+  // own, or went outside a window of it; and of a buffer with windows
+  // that entities take, the run of such a `for` and which entity of it
+  // took each row (see WorldBuffer).
+  llvm::DenseSet<StringAttr> owned, claimed;
+  module.walk([&](Operation *op) {
+    auto query = op->getParentOfType<QueryOp>();
+    if (!query || query.isTurn())
+      return;
+    if (auto set = dyn_cast<BufferSetOp>(op))
       owned.insert(set.getBufferAttr().getAttr());
+    if (auto at = dyn_cast<BufferAtOp>(op); at && at->hasAttr(kWindowAttr))
+      owned.insert(at.getBufferAttr().getAttr());
+    if (auto claim = dyn_cast<BufferClaimOp>(op)) {
+      owned.insert(claim.getBufferAttr().getAttr());
+      claimed.insert(claim.getBufferAttr().getAttr());
+    }
   });
   for (WorldBuffer &buffer : layout.buffers) {
-    if (!owned.contains(cast<BufferOp>(buffer.op).getSymNameAttr()))
+    StringAttr name = cast<BufferOp>(buffer.op).getSymNameAttr();
+    if (!owned.contains(name))
       continue;
     end = llvm::alignTo(end, 8);
     buffer.clashOffset = end;
     end += 8;
+    if (!claimed.contains(name))
+      continue;
+    buffer.runOffset = end;
+    end += 8;
+    buffer.ownerOffset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+    end = buffer.ownerOffset + 8 * buffer.rows;
+    // (A run is never 0, so a row no run took is no run's.)
+    layout.zeroed.push_back({buffer.runOffset, 8});
+    layout.zeroed.push_back({buffer.ownerOffset, 8 * uint64_t(buffer.rows)});
   }
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;

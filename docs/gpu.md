@@ -101,6 +101,11 @@ entity and values every entity reads alike:
   in a..b`, `while`): combined atomically where they are sent, as from
   the body itself (on the CPU they go on lists, combined in the order
   of the rows and turns);
+- windows of buffers (`w: mut Cohorts[c.cohorts, Colonies.rows]`,
+  docs/syntax.md), read and written: the rows are taken by an atomic
+  exchange each (the run and the entity's id), the CPU's run counter
+  given to the kernel; overlapping windows, and rows outside one, are
+  said in the buffer's flag the CPU reads when the `for` ends;
 - running sums (`let first = Laying.stubs += s.meets`, docs/syntax.md):
   in two passes, with a scan of the values between them (below);
 - calling `fn`s of the program: compiled for the GPU like the body;

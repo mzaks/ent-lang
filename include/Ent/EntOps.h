@@ -39,6 +39,11 @@ FailureOr<OwnRow> ownRowOf(BufferSetOp set, std::string &why);
 /// every entity of a query: so two writes with them are at one base.
 bool sameValue(Value a, Value b);
 
+/// Marks an `ent.buffer.at` or `ent.buffer.set` of a window (`w: mut
+/// Cohorts[start, count]` in a `for`): a row the visited entity took with
+/// `ent.buffer.claim`, its number already inside the window.
+inline constexpr llvm::StringLiteral kWindowAttr = "ent.window";
+
 } // namespace mlir::ent
 
 #endif // ENT_ENTOPS_H

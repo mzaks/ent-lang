@@ -1,0 +1,69 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+// Windows of a buffer in a `for` (`w: mut Cells[start, count]`): what
+// cannot be.
+
+component Hive { start: i32, size: i32 }
+component Count { n: i32 }
+buffer Cells { bees: i32 } capacity 64
+system a() {
+  // expected-error @+1 {{'Count' is not a buffer of the program}}
+  for h: Hive, w: mut Count[h.start, h.size] { }
+}
+
+// -----
+
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+system b() {
+  // expected-error @+1 {{'w' is a window to read}}
+  for h: Hive, w: Cells[h.start, h.size] { w[0].bees = 1 }
+}
+
+// -----
+
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+system c() {
+  // expected-error @+1 {{a window is of a 'for' whose entities run at once}}
+  for h: Hive, w: mut Cells[h.start, h.size] in turn by h.start { w[0].bees = 1 }
+}
+
+// -----
+
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+system d() {
+  // expected-error @+1 {{which its query also uses outside the window}}
+  for h: Hive, w: mut Cells[h.start, h.size] {
+    // expected-note @+1 {{it does here}}
+    w[0].bees = Cells[3].bees
+  }
+}
+
+// -----
+
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+system e() {
+  // expected-error @+1 {{'Cells' has a window in this 'for' already}}
+  for h: Hive, w: mut Cells[h.start, h.size], v: Cells[0, 1] { }
+}
+
+// -----
+
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+system f() {
+  // expected-error @+1 {{'w' is a window of a buffer; read a row of it}}
+  for h: Hive, w: Cells[h.start, h.size] { let x = w }
+}
+
+// -----
+
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+system g() {
+  // expected-error @+1 {{a window is a binding of the entity a 'for' visits, without a pattern}}
+  for (h: Hive, w: mut Cells[h.start, h.size]) { }
+}

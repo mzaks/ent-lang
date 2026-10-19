@@ -698,7 +698,17 @@ BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   // stands, each row by one entity of the query (two that write one row
   // stop the program, see lowerBuffers), which reads nothing else of the
   // buffer: what it read would depend on which entities wrote before.
+  // (A row of a window the entity took: its own, see BufferClaimOp.)
   if (auto query = (*this)->getParentOfType<QueryOp>();
+      query && !isInTurn(*this) && (*this)->hasAttr(kWindowAttr)) {
+    bool claimed = false;
+    query.walk([&](BufferClaimOp claim) {
+      claimed |= claim.getBufferAttr() == getBufferAttr();
+    });
+    if (!claimed)
+      return emitOpError("writes a row of a window of ")
+             << getBufferAttr() << " its query did not take";
+  } else if (auto query = (*this)->getParentOfType<QueryOp>();
       query && !isInTurn(*this)) {
     if (query.getCascade() || query.hasBy() ||
         query->hasAttr(QueryOp::kTriggersAttr))
@@ -774,6 +784,55 @@ BufferSetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       index && index.getBuffer() != getBufferAttr())
     return emitOpError("sets ") << getBufferAttr() << " by a row number of "
                                 << index.getBuffer();
+  return success();
+}
+
+/// A window of a buffer in a query: rows the visited entity takes as its
+/// own for the run (`w: mut Cohorts[start, count]`), read and written
+/// through `ent.buffer.at` and `ent.buffer.set` marked as the window's,
+/// and nothing else of the buffer in the query.
+LogicalResult
+BufferClaimOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  if (!verifyBufferUse(symbolTable, *this, getBufferAttr(), /*writes=*/true,
+                       /*outside=*/false, "takes rows of "))
+    return failure();
+  auto query = (*this)->getParentOfType<QueryOp>();
+  if (!query || isInTurn(*this))
+    return emitOpError("takes rows of ")
+           << getBufferAttr()
+           << " outside a query whose entities run at once: a window is "
+              "a binding of a 'for' over entities";
+  if (query.getCascade() || query.hasBy() ||
+      query->hasAttr(QueryOp::kTriggersAttr))
+    return emitOpError("takes rows of ")
+           << getBufferAttr()
+           << " in a query that goes along a tree, by a field or reacts to "
+              "changes: not yet";
+  if ((*this)->getParentOfType<EachOp>() ||
+      (*this)->getParentOfType<EdgesOp>())
+    return emitOpError("takes rows of ")
+           << getBufferAttr() << " in a 'for' inside a 'for': not yet";
+  Operation *other = nullptr;
+  query.walk([&](Operation *op) {
+    if (other || op == getOperation())
+      return;
+    auto name = op->getAttrOfType<FlatSymbolRefAttr>("buffer");
+    if (!name || name != getBufferAttr())
+      return;
+    bool windowed = isa<BufferAtOp, BufferSetOp>(op) && op->hasAttr(kWindowAttr);
+    if (!windowed && !isa<BufferLenOp, RowsCheckOp>(op))
+      other = op;
+  });
+  if (other) {
+    InFlightDiagnostic diag =
+        emitOpError("takes rows of ")
+        << getBufferAttr()
+        << ", which its query also uses outside the window: in a query a "
+           "buffer with a window is read and written through it (and its "
+           "length read)";
+    diag.attachNote(other->getLoc()) << "it does here";
+    return diag;
+  }
   return success();
 }
 

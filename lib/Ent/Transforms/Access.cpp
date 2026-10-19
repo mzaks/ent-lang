@@ -599,14 +599,14 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       return;
     }
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferOfOp,
-            BufferSetOp, BufferFillOp, BufferKeepOp>(op)) {
+            BufferSetOp, BufferFillOp, BufferKeepOp, BufferClaimOp>(op)) {
       // A buffer is one thing: its rows and how many they are.
       Column buffer{StringAttr(),
                     cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr(),
                     StringAttr::get(context, "rows")};
       auto handed = dyn_cast<BufferOfOp>(op);
-      if (isa<AppendOp, ClearOp, BufferSetOp, BufferFillOp, BufferKeepOp>(
-              op) ||
+      if (isa<AppendOp, ClearOp, BufferSetOp, BufferFillOp, BufferKeepOp,
+              BufferClaimOp>(op) ||
           (handed && handed.getResult().getType().getMut()))
         access.writes.insert(buffer);
       else
@@ -615,6 +615,11 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
         for (ArchetypeOp archetype :
              matchedArchetypes(op->getParentOfType<QueryOp>()))
           access.reads.insert({archetype.getSymNameAttr(), empty, empty});
+      // (Rows an entity takes are its own by its id: see lowerBuffers.)
+      if (isa<BufferClaimOp>(op))
+        for (ArchetypeOp archetype :
+             matchedArchetypes(op->getParentOfType<QueryOp>()))
+          access.reads.insert({archetype.getSymNameAttr(), empty, idField});
       return;
     }
     if (auto has = dyn_cast<HasOp>(op)) {

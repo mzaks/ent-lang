@@ -1715,6 +1715,38 @@ to a device at once (all there is to draw), in place of a call for each.
   of Name`) past the buffer's room is outside too. Not yet in a `for`
   inside a `for`, nor in one that goes along a tree, by a field or
   reacts to changes.
+- A `for` over entities may give each entity a **window** of a buffer:
+  rows of its own that it reads and writes as it likes, its rows from
+  the row before, `+=` too. It is a binding like a component's, the
+  buffer's name and where the rows start and how many there are, of
+  what the entity has:
+
+  ```
+  for c: Colony, w: mut Cohorts[c.cohorts, Colonies.rows] {
+    for i in 0..len(w) {
+      let here = w[i].bees
+      if here > 0 { w[i].bees = here - died(c, i) }
+    }
+  }
+  ```
+
+  `w[i].field` is row `start + i` of the buffer, `len(w)` how many rows
+  the window has. With `mut` the entity takes the rows when its body
+  starts: each says which entity of this run of the `for` took it, and
+  where another took it too, or the rows are not all rows the buffer
+  has, the program stops after the `for`; so does a row `i` outside the
+  window (which reads nought and is not written). So the entities have
+  rows apart and what the buffer holds after does not depend on the
+  order they ran in, on one core, on many and on the GPU alike. Without
+  `mut` the rows are only read and nothing is taken (as a buffer in a
+  `for` is read anyway). A `for` with a window of a buffer does nothing
+  else to it but read its `len`; one window of a buffer each, of the
+  visited entity's own bindings (not in a pattern, nor in a `for` that
+  takes turns, where the buffer is read and written as it is; not yet
+  in one that goes along a tree, by a field or reacts to changes, nor in
+  a `for` inside a `for`). Taking
+  is a write for each row of each window every run, about what reading
+  them costs.
 - `len(Name)` is how many rows it has and `Name[i].field` a row's field
   (nought where it has no row `i`); in a `for` that gives it rows, as it
   was before the `for`.
