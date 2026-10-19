@@ -1,0 +1,16 @@
+// On many ranks a fraction sent to an entity another rank has would be
+// combined in another order: the program stops (ranks.test).
+component Cell { number: i32, heat: f64 } capacity 100
+distribute Cell by number
+buffer Ids { who: entity } capacity 100
+unique Days: i32
+system send() {
+  for c: Cell {
+    let other = Ids[(c.number * 37 + 11) % len(Ids)].who
+    Cell(other).heat += 0.5
+  }
+}
+system report() { Days += 1 }
+schedule day() { send()  report() }
+world { for i in 0..100 { Ids += { who: spawn { Cell { number: i, heat: 0.0 } } } } }
+main { loop { day() } until Days == 2 }

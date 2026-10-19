@@ -32,6 +32,19 @@
 // RUN: FileCheck %s --check-prefix=BUFFER --input-file=%t.buffer.three
 // BUFFER: day 3: rows 5002 check 18683673 sum 58221667
 //
+// RUN: %ent run %S/Inputs/ranks_sends.ent > %t.sends.one
+// RUN: %ent run %S/Inputs/ranks_sends.ent --ranks 3 > %t.sends.three
+// RUN: %ent run %S/Inputs/ranks_sends.ent --ranks 4 > %t.sends.four
+// RUN: diff %t.sends.one %t.sends.three
+// RUN: diff %t.sends.one %t.sends.four
+// RUN: FileCheck %s --check-prefix=SENDS --input-file=%t.sends.four
+// SENDS: day 3: sum 2894930 hub 1498500 3000
+//
+// A fraction sent to another rank's entity stops the program.
+// RUN: %ent run %S/Inputs/ranks_sendfloat.ent
+// RUN: not %ent run %S/Inputs/ranks_sendfloat.ent --ranks 2 2>&1 | FileCheck %s --check-prefix=SENDFLOAT
+// SENDFLOAT: reads or sends to an entity that rank {{[0-9]}} has
+//
 // RUN: %ent run %S/Inputs/ranks_turn.ent > %t.turn.one
 // RUN: %ent run %S/Inputs/ranks_turn.ent --ranks 4 > %t.turn.four
 // RUN: diff %t.turn.one %t.turn.four

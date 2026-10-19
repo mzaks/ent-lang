@@ -1960,6 +1960,28 @@ static Value worldPointer(IRRewriter &rewriter, Location loc, Value arena);
 /// stretch of each one's rows starts (an index), from which the loops that
 /// combine what its rows sent start too.
 static llvm::DenseMap<const WorldArchetype *, Value> rankFirstRows;
+/// While a query over distributed archetypes is lowered: a send combined
+/// into an entity that another rank has (or every rank, of an archetype
+/// not distributed) is posted to it (devices/ranks.c), on a channel of the
+/// field and rule it combines into, and combined there when the query ends
+/// (see deliverOverRanks). Only whole numbers added, or kept the least or
+/// the most, which come to the same in any order; any other such send
+/// stops the program.
+static bool rankPosting = false;
+struct RankChannel {
+  StringAttr component, field;
+  StringRef rule;
+  Type stored;
+};
+static SmallVector<RankChannel> rankChannels;
+/// What a send being lowered does where the entity is not this rank's
+/// alone (see emitLocate): `post` posts it (to the owner, or to every
+/// rank with `all`); without `postable`, the program stops.
+struct RankPost {
+  bool postable = false;
+  std::function<void(const WorldArchetype &, Value row, bool all)> post;
+};
+static RankPost *rankPost = nullptr;
 /// Marks a call of a proc in a query over distributed archetypes: made by
 /// the rank whose row it is, not by rank 0 for all (see lowerInvoke).
 static constexpr llvm::StringLiteral kRankLocalAttr = "ent.rank_local";
@@ -4468,7 +4490,41 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
   // has is not this rank's to read or send to: not yet, see
   // devices/ranks.c.)
   auto foundHere = [&](const WorldArchetype &archetype, Value row,
-                       Value present) {
+                       Value present) -> SmallVector<Value> {
+    // (A send: posted to the rank that has the entity, or to every rank
+    // for one every rank has, where that comes to the same in any order;
+    // see rankPosting.)
+    if (ranksMode && rankPost && results.empty()) {
+      if (!archetype.isDistributed()) {
+        rankPost->post(archetype, row, /*all=*/true);
+        return {};
+      }
+      if (rankPost->postable) {
+        Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        Value at = arith::IndexCastOp::create(rewriter, loc,
+                                              rewriter.getI64Type(), row);
+        Value first = memref::LoadOp::create(
+            rewriter, loc, world.scalar(archetype.rankFirstOffset),
+            ValueRange{zero});
+        Value end = memref::LoadOp::create(
+            rewriter, loc, world.scalar(archetype.rankEndOffset),
+            ValueRange{zero});
+        Value outside = arith::OrIOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
+                                  at, first),
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
+                                  at, end));
+        auto where = scf::IfOp::create(rewriter, loc, outside,
+                                       /*withElseRegion=*/true);
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPoint(where.thenBlock()->getTerminator());
+        rankPost->post(archetype, row, /*all=*/false);
+        rewriter.setInsertionPoint(where.elseBlock()->getTerminator());
+        found(archetype, row, present);
+        return {};
+      }
+    }
     if (ranksMode && archetype.isDistributed()) {
       // (This rank's stretch, from the world; the runtime only where the
       // row is not in it, to say so.)
@@ -5146,15 +5202,85 @@ static LocateBounds loadApplyBounds(IRRewriter &rewriter, Location loc,
 /// Combine `value` (stored form) into `apply`'s field of the entity `id`,
 /// at the insertion point; nothing if the id is not alive or the entity
 /// lacks the component.
+static void combineIntoField(IRRewriter &rewriter, Location loc,
+                             FlatSymbolRefAttr component, StringAttr fieldName,
+                             StringRef rule, bool atomic, bool trusted,
+                             const WorldLayout &layout, WorldAccess &world,
+                             Value id, Value value, Value tick,
+                             const LocateBounds &bounds);
 static void combineInto(IRRewriter &rewriter, ApplyOp apply,
                         const WorldLayout &layout, WorldAccess &world,
                         Value id, Value value, Value tick,
                         const LocateBounds &bounds) {
-  Location loc = apply.getLoc();
-  FlatSymbolRefAttr component = apply.getComponentAttr();
+  combineIntoField(rewriter, apply.getLoc(), apply.getComponentAttr(),
+                   apply.getFieldAttr(), apply.getRule(),
+                   apply->hasAttr(kAtomicAttr), apply->hasAttr(kTrustedAttr),
+                   layout, world, id, value, tick, bounds);
+}
+
+static Value toSendBits(IRRewriter &rewriter, Location loc, Value stored);
+
+static void combineIntoField(IRRewriter &rewriter, Location loc,
+                             FlatSymbolRefAttr component, StringAttr fieldName,
+                             StringRef rule, bool atomic, bool trusted,
+                             const WorldLayout &layout, WorldAccess &world,
+                             Value id, Value value, Value tick,
+                             const LocateBounds &bounds) {
   auto holds = [&](const WorldArchetype &archetype) {
     return ArchetypeOp(archetype.op).contains(component);
   };
+  // (On many ranks, in a query over distributed archetypes: where the
+  // entity is another rank's, or every rank's, the send is posted.)
+  std::optional<RankPost> posting;
+  if (ranksMode && rankPosting) {
+    posting.emplace();
+    bool events = false;
+    for (const WorldArchetype &archetype : layout.archetypes)
+      if (holds(archetype) &&
+          !stampsFor(archetype, Trigger::Changed, component.getAttr(),
+                     fieldName)
+               .empty())
+        events = true;
+    posting->postable = isa<IntegerType>(value.getType()) && rule != "set" &&
+                        !atomic && !events;
+    int64_t channel = -1;
+    if (posting->postable) {
+      auto known = llvm::find_if(rankChannels, [&](const RankChannel &c) {
+        return c.component == component.getAttr() && c.field == fieldName &&
+               c.rule == rule && c.stored == value.getType();
+      });
+      channel = known - rankChannels.begin();
+      if (known == rankChannels.end())
+        rankChannels.push_back(
+            {component.getAttr(), fieldName, rule, value.getType()});
+    }
+    posting->post = [&, channel](const WorldArchetype &archetype, Value row,
+                                 bool all) {
+      ModuleOp module =
+          rewriter.getInsertionBlock()->getParentOp()->getParentOfType<
+              ModuleOp>();
+      if (channel < 0) {
+        auto at = loc->findInstanceOf<FileLineColLoc>();
+        callGpu(rewriter, loc, module, "ent_ranks_cannot_send",
+                ValueRange{arith::ConstantIntOp::create(
+                    rewriter, loc, at ? at.getLine() : 0, 32)});
+        return;
+      }
+      callGpu(rewriter, loc, module, "ent_ranks_post",
+              ValueRange{
+                  arith::ConstantIntOp::create(rewriter, loc, channel, 32),
+                  arith::ConstantIntOp::create(rewriter, loc, archetype.index,
+                                               32),
+                  arith::IndexCastOp::create(rewriter, loc,
+                                             rewriter.getI64Type(), row),
+                  toSendBits(rewriter, loc, id),
+                  toSendBits(rewriter, loc, value),
+                  arith::ConstantIntOp::create(rewriter, loc, all ? 1 : 0,
+                                               32)});
+    };
+  }
+  llvm::SaveAndRestore keepPost(rankPost,
+                                posting ? &*posting : (RankPost *)nullptr);
   emitLocate(
       rewriter, loc, layout, world, id, holds, component, TypeRange{},
       [&](const WorldArchetype &target, Value targetRow,
@@ -5164,14 +5290,62 @@ static void combineInto(IRRewriter &rewriter, ApplyOp apply,
           auto ifPresent = scf::IfOp::create(rewriter, loc, present);
           rewriter.setInsertionPointToStart(ifPresent.thenBlock());
         }
+        // (What it combines is this rank's own: no more posting.)
+        llvm::SaveAndRestore noPost(rankPost, (RankPost *)nullptr);
         combineAtRow(rewriter, loc, layout, world, target, targetRow,
-                     component.getAttr(), apply.getFieldAttr(),
-                     apply.getRule(), value, id, tick,
-                     apply->hasAttr(kAtomicAttr));
+                     component.getAttr(), fieldName, rule, value, id, tick,
+                     atomic);
         return {};
       },
-      []() -> SmallVector<Value> { return {}; }, bounds,
-      apply->hasAttr(kTrustedAttr));
+      []() -> SmallVector<Value> { return {}; }, bounds, trusted);
+}
+
+/// On many ranks, when a query over distributed archetypes ends: what its
+/// sends posted to other ranks given to them (devices/ranks.c), and what
+/// this rank was given combined into its entities, channel by channel.
+/// (In any order: each channel's values are whole numbers added, or kept
+/// the least or the most.)
+static void deliverOverRanks(IRRewriter &rewriter, Location loc,
+                             ModuleOp module, const WorldLayout &layout,
+                             WorldAccess &world) {
+  if (rankChannels.empty())
+    return;
+  llvm::SaveAndRestore noPosting(rankPosting, false);
+  Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
+  callGpu(rewriter, loc, module, "ent_ranks_exchange",
+          ValueRange{arith::ConstantIntOp::create(
+              rewriter, loc, int64_t(rankChannels.size()), 32)});
+  for (auto [index, channel] : llvm::enumerate(rankChannels)) {
+    OpBuilder::InsertionGuard guard(rewriter);
+    Value number = arith::ConstantIntOp::create(rewriter, loc, index, 32);
+    Value got = callGpu(rewriter, loc, module, "ent_ranks_got",
+                        ValueRange{number}, TypeRange{i64})
+                    .getResult(0);
+    auto loop = scf::ForOp::create(
+        rewriter, loc, arith::ConstantIndexOp::create(rewriter, loc, 0),
+        arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                   got),
+        arith::ConstantIndexOp::create(rewriter, loc, 1));
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    Value i = arith::IndexCastOp::create(rewriter, loc, i64,
+                                         loop.getInductionVar());
+    Value id = callGpu(rewriter, loc, module, "ent_ranks_got_id",
+                       ValueRange{number, i}, TypeRange{i64})
+                   .getResult(0);
+    if (world.idType() != i64)
+      id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
+    Value value = callGpu(rewriter, loc, module, "ent_ranks_got_value",
+                          ValueRange{number, i}, TypeRange{i64})
+                      .getResult(0);
+    if (channel.stored != i64)
+      value = arith::TruncIOp::create(rewriter, loc, channel.stored, value);
+    combineIntoField(rewriter, loc,
+                     FlatSymbolRefAttr::get(channel.component), channel.field,
+                     channel.rule, /*atomic=*/false, /*trusted=*/false, layout,
+                     world, id, value, Value(), LocateBounds());
+  }
+  (void)i32;
+  rankChannels.clear();
 }
 
 static void combineAtRow(IRRewriter &rewriter, Location loc,
@@ -14183,6 +14357,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                                                    matches(archetype, query);
                                           });
   llvm::SaveAndRestore keepFirstRows(rankFirstRows);
+  llvm::SaveAndRestore keepPosting(rankPosting, spread);
+  rankChannels.clear();
   bool captured = false;
   // (Each unique field accumulated into: what it held before.)
   SmallVector<SpreadCell> spreadCells;
@@ -14452,6 +14628,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     rewriter.setInsertionPoint(query);
     reduceOverRanks(rewriter, loc, module, spreadCells);
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
+    deliverOverRanks(rewriter, loc, module, layout, world);
     if (captured)
       callGpu(rewriter, loc, module, "ent_ranks_release", ValueRange{});
   }
@@ -14914,6 +15091,8 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
             break;
           }
   llvm::SaveAndRestore keepFirstRows(rankFirstRows);
+  llvm::SaveAndRestore keepPosting(rankPosting, spread);
+  rankChannels.clear();
   SmallVector<SpreadCell> spreadCells;
   SmallVector<const WorldBuffer *> sharedBuffers;
   if (spread) {
@@ -15106,6 +15285,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     rewriter.setInsertionPoint(insertionPoint);
     reduceOverRanks(rewriter, loc, module, spreadCells);
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
+    deliverOverRanks(rewriter, loc, module, layout, world);
   }
   for (Operation *op : reduced)
     op->removeAttr(kReducedAttr);

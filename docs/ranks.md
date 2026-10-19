@@ -43,7 +43,13 @@ to the same on any number of ranks:
 - running sums of whole numbers (`let first = Free += free`), each rank's
   rows from where the ranks before it end (`Exscan`); over several
   archetypes only of one number for every entity (`+= 1`);
-- lookups of and sends to entities of its own rank;
+- lookups of entities of its own rank;
+- sends to entities of any rank: whole numbers added (`+=`, `-=`) or kept
+  the least or the most (`min=`, `max=`), which come to the same in any
+  order. One to an entity another rank has is posted to that rank, one to
+  an entity of an archetype that is not distributed to every rank; when
+  the `for` ends the ranks swap them (`Alltoallv`) and each combines what
+  it was given;
 - lines it writes out (`put`), each rank's after the ranks' before it, in
   the order of the rows; a `for` that takes turns (`in turn by c.number`)
   writes each rank's in its order;
@@ -61,8 +67,9 @@ connects, rows given to buffers (`+=`), a buffer given its rows anew or
 fewer of them, spawns and destroys, moves to
 another archetype, trees, reactive `for`s, a `for` inside a `for`, and in a
 `for` that takes turns anything written to a unique or a buffer, or sent. Not yet, and
-the program stops when it happens: a lookup of or send to an entity
-another rank has (with the rank, the row and the line of the lowered
+the program stops when it happens: a lookup of an entity another rank
+has, or a send to one of a fraction, with `=` or to a field whose changes
+are events (with the rank, the row and the line of the lowered
 program), and entities spawned into or gone from a distributed archetype
 after it was placed.
 

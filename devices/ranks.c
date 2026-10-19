@@ -423,3 +423,138 @@ void ent_ranks_share_column(void *column, int64_t each) {
   MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_BYTE, column, ent_share_counts,
                  ent_share_starts, MPI_BYTE, MPI_COMM_WORLD);
 }
+
+// ---------------------------------------------------------------------------
+// Sends of a `for` over distributed entities to entities another rank has
+// (or every rank: of an archetype that is not distributed): each posted to
+// those ranks, on a channel of the program's (one for each field and rule
+// it combines into), and given to them when the `for` ends, where each is
+// combined into the entity's field. Only whole numbers added, or kept the
+// least or the most, which come to the same in any order.
+
+typedef struct {
+  int64_t *words; // channel, id, value
+  int64_t count, room;
+} ent_posts;
+
+static ent_posts *ent_outbox = 0;
+static int64_t *ent_inbox = 0;
+static int64_t ent_inbox_count = 0;
+// (For each channel, where its sends start in the inbox, sorted by it.)
+static int64_t *ent_channel_starts = 0;
+static int32_t ent_channels = 0;
+
+static void ent_post_to(int32_t rank, int32_t channel, int64_t id,
+                        int64_t value) {
+  if (!ent_outbox)
+    ent_outbox = calloc(ent_ranks, sizeof(ent_posts));
+  ent_posts *box = &ent_outbox[rank];
+  if (box->count + 3 > box->room) {
+    box->room = box->room ? box->room * 2 : 3 * 1024;
+    box->words = realloc(box->words, sizeof(int64_t) * box->room);
+  }
+  box->words[box->count++] = channel;
+  box->words[box->count++] = id;
+  box->words[box->count++] = value;
+  if (channel >= ent_channels)
+    ent_channels = channel + 1;
+}
+
+void ent_ranks_post(int32_t channel, int32_t archetype, int64_t row,
+                    int64_t id, int64_t value, int32_t all) {
+  if (all) {
+    for (int r = 0; r < ent_ranks; ++r)
+      ent_post_to(r, channel, id, value);
+    return;
+  }
+  ent_post_to(ent_ranks_owner(archetype, row), channel, id, value);
+}
+
+// Every rank's posts to every rank, sorted by channel (in the order of the
+// ranks they came from, each's in its order).
+void ent_ranks_exchange(int32_t channels) {
+  if (!ent_outbox)
+    ent_outbox = calloc(ent_ranks, sizeof(ent_posts));
+  int *sent = malloc(sizeof(int) * ent_ranks), *got = malloc(sizeof(int) * ent_ranks);
+  int *sent_at = malloc(sizeof(int) * ent_ranks), *got_at = malloc(sizeof(int) * ent_ranks);
+  int64_t total = 0;
+  for (int r = 0; r < ent_ranks; ++r) {
+    if (ent_outbox[r].count > 0x7fffffff || total > 0x7fffffff)
+      ent_ranks_stop("a rank sent more than 2^31 words to the others in one "
+                     "`for`: not on many ranks yet");
+    sent[r] = (int)ent_outbox[r].count;
+    total += sent[r];
+  }
+  int64_t *out = malloc(sizeof(int64_t) * (total > 0 ? total : 1));
+  total = 0;
+  for (int r = 0; r < ent_ranks; ++r) {
+    sent_at[r] = (int)total;
+    for (int64_t i = 0; i < ent_outbox[r].count; ++i)
+      out[total++] = ent_outbox[r].words[i];
+    ent_outbox[r].count = 0;
+  }
+  MPI_Alltoall(sent, 1, MPI_INT, got, 1, MPI_INT, MPI_COMM_WORLD);
+  int64_t incoming = 0;
+  for (int r = 0; r < ent_ranks; ++r) {
+    got_at[r] = (int)incoming;
+    incoming += got[r];
+  }
+  int64_t *in = malloc(sizeof(int64_t) * (incoming > 0 ? incoming : 1));
+  MPI_Alltoallv(out, sent, sent_at, MPI_INT64_T, in, got, got_at, MPI_INT64_T,
+                MPI_COMM_WORLD);
+  free(out);
+  free(sent);
+  free(got);
+  free(sent_at);
+  free(got_at);
+  // (By channel: counted, then put in place.)
+  if (channels > ent_channels)
+    ent_channels = channels;
+  ent_channel_starts =
+      realloc(ent_channel_starts, sizeof(int64_t) * (ent_channels + 1));
+  for (int32_t c = 0; c <= ent_channels; ++c)
+    ent_channel_starts[c] = 0;
+  ent_inbox_count = incoming / 3;
+  for (int64_t i = 0; i < ent_inbox_count; ++i)
+    ++ent_channel_starts[in[3 * i] + 1];
+  for (int32_t c = 0; c < ent_channels; ++c)
+    ent_channel_starts[c + 1] += ent_channel_starts[c];
+  int64_t *place = malloc(sizeof(int64_t) * (ent_channels + 1));
+  for (int32_t c = 0; c <= ent_channels; ++c)
+    place[c] = ent_channel_starts[c];
+  ent_inbox = realloc(ent_inbox, sizeof(int64_t) * 2 * (ent_inbox_count + 1));
+  for (int64_t i = 0; i < ent_inbox_count; ++i) {
+    int64_t at = place[in[3 * i]]++;
+    ent_inbox[2 * at] = in[3 * i + 1];
+    ent_inbox[2 * at + 1] = in[3 * i + 2];
+  }
+  free(place);
+  free(in);
+}
+
+// How many sends this rank was given on the channel, and the `i`th one's
+// entity and value.
+int64_t ent_ranks_got(int32_t channel) {
+  if (channel >= ent_channels)
+    return 0;
+  return ent_channel_starts[channel + 1] - ent_channel_starts[channel];
+}
+int64_t ent_ranks_got_id(int32_t channel, int64_t i) {
+  return ent_inbox[2 * (ent_channel_starts[channel] + i)];
+}
+int64_t ent_ranks_got_value(int32_t channel, int64_t i) {
+  return ent_inbox[2 * (ent_channel_starts[channel] + i) + 1];
+}
+
+// A send that cannot go to the other ranks yet (a fraction, `=`, or to a
+// field whose changes are events) to an entity they have too.
+void ent_ranks_cannot_send(int32_t line) {
+  char why[256];
+  snprintf(why, sizeof why,
+           "a `for` over distributed entities sends a value that is not a "
+           "whole number added, or kept the least or the most, to an entity "
+           "another rank has or every rank has (line %d): not on many ranks "
+           "yet",
+           line);
+  ent_ranks_stop(why);
+}

@@ -1,0 +1,48 @@
+// On many ranks: cells distributed by their numbers send whole numbers to
+// cells of any rank (`+=`, `min=`, `max=`), found through a buffer of
+// their ids, and to a hub every rank has: each send reaches the rank that
+// has the entity (or every rank), so the program says what it says on one
+// process (ranks.test).
+import console
+component Cell { number: i32, got: i64, least: i32, most: i32 } capacity 4000
+component Hub { total: i64, many: i32 } capacity 4
+distribute Cell by number
+buffer Ids { who: entity } capacity 4000
+unique The { hub: entity }
+unique Days: i32
+unique Sum: i64
+system send() {
+  for c: Cell {
+    let other = Ids[(c.number * 389 + 211 + Days * 7) % len(Ids)].who
+    Cell(other).got += (c.number % 13 + Days) as i64
+    Cell(other).least min= c.number
+    Cell(other).most max= c.number
+    let far = Ids[(c.number * 17 + Days) % len(Ids)].who
+    Cell(far).got += 1
+    Hub(The.hub).total += c.number as i64
+    Hub(The.hub).many += 1
+  }
+}
+system check() {
+  Sum = 0
+  for c: mut Cell {
+    Sum += c.got * (c.number % 7 + 1) as i64 + (c.least * 3 + c.most) as i64
+    // (Every rank's copy of the hub, alike.)
+    if let t = Hub(The.hub).total { Sum += t % 1000 }
+    if c.number % 250 == 3 { put("cell {c.number}: got {c.got} least {c.least} most {c.most}") }
+    c.least = 100000
+  }
+}
+system report() {
+  Days += 1
+  for h: Hub { put("day {Days}: sum {Sum} hub {h.total} {h.many}") }
+}
+schedule day() { send()  check()  report() }
+world {
+  The.hub = spawn { Hub { total: 0, many: 0 } }
+  for i in 0..1000 {
+    let e = spawn { Cell { number: i, got: 0, least: 100000, most: -1 } }
+    Ids += { who: e }
+  }
+}
+main { loop { day() } until Days == 3 }
