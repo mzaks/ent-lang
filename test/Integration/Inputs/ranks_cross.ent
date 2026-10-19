@@ -1,6 +1,7 @@
 // On many ranks: a colony that reads the colony before it, which on
-// several ranks another rank may have: not yet, and the program stops
-// (ranks.test); on one process it runs.
+// several ranks another rank may have: the field it reads is gathered on
+// every rank before the `for`, so it says what it says on one process
+// (ranks.test).
 import console
 component Colony { number: i32, food: i64, bees: i32, next: entity } capacity 400
 component Bee { home: entity, energy: i32 } capacity 40000

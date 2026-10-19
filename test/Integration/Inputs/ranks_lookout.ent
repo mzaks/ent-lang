@@ -1,0 +1,19 @@
+// On many ranks a lookup of a distributed entity from a `for` over
+// entities every rank has: not yet, the program stops (ranks.test).
+import console
+component Cell { number: i32, size: i64 } capacity 100
+component Watch { at: entity, seen: i64 } capacity 4
+distribute Cell by number
+buffer Ids { who: entity } capacity 100
+unique Days: i32
+system grow() { for c: mut Cell { c.size += c.number as i64 } }
+system look() {
+  for w: mut Watch { if let s = Cell(w.at).size { w.seen = s } }
+}
+system report() { Days += 1 }
+schedule day() { grow()  look()  report() }
+world {
+  for i in 0..100 { Ids += { who: spawn { Cell { number: i, size: 0 } } } }
+  spawn { Watch { at: Ids[99].who, seen: 0 } }
+}
+main { loop { day() } until Days == 2 }

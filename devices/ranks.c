@@ -558,3 +558,27 @@ void ent_ranks_cannot_send(int32_t line) {
            line);
   ent_ranks_stop(why);
 }
+
+// ---------------------------------------------------------------------------
+// A column of a placed archetype (`each` bytes a row) that a `for` over
+// distributed entities looks up in entities of any rank: each rank's
+// stretch given to every other rank, so that every rank has all of it (the
+// ghosts of the other ranks' entities) until the `for` ends.
+void ent_ranks_gather_column(int32_t archetype, void *column, int64_t each) {
+  ent_placement *place = ent_place_of(archetype);
+  int *counts = malloc(sizeof(int) * ent_ranks);
+  int *starts = malloc(sizeof(int) * ent_ranks);
+  for (int r = 0; r < ent_ranks; ++r) {
+    int64_t start = place->bounds[r] * each;
+    int64_t bytes = (place->bounds[r + 1] - place->bounds[r]) * each;
+    if (start > 0x7fffffff || bytes > 0x7fffffff)
+      ent_ranks_stop("a column looked up across ranks is past 2 GB: not on "
+                     "many ranks yet");
+    counts[r] = (int)bytes;
+    starts[r] = (int)start;
+  }
+  MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_BYTE, column, counts, starts, MPI_BYTE,
+                 MPI_COMM_WORLD);
+  free(counts);
+  free(starts);
+}

@@ -49,11 +49,18 @@
 // RUN: %ent run %S/Inputs/ranks_turn.ent --ranks 4 > %t.turn.four
 // RUN: diff %t.turn.one %t.turn.four
 //
-// A colony on another rank is not read yet: the program stops.
-// RUN: %ent run %S/Inputs/ranks_cross.ent | FileCheck %s --check-prefix=CROSS-ONE
-// CROSS-ONE: day 3: all
-// RUN: not %ent run %S/Inputs/ranks_cross.ent --ranks 3 2>&1 | FileCheck %s --check-prefix=CROSS
-// CROSS: reads or sends to an entity that rank {{[0-9]}} has
+// A colony reads a colony another rank may have.
+// RUN: %ent run %S/Inputs/ranks_cross.ent > %t.cross.one
+// RUN: %ent run %S/Inputs/ranks_cross.ent --ranks 3 > %t.cross.three
+// RUN: diff %t.cross.one %t.cross.three
+// RUN: FileCheck %s --check-prefix=CROSS --input-file=%t.cross.three
+// CROSS: day 3: all
+//
+// A lookup of a distributed entity from a `for` over entities every rank
+// has is not made yet: the program stops.
+// RUN: %ent run %S/Inputs/ranks_lookout.ent
+// RUN: not %ent run %S/Inputs/ranks_lookout.ent --ranks 2 2>&1 | FileCheck %s --check-prefix=LOOKOUT
+// LOOKOUT: reads or sends to an entity that rank {{[0-9]}} has
 //
 // What a `for` over distributed entities cannot do yet is said when the
 // program is built.

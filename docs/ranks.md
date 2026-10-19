@@ -43,7 +43,11 @@ to the same on any number of ranks:
 - running sums of whole numbers (`let first = Free += free`), each rank's
   rows from where the ranks before it end (`Exscan`); over several
   archetypes only of one number for every entity (`+= 1`);
-- lookups of entities of its own rank;
+- lookups of entities of any rank (`Colony(c.next).food`): before the
+  `for` the fields it looks up are made whole on every rank, each rank's
+  stretch given to the others (`Allgatherv`), so a lookup reads another
+  rank's entity as it was when the `for` started, as on one process (a
+  `for` does not look up a field it writes);
 - sends to entities of any rank: whole numbers added (`+=`, `-=`) or kept
   the least or the most (`min=`, `max=`), which come to the same in any
   order. One to an entity another rank has is posted to that rank, one to
@@ -68,7 +72,7 @@ fewer of them, spawns and destroys, moves to
 another archetype, trees, reactive `for`s, a `for` inside a `for`, and in a
 `for` that takes turns anything written to a unique or a buffer, or sent. Not yet, and
 the program stops when it happens: a lookup of an entity another rank
-has, or a send to one of a fraction, with `=` or to a field whose changes
+has from a `for` over entities every rank has or outside a `for`, a send to one of a fraction, with `=` or to a field whose changes
 are events (with the rank, the row and the line of the lowered
 program), and entities spawned into or gone from a distributed archetype
 after it was placed.
@@ -93,7 +97,8 @@ writes a distributed component, is refused when the program is built.
   placed, every row of it: the most memory a rank takes is the whole
   world's. When it is placed each rank gives the memory of the other
   ranks' rows of its columns back to the system (`madvise`), and keeps
-  its own; the row numbers stay. Buffers, uniques, archetypes that are
+  its own; the row numbers stay. A field that a `for` looks up is had
+  whole again from then on. Buffers, uniques, archetypes that are
   not distributed and the table of entities every rank keeps whole.
 - `--gpu` is for one process. Systems' loops are fused on many ranks as
   on one, where all of them go over distributed entities or none.

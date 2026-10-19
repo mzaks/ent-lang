@@ -1982,6 +1982,13 @@ struct RankPost {
   std::function<void(const WorldArchetype &, Value row, bool all)> post;
 };
 static RankPost *rankPost = nullptr;
+/// Marks a lookup in a query over distributed archetypes: the field it
+/// reads is had whole on every rank while the query runs (gathered before
+/// it, see gatherGhosts), so it reads any rank's entity.
+static constexpr llvm::StringLiteral kRankGhostAttr = "ent.rank_ghost";
+/// While such a lookup is lowered: no check that the entity is this
+/// rank's (see emitLocate).
+static bool rankGhostRead = false;
 /// Marks a call of a proc in a query over distributed archetypes: made by
 /// the rank whose row it is, not by rank 0 for all (see lowerInvoke).
 static constexpr llvm::StringLiteral kRankLocalAttr = "ent.rank_local";
@@ -2062,6 +2069,40 @@ static void noteRankWrite(IRRewriter &rewriter, Location loc,
   memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::maxs, high,
                               world.scalar(buffer.rankHighOffset),
                               ValueRange{zero});
+}
+
+/// The fields `query` looks up, of the distributed archetypes that hold
+/// them, made whole on every rank at the insertion point (after the
+/// placement): each rank's stretch given to the others (devices/ranks.c).
+/// Its lookups are marked to read them on any rank. (The query writes none
+/// of them: the verifier sees to that.)
+static void gatherGhosts(IRRewriter &rewriter, Location loc, ModuleOp module,
+                         const WorldLayout &layout, WorldAccess &world,
+                         QueryOp query) {
+  SmallVector<std::pair<const WorldArchetype *, const WorldColumn *>> columns;
+  query.getBody().walk([&](LookupOp lookup) {
+    lookup->setAttr(kRankGhostAttr, rewriter.getUnitAttr());
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (!archetype.isDistributed())
+        continue;
+      for (const WorldColumn &column : archetype.columns)
+        if (!column.isStamp() &&
+            column.component == lookup.getComponentAttr().getAttr() &&
+            (column.field == lookup.getFieldAttr() || column.isPresence()) &&
+            !llvm::is_contained(columns, std::make_pair(&archetype, &column)))
+          columns.push_back({&archetype, &column});
+    }
+  });
+  for (auto [archetype, column] : columns) {
+    uint64_t each = world.storageBytes(column->type);
+    callGpu(rewriter, loc, module, "ent_ranks_gather_column",
+            ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                    archetype->index, 32),
+                       worldPointer(rewriter, loc,
+                                    world.bytes(column->offset,
+                                                archetype->capacity * each)),
+                       arith::ConstantIntOp::create(rewriter, loc, each, 64)});
+  }
 }
 
 /// Each rank's stretch of the rows of `buffers` that its entities wrote,
@@ -4525,7 +4566,7 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
         return {};
       }
     }
-    if (ranksMode && archetype.isDistributed()) {
+    if (ranksMode && archetype.isDistributed() && !rankGhostRead) {
       // (This rank's stretch, from the world; the runtime only where the
       // row is not in it, to say so.)
       Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -5116,6 +5157,8 @@ static void lowerLookupsOf(IRRewriter &rewriter, func::FuncOp func,
     auto holds = [&](const WorldArchetype &archetype) {
       return ArchetypeOp(archetype.op).contains(component);
     };
+    llvm::SaveAndRestore ghosts(rankGhostRead,
+                                first->hasAttr(kRankGhostAttr));
     std::optional<SmallVector<Value>> byTable = emitReadFields(
         rewriter, loc, layout, world, world.toStorage(loc, first.getEntity()),
         component, fields, first->hasAttr(kTrustedAttr));
@@ -14377,6 +14420,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       callGpu(rewriter, loc, module, "ent_ranks_capture", ValueRange{});
     noteSpreadCells(rewriter, loc, world, {query}, spreadCells);
     noteSharedBuffers(rewriter, loc, layout, world, {query}, sharedBuffers);
+    gatherGhosts(rewriter, loc, module, layout, world, query);
     for (const WorldArchetype &archetype : layout.archetypes)
       if (archetype.isDistributed() && matches(archetype, query))
         rankFirstRows[&archetype] = arith::IndexCastOp::create(
