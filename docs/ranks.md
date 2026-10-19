@@ -129,6 +129,9 @@ writes a distributed component, is refused when the program is built.
 - `ENT_RANKS_LOG=1` (passed on with `mpirun -x ENT_RANKS_LOG`) says each
   rank's stretch of each distributed archetype when it is placed, where a
   rank stopped, and as each rank ends how long it spent in each kind of
-  call to the others (which is where it waited for them too) and its
-  memory.
+  call to the others (which is where it waited for them too), how many
+  sends it posted to other ranks and was given, and its memory. With
+  `ENT_RANKS_LOG=2` also, for each place the program calls the runtime
+  from (by its offset in the program's file, which `nm` names), how long
+  the rank worked before it and waited in it.
 - The runtime is `devices/ranks.c`, the only code that calls MPI.

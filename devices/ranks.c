@@ -8,6 +8,7 @@
 // goes on alike and the program says what it says on one process.
 // (open_memstream.)
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <execinfo.h>
 #include <mpi.h>
 #include <stdint.h>
@@ -31,6 +32,35 @@ void ent_ranks_distribute(void) { ent_distributed = 1; }
 static const char *ent_kinds[] = {"bcast", "sum", "min", "max", "before", "release", "share_begin", "share_column", "exchange", "gather_column"};
 static double ent_spent[10];
 static int64_t ent_calls[10];
+static int64_t ent_posted = 0, ent_received = 0;
+// (ENT_RANKS_LOG=2: for each place the program calls from, the time it
+// worked before the call, since the call before, and spent in it.)
+typedef struct {
+  void *at;
+  double worked, waited;
+  int64_t calls;
+} ent_place_spent;
+static ent_place_spent ent_places_spent[256];
+static double ent_last_return = 0;
+static void ent_note_place(void *at, double start, double end) {
+  for (int i = 0; i < 256; ++i) {
+    ent_place_spent *p = &ent_places_spent[(((uintptr_t)at >> 2) + i) & 255];
+    if (p->at && p->at != at)
+      continue;
+    p->at = at;
+    if (ent_last_return > 0)
+      p->worked += start - ent_last_return;
+    p->waited += end - start;
+    ++p->calls;
+    break;
+  }
+  ent_last_return = end;
+}
+static int ent_by_worked(const void *a, const void *b) {
+  const ent_place_spent *x = a, *y = b;
+  double l = x->worked + x->waited, r = y->worked + y->waited;
+  return l < r ? 1 : l > r ? -1 : 0;
+}
 
 void ent_ranks_start(void) {
   if (ent_started)
@@ -47,7 +77,29 @@ void ent_ranks_start(void) {
 }
 
 // (ENT_RANKS_LOG: how much memory the rank has, as it ends.)
+static void ent_log_places(void) {
+  qsort(ent_places_spent, 256, sizeof *ent_places_spent, ent_by_worked);
+  for (int i = 0; i < 14 && ent_places_spent[i].at; ++i) {
+    Dl_info info;
+    const char *name = "?";
+    uintptr_t off = 0;
+    // (By its place in the program's file: `nm` names it.)
+    if (dladdr(ent_places_spent[i].at, &info)) {
+      name = info.dli_sname ? info.dli_sname : "file";
+      off = (uintptr_t)ent_places_spent[i].at -
+            (uintptr_t)(info.dli_sname ? info.dli_saddr : info.dli_fbase);
+    }
+    fprintf(stderr, "ent: rank %d: before %s+%#lx: worked %7.3f s, waited %7.3f s (%lld)\n",
+            ent_rank, name, (unsigned long)off, ent_places_spent[i].worked,
+            ent_places_spent[i].waited, (long long)ent_places_spent[i].calls);
+  }
+}
+
 static void ent_log_spent(void) {
+  if (getenv("ENT_RANKS_LOG")[0] == '2')
+    ent_log_places();
+  fprintf(stderr, "ent: rank %d: posted %lld sends, was given %lld\n",
+          ent_rank, (long long)ent_posted, (long long)ent_received);
   for (unsigned k = 0; k < sizeof ent_kinds / sizeof *ent_kinds; ++k)
     if (ent_calls[k])
       fprintf(stderr, "ent: rank %d: %-13s %8lld calls %9.3f s\n", ent_rank,
@@ -500,6 +552,7 @@ static int32_t ent_channels = 0;
 
 static void ent_post_to(int32_t rank, int32_t channel, int64_t id,
                         int64_t value) {
+  ++ent_posted;
   if (!ent_outbox)
     ent_outbox = calloc(ent_ranks, sizeof(ent_posts));
   ent_posts *box = &ent_outbox[rank];
@@ -574,6 +627,7 @@ static void ent_ranks_exchange_untimed(int32_t channels) {
   for (int32_t c = 0; c <= ent_channels; ++c)
     ent_channel_starts[c] = 0;
   ent_inbox_count = incoming / 3;
+  ent_received += ent_inbox_count;
   for (int64_t i = 0; i < ent_inbox_count; ++i)
     ++ent_channel_starts[in[3 * i] + 1];
   for (int32_t c = 0; c < ent_channels; ++c)
@@ -683,14 +737,18 @@ void ent_ranks_cannot_connect(int32_t line) {
 void ent_ranks_bcast(void *data, int64_t bytes) {
   double start = MPI_Wtime();
   ent_ranks_bcast_untimed(data, bytes);
-  ent_spent[0] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[0] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[0];
 }
 
 int64_t ent_ranks_sum(int64_t mine) {
   double start = MPI_Wtime();
   int64_t result = ent_ranks_sum_untimed(mine);
-  ent_spent[1] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[1] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[1];
   return result;
 }
@@ -698,7 +756,9 @@ int64_t ent_ranks_sum(int64_t mine) {
 int64_t ent_ranks_min(int64_t mine) {
   double start = MPI_Wtime();
   int64_t result = ent_ranks_min_untimed(mine);
-  ent_spent[2] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[2] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[2];
   return result;
 }
@@ -706,7 +766,9 @@ int64_t ent_ranks_min(int64_t mine) {
 int64_t ent_ranks_max(int64_t mine) {
   double start = MPI_Wtime();
   int64_t result = ent_ranks_max_untimed(mine);
-  ent_spent[3] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[3] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[3];
   return result;
 }
@@ -714,7 +776,9 @@ int64_t ent_ranks_max(int64_t mine) {
 int64_t ent_ranks_before(int64_t mine) {
   double start = MPI_Wtime();
   int64_t result = ent_ranks_before_untimed(mine);
-  ent_spent[4] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[4] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[4];
   return result;
 }
@@ -722,34 +786,44 @@ int64_t ent_ranks_before(int64_t mine) {
 void ent_ranks_release(void) {
   double start = MPI_Wtime();
   ent_ranks_release_untimed();
-  ent_spent[5] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[5] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[5];
 }
 
 void ent_ranks_share_begin(int64_t low, int64_t high) {
   double start = MPI_Wtime();
   ent_ranks_share_begin_untimed(low, high);
-  ent_spent[6] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[6] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[6];
 }
 
 void ent_ranks_share_column(void *column, int64_t each) {
   double start = MPI_Wtime();
   ent_ranks_share_column_untimed(column, each);
-  ent_spent[7] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[7] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[7];
 }
 
 void ent_ranks_exchange(int32_t channels) {
   double start = MPI_Wtime();
   ent_ranks_exchange_untimed(channels);
-  ent_spent[8] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[8] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[8];
 }
 
 void ent_ranks_gather_column(int32_t archetype, void *column, int64_t each) {
   double start = MPI_Wtime();
   ent_ranks_gather_column_untimed(archetype, column, each);
-  ent_spent[9] += MPI_Wtime() - start;
+  double end = MPI_Wtime();
+  ent_spent[9] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[9];
 }
