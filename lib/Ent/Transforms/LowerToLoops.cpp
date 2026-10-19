@@ -2065,6 +2065,12 @@ static bool spreads(const WorldArchetype &archetype, QueryOp query) {
 /// lowered: its body applies only to this rank's own rows (a tree's
 /// children live where their parents do, see checkTreesPlaced).
 static bool rankOwnRowsOnly = false;
+/// While a query over distributed archetypes is lowered: what its
+/// entities do to edges (disconnect them, write their fields) is noted
+/// for the other ranks (ent_ranks_edge_note), and the relations it does
+/// that to (see deliverEdges).
+static bool rankEdgeNotes = false;
+static SmallVector<const WorldRelation *> rankEdgeRelations;
 /// Marks a lookup in a query over distributed archetypes: the field it
 /// reads is had whole on every rank while the query runs (gathered before
 /// it, see gatherGhosts), so it reads any rank's entity.
@@ -2205,24 +2211,6 @@ static void gatherGhosts(IRRewriter &rewriter, Location loc, ModuleOp module,
                                                 archetype->capacity * each)),
                        arith::ConstantIntOp::create(rewriter, loc, each, 64)});
   }
-}
-
-/// Before each connect and disconnect of `queries` (over distributed
-/// archetypes): the program stops there if they are placed (not yet on
-/// many ranks; before, in the setup, every rank makes every edge).
-static void stopConnects(IRRewriter &rewriter, ModuleOp module,
-                         ArrayRef<QueryOp> queries) {
-  OpBuilder::InsertionGuard guard(rewriter);
-  for (QueryOp query : queries)
-    query.getBody().walk([&](Operation *op) {
-      if (!isa<ConnectOp, DisconnectOp>(op))
-        return;
-      rewriter.setInsertionPoint(op);
-      auto at = op->getLoc()->findInstanceOf<FileLineColLoc>();
-      callGpu(rewriter, op->getLoc(), module, "ent_ranks_cannot_connect",
-              ValueRange{arith::ConstantIntOp::create(
-                  rewriter, op->getLoc(), at ? at.getLine() : 0, 32)});
-    });
 }
 
 /// Each rank's stretch of the rows of `buffers` that its entities wrote,
@@ -5400,6 +5388,8 @@ static void combineInto(IRRewriter &rewriter, ApplyOp apply,
 }
 
 static Value toSendBits(IRRewriter &rewriter, Location loc, Value stored);
+static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
+                          Type type);
 
 static void combineIntoField(IRRewriter &rewriter, Location loc,
                              FlatSymbolRefAttr component, StringAttr fieldName,
@@ -5479,6 +5469,96 @@ static void combineIntoField(IRRewriter &rewriter, Location loc,
         return {};
       },
       []() -> SmallVector<Value> { return {}; }, bounds, trusted);
+}
+
+/// On many ranks: that this rank's entity wrote field `field` of `edge`
+/// (an index) of `relation` (`stored`), or disconnected it (`field` -1),
+/// noted for the other ranks (see deliverEdges).
+static void noteEdge(IRRewriter &rewriter, Location loc,
+                     const WorldLayout &layout, const WorldRelation &relation,
+                     Value edge, int64_t field, Value stored) {
+  if (!llvm::is_contained(rankEdgeRelations, &relation))
+    rankEdgeRelations.push_back(&relation);
+  callGpu(rewriter, loc,
+          rewriter.getInsertionBlock()->getParentOp()->getParentOfType<
+              ModuleOp>(),
+          "ent_ranks_edge_note",
+          ValueRange{arith::ConstantIntOp::create(
+                         rewriter, loc, &relation - &layout.relations[0], 32),
+                     arith::IndexCastOp::create(rewriter, loc,
+                                                rewriter.getI64Type(), edge),
+                     arith::ConstantIntOp::create(rewriter, loc, field, 32),
+                     stored ? toSendBits(rewriter, loc, stored)
+                            : arith::ConstantIntOp::create(rewriter, loc, 0,
+                                                           64)});
+}
+
+/// On many ranks, when a query over distributed archetypes ends: what
+/// every rank's entities did to edges (noteEdge), done by every rank, in
+/// the order of the ranks, so that every rank's edges stay alike.
+static void deliverEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
+                         const WorldLayout &layout, WorldAccess &world) {
+  if (rankEdgeRelations.empty())
+    return;
+  OpBuilder::InsertionGuard guard(rewriter);
+  Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
+  Value notes = callGpu(rewriter, loc, module, "ent_ranks_edge_exchange",
+                        ValueRange{}, TypeRange{i64})
+                    .getResult(0);
+  auto loop = scf::ForOp::create(
+      rewriter, loc, arith::ConstantIndexOp::create(rewriter, loc, 0),
+      arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                 notes),
+      arith::ConstantIndexOp::create(rewriter, loc, 1));
+  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+  Value i = arith::IndexCastOp::create(rewriter, loc, i64,
+                                       loop.getInductionVar());
+  auto word = [&](int64_t k) {
+    return callGpu(rewriter, loc, module, "ent_ranks_edge_word",
+                   ValueRange{i, arith::ConstantIntOp::create(rewriter, loc,
+                                                              k, 32)},
+                   TypeRange{i64})
+        .getResult(0);
+  };
+  Value relationIndex = word(0);
+  Value edge = arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getIndexType(), word(1));
+  Value field = word(2);
+  Value value = word(3);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  auto when = [&](Value a, int64_t b) {
+    auto branch = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, a,
+                              arith::ConstantIntOp::create(rewriter, loc, b,
+                                                           64)));
+    rewriter.setInsertionPoint(branch.thenBlock()->getTerminator());
+  };
+  for (const WorldRelation *relation : rankEdgeRelations) {
+    OpBuilder::InsertionGuard inner(rewriter);
+    when(relationIndex, relation - &layout.relations[0]);
+    {
+      OpBuilder::InsertionGuard gone(rewriter);
+      when(field, -1);
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 8),
+          world.edgeDead(*relation), ValueRange{edge});
+      memref::StoreOp::create(rewriter, loc,
+                              arith::ConstantIntOp::create(rewriter, loc, 0,
+                                                           64),
+                              world.edgesClean(*relation), ValueRange{zero});
+    }
+    for (auto [k, column] : llvm::enumerate(relation->fields)) {
+      OpBuilder::InsertionGuard written(rewriter);
+      when(field, k);
+      memref::StoreOp::create(
+          rewriter, loc,
+          fromSendBits(rewriter, loc, value, world.storageType(column.type)),
+          world.edgeField(*relation, column), ValueRange{edge});
+    }
+  }
+  (void)i32;
+  rankEdgeRelations.clear();
 }
 
 /// On many ranks, when a query over distributed archetypes ends: what its
@@ -6136,10 +6216,13 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
     } else {
       auto set = cast<SetOp>(user);
       const WorldColumn *field = relation.find(set.getFieldAttr());
-      memref::StoreOp::create(rewriter, set.getLoc(),
-                              world.toStorage(set.getLoc(), set.getValue()),
+      Value stored = world.toStorage(set.getLoc(), set.getValue());
+      memref::StoreOp::create(rewriter, set.getLoc(), stored,
                               world.edgeField(relation, *field),
                               ValueRange{edge});
+      if (rankEdgeNotes)
+        noteEdge(rewriter, set.getLoc(), layout, relation, edge,
+                 field - relation.fields.begin(), stored);
       rewriter.eraseOp(set);
     }
   }
@@ -6169,6 +6252,8 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
     memref::StoreOp::create(rewriter, at,
                             arith::ConstantIntOp::create(rewriter, at, 1, 8),
                             world.edgeDead(relation), ValueRange{edge});
+    if (rankEdgeNotes)
+      noteEdge(rewriter, at, layout, relation, edge, -1, Value());
     // (The edge's target loses a child.)
     if (relation.childTicksOffset) {
       memref::StoreOp::create(
@@ -6816,6 +6901,9 @@ static void assertEnds(IRRewriter &rewriter, Location loc,
                        const WorldRelation &relation, Value source,
                        Value target) {
   RelationOp relationOp = relation.op;
+  // (On many ranks either end may be another rank's: whether it has the
+  // component every rank knows from its archetype.)
+  llvm::SaveAndRestore anyRank(rankGhostRead, ranksMode || rankGhostRead);
   for (auto [end, id] : {std::make_pair(false, source),
                          std::make_pair(true, target)}) {
     FlatSymbolRefAttr component = relationOp.getEndpoint(end);
@@ -7003,6 +7091,26 @@ static void appendConnected(IRRewriter &rewriter, ConnectOp connect,
       world.connectBuffer(connect, archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  // (On many ranks, of a distributed archetype: every rank's rows' edges,
+  // their places given to every rank first, so every rank adds them all
+  // in the order of the rows.)
+  if (rankFirstRows.lookup(&archetype)) {
+    ModuleOp module = connect->getParentOfType<ModuleOp>();
+    SmallVector<Value> columns{buffers.sources, buffers.targets};
+    llvm::append_range(columns, buffers.values);
+    for (Value column : columns) {
+      Type element = cast<MemRefType>(column.getType()).getElementType();
+      int64_t each =
+          std::max<int64_t>(1, element.getIntOrFloatBitWidth() / 8);
+      callGpu(rewriter, loc, module, "ent_ranks_gather_column",
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                      archetype.index, 32),
+                         worldPointer(rewriter, loc, column),
+                         arith::ConstantIntOp::create(rewriter, loc, each,
+                                                      64)});
+    }
+    count = world.count(loc, archetype);
+  }
   auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
   rewriter.setInsertionPoint(loop.getBody()->getTerminator());
   Value row = loop.getInductionVar();
@@ -10212,6 +10320,10 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
   const WorldRelation &relation =
       layout.getRelation(connect.getRelationAttr().getAttr());
   Value list = sendList(rewriter, loc, connect, archetype);
+  // (On many ranks: every rank's, in the order of the ranks.)
+  if (rankFirstRows.lookup(&archetype))
+    callGpu(rewriter, loc, connect->getParentOfType<ModuleOp>(),
+            "ent_ranks_share_list", ValueRange{list});
   int64_t each = 1 + (relation.fields.size() + 1) / 2;
   Value edges = arith::DivUIOp::create(
       rewriter, loc,
@@ -14666,7 +14778,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                              });
   llvm::SaveAndRestore keepFirstRows(rankFirstRows);
   llvm::SaveAndRestore keepPosting(rankPosting, spread);
+  llvm::SaveAndRestore keepEdgeNotes(rankEdgeNotes, spread);
   rankChannels.clear();
+  rankEdgeRelations.clear();
   bool captured = false;
   // (Each unique field accumulated into: what it held before.)
   SmallVector<SpreadCell> spreadCells;
@@ -14686,7 +14800,6 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     noteSpreadCells(rewriter, loc, world, {query}, spreadCells);
     noteSharedBuffers(rewriter, loc, layout, world, {query}, sharedBuffers);
     gatherGhosts(rewriter, loc, module, layout, world, query);
-    stopConnects(rewriter, module, {query});
     for (const WorldArchetype &archetype : layout.archetypes)
       if (spreads(archetype, query) && matches(archetype, query))
         rankFirstRows[&archetype] = arith::IndexCastOp::create(
@@ -14942,6 +15055,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     reduceOverRanks(rewriter, loc, module, spreadCells);
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
     deliverOverRanks(rewriter, loc, module, layout, world);
+    deliverEdges(rewriter, loc, module, layout, world);
     if (captured)
       callGpu(rewriter, loc, module, "ent_ranks_release", ValueRange{});
   }
@@ -15405,7 +15519,9 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
           }
   llvm::SaveAndRestore keepFirstRows(rankFirstRows);
   llvm::SaveAndRestore keepPosting(rankPosting, spread);
+  llvm::SaveAndRestore keepEdgeNotes(rankEdgeNotes, spread);
   rankChannels.clear();
+  rankEdgeRelations.clear();
   SmallVector<SpreadCell> spreadCells;
   SmallVector<const WorldBuffer *> sharedBuffers;
   if (spread) {
@@ -15413,7 +15529,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     noteSpreadCells(rewriter, loc, world, spreadQueries, spreadCells);
     noteSharedBuffers(rewriter, loc, layout, world, spreadQueries,
                       sharedBuffers);
-    stopConnects(rewriter, module, spreadQueries);
+
     for (const WorldArchetype &archetype : layout.archetypes)
       if (archetype.isDistributed())
         rankFirstRows[&archetype] = arith::IndexCastOp::create(
@@ -15603,6 +15719,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     reduceOverRanks(rewriter, loc, module, spreadCells);
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
     deliverOverRanks(rewriter, loc, module, layout, world);
+    deliverEdges(rewriter, loc, module, layout, world);
   }
   for (Operation *op : reduced)
     op->removeAttr(kReducedAttr);

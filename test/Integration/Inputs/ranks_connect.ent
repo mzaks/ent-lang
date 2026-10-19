@@ -1,16 +1,23 @@
-// On many ranks: edges connected in a `for` over distributed entities
-// before `main`'s loop (the setup, which every rank runs whole) are fine;
-// in the loop, after the entities are placed, the program stops: not yet
+// On many ranks: edges connected in a `for` over distributed entities,
+// before `main`'s loop (the setup, which every rank runs whole) and in it,
+// after the entities are placed: every rank's, so every rank has them all
 // (ranks.test).
+import console
 component Cell { number: i32 } capacity 100
 relation (Cell)-[Next]->(Cell) capacity 400
 distribute Cell by number
 buffer Ids { who: entity } capacity 100
 unique Days: i32
+unique Edges: i32
 system link() {
   for e, c: Cell { connect (e)-[Next]->(Ids[(c.number + 1) % len(Ids)].who) }
 }
-system report() { Days += 1 }
+system report() {
+  Days += 1
+  Edges = 0
+  for c: Cell { for (c)-[Next]->(o) { Edges += 1 } }
+  put("day {Days}: {Edges} edges")
+}
 schedule setup() { link() }
 schedule day() { link()  report() }
 world { for i in 0..100 { Ids += { who: spawn { Cell { number: i } } } } }

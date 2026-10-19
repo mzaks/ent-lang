@@ -64,7 +64,13 @@ to the same on any number of ranks:
   the order of the rows; a `for` that takes turns (`in turn by c.number`)
   writes each rank's in its order;
 - edges gone along from its own entities (`for (p)-[w: Tie]->(o)`), to
-  entities of any rank: every rank has every edge (made in the setup);
+  entities of any rank, and the far end's fields read (`(o: Person)`, as
+  lookups): every rank has every edge;
+- edges connected (from the body or a loop of it, from and to entities of
+  any rank), let go of (`t.disconnect()`) and their fields written: what
+  each rank's entities did every rank is given when the `for` ends and
+  does too, in the order of the ranks, so every rank's edges stay alike
+  and in the order they have on one process;
 - going along a tree (`bottom up`, `top down`), where each child lives on
   its parent's rank (distributed by its parent, or both by one number):
   each rank goes through its own entities, and what each does to itself
@@ -86,8 +92,7 @@ given its rows anew or fewer of them, spawns and destroys, moves to
 another archetype, reactive `for`s, a `for` inside a `for`; in a `for`
 that takes turns anything written to a unique or a buffer, or sent; in
 one along a tree anything but what each entity does to itself and its
-ancestors. Not yet, and the program stops when it happens: connects and
-disconnects, a lookup of an entity another rank has from a `for` over
+ancestors. Not yet, and the program stops when it happens: a lookup of an entity another rank has from a `for` over
 entities every rank has or outside a `for`, a send to one of a fraction,
 with `=` or to a field whose changes are events (with the rank, the row
 and the line of the lowered program), and entities spawned into or gone

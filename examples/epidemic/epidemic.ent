@@ -35,8 +35,7 @@ capacity ToldBy 800000
 
 // On many ranks (`tools/ent run --ranks 4`, docs/ranks.md): people by the
 // number of their household, households by theirs, so that each household
-// lives with its people and goes up its tree on its own rank. (Tracing,
-// which connects people as it goes, is not on many ranks yet.)
+// lives with its people and goes up its tree on its own rank.
 distribute Home by house
 distribute Household by id
 

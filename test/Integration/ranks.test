@@ -56,11 +56,21 @@
 // RUN: FileCheck %s --check-prefix=CITY --input-file=%t.city.four
 // CITY: day 4: sum 728799 log 28 mean 280.875
 //
-// Edges connected after the placement, and a tree whose children live on
-// another rank than their parents, stop the program.
-// RUN: %ent run %S/Inputs/ranks_connect.ent
-// RUN: not %ent run %S/Inputs/ranks_connect.ent --ranks 2 2>&1 | FileCheck %s --check-prefix=CONNECT
-// CONNECT: connects or disconnects edges
+// Edges connected, let go of and written by people of any rank: every
+// rank keeps them alike.
+// RUN: %ent run %S/Inputs/ranks_connect.ent > %t.connect.one
+// RUN: %ent run %S/Inputs/ranks_connect.ent --ranks 2 > %t.connect.two
+// RUN: diff %t.connect.one %t.connect.two
+// RUN: %ent run %S/Inputs/ranks_trace.ent > %t.trace.one
+// RUN: %ent run %S/Inputs/ranks_trace.ent --ranks 3 > %t.trace.three
+// RUN: %ent run %S/Inputs/ranks_trace.ent --ranks 4 > %t.trace.four
+// RUN: diff %t.trace.one %t.trace.three
+// RUN: diff %t.trace.one %t.trace.four
+// RUN: FileCheck %s --check-prefix=TRACE --input-file=%t.trace.four
+// TRACE: day 6: sum 77533
+//
+// A tree whose children live on another rank than their parents stops
+// the program.
 // RUN: %ent run %S/Inputs/ranks_tree.ent
 // RUN: not %ent run %S/Inputs/ranks_tree.ent --ranks 2 2>&1 | FileCheck %s --check-prefix=TREE
 // TREE: a `for` along the tree needs them on one rank

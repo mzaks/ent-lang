@@ -718,18 +718,6 @@ void ent_ranks_same_rank(int32_t archetype, int64_t row, int32_t home,
   }
 }
 
-// A connect or disconnect in a `for` over distributed entities, after
-// they were placed: the ranks' edges would come apart.
-void ent_ranks_cannot_connect(int32_t line) {
-  if (!ent_distributed)
-    return;
-  char why[200];
-  snprintf(why, sizeof why,
-           "a `for` over distributed entities connects or disconnects edges "
-           "(line %d): not on many ranks yet",
-           line);
-  ent_ranks_stop(why);
-}
 
 // ---------------------------------------------------------------------------
 // The calls the compiler makes, timed (see ent_spent).
@@ -826,4 +814,92 @@ void ent_ranks_gather_column(int32_t archetype, void *column, int64_t each) {
   ent_spent[9] += end - start;
   ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[9];
+}
+
+// ---------------------------------------------------------------------------
+// Edges a `for` over distributed entities connects, disconnects, or whose
+// fields it writes. Every rank has every edge, in the same places: what
+// each rank's entities do to them every rank is given and does too, in
+// the order of the ranks (which is that of the rows), so the ranks' edges
+// stay alike.
+
+int64_t ent_sends_export(int64_t number, int64_t **words);
+void ent_sends_import(int64_t number, const int64_t *words, int64_t count);
+
+// (Each rank's words, one after another in the order of the ranks, on
+// every rank; `*all` taken with malloc.)
+static int64_t ent_gather_words(const int64_t *mine, int64_t count,
+                                int64_t **all) {
+  int *counts = malloc(sizeof(int) * ent_ranks);
+  int *starts = malloc(sizeof(int) * ent_ranks);
+  if (count > 0x7fffffff)
+    ent_ranks_stop("a rank gave the others more than 2^31 words of edges "
+                   "in one `for`: not on many ranks yet");
+  int sent = (int)count;
+  MPI_Allgather(&sent, 1, MPI_INT, counts, 1, MPI_INT, MPI_COMM_WORLD);
+  int64_t total = 0;
+  for (int r = 0; r < ent_ranks; ++r) {
+    if (total > 0x7fffffff)
+      ent_ranks_stop("the ranks gave each other more than 2^31 words of "
+                     "edges in one `for`: not on many ranks yet");
+    starts[r] = (int)total;
+    total += counts[r];
+  }
+  *all = malloc(sizeof(int64_t) * (total > 0 ? total : 1));
+  MPI_Allgatherv(mine, sent, MPI_INT64_T, *all, counts, starts, MPI_INT64_T,
+                 MPI_COMM_WORLD);
+  free(counts);
+  free(starts);
+  return total;
+}
+
+// The edges connected from loops of a `for`'s body, on the list `number`
+// (devices/sends.c): every rank's, in the order of the ranks.
+void ent_ranks_share_list(int64_t number) {
+  if (!ent_distributed)
+    return;
+  int64_t *mine = 0, *all = 0;
+  int64_t count = ent_sends_export(number, &mine);
+  int64_t total = ent_gather_words(mine, count, &all);
+  ent_sends_import(number, all, total);
+  free(mine);
+  free(all);
+}
+
+// What a rank's entities did to edges: relation, edge, field (-1: the
+// edge is gone) and value, four words each.
+static int64_t *ent_edge_notes = 0;
+static int64_t ent_edge_count = 0, ent_edge_room = 0;
+static int64_t *ent_edge_all = 0;
+static int64_t ent_edge_all_count = 0;
+
+void ent_ranks_edge_note(int32_t relation, int64_t edge, int32_t field,
+                         int64_t value) {
+  if (!ent_distributed)
+    return;
+  if (ent_edge_count + 4 > ent_edge_room) {
+    ent_edge_room = ent_edge_room ? 2 * ent_edge_room : 4096;
+    ent_edge_notes = realloc(ent_edge_notes, sizeof(int64_t) * ent_edge_room);
+  }
+  ent_edge_notes[ent_edge_count++] = relation;
+  ent_edge_notes[ent_edge_count++] = edge;
+  ent_edge_notes[ent_edge_count++] = field;
+  ent_edge_notes[ent_edge_count++] = value;
+}
+
+// Every rank's notes, in the order of the ranks; how many.
+int64_t ent_ranks_edge_exchange(void) {
+  free(ent_edge_all);
+  ent_edge_all = 0;
+  ent_edge_all_count = 0;
+  if (!ent_distributed)
+    return 0;
+  ent_edge_all_count =
+      ent_gather_words(ent_edge_notes, ent_edge_count, &ent_edge_all) / 4;
+  ent_edge_count = 0;
+  return ent_edge_all_count;
+}
+// The `i`th of them: its relation, edge, field and value.
+int64_t ent_ranks_edge_word(int64_t i, int32_t word) {
+  return ent_edge_all[4 * i + word];
 }

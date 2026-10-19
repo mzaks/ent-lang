@@ -1,0 +1,60 @@
+// On many ranks, edges changed in `for`s over distributed people: told
+// people connected to whoever told them (from a loop of the body, to
+// people of any rank), one tie a day from each person (its own slot),
+// edge fields written, edges let go of, and the far ends' fields read.
+// Every rank keeps every edge alike, so it says what it says on one
+// process (ranks.test).
+import console
+component Person { number: i32, heat: i64, told: i32 }
+relation (Person)-[Told { day: i32, red: bool }]->(Person) capacity 16
+relation (Person)-[Tie]->(Person) capacity 16
+distribute Person by number
+capacity Person 1000
+capacity Told 20000
+capacity Tie 8000
+buffer Ids { who: entity } capacity 1000
+unique Days: i32
+unique Sum: i64
+system tell() {
+  for e, p: Person where p.heat % 5 == Days % 5 {
+    for k in 0..3 {
+      let who = Ids[(p.number * 31 + k * 7 + Days * 13) % len(Ids)].who
+      if let h = Person(who).heat { if h % 2 == 0 { connect (who)-[Told { day: Days, red: false }]->(e) } }
+    }
+  }
+}
+system tie() {
+  for e, p: Person where p.number % 4 == Days % 4 {
+    connect (e)-[Tie]->(Ids[(p.number * 7 + Days) % len(Ids)].who)
+  }
+}
+system heard() {
+  for p: mut Person {
+    var told = 0
+    for (p)-[mut t: Told]->(src: Person) {
+      if Days - t.day > 2 { t.disconnect() } else {
+        told += 1
+        if src.heat % 3 == 0 as i64 { t.red = true }
+      }
+    }
+    p.told = told
+  }
+  for p: mut Person { p.heat = (p.heat * 5 + p.number as i64 + Days as i64) % 1013 }
+}
+system check() {
+  Sum = 0
+  for p: Person {
+    var reds = 0
+    for (src)-[t: Told]->(p) { if t.red { reds += 1 } }
+    var ties = 0
+    for (p)-[Tie]->(o: Person) { ties += (o.heat % (11 as i64)) as i32 }
+    Sum += (p.told * 7 + reds * 3 + ties) as i64 * (p.number % 9 + 1) as i64
+  }
+}
+system report() {
+  Days += 1
+  put("day {Days}: sum {Sum}")
+}
+schedule day() { tell()  tie()  heard()  check()  report() }
+world { for i in 0..1000 { Ids += { who: spawn { Person { number: i, heat: i as i64 % 17, told: 0 } } } } }
+main { loop { day() } until Days == 6 }
