@@ -1206,7 +1206,9 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       continue;
     end = llvm::alignTo(end, 8);
     buffer.clashOffset = end;
-    end += 8;
+    buffer.rankLowOffset = end + 8;
+    buffer.rankHighOffset = end + 16;
+    end += 24;
     if (!claimed.contains(name))
       continue;
     buffer.runOffset = end;

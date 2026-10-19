@@ -1944,6 +1944,7 @@ static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
 static void emitPlacement(IRRewriter &rewriter, Location loc,
                           const WorldLayout &layout, WorldAccess &world,
                           ModuleOp module);
+static Value worldPointer(IRRewriter &rewriter, Location loc, Value arena);
 /// While a query over distributed archetypes is lowered: where this rank's
 /// stretch of each one's rows starts (an index), from which the loops that
 /// combine what its rows sent start too.
@@ -1977,6 +1978,83 @@ static Value wideForRanks(IRRewriter &rewriter, Location loc, Value value,
 }
 static Value narrowFromRanks(IRRewriter &rewriter, Location loc, Value wide,
                              Type type);
+
+/// Marks a window taken (`ent.buffer.claim`) or a row written at a running
+/// sum's place in a query over distributed archetypes: the least and the
+/// most row this rank's entities write are kept, for the other ranks (see
+/// shareOverRanks).
+static constexpr llvm::StringLiteral kRankWrittenAttr = "ent.rank_written";
+
+/// The buffers whose rows `queries` write (their windows or running sums'
+/// places), at the insertion point: none written yet on this rank.
+static void noteSharedBuffers(IRRewriter &rewriter, Location loc,
+                              const WorldLayout &layout, WorldAccess &world,
+                              ArrayRef<QueryOp> queries,
+                              SmallVectorImpl<const WorldBuffer *> &buffers) {
+  for (QueryOp query : queries)
+    query.getBody().walk([&](Operation *op) {
+      if (!isa<BufferClaimOp>(op) &&
+          !(isa<BufferSetOp>(op) && op->hasAttr(kOwnedAttr)))
+        return;
+      op->setAttr(kRankWrittenAttr, rewriter.getUnitAttr());
+      const WorldBuffer &buffer = layout.getBuffer(
+          cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr());
+      if (!llvm::is_contained(buffers, &buffer))
+        buffers.push_back(&buffer);
+    });
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  for (const WorldBuffer *buffer : buffers) {
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::ConstantIntOp::create(rewriter, loc,
+                                     std::numeric_limits<int64_t>::max(), 64),
+        world.scalar(buffer->rankLowOffset), ValueRange{zero});
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, -1, 64),
+                            world.scalar(buffer->rankHighOffset),
+                            ValueRange{zero});
+  }
+}
+
+/// That this rank's entities wrote rows `low` to `high` (i64) of `buffer`
+/// (see noteSharedBuffers): its least and most such row kept up to date,
+/// atomically, as rows may be written on many threads.
+static void noteRankWrite(IRRewriter &rewriter, Location loc,
+                          WorldAccess &world, const WorldBuffer &buffer,
+                          Value low, Value high) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::mins, low,
+                              world.scalar(buffer.rankLowOffset),
+                              ValueRange{zero});
+  memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::maxs, high,
+                              world.scalar(buffer.rankHighOffset),
+                              ValueRange{zero});
+}
+
+/// Each rank's stretch of the rows of `buffers` that its entities wrote,
+/// given to every rank (devices/ranks.c), field by field.
+static void shareOverRanks(IRRewriter &rewriter, Location loc,
+                           ModuleOp module, WorldAccess &world,
+                           ArrayRef<const WorldBuffer *> buffers) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  for (const WorldBuffer *buffer : buffers) {
+    callGpu(rewriter, loc, module, "ent_ranks_share_begin",
+            ValueRange{memref::LoadOp::create(
+                           rewriter, loc, world.scalar(buffer->rankLowOffset),
+                           ValueRange{zero}),
+                       memref::LoadOp::create(
+                           rewriter, loc, world.scalar(buffer->rankHighOffset),
+                           ValueRange{zero})});
+    for (const WorldColumn &field : buffer->fields)
+      callGpu(rewriter, loc, module, "ent_ranks_share_column",
+              ValueRange{worldPointer(rewriter, loc,
+                                      world.bufferField(*buffer, field)),
+                         arith::ConstantIntOp::create(
+                             rewriter, loc,
+                             getStorageBytes(world.storageType(field.type)),
+                             64)});
+  }
+}
 
 /// A unique's field that a query over distributed archetypes accumulates
 /// into, and what it held before the query (see reduceOverRanks): the
@@ -14074,6 +14152,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   bool captured = false;
   // (Each unique field accumulated into: what it held before.)
   SmallVector<SpreadCell> spreadCells;
+  // (And the buffers whose rows it writes.)
+  SmallVector<const WorldBuffer *> sharedBuffers;
   if (spread) {
     rewriter.setInsertionPoint(query);
     emitPlacement(rewriter, loc, layout, world, module);
@@ -14086,6 +14166,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     if (captured)
       callGpu(rewriter, loc, module, "ent_ranks_capture", ValueRange{});
     noteSpreadCells(rewriter, loc, world, {query}, spreadCells);
+    noteSharedBuffers(rewriter, loc, layout, world, {query}, sharedBuffers);
     for (const WorldArchetype &archetype : layout.archetypes)
       if (archetype.isDistributed() && matches(archetype, query))
         rankFirstRows[&archetype] = arith::IndexCastOp::create(
@@ -14336,6 +14417,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   if (spread) {
     rewriter.setInsertionPoint(query);
     reduceOverRanks(rewriter, loc, module, spreadCells);
+    shareOverRanks(rewriter, loc, module, world, sharedBuffers);
     if (captured)
       callGpu(rewriter, loc, module, "ent_ranks_release", ValueRange{});
   }
@@ -14799,9 +14881,12 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
           }
   llvm::SaveAndRestore keepFirstRows(rankFirstRows);
   SmallVector<SpreadCell> spreadCells;
+  SmallVector<const WorldBuffer *> sharedBuffers;
   if (spread) {
     emitPlacement(rewriter, loc, layout, world, module);
     noteSpreadCells(rewriter, loc, world, spreadQueries, spreadCells);
+    noteSharedBuffers(rewriter, loc, layout, world, spreadQueries,
+                      sharedBuffers);
     for (const WorldArchetype &archetype : layout.archetypes)
       if (archetype.isDistributed())
         rankFirstRows[&archetype] = arith::IndexCastOp::create(
@@ -14986,6 +15071,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   if (spread) {
     rewriter.setInsertionPoint(insertionPoint);
     reduceOverRanks(rewriter, loc, module, spreadCells);
+    shareOverRanks(rewriter, loc, module, world, sharedBuffers);
   }
   for (Operation *op : reduced)
     op->removeAttr(kReducedAttr);
@@ -15733,6 +15819,16 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       memref::StoreOp::create(rewriter, loc, one, world.bufferClash(buffer),
                               ValueRange{zero});
       rewriter.setInsertionPointToStart(branch.thenBlock());
+      if (op->hasAttr(kRankWrittenAttr)) {
+        OpBuilder::InsertionGuard guard(rewriter);
+        auto some = scf::IfOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
+                                  start, end));
+        rewriter.setInsertionPointToStart(some.thenBlock());
+        noteRankWrite(rewriter, loc, world, buffer, start,
+                      arith::SubIOp::create(rewriter, loc, end, one));
+      }
       if (tag) {
         Value owners = world.bufferOwners(buffer);
         auto rows = scf::ForOp::create(
@@ -15819,6 +15915,11 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         memref::StoreOp::create(rewriter, loc, stored,
                                 world.bufferField(buffer, *field),
                                 ValueRange{row});
+        if (op->hasAttr(kRankWrittenAttr)) {
+          Value at = arith::IndexCastOp::create(rewriter, loc,
+                                                rewriter.getI64Type(), row);
+          noteRankWrite(rewriter, loc, world, buffer, at, at);
+        }
         rewriter.eraseOp(op);
         continue;
       }
@@ -15835,6 +15936,8 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       memref::StoreOp::create(rewriter, loc, stored,
                               world.bufferField(buffer, *field),
                               ValueRange{world.toIndex(loc, index)});
+      if (op->hasAttr(kRankWrittenAttr))
+        noteRankWrite(rewriter, loc, world, buffer, index, index);
       rewriter.eraseOp(op);
     } else if (auto keep = dyn_cast<BufferKeepOp>(op)) {
       // (Fewer rows, those it had; the rest of the column is not read
@@ -16860,6 +16963,11 @@ static LogicalResult checkRanks(ModuleOp module, const WorldLayout &layout) {
         return fail(op, "takes turns and writes a unique or sends to "
                         "another entity as it goes: the turns would be on "
                         "several ranks");
+      if (isa<BufferFillOp, BufferKeepOp>(op))
+        return fail(op, "gives a buffer its rows anew or fewer of them");
+      if (turn && isa<BufferSetOp, BufferClaimOp>(op))
+        return fail(op, "takes turns and writes rows of a buffer: the turns "
+                        "would be on several ranks");
       if (auto accumulate = dyn_cast<AccumulateOp>(op)) {
         Type type = accumulate.getValue().getType();
         if (accumulate.getRule() == "set")

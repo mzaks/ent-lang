@@ -48,14 +48,19 @@ to the same on any number of ranks:
   the order of the rows; a `for` that takes turns (`in turn by c.number`)
   writes each rank's in its order;
 - windows of buffers and rows of buffers at running-sum places, which each
-  rank writes for its own entities.
+  rank writes for its own entities. When the `for` ends every rank is
+  given the rows the others wrote: each rank's from the least to the most
+  row its entities wrote, field by field (`Allgatherv`). Where the
+  stretches of two ranks overlap (a rank's entities wrote rows apart,
+  with another's between them) the program stops.
 
 Not yet, and refused when the program is built: fractions and `=` into
 uniques, running sums of fractions or over several archetypes of values that
 differ, a `for` over distributed and copied entities at once, edges,
-connects, rows given to buffers (`+=`), spawns and destroys, moves to
+connects, rows given to buffers (`+=`), a buffer given its rows anew or
+fewer of them, spawns and destroys, moves to
 another archetype, trees, reactive `for`s, a `for` inside a `for`, and in a
-`for` that takes turns anything written to a unique or sent. Not yet, and
+`for` that takes turns anything written to a unique or a buffer, or sent. Not yet, and
 the program stops when it happens: a lookup of or send to an entity
 another rank has (with the rank, the row and the line of the lowered
 program), and entities spawned into or gone from a distributed archetype
@@ -74,11 +79,7 @@ reaches rank 0, which writes it in their order.
 
 - Every rank keeps every row of every archetype and buffer: the work is
   split, not the memory. A rank reads and writes only its own rows of a
-  distributed archetype and of the buffers its entities write; the rows
-  of other ranks it has are stale.
-- A buffer row written by one rank and read by another is not given to
-  it: the program must read only rows its own entities wrote (beecs
-  does).
+  distributed archetype; the rows of other ranks it has are stale.
 - `--gpu` is for one process. Systems' loops are fused on many ranks as
   on one, where all of them go over distributed entities or none.
 

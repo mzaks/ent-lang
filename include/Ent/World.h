@@ -432,6 +432,13 @@ struct WorldBuffer {
   /// GPU's has its own). Zero at first; not saved.
   uint64_t runOffset = 0;
   uint64_t ownerOffset = 0;
+  /// Of a buffer whose rows a `for` writes or takes as windows: on many
+  /// ranks, the least and the most row this rank's entities wrote in the
+  /// last such `for` (i64 each; none: the least above the most), which it
+  /// gives the other ranks when the `for` ends (devices/ranks.c). Not
+  /// saved.
+  uint64_t rankLowOffset = 0;
+  uint64_t rankHighOffset = 0;
 
   /// The column of `field`, or null.
   const WorldColumn *find(StringRef field) const;

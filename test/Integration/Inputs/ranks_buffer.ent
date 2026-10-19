@@ -1,0 +1,53 @@
+// On many ranks: rows of buffers written in `for`s over distributed cells,
+// at running-sum places and through windows, then read by cells of other
+// ranks and outside the `for`s: every rank is given the rows the others
+// wrote, so it says what it says on one process (ranks.test).
+import console
+component Cell { number: i32, size: i32, start: i32, n: i32, got: i64 } capacity 4000
+distribute Cell by number
+buffer Laid { who: i32, v: i64 } capacity 20000
+buffer Wins { v: i64 } capacity 4000
+unique Off { rows: i32, check: i64 }
+unique Days: i32
+system lay() {
+  Off.rows = 0
+  Laid = [{ who: 0, v: 0 }; 20000]
+  for c: mut Cell {
+    let first = Off.rows += c.size
+    for k in 0..c.size { Laid[first + k].who = c.number  Laid[first + k].v = (c.number * 7 + k + Days) as i64 }
+  }
+}
+system fill() {
+  for c: Cell, w: mut Wins[c.start, c.n] {
+    for i in 0..len(w) { w[i].v = (c.number * 3 + i * Days) as i64 }
+  }
+}
+system read() {
+  for c: mut Cell {
+    let far = (c.number * 389 + 211) % 1000
+    c.got = Wins[far * 4].v + Laid[(far * 13 + Days) % Off.rows].v
+  }
+}
+system check() {
+  Off.check = 0
+  for c: Cell {
+    Off.check += c.got * (c.number % 7 + 1) as i64
+    if c.number % 250 == 3 { put("cell {c.number}: got {c.got}") }
+  }
+}
+system report() {
+  Days += 1
+  var sum: i64 = 0
+  for i in 0..len(Wins) { sum += Wins[i].v * (i % 5 + 1) as i64 }
+  for i in 0..Off.rows { sum += (Laid[i].v + Laid[i].who as i64) * (i % 3 + 1) as i64 }
+  put("day {Days}: rows {Off.rows} check {Off.check} sum {sum}")
+}
+system grow() {
+  for c: mut Cell { c.size = (c.size * 5 + c.number + Days) % 11 }
+}
+schedule day() { lay()  fill()  read()  check()  report()  grow() }
+world {
+  Wins = [{ v: 0 }; 4000]
+  for i in 0..1000 { spawn { Cell { number: i, size: i % 9, start: i * 4, n: 4, got: 0 } } }
+}
+main { loop { day() } until Days == 3 }

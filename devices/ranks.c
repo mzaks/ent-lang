@@ -318,3 +318,59 @@ void ent_ranks_release(void) {
   ent_captured = 0;
   ent_captured_size = 0;
 }
+
+// ---------------------------------------------------------------------------
+// Rows of a buffer that a `for` over distributed entities wrote: each rank
+// wrote its entities' rows, from the least to the most it wrote (nothing
+// where the least is above the most), and gives them to every other rank,
+// each field's into the same rows there. Two ranks' stretches that overlap
+// would give rows another rank wrote: not on many ranks yet.
+
+static int *ent_share_counts = 0, *ent_share_starts = 0;
+static int64_t *ent_share_lows = 0, *ent_share_highs = 0;
+static int ent_share_any = 0;
+
+void ent_ranks_share_begin(int64_t low, int64_t high) {
+  int64_t mine[2] = {low, high};
+  int64_t *all = malloc(sizeof(int64_t) * 2 * ent_ranks);
+  MPI_Allgather(mine, 2, MPI_INT64_T, all, 2, MPI_INT64_T, MPI_COMM_WORLD);
+  ent_share_lows = realloc(ent_share_lows, sizeof(int64_t) * ent_ranks);
+  ent_share_highs = realloc(ent_share_highs, sizeof(int64_t) * ent_ranks);
+  ent_share_counts = realloc(ent_share_counts, sizeof(int) * ent_ranks);
+  ent_share_starts = realloc(ent_share_starts, sizeof(int) * ent_ranks);
+  ent_share_any = 0;
+  for (int r = 0; r < ent_ranks; ++r) {
+    ent_share_lows[r] = all[2 * r];
+    ent_share_highs[r] = all[2 * r + 1];
+    ent_share_any |= ent_share_lows[r] <= ent_share_highs[r];
+  }
+  free(all);
+  for (int a = 0; a < ent_ranks; ++a)
+    for (int b = a + 1; b < ent_ranks; ++b)
+      if (ent_share_lows[a] <= ent_share_highs[a] &&
+          ent_share_lows[b] <= ent_share_highs[b] &&
+          ent_share_lows[a] <= ent_share_highs[b] &&
+          ent_share_lows[b] <= ent_share_highs[a])
+        ent_ranks_stop("two ranks' entities wrote rows of a buffer between "
+                       "each other's (their windows or places are not "
+                       "apart by rank): not on many ranks yet");
+}
+
+// One column of the buffer, `each` bytes a row, from `column`.
+void ent_ranks_share_column(void *column, int64_t each) {
+  if (!ent_share_any)
+    return;
+  for (int r = 0; r < ent_ranks; ++r) {
+    int64_t rows = ent_share_lows[r] <= ent_share_highs[r]
+                       ? ent_share_highs[r] - ent_share_lows[r] + 1
+                       : 0;
+    int64_t bytes = rows * each, start = rows ? ent_share_lows[r] * each : 0;
+    if (bytes > 0x7fffffff || start > 0x7fffffff)
+      ent_ranks_stop("a rank wrote more than 2 GB of a buffer's column, or "
+                     "rows past 2 GB: not on many ranks yet");
+    ent_share_counts[r] = (int)bytes;
+    ent_share_starts[r] = (int)start;
+  }
+  MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_BYTE, column, ent_share_counts,
+                 ent_share_starts, MPI_BYTE, MPI_COMM_WORLD);
+}
