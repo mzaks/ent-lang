@@ -75,11 +75,19 @@ read once, the clock is rank 0's. In a `for` over distributed entities each
 rank calls the device for its own rows; what they write to standard output
 reaches rank 0, which writes it in their order.
 
+An extern system (a system without a body, as `world`'s `save_world`)
+works on the whole world, where each rank has only its own rows of a
+distributed archetype: one that declares no reads or writes, or reads or
+writes a distributed component, is refused when the program is built.
+
 ## Not yet
 
-- Every rank keeps every row of every archetype and buffer: the work is
-  split, not the memory. A rank reads and writes only its own rows of a
-  distributed archetype; the rows of other ranks it has are stale.
+- Every rank runs the setup and so has, until a distributed archetype is
+  placed, every row of it: the most memory a rank takes is the whole
+  world's. When it is placed each rank gives the memory of the other
+  ranks' rows of its columns back to the system (`madvise`), and keeps
+  its own; the row numbers stay. Buffers, uniques, archetypes that are
+  not distributed and the table of entities every rank keeps whole.
 - `--gpu` is for one process. Systems' loops are fused on many ranks as
   on one, where all of them go over distributed entities or none.
 

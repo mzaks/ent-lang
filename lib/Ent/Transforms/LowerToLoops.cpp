@@ -253,6 +253,17 @@ public:
   }
 
   /// The id of the entity in each row of `archetype`.
+  /// The bytes a value of `type` takes in the world (an id the width the
+  /// layout chose), as the layout counts them.
+  uint64_t storageBytes(Type type) {
+    if (isa<EntityType>(type))
+      return layout.entities.idBits / 8;
+    return getStorageBytes(type);
+  }
+  /// `size` bytes of the arena at `offset`.
+  Value bytes(uint64_t offset, int64_t size) {
+    return view(offset, size, rewriter.getI8Type());
+  }
   Value ids(const WorldArchetype &archetype) {
     return view(archetype.idOffset, archetype.capacity,
                 rewriter.getIntegerType(layout.entities.idBits));
@@ -2051,7 +2062,7 @@ static void shareOverRanks(IRRewriter &rewriter, Location loc,
                                       world.bufferField(*buffer, field)),
                          arith::ConstantIntOp::create(
                              rewriter, loc,
-                             getStorageBytes(world.storageType(field.type)),
+                             world.storageBytes(field.type),
                              64)});
   }
 }
@@ -13315,6 +13326,29 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
                 TypeRange{i64})
             .getResult(0),
         world.scalar(archetype.rankEndOffset), ValueRange{zero});
+    // (Placed just now: the other ranks' rows of its columns let go.)
+    OpBuilder::InsertionGuard guard(rewriter);
+    auto dropping = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne,
+            callGpu(rewriter, loc, module, "ent_ranks_dropping",
+                    ValueRange{index}, TypeRange{i32})
+                .getResult(0),
+            arith::ConstantIntOp::create(rewriter, loc, 0, 32)));
+    rewriter.setInsertionPoint(dropping.thenBlock()->getTerminator());
+    auto drop = [&](uint64_t offset, uint64_t each) {
+      Value column = world.bytes(offset, archetype.capacity * each);
+      callGpu(rewriter, loc, module, "ent_ranks_drop",
+              ValueRange{index, worldPointer(rewriter, loc, column),
+                         arith::ConstantIntOp::create(rewriter, loc, each, 64),
+                         arith::ConstantIntOp::create(
+                             rewriter, loc, archetype.capacity, 64)});
+    };
+    for (const WorldColumn &column : archetype.columns)
+      drop(column.offset, world.storageBytes(column.type));
+    if (archetype.idOffset)
+      drop(archetype.idOffset, layout.entities.idBits / 8);
   }
 }
 
@@ -16930,6 +16964,39 @@ static LogicalResult flattenGpuCascades(ModuleOp module) {
 /// uniques and running sums of them, its own entities' fields, sends and
 /// lookups to its own rank's entities, what it writes out.
 static LogicalResult checkRanks(ModuleOp module, const WorldLayout &layout) {
+  // (An extern system works on the whole world: each rank has only its
+  // own rows of a distributed archetype.)
+  WalkResult externs = module.walk([&](RunOp run) {
+    auto system = SymbolTable::lookupNearestSymbolFrom<ExternOp>(
+        run, run.getSystemAttr());
+    if (!system)
+      return WalkResult::advance();
+    SmallVector<Attribute> touched;
+    for (std::optional<ArrayAttr> list : {system.getReads(), system.getWrites()})
+      if (list)
+        llvm::append_range(touched, *list);
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (!archetype.isDistributed())
+        continue;
+      bool touches = touched.empty() || llvm::any_of(touched, [&](Attribute a) {
+        auto ref = dyn_cast<FlatSymbolRefAttr>(a);
+        ArchetypeOp op = archetype.op;
+        return ref && op.contains(ref);
+      });
+      if (touches) {
+        run.emitOpError("runs the extern system ")
+            << run.getSystemAttr()
+            << ", which works on the whole world (it declares no reads or "
+               "writes, or entities of a distributed archetype): each rank "
+               "has only its own of those, not on many ranks yet "
+               "(docs/ranks.md)";
+        return WalkResult::interrupt();
+      }
+    }
+    return WalkResult::advance();
+  });
+  if (externs.wasInterrupted())
+    return failure();
   WalkResult result = module.walk([&](QueryOp query) {
     bool spread = false, copied = false, many = false;
     unsigned matched = 0;

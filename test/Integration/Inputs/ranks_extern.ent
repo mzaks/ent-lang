@@ -1,0 +1,10 @@
+// On many ranks an extern system (here the world device's save) would see
+// only this rank's rows of distributed entities: refused (ranks.test).
+import world
+component Cell { number: i32, size: i32 } capacity 100
+distribute Cell by number
+system grow() { for c: mut Cell { c.size += 1 } }
+system choose() { Saved.file = "cells.sav" }
+schedule day() { grow()  choose()  save_world() }
+world { for i in 0..10 { spawn { Cell { number: i, size: 0 } } } }
+main { day() }

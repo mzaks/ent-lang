@@ -46,3 +46,5 @@
 // program is built.
 // RUN: not %ent build %S/Inputs/ranks_refused.ent --ranks 2 -o %t.refused 2>&1 | FileCheck %s --check-prefix=REFUSED
 // REFUSED: accumulates a value that is not a whole number
+// RUN: not %ent build %S/Inputs/ranks_extern.ent --ranks 2 -o %t.extern 2>&1 | FileCheck %s --check-prefix=EXTERN
+// EXTERN: runs the extern system @world.save_world, which works on the whole world

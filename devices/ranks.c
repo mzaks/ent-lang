@@ -13,6 +13,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 static int ent_rank = 0, ent_ranks = 1, ent_started = 0;
 
@@ -30,9 +33,23 @@ void ent_ranks_start(void) {
   ent_started = 1;
 }
 
+// (ENT_RANKS_LOG: how much memory the rank has, as it ends.)
+static void ent_log_memory(void) {
+  FILE *status = fopen("/proc/self/status", "r");
+  if (!status)
+    return;
+  char line[256];
+  while (fgets(line, sizeof line, status))
+    if (!strncmp(line, "VmRSS:", 6) || !strncmp(line, "VmHWM:", 6))
+      fprintf(stderr, "ent: rank %d: %s", ent_rank, line);
+  fclose(status);
+}
+
 void ent_ranks_end(void) {
   if (!ent_started)
     return;
+  if (getenv("ENT_RANKS_LOG"))
+    ent_log_memory();
   // (What rank 0 wrote is out before the other ranks are gone.)
   fflush(stdout);
   MPI_Finalize();
@@ -66,6 +83,7 @@ typedef struct {
   int64_t count;
   int64_t *bounds; // ranks + 1
   int32_t *noted;  // while placing by an entity: each row's rank
+  int dropped;     // the other ranks' rows let go (ent_ranks_drop)
 } ent_placement;
 
 static ent_placement *ent_places = 0;
@@ -88,7 +106,7 @@ static ent_placement *ent_place_of(int32_t archetype) {
     int32_t more = archetype + 16;
     ent_places = realloc(ent_places, sizeof(ent_placement) * more);
     for (int32_t i = ent_places_known; i < more; ++i)
-      ent_places[i] = (ent_placement){0, 0, 0, 0};
+      ent_places[i] = (ent_placement){0, 0, 0, 0, 0};
     ent_places_known = more;
   }
   return &ent_places[archetype];
@@ -224,6 +242,37 @@ int64_t ent_ranks_first(int32_t archetype) {
 }
 int64_t ent_ranks_end_row(int32_t archetype) {
   return ent_place_of(archetype)->bounds[ent_rank + 1];
+}
+
+// Whether the other ranks' rows of the placed archetype are yet to be let
+// go (1, once).
+int32_t ent_ranks_dropping(int32_t archetype) {
+  ent_placement *place = ent_place_of(archetype);
+  if (!place->placed || place->dropped)
+    return 0;
+  place->dropped = 1;
+  return 1;
+}
+
+// (The whole pages from `from` to `to` given back to the system: read
+// again they are noughts.)
+static void ent_let_go(char *from, char *to) {
+  uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+  uintptr_t start = ((uintptr_t)from + page - 1) & ~(page - 1);
+  uintptr_t end = (uintptr_t)to & ~(page - 1);
+  if (start < end)
+    madvise((void *)start, end - start, MADV_DONTNEED);
+}
+
+// The rows of a column (`each` bytes a row, `capacity` rows) of the
+// placed archetype that other ranks have, let go: the rank keeps only the
+// memory of its own. (Their row numbers stay as they are.)
+void ent_ranks_drop(int32_t archetype, void *column, int64_t each,
+                    int64_t capacity) {
+  ent_placement *place = ent_place_of(archetype);
+  char *rows = column;
+  ent_let_go(rows, rows + place->bounds[ent_rank] * each);
+  ent_let_go(rows + place->bounds[ent_rank + 1] * each, rows + capacity * each);
 }
 
 // A row of a distributed archetype that another rank has is not read or
