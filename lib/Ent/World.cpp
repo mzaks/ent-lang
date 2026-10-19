@@ -1191,9 +1191,13 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       claimed.insert(claim.getBufferAttr().getAttr());
     }
   });
-  // (Each rank's stretch of a distributed archetype's rows.)
+  // (Each rank's stretch of an archetype's rows: of every one where any
+  // is distributed, as one may be by its rows, see distributedByRows.)
+  bool anyDistributed = llvm::any_of(
+      layout.archetypes,
+      [](const WorldArchetype &archetype) { return archetype.isDistributed(); });
   for (WorldArchetype &archetype : layout.archetypes) {
-    if (!archetype.isDistributed())
+    if (!anyDistributed)
       continue;
     end = llvm::alignTo(end, 8);
     archetype.rankFirstOffset = end;

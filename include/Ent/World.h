@@ -69,7 +69,13 @@ struct WorldArchetype {
   uint64_t rankEndOffset = 0;
 
   bool hasPending() const { return pendingOffset != 0; }
-  bool isDistributed() const { return bool(distributeField); }
+  /// Distributed without being declared so: a `for` over it goes over a
+  /// distributed archetype too, so its rows are cut into as many even
+  /// stretches as there are ranks (the runtime's own placement).
+  bool distributedByRows = false;
+  bool isDistributed() const {
+    return bool(distributeField) || distributedByRows;
+  }
 
   /// For an archetype holding entities of a tree declared `sorted` (its
   /// rows are kept with the entities without a parent first, then the

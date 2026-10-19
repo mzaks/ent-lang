@@ -6,7 +6,7 @@ run --ranks N`) runs as several processes, the ranks, started by MPI
 machines. It says what it says on one process, to the byte: where its
 entities live changes how fast it runs, never what it computes. The design
 and its phases are in the doc "ent-lang on many machines: design (D0)";
-this is what is built (D1).
+this is what is built (D1 and D2).
 
 ## Distributing entities
 
@@ -24,17 +24,23 @@ distribute Bee by home        // each bee where its colony is
 - By a whole number: its values, from the least to the most, cut into as
   many equal ranges as there are ranks. By an entity: the entity lives on
   the rank of the one its field names, which must be distributed itself.
-- Every rank runs the program's setup and spawns every entity, so ids are
-  the same on every rank. When a `for` first goes over a distributed
-  archetype its entities are placed: each rank takes a stretch of the rows,
-  the same on every rank. The rows of one rank must come one after another
-  in the field's order (spawned in that order); else the program stops.
-- An archetype without `distribute` is every rank's, and every rank goes
-  through all of it, as on one process.
+- Every rank runs the program's setup whole, as one process: `world`, and
+  what `main` does before its first `loop`. So every rank spawns every
+  entity (ids are the same on every rank) and makes every edge, and a
+  `for` there may do anything it does on one process. Where `main` starts
+  its first loop the entities are placed: each rank takes a stretch of
+  each distributed archetype's rows, the same on every rank. The rows of
+  one rank must come one after another in the field's order (spawned in
+  that order); else the program stops. A program without a loop in
+  `main` is never placed.
+- An archetype without `distribute` that a `for` in the loop goes over
+  together with a distributed one is distributed too, by its rows: as
+  many even stretches as there are ranks. Any other is every rank's, and
+  every rank goes through all of it, as on one process.
 
 ## A `for` over distributed entities
 
-Each rank goes through its stretch of the rows. What the `for` does comes
+From the placement on, each rank goes through its stretch of the rows. What the `for` does comes
 to the same on any number of ranks:
 
 - its own entities' fields, read and written;
@@ -57,6 +63,15 @@ to the same on any number of ranks:
 - lines it writes out (`put`), each rank's after the ranks' before it, in
   the order of the rows; a `for` that takes turns (`in turn by c.number`)
   writes each rank's in its order;
+- edges gone along from its own entities (`for (p)-[w: Tie]->(o)`), to
+  entities of any rank: every rank has every edge (made in the setup);
+- going along a tree (`bottom up`, `top down`), where each child lives on
+  its parent's rank (distributed by its parent, or both by one number):
+  each rank goes through its own entities, and what each does to itself
+  and its ancestors. Where a child lives on another rank than its parent
+  the program stops when they are placed;
+- rows given to buffers (`Log += {..}`): each rank's after those the
+  ranks before it gave (`Exscan`), every rank given all of them;
 - windows of buffers and rows of buffers at running-sum places, which each
   rank writes for its own entities. When the `for` ends every rank is
   given the rows the others wrote: each rank's from the least to the most
@@ -64,18 +79,19 @@ to the same on any number of ranks:
   stretches of two ranks overlap (a rank's entities wrote rows apart,
   with another's between them) the program stops.
 
-Not yet, and refused when the program is built: fractions and `=` into
-uniques, running sums of fractions or over several archetypes of values that
-differ, a `for` over distributed and copied entities at once, edges,
-connects, rows given to buffers (`+=`), a buffer given its rows anew or
-fewer of them, spawns and destroys, moves to
-another archetype, trees, reactive `for`s, a `for` inside a `for`, and in a
-`for` that takes turns anything written to a unique or a buffer, or sent. Not yet, and
-the program stops when it happens: a lookup of an entity another rank
-has from a `for` over entities every rank has or outside a `for`, a send to one of a fraction, with `=` or to a field whose changes
-are events (with the rank, the row and the line of the lowered
-program), and entities spawned into or gone from a distributed archetype
-after it was placed.
+Not yet, in a `for` of a system that runs in the loop, and refused when
+the program is built: fractions and `=` into uniques, running sums of
+fractions or over several archetypes of values that differ, a buffer
+given its rows anew or fewer of them, spawns and destroys, moves to
+another archetype, reactive `for`s, a `for` inside a `for`; in a `for`
+that takes turns anything written to a unique or a buffer, or sent; in
+one along a tree anything but what each entity does to itself and its
+ancestors. Not yet, and the program stops when it happens: connects and
+disconnects, a lookup of an entity another rank has from a `for` over
+entities every rank has or outside a `for`, a send to one of a fraction,
+with `=` or to a field whose changes are events (with the rank, the row
+and the line of the lowered program), and entities spawned into or gone
+from a distributed archetype after it was placed.
 
 ## Devices
 
@@ -93,13 +109,15 @@ writes a distributed component, is refused when the program is built.
 
 ## Not yet
 
-- Every rank runs the setup and so has, until a distributed archetype is
-  placed, every row of it: the most memory a rank takes is the whole
-  world's. When it is placed each rank gives the memory of the other
+- Every rank runs the setup and so has, until the placement, every row:
+  the most memory a rank takes is the whole world's. When it is placed each rank gives the memory of the other
   ranks' rows of its columns back to the system (`madvise`), and keeps
   its own; the row numbers stay. A field that a `for` looks up is had
-  whole again from then on. Buffers, uniques, archetypes that are
-  not distributed and the table of entities every rank keeps whole.
+  whole again from then on. Buffers, uniques, archetypes that are not
+  distributed, relations and the table of entities every rank keeps
+  whole.
+- A `for` along a tree goes through every rank's rows, doing nothing for
+  those of other ranks.
 - `--gpu` is for one process. Systems' loops are fused on many ranks as
   on one, where all of them go over distributed entities or none.
 

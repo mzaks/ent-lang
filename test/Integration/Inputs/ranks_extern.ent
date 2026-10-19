@@ -7,4 +7,4 @@ system grow() { for c: mut Cell { c.size += 1 } }
 system choose() { Saved.file = "cells.sav" }
 schedule day() { grow()  choose()  save_world() }
 world { for i in 0..10 { spawn { Cell { number: i, size: 0 } } } }
-main { day() }
+main { loop { day() } until true }

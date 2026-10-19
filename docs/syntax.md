@@ -1289,10 +1289,12 @@ A program built with `tools/ent build --ranks N` runs as several
 processes started by MPI, and says what it says on one. `distribute
 Component by field`, a top-level declaration, splits the entities that
 have the component over the ranks: by ranges of a whole number, or each
-with the entity its field names. A `for` over them goes through each
-rank's own, and adds up what they add into uniques; devices are rank 0's.
-What else is allowed, and what not yet, is in `docs/ranks.md`. Without
-`--ranks` the declaration changes nothing.
+with the entity its field names. The setup, before `main`'s first
+`loop`, every rank runs whole; from there a `for` over them goes through
+each rank's own, adds up what they add into uniques, and reads and sends
+to entities of other ranks; devices are rank 0's. What else is allowed,
+and what not yet, is in `docs/ranks.md`. Without `--ranks` the
+declaration changes nothing.
 
 ## Extern systems
 

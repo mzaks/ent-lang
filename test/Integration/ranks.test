@@ -45,6 +45,26 @@
 // RUN: not %ent run %S/Inputs/ranks_sendfloat.ent --ranks 2 2>&1 | FileCheck %s --check-prefix=SENDFLOAT
 // SENDFLOAT: reads or sends to an entity that rank {{[0-9]}} has
 //
+// A small city: the setup run whole by every rank, then ties to people
+// of any rank, a tree up to houses that live with their people, rows
+// given to a buffer, and an archetype placed by its rows.
+// RUN: %ent run %S/Inputs/ranks_city.ent > %t.city.one
+// RUN: %ent run %S/Inputs/ranks_city.ent --ranks 3 > %t.city.three
+// RUN: %ent run %S/Inputs/ranks_city.ent --ranks 4 > %t.city.four
+// RUN: diff %t.city.one %t.city.three
+// RUN: diff %t.city.one %t.city.four
+// RUN: FileCheck %s --check-prefix=CITY --input-file=%t.city.four
+// CITY: day 4: sum 728799 log 28 mean 280.875
+//
+// Edges connected after the placement, and a tree whose children live on
+// another rank than their parents, stop the program.
+// RUN: %ent run %S/Inputs/ranks_connect.ent
+// RUN: not %ent run %S/Inputs/ranks_connect.ent --ranks 2 2>&1 | FileCheck %s --check-prefix=CONNECT
+// CONNECT: connects or disconnects edges
+// RUN: %ent run %S/Inputs/ranks_tree.ent
+// RUN: not %ent run %S/Inputs/ranks_tree.ent --ranks 2 2>&1 | FileCheck %s --check-prefix=TREE
+// TREE: a `for` along the tree needs them on one rank
+//
 // RUN: %ent run %S/Inputs/ranks_turn.ent > %t.turn.one
 // RUN: %ent run %S/Inputs/ranks_turn.ent --ranks 4 > %t.turn.four
 // RUN: diff %t.turn.one %t.turn.four

@@ -18,6 +18,13 @@
 #include <unistd.h>
 
 static int ent_rank = 0, ent_ranks = 1, ent_started = 0;
+// Whether the distributed archetypes are placed (when `main` starts its
+// first loop): until then every rank goes through every row, as one
+// process, and what the ranks would combine or give each other is this
+// rank's alone (a sum is its own part, a running sum starts at nought).
+static int ent_distributed = 0;
+
+void ent_ranks_distribute(void) { ent_distributed = 1; }
 
 void ent_ranks_start(void) {
   if (ent_started)
@@ -189,6 +196,16 @@ void ent_ranks_place_range(int32_t archetype, int64_t count,
   free(rank_of);
 }
 
+// By its rows (an archetype not declared distributed that a `for` goes
+// over with one that is): as many even stretches as there are ranks.
+void ent_ranks_place_rows(int32_t archetype, int64_t count) {
+  int32_t *rank_of = malloc(sizeof(int32_t) * (count > 0 ? count : 1));
+  for (int64_t i = 0; i < count; ++i)
+    rank_of[i] = (int32_t)((__int128)i * ent_ranks / count);
+  ent_settle(ent_place_of(archetype), count, rank_of);
+  free(rank_of);
+}
+
 // By an entity: each row with the rank of the entity it names, noted one
 // by one, then settled.
 void ent_ranks_note(int32_t archetype, int64_t count, int64_t row,
@@ -237,11 +254,15 @@ int32_t ent_ranks_owner_of_home(int32_t archetype, int64_t row) {
   return rank;
 }
 
+// This rank's stretch of the archetype's rows, of `count` it has: all of
+// them before it is placed.
 int64_t ent_ranks_first(int32_t archetype) {
-  return ent_place_of(archetype)->bounds[ent_rank];
+  ent_placement *place = ent_place_of(archetype);
+  return place->placed ? place->bounds[ent_rank] : 0;
 }
-int64_t ent_ranks_end_row(int32_t archetype) {
-  return ent_place_of(archetype)->bounds[ent_rank + 1];
+int64_t ent_ranks_end_row(int32_t archetype, int64_t count) {
+  ent_placement *place = ent_place_of(archetype);
+  return place->placed ? place->bounds[ent_rank + 1] : count;
 }
 
 // Whether the other ranks' rows of the placed archetype are yet to be let
@@ -293,22 +314,30 @@ void ent_ranks_check_own(int32_t archetype, int64_t row, int32_t line) {
 // What the ranks' parts of a `for` come to.
 
 int64_t ent_ranks_sum(int64_t mine) {
+  if (!ent_distributed)
+    return mine;
   int64_t all = 0;
   MPI_Allreduce(&mine, &all, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
   return all;
 }
 int64_t ent_ranks_min(int64_t mine) {
+  if (!ent_distributed)
+    return mine;
   int64_t all = 0;
   MPI_Allreduce(&mine, &all, 1, MPI_INT64_T, MPI_MIN, MPI_COMM_WORLD);
   return all;
 }
 int64_t ent_ranks_max(int64_t mine) {
+  if (!ent_distributed)
+    return mine;
   int64_t all = 0;
   MPI_Allreduce(&mine, &all, 1, MPI_INT64_T, MPI_MAX, MPI_COMM_WORLD);
   return all;
 }
 // What the ranks before this one added (nought on rank 0).
 int64_t ent_ranks_before(int64_t mine) {
+  if (!ent_distributed)
+    return 0;
   int64_t before = 0;
   MPI_Exscan(&mine, &before, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
   return ent_rank == 0 ? 0 : before;
@@ -339,6 +368,13 @@ void ent_ranks_release(void) {
     size = (int)ent_captured_size;
   } else {
     fflush(stdout);
+  }
+  // (Before the placement every rank wrote all of it: rank 0's is it.)
+  if (!ent_distributed) {
+    free(ent_captured);
+    ent_captured = 0;
+    ent_captured_size = 0;
+    return;
   }
   int *sizes = ent_rank == 0 ? malloc(sizeof(int) * ent_ranks) : 0;
   MPI_Gather(&size, 1, MPI_INT, sizes, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -380,6 +416,9 @@ static int64_t *ent_share_lows = 0, *ent_share_highs = 0;
 static int ent_share_any = 0;
 
 void ent_ranks_share_begin(int64_t low, int64_t high) {
+  ent_share_any = 0;
+  if (!ent_distributed)
+    return;
   int64_t mine[2] = {low, high};
   int64_t *all = malloc(sizeof(int64_t) * 2 * ent_ranks);
   MPI_Allgather(mine, 2, MPI_INT64_T, all, 2, MPI_INT64_T, MPI_COMM_WORLD);
@@ -462,6 +501,11 @@ static void ent_post_to(int32_t rank, int32_t channel, int64_t id,
 
 void ent_ranks_post(int32_t channel, int32_t archetype, int64_t row,
                     int64_t id, int64_t value, int32_t all) {
+  // (Before the placement every rank sends all of it: to itself.)
+  if (!ent_distributed) {
+    ent_post_to(ent_rank, channel, id, value);
+    return;
+  }
   if (all) {
     for (int r = 0; r < ent_ranks; ++r)
       ent_post_to(r, channel, id, value);
@@ -565,6 +609,8 @@ void ent_ranks_cannot_send(int32_t line) {
 // stretch given to every other rank, so that every rank has all of it (the
 // ghosts of the other ranks' entities) until the `for` ends.
 void ent_ranks_gather_column(int32_t archetype, void *column, int64_t each) {
+  if (!ent_distributed)
+    return;
   ent_placement *place = ent_place_of(archetype);
   int *counts = malloc(sizeof(int) * ent_ranks);
   int *starts = malloc(sizeof(int) * ent_ranks);
@@ -581,4 +627,37 @@ void ent_ranks_gather_column(int32_t archetype, void *column, int64_t each) {
                  MPI_COMM_WORLD);
   free(counts);
   free(starts);
+}
+
+// A child of a tree that a `for` over distributed entities goes along
+// (row `row` of `archetype`) and its parent (`row` of `home`): the
+// same rank's, else the program stops when they are placed.
+void ent_ranks_same_rank(int32_t archetype, int64_t row, int32_t home,
+                         int64_t home_row) {
+  int32_t child = ent_ranks_owner(archetype, row);
+  int32_t parent = ent_ranks_owner(home, home_row);
+  if (child != parent) {
+    char why[256];
+    snprintf(why, sizeof why,
+             "a child of a tree (row %lld of archetype %d) is placed on rank "
+             "%d, its parent (row %lld of archetype %d) on rank %d: a `for` "
+             "along the tree needs them on one rank (distribute the child "
+             "by its parent, or both by one number)",
+             (long long)row, archetype, child, (long long)home_row, home,
+             parent);
+    ent_ranks_stop(why);
+  }
+}
+
+// A connect or disconnect in a `for` over distributed entities, after
+// they were placed: the ranks' edges would come apart.
+void ent_ranks_cannot_connect(int32_t line) {
+  if (!ent_distributed)
+    return;
+  char why[200];
+  snprintf(why, sizeof why,
+           "a `for` over distributed entities connects or disconnects edges "
+           "(line %d): not on many ranks yet",
+           line);
+  ent_ranks_stop(why);
 }

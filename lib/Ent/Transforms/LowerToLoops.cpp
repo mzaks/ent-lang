@@ -1955,6 +1955,9 @@ static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
 static void emitPlacement(IRRewriter &rewriter, Location loc,
                           const WorldLayout &layout, WorldAccess &world,
                           ModuleOp module);
+static void checkPlaced(IRRewriter &rewriter, Location loc,
+                        const WorldLayout &layout, WorldAccess &world,
+                        ModuleOp module);
 static Value worldPointer(IRRewriter &rewriter, Location loc, Value arena);
 /// While a query over distributed archetypes is lowered: where this rank's
 /// stretch of each one's rows starts (an index), from which the loops that
@@ -1982,6 +1985,86 @@ struct RankPost {
   std::function<void(const WorldArchetype &, Value row, bool all)> post;
 };
 static RankPost *rankPost = nullptr;
+/// Marks a query of a system that runs only before the distributed
+/// archetypes are placed (before `main`'s first loop): every rank goes
+/// through all of its rows, as one process (see markSetupQueries).
+static constexpr llvm::StringLiteral kSetupAttr = "ent.setup";
+/// The schedules `main` calls from its first loop on, when the distributed
+/// archetypes are placed.
+static llvm::DenseSet<StringAttr> rankPlacedSchedules;
+
+/// Marks the queries of every system that no schedule of
+/// rankPlacedSchedules runs: those run before the placement (kSetupAttr).
+/// Without a loop in `main` nothing is ever placed.
+static void markSetupQueries(ModuleOp module) {
+  rankPlacedSchedules.clear();
+  llvm::DenseSet<StringAttr> placedSystems;
+  for (MainOp main : module.getOps<MainOp>()) {
+    bool placed = false;
+    main.getBody().walk<WalkOrder::PreOrder>([&](Operation *op) {
+      placed |= isa<LoopOp>(op);
+      if (auto call = dyn_cast<CallOp>(op); call && placed)
+        rankPlacedSchedules.insert(call.getScheduleAttr().getAttr());
+    });
+  }
+  for (ScheduleOp schedule : module.getOps<ScheduleOp>())
+    if (rankPlacedSchedules.contains(schedule.getSymNameAttr()))
+      schedule.walk([&](RunOp run) {
+        placedSystems.insert(run.getSystemAttr().getRootReference());
+      });
+  module.walk([&](SystemOp system) {
+    if (placedSystems.contains(system.getSymNameAttr()))
+      return;
+    system.walk([&](QueryOp query) {
+      query->setAttr(kSetupAttr, UnitAttr::get(query.getContext()));
+    });
+  });
+}
+
+static bool spreads(const WorldArchetype &archetype, QueryOp query);
+/// The trees that queries over distributed archetypes go along (after the
+/// placement): each child must live where its parent does.
+static SmallVector<StringAttr> rankTrees;
+
+/// An archetype a `for` goes over together with a distributed one (after
+/// the placement) is distributed too, by its rows (distributedByRows), as
+/// are those that go with it in turn.
+static void distributeByRows(WorldLayout &layout, ModuleOp module) {
+  for (bool more = true; more;) {
+    more = false;
+    module.walk([&](QueryOp query) {
+      if (query->hasAttr(kSetupAttr) ||
+          llvm::none_of(layout.archetypes, [&](const WorldArchetype &a) {
+            return a.isDistributed() && matches(a, query);
+          }))
+        return;
+      for (WorldArchetype &archetype : layout.archetypes)
+        if (!archetype.isDistributed() && matches(archetype, query)) {
+          archetype.distributedByRows = true;
+          more = true;
+        }
+    });
+  }
+  rankTrees.clear();
+  module.walk([&](QueryOp query) {
+    FlatSymbolRefAttr cascade = query.getCascade();
+    if (cascade && !llvm::is_contained(rankTrees, cascade.getAttr()) &&
+        llvm::any_of(layout.archetypes, [&](const WorldArchetype &a) {
+          return spreads(a, query) && matches(a, query);
+        }))
+      rankTrees.push_back(cascade.getAttr());
+  });
+}
+
+/// Whether `query` goes through this rank's stretch of `archetype`'s rows.
+static bool spreads(const WorldArchetype &archetype, QueryOp query) {
+  return ranksMode && archetype.isDistributed() &&
+         !query->hasAttr(kSetupAttr);
+}
+/// While a query over distributed archetypes that goes along a tree is
+/// lowered: its body applies only to this rank's own rows (a tree's
+/// children live where their parents do, see checkTreesPlaced).
+static bool rankOwnRowsOnly = false;
 /// Marks a lookup in a query over distributed archetypes: the field it
 /// reads is had whole on every rank while the query runs (gathered before
 /// it, see gatherGhosts), so it reads any rank's entity.
@@ -2103,6 +2186,24 @@ static void gatherGhosts(IRRewriter &rewriter, Location loc, ModuleOp module,
                                                 archetype->capacity * each)),
                        arith::ConstantIntOp::create(rewriter, loc, each, 64)});
   }
+}
+
+/// Before each connect and disconnect of `queries` (over distributed
+/// archetypes): the program stops there if they are placed (not yet on
+/// many ranks; before, in the setup, every rank makes every edge).
+static void stopConnects(IRRewriter &rewriter, ModuleOp module,
+                         ArrayRef<QueryOp> queries) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  for (QueryOp query : queries)
+    query.getBody().walk([&](Operation *op) {
+      if (!isa<ConnectOp, DisconnectOp>(op))
+        return;
+      rewriter.setInsertionPoint(op);
+      auto at = op->getLoc()->findInstanceOf<FileLineColLoc>();
+      callGpu(rewriter, op->getLoc(), module, "ent_ranks_cannot_connect",
+              ValueRange{arith::ConstantIntOp::create(
+                  rewriter, op->getLoc(), at ? at.getLine() : 0, 32)});
+    });
 }
 
 /// Each rank's stretch of the rows of `buffers` that its entities wrote,
@@ -3045,6 +3146,24 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     mask = mask ? arith::AndIOp::create(rewriter, loc, mask, term).getResult()
                 : term;
   };
+  // (On many ranks, along a tree: this rank's own rows only.)
+  if (rankOwnRowsOnly && spreads(archetype, query)) {
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value at = arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getI64Type(), entity);
+    require(arith::AndIOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sge, at,
+            memref::LoadOp::create(rewriter, loc,
+                                   world.scalar(archetype.rankFirstOffset),
+                                   ValueRange{zero})),
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::slt, at,
+            memref::LoadOp::create(rewriter, loc,
+                                   world.scalar(archetype.rankEndOffset),
+                                   ValueRange{zero}))));
+  }
   PresenceTest test = getPresenceTest(query, archetypeOp);
   for (FlatSymbolRefAttr component : test.present)
     require(isPresent(component));
@@ -6917,9 +7036,42 @@ static void appendAppended(IRRewriter &rewriter, AppendOp append,
   Value counter = world.bufferCount(buffer);
   Value start = world.toIndex(
       loc, memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}));
+  // (On many ranks, of a distributed archetype: this rank's rows give
+  // theirs after those the ranks before it gave, which every rank is
+  // given when they are written, see below.)
+  Value from = rankFirstRows.lookup(&archetype);
+  Type i64 = rewriter.getI64Type();
+  ModuleOp module = append->getParentOfType<ModuleOp>();
+  Value mine, before;
+  if (from) {
+    auto counting = scf::ForOp::create(
+        rewriter, loc, from, count, one,
+        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)},
+        [&](OpBuilder &, Location, Value row, ValueRange carried) {
+          Value sent = memref::LoadOp::create(rewriter, loc, slots.sent,
+                                              ValueRange{row});
+          Value added = arith::ExtUIOp::create(
+              rewriter, loc, i64,
+              arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::ne, sent,
+                  arith::ConstantIntOp::create(rewriter, loc, 0, 8)));
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::AddIOp::create(rewriter, loc, carried[0],
+                                               added)});
+        });
+    mine = counting.getResult(0);
+    before = callGpu(rewriter, loc, module, "ent_ranks_before",
+                     ValueRange{mine}, TypeRange{i64})
+                 .getResult(0);
+    start = arith::AddIOp::create(
+        rewriter, loc, start,
+        arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                   before));
+  }
   // (How many it has is carried round, and written once.)
   auto loop = scf::ForOp::create(
-      rewriter, loc, zero, count, one, ValueRange{start},
+      rewriter, loc, from ? from : zero, count, one, ValueRange{start},
       [&](OpBuilder &, Location, Value row, ValueRange carried) {
         Value at = carried[0];
         Value sent = memref::LoadOp::create(rewriter, loc, slots.sent,
@@ -6945,11 +7097,30 @@ static void appendAppended(IRRewriter &rewriter, AppendOp append,
         scf::YieldOp::create(rewriter, loc, ifAdded.getResults());
       });
   rewriter.setInsertionPointAfter(loop);
-  memref::StoreOp::create(
-      rewriter, loc,
-      arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
-                                 loop.getResult(0)),
-      counter, ValueRange{zero});
+  Value rows = arith::IndexCastOp::create(rewriter, loc, i64,
+                                          loop.getResult(0));
+  if (from) {
+    // (The rows each rank gave, given to every rank; and how many all
+    // gave.)
+    Value high = arith::SubIOp::create(
+        rewriter, loc, rows, arith::ConstantIntOp::create(rewriter, loc, 1, 64));
+    Value low = arith::SubIOp::create(rewriter, loc, rows, mine);
+    callGpu(rewriter, loc, module, "ent_ranks_share_begin",
+            ValueRange{low, high});
+    for (const WorldColumn &field : buffer.fields)
+      callGpu(rewriter, loc, module, "ent_ranks_share_column",
+              ValueRange{worldPointer(rewriter, loc,
+                                      world.bufferField(buffer, field)),
+                         arith::ConstantIntOp::create(
+                             rewriter, loc, world.storageBytes(field.type),
+                             64)});
+    rows = arith::AddIOp::create(
+        rewriter, loc, arith::SubIOp::create(rewriter, loc, low, before),
+        callGpu(rewriter, loc, module, "ent_ranks_sum", ValueRange{mine},
+                TypeRange{i64})
+            .getResult(0));
+  }
+  memref::StoreOp::create(rewriter, loc, rows, counter, ValueRange{zero});
 }
 
 /// The name of the function that sorts `relation`'s edges if it is
@@ -10364,6 +10535,20 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   FlatSymbolRefAttr cascade = query.getCascade();
   const WorldRelation &relation = layout.getRelation(cascade.getAttr());
   rewriter.setInsertionPoint(query);
+  // (On many ranks: this rank's own entities of the tree, which are whole
+  // trees, see checkTreesPlaced.)
+  bool spread = llvm::any_of(layout.archetypes,
+                             [&](const WorldArchetype &archetype) {
+                               return spreads(archetype, query) &&
+                                      matches(archetype, query);
+                             });
+  llvm::SaveAndRestore ownRows(rankOwnRowsOnly, spread);
+  // (Its rows of other ranks are gone through too, doing nothing: what
+  // they find of their parents is not asked whose it is.)
+  llvm::SaveAndRestore anyRows(rankGhostRead, spread);
+  if (spread)
+    checkPlaced(rewriter, loc, layout, world,
+                query->getParentOfType<ModuleOp>());
   // A reactive query takes the tick it last started at and advances the
   // counter, as any does. It goes through its tree as ever, and its body
   // applies where a trigger fired: no event log is walked, since the
@@ -12855,13 +13040,13 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
   // the rows, in the order of their keys, what they write out written
   // after the ranks' before; checkRanks lets such a query do nothing
   // else that the ranks would have to take turns at.)
-  bool spread = ranksMode && llvm::any_of(matched, [](const WorldArchetype *a) {
-                  return a->isDistributed();
-                });
+  bool spread = llvm::any_of(matched, [&](const WorldArchetype *a) {
+    return spreads(*a, query);
+  });
   bool captured = false;
   ModuleOp program = query->getParentOfType<ModuleOp>();
   if (spread) {
-    emitPlacement(rewriter, loc, layout, world, program);
+    checkPlaced(rewriter, loc, layout, world, program);
     query.getBody().walk([&](InvokeOp invoke) {
       if (!invoke.getProc())
         return;
@@ -12889,7 +13074,8 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
       rows = arith::IndexCastOp::create(
           rewriter, loc, index,
           callGpu(rewriter, loc, program, "ent_ranks_end_row",
-                  ValueRange{number}, TypeRange{i64})
+                  ValueRange{number, arith::IndexCastOp::create(rewriter, loc, i64, world.count(loc, *archetype))},
+                  TypeRange{i64})
               .getResult(0));
     }
     auto gather = scf::ForOp::create(rewriter, loc, from, rows, one);
@@ -13451,8 +13637,27 @@ static void checkOwnRows(IRRewriter &rewriter, QueryOp query) {
 
 static Value worldPointer(IRRewriter &rewriter, Location loc, Value arena);
 
+/// On many ranks, where a query over distributed archetypes starts: that
+/// none was spawned into or is gone from since they were placed (else the
+/// program stops, devices/ranks.c).
+static void checkPlaced(IRRewriter &rewriter, Location loc,
+                        const WorldLayout &layout, WorldAccess &world,
+                        ModuleOp module) {
+  for (const WorldArchetype &archetype : layout.archetypes)
+    if (archetype.isDistributed())
+      callGpu(rewriter, loc, module, "ent_ranks_unplaced",
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                      archetype.index, 32),
+                         arith::IndexCastOp::create(
+                             rewriter, loc, rewriter.getI64Type(),
+                             world.count(loc, archetype))},
+              TypeRange{rewriter.getI32Type()});
+}
+
 /// On many ranks: every distributed archetype's entities placed where they
 /// are not yet (devices/ranks.c), each rank given its stretch of the rows.
+/// Where `main` starts its first loop: until then every rank goes through
+/// every row, as one process (the setup).
 /// Those placed by a whole number first, then those placed by an entity,
 /// which live where it does. Every rank has every row when this runs, so
 /// every rank works out the same stretches.
@@ -13469,6 +13674,16 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
         if (column.component == archetype.distributeComponent &&
             column.field == archetype.distributeField && !column.isStamp())
           placedBy = &column;
+      if (archetype.distributedByRows && !byEntity) {
+        // (By its rows: even stretches.)
+        Value rows = arith::IndexCastOp::create(rewriter, loc, i64,
+                                                world.count(loc, archetype));
+        callGpu(rewriter, loc, module, "ent_ranks_place_rows",
+                ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                        archetype.index, 32),
+                           rows});
+        continue;
+      }
       if (!placedBy || isa<EntityType>(placedBy->type) != byEntity)
         continue;
       Value index = arith::ConstantIntOp::create(rewriter, loc,
@@ -13539,7 +13754,8 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
         world.scalar(archetype.rankFirstOffset), ValueRange{zero});
     memref::StoreOp::create(
         rewriter, loc,
-        callGpu(rewriter, loc, module, "ent_ranks_end_row", ValueRange{index},
+        callGpu(rewriter, loc, module, "ent_ranks_end_row",
+                ValueRange{index, arith::IndexCastOp::create(rewriter, loc, i64, world.count(loc, archetype))},
                 TypeRange{i64})
             .getResult(0),
         world.scalar(archetype.rankEndOffset), ValueRange{zero});
@@ -13567,6 +13783,35 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
     if (archetype.idOffset)
       drop(archetype.idOffset, layout.entities.idBits / 8);
   }
+  // (Each child of a tree that is gone along where its parent is.)
+  for (StringAttr tree : rankTrees) {
+    const WorldRelation &relation = layout.getRelation(tree);
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (!archetype.isDistributed())
+        continue;
+      OpBuilder::InsertionGuard guard(rewriter);
+      auto rows = scf::ForOp::create(
+          rewriter, loc, arith::ConstantIndexOp::create(rewriter, loc, 0),
+          world.count(loc, archetype),
+          arith::ConstantIndexOp::create(rewriter, loc, 1));
+      rewriter.setInsertionPoint(rows.getBody()->getTerminator());
+      Value row = rows.getInductionVar();
+      auto [has, parent] = emitParent(rewriter, loc, layout, world, relation,
+                                      world.entityId(loc, archetype, row));
+      auto ifHas = scf::IfOp::create(rewriter, loc, has);
+      rewriter.setInsertionPoint(ifHas.thenBlock()->getTerminator());
+      auto [home, homeRow] = world.locate(loc, parent);
+      callGpu(rewriter, loc, module, "ent_ranks_same_rank",
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                      archetype.index, 32),
+                         arith::IndexCastOp::create(rewriter, loc, i64, row),
+                         home,
+                         arith::IndexCastOp::create(rewriter, loc, i64,
+                                                    homeRow)});
+    }
+  }
+  // (From now on the ranks' parts are combined and given to each other.)
+  callGpu(rewriter, loc, module, "ent_ranks_distribute", ValueRange{});
 }
 
 /// How many rows of a running sum's scan one turn of a loop combines (see
@@ -13801,10 +14046,9 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
   // the ranks before this one add is known only once each has worked out
   // its rows' values. checkRanks lets such a query match one archetype.)
   const WorldArchetype *spread = nullptr;
-  if (ranksMode)
-    for (const WorldArchetype &archetype : layout.archetypes)
-      if (archetype.isDistributed() && matches(archetype, query))
-        spread = &archetype;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    if (spreads(archetype, query) && matches(archetype, query))
+      spread = &archetype;
   if (!options.parallelEntities && !options.gpu && !spread)
     return false;
   // A whole number added for every entity, from the body itself (not an
@@ -13851,7 +14095,7 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
     // (Of one archetype, the places are this rank's own: from its first
     // row, and the scratch arrays as long as its stretch. What the ranks
     // before it add is where its sums start (see below).)
-    emitPlacement(rewriter, loc, layout, world, module);
+    checkPlaced(rewriter, loc, layout, world, module);
     Type i64 = rewriter.getI64Type();
     Value number = arith::ConstantIntOp::create(rewriter, loc, spread->index,
                                                 32);
@@ -13859,7 +14103,8 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
                           ValueRange{number}, TypeRange{i64})
                       .getResult(0);
     Value end = callGpu(rewriter, loc, module, "ent_ranks_end_row",
-                        ValueRange{number}, TypeRange{i64})
+                        ValueRange{number, arith::IndexCastOp::create(rewriter, loc, i64, world.count(loc, *spread))},
+                        TypeRange{i64})
                     .getResult(0);
     Value mine = arith::SubIOp::create(rewriter, loc, end, first);
     bases[spread] = arith::IndexCastOp::create(
@@ -13876,7 +14121,7 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
                          ValueRange{mine}, TypeRange{i64})
                      .getResult(0);
   } else if (spread) {
-    emitPlacement(rewriter, loc, layout, world, module);
+    checkPlaced(rewriter, loc, layout, world, module);
     Type i64 = rewriter.getI64Type();
     Value placed = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
     for (const WorldArchetype &archetype : layout.archetypes) {
@@ -13888,7 +14133,8 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
                             ValueRange{number}, TypeRange{i64})
                         .getResult(0);
       Value end = callGpu(rewriter, loc, module, "ent_ranks_end_row",
-                          ValueRange{number}, TypeRange{i64})
+                          ValueRange{number, arith::IndexCastOp::create(rewriter, loc, i64, world.count(loc, archetype))},
+                          TypeRange{i64})
                       .getResult(0);
       Value mine = arith::SubIOp::create(rewriter, loc, end, first);
       Value before = callGpu(rewriter, loc, module, "ent_ranks_before",
@@ -14394,11 +14640,11 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // accumulate into uniques is added up over the ranks when the query
   // ends (devices/ranks.c). (checkRanks refuses what that cannot do yet.)
   ModuleOp module = query->getParentOfType<ModuleOp>();
-  bool spread = ranksMode && llvm::any_of(layout.archetypes,
-                                          [&](const WorldArchetype &archetype) {
-                                            return archetype.isDistributed() &&
-                                                   matches(archetype, query);
-                                          });
+  bool spread = llvm::any_of(layout.archetypes,
+                             [&](const WorldArchetype &archetype) {
+                               return spreads(archetype, query) &&
+                                      matches(archetype, query);
+                             });
   llvm::SaveAndRestore keepFirstRows(rankFirstRows);
   llvm::SaveAndRestore keepPosting(rankPosting, spread);
   rankChannels.clear();
@@ -14409,7 +14655,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   SmallVector<const WorldBuffer *> sharedBuffers;
   if (spread) {
     rewriter.setInsertionPoint(query);
-    emitPlacement(rewriter, loc, layout, world, module);
+    checkPlaced(rewriter, loc, layout, world, module);
     query.getBody().walk([&](InvokeOp invoke) {
       if (!invoke.getProc())
         return;
@@ -14421,8 +14667,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     noteSpreadCells(rewriter, loc, world, {query}, spreadCells);
     noteSharedBuffers(rewriter, loc, layout, world, {query}, sharedBuffers);
     gatherGhosts(rewriter, loc, module, layout, world, query);
+    stopConnects(rewriter, module, {query});
     for (const WorldArchetype &archetype : layout.archetypes)
-      if (archetype.isDistributed() && matches(archetype, query))
+      if (spreads(archetype, query) && matches(archetype, query))
         rankFirstRows[&archetype] = arith::IndexCastOp::create(
             rewriter, loc, rewriter.getIndexType(),
             callGpu(rewriter, loc, module, "ent_ranks_first",
@@ -14558,7 +14805,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
           rewriter, loc, rewriter.getIndexType(),
           callGpu(rewriter, loc, module, "ent_ranks_end_row",
                   ValueRange{arith::ConstantIntOp::create(rewriter, loc,
-                                                          archetype.index, 32)},
+                                                          archetype.index, 32),
+                             arith::IndexCastOp::create(
+                                 rewriter, loc, rewriter.getI64Type(),
+                                 world.count(loc, archetype))},
                   TypeRange{rewriter.getI64Type()})
               .getResult(0));
     if (!applies.empty() || !accumulates.empty() || !connects.empty() ||
@@ -15129,7 +15379,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     for (SystemOp system : systems)
       for (QueryOp query : system.getBody().getOps<QueryOp>())
         for (const WorldArchetype &archetype : layout.archetypes)
-          if (archetype.isDistributed() && matches(archetype, query)) {
+          if (spreads(archetype, query) && matches(archetype, query)) {
             spread = true;
             spreadQueries.push_back(query);
             break;
@@ -15140,10 +15390,11 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   SmallVector<SpreadCell> spreadCells;
   SmallVector<const WorldBuffer *> sharedBuffers;
   if (spread) {
-    emitPlacement(rewriter, loc, layout, world, module);
+    checkPlaced(rewriter, loc, layout, world, module);
     noteSpreadCells(rewriter, loc, world, spreadQueries, spreadCells);
     noteSharedBuffers(rewriter, loc, layout, world, spreadQueries,
                       sharedBuffers);
+    stopConnects(rewriter, module, spreadQueries);
     for (const WorldArchetype &archetype : layout.archetypes)
       if (archetype.isDistributed())
         rankFirstRows[&archetype] = arith::IndexCastOp::create(
@@ -15274,7 +15525,10 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
           rewriter, loc, rewriter.getIndexType(),
           callGpu(rewriter, loc, module, "ent_ranks_end_row",
                   ValueRange{arith::ConstantIntOp::create(rewriter, loc,
-                                                          archetype.index, 32)},
+                                                          archetype.index, 32),
+                             arith::IndexCastOp::create(
+                                 rewriter, loc, rewriter.getI64Type(),
+                                 world.count(loc, archetype))},
                   TypeRange{rewriter.getI64Type()})
               .getResult(0));
     visited.push_back({&archetype, rows});
@@ -15438,7 +15692,7 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
         for (QueryOp query : system.getBody().getOps<QueryOp>())
           for (const WorldArchetype &archetype : layout.archetypes)
             if (matches(archetype, query))
-              (archetype.isDistributed() ? spread : copied) = true;
+              (spreads(archetype, query) ? spread : copied) = true;
       writesResource |= spread && copied;
       if (!conditional && !writesResource &&
           !computeAccess(system, archetypes).isOpaque()) {
@@ -16671,6 +16925,24 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
       convertToFunc(rewriter, main, "ent.main", main.getBody(), arenaType);
   body.setPrivate();
 
+  // (On many ranks: the distributed archetypes' entities placed where
+  // the first loop starts, the setup before it run whole by every rank.)
+  if (ranksMode && llvm::any_of(layout.archetypes,
+                                [](const WorldArchetype &archetype) {
+                                  return archetype.isDistributed();
+                                })) {
+    LoopOp first;
+    body.walk<WalkOrder::PreOrder>([&](LoopOp loop) {
+      if (!first)
+        first = loop;
+    });
+    if (first) {
+      rewriter.setInsertionPoint(first);
+      WorldAccess placing(rewriter, layout, arena);
+      emitPlacement(rewriter, first.getLoc(), layout, placing, module);
+    }
+  }
+
   // Innermost first: an outer loop moves the lowered inner ones.
   SmallVector<LoopOp> loops;
   body.walk<WalkOrder::PostOrder>([&](LoopOp loop) { loops.push_back(loop); });
@@ -17193,7 +17465,9 @@ static LogicalResult checkRanks(ModuleOp module, const WorldLayout &layout) {
   WalkResult externs = module.walk([&](RunOp run) {
     auto system = SymbolTable::lookupNearestSymbolFrom<ExternOp>(
         run, run.getSystemAttr());
-    if (!system)
+    auto schedule = run->getParentOfType<ScheduleOp>();
+    if (!system || !schedule ||
+        !rankPlacedSchedules.contains(schedule.getSymNameAttr()))
       return WalkResult::advance();
     SmallVector<Attribute> touched;
     for (std::optional<ArrayAttr> list : {system.getReads(), system.getWrites()})
@@ -17227,7 +17501,7 @@ static LogicalResult checkRanks(ModuleOp module, const WorldLayout &layout) {
     for (const WorldArchetype &archetype : layout.archetypes)
       if (matches(archetype, query)) {
         ++matched;
-        (archetype.isDistributed() ? spread : copied) = true;
+        (spreads(archetype, query) ? spread : copied) = true;
         many |= isStructuralFor(query, archetype.op);
       }
     if (!spread)
@@ -17240,16 +17514,23 @@ static LogicalResult checkRanks(ModuleOp module, const WorldLayout &layout) {
     if (copied)
       return fail(query, "also visits entities that every rank has (not "
                          "distributed)");
-    if (query.getCascade() || query->hasAttr(QueryOp::kTriggersAttr))
-      return fail(query, "goes along a tree or reacts to events");
+    if (query->hasAttr(QueryOp::kTriggersAttr))
+      return fail(query, "reacts to events");
+    bool tree = bool(query.getCascade());
     if (many)
       return fail(query, "moves its entities to another archetype");
     bool turn = query.isTurn() || query.hasBy();
     WalkResult inner = query.getBody().walk([&](Operation *op) {
-      if (isa<EdgesOp, ConnectOp, DisconnectOp, AppendOp, SpawnOp, DespawnOp,
-              EachOp>(op))
-        return fail(op, "goes along edges, connects them, gives a buffer "
-                        "rows, spawns, destroys or has a 'for' inside it");
+      if (isa<SpawnOp, DespawnOp, EachOp>(op))
+        return fail(op, "spawns, destroys or has a 'for' inside it");
+      auto invoke = dyn_cast<InvokeOp>(op);
+      if (tree && (isa<AccumulateOp, RunningOp, AppendOp, ApplyOp, BufferSetOp,
+                       BufferClaimOp, ConnectOp, DisconnectOp, LookupOp>(op) ||
+                   (invoke && invoke.getProc())))
+        return fail(op, "goes along a tree and adds into a unique, gives a "
+                        "buffer rows, writes them, calls a proc, sends, "
+                        "connects or looks up (only what each entity does to "
+                        "itself and its ancestors is)");
       if (turn && isa<WriteOp, AccumulateOp, RunningOp, ApplyOp>(op))
         return fail(op, "takes turns and writes a unique or sends to "
                         "another entity as it goes: the turns would be on "
@@ -18032,6 +18313,8 @@ struct EntLowerToLoops
     ownerRuns.clear();
     ownerTags.clear();
     ranksMode = ranks;
+    if (ranksMode)
+      markSetupQueries(module);
     // (Those of windows are the rows their entity took: see lowerBuffers.)
     module.walk([&](BufferSetOp set) {
       if (auto query = set->getParentOfType<QueryOp>();
@@ -18045,6 +18328,8 @@ struct EntLowerToLoops
     FailureOr<WorldLayout> layout = WorldLayout::compute(module);
     if (failed(layout))
       return signalPassFailure();
+    if (ranks)
+      distributeByRows(*layout, module);
     if (ranks && failed(checkRanks(module, *layout)))
       return signalPassFailure();
     if (failed(checkGpuStamps(module, *layout)))

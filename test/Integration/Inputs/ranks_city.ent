@@ -1,0 +1,85 @@
+// On many ranks, a small city: people distributed by their house's
+// number, houses by theirs, so each house lives with its people. The
+// setup, before `main`'s loop, every rank runs whole (rows given to a
+// buffer from a `for`, fractions added up, edges connected); in the loop
+// people go along their ties to people of any rank (lookups and sends),
+// pass pressure up to their house (`bottom up`), and log to a buffer.
+// Ticks without people, an archetype not declared distributed that a
+// `for` goes over with people's, are placed by their rows. It says what it says on one
+// process (ranks.test).
+import console
+component Person { number: i32, house: i32, heat: i64, seen: i64 }
+component House { id: i32, pressure: i64 }
+component Tick { n: i64 }
+relation (Person)-[Tie { weight: i32 }]->(Person) capacity 16
+relation (Person)-[Lives]->(House) tree capacity 16
+distribute Person by house
+distribute House by id
+capacity Person 2000
+capacity House 400
+capacity Tick 2100
+capacity Tie 8000
+capacity Lives 2000
+buffer Ring { who: entity } capacity 2000
+buffer Log { who: i32, heat: i64 } capacity 20000
+unique Setup { mean: f64 }
+unique Days: i32
+unique Sum: i64
+system ring() {
+  for e, p: Person { Ring += { who: e } }
+}
+system tie() {
+  for i in 0..len(Ring) {
+    let a = Ring[i].who
+    let b = Ring[(i * 37 + 11) % len(Ring)].who
+    connect (a)-[Tie { weight: i % 5 + 1 }]->(b)
+  }
+}
+system mean() {
+  Setup.mean = 0.0
+  for p: Person { Setup.mean += p.number as f64 / 1000.0 }
+}
+system pass() {
+  for p: Person {
+    for (p)-[t: Tie]->(o) {
+      if let s = Person(o).heat { Person(o).seen += s % 7 + t.weight as i64 }
+    }
+  }
+  for p: mut Person { p.heat = (p.heat * 3 + p.number as i64 + Days as i64) % 1009 }
+  for t: mut Tick { t.n += Days as i64 + 1 }
+}
+system up() {
+  for h: mut House { h.pressure = 0 }
+  for (p: Person)-[Lives]->(h: mut House) bottom up Lives { h.pressure += p.heat % 13 }
+}
+system log() {
+  for p: Person { if p.heat % 97 == 3 { Log += { who: p.number, heat: p.heat } } }
+}
+system check() {
+  Sum = 0
+  for p: Person { Sum += p.seen * (p.number % 5 + 1) as i64 }
+  for h: House { Sum += h.pressure * h.id as i64 }
+  for t: Tick { Sum += t.n }
+}
+system report() {
+  Days += 1
+  put("day {Days}: sum {Sum} log {len(Log)} mean {Setup.mean}")
+}
+schedule setup() { ring()  tie()  mean() }
+schedule day() { pass()  up()  log()  check()  report() }
+world {
+  for c in 0..50 { spawn { Tick { n: c as i64 } } }
+  var number = 0
+  for h in 0..300 {
+    let house = spawn { House { id: h, pressure: 0 } }
+    for k in 0..(h % 4 + 1) {
+      let p = spawn { Person { number: number, house: h, heat: number as i64 % 11, seen: 0 }, Tick { n: 0 } }
+      connect (p)-[Lives]->(house)
+      number += 1
+    }
+  }
+}
+main {
+  setup()
+  loop { day() } until Days == 4
+}

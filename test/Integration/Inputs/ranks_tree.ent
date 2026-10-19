@@ -1,0 +1,26 @@
+// On many ranks: people distributed by their numbers, houses by theirs,
+// so a person's house may be another rank's; a `for` up the tree needs
+// them together: the program stops when they are placed (ranks.test).
+component Person { number: i32, heat: i64 } capacity 400
+component House { id: i32, pressure: i64 } capacity 100
+relation (Person)-[Lives]->(House) tree capacity 400
+distribute Person by number
+distribute House by id
+unique Days: i32
+system up() {
+  for (p: Person)-[Lives]->(h: mut House) bottom up Lives { h.pressure += p.heat }
+}
+system report() { Days += 1 }
+schedule day() { up()  report() }
+world {
+  for h in 0..100 {
+    let house = spawn { House { id: h, pressure: 0 } }
+    // (The people of the houses from 25 on numbered far up: on two ranks
+    // the houses 25 to 49 are rank 0's, their people rank 1's.)
+    let base = if h < 25 { 0 } else { 1000 }
+    for k in 0..4 {
+      connect (spawn { Person { number: base + h * 4 + k, heat: 1 } })-[Lives]->(house)
+    }
+  }
+}
+main { loop { day() } until Days == 2 }

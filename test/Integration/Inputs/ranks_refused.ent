@@ -1,6 +1,7 @@
 // On many ranks: a `for` over distributed cells that adds fractions into
 // a unique, which the ranks' parts would add up in another order than
-// one process: refused when the program is built (ranks.test).
+// one process: refused when the program is built (ranks.test). (In
+// `main`'s loop: before it, the setup, every rank goes through all.)
 import console
 component Cell { number: i32, weight: f32 } capacity 100
 distribute Cell by number
@@ -12,4 +13,4 @@ system weigh() {
 system report() { put("total {Total}") }
 schedule frame() { weigh()  report() }
 world { for i in 0..10 { spawn { Cell { number: i, weight: 0.5 } } } }
-main { frame() }
+main { loop { frame() } until Total > 1.0 }
