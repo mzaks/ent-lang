@@ -26,6 +26,12 @@ static int ent_distributed = 0;
 
 void ent_ranks_distribute(void) { ent_distributed = 1; }
 
+// (ENT_RANKS_LOG: the time each rank spent in each kind of call, which is
+// where it waited for the others too, said as it ends.)
+static const char *ent_kinds[] = {"bcast", "sum", "min", "max", "before", "release", "share_begin", "share_column", "exchange", "gather_column"};
+static double ent_spent[10];
+static int64_t ent_calls[10];
+
 void ent_ranks_start(void) {
   if (ent_started)
     return;
@@ -41,6 +47,13 @@ void ent_ranks_start(void) {
 }
 
 // (ENT_RANKS_LOG: how much memory the rank has, as it ends.)
+static void ent_log_spent(void) {
+  for (unsigned k = 0; k < sizeof ent_kinds / sizeof *ent_kinds; ++k)
+    if (ent_calls[k])
+      fprintf(stderr, "ent: rank %d: %-13s %8lld calls %9.3f s\n", ent_rank,
+              ent_kinds[k], (long long)ent_calls[k], ent_spent[k]);
+}
+
 static void ent_log_memory(void) {
   FILE *status = fopen("/proc/self/status", "r");
   if (!status)
@@ -55,8 +68,10 @@ static void ent_log_memory(void) {
 void ent_ranks_end(void) {
   if (!ent_started)
     return;
-  if (getenv("ENT_RANKS_LOG"))
+  if (getenv("ENT_RANKS_LOG")) {
+    ent_log_spent();
     ent_log_memory();
+  }
   // (What rank 0 wrote is out before the other ranks are gone.)
   fflush(stdout);
   MPI_Finalize();
@@ -68,7 +83,7 @@ int32_t ent_ranks_count(void) { return ent_ranks; }
 
 // `bytes` bytes at `data`, as rank 0 has them, on every rank. (In pieces
 // of at most 1 GB: MPI counts in ints.)
-void ent_ranks_bcast(void *data, int64_t bytes) {
+static void ent_ranks_bcast_untimed(void *data, int64_t bytes) {
   char *at = (char *)data;
   while (bytes > 0) {
     int piece = bytes > (1 << 30) ? (1 << 30) : (int)bytes;
@@ -313,21 +328,21 @@ void ent_ranks_check_own(int32_t archetype, int64_t row, int32_t line) {
 // ---------------------------------------------------------------------------
 // What the ranks' parts of a `for` come to.
 
-int64_t ent_ranks_sum(int64_t mine) {
+static int64_t ent_ranks_sum_untimed(int64_t mine) {
   if (!ent_distributed)
     return mine;
   int64_t all = 0;
   MPI_Allreduce(&mine, &all, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
   return all;
 }
-int64_t ent_ranks_min(int64_t mine) {
+static int64_t ent_ranks_min_untimed(int64_t mine) {
   if (!ent_distributed)
     return mine;
   int64_t all = 0;
   MPI_Allreduce(&mine, &all, 1, MPI_INT64_T, MPI_MIN, MPI_COMM_WORLD);
   return all;
 }
-int64_t ent_ranks_max(int64_t mine) {
+static int64_t ent_ranks_max_untimed(int64_t mine) {
   if (!ent_distributed)
     return mine;
   int64_t all = 0;
@@ -335,7 +350,7 @@ int64_t ent_ranks_max(int64_t mine) {
   return all;
 }
 // What the ranks before this one added (nought on rank 0).
-int64_t ent_ranks_before(int64_t mine) {
+static int64_t ent_ranks_before_untimed(int64_t mine) {
   if (!ent_distributed)
     return 0;
   int64_t before = 0;
@@ -360,7 +375,7 @@ void ent_ranks_capture(void) {
   stdout = open_memstream(&ent_captured, &ent_captured_size);
 }
 
-void ent_ranks_release(void) {
+static void ent_ranks_release_untimed(void) {
   int size = 0;
   if (ent_rank != 0) {
     fclose(stdout);
@@ -415,7 +430,7 @@ static int *ent_share_counts = 0, *ent_share_starts = 0;
 static int64_t *ent_share_lows = 0, *ent_share_highs = 0;
 static int ent_share_any = 0;
 
-void ent_ranks_share_begin(int64_t low, int64_t high) {
+static void ent_ranks_share_begin_untimed(int64_t low, int64_t high) {
   ent_share_any = 0;
   if (!ent_distributed)
     return;
@@ -445,7 +460,7 @@ void ent_ranks_share_begin(int64_t low, int64_t high) {
 }
 
 // One column of the buffer, `each` bytes a row, from `column`.
-void ent_ranks_share_column(void *column, int64_t each) {
+static void ent_ranks_share_column_untimed(void *column, int64_t each) {
   if (!ent_share_any)
     return;
   for (int r = 0; r < ent_ranks; ++r) {
@@ -516,7 +531,7 @@ void ent_ranks_post(int32_t channel, int32_t archetype, int64_t row,
 
 // Every rank's posts to every rank, sorted by channel (in the order of the
 // ranks they came from, each's in its order).
-void ent_ranks_exchange(int32_t channels) {
+static void ent_ranks_exchange_untimed(int32_t channels) {
   if (!ent_outbox)
     ent_outbox = calloc(ent_ranks, sizeof(ent_posts));
   int *sent = malloc(sizeof(int) * ent_ranks), *got = malloc(sizeof(int) * ent_ranks);
@@ -608,7 +623,7 @@ void ent_ranks_cannot_send(int32_t line) {
 // distributed entities looks up in entities of any rank: each rank's
 // stretch given to every other rank, so that every rank has all of it (the
 // ghosts of the other ranks' entities) until the `for` ends.
-void ent_ranks_gather_column(int32_t archetype, void *column, int64_t each) {
+static void ent_ranks_gather_column_untimed(int32_t archetype, void *column, int64_t each) {
   if (!ent_distributed)
     return;
   ent_placement *place = ent_place_of(archetype);
@@ -660,4 +675,81 @@ void ent_ranks_cannot_connect(int32_t line) {
            "(line %d): not on many ranks yet",
            line);
   ent_ranks_stop(why);
+}
+
+// ---------------------------------------------------------------------------
+// The calls the compiler makes, timed (see ent_spent).
+
+void ent_ranks_bcast(void *data, int64_t bytes) {
+  double start = MPI_Wtime();
+  ent_ranks_bcast_untimed(data, bytes);
+  ent_spent[0] += MPI_Wtime() - start;
+  ++ent_calls[0];
+}
+
+int64_t ent_ranks_sum(int64_t mine) {
+  double start = MPI_Wtime();
+  int64_t result = ent_ranks_sum_untimed(mine);
+  ent_spent[1] += MPI_Wtime() - start;
+  ++ent_calls[1];
+  return result;
+}
+
+int64_t ent_ranks_min(int64_t mine) {
+  double start = MPI_Wtime();
+  int64_t result = ent_ranks_min_untimed(mine);
+  ent_spent[2] += MPI_Wtime() - start;
+  ++ent_calls[2];
+  return result;
+}
+
+int64_t ent_ranks_max(int64_t mine) {
+  double start = MPI_Wtime();
+  int64_t result = ent_ranks_max_untimed(mine);
+  ent_spent[3] += MPI_Wtime() - start;
+  ++ent_calls[3];
+  return result;
+}
+
+int64_t ent_ranks_before(int64_t mine) {
+  double start = MPI_Wtime();
+  int64_t result = ent_ranks_before_untimed(mine);
+  ent_spent[4] += MPI_Wtime() - start;
+  ++ent_calls[4];
+  return result;
+}
+
+void ent_ranks_release(void) {
+  double start = MPI_Wtime();
+  ent_ranks_release_untimed();
+  ent_spent[5] += MPI_Wtime() - start;
+  ++ent_calls[5];
+}
+
+void ent_ranks_share_begin(int64_t low, int64_t high) {
+  double start = MPI_Wtime();
+  ent_ranks_share_begin_untimed(low, high);
+  ent_spent[6] += MPI_Wtime() - start;
+  ++ent_calls[6];
+}
+
+void ent_ranks_share_column(void *column, int64_t each) {
+  double start = MPI_Wtime();
+  ent_ranks_share_column_untimed(column, each);
+  ent_spent[7] += MPI_Wtime() - start;
+  ++ent_calls[7];
+}
+
+void ent_ranks_exchange(int32_t channels) {
+  double start = MPI_Wtime();
+  ent_ranks_exchange_untimed(channels);
+  ent_spent[8] += MPI_Wtime() - start;
+  ++ent_calls[8];
+}
+
+void ent_ranks_gather_column(int32_t archetype, void *column, int64_t each) {
+  double start = MPI_Wtime();
+  ent_ranks_gather_column_untimed(archetype, column, each);
+  ent_spent[9] += MPI_Wtime() - start;
+  ++ent_calls[9];
 }

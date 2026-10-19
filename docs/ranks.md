@@ -127,6 +127,8 @@ writes a distributed component, is refused when the program is built.
   (`mpirun -n 4 --oversubscribe`). MPI (Open MPI or MPICH, `mpicc` and
   `mpirun` on the PATH) is needed where it is built and run.
 - `ENT_RANKS_LOG=1` (passed on with `mpirun -x ENT_RANKS_LOG`) says each
-  rank's stretch of each distributed archetype when it is placed, and
-  where a rank stopped.
+  rank's stretch of each distributed archetype when it is placed, where a
+  rank stopped, and as each rank ends how long it spent in each kind of
+  call to the others (which is where it waited for them too) and its
+  memory.
 - The runtime is `devices/ranks.c`, the only code that calls MPI.

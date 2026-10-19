@@ -2146,12 +2146,31 @@ static void noteRankWrite(IRRewriter &rewriter, Location loc,
                           WorldAccess &world, const WorldBuffer &buffer,
                           Value low, Value high) {
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::mins, low,
-                              world.scalar(buffer.rankLowOffset),
-                              ValueRange{zero});
-  memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::maxs, high,
-                              world.scalar(buffer.rankHighOffset),
-                              ValueRange{zero});
+  Value lows = world.scalar(buffer.rankLowOffset);
+  Value highs = world.scalar(buffer.rankHighOffset);
+  // (Atomically only in a loop that may run on many threads: elsewhere a
+  // locked exchange costs much more than the write it notes.)
+  Operation *at = rewriter.getInsertionBlock()->getParentOp();
+  if (at->getParentOfType<scf::ParallelOp>() || isa<scf::ParallelOp>(at)) {
+    memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::mins, low,
+                                lows, ValueRange{zero});
+    memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::maxs,
+                                high, highs, ValueRange{zero});
+    return;
+  }
+  memref::StoreOp::create(
+      rewriter, loc,
+      arith::MinSIOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, lows, ValueRange{zero}), low),
+      lows, ValueRange{zero});
+  memref::StoreOp::create(
+      rewriter, loc,
+      arith::MaxSIOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, highs, ValueRange{zero}),
+          high),
+      highs, ValueRange{zero});
 }
 
 /// The fields `query` looks up, of the distributed archetypes that hold
