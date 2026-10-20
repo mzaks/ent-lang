@@ -144,3 +144,25 @@
 // RUN: %ent build %S/Inputs/ranks_fraction.ent --ranks 4 --partitions -o %t.fraction.exe
 // RUN: mpirun -n 1 %t.fraction.exe > %t.fraction.in1
 // RUN: diff %t.fraction.one %t.fraction.in1
+//
+// And each partition on many threads, every loop that can: what threads
+// of parallel loops send and connect from loops of the body and the texts
+// they join are their partition's; a text field of a distributed
+// archetype is given back by the row's owner alone, where the
+// partitions share its rows.
+// RUN: %ent run %S/Inputs/ranks_threads.ent > %t.threads.one
+// RUN: FileCheck %s --check-prefix=THREADS --input-file=%t.threads.one
+// THREADS: cell 1603: got 71 heard 5 cell 1604 on day 2
+// THREADS: day 3: sum 648132
+// RUN: %ent build %S/Inputs/ranks_threads.ent --ranks 4 --partitions -o %t.threads.exe
+// RUN: mpirun -n 1 -x ENT_BLOCK=500 -x ENT_TEXT_REPORT=1 %t.threads.exe > %t.threads.in1 2> %t.threads.err1
+// RUN: diff %t.threads.one %t.threads.in1
+// RUN: FileCheck %s --check-prefix=TEXTS --input-file=%t.threads.err1
+// RUN: env ENT_PARALLEL_MIN=1 %ent build %S/Inputs/ranks_threads.ent --parallel --ranks 4 --partitions -o %t.threads.par
+// RUN: mpirun -n 1 --bind-to none -x OMP_NUM_THREADS=4 -x ENT_BLOCK=500 -x ENT_TEXT_REPORT=1 %t.threads.par > %t.threads.p1 2> %t.threads.err2
+// RUN: diff %t.threads.one %t.threads.p1
+// RUN: FileCheck %s --check-prefix=TEXTS --input-file=%t.threads.err2
+// RUN: mpirun -n 2 --oversubscribe --bind-to none -x OMP_NUM_THREADS=2 -x ENT_BLOCK=500 %t.threads.par > %t.threads.p2
+// RUN: diff %t.threads.one %t.threads.p2
+// TEXTS: texts held: 0
+// TEXTS: texts kept: 0

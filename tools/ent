@@ -46,7 +46,10 @@ With --parallel the program runs its systems on all cores (OpenMP). A
 thread without work waits a millisecond for more and then sleeps, so that
 what the program does on one core (drawing, say) has the machine to
 itself; KMP_BLOCKTIME or OMP_WAIT_POLICY, where the program runs, say
-otherwise.
+otherwise. A loop runs on many threads from a million entities on (fewer
+where its body calls out), and what was sent from loops in its body, or
+the events a reactive one walks, from 16384 on; ENT_PARALLEL_MIN, where it
+is built, says from how many instead (for tests: 1, every loop that can).
 
 With --gpu the `for`s of `gpu system`s run on the machine's NVIDIA GPU
 (docs/gpu.md): made into kernels for it (its kind from nvidia-smi, or
@@ -260,7 +263,7 @@ def cache_key(arguments):
         note_file(os.path.join(ROOT, "devices", "ranks.c"))
     note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
          os.environ.get("ENT_PIECES", ""), os.environ.get("ENT_SPLIT", ""),
-         os.cpu_count())
+         os.environ.get("ENT_PARALLEL_MIN", ""), os.cpu_count())
 
     # (The C that keeps what a `for` sends from a loop.)
     note_file(os.path.join(ROOT, "devices", "sends.c"))
@@ -474,9 +477,14 @@ def build(arguments, output, directory):
         passes += views + before
     link = []
     if arguments.parallel:
+        # (ENT_PARALLEL_MIN: from how many entities, values sent or events
+        # a loop runs on many threads; for tests, which have few.)
+        least = os.environ.get("ENT_PARALLEL_MIN", "")
+        least = (" parallel-min-entities=%d parallel-min-events=%d"
+                 % (int(least), int(least))) if least else ""
         passes = ["--ent-schedule",
                   lowering + "=fuse-systems=1 parallel-entities=1 "
-                  "parallel-stages=1" + gpu + ranks,
+                  "parallel-stages=1" + least + gpu + ranks,
                   "--symbol-dce"] + (views + before if gpu else []) + [
                   "--convert-scf-to-openmp", "--canonicalize",
                   "--ent-omp-nowait"]

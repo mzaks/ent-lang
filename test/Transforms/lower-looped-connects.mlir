@@ -12,7 +12,7 @@ ent.relation @R (w: i32) capacity 400
 // CHECK-LABEL: func.func private @s(
 // CHECK:       scf.for
 // CHECK:         scf.for
-// CHECK:           func.call @ent_sends_put(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i64, i64, i64, i64) -> ()
+// CHECK:           func.call @ent_sends_put(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i64, i64, i64, i64, i64) -> ()
 // CHECK:           func.call @ent_sends_put(
 // CHECK:       call @ent_sends_count(
 // CHECK:       scf.for

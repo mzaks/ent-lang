@@ -37,7 +37,10 @@ struct EntOmpNowait : public mlir::ent::impl::EntOmpNowaitBase<EntOmpNowait> {
     // puts on the stack. One that puts nothing there is taken out of it:
     // the canonicalizer leaves it wherever the body calls a function
     // (which might, for all it knows), and with loops of its own inside,
-    // the body cannot stay in a scope when those become blocks.
+    // the body cannot stay in a scope when those become blocks. Nor one
+    // that puts there only places of a fixed size at its start (for a
+    // text a C function is given, see stackOf), which go to the start of
+    // the parallel region instead: one for each thread, there once.
     SmallVector<memref::AllocaScopeOp> scopes;
     getOperation()->walk([&](memref::AllocaScopeOp scope) {
       if (isa_and_nonnull<omp::LoopNestOp>(scope->getParentOp()) &&
@@ -45,12 +48,24 @@ struct EntOmpNowait : public mlir::ent::impl::EntOmpNowaitBase<EntOmpNowait> {
         scopes.push_back(scope);
     });
     for (memref::AllocaScopeOp scope : scopes) {
+      auto parallel = scope->getParentOfType<omp::ParallelOp>();
+      Block &start = scope.getRegion().front();
+      SmallVector<memref::AllocaOp> hoisted;
       bool allocates = false;
       scope->walk([&](Operation *op) {
-        allocates |= isa<memref::AllocaOp, LLVM::AllocaOp>(op);
+        auto alloca = dyn_cast<memref::AllocaOp>(op);
+        if (alloca && parallel && parallel.getRegion().hasOneBlock() &&
+            alloca->getBlock() == &start && alloca->getNumOperands() == 0 &&
+            alloca.getType().hasStaticShape())
+          hoisted.push_back(alloca);
+        else
+          allocates |= isa<memref::AllocaOp, LLVM::AllocaOp>(op);
       });
       if (allocates)
         continue;
+      for (memref::AllocaOp alloca : hoisted)
+        alloca->moveBefore(&parallel.getRegion().front(),
+                           parallel.getRegion().front().begin());
       Block &body = scope.getRegion().front();
       scope->getBlock()->getOperations().splice(
           Block::iterator(scope), body.getOperations(), body.begin(),

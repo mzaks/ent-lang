@@ -78,8 +78,29 @@ typedef struct ent_text_made {
 // ent_partition_index says which is the calling one's; 0 otherwise: each
 // gives back its own.)
 __attribute__((weak)) int ent_partition_index(void) { return 0; }
+__attribute__((weak)) int ent_partitions_here(void) { return 1; }
 static ent_text_made *ent_text_all_made_by[1024];
 #define ent_text_all_made (ent_text_all_made_by[ent_partition_index()])
+
+// (Where a process runs several partitions, a thread of a parallel loop
+// is none of theirs, and the partition it runs for unknown: what it makes
+// is on a list of the process's, one for each round, a round ending when
+// every partition has given back once. What is made in one round is
+// given back when the next ends: every partition has given back since,
+// which none does while it still uses what was made for it.)
+__attribute__((weak)) int omp_in_parallel(void);
+static ent_text_made *ent_text_made_in[3];
+static int64_t ent_text_round = 0;
+static char ent_text_gave[1024];
+static int ent_text_gave_count = 0;
+static char ent_text_rounds_lock = 0;
+
+static void ent_text_push(ent_text_made **list, ent_text_made *made) {
+  made->next = __atomic_load_n(list, __ATOMIC_RELAXED);
+  while (!__atomic_compare_exchange_n(list, &made->next, made, 1,
+                                      __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+    ;
+}
 
 static ent_text *ent_text_make(uint32_t length) {
   ent_text_made *made = malloc(sizeof(ent_text_made) + length + 1);
@@ -88,11 +109,23 @@ static ent_text *ent_text_make(uint32_t length) {
   __atomic_add_fetch(&ent_text_kept, 1, __ATOMIC_RELAXED);
   made->length = length;
   made->bytes[length] = 0;
-  made->next = __atomic_load_n(&ent_text_all_made, __ATOMIC_RELAXED);
-  while (!__atomic_compare_exchange_n(&ent_text_all_made, &made->next, made,
-                                      1, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-    ;
+  if (ent_partitions_here() > 1 && omp_in_parallel && omp_in_parallel())
+    ent_text_push(
+        &ent_text_made_in[__atomic_load_n(&ent_text_round, __ATOMIC_ACQUIRE) %
+                          3],
+        made);
+  else
+    ent_text_push(&ent_text_all_made, made);
   return (ent_text *)&made->length;
+}
+
+static void ent_text_free(ent_text_made *made) {
+  while (made) {
+    ent_text_made *next = made->next;
+    free(made);
+    __atomic_sub_fetch(&ent_text_kept, 1, __ATOMIC_RELAXED);
+    made = next;
+  }
 }
 
 // The bytes of `a` and then those of `b`.
@@ -135,14 +168,37 @@ uint64_t ent_text_keep(uint64_t view) {
 }
 
 void ent_text_release(void) {
-  ent_text_made *made =
-      __atomic_exchange_n(&ent_text_all_made, 0, __ATOMIC_ACQUIRE);
-  while (made) {
-    ent_text_made *next = made->next;
-    free(made);
-    __atomic_sub_fetch(&ent_text_kept, 1, __ATOMIC_RELAXED);
-    made = next;
+  ent_text_free(__atomic_exchange_n(&ent_text_all_made, 0, __ATOMIC_ACQUIRE));
+  int partitions = ent_partitions_here();
+  if (partitions <= 1)
+    return;
+  // (This partition has given back in this round; the last to do so ends
+  // it, and what was made in the one before is given back.)
+  while (__atomic_test_and_set(&ent_text_rounds_lock, __ATOMIC_ACQUIRE))
+    ;
+  ent_text_made *done = 0;
+  int partition = ent_partition_index();
+  if (!ent_text_gave[partition]) {
+    ent_text_gave[partition] = 1;
+    if (++ent_text_gave_count == partitions) {
+      int64_t round = ent_text_round;
+      done = __atomic_exchange_n(&ent_text_made_in[(round + 2) % 3], 0,
+                                 __ATOMIC_ACQUIRE);
+      memset(ent_text_gave, 0, sizeof ent_text_gave);
+      ent_text_gave_count = 0;
+      __atomic_store_n(&ent_text_round, round + 1, __ATOMIC_RELEASE);
+    }
   }
+  __atomic_clear(&ent_text_rounds_lock, __ATOMIC_RELEASE);
+  ent_text_free(done);
+}
+
+// Every partition of the process done: what threads of parallel loops
+// made is nobody's any more (devices/ranks.c).
+void ent_text_release_all(void) {
+  for (int round = 0; round < 3; ++round)
+    ent_text_free(
+        __atomic_exchange_n(&ent_text_made_in[round], 0, __ATOMIC_ACQUIRE));
 }
 
 void ent_text_drop(uint64_t held) {

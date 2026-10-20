@@ -631,6 +631,8 @@ static void *ent_partition_runs(void *given) {
   return 0;
 }
 
+__attribute__((weak)) void ent_text_release_all(void);
+
 int32_t ent_ranks_run(int32_t (*program)(void), int64_t partitions) {
   int provided = 0;
   if (MPI_Init_thread(NULL, NULL, MPI_THREAD_MULTIPLE, &provided) !=
@@ -700,6 +702,10 @@ int32_t ent_ranks_run(int32_t (*program)(void), int64_t partitions) {
   }
   for (int l = 0; l < ent_locals; ++l)
     pthread_join(threads[l], 0);
+  // (What threads of parallel loops joined of texts, for the partitions,
+  // given back: devices/text.c, where the program has texts.)
+  if (ent_text_release_all)
+    ent_text_release_all();
   int32_t status = all[0].status;
   free(all);
   free(threads);
@@ -854,6 +860,17 @@ static void ent_nothing(void **args) { (void)args; }
 void ent_ranks_barrier(void) {
   if (ent_locals > 1 && ent_share_count > 0)
     ent_meet(0, ent_nothing);
+}
+
+// Whether the `row`th cell (of `each` bytes) of the column at `column` of
+// this partition's world is shared with the process's other partitions:
+// then what it holds is the row's owner's (see lowerMain).
+int32_t ent_ranks_shared_cell(char *column, int64_t row, int64_t each) {
+  int64_t from = column + row * each - ent_arena, to = from + each;
+  for (int64_t i = 0; i < ent_share_count; ++i)
+    if (ent_shares[i].from <= from && to <= ent_shares[i].to)
+      return 1;
+  return 0;
 }
 
 // Whether `bytes` at `at` of a partition's world are all shared.
@@ -1265,6 +1282,25 @@ FILE *ent_stdout(void) { return ent_capturing ? ent_capturing : stdout; }
 // Which of the process's partitions calls (devices/sends.c, text.c keep
 // what they keep for each).
 int ent_partition_index(void) { return ent_local; }
+int ent_partitions_here(void) { return ent_locals; }
+
+// Which of the process's partitions the world at `world` is: a thread of
+// a parallel loop runs for the partition whose world it is given, though
+// it is none of the partitions' own (devices/sends.c). The last one asked
+// about, each thread's.
+int ent_partition_of(int64_t world) {
+  static _Thread_local int64_t last = 0;
+  static _Thread_local int index = 0;
+  if (world == last)
+    return index;
+  for (int l = 0; l < ent_locals; ++l)
+    if (ent_arenas && (int64_t)(intptr_t)ent_arenas[l] == world) {
+      last = world;
+      index = l;
+      return l;
+    }
+  return ent_local;
+}
 
 void ent_ranks_capture(void) {
   fflush(stdout);

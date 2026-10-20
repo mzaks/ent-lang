@@ -48,12 +48,17 @@ typedef struct {
 } ent_send_lists;
 
 // (A table of them for each partition a process runs, devices/ranks.c,
-// whose ent_partition_index says which is the calling one's; 0 otherwise.)
+// whose ent_partition_of says which partition's the world is, where each
+// call says it is (`world`): the one of any thread of a parallel loop
+// that runs for it too; 0 otherwise.)
 #define ENT_PARTITIONS 1024
-__attribute__((weak)) int ent_partition_index(void) { return 0; }
+__attribute__((weak)) int ent_partition_of(int64_t world) {
+  (void)world;
+  return 0;
+}
 static ent_send_lists **ent_sends_by[ENT_PARTITIONS];
-static ent_send_lists **ent_sends_table(void) {
-  int p = ent_partition_index();
+static ent_send_lists **ent_sends_table(int64_t world) {
+  int p = ent_partition_of(world);
   ent_send_lists **table = __atomic_load_n(&ent_sends_by[p], __ATOMIC_ACQUIRE);
   if (table)
     return table;
@@ -64,7 +69,7 @@ static ent_send_lists **ent_sends_table(void) {
   free(made);
   return table;
 }
-#define ent_sends (ent_sends_table())
+#define ent_sends (ent_sends_table(world))
 
 static void *ent_sends_take(size_t size) {
   void *memory = aligned_alloc(64, (size + 63) & ~(size_t)63);
@@ -77,7 +82,7 @@ static void *ent_sends_take(size_t size) {
 
 // The lists with this number, made when they are first sent to: by
 // whichever thread comes first.
-static ent_send_lists *ent_sends_of(int64_t number) {
+static ent_send_lists *ent_sends_of(int64_t world, int64_t number) {
   ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
   if (lists)
     return lists;
@@ -100,8 +105,9 @@ static ent_send_lists *ent_sends_of(int64_t number) {
   return lists;
 }
 
-void ent_sends_put(int64_t number, int64_t slice, int64_t id, int64_t value) {
-  ent_send_slice *list = &ent_sends_of(number)->slices[slice];
+void ent_sends_put(int64_t world, int64_t number, int64_t slice, int64_t id,
+                   int64_t value) {
+  ent_send_slice *list = &ent_sends_of(world, number)->slices[slice];
   ent_send_block *block = list->last;
   if (!block || block->count == ENT_SEND_BLOCK) {
     // (The next of those kept from the last time, if there is one.)
@@ -123,7 +129,7 @@ void ent_sends_put(int64_t number, int64_t slice, int64_t id, int64_t value) {
 }
 
 // How many were sent, and the reading starts at the first.
-int64_t ent_sends_count(int64_t number) {
+int64_t ent_sends_count(int64_t world, int64_t number) {
   ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
   if (!lists)
     return 0;
@@ -160,11 +166,11 @@ static ent_send_block *ent_sends_at(ent_send_lists *lists) {
 }
 
 // Whom the next one was sent to; and what, which goes on to the one after.
-int64_t ent_sends_id(int64_t number) {
+int64_t ent_sends_id(int64_t world, int64_t number) {
   ent_send_lists *lists = ent_sends[number];
   return (int64_t)ent_sends_at(lists)->sent[2 * lists->at];
 }
-int64_t ent_sends_value(int64_t number) {
+int64_t ent_sends_value(int64_t world, int64_t number) {
   ent_send_lists *lists = ent_sends[number];
   ent_send_block *block = ent_sends_at(lists);
   return (int64_t)block->sent[2 * lists->at++ + 1];
@@ -177,7 +183,7 @@ int64_t ent_sends_value(int64_t number) {
 static int64_t ent_send_group_of(uint64_t id) {
   return (int64_t)((id >> 6) & (ENT_SEND_GROUPS - 1));
 }
-int64_t ent_sends_group(int64_t number) {
+int64_t ent_sends_group(int64_t world, int64_t number) {
   ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
   if (!lists)
     return 0;
@@ -223,18 +229,18 @@ int64_t ent_sends_group(int64_t number) {
 
 // Where `group` starts among them (ENT_SEND_GROUPS: where the last ends);
 // whom the `k`th was sent to, and what.
-int64_t ent_sends_group_start(int64_t number, int64_t group) {
+int64_t ent_sends_group_start(int64_t world, int64_t number, int64_t group) {
   return ent_sends[number]->starts[group];
 }
-int64_t ent_sends_id_at(int64_t number, int64_t k) {
+int64_t ent_sends_id_at(int64_t world, int64_t number, int64_t k) {
   return (int64_t)ent_sends[number]->grouped[2 * k];
 }
-int64_t ent_sends_value_at(int64_t number, int64_t k) {
+int64_t ent_sends_value_at(int64_t world, int64_t number, int64_t k) {
   return (int64_t)ent_sends[number]->grouped[2 * k + 1];
 }
 
 // Nothing is on the lists any more; their blocks are kept.
-void ent_sends_clear(int64_t number) {
+void ent_sends_clear(int64_t world, int64_t number) {
   ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
   if (!lists)
     return;
@@ -257,8 +263,8 @@ typedef struct {
 } ent_rows_list;
 
 static ent_rows_list *ent_rows_by[ENT_PARTITIONS];
-static ent_rows_list *ent_rows_table(void) {
-  int p = ent_partition_index();
+static ent_rows_list *ent_rows_table(int64_t world) {
+  int p = ent_partition_of(world);
   ent_rows_list *table = __atomic_load_n(&ent_rows_by[p], __ATOMIC_ACQUIRE);
   if (table)
     return table;
@@ -269,9 +275,9 @@ static ent_rows_list *ent_rows_table(void) {
   free(made);
   return table;
 }
-#define ent_rows (ent_rows_table())
+#define ent_rows (ent_rows_table(world))
 
-void ent_rows_put(int64_t number, int64_t row) {
+void ent_rows_put(int64_t world, int64_t number, int64_t row) {
   ent_rows_list *list = &ent_rows[number];
   if (list->count == list->room) {
     int64_t room = list->room ? 2 * list->room : 1024;
@@ -293,7 +299,7 @@ static int ent_rows_compare(const void *a, const void *b) {
 
 // How many rows were put, now in order; the list is empty for the next
 // time, and its rows can be read until then.
-int64_t ent_rows_sort(int64_t number) {
+int64_t ent_rows_sort(int64_t world, int64_t number) {
   ent_rows_list *list = &ent_rows[number];
   int64_t count = list->count;
   qsort(list->rows, (size_t)count, sizeof(int64_t), ent_rows_compare);
@@ -301,4 +307,6 @@ int64_t ent_rows_sort(int64_t number) {
   return count;
 }
 
-int64_t ent_rows_at(int64_t number, int64_t k) { return ent_rows[number].rows[k]; }
+int64_t ent_rows_at(int64_t world, int64_t number, int64_t k) {
+  return ent_rows[number].rows[k];
+}

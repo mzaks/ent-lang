@@ -1671,7 +1671,8 @@ static void combineDirectly(IRRewriter &rewriter, ApplyOp apply,
 static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
                      Value a, Value b, bool noSign);
 static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
-                    const WorldArchetype &archetype, Value id, Value value);
+                    const WorldArchetype &archetype, WorldAccess &world,
+                    Value id, Value value);
 
 /// Marks an `ent.apply` whose field nothing else in its query touches (no
 /// get, set or lookup of the field, no other apply to it, no add or remove
@@ -3147,7 +3148,7 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
         rewriter.setInsertionPointToStart(ifApplies.thenBlock());
       }
-      putSend(rewriter, loc, op, archetype, id, value);
+      putSend(rewriter, loc, op, archetype, world, id, value);
       rewriter.eraseOp(op);
     } else if (auto apply = dyn_cast<ApplyOp>(op);
                apply && appliesDirectly(apply, directApplies)) {
@@ -3233,9 +3234,9 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
         auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
         rewriter.setInsertionPointToStart(ifApplies.thenBlock());
       }
-      putSend(rewriter, loc, op, archetype, source, target);
+      putSend(rewriter, loc, op, archetype, world, source, target);
       for (unsigned i = 0; i < values.size(); i += 2)
-        putSend(rewriter, loc, op, archetype, values[i],
+        putSend(rewriter, loc, op, archetype, world, values[i],
                 i + 1 < values.size() ? values[i + 1] : Value());
       rewriter.eraseOp(op);
     } else if (auto connect = dyn_cast<ConnectOp>(op)) {
@@ -4770,11 +4771,13 @@ static bool canHoldEnd(const WorldArchetype &archetype,
 }
 
 /// Give back the texts of any length that the fields of the entity at
-/// `row` of `archetype` hold, of the components `goes` says: those it has.
-static void dropHeldTexts(IRRewriter &rewriter, Location loc,
-                          const WorldArchetype &archetype, WorldAccess &world,
-                          Value row,
-                          function_ref<bool(FlatSymbolRefAttr)> goes) {
+/// `row` of `archetype` hold, of the components `goes` says: those it has
+/// (and, with `holds`, where it says, an i1 for the column).
+static void
+dropHeldTexts(IRRewriter &rewriter, Location loc,
+              const WorldArchetype &archetype, WorldAccess &world, Value row,
+              function_ref<bool(FlatSymbolRefAttr)> goes,
+              function_ref<Value(const WorldColumn &)> holds = nullptr) {
   ArchetypeOp archetypeOp = archetype.op;
   for (const WorldColumn &column : archetype.columns) {
     auto component = FlatSymbolRefAttr::get(column.component);
@@ -4782,6 +4785,10 @@ static void dropHeldTexts(IRRewriter &rewriter, Location loc,
         !isa<StringType>(column.type) || !goes(component))
       continue;
     OpBuilder::InsertionGuard guard(rewriter);
+    if (holds) {
+      auto held = scf::IfOp::create(rewriter, loc, holds(column));
+      rewriter.setInsertionPointToStart(held.thenBlock());
+    }
     if (archetypeOp.isOptional(component)) {
       Value has = arith::CmpIOp::create(
           rewriter, loc, arith::CmpIPredicate::ne,
@@ -7124,7 +7131,7 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
     // field, see kLoopedAttr: to its slice's list.)
     if (apply->hasAttr(kLoopedAttr) &&
         (sendSegment || !apply->hasAttr(kUnobservedAttr))) {
-      putSend(rewriter, apply.getLoc(), apply, archetype,
+      putSend(rewriter, apply.getLoc(), apply, archetype, world,
               world.toStorage(apply.getLoc(), apply.getEntity()),
               world.toStorage(apply.getLoc(), apply.getValue()));
       rewriter.eraseOp(apply);
@@ -11270,8 +11277,8 @@ static Value openLogsToFollow(IRRewriter &rewriter, QueryOp query,
 /// fired for it too, so each entity runs once. With `parallel`, the
 /// segments are walked in parallel: an entity's latest entry is in one
 /// segment only, so no two iterations run the body for the same entity.
-static Value callSends(IRRewriter &rewriter, Location loc, StringRef name,
-                       ArrayRef<Value> args, bool gives);
+static Value callSends(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                       StringRef name, ArrayRef<Value> args, bool gives);
 
 /// The number of the list of rows a row-ordered query (kRowOrderedAttr)
 /// gathers for `archetype`, as an i64.
@@ -11371,10 +11378,10 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
           auto branch = scf::IfOp::create(rewriter, loc, runs);
           rewriter.setInsertionPointToStart(branch.thenBlock());
           if (ordered) {
-            callSends(rewriter, loc, "ent_rows_put",
+            callSends(rewriter, loc, world, "ent_rows_put",
                       {rowList(rewriter, loc, query, archetype),
-                       arith::IndexCastOp::create(
-                           rewriter, loc, rewriter.getI64Type(), row)},
+                       arith::IndexCastOp::create(rewriter, loc,
+                                                  rewriter.getI64Type(), row)},
                       /*gives=*/false);
             return {};
           }
@@ -11405,13 +11412,14 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
     Value list = rowList(rewriter, loc, query, archetype);
     Value count = arith::IndexCastOp::create(
         rewriter, loc, rewriter.getIndexType(),
-        callSends(rewriter, loc, "ent_rows_sort", {list}, /*gives=*/true));
+        callSends(rewriter, loc, world, "ent_rows_sort", {list},
+                  /*gives=*/true));
     auto rows = scf::ForOp::create(rewriter, loc, zero, count, one);
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(rows.getBody()->getTerminator());
     Value row = arith::IndexCastOp::create(
         rewriter, loc, rewriter.getIndexType(),
-        callSends(rewriter, loc, "ent_rows_at",
+        callSends(rewriter, loc, world, "ent_rows_at",
                   {list, arith::IndexCastOp::create(rewriter, loc,
                                                     rewriter.getI64Type(),
                                                     rows.getInductionVar())},
@@ -11425,9 +11433,17 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
 /// A call of `name`, one of the functions that keep what is sent from a
 /// loop (devices/sends.c), at the insertion point; all they take and give
 /// is 64 bits wide.
-static Value callSends(IRRewriter &rewriter, Location loc, StringRef name,
-                       ArrayRef<Value> args, bool gives) {
+static Value callSends(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                       StringRef name, ArrayRef<Value> given, bool gives) {
   Type i64 = rewriter.getI64Type();
+  // (First where the world is: the lists are each world's, and a thread
+  // of a parallel loop, which runs for the world's partition, is told so
+  // by it, devices/sends.c.)
+  SmallVector<Value> args{
+      arith::IndexCastOp::create(rewriter, loc, i64,
+                                 memref::ExtractAlignedPointerAsIndexOp::create(
+                                     rewriter, loc, world.getArena()))};
+  llvm::append_range(args, given);
   auto module =
       rewriter.getInsertionBlock()->getParentOp()->getParentOfType<ModuleOp>();
   if (!SymbolTable::lookupSymbolIn(module, name)) {
@@ -11483,7 +11499,8 @@ static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
 /// on its list, at the insertion point: `id` (stored form; nothing for an
 /// accumulate) and `value`.
 static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
-                    const WorldArchetype &archetype, Value id, Value value) {
+                    const WorldArchetype &archetype, WorldAccess &world,
+                    Value id, Value value) {
   Type i64 = rewriter.getI64Type();
   Value nothing = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
   // (A loop on one thread is one slice, the first.)
@@ -11491,7 +11508,7 @@ static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
                                                          sendSegment)
                                   .getResult()
                             : nothing;
-  callSends(rewriter, loc, "ent_sends_put",
+  callSends(rewriter, loc, world, "ent_sends_put",
             {sendList(rewriter, loc, op, archetype), slice,
              id ? toSendBits(rewriter, loc, id) : nothing,
              value ? toSendBits(rewriter, loc, value) : nothing},
@@ -11519,15 +11536,15 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
   int64_t each = 1 + (relation.fields.size() + 1) / 2;
   Value edges = arith::DivUIOp::create(
       rewriter, loc,
-      world.toIndex(loc,
-                    callSends(rewriter, loc, "ent_sends_count", {list}, true)),
+      world.toIndex(loc, callSends(rewriter, loc, world, "ent_sends_count",
+                                   {list}, true)),
       arith::ConstantIndexOp::create(rewriter, loc, each));
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   auto loop = scf::ForOp::create(rewriter, loc, zero, edges, one);
   rewriter.setInsertionPoint(loop.getBody()->getTerminator());
   auto next = [&](bool second) {
-    return callSends(rewriter, loc,
+    return callSends(rewriter, loc, world,
                      second ? "ent_sends_value" : "ent_sends_id", {list}, true);
   };
   auto asId = [&](Value bits) {
@@ -11551,7 +11568,7 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
   else
     appendEdge(rewriter, loc, layout, world, relation, source, target, values);
   rewriter.setInsertionPointAfter(loop);
-  callSends(rewriter, loc, "ent_sends_clear", {list}, false);
+  callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
 }
 
 /// Whether what `apply` sends can be combined on many threads, a group of
@@ -11594,7 +11611,8 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
   auto apply = dyn_cast<ApplyOp>(op);
   if (apply && parallel && combinesApart(apply, layout)) {
     LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
-    Value sent = callSends(rewriter, loc, "ent_sends_group", {list}, true);
+    Value sent =
+        callSends(rewriter, loc, world, "ent_sends_group", {list}, true);
     Value enough = arith::CmpIOp::create(
         rewriter, loc, arith::CmpIPredicate::sge, sent,
         arith::ConstantIntOp::create(rewriter, loc, many, 64));
@@ -11604,13 +11622,15 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
     auto combineAt = [&](Value k) {
       Value at =
           arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(), k);
-      Value id = callSends(rewriter, loc, "ent_sends_id_at", {list, at}, true);
+      Value id =
+          callSends(rewriter, loc, world, "ent_sends_id_at", {list, at}, true);
       if (world.idType() != rewriter.getI64Type())
         id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
-      Value value = fromSendBits(
-          rewriter, loc,
-          callSends(rewriter, loc, "ent_sends_value_at", {list, at}, true),
-          stored);
+      Value value =
+          fromSendBits(rewriter, loc,
+                       callSends(rewriter, loc, world, "ent_sends_value_at",
+                                 {list, at}, true),
+                       stored);
       combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
     };
     {
@@ -11627,12 +11647,12 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
       Value next = arith::AddIOp::create(
           rewriter, loc, group,
           arith::ConstantIntOp::create(rewriter, loc, 1, 64));
-      Value begin =
-          world.toIndex(loc, callSends(rewriter, loc, "ent_sends_group_start",
-                                       {list, group}, true));
-      Value end =
-          world.toIndex(loc, callSends(rewriter, loc, "ent_sends_group_start",
-                                       {list, next}, true));
+      Value begin = world.toIndex(loc, callSends(rewriter, loc, world,
+                                                 "ent_sends_group_start",
+                                                 {list, group}, true));
+      Value end = world.toIndex(loc, callSends(rewriter, loc, world,
+                                               "ent_sends_group_start",
+                                               {list, next}, true));
       auto entries = scf::ForOp::create(rewriter, loc, begin, end, one);
       rewriter.setInsertionPoint(entries.getBody()->getTerminator());
       combineAt(entries.getInductionVar());
@@ -11645,20 +11665,21 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
       rewriter.setInsertionPoint(entries.getBody()->getTerminator());
       combineAt(entries.getInductionVar());
     }
-    callSends(rewriter, loc, "ent_sends_clear", {list}, false);
+    callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
     return;
   }
   Value sent = world.toIndex(
-      loc, callSends(rewriter, loc, "ent_sends_count", {list}, true));
+      loc, callSends(rewriter, loc, world, "ent_sends_count", {list}, true));
   if (apply) {
     LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
     auto loop = scf::ForOp::create(rewriter, loc, zero, sent, one);
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-    Value id = callSends(rewriter, loc, "ent_sends_id", {list}, true);
+    Value id = callSends(rewriter, loc, world, "ent_sends_id", {list}, true);
     if (world.idType() != rewriter.getI64Type())
       id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
     Value value = fromSendBits(
-        rewriter, loc, callSends(rewriter, loc, "ent_sends_value", {list}, true),
+        rewriter, loc,
+        callSends(rewriter, loc, world, "ent_sends_value", {list}, true),
         stored);
     combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
     rewriter.setInsertionPointAfter(loop);
@@ -11671,7 +11692,8 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
                                    ValueRange{start});
     rewriter.setInsertionPointToStart(loop.getBody());
     Value value = fromSendBits(
-        rewriter, loc, callSends(rewriter, loc, "ent_sends_value", {list}, true),
+        rewriter, loc,
+        callSends(rewriter, loc, world, "ent_sends_value", {list}, true),
         stored);
     scf::YieldOp::create(
         rewriter, loc,
@@ -11682,7 +11704,7 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
     memref::StoreOp::create(rewriter, loc, loop.getResult(0), field,
                             ValueRange{zero});
   }
-  callSends(rewriter, loc, "ent_sends_clear", {list}, false);
+  callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
 }
 
 /// Fold the values `accumulate` sent from the first `count` rows of
@@ -18779,8 +18801,49 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
           arith::ConstantIndexOp::create(rewriter, loc, 1));
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPoint(rows.getBody()->getTerminator());
-      dropHeldTexts(rewriter, loc, archetype, world, rows.getInductionVar(),
-                    [](FlatSymbolRefAttr) { return true; });
+      Value row = rows.getInductionVar();
+      // (Built for partitions, of a distributed archetype: where the
+      // partitions of a process share its rows, a row's text is its
+      // owner's, and given back by it alone, devices/ranks.c.)
+      auto holds = [&](const WorldColumn &column) -> Value {
+        Type i64 = rewriter.getI64Type();
+        Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        Value at = arith::IndexCastOp::create(rewriter, loc, i64, row);
+        Value mine = arith::AndIOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::sge, at,
+                memref::LoadOp::create(rewriter, loc,
+                                       world.scalar(archetype.rankFirstOffset),
+                                       ValueRange{zero})),
+            arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::slt, at,
+                memref::LoadOp::create(rewriter, loc,
+                                       world.scalar(archetype.rankEndOffset),
+                                       ValueRange{zero})));
+        uint64_t each = world.storageBytes(column.type);
+        Value cells = world.bytes(column.offset, archetype.capacity * each);
+        Value shared = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne,
+            callGpu(rewriter, loc, main->getParentOfType<ModuleOp>(),
+                    "ent_ranks_shared_cell",
+                    ValueRange{
+                        worldPointer(rewriter, loc, cells), at,
+                        arith::ConstantIntOp::create(rewriter, loc, each, 64)},
+                    TypeRange{rewriter.getI32Type()})
+                .getResult(0),
+            arith::ConstantIntOp::create(rewriter, loc, 0, 32));
+        return arith::OrIOp::create(
+            rewriter, loc, mine,
+            arith::XOrIOp::create(
+                rewriter, loc, shared,
+                arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
+      };
+      bool owned = ranksMode && partitionCount > 0 && archetype.isDistributed();
+      dropHeldTexts(
+          rewriter, loc, archetype, world, row,
+          [](FlatSymbolRefAttr) { return true; },
+          owned ? function_ref<Value(const WorldColumn &)>(holds) : nullptr);
     }
     for (const WorldResource &resource : layout.resources)
       for (const WorldResourceField &field : resource.fields) {

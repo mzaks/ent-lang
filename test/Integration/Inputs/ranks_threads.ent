@@ -1,0 +1,49 @@
+// On many ranks, several partitions in a process, each on many threads
+// (--parallel, every loop that can, ENT_PARALLEL_MIN=1): cells send
+// whole numbers from a loop of their body and connect edges there, and
+// join texts, on threads that are none of the partitions' own. What each
+// thread sends is its partition's, and a text it joins is kept until its
+// partition is done with it, so it says what it says on one process
+// (ranks.test).
+import console
+import text
+component Cell { number: i32, got: i64, name: text, size: i32 } capacity 2000
+relation (Cell)-[Heard { day: i32 }]->(Cell) capacity 16
+distribute Cell by number
+capacity Heard 40000
+buffer Ids { who: entity } capacity 2000
+unique Days: i32
+unique Sum: i64
+fn named(n: i32, day: i32) -> text { "cell {n} on day {day}" }
+system send() {
+  for e, c: mut Cell {
+    for k in 0..3 {
+      let other = Ids[(c.number * 389 + k * 211 + Days * 7) % len(Ids)].who
+      Cell(other).got += (c.number % 13 + k + Days) as i64
+      if (c.number + k + Days) % 5 == 0 { connect (other)-[Heard { day: Days }]->(e) }
+    }
+    c.size = len(named(c.number, Days) + "!")
+    c.name = named(c.number + 1, Days)
+  }
+}
+system check() {
+  Sum = 0
+  for c: Cell {
+    var heard = 0
+    for (c)-[h: Heard]->(o: Cell) { heard += h.day + o.number % 3 }
+    Sum += c.got * (c.number % 7 + 1) as i64 + (heard * 5 + c.size) as i64
+    if c.number % 400 == 3 { put("cell {c.number}: got {c.got} heard {heard} {c.name}") }
+  }
+}
+system report() {
+  Days += 1
+  put("day {Days}: sum {Sum}")
+}
+schedule day() { send()  check()  report() }
+world {
+  for i in 0..2000 {
+    let e = spawn { Cell { number: i, got: 0, name: "", size: 0 } }
+    Ids += { who: e }
+  }
+}
+main { loop { day() } until Days == 3 }

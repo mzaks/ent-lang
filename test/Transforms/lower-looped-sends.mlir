@@ -17,7 +17,7 @@ ent.resource @Score (points: f32)
 // CHECK:       scf.parallel (%[[SLICE:.*]]) = (%{{.*}}) to (%c256)
 // CHECK:         scf.for %[[ROW:.*]] =
 // CHECK:           scf.for
-// CHECK:             func.call @ent_sends_put(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i64, i64, i64, i64) -> ()
+// CHECK:             func.call @ent_sends_put(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i64, i64, i64, i64, i64) -> ()
 // CHECK:             func.call @ent_sends_put(
 // CHECK:       %[[SENT:.*]] = call @ent_sends_group(
 // CHECK:       scf.if
