@@ -62,9 +62,15 @@ rank, run on N ranks. No rank ever holds the whole world:
 - An archetype that a `for` goes over together with a distributed one,
   not declared so, is all partition 0's.
 
-Not yet: what is kept for each entity of a relation (where its edges
-start) and the table of entities are as large as the whole world, on
-every rank; buffers are whole on every rank; a partition is a rank.
+- A relation keeps, on each rank, the edges its entities are visited by:
+  those whose source is its own, and, where the program also goes to a
+  target's edges, those whose target is. They are sorted by key over the
+  rank's own edges alone (a radix sort), and where each key's edges start
+  is kept for the keys of the rank's own entities only; so for a tree.
+
+Not yet: the table of entities is as large as the whole world, on every
+rank; buffers are whole on every rank; a field looked up across ranks is
+had whole on every rank; a partition is a rank.
 
 ## A `for` over distributed entities
 

@@ -1070,13 +1070,17 @@ int64_t ent_ranks_msg_read(int32_t channel, int64_t i, int32_t word) {
   return ent_msg_in[ent_msg_list[ent_msg_starts[channel] + i] + word];
 }
 
-// Whether this rank keeps an edge between the rows `row_a` of archetype
-// `a` and `row_b` of `b`: where either is its own or every rank's.
-int32_t ent_ranks_keeps(int32_t a, int64_t row_a, int32_t b, int64_t row_b) {
+// Whether this rank keeps an edge from the row `row_a` of archetype `a`
+// to `row_b` of `b`: where the source is its own (or every rank's) and
+// its edges are visited from the source (`by_source`), or the target and
+// from the target (`by_target`).
+int32_t ent_ranks_keeps(int32_t a, int64_t row_a, int32_t b, int64_t row_b,
+                        int32_t by_source, int32_t by_target) {
   if (!ent_distributed)
     return 1;
   int ra = ent_ranks_owner(a, row_a), rb = ent_ranks_owner(b, row_b);
-  return ra < 0 || rb < 0 || ra == ent_rank || rb == ent_rank;
+  return (by_source && (ra < 0 || ra == ent_rank)) ||
+         (by_target && (rb < 0 || rb == ent_rank));
 }
 
 // (ENT_RANKS_LOG: how many edges of a relation the rank kept when the
@@ -1129,4 +1133,124 @@ void ent_ranks_chain_last(void *cell, int64_t bytes) {
   if (!ent_distributed)
     return;
   MPI_Bcast(cell, (int)bytes, MPI_BYTE, ent_ranks - 1, MPI_COMM_WORLD);
+}
+
+// ---------------------------------------------------------------------------
+// Built for partitions: a relation's edges sorted by the key of an end
+// over the rank's own edges only (a stable radix sort), and the offsets of
+// the keys of a window of them (see ownKeyWindows in the compiler), so
+// that nothing as large as all the world's keys is gone through.
+// ent_ranks_sort_begin(n), a key for each of the n (-1: the edge goes),
+// ent_ranks_sort_run() (how many stay), then for each place the edge that
+// goes there, and the offsets.
+
+static uint64_t *ent_sort_keys = 0, *ent_sort_scratch = 0;
+static int64_t *ent_sort_order = 0, *ent_sort_order_scratch = 0;
+static int64_t ent_sort_n = 0, ent_sort_room = 0, ent_sort_kept = 0;
+
+void ent_ranks_sort_begin(int64_t n) {
+  if (n > ent_sort_room) {
+    ent_sort_room = n;
+    ent_sort_keys = realloc(ent_sort_keys, sizeof(uint64_t) * n);
+    ent_sort_scratch = realloc(ent_sort_scratch, sizeof(uint64_t) * n);
+    ent_sort_order = realloc(ent_sort_order, sizeof(int64_t) * n);
+    ent_sort_order_scratch =
+        realloc(ent_sort_order_scratch, sizeof(int64_t) * n);
+  }
+  ent_sort_n = n;
+}
+void ent_ranks_sort_key(int64_t i, int64_t key) {
+  ent_sort_keys[i] = (uint64_t)key;
+  ent_sort_order[i] = i;
+}
+int64_t ent_ranks_sort_run(void) {
+  uint64_t most = 0;
+  for (int64_t i = 0; i < ent_sort_n; ++i)
+    if (ent_sort_keys[i] != UINT64_MAX && ent_sort_keys[i] > most)
+      most = ent_sort_keys[i];
+  // (Sixteen bits a pass, as many passes as the largest key needs; the
+  // edges that go, keyed all ones, after all the rest.)
+  int passes = 1;
+  while (passes < 4 && (most >> (16 * passes)) != 0)
+    ++passes;
+  static int64_t counts[65537];
+  for (int pass = 0; pass < passes; ++pass) {
+    int shift = 16 * pass;
+    for (int d = 0; d <= 65536; ++d)
+      counts[d] = 0;
+    for (int64_t i = 0; i < ent_sort_n; ++i) {
+      uint64_t key = ent_sort_keys[i];
+      int digit = key == UINT64_MAX ? 65536 : (int)((key >> shift) & 0xffff);
+      ++counts[digit];
+    }
+    int64_t at = 0;
+    for (int d = 0; d <= 65536; ++d) {
+      int64_t c = counts[d];
+      counts[d] = at;
+      at += c;
+    }
+    for (int64_t i = 0; i < ent_sort_n; ++i) {
+      uint64_t key = ent_sort_keys[i];
+      int digit = key == UINT64_MAX ? 65536 : (int)((key >> shift) & 0xffff);
+      int64_t to = counts[digit]++;
+      ent_sort_scratch[to] = key;
+      ent_sort_order_scratch[to] = ent_sort_order[i];
+    }
+    uint64_t *k = ent_sort_keys;
+    ent_sort_keys = ent_sort_scratch;
+    ent_sort_scratch = k;
+    int64_t *o = ent_sort_order;
+    ent_sort_order = ent_sort_order_scratch;
+    ent_sort_order_scratch = o;
+  }
+  ent_sort_kept = ent_sort_n;
+  while (ent_sort_kept > 0 && ent_sort_keys[ent_sort_kept - 1] == UINT64_MAX)
+    --ent_sort_kept;
+  return ent_sort_kept;
+}
+// The edge (its place before the sort) that goes to place `p`.
+int64_t ent_ranks_sort_from(int64_t p) { return ent_sort_order[p]; }
+
+// For each key from `from` to `to` (both), where its edges start among
+// those sorted: offsets[key], `bits` wide (32 or 64).
+void ent_ranks_sort_offsets(void *offsets, int32_t bits, int64_t from,
+                            int64_t to) {
+  int64_t at = 0;
+  // (The first edge of a key at or after `from`.)
+  int64_t lo = 0, hi = ent_sort_kept;
+  while (lo < hi) {
+    int64_t mid = lo + (hi - lo) / 2;
+    if (ent_sort_keys[mid] < (uint64_t)from)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  at = lo;
+  for (int64_t key = from; key <= to; ++key) {
+    while (at < ent_sort_kept && ent_sort_keys[at] < (uint64_t)key)
+      ++at;
+    if (bits == 64)
+      ((int64_t *)offsets)[key] = at;
+    else
+      ((int32_t *)offsets)[key] = (int32_t)at;
+  }
+}
+
+// Whether the row `row` of `archetype` is this rank's (or every rank's).
+int32_t ent_ranks_owns(int32_t archetype, int64_t row) {
+  if (!ent_distributed)
+    return 1;
+  int32_t owner = ent_ranks_owner(archetype, row);
+  return owner < 0 || owner == ent_rank;
+}
+
+// The sort's own memory, given back where a relation is sorted.
+void ent_ranks_sort_end(void) {
+  free(ent_sort_keys);
+  free(ent_sort_scratch);
+  free(ent_sort_order);
+  free(ent_sort_order_scratch);
+  ent_sort_keys = ent_sort_scratch = 0;
+  ent_sort_order = ent_sort_order_scratch = 0;
+  ent_sort_room = ent_sort_n = ent_sort_kept = 0;
 }

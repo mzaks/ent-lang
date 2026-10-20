@@ -5803,48 +5803,85 @@ static void routeEdge(IRRewriter &rewriter, Location loc, ModuleOp module,
   sendToEnds(rewriter, loc, module, world, channel, source, target, words);
 }
 
-/// On many ranks: that this rank's entity wrote field `field` of `edge`
-/// (an index) of `relation` (`stored`), or disconnected it (`field` -1),
-/// sent to the ranks of the edge's ends. The edge goes by what is the same
-/// in every rank's copy: the end the table is sorted by, the other, and
-/// how many edges between the two come before it.
-static void noteEdge(IRRewriter &rewriter, Location loc,
-                     const WorldLayout &layout, const WorldRelation &relation,
-                     Value edge, int64_t field, Value stored, WorldAccess &world) {
-  ModuleOp module =
-      rewriter.getInsertionBlock()->getParentOp()->getParentOfType<ModuleOp>();
-  bool byTarget = relation.byTarget;
-  Value first = memref::LoadOp::create(
-      rewriter, loc, world.edgeIds(relation, /*source=*/!byTarget),
-      ValueRange{edge});
-  Value other = memref::LoadOp::create(
-      rewriter, loc, world.edgeIds(relation, /*source=*/byTarget),
-      ValueRange{edge});
-  auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation, byTarget,
-                                    world.entityKey(loc, first));
-  (void)end;
+/// Of the edges of the entity with key `key` at the `in` end (its
+/// targets' edges for `in`) of `relation`, in the order a loop over them
+/// visits them (the table's order): those whose other end is `other`.
+/// Gives how many of them are before the table's edge `before` (an index)
+/// and the table's place of the `nth` (an i64; -1 for none).
+static std::pair<Value, Value>
+searchEdges(IRRewriter &rewriter, Location loc, WorldAccess &world,
+            const WorldRelation &relation, bool in, Value key, Value other,
+            Value before, Value nth) {
   Type i64 = rewriter.getI64Type();
-  auto before = scf::ForOp::create(
-      rewriter, loc, begin, edge,
-      arith::ConstantIndexOp::create(rewriter, loc, 1),
-      ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)},
-      [&](OpBuilder &, Location, Value at, ValueRange carried) {
+  auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation, in, key);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value none = arith::ConstantIntOp::create(rewriter, loc, -1, 64);
+  auto loop = scf::ForOp::create(
+      rewriter, loc, begin, end, one,
+      ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64), none},
+      [&](OpBuilder &, Location, Value position, ValueRange carried) {
+        Value edge = relation.isSorted(in)
+                         ? position
+                         : world.toIndex(loc, memref::LoadOp::create(
+                                                  rewriter, loc,
+                                                  world.indexEdges(relation),
+                                                  ValueRange{position}));
         Value same = arith::CmpIOp::create(
             rewriter, loc, arith::CmpIPredicate::eq,
-            memref::LoadOp::create(
-                rewriter, loc, world.edgeIds(relation, /*source=*/byTarget),
-                ValueRange{at}),
+            memref::LoadOp::create(rewriter, loc,
+                                   world.edgeIds(relation, /*source=*/in),
+                                   ValueRange{edge}),
             other);
+        Value counted = same;
+        if (before)
+          counted = arith::AndIOp::create(
+              rewriter, loc, same,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                    edge, before));
+        Value found = carried[1];
+        if (nth)
+          found = arith::SelectOp::create(
+              rewriter, loc,
+              arith::AndIOp::create(
+                  rewriter, loc, same,
+                  arith::CmpIOp::create(rewriter, loc,
+                                        arith::CmpIPredicate::eq, carried[0],
+                                        nth)),
+              arith::IndexCastOp::create(rewriter, loc, i64, edge), found);
         scf::YieldOp::create(
             rewriter, loc,
             ValueRange{arith::AddIOp::create(
-                rewriter, loc, carried[0],
-                arith::ExtUIOp::create(rewriter, loc, i64, same))});
+                           rewriter, loc, carried[0],
+                           arith::ExtUIOp::create(rewriter, loc, i64, counted)),
+                       found});
       });
+  return {loop.getResult(0), loop.getResult(1)};
+}
+
+/// On many ranks: that this rank's entity wrote field `field` of `edge`
+/// (an index) of `relation` (`stored`), or disconnected it (`field` -1),
+/// sent to the ranks of the edge's ends. The edge goes by what is the same
+/// in every rank's copy: its source, its target, and how many edges
+/// between the two come before it, counted in the list of the entity
+/// visiting it (key `key`, at the `in` end), which is this rank's own.
+static void noteEdge(IRRewriter &rewriter, Location loc,
+                     const WorldLayout &layout, const WorldRelation &relation,
+                     Value edge, int64_t field, Value stored, WorldAccess &world,
+                     bool in, Value key) {
+  ModuleOp module =
+      rewriter.getInsertionBlock()->getParentOp()->getParentOfType<ModuleOp>();
+  Value source = memref::LoadOp::create(
+      rewriter, loc, world.edgeIds(relation, /*source=*/true),
+      ValueRange{edge});
+  Value target = memref::LoadOp::create(
+      rewriter, loc, world.edgeIds(relation, /*source=*/false),
+      ValueRange{edge});
+  Value before = searchEdges(rewriter, loc, world, relation, in, key,
+                             in ? source : target, edge, Value())
+                     .first;
   int64_t channel = rankEdgeChannel(relation, /*note=*/true, 5);
-  Value source = byTarget ? other : first, target = byTarget ? first : other;
   sendToEnds(rewriter, loc, module, world, channel, source, target,
-             {first, other, before.getResult(0),
+             {source, target, before,
               arith::ConstantIntOp::create(rewriter, loc, field, 64),
               stored ? stored
                      : arith::ConstantIntOp::create(rewriter, loc, 0, 64)});
@@ -5904,50 +5941,70 @@ static void deliverEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
                    asId(word(1)), values);
         continue;
       }
-      // (The edge: of those of its first end, the how-manieth to the
-      // other.)
-      bool byTarget = relation.byTarget;
-      Value first = asId(word(0)), other = asId(word(1));
+      // (The edge: of those between its ends, the how-manieth, found in
+      // the list of an end that is this rank's own.)
+      Value source = asId(word(0)), target = asId(word(1));
       Value nth = word(2), field = word(3), value = word(4);
-      auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation,
-                                        byTarget, world.entityKey(loc, first));
       Value none = arith::ConstantIntOp::create(rewriter, loc, -1, 64);
-      auto search = scf::ForOp::create(
-          rewriter, loc, begin, end, one,
-          ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64), none},
-          [&](OpBuilder &, Location, Value at, ValueRange carried) {
-            Value same = arith::CmpIOp::create(
-                rewriter, loc, arith::CmpIPredicate::eq,
-                memref::LoadOp::create(
-                    rewriter, loc,
-                    world.edgeIds(relation, /*source=*/byTarget),
-                    ValueRange{at}),
-                other);
-            Value hit = arith::AndIOp::create(
-                rewriter, loc, same,
-                arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
-                                      carried[0], nth));
-            Value found = arith::SelectOp::create(
-                rewriter, loc, hit,
-                arith::IndexCastOp::create(rewriter, loc, i64, at),
-                carried[1]);
-            scf::YieldOp::create(
-                rewriter, loc,
-                ValueRange{arith::AddIOp::create(
-                               rewriter, loc, carried[0],
-                               arith::ExtUIOp::create(rewriter, loc, i64,
-                                                      same)),
-                           found});
-          });
+      auto owns = [&](Value id) {
+        auto [archetype, row] = world.locate(loc, id);
+        return arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne,
+            callGpu(rewriter, loc, module, "ent_ranks_owns",
+                    ValueRange{archetype,
+                               arith::IndexCastOp::create(rewriter, loc, i64,
+                                                          row)},
+                    TypeRange{rewriter.getI32Type()})
+                .getResult(0),
+            arith::ConstantIntOp::create(rewriter, loc, 0, 32));
+      };
+      auto findIn = [&](bool in) -> Value {
+        return searchEdges(rewriter, loc, world, relation, in,
+                           world.entityKey(loc, in ? target : source),
+                           in ? source : target, Value(), nth)
+            .second;
+      };
+      bool outList = !relation.byTarget;
+      bool inList = relation.byTarget || relation.hasIndex();
+      Value found = none;
+      if (outList || inList) {
+        Value byOut = outList ? owns(source)
+                              : arith::ConstantIntOp::create(rewriter, loc, 0,
+                                                             1)
+                                    .getResult();
+        auto choose = scf::IfOp::create(rewriter, loc, TypeRange{i64}, byOut,
+                                        /*withElseRegion=*/true);
+        {
+          OpBuilder::InsertionGuard pick(rewriter);
+          rewriter.setInsertionPointToStart(choose.thenBlock());
+          scf::YieldOp::create(rewriter, loc,
+                               ValueRange{outList ? findIn(false) : none});
+          rewriter.setInsertionPointToStart(choose.elseBlock());
+          if (inList) {
+            auto byIn = scf::IfOp::create(rewriter, loc, TypeRange{i64},
+                                          owns(target),
+                                          /*withElseRegion=*/true);
+            rewriter.setInsertionPointToStart(byIn.thenBlock());
+            scf::YieldOp::create(rewriter, loc, ValueRange{findIn(true)});
+            rewriter.setInsertionPointToStart(byIn.elseBlock());
+            scf::YieldOp::create(rewriter, loc, ValueRange{none});
+            rewriter.setInsertionPointAfter(byIn);
+            scf::YieldOp::create(rewriter, loc, byIn.getResults());
+          } else {
+            scf::YieldOp::create(rewriter, loc, ValueRange{none});
+          }
+        }
+        found = choose.getResult(0);
+      }
       auto ifFound = scf::IfOp::create(
           rewriter, loc,
           arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
-                                search.getResult(1),
+                                found,
                                 arith::ConstantIntOp::create(rewriter, loc, 0,
                                                              64)));
       rewriter.setInsertionPoint(ifFound.thenBlock()->getTerminator());
       Value edge = arith::IndexCastOp::create(
-          rewriter, loc, rewriter.getIndexType(), search.getResult(1));
+          rewriter, loc, rewriter.getIndexType(), found);
       auto when = [&](int64_t k) {
         auto branch = scf::IfOp::create(
             rewriter, loc,
@@ -6641,7 +6698,7 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                               ValueRange{edge});
       if (rankEdgeNotes)
         noteEdge(rewriter, set.getLoc(), layout, relation, edge,
-                 field - relation.fields.begin(), stored, world);
+                 field - relation.fields.begin(), stored, world, !out, key);
       rewriter.eraseOp(set);
     }
   }
@@ -6672,7 +6729,8 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                             arith::ConstantIntOp::create(rewriter, at, 1, 8),
                             world.edgeDead(relation), ValueRange{edge});
     if (rankEdgeNotes)
-      noteEdge(rewriter, at, layout, relation, edge, -1, Value(), world);
+      noteEdge(rewriter, at, layout, relation, edge, -1, Value(), world, !out,
+               key);
     // (The edge's target loses a child.)
     if (relation.childTicksOffset) {
       memref::StoreOp::create(
@@ -7380,7 +7438,13 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
                                                           rowA),
                                b,
                                arith::IndexCastOp::create(rewriter, loc, i64,
-                                                          rowB)},
+                                                          rowB),
+                               arith::ConstantIntOp::create(
+                                   rewriter, loc, !relation.byTarget, 32),
+                               arith::ConstantIntOp::create(
+                                   rewriter, loc,
+                                   relation.byTarget || relation.hasIndex(),
+                                   32)},
                     TypeRange{i32})
                 .getResult(0),
             arith::ConstantIntOp::create(rewriter, loc, 0, 32)));
@@ -8311,6 +8375,70 @@ static void emitDropFunction(IRRewriter &rewriter, ModuleOp module,
     tree.store(tree.noLink(), column, slot);
 }
 
+/// For each key of an entity of the tree `relation` (a child or a parent)
+/// that this rank has, in the order of the keys: all of them, or, built
+/// for partitions with row ids, its partition's rows of each archetype
+/// that can be in the tree (a tree's children live with their parents, so
+/// a rank's edges of it are of its own entities). `body` at each, inside.
+static void forTreeKeys(IRRewriter &rewriter, Location loc,
+                        const WorldLayout &layout, WorldAccess &world,
+                        const WorldRelation &relation,
+                        function_ref<void(Value)> body,
+                        bool beyond = false) {
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  // (With `beyond`, the key past the last too, which some arrays have for
+  // the entities without a parent.)
+  auto atBeyond = [&] {
+    if (beyond)
+      body(arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys));
+  };
+  auto loopOver = [&](Value from, Value to) {
+    auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    body(loop.getInductionVar());
+  };
+  if (partitionCount == 0 || layout.entities.kind != EntityScheme::Rows) {
+    loopOver(arith::ConstantIndexOp::create(rewriter, loc, 0),
+             arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys));
+    atBeyond();
+    return;
+  }
+  RelationOp relationOp = relation.op;
+  FlatSymbolRefAttr child = relationOp.getEndpoint(false);
+  FlatSymbolRefAttr parent = relationOp.getEndpoint(true);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  for (const WorldArchetype &archetype : layout.archetypes) {
+    ArchetypeOp archetypeOp = archetype.op;
+    if (child && parent && !archetypeOp.contains(child) &&
+        !archetypeOp.contains(parent))
+      continue;
+    int64_t base = int64_t(archetype.index) << layout.entities.rowBits;
+    Value from = arith::ConstantIndexOp::create(rewriter, loc, base);
+    Value to = arith::ConstantIndexOp::create(rewriter, loc,
+                                              base + archetype.capacity);
+    if (archetype.isDistributed()) {
+      Value first = arith::MinUIOp::create(
+          rewriter, loc,
+          world.toIndex(loc, memref::LoadOp::create(
+                                 rewriter, loc,
+                                 world.scalar(archetype.rankFirstOffset),
+                                 ValueRange{zero})),
+          arith::ConstantIndexOp::create(rewriter, loc, archetype.capacity));
+      from = arith::AddIOp::create(rewriter, loc, from, first);
+      if (archetype.isPartitioned())
+        to = arith::MinUIOp::create(
+            rewriter, loc, to,
+            arith::AddIOp::create(
+                rewriter, loc, from,
+                arith::ConstantIndexOp::create(rewriter, loc,
+                                               archetype.partitionRows)));
+    }
+    loopOver(from, to);
+  }
+  atBeyond();
+}
+
 /// Emit the function that, if a linked tree is unclean, builds it again
 /// from its slots: the edges of dead entities, to dead entities and
 /// disconnected ones go; every entity's children are linked in the order
@@ -8348,7 +8476,7 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
   };
   // Which sibling each had before it, to tell afterwards who has another.
   if (relation.siblingTicksOffset)
-    tree.forEach(zero, keys, [&](Value key) {
+    forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
       tree.store(tree.load(tree.previousSibling(), key),
                  world.siblingsBefore(relation), key);
       tree.store(tree.load(tree.nextSibling(), key),
@@ -8356,7 +8484,7 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
     });
   // The edges that stay, counted, and every link cleared.
   tree.store(tree.i64(0), world.edgeCount(relation), zero);
-  tree.forEach(zero, keys, [&](Value key) {
+  forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
     tree.branch(hasEdge(key), [&] {
       Value kept = tree.both(
           world.isAlive(loc, tree.sourceOf(key)),
@@ -8386,13 +8514,13 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
   // Children, by their keys, or in their order where the tree has one
   // (what each is ordered by is read from it first, once).
   if (relation.isOrdered())
-    tree.forEach(zero, keys, [&](Value key) {
+    forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
       tree.branch(hasEdge(key), [&] {
         tree.store(tree.orderKey(layout, tree.sourceOf(key)),
                    world.orderKeys(relation), key);
       });
     });
-  tree.forEach(zero, keys, [&](Value key) {
+  forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
     tree.branch(hasEdge(key), [&] {
       Value parent = world.entityKey(loc, tree.load(tree.targets(), key));
       if (relation.isOrdered())
@@ -8426,7 +8554,7 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
                 ValueRange{tree.load(tree.nextSibling(), child)});
           });
     };
-    tree.forEach(zero, keys, [&](Value key) {
+    forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
       tree.branch(tree.negate(hasEdge(key)), [&] { listChildren(key); });
     });
     scf::WhileOp::create(
@@ -8475,7 +8603,8 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
   Type idType = world.idType();
   // (A tree whose children are in an order has its list: every entity is
   // in, and nothing is left for this.)
-  tree.forEach(zero, relation.isOrdered() ? zero : keys, [&](Value key) {
+  if (!relation.isOrdered())
+  forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
     tree.branch(tree.both(hasEdge(key), tree.negate(isIn(key))), [&] {
       // (the key to keep back, where the kept start, whether to go on)
       auto climb = scf::WhileOp::create(
@@ -8517,7 +8646,7 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
   // An entity with another sibling before it than it had: an event, where
   // a reactive query has a trigger before the tree.
   if (relation.siblingTicksOffset)
-    tree.forEach(zero, keys, [&](Value key) {
+    forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
       tree.branch(
           tree.both(
               hasEdge(key),
@@ -8555,6 +8684,192 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
     });
     tree.store(tree.i64(0), world.treeStale(relation), zero);
   });
+}
+
+/// Built for partitions with row ids: the keys of the entities a
+/// relation's `target` (or source) end may be that this rank has the edges
+/// of, in key order, as ranges [from, to] (indices, both in): of each
+/// archetype that can be that end, its partition's rows (all rows of one
+/// every rank has). Where the offsets of a sorted table are kept for.
+static SmallVector<std::pair<Value, Value>>
+ownKeyWindows(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
+              WorldAccess &world, const WorldRelation &relation, bool target) {
+  SmallVector<std::pair<Value, Value>> windows;
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  FlatSymbolRefAttr end = RelationOp(relation.op).getEndpoint(target);
+  for (const WorldArchetype &archetype : layout.archetypes) {
+    if (end && !ArchetypeOp(archetype.op).contains(end))
+      continue;
+    int64_t base = int64_t(archetype.index) << layout.entities.rowBits;
+    Value from = arith::ConstantIndexOp::create(rewriter, loc, base);
+    Value to = arith::ConstantIndexOp::create(rewriter, loc,
+                                              base + archetype.capacity);
+    if (archetype.isDistributed()) {
+      // (Its first row here, past its rows where it has none.)
+      Value first = arith::MinUIOp::create(
+          rewriter, loc,
+          world.toIndex(loc, memref::LoadOp::create(
+                                 rewriter, loc,
+                                 world.scalar(archetype.rankFirstOffset),
+                                 ValueRange{zero})),
+          arith::ConstantIndexOp::create(rewriter, loc, archetype.capacity));
+      from = arith::AddIOp::create(rewriter, loc, from, first);
+      if (archetype.isPartitioned())
+        to = arith::MinUIOp::create(
+            rewriter, loc, to,
+            arith::AddIOp::create(
+                rewriter, loc, from,
+                arith::ConstantIndexOp::create(rewriter, loc,
+                                               archetype.partitionRows)));
+    }
+    windows.push_back({from, to});
+  }
+  return windows;
+}
+
+/// Whether `relation` is sorted, built for partitions, by the rank's own
+/// edges alone (emitPartitionedSort): with row ids, a relation that is
+/// neither a tree nor kept in an order or watched by reactive queries.
+static bool sortsPartitioned(const WorldLayout &layout,
+                             const WorldRelation &relation) {
+  return partitionCount > 0 && layout.entities.kind == EntityScheme::Rows &&
+         !relation.tree && !relation.linked && !relation.connectedOffset &&
+         !relation.walkStateOffset && !relation.childTicksOffset &&
+         !relation.siblingTicksOffset && !relation.touchedOffset;
+}
+
+/// The sort of `relation` built for partitions (see emitSortFunction), at
+/// the insertion point, where it is unclean: its edges sorted by the key
+/// of the end its table goes by (a stable radix sort of the rank's own
+/// edges, devices/ranks.c), those that go dropped, and the offsets of the
+/// keys of the rank's own entities only; the same for the index by
+/// target. The table is in the order one process has, of the edges this
+/// rank keeps.
+static void emitPartitionedSort(IRRewriter &rewriter, Location loc,
+                                ModuleOp module, const WorldLayout &layout,
+                                WorldAccess &world,
+                                const WorldRelation &relation,
+                                function_ref<Value(Value)> keep) {
+  Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
+  Type offsetType = world.offsetType(relation);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto forEach = [&](Value from, Value to, function_ref<void(Value)> body) {
+    auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    body(loop.getInductionVar());
+  };
+  auto asI64 = [&](Value index) {
+    return arith::IndexCastOp::create(rewriter, loc, i64, index).getResult();
+  };
+  Value sources = world.edgeIds(relation, /*source=*/true);
+  Value targets = world.edgeIds(relation, /*source=*/false);
+  auto keyAt = [&](Value column, Value k) {
+    return asI64(world.entityKey(
+        loc, memref::LoadOp::create(rewriter, loc, column, ValueRange{k})));
+  };
+  SmallVector<Value> table{sources, targets}, scratch{
+      world.array(relation.sourceScratchOffset, relation.capacity,
+                  world.idType()),
+      world.array(relation.targetScratchOffset, relation.capacity,
+                  world.idType())};
+  for (auto [field, offset] :
+       llvm::zip(relation.fields, relation.fieldScratchOffsets)) {
+    table.push_back(world.edgeField(relation, field));
+    scratch.push_back(world.array(offset, relation.capacity,
+                                  world.storageType(field.type)));
+  }
+  Value count = world.toIndex(
+      loc, memref::LoadOp::create(rewriter, loc, world.edgeCount(relation),
+                                  ValueRange{zero}));
+  auto sortBy = [&](Value n, function_ref<Value(Value)> keyOf) -> Value {
+    callGpu(rewriter, loc, module, "ent_ranks_sort_begin",
+            ValueRange{asI64(n)});
+    forEach(zero, n, [&](Value k) {
+      callGpu(rewriter, loc, module, "ent_ranks_sort_key",
+              ValueRange{asI64(k), keyOf(k)});
+    });
+    return world.toIndex(loc, callGpu(rewriter, loc, module,
+                                      "ent_ranks_sort_run", ValueRange{},
+                                      TypeRange{i64})
+                                  .getResult(0));
+  };
+  auto from = [&](Value p) {
+    return world.toIndex(loc, callGpu(rewriter, loc, module,
+                                      "ent_ranks_sort_from",
+                                      ValueRange{asI64(p)}, TypeRange{i64})
+                                  .getResult(0));
+  };
+  auto offsetsOf = [&](Value offsets, bool target) {
+    for (auto [lo, hi] :
+         ownKeyWindows(rewriter, loc, layout, world, relation, target))
+      callGpu(rewriter, loc, module, "ent_ranks_sort_offsets",
+              ValueRange{worldPointer(rewriter, loc, offsets),
+                         arith::ConstantIntOp::create(
+                             rewriter, loc, relation.offsetBits, 32),
+                         asI64(lo), asI64(hi)});
+  };
+  // The table by the end it goes by; the edges that go dropped.
+  Value byEnd = relation.byTarget ? targets : sources;
+  Value kept = sortBy(count, [&](Value k) -> Value {
+    return arith::SelectOp::create(
+        rewriter, loc, keep(k), keyAt(byEnd, k),
+        arith::ConstantIntOp::create(rewriter, loc, -1, 64));
+  });
+  forEach(zero, kept, [&](Value p) {
+    Value k = from(p);
+    for (auto [column, copy] : llvm::zip(table, scratch))
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, column, ValueRange{k}), copy,
+          ValueRange{p});
+  });
+  forEach(zero, kept, [&](Value p) {
+    for (auto [column, copy] : llvm::zip(table, scratch))
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, copy, ValueRange{p}), column,
+          ValueRange{p});
+  });
+  offsetsOf(world.edgeOffsets(relation, /*in=*/relation.byTarget),
+            relation.byTarget);
+  // (The copies, given back to the system: the next sort makes them
+  // anew, and a relation sorted once, in the setup, needs them no more.)
+  for (auto [copy, column] : llvm::zip(scratch, table)) {
+    Type element = cast<MemRefType>(copy.getType()).getElementType();
+    callGpu(rewriter, loc, module, "ent_ranks_drop_rows",
+            ValueRange{worldPointer(rewriter, loc, copy),
+                       arith::ConstantIntOp::create(
+                           rewriter, loc,
+                           std::max<int64_t>(
+                               1, element.getIntOrFloatBitWidth() / 8),
+                           64),
+                       arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                       arith::ConstantIntOp::create(rewriter, loc,
+                                                    relation.capacity, 64)});
+  }
+  if (relation.deadOffset)
+    forEach(zero, kept, [&](Value p) {
+      memref::StoreOp::create(rewriter, loc,
+                              arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+                              world.edgeDead(relation), ValueRange{p});
+    });
+  memref::StoreOp::create(rewriter, loc, asI64(kept),
+                          world.edgeCount(relation), ValueRange{zero});
+  // Both ways: the index by target, each target's edges in table order.
+  if (relation.hasIndex()) {
+    sortBy(kept, [&](Value p) { return keyAt(targets, p); });
+    forEach(zero, kept, [&](Value p) {
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::IndexCastOp::create(rewriter, loc, offsetType, from(p)),
+          world.indexEdges(relation), ValueRange{p});
+    });
+    offsetsOf(world.edgeOffsets(relation, /*in=*/true), /*target=*/true);
+  }
+  callGpu(rewriter, loc, module, "ent_ranks_sort_end", ValueRange{});
+  (void)i32;
 }
 
 /// Emit the function that, if `relation` is unclean, sorts its edges by
@@ -8694,6 +9009,14 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
     }
     return kept;
   };
+  // (Built for partitions: by this rank's own edges alone.)
+  if (sortsPartitioned(layout, relation)) {
+    emitPartitionedSort(rewriter, loc, module, layout, world, relation, keep);
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+                            world.edgesClean(relation), ValueRange{zero});
+    return;
+  }
   // The table's columns and their scratch copies.
   SmallVector<Value> table{sources, targets}, scratch{
       world.array(relation.sourceScratchOffset, relation.capacity,
@@ -12090,10 +12413,10 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       // How many are below each entity, itself counted (one without a
       // parent is not in the list and not counted): from the list's end,
       // where an entity's children have been before it is come to.
-      tree.forEach(zero, keys, [&](Value key) {
+      forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
         tree.store(tree.i64(0), sizes, key);
         tree.store(tree.i64(-1), cursors, key);
-      });
+      }, /*beyond=*/true);
       // (Where each is in the order, for the queries that follow events
       // in it: nowhere, until it is given its place.)
       tree.forEach(zero,
@@ -12159,10 +12482,10 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     // other and in their order.
     if (!depthFirst) {
       Value all = count;
-      tree.forEach(zero, keys, [&](Value key) {
+      forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
         tree.store(tree.i64(0), sizes, key);
         tree.store(tree.i64(0), cursors, key);
-      });
+      }, /*beyond=*/true);
       forListed(/*backwards=*/false, [&](Value id, Value parent) {
         Value depth = add(tree.load(sizes, world.entityKey(loc, parent)),
                           tree.i64(1));
@@ -14481,7 +14804,13 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
                   ValueRange{a, arith::IndexCastOp::create(rewriter, loc, i64,
                                                            rowA),
                              b, arith::IndexCastOp::create(rewriter, loc, i64,
-                                                           rowB)},
+                                                           rowB),
+                             arith::ConstantIntOp::create(
+                                 rewriter, loc, !relation.byTarget, 32),
+                             arith::ConstantIntOp::create(
+                                 rewriter, loc,
+                                 relation.byTarget || relation.hasIndex(),
+                                 32)},
                   TypeRange{i32})
               .getResult(0),
           arith::ConstantIntOp::create(rewriter, loc, 0, 32));
