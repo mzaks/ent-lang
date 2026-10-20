@@ -116,7 +116,9 @@ rank, run on N ranks. No rank ever holds the whole world:
   and reads. A `for` over distributed entities ends with all of them done
   before any goes on. `ENT_NOSHARE` gives each partition its own copy, to
   compare. The epidemic with tracing at 1e6 as 16 partitions in one
-  process ends in 1.96 GB (4.06 GB without sharing), in 37.7 s.
+  process ends in 1.96 GB (4.06 GB without sharing), in 37.7 s; in a 2 GB
+  limit, with its worlds in files on a disk and one partition at a time
+  (`ENT_RUNNING=1`), in 172 s, where 16 processes took 1359 s.
 
 Not yet: what the setup takes at its most (each partition builds its own
 part with what every rank has whole) is not shared: the 16 partitions
