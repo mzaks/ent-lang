@@ -2184,6 +2184,25 @@ static int64_t rankEdgeChannel(const WorldRelation &relation, bool note,
   rankEdgeChannels.push_back({&relation, note, length});
   return rankEdgeChannels.size() - 1;
 }
+static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
+                          Type type);
+
+/// Built for partitions, a query over distributed archetypes that looks up
+/// entities of other ranks: its lookups read ghosts (`ent.rank_channel`,
+/// the channel of the field), which a copy of it that only asks
+/// (kRankAskQueryAttr; its lookups kRankAskAttr) fetched first (askPass).
+static constexpr llvm::StringLiteral kRankAskQueryAttr = "ent.rank_ask_query";
+static constexpr llvm::StringLiteral kRankAskAttr = "ent.rank_ask";
+static constexpr llvm::StringLiteral kRankChannelAttr = "ent.rank_channel";
+/// While such a lookup is lowered (see emitLocate): whether it asks (or
+/// reads what was asked), and the channel of each of its fields.
+struct RankLookup {
+  bool ask;
+  SmallVector<int64_t> channels;
+  SmallVector<Type> types;
+};
+static RankLookup *rankLookup = nullptr;
+
 /// Built for partitions: whether `row` (an index) of `archetype` is one its
 /// partition has (whichever rank's it is), from the counts every rank keeps.
 static Value partitionHasRow(IRRewriter &rewriter, Location loc,
@@ -2353,6 +2372,151 @@ static void gatherGhosts(IRRewriter &rewriter, Location loc, ModuleOp module,
                                                 archetype->capacity * each)),
                        arith::ConstantIntOp::create(rewriter, loc, each, 64)});
   }
+}
+
+/// The body of an asking copy of a query (see askPass) made to do nothing
+/// but look up: what it writes, sends, adds, connects, gives to buffers
+/// and calls procs for, taken out; a running sum's place and what a proc
+/// gives back read as nought. False where that cannot be done (a spawn, or
+/// a proc that gives back what has no nought).
+static bool stripEffects(IRRewriter &rewriter, QueryOp query) {
+  SmallVector<Operation *> effects;
+  bool ok = true;
+  query.getBody().walk<WalkOrder::PostOrder>([&](Operation *op) {
+    if (isa<SpawnOp>(op)) {
+      ok = false;
+      return;
+    }
+    auto invoke = dyn_cast<InvokeOp>(op);
+    bool changes =
+        invoke &&
+        (invoke.getProc() ||
+         llvm::any_of(invoke->getOperandTypes(), [](Type type) {
+           auto rows = dyn_cast<RowsType>(type);
+           return rows && rows.getMut();
+         }));
+    if (changes || isa<SetOp, ApplyOp, AccumulateOp, CombineOp, ConnectOp,
+                       DisconnectOp, AppendOp, BufferSetOp, BufferClaimOp,
+                       WriteOp, AddOp, RemoveOp, DespawnOp, RowsCheckOp,
+                       BufferFillOp, BufferKeepOp, RunningOp>(op))
+      effects.push_back(op);
+  });
+  if (!ok)
+    return false;
+  for (Operation *op : effects)
+    for (Type type : op->getResultTypes())
+      if (!isa<IntegerType, FloatType, IndexType>(type))
+        return false;
+  for (Operation *op : effects) {
+    rewriter.setInsertionPoint(op);
+    SmallVector<Value> noughts;
+    for (Type type : op->getResultTypes())
+      noughts.push_back(arith::ConstantOp::create(
+          rewriter, op->getLoc(), cast<TypedAttr>(rewriter.getZeroAttr(type))));
+    if (op->getNumResults())
+      rewriter.replaceOp(op, noughts);
+    else
+      rewriter.eraseOp(op);
+  }
+  return true;
+}
+
+static void lowerQuery(IRRewriter &rewriter, QueryOp query,
+                       const WorldLayout &layout, WorldAccess &world,
+                       const LoopOptions &given);
+
+/// Built for partitions: before a query over distributed archetypes that
+/// looks up entities, at the insertion point, a copy of it that only asks
+/// (stripEffects) goes through the rank's rows, asking for the fields of
+/// other ranks' entities it looks up, on a channel for each field; what
+/// was asked is fetched from the ranks that have it (devices/ranks.c), and
+/// again while a round asks for more (a lookup chosen by what another one
+/// found). The query's own lookups then read those ghosts. False where no
+/// such copy can be made (then the fields are gathered whole).
+static bool askPass(IRRewriter &rewriter, Location loc, ModuleOp module,
+                    const WorldLayout &layout, WorldAccess &world,
+                    QueryOp query, const LoopOptions &given) {
+  SmallVector<LookupOp> lookups;
+  query.getBody().walk([&](LookupOp lookup) { lookups.push_back(lookup); });
+  if (lookups.empty())
+    return false;
+  OpBuilder::InsertionGuard guard(rewriter);
+  auto clone = cast<QueryOp>(rewriter.clone(*query));
+  if (!stripEffects(rewriter, clone)) {
+    rewriter.eraseOp(clone);
+    return false;
+  }
+  clone->setAttr(kRankAskQueryAttr, rewriter.getUnitAttr());
+  // (A channel for each field looked up.)
+  SmallVector<std::pair<StringAttr, StringAttr>> channels;
+  auto channelOf = [&](LookupOp lookup) -> int64_t {
+    std::pair<StringAttr, StringAttr> key{
+        lookup.getComponentAttr().getAttr(), lookup.getFieldAttr()};
+    auto known = llvm::find(channels, key);
+    if (known != channels.end())
+      return known - channels.begin();
+    channels.push_back(key);
+    return channels.size() - 1;
+  };
+  for (LookupOp lookup : lookups)
+    lookup->setAttr(kRankChannelAttr,
+                    rewriter.getI64IntegerAttr(channelOf(lookup)));
+  clone.getBody().walk([&](LookupOp lookup) {
+    lookup->setAttr(kRankChannelAttr,
+                    rewriter.getI64IntegerAttr(channelOf(lookup)));
+    lookup->setAttr(kRankAskAttr, rewriter.getUnitAttr());
+  });
+  // (Where the ranks that have them read them: each field's column, and
+  // the presence of an optional component.)
+  rewriter.setInsertionPoint(clone);
+  auto pointer = [&](Value column) { return worldPointer(rewriter, loc, column); };
+  for (auto [channel, key] : llvm::enumerate(channels))
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      auto component = FlatSymbolRefAttr::get(key.first);
+      ArchetypeOp archetypeOp = archetype.op;
+      if (!archetype.isDistributed() || !archetypeOp.contains(component))
+        continue;
+      const WorldColumn *field = archetype.find(key.first, key.second);
+      Value present =
+          archetypeOp.isOptional(component)
+              ? pointer(world.column(archetype, key.first,
+                                     rewriter.getStringAttr("")))
+              : LLVM::ZeroOp::create(
+                    rewriter, loc,
+                    LLVM::LLVMPointerType::get(rewriter.getContext()))
+                    .getResult();
+      callGpu(rewriter, loc, module, "ent_ranks_ghost_column",
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc, channel,
+                                                      32),
+                         arith::ConstantIntOp::create(rewriter, loc,
+                                                      archetype.index, 32),
+                         pointer(world.column(archetype, key.first,
+                                              key.second)),
+                         arith::ConstantIntOp::create(
+                             rewriter, loc, world.storageBytes(field->type),
+                             64),
+                         present});
+    }
+  // Rounds: ask, fetch, while more was asked.
+  auto rounds = scf::WhileOp::create(
+      rewriter, loc, TypeRange{}, ValueRange{},
+      [](OpBuilder &, Location, ValueRange) {},
+      [](OpBuilder &builder, Location at, ValueRange) {
+        scf::YieldOp::create(builder, at);
+      });
+  Block *before = rounds.getBeforeBody();
+  clone->moveBefore(before, before->end());
+  rewriter.setInsertionPointToEnd(before);
+  Value asked = callGpu(rewriter, loc, module, "ent_ranks_fetch",
+                        ValueRange{}, TypeRange{rewriter.getI64Type()})
+                    .getResult(0);
+  scf::ConditionOp::create(
+      rewriter, loc,
+      arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt, asked,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 64)),
+      ValueRange{});
+  lowerQuery(rewriter, clone, layout, world, given);
+  return true;
 }
 
 /// Each rank's stretch of the rows of `buffers` that its entities wrote,
@@ -4978,6 +5142,77 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
         return {};
       }
     }
+    // (A lookup of an entity another rank has: asked for, or its ghost;
+    // see askPass.)
+    if (ranksMode && archetype.isDistributed() && rankLookup) {
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
+      Value at = arith::IndexCastOp::create(rewriter, loc, i64, row);
+      Value outside = arith::OrIOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::slt, at,
+              memref::LoadOp::create(rewriter, loc,
+                                     world.scalar(archetype.rankFirstOffset),
+                                     ValueRange{zero})),
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::sge, at,
+              memref::LoadOp::create(rewriter, loc,
+                                     world.scalar(archetype.rankEndOffset),
+                                     ValueRange{zero})));
+      auto where = scf::IfOp::create(rewriter, loc, results, outside,
+                                     /*withElseRegion=*/true);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(where.thenBlock());
+      ModuleOp module =
+          rewriter.getInsertionBlock()->getParentOp()->getParentOfType<
+              ModuleOp>();
+      Value index =
+          arith::ConstantIntOp::create(rewriter, loc, archetype.index, 32);
+      // (The ghosts were gathered whole where the run does not ask: read
+      // where they lie.)
+      if (!rankLookup->ask) {
+        auto how = scf::IfOp::create(
+            rewriter, loc, results,
+            arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ne,
+                callGpu(rewriter, loc, module, "ent_ranks_ghosts_ask",
+                        ValueRange{}, TypeRange{i32})
+                    .getResult(0),
+                arith::ConstantIntOp::create(rewriter, loc, 0, 32)),
+            /*withElseRegion=*/true);
+        scf::YieldOp::create(rewriter, loc, how.getResults());
+        rewriter.setInsertionPointToStart(how.elseBlock());
+        scf::YieldOp::create(rewriter, loc, found(archetype, row, present));
+        rewriter.setInsertionPointToStart(how.thenBlock());
+      }
+      SmallVector<Value> values;
+      for (auto [channel, type] :
+           llvm::zip(rankLookup->channels, rankLookup->types)) {
+        Value number = arith::ConstantIntOp::create(rewriter, loc, channel, 32);
+        Value bits =
+            callGpu(rewriter, loc, module,
+                    rankLookup->ask ? "ent_ranks_ask" : "ent_ranks_ghost",
+                    ValueRange{number, index, at}, TypeRange{i64})
+                .getResult(0);
+        values.push_back(fromSendBits(rewriter, loc, bits, type));
+      }
+      Value had = callGpu(
+          rewriter, loc, module,
+          rankLookup->ask ? "ent_ranks_ask_found" : "ent_ranks_ghost_found",
+          ValueRange{arith::ConstantIntOp::create(
+                         rewriter, loc, rankLookup->channels.front(), 32),
+                     index, at},
+          TypeRange{i32})
+                        .getResult(0);
+      values.push_back(arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ne, had,
+          arith::ConstantIntOp::create(rewriter, loc, 0, 32)));
+      scf::YieldOp::create(rewriter, loc, values);
+      rewriter.setInsertionPointToStart(where.elseBlock());
+      scf::YieldOp::create(rewriter, loc, found(archetype, row, present));
+      return SmallVector<Value>(where.getResults());
+    }
     if (ranksMode && archetype.isDistributed() && !rankGhostRead) {
       // (This rank's stretch, from the world; the runtime only where the
       // row is not in it, to say so.)
@@ -5575,9 +5810,30 @@ static void lowerLookupsOf(IRRewriter &rewriter, func::FuncOp func,
     };
     llvm::SaveAndRestore ghosts(rankGhostRead,
                                 first->hasAttr(kRankGhostAttr));
-    std::optional<SmallVector<Value>> byTable = emitReadFields(
-        rewriter, loc, layout, world, world.toStorage(loc, first.getEntity()),
-        component, fields, first->hasAttr(kTrustedAttr));
+    // (Built for partitions: of another rank's entity, asked for or read
+    // from what was; see askPass.)
+    std::optional<RankLookup> asking;
+    if (first->hasAttr(kRankChannelAttr)) {
+      asking.emplace();
+      asking->ask = first->hasAttr(kRankAskAttr);
+      for (auto [field, type] : llvm::zip(fields, resultTypes)) {
+        for (LookupOp lookup : group)
+          if (lookup.getFieldAttr() == field) {
+            asking->channels.push_back(
+                lookup->getAttrOfType<IntegerAttr>(kRankChannelAttr).getInt());
+            break;
+          }
+        asking->types.push_back(type);
+      }
+    }
+    llvm::SaveAndRestore askingNow(rankLookup,
+                                   asking ? &*asking : (RankLookup *)nullptr);
+    std::optional<SmallVector<Value>> byTable =
+        asking ? std::nullopt
+               : emitReadFields(rewriter, loc, layout, world,
+                                world.toStorage(loc, first.getEntity()),
+                                component, fields,
+                                first->hasAttr(kTrustedAttr));
     SmallVector<Value> results = byTable ? *byTable : emitLocate(
         rewriter, loc, layout, world, world.toStorage(loc, first.getEntity()),
         holds, component, resultTypes,
@@ -15725,6 +15981,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   rankChannels.clear();
   rankEdgeChannels.clear();
   bool captured = false;
+  // (Whether its lookups read ghosts that were asked for.)
+  bool asked = false;
   // (Each unique field accumulated into: what it held before.)
   SmallVector<SpreadCell> spreadCells;
   // (And the buffers whose rows it writes.)
@@ -15742,7 +16000,33 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       callGpu(rewriter, loc, module, "ent_ranks_capture", ValueRange{});
     noteSpreadCells(rewriter, loc, world, {query}, spreadCells);
     noteSharedBuffers(rewriter, loc, layout, world, {query}, sharedBuffers);
-    gatherGhosts(rewriter, loc, module, layout, world, query);
+    // (Built for partitions: what it looks up of other ranks' entities
+    // asked for first; else the fields gathered whole.)
+    if (query->hasAttr(kRankAskQueryAttr)) {
+      // (Itself the asking copy.)
+    } else if (partitionCount > 0) {
+      // (Which, the run says: ENT_GHOSTS, devices/ranks.c.)
+      auto how = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::ne,
+              callGpu(rewriter, loc, module, "ent_ranks_ghosts_ask",
+                      ValueRange{}, TypeRange{rewriter.getI32Type()})
+                  .getResult(0),
+              arith::ConstantIntOp::create(rewriter, loc, 0, 32)),
+          /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard choice(rewriter);
+        rewriter.setInsertionPoint(how.thenBlock()->getTerminator());
+        asked = askPass(rewriter, loc, module, layout, world, query, given);
+        if (!asked)
+          gatherGhosts(rewriter, loc, module, layout, world, query);
+        rewriter.setInsertionPoint(how.elseBlock()->getTerminator());
+        gatherGhosts(rewriter, loc, module, layout, world, query);
+      }
+    } else {
+      gatherGhosts(rewriter, loc, module, layout, world, query);
+    }
     for (const WorldArchetype &archetype : layout.archetypes)
       if (spreads(archetype, query) && matches(archetype, query))
         rankFirstRows[&archetype] = arith::IndexCastOp::create(
@@ -15999,6 +16283,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
     deliverOverRanks(rewriter, loc, module, layout, world);
     deliverEdges(rewriter, loc, module, layout, world);
+    if (asked)
+      callGpu(rewriter, loc, module, "ent_ranks_ghosts_drop", ValueRange{});
     if (captured)
       callGpu(rewriter, loc, module, "ent_ranks_release", ValueRange{});
   }

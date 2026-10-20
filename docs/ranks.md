@@ -68,9 +68,18 @@ rank, run on N ranks. No rank ever holds the whole world:
   rank's own edges alone (a radix sort), and where each key's edges start
   is kept for the keys of the rank's own entities only; so for a tree.
 
-Not yet: the table of entities is as large as the whole world, on every
-rank; buffers are whole on every rank; a field looked up across ranks is
-had whole on every rank; a partition is a rank.
+- A field that a `for` looks up in other ranks' entities is gathered
+  whole on every rank before the `for` (fast where it fits), or, with
+  `ENT_GHOSTS=ask` where the program runs, asked for: a copy of the `for`
+  that only looks up goes through the rank's rows first, asking for what
+  it would read of other ranks' entities (again while a round asks for
+  more), each rank answers from its own rows, and the `for` reads those
+  answers. The `for`'s work that leads to its lookups is done twice; a
+  rank holds of other ranks' entities only what it looked up. A `for`
+  that chose whom to look up by what it wrote first would look up one it
+  did not ask for: the program stops there.
+
+Not yet: buffers are whole on every rank; a partition is a rank.
 
 ## A `for` over distributed entities
 

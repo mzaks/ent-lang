@@ -1010,7 +1010,8 @@ void ent_ranks_msg_exchange(void) {
   for (int r = 0, at = 0; r < ent_ranks; ++r) {
     for (int64_t i = 0; i < ent_msg_out[r].count; ++i)
       out[at++] = ent_msg_out[r].words[i];
-    ent_msg_out[r].count = 0;
+    free(ent_msg_out[r].words);
+    ent_msg_out[r] = (ent_box){0, 0, 0};
   }
   int64_t incoming = 0;
   if (ent_distributed) {
@@ -1253,4 +1254,237 @@ void ent_ranks_sort_end(void) {
   ent_sort_keys = ent_sort_scratch = 0;
   ent_sort_order = ent_sort_order_scratch = 0;
   ent_sort_room = ent_sort_n = ent_sort_kept = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Ghosts by request (built for partitions): a `for` over distributed
+// entities that looks up entities of other ranks first goes through its
+// rows asking (a copy of its body that does nothing but look up, see the
+// compiler's askPass), on channels, one for each field looked up; each
+// rank is then given what it asked of the ranks that have them, which
+// read it from their own columns (registered for the channel and the
+// archetype). The `for` then reads those (the ghosts). They are dropped
+// when it ends.
+
+typedef struct {
+  char *column;  // the field's column, `each` bytes a row
+  int64_t each;
+  char *present; // an optional component's presence, or 0
+} ent_ghost_column;
+
+typedef struct {
+  uint64_t key;  // channel << 56 | archetype << 48 | row, or 0 for none
+  int64_t value;
+  int32_t found;
+  int32_t asked; // asked of the owner, not yet given
+} ent_ghost;
+
+static ent_ghost_column *ent_ghost_columns = 0; // [channel * 256 + archetype]
+static int32_t ent_ghost_channels = 0;
+static ent_ghost *ent_ghosts = 0;
+static int64_t ent_ghost_room = 0, ent_ghost_used = 0;
+static ent_box *ent_ask_out = 0;
+static int64_t ent_ask_new = 0;
+
+void ent_ranks_ghost_column(int32_t channel, int32_t archetype, void *column,
+                            int64_t each, void *present) {
+  if (channel >= ent_ghost_channels) {
+    int32_t more = channel + 8;
+    ent_ghost_columns =
+        realloc(ent_ghost_columns, sizeof(ent_ghost_column) * 256 * more);
+    for (int64_t i = 256 * (int64_t)ent_ghost_channels; i < 256 * (int64_t)more; ++i)
+      ent_ghost_columns[i] = (ent_ghost_column){0, 0, 0};
+    ent_ghost_channels = more;
+  }
+  ent_ghost_columns[channel * 256 + archetype] =
+      (ent_ghost_column){column, each, present};
+}
+
+static uint64_t ent_ghost_key(int32_t channel, int32_t archetype, int64_t row) {
+  return ((uint64_t)(channel + 1) << 56) | ((uint64_t)archetype << 48) |
+         (uint64_t)row;
+}
+
+static ent_ghost *ent_ghost_slot(uint64_t key, int make) {
+  if (make && 2 * (ent_ghost_used + 1) > ent_ghost_room) {
+    int64_t room = ent_ghost_room ? 2 * ent_ghost_room : 1 << 16;
+    ent_ghost *old = ent_ghosts;
+    int64_t old_room = ent_ghost_room;
+    ent_ghosts = calloc(room, sizeof(ent_ghost));
+    ent_ghost_room = room;
+    ent_ghost_used = 0;
+    for (int64_t i = 0; i < old_room; ++i)
+      if (old[i].key) {
+        ent_ghost *slot = ent_ghost_slot(old[i].key, 1);
+        *slot = old[i];
+        ++ent_ghost_used;
+      }
+    free(old);
+  }
+  if (!ent_ghost_room)
+    return 0;
+  uint64_t h = key * 0x9e3779b97f4a7c15ull;
+  for (int64_t i = (int64_t)(h >> 20) & (ent_ghost_room - 1);;
+       i = (i + 1) & (ent_ghost_room - 1)) {
+    if (ent_ghosts[i].key == key)
+      return &ent_ghosts[i];
+    if (!ent_ghosts[i].key) {
+      if (!make)
+        return 0;
+      ent_ghosts[i].key = key;
+      ++ent_ghost_used;
+      return &ent_ghosts[i];
+    }
+  }
+}
+
+// In the asking pass: the field of row `row` of `archetype` (another
+// rank's), asked for where it is not had yet; what is had of it so far
+// (nothing yet: 0, not found).
+int64_t ent_ranks_ask(int32_t channel, int32_t archetype, int64_t row) {
+  uint64_t key = ent_ghost_key(channel, archetype, row);
+  ent_ghost *ghost = ent_ghost_slot(key, 0);
+  if (ghost)
+    return ghost->value;
+  ghost = ent_ghost_slot(key, 1);
+  ghost->value = 0;
+  ghost->found = 0;
+  ghost->asked = 1;
+  if (!ent_ask_out)
+    ent_ask_out = calloc(ent_ranks, sizeof(ent_box));
+  ent_box *box = &ent_ask_out[ent_ranks_owner(archetype, row)];
+  ent_box_put(box, channel);
+  ent_box_put(box, archetype);
+  ent_box_put(box, row);
+  ++ent_ask_new;
+  return 0;
+}
+int32_t ent_ranks_ask_found(int32_t channel, int32_t archetype, int64_t row) {
+  ent_ghost *ghost = ent_ghost_slot(ent_ghost_key(channel, archetype, row), 0);
+  return ghost ? ghost->found : 0;
+}
+
+// What was asked, from the ranks that have it: how many were asked in
+// all (over the ranks) this time; nought when the asking is done.
+int64_t ent_ranks_fetch(void) {
+  if (!ent_ask_out)
+    ent_ask_out = calloc(ent_ranks, sizeof(ent_box));
+  int64_t asked = ent_ask_new, all = 0;
+  ent_ask_new = 0;
+  MPI_Allreduce(&asked, &all, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+  if (all == 0)
+    return 0;
+  int *sent = malloc(sizeof(int) * ent_ranks), *got = malloc(sizeof(int) * ent_ranks);
+  int *sent_at = malloc(sizeof(int) * ent_ranks), *got_at = malloc(sizeof(int) * ent_ranks);
+  int64_t total = 0;
+  for (int r = 0; r < ent_ranks; ++r) {
+    sent[r] = (int)ent_ask_out[r].count;
+    sent_at[r] = (int)total;
+    total += sent[r];
+  }
+  int64_t *out = malloc(sizeof(int64_t) * (total ? total : 1));
+  for (int r = 0, at = 0; r < ent_ranks; ++r) {
+    for (int64_t i = 0; i < ent_ask_out[r].count; ++i)
+      out[at++] = ent_ask_out[r].words[i];
+    // (Given back: a round may ask for much, the next for little.)
+    free(ent_ask_out[r].words);
+    ent_ask_out[r] = (ent_box){0, 0, 0};
+  }
+  MPI_Alltoall(sent, 1, MPI_INT, got, 1, MPI_INT, MPI_COMM_WORLD);
+  int64_t incoming = 0;
+  for (int r = 0; r < ent_ranks; ++r) {
+    got_at[r] = (int)incoming;
+    incoming += got[r];
+  }
+  int64_t *in = malloc(sizeof(int64_t) * (incoming ? incoming : 1));
+  MPI_Alltoallv(out, sent, sent_at, MPI_INT64_T, in, got, got_at, MPI_INT64_T,
+                MPI_COMM_WORLD);
+  // (The answers, in the places of the questions: value and found.)
+  int64_t *answer = malloc(sizeof(int64_t) * (incoming ? incoming : 1));
+  for (int64_t i = 0; i + 2 < incoming + 2 && i < incoming; i += 3) {
+    int32_t channel = (int32_t)in[i], archetype = (int32_t)in[i + 1];
+    int64_t row = in[i + 2];
+    ent_ghost_column *column =
+        channel < ent_ghost_channels
+            ? &ent_ghost_columns[channel * 256 + archetype]
+            : 0;
+    ent_placement *place = ent_place_of(archetype);
+    int found = column && column->column && place->rows &&
+                row - (row / place->rows) * place->rows <
+                    place->counts[row / place->rows];
+    if (found && column->present)
+      found = column->present[row] != 0;
+    int64_t value = 0;
+    if (found)
+      memcpy(&value, column->column + row * column->each, column->each);
+    answer[i] = channel;
+    answer[i + 1] = value;
+    answer[i + 2] = found;
+  }
+  int64_t *back = malloc(sizeof(int64_t) * (total ? total : 1));
+  MPI_Alltoallv(answer, got, got_at, MPI_INT64_T, back, sent, sent_at,
+                MPI_INT64_T, MPI_COMM_WORLD);
+  for (int64_t i = 0; i < total; i += 3) {
+    ent_ghost *ghost = ent_ghost_slot(
+        ent_ghost_key((int32_t)out[i], (int32_t)out[i + 1], out[i + 2]), 0);
+    if (ghost) {
+      ghost->value = back[i + 1];
+      ghost->found = (int32_t)back[i + 2];
+      ghost->asked = 0;
+    }
+  }
+  free(out);
+  free(in);
+  free(answer);
+  free(back);
+  free(sent);
+  free(got);
+  free(sent_at);
+  free(got_at);
+  return all;
+}
+
+// In the `for` itself: the ghost of the field of row `row` of `archetype`
+// (another rank's), and whether its entity was found. One not asked for
+// stops the program.
+static ent_ghost *ent_ghost_had(int32_t channel, int32_t archetype,
+                                int64_t row) {
+  ent_ghost *ghost = ent_ghost_slot(ent_ghost_key(channel, archetype, row), 0);
+  if (!ghost || ghost->asked) {
+    char why[240];
+    snprintf(why, sizeof why,
+             "rank %d looks up an entity of rank %d (row %lld of archetype "
+             "%d) that its asking did not come to (the `for` chose it by "
+             "something it wrote first): not on many ranks yet",
+             ent_rank, ent_ranks_owner(archetype, row), (long long)row,
+             archetype);
+    ent_ranks_stop(why);
+  }
+  return ghost;
+}
+int64_t ent_ranks_ghost(int32_t channel, int32_t archetype, int64_t row) {
+  return ent_ghost_had(channel, archetype, row)->value;
+}
+int32_t ent_ranks_ghost_found(int32_t channel, int32_t archetype,
+                              int64_t row) {
+  return ent_ghost_had(channel, archetype, row)->found;
+}
+// The ghosts of a `for`, dropped when it ends.
+void ent_ranks_ghosts_drop(void) {
+  free(ent_ghosts);
+  ent_ghosts = 0;
+  ent_ghost_room = ent_ghost_used = 0;
+}
+
+// Whether lookups of other ranks' entities are asked for (ENT_GHOSTS=ask:
+// what a rank holds of them is only what its rows look up, for worlds
+// larger than a machine), or the fields looked up are gathered whole on
+// every rank (faster where they fit).
+int32_t ent_ranks_ghosts_ask(void) {
+  static int ask = -1;
+  if (ask < 0) {
+    const char *how = getenv("ENT_GHOSTS");
+    ask = how && !strcmp(how, "ask");
+  }
+  return ask;
 }

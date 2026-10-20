@@ -121,6 +121,14 @@
 // RUN: diff %t.city.one %t.city.p3
 // RUN: %ent run %S/Inputs/ranks_trace.ent --ranks 3 --partitions > %t.trace.p3
 // RUN: diff %t.trace.one %t.trace.p3
+// Lookups of other ranks' entities asked for (ENT_GHOSTS=ask), not
+// gathered whole.
+// RUN: env ENT_GHOSTS=ask ENT_BLOCK=14 %ent run %S/Inputs/ranks_cross.ent --ranks 3 --partitions > %t.cross.a3
+// RUN: diff %t.cross.one %t.cross.a3
+// RUN: env ENT_GHOSTS=ask ENT_BLOCK=100 %ent run %S/Inputs/ranks_city.ent --ranks 3 --partitions > %t.city.a3
+// RUN: diff %t.city.one %t.city.a3
+// RUN: env ENT_GHOSTS=ask %ent run %S/Inputs/ranks_trace.ent --ranks 3 --partitions > %t.trace.a3
+// RUN: diff %t.trace.one %t.trace.a3
 // RUN: %ent run %S/Inputs/ranks_fraction.ent --ranks 4 --partitions > %t.fraction.p4
 // RUN: diff %t.fraction.one %t.fraction.p4
 // RUN: not %ent build %S/Inputs/ranks_extern.ent --ranks 2 -o %t.extern 2>&1 | FileCheck %s --check-prefix=EXTERN
