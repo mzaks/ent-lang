@@ -84,6 +84,11 @@ by those counts: what runs often inlined and laid out to run straight
 through. Runs of the instrumented program that do what the program is
 for are the ones to count; the C next to modules is not counted.
 
+The machine code says which line of which .ent each instruction was made
+from (line tables, which change no instruction): `perf report --sort
+srcline` gives the time of each line of the program, and a debugger the
+line it stopped at.
+
 A module that needs libraries says so in `m.link`: the linker's arguments
 for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
 
@@ -440,7 +445,10 @@ def build(arguments, output, directory):
     stem = os.path.splitext(os.path.basename(program))[0]
 
     module = os.path.join(directory, stem + ".mlir")
-    run([translate, "--import-ent", program, "-o", module] + includes)
+    # (With where each op comes from in the .ent, which the lines of the
+    # program's machine code are then of.)
+    run([translate, "--import-ent", program, "--mlir-print-debuginfo",
+         "-o", module] + includes)
     header = os.path.join(directory, "ent_world.h")
     run([translate, "--ent-to-c-header", module, "-o", header])
     # What the C of extern fns and procs gets: their declarations, without
@@ -589,6 +597,9 @@ def build(arguments, output, directory):
         ([] if gpu else views) + after +
         ["--convert-scf-to-cf", "--convert-to-llvm"] + finish +
         ["--reconcile-unrealized-casts",
+         # (Each instruction with the line of the .ent it was made from,
+         # for a profiler or a debugger to say: line tables only.)
+         "--ensure-debug-info-scope-on-llvm-func",
          "--ent-emit-llvm=output=" + llvm + " keep=" + keep,
          "-o", os.devnull])
 
