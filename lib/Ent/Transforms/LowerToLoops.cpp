@@ -4798,7 +4798,9 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
             "no room for another entity: ent.spawn exceeds the capacity of @" +
             spawn.getArchetypeAttr().getValue() + " (" +
             Twine(archetype->capacity) + "); 'capacity' gives more"));
-    Value id = world.allocateEntity(loc, *archetype, row);
+    // (Every rank gives a partitioned spawn its id; the rest only where
+    // the entity is written.)
+    Value id = mine ? world.allocateEntity(loc, *archetype, row) : Value();
     OpBuilder::InsertionGuard ownRow(rewriter);
     if (mine) {
       auto own = scf::IfOp::create(rewriter, loc, mine);
@@ -4862,6 +4864,8 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
           world.column(*archetype, column.component, column.field),
           ValueRange{row});
     }
+    if (!id)
+      id = world.allocateEntity(loc, *archetype, row);
     if (world.hasIds())
       memref::StoreOp::create(rewriter, loc, id, world.ids(*archetype),
                               ValueRange{row});

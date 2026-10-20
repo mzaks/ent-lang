@@ -217,12 +217,6 @@ def EntSchedule : Pass<"ent-schedule", "ModuleOp"> {
     stages are left unchanged.
   }];
   let options = [
-    Option<"partitions", "partitions", "int64_t", /*default=*/"0",
-           "With ranks: build for so many partitions (one per rank), each "
-           "with rows of its own of the declared distributed archetypes, "
-           "into which entities are spawned (placement at spawn); 0 for the "
-           "setup run whole by every rank and placement where main's first "
-           "loop starts">,
     Option<"explain", "explain", "bool", /*default=*/"false",
            "Emit a remark on each run that has to wait, naming the run it "
            "waits for and the conflict">,
