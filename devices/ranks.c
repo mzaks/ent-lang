@@ -817,89 +817,170 @@ void ent_ranks_gather_column(int32_t archetype, void *column, int64_t each) {
 }
 
 // ---------------------------------------------------------------------------
-// Edges a `for` over distributed entities connects, disconnects, or whose
-// fields it writes. Every rank has every edge, in the same places: what
-// each rank's entities do to them every rank is given and does too, in
-// the order of the ranks (which is that of the rows), so the ranks' edges
-// stay alike.
+// Edges, which live with their source's rank and, where the target is
+// another rank's, with the target's too (every rank's where an end is an
+// entity every rank has). What a `for` over distributed entities does to
+// edges (connects them, lets them go, writes their fields) is sent to the
+// ranks of the edge's two ends, as messages of a channel, each so many
+// words; when the `for` ends every rank is given its messages, by channel
+// and in the order of the ranks (that of the rows), so the copies of an
+// edge stay alike and in one process's order.
 
-int64_t ent_sends_export(int64_t number, int64_t **words);
-void ent_sends_import(int64_t number, const int64_t *words, int64_t count);
+typedef struct {
+  int64_t *words; // channel, length, then the words, message by message
+  int64_t count, room;
+} ent_box;
 
-// (Each rank's words, one after another in the order of the ranks, on
-// every rank; `*all` taken with malloc.)
-static int64_t ent_gather_words(const int64_t *mine, int64_t count,
-                                int64_t **all) {
-  int *counts = malloc(sizeof(int) * ent_ranks);
-  int *starts = malloc(sizeof(int) * ent_ranks);
-  if (count > 0x7fffffff)
-    ent_ranks_stop("a rank gave the others more than 2^31 words of edges "
-                   "in one `for`: not on many ranks yet");
-  int sent = (int)count;
-  MPI_Allgather(&sent, 1, MPI_INT, counts, 1, MPI_INT, MPI_COMM_WORLD);
+static ent_box *ent_msg_out = 0;
+static int *ent_msg_dest = 0;
+static int ent_msg_dests = 0;
+// (What was given: by channel, where each message's words start.)
+static int64_t *ent_msg_in = 0;
+static int64_t *ent_msg_starts = 0;  // by channel: where its list starts
+static int64_t *ent_msg_list = 0;    // message word places, by channel
+static int32_t ent_msg_channels = 0;
+static int64_t ent_msg_given = 0;
+
+static void ent_box_put(ent_box *box, int64_t word) {
+  if (box->count == box->room) {
+    box->room = box->room ? 2 * box->room : 4096;
+    box->words = realloc(box->words, sizeof(int64_t) * box->room);
+  }
+  box->words[box->count++] = word;
+}
+
+// A message of `length` words on `channel` to the ranks of the rows
+// `row_a` of archetype `a` and `row_b` of `b` (once where it is one rank;
+// every rank where either is an entity every rank has, and before the
+// placement this rank alone). Its words follow, one by one.
+void ent_ranks_msg_ends(int32_t channel, int32_t length, int32_t a,
+                        int64_t row_a, int32_t b, int64_t row_b) {
+  if (!ent_msg_out) {
+    ent_msg_out = calloc(ent_ranks, sizeof(ent_box));
+    ent_msg_dest = malloc(sizeof(int) * ent_ranks);
+  }
+  if (channel >= ent_msg_channels)
+    ent_msg_channels = channel + 1;
+  ent_msg_dests = 0;
+  if (!ent_distributed) {
+    ent_msg_dest[ent_msg_dests++] = ent_rank;
+  } else {
+    int ra = ent_ranks_owner(a, row_a), rb = ent_ranks_owner(b, row_b);
+    if (ra < 0 || rb < 0) {
+      for (int r = 0; r < ent_ranks; ++r)
+        ent_msg_dest[ent_msg_dests++] = r;
+    } else {
+      ent_msg_dest[ent_msg_dests++] = ra;
+      if (rb != ra)
+        ent_msg_dest[ent_msg_dests++] = rb;
+    }
+  }
+  for (int d = 0; d < ent_msg_dests; ++d) {
+    ent_box_put(&ent_msg_out[ent_msg_dest[d]], channel);
+    ent_box_put(&ent_msg_out[ent_msg_dest[d]], length);
+  }
+}
+
+void ent_ranks_msg_word(int64_t word) {
+  for (int d = 0; d < ent_msg_dests; ++d)
+    ent_box_put(&ent_msg_out[ent_msg_dest[d]], word);
+}
+
+// Every rank's messages to every rank; then by channel, in the order of
+// the ranks they came from and each's in its order.
+void ent_ranks_msg_exchange(void) {
+  if (!ent_msg_out) {
+    ent_msg_out = calloc(ent_ranks, sizeof(ent_box));
+    ent_msg_dest = malloc(sizeof(int) * ent_ranks);
+  }
+  int *sent = malloc(sizeof(int) * ent_ranks), *got = malloc(sizeof(int) * ent_ranks);
+  int *sent_at = malloc(sizeof(int) * ent_ranks), *got_at = malloc(sizeof(int) * ent_ranks);
   int64_t total = 0;
   for (int r = 0; r < ent_ranks; ++r) {
-    if (total > 0x7fffffff)
-      ent_ranks_stop("the ranks gave each other more than 2^31 words of "
-                     "edges in one `for`: not on many ranks yet");
-    starts[r] = (int)total;
-    total += counts[r];
+    if (total + ent_msg_out[r].count > 0x7fffffff)
+      ent_ranks_stop("a rank sent more than 2^31 words of edges in one "
+                     "`for`: not on many ranks yet");
+    sent[r] = (int)ent_msg_out[r].count;
+    sent_at[r] = (int)total;
+    total += sent[r];
   }
-  *all = malloc(sizeof(int64_t) * (total > 0 ? total : 1));
-  MPI_Allgatherv(mine, sent, MPI_INT64_T, *all, counts, starts, MPI_INT64_T,
-                 MPI_COMM_WORLD);
-  free(counts);
-  free(starts);
-  return total;
-}
-
-// The edges connected from loops of a `for`'s body, on the list `number`
-// (devices/sends.c): every rank's, in the order of the ranks.
-void ent_ranks_share_list(int64_t number) {
-  if (!ent_distributed)
-    return;
-  int64_t *mine = 0, *all = 0;
-  int64_t count = ent_sends_export(number, &mine);
-  int64_t total = ent_gather_words(mine, count, &all);
-  ent_sends_import(number, all, total);
-  free(mine);
-  free(all);
-}
-
-// What a rank's entities did to edges: relation, edge, field (-1: the
-// edge is gone) and value, four words each.
-static int64_t *ent_edge_notes = 0;
-static int64_t ent_edge_count = 0, ent_edge_room = 0;
-static int64_t *ent_edge_all = 0;
-static int64_t ent_edge_all_count = 0;
-
-void ent_ranks_edge_note(int32_t relation, int64_t edge, int32_t field,
-                         int64_t value) {
-  if (!ent_distributed)
-    return;
-  if (ent_edge_count + 4 > ent_edge_room) {
-    ent_edge_room = ent_edge_room ? 2 * ent_edge_room : 4096;
-    ent_edge_notes = realloc(ent_edge_notes, sizeof(int64_t) * ent_edge_room);
+  int64_t *out = malloc(sizeof(int64_t) * (total > 0 ? total : 1));
+  for (int r = 0, at = 0; r < ent_ranks; ++r) {
+    for (int64_t i = 0; i < ent_msg_out[r].count; ++i)
+      out[at++] = ent_msg_out[r].words[i];
+    ent_msg_out[r].count = 0;
   }
-  ent_edge_notes[ent_edge_count++] = relation;
-  ent_edge_notes[ent_edge_count++] = edge;
-  ent_edge_notes[ent_edge_count++] = field;
-  ent_edge_notes[ent_edge_count++] = value;
+  int64_t incoming = 0;
+  if (ent_distributed) {
+    MPI_Alltoall(sent, 1, MPI_INT, got, 1, MPI_INT, MPI_COMM_WORLD);
+    for (int r = 0; r < ent_ranks; ++r) {
+      if (incoming > 0x7fffffff)
+        ent_ranks_stop("a rank was given more than 2^31 words of edges in "
+                       "one `for`: not on many ranks yet");
+      got_at[r] = (int)incoming;
+      incoming += got[r];
+    }
+    free(ent_msg_in);
+    ent_msg_in = malloc(sizeof(int64_t) * (incoming > 0 ? incoming : 1));
+    MPI_Alltoallv(out, sent, sent_at, MPI_INT64_T, ent_msg_in, got, got_at,
+                  MPI_INT64_T, MPI_COMM_WORLD);
+    free(out);
+  } else {
+    // (Before the placement, all to this rank itself.)
+    free(ent_msg_in);
+    ent_msg_in = out;
+    incoming = total;
+  }
+  free(sent);
+  free(got);
+  free(sent_at);
+  free(got_at);
+  // (By channel: counted, then their places listed.)
+  ent_msg_starts =
+      realloc(ent_msg_starts, sizeof(int64_t) * (ent_msg_channels + 1));
+  for (int32_t c = 0; c <= ent_msg_channels; ++c)
+    ent_msg_starts[c] = 0;
+  int64_t messages = 0;
+  for (int64_t at = 0; at < incoming; at += 2 + ent_msg_in[at + 1]) {
+    ++ent_msg_starts[ent_msg_in[at] + 1];
+    ++messages;
+  }
+  for (int32_t c = 0; c < ent_msg_channels; ++c)
+    ent_msg_starts[c + 1] += ent_msg_starts[c];
+  ent_msg_list = realloc(ent_msg_list, sizeof(int64_t) * (messages + 1));
+  int64_t *next = malloc(sizeof(int64_t) * (ent_msg_channels + 1));
+  for (int32_t c = 0; c <= ent_msg_channels; ++c)
+    next[c] = ent_msg_starts[c];
+  for (int64_t at = 0; at < incoming; at += 2 + ent_msg_in[at + 1])
+    ent_msg_list[next[ent_msg_in[at]]++] = at + 2;
+  free(next);
+  ent_msg_given = messages;
 }
 
-// Every rank's notes, in the order of the ranks; how many.
-int64_t ent_ranks_edge_exchange(void) {
-  free(ent_edge_all);
-  ent_edge_all = 0;
-  ent_edge_all_count = 0;
-  if (!ent_distributed)
+// How many messages this rank was given on the channel, and word `word`
+// of the `i`th.
+int64_t ent_ranks_msg_count(int32_t channel) {
+  if (channel >= ent_msg_channels || !ent_msg_starts)
     return 0;
-  ent_edge_all_count =
-      ent_gather_words(ent_edge_notes, ent_edge_count, &ent_edge_all) / 4;
-  ent_edge_count = 0;
-  return ent_edge_all_count;
+  return ent_msg_starts[channel + 1] - ent_msg_starts[channel];
 }
-// The `i`th of them: its relation, edge, field and value.
-int64_t ent_ranks_edge_word(int64_t i, int32_t word) {
-  return ent_edge_all[4 * i + word];
+int64_t ent_ranks_msg_read(int32_t channel, int64_t i, int32_t word) {
+  return ent_msg_in[ent_msg_list[ent_msg_starts[channel] + i] + word];
+}
+
+// Whether this rank keeps an edge between the rows `row_a` of archetype
+// `a` and `row_b` of `b`: where either is its own or every rank's.
+int32_t ent_ranks_keeps(int32_t a, int64_t row_a, int32_t b, int64_t row_b) {
+  if (!ent_distributed)
+    return 1;
+  int ra = ent_ranks_owner(a, row_a), rb = ent_ranks_owner(b, row_b);
+  return ra < 0 || rb < 0 || ra == ent_rank || rb == ent_rank;
+}
+
+// (ENT_RANKS_LOG: how many edges of a relation the rank kept when the
+// entities were placed.)
+void ent_ranks_log_edges(int32_t relation, int64_t had, int64_t kept) {
+  if (getenv("ENT_RANKS_LOG"))
+    fprintf(stderr, "ent: rank %d: relation %d: kept %lld of %lld edges\n",
+            ent_rank, relation, (long long)kept, (long long)had);
 }

@@ -199,23 +199,3 @@ int64_t ent_rows_sort(int64_t number) {
 }
 
 int64_t ent_rows_at(int64_t number, int64_t k) { return ent_rows[number].rows[k]; }
-
-// All that the lists with this number hold, in their order, as 64-bit
-// words two by two (`*words` taken with malloc; the caller frees it), and
-// the lists made to hold `count` words instead (on many ranks: every
-// rank's, devices/ranks.c).
-int64_t ent_sends_export(int64_t number, int64_t **words) {
-  int64_t count = 2 * ent_sends_count(number);
-  int64_t *all = malloc(sizeof(int64_t) * (count > 0 ? count : 1));
-  for (int64_t i = 0; i < count; i += 2) {
-    all[i] = ent_sends_id(number);
-    all[i + 1] = ent_sends_value(number);
-  }
-  *words = all;
-  return count;
-}
-void ent_sends_import(int64_t number, const int64_t *words, int64_t count) {
-  ent_sends_clear(number);
-  for (int64_t i = 0; i + 1 < count; i += 2)
-    ent_sends_put(number, 0, words[i], words[i + 1]);
-}

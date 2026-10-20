@@ -63,14 +63,19 @@ to the same on any number of ranks:
 - lines it writes out (`put`), each rank's after the ranks' before it, in
   the order of the rows; a `for` that takes turns (`in turn by c.number`)
   writes each rank's in its order;
-- edges gone along from its own entities (`for (p)-[w: Tie]->(o)`), to
-  entities of any rank, and the far end's fields read (`(o: Person)`, as
-  lookups): every rank has every edge;
+- edges gone along from its own entities (`for (p)-[w: Tie]->(o)`, and
+  `in`), to entities of any rank, and the far end's fields read
+  (`(o: Person)`, as lookups). An edge lives with its source's rank and,
+  where its target is another rank's, with the target's too (with every
+  rank where an end is an entity every rank has): when the entities are
+  placed each rank keeps only those edges;
 - edges connected (from the body or a loop of it, from and to entities of
-  any rank), let go of (`t.disconnect()`) and their fields written: what
-  each rank's entities did every rank is given when the `for` ends and
-  does too, in the order of the ranks, so every rank's edges stay alike
-  and in the order they have on one process;
+  any rank), let go of (`t.disconnect()`) and their fields written: each
+  sent to the ranks of the edge's ends and done there when the `for`
+  ends, in the order of the ranks, so the copies of an edge stay alike
+  and in the order they have on one process. An edge goes by the end its
+  table is sorted by, the other end, and how many edges between the two
+  come before it;
 - going along a tree (`bottom up`, `top down`), where each child lives on
   its parent's rank (distributed by its parent, or both by one number):
   each rank goes through its own entities, and what each does to itself
@@ -119,8 +124,7 @@ writes a distributed component, is refused when the program is built.
   ranks' rows of its columns back to the system (`madvise`), and keeps
   its own; the row numbers stay. A field that a `for` looks up is had
   whole again from then on. Buffers, uniques, archetypes that are not
-  distributed, relations and the table of entities every rank keeps
-  whole.
+  distributed, trees and the table of entities every rank keeps whole.
 - A `for` along a tree goes through every rank's rows, doing nothing for
   those of other ranks.
 - `--gpu` is for one process. Systems' loops are fused on many ranks as

@@ -2066,11 +2066,29 @@ static bool spreads(const WorldArchetype &archetype, QueryOp query) {
 /// children live where their parents do, see checkTreesPlaced).
 static bool rankOwnRowsOnly = false;
 /// While a query over distributed archetypes is lowered: what its
-/// entities do to edges (disconnect them, write their fields) is noted
-/// for the other ranks (ent_ranks_edge_note), and the relations it does
-/// that to (see deliverEdges).
+/// entities do to edges is sent to the ranks of the edges' ends
+/// (devices/ranks.c), on channels: for each relation, a channel of what
+/// is done to edges it has (disconnects, fields written; see noteEdge),
+/// and for each connect and archetype, one of the edges it connects (see
+/// routeEdge). When the query ends they are done where they arrive (see
+/// deliverEdges).
 static bool rankEdgeNotes = false;
-static SmallVector<const WorldRelation *> rankEdgeRelations;
+struct RankEdgeChannel {
+  const WorldRelation *relation;
+  bool note;
+  int64_t length;
+};
+static SmallVector<RankEdgeChannel> rankEdgeChannels;
+static int64_t rankEdgeChannel(const WorldRelation &relation, bool note,
+                               int64_t length) {
+  // (A relation's notes share one channel; each connect has its own.)
+  if (note)
+    for (auto [index, channel] : llvm::enumerate(rankEdgeChannels))
+      if (channel.note && channel.relation == &relation)
+        return index;
+  rankEdgeChannels.push_back({&relation, note, length});
+  return rankEdgeChannels.size() - 1;
+}
 /// Marks a lookup in a query over distributed archetypes: the field it
 /// reads is had whole on every rank while the query runs (gathered before
 /// it, see gatherGhosts), so it reads any rank's entity.
@@ -5471,94 +5489,222 @@ static void combineIntoField(IRRewriter &rewriter, Location loc,
       []() -> SmallVector<Value> { return {}; }, bounds, trusted);
 }
 
-/// On many ranks: that this rank's entity wrote field `field` of `edge`
-/// (an index) of `relation` (`stored`), or disconnected it (`field` -1),
-/// noted for the other ranks (see deliverEdges).
-static void noteEdge(IRRewriter &rewriter, Location loc,
-                     const WorldLayout &layout, const WorldRelation &relation,
-                     Value edge, int64_t field, Value stored) {
-  if (!llvm::is_contained(rankEdgeRelations, &relation))
-    rankEdgeRelations.push_back(&relation);
-  callGpu(rewriter, loc,
-          rewriter.getInsertionBlock()->getParentOp()->getParentOfType<
-              ModuleOp>(),
-          "ent_ranks_edge_note",
-          ValueRange{arith::ConstantIntOp::create(
-                         rewriter, loc, &relation - &layout.relations[0], 32),
-                     arith::IndexCastOp::create(rewriter, loc,
-                                                rewriter.getI64Type(), edge),
-                     arith::ConstantIntOp::create(rewriter, loc, field, 32),
-                     stored ? toSendBits(rewriter, loc, stored)
-                            : arith::ConstantIntOp::create(rewriter, loc, 0,
-                                                           64)});
+static std::pair<Value, Value> emitEdgeRange(IRRewriter &rewriter,
+                                             Location loc, WorldAccess &world,
+                                             const WorldRelation &relation,
+                                             bool in, Value key);
+static void appendEdge(IRRewriter &rewriter, Location loc,
+                       const WorldLayout &layout, WorldAccess &world,
+                       const WorldRelation &relation, Value source,
+                       Value target, ValueRange values);
+
+/// On many ranks: a message on `channel` to the ranks of the entities
+/// `a` and `b` (stored form), of `words` (each as 64 bits), at the
+/// insertion point (devices/ranks.c).
+static void sendToEnds(IRRewriter &rewriter, Location loc, ModuleOp module,
+                       WorldAccess &world, int64_t channel, Value a, Value b,
+                       ArrayRef<Value> words) {
+  Type i64 = rewriter.getI64Type();
+  auto [archetypeA, rowA] = world.locate(loc, a);
+  auto [archetypeB, rowB] = world.locate(loc, b);
+  callGpu(rewriter, loc, module, "ent_ranks_msg_ends",
+          ValueRange{arith::ConstantIntOp::create(rewriter, loc, channel, 32),
+                     arith::ConstantIntOp::create(rewriter, loc, words.size(),
+                                                  32),
+                     archetypeA,
+                     arith::IndexCastOp::create(rewriter, loc, i64, rowA),
+                     archetypeB,
+                     arith::IndexCastOp::create(rewriter, loc, i64, rowB)});
+  for (Value word : words)
+    callGpu(rewriter, loc, module, "ent_ranks_msg_word",
+            ValueRange{toSendBits(rewriter, loc, word)});
 }
 
-/// On many ranks, when a query over distributed archetypes ends: what
-/// every rank's entities did to edges (noteEdge), done by every rank, in
-/// the order of the ranks, so that every rank's edges stay alike.
+/// On many ranks: an edge `connect` makes, from `source` to `target` with
+/// `values` (stored form), sent to the ranks of its ends, which add it
+/// when the query ends (deliverEdges).
+static void routeEdge(IRRewriter &rewriter, Location loc, ModuleOp module,
+                      WorldAccess &world, int64_t channel, Value source,
+                      Value target, ValueRange values) {
+  SmallVector<Value> words{source, target};
+  llvm::append_range(words, values);
+  sendToEnds(rewriter, loc, module, world, channel, source, target, words);
+}
+
+/// On many ranks: that this rank's entity wrote field `field` of `edge`
+/// (an index) of `relation` (`stored`), or disconnected it (`field` -1),
+/// sent to the ranks of the edge's ends. The edge goes by what is the same
+/// in every rank's copy: the end the table is sorted by, the other, and
+/// how many edges between the two come before it.
+static void noteEdge(IRRewriter &rewriter, Location loc,
+                     const WorldLayout &layout, const WorldRelation &relation,
+                     Value edge, int64_t field, Value stored, WorldAccess &world) {
+  ModuleOp module =
+      rewriter.getInsertionBlock()->getParentOp()->getParentOfType<ModuleOp>();
+  bool byTarget = relation.byTarget;
+  Value first = memref::LoadOp::create(
+      rewriter, loc, world.edgeIds(relation, /*source=*/!byTarget),
+      ValueRange{edge});
+  Value other = memref::LoadOp::create(
+      rewriter, loc, world.edgeIds(relation, /*source=*/byTarget),
+      ValueRange{edge});
+  auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation, byTarget,
+                                    world.entityKey(loc, first));
+  (void)end;
+  Type i64 = rewriter.getI64Type();
+  auto before = scf::ForOp::create(
+      rewriter, loc, begin, edge,
+      arith::ConstantIndexOp::create(rewriter, loc, 1),
+      ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)},
+      [&](OpBuilder &, Location, Value at, ValueRange carried) {
+        Value same = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq,
+            memref::LoadOp::create(
+                rewriter, loc, world.edgeIds(relation, /*source=*/byTarget),
+                ValueRange{at}),
+            other);
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::AddIOp::create(
+                rewriter, loc, carried[0],
+                arith::ExtUIOp::create(rewriter, loc, i64, same))});
+      });
+  int64_t channel = rankEdgeChannel(relation, /*note=*/true, 5);
+  Value source = byTarget ? other : first, target = byTarget ? first : other;
+  sendToEnds(rewriter, loc, module, world, channel, source, target,
+             {first, other, before.getResult(0),
+              arith::ConstantIntOp::create(rewriter, loc, field, 64),
+              stored ? stored
+                     : arith::ConstantIntOp::create(rewriter, loc, 0, 64)});
+}
+
+/// On many ranks, when a query over distributed archetypes ends: what the
+/// ranks' entities did to edges (noteEdge, routeEdge), done where it was
+/// sent, in the order of the ranks: first what was done to edges there
+/// were, then the edges connected, as on one process.
 static void deliverEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
                          const WorldLayout &layout, WorldAccess &world) {
-  if (rankEdgeRelations.empty())
+  if (rankEdgeChannels.empty())
     return;
   OpBuilder::InsertionGuard guard(rewriter);
-  Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
-  Value notes = callGpu(rewriter, loc, module, "ent_ranks_edge_exchange",
-                        ValueRange{}, TypeRange{i64})
-                    .getResult(0);
-  auto loop = scf::ForOp::create(
-      rewriter, loc, arith::ConstantIndexOp::create(rewriter, loc, 0),
-      arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
-                                 notes),
-      arith::ConstantIndexOp::create(rewriter, loc, 1));
-  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-  Value i = arith::IndexCastOp::create(rewriter, loc, i64,
-                                       loop.getInductionVar());
-  auto word = [&](int64_t k) {
-    return callGpu(rewriter, loc, module, "ent_ranks_edge_word",
-                   ValueRange{i, arith::ConstantIntOp::create(rewriter, loc,
-                                                              k, 32)},
-                   TypeRange{i64})
-        .getResult(0);
-  };
-  Value relationIndex = word(0);
-  Value edge = arith::IndexCastOp::create(rewriter, loc,
-                                          rewriter.getIndexType(), word(1));
-  Value field = word(2);
-  Value value = word(3);
+  Type i64 = rewriter.getI64Type();
+  callGpu(rewriter, loc, module, "ent_ranks_msg_exchange", ValueRange{});
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  auto when = [&](Value a, int64_t b) {
-    auto branch = scf::IfOp::create(
-        rewriter, loc,
-        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, a,
-                              arith::ConstantIntOp::create(rewriter, loc, b,
-                                                           64)));
-    rewriter.setInsertionPoint(branch.thenBlock()->getTerminator());
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto asId = [&](Value bits) {
+    return world.idType() == i64
+               ? bits
+               : arith::TruncIOp::create(rewriter, loc, world.idType(), bits)
+                     .getResult();
   };
-  for (const WorldRelation *relation : rankEdgeRelations) {
-    OpBuilder::InsertionGuard inner(rewriter);
-    when(relationIndex, relation - &layout.relations[0]);
-    {
-      OpBuilder::InsertionGuard gone(rewriter);
-      when(field, -1);
-      memref::StoreOp::create(
-          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 8),
-          world.edgeDead(*relation), ValueRange{edge});
-      memref::StoreOp::create(rewriter, loc,
-                              arith::ConstantIntOp::create(rewriter, loc, 0,
-                                                           64),
-                              world.edgesClean(*relation), ValueRange{zero});
-    }
-    for (auto [k, column] : llvm::enumerate(relation->fields)) {
-      OpBuilder::InsertionGuard written(rewriter);
-      when(field, k);
-      memref::StoreOp::create(
+  for (bool notes : {true, false})
+    for (auto [index, channel] : llvm::enumerate(rankEdgeChannels)) {
+      if (channel.note != notes)
+        continue;
+      OpBuilder::InsertionGuard inner(rewriter);
+      const WorldRelation &relation = *channel.relation;
+      Value number = arith::ConstantIntOp::create(rewriter, loc, index, 32);
+      Value given = callGpu(rewriter, loc, module, "ent_ranks_msg_count",
+                            ValueRange{number}, TypeRange{i64})
+                        .getResult(0);
+      auto loop = scf::ForOp::create(
+          rewriter, loc, zero,
+          arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                     given),
+          one);
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      Value i = arith::IndexCastOp::create(rewriter, loc, i64,
+                                           loop.getInductionVar());
+      auto word = [&](int64_t k) {
+        return callGpu(rewriter, loc, module, "ent_ranks_msg_read",
+                       ValueRange{number, i,
+                                  arith::ConstantIntOp::create(rewriter, loc,
+                                                               k, 32)},
+                       TypeRange{i64})
+            .getResult(0);
+      };
+      if (!notes) {
+        SmallVector<Value> values;
+        for (auto [k, field] : llvm::enumerate(relation.fields))
+          values.push_back(fromSendBits(rewriter, loc, word(2 + k),
+                                        world.storageType(field.type)));
+        appendEdge(rewriter, loc, layout, world, relation, asId(word(0)),
+                   asId(word(1)), values);
+        continue;
+      }
+      // (The edge: of those of its first end, the how-manieth to the
+      // other.)
+      bool byTarget = relation.byTarget;
+      Value first = asId(word(0)), other = asId(word(1));
+      Value nth = word(2), field = word(3), value = word(4);
+      auto [begin, end] = emitEdgeRange(rewriter, loc, world, relation,
+                                        byTarget, world.entityKey(loc, first));
+      Value none = arith::ConstantIntOp::create(rewriter, loc, -1, 64);
+      auto search = scf::ForOp::create(
+          rewriter, loc, begin, end, one,
+          ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64), none},
+          [&](OpBuilder &, Location, Value at, ValueRange carried) {
+            Value same = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::eq,
+                memref::LoadOp::create(
+                    rewriter, loc,
+                    world.edgeIds(relation, /*source=*/byTarget),
+                    ValueRange{at}),
+                other);
+            Value hit = arith::AndIOp::create(
+                rewriter, loc, same,
+                arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                      carried[0], nth));
+            Value found = arith::SelectOp::create(
+                rewriter, loc, hit,
+                arith::IndexCastOp::create(rewriter, loc, i64, at),
+                carried[1]);
+            scf::YieldOp::create(
+                rewriter, loc,
+                ValueRange{arith::AddIOp::create(
+                               rewriter, loc, carried[0],
+                               arith::ExtUIOp::create(rewriter, loc, i64,
+                                                      same)),
+                           found});
+          });
+      auto ifFound = scf::IfOp::create(
           rewriter, loc,
-          fromSendBits(rewriter, loc, value, world.storageType(column.type)),
-          world.edgeField(*relation, column), ValueRange{edge});
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
+                                search.getResult(1),
+                                arith::ConstantIntOp::create(rewriter, loc, 0,
+                                                             64)));
+      rewriter.setInsertionPoint(ifFound.thenBlock()->getTerminator());
+      Value edge = arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), search.getResult(1));
+      auto when = [&](int64_t k) {
+        auto branch = scf::IfOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                  field,
+                                  arith::ConstantIntOp::create(rewriter, loc,
+                                                               k, 64)));
+        rewriter.setInsertionPoint(branch.thenBlock()->getTerminator());
+      };
+      if (relation.deadOffset) {
+        OpBuilder::InsertionGuard gone(rewriter);
+        when(-1);
+        memref::StoreOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 8),
+            world.edgeDead(relation), ValueRange{edge});
+        memref::StoreOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+            world.edgesClean(relation), ValueRange{zero});
+      }
+      for (auto [k, column] : llvm::enumerate(relation.fields)) {
+        OpBuilder::InsertionGuard written(rewriter);
+        when(k);
+        memref::StoreOp::create(
+            rewriter, loc,
+            fromSendBits(rewriter, loc, value, world.storageType(column.type)),
+            world.edgeField(relation, column), ValueRange{edge});
+      }
     }
-  }
-  (void)i32;
-  rankEdgeRelations.clear();
+  rankEdgeChannels.clear();
 }
 
 /// On many ranks, when a query over distributed archetypes ends: what its
@@ -6061,9 +6207,10 @@ static void combineEdgeApplied(IRRewriter &rewriter, ApplyOp apply,
   Value flags = world.applyBuffer(apply, archetype).first;
   auto [ids, values] = world.edgeApplyBuffer(apply);
   LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
-  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  auto rows = scf::ForOp::create(rewriter, loc, zero, count, one);
+  // (On many ranks, this rank's rows.)
+  auto rows = scf::ForOp::create(
+      rewriter, loc, firstRowOf(rewriter, loc, archetype), count, one);
   rewriter.setInsertionPoint(rows.getBody()->getTerminator());
   Value row = rows.getInductionVar();
   Value flag = memref::LoadOp::create(rewriter, loc, flags, ValueRange{row});
@@ -6222,7 +6369,7 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                               ValueRange{edge});
       if (rankEdgeNotes)
         noteEdge(rewriter, set.getLoc(), layout, relation, edge,
-                 field - relation.fields.begin(), stored);
+                 field - relation.fields.begin(), stored, world);
       rewriter.eraseOp(set);
     }
   }
@@ -6253,7 +6400,7 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                             arith::ConstantIntOp::create(rewriter, at, 1, 8),
                             world.edgeDead(relation), ValueRange{edge});
     if (rankEdgeNotes)
-      noteEdge(rewriter, at, layout, relation, edge, -1, Value());
+      noteEdge(rewriter, at, layout, relation, edge, -1, Value(), world);
     // (The edge's target loses a child.)
     if (relation.childTicksOffset) {
       memref::StoreOp::create(
@@ -7091,27 +7238,15 @@ static void appendConnected(IRRewriter &rewriter, ConnectOp connect,
       world.connectBuffer(connect, archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  // (On many ranks, of a distributed archetype: every rank's rows' edges,
-  // their places given to every rank first, so every rank adds them all
-  // in the order of the rows.)
-  if (rankFirstRows.lookup(&archetype)) {
-    ModuleOp module = connect->getParentOfType<ModuleOp>();
-    SmallVector<Value> columns{buffers.sources, buffers.targets};
-    llvm::append_range(columns, buffers.values);
-    for (Value column : columns) {
-      Type element = cast<MemRefType>(column.getType()).getElementType();
-      int64_t each =
-          std::max<int64_t>(1, element.getIntOrFloatBitWidth() / 8);
-      callGpu(rewriter, loc, module, "ent_ranks_gather_column",
-              ValueRange{arith::ConstantIntOp::create(rewriter, loc,
-                                                      archetype.index, 32),
-                         worldPointer(rewriter, loc, column),
-                         arith::ConstantIntOp::create(rewriter, loc, each,
-                                                      64)});
-    }
-    count = world.count(loc, archetype);
-  }
-  auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+  // (On many ranks, of a distributed archetype: this rank's rows' edges,
+  // sent to the ranks of their ends, which add them when the query ends.)
+  Value from = rankFirstRows.lookup(&archetype);
+  int64_t channel =
+      from ? rankEdgeChannel(relation, /*note=*/false,
+                             2 + relation.fields.size())
+           : -1;
+  auto loop = scf::ForOp::create(rewriter, loc, from ? from : zero, count,
+                                 one);
   rewriter.setInsertionPoint(loop.getBody()->getTerminator());
   Value row = loop.getInductionVar();
   Value source =
@@ -7126,7 +7261,11 @@ static void appendConnected(IRRewriter &rewriter, ConnectOp connect,
   for (Value column : buffers.values)
     values.push_back(
         memref::LoadOp::create(rewriter, loc, column, ValueRange{row}));
-  appendEdge(rewriter, loc, layout, world, relation, source, target, values);
+  if (from)
+    routeEdge(rewriter, loc, connect->getParentOfType<ModuleOp>(), world,
+              channel, source, target, values);
+  else
+    appendEdge(rewriter, loc, layout, world, relation, source, target, values);
 }
 
 /// The row `at` (an index) of `buffer` gets `values` (stored form); the
@@ -10320,10 +10459,12 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
   const WorldRelation &relation =
       layout.getRelation(connect.getRelationAttr().getAttr());
   Value list = sendList(rewriter, loc, connect, archetype);
-  // (On many ranks: every rank's, in the order of the ranks.)
-  if (rankFirstRows.lookup(&archetype))
-    callGpu(rewriter, loc, connect->getParentOfType<ModuleOp>(),
-            "ent_ranks_share_list", ValueRange{list});
+  // (On many ranks: sent to the ranks of their ends, see appendConnected.)
+  bool route = bool(rankFirstRows.lookup(&archetype));
+  int64_t channel =
+      route ? rankEdgeChannel(relation, /*note=*/false,
+                              2 + relation.fields.size())
+            : -1;
   int64_t each = 1 + (relation.fields.size() + 1) / 2;
   Value edges = arith::DivUIOp::create(
       rewriter, loc,
@@ -10353,7 +10494,11 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
   // (A last value without another after it: on to the next one.)
   if (relation.fields.size() % 2 == 1)
     next(true);
-  appendEdge(rewriter, loc, layout, world, relation, source, target, values);
+  if (route)
+    routeEdge(rewriter, loc, connect->getParentOfType<ModuleOp>(), world,
+              channel, source, target, values);
+  else
+    appendEdge(rewriter, loc, layout, world, relation, source, target, values);
   rewriter.setInsertionPointAfter(loop);
   callSends(rewriter, loc, "ent_sends_clear", {list}, false);
 }
@@ -13943,6 +14088,77 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
   }
   // (From now on the ranks' parts are combined and given to each other.)
   callGpu(rewriter, loc, module, "ent_ranks_distribute", ValueRange{});
+  // Each rank keeps the edges with an end of its own (or every rank's),
+  // in their order, and the table is sorted anew. (A tree's children
+  // live with their parents: a tree is kept as it is.)
+  for (const WorldRelation &relation : layout.relations) {
+    if (relation.tree || relation.linked)
+      continue;
+    OpBuilder::InsertionGuard guard(rewriter);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value counter = world.edgeCount(relation);
+    Value count = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}));
+    SmallVector<Value> columns{world.edgeIds(relation, /*source=*/true),
+                               world.edgeIds(relation, /*source=*/false)};
+    for (const WorldColumn &field : relation.fields)
+      columns.push_back(world.edgeField(relation, field));
+    if (relation.deadOffset)
+      columns.push_back(world.edgeDead(relation));
+    auto loop = scf::ForOp::create(rewriter, loc, zero, count, one,
+                                   ValueRange{zero});
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(loop.getBody());
+      Value edge = loop.getInductionVar();
+      Value kept = loop.getRegionIterArgs()[0];
+      auto [a, rowA] = world.locate(
+          loc, memref::LoadOp::create(rewriter, loc, columns[0],
+                                      ValueRange{edge}));
+      auto [b, rowB] = world.locate(
+          loc, memref::LoadOp::create(rewriter, loc, columns[1],
+                                      ValueRange{edge}));
+      Value keeps = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ne,
+          callGpu(rewriter, loc, module, "ent_ranks_keeps",
+                  ValueRange{a, arith::IndexCastOp::create(rewriter, loc, i64,
+                                                           rowA),
+                             b, arith::IndexCastOp::create(rewriter, loc, i64,
+                                                           rowB)},
+                  TypeRange{i32})
+              .getResult(0),
+          arith::ConstantIntOp::create(rewriter, loc, 0, 32));
+      auto ifKept = scf::IfOp::create(rewriter, loc, TypeRange{kept.getType()},
+                                      keeps, /*withElseRegion=*/true);
+      rewriter.setInsertionPointToStart(ifKept.thenBlock());
+      for (Value column : columns)
+        memref::StoreOp::create(
+            rewriter, loc,
+            memref::LoadOp::create(rewriter, loc, column, ValueRange{edge}),
+            column, ValueRange{kept});
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{arith::AddIOp::create(rewriter, loc, kept, one)});
+      rewriter.setInsertionPointToStart(ifKept.elseBlock());
+      scf::YieldOp::create(rewriter, loc, ValueRange{kept});
+      rewriter.setInsertionPointAfter(ifKept);
+      scf::YieldOp::create(rewriter, loc, ifKept.getResults());
+    }
+    Value kept =
+        arith::IndexCastOp::create(rewriter, loc, i64, loop.getResult(0));
+    callGpu(rewriter, loc, module, "ent_ranks_log_edges",
+            ValueRange{arith::ConstantIntOp::create(
+                           rewriter, loc, &relation - &layout.relations[0],
+                           32),
+                       arith::IndexCastOp::create(rewriter, loc, i64, count),
+                       kept});
+    memref::StoreOp::create(rewriter, loc, kept, counter, ValueRange{zero});
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                            world.edgesClean(relation), ValueRange{zero});
+    callSort(rewriter, loc, relation, world.getArena());
+  }
 }
 
 /// How many rows of a running sum's scan one turn of a loop combines (see
@@ -14780,7 +14996,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   llvm::SaveAndRestore keepPosting(rankPosting, spread);
   llvm::SaveAndRestore keepEdgeNotes(rankEdgeNotes, spread);
   rankChannels.clear();
-  rankEdgeRelations.clear();
+  rankEdgeChannels.clear();
   bool captured = false;
   // (Each unique field accumulated into: what it held before.)
   SmallVector<SpreadCell> spreadCells;
@@ -15521,7 +15737,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   llvm::SaveAndRestore keepPosting(rankPosting, spread);
   llvm::SaveAndRestore keepEdgeNotes(rankEdgeNotes, spread);
   rankChannels.clear();
-  rankEdgeRelations.clear();
+  rankEdgeChannels.clear();
   SmallVector<SpreadCell> spreadCells;
   SmallVector<const WorldBuffer *> sharedBuffers;
   if (spread) {
