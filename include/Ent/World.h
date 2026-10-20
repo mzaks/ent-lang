@@ -67,6 +67,14 @@ struct WorldArchetype {
   /// row is this rank's (see lowerMain). Not saved.
   uint64_t rankFirstOffset = 0;
   uint64_t rankEndOffset = 0;
+  /// Built for partitions (`ent.partitions`), of a declared distributed
+  /// archetype: the rows of each partition, which has rows
+  /// [p * partitionRows, p * partitionRows + count of p); `capacity` is
+  /// all of them. And where the count of each partition is kept (i64 each,
+  /// on every rank).
+  int64_t partitionRows = 0;
+  uint64_t partitionCountsOffset = 0;
+  bool isPartitioned() const { return partitionRows != 0; }
 
   bool hasPending() const { return pendingOffset != 0; }
   /// Distributed without being declared so: a `for` over it goes over a
@@ -703,6 +711,9 @@ struct WorldLayout {
   /// (`distribute Colony by number`), a whole number (ranges of it) or an
   /// entity (with that one). Its archetypes are distributed.
   static constexpr llvm::StringLiteral kDistributeAttr = "ent.distribute";
+  /// On the module: built for so many partitions (`--partitions`), each
+  /// declared distributed archetype with rows of each partition's own.
+  static constexpr llvm::StringLiteral kPartitionsAttr = "ent.partitions";
   /// On a buffer that an `!ent.index_of` reads: room for a power of two of
   /// rows, which such a row number is masked to.
   static constexpr llvm::StringLiteral kIndexedAttr = "ent.indexed";

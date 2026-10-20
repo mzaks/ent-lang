@@ -279,6 +279,15 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       entry.distributeComponent = name.getAttr();
       entry.distributeField = field;
     }
+    // (Built for partitions: each partition rows of its own, twice an even
+    // share of the capacity, which costs nothing where it is not used.)
+    if (auto partitions =
+            module->getAttrOfType<IntegerAttr>(WorldLayout::kPartitionsAttr);
+        partitions && partitions.getInt() > 0 && entry.distributeField) {
+      int64_t n = partitions.getInt();
+      entry.partitionRows = std::max<int64_t>(1, (2 * entry.capacity + n - 1) / n);
+      entry.capacity = n * entry.partitionRows;
+    }
     layout.archetypes.push_back(std::move(entry));
   }
   layout.countsBytes = 8 * layout.archetypes.size();
@@ -1203,6 +1212,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     archetype.rankFirstOffset = end;
     archetype.rankEndOffset = end + 8;
     end += 16;
+    if (archetype.isPartitioned()) {
+      archetype.partitionCountsOffset = end;
+      end += 8 * cast<IntegerAttr>(module->getAttr(WorldLayout::kPartitionsAttr))
+                     .getInt();
+    }
   }
   for (WorldBuffer &buffer : layout.buffers) {
     StringAttr name = cast<BufferOp>(buffer.op).getSymNameAttr();

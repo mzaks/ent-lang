@@ -1,16 +1,13 @@
-// On many ranks: a `for` over distributed cells that adds fractions into
-// a unique, which the ranks' parts would add up in another order than
-// one process: refused when the program is built (ranks.test). (In
-// `main`'s loop: before it, the setup, every rank goes through all.)
+// On many ranks: a `for` over distributed cells that sets a unique with
+// `=`, where the last row wins: refused when the program is built
+// (ranks.test). (In `main`'s loop: before it, the setup, every rank goes
+// through all.)
 import console
-component Cell { number: i32, weight: f32 } capacity 100
+component Cell { number: i32 } capacity 100
 distribute Cell by number
-unique Total: f32
-system weigh() {
-  Total = 0.0
-  for c: Cell { Total += c.weight }
-}
-system report() { put("total {Total}") }
-schedule frame() { weigh()  report() }
-world { for i in 0..10 { spawn { Cell { number: i, weight: 0.5 } } } }
-main { loop { frame() } until Total > 1.0 }
+unique Last: i32
+system mark() { for c: Cell { Last = c.number } }
+system report() { put("last {Last}") }
+schedule frame() { mark()  report() }
+world { for i in 0..10 { spawn { Cell { number: i } } } }
+main { loop { frame() } until Last > 1 }

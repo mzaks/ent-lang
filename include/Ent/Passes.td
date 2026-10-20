@@ -89,6 +89,12 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
            "started and ended around main, and what a device (an extern "
            "proc) does done by rank 0, what it gives back given every "
            "rank">,
+    Option<"partitions", "partitions", "int64_t", /*default=*/"0",
+           "With ranks: build for so many partitions (one per rank), each "
+           "with rows of its own of the declared distributed archetypes, "
+           "into which entities are spawned (placement at spawn); 0 for the "
+           "setup run whole by every rank and placement where main's first "
+           "loop starts">,
     Option<"explain", "explain", "bool", /*default=*/"false",
            "Emit remarks on lowering decisions, such as reactive queries "
            "that scan every entity instead of walking event logs">,
@@ -211,6 +217,12 @@ def EntSchedule : Pass<"ent-schedule", "ModuleOp"> {
     stages are left unchanged.
   }];
   let options = [
+    Option<"partitions", "partitions", "int64_t", /*default=*/"0",
+           "With ranks: build for so many partitions (one per rank), each "
+           "with rows of its own of the declared distributed archetypes, "
+           "into which entities are spawned (placement at spawn); 0 for the "
+           "setup run whole by every rank and placement where main's first "
+           "loop starts">,
     Option<"explain", "explain", "bool", /*default=*/"false",
            "Emit a remark on each run that has to wait, naming the run it "
            "waits for and the conflict">,

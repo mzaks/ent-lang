@@ -1947,6 +1947,11 @@ static llvm::DenseMap<Operation *, Value> ownerTags;
 /// device is rank 0's (see lowerInvoke), and MPI starts and ends around
 /// `main` (see lowerMain).
 static bool ranksMode = false;
+/// Built for so many partitions (the pass's `partitions`; 0 for none):
+/// entities are placed when they are spawned, each into its partition's
+/// rows (see WorldArchetype::partitionRows), and everything over
+/// distributed archetypes goes through each rank's own from the start.
+static int64_t partitionCount = 0;
 /// A call of a C function of the runtime (devices/gpu.c, devices/ranks.c),
 /// declared where it is not yet.
 static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
@@ -2179,6 +2184,35 @@ static int64_t rankEdgeChannel(const WorldRelation &relation, bool note,
   rankEdgeChannels.push_back({&relation, note, length});
   return rankEdgeChannels.size() - 1;
 }
+/// Built for partitions: whether `row` (an index) of `archetype` is one its
+/// partition has (whichever rank's it is), from the counts every rank keeps.
+static Value partitionHasRow(IRRewriter &rewriter, Location loc,
+                             WorldAccess &world,
+                             const WorldArchetype &archetype, Value row) {
+  Value rows =
+      arith::ConstantIndexOp::create(rewriter, loc, archetype.partitionRows);
+  Value partitions =
+      arith::ConstantIndexOp::create(rewriter, loc, partitionCount);
+  Value partition = arith::DivUIOp::create(rewriter, loc, row, rows);
+  Value valid = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
+                                      partition, partitions);
+  Value at = arith::SelectOp::create(
+      rewriter, loc, valid, partition,
+      arith::ConstantIndexOp::create(rewriter, loc, 0));
+  Value count = world.toIndex(
+      loc, memref::LoadOp::create(
+               rewriter, loc,
+               world.array(archetype.partitionCountsOffset, partitionCount,
+                           rewriter.getI64Type()),
+               ValueRange{at}));
+  Value local = arith::SubIOp::create(
+      rewriter, loc, row, arith::MulIOp::create(rewriter, loc, at, rows));
+  return arith::AndIOp::create(
+      rewriter, loc, valid,
+      arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, local,
+                            count));
+}
+
 /// Marks a lookup in a query over distributed archetypes: the field it
 /// reads is had whole on every rank while the query runs (gathered before
 /// it, see gatherGhosts), so it reads any rank's entity.
@@ -2365,11 +2399,23 @@ static void noteSpreadCells(IRRewriter &rewriter, Location loc,
         return;
       Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
                                         accumulate.getFieldAttr());
+      Type type = accumulate.getValue().getType();
+      // (A fraction: what the rank before this one ended with, first: the
+      // ranks take turns, see devices/ranks.c.)
+      if (isa<FloatType>(type)) {
+        callGpu(rewriter, loc, query->getParentOfType<ModuleOp>(),
+                "ent_ranks_chain_get",
+                ValueRange{worldPointer(rewriter, loc, field),
+                           arith::ConstantIntOp::create(
+                               rewriter, loc, type.getIntOrFloatBitWidth() / 8,
+                               64)});
+        cells.push_back({field, Value(), accumulate.getRule(), type});
+        return;
+      }
       Value before = memref::LoadOp::create(
           rewriter, loc, field,
           ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
-      cells.push_back({field, before, accumulate.getRule(),
-                       accumulate.getValue().getType()});
+      cells.push_back({field, before, accumulate.getRule(), type});
     });
 }
 
@@ -2380,7 +2426,18 @@ static void reduceOverRanks(IRRewriter &rewriter, Location loc,
                             ModuleOp module, ArrayRef<SpreadCell> cells) {
   Type i64 = rewriter.getI64Type();
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  // (Fractions: given on to the next rank, the last one's to every rank.)
+  for (StringRef step : {"ent_ranks_chain_put", "ent_ranks_chain_last"})
+    for (auto [field, before, rule, type] : cells)
+      if (isa<FloatType>(type))
+        callGpu(rewriter, loc, module, step,
+                ValueRange{worldPointer(rewriter, loc, field),
+                           arith::ConstantIntOp::create(
+                               rewriter, loc, type.getIntOrFloatBitWidth() / 8,
+                               64)});
   for (auto [field, before, rule, type] : cells) {
+    if (isa<FloatType>(type))
+      continue;
     bool noSign = hasNoSign(type);
     auto wide = [&](Value value) {
       return wideForRanks(rewriter, loc, value, noSign);
@@ -4602,6 +4659,102 @@ emitPartWith(IRRewriter &rewriter, Location loc, StringRef name,
 static void emitPart(IRRewriter &rewriter, Location loc, const Twine &name,
                      function_ref<void()> emit);
 
+/// Built for partitions: the row a spawn into the partitioned `archetype`
+/// takes, and whether it is this rank's. The partition is that of the
+/// value of what the archetype is distributed by (ent_ranks_partition_of)
+/// or of the entity it names; the row the next of the partition's, whose
+/// count every rank keeps, so ids are alike on every rank.
+static std::pair<Value, Value> spawnPartitioned(IRRewriter &rewriter,
+                                                SpawnOp spawn,
+                                                const WorldArchetype &archetype,
+                                                WorldAccess &world) {
+  Location loc = spawn.getLoc();
+  ModuleOp module = spawn->getParentOfType<ModuleOp>();
+  Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
+  Value index =
+      arith::ConstantIntOp::create(rewriter, loc, archetype.index, 32);
+  // The value it is distributed by, where the spawn gives it.
+  Value value;
+  unsigned at = 0;
+  ArchetypeOp archetypeOp = archetype.op;
+  SmallVector<Attribute> started;
+  if (ArrayAttr listed = spawn.getComponentsAttr())
+    started.assign(listed.begin(), listed.end());
+  else
+    for (Attribute attr : archetypeOp.getComponents())
+      if (!archetypeOp.isOptional(cast<FlatSymbolRefAttr>(attr)))
+        started.push_back(attr);
+  for (Attribute attr : started) {
+    auto component = SymbolTable::lookupNearestSymbolFrom<ComponentOp>(
+        spawn, cast<FlatSymbolRefAttr>(attr));
+    ArrayAttr names = component.getFieldNames();
+    if (cast<FlatSymbolRefAttr>(attr).getAttr() ==
+        archetype.distributeComponent)
+      for (auto [k, name] : llvm::enumerate(names))
+        if (cast<StringAttr>(name) == archetype.distributeField)
+          value = spawn.getValues()[at + k];
+    at += names.size();
+  }
+  Value partition;
+  if (!value) {
+    partition = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
+  } else if (isa<EntityType>(value.getType())) {
+    auto [home, homeRow] = world.locate(loc, world.toStorage(loc, value));
+    partition = callGpu(rewriter, loc, module, "ent_ranks_owner_of_home",
+                        ValueRange{home, arith::IndexCastOp::create(
+                                             rewriter, loc, i64, homeRow)},
+                        TypeRange{i32})
+                    .getResult(0);
+  } else {
+    Value stored = world.toStorage(loc, value);
+    unsigned bits = stored.getType().getIntOrFloatBitWidth();
+    Value wide = bits == 64 ? stored
+                 : hasNoSign(value.getType())
+                     ? arith::ExtUIOp::create(rewriter, loc, i64, stored)
+                           .getResult()
+                     : arith::ExtSIOp::create(rewriter, loc, i64, stored)
+                           .getResult();
+    partition = callGpu(rewriter, loc, module, "ent_ranks_partition_of",
+                        ValueRange{index, wide}, TypeRange{i32})
+                    .getResult(0);
+  }
+  Value p = arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                       partition);
+  Value counts = world.array(archetype.partitionCountsOffset, partitionCount,
+                             i64);
+  Value count = memref::LoadOp::create(rewriter, loc, counts, ValueRange{p});
+  cf::AssertOp::create(
+      rewriter, loc,
+      arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::slt, count,
+          arith::ConstantIntOp::create(rewriter, loc, archetype.partitionRows,
+                                       64)),
+      rewriter.getStringAttr(
+          "no room for another entity in its partition: @" +
+          ArchetypeOp(archetype.op).getSymName() + " has " +
+          Twine(archetype.partitionRows) +
+          " rows a partition; a larger 'capacity', or a block (ENT_BLOCK) "
+          "that spreads the entities more evenly"));
+  memref::StoreOp::create(
+      rewriter, loc,
+      arith::AddIOp::create(rewriter, loc, count,
+                            arith::ConstantIntOp::create(rewriter, loc, 1, 64)),
+      counts, ValueRange{p});
+  Value row = arith::AddIOp::create(
+      rewriter, loc,
+      arith::MulIOp::create(
+          rewriter, loc, p,
+          arith::ConstantIndexOp::create(rewriter, loc, archetype.partitionRows)),
+      arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                 count));
+  Value mine = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::eq, partition,
+      callGpu(rewriter, loc, module, "ent_ranks_rank", ValueRange{},
+              TypeRange{i32})
+          .getResult(0));
+  return {row, mine};
+}
+
 static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
                         const WorldLayout &layout, WorldAccess &world) {
   SmallVector<SpawnOp> spawns;
@@ -4625,7 +4778,16 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
           rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
           world.edgesClean(layout.getRelation(archetype->sortedBy)),
           ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
-    Value row = world.count(loc, *archetype);
+    ArchetypeOp archetypeOp = archetype->op;
+    // (Built for partitions: the entity goes to the partition of what its
+    // archetype is distributed by, at the next of that partition's rows;
+    // what is in the row is written by the rank whose partition it is.)
+    Value row, mine;
+    if (archetype->isPartitioned())
+      std::tie(row, mine) =
+          spawnPartitioned(rewriter, spawn, *archetype, world);
+    else
+      row = world.count(loc, *archetype);
     Value capacity =
         arith::ConstantIndexOp::create(rewriter, loc, archetype->capacity);
     Value fits = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult,
@@ -4636,7 +4798,12 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
             "no room for another entity: ent.spawn exceeds the capacity of @" +
             spawn.getArchetypeAttr().getValue() + " (" +
             Twine(archetype->capacity) + "); 'capacity' gives more"));
-    ArchetypeOp archetypeOp = archetype->op;
+    Value id = world.allocateEntity(loc, *archetype, row);
+    OpBuilder::InsertionGuard ownRow(rewriter);
+    if (mine) {
+      auto own = scf::IfOp::create(rewriter, loc, mine);
+      rewriter.setInsertionPoint(own.thenBlock()->getTerminator());
+    }
     // Where each component the entity starts with finds its values: in the
     // order the spawn lists them, or the archetype holds them.
     SmallVector<Attribute> started;
@@ -4695,7 +4862,6 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
           world.column(*archetype, column.component, column.field),
           ValueRange{row});
     }
-    Value id = world.allocateEntity(loc, *archetype, row);
     if (world.hasIds())
       memref::StoreOp::create(rewriter, loc, id, world.ids(*archetype),
                               ValueRange{row});
@@ -4708,8 +4874,16 @@ static void lowerSpawns(IRRewriter &rewriter, func::FuncOp func,
                     stamped, Value(), Value(), /*atomic=*/false);
       });
     Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-    world.setCount(loc, *archetype,
-                   arith::AddIOp::create(rewriter, loc, row, one));
+    Value next = arith::AddIOp::create(rewriter, loc, row, one);
+    world.setCount(loc, *archetype, next);
+    // (This rank's rows end after it: where lookups find them its own.)
+    if (mine)
+      memref::StoreOp::create(
+          rewriter, loc,
+          arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                     next),
+          world.scalar(archetype->rankEndOffset),
+          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
     return {id};
                               })[0];
     rewriter.replaceOp(spawn, world.fromStorage(loc, made, spawn.getType()));
@@ -4963,11 +5137,15 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
     any = true;
     rewriter.setInsertionPointToStart(branch.thenBlock());
     Value inRow = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
-    if (scheme.kind == EntityScheme::Rows)
+    if (scheme.kind == EntityScheme::Rows && archetype.isPartitioned()) {
+      // (Built for partitions: inside its partition's rows, of any rank.)
+      inRow = partitionHasRow(rewriter, loc, world, archetype, row);
+    } else if (scheme.kind == EntityScheme::Rows) {
       inRow = arith::CmpIOp::create(
           rewriter, loc, arith::CmpIPredicate::ult, row,
           bounds.counts.empty() ? world.count(loc, archetype)
                                 : bounds.counts[archetype.index]);
+    }
     auto inside = guard(inRow);
     Value present;
     if (presenceOf && archetypeOp.isOptional(presenceOf)) {
@@ -7178,6 +7356,32 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
                        const WorldRelation &relation, Value source,
                        Value target, ValueRange values) {
   assertEnds(rewriter, loc, layout, world, relation, source, target);
+  // (Built for partitions: an edge is this rank's where an end is.)
+  OpBuilder::InsertionGuard kept(rewriter);
+  if (partitionCount > 0) {
+    Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
+    auto [a, rowA] = world.locate(loc, source);
+    auto [b, rowB] = world.locate(loc, target);
+    auto keeps = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne,
+            callGpu(rewriter, loc,
+                    rewriter.getInsertionBlock()
+                        ->getParentOp()
+                        ->getParentOfType<ModuleOp>(),
+                    "ent_ranks_keeps",
+                    ValueRange{a,
+                               arith::IndexCastOp::create(rewriter, loc, i64,
+                                                          rowA),
+                               b,
+                               arith::IndexCastOp::create(rewriter, loc, i64,
+                                                          rowB)},
+                    TypeRange{i32})
+                .getResult(0),
+            arith::ConstantIntOp::create(rewriter, loc, 0, 32)));
+    rewriter.setInsertionPoint(keeps.thenBlock()->getTerminator());
+  }
   // Being connected is an event of the source, where a reactive query has
   // a trigger up this tree: what it sees through a ref up it is another
   // entity's from now on.
@@ -17469,10 +17673,10 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
 
   // (On many ranks: the distributed archetypes' entities placed where
   // the first loop starts, the setup before it run whole by every rank.)
-  if (ranksMode && llvm::any_of(layout.archetypes,
-                                [](const WorldArchetype &archetype) {
-                                  return archetype.isDistributed();
-                                })) {
+  if (ranksMode && partitionCount == 0 &&
+      llvm::any_of(layout.archetypes, [](const WorldArchetype &archetype) {
+        return archetype.isDistributed();
+      })) {
     LoopOp first;
     body.walk<WalkOrder::PreOrder>([&](LoopOp loop) {
       if (!first)
@@ -17603,14 +17807,79 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
                            cast<MemRefType>(created.getType()).getNumElements(),
                            64)});
     WorldAccess started(rewriter, layout, created);
-    for (const WorldArchetype &archetype : layout.archetypes)
-      if (archetype.isDistributed())
-        memref::StoreOp::create(
-            rewriter, loc,
+    Type i32 = rewriter.getI32Type(), i64 = rewriter.getI64Type();
+    Value most = arith::ConstantIntOp::create(
+        rewriter, loc, std::numeric_limits<int64_t>::max(), 64);
+    // (Built for partitions: each distributed archetype's rows of this
+    // rank's partition, from the start; one not declared so is all
+    // partition 0's.)
+    Value rank;
+    if (partitionCount > 0)
+      callGpu(rewriter, loc, module, "ent_ranks_partitions",
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                      partitionCount, 64)});
+    if (partitionCount > 0)
+      rank = arith::ExtSIOp::create(
+          rewriter, loc, i64,
+          callGpu(rewriter, loc, module, "ent_ranks_rank", ValueRange{},
+                  TypeRange{i32})
+              .getResult(0));
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (!archetype.isDistributed())
+        continue;
+      Value first = started.scalar(archetype.rankFirstOffset);
+      Value end = started.scalar(archetype.rankEndOffset);
+      if (partitionCount == 0) {
+        memref::StoreOp::create(rewriter, loc, most, end, ValueRange{zero});
+        continue;
+      }
+      Value index =
+          arith::ConstantIntOp::create(rewriter, loc, archetype.index, 32);
+      if (archetype.isPartitioned()) {
+        Value base = arith::MulIOp::create(
+            rewriter, loc, rank,
             arith::ConstantIntOp::create(rewriter, loc,
-                                         std::numeric_limits<int64_t>::max(),
-                                         64),
-            started.scalar(archetype.rankEndOffset), ValueRange{zero});
+                                         archetype.partitionRows, 64));
+        memref::StoreOp::create(rewriter, loc, base, first, ValueRange{zero});
+        memref::StoreOp::create(rewriter, loc, base, end, ValueRange{zero});
+        started.setCount(loc, archetype,
+                         arith::IndexCastOp::create(
+                             rewriter, loc, rewriter.getIndexType(), base));
+        callGpu(rewriter, loc, module, "ent_ranks_partition",
+                ValueRange{index,
+                           arith::ConstantIntOp::create(
+                               rewriter, loc, archetype.partitionRows, 64),
+                           worldPointer(rewriter, loc,
+                                        started.array(
+                                            archetype.partitionCountsOffset,
+                                            partitionCount, i64)),
+                           arith::ConstantIntOp::create(rewriter, loc, 0,
+                                                        32)});
+        continue;
+      }
+      Value mine = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::eq, rank,
+          arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+      memref::StoreOp::create(rewriter, loc,
+                              arith::SelectOp::create(
+                                  rewriter, loc, mine,
+                                  arith::ConstantIntOp::create(rewriter, loc,
+                                                               0, 64),
+                                  most),
+                              first, ValueRange{zero});
+      memref::StoreOp::create(rewriter, loc, most, end, ValueRange{zero});
+      callGpu(rewriter, loc, module, "ent_ranks_partition",
+              ValueRange{index,
+                         arith::ConstantIntOp::create(rewriter, loc,
+                                                      archetype.capacity, 64),
+                         worldPointer(rewriter, loc,
+                                      started.array(
+                                          8 * archetype.index,
+                                          1, i64)),
+                         arith::ConstantIntOp::create(rewriter, loc, 1, 32)});
+    }
+    if (partitionCount > 0)
+      callGpu(rewriter, loc, module, "ent_ranks_distribute", ValueRange{});
   }
   func::CallOp::create(rewriter, loc, body.getSymName(), TypeRange{},
                        ValueRange{created});
@@ -18092,10 +18361,9 @@ static LogicalResult checkRanks(ModuleOp module, const WorldLayout &layout) {
         Type type = accumulate.getValue().getType();
         if (accumulate.getRule() == "set")
           return fail(op, "accumulates with '=', where the last one wins");
-        if (!type.isIntOrIndex())
-          return fail(op, "accumulates a value that is not a whole number "
-                          "(the ranks' parts would be combined in another "
-                          "order)");
+        if (!type.isIntOrIndex() && !isa<FloatType>(type))
+          return fail(op, "accumulates a value that is neither a whole "
+                          "number nor a fraction");
       }
       if (auto running = dyn_cast<RunningOp>(op)) {
         if (running.getRule() != "add" ||
@@ -18861,7 +19129,11 @@ struct EntLowerToLoops
     ownerRuns.clear();
     ownerTags.clear();
     ranksMode = ranks;
-    if (ranksMode)
+    partitionCount = ranks ? partitions : 0;
+    if (partitionCount > 0)
+      module->setAttr(WorldLayout::kPartitionsAttr,
+                      rewriter.getI64IntegerAttr(partitionCount));
+    if (ranksMode && partitionCount == 0)
       markSetupQueries(module);
     // (Those of windows are the rows their entity took: see lowerBuffers.)
     module.walk([&](BufferSetOp set) {

@@ -95,6 +95,33 @@
 // What a `for` over distributed entities cannot do yet is said when the
 // program is built.
 // RUN: not %ent build %S/Inputs/ranks_refused.ent --ranks 2 -o %t.refused 2>&1 | FileCheck %s --check-prefix=REFUSED
-// REFUSED: accumulates a value that is not a whole number
+// REFUSED: accumulates with '=', where the last one wins
+//
+// Fractions added into a unique: the ranks take turns.
+// RUN: %ent run %S/Inputs/ranks_fraction.ent > %t.fraction.one
+// RUN: %ent run %S/Inputs/ranks_fraction.ent --ranks 3 > %t.fraction.three
+// RUN: diff %t.fraction.one %t.fraction.three
+//
+// Built for partitions: entities placed where they are spawned, the
+// setup spread over the ranks too (ENT_BLOCK: values of what they are
+// distributed by a partition).
+// RUN: %ent run %S/Inputs/ranks_spread.ent --ranks 3 --partitions > %t.spread.p3
+// RUN: diff %t.spread.one %t.spread.p3
+// RUN: %ent run %S/Inputs/ranks_running.ent --ranks 4 --partitions > %t.running.p4
+// RUN: diff %t.running.one %t.running.p4
+// RUN: env ENT_BLOCK=14 %ent run %S/Inputs/ranks_colocate.ent --ranks 3 --partitions > %t.colocate.p3
+// RUN: diff %t.colocate.one %t.colocate.p3
+// RUN: %ent run %S/Inputs/ranks_buffer.ent --ranks 3 --partitions > %t.buffer.p3
+// RUN: diff %t.buffer.one %t.buffer.p3
+// RUN: env ENT_BLOCK=334 %ent run %S/Inputs/ranks_sends.ent --ranks 3 --partitions > %t.sends.p3
+// RUN: diff %t.sends.one %t.sends.p3
+// RUN: env ENT_BLOCK=14 %ent run %S/Inputs/ranks_cross.ent --ranks 3 --partitions > %t.cross.p3
+// RUN: diff %t.cross.one %t.cross.p3
+// RUN: env ENT_BLOCK=100 %ent run %S/Inputs/ranks_city.ent --ranks 3 --partitions > %t.city.p3
+// RUN: diff %t.city.one %t.city.p3
+// RUN: %ent run %S/Inputs/ranks_trace.ent --ranks 3 --partitions > %t.trace.p3
+// RUN: diff %t.trace.one %t.trace.p3
+// RUN: %ent run %S/Inputs/ranks_fraction.ent --ranks 4 --partitions > %t.fraction.p4
+// RUN: diff %t.fraction.one %t.fraction.p4
 // RUN: not %ent build %S/Inputs/ranks_extern.ent --ranks 2 -o %t.extern 2>&1 | FileCheck %s --check-prefix=EXTERN
 // EXTERN: runs the extern system @world.save_world, which works on the whole world

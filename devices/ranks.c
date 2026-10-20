@@ -199,6 +199,12 @@ typedef struct {
   int64_t *bounds; // ranks + 1
   int32_t *noted;  // while placing by an entity: each row's rank
   int dropped;     // the other ranks' rows let go (ent_ranks_drop)
+  // Built for partitions (one a rank): partition p has the rows from
+  // p * rows, as many as counts[p] says (the world's, on every rank); with
+  // first_only all are partition 0's, as many as *counts.
+  int64_t rows;
+  const int64_t *counts;
+  int first_only;
 } ent_placement;
 
 static ent_placement *ent_places = 0;
@@ -221,7 +227,7 @@ static ent_placement *ent_place_of(int32_t archetype) {
     int32_t more = archetype + 16;
     ent_places = realloc(ent_places, sizeof(ent_placement) * more);
     for (int32_t i = ent_places_known; i < more; ++i)
-      ent_places[i] = (ent_placement){0, 0, 0, 0, 0};
+      ent_places[i] = (ent_placement){0, 0, 0, 0, 0, 0, 0, 0};
     ent_places_known = more;
   }
   return &ent_places[archetype];
@@ -232,6 +238,8 @@ static ent_placement *ent_place_of(int32_t archetype) {
 // it was placed stop the program: not on many ranks yet.
 int32_t ent_ranks_unplaced(int32_t archetype, int64_t count) {
   ent_placement *place = ent_place_of(archetype);
+  if (place->rows)
+    return 0;
   if (!place->placed)
     return 1;
   if (place->count != count)
@@ -334,11 +342,56 @@ void ent_ranks_settle(int32_t archetype, int64_t count) {
   place->noted = 0;
 }
 
+// Built for partitions: the archetype's rows of each partition (one a
+// rank), and where the world keeps how many each has. Placed from the
+// start: entities are spawned into their partitions.
+void ent_ranks_partition(int32_t archetype, int64_t rows, const int64_t *counts,
+                         int32_t first_only) {
+  ent_placement *place = ent_place_of(archetype);
+  place->placed = 1;
+  place->rows = rows;
+  place->counts = counts;
+  place->first_only = first_only;
+}
+
+static int64_t ent_partition_first(const ent_placement *place, int r) {
+  if (place->first_only)
+    return r == 0 ? 0 : place->counts[0];
+  return r * place->rows;
+}
+static int64_t ent_partition_end(const ent_placement *place, int r) {
+  if (place->first_only)
+    return place->counts[0];
+  return r * place->rows + place->counts[r];
+}
+
+// The partition an entity with this value of what its archetype is
+// distributed by goes to: the value over the block (ENT_BLOCK, else half
+// the partition's rows, an even share of the capacity), the last taking
+// the rest.
+int32_t ent_ranks_partition_of(int32_t archetype, int64_t value) {
+  ent_placement *place = ent_place_of(archetype);
+  static int64_t block = -1;
+  if (block < 0) {
+    const char *given = getenv("ENT_BLOCK");
+    block = given ? atoll(given) : 0;
+  }
+  int64_t size = block > 0 ? block : (place->rows > 1 ? place->rows / 2 : 1);
+  int64_t p = value < 0 ? 0 : value / size;
+  return (int32_t)(p >= ent_ranks ? ent_ranks - 1 : p);
+}
+
 // The rank whose row it is; -1 for an archetype that is not distributed,
 // which every rank has.
 int32_t ent_ranks_owner(int32_t archetype, int64_t row) {
   if (archetype >= ent_places_known || !ent_places[archetype].placed)
     return -1;
+  if (ent_places[archetype].rows) {
+    if (ent_places[archetype].first_only)
+      return 0;
+    int64_t p = row / ent_places[archetype].rows;
+    return (int32_t)(p >= ent_ranks ? ent_ranks - 1 : p);
+  }
   const int64_t *bounds = ent_places[archetype].bounds;
   int32_t lo = 0, hi = ent_ranks - 1;
   while (lo < hi) {
@@ -366,10 +419,14 @@ int32_t ent_ranks_owner_of_home(int32_t archetype, int64_t row) {
 // them before it is placed.
 int64_t ent_ranks_first(int32_t archetype) {
   ent_placement *place = ent_place_of(archetype);
+  if (place->rows)
+    return ent_partition_first(place, ent_rank);
   return place->placed ? place->bounds[ent_rank] : 0;
 }
 int64_t ent_ranks_end_row(int32_t archetype, int64_t count) {
   ent_placement *place = ent_place_of(archetype);
+  if (place->rows)
+    return ent_partition_end(place, ent_rank);
   return place->placed ? place->bounds[ent_rank + 1] : count;
 }
 
@@ -725,8 +782,12 @@ static void ent_ranks_gather_column_untimed(int32_t archetype, void *column, int
   int *counts = malloc(sizeof(int) * ent_ranks);
   int *starts = malloc(sizeof(int) * ent_ranks);
   for (int r = 0; r < ent_ranks; ++r) {
-    int64_t start = place->bounds[r] * each;
-    int64_t bytes = (place->bounds[r + 1] - place->bounds[r]) * each;
+    int64_t first = place->rows ? ent_partition_first(place, r)
+                                : place->bounds[r];
+    int64_t end = place->rows ? ent_partition_end(place, r)
+                              : place->bounds[r + 1];
+    int64_t start = first * each;
+    int64_t bytes = (end - first) * each;
     if (start > 0x7fffffff || bytes > 0x7fffffff)
       ent_ranks_stop("a column looked up across ranks is past 2 GB: not on "
                      "many ranks yet");
@@ -1032,4 +1093,40 @@ void ent_ranks_drop_rows(void *column, int64_t each, int64_t from,
                          int64_t to) {
   if (from < to)
     ent_let_go((char *)column + from * each, (char *)column + to * each);
+}
+
+// Built for so many partitions, one a rank: run on as many ranks.
+void ent_ranks_partitions(int64_t partitions) {
+  if (partitions != ent_ranks) {
+    char why[160];
+    snprintf(why, sizeof why,
+             "the program is built for %lld partitions, one a rank, and runs "
+             "on %d ranks",
+             (long long)partitions, ent_ranks);
+    ent_ranks_stop(why);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fractions added (or kept the least or the most) into a unique by a `for`
+// over distributed entities come out other where added in another order:
+// the ranks take turns, in their order. Before its rows a rank takes what
+// the rank before it ended with; after them it gives its own to the next;
+// the last one's is every rank's then. (Each rank's rows wait for the
+// ranks' before it.)
+void ent_ranks_chain_get(void *cell, int64_t bytes) {
+  if (!ent_distributed || ent_rank == 0)
+    return;
+  MPI_Recv(cell, (int)bytes, MPI_BYTE, ent_rank - 1, 17, MPI_COMM_WORLD,
+           MPI_STATUS_IGNORE);
+}
+void ent_ranks_chain_put(void *cell, int64_t bytes) {
+  if (!ent_distributed || ent_rank == ent_ranks - 1)
+    return;
+  MPI_Send(cell, (int)bytes, MPI_BYTE, ent_rank + 1, 17, MPI_COMM_WORLD);
+}
+void ent_ranks_chain_last(void *cell, int64_t bytes) {
+  if (!ent_distributed)
+    return;
+  MPI_Bcast(cell, (int)bytes, MPI_BYTE, ent_ranks - 1, MPI_COMM_WORLD);
 }

@@ -1,0 +1,22 @@
+// On many ranks: a `for` over distributed cells that adds fractions into
+// a unique. Added in another order they would come out other: the ranks
+// take turns, each adding its rows to what the rank before it ended
+// with, so it says what one process says (ranks.test).
+import console
+component Cell { number: i32, weight: f64 } capacity 1000
+distribute Cell by number
+unique Total: f64
+unique Days: i32
+system weigh() {
+  Total = 0.1
+  for c: Cell { Total += c.weight }
+}
+system grow() { for c: mut Cell { c.weight = c.weight * 1.37 + 1.0 / (c.number as f64 + 3.0) } }
+system report() {
+  Days += 1
+  // (Its last digits, which another order would change.)
+  put("day {Days}: total {Total} digits {(Total * 1000000000000.0) as i64 % 1000000}")
+}
+schedule day() { weigh()  grow()  report() }
+world { for i in 0..900 { spawn { Cell { number: i, weight: 1.0 / (i as f64 + 7.0) } } } }
+main { loop { day() } until Days == 3 }

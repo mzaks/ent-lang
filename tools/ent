@@ -62,7 +62,11 @@ processes started by MPI's mpirun (`run`), each with a world of its own,
 which say what one process says; what a device does (an extern proc)
 rank 0 does, and every rank is given what it gave back. It needs MPI
 (mpicc, mpirun on the PATH; Open MPI or MPICH) where it is built and run.
-A program built so is started as `mpirun -n N program`.
+A program built so is started as `mpirun -n N program`. With
+--partitions (as many as --ranks) its distributed entities are placed
+when they are spawned, each rank building only its own: the setup too
+runs spread over the ranks (ENT_BLOCK, where it runs, says how many
+values of what an archetype is distributed by go to a partition).
 
 Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 
@@ -241,7 +245,8 @@ def cache_key(arguments):
              os.environ.get("CUDA_PATH", ""))
         note_file(os.path.join(ROOT, "devices", "gpu.c"))
     if arguments.ranks:
-        note("ranks", mpi_flags())
+        note("ranks", mpi_flags(),
+             arguments.ranks if arguments.partitions else 0)
         note_file(os.path.join(ROOT, "devices", "ranks.c"))
     note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
          os.environ.get("ENT_PIECES", ""), os.environ.get("ENT_SPLIT", ""),
@@ -443,6 +448,8 @@ def build(arguments, output, directory):
     gpu = " gpu=1" if arguments.gpu else ""
     # (On many ranks: devices/ranks.c, and MPI's own flags.)
     ranks = " ranks=1" if arguments.ranks else ""
+    if arguments.ranks and arguments.partitions:
+        ranks += " partitions=%d" % arguments.ranks
     passes = [lowering + "=fuse-systems=1" + gpu + ranks, "--symbol-dce"]
     # (Kernels are made of the GPU's loops before what is left of them is
     # the CPU's; and the columns are read by their addresses before, so
@@ -713,6 +720,9 @@ def main():
                         "machine's NVIDIA GPU")
     parser.add_argument("--ranks", type=int, metavar="N",
                         help="build for many ranks (MPI); `run` starts N")
+    parser.add_argument("--partitions", action="store_true",
+                        help="with --ranks: place entities where they are "
+                        "spawned, a partition for each rank")
     parser.add_argument("--embed", action="store_true",
                         help="put the files the program declares (`asset`) "
                         "into the program itself, not next to it")

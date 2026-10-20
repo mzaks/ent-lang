@@ -38,6 +38,34 @@ distribute Bee by home        // each bee where its colony is
   many even stretches as there are ranks. Any other is every rank's, and
   every rank goes through all of it, as on one process.
 
+## Partitions: worlds larger than one machine
+
+`tools/ent build --ranks N --partitions` builds for N partitions, one a
+rank, run on N ranks. No rank ever holds the whole world:
+
+- Each declared distributed archetype has rows of each partition's own:
+  partition p the rows from p times C, C twice an even share of the
+  capacity (rows a rank never uses cost it no memory). Every rank keeps how
+  many each partition has, so an entity's id is the same on every rank.
+- An entity goes to its partition where it is spawned: by a whole number,
+  the value over a block (`ENT_BLOCK` where the program runs, else an even
+  share of the capacity), the last partition taking the rest; by an
+  entity, that entity's. Only the rank whose partition it is writes it. So
+  the entities of a partition are those of a range of the values, in the
+  order they were spawned: a block that fits the values spreads them
+  evenly, one that does not leaves some partitions empty and others full
+  (a partition that has no room stops the program, which says so).
+- The setup is spread too: a `for` over distributed entities goes through
+  each rank's own from the start. Code outside a `for` runs on every rank:
+  each spawns every entity (writing its own), and keeps the edges it
+  connects that have an end of its own.
+- An archetype that a `for` goes over together with a distributed one,
+  not declared so, is all partition 0's.
+
+Not yet: what is kept for each entity of a relation (where its edges
+start) and the table of entities are as large as the whole world, on
+every rank; buffers are whole on every rank; a partition is a rank.
+
 ## A `for` over distributed entities
 
 From the placement on, each rank goes through its stretch of the rows. What the `for` does comes
@@ -46,6 +74,10 @@ to the same on any number of ranks:
 - its own entities' fields, read and written;
 - whole numbers added into uniques (`+=`, `min=`, `max=`), each rank's part
   added up over the ranks when the `for` ends (MPI's `Allreduce`);
+- fractions added into uniques (or kept the least or the most): the ranks
+  take turns in their order, each adding its rows to what the rank before
+  it ended with, so the sum is one process's (such a `for`'s rows run one
+  rank after another);
 - running sums of whole numbers (`let first = Free += free`), each rank's
   rows from where the ranks before it end (`Exscan`); over several
   archetypes only of one number for every entity (`+= 1`);
@@ -91,7 +123,7 @@ to the same on any number of ranks:
   with another's between them) the program stops.
 
 Not yet, in a `for` of a system that runs in the loop, and refused when
-the program is built: fractions and `=` into uniques, running sums of
+the program is built: `=` into uniques, running sums of
 fractions or over several archetypes of values that differ, a buffer
 given its rows anew or fewer of them, spawns and destroys, moves to
 another archetype, reactive `for`s, a `for` inside a `for`; in a `for`
