@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <pthread.h>
+#include <sched.h>
 #include <execinfo.h>
 #include <mpi.h>
 #include <stdint.h>
@@ -666,9 +667,21 @@ int32_t ent_ranks_run(int32_t (*program)(void), int64_t partitions) {
     pthread_cond_init(&ent_mailboxes[l].ready, 0);
   }
   // (How many go through their rows at once: ENT_RUNNING, else as many as
-  // there are cores.)
+  // there are cores the process may run on. Open MPI binds a process to
+  // one core where it starts one or two: its partitions then share that
+  // core, said, as it is likely not what is meant.)
   const char *running = getenv("ENT_RUNNING");
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  cpu_set_t allowed;
+  if (sched_getaffinity(0, sizeof allowed, &allowed) == 0) {
+    long may = CPU_COUNT(&allowed);
+    if (ent_locals > may && may < cores)
+      fprintf(stderr,
+              "ent: process %d runs %d partitions on %ld of the %ld CPUs "
+              "(mpirun binds it: --bind-to none)\n",
+              ent_proc, ent_locals, may, cores);
+    cores = may;
+  }
   ent_slots = running ? atoi(running) : (int)(cores > 0 ? cores : 1);
   if (ent_slots < 1)
     ent_slots = 1;

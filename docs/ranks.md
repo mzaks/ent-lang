@@ -104,9 +104,12 @@ rank, run on N ranks. No rank ever holds the whole world:
   own (in a file of its own, with `ENT_WORLD_DIR`). What the ranks do
   together the partitions of a process do through memory, and the
   processes through MPI. `ENT_RUNNING` says how many partitions of a
-  process go through their rows at once (as many as there are cores; 1:
-  one after another, which takes the least memory); one that waits for
-  the others lets another run.
+  process go through their rows at once (as many as there are cores the
+  process may run on; 1: one after another, which takes the least
+  memory); one that waits for the others lets another run. Open MPI binds
+  a process it starts alone or in two to one core: its partitions then
+  share that core (the program says so as it starts), so they are
+  started with `mpirun --bind-to none`.
 
 - The partitions of a process share memory, one copy for all of them, of
   what only its owner writes: the rows of distributed archetypes (so a
@@ -116,7 +119,8 @@ rank, run on N ranks. No rank ever holds the whole world:
   and reads. A `for` over distributed entities ends with all of them done
   before any goes on. `ENT_NOSHARE` gives each partition its own copy, to
   compare. The epidemic with tracing at 1e6 as 16 partitions in one
-  process ends in 1.96 GB (4.06 GB without sharing), in 37.7 s; in a 2 GB
+  process ends in 1.96 GB (4.06 GB without sharing), in 9.4 to 10.2 s (one
+  world on all cores: 9.6 s; bound to one core: 37.8 s); in a 2 GB
   limit, with its worlds in files on a disk and one partition at a time
   (`ENT_RUNNING=1`), in 172 s, where 16 processes took 1359 s.
 
