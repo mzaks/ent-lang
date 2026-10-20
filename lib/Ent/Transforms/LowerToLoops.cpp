@@ -260,6 +260,7 @@ public:
       return layout.entities.idBits / 8;
     return getStorageBytes(type);
   }
+  const WorldLayout &getLayout() const { return layout; }
   /// `size` bytes of the arena at `offset`.
   Value bytes(uint64_t offset, int64_t size) {
     return view(offset, size, rewriter.getI8Type());
@@ -2187,6 +2188,101 @@ static int64_t rankEdgeChannel(const WorldRelation &relation, bool note,
 static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
                           Type type);
 
+/// Built for partitions: the buffers that are split by rows where the run
+/// asks (ENT_GHOSTS=ask, devices/ranks.c): those `for`s over distributed
+/// entities write and only such `for`s read (or fns only they call), not
+/// handed to a proc, not read by row numbers or as rows. See
+/// markSplitBuffers.
+static llvm::DenseSet<StringAttr> rankSplitBuffers;
+/// And the fns that read one (or call a fn that does), by name: known
+/// before fns are lowered (see askPass).
+static llvm::DenseSet<StringRef> rankSplitReaders;
+
+/// Whether `op` stands in a query over distributed archetypes, or in a fn
+/// that only such queries call (and fns they call, in turn).
+static bool inSpreadFor(Operation *op, ModuleOp module,
+                        llvm::DenseMap<Operation *, bool> &fns,
+                        const WorldLayout &layout);
+
+static void markSplitBuffers(ModuleOp module, const WorldLayout &layout) {
+  rankSplitBuffers.clear();
+  if (partitionCount == 0)
+    return;
+  llvm::DenseMap<Operation *, bool> fns;
+  llvm::DenseSet<StringAttr> written, refused;
+  module.walk([&](Operation *op) {
+    StringAttr buffer;
+    if (auto set = dyn_cast<BufferSetOp>(op))
+      buffer = set.getBufferAttr().getAttr();
+    else if (auto claim = dyn_cast<BufferClaimOp>(op))
+      buffer = claim.getBufferAttr().getAttr();
+    else if (auto append = dyn_cast<AppendOp>(op))
+      buffer = append.getBufferAttr().getAttr();
+    if (buffer && op->getParentOfType<QueryOp>() &&
+        inSpreadFor(op, module, fns, layout))
+      written.insert(buffer);
+    if (auto at = dyn_cast<BufferAtOp>(op)) {
+      StringAttr name = at.getBufferAttr().getAttr();
+      if (isa<IndexOfType>(at.getIndex().getType()) ||
+          !inSpreadFor(op, module, fns, layout))
+        refused.insert(name);
+    }
+    if (auto rows = dyn_cast<BufferRowsOp>(op))
+      refused.insert(rows.getBufferAttr().getAttr());
+    // (Handed to a proc, which sees the whole of it.)
+    if (auto invoke = dyn_cast<InvokeOp>(op); invoke && invoke.getProc())
+      for (Value operand : invoke.getOperands())
+        if (auto of = operand.getDefiningOp<BufferOfOp>())
+          refused.insert(of.getBufferAttr().getAttr());
+  });
+  for (StringAttr buffer : written)
+    if (!refused.contains(buffer))
+      rankSplitBuffers.insert(buffer);
+  // (The fns that read them, and those that call those, till no more.)
+  rankSplitReaders.clear();
+  for (bool more = true; more;) {
+    more = false;
+    for (FunctionOp fn : module.getOps<FunctionOp>()) {
+      if (rankSplitReaders.contains(fn.getSymName()))
+        continue;
+      bool reads = false;
+      fn.walk([&](Operation *op) {
+        if (auto at = dyn_cast<BufferAtOp>(op))
+          reads |= rankSplitBuffers.contains(at.getBufferAttr().getAttr());
+        if (auto invoke = dyn_cast<InvokeOp>(op))
+          reads |= rankSplitReaders.contains(invoke.getCallee());
+      });
+      if (reads) {
+        rankSplitReaders.insert(fn.getSymName());
+        more = true;
+      }
+    }
+  }
+}
+
+static bool inSpreadFor(Operation *op, ModuleOp module,
+                        llvm::DenseMap<Operation *, bool> &fns,
+                        const WorldLayout &layout) {
+  if (auto query = op->getParentOfType<QueryOp>())
+    return llvm::any_of(layout.archetypes, [&](const WorldArchetype &a) {
+      return spreads(a, query) && matches(a, query);
+    });
+  auto fn = op->getParentOfType<FunctionOp>();
+  if (!fn)
+    return false;
+  auto [known, fresh] = fns.try_emplace(fn.getOperation(), false);
+  if (!fresh)
+    return known->second;
+  bool all = true, any = false;
+  module.walk([&](InvokeOp invoke) {
+    if (invoke.getCallee() != fn.getSymName())
+      return;
+    any = true;
+    all &= inSpreadFor(invoke, module, fns, layout);
+  });
+  return fns[fn.getOperation()] = any && all;
+}
+
 /// Built for partitions, a query over distributed archetypes that looks up
 /// entities of other ranks: its lookups read ghosts (`ent.rank_channel`,
 /// the channel of the field), which a copy of it that only asks
@@ -2438,7 +2534,18 @@ static bool askPass(IRRewriter &rewriter, Location loc, ModuleOp module,
                     QueryOp query, const LoopOptions &given) {
   SmallVector<LookupOp> lookups;
   query.getBody().walk([&](LookupOp lookup) { lookups.push_back(lookup); });
-  if (lookups.empty())
+  // (Or reads a buffer split by rows, itself or in a fn it calls.)
+  auto readsSplit = [&](Operation *root) {
+    bool reads = false;
+    root->walk([&](Operation *op) {
+      if (auto at = dyn_cast<BufferAtOp>(op))
+        reads |= rankSplitBuffers.contains(at.getBufferAttr().getAttr());
+      if (auto invoke = dyn_cast<InvokeOp>(op))
+        reads |= rankSplitReaders.contains(invoke.getCallee());
+    });
+    return reads;
+  };
+  if (lookups.empty() && !readsSplit(query))
     return false;
   OpBuilder::InsertionGuard guard(rewriter);
   auto clone = cast<QueryOp>(rewriter.clone(*query));
@@ -2505,8 +2612,15 @@ static bool askPass(IRRewriter &rewriter, Location loc, ModuleOp module,
         scf::YieldOp::create(builder, at);
       });
   Block *before = rounds.getBeforeBody();
+  // (Its rows, asking: devices/ranks.c reads a split buffer's rows of
+  // other ranks so, wherever the read is, in a fn too.)
+  rewriter.setInsertionPointToEnd(before);
+  callGpu(rewriter, loc, module, "ent_ranks_asking",
+          ValueRange{arith::ConstantIntOp::create(rewriter, loc, 1, 32)});
   clone->moveBefore(before, before->end());
   rewriter.setInsertionPointToEnd(before);
+  callGpu(rewriter, loc, module, "ent_ranks_asking",
+          ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 32)});
   Value asked = callGpu(rewriter, loc, module, "ent_ranks_fetch",
                         ValueRange{}, TypeRange{rewriter.getI64Type()})
                     .getResult(0);
@@ -2533,6 +2647,11 @@ static void shareOverRanks(IRRewriter &rewriter, Location loc,
                        memref::LoadOp::create(
                            rewriter, loc, world.scalar(buffer->rankHighOffset),
                            ValueRange{zero})});
+    // (Split by rows where the run asks: whose they are, not the rows.)
+    if (rankSplitBuffers.contains(BufferOp(buffer->op).getSymNameAttr()))
+      callGpu(rewriter, loc, module, "ent_ranks_buffer_owned",
+              ValueRange{arith::ConstantIntOp::create(
+                  rewriter, loc, buffer - &world.getLayout().buffers[0], 32)});
     for (const WorldColumn &field : buffer->fields)
       callGpu(rewriter, loc, module, "ent_ranks_share_column",
               ValueRange{worldPointer(rewriter, loc,
@@ -7991,6 +8110,10 @@ static void appendAppended(IRRewriter &rewriter, AppendOp append,
     Value low = arith::SubIOp::create(rewriter, loc, rows, mine);
     callGpu(rewriter, loc, module, "ent_ranks_share_begin",
             ValueRange{low, high});
+    if (rankSplitBuffers.contains(BufferOp(buffer.op).getSymNameAttr()))
+      callGpu(rewriter, loc, module, "ent_ranks_buffer_owned",
+              ValueRange{arith::ConstantIntOp::create(
+                  rewriter, loc, &buffer - &layout.buffers[0], 32)});
     for (const WorldColumn &field : buffer.fields)
       callGpu(rewriter, loc, module, "ent_ranks_share_column",
               ValueRange{worldPointer(rewriter, loc,
@@ -17543,6 +17666,27 @@ static Value inRoom(IRRewriter &rewriter, Location loc, WorldAccess &world,
 /// Lower what `func`, a system, does with buffers outside its queries: a
 /// row appended is there at once, as is none after a clear; reads; and
 /// the calls of C functions that are handed one.
+/// Where the run asks, before a row of a split buffer is written (see
+/// lowerBuffers): by a `for`'s entity (its own row, or its window's), told
+/// to the runtime, which gives a row of a run its values first and notes
+/// one that was another rank's; outside a `for`, alike on every rank.
+static void noteSplitWrite(IRRewriter &rewriter, Location loc,
+                           ModuleOp program, BufferSetOp set,
+                           function_ref<Value()> number, int64_t field,
+                           Value row,
+                           function_ref<void(function_ref<void()>)> alsoAsked) {
+  alsoAsked([&] {
+    if (set->hasAttr(kOwnedAttr) || set->hasAttr(kWindowAttr))
+      callGpu(rewriter, loc, program, "ent_ranks_buffer_write",
+              ValueRange{number(),
+                         arith::ConstantIntOp::create(rewriter, loc, field, 32),
+                         row});
+    else
+      callGpu(rewriter, loc, program, "ent_ranks_buffer_wrote",
+              ValueRange{number(), row});
+  });
+}
+
 static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                          const WorldLayout &layout, WorldAccess &cpu,
                          SymbolTable &symbols,
@@ -17632,6 +17776,44 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
     }
     const WorldBuffer &buffer = layout.getBuffer(
         cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr());
+    // (Built for partitions, a buffer split by rows where the run asks:
+    // devices/ranks.c keeps what is where, see markSplitBuffers.)
+    bool split =
+        rankSplitBuffers.contains(BufferOp(buffer.op).getSymNameAttr());
+    ModuleOp program = op->getParentOfType<ModuleOp>();
+    auto bufferNumber = [&]() -> Value {
+      return arith::ConstantIntOp::create(rewriter, loc,
+                                          &buffer - &layout.buffers[0], 32);
+    };
+    // (An `if` on whether the run asks: `asks` there, then the rest of the
+    // op's lowering in its else branch, where the insertion point is
+    // left; or no `if` for a buffer not split.)
+    auto whereAsked = [&](function_ref<void()> asks) {
+      if (!split)
+        return;
+      auto how = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::ne,
+              callGpu(rewriter, loc, program, "ent_ranks_ghosts_ask",
+                      ValueRange{}, TypeRange{rewriter.getI32Type()})
+                  .getResult(0),
+              arith::ConstantIntOp::create(rewriter, loc, 0, 32)),
+          /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard asking(rewriter);
+        rewriter.setInsertionPoint(how.thenBlock()->getTerminator());
+        asks();
+      }
+      rewriter.setInsertionPoint(how.elseBlock()->getTerminator());
+    };
+    // (Only where it asks, before what is done anyway.)
+    auto alsoAsked = [&](function_ref<void()> asks) {
+      if (!split)
+        return;
+      OpBuilder::InsertionGuard after(rewriter);
+      whereAsked(asks);
+    };
     if (auto check = dyn_cast<RowsCheckOp>(op); check && !buffer.clashOffset) {
       // (In a function given rows of a buffer no `for` hands rows of, or
       // reads through a window: as a row the buffer has not, nothing.)
@@ -17654,6 +17836,11 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
     }
     Value counter = world.bufferCount(buffer);
     if (isa<ClearOp>(op)) {
+      alsoAsked([&] {
+        callGpu(rewriter, loc, program, "ent_ranks_buffer_kept",
+                ValueRange{bufferNumber(),
+                           arith::ConstantIntOp::create(rewriter, loc, 0, 64)});
+      });
       memref::StoreOp::create(
           rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
           counter, ValueRange{zero});
@@ -17744,8 +17931,35 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       SmallVector<Value> values;
       for (Value value : append.getValues())
         values.push_back(world.toStorage(loc, value));
-      storeRow(rewriter, loc, world, buffer, world.toIndex(loc, count),
-               values);
+      {
+        // (Asked: the row given to the runtime, a run where it is like the
+        // last, not written.)
+        OpBuilder::InsertionGuard row(rewriter);
+        whereAsked([&] {
+          cf::AssertOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::ult, count,
+                  arith::ConstantIntOp::create(rewriter, loc, buffer.capacity,
+                                               64)),
+              rewriter.getStringAttr(
+                  "no room for another row: the buffer @" +
+                  BufferOp(buffer.op).getSymName() + " holds " +
+                  Twine(buffer.capacity) + "; 'capacity' gives more"));
+          callGpu(rewriter, loc, program, "ent_ranks_buffer_row",
+                  ValueRange{bufferNumber(), count});
+          for (auto [field, value] : llvm::enumerate(values))
+            callGpu(rewriter, loc, program, "ent_ranks_buffer_value",
+                    ValueRange{bufferNumber(),
+                               arith::ConstantIntOp::create(rewriter, loc,
+                                                            field, 32),
+                               toSendBits(rewriter, loc, value)});
+          callGpu(rewriter, loc, program, "ent_ranks_buffer_given",
+                  ValueRange{bufferNumber()});
+        });
+        storeRow(rewriter, loc, world, buffer, world.toIndex(loc, count),
+                 values);
+      }
       memref::StoreOp::create(
           rewriter, loc,
           arith::AddIOp::create(
@@ -17789,6 +18003,10 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
           rewriter.setInsertionPointToStart(branch.thenBlock());
         }
         Value row = inRoom(rewriter, loc, world, buffer, set.getIndex());
+        noteSplitWrite(rewriter, loc, program, set, bufferNumber, field - &buffer.fields[0],
+                       arith::IndexCastOp::create(rewriter, loc,
+                                                  rewriter.getI64Type(), row),
+                       alsoAsked);
         memref::StoreOp::create(rewriter, loc, stored,
                                 world.bufferField(buffer, *field),
                                 ValueRange{row});
@@ -17810,6 +18028,8 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       auto branch = scf::IfOp::create(rewriter, loc, there,
                                       /*withElseRegion=*/false);
       rewriter.setInsertionPointToStart(branch.thenBlock());
+      noteSplitWrite(rewriter, loc, program, set, bufferNumber,
+                     field - &buffer.fields[0], index, alsoAsked);
       memref::StoreOp::create(rewriter, loc, stored,
                               world.bufferField(buffer, *field),
                               ValueRange{world.toIndex(loc, index)});
@@ -17824,6 +18044,11 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
           arith::ConstantIntOp::create(rewriter, loc, 0, 32));
       rows = arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(),
                                     rows);
+      alsoAsked([&] {
+        callGpu(rewriter, loc, program, "ent_ranks_buffer_kept",
+                ValueRange{bufferNumber(),
+                           arith::MinUIOp::create(rewriter, loc, rows, count)});
+      });
       memref::StoreOp::create(
           rewriter, loc, arith::MinUIOp::create(rewriter, loc, rows, count),
           counter, ValueRange{zero});
@@ -17849,14 +18074,27 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       SmallVector<Value> columns;
       for (const WorldColumn &field : buffer.fields)
         columns.push_back(world.bufferField(buffer, field));
-      auto loop = scf::ForOp::create(
-          rewriter, loc, zero, world.toIndex(loc, rows),
-          arith::ConstantIndexOp::create(rewriter, loc, 1));
-      rewriter.setInsertionPointToStart(loop.getBody());
-      for (auto [value, column] : llvm::zip(values, columns))
-        memref::StoreOp::create(rewriter, loc, value, column,
-                                ValueRange{loop.getInductionVar()});
-      rewriter.setInsertionPointAfter(loop);
+      {
+        // (Asked: a run of the rows, not written.)
+        OpBuilder::InsertionGuard filled(rewriter);
+        whereAsked([&] {
+          for (auto [field, value] : llvm::enumerate(values))
+            callGpu(rewriter, loc, program, "ent_ranks_buffer_value",
+                    ValueRange{bufferNumber(),
+                               arith::ConstantIntOp::create(rewriter, loc,
+                                                            field, 32),
+                               toSendBits(rewriter, loc, value)});
+          callGpu(rewriter, loc, program, "ent_ranks_buffer_filled",
+                  ValueRange{bufferNumber(), rows});
+        });
+        auto loop = scf::ForOp::create(
+            rewriter, loc, zero, world.toIndex(loc, rows),
+            arith::ConstantIndexOp::create(rewriter, loc, 1));
+        rewriter.setInsertionPointToStart(loop.getBody());
+        for (auto [value, column] : llvm::zip(values, columns))
+          memref::StoreOp::create(rewriter, loc, value, column,
+                                  ValueRange{loop.getInductionVar()});
+      }
       memref::StoreOp::create(rewriter, loc, rows, counter, ValueRange{zero});
       rewriter.eraseOp(op);
     } else {
@@ -17882,8 +18120,48 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                                           count);
       Value row = arith::SelectOp::create(
           rewriter, loc, there, world.toIndex(loc, index), zero);
-      Value stored = memref::LoadOp::create(
-          rewriter, loc, world.bufferField(buffer, *field), ValueRange{row});
+      Value stored;
+      if (split) {
+        // (Asked: by the runtime, which has the row or asks for it.)
+        Type type =
+            world.storageType(at.getResult().getType());
+        auto how = scf::IfOp::create(
+            rewriter, loc, TypeRange{type},
+            arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ne,
+                callGpu(rewriter, loc, program, "ent_ranks_ghosts_ask",
+                        ValueRange{}, TypeRange{rewriter.getI32Type()})
+                    .getResult(0),
+                arith::ConstantIntOp::create(rewriter, loc, 0, 32)),
+            /*withElseRegion=*/true);
+        OpBuilder::InsertionGuard read(rewriter);
+        rewriter.setInsertionPointToStart(how.thenBlock());
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{fromSendBits(
+                rewriter, loc,
+                callGpu(rewriter, loc, program, "ent_ranks_buffer_read",
+                        ValueRange{bufferNumber(),
+                                   arith::ConstantIntOp::create(
+                                       rewriter, loc,
+                                       field - &buffer.fields[0], 32),
+                                   arith::IndexCastOp::create(
+                                       rewriter, loc, rewriter.getI64Type(),
+                                       row)},
+                        TypeRange{rewriter.getI64Type()})
+                    .getResult(0),
+                type)});
+        rewriter.setInsertionPointToStart(how.elseBlock());
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{memref::LoadOp::create(
+                rewriter, loc, world.bufferField(buffer, *field),
+                ValueRange{row})});
+        stored = how.getResult(0);
+      } else {
+        stored = memref::LoadOp::create(
+            rewriter, loc, world.bufferField(buffer, *field), ValueRange{row});
+      }
       Value nought;
       if (isa<FloatType>(stored.getType()))
         nought = arith::ConstantOp::create(
@@ -18499,6 +18777,24 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
     }
     if (partitionCount > 0)
       callGpu(rewriter, loc, module, "ent_ranks_distribute", ValueRange{});
+    // (The buffers split by rows where the run asks: their columns.)
+    for (const WorldBuffer &buffer : layout.buffers) {
+      if (!rankSplitBuffers.contains(BufferOp(buffer.op).getSymNameAttr()))
+        continue;
+      for (auto [field, column] : llvm::enumerate(buffer.fields))
+        callGpu(rewriter, loc, module, "ent_ranks_buffer_column",
+                ValueRange{arith::ConstantIntOp::create(
+                               rewriter, loc, &buffer - &layout.buffers[0], 32),
+                           arith::ConstantIntOp::create(rewriter, loc, field,
+                                                        32),
+                           worldPointer(rewriter, loc,
+                                        started.bufferField(buffer, column)),
+                           arith::ConstantIntOp::create(
+                               rewriter, loc,
+                               started.storageBytes(column.type), 64),
+                           arith::ConstantIntOp::create(rewriter, loc,
+                                                        buffer.rows, 64)});
+    }
   }
   func::CallOp::create(rewriter, loc, body.getSymName(), TypeRange{},
                        ValueRange{created});
@@ -19771,6 +20067,7 @@ struct EntLowerToLoops
       printLayoutMap(*layout);
     if (ranks)
       distributeByRows(*layout, module);
+    markSplitBuffers(module, *layout);
     if (ranks && failed(checkRanks(module, *layout)))
       return signalPassFailure();
     if (failed(checkGpuStamps(module, *layout)))

@@ -33,6 +33,7 @@ static const char *ent_kinds[] = {"bcast", "sum", "min", "max", "before", "relea
 static double ent_spent[10];
 static int64_t ent_calls[10];
 static int64_t ent_posted = 0, ent_received = 0;
+static int64_t ent_rounds = 0, ent_asked_rows = 0, ent_most_stretches = 0;
 // (ENT_RANKS_LOG=2: for each place the program calls from, the time it
 // worked before the call, since the call before, and spent in it.)
 typedef struct {
@@ -100,6 +101,11 @@ static void ent_log_spent(void) {
     ent_log_places();
   fprintf(stderr, "ent: rank %d: posted %lld sends, was given %lld\n",
           ent_rank, (long long)ent_posted, (long long)ent_received);
+  fprintf(stderr,
+          "ent: rank %d: %lld rounds of asking, %lld rows of buffers asked "
+          "for, at most %lld stretches of a buffer's rows\n",
+          ent_rank, (long long)ent_rounds, (long long)ent_asked_rows,
+          (long long)ent_most_stretches);
   for (unsigned k = 0; k < sizeof ent_kinds / sizeof *ent_kinds; ++k)
     if (ent_calls[k])
       fprintf(stderr, "ent: rank %d: %-13s %8lld calls %9.3f s\n", ent_rank,
@@ -1300,9 +1306,12 @@ void ent_ranks_ghost_column(int32_t channel, int32_t archetype, void *column,
       (ent_ghost_column){column, each, present};
 }
 
+// (A lookup's: its channel and the archetype; a buffer's, archetype -1:
+// the buffer and the field in the channel. Then the row, below 2^40.)
 static uint64_t ent_ghost_key(int32_t channel, int32_t archetype, int64_t row) {
-  return ((uint64_t)(channel + 1) << 56) | ((uint64_t)archetype << 48) |
-         (uint64_t)row;
+  uint64_t which = archetype < 0 ? (1ull << 23) | (uint64_t)channel
+                                 : ((uint64_t)channel << 8) | (uint64_t)archetype;
+  return ((which + 1) << 40) | (uint64_t)row;
 }
 
 static ent_ghost *ent_ghost_slot(uint64_t key, int make) {
@@ -1338,9 +1347,13 @@ static ent_ghost *ent_ghost_slot(uint64_t key, int make) {
   }
 }
 
+static int32_t ent_buffer_owner(int32_t buffer, int64_t row);
+static int64_t ent_buffer_local(int32_t buffer, int32_t field, int64_t row);
+
 // In the asking pass: the field of row `row` of `archetype` (another
 // rank's), asked for where it is not had yet; what is had of it so far
-// (nothing yet: 0, not found).
+// (nothing yet: 0, not found). (Of a buffer, archetype -1: the channel
+// is the buffer's and the field's, see ent_ranks_buffer_read.)
 int64_t ent_ranks_ask(int32_t channel, int32_t archetype, int64_t row) {
   uint64_t key = ent_ghost_key(channel, archetype, row);
   ent_ghost *ghost = ent_ghost_slot(key, 0);
@@ -1352,7 +1365,9 @@ int64_t ent_ranks_ask(int32_t channel, int32_t archetype, int64_t row) {
   ghost->asked = 1;
   if (!ent_ask_out)
     ent_ask_out = calloc(ent_ranks, sizeof(ent_box));
-  ent_box *box = &ent_ask_out[ent_ranks_owner(archetype, row)];
+  ent_box *box =
+      &ent_ask_out[archetype < 0 ? ent_buffer_owner(channel >> 6, row)
+                                 : ent_ranks_owner(archetype, row)];
   ent_box_put(box, channel);
   ent_box_put(box, archetype);
   ent_box_put(box, row);
@@ -1371,6 +1386,7 @@ int64_t ent_ranks_fetch(void) {
     ent_ask_out = calloc(ent_ranks, sizeof(ent_box));
   int64_t asked = ent_ask_new, all = 0;
   ent_ask_new = 0;
+  ++ent_rounds;
   MPI_Allreduce(&asked, &all, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
   if (all == 0)
     return 0;
@@ -1404,6 +1420,13 @@ int64_t ent_ranks_fetch(void) {
   for (int64_t i = 0; i + 2 < incoming + 2 && i < incoming; i += 3) {
     int32_t channel = (int32_t)in[i], archetype = (int32_t)in[i + 1];
     int64_t row = in[i + 2];
+    if (archetype < 0) {
+      // (A buffer's row: this rank's own.)
+      answer[i] = channel;
+      answer[i + 1] = ent_buffer_local(channel >> 6, channel & 63, row);
+      answer[i + 2] = 1;
+      continue;
+    }
     ent_ghost_column *column =
         channel < ent_ghost_channels
             ? &ent_ghost_columns[channel * 256 + archetype]
@@ -1487,4 +1510,359 @@ int32_t ent_ranks_ghosts_ask(void) {
     ask = how && !strcmp(how, "ask");
   }
   return ask;
+}
+
+// ---------------------------------------------------------------------------
+// Buffers split by rows (built for partitions, with ENT_GHOSTS=ask): a
+// buffer that `for`s over distributed entities write, and only such `for`s
+// read, keeps on each rank only the rows it has: those its entities wrote
+// (its own), those every rank gave it alike outside a `for` (local), and
+// runs of rows all alike, given outside a `for` (a fill), which are not
+// written at all. Rows other ranks' entities wrote are theirs, asked for
+// like a lookup. A list of stretches of rows says which is which.
+
+enum { ENT_ROWS_LOCAL = 0, ENT_ROWS_RUN = 1, ENT_ROWS_REMOTE = 2 };
+
+typedef struct {
+  int64_t from, to; // [from, to)
+  int kind;
+  int rank;         // of a REMOTE stretch
+  int64_t *run;     // of a RUN: the value of each field (bits)
+} ent_rows;
+
+typedef struct {
+  int registered;
+  int fields;
+  char *columns[64];
+  int64_t each[64];
+  int64_t capacity;
+  ent_rows *rows;
+  int64_t count, room;
+  // (A row being given outside a `for`: its values, field by field.)
+  int64_t pending_row;
+  int64_t pending[64];
+} ent_split;
+
+static ent_split *ent_splits = 0;
+static int32_t ent_splits_known = 0;
+static int ent_asking = 0;
+
+static ent_split *ent_split_of(int32_t buffer) {
+  if (buffer >= ent_splits_known) {
+    int32_t more = buffer + 8;
+    ent_splits = realloc(ent_splits, sizeof(ent_split) * more);
+    memset(ent_splits + ent_splits_known, 0,
+           sizeof(ent_split) * (more - ent_splits_known));
+    ent_splits_known = more;
+  }
+  return &ent_splits[buffer];
+}
+
+void ent_ranks_buffer_column(int32_t buffer, int32_t field, void *column,
+                             int64_t each, int64_t capacity) {
+  ent_split *split = ent_split_of(buffer);
+  split->registered = 1;
+  if (field >= split->fields)
+    split->fields = field + 1;
+  split->columns[field] = column;
+  split->each[field] = each;
+  split->capacity = capacity;
+}
+
+// (The stretch row `row` is in, or -1: no stretch says, so it is local.)
+static int64_t ent_rows_at(ent_split *split, int64_t row) {
+  int64_t lo = 0, hi = split->count;
+  while (lo < hi) {
+    int64_t mid = lo + (hi - lo) / 2;
+    if (split->rows[mid].to <= row)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return lo < split->count && split->rows[lo].from <= row ? lo : -1;
+}
+
+// The rows [from, to) made `kind` (of `rank`, or a run of `run`): the
+// stretches they were in cut around them.
+static void ent_rows_set(ent_split *split, int64_t from, int64_t to, int kind,
+                         int rank, const int64_t *run) {
+  if (from >= to)
+    return;
+  ent_rows *kept = malloc(sizeof(ent_rows) * (split->count + 3));
+  int64_t n = 0;
+  int placed = 0;
+  for (int64_t i = 0; i < split->count; ++i) {
+    ent_rows r = split->rows[i];
+    if (r.to <= from || r.from >= to) {
+      if (!placed && r.from >= to) {
+        kept[n++] = (ent_rows){from, to, kind, rank, 0};
+        placed = 1;
+      }
+      kept[n++] = r;
+      continue;
+    }
+    if (r.from < from) {
+      ent_rows left = r;
+      left.to = from;
+      if (left.run) {
+        left.run = malloc(sizeof(int64_t) * split->fields);
+        memcpy(left.run, r.run, sizeof(int64_t) * split->fields);
+      }
+      kept[n++] = left;
+    }
+    if (!placed) {
+      kept[n++] = (ent_rows){from, to, kind, rank, 0};
+      placed = 1;
+    }
+    if (r.to > to) {
+      ent_rows right = r;
+      right.from = to;
+      if (right.run) {
+        right.run = malloc(sizeof(int64_t) * split->fields);
+        memcpy(right.run, r.run, sizeof(int64_t) * split->fields);
+      }
+      kept[n++] = right;
+    }
+    free(r.run);
+  }
+  if (!placed)
+    kept[n++] = (ent_rows){from, to, kind, rank, 0};
+  for (int64_t i = 0; i < n; ++i)
+    if (kept[i].from == from && kept[i].to == to && kept[i].kind == kind &&
+        kept[i].run == 0 && run) {
+      kept[i].run = malloc(sizeof(int64_t) * split->fields);
+      memcpy(kept[i].run, run, sizeof(int64_t) * split->fields);
+    }
+  free(split->rows);
+  split->rows = kept;
+  split->count = n;
+  split->room = n;
+  if (n > ent_most_stretches)
+    ent_most_stretches = n;
+}
+
+static int32_t ent_buffer_owner(int32_t buffer, int64_t row) {
+  ent_split *split = ent_split_of(buffer);
+  int64_t at = ent_rows_at(split, row);
+  return at >= 0 && split->rows[at].kind == ENT_ROWS_REMOTE
+             ? split->rows[at].rank
+             : ent_rank;
+}
+
+static int64_t ent_buffer_local(int32_t buffer, int32_t field, int64_t row) {
+  ent_split *split = ent_split_of(buffer);
+  int64_t at = ent_rows_at(split, row);
+  if (at >= 0 && split->rows[at].kind == ENT_ROWS_RUN)
+    return split->rows[at].run[field];
+  int64_t value = 0;
+  memcpy(&value, split->columns[field] + row * split->each[field],
+         split->each[field]);
+  return value;
+}
+
+// The asking copy of a `for` goes through its rows (1), or not (0).
+void ent_ranks_asking(int32_t asking) { ent_asking = asking; }
+
+// A field of a row of a split buffer, where the buffer has the row: its
+// own, a run's, or another rank's: asked for (in the asking copy), or
+// what was given.
+int64_t ent_ranks_buffer_read(int32_t buffer, int32_t field, int64_t row) {
+  ent_split *split = ent_split_of(buffer);
+  int64_t at = ent_rows_at(split, row);
+  if (at < 0 || split->rows[at].kind != ENT_ROWS_REMOTE)
+    return ent_buffer_local(buffer, field, row);
+  int32_t channel = buffer << 6 | field;
+  if (ent_asking) {
+    ++ent_asked_rows;
+    return ent_ranks_ask(channel, -1, row);
+  }
+  return ent_ranks_ghost(channel, -1, row);
+}
+
+// Outside a `for`: a row given (`row`, its values field by field, then
+// done), which every rank gives alike: a run where it is like the last.
+void ent_ranks_buffer_row(int32_t buffer, int64_t row) {
+  ent_split_of(buffer)->pending_row = row;
+}
+void ent_ranks_buffer_value(int32_t buffer, int32_t field, int64_t bits) {
+  ent_split_of(buffer)->pending[field] = bits;
+}
+void ent_ranks_buffer_given(int32_t buffer) {
+  ent_split *split = ent_split_of(buffer);
+  int64_t row = split->pending_row;
+  ent_rows *last = split->count ? &split->rows[split->count - 1] : 0;
+  if (last && last->kind == ENT_ROWS_RUN && last->to == row &&
+      !memcmp(last->run, split->pending, sizeof(int64_t) * split->fields)) {
+    last->to = row + 1;
+    return;
+  }
+  ent_rows_set(split, row, row + 1, ENT_ROWS_RUN, 0, split->pending);
+}
+// Outside a `for`: `n` rows all alike (values given as above), in place of
+// those it had.
+void ent_ranks_buffer_filled(int32_t buffer, int64_t n) {
+  ent_split *split = ent_split_of(buffer);
+  for (int64_t i = 0; i < split->count; ++i)
+    free(split->rows[i].run);
+  split->count = 0;
+  ent_rows_set(split, 0, n, ENT_ROWS_RUN, 0, split->pending);
+}
+// Outside a `for`: only the first `n` rows kept (0: none).
+void ent_ranks_buffer_kept(int32_t buffer, int64_t n) {
+  ent_split *split = ent_split_of(buffer);
+  if (n < 0)
+    n = 0;
+  int64_t end = split->count ? split->rows[split->count - 1].to : 0;
+  if (end > n)
+    ent_rows_set(split, n, end, ENT_ROWS_LOCAL, 0, 0);
+}
+// Outside a `for`: row `row` written, alike on every rank: local. One of
+// another rank's: not yet.
+void ent_ranks_buffer_wrote(int32_t buffer, int64_t row) {
+  ent_split *split = ent_split_of(buffer);
+  int64_t at = ent_rows_at(split, row);
+  if (at < 0)
+    return;
+  if (split->rows[at].kind == ENT_ROWS_REMOTE)
+    ent_ranks_stop("a row of a buffer that another rank's entities wrote is "
+                   "written outside a `for`: not on many ranks yet");
+  if (split->rows[at].kind == ENT_ROWS_RUN) {
+    // (Its run's values first, the field being written then given.)
+    int64_t *run = split->rows[at].run;
+    for (int f = 0; f < split->fields; ++f)
+      memcpy(split->columns[f] + row * split->each[f], &run[f],
+             split->each[f]);
+    ent_rows_set(split, row, row + 1, ENT_ROWS_LOCAL, 0, 0);
+  }
+}
+
+// After a `for` over distributed entities wrote rows of the split buffer
+// (its stretch of each rank, from ent_ranks_share_begin): those of other
+// ranks theirs, and the memory of them given back; its own local. The
+// rows are not given to the other ranks.
+static void ent_retaken_check(int32_t buffer, ent_split *split, int64_t from,
+                              int64_t to);
+static void ent_retaken_forget(int32_t buffer);
+
+int32_t ent_ranks_ghosts_ask(void);
+
+void ent_ranks_buffer_owned(int32_t buffer) {
+  ent_split *split = ent_split_of(buffer);
+  if (!split->registered || !ent_ranks_ghosts_ask() || !ent_distributed)
+    return;
+  if (ent_share_lows[ent_rank] <= ent_share_highs[ent_rank])
+    ent_retaken_check(buffer, split, ent_share_lows[ent_rank],
+                      ent_share_highs[ent_rank] + 1);
+  ent_retaken_forget(buffer);
+  for (int r = 0; r < ent_ranks; ++r) {
+    int64_t from = ent_share_lows[r], to = ent_share_highs[r] + 1;
+    if (from >= to)
+      continue;
+    ent_rows_set(split, from, to,
+                 r == ent_rank ? ENT_ROWS_LOCAL : ENT_ROWS_REMOTE, r, 0);
+    if (r != ent_rank)
+      for (int f = 0; f < split->fields; ++f)
+        ent_let_go(split->columns[f] + from * split->each[f],
+                   split->columns[f] + to * split->each[f]);
+  }
+  ent_share_any = 0;
+}
+
+// In a `for` over distributed entities, before this rank's entity writes
+// field `field` of row `row` of a split buffer: a row of a run is given
+// its run's values first (rows about it, a page's worth, at once); one
+// that was another rank's is noted, field by field, and by the end of the
+// `for` every field of it must have been written (its others are not
+// here), else the program stops.
+static int64_t *ent_retaken = 0; // row, fields written (bits)
+static int64_t ent_retaken_count = 0, ent_retaken_room = 0;
+
+void ent_ranks_buffer_write(int32_t buffer, int32_t field, int64_t row) {
+  ent_split *split = ent_split_of(buffer);
+  int64_t at = ent_rows_at(split, row);
+  if (at < 0)
+    return;
+  ent_rows *rows = &split->rows[at];
+  if (rows->kind == ENT_ROWS_RUN) {
+    int64_t from = row & ~(int64_t)4095, to = from + 4096;
+    if (from < rows->from)
+      from = rows->from;
+    if (to > rows->to)
+      to = rows->to;
+    int64_t *run = malloc(sizeof(int64_t) * split->fields);
+    memcpy(run, rows->run, sizeof(int64_t) * split->fields);
+    for (int64_t r = from; r < to; ++r)
+      for (int f = 0; f < split->fields; ++f)
+        memcpy(split->columns[f] + r * split->each[f], &run[f],
+               split->each[f]);
+    free(run);
+    ent_rows_set(split, from, to, ENT_ROWS_LOCAL, 0, 0);
+    return;
+  }
+  if (rows->kind != ENT_ROWS_REMOTE)
+    return;
+  for (int64_t i = ent_retaken_count - 2; i >= 0 && i >= ent_retaken_count - 64;
+       i -= 2)
+    if (ent_retaken[i] == (buffer * (1ll << 40)) + row) {
+      ent_retaken[i + 1] |= 1ll << field;
+      return;
+    }
+  if (ent_retaken_count + 2 > ent_retaken_room) {
+    ent_retaken_room = ent_retaken_room ? 2 * ent_retaken_room : 4096;
+    ent_retaken = realloc(ent_retaken, sizeof(int64_t) * ent_retaken_room);
+  }
+  ent_retaken[ent_retaken_count++] = buffer * (1ll << 40) + row;
+  ent_retaken[ent_retaken_count++] = 1ll << field;
+}
+
+static int ent_by_row(const void *a, const void *b) {
+  int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+  return x < y ? -1 : x > y;
+}
+
+// (At the end of the `for`: the rows of `buffer` from `from` to `to` that
+// were another rank's, all written, every field.)
+static void ent_retaken_check(int32_t buffer, ent_split *split, int64_t from,
+                              int64_t to) {
+  // (Merged by row: a row's fields may be noted apart.)
+  qsort(ent_retaken, ent_retaken_count / 2, 2 * sizeof(int64_t), ent_by_row);
+  int64_t full = (split->fields >= 63 ? -1 : (1ll << split->fields) - 1);
+  for (int64_t at = 0; at < split->count; ++at) {
+    ent_rows *rows = &split->rows[at];
+    if (rows->kind != ENT_ROWS_REMOTE || rows->to <= from || rows->from >= to)
+      continue;
+    int64_t lo = rows->from > from ? rows->from : from;
+    int64_t hi = rows->to < to ? rows->to : to;
+    for (int64_t row = lo; row < hi; ++row) {
+      int64_t key = buffer * (1ll << 40) + row, mask = 0;
+      int64_t a = 0, b = ent_retaken_count / 2;
+      while (a < b) {
+        int64_t m = (a + b) / 2;
+        if (ent_retaken[2 * m] < key)
+          a = m + 1;
+        else
+          b = m;
+      }
+      for (int64_t i = a; i < ent_retaken_count / 2 && ent_retaken[2 * i] == key;
+           ++i)
+        mask |= ent_retaken[2 * i + 1];
+      if ((mask & full) != full)
+        ent_ranks_stop("an entity wrote some fields of a buffer's row that "
+                       "another rank's entity wrote before, not all (the "
+                       "others are not here, with ENT_GHOSTS=ask): not on "
+                       "many ranks yet");
+    }
+  }
+}
+
+// (The rows of `buffer` noted, forgotten: its `for` is done with them.)
+static void ent_retaken_forget(int32_t buffer) {
+  int64_t kept = 0;
+  for (int64_t i = 0; i < ent_retaken_count; i += 2)
+    if (ent_retaken[i] / (1ll << 40) != buffer) {
+      ent_retaken[kept] = ent_retaken[i];
+      ent_retaken[kept + 1] = ent_retaken[i + 1];
+      kept += 2;
+    }
+  ent_retaken_count = kept;
 }

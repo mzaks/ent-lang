@@ -79,7 +79,18 @@ rank, run on N ranks. No rank ever holds the whole world:
   that chose whom to look up by what it wrote first would look up one it
   did not ask for: the program stops there.
 
-Not yet: buffers are whole on every rank; a partition is a rank.
+- With `ENT_GHOSTS=ask`, a buffer that `for`s over distributed entities
+  write, and only such `for`s (or fns only they call) read, is split by
+  rows: a rank keeps the rows its entities wrote, the rows given alike
+  outside a `for` (runs of rows all alike are kept as one, not written),
+  and asks for other ranks' rows like a lookup. When such a `for` ends the
+  ranks say whose rows they wrote instead of giving them. A row that was
+  another rank's, written again by this rank's entity, must get every
+  field (else the program stops). A `for` that reads a buffer by
+  searching it (each read where the one before says) asks in as many
+  rounds as the search has steps, its work done again in each: slow.
+
+Not yet: a partition is a rank.
 
 ## A `for` over distributed entities
 
