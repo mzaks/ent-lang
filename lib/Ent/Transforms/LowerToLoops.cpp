@@ -2022,6 +2022,96 @@ static void markSetupQueries(ModuleOp module) {
 }
 
 static bool spreads(const WorldArchetype &archetype, QueryOp query);
+/// ENT_LAYOUT_MAP: where each array of the world starts, by name, to
+/// stderr (a line each: offset, name), to tell what the memory of a
+/// running program holds.
+static void printLayoutMap(const WorldLayout &layout) {
+  std::vector<std::pair<uint64_t, std::string>> map;
+  auto add = [&](uint64_t offset, const Twine &name) {
+    if (offset)
+      map.push_back({offset, name.str()});
+  };
+  for (const WorldArchetype &archetype : layout.archetypes) {
+    std::string name = ArchetypeOp(archetype.op).getSymName().str();
+    for (const WorldColumn &column : archetype.columns)
+      add(column.offset, name + "." + column.component.getValue() + "." +
+                             column.field.getValue() +
+                             (column.isStamp() ? ".stamp" : ""));
+    add(archetype.idOffset, name + ".ids");
+    add(archetype.pendingOffset, name + ".pending");
+    add(archetype.pendingActionOffset, name + ".pendingAction");
+    add(archetype.newRowOffset, name + ".newRow");
+    add(archetype.idScratchOffset, name + ".idScratch");
+    add(archetype.levelStartOffset, name + ".levelStart");
+    add(archetype.connectedRowOffset, name + ".connectedRow");
+    add(archetype.parentRowOffset, name + ".parentRow");
+    add(archetype.marksOffset, name + ".marks");
+    for (uint64_t offset : archetype.columnScratchOffsets)
+      add(offset, name + ".columnScratch");
+    for (const WorldMove &move : archetype.moves)
+      for (const WorldColumn &value : move.values)
+        add(value.offset, name + ".moveValue");
+  }
+  for (auto [i, apply] : llvm::enumerate(layout.applies)) {
+    for (const WorldApplyBuffer &buffer : apply.buffers) {
+      add(buffer.idOffset, "apply" + Twine(i) + ".ids");
+      add(buffer.valueOffset, "apply" + Twine(i) + ".values");
+    }
+    add(apply.edgeIdOffset, "apply" + Twine(i) + ".edgeIds");
+    add(apply.edgeValueOffset, "apply" + Twine(i) + ".edgeValues");
+  }
+  for (auto [i, connect] : llvm::enumerate(layout.connects))
+    for (const WorldConnect::Buffer &buffer : connect.buffers) {
+      add(buffer.sourceOffset, "connect" + Twine(i) + ".sources");
+      add(buffer.targetOffset, "connect" + Twine(i) + ".targets");
+      for (uint64_t offset : buffer.valueOffsets)
+        add(offset, "connect" + Twine(i) + ".values");
+    }
+  for (auto [i, append] : llvm::enumerate(layout.appends))
+    for (const WorldAppend::Slots &slots : append.slots) {
+      add(slots.sentOffset, "append" + Twine(i) + ".sent");
+      for (uint64_t offset : slots.valueOffsets)
+        add(offset, "append" + Twine(i) + ".values");
+    }
+  for (const WorldRelation &relation : layout.relations) {
+    std::string name = RelationOp(relation.op).getSymName().str();
+    add(relation.sourceOffset, name + ".source");
+    add(relation.targetOffset, name + ".target");
+    for (const WorldColumn &field : relation.fields)
+      add(field.offset, name + "." + field.field.getValue());
+    add(relation.deadOffset, name + ".dead");
+    add(relation.sortedOffset, name + ".sorted");
+    add(relation.indexOffset, name + ".index");
+    add(relation.indexEdgesOffset, name + ".indexEdges");
+    add(relation.cursorOffset, name + ".cursor");
+    add(relation.sourceScratchOffset, name + ".sourceScratch");
+    add(relation.targetScratchOffset, name + ".targetScratch");
+    for (uint64_t offset : relation.fieldScratchOffsets)
+      add(offset, name + ".fieldScratch");
+    add(relation.firstChildOffset, name + ".firstChild");
+    add(relation.sequenceOffset, name + ".sequence");
+    add(relation.orderKeysOffset, name + ".orderKeys");
+    add(relation.orderOffset, name + ".order");
+    add(relation.orderParentOffset, name + ".orderParent");
+    add(relation.walkOrderOffset, name + ".walkOrder");
+    add(relation.rowOrderOffset, name + ".rowOrder");
+    add(relation.depthOffset, name + ".depth");
+  }
+  for (const WorldBuffer &buffer : layout.buffers) {
+    std::string name = BufferOp(buffer.op).getSymName().str();
+    for (const WorldColumn &field : buffer.fields)
+      add(field.offset, name + "." + field.field.getValue());
+    add(buffer.ownerOffset, name + ".owner");
+  }
+  for (auto [i, log] : llvm::enumerate(layout.logs))
+    add(log.idsOffset, "log" + Twine(i));
+  add(layout.locationOffset, "entities.location");
+  add(layout.generationOffset, "entities.generation");
+  llvm::sort(map);
+  for (auto &[offset, name] : map)
+    llvm::errs() << offset << " " << name << "\n";
+}
+
 /// The trees that queries over distributed archetypes go along (after the
 /// placement): each child must live where its parent does.
 static SmallVector<StringAttr> rankTrees;
@@ -14058,6 +14148,44 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
       drop(column.offset, world.storageBytes(column.type));
     if (archetype.idOffset)
       drop(archetype.idOffset, layout.entities.idBits / 8);
+    // (And their rows' places for what queries send, connect and give to
+    // buffers, which the setup may have filled for every row.)
+    uint64_t idBytes = layout.entities.idBits / 8;
+    for (const WorldApply &apply : layout.applies)
+      for (const WorldApplyBuffer &buffer : apply.buffers)
+        if (buffer.archetype == archetype.index) {
+          drop(buffer.idOffset, idBytes);
+          drop(buffer.valueOffset, world.storageBytes(apply.type));
+        }
+    for (const WorldConnect &connect : layout.connects)
+      for (const WorldConnect::Buffer &buffer : connect.buffers)
+        if (buffer.archetype == archetype.index) {
+          drop(buffer.sourceOffset, idBytes);
+          drop(buffer.targetOffset, idBytes);
+        }
+    for (const WorldAppend &append : layout.appends)
+      for (const WorldAppend::Slots &slots : append.slots)
+        if (slots.archetype == archetype.index)
+          drop(slots.sentOffset, 1);
+    // (And all of what sorting its rows copies them to, which the next
+    // sort fills anew.)
+    auto dropAll = [&](uint64_t offset, uint64_t each) {
+      callGpu(rewriter, loc, module, "ent_ranks_drop_rows",
+              ValueRange{worldPointer(rewriter, loc,
+                                      world.bytes(offset,
+                                                  archetype.capacity * each)),
+                         arith::ConstantIntOp::create(rewriter, loc, each, 64),
+                         arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                         arith::ConstantIntOp::create(rewriter, loc,
+                                                      archetype.capacity, 64)});
+    };
+    for (auto [offset, column] :
+         llvm::zip(archetype.columnScratchOffsets, archetype.columns))
+      dropAll(offset, world.storageBytes(column.type));
+    if (archetype.idScratchOffset)
+      dropAll(archetype.idScratchOffset, idBytes);
+    if (archetype.newRowOffset)
+      dropAll(archetype.newRowOffset, 4);
   }
   // (Each child of a tree that is gone along where its parent is.)
   for (StringAttr tree : rankTrees) {
@@ -14085,6 +14213,26 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
                          arith::IndexCastOp::create(rewriter, loc, i64,
                                                     homeRow)});
     }
+  }
+  // (What sends in loops over edges noted per edge, which every such
+  // query fills anew: given back to the system.)
+  for (const WorldApply &apply : layout.applies) {
+    if (!apply.edgeIdOffset)
+      continue;
+    for (auto [offset, each] :
+         {std::make_pair(apply.edgeIdOffset,
+                         (uint64_t)layout.entities.idBits / 8),
+          std::make_pair(apply.edgeValueOffset,
+                         world.storageBytes(apply.type))})
+      callGpu(rewriter, loc, module, "ent_ranks_drop_rows",
+              ValueRange{worldPointer(rewriter, loc,
+                                      world.bytes(offset,
+                                                  apply.edgeCapacity * each)),
+                         arith::ConstantIntOp::create(rewriter, loc, each, 64),
+                         arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                         arith::ConstantIntOp::create(rewriter, loc,
+                                                      apply.edgeCapacity,
+                                                      64)});
   }
   // (From now on the ranks' parts are combined and given to each other.)
   callGpu(rewriter, loc, module, "ent_ranks_distribute", ValueRange{});
@@ -14158,6 +14306,48 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
                             arith::ConstantIntOp::create(rewriter, loc, 0, 64),
                             world.edgesClean(relation), ValueRange{zero});
     callSort(rewriter, loc, relation, world.getArena());
+    // (The rows past those kept given back to the system, and the copies
+    // the sort makes, which the next sort makes anew.)
+    auto dropAll = [&](uint64_t offset, int64_t each) {
+      callGpu(rewriter, loc, module, "ent_ranks_drop_rows",
+              ValueRange{worldPointer(rewriter, loc,
+                                      world.bytes(offset,
+                                                  relation.slots * each)),
+                         arith::ConstantIntOp::create(rewriter, loc, each, 64),
+                         arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                         arith::ConstantIntOp::create(rewriter, loc,
+                                                      relation.slots, 64)});
+    };
+    if (relation.sourceScratchOffset) {
+      uint64_t idBytes = layout.entities.idBits / 8;
+      dropAll(relation.sourceScratchOffset, idBytes);
+      dropAll(relation.targetScratchOffset, idBytes);
+      for (auto [offset, field] :
+           llvm::zip(relation.fieldScratchOffsets, relation.fields))
+        dropAll(offset, world.storageBytes(field.type));
+    }
+    if (relation.indexEdgesOffset)
+      callGpu(rewriter, loc, module, "ent_ranks_drop_rows",
+              ValueRange{worldPointer(rewriter, loc,
+                                      world.indexEdges(relation)),
+                         arith::ConstantIntOp::create(
+                             rewriter, loc, relation.offsetBits / 8, 64),
+                         kept,
+                         arith::ConstantIntOp::create(rewriter, loc,
+                                                      relation.capacity, 64)});
+    for (Value column : columns) {
+      Type element = cast<MemRefType>(column.getType()).getElementType();
+      callGpu(rewriter, loc, module, "ent_ranks_drop_rows",
+              ValueRange{worldPointer(rewriter, loc, column),
+                         arith::ConstantIntOp::create(
+                             rewriter, loc,
+                             std::max<int64_t>(
+                                 1, element.getIntOrFloatBitWidth() / 8),
+                             64),
+                         kept,
+                         arith::IndexCastOp::create(rewriter, loc, i64,
+                                                    count)});
+    }
   }
 }
 
@@ -17406,6 +17596,12 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
   // placed, every row of a distributed archetype is every rank's.)
   if (ranksMode) {
     callGpu(rewriter, loc, module, "ent_ranks_start", ValueRange{});
+    callGpu(rewriter, loc, module, "ent_ranks_arena",
+            ValueRange{worldPointer(rewriter, loc, created),
+                       arith::ConstantIntOp::create(
+                           rewriter, loc,
+                           cast<MemRefType>(created.getType()).getNumElements(),
+                           64)});
     WorldAccess started(rewriter, layout, created);
     for (const WorldArchetype &archetype : layout.archetypes)
       if (archetype.isDistributed())
@@ -18680,6 +18876,8 @@ struct EntLowerToLoops
     FailureOr<WorldLayout> layout = WorldLayout::compute(module);
     if (failed(layout))
       return signalPassFailure();
+    if (getenv("ENT_LAYOUT_MAP"))
+      printLayoutMap(*layout);
     if (ranks)
       distributeByRows(*layout, module);
     if (ranks && failed(checkRanks(module, *layout)))

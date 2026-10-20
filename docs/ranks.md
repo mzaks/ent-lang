@@ -122,9 +122,12 @@ writes a distributed component, is refused when the program is built.
 - Every rank runs the setup and so has, until the placement, every row:
   the most memory a rank takes is the whole world's. When it is placed each rank gives the memory of the other
   ranks' rows of its columns back to the system (`madvise`), and keeps
-  its own; the row numbers stay. A field that a `for` looks up is had
+  its own; the row numbers stay. So it does with the places for what
+  `for`s send, connect and give to buffers, with the copies sorting makes
+  (of rows and of edges), and with the edges it no longer has. A field that a `for` looks up is had
   whole again from then on. Buffers, uniques, archetypes that are not
-  distributed, trees and the table of entities every rank keeps whole.
+  distributed, trees, what is kept for each entity of a relation (where
+  its edges start) and the table of entities every rank keeps whole.
 - A `for` along a tree goes through every rank's rows, doing nothing for
   those of other ranks.
 - `--gpu` is for one process. Systems' loops are fused on many ranks as
@@ -142,5 +145,10 @@ writes a distributed component, is refused when the program is built.
   sends it posted to other ranks and was given, and its memory. With
   `ENT_RANKS_LOG=2` also, for each place the program calls the runtime
   from (by its offset in the program's file, which `nm` names), how long
-  the rank worked before it and waited in it.
+  the rank worked before it and waited in it. With `ENT_RANKS_LOG=3`
+  each rank also writes, as it ends, which pages of its world it has
+  (`ent-ranks-pages.<rank>`: the offset of each MB and how many of its
+  pages), and `ENT_LAYOUT_MAP=1` where the program is built prints where
+  each array of the world starts: together they say what a rank's memory
+  holds.
 - The runtime is `devices/ranks.c`, the only code that calls MPI.

@@ -96,7 +96,7 @@ static void ent_log_places(void) {
 }
 
 static void ent_log_spent(void) {
-  if (getenv("ENT_RANKS_LOG")[0] == '2')
+  if (getenv("ENT_RANKS_LOG")[0] >= '2')
     ent_log_places();
   fprintf(stderr, "ent: rank %d: posted %lld sends, was given %lld\n",
           ent_rank, (long long)ent_posted, (long long)ent_received);
@@ -117,9 +117,50 @@ static void ent_log_memory(void) {
   fclose(status);
 }
 
+// The world's memory (ENT_RANKS_LOG=3: which of its pages each rank has
+// as it ends, to ent-ranks-pages.<rank>, by MB: the offset and the pages
+// of it the rank has).
+static char *ent_arena = 0;
+static int64_t ent_arena_bytes = 0;
+void ent_ranks_arena(void *arena, int64_t bytes) {
+  ent_arena = arena;
+  ent_arena_bytes = bytes;
+}
+static void ent_log_pages(void) {
+  if (!ent_arena)
+    return;
+  long page = sysconf(_SC_PAGESIZE);
+  uintptr_t start = (uintptr_t)ent_arena & ~(uintptr_t)(page - 1);
+  int64_t length = (int64_t)((uintptr_t)ent_arena + ent_arena_bytes - start);
+  int64_t pages = (length + page - 1) / page;
+  unsigned char *have = malloc(pages);
+  if (mincore((void *)start, pages * page, have) != 0) {
+    free(have);
+    return;
+  }
+  char name[64];
+  snprintf(name, sizeof name, "ent-ranks-pages.%d", ent_rank);
+  FILE *out = fopen(name, "w");
+  int64_t per = (1 << 20) / page;
+  for (int64_t at = 0; at < pages; at += per) {
+    int64_t n = 0;
+    for (int64_t i = at; i < pages && i < at + per; ++i)
+      n += have[i] & 1;
+    if (n)
+      fprintf(out, "%lld %lld\n", (long long)(at * page), (long long)n);
+  }
+  fclose(out);
+  free(have);
+}
+
 void ent_ranks_end(void) {
   if (!ent_started)
     return;
+  {
+    const char *log = getenv("ENT_RANKS_LOG");
+    if (log && log[0] == '3')
+      ent_log_pages();
+  }
   if (getenv("ENT_RANKS_LOG")) {
     ent_log_spent();
     ent_log_memory();
@@ -983,4 +1024,12 @@ void ent_ranks_log_edges(int32_t relation, int64_t had, int64_t kept) {
   if (getenv("ENT_RANKS_LOG"))
     fprintf(stderr, "ent: rank %d: relation %d: kept %lld of %lld edges\n",
             ent_rank, relation, (long long)kept, (long long)had);
+}
+
+// The rows `from` to `to` of a column (`each` bytes a row) given back to
+// the system: rows a rank no longer has (edges it dropped).
+void ent_ranks_drop_rows(void *column, int64_t each, int64_t from,
+                         int64_t to) {
+  if (from < to)
+    ent_let_go((char *)column + from * each, (char *)column + to * each);
 }
