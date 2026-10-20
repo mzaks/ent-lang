@@ -90,6 +90,14 @@ rank, run on N ranks. No rank ever holds the whole world:
   searching it (each read where the one before says) asks in as many
   rounds as the search has steps, its work done again in each: slow.
 
+- `ENT_WORLD_DIR=dir` where any program runs (on many ranks or one) puts
+  its world in a file in that directory (sparse, gone when it ends), which
+  the system keeps in memory as far as it can and writes to the file past
+  that: a world larger than the machine's memory runs, slowly. The
+  epidemic with tracing at 1e6 people (1.15 GB) ran in 500 MB so, in
+  203 s instead of 18 s, to the same bytes. (A directory on a disk: one
+  in memory, as /tmp often is, is no help.)
+
 Not yet: a partition is a rank.
 
 ## A `for` over distributed entities

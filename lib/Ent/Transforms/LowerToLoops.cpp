@@ -18665,9 +18665,103 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
       rewriter, loc, "main",
       rewriter.getFunctionType({}, {rewriter.getI32Type()}));
   rewriter.setInsertionPointToStart(func.addEntryBlock());
-  Value created = memref::AllocOp::create(
-      rewriter, loc, arenaType,
-      rewriter.getI64IntegerAttr(WorldLayout::kArenaAlignment));
+  // The world's memory from devices/memory.c: mapped, and with
+  // ENT_WORLD_DIR a file the system may write it to (a world larger than
+  // the machine's memory). Made the arena's memref here.
+  auto pointerType = LLVM::LLVMPointerType::get(rewriter.getContext());
+  Type wordType = rewriter.getI64Type();
+  // (Declared weak: a program linked without devices/memory.c takes the
+  // world from the heap.)
+  auto weakDeclaration = [&](StringRef name, Type result, Type argument) {
+    if (auto known = module.lookupSymbol<LLVM::LLVMFuncOp>(name))
+      return known;
+    OpBuilder::InsertionGuard declared(rewriter);
+    rewriter.setInsertionPointToStart(module.getBody());
+    auto made = LLVM::LLVMFuncOp::create(
+        rewriter, loc, name,
+        LLVM::LLVMFunctionType::get(result, {argument}));
+    made.setLinkage(LLVM::Linkage::ExternWeak);
+    return made;
+  };
+  auto voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
+  // (A C function of the C library, called by whatever declares it here,
+  // or declared.)
+  auto callC = [&](StringRef name, Type result, ValueRange arguments) -> Value {
+    if (auto known = module.lookupSymbol<func::FuncOp>(name)) {
+      auto call = func::CallOp::create(rewriter, loc, known, arguments);
+      return call->getNumResults() ? call.getResult(0) : Value();
+    }
+    auto function = module.lookupSymbol<LLVM::LLVMFuncOp>(name);
+    if (!function) {
+      OpBuilder::InsertionGuard declared(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+      SmallVector<Type> types(arguments.getTypes());
+      function = LLVM::LLVMFuncOp::create(
+          rewriter, loc, name, LLVM::LLVMFunctionType::get(result, types));
+    }
+    auto call = LLVM::CallOp::create(rewriter, loc, function, arguments);
+    return call->getNumResults() ? call.getResult() : Value();
+  };
+  auto worldMemory =
+      weakDeclaration("ent_world_memory", pointerType, wordType);
+  auto worldFree = weakDeclaration("ent_world_free", voidType, pointerType);
+  auto linked = [&](LLVM::LLVMFuncOp function) -> Value {
+    Value address = LLVM::AddressOfOp::create(rewriter, loc, pointerType,
+                                              function.getSymName());
+    return LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ne,
+                                address,
+                                LLVM::ZeroOp::create(rewriter, loc,
+                                                     pointerType));
+  };
+  Value bytes = arith::ConstantIntOp::create(rewriter, loc,
+                                             arenaType.getNumElements(), 64);
+  auto taking = scf::IfOp::create(rewriter, loc, TypeRange{pointerType},
+                                  linked(worldMemory),
+                                  /*withElseRegion=*/true);
+  {
+    OpBuilder::InsertionGuard branch(rewriter);
+    rewriter.setInsertionPointToStart(taking.thenBlock());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{LLVM::CallOp::create(rewriter, loc, worldMemory,
+                                        ValueRange{bytes})
+                       .getResult()});
+    rewriter.setInsertionPointToStart(taking.elseBlock());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{callC("aligned_alloc", pointerType,
+                         ValueRange{arith::ConstantIntOp::create(
+                                        rewriter, loc,
+                                        WorldLayout::kArenaAlignment, 64),
+                                    bytes})});
+  }
+  Value memory = taking.getResult(0);
+  Value created;
+  {
+    auto dimensions = LLVM::LLVMArrayType::get(wordType, 1);
+    auto descriptorType = LLVM::LLVMStructType::getLiteral(
+        rewriter.getContext(),
+        {pointerType, pointerType, wordType, dimensions, dimensions});
+    Value descriptor = LLVM::UndefOp::create(rewriter, loc, descriptorType);
+    auto word = [&](int64_t value) {
+      return LLVM::ConstantOp::create(rewriter, loc, wordType,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+    descriptor = LLVM::InsertValueOp::create(rewriter, loc, descriptor,
+                                             memory, ArrayRef<int64_t>{0});
+    descriptor = LLVM::InsertValueOp::create(rewriter, loc, descriptor,
+                                             memory, ArrayRef<int64_t>{1});
+    descriptor = LLVM::InsertValueOp::create(rewriter, loc, descriptor,
+                                             word(0), ArrayRef<int64_t>{2});
+    descriptor = LLVM::InsertValueOp::create(
+        rewriter, loc, descriptor, word(arenaType.getNumElements()),
+        ArrayRef<int64_t>{3, 0});
+    descriptor = LLVM::InsertValueOp::create(rewriter, loc, descriptor,
+                                             word(1), ArrayRef<int64_t>{4, 0});
+    created = UnrealizedConversionCastOp::create(rewriter, loc, arenaType,
+                                                 descriptor)
+                  .getResult(0);
+  }
   // Counts, resources and entity counters start at zero; columns stay
   // untouched, so capacity costs address space, not memory.
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -18800,7 +18894,16 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
                        ValueRange{created});
   if (ranksMode)
     callGpu(rewriter, loc, module, "ent_ranks_end", ValueRange{});
-  memref::DeallocOp::create(rewriter, loc, created);
+  {
+    auto freeing = scf::IfOp::create(rewriter, loc, TypeRange{},
+                                     linked(worldFree),
+                                     /*withElseRegion=*/true);
+    OpBuilder::InsertionGuard branch(rewriter);
+    rewriter.setInsertionPoint(freeing.thenBlock()->getTerminator());
+    LLVM::CallOp::create(rewriter, loc, worldFree, ValueRange{memory});
+    rewriter.setInsertionPoint(freeing.elseBlock()->getTerminator());
+    callC("free", voidType, ValueRange{memory});
+  }
   Value status = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
   func::ReturnOp::create(rewriter, loc, ValueRange{status});
   return success();

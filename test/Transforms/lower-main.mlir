@@ -22,15 +22,24 @@ ent.schedule @frame(%dt: f32) {
   ent.run @tick()
 }
 
-// The arena, aligned as the header aligns it, with its header (counts,
-// resources, entity counters) zeroed; columns stay untouched.
+// The arena: from devices/memory.c where the program is linked with it
+// (declared weak; mapped, or a file with ENT_WORLD_DIR), else from the
+// heap, aligned as the header aligns it; its header (counts, resources,
+// entity counters) zeroed; columns stay untouched.
+// CHECK-DAG: llvm.func extern_weak @ent_world_memory(i64) -> !llvm.ptr
+// CHECK-DAG: llvm.func extern_weak @ent_world_free(!llvm.ptr)
 // CHECK-LABEL: func.func @main() -> i32 {
-// CHECK-NEXT:   %[[WORLD:.*]] = memref.alloc() {alignment = 16384 : i64} : memref<[[BYTES:.*]]xi8>
+// CHECK:        %[[MEMORY:.*]] = scf.if
+// CHECK:          llvm.call @ent_world_memory
+// CHECK:        } else {
+// CHECK:          llvm.call @aligned_alloc
+// CHECK:        %[[WORLD:.*]] = builtin.unrealized_conversion_cast %{{.*}} : !llvm.struct<{{.*}}> to memref<[[BYTES:.*]]xi8>
 // CHECK:        scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step
 // CHECK-NEXT:     memref.store %{{.*}}, %[[WORLD]][%[[I]]]
 // CHECK:        call @ent.main(%[[WORLD]])
-// CHECK-NEXT:   memref.dealloc %[[WORLD]]
-// CHECK-NEXT:   %[[STATUS:.*]] = arith.constant 0 : i32
+// CHECK:          llvm.call @ent_world_free(%[[MEMORY]])
+// CHECK:          llvm.call @free(%[[MEMORY]])
+// CHECK:        %[[STATUS:.*]] = arith.constant 0 : i32
 // CHECK-NEXT:   return %[[STATUS]] : i32
 
 // CHECK: func.func private @ent.main(%[[ARENA:.*]]: memref<[[BYTES]]xi8>) {

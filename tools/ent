@@ -68,6 +68,11 @@ when they are spawned, each rank building only its own: the setup too
 runs spread over the ranks (ENT_BLOCK, where it runs, says how many
 values of what an archetype is distributed by go to a partition).
 
+A program's world lives in memory, as large as its capacities say (rows it
+never uses cost address space only). With ENT_WORLD_DIR set where it runs,
+it is a file in that directory instead (on a disk), which the system pages:
+a world larger than the machine's memory runs, slowly (devices/memory.c).
+
 Files on the command line (.c, .cpp, .o, .a) are taken the same way.
 
 A program can be built for what it does when it runs (profile-guided):
@@ -254,6 +259,7 @@ def cache_key(arguments):
 
     # (The C that keeps what a `for` sends from a loop.)
     note_file(os.path.join(ROOT, "devices", "sends.c"))
+    note_file(os.path.join(ROOT, "devices", "memory.c"))
 
     include_directories = arguments.I + [os.path.join(ROOT, "devices")]
     files, assets = made_of(arguments)
@@ -480,6 +486,8 @@ def build(arguments, output, directory):
     # the edges it connects there are kept by C that comes with the
     # compiler.
     given.append(os.path.join(ROOT, "devices", "sends.c"))
+    # And where the world lives (in a file, with ENT_WORLD_DIR).
+    given.append(os.path.join(ROOT, "devices", "memory.c"))
     if arguments.gpu:
         given.append(os.path.join(ROOT, "devices", "gpu.c"))
         link.append("-lcuda")
