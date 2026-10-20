@@ -39,7 +39,24 @@ typedef struct {
   uint64_t at;
 } ent_send_lists;
 
-static ent_send_lists *ent_sends[ENT_SEND_LISTS];
+// (A table of them for each partition a process runs, devices/ranks.c,
+// whose ent_partition_index says which is the calling one's; 0 otherwise.)
+#define ENT_PARTITIONS 1024
+__attribute__((weak)) int ent_partition_index(void) { return 0; }
+static ent_send_lists **ent_sends_by[ENT_PARTITIONS];
+static ent_send_lists **ent_sends_table(void) {
+  int p = ent_partition_index();
+  ent_send_lists **table = __atomic_load_n(&ent_sends_by[p], __ATOMIC_ACQUIRE);
+  if (table)
+    return table;
+  ent_send_lists **made = calloc(ENT_SEND_LISTS, sizeof(ent_send_lists *));
+  if (__atomic_compare_exchange_n(&ent_sends_by[p], &table, made, 0,
+                                  __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+    return made;
+  free(made);
+  return table;
+}
+#define ent_sends (ent_sends_table())
 
 static void *ent_sends_take(size_t size) {
   void *memory = aligned_alloc(64, (size + 63) & ~(size_t)63);
@@ -166,7 +183,20 @@ typedef struct {
   int64_t count, room;
 } ent_rows_list;
 
-static ent_rows_list ent_rows[ENT_SEND_LISTS];
+static ent_rows_list *ent_rows_by[ENT_PARTITIONS];
+static ent_rows_list *ent_rows_table(void) {
+  int p = ent_partition_index();
+  ent_rows_list *table = __atomic_load_n(&ent_rows_by[p], __ATOMIC_ACQUIRE);
+  if (table)
+    return table;
+  ent_rows_list *made = calloc(ENT_SEND_LISTS, sizeof(ent_rows_list));
+  if (__atomic_compare_exchange_n(&ent_rows_by[p], &table, made, 0,
+                                  __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+    return made;
+  free(made);
+  return table;
+}
+#define ent_rows (ent_rows_table())
 
 void ent_rows_put(int64_t number, int64_t row) {
   ent_rows_list *list = &ent_rows[number];

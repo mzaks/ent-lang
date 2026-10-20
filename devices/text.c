@@ -74,7 +74,12 @@ typedef struct ent_text_made {
   uint32_t length;
   char bytes[];
 } ent_text_made;
-static ent_text_made *ent_text_all_made;
+// (A list for each partition a process runs, devices/ranks.c, whose
+// ent_partition_index says which is the calling one's; 0 otherwise: each
+// gives back its own.)
+__attribute__((weak)) int ent_partition_index(void) { return 0; }
+static ent_text_made *ent_text_all_made_by[1024];
+#define ent_text_all_made (ent_text_all_made_by[ent_partition_index()])
 
 static ent_text *ent_text_make(uint32_t length) {
   ent_text_made *made = malloc(sizeof(ent_text_made) + length + 1);

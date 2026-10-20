@@ -98,7 +98,19 @@ rank, run on N ranks. No rank ever holds the whole world:
   203 s instead of 18 s, to the same bytes. (A directory on a disk: one
   in memory, as /tmp often is, is no help.)
 
-Not yet: a partition is a rank.
+- A process runs several partitions where it is started on fewer ranks
+  than the program is built for: `mpirun -n 2 program` of a build for 8
+  partitions runs 4 in each process, each a thread with a world of its
+  own (in a file of its own, with `ENT_WORLD_DIR`). What the ranks do
+  together the partitions of a process do through memory, and the
+  processes through MPI. `ENT_RUNNING` says how many partitions of a
+  process go through their rows at once (as many as there are cores; 1:
+  one after another, which takes the least memory); one that waits for
+  the others lets another run.
+
+Not yet: partitions of a process each have the whole of what every rank
+has whole (buffers, fields gathered for lookups), not one copy for them
+all.
 
 ## A `for` over distributed entities
 

@@ -133,3 +133,14 @@
 // RUN: diff %t.fraction.one %t.fraction.p4
 // RUN: not %ent build %S/Inputs/ranks_extern.ent --ranks 2 -o %t.extern 2>&1 | FileCheck %s --check-prefix=EXTERN
 // EXTERN: runs the extern system @world.save_world, which works on the whole world
+//
+// A build for 4 partitions run by fewer processes: each runs several, as
+// threads (one at a time, ENT_RUNNING=1).
+// RUN: %ent build %S/Inputs/ranks_trace.ent --ranks 4 --partitions -o %t.trace.exe
+// RUN: mpirun -n 1 -x ENT_RUNNING=1 %t.trace.exe > %t.trace.in1
+// RUN: diff %t.trace.one %t.trace.in1
+// RUN: mpirun -n 2 --oversubscribe %t.trace.exe > %t.trace.in2
+// RUN: diff %t.trace.one %t.trace.in2
+// RUN: %ent build %S/Inputs/ranks_fraction.ent --ranks 4 --partitions -o %t.fraction.exe
+// RUN: mpirun -n 1 %t.fraction.exe > %t.fraction.in1
+// RUN: diff %t.fraction.one %t.fraction.in1

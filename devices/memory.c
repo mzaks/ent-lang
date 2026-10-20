@@ -28,8 +28,9 @@
 // (The world's alignment: WorldLayout::kArenaAlignment.)
 #define ENT_WORLD_ALIGNMENT 16384
 
-static void *ent_world_base = 0;
-static size_t ent_world_length = 0;
+// (Each partition's own, where a process runs several: devices/ranks.c.)
+static _Thread_local void *ent_world_base = 0;
+static _Thread_local size_t ent_world_length = 0;
 
 static void ent_world_fails(const char *what) {
   fprintf(stderr, "ent: no memory for the world (%s): %s\n", what,

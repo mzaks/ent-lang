@@ -18661,8 +18661,10 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
   }
 
   rewriter.setInsertionPoint(body);
+  // (On many ranks the program is `ent_rank_main`, which a process runs
+  // for each of its partitions, see the `main` below.)
   auto func = func::FuncOp::create(
-      rewriter, loc, "main",
+      rewriter, loc, ranksMode ? "ent_rank_main" : "main",
       rewriter.getFunctionType({}, {rewriter.getI32Type()}));
   rewriter.setInsertionPointToStart(func.addEntryBlock());
   // The world's memory from devices/memory.c: mapped, and with
@@ -18906,6 +18908,24 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
   }
   Value status = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
   func::ReturnOp::create(rewriter, loc, ValueRange{status});
+  // On many ranks, `main`: devices/ranks.c runs the program once for each
+  // partition the process has (a thread each), MPI around them.
+  if (ranksMode) {
+    rewriter.setInsertionPointAfter(func);
+    auto entry = func::FuncOp::create(
+        rewriter, loc, "main",
+        rewriter.getFunctionType({}, {rewriter.getI32Type()}));
+    rewriter.setInsertionPointToStart(entry.addEntryBlock());
+    Value program = func::ConstantOp::create(
+        rewriter, loc, func.getFunctionType(), func.getSymName());
+    Value ran = callGpu(rewriter, loc, module, "ent_ranks_run",
+                        ValueRange{program,
+                                   arith::ConstantIntOp::create(
+                                       rewriter, loc, partitionCount, 64)},
+                        TypeRange{rewriter.getI32Type()})
+                    .getResult(0);
+    func::ReturnOp::create(rewriter, loc, ValueRange{ran});
+  }
   return success();
 }
 

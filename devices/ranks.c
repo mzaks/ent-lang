@@ -9,6 +9,7 @@
 // (open_memstream.)
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <pthread.h>
 #include <execinfo.h>
 #include <mpi.h>
 #include <stdint.h>
@@ -18,22 +19,537 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-static int ent_rank = 0, ent_ranks = 1, ent_started = 0;
+// ---------------------------------------------------------------------------
+// Partitions in a process. Built for partitions, a process runs several,
+// each a thread with a world of its own (ent_ranks_run): a partition is a
+// rank of the program (`ent_rank` of `ent_ranks`), and what the ranks do
+// together the partitions of a process do through memory, and the
+// processes through MPI, which one partition of each does for all of
+// them. At most ENT_RUNNING partitions of a process go through their rows
+// at once (as many as there are cores; 1: one after another, the least
+// memory); one waiting for the others runs none.
+
+static int ent_procs = 1, ent_proc = 0, ent_locals = 1;
+static _Thread_local int ent_local = 0;
+static pthread_mutex_t ent_meeting = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ent_met = PTHREAD_COND_INITIALIZER;
+static int ent_arrived = 0;
+static long ent_generation = 0;
+static void **ent_args = 0;
+static pthread_mutex_t ent_running = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ent_free_slot = PTHREAD_COND_INITIALIZER;
+static int ent_slots = 1;
+
+static void ent_slot_take(void) {
+  pthread_mutex_lock(&ent_running);
+  while (ent_slots == 0)
+    pthread_cond_wait(&ent_free_slot, &ent_running);
+  --ent_slots;
+  pthread_mutex_unlock(&ent_running);
+}
+static void ent_slot_give(void) {
+  pthread_mutex_lock(&ent_running);
+  ++ent_slots;
+  pthread_cond_signal(&ent_free_slot);
+  pthread_mutex_unlock(&ent_running);
+}
+
+// All the process's partitions meet: each gives what it brings (`mine`),
+// and the last to come does `work` for all of them (by their local
+// numbers), the others waiting; then each goes on.
+static void ent_meet(void *mine, void (*work)(void **)) {
+  ent_slot_give();
+  pthread_mutex_lock(&ent_meeting);
+  ent_args[ent_local] = mine;
+  long generation = ent_generation;
+  if (++ent_arrived == ent_locals) {
+    work(ent_args);
+    ent_arrived = 0;
+    ++ent_generation;
+    pthread_cond_broadcast(&ent_met);
+  } else {
+    while (generation == ent_generation)
+      pthread_cond_wait(&ent_met, &ent_meeting);
+  }
+  pthread_mutex_unlock(&ent_meeting);
+  ent_slot_take();
+}
+
+// (The global rank of the `l`th partition of process `p`.)
+static int ent_global(int p, int l) { return p * ent_locals + l; }
+
+// -- A whole number combined over all the partitions.
+typedef struct {
+  int64_t in, out;
+  MPI_Op op;
+} ent_reduce_args;
+static int64_t ent_fold(int64_t a, int64_t b, MPI_Op op) {
+  if (op == MPI_MIN)
+    return a < b ? a : b;
+  if (op == MPI_MAX)
+    return a > b ? a : b;
+  return a + b;
+}
+static void ent_reduce_work(void **args) {
+  ent_reduce_args *first = args[0];
+  int64_t local = first->in;
+  for (int l = 1; l < ent_locals; ++l)
+    local = ent_fold(local, ((ent_reduce_args *)args[l])->in, first->op);
+  int64_t all = local;
+  if (ent_procs > 1)
+    MPI_Allreduce(&local, &all, 1, MPI_INT64_T, first->op, MPI_COMM_WORLD);
+  for (int l = 0; l < ent_locals; ++l)
+    ((ent_reduce_args *)args[l])->out = all;
+}
+static int64_t ent_allreduce(int64_t mine, MPI_Op op) {
+  ent_reduce_args args = {mine, 0, op};
+  ent_meet(&args, ent_reduce_work);
+  return args.out;
+}
+
+// -- What the partitions before this one add up to (nought for the first).
+static void ent_exscan_work(void **args) {
+  int64_t local = 0;
+  for (int l = 0; l < ent_locals; ++l)
+    local += ((ent_reduce_args *)args[l])->in;
+  int64_t before = 0;
+  if (ent_procs > 1) {
+    MPI_Exscan(&local, &before, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+    if (ent_proc == 0)
+      before = 0;
+  }
+  for (int l = 0; l < ent_locals; ++l) {
+    ent_reduce_args *a = args[l];
+    a->out = before;
+    before += a->in;
+  }
+}
+static int64_t ent_exscan(int64_t mine) {
+  ent_reduce_args args = {mine, 0, MPI_SUM};
+  ent_meet(&args, ent_exscan_work);
+  return args.out;
+}
+
+// -- `bytes` at `data`, as partition `root` has them, on every partition.
+typedef struct {
+  void *data;
+  int64_t bytes;
+  int root;
+} ent_bcast_args;
+static void ent_bcast_work(void **args) {
+  ent_bcast_args *first = args[0];
+  int root = first->root, from = root / ent_locals;
+  int64_t bytes = first->bytes;
+  void *source = from == ent_proc ? ((ent_bcast_args *)args[root % ent_locals])->data
+                                  : first->data;
+  if (ent_procs > 1)
+    for (int64_t at = 0; at < bytes; at += 1 << 30) {
+      int64_t n = bytes - at < (1 << 30) ? bytes - at : (1 << 30);
+      MPI_Bcast((char *)source + at, (int)n, MPI_BYTE, from, MPI_COMM_WORLD);
+    }
+  for (int l = 0; l < ent_locals; ++l) {
+    ent_bcast_args *a = args[l];
+    if (a->data != source)
+      memcpy(a->data, source, bytes);
+  }
+}
+static void ent_bcast(void *data, int64_t bytes, int root) {
+  ent_bcast_args args = {data, bytes, root};
+  ent_meet(&args, ent_bcast_work);
+}
+
+// -- Each partition's `bytes` (`mine`), all of them in the order of the
+// ranks (`all`, ranks times as many), on every partition.
+typedef struct {
+  const void *mine;
+  void *all;
+  int64_t bytes;
+} ent_gather_args;
+static void ent_allgather_work(void **args) {
+  ent_gather_args *first = args[0];
+  int64_t bytes = first->bytes, block = bytes * ent_locals;
+  char *all = first->all;
+  for (int l = 0; l < ent_locals; ++l)
+    memcpy(all + (ent_proc * ent_locals + l) * bytes,
+           ((ent_gather_args *)args[l])->mine, bytes);
+  if (ent_procs > 1)
+    MPI_Allgather(MPI_IN_PLACE, 0, MPI_BYTE, all, (int)block, MPI_BYTE,
+                  MPI_COMM_WORLD);
+  for (int l = 1; l < ent_locals; ++l)
+    memcpy(((ent_gather_args *)args[l])->all, all,
+           bytes * ent_locals * ent_procs);
+}
+static void ent_allgather(const void *mine, int64_t bytes, void *all) {
+  ent_gather_args args = {mine, all, bytes};
+  ent_meet(&args, ent_allgather_work);
+}
+
+// -- Each partition's piece, `counts[r]` bytes at `displs[r]` (by rank):
+// from its `send` into every partition's `recv` (or, where `send` is 0,
+// from its own `recv`, in place).
+typedef struct {
+  const void *send;
+  void *recv;
+  const int64_t *counts, *displs;
+} ent_pieces_args;
+static void ent_allgatherv_work(void **args) {
+  ent_pieces_args *first = args[0];
+  const int64_t *counts = first->counts, *displs = first->displs;
+  int ranks = ent_locals * ent_procs;
+  // (Each partition's piece where every partition of the process has it.)
+  for (int l = 0; l < ent_locals; ++l) {
+    ent_pieces_args *a = args[l];
+    int r = ent_global(ent_proc, l);
+    const char *piece = a->send ? a->send : (char *)a->recv + displs[r];
+    for (int m = 0; m < ent_locals; ++m) {
+      char *to = (char *)((ent_pieces_args *)args[m])->recv + displs[r];
+      if (to != piece)
+        memmove(to, piece, counts[r]);
+    }
+  }
+  if (ent_procs == 1)
+    return;
+  // (Between processes: each one's pieces, one after another.)
+  int *sizes = malloc(sizeof(int) * ent_procs), *starts = malloc(sizeof(int) * ent_procs);
+  int64_t total = 0;
+  for (int p = 0; p < ent_procs; ++p) {
+    int64_t size = 0;
+    for (int l = 0; l < ent_locals; ++l)
+      size += counts[ent_global(p, l)];
+    if (size > 0x7fffffff || total > 0x7fffffff) {
+      fprintf(stderr, "ent: a process's pieces past 2 GB: not on many ranks yet\n");
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    sizes[p] = (int)size;
+    starts[p] = (int)total;
+    total += size;
+  }
+  char *packed = malloc(total ? total : 1);
+  char *at = packed + starts[ent_proc];
+  for (int l = 0; l < ent_locals; ++l) {
+    int r = ent_global(ent_proc, l);
+    memcpy(at, (char *)first->recv + displs[r], counts[r]);
+    at += counts[r];
+  }
+  MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_BYTE, packed, sizes, starts, MPI_BYTE,
+                 MPI_COMM_WORLD);
+  for (int p = 0; p < ent_procs; ++p) {
+    if (p == ent_proc)
+      continue;
+    char *from = packed + starts[p];
+    for (int l = 0; l < ent_locals; ++l) {
+      int r = ent_global(p, l);
+      for (int m = 0; m < ent_locals; ++m)
+        memcpy((char *)((ent_pieces_args *)args[m])->recv + displs[r], from,
+               counts[r]);
+      from += counts[r];
+    }
+  }
+  (void)ranks;
+  free(packed);
+  free(sizes);
+  free(starts);
+}
+static void ent_allgatherv(const void *send, void *recv, const int64_t *counts,
+                           const int64_t *displs) {
+  ent_pieces_args args = {send, recv, counts, displs};
+  ent_meet(&args, ent_allgatherv_work);
+}
+
+// -- Each partition's words to each (`sent[r]` of them at `sent_at[r]` of
+// `out`, by rank), given to each (`got[r]` from rank r at `got_at[r]` of
+// `in`); the counts first (ent_alltoall).
+typedef struct {
+  const int64_t *sent;
+  int64_t *got;
+} ent_counts_args;
+static void ent_alltoall_work(void **args) {
+  int ranks = ent_locals * ent_procs;
+  // (got[l][r]: what rank r sends local partition l.)
+  int64_t *matrix = malloc(sizeof(int64_t) * ent_locals * ranks);
+  for (int l = 0; l < ent_locals; ++l)
+    for (int m = 0; m < ent_locals; ++m)
+      ((ent_counts_args *)args[m])->got[ent_global(ent_proc, l)] =
+          ((ent_counts_args *)args[l])->sent[ent_global(ent_proc, m)];
+  if (ent_procs > 1) {
+    // (To process q, from each of ours to each of its: locals squared.)
+    int64_t square = (int64_t)ent_locals * ent_locals;
+    int64_t *out = malloc(sizeof(int64_t) * square * ent_procs);
+    int64_t *in = malloc(sizeof(int64_t) * square * ent_procs);
+    for (int q = 0; q < ent_procs; ++q)
+      for (int l = 0; l < ent_locals; ++l)
+        for (int m = 0; m < ent_locals; ++m)
+          out[q * square + l * ent_locals + m] =
+              ((ent_counts_args *)args[l])->sent[ent_global(q, m)];
+    MPI_Alltoall(out, (int)square, MPI_INT64_T, in, (int)square, MPI_INT64_T,
+                 MPI_COMM_WORLD);
+    for (int p = 0; p < ent_procs; ++p)
+      if (p != ent_proc)
+        for (int l = 0; l < ent_locals; ++l)
+          for (int m = 0; m < ent_locals; ++m)
+            ((ent_counts_args *)args[m])->got[ent_global(p, l)] =
+                in[p * square + l * ent_locals + m];
+    free(out);
+    free(in);
+  }
+  free(matrix);
+}
+static void ent_alltoall(const int64_t *sent, int64_t *got) {
+  ent_counts_args args = {sent, got};
+  ent_meet(&args, ent_alltoall_work);
+}
+
+typedef struct {
+  const int64_t *out;
+  const int64_t *sent, *sent_at;
+  int64_t *in;
+  const int64_t *got, *got_at;
+} ent_words_args;
+static void ent_alltoallv_work(void **args) {
+  // (Within the process, from each to each.)
+  for (int l = 0; l < ent_locals; ++l) {
+    ent_words_args *from = args[l];
+    int source = ent_global(ent_proc, l);
+    for (int m = 0; m < ent_locals; ++m) {
+      ent_words_args *to = args[m];
+      int target = ent_global(ent_proc, m);
+      memcpy(to->in + to->got_at[source], from->out + from->sent_at[target],
+             sizeof(int64_t) * from->sent[target]);
+    }
+  }
+  if (ent_procs == 1)
+    return;
+  // (Between processes: to process q, from each of ours to each of its in
+  // turn, packed; unpacked so on the other side.)
+  int *sizes = calloc(ent_procs, sizeof(int)), *size_at = calloc(ent_procs, sizeof(int));
+  int *gets = calloc(ent_procs, sizeof(int)), *get_at = calloc(ent_procs, sizeof(int));
+  int64_t total = 0, incoming = 0;
+  for (int q = 0; q < ent_procs; ++q) {
+    int64_t n = 0, g = 0;
+    if (q != ent_proc)
+      for (int l = 0; l < ent_locals; ++l)
+        for (int m = 0; m < ent_locals; ++m) {
+          n += ((ent_words_args *)args[l])->sent[ent_global(q, m)];
+          g += ((ent_words_args *)args[m])->got[ent_global(q, l)];
+        }
+    if (total + n > 0x7fffffff || incoming + g > 0x7fffffff) {
+      fprintf(stderr, "ent: more than 2^31 words between processes: not on "
+                      "many ranks yet\n");
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    sizes[q] = (int)n;
+    size_at[q] = (int)total;
+    gets[q] = (int)g;
+    get_at[q] = (int)incoming;
+    total += n;
+    incoming += g;
+  }
+  int64_t *out = malloc(sizeof(int64_t) * (total ? total : 1));
+  int64_t *in = malloc(sizeof(int64_t) * (incoming ? incoming : 1));
+  for (int q = 0, at = 0; q < ent_procs; ++q)
+    if (q != ent_proc)
+      for (int l = 0; l < ent_locals; ++l)
+        for (int m = 0; m < ent_locals; ++m) {
+          ent_words_args *from = args[l];
+          int target = ent_global(q, m);
+          memcpy(out + at, from->out + from->sent_at[target],
+                 sizeof(int64_t) * from->sent[target]);
+          at += from->sent[target];
+        }
+  MPI_Alltoallv(out, sizes, size_at, MPI_INT64_T, in, gets, get_at,
+                MPI_INT64_T, MPI_COMM_WORLD);
+  for (int p = 0, at = 0; p < ent_procs; ++p)
+    if (p != ent_proc)
+      for (int l = 0; l < ent_locals; ++l)
+        for (int m = 0; m < ent_locals; ++m) {
+          ent_words_args *to = args[m];
+          int source = ent_global(p, l);
+          memcpy(to->in + to->got_at[source], in + at,
+                 sizeof(int64_t) * to->got[source]);
+          at += to->got[source];
+        }
+  free(out);
+  free(in);
+  free(sizes);
+  free(size_at);
+  free(gets);
+  free(get_at);
+}
+static void ent_alltoallv(const int64_t *out, const int64_t *sent,
+                          const int64_t *sent_at, int64_t *in,
+                          const int64_t *got, const int64_t *got_at) {
+  ent_words_args args = {out, sent, sent_at, in, got, got_at};
+  ent_meet(&args, ent_alltoallv_work);
+}
+
+// -- Each partition's `bytes` at `mine`, given to partition 0: all of them
+// in the order of the ranks (`*all`, taken with malloc, and their sizes in
+// `sizes`), there; nothing elsewhere.
+typedef struct {
+  const char *mine;
+  int64_t bytes;
+  char **all;
+  int64_t *sizes;
+} ent_root_args;
+static void ent_gather_root_work(void **args) {
+  int ranks = ent_locals * ent_procs;
+  int64_t *sizes = calloc(ranks, sizeof(int64_t));
+  for (int l = 0; l < ent_locals; ++l)
+    sizes[ent_global(ent_proc, l)] = ((ent_root_args *)args[l])->bytes;
+  if (ent_procs > 1)
+    MPI_Allgather(MPI_IN_PLACE, 0, MPI_INT64_T, sizes, ent_locals, MPI_INT64_T,
+                  MPI_COMM_WORLD);
+  int64_t local = 0;
+  for (int l = 0; l < ent_locals; ++l)
+    local += sizes[ent_global(ent_proc, l)];
+  char *packed = malloc(local ? local : 1);
+  for (int l = 0, at = 0; l < ent_locals; ++l) {
+    ent_root_args *a = args[l];
+    memcpy(packed + at, a->mine, a->bytes);
+    at += a->bytes;
+  }
+  char *all = 0;
+  if (ent_proc == 0) {
+    int64_t total = 0;
+    for (int r = 0; r < ranks; ++r)
+      total += sizes[r];
+    all = malloc(total ? total : 1);
+  }
+  if (ent_procs > 1) {
+    int *counts = malloc(sizeof(int) * ent_procs), *starts = malloc(sizeof(int) * ent_procs);
+    int64_t at = 0;
+    for (int p = 0; p < ent_procs; ++p) {
+      int64_t c = 0;
+      for (int l = 0; l < ent_locals; ++l)
+        c += sizes[ent_global(p, l)];
+      counts[p] = (int)c;
+      starts[p] = (int)at;
+      at += c;
+    }
+    MPI_Gatherv(packed, (int)local, MPI_BYTE, all, counts, starts, MPI_BYTE, 0,
+                MPI_COMM_WORLD);
+    free(counts);
+    free(starts);
+  } else {
+    memcpy(all, packed, local);
+  }
+  free(packed);
+  ent_root_args *zero = args[0];
+  if (ent_proc == 0) {
+    *zero->all = all;
+    memcpy(zero->sizes, sizes, sizeof(int64_t) * ranks);
+  }
+  free(sizes);
+}
+static void ent_gather_root(const char *mine, int64_t bytes, char **all,
+                            int64_t *sizes) {
+  ent_root_args args = {mine, bytes, all, sizes};
+  ent_meet(&args, ent_gather_root_work);
+}
+
+// -- From one partition to the next (the ranks taking turns, see
+// ent_ranks_chain_get): through memory within the process, else MPI.
+typedef struct {
+  pthread_mutex_t lock;
+  pthread_cond_t ready;
+  char *bytes;
+  int64_t size;
+  int full;
+} ent_mailbox;
+static ent_mailbox *ent_mailboxes = 0;
+static void ent_send(const void *data, int64_t bytes, int to) {
+  if (to / ent_locals != ent_proc) {
+    MPI_Send(data, (int)bytes, MPI_BYTE, to / ent_locals, to % ent_locals,
+             MPI_COMM_WORLD);
+    return;
+  }
+  ent_mailbox *box = &ent_mailboxes[to % ent_locals];
+  pthread_mutex_lock(&box->lock);
+  while (box->full)
+    pthread_cond_wait(&box->ready, &box->lock);
+  box->bytes = malloc(bytes ? bytes : 1);
+  memcpy(box->bytes, data, bytes);
+  box->size = bytes;
+  box->full = 1;
+  pthread_cond_broadcast(&box->ready);
+  pthread_mutex_unlock(&box->lock);
+}
+static void ent_recv(void *data, int64_t bytes, int from) {
+  if (from / ent_locals != ent_proc) {
+    // (Waiting, it lets another partition of the process run.)
+    ent_slot_give();
+    MPI_Recv(data, (int)bytes, MPI_BYTE, from / ent_locals, ent_local,
+             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    ent_slot_take();
+    return;
+  }
+  ent_mailbox *box = &ent_mailboxes[ent_local];
+  ent_slot_give();
+  pthread_mutex_lock(&box->lock);
+  while (!box->full)
+    pthread_cond_wait(&box->ready, &box->lock);
+  memcpy(data, box->bytes, bytes);
+  free(box->bytes);
+  box->full = 0;
+  pthread_cond_broadcast(&box->ready);
+  pthread_mutex_unlock(&box->lock);
+  ent_slot_take();
+}
+
+// (As MPI's, counts in ints by rank.)
+static void ent_alltoall_ints(const int *sent, int *got) {
+  int ranks = ent_locals * ent_procs;
+  int64_t *a = malloc(sizeof(int64_t) * ranks), *b = malloc(sizeof(int64_t) * ranks);
+  for (int r = 0; r < ranks; ++r)
+    a[r] = sent[r];
+  ent_alltoall(a, b);
+  for (int r = 0; r < ranks; ++r)
+    got[r] = (int)b[r];
+  free(a);
+  free(b);
+}
+static void ent_alltoallv_ints(const int64_t *out, const int *sent,
+                               const int *sent_at, int64_t *in,
+                               const int *got, const int *got_at) {
+  int ranks = ent_locals * ent_procs;
+  int64_t *w = malloc(sizeof(int64_t) * 4 * ranks);
+  for (int r = 0; r < ranks; ++r) {
+    w[r] = sent[r];
+    w[ranks + r] = sent_at[r];
+    w[2 * ranks + r] = got[r];
+    w[3 * ranks + r] = got_at[r];
+  }
+  ent_alltoallv(out, w, w + ranks, in, w + 2 * ranks, w + 3 * ranks);
+  free(w);
+}
+static void ent_allgatherv_ints(void *column, const int *counts,
+                                const int *starts) {
+  int ranks = ent_locals * ent_procs;
+  int64_t *w = malloc(sizeof(int64_t) * 2 * ranks);
+  for (int r = 0; r < ranks; ++r) {
+    w[r] = counts[r];
+    w[ranks + r] = starts[r];
+  }
+  ent_allgatherv(0, column, w, w + ranks);
+  free(w);
+}
+
+static _Thread_local int ent_rank = 0, ent_ranks = 1, ent_started = 0;
 // Whether the distributed archetypes are placed (when `main` starts its
 // first loop): until then every rank goes through every row, as one
 // process, and what the ranks would combine or give each other is this
 // rank's alone (a sum is its own part, a running sum starts at nought).
-static int ent_distributed = 0;
+static _Thread_local int ent_distributed = 0;
 
 void ent_ranks_distribute(void) { ent_distributed = 1; }
 
 // (ENT_RANKS_LOG: the time each rank spent in each kind of call, which is
 // where it waited for the others too, said as it ends.)
 static const char *ent_kinds[] = {"bcast", "sum", "min", "max", "before", "release", "share_begin", "share_column", "exchange", "gather_column"};
-static double ent_spent[10];
-static int64_t ent_calls[10];
-static int64_t ent_posted = 0, ent_received = 0;
-static int64_t ent_rounds = 0, ent_asked_rows = 0, ent_most_stretches = 0;
+static _Thread_local double ent_spent[10];
+static _Thread_local int64_t ent_calls[10];
+static _Thread_local int64_t ent_posted = 0, ent_received = 0;
+static _Thread_local int64_t ent_rounds = 0, ent_asked_rows = 0, ent_most_stretches = 0;
 // (ENT_RANKS_LOG=2: for each place the program calls from, the time it
 // worked before the call, since the call before, and spent in it.)
 typedef struct {
@@ -41,8 +557,8 @@ typedef struct {
   double worked, waited;
   int64_t calls;
 } ent_place_spent;
-static ent_place_spent ent_places_spent[256];
-static double ent_last_return = 0;
+static _Thread_local ent_place_spent ent_places_spent[256];
+static _Thread_local double ent_last_return = 0;
 static void ent_note_place(void *at, double start, double end) {
   for (int i = 0; i < 256; ++i) {
     ent_place_spent *p = &ent_places_spent[(((uintptr_t)at >> 2) + i) & 255];
@@ -63,19 +579,94 @@ static int ent_by_worked(const void *a, const void *b) {
   return l < r ? 1 : l > r ? -1 : 0;
 }
 
-void ent_ranks_start(void) {
-  if (ent_started)
-    return;
-  int ready = 0;
-  MPI_Initialized(&ready);
-  if (!ready && MPI_Init(NULL, NULL) != MPI_SUCCESS) {
+// The program on its ranks: MPI started, and in each process as many
+// partitions as the program is built for over the processes (one where it
+// is not built for partitions), each a thread running `program` (main, as
+// the compiler makes it) with a world of its own; MPI ended when all are
+// done. What the first gave back.
+typedef struct {
+  int32_t (*program)(void);
+  int local;
+  int32_t status;
+} ent_partition;
+
+static void *ent_partition_runs(void *given) {
+  ent_partition *partition = given;
+  ent_local = partition->local;
+  ent_rank = ent_global(ent_proc, ent_local);
+  ent_ranks = ent_procs * ent_locals;
+  ent_started = 1;
+  ent_slot_take();
+  partition->status = partition->program();
+  ent_slot_give();
+  return 0;
+}
+
+int32_t ent_ranks_run(int32_t (*program)(void), int64_t partitions) {
+  int provided = 0;
+  if (MPI_Init_thread(NULL, NULL, MPI_THREAD_MULTIPLE, &provided) !=
+      MPI_SUCCESS) {
     fprintf(stderr, "ent: MPI did not start\n");
     exit(1);
   }
-  MPI_Comm_rank(MPI_COMM_WORLD, &ent_rank);
-  MPI_Comm_size(MPI_COMM_WORLD, &ent_ranks);
-  ent_started = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &ent_proc);
+  MPI_Comm_size(MPI_COMM_WORLD, &ent_procs);
+  ent_locals = 1;
+  if (partitions > 0) {
+    if (partitions % ent_procs) {
+      if (ent_proc == 0)
+        fprintf(stderr,
+                "ent: the program is built for %lld partitions, which %d "
+                "processes cannot share evenly\n",
+                (long long)partitions, ent_procs);
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    ent_locals = (int)(partitions / ent_procs);
+  }
+  if (ent_locals > 1 && provided < MPI_THREAD_MULTIPLE) {
+    if (ent_proc == 0)
+      fprintf(stderr, "ent: this MPI runs no threads, needed for %d "
+                      "partitions a process\n",
+              ent_locals);
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
+  ent_args = calloc(ent_locals, sizeof(void *));
+  ent_mailboxes = calloc(ent_locals, sizeof(ent_mailbox));
+  for (int l = 0; l < ent_locals; ++l) {
+    pthread_mutex_init(&ent_mailboxes[l].lock, 0);
+    pthread_cond_init(&ent_mailboxes[l].ready, 0);
+  }
+  // (How many go through their rows at once: ENT_RUNNING, else as many as
+  // there are cores.)
+  const char *running = getenv("ENT_RUNNING");
+  long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  ent_slots = running ? atoi(running) : (int)(cores > 0 ? cores : 1);
+  if (ent_slots < 1)
+    ent_slots = 1;
+  ent_partition *all = calloc(ent_locals, sizeof(ent_partition));
+  pthread_t *threads = calloc(ent_locals, sizeof(pthread_t));
+  pthread_attr_t attributes;
+  pthread_attr_init(&attributes);
+  // (A stack as large as a program's main has.)
+  pthread_attr_setstacksize(&attributes, (size_t)512 << 20);
+  for (int l = 0; l < ent_locals; ++l) {
+    all[l] = (ent_partition){program, l, 0};
+    if (pthread_create(&threads[l], &attributes, ent_partition_runs, &all[l])) {
+      fprintf(stderr, "ent: no thread for a partition\n");
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+  }
+  for (int l = 0; l < ent_locals; ++l)
+    pthread_join(threads[l], 0);
+  int32_t status = all[0].status;
+  free(all);
+  free(threads);
+  fflush(stdout);
+  MPI_Finalize();
+  return status;
 }
+
+void ent_ranks_start(void) {}
 
 // (ENT_RANKS_LOG: how much memory the rank has, as it ends.)
 static void ent_log_places(void) {
@@ -126,8 +717,8 @@ static void ent_log_memory(void) {
 // The world's memory (ENT_RANKS_LOG=3: which of its pages each rank has
 // as it ends, to ent-ranks-pages.<rank>, by MB: the offset and the pages
 // of it the rank has).
-static char *ent_arena = 0;
-static int64_t ent_arena_bytes = 0;
+static _Thread_local char *ent_arena = 0;
+static _Thread_local int64_t ent_arena_bytes = 0;
 void ent_ranks_arena(void *arena, int64_t bytes) {
   ent_arena = arena;
   ent_arena_bytes = bytes;
@@ -173,7 +764,6 @@ void ent_ranks_end(void) {
   }
   // (What rank 0 wrote is out before the other ranks are gone.)
   fflush(stdout);
-  MPI_Finalize();
   ent_started = 0;
 }
 
@@ -186,7 +776,7 @@ static void ent_ranks_bcast_untimed(void *data, int64_t bytes) {
   char *at = (char *)data;
   while (bytes > 0) {
     int piece = bytes > (1 << 30) ? (1 << 30) : (int)bytes;
-    MPI_Bcast(at, piece, MPI_BYTE, 0, MPI_COMM_WORLD);
+    ent_bcast(at, piece, 0);
     at += piece;
     bytes -= piece;
   }
@@ -213,8 +803,8 @@ typedef struct {
   int first_only;
 } ent_placement;
 
-static ent_placement *ent_places = 0;
-static int32_t ent_places_known = 0;
+static _Thread_local ent_placement *ent_places = 0;
+static _Thread_local int32_t ent_places_known = 0;
 
 static void ent_ranks_stop(const char *why) {
   fprintf(stderr, "ent: %s\n", why);
@@ -377,7 +967,7 @@ static int64_t ent_partition_end(const ent_placement *place, int r) {
 // the rest.
 int32_t ent_ranks_partition_of(int32_t archetype, int64_t value) {
   ent_placement *place = ent_place_of(archetype);
-  static int64_t block = -1;
+  static _Thread_local int64_t block = -1;
   if (block < 0) {
     const char *given = getenv("ENT_BLOCK");
     block = given ? atoll(given) : 0;
@@ -488,21 +1078,21 @@ static int64_t ent_ranks_sum_untimed(int64_t mine) {
   if (!ent_distributed)
     return mine;
   int64_t all = 0;
-  MPI_Allreduce(&mine, &all, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+  all = ent_allreduce(mine, MPI_SUM);
   return all;
 }
 static int64_t ent_ranks_min_untimed(int64_t mine) {
   if (!ent_distributed)
     return mine;
   int64_t all = 0;
-  MPI_Allreduce(&mine, &all, 1, MPI_INT64_T, MPI_MIN, MPI_COMM_WORLD);
+  all = ent_allreduce(mine, MPI_MIN);
   return all;
 }
 static int64_t ent_ranks_max_untimed(int64_t mine) {
   if (!ent_distributed)
     return mine;
   int64_t all = 0;
-  MPI_Allreduce(&mine, &all, 1, MPI_INT64_T, MPI_MAX, MPI_COMM_WORLD);
+  all = ent_allreduce(mine, MPI_MAX);
   return all;
 }
 // What the ranks before this one added (nought on rank 0).
@@ -510,7 +1100,7 @@ static int64_t ent_ranks_before_untimed(int64_t mine) {
   if (!ent_distributed)
     return 0;
   int64_t before = 0;
-  MPI_Exscan(&mine, &before, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+  before = ent_exscan(mine);
   return ent_rank == 0 ? 0 : before;
 }
 
@@ -519,24 +1109,32 @@ static int64_t ent_ranks_before_untimed(int64_t mine) {
 // rank writes what its rows write, the ranks after 0 into memory, which
 // rank 0 then writes after its own, rank by rank: the order of the rows.
 
-static FILE *ent_kept_stdout = 0;
-static char *ent_captured = 0;
-static size_t ent_captured_size = 0;
+static _Thread_local FILE *ent_capturing = 0;
+static _Thread_local char *ent_captured = 0;
+static _Thread_local size_t ent_captured_size = 0;
+
+// Where a partition writes what the console says (devices/console.c): what
+// a `for` writes is kept in memory by every partition but rank 0 (see
+// ent_ranks_capture).
+FILE *ent_stdout(void) { return ent_capturing ? ent_capturing : stdout; }
+
+// Which of the process's partitions calls (devices/sends.c, text.c keep
+// what they keep for each).
+int ent_partition_index(void) { return ent_local; }
 
 void ent_ranks_capture(void) {
   fflush(stdout);
   if (ent_rank == 0)
     return;
-  ent_kept_stdout = stdout;
-  stdout = open_memstream(&ent_captured, &ent_captured_size);
+  ent_capturing = open_memstream(&ent_captured, &ent_captured_size);
 }
 
 static void ent_ranks_release_untimed(void) {
-  int size = 0;
+  int64_t size = 0;
   if (ent_rank != 0) {
-    fclose(stdout);
-    stdout = ent_kept_stdout;
-    size = (int)ent_captured_size;
+    fclose(ent_capturing);
+    ent_capturing = 0;
+    size = (int64_t)ent_captured_size;
   } else {
     fflush(stdout);
   }
@@ -547,29 +1145,20 @@ static void ent_ranks_release_untimed(void) {
     ent_captured_size = 0;
     return;
   }
-  int *sizes = ent_rank == 0 ? malloc(sizeof(int) * ent_ranks) : 0;
-  MPI_Gather(&size, 1, MPI_INT, sizes, 1, MPI_INT, 0, MPI_COMM_WORLD);
-  int *starts = 0;
   char *all = 0;
+  int64_t *sizes = calloc(ent_ranks, sizeof(int64_t));
+  ent_gather_root(ent_rank == 0 ? "" : ent_captured, ent_rank == 0 ? 0 : size,
+                  &all, sizes);
   if (ent_rank == 0) {
-    starts = malloc(sizeof(int) * ent_ranks);
-    int total = 0;
-    for (int r = 0; r < ent_ranks; ++r) {
-      starts[r] = total;
-      total += sizes[r];
+    int64_t at = sizes[0];
+    for (int r = 1; r < ent_ranks; ++r) {
+      fwrite(all + at, 1, sizes[r], stdout);
+      at += sizes[r];
     }
-    all = malloc(total > 0 ? total : 1);
-  }
-  MPI_Gatherv(ent_rank == 0 ? MPI_IN_PLACE : ent_captured, size, MPI_BYTE, all,
-              sizes, starts, MPI_BYTE, 0, MPI_COMM_WORLD);
-  if (ent_rank == 0) {
-    for (int r = 1; r < ent_ranks; ++r)
-      fwrite(all + starts[r], 1, sizes[r], stdout);
     fflush(stdout);
-    free(sizes);
-    free(starts);
     free(all);
   }
+  free(sizes);
   free(ent_captured);
   ent_captured = 0;
   ent_captured_size = 0;
@@ -582,9 +1171,9 @@ static void ent_ranks_release_untimed(void) {
 // each field's into the same rows there. Two ranks' stretches that overlap
 // would give rows another rank wrote: not on many ranks yet.
 
-static int *ent_share_counts = 0, *ent_share_starts = 0;
-static int64_t *ent_share_lows = 0, *ent_share_highs = 0;
-static int ent_share_any = 0;
+static _Thread_local int *ent_share_counts = 0, *ent_share_starts = 0;
+static _Thread_local int64_t *ent_share_lows = 0, *ent_share_highs = 0;
+static _Thread_local int ent_share_any = 0;
 
 static void ent_ranks_share_begin_untimed(int64_t low, int64_t high) {
   ent_share_any = 0;
@@ -592,7 +1181,7 @@ static void ent_ranks_share_begin_untimed(int64_t low, int64_t high) {
     return;
   int64_t mine[2] = {low, high};
   int64_t *all = malloc(sizeof(int64_t) * 2 * ent_ranks);
-  MPI_Allgather(mine, 2, MPI_INT64_T, all, 2, MPI_INT64_T, MPI_COMM_WORLD);
+  ent_allgather(mine, 2 * sizeof(int64_t), all);
   ent_share_lows = realloc(ent_share_lows, sizeof(int64_t) * ent_ranks);
   ent_share_highs = realloc(ent_share_highs, sizeof(int64_t) * ent_ranks);
   ent_share_counts = realloc(ent_share_counts, sizeof(int) * ent_ranks);
@@ -630,8 +1219,7 @@ static void ent_ranks_share_column_untimed(void *column, int64_t each) {
     ent_share_counts[r] = (int)bytes;
     ent_share_starts[r] = (int)start;
   }
-  MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_BYTE, column, ent_share_counts,
-                 ent_share_starts, MPI_BYTE, MPI_COMM_WORLD);
+  ent_allgatherv_ints(column, ent_share_counts, ent_share_starts);
 }
 
 // ---------------------------------------------------------------------------
@@ -647,12 +1235,12 @@ typedef struct {
   int64_t count, room;
 } ent_posts;
 
-static ent_posts *ent_outbox = 0;
-static int64_t *ent_inbox = 0;
-static int64_t ent_inbox_count = 0;
+static _Thread_local ent_posts *ent_outbox = 0;
+static _Thread_local int64_t *ent_inbox = 0;
+static _Thread_local int64_t ent_inbox_count = 0;
 // (For each channel, where its sends start in the inbox, sorted by it.)
-static int64_t *ent_channel_starts = 0;
-static int32_t ent_channels = 0;
+static _Thread_local int64_t *ent_channel_starts = 0;
+static _Thread_local int32_t ent_channels = 0;
 
 static void ent_post_to(int32_t rank, int32_t channel, int64_t id,
                         int64_t value) {
@@ -709,15 +1297,14 @@ static void ent_ranks_exchange_untimed(int32_t channels) {
       out[total++] = ent_outbox[r].words[i];
     ent_outbox[r].count = 0;
   }
-  MPI_Alltoall(sent, 1, MPI_INT, got, 1, MPI_INT, MPI_COMM_WORLD);
+  ent_alltoall_ints(sent, got);
   int64_t incoming = 0;
   for (int r = 0; r < ent_ranks; ++r) {
     got_at[r] = (int)incoming;
     incoming += got[r];
   }
   int64_t *in = malloc(sizeof(int64_t) * (incoming > 0 ? incoming : 1));
-  MPI_Alltoallv(out, sent, sent_at, MPI_INT64_T, in, got, got_at, MPI_INT64_T,
-                MPI_COMM_WORLD);
+  ent_alltoallv_ints(out, sent, sent_at, in, got, got_at);
   free(out);
   free(sent);
   free(got);
@@ -800,8 +1387,7 @@ static void ent_ranks_gather_column_untimed(int32_t archetype, void *column, int
     counts[r] = (int)bytes;
     starts[r] = (int)start;
   }
-  MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_BYTE, column, counts, starts, MPI_BYTE,
-                 MPI_COMM_WORLD);
+  ent_allgatherv_ints(column, counts, starts);
   free(counts);
   free(starts);
 }
@@ -939,15 +1525,15 @@ typedef struct {
   int64_t count, room;
 } ent_box;
 
-static ent_box *ent_msg_out = 0;
-static int *ent_msg_dest = 0;
-static int ent_msg_dests = 0;
+static _Thread_local ent_box *ent_msg_out = 0;
+static _Thread_local int *ent_msg_dest = 0;
+static _Thread_local int ent_msg_dests = 0;
 // (What was given: by channel, where each message's words start.)
-static int64_t *ent_msg_in = 0;
-static int64_t *ent_msg_starts = 0;  // by channel: where its list starts
-static int64_t *ent_msg_list = 0;    // message word places, by channel
-static int32_t ent_msg_channels = 0;
-static int64_t ent_msg_given = 0;
+static _Thread_local int64_t *ent_msg_in = 0;
+static _Thread_local int64_t *ent_msg_starts = 0;  // by channel: where its list starts
+static _Thread_local int64_t *ent_msg_list = 0;    // message word places, by channel
+static _Thread_local int32_t ent_msg_channels = 0;
+static _Thread_local int64_t ent_msg_given = 0;
 
 static void ent_box_put(ent_box *box, int64_t word) {
   if (box->count == box->room) {
@@ -1021,7 +1607,7 @@ void ent_ranks_msg_exchange(void) {
   }
   int64_t incoming = 0;
   if (ent_distributed) {
-    MPI_Alltoall(sent, 1, MPI_INT, got, 1, MPI_INT, MPI_COMM_WORLD);
+    ent_alltoall_ints(sent, got);
     for (int r = 0; r < ent_ranks; ++r) {
       if (incoming > 0x7fffffff)
         ent_ranks_stop("a rank was given more than 2^31 words of edges in "
@@ -1031,8 +1617,7 @@ void ent_ranks_msg_exchange(void) {
     }
     free(ent_msg_in);
     ent_msg_in = malloc(sizeof(int64_t) * (incoming > 0 ? incoming : 1));
-    MPI_Alltoallv(out, sent, sent_at, MPI_INT64_T, ent_msg_in, got, got_at,
-                  MPI_INT64_T, MPI_COMM_WORLD);
+    ent_alltoallv_ints(out, sent, sent_at, ent_msg_in, got, got_at);
     free(out);
   } else {
     // (Before the placement, all to this rank itself.)
@@ -1128,18 +1713,17 @@ void ent_ranks_partitions(int64_t partitions) {
 void ent_ranks_chain_get(void *cell, int64_t bytes) {
   if (!ent_distributed || ent_rank == 0)
     return;
-  MPI_Recv(cell, (int)bytes, MPI_BYTE, ent_rank - 1, 17, MPI_COMM_WORLD,
-           MPI_STATUS_IGNORE);
+  ent_recv(cell, bytes, ent_rank - 1);
 }
 void ent_ranks_chain_put(void *cell, int64_t bytes) {
   if (!ent_distributed || ent_rank == ent_ranks - 1)
     return;
-  MPI_Send(cell, (int)bytes, MPI_BYTE, ent_rank + 1, 17, MPI_COMM_WORLD);
+  ent_send(cell, bytes, ent_rank + 1);
 }
 void ent_ranks_chain_last(void *cell, int64_t bytes) {
   if (!ent_distributed)
     return;
-  MPI_Bcast(cell, (int)bytes, MPI_BYTE, ent_ranks - 1, MPI_COMM_WORLD);
+  ent_bcast(cell, bytes, ent_ranks - 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,9 +1735,9 @@ void ent_ranks_chain_last(void *cell, int64_t bytes) {
 // ent_ranks_sort_run() (how many stay), then for each place the edge that
 // goes there, and the offsets.
 
-static uint64_t *ent_sort_keys = 0, *ent_sort_scratch = 0;
-static int64_t *ent_sort_order = 0, *ent_sort_order_scratch = 0;
-static int64_t ent_sort_n = 0, ent_sort_room = 0, ent_sort_kept = 0;
+static _Thread_local uint64_t *ent_sort_keys = 0, *ent_sort_scratch = 0;
+static _Thread_local int64_t *ent_sort_order = 0, *ent_sort_order_scratch = 0;
+static _Thread_local int64_t ent_sort_n = 0, ent_sort_room = 0, ent_sort_kept = 0;
 
 void ent_ranks_sort_begin(int64_t n) {
   if (n > ent_sort_room) {
@@ -1180,7 +1764,7 @@ int64_t ent_ranks_sort_run(void) {
   int passes = 1;
   while (passes < 4 && (most >> (16 * passes)) != 0)
     ++passes;
-  static int64_t counts[65537];
+  static _Thread_local int64_t counts[65537];
   for (int pass = 0; pass < passes; ++pass) {
     int shift = 16 * pass;
     for (int d = 0; d <= 65536; ++d)
@@ -1285,12 +1869,12 @@ typedef struct {
   int32_t asked; // asked of the owner, not yet given
 } ent_ghost;
 
-static ent_ghost_column *ent_ghost_columns = 0; // [channel * 256 + archetype]
-static int32_t ent_ghost_channels = 0;
-static ent_ghost *ent_ghosts = 0;
-static int64_t ent_ghost_room = 0, ent_ghost_used = 0;
-static ent_box *ent_ask_out = 0;
-static int64_t ent_ask_new = 0;
+static _Thread_local ent_ghost_column *ent_ghost_columns = 0; // [channel * 256 + archetype]
+static _Thread_local int32_t ent_ghost_channels = 0;
+static _Thread_local ent_ghost *ent_ghosts = 0;
+static _Thread_local int64_t ent_ghost_room = 0, ent_ghost_used = 0;
+static _Thread_local ent_box *ent_ask_out = 0;
+static _Thread_local int64_t ent_ask_new = 0;
 
 void ent_ranks_ghost_column(int32_t channel, int32_t archetype, void *column,
                             int64_t each, void *present) {
@@ -1387,7 +1971,7 @@ int64_t ent_ranks_fetch(void) {
   int64_t asked = ent_ask_new, all = 0;
   ent_ask_new = 0;
   ++ent_rounds;
-  MPI_Allreduce(&asked, &all, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+  all = ent_allreduce(asked, MPI_SUM);
   if (all == 0)
     return 0;
   int *sent = malloc(sizeof(int) * ent_ranks), *got = malloc(sizeof(int) * ent_ranks);
@@ -1406,15 +1990,14 @@ int64_t ent_ranks_fetch(void) {
     free(ent_ask_out[r].words);
     ent_ask_out[r] = (ent_box){0, 0, 0};
   }
-  MPI_Alltoall(sent, 1, MPI_INT, got, 1, MPI_INT, MPI_COMM_WORLD);
+  ent_alltoall_ints(sent, got);
   int64_t incoming = 0;
   for (int r = 0; r < ent_ranks; ++r) {
     got_at[r] = (int)incoming;
     incoming += got[r];
   }
   int64_t *in = malloc(sizeof(int64_t) * (incoming ? incoming : 1));
-  MPI_Alltoallv(out, sent, sent_at, MPI_INT64_T, in, got, got_at, MPI_INT64_T,
-                MPI_COMM_WORLD);
+  ent_alltoallv_ints(out, sent, sent_at, in, got, got_at);
   // (The answers, in the places of the questions: value and found.)
   int64_t *answer = malloc(sizeof(int64_t) * (incoming ? incoming : 1));
   for (int64_t i = 0; i + 2 < incoming + 2 && i < incoming; i += 3) {
@@ -1445,8 +2028,7 @@ int64_t ent_ranks_fetch(void) {
     answer[i + 2] = found;
   }
   int64_t *back = malloc(sizeof(int64_t) * (total ? total : 1));
-  MPI_Alltoallv(answer, got, got_at, MPI_INT64_T, back, sent, sent_at,
-                MPI_INT64_T, MPI_COMM_WORLD);
+  ent_alltoallv_ints(answer, got, got_at, back, sent, sent_at);
   for (int64_t i = 0; i < total; i += 3) {
     ent_ghost *ghost = ent_ghost_slot(
         ent_ghost_key((int32_t)out[i], (int32_t)out[i + 1], out[i + 2]), 0);
@@ -1504,7 +2086,7 @@ void ent_ranks_ghosts_drop(void) {
 // larger than a machine), or the fields looked up are gathered whole on
 // every rank (faster where they fit).
 int32_t ent_ranks_ghosts_ask(void) {
-  static int ask = -1;
+  static _Thread_local int ask = -1;
   if (ask < 0) {
     const char *how = getenv("ENT_GHOSTS");
     ask = how && !strcmp(how, "ask");
@@ -1543,9 +2125,9 @@ typedef struct {
   int64_t pending[64];
 } ent_split;
 
-static ent_split *ent_splits = 0;
-static int32_t ent_splits_known = 0;
-static int ent_asking = 0;
+static _Thread_local ent_split *ent_splits = 0;
+static _Thread_local int32_t ent_splits_known = 0;
+static _Thread_local int ent_asking = 0;
 
 static ent_split *ent_split_of(int32_t buffer) {
   if (buffer >= ent_splits_known) {
@@ -1774,8 +2356,8 @@ void ent_ranks_buffer_owned(int32_t buffer) {
 // that was another rank's is noted, field by field, and by the end of the
 // `for` every field of it must have been written (its others are not
 // here), else the program stops.
-static int64_t *ent_retaken = 0; // row, fields written (bits)
-static int64_t ent_retaken_count = 0, ent_retaken_room = 0;
+static _Thread_local int64_t *ent_retaken = 0; // row, fields written (bits)
+static _Thread_local int64_t ent_retaken_count = 0, ent_retaken_room = 0;
 
 void ent_ranks_buffer_write(int32_t buffer, int32_t field, int64_t row) {
   ent_split *split = ent_split_of(buffer);
