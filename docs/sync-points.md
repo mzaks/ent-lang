@@ -186,7 +186,11 @@ When a query has run for every entity it visits, in this order:
    combines it where it is sent if the query sees the field nowhere;
    otherwise, and in a parallel loop, which visits the rows in slices, it
    goes on a list (a slice's own) that is read in order here. So do the
-   edges connected in a loop of the body or in `ent.edges`.)
+   edges connected in a loop of the body or in `ent.edges`, and, built for
+   many threads, what is sent from `ent.edges`. Many values sent by an
+   apply whose field has no events, no tree ordered by it and no other
+   rank to go to are read in groups of the entities sent to, the groups
+   on many threads, each entity's in the lists' order: the same result.)
 2. **Structural changes** are applied per archetype: despawns free their ids,
    moves append their entities to the target archetype, and the rows they
    leave are filled by swap-remove. Within one query the last structural

@@ -936,9 +936,11 @@ of a depth.
   reads that unique), each value lands where it is sent on one thread,
   which comes to the same. Otherwise, and on many threads
   (`--parallel`), what is sent is kept on lists that are as long as they
-  must be (every slice of the entities has its own) and combined one
-  after another when the `for` ends: the same sums to the last bit, on
-  any number of threads. Not in a `for` that goes along a tree or waits
+  must be (every slice of the entities has its own) and combined when
+  the `for` ends, those for each entity one after another (the entities
+  apart on many threads, where many were sent and changing the field
+  starts nothing else): the same sums to the last bit, on any number of
+  threads. Not in a `for` that goes along a tree or waits
   for changes; and a value is not sent from a loop inside a `for` over
   edges (a `for` over edges sends once for each edge).
 - A `for` over entities gives a number where the value of a statement

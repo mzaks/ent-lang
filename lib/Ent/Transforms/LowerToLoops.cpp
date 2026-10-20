@@ -7120,6 +7120,16 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   }
   for (ApplyOp apply : direct) {
     rewriter.setInsertionPoint(apply);
+    // (One on the lists, in a parallel loop or where the query sees the
+    // field, see kLoopedAttr: to its slice's list.)
+    if (apply->hasAttr(kLoopedAttr) &&
+        (sendSegment || !apply->hasAttr(kUnobservedAttr))) {
+      putSend(rewriter, apply.getLoc(), apply, archetype,
+              world.toStorage(apply.getLoc(), apply.getEntity()),
+              world.toStorage(apply.getLoc(), apply.getValue()));
+      rewriter.eraseOp(apply);
+      continue;
+    }
     combineDirectly(rewriter, apply, layout, world,
                     world.toStorage(apply.getLoc(), apply.getEntity()),
                     world.toStorage(apply.getLoc(), apply.getValue()), tick);
@@ -11544,25 +11554,103 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
   callSends(rewriter, loc, "ent_sends_clear", {list}, false);
 }
 
+/// Whether what `apply` sends can be combined on many threads, a group of
+/// the entities it is sent to on each: combining it writes only the
+/// field (no events, no tree ordered by it, nothing posted to another
+/// rank).
+static bool combinesApart(ApplyOp apply, const WorldLayout &layout) {
+  if (ranksMode || apply->hasAttr(kAtomicAttr))
+    return false;
+  StringAttr component = apply.getComponentAttr().getAttr();
+  StringAttr field = apply.getFieldAttr();
+  for (const WorldRelation &relation : layout.relations)
+    if (relation.orderComponent == component && relation.orderField == field)
+      return false;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    if (!stampsFor(archetype, Trigger::Changed, component, field).empty())
+      return false;
+  return true;
+}
+
 /// Combine what `op` sent from loops of the body for the entities of
 /// `archetype`, at the insertion point: its list from the first to the
 /// last, which is then empty. (Nothing if the loop ran on one thread and
-/// combined each value where it was sent.)
+/// combined each value where it was sent.) Where the loop ran on many
+/// threads (`parallel`), from `many` values on, an apply's values are
+/// combined by groups of the entities they were sent to, the groups on
+/// many threads, each entity's in the order of the list.
 static void combineLooped(IRRewriter &rewriter, Operation *op,
                           const WorldLayout &layout,
                           const WorldArchetype &archetype, WorldAccess &world,
-                          Value tick) {
+                          Value tick, bool parallel, int64_t many) {
   Location loc = op->getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   Value list = sendList(rewriter, loc, op, archetype);
-  Value sent = world.toIndex(
-      loc, callSends(rewriter, loc, "ent_sends_count", {list}, true));
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Type stored = cast<MemRefType>(
                     world.applyBuffer(op, archetype).second.getType())
                     .getElementType();
-  if (auto apply = dyn_cast<ApplyOp>(op)) {
+  auto apply = dyn_cast<ApplyOp>(op);
+  if (apply && parallel && combinesApart(apply, layout)) {
+    LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
+    Value sent = callSends(rewriter, loc, "ent_sends_group", {list}, true);
+    Value enough = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::sge, sent,
+        arith::ConstantIntOp::create(rewriter, loc, many, 64));
+    auto split = scf::IfOp::create(rewriter, loc, enough,
+                                   /*withElseRegion=*/true);
+    // (The values of the `k`th, of a group or of all.)
+    auto combineAt = [&](Value k) {
+      Value at =
+          arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(), k);
+      Value id = callSends(rewriter, loc, "ent_sends_id_at", {list, at}, true);
+      if (world.idType() != rewriter.getI64Type())
+        id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
+      Value value = fromSendBits(
+          rewriter, loc,
+          callSends(rewriter, loc, "ent_sends_value_at", {list, at}, true),
+          stored);
+      combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
+    };
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPoint(split.thenBlock()->getTerminator());
+      auto groups = scf::ParallelOp::create(
+          rewriter, loc, ValueRange{zero},
+          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 256)},
+          ValueRange{one});
+      rewriter.setInsertionPoint(groups.getBody()->getTerminator());
+      Value group =
+          arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                     groups.getInductionVars().front());
+      Value next = arith::AddIOp::create(
+          rewriter, loc, group,
+          arith::ConstantIntOp::create(rewriter, loc, 1, 64));
+      Value begin =
+          world.toIndex(loc, callSends(rewriter, loc, "ent_sends_group_start",
+                                       {list, group}, true));
+      Value end =
+          world.toIndex(loc, callSends(rewriter, loc, "ent_sends_group_start",
+                                       {list, next}, true));
+      auto entries = scf::ForOp::create(rewriter, loc, begin, end, one);
+      rewriter.setInsertionPoint(entries.getBody()->getTerminator());
+      combineAt(entries.getInductionVar());
+    }
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPoint(split.elseBlock()->getTerminator());
+      auto entries = scf::ForOp::create(rewriter, loc, zero,
+                                        world.toIndex(loc, sent), one);
+      rewriter.setInsertionPoint(entries.getBody()->getTerminator());
+      combineAt(entries.getInductionVar());
+    }
+    callSends(rewriter, loc, "ent_sends_clear", {list}, false);
+    return;
+  }
+  Value sent = world.toIndex(
+      loc, callSends(rewriter, loc, "ent_sends_count", {list}, true));
+  if (apply) {
     LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
     auto loop = scf::ForOp::create(rewriter, loc, zero, sent, one);
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
@@ -16404,7 +16492,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
         (!op->hasAttr(kUnobservedAttr) ||
          (!neverParallel(*archetype, options, entityLocal) &&
           archetype->capacity != 1)))
-      combineLooped(rewriter, op, layout, *archetype, world, tick);
+      combineLooped(rewriter, op, layout, *archetype, world, tick,
+                    options.parallelEntities, options.parallelMinEvents);
   };
   rewriter.setInsertionPoint(query);
   for (ApplyOp apply : applies)
@@ -20442,11 +20531,19 @@ struct EntLowerToLoops
           op->hasAttr(kAtomicAttr))
         return;
       bool inLoop = false;
+      // (Built for many threads, an apply in a loop over edges goes on the
+      // lists too, which are combined on many threads, see combineLooped:
+      // in the same order, that of the rows and then of their edges. Not
+      // for the GPU, whose kernels call no C.)
+      bool listed = parallelEntities && !gpu && !ranksMode &&
+                    !query.getCascade() && !query.hasBy() &&
+                    getTriggers(query).empty();
       for (Operation *parent = op->getParentOp(); parent != query;
            parent = parent->getParentOp()) {
         // (An apply in a loop over edges has a place for each edge; an
         // accumulate there is one from a loop.)
-        if (isa<EachOp>(parent) || (isa<EdgesOp>(parent) && isa<ApplyOp>(op)))
+        if (isa<EachOp>(parent) ||
+            (isa<EdgesOp>(parent) && isa<ApplyOp>(op) && !listed))
           return;
         inLoop |= isa<LoopLikeOpInterface, EdgesOp>(parent);
       }

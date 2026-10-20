@@ -31,12 +31,20 @@ typedef struct {
   ent_send_block *last;
 } ent_send_slice;
 
+// (Read in groups instead, ent_sends_group: by whom they were sent to.)
+#define ENT_SEND_GROUPS 256
+
 // The lists of one sending place, and where the reading of them is.
 typedef struct {
   ent_send_slice slices[ENT_SEND_SLICES];
   int64_t slice;
   ent_send_block *block;
   uint64_t at;
+  // (In groups: the entries one after another, and where each group
+  // starts; their room is kept.)
+  uint64_t *grouped;
+  int64_t room;
+  int64_t starts[ENT_SEND_GROUPS + 1];
 } ent_send_lists;
 
 // (A table of them for each partition a process runs, devices/ranks.c,
@@ -83,6 +91,8 @@ static ent_send_lists *ent_sends_of(int64_t number) {
   made->slice = ENT_SEND_SLICES;
   made->block = 0;
   made->at = 0;
+  made->grouped = 0;
+  made->room = 0;
   if (__atomic_compare_exchange_n(&ent_sends[number], &lists, made, 0,
                                   __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
     return made;
@@ -158,6 +168,69 @@ int64_t ent_sends_value(int64_t number) {
   ent_send_lists *lists = ent_sends[number];
   ent_send_block *block = ent_sends_at(lists);
   return (int64_t)block->sent[2 * lists->at++ + 1];
+}
+
+// Or read in groups, each of whom the values were sent to (by their ids,
+// 64 ids after another in a group), each in the order of the lists: so
+// a group at a time, on many threads, the values for each entity are
+// combined in the same order as by the lists. How many were sent.
+static int64_t ent_send_group_of(uint64_t id) {
+  return (int64_t)((id >> 6) & (ENT_SEND_GROUPS - 1));
+}
+int64_t ent_sends_group(int64_t number) {
+  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
+  if (!lists)
+    return 0;
+  int64_t *starts = lists->starts;
+  for (int group = 0; group <= ENT_SEND_GROUPS; ++group)
+    starts[group] = 0;
+  for (int slice = 0; slice < ENT_SEND_SLICES; ++slice) {
+    ent_send_slice *list = &lists->slices[slice];
+    for (ent_send_block *block = list->first; block; block = block->next) {
+      for (uint64_t k = 0; k < block->count; ++k)
+        ++starts[ent_send_group_of(block->sent[2 * k]) + 1];
+      if (block == list->last)
+        break;
+    }
+  }
+  for (int group = 0; group < ENT_SEND_GROUPS; ++group)
+    starts[group + 1] += starts[group];
+  int64_t count = starts[ENT_SEND_GROUPS];
+  if (count > lists->room) {
+    free(lists->grouped);
+    lists->room = count + count / 2;
+    lists->grouped = ent_sends_take((size_t)lists->room * 2 * sizeof(uint64_t));
+  }
+  // (Where the next of each group goes: the starts, moved on, and then
+  // back.)
+  for (int slice = 0; slice < ENT_SEND_SLICES; ++slice) {
+    ent_send_slice *list = &lists->slices[slice];
+    for (ent_send_block *block = list->first; block; block = block->next) {
+      for (uint64_t k = 0; k < block->count; ++k) {
+        int64_t at = starts[ent_send_group_of(block->sent[2 * k])]++;
+        lists->grouped[2 * at] = block->sent[2 * k];
+        lists->grouped[2 * at + 1] = block->sent[2 * k + 1];
+      }
+      if (block == list->last)
+        break;
+    }
+  }
+  for (int group = ENT_SEND_GROUPS; group > 0; --group)
+    starts[group] = starts[group - 1];
+  starts[0] = 0;
+  return count;
+}
+
+// Where `group` starts among them (ENT_SEND_GROUPS: where the last ends);
+// whom the `k`th was sent to, and what.
+int64_t ent_sends_group_start(int64_t number, int64_t group) {
+  return ent_sends[number]->starts[group];
+}
+int64_t ent_sends_id_at(int64_t number, int64_t k) {
+  return (int64_t)ent_sends[number]->grouped[2 * k];
+}
+int64_t ent_sends_value_at(int64_t number, int64_t k) {
+  return (int64_t)ent_sends[number]->grouped[2 * k + 1];
 }
 
 // Nothing is on the lists any more; their blocks are kept.

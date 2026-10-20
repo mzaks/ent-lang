@@ -27,12 +27,12 @@
 // RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn.stages.ll \
 // RUN:     -I%t.snn %S/../../examples/host/snn_main.c %openmp -o %t.snn.stages
 // RUN: %t.snn.stages | FileCheck %s
-// RUN: ent-opt %t.snn.mlir "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN: ent-opt %t.snn.mlir "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=1" \
 // RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn.par.ll
 // RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn.par.ll \
-// RUN:     -I%t.snn %S/../../examples/host/snn_main.c %openmp -o %t.snn.par
+// RUN:     -I%t.snn %S/../../examples/host/snn_main.c %S/../../devices/sends.c %openmp -o %t.snn.par
 // RUN: %t.snn.par | FileCheck %s
 
 // RUN: mkdir -p %t.snn_pull
@@ -56,12 +56,12 @@
 // RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn_pull.stages.ll \
 // RUN:     -I%t.snn_pull %S/../../examples/host/snn_main.c %openmp -o %t.snn_pull.stages
 // RUN: %t.snn_pull.stages | FileCheck %s
-// RUN: ent-opt %t.snn_pull.mlir "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1" \
+// RUN: ent-opt %t.snn_pull.mlir "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=1" \
 // RUN:     --convert-scf-to-openmp --canonicalize --ent-omp-nowait \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.snn_pull.par.ll
 // RUN: clang -O2 -ffp-contract=off -Wno-override-module %t.snn_pull.par.ll \
-// RUN:     -I%t.snn_pull %S/../../examples/host/snn_main.c %openmp -o %t.snn_pull.par
+// RUN:     -I%t.snn_pull %S/../../examples/host/snn_main.c %S/../../devices/sends.c %openmp -o %t.snn_pull.par
 // RUN: %t.snn_pull.par | FileCheck %s
 
 // CHECK:      neurons 1024 synapses 32768 steps 100

@@ -6,7 +6,8 @@
 // the loop. A loop on one thread combines each value where it is sent.
 // A parallel one visits the rows in 256 slices, each one after another
 // on a thread, and puts what is sent on the slice's list; the query's
-// end reads the lists in order and combines.
+// end reads the lists in order and combines: an apply's from many values
+// on by groups of the entities sent to, the groups on many threads.
 
 ent.component @H (hp: f32, n: i32)
 ent.archetype @A (@H) capacity 100000
@@ -18,10 +19,18 @@ ent.resource @Score (points: f32)
 // CHECK:           scf.for
 // CHECK:             func.call @ent_sends_put(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i64, i64, i64, i64) -> ()
 // CHECK:             func.call @ent_sends_put(
-// CHECK:       %[[SENT:.*]] = call @ent_sends_count(
-// CHECK:       scf.for
-// CHECK:         call @ent_sends_id(
-// CHECK:         call @ent_sends_value(
+// CHECK:       %[[SENT:.*]] = call @ent_sends_group(
+// CHECK:       scf.if
+// CHECK:         scf.parallel (%[[GROUP:.*]]) = (%{{.*}}) to (%c256{{.*}})
+// CHECK:           call @ent_sends_group_start(
+// CHECK:           call @ent_sends_group_start(
+// CHECK:           scf.for
+// CHECK:             call @ent_sends_id_at(
+// CHECK:             call @ent_sends_value_at(
+// CHECK:       } else {
+// CHECK:         scf.for
+// CHECK:           call @ent_sends_id_at(
+// CHECK:           call @ent_sends_value_at(
 // CHECK:       call @ent_sends_clear(
 // CHECK:       call @ent_sends_count(
 // CHECK:       scf.for
