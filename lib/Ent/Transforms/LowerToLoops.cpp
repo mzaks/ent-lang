@@ -2194,6 +2194,11 @@ static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
 /// handed to a proc, not read by row numbers or as rows. See
 /// markSplitBuffers.
 static llvm::DenseSet<StringAttr> rankSplitBuffers;
+/// Built for partitions: the buffers a process's partitions share (one
+/// copy in memory for all, see ent_ranks_share_region): those no code
+/// outside a `for` both writes and reads (where every partition does it,
+/// a row changed from what it holds would be changed once for each).
+static llvm::DenseSet<StringAttr> rankSharedBuffers;
 /// And the fns that read one (or call a fn that does), by name: known
 /// before fns are lowered (see askPass).
 static llvm::DenseSet<StringRef> rankSplitReaders;
@@ -2238,6 +2243,42 @@ static void markSplitBuffers(ModuleOp module, const WorldLayout &layout) {
   for (StringAttr buffer : written)
     if (!refused.contains(buffer))
       rankSplitBuffers.insert(buffer);
+  // (Shared: none that code outside a `for` both writes and reads,
+  // anywhere: the partitions run it each at its own time.)
+  rankSharedBuffers.clear();
+  llvm::DenseSet<StringAttr> sets, reads;
+  module.walk([&](Operation *op) {
+    // (In a `for`, or a fn only `for`s call.)
+    if (op->getParentOfType<QueryOp>() ||
+        (op->getParentOfType<FunctionOp>() &&
+         inSpreadFor(op, module, fns, layout)))
+      return;
+    // (Rows given, or given anew, are written too.)
+    if (auto set = dyn_cast<BufferSetOp>(op))
+      sets.insert(set.getBufferAttr().getAttr());
+    if (auto append = dyn_cast<AppendOp>(op))
+      sets.insert(append.getBufferAttr().getAttr());
+    if (auto fill = dyn_cast<BufferFillOp>(op))
+      sets.insert(fill.getBufferAttr().getAttr());
+    if (auto at = dyn_cast<BufferAtOp>(op))
+      reads.insert(at.getBufferAttr().getAttr());
+    // (And one a proc is given: a device writes it, on rank 0, while the
+    // other partitions go on at their own pace.)
+    if (auto invoke = dyn_cast<InvokeOp>(op); invoke && invoke.getProc())
+      for (Value operand : invoke.getOperands())
+        if (auto of = operand.getDefiningOp<BufferOfOp>()) {
+          sets.insert(of.getBufferAttr().getAttr());
+          reads.insert(of.getBufferAttr().getAttr());
+        }
+  });
+  for (BufferOp buffer : module.getOps<BufferOp>())
+    if (!(sets.contains(buffer.getSymNameAttr()) &&
+          reads.contains(buffer.getSymNameAttr())))
+      rankSharedBuffers.insert(buffer.getSymNameAttr());
+  if (getenv("ENT_LAYOUT_MAP"))
+    for (StringAttr buffer : rankSharedBuffers)
+      llvm::errs() << "shared by a process's partitions: buffer "
+                   << buffer.getValue() << "\n";
   // (The fns that read them, and those that call those, till no more.)
   rankSplitReaders.clear();
   for (bool more = true; more;) {
@@ -16408,6 +16449,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     deliverEdges(rewriter, loc, module, layout, world);
     if (asked)
       callGpu(rewriter, loc, module, "ent_ranks_ghosts_drop", ValueRange{});
+    // (Partitions of a process that share memory: none goes on to write
+    // what another may still read in this `for`.)
+    if (partitionCount > 0)
+      callGpu(rewriter, loc, module, "ent_ranks_barrier", ValueRange{});
     if (captured)
       callGpu(rewriter, loc, module, "ent_ranks_release", ValueRange{});
   }
@@ -17072,6 +17117,8 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
     deliverOverRanks(rewriter, loc, module, layout, world);
     deliverEdges(rewriter, loc, module, layout, world);
+    if (partitionCount > 0)
+      callGpu(rewriter, loc, module, "ent_ranks_barrier", ValueRange{});
   }
   for (Operation *op : reduced)
     op->removeAttr(kReducedAttr);
@@ -18770,6 +18817,15 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
   Value end = arith::ConstantIndexOp::create(rewriter, loc, layout.headerBytes);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Value zeroByte = arith::ConstantIntOp::create(rewriter, loc, 0, 8);
+  // (Only where it came from the heap: what devices/memory.c maps is
+  // zero, and stays untouched, the whole of what holds a place for every
+  // entity in the world included.)
+  auto fromHeap = scf::IfOp::create(
+      rewriter, loc,
+      arith::XOrIOp::create(rewriter, loc, linked(worldMemory),
+                            arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
+  OpBuilder::InsertionGuard zeroing(rewriter);
+  rewriter.setInsertionPoint(fromHeap.thenBlock()->getTerminator());
   scf::ForOp::create(rewriter, loc, zero, end, one, ValueRange{},
                      [&](OpBuilder &builder, Location loc, Value index,
                          ValueRange) {
@@ -18789,6 +18845,7 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
                                   ValueRange{index});
           scf::YieldOp::create(builder, loc);
         });
+  rewriter.setInsertionPointAfter(fromHeap);
   // (On many ranks, MPI around it all: devices/ranks.c. Until they are
   // placed, every row of a distributed archetype is every rank's.)
   if (ranksMode) {
@@ -18873,6 +18930,51 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
     }
     if (partitionCount > 0)
       callGpu(rewriter, loc, module, "ent_ranks_distribute", ValueRange{});
+    // (Built for partitions: what a process's partitions share, the rows
+    // only their owner writes: each partitioned archetype's columns, ids
+    // and places for what its `for`s send, connect and give to buffers.)
+    if (partitionCount > 0) {
+      auto share = [&](uint64_t offset, int64_t bytes) {
+        callGpu(rewriter, loc, module, "ent_ranks_share_region",
+                ValueRange{arith::ConstantIntOp::create(rewriter, loc, offset,
+                                                        64),
+                           arith::ConstantIntOp::create(rewriter, loc, bytes,
+                                                        64)});
+      };
+      uint64_t idBytes = layout.entities.idBits / 8;
+      for (const WorldArchetype &archetype : layout.archetypes) {
+        if (!archetype.isPartitioned())
+          continue;
+        for (const WorldColumn &column : archetype.columns)
+          share(column.offset,
+                archetype.capacity * started.storageBytes(column.type));
+        if (archetype.idOffset)
+          share(archetype.idOffset, archetype.capacity * idBytes);
+        for (const WorldApply &apply : layout.applies)
+          for (const WorldApplyBuffer &buffer : apply.buffers)
+            if (buffer.archetype == archetype.index) {
+              share(buffer.idOffset, archetype.capacity * idBytes);
+              share(buffer.valueOffset,
+                    archetype.capacity * started.storageBytes(apply.type));
+            }
+        for (const WorldConnect &connect : layout.connects)
+          for (const WorldConnect::Buffer &buffer : connect.buffers)
+            if (buffer.archetype == archetype.index) {
+              share(buffer.sourceOffset, archetype.capacity * idBytes);
+              share(buffer.targetOffset, archetype.capacity * idBytes);
+            }
+        for (const WorldAppend &append : layout.appends)
+          for (const WorldAppend::Slots &slots : append.slots)
+            if (slots.archetype == archetype.index)
+              share(slots.sentOffset, archetype.capacity);
+      }
+      for (const WorldBuffer &buffer : layout.buffers)
+        if (rankSharedBuffers.contains(BufferOp(buffer.op).getSymNameAttr()))
+          for (const WorldColumn &field : buffer.fields)
+            share(field.offset,
+                  buffer.rows * started.storageBytes(field.type));
+      callGpu(rewriter, loc, module, "ent_ranks_share_regions", ValueRange{});
+    }
     // (The buffers split by rows where the run asks: their columns.)
     for (const WorldBuffer &buffer : layout.buffers) {
       if (!rankSplitBuffers.contains(BufferOp(buffer.op).getSymNameAttr()))

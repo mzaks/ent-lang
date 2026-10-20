@@ -36,6 +36,8 @@ static pthread_cond_t ent_met = PTHREAD_COND_INITIALIZER;
 static int ent_arrived = 0;
 static long ent_generation = 0;
 static void **ent_args = 0;
+static char **ent_arenas = 0; // each local partition's world
+static int ent_is_shared(const char *base, const char *at, int64_t bytes);
 static pthread_mutex_t ent_running = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ent_free_slot = PTHREAD_COND_INITIALIZER;
 static int ent_slots = 1;
@@ -57,14 +59,31 @@ static void ent_slot_give(void) {
 // All the process's partitions meet: each gives what it brings (`mine`),
 // and the last to come does `work` for all of them (by their local
 // numbers), the others waiting; then each goes on.
+static void (**ent_works)(void **) = 0;
 static void ent_meet(void *mine, void (*work)(void **)) {
   ent_slot_give();
   pthread_mutex_lock(&ent_meeting);
   ent_args[ent_local] = mine;
+  // (Every partition at the same kind of meeting, else the program, or
+  // what the runtime shares, is wrong: said, and stopped.)
+  if (!ent_works)
+    ent_works = calloc(1024, sizeof(*ent_works));
+  ent_works[ent_local] = work;
+  for (int l = 0; l < ent_locals; ++l)
+    if (ent_works[l] && ent_works[l] != work) {
+      fprintf(stderr,
+              "ent: the partitions of a process came apart (partition %d "
+              "meets for ent_meet%+ld, partition %d for ent_meet%+ld)\n",
+              ent_local, (long)((char *)work - (char *)ent_meet), l,
+              (long)((char *)ent_works[l] - (char *)ent_meet));
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
   long generation = ent_generation;
   if (++ent_arrived == ent_locals) {
     work(ent_args);
     ent_arrived = 0;
+    for (int l = 0; l < ent_locals; ++l)
+      ent_works[l] = 0;
     ++ent_generation;
     pthread_cond_broadcast(&ent_met);
   } else {
@@ -201,6 +220,10 @@ static void ent_allgatherv_work(void **args) {
     ent_pieces_args *a = args[l];
     int r = ent_global(ent_proc, l);
     const char *piece = a->send ? a->send : (char *)a->recv + displs[r];
+    // (Where the partitions share it, each has it already.)
+    if (!a->send && ent_arenas && ent_arenas[l] &&
+        ent_is_shared(ent_arenas[l], piece, counts[r]))
+      continue;
     for (int m = 0; m < ent_locals; ++m) {
       char *to = (char *)((ent_pieces_args *)args[m])->recv + displs[r];
       if (to != piece)
@@ -239,9 +262,14 @@ static void ent_allgatherv_work(void **args) {
     char *from = packed + starts[p];
     for (int l = 0; l < ent_locals; ++l) {
       int r = ent_global(p, l);
-      for (int m = 0; m < ent_locals; ++m)
-        memcpy((char *)((ent_pieces_args *)args[m])->recv + displs[r], from,
-               counts[r]);
+      for (int m = 0; m < ent_locals; ++m) {
+        char *to = (char *)((ent_pieces_args *)args[m])->recv + displs[r];
+        memcpy(to, from, counts[r]);
+        // (Shared: one copy is all of theirs.)
+        if (ent_arenas && ent_arenas[m] &&
+            ent_is_shared(ent_arenas[m], to, counts[r]))
+          break;
+      }
       from += counts[r];
     }
   }
@@ -631,6 +659,7 @@ int32_t ent_ranks_run(int32_t (*program)(void), int64_t partitions) {
     MPI_Abort(MPI_COMM_WORLD, 1);
   }
   ent_args = calloc(ent_locals, sizeof(void *));
+  ent_arenas = calloc(ent_locals, sizeof(char *));
   ent_mailboxes = calloc(ent_locals, sizeof(ent_mailbox));
   for (int l = 0; l < ent_locals; ++l) {
     pthread_mutex_init(&ent_mailboxes[l].lock, 0);
@@ -709,7 +738,9 @@ static void ent_log_memory(void) {
     return;
   char line[256];
   while (fgets(line, sizeof line, status))
-    if (!strncmp(line, "VmRSS:", 6) || !strncmp(line, "VmHWM:", 6))
+    if (!strncmp(line, "VmRSS:", 6) || !strncmp(line, "VmHWM:", 6) ||
+        !strncmp(line, "RssAnon:", 8) || !strncmp(line, "RssShmem:", 9) ||
+        !strncmp(line, "RssFile:", 8))
       fprintf(stderr, "ent: rank %d: %s", ent_rank, line);
   fclose(status);
 }
@@ -719,9 +750,106 @@ static void ent_log_memory(void) {
 // of it the rank has).
 static _Thread_local char *ent_arena = 0;
 static _Thread_local int64_t ent_arena_bytes = 0;
+
 void ent_ranks_arena(void *arena, int64_t bytes) {
   ent_arena = arena;
   ent_arena_bytes = bytes;
+  ent_arenas[ent_local] = arena;
+}
+
+// ---------------------------------------------------------------------------
+// What the partitions of a process share: stretches of their worlds (the
+// rows of distributed archetypes, which each partition writes of its own
+// only, and buffers, which all have alike), the same memory at the same
+// place of each world: each sees the others' rows without their being
+// given. (The whole pages of each stretch; the pieces at its ends stay
+// each one's own.) In a file in ENT_WORLD_DIR, else in memory.
+
+typedef struct {
+  int64_t from, to; // offsets in the world, whole pages
+} ent_shared;
+static ent_shared *ent_shares = 0;
+static int64_t ent_share_count = 0;
+static _Thread_local ent_shared *ent_asked_shares = 0;
+static _Thread_local int64_t ent_asked_count = 0, ent_asked_room = 0;
+
+void ent_ranks_share_region(int64_t offset, int64_t bytes) {
+  long page = sysconf(_SC_PAGESIZE);
+  int64_t from = (offset + page - 1) / page * page;
+  int64_t to = (offset + bytes) / page * page;
+  if (from >= to)
+    return;
+  if (ent_asked_count == ent_asked_room) {
+    ent_asked_room = ent_asked_room ? 2 * ent_asked_room : 64;
+    ent_asked_shares =
+        realloc(ent_asked_shares, sizeof(ent_shared) * ent_asked_room);
+  }
+  ent_asked_shares[ent_asked_count++] = (ent_shared){from, to};
+}
+
+static void ent_share_work(void **args) {
+  (void)args;
+  int64_t total = 0;
+  for (int64_t i = 0; i < ent_asked_count; ++i)
+    total += ent_asked_shares[i].to - ent_asked_shares[i].from;
+  int file = -1;
+  const char *directory = getenv("ENT_WORLD_DIR");
+  if (directory && *directory) {
+    char path[4096];
+    snprintf(path, sizeof path, "%s/ent-shared.%ld.XXXXXX", directory,
+             (long)getpid());
+    file = mkstemp(path);
+    if (file >= 0)
+      unlink(path);
+  } else {
+    file = memfd_create("ent-shared", 0);
+  }
+  if (file < 0 || ftruncate(file, total) != 0) {
+    fprintf(stderr, "ent: no memory the partitions share\n");
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
+  int64_t at = 0;
+  for (int64_t i = 0; i < ent_asked_count; ++i) {
+    ent_shared region = ent_asked_shares[i];
+    for (int l = 0; l < ent_locals; ++l)
+      if (mmap(ent_arenas[l] + region.from, region.to - region.from,
+               PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, file,
+               at) == MAP_FAILED) {
+        fprintf(stderr, "ent: no memory the partitions share\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+      }
+    at += region.to - region.from;
+  }
+  close(file);
+  ent_shares = ent_asked_shares;
+  ent_share_count = ent_asked_count;
+}
+
+// The stretches asked for, shared (once all the partitions of the process
+// asked; the same of each, the layout being one). Nothing where a process
+// runs one partition, or with ENT_NOSHARE (each a copy of its own, to
+// compare).
+void ent_ranks_share_regions(void) {
+  if (ent_locals > 1 && !getenv("ENT_NOSHARE"))
+    ent_meet(0, ent_share_work);
+}
+
+static void ent_nothing(void **args) { (void)args; }
+
+// After a `for` over distributed entities, where the partitions of the
+// process share memory: all of them done with it before any goes on.
+void ent_ranks_barrier(void) {
+  if (ent_locals > 1 && ent_share_count > 0)
+    ent_meet(0, ent_nothing);
+}
+
+// Whether `bytes` at `at` of a partition's world are all shared.
+static int ent_is_shared(const char *base, const char *at, int64_t bytes) {
+  int64_t from = at - base, to = from + bytes;
+  for (int64_t i = 0; i < ent_share_count; ++i)
+    if (ent_shares[i].from <= from && to <= ent_shares[i].to)
+      return 1;
+  return 0;
 }
 static void ent_log_pages(void) {
   if (!ent_arena)
@@ -1039,6 +1167,9 @@ int32_t ent_ranks_dropping(int32_t archetype) {
 // (The whole pages from `from` to `to` given back to the system: read
 // again they are noughts.)
 static void ent_let_go(char *from, char *to) {
+  // (Pages the partitions of the process share are not this one's.)
+  if (ent_arena && ent_is_shared(ent_arena, from, to - from))
+    return;
   uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
   uintptr_t start = ((uintptr_t)from + page - 1) & ~(page - 1);
   uintptr_t end = (uintptr_t)to & ~(page - 1);

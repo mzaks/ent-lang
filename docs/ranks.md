@@ -108,9 +108,19 @@ rank, run on N ranks. No rank ever holds the whole world:
   one after another, which takes the least memory); one that waits for
   the others lets another run.
 
-Not yet: partitions of a process each have the whole of what every rank
-has whole (buffers, fields gathered for lookups), not one copy for them
-all.
+- The partitions of a process share memory, one copy for all of them, of
+  what only its owner writes: the rows of distributed archetypes (so a
+  field gathered for lookups is there for all at once), the places for
+  what their `for`s send, connect and give to buffers, and buffers that no
+  code outside a `for` both writes (or gives rows to, or hands to a proc)
+  and reads. A `for` over distributed entities ends with all of them done
+  before any goes on. `ENT_NOSHARE` gives each partition its own copy, to
+  compare. The epidemic with tracing at 1e6 as 16 partitions in one
+  process ends in 1.96 GB (4.06 GB without sharing), in 37.7 s.
+
+Not yet: what the setup takes at its most (each partition builds its own
+part with what every rank has whole) is not shared: the 16 partitions
+above take 4.1 GB at the most.
 
 ## A `for` over distributed entities
 
