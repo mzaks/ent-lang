@@ -6050,9 +6050,9 @@ static LocateBounds loadCombineBounds(IRRewriter &rewriter, Location loc,
 static void combineIntoField(IRRewriter &rewriter, Location loc,
                              FlatSymbolRefAttr component, StringAttr fieldName,
                              StringRef rule, bool atomic, bool trusted,
-                             const WorldLayout &layout, WorldAccess &world,
-                             Value id, Value value, Value tick,
-                             const LocateBounds &bounds);
+                             StringRef onRanks, const WorldLayout &layout,
+                             WorldAccess &world, Value id, Value value,
+                             Value tick, const LocateBounds &bounds);
 static void combineInto(IRRewriter &rewriter, ApplyOp apply,
                         const WorldLayout &layout, WorldAccess &world,
                         Value id, Value value, Value tick,
@@ -6060,72 +6060,78 @@ static void combineInto(IRRewriter &rewriter, ApplyOp apply,
   combineIntoField(rewriter, apply.getLoc(), apply.getComponentAttr(),
                    apply.getFieldAttr(), apply.getRule(),
                    apply->hasAttr(kAtomicAttr), apply->hasAttr(kTrustedAttr),
-                   layout, world, id, value, tick, bounds);
+                   /*onRanks=*/"", layout, world, id, value, tick, bounds);
 }
 
 static Value toSendBits(IRRewriter &rewriter, Location loc, Value stored);
 static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
                           Type type);
 
+/// On many ranks, resolved `on_ranks` (see SaCombineOp): what a value
+/// combined into an entity another rank has (or every rank, of an
+/// archetype not distributed) does. "posted": posted to it on the channel
+/// of the field, rule and stored type (numbered here), combined there
+/// when the query ends (deliverOverRanks); "refused": the program stops.
+static RankPost ranksPosting(IRRewriter &rewriter, Location loc,
+                             FlatSymbolRefAttr component, StringAttr fieldName,
+                             StringRef rule, StringRef onRanks, Value id,
+                             Value value) {
+  RankPost posting;
+  posting.postable = onRanks == "posted";
+  int64_t channel = -1;
+  if (posting.postable) {
+    auto known = llvm::find_if(rankChannels, [&](const RankChannel &c) {
+      return c.component == component.getAttr() && c.field == fieldName &&
+             c.rule == rule && c.stored == value.getType();
+    });
+    channel = known - rankChannels.begin();
+    if (known == rankChannels.end())
+      rankChannels.push_back(
+          {component.getAttr(), fieldName, rule, value.getType()});
+  }
+  posting.post = [&rewriter, loc, id, value,
+                  channel](const WorldArchetype &archetype, Value row,
+                           bool all) {
+    ModuleOp module =
+        rewriter.getInsertionBlock()->getParentOp()->getParentOfType<
+            ModuleOp>();
+    if (channel < 0) {
+      auto at = loc->findInstanceOf<FileLineColLoc>();
+      callGpu(rewriter, loc, module, "ent_ranks_cannot_send",
+              ValueRange{arith::ConstantIntOp::create(
+                  rewriter, loc, at ? at.getLine() : 0, 32)});
+      return;
+    }
+    callGpu(rewriter, loc, module, "ent_ranks_post",
+            ValueRange{
+                arith::ConstantIntOp::create(rewriter, loc, channel, 32),
+                arith::ConstantIntOp::create(rewriter, loc, archetype.index,
+                                             32),
+                arith::IndexCastOp::create(rewriter, loc,
+                                           rewriter.getI64Type(), row),
+                toSendBits(rewriter, loc, id),
+                toSendBits(rewriter, loc, value),
+                arith::ConstantIntOp::create(rewriter, loc, all ? 1 : 0,
+                                             32)});
+  };
+  return posting;
+}
+
 static void combineIntoField(IRRewriter &rewriter, Location loc,
                              FlatSymbolRefAttr component, StringAttr fieldName,
                              StringRef rule, bool atomic, bool trusted,
-                             const WorldLayout &layout, WorldAccess &world,
-                             Value id, Value value, Value tick,
-                             const LocateBounds &bounds) {
+                             StringRef onRanks, const WorldLayout &layout,
+                             WorldAccess &world, Value id, Value value,
+                             Value tick, const LocateBounds &bounds) {
   auto holds = [&](const WorldArchetype &archetype) {
     return ArchetypeOp(archetype.op).contains(component);
   };
   // (On many ranks, in a query over distributed archetypes: where the
   // entity is another rank's, or every rank's, the send is posted.)
   std::optional<RankPost> posting;
-  if (ranksMode && rankPosting) {
-    posting.emplace();
-    bool events = false;
-    for (const WorldArchetype &archetype : layout.archetypes)
-      if (holds(archetype) &&
-          !stampsFor(archetype, Trigger::Changed, component.getAttr(),
-                     fieldName)
-               .empty())
-        events = true;
-    posting->postable = isa<IntegerType>(value.getType()) && rule != "set" &&
-                        !atomic && !events;
-    int64_t channel = -1;
-    if (posting->postable) {
-      auto known = llvm::find_if(rankChannels, [&](const RankChannel &c) {
-        return c.component == component.getAttr() && c.field == fieldName &&
-               c.rule == rule && c.stored == value.getType();
-      });
-      channel = known - rankChannels.begin();
-      if (known == rankChannels.end())
-        rankChannels.push_back(
-            {component.getAttr(), fieldName, rule, value.getType()});
-    }
-    posting->post = [&, channel](const WorldArchetype &archetype, Value row,
-                                 bool all) {
-      ModuleOp module =
-          rewriter.getInsertionBlock()->getParentOp()->getParentOfType<
-              ModuleOp>();
-      if (channel < 0) {
-        auto at = loc->findInstanceOf<FileLineColLoc>();
-        callGpu(rewriter, loc, module, "ent_ranks_cannot_send",
-                ValueRange{arith::ConstantIntOp::create(
-                    rewriter, loc, at ? at.getLine() : 0, 32)});
-        return;
-      }
-      callGpu(rewriter, loc, module, "ent_ranks_post",
-              ValueRange{
-                  arith::ConstantIntOp::create(rewriter, loc, channel, 32),
-                  arith::ConstantIntOp::create(rewriter, loc, archetype.index,
-                                               32),
-                  arith::IndexCastOp::create(rewriter, loc,
-                                             rewriter.getI64Type(), row),
-                  toSendBits(rewriter, loc, id),
-                  toSendBits(rewriter, loc, value),
-                  arith::ConstantIntOp::create(rewriter, loc, all ? 1 : 0,
-                                               32)});
-    };
-  }
+  if (!onRanks.empty())
+    posting = ranksPosting(rewriter, loc, component, fieldName, rule, onRanks,
+                           id, value);
   llvm::SaveAndRestore keepPost(rankPost,
                                 posting ? &*posting : (RankPost *)nullptr);
   emitLocate(
@@ -6463,8 +6469,9 @@ static void deliverOverRanks(IRRewriter &rewriter, Location loc,
       value = arith::TruncIOp::create(rewriter, loc, channel.stored, value);
     combineIntoField(rewriter, loc,
                      FlatSymbolRefAttr::get(channel.component), channel.field,
-                     channel.rule, /*atomic=*/false, /*trusted=*/false, layout,
-                     world, id, value, Value(), LocateBounds());
+                     channel.rule, /*atomic=*/false, /*trusted=*/false,
+                     /*onRanks=*/"", layout, world, id, value, Value(),
+                     LocateBounds());
   }
   (void)i32;
   rankChannels.clear();
@@ -12218,6 +12225,38 @@ static StringRef resolveSend(const ApplyFacts &facts) {
   return facts.inEdges ? "edges" : "rows";
 }
 
+/// On many ranks, what a value combined into another rank's entity does
+/// (`on_ranks`, see SaCombineOp), where it may be (`posts`): posted where
+/// that comes to the same in any order (a whole number added, or the
+/// least or the most kept; not atomically, nothing stamped); else
+/// refused. Nothing ("") where it may not.
+static StringRef resolveOnRanks(bool posts, bool whole, StringRef rule,
+                                bool atomic, bool changed) {
+  if (!posts)
+    return "";
+  return whole && rule != "set" && !atomic && !changed ? "posted"
+                                                        : "refused";
+}
+
+/// The facts of a combine into `component`'s `field`, of values stored as
+/// `stored`, on many ranks: `posts`, `whole`, `changed`.
+static void rankFacts(Builder &builder, SmallVectorImpl<NamedAttribute> &into,
+                      const WorldLayout &layout, StringAttr component,
+                      StringAttr field, Type stored) {
+  bool changed = false;
+  for (const WorldArchetype &archetype : layout.archetypes)
+    changed |= ArchetypeOp(archetype.op).contains(
+                   FlatSymbolRefAttr::get(component)) &&
+               !stampsFor(archetype, Trigger::Changed, component, field)
+                    .empty();
+  for (auto [name, on] :
+       {std::pair<StringRef, bool>{"posts", ranksMode && rankPosting},
+        {"whole", isa<IntegerType>(stored)},
+        {"changed", changed}})
+    if (on)
+      into.push_back(builder.getNamedAttr(name, builder.getUnitAttr()));
+}
+
 static void resolveStateAccess(SaCombineOp combine) {
   ApplyFacts facts;
   facts.atomic = combine.getAtomic();
@@ -12229,6 +12268,12 @@ static void resolveStateAccess(SaCombineOp combine) {
   facts.sliced = combine.getSliced();
   facts.inEdges = combine.getInEdges();
   combine.setResolution(resolveSend(facts));
+  if (StringRef onRanks =
+          resolveOnRanks(combine.getPosts(), combine.getWhole(),
+                         combine.getRule(), combine.getAtomic(),
+                         combine.getChanged());
+      !onRanks.empty())
+    combine.setOnRanks(onRanks);
 }
 
 /// How what was staged for an apply is merged, from what its accesses
@@ -12239,6 +12284,11 @@ static void resolveStateAccess(SaCombineOp combine) {
 /// after another. (The groups only where that takes less, as the program
 /// runs.) Rows and edges, row after row.
 static void resolveStateAccess(SaMergeOp merge) {
+  if (StringRef onRanks = resolveOnRanks(merge.getPosts(), merge.getWhole(),
+                                         merge.getRule(), merge.getAtomic(),
+                                         merge.getChanged());
+      !onRanks.empty())
+    merge.setOnRanks(onRanks);
   if (merge.getStaged() != "list") {
     merge.setResolution(merge.getStaged());
     return;
@@ -12304,8 +12354,9 @@ static void lowerStateAccess(IRRewriter &rewriter, SaCombineOp combine,
     } else {
       combineIntoField(rewriter, loc, combine.getComponentAttr(),
                        combine.getFieldAttr(), combine.getRule(),
-                       combine.getAtomic(), combine.getTrusted(), layout,
-                       world, id, value, combine.getTick(), LocateBounds());
+                       combine.getAtomic(), combine.getTrusted(),
+                       combine.getOnRanks().value_or(""), layout, world, id,
+                       value, combine.getTick(), LocateBounds());
     }
   }
   rewriter.eraseOp(combine);
@@ -12341,6 +12392,9 @@ static void sendApplied(IRRewriter &rewriter, ApplyOp apply,
   flag("sliced", facts.sliced);
   flag("in_edges", facts.inEdges);
   flag("trusted", facts.trusted);
+  rankFacts(rewriter, attributes, layout, apply.getComponentAttr().getAttr(),
+            apply.getFieldAttr(),
+            world.storageType(apply.getValue().getType()));
   SmallVector<Value> operands{apply.getEntity(), apply.getValue()};
   SmallVector<int32_t> segments{1, 1};
   for (Value optional : {at, mask, tick}) {
@@ -12464,8 +12518,8 @@ static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
   auto combineInto = [&](Value id, Value value, const LocateBounds &bounds) {
     combineIntoField(rewriter, loc, merge.getComponentAttr(),
                      merge.getFieldAttr(), merge.getRule(), merge.getAtomic(),
-                     merge.getTrusted(), layout, world, id, value, tick,
-                     bounds);
+                     merge.getTrusted(), merge.getOnRanks().value_or(""),
+                     layout, world, id, value, tick, bounds);
   };
   StringRef resolution = *merge.getResolution();
   if (resolution == "rows" || resolution == "edges") {
@@ -12648,6 +12702,7 @@ static void mergeApplied(IRRewriter &rewriter, ApplyOp apply,
   flag("atomic", apply->hasAttr(kAtomicAttr));
   flag("trusted", apply->hasAttr(kTrustedAttr));
   flag("ranks", ranksMode);
+  rankFacts(rewriter, attributes, layout, component, field, stored);
   SmallVector<Value> operands{world.getArena()};
   SmallVector<int32_t> segments{1};
   for (Value optional : {count, tick}) {

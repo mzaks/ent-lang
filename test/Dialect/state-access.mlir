@@ -20,6 +20,10 @@ func.func @staged(%e: !ent.entity, %v: i32, %row: index, %mask: i1,
   // CHECK: ent.sa.combine 3[1] @Cell "got" "max"(%{{.*}}, %{{.*}}) tick %{{.*}} in %{{.*}} {looped, resolution = "list", sliced} : !ent.entity, i32, memref<4096xi8>
   ent.sa.combine 3[1] @Cell "got" "max" (%e, %v) tick %tick in %world
     {looped, resolution = "list", sliced} : !ent.entity, i32, memref<4096xi8>
+  // CHECK: ent.sa.combine 3[1] @Cell "got" "add"(%{{.*}}, %{{.*}}) in %{{.*}} {direct, on_ranks = "posted", posts, resolution = "direct", unobserved, whole} : !ent.entity, i32, memref<4096xi8>
+  ent.sa.combine 3[1] @Cell "got" "add" (%e, %v) in %world
+    {direct, on_ranks = "posted", posts, resolution = "direct", unobserved,
+     whole} : !ent.entity, i32, memref<4096xi8>
   // CHECK: ent.sa.merge 2[1] @Cell "got" "add" of i32 in %{{.*}} count %{{.*}} {least = 0 : i64, resolution = "rows", staged = "rows"} : memref<4096xi8>
   ent.sa.merge 2[1] @Cell "got" "add" of i32 in %world count %count
     {least = 0 : i64, resolution = "rows", staged = "rows"} : memref<4096xi8>

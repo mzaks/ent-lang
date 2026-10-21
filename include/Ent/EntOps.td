@@ -1773,14 +1773,21 @@ def Ent_SaCombineOp : Ent_Op<"sa.combine", [AttrSizedOperandSegments]> {
     visiting entities one after another in a fixed order), `order_free`
     (whole numbers of a reactive query), `direct` (the query's loop may
     combine where it is sent), `sliced` (in a slice of a parallel loop),
-    `in_edges` (in a loop over edges), `trusted` (its id is alive).
+    `in_edges` (in a loop over edges), `trusted` (its id is alive);
+    on many ranks, `posts` (in a query over distributed archetypes: one
+    sent to another rank's entity is posted to it), `whole` (a whole
+    number, stored), `changed` (combining it stamps a Changed event).
 
     The decision, `resolution`: `"atomic"` or `"direct"`, combined where it
     is sent; `"list"`, staged on the list of the slice of the loop it is
     in (the first, on one thread) until the query ends (devices/sends.c, ent_sends_put);
     `"rows"` or `"edges"`, in a slot of the row or the edge `%at`, until
     the query ends. Where it is staged, an `ent.sa.merge` of the same
-    apply and archetype combines.
+    apply and archetype combines. And on many ranks, `on_ranks`:
+    `"posted"` (to the rank that has the entity, combined there when the
+    query ends; whole numbers added, or kept the least or the most, the
+    same in any order) or `"refused"` (the program stops where one would
+    be posted); see ranksPosting.
   }];
   let arguments = (ins I64Attr:$apply, I64Attr:$archetype,
                        FlatSymbolRefAttr:$component, StrAttr:$field,
@@ -1791,7 +1798,9 @@ def Ent_SaCombineOp : Ent_Op<"sa.combine", [AttrSizedOperandSegments]> {
                        UnitAttr:$unobserved, UnitAttr:$in_each,
                        UnitAttr:$order_free, UnitAttr:$direct,
                        UnitAttr:$sliced, UnitAttr:$in_edges,
-                       UnitAttr:$trusted, OptionalAttr<StrAttr>:$resolution);
+                       UnitAttr:$trusted, UnitAttr:$posts, UnitAttr:$whole,
+                       UnitAttr:$changed, OptionalAttr<StrAttr>:$resolution,
+                       OptionalAttr<StrAttr>:$on_ranks);
   let assemblyFormat = [{
     $apply `[` $archetype `]` $component $field $rule `(` $entity `,` $value
     `)` (`at` $at^)? (`if` $mask^)? (`tick` $tick^)? `in` $world attr-dict
@@ -1822,7 +1831,8 @@ def Ent_SaMergeOp : Ent_Op<"sa.merge", [AttrSizedOperandSegments]> {
     list, `"in-order"` (one value after another) or `"groups"` (in groups
     of the entities sent to, on many threads, where that takes less:
     chosen as the program runs, both giving the same); `"rows"` and
-    `"edges"`, row after row (and edge after edge).
+    `"edges"`, row after row (and edge after edge). On many ranks, from
+    `posts`, `whole` and `changed`, `on_ranks` as for `ent.sa.combine`.
   }];
   let arguments = (ins I64Attr:$apply, I64Attr:$archetype,
                        FlatSymbolRefAttr:$component, StrAttr:$field,
@@ -1832,8 +1842,10 @@ def Ent_SaMergeOp : Ent_Op<"sa.merge", [AttrSizedOperandSegments]> {
                        OptionalAttr<FlatSymbolRefAttr>:$relation,
                        UnitAttr:$inward, UnitAttr:$parallel,
                        UnitAttr:$order_shows, UnitAttr:$atomic,
-                       UnitAttr:$trusted, UnitAttr:$ranks, I64Attr:$least,
-                       OptionalAttr<StrAttr>:$resolution);
+                       UnitAttr:$trusted, UnitAttr:$ranks, UnitAttr:$posts,
+                       UnitAttr:$whole, UnitAttr:$changed, I64Attr:$least,
+                       OptionalAttr<StrAttr>:$resolution,
+                       OptionalAttr<StrAttr>:$on_ranks);
   let assemblyFormat = [{
     $apply `[` $archetype `]` $component $field $rule `of` $stored `in`
     $world (`count` $count^)? (`tick` $tick^)? attr-dict `:` type($world)
