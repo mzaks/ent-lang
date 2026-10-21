@@ -9317,8 +9317,9 @@ static void emitPartitionedSort(IRRewriter &rewriter, Location loc,
 /// clean. Edges keep the order they were connected in among those of the
 /// same source, and the index by target lists each target's edges in table
 /// order. With `parallel`, what goes over every entity key (offsets set
-/// to 0, and added up) is on many threads, and from `manyEdges` edges on
-/// the counting and placing of the edges too.
+/// to 0, and added up) or every kept edge (copied back, marked alive) is
+/// on many threads, and from `manyEdges` edges on the counting and placing
+/// of the edges too.
 static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                              const WorldLayout &layout,
                              const WorldRelation &relation,
@@ -9502,6 +9503,13 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     body(loop.getInductionVars().front());
   };
+  // (Each of the first `n` on its own, on many threads with `parallel`.)
+  auto forEachApart = [&](Value n, function_ref<void(Value)> body) {
+    if (parallel)
+      onThreads(n, body);
+    else
+      forEach(zero, n, body);
+  };
   // Each of the first `n` edges that `counted` keeps given its place in
   // the order of `keyOf`, stably (place(k, position)), through `offsets`,
   // which end as where each key's edges start; says how many there are.
@@ -9586,35 +9594,60 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                                 marks, ValueRange{mark});
       });
     });
-    auto byBucket =
-        scf::ForOp::create(rewriter, loc, zero, buckets, one, ValueRange{zero});
-    {
-      OpBuilder::InsertionGuard inner(rewriter);
-      rewriter.setInsertionPointToStart(byBucket.getBody());
-      Value bucket = byBucket.getInductionVar();
-      memref::StoreOp::create(rewriter, loc, byBucket.getRegionIterArg(0),
-                              starts, ValueRange{bucket});
-      auto byPiece =
-          scf::ForOp::create(rewriter, loc, zero, pieces, one,
-                             ValueRange{byBucket.getRegionIterArg(0)});
-      rewriter.setInsertionPointToStart(byPiece.getBody());
-      Value mark = arith::AddIOp::create(
-          rewriter, loc,
-          arith::MulIOp::create(rewriter, loc, byPiece.getInductionVar(),
-                                buckets),
+    // (Each bucket's on a thread: all its pieces' first, which in order
+    // of the buckets say where each starts, then where each piece's go.)
+    auto markOf = [&](Value piece, Value bucket) {
+      return arith::AddIOp::create(
+          rewriter, loc, arith::MulIOp::create(rewriter, loc, piece, buckets),
           bucket);
-      Value at = byPiece.getRegionIterArg(0);
+    };
+    onThreads(buckets, [&](Value bucket) {
+      auto loop = scf::ForOp::create(rewriter, loc, zero, pieces, one,
+                                     ValueRange{zero});
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(loop.getBody());
+        Value mark = markOf(loop.getInductionVar(), bucket);
+        scf::YieldOp::create(rewriter, loc,
+                             ValueRange{arith::AddIOp::create(
+                                 rewriter, loc, loop.getRegionIterArg(0),
+                                 memref::LoadOp::create(rewriter, loc, marks,
+                                                        ValueRange{mark}))});
+      }
+      memref::StoreOp::create(
+          rewriter, loc, loop.getResult(0), starts,
+          ValueRange{arith::AddIOp::create(rewriter, loc, bucket, one)});
+    });
+    memref::StoreOp::create(rewriter, loc, zero, starts, ValueRange{zero});
+    forEach(
+        one, arith::AddIOp::create(rewriter, loc, buckets, one),
+        [&](Value bucket) {
+          Value before = memref::LoadOp::create(
+              rewriter, loc, starts,
+              ValueRange{arith::SubIOp::create(rewriter, loc, bucket, one)});
+          Value own =
+              memref::LoadOp::create(rewriter, loc, starts, ValueRange{bucket});
+          memref::StoreOp::create(
+              rewriter, loc, arith::AddIOp::create(rewriter, loc, before, own),
+              starts, ValueRange{bucket});
+        });
+    onThreads(buckets, [&](Value bucket) {
+      // (The piece's count read before its place is written over it.)
+      auto loop =
+          scf::ForOp::create(rewriter, loc, zero, pieces, one,
+                             ValueRange{memref::LoadOp::create(
+                                 rewriter, loc, starts, ValueRange{bucket})});
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(loop.getBody());
+      Value mark = markOf(loop.getInductionVar(), bucket);
+      Value at = loop.getRegionIterArg(0);
       Value many =
           memref::LoadOp::create(rewriter, loc, marks, ValueRange{mark});
       memref::StoreOp::create(rewriter, loc, at, marks, ValueRange{mark});
       scf::YieldOp::create(
           rewriter, loc,
           ValueRange{arith::AddIOp::create(rewriter, loc, at, many)});
-      rewriter.setInsertionPointAfter(byPiece);
-      scf::YieldOp::create(rewriter, loc, byPiece.getResults());
-    }
-    memref::StoreOp::create(rewriter, loc, byBucket.getResult(0), starts,
-                            ValueRange{buckets});
+    });
     onThreads(pieces, [&](Value piece) {
       inPiece(piece, [&](Value k, Value mark) {
         Value at =
@@ -9845,7 +9878,7 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
         rewriter, loc,
         arith::IndexCastOp::create(rewriter, loc, offsetType, kept), sorted,
         ValueRange{keys});
-    forEach(zero, kept, [&](Value p) {
+    forEachApart(kept, [&](Value p) {
       for (auto [column, copy] : llvm::zip(table, scratch))
         memref::StoreOp::create(
             rewriter, loc,
@@ -9859,7 +9892,7 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
       sortInto(sorted, kept, scratch, table, keyIn(scratch, /*target=*/true),
                all);
     } else {
-      forEach(zero, kept, [&](Value p) {
+      forEachApart(kept, [&](Value p) {
         for (auto [column, copy] : llvm::zip(table, scratch))
           memref::StoreOp::create(
               rewriter, loc,
@@ -9869,7 +9902,7 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
     }
   }
   if (relation.deadOffset)
-    forEach(zero, kept, [&](Value p) {
+    forEachApart(kept, [&](Value p) {
       memref::StoreOp::create(rewriter, loc,
                               arith::ConstantIntOp::create(rewriter, loc, 0, 8),
                               world.edgeDead(relation), ValueRange{p});
