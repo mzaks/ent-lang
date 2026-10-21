@@ -2461,9 +2461,10 @@ static bool rankGhostRead = false;
 /// Marks a call of a proc in a query over distributed archetypes: made by
 /// the rank whose row it is, not by rank 0 for all (see lowerInvoke).
 static constexpr llvm::StringLiteral kRankLocalAttr = "ent.rank_local";
-static Value firstRowOf(IRRewriter &rewriter, Location loc,
-                        const WorldArchetype &archetype) {
-  if (Value first = rankFirstRows.lookup(&archetype))
+/// Where a loop over the rows that staged something starts: on many ranks
+/// at `first`, the first of this rank's (an index); else at 0.
+static Value firstRowOf(IRRewriter &rewriter, Location loc, Value first) {
+  if (first)
     return first;
   return arith::ConstantIndexOp::create(rewriter, loc, 0);
 }
@@ -12428,7 +12429,7 @@ static void mergeRows(IRRewriter &rewriter, SaMergeOp merge,
   auto [ids, values] = world.applyBuffer(merge.getApply(), archetype);
   LocateBounds bounds = loadCombineBounds(
       rewriter, loc, merge.getComponentAttr(), layout, world);
-  Value zero = firstRowOf(rewriter, loc, archetype);
+  Value zero = firstRowOf(rewriter, loc, merge.getFirst());
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   auto loop = scf::ForOp::create(rewriter, loc, zero, merge.getCount(), one);
   rewriter.setInsertionPoint(loop.getBody()->getTerminator());
@@ -12463,7 +12464,7 @@ static void mergeEdges(IRRewriter &rewriter, SaMergeOp merge,
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   // (On many ranks, this rank's rows.)
   auto rows = scf::ForOp::create(rewriter, loc,
-                                 firstRowOf(rewriter, loc, archetype),
+                                 firstRowOf(rewriter, loc, merge.getFirst()),
                                  merge.getCount(), one);
   rewriter.setInsertionPoint(rows.getBody()->getTerminator());
   Value row = rows.getInductionVar();
@@ -12703,9 +12704,11 @@ static void mergeApplied(IRRewriter &rewriter, ApplyOp apply,
   flag("trusted", apply->hasAttr(kTrustedAttr));
   flag("ranks", ranksMode);
   rankFacts(rewriter, attributes, layout, component, field, stored);
+  // (On many ranks, from the first of this rank's rows.)
+  Value first = count ? rankFirstRows.lookup(&archetype) : Value();
   SmallVector<Value> operands{world.getArena()};
   SmallVector<int32_t> segments{1};
-  for (Value optional : {count, tick}) {
+  for (Value optional : {count, first, tick}) {
     if (optional)
       operands.push_back(optional);
     segments.push_back(optional ? 1 : 0);
@@ -12890,8 +12893,9 @@ static void foldRows(IRRewriter &rewriter, SaFoldOp fold,
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
+  // (On many ranks, this rank's rows.)
   auto loop = scf::ForOp::create(rewriter, loc,
-                                 firstRowOf(rewriter, loc, archetype),
+                                 firstRowOf(rewriter, loc, fold.getFirst()),
                                  fold.getCount(), one, ValueRange{start});
   rewriter.setInsertionPointToStart(loop.getBody());
   Value row = loop.getInductionVar();
@@ -12947,9 +12951,17 @@ static void foldAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
   if (hasNoSign(accumulate.getValue().getType()))
     attributes.push_back(
         rewriter.getNamedAttr("no_sign", rewriter.getUnitAttr()));
+  // (On many ranks, from the first of this rank's rows.)
+  Value first = staged == "rows" ? rankFirstRows.lookup(&archetype) : Value();
   SmallVector<Value> operands{world.getArena()};
-  if (staged == "rows")
-    operands.push_back(count);
+  SmallVector<int32_t> segments{1};
+  for (Value optional : {staged == "rows" ? count : Value(), first}) {
+    if (optional)
+      operands.push_back(optional);
+    segments.push_back(optional ? 1 : 0);
+  }
+  attributes.push_back(rewriter.getNamedAttr(
+      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
   auto fold = SaFoldOp::create(rewriter, accumulate.getLoc(), TypeRange{},
                                operands, attributes);
   resolveStateAccess(fold);

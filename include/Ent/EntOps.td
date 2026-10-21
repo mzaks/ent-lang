@@ -1821,8 +1821,8 @@ def Ent_SaMergeOp : Ent_Op<"sa.merge", [AttrSizedOperandSegments]> {
     `"edges"`), combined into the field, each entity's values in the order
     they were staged (row by row or slice by slice, then as sent), so the
     same on any number of threads. `%count` is how many rows the query
-    went through (rows and edges); `%tick` the world's tick where it has
-    stamps. For edges, `relation` and `inward` say which loop it was in.
+    went through (rows and edges), on many ranks from `%first`, the first
+    of this rank's; `%tick` the world's tick where it has stamps. For edges, `relation` and `inward` say which loop it was in.
 
     What decides how (resolveStateAccess): `parallel` (the loop may have
     run on many threads), `order_shows` (combining it stamps a Changed
@@ -1838,7 +1838,7 @@ def Ent_SaMergeOp : Ent_Op<"sa.merge", [AttrSizedOperandSegments]> {
                        FlatSymbolRefAttr:$component, StrAttr:$field,
                        StrAttr:$rule, TypeAttr:$stored, StrAttr:$staged,
                        AnyMemRef:$world, Optional<Index>:$count,
-                       Optional<I64>:$tick,
+                       Optional<Index>:$first, Optional<I64>:$tick,
                        OptionalAttr<FlatSymbolRefAttr>:$relation,
                        UnitAttr:$inward, UnitAttr:$parallel,
                        UnitAttr:$order_shows, UnitAttr:$atomic,
@@ -1848,7 +1848,8 @@ def Ent_SaMergeOp : Ent_Op<"sa.merge", [AttrSizedOperandSegments]> {
                        OptionalAttr<StrAttr>:$on_ranks);
   let assemblyFormat = [{
     $apply `[` $archetype `]` $component $field $rule `of` $stored `in`
-    $world (`count` $count^)? (`tick` $tick^)? attr-dict `:` type($world)
+    $world (`count` $count^)? (`from` $first^)? (`tick` $tick^)? attr-dict
+    `:` type($world)
   }];
 }
 
@@ -1974,7 +1975,7 @@ def Ent_SaAccumulateOp : Ent_Op<"sa.accumulate", [AttrSizedOperandSegments]> {
   }];
 }
 
-def Ent_SaFoldOp : Ent_Op<"sa.fold"> {
+def Ent_SaFoldOp : Ent_Op<"sa.fold", [AttrSizedOperandSegments]> {
   let summary = "Fold what was staged for an accumulate into its unique";
   let description = [{
     ```mlir
@@ -1983,7 +1984,8 @@ def Ent_SaFoldOp : Ent_Op<"sa.fold"> {
     ```
     Where the query ends: what `ent.sa.accumulate` of accumulate 5 staged
     for the entities of archetype 1, as `staged` says (`"list"`, or
-    `"rows"`, the first `%count` rows), folded into the unique's field in
+    `"rows"`, the first `%count` rows, on many ranks from `%first`),
+    folded into the unique's field in
     the order it was staged, so the result does not depend on how the
     query's loop ran. `no_sign`: a whole number without a sign. The
     decision, `resolution`: `"in-order"` for a list (slice after slice,
@@ -1994,10 +1996,11 @@ def Ent_SaFoldOp : Ent_Op<"sa.fold"> {
                        FlatSymbolRefAttr:$resource, StrAttr:$field,
                        StrAttr:$rule, TypeAttr:$stored, StrAttr:$staged,
                        AnyMemRef:$world, Optional<Index>:$count,
-                       UnitAttr:$no_sign, OptionalAttr<StrAttr>:$resolution);
+                       Optional<Index>:$first, UnitAttr:$no_sign,
+                       OptionalAttr<StrAttr>:$resolution);
   let assemblyFormat = [{
     $apply `[` $archetype `]` $resource $field $rule `of` $stored `in`
-    $world (`count` $count^)? attr-dict `:` type($world)
+    $world (`count` $count^)? (`from` $first^)? attr-dict `:` type($world)
   }];
 }
 
