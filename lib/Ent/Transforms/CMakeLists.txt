@@ -7,6 +7,7 @@ add_mlir_library(MLIREntTransforms
   OmpNowait.cpp
   PrintAccess.cpp
   Schedule.cpp
+  Trace.cpp
 
   DEPENDS
   MLIREntPassIncGen

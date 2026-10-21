@@ -173,6 +173,30 @@ def EntOmpNowait : Pass<"ent-omp-nowait"> {
   let dependentDialects = ["::mlir::omp::OpenMPDialect"];
 }
 
+def EntTrace : Pass<"ent-trace", "ModuleOp"> {
+  let summary = "Time systems, schedules, sorts and parallel loops as they run";
+  let description = [{
+    For `ent build --trace`: calls devices/trace.c, which keeps what was
+    timed on each thread and, when the program ends, writes it as a trace
+    (Chrome's JSON, for ui.perfetto.dev) and says where the time went.
+
+    - A function lowered from a system or a schedule, or the sort of a
+      relation (`ent.trace` on it), is timed from its start to each
+      return: `ent_trace_begin` and `ent_trace_end` with its site.
+    - An `omp.parallel` region is timed where it is entered and left
+      (`ent_trace_loop_begin`, `ent_trace_loop_end`), and inside it each
+      thread's own time, from its start to the region's end
+      (`ent_trace_now`, `ent_trace_work`): so how long the threads worked
+      of the time the loop took, at two calls a thread.
+    - `main` starts the trace and names each site (`ent_trace_name`): the
+      function, and the .ent file and line of the region.
+
+    Run it after `--ent-omp-nowait`, before `--convert-scf-to-cf`.
+  }];
+  let dependentDialects = ["::mlir::LLVM::LLVMDialect",
+                           "::mlir::func::FuncDialect"];
+}
+
 def EntLowerViews : Pass<"ent-lower-views", "::mlir::func::FuncOp"> {
   let summary = "Read and write the world's columns by their addresses";
   let description = [{

@@ -84,7 +84,7 @@ ent.system @dead() reads [@Unused] {
 
 // CHECK-LABEL: func.func @tick(
 // CHECK-SAME: %[[K:[^:]*]]: f32, %[[W:[^:]*]]: memref<32768xi8>)
-// CHECK-SAME: attributes {llvm.emit_c_interface}
+// CHECK-SAME: attributes {ent.trace = "schedule", llvm.emit_c_interface}
 // CHECK-NEXT: call @scale(%[[K]], %[[W]])
 // CHECK-NEXT: call @dead(%[[W]])
 ent.schedule @tick(%k: f32) {

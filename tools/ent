@@ -92,6 +92,14 @@ from (line tables, which change no instruction): `perf report --sort
 srcline` gives the time of each line of the program, and a debugger the
 line it stopped at.
 
+Built with --trace, the program times each system, schedule and sort of a
+relation, and each parallel loop with each thread's time in it
+(devices/trace.c). When it ends it says on stderr where the time went
+(each one's own time, and how much of a loop's time the threads worked)
+and writes the timeline of every thread to `program.trace.json` where it
+runs (ENT_TRACE says where instead; `%p` in it, the process's number),
+for ui.perfetto.dev or chrome://tracing to show.
+
 A module that needs libraries says so in `m.link`: the linker's arguments
 for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
 
@@ -249,6 +257,9 @@ def cache_key(arguments):
         note_tool(shutil.which(compiler) or compiler)
     note_tool(os.path.abspath(__file__))
     note("embed", arguments.embed)
+    note("trace", arguments.trace)
+    if arguments.trace:
+        note_file(os.path.join(ROOT, "devices", "trace.c"))
     note("instrument", arguments.instrument and instrumented(arguments))
     if arguments.profile:
         for path in profiles(arguments.profile):
@@ -504,6 +515,9 @@ def build(arguments, output, directory):
     given.append(os.path.join(ROOT, "devices", "sends.c"))
     # And where the world lives (in a file, with ENT_WORLD_DIR).
     given.append(os.path.join(ROOT, "devices", "memory.c"))
+    # (With --trace: what keeps the times, see the ent-trace pass.)
+    if arguments.trace:
+        given.append(os.path.join(ROOT, "devices", "trace.c"))
     if arguments.gpu:
         given.append(os.path.join(ROOT, "devices", "gpu.c"))
         link.append("-lcuda")
@@ -603,6 +617,7 @@ def build(arguments, output, directory):
         # read and written by their addresses: less to turn into LLVM's
         # IR, and for LLVM to read.)
         ([] if gpu else views) + after +
+        (["--ent-trace"] if arguments.trace else []) +
         ["--convert-scf-to-cf", "--convert-to-llvm"] + finish +
         ["--reconcile-unrealized-casts",
          # (Each instruction with the line of the .ent it was made from,
@@ -760,6 +775,9 @@ def main():
                         help="optimise by the counts of runs of the program "
                         "built with --instrument: their folder or a "
                         ".profraw or .profdata file")
+    parser.add_argument("--trace", action="store_true",
+                        help="time systems, sorts and parallel loops, said "
+                        "on stderr and written to program.trace.json")
     parser.add_argument("--keep", metavar="dir", help="keep the generated "
                         "files (IR, header) in this directory")
     parser.add_argument("--no-cache", action="store_true",

@@ -1130,6 +1130,10 @@ convertToFunc(IRRewriter &rewriter, Operation *op, StringRef name,
   rewriter.setInsertionPoint(op);
   auto func = func::FuncOp::create(rewriter, op->getLoc(), name,
                                    rewriter.getFunctionType(inputs, {}));
+  // (Timed with --trace, see EntTrace.)
+  if (isa<SystemOp, ScheduleOp>(op))
+    func->setAttr("ent.trace", rewriter.getStringAttr(
+                                   isa<SystemOp>(op) ? "system" : "schedule"));
   rewriter.inlineRegionBefore(body, func.getBody(), func.getBody().end());
   Value arena = entry.addArgument(arenaType, op->getLoc());
 
@@ -8909,6 +8913,8 @@ static void emitLinkedSortFunction(IRRewriter &rewriter, ModuleOp module,
   auto func = func::FuncOp::create(rewriter, loc, sortFunctionName(relation),
                                    rewriter.getFunctionType({arenaType}, {}));
   func.setPrivate();
+  // (Timed with --trace, see EntTrace.)
+  func->setAttr("ent.trace", rewriter.getStringAttr("sort"));
   Block *entry = func.addEntryBlock();
   rewriter.setInsertionPointToStart(entry);
   func::ReturnOp::create(rewriter, loc);
@@ -9354,6 +9360,8 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   auto func = func::FuncOp::create(rewriter, loc, sortFunctionName(relation),
                                    rewriter.getFunctionType({arenaType}, {}));
   func.setPrivate();
+  // (Timed with --trace, see EntTrace.)
+  func->setAttr("ent.trace", rewriter.getStringAttr("sort"));
   Block *entry = func.addEntryBlock();
   rewriter.setInsertionPointToStart(entry);
   func::ReturnOp::create(rewriter, loc);

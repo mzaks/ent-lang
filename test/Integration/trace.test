@@ -1,0 +1,18 @@
+// A program built with --trace (devices/trace.c) says what it says
+// without, and when it ends says where the time went: the thread that ran
+// it, its systems, schedules and the sort of its relation, each parallel
+// loop with how much the threads worked of it; and writes the timeline to
+// ENT_TRACE, as Chrome's JSON.
+// RUN: env ENT_PARALLEL_MIN=1 %ent run %S/Inputs/ranks_threads.ent --parallel > %t.plain
+// RUN: env ENT_TRACE=%t.json ENT_PARALLEL_MIN=1 %ent run %S/Inputs/ranks_threads.ent --parallel --trace > %t.traced 2> %t.said
+// RUN: diff %t.plain %t.traced
+// RUN: FileCheck %s --input-file=%t.said
+// RUN: python3 -c "import json, sys; events = json.load(open(sys.argv[1]))['traceEvents']; print('work', any(e['cat'] == 'work' for e in events), 'loops', any(e['cat'] == 'loop' for e in events))" %t.json | FileCheck %s --check-prefix=JSON
+// CHECK: ent: thread 0 ran the program: {{[0-9.]+}} s in parallel loops, {{[0-9.]+}} s on its own (of {{[0-9.]+}} s)
+// CHECK: ent: traced {{[0-9.]+}} s on {{[0-9]+}} threads.
+// CHECK-DAG: {{%}}  loop ranks_threads.ent:{{[0-9]+}} in send
+// CHECK-DAG: system send (ranks_threads.ent:18)
+// CHECK-DAG: schedule day (ranks_threads.ent:42)
+// CHECK-DAG: sort ent_sort_Heard (ranks_threads.ent:11)
+// CHECK: ent: the trace is in {{.*}}.json (ui.perfetto.dev shows it)
+// JSON: work True loops True

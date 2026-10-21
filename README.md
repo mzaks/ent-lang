@@ -149,6 +149,20 @@ counts), a demo of Doom drawn tic by tic 289 ms where 354 (see
 `bench/RESULTS.md`); beecs's colony, whose time is in loops already
 inlined, as it did (`bench/beecs/RESULTS.md`).
 
+Where a program's time goes, `--trace` says: built so, it times each
+system, schedule and sort of a relation, and each parallel loop with each
+thread's time in it (`devices/trace.c`, at two calls a thread for a loop).
+When it ends it says on stderr how long the thread that ran it spent in
+parallel loops and how long on its own, and of each site its own time
+(without what it called that was timed) and of a loop how much of it the
+threads worked; and it writes the timeline of every thread to
+`program.trace.json` (`ENT_TRACE` says where instead), for
+[ui.perfetto.dev](https://ui.perfetto.dev) to show. The city's epidemic
+at a million people with tracing, on 24 threads: 4.74 s, of which the
+thread that runs it is 2.97 s in parallel loops and 1.78 s on its own
+(the setup of the city most of it), its threads working 50 to 70% of
+most loops' time.
+
 A big program is optimised whole and then made into machine code in
 pieces, each on a core of its own (`ENT_PIECES=1`: in one piece;
 `ENT_SPLIT=first`: shared out before it is optimised, which builds a big
