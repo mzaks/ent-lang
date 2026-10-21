@@ -91,7 +91,10 @@ def build(name, number, program, passes, openmp, n, k, transform=None):
         ll = os.path.join(directory, "snn.ll")
         subprocess.run([f"{LLVM}/bin/mlir-translate", "--mlir-to-llvmir",
                         "-o", ll], input=lowered, text=True, check=True)
-        extra = [ll, "-Wno-override-module", f"-I{directory}"]
+        # (With the C that keeps what a `for` sends from a loop of its body,
+        # which tools/ent links into every program.)
+        extra = [ll, os.path.join(ROOT, "devices", "sends.c"),
+                 "-Wno-override-module", f"-I{directory}"]
     if openmp:
         extra += OPENMP
     subprocess.run([f"{LLVM}/bin/clang", "-O2", *EXTRA_CFLAGS,
