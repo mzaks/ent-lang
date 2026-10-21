@@ -1,0 +1,8 @@
+// Every program of the tests' inputs and of examples says the same on one
+// thread as with every loop that can on many (test/parallel_same.py):
+// what ent promises however a program is run, checked for all of them at
+// once. Each is built both ways and run both ways; one that needs C of its
+// own or opens a window is left out.
+// RUN: %python %S/../parallel_same.py %ent -- %t %S/Inputs/*.ent %S/../../examples/*.ent | FileCheck %s
+// CHECK-NOT: FAIL
+// CHECK: same: {{[0-9]+}}
