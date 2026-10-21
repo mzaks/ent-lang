@@ -1749,8 +1749,8 @@ def Ent_YieldOp : Ent_Op<"yield", [
 // and the loops they become, so that how a loop runs in parallel is
 // decided by its accesses (resolveStateAccess in LowerToLoops.cpp) and
 // carried out by a lowering per backend. So far: what an apply in a
-// query sends, made and lowered where it is sent and where the query
-// ends.
+// query sends, and the edges and rows it adds, made and lowered where
+// they are sent and where the query ends.
 
 def Ent_SaCombineOp : Ent_Op<"sa.combine", [AttrSizedOperandSegments]> {
   let summary = "Combine into another entity's field: an access of a loop";
@@ -1837,6 +1837,81 @@ def Ent_SaMergeOp : Ent_Op<"sa.merge", [AttrSizedOperandSegments]> {
   let assemblyFormat = [{
     $apply `[` $archetype `]` $component $field $rule `of` $stored `in`
     $world (`count` $count^)? (`tick` $tick^)? attr-dict `:` type($world)
+  }];
+}
+
+def Ent_SaAppendOp : Ent_Op<"sa.append", [AttrSizedOperandSegments]> {
+  let summary = "Append a row or an edge: an access of a loop";
+  let description = [{
+    ```mlir
+    ent.sa.append "connect" 4[1] @ToldBy (%a, %b, %day) at %row
+      in %world {looped, resolution = "list", sliced}
+      : (!ent.entity, !ent.entity, i32), memref<4096xi8>
+    ```
+    What connect 4 of the layout (`ent.connect`; `"buffer"`, append 4,
+    `ent.append`), in the body of a query over archetype 1, adds: an edge
+    of `@ToldBy` from the first value to the second, with the rest for its
+    fields (a row of the buffer, the values its fields). `%at` is its
+    row; `%mask`, where the body runs only for some entities, whether it
+    does here.
+
+    What it is: `looped` (from a loop of the body, or a loop over edges
+    there: once for each of its turns), `sliced` (in a slice of a
+    parallel loop). The decision (resolveStateAccess), `resolution`:
+    `"list"`, staged on the list of the slice of the loop it is in (the
+    ends, then the values two by two; devices/sends.c), or `"rows"`, in
+    its row's places; an `ent.sa.place` of the same op and archetype adds
+    them where the query ends.
+  }];
+  let arguments = (ins StrAttr:$kind, I64Attr:$index, I64Attr:$archetype,
+                       FlatSymbolRefAttr:$target, Variadic<AnyType>:$values,
+                       Optional<Index>:$at, Optional<I1>:$mask,
+                       AnyMemRef:$world, UnitAttr:$looped, UnitAttr:$sliced,
+                       OptionalAttr<StrAttr>:$resolution);
+  let assemblyFormat = [{
+    $kind $index `[` $archetype `]` $target `(` $values `)` (`at` $at^)?
+    (`if` $mask^)? `in` $world attr-dict `:` `(` type($values) `)` `,`
+    type($world)
+  }];
+}
+
+def Ent_SaPlaceOp : Ent_Op<"sa.place"> {
+  let summary = "Add what was staged for a connect or an append";
+  let description = [{
+    ```mlir
+    ent.sa.place "connect" 4[1] @ToldBy in %world
+      {least = 1024 : i64, parallel, resolution = "reserved",
+       staged = "list"} : memref<4096xi8>
+    ```
+    Where the query ends: what `ent.sa.append` of connect 4 (or append 4,
+    `"buffer"`) staged for the entities of archetype 1, as `staged` says
+    (`"list"` or `"rows"`, the first `%count` rows), added at the end of
+    the relation's table (the buffer's rows) in the order it was staged:
+    row by row, or slice by slice and then as sent.
+
+    What decides how (resolveStateAccess): `parallel` (the loop may have
+    run on many threads), `ranks` (the rows are this rank's of a
+    distributed archetype), and what adding an edge does besides writing
+    it at the end of the table: `partitions` (built for partitions, an
+    edge kept where an end is), `stamps` (it stamps the tick its entity
+    was connected at), `linked`, `ordered`, `tree` (it links the edge, or
+    orders a tree). The decision, `resolution`: for a list, `"reserved"`
+    (from `least` edges on, a range of the table reserved at once and each
+    slice's edges written in its own on many threads), `"routed"` (sent to
+    the ranks of their ends, which add them) or `"in-order"` (one edge
+    after another); `"rows"`, row after row (on many ranks sent to the
+    ends' ranks, or after the rows of the ranks before).
+  }];
+  let arguments = (ins StrAttr:$kind, I64Attr:$index, I64Attr:$archetype,
+                       FlatSymbolRefAttr:$target, StrAttr:$staged,
+                       AnyMemRef:$world, Optional<Index>:$count,
+                       UnitAttr:$parallel, UnitAttr:$ranks,
+                       UnitAttr:$partitions, UnitAttr:$stamps,
+                       UnitAttr:$linked, UnitAttr:$ordered, UnitAttr:$tree,
+                       I64Attr:$least, OptionalAttr<StrAttr>:$resolution);
+  let assemblyFormat = [{
+    $kind $index `[` $archetype `]` $target `in` $world
+    (`count` $count^)? attr-dict `:` type($world)
   }];
 }
 

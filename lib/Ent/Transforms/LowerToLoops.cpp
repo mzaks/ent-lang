@@ -702,12 +702,17 @@ public:
     SmallVector<Value> values;
   };
   AppendSlots appendSlots(AppendOp append, const WorldArchetype &archetype) {
-    auto index =
-        append->getAttrOfType<IntegerAttr>(WorldLayout::kAppendIndexAttr);
+    return appendSlots(
+        append->getAttrOfType<IntegerAttr>(WorldLayout::kAppendIndexAttr)
+            .getInt(),
+        append.getBufferAttr(), archetype);
+  }
+  /// The same, by the append's index in the layout and its buffer.
+  AppendSlots appendSlots(int64_t index, FlatSymbolRefAttr to,
+                          const WorldArchetype &archetype) {
     const WorldAppend::Slots &slots =
-        layout.appends[index.getInt()].find(archetype.index);
-    const WorldBuffer &buffer =
-        layout.getBuffer(append.getBufferAttr().getAttr());
+        layout.appends[index].find(archetype.index);
+    const WorldBuffer &buffer = layout.getBuffer(to.getAttr());
     AppendSlots result;
     result.sent = view(slots.sentOffset, archetype.capacity,
                        rewriter.getI8Type());
@@ -1003,12 +1008,17 @@ public:
   };
   ConnectBuffers connectBuffer(ConnectOp connect,
                                const WorldArchetype &archetype) {
-    auto index =
-        connect->getAttrOfType<IntegerAttr>(WorldLayout::kConnectIndexAttr);
+    return connectBuffer(
+        connect->getAttrOfType<IntegerAttr>(WorldLayout::kConnectIndexAttr)
+            .getInt(),
+        connect.getRelationAttr(), archetype);
+  }
+  /// The same, by the connect's index in the layout and its relation.
+  ConnectBuffers connectBuffer(int64_t index, FlatSymbolRefAttr to,
+                               const WorldArchetype &archetype) {
     const WorldConnect::Buffer &buffer =
-        layout.connects[index.getInt()].find(archetype.index);
-    const WorldRelation &relation =
-        layout.getRelation(connect.getRelationAttr().getAttr());
+        layout.connects[index].find(archetype.index);
+    const WorldRelation &relation = layout.getRelation(to.getAttr());
     ConnectBuffers result;
     result.sources = view(buffer.sourceOffset, archetype.capacity, idType());
     result.targets = view(buffer.targetOffset, archetype.capacity, idType());
@@ -1900,6 +1910,18 @@ static void sendApplied(IRRewriter &rewriter, ApplyOp apply,
                         const WorldLayout &layout,
                         const WorldArchetype &archetype, WorldAccess &world,
                         Value at, Value mask, Value tick, bool directApplies);
+/// What `op` (a connect or an append in the body of a query over
+/// `archetype`) adds, at the insertion point: an `ent.sa.append`, resolved
+/// (resolveStateAccess) and carried out (lowerStateAccess) there. `at` is
+/// its row; `mask` whether the body runs for this entity.
+static void sendAppended(IRRewriter &rewriter, Operation *op,
+                         const WorldLayout &layout,
+                         const WorldArchetype &archetype, WorldAccess &world,
+                         Value at, Value mask);
+static void placeAppended(IRRewriter &rewriter, Operation *op,
+                          const WorldLayout &layout,
+                          const WorldArchetype &archetype, WorldAccess &world,
+                          Value count, bool parallel, int64_t many);
 
 /// What recordPending does, for a query that does not visit rows in their
 /// order (a cascading one), which applying the pending rows goes by: the
@@ -3255,54 +3277,9 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       memref::StoreOp::create(rewriter, loc, accumulate.getValue(), values,
                               ValueRange{entity});
       rewriter.eraseOp(op);
-    } else if (auto connect = dyn_cast<ConnectOp>(op);
-               connect && connect->hasAttr(kLoopedAttr)) {
-      // From a loop of the body or a loop over edges: on its list, the
-      // two ends and then the values, two by two.
-      Value source = world.toStorage(loc, connect.getSource());
-      Value target = world.toStorage(loc, connect.getTarget());
-      SmallVector<Value> values;
-      for (Value value : connect.getValues())
-        values.push_back(world.toStorage(loc, value));
-      if (mask) {
-        auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
-        rewriter.setInsertionPointToStart(ifApplies.thenBlock());
-      }
-      putSend(rewriter, loc, op, archetype, world, source, target);
-      for (unsigned i = 0; i < values.size(); i += 2)
-        putSend(rewriter, loc, op, archetype, world, values[i],
-                i + 1 < values.size() ? values[i + 1] : Value());
-      rewriter.eraseOp(op);
-    } else if (auto connect = dyn_cast<ConnectOp>(op)) {
-      // Fill this entity's slot; the query's end appends the edge.
-      WorldAccess::ConnectBuffers buffers =
-          world.connectBuffer(connect, archetype);
-      Value source = world.toStorage(loc, connect.getSource());
-      if (mask)
-        source = arith::SelectOp::create(rewriter, loc, mask, source,
-                                         world.noEntity(loc));
-      memref::StoreOp::create(rewriter, loc, source, buffers.sources,
-                              ValueRange{entity});
-      memref::StoreOp::create(rewriter, loc,
-                              world.toStorage(loc, connect.getTarget()),
-                              buffers.targets, ValueRange{entity});
-      for (auto [value, column] :
-           llvm::zip(connect.getValues(), buffers.values))
-        memref::StoreOp::create(rewriter, loc, world.toStorage(loc, value),
-                                column, ValueRange{entity});
-      rewriter.eraseOp(op);
-    } else if (auto append = dyn_cast<AppendOp>(op)) {
-      // Fill this entity's places; the query's end appends the row.
-      WorldAccess::AppendSlots slots = world.appendSlots(append, archetype);
-      Value sent = arith::ConstantIntOp::create(rewriter, loc, 1, 8);
-      if (mask)
-        sent = arith::ExtUIOp::create(rewriter, loc, rewriter.getI8Type(),
-                                      mask);
-      memref::StoreOp::create(rewriter, loc, sent, slots.sent,
-                              ValueRange{entity});
-      for (auto [value, column] : llvm::zip(append.getValues(), slots.values))
-        memref::StoreOp::create(rewriter, loc, world.toStorage(loc, value),
-                                column, ValueRange{entity});
+    } else if (isa<ConnectOp, AppendOp>(op)) {
+      // Staged on its slice's list, or in its row's places.
+      sendAppended(rewriter, op, layout, archetype, world, entity, mask);
       rewriter.eraseOp(op);
     } else if (auto entityOp = dyn_cast<EntityOp>(op)) {
       Value id = world.entityId(loc, archetype, entity);
@@ -7806,14 +7783,6 @@ static void writeEdge(IRRewriter &rewriter, Location loc, WorldAccess &world,
                             world.edgeDead(relation), ValueRange{at});
 }
 
-/// Whether appending an edge to `relation` is writing it at the end of
-/// the table and counting it, nothing else: so many edges can be written
-/// at once, each in its place, on many threads.
-static bool appendsPlainly(const WorldRelation &relation) {
-  return partitionCount == 0 && !relation.connectedOffset && !relation.linked &&
-         !relation.isOrdered() && !relation.tree;
-}
-
 static void appendEdge(IRRewriter &rewriter, Location loc,
                        const WorldLayout &layout, WorldAccess &world,
                        const WorldRelation &relation, Value source,
@@ -7975,18 +7944,20 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
                           world.edgesClean(relation), ValueRange{zero});
 }
 
-/// Append the edges `connect` (inside a query) buffered for the first
-/// `count` rows of `archetype`, row after row, at the insertion point.
-static void appendConnected(IRRewriter &rewriter, ConnectOp connect,
+/// Append the edges a connect (inside a query) buffered for the first
+/// `count` rows of `archetype`, row after row, at the insertion point:
+/// `place`, staged "rows".
+static void appendConnected(IRRewriter &rewriter, SaPlaceOp place,
                             const WorldLayout &layout,
                             const WorldArchetype &archetype,
-                            WorldAccess &world, Value count) {
-  Location loc = connect.getLoc();
+                            WorldAccess &world) {
+  Location loc = place.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
+  Value count = place.getCount();
   const WorldRelation &relation =
-      layout.getRelation(connect.getRelationAttr().getAttr());
+      layout.getRelation(place.getTargetAttr().getAttr());
   WorldAccess::ConnectBuffers buffers =
-      world.connectBuffer(connect, archetype);
+      world.connectBuffer(place.getIndex(), place.getTargetAttr(), archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   // (On many ranks, of a distributed archetype: this rank's rows' edges,
@@ -8013,7 +7984,7 @@ static void appendConnected(IRRewriter &rewriter, ConnectOp connect,
     values.push_back(
         memref::LoadOp::create(rewriter, loc, column, ValueRange{row}));
   if (from)
-    routeEdge(rewriter, loc, connect->getParentOfType<ModuleOp>(), world,
+    routeEdge(rewriter, loc, place->getParentOfType<ModuleOp>(), world,
               channel, source, target, values);
   else
     appendEdge(rewriter, loc, layout, world, relation, source, target, values);
@@ -8037,17 +8008,20 @@ static void storeRow(IRRewriter &rewriter, Location loc, WorldAccess &world,
                             world.bufferField(buffer, field), ValueRange{at});
 }
 
-/// Append the rows `append` (inside a query) noted for the first `count`
-/// rows of `archetype`, row after row, at the insertion point.
-static void appendAppended(IRRewriter &rewriter, AppendOp append,
+/// Append the rows an append (inside a query) noted for the first `count`
+/// rows of `archetype`, row after row, at the insertion point: `place`,
+/// staged "rows".
+static void appendAppended(IRRewriter &rewriter, SaPlaceOp place,
                            const WorldLayout &layout,
                            const WorldArchetype &archetype,
-                           WorldAccess &world, Value count) {
-  Location loc = append.getLoc();
+                           WorldAccess &world) {
+  Location loc = place.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
+  Value count = place.getCount();
   const WorldBuffer &buffer =
-      layout.getBuffer(append.getBufferAttr().getAttr());
-  WorldAccess::AppendSlots slots = world.appendSlots(append, archetype);
+      layout.getBuffer(place.getTargetAttr().getAttr());
+  WorldAccess::AppendSlots slots =
+      world.appendSlots(place.getIndex(), place.getTargetAttr(), archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Value counter = world.bufferCount(buffer);
@@ -8058,7 +8032,7 @@ static void appendAppended(IRRewriter &rewriter, AppendOp append,
   // given when they are written, see below.)
   Value from = rankFirstRows.lookup(&archetype);
   Type i64 = rewriter.getI64Type();
-  ModuleOp module = append->getParentOfType<ModuleOp>();
+  ModuleOp module = place->getParentOfType<ModuleOp>();
   Value mine, before;
   if (from) {
     auto counting = scf::ForOp::create(
@@ -11787,12 +11761,11 @@ static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
   return bits;
 }
 
-/// Put what `op` (an accumulate or a connect in a loop of the body) sends
-/// on its list, at the insertion point: `id` (stored form; nothing for an
-/// accumulate) and `value`.
-static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
-                    const WorldArchetype &archetype, WorldAccess &world,
-                    Value id, Value value) {
+/// Put what an accumulate or a connect in a loop of the body sends on its
+/// list (number `list`), at the insertion point: `id` (stored form;
+/// nothing for an accumulate) and `value`.
+static void putSend(IRRewriter &rewriter, Location loc, int64_t list,
+                    WorldAccess &world, Value id, Value value) {
   Type i64 = rewriter.getI64Type();
   Value nothing = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
   // (A loop on one thread is one slice, the first.)
@@ -11801,34 +11774,47 @@ static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
                                   .getResult()
                             : nothing;
   callSends(rewriter, loc, world, "ent_sends_put",
-            {sendList(rewriter, loc, op, archetype), slice,
+            {arith::ConstantIntOp::create(rewriter, loc, list, 64), slice,
              id ? toSendBits(rewriter, loc, id) : nothing,
              value ? toSendBits(rewriter, loc, value) : nothing},
             /*gives=*/false);
 }
+/// The same, for `op` from `archetype`.
+static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
+                    const WorldArchetype &archetype, WorldAccess &world,
+                    Value id, Value value) {
+  bool connects = isa<ConnectOp>(op);
+  auto index = op->getAttrOfType<IntegerAttr>(
+      connects ? WorldLayout::kConnectIndexAttr : WorldLayout::kApplyIndexAttr);
+  putSend(rewriter, loc,
+          sendListNumber(index.getInt(), connects, archetype.index), world, id,
+          value);
+}
 
-/// Add the edges `connect` (in a loop of its query's body, or in a loop
+/// Add the edges a connect (in a loop of its query's body, or in a loop
 /// over edges there) noted for the entities of `archetype`, at the
-/// insertion point: from its list, where each edge is its two ends and
-/// then its fields' values, two by two; the list is then empty. Where the
-/// loop ran on many threads (`parallel`), from `many` edges on, edges
-/// appended plainly (appendsPlainly) are written on many threads, each
-/// slice of the list's where the ones before it end: in the order of the
-/// list still. (One parallel loop: worth it from fewer edges than the
-/// steps of combining applies by groups, so `many` is a sixteenth of
-/// parallel-min-events; at least one, as there are lists only once
-/// something was sent.)
-static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
+/// insertion point: `place`, staged "list". From its list, where each
+/// edge is its two ends and then its fields' values, two by two; the list
+/// is then empty. Resolved "reserved", from `least` edges on, the edges
+/// are written on many threads, each slice of the list's where the ones
+/// before it end: in the order of the list still. (One parallel loop:
+/// worth it from fewer edges than the steps of combining applies by
+/// groups, so `least` is a sixteenth of parallel-min-events; at least
+/// one, as there are lists only once something was sent.)
+static void appendLooped(IRRewriter &rewriter, SaPlaceOp place,
                          const WorldLayout &layout,
-                         const WorldArchetype &archetype, WorldAccess &world,
-                         bool parallel, int64_t many) {
-  Location loc = connect.getLoc();
+                         const WorldArchetype &archetype, WorldAccess &world) {
+  Location loc = place.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   const WorldRelation &relation =
-      layout.getRelation(connect.getRelationAttr().getAttr());
-  Value list = sendList(rewriter, loc, connect, archetype);
+      layout.getRelation(place.getTargetAttr().getAttr());
+  int64_t many = place.getLeast();
+  Value list = arith::ConstantIntOp::create(
+      rewriter, loc,
+      sendListNumber(place.getIndex(), /*connects=*/true, archetype.index),
+      64);
   // (On many ranks: sent to the ranks of their ends, see appendConnected.)
-  bool route = bool(rankFirstRows.lookup(&archetype));
+  bool route = *place.getResolution() == "routed";
   int64_t channel =
       route ? rankEdgeChannel(relation, /*note=*/false,
                               2 + relation.fields.size())
@@ -11873,13 +11859,13 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
                        true);
     });
     if (route)
-      routeEdge(rewriter, loc, connect->getParentOfType<ModuleOp>(), world,
+      routeEdge(rewriter, loc, place->getParentOfType<ModuleOp>(), world,
                 channel, source, target, values);
     else
       appendEdge(rewriter, loc, layout, world, relation, source, target,
                  values);
   };
-  if (!parallel || route || !appendsPlainly(relation)) {
+  if (*place.getResolution() != "reserved") {
     oneByOne();
     callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
     return;
@@ -11956,6 +11942,205 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
     oneByOne();
   }
   callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
+}
+
+/// How what a connect or an append adds is staged (see SaAppendOp): on
+/// its slice's list where it is sent from a loop of the body (more than
+/// once for a row); else in its row's places.
+static StringRef resolveAppend(bool looped) { return looped ? "list" : "rows"; }
+static void resolveStateAccess(SaAppendOp append) {
+  append.setResolution(resolveAppend(append.getLooped()));
+}
+
+/// How what was staged for a connect or an append is added, from what
+/// adding it does (see SaPlaceOp): a list's edges sent to the ranks of
+/// their ends where the rows are a rank's; in ranges reserved at once,
+/// on many threads, where the loop may have run on many and adding an
+/// edge is writing it at the end of the table and counting it, nothing
+/// else (no partitions, no stamp, no links, no order); else one after
+/// another. Rows', row after row.
+static void resolveStateAccess(SaPlaceOp place) {
+  if (place.getStaged() == "rows") {
+    place.setResolution("rows");
+    return;
+  }
+  bool plain = !place.getPartitions() && !place.getStamps() &&
+               !place.getLinked() && !place.getOrdered() && !place.getTree();
+  place.setResolution(place.getRanks()                 ? "routed"
+                      : place.getParallel() && plain ? "reserved"
+                                                       : "in-order");
+}
+
+/// Carry out `append` (resolved), at its place.
+static void lowerStateAccess(IRRewriter &rewriter, SaAppendOp append,
+                             const WorldLayout &layout, WorldAccess &world) {
+  Location loc = append.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(append);
+  const WorldArchetype &archetype = layout.archetypes[append.getArchetype()];
+  Value mask = append.getMask();
+  Value at = append.getAt();
+  ValueRange given = append.getValues();
+  bool connects = append.getKind() == "connect";
+  if (*append.getResolution() == "list") {
+    // On its list, the two ends and then the values, two by two.
+    SmallVector<Value> values;
+    for (Value value : given)
+      values.push_back(world.toStorage(loc, value));
+    if (mask) {
+      auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
+      rewriter.setInsertionPointToStart(ifApplies.thenBlock());
+    }
+    int64_t list =
+        sendListNumber(append.getIndex(), connects, archetype.index);
+    for (unsigned i = 0; i < values.size(); i += 2)
+      putSend(rewriter, loc, list, world, values[i],
+              i + 1 < values.size() ? values[i + 1] : Value());
+  } else if (connects) {
+    // Fill this entity's slot; the query's end appends the edge.
+    WorldAccess::ConnectBuffers buffers = world.connectBuffer(
+        append.getIndex(), append.getTargetAttr(), archetype);
+    Value source = world.toStorage(loc, given[0]);
+    if (mask)
+      source = arith::SelectOp::create(rewriter, loc, mask, source,
+                                       world.noEntity(loc));
+    memref::StoreOp::create(rewriter, loc, source, buffers.sources,
+                            ValueRange{at});
+    memref::StoreOp::create(rewriter, loc, world.toStorage(loc, given[1]),
+                            buffers.targets, ValueRange{at});
+    for (auto [value, column] : llvm::zip(given.drop_front(2), buffers.values))
+      memref::StoreOp::create(rewriter, loc, world.toStorage(loc, value),
+                              column, ValueRange{at});
+  } else {
+    // Fill this entity's places; the query's end appends the row.
+    WorldAccess::AppendSlots slots = world.appendSlots(
+        append.getIndex(), append.getTargetAttr(), archetype);
+    Value sent = arith::ConstantIntOp::create(rewriter, loc, 1, 8);
+    if (mask)
+      sent = arith::ExtUIOp::create(rewriter, loc, rewriter.getI8Type(),
+                                    mask);
+    memref::StoreOp::create(rewriter, loc, sent, slots.sent, ValueRange{at});
+    for (auto [value, column] : llvm::zip(given, slots.values))
+      memref::StoreOp::create(rewriter, loc, world.toStorage(loc, value),
+                              column, ValueRange{at});
+  }
+  rewriter.eraseOp(append);
+}
+
+/// Carry out `place` (resolved), at its place.
+static void lowerStateAccess(IRRewriter &rewriter, SaPlaceOp place,
+                             const WorldLayout &layout, WorldAccess &world) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(place);
+  const WorldArchetype &archetype = layout.archetypes[place.getArchetype()];
+  if (place.getStaged() == "list")
+    appendLooped(rewriter, place, layout, archetype, world);
+  else if (place.getKind() == "connect")
+    appendConnected(rewriter, place, layout, archetype, world);
+  else
+    appendAppended(rewriter, place, layout, archetype, world);
+  rewriter.eraseOp(place);
+}
+
+static void sendAppended(IRRewriter &rewriter, Operation *op,
+                         const WorldLayout &layout,
+                         const WorldArchetype &archetype, WorldAccess &world,
+                         Value at, Value mask) {
+  auto connect = dyn_cast<ConnectOp>(op);
+  SmallVector<Value> values;
+  if (connect) {
+    values = {connect.getSource(), connect.getTarget()};
+    llvm::append_range(values, connect.getValues());
+  } else {
+    llvm::append_range(values, cast<AppendOp>(op).getValues());
+  }
+  SmallVector<NamedAttribute> attributes{
+      rewriter.getNamedAttr("kind",
+                            rewriter.getStringAttr(connect ? "connect"
+                                                           : "buffer")),
+      rewriter.getNamedAttr(
+          "index", op->getAttr(connect ? WorldLayout::kConnectIndexAttr
+                                       : WorldLayout::kAppendIndexAttr)),
+      rewriter.getNamedAttr("archetype",
+                            rewriter.getI64IntegerAttr(archetype.index)),
+      rewriter.getNamedAttr("target",
+                            connect ? connect.getRelationAttr()
+                                    : cast<AppendOp>(op).getBufferAttr())};
+  if (op->hasAttr(kLoopedAttr))
+    attributes.push_back(
+        rewriter.getNamedAttr("looped", rewriter.getUnitAttr()));
+  if (sendSegment)
+    attributes.push_back(
+        rewriter.getNamedAttr("sliced", rewriter.getUnitAttr()));
+  SmallVector<Value> operands = values;
+  SmallVector<int32_t> segments{int32_t(values.size())};
+  for (Value optional : {at, mask}) {
+    if (optional)
+      operands.push_back(optional);
+    segments.push_back(optional ? 1 : 0);
+  }
+  operands.push_back(world.getArena());
+  segments.push_back(1);
+  attributes.push_back(rewriter.getNamedAttr(
+      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
+  auto append = SaAppendOp::create(rewriter, op->getLoc(), TypeRange{},
+                                   operands, attributes);
+  resolveStateAccess(append);
+  lowerStateAccess(rewriter, append, layout, world);
+}
+
+/// Add what `op` (a connect or an append inside a query) staged for the
+/// entities of `archetype`, at the insertion point: from its list where it
+/// is sent from a loop of the body, else from the first `count` rows; an
+/// `ent.sa.place` saying what adding it does, resolved
+/// (resolveStateAccess) and carried out (lowerStateAccess) there. A
+/// list's edges in reserved ranges from `many` on where the loop ran on
+/// many threads (`parallel`).
+static void placeAppended(IRRewriter &rewriter, Operation *op,
+                          const WorldLayout &layout,
+                          const WorldArchetype &archetype, WorldAccess &world,
+                          Value count, bool parallel, int64_t many) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  auto connect = dyn_cast<ConnectOp>(op);
+  bool listed = resolveAppend(op->hasAttr(kLoopedAttr)) == "list";
+  SmallVector<NamedAttribute> attributes{
+      rewriter.getNamedAttr("kind",
+                            rewriter.getStringAttr(connect ? "connect"
+                                                           : "buffer")),
+      rewriter.getNamedAttr(
+          "index", op->getAttr(connect ? WorldLayout::kConnectIndexAttr
+                                       : WorldLayout::kAppendIndexAttr)),
+      rewriter.getNamedAttr("archetype",
+                            rewriter.getI64IntegerAttr(archetype.index)),
+      rewriter.getNamedAttr("target",
+                            connect ? connect.getRelationAttr()
+                                    : cast<AppendOp>(op).getBufferAttr()),
+      rewriter.getNamedAttr("staged",
+                            rewriter.getStringAttr(listed ? "list" : "rows")),
+      rewriter.getNamedAttr("least", rewriter.getI64IntegerAttr(many))};
+  auto flag = [&](StringRef name, bool on) {
+    if (on)
+      attributes.push_back(
+          rewriter.getNamedAttr(name, rewriter.getUnitAttr()));
+  };
+  flag("parallel", parallel);
+  flag("ranks", bool(rankFirstRows.lookup(&archetype)));
+  if (connect) {
+    const WorldRelation &relation =
+        layout.getRelation(connect.getRelationAttr().getAttr());
+    flag("partitions", partitionCount > 0);
+    flag("stamps", relation.connectedOffset != 0);
+    flag("linked", relation.linked);
+    flag("ordered", relation.isOrdered());
+    flag("tree", relation.tree);
+  }
+  SmallVector<Value> operands{world.getArena()};
+  if (count && !listed)
+    operands.push_back(count);
+  auto place = SaPlaceOp::create(rewriter, op->getLoc(), TypeRange{},
+                                 operands, attributes);
+  resolveStateAccess(place);
+  lowerStateAccess(rewriter, place, layout, world);
 }
 
 /// The word (i64) at `address` (an i64) and `offset` bytes after it.
@@ -14860,11 +15045,13 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   for (ConnectOp connect : connects)
     for (const WorldArchetype &archetype : layout.archetypes)
       if (Value rows = startCounts.lookup(&archetype))
-        appendConnected(rewriter, connect, layout, archetype, world, rows);
+        placeAppended(rewriter, connect, layout, archetype, world, rows,
+                      /*parallel=*/false, /*many=*/0);
   for (AppendOp append : appends)
     for (const WorldArchetype &archetype : layout.archetypes)
       if (Value rows = startCounts.lookup(&archetype))
-        appendAppended(rewriter, append, layout, archetype, world, rows);
+        placeAppended(rewriter, append, layout, archetype, world, rows,
+                      /*parallel=*/false, /*many=*/0);
   // A query that reacts to its ancestors' events has passed down the ones
   // it caused itself. The counter moves on, so that these are the only
   // events of their tick and the next time can tell them from what came
@@ -15527,8 +15714,9 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
     }
     for (ConnectOp connect : connects)
       for (const WorldArchetype *archetype : matched)
-        appendConnected(rewriter, connect, layout, *archetype, world,
-                        startCounts.lookup(archetype));
+        placeAppended(rewriter, connect, layout, *archetype, world,
+                      startCounts.lookup(archetype), /*parallel=*/false,
+                      /*many=*/0);
     commitStructure(rewriter, loc, layout, world, changing, changedRelations,
                     tick);
   }
@@ -17360,18 +17548,15 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // Connected edges are appended while the buffers' rows still are the
   // rows that filled them, before despawns and moves.
   for (ConnectOp connect : connects)
-    for (auto [archetype, count] : visited) {
-      if (connect->hasAttr(kLoopedAttr))
-        appendLooped(rewriter, connect, layout, *archetype, world,
-                     options.parallelEntities && !options.gpuSystems,
-                     std::max<int64_t>(options.parallelMinEvents / 16, 1));
-      else
-        appendConnected(rewriter, connect, layout, *archetype, world, count);
-    }
+    for (auto [archetype, count] : visited)
+      placeAppended(rewriter, connect, layout, *archetype, world, count,
+                    options.parallelEntities && !options.gpuSystems,
+                    std::max<int64_t>(options.parallelMinEvents / 16, 1));
   // And the rows appended to buffers, in the same order.
   for (AppendOp append : appends)
     for (auto [archetype, count] : visited)
-      appendAppended(rewriter, append, layout, *archetype, world, count);
+      placeAppended(rewriter, append, layout, *archetype, world, count,
+                    /*parallel=*/false, /*many=*/0);
 
   // (On many ranks: what each rank's rows accumulated, added up over the
   // ranks, and what they wrote out written in order.)
