@@ -55,5 +55,8 @@ func.func @staged(%e: !ent.entity, %v: i32, %row: index, %mask: i1,
   // CHECK: ent.sa.fold 5[1] @Score "points" "add" of i32 in %{{.*}} count %{{.*}} {resolution = "rows", staged = "rows"} : memref<4096xi8>
   ent.sa.fold 5[1] @Score "points" "add" of i32 in %world count %count
     {resolution = "rows", staged = "rows"} : memref<4096xi8>
+  // CHECK: ent.sa.fold -1[-1] @Score "hits" "max" of i64 in %{{.*}} {no_sign, resolution = "cell", staged = "cell"} : memref<4096xi8>
+  ent.sa.fold -1[-1] @Score "hits" "max" of i64 in %world
+    {no_sign, resolution = "cell", staged = "cell"} : memref<4096xi8>
   return
 }

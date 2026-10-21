@@ -12735,9 +12735,13 @@ static void resolveStateAccess(SaAccumulateOp accumulate) {
 }
 
 /// How what was staged for an accumulate is folded: in the order it was
-/// staged, slice after slice or row after row.
+/// staged, slice after slice or row after row; on the GPU, what its cell
+/// holds, at once.
 static void resolveStateAccess(SaFoldOp fold) {
-  fold.setResolution(fold.getStaged() == "list" ? "in-order" : "rows");
+  StringRef staged = fold.getStaged();
+  fold.setResolution(staged == "list"   ? "in-order"
+                     : staged == "cell" ? "cell"
+                                        : "rows");
 }
 
 /// Carry out `accumulate` (resolved), at its place.
@@ -12915,11 +12919,50 @@ static void foldRows(IRRewriter &rewriter, SaFoldOp fold,
                           ValueRange{zero});
 }
 
+/// The fold of the GPU's cell (resolution "cell"): what the loops for the
+/// GPU accumulated into the cell of its copy at the unique's place, from
+/// where the rule starts (whole numbers, atomically: the same in any
+/// order), read back (devices/gpu.c, ent_gpu_cell_get) and combined into
+/// the unique of `world`, the CPU's, by the rule.
+static void foldCell(IRRewriter &rewriter, SaFoldOp fold,
+                     const WorldLayout &layout, WorldAccess &world) {
+  Location loc = fold.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  StringAttr resource = fold.getResourceAttr().getAttr();
+  const WorldResourceField *field =
+      layout.getResource(resource).find(fold.getFieldAttr());
+  Type stored = fold.getStored();
+  unsigned bits = stored.getIntOrFloatBitWidth();
+  Value got =
+      callGpu(rewriter, loc, fold->getParentOfType<ModuleOp>(),
+              "ent_gpu_cell_get",
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                      field->offset, 64),
+                         arith::ConstantIntOp::create(rewriter, loc,
+                                                      (bits + 7) / 8, 64)},
+              TypeRange{rewriter.getI64Type()})
+          .getResult(0);
+  if (bits < 64)
+    got = arith::TruncIOp::create(rewriter, loc, stored, got);
+  Value unique = world.resourceField(resource, fold.getFieldAttr());
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value old = memref::LoadOp::create(rewriter, loc, unique, ValueRange{zero});
+  memref::StoreOp::create(
+      rewriter, loc,
+      combine(rewriter, loc, fold.getRule(), old, got, fold.getNoSign()),
+      unique, ValueRange{zero});
+}
+
 /// Carry out `fold` (resolved), at its place.
 static void lowerStateAccess(IRRewriter &rewriter, SaFoldOp fold,
                              const WorldLayout &layout, WorldAccess &world) {
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(fold);
+  if (*fold.getResolution() == "cell") {
+    foldCell(rewriter, fold, layout, world);
+    rewriter.eraseOp(fold);
+    return;
+  }
   const WorldArchetype &archetype = layout.archetypes[fold.getArchetype()];
   (*fold.getResolution() == "in-order" ? foldList : foldRows)(
       rewriter, fold, archetype, world);
@@ -18131,8 +18174,9 @@ static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
 /// The uniques that the loops for the GPU of `queries` accumulate into:
 /// each the cell of the GPU's copy at the unique's place, which starts
 /// where its rule does (0, or the most or least a number of its type can
-/// be) and after the loops is combined into the CPU's unique by the rule
-/// (devices/gpu.c: ent_gpu_cell_set, ent_gpu_cell_get).
+/// be) and after the loops is folded into the CPU's unique by the rule
+/// (devices/gpu.c: ent_gpu_cell_set; the fold's resolution "cell", see
+/// foldCell).
 struct GpuCells {
   struct Cell {
     const WorldResourceField *field;
@@ -18178,32 +18222,33 @@ struct GpuCells {
     }
   }
 
-  void finish(IRRewriter &rewriter, Location loc, ModuleOp module,
+  /// Fold the cells into the uniques of `cpu`, the CPU's copy of the
+  /// world, at the insertion point: an `ent.sa.fold` of each, resolved
+  /// (resolveStateAccess) and carried out (lowerStateAccess) there.
+  void finish(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
               WorldAccess &cpu) {
     for (const Cell &cell : cells) {
       auto type = cast<IntegerType>(cell.field->type);
-      unsigned bits = type.getWidth();
-      Value got =
-          callGpu(rewriter, loc, module, "ent_gpu_cell_get",
-                  ValueRange{arith::ConstantIntOp::create(
-                                 rewriter, loc, cell.field->offset, 64),
-                             arith::ConstantIntOp::create(rewriter, loc,
-                                                          (bits + 7) / 8, 64)},
-                  TypeRange{rewriter.getI64Type()})
-              .getResult(0);
-      Type stored = cpu.storageType(type);
-      if (bits < 64)
-        got = arith::TruncIOp::create(rewriter, loc, stored, got);
-      Value unique = cpu.resourceField(cell.resource,
-                                       StringAttr::get(rewriter.getContext(),
-                                                       cell.field->field.getValue()));
-      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-      Value old = memref::LoadOp::create(rewriter, loc, unique,
-                                         ValueRange{zero});
-      memref::StoreOp::create(
-          rewriter, loc,
-          combine(rewriter, loc, cell.rule, old, got, type.isUnsigned()),
-          unique, ValueRange{zero});
+      SmallVector<NamedAttribute> attributes{
+          rewriter.getNamedAttr("apply", rewriter.getI64IntegerAttr(-1)),
+          rewriter.getNamedAttr("archetype", rewriter.getI64IntegerAttr(-1)),
+          rewriter.getNamedAttr("resource",
+                                FlatSymbolRefAttr::get(cell.resource)),
+          rewriter.getNamedAttr("field", rewriter.getStringAttr(
+                                             cell.field->field.getValue())),
+          rewriter.getNamedAttr("rule", rewriter.getStringAttr(cell.rule)),
+          rewriter.getNamedAttr("stored",
+                                TypeAttr::get(cpu.storageType(type))),
+          rewriter.getNamedAttr("staged", rewriter.getStringAttr("cell")),
+          rewriter.getNamedAttr("operandSegmentSizes",
+                                rewriter.getDenseI32ArrayAttr({1, 0, 0}))};
+      if (type.isUnsigned())
+        attributes.push_back(
+            rewriter.getNamedAttr("no_sign", rewriter.getUnitAttr()));
+      auto fold = SaFoldOp::create(rewriter, loc, TypeRange{},
+                                   ValueRange{cpu.getArena()}, attributes);
+      resolveStateAccess(fold);
+      lowerStateAccess(rewriter, fold, layout, cpu);
     }
   }
 };
@@ -18372,7 +18417,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
       emitFrom(0, zero);
       hoistResourceReads(rewriter, loop, world);
       rewriter.setInsertionPointAfter(loop);
-      cells.finish(rewriter, loc, module, world.cpu());
+      cells.finish(rewriter, loc, layout, world.cpu());
     }
   }
   for (const WorldArchetype &archetype : layout.archetypes) {
@@ -22167,7 +22212,7 @@ struct EntLowerToLoops
             rewriter.setInsertionPoint(after);
           else
             rewriter.setInsertionPoint(block->getTerminator());
-          cells->finish(rewriter, query.getLoc(), module, world);
+          cells->finish(rewriter, query.getLoc(), *layout, world);
         }
         ++scope;
         for (Operation *op = before ? before->getNextNode() : &block->front();

@@ -1987,10 +1987,13 @@ def Ent_SaFoldOp : Ent_Op<"sa.fold", [AttrSizedOperandSegments]> {
     `"rows"`, the first `%count` rows, on many ranks from `%first`),
     folded into the unique's field in
     the order it was staged, so the result does not depend on how the
-    query's loop ran. `no_sign`: a whole number without a sign. The
-    decision, `resolution`: `"in-order"` for a list (slice after slice,
-    then as sent), `"rows"` row after row (rows that sent nothing are
-    skipped).
+    query's loop ran. Or `"cell"`, apply and archetype -1: on the GPU,
+    what its loops accumulated atomically, whole numbers, into the cell
+    of its copy of the world at the unique's place (the same in any
+    order). `no_sign`: a whole number without a sign. The decision,
+    `resolution`: `"in-order"` for a list (slice after slice, then as
+    sent), `"rows"` row after row (rows that sent nothing are skipped),
+    `"cell"` the cell read back and combined into the CPU's unique.
   }];
   let arguments = (ins I64Attr:$apply, I64Attr:$archetype,
                        FlatSymbolRefAttr:$resource, StrAttr:$field,
