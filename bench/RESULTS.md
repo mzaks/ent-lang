@@ -3387,3 +3387,39 @@ median of 5 processes:
   only where it takes 5% less.
 - The epidemic (1e6 people, tracing, 24 threads): median 4.60 s chosen,
   4.60 s in groups from 131072 values, same bytes.
+
+## 2026-10-21: threads awake for five milliseconds
+
+`--trace` showed the epidemic's parallel loops busy 50 to 70% of their
+time, half of what is lost the last thread starting up to 1.1 ms late:
+its threads had slept (1 ms without work, what tools/ent said since
+2026-10-09) through the 171 stretches of 1 to 3 ms a run on one core
+between loops (13,046 of 13,224 are under 1 ms, 7 over 3 ms). The
+epidemic (1e6 people, tracing, 24 threads, mains, load average under 1,
+same bytes each run), `KMP_BLOCKTIME` where it runs:
+
+| threads wait | runs | median | from | to |
+|---|---|---|---|---|
+| 1 ms | 8 | 4.676 s | 4.607 | 5.322 |
+| 3 ms | 8 | 4.463 s | 4.423 | 4.921 |
+| 5 ms | 8 | 4.365 s | 4.330 | 4.564 |
+| 5 ms | 6 | 4.369 s | 4.274 | 4.506 |
+| 10 ms | 6 | 4.403 s | 4.323 | 4.551 |
+| 20 ms | 6 | 4.437 s | 4.358 | 4.726 |
+| 50 ms | 6 | 4.550 s | 4.429 | 4.634 |
+
+Longer than that, threads spin through the setup of the city (1.3 s on
+one core) and slow it; for good (`infinite`) 6.3 to 7.3 s. The swarm,
+for which 1 ms was chosen (it then drew for ten milliseconds of a frame
+on one core), now draws in one: `bench/swarm/run.py 1800 --parallel`,
+the last report of five runs each, us a frame:
+
+| threads wait | a frame (computing, drawing) |
+|---|---|
+| 1 ms | 5806 (3918, 1775), 4931 (3788, 984), 4965 (3800, 1007), 5095 (3882, 1053), 5067 (3898, 1010) |
+| 5 ms | 5065 (3846, 1030), 6342 (4358, 1606), 4895 (3686, 1036), 5076 (3782, 1109), 6139 (4205, 1537) |
+
+The same within its runs, which come out at about 5.0 or 6.2 ms
+whichever it is (as on 2026-10-09, not explained). tools/ent now says
+5 ms; the epidemic built so: 4.24 to 4.49 s, where 4.53 to 5.29 s with
+1 ms, six runs each one after the other.

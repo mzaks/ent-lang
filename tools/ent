@@ -43,10 +43,11 @@ on a core each: one piece for every two megabytes of its LLVM IR, up to
 sixteen. ENT_PIECES says how many instead (1: all in one).
 
 With --parallel the program runs its systems on all cores (OpenMP). A
-thread without work waits a millisecond for more and then sleeps, so that
-what the program does on one core (drawing, say) has the machine to
-itself; KMP_BLOCKTIME or OMP_WAIT_POLICY, where the program runs, say
-otherwise. A loop runs on many threads from a million entities on (fewer
+thread without work waits five milliseconds for more and then sleeps, so
+that it is awake for the next parallel loop after a short stretch on one
+core, and what the program does on one core for longer (drawing, say)
+has the machine to itself; KMP_BLOCKTIME or OMP_WAIT_POLICY, where the
+program runs, say otherwise. A loop runs on many threads from a million entities on (fewer
 where its body calls out), and the events a reactive one walks from 16384
 on; what was sent from loops in its body may be combined on many threads
 from 16384 values on, where that has taken less so far than on one (the
@@ -701,17 +702,21 @@ def build(arguments, output, directory):
                              f"{os.path.getsize(where)}}},\n")
             source.write("  {0, 0, 0}};\n")
         if arguments.parallel:
-            # A thread without work waits a millisecond for more, then
-            # sleeps. (The OpenMP runtime would have it spin for a fifth
-            # of a second: through all a frame does on one core, drawing
-            # say, which the spinning cores slow down.) What the
+            # A thread without work waits five milliseconds for more,
+            # then sleeps: awake through the short stretches a program
+            # does on one core between its parallel loops (one woken
+            # takes up to a millisecond to start), asleep through long
+            # ones. (The OpenMP runtime would have it spin for a fifth of
+            # a second: through all a frame does on one core, drawing
+            # say, which the spinning cores slow down; see
+            # bench/RESULTS.md, 2026-10-09 and 2026-10-21.) What the
             # environment says holds over this.
             source.write(
                 "#include <stdlib.h>\n"
                 "__attribute__((constructor)) static void "
                 "ent_threads_wait(void) {\n"
                 '  if (!getenv("OMP_WAIT_POLICY")) '
-                'setenv("KMP_BLOCKTIME", "1", 0);\n}\n')
+                'setenv("KMP_BLOCKTIME", "5", 0);\n}\n')
     if held:
         apple = sys.platform == "darwin"
         bytes_of = os.path.join(directory, "ent_assets.s")
