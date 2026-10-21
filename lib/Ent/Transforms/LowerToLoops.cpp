@@ -9317,11 +9317,13 @@ static void emitPartitionedSort(IRRewriter &rewriter, Location loc,
 /// clean. Edges keep the order they were connected in among those of the
 /// same source, and the index by target lists each target's edges in table
 /// order. With `parallel`, what goes over every entity key (offsets set
-/// to 0, and added up) is on many threads.
+/// to 0, and added up) is on many threads, and from `manyEdges` edges on
+/// the counting and placing of the edges too.
 static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                              const WorldLayout &layout,
                              const WorldRelation &relation,
-                             MemRefType arenaType, bool parallel) {
+                             MemRefType arenaType, bool parallel,
+                             int64_t manyEdges) {
   if (relation.linked) {
     emitLinkedSortFunction(rewriter, module, layout, relation, arenaType);
     emitConnectFunction(rewriter, module, layout, relation, arenaType);
@@ -9493,6 +9495,223 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
           rewriter, loc, arith::SubIOp::create(rewriter, loc, n, one), k));
     });
   };
+  auto onThreads = [&](Value n, function_ref<void(Value)> body) {
+    auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                        ValueRange{n}, ValueRange{one});
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    body(loop.getInductionVars().front());
+  };
+  // Each of the first `n` edges that `counted` keeps given its place in
+  // the order of `keyOf`, stably (place(k, position)), through `offsets`,
+  // which end as where each key's edges start; says how many there are.
+  using KeyOf = function_ref<Value(Value)>;
+  using Place = function_ref<void(Value, Value)>;
+  auto placeSerially = [&](Value offsets, Value n, KeyOf keyOf, KeyOf counted,
+                           Place place) -> Value {
+    countInto(offsets, n, keyOf, counted);
+    // (All of them: where the last key's end.)
+    Value all = memref::LoadOp::create(
+        rewriter, loc, offsets,
+        ValueRange{arith::SubIOp::create(rewriter, loc, keys, one)});
+    forEachBack(n, [&](Value k) {
+      auto ifCounted = scf::IfOp::create(rewriter, loc, counted(k));
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(ifCounted.thenBlock());
+      place(k, world.toIndex(loc, take(offsets, keyOf(k))));
+    });
+    return all;
+  };
+  // The same on many threads: the edges in 256 pieces, the keys in up to
+  // 256 buckets (of a power of two keys each). Each piece counts its edges
+  // by bucket; summed bucket by bucket, piece by piece, those say where
+  // each piece's edges of a bucket go in a list of the edges by bucket,
+  // which each piece then fills; then each bucket sorts its edges, in
+  // their order still, by key, through the offsets of its own keys alone.
+  int64_t keyCount = layout.entityKeys;
+  int64_t shift = 0;
+  while ((int64_t(1) << shift) * 256 < keyCount)
+    ++shift;
+  int64_t bucketCount = (keyCount + (int64_t(1) << shift) - 1) >> shift;
+  auto placeInBuckets = [&](Value offsets, Value n, KeyOf keyOf, KeyOf counted,
+                            Place place) -> Value {
+    Type index = rewriter.getIndexType();
+    Value pieces = arith::ConstantIndexOp::create(rewriter, loc, 256);
+    Value buckets = arith::ConstantIndexOp::create(rewriter, loc, bucketCount);
+    Value bucketShift = arith::ConstantIndexOp::create(rewriter, loc, shift);
+    Value perPiece = arith::DivUIOp::create(
+        rewriter, loc,
+        arith::AddIOp::create(
+            rewriter, loc, n,
+            arith::ConstantIndexOp::create(rewriter, loc, 255)),
+        pieces);
+    // (marks[piece * buckets + bucket]: how many, then where the next.)
+    Value marks = memref::AllocOp::create(
+        rewriter, loc, MemRefType::get({256 * bucketCount}, index));
+    Value starts = memref::AllocOp::create(
+        rewriter, loc, MemRefType::get({bucketCount + 1}, index));
+    Value list = memref::AllocOp::create(
+        rewriter, loc, MemRefType::get({ShapedType::kDynamic}, offsetType),
+        ValueRange{n});
+    auto inPiece = [&](Value piece, function_ref<void(Value, Value)> body) {
+      Value from = arith::MinUIOp::create(
+          rewriter, loc, n,
+          arith::MulIOp::create(rewriter, loc, piece, perPiece));
+      Value to = arith::MinUIOp::create(
+          rewriter, loc, n,
+          arith::AddIOp::create(rewriter, loc, from, perPiece));
+      Value row = arith::MulIOp::create(rewriter, loc, piece, buckets);
+      forEach(from, to, [&](Value k) {
+        auto ifCounted = scf::IfOp::create(rewriter, loc, counted(k));
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(ifCounted.thenBlock());
+        body(k,
+             arith::AddIOp::create(
+                 rewriter, loc, row,
+                 arith::ShRUIOp::create(rewriter, loc, keyOf(k), bucketShift)));
+      });
+    };
+    onThreads(pieces, [&](Value piece) {
+      Value row = arith::MulIOp::create(rewriter, loc, piece, buckets);
+      forEach(zero, buckets, [&](Value bucket) {
+        memref::StoreOp::create(
+            rewriter, loc, zero, marks,
+            ValueRange{arith::AddIOp::create(rewriter, loc, row, bucket)});
+      });
+      inPiece(piece, [&](Value, Value mark) {
+        Value had =
+            memref::LoadOp::create(rewriter, loc, marks, ValueRange{mark});
+        memref::StoreOp::create(rewriter, loc,
+                                arith::AddIOp::create(rewriter, loc, had, one),
+                                marks, ValueRange{mark});
+      });
+    });
+    auto byBucket =
+        scf::ForOp::create(rewriter, loc, zero, buckets, one, ValueRange{zero});
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(byBucket.getBody());
+      Value bucket = byBucket.getInductionVar();
+      memref::StoreOp::create(rewriter, loc, byBucket.getRegionIterArg(0),
+                              starts, ValueRange{bucket});
+      auto byPiece =
+          scf::ForOp::create(rewriter, loc, zero, pieces, one,
+                             ValueRange{byBucket.getRegionIterArg(0)});
+      rewriter.setInsertionPointToStart(byPiece.getBody());
+      Value mark = arith::AddIOp::create(
+          rewriter, loc,
+          arith::MulIOp::create(rewriter, loc, byPiece.getInductionVar(),
+                                buckets),
+          bucket);
+      Value at = byPiece.getRegionIterArg(0);
+      Value many =
+          memref::LoadOp::create(rewriter, loc, marks, ValueRange{mark});
+      memref::StoreOp::create(rewriter, loc, at, marks, ValueRange{mark});
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{arith::AddIOp::create(rewriter, loc, at, many)});
+      rewriter.setInsertionPointAfter(byPiece);
+      scf::YieldOp::create(rewriter, loc, byPiece.getResults());
+    }
+    memref::StoreOp::create(rewriter, loc, byBucket.getResult(0), starts,
+                            ValueRange{buckets});
+    onThreads(pieces, [&](Value piece) {
+      inPiece(piece, [&](Value k, Value mark) {
+        Value at =
+            memref::LoadOp::create(rewriter, loc, marks, ValueRange{mark});
+        memref::StoreOp::create(
+            rewriter, loc,
+            arith::IndexCastOp::create(rewriter, loc, offsetType, k), list,
+            ValueRange{at});
+        memref::StoreOp::create(rewriter, loc,
+                                arith::AddIOp::create(rewriter, loc, at, one),
+                                marks, ValueRange{mark});
+      });
+    });
+    onThreads(buckets, [&](Value bucket) {
+      Value first = arith::ShLIOp::create(rewriter, loc, bucket, bucketShift);
+      Value last = arith::MinUIOp::create(
+          rewriter, loc, keys,
+          arith::AddIOp::create(rewriter, loc, first,
+                                arith::ConstantIndexOp::create(
+                                    rewriter, loc, int64_t(1) << shift)));
+      Value start =
+          memref::LoadOp::create(rewriter, loc, starts, ValueRange{bucket});
+      Value end = memref::LoadOp::create(
+          rewriter, loc, starts,
+          ValueRange{arith::AddIOp::create(rewriter, loc, bucket, one)});
+      auto edgeAt = [&](Value p) {
+        return world.toIndex(
+            loc, memref::LoadOp::create(rewriter, loc, list, ValueRange{p}));
+      };
+      forEach(first, last, [&](Value key) {
+        memref::StoreOp::create(rewriter, loc, offsetConstant(0), offsets,
+                                ValueRange{key});
+      });
+      forEach(start, end, [&](Value p) {
+        Value key = keyOf(edgeAt(p));
+        Value had =
+            memref::LoadOp::create(rewriter, loc, offsets, ValueRange{key});
+        memref::StoreOp::create(
+            rewriter, loc,
+            arith::AddIOp::create(rewriter, loc, had, offsetConstant(1)),
+            offsets, ValueRange{key});
+      });
+      auto sum = scf::ForOp::create(rewriter, loc, first, last, one,
+                                    ValueRange{arith::IndexCastOp::create(
+                                        rewriter, loc, offsetType, start)});
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(sum.getBody());
+        Value key = sum.getInductionVar();
+        Value upTo = arith::AddIOp::create(
+            rewriter, loc, sum.getRegionIterArg(0),
+            memref::LoadOp::create(rewriter, loc, offsets, ValueRange{key}));
+        memref::StoreOp::create(rewriter, loc, upTo, offsets, ValueRange{key});
+        scf::YieldOp::create(rewriter, loc, ValueRange{upTo});
+      }
+      forEachBack(
+          arith::SubIOp::create(rewriter, loc, end, start), [&](Value i) {
+            Value k = edgeAt(arith::AddIOp::create(rewriter, loc, start, i));
+            place(k, world.toIndex(loc, take(offsets, keyOf(k))));
+          });
+    });
+    Value all = arith::IndexCastOp::create(
+        rewriter, loc, offsetType,
+        memref::LoadOp::create(rewriter, loc, starts, ValueRange{buckets}));
+    for (Value made : {marks, starts, list})
+      memref::DeallocOp::create(rewriter, loc, made);
+    return all;
+  };
+  // offsets[keys] = all of them, which it says.
+  auto placeAll = [&](Value offsets, Value n, KeyOf keyOf, KeyOf counted,
+                      Place place) -> Value {
+    Value all;
+    if (!parallel) {
+      all = placeSerially(offsets, n, keyOf, counted, place);
+    } else {
+      // (On many threads where there are so many edges.)
+      auto ifMany = scf::IfOp::create(
+          rewriter, loc, TypeRange{offsetType},
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::uge, n,
+              arith::ConstantIndexOp::create(rewriter, loc, manyEdges)),
+          /*withElseRegion=*/true);
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(ifMany.thenBlock());
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{placeInBuckets(offsets, n, keyOf, counted, place)});
+      rewriter.setInsertionPointToStart(ifMany.elseBlock());
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{placeSerially(offsets, n, keyOf, counted, place)});
+      all = ifMany.getResult(0);
+      rewriter.setInsertionPointAfter(ifMany);
+    }
+    memref::StoreOp::create(rewriter, loc, all, offsets, ValueRange{keys});
+    return world.toIndex(loc, all);
+  };
 
   Value sources = world.edgeIds(relation, /*source=*/true);
   Value targets = world.edgeIds(relation, /*source=*/false);
@@ -9554,24 +9773,13 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   auto sortInto = [&](Value offsets, Value n, ArrayRef<Value> from,
                       ArrayRef<Value> to, function_ref<Value(Value)> keyOf,
                       function_ref<Value(Value)> counted) {
-    countInto(offsets, n, keyOf, counted);
-    // (All of them: where the last key's end.)
-    Value all = memref::LoadOp::create(
-        rewriter, loc, offsets,
-        ValueRange{arith::SubIOp::create(rewriter, loc, keys, one)});
-    forEachBack(n, [&](Value k) {
-      auto ifCounted = scf::IfOp::create(rewriter, loc, counted(k));
-      OpBuilder::InsertionGuard inner(rewriter);
-      rewriter.setInsertionPointToStart(ifCounted.thenBlock());
-      Value position = world.toIndex(loc, take(offsets, keyOf(k)));
+    return placeAll(offsets, n, keyOf, counted, [&](Value k, Value position) {
       for (auto [source, target] : llvm::zip(from, to))
         memref::StoreOp::create(
             rewriter, loc,
             memref::LoadOp::create(rewriter, loc, source, ValueRange{k}),
             target, ValueRange{position});
     });
-    memref::StoreOp::create(rewriter, loc, all, offsets, ValueRange{keys});
-    return world.toIndex(loc, all);
   };
 
   // By source into the scratch, dropping what is not kept; then back, by
@@ -9681,18 +9889,12 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   if (relation.hasIndex()) {
     Value index = world.edgeOffsets(relation, /*in=*/true);
     auto keyOfTarget = keyIn(table, /*target=*/true);
-    countInto(index, kept, keyOfTarget, all);
-    forEachBack(kept, [&](Value k) {
-      Value position = world.toIndex(loc, take(index, keyOfTarget(k)));
+    placeAll(index, kept, keyOfTarget, all, [&](Value k, Value position) {
       memref::StoreOp::create(
           rewriter, loc,
           arith::IndexCastOp::create(rewriter, loc, offsetType, k),
           world.indexEdges(relation), ValueRange{position});
     });
-    memref::StoreOp::create(
-        rewriter, loc,
-        arith::IndexCastOp::create(rewriter, loc, offsetType, kept), index,
-        ValueRange{keys});
   }
 
   // A tree: list the entities with a parent, parents before children.
@@ -20838,7 +21040,7 @@ struct EntLowerToLoops
                       int64_t(layout->entityKeys) >= parallelMinEntities;
     for (const WorldRelation &relation : layout->relations)
       emitSortFunction(rewriter, module, *layout, relation, arenaType,
-                       sortsApart);
+                       sortsApart, parallelMinEvents);
     LoopOptions options{parallelEntities, parallelMinEntities,
                         parallelMinEvents, parallelMinLevel, explain,
                         directApplies};
