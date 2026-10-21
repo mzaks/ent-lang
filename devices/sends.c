@@ -25,10 +25,14 @@ typedef struct ent_send_block {
   uint64_t sent[2 * ENT_SEND_BLOCK];
 } ent_send_block;
 
-// (A line of the cache each: every thread writes its own.)
+// (A line of the cache each: every thread writes its own. Where a
+// reading of the slice alone is, ent_sends_slice_first.)
 typedef struct {
   _Alignas(64) ent_send_block *first;
   ent_send_block *last;
+  ent_send_block *block;
+  uint64_t at;
+  int64_t before;
 } ent_send_slice;
 
 // (Read in groups instead, ent_sends_group: by whom they were sent to.)
@@ -47,6 +51,8 @@ typedef struct {
   int64_t room;
   int64_t starts[ENT_SEND_GROUPS + 1];
   int64_t *marks;
+  // (How many there are, read a slice at a time.)
+  int64_t sliced;
 } ent_send_lists;
 
 // (A table of them for each partition a process runs, devices/ranks.c,
@@ -101,6 +107,7 @@ static ent_send_lists *ent_sends_of(int64_t world, int64_t number) {
   made->grouped = 0;
   made->room = 0;
   made->marks = 0;
+  made->sliced = 0;
   if (__atomic_compare_exchange_n(&ent_sends[number], &lists, made, 0,
                                   __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
     return made;
@@ -177,6 +184,53 @@ int64_t ent_sends_value(int64_t world, int64_t number) {
   ent_send_lists *lists = ent_sends[number];
   ent_send_block *block = ent_sends_at(lists);
   return (int64_t)block->sent[2 * lists->at++ + 1];
+}
+
+// Or read a slice at a time, each slice on a thread of its own: how many
+// were sent, and how many in the slices before each (ent_sends_slices);
+// how many before `slice` (ent_sends_slice_before, ENT_SEND_SLICES: all
+// of them); and its own from the first (ent_sends_slice_first, then
+// ent_sends_slice_id and ent_sends_slice_value as above).
+int64_t ent_sends_slices(int64_t world, int64_t number) {
+  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
+  if (!lists)
+    return 0;
+  int64_t count = 0;
+  for (int slice = 0; slice < ENT_SEND_SLICES; ++slice) {
+    ent_send_slice *list = &lists->slices[slice];
+    list->before = count;
+    for (ent_send_block *block = list->first; block; block = block->next) {
+      count += block->count;
+      if (block == list->last)
+        break;
+    }
+  }
+  lists->sliced = count;
+  return count;
+}
+int64_t ent_sends_slice_before(int64_t world, int64_t number, int64_t slice) {
+  ent_send_lists *lists = ent_sends[number];
+  return slice == ENT_SEND_SLICES ? lists->sliced : lists->slices[slice].before;
+}
+void ent_sends_slice_first(int64_t world, int64_t number, int64_t slice) {
+  ent_send_slice *list = &ent_sends[number]->slices[slice];
+  list->block = list->last ? list->first : 0;
+  list->at = 0;
+}
+static ent_send_block *ent_sends_slice_at(ent_send_slice *list) {
+  if (list->at == list->block->count) {
+    list->block = list->block->next;
+    list->at = 0;
+  }
+  return list->block;
+}
+int64_t ent_sends_slice_id(int64_t world, int64_t number, int64_t slice) {
+  ent_send_slice *list = &ent_sends[number]->slices[slice];
+  return (int64_t)ent_sends_slice_at(list)->sent[2 * list->at];
+}
+int64_t ent_sends_slice_value(int64_t world, int64_t number, int64_t slice) {
+  ent_send_slice *list = &ent_sends[number]->slices[slice];
+  return (int64_t)ent_sends_slice_at(list)->sent[2 * list->at++ + 1];
 }
 
 // Or read in groups, each of whom the values were sent to (by their ids,

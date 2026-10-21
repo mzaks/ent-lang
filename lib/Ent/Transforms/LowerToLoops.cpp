@@ -7846,6 +7846,34 @@ static void assertEnds(IRRewriter &rewriter, Location loc,
   }
 }
 
+/// Write the edge from `source` to `target` with `values` (stored form)
+/// at `at` (an index) of the table of `relation`, alive.
+static void writeEdge(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                      const WorldRelation &relation, Value at, Value source,
+                      Value target, ValueRange values) {
+  memref::StoreOp::create(rewriter, loc, source,
+                          world.edgeIds(relation, /*source=*/true),
+                          ValueRange{at});
+  memref::StoreOp::create(rewriter, loc, target,
+                          world.edgeIds(relation, /*source=*/false),
+                          ValueRange{at});
+  for (auto [value, field] : llvm::zip(values, relation.fields))
+    memref::StoreOp::create(rewriter, loc, value,
+                            world.edgeField(relation, field), ValueRange{at});
+  if (relation.deadOffset)
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+                            world.edgeDead(relation), ValueRange{at});
+}
+
+/// Whether appending an edge to `relation` is writing it at the end of
+/// the table and counting it, nothing else: so many edges can be written
+/// at once, each in its place, on many threads.
+static bool appendsPlainly(const WorldRelation &relation) {
+  return partitionCount == 0 && !relation.connectedOffset && !relation.linked &&
+         !relation.isOrdered() && !relation.tree;
+}
+
 static void appendEdge(IRRewriter &rewriter, Location loc,
                        const WorldLayout &layout, WorldAccess &world,
                        const WorldRelation &relation, Value source,
@@ -7996,19 +8024,7 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
       rewriter, loc, fits,
       rewriter.getStringAttr("ent.connect exceeds the capacity of @" +
                              RelationOp(relation.op).getSymName()));
-  memref::StoreOp::create(rewriter, loc, source,
-                          world.edgeIds(relation, /*source=*/true),
-                          ValueRange{at});
-  memref::StoreOp::create(rewriter, loc, target,
-                          world.edgeIds(relation, /*source=*/false),
-                          ValueRange{at});
-  for (auto [value, field] : llvm::zip(values, relation.fields))
-    memref::StoreOp::create(rewriter, loc, value,
-                            world.edgeField(relation, field), ValueRange{at});
-  if (relation.deadOffset)
-    memref::StoreOp::create(rewriter, loc,
-                            arith::ConstantIntOp::create(rewriter, loc, 0, 8),
-                            world.edgeDead(relation), ValueRange{at});
+  writeEdge(rewriter, loc, world, relation, at, source, target, values);
   memref::StoreOp::create(
       rewriter, loc,
       arith::AddIOp::create(rewriter, loc, count,
@@ -11834,10 +11850,18 @@ static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
 /// Add the edges `connect` (in a loop of its query's body, or in a loop
 /// over edges there) noted for the entities of `archetype`, at the
 /// insertion point: from its list, where each edge is its two ends and
-/// then its fields' values, two by two; the list is then empty.
+/// then its fields' values, two by two; the list is then empty. Where the
+/// loop ran on many threads (`parallel`), from `many` edges on, edges
+/// appended plainly (appendsPlainly) are written on many threads, each
+/// slice of the list's where the ones before it end: in the order of the
+/// list still. (One parallel loop: worth it from fewer edges than the
+/// steps of combining applies by groups, so `many` is a sixteenth of
+/// parallel-min-events; at least one, as there are lists only once
+/// something was sent.)
 static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
                          const WorldLayout &layout,
-                         const WorldArchetype &archetype, WorldAccess &world) {
+                         const WorldArchetype &archetype, WorldAccess &world,
+                         bool parallel, int64_t many) {
   Location loc = connect.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   const WorldRelation &relation =
@@ -11857,33 +11881,120 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
       arith::ConstantIndexOp::create(rewriter, loc, each));
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  auto loop = scf::ForOp::create(rewriter, loc, zero, edges, one);
-  rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-  auto next = [&](bool second) {
-    return callSends(rewriter, loc, world,
-                     second ? "ent_sends_value" : "ent_sends_id", {list}, true);
-  };
+  Value perEdge = arith::ConstantIndexOp::create(rewriter, loc, each);
+  Type i64 = rewriter.getI64Type();
   auto asId = [&](Value bits) {
-    return world.idType() == rewriter.getI64Type()
+    return world.idType() == i64
                ? bits
                : arith::TruncIOp::create(rewriter, loc, world.idType(), bits)
                      .getResult();
   };
-  Value source = asId(next(false));
-  Value target = asId(next(true));
-  SmallVector<Value> values;
-  for (auto [index, field] : llvm::enumerate(relation.fields))
-    values.push_back(fromSendBits(rewriter, loc, next(index % 2 == 1),
-                                  world.storageType(field.type)));
-  // (A last value without another after it: on to the next one.)
-  if (relation.fields.size() % 2 == 1)
-    next(true);
-  if (route)
-    routeEdge(rewriter, loc, connect->getParentOfType<ModuleOp>(), world,
-              channel, source, target, values);
-  else
-    appendEdge(rewriter, loc, layout, world, relation, source, target, values);
-  rewriter.setInsertionPointAfter(loop);
+  // An edge's ends and values, read by `next` (the value of a pair, else
+  // whom it was sent to).
+  auto readEdge = [&](function_ref<Value(bool)> next) {
+    Value source = asId(next(false));
+    Value target = asId(next(true));
+    SmallVector<Value> values;
+    for (auto [index, field] : llvm::enumerate(relation.fields))
+      values.push_back(fromSendBits(rewriter, loc, next(index % 2 == 1),
+                                    world.storageType(field.type)));
+    // (A last value without another after it: on to the next one.)
+    if (relation.fields.size() % 2 == 1)
+      next(true);
+    return std::make_tuple(source, target, values);
+  };
+  auto oneByOne = [&]() {
+    auto loop = scf::ForOp::create(rewriter, loc, zero, edges, one);
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    auto [source, target, values] = readEdge([&](bool second) {
+      return callSends(rewriter, loc, world,
+                       second ? "ent_sends_value" : "ent_sends_id", {list},
+                       true);
+    });
+    if (route)
+      routeEdge(rewriter, loc, connect->getParentOfType<ModuleOp>(), world,
+                channel, source, target, values);
+    else
+      appendEdge(rewriter, loc, layout, world, relation, source, target,
+                 values);
+  };
+  if (!parallel || route || !appendsPlainly(relation)) {
+    oneByOne();
+    callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
+    return;
+  }
+  auto split = scf::IfOp::create(
+      rewriter, loc,
+      arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::uge, edges,
+          arith::ConstantIndexOp::create(rewriter, loc, many)),
+      /*withElseRegion=*/true);
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPoint(split.thenBlock()->getTerminator());
+    callSends(rewriter, loc, world, "ent_sends_slices", {list}, true);
+    Value counter = world.edgeCount(relation);
+    Value count =
+        memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero});
+    Value first = world.toIndex(loc, count);
+    Value end = arith::AddIOp::create(rewriter, loc, first, edges);
+    cf::AssertOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ule, end,
+            arith::ConstantIndexOp::create(rewriter, loc, relation.capacity)),
+        rewriter.getStringAttr("ent.connect exceeds the capacity of @" +
+                               RelationOp(relation.op).getSymName()));
+    auto slices = scf::ParallelOp::create(
+        rewriter, loc, ValueRange{zero},
+        ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 256)},
+        ValueRange{one});
+    {
+      OpBuilder::InsertionGuard body(rewriter);
+      rewriter.setInsertionPoint(slices.getBody()->getTerminator());
+      Value slice = slices.getInductionVars().front();
+      Value slice64 = arith::IndexCastOp::create(rewriter, loc, i64, slice);
+      auto edgesBefore = [&](Value slice64) {
+        return arith::DivUIOp::create(
+            rewriter, loc,
+            world.toIndex(loc, callSends(rewriter, loc, world,
+                                         "ent_sends_slice_before",
+                                         {list, slice64}, true)),
+            perEdge);
+      };
+      Value from = edgesBefore(slice64);
+      Value to = edgesBefore(arith::AddIOp::create(
+          rewriter, loc, slice64,
+          arith::ConstantIntOp::create(rewriter, loc, 1, 64)));
+      callSends(rewriter, loc, world, "ent_sends_slice_first", {list, slice64},
+                false);
+      auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      auto [source, target, values] = readEdge([&](bool second) {
+        return callSends(rewriter, loc, world,
+                         second ? "ent_sends_slice_value"
+                                : "ent_sends_slice_id",
+                         {list, slice64}, true);
+      });
+      assertEnds(rewriter, loc, layout, world, relation, source, target);
+      writeEdge(
+          rewriter, loc, world, relation,
+          arith::AddIOp::create(rewriter, loc, first, loop.getInductionVar()),
+          source, target, values);
+    }
+    memref::StoreOp::create(rewriter, loc,
+                            arith::IndexCastOp::create(rewriter, loc, i64, end),
+                            counter, ValueRange{zero});
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                            world.edgesClean(relation), ValueRange{zero});
+  }
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPoint(split.elseBlock()->getTerminator());
+    oneByOne();
+  }
   callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
 }
 
@@ -16885,7 +16996,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   for (ConnectOp connect : connects)
     for (auto [archetype, count] : visited) {
       if (connect->hasAttr(kLoopedAttr))
-        appendLooped(rewriter, connect, layout, *archetype, world);
+        appendLooped(rewriter, connect, layout, *archetype, world,
+                     options.parallelEntities && !options.gpuSystems,
+                     std::max<int64_t>(options.parallelMinEvents / 16, 1));
       else
         appendConnected(rewriter, connect, layout, *archetype, world, count);
     }
