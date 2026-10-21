@@ -1748,62 +1748,95 @@ def Ent_YieldOp : Ent_Op<"yield", [
 // What a loop of the lowering touches, said as ops between the `ent` ops
 // and the loops they become, so that how a loop runs in parallel is
 // decided by its accesses (resolveStateAccess in LowerToLoops.cpp) and
-// carried out by a lowering per backend. The first case: an apply's
-// values sent from loops of a query's body.
+// carried out by a lowering per backend. So far: what an apply in a
+// query sends, made and lowered where it is sent and where the query
+// ends.
 
-def Ent_SaCombineOp : Ent_Op<"sa.combine"> {
-  let summary = "Combine into another entity's field, staged per slice";
+def Ent_SaCombineOp : Ent_Op<"sa.combine", [AttrSizedOperandSegments]> {
+  let summary = "Combine into another entity's field: an access of a loop";
   let description = [{
     ```mlir
-    ent.sa.combine 3[%slice] @Cell "got" "add" (%id, %v) in %world
-      : i64, i32, memref<4096xi8>
+    ent.sa.combine 2[1] @Cell "got" "add" (%e, %v) at %row if %mask
+      in %world {resolution = "rows"} : !ent.entity, i32, memref<4096xi8>
     ```
-    An access of a loop: combine `%v` (stored form) into field `got` of
-    `@Cell` of the entity with id `%id` (stored form), with the rule `add`,
-    `min` or `max`, as state number 3 has it: staged on the list of the
-    loop's slice `%slice` (0 on one thread) until the query ends, where
-    `ent.sa.merge` of the same state combines what was staged. On the CPU:
-    `ent_sends_put` (devices/sends.c).
+    What apply 2 of the layout (`ent.apply`; -1, one that has no
+    buffers there), in the body of a query over archetype 1, sends: `%v` combined into field `got` of `@Cell` of
+    the entity `%e` by the rule `add`, `min` or `max`. `%mask`, where the
+    body runs only for some entities, says whether it does here; `%tick`
+    is the world's tick where it has stamps; `%at` its row, or its edge's
+    position in a loop over edges.
+
+    What it is, which decides how it is done (resolveStateAccess in
+    LowerToLoops.cpp): `atomic` (whole numbers for the GPU), `looped`
+    (from a loop of the body, once for each of its turns), `unobserved`
+    (nothing else in the query touches the field), `in_each` (in a query
+    visiting entities one after another in a fixed order), `order_free`
+    (whole numbers of a reactive query), `direct` (the query's loop may
+    combine where it is sent), `sliced` (in a slice of a parallel loop),
+    `in_edges` (in a loop over edges), `trusted` (its id is alive).
+
+    The decision, `resolution`: `"atomic"` or `"direct"`, combined where it
+    is sent; `"list"`, staged on the list of the slice of the loop it is
+    in (the first, on one thread) until the query ends (devices/sends.c, ent_sends_put);
+    `"rows"` or `"edges"`, in a slot of the row or the edge `%at`, until
+    the query ends. Where it is staged, an `ent.sa.merge` of the same
+    apply and archetype combines.
   }];
-  let arguments = (ins I64Attr:$state, I64:$slice, FlatSymbolRefAttr:$component,
-                       StrAttr:$field, StrAttr:$rule, AnyType:$id,
-                       AnyType:$value, AnyMemRef:$world);
+  let arguments = (ins I64Attr:$apply, I64Attr:$archetype,
+                       FlatSymbolRefAttr:$component, StrAttr:$field,
+                       StrAttr:$rule, AnyType:$entity, AnyType:$value,
+                       Optional<Index>:$at, Optional<I1>:$mask,
+                       Optional<I64>:$tick, AnyMemRef:$world,
+                       UnitAttr:$atomic, UnitAttr:$looped,
+                       UnitAttr:$unobserved, UnitAttr:$in_each,
+                       UnitAttr:$order_free, UnitAttr:$direct,
+                       UnitAttr:$sliced, UnitAttr:$in_edges,
+                       UnitAttr:$trusted, OptionalAttr<StrAttr>:$resolution);
   let assemblyFormat = [{
-    $state `[` $slice `]` $component $field $rule `(` $id `,` $value `)`
-    `in` $world attr-dict `:` type($id) `,` type($value) `,` type($world)
+    $apply `[` $archetype `]` $component $field $rule `(` $entity `,` $value
+    `)` (`at` $at^)? (`if` $mask^)? (`tick` $tick^)? `in` $world attr-dict
+    `:` type($entity) `,` type($value) `,` type($world)
   }];
 }
 
-def Ent_SaMergeOp : Ent_Op<"sa.merge"> {
-  let summary = "Combine what was staged on a state into its entities' fields";
+def Ent_SaMergeOp : Ent_Op<"sa.merge", [AttrSizedOperandSegments]> {
+  let summary = "Combine what was staged for an apply into its fields";
   let description = [{
     ```mlir
-    ent.sa.merge 3 @Cell "got" "add" of i32 in %world at %tick
-      {least = 16384 : i64, parallel, resolution = "groups"}
-      : memref<4096xi8>
+    ent.sa.merge 2[1] @Cell "got" "add" of i32 in %world tick %tick
+      {least = 16384 : i64, parallel, resolution = "groups",
+       staged = "list"} : memref<4096xi8>
     ```
-    Where the query ends: what `ent.sa.combine` staged on state 3, combined
-    into the field, each entity's values in the order they were staged
-    (slice by slice, then as sent), so the same on any number of threads.
-    `%tick` is the world's tick where it has stamps.
+    Where the query ends: what `ent.sa.combine` of apply 2 staged for
+    the entities of archetype 1, as `staged` says (`"list"`, `"rows"` or
+    `"edges"`), combined into the field, each entity's values in the order
+    they were staged (row by row or slice by slice, then as sent), so the
+    same on any number of threads. `%count` is how many rows the query
+    went through (rows and edges); `%tick` the world's tick where it has
+    stamps. For edges, `relation` and `inward` say which loop it was in.
 
     What decides how (resolveStateAccess): `parallel` (the loop may have
     run on many threads), `order_shows` (combining it stamps a Changed
     event or reorders a tree, so the order of entities shows), `atomic`,
-    `ranks` (built for many ranks). The decision, `resolution`:
-    `"in-order"` (one value after another) or `"groups"` (in groups of the
-    entities sent to, on many threads, where that takes less: chosen as the
-    program runs, both giving the same).
+    `ranks` (built for many ranks). The decision, `resolution`: for a
+    list, `"in-order"` (one value after another) or `"groups"` (in groups
+    of the entities sent to, on many threads, where that takes less:
+    chosen as the program runs, both giving the same); `"rows"` and
+    `"edges"`, row after row (and edge after edge).
   }];
-  let arguments = (ins I64Attr:$state, FlatSymbolRefAttr:$component,
-                       StrAttr:$field, StrAttr:$rule, TypeAttr:$stored,
-                       AnyMemRef:$world, Optional<I64>:$tick,
-                       UnitAttr:$parallel, UnitAttr:$order_shows,
-                       UnitAttr:$atomic, UnitAttr:$trusted, UnitAttr:$ranks,
-                       I64Attr:$least, OptionalAttr<StrAttr>:$resolution);
+  let arguments = (ins I64Attr:$apply, I64Attr:$archetype,
+                       FlatSymbolRefAttr:$component, StrAttr:$field,
+                       StrAttr:$rule, TypeAttr:$stored, StrAttr:$staged,
+                       AnyMemRef:$world, Optional<Index>:$count,
+                       Optional<I64>:$tick,
+                       OptionalAttr<FlatSymbolRefAttr>:$relation,
+                       UnitAttr:$inward, UnitAttr:$parallel,
+                       UnitAttr:$order_shows, UnitAttr:$atomic,
+                       UnitAttr:$trusted, UnitAttr:$ranks, I64Attr:$least,
+                       OptionalAttr<StrAttr>:$resolution);
   let assemblyFormat = [{
-    $state $component $field $rule `of` $stored `in` $world
-    (`at` $tick^)? attr-dict `:` type($world)
+    $apply `[` $archetype `]` $component $field $rule `of` $stored `in`
+    $world (`count` $count^)? (`tick` $tick^)? attr-dict `:` type($world)
   }];
 }
 
