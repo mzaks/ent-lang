@@ -48,8 +48,10 @@ what the program does on one core (drawing, say) has the machine to
 itself; KMP_BLOCKTIME or OMP_WAIT_POLICY, where the program runs, say
 otherwise. A loop runs on many threads from a million entities on (fewer
 where its body calls out), and the events a reactive one walks from 16384
-on; what was sent from loops in its body is combined on many threads from
-131072 values on, the edges connected there added from 1024 on.
+on; what was sent from loops in its body may be combined on many threads
+from 16384 values on, where that has taken less so far than on one (the
+program times both ways as it runs; ENT_COMBINE=groups or one, where it
+runs, says which instead), the edges connected there added from 1024 on.
 ENT_PARALLEL_MIN, where it is built, says from how many instead of a
 million and 16384, the others following (for tests: 1, every loop that
 can).

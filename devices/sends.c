@@ -15,6 +15,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 #define ENT_SEND_SLICES 256
 #define ENT_SEND_BLOCK 1023
@@ -43,6 +45,15 @@ typedef struct {
 // (Read in groups instead, ent_sends_group: by whom they were sent to.)
 #define ENT_SEND_GROUPS 256
 
+// What combining took, each way (0: one after another, 1: in groups),
+// for each value, so far: and from which call on the way that lost is
+// tried again.
+typedef struct {
+  double cost[2];
+  int known[2], best;
+  int64_t calls, again, wait;
+} ent_send_choice;
+
 // The lists of one sending place, and where the reading of them is.
 typedef struct {
   ent_send_slice slices[ENT_SEND_SLICES];
@@ -58,6 +69,12 @@ typedef struct {
   int64_t *marks;
   // (How many there are, read a slice at a time.)
   int64_t sliced;
+  // How it went combining them each way (ent_sends_choose), for as many
+  // as they were (up to 2^k, k the place); and the way being timed now.
+  ent_send_choice choices[64];
+  int64_t timed_since;
+  int timed_way, timed_size;
+  int64_t timed_count;
 } ent_send_lists;
 
 // (A table of them for each partition a process runs, devices/ranks.c,
@@ -113,6 +130,8 @@ static ent_send_lists *ent_sends_of(int64_t world, int64_t number) {
   made->room = 0;
   made->marks = 0;
   made->sliced = 0;
+  memset(made->choices, 0, sizeof made->choices);
+  made->timed_way = -1;
   if (__atomic_compare_exchange_n(&ent_sends[number], &lists, made, 0,
                                   __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
     return made;
@@ -365,6 +384,93 @@ int64_t ent_sends_group_start(int64_t world, int64_t number, int64_t group) {
 }
 int64_t ent_sends_grouped_data(int64_t world, int64_t number) {
   return (int64_t)(uintptr_t)ent_sends[number]->grouped;
+}
+
+// Which way to combine the `count` values sent (1: in groups, on many
+// threads; 0: one after another), each giving the same: the one that has
+// taken less for each value, for about as many values (from `least` on;
+// fewer, one after another). The first time `guess` (in groups from so
+// many), the second the other way; the way that lost is tried again
+// after 8 more, then twice as many each time it loses again (up to 1024),
+// in case it no longer does. It is timed until ent_sends_chosen.
+// ENT_COMBINE, where the program runs, says `groups` or `one` instead.
+static int ent_sends_forced = -2;
+static int64_t ent_sends_clock(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
+}
+int64_t ent_sends_choose(int64_t world, int64_t number, int64_t count,
+                         int64_t least, int64_t guess) {
+  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
+  if (ent_sends_forced == -2) {
+    const char *asked = getenv("ENT_COMBINE");
+    ent_sends_forced = !asked                         ? -1
+                       : strcmp(asked, "groups") == 0 ? 1
+                       : strcmp(asked, "one") == 0    ? 0
+                                                      : -1;
+  }
+  if (!lists || count <= 0)
+    return 0;
+  lists->timed_way = -1;
+  if (ent_sends_forced >= 0)
+    return ent_sends_forced;
+  if (count < least)
+    return 0;
+  int size = 63 - __builtin_clzll((uint64_t)count);
+  ent_send_choice *choice = &lists->choices[size];
+  int first = count >= guess;
+  int best = choice->known[0] && choice->known[1] ? choice->best
+             : choice->known[0]                   ? 0
+             : choice->known[1]                   ? 1
+                                                  : first;
+  choice->calls += 1;
+  int way = best;
+  if (choice->calls == 2 && !choice->known[!best])
+    way = !best;
+  else if (choice->again && choice->calls >= choice->again)
+    way = !best;
+  lists->timed_way = way;
+  lists->timed_size = size;
+  lists->timed_count = count;
+  lists->timed_since = ent_sends_clock();
+  return way;
+}
+void ent_sends_chosen(int64_t world, int64_t number) {
+  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
+  if (!lists || lists->timed_way < 0)
+    return;
+  double each =
+      (double)(ent_sends_clock() - lists->timed_since) / lists->timed_count;
+  ent_send_choice *choice = &lists->choices[lists->timed_size];
+  int way = lists->timed_way;
+  int both = choice->known[0] && choice->known[1];
+  int was = both ? choice->best : way;
+  // (A time can only be longer than what it takes, the machine doing
+  // something else meanwhile: one below what is known counts for half,
+  // one above for a tenth.)
+  double known = choice->cost[way];
+  choice->cost[way] = !choice->known[way] ? each
+                      : each < known      ? 0.5 * known + 0.5 * each
+                                          : 0.9 * known + 0.1 * each;
+  choice->known[way] = 1;
+  lists->timed_way = -1;
+  if (!choice->known[0] || !choice->known[1])
+    return;
+  // (The other way only where it takes 5% less: not back and forth. The
+  // first time both are known, the one that took less.)
+  int best = was;
+  if (!both)
+    best = choice->cost[1] < choice->cost[0];
+  else if (choice->cost[!was] < 0.95 * choice->cost[was])
+    best = !was;
+  choice->best = best;
+  if (best != was || !choice->wait)
+    choice->wait = 8;
+  else if (way != best)
+    choice->wait = choice->wait < 1024 ? 2 * choice->wait : 1024;
+  if (way != best || best != was || !choice->again)
+    choice->again = choice->calls + choice->wait;
 }
 
 // Nothing is on the lists any more; their blocks are kept.

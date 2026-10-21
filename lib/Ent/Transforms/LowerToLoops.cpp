@@ -12102,13 +12102,15 @@ forEachSent(IRRewriter &rewriter, Location loc, WorldAccess &world, Value list,
 /// `archetype`, at the insertion point: its list from the first to the
 /// last, which is then empty. (Nothing if the loop ran on one thread and
 /// combined each value where it was sent.) Where the loop ran on many
-/// threads (`parallel`), from `many` values on, an apply's values are
+/// threads (`parallel`), from `many` values on, an apply's values may be
 /// combined by groups of the entities they were sent to, the groups on
-/// many threads, each entity's in the order of the list. (Putting them in
-/// groups is five parallel loops and 64K counts: worth it from more
-/// values than other parallel work, so `many` is eight times
-/// parallel-min-events. The spiking network, bench/snn, on 24 threads:
-/// one after another wins at 74 thousand values, groups at 220 thousand.)
+/// many threads, each entity's in the order of the list: where that has
+/// taken less for each value than one after another, for about as many
+/// values (devices/sends.c, ent_sends_choose; both give the same). Which
+/// wins depends on the machine, its threads and what combining does: the
+/// spiking network, bench/snn, on 24 threads, one after another at 74
+/// thousand values, groups at 220 thousand. The first time, groups from
+/// eight times `many` on.
 static void combineLooped(IRRewriter &rewriter, Operation *op,
                           const WorldLayout &layout,
                           const WorldArchetype &archetype, WorldAccess &world,
@@ -12126,10 +12128,17 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
     LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
     Value sent =
         callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
-    Value enough = arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::sge, sent,
-        arith::ConstantIntOp::create(rewriter, loc, many, 64));
-    auto split = scf::IfOp::create(rewriter, loc, enough,
+    // (Which way takes less, as it has gone so far: devices/sends.c,
+    // timed until ent_sends_chosen.)
+    Value grouping = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ne,
+        callSends(rewriter, loc, world, "ent_sends_choose",
+                  {list, sent,
+                   arith::ConstantIntOp::create(rewriter, loc, many, 64),
+                   arith::ConstantIntOp::create(rewriter, loc, many * 8, 64)},
+                  true),
+        arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+    auto split = scf::IfOp::create(rewriter, loc, grouping,
                                    /*withElseRegion=*/true);
     auto asId = [&](Value bits) {
       return world.idType() == rewriter.getI64Type()
@@ -12211,6 +12220,7 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
                     return SmallVector<Value>{};
                   });
     }
+    callSends(rewriter, loc, world, "ent_sends_chosen", {list}, false);
     callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
     return;
   }
@@ -17052,7 +17062,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
          (!neverParallel(*archetype, options, entityLocal) &&
           archetype->capacity != 1)))
       combineLooped(rewriter, op, layout, *archetype, world, tick,
-                    options.parallelEntities, options.parallelMinEvents * 8);
+                    options.parallelEntities, options.parallelMinEvents);
   };
   rewriter.setInsertionPoint(query);
   for (ApplyOp apply : applies)

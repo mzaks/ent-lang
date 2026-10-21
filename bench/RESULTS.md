@@ -3357,3 +3357,33 @@ parallel-min-events, 131072 values, on:
   156 us a step where 70 on one thread, 424 where 230 on 24.
 - The C variants moved as much as 30% either way against the tables
   above, run on other days: compare within a table.
+
+## 2026-10-21: combined in groups where that has taken less
+
+Whether what a `for` sent is combined in groups on many threads or one
+value after another is now chosen as the program runs, for each place it
+is sent from and each size (up to 2^k values): the way that has taken
+less for each value so far (devices/sends.c, `ent_sends_choose`; both
+give the same), the other tried again now and then. `ENT_COMBINE=groups`
+or `one` says which instead. `bench/snn/run.py --rounds 5 --variants
+ent-push-par`, 24 threads, mains power, two passes each way; us per step,
+median of 5 processes:
+
+| neurons x synapses | bias | chosen | in groups | one after another |
+|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 160.8, 202.1 | 388.9, 378.4 | 204.9, 191.5 |
+| 1e+04 x 100 | 0.3 | 223.1, 234.5 | 454.6, 299.8 | 280.4, 274.2 |
+| 1e+05 x 100 | 0.15 | 277.8, 264.7 | 266.5, 258.4 | 457.4, 423.9 |
+| 1e+05 x 100 | 0.3 | 1,281.5, 1,234.4 | 1,238.1, 1,506.3 | 1,545.6, 1,623.3 |
+| 1e+06 x 20 | 0.15 | 1,565.6, 1,538.8 | 1,560.7, 1,535.8 | 2,201.5, 2,067.5 |
+| 1e+06 x 20 | 0.3 | 4,550.8, 4,618.8 | 4,604.0, 4,562.3 | 5,542.5, 5,444.4 |
+
+- Chosen is as fast as the faster way at every size, within the spread.
+- A first version averaged each way's times evenly and switched at any
+  difference: a single slow step (a thread woken late) made the other
+  way look faster, it was tried again 8 steps later, and at 1e6 x 20
+  it took 5,260 us where groups 4,696. Now a time above what is known
+  counts for a tenth, one below for half, and the other way is taken
+  only where it takes 5% less.
+- The epidemic (1e6 people, tracing, 24 threads): median 4.60 s chosen,
+  4.60 s in groups from 131072 values, same bytes.

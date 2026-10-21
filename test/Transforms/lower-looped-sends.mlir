@@ -7,8 +7,9 @@
 // A parallel one visits the rows in 256 slices, each one after another
 // on a thread, and puts what is sent on the slice's list; the query's
 // end reads the lists in order, where they are (a block at a time), and
-// combines: an apply's from many values on by groups of the entities sent
-// to, put in groups and combined on many threads.
+// combines: an apply's from many values on, where that has taken less so
+// far (devices/sends.c chooses), by groups of the entities sent to, put
+// in groups and combined on many threads.
 
 ent.component @H (hp: f32, n: i32)
 ent.archetype @A (@H) capacity 100000
@@ -21,6 +22,7 @@ ent.resource @Score (points: f32)
 // CHECK:             func.call @ent_sends_put(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i64, i64, i64, i64, i64) -> ()
 // CHECK:             func.call @ent_sends_put(
 // CHECK:       %[[SENT:.*]] = call @ent_sends_count(
+// CHECK:       call @ent_sends_choose({{.*}}, %[[SENT]], %c16384_i64, %c131072_i64)
 // CHECK:       scf.if
 // CHECK:         scf.parallel
 // CHECK:           call @ent_sends_group_count(
@@ -47,6 +49,7 @@ ent.resource @Score (points: f32)
 // CHECK:           scf.for
 // CHECK:             llvm.load
 // CHECK:             llvm.load
+// CHECK:       call @ent_sends_chosen(
 // CHECK:       call @ent_sends_clear(
 // CHECK:       call @ent_sends_count(
 // CHECK:       scf.while

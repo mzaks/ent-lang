@@ -12,6 +12,12 @@
 // RUN: FileCheck %s < %t.one
 // RUN: cmp %t.one %t.all
 // RUN: cmp %t.one %t.three
+// Combined in groups, one after another, and whichever has taken less so
+// far (devices/sends.c, ENT_COMBINE): the same.
+// RUN: env ENT_PARALLEL_MIN=1 %ent build --parallel %S/Inputs/looped_sends.ent -o %t.par
+// RUN: env ENT_COMBINE=groups %t.par 2>/dev/null | cmp - %t.one
+// RUN: env ENT_COMBINE=one %t.par 2>/dev/null | cmp - %t.one
+// RUN: %t.par 2>/dev/null | cmp - %t.one
 
 // CHECK:      2740.354004 44999950000 146372.140625 599998 1009
 // CHECK-NEXT: 7: 0.0019 287834
