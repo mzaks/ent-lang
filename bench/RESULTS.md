@@ -3302,3 +3302,58 @@ Native, CPU 2, median of seven; the same output to the bit.
   what inlines it.
 - On all cores the epidemic is within the runs' spread (1.90 to 2.10 s
   either way). Building Doom takes some 4.4 s where 3.8 to 4.2.
+
+## 2026-10-21: the spiking network on many threads, and the lists read where they are
+
+`bench/snn/run.py` had not linked since the lowered program called
+`devices/sends.c`; it does again. Its default run (5 rounds, 100 steps
+after 50, native, 24 threads, on mains power, load average about 1 at
+the start), us per step, median of 5 processes (spread), checksums agree.
+Before: as of 3de0029, the applies along synapses on the lists of a
+`for` (since 5d83c15) and combined by groups from 16384 values on:
+
+| neurons x synapses | bias | firing | c-push | c-pull | c-pull-par | ent-push | ent-push-par | ent-pull | ent-pull-par |
+|---|---|---|---|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | 26.4 (180%) | 376.6 (2%) | 174.3 (31%) | **15.2 (108%)** | 443.9 (15%) | 397.2 (5%) | 231.2 (5%) |
+| 1e+04 x 100 | 0.3 | 7.4% | **39.3 (56%)** | 379.2 (4%) | 149.4 (29%) | 39.3 (39%) | 567.6 (36%) | 400.2 (3%) | 237.0 (32%) |
+| 1e+05 x 100 | 0.15 | 2.0% | 527.3 (10%) | 5,560.0 (2%) | 1,056.5 (13%) | 574.7 (19%) | **472.5 (70%)** | 6,197.2 (5%) | 1,186.4 (63%) |
+| 1e+05 x 100 | 0.3 | 7.3% | 1,690.2 (17%) | 5,593.8 (2%) | **992.0 (14%)** | 1,795.6 (3%) | 1,444.4 (30%) | 6,201.3 (4%) | 1,116.0 (21%) |
+| 1e+06 x 20 | 0.15 | 2.4% | 5,787.7 (4%) | 17,648.3 (4%) | 4,360.5 (8%) | 5,895.6 (4%) | **1,581.3 (10%)** | 17,882.9 (5%) | 4,032.8 (12%) |
+| 1e+06 x 20 | 0.3 | 7.9% | 13,168.5 (4%) | 17,417.5 (4%) | **4,424.7 (10%)** | 13,175.1 (3%) | 4,977.6 (35%) | 17,626.4 (1%) | 5,214.3 (54%) |
+
+After: what a `for` sent read from the lists where it is, a block at a
+time (no call for each value), and combined by groups from eight times
+parallel-min-events, 131072 values, on:
+
+| neurons x synapses | bias | firing | c-push | c-pull | c-pull-par | ent-push | ent-push-par | ent-pull | ent-pull-par |
+|---|---|---|---|---|---|---|---|---|---|
+| 1e+04 x 100 | 0.15 | 2.0% | 23.9 (50%) | 375.3 (24%) | 168.7 (64%) | **22.3 (35%)** | 199.1 (41%) | 396.5 (6%) | 168.6 (51%) |
+| 1e+04 x 100 | 0.3 | 7.4% | 64.5 (46%) | 372.0 (14%) | 177.2 (22%) | **38.1 (67%)** | 277.9 (28%) | 392.7 (6%) | 239.7 (11%) |
+| 1e+05 x 100 | 0.15 | 2.0% | 473.6 (12%) | 4,682.6 (10%) | 1,079.9 (14%) | 520.4 (21%) | **359.1 (106%)** | 4,740.7 (6%) | 1,047.1 (20%) |
+| 1e+05 x 100 | 0.3 | 7.3% | 1,538.4 (6%) | 4,717.2 (6%) | 1,135.9 (39%) | 1,639.1 (5%) | 1,188.8 (7%) | 4,743.4 (6%) | **1,051.8 (46%)** |
+| 1e+06 x 20 | 0.15 | 2.4% | 5,610.8 (4%) | 17,281.8 (4%) | 4,398.2 (25%) | 5,818.1 (6%) | **1,550.5 (43%)** | 16,763.6 (5%) | 4,070.8 (60%) |
+| 1e+06 x 20 | 0.3 | 7.9% | 13,002.1 (2%) | 17,254.3 (6%) | 4,214.9 (5%) | 13,105.1 (5%) | 4,538.3 (3%) | 16,986.0 (3%) | **4,069.4 (9%)** |
+
+- Parallel push now pays from 1e5 neurons, and at 1e6 with few spikes
+  is the fastest of all, 2.8x c-pull-par; in the last Linux table
+  (above, "Spiking network") it was the slowest parallel variant,
+  7.8 ms and 17.0 ms where 1.55 and 4.54 now.
+- At 1e4 the step is too short for 24 threads: parallel push takes
+  199 us where push on one thread takes 22 (a program built by tools/ent
+  runs a loop of fewer than a million entities on one thread; the
+  benchmark asks for parallel loops from one entity on). The 20
+  thousand values a step had been put in groups (five parallel loops,
+  64K counts) for more than they cost.
+- Where the break is, `ent-push-par` at 1e4 x 100 built with
+  parallel-min-events 10^8 (never in groups) against the default, 24
+  threads, median of 5 to 7: 20 thousand values a step 230 us one after
+  another against 465 in groups; 74 thousand 280 against 336; 220
+  thousand (1e5 x 100) 657 against 505; 535 thousand (1e6 x 20) 2,586
+  against 2,337. Hence eight times parallel-min-events. The epidemic
+  (1e6 people, tracing, 24 threads, same bytes) is the same within its
+  spread either way: medians 5.23 s (16384), 5.32 s (131072), 5.27 s
+  before the lists were read where they are.
+- Reading the lists where they are: at 1e4 x 100, one after another,
+  156 us a step where 70 on one thread, 424 where 230 on 24.
+- The C variants moved as much as 30% either way against the tables
+  above, run on other days: compare within a table.

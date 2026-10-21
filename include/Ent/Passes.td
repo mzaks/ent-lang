@@ -67,11 +67,10 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
     Option<"parallelMinEvents", "parallel-min-events", "int64_t",
            /*default=*/"16384",
            "Pending event-log entries from which a reactive query walks its "
-           "logs' segments in parallel, and values sent from loops of a "
-           "query's body from which they are combined in parallel, by "
-           "groups of their targets, and a sixteenth of that many edges "
-           "connected there, from which they are added in parallel (with "
-           "parallel-entities)">,
+           "logs' segments in parallel (with parallel-entities). Values sent "
+           "from loops of a query's body are combined in parallel, by groups "
+           "of their targets, from eight times as many; edges connected "
+           "there are added in parallel from a sixteenth as many">,
     Option<"parallelMinLevel", "parallel-min-level", "int64_t",
            /*default=*/"32768",
            "Entities of one depth of a sorted tree from which a cascading "

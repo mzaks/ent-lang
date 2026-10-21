@@ -12024,13 +12024,91 @@ static bool combinesApart(ApplyOp apply, const WorldLayout &layout) {
   return true;
 }
 
+/// The word (i64) at `address` (an i64) and `offset` bytes after it.
+static Value loadWord(IRRewriter &rewriter, Location loc, Value address,
+                      int64_t offset) {
+  Type i64 = rewriter.getI64Type();
+  if (offset)
+    address = arith::AddIOp::create(
+        rewriter, loc, address,
+        arith::ConstantIntOp::create(rewriter, loc, offset, 64));
+  return LLVM::LoadOp::create(
+      rewriter, loc, i64,
+      LLVM::IntToPtrOp::create(
+          rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
+          address));
+}
+
+/// Go through what was sent on `list` in its order, at the insertion
+/// point: `body` given whom each was sent to and what (64 bits each) and
+/// what it carries from the one before (`initial` for the first), giving
+/// what it carries to the next. Read where they are, a block of the lists
+/// at a time (ent_sends_next_block, devices/sends.c), after
+/// ent_sends_count. Gives what the last gave.
+static SmallVector<Value>
+forEachSent(IRRewriter &rewriter, Location loc, WorldAccess &world, Value list,
+            ValueRange initial,
+            function_ref<SmallVector<Value>(Value, Value, ValueRange)> body) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  Type i64 = rewriter.getI64Type();
+  SmallVector<Type> types{i64};
+  for (Value value : initial)
+    types.push_back(value.getType());
+  // (What it gives: the block it ended at, 0, and what is carried.)
+  auto blocks = scf::WhileOp::create(rewriter, loc, types, initial);
+  Block *before = rewriter.createBlock(
+      &blocks.getBefore(), {}, TypeRange(types).drop_front(),
+      SmallVector<Location>(initial.size(), loc));
+  Value block =
+      callSends(rewriter, loc, world, "ent_sends_next_block", {list}, true);
+  SmallVector<Value> passed{block};
+  llvm::append_range(passed, before->getArguments());
+  scf::ConditionOp::create(
+      rewriter, loc,
+      arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, block,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 64)),
+      passed);
+  Block *after = rewriter.createBlock(&blocks.getAfter(), {}, types,
+                                      SmallVector<Location>(types.size(), loc));
+  Value at = after->getArgument(0);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value count = world.toIndex(loc, loadWord(rewriter, loc, at, 8));
+  auto entries = scf::ForOp::create(rewriter, loc, zero, count, one,
+                                    after->getArguments().drop_front());
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    // (Its own yield, where it carries nothing, is the body's.)
+    if (Block *body = entries.getBody(); !body->empty())
+      rewriter.eraseOp(body->getTerminator());
+    rewriter.setInsertionPointToStart(entries.getBody());
+    Value entry = arith::AddIOp::create(
+        rewriter, loc, at,
+        arith::ShLIOp::create(
+            rewriter, loc,
+            arith::IndexCastOp::create(rewriter, loc, i64,
+                                       entries.getInductionVar()),
+            arith::ConstantIntOp::create(rewriter, loc, 4, 64)));
+    SmallVector<Value> carried =
+        body(loadWord(rewriter, loc, entry, 16),
+             loadWord(rewriter, loc, entry, 24), entries.getRegionIterArgs());
+    scf::YieldOp::create(rewriter, loc, carried);
+  }
+  scf::YieldOp::create(rewriter, loc, entries.getResults());
+  return SmallVector<Value>(blocks.getResults().drop_front());
+}
+
 /// Combine what `op` sent from loops of the body for the entities of
 /// `archetype`, at the insertion point: its list from the first to the
 /// last, which is then empty. (Nothing if the loop ran on one thread and
 /// combined each value where it was sent.) Where the loop ran on many
 /// threads (`parallel`), from `many` values on, an apply's values are
 /// combined by groups of the entities they were sent to, the groups on
-/// many threads, each entity's in the order of the list.
+/// many threads, each entity's in the order of the list. (Putting them in
+/// groups is five parallel loops and 64K counts: worth it from more
+/// values than other parallel work, so `many` is eight times
+/// parallel-min-events. The spiking network, bench/snn, on 24 threads:
+/// one after another wins at 74 thousand values, groups at 220 thousand.)
 static void combineLooped(IRRewriter &rewriter, Operation *op,
                           const WorldLayout &layout,
                           const WorldArchetype &archetype, WorldAccess &world,
@@ -12053,20 +12131,27 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
         arith::ConstantIntOp::create(rewriter, loc, many, 64));
     auto split = scf::IfOp::create(rewriter, loc, enough,
                                    /*withElseRegion=*/true);
-    // (The values of the `k`th of the groups.)
+    auto asId = [&](Value bits) {
+      return world.idType() == rewriter.getI64Type()
+                 ? bits
+                 : arith::TruncIOp::create(rewriter, loc, world.idType(), bits)
+                       .getResult();
+    };
+    // (The values of the `k`th of the groups, from where they are: two
+    // words each.)
+    Value grouped;
     auto combineAt = [&](Value k) {
-      Value at =
-          arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(), k);
-      Value id =
-          callSends(rewriter, loc, world, "ent_sends_id_at", {list, at}, true);
-      if (world.idType() != rewriter.getI64Type())
-        id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
-      Value value =
-          fromSendBits(rewriter, loc,
-                       callSends(rewriter, loc, world, "ent_sends_value_at",
-                                 {list, at}, true),
-                       stored);
-      combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
+      Value at = arith::AddIOp::create(
+          rewriter, loc, grouped,
+          arith::ShLIOp::create(
+              rewriter, loc,
+              arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
+                                         k),
+              arith::ConstantIntOp::create(rewriter, loc, 4, 64)));
+      combineInto(
+          rewriter, apply, layout, world, asId(loadWord(rewriter, loc, at, 0)),
+          fromSendBits(rewriter, loc, loadWord(rewriter, loc, at, 8), stored),
+          tick, bounds);
     };
     {
       OpBuilder::InsertionGuard inner(rewriter);
@@ -12091,6 +12176,8 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
       callSends(rewriter, loc, world, "ent_sends_group_starts", {list}, true);
       onThreads("ent_sends_group_mark");
       onThreads("ent_sends_group_place");
+      grouped = callSends(rewriter, loc, world, "ent_sends_grouped_data",
+                          {list}, true);
       auto groups = scf::ParallelOp::create(
           rewriter, loc, ValueRange{zero},
           ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 256)},
@@ -12116,56 +12203,43 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
       OpBuilder::InsertionGuard inner(rewriter);
       // (Fewer: in the order of the lists, each entity's in theirs still.)
       rewriter.setInsertionPoint(split.elseBlock()->getTerminator());
-      auto entries = scf::ForOp::create(rewriter, loc, zero,
-                                        world.toIndex(loc, sent), one);
-      rewriter.setInsertionPoint(entries.getBody()->getTerminator());
-      Value id = callSends(rewriter, loc, world, "ent_sends_id", {list}, true);
-      if (world.idType() != rewriter.getI64Type())
-        id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
-      Value value = fromSendBits(
-          rewriter, loc,
-          callSends(rewriter, loc, world, "ent_sends_value", {list}, true),
-          stored);
-      combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
+      forEachSent(rewriter, loc, world, list, {},
+                  [&](Value id, Value value, ValueRange) {
+                    combineInto(rewriter, apply, layout, world, asId(id),
+                                fromSendBits(rewriter, loc, value, stored),
+                                tick, bounds);
+                    return SmallVector<Value>{};
+                  });
     }
     callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
     return;
   }
-  Value sent = world.toIndex(
-      loc, callSends(rewriter, loc, world, "ent_sends_count", {list}, true));
+  // (In the order of the lists, read where they are.)
+  callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
   if (apply) {
     LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
-    auto loop = scf::ForOp::create(rewriter, loc, zero, sent, one);
-    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-    Value id = callSends(rewriter, loc, world, "ent_sends_id", {list}, true);
-    if (world.idType() != rewriter.getI64Type())
-      id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
-    Value value = fromSendBits(
-        rewriter, loc,
-        callSends(rewriter, loc, world, "ent_sends_value", {list}, true),
-        stored);
-    combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
-    rewriter.setInsertionPointAfter(loop);
+    forEachSent(
+        rewriter, loc, world, list, {}, [&](Value id, Value value, ValueRange) {
+          if (world.idType() != rewriter.getI64Type())
+            id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
+          combineInto(rewriter, apply, layout, world, id,
+                      fromSendBits(rewriter, loc, value, stored), tick, bounds);
+          return SmallVector<Value>{};
+        });
   } else {
     auto accumulate = cast<AccumulateOp>(op);
     Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
                                       accumulate.getFieldAttr());
     Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
-    auto loop = scf::ForOp::create(rewriter, loc, zero, sent, one,
-                                   ValueRange{start});
-    rewriter.setInsertionPointToStart(loop.getBody());
-    Value value = fromSendBits(
-        rewriter, loc,
-        callSends(rewriter, loc, world, "ent_sends_value", {list}, true),
-        stored);
-    scf::YieldOp::create(
-        rewriter, loc,
-        ValueRange{combine(rewriter, loc, accumulate.getRule(),
-                           loop.getRegionIterArg(0), value,
-                           hasNoSign(accumulate.getValue().getType()))});
-    rewriter.setInsertionPointAfter(loop);
-    memref::StoreOp::create(rewriter, loc, loop.getResult(0), field,
-                            ValueRange{zero});
+    SmallVector<Value> sum =
+        forEachSent(rewriter, loc, world, list, {start},
+                    [&](Value, Value value, ValueRange carried) {
+                      return SmallVector<Value>{combine(
+                          rewriter, loc, accumulate.getRule(), carried[0],
+                          fromSendBits(rewriter, loc, value, stored),
+                          hasNoSign(accumulate.getValue().getType()))};
+                    });
+    memref::StoreOp::create(rewriter, loc, sum[0], field, ValueRange{zero});
   }
   callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
 }
@@ -16978,7 +17052,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
          (!neverParallel(*archetype, options, entityLocal) &&
           archetype->capacity != 1)))
       combineLooped(rewriter, op, layout, *archetype, world, tick,
-                    options.parallelEntities, options.parallelMinEvents);
+                    options.parallelEntities, options.parallelMinEvents * 8);
   };
   rewriter.setInsertionPoint(query);
   for (ApplyOp apply : applies)

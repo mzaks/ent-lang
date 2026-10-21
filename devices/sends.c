@@ -11,6 +11,7 @@
 // and for one row the order it was sent in, however many threads there
 // were. A list is blocks that are taken as they are needed and kept for
 // the next time.
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,10 @@ typedef struct ent_send_block {
   uint64_t count;
   uint64_t sent[2 * ENT_SEND_BLOCK];
 } ent_send_block;
+// (The compiler reads a block where it is, ent_sends_next_block: how many
+// at 8 bytes in, from 16 on each one's id and value.)
+_Static_assert(offsetof(ent_send_block, count) == 8, "a block's count");
+_Static_assert(offsetof(ent_send_block, sent) == 16, "a block's values");
 
 // (A line of the cache each: every thread writes its own. Where a
 // reading of the slice alone is, ent_sends_slice_first.)
@@ -173,6 +178,31 @@ static ent_send_block *ent_sends_at(ent_send_lists *lists) {
     lists->at = 0;
   }
   return lists->block;
+}
+
+// Or the next block that has any, by its address (0: none left), for the
+// compiler to read them from (two words each, see ent_send_block).
+int64_t ent_sends_next_block(int64_t world, int64_t number) {
+  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
+  if (!lists)
+    return 0;
+  for (;;) {
+    ent_send_block *block = lists->block;
+    if (block && block != lists->slices[lists->slice].last) {
+      block = block->next;
+    } else {
+      do
+        lists->slice += 1;
+      while (lists->slice < ENT_SEND_SLICES &&
+             !lists->slices[lists->slice].last);
+      if (lists->slice >= ENT_SEND_SLICES)
+        return 0;
+      block = lists->slices[lists->slice].first;
+    }
+    lists->block = block;
+    if (block->count)
+      return (int64_t)(uintptr_t)block;
+  }
 }
 
 // Whom the next one was sent to; and what, which goes on to the one after.
@@ -328,15 +358,13 @@ void ent_sends_group_place(int64_t world, int64_t number, int64_t slice) {
 }
 
 // Where `group` starts among them (ENT_SEND_GROUPS: where the last ends);
-// whom the `k`th was sent to, and what.
+// where they are, two words each, whom it was sent to and what, for the
+// compiler to read them from.
 int64_t ent_sends_group_start(int64_t world, int64_t number, int64_t group) {
   return ent_sends[number]->starts[group];
 }
-int64_t ent_sends_id_at(int64_t world, int64_t number, int64_t k) {
-  return (int64_t)ent_sends[number]->grouped[2 * k];
-}
-int64_t ent_sends_value_at(int64_t world, int64_t number, int64_t k) {
-  return (int64_t)ent_sends[number]->grouped[2 * k + 1];
+int64_t ent_sends_grouped_data(int64_t world, int64_t number) {
+  return (int64_t)(uintptr_t)ent_sends[number]->grouped;
 }
 
 // Nothing is on the lists any more; their blocks are kept.
