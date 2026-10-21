@@ -1858,24 +1858,16 @@ static arith::AtomicRMWKind atomicKind(StringRef rule, bool noSign) {
   return arith::AtomicRMWKind::addi;
 }
 
-static bool appliesDirectly(Operation *apply, bool directApplies) {
-  if (!isa<ApplyOp, AccumulateOp>(apply))
-    return false;
-  return apply->hasAttr(kAtomicAttr) ||
-         apply->hasAttr(kInEachAttr) || apply->hasAttr(kReducedAttr) ||
-         apply->hasAttr(kLoopedAttr) || apply->hasAttr(kOrderFreeAttr) ||
-         (directApplies && apply->hasAttr(kUnobservedAttr));
-}
-
-/// What an apply is where it is sent, which decides how its values reach
-/// the field (resolveApply; the facts of SaCombineOp): `directApplies`,
-/// whether the query's loop may combine where it is sent; `sliced`,
-/// whether it is in a slice of a parallel loop.
+/// What an apply or an accumulate is where it is sent, which decides how
+/// its values reach the field (resolveSend; the facts of SaCombineOp and
+/// SaAccumulateOp): `directApplies`, whether the query's loop may combine
+/// where it is sent; `sliced`, whether it is in a slice of a parallel
+/// loop.
 namespace {
 struct ApplyFacts {
   bool atomic = false, looped = false, unobserved = false, inEach = false,
-       orderFree = false, direct = false, sliced = false, inEdges = false,
-       trusted = false;
+       orderFree = false, reduced = false, direct = false, sliced = false,
+       inEdges = false, trusted = false;
 };
 } // namespace
 static ApplyFacts applyFacts(Operation *apply, bool directApplies,
@@ -1886,18 +1878,20 @@ static ApplyFacts applyFacts(Operation *apply, bool directApplies,
   facts.unobserved = apply->hasAttr(kUnobservedAttr);
   facts.inEach = apply->hasAttr(kInEachAttr);
   facts.orderFree = apply->hasAttr(kOrderFreeAttr);
+  facts.reduced = apply->hasAttr(kReducedAttr);
   facts.direct = directApplies;
   facts.sliced = sliced;
   facts.inEdges = apply->getParentOfType<EdgesOp>() != nullptr;
   facts.trusted = apply->hasAttr(kTrustedAttr);
   return facts;
 }
-static StringRef resolveApply(const ApplyFacts &facts);
-/// Where what `apply` sends waits for the query's end in a slot of its row
-/// or edge ("rows", "edges"), and nothing ("") where it does not.
-static StringRef stagedSlots(ApplyOp apply, bool directApplies) {
+static StringRef resolveSend(const ApplyFacts &facts);
+/// Where what `apply` (an apply or an accumulate) sends waits for the
+/// query's end in a slot of its row or edge ("rows", "edges"), and nothing
+/// ("") where it does not.
+static StringRef stagedSlots(Operation *apply, bool directApplies) {
   StringRef resolution =
-      resolveApply(applyFacts(apply, directApplies, /*sliced=*/false));
+      resolveSend(applyFacts(apply, directApplies, /*sliced=*/false));
   return resolution == "rows" || resolution == "edges" ? resolution
                                                        : StringRef();
 }
@@ -1922,6 +1916,15 @@ static void placeAppended(IRRewriter &rewriter, Operation *op,
                           const WorldLayout &layout,
                           const WorldArchetype &archetype, WorldAccess &world,
                           Value count, bool parallel, int64_t many);
+/// What `accumulate` (in the body of a query over `archetype`) sends, at
+/// the insertion point: an `ent.sa.accumulate`, resolved
+/// (resolveStateAccess) and carried out (lowerStateAccess) there. `at` is
+/// its row; `mask` whether the body runs for this entity.
+static void sendAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
+                            const WorldLayout &layout,
+                            const WorldArchetype &archetype,
+                            WorldAccess &world, Value at, Value mask,
+                            bool directApplies);
 
 /// What recordPending does, for a query that does not visit rows in their
 /// order (a cascading one), which applying the pending rows goes by: the
@@ -3219,63 +3222,10 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
       sendApplied(rewriter, apply, layout, archetype, world, entity, mask,
                   tick, directApplies);
       rewriter.eraseOp(op);
-    } else if (isa<AccumulateOp>(op) && op->hasAttr(kLoopedAttr) &&
-               (sendSegment || !op->hasAttr(kUnobservedAttr))) {
-      // From a loop of the body, in a parallel loop: to its slice's list.
-      // (And in any loop where the query sees the field: it lands when
-      // the query ends.)
-      Value value = world.toStorage(loc, cast<AccumulateOp>(op).getValue());
-      if (mask) {
-        auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
-        rewriter.setInsertionPointToStart(ifApplies.thenBlock());
-      }
-      putSend(rewriter, loc, op, archetype, world, Value(), value);
-      rewriter.eraseOp(op);
-    } else if (auto accumulate = dyn_cast<AccumulateOp>(op);
-               accumulate && appliesDirectly(accumulate, directApplies)) {
-      // Combine into the resource now, in the order the query's end would.
-      if (mask) {
-        auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
-        rewriter.setInsertionPointToStart(ifApplies.thenBlock());
-      }
-      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-      // (On the GPU: into the cell of the GPU's copy, see
-      // gpuAccumulateCells.)
-      if (accumulate->hasAttr(kAtomicAttr)) {
-        memref::AtomicRMWOp::create(
-            rewriter, loc,
-            atomicKind(accumulate.getRule(),
-                       hasNoSign(accumulate.getValue().getType())),
-            world.toStorage(loc, accumulate.getValue()),
-            world.ownResourceField(accumulate.getResourceAttr().getAttr(),
-                                   accumulate.getFieldAttr()),
-            ValueRange{zero});
-        rewriter.eraseOp(op);
-        continue;
-      }
-      Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
-                                        accumulate.getFieldAttr());
-      Value old = memref::LoadOp::create(rewriter, loc, field,
-                                         ValueRange{zero});
-      memref::StoreOp::create(
-          rewriter, loc,
-          combine(rewriter, loc, accumulate.getRule(), old,
-                  world.toStorage(loc, accumulate.getValue()),
-                  hasNoSign(accumulate.getValue().getType())),
-          field, ValueRange{zero});
-      rewriter.eraseOp(op);
     } else if (auto accumulate = dyn_cast<AccumulateOp>(op)) {
-      // The same, with "sent" (0) for a target id.
-      auto [ids, values] = world.applyBuffer(accumulate, archetype);
-      Value sent = arith::ConstantIntOp::create(
-          rewriter, loc,
-          cast<MemRefType>(ids.getType()).getElementType(), 0);
-      if (mask)
-        sent = arith::SelectOp::create(rewriter, loc, mask, sent,
-                                       world.noEntity(loc));
-      memref::StoreOp::create(rewriter, loc, sent, ids, ValueRange{entity});
-      memref::StoreOp::create(rewriter, loc, accumulate.getValue(), values,
-                              ValueRange{entity});
+      // Staged on its slice's list, in its row's slot, or combined now.
+      sendAccumulated(rewriter, accumulate, layout, archetype, world, entity,
+                      mask, directApplies);
       rewriter.eraseOp(op);
     } else if (isa<ConnectOp, AppendOp>(op)) {
       // Staged on its slice's list, or in its row's places.
@@ -4296,9 +4246,8 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
   // the loop ran.
   query.getBody().walk([&](Operation *apply) {
     if (!isa<ApplyOp, AccumulateOp, ConnectOp, AppendOp>(apply) ||
-        (isa<ApplyOp>(apply)
-             ? stagedSlots(cast<ApplyOp>(apply), directApplies).empty()
-             : appliesDirectly(apply, directApplies)) ||
+        (isa<ApplyOp, AccumulateOp>(apply) &&
+         stagedSlots(apply, directApplies).empty()) ||
         apply->hasAttr(kAtOnceAttr))
       return;
     bool inEdges = apply->getParentOfType<EdgesOp>() != nullptr;
@@ -12217,21 +12166,24 @@ forEachSent(IRRewriter &rewriter, Location loc, WorldAccess &world, Value list,
   return SmallVector<Value>(blocks.getResults().drop_front());
 }
 
-/// How what an apply sends is done, from what it is (see SaCombineOp).
-/// What reaches its field in an order that may show waits for the
-/// query's end: on the slice's list where it is sent from a loop of the
-/// body (more than once for a row) and the query's loop may run in slices
-/// or something in the query sees the field; else in a slot of its row
-/// or edge. Combined where it is sent: whole numbers for the GPU,
-/// atomically; an apply from a loop of the body otherwise; one whose
-/// query visits the entities in the order the end would combine them
-/// (`in_each`, `order_free`, or a loop on one thread where nothing else
-/// in the query sees the field).
-static StringRef resolveApply(const ApplyFacts &facts) {
+/// How what an apply or an accumulate sends is done, from what it is (see
+/// SaCombineOp, SaAccumulateOp). What reaches its field in an order that
+/// may show waits for the query's end: on the slice's list where it is
+/// sent from a loop of the body (more than once for a row) and the
+/// query's loop may run in slices or something in the query sees the
+/// field; else in a slot of its row or edge. Combined where it is sent:
+/// whole numbers for the GPU, atomically; one from a loop of the body
+/// otherwise; whole numbers nothing else sees, a parallel loop reducing
+/// them (`reduced`); one whose query visits the entities in the order the
+/// end would combine them (`in_each`, `order_free`, or a loop on one
+/// thread where nothing else in the query sees the field).
+static StringRef resolveSend(const ApplyFacts &facts) {
   if (facts.atomic)
     return "atomic";
   if (facts.looped)
     return facts.sliced || !facts.unobserved ? "list" : "direct";
+  if (facts.reduced)
+    return "reduce";
   if (facts.inEach || facts.orderFree || (facts.direct && facts.unobserved))
     return "direct";
   return facts.inEdges ? "edges" : "rows";
@@ -12247,7 +12199,7 @@ static void resolveStateAccess(SaCombineOp combine) {
   facts.direct = combine.getDirect();
   facts.sliced = combine.getSliced();
   facts.inEdges = combine.getInEdges();
-  combine.setResolution(resolveApply(facts));
+  combine.setResolution(resolveSend(facts));
 }
 
 /// How what was staged for an apply is merged, from what its accesses
@@ -12682,55 +12634,181 @@ static void mergeApplied(IRRewriter &rewriter, ApplyOp apply,
   lowerStateAccess(rewriter, merge, layout, world);
 }
 
-/// Combine what `accumulate` sent from loops of the body for the entities
-/// of `archetype`, at the insertion point: its list from the first to the
-/// last, which is then empty, into the resource field. (Nothing if the
-/// loop ran on one thread and combined each value where it was sent.)
-static void combineLooped(IRRewriter &rewriter, AccumulateOp accumulate,
-                          const WorldArchetype &archetype,
-                          WorldAccess &world) {
+static void resolveStateAccess(SaAccumulateOp accumulate) {
+  ApplyFacts facts;
+  facts.atomic = accumulate.getAtomic();
+  facts.looped = accumulate.getLooped();
+  facts.unobserved = accumulate.getUnobserved();
+  facts.inEach = accumulate.getInEach();
+  facts.orderFree = accumulate.getOrderFree();
+  facts.reduced = accumulate.getReduced();
+  facts.direct = accumulate.getDirect();
+  facts.sliced = accumulate.getSliced();
+  accumulate.setResolution(resolveSend(facts));
+}
+
+/// How what was staged for an accumulate is folded: in the order it was
+/// staged, slice after slice or row after row.
+static void resolveStateAccess(SaFoldOp fold) {
+  fold.setResolution(fold.getStaged() == "list" ? "in-order" : "rows");
+}
+
+/// Carry out `accumulate` (resolved), at its place.
+static void lowerStateAccess(IRRewriter &rewriter, SaAccumulateOp accumulate,
+                             const WorldLayout &layout, WorldAccess &world) {
   Location loc = accumulate.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
-  Value list = sendList(rewriter, loc, accumulate, archetype);
+  rewriter.setInsertionPoint(accumulate);
+  const WorldArchetype &archetype =
+      layout.archetypes[accumulate.getArchetype()];
+  StringRef resolution = *accumulate.getResolution();
+  Value mask = accumulate.getMask();
+  Value given = accumulate.getValue();
+  bool noSign = hasNoSign(given.getType());
+  if (resolution == "list") {
+    // From a loop of the body, in a parallel loop: to its slice's list.
+    // (And in any loop where the query sees the field: it lands when
+    // the query ends.)
+    Value value = world.toStorage(loc, given);
+    if (mask) {
+      auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
+      rewriter.setInsertionPointToStart(ifApplies.thenBlock());
+    }
+    putSend(rewriter, loc,
+            applyListNumber(accumulate.getApply(), accumulate.getArchetype()),
+            world, Value(), value);
+  } else if (resolution == "rows") {
+    // The same as an apply's, with "sent" (0) for a target id.
+    auto [ids, values] = world.applyBuffer(accumulate.getApply(), archetype);
+    Value sent = arith::ConstantIntOp::create(
+        rewriter, loc, cast<MemRefType>(ids.getType()).getElementType(), 0);
+    if (mask)
+      sent = arith::SelectOp::create(rewriter, loc, mask, sent,
+                                     world.noEntity(loc));
+    memref::StoreOp::create(rewriter, loc, sent, ids, ValueRange{accumulate.getAt()});
+    memref::StoreOp::create(rewriter, loc, given, values,
+                            ValueRange{accumulate.getAt()});
+  } else {
+    // Combine into the resource now, in the order the query's end would.
+    if (mask) {
+      auto ifApplies = scf::IfOp::create(rewriter, loc, mask);
+      rewriter.setInsertionPointToStart(ifApplies.thenBlock());
+    }
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    StringAttr resource = accumulate.getResourceAttr().getAttr();
+    if (resolution == "atomic") {
+      // (On the GPU: into the cell of the GPU's copy, see
+      // gpuAccumulateCells.)
+      memref::AtomicRMWOp::create(
+          rewriter, loc, atomicKind(accumulate.getRule(), noSign),
+          world.toStorage(loc, given),
+          world.ownResourceField(resource, accumulate.getFieldAttr()),
+          ValueRange{zero});
+    } else {
+      // (Reduced or kept in a register when the loops are made, see
+      // keepCells.)
+      Value field = world.resourceField(resource, accumulate.getFieldAttr());
+      Value old =
+          memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
+      memref::StoreOp::create(rewriter, loc,
+                              combine(rewriter, loc, accumulate.getRule(), old,
+                                      world.toStorage(loc, given), noSign),
+                              field, ValueRange{zero});
+    }
+  }
+  rewriter.eraseOp(accumulate);
+}
+
+static void sendAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
+                            const WorldLayout &layout,
+                            const WorldArchetype &archetype,
+                            WorldAccess &world, Value at, Value mask,
+                            bool directApplies) {
+  ApplyFacts facts =
+      applyFacts(accumulate, directApplies, sendSegment != nullptr);
+  SmallVector<NamedAttribute> attributes{
+      rewriter.getNamedAttr("apply",
+                            accumulate->getAttr(WorldLayout::kApplyIndexAttr)),
+      rewriter.getNamedAttr("archetype",
+                            rewriter.getI64IntegerAttr(archetype.index)),
+      rewriter.getNamedAttr("resource", accumulate.getResourceAttr()),
+      rewriter.getNamedAttr("field", accumulate.getFieldAttr()),
+      rewriter.getNamedAttr("rule", accumulate.getRuleAttr())};
+  auto flag = [&](StringRef name, bool on) {
+    if (on)
+      attributes.push_back(
+          rewriter.getNamedAttr(name, rewriter.getUnitAttr()));
+  };
+  flag("atomic", facts.atomic);
+  flag("looped", facts.looped);
+  flag("unobserved", facts.unobserved);
+  flag("in_each", facts.inEach);
+  flag("order_free", facts.orderFree);
+  flag("reduced", facts.reduced);
+  flag("direct", facts.direct);
+  flag("sliced", facts.sliced);
+  SmallVector<Value> operands{accumulate.getValue()};
+  SmallVector<int32_t> segments{1};
+  for (Value optional : {at, mask}) {
+    if (optional)
+      operands.push_back(optional);
+    segments.push_back(optional ? 1 : 0);
+  }
+  operands.push_back(world.getArena());
+  segments.push_back(1);
+  attributes.push_back(rewriter.getNamedAttr(
+      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
+  auto access = SaAccumulateOp::create(rewriter, accumulate.getLoc(),
+                                       TypeRange{}, operands, attributes);
+  resolveStateAccess(access);
+  lowerStateAccess(rewriter, access, layout, world);
+}
+
+/// The fold of a list (resolution "in-order"): what an accumulate sent
+/// from loops of the body for the entities of `archetype`, from the
+/// first to the last, which is then empty, into the resource field.
+static void foldList(IRRewriter &rewriter, SaFoldOp fold,
+                     const WorldArchetype &archetype, WorldAccess &world) {
+  Location loc = fold.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  Value list = arith::ConstantIntOp::create(
+      rewriter, loc, applyListNumber(fold.getApply(), fold.getArchetype()), 64);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  Type stored = cast<MemRefType>(
-                    world.applyBuffer(accumulate, archetype).second.getType())
-                    .getElementType();
+  Type stored = fold.getStored();
   // (In the order of the lists, read where they are.)
   callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
-  Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
-                                    accumulate.getFieldAttr());
+  Value field = world.resourceField(fold.getResourceAttr().getAttr(),
+                                    fold.getFieldAttr());
   Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
   SmallVector<Value> sum =
       forEachSent(rewriter, loc, world, list, {start},
                   [&](Value, Value value, ValueRange carried) {
                     return SmallVector<Value>{combine(
-                        rewriter, loc, accumulate.getRule(), carried[0],
+                        rewriter, loc, fold.getRule(), carried[0],
                         fromSendBits(rewriter, loc, value, stored),
-                        hasNoSign(accumulate.getValue().getType()))};
+                        fold.getNoSign())};
                   });
   memref::StoreOp::create(rewriter, loc, sum[0], field, ValueRange{zero});
   callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
 }
 
-/// Fold the values `accumulate` sent from the first `count` rows of
-/// `archetype` into its resource field, at the insertion point, one row
-/// after another (rows that sent nothing are skipped), so the result does
-/// not depend on how the query's loop ran.
-static void combineAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
-                               const WorldArchetype &archetype,
-                               WorldAccess &world, Value count) {
-  Location loc = accumulate.getLoc();
+/// The fold of rows (resolution "rows"): the values an accumulate sent
+/// from the first `count` rows of `archetype` into its resource field,
+/// one row after another (rows that sent nothing are skipped), so the
+/// result does not depend on how the query's loop ran.
+static void foldRows(IRRewriter &rewriter, SaFoldOp fold,
+                     const WorldArchetype &archetype, WorldAccess &world) {
+  Location loc = fold.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
-  auto [ids, values] = world.applyBuffer(accumulate, archetype);
-  Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
-                                    accumulate.getFieldAttr());
+  auto [ids, values] = world.applyBuffer(fold.getApply(), archetype);
+  Value field = world.resourceField(fold.getResourceAttr().getAttr(),
+                                    fold.getFieldAttr());
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
   auto loop = scf::ForOp::create(rewriter, loc,
-                                 firstRowOf(rewriter, loc, archetype), count,
-                                 one, ValueRange{start});
+                                 firstRowOf(rewriter, loc, archetype),
+                                 fold.getCount(), one, ValueRange{start});
   rewriter.setInsertionPointToStart(loop.getBody());
   Value row = loop.getInductionVar();
   Value sum = loop.getRegionIterArg(0);
@@ -12741,13 +12819,57 @@ static void combineAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
   Value value = memref::LoadOp::create(rewriter, loc, values, ValueRange{row});
   Value next = arith::SelectOp::create(
       rewriter, loc, sent,
-      combine(rewriter, loc, accumulate.getRule(), sum, value,
-              hasNoSign(accumulate.getValue().getType())),
+      combine(rewriter, loc, fold.getRule(), sum, value, fold.getNoSign()),
       sum);
   scf::YieldOp::create(rewriter, loc, ValueRange{next});
   rewriter.setInsertionPointAfter(loop);
   memref::StoreOp::create(rewriter, loc, loop.getResult(0), field,
                           ValueRange{zero});
+}
+
+/// Carry out `fold` (resolved), at its place.
+static void lowerStateAccess(IRRewriter &rewriter, SaFoldOp fold,
+                             const WorldLayout &layout, WorldAccess &world) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(fold);
+  const WorldArchetype &archetype = layout.archetypes[fold.getArchetype()];
+  (*fold.getResolution() == "in-order" ? foldList : foldRows)(
+      rewriter, fold, archetype, world);
+  rewriter.eraseOp(fold);
+}
+
+/// Fold what `accumulate` staged for the entities of `archetype` as
+/// `staged` says ("list", or "rows": the first `count` rows), at the
+/// insertion point: an `ent.sa.fold`, resolved (resolveStateAccess) and
+/// carried out (lowerStateAccess) there.
+static void foldAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
+                            StringRef staged, const WorldLayout &layout,
+                            const WorldArchetype &archetype,
+                            WorldAccess &world, Value count) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  Type stored = cast<MemRefType>(
+                    world.applyBuffer(accumulate, archetype).second.getType())
+                    .getElementType();
+  SmallVector<NamedAttribute> attributes{
+      rewriter.getNamedAttr("apply",
+                            accumulate->getAttr(WorldLayout::kApplyIndexAttr)),
+      rewriter.getNamedAttr("archetype",
+                            rewriter.getI64IntegerAttr(archetype.index)),
+      rewriter.getNamedAttr("resource", accumulate.getResourceAttr()),
+      rewriter.getNamedAttr("field", accumulate.getFieldAttr()),
+      rewriter.getNamedAttr("rule", accumulate.getRuleAttr()),
+      rewriter.getNamedAttr("stored", TypeAttr::get(stored)),
+      rewriter.getNamedAttr("staged", rewriter.getStringAttr(staged))};
+  if (hasNoSign(accumulate.getValue().getType()))
+    attributes.push_back(
+        rewriter.getNamedAttr("no_sign", rewriter.getUnitAttr()));
+  SmallVector<Value> operands{world.getArena()};
+  if (staged == "rows")
+    operands.push_back(count);
+  auto fold = SaFoldOp::create(rewriter, accumulate.getLoc(), TypeRange{},
+                               operands, attributes);
+  resolveStateAccess(fold);
+  lowerStateAccess(rewriter, fold, layout, world);
 }
 
 /// What a query's end does to the archetypes it changed the entities of,
@@ -15950,15 +16072,18 @@ static Operation *keepCells(IRRewriter &rewriter, Operation *loops,
     if (accumulate->hasAttr(kInEachAttr))
       looped.insert({accumulate.getResourceAttr(), accumulate.getFieldAttr()});
   for (AccumulateOp accumulate : accumulates) {
-    if (!appliesDirectly(accumulate, sequentialOnly) ||
-        accumulate->hasAttr(kAtomicAttr) ||
+    // (As resolveSend decided where it was sent: those combined there,
+    // not atomically.)
+    StringRef resolution = resolveSend(
+        applyFacts(accumulate, sequentialOnly, /*sliced=*/false));
+    if (resolution == "rows" || resolution == "atomic" ||
         looped.contains(
             {accumulate.getResourceAttr(), accumulate.getFieldAttr()}))
       continue;
     Value cell = world.resourceField(accumulate.getResourceAttr().getAttr(),
                                      accumulate.getFieldAttr());
     cells.push_back(cell);
-    if (accumulate->hasAttr(kReducedAttr))
+    if (resolution == "reduce")
       reduced.push_back({cell, accumulate.getRule(),
                          hasNoSign(accumulate.getValue().getType())});
   }
@@ -17517,20 +17642,12 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // Applies are combined when the whole query has run, in a fixed order:
   // by apply, then archetype, then row. They land before despawns and
   // moves, while every id still leads to where its entity was.
-  // (What a parallel loop sent from a loop of the body, from its lists.)
-  auto looped = [&](AccumulateOp op, const WorldArchetype *archetype) {
-    if (op->hasAttr(kLoopedAttr) &&
-        (!op->hasAttr(kUnobservedAttr) ||
-         (!neverParallel(*archetype, options, entityLocal) &&
-          archetype->capacity != 1)))
-      combineLooped(rewriter, op, *archetype, world);
-  };
   rewriter.setInsertionPoint(query);
   for (ApplyOp apply : applies)
     for (auto [archetype, count] : visited) {
       // (Its list's where the loop may have run in slices or the query
       // sees the field; its rows' or edges' slots'.)
-      StringRef staged = resolveApply(applyFacts(
+      StringRef staged = resolveSend(applyFacts(
           apply, direct.contains(archetype),
           /*sliced=*/!neverParallel(*archetype, options, entityLocal) &&
               archetype->capacity != 1));
@@ -17541,9 +17658,15 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     }
   for (AccumulateOp accumulate : accumulates)
     for (auto [archetype, count] : visited) {
-      looped(accumulate, archetype);
-      if (!appliesDirectly(accumulate, direct.contains(archetype)))
-        combineAccumulated(rewriter, accumulate, *archetype, world, count);
+      // (Its list's where the loop may have run in slices or the query
+      // sees the field; its rows' slots'.)
+      StringRef staged = resolveSend(applyFacts(
+          accumulate, direct.contains(archetype),
+          /*sliced=*/!neverParallel(*archetype, options, entityLocal) &&
+              archetype->capacity != 1));
+      if (staged == "list" || staged == "rows")
+        foldAccumulated(rewriter, accumulate, staged, layout, *archetype,
+                        world, count);
     }
   // Connected edges are appended while the buffers' rows still are the
   // rows that filled them, before despawns and moves.
@@ -18226,9 +18349,11 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
                        count, tick, /*parallel=*/false, /*many=*/0);
     for (AccumulateOp accumulate : accumulates)
       for (auto [archetype, count] : visited)
-        if (matches(*archetype, query) &&
-            !appliesDirectly(accumulate, direct.contains(archetype)))
-          combineAccumulated(rewriter, accumulate, *archetype, world, count);
+        if (StringRef staged =
+                stagedSlots(accumulate, direct.contains(archetype));
+            matches(*archetype, query) && !staged.empty())
+          foldAccumulated(rewriter, accumulate, staged, layout, *archetype,
+                          world, count);
   }
   if (spread) {
     rewriter.setInsertionPoint(insertionPoint);
@@ -21603,7 +21728,7 @@ struct EntLowerToLoops
         return;
       bool inLoop = false;
       // (Built for many threads, an apply in a loop over edges goes on the
-      // lists too, which are combined on many threads, see combineLooped:
+      // lists too, which are combined on many threads, see lowerStateAccess:
       // in the same order, that of the rows and then of their edges. Not
       // for the GPU, whose kernels call no C.)
       bool listed = parallelEntities && !gpu && !ranksMode &&

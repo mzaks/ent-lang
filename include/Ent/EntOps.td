@@ -1748,9 +1748,9 @@ def Ent_YieldOp : Ent_Op<"yield", [
 // What a loop of the lowering touches, said as ops between the `ent` ops
 // and the loops they become, so that how a loop runs in parallel is
 // decided by its accesses (resolveStateAccess in LowerToLoops.cpp) and
-// carried out by a lowering per backend. So far: what an apply in a
-// query sends, and the edges and rows it adds, made and lowered where
-// they are sent and where the query ends.
+// carried out by a lowering per backend. So far: what an apply or an
+// accumulate in a query sends, and the edges and rows it adds, made and
+// lowered where they are sent and where the query ends.
 
 def Ent_SaCombineOp : Ent_Op<"sa.combine", [AttrSizedOperandSegments]> {
   let summary = "Combine into another entity's field: an access of a loop";
@@ -1912,6 +1912,75 @@ def Ent_SaPlaceOp : Ent_Op<"sa.place"> {
   let assemblyFormat = [{
     $kind $index `[` $archetype `]` $target `in` $world
     (`count` $count^)? attr-dict `:` type($world)
+  }];
+}
+
+def Ent_SaAccumulateOp : Ent_Op<"sa.accumulate", [AttrSizedOperandSegments]> {
+  let summary = "Accumulate into a unique's field: an access of a loop";
+  let description = [{
+    ```mlir
+    ent.sa.accumulate 5[1] @Score "points" "add" (%v) at %row in %world
+      {reduced, resolution = "reduce", unobserved} : i32, memref<4096xi8>
+    ```
+    What accumulate 5 of the layout (`ent.accumulate`), in the body of a
+    query over archetype 1, sends: `%v` combined into field `points` of
+    the unique `@Score` by the rule `add`, `min`, `max` or `set`. `%at` is
+    its row; `%mask`, where the body runs only for some entities, whether
+    it does here.
+
+    What it is, as for `ent.sa.combine` (`atomic`, `looped`,
+    `unobserved`, `in_each`, `order_free`, `direct`, `sliced`), and
+    `reduced`: a whole number nothing else in the query sees, sent from
+    the body itself or an `if` of it, in a query that may run in parallel.
+    The decision (resolveStateAccess), `resolution`: `"atomic"` (for the
+    GPU, into its copy's cell) or `"direct"`, combined where it is sent;
+    `"reduce"`, the same, and a parallel loop over the entities reduces
+    the cell (each thread from the number that changes nothing, then the
+    threads'; see keepCells), a loop on one thread keeps it in a
+    register; `"list"`, staged on the list of the slice of the loop it is
+    in; `"rows"`, in a slot of its row. Where it is staged, an
+    `ent.sa.fold` of the same accumulate and archetype combines.
+  }];
+  let arguments = (ins I64Attr:$apply, I64Attr:$archetype,
+                       FlatSymbolRefAttr:$resource, StrAttr:$field,
+                       StrAttr:$rule, AnyType:$value, Optional<Index>:$at,
+                       Optional<I1>:$mask, AnyMemRef:$world,
+                       UnitAttr:$atomic, UnitAttr:$looped,
+                       UnitAttr:$unobserved, UnitAttr:$in_each,
+                       UnitAttr:$order_free, UnitAttr:$reduced,
+                       UnitAttr:$direct, UnitAttr:$sliced,
+                       OptionalAttr<StrAttr>:$resolution);
+  let assemblyFormat = [{
+    $apply `[` $archetype `]` $resource $field $rule `(` $value `)`
+    (`at` $at^)? (`if` $mask^)? `in` $world attr-dict `:` type($value) `,`
+    type($world)
+  }];
+}
+
+def Ent_SaFoldOp : Ent_Op<"sa.fold"> {
+  let summary = "Fold what was staged for an accumulate into its unique";
+  let description = [{
+    ```mlir
+    ent.sa.fold 5[1] @Score "points" "add" of i32 in %world count %n
+      {resolution = "rows", staged = "rows"} : memref<4096xi8>
+    ```
+    Where the query ends: what `ent.sa.accumulate` of accumulate 5 staged
+    for the entities of archetype 1, as `staged` says (`"list"`, or
+    `"rows"`, the first `%count` rows), folded into the unique's field in
+    the order it was staged, so the result does not depend on how the
+    query's loop ran. `no_sign`: a whole number without a sign. The
+    decision, `resolution`: `"in-order"` for a list (slice after slice,
+    then as sent), `"rows"` row after row (rows that sent nothing are
+    skipped).
+  }];
+  let arguments = (ins I64Attr:$apply, I64Attr:$archetype,
+                       FlatSymbolRefAttr:$resource, StrAttr:$field,
+                       StrAttr:$rule, TypeAttr:$stored, StrAttr:$staged,
+                       AnyMemRef:$world, Optional<Index>:$count,
+                       UnitAttr:$no_sign, OptionalAttr<StrAttr>:$resolution);
+  let assemblyFormat = [{
+    $apply `[` $archetype `]` $resource $field $rule `of` $stored `in`
+    $world (`count` $count^)? attr-dict `:` type($world)
   }];
 }
 
