@@ -11928,13 +11928,13 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
   if (apply && parallel && combinesApart(apply, layout)) {
     LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
     Value sent =
-        callSends(rewriter, loc, world, "ent_sends_group", {list}, true);
+        callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
     Value enough = arith::CmpIOp::create(
         rewriter, loc, arith::CmpIPredicate::sge, sent,
         arith::ConstantIntOp::create(rewriter, loc, many, 64));
     auto split = scf::IfOp::create(rewriter, loc, enough,
                                    /*withElseRegion=*/true);
-    // (The values of the `k`th, of a group or of all.)
+    // (The values of the `k`th of the groups.)
     auto combineAt = [&](Value k) {
       Value at =
           arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(), k);
@@ -11952,6 +11952,26 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
     {
       OpBuilder::InsertionGuard inner(rewriter);
       rewriter.setInsertionPoint(split.thenBlock()->getTerminator());
+      // (Put in groups first, devices/sends.c: a step on many threads, by
+      // the 256 slices or groups, for each but the adding up in order.)
+      auto onThreads = [&](StringRef step) {
+        auto loop = scf::ParallelOp::create(
+            rewriter, loc, ValueRange{zero},
+            ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 256)},
+            ValueRange{one});
+        OpBuilder::InsertionGuard body(rewriter);
+        rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+        callSends(rewriter, loc, world, step,
+                  {list, arith::IndexCastOp::create(
+                             rewriter, loc, rewriter.getI64Type(),
+                             loop.getInductionVars().front())},
+                  false);
+      };
+      onThreads("ent_sends_group_count");
+      onThreads("ent_sends_group_total");
+      callSends(rewriter, loc, world, "ent_sends_group_starts", {list}, true);
+      onThreads("ent_sends_group_mark");
+      onThreads("ent_sends_group_place");
       auto groups = scf::ParallelOp::create(
           rewriter, loc, ValueRange{zero},
           ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 256)},
@@ -11975,11 +11995,19 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
     }
     {
       OpBuilder::InsertionGuard inner(rewriter);
+      // (Fewer: in the order of the lists, each entity's in theirs still.)
       rewriter.setInsertionPoint(split.elseBlock()->getTerminator());
       auto entries = scf::ForOp::create(rewriter, loc, zero,
                                         world.toIndex(loc, sent), one);
       rewriter.setInsertionPoint(entries.getBody()->getTerminator());
-      combineAt(entries.getInductionVar());
+      Value id = callSends(rewriter, loc, world, "ent_sends_id", {list}, true);
+      if (world.idType() != rewriter.getI64Type())
+        id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
+      Value value = fromSendBits(
+          rewriter, loc,
+          callSends(rewriter, loc, world, "ent_sends_value", {list}, true),
+          stored);
+      combineInto(rewriter, apply, layout, world, id, value, tick, bounds);
     }
     callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
     return;
