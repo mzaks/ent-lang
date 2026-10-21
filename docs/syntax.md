@@ -2066,7 +2066,7 @@ on `f32`, with `64` at its end on `f64` (`sin64`), with an `i` in front on
   `log264` follow Arm's optimized-routines, as glibc's do (`pow64` and
   `log64` within 0.52 ulp, `log264` 0.55, `pow` 0.82). The f32 ones have shorter polynomials of their own (FreeBSD's),
   worked out in f64 and rounded once: within an ulp, and as often rounded
-  right as glibc's.
+  right as glibc's. Their notices and licenses are in THIRD_PARTY_NOTICES.
   Where they give not a number its bits are `0x7ff8000000000000`, of
   the f32 ones `0x7fc00000`.
 - Also written in ent-lang: `pi()`, `tau()` (and `pi64()`, `tau64()`),

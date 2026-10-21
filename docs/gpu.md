@@ -505,7 +505,8 @@ are written in `devices/math.ent` from `+ - * /`, the built-in `sqrt` and
 the bits of floats (`bits_of`, `float_of`), all of which IEEE 754 rounds
 exactly: fdlibm's algorithms as FreeBSD's msun and Mojo's standard
 library have them (Mojo's comments and constants, checked against π and
-ln 2 worked out to 450 digits), `pow` from a logarithm in two floats.
+ln 2 worked out to 450 digits), `pow` from a logarithm in two floats
+(their notices and licenses in THIRD_PARTY_NOTICES).
 Against glibc, on 120,000 inputs each over the whole range (angles to
 2^1023 by the bits of 2/π), every result is within an ulp. On the GPU a
 multiply and an add are never made one fma (the PTX has `mul.rn` and

@@ -1073,3 +1073,9 @@ cheap by default as on the Mac with it. Results, with the conditions they were t
 - [ ] **M3**: layout choice (SoA/AoSoA), system fusion, benchmarks.
 - [ ] Later: structural changes (spawn/despawn), change detection, relations,
       surface syntax.
+
+## Third-party code
+
+`devices/math.ent` is derived from Sun's fdlibm (by way of FreeBSD's msun),
+Arm's optimized-routines and Mojo's standard library. Their copyright
+notices and licenses are in `THIRD_PARTY_NOTICES`.
