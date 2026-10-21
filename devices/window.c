@@ -167,6 +167,26 @@ void ent_window_end_frame(void) {
   EndDrawing();
 }
 
+// For a device that draws in three dimensions within the frame (the
+// scene device, devices/scene.c): the window's own way of drawing put
+// aside (its points, its zoom, a shift or a clip), and taken up again.
+// (rlgl lays a matrix that is pushed on every point it is given, a 3D
+// one too: so it is popped while the scene is drawn.)
+void ent_window_aside(void) {
+  ent_window_shift(0, 0);
+  ent_window_unclip();
+  rlDrawRenderBatchActive();
+  rlPopMatrix();
+}
+void ent_window_again(void) {
+  rlPushMatrix();
+  rlScalef(ent_window_zoom, ent_window_zoom, 1);
+}
+// How many of the picture's pixels a point is across (with the zoom).
+float ent_window_pixels(void) {
+  return GetWindowScaleDPI().x * ent_window_zoom;
+}
+
 float ent_window_mouse_x(void) { return (float)GetMouseX() / ent_window_more; }
 float ent_window_mouse_y(void) { return (float)GetMouseY() / ent_window_more; }
 bool ent_window_mouse_down(int32_t button) { return IsMouseButtonDown(button); }

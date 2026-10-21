@@ -1,0 +1,60 @@
+// A scene in three dimensions, drawn into the window's frame (see
+// devices/window.ent) before what is drawn on top of it in two: boxes
+// (the stuff of a voxel world: each face shaded by the way it looks, so
+// that the box reads as solid without lights), lines and balls, seen
+// from an eye:
+//
+//   import window
+//   import scene
+//   system world3d() {
+//     Boxes += { x: 0.0, y: 0.0, z: 0.0, w: 1.0, h: 1.0, d: 1.0, color: 0x80c040, edge: 0 }
+//     begin_scene(4.0, 3.0, 4.0, 0.0, 0.0, 0.0, 45.0, false)
+//     draw_boxes(Boxes)
+//     end_scene()
+//     Boxes = []
+//   }
+//   schedule frame() { begin()  world3d()  present() }
+//
+// The axes: x to the right, y up, z towards the viewer of the ground's
+// plan (a plan's (x, y) is the scene's (x, z)). What is drawn after
+// `end_scene` lies over the scene, in the window's points as ever.
+// (`screen_x` and `screen_y` are in the window's points, as the mouse
+// is.)
+//
+// Implemented with raylib (devices/scene.c, devices/scene.link).
+import window
+
+// A box by its corner of least x, y and z and its size; `edge`: a colour
+// for its edges, or 0 for none. A colour of 0xAARRGGBB lets what is
+// behind show through: such boxes go after the others.
+transient buffer Boxes {
+  x: f32, y: f32, z: f32, w: f32, h: f32, d: f32, color: i32, edge: i32
+} capacity 32768
+// A line from one point to another.
+transient buffer Rays { x0: f32, y0: f32, z0: f32, x1: f32, y1: f32, z1: f32, color: i32 } capacity 4096
+// A ball by its middle, filled or (`wire`) only its lines.
+transient buffer Balls { x: f32, y: f32, z: f32, r: f32, color: i32, wire: bool } capacity 512
+
+// The scene begins: seen from (eye_x, eye_y, eye_z) towards (at_x, at_y,
+// at_z), up being up; `fov` the degrees it takes in from the bottom to
+// the top, or with `ortho` how many units high it is, all of it seen
+// alike from afar (for a view from above that keeps its sizes). The
+// mouse is followed onto the ground (the plane y = 0) as seen so.
+extern proc begin_scene(eye_x: f32, eye_y: f32, eye_z: f32, at_x: f32, at_y: f32, at_z: f32,
+                        fov: f32, ortho: bool)
+extern proc draw_boxes(them: Boxes)
+extern proc draw_rays(them: Rays)
+extern proc draw_balls(them: Balls)
+// The scene ends: what is drawn after is drawn as before it began.
+extern proc end_scene()
+
+// Where the mouse points on the ground, as the last scene was seen
+// (`ground_hit`: whether it points at the ground at all).
+extern proc ground_hit() -> bool
+extern proc ground_x() -> f32
+extern proc ground_z() -> f32
+// Where a point of the last scene is on the screen, and whether it is in
+// front of the eye at all.
+extern proc screen_x(x: f32, y: f32, z: f32) -> f32
+extern proc screen_y(x: f32, y: f32, z: f32) -> f32
+extern proc in_view(x: f32, y: f32, z: f32) -> bool
