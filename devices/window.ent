@@ -160,6 +160,12 @@ extern fn text_least(text: text, font: i32, size: f32, spacing: f32,
 // a picture. One that is declared (`asset "name.ttf"`) is taken along
 // by `ent build`: next to the program, or in it (`--embed`).
 extern proc font(file: text[126], size: i32) -> i32
+// The font `label` and `paragraph` (and `text_width` and their like)
+// draw with from now on, in place of the machine's: a file found as
+// `font` finds one, so one declared as an asset and taken along in the
+// program (`--embed`) too. Where it is not there, or is no font, they
+// keep the one they had.
+extern proc plain_font(file: text[126])
 // A filled rectangle whose corners are rounded, each with its own
 // radius: top left, top right, bottom left, bottom right.
 extern proc rounded(x: f32, y: f32, width: f32, height: f32, top_left: f32,

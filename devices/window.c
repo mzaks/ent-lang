@@ -373,17 +373,21 @@ static struct {
   int pixels[ENT_WINDOW_PLAIN_SIZES];
   Font at[ENT_WINDOW_PLAIN_SIZES];
   int next;
-} ent_window_plain_font;
+  // (One the program named, `plain_font`: its bytes, wherever they came
+  // from, the program itself too.)
+  struct ent_file held;
+  char kind[8];
+} ent_window_plain_face;
 
 static const char *ent_window_plain_file(void) {
-  if (ent_window_plain_font.looked)
-    return ent_window_plain_font.file;
-  ent_window_plain_font.looked = 1;
+  if (ent_window_plain_face.looked)
+    return ent_window_plain_face.file;
+  ent_window_plain_face.looked = 1;
   const char *asked = getenv("ENT_WINDOW_FONT");
   if (asked && *asked) {
     if (strcmp(asked, "none") != 0 && FileExists(asked))
-      ent_window_plain_font.file = asked;
-    return ent_window_plain_font.file;
+      ent_window_plain_face.file = asked;
+    return ent_window_plain_face.file;
   }
   static const char *known[] = {
       "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
@@ -401,10 +405,10 @@ static const char *ent_window_plain_file(void) {
   };
   for (unsigned i = 0; i < sizeof(known) / sizeof(known[0]); ++i)
     if (FileExists(known[i])) {
-      ent_window_plain_font.file = known[i];
+      ent_window_plain_face.file = known[i];
       break;
     }
-  return ent_window_plain_font.file;
+  return ent_window_plain_face.file;
 }
 
 static float ent_window_zoom_now(void);
@@ -417,24 +421,29 @@ static Font ent_window_plain(float size) {
   if (pixels < 8)
     pixels = 8;
   for (int i = 0; i < ENT_WINDOW_PLAIN_SIZES; ++i)
-    if (ent_window_plain_font.pixels[i] == pixels)
-      return ent_window_plain_font.at[i];
+    if (ent_window_plain_face.pixels[i] == pixels)
+      return ent_window_plain_face.at[i];
   // (The letters of Latin-1, as the library's own font has them.)
   int letters[191];
   for (int i = 0; i < 191; ++i)
     letters[i] = i < 95 ? 32 + i : 160 + (i - 95);
-  Font made = LoadFontEx(file, pixels, letters, 191);
+  Font made = ent_window_plain_face.held.bytes
+                  ? LoadFontFromMemory(ent_window_plain_face.kind,
+                                       ent_window_plain_face.held.bytes,
+                                       (int)ent_window_plain_face.held.size,
+                                       pixels, letters, 191)
+                  : LoadFontEx(file, pixels, letters, 191);
   if (!made.texture.id || !made.glyphCount) {
-    ent_window_plain_font.file = 0;
+    ent_window_plain_face.file = 0;
     return GetFontDefault();
   }
   SetTextureFilter(made.texture, TEXTURE_FILTER_BILINEAR);
-  int slot = ent_window_plain_font.next;
-  ent_window_plain_font.next = (slot + 1) % ENT_WINDOW_PLAIN_SIZES;
-  if (ent_window_plain_font.pixels[slot])
-    UnloadFont(ent_window_plain_font.at[slot]);
-  ent_window_plain_font.at[slot] = made;
-  ent_window_plain_font.pixels[slot] = pixels;
+  int slot = ent_window_plain_face.next;
+  ent_window_plain_face.next = (slot + 1) % ENT_WINDOW_PLAIN_SIZES;
+  if (ent_window_plain_face.pixels[slot])
+    UnloadFont(ent_window_plain_face.at[slot]);
+  ent_window_plain_face.at[slot] = made;
+  ent_window_plain_face.pixels[slot] = pixels;
   return made;
 }
 
@@ -725,6 +734,34 @@ int32_t ent_window_font(const ent_text126 *file, int32_t size) {
   strcpy(ent_window_faces[ent_window_font_count].kind, kind);
   ent_window_faces[ent_window_font_count].size = size;
   return ent_window_font_count++;
+}
+
+// The font of `label` and `paragraph`, named by the program: found as
+// `font` finds one (next to the program, or in it). Where there is no
+// such font, or it is damaged, they keep the one they had.
+void ent_window_plain_font(const ent_text126 *file) {
+  ENT_WINDOW_TEXT(named, file);
+  const char *kind = GetFileExtension(named);
+  struct ent_file held;
+  if (!kind || strlen(kind) >= sizeof ent_window_plain_face.kind ||
+      !ent_file_open(named, &held))
+    return;
+  if (!ent_window_font_whole(named, held.bytes, held.size)) {
+    ent_file_close(&held);
+    return;
+  }
+  for (int i = 0; i < ENT_WINDOW_PLAIN_SIZES; ++i)
+    if (ent_window_plain_face.pixels[i]) {
+      UnloadFont(ent_window_plain_face.at[i]);
+      ent_window_plain_face.pixels[i] = 0;
+    }
+  if (ent_window_plain_face.held.bytes)
+    ent_file_close(&ent_window_plain_face.held);
+  ent_window_plain_face.held = held;
+  strcpy(ent_window_plain_face.kind, kind);
+  ent_window_plain_face.looked = 1;
+  ent_window_plain_face.file = "(the program's)";
+  ent_window_plain_face.next = 0;
 }
 
 // (raylib draws its own font with a tenth of the size between letters.)
