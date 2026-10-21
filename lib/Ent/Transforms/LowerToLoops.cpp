@@ -1693,9 +1693,8 @@ static void combineDirectly(IRRewriter &rewriter, ApplyOp apply,
                             Value id, Value value, Value tick);
 static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
                      Value a, Value b, bool noSign);
-static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
-                    const WorldArchetype &archetype, WorldAccess &world,
-                    Value id, Value value);
+static void putSend(IRRewriter &rewriter, Location loc, int64_t list,
+                    WorldAccess &world, Value id, Value value);
 
 /// Marks an `ent.apply` whose field nothing else in its query touches (no
 /// get, set or lookup of the field, no other apply to it, no add or remove
@@ -7893,6 +7892,104 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
                           world.edgesClean(relation), ValueRange{zero});
 }
 
+// The ranks' lowering of the resolved accesses: on many ranks, what an
+// `ent.sa.place` resolved "routed" or "shared" does where it differs from
+// what one process does.
+
+/// The channel the edges of `place` (resolved "routed") are sent to the
+/// ranks of their ends on; -1 for one whose edges are added here.
+static int64_t ranksEdgeChannel(SaPlaceOp place,
+                                const WorldRelation &relation) {
+  return *place.getResolution() == "routed"
+             ? rankEdgeChannel(relation, /*note=*/false,
+                               2 + relation.fields.size())
+             : -1;
+}
+
+/// Add an edge `place` staged (`source` to `target` with `values`, stored
+/// form), at the insertion point: resolved "routed", sent on `channel` to
+/// the ranks of its ends, which add it when the query ends
+/// (deliverEdges); else here.
+static void addStagedEdge(IRRewriter &rewriter, Location loc, SaPlaceOp place,
+                          const WorldLayout &layout, WorldAccess &world,
+                          const WorldRelation &relation, int64_t channel,
+                          Value source, Value target, ValueRange values) {
+  if (channel >= 0)
+    routeEdge(rewriter, loc, place->getParentOfType<ModuleOp>(), world,
+              channel, source, target, values);
+  else
+    appendEdge(rewriter, loc, layout, world, relation, source, target, values);
+}
+
+/// Resolved "shared": how many of this rank's rows (`first` to `count`)
+/// added a row (`sent`, a byte each), and how many the ranks before it
+/// added; and where this rank's first goes, after theirs (`start`, the
+/// buffer's count, plus those).
+static std::tuple<Value, Value, Value>
+ranksRowsBefore(IRRewriter &rewriter, Location loc, ModuleOp module,
+                Value sent, Value first, Value count, Value one, Value start) {
+  Type i64 = rewriter.getI64Type();
+  auto counting = scf::ForOp::create(
+      rewriter, loc, first, count, one,
+      ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)},
+      [&](OpBuilder &, Location, Value row, ValueRange carried) {
+        Value byte = memref::LoadOp::create(rewriter, loc, sent,
+                                            ValueRange{row});
+        Value added = arith::ExtUIOp::create(
+            rewriter, loc, i64,
+            arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ne, byte,
+                arith::ConstantIntOp::create(rewriter, loc, 0, 8)));
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::AddIOp::create(rewriter, loc, carried[0],
+                                             added)});
+      });
+  Value mine = counting.getResult(0);
+  Value before = callGpu(rewriter, loc, module, "ent_ranks_before",
+                         ValueRange{mine}, TypeRange{i64})
+                     .getResult(0);
+  start = arith::AddIOp::create(
+      rewriter, loc, start,
+      arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                 before));
+  return {mine, before, start};
+}
+
+/// Resolved "shared": the rows each rank gave to `buffer` (this one's
+/// `mine`, up to `rows`, after the `before` of the ranks before), given to
+/// every rank; gives how many all gave, with those it had.
+static Value ranksShareRows(IRRewriter &rewriter, Location loc,
+                            ModuleOp module, const WorldLayout &layout,
+                            WorldAccess &world, const WorldBuffer &buffer,
+                            Value rows, Value mine, Value before) {
+  Type i64 = rewriter.getI64Type();
+  // (The rows each rank gave, given to every rank; and how many all
+  // gave.)
+  Value high = arith::SubIOp::create(
+      rewriter, loc, rows, arith::ConstantIntOp::create(rewriter, loc, 1, 64));
+  Value low = arith::SubIOp::create(rewriter, loc, rows, mine);
+  callGpu(rewriter, loc, module, "ent_ranks_share_begin",
+          ValueRange{low, high});
+  if (rankSplitBuffers.contains(BufferOp(buffer.op).getSymNameAttr()))
+    callGpu(rewriter, loc, module, "ent_ranks_buffer_owned",
+            ValueRange{arith::ConstantIntOp::create(
+                rewriter, loc, &buffer - &layout.buffers[0], 32)});
+  for (const WorldColumn &field : buffer.fields)
+    callGpu(rewriter, loc, module, "ent_ranks_share_column",
+            ValueRange{worldPointer(rewriter, loc,
+                                    world.bufferField(buffer, field)),
+                       arith::ConstantIntOp::create(
+                           rewriter, loc, world.storageBytes(field.type),
+                           64)});
+  rows = arith::AddIOp::create(
+      rewriter, loc, arith::SubIOp::create(rewriter, loc, low, before),
+      callGpu(rewriter, loc, module, "ent_ranks_sum", ValueRange{mine},
+              TypeRange{i64})
+          .getResult(0));
+  return rows;
+}
+
 /// Append the edges a connect (inside a query) buffered for the first
 /// `count` rows of `archetype`, row after row, at the insertion point:
 /// `place`, staged "rows".
@@ -7909,13 +8006,10 @@ static void appendConnected(IRRewriter &rewriter, SaPlaceOp place,
       world.connectBuffer(place.getIndex(), place.getTargetAttr(), archetype);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  // (On many ranks, of a distributed archetype: this rank's rows' edges,
-  // sent to the ranks of their ends, which add them when the query ends.)
-  Value from = rankFirstRows.lookup(&archetype);
-  int64_t channel =
-      from ? rankEdgeChannel(relation, /*note=*/false,
-                             2 + relation.fields.size())
-           : -1;
+  // (On many ranks, of a distributed archetype, "routed": this rank's
+  // rows' edges, sent to the ranks of their ends.)
+  Value from = place.getFirst();
+  int64_t channel = ranksEdgeChannel(place, relation);
   auto loop = scf::ForOp::create(rewriter, loc, from ? from : zero, count,
                                  one);
   rewriter.setInsertionPoint(loop.getBody()->getTerminator());
@@ -7932,11 +8026,8 @@ static void appendConnected(IRRewriter &rewriter, SaPlaceOp place,
   for (Value column : buffers.values)
     values.push_back(
         memref::LoadOp::create(rewriter, loc, column, ValueRange{row}));
-  if (from)
-    routeEdge(rewriter, loc, place->getParentOfType<ModuleOp>(), world,
-              channel, source, target, values);
-  else
-    appendEdge(rewriter, loc, layout, world, relation, source, target, values);
+  addStagedEdge(rewriter, loc, place, layout, world, relation, channel,
+                source, target, values);
 }
 
 /// The row `at` (an index) of `buffer` gets `values` (stored form); the
@@ -7976,39 +8067,17 @@ static void appendAppended(IRRewriter &rewriter, SaPlaceOp place,
   Value counter = world.bufferCount(buffer);
   Value start = world.toIndex(
       loc, memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}));
-  // (On many ranks, of a distributed archetype: this rank's rows give
-  // theirs after those the ranks before it gave, which every rank is
-  // given when they are written, see below.)
-  Value from = rankFirstRows.lookup(&archetype);
+  // (On many ranks, of a distributed archetype, "shared": this rank's
+  // rows give theirs after those the ranks before it gave, which every
+  // rank is given when they are written.)
+  bool shared = *place.getResolution() == "shared";
+  Value from = place.getFirst();
   Type i64 = rewriter.getI64Type();
   ModuleOp module = place->getParentOfType<ModuleOp>();
   Value mine, before;
-  if (from) {
-    auto counting = scf::ForOp::create(
-        rewriter, loc, from, count, one,
-        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)},
-        [&](OpBuilder &, Location, Value row, ValueRange carried) {
-          Value sent = memref::LoadOp::create(rewriter, loc, slots.sent,
-                                              ValueRange{row});
-          Value added = arith::ExtUIOp::create(
-              rewriter, loc, i64,
-              arith::CmpIOp::create(
-                  rewriter, loc, arith::CmpIPredicate::ne, sent,
-                  arith::ConstantIntOp::create(rewriter, loc, 0, 8)));
-          scf::YieldOp::create(
-              rewriter, loc,
-              ValueRange{arith::AddIOp::create(rewriter, loc, carried[0],
-                                               added)});
-        });
-    mine = counting.getResult(0);
-    before = callGpu(rewriter, loc, module, "ent_ranks_before",
-                     ValueRange{mine}, TypeRange{i64})
-                 .getResult(0);
-    start = arith::AddIOp::create(
-        rewriter, loc, start,
-        arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
-                                   before));
-  }
+  if (shared)
+    std::tie(mine, before, start) = ranksRowsBefore(
+        rewriter, loc, module, slots.sent, from, count, one, start);
   // (How many it has is carried round, and written once.)
   auto loop = scf::ForOp::create(
       rewriter, loc, from ? from : zero, count, one, ValueRange{start},
@@ -8039,31 +8108,9 @@ static void appendAppended(IRRewriter &rewriter, SaPlaceOp place,
   rewriter.setInsertionPointAfter(loop);
   Value rows = arith::IndexCastOp::create(rewriter, loc, i64,
                                           loop.getResult(0));
-  if (from) {
-    // (The rows each rank gave, given to every rank; and how many all
-    // gave.)
-    Value high = arith::SubIOp::create(
-        rewriter, loc, rows, arith::ConstantIntOp::create(rewriter, loc, 1, 64));
-    Value low = arith::SubIOp::create(rewriter, loc, rows, mine);
-    callGpu(rewriter, loc, module, "ent_ranks_share_begin",
-            ValueRange{low, high});
-    if (rankSplitBuffers.contains(BufferOp(buffer.op).getSymNameAttr()))
-      callGpu(rewriter, loc, module, "ent_ranks_buffer_owned",
-              ValueRange{arith::ConstantIntOp::create(
-                  rewriter, loc, &buffer - &layout.buffers[0], 32)});
-    for (const WorldColumn &field : buffer.fields)
-      callGpu(rewriter, loc, module, "ent_ranks_share_column",
-              ValueRange{worldPointer(rewriter, loc,
-                                      world.bufferField(buffer, field)),
-                         arith::ConstantIntOp::create(
-                             rewriter, loc, world.storageBytes(field.type),
-                             64)});
-    rows = arith::AddIOp::create(
-        rewriter, loc, arith::SubIOp::create(rewriter, loc, low, before),
-        callGpu(rewriter, loc, module, "ent_ranks_sum", ValueRange{mine},
-                TypeRange{i64})
-            .getResult(0));
-  }
+  if (shared)
+    rows = ranksShareRows(rewriter, loc, module, layout, world, buffer, rows,
+                          mine, before);
   memref::StoreOp::create(rewriter, loc, rows, counter, ValueRange{zero});
 }
 
@@ -11677,16 +11724,6 @@ static int64_t sendListNumber(int64_t index, bool connects,
 static int64_t applyListNumber(int64_t apply, int64_t archetype) {
   return sendListNumber(apply, /*connects=*/false, unsigned(archetype));
 }
-/// The number of the list `op` sends to from `archetype`, as an i64.
-static Value sendList(IRRewriter &rewriter, Location loc, Operation *op,
-                      const WorldArchetype &archetype) {
-  bool connects = isa<ConnectOp>(op);
-  auto index = op->getAttrOfType<IntegerAttr>(
-      connects ? WorldLayout::kConnectIndexAttr : WorldLayout::kApplyIndexAttr);
-  return arith::ConstantIntOp::create(
-      rewriter, loc, sendListNumber(index.getInt(), connects, archetype.index),
-      64);
-}
 
 /// A stored value as 64 bits, and back.
 static Value toSendBits(IRRewriter &rewriter, Location loc, Value stored) {
@@ -11728,17 +11765,6 @@ static void putSend(IRRewriter &rewriter, Location loc, int64_t list,
              value ? toSendBits(rewriter, loc, value) : nothing},
             /*gives=*/false);
 }
-/// The same, for `op` from `archetype`.
-static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
-                    const WorldArchetype &archetype, WorldAccess &world,
-                    Value id, Value value) {
-  bool connects = isa<ConnectOp>(op);
-  auto index = op->getAttrOfType<IntegerAttr>(
-      connects ? WorldLayout::kConnectIndexAttr : WorldLayout::kApplyIndexAttr);
-  putSend(rewriter, loc,
-          sendListNumber(index.getInt(), connects, archetype.index), world, id,
-          value);
-}
 
 /// Add the edges a connect (in a loop of its query's body, or in a loop
 /// over edges there) noted for the entities of `archetype`, at the
@@ -11762,12 +11788,8 @@ static void appendLooped(IRRewriter &rewriter, SaPlaceOp place,
       rewriter, loc,
       sendListNumber(place.getIndex(), /*connects=*/true, archetype.index),
       64);
-  // (On many ranks: sent to the ranks of their ends, see appendConnected.)
-  bool route = *place.getResolution() == "routed";
-  int64_t channel =
-      route ? rankEdgeChannel(relation, /*note=*/false,
-                              2 + relation.fields.size())
-            : -1;
+  // (On many ranks, "routed": sent to the ranks of their ends.)
+  int64_t channel = ranksEdgeChannel(place, relation);
   int64_t each = 1 + (relation.fields.size() + 1) / 2;
   Value edges = arith::DivUIOp::create(
       rewriter, loc,
@@ -11807,12 +11829,8 @@ static void appendLooped(IRRewriter &rewriter, SaPlaceOp place,
                        second ? "ent_sends_value" : "ent_sends_id", {list},
                        true);
     });
-    if (route)
-      routeEdge(rewriter, loc, place->getParentOfType<ModuleOp>(), world,
-                channel, source, target, values);
-    else
-      appendEdge(rewriter, loc, layout, world, relation, source, target,
-                 values);
+    addStagedEdge(rewriter, loc, place, layout, world, relation, channel,
+                  source, target, values);
   };
   if (*place.getResolution() != "reserved") {
     oneByOne();
@@ -11902,15 +11920,18 @@ static void resolveStateAccess(SaAppendOp append) {
 }
 
 /// How what was staged for a connect or an append is added, from what
-/// adding it does (see SaPlaceOp): a list's edges sent to the ranks of
-/// their ends where the rows are a rank's; in ranges reserved at once,
-/// on many threads, where the loop may have run on many and adding an
-/// edge is writing it at the end of the table and counting it, nothing
-/// else (no partitions, no stamp, no links, no order); else one after
-/// another. Rows', row after row.
+/// adding it does (see SaPlaceOp): where the rows are a rank's, edges
+/// sent to the ranks of their ends and a buffer's rows after the ranks'
+/// before; a list's in ranges reserved at once, on many threads, where
+/// the loop may have run on many and adding an edge is writing it at the
+/// end of the table and counting it, nothing else (no partitions, no
+/// stamp, no links, no order); else one after another, and rows' row
+/// after row.
 static void resolveStateAccess(SaPlaceOp place) {
   if (place.getStaged() == "rows") {
-    place.setResolution("rows");
+    place.setResolution(!place.getRanks()               ? "rows"
+                        : place.getKind() == "connect" ? "routed"
+                                                       : "shared");
     return;
   }
   bool plain = !place.getPartitions() && !place.getStamps() &&
@@ -12083,9 +12104,17 @@ static void placeAppended(IRRewriter &rewriter, Operation *op,
     flag("ordered", relation.isOrdered());
     flag("tree", relation.tree);
   }
+  // (On many ranks: from the first of this rank's rows.)
+  Value first = rankFirstRows.lookup(&archetype);
   SmallVector<Value> operands{world.getArena()};
-  if (count && !listed)
-    operands.push_back(count);
+  SmallVector<int32_t> segments{1};
+  for (Value optional : {listed ? Value() : count, first}) {
+    if (optional)
+      operands.push_back(optional);
+    segments.push_back(optional ? 1 : 0);
+  }
+  attributes.push_back(rewriter.getNamedAttr(
+      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
   auto place = SaPlaceOp::create(rewriter, op->getLoc(), TypeRange{},
                                  operands, attributes);
   resolveStateAccess(place);

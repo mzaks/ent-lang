@@ -1875,7 +1875,7 @@ def Ent_SaAppendOp : Ent_Op<"sa.append", [AttrSizedOperandSegments]> {
   }];
 }
 
-def Ent_SaPlaceOp : Ent_Op<"sa.place"> {
+def Ent_SaPlaceOp : Ent_Op<"sa.place", [AttrSizedOperandSegments]> {
   let summary = "Add what was staged for a connect or an append";
   let description = [{
     ```mlir
@@ -1885,9 +1885,10 @@ def Ent_SaPlaceOp : Ent_Op<"sa.place"> {
     ```
     Where the query ends: what `ent.sa.append` of connect 4 (or append 4,
     `"buffer"`) staged for the entities of archetype 1, as `staged` says
-    (`"list"` or `"rows"`, the first `%count` rows), added at the end of
-    the relation's table (the buffer's rows) in the order it was staged:
-    row by row, or slice by slice and then as sent.
+    (`"list"` or `"rows"`, the first `%count` rows; on many ranks from
+    `%first`, the first of this rank's), added at the end of the
+    relation's table (the buffer's rows) in the order it was staged: row
+    by row, or slice by slice and then as sent.
 
     What decides how (resolveStateAccess): `parallel` (the loop may have
     run on many threads), `ranks` (the rows are this rank's of a
@@ -1899,19 +1900,23 @@ def Ent_SaPlaceOp : Ent_Op<"sa.place"> {
     (from `least` edges on, a range of the table reserved at once and each
     slice's edges written in its own on many threads), `"routed"` (sent to
     the ranks of their ends, which add them) or `"in-order"` (one edge
-    after another); `"rows"`, row after row (on many ranks sent to the
-    ends' ranks, or after the rows of the ranks before).
+    after another); for rows, `"rows"` (row after row), and on many ranks
+    `"routed"` (an edge sent to the ranks of its ends) or `"shared"` (a
+    buffer's rows after those of the ranks before, given to every rank).
+    What differs on many ranks is their lowering (ranksAddEdge,
+    ranksRowsBefore, ranksShareRows in LowerToLoops.cpp).
   }];
   let arguments = (ins StrAttr:$kind, I64Attr:$index, I64Attr:$archetype,
                        FlatSymbolRefAttr:$target, StrAttr:$staged,
                        AnyMemRef:$world, Optional<Index>:$count,
+                       Optional<Index>:$first,
                        UnitAttr:$parallel, UnitAttr:$ranks,
                        UnitAttr:$partitions, UnitAttr:$stamps,
                        UnitAttr:$linked, UnitAttr:$ordered, UnitAttr:$tree,
                        I64Attr:$least, OptionalAttr<StrAttr>:$resolution);
   let assemblyFormat = [{
     $kind $index `[` $archetype `]` $target `in` $world
-    (`count` $count^)? attr-dict `:` type($world)
+    (`count` $count^)? (`from` $first^)? attr-dict `:` type($world)
   }];
 }
 

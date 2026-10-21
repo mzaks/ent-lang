@@ -41,6 +41,10 @@ func.func @staged(%e: !ent.entity, %v: i32, %row: index, %mask: i1,
   // CHECK: ent.sa.place "buffer" 0[1] @Lines in %{{.*}} count %{{.*}} {least = 0 : i64, resolution = "rows", staged = "rows"} : memref<4096xi8>
   ent.sa.place "buffer" 0[1] @Lines in %world count %count
     {least = 0 : i64, resolution = "rows", staged = "rows"} : memref<4096xi8>
+  // CHECK: ent.sa.place "buffer" 0[1] @Lines in %{{.*}} count %{{.*}} from %{{.*}} {least = 0 : i64, ranks, resolution = "shared", staged = "rows"} : memref<4096xi8>
+  ent.sa.place "buffer" 0[1] @Lines in %world count %count from %row
+    {least = 0 : i64, ranks, resolution = "shared", staged = "rows"}
+    : memref<4096xi8>
   // CHECK: ent.sa.accumulate 5[1] @Score "points" "add"(%{{.*}}) at %{{.*}} in %{{.*}} {reduced, resolution = "reduce", unobserved} : i32, memref<4096xi8>
   ent.sa.accumulate 5[1] @Score "points" "add" (%v) at %row in %world
     {reduced, resolution = "reduce", unobserved} : i32, memref<4096xi8>
