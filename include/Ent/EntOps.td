@@ -1741,4 +1741,70 @@ def Ent_YieldOp : Ent_Op<"yield", [
   let assemblyFormat = "attr-dict ($results^ `:` type($results))?";
 }
 
+//===----------------------------------------------------------------------===//
+// State and access (docs: "explicit state and access in the lowering")
+//===----------------------------------------------------------------------===//
+//
+// What a loop of the lowering touches, said as ops between the `ent` ops
+// and the loops they become, so that how a loop runs in parallel is
+// decided by its accesses (resolveStateAccess in LowerToLoops.cpp) and
+// carried out by a lowering per backend. The first case: an apply's
+// values sent from loops of a query's body.
+
+def Ent_SaCombineOp : Ent_Op<"sa.combine"> {
+  let summary = "Combine into another entity's field, staged per slice";
+  let description = [{
+    ```mlir
+    ent.sa.combine 3[%slice] @Cell "got" "add" (%id, %v) in %world
+      : i64, i32, memref<4096xi8>
+    ```
+    An access of a loop: combine `%v` (stored form) into field `got` of
+    `@Cell` of the entity with id `%id` (stored form), with the rule `add`,
+    `min` or `max`, as state number 3 has it: staged on the list of the
+    loop's slice `%slice` (0 on one thread) until the query ends, where
+    `ent.sa.merge` of the same state combines what was staged. On the CPU:
+    `ent_sends_put` (devices/sends.c).
+  }];
+  let arguments = (ins I64Attr:$state, I64:$slice, FlatSymbolRefAttr:$component,
+                       StrAttr:$field, StrAttr:$rule, AnyType:$id,
+                       AnyType:$value, AnyMemRef:$world);
+  let assemblyFormat = [{
+    $state `[` $slice `]` $component $field $rule `(` $id `,` $value `)`
+    `in` $world attr-dict `:` type($id) `,` type($value) `,` type($world)
+  }];
+}
+
+def Ent_SaMergeOp : Ent_Op<"sa.merge"> {
+  let summary = "Combine what was staged on a state into its entities' fields";
+  let description = [{
+    ```mlir
+    ent.sa.merge 3 @Cell "got" "add" of i32 in %world at %tick
+      {least = 16384 : i64, parallel, resolution = "groups"}
+      : memref<4096xi8>
+    ```
+    Where the query ends: what `ent.sa.combine` staged on state 3, combined
+    into the field, each entity's values in the order they were staged
+    (slice by slice, then as sent), so the same on any number of threads.
+    `%tick` is the world's tick where it has stamps.
+
+    What decides how (resolveStateAccess): `parallel` (the loop may have
+    run on many threads), `order_shows` (combining it stamps a Changed
+    event or reorders a tree, so the order of entities shows), `atomic`,
+    `ranks` (built for many ranks). The decision, `resolution`:
+    `"in-order"` (one value after another) or `"groups"` (in groups of the
+    entities sent to, on many threads, where that takes less: chosen as the
+    program runs, both giving the same).
+  }];
+  let arguments = (ins I64Attr:$state, FlatSymbolRefAttr:$component,
+                       StrAttr:$field, StrAttr:$rule, TypeAttr:$stored,
+                       AnyMemRef:$world, Optional<I64>:$tick,
+                       UnitAttr:$parallel, UnitAttr:$order_shows,
+                       UnitAttr:$atomic, UnitAttr:$trusted, UnitAttr:$ranks,
+                       I64Attr:$least, OptionalAttr<StrAttr>:$resolution);
+  let assemblyFormat = [{
+    $state $component $field $rule `of` $stored `in` $world
+    (`at` $tick^)? attr-dict `:` type($world)
+  }];
+}
+
 #endif // ENT_OPS

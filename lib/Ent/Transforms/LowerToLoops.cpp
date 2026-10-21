@@ -1824,6 +1824,9 @@ static constexpr llvm::StringLiteral kRowOrderedAttr = "ent.row_ordered";
 static constexpr llvm::StringLiteral kLoopedAttr = "ent.looped";
 /// The lists' numbers: one for each such op and archetype it sends from.
 static llvm::DenseMap<std::pair<int64_t, unsigned>, int64_t> sendLists;
+/// What applies in loops of the bodies stage on their lists (see putSend),
+/// until the states are merged (lowerStateAccess).
+static SmallVector<SaCombineOp> stagedCombines;
 
 /// A whole number sent or accumulated in a loop for the GPU, combined
 /// where it is sent by an atomic operation: the same in any order (see
@@ -6068,14 +6071,15 @@ static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
 /// combining only writes fields, so they cannot change meanwhile. Loaded
 /// inside the loop, they would be reloaded for every value: LLVM cannot
 /// tell the stores to the field from them, since all live in the arena.
-static LocateBounds loadApplyBounds(IRRewriter &rewriter, Location loc,
-                                    ApplyOp apply, const WorldLayout &layout,
-                                    WorldAccess &world) {
+static LocateBounds loadCombineBounds(IRRewriter &rewriter, Location loc,
+                                      FlatSymbolRefAttr component,
+                                      const WorldLayout &layout,
+                                      WorldAccess &world) {
   LocateBounds bounds;
   if (layout.entities.kind == EntityScheme::Rows) {
     for (const WorldArchetype &target : layout.archetypes) {
       ArchetypeOp targetOp = target.op;
-      bounds.counts.push_back(targetOp.contains(apply.getComponentAttr())
+      bounds.counts.push_back(targetOp.contains(component)
                                   ? world.count(loc, target)
                                   : Value());
     }
@@ -6083,6 +6087,12 @@ static LocateBounds loadApplyBounds(IRRewriter &rewriter, Location loc,
     bounds.slotsInUse = loadSlotsInUse(rewriter, loc, layout, world);
   }
   return bounds;
+}
+static LocateBounds loadApplyBounds(IRRewriter &rewriter, Location loc,
+                                    ApplyOp apply, const WorldLayout &layout,
+                                    WorldAccess &world) {
+  return loadCombineBounds(rewriter, loc, apply.getComponentAttr(), layout,
+                           world);
 }
 
 /// Combine `value` (stored form) into `apply`'s field of the entity `id`,
@@ -11619,6 +11629,8 @@ static Value openLogsToFollow(IRRewriter &rewriter, QueryOp query,
 /// segment only, so no two iterations run the body for the same entity.
 static Value callSends(IRRewriter &rewriter, Location loc, WorldAccess &world,
                        StringRef name, ArrayRef<Value> args, bool gives);
+static Value callSends(IRRewriter &rewriter, Location loc, Value arena,
+                       StringRef name, ArrayRef<Value> args, bool gives);
 
 /// The number of the list of rows a row-ordered query (kRowOrderedAttr)
 /// gathers for `archetype`, as an i64.
@@ -11773,7 +11785,7 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
 /// A call of `name`, one of the functions that keep what is sent from a
 /// loop (devices/sends.c), at the insertion point; all they take and give
 /// is 64 bits wide.
-static Value callSends(IRRewriter &rewriter, Location loc, WorldAccess &world,
+static Value callSends(IRRewriter &rewriter, Location loc, Value arena,
                        StringRef name, ArrayRef<Value> given, bool gives) {
   Type i64 = rewriter.getI64Type();
   // (First where the world is: the lists are each world's, and a thread
@@ -11782,7 +11794,7 @@ static Value callSends(IRRewriter &rewriter, Location loc, WorldAccess &world,
   SmallVector<Value> args{
       arith::IndexCastOp::create(rewriter, loc, i64,
                                  memref::ExtractAlignedPointerAsIndexOp::create(
-                                     rewriter, loc, world.getArena()))};
+                                     rewriter, loc, arena))};
   llvm::append_range(args, given);
   auto module =
       rewriter.getInsertionBlock()->getParentOp()->getParentOfType<ModuleOp>();
@@ -11799,10 +11811,13 @@ static Value callSends(IRRewriter &rewriter, Location loc, WorldAccess &world,
                                    gives ? TypeRange{i64} : TypeRange{}, args);
   return gives ? call.getResult(0) : Value();
 }
+static Value callSends(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                       StringRef name, ArrayRef<Value> given, bool gives) {
+  return callSends(rewriter, loc, world.getArena(), name, given, gives);
+}
 
-/// The number of the list `op` sends to from `archetype`, as an i64.
-static Value sendList(IRRewriter &rewriter, Location loc, Operation *op,
-                      const WorldArchetype &archetype) {
+/// The number of the list `op` sends to from `archetype`.
+static int64_t sendListNumber(Operation *op, const WorldArchetype &archetype) {
   // (Connects are numbered apart from applies and accumulates.)
   bool connects = isa<ConnectOp>(op);
   auto index = op->getAttrOfType<IntegerAttr>(
@@ -11810,7 +11825,13 @@ static Value sendList(IRRewriter &rewriter, Location loc, Operation *op,
   auto [entry, added] = sendLists.try_emplace(
       {index.getInt() * 2 + (connects ? 1 : 0), archetype.index},
       int64_t(sendLists.size()));
-  return arith::ConstantIntOp::create(rewriter, loc, entry->second, 64);
+  return entry->second;
+}
+/// The same, as an i64.
+static Value sendList(IRRewriter &rewriter, Location loc, Operation *op,
+                      const WorldArchetype &archetype) {
+  return arith::ConstantIntOp::create(rewriter, loc,
+                                      sendListNumber(op, archetype), 64);
 }
 
 /// A stored value as 64 bits, and back.
@@ -11848,6 +11869,15 @@ static void putSend(IRRewriter &rewriter, Location loc, Operation *op,
                                                          sendSegment)
                                   .getResult()
                             : nothing;
+  // (An apply's: an access of the loop, staged on its list's state, put
+  // there where the state is merged, see lowerStateAccess.)
+  if (auto apply = dyn_cast<ApplyOp>(op)) {
+    stagedCombines.push_back(SaCombineOp::create(
+        rewriter, loc, rewriter.getI64IntegerAttr(sendListNumber(op, archetype)),
+        slice, apply.getComponentAttr(), apply.getFieldAttr(),
+        apply.getRuleAttr(), id, value, world.getArena()));
+    return;
+  }
   callSends(rewriter, loc, world, "ent_sends_put",
             {sendList(rewriter, loc, op, archetype), slice,
              id ? toSendBits(rewriter, loc, id) : nothing,
@@ -12006,24 +12036,6 @@ static void appendLooped(IRRewriter &rewriter, ConnectOp connect,
   callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
 }
 
-/// Whether what `apply` sends can be combined on many threads, a group of
-/// the entities it is sent to on each: combining it writes only the
-/// field (no events, no tree ordered by it, nothing posted to another
-/// rank).
-static bool combinesApart(ApplyOp apply, const WorldLayout &layout) {
-  if (ranksMode || apply->hasAttr(kAtomicAttr))
-    return false;
-  StringAttr component = apply.getComponentAttr().getAttr();
-  StringAttr field = apply.getFieldAttr();
-  for (const WorldRelation &relation : layout.relations)
-    if (relation.orderComponent == component && relation.orderField == field)
-      return false;
-  for (const WorldArchetype &archetype : layout.archetypes)
-    if (!stampsFor(archetype, Trigger::Changed, component, field).empty())
-      return false;
-  return true;
-}
-
 /// The word (i64) at `address` (an i64) and `offset` bytes after it.
 static Value loadWord(IRRewriter &rewriter, Location loc, Value address,
                       int64_t offset) {
@@ -12098,34 +12110,75 @@ forEachSent(IRRewriter &rewriter, Location loc, WorldAccess &world, Value list,
   return SmallVector<Value>(blocks.getResults().drop_front());
 }
 
-/// Combine what `op` sent from loops of the body for the entities of
-/// `archetype`, at the insertion point: its list from the first to the
-/// last, which is then empty. (Nothing if the loop ran on one thread and
-/// combined each value where it was sent.) Where the loop ran on many
-/// threads (`parallel`), from `many` values on, an apply's values may be
-/// combined by groups of the entities they were sent to, the groups on
+/// Put what the applies of loops staged on `state` (any, without one)
+/// on its list (devices/sends.c, ent_sends_put), where each was staged.
+static void lowerStagedCombines(IRRewriter &rewriter,
+                                std::optional<int64_t> state) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  llvm::erase_if(stagedCombines, [&](SaCombineOp combine) {
+    if (state && combine.getState() != uint64_t(*state))
+      return false;
+    Location loc = combine.getLoc();
+    rewriter.setInsertionPoint(combine);
+    Value list = arith::ConstantIntOp::create(
+        rewriter, loc, int64_t(combine.getState()), 64);
+    callSends(rewriter, loc, combine.getWorld(), "ent_sends_put",
+              {list, combine.getSlice(),
+               toSendBits(rewriter, loc, combine.getId()),
+               toSendBits(rewriter, loc, combine.getValue())},
+              /*gives=*/false);
+    rewriter.eraseOp(combine);
+    return true;
+  });
+}
+
+/// How what was staged on a state is merged, from what its accesses are:
+/// in groups of the entities sent to, on many threads, where the loop may
+/// have run on many and combining writes only the field, on this rank,
+/// without atomics (the order of entities does not show: no event, no
+/// tree ordered by it, nothing posted to another rank); else one after
+/// another. (The groups only where that takes less, as the program runs.)
+static void resolveStateAccess(SaMergeOp merge) {
+  bool groups = merge.getParallel() && !merge.getOrderShows() &&
+                !merge.getAtomic() && !merge.getRanks();
+  merge.setResolution(groups ? "groups" : "in-order");
+}
+
+/// Carry out `merge` (resolved), at its place: what was staged on its
+/// state put on the list where it was, and the list combined into the
+/// field, from the first to the last, which is then empty. By groups
+/// (resolution "groups"): from `least` values on, an apply's values may
+/// be combined by groups of the entities they were sent to, the groups on
 /// many threads, each entity's in the order of the list: where that has
 /// taken less for each value than one after another, for about as many
 /// values (devices/sends.c, ent_sends_choose; both give the same). Which
 /// wins depends on the machine, its threads and what combining does: the
 /// spiking network, bench/snn, on 24 threads, one after another at 74
 /// thousand values, groups at 220 thousand. The first time, groups from
-/// eight times `many` on.
-static void combineLooped(IRRewriter &rewriter, Operation *op,
-                          const WorldLayout &layout,
-                          const WorldArchetype &archetype, WorldAccess &world,
-                          Value tick, bool parallel, int64_t many) {
-  Location loc = op->getLoc();
+/// eight times `least` on.
+static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
+                             const WorldLayout &layout, WorldAccess &world) {
+  lowerStagedCombines(rewriter, int64_t(merge.getState()));
+  Location loc = merge.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
-  Value list = sendList(rewriter, loc, op, archetype);
+  rewriter.setInsertionPoint(merge);
+  Value list = arith::ConstantIntOp::create(
+      rewriter, loc, int64_t(merge.getState()), 64);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  Type stored = cast<MemRefType>(
-                    world.applyBuffer(op, archetype).second.getType())
-                    .getElementType();
-  auto apply = dyn_cast<ApplyOp>(op);
-  if (apply && parallel && combinesApart(apply, layout)) {
-    LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
+  Type stored = merge.getStored();
+  Value tick = merge.getTick();
+  auto combineInto = [&](Value id, Value value, const LocateBounds &bounds) {
+    combineIntoField(rewriter, loc, merge.getComponentAttr(),
+                     merge.getFieldAttr(), merge.getRule(), merge.getAtomic(),
+                     merge.getTrusted(), layout, world, id, value, tick,
+                     bounds);
+  };
+  if (merge.getResolution() == "groups") {
+    LocateBounds bounds =
+        loadCombineBounds(rewriter, loc, merge.getComponentAttr(), layout,
+                          world);
+    int64_t many = merge.getLeast();
     Value sent =
         callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
     // (Which way takes less, as it has gone so far: devices/sends.c,
@@ -12158,9 +12211,9 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
                                          k),
               arith::ConstantIntOp::create(rewriter, loc, 4, 64)));
       combineInto(
-          rewriter, apply, layout, world, asId(loadWord(rewriter, loc, at, 0)),
+          asId(loadWord(rewriter, loc, at, 0)),
           fromSendBits(rewriter, loc, loadWord(rewriter, loc, at, 8), stored),
-          tick, bounds);
+          bounds);
     };
     {
       OpBuilder::InsertionGuard inner(rewriter);
@@ -12214,43 +12267,103 @@ static void combineLooped(IRRewriter &rewriter, Operation *op,
       rewriter.setInsertionPoint(split.elseBlock()->getTerminator());
       forEachSent(rewriter, loc, world, list, {},
                   [&](Value id, Value value, ValueRange) {
-                    combineInto(rewriter, apply, layout, world, asId(id),
+                    combineInto(asId(id),
                                 fromSendBits(rewriter, loc, value, stored),
-                                tick, bounds);
+                                bounds);
                     return SmallVector<Value>{};
                   });
     }
     callSends(rewriter, loc, world, "ent_sends_chosen", {list}, false);
-    callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
-    return;
-  }
-  // (In the order of the lists, read where they are.)
-  callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
-  if (apply) {
-    LocateBounds bounds = loadApplyBounds(rewriter, loc, apply, layout, world);
+  } else {
+    // (In the order of the lists, read where they are.)
+    callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
+    LocateBounds bounds =
+        loadCombineBounds(rewriter, loc, merge.getComponentAttr(), layout,
+                          world);
     forEachSent(
         rewriter, loc, world, list, {}, [&](Value id, Value value, ValueRange) {
           if (world.idType() != rewriter.getI64Type())
             id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
-          combineInto(rewriter, apply, layout, world, id,
-                      fromSendBits(rewriter, loc, value, stored), tick, bounds);
+          combineInto(id, fromSendBits(rewriter, loc, value, stored), bounds);
           return SmallVector<Value>{};
         });
-  } else {
-    auto accumulate = cast<AccumulateOp>(op);
-    Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
-                                      accumulate.getFieldAttr());
-    Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
-    SmallVector<Value> sum =
-        forEachSent(rewriter, loc, world, list, {start},
-                    [&](Value, Value value, ValueRange carried) {
-                      return SmallVector<Value>{combine(
-                          rewriter, loc, accumulate.getRule(), carried[0],
-                          fromSendBits(rewriter, loc, value, stored),
-                          hasNoSign(accumulate.getValue().getType()))};
-                    });
-    memref::StoreOp::create(rewriter, loc, sum[0], field, ValueRange{zero});
   }
+  callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
+  rewriter.eraseOp(merge);
+}
+
+/// Combine what `op` sent from loops of the body for the entities of
+/// `archetype`, at the insertion point. An apply's: an `ent.sa.merge` of
+/// its list's state, saying what its accesses are, resolved
+/// (resolveStateAccess) and carried out (lowerStateAccess) there, by
+/// groups from `many` values on where the loop ran on many threads
+/// (`parallel`). An accumulate's: its list from the first to the last,
+/// which is then empty, into the resource field. (Nothing if the loop ran
+/// on one thread and combined each value where it was sent.)
+static void combineLooped(IRRewriter &rewriter, Operation *op,
+                          const WorldLayout &layout,
+                          const WorldArchetype &archetype, WorldAccess &world,
+                          Value tick, bool parallel, int64_t many) {
+  Location loc = op->getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  Type stored = cast<MemRefType>(
+                    world.applyBuffer(op, archetype).second.getType())
+                    .getElementType();
+  if (auto apply = dyn_cast<ApplyOp>(op)) {
+    StringAttr component = apply.getComponentAttr().getAttr();
+    StringAttr field = apply.getFieldAttr();
+    // (Combining it stamps a Changed event, or reorders a tree.)
+    bool orderShows = false;
+    for (const WorldRelation &relation : layout.relations)
+      orderShows |= relation.orderComponent == component &&
+                    relation.orderField == field;
+    for (const WorldArchetype &holder : layout.archetypes)
+      orderShows |=
+          !stampsFor(holder, Trigger::Changed, component, field).empty();
+    SmallVector<NamedAttribute> attributes{
+        rewriter.getNamedAttr("state", rewriter.getI64IntegerAttr(
+                                           sendListNumber(op, archetype))),
+        rewriter.getNamedAttr("component", apply.getComponentAttr()),
+        rewriter.getNamedAttr("field", apply.getFieldAttr()),
+        rewriter.getNamedAttr("rule", apply.getRuleAttr()),
+        rewriter.getNamedAttr("stored", TypeAttr::get(stored)),
+        rewriter.getNamedAttr("least", rewriter.getI64IntegerAttr(many))};
+    auto flag = [&](StringRef name, bool on) {
+      if (on)
+        attributes.push_back(
+            rewriter.getNamedAttr(name, rewriter.getUnitAttr()));
+    };
+    flag("parallel", parallel);
+    flag("order_shows", orderShows);
+    flag("atomic", apply->hasAttr(kAtomicAttr));
+    flag("trusted", apply->hasAttr(kTrustedAttr));
+    flag("ranks", ranksMode);
+    SmallVector<Value> operands{world.getArena()};
+    if (tick)
+      operands.push_back(tick);
+    auto merge = SaMergeOp::create(rewriter, loc, TypeRange{}, operands,
+                                   attributes);
+    resolveStateAccess(merge);
+    lowerStateAccess(rewriter, merge, layout, world);
+    return;
+  }
+  Value list = sendList(rewriter, loc, op, archetype);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  // (In the order of the lists, read where they are.)
+  callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
+  auto accumulate = cast<AccumulateOp>(op);
+  Value field = world.resourceField(accumulate.getResourceAttr().getAttr(),
+                                    accumulate.getFieldAttr());
+  Value start = memref::LoadOp::create(rewriter, loc, field, ValueRange{zero});
+  SmallVector<Value> sum =
+      forEachSent(rewriter, loc, world, list, {start},
+                  [&](Value, Value value, ValueRange carried) {
+                    return SmallVector<Value>{combine(
+                        rewriter, loc, accumulate.getRule(), carried[0],
+                        fromSendBits(rewriter, loc, value, stored),
+                        hasNoSign(accumulate.getValue().getType()))};
+                  });
+  memref::StoreOp::create(rewriter, loc, sum[0], field, ValueRange{zero});
   callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
 }
 
@@ -17077,6 +17190,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
         combineApplied(rewriter, apply, layout, *archetype, world, count,
                        tick);
     }
+  // (Each staged combine is put by its state's merge, above; one without
+  // a merge would still be put on its list.)
+  lowerStagedCombines(rewriter, std::nullopt);
   for (AccumulateOp accumulate : accumulates)
     for (auto [archetype, count] : visited) {
       looped(accumulate, archetype);
@@ -20965,6 +21081,7 @@ struct EntLowerToLoops
     ModuleOp module = getOperation();
     IRRewriter rewriter(module.getContext());
     sendLists.clear();
+    stagedCombines.clear();
     runningStarts.clear();
     // Rows of buffers written in queries (not those that take turns).
     ownerRuns.clear();
