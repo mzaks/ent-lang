@@ -75,7 +75,9 @@ ent.system @learn() {
 // A frame starts by sorting edges the host connected.
 // CHECK-LABEL: func.func @frame(
 // CHECK-NEXT:   call @ent_sort_Syn(
-// The sort: only when unclean; offsets by source, then a stable scatter.
+// The sort: only when unclean; offsets by source (set to 0, counted,
+// added up), then a stable scatter from the last edge back, and the
+// edges back into the table.
 // CHECK-LABEL: func.func private @ent_sort_Syn(
 // CHECK:        %[[CLEAN:.*]] = memref.load
 // CHECK:        scf.if
@@ -83,7 +85,7 @@ ent.system @learn() {
 // CHECK:          scf.for
 // CHECK:          scf.for
 // CHECK:          scf.for
-// CHECK:          scf.for
+// CHECK:            arith.subi
 // CHECK:          scf.for
 // CHECK:          %[[ONE:.*]] = arith.constant 1 : i64
 // CHECK-NEXT:     memref.store %[[ONE]]

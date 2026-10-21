@@ -9316,11 +9316,12 @@ static void emitPartitionedSort(IRRewriter &rewriter, Location loc,
 /// those edges, where the program visits incoming edges) and marks it
 /// clean. Edges keep the order they were connected in among those of the
 /// same source, and the index by target lists each target's edges in table
-/// order.
+/// order. With `parallel`, what goes over every entity key (offsets set
+/// to 0, and added up) is on many threads.
 static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                              const WorldLayout &layout,
                              const WorldRelation &relation,
-                             MemRefType arenaType) {
+                             MemRefType arenaType, bool parallel) {
   if (relation.linked) {
     emitLinkedSortFunction(rewriter, module, layout, relation, arenaType);
     emitConnectFunction(rewriter, module, layout, relation, arenaType);
@@ -9344,8 +9345,6 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Value keys = arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys);
-  Value keysPlusOne =
-      arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys + 1);
   Value clean = memref::LoadOp::create(rewriter, loc, world.edgesClean(relation),
                                        ValueRange{zero});
   auto ifUnclean = scf::IfOp::create(
@@ -9370,21 +9369,49 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
     return arith::ConstantIntOp::create(rewriter, loc, value,
                                         relation.offsetBits);
   };
-  // offsets[i] = 0; offsets[key + 1] += 1 per counted edge; prefix sums;
-  // cursors = offsets.
+  // (In chunks of the keys, each on a thread, with `parallel`.)
+  int64_t chunks = 256;
+  Value chunkKeys = arith::ConstantIndexOp::create(
+      rewriter, loc, (int64_t(layout.entityKeys) + chunks - 1) / chunks);
+  auto inChunks = [&](function_ref<void(Value, Value, Value)> body) {
+    auto loop = scf::ParallelOp::create(
+        rewriter, loc, ValueRange{zero},
+        ValueRange{arith::ConstantIndexOp::create(rewriter, loc, chunks)},
+        ValueRange{one});
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    Value chunk = loop.getInductionVars().front();
+    Value from = arith::MulIOp::create(rewriter, loc, chunk, chunkKeys);
+    Value to = arith::MinUIOp::create(
+        rewriter, loc, keys,
+        arith::AddIOp::create(rewriter, loc, from, chunkKeys));
+    body(chunk, arith::MinUIOp::create(rewriter, loc, keys, from), to);
+  };
+  // offsets[key] = how many counted edges have the key, then the sum of
+  // those up to it and its own: where its last ends. Placed from the last
+  // edge back (see take), each edge takes the place before, and the
+  // offsets are where each key's edges start; offsets[keys] = all.
   auto countInto = [&](Value offsets, Value edgeCount,
                        function_ref<Value(Value)> keyOf,
                        function_ref<Value(Value)> counts) {
-    forEach(zero, keysPlusOne, [&](Value i) {
-      memref::StoreOp::create(rewriter, loc, offsetConstant(0), offsets,
-                              ValueRange{i});
-    });
+    if (parallel)
+      inChunks([&](Value, Value from, Value to) {
+        forEach(from, to, [&](Value i) {
+          memref::StoreOp::create(rewriter, loc, offsetConstant(0), offsets,
+                                  ValueRange{i});
+        });
+      });
+    else
+      forEach(zero, keys, [&](Value i) {
+        memref::StoreOp::create(rewriter, loc, offsetConstant(0), offsets,
+                                ValueRange{i});
+      });
     forEach(zero, edgeCount, [&](Value k) {
       Value counted = counts(k);
       auto ifCounted = scf::IfOp::create(rewriter, loc, counted);
       OpBuilder::InsertionGuard inner(rewriter);
       rewriter.setInsertionPointToStart(ifCounted.thenBlock());
-      Value slot = arith::AddIOp::create(rewriter, loc, keyOf(k), one);
+      Value slot = keyOf(k);
       Value old =
           memref::LoadOp::create(rewriter, loc, offsets, ValueRange{slot});
       memref::StoreOp::create(
@@ -9392,33 +9419,79 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
           arith::AddIOp::create(rewriter, loc, old, offsetConstant(1)),
           offsets, ValueRange{slot});
     });
-    forEach(one, keysPlusOne, [&](Value i) {
-      Value previous = memref::LoadOp::create(
-          rewriter, loc, offsets,
-          ValueRange{arith::SubIOp::create(rewriter, loc, i, one)});
-      Value own = memref::LoadOp::create(rewriter, loc, offsets, ValueRange{i});
+    // (The sums: of each chunk on its own thread; the chunks' in order;
+    // then each chunk's from the sum before it.)
+    auto sumUp = [&](Value from, Value to, Value start) {
+      auto loop =
+          scf::ForOp::create(rewriter, loc, from, to, one, ValueRange{start});
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(loop.getBody());
+      Value i = loop.getInductionVar();
+      Value sum = arith::AddIOp::create(
+          rewriter, loc, loop.getRegionIterArg(0),
+          memref::LoadOp::create(rewriter, loc, offsets, ValueRange{i}));
+      memref::StoreOp::create(rewriter, loc, sum, offsets, ValueRange{i});
+      scf::YieldOp::create(rewriter, loc, ValueRange{sum});
+    };
+    if (!parallel) {
+      sumUp(zero, keys, offsetConstant(0));
+      return;
+    }
+    Value sums = memref::AllocaOp::create(
+        rewriter, loc,
+        MemRefType::get({chunks + 1},
+                        rewriter.getIntegerType(relation.offsetBits)));
+    inChunks([&](Value chunk, Value from, Value to) {
+      auto loop = scf::ForOp::create(rewriter, loc, from, to, one,
+                                     ValueRange{offsetConstant(0)});
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(loop.getBody());
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::AddIOp::create(
+                rewriter, loc, loop.getRegionIterArg(0),
+                memref::LoadOp::create(rewriter, loc, offsets,
+                                       ValueRange{loop.getInductionVar()}))});
+      }
       memref::StoreOp::create(
-          rewriter, loc, arith::AddIOp::create(rewriter, loc, previous, own),
-          offsets, ValueRange{i});
+          rewriter, loc, loop.getResult(0), sums,
+          ValueRange{arith::AddIOp::create(rewriter, loc, chunk, one)});
     });
-    Value cursors = world.edgeCursors(relation);
-    forEach(zero, keys, [&](Value i) {
-      memref::StoreOp::create(
-          rewriter, loc,
-          memref::LoadOp::create(rewriter, loc, offsets, ValueRange{i}),
-          cursors, ValueRange{i});
+    memref::StoreOp::create(rewriter, loc, offsetConstant(0), sums,
+                            ValueRange{zero});
+    forEach(one, arith::ConstantIndexOp::create(rewriter, loc, chunks + 1),
+            [&](Value c) {
+              Value before = memref::LoadOp::create(
+                  rewriter, loc, sums,
+                  ValueRange{arith::SubIOp::create(rewriter, loc, c, one)});
+              Value own =
+                  memref::LoadOp::create(rewriter, loc, sums, ValueRange{c});
+              memref::StoreOp::create(
+                  rewriter, loc,
+                  arith::AddIOp::create(rewriter, loc, before, own), sums,
+                  ValueRange{c});
+            });
+    inChunks([&](Value chunk, Value from, Value to) {
+      sumUp(from, to,
+            memref::LoadOp::create(rewriter, loc, sums, ValueRange{chunk}));
     });
   };
-  // Take the cursor of `key` and advance it.
-  auto take = [&](Value key) {
-    Value cursors = world.edgeCursors(relation);
-    Value position =
-        memref::LoadOp::create(rewriter, loc, cursors, ValueRange{key});
-    memref::StoreOp::create(
+  // The place before the one `key`'s offset says, which it says then.
+  auto take = [&](Value offsets, Value key) {
+    Value position = arith::SubIOp::create(
         rewriter, loc,
-        arith::AddIOp::create(rewriter, loc, position, offsetConstant(1)),
-        cursors, ValueRange{key});
+        memref::LoadOp::create(rewriter, loc, offsets, ValueRange{key}),
+        offsetConstant(1));
+    memref::StoreOp::create(rewriter, loc, position, offsets, ValueRange{key});
     return position;
+  };
+  // From the last of the first `n` back to the first.
+  auto forEachBack = [&](Value n, function_ref<void(Value)> body) {
+    forEach(zero, n, [&](Value k) {
+      body(arith::SubIOp::create(
+          rewriter, loc, arith::SubIOp::create(rewriter, loc, n, one), k));
+    });
   };
 
   Value sources = world.edgeIds(relation, /*source=*/true);
@@ -9482,19 +9555,23 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                       ArrayRef<Value> to, function_ref<Value(Value)> keyOf,
                       function_ref<Value(Value)> counted) {
     countInto(offsets, n, keyOf, counted);
-    forEach(zero, n, [&](Value k) {
+    // (All of them: where the last key's end.)
+    Value all = memref::LoadOp::create(
+        rewriter, loc, offsets,
+        ValueRange{arith::SubIOp::create(rewriter, loc, keys, one)});
+    forEachBack(n, [&](Value k) {
       auto ifCounted = scf::IfOp::create(rewriter, loc, counted(k));
       OpBuilder::InsertionGuard inner(rewriter);
       rewriter.setInsertionPointToStart(ifCounted.thenBlock());
-      Value position = world.toIndex(loc, take(keyOf(k)));
+      Value position = world.toIndex(loc, take(offsets, keyOf(k)));
       for (auto [source, target] : llvm::zip(from, to))
         memref::StoreOp::create(
             rewriter, loc,
             memref::LoadOp::create(rewriter, loc, source, ValueRange{k}),
             target, ValueRange{position});
     });
-    return world.toIndex(
-        loc, memref::LoadOp::create(rewriter, loc, offsets, ValueRange{keys}));
+    memref::StoreOp::create(rewriter, loc, all, offsets, ValueRange{keys});
+    return world.toIndex(loc, all);
   };
 
   // By source into the scratch, dropping what is not kept; then back, by
@@ -9605,13 +9682,17 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
     Value index = world.edgeOffsets(relation, /*in=*/true);
     auto keyOfTarget = keyIn(table, /*target=*/true);
     countInto(index, kept, keyOfTarget, all);
-    forEach(zero, kept, [&](Value k) {
-      Value position = world.toIndex(loc, take(keyOfTarget(k)));
+    forEachBack(kept, [&](Value k) {
+      Value position = world.toIndex(loc, take(index, keyOfTarget(k)));
       memref::StoreOp::create(
           rewriter, loc,
           arith::IndexCastOp::create(rewriter, loc, offsetType, k),
           world.indexEdges(relation), ValueRange{position});
     });
+    memref::StoreOp::create(
+        rewriter, loc,
+        arith::IndexCastOp::create(rewriter, loc, offsetType, kept), index,
+        ValueRange{keys});
   }
 
   // A tree: list the entities with a parent, parents before children.
@@ -20751,8 +20832,13 @@ struct EntLowerToLoops
                         rewriter.getI64IntegerAttr(appendIndex++));
     });
     MemRefType arenaType = getArenaType(module.getContext(), *layout);
+    // (Its passes over every entity key on many threads, where there are
+    // so many of them.)
+    bool sortsApart = parallelEntities && !gpu &&
+                      int64_t(layout->entityKeys) >= parallelMinEntities;
     for (const WorldRelation &relation : layout->relations)
-      emitSortFunction(rewriter, module, *layout, relation, arenaType);
+      emitSortFunction(rewriter, module, *layout, relation, arenaType,
+                       sortsApart);
     LoopOptions options{parallelEntities, parallelMinEntities,
                         parallelMinEvents, parallelMinLevel, explain,
                         directApplies};
