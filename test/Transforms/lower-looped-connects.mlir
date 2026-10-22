@@ -27,7 +27,8 @@ ent.relation @R (w: i32) capacity 400
 // CHECK:       call @ent_sends_clear(
 // PAR-LABEL: func.func private @s(
 // PAR:       scf.parallel
-// PAR:           func.call @ent_sends_put(
+// PAR:         func.call @ent_sends_slice_list(
+// PAR:           llvm.store
 // PAR:       %[[SENT:.*]] = call @ent_sends_count(
 // PAR:       scf.if
 // PAR:         call @ent_sends_slices(

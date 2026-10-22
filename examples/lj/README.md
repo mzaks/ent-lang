@@ -43,19 +43,21 @@ says, at step 0, what `melt.ent` says to every digit (`-6.7733681
 
 | 32,000 atoms, 100 steps (native, 2026-10-22) | one core | 12 threads |
 |---|---|---|
-| `melt.ent`, half lists | 1.43 s | 0.77 s |
+| `melt.ent`, half lists | 1.43 s | 0.36 s |
 | `melt_full.ent`, full lists | 2.23 s | 0.35 s |
 | `check/melt.c`, half lists, full lists | 1.09 s, 1.69 s | |
 | LAMMPS (half lists; `-sf omp` with threads) | 0.74 s | 0.12 s |
 | before the lists: every atom of the 27 cells around, every step | 4.76 s | 0.76 s |
 
 - Half lists are the faster on one core: half the pairs. On many threads
-  the other atom's force, sent (some 3.7 million values a step), is put
-  on lists and combined in the order of the atoms that sent it, so that
-  the sums are the same on any number of threads; that costs more than
-  working the pairs out twice. LAMMPS's threads each add into a copy of
-  the forces of their own, which differ in the last bits with the number
-  of threads.
+  the other atom's force is sent, and put on lists to be combined in the
+  order of the atoms that sent it, so that the sums are the same on any
+  number of threads: the three fields together, one entry of four words
+  (`docs/syntax.md`), written where the list is without a call. So half
+  lists are about as fast as full ones there (0.77 s before the entries
+  were one and written without a call). LAMMPS's threads each add into a
+  copy of the forces of their own, which differ in the last bits with
+  the number of threads.
 - Against its own C, `melt.ent` is 1.3 times slower on one core. Making
   the lists (the `near` scan, twice: counting, then filling) is 4.3 ms a
   step of the 14; the count's scan is vectorized, the fill's is not, as

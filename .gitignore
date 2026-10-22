@@ -4,3 +4,5 @@
 /examples/pushover/data/
 /examples/pushover/themes/
 /examples/pushover/levels/
+# What a program built with --trace writes where it runs.
+*.trace.json

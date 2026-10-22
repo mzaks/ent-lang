@@ -946,7 +946,10 @@ of a depth.
   the `for` ends, those for each entity one after another (the entities
   apart on many threads, where many were sent and changing the field
   starts nothing else): the same sums to the last bit, on any number of
-  threads. Not in a `for` that goes along a tree or waits
+  threads. Values sent one right after another to fields of one
+  component of the same entity by the same rule (`Pull(o).fx += a
+  Pull(o).fy += b`) go on one list together, as one entry, and are
+  combined together. Not in a `for` that goes along a tree or waits
   for changes; and a value is not sent from a loop inside a `for` over
   edges (a `for` over edges sends once for each edge).
 - A `for` over entities gives a number where the value of a statement

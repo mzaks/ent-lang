@@ -6,7 +6,9 @@
 // 256 of them, each on one thread and in order; on one thread all are
 // the first slice. What a slice sends is put on the slice's own list, a
 // target's id and a value, 64 bits each (an edge: its two ends, then its
-// fields' values two by two); when the `for` ends the lists are read
+// fields' values two by two; sends to several fields of one entity
+// together, ent_sends_put_wide: the id and their values, as many words
+// as the list's width says); when the `for` ends the lists are read
 // from the first slice's to the last's, which is the order of the rows,
 // and for one row the order it was sent in, however many threads there
 // were. A list is blocks that are taken as they are needed and kept for
@@ -42,6 +44,10 @@ typedef struct {
   int64_t before;
 } ent_send_slice;
 
+// (Where the compiler reads a slice's list where it puts on it without a
+// call, ent_sends_slice_list: its last block 8 bytes in.)
+_Static_assert(offsetof(ent_send_slice, last) == 8, "a slice's last block");
+
 // (Read in groups instead, ent_sends_group: by whom they were sent to.)
 #define ENT_SEND_GROUPS 256
 
@@ -57,6 +63,9 @@ typedef struct {
 // The lists of one sending place, and where the reading of them is.
 typedef struct {
   ent_send_slice slices[ENT_SEND_SLICES];
+  // The words of an entry: 2, or what ent_sends_put_wide said (the same
+  // every time for a place).
+  int64_t width;
   int64_t slice;
   ent_send_block *block;
   uint64_t at;
@@ -127,6 +136,7 @@ static ent_send_lists *ent_sends_of(int64_t world, int64_t number) {
   made->block = 0;
   made->at = 0;
   made->grouped = 0;
+  made->width = 2;
   made->room = 0;
   made->marks = 0;
   made->sliced = 0;
@@ -159,6 +169,67 @@ void ent_sends_put(int64_t world, int64_t number, int64_t slice, int64_t id,
   }
   block->sent[2 * block->count] = (uint64_t)id;
   block->sent[2 * block->count + 1] = (uint64_t)value;
+  block->count += 1;
+}
+
+// A slice's list, taken where it has no block or its last is full: the
+// next block, empty (one kept from the last time, or a new one).
+static ent_send_block *ent_sends_grow(ent_send_slice *list) {
+  ent_send_block *block = list->last;
+  ent_send_block *next = block ? block->next : list->first;
+  if (!next) {
+    next = ent_sends_take(sizeof(ent_send_block));
+    next->next = 0;
+    if (block)
+      block->next = next;
+    else
+      list->first = next;
+  }
+  next->count = 0;
+  list->last = next;
+  return next;
+}
+
+// What the compiler puts on without a call: where a slice's list is (its
+// `last` block 8 bytes in, a block's count 8 bytes in and its entries from
+// 16 on, `width` words each, 2 * ENT_SEND_BLOCK / width of them); and the
+// next block, where the last is full or there is none.
+int64_t ent_sends_slice_list(int64_t world, int64_t number, int64_t slice,
+                             int64_t width) {
+  ent_send_lists *lists = ent_sends_of(world, number);
+  lists->width = width;
+  return (int64_t)(uintptr_t)&lists->slices[slice];
+}
+int64_t ent_sends_slice_grow(int64_t world, int64_t list) {
+  (void)world;
+  return (int64_t)(uintptr_t)ent_sends_grow((ent_send_slice *)(uintptr_t)list);
+}
+
+// Several values sent to one entity together: its id and `width` - 1
+// values (up to 7; those after are nothing), as one entry.
+void ent_sends_put_wide(int64_t world, int64_t number, int64_t slice,
+                        int64_t width, int64_t id, int64_t v0, int64_t v1,
+                        int64_t v2, int64_t v3, int64_t v4, int64_t v5,
+                        int64_t v6) {
+  ent_send_lists *lists = ent_sends_of(world, number);
+  lists->width = width;
+  ent_send_slice *list = &lists->slices[slice];
+  ent_send_block *block = list->last;
+  uint64_t fits = 2 * ENT_SEND_BLOCK / (uint64_t)width;
+  if (!block || block->count == fits)
+    block = ent_sends_grow(list);
+  uint64_t *entry = &block->sent[(uint64_t)width * block->count];
+  // (Each word written out: a copy of so few is a call otherwise.)
+  switch (width) {
+  case 8: entry[7] = (uint64_t)v6; /* fall through */
+  case 7: entry[6] = (uint64_t)v5; /* fall through */
+  case 6: entry[5] = (uint64_t)v4; /* fall through */
+  case 5: entry[4] = (uint64_t)v3; /* fall through */
+  case 4: entry[3] = (uint64_t)v2; /* fall through */
+  case 3: entry[2] = (uint64_t)v1; /* fall through */
+  default: entry[1] = (uint64_t)v0;
+  }
+  entry[0] = (uint64_t)id;
   block->count += 1;
 }
 
@@ -315,9 +386,10 @@ void ent_sends_group_count(int64_t world, int64_t number, int64_t slice) {
   for (int group = 0; group < ENT_SEND_GROUPS; ++group)
     marks[group] = 0;
   ent_send_slice *list = &lists->slices[slice];
+  uint64_t width = (uint64_t)lists->width;
   for (ent_send_block *block = list->first; block; block = block->next) {
     for (uint64_t k = 0; k < block->count; ++k)
-      ++marks[ent_send_group_of(block->sent[2 * k])];
+      ++marks[ent_send_group_of(block->sent[width * k])];
     if (block == list->last)
       break;
   }
@@ -343,7 +415,8 @@ int64_t ent_sends_group_starts(int64_t world, int64_t number) {
   if (count > lists->room) {
     free(lists->grouped);
     lists->room = count + count / 2;
-    lists->grouped = ent_sends_take((size_t)lists->room * 2 * sizeof(uint64_t));
+    lists->grouped = ent_sends_take((size_t)lists->room *
+                                    (size_t)lists->width * sizeof(uint64_t));
   }
   return count;
 }
@@ -365,11 +438,16 @@ void ent_sends_group_place(int64_t world, int64_t number, int64_t slice) {
     return;
   int64_t *marks = lists->marks + slice * ENT_SEND_GROUPS;
   ent_send_slice *list = &lists->slices[slice];
+  uint64_t width = (uint64_t)lists->width;
   for (ent_send_block *block = list->first; block; block = block->next) {
     for (uint64_t k = 0; k < block->count; ++k) {
-      int64_t at = marks[ent_send_group_of(block->sent[2 * k])]++;
-      lists->grouped[2 * at] = block->sent[2 * k];
-      lists->grouped[2 * at + 1] = block->sent[2 * k + 1];
+      uint64_t *entry = &block->sent[width * k];
+      int64_t at = marks[ent_send_group_of(entry[0])]++;
+      uint64_t *to = &lists->grouped[width * (uint64_t)at];
+      to[0] = entry[0];
+      to[1] = entry[1];
+      for (uint64_t w = 2; w < width; ++w)
+        to[w] = entry[w];
     }
     if (block == list->last)
       break;
@@ -377,8 +455,8 @@ void ent_sends_group_place(int64_t world, int64_t number, int64_t slice) {
 }
 
 // Where `group` starts among them (ENT_SEND_GROUPS: where the last ends);
-// where they are, two words each, whom it was sent to and what, for the
-// compiler to read them from.
+// where they are, the list's width of words each, whom it was sent to and
+// what, for the compiler to read them from.
 int64_t ent_sends_group_start(int64_t world, int64_t number, int64_t group) {
   return ent_sends[number]->starts[group];
 }

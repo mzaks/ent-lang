@@ -5,7 +5,9 @@
 // What a query sends from a loop of its body runs once for each turn of
 // the loop. A loop on one thread combines each value where it is sent.
 // A parallel one visits the rows in 256 slices, each one after another
-// on a thread, and puts what is sent on the slice's list; the query's
+// on a thread, and puts what is sent on the slice's list (asked for where
+// the slice starts, and written to without a call, but where its block
+// is full or there is none); the query's
 // end reads the lists in order, where they are (a block at a time), and
 // combines: an apply's from many values on, where that has taken less so
 // far (devices/sends.c chooses), by groups of the entities sent to, put
@@ -17,10 +19,14 @@ ent.resource @Score (points: f32)
 
 // CHECK-LABEL: func.func private @sends(
 // CHECK:       scf.parallel (%[[SLICE:.*]]) = (%{{.*}}) to (%c256)
+// CHECK:         %[[SECOND:.*]] = func.call @ent_sends_slice_list(%{{.*}}, %c1_i64{{.*}}, %{{.*}}, %c2_i64{{.*}}) : (i64, i64, i64, i64) -> i64
+// CHECK:         %[[FIRST:.*]] = func.call @ent_sends_slice_list(%{{.*}}, %c0_i64{{.*}}, %{{.*}}, %c2_i64{{.*}}) : (i64, i64, i64, i64) -> i64
 // CHECK:         scf.for %[[ROW:.*]] =
 // CHECK:           scf.for
-// CHECK:             func.call @ent_sends_put(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i64, i64, i64, i64, i64) -> ()
-// CHECK:             func.call @ent_sends_put(
+// CHECK:             func.call @ent_sends_slice_grow(%{{.*}}, %[[FIRST]])
+// CHECK:             llvm.store
+// CHECK:             func.call @ent_sends_slice_grow(%{{.*}}, %[[SECOND]])
+// CHECK:             llvm.store
 // CHECK:       %[[SENT:.*]] = call @ent_sends_count(
 // CHECK:       call @ent_sends_choose({{.*}}, %[[SENT]], %c16384_i64, %c131072_i64)
 // CHECK:       scf.if
