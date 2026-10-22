@@ -128,3 +128,27 @@ system look() {
     for o, b: Dot near (a.x, a.y, a.x) within 1.0 in Cells { }
   }
 }
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Cells of Dot grid (x, y) cell 1.0
+system look() {
+  for me, a: Dot {
+    let other = me
+    // expected-error @+1 {{'after' takes the entity the 'for' around visits, by its name}}
+    for o, b: Dot near (a.x, a.y) within 1.0 in Cells after other { }
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+component Mark { x: f64 } capacity 8
+index Cells of Dot grid (x, y) cell 1.0
+system look() {
+  for me, m: Mark {
+    // expected-error @+1 {{the 'for' around binds no 'Dot', by which 'me' has a row in 'Cells'}}
+    for o, b: Dot near (m.x, m.x) within 1.0 in Cells after me { }
+  }
+}

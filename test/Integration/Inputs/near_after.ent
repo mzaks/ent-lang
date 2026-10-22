@@ -1,0 +1,105 @@
+// 400 dots in a box of 10 that wraps (`Cells`), and 400 pins in one that
+// does not (`Pins`): those within r of each after it in the index (`after
+// me`), against the same `near` with the rows in its `where`, and against
+// all within r (test/Integration/near_after.test).
+import console
+import wyhash
+component Dot { x: f64, y: f64 } capacity 1024
+component Pin { x: f64, y: f64 } capacity 1024
+component Seen { after: i64, far: f64, rows: i64, rowsfar: f64, all: i64 }
+          capacity 2048
+unique Check { same: i64, pairs: i64, all: i64 }
+unique Box { size: f64, cell: f64 }
+
+index Cells of Dot grid (x, y) cell Box.cell wrap Box.size
+index Pins of Pin grid (x, y) cell Box.cell
+
+world {
+  Box.size = 10.0
+  Box.cell = 1.0
+  for i in 0..400 {
+    spawn { Dot { x: wyrand_unit(3, i as i64 * 2) * 10.0,
+                  y: wyrand_unit(3, i as i64 * 2 + 1) * 10.0 },
+            Seen { after: 0, far: 0.0, rows: 0, rowsfar: 0.0, all: 0 } }
+    spawn { Pin { x: wyrand_unit(5, i as i64 * 2) * 10.0,
+                  y: wyrand_unit(5, i as i64 * 2 + 1) * 10.0 },
+            Seen { after: 0, far: 0.0, rows: 0, rowsfar: 0.0, all: 0 } }
+  }
+}
+
+system dots(r: f64) {
+  for me, a: Dot, s: mut Seen {
+    var n = 0
+    var far: f64 = 0.0
+    for o, b: Dot near (a.x, a.y) within r in Cells after me {
+      n += 1
+      far += (b.x - a.x) * 3.0 + (b.y - a.y)
+    }
+    var m = 0
+    var mfar: f64 = 0.0
+    for o, b: Dot near (a.x, a.y) within r in Cells
+        where b.row_in_Cells > a.row_in_Cells {
+      m += 1
+      mfar += (b.x - a.x) * 3.0 + (b.y - a.y)
+    }
+    var all = 0
+    for o, b: Dot near (a.x, a.y) within r in Cells where o != me {
+      all += 1
+    }
+    s.after = n
+    s.far = far
+    s.rows = m
+    s.rowsfar = mfar
+    s.all = all
+  }
+}
+
+system pins(r: f64) {
+  for me, a: Pin, s: mut Seen {
+    var n = 0
+    var far: f64 = 0.0
+    for o, b: Pin near (a.x, a.y) within r in Pins after me {
+      n += 1
+      far += (b.x - a.x) * 3.0 + (b.y - a.y)
+    }
+    var m = 0
+    var mfar: f64 = 0.0
+    for o, b: Pin near (a.x, a.y) within r in Pins
+        where b.row_in_Pins > a.row_in_Pins {
+      m += 1
+      mfar += (b.x - a.x) * 3.0 + (b.y - a.y)
+    }
+    var all = 0
+    for o, b: Pin near (a.x, a.y) within r in Pins where o != me {
+      all += 1
+    }
+    s.after = n
+    s.far = far
+    s.rows = m
+    s.rowsfar = mfar
+    s.all = all
+  }
+}
+
+// Of each: the same entities after it, the same sum of where they are
+// (to the bit: in the same order); and the pairs after, of all.
+system report(what: i64) {
+  for s: Seen {
+    if s.after == s.rows && bits_of(s.far) == bits_of(s.rowsfar) {
+      Check.same += 1
+    }
+    Check.pairs += s.after
+    Check.all += s.all
+  }
+  put("{what}: same {Check.same} of 800, pairs after {Check.pairs}, of all {Check.all}")
+  Check.same = 0
+  Check.pairs = 0
+  Check.all = 0
+}
+
+schedule s() {
+  dots(0.7) pins(0.7) report(1)
+  dots(2.3) pins(2.3) report(2)
+  dots(6.0) pins(15.0) report(3)
+}
+main { s() }

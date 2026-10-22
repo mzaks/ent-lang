@@ -48,7 +48,7 @@ static double size;
 // The index: each atom's cell, the atoms in order by cell, a copy of
 // where each was when it was made, and each cell's first row.
 static int64_t key[CAPACITY];
-static int order[CAPACITY];
+static int order[CAPACITY], row_of[CAPACITY];
 static double rx[CAPACITY], ry[CAPACITY], rz[CAPACITY];
 static int first[CAPACITY + 1];
 static int64_t n;
@@ -122,6 +122,7 @@ static void make_index(void) {
     order[j] = a;
   }
   for (int r = 0; r < atoms; r++) {
+    row_of[order[r]] = r;
     rx[r] = x[order[r]];
     ry[r] = y[order[r]];
     rz[r] = z[order[r]];
@@ -133,8 +134,9 @@ static void make_index(void) {
   }
 }
 
-// Each atom's list (of a half list, only the atoms whose number is above
-// its own), counted and then filled: here in one go, in the same order.
+// Each atom's list (of a half list, only the atoms after it in the
+// index's order, as `after me` has them), counted and then filled: here
+// in one go, in the same order.
 static void make_lists(void) {
   for (int i = 0; i < atoms; i++) {
     if (x[i] >= size) x[i] -= size;
@@ -171,7 +173,7 @@ static void make_lists(void) {
             double ax = sx - x[i], ay = sy - y[i], az = sz - z[i];
             if (!(ax * ax + ay * ay + az * az <= far)) continue;
             int j = order[r];
-            if (j == i || (half && !(j > i))) continue;
+            if (j == i || (half && !(row_of[j] > row_of[i]))) continue;
             if (across(sx, sy, sz))
               cross_[crows++] = j;
             else

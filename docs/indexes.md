@@ -321,7 +321,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | Step | Work | Shows | Status |
 |---|---|---|---|
 | 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | `for ... by` listed, sorted and (giving rows) visited on many threads (see below); GPU to do |
-| 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below); `after me` proposed (2b) |
+| 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below), and `after me` (2b) |
 | 3 | Hash index and `unique` | `incremental`, change tracking | |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); query forms, float keys, ties, clustered to do |
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
@@ -389,7 +389,10 @@ its `where` (`test/Integration/near.test`).
   `kick_drift` moved the atoms, every step (0.6 ms of a step of 48).
 - Not yet: a range (`in box`), `nearest k`, and a grid of whole numbers.
 
-**Step 2b, each pair once: `after me`** (proposed 2026-10-22). A half
+**Step 2b, each pair once: `after me`** (built 2026-10-22, as proposed
+below; `test/Integration/near_after.test`. The half melt on one core
+0.96 s where 1.19, its count and fill 0.7 and 1.9 ms a step where 1.4
+and 3.5; on 12 threads 0.31 s where 0.35). A half
 list of neighbours (each pair once, the other given the opposite force)
 says which of the two takes the pair. `examples/lj` says it by number,
 `where o != me && b.number > a.number`, and so goes over all the atoms

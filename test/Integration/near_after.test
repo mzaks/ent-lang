@@ -1,0 +1,15 @@
+// `for ... near .. in Index after me`: the entities within r whose row in
+// the index is after that of the entity the `for` around visits
+// (Inputs/near_after.ent). Of each dot of a box that wraps and each pin
+// of one that does not, within less than a cell, more, and more than half
+// the box (all the pins): the same entities, in the same order (the same
+// sum of where they are, to the bit), as the `near` with the rows in its
+// `where`; every pair once, half of all. The same on one core and on all.
+// RUN: %ent run %S/Inputs/near_after.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/near_after.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK:      1: same 800 of 800, pairs after 2394, of all 4788
+// CHECK-NEXT: 2: same 800 of 800, pairs after 24164, of all 48328
+// CHECK-NEXT: 3: same 800 of 800, pairs after 155774, of all 311548

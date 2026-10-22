@@ -2018,6 +2018,14 @@ are worked out each time the index is made, and may read uniques.
   the cells around the place's, as many out as `r` reaches (z, then y,
   then x; round the box where it wraps), and in each over its rows; so
   in a fixed order, the same on one core and on many.
+- `after me` after the index's name (`.. within r in Name after me`)
+  visits of those only the entities whose row in the index is after
+  that of `me`, the entity the `for` around visits, by its name (that
+  `for` binds the index's first component): the same as `where
+  b.row_in_Name > a.row_in_Name`, never `me` itself, about half the rows
+  without testing them. Where the place is each one's own, every pair
+  within `r` is visited once, from the one whose row is first: a half
+  list of neighbours (`examples/lj/lj.ent`).
 - In a box that wraps, an entity is seen from the place where it is
   nearest it: `b.x` is that image's x (where the box is less than twice
   `r` wide, an entity is still visited once, by its nearest image). What

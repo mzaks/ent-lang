@@ -5667,6 +5667,40 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
     if (!llvm::is_contained(index.of, resolve(component)))
       return error(at, "the entities of '" + *named + "' have its "
                        "components; '" + component + "' is not one");
+  // `after me`: only those whose row in the index is after the row of
+  // the entity the `for` around visits, read through its binding of the
+  // index's first component.
+  mlir::Value afterRow;
+  if (consumeKeyword("after")) {
+    llvm::SMLoc meAt = token.loc;
+    FailureOr<std::string> me =
+        identifier("the entity the 'for' around visits");
+    if (failed(me))
+      return failure();
+    const Variable *visited = lookup(*me);
+    if (!visited || visited->kind != Variable::Entity)
+      return error(meAt, "'after' takes the entity the 'for' around "
+                         "visits, by its name: 'for me, a: " +
+                             index.of.front() + " { for o, b: " +
+                             index.of.front() + " near (..) within r in " +
+                             *named + " after me { .. } }'");
+    mlir::Value ref;
+    for (auto scope = scopes.rbegin(); scope != scopes.rend() && !ref;
+         ++scope)
+      for (auto &[name, variable] : *scope)
+        if (variable.kind == Variable::Ref &&
+            resolve(variable.component) == index.of.front()) {
+          ref = variable.value;
+          break;
+        }
+    if (!ref)
+      return error(meAt, "the 'for' around binds no '" + index.of.front() +
+                             "', by which '" + *me + "' has a row in '" +
+                             *named + "'");
+    afterRow = GetOp::create(builder, loc(meAt), builder.getI32Type(), ref,
+                             builder.getStringAttr(index.rowField))
+                   .getResult();
+  }
   ExprPtr condition;
   if (consumeKeyword("where")) {
     FailureOr<ExprPtr> parsed = parseExpr();
@@ -5766,6 +5800,14 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
     mlir::Value end1 = firstOf(part(1), 1);
     mlir::Value start2 = firstOf(part(2), 0);
     mlir::Value end2 = firstOf(part(3), 1);
+    // (After a row: each run from the row after it, where it starts
+    // before; one that ends before it has none.)
+    if (afterRow) {
+      mlir::Value next = arith::AddIOp::create(builder, where, afterRow,
+                                               integer(where, i32, 1));
+      start1 = arith::MaxSIOp::create(builder, where, start1, next);
+      start2 = arith::MaxSIOp::create(builder, where, start2, next);
+    }
     // The runs one after the other, each a loop over its rows.
     return loopWithVars(
         where, zero, arith::ConstantIndexOp::create(builder, where, 2),

@@ -13,8 +13,8 @@
 // and is seen as it is; only a pair whose other atom was seen across the
 // side of the box, in a list of its own (`Crossing`), is seen as the
 // image of the other nearest. With `half`, its list has only the
-// atoms whose number is above its own, each pair once, and it gives the
-// other the opposite force (to its `Pull`, combined in the order of the
+// atoms after it in the index (`after me`), each pair once, and it gives
+// the other the opposite force (to its `Pull`, combined in the order of the
 // atoms that give it, so the sums are the same however many threads
 // there are); else every atom has all of its own, each pair twice, and
 // gives nothing. Half the pairs, on one core; on many threads giving to
@@ -166,19 +166,24 @@ fn across(x: f64, y: f64, z: f64, size: f64) -> bool {
 }
 
 // The lists: each atom's count of the atoms within the cut and the skin
-// (of a half list: those whose number is above its own), of those seen
-// within the box and of those across its side; where each list starts;
-// and each list filled, in the order the index finds them.
+// (of a half list: those after it in the index, so each pair once), of
+// those seen within the box and of those across its side; where each
+// list starts; and each list filled, in the order the index finds them.
 system count_pairs() {
   let reach = Melt.cut + Melt.skin
-  let half = Melt.half
   let size = Melt.size
   for me, a: Atom, l: mut List, x: mut Across {
     var n: i32 = 0
     var c: i32 = 0
-    for o, b: Atom near (a.x, a.y, a.z) within reach in Cells
-        where o != me && (!half || b.number > a.number) {
-      if across(b.x, b.y, b.z, size) { c += 1 } else { n += 1 }
+    if Melt.half {
+      for o, b: Atom near (a.x, a.y, a.z) within reach in Cells after me {
+        if across(b.x, b.y, b.z, size) { c += 1 } else { n += 1 }
+      }
+    } else {
+      for o, b: Atom near (a.x, a.y, a.z) within reach in Cells
+          where o != me {
+        if across(b.x, b.y, b.z, size) { c += 1 } else { n += 1 }
+      }
     }
     l.count = n
     x.count = c
@@ -200,20 +205,31 @@ system place_pairs() {
 
 system fill_pairs() {
   let reach = Melt.cut + Melt.skin
-  let half = Melt.half
   let size = Melt.size
   for me, a: Atom, l: List, x: Across, w: mut Pairs[l.first, l.count],
       c: mut Crossing[x.first, x.count] {
     var k: i32 = 0
     var j: i32 = 0
-    for o, b: Atom near (a.x, a.y, a.z) within reach in Cells
-        where o != me && (!half || b.number > a.number) {
-      if across(b.x, b.y, b.z, size) {
-        c[j].other = o
-        j += 1
-      } else {
-        w[k].other = o
-        k += 1
+    if Melt.half {
+      for o, b: Atom near (a.x, a.y, a.z) within reach in Cells after me {
+        if across(b.x, b.y, b.z, size) {
+          c[j].other = o
+          j += 1
+        } else {
+          w[k].other = o
+          k += 1
+        }
+      }
+    } else {
+      for o, b: Atom near (a.x, a.y, a.z) within reach in Cells
+          where o != me {
+        if across(b.x, b.y, b.z, size) {
+          c[j].other = o
+          j += 1
+        } else {
+          w[k].other = o
+          k += 1
+        }
       }
     }
   }
