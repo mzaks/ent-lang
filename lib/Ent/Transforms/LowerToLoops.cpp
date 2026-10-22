@@ -12857,23 +12857,37 @@ static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
           rewriter, loc, list,
           arith::IndexCastOp::create(rewriter, loc, i64, group));
     };
-    auto counting = scf::ForOp::create(
-        rewriter, loc, zero, groupCount, one,
-        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)});
+    // (Each group's lists counted on a thread of their own, added up.)
+    // (Made around nought, which the count takes the place of where the
+    // loop is in the module: a call needs that.)
+    Value nought = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+    scf::ReduceOp reduce;
+    auto counting = scf::ParallelOp::create(
+        rewriter, loc, ValueRange{zero}, ValueRange{groupCount},
+        ValueRange{one}, ValueRange{nought},
+        [&](OpBuilder &, Location, ValueRange, ValueRange) {
+          reduce = scf::ReduceOp::create(rewriter, loc, nought);
+          Block &both = reduce.getReductions().front().front();
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPointToStart(&both);
+          scf::ReduceReturnOp::create(
+              rewriter, loc,
+              arith::AddIOp::create(rewriter, loc, both.getArgument(0),
+                                    both.getArgument(1))
+                  .getResult());
+        });
     {
       OpBuilder::InsertionGuard inner(rewriter);
-      rewriter.setInsertionPointToStart(counting.getBody());
-      Value counted = callSends(rewriter, loc, world, "ent_sends_count",
-                                {numberOf(counting.getInductionVar())}, true);
-      scf::YieldOp::create(
-          rewriter, loc,
-          ValueRange{arith::AddIOp::create(rewriter, loc,
-                                           counting.getRegionIterArg(0),
-                                           counted)});
+      rewriter.setInsertionPoint(reduce);
+      reduce->setOperand(
+          0, callSends(rewriter, loc, world, "ent_sends_count",
+                       {numberOf(counting.getInductionVars().front())}, true));
     }
     Value sent = counting.getResult(0);
+    // (A group's lists read, then emptied, on the same thread.)
     auto readGroup = [&](Value group) {
-      forEachSentWide(rewriter, loc, world, numberOf(group), width, {},
+      Value number = numberOf(group);
+      forEachSentWide(rewriter, loc, world, number, width, {},
                       [&](Value id, ArrayRef<Value> values, ValueRange) {
                         if (world.idType() != i64)
                           id = arith::TruncIOp::create(rewriter, loc,
@@ -12881,6 +12895,7 @@ static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
                         combineAll(id, values, bounds);
                         return SmallVector<Value>{};
                       });
+      callSends(rewriter, loc, world, "ent_sends_clear", {number}, false);
     };
     auto oneByOne = [&]() {
       auto groups = scf::ForOp::create(rewriter, loc, zero, groupCount, one);
@@ -12914,13 +12929,6 @@ static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
       callSends(rewriter, loc, world, "ent_sends_chosen", {list}, false);
     } else {
       oneByOne();
-    }
-    auto clearing = scf::ForOp::create(rewriter, loc, zero, groupCount, one);
-    {
-      OpBuilder::InsertionGuard inner(rewriter);
-      rewriter.setInsertionPoint(clearing.getBody()->getTerminator());
-      callSends(rewriter, loc, world, "ent_sends_clear",
-                {numberOf(clearing.getInductionVar())}, false);
     }
     rewriter.eraseOp(merge);
     return;

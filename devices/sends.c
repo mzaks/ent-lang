@@ -228,7 +228,9 @@ int64_t ent_sends_count(int64_t world, int64_t number) {
   int64_t count = 0;
   for (int slice = 0; slice < ENT_SEND_SLICES; ++slice) {
     ent_send_slice *list = &lists->slices[slice];
-    for (ent_send_block *block = list->first; block; block = block->next) {
+    // (One with no last block is empty: its blocks are from before.)
+    for (ent_send_block *block = list->last ? list->first : 0; block;
+         block = block->next) {
       count += block->count;
       if (block == list->last)
         break;
@@ -306,7 +308,8 @@ int64_t ent_sends_slices(int64_t world, int64_t number) {
   for (int slice = 0; slice < ENT_SEND_SLICES; ++slice) {
     ent_send_slice *list = &lists->slices[slice];
     list->before = count;
-    for (ent_send_block *block = list->first; block; block = block->next) {
+    for (ent_send_block *block = list->last ? list->first : 0; block;
+         block = block->next) {
       count += block->count;
       if (block == list->last)
         break;
@@ -429,21 +432,23 @@ void ent_sends_chosen(int64_t world, int64_t number) {
     choice->wait = 8;
   else if (way != best)
     choice->wait = choice->wait < 1024 ? 2 * choice->wait : 1024;
+  // (Where the other takes more than twice as long, it is tried again
+  // only after the most: trying it costs more than it could win soon.)
+  if (choice->cost[!best] > 2.0 * choice->cost[best])
+    choice->wait = 1024;
   if (way != best || best != was || !choice->again)
     choice->again = choice->calls + choice->wait;
 }
 
-// Nothing is on the lists any more; their blocks are kept.
+// Nothing is on the lists any more; their blocks are kept, to be taken
+// again from the first, each emptied as it is (ent_sends_grow), and
+// nothing reads past a slice's last block, which it has none of now.
 void ent_sends_clear(int64_t world, int64_t number) {
   ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
   if (!lists)
     return;
-  for (int slice = 0; slice < ENT_SEND_SLICES; ++slice) {
-    ent_send_slice *list = &lists->slices[slice];
-    for (ent_send_block *block = list->first; block; block = block->next)
-      block->count = 0;
-    list->last = 0;
-  }
+  for (int slice = 0; slice < ENT_SEND_SLICES; ++slice)
+    lists->slices[slice].last = 0;
 }
 
 // The rows a reactive `for` visits where what it sends is combined as it

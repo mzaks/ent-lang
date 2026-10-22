@@ -12,7 +12,8 @@
 // in a table where it starts. The query's end reads the lists in order,
 // where they are (a block at a time), and combines: an apply's from many
 // values on, where that has taken less so far (devices/sends.c chooses),
-// a group's lists on each thread, at once.
+// a group's lists on each thread, at once, each counted first and emptied
+// after on its thread.
 
 ent.component @H (hp: f32, n: i32)
 ent.archetype @A (@H) capacity 100000
@@ -34,20 +35,22 @@ ent.resource @Score (points: f32)
 // CHECK:             llvm.store
 // CHECK:             func.call @ent_sends_slice_grow(%{{.*}}, %[[SECOND]])
 // CHECK:             llvm.store
-// CHECK:       scf.for {{.*}} to %c64{{.*}} iter_args
-// CHECK:         call @ent_sends_count(
+// CHECK:       scf.parallel ({{.*}}) = ({{.*}}) to (%c64{{.*}}) step ({{.*}}) init
+// CHECK:         %[[COUNTED:.*]] = func.call @ent_sends_count(
+// CHECK:         scf.reduce(%[[COUNTED]] : i64)
+// CHECK:           arith.addi
 // CHECK:       call @ent_sends_choose({{.*}}, %c16384_i64, %c131072_i64)
 // CHECK:       scf.if
 // CHECK:         scf.parallel ({{.*}}) = ({{.*}}) to (%c64
 // CHECK:           scf.while
 // CHECK:             call @ent_sends_next_block(
+// CHECK:           call @ent_sends_clear(
 // CHECK:       } else {
 // CHECK:         scf.for {{.*}} to %c64
 // CHECK:           scf.while
 // CHECK:             call @ent_sends_next_block(
+// CHECK:           call @ent_sends_clear(
 // CHECK:       call @ent_sends_chosen(
-// CHECK:       scf.for {{.*}} to %c64
-// CHECK:         call @ent_sends_clear(
 // CHECK:       call @ent_sends_count(
 // CHECK:       scf.while
 // CHECK:         call @ent_sends_next_block(
