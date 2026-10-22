@@ -3438,23 +3438,100 @@ LogicalResult Parser::parseIndex() {
       out << "  min(2 * m + 1, n)\n}\n";
     else
       out << "  min(n - 1, c + m) - max(0, c - m) + 1\n}\n";
-    // A cell counted from the first, round the box.
+    // A little of a cell's width, for where a place found its cell by
+    // rounding.
+    std::string slack = ts == "f32" ? "0.01" : "0.000000001";
+    // A cell counted from the first, round the box (from `_from`, never
+    // a box or more below the first cell or past the last).
     out << "fn " << n << "_at(k: i64, n: i64) -> i64 {\n"
-        << "  var c = k % n\n"
-        << "  if c < 0 { c += n }\n"
+        << "  if k < 0 { k + n } else if k >= n { k - n } else { k }\n}\n"
+        // The lowest and the highest cell, counted on from the first
+        // (not round the box), that a place's `r` either side reaches.
+        << "fn " << n << "_low(p: " << ts << ", r: " << ts << ", lo: " << ts
+        << ", w: " << ts << ") -> i64 {\n"
+        << "  let q = (p - r - w * " << slack << " - lo) / w\n"
+        << "  var c = q as i64\n"
+        << "  if (c as " << ts << ") > q { c -= 1 }\n"
         << "  c\n}\n"
-        // Where `x` is seen from `p`: the image nearest it.
-        << "fn " << n << "_image(x: " << ts << ", p: " << ts << ", size: "
-        << ts << ") -> " << ts << " {\n";
+        << "fn " << n << "_high(p: " << ts << ", r: " << ts << ", lo: " << ts
+        << ", w: " << ts << ") -> i64 {\n"
+        << "  let q = (p + r + w * " << slack << " - lo) / w\n"
+        << "  var c = q as i64\n"
+        << "  if (c as " << ts << ") > q { c -= 1 }\n"
+        << "  c\n}\n"
+        // The cells from `l` to `h` of those `_from` and `_many` give, in
+        // the order they are visited, as two runs of cells next to each
+        // other (where they go round the box): `part` 0 and 1 the first
+        // and last of the first run, 2 and 3 of the second; a run with no
+        // cells is from 1 to 0.
+        << "fn " << n << "_run(part: i64, l: i64, h: i64, from: i64, "
+        << "many: i64, n: i64) -> i64 {\n"
+        << "  var a1: i64 = 1\n  var b1: i64 = 0\n"
+        << "  var a2: i64 = 1\n  var b2: i64 = 0\n";
     if (wrap)
-      // (One subtraction of the shift, which is what adding its
-      // opposite is, to the bit.)
+      // (All the cells, from the first: where they are no more than a
+      // box, those of `l` to `h` round it.)
+      out << "  if many == n {\n"
+          << "    if h - l + 1 >= n {\n"
+          << "      a1 = 0\n      b1 = n - 1\n"
+          << "    } else {\n"
+          << "      let lw = " << n << "_at(l - n * (l / n), n)\n"
+          << "      let hw = " << n << "_at(h - n * (h / n), n)\n"
+          << "      if lw <= hw {\n        a1 = lw\n        b1 = hw\n"
+          << "      } else {\n        a1 = 0\n        b1 = hw\n"
+          << "        a2 = lw\n        b2 = n - 1\n      }\n"
+          << "    }\n"
+          << "  } else {\n"
+          << "    let s = max(l, from)\n"
+          << "    let e = min(h, from + many - 1)\n"
+          << "    if s <= e {\n"
+          << "      if e < 0 {\n        a1 = s + n\n        b1 = e + n\n"
+          << "      } else if s < 0 {\n        a1 = s + n\n        b1 = n - 1\n"
+          << "        a2 = 0\n        b2 = e\n"
+          << "      } else if s >= n {\n"
+          << "        a1 = s - n\n        b1 = e - n\n"
+          << "      } else if e >= n {\n        a1 = s\n        b1 = n - 1\n"
+          << "        a2 = 0\n        b2 = e - n\n"
+          << "      } else {\n        a1 = s\n        b1 = e\n      }\n"
+          << "    }\n"
+          << "  }\n";
+    else
+      out << "  let s = max(l, from)\n"
+          << "  let e = min(h, from + many - 1)\n"
+          << "  if s <= e {\n    a1 = s\n    b1 = e\n  }\n";
+    out << "  if part == 0 { a1 } else if part == 1 { b1 } else if part == 2 "
+           "{ a2 } else { b2 }\n}\n"
+        // Where `x` is seen from `p`: the image nearest it.
+        << "fn " << n << "_image(x: " << ts << ", p: " << ts << ", size: " << ts
+        << ") -> " << ts << " {\n";
+    if (wrap)
+      // (Moved by the size in each branch: the same, to the bit, as
+      // taking away a shift of the size or of its opposite.)
       out << "  let d = x - p\n"
-          << "  let shift = if d > size * 0.5 { size } else if d < 0.0 - "
-             "size * 0.5 { 0.0 - size } else { 0.0 }\n"
-          << "  x - shift\n}\n";
+          << "  if d > size * 0.5 { x - size } else if d < 0.0 - size * 0.5 "
+             "{ x + size } else { x }\n}\n";
     else
       out << "  x\n}\n";
+    // How far, at least, an entity in cell `c` is from `p` on one side
+    // (as `_image` sees it, where the box wraps): from `p` to the cell,
+    // less a little for where a place found its cell by rounding. No
+    // nearer than that, so a cell farther than a distance has no entity
+    // within it.
+    out << "fn " << n << "_out(a: " << ts << ", w: " << ts << ", p: " << ts
+        << ") -> " << ts << " {\n"
+        << "  if p < a { a - p } else if p > a + w { p - (a + w) } else "
+           "{ 0.0 }\n}\n"
+        << "fn " << n << "_gap(c: i64, p: " << ts << ", lo: " << ts
+        << ", w: " << ts << ", size: " << ts << ") -> " << ts << " {\n"
+        << "  let a = lo + (c as " << ts << ") * w\n"
+        << "  var g = " << n << "_out(a, w, p)\n";
+    if (wrap)
+      out << "  let below = " << n << "_out(a - size, w, p)\n"
+          << "  if below < g { g = below }\n"
+          << "  let above = " << n << "_out(a + size, w, p)\n"
+          << "  if above < g { g = above }\n";
+    out << "  g -= w * " << slack << "\n"
+        << "  if g < 0.0 { 0.0 } else { g }\n}\n";
     // Each cell's first row: the first whose cell is not below it.
     out << "proc " << n << "_bounds(order: " << n << ", starts: mut " << n
         << "_cells, cells: i64) {\n"
@@ -5631,14 +5708,17 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
         ->getResult(0);
   };
   mlir::Value size = index.wrap ? read("size", t) : mlir::Value();
-  SmallVector<mlir::Value> sides, from, many;
+  SmallVector<mlir::Value> sides, from, many, starts, widths;
   for (unsigned d = 0; d < dims; ++d) {
     std::string number = std::to_string(d);
     mlir::Value n = read("n" + number, i64);
     mlir::Value width = read("w" + number, t);
-    mlir::Value own = call("_cell", {at_[d], read("lo" + number, t), width, n});
+    mlir::Value lo = read("lo" + number, t);
+    mlir::Value own = call("_cell", {at_[d], lo, width, n});
     mlir::Value out = call("_reach", {*reach, width});
     sides.push_back(n);
+    starts.push_back(lo);
+    widths.push_back(width);
     from.push_back(call("_from", {own, out, n}));
     many.push_back(call("_many", {own, out, n}));
   }
@@ -5646,92 +5726,144 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   auto rows = FlatSymbolRefAttr::get(context, symbolName);
   mlir::Value zero = arith::ConstantIndexOp::create(builder, where, 0);
   SmallVector<mlir::Value> cell(dims);
-  // The rows of one cell, then the entities within reach in them.
-  auto visitCell = [&]() -> LogicalResult {
-    mlir::Value number = cell[dims - 1];
-    for (unsigned d = dims - 1; d-- > 0;)
-      number = arith::AddIOp::create(
-          builder, where,
-          arith::MulIOp::create(builder, where, number, sides[d]), cell[d]);
+  // The rows of the cells along the first side that are within reach,
+  // where the other sides' cells are `cell` (`outer` how far, at least,
+  // those are, squared): those cells as up to two runs of cells next to
+  // each other (where they go round the box), and so of rows next to
+  // each other; then the entities within reach in them.
+  auto visitRuns = [&](mlir::Value outer) -> LogicalResult {
+    mlir::Value left = *reach;
+    if (outer)
+      left = math::SqrtOp::create(
+          builder, where, arith::SubFOp::create(builder, where, far, outer));
+    mlir::Value low = call("_low", {at_[0], left, starts[0], widths[0]});
+    mlir::Value high = call("_high", {at_[0], left, starts[0], widths[0]});
+    auto part = [&](int64_t which) {
+      return call("_run", {integer(where, i64, which), low, high, from[0],
+                           many[0], sides[0]});
+    };
+    // The cell number of the first along the first side.
+    mlir::Value base = integer(where, i64, 0);
+    for (unsigned d = dims; d-- > 1;)
+      base = arith::MulIOp::create(
+          builder, where, arith::AddIOp::create(builder, where, base, cell[d]),
+          sides[d - 1]);
     Type i32 = builder.getI32Type();
     // (Rows the index has, by the cells: read by row numbers, which are
     // not asked whether they are rows of the buffer.)
     auto cellRow = IndexOfType::get(context, cells);
-    mlir::Value first32 =
-        arith::TruncIOp::create(builder, where, i32, number);
-    mlir::Value next32 = arith::AddIOp::create(
-        builder, where, first32, integer(where, i32, 1));
-    mlir::Value first = BufferAtOp::create(
-        builder, where, i32, cells, builder.getStringAttr("first"),
-        asIndex(where, first32, cellRow));
-    mlir::Value end = BufferAtOp::create(
-        builder, where, i32, cells, builder.getStringAttr("first"),
-        asIndex(where, next32, cellRow));
+    auto firstOf = [&](mlir::Value along, int64_t plus) -> mlir::Value {
+      mlir::Value number = arith::AddIOp::create(
+          builder, where, base,
+          arith::AddIOp::create(builder, where, along,
+                                integer(where, i64, plus)));
+      return BufferAtOp::create(
+          builder, where, i32, cells, builder.getStringAttr("first"),
+          asIndex(where, arith::TruncIOp::create(builder, where, i32, number),
+                  cellRow));
+    };
+    mlir::Value start1 = firstOf(part(0), 0);
+    mlir::Value end1 = firstOf(part(1), 1);
+    mlir::Value start2 = firstOf(part(2), 0);
+    mlir::Value end2 = firstOf(part(3), 1);
+    // The runs one after the other, each a loop over its rows.
     return loopWithVars(
-        where, arith::IndexCastOp::create(builder, where, indexType, first),
-        arith::IndexCastOp::create(builder, where, indexType, end),
-        [&](mlir::Value counted) -> LogicalResult {
-          mlir::Value row = asIndex(
-              where, arith::IndexCastOp::create(builder, where, i32, counted),
-              IndexOfType::get(context, rows));
-          mlir::Value who =
-              BufferAtOp::create(builder, where, EntityType::get(context),
-                                 rows, builder.getStringAttr("who"), row);
-          NearRows near{symbolName, row, {}};
-          mlir::Value distance;
-          for (unsigned d = 0; d < dims; ++d) {
-            mlir::Value stored = BufferAtOp::create(
-                builder, where, t, rows,
-                builder.getStringAttr(index.positions[d]), row);
-            mlir::Value seen =
-                index.wrap
-                    ? InvokeOp::create(builder, where, t,
-                                       FlatSymbolRefAttr::get(
-                                           context, symbolName + "_image"),
-                                       ValueRange{stored, at_[d], size},
-                                       UnitAttr())
-                          ->getResult(0)
-                    : stored;
-            near.seen.push_back({index.component, index.positions[d], seen});
-            mlir::Value apart =
-                arith::SubFOp::create(builder, where, seen, at_[d]);
-            mlir::Value squared =
-                arith::MulFOp::create(builder, where, apart, apart);
-            distance = distance ? arith::AddFOp::create(builder, where,
-                                                        distance, squared)
-                                      .getResult()
-                                : squared;
-          }
-          mlir::Value within = arith::CmpFOp::create(
-              builder, where, arith::CmpFPredicate::OLE, distance, far);
-          return ifWithVars(where, within, [&]() -> LogicalResult {
-            ScopeGuard scope(*this);
-            llvm::SaveAndRestore inside(inEach, true);
-            std::optional<NearRows> outer = nearRows;
-            nearRows = near;
-            auto restore = llvm::make_scope_exit([&] { nearRows = outer; });
-            for (auto &[name, component] : bound) {
-              Variable variable{Variable::Near, who, component, false};
-              variable.which = row;
-              bind(name, variable);
-            }
-            if (!entity.empty())
-              bind(entity, Variable::ofValue(who));
-            if (!condition)
-              return parseBlock();
-            FailureOr<mlir::Value> holds =
-                emit(*condition, builder.getI1Type());
-            if (failed(holds))
-              return failure();
-            if (!holds->getType().isInteger(1))
-              return error(condition->loc, "'where' takes a bool");
-            return ifWithVars(where, *holds, [&] { return parseBlock(); });
-          });
+        where, zero, arith::ConstantIndexOp::create(builder, where, 2),
+        [&](mlir::Value run) -> LogicalResult {
+          mlir::Value second = arith::CmpIOp::create(
+              builder, where, arith::CmpIPredicate::ne, run, zero);
+          mlir::Value first =
+              arith::SelectOp::create(builder, where, second, start2, start1);
+          mlir::Value end =
+              arith::SelectOp::create(builder, where, second, end2, end1);
+          return loopWithVars(
+              where,
+              arith::IndexCastOp::create(builder, where, indexType, first),
+              arith::IndexCastOp::create(builder, where, indexType, end),
+              [&](mlir::Value counted) -> LogicalResult {
+                mlir::Value row = asIndex(
+                    where,
+                    arith::IndexCastOp::create(builder, where, i32, counted),
+                    IndexOfType::get(context, rows));
+                mlir::Value who =
+                    BufferAtOp::create(builder, where, EntityType::get(context),
+                                       rows, builder.getStringAttr("who"), row);
+                NearRows near{symbolName, row, {}};
+                mlir::Value distance;
+                for (unsigned d = 0; d < dims; ++d) {
+                  mlir::Value stored = BufferAtOp::create(
+                      builder, where, t, rows,
+                      builder.getStringAttr(index.positions[d]), row);
+                  mlir::Value seen =
+                      index.wrap
+                          ? InvokeOp::create(
+                                builder, where, t,
+                                FlatSymbolRefAttr::get(context,
+                                                       symbolName + "_image"),
+                                ValueRange{stored, at_[d], size}, UnitAttr())
+                                ->getResult(0)
+                          : stored;
+                  near.seen.push_back(
+                      {index.component, index.positions[d], seen});
+                  mlir::Value apart =
+                      arith::SubFOp::create(builder, where, seen, at_[d]);
+                  mlir::Value squared =
+                      arith::MulFOp::create(builder, where, apart, apart);
+                  distance = distance ? arith::AddFOp::create(builder, where,
+                                                              distance, squared)
+                                            .getResult()
+                                      : squared;
+                }
+                mlir::Value within = arith::CmpFOp::create(
+                    builder, where, arith::CmpFPredicate::OLE, distance, far);
+                return ifWithVars(where, within, [&]() -> LogicalResult {
+                  ScopeGuard scope(*this);
+                  llvm::SaveAndRestore inside(inEach, true);
+                  std::optional<NearRows> outer = nearRows;
+                  nearRows = near;
+                  auto restore =
+                      llvm::make_scope_exit([&] { nearRows = outer; });
+                  for (auto &[name, component] : bound) {
+                    Variable variable{Variable::Near, who, component, false};
+                    variable.which = row;
+                    bind(name, variable);
+                  }
+                  if (!entity.empty())
+                    bind(entity, Variable::ofValue(who));
+                  if (!condition)
+                    return parseBlock();
+                  FailureOr<mlir::Value> holds =
+                      emit(*condition, builder.getI1Type());
+                  if (failed(holds))
+                    return failure();
+                  if (!holds->getType().isInteger(1))
+                    return error(condition->loc, "'where' takes a bool");
+                  return ifWithVars(where, *holds,
+                                    [&] { return parseBlock(); });
+                });
+              });
         });
   };
-  // The cells around, the last side's outermost.
-  std::function<LogicalResult(unsigned)> sideLoop =
-      [&](unsigned d) -> LogicalResult {
+  // How far, at least, the entities of a cell are from the place on side
+  // `d`, squared: a row of cells (or a cell) farther than `r` is not
+  // visited, which leaves out no entity within it, nor changes the order
+  // of those visited.
+  auto gapSquared = [&](unsigned d) -> mlir::Value {
+    mlir::Value gap =
+        InvokeOp::create(
+            builder, where, t,
+            FlatSymbolRefAttr::get(context, symbolName + "_gap"),
+            ValueRange{cell[d], at_[d], starts[d], widths[d],
+                       size ? size : widths[d]},
+            UnitAttr())
+            ->getResult(0);
+    return arith::MulFOp::create(builder, where, gap, gap);
+  };
+  // The cells around on every side but the first, the last side's
+  // outermost, those farther than `r` left out; `outer` how far, at
+  // least, the row of cells is on the sides outside this one.
+  std::function<LogicalResult(unsigned, mlir::Value)> sideLoop =
+      [&](unsigned d, mlir::Value outer) -> LogicalResult {
     return loopWithVars(
         where, zero,
         arith::IndexCastOp::create(builder, where, indexType, many[d]),
@@ -5740,10 +5872,18 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
               arith::IndexCastOp::create(builder, where, i64, counted);
           mlir::Value along = arith::AddIOp::create(builder, where, from[d], k);
           cell[d] = index.wrap ? call("_at", {along, sides[d]}) : along;
-          return d == 0 ? visitCell() : sideLoop(d - 1);
+          mlir::Value gap = gapSquared(d);
+          if (outer)
+            gap = arith::AddFOp::create(builder, where, outer, gap);
+          mlir::Value near = arith::CmpFOp::create(
+              builder, where, arith::CmpFPredicate::OLE, gap, far);
+          return ifWithVars(where, near, [&]() -> LogicalResult {
+            return d == 1 ? visitRuns(gap) : sideLoop(d - 1, gap);
+          });
         });
   };
-  return sideLoop(dims - 1);
+  return dims == 1 ? visitRuns(mlir::Value())
+                   : sideLoop(dims - 1, mlir::Value());
 }
 
 LogicalResult Parser::parseEdges(llvm::SMLoc at) {
@@ -10839,6 +10979,28 @@ FailureOr<mlir::Value> Parser::windowRow(const Variable &window,
   if (!row->getType().isInteger(32))
     return error(number.loc, "a row of a window is an i32, from 0 to below "
                              "its length");
+  // (The number a loop counts from 0 or more up to below the window's
+  // length, `for k in 0..len(w)`: in it, as it is.)
+  if (auto counted = row->getDefiningOp<arith::IndexCastOp>()) {
+    auto argument = dyn_cast<BlockArgument>(counted.getIn());
+    auto loop = argument ? dyn_cast<scf::ForOp>(
+                               argument.getOwner()->getParentOp())
+                         : scf::ForOp();
+    if (loop && loop.getInductionVar() == argument) {
+      auto upper = loop.getUpperBound().getDefiningOp<arith::IndexCastOp>();
+      auto constant = [](mlir::Value value) {
+        if (auto cast = value.getDefiningOp<arith::IndexCastOp>())
+          value = cast.getIn();
+        return getConstantIntValue(value);
+      };
+      std::optional<int64_t> lower = constant(loop.getLowerBound());
+      std::optional<int64_t> step = constant(loop.getStep());
+      if (upper && upper.getIn() == window.which && lower && *lower >= 0 &&
+          step && *step > 0)
+        return arith::AddIOp::create(builder, at, window.value, *row)
+            .getResult();
+    }
+  }
   mlir::Value inside = arith::AndIOp::create(
       builder, at,
       arith::CmpIOp::create(builder, at, arith::CmpIPredicate::sge, *row,
