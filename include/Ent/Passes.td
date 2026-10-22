@@ -102,6 +102,11 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
     Option<"explain", "explain", "bool", /*default=*/"false",
            "Emit remarks on lowering decisions, such as reactive queries "
            "that scan every entity instead of walking event logs">,
+    Option<"explainStateAccess", "explain-state-access", "bool",
+           /*default=*/"false",
+           "Emit a remark for each state and access op (ent.sa) where it "
+           "is lowered: how it was resolved, and the facts it was "
+           "resolved from">,
   ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",

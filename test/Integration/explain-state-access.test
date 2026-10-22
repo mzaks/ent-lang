@@ -1,0 +1,68 @@
+// How each state and access op (ent.sa) was resolved, said where it is
+// lowered (explain-state-access): the resolution, and the facts it was
+// resolved from, at the line of the .ent that sends, appends or ends the
+// query.
+
+// On many threads: sends from a loop of the body on the slices' lists,
+// an apply's merged by groups, an accumulate's folded in order; one sent
+// once for each row in its slot, folded row after row; whole numbers
+// nothing else sees reduced by the loop.
+// RUN: ent-translate --import-ent %S/Inputs/looped_sends.ent -I %S/../../devices \
+// RUN:   --mlir-print-debuginfo \
+// RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 parallel-entities=1 parallel-min-entities=1 explain-state-access=1" \
+// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=SENDS
+// SENDS: looped_sends.ent:28:9: remark: sa.combine list (looped, sliced, unobserved)
+// SENDS: looped_sends.ent:29:9: remark: sa.accumulate list (looped, sliced, unobserved)
+// SENDS: looped_sends.ent:28:9: remark: sa.merge groups, staged list (parallel)
+// SENDS: looped_sends.ent:29:9: remark: sa.fold in-order, staged list
+// SENDS: looped_sends.ent:43:5: remark: sa.accumulate rows (unobserved)
+// SENDS: looped_sends.ent:44:5: remark: sa.accumulate reduce (reduced, unobserved)
+// SENDS: looped_sends.ent:43:5: remark: sa.fold rows, staged rows
+
+// The same on one thread: combined where they are sent.
+// RUN: ent-translate --import-ent %S/Inputs/looped_sends.ent -I %S/../../devices \
+// RUN:   --mlir-print-debuginfo \
+// RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 explain-state-access=1" \
+// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=ONE
+// ONE: looped_sends.ent:28:9: remark: sa.combine direct (direct, looped, unobserved)
+// ONE: looped_sends.ent:29:9: remark: sa.accumulate direct (direct, looped, unobserved)
+
+// Edges connected from a loop of the body on many threads: a range
+// reserved for each slice.
+// RUN: ent-translate --import-ent %S/Inputs/looped_connects.ent -I %S/../../devices \
+// RUN:   --mlir-print-debuginfo \
+// RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 parallel-entities=1 parallel-min-entities=1 explain-state-access=1" \
+// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONNECTS
+// CONNECTS: looped_connects.ent:21:7: remark: sa.append list (looped, sliced)
+// CONNECTS: looped_connects.ent:21:7: remark: sa.place reserved, staged list (parallel)
+
+// On the GPU, whole numbers are combined atomically and accumulated into the
+// GPU's cells, which are folded into the uniques after the loops.
+// RUN: ent-translate --import-ent %S/Inputs/gpu_sends.ent -I %S/../../devices \
+// RUN:   --mlir-print-debuginfo \
+// RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 gpu=1 explain-state-access=1" \
+// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=GPU
+// GPU: gpu_sends.ent:16:5: remark: sa.combine atomic (atomic, unobserved, whole)
+// GPU: gpu_sends.ent:18:5: remark: sa.accumulate atomic (atomic, unobserved)
+// GPU: remark: sa.fold cell, staged cell
+// GPU: remark: sa.fold cell, staged cell (no_sign)
+
+// On many ranks: whole numbers sent to another rank's entities posted
+// there, fractions refused; edges sent to the ranks of their ends.
+// RUN: ent-translate --import-ent %S/Inputs/ranks_sends.ent -I %S/../../devices \
+// RUN:   --mlir-print-debuginfo \
+// RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 ranks=1 explain-state-access=1" \
+// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=RANKS
+// RANKS: ranks_sends.ent:17:5: remark: sa.combine rows, posted on ranks (direct, posts, whole)
+// RANKS: ranks_sends.ent:17:5: remark: sa.merge rows, posted on ranks, staged rows (posts, ranks, whole)
+// RUN: ent-translate --import-ent %S/Inputs/ranks_sendfloat.ent -I %S/../../devices \
+// RUN:   --mlir-print-debuginfo \
+// RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 ranks=1 explain-state-access=1" \
+// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=REFUSED
+// REFUSED: ranks_sendfloat.ent:10:5: remark: sa.combine direct, refused on ranks (direct, posts, unobserved)
+// RUN: ent-translate --import-ent %S/Inputs/ranks_connect.ent -I %S/../../devices \
+// RUN:   --mlir-print-debuginfo \
+// RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 ranks=1 explain-state-access=1" \
+// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=ROUTED
+// ROUTED: ranks_connect.ent:13:20: remark: sa.append rows
+// ROUTED: ranks_connect.ent:13:20: remark: sa.place routed, staged rows (ranks)

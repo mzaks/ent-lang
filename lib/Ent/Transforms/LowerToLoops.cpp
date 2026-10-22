@@ -11949,9 +11949,36 @@ static void resolveStateAccess(SaPlaceOp place) {
                                                        : "in-order");
 }
 
+/// Whether each state and access op says how it was resolved, as a
+/// remark where it is lowered (the pass's `explain-state-access`).
+static bool explainingStateAccess = false;
+
+/// The remark of `op` (an `ent.sa` op, resolved), where explained: its
+/// name, its resolution (and on many ranks what crosses them), what it
+/// staged, and the facts it was resolved from, `sa.merge rows, staged
+/// rows (parallel, trusted)`.
+static void explainResolution(Operation *op) {
+  if (!explainingStateAccess)
+    return;
+  InFlightDiagnostic remark = op->emitRemark();
+  remark << op->getName().stripDialect() << " "
+         << op->getAttrOfType<StringAttr>("resolution").getValue();
+  if (auto onRanks = op->getAttrOfType<StringAttr>("on_ranks"))
+    remark << ", " << onRanks.getValue() << " on ranks";
+  if (auto staged = op->getAttrOfType<StringAttr>("staged"))
+    remark << ", staged " << staged.getValue();
+  SmallVector<StringRef> facts;
+  for (NamedAttribute attribute : op->getAttrs())
+    if (isa<UnitAttr>(attribute.getValue()))
+      facts.push_back(attribute.getName().getValue());
+  if (!facts.empty())
+    remark << " (" << llvm::join(facts, ", ") << ")";
+}
+
 /// Carry out `append` (resolved), at its place.
 static void lowerStateAccess(IRRewriter &rewriter, SaAppendOp append,
                              const WorldLayout &layout, WorldAccess &world) {
+  explainResolution(append);
   Location loc = append.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(append);
@@ -12008,6 +12035,7 @@ static void lowerStateAccess(IRRewriter &rewriter, SaAppendOp append,
 /// Carry out `place` (resolved), at its place.
 static void lowerStateAccess(IRRewriter &rewriter, SaPlaceOp place,
                              const WorldLayout &layout, WorldAccess &world) {
+  explainResolution(place);
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(place);
   const WorldArchetype &archetype = layout.archetypes[place.getArchetype()];
@@ -12302,6 +12330,7 @@ static void resolveStateAccess(SaMergeOp merge) {
 /// Carry out `combine` (resolved), at its place.
 static void lowerStateAccess(IRRewriter &rewriter, SaCombineOp combine,
                              const WorldLayout &layout, WorldAccess &world) {
+  explainResolution(combine);
   Location loc = combine.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(combine);
@@ -12510,6 +12539,7 @@ static void mergeEdges(IRRewriter &rewriter, SaMergeOp merge,
 /// time, groups from eight times `least` on.
 static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
                              const WorldLayout &layout, WorldAccess &world) {
+  explainResolution(merge);
   Location loc = merge.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(merge);
@@ -12747,6 +12777,7 @@ static void resolveStateAccess(SaFoldOp fold) {
 /// Carry out `accumulate` (resolved), at its place.
 static void lowerStateAccess(IRRewriter &rewriter, SaAccumulateOp accumulate,
                              const WorldLayout &layout, WorldAccess &world) {
+  explainResolution(accumulate);
   Location loc = accumulate.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(accumulate);
@@ -12956,6 +12987,7 @@ static void foldCell(IRRewriter &rewriter, SaFoldOp fold,
 /// Carry out `fold` (resolved), at its place.
 static void lowerStateAccess(IRRewriter &rewriter, SaFoldOp fold,
                              const WorldLayout &layout, WorldAccess &world) {
+  explainResolution(fold);
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(fold);
   if (*fold.getResolution() == "cell") {
@@ -21695,6 +21727,7 @@ struct EntLowerToLoops
     ownerRuns.clear();
     ownerTags.clear();
     ranksMode = ranks;
+    explainingStateAccess = explainStateAccess;
     partitionCount = ranks ? partitions : 0;
     if (partitionCount > 0)
       module->setAttr(WorldLayout::kPartitionsAttr,
