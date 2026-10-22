@@ -321,7 +321,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | Step | Work | Shows | Status |
 |---|---|---|---|
 | 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | `for ... by` listed, sorted and (giving rows) visited on many threads (see below); GPU to do |
-| 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below) |
+| 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below); `after me` proposed (2b) |
 | 3 | Hash index and `unique` | `incremental`, change tracking | |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); query forms, float keys, ties, clustered to do |
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
@@ -388,6 +388,87 @@ its `where` (`test/Integration/near.test`).
 - The policy is still `lazy`: made before `forces` reads it, after
   `kick_drift` moved the atoms, every step (0.6 ms of a step of 48).
 - Not yet: a range (`in box`), `nearest k`, and a grid of whole numbers.
+
+**Step 2b, each pair once: `after me`** (proposed 2026-10-22). A half
+list of neighbours (each pair once, the other given the opposite force)
+says which of the two takes the pair. `examples/lj` says it by number,
+`where o != me && b.number > a.number`, and so goes over all the atoms
+around and drops half of them: the same scan as a full list, half the
+pairs. LAMMPS goes over half of what is around (its half stencil): its
+lists take 1.2 ms a step where `melt.ent`'s take 5.3.
+
+The surface: `after` and the entity the `for` around visits, after the
+index's name.
+
+```
+for me, a: Atom, l: mut List {
+  var n: i32 = 0
+  for o, b: Atom near (a.x, a.y, a.z) within reach in Cells after me {
+    n += 1
+  }
+  l.count = n
+}
+```
+
+- It visits what the `near` without it visits whose row in the index is
+  after `me`'s (`row_in_Cells`): the same entities in the same order as
+  `where b.row_in_Cells > a.row_in_Cells`, so never `me` itself. Where
+  the `for` around visits every entity of the index and the place is
+  each one's own, every pair within `r` is visited once, from the one of
+  the two whose row is first. Which one that is depends on the cell
+  size and the order the index keeps, as the order of the visits does
+  already; the same on one core and on many.
+- `me` is the entity the `for` around visits, by its name, and that
+  `for` binds the index's first component (so it has a row); else it is
+  an error. A `where` after it as before (`after me where b.kind == ..`).
+- The compiler: the rows `near` goes along are runs, each from a first
+  row to a last (see step 2); with `after me` each run starts at the
+  row after `me`'s where it starts before it, and a run that ends before
+  it is left out. The cells the rows are in are in the order of their
+  keys, so the cells before `me`'s give nothing, as do the rows of its
+  own cell before its row. Nothing about the cells is assumed: the
+  place may be anywhere, the box less than a cell or two wide. About
+  half the rows, without testing them; with the cells of
+  `examples/lj` (3 cells of 3.05 across the 2.8 it reaches) about 220
+  where 430 now.
+- Which atom takes the pair is not even. Of a box that wraps, the cells
+  just across its last side are first in the order: an atom in the
+  first layer of cells takes the pairs of the last layer too, and one in
+  the last layer none of the first. On average half; on many threads the
+  slices are of the archetype's rows, each across all the cells, so
+  about even too (to measure).
+
+Tests: `test/Integration/near.test` with `after me` against the same
+`near` with `where b.row_in_Cells > a.row_in_Cells`, in a box that wraps
+and one that does not, `r` within a cell and beyond, a box of fewer
+cells than `r` reaches; and that every pair comes once (twice the
+pairs of `after me` are those of `where o != me`). The errors, in a
+`test/Import` test. `lj_melt.test` against the C as now.
+
+`examples/lj` then: a half list takes `after me` in place of the number
+(its own `for` near, beside the full list's `where o != me`, as
+`Melt.half` is a value of the world, not of the source), in the count
+and the fill; `check/melt.c` the same by the index's rows, to the bit.
+What I expect: the count and the fill of half lists about half (1.4 and
+3.5 ms a step to about 0.8 and 1.9), the half melt 1.19 s on one core
+to about 1.0, the force loop as it is.
+
+Not chosen:
+
+- A half by the cells around, as LAMMPS has it (the cells ahead of one's
+  own, and in its own the rows after): each atom takes as many as
+  another. But "ahead" is of the cells as seen around the place, which
+  are not one order where the box is less than 2m + 1 cells across
+  (`test/Integration/lj_melt.test` has 3), and it ties the meaning of a
+  program to the grid's geometry more than an order of rows does.
+- The compiler finding `where b.row_in_Cells > a.row_in_Cells` itself:
+  the same, but by the name of a field the index keeps for itself.
+- `where b.number > a.number`, as now: it says the most (a pair belongs
+  to the lower number, whatever the index), and goes over twice the
+  rows. It stays as it is for what needs that.
+
+Decided (2026-10-22): `after me`; a program that chooses between a half
+and a full list by a value of the world keeps two loops.
 
 ## 9. When it is done
 
