@@ -1,0 +1,315 @@
+// Cars on a ring road of several lanes: each drives by the intelligent
+// driver model behind the car ahead in its lane, as in idm.ent, and
+// changes lanes by MOBIL (Kesting, Treiber and Helbing, 2007). A car goes
+// to the lane beside it where it would speed up there by more than
+// `threshold` above what it does here, counting what the cars behind it
+// lose or gain by it at `polite` of their worth:
+//
+//   a~c - ac + polite (a~n - an + a~o - ao) > threshold
+//
+// (c the car, n the one that would be behind it in the new lane, o the one
+// behind it now; ~ after the change), and only where the new one behind
+// it need not brake harder than `safe`. All decide from where the cars
+// were when the step began; to the left in even steps and to the right in
+// odd ones, so that no two cars go into one lane from both sides at once.
+// Then they all go into their lanes, and every car speeds up or brakes
+// behind the car that is ahead of it there: two that went into the next
+// lane together, one close behind the other, see each other.
+//
+// The car ahead and the cars behind are not kept: each step all cars are
+// put in order by lane and place, as the rows of the buffer `Order`, and
+// a car finds its neighbours there: in its own lane the rows next to its
+// own, in the other lane by halving (`ahead`, `behind`). A lane of a road
+// is a strip, `base + lane`, and a car's place in the order is its key:
+// its strip in the high 32 bits and where it is, in millimetres, in the
+// low ones.
+//
+// With one lane nobody changes, and the cars go as in idm.ent, to the bit.
+
+import wyhash
+
+unique Sim { seed: u64, dt: f32, step: i64, warm: i64, cars: i32, strips: i32 }
+
+// A road and what was measured on it after the warm-up: how far its cars
+// drove, how often one changed lanes, and in how many steps a car stood
+// no further behind the one ahead than nought (none, it is to be hoped).
+component Road { ring: f32, lanes: i32, cars: i32, driven: f64, changes: i32,
+                 crashes: i32 } capacity 1024
+
+// What a car is: its road, how long it is, how long the road is, how many
+// lanes it has and the first one's strip, which lane it is in, and its
+// key.
+component Car { road: entity, number: i32, length: f32, ring: f32, lanes: i32,
+                base: i32, lane: i32, key: i64 } capacity 100000
+// How it drives (`sq` is 2 sqrt(a b)) and changes lanes.
+component Driver { v0: f32, t: f32, s0: f32, a: f32, b: f32, sq: f32,
+                   polite: f32, threshold: f32, safe: f32 } capacity 100000
+component Spot { x: f32 } capacity 100000
+component Speed { v: f32 } capacity 100000
+// How hard it speeds up behind the car ahead in its lane.
+component Accel { a: f32 } capacity 100000
+// The lane it goes on in.
+component Move { lane: i32 } capacity 100000
+// Its row in `Order`.
+component Slot { row: i32 } capacity 100000
+
+// All cars by lane and place, as they were when the step began.
+buffer Order { key: i64, who: entity, x: f32, v: f32, length: f32 } capacity 100000
+
+// The roads to lay, a row each, which the program gives before `lay()`.
+// Every `trucks`-th car is a truck (none where it is 0), which would go
+// `truck_v0` and is `truck_length` long. Every car's v0 is drawn from
+// v0 (1 - spread / 2) to v0 (1 + spread / 2), and so is every truck's.
+buffer Plan { ring: f32, lanes: i32, cars: i32, length: f32, v0: f32, t: f32,
+              s0: f32, a: f32, b: f32, polite: f32, threshold: f32, safe: f32,
+              kick: f32, trucks: i32, truck_v0: f32, truck_length: f32,
+              spread: f32 } capacity 1024
+
+fn key(strip: i32, x: f32) -> i64 {
+  (strip as i64) << 32 | (x * 1000.0) as i64
+}
+
+fn strip_of(order: Order, row: i32) -> i32 { (order[row].key >> 32) as i32 }
+
+// The first row whose key is above `key` (`above`), or not below it: by
+// halving the rows, as often as their number has bits (the exponent of it
+// as a float).
+fn first(order: Order, key: i64, above: bool) -> i32 {
+  var low = 0
+  var high = len(order)
+  let rounds = (bits_of(len(order) as f32) >> 23) as i32 - 126
+  for round in 0..rounds {
+    if low < high {
+      let mid = (low + high) >> 1
+      let k = order[mid].key
+      if k < key || (above && k == key) { low = mid + 1 } else { high = mid }
+    }
+  }
+  low
+}
+
+// The row of the car ahead of the key `k` in the strip, round the ring
+// (the first after the last); -1 where the strip has no car. A car whose
+// key is `k`, beside the one asking within the millimetre, is ahead.
+fn ahead(order: Order, strip: i32, k: i64) -> i32 {
+  let r = first(order, k, false)
+  if r < len(order) && strip_of(order, r) == strip { r } else {
+    let f = first(order, (strip as i64) << 32, false)
+    if f < len(order) && strip_of(order, f) == strip { f } else { -1 }
+  }
+}
+
+// The row of the car behind the key `k` in the strip, round the ring.
+fn behind(order: Order, strip: i32, k: i64) -> i32 {
+  let r = first(order, k, false) - 1
+  if r >= 0 && strip_of(order, r) == strip { r } else {
+    let l = first(order, ((strip + 1) as i64) << 32, false) - 1
+    if l >= 0 && strip_of(order, l) == strip { l } else { -1 }
+  }
+}
+
+// The row after `row` in its strip, round the ring (the car ahead of the
+// one in `row`), and the row before it (the car behind it); the row itself
+// where it is the strip's only car.
+fn next_in(order: Order, row: i32, strip: i32) -> i32 {
+  if row + 1 < len(order) && strip_of(order, row + 1) == strip { row + 1 } else {
+    first(order, (strip as i64) << 32, false)
+  }
+}
+
+fn before_in(order: Order, row: i32, strip: i32) -> i32 {
+  if row > 0 && strip_of(order, row - 1) == strip { row - 1 } else {
+    first(order, ((strip + 1) as i64) << 32, false) - 1
+  }
+}
+
+// How far the car at `x` (of key `k`) is behind the one in row `r`: once
+// round the ring more where that is round it (its key below `k`, or `k`
+// itself where `above`: the car itself, or in its own lane).
+fn reach(order: Order, r: i32, k: i64, above: bool, x: f32, ring: f32) -> f32 {
+  var dx = order[r].x - x
+  if order[r].key < k || (above && order[r].key == k) { dx += ring }
+  dx
+}
+
+// How far the car in row `r`, which `behind` found, is behind the car at
+// `x` (of key `k`).
+fn reach_back(order: Order, r: i32, k: i64, x: f32, ring: f32) -> f32 {
+  var dx = x - order[r].x
+  if order[r].key >= k { dx += ring }
+  dx
+}
+
+// The intelligent driver model: how hard a car that goes `v` speeds up
+// `gap` behind one that goes `ahead`.
+fn idm(v0: f32, t: f32, s0: f32, a: f32, sq: f32, v: f32, ahead: f32, gap: f32) -> f32 {
+  let r = v / v0
+  let r2 = r * r
+  let want = s0 + max(0.0, v * t + v * (v - ahead) / sq)
+  let q = want / gap
+  a * (1.0 - r2 * r2 - q * q)
+}
+
+// For every row of `Plan` a road with its cars standing evenly round it,
+// one lane after the other (the n-th in lane n % lanes).
+system lay() {
+  for i in 0..len(Plan) {
+    let ring = Plan[i].ring
+    let lanes = Plan[i].lanes
+    let cars = Plan[i].cars
+    let base = Sim.strips
+    let road = spawn { Road { ring: ring, lanes: lanes, cars: cars, driven: 0.0,
+                              changes: 0, crashes: 0 } }
+    let a = Plan[i].a
+    let b = Plan[i].b
+    let sq = 2.0 * sqrt(a * b)
+    for k in 0..cars {
+      var x = k as f32 * ring / cars as f32
+      if k == 0 { x += Plan[i].kick }
+      let lane = k % lanes
+      let truck = Plan[i].trucks > 0 && k % Plan[i].trucks == Plan[i].trucks - 1
+      let length = if truck { Plan[i].truck_length } else { Plan[i].length }
+      let wish = if truck { Plan[i].truck_v0 } else { Plan[i].v0 }
+      let draw = wyrand_unit(wyhash64(Sim.seed, i as u64), k as i64) as f32
+      let v0 = wish * (1.0 + Plan[i].spread * (draw - 0.5))
+      spawn { Car { road: road, number: Sim.cars, length: length, ring: ring,
+                    lanes: lanes, base: base, lane: lane, key: key(base + lane, x) },
+              Driver { v0: v0, t: Plan[i].t, s0: Plan[i].s0, a: a, b: b, sq: sq,
+                       polite: Plan[i].polite, threshold: Plan[i].threshold,
+                       safe: Plan[i].safe },
+              Spot { x: x }, Speed { v: 0.0 }, Accel { a: 0.0 }, Move { lane: lane }, Slot { row: 0 } }
+      Sim.cars += 1
+    }
+    Sim.strips += lanes
+  }
+}
+
+// Every car in `order` told its row.
+proc number(order: Order, slots: mut Slot) {
+  for row in 0..len(order) { slots[order[row].who].row = row }
+}
+
+// The cars in order by lane and place, each told its row.
+system sort() {
+  Order = []
+  for e, c: Car, at: Spot, s: Speed by c.key {
+    Order += { key: c.key, who: e, x: at.x, v: s.v, length: c.length }
+  }
+  number(Order, Slot)
+}
+
+// How hard every car speeds up behind the car ahead in its lane; where
+// `tally`, its road counts it standing on the car ahead.
+system think(tally: bool) {
+  let counts = tally && Sim.step >= Sim.warm
+  for c: Car, d: Driver, at: Spot, s: Speed, o: Slot, acc: mut Accel {
+    let r = next_in(Order, o.row, c.base + c.lane)
+    let gap = reach(Order, r, c.key, true, at.x, c.ring) - Order[r].length
+    if counts && gap <= 0.0 { Road(c.road).crashes += 1 }
+    acc.a = idm(d.v0, d.t, d.s0, d.a, d.sq, s.v, Order[r].v, gap)
+  }
+}
+
+// Which lane every car goes on in, by MOBIL.
+system decide() {
+  let side = if Sim.step % 2 == 0 { 1 } else { -1 }
+  for me, c: Car, d: Driver, at: Spot, s: Speed, o: Slot, acc: Accel, m: mut Move {
+    m.lane = c.lane
+    let lane = c.lane + side
+    if lane >= 0 && lane < c.lanes {
+      let own = c.base + c.lane
+      let there = c.base + lane
+      // Behind the car ahead in the other lane, or alone in it.
+      var gap = c.ring - c.length
+      var front = s.v
+      let k = key(there, at.x)
+      let nl = ahead(Order, there, k)
+      if nl >= 0 {
+        gap = reach(Order, nl, k, false, at.x, c.ring) - Order[nl].length
+        front = Order[nl].v
+      }
+      let mine = idm(d.v0, d.t, d.s0, d.a, d.sq, s.v, front, gap)
+      var safe = gap > 0.0
+      var gain = mine - acc.a
+      // The car that would be behind it there.
+      let nf = behind(Order, there, k)
+      if nf >= 0 {
+        let who = Order[nf].who
+        let back = reach_back(Order, nf, k, at.x, c.ring) - c.length
+        if let v0 = Driver(who).v0, let t = Driver(who).t, let s0 = Driver(who).s0,
+           let a = Driver(who).a, let sq = Driver(who).sq, let now = Accel(who).a {
+          let then = idm(v0, t, s0, a, sq, Order[nf].v, s.v, back)
+          safe = safe && back > 0.0 && then >= 0.0 - d.safe
+          gain += d.polite * (then - now)
+        }
+      }
+      // The car behind it now, which would follow the car ahead of it.
+      let of = before_in(Order, o.row, own)
+      if of >= 0 && Order[of].who != me {
+        let who = Order[of].who
+        let ol = next_in(Order, o.row, own)
+        let back = reach(Order, ol, Order[of].key, true, Order[of].x, c.ring) - Order[ol].length
+        if let v0 = Driver(who).v0, let t = Driver(who).t, let s0 = Driver(who).s0,
+           let a = Driver(who).a, let sq = Driver(who).sq, let now = Accel(who).a {
+          let then = idm(v0, t, s0, a, sq, Order[of].v, Order[ol].v, back)
+          gain += d.polite * (then - now)
+        }
+      }
+      if safe && gain > d.threshold {
+        m.lane = lane
+      }
+    }
+  }
+}
+
+// Every car goes into the lane it goes on in.
+system shift() {
+  let counts = Sim.step >= Sim.warm
+  for c: mut Car, at: Spot, m: Move {
+    if m.lane != c.lane {
+      c.lane = m.lane
+      c.key = key(c.base + c.lane, at.x)
+      if counts { Road(c.road).changes += 1 }
+    }
+  }
+}
+
+// Every car moves on.
+system drive() {
+  let dt = Sim.dt
+  let counts = Sim.step >= Sim.warm
+  for c: mut Car, at: mut Spot, s: mut Speed, acc: Accel {
+    let v = s.v
+    let a = acc.a
+    let next = v + a * dt
+    var dx = 0.0
+    if next < 0.0 {
+      dx = 0.0 - 0.5 * v * v / a
+      s.v = 0.0
+    } else {
+      dx = v * dt + 0.5 * a * dt * dt
+      s.v = next
+    }
+    var x = at.x + dx
+    if x >= c.ring { x -= c.ring }
+    at.x = x
+    c.key = key(c.base + c.lane, x)
+    if counts { Road(c.road).driven += dx as f64 }
+  }
+  Sim.step += 1
+}
+
+schedule setup() { lay() }
+
+// A step: the cars decide which lane to go on in from where they all are,
+// go into it, and then speed up or brake behind the car that is ahead of
+// them there.
+schedule step() {
+  sort()
+  think(false)
+  decide()
+  shift()
+  sort()
+  think(true)
+  drive()
+}

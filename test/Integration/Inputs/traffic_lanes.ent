@@ -1,0 +1,49 @@
+// Ring roads of two and three lanes through examples/traffic/lanes.ent,
+// with trucks and drivers who would go at different speeds, as
+// examples/traffic/check/lanes.c drives them: every 100 steps a line for
+// each car, `step car lane x v` (the bits of the floats), and at the end
+// each road's distance driven (the bits of the double), lane changes and
+// steps standing on the car ahead.
+import console
+import lanes
+
+world {
+  Sim.seed = 1
+  Sim.dt = 0.1
+  Sim.warm = 3000
+  Plan += { ring: 1000.0, lanes: 2, cars: 40, length: 5.0, v0: 33.3, t: 1.5, s0: 2.0,
+            a: 1.0, b: 1.5, polite: 0.2, threshold: 0.1, safe: 4.0, kick: 1.0,
+            trucks: 5, truck_v0: 22.2, truck_length: 12.0, spread: 0.3 }
+  Plan += { ring: 1000.0, lanes: 3, cars: 30, length: 5.0, v0: 33.3, t: 1.5, s0: 2.0,
+            a: 1.0, b: 1.5, polite: 0.2, threshold: 0.1, safe: 4.0, kick: 1.0,
+            trucks: 5, truck_v0: 22.2, truck_length: 12.0, spread: 0.3 }
+  Plan += { ring: 600.0, lanes: 3, cars: 75, length: 5.0, v0: 30.0, t: 1.2, s0: 2.0,
+            a: 0.8, b: 1.5, polite: 0.5, threshold: 0.2, safe: 3.0, kick: 2.0,
+            trucks: 4, truck_v0: 22.2, truck_length: 10.0, spread: 0.4 }
+}
+
+system trace() {
+  let step = Sim.step
+  for c: Car, at: Spot, s: Speed {
+    put("{step} {c.number} {c.lane} {bits_of(at.x)} {bits_of(s.v)}")
+  }
+}
+
+system report() {
+  for r: Road {
+    put("road of {r.lanes} lanes {r.cars} cars driven {bits_of(r.driven)} changes {r.changes} crashes {r.crashes}")
+  }
+}
+
+schedule traced() {
+  trace() run_if Sim.step % 100 == 0
+  step()
+}
+
+schedule finish() { report() }
+
+main {
+  setup()
+  loop { traced() } until Sim.step == 6000
+  finish()
+}

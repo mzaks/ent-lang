@@ -1,0 +1,45 @@
+// examples/traffic/lanes.ent at scale: 1,000 roads of three lanes and
+// 3 km, each with 120 cars and trucks (40 a lane, 13 a km of lane):
+// 120,000 cars for 1,000 steps of 0.1 s.
+//
+//   tools/ent run --trace -I examples/traffic bench/traffic/highway.ent
+import console
+import lanes
+
+capacity Car 131072
+capacity Driver 131072
+capacity Spot 131072
+capacity Speed 131072
+capacity Accel 131072
+capacity Move 131072
+capacity Slot 131072
+capacity Order 131072
+
+unique Tally { changes: i64, crashes: i64 }
+
+world {
+  Sim.seed = 1
+  Sim.dt = 0.1
+  Sim.warm = 500
+  for i in 0..1000 {
+    Plan += { ring: 3000.0, lanes: 3, cars: 120, length: 5.0, v0: 33.3, t: 1.5, s0: 2.0,
+              a: 1.0, b: 1.5, polite: 0.2, threshold: 0.1, safe: 4.0, kick: 1.0,
+              trucks: 5, truck_v0: 22.2, truck_length: 12.0, spread: 0.3 }
+  }
+}
+
+system report() {
+  for r: Road {
+    Tally.changes += r.changes
+    Tally.crashes += r.crashes
+  }
+  put("{Sim.cars} cars, {Tally.changes} lane changes, {Tally.crashes} crashes")
+}
+
+schedule finish() { report() }
+
+main {
+  setup()
+  loop { step() } until Sim.step == 1000
+  finish()
+}

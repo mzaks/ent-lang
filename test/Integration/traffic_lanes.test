@@ -1,0 +1,31 @@
+// Ring roads of several lanes (examples/traffic/lanes.ent): the
+// intelligent driver model behind the car ahead in the lane and MOBIL to
+// change lanes, with the cars put in order by lane and place every step.
+// With one lane it is idm.ent's model: the roads of traffic_idm.ent go as
+// examples/traffic/check/idm.c drives them, to the bit. With two and three
+// lanes, trucks and drivers who would go at different speeds, it goes as
+// examples/traffic/check/lanes.c drives them, to the bit: every car's
+// lane, place and speed every 100 steps, and what the roads measured. On
+// one core and on all.
+// RUN: clang -O2 -ffp-contract=off %S/../../examples/traffic/check/idm.c -lm -o %t.idm
+// RUN: %t.idm | grep -v road > %t.idm.want
+// RUN: %ent run -I %S/../../examples/traffic %S/Inputs/traffic_lanes_one.ent 2>/dev/null > %t.one
+// RUN: grep -v road %t.one | cmp %t.idm.want -
+// RUN: FileCheck %s --check-prefix=ONE --input-file=%t.one
+// RUN: clang -O2 -ffp-contract=off %S/../../examples/traffic/check/lanes.c -lm -o %t.lanes
+// RUN: %t.lanes > %t.want
+// RUN: %ent run -I %S/../../examples/traffic %S/Inputs/traffic_lanes.ent 2>/dev/null > %t.got
+// RUN: %ent run --parallel -I %S/../../examples/traffic %S/Inputs/traffic_lanes.ent 2>/dev/null > %t.all
+// RUN: cmp %t.want %t.got
+// RUN: cmp %t.want %t.all
+// RUN: FileCheck %s --input-file=%t.got
+
+// One lane: the same distances as idm.c's, and nobody changes.
+// ONE: road of 22 cars driven 4669621502999548397 changes 0 crashes 0
+// ONE: road of 30 cars driven 4676347160997227621 changes 0 crashes 0
+
+// Cars change lanes to pass trucks and slower drivers, and nobody stands
+// on the car ahead.
+// CHECK: road of 2 lanes 40 cars driven {{[0-9]+}} changes 57 crashes 0
+// CHECK: road of 3 lanes 30 cars driven {{[0-9]+}} changes 194 crashes 0
+// CHECK: road of 3 lanes 75 cars driven {{[0-9]+}} changes 0 crashes 0

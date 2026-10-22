@@ -1,0 +1,42 @@
+// The roads of traffic_idm.ent through examples/traffic/lanes.ent, with
+// one lane each: every 100 steps a line for each car, `step car x v` (the
+// bits of the floats), as traffic_idm.ent writes them.
+import console
+import lanes
+
+world {
+  Sim.dt = 0.1
+  Sim.warm = 3000
+  Plan += { ring: 230.0, lanes: 1, cars: 22, length: 5.0, v0: 15.0, t: 1.0, s0: 2.0,
+            a: 1.0, b: 1.5, polite: 0.2, threshold: 0.1, safe: 4.0, kick: 0.5,
+            trucks: 0, truck_v0: 0.0, truck_length: 0.0, spread: 0.0 }
+  Plan += { ring: 400.0, lanes: 1, cars: 30, length: 4.5, v0: 20.0, t: 1.2, s0: 1.5,
+            a: 0.8, b: 2.0, polite: 0.2, threshold: 0.1, safe: 4.0, kick: 1.0,
+            trucks: 0, truck_v0: 0.0, truck_length: 0.0, spread: 0.0 }
+}
+
+system trace() {
+  let step = Sim.step
+  for c: Car, at: Spot, s: Speed {
+    put("{step} {c.number} {bits_of(at.x)} {bits_of(s.v)}")
+  }
+}
+
+system report() {
+  for r: Road {
+    put("road of {r.cars} cars driven {bits_of(r.driven)} changes {r.changes} crashes {r.crashes}")
+  }
+}
+
+schedule traced() {
+  trace() run_if Sim.step % 100 == 0
+  step()
+}
+
+schedule finish() { report() }
+
+main {
+  setup()
+  loop { traced() } until Sim.step == 6000
+  finish()
+}

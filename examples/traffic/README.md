@@ -36,6 +36,16 @@ which need the cars in their order by lane and position every step.
   gives what `idm.ent` gives, to the bit: every car's place and speed,
   and what the roads measured.
 
+- `lanes.ent`: roads of several lanes. A car drives by the intelligent
+  driver model behind the car ahead in its lane and changes lanes by
+  MOBIL (Kesting, Treiber and Helbing, 2007), with trucks and drivers
+  who would go at different speeds. The car ahead is no longer one edge:
+  every step the cars are put in order by lane and place (a `for ... by`
+  a key into the buffer `Order`), and each finds its neighbours there.
+  With one lane it is `idm.ent`'s model to the bit.
+- `check/lanes.c`: the same in plain C, which `lanes.ent` matches to the
+  bit, lane changes and all.
+
 ```sh
 tools/ent run --parallel examples/traffic/flow.ent > flow.csv
 examples/traffic/check/flow.py
@@ -45,4 +55,7 @@ tools/ent run examples/traffic/sugiyama.ent
 `test/Integration/traffic_ring.test` runs a few roads and checks the
 flows without braking to the cell; `test/Integration/traffic_idm.test`
 runs two roads of the driver model in ent and in C and compares them to
-the bit, on one core and on all.
+the bit, on one core and on all; `test/Integration/traffic_lanes.test`
+does so for `lanes.ent` with one lane (against `check/idm.c`) and with
+two and three (against `check/lanes.c`). `bench/traffic` times 120,000
+cars on roads of three lanes.
