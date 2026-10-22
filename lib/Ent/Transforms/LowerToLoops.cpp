@@ -1326,11 +1326,16 @@ static llvm::StringMap<int> siteUses;
 struct TunedLoop {
   std::optional<bool> parallel;
   std::optional<bool> dynamic;
+  /// Of the combining of what a place sends (a `send ..` site): by groups
+  /// on many threads from so many values on, one group after another
+  /// where fewer.
+  std::optional<int64_t> groupsFrom;
 };
 static llvm::StringMap<TunedLoop> tunedLoops;
 
 /// Read the choices `tune` names: `{"loops": {site: {"parallel": bool,
-/// "schedule": "dynamic" or "static"}}}`, either left out.
+/// "schedule": "dynamic" or "static", "combine_from": values}}}`, any
+/// left out.
 static LogicalResult readTuned(ModuleOp module, StringRef path) {
   auto file = llvm::MemoryBuffer::getFile(path);
   if (!file)
@@ -1357,6 +1362,7 @@ static LogicalResult readTuned(ModuleOp module, StringRef path) {
     tuned.parallel = choice->getBoolean("parallel");
     if (std::optional<StringRef> schedule = choice->getString("schedule"))
       tuned.dynamic = *schedule == "dynamic";
+    tuned.groupsFrom = choice->getInteger("combine_from");
   }
   return success();
 }
@@ -1373,7 +1379,8 @@ static bool chosenParallel(const LoopOptions &options, bool entityLocal,
 }
 
 static std::string siteOf(Location loc, Operation *at,
-                          const WorldArchetype &archetype) {
+                          const WorldArchetype &archetype,
+                          StringRef kind = "") {
   std::string place = "?";
   loc->walk([&](Location inner) {
     auto file = dyn_cast<FileLineColLoc>(inner);
@@ -1391,8 +1398,8 @@ static std::string siteOf(Location loc, Operation *at,
       in = symbol.getName().str();
       break;
     }
-  std::string site =
-      place + " " + in + " " + ArchetypeOp(archetype.op).getSymName().str();
+  std::string site = (kind.empty() ? "" : kind.str() + " ") + place + " " +
+                     in + " " + ArchetypeOp(archetype.op).getSymName().str();
   int uses = ++siteUses[site];
   if (uses > 1)
     site += " #" + std::to_string(uses);
@@ -12988,9 +12995,21 @@ static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
   if (sentInGroups(merge.getApply())) {
     // On lists by groups of the targets (kSendGroups): each group's read
     // in its order, the groups at once on many threads where that takes
-    // less (or as it has gone so far, devices/sends.c), else one after
-    // another; every target's values in the same order either way.
+    // less (as a trace chose, `tune`; or as it has gone so far,
+    // devices/sends.c), else one after another; every target's values in
+    // the same order either way. The two ways' loops have the site of
+    // this combining (`send ..`), for a trace to time them by.
     Type i64 = rewriter.getI64Type();
+    const WorldArchetype &sender = layout.archetypes[merge.getArchetype()];
+    std::string site = siteOf(
+        loc, rewriter.getInsertionBlock()->getParentOp(), sender, "send");
+    std::optional<int64_t> chosen;
+    if (auto found = tunedLoops.find(site); found != tunedLoops.end())
+      chosen = found->second.groupsFrom;
+    Location sited = FusedLoc::get(
+        rewriter.getContext(), {loc},
+        rewriter.getDictionaryAttr(
+            {rewriter.getNamedAttr("site", rewriter.getStringAttr(site))}));
     LocateBounds bounds =
         loadCombineBounds(rewriter, loc, merge.getComponentAttr(), layout,
                           world);
@@ -13042,14 +13061,36 @@ static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
       callSends(rewriter, loc, world, "ent_sends_clear", {number}, false);
     };
     auto oneByOne = [&]() {
-      auto groups = scf::ForOp::create(rewriter, loc, zero, groupCount, one);
+      auto groups = scf::ForOp::create(rewriter, sited, zero, groupCount, one);
       OpBuilder::InsertionGuard inner(rewriter);
       rewriter.setInsertionPoint(groups.getBody()->getTerminator());
       readGroup(groups.getInductionVar());
     };
-    if (resolution == "groups") {
+    auto atOnce = [&]() {
+      auto groups = scf::ParallelOp::create(rewriter, sited, ValueRange{zero},
+                                            ValueRange{groupCount},
+                                            ValueRange{one});
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPoint(groups.getBody()->getTerminator());
+      readGroup(groups.getInductionVars().front());
+    };
+    if (resolution == "groups" && chosen) {
+      // (As the trace chose: by groups from so many values on, without
+      // choosing, nor timing, where it runs.)
+      auto split = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::sge, sent,
+              arith::ConstantIntOp::create(rewriter, loc, *chosen, 64)),
+          /*withElseRegion=*/true);
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPoint(split.thenBlock()->getTerminator());
+      atOnce();
+      rewriter.setInsertionPoint(split.elseBlock()->getTerminator());
+      oneByOne();
+    } else if (resolution == "groups") {
       int64_t many = merge.getLeast();
-      Value atOnce = arith::CmpIOp::create(
+      Value grouping = arith::CmpIOp::create(
           rewriter, loc, arith::CmpIPredicate::ne,
           callSends(rewriter, loc, world, "ent_sends_choose",
                     {list, sent,
@@ -13057,16 +13098,12 @@ static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
                      arith::ConstantIntOp::create(rewriter, loc, many * 8, 64)},
                     true),
           arith::ConstantIntOp::create(rewriter, loc, 0, 64));
-      auto split = scf::IfOp::create(rewriter, loc, atOnce,
+      auto split = scf::IfOp::create(rewriter, loc, grouping,
                                      /*withElseRegion=*/true);
       {
         OpBuilder::InsertionGuard inner(rewriter);
         rewriter.setInsertionPoint(split.thenBlock()->getTerminator());
-        auto groups = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
-                                              ValueRange{groupCount},
-                                              ValueRange{one});
-        rewriter.setInsertionPoint(groups.getBody()->getTerminator());
-        readGroup(groups.getInductionVars().front());
+        atOnce();
         rewriter.setInsertionPoint(split.elseBlock()->getTerminator());
         oneByOne();
       }

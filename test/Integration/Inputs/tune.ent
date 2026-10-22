@@ -5,9 +5,13 @@ import console
 
 component Cell { v: f64, n: i64 } capacity 64
 unique Total { s: f64 }
+buffer Cells { cell: entity } capacity 64
 
 system make() {
-  for i in 0..64 { spawn { Cell { v: 0.0, n: i as i64 } } }
+  for i in 0..64 {
+    let e = spawn { Cell { v: 0.0, n: i as i64 } }
+    Cells += { cell: e }
+  }
 }
 
 system heavy() {
@@ -22,6 +26,17 @@ system light() {
   for c: mut Cell { c.n += 1 }
 }
 
+// What each sends to the others (read where it is sent from, so it waits
+// on lists): few values, combined one group after another.
+system spread() {
+  for me, c: Cell {
+    for k in 0..64 {
+      let to = Cells[(c.n + k as i64) % 64].cell
+      if to != me { Cell(to).v += c.v * 0.001 }
+    }
+  }
+}
+
 system report() {
   for c: Cell { Total.s += c.v }
   put("{bits_of(Total.s)}")
@@ -30,6 +45,7 @@ system report() {
 schedule all() {
   make()
   heavy() light() heavy() light()
+  spread()
   report()
 }
 

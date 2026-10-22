@@ -169,10 +169,14 @@ function and archetype) on many threads or on one as the trace says it
 is worth (a call of 20 microseconds of its threads' time or more), and
 deals a query's slices out to whichever thread is free where its threads
 worked less than 90% of its time, in place of the rules that guess these
-(a million entities, loops inside loops). The same results; a loop on one
-thread is traced too. The LJ melt on 12 threads 0.198 s, tuned 0.195,
-tuned again from its own trace 0.193; the epidemic the same as untuned
-(11.0 ms a day). See `test/Integration/tune.test`.
+(a million entities, loops inside loops); and combines what a place
+sends from a loop by groups on many threads from as many values on as
+that took less for each value in the trace, one group after another
+where fewer, where without it the program times both ways as it runs.
+The same results; a loop on one thread is traced too, and how many
+values were sent before each combining. The LJ melt on 12 threads 0.195
+s, tuned 0.192; the epidemic 11.0 ms a day, tuned 10.7. See
+`test/Integration/tune.test`.
 
 A big program is optimised whole and then made into machine code in
 pieces, each on a core of its own (`ENT_PIECES=1`: in one piece;

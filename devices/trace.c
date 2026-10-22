@@ -17,7 +17,7 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { ENT_TRACE_SPAN, ENT_TRACE_LOOP, ENT_TRACE_WORK };
+enum { ENT_TRACE_SPAN, ENT_TRACE_LOOP, ENT_TRACE_WORK, ENT_TRACE_COUNT };
 
 typedef struct {
   int64_t begin, end;
@@ -111,6 +111,14 @@ void ent_trace_work(int64_t site, int64_t begin) {
                 ent_trace_now());
 }
 
+// How many values were sent to be combined (ent_sends_choose): an instant,
+// whose `end` holds the number, before the combining it is of.
+void ent_trace_count(int64_t site, int64_t count) {
+  int64_t now = ent_trace_now();
+  ent_trace_add(ent_trace_this(), (int32_t)site, ENT_TRACE_COUNT, now,
+                now + count);
+}
+
 void ent_trace_name(int64_t site, const char *name) {
   if (site >= ent_trace_name_count) {
     int64_t count = site + 1;
@@ -162,6 +170,21 @@ static void ent_trace_write(const char *path) {
       ent_trace_event *event = &thread->events[k];
       fprintf(out, "%s{\"name\":", first ? "" : ",\n");
       first = 0;
+      if (event->kind == ENT_TRACE_COUNT) {
+        const char *key = ent_trace_key_of(event->site);
+        ent_trace_json_text(out, ent_trace_name_of(event->site));
+        fprintf(out,
+                ",\"cat\":\"count\",\"ph\":\"i\",\"s\":\"t\",\"ts\":%.3f,"
+                "\"pid\":1,\"tid\":%d,\"args\":{\"count\":%lld",
+                (event->begin - ent_trace_started) / 1e3, thread->number,
+                (long long)(event->end - event->begin));
+        if (key) {
+          fprintf(out, ",\"site\":");
+          ent_trace_json_text(out, key);
+        }
+        fprintf(out, "}}");
+        continue;
+      }
       ent_trace_json_text(out, event->kind == ENT_TRACE_WORK
                                    ? "work"
                                    : ent_trace_name_of(event->site));
@@ -228,6 +251,8 @@ static void ent_trace_say(int64_t ended) {
       int32_t site = event->site < ent_trace_name_count
                          ? event->site
                          : (int32_t)ent_trace_name_count;
+      if (event->kind == ENT_TRACE_COUNT)
+        continue;
       if (event->kind == ENT_TRACE_WORK) {
         sums[site].work += event->end - event->begin;
         worked = 1;

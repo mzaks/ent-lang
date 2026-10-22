@@ -70,6 +70,7 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
     declare("ent_trace_start", {}, {});
     declare("ent_trace_name", {i64, pointer}, {});
     declare("ent_trace_key", {i64, pointer}, {});
+    declare("ent_trace_count", {i64, i64}, {});
     declare("ent_trace_begin", {i64}, {});
     declare("ent_trace_end", {i64}, {});
     declare("ent_trace_loop_begin", {i64}, {});
@@ -167,6 +168,33 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
         builder.setInsertionPointAfter(loop);
         call(builder, loc, "ent_trace_end", {number});
       });
+    });
+
+    // How many values were sent where they are combined: the number the
+    // choosing of the way is given, ahead of it, by the site of the loops
+    // that combine them (`send ..`, in the `if` the choice makes).
+    module.walk([&](func::CallOp choose) {
+      if (choose.getCallee() != "ent_sends_choose" ||
+          choose.getNumOperands() < 3)
+        return;
+      std::string key;
+      for (Operation *after = choose->getNextNode(); after && key.empty();
+           after = after->getNextNode())
+        if (isa<scf::IfOp>(after))
+          after->walk([&](Operation *inside) {
+            if (key.empty())
+              key = siteOf(inside->getLoc());
+          });
+      if (key.empty())
+        return;
+      Location loc = choose.getLoc();
+      std::string place = placeOf(loc);
+      builder.setInsertionPoint(choose);
+      Value number = site(builder, loc,
+                          "values sent at " +
+                              (place.empty() ? std::string("?") : place),
+                          key + "|count");
+      call(builder, loc, "ent_trace_count", {number, choose.getOperand(2)});
     });
 
     // (Sites that would have the same name, a sort's loops say, are told

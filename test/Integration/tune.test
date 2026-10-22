@@ -1,9 +1,12 @@
 // `ent build --tune` with a trace of the program (--trace): each loop over
 // entities, by its site (place, function, archetype), runs on many threads
 // or on one as its time in the trace says it is worth, not as the rules
-// guess. Inputs/tune.ent: 64 entities (on one thread by the rules), a
-// heavy loop over them and a light one, fused into the schedule: the
-// heavy one's two runs are chosen for many threads, the rest not; the
+// guess; and what a place sends is combined by groups on many threads
+// from as many values on as that took less in the trace. Inputs/tune.ent:
+// 64 entities (on one thread by the rules), a heavy loop over them and a
+// light one, fused into the schedule: the heavy one's two runs are chosen
+// for many threads, the light ones not; what `spread` sends (4,096 values
+// a run) was combined one group after another, and is from now on. The
 // program says the same either way.
 // RUN: %ent build --parallel --trace %S/Inputs/tune.ent -o %t.traced
 // RUN: env ENT_TRACE=%t.json %t.traced > %t.one 2> %t.said
@@ -12,7 +15,7 @@
 // RUN: %ent build --parallel --tune %t.json --keep %t.dir %S/Inputs/tune.ent -o %t.tuned
 // RUN: %t.tuned > %t.two
 // RUN: cmp %t.one %t.two
-// RUN: python3 -c "import json, sys; loops = json.load(open(sys.argv[1]))['loops']; [print(site, loops[site]['parallel']) for site in sorted(loops)]" %t.dir/tune.tune.json | FileCheck %s
+// RUN: python3 -c "import json, sys; loops = json.load(open(sys.argv[1]))['loops']; [print(site, loops[site]) for site in sorted(loops)]" %t.dir/tune.tune.json | FileCheck %s
 // A tuned build traced: the heavy loop runs on many threads.
 // RUN: rm -rf %t.dir2
 // RUN: %ent build --parallel --trace --tune %t.json --keep %t.dir2 %S/Inputs/tune.ent -o %t.both
@@ -20,12 +23,12 @@
 // RUN: cmp %t.one %t.three
 // RUN: FileCheck %s --check-prefix=TUNED --input-file=%t.said2
 
-// TRACED: loop tune.ent:32 in all (one thread)
+// TRACED: loop tune.ent:47 in all (one thread)
 
-// CHECK:      tune.ent:26:7 report Cell_archetype False
-// CHECK-NEXT: tune.ent:32:11 all Cell_archetype True
-// CHECK-NEXT: tune.ent:32:19 all Cell_archetype False
-// CHECK-NEXT: tune.ent:32:27 all Cell_archetype True
-// CHECK-NEXT: tune.ent:33:3 all Cell_archetype False
+// CHECK:      send tune.ent:35:21 spread Cell_archetype {'combine_from': 4611686018427387904}
+// CHECK:      tune.ent:41:7 report Cell_archetype {'parallel': False}
+// CHECK-NEXT: tune.ent:47:11 all Cell_archetype {'parallel': True}
+// CHECK-NEXT: tune.ent:47:19 all Cell_archetype {'parallel': False}
+// CHECK-NEXT: tune.ent:47:27 all Cell_archetype {'parallel': True}
 
-// TUNED: %  loop tune.ent:32 in all
+// TUNED: %  loop tune.ent:47 in all
