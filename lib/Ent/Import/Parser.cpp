@@ -3084,6 +3084,7 @@ LogicalResult Parser::parseBuffer() {
 // have, until the capacity of its first component is known
 // (finishIndexOrders).
 static constexpr int64_t kCellsPlaceholder = 918273645;
+// (kTangledPlaceholder, Ent/EntOps.h: how out of order a grid index is.)
 
 // From how many entities on an index's update writes the rows on many
 // threads (where the program is built for them).
@@ -3374,12 +3375,18 @@ LogicalResult Parser::parseIndex() {
       << of.front() << ") {\n"
       << "  for row in 0..len(order) { held[order[row].who]." << rowField
       << " = row }\n}\n"
-      // Whether more than one row in 64 is below the one before it.
-      << "fn " << n << "_tangled(order: " << n << ") -> bool {\n"
+      // How many rows are below the one before them; and whether that is
+      // more than one in 64 of them, so many that they are better put in
+      // order anew (64 where nothing else says: `tune`, ent-lower-to-
+      // loops, says another of a trace, which also sees this call).
+      << "fn " << n << "_below(order: " << n << ") -> i32 {\n"
       << "  var below = 0\n"
       << "  for i in 1..len(order) {\n"
       << "    if order[i].key < order[i - 1].key { below += 1 }\n"
-      << "  }\n  below * 64 > len(order)\n}\n"
+      << "  }\n  below\n}\n"
+      << "fn " << n << "_tangled(below: i32, rows: i32) -> bool {\n"
+      << "  (below as i64) * " << kTangledPlaceholder
+      << " > (rows as i64)\n}\n"
       // The rows in order again, where few are out of it: each that is
       // below the one before goes down past those above it (insertion),
       // and the entities of the rows that moved are told their rows.
@@ -3640,7 +3647,8 @@ LogicalResult Parser::parseIndex() {
   if (grid) {
     // (Where many rows are out of order, sorted on many threads; else
     // each goes down past those above it.)
-    out << "    if " << n << "_tangled(" << n << ") {\n";
+    out << "    if " << n << "_tangled(" << n << "_below(" << n << "), len("
+        << n << ")) {\n";
     anew(rankField, "      ");
     out << "    } else {\n      " << n << "_settle(" << n << ", "
         << of.front() << ")\n    }\n";

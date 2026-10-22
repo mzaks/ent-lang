@@ -17,12 +17,21 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { ENT_TRACE_SPAN, ENT_TRACE_LOOP, ENT_TRACE_WORK, ENT_TRACE_COUNT };
+enum {
+  ENT_TRACE_SPAN,
+  ENT_TRACE_LOOP,
+  ENT_TRACE_WORK,
+  ENT_TRACE_COUNT,
+  ENT_TRACE_TANGLE
+};
 
 typedef struct {
   int64_t begin, end;
   int32_t site;
   int32_t kind;
+  // (Of an index made again: how many rows were below the one before, of
+  // how many.)
+  int64_t below, rows;
 } ent_trace_event;
 
 // (What one thread timed; `open`: where what it is in began, and what.)
@@ -119,6 +128,29 @@ void ent_trace_count(int64_t site, int64_t count) {
                 now + count);
 }
 
+// A grid index made again (its Name_tangled, ent-trace): how many of its
+// rows were below the one before, of how many, and whether it was put in
+// order anew (`tangled`, else each moved down to its place). With
+// ENT_TRACE_EXPLORE set, one way and the other in turn, whatever was
+// chosen (the same rows either way), so that a trace has the time of both
+// for `ent build --tune`.
+int64_t ent_trace_tangled(int64_t site, int64_t below, int64_t rows,
+                          int64_t tangled) {
+  static int explore = -1, turn;
+  if (explore < 0) {
+    const char *asked = getenv("ENT_TRACE_EXPLORE");
+    explore = asked && *asked && strcmp(asked, "0") != 0;
+  }
+  if (explore)
+    tangled = turn++ & 1;
+  ent_trace_thread *thread = ent_trace_this();
+  int64_t now = ent_trace_now();
+  ent_trace_add(thread, (int32_t)site, ENT_TRACE_TANGLE, now, now + tangled);
+  thread->events[thread->count - 1].below = below;
+  thread->events[thread->count - 1].rows = rows;
+  return tangled;
+}
+
 void ent_trace_name(int64_t site, const char *name) {
   if (site >= ent_trace_name_count) {
     int64_t count = site + 1;
@@ -170,6 +202,23 @@ static void ent_trace_write(const char *path) {
       ent_trace_event *event = &thread->events[k];
       fprintf(out, "%s{\"name\":", first ? "" : ",\n");
       first = 0;
+      if (event->kind == ENT_TRACE_TANGLE) {
+        const char *key = ent_trace_key_of(event->site);
+        ent_trace_json_text(out, ent_trace_name_of(event->site));
+        fprintf(out,
+                ",\"cat\":\"tangle\",\"ph\":\"i\",\"s\":\"t\",\"ts\":%.3f,"
+                "\"pid\":1,\"tid\":%d,\"args\":{\"below\":%lld,\"rows\":%lld,"
+                "\"anew\":%lld",
+                (event->begin - ent_trace_started) / 1e3, thread->number,
+                (long long)event->below, (long long)event->rows,
+                (long long)(event->end - event->begin));
+        if (key) {
+          fprintf(out, ",\"site\":");
+          ent_trace_json_text(out, key);
+        }
+        fprintf(out, "}}");
+        continue;
+      }
       if (event->kind == ENT_TRACE_COUNT) {
         const char *key = ent_trace_key_of(event->site);
         ent_trace_json_text(out, ent_trace_name_of(event->site));
@@ -251,7 +300,7 @@ static void ent_trace_say(int64_t ended) {
       int32_t site = event->site < ent_trace_name_count
                          ? event->site
                          : (int32_t)ent_trace_name_count;
-      if (event->kind == ENT_TRACE_COUNT)
+      if (event->kind == ENT_TRACE_COUNT || event->kind == ENT_TRACE_TANGLE)
         continue;
       if (event->kind == ENT_TRACE_WORK) {
         sums[site].work += event->end - event->begin;

@@ -119,7 +119,11 @@ of those loops runs on many threads where one call of it took at least
 one where less, whatever the rules that guess it say; and one over a
 query's slices (a few pieces, at most 1024) deals them out to whichever
 thread is free where it ran so, or its threads worked less than 90% of
-its time. What a place sends from a loop is combined by groups of its
+its time. A grid index made again is put in order anew where more of
+its rows than one in K are out of order, K as that took less than each
+row moved down to its place in the trace (both are timed where the
+traced program runs with ENT_TRACE_EXPLORE=1, one way and the other in
+turn; 64 without). What a place sends from a loop is combined by groups of its
 targets on many threads from as many values on as that took less for
 each value in the trace, one group after another where fewer, without
 timing the two ways as it runs. What the program does is the same
@@ -510,6 +514,36 @@ def groups_from(combined):
     return start
 
 
+def tangled_from(remade):
+    """Of a grid index, from how out of order its rows are on it is made
+    anew (more than one in what this gives below the one before, its
+    Name_tangled), of `remade`, (rows below the one before, rows, made
+    anew, time) of each time it was made again in a trace: by how out of
+    order, as a power of two (one in 2, 4, ..), the way that took less, or
+    None where no such has both. Made anew from the most out of order on,
+    up to the first where moving each down took less; where none did, from
+    as far as the trace has it, but no less than one in 64 (as without a
+    trace)."""
+    classes = {}
+    for below, rows, anew, took in remade:
+        if below <= 0 or rows <= 0:
+            continue
+        each = classes.setdefault((rows // below).bit_length() - 1,
+                                  {True: [0.0, 0], False: [0.0, 0]})
+        each[anew][0] += took
+        each[anew][1] += 1
+    measured = {size: {way: total / calls
+                       for way, (total, calls) in ways.items() if calls}
+                for size, ways in classes.items()}
+    if not any(len(cost) == 2 for cost in measured.values()):
+        return None
+    for size in sorted(measured):
+        cost = measured[size]
+        if len(cost) == 2 and cost[False] <= cost[True]:
+            return 1 << size
+    return max(64, 1 << (max(measured) + 1))
+
+
 def tuned_loops(path):
     """What `--tune` chooses of each loop over entities from the trace at
     `path`: the loops by their sites (ent-lower-to-loops), each whether it
@@ -521,6 +555,26 @@ def tuned_loops(path):
     except (OSError, ValueError, KeyError) as error:
         sys.exit(f"ent: cannot read the trace '{path}': {error}")
     seen = {}
+    # (A grid index made again: how out of order, which way, and the time
+    # of the system that made it, which the event is in, on its thread.)
+    remade = {}
+    spans = {}
+    for event in events:
+        if event.get("cat") == "span":
+            spans.setdefault(event["tid"], []).append(event)
+    for event in events:
+        if event.get("cat") != "tangle":
+            continue
+        args = event["args"]
+        around = [span for span in spans.get(event["tid"], [])
+                  if span["ts"] <= event["ts"] <= span["ts"] + span["dur"]
+                  and span["name"].startswith("system ")]
+        if not around:
+            continue
+        took = min(around, key=lambda span: span["dur"])["dur"]
+        index = args["site"].split("|", 1)[0]
+        remade.setdefault(index, []).append(
+            (args["below"], args["rows"], bool(args["anew"]), took))
     # (What a place sent, before each combining of it on the same thread:
     # how many values, and then which way it went and how long it took.)
     sent = {}
@@ -541,7 +595,7 @@ def tuned_loops(path):
         if not key:
             continue
         site, how = key.split("|", 1)
-        if how == "count":
+        if how in ("count", "tangle"):
             continue
         each = seen.setdefault(site, {"calls": 0, "wall": 0.0, "work": 0.0,
                                       "threads": set(), "ran": 0,
@@ -577,6 +631,10 @@ def tuned_loops(path):
             choice["schedule"] = ("dynamic" if each["dynamic"] or
                                   busy < TUNE_BUSY_ENOUGH else "static")
         loops[site] = choice
+    for index, made in remade.items():
+        many = tangled_from(made)
+        if many is not None:
+            loops[index] = {"tangled": many}
     return {"loops": loops}
 
 

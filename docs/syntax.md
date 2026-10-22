@@ -1960,7 +1960,8 @@ finds the car ahead and the cars beside each car so.
   Of a grid, where more than one row in 64 is below the one before, the
   entities are put in order instead by their cell and then their row
   before (`rank_in_Name`), as a `for ... by` does, on many threads: the
-  same order.
+  same order. (`ent build --tune` with a trace may choose another than
+  64; see tools/ent.)
   Where entities came, went, or got or lost a component of it, it is
   made anew: every entity in order by its key (as a `for ... by` does)
   and each told its row. With 120,000 cars of which few overtake or
@@ -1976,8 +1977,8 @@ finds the car ahead and the cars beside each car so.
   same entities (`Name_fresh`, `Name_whole`), the procs that tell the
   entities their rows and put them in order again (`Name_number`,
   `Name_settle`), the fn that halves its rows (`Name_find`) and, of a
-  grid, the one that says whether many rows are out of order
-  (`Name_tangled`); those names are taken.
+  grid, those that count the rows out of order and say whether they are
+  many (`Name_below`, `Name_tangled`); those names are taken.
 - Its rows are as many as its first component's capacity at most.
 
 #### Grids

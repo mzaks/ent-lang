@@ -71,6 +71,7 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
     declare("ent_trace_name", {i64, pointer}, {});
     declare("ent_trace_key", {i64, pointer}, {});
     declare("ent_trace_count", {i64, i64}, {});
+    declare("ent_trace_tangled", {i64, i64, i64, i64}, {i64});
     declare("ent_trace_begin", {i64}, {});
     declare("ent_trace_end", {i64}, {});
     declare("ent_trace_loop_begin", {i64}, {});
@@ -195,6 +196,34 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
                               (place.empty() ? std::string("?") : place),
                           key + "|count");
       call(builder, loc, "ent_trace_count", {number, choose.getOperand(2)});
+    });
+
+    // Where a grid index is made again, whether it is put in order anew
+    // (its `Name_tangled`, given how many rows were below the one before
+    // and of how many): those two and the way it went, by the index
+    // (`tangled Name`, the name as the function's).
+    module.walk([&](func::CallOp tangled) {
+      StringRef callee = tangled.getCallee();
+      if (!callee.starts_with("ent_") || !callee.ends_with("_tangled") ||
+          tangled.getNumOperands() != 2 || tangled.getNumResults() != 1)
+        return;
+      Location loc = tangled.getLoc();
+      std::string index =
+          callee.drop_front(4).drop_back(StringRef("_tangled").size()).str();
+      builder.setInsertionPointAfter(tangled);
+      Value number = site(builder, loc, "index " + index + " made again",
+                          "tangled " + index + "|tangle");
+      auto wide = [&](Value value) {
+        return arith::ExtSIOp::create(builder, loc, i64, value).getResult();
+      };
+      Value chosen = arith::ExtUIOp::create(builder, loc, i64,
+                                            tangled.getResult(0));
+      auto traced = call(builder, loc, "ent_trace_tangled",
+                         {number, wide(tangled.getOperand(0)),
+                          wide(tangled.getOperand(1)), chosen});
+      Value way = arith::TruncIOp::create(builder, loc, builder.getI1Type(),
+                                          traced.getResult(0));
+      tangled.getResult(0).replaceAllUsesExcept(way, chosen.getDefiningOp());
     });
 
     // (Sites that would have the same name, a sort's loops say, are told

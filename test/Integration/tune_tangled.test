@@ -1,0 +1,20 @@
+// A grid index made again, traced (Inputs/lj_melt.ent, 864 atoms, its
+// index made again every 20 steps): how many rows were below the one
+// before, of how many, and which way it went; with ENT_TRACE_EXPLORE the
+// one way and the other in turn, the same bits as the C either way, so
+// that `ent build --tune` has the time of both and chooses from how out
+// of order on it is made anew (`tangled`).
+// RUN: clang -O2 -ffp-contract=off %S/../../examples/lj/check/melt.c -lm -o %t.c
+// RUN: %t.c 6 100 20 1 > %t.want
+// RUN: %ent build --parallel --trace -I %S/../../examples/lj %S/Inputs/lj_melt.ent -o %t.traced
+// RUN: env ENT_TRACE_EXPLORE=1 ENT_TRACE=%t.json %t.traced > %t.one 2>/dev/null
+// RUN: cmp %t.want %t.one
+// RUN: python3 -c "import json, sys; events = [e['args'] for e in json.load(open(sys.argv[1]))['traceEvents'] if e['cat'] == 'tangle']; print('remade', len(events), 'anew', sorted(set(e['anew'] for e in events)), 'rows', events[0]['rows'], events[0]['site'])" %t.json | FileCheck %s
+// RUN: rm -rf %t.dir
+// RUN: %ent build --parallel --tune %t.json --keep %t.dir -I %S/../../examples/lj %S/Inputs/lj_melt.ent -o %t.tuned
+// RUN: %t.tuned | cmp - %t.want
+// RUN: FileCheck %s --check-prefix=CHOSEN --input-file=%t.dir/lj_melt.tune.json
+
+// CHECK: remade 5 anew [0, 1] rows 864 tangled lj_Cells|tangle
+// CHOSEN: "tangled lj_Cells": {
+// CHOSEN-NEXT: "tangled":

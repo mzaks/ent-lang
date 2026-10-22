@@ -1326,6 +1326,9 @@ static llvm::StringMap<int> siteUses;
 struct TunedLoop {
   std::optional<bool> parallel;
   std::optional<bool> dynamic;
+  /// Of a grid index (a `tangled ..` site): put in order anew where more
+  /// than one row in so many is below the one before.
+  std::optional<int64_t> tangled;
   /// Of the combining of what a place sends (a `send ..` site): by groups
   /// on many threads from so many values on, one group after another
   /// where fewer.
@@ -1363,6 +1366,7 @@ static LogicalResult readTuned(ModuleOp module, StringRef path) {
     if (std::optional<StringRef> schedule = choice->getString("schedule"))
       tuned.dynamic = *schedule == "dynamic";
     tuned.groupsFrom = choice->getInteger("combine_from");
+    tuned.tangled = choice->getInteger("tangled");
   }
   return success();
 }
@@ -22592,6 +22596,27 @@ struct EntLowerToLoops
     tunedLoops.clear();
     if (!tune.empty() && failed(readTuned(module, tune)))
       return signalPassFailure();
+    // How out of order a grid index's rows are where it is made anew
+    // (kTangledPlaceholder): as chosen of a trace (`tangled` and the name
+    // of the function, `Name_tangled`), else more than one in 64.
+    module.walk([&](arith::ConstantOp constant) {
+      auto value = dyn_cast<IntegerAttr>(constant.getValue());
+      if (!value || value.getInt() != kTangledPlaceholder)
+        return;
+      int64_t many = 64;
+      if (auto symbol = constant->getParentOfType<SymbolOpInterface>()) {
+        StringRef name = symbol.getName();
+        // (By the name as a function's, `ent_` and `.` as `_` aside.)
+        std::string named = name.str();
+        std::replace(named.begin(), named.end(), '.', '_');
+        if (name.consume_back("_tangled"))
+          if (auto found = tunedLoops.find(
+                  "tangled " + named.substr(0, named.size() - 8));
+              found != tunedLoops.end() && found->second.tangled)
+            many = *found->second.tangled;
+      }
+      constant.setValueAttr(IntegerAttr::get(value.getType(), many));
+    });
     runningStarts.clear();
     // Rows of buffers written in queries (not those that take turns).
     ownerRuns.clear();

@@ -172,7 +172,10 @@ worked less than 90% of its time, in place of the rules that guess these
 (a million entities, loops inside loops); and combines what a place
 sends from a loop by groups on many threads from as many values on as
 that took less for each value in the trace, one group after another
-where fewer, where without it the program times both ways as it runs.
+where fewer, where without it the program times both ways as it runs;
+and makes a grid index anew (on many threads) from as many of its rows
+out of order on as that took less than moving each down (both timed
+where the traced program runs with `ENT_TRACE_EXPLORE=1`).
 The same results; a loop on one thread is traced too, and how many
 values were sent before each combining. The LJ melt on 12 threads 0.195
 s, tuned 0.192; the epidemic 11.0 ms a day, tuned 10.7. See

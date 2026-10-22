@@ -44,6 +44,12 @@ bool sameValue(Value a, Value b);
 /// `ent.buffer.claim`, its number already inside the window.
 inline constexpr llvm::StringLiteral kWindowAttr = "ent.window";
 
+/// In a grid index's `Name_tangled` (the parser writes it): where its rows
+/// are so out of order that they are put in order anew, more than one in
+/// this many below the one before. ent-lower-to-loops puts in 64, or what
+/// `tune` chose of a trace (by `tangled Name`).
+inline constexpr int64_t kTangledPlaceholder = 918273646;
+
 } // namespace mlir::ent
 
 #endif // ENT_ENTOPS_H

@@ -1,0 +1,13 @@
+// How out of order a grid index is where it is made anew (its
+// Name_tangled: more than one row in K below the one before): 64, or what
+// `tune` chose of a trace for it (`tangled Name`, the name as the
+// function's: `ent build --tune`).
+// RUN: ent-translate --import-ent %S/../Integration/Inputs/near.ent -I %S/../../devices > %t.mlir
+// RUN: ent-opt %t.mlir --ent-indexes --ent-lower-to-loops | FileCheck %s --check-prefix=PLAIN
+// RUN: echo '{"loops": {"tangled Cells": {"tangled": 8}}}' > %t.json
+// RUN: ent-opt %t.mlir --ent-indexes "--ent-lower-to-loops=tune=%t.json" | FileCheck %s --check-prefix=TUNED
+
+// PLAIN-LABEL: func.func private @ent_Cells_tangled(
+// PLAIN:         arith.constant 64 : i64
+// TUNED-LABEL: func.func private @ent_Cells_tangled(
+// TUNED:         arith.constant 8 : i64
