@@ -16,6 +16,9 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/DenseSet.h"
@@ -37,6 +40,9 @@ static MemRefType getArenaType(MLIRContext *context,
 
 /// Marks, while a function is lowered, the ops a query became.
 static const char kScopeAttr[] = "ent.scope";
+
+/// What a trace chose of a loop (see tunedLoops).
+struct TunedLoop;
 
 namespace {
 
@@ -1108,6 +1114,10 @@ struct LoopOptions {
   /// edges there can be at most, all its entities' together.
   int64_t edgeCapacity = 0;
   Value edgeRows = Value();
+  /// The site of the loop being made (see siteOf), and what was chosen of
+  /// it (`tune`), where it was worked out before the loop is made.
+  std::string site;
+  const TunedLoop *tuned = nullptr;
   /// How much one entity's turn is, against one that only computes with
   /// what lies in its columns: a body that calls out (an extern fn: a
   /// sine, a root) is not done sixteen entities at a time, and is worth
@@ -1276,8 +1286,13 @@ static bool isEntityLocal(QueryOp query) {
 /// one, however many there are: the most work it can be (with a `for`
 /// over other entities in the body, the two numbers multiplied; with
 /// calls out of it, so many times more) is below what a fork pays for.
+static bool chosenParallel(const LoopOptions &options, bool entityLocal,
+                           bool &parallel);
 static bool neverParallel(const WorldArchetype &archetype,
                           const LoopOptions &options, bool entityLocal) {
+  // (As chosen of a trace, where it was.)
+  if (bool parallel; chosenParallel(options, entityLocal, parallel))
+    return !parallel;
   int64_t most = std::max(int64_t(archetype.capacity) *
                               std::max<int64_t>(1, options.innerCapacity),
                           options.edgeCapacity) *
@@ -1297,6 +1312,105 @@ static constexpr llvm::StringLiteral kParallelMinAttr =
 /// the slice the body being lowered runs for (an index), in such a loop.
 static constexpr int64_t kSendSegments = 256;
 static Value sendSegment;
+
+/// Each loop over the entities of an archetype has a site: the place of
+/// its `for` (file, line and column), the function it is in and the
+/// archetype, and where those are the same, its number among them (#2,
+/// ..): the same in every build of the same program. It is in the loop's
+/// location (a fused one, its metadata `{site = ..}`), which the loops it
+/// becomes keep: a trace names it so (ent-trace), and a choice made of
+/// that trace (`tune`) is found by it.
+static llvm::StringMap<int> siteUses;
+/// What `tune` chose of a site: whether its loop runs on many threads, and
+/// whether its pieces are dealt out as threads are free.
+struct TunedLoop {
+  std::optional<bool> parallel;
+  std::optional<bool> dynamic;
+};
+static llvm::StringMap<TunedLoop> tunedLoops;
+
+/// Read the choices `tune` names: `{"loops": {site: {"parallel": bool,
+/// "schedule": "dynamic" or "static"}}}`, either left out.
+static LogicalResult readTuned(ModuleOp module, StringRef path) {
+  auto file = llvm::MemoryBuffer::getFile(path);
+  if (!file)
+    return module.emitError("cannot read the choices of loops '") << path
+                                                                    << "'";
+  llvm::Expected<llvm::json::Value> parsed =
+      llvm::json::parse((*file)->getBuffer());
+  if (!parsed) {
+    std::string why = llvm::toString(parsed.takeError());
+    return module.emitError("the choices of loops '") << path
+                                                       << "' are not JSON: "
+                                                       << why;
+  }
+  const llvm::json::Object *top = parsed->getAsObject();
+  const llvm::json::Object *loops = top ? top->getObject("loops") : nullptr;
+  if (!loops)
+    return module.emitError("the choices of loops '")
+           << path << "' have no \"loops\"";
+  for (const auto &[site, value] : *loops) {
+    const llvm::json::Object *choice = value.getAsObject();
+    if (!choice)
+      continue;
+    TunedLoop &tuned = tunedLoops[site.str()];
+    tuned.parallel = choice->getBoolean("parallel");
+    if (std::optional<StringRef> schedule = choice->getString("schedule"))
+      tuned.dynamic = *schedule == "dynamic";
+  }
+  return success();
+}
+
+/// Whether a trace chose whether the loop `options` are of runs on many
+/// threads (and so, in `parallel`); only where it may at all.
+static bool chosenParallel(const LoopOptions &options, bool entityLocal,
+                           bool &parallel) {
+  if (!options.tuned || !options.tuned->parallel ||
+      !options.parallelEntities || !entityLocal)
+    return false;
+  parallel = *options.tuned->parallel;
+  return true;
+}
+
+static std::string siteOf(Location loc, Operation *at,
+                          const WorldArchetype &archetype) {
+  std::string place = "?";
+  loc->walk([&](Location inner) {
+    auto file = dyn_cast<FileLineColLoc>(inner);
+    if (!file)
+      return WalkResult::advance();
+    place = (llvm::sys::path::filename(file.getFilename().getValue()) + ":" +
+             Twine(file.getLine()) + ":" + Twine(file.getColumn()))
+                .str();
+    return WalkResult::interrupt();
+  });
+  // (In the nearest that has a name: a function, a system, a schedule.)
+  std::string in = "?";
+  for (Operation *op = at; op && !isa<ModuleOp>(op); op = op->getParentOp())
+    if (auto symbol = dyn_cast<SymbolOpInterface>(op)) {
+      in = symbol.getName().str();
+      break;
+    }
+  std::string site =
+      place + " " + in + " " + ArchetypeOp(archetype.op).getSymName().str();
+  int uses = ++siteUses[site];
+  if (uses > 1)
+    site += " #" + std::to_string(uses);
+  return site;
+}
+
+/// `options` for the loop over `archetype` about to be made at the
+/// insertion point: with its site, and what a trace chose of it.
+static LoopOptions sitedOptions(IRRewriter &rewriter, Location loc,
+                                const LoopOptions &options,
+                                const WorldArchetype &archetype) {
+  LoopOptions sited = options;
+  sited.site =
+      siteOf(loc, rewriter.getInsertionBlock()->getParentOp(), archetype);
+  if (auto found = tunedLoops.find(sited.site); found != tunedLoops.end())
+    sited.tuned = &found->second;
+  return sited;
+}
 
 /// Emit the loop over the entities of `archetype` at the insertion point
 /// and call `emitBody` with the entity index, positioned inside the loop,
@@ -1336,8 +1450,25 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
   }
 
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  // (Its site, on the loop itself, and what was chosen of it.)
+  std::string site = options.site;
+  const TunedLoop *tuned = options.tuned;
+  if (site.empty()) {
+    site = siteOf(loc, rewriter.getInsertionBlock()->getParentOp(), archetype);
+    if (auto found = tunedLoops.find(site); found != tunedLoops.end())
+      tuned = &found->second;
+  }
+  SmallVector<NamedAttribute> marks{
+      rewriter.getNamedAttr("site", rewriter.getStringAttr(site))};
+  if (tuned && tuned->dynamic)
+    marks.push_back(rewriter.getNamedAttr(
+        "schedule",
+        rewriter.getStringAttr(*tuned->dynamic ? "dynamic" : "static")));
+  Location sited =
+      FusedLoc::get(rewriter.getContext(), {loc},
+                    rewriter.getDictionaryAttr(marks));
   auto emitSequential = [&]() -> Operation * {
-    auto loop = scf::ForOp::create(rewriter, loc, zero, count, one);
+    auto loop = scf::ForOp::create(rewriter, sited, zero, count, one);
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     emitBody(loop.getInductionVar(), count, /*parallel=*/false);
     return loop;
@@ -1349,7 +1480,7 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
       Value slices = arith::ConstantIndexOp::create(rewriter, loc,
                                                     kSendSegments);
       auto loop = scf::ParallelOp::create(
-          rewriter, loc,
+          rewriter, sited,
           ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)},
           ValueRange{slices}, ValueRange{one});
       rewriter.setInsertionPoint(loop.getBody()->getTerminator());
@@ -1373,7 +1504,7 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
       emitBody(rowsOf.getInductionVar(), count, /*parallel=*/true);
       return loop;
     }
-    auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+    auto loop = scf::ParallelOp::create(rewriter, sited, ValueRange{zero},
                                         ValueRange{count}, ValueRange{one});
     if (options.gpu)
       loop->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
@@ -1385,6 +1516,12 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
   // (A `gpu` system's queries are entity-local: see checkGpuSystems.)
   if (options.gpu)
     return emitParallel();
+  // (Chosen of a trace: on many threads or on one, whatever the rules
+  // below would guess; but only where it may run on many at all.)
+  LoopOptions chosen = options;
+  chosen.tuned = tuned;
+  if (bool parallel; chosenParallel(chosen, entityLocal, parallel))
+    return parallel ? emitParallel() : emitSequential();
   if (neverParallel(archetype, options, entityLocal))
     return emitSequential();
   if (options.parallelMinEntities <= 1)
@@ -18401,8 +18538,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // into an archetype whose loop comes later. The same counts bound the
   // rows whose applies are combined.
   SmallVector<std::pair<const WorldArchetype *, Value>> visited;
-  // Archetypes whose loop combined its unobserved applies directly.
+  // Archetypes whose loop combined its unobserved applies directly; and
+  // those whose loop may run on many threads (in slices, where it sends).
   llvm::SmallPtrSet<const WorldArchetype *, 4> direct;
+  llvm::SmallPtrSet<const WorldArchetype *, 4> threaded;
   llvm::DenseMap<const WorldArchetype *, Value> startCounts;
   {
     OpBuilder::InsertionGuard guard(rewriter);
@@ -18444,8 +18583,11 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     // applies are combined in, so it may combine unobserved ones directly.
     // (By the measure the loop itself is made by: one whose body calls
     // out runs in parallel from fewer entities on.)
-    bool sequentialOnly = options.directApplies &&
-                          neverParallel(archetype, options, entityLocal);
+    LoopOptions here = sitedOptions(rewriter, loc, options, archetype);
+    bool never = neverParallel(archetype, here, entityLocal);
+    if (!never)
+      threaded.insert(&archetype);
+    bool sequentialOnly = options.directApplies && never;
     if (sequentialOnly)
       direct.insert(&archetype);
     // (A reactive query's body is a part: the same for every archetype
@@ -18454,7 +18596,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     bool asPart = !triggers.empty() && applies.empty() &&
                   accumulates.empty() && connects.empty();
     Operation *loops = emitEntityLoops(
-        rewriter, loc, archetype, world, options, entityLocal,
+        rewriter, loc, archetype, world, here, entityLocal,
         [&](Value entity, Value rows, bool parallel) {
           llvm::SaveAndRestore base(runningBase,
                                     runningBases.lookup(&archetype));
@@ -18508,7 +18650,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       // sees the field; its rows' or edges' slots'.)
       StringRef staged = resolveSend(applyFacts(
           apply, direct.contains(archetype),
-          /*sliced=*/!neverParallel(*archetype, options, entityLocal) &&
+          /*sliced=*/threaded.contains(archetype) &&
               archetype->capacity != 1));
       if (staged == "list" || staged == "rows" || staged == "edges")
         mergeApplied(rewriter, apply, staged, layout, *archetype, world,
@@ -18521,7 +18663,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       // sees the field; its rows' slots'.)
       StringRef staged = resolveSend(applyFacts(
           accumulate, direct.contains(archetype),
-          /*sliced=*/!neverParallel(*archetype, options, entityLocal) &&
+          /*sliced=*/threaded.contains(archetype) &&
               archetype->capacity != 1));
       if (staged == "list" || staged == "rows")
         foldAccumulated(rewriter, accumulate, staged, layout, *archetype,
@@ -19164,12 +19306,13 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     visited.push_back({&archetype, rows});
     // A loop that never runs in parallel visits the entities in the order
     // sends are combined in (see lowerQuery).
+    LoopOptions here = sitedOptions(rewriter, loc, options, archetype);
     bool sequentialOnly = options.directApplies &&
-                          neverParallel(archetype, options, /*entityLocal=*/true);
+                          neverParallel(archetype, here, /*entityLocal=*/true);
     if (sequentialOnly)
       direct.insert(&archetype);
     Operation *loops = emitEntityLoops(
-        rewriter, loc, archetype, world, options, /*entityLocal=*/true,
+        rewriter, loc, archetype, world, here, /*entityLocal=*/true,
         [&](Value entity, Value rows, bool parallel) {
           for (auto [query, index] : bodies)
             emitQueryBody(rewriter, query, mappings[index], archetype, world,
@@ -22408,6 +22551,10 @@ struct EntLowerToLoops
     listOwners.clear();
     groupedSends.clear();
     sendListsTaken = 0;
+    siteUses.clear();
+    tunedLoops.clear();
+    if (!tune.empty() && failed(readTuned(module, tune)))
+      return signalPassFailure();
     runningStarts.clear();
     // Rows of buffers written in queries (not those that take turns).
     ownerRuns.clear();

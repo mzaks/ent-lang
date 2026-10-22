@@ -1,5 +1,6 @@
 #include "Ent/Passes.h"
 
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/SymbolTable.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Path.h"
@@ -29,6 +30,23 @@ static std::string placeOf(Location loc) {
   return place;
 }
 
+/// The site of a loop over entities (ent-lower-to-loops puts it in the
+/// loop's location, `{site = ..}`), or "".
+static std::string siteOf(Location loc) {
+  std::string site;
+  loc->walk([&](Location inner) {
+    auto fused = dyn_cast<FusedLoc>(inner);
+    auto marks =
+        fused ? dyn_cast_or_null<DictionaryAttr>(fused.getMetadata()) : nullptr;
+    if (auto named = marks ? marks.getAs<StringAttr>("site") : nullptr) {
+      site = named.getValue().str();
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return site;
+}
+
 struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -51,6 +69,7 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
     };
     declare("ent_trace_start", {}, {});
     declare("ent_trace_name", {i64, pointer}, {});
+    declare("ent_trace_key", {i64, pointer}, {});
     declare("ent_trace_begin", {i64}, {});
     declare("ent_trace_end", {i64}, {});
     declare("ent_trace_loop_begin", {i64}, {});
@@ -58,11 +77,15 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
     declare("ent_trace_now", {}, {i64});
     declare("ent_trace_work", {i64, i64}, {});
 
-    // Each site a number, and what it is called.
-    SmallVector<std::string> names;
-    auto site = [&](OpBuilder &at, Location loc, std::string name) {
+    // Each site a number, and what it is called; a loop over entities also
+    // its site and how it ran ("site|parallel|dynamic", "site|serial"), for
+    // `ent build --tune` to read.
+    SmallVector<std::string> names, keys;
+    auto site = [&](OpBuilder &at, Location loc, std::string name,
+                    std::string key = "") {
       Value number = arith::ConstantIntOp::create(at, loc, names.size(), 64);
       names.push_back(std::move(name));
+      keys.push_back(std::move(key));
       return number;
     };
     auto call = [&](OpBuilder &at, Location loc, StringRef name,
@@ -95,10 +118,20 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
         Location loc = parallel.getLoc();
         std::string place = placeOf(loc);
         builder.setInsertionPoint(parallel);
+        std::string key = siteOf(loc);
+        if (!key.empty()) {
+          bool dynamic = false;
+          parallel.walk([&](omp::WsloopOp loop) {
+            dynamic |= loop.getScheduleKind() ==
+                       omp::ClauseScheduleKind::Dynamic;
+          });
+          key += dynamic ? "|parallel|dynamic" : "|parallel|static";
+        }
         Value number =
             site(builder, loc,
                  "loop " + (place.empty() ? std::string("?") : place) + " in " +
-                     func.getSymName().str());
+                     func.getSymName().str(),
+                 key);
         call(builder, loc, "ent_trace_loop_begin", {number});
         builder.setInsertionPointAfter(parallel);
         call(builder, loc, "ent_trace_loop_end", {number});
@@ -110,6 +143,29 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
             builder.setInsertionPoint(end);
             call(builder, loc, "ent_trace_work", {number, start});
           }
+      });
+    });
+
+    // A loop over entities on one thread (where it is never on many, or
+    // where it has too few entities this time): its time, as a span.
+    module.walk([&](func::FuncOp func) {
+      if (func.isExternal())
+        return;
+      func.walk([&](scf::ForOp loop) {
+        std::string key = siteOf(loop.getLoc());
+        if (key.empty() || loop->getParentOfType<omp::ParallelOp>())
+          return;
+        Location loc = loop.getLoc();
+        std::string place = placeOf(loc);
+        builder.setInsertionPoint(loop);
+        Value number =
+            site(builder, loc,
+                 "loop " + (place.empty() ? std::string("?") : place) + " in " +
+                     func.getSymName().str() + " (one thread)",
+                 key + "|serial");
+        call(builder, loc, "ent_trace_begin", {number});
+        builder.setInsertionPointAfter(loop);
+        call(builder, loc, "ent_trace_end", {number});
       });
     });
 
@@ -135,6 +191,13 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
           LLVM::Linkage::Internal);
       call(builder, loc, "ent_trace_name",
            {arith::ConstantIntOp::create(builder, loc, number, 64), text});
+      if (keys[number].empty())
+        continue;
+      Value key = LLVM::createGlobalString(
+          loc, builder, ("ent_trace_key_" + Twine(number)).str(),
+          keys[number] + '\0', LLVM::Linkage::Internal);
+      call(builder, loc, "ent_trace_key",
+           {arith::ConstantIntOp::create(builder, loc, number, 64), key});
     }
   }
 };

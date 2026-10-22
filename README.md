@@ -163,6 +163,17 @@ thread that runs it is 2.97 s in parallel loops and 1.78 s on its own
 (the setup of the city most of it), its threads working 50 to 70% of
 most loops' time.
 
+And what it says can choose: `ent build --tune program.trace.json`
+builds each loop over entities (by its site in the trace: its place,
+function and archetype) on many threads or on one as the trace says it
+is worth (a call of 20 microseconds of its threads' time or more), and
+deals a query's slices out to whichever thread is free where its threads
+worked less than 90% of its time, in place of the rules that guess these
+(a million entities, loops inside loops). The same results; a loop on one
+thread is traced too. The LJ melt on 12 threads 0.198 s, tuned 0.195,
+tuned again from its own trace 0.193; the epidemic the same as untuned
+(11.0 ms a day). See `test/Integration/tune.test`.
+
 A big program is optimised whole and then made into machine code in
 pieces, each on a core of its own (`ENT_PIECES=1`: in one piece;
 `ENT_SPLIT=first`: shared out before it is optimised, which builds a big

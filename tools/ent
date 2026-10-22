@@ -111,6 +111,16 @@ and writes the timeline of every thread to `program.trace.json` where it
 runs (ENT_TRACE says where instead; `%p` in it, the process's number),
 for ui.perfetto.dev or chrome://tracing to show.
 
+A loop over the entities of a `for` that ran on one thread is timed too,
+`(one thread)`; each loop over entities has a site in the trace (its
+place, function and archetype). Built with --tune and such a trace, each
+of those loops runs on many threads where one call of it took at least
+20 microseconds of its threads' time there (TUNE_WORTH_THREADS_US), on
+one where less, whatever the rules that guess it say; and one over a
+query's slices (a few pieces, at most 1024) deals them out to whichever
+thread is free where it ran so, or its threads worked less than 90% of
+its time. What the program does is the same either way.
+
 A module that needs libraries says so in `m.link`: the linker's arguments
 for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
 
@@ -272,6 +282,8 @@ def cache_key(arguments):
     if arguments.trace:
         note_file(os.path.join(ROOT, "devices", "trace.c"))
     note("instrument", arguments.instrument and instrumented(arguments))
+    if arguments.tune:
+        note_file(arguments.tune)
     if arguments.profile:
         for path in profiles(arguments.profile):
             note_file(path)
@@ -457,6 +469,61 @@ def run(command, **options):
     return result
 
 
+# A loop over entities is worth running on many threads where one call of
+# it takes at least this long on one (its threads' time together, where
+# it ran on many): a fork and a meeting at its end cost some microseconds.
+TUNE_WORTH_THREADS_US = 20.0
+# Where its threads worked less of its time than this, its pieces are
+# dealt out to whichever thread is free.
+TUNE_BUSY_ENOUGH = 0.9
+
+
+def tuned_loops(path):
+    """What `--tune` chooses of each loop over entities from the trace at
+    `path`: the loops by their sites (ent-lower-to-loops), each whether it
+    runs on many threads and how its pieces are shared out
+    ({"loops": {site: {"parallel": .., "schedule": ..}}})."""
+    try:
+        with open(path) as source:
+            events = json.load(source)["traceEvents"]
+    except (OSError, ValueError, KeyError) as error:
+        sys.exit(f"ent: cannot read the trace '{path}': {error}")
+    seen = {}
+    for event in events:
+        key = event.get("args", {}).get("site")
+        if not key:
+            continue
+        site, how = key.split("|", 1)
+        each = seen.setdefault(site, {"calls": 0, "wall": 0.0, "work": 0.0,
+                                      "threads": set(), "ran": 0,
+                                      "dynamic": False, "serial": 0,
+                                      "alone": 0.0})
+        if event["cat"] == "work":
+            each["work"] += event["dur"]
+            each["threads"].add(event["tid"])
+        elif how == "serial":
+            each["serial"] += 1
+            each["alone"] += event["dur"]
+        else:
+            each["ran"] += 1
+            each["wall"] += event["dur"]
+            each["dynamic"] = how.endswith("dynamic")
+    loops = {}
+    for site, each in seen.items():
+        calls = each["ran"] + each["serial"]
+        if not calls:
+            continue
+        # (What a call takes on one thread: its threads' time together.)
+        cost = (each["work"] + each["alone"]) / calls
+        choice = {"parallel": cost >= TUNE_WORTH_THREADS_US}
+        if choice["parallel"] and each["ran"] and each["wall"] > 0:
+            busy = each["work"] / (each["wall"] * max(1, len(each["threads"])))
+            choice["schedule"] = ("dynamic" if each["dynamic"] or
+                                  busy < TUNE_BUSY_ENOUGH else "static")
+        loops[site] = choice
+    return {"loops": loops}
+
+
 def build(arguments, output, directory):
     own = [os.environ.get("ENT_BIN"), os.path.join(ROOT, "build/bin")]
     own = [path for path in own if path]
@@ -485,13 +552,21 @@ def build(arguments, output, directory):
 
     lowering = "--ent-lower-to-loops"
     gpu = " gpu=1" if arguments.gpu else ""
+    # (Choices of a trace, see tuned_loops.)
+    tuning = ""
+    if arguments.tune:
+        choices = os.path.join(directory, stem + ".tune.json")
+        with open(choices, "w") as out:
+            json.dump(tuned_loops(arguments.tune), out, indent=1)
+        tuning = " tune=" + choices
     # (On many ranks: devices/ranks.c, and MPI's own flags.)
     ranks = " ranks=1" if arguments.ranks else ""
     if arguments.ranks and arguments.partitions:
         ranks += " partitions=%d" % arguments.ranks
     # (Each index made again before what reads it, where what it is made
     # of changed: before the systems are staged and lowered.)
-    passes = ["--ent-indexes", lowering + "=fuse-systems=1" + gpu + ranks,
+    passes = ["--ent-indexes",
+              lowering + "=fuse-systems=1" + gpu + ranks + tuning,
               "--symbol-dce"]
     # (Kernels are made of the GPU's loops before what is left of them is
     # the CPU's; and the columns are read by their addresses before, so
@@ -509,7 +584,7 @@ def build(arguments, output, directory):
                  % (int(least), int(least))) if least else ""
         passes = ["--ent-indexes", "--ent-schedule",
                   lowering + "=fuse-systems=1 parallel-entities=1 "
-                  "parallel-stages=1" + least + gpu + ranks,
+                  "parallel-stages=1" + least + gpu + ranks + tuning,
                   "--symbol-dce"] + (views + before if gpu else []) + [
                   "--convert-scf-to-openmp", "--canonicalize",
                   "--ent-omp-nowait"]
@@ -867,6 +942,11 @@ def main():
     parser.add_argument("--trace", action="store_true",
                         help="time systems, sorts and parallel loops, said "
                         "on stderr and written to program.trace.json")
+    parser.add_argument("--tune", metavar="trace",
+                        help="choose for each loop over entities whether it "
+                        "runs on many threads, and how it shares its pieces "
+                        "out, by how it ran in a trace of the program "
+                        "(program.trace.json of a build with --trace)")
     parser.add_argument("--keep", metavar="dir", help="keep the generated "
                         "files (IR, header) in this directory")
     parser.add_argument("--no-cache", action="store_true",

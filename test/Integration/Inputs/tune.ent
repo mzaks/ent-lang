@@ -1,0 +1,36 @@
+// Few entities, one loop over them heavy and one light: by the rules
+// both are on one thread (64 entities); a trace says the heavy one is
+// worth many (test/Integration/tune.test).
+import console
+
+component Cell { v: f64, n: i64 } capacity 64
+unique Total { s: f64 }
+
+system make() {
+  for i in 0..64 { spawn { Cell { v: 0.0, n: i as i64 } } }
+}
+
+system heavy() {
+  for c: mut Cell {
+    var x: f64 = 0.0
+    for k in 0..20000 { x += 1.0 / (1 + k as i64 + c.n) as f64 }
+    c.v = x
+  }
+}
+
+system light() {
+  for c: mut Cell { c.n += 1 }
+}
+
+system report() {
+  for c: Cell { Total.s += c.v }
+  put("{bits_of(Total.s)}")
+}
+
+schedule all() {
+  make()
+  heavy() light() heavy() light()
+  report()
+}
+
+main { all() }

@@ -107,6 +107,11 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
            "Emit a remark for each state and access op (ent.sa) where it "
            "is lowered: how it was resolved, and the facts it was "
            "resolved from">,
+    Option<"tune", "tune", "std::string", /*default=*/"\"\"",
+           "A JSON file of choices for loops over entities, by their sites "
+           "(`tools/ent build --tune`, from a trace): whether each runs on "
+           "many threads, and whether it deals its pieces out as threads "
+           "are free (`schedule`), in place of the rules that guess them">,
   ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect",

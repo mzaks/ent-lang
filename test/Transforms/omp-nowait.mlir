@@ -114,3 +114,42 @@ func.func @schedules(%n: index, %a: memref<?xf32>, %v: f32) {
   }
   return
 }
+
+// Where a trace chose (`--tune`: the schedule in the loop's location), as
+// it chose: dealt out though its rows have no loops of their own, and in
+// fixed shares though they have; of a few pieces only.
+// CHECK-LABEL: func.func @chosen(
+// CHECK:       omp.wsloop schedule(dynamic) {
+// CHECK:       omp.wsloop {
+// CHECK:       omp.wsloop nowait {
+func.func @chosen(%n: index, %a: memref<?xf32>, %v: f32) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c256 = arith.constant 256 : index
+  omp.parallel {
+    omp.wsloop {
+      omp.loop_nest (%s) : index = (%c0) to (%c256) step (%c1) {
+        memref.store %v, %a[%s] : memref<?xf32>
+        omp.yield
+      }
+    } loc(fused<{schedule = "dynamic", site = "a.ent:1:1 f A"}>["a.ent":1:1])
+    omp.wsloop {
+      omp.loop_nest (%s) : index = (%c0) to (%c256) step (%c1) {
+        scf.for %r = %c0 to %n step %c1 {
+          scf.for %k = %c0 to %r step %c1 {
+            memref.store %v, %a[%k] : memref<?xf32>
+          }
+        }
+        omp.yield
+      }
+    } loc(fused<{schedule = "static", site = "a.ent:2:1 f A"}>["a.ent":2:1])
+    omp.wsloop {
+      omp.loop_nest (%s) : index = (%c0) to (%n) step (%c1) {
+        memref.store %v, %a[%s] : memref<?xf32>
+        omp.yield
+      }
+    } loc(fused<{schedule = "dynamic", site = "a.ent:3:1 f A"}>["a.ent":3:1])
+    omp.terminator
+  }
+  return
+}

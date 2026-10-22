@@ -40,6 +40,10 @@ static ent_trace_thread **ent_trace_threads;
 static int ent_trace_thread_count, ent_trace_thread_room;
 static const char **ent_trace_names;
 static int64_t ent_trace_name_count;
+// (Of a loop over entities: its site and how it ran, in the JSON as the
+// event's `site`, for `ent build --tune`.)
+static const char **ent_trace_keys;
+static int64_t ent_trace_key_count;
 static int64_t ent_trace_started;
 static _Thread_local ent_trace_thread *ent_trace_mine;
 
@@ -117,6 +121,19 @@ void ent_trace_name(int64_t site, const char *name) {
   }
   ent_trace_names[site] = name;
 }
+void ent_trace_key(int64_t site, const char *key) {
+  if (site >= ent_trace_key_count) {
+    int64_t count = site + 1;
+    ent_trace_keys = realloc(ent_trace_keys, count * sizeof(char *));
+    for (int64_t k = ent_trace_key_count; k < count; ++k)
+      ent_trace_keys[k] = 0;
+    ent_trace_key_count = count;
+  }
+  ent_trace_keys[site] = key;
+}
+static const char *ent_trace_key_of(int32_t site) {
+  return site >= 0 && site < ent_trace_key_count ? ent_trace_keys[site] : 0;
+}
 static const char *ent_trace_name_of(int32_t site) {
   return site < ent_trace_name_count ? ent_trace_names[site] : "?";
 }
@@ -156,9 +173,17 @@ static void ent_trace_write(const char *path) {
                                               : "work",
               (event->begin - ent_trace_started) / 1e3,
               (event->end - event->begin) / 1e3, thread->number);
-      if (event->kind == ENT_TRACE_WORK) {
-        fprintf(out, ",\"args\":{\"loop\":");
-        ent_trace_json_text(out, ent_trace_name_of(event->site));
+      const char *key = ent_trace_key_of(event->site);
+      if (event->kind == ENT_TRACE_WORK || key) {
+        fprintf(out, ",\"args\":{");
+        if (event->kind == ENT_TRACE_WORK) {
+          fprintf(out, "\"loop\":");
+          ent_trace_json_text(out, ent_trace_name_of(event->site));
+        }
+        if (key) {
+          fprintf(out, "%s\"site\":", event->kind == ENT_TRACE_WORK ? "," : "");
+          ent_trace_json_text(out, key);
+        }
         fputc('}', out);
       }
       fputc('}', out);

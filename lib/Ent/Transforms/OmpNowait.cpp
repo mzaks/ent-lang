@@ -31,6 +31,23 @@ static void dropTrailingBarrier(omp::ParallelOp parallel) {
   last.setNowait(true);
 }
 
+/// What a trace chose of the loop at `loc` (the `schedule` of its site,
+/// see ent-lower-to-loops `tune`): "dynamic", "static", or "" for nothing.
+static StringRef chosenSchedule(Location loc) {
+  StringRef chosen;
+  loc->walk([&](Location inner) {
+    auto fused = dyn_cast<FusedLoc>(inner);
+    auto marks =
+        fused ? dyn_cast_or_null<DictionaryAttr>(fused.getMetadata()) : nullptr;
+    if (auto schedule = marks ? marks.getAs<StringAttr>("schedule") : nullptr) {
+      chosen = schedule.getValue();
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return chosen;
+}
+
 struct EntOmpNowait : public mlir::ent::impl::EntOmpNowaitBase<EntOmpNowait> {
   void runOnOperation() override {
     // The body of a loop that was made parallel is in a scope for what it
@@ -89,6 +106,13 @@ struct EntOmpNowait : public mlir::ent::impl::EntOmpNowaitBase<EntOmpNowait> {
           nest.getLoopUpperBounds()[0].getDefiningOp<arith::ConstantIndexOp>();
       if (!upper || upper.value() > 1024)
         return;
+      // (Where a trace chose, as it chose: of a few pieces too.)
+      StringRef chosen = chosenSchedule(loop.getLoc());
+      if (!chosen.empty()) {
+        if (chosen == "dynamic")
+          loop.setScheduleKind(omp::ClauseScheduleKind::Dynamic);
+        return;
+      }
       bool uneven = false;
       nest->walk([&](LoopLikeOpInterface inner) {
         auto outer = inner->getParentOfType<LoopLikeOpInterface>();
