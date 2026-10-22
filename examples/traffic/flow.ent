@@ -1,0 +1,41 @@
+// The flow of cars on a ring road against how many there are on it (the
+// fundamental diagram), as CSV: `vmax,brake,cells,cars,density,flow,off`.
+// Nineteen roads of 1,000 cells each for a `vmax` of 1 and of 5, and for a
+// chance to brake of 0 and of 0.5 (Nagel and Schreckenberg's), all driven
+// at once. The flow is cars passing a point a step, over 1,000 steps after
+// 1,000 to settle; `off` is how many of those steps a road without braking
+// was not at min(density * vmax, 1 - density).
+//
+//   tools/ent run --parallel examples/traffic/flow.ent > flow.csv
+import console
+import ring
+
+world {
+  Run.seed = 1
+  Run.warm = 1000
+  for v in 0..2 {
+    for b in 0..2 {
+      for n in 1..20 {
+        Plan += { cells: 1000, cars: n * 50, vmax: 1 + v * 4, brake: b as f64 * 0.5 }
+      }
+    }
+  }
+}
+
+system report() {
+  put("vmax,brake,cells,cars,density,flow,off")
+  let steps = Run.step - Run.warm
+  for r: Road {
+    let density = r.cars as f64 / r.cells as f64
+    let flow = r.total as f64 / (r.cells as i64 * steps) as f64
+    put("{r.vmax},{r.brake},{r.cells},{r.cars},{density},{flow},{r.off}")
+  }
+}
+
+schedule finish() { report() }
+
+main {
+  setup()
+  loop { step() } until Run.step == 2000
+  finish()
+}

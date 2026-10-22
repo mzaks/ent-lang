@@ -1,0 +1,117 @@
+// Cars on a ring road, one lane, after Nagel and Schreckenberg (1992):
+// the road is cut into cells of 7.5 m, a car stands in one and has a
+// whole speed in cells a step. Every step, each car at once
+//
+//   1. goes one faster, up to its road's `vmax`;
+//   2. goes no faster than the free cells ahead of it, to its leader;
+//   3. goes one slower, with its road's chance `brake`;
+//   4. moves on by its speed, round the ring.
+//
+// Several roads go side by side, each with its cars, cells, `vmax` and
+// `brake`: one run is a sweep over densities. A road counts the cells its
+// cars moved, every step after `Run.warm`, and from that its flow (cars
+// passing a point a step) comes out.
+//
+// With `brake` 0 the cars come to a state in which the flow is exactly
+// min(density * vmax, 1 - density), every step (and with `vmax` 1 this is
+// Wolfram's rule 184). `Road.off` counts the steps after `Run.warm` that
+// it was not; it is 0 once the warm-up is longer than the cars take to
+// settle, which is less than the ring's cells.
+import wyhash
+
+unique Run { seed: u64, step: i64, warm: i64, cars: i32 }
+
+// A road and what it measured. `moved` is this step's, `total` all after
+// the warm-up.
+component Road { cells: i32, cars: i32, vmax: i32, brake: f64,
+                 moved: i64, total: i64, off: i32 } capacity 1024
+
+// What a car is and knows of its road.
+component Car { road: entity, number: i32,
+                cells: i32, vmax: i32, brake: f64 } capacity 100000
+component Cell { x: i32 } capacity 100000
+component Speed { v: i32 } capacity 100000
+
+// A car follows the car ahead of it: a road is a ring of these edges.
+relation (Car)-[Follows]->(Car) capacity 100000
+
+// The roads to lay, a row each, which the program gives before `lay()`.
+buffer Plan { cells: i32, cars: i32, vmax: i32, brake: f64 } capacity 1024
+
+// For every row of `Plan` a road of `cells` cells with `cars` cars on
+// cells picked at random, standing. The cells are gone through in order
+// and each takes a car with the chance of the cars left over the cells
+// left (Knuth's selection sampling), so the cars come in their order
+// round the ring and each follows the one spawned after it, the last the
+// first.
+system lay() {
+  for i in 0..len(Plan) {
+    let cells = Plan[i].cells
+    let road = spawn { Road { cells: cells, cars: Plan[i].cars, vmax: Plan[i].vmax,
+                              brake: Plan[i].brake, moved: 0, total: 0, off: 0 } }
+    let key = wyhash64(Run.seed, i as u64)
+    var left = Plan[i].cars
+    var first: entity = none
+    var behind: entity = none
+    for x in 0..cells {
+      if left > 0 && wyrand_below(key, x as i64, (cells - x) as u64) < left as u64 {
+        let car = spawn { Car { road: road, number: Run.cars, cells: cells,
+                                vmax: Plan[i].vmax, brake: Plan[i].brake },
+                          Cell { x: x }, Speed { v: 0 } }
+        Run.cars += 1
+        if behind != none { connect (behind)-[Follows]->(car) } else { first = car }
+        behind = car
+        left -= 1
+      }
+    }
+    if behind != none { connect (behind)-[Follows]->(first) }
+  }
+}
+
+// Steps 1 to 3: the speed every car goes this step, from where the cars
+// are; each road adds up its cars' speeds.
+system drive() {
+  let step = Run.step
+  for me, c: Car, at: Cell, s: mut Speed {
+    for (me)-[Follows]->(ahead: Cell) {
+      let gap = (ahead.x - at.x - 1 + c.cells) % c.cells
+      var v = min(min(s.v + 1, c.vmax), gap)
+      if c.brake > 0.0 && v > 0 {
+        let key = wyhash64(Run.seed, c.number as u64)
+        if wyrand_unit(key, step) < c.brake { v -= 1 }
+      }
+      s.v = v
+      Road(c.road).moved += v as i64
+    }
+  }
+}
+
+// Step 4: every car moves on.
+system move() {
+  for c: Car, at: mut Cell, s: Speed {
+    at.x = (at.x + s.v) % c.cells
+  }
+}
+
+// What the roads moved this step, kept after the warm-up.
+system measure() {
+  let counts = Run.step >= Run.warm
+  for r: mut Road {
+    if counts {
+      r.total += r.moved
+      let jam = (r.cells - r.cars) as i64
+      let free = (r.cars * r.vmax) as i64
+      if r.brake == 0.0 && r.moved != min(free, jam) { r.off += 1 }
+    }
+    r.moved = 0
+  }
+  Run.step += 1
+}
+
+schedule setup() { lay() }
+
+schedule step() {
+  drive()
+  move()
+  measure()
+}

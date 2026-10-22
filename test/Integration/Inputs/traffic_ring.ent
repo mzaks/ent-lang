@@ -1,0 +1,34 @@
+// The ring road of examples/traffic (ring.ent): roads of 400 cells around
+// the density at which the flow is highest, without braking and with,
+// 400 steps to settle and 400 measured.
+import console
+import ring
+
+capacity Road 16
+
+world {
+  Run.seed = 1
+  Run.warm = 400
+  for n in 0..4 {
+    Plan += { cells: 400, cars: 160 + n * 20, vmax: 1, brake: 0.0 }
+  }
+  for n in 0..4 {
+    Plan += { cells: 400, cars: 40 + n * 40, vmax: 5, brake: 0.0 }
+  }
+  Plan += { cells: 400, cars: 200, vmax: 1, brake: 0.5 }
+}
+
+system report() {
+  let steps = Run.step - Run.warm
+  for r: Road {
+    put("vmax {r.vmax} brake {r.brake} cars {r.cars} moved {r.total} of {steps} steps, off {r.off}")
+  }
+}
+
+schedule finish() { report() }
+
+main {
+  setup()
+  loop { step() } until Run.step == 800
+  finish()
+}

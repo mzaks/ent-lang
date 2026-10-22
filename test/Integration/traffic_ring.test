@@ -1,0 +1,25 @@
+// Cars on ring roads after Nagel and Schreckenberg
+// (examples/traffic/ring.ent). Without braking every road settles within
+// the warm-up to a flow of exactly min(density * vmax, 1 - density) cars
+// a step, so over 400 steps its cars move min(cars * vmax, cells - cars)
+// cells a step, and no step is off. The draws to brake are worked out from
+// the seed, the car and the step, so the run is the same on one core and
+// on all of them. (examples/traffic/check/flow.py holds the flows of a
+// whole sweep against the exact formulas.)
+// RUN: %ent run -I %S/../../examples/traffic %S/Inputs/traffic_ring.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel -I %S/../../examples/traffic %S/Inputs/traffic_ring.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// vmax 1 is rule 184: free below half the cells, jammed above.
+// CHECK:      vmax 1 brake 0.0 cars 160 moved 64000 of 400 steps, off 0
+// CHECK-NEXT: vmax 1 brake 0.0 cars 180 moved 72000 of 400 steps, off 0
+// CHECK-NEXT: vmax 1 brake 0.0 cars 200 moved 80000 of 400 steps, off 0
+// CHECK-NEXT: vmax 1 brake 0.0 cars 220 moved 72000 of 400 steps, off 0
+// With vmax 5 the flow is highest at a sixth of the cells.
+// CHECK-NEXT: vmax 5 brake 0.0 cars 40 moved 80000 of 400 steps, off 0
+// CHECK-NEXT: vmax 5 brake 0.0 cars 80 moved 128000 of 400 steps, off 0
+// CHECK-NEXT: vmax 5 brake 0.0 cars 120 moved 112000 of 400 steps, off 0
+// CHECK-NEXT: vmax 5 brake 0.0 cars 160 moved 96000 of 400 steps, off 0
+// Braking at random: about 0.146 * 400 cells * 400 steps.
+// CHECK-NEXT: vmax 1 brake 0.5 cars 200 moved {{2[34][0-9][0-9][0-9]}} of 400 steps, off 0
