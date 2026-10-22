@@ -4,7 +4,10 @@
 // grid index `Cells` finds them, in the same order (the cells around an
 // atom's, z, then y, then x, each cell's atoms in the index's order: put
 // in order by cell once by insertion from the order they were made in,
-// and again by insertion from the last order each time). Of half lists,
+// and again by insertion from the last order each time), the atoms put
+// back in the box first (only then: between, they leave it), and those
+// seen across the side of the box in a list of their own, of which the
+// force takes the nearest image, after the others. Of half lists,
 // the force an atom gives the other of a pair is added in the order of
 // the atoms that give it. So the sums are the same to the bit. Its output
 // is that of test/Integration/Inputs/lj_melt.ent (half lists) and
@@ -33,9 +36,12 @@ static double fx[CAPACITY], fy[CAPACITY], fz[CAPACITY], fe[CAPACITY],
     fw[CAPACITY];
 // The force given by the atoms whose half lists an atom is in.
 static double px_[CAPACITY], py_[CAPACITY], pz_[CAPACITY];
-// The lists: where each starts and how long it is, one after another.
+// The lists: where each starts and how long it is, one after another;
+// and those of the pairs seen across the side of the box.
 static int first_[CAPACITY], count_[CAPACITY];
 static int pairs_[MOST], rows;
+static int cfirst_[CAPACITY], ccount_[CAPACITY];
+static int cross_[MOST], crows;
 static int64_t pairs[CAPACITY];
 static double size;
 
@@ -84,6 +90,11 @@ static int64_t at(int64_t k) {
   return c;
 }
 
+static int across(double ax, double ay, double az) {
+  return ax <= 0.0 || ax >= size || ay <= 0.0 || ay >= size || az <= 0.0 ||
+         az >= size;
+}
+
 static double image(double p, double from) {
   double d = p - from;
   if (d > size * 0.5) return p - size;
@@ -125,6 +136,14 @@ static void make_index(void) {
 // Each atom's list (of a half list, only the atoms whose number is above
 // its own), counted and then filled: here in one go, in the same order.
 static void make_lists(void) {
+  for (int i = 0; i < atoms; i++) {
+    if (x[i] >= size) x[i] -= size;
+    if (x[i] < 0.0) x[i] += size;
+    if (y[i] >= size) y[i] -= size;
+    if (y[i] < 0.0) y[i] += size;
+    if (z[i] >= size) z[i] -= size;
+    if (z[i] < 0.0) z[i] += size;
+  }
   make_index();
   double reach = cut + skin;
   int64_t m = (int64_t)(reach / w);
@@ -132,8 +151,10 @@ static void make_lists(void) {
   int64_t many = 2 * m + 1 < n ? 2 * m + 1 : n;
   double far = reach * reach;
   rows = 0;
+  crows = 0;
   for (int i = 0; i < atoms; i++) {
     first_[i] = rows;
+    cfirst_[i] = crows;
     int64_t own[3] = {cell_of(x[i]), cell_of(y[i]), cell_of(z[i])};
     int64_t from[3];
     for (int d = 0; d < 3; d++) from[d] = 2 * m + 1 >= n ? 0 : own[d] - m;
@@ -145,17 +166,22 @@ static void make_lists(void) {
           int64_t cx = at(from[0] + kx);
           int64_t c = (cz * n + cy) * n + cx;
           for (int r = first[c]; r < first[c + 1]; r++) {
-            double ax = image(rx[r], x[i]) - x[i], ay = image(ry[r], y[i]) - y[i],
-                   az = image(rz[r], z[i]) - z[i];
+            double sx = image(rx[r], x[i]), sy = image(ry[r], y[i]),
+                   sz = image(rz[r], z[i]);
+            double ax = sx - x[i], ay = sy - y[i], az = sz - z[i];
             if (!(ax * ax + ay * ay + az * az <= far)) continue;
             int j = order[r];
             if (j == i || (half && !(j > i))) continue;
-            pairs_[rows++] = j;
+            if (across(sx, sy, sz))
+              cross_[crows++] = j;
+            else
+              pairs_[rows++] = j;
           }
         }
       }
     }
     count_[i] = rows - first_[i];
+    ccount_[i] = crows - cfirst_[i];
   }
 }
 
@@ -168,6 +194,31 @@ static void forces(void) {
     int64_t count = 0;
     for (int k = 0; k < count_[i]; k++) {
       int j = pairs_[first_[i] + k];
+      double dx = x[j] - x[i];
+      double dy = y[j] - y[i];
+      double dz = z[j] - z[i];
+      double r2 = dx * dx + dy * dy + dz * dz;
+      if (!(r2 <= far)) continue;
+      double r2i = 1.0 / r2;
+      double r6i = r2i * r2i * r2i;
+      double pair = 48.0 * r6i * (r6i - 0.5) * r2i;
+      sx -= dx * pair;
+      sy -= dy * pair;
+      sz -= dz * pair;
+      if (half) {
+        px_[j] += dx * pair;
+        py_[j] += dy * pair;
+        pz_[j] += dz * pair;
+        e += 4.0 * r6i * (r6i - 1.0);
+        wv += pair * r2;
+      } else {
+        e += 2.0 * r6i * (r6i - 1.0);
+        wv += 0.5 * pair * r2;
+      }
+      count += 1;
+    }
+    for (int k = 0; k < ccount_[i]; k++) {
+      int j = cross_[cfirst_[i] + k];
       double dx = image(x[j], x[i]) - x[i];
       double dy = image(y[j], y[i]) - y[i];
       double dz = image(z[j], z[i]) - z[i];
@@ -281,12 +332,6 @@ int main(int argc, char **argv) {
       x[i] += dt * vx[i];
       y[i] += dt * vy[i];
       z[i] += dt * vz[i];
-      if (x[i] >= size) x[i] -= size;
-      if (x[i] < 0.0) x[i] += size;
-      if (y[i] >= size) y[i] -= size;
-      if (y[i] < 0.0) y[i] += size;
-      if (z[i] >= size) z[i] -= size;
-      if (z[i] < 0.0) z[i] += size;
     }
     if ((step + 1) % EVERY == 0) make_lists();
     forces();

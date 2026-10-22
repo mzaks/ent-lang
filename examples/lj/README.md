@@ -8,6 +8,10 @@ a list of the atoms within the cut and a skin of 0.3, made every 20
 steps: the grid index `Cells` finds them (`docs/syntax.md`, Grids), `for
 o, b: Atom near (a.x, a.y, a.z) within cut + skin in Cells`, each atom
 seen as its nearest image. Every step each atom goes through its list.
+And as in LAMMPS, the atoms are put back in the box only where the lists
+are made: until then a pair apart within the box stays so and needs no
+image; those seen across the side of the box are a list of their own
+(`Crossing`), whose other atom is seen as its nearest image.
 
 - `lj.ent`: the atoms, the lattice, the velocities (no momentum, the
   temperature asked for), the lists, the forces and the steps, and the
@@ -43,9 +47,9 @@ says, at step 0, what `melt.ent` says to every digit (`-6.7733681
 
 | 32,000 atoms, 100 steps (native, 2026-10-22) | one core | 12 threads |
 |---|---|---|
-| `melt.ent`, half lists | 1.36 s | 0.35 s |
-| `melt_full.ent`, full lists | 2.16 s | 0.34 s |
-| `check/melt.c`, half lists, full lists | 1.09 s, 1.69 s | |
+| `melt.ent`, half lists | 1.19 s | 0.35 s |
+| `melt_full.ent`, full lists | 1.76 s | 0.29 s |
+| `check/melt.c`, half lists, full lists | 1.10 s, 1.65 s | |
 | LAMMPS (half lists; `-sf omp` with threads) | 0.74 s | 0.12 s |
 | before the lists: every atom of the 27 cells around, every step | 4.76 s | 0.76 s |
 
@@ -54,17 +58,17 @@ says, at step 0, what `melt.ent` says to every digit (`-6.7733681
   order of the atoms that sent it, so that the sums are the same on any
   number of threads: the three fields together, one entry of four words
   (`docs/syntax.md`), written where the list is without a call. So half
-  lists are about as fast as full ones there (0.77 s before the entries
-  were one and written without a call). LAMMPS's threads each add into a
+  lists are a little slower than full ones there (0.77 s before the
+  entries were one and written without a call). LAMMPS's threads each add into a
   copy of the forces of their own, which differ in the last bits with
   the number of threads.
-- Against its own C (1.19 s on the same day), `melt.ent` is 1.14 times
-  slower on one core. Of its 13.6 ms a step, the forces are 8.4 and the
-  lists 4.5 (the `near` scan twice, counting then filling, 1.2 and 3.3,
-  and the index 0.4); `near` leaves out the rows of cells out of reach,
-  and goes along the rest as runs of rows. The count's scan is
-  vectorized, the fill's is not, as it writes. LAMMPS's lists take 1.2 ms
-  a step, its pairs 5.9. Of the force loop's difference: the nearest
-  image of every pair, which LAMMPS has no need of (its ghost atoms); the
-  C without it takes 5.7 ms a step, and ent's `image` is made into
-  selects where the C's stays branches (8.2 ms as selects in the C).
+- Against its own C, `melt.ent` is 1.08 times slower on one core. Of
+  its 11.9 ms a step, the forces are 6.5 and the lists 5.3 (the `near`
+  scan twice, counting then filling, 1.4 and 3.5, and the index 0.4);
+  `near` leaves out the rows of cells out of reach, and goes along the
+  rest as runs of rows. The count's scan is vectorized, the fill's is
+  not, as it writes. LAMMPS's lists take 1.2 ms a step, its pairs 5.9.
+- Before the atoms stayed out of the box between the lists, every pair
+  was seen as the nearest image of its other atom: the forces took 8.5
+  ms a step, and ent's `image` is selects where the C's is branches
+  (8.2 ms as selects in the C, 7.3 as branches).
