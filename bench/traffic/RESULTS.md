@@ -146,3 +146,27 @@ what `drive` and `shift` wrote on those threads, where they wrote it. On
 | 120,000 | 0.50 ms | 0.15 ms (the loop 0.05, putting the rows in order 0.10) |
 
 A step of 120,000 cars on 12 threads: 1.39 ms, where it was 2.11.
+
+## 2026-10-22, putting the rows in order on many threads: not worth it yet
+
+Of the update's 0.15 ms on 12 threads, 0.10 is putting the rows back in
+order by insertion, on one thread. Tried: a loop on many threads lists
+the rows whose next row is below them (each car its own), and the
+insertion runs only from those. The listing takes 0.015 ms, the
+insertion still 0.085: it is not the pass over the rows that costs but
+the rows that move. 214 rows are out of order in an update (cars that
+changed lanes or came round the ring), and each goes past some 40 rows
+(the cars of a lane of a road), every one of which is copied and its car
+told its row. On one core the update took 0.26 ms where it takes 0.21.
+Not kept.
+
+A sorting network would not help either: it does its n log² n compares
+and exchanges whatever the order (some 10 million for 120,000 rows,
+bitonic), where the rows here are nearly in order and insertion does a
+pass and the moves. On 12 threads that is still several times what
+insertion does on one.
+
+What would: moves in parts of the rows that do not overlap, on several
+threads (a road's lanes are a part of their own here, but not in
+general), or rows with room between them so that a row that moves
+shifts few others.
