@@ -357,7 +357,11 @@ struct Variable {
   /// (Window: rows of a buffer a `for`'s entity has, `w[i].field`; the
   /// buffer is `component` by its symbol, `value` the row its window
   /// starts at and `which` how many it has, both i32.)
-  enum Kind { Value, Ref, Entity, Other, Row, Window };
+  /// (Near: a component of an entity a `for ... near` visits, in a row
+  /// of a grid index; `value` is the entity, `which` its row (an i32),
+  /// and a field is read from the row, as seen from the place, or looked
+  /// up: see Parser::nearRows.)
+  enum Kind { Value, Ref, Entity, Other, Row, Window, Near };
   Kind kind;
   mlir::Value value;
   std::string component; // for Ref; for a Row, the table
@@ -727,6 +731,22 @@ private:
   LogicalResult parseRelation();
   LogicalResult parseEdges(llvm::SMLoc at);
   LogicalResult parseEach(llvm::SMLoc at);
+  LogicalResult parseNear(llvm::SMLoc at, const std::string &entity,
+                          ArrayRef<std::pair<std::string, std::string>> bound);
+  LogicalResult loopWithVars(Location where, mlir::Value lower,
+                             mlir::Value upper,
+                             function_ref<LogicalResult(mlir::Value)> body);
+  LogicalResult ifWithVars(Location where, mlir::Value holds,
+                           function_ref<LogicalResult()> body);
+  /// In the body of a `for ... near`: the index and its row the entity is
+  /// in, and where it is seen from the place (the image of each place's
+  /// field nearest it, by the component's symbol and the field).
+  struct NearRows {
+    std::string index;
+    mlir::Value row;
+    SmallVector<std::tuple<std::string, std::string, mlir::Value>> seen;
+  };
+  std::optional<NearRows> nearRows;
   LogicalResult checkEaches(Operation *query);
   /// Inside the body of a `for` over entities that is in another.
   bool inEach = false;
@@ -984,6 +1004,18 @@ private:
     std::string rowField;
     Type key;
     std::string find;
+    /// Of a grid: the fields of where an entity is (the first
+    /// component's, and the rows' of the same names), their type, whether
+    /// the box wraps, the unique of the grid's sizes and the buffer of
+    /// each cell's first row; and copied fields by their component and
+    /// field, to their names in the rows.
+    SmallVector<std::string> positions;
+    Type positionType;
+    bool wrap = false;
+    std::string gridUnique, cells;
+    SmallVector<std::tuple<std::string, std::string, std::string>> copied;
+    /// The components of the entities it holds, by their symbols.
+    SmallVector<std::string> of;
   };
   llvm::StringMap<Index> indexes;
   /// Parsing what an index declares for itself, which fills it.
@@ -3048,6 +3080,11 @@ LogicalResult Parser::parseBuffer() {
   return success();
 }
 
+// In what an index of a grid declares for itself: the most cells it may
+// have, until the capacity of its first component is known
+// (finishIndexOrders).
+static constexpr int64_t kCellsPlaceholder = 918273645;
+
 // From how many entities on an index's update writes the rows on many
 // threads (where the program is built for them).
 static constexpr int64_t kIndexParallelMin = 16384;
@@ -3085,21 +3122,81 @@ LogicalResult Parser::parseIndex() {
       return error(componentAt, "'" + *component + "' is named twice");
     of.push_back(*component);
   } while (consumeIf(Token::Comma));
-  if (!consumeKeyword("by"))
-    return error("expected 'by' and a field of '" + of.front() +
-                 "': the whole number the entities are in order by");
-  llvm::SMLoc keyAt = token.loc;
-  FailureOr<std::string> key = identifier("a field");
-  if (failed(key))
-    return failure();
-  Type keyType = components[of.front()].fieldType(*key);
-  if (!keyType)
-    return error(keyAt, "component '" + of.front() + "' has no field '" +
-                            *key + "'");
-  auto whole = dyn_cast<IntegerType>(keyType);
-  if (!whole || whole.getWidth() == 1)
-    return error(keyAt, "an index is in order by a whole number; '" + *key +
-                            "' is " + typeWords(keyType));
+  // `grid (x, y, z) cell size [wrap box]`: the entities by the cell of a
+  // grid they are in, its key a field of the index's own; else `by` a
+  // field of the first component.
+  bool grid = false;
+  SmallVector<std::string> positions;
+  Type positionType;
+  std::string cellText, wrapText;
+  FailureOr<std::string> key = failure();
+  Type keyType;
+  // An expression as it is written: worked out where the index is made.
+  auto written = [&](std::string &into) -> LogicalResult {
+    const char *start = token.loc.getPointer();
+    FailureOr<ExprPtr> parsed = parseExpr();
+    if (failed(parsed))
+      return failure();
+    into = StringRef(start, previousEnd - start).str();
+    return success();
+  };
+  if (consumeKeyword("grid")) {
+    grid = true;
+    if (failed(expect(Token::LParen,
+                      "'(' and the fields of '" + of.front() +
+                          "' that say where an entity is: 'grid (x, y)'")))
+      return failure();
+    do {
+      llvm::SMLoc fieldAt = token.loc;
+      FailureOr<std::string> field = identifier("a field");
+      if (failed(field))
+        return failure();
+      Type type = components[of.front()].fieldType(*field);
+      if (!type)
+        return error(fieldAt, "component '" + of.front() +
+                                  "' has no field '" + *field + "'");
+      if (!type.isF32() && !type.isF64())
+        return error(fieldAt, "a grid is over places, f32 or f64; '" +
+                                  *field + "' is " + typeWords(type));
+      if (positionType && type != positionType)
+        return error(fieldAt, "a grid's places are of one type: '" + *field +
+                                  "' is " + typeWords(type) + ", not " +
+                                  typeWords(positionType));
+      if (llvm::is_contained(positions, *field))
+        return error(fieldAt, "'" + *field + "' is named twice");
+      positionType = type;
+      positions.push_back(*field);
+    } while (consumeIf(Token::Comma));
+    if (failed(expect(Token::RParen, "')'")))
+      return failure();
+    if (positions.size() < 2 || positions.size() > 3)
+      return error(at, "a grid is of two places or of three");
+    if (!consumeKeyword("cell"))
+      return error("expected 'cell' and how wide a cell is at least");
+    if (failed(written(cellText)))
+      return failure();
+    if (consumeKeyword("wrap") && failed(written(wrapText)))
+      return failure();
+    key = "cell_in_" + *name;
+    keyType = builder.getI64Type();
+  } else {
+    if (!consumeKeyword("by"))
+      return error("expected 'by' and a field of '" + of.front() +
+                   "': the whole number the entities are in order by "
+                   "(or 'grid' and the fields of where they are)");
+    llvm::SMLoc keyAt = token.loc;
+    key = identifier("a field");
+    if (failed(key))
+      return failure();
+    keyType = components[of.front()].fieldType(*key);
+    if (!keyType)
+      return error(keyAt, "component '" + of.front() + "' has no field '" +
+                              *key + "'");
+    auto whole = dyn_cast<IntegerType>(keyType);
+    if (!whole || whole.getWidth() == 1)
+      return error(keyAt, "an index is in order by a whole number; '" +
+                              *key + "' is " + typeWords(keyType));
+  }
 
   // { name: Component.field, .. }: what each row has besides.
   struct Copy {
@@ -3147,19 +3244,32 @@ LogicalResult Parser::parseIndex() {
       return failure();
   }
   consumeIf(Token::Semicolon);
+  // A grid's rows have where the entity is, under the fields' names.
+  for (auto [number, field] : llvm::enumerate(positions)) {
+    for (const Copy &copy : copies)
+      if (copy.name == field)
+        return error(at, "'" + field + "' is in every row already: where "
+                         "the entity is in the grid");
+    copies.insert(copies.begin() + number,
+                  Copy{field, of.front(), field, positionType});
+  }
 
   // Where each entity's row is: a field of the first component, which
   // the spawns and adds of it that were read already are given (0), as
-  // those after will be.
+  // those after will be; and, of a grid, the cell it is in.
   std::string rowField = "row_in_" + *name;
   Record &holder = components[of.front()];
-  if (holder.fieldType(rowField))
-    return error(at, "'" + of.front() + "' has a field '" + rowField +
-                         "' already: the index keeps its rows there");
+  SmallVector<std::pair<std::string, Type>> hidden{
+      {rowField, builder.getI32Type()}};
+  if (grid)
+    hidden.push_back({*key, keyType});
+  for (auto &[field, type] : hidden)
+    if (holder.fieldType(field))
+      return error(at, "'" + of.front() + "' has a field '" + field +
+                           "' already: the index keeps its own there");
   auto holderOp = SymbolTable::lookupSymbolIn(module, symbol(of.front()));
   auto componentOp = cast<ComponentOp>(holderOp);
   unsigned before = componentOp.getFieldNames().size();
-  Type rowType = builder.getI32Type();
   auto fieldsOf = [&](Attribute component) -> unsigned {
     auto op = SymbolTable::lookupSymbolIn(
         module, cast<FlatSymbolRefAttr>(component).getAttr());
@@ -3168,7 +3278,10 @@ LogicalResult Parser::parseIndex() {
   auto giveRow = [&](Operation *op, unsigned place) {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(op);
-    op->insertOperands(place, noughtOf(op->getLoc(), rowType));
+    SmallVector<mlir::Value> noughts;
+    for (auto &[field, type] : hidden)
+      noughts.push_back(noughtOf(op->getLoc(), type));
+    op->insertOperands(place, noughts);
   };
   FlatSymbolRefAttr holderName = symbol(of.front());
   module.walk([&](Operation *op) {
@@ -3203,12 +3316,14 @@ LogicalResult Parser::parseIndex() {
   });
   SmallVector<Attribute> fieldNames(componentOp.getFieldNames().getValue());
   SmallVector<Attribute> fieldTypes(componentOp.getFieldTypes().getValue());
-  fieldNames.push_back(builder.getStringAttr(rowField));
-  fieldTypes.push_back(TypeAttr::get(rowType));
+  for (auto &[field, type] : hidden) {
+    fieldNames.push_back(builder.getStringAttr(field));
+    fieldTypes.push_back(TypeAttr::get(type));
+    holder.fields.push_back({field, type});
+    holder.hidden.push_back(field);
+  }
   componentOp.setFieldNamesAttr(builder.getArrayAttr(fieldNames));
   componentOp.setFieldTypesAttr(builder.getArrayAttr(fieldTypes));
-  holder.fields.push_back({rowField, rowType});
-  holder.hidden.push_back(rowField);
 
   // The rows: a buffer the program keeps, which a saved world leaves out
   // (it is made again from the entities).
@@ -3276,8 +3391,144 @@ LogicalResult Parser::parseIndex() {
       // Made again: where the same entities are in it, each writes its
       // key and what is copied into its own row, and the rows are put in
       // order again; else all are put in order by their keys.
-      << "system " << n << "_update() {\n"
-      << "  if " << n << "_whole {\n"
+      ;
+  // Of a grid: how many cells it has on each side, how wide they are and
+  // where they start (`N_grid`); each cell's first row (`N_cells`, a row
+  // more at the end); and what finds a place's cell and the cells around.
+  std::string ts = positionType && positionType.isF32() ? "f32" : "f64";
+  unsigned dims = positions.size();
+  bool wrap = !wrapText.empty();
+  auto side = [&](const char *what, unsigned d) {
+    return std::string(what) + std::to_string(d);
+  };
+  if (grid) {
+    out << "transient unique " << n << "_grid { cells: i64";
+    for (unsigned d = 0; d < dims; ++d)
+      out << ", " << side("n", d) << ": i64, " << side("w", d) << ": " << ts
+          << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
+          << ": " << ts;
+    out << ", size: " << ts << " }\n"
+        << "transient buffer " << n << "_cells { first: i32 } capacity 1\n"
+        // The cell of a place on one side.
+        << "fn " << n << "_cell(x: " << ts << ", lo: " << ts << ", w: " << ts
+        << ", n: i64) -> i64 {\n"
+        << "  let q = (x - lo) / w\n"
+        << "  var c = q as i64\n"
+        << "  if (c as " << ts << ") > q { c -= 1 }\n";
+    if (wrap)
+      out << "  c = c % n\n"
+          << "  if c < 0 { c += n }\n";
+    else
+      out << "  if c < 0 { c = 0 }\n"
+          << "  if c >= n { c = n - 1 }\n";
+    out << "  c\n}\n"
+        // How many cells out from a place's own are within `r`.
+        << "fn " << n << "_reach(r: " << ts << ", w: " << ts << ") -> i64 {\n"
+        << "  var m = (r / w) as i64\n"
+        << "  if (m as " << ts << ") * w < r { m += 1 }\n"
+        << "  m\n}\n"
+        // The first of the cells around cell `c`, and how many.
+        << "fn " << n << "_from(c: i64, m: i64, n: i64) -> i64 {\n";
+    if (wrap)
+      out << "  if 2 * m + 1 >= n { 0 } else { c - m }\n}\n";
+    else
+      out << "  max(0, c - m)\n}\n";
+    out << "fn " << n << "_many(c: i64, m: i64, n: i64) -> i64 {\n";
+    if (wrap)
+      out << "  min(2 * m + 1, n)\n}\n";
+    else
+      out << "  min(n - 1, c + m) - max(0, c - m) + 1\n}\n";
+    // A cell counted from the first, round the box.
+    out << "fn " << n << "_at(k: i64, n: i64) -> i64 {\n"
+        << "  var c = k % n\n"
+        << "  if c < 0 { c += n }\n"
+        << "  c\n}\n"
+        // Where `x` is seen from `p`: the image nearest it.
+        << "fn " << n << "_image(x: " << ts << ", p: " << ts << ", size: "
+        << ts << ") -> " << ts << " {\n";
+    if (wrap)
+      out << "  let d = x - p\n"
+          << "  if d > size * 0.5 { x - size } else if d < 0.0 - size * 0.5 "
+             "{ x + size } else { x }\n}\n";
+    else
+      out << "  x\n}\n";
+    // Each cell's first row: the first whose cell is not below it.
+    out << "proc " << n << "_bounds(order: " << n << ", starts: mut " << n
+        << "_cells, cells: i64) {\n"
+        << "  starts = [{ first: 0 }; (cells + 1) as i32]\n"
+        << "  var r = 0\n"
+        << "  for c in 0..cells + 1 {\n"
+        << "    while r < len(order) && order[r].key < c { r += 1 }\n"
+        << "    starts[c as i32].first = r\n"
+        << "  }\n}\n";
+  }
+  out << "system " << n << "_update() {\n";
+  if (grid) {
+    // The grid as the entities are now: its cells at least `cell` wide,
+    // round the box where it wraps (`size` on every side), else over
+    // where the entities are; no more cells than entities can be (the
+    // number is the first component's capacity, put in where the index's
+    // capacity is known).
+    // (Of the places' type: a number written out takes it.)
+    out << "  var cell_: " << ts << " = " << cellText << "\n";
+    if (wrap) {
+      out << "  var size_: " << ts << " = " << wrapText << "\n"
+          << "  " << n << "_grid.size = size_\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "  " << n << "_grid." << side("lo", d) << " = 0.0\n"
+            << "  " << n << "_grid." << side("hi", d) << " = size_\n"
+            << "  var " << side("n", d) << " = max(1, (size_ / cell_) as i64)\n";
+    } else {
+      for (unsigned d = 0; d < dims; ++d)
+        out << "  " << n << "_grid." << side("lo", d) << " = 1.0 / 0.0\n"
+            << "  " << n << "_grid." << side("hi", d) << " = 0.0 - 1.0 / 0.0\n";
+      out << "  for c0: " << of.front() << " {\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "    " << n << "_grid." << side("lo", d) << " min= c0."
+            << positions[d] << "\n"
+            << "    " << n << "_grid." << side("hi", d) << " max= c0."
+            << positions[d] << "\n";
+      out << "  }\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "  var " << side("n", d) << " = max(1, ((" << n << "_grid."
+            << side("hi", d) << " - " << n << "_grid." << side("lo", d)
+            << ") / cell_) as i64 + 1)\n";
+    }
+    std::string product = "n0";
+    for (unsigned d = 1; d < dims; ++d)
+      product += " * " + side("n", d);
+    out << "  while " << product << " > " << kCellsPlaceholder << " {\n";
+    for (unsigned d = 0; d < dims; ++d)
+      out << "    " << side("n", d) << " = max(1, " << side("n", d)
+          << " / 2)\n";
+    out << "  }\n  " << n << "_grid.cells = " << product << "\n";
+    for (unsigned d = 0; d < dims; ++d) {
+      out << "  " << n << "_grid." << side("n", d) << " = " << side("n", d)
+          << "\n  " << n << "_grid." << side("w", d) << " = ";
+      if (wrap)
+        out << "size_ / (" << side("n", d) << " as " << ts << ")\n";
+      else
+        out << "max(cell_, (" << n << "_grid." << side("hi", d) << " - " << n
+            << "_grid." << side("lo", d) << ") / (" << side("n", d) << " as "
+            << ts << "))\n";
+      out << "  let " << side("w_", d) << " = " << n << "_grid."
+          << side("w", d) << "\n  let " << side("lo_", d) << " = " << n
+          << "_grid." << side("lo", d) << "\n";
+    }
+    // Each entity's cell: x fastest, then y, then z.
+    std::string number;
+    for (unsigned d = dims; d-- > 0;) {
+      std::string cell = n + "_cell(c0." + positions[d] + ", " +
+                         side("lo_", d) + ", " + side("w_", d) + ", " +
+                         side("n", d) + ")";
+      number = number.empty()
+                   ? cell
+                   : "(" + number + ") * " + side("n", d) + " + " + cell;
+    }
+    out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
+        << number << "\n  }\n";
+  }
+  out << "  if " << n << "_whole {\n"
       << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
       << ", 1] {\n      w[0].key = c0." << *key << "\n";
   for (const Copy &copy : copies)
@@ -3291,7 +3542,11 @@ LogicalResult Parser::parseIndex() {
     out << ", " << copy.name << ": " << through(copy);
   out << " }\n    }\n    " << n << "_number(" << n << ", " << of.front()
       << ")\n    " << n << "_whole = true\n  }\n"
-      << "  " << n << "_fresh = true\n}\n"
+      ;
+  if (grid)
+    out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
+        << "_grid.cells)\n";
+  out << "  " << n << "_fresh = true\n}\n"
       // Out of date: its keys or what it copies changed, or (`moved`)
       // which entities it holds.
       << "system " << n << "_stale() { " << n << "_fresh = false }\n"
@@ -3347,9 +3602,29 @@ LogicalResult Parser::parseIndex() {
           builder.getNamedAttr("stale", builder.getStringAttr(resolve(n + "_stale"))),
           builder.getNamedAttr("moved", builder.getStringAttr(resolve(n + "_moved"))),
           builder.getNamedAttr("fresh", builder.getStringAttr(resolve(n + "_fresh"))),
+          builder.getNamedAttr(
+              "own",
+              strings(grid ? SmallVector<std::string>{resolve(n),
+                                                      resolve(n + "_cells"),
+                                                      resolve(n + "_grid")}
+                           : SmallVector<std::string>{resolve(n)})),
+          builder.getNamedAttr(
+              "hidden", strings(grid ? SmallVector<std::string>{rowField, *key}
+                                     : SmallVector<std::string>{rowField})),
       }));
-  indexes[bufferName.getValue()] = {resolve(of.front()), rowField, keyType,
-                                    resolve(n + "_find")};
+  Index &kept = indexes[bufferName.getValue()];
+  kept = {resolve(of.front()), rowField, keyType, resolve(n + "_find")};
+  for (const Copy &copy : copies)
+    kept.copied.push_back({resolve(copy.component), copy.field, copy.name});
+  for (const std::string &component : of)
+    kept.of.push_back(resolve(component));
+  if (grid) {
+    kept.positions.assign(positions.begin(), positions.end());
+    kept.positionType = positionType;
+    kept.wrap = !wrapText.empty();
+    kept.gridUnique = resolve(n + "_grid");
+    kept.cells = resolve(n + "_cells");
+  }
   // Where it holds the same entities, each writes its own row: a loop
   // worth running on many threads from far fewer entities than a loop
   // that reads what lies in memory, since it reads what the loops before
@@ -3384,6 +3659,23 @@ LogicalResult Parser::finishIndexOrders() {
              << "': give that component a capacity (or the program a "
                 "default_capacity)";
     buffer.setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));
+    // A grid: as many cells at most as there may be entities.
+    if (found->second.cells.empty())
+      continue;
+    cast<BufferOp>(SymbolTable::lookupSymbolIn(
+                       module, builder.getStringAttr(found->second.cells)))
+        .setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt() + 1));
+    std::string update =
+        buffer.getSymName().str() + "_update";
+    module.walk([&](arith::ConstantOp constant) {
+      auto value = dyn_cast<IntegerAttr>(constant.getValue());
+      if (!value || value.getInt() != kCellsPlaceholder)
+        return;
+      auto system = constant->getParentOfType<SystemOp>();
+      if (system && system.getSymName() == update)
+        constant.setValueAttr(
+            IntegerAttr::get(value.getType(), capacity.getInt()));
+    });
   }
   return success();
 }
@@ -5045,6 +5337,24 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
       into.push_back(symbol(*component));
     } while (consumeIf(Token::Comma));
   }
+  // `near (x, y) within r in Index`: the entities of a grid index near
+  // a place.
+  if (token.isKeyword("near")) {
+    if (inFunction)
+      return error("a fn or proc has no index: a 'for ... near' is in a "
+                   "system's 'for'");
+    if (!with.empty() || !without.empty())
+      return error("a 'for ... near' visits the entities of an index, "
+                   "which have its components: no 'with' or 'without'");
+    SmallVector<std::pair<std::string, std::string>> bound;
+    for (const Bound &binding : bindings) {
+      if (binding.old)
+        return error(at, "a 'for ... near' reads the index as it was made, "
+                         "before the 'for' around started: no 'old'");
+      bound.push_back({binding.name, binding.component});
+    }
+    return parseNear(at, entity, bound);
+  }
   if (bindings.empty() && with.empty())
     return error(at, "a 'for' inside a 'for' binds a component, or says "
                      "what its entities have ('with')");
@@ -5138,6 +5448,295 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
     var.value = result;
   restoreVars(vars);
   return success();
+}
+
+// A loop from `lower` to `upper` (indexes), the vars assigned in it
+// going round, as in a counted `for`: `body` is given the count.
+LogicalResult
+Parser::loopWithVars(Location where, mlir::Value lower, mlir::Value upper,
+                     function_ref<LogicalResult(mlir::Value)> body) {
+  mlir::Value step = arith::ConstantIndexOp::create(builder, where, 1);
+  auto loop = scf::ForOp::create(builder, where, lower, upper, step);
+  SmallVector<VarState> before = captureVars(), after;
+  SmallVector<Operation *> placeholders;
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(loop.getBody()->getTerminator());
+    ScopeGuard scope(*this);
+    SmallVector<VarState> inside = before;
+    for (VarState &state : inside) {
+      auto placeholder = UnrealizedConversionCastOp::create(
+          builder, where, state.value.getType(), state.value);
+      placeholders.push_back(placeholder);
+      state.value = placeholder.getResult(0);
+    }
+    restoreVars(inside);
+    if (failed(body(loop.getInductionVar())))
+      return failure();
+    after = captureVars();
+  }
+  restoreVars(before);
+  SmallVector<unsigned> carried;
+  for (auto [i, state] : llvm::enumerate(after))
+    if (state.value != placeholders[i]->getResult(0))
+      carried.push_back(i);
+  if (!carried.empty()) {
+    SmallVector<mlir::Value> inits, ends;
+    for (unsigned i : carried) {
+      inits.push_back(before[i].value);
+      ends.push_back(after[i].value);
+    }
+    auto carrying =
+        scf::ForOp::create(builder, where, lower, upper, step, inits);
+    Block *from = loop.getBody(), *to = carrying.getBody();
+    from->getTerminator()->erase();
+    loop.getInductionVar().replaceAllUsesWith(carrying.getInductionVar());
+    to->getOperations().splice(to->end(), from->getOperations());
+    {
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToEnd(to);
+      scf::YieldOp::create(builder, where, ends);
+    }
+    loop.erase();
+    for (auto [k, i] : llvm::enumerate(carried)) {
+      placeholders[i]->getResult(0).replaceAllUsesWith(
+          carrying.getRegionIterArg(k));
+      before[i].value = carrying.getResult(k);
+    }
+    restoreVars(before);
+  }
+  for (Operation *placeholder : placeholders) {
+    placeholder->getResult(0).replaceAllUsesWith(placeholder->getOperand(0));
+    placeholder->erase();
+  }
+  return success();
+}
+
+// `body` where `holds`, the vars it assigns as it left them there and as
+// they were where it does not hold.
+LogicalResult Parser::ifWithVars(Location where, mlir::Value holds,
+                                 function_ref<LogicalResult()> body) {
+  auto branch =
+      scf::IfOp::create(builder, where, holds, /*withElseRegion=*/true);
+  SmallVector<VarState> before = captureVars();
+  {
+    OpBuilder::InsertionGuard inner(builder);
+    builder.setInsertionPoint(branch.thenBlock()->getTerminator());
+    if (failed(body()))
+      return failure();
+  }
+  SmallVector<VarState> thenVars = captureVars();
+  restoreVars(before);
+  branch.getElseRegion().getBlocks().clear();
+  mergeBranches(branch, before, thenVars, before);
+  return success();
+}
+
+// for [e,] b: Component, .. near (x, y[, z]) within r in Index [where c] { }
+//
+// The entities of a grid index within `r` of a place, in the order of the
+// cells around the place's (as many out as `r` reaches: z, then y, then
+// x, round the box where it wraps) and in each cell of its rows. A
+// field of where they are reads as seen from the place (the image
+// nearest it, where the box wraps), and the distance is of that; what
+// the index copies is read from its row; anything else of the bound
+// components is looked up. The vars go round as in any loop.
+LogicalResult
+Parser::parseNear(llvm::SMLoc at, const std::string &entity,
+                  ArrayRef<std::pair<std::string, std::string>> bound) {
+  Location where = loc(at);
+  advance(); // near
+  if (failed(expect(Token::LParen, "'(' and the place: 'near (x, y) "
+                                   "within r in Index'")))
+    return failure();
+  SmallVector<ExprPtr> place;
+  do {
+    FailureOr<ExprPtr> coordinate = parseExpr();
+    if (failed(coordinate))
+      return failure();
+    place.push_back(std::move(*coordinate));
+  } while (consumeIf(Token::Comma));
+  if (failed(expect(Token::RParen, "')'")))
+    return failure();
+  if (!consumeKeyword("within"))
+    return error("expected 'within' and how far: 'near (x, y) within r in "
+                 "Index'");
+  FailureOr<ExprPtr> radius = parseExpr();
+  if (failed(radius))
+    return failure();
+  if (!consumeKeyword("in"))
+    return error("expected 'in' and the grid index: 'near (x, y) within r "
+                 "in Index'");
+  llvm::SMLoc indexAt = token.loc;
+  FailureOr<std::string> named = identifier("an index");
+  if (failed(named))
+    return failure();
+  std::optional<BufferUse> held = bufferNamed(*named);
+  if (!held || !indexes.count(held->symbol) ||
+      indexes[held->symbol].positions.empty())
+    return error(indexAt, "'" + *named + "' is not an index of a grid "
+                          "('index " + *named + " of C grid (x, y) cell w')");
+  std::string symbolName = held->symbol;
+  Index &index = indexes[symbolName];
+  unsigned dims = index.positions.size();
+  if (place.size() != dims)
+    return error(at, "'" + *named + "' is a grid of " + Twine(dims) +
+                         " places; the place is given " +
+                         Twine(place.size()));
+  for (auto &[name, component] : bound)
+    if (!llvm::is_contained(index.of, resolve(component)))
+      return error(at, "the entities of '" + *named + "' have its "
+                       "components; '" + component + "' is not one");
+  ExprPtr condition;
+  if (consumeKeyword("where")) {
+    FailureOr<ExprPtr> parsed = parseExpr();
+    if (failed(parsed))
+      return failure();
+    condition = std::move(*parsed);
+  }
+  if (!token.is(Token::LBrace))
+    return error("expected '{' and the statements to run for each entity");
+
+  Type t = index.positionType;
+  Type i64 = builder.getI64Type();
+  Type indexType = builder.getIndexType();
+  SmallVector<mlir::Value> at_;
+  for (const ExprPtr &coordinate : place) {
+    FailureOr<mlir::Value> value = emit(*coordinate, t);
+    if (failed(value))
+      return failure();
+    if (value->getType() != t)
+      return mismatch(coordinate->loc, value->getType(), t);
+    at_.push_back(*value);
+  }
+  FailureOr<mlir::Value> reach = emit(**radius, t);
+  if (failed(reach))
+    return failure();
+  if (reach->getType() != t)
+    return mismatch((*radius)->loc, reach->getType(), t);
+  mlir::Value far = arith::MulFOp::create(builder, where, *reach, *reach);
+  auto grid = FlatSymbolRefAttr::get(context, index.gridUnique);
+  auto read = [&](StringRef field, Type type) -> mlir::Value {
+    return ReadOp::create(builder, where, type, grid,
+                          builder.getStringAttr(field))
+        .getResult();
+  };
+  auto call = [&](StringRef fn, ValueRange args) -> mlir::Value {
+    return InvokeOp::create(builder, where, i64,
+                            FlatSymbolRefAttr::get(context, (symbolName + fn).str()),
+                            args, UnitAttr())
+        ->getResult(0);
+  };
+  mlir::Value size = index.wrap ? read("size", t) : mlir::Value();
+  SmallVector<mlir::Value> sides, from, many;
+  for (unsigned d = 0; d < dims; ++d) {
+    std::string number = std::to_string(d);
+    mlir::Value n = read("n" + number, i64);
+    mlir::Value width = read("w" + number, t);
+    mlir::Value own = call("_cell", {at_[d], read("lo" + number, t), width, n});
+    mlir::Value out = call("_reach", {*reach, width});
+    sides.push_back(n);
+    from.push_back(call("_from", {own, out, n}));
+    many.push_back(call("_many", {own, out, n}));
+  }
+  auto cells = FlatSymbolRefAttr::get(context, index.cells);
+  auto rows = FlatSymbolRefAttr::get(context, symbolName);
+  mlir::Value zero = arith::ConstantIndexOp::create(builder, where, 0);
+  SmallVector<mlir::Value> cell(dims);
+  // The rows of one cell, then the entities within reach in them.
+  auto visitCell = [&]() -> LogicalResult {
+    mlir::Value number = cell[dims - 1];
+    for (unsigned d = dims - 1; d-- > 0;)
+      number = arith::AddIOp::create(
+          builder, where,
+          arith::MulIOp::create(builder, where, number, sides[d]), cell[d]);
+    Type i32 = builder.getI32Type();
+    mlir::Value first32 =
+        arith::TruncIOp::create(builder, where, i32, number);
+    mlir::Value next32 = arith::AddIOp::create(
+        builder, where, first32, integer(where, i32, 1));
+    mlir::Value first = BufferAtOp::create(builder, where, i32, cells,
+                                           builder.getStringAttr("first"),
+                                           first32);
+    mlir::Value end = BufferAtOp::create(builder, where, i32, cells,
+                                         builder.getStringAttr("first"),
+                                         next32);
+    return loopWithVars(
+        where, arith::IndexCastOp::create(builder, where, indexType, first),
+        arith::IndexCastOp::create(builder, where, indexType, end),
+        [&](mlir::Value counted) -> LogicalResult {
+          mlir::Value row =
+              arith::IndexCastOp::create(builder, where, i32, counted);
+          mlir::Value who =
+              BufferAtOp::create(builder, where, EntityType::get(context),
+                                 rows, builder.getStringAttr("who"), row);
+          NearRows near{symbolName, row, {}};
+          mlir::Value distance;
+          for (unsigned d = 0; d < dims; ++d) {
+            mlir::Value stored = BufferAtOp::create(
+                builder, where, t, rows,
+                builder.getStringAttr(index.positions[d]), row);
+            mlir::Value seen =
+                index.wrap
+                    ? InvokeOp::create(builder, where, t,
+                                       FlatSymbolRefAttr::get(
+                                           context, symbolName + "_image"),
+                                       ValueRange{stored, at_[d], size},
+                                       UnitAttr())
+                          ->getResult(0)
+                    : stored;
+            near.seen.push_back({index.component, index.positions[d], seen});
+            mlir::Value apart =
+                arith::SubFOp::create(builder, where, seen, at_[d]);
+            mlir::Value squared =
+                arith::MulFOp::create(builder, where, apart, apart);
+            distance = distance ? arith::AddFOp::create(builder, where,
+                                                        distance, squared)
+                                      .getResult()
+                                : squared;
+          }
+          mlir::Value within = arith::CmpFOp::create(
+              builder, where, arith::CmpFPredicate::OLE, distance, far);
+          return ifWithVars(where, within, [&]() -> LogicalResult {
+            ScopeGuard scope(*this);
+            llvm::SaveAndRestore inside(inEach, true);
+            std::optional<NearRows> outer = nearRows;
+            nearRows = near;
+            auto restore = llvm::make_scope_exit([&] { nearRows = outer; });
+            for (auto &[name, component] : bound) {
+              Variable variable{Variable::Near, who, component, false};
+              variable.which = row;
+              bind(name, variable);
+            }
+            if (!entity.empty())
+              bind(entity, Variable::ofValue(who));
+            if (!condition)
+              return parseBlock();
+            FailureOr<mlir::Value> holds =
+                emit(*condition, builder.getI1Type());
+            if (failed(holds))
+              return failure();
+            if (!holds->getType().isInteger(1))
+              return error(condition->loc, "'where' takes a bool");
+            return ifWithVars(where, *holds, [&] { return parseBlock(); });
+          });
+        });
+  };
+  // The cells around, the last side's outermost.
+  std::function<LogicalResult(unsigned)> sideLoop =
+      [&](unsigned d) -> LogicalResult {
+    return loopWithVars(
+        where, zero,
+        arith::IndexCastOp::create(builder, where, indexType, many[d]),
+        [&](mlir::Value counted) -> LogicalResult {
+          mlir::Value k =
+              arith::IndexCastOp::create(builder, where, i64, counted);
+          mlir::Value along = arith::AddIOp::create(builder, where, from[d], k);
+          cell[d] = index.wrap ? call("_at", {along, sides[d]}) : along;
+          return d == 0 ? visitCell() : sideLoop(d - 1);
+        });
+  };
+  return sideLoop(dims - 1);
 }
 
 LogicalResult Parser::parseEdges(llvm::SMLoc at) {
@@ -8198,7 +8797,7 @@ Type Parser::typeOf(const Expr &expr) {
   }
   case Expr::Field: {
     if (const Variable *variable = lookup(expr.name)) {
-      if (variable->kind == Variable::Ref)
+      if (variable->kind == Variable::Ref || variable->kind == Variable::Near)
         return recordOf(*variable).fieldType(expr.field);
       if (variable->kind == Variable::Row)
         return typeOf(fieldOfRow(*variable, expr.field, expr.loc));
@@ -9014,6 +9613,29 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       if (variable->kind == Variable::Value && variable->value &&
           rowOf(variable->value.getType()))
         return readRowValue(expr.loc, variable->value, expr.field);
+      if (variable->kind == Variable::Near) {
+        Type type = recordOf(*variable).fieldType(expr.field);
+        if (!type)
+          return error(expr.loc, "component '" + variable->component +
+                                     "' has no field '" + expr.field + "'");
+        std::string component = resolve(variable->component);
+        // Where it is: as seen from the place. What the index copies:
+        // from its row. Else looked up (it has the component).
+        for (auto &[of, field, seen] : nearRows->seen)
+          if (of == component && field == expr.field)
+            return seen;
+        for (auto &[of, field, name] : indexes[nearRows->index].copied)
+          if (of == component && field == expr.field)
+            return BufferAtOp::create(
+                       builder, at, type,
+                       FlatSymbolRefAttr::get(context, nearRows->index),
+                       builder.getStringAttr(name), nearRows->row)
+                .getResult();
+        return LookupOp::create(builder, at, type, builder.getI1Type(),
+                                variable->value, symbol(variable->component),
+                                builder.getStringAttr(expr.field))
+            .getValue();
+      }
       if (variable->kind == Variable::Other) {
         Type type = recordOf(*variable).fieldType(expr.field);
         if (!type)

@@ -1968,6 +1968,59 @@ finds the car ahead and the cars beside each car so.
   names are taken.
 - Its rows are as many as its first component's capacity at most.
 
+#### Grids
+
+```
+component Atom { x: f64, y: f64, z: f64 } capacity 32768
+unique Box { size: f64, cut: f64 }
+
+index Cells of Atom grid (x, y, z) cell Box.cut wrap Box.size
+
+system forces() {
+  for me, a: Atom, f: mut Force {
+    var fx: f64 = 0.0
+    for o, b: Atom near (a.x, a.y, a.z) within Box.cut in Cells
+        where o != me {
+      let dx = b.x - a.x         // b as seen from a: its nearest image
+      ...
+    }
+  }
+}
+```
+
+An index may hold the entities by where they are: `grid (x, y)` or
+`grid (x, y, z)` in place of `by field`, fields of the first component of
+one float type, with `cell` how wide a cell is at least and, after
+`wrap`, how big a box is that wraps on every side (from 0 to it). Both
+are worked out each time the index is made, and may read uniques.
+`examples/lj/lj.ent` finds the atoms near each atom so.
+
+- The rows are in the order of the cells, x the fastest, then y, then
+  z, each with where its entity is (the fields, by their names) and what
+  `{ }` copies. Without `wrap` the grid is over where the entities are
+  when it is made. It has as many cells as fit, no more than its first
+  component's capacity (where those would be more, they are wider).
+- Its key is the cell (`Name[r].key`), and `Name_cells[c].first` the
+  first row of cell `c` (with a row more at the end); `Name_grid` has how
+  many cells there are on each side (`n0`, `n1`, ..), how wide they are
+  (`w0`, ..) and where they start (`lo0`, ..). The entity keeps its cell
+  in a field of the index's (`cell_in_Name`).
+- `for e, b: Component near (x, y) within r in Name where .. { }`, in a
+  `for` over entities, visits the entities of the index within `r` of a
+  place, the distance of where they are taken as `<=` r: the same as a
+  `for` over all of them with that in its `where`, faster. It goes over
+  the cells around the place's, as many out as `r` reaches (z, then y,
+  then x; round the box where it wraps), and in each over its rows; so
+  in a fixed order, the same on one core and on many.
+- In a box that wraps, an entity is seen from the place where it is
+  nearest it: `b.x` is that image's x (where the box is less than twice
+  `r` wide, an entity is still visited once, by its nearest image). What
+  the index copies is read from its row, anything else of `b`'s
+  components looked up.
+- The body is that of a `for` inside a `for`: vars of the `for` around
+  go round in it, and what it reads of the index is as it was made,
+  before the `for` around started.
+
 ### Entities given to a fn or proc
 
 ```

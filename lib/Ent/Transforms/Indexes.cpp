@@ -35,7 +35,7 @@ SmallVector<StringAttr> strings(DictionaryAttr info, StringRef name) {
 }
 
 Kept keptOf(BufferOp buffer, DictionaryAttr info,
-            ArrayRef<ArchetypeOp> archetypes) {
+            ArrayRef<ArchetypeOp> archetypes, SymbolTable &symbols) {
   MLIRContext *context = buffer.getContext();
   StringAttr empty = StringAttr::get(context, "");
   Kept kept;
@@ -44,27 +44,47 @@ Kept keptOf(BufferOp buffer, DictionaryAttr info,
   kept.moved = cast<StringAttr>(info.get("moved"));
   kept.fresh = cast<StringAttr>(info.get("fresh"));
   SmallVector<StringAttr> of = strings(info, "of");
-  SmallVector<StringAttr> key = strings(info, "key");
-  SmallVector<StringAttr> copies = strings(info, "copies");
   SmallVector<StringAttr> row = strings(info, "row");
-  kept.readBy.insert({StringAttr(), buffer.getSymNameAttr(),
-                      StringAttr::get(context, "rows")});
+  // What reads it: its rows (and a grid's cells and sizes), and the
+  // fields where the entities keep their place in it.
+  for (StringAttr own : strings(info, "own")) {
+    Operation *declared = symbols.lookup(own);
+    if (isa_and_nonnull<BufferOp>(declared))
+      kept.readBy.insert(
+          {StringAttr(), own, StringAttr::get(context, "rows")});
+    if (auto resource = dyn_cast_or_null<ResourceOp>(declared))
+      for (Attribute field : resource.getFieldNames())
+        kept.readBy.insert({StringAttr(), own, cast<StringAttr>(field)});
+  }
   for (ArchetypeOp archetype : archetypes) {
     StringAttr name = archetype.getSymNameAttr();
     if (archetype.contains(FlatSymbolRefAttr::get(row[0])))
-      kept.readBy.insert({name, row[0], row[1]});
+      for (StringAttr hidden : strings(info, "hidden"))
+        kept.readBy.insert({name, row[0], hidden});
     if (!llvm::all_of(of, [&](StringAttr component) {
           return archetype.contains(FlatSymbolRefAttr::get(component));
         }))
       continue;
-    // Which entities it holds, their keys and what it copies.
+    // Which entities it holds.
     kept.holds.insert({name, empty, empty});
     for (StringAttr component : of)
       if (archetype.isOptional(FlatSymbolRefAttr::get(component)))
         kept.holds.insert({name, component, empty});
-    kept.values.insert({name, key[0], key[1]});
-    for (unsigned i = 0; i + 1 < copies.size(); i += 2)
-      kept.values.insert({name, copies[i], copies[i + 1]});
+  }
+  // The values it holds of them: the fields its update reads, of the
+  // components (but those it keeps its own in) and of the uniques it
+  // does not write itself (but the flags that say it is up to date): the
+  // key, what it copies, a grid's places and what its sizes are worked
+  // out of. (Its update gives a proc the first component to change, which
+  // the analysis takes for writing all of it.)
+  SystemAccess made = computeAccess(symbols.lookup(kept.update), archetypes);
+  for (const Column &column : made.reads) {
+    auto [archetype, component, field] = column;
+    if (kept.readBy.contains(column) || kept.holds.contains(column) ||
+        !component || component.empty() || !field || field.empty() ||
+        (!archetype && made.writes.contains(column)))
+      continue;
+    kept.values.insert(column);
   }
   return kept;
 }
@@ -101,7 +121,7 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
 
     OpBuilder builder(module.getContext());
     for (auto [buffer, info] : indexes) {
-      Kept kept = keptOf(buffer, info, archetypes);
+      Kept kept = keptOf(buffer, info, archetypes, symbols);
       SmallVector<RunOp> runs;
       module.walk([&](RunOp run) { runs.push_back(run); });
       for (RunOp run : runs) {

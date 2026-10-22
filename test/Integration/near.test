@@ -1,0 +1,19 @@
+// `for ... near (x, y) within r in Index` against a scan of all: every
+// dot's count of the dots within r of it, and the sum of their
+// distances, the same. In a box that wraps (the nearest image of each),
+// within less than a cell and within more; in one that does not, also
+// within more than the box. The same on one core and on all.
+// RUN: %ent run %S/Inputs/near.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/near.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --check-prefix=WRAP --input-file=%t.one
+// RUN: %ent run %S/Inputs/near_open.ent 2>/dev/null > %t.open
+// RUN: %ent run --parallel %S/Inputs/near_open.ent 2>/dev/null > %t.open.all
+// RUN: cmp %t.open %t.open.all
+// RUN: FileCheck %s --check-prefix=OPEN --input-file=%t.open
+
+// WRAP:      same counts 400 of 400, pairs 2482, worst distance sum off 0.0
+// WRAP-NEXT: same counts 400 of 400, pairs 26658, worst distance sum off 0.0
+// OPEN:      same counts 400 of 400, pairs 2280, worst distance sum off 0.0
+// OPEN-NEXT: same counts 400 of 400, pairs 22040, worst distance sum off 0.0
+// OPEN-NEXT: same counts 400 of 400, pairs 159600, worst distance sum off 0.0

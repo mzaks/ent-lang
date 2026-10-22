@@ -82,3 +82,49 @@ fn first(rows: Traffic, e: entity) -> index of Traffic {
 component Car { key: i64 }
 // expected-error @+1 {{index 'Traffic' holds a row for each entity with 'Car': give that component a capacity}}
 index Traffic of Car by key
+
+// -----
+
+component Dot { x: f64, n: i32 } capacity 8
+// expected-error @+1 {{a grid is over places, f32 or f64; 'n' is an i32}}
+index Cells of Dot grid (x, n) cell 1.0
+
+// -----
+
+component Dot { x: f64 } capacity 8
+// expected-error @+1 {{a grid is of two places or of three}}
+index Cells of Dot grid (x) cell 1.0
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{expected 'cell' and how wide a cell is at least}}
+index Cells of Dot grid (x, y) wrap 10.0
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{'x' is in every row already: where the entity is in the grid}}
+index Cells of Dot grid (x, y) cell 1.0 { x: Dot.x }
+
+// -----
+
+component Dot { x: f64, y: f64, key: i64 } capacity 8
+index Order of Dot by key
+system look() {
+  for me, a: Dot {
+    // expected-error @+1 {{'Order' is not an index of a grid}}
+    for o, b: Dot near (a.x, a.y) within 1.0 in Order { }
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Cells of Dot grid (x, y) cell 1.0
+system look() {
+  for me, a: Dot {
+    // expected-error @+1 {{'Cells' is a grid of 2 places; the place is given 3}}
+    for o, b: Dot near (a.x, a.y, a.x) within 1.0 in Cells { }
+  }
+}

@@ -37,7 +37,7 @@ schedule frame() {
 // CHECK-LABEL: ent.system @early()
 // CHECK: %[[ROW:.*]] = arith.constant 0 : i32
 // CHECK: ent.spawn (@Car, @Spot)(%{{.*}}, %[[ROW]], %{{.*}}) : i64, i32, f32
-// CHECK: ent.buffer @Traffic (key: i64, who: !ent.entity, x: f32) capacity 64 {ent.index = {copies = ["Spot", "x"], fresh = "Traffic_fresh", key = ["Car", "key"], moved = "Traffic_moved", of = ["Car", "Spot"], row = ["Car", "row_in_Traffic"], stale = "Traffic_stale", update = "Traffic_update"}{{.*}}ent.transient}
+// CHECK: ent.buffer @Traffic (key: i64, who: !ent.entity, x: f32) capacity 64 {ent.index = {copies = ["Spot", "x"], fresh = "Traffic_fresh", hidden = ["row_in_Traffic"], key = ["Car", "key"], moved = "Traffic_moved", of = ["Car", "Spot"], own = ["Traffic"], row = ["Car", "row_in_Traffic"], stale = "Traffic_stale", update = "Traffic_update"}{{.*}}ent.transient}
 // CHECK-LABEL: ent.system @Traffic_update()
 // CHECK: ent.read @Traffic_whole "value"
 // CHECK: ent.query

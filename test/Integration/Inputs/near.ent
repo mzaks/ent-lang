@@ -1,0 +1,64 @@
+// 400 dots in a box of 10 that wraps, and the dots within 0.7 and 2.3 of
+// each, by the grid index and by a scan (test/Integration/near.test).
+import console
+import wyhash
+import math
+component Dot { x: f64, y: f64, id: i64 } capacity 1024
+component Seen { near: i64, far: f64, scan: i64, scanfar: f64 } capacity 1024
+unique Check { same: i64, pairs: i64, worst: f64 }
+unique Box { size: f64, cell: f64, r: f64 }
+
+index Cells of Dot grid (x, y) cell Box.cell wrap Box.size
+
+world {
+  Box.size = 10.0
+  Box.cell = 1.0
+  for i in 0..400 {
+    spawn { Dot { x: wyrand_unit(3, i as i64 * 2) * 10.0, y: wyrand_unit(3, i as i64 * 2 + 1) * 10.0, id: i as i64 },
+            Seen { near: 0, far: 0.0, scan: 0, scanfar: 0.0 } }
+  }
+}
+
+fn image(d: f64, size: f64) -> f64 {
+  if d > size * 0.5 { d - size } else if d < 0.0 - size * 0.5 { d + size } else { d }
+}
+
+system count(r: f64) {
+  for me, a: Dot, s: mut Seen {
+    var n = 0
+    var far: f64 = 0.0
+    for o, b: Dot near (a.x, a.y) within r in Cells where o != me {
+      n += 1
+      far += sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y))
+    }
+    var m = 0
+    var mfar: f64 = 0.0
+    for o, b: Dot where o != me {
+      let dx = image(b.x - a.x, 10.0)
+      let dy = image(b.y - a.y, 10.0)
+      if dx * dx + dy * dy <= r * r {
+        m += 1
+        mfar += sqrt(dx * dx + dy * dy)
+      }
+    }
+    s.near = n
+    s.far = far
+    s.scan = m
+    s.scanfar = mfar
+  }
+}
+
+system report() {
+  for s: Seen {
+    if s.near == s.scan { Check.same += 1 }
+    Check.pairs += s.near
+    Check.worst max= abs64(s.far - s.scanfar)
+  }
+  put("same counts {Check.same} of 400, pairs {Check.pairs}, worst distance sum off {Check.worst}")
+  Check.same = 0
+  Check.pairs = 0
+  Check.worst = 0.0
+}
+
+schedule s() { count(0.7) report() count(2.3) report() }
+main { s() }
