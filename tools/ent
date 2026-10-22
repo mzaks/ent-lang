@@ -43,11 +43,11 @@ on a core each: one piece for every two megabytes of its LLVM IR, up to
 sixteen. ENT_PIECES says how many instead (1: all in one).
 
 With --parallel the program runs its systems on all cores (OpenMP): a
-thread on each core it may run on (`taskset` says which), bound to it,
-not one on each of a core's hardware threads, where one waiting for work
-would slow the other, which runs what the program does on one core
-between its loops (not with --ranks, whose processes would bind theirs
-to the same cores). A thread without work waits five milliseconds for
+thread on each CPU it may run on (`taskset` says which; each hardware
+thread of a core), bound to it, but for the others of the first one's
+core, where one waiting for work would slow the first, which runs what
+the program does on one core between its loops (not with --ranks, whose
+processes would bind theirs to the same CPUs). A thread without work waits five milliseconds for
 more and then sleeps, so that it is awake for the next parallel loop
 after a short stretch on one core, and what the program does on one core
 for longer (drawing, say) has the machine to itself. OMP_NUM_THREADS,
@@ -850,57 +850,76 @@ def build(arguments, output, directory):
             # say, which the spinning cores slow down; see
             # bench/RESULTS.md, 2026-10-09 and 2026-10-21.)
             #
-            # And there is one thread for each core the program may run
-            # on, bound to it, not one for each of the core's hardware
-            # threads: one that waits for the next loop on the other
-            # half of the core that runs on alone between the loops
-            # takes half of it (bench/traffic/RESULTS.md, 2026-10-22:
-            # the epidemic's day 10% faster, beecs's colonies 17%). Not
-            # on many ranks, whose processes or partitions would each
-            # bind theirs to the same cores. What the environment says
-            # holds over all of this.
+            # And there is one thread for each CPU the program may run on
+            # (each hardware thread of a core), bound to it, but for the
+            # others of the core of the first, which runs the program
+            # alone between the loops: a thread that waits for the next
+            # loop on the other half of that core takes half of it.
+            # Against one thread a core, the LJ melt 0.198 -> 0.176 s,
+            # the epidemic 11.0 -> 9.3 ms a day, the traffic highway
+            # 1.343 -> 1.193 s, beecs's 100 colonies 2.13 -> 2.22 s (it
+            # is mostly on one core); with a thread on the other half of
+            # the first core too, beecs 2.9 s (bench/RESULTS.md,
+            # 2026-10-22). Not on many ranks, whose processes or
+            # partitions would each bind theirs to the same CPUs. What
+            # the environment says holds over all of this.
             bind = "0" if arguments.ranks else "1"
             source.write(
                 "#define _GNU_SOURCE\n"
                 "#include <stdio.h>\n"
                 "#include <stdlib.h>\n"
+                "#include <string.h>\n"
                 "#ifdef __linux__\n"
                 "#include <sched.h>\n"
                 "#endif\n"
                 "#ifdef __APPLE__\n"
                 "#include <sys/sysctl.h>\n"
                 "#endif\n"
-                "// The cores the program may run on: of the CPUs it may\n"
-                "// run on, those no other CPU of the same core comes\n"
-                "// before (0 where that is not known).\n"
-                "static int ent_cores(void) {\n"
+                "#ifdef __linux__\n"
+                "// Whether `cpu` is listed in a sysfs list (\"0,12\", \"0-1\").\n"
+                "static int ent_listed(const char *path, int cpu) {\n"
+                "  FILE *list = fopen(path, \"r\");\n"
+                "  if (!list) return 0;\n"
+                "  int low, high, found = 0;\n"
+                "  char after = 0;\n"
+                "  while (fscanf(list, \"%d\", &low) == 1) {\n"
+                "    high = low;\n"
+                "    if (fscanf(list, \"%c\", &after) == 1 && after == '-') {\n"
+                "      if (fscanf(list, \"%d\", &high) != 1) break;\n"
+                "      if (fscanf(list, \"%c\", &after) != 1) after = 0;\n"
+                "    }\n"
+                "    found |= low <= cpu && cpu <= high;\n"
+                "    if (after != ',') break;\n"
+                "  }\n"
+                "  fclose(list);\n"
+                "  return found;\n"
+                "}\n"
+                "#endif\n"
+                "// The places for the threads, one CPU each (\"{0},{1},..\"):\n"
+                "// those the program may run on, but the others of the\n"
+                "// first one's core; how many (0 where that is not known).\n"
+                "static int ent_places(char *places, size_t room) {\n"
+                "  places[0] = 0;\n"
                 "#if defined(__linux__)\n"
                 "  cpu_set_t mask;\n"
                 "  if (sched_getaffinity(0, sizeof mask, &mask) != 0) return 0;\n"
-                "  int cores = 0;\n"
+                "  int first = -1, count = 0;\n"
+                "  char path[96];\n"
                 "  for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {\n"
                 "    if (!CPU_ISSET(cpu, &mask)) continue;\n"
-                "    char path[96];\n"
-                "    snprintf(path, sizeof path, \"/sys/devices/system/cpu/cpu%d/\"\n"
-                "             \"topology/thread_siblings_list\", cpu);\n"
-                "    FILE *list = fopen(path, \"r\");\n"
-                "    if (!list) return 0;\n"
-                "    int first = 1, low, high;\n"
-                "    char after = 0;\n"
-                "    while (fscanf(list, \"%d\", &low) == 1) {\n"
-                "      high = low;\n"
-                "      if (fscanf(list, \"%c\", &after) == 1 && after == '-') {\n"
-                "        if (fscanf(list, \"%d\", &high) != 1) break;\n"
-                "        if (fscanf(list, \"%c\", &after) != 1) after = 0;\n"
-                "      }\n"
-                "      for (int s = low; s <= high && s < cpu; s++)\n"
-                "        if (CPU_ISSET(s, &mask)) first = 0;\n"
-                "      if (after != ',') break;\n"
+                "    if (first < 0) {\n"
+                "      first = cpu;\n"
+                "      snprintf(path, sizeof path, \"/sys/devices/system/cpu/cpu%d/\"\n"
+                "               \"topology/thread_siblings_list\", cpu);\n"
+                "    } else if (ent_listed(path, cpu)) {\n"
+                "      continue;\n"
                 "    }\n"
-                "    fclose(list);\n"
-                "    cores += first;\n"
+                "    size_t at = strlen(places);\n"
+                "    if (at + 16 >= room) return 0;\n"
+                "    snprintf(places + at, room - at, \"%s{%d}\", count ? \",\" : \"\", cpu);\n"
+                "    count++;\n"
                 "  }\n"
-                "  return cores;\n"
+                "  return count;\n"
                 "#elif defined(__APPLE__)\n"
                 "  int cores = 0;\n"
                 "  size_t size = sizeof cores;\n"
@@ -917,13 +936,14 @@ def build(arguments, output, directory):
                 f"  if (!{bind} || getenv(\"OMP_NUM_THREADS\") || "
                 'getenv("OMP_PLACES") ||\n'
                 '      getenv("OMP_PROC_BIND") || getenv("KMP_AFFINITY")) return;\n'
-                "  int cores = ent_cores();\n"
-                "  if (cores <= 0) return;\n"
-                "  char count[16];\n"
-                '  snprintf(count, sizeof count, "%d", cores);\n'
-                '  setenv("OMP_NUM_THREADS", count, 0);\n'
+                "  static char places[16384];\n"
+                "  int count = ent_places(places, sizeof places);\n"
+                "  if (count <= 0) return;\n"
+                "  char threads[16];\n"
+                '  snprintf(threads, sizeof threads, "%d", count);\n'
+                '  setenv("OMP_NUM_THREADS", threads, 0);\n'
                 "#ifdef __linux__\n"
-                '  setenv("OMP_PLACES", "cores", 0);\n'
+                '  setenv("OMP_PLACES", places, 0);\n'
                 '  setenv("OMP_PROC_BIND", "close", 0);\n'
                 "#endif\n"
                 "}\n")

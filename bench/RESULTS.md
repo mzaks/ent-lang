@@ -3423,3 +3423,34 @@ The same within its runs, which come out at about 5.0 or 6.2 ms
 whichever it is (as on 2026-10-09, not explained). tools/ent now says
 5 ms; the epidemic built so: 4.24 to 4.49 s, where 4.53 to 5.29 s with
 1 ms, six runs each one after the other.
+
+## 2026-10-22: a thread on each hardware thread, but the first core's other
+
+What a program built with `--parallel` runs on, where nothing says
+otherwise (tools/ent): a thread on each core (12 here, one each,
+`OMP_PLACES=cores`) until now; now a thread on each CPU it may run on,
+bound to it, but for the others of the core of the first CPU (23 here:
+CPU 12 is the other half of CPU 0's core). The first thread runs what
+the program does on one core between its loops; one waiting for the next
+loop on the other half of its core takes half of it. CPUs 0 to 3 here are
+the fast cores (5.16 GHz), 4 to 11 the slow ones (3.29), 12 to 23 their
+other halves. The same output each way; native, on mains, the best of
+five (beecs and the epidemic: of three).
+
+| | a thread a core (12) | a thread a CPU (24) | a thread a CPU but CPU 12 (23) |
+|---|---|---|---|
+| LJ melt, half lists (`examples/lj/melt.ent`) | 0.198 s | 0.173 s | 0.176 s |
+| the epidemic, a million people, ms a day | 11.0 | 9.8 | 9.3 |
+| traffic highway (`bench/traffic/highway.ent`) | 1.343 s | 1.390 s | 1.193 s |
+| beecs, 100 colonies (`examples/beecs/many.ent`) | 2.13 s | 2.90 s | 2.22 s |
+
+beecs is mostly on one core (1.72 s of its 2.15 on its own): with a
+thread waiting on the other half of the first core it is 2.33 s there.
+Not bound, 24 threads: the LJ melt 0.193 s, the highway 1.482 s. Twelve
+bound to CPUs 0 to 11 exactly (`OMP_PLACES=threads`): the LJ melt 0.224 s,
+slower than a place a core, where a thread runs on either half.
+
+And a loop alone with a thread a CPU (the LJ melt's force loop, the
+others a thread a core): the force loop 92 -> 86 ms in 100 steps, the
+melt 0.198 -> 0.203 s (the team made and unmade every step; the threads
+waiting): not kept.
