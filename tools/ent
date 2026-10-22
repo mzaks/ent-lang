@@ -470,6 +470,25 @@ def gpu_passes(chip):
     return before, after, finish
 
 
+def machine_features(clang, cflags):
+    """The features clang makes code for with these flags, as LLVM's
+    target-features list, on x86 (else None): what a function that is to
+    prefer no gathers has with it, since a function's own features take
+    the place of the machine's (ent-emit-llvm)."""
+    said = run([clang, "-###", *cflags, "-x", "c", "-c", os.devnull,
+                "-o", os.devnull], stderr=subprocess.PIPE, text=True).stderr
+    command = next((line for line in said.splitlines()
+                    if '"-target-feature"' in line), None)
+    if not command:
+        return None
+    words = shlex.split(command)
+    triple = words[words.index("-triple") + 1] if "-triple" in words else ""
+    if not triple.startswith(("x86_64", "i386", "i686")):
+        return None
+    return ",".join(words[index + 1] for index, word in enumerate(words)
+                    if word == "-target-feature")
+
+
 def run(command, **options):
     result = subprocess.run(command, **options)
     if result.returncode != 0:
@@ -815,6 +834,8 @@ def build(arguments, output, directory):
     # To LLVM bitcode in the same run: not written out as text for another
     # tool to read again.
     llvm = os.path.join(directory, stem + ".bc")
+    cflags = shlex.split(os.environ.get("ENT_CFLAGS", ""))
+    features = machine_features(clang, cflags)
     run([optimise, module] + passes +
         # (What the lowering wrote more than once, once, and the columns
         # read and written by their addresses: less to turn into LLVM's
@@ -826,11 +847,11 @@ def build(arguments, output, directory):
          # (Each instruction with the line of the .ent it was made from,
          # for a profiler or a debugger to say: line tables only.)
          "--ensure-debug-info-scope-on-llvm-func",
-         "--ent-emit-llvm=output=" + llvm + " keep=" + keep,
+         "--ent-emit-llvm=output=" + llvm + " keep=" + keep +
+         (" features=" + features if features else ""),
          "-o", os.devnull])
 
-    flags = ["-O2", *shlex.split(os.environ.get("ENT_CFLAGS", "")),
-             "-Wno-override-module", "-c"]
+    flags = ["-O2", *cflags, "-Wno-override-module", "-c"]
     if arguments.instrument:
         flags.append("-fprofile-generate=" + instrumented(arguments))
         # Its library, linked by the machine's compiler: kept in by the

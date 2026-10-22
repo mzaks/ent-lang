@@ -1,6 +1,8 @@
 #include "Ent/EntDialect.h"
+#include "Ent/EntOps.h"
 #include "Ent/Passes.h"
 
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/InitAllDialects.h"
@@ -43,9 +45,22 @@ struct EmitLLVM : mlir::PassWrapper<EmitLLVM, mlir::OperationPass<mlir::ModuleOp
       llvm::cl::desc("A file of the names, one to a line, that code outside "
                      "the program calls or reads: with it, every other "
                      "definition but main is made internal")};
+  Option<std::string> features{
+      *this, "features",
+      llvm::cl::desc("The features of the machine the code is made for, as "
+                     "LLVM's target-features list: with it, the functions "
+                     "marked ent.no_gather have them, and prefer no "
+                     "gathers (x86 only)")};
 
   void runOnOperation() final {
     mlir::ModuleOp module = getOperation();
+    // (Their names: the attribute is not translated.)
+    llvm::StringSet<> noGather;
+    if (!features.empty())
+      module.walk([&](mlir::LLVM::LLVMFuncOp func) {
+        if (func->hasAttr(mlir::ent::kNoGatherAttr))
+          noGather.insert(func.getSymName());
+      });
     llvm::LLVMContext context;
     std::unique_ptr<llvm::Module> translated =
         mlir::translateModuleToLLVMIR(module, context);
@@ -107,6 +122,13 @@ struct EmitLLVM : mlir::PassWrapper<EmitLLVM, mlir::OperationPass<mlir::ModuleOp
       function->addFnAttr(llvm::Attribute::OptimizeNone);
       function->addFnAttr(llvm::Attribute::NoInline);
     }
+    // A function's own features are all it has, not more than the
+    // machine's: these, and no gathers. (The parts of it that run on
+    // many threads, made into functions of their own later, have what it
+    // has.)
+    for (llvm::Function &function : *translated)
+      if (noGather.contains(function.getName()))
+        function.addFnAttr("target-features", features + ",+prefer-no-gather");
     std::error_code error;
     llvm::raw_fd_ostream file(output, error, llvm::sys::fs::OF_None);
     if (error) {

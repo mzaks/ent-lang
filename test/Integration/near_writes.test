@@ -5,9 +5,12 @@
 // (Inputs/near_writes.ent). Each dot's list written so is the list the
 // reading `near` sees, in the same order, within less than a cell, more,
 // and more than half the box, where a run of rows has up to 200. The
-// same on one core and on all.
+// same on one core and on all. The function with the blocks prefers no
+// gathers (ent.no_gather, see ent-emit-llvm).
 // RUN: ent-translate --import-ent %S/Inputs/near_writes.ent -I %S/../../devices \
 // RUN:   | FileCheck %s --check-prefix=IR
+// RUN: ent-translate --import-ent %S/Inputs/near_writes.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-lower-to-loops | FileCheck %s --check-prefix=LOW
 // RUN: %ent run %S/Inputs/near_writes.ent 2>/dev/null > %t.one
 // RUN: %ent run --parallel %S/Inputs/near_writes.ent 2>/dev/null > %t.all
 // RUN: cmp %t.one %t.all
@@ -19,6 +22,9 @@
 // IR:       math.ctpop
 // IR:       math.cttz
 // IR:       ent.buffer.set
+
+// LOW: func.func private @count({{.*}}) attributes {ent.trace = "system"}
+// LOW: func.func private @fill({{.*}}) attributes {ent.no_gather,
 
 // CHECK:      same lists 400 of 400, pairs 1599
 // CHECK-NEXT: same lists 400 of 400, pairs 17645

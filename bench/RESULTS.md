@@ -3486,3 +3486,42 @@ and z (three columns) with one gather (`vgatherqpd`) for each row within
 reach; `-mno-gather` (or `-fno-slp-vectorize`) leaves three loads, 97 ms.
 That is a flag of the whole program (ENT_CFLAGS), not yet chosen for all.
 
+## 2026-10-22: no gathers where a `near` goes by blocks
+
+`-mno-gather` for every program (native, on mains, A without it, B
+with; the best of five, SAT and the scripts as they report):
+
+| | A | B |
+|---|---|---|
+| LJ melt, half lists, one core / 23 threads | 0.896 / 0.181 s | 0.838 / 0.170 s |
+| LJ melt, full lists, one core / 23 threads | 1.600 / 0.186 s | 1.485 / 0.176 s |
+| traffic highway, one core / 23 threads | 6.29 / 1.245 s | 6.26 / 1.229 s |
+| epidemic 1e6, one core / all, a day | 65.8 / 9.3 ms | 64.7 / 9.2 ms |
+| beecs 100, one core / all, a year | 20.7 / 25.3 ms | 19.8 / 26.1 ms |
+| entsat, nine problems of 4 to 16 s, CPU 2 | 70.6 s | 71.5 s |
+| entsat 26114429..., three times | 4.62-4.68 s | 4.94-4.99 s |
+| entsat 44092fcc..., three times | 7.93-7.99 s | 8.34-8.38 s |
+
+The logic, snn, river, scene, apply, churn, reactive and core
+benchmarks: the same within their spread. (The analog's ways, of up to
+600 s each, were not run with B.) So gathers pay in entsat (`sat.round`,
+50 of them) and cost in the LJ melt, where only the fill's (the `near`
+by blocks) do: without gathers in `count_pairs` or `Cells_update` alone
+the melt is as fast as with them, in `fill_pairs` alone as fast as B.
+
+A function's own features take the place of the command line's in LLVM,
+not add to them (`"target-features"="+prefer-no-gather"` alone left a
+`-mavx2` build without AVX2 there). So the parser marks the loop of a
+`near` by blocks (`ent.no_gather`), ent-lower-to-loops the function it
+is in, and tools/ent asks clang for the features its flags make code
+for (`clang -###`, x86 only) and passes them to ent-emit-llvm, which
+gives the marked functions those and `+prefer-no-gather` (the parts made
+into functions of their own for threads have what theirs has):
+
+| | A | B | marked |
+|---|---|---|---|
+| LJ melt, half lists, one core / 23 threads | 0.895 / 0.169 s | 0.839 / 0.168 s | 0.841 / 0.167 s |
+| LJ melt, full lists, one core / 23 threads | 1.603 / 0.180 s | 1.492 / 0.180 s | 1.525 / 0.179 s |
+| entsat 26114429... / 44092fcc... | 4.69 / 8.00 s | | 4.70 / 7.99 s |
+
+entsat keeps its 81 gathers; the melt's output is the same to the bit.

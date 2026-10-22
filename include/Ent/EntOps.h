@@ -44,6 +44,14 @@ bool sameValue(Value a, Value b);
 /// `ent.buffer.claim`, its number already inside the window.
 inline constexpr llvm::StringLiteral kWindowAttr = "ent.window";
 
+/// Marks the loop of a `near` by blocks of rows (the parser writes it), and
+/// ent-lower-to-loops the function it ends up in: one that ent-emit-llvm,
+/// given the features of the machine, has prefer no gathers. LLVM gathers
+/// the coordinates of each row within reach that the loop visits, which
+/// takes longer than loading them one by one (bench/RESULTS.md,
+/// 2026-10-22).
+inline constexpr llvm::StringLiteral kNoGatherAttr = "ent.no_gather";
+
 /// In a grid index's `Name_tangled` (the parser writes it): where its rows
 /// are so out of order that they are put in order anew, more than one in
 /// this many below the one before. ent-lower-to-loops puts in 64, or what

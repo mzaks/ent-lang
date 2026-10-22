@@ -23501,6 +23501,17 @@ struct EntLowerToLoops
       return signalPassFailure();
     compactGpuLoops(module);
     mapGpuLoops(module);
+
+    // A function with a `near` by blocks in it prefers no gathers (see
+    // kNoGatherAttr).
+    module.walk([](func::FuncOp func) {
+      WalkResult found = func.walk([](Operation *op) {
+        return op->hasAttr(kNoGatherAttr) ? WalkResult::interrupt()
+                                          : WalkResult::advance();
+      });
+      if (found.wasInterrupted())
+        func->setAttr(kNoGatherAttr, UnitAttr::get(func.getContext()));
+    });
   }
 };
 } // namespace

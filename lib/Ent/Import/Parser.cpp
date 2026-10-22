@@ -5978,6 +5978,7 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                   auto bits =
                       scf::ForOp::create(builder, where, zero, many, one,
                                          ValueRange{integer(where, i64, 0)});
+                  bits->setAttr(kNoGatherAttr, builder.getUnitAttr());
                   {
                     OpBuilder::InsertionGuard guard(builder);
                     builder.setInsertionPointToStart(bits.getBody());
