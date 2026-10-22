@@ -174,6 +174,15 @@ def EntOmpNowait : Pass<"ent-omp-nowait"> {
     nothing on the stack: a body with loops of its own cannot stay in a
     scope when those become blocks, and the canonicalizer keeps the scope
     wherever the body calls a function.
+
+    And a work-sharing loop over at most 1024 pieces (a constant count:
+    a query's slices) whose body has a loop inside a loop (rows with loops
+    of their own, whose time differs from piece to piece) is scheduled
+    `dynamic`, a piece at a time to whichever thread is free, instead of
+    fixed shares; other loops keep fixed shares, and with them each
+    thread's rows in its cache. On a thread for each core of two speeds
+    (4 fast, 8 slow): the epidemic at a million people 12.7 -> 10.9 ms a
+    day, the LJ melt of half lists 0.203 -> 0.196 s.
   }];
   let dependentDialects = ["::mlir::omp::OpenMPDialect"];
 }

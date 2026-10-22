@@ -72,6 +72,31 @@ struct EntOmpNowait : public mlir::ent::impl::EntOmpNowaitBase<EntOmpNowait> {
           std::prev(body.end()));
       scope->erase();
     }
+    // A loop over a few pieces (a query's 256 slices, say) whose rows have
+    // loops of their own, so that a piece may take much longer than
+    // another (an entity's edges, a filter that lets few through), deals
+    // its pieces one at a time to whichever thread is free: on cores of
+    // two speeds, and with work that is not even, a fixed share each
+    // leaves the threads that are done waiting for the slowest. A loop
+    // without inner loops keeps fixed shares: each thread then has the
+    // same rows in every loop, in its own cache. (Each piece runs on one
+    // thread either way: what the program does is the same.)
+    getOperation()->walk([](omp::WsloopOp loop) {
+      auto nest = dyn_cast<omp::LoopNestOp>(loop.getWrappedLoop());
+      if (!nest || nest.getLoopUpperBounds().size() != 1)
+        return;
+      auto upper =
+          nest.getLoopUpperBounds()[0].getDefiningOp<arith::ConstantIndexOp>();
+      if (!upper || upper.value() > 1024)
+        return;
+      bool uneven = false;
+      nest->walk([&](LoopLikeOpInterface inner) {
+        auto outer = inner->getParentOfType<LoopLikeOpInterface>();
+        uneven |= outer && outer != nest;
+      });
+      if (uneven)
+        loop.setScheduleKind(omp::ClauseScheduleKind::Dynamic);
+    });
     getOperation()->walk([](omp::ParallelOp parallel) {
       if (!parallel.getRegion().hasOneBlock())
         return;

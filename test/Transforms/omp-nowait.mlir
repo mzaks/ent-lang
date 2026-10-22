@@ -62,3 +62,55 @@ func.func @sections(%a: memref<?xf32>, %v: f32) {
   }
   return
 }
+
+// A loop over 256 pieces whose rows have loops of their own deals them out
+// a piece at a time; one over pieces without inner loops, or over a count
+// not known (or more than 1024), keeps fixed shares.
+// CHECK-LABEL: func.func @schedules(
+// CHECK:       omp.wsloop schedule(dynamic) {
+// CHECK:       omp.wsloop {
+// CHECK:       omp.wsloop {
+// CHECK:       omp.wsloop nowait {
+func.func @schedules(%n: index, %a: memref<?xf32>, %v: f32) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c256 = arith.constant 256 : index
+  omp.parallel {
+    omp.wsloop {
+      omp.loop_nest (%s) : index = (%c0) to (%c256) step (%c1) {
+        scf.for %r = %c0 to %n step %c1 {
+          scf.for %k = %c0 to %r step %c1 {
+            memref.store %v, %a[%k] : memref<?xf32>
+          }
+        }
+        omp.yield
+      }
+    }
+    omp.wsloop {
+      omp.loop_nest (%s) : index = (%c0) to (%c256) step (%c1) {
+        scf.for %r = %c0 to %n step %c1 {
+          memref.store %v, %a[%r] : memref<?xf32>
+        }
+        omp.yield
+      }
+    }
+    omp.wsloop {
+      omp.loop_nest (%s) : index = (%c0) to (%n) step (%c1) {
+        scf.for %r = %c0 to %n step %c1 {
+          scf.for %k = %c0 to %r step %c1 {
+            memref.store %v, %a[%k] : memref<?xf32>
+          }
+        }
+        omp.yield
+      }
+    }
+    omp.wsloop {
+      omp.loop_nest (%s) : index = (%c0) to (%c256) step (%c1) {
+        memref.store %v, %a[%s] : memref<?xf32>
+        omp.yield
+      }
+    }
+    omp.terminator
+  }
+  return
+}
