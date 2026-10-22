@@ -4,6 +4,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/DenseMap.h"
 
 namespace mlir::ent {
@@ -151,6 +152,16 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
                                        builder.getStringAttr("value"));
           Value yes = arith::ConstantIntOp::create(builder, loc, 1, 1);
           Value stale = arith::XOrIOp::create(builder, loc, fresh, yes);
+          // And only where what reads it runs: on its condition too.
+          if (!run.getCondition().empty()) {
+            IRMapping mapping;
+            Block &asked = run.getCondition().front();
+            for (Operation &op : asked.without_terminator())
+              builder.clone(op, mapping);
+            Value runs = mapping.lookupOrDefault(
+                asked.getTerminator()->getOperand(0));
+            stale = arith::AndIOp::create(builder, loc, stale, runs);
+          }
           YieldOp::create(builder, loc, ValueRange{stale});
         }
         if (writes) {

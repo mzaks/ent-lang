@@ -266,7 +266,8 @@ def EntIndexes : Pass<"ent-indexes", "ModuleOp"> {
     (`fresh`); others (`stale`, `moved`) clear it.
 
     In every schedule, a run of `update` on the condition that the index
-    is not fresh goes before each run of a system that reads the index
+    is not fresh (and that of the run it goes before, if it has one)
+    goes before each run of a system that reads the index
     (its rows, or the field each entity keeps its row in); a run of
     `moved` after each run of a system that changes which entities have
     its components (spawns, despawns, moves), and of `stale` after each
