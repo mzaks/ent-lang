@@ -1867,6 +1867,73 @@ struct ApplyFacts {
   bool atomic = false, looped = false, unobserved = false, inEach = false,
        orderFree = false, reduced = false, direct = false, sliced = false,
        inEdges = false, trusted = false;
+
+  /// Each fact by the name of its unit attribute on the ops.
+  static constexpr std::pair<llvm::StringLiteral, bool ApplyFacts::*>
+      kNames[] = {{"atomic", &ApplyFacts::atomic},
+                  {"looped", &ApplyFacts::looped},
+                  {"unobserved", &ApplyFacts::unobserved},
+                  {"in_each", &ApplyFacts::inEach},
+                  {"order_free", &ApplyFacts::orderFree},
+                  {"reduced", &ApplyFacts::reduced},
+                  {"direct", &ApplyFacts::direct},
+                  {"sliced", &ApplyFacts::sliced},
+                  {"in_edges", &ApplyFacts::inEdges},
+                  {"trusted", &ApplyFacts::trusted}};
+
+  /// The facts `op` (an `ent.sa.combine` or `ent.sa.accumulate`) carries.
+  static ApplyFacts of(Operation *op) {
+    ApplyFacts facts;
+    for (auto [name, fact] : kNames)
+      facts.*fact = op->hasAttr(name);
+    return facts;
+  }
+};
+
+/// What an `ent.sa` op is made of, as it is being made: its attributes
+/// (its facts among them, as unit attributes where they hold) and its
+/// operands, segment by segment.
+struct SaOpState {
+  OpBuilder &builder;
+  SmallVector<NamedAttribute> attributes;
+  SmallVector<Value> operands;
+  SmallVector<int32_t> segments;
+
+  explicit SaOpState(OpBuilder &builder) : builder(builder) {}
+  void set(StringRef name, Attribute value) {
+    attributes.push_back(builder.getNamedAttr(name, value));
+  }
+  void set(StringRef name, int64_t value) {
+    set(name, builder.getI64IntegerAttr(value));
+  }
+  void set(StringRef name, StringRef value) {
+    set(name, builder.getStringAttr(value));
+  }
+  /// A fact, where it holds.
+  void fact(StringRef name, bool holds) {
+    if (holds)
+      set(name, builder.getUnitAttr());
+  }
+  /// Those of a send's facts that hold.
+  void facts(const ApplyFacts &facts) {
+    for (auto [name, fact] : ApplyFacts::kNames)
+      this->fact(name, facts.*fact);
+  }
+  /// The next segment of operands: `values`.
+  void operand(ValueRange values) {
+    llvm::append_range(operands, values);
+    segments.push_back(values.size());
+  }
+  /// The next segment: `value`, or none where it is null.
+  void optional(Value value) {
+    if (value)
+      operands.push_back(value);
+    segments.push_back(value ? 1 : 0);
+  }
+  template <typename OpTy> OpTy create(Location loc) {
+    set("operandSegmentSizes", builder.getDenseI32ArrayAttr(segments));
+    return OpTy::create(builder, loc, TypeRange{}, operands, attributes);
+  }
 };
 } // namespace
 static ApplyFacts applyFacts(Operation *apply, bool directApplies,
@@ -1880,7 +1947,9 @@ static ApplyFacts applyFacts(Operation *apply, bool directApplies,
   facts.reduced = apply->hasAttr(kReducedAttr);
   facts.direct = directApplies;
   facts.sliced = sliced;
-  facts.inEdges = apply->getParentOfType<EdgesOp>() != nullptr;
+  // (An accumulate has no place of its own for each edge.)
+  facts.inEdges =
+      isa<ApplyOp>(apply) && apply->getParentOfType<EdgesOp>() != nullptr;
   facts.trusted = apply->hasAttr(kTrustedAttr);
   return facts;
 }
@@ -12048,6 +12117,19 @@ static void lowerStateAccess(IRRewriter &rewriter, SaPlaceOp place,
   rewriter.eraseOp(place);
 }
 
+/// Which connect or append `op` is, of the entities of `archetype`: the
+/// attributes of its `ent.sa.append` and `ent.sa.place`.
+static void appendedOne(SaOpState &state, Operation *op,
+                        const WorldArchetype &archetype) {
+  auto connect = dyn_cast<ConnectOp>(op);
+  state.set("kind", connect ? "connect" : "buffer");
+  state.set("index", op->getAttr(connect ? WorldLayout::kConnectIndexAttr
+                                         : WorldLayout::kAppendIndexAttr));
+  state.set("archetype", int64_t(archetype.index));
+  state.set("target", connect ? Attribute(connect.getRelationAttr())
+                              : cast<AppendOp>(op).getBufferAttr());
+}
+
 static void sendAppended(IRRewriter &rewriter, Operation *op,
                          const WorldLayout &layout,
                          const WorldArchetype &archetype, WorldAccess &world,
@@ -12060,37 +12142,15 @@ static void sendAppended(IRRewriter &rewriter, Operation *op,
   } else {
     llvm::append_range(values, cast<AppendOp>(op).getValues());
   }
-  SmallVector<NamedAttribute> attributes{
-      rewriter.getNamedAttr("kind",
-                            rewriter.getStringAttr(connect ? "connect"
-                                                           : "buffer")),
-      rewriter.getNamedAttr(
-          "index", op->getAttr(connect ? WorldLayout::kConnectIndexAttr
-                                       : WorldLayout::kAppendIndexAttr)),
-      rewriter.getNamedAttr("archetype",
-                            rewriter.getI64IntegerAttr(archetype.index)),
-      rewriter.getNamedAttr("target",
-                            connect ? connect.getRelationAttr()
-                                    : cast<AppendOp>(op).getBufferAttr())};
-  if (op->hasAttr(kLoopedAttr))
-    attributes.push_back(
-        rewriter.getNamedAttr("looped", rewriter.getUnitAttr()));
-  if (sendSegment)
-    attributes.push_back(
-        rewriter.getNamedAttr("sliced", rewriter.getUnitAttr()));
-  SmallVector<Value> operands = values;
-  SmallVector<int32_t> segments{int32_t(values.size())};
-  for (Value optional : {at, mask}) {
-    if (optional)
-      operands.push_back(optional);
-    segments.push_back(optional ? 1 : 0);
-  }
-  operands.push_back(world.getArena());
-  segments.push_back(1);
-  attributes.push_back(rewriter.getNamedAttr(
-      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
-  auto append = SaAppendOp::create(rewriter, op->getLoc(), TypeRange{},
-                                   operands, attributes);
+  SaOpState state(rewriter);
+  appendedOne(state, op, archetype);
+  state.fact("looped", op->hasAttr(kLoopedAttr));
+  state.fact("sliced", sendSegment != nullptr);
+  state.operand(values);
+  state.optional(at);
+  state.optional(mask);
+  state.operand(world.getArena());
+  auto append = state.create<SaAppendOp>(op->getLoc());
   resolveStateAccess(append);
   lowerStateAccess(rewriter, append, layout, world);
 }
@@ -12109,50 +12169,27 @@ static void placeAppended(IRRewriter &rewriter, Operation *op,
   OpBuilder::InsertionGuard guard(rewriter);
   auto connect = dyn_cast<ConnectOp>(op);
   bool listed = resolveAppend(op->hasAttr(kLoopedAttr)) == "list";
-  SmallVector<NamedAttribute> attributes{
-      rewriter.getNamedAttr("kind",
-                            rewriter.getStringAttr(connect ? "connect"
-                                                           : "buffer")),
-      rewriter.getNamedAttr(
-          "index", op->getAttr(connect ? WorldLayout::kConnectIndexAttr
-                                       : WorldLayout::kAppendIndexAttr)),
-      rewriter.getNamedAttr("archetype",
-                            rewriter.getI64IntegerAttr(archetype.index)),
-      rewriter.getNamedAttr("target",
-                            connect ? connect.getRelationAttr()
-                                    : cast<AppendOp>(op).getBufferAttr()),
-      rewriter.getNamedAttr("staged",
-                            rewriter.getStringAttr(listed ? "list" : "rows")),
-      rewriter.getNamedAttr("least", rewriter.getI64IntegerAttr(many))};
-  auto flag = [&](StringRef name, bool on) {
-    if (on)
-      attributes.push_back(
-          rewriter.getNamedAttr(name, rewriter.getUnitAttr()));
-  };
-  flag("parallel", parallel);
-  flag("ranks", bool(rankFirstRows.lookup(&archetype)));
+  // (On many ranks: from the first of this rank's rows.)
+  Value first = rankFirstRows.lookup(&archetype);
+  SaOpState state(rewriter);
+  appendedOne(state, op, archetype);
+  state.set("staged", listed ? "list" : "rows");
+  state.set("least", many);
+  state.fact("parallel", parallel);
+  state.fact("ranks", bool(first));
   if (connect) {
     const WorldRelation &relation =
         layout.getRelation(connect.getRelationAttr().getAttr());
-    flag("partitions", partitionCount > 0);
-    flag("stamps", relation.connectedOffset != 0);
-    flag("linked", relation.linked);
-    flag("ordered", relation.isOrdered());
-    flag("tree", relation.tree);
+    state.fact("partitions", partitionCount > 0);
+    state.fact("stamps", relation.connectedOffset != 0);
+    state.fact("linked", relation.linked);
+    state.fact("ordered", relation.isOrdered());
+    state.fact("tree", relation.tree);
   }
-  // (On many ranks: from the first of this rank's rows.)
-  Value first = rankFirstRows.lookup(&archetype);
-  SmallVector<Value> operands{world.getArena()};
-  SmallVector<int32_t> segments{1};
-  for (Value optional : {listed ? Value() : count, first}) {
-    if (optional)
-      operands.push_back(optional);
-    segments.push_back(optional ? 1 : 0);
-  }
-  attributes.push_back(rewriter.getNamedAttr(
-      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
-  auto place = SaPlaceOp::create(rewriter, op->getLoc(), TypeRange{},
-                                 operands, attributes);
+  state.operand(world.getArena());
+  state.optional(listed ? Value() : count);
+  state.optional(first);
+  auto place = state.create<SaPlaceOp>(op->getLoc());
   resolveStateAccess(place);
   lowerStateAccess(rewriter, place, layout, world);
 }
@@ -12269,34 +12306,21 @@ static StringRef resolveOnRanks(bool posts, bool whole, StringRef rule,
 
 /// The facts of a combine into `component`'s `field`, of values stored as
 /// `stored`, on many ranks: `posts`, `whole`, `changed`.
-static void rankFacts(Builder &builder, SmallVectorImpl<NamedAttribute> &into,
-                      const WorldLayout &layout, StringAttr component,
-                      StringAttr field, Type stored) {
+static void rankFacts(SaOpState &state, const WorldLayout &layout,
+                      StringAttr component, StringAttr field, Type stored) {
   bool changed = false;
   for (const WorldArchetype &archetype : layout.archetypes)
     changed |= ArchetypeOp(archetype.op).contains(
                    FlatSymbolRefAttr::get(component)) &&
                !stampsFor(archetype, Trigger::Changed, component, field)
                     .empty();
-  for (auto [name, on] :
-       {std::pair<StringRef, bool>{"posts", ranksMode && rankPosting},
-        {"whole", isa<IntegerType>(stored)},
-        {"changed", changed}})
-    if (on)
-      into.push_back(builder.getNamedAttr(name, builder.getUnitAttr()));
+  state.fact("posts", ranksMode && rankPosting);
+  state.fact("whole", isa<IntegerType>(stored));
+  state.fact("changed", changed);
 }
 
 static void resolveStateAccess(SaCombineOp combine) {
-  ApplyFacts facts;
-  facts.atomic = combine.getAtomic();
-  facts.looped = combine.getLooped();
-  facts.unobserved = combine.getUnobserved();
-  facts.inEach = combine.getInEach();
-  facts.orderFree = combine.getOrderFree();
-  facts.direct = combine.getDirect();
-  facts.sliced = combine.getSliced();
-  facts.inEdges = combine.getInEdges();
-  combine.setResolution(resolveSend(facts));
+  combine.setResolution(resolveSend(ApplyFacts::of(combine)));
   if (StringRef onRanks =
           resolveOnRanks(combine.getPosts(), combine.getWhole(),
                          combine.getRule(), combine.getAtomic(),
@@ -12327,6 +12351,18 @@ static void resolveStateAccess(SaMergeOp merge) {
   merge.setResolution(groups ? "groups" : "in-order");
 }
 
+/// Stage `id` and `value` (stored forms) in the slots (ids, values) of
+/// row `at`, which the query's end goes through ("rows"): an entity the
+/// masked body does not run for (`mask` false) stages no entity.
+static void stageInRow(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                       std::pair<Value, Value> slots, Value at, Value id,
+                       Value value, Value mask) {
+  if (mask)
+    id = arith::SelectOp::create(rewriter, loc, mask, id, world.noEntity(loc));
+  memref::StoreOp::create(rewriter, loc, id, slots.first, ValueRange{at});
+  memref::StoreOp::create(rewriter, loc, value, slots.second, ValueRange{at});
+}
+
 /// Carry out `combine` (resolved), at its place.
 static void lowerStateAccess(IRRewriter &rewriter, SaCombineOp combine,
                              const WorldLayout &layout, WorldAccess &world) {
@@ -12339,17 +12375,11 @@ static void lowerStateAccess(IRRewriter &rewriter, SaCombineOp combine,
   Value mask = combine.getMask();
   Value at = combine.getAt();
   if (resolution == "rows") {
-    // Fill this entity's slot of the buffer; the query's end combines.
-    // An entity the masked body does not apply to sends nothing.
-    auto [ids, values] = world.applyBuffer(combine.getApply(), archetype);
     Value id = world.toStorage(loc, combine.getEntity());
-    if (mask)
-      id = arith::SelectOp::create(rewriter, loc, mask, id,
-                                   world.noEntity(loc));
-    memref::StoreOp::create(rewriter, loc, id, ids, ValueRange{at});
-    memref::StoreOp::create(rewriter, loc,
-                            world.toStorage(loc, combine.getValue()), values,
-                            ValueRange{at});
+    Value value = world.toStorage(loc, combine.getValue());
+    stageInRow(rewriter, loc, world,
+               world.applyBuffer(combine.getApply(), archetype), at, id, value,
+               mask);
   } else if (resolution == "edges") {
     // (Its edge's slot: the row's says the loop ran, see lowerEdges.)
     auto [ids, values] = world.edgeApplyBuffer(combine.getApply());
@@ -12367,20 +12397,9 @@ static void lowerStateAccess(IRRewriter &rewriter, SaCombineOp combine,
       rewriter.setInsertionPointToStart(ifApplies.thenBlock());
     }
     if (resolution == "list") {
-      // (A loop on one thread is one slice, the first.)
-      Type i64 = rewriter.getI64Type();
-      Value nothing = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
-      Value slice = sendSegment ? arith::IndexCastOp::create(rewriter, loc,
-                                                             i64, sendSegment)
-                                      .getResult()
-                                : nothing;
-      Value list = arith::ConstantIntOp::create(
-          rewriter, loc,
-          applyListNumber(combine.getApply(), combine.getArchetype()), 64);
-      callSends(rewriter, loc, world, "ent_sends_put",
-                {list, slice, toSendBits(rewriter, loc, id),
-                 toSendBits(rewriter, loc, value)},
-                /*gives=*/false);
+      putSend(rewriter, loc,
+              applyListNumber(combine.getApply(), combine.getArchetype()),
+              world, id, value);
     } else {
       combineIntoField(rewriter, loc, combine.getComponentAttr(),
                        combine.getFieldAttr(), combine.getRule(),
@@ -12400,44 +12419,23 @@ static void sendApplied(IRRewriter &rewriter, ApplyOp apply,
   // (One a cascading query makes, through an ancestor, has no buffers in
   // the layout: it is combined where it is sent.)
   auto index = apply->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
-  SmallVector<NamedAttribute> attributes{
-      rewriter.getNamedAttr("apply", index ? Attribute(index)
-                                           : rewriter.getI64IntegerAttr(-1)),
-      rewriter.getNamedAttr("archetype",
-                            rewriter.getI64IntegerAttr(archetype.index)),
-      rewriter.getNamedAttr("component", apply.getComponentAttr()),
-      rewriter.getNamedAttr("field", apply.getFieldAttr()),
-      rewriter.getNamedAttr("rule", apply.getRuleAttr())};
-  auto flag = [&](StringRef name, bool on) {
-    if (on)
-      attributes.push_back(
-          rewriter.getNamedAttr(name, rewriter.getUnitAttr()));
-  };
-  flag("atomic", facts.atomic);
-  flag("looped", facts.looped);
-  flag("unobserved", facts.unobserved);
-  flag("in_each", facts.inEach);
-  flag("order_free", facts.orderFree);
-  flag("direct", facts.direct);
-  flag("sliced", facts.sliced);
-  flag("in_edges", facts.inEdges);
-  flag("trusted", facts.trusted);
-  rankFacts(rewriter, attributes, layout, apply.getComponentAttr().getAttr(),
+  SaOpState state(rewriter);
+  state.set("apply", index ? index.getInt() : int64_t(-1));
+  state.set("archetype", int64_t(archetype.index));
+  state.set("component", apply.getComponentAttr());
+  state.set("field", apply.getFieldAttr());
+  state.set("rule", apply.getRuleAttr());
+  state.facts(facts);
+  rankFacts(state, layout, apply.getComponentAttr().getAttr(),
             apply.getFieldAttr(),
             world.storageType(apply.getValue().getType()));
-  SmallVector<Value> operands{apply.getEntity(), apply.getValue()};
-  SmallVector<int32_t> segments{1, 1};
-  for (Value optional : {at, mask, tick}) {
-    if (optional)
-      operands.push_back(optional);
-    segments.push_back(optional ? 1 : 0);
-  }
-  operands.push_back(world.getArena());
-  segments.push_back(1);
-  attributes.push_back(rewriter.getNamedAttr(
-      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
-  auto combine = SaCombineOp::create(rewriter, apply.getLoc(), TypeRange{},
-                                     operands, attributes);
+  state.operand(apply.getEntity());
+  state.operand(apply.getValue());
+  state.optional(at);
+  state.optional(mask);
+  state.optional(tick);
+  state.operand(world.getArena());
+  auto combine = state.create<SaCombineOp>(apply.getLoc());
   resolveStateAccess(combine);
   lowerStateAccess(rewriter, combine, layout, world);
 }
@@ -12707,61 +12705,37 @@ static void mergeApplied(IRRewriter &rewriter, ApplyOp apply,
   for (const WorldArchetype &holder : layout.archetypes)
     orderShows |=
         !stampsFor(holder, Trigger::Changed, component, field).empty();
-  SmallVector<NamedAttribute> attributes{
-      rewriter.getNamedAttr("apply",
-                            apply->getAttr(WorldLayout::kApplyIndexAttr)),
-      rewriter.getNamedAttr("archetype",
-                            rewriter.getI64IntegerAttr(archetype.index)),
-      rewriter.getNamedAttr("component", apply.getComponentAttr()),
-      rewriter.getNamedAttr("field", apply.getFieldAttr()),
-      rewriter.getNamedAttr("rule", apply.getRuleAttr()),
-      rewriter.getNamedAttr("stored", TypeAttr::get(stored)),
-      rewriter.getNamedAttr("staged", rewriter.getStringAttr(staged)),
-      rewriter.getNamedAttr("least", rewriter.getI64IntegerAttr(many))};
-  auto flag = [&](StringRef name, bool on) {
-    if (on)
-      attributes.push_back(
-          rewriter.getNamedAttr(name, rewriter.getUnitAttr()));
-  };
+  SaOpState state(rewriter);
+  state.set("apply", apply->getAttr(WorldLayout::kApplyIndexAttr));
+  state.set("archetype", int64_t(archetype.index));
+  state.set("component", apply.getComponentAttr());
+  state.set("field", apply.getFieldAttr());
+  state.set("rule", apply.getRuleAttr());
+  state.set("stored", TypeAttr::get(stored));
+  state.set("staged", staged);
+  state.set("least", many);
   if (auto edges = apply->getParentOfType<EdgesOp>()) {
-    attributes.push_back(
-        rewriter.getNamedAttr("relation", edges.getRelationAttr()));
-    flag("inward", !edges.isOut());
+    state.set("relation", edges.getRelationAttr());
+    state.fact("inward", !edges.isOut());
   }
-  flag("parallel", parallel);
-  flag("order_shows", orderShows);
-  flag("atomic", apply->hasAttr(kAtomicAttr));
-  flag("trusted", apply->hasAttr(kTrustedAttr));
-  flag("ranks", ranksMode);
-  rankFacts(rewriter, attributes, layout, component, field, stored);
+  state.fact("parallel", parallel);
+  state.fact("order_shows", orderShows);
+  state.fact("atomic", apply->hasAttr(kAtomicAttr));
+  state.fact("trusted", apply->hasAttr(kTrustedAttr));
+  state.fact("ranks", ranksMode);
+  rankFacts(state, layout, component, field, stored);
   // (On many ranks, from the first of this rank's rows.)
-  Value first = count ? rankFirstRows.lookup(&archetype) : Value();
-  SmallVector<Value> operands{world.getArena()};
-  SmallVector<int32_t> segments{1};
-  for (Value optional : {count, first, tick}) {
-    if (optional)
-      operands.push_back(optional);
-    segments.push_back(optional ? 1 : 0);
-  }
-  attributes.push_back(rewriter.getNamedAttr(
-      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
-  auto merge = SaMergeOp::create(rewriter, apply.getLoc(), TypeRange{},
-                                 operands, attributes);
+  state.operand(world.getArena());
+  state.optional(count);
+  state.optional(count ? rankFirstRows.lookup(&archetype) : Value());
+  state.optional(tick);
+  auto merge = state.create<SaMergeOp>(apply.getLoc());
   resolveStateAccess(merge);
   lowerStateAccess(rewriter, merge, layout, world);
 }
 
 static void resolveStateAccess(SaAccumulateOp accumulate) {
-  ApplyFacts facts;
-  facts.atomic = accumulate.getAtomic();
-  facts.looped = accumulate.getLooped();
-  facts.unobserved = accumulate.getUnobserved();
-  facts.inEach = accumulate.getInEach();
-  facts.orderFree = accumulate.getOrderFree();
-  facts.reduced = accumulate.getReduced();
-  facts.direct = accumulate.getDirect();
-  facts.sliced = accumulate.getSliced();
-  accumulate.setResolution(resolveSend(facts));
+  accumulate.setResolution(resolveSend(ApplyFacts::of(accumulate)));
 }
 
 /// How what was staged for an accumulate is folded: in the order it was
@@ -12801,15 +12775,13 @@ static void lowerStateAccess(IRRewriter &rewriter, SaAccumulateOp accumulate,
             world, Value(), value);
   } else if (resolution == "rows") {
     // The same as an apply's, with "sent" (0) for a target id.
-    auto [ids, values] = world.applyBuffer(accumulate.getApply(), archetype);
+    std::pair<Value, Value> slots =
+        world.applyBuffer(accumulate.getApply(), archetype);
     Value sent = arith::ConstantIntOp::create(
-        rewriter, loc, cast<MemRefType>(ids.getType()).getElementType(), 0);
-    if (mask)
-      sent = arith::SelectOp::create(rewriter, loc, mask, sent,
-                                     world.noEntity(loc));
-    memref::StoreOp::create(rewriter, loc, sent, ids, ValueRange{accumulate.getAt()});
-    memref::StoreOp::create(rewriter, loc, given, values,
-                            ValueRange{accumulate.getAt()});
+        rewriter, loc,
+        cast<MemRefType>(slots.first.getType()).getElementType(), 0);
+    stageInRow(rewriter, loc, world, slots, accumulate.getAt(), sent, given,
+               mask);
   } else {
     // Combine into the resource now, in the order the query's end would.
     if (mask) {
@@ -12841,6 +12813,18 @@ static void lowerStateAccess(IRRewriter &rewriter, SaAccumulateOp accumulate,
   rewriter.eraseOp(accumulate);
 }
 
+/// Which accumulate `accumulate` is, of the entities of archetype
+/// `archetype`, and what it accumulates into: the attributes of its
+/// `ent.sa.accumulate` and `ent.sa.fold`.
+static void accumulatedOne(SaOpState &state, AccumulateOp accumulate,
+                           int64_t archetype) {
+  state.set("apply", accumulate->getAttr(WorldLayout::kApplyIndexAttr));
+  state.set("archetype", archetype);
+  state.set("resource", accumulate.getResourceAttr());
+  state.set("field", accumulate.getFieldAttr());
+  state.set("rule", accumulate.getRuleAttr());
+}
+
 static void sendAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
                             const WorldLayout &layout,
                             const WorldArchetype &archetype,
@@ -12848,40 +12832,14 @@ static void sendAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
                             bool directApplies) {
   ApplyFacts facts =
       applyFacts(accumulate, directApplies, sendSegment != nullptr);
-  SmallVector<NamedAttribute> attributes{
-      rewriter.getNamedAttr("apply",
-                            accumulate->getAttr(WorldLayout::kApplyIndexAttr)),
-      rewriter.getNamedAttr("archetype",
-                            rewriter.getI64IntegerAttr(archetype.index)),
-      rewriter.getNamedAttr("resource", accumulate.getResourceAttr()),
-      rewriter.getNamedAttr("field", accumulate.getFieldAttr()),
-      rewriter.getNamedAttr("rule", accumulate.getRuleAttr())};
-  auto flag = [&](StringRef name, bool on) {
-    if (on)
-      attributes.push_back(
-          rewriter.getNamedAttr(name, rewriter.getUnitAttr()));
-  };
-  flag("atomic", facts.atomic);
-  flag("looped", facts.looped);
-  flag("unobserved", facts.unobserved);
-  flag("in_each", facts.inEach);
-  flag("order_free", facts.orderFree);
-  flag("reduced", facts.reduced);
-  flag("direct", facts.direct);
-  flag("sliced", facts.sliced);
-  SmallVector<Value> operands{accumulate.getValue()};
-  SmallVector<int32_t> segments{1};
-  for (Value optional : {at, mask}) {
-    if (optional)
-      operands.push_back(optional);
-    segments.push_back(optional ? 1 : 0);
-  }
-  operands.push_back(world.getArena());
-  segments.push_back(1);
-  attributes.push_back(rewriter.getNamedAttr(
-      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
-  auto access = SaAccumulateOp::create(rewriter, accumulate.getLoc(),
-                                       TypeRange{}, operands, attributes);
+  SaOpState state(rewriter);
+  accumulatedOne(state, accumulate, archetype.index);
+  state.facts(facts);
+  state.operand(accumulate.getValue());
+  state.optional(at);
+  state.optional(mask);
+  state.operand(world.getArena());
+  auto access = state.create<SaAccumulateOp>(accumulate.getLoc());
   resolveStateAccess(access);
   lowerStateAccess(rewriter, access, layout, world);
 }
@@ -13013,32 +12971,17 @@ static void foldAccumulated(IRRewriter &rewriter, AccumulateOp accumulate,
   Type stored = cast<MemRefType>(
                     world.applyBuffer(accumulate, archetype).second.getType())
                     .getElementType();
-  SmallVector<NamedAttribute> attributes{
-      rewriter.getNamedAttr("apply",
-                            accumulate->getAttr(WorldLayout::kApplyIndexAttr)),
-      rewriter.getNamedAttr("archetype",
-                            rewriter.getI64IntegerAttr(archetype.index)),
-      rewriter.getNamedAttr("resource", accumulate.getResourceAttr()),
-      rewriter.getNamedAttr("field", accumulate.getFieldAttr()),
-      rewriter.getNamedAttr("rule", accumulate.getRuleAttr()),
-      rewriter.getNamedAttr("stored", TypeAttr::get(stored)),
-      rewriter.getNamedAttr("staged", rewriter.getStringAttr(staged))};
-  if (hasNoSign(accumulate.getValue().getType()))
-    attributes.push_back(
-        rewriter.getNamedAttr("no_sign", rewriter.getUnitAttr()));
+  SaOpState state(rewriter);
+  accumulatedOne(state, accumulate, archetype.index);
+  state.set("stored", TypeAttr::get(stored));
+  state.set("staged", staged);
+  state.fact("no_sign", hasNoSign(accumulate.getValue().getType()));
   // (On many ranks, from the first of this rank's rows.)
-  Value first = staged == "rows" ? rankFirstRows.lookup(&archetype) : Value();
-  SmallVector<Value> operands{world.getArena()};
-  SmallVector<int32_t> segments{1};
-  for (Value optional : {staged == "rows" ? count : Value(), first}) {
-    if (optional)
-      operands.push_back(optional);
-    segments.push_back(optional ? 1 : 0);
-  }
-  attributes.push_back(rewriter.getNamedAttr(
-      "operandSegmentSizes", rewriter.getDenseI32ArrayAttr(segments)));
-  auto fold = SaFoldOp::create(rewriter, accumulate.getLoc(), TypeRange{},
-                               operands, attributes);
+  bool rows = staged == "rows";
+  state.operand(world.getArena());
+  state.optional(rows ? count : Value());
+  state.optional(rows ? rankFirstRows.lookup(&archetype) : Value());
+  auto fold = state.create<SaFoldOp>(accumulate.getLoc());
   resolveStateAccess(fold);
   lowerStateAccess(rewriter, fold, layout, world);
 }
@@ -18261,24 +18204,19 @@ struct GpuCells {
               WorldAccess &cpu) {
     for (const Cell &cell : cells) {
       auto type = cast<IntegerType>(cell.field->type);
-      SmallVector<NamedAttribute> attributes{
-          rewriter.getNamedAttr("apply", rewriter.getI64IntegerAttr(-1)),
-          rewriter.getNamedAttr("archetype", rewriter.getI64IntegerAttr(-1)),
-          rewriter.getNamedAttr("resource",
-                                FlatSymbolRefAttr::get(cell.resource)),
-          rewriter.getNamedAttr("field", rewriter.getStringAttr(
-                                             cell.field->field.getValue())),
-          rewriter.getNamedAttr("rule", rewriter.getStringAttr(cell.rule)),
-          rewriter.getNamedAttr("stored",
-                                TypeAttr::get(cpu.storageType(type))),
-          rewriter.getNamedAttr("staged", rewriter.getStringAttr("cell")),
-          rewriter.getNamedAttr("operandSegmentSizes",
-                                rewriter.getDenseI32ArrayAttr({1, 0, 0}))};
-      if (type.isUnsigned())
-        attributes.push_back(
-            rewriter.getNamedAttr("no_sign", rewriter.getUnitAttr()));
-      auto fold = SaFoldOp::create(rewriter, loc, TypeRange{},
-                                   ValueRange{cpu.getArena()}, attributes);
+      SaOpState state(rewriter);
+      state.set("apply", int64_t(-1));
+      state.set("archetype", int64_t(-1));
+      state.set("resource", FlatSymbolRefAttr::get(cell.resource));
+      state.set("field", cell.field->field.getValue());
+      state.set("rule", cell.rule);
+      state.set("stored", TypeAttr::get(cpu.storageType(type)));
+      state.set("staged", "cell");
+      state.fact("no_sign", type.isUnsigned());
+      state.operand(cpu.getArena());
+      state.optional(Value());
+      state.optional(Value());
+      auto fold = state.create<SaFoldOp>(loc);
       resolveStateAccess(fold);
       lowerStateAccess(rewriter, fold, layout, cpu);
     }
