@@ -1,0 +1,80 @@
+// 400 dots in a box of 10 that wraps, cells of 5: a run of rows has up to
+// 200, so more than one block of 64 (test/Integration/near_writes.test).
+// Each dot's list of the dots within r of it, written by a `near` that
+// writes (by blocks of rows), against the same `near` that only reads.
+import console
+import wyhash
+component Dot { x: f64, y: f64, id: i64 } capacity 1024
+component List { first: i32, count: i32, order: i64 } capacity 1024
+unique Box { size: f64 }
+unique Lists { rows: i32 }
+unique Check { same: i64, pairs: i64 }
+buffer Ids { id: i64 } capacity 262144
+
+index Cells of Dot grid (x, y) cell 5.0 wrap Box.size
+
+world {
+  Box.size = 10.0
+  for i in 0..400 {
+    spawn { Dot { x: wyrand_unit(5, i as i64 * 2) * 10.0, y: wyrand_unit(5, i as i64 * 2 + 1) * 10.0, id: i as i64 },
+            List { first: 0, count: 0, order: 0 } }
+  }
+}
+
+// Each dot's count, and the order of the ids (as a hash), by a `near`
+// that only reads.
+system count(r: f64) {
+  for me, a: Dot, l: mut List {
+    var n: i32 = 0
+    var h: i64 = 7
+    for o, b: Dot near (a.x, a.y) within r in Cells
+        where o != me && b.id % 3 != 0 {
+      n += 1
+      h = h * 31 + b.id
+    }
+    l.count = n
+    l.order = h
+  }
+}
+
+system place() {
+  Lists.rows = 0
+  for l: mut List {
+    let first = Lists.rows += l.count
+    l.first = first
+  }
+  Ids = [{ id: 0 }; Lists.rows]
+}
+
+// The same, written into each dot's own rows of `Ids`.
+system fill(r: f64) {
+  for me, a: Dot, l: List, w: mut Ids[l.first, l.count] {
+    var k: i32 = 0
+    for o, b: Dot near (a.x, a.y) within r in Cells
+        where o != me && b.id % 3 != 0 {
+      w[k].id = b.id
+      k += 1
+    }
+  }
+}
+
+system report() {
+  for l: List, w: Ids[l.first, l.count] {
+    var h: i64 = 7
+    for k in 0..l.count {
+      h = h * 31 + w[k].id
+    }
+    if h == l.order { Check.same += 1 }
+    Check.pairs += l.count as i64
+  }
+  put("same lists {Check.same} of 400, pairs {Check.pairs}")
+  Check.same = 0
+  Check.pairs = 0
+}
+
+schedule lists() {
+  count(0.7) place() fill(0.7) report()
+  count(2.3) place() fill(2.3) report()
+  count(6.0) place() fill(6.0) report()
+}
+main { lists() }

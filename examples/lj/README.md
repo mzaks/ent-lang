@@ -45,13 +45,13 @@ says, at step 0, what `melt.ent` says to every digit (`-6.7733681
 -4.6134356 -5.0197073`), and at step 100, of its own velocities,
 `0.7574531 -5.7585055 -4.6223613 0.20726105`.
 
-| 32,000 atoms, 100 steps (native, 2026-10-22) | one core | 12 threads |
+| 32,000 atoms, 100 steps (native, 2026-10-22) | one core | all threads |
 |---|---|---|
-| `melt.ent`, half lists | 0.92 s | 0.20 s |
-| `melt_full.ent`, full lists | 1.69 s | 0.25 s |
+| `melt.ent`, half lists | 0.90 s | 0.167 s (23) |
+| `melt_full.ent`, full lists | 1.61 s | 0.180 s (23) |
 | `check/melt.c`, half lists, full lists | 1.09 s, 1.65 s | |
-| LAMMPS (half lists; `-sf omp` with threads) | 0.74 s | 0.12 s |
-| before the lists: every atom of the 27 cells around, every step | 4.76 s | 0.76 s |
+| LAMMPS (half lists; `-sf omp` with threads) | 0.74 s | 0.12 s (12) |
+| before the lists: every atom of the 27 cells around, every step | 4.76 s | 0.76 s (12) |
 
 - Half lists are the faster on one core: half the pairs. On many threads
   the other atom's force is sent, and put on lists to be combined in the
@@ -63,13 +63,17 @@ says, at step 0, what `melt.ent` says to every digit (`-6.7733681
   copy of the forces of their own, which differ in the last bits with
   the number of threads.
 - On one core `melt.ent` is faster than its own C, which goes over
-  all the atoms around and drops those before it. Of its 9.6 ms a step,
-  the forces are 6.6 and the lists 3.0 (the `near` scan twice, counting
-  then filling, 0.7 and 1.9, and the index 0.4); `near` leaves out the
+  all the atoms around and drops those before it. Of its 9.0 ms a step,
+  the forces are 6.4 and the lists 2.1 (the `near` scan twice, counting
+  then filling, 0.7 and 1.4, and the index 0.05); `near` leaves out the
   rows of cells out of reach and, with `after me`, the rows before the
   atom's own, and goes along the rest as runs of rows. The count's scan
-  is vectorized, the fill's is not, as it writes. LAMMPS's lists take
-  1.2 ms a step, its pairs 5.9.
+  is done many rows at once; the fill's, as it writes, by blocks of 64
+  rows, which are within reach one bit each, many at once, then the
+  atoms of those bits (1.9 ms a step by a branch a row). With
+  `ENT_CFLAGS='-march=native -mno-gather'` the fill takes 1.0 and the
+  melt 0.84 s (LLVM loads x, y and z of a row with one gather). LAMMPS's
+  lists take 1.2 ms a step, its pairs 5.9.
 - On 12 threads, of 2.0 ms a step: the force loop 1.0, combining what
   it sent to `Pull` 0.4 (64 groups of the atoms at once, each in the
   order of the lists, counted and emptied on the threads too), the lists

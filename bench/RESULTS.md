@@ -3454,3 +3454,35 @@ And a loop alone with a thread a CPU (the LJ melt's force loop, the
 others a thread a core): the force loop 92 -> 86 ms in 100 steps, the
 melt 0.198 -> 0.203 s (the team made and unmade every step; the threads
 waiting): not kept.
+
+## 2026-10-22: a `near` that writes, by blocks of rows
+
+A `near` whose body writes (`examples/lj/lj.ent`'s `fill_pairs`, each
+atom's list written into its rows of `Pairs`) asked each row whether it
+is within reach by a branch, which goes one way or the other as it may
+(of 270 rows an atom, 38 within), and LLVM cannot do it many rows at once
+(it makes no compress stores). Now such a `near` goes by blocks of 64
+rows: a loop without branches gives which are within reach one bit each,
+many rows at once, then the body runs for each set bit (`math.cttz`), in
+the order of the rows. One whose body only reads and sets vars
+(`count_pairs`) stays as it was, all of it many rows at once: by blocks it
+was 127 ms where 68. The parser reads the body as the plain loop and,
+where it writes, again by blocks. The same output, to the bit.
+
+In C first (scratch, 32,000 dots at random, the same runs of rows): the
+count 5.3 ms, the fill by branches 33.4, by blocks with bits 11.1, by
+AVX-512 compress stores 10.8; so the bits are as good as compress stores.
+
+| native, on mains, the best of five | before | by blocks | and `-mno-gather` |
+|---|---|---|---|
+| LJ melt, half lists, one core | 0.924 s | 0.898 s | 0.839 s |
+| its fill (6 lists), traced | 186 ms | 138 ms | 97 ms |
+| LJ melt, half lists, 23 threads | 0.177 s | 0.167 s | 0.169 s |
+| LJ melt, full lists, one core | 1.70 s | 1.61 s | |
+| LJ melt, full lists, 23 threads | 0.200 s | 0.180 s | |
+
+Of the 138 ms, about 40 are LLVM's SLP vectorizer loading a row's x, y
+and z (three columns) with one gather (`vgatherqpd`) for each row within
+reach; `-mno-gather` (or `-fno-slp-vectorize`) leaves three loads, 97 ms.
+That is a flag of the whole program (ENT_CFLAGS), not yet chosen for all.
+

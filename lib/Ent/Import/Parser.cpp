@@ -5647,6 +5647,20 @@ LogicalResult Parser::ifWithVars(Location where, mlir::Value holds,
   return success();
 }
 
+// Whether an op of the statements in a `near` loop only reads, or sets
+// vars (which go round as values): such statements LLVM does many rows
+// at once as they are.
+static bool onlyReads(Operation *op) {
+  if (isa<arith::ArithDialect, math::MathDialect>(op->getDialect()))
+    return true;
+  if (auto invoke = dyn_cast<InvokeOp>(op))
+    return !invoke.getProc();
+  return isa<scf::IfOp, scf::ForOp, scf::YieldOp, BufferAtOp, BufferLenOp,
+             GetOp, ReadOp, LookupOp, TableAtOp, SameOp, NobodyOp, HasOp,
+             EntityOp, RowsStartOp, RowsCountOp, UnrealizedConversionCastOp>(
+      op);
+}
+
 // for [e,] b: Component, .. near (x, y[, z]) within r in Index [where c] { }
 //
 // The entities of a grid index within `r` of a place, in the order of the
@@ -5843,83 +5857,210 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
       start1 = arith::MaxSIOp::create(builder, where, start1, next);
       start2 = arith::MaxSIOp::create(builder, where, start2, next);
     }
-    // The runs one after the other, each a loop over its rows.
-    return loopWithVars(
-        where, zero, arith::ConstantIndexOp::create(builder, where, 2),
-        [&](mlir::Value run) -> LogicalResult {
-          mlir::Value second = arith::CmpIOp::create(
-              builder, where, arith::CmpIPredicate::ne, run, zero);
-          mlir::Value first =
-              arith::SelectOp::create(builder, where, second, start2, start1);
-          mlir::Value end =
-              arith::SelectOp::create(builder, where, second, end2, end1);
-          return loopWithVars(
-              where,
-              arith::IndexCastOp::create(builder, where, indexType, first),
-              arith::IndexCastOp::create(builder, where, indexType, end),
-              [&](mlir::Value counted) -> LogicalResult {
-                mlir::Value row = asIndex(
-                    where,
-                    arith::IndexCastOp::create(builder, where, i32, counted),
-                    IndexOfType::get(context, rows));
-                mlir::Value who =
-                    BufferAtOp::create(builder, where, EntityType::get(context),
-                                       rows, builder.getStringAttr("who"), row);
-                NearRows near{symbolName, row, {}};
-                mlir::Value distance;
-                for (unsigned d = 0; d < dims; ++d) {
-                  mlir::Value stored = BufferAtOp::create(
-                      builder, where, t, rows,
-                      builder.getStringAttr(index.positions[d]), row);
-                  mlir::Value seen =
-                      index.wrap
-                          ? InvokeOp::create(
-                                builder, where, t,
-                                FlatSymbolRefAttr::get(context,
-                                                       symbolName + "_image"),
-                                ValueRange{stored, at_[d], size}, UnitAttr())
-                                ->getResult(0)
-                          : stored;
-                  near.seen.push_back(
-                      {index.component, index.positions[d], seen});
-                  mlir::Value apart =
-                      arith::SubFOp::create(builder, where, seen, at_[d]);
-                  mlir::Value squared =
-                      arith::MulFOp::create(builder, where, apart, apart);
-                  distance = distance ? arith::AddFOp::create(builder, where,
-                                                              distance, squared)
-                                            .getResult()
-                                      : squared;
-                }
-                mlir::Value within = arith::CmpFOp::create(
-                    builder, where, arith::CmpFPredicate::OLE, distance, far);
-                return ifWithVars(where, within, [&]() -> LogicalResult {
-                  ScopeGuard scope(*this);
-                  llvm::SaveAndRestore inside(inEach, true);
-                  std::optional<NearRows> outer = nearRows;
-                  nearRows = near;
-                  auto restore =
-                      llvm::make_scope_exit([&] { nearRows = outer; });
-                  for (auto &[name, component] : bound) {
-                    Variable variable{Variable::Near, who, component, false};
-                    variable.which = row;
-                    bind(name, variable);
-                  }
-                  if (!entity.empty())
-                    bind(entity, Variable::ofValue(who));
-                  if (!condition)
-                    return parseBlock();
-                  FailureOr<mlir::Value> holds =
-                      emit(*condition, builder.getI1Type());
-                  if (failed(holds))
-                    return failure();
-                  if (!holds->getType().isInteger(1))
-                    return error(condition->loc, "'where' takes a bool");
-                  return ifWithVars(where, *holds,
-                                    [&] { return parseBlock(); });
+    // Where a row's entity is seen from the place, and how far it is,
+    // squared.
+    auto seenAt = [&](mlir::Value row, NearRows &near) -> mlir::Value {
+      mlir::Value distance;
+      for (unsigned d = 0; d < dims; ++d) {
+        mlir::Value stored =
+            BufferAtOp::create(builder, where, t, rows,
+                               builder.getStringAttr(index.positions[d]), row);
+        mlir::Value seen =
+            index.wrap
+                ? InvokeOp::create(
+                      builder, where, t,
+                      FlatSymbolRefAttr::get(context, symbolName + "_image"),
+                      ValueRange{stored, at_[d], size}, UnitAttr())
+                      ->getResult(0)
+                : stored;
+        near.seen.push_back({index.component, index.positions[d], seen});
+        mlir::Value apart = arith::SubFOp::create(builder, where, seen, at_[d]);
+        mlir::Value squared =
+            arith::MulFOp::create(builder, where, apart, apart);
+        distance =
+            distance ? arith::AddFOp::create(builder, where, distance, squared)
+                           .getResult()
+                     : squared;
+      }
+      return distance;
+    };
+    auto rowOf = [&](mlir::Value counted) -> mlir::Value {
+      return asIndex(where,
+                     arith::IndexCastOp::create(builder, where, i32, counted),
+                     IndexOfType::get(context, rows));
+    };
+    // The statements for the entity of a row within reach.
+    auto visit = [&](mlir::Value row, const NearRows &near) -> LogicalResult {
+      mlir::Value who =
+          BufferAtOp::create(builder, where, EntityType::get(context), rows,
+                             builder.getStringAttr("who"), row);
+      ScopeGuard scope(*this);
+      llvm::SaveAndRestore inside(inEach, true);
+      std::optional<NearRows> outer = nearRows;
+      nearRows = near;
+      auto restore = llvm::make_scope_exit([&] { nearRows = outer; });
+      for (auto &[name, component] : bound) {
+        Variable variable{Variable::Near, who, component, false};
+        variable.which = row;
+        bind(name, variable);
+      }
+      if (!entity.empty())
+        bind(entity, Variable::ofValue(who));
+      if (!condition)
+        return parseBlock();
+      FailureOr<mlir::Value> holds = emit(*condition, builder.getI1Type());
+      if (failed(holds))
+        return failure();
+      if (!holds->getType().isInteger(1))
+        return error(condition->loc, "'where' takes a bool");
+      return ifWithVars(where, *holds, [&] { return parseBlock(); });
+    };
+    // A run's first and end, of the two.
+    auto runAt = [&](mlir::Value run) -> std::pair<mlir::Value, mlir::Value> {
+      mlir::Value second = arith::CmpIOp::create(
+          builder, where, arith::CmpIPredicate::ne, run, zero);
+      return {
+          arith::IndexCastOp::create(
+              builder, where, indexType,
+              arith::SelectOp::create(builder, where, second, start2, start1)),
+          arith::IndexCastOp::create(
+              builder, where, indexType,
+              arith::SelectOp::create(builder, where, second, end2, end1))};
+    };
+    mlir::Value two = arith::ConstantIndexOp::create(builder, where, 2);
+    // The runs one after the other, each a loop over its rows, asking of
+    // each whether it is within reach: where the statements only read
+    // and set vars, the loop is done many rows at once as it is.
+    auto plain = [&]() -> LogicalResult {
+      return loopWithVars(
+          where, zero, two, [&](mlir::Value run) -> LogicalResult {
+            auto [first, end] = runAt(run);
+            return loopWithVars(
+                where, first, end, [&](mlir::Value counted) -> LogicalResult {
+                  mlir::Value row = rowOf(counted);
+                  NearRows near{symbolName, row, {}};
+                  mlir::Value within = arith::CmpFOp::create(
+                      builder, where, arith::CmpFPredicate::OLE,
+                      seenAt(row, near), far);
+                  return ifWithVars(where, within,
+                                    [&] { return visit(row, near); });
                 });
-              });
-        });
+          });
+    };
+    // Where they write, a branch for each row would go one way or the
+    // other as it may: each run by blocks of 64 rows instead, which of a
+    // block's rows are within reach one bit each (a loop without
+    // branches, done many rows at once), then the statements for each of
+    // those, in the order of the rows.
+    auto blocked = [&]() -> LogicalResult {
+      mlir::Value one = arith::ConstantIndexOp::create(builder, where, 1);
+      mlir::Value block = arith::ConstantIndexOp::create(builder, where, 64);
+      return loopWithVars(
+          where, zero, two, [&](mlir::Value run) -> LogicalResult {
+            auto [first, end] = runAt(run);
+            mlir::Value length = arith::MaxSIOp::create(
+                builder, where,
+                arith::SubIOp::create(builder, where, end, first), zero);
+            mlir::Value blocks = arith::DivUIOp::create(
+                builder, where,
+                arith::AddIOp::create(
+                    builder, where, length,
+                    arith::ConstantIndexOp::create(builder, where, 63)),
+                block);
+            return loopWithVars(
+                where, zero, blocks, [&](mlir::Value b) -> LogicalResult {
+                  mlir::Value low = arith::AddIOp::create(
+                      builder, where, first,
+                      arith::MulIOp::create(builder, where, b, block));
+                  mlir::Value many = arith::MinSIOp::create(
+                      builder, where, block,
+                      arith::SubIOp::create(builder, where, end, low));
+                  auto bits =
+                      scf::ForOp::create(builder, where, zero, many, one,
+                                         ValueRange{integer(where, i64, 0)});
+                  {
+                    OpBuilder::InsertionGuard guard(builder);
+                    builder.setInsertionPointToStart(bits.getBody());
+                    mlir::Value i = bits.getInductionVar();
+                    NearRows near{symbolName, {}, {}};
+                    mlir::Value within = arith::CmpFOp::create(
+                        builder, where, arith::CmpFPredicate::OLE,
+                        seenAt(rowOf(arith::AddIOp::create(builder, where, low,
+                                                           i)),
+                               near),
+                        far);
+                    mlir::Value bit = arith::ShLIOp::create(
+                        builder, where,
+                        arith::ExtUIOp::create(builder, where, i64, within),
+                        arith::IndexCastOp::create(builder, where, i64, i));
+                    scf::YieldOp::create(
+                        builder, where,
+                        mlir::Value(arith::OrIOp::create(
+                            builder, where, bits.getRegionIterArg(0), bit)));
+                  }
+                  // (The bits not yet visited go round as a var of a
+                  // name no program can write.)
+                  ScopeGuard hidden(*this);
+                  const char *left = " near bits";
+                  bind(left, Variable::ofVar(bits.getResult(0)));
+                  mlir::Value hits = arith::IndexCastOp::create(
+                      builder, where, indexType,
+                      math::CtPopOp::create(builder, where, bits.getResult(0)));
+                  return loopWithVars(
+                      where, zero, hits, [&](mlir::Value) -> LogicalResult {
+                        mlir::Value unvisited = lookup(left)->value;
+                        mlir::Value at = math::CountTrailingZerosOp::create(
+                            builder, where, unvisited);
+                        llvm::find_if(llvm::reverse(scopes),
+                                      [&](auto &s) { return s.count(left); })
+                            ->find(left)
+                            ->second.value = arith::AndIOp::create(
+                            builder, where, unvisited,
+                            arith::SubIOp::create(builder, where, unvisited,
+                                                  integer(where, i64, 1)));
+                        mlir::Value row = rowOf(arith::AddIOp::create(
+                            builder, where, low,
+                            arith::IndexCastOp::create(builder, where,
+                                                       indexType, at)));
+                        NearRows near{symbolName, row, {}};
+                        seenAt(row, near);
+                        return visit(row, near);
+                      });
+                });
+          });
+    };
+    // Which: the statements read as the plain loop first, and again as
+    // blocks where they write.
+    Lexer lexerBefore = lexer;
+    Token tokenBefore = token;
+    const char *endBefore = previousEnd;
+    SmallVector<VarState> varsBefore = captureVars();
+    Block *into = builder.getInsertionBlock();
+    Operation *last = builder.getInsertionPoint() == into->begin()
+                          ? nullptr
+                          : &*std::prev(builder.getInsertionPoint());
+    if (failed(plain()))
+      return failure();
+    auto firstMade = last ? std::next(last->getIterator()) : into->begin();
+    auto madeEnd = builder.getInsertionPoint();
+    bool writes = false;
+    for (Operation &op : llvm::make_range(firstMade, madeEnd))
+      op.walk([&](Operation *inner) {
+        if (!onlyReads(inner))
+          writes = true;
+      });
+    if (!writes)
+      return success();
+    SmallVector<Operation *> made;
+    for (Operation &op : llvm::make_range(firstMade, madeEnd))
+      made.push_back(&op);
+    for (Operation *op : llvm::reverse(made))
+      op->erase();
+    restoreVars(varsBefore);
+    lexer = lexerBefore;
+    token = tokenBefore;
+    previousEnd = endBefore;
+    return blocked();
   };
   // How far, at least, the entities of a cell are from the place on side
   // `d`, squared: a row of cells (or a cell) farther than `r` is not

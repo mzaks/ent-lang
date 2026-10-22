@@ -2041,6 +2041,12 @@ are worked out each time the index is made, and may read uniques.
 - The body is that of a `for` inside a `for`: vars of the `for` around
   go round in it, and what it reads of the index is as it was made,
   before the `for` around started.
+- Where the body only reads and sets vars, the rows are asked one by
+  one whether they are within `r` (LLVM does many at once). Where it
+  writes (a buffer's row, a send, a proc), the rows go by blocks of 64:
+  which are within `r` one bit each, then the body for each of those, in
+  the order of the rows; so no branch for a row that may go either way
+  (`examples/lj/lj.ent`'s lists, filled so).
 
 ### Entities given to a fn or proc
 

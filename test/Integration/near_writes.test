@@ -1,0 +1,25 @@
+// A `near` whose statements write goes along its rows by blocks of 64:
+// which rows are within reach one bit each, then the statements for each
+// of those (math.ctpop, math.cttz); one whose statements only read and
+// set vars goes row by row, as LLVM does many rows at once
+// (Inputs/near_writes.ent). Each dot's list written so is the list the
+// reading `near` sees, in the same order, within less than a cell, more,
+// and more than half the box, where a run of rows has up to 200. The
+// same on one core and on all.
+// RUN: ent-translate --import-ent %S/Inputs/near_writes.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+// RUN: %ent run %S/Inputs/near_writes.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/near_writes.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// IR-LABEL: ent.system @count(
+// IR-NOT:   math.ctpop
+// IR-LABEL: ent.system @fill(
+// IR:       math.ctpop
+// IR:       math.cttz
+// IR:       ent.buffer.set
+
+// CHECK:      same lists 400 of 400, pairs 1599
+// CHECK-NEXT: same lists 400 of 400, pairs 17645
+// CHECK-NEXT: same lists 400 of 400, pairs 101042
