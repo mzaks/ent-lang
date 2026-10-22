@@ -4,6 +4,7 @@ import console
 import wyhash
 component Thing { key: i64, n: i64 } capacity 131072
 buffer Seen { n: i64 } capacity 131072
+buffer Twice { n: i64, key: i64 } capacity 262144
 unique Run { step: i32 }
 
 world {
@@ -16,10 +17,17 @@ world {
 
 system sort() {
   Seen = []
-  for t: Thing by t.key { Seen += { n: t.n } }
+  Twice = []
+  for t: Thing by t.key {
+    Twice += { n: t.n, key: t.key }
+    Seen += { n: t.n }
+    Twice += { n: -t.n, key: t.key + 1 }
+  }
   var sum: u64 = 0
   for i in 0..len(Seen) { sum = wymix(sum + 1, Seen[i].n as u64) }
-  put("step {Run.step}: {len(Seen)} rows, order {sum}")
+  var both: u64 = 0
+  for i in 0..len(Twice) { both = wymix(both + Twice[i].key as u64, Twice[i].n as u64) }
+  put("step {Run.step}: {len(Seen)} rows, order {sum}, {len(Twice)} rows two each, {both}")
 }
 
 system churn() {

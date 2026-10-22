@@ -15876,6 +15876,59 @@ static void callOrderedSort(IRRewriter &rewriter, Location loc,
   memref::DeallocOp::create(rewriter, loc, spareIds);
 }
 
+/// On an append of a query that goes by a field and may be visited on
+/// many threads (see appendsOnly): which of the rows each entity gives
+/// its buffer it is, from 0, in the order of the body.
+static constexpr llvm::StringLiteral kOrderedSlotAttr = "ent.ordered_slot";
+
+/// Whether the body of `query`, which goes by a field, does nothing but
+/// give rows to buffers, each `+=` once for each entity (in the body
+/// itself, under no `if` or loop), besides what only reads and computes:
+/// then where its rows go is known before it runs, the entity's place in
+/// the order times its rows, and the entities may be visited on many
+/// threads. Says how many rows each entity gives each buffer, in the
+/// order the buffers are first given one.
+static std::optional<SmallVector<std::pair<StringAttr, int64_t>>>
+appendsOnly(QueryOp query) {
+  SmallVector<std::pair<StringAttr, int64_t>> rows;
+  Block *top = &query.getBody().front();
+  WalkResult result = query.getBody().walk([&](Operation *op) {
+    if (auto append = dyn_cast<AppendOp>(op)) {
+      if (op->getBlock() != top || rankSplitBuffers.contains(
+                                       append.getBufferAttr().getAttr()))
+        return WalkResult::interrupt();
+      StringAttr buffer = append.getBufferAttr().getAttr();
+      auto known = llvm::find_if(rows, [&](auto &entry) {
+        return entry.first == buffer;
+      });
+      if (known == rows.end()) {
+        rows.push_back({buffer, 0});
+        known = std::prev(rows.end());
+      }
+      op->setAttr(kOrderedSlotAttr,
+                  IntegerAttr::get(IntegerType::get(op->getContext(), 64),
+                                   known->second++));
+      return WalkResult::advance();
+    }
+    if (auto invoke = dyn_cast<InvokeOp>(op))
+      return invoke.getProc() ? WalkResult::interrupt()
+                              : WalkResult::advance();
+    if (auto handed = dyn_cast<BufferOfOp>(op))
+      return handed.getResult().getType().getMut() ? WalkResult::interrupt()
+                                                   : WalkResult::advance();
+    if (isa<GetOp, ReadOp, BufferAtOp, BufferLenOp, LookupOp, EntityOp,
+            HasOp, BoundOp, scf::IfOp, scf::ForOp, scf::WhileOp,
+            scf::YieldOp, scf::ConditionOp, YieldOp>(op))
+      return WalkResult::advance();
+    if (op->getNumRegions() == 0 && isMemoryEffectFree(op))
+      return WalkResult::advance();
+    return WalkResult::interrupt();
+  });
+  if (result.wasInterrupted() || rows.empty())
+    return std::nullopt;
+  return rows;
+}
+
 /// Replace a query that goes by a field (`by @C "f"`) by a loop over its
 /// entities in that order: they are listed with the field's values, the
 /// smallest first, and each is then found by its id, since rows may move
@@ -15978,25 +16031,60 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
                   TypeRange{i64})
               .getResult(0));
     }
-    auto gather = scf::ForOp::create(rewriter, loc, from, rows, one);
+    // Each row at its place after those listed before (on many threads,
+    // built for them, from as many rows on as are sorted on them).
     OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointToStart(gather.getBody());
-    Value row = gather.getInductionVar();
-    Value stored = memref::LoadOp::create(
-        rewriter, loc, world.column(*archetype, byComponent, byField),
-        ValueRange{row});
-    Value listed =
+    Value before =
         memref::LoadOp::create(rewriter, loc, cells, ValueRange{zero});
+    auto list = [&](Value row) {
+      Value stored = memref::LoadOp::create(
+          rewriter, loc, world.column(*archetype, byComponent, byField),
+          ValueRange{row});
+      Value listed = arith::AddIOp::create(
+          rewriter, loc, before, arith::SubIOp::create(rewriter, loc, row, from));
+      memref::StoreOp::create(
+          rewriter, loc,
+          keyOf(stored, archetype->find(byComponent, byField)->type), keys,
+          ValueRange{listed});
+      memref::StoreOp::create(rewriter, loc,
+                              world.entityId(loc, *archetype, row), ids,
+                              ValueRange{listed});
+    };
+    auto serially = [&]() {
+      auto gather = scf::ForOp::create(rewriter, loc, from, rows, one);
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(gather.getBody());
+      list(gather.getInductionVar());
+    };
+    if (options.parallelEntities && !spread &&
+        int64_t(archetype->capacity) >= options.parallelMinEvents) {
+      auto ifMany = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::uge,
+              arith::SubIOp::create(rewriter, loc, rows, from),
+              arith::ConstantIndexOp::create(rewriter, loc,
+                                             options.parallelMinEvents)),
+          /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(ifMany.thenBlock());
+        auto gather = scf::ParallelOp::create(rewriter, loc, ValueRange{from},
+                                              ValueRange{rows},
+                                              ValueRange{one});
+        rewriter.setInsertionPoint(gather.getBody()->getTerminator());
+        list(gather.getInductionVars().front());
+        rewriter.setInsertionPointToStart(ifMany.elseBlock());
+        serially();
+      }
+    } else {
+      serially();
+    }
     memref::StoreOp::create(
         rewriter, loc,
-        keyOf(stored, archetype->find(byComponent, byField)->type), keys,
-        ValueRange{listed});
-    memref::StoreOp::create(rewriter, loc,
-                            world.entityId(loc, *archetype, row), ids,
-                            ValueRange{listed});
-    memref::StoreOp::create(rewriter, loc,
-                            arith::AddIOp::create(rewriter, loc, listed, one),
-                            cells, ValueRange{zero});
+        arith::AddIOp::create(rewriter, loc, before,
+                              arith::SubIOp::create(rewriter, loc, rows, from)),
+        cells, ValueRange{zero});
   }
   // (On many threads from as many entities as a reactive query's events
   // are walked on them.)
@@ -16042,6 +16130,108 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
           rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 32),
           world.pendingList(*archetype), ValueRange{clear.getInductionVar()});
     }
+
+  // A body that only gives rows to buffers, built for many threads and
+  // from as many entities on as the sort: each entity at its place in the
+  // order on whichever thread, writing its rows where they go (the place
+  // times the rows it gives, after those the buffer had), the buffers
+  // given all the rows first. The same rows as one after another.
+  std::optional<SmallVector<std::pair<StringAttr, int64_t>>> appended;
+  if (!turn && !spread && options.parallelEntities)
+    appended = appendsOnly(query);
+  if (appended) {
+    Value listed = memref::LoadOp::create(rewriter, loc, cells,
+                                          ValueRange{zero});
+    auto ifMany = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::uge, listed,
+            arith::ConstantIndexOp::create(rewriter, loc,
+                                           options.parallelMinEvents)),
+        /*withElseRegion=*/true);
+    rewriter.setInsertionPointToStart(ifMany.thenBlock());
+    Type i64 = rewriter.getI64Type();
+    Value many = arith::IndexCastOp::create(rewriter, loc, i64, listed);
+    llvm::DenseMap<Attribute, Value> bases;
+    for (auto [name, rows] : *appended) {
+      const WorldBuffer &buffer = layout.getBuffer(name);
+      Value counter = world.bufferCount(buffer);
+      Value base = memref::LoadOp::create(rewriter, loc, counter,
+                                          ValueRange{zero});
+      Value end = arith::AddIOp::create(
+          rewriter, loc, base,
+          arith::MulIOp::create(
+              rewriter, loc, many,
+              arith::ConstantIntOp::create(rewriter, loc, rows, 64)));
+      cf::AssertOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::ule, end,
+              arith::ConstantIntOp::create(rewriter, loc, buffer.capacity,
+                                           64)),
+          rewriter.getStringAttr("no room for another row: the buffer @" +
+                                 BufferOp(buffer.op).getSymName() + " holds " +
+                                 Twine(buffer.capacity) +
+                                 "; 'capacity' gives more"));
+      memref::StoreOp::create(rewriter, loc, end, counter, ValueRange{zero});
+      bases[name] = base;
+    }
+    auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                        ValueRange{listed}, ValueRange{one});
+    {
+      OpBuilder::InsertionGuard inLoop(rewriter);
+      rewriter.setInsertionPoint(each.getBody()->getTerminator());
+      Value at = each.getInductionVars().front();
+      Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{at});
+      Value place = arith::IndexCastOp::create(rewriter, loc, i64, at);
+      emitLocate(
+          rewriter, loc, layout, world, id,
+          [&](const WorldArchetype &archetype) {
+            return llvm::is_contained(matched, &archetype);
+          },
+          FlatSymbolRefAttr(), TypeRange{},
+          [&](const WorldArchetype &archetype, Value row,
+              Value) -> SmallVector<Value> {
+            OpBuilder::InsertionGuard guard(rewriter);
+            rewriter.setInsertionPoint(
+                rewriter.getInsertionBlock()->getTerminator());
+            emitQueryBody(rewriter, query, IRMapping(), archetype, world,
+                          layout, row, world.count(loc, archetype), tick,
+                          Value(), /*parallel=*/false,
+                          /*directApplies=*/true, KnownParent(),
+                          /*marksPending=*/false);
+            return {};
+          },
+          []() -> SmallVector<Value> { return {}; });
+      // Each row where it goes.
+      SmallVector<AppendOp> rows;
+      each.getBody()->walk([&](AppendOp append) { rows.push_back(append); });
+      for (AppendOp append : rows) {
+        rewriter.setInsertionPoint(append);
+        StringAttr name = append.getBufferAttr().getAttr();
+        int64_t given = llvm::find_if(*appended, [&](auto &entry) {
+                          return entry.first == name;
+                        })->second;
+        int64_t slot =
+            append->getAttrOfType<IntegerAttr>(kOrderedSlotAttr).getInt();
+        Value where = arith::AddIOp::create(
+            rewriter, loc, bases.lookup(name),
+            arith::AddIOp::create(
+                rewriter, loc,
+                arith::MulIOp::create(
+                    rewriter, loc, place,
+                    arith::ConstantIntOp::create(rewriter, loc, given, 64)),
+                arith::ConstantIntOp::create(rewriter, loc, slot, 64)));
+        SmallVector<Value> values;
+        for (Value value : append.getValues())
+          values.push_back(world.toStorage(loc, value));
+        storeRow(rewriter, loc, world, layout.getBuffer(name),
+                 world.toIndex(loc, where), values);
+        rewriter.eraseOp(append);
+      }
+    }
+    rewriter.setInsertionPointToStart(ifMany.elseBlock());
+  }
 
   auto visit = scf::WhileOp::create(
       rewriter, loc, TypeRange{}, ValueRange{},

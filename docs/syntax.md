@@ -464,10 +464,12 @@ after the filters, where `top down` stands for a tree:
   0.24 ms where the storage's order is the one asked for backwards, and
   0.18 ms by numbers at random (this machine, built for it). So an order
   at random is a number at random for each entity to go by. Built with
-  `--parallel`, from 16,384 entities on, the keys are sorted on many
-  threads, by the same passes and so in the same order; the body still
-  runs for one entity after another (a million by numbers at random: 10
-  ms where 12.9 on one core, of which 7 the entities visited).
+  `--parallel`, from 16,384 entities on, the keys are listed and sorted
+  on many threads, by the same passes and so in the same order; and
+  where the body does nothing but give rows to buffers (each `+=` in the
+  body itself, under no `if` or loop) and read, the entities are visited
+  on many threads too, each writing its rows where they go in the order.
+  A million by numbers at random so: 5.9 ms where 11.1 on one core.
 - A `var` from outside is still not assigned in it: a unique does that.
   It does not react (`on`) or go along a tree, and binds what its own
   entities have, no arrows.

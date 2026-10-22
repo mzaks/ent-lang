@@ -320,7 +320,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 
 | Step | Work | Shows | Status |
 |---|---|---|---|
-| 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | the radix sort of `for ... by` on many threads (see below); visits, GPU to do |
+| 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | `for ... by` listed, sorted and (giving rows) visited on many threads (see below); GPU to do |
 | 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | |
 | 3 | Hash index and `unique` | `incremental`, change tracking | |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); query forms, float keys, ties, clustered to do |
@@ -349,12 +349,17 @@ so.
   which `for`s already do on many threads and on the GPU. Nothing of it
   is to port; the grid (step 2) is where counting by bucket and a running
   sum come together, and that is what to build on this.
-- A million entities by keys at random: 10 ms a `for ... by` where it
-  was 12.9 on one core; the placing passes on 12 threads, 91% busy. What
-  is left is the visit: the body for one entity after another, each
-  found by its id (7 ms). A body that only gives rows to buffers could be
-  visited on many threads, each entity at its place in the order writing
-  the rows there.
+- The keys are listed on many threads too, each archetype's rows at
+  their place. And a body that does nothing but give rows to buffers
+  (each `+=` once for each entity, in the body itself) and read is
+  visited on many threads: the buffers are given all the rows first, and
+  each entity writes its own at its place in the order times the rows it
+  gives, after those the buffer had. So an index made anew, whose `for
+  ... by` is such a body.
+- A million entities by keys at random, 12 threads: 5.9 ms a `for ...
+  by` where it is 11.1 on one core (10.0 with only the sort on many
+  threads); 0.84 ms of it on one thread (the scans between the passes,
+  and what is allocated). 120,000: 0.70 ms where 0.84.
 - The GPU: not yet (`for ... by` is not for a `gpu system`).
 
 ## 9. When it is done

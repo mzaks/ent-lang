@@ -1,13 +1,15 @@
 // A `for ... by` over 100,000 entities: built --parallel their keys are
-// sorted on many threads (from 16,384 on), by the same passes, so in the
-// same order as on one: those alike in the order they are stored, those
-// below nought first. The order, as a hash of who came when, the same
-// both ways, each time.
+// listed and sorted on many threads (from 16,384 on), by the same passes,
+// so in the same order as on one: those alike in the order they are
+// stored, those below nought first. Its body only gives rows to buffers,
+// so the entities are visited on many threads too, each writing its rows
+// at its place in the order (one to `Seen`, two to `Twice`, between
+// them). The rows, as hashes, the same both ways, each time.
 // RUN: %ent run %S/Inputs/ordered_parallel.ent 2>/dev/null > %t.one
 // RUN: %ent run --parallel %S/Inputs/ordered_parallel.ent 2>/dev/null > %t.all
 // RUN: cmp %t.one %t.all
 // RUN: FileCheck %s --input-file=%t.one
 
-// CHECK:      step 0: 100000 rows, order 5796329773731977640
-// CHECK-NEXT: step 1: 100000 rows, order 3085602959123592563
-// CHECK:      step 4: 100000 rows, order 6974316037733467605
+// CHECK:      step 0: 100000 rows, order 5796329773731977640, 200000 rows two each, 18044514214991199808
+// CHECK-NEXT: step 1: 100000 rows, order 3085602959123592563, 200000 rows two each, 13725720965719220983
+// CHECK:      step 4: 100000 rows, order 6974316037733467605, 200000 rows two each, 8109710512045392201
