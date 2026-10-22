@@ -1,0 +1,364 @@
+# Indexes
+
+Status: a proposal, built in stages. What is built is said where it
+stands, under **Built**; `docs/syntax.md` (Indexes) is the reference for
+what the language has.
+
+## 1. Goal
+
+Declared indexes, so that queries find entities by key, by order, by
+position and by similarity without scanning every row. The compiler, not
+the program, decides as much as it can: how an index is stored, when it
+is kept up to date, and which queries use it.
+
+## 2. What there is to build on
+
+- **Relations** are stored as compressed sparse rows (CSR) sorted by
+  source, with an index by target where the program goes along incoming
+  edges (`ent.relation`, `include/Ent/EntOps.td`).
+- **Sorted trees** (`relation ... tree sorted`) keep an archetype's rows
+  in breadth-first order (`docs/syntax.md`, Trees;
+  `test/Transforms/lower-sorted*.mlir`).
+- **Orders by hand in buffers:** `Grid` (`docs/syntax.md`, Buffers), and
+  `Order`/`Index` filled by a counting sort with running sums in the
+  epidemic (`docs/gpu.md`, `lay` and `pair`).
+- **`for ... by field`**: the entities in the order of a whole number,
+  by a radix sort of the bytes in which the numbers differ.
+- **Lookups** (`ent.lookup`) see other entities as they were when the
+  query started (Q3).
+- **Access analysis** (`lib/Ent/Transforms/Access.cpp`) knows every
+  system's reads and writes, column by column; `--ent-schedule` places
+  systems in stages by it.
+- `docs/sync-points.md` ("Defined against this model later") has the
+  rule for indexes: **they are maintained at commit points, so an index
+  is consistent at every query's start and, within a query, reflects the
+  state at its start, like lookups.** This spec takes it as it is.
+
+## 3. Principles
+
+1. **As of the start.** A query reads an index as it was when the query
+   started. What a query writes reaches the index at the next commit
+   point.
+2. **Deterministic.** The same program and input give the same contents
+   and the same order of an index, on one core, on many and on the GPU.
+   Ties go by row order. Seeds (LSH, k-means) are fixed when the program
+   is compiled, or set in a unique.
+3. **One backend for making them.** Most indexes are rows sorted or put
+   in buckets by a key made of fields. One primitive does that: count per
+   bucket, an exclusive running sum, scatter; on one core, in parallel
+   loops, and on the GPU. The grid, the Morton order, hash buckets, LSH
+   and IVF lists are built on it.
+4. **An index is derived.** It is never the source of what is true:
+   without it the program is slower, never different. Except `unique`,
+   which also checks (5.1).
+5. **Fixed capacity**, as buffers and relations have. More stops the
+   program, saying so.
+
+**Built:** 1 for systems: a system reads an index as it was when the
+system started, also where it changes the keys itself. 4: the rows are a
+transient buffer, made again from the entities after a world is loaded.
+5: an index holds as many rows as its first component's capacity. 2 and
+3 not yet: see 5.2 for ties, and step 1 for the backend.
+
+## 4. Keeping an index up to date
+
+An index has one of three policies. The compiler infers it (section 7)
+unless the program says which.
+
+| Policy | When the index is brought up to date | Best where |
+|---|---|---|
+| `rebuild` | At the commit point after the last writer of a key field in the frame | Many keys change each frame (positions) |
+| `incremental` | At the commit point, only the rows whose key changed, or that were spawned or despawned | Keys change rarely (names, ids) |
+| `lazy` | Before the first query that reads it after a write | Readers are rare or conditional |
+
+`incremental` needs to know which rows changed: the change tracking that
+reactive queries have already (`test/Transforms/lower-reactive*.mlir`),
+not a second mechanism.
+
+**Built:** `lazy` only, and it is all an index has. The pass
+`--ent-indexes` runs the index's update before every system that reads
+it, on the condition that something changed since it was last made; it
+knows what changed from the access analysis: after a system that changes
+which entities it holds (spawns, despawns, moves) it is made anew by a
+sort; after one that changes only keys or copied fields, every entity
+writes its own row again (in parallel, from 16,384 entities on) and the
+rows out of order are put back by insertion. This is not the
+`incremental` above: every row is written, not only those that changed.
+
+## 5. Kinds of index
+
+The syntax below shows the idea; it is settled in the style of
+`docs/syntax.md` when a kind is built. A kind needs `ent.` ops first, the
+surface after, as for the rest of the language.
+
+### 5.1 Hash index (equality)
+
+```
+index Player.name hash unique capacity 4096
+for p in Player where name == "ada" { ... }   // or: Player by name "ada"
+```
+
+- Open addressing, a power-of-two table, linear probing.
+- Hash functions: multiply-shift (Fibonacci) for whole numbers and
+  `entity`, wyhash for `text` (`devices/wyhash.ent`). Fixed and seedable.
+- `unique`: two entities with the same key at a commit point stop the
+  program, naming the key and both entities.
+- For: an entity by name or an id from outside, a netlist's signal name
+  to its entity (AIGER and SPICE import), network ids.
+
+### 5.2 Sorted index (order, ranges, top-k)
+
+```
+index Traffic of Car by key { x: Spot.x, v: Speed.v }
+```
+
+- **Secondary:** the entities with the index's components in the order
+  of a key, apart from where they are stored, so that an archetype can
+  have several orders, which sorted trees cannot, and an order can go
+  over several archetypes.
+- **Clustered (optional):** the archetype's rows themselves in the
+  key's order, as `tree sorted` keeps them. One clustered order an
+  archetype; the compiler rejects two.
+- Made by a radix sort, for whole-number keys and floats (by the usual
+  flip of the sign bit). Ties in row order.
+- For: queues of events, top-k, VSIDS-like orders in the SAT solver,
+  leaderboards, the car ahead and the cars beside it
+  (`examples/traffic/lanes.ent`).
+
+**Built** (secondary, 2026-10-22; `docs/syntax.md`, Indexes):
+
+- `index Name of Component, .. by field { name: Component.field, .. }`:
+  a row for each entity, with its key (`key`), the entity (`who`) and
+  the fields it copies, which a scan of the rows reads without looking
+  up the entities. Each entity keeps its row in a field of the first
+  component (`row_in_Name`): `Name.row(e)` is one lookup.
+- Read as a buffer that only systems read (`Name[r].x`, `len(Name)`,
+  handed to a fn), with `Name.find(key)`, the first row not below a key.
+  No query form uses it yet (`for e in Event ordered by time where ...`).
+- Ties: in row order where it is made anew; where it is made again in
+  place, as they were in it. To be made the same (principle 2).
+- Keys are whole numbers only, as for `for ... by`.
+- `examples/traffic/lanes.ent` uses it: to the bit what the C version
+  gives, as fast as the order it kept by hand, and its update six times
+  cheaper made again in place (`bench/traffic/RESULTS.md`).
+
+### 5.3 B+ tree (large, slowly changing, ordered)
+
+- The queries of 5.2, kept `incremental` with O(log n) updates.
+- Nodes in a node pool of fixed capacity, a buffer, 8 to 16 keys a node
+  (one or two cache lines); leaves linked by `index of` for ranges.
+- One writer, at the commit point: no latches.
+- Worth it only for large sets of keys (100,000 and more) of which few
+  change a frame; else the sorted index wins. After 5.2, measured
+  against it.
+
+### 5.4 Partitions by value (fields of few values)
+
+```
+index Unit.state partition      // state: an enum
+for u in Unit where state == .attacking { ... }
+```
+
+Two ways; the compiler picks one, or the program says which:
+
+- **In the archetype:** the value is a hidden tag of the archetype, so a
+  filter by it is free, but every change of it moves the entity (as
+  `apart` tags are kept).
+- **A bitmap or a list of rows for each value:** cheap to change, a scan
+  of the list to read.
+
+For: alive and dead, the states of units, satisfied and unsatisfied SAT
+clauses, resting and refractory neurons.
+
+### 5.5 Spatial indexes
+
+All take a position (2D or 3D, `f32` or whole numbers) and answer at
+least `within r of p` and `in box`; k-d trees also `nearest k`.
+
+```
+index Unit.pos grid cell 4.0 capacity 100000
+index Star.pos morton bits 21 capacity 10000000
+index Site.pos kdtree capacity 50000
+for o in Unit near u.pos within 3.0 { ... }
+for s in Site nearest 5 to p { ... }
+```
+
+| Kind | Made by | For |
+|---|---|---|
+| **Uniform grid** | Cell = floor(pos / cell size). A counting sort by cell, then a running sum gives each cell's start (the `lay` pattern) | Objects of a similar size, spread evenly: particles, boids, crowds, the broad phase of collisions |
+| **Linear quadtree or octree (Morton)** | Key = the bits of the quantized coordinates interleaved (Z order), radix sorted. A cell is a run of rows that share a prefix, found by halving | Uneven density, Barnes–Hut, levels of detail, sparse voxels. The general default |
+| **k-d tree** | Median splits, kept in breadth-first order (children at fixed places, as sorted trees are). Made again at the commit point | Nearest k of points that mostly stay |
+| **BVH (later)** | Over boxes, not points, made from the Morton order (LBVH) | Objects with extent: rays, line of sight, collisions of meshes and boxes |
+
+- Morton: the bits spread by shifts and masks (or `pdep`, x86 BMI2). A
+  query for neighbours looks at the cells next to it too, since the Z
+  curve jumps at the borders of quadrants. Hilbert later, perhaps.
+- Perhaps: the archetype's rows clustered by the Morton key, so that
+  neighbours are near in memory too. Measured on what reads neighbours
+  (`swarm`, `boxes`).
+- Not a quadtree of pointers made of a `tree` relation with cells as
+  entities: cells that split and merge are spawns and despawns every
+  frame.
+- A k-d tree's queries need a small stack: a buffer, or a fn that calls
+  itself.
+
+### 5.6 Relation indexes
+
+What relations have, extended:
+
+- An index by source and one by target for every relation whose edges
+  queries read either way (today: by target only where edges into an
+  entity are visited).
+- Indexes on edge fields: edges sorted or in buckets by a field (the
+  heaviest `weight` first, say).
+
+For: fan-in and fan-out in `examples/logic`, variables to clauses and
+back in the SAT solver, synapses by their neurons before and after.
+
+### 5.7 Similarity: locality-sensitive hashing (LSH)
+
+Hash functions under which similar entries collide.
+
+| Similarity | Family | Hash |
+|---|---|---|
+| Euclidean | Random projection | `floor((a·v + b) / w)`, `a` Gaussian, `b` in `[0, w)` |
+| Cosine, angle | SimHash | A bit for each random hyperplane: `sign(a·v)` |
+| Jaccard (sets) | MinHash | For each of k hash functions, the least over the set's elements |
+| Hamming (bits) | Bit sampling | A fixed random subset of the bits |
+
+- Bands: k hashes together are one bucket's key, in L tables. A
+  candidate is an entity that collides in one table at least; then the
+  real distance is checked. k and L are parameters.
+- Each table is a hash index of buckets (5.1's storage, the backend of
+  section 3). The L tables are made in parallel.
+- Projections and seeds fixed (principle 2).
+- For: states seen before (cycles in the logic simulator), equivalent
+  subcircuits, duplicate SAT clauses and candidates for subsumption,
+  agents that behave alike.
+
+### 5.8 Embeddings and similarity of meaning (ANN)
+
+Vectors of 384 to 1536 numbers, normalized where they come in, so that
+cosine similarity is a dot product. Making the embeddings is **not part
+of this**: a device or an `extern system` does it (ONNX Runtime,
+llama.cpp); ent-lang keeps them and indexes them.
+
+In this order:
+
+1. **Brute force** over int8 or binary vectors (binary: the sign bits,
+   compared by popcount), the best candidates ranked again with the full
+   `f32` vectors. One query loop; fits the GPU. Also what the recall of
+   all that follows is measured against.
+2. **IVF**, in ent-lang: k-means, each step two passes. Each vector
+   finds the nearest centroid; then adds itself into that centroid's
+   sums (`+=` into another entity, the same in parallel). The lists of
+   the clusters by the backend of section 3. A query searches the
+   `nprobe` nearest clusters. Product quantization of the codes, perhaps.
+3. **HNSW**, only from outside, behind an `extern system` (hnswlib or
+   FAISS): its inserts go one after another and depend on their order,
+   which does not go with indexes that are made deterministically at
+   commit points. Not built in ent-lang.
+
+For: search by meaning and retrieval for RAG, recommendations, what an
+agent or an NPC remembers, queries in plain language matched to
+entities.
+
+## 6. Semantics to say exactly
+
+For each kind, `docs/syntax.md` says:
+
+- What a query sees of an entity spawned, despawned or changed earlier
+  in the same frame (rule: what was committed before the query started).
+- In what order the results come (rule: by key, ties in row order; in
+  hash and LSH buckets, row order).
+- What happens beyond the capacity and where `unique` does not hold.
+- What `gpu system`s may read (an index is read only in a kernel; it
+  may itself be made on the GPU).
+- How `--ent-schedule` treats an index: making it is a run that reads
+  the key columns and writes the index, so what reads the index goes in
+  a later stage.
+
+**Built:** for the sorted index the first, the third (its capacity is
+the component's: no row more than there are entities) and the last (the
+update is a system like any other, run where `--ent-indexes` puts it,
+and staged by `--ent-schedule`). Order of ties: see 5.2. GPU: not yet.
+
+## 7. Compiler passes
+
+1. **Ops**: `ent.index` (the declaration: kind, key fields, capacity,
+   options, perhaps the policy) and ops or attributes for queries that
+   use one. The verifier checks that the key fields are there and of
+   types that can be keys, one clustered order an archetype, partitions
+   only of enums and small whole numbers.
+2. **`--ent-lower-indexes`** (or part of `--ent-lower-to-loops`): the
+   index's storage in the arena and the code that makes it and keeps it,
+   on the shared primitive.
+3. **Access**: making an index shows in `--ent-print-access`, and
+   `--ent-schedule` puts it in the earliest stage after the last writer
+   of its key fields.
+4. **`--ent-infer-indexes`** (the part that is ent-lang's own, last),
+   by the access analysis:
+   - the policy, from how often the key fields are written;
+   - declared indexes no query reads dropped, with a remark;
+   - indexes for queries that scan, suggested (equality: hash; ranges
+     and order: sorted; `near`: grid or Morton), as remarks first, made
+     by themselves only behind a flag.
+
+**Built**, otherwise: no `ent.index` op. The parser declares a buffer
+with an `ent.index` attribute (what it holds and is made of), a field
+for each entity's row, and, as ent-lang, the systems and the unique that
+make it and say whether it is up to date; `--ent-indexes` (first in
+`tools/ent`'s pipelines) places their runs by the access analysis
+(section 4). The update shows in `--ent-print-access` as the system it
+is.
+
+## 8. Order of the work
+
+Each step comes with lit and FileCheck tests (`test/Dialect`,
+`test/Transforms`), a test in `test/Integration`, its docs, and a
+benchmark in `bench/` with its numbers in a `RESULTS.md`.
+
+| Step | Work | Shows | Status |
+|---|---|---|---|
+| 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | next |
+| 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | |
+| 3 | Hash index and `unique` | `incremental`, change tracking | |
+| 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); query forms, float keys, ties, clustered to do |
+| 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
+| 6 | Relation indexes by source and target everywhere, indexes on edge fields | | |
+| 7 | Partitions by value | | |
+| 8 | k-d tree and `nearest k` | | |
+| 9 | Embeddings by brute force (int8 and binary, ranked again) | The recall to measure against | needs a vector type |
+| 10 | IVF with k-means in ent-lang | | |
+| 11 | LSH families | | |
+| 12 | `--ent-infer-indexes` | | |
+| 13 | B+ tree, BVH, HNSW from outside (where measurements or programs need them) | | |
+
+## 9. When it is done
+
+- Every query gives the same with an index as without (an index changes
+  only how fast), checked by running each test both ways. (The sorted
+  index as built is read explicitly, `Name[r]` and `Name.find`: this
+  applies once queries use indexes by themselves.)
+- The same on one core, on many and on the GPU.
+- Each kind has a benchmark that shows where it beats a scan and where
+  it does not (the B+ tree against sorting again when many keys change).
+- ANN: recall@10 against brute force, for IVF at several `nprobe`.
+
+## 10. Not part of this
+
+- Making embeddings (a model outside, by a device or an `extern system`).
+- Indexes written to inside a query, by several at once.
+- Indexes in a saved world: they are made again where it is loaded.
+
+## 11. Open questions
+
+1. Syntax: a declaration of its own, or options on the component
+   (`component Player { name: text @hash unique }`)? **A declaration of
+   its own** (`index Name of ...`), as built.
+2. Should the compiler ever add an index by itself, or only suggest one?
+3. May a clustered order conflict with a `tree sorted` order, one of
+   them winning, or is that an error? (Two sorted trees with their
+   entities in one archetype are an error.)
+4. A vector type (`f32[384]`) for a field: there is none (the one type
+   of a fixed size is `text[N]`). Step 9 needs it first.
