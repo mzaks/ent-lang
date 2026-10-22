@@ -42,12 +42,17 @@ A big program is optimised whole and then made into machine code in pieces,
 on a core each: one piece for every two megabytes of its LLVM IR, up to
 sixteen. ENT_PIECES says how many instead (1: all in one).
 
-With --parallel the program runs its systems on all cores (OpenMP). A
-thread without work waits five milliseconds for more and then sleeps, so
-that it is awake for the next parallel loop after a short stretch on one
-core, and what the program does on one core for longer (drawing, say)
-has the machine to itself; KMP_BLOCKTIME or OMP_WAIT_POLICY, where the
-program runs, say otherwise. A loop runs on many threads from a million entities on (fewer
+With --parallel the program runs its systems on all cores (OpenMP): a
+thread on each core it may run on (`taskset` says which), bound to it,
+not one on each of a core's hardware threads, where one waiting for work
+would slow the other, which runs what the program does on one core
+between its loops (not with --ranks, whose processes would bind theirs
+to the same cores). A thread without work waits five milliseconds for
+more and then sleeps, so that it is awake for the next parallel loop
+after a short stretch on one core, and what the program does on one core
+for longer (drawing, say) has the machine to itself. OMP_NUM_THREADS,
+OMP_PLACES, OMP_PROC_BIND or KMP_AFFINITY, and KMP_BLOCKTIME or
+OMP_WAIT_POLICY, where the program runs, say otherwise. A loop runs on many threads from a million entities on (fewer
 where its body calls out), and the events a reactive one walks from 16384
 on; what was sent from loops in its body may be combined on many threads
 from 16384 values on, where that has taken less so far than on one (the
@@ -709,14 +714,85 @@ def build(arguments, output, directory):
             # ones. (The OpenMP runtime would have it spin for a fifth of
             # a second: through all a frame does on one core, drawing
             # say, which the spinning cores slow down; see
-            # bench/RESULTS.md, 2026-10-09 and 2026-10-21.) What the
-            # environment says holds over this.
+            # bench/RESULTS.md, 2026-10-09 and 2026-10-21.)
+            #
+            # And there is one thread for each core the program may run
+            # on, bound to it, not one for each of the core's hardware
+            # threads: one that waits for the next loop on the other
+            # half of the core that runs on alone between the loops
+            # takes half of it (bench/traffic/RESULTS.md, 2026-10-22:
+            # the epidemic's day 10% faster, beecs's colonies 17%). Not
+            # on many ranks, whose processes or partitions would each
+            # bind theirs to the same cores. What the environment says
+            # holds over all of this.
+            bind = "0" if arguments.ranks else "1"
             source.write(
+                "#define _GNU_SOURCE\n"
+                "#include <stdio.h>\n"
                 "#include <stdlib.h>\n"
+                "#ifdef __linux__\n"
+                "#include <sched.h>\n"
+                "#endif\n"
+                "#ifdef __APPLE__\n"
+                "#include <sys/sysctl.h>\n"
+                "#endif\n"
+                "// The cores the program may run on: of the CPUs it may\n"
+                "// run on, those no other CPU of the same core comes\n"
+                "// before (0 where that is not known).\n"
+                "static int ent_cores(void) {\n"
+                "#if defined(__linux__)\n"
+                "  cpu_set_t mask;\n"
+                "  if (sched_getaffinity(0, sizeof mask, &mask) != 0) return 0;\n"
+                "  int cores = 0;\n"
+                "  for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {\n"
+                "    if (!CPU_ISSET(cpu, &mask)) continue;\n"
+                "    char path[96];\n"
+                "    snprintf(path, sizeof path, \"/sys/devices/system/cpu/cpu%d/\"\n"
+                "             \"topology/thread_siblings_list\", cpu);\n"
+                "    FILE *list = fopen(path, \"r\");\n"
+                "    if (!list) return 0;\n"
+                "    int first = 1, low, high;\n"
+                "    char after = 0;\n"
+                "    while (fscanf(list, \"%d\", &low) == 1) {\n"
+                "      high = low;\n"
+                "      if (fscanf(list, \"%c\", &after) == 1 && after == '-') {\n"
+                "        if (fscanf(list, \"%d\", &high) != 1) break;\n"
+                "        if (fscanf(list, \"%c\", &after) != 1) after = 0;\n"
+                "      }\n"
+                "      for (int s = low; s <= high && s < cpu; s++)\n"
+                "        if (CPU_ISSET(s, &mask)) first = 0;\n"
+                "      if (after != ',') break;\n"
+                "    }\n"
+                "    fclose(list);\n"
+                "    cores += first;\n"
+                "  }\n"
+                "  return cores;\n"
+                "#elif defined(__APPLE__)\n"
+                "  int cores = 0;\n"
+                "  size_t size = sizeof cores;\n"
+                "  return sysctlbyname(\"hw.physicalcpu\", &cores, &size, 0, 0) == 0\n"
+                "    ? cores : 0;\n"
+                "#else\n"
+                "  return 0;\n"
+                "#endif\n"
+                "}\n"
                 "__attribute__((constructor)) static void "
                 "ent_threads_wait(void) {\n"
                 '  if (!getenv("OMP_WAIT_POLICY")) '
-                'setenv("KMP_BLOCKTIME", "5", 0);\n}\n')
+                'setenv("KMP_BLOCKTIME", "5", 0);\n'
+                f"  if (!{bind} || getenv(\"OMP_NUM_THREADS\") || "
+                'getenv("OMP_PLACES") ||\n'
+                '      getenv("OMP_PROC_BIND") || getenv("KMP_AFFINITY")) return;\n'
+                "  int cores = ent_cores();\n"
+                "  if (cores <= 0) return;\n"
+                "  char count[16];\n"
+                '  snprintf(count, sizeof count, "%d", cores);\n'
+                '  setenv("OMP_NUM_THREADS", count, 0);\n'
+                "#ifdef __linux__\n"
+                '  setenv("OMP_PLACES", "cores", 0);\n'
+                '  setenv("OMP_PROC_BIND", "close", 0);\n'
+                "#endif\n"
+                "}\n")
     if held:
         apple = sys.platform == "darwin"
         bytes_of = os.path.join(directory, "ent_assets.s")
