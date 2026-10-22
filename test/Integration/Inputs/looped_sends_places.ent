@@ -1,0 +1,47 @@
+// Sends from two loops of a `for`'s body to the same fields: what each
+// entity sends lands in the order of the entities, and for one of its
+// turns, whichever loop it is sent from (test/Integration/
+// looped_sends_places.test).
+import console
+
+component Thing { n: i32 } capacity 64
+component Box { sum: f32 } capacity 4
+buffer Boxes { box: entity } capacity 4
+
+system fill() {
+  for b in 0..4 {
+    let e = spawn { Box { sum: 0.0 } }
+    Boxes += { box: e }
+  }
+  for i in 0..64 { spawn { Thing { n: i } } }
+}
+
+// Every thing sends to box n % 4 fractions of very different sizes,
+// whose sum depends on the order they are added in: two from a loop,
+// then one from another (from one loop only of the odd ones, so the
+// loops' sends land apart from each other).
+system send() {
+  for t: Thing {
+    let to = Boxes[t.n % 4].box
+    for k in 0..2 {
+      Box(to).sum += 1.0 / (1 + t.n * 977 % 1000 + k) as f32
+    }
+    for k in 0..1 - t.n % 2 {
+      Box(to).sum += 1000.0 / (1 + t.n) as f32
+    }
+  }
+}
+
+system report() {
+  for b: Box {
+    put("{bits_of(b.sum)}")
+  }
+}
+
+schedule all() {
+  fill()
+  send()
+  report()
+}
+
+main { all() }

@@ -1860,6 +1860,13 @@ static constexpr llvm::StringLiteral kBundleFieldsAttr = "ent.bundle_fields";
 static constexpr int64_t kBundleMost = 7;
 /// The lists' numbers: one for each such op and archetype it sends from.
 static llvm::DenseMap<std::pair<int64_t, unsigned>, int64_t> sendLists;
+/// Applies sent from loops of one query's body to the same fields of one
+/// component by the same rule (one, or a bundle of the same fields in
+/// the same order), by their index: the index of the first of them,
+/// whose list they all go on, in the order they are sent, and which
+/// combines it. So what is sent to an entity lands in the order of the
+/// entities that sent it, and for one of the turns, as from one place.
+static llvm::DenseMap<int64_t, int64_t> listOwners;
 
 /// A whole number sent or accumulated in a loop for the GPU, combined
 /// where it is sent by an atomic operation: the same in any order (see
@@ -11812,6 +11819,8 @@ static Value callSends(IRRewriter &rewriter, Location loc, WorldAccess &world,
 static int64_t sendListNumber(int64_t index, bool connects,
                               unsigned archetype) {
   // (Connects are numbered apart from applies and accumulates.)
+  if (!connects)
+    index = listOwners.lookup_or(index, index);
   auto [entry, added] = sendLists.try_emplace(
       {index * 2 + (connects ? 1 : 0), archetype}, int64_t(sendLists.size()));
   return entry->second;
@@ -12887,6 +12896,12 @@ static void mergeApplied(IRRewriter &rewriter, ApplyOp apply,
   // kBundleAttr.)
   SmallVector<StringAttr> fields{field};
   ArrayAttr bundled;
+  // (On another's list, which that one combines: see listOwners.)
+  if (auto index =
+          apply->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
+      index && staged == "list" &&
+      listOwners.lookup_or(index.getInt(), index.getInt()) != index.getInt())
+    return;
   if (auto bundle = apply->getAttrOfType<ArrayAttr>(kBundleAttr);
       bundle && staged == "list") {
     if (cast<IntegerAttr>(bundle[0]).getInt() != 0)
@@ -22283,6 +22298,7 @@ struct EntLowerToLoops
     ModuleOp module = getOperation();
     IRRewriter rewriter(module.getContext());
     sendLists.clear();
+    listOwners.clear();
     runningStarts.clear();
     // Rows of buffers written in queries (not those that take turns).
     ownerRuns.clear();
@@ -22333,12 +22349,10 @@ struct EntLowerToLoops
         query->setAttr(WorldLayout::kReactiveIndexAttr,
                        rewriter.getI64IntegerAttr(reactiveIndex++));
     });
-    // Applies whose field nothing else in their query touches.
-    module.walk([&](ApplyOp apply) {
-      auto query = apply->getParentOfType<QueryOp>();
-      // (In a function that was given the component: see lowerGiven.)
-      if (!query)
-        return;
+    // Applies whose field nothing else in their query touches (but the
+    // applies of `alike`).
+    auto unobserved = [&](ApplyOp apply, QueryOp query,
+                          ArrayRef<ApplyOp> alike) {
       FlatSymbolRefAttr component = apply.getComponentAttr();
       StringAttr field = apply.getFieldAttr();
       auto refTo = [&](Value ref) {
@@ -22347,7 +22361,8 @@ struct EntLowerToLoops
       WalkResult seen = query.walk([&](Operation *op) {
         bool touches = false;
         if (auto other = dyn_cast<ApplyOp>(op))
-          touches = other != apply && other.getComponentAttr() == component &&
+          touches = other != apply && !llvm::is_contained(alike, other) &&
+                    other.getComponentAttr() == component &&
                     other.getFieldAttr() == field;
         else if (auto get = dyn_cast<GetOp>(op))
           touches = refTo(get.getRef()) && get.getFieldAttr() == field;
@@ -22360,7 +22375,12 @@ struct EntLowerToLoops
           touches = op->getAttr("component") == component;
         return touches ? WalkResult::interrupt() : WalkResult::advance();
       });
-      if (!seen.wasInterrupted())
+      return !seen.wasInterrupted();
+    };
+    module.walk([&](ApplyOp apply) {
+      auto query = apply->getParentOfType<QueryOp>();
+      // (In a function that was given the component: see lowerGiven.)
+      if (query && unobserved(apply, query, {}))
         apply->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
     });
     module.walk([&](AccumulateOp accumulate) {
@@ -22532,6 +22552,70 @@ struct EntLowerToLoops
           run.push_back(apply);
       }
       close();
+    });
+    // What is sent from loops of a query's body to the same fields by the
+    // same rule, from more than one place, on one list (see listOwners).
+    module.walk([&](QueryOp query) {
+      using Key = std::tuple<Attribute, StringRef, Type, Attribute>;
+      SmallVector<std::pair<Key, int64_t>> firsts;
+      // (Each list's applies, by its owner.)
+      llvm::MapVector<int64_t, SmallVector<ApplyOp>> sharing;
+      query.getBody().walk([&](ApplyOp apply) {
+        auto index =
+            apply->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
+        if (!index || !apply->hasAttr(kLoopedAttr) ||
+            apply->hasAttr(kAtomicAttr) ||
+            apply->getParentOfType<QueryOp>() != query)
+          return;
+        Attribute fields = apply->getAttr(kBundleFieldsAttr);
+        if (auto bundle = apply->getAttrOfType<ArrayAttr>(kBundleAttr)) {
+          if (cast<IntegerAttr>(bundle[0]).getInt() != 0)
+            return;
+        } else {
+          fields = rewriter.getArrayAttr({apply.getFieldAttr()});
+        }
+        Key key{apply.getComponentAttr(), apply.getRule(),
+                apply.getValue().getType(), fields};
+        auto first = llvm::find_if(
+            firsts, [&](const auto &each) { return each.first == key; });
+        if (first == firsts.end())
+          firsts.push_back({key, index.getInt()});
+        else
+          listOwners[index.getInt()] = first->second;
+        // (The bundle's applies with it.)
+        SmallVector<ApplyOp> &members = sharing[first == firsts.end()
+                                                    ? index.getInt()
+                                                    : first->second];
+        members.push_back(apply);
+        if (auto bundle = apply->getAttrOfType<ArrayAttr>(kBundleAttr)) {
+          int64_t left = cast<IntegerAttr>(bundle[1]).getInt() - 1;
+          for (Operation *op = apply->getNextNode(); op && left > 0;
+               op = op->getNextNode())
+            if (auto member = dyn_cast<ApplyOp>(op)) {
+              members.push_back(member);
+              --left;
+            }
+        }
+      });
+      // Where only they send to their fields, and nothing else in the
+      // query touches those, they are combined where they are sent on
+      // one core as they would be from the list: in the order of the
+      // entities, and for one of its turns.
+      for (auto &[owner, members] : sharing) {
+        if (members.size() < 2 ||
+            !llvm::any_of(members, [&](ApplyOp member) {
+              auto index = member->getAttrOfType<IntegerAttr>(
+                  WorldLayout::kApplyIndexAttr);
+              return listOwners.count(index.getInt());
+            }))
+          continue;
+        if (llvm::all_of(members, [&](ApplyOp member) {
+              return unobserved(member, query, members);
+            }))
+          for (ApplyOp member : members)
+            member->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
+      }
+      sharing.clear();
     });
     // Whole numbers a reactive query sends or adds up, where the order
     // does not show (see kOrderFreeAttr): nothing else in the query reads

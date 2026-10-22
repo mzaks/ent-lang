@@ -1,0 +1,19 @@
+// Sends from two loops of a `for`'s body to the same field land as from
+// one place: in the order of the entities, and for one entity of its
+// turns, whichever loop sent them (Inputs/looped_sends_places.ent: f32
+// fractions whose sums depend on the order). Each box's sum's bits as
+// they come in that order, worked out apart (a loop's sends all after the
+// other's would give 1155167812 and 1148332464 for boxes 0 and 2). The
+// same on one core, on many threads, and with every loop on many.
+// RUN: %ent run %S/Inputs/looped_sends_places.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/looped_sends_places.ent 2>/dev/null > %t.all
+// RUN: env ENT_PARALLEL_MIN=1 %ent build --parallel %S/Inputs/looped_sends_places.ent -o %t.par
+// RUN: %t.par 2>/dev/null > %t.many
+// RUN: FileCheck %s < %t.one
+// RUN: cmp %t.one %t.all
+// RUN: cmp %t.one %t.many
+
+// CHECK:      1155167809
+// CHECK-NEXT: 1036341193
+// CHECK-NEXT: 1148332465
+// CHECK-NEXT: 1047489265

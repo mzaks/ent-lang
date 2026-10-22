@@ -938,9 +938,12 @@ of a depth.
   }
   ```
 
-  Where nothing else in the `for` reads, sets or sends to that field (or
-  reads that unique), each value lands where it is sent on one thread,
-  which comes to the same. Otherwise, and on many threads
+  So also where loops of the body in more than one place send to the
+  same field (or the same fields together, as below) by the same rule:
+  all in the order of the entities, and for one the order of its turns,
+  whichever loop they came from. Where nothing else in the `for` reads,
+  sets or sends to that field (or reads that unique), but those, each
+  value lands where it is sent on one thread, which comes to the same. Otherwise, and on many threads
   (`--parallel`), what is sent is kept on lists that are as long as they
   must be (every slice of the entities has its own) and combined when
   the `for` ends, those for each entity one after another (the entities
