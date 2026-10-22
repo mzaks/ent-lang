@@ -75,6 +75,16 @@ says, at step 0, what `melt.ent` says to every digit (`-6.7733681
   order of the lists, counted and emptied on the threads too), the lists
   0.4, the index 0.06 (put in order on many threads, by cell and row
   before); on one thread 0.2 in all.
+- Tried (2026-10-22), not kept: no sends from the force loop, each
+  pair's force written at its row (`Given`) and each atom adding up
+  those of its pairs through edges into it (a relation `Push`, made with
+  the lists; edges go by source, the order the sends land in, so the
+  same bits). On 12 threads 0.51 s where 0.196: the sum reads `Given`
+  (30 MB) row by row as the edges point, 1.7 ms a step, where combining
+  the sends reads the lists in order and adds into `Pull` (768 KB, in
+  the cache), 0.4; the windows that write `Given` take their rows each
+  step (the force loop 1.26 ms where 0.95); and making 1.25 million
+  edges every 20 steps, 24 ms each.
 - Before the atoms stayed out of the box between the lists, every pair
   was seen as the nearest image of its other atom: the forces took 8.5
   ms a step, and ent's `image` is selects where the C's is branches

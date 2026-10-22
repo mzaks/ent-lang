@@ -1104,6 +1104,10 @@ struct LoopOptions {
   /// since what an entity of the query costs is that many times more.
   int64_t innerCapacity = 0;
   Value innerRows = Value();
+  /// For a query that goes along the edges of its entities: how many
+  /// edges there can be at most, all its entities' together.
+  int64_t edgeCapacity = 0;
+  Value edgeRows = Value();
   /// How much one entity's turn is, against one that only computes with
   /// what lies in its columns: a body that calls out (an extern fn: a
   /// sine, a root) is not done sixteen entities at a time, and is worth
@@ -1274,8 +1278,9 @@ static bool isEntityLocal(QueryOp query) {
 /// calls out of it, so many times more) is below what a fork pays for.
 static bool neverParallel(const WorldArchetype &archetype,
                           const LoopOptions &options, bool entityLocal) {
-  int64_t most = int64_t(archetype.capacity) *
-                 std::max<int64_t>(1, options.innerCapacity) *
+  int64_t most = std::max(int64_t(archetype.capacity) *
+                              std::max<int64_t>(1, options.innerCapacity),
+                          options.edgeCapacity) *
                  options.bodyWeight;
   return !options.parallelEntities || !entityLocal ||
          most < options.parallelMinEntities;
@@ -1392,6 +1397,8 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
                                            options.innerRows)
                          .getResult()
                    : count;
+  if (options.edgeRows)
+    work = arith::MaxUIOp::create(rewriter, loc, work, options.edgeRows);
   if (options.bodyWeight > 1)
     work = arith::MulIOp::create(
         rewriter, loc, work,
@@ -18124,6 +18131,24 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
         invoke, invoke.getCalleeAttr());
     if (callee && !callee.isDefined())
       options.bodyWeight += 32;
+  });
+  // (Its edges: as many as their relation may have, between them.)
+  query.walk([&](EdgesOp edges) {
+    const WorldRelation &relation =
+        layout.getRelation(edges.getRelationAttr().getAttr());
+    options.edgeCapacity += relation.capacity;
+    rewriter.setInsertionPoint(query);
+    Value rows = world.toIndex(
+        query.getLoc(),
+        memref::LoadOp::create(
+            rewriter, query.getLoc(), world.edgeCount(relation),
+            ValueRange{arith::ConstantIndexOp::create(rewriter,
+                                                      query.getLoc(), 0)}));
+    options.edgeRows = options.edgeRows
+                           ? arith::AddIOp::create(rewriter, query.getLoc(),
+                                                   options.edgeRows, rows)
+                                 .getResult()
+                           : rows;
   });
   SmallVector<EachOp> eaches;
   query.walk([&](EachOp each) { eaches.push_back(each); });
