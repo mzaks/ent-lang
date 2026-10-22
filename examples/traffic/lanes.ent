@@ -16,13 +16,13 @@
 // behind the car that is ahead of it there: two that went into the next
 // lane together, one close behind the other, see each other.
 //
-// The car ahead and the cars behind are not kept: each step all cars are
-// put in order by lane and place, as the rows of the buffer `Order`, and
-// a car finds its neighbours there: in its own lane the rows next to its
-// own, in the other lane by halving (`ahead`, `behind`). A lane of a road
-// is a strip, `base + lane`, and a car's place in the order is its key:
-// its strip in the high 32 bits and where it is, in millimetres, in the
-// low ones.
+// The car ahead and the cars behind are not kept: the cars are in the
+// index `Traffic` by lane and place, which the program keeps up to date,
+// and a car finds its neighbours there: in its own lane the rows next to
+// its own, in the other lane by halving (`ahead`, `behind`). A lane of a
+// road is a strip, `base + lane`, and a car's place in the order is its
+// key: its strip in the high 32 bits and where it is, in millimetres, in
+// the low ones.
 //
 // With one lane nobody changes, and the cars go as in idm.ent, to the bit.
 
@@ -50,11 +50,10 @@ component Speed { v: f32 } capacity 100000
 component Accel { a: f32 } capacity 100000
 // The lane it goes on in.
 component Move { lane: i32 } capacity 100000
-// Its row in `Order`.
-component Slot { row: i32 } capacity 100000
 
-// All cars by lane and place, as they were when the step began.
-buffer Order { key: i64, who: entity, x: f32, v: f32, length: f32 } capacity 100000
+// All cars by lane and place, with where each is, how fast it goes and
+// how long it is.
+index Traffic of Car by key { x: Spot.x, v: Speed.v, length: Car.length }
 
 // The roads to lay, a row each, which the program gives before `lay()`.
 // Every `trucks`-th car is a truck (none where it is 0), which would go
@@ -69,64 +68,50 @@ fn key(strip: i32, x: f32) -> i64 {
   (strip as i64) << 32 | (x * 1000.0) as i64
 }
 
-fn strip_of(order: Order, row: i32) -> i32 { (order[row].key >> 32) as i32 }
-
-// The first row whose key is above `key` (`above`), or not below it: by
-// halving the rows, as often as their number has bits (the exponent of it
-// as a float).
-fn first(order: Order, key: i64, above: bool) -> i32 {
-  var low = 0
-  var high = len(order)
-  let rounds = (bits_of(len(order) as f32) >> 23) as i32 - 126
-  for round in 0..rounds {
-    if low < high {
-      let mid = (low + high) >> 1
-      let k = order[mid].key
-      if k < key || (above && k == key) { low = mid + 1 } else { high = mid }
-    }
-  }
-  low
+fn strip_of(order: Traffic, row: index of Traffic) -> i32 {
+  (order[row].key >> 32) as i32
 }
 
 // The row of the car ahead of the key `k` in the strip, round the ring
-// (the first after the last); -1 where the strip has no car. A car whose
-// key is `k`, beside the one asking within the millimetre, is ahead.
-fn ahead(order: Order, strip: i32, k: i64) -> i32 {
-  let r = first(order, k, false)
+// (the first after the last); none where the strip has no car. A car
+// whose key is `k`, beside the one asking within the millimetre, is ahead.
+fn ahead(order: Traffic, strip: i32, k: i64) -> index of Traffic {
+  let r = order.find(k)
   if r < len(order) && strip_of(order, r) == strip { r } else {
-    let f = first(order, (strip as i64) << 32, false)
-    if f < len(order) && strip_of(order, f) == strip { f } else { -1 }
+    let f = order.find((strip as i64) << 32)
+    if f < len(order) && strip_of(order, f) == strip { f } else { none }
   }
 }
 
 // The row of the car behind the key `k` in the strip, round the ring.
-fn behind(order: Order, strip: i32, k: i64) -> i32 {
-  let r = first(order, k, false) - 1
+fn behind(order: Traffic, strip: i32, k: i64) -> index of Traffic {
+  let r = order.find(k) - 1
   if r >= 0 && strip_of(order, r) == strip { r } else {
-    let l = first(order, ((strip + 1) as i64) << 32, false) - 1
-    if l >= 0 && strip_of(order, l) == strip { l } else { -1 }
+    let l = order.find(((strip + 1) as i64) << 32) - 1
+    if l >= 0 && strip_of(order, l) == strip { l } else { none }
   }
 }
 
 // The row after `row` in its strip, round the ring (the car ahead of the
 // one in `row`), and the row before it (the car behind it); the row itself
 // where it is the strip's only car.
-fn next_in(order: Order, row: i32, strip: i32) -> i32 {
+fn next_in(order: Traffic, row: index of Traffic, strip: i32) -> index of Traffic {
   if row + 1 < len(order) && strip_of(order, row + 1) == strip { row + 1 } else {
-    first(order, (strip as i64) << 32, false)
+    order.find((strip as i64) << 32)
   }
 }
 
-fn before_in(order: Order, row: i32, strip: i32) -> i32 {
+fn before_in(order: Traffic, row: index of Traffic, strip: i32) -> index of Traffic {
   if row > 0 && strip_of(order, row - 1) == strip { row - 1 } else {
-    first(order, ((strip + 1) as i64) << 32, false) - 1
+    order.find(((strip + 1) as i64) << 32) - 1
   }
 }
 
 // How far the car at `x` (of key `k`) is behind the one in row `r`: once
 // round the ring more where that is round it (its key below `k`, or `k`
 // itself where `above`: the car itself, or in its own lane).
-fn reach(order: Order, r: i32, k: i64, above: bool, x: f32, ring: f32) -> f32 {
+fn reach(order: Traffic, r: index of Traffic, k: i64, above: bool, x: f32,
+         ring: f32) -> f32 {
   var dx = order[r].x - x
   if order[r].key < k || (above && order[r].key == k) { dx += ring }
   dx
@@ -134,7 +119,7 @@ fn reach(order: Order, r: i32, k: i64, above: bool, x: f32, ring: f32) -> f32 {
 
 // How far the car in row `r`, which `behind` found, is behind the car at
 // `x` (of key `k`).
-fn reach_back(order: Order, r: i32, k: i64, x: f32, ring: f32) -> f32 {
+fn reach_back(order: Traffic, r: index of Traffic, k: i64, x: f32, ring: f32) -> f32 {
   var dx = x - order[r].x
   if order[r].key >= k { dx += ring }
   dx
@@ -177,44 +162,31 @@ system lay() {
               Driver { v0: v0, t: Plan[i].t, s0: Plan[i].s0, a: a, b: b, sq: sq,
                        polite: Plan[i].polite, threshold: Plan[i].threshold,
                        safe: Plan[i].safe },
-              Spot { x: x }, Speed { v: 0.0 }, Accel { a: 0.0 }, Move { lane: lane }, Slot { row: 0 } }
+              Spot { x: x }, Speed { v: 0.0 }, Accel { a: 0.0 }, Move { lane: lane } }
       Sim.cars += 1
     }
     Sim.strips += lanes
   }
 }
 
-// Every car in `order` told its row.
-proc number(order: Order, slots: mut Slot) {
-  for row in 0..len(order) { slots[order[row].who].row = row }
-}
-
-// The cars in order by lane and place, each told its row.
-system sort() {
-  Order = []
-  for e, c: Car, at: Spot, s: Speed by c.key {
-    Order += { key: c.key, who: e, x: at.x, v: s.v, length: c.length }
-  }
-  number(Order, Slot)
-}
-
 // How hard every car speeds up behind the car ahead in its lane; where
 // `tally`, its road counts it standing on the car ahead.
 system think(tally: bool) {
   let counts = tally && Sim.step >= Sim.warm
-  for c: Car, d: Driver, at: Spot, s: Speed, o: Slot, acc: mut Accel {
-    let r = next_in(Order, o.row, c.base + c.lane)
-    let gap = reach(Order, r, c.key, true, at.x, c.ring) - Order[r].length
+  for me, c: Car, d: Driver, at: Spot, s: Speed, acc: mut Accel {
+    let r = next_in(Traffic, Traffic.row(me), c.base + c.lane)
+    let gap = reach(Traffic, r, c.key, true, at.x, c.ring) - Traffic[r].length
     if counts && gap <= 0.0 { Road(c.road).crashes += 1 }
-    acc.a = idm(d.v0, d.t, d.s0, d.a, d.sq, s.v, Order[r].v, gap)
+    acc.a = idm(d.v0, d.t, d.s0, d.a, d.sq, s.v, Traffic[r].v, gap)
   }
 }
 
 // Which lane every car goes on in, by MOBIL.
 system decide() {
   let side = if Sim.step % 2 == 0 { 1 } else { -1 }
-  for me, c: Car, d: Driver, at: Spot, s: Speed, o: Slot, acc: Accel, m: mut Move {
+  for me, c: Car, d: Driver, at: Spot, s: Speed, acc: Accel, m: mut Move {
     m.lane = c.lane
+    let row = Traffic.row(me)
     let lane = c.lane + side
     if lane >= 0 && lane < c.lanes {
       let own = c.base + c.lane
@@ -223,35 +195,36 @@ system decide() {
       var gap = c.ring - c.length
       var front = s.v
       let k = key(there, at.x)
-      let nl = ahead(Order, there, k)
+      let nl = ahead(Traffic, there, k)
       if nl >= 0 {
-        gap = reach(Order, nl, k, false, at.x, c.ring) - Order[nl].length
-        front = Order[nl].v
+        gap = reach(Traffic, nl, k, false, at.x, c.ring) - Traffic[nl].length
+        front = Traffic[nl].v
       }
       let mine = idm(d.v0, d.t, d.s0, d.a, d.sq, s.v, front, gap)
       var safe = gap > 0.0
       var gain = mine - acc.a
       // The car that would be behind it there.
-      let nf = behind(Order, there, k)
+      let nf = behind(Traffic, there, k)
       if nf >= 0 {
-        let who = Order[nf].who
-        let back = reach_back(Order, nf, k, at.x, c.ring) - c.length
+        let who = Traffic[nf].who
+        let back = reach_back(Traffic, nf, k, at.x, c.ring) - c.length
         if let v0 = Driver(who).v0, let t = Driver(who).t, let s0 = Driver(who).s0,
            let a = Driver(who).a, let sq = Driver(who).sq, let now = Accel(who).a {
-          let then = idm(v0, t, s0, a, sq, Order[nf].v, s.v, back)
+          let then = idm(v0, t, s0, a, sq, Traffic[nf].v, s.v, back)
           safe = safe && back > 0.0 && then >= 0.0 - d.safe
           gain += d.polite * (then - now)
         }
       }
       // The car behind it now, which would follow the car ahead of it.
-      let of = before_in(Order, o.row, own)
-      if of >= 0 && Order[of].who != me {
-        let who = Order[of].who
-        let ol = next_in(Order, o.row, own)
-        let back = reach(Order, ol, Order[of].key, true, Order[of].x, c.ring) - Order[ol].length
+      let of = before_in(Traffic, row, own)
+      if of >= 0 && Traffic[of].who != me {
+        let who = Traffic[of].who
+        let ol = next_in(Traffic, row, own)
+        let back = reach(Traffic, ol, Traffic[of].key, true, Traffic[of].x, c.ring) -
+                   Traffic[ol].length
         if let v0 = Driver(who).v0, let t = Driver(who).t, let s0 = Driver(who).s0,
            let a = Driver(who).a, let sq = Driver(who).sq, let now = Accel(who).a {
-          let then = idm(v0, t, s0, a, sq, Order[of].v, Order[ol].v, back)
+          let then = idm(v0, t, s0, a, sq, Traffic[of].v, Traffic[ol].v, back)
           gain += d.polite * (then - now)
         }
       }
@@ -303,13 +276,12 @@ schedule setup() { lay() }
 
 // A step: the cars decide which lane to go on in from where they all are,
 // go into it, and then speed up or brake behind the car that is ahead of
-// them there.
+// them there. (`Traffic` is made again before `think` reads it, after
+// `drive` and `shift` changed where the cars are.)
 schedule step() {
-  sort()
   think(false)
   decide()
   shift()
-  sort()
   think(true)
   drive()
 }

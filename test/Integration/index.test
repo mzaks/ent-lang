@@ -1,0 +1,27 @@
+// An index (docs/syntax.md): the cars by a key of lane and place, rows
+// that hold each car and its place, where each car's row is, and the
+// first row of a lane by halving. Made again after `move` changed the
+// keys and places, before `show` reads it in the next frame. The same on
+// one core and on all.
+// RUN: %ent run %S/Inputs/index.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/index.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK:      row 0: key 60 x 60.0
+// CHECK-NEXT: row 1: key 80 x 80.0
+// CHECK-NEXT: row 2: key 100 x 100.0
+// CHECK-NEXT: row 3: key 4294967346 x 50.0
+// CHECK-NEXT: row 4: key 4294967366 x 70.0
+// CHECK-NEXT: row 5: key 4294967386 x 90.0
+// CHECK-NEXT: lane 1 starts at row 3
+// CHECK-NEXT: car at 100.0 lane 0: row 2, next row has x 50.0
+// CHECK-NEXT: car at 90.0 lane 1: row 5, next row has x 0.0
+// CHECK:      car at 50.0 lane 1: row 3, next row has x 70.0
+// After a move: other keys, so another order.
+// CHECK-NEXT: row 0: key 5 x 105.0
+// CHECK-NEXT: row 1: key 25 x 125.0
+// CHECK-NEXT: row 2: key 85 x 85.0
+// CHECK-NEXT: row 3: key 4294967311 x 115.0
+// CHECK:      lane 1 starts at row 3
+// CHECK-NEXT: car at 125.0 lane 0: row 1, next row has x 85.0

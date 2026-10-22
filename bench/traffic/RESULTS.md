@@ -88,3 +88,24 @@ for each core it may run on, bound to it (`OMP_NUM_THREADS` the cores of
 its CPUs, `OMP_PLACES=cores`, `OMP_PROC_BIND=close`), unless the
 environment says how many or where, and not with `--ranks`. `highway.ent`
 so: 12 threads, 3.9 ms a step; under `taskset -c 0-3`, 4 threads.
+
+## 2026-10-22, the order as an index of the language
+
+`lanes.ent` with `index Traffic of Car by key { x: Spot.x, v: Speed.v,
+length: Car.length }` in place of the buffer, the sort and the proc: the
+same lines to the bit (162,849 lane changes). The index is made again
+twice a step, before `think`, as the hand-made order was, and the same
+way: a `for ... by` the key, then each car told its row.
+
+| 120,000 cars, a step | one core ms | all cores ms (12 threads) |
+|---|---|---|
+| `Traffic_update` (twice) | 2.47 | 2.80 |
+| `think` (twice) | 0.79 | 0.18 |
+| `decide` | 5.00 | 0.67 |
+| `drive` | 0.20 | 0.21 |
+| the step | 8.50 | 3.91 |
+
+As the order by hand (8.34 and 3.92): `Traffic.row(me)`, a car's row
+looked up by its id, costs what reading it from a component of its own
+did. What is left is to make the index again for less where few
+entities moved in the order.

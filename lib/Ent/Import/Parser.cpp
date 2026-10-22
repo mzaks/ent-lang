@@ -244,6 +244,9 @@ struct Record {
   /// For a unique declared as `unique Score: i64`: its one field is
   /// `value` and the bare name stands for it.
   bool shorthand = false;
+  /// For a component: the fields an index keeps in it (an entity's row
+  /// in the index), which a spawn does not give.
+  SmallVector<std::string> hidden;
 
   Type fieldType(StringRef name) const {
     for (auto &[field, type] : fields)
@@ -587,6 +590,10 @@ private:
   }
   LogicalResult parseComponent(bool tag);
   LogicalResult parseBuffer();
+  LogicalResult parseIndex();
+  LogicalResult finishIndexOrders();
+  FailureOr<mlir::Value> emitIndexCall(const Expr &expr, StringRef symbol,
+                                       mlir::Value given);
   LogicalResult parseBufferStatement(const std::string &name, llvm::SMLoc at);
   /// The buffer a name stands for where it is used: the buffer of that
   /// name, or the one a fn or proc was given under it (to change, or only
@@ -607,7 +614,9 @@ private:
       return std::nullopt;
     }
     if (buffers.count(name))
-      return BufferUse{resolve(name), true, mlir::Value()};
+      return BufferUse{resolve(name),
+                       buildingIndex || !indexes.count(resolve(name)),
+                       mlir::Value()};
     return std::nullopt;
   }
   /// The components the fn or proc that is being parsed was given, by
@@ -966,6 +975,19 @@ private:
   Declared<Record> tables;
   /// The buffers, by their fields.
   Declared<Record> buffers;
+  /// The indexes (`index Name of Component by field`), by the symbol of
+  /// the buffer that holds their rows: the component that keeps each
+  /// entity's row, the field it keeps it in, the type of the key, and the
+  /// fn that halves the rows.
+  struct Index {
+    std::string component;
+    std::string rowField;
+    Type key;
+    std::string find;
+  };
+  llvm::StringMap<Index> indexes;
+  /// Parsing what an index declares for itself, which fills it.
+  bool buildingIndex = false;
   /// The files that have a name (`asset name = "file"`): as the program
   /// writes them.
   Declared<std::string> assetFiles;
@@ -1058,6 +1080,8 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
   finished.push_back(root);
   if (failed(finishRowKinds()) || failed(finishRows()) ||
       failed(finishCallables()))
+    return nullptr;
+  if (failed(finishIndexOrders()))
     return nullptr;
   finishIndexes();
 
@@ -1175,6 +1199,10 @@ LogicalResult Parser::parseDeclarations() {
     else if (token.isKeyword("buffer") && peek().is(Token::Identifier)) {
       advance();
       result = parseBuffer();
+    }
+    else if (token.isKeyword("index") && peek().is(Token::Identifier)) {
+      advance();
+      result = parseIndex();
     }
     else if (consumeKeyword("relation"))
       result = parseRelation();
@@ -3020,6 +3048,337 @@ LogicalResult Parser::parseBuffer() {
   return success();
 }
 
+// index Name of Component, .. by field { name: Component.field, .. }
+//
+// The entities that have every component named, in the order of a whole
+// number of the first one's, as the rows of a buffer the program keeps
+// and only reads: each row the entity (`who`), its key and the fields
+// copied after it. The first component keeps where each entity's row is
+// (a field of its own, which a spawn does not give). The index declares
+// for itself, as ent-lang, a system that fills it (`Name_update`: the
+// entities by their key, then each told its row), one that marks it out
+// of date (`Name_stale`), the unique that says whether it is
+// (`Name_fresh`) and the fn that halves its rows (`Name_find`); the pass
+// --ent-indexes runs the first before what reads the index where the
+// second has run after what changed what it holds.
+LogicalResult Parser::parseIndex() {
+  llvm::SMLoc at = token.loc;
+  FailureOr<std::string> name = identifier("an index name");
+  if (failed(name))
+    return failure();
+  if (!consumeKeyword("of"))
+    return error("expected 'of' and the components of the entities it "
+                 "holds: 'index " + *name + " of Component by field'");
+  SmallVector<std::string> of;
+  do {
+    llvm::SMLoc componentAt = token.loc;
+    FailureOr<std::string> component = identifier("a component");
+    if (failed(component))
+      return failure();
+    if (!components.count(*component))
+      return error(componentAt, "unknown component '" + *component + "'");
+    if (llvm::is_contained(of, *component))
+      return error(componentAt, "'" + *component + "' is named twice");
+    of.push_back(*component);
+  } while (consumeIf(Token::Comma));
+  if (!consumeKeyword("by"))
+    return error("expected 'by' and a field of '" + of.front() +
+                 "': the whole number the entities are in order by");
+  llvm::SMLoc keyAt = token.loc;
+  FailureOr<std::string> key = identifier("a field");
+  if (failed(key))
+    return failure();
+  Type keyType = components[of.front()].fieldType(*key);
+  if (!keyType)
+    return error(keyAt, "component '" + of.front() + "' has no field '" +
+                            *key + "'");
+  auto whole = dyn_cast<IntegerType>(keyType);
+  if (!whole || whole.getWidth() == 1)
+    return error(keyAt, "an index is in order by a whole number; '" + *key +
+                            "' is " + typeWords(keyType));
+
+  // { name: Component.field, .. }: what each row has besides.
+  struct Copy {
+    std::string name, component, field;
+    Type type;
+  };
+  SmallVector<Copy> copies;
+  if (consumeIf(Token::LBrace)) {
+    while (!token.is(Token::RBrace)) {
+      llvm::SMLoc nameAt = token.loc;
+      FailureOr<std::string> field = identifier("a field name");
+      if (failed(field) || failed(expect(Token::Colon, "':'")))
+        return failure();
+      if (*field == "key" || *field == "who")
+        return error(nameAt, "every row has '" + *field + "' already");
+      for (const Copy &copy : copies)
+        if (copy.name == *field)
+          return error(nameAt, "'" + *field + "' is named twice");
+      llvm::SMLoc componentAt = token.loc;
+      FailureOr<std::string> component = identifier("a component");
+      if (failed(component) ||
+          failed(expect(Token::Dot, "'.' and a field: 'name: Component.field'")))
+        return failure();
+      if (!components.count(*component))
+        return error(componentAt, "unknown component '" + *component + "'");
+      llvm::SMLoc fromAt = token.loc;
+      FailureOr<std::string> from = identifier("a field");
+      if (failed(from))
+        return failure();
+      Type type = components[*component].fieldType(*from);
+      if (!type)
+        return error(fromAt, "component '" + *component + "' has no field '" +
+                                 *from + "'");
+      if (!isa<IntegerType, FloatType, EnumType, EntityType, IndexOfType>(type))
+        return error(fromAt, "'" + *from + "': a row of an index holds "
+                             "numbers, bools, enums, entities and row "
+                             "numbers");
+      if (!llvm::is_contained(of, *component))
+        of.push_back(*component);
+      copies.push_back({*field, *component, *from, type});
+      if (!consumeIf(Token::Comma))
+        break;
+    }
+    if (failed(expect(Token::RBrace, "'}'")))
+      return failure();
+  }
+  consumeIf(Token::Semicolon);
+
+  // Where each entity's row is: a field of the first component, which
+  // the spawns and adds of it that were read already are given (0), as
+  // those after will be.
+  std::string rowField = "row_in_" + *name;
+  Record &holder = components[of.front()];
+  if (holder.fieldType(rowField))
+    return error(at, "'" + of.front() + "' has a field '" + rowField +
+                         "' already: the index keeps its rows there");
+  auto holderOp = SymbolTable::lookupSymbolIn(module, symbol(of.front()));
+  auto componentOp = cast<ComponentOp>(holderOp);
+  unsigned before = componentOp.getFieldNames().size();
+  Type rowType = builder.getI32Type();
+  auto fieldsOf = [&](Attribute component) -> unsigned {
+    auto op = SymbolTable::lookupSymbolIn(
+        module, cast<FlatSymbolRefAttr>(component).getAttr());
+    return cast<ComponentOp>(op).getFieldNames().size();
+  };
+  auto giveRow = [&](Operation *op, unsigned place) {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(op);
+    op->insertOperands(place, noughtOf(op->getLoc(), rowType));
+  };
+  FlatSymbolRefAttr holderName = symbol(of.front());
+  module.walk([&](Operation *op) {
+    if (auto add = dyn_cast<AddOp>(op)) {
+      if (add.getComponentAttr() == holderName)
+        giveRow(op, op->getNumOperands());
+      return;
+    }
+    auto spawn = dyn_cast<SpawnOp>(op);
+    if (!spawn)
+      return;
+    unsigned place = 0;
+    if (std::optional<ArrayAttr> listed = spawn.getComponents()) {
+      for (Attribute component : *listed) {
+        if (component == holderName)
+          return giveRow(op, place + before);
+        place += fieldsOf(component);
+      }
+      return;
+    }
+    if (auto archetype = SymbolTable::lookupSymbolIn(
+            module, spawn.getArchetypeAttr().getAttr())) {
+      auto declared = cast<ArchetypeOp>(archetype);
+      for (Attribute component : declared.getComponents()) {
+        if (declared.isOptional(cast<FlatSymbolRefAttr>(component)))
+          continue;
+        if (component == holderName)
+          return giveRow(op, place + before);
+        place += fieldsOf(component);
+      }
+    }
+  });
+  SmallVector<Attribute> fieldNames(componentOp.getFieldNames().getValue());
+  SmallVector<Attribute> fieldTypes(componentOp.getFieldTypes().getValue());
+  fieldNames.push_back(builder.getStringAttr(rowField));
+  fieldTypes.push_back(TypeAttr::get(rowType));
+  componentOp.setFieldNamesAttr(builder.getArrayAttr(fieldNames));
+  componentOp.setFieldTypesAttr(builder.getArrayAttr(fieldTypes));
+  holder.fields.push_back({rowField, rowType});
+  holder.hidden.push_back(rowField);
+
+  // The rows: a buffer the program keeps, which a saved world leaves out
+  // (it is made again from the entities).
+  Record record;
+  record.fields.push_back({"key", keyType});
+  record.fields.push_back({"who", EntityType::get(context)});
+  for (const Copy &copy : copies)
+    record.fields.push_back({copy.name, copy.type});
+  SmallVector<Attribute> names, types;
+  for (auto &[field, type] : record.fields) {
+    names.push_back(builder.getStringAttr(field));
+    types.push_back(TypeAttr::get(type));
+  }
+  StringAttr bufferName = declareSymbol(at, *name);
+  BufferOp declared = BufferOp::create(builder, loc(at), bufferName,
+                                       builder.getArrayAttr(names),
+                                       builder.getArrayAttr(types),
+                                       builder.getI64IntegerAttr(1));
+  declared->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
+  buffers[*name] = std::move(record);
+
+  // What the index declares for itself.
+  std::string spelled = (isUnsigned(keyType) ? "u" : "i") +
+                         std::to_string(keyType.getIntOrFloatBitWidth());
+  std::string n = *name;
+  std::string text;
+  llvm::raw_string_ostream out(text);
+  out << "transient unique " << n << "_fresh: bool\n"
+      << "proc " << n << "_number(order: " << n << ", held: mut "
+      << of.front() << ") {\n"
+      << "  for row in 0..len(order) { held[order[row].who]." << rowField
+      << " = row }\n}\n"
+      << "system " << n << "_update() {\n  " << n << " = []\n  for e";
+  for (auto [number, component] : llvm::enumerate(of))
+    out << ", c" << number << ": " << component;
+  out << " by c0." << *key << " {\n    " << n << " += { key: c0." << *key
+      << ", who: e";
+  for (const Copy &copy : copies)
+    out << ", " << copy.name << ": c"
+        << llvm::find(of, copy.component) - of.begin() << "." << copy.field;
+  out << " }\n  }\n  " << n << "_number(" << n << ", " << of.front()
+      << ")\n  " << n << "_fresh = true\n}\n"
+      << "system " << n << "_stale() { " << n << "_fresh = false }\n"
+      << "fn " << n << "_find(order: " << n << ", key: " << spelled
+      << ") -> i32 {\n"
+      << "  var low = 0\n  var high = len(order)\n"
+      << "  let rounds = (bits_of(len(order) as f32) >> 23) as i32 - 126\n"
+      << "  for round in 0..rounds {\n    if low < high {\n"
+      << "      let mid = (low + high) >> 1\n"
+      << "      if order[mid].key < key { low = mid + 1 } else { high = mid }\n"
+      << "    }\n  }\n  low\n}\n";
+  auto source = llvm::MemoryBuffer::getMemBufferCopy(text, "index " + n);
+  StringRef bytes = source->getBuffer();
+  sourceMgr.AddNewSourceBuffer(std::move(source), at);
+  Lexer savedLexer = lexer;
+  Token savedToken = token;
+  const char *savedEnd = previousEnd;
+  lexer = Lexer(bytes);
+  buildingIndex = true;
+  advance();
+  LogicalResult made = parseDeclarations();
+  buildingIndex = false;
+  lexer = savedLexer;
+  token = savedToken;
+  previousEnd = savedEnd;
+  if (failed(made))
+    return failure();
+
+  auto strings = [&](ArrayRef<std::string> list) {
+    SmallVector<Attribute> attrs;
+    for (const std::string &item : list)
+      attrs.push_back(builder.getStringAttr(item));
+    return builder.getArrayAttr(attrs);
+  };
+  SmallVector<std::string> ofSymbols, copied;
+  for (const std::string &component : of)
+    ofSymbols.push_back(resolve(component));
+  for (const Copy &copy : copies) {
+    copied.push_back(resolve(copy.component));
+    copied.push_back(copy.field);
+  }
+  declared->setAttr(
+      "ent.index",
+      builder.getDictionaryAttr({
+          builder.getNamedAttr("of", strings(ofSymbols)),
+          builder.getNamedAttr("key", strings({resolve(of.front()), *key})),
+          builder.getNamedAttr("copies", strings(copied)),
+          builder.getNamedAttr("row",
+                               strings({resolve(of.front()), rowField})),
+          builder.getNamedAttr("update", builder.getStringAttr(resolve(n + "_update"))),
+          builder.getNamedAttr("stale", builder.getStringAttr(resolve(n + "_stale"))),
+          builder.getNamedAttr("fresh", builder.getStringAttr(resolve(n + "_fresh"))),
+      }));
+  indexes[bufferName.getValue()] = {resolve(of.front()), rowField, keyType,
+                                    resolve(n + "_find")};
+  return success();
+}
+
+// An index holds a row for every entity that has its first component at
+// most: as many as that one's capacity.
+LogicalResult Parser::finishIndexOrders() {
+  for (BufferOp buffer : module.getOps<BufferOp>()) {
+    auto found = indexes.find(buffer.getSymName());
+    if (found == indexes.end())
+      continue;
+    auto component = cast<ComponentOp>(SymbolTable::lookupSymbolIn(
+        module, builder.getStringAttr(found->second.component)));
+    IntegerAttr capacity = component.getCapacityAttr();
+    if (!capacity)
+      capacity = module->getAttrOfType<IntegerAttr>("ent.default_capacity");
+    if (!capacity)
+      return emitError(buffer.getLoc())
+             << "index '" << buffer.getSymName()
+             << "' holds a row for each entity with '"
+             << found->second.component
+             << "': give that component a capacity (or the program a "
+                "default_capacity)";
+    buffer.setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));
+  }
+  return success();
+}
+
+// Index.row(e): where entity e is in the index (none where it is not);
+// Index.find(key): the first row whose key is not below `key` (as many
+// as the index has where none is).
+FailureOr<mlir::Value> Parser::emitIndexCall(const Expr &expr,
+                                             StringRef symbolName,
+                                             mlir::Value given) {
+  Location at = loc(expr.loc);
+  const Index &index = indexes[symbolName];
+  auto rowType =
+      IndexOfType::get(context, FlatSymbolRefAttr::get(context, symbolName));
+  if (expr.operands.size() != 1)
+    return error(expr.loc, "'" + expr.name + "." + expr.field +
+                               "' takes one argument");
+  if (expr.field == "row") {
+    if (inFunction)
+      return error(expr.loc, "a fn or proc has no entities: where an entity "
+                             "is in '" + expr.name + "' is asked in a system");
+    FailureOr<mlir::Value> who =
+        emit(*expr.operands[0], EntityType::get(context));
+    if (failed(who))
+      return failure();
+    if (!isa<EntityType>(who->getType()))
+      return error(expr.operands[0]->loc, "'" + expr.name +
+                                              ".row' is given an entity");
+    auto lookup = LookupOp::create(
+        builder, at, builder.getI32Type(), builder.getI1Type(), *who,
+        FlatSymbolRefAttr::get(context, index.component),
+        builder.getStringAttr(index.rowField));
+    mlir::Value none = integer(at, builder.getI32Type(), -1);
+    mlir::Value row = arith::SelectOp::create(builder, at, lookup.getFound(),
+                                              lookup.getValue(), none);
+    return asIndex(at, row, rowType);
+  }
+  FailureOr<mlir::Value> key = emit(*expr.operands[0], index.key);
+  if (failed(key))
+    return failure();
+  if (key->getType() != index.key)
+    return mismatch(expr.operands[0]->loc, key->getType(), index.key);
+  Function &find = functions.ofSymbol(index.find);
+  mlir::Value rows = given;
+  if (!rows)
+    rows = BufferOfOp::create(builder, at, find.params.front(),
+                              FlatSymbolRefAttr::get(context, symbolName))
+               .getResult();
+  mlir::Value row =
+      InvokeOp::create(builder, at, builder.getI32Type(),
+                       FlatSymbolRefAttr::get(context, index.find),
+                       ValueRange{rows, *key}, UnitAttr())
+          ->getResult(0);
+  return asIndex(at, row, rowType);
+}
+
 // Name += { field: value, ... } / Name = []: a row more, or none.
 LogicalResult Parser::parseBufferStatement(const std::string &name,
                                            llvm::SMLoc at) {
@@ -3030,6 +3389,9 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
     return error(at, "'" + name + "' is a buffer, which a system fills: a "
                      "proc changes one it is given ('name: mut " + name +
                          "')");
+  if (!held.mut && indexes.count(held.symbol))
+    return error(at, "'" + name + "' is an index: the program keeps its rows "
+                     "in order, and they are only read");
   if (!held.mut)
     return error(at, "'" + name + "' was given to read: a proc that changes "
                      "a buffer takes it as 'name: mut Buffer'");
@@ -5579,6 +5941,9 @@ LogicalResult Parser::parseFor() {
           return error(componentAt, "'" + *component + "' is not a buffer "
                                     "of the program: a window is 'name: mut "
                                     "Buffer[start, count]'");
+        if (mut && !held->mut)
+          return error(componentAt, "'" + *component + "' is an index: its "
+                                    "rows are only read");
         if (!windowsHere)
           return error(componentAt, "a window is a binding of the entity "
                                     "a 'for' visits, without a pattern: "
@@ -7862,6 +8227,12 @@ Type Parser::typeOf(const Expr &expr) {
   case Expr::Call:
     if (Callable *through = callableThrough(expr))
       return through->result;
+    // (Index.row(e), Index.find(key): a row of the index.)
+    if (expr.field == "row" || expr.field == "find")
+      if (std::optional<BufferUse> held = bufferNamed(expr.name);
+          held && indexes.count(held->symbol))
+        return IndexOfType::get(context,
+                                FlatSymbolRefAttr::get(context, held->symbol));
     if (!expr.field.empty())
       return {};
     if (expr.name == "len")
@@ -8006,6 +8377,11 @@ FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
         return error(operand->loc,
                      "'" + expr.name + "' is handed the buffer '" +
                          handed.getName().getValue() + "' here, by its name");
+      if (handed.getMut() && !held->mut && indexes.count(held->symbol))
+        return error(operand->loc,
+                     "'" + operand->name + "' is an index, whose rows are "
+                     "only read, and '" + expr.name + "' changes the buffer "
+                     "it is given");
       if (handed.getMut() && !held->mut)
         return error(operand->loc,
                      "'" + operand->name + "' was given to read, and '" +
@@ -8691,6 +9067,10 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   case Expr::Binary:
     return emitBinary(expr, expected);
   case Expr::Call: {
+    if (expr.field == "row" || expr.field == "find")
+      if (std::optional<BufferUse> held = bufferNamed(expr.name);
+          held && indexes.count(held->symbol))
+        return emitIndexCall(expr, held->symbol, held->given);
     // (A name or a field that holds a fn or proc: a call of that one.)
     if (!expr.field.empty() && !callableThrough(expr))
       return error(expr.loc, "'" + expr.name + "." + expr.field +
@@ -10214,6 +10594,10 @@ Parser::emitInitValues(const ComponentInit &init) {
     for (auto &[name, expr] : init.fields)
       if (name == field)
         value = expr.get();
+    if (!value && llvm::is_contained(record.hidden, field)) {
+      values.push_back(noughtOf(loc(init.loc), type));
+      continue;
+    }
     if (!value)
       return error(init.loc, "'" + init.component + "' needs a value for '" +
                                  field + "'");
@@ -10229,10 +10613,14 @@ Parser::emitInitValues(const ComponentInit &init) {
                     .getResult();
     values.push_back(*emitted);
   }
-  for (auto &[name, expr] : init.fields)
+  for (auto &[name, expr] : init.fields) {
     if (!record.fieldType(name))
       return error(expr->loc, "component '" + init.component +
                                   "' has no field '" + name + "'");
+    if (llvm::is_contained(record.hidden, name))
+      return error(expr->loc, "'" + name + "' is where an index keeps the "
+                              "entity's row: the index gives it");
+  }
   return values;
 }
 

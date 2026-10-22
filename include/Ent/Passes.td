@@ -256,4 +256,25 @@ def EntSchedule : Pass<"ent-schedule", "ModuleOp"> {
   ];
 }
 
+def EntIndexes : Pass<"ent-indexes", "ModuleOp"> {
+  let summary = "Keep each index up to date before what reads it";
+  let description = [{
+    An index (a buffer with an `ent.index` attribute, see `index` in
+    docs/syntax.md) holds the entities that have its components in the
+    order of a key, with fields copied from them. Its rows are made by a
+    system the index declares (`update`), which also sets a unique
+    (`fresh`); another (`stale`) clears it.
+
+    In every schedule, a run of `update` on the condition that the index
+    is not fresh goes before each run of a system that reads the index
+    (its rows, or the field each entity keeps its row in), and a run of
+    `stale` after each run of a system that writes what the index is made
+    of: the key, the fields it copies, or which entities have its
+    components (spawns, despawns, moves). An extern system that declares
+    no access does both. So the index is made again, once, before the first
+    read after a change, and between systems: what reads it sees it as it
+    is when its system starts.
+  }];
+}
+
 #endif // ENT_PASSES

@@ -40,8 +40,9 @@ which need the cars in their order by lane and position every step.
   driver model behind the car ahead in its lane and changes lanes by
   MOBIL (Kesting, Treiber and Helbing, 2007), with trucks and drivers
   who would go at different speeds. The car ahead is no longer one edge:
-  every step the cars are put in order by lane and place (a `for ... by`
-  a key into the buffer `Order`), and each finds its neighbours there.
+  the cars are in the index `Traffic` by lane and place (docs/syntax.md,
+  Indexes), which the program makes again where they moved, and each
+  finds its neighbours there.
   With one lane it is `idm.ent`'s model to the bit.
 - `check/lanes.c`: the same in plain C, which `lanes.ent` matches to the
   bit, lane changes and all.

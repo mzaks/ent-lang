@@ -1,0 +1,84 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+// `index Name of Component by field { .. }` (docs/syntax.md): what cannot be.
+
+component Car { key: i64 } capacity 8
+// expected-error @+1 {{unknown component 'Truck'}}
+index Traffic of Truck by key
+
+// -----
+
+component Car { key: i64 } capacity 8
+// expected-error @+1 {{expected 'by' and a field of 'Car'}}
+index Traffic of Car key
+
+// -----
+
+component Car { x: f32 } capacity 8
+// expected-error @+1 {{an index is in order by a whole number; 'x' is an f32}}
+index Traffic of Car by x
+
+// -----
+
+component Car { key: i64 } capacity 8
+component Spot { x: f32 } capacity 8
+// expected-error @+1 {{component 'Spot' has no field 'y'}}
+index Traffic of Car by key { y: Spot.y }
+
+// -----
+
+component Car { key: i64 } capacity 8
+// expected-error @+1 {{every row has 'who' already}}
+index Traffic of Car by key { who: Car.key }
+
+// -----
+
+component Car { key: i64 } capacity 8
+index Traffic of Car by key
+system clear() {
+  // expected-error @+1 {{'Traffic' is an index: the program keeps its rows in order, and they are only read}}
+  Traffic = []
+}
+
+// -----
+
+component Car { key: i64, x: f32 } capacity 8
+index Traffic of Car by key { x: Car.x }
+system nudge() {
+  // expected-error @+1 {{'Traffic' is an index: the program keeps its rows in order, and they are only read}}
+  Traffic[0].x = 1.0
+}
+
+// -----
+
+component Car { key: i64 } capacity 8
+index Traffic of Car by key
+proc fill(rows: mut Traffic) { rows = [] }
+system clear() {
+  // expected-error @+1 {{'Traffic' is an index, whose rows are only read, and 'fill' changes the buffer it is given}}
+  fill(Traffic)
+}
+
+// -----
+
+component Car { key: i64 } capacity 8
+index Traffic of Car by key
+world {
+  // expected-error @+1 {{'row_in_Traffic' is where an index keeps the entity's row: the index gives it}}
+  spawn { Car { key: 1, row_in_Traffic: 0 } }
+}
+
+// -----
+
+component Car { key: i64 } capacity 8
+index Traffic of Car by key
+fn first(rows: Traffic, e: entity) -> index of Traffic {
+  // expected-error @+1 {{a fn or proc has no entities: where an entity is in 'Traffic' is asked in a system}}
+  Traffic.row(e)
+}
+
+// -----
+
+component Car { key: i64 }
+// expected-error @+1 {{index 'Traffic' holds a row for each entity with 'Car': give that component a capacity}}
+index Traffic of Car by key

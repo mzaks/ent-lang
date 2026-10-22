@@ -1894,6 +1894,62 @@ of that buffer and of no other.
   the room is what the number is masked to, and is reserved, not used,
   until it is written.
 
+### Indexes
+
+```
+component Car { lane: i32, key: i64 } capacity 100000
+component Spot { x: f32 } capacity 100000
+component Speed { v: f32 } capacity 100000
+
+index Traffic of Car by key { x: Spot.x, v: Speed.v }
+
+fn after(rows: Traffic, row: index of Traffic) -> f32 { rows[row + 1].x }
+
+system follow() {
+  for me, c: Car, at: Spot {
+    let r = Traffic.row(me)                  // where it is in the order
+    let first = Traffic.find(c.key >> 32 << 32)   // its lane's first row
+    if r + 1 < len(Traffic) { ... Traffic[r + 1].who ... after(Traffic, r) }
+  }
+}
+```
+
+An index is the entities that have its components in the order of a
+whole number of the first one's (its key), as the rows of a buffer that
+the program keeps and the systems only read: `examples/traffic/lanes.ent`
+finds the car ahead and the cars beside each car so.
+
+- `index Name of Component, .. by field`, at the top level, after the
+  components. Each row has the entity's key (`key`) and the entity
+  (`who`), and, after `{ }`, a field of the entity's components under a
+  name of its own (`x: Spot.x`). The entities it holds are those that
+  have every component named, in it or in `{ }`; with the same key, in
+  the order the program keeps them in.
+- It is read as a buffer is: `Name[r].field`, `len(Name)`, and handed by
+  its name to a fn or proc (`rows: Name`), which reads it. Nothing gives
+  it rows, takes them, or changes them.
+- `Name.row(e)` is where entity `e` is in it, an `index of Name`; `none`
+  where `e` is not there. `Name.find(key)` is the first row whose key is
+  not below `key` (as many as it has, where none is), by halving the
+  rows; a fn or proc that was given the index asks `rows.find(key)`.
+- It is up to date when a system starts: made again before the first
+  system that reads it after one that changed what it holds (the key,
+  the fields it copies, or which entities have its components), and
+  only then. A system reads it as it was when the system started, also
+  where it changes what it holds itself.
+- To make it again is to put every entity in order by its key (as a
+  `for ... by` does, then told its row), with the fields it copies: as
+  long as that, each time. (Not yet: only the entities that changed.)
+- Each entity keeps where its row is in the first component, in a field
+  of the index's (`row_in_Name`), which a spawn does not give; the C
+  header shows it. The rows are not part of a saved world: they are
+  made again from the entities.
+- The index declares for itself, in its module, the system that makes it
+  (`Name_update`), the one that says it is out of date (`Name_stale`),
+  the unique that says it is up to date (`Name_fresh`) and the fn that
+  halves its rows (`Name_find`); those names are taken.
+- Its rows are as many as its first component's capacity at most.
+
 ### Entities given to a fn or proc
 
 ```

@@ -12,8 +12,6 @@ capacity Spot 131072
 capacity Speed 131072
 capacity Accel 131072
 capacity Move 131072
-capacity Slot 131072
-capacity Order 131072
 
 unique Tally { changes: i64, crashes: i64 }
 

@@ -1,0 +1,43 @@
+// Six cars in two lanes, in the index `Traffic` by lane and place with
+// where they are (test/Integration/index.test).
+import console
+component Car { lane: i32, key: i64 } capacity 64
+component Spot { x: f32 } capacity 64
+
+index Traffic of Car by key { x: Spot.x }
+
+unique Run { step: i32 }
+
+world {
+  for i in 0..6 {
+    spawn { Car { lane: i % 2, key: ((i % 2) as i64 << 32) | (100 - i * 10) as i64 }, Spot { x: (100 - i * 10) as f32 } }
+  }
+}
+
+system show() {
+  for i in 0..len(Traffic) {
+    put("row {i}: key {Traffic[i].key} x {Traffic[i].x}")
+  }
+  let k = Traffic.find(1 << 32)
+  put("lane 1 starts at row {k as i32}")
+}
+
+system ahead() {
+  for e, c: Car, s: Spot {
+    let r = Traffic.row(e)
+    let next = r + 1
+    put("car at {s.x} lane {c.lane}: row {r as i32}, next row has x {Traffic[next].x}")
+  }
+}
+
+system move() {
+  Run.step += 1
+  for c: mut Car, s: mut Spot {
+    s.x += 25.0
+    c.key = (c.lane as i64 << 32) | (s.x as i64 % 100)
+  }
+}
+
+schedule frame() { show() ahead() move() }
+
+main { loop { frame() } until Run.step == 2 }
