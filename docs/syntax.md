@@ -943,13 +943,14 @@ of a depth.
   all in the order of the entities, and for one the order of its turns,
   whichever loop they came from. Where nothing else in the `for` reads,
   sets or sends to that field (or reads that unique), but those, each
-  value lands where it is sent on one thread, which comes to the same. Otherwise, and on many threads
-  (`--parallel`), what is sent is kept on lists that are as long as they
-  must be (every slice of the entities has its own) and combined when
-  the `for` ends, those for each entity one after another (the entities
-  apart on many threads, where many were sent and changing the field
-  starts nothing else): the same sums to the last bit, on any number of
-  threads. Values sent one right after another to fields of one
+  value lands where it is sent on one thread, which comes to the same.
+  Otherwise, and on many threads (`--parallel`), what is sent is kept on
+  lists that are as long as they must be (every slice of the entities
+  has its own; built with `--parallel`, one for each of 64 groups of the
+  entities sent to, by their slots) and combined when the `for` ends,
+  those for each entity one after another (the groups at once on many
+  threads, where many were sent and changing the field starts nothing
+  else): the same sums to the last bit, on any number of threads. Values sent one right after another to fields of one
   component of the same entity by the same rule (`Pull(o).fx += a
   Pull(o).fy += b`) go on one list together, as one entry, and are
   combined together. Not in a `for` that goes along a tree or waits
@@ -1956,6 +1957,10 @@ finds the car ahead and the cars beside each car so.
   16,384 entities on, built with `--parallel`),
   and the rows that are out of order then go down past those above them
   one by one: about a pass over the rows where few moved in the order.
+  Of a grid, where more than one row in 64 is below the one before, the
+  entities are put in order instead by their cell and then their row
+  before (`rank_in_Name`), as a `for ... by` does, on many threads: the
+  same order.
   Where entities came, went, or got or lost a component of it, it is
   made anew: every entity in order by its key (as a `for ... by` does)
   and each told its row. With 120,000 cars of which few overtake or
@@ -1970,8 +1975,9 @@ finds the car ahead and the cars beside each car so.
   `Name_moved`), the uniques that say it is up to date and holds the
   same entities (`Name_fresh`, `Name_whole`), the procs that tell the
   entities their rows and put them in order again (`Name_number`,
-  `Name_settle`) and the fn that halves its rows (`Name_find`); those
-  names are taken.
+  `Name_settle`), the fn that halves its rows (`Name_find`) and, of a
+  grid, the one that says whether many rows are out of order
+  (`Name_tangled`); those names are taken.
 - Its rows are as many as its first component's capacity at most.
 
 #### Grids

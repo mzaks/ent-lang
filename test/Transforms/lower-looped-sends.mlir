@@ -7,11 +7,12 @@
 // A parallel one visits the rows in 256 slices, each one after another
 // on a thread, and puts what is sent on the slice's list (asked for where
 // the slice starts, and written to without a call, but where its block
-// is full or there is none); the query's
-// end reads the lists in order, where they are (a block at a time), and
-// combines: an apply's from many values on, where that has taken less so
-// far (devices/sends.c chooses), by groups of the entities sent to, put
-// in groups and combined on many threads.
+// is full or there is none). What an apply sends to entities goes on 64
+// lists, by the group of the target's row (its high bits), each slice's
+// in a table where it starts. The query's end reads the lists in order,
+// where they are (a block at a time), and combines: an apply's from many
+// values on, where that has taken less so far (devices/sends.c chooses),
+// a group's lists on each thread, at once.
 
 ent.component @H (hp: f32, n: i32)
 ent.archetype @A (@H) capacity 100000
@@ -19,44 +20,34 @@ ent.resource @Score (points: f32)
 
 // CHECK-LABEL: func.func private @sends(
 // CHECK:       scf.parallel (%[[SLICE:.*]]) = (%{{.*}}) to (%c256)
-// CHECK:         %[[SECOND:.*]] = func.call @ent_sends_slice_list(%{{.*}}, %c1_i64{{.*}}, %{{.*}}, %c2_i64{{.*}}) : (i64, i64, i64, i64) -> i64
-// CHECK:         %[[FIRST:.*]] = func.call @ent_sends_slice_list(%{{.*}}, %c0_i64{{.*}}, %{{.*}}, %c2_i64{{.*}}) : (i64, i64, i64, i64) -> i64
+// CHECK:         %[[SECOND:.*]] = func.call @ent_sends_slice_list(%{{.*}}, %c64_i64{{.*}}, %{{.*}}, %c2_i64{{.*}}) : (i64, i64, i64, i64) -> i64
+// CHECK:         %[[GROUPS:.*]] = memref.alloca() : memref<64xi64>
+// CHECK:         scf.for %[[GROUP:.*]] = %{{.*}} to %c64
+// CHECK:           %[[LIST:.*]] = func.call @ent_sends_slice_list(
+// CHECK:           memref.store %[[LIST]], %[[GROUPS]][%[[GROUP]]]
 // CHECK:         scf.for %[[ROW:.*]] =
 // CHECK:           scf.for
+// CHECK:             arith.andi %{{.*}}, %c131071_i64
+// CHECK:             arith.shrui %{{.*}}, %c11_i64
+// CHECK:             %[[FIRST:.*]] = memref.load %[[GROUPS]]
 // CHECK:             func.call @ent_sends_slice_grow(%{{.*}}, %[[FIRST]])
 // CHECK:             llvm.store
 // CHECK:             func.call @ent_sends_slice_grow(%{{.*}}, %[[SECOND]])
 // CHECK:             llvm.store
-// CHECK:       %[[SENT:.*]] = call @ent_sends_count(
-// CHECK:       call @ent_sends_choose({{.*}}, %[[SENT]], %c16384_i64, %c131072_i64)
+// CHECK:       scf.for {{.*}} to %c64{{.*}} iter_args
+// CHECK:         call @ent_sends_count(
+// CHECK:       call @ent_sends_choose({{.*}}, %c16384_i64, %c131072_i64)
 // CHECK:       scf.if
-// CHECK:         scf.parallel
-// CHECK:           call @ent_sends_group_count(
-// CHECK:         scf.parallel
-// CHECK:           call @ent_sends_group_total(
-// CHECK:         call @ent_sends_group_starts(
-// CHECK:         scf.parallel
-// CHECK:           call @ent_sends_group_mark(
-// CHECK:         scf.parallel
-// CHECK:           call @ent_sends_group_place(
-// CHECK:         %[[GROUPED:.*]] = {{(func.)?}}call @ent_sends_grouped_data(
-// CHECK:         scf.parallel (%[[GROUP:.*]]) = (%{{.*}}) to (%c256{{.*}})
-// CHECK:           call @ent_sends_group_start(
-// CHECK:           call @ent_sends_group_start(
-// CHECK:           scf.for
-// CHECK:             arith.addi %[[GROUPED]],
-// CHECK:             llvm.load
-// CHECK:             llvm.load
+// CHECK:         scf.parallel ({{.*}}) = ({{.*}}) to (%c64
+// CHECK:           scf.while
+// CHECK:             call @ent_sends_next_block(
 // CHECK:       } else {
-// CHECK:         scf.while
-// CHECK:           call @ent_sends_next_block(
-// CHECK:           scf.condition
-// CHECK:         } do {
-// CHECK:           scf.for
-// CHECK:             llvm.load
-// CHECK:             llvm.load
+// CHECK:         scf.for {{.*}} to %c64
+// CHECK:           scf.while
+// CHECK:             call @ent_sends_next_block(
 // CHECK:       call @ent_sends_chosen(
-// CHECK:       call @ent_sends_clear(
+// CHECK:       scf.for {{.*}} to %c64
+// CHECK:         call @ent_sends_clear(
 // CHECK:       call @ent_sends_count(
 // CHECK:       scf.while
 // CHECK:         call @ent_sends_next_block(

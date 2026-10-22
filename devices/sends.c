@@ -48,9 +48,6 @@ typedef struct {
 // call, ent_sends_slice_list: its last block 8 bytes in.)
 _Static_assert(offsetof(ent_send_slice, last) == 8, "a slice's last block");
 
-// (Read in groups instead, ent_sends_group: by whom they were sent to.)
-#define ENT_SEND_GROUPS 256
-
 // What combining took, each way (0: one after another, 1: in groups),
 // for each value, so far: and from which call on the way that lost is
 // tried again.
@@ -69,13 +66,6 @@ typedef struct {
   int64_t slice;
   ent_send_block *block;
   uint64_t at;
-  // (In groups: the entries one after another, and where each group
-  // starts; their room is kept. marks[slice * ENT_SEND_GROUPS + group]:
-  // how many of a slice's are of a group, then where the next goes.)
-  uint64_t *grouped;
-  int64_t room;
-  int64_t starts[ENT_SEND_GROUPS + 1];
-  int64_t *marks;
   // (How many there are, read a slice at a time.)
   int64_t sliced;
   // How it went combining them each way (ent_sends_choose), for as many
@@ -135,10 +125,7 @@ static ent_send_lists *ent_sends_of(int64_t world, int64_t number) {
   made->slice = ENT_SEND_SLICES;
   made->block = 0;
   made->at = 0;
-  made->grouped = 0;
   made->width = 2;
-  made->room = 0;
-  made->marks = 0;
   made->sliced = 0;
   memset(made->choices, 0, sizeof made->choices);
   made->timed_way = -1;
@@ -353,116 +340,11 @@ int64_t ent_sends_slice_value(int64_t world, int64_t number, int64_t slice) {
   return (int64_t)ent_sends_slice_at(list)->sent[2 * list->at++ + 1];
 }
 
-// Or read in groups, each of whom the values were sent to (by their ids,
-// 64 ids after another in a group), each in the order of the lists: so
-// a group at a time, on many threads, the values for each entity are
-// combined in the same order as by the lists. They are put in groups on
-// many threads too, each step a parallel loop's, the steps in order:
-// each slice counts its own by group (ent_sends_group_count), each group
-// adds up its slices' (ent_sends_group_total), the groups' are added up
-// in order (ent_sends_group_starts: how many there are), each group says
-// where its slices' go (ent_sends_group_mark) and each slice puts its own
-// there (ent_sends_group_place).
-static int64_t ent_send_group_of(uint64_t id) {
-  return (int64_t)((id >> 6) & (ENT_SEND_GROUPS - 1));
-}
-static int64_t *ent_sends_marks(ent_send_lists *lists) {
-  int64_t *marks = __atomic_load_n(&lists->marks, __ATOMIC_ACQUIRE);
-  if (marks)
-    return marks;
-  int64_t *made =
-      ent_sends_take(ENT_SEND_SLICES * ENT_SEND_GROUPS * sizeof(int64_t));
-  if (__atomic_compare_exchange_n(&lists->marks, &marks, made, 0,
-                                  __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
-    return made;
-  free(made);
-  return marks;
-}
-void ent_sends_group_count(int64_t world, int64_t number, int64_t slice) {
-  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
-  if (!lists)
-    return;
-  int64_t *marks = ent_sends_marks(lists) + slice * ENT_SEND_GROUPS;
-  for (int group = 0; group < ENT_SEND_GROUPS; ++group)
-    marks[group] = 0;
-  ent_send_slice *list = &lists->slices[slice];
-  uint64_t width = (uint64_t)lists->width;
-  for (ent_send_block *block = list->first; block; block = block->next) {
-    for (uint64_t k = 0; k < block->count; ++k)
-      ++marks[ent_send_group_of(block->sent[width * k])];
-    if (block == list->last)
-      break;
-  }
-}
-void ent_sends_group_total(int64_t world, int64_t number, int64_t group) {
-  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
-  if (!lists)
-    return;
-  int64_t total = 0;
-  for (int slice = 0; slice < ENT_SEND_SLICES; ++slice)
-    total += lists->marks[slice * ENT_SEND_GROUPS + group];
-  lists->starts[group + 1] = total;
-}
-int64_t ent_sends_group_starts(int64_t world, int64_t number) {
-  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
-  if (!lists)
-    return 0;
-  int64_t *starts = lists->starts;
-  starts[0] = 0;
-  for (int group = 0; group < ENT_SEND_GROUPS; ++group)
-    starts[group + 1] += starts[group];
-  int64_t count = starts[ENT_SEND_GROUPS];
-  if (count > lists->room) {
-    free(lists->grouped);
-    lists->room = count + count / 2;
-    lists->grouped = ent_sends_take((size_t)lists->room *
-                                    (size_t)lists->width * sizeof(uint64_t));
-  }
-  return count;
-}
-void ent_sends_group_mark(int64_t world, int64_t number, int64_t group) {
-  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
-  if (!lists)
-    return;
-  int64_t at = lists->starts[group];
-  for (int slice = 0; slice < ENT_SEND_SLICES; ++slice) {
-    int64_t *mark = &lists->marks[slice * ENT_SEND_GROUPS + group];
-    int64_t many = *mark;
-    *mark = at;
-    at += many;
-  }
-}
-void ent_sends_group_place(int64_t world, int64_t number, int64_t slice) {
-  ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);
-  if (!lists)
-    return;
-  int64_t *marks = lists->marks + slice * ENT_SEND_GROUPS;
-  ent_send_slice *list = &lists->slices[slice];
-  uint64_t width = (uint64_t)lists->width;
-  for (ent_send_block *block = list->first; block; block = block->next) {
-    for (uint64_t k = 0; k < block->count; ++k) {
-      uint64_t *entry = &block->sent[width * k];
-      int64_t at = marks[ent_send_group_of(entry[0])]++;
-      uint64_t *to = &lists->grouped[width * (uint64_t)at];
-      to[0] = entry[0];
-      to[1] = entry[1];
-      for (uint64_t w = 2; w < width; ++w)
-        to[w] = entry[w];
-    }
-    if (block == list->last)
-      break;
-  }
-}
-
-// Where `group` starts among them (ENT_SEND_GROUPS: where the last ends);
-// where they are, the list's width of words each, whom it was sent to and
-// what, for the compiler to read them from.
-int64_t ent_sends_group_start(int64_t world, int64_t number, int64_t group) {
-  return ent_sends[number]->starts[group];
-}
-int64_t ent_sends_grouped_data(int64_t world, int64_t number) {
-  return (int64_t)(uintptr_t)ent_sends[number]->grouped;
-}
+// Or, of what is sent to entities on many threads, as many lists as the
+// compiler makes groups of the targets (each a range of their slots), a
+// slice's values for each group on that group's list: each list is read
+// as above, the groups' at once, a group on a thread, which combines each
+// target's values in the order of one list (LowerToLoops, kSendGroups).
 
 // Which way to combine the `count` values sent (1: in groups, on many
 // threads; 0: one after another), each giving the same: the one that has

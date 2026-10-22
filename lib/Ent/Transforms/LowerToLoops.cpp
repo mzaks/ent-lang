@@ -1700,7 +1700,8 @@ static void combineDirectly(IRRewriter &rewriter, ApplyOp apply,
 static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
                      Value a, Value b, bool noSign);
 static void putSend(IRRewriter &rewriter, Location loc, int64_t list,
-                    WorldAccess &world, Value id, Value value);
+                    WorldAccess &world, Value id, Value value,
+                    bool grouped = false);
 
 /// Marks an `ent.apply` whose field nothing else in its query touches (no
 /// get, set or lookup of the field, no other apply to it, no add or remove
@@ -1867,6 +1868,18 @@ static llvm::DenseMap<std::pair<int64_t, unsigned>, int64_t> sendLists;
 /// combines it. So what is sent to an entity lands in the order of the
 /// entities that sent it, and for one of the turns, as from one place.
 static llvm::DenseMap<int64_t, int64_t> listOwners;
+/// What is sent to entities from a loop of a body, built for many threads,
+/// goes on so many lists, each of the targets of a range of slots (or
+/// rows): its own slices, in the order of the rows, and for one row of
+/// the turns. So the lists are combined at once on many threads, a group
+/// each, every target's values in the same order as from one list,
+/// without putting them in groups after (devices/sends.c).
+static constexpr int64_t kSendGroups = 64;
+/// The applies (by index) whose lists are kSendGroups lists so, one after
+/// another from the number the first has.
+static llvm::DenseSet<int64_t> groupedSends;
+/// How many list numbers are taken (sendListNumber).
+static int64_t sendListsTaken = 0;
 
 /// A whole number sent or accumulated in a loop for the GPU, combined
 /// where it is sent by an atomic operation: the same in any order (see
@@ -11822,11 +11835,45 @@ static int64_t sendListNumber(int64_t index, bool connects,
   if (!connects)
     index = listOwners.lookup_or(index, index);
   auto [entry, added] = sendLists.try_emplace(
-      {index * 2 + (connects ? 1 : 0), archetype}, int64_t(sendLists.size()));
+      {index * 2 + (connects ? 1 : 0), archetype}, sendListsTaken);
+  if (added)
+    sendListsTaken +=
+        !connects && groupedSends.contains(index) ? kSendGroups : 1;
   return entry->second;
 }
 static int64_t applyListNumber(int64_t apply, int64_t archetype) {
   return sendListNumber(apply, /*connects=*/false, unsigned(archetype));
+}
+/// Whether what apply `index` sends goes on kSendGroups lists.
+static bool sentInGroups(int64_t index) {
+  return groupedSends.contains(listOwners.lookup_or(index, index));
+}
+
+/// The group of the target of an entry (its id's 64 bits): the high bits
+/// of its slot (or of its row, where an id is its row), of those slots
+/// there can be; one of kSendGroups.
+static Value sendGroup(IRRewriter &rewriter, Location loc, WorldAccess &world,
+                       Value id) {
+  const WorldLayout &layout = world.getLayout();
+  bool rows = layout.entities.kind == EntityScheme::Rows;
+  int64_t many = layout.entityCapacity;
+  if (rows)
+    for (const WorldArchetype &archetype : layout.archetypes)
+      many = std::max(many, archetype.capacity);
+  unsigned bits = rows ? layout.entities.rowBits : layout.entities.slotBits;
+  unsigned used = llvm::Log2_64_Ceil(uint64_t(std::max<int64_t>(many, 1)));
+  unsigned shift = used > 6 ? used - 6 : 0;
+  auto constant = [&](int64_t value) -> Value {
+    return arith::ConstantIntOp::create(rewriter, loc, value, 64);
+  };
+  Value slot = bits >= 64 ? id
+                          : arith::AndIOp::create(rewriter, loc, id,
+                                                  constant((1ll << bits) - 1))
+                                .getResult();
+  return arith::AndIOp::create(
+      rewriter, loc,
+      arith::ShRUIOp::create(rewriter, loc, slot, constant(shift)),
+      constant(kSendGroups - 1));
 }
 
 /// A stored value as 64 bits, and back.
@@ -11852,27 +11899,33 @@ static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
 }
 
 static void putOnSlice(IRRewriter &rewriter, Location loc, WorldAccess &world,
-                       int64_t list, ArrayRef<Value> words);
+                       int64_t list, ArrayRef<Value> words,
+                       bool grouped = false);
 
 /// Put what an accumulate or a connect in a loop of the body sends on its
 /// list (number `list`), at the insertion point: `id` (stored form;
-/// nothing for an accumulate) and `value`.
+/// nothing for an accumulate) and `value`. `grouped`: on the list of the
+/// id's group, of those from `list` on (see kSendGroups).
 static void putSend(IRRewriter &rewriter, Location loc, int64_t list,
-                    WorldAccess &world, Value id, Value value) {
+                    WorldAccess &world, Value id, Value value, bool grouped) {
   Type i64 = rewriter.getI64Type();
   Value nothing = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+  Value idBits = id ? toSendBits(rewriter, loc, id) : nothing;
   // (In a slice of a parallel loop, without a call.)
   if (sendSegment) {
     putOnSlice(rewriter, loc, world, list,
-               {id ? toSendBits(rewriter, loc, id) : nothing,
-                value ? toSendBits(rewriter, loc, value) : nothing});
+               {idBits, value ? toSendBits(rewriter, loc, value) : nothing},
+               grouped);
     return;
   }
   // (A loop on one thread is one slice, the first.)
   Value slice = nothing;
+  Value number = arith::ConstantIntOp::create(rewriter, loc, list, 64);
+  if (grouped)
+    number = arith::AddIOp::create(rewriter, loc, number,
+                                   sendGroup(rewriter, loc, world, idBits));
   callSends(rewriter, loc, world, "ent_sends_put",
-            {arith::ConstantIntOp::create(rewriter, loc, list, 64), slice,
-             id ? toSendBits(rewriter, loc, id) : nothing,
+            {number, slice, idBits,
              value ? toSendBits(rewriter, loc, value) : nothing},
             /*gives=*/false);
 }
@@ -12269,7 +12322,7 @@ static constexpr int64_t kSendBlock = 1023;
 /// ent_sends_slice_grow gives the next). A call in the loop would keep
 /// what the loop carries out of the registers.
 static void putOnSlice(IRRewriter &rewriter, Location loc, WorldAccess &world,
-                       int64_t list, ArrayRef<Value> words) {
+                       int64_t list, ArrayRef<Value> words, bool grouped) {
   Type i64 = rewriter.getI64Type();
   int64_t width = int64_t(words.size());
   auto constant = [&](int64_t value) -> Value {
@@ -12280,13 +12333,38 @@ static void putOnSlice(IRRewriter &rewriter, Location loc, WorldAccess &world,
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(
         cast<BlockArgument>(sendSegment).getOwner());
-    slices = callSends(
-        rewriter, loc, world, "ent_sends_slice_list",
-        {constant(list),
-         arith::IndexCastOp::create(rewriter, loc, i64, sendSegment),
-         constant(width)},
-        true);
+    Value slice = arith::IndexCastOp::create(rewriter, loc, i64, sendSegment);
+    if (!grouped) {
+      slices = callSends(rewriter, loc, world, "ent_sends_slice_list",
+                         {constant(list), slice, constant(width)}, true);
+    } else {
+      // (Of grouped lists, where each group's is, kept on the stack.)
+      slices = memref::AllocaOp::create(
+          rewriter, loc, MemRefType::get({kSendGroups}, i64));
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      auto groups = scf::ForOp::create(
+          rewriter, loc, zero,
+          arith::ConstantIndexOp::create(rewriter, loc, kSendGroups),
+          arith::ConstantIndexOp::create(rewriter, loc, 1));
+      rewriter.setInsertionPointToStart(groups.getBody());
+      Value group = groups.getInductionVar();
+      memref::StoreOp::create(
+          rewriter, loc,
+          callSends(rewriter, loc, world, "ent_sends_slice_list",
+                    {arith::AddIOp::create(
+                         rewriter, loc, constant(list),
+                         arith::IndexCastOp::create(rewriter, loc, i64, group)),
+                     slice, constant(width)},
+                    true),
+          slices, ValueRange{group});
+    }
   }
+  if (grouped)
+    slices = memref::LoadOp::create(
+        rewriter, loc, slices,
+        ValueRange{arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getIndexType(),
+            sendGroup(rewriter, loc, world, words.front()))});
   Value nought = constant(0);
   auto grow = [&]() {
     return callSends(rewriter, loc, world, "ent_sends_slice_grow", {slices},
@@ -12529,7 +12607,7 @@ static void lowerStateAccess(IRRewriter &rewriter, SaCombineOp combine,
     if (resolution == "list") {
       putSend(rewriter, loc,
               applyListNumber(combine.getApply(), combine.getArchetype()),
-              world, id, value);
+              world, id, value, sentInGroups(combine.getApply()));
     } else {
       combineIntoField(rewriter, loc, combine.getComponentAttr(),
                        combine.getFieldAttr(), combine.getRule(),
@@ -12600,13 +12678,18 @@ static void sendApplied(IRRewriter &rewriter, ApplyOp apply,
       for (ApplyOp member : members)
         words.push_back(toSendBits(rewriter, loc,
                                    world.toStorage(loc, member.getValue())));
+      bool grouped = sentInGroups(combine.getApply());
       if (sendSegment) {
-        putOnSlice(rewriter, loc, world, list, words);
+        putOnSlice(rewriter, loc, world, list, words, grouped);
         rewriter.eraseOp(combine);
         return;
       }
+      Value number = arith::ConstantIntOp::create(rewriter, loc, list, 64);
+      if (grouped)
+        number = arith::AddIOp::create(
+            rewriter, loc, number, sendGroup(rewriter, loc, world, words[0]));
       SmallVector<Value> args{
-          arith::ConstantIntOp::create(rewriter, loc, list, 64), slice,
+          number, slice,
           arith::ConstantIntOp::create(rewriter, loc, size + 1, 64)};
       llvm::append_range(args, words);
       while (args.size() < 4 + kBundleMost)
@@ -12758,121 +12841,121 @@ static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
       64);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  if (resolution == "groups") {
+  if (sentInGroups(merge.getApply())) {
+    // On lists by groups of the targets (kSendGroups): each group's read
+    // in its order, the groups at once on many threads where that takes
+    // less (or as it has gone so far, devices/sends.c), else one after
+    // another; every target's values in the same order either way.
+    Type i64 = rewriter.getI64Type();
     LocateBounds bounds =
         loadCombineBounds(rewriter, loc, merge.getComponentAttr(), layout,
                           world);
-    int64_t many = merge.getLeast();
-    Value sent =
-        callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
-    // (Which way takes less, as it has gone so far: devices/sends.c,
-    // timed until ent_sends_chosen.)
-    Value grouping = arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::ne,
-        callSends(rewriter, loc, world, "ent_sends_choose",
-                  {list, sent,
-                   arith::ConstantIntOp::create(rewriter, loc, many, 64),
-                   arith::ConstantIntOp::create(rewriter, loc, many * 8, 64)},
-                  true),
-        arith::ConstantIntOp::create(rewriter, loc, 0, 64));
-    auto split = scf::IfOp::create(rewriter, loc, grouping,
-                                   /*withElseRegion=*/true);
-    auto asId = [&](Value bits) {
-      return world.idType() == rewriter.getI64Type()
-                 ? bits
-                 : arith::TruncIOp::create(rewriter, loc, world.idType(), bits)
-                       .getResult();
+    Value groupCount = arith::ConstantIndexOp::create(rewriter, loc,
+                                                      kSendGroups);
+    auto numberOf = [&](Value group) -> Value {
+      return arith::AddIOp::create(
+          rewriter, loc, list,
+          arith::IndexCastOp::create(rewriter, loc, i64, group));
     };
-    // (The values of the `k`th of the groups, from where they are:
-    // `width` words each.)
-    Value grouped;
-    auto combineAt = [&](Value k) {
-      Value at = arith::AddIOp::create(
-          rewriter, loc, grouped,
-          arith::MulIOp::create(
-              rewriter, loc,
-              arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
-                                         k),
-              arith::ConstantIntOp::create(rewriter, loc, 8 * width, 64)));
-      SmallVector<Value> values;
-      for (int64_t w = 1; w < width; ++w)
-        values.push_back(loadWord(rewriter, loc, at, 8 * w));
-      combineAll(asId(loadWord(rewriter, loc, at, 0)), values, bounds);
-    };
+    auto counting = scf::ForOp::create(
+        rewriter, loc, zero, groupCount, one,
+        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)});
     {
       OpBuilder::InsertionGuard inner(rewriter);
-      rewriter.setInsertionPoint(split.thenBlock()->getTerminator());
-      // (Put in groups first, devices/sends.c: a step on many threads, by
-      // the 256 slices or groups, for each but the adding up in order.)
-      auto onThreads = [&](StringRef step) {
-        auto loop = scf::ParallelOp::create(
-            rewriter, loc, ValueRange{zero},
-            ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 256)},
-            ValueRange{one});
-        OpBuilder::InsertionGuard body(rewriter);
-        rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-        callSends(rewriter, loc, world, step,
-                  {list, arith::IndexCastOp::create(
-                             rewriter, loc, rewriter.getI64Type(),
-                             loop.getInductionVars().front())},
-                  false);
-      };
-      onThreads("ent_sends_group_count");
-      onThreads("ent_sends_group_total");
-      callSends(rewriter, loc, world, "ent_sends_group_starts", {list}, true);
-      onThreads("ent_sends_group_mark");
-      onThreads("ent_sends_group_place");
-      grouped = callSends(rewriter, loc, world, "ent_sends_grouped_data",
-                          {list}, true);
-      auto groups = scf::ParallelOp::create(
-          rewriter, loc, ValueRange{zero},
-          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 256)},
-          ValueRange{one});
-      rewriter.setInsertionPoint(groups.getBody()->getTerminator());
-      Value group =
-          arith::IndexCastOp::create(rewriter, loc, rewriter.getI64Type(),
-                                     groups.getInductionVars().front());
-      Value next = arith::AddIOp::create(
-          rewriter, loc, group,
-          arith::ConstantIntOp::create(rewriter, loc, 1, 64));
-      Value begin = world.toIndex(loc, callSends(rewriter, loc, world,
-                                                 "ent_sends_group_start",
-                                                 {list, group}, true));
-      Value end = world.toIndex(loc, callSends(rewriter, loc, world,
-                                               "ent_sends_group_start",
-                                               {list, next}, true));
-      auto entries = scf::ForOp::create(rewriter, loc, begin, end, one);
-      rewriter.setInsertionPoint(entries.getBody()->getTerminator());
-      combineAt(entries.getInductionVar());
+      rewriter.setInsertionPointToStart(counting.getBody());
+      Value counted = callSends(rewriter, loc, world, "ent_sends_count",
+                                {numberOf(counting.getInductionVar())}, true);
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{arith::AddIOp::create(rewriter, loc,
+                                           counting.getRegionIterArg(0),
+                                           counted)});
     }
-    {
-      OpBuilder::InsertionGuard inner(rewriter);
-      // (Fewer: in the order of the lists, each entity's in theirs still.)
-      rewriter.setInsertionPoint(split.elseBlock()->getTerminator());
-      forEachSentWide(rewriter, loc, world, list, width, {},
+    Value sent = counting.getResult(0);
+    auto readGroup = [&](Value group) {
+      forEachSentWide(rewriter, loc, world, numberOf(group), width, {},
                       [&](Value id, ArrayRef<Value> values, ValueRange) {
-                        combineAll(asId(id), values, bounds);
+                        if (world.idType() != i64)
+                          id = arith::TruncIOp::create(rewriter, loc,
+                                                       world.idType(), id);
+                        combineAll(id, values, bounds);
                         return SmallVector<Value>{};
                       });
+    };
+    auto oneByOne = [&]() {
+      auto groups = scf::ForOp::create(rewriter, loc, zero, groupCount, one);
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPoint(groups.getBody()->getTerminator());
+      readGroup(groups.getInductionVar());
+    };
+    if (resolution == "groups") {
+      int64_t many = merge.getLeast();
+      Value atOnce = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ne,
+          callSends(rewriter, loc, world, "ent_sends_choose",
+                    {list, sent,
+                     arith::ConstantIntOp::create(rewriter, loc, many, 64),
+                     arith::ConstantIntOp::create(rewriter, loc, many * 8, 64)},
+                    true),
+          arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+      auto split = scf::IfOp::create(rewriter, loc, atOnce,
+                                     /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPoint(split.thenBlock()->getTerminator());
+        auto groups = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                              ValueRange{groupCount},
+                                              ValueRange{one});
+        rewriter.setInsertionPoint(groups.getBody()->getTerminator());
+        readGroup(groups.getInductionVars().front());
+        rewriter.setInsertionPoint(split.elseBlock()->getTerminator());
+        oneByOne();
+      }
+      callSends(rewriter, loc, world, "ent_sends_chosen", {list}, false);
+    } else {
+      oneByOne();
     }
-    callSends(rewriter, loc, world, "ent_sends_chosen", {list}, false);
-  } else {
-    // (In the order of the lists, read where they are.)
-    callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
-    LocateBounds bounds =
-        loadCombineBounds(rewriter, loc, merge.getComponentAttr(), layout,
-                          world);
-    forEachSentWide(
-        rewriter, loc, world, list, width, {},
-        [&](Value id, ArrayRef<Value> values, ValueRange) {
-          if (world.idType() != rewriter.getI64Type())
-            id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
-          combineAll(id, values, bounds);
-          return SmallVector<Value>{};
-        });
+    auto clearing = scf::ForOp::create(rewriter, loc, zero, groupCount, one);
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPoint(clearing.getBody()->getTerminator());
+      callSends(rewriter, loc, world, "ent_sends_clear",
+                {numberOf(clearing.getInductionVar())}, false);
+    }
+    rewriter.eraseOp(merge);
+    return;
   }
+  // (Else in the order of the lists, read where they are: what resolved
+  // "groups" is on lists by groups, see above.)
+  callSends(rewriter, loc, world, "ent_sends_count", {list}, true);
+  LocateBounds bounds =
+      loadCombineBounds(rewriter, loc, merge.getComponentAttr(), layout,
+                        world);
+  forEachSentWide(
+      rewriter, loc, world, list, width, {},
+      [&](Value id, ArrayRef<Value> values, ValueRange) {
+        if (world.idType() != rewriter.getI64Type())
+          id = arith::TruncIOp::create(rewriter, loc, world.idType(), id);
+        combineAll(id, values, bounds);
+        return SmallVector<Value>{};
+      });
   callSends(rewriter, loc, world, "ent_sends_clear", {list}, false);
   rewriter.eraseOp(merge);
+}
+
+/// Whether combining into `fields` of `component` stamps a Changed event,
+/// or reorders a tree: the order values land in shows.
+static bool combiningShows(const WorldLayout &layout, StringAttr component,
+                           ArrayRef<StringAttr> fields) {
+  bool shows = false;
+  for (StringAttr each : fields) {
+    for (const WorldRelation &relation : layout.relations)
+      shows |= relation.orderComponent == component &&
+               relation.orderField == each;
+    for (const WorldArchetype &holder : layout.archetypes)
+      shows |= !stampsFor(holder, Trigger::Changed, component, each).empty();
+  }
+  return shows;
 }
 
 /// Combine what `apply` staged for the entities of `archetype` as
@@ -12910,16 +12993,7 @@ static void mergeApplied(IRRewriter &rewriter, ApplyOp apply,
     fields.assign(bundled.getAsRange<StringAttr>().begin(),
                   bundled.getAsRange<StringAttr>().end());
   }
-  // (Combining it stamps a Changed event, or reorders a tree.)
-  bool orderShows = false;
-  for (StringAttr each : fields) {
-    for (const WorldRelation &relation : layout.relations)
-      orderShows |= relation.orderComponent == component &&
-                    relation.orderField == each;
-    for (const WorldArchetype &holder : layout.archetypes)
-      orderShows |=
-          !stampsFor(holder, Trigger::Changed, component, each).empty();
-  }
+  bool orderShows = combiningShows(layout, component, fields);
   SaOpState state(rewriter);
   state.set("apply", apply->getAttr(WorldLayout::kApplyIndexAttr));
   state.set("archetype", int64_t(archetype.index));
@@ -22299,6 +22373,8 @@ struct EntLowerToLoops
     IRRewriter rewriter(module.getContext());
     sendLists.clear();
     listOwners.clear();
+    groupedSends.clear();
+    sendListsTaken = 0;
     runningStarts.clear();
     // Rows of buffers written in queries (not those that take turns).
     ownerRuns.clear();
@@ -22617,6 +22693,29 @@ struct EntLowerToLoops
       }
       sharing.clear();
     });
+    // What is sent to entities from loops, on many threads, goes on lists
+    // by groups of its targets where the order it lands in does not show
+    // but per entity (see kSendGroups): what the first of those sharing a
+    // list (and of a bundle) says.
+    if (parallelEntities && !ranksMode)
+      module.walk([&](ApplyOp apply) {
+        auto index =
+            apply->getAttrOfType<IntegerAttr>(WorldLayout::kApplyIndexAttr);
+        if (!index || !apply->hasAttr(kLoopedAttr) ||
+            apply->hasAttr(kAtomicAttr) || listOwners.count(index.getInt()))
+          return;
+        SmallVector<StringAttr> fields{apply.getFieldAttr()};
+        if (auto bundle = apply->getAttrOfType<ArrayAttr>(kBundleAttr)) {
+          if (cast<IntegerAttr>(bundle[0]).getInt() != 0)
+            return;
+          auto bundled = apply->getAttrOfType<ArrayAttr>(kBundleFieldsAttr);
+          fields.assign(bundled.getAsRange<StringAttr>().begin(),
+                        bundled.getAsRange<StringAttr>().end());
+        }
+        if (!combiningShows(*layout, apply.getComponentAttr().getAttr(),
+                            fields))
+          groupedSends.insert(index.getInt());
+      });
     // Whole numbers a reactive query sends or adds up, where the order
     // does not show (see kOrderFreeAttr): nothing else in the query reads
     // or sets the field, or sends to it by another rule. (Looking whether

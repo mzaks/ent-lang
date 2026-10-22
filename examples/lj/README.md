@@ -47,8 +47,8 @@ says, at step 0, what `melt.ent` says to every digit (`-6.7733681
 
 | 32,000 atoms, 100 steps (native, 2026-10-22) | one core | 12 threads |
 |---|---|---|
-| `melt.ent`, half lists | 0.96 s | 0.31 s |
-| `melt_full.ent`, full lists | 1.71 s | 0.29 s |
+| `melt.ent`, half lists | 0.92 s | 0.22 s |
+| `melt_full.ent`, full lists | 1.69 s | 0.25 s |
 | `check/melt.c`, half lists, full lists | 1.09 s, 1.65 s | |
 | LAMMPS (half lists; `-sf omp` with threads) | 0.74 s | 0.12 s |
 | before the lists: every atom of the 27 cells around, every step | 4.76 s | 0.76 s |
@@ -70,10 +70,11 @@ says, at step 0, what `melt.ent` says to every digit (`-6.7733681
   atom's own, and goes along the rest as runs of rows. The count's scan
   is vectorized, the fill's is not, as it writes. LAMMPS's lists take
   1.2 ms a step, its pairs 5.9.
-- On 12 threads, of 3.1 ms a step: the force loop 1.0, the rest of the
-  forces' system 1.1 on one thread (setting `Pull` to nought and
-  combining what was sent to it, which the trace does not tell apart),
-  the index 0.4 on one.
+- On 12 threads, of 2.2 ms a step: the force loop 1.0, combining what
+  it sent to `Pull` 0.4 (64 groups of the atoms at once, each in the
+  order of the lists), the rest of the forces' system 0.24 on one thread
+  (which the trace does not tell apart), the lists 0.4, the
+  index 0.06 (put in order on many threads, by cell and row before).
 - Before the atoms stayed out of the box between the lists, every pair
   was seen as the nearest image of its other atom: the forces took 8.5
   ms a step, and ent's `image` is selects where the C's is branches

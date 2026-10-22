@@ -3256,13 +3256,18 @@ LogicalResult Parser::parseIndex() {
 
   // Where each entity's row is: a field of the first component, which
   // the spawns and adds of it that were read already are given (0), as
-  // those after will be; and, of a grid, the cell it is in.
+  // those after will be; and, of a grid, the cell it is in, and that and
+  // its row before together (`rank_in_Name`: its place among the rows put
+  // in order again, as insertion from the order before puts them).
   std::string rowField = "row_in_" + *name;
+  std::string rankField = "rank_in_" + *name;
   Record &holder = components[of.front()];
   SmallVector<std::pair<std::string, Type>> hidden{
       {rowField, builder.getI32Type()}};
-  if (grid)
+  if (grid) {
     hidden.push_back({*key, keyType});
+    hidden.push_back({rankField, builder.getI64Type()});
+  }
   for (auto &[field, type] : hidden)
     if (holder.fieldType(field))
       return error(at, "'" + of.front() + "' has a field '" + field +
@@ -3369,6 +3374,12 @@ LogicalResult Parser::parseIndex() {
       << of.front() << ") {\n"
       << "  for row in 0..len(order) { held[order[row].who]." << rowField
       << " = row }\n}\n"
+      // Whether more than one row in 64 is below the one before it.
+      << "fn " << n << "_tangled(order: " << n << ") -> bool {\n"
+      << "  var below = 0\n"
+      << "  for i in 1..len(order) {\n"
+      << "    if order[i].key < order[i - 1].key { below += 1 }\n"
+      << "  }\n  below * 64 > len(order)\n}\n"
       // The rows in order again, where few are out of it: each that is
       // below the one before goes down past those above it (insertion),
       // and the entities of the rows that moved are told their rows.
@@ -3605,24 +3616,40 @@ LogicalResult Parser::parseIndex() {
                    ? cell
                    : "(" + number + ") * " + side("n", d) + " + " + cell;
     }
-    out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
-        << number << "\n  }\n";
+    out << "  for c0: mut " << of.front() << " {\n    let cell_ = " << number
+        << "\n    c0." << *key << " = cell_\n    c0." << rankField
+        << " = cell_ * 4294967296 + c0." << rowField << " as i64\n  }\n";
   }
+  // Made anew by `by`: every entity in order by its key, or of a grid,
+  // by its key and then its row before (the order the insertion gives).
+  auto anew = [&](const std::string &by, const std::string &indent) {
+    out << indent << n << " = []\n"
+        << indent << "for e" << bindings << " by c0." << by << " {\n"
+        << indent << "  " << n << " += { key: c0." << *key << ", who: e";
+    for (const Copy &copy : copies)
+      out << ", " << copy.name << ": " << through(copy);
+    out << " }\n" << indent << "}\n"
+        << indent << n << "_number(" << n << ", " << of.front() << ")\n";
+  };
   out << "  if " << n << "_whole {\n"
       << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
       << ", 1] {\n      w[0].key = c0." << *key << "\n";
   for (const Copy &copy : copies)
     out << "      w[0]." << copy.name << " = " << through(copy) << "\n";
-  out << "    }\n    " << n << "_settle(" << n << ", " << of.front()
-      << ")\n  } else {\n"
-      << "    " << n << " = []\n"
-      << "    for e" << bindings << " by c0." << *key << " {\n"
-      << "      " << n << " += { key: c0." << *key << ", who: e";
-  for (const Copy &copy : copies)
-    out << ", " << copy.name << ": " << through(copy);
-  out << " }\n    }\n    " << n << "_number(" << n << ", " << of.front()
-      << ")\n    " << n << "_whole = true\n  }\n"
-      ;
+  out << "    }\n";
+  if (grid) {
+    // (Where many rows are out of order, sorted on many threads; else
+    // each goes down past those above it.)
+    out << "    if " << n << "_tangled(" << n << ") {\n";
+    anew(rankField, "      ");
+    out << "    } else {\n      " << n << "_settle(" << n << ", "
+        << of.front() << ")\n    }\n";
+  } else {
+    out << "    " << n << "_settle(" << n << ", " << of.front() << ")\n";
+  }
+  out << "  } else {\n";
+  anew(*key, "    ");
+  out << "    " << n << "_whole = true\n  }\n";
   if (grid)
     out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
         << "_grid.cells)\n";
