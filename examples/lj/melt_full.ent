@@ -1,0 +1,50 @@
+// LAMMPS's "LJ melt" benchmark (bench/in.lj): 32,000 atoms on an fcc
+// lattice at density 0.8442, started at temperature 1.44, cut at 2.5,
+// 100 steps of 0.005, of full lists (melt.ent: of half lists), which
+// are faster on many threads.
+// Every 50 steps a line as LAMMPS writes it,
+// `Step Temp E_pair TotEng Press`, and the total energy of a potential
+// shifted to 0 at the cut, which stays. (The velocities are drawn here,
+// not as LAMMPS draws them, so after step 0 the numbers are others.)
+//
+//   tools/ent run --parallel examples/lj/melt_full.ent
+import console
+import lj
+
+world {
+  Melt.seed = 87287
+  Melt.density = 0.8442
+  Melt.cells = 20
+  Melt.temperature = 1.44
+  Melt.cut = 2.5
+  Melt.skin = 0.3
+  Melt.every = 20
+  Melt.half = false
+  Melt.dt = 0.005
+}
+
+system thermo() {
+  let n = Melt.atoms as f64
+  let t = temperature(Sums.vv, Melt.atoms)
+  let pe = Sums.pe / n
+  let total = (0.5 * Sums.vv + Sums.pe) / n
+  let p = pressure(Sums.vv, Sums.w, Melt.size)
+  let kept = shifted(total, Sums.pairs, Melt.half, Melt.atoms, Melt.cut)
+  put("{Melt.step} {t} {pe} {total} {p} {kept}")
+}
+
+schedule start() {
+  setup()
+  thermo()
+}
+
+schedule stepped() {
+  step()
+  sums() run_if Melt.step % 50 == 0
+  thermo() run_if Melt.step % 50 == 0
+}
+
+main {
+  start()
+  loop { stepped() } until Melt.step == 100
+}

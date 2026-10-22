@@ -1,15 +1,18 @@
 // The LJ melt of examples/lj/lj.ent in plain C: the same lattice, the
-// same velocities, the same steps, and the atoms found as the grid index
-// `Cells` finds them, in the same order (the cells around an atom's, z,
-// then y, then x, each cell's atoms in the index's order: put in order by
-// cell once by insertion from the order they were made in, and again by
-// insertion from the last order every step). So the sums are the same to
-// the bit. Its output is that of test/Integration/Inputs/lj_melt.ent:
-// every `every` steps the bits of every atom's place and velocity, and of
-// the sums.
+// same velocities, the same steps, and the same lists of neighbours,
+// made every 20 steps of the atoms within the cut and the skin as the
+// grid index `Cells` finds them, in the same order (the cells around an
+// atom's, z, then y, then x, each cell's atoms in the index's order: put
+// in order by cell once by insertion from the order they were made in,
+// and again by insertion from the last order each time). Of half lists,
+// the force an atom gives the other of a pair is added in the order of
+// the atoms that give it. So the sums are the same to the bit. Its output
+// is that of test/Integration/Inputs/lj_melt.ent (half lists) and
+// lj_melt_full.ent: every `print` steps the bits of every atom's place
+// and velocity, and of the sums.
 //
 //   cc -O2 -ffp-contract=off examples/lj/check/melt.c -lm -o melt
-//   ./melt cells steps every
+//   ./melt cells steps print half
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,13 +22,20 @@
 enum { CAPACITY = 32768 };
 static const uint64_t seed = 87287;
 static const double density = 0.8442, temperature = 1.44, cut = 2.5,
-                    dt = 0.005;
+                    skin = 0.3, dt = 0.005;
+enum { EVERY = 20, MOST = 4194304 };
+static int half;
 
 static int atoms;
 static double x[CAPACITY], y[CAPACITY], z[CAPACITY];
 static double vx[CAPACITY], vy[CAPACITY], vz[CAPACITY];
 static double fx[CAPACITY], fy[CAPACITY], fz[CAPACITY], fe[CAPACITY],
     fw[CAPACITY];
+// The force given by the atoms whose half lists an atom is in.
+static double px_[CAPACITY], py_[CAPACITY], pz_[CAPACITY];
+// The lists: where each starts and how long it is, one after another.
+static int first_[CAPACITY], count_[CAPACITY];
+static int pairs_[MOST], rows;
 static int64_t pairs[CAPACITY];
 static double size;
 
@@ -82,7 +92,8 @@ static double image(double p, double from) {
 }
 
 static void make_index(void) {
-  n = (int64_t)(size / cut);
+  double reach = cut + skin;
+  n = (int64_t)(size / reach);
   if (n < 1) n = 1;
   while (n * n * n > CAPACITY) {
     n = n / 2 < 1 ? 1 : n / 2;
@@ -111,15 +122,18 @@ static void make_index(void) {
   }
 }
 
-static void forces(void) {
+// Each atom's list (of a half list, only the atoms whose number is above
+// its own), counted and then filled: here in one go, in the same order.
+static void make_lists(void) {
   make_index();
-  int64_t m = (int64_t)(cut / w);
-  if ((double)m * w < cut) m += 1;
+  double reach = cut + skin;
+  int64_t m = (int64_t)(reach / w);
+  if ((double)m * w < reach) m += 1;
   int64_t many = 2 * m + 1 < n ? 2 * m + 1 : n;
-  double far = cut * cut;
+  double far = reach * reach;
+  rows = 0;
   for (int i = 0; i < atoms; i++) {
-    double sx = 0.0, sy = 0.0, sz = 0.0, e = 0.0, wv = 0.0;
-    int64_t count = 0;
+    first_[i] = rows;
     int64_t own[3] = {cell_of(x[i]), cell_of(y[i]), cell_of(z[i])};
     int64_t from[3];
     for (int d = 0; d < 3; d++) from[d] = 2 * m + 1 >= n ? 0 : own[d] - m;
@@ -131,25 +145,51 @@ static void forces(void) {
           int64_t cx = at(from[0] + kx);
           int64_t c = (cz * n + cy) * n + cx;
           for (int r = first[c]; r < first[c + 1]; r++) {
-            double px = image(rx[r], x[i]), py = image(ry[r], y[i]),
-                   pz = image(rz[r], z[i]);
-            double ax = px - x[i], ay = py - y[i], az = pz - z[i];
+            double ax = image(rx[r], x[i]) - x[i], ay = image(ry[r], y[i]) - y[i],
+                   az = image(rz[r], z[i]) - z[i];
             if (!(ax * ax + ay * ay + az * az <= far)) continue;
-            if (order[r] == i) continue;
-            double dx = px - x[i], dy = py - y[i], dz = pz - z[i];
-            double r2 = dx * dx + dy * dy + dz * dz;
-            double r2i = 1.0 / r2;
-            double r6i = r2i * r2i * r2i;
-            double pair = 48.0 * r6i * (r6i - 0.5) * r2i;
-            sx -= dx * pair;
-            sy -= dy * pair;
-            sz -= dz * pair;
-            e += 2.0 * r6i * (r6i - 1.0);
-            wv += 0.5 * pair * r2;
-            count += 1;
+            int j = order[r];
+            if (j == i || (half && !(j > i))) continue;
+            pairs_[rows++] = j;
           }
         }
       }
+    }
+    count_[i] = rows - first_[i];
+  }
+}
+
+static void forces(void) {
+  double far = cut * cut;
+  if (half)
+    for (int i = 0; i < atoms; i++) px_[i] = py_[i] = pz_[i] = 0.0;
+  for (int i = 0; i < atoms; i++) {
+    double sx = 0.0, sy = 0.0, sz = 0.0, e = 0.0, wv = 0.0;
+    int64_t count = 0;
+    for (int k = 0; k < count_[i]; k++) {
+      int j = pairs_[first_[i] + k];
+      double dx = image(x[j], x[i]) - x[i];
+      double dy = image(y[j], y[i]) - y[i];
+      double dz = image(z[j], z[i]) - z[i];
+      double r2 = dx * dx + dy * dy + dz * dz;
+      if (!(r2 <= far)) continue;
+      double r2i = 1.0 / r2;
+      double r6i = r2i * r2i * r2i;
+      double pair = 48.0 * r6i * (r6i - 0.5) * r2i;
+      sx -= dx * pair;
+      sy -= dy * pair;
+      sz -= dz * pair;
+      if (half) {
+        px_[j] += dx * pair;
+        py_[j] += dy * pair;
+        pz_[j] += dz * pair;
+        e += 4.0 * r6i * (r6i - 1.0);
+        wv += pair * r2;
+      } else {
+        e += 2.0 * r6i * (r6i - 1.0);
+        wv += 0.5 * pair * r2;
+      }
+      count += 1;
     }
     fx[i] = sx;
     fy[i] = sy;
@@ -169,7 +209,8 @@ static uint64_t bits(double f) {
 int main(int argc, char **argv) {
   int cells = argc > 1 ? atoi(argv[1]) : 6;
   int steps = argc > 2 ? atoi(argv[2]) : 100;
-  int every = argc > 3 ? atoi(argv[3]) : 20;
+  int print = argc > 3 ? atoi(argv[3]) : 20;
+  half = argc > 4 ? atoi(argv[4]) : 1;
   double a = cube_root(4.0 / density);
   size = a * (double)cells;
   uint64_t k = wyhash64(seed, 1);
@@ -212,9 +253,10 @@ int main(int argc, char **argv) {
     vy[i] *= by;
     vz[i] *= by;
   }
+  make_lists();
   forces();
   for (int step = 0;; step++) {
-    if (step % every == 0) {
+    if (step % print == 0) {
       double svv = 0.0, spe = 0.0, sw = 0.0;
       int64_t sp = 0;
       for (int i = 0; i < atoms; i++) {
@@ -233,9 +275,9 @@ int main(int argc, char **argv) {
     }
     if (step == steps) break;
     for (int i = 0; i < atoms; i++) {
-      vx[i] += 0.5 * dt * fx[i];
-      vy[i] += 0.5 * dt * fy[i];
-      vz[i] += 0.5 * dt * fz[i];
+      vx[i] += 0.5 * dt * (fx[i] + px_[i]);
+      vy[i] += 0.5 * dt * (fy[i] + py_[i]);
+      vz[i] += 0.5 * dt * (fz[i] + pz_[i]);
       x[i] += dt * vx[i];
       y[i] += dt * vy[i];
       z[i] += dt * vz[i];
@@ -246,11 +288,12 @@ int main(int argc, char **argv) {
       if (z[i] >= size) z[i] -= size;
       if (z[i] < 0.0) z[i] += size;
     }
+    if ((step + 1) % EVERY == 0) make_lists();
     forces();
     for (int i = 0; i < atoms; i++) {
-      vx[i] += 0.5 * dt * fx[i];
-      vy[i] += 0.5 * dt * fy[i];
-      vz[i] += 0.5 * dt * fz[i];
+      vx[i] += 0.5 * dt * (fx[i] + px_[i]);
+      vy[i] += 0.5 * dt * (fy[i] + py_[i]);
+      vz[i] += 0.5 * dt * (fz[i] + pz_[i]);
     }
   }
   return 0;

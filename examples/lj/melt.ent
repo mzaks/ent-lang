@@ -1,6 +1,7 @@
 // LAMMPS's "LJ melt" benchmark (bench/in.lj): 32,000 atoms on an fcc
 // lattice at density 0.8442, started at temperature 1.44, cut at 2.5,
-// 100 steps of 0.005. Every 50 steps a line as LAMMPS writes it,
+// 100 steps of 0.005, of half lists (melt_full.ent: of full lists).
+// Every 50 steps a line as LAMMPS writes it,
 // `Step Temp E_pair TotEng Press`, and the total energy of a potential
 // shifted to 0 at the cut, which stays. (The velocities are drawn here,
 // not as LAMMPS draws them, so after step 0 the numbers are others.)
@@ -15,6 +16,9 @@ world {
   Melt.cells = 20
   Melt.temperature = 1.44
   Melt.cut = 2.5
+  Melt.skin = 0.3
+  Melt.every = 20
+  Melt.half = true
   Melt.dt = 0.005
 }
 
@@ -24,7 +28,7 @@ system thermo() {
   let pe = Sums.pe / n
   let total = (0.5 * Sums.vv + Sums.pe) / n
   let p = pressure(Sums.vv, Sums.w, Melt.size)
-  let kept = shifted(total, Sums.pairs, Melt.atoms, Melt.cut)
+  let kept = shifted(total, Sums.pairs, Melt.half, Melt.atoms, Melt.cut)
   put("{Melt.step} {t} {pe} {total} {p} {kept}")
 }
 

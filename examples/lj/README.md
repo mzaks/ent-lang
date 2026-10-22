@@ -3,17 +3,22 @@
 LAMMPS's "LJ melt" benchmark (its `bench/in.lj`): 32,000 atoms on an fcc
 lattice at density 0.8442, started at temperature 1.44 so that the
 lattice melts, the potential cut at 2.5, 100 steps of 0.005 by velocity
-Verlet, in a box that wraps on every side. Each atom's force is of the
-atoms within the cut of it, which the grid index `Cells` finds
-(`docs/syntax.md`, Grids): `for o, b: Atom near (a.x, a.y, a.z) within
-cut in Cells`, each atom seen as its nearest image.
+Verlet, in a box that wraps on every side. As in LAMMPS, every atom has
+a list of the atoms within the cut and a skin of 0.3, made every 20
+steps: the grid index `Cells` finds them (`docs/syntax.md`, Grids), `for
+o, b: Atom near (a.x, a.y, a.z) within cut + skin in Cells`, each atom
+seen as its nearest image. Every step each atom goes through its list.
 
 - `lj.ent`: the atoms, the lattice, the velocities (no momentum, the
-  temperature asked for), the forces and the steps, and the sums LAMMPS
-  reports.
-- `melt.ent`: the benchmark; every 50 steps `Step Temp E_pair TotEng
-  Press` as LAMMPS writes them, and the total energy of the potential
-  shifted to 0 at the cut. The velocities are drawn here, not as LAMMPS
+  temperature asked for), the lists, the forces and the steps, and the
+  sums LAMMPS reports. With `Melt.half` a list has only the atoms whose
+  number is above the atom's own, each pair once (a half list), and the
+  other atom is given the opposite force (`Pull(o).fx += ..`, combined
+  in the order of the atoms that give it); else each atom has all of
+  its own (a full list) and gives nothing.
+- `melt.ent`: the benchmark, of half lists (`melt_full.ent`: of full
+  lists); every 50 steps `Step Temp E_pair TotEng Press` as LAMMPS writes
+  them, and the total energy of the potential shifted to 0 at the cut. The velocities are drawn here, not as LAMMPS
   draws them, so after step 0 the numbers are others (at step 100 near
   LAMMPS's: a temperature of 0.76, E_pair -5.76).
 - `check/melt.py`: at step 0 the energy an atom and the pressure are
@@ -21,8 +26,9 @@ cut in Cells`, each atom seen as its nearest image.
   energy is the -6.7733681 LAMMPS reports); and the shifted total energy
   stays within 1e-4 (the total energy moves by U(2.5) each time a pair
   crosses the cut: the liquid has more pairs within it than the lattice).
-- `check/melt.c`: the same in plain C, the atoms found in the index's
-  order, which `test/Integration/lj_melt.test` compares to the bit.
+- `check/melt.c`: the same in plain C, the lists made in the index's
+  order, which `test/Integration/lj_melt.test` compares to the bit, of
+  half lists and of full ones.
 
 ```sh
 tools/ent run --parallel examples/lj/melt.ent
@@ -35,20 +41,22 @@ says, at step 0, what `melt.ent` says to every digit (`-6.7733681
 -4.6134356 -5.0197073`), and at step 100, of its own velocities,
 `0.7574531 -5.7585055 -4.6223613 0.20726105`.
 
-| 32,000 atoms, 100 steps (native, 2026-10-22) | one core | 4 threads | 12 threads |
-|---|---|---|---|
-| `melt.ent` | 4.76 s | | 0.76 s |
-| `check/melt.c` (the same work) | 4.25 s | | |
-| LAMMPS | 0.74 s (0.65 with `-sf omp`) | 0.18 s | 0.12 s |
+| 32,000 atoms, 100 steps (native, 2026-10-22) | one core | 12 threads |
+|---|---|---|
+| `melt.ent`, half lists | 1.43 s | 0.77 s |
+| `melt_full.ent`, full lists | 2.23 s | 0.35 s |
+| `check/melt.c`, half lists, full lists | 1.09 s, 1.69 s | |
+| LAMMPS (half lists; `-sf omp` with threads) | 0.74 s | 0.12 s |
+| before the lists: every atom of the 27 cells around, every step | 4.76 s | 0.76 s |
 
-LAMMPS does less work, not the same work faster: a list for each atom
-of the atoms within the cut and a skin (2.8), made every 20 steps, of
-each pair once (half the list, the force given to both); `melt.ent`
-looks at every atom in the 27 cells around each atom (some 390), every
-step, and works out each pair twice. Its 81% of the time in the pair
-forces is the same share as LAMMPS's.
-
-Against its own C, `melt.ent` is 12% slower on one core (23.9 billion
-cycles to 21.2): the image of an atom is chosen without a branch, where
-the C's branches are well foreseen. (17% before the rows of `near` were
-read by row numbers, which are not asked whether they are rows.)
+- Half lists are the faster on one core: half the pairs. On many threads
+  the other atom's force, sent (some 3.7 million values a step), is put
+  on lists and combined in the order of the atoms that sent it, so that
+  the sums are the same on any number of threads; that costs more than
+  working the pairs out twice. LAMMPS's threads each add into a copy of
+  the forces of their own, which differ in the last bits with the number
+  of threads.
+- Against its own C, `melt.ent` is 1.3 times slower on one core. Making
+  the lists (the `near` scan, twice: counting, then filling) is 4.3 ms a
+  step of the 14; the count's scan is vectorized, the fill's is not, as
+  it writes. LAMMPS's lists take 1.2 ms a step, its pairs 6.

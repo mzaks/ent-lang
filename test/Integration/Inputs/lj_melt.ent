@@ -1,6 +1,6 @@
-// The LJ melt of examples/lj (lj.ent) with 6^3 unit cells, 864 atoms, as
-// examples/lj/check/melt.c runs it: every 20 steps the bits of the sums
-// and of every atom's place and velocity.
+// The LJ melt of examples/lj (lj.ent) with 6^3 unit cells, 864 atoms, of
+// half lists, as examples/lj/check/melt.c runs it: every 20 steps the
+// bits of the sums and of every atom's place and velocity.
 import console
 import lj
 
@@ -10,6 +10,9 @@ world {
   Melt.cells = 6
   Melt.temperature = 1.44
   Melt.cut = 2.5
+  Melt.skin = 0.3
+  Melt.every = 20
+  Melt.half = true
   Melt.dt = 0.005
 }
 
