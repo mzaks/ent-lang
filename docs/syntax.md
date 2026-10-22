@@ -1940,7 +1940,8 @@ finds the car ahead and the cars beside each car so.
   where it changes what it holds itself.
 - It is made again one of two ways. Where it holds the same entities as
   before (only keys and copied fields changed), each entity writes its
-  key and fields into its own row (a `for` that may run on all cores),
+  key and fields into its own row (a `for` that runs on all cores from
+  16,384 entities on, built with `--parallel`),
   and the rows that are out of order then go down past those above them
   one by one: about a pass over the rows where few moved in the order.
   Where entities came, went, or got or lost a component of it, it is

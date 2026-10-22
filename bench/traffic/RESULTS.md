@@ -130,3 +130,19 @@ On 12 threads the update reads what `drive` and `shift` wrote on other
 cores, and its `for` (120,000 cars, below the million from which a loop
 runs on many threads) runs on one: 0.50 where 0.21. Of the step on all
 cores the update is now half.
+
+## 2026-10-22, the index's update on many threads
+
+The `for` in which each car writes its own row of the index runs on many
+threads from 16,384 cars on (the attribute `ent.parallel_min_entities`
+on its query, below the million from which other loops do): it reads
+what `drive` and `shift` wrote on those threads, where they wrote it. On
+12 threads, the same lines to the bit:
+
+| cars | update a call, on one thread | on 12 from 16,384 cars |
+|---|---|---|
+| 19,200 | 0.082 ms | 0.028 ms |
+| 48,000 | 0.202 ms | 0.063 ms |
+| 120,000 | 0.50 ms | 0.15 ms (the loop 0.05, putting the rows in order 0.10) |
+
+A step of 120,000 cars on 12 threads: 1.39 ms, where it was 2.11.

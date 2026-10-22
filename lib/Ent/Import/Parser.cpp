@@ -3048,6 +3048,10 @@ LogicalResult Parser::parseBuffer() {
   return success();
 }
 
+// From how many entities on an index's update writes the rows on many
+// threads (where the program is built for them).
+static constexpr int64_t kIndexParallelMin = 16384;
+
 // index Name of Component, .. by field { name: Component.field, .. }
 //
 // The entities that have every component named, in the order of a whole
@@ -3346,6 +3350,17 @@ LogicalResult Parser::parseIndex() {
       }));
   indexes[bufferName.getValue()] = {resolve(of.front()), rowField, keyType,
                                     resolve(n + "_find")};
+  // Where it holds the same entities, each writes its own row: a loop
+  // worth running on many threads from far fewer entities than a loop
+  // that reads what lies in memory, since it reads what the loops before
+  // it wrote there, on many threads (bench/traffic/RESULTS.md).
+  auto update = cast<SystemOp>(SymbolTable::lookupSymbolIn(
+      module, builder.getStringAttr(resolve(n + "_update"))));
+  update.walk([&](QueryOp query) {
+    if (!query->hasAttr("by"))
+      query->setAttr("ent.parallel_min_entities",
+                     builder.getI64IntegerAttr(kIndexParallelMin));
+  });
   return success();
 }
 

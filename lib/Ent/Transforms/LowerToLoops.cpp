@@ -1281,6 +1281,12 @@ static bool neverParallel(const WorldArchetype &archetype,
          most < options.parallelMinEntities;
 }
 
+/// On a query: from how many entities on its loop runs on many threads,
+/// where that is fewer than `parallel-min-entities` (an index's update,
+/// which reads rows the loops before it wrote on many threads).
+static constexpr llvm::StringLiteral kParallelMinAttr =
+    "ent.parallel_min_entities";
+
 /// Into how many slices of its rows a parallel loop visits the entities
 /// of a query that sends from a loop of its body (see kLoopedAttr); and
 /// the slice the body being lowered runs for (an index), in such a loop.
@@ -17396,6 +17402,11 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // each is loops that read columns. (How many those entities are says
   // from how many of its own the query is worth running in parallel.)
   LoopOptions options = given;
+  // (A query that says from how many entities on it is worth running in
+  // parallel, below what holds for all: see kParallelMinAttr.)
+  if (auto least = query->getAttrOfType<IntegerAttr>(kParallelMinAttr))
+    options.parallelMinEntities =
+        std::min(options.parallelMinEntities, least.getInt());
   // (Calls out of the body, for each entity: see `bodyWeight`.)
   query.walk([&](InvokeOp invoke) {
     if (invoke->getParentOfType<EachOp>())
