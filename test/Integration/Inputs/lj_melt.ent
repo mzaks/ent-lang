@@ -1,0 +1,37 @@
+// The LJ melt of examples/lj (lj.ent) with 6^3 unit cells, 864 atoms, as
+// examples/lj/check/melt.c runs it: every 20 steps the bits of the sums
+// and of every atom's place and velocity.
+import console
+import lj
+
+world {
+  Melt.seed = 87287
+  Melt.density = 0.8442
+  Melt.cells = 6
+  Melt.temperature = 1.44
+  Melt.cut = 2.5
+  Melt.dt = 0.005
+}
+
+system trace() {
+  put("step {Melt.step} vv {bits_of(Sums.vv)} pe {bits_of(Sums.pe)} w {bits_of(Sums.w)} pairs {Sums.pairs}")
+  for a: Atom, v: Velocity {
+    put("{a.number} {bits_of(a.x)} {bits_of(a.y)} {bits_of(a.z)} {bits_of(v.vx)}")
+  }
+}
+
+schedule start() {
+  setup()
+  trace()
+}
+
+schedule stepped() {
+  step()
+  sums() run_if Melt.step % 20 == 0
+  trace() run_if Melt.step % 20 == 0
+}
+
+main {
+  start()
+  loop { stepped() } until Melt.step == 100
+}

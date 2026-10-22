@@ -1,0 +1,218 @@
+// Atoms that pull and push each other by the Lennard-Jones potential, in
+// a box that wraps on every side, as LAMMPS's "LJ melt" has them: an fcc
+// lattice of `4 cells^3` atoms at a density, given velocities at random
+// for a temperature, and moved by velocity Verlet (in LJ units: mass,
+// σ and ε 1). An atom's force is of the atoms within `cut` of it, found
+// through the grid index `Cells`; each atom adds up its own, so the sums
+// are the same however many threads there are.
+//
+//   U(r) = 4 (r^-12 - r^-6)        for r within `cut`, else nothing
+//
+// What LAMMPS says of a step comes of `sums()`: the temperature (of
+// 3N - 3 degrees of freedom), the potential energy an atom, the total
+// energy an atom and the pressure.
+
+import wyhash
+
+unique Melt { seed: u64, density: f64, cells: i64, temperature: f64,
+              cut: f64, dt: f64, size: f64, atoms: i64, step: i64 }
+
+// The sums of a step: momentum, twice the kinetic energy, the potential
+// energy, the virial, and twice the pairs within the cut.
+unique Sums { px: f64, py: f64, pz: f64, vv: f64, pe: f64, w: f64, pairs: i64 }
+
+component Atom { x: f64, y: f64, z: f64, number: i64 } capacity 32768
+component Velocity { vx: f64, vy: f64, vz: f64 } capacity 32768
+// The force on an atom, and its share of the potential energy and of the
+// virial of its pairs (a half of each pair's), and how many atoms are
+// within the cut of it.
+component Force { fx: f64, fy: f64, fz: f64, e: f64, w: f64, pairs: i64 }
+          capacity 32768
+
+index Cells of Atom grid (x, y, z) cell Melt.cut wrap Melt.size
+
+// v^(1/3), by Newton's steps from 1 (the same steps in check/melt.c).
+fn cube_root(v: f64) -> f64 {
+  var y: f64 = 1.0
+  for i in 0..60 { y = y - (y * y * y - v) / (3.0 * y * y) }
+  y
+}
+
+// The lattice: `cells` unit cells on each side, four atoms in each, and
+// every atom a velocity at random, each part from -0.5 to 0.5.
+system lattice() {
+  let a = cube_root(4.0 / Melt.density)
+  let k = Melt.cells
+  Melt.size = a * k as f64
+  let key = wyhash64(Melt.seed, 1)
+  for i in 0..k {
+    for j in 0..k {
+      for l in 0..k {
+        for b in 0..4 {
+          var bx: f64 = 0.0
+          var by: f64 = 0.0
+          var bz: f64 = 0.0
+          if b == 1 || b == 2 { bx = 0.5 }
+          if b == 1 || b == 3 { by = 0.5 }
+          if b == 2 || b == 3 { bz = 0.5 }
+          let n = Melt.atoms
+          spawn { Atom { x: (i as f64 + bx) * a, y: (j as f64 + by) * a,
+                         z: (l as f64 + bz) * a, number: n },
+                  Velocity { vx: wyrand_unit(key, 3 * n) - 0.5,
+                             vy: wyrand_unit(key, 3 * n + 1) - 0.5,
+                             vz: wyrand_unit(key, 3 * n + 2) - 0.5 },
+                  Force { fx: 0.0, fy: 0.0, fz: 0.0, e: 0.0, w: 0.0, pairs: 0 } }
+          Melt.atoms += 1
+        }
+      }
+    }
+  }
+}
+
+// No momentum: the mean velocity taken away.
+system momentum() {
+  Sums.px = 0.0
+  Sums.py = 0.0
+  Sums.pz = 0.0
+  for v: Velocity {
+    Sums.px += v.vx
+    Sums.py += v.vy
+    Sums.pz += v.vz
+  }
+}
+
+system still() {
+  let n = Melt.atoms as f64
+  let mx = Sums.px / n
+  let my = Sums.py / n
+  let mz = Sums.pz / n
+  for v: mut Velocity {
+    v.vx -= mx
+    v.vy -= my
+    v.vz -= mz
+  }
+}
+
+// The temperature asked for: every velocity scaled by one number.
+system squares() {
+  Sums.vv = 0.0
+  for v: Velocity { Sums.vv += v.vx * v.vx + v.vy * v.vy + v.vz * v.vz }
+}
+
+system scale() {
+  let dof = (3 * Melt.atoms - 3) as f64
+  let by = sqrt(Melt.temperature / (Sums.vv / dof))
+  for v: mut Velocity {
+    v.vx *= by
+    v.vy *= by
+    v.vz *= by
+  }
+}
+
+// Every atom's force, of the atoms within the cut, as seen from it (the
+// nearest image of each).
+system forces() {
+  let cut = Melt.cut
+  for me, a: Atom, f: mut Force {
+    var fx: f64 = 0.0
+    var fy: f64 = 0.0
+    var fz: f64 = 0.0
+    var e: f64 = 0.0
+    var w: f64 = 0.0
+    var pairs: i64 = 0
+    for o, b: Atom near (a.x, a.y, a.z) within cut in Cells where o != me {
+      let dx = b.x - a.x
+      let dy = b.y - a.y
+      let dz = b.z - a.z
+      let r2 = dx * dx + dy * dy + dz * dz
+      let r2i = 1.0 / r2
+      let r6i = r2i * r2i * r2i
+      let pair = 48.0 * r6i * (r6i - 0.5) * r2i
+      fx -= dx * pair
+      fy -= dy * pair
+      fz -= dz * pair
+      e += 2.0 * r6i * (r6i - 1.0)
+      w += 0.5 * pair * r2
+      pairs += 1
+    }
+    f.fx = fx
+    f.fy = fy
+    f.fz = fz
+    f.e = e
+    f.w = w
+    f.pairs = pairs
+  }
+}
+
+// Half a step's kick, and a step's drift, round the box.
+system kick_drift() {
+  let dt = Melt.dt
+  let size = Melt.size
+  for a: mut Atom, v: mut Velocity, f: Force {
+    v.vx += 0.5 * dt * f.fx
+    v.vy += 0.5 * dt * f.fy
+    v.vz += 0.5 * dt * f.fz
+    a.x += dt * v.vx
+    a.y += dt * v.vy
+    a.z += dt * v.vz
+    if a.x >= size { a.x -= size }
+    if a.x < 0.0 { a.x += size }
+    if a.y >= size { a.y -= size }
+    if a.y < 0.0 { a.y += size }
+    if a.z >= size { a.z -= size }
+    if a.z < 0.0 { a.z += size }
+  }
+}
+
+system kick() {
+  let dt = Melt.dt
+  for v: mut Velocity, f: Force {
+    v.vx += 0.5 * dt * f.fx
+    v.vy += 0.5 * dt * f.fy
+    v.vz += 0.5 * dt * f.fz
+  }
+  Melt.step += 1
+}
+
+system sums() {
+  Sums.vv = 0.0
+  Sums.pe = 0.0
+  Sums.w = 0.0
+  Sums.pairs = 0
+  for v: Velocity, f: Force {
+    Sums.vv += v.vx * v.vx + v.vy * v.vy + v.vz * v.vz
+    Sums.pe += f.e
+    Sums.w += f.w
+    Sums.pairs += f.pairs
+  }
+}
+
+// Temperature, potential and total energy an atom, pressure.
+fn temperature(vv: f64, atoms: i64) -> f64 { vv / (3 * atoms - 3) as f64 }
+fn pressure(vv: f64, w: f64, size: f64) -> f64 {
+  (vv + w) / (3.0 * size * size * size)
+}
+// The total energy as if the potential were shifted to 0 at the cut,
+// which velocity Verlet keeps (a pair that crosses the cut changes the
+// energy above by U(cut)).
+fn shifted(total: f64, pairs: i64, atoms: i64, cut: f64) -> f64 {
+  let c2i = 1.0 / (cut * cut)
+  let c6i = c2i * c2i * c2i
+  total - 0.5 * pairs as f64 * 4.0 * c6i * (c6i - 1.0) / atoms as f64
+}
+
+schedule setup() {
+  lattice()
+  momentum()
+  still()
+  squares()
+  scale()
+  forces()
+  sums()
+}
+
+schedule step() {
+  kick_drift()
+  forces()
+  kick()
+}

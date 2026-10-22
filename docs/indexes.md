@@ -321,7 +321,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | Step | Work | Shows | Status |
 |---|---|---|---|
 | 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | `for ... by` listed, sorted and (giving rows) visited on many threads (see below); GPU to do |
-| 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | |
+| 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below) |
 | 3 | Hash index and `unique` | `incremental`, change tracking | |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); query forms, float keys, ties, clustered to do |
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
@@ -360,7 +360,34 @@ so.
   by` where it is 11.1 on one core (10.0 with only the sort on many
   threads); 0.84 ms of it on one thread (the scans between the passes,
   and what is allocated). 120,000: 0.70 ms where 0.84.
-- The GPU: not yet (`for ... by` is not for a `gpu system`).
+- The GPU: not yet. `for ... by` is not for a `gpu system`, which
+  docs/gpu.md says of it "one entity after another: no parallel form".
+  A `for ... by` that only gives rows has one now; on the GPU it needs
+  rows given to buffers in the order of the entities (`Marks += ..`, G2
+  there, not built) and a radix sort of its own (counts per block and a
+  scan of them, not 64 pieces and a scan on one core). Not needed by the
+  grid.
+
+**Step 2, as it stands** (2026-10-22). `index Name of C grid (x, y, z)
+cell w [wrap size] { .. }` (`docs/syntax.md`, Grids) is a sorted index
+whose key is the cell, a field the index keeps in the entity: the same
+making anew (the parallel `for ... by`) and in place (each entity its
+row, insertion), and a table of each cell's first row. The sizes are
+worked out where it is made, of uniques. `for e, b: C near (x, y, z)
+within r in Name` (in a `for`) goes over the cells around the place,
+as many out as `r` reaches, round the box where it wraps, `b`'s place
+seen as its nearest image: the same as a scan with that distance in
+its `where` (`test/Integration/near.test`).
+
+- `examples/lj`: LAMMPS's LJ melt, 32,000 atoms. At step 0 the energy an
+  atom (-6.7733681) and the pressure are those of the lattice, and the
+  total energy of the potential shifted to 0 at the cut stays within
+  5e-5 over 100 steps (`check/melt.py`); to the bit what the same in
+  plain C gives (`test/Integration/lj_melt.test`). 100 steps on one core
+  4.9 s where the C takes 4.25; on 12 threads 0.76 s.
+- The policy is still `lazy`: made before `forces` reads it, after
+  `kick_drift` moved the atoms, every step (0.6 ms of a step of 48).
+- Not yet: a range (`in box`), `nearest k`, and a grid of whole numbers.
 
 ## 9. When it is done
 

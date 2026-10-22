@@ -1,0 +1,16 @@
+// The LJ melt of examples/lj/lj.ent, 864 atoms for 100 steps, against
+// the same in plain C (examples/lj/check/melt.c), to the bit: the atoms
+// found through the grid index `Cells` (`for ... near ... within`), in its
+// order, every 20 steps every atom's place and velocity and the sums. On
+// one core and on all.
+// RUN: clang -O2 -ffp-contract=off %S/../../examples/lj/check/melt.c -lm -o %t.c
+// RUN: %t.c 6 100 20 > %t.want
+// RUN: %ent run -I %S/../../examples/lj %S/Inputs/lj_melt.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel -I %S/../../examples/lj %S/Inputs/lj_melt.ent 2>/dev/null > %t.all
+// RUN: cmp %t.want %t.one
+// RUN: cmp %t.want %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// On the lattice every atom has 54 within the cut.
+// CHECK: step 0 vv {{[0-9]+}} pe {{[0-9]+}} w {{[0-9]+}} pairs 46656
+// CHECK: step 100 vv
